@@ -832,8 +832,11 @@ defmodule FermixCore.Realtime.GrokSessionServer do
     state = %{state | user_items: user_items}
 
     case String.trim(transcript) do
-      "" -> {state, nil}
-      _words -> {utterance(state, :user, transcript, start_ms, end_ms), {transcript, start_ms}}
+      "" ->
+        {state, nil}
+
+      _words ->
+        {utterance(state, :user, transcript, start_ms, end_ms), {transcript, start_ms, end_ms}}
     end
   end
 
@@ -1360,8 +1363,12 @@ defmodule FermixCore.Realtime.GrokSessionServer do
   defp owner_heard(%{goodbye: nil} = state, _heard), do: {:noreply, state}
   defp owner_heard(state, nil), do: {:noreply, state}
 
-  defp owner_heard(state, {text, start_ms}),
-    do: goodbye_verdict(state, CallGoodbye.owner_words(state.goodbye, text <> " ", start_ms))
+  defp owner_heard(state, {text, start_ms, end_ms}) do
+    goodbye_verdict(
+      state,
+      CallGoodbye.owner_words(state.goodbye, text <> " ", start_ms, end_ms)
+    )
+  end
 
   # The reply has played out once the client drained it and nothing is being
   # generated, `maybe_listening/1`'s own test, whether or not it spoke.

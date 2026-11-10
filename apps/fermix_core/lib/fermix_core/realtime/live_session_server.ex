@@ -56,8 +56,10 @@ defmodule FermixCore.Realtime.LiveSessionServer do
   voice's reply has played (`CallGoodbye`, M96 §5), only for a client at wire
   version 5 (`ends_on_goodbye`). Live's own transcript timeline carries both
   sides ("milliseconds from the start of the session", its guide says): the
-  owner's words at their `start_ms`, and a reply's start at its first output
-  transcript fragment. A reply has played out once its voice has had time to
+  owner's words from their `start_ms` to their `end_ms`, and a reply's start at
+  its first output transcript fragment. Live may begin a reply in the owner's
+  pause mid-sentence, so words that carry on the owner's speech join the turn
+  the reply answers (`CallGoodbye`). A reply has played out once its voice has had time to
   play and then `@goodbye_quiet_ms` more carried none (a pause inside a reply
   is not its end), which also closes it; only the client's `interrupt` is an
   interruption, since Live's own barge-in cannot be told from the echo.
@@ -710,7 +712,7 @@ defmodule FermixCore.Realtime.LiveSessionServer do
     notify(state, LiveFrames.caption(Atom.to_string(speaker), delta, start_ms, end_ms))
 
     record_caption(state, speaker, delta, start_ms, end_ms)
-    state |> read_operator_words(speaker) |> goodbye_words(speaker, delta, start_ms)
+    state |> read_operator_words(speaker) |> goodbye_words(speaker, delta, start_ms, end_ms)
   end
 
   defp handle_live_event({:delegation_created, id, offset_ms}, state) do
@@ -1153,17 +1155,18 @@ defmodule FermixCore.Realtime.LiveSessionServer do
 
   # The owner's words feed the goodbye as Live dates them. The first of the
   # voice's words while no reply is open begins one, at its own `start_ms`.
-  defp goodbye_words(%{goodbye: nil} = state, _speaker, _delta, _start_ms), do: {:noreply, state}
+  defp goodbye_words(%{goodbye: nil} = state, _speaker, _delta, _start_ms, _end_ms),
+    do: {:noreply, state}
 
-  defp goodbye_words(state, :user, delta, start_ms),
-    do: goodbye_verdict(state, CallGoodbye.owner_words(state.goodbye, delta, start_ms))
+  defp goodbye_words(state, :user, delta, start_ms, end_ms),
+    do: goodbye_verdict(state, CallGoodbye.owner_words(state.goodbye, delta, start_ms, end_ms))
 
-  defp goodbye_words(%{reply_open?: false} = state, :assistant, _delta, start_ms) do
+  defp goodbye_words(%{reply_open?: false} = state, :assistant, _delta, start_ms, _end_ms) do
     goodbye = CallGoodbye.reply_started(state.goodbye, start_ms)
     {:noreply, %{state | goodbye: goodbye, reply_open?: true}}
   end
 
-  defp goodbye_words(state, :assistant, _delta, _start_ms), do: {:noreply, state}
+  defp goodbye_words(state, :assistant, _delta, _start_ms, _end_ms), do: {:noreply, state}
 
   defp goodbye_interrupted(%{goodbye: nil} = state), do: state
 

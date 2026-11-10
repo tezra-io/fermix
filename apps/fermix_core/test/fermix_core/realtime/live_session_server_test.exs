@@ -2726,6 +2726,24 @@ defmodule FermixCore.Realtime.LiveSessionServerTest do
       assert_receive {:EXIT, ^session, {:shutdown, :goodbye}}
     end
 
+    # Live began its reply in the owner's pause before "bye" (a paid call,
+    # 2026-11-09): the words that carried on still belong to the turn it answered.
+    test "a goodbye carried on past the start of the reply still ends it", %{clock: clock} do
+      Process.flag(:trap_exit, true)
+      session = listening_session(clock, ends_on_goodbye: true)
+      speak(session, "Okay", 6_400, 6_600)
+      speak(session, ", thanks", 7_200, 7_400)
+      assistant_says(session, " Sure,", 7_600)
+      speak(session, ". Bye", 7_800, 8_000)
+      assistant_says(session, " take care.", 8_200)
+      voice(session)
+
+      quiet(session)
+
+      assert_receive {:EXIT, ^session, {:shutdown, :goodbye}}
+      assert_received {:realtime, %{type: "call_ended", reason: "goodbye"}}
+    end
+
     test "a pause inside the reply is not its end", %{clock: clock} do
       session = listening_session(clock, ends_on_goodbye: true)
       speak(session, "bye", 1_000, 1_300)

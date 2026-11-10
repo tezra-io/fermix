@@ -101,14 +101,14 @@ defmodule FermixCore.Realtime.CallGoodbyeTest do
       goodbye = CallGoodbye.new(nil) |> CallGoodbye.reply_started(2_200)
       assert {:cont, goodbye} = CallGoodbye.reply_played_out(goodbye)
 
-      assert {:end, _goodbye} = CallGoodbye.owner_words(goodbye, "Bye.", 1_500)
+      assert {:end, _goodbye} = CallGoodbye.owner_words(goodbye, "Bye.", 1_500, 1_700)
     end
 
     test "words spoken after the reply began start the next turn and cannot end the call" do
       goodbye = said(CallGoodbye.new(nil), [{1_000, "What's the weather?"}])
       goodbye = CallGoodbye.reply_started(goodbye, 2_000)
       # The reply's own echo, heard through the microphone.
-      assert {:cont, goodbye} = CallGoodbye.owner_words(goodbye, " Bye!", 2_600)
+      assert {:cont, goodbye} = CallGoodbye.owner_words(goodbye, " Bye!", 2_600, 2_800)
 
       assert {:cont, _goodbye} = CallGoodbye.reply_played_out(goodbye)
     end
@@ -116,7 +116,9 @@ defmodule FermixCore.Realtime.CallGoodbyeTest do
     test "the reply's echo cannot keep the call open either" do
       goodbye = said(CallGoodbye.new(nil), [{1_000, "bye"}])
       goodbye = CallGoodbye.reply_started(goodbye, 2_000)
-      assert {:cont, goodbye} = CallGoodbye.owner_words(goodbye, " Bye, Sam! Talk soon.", 2_300)
+
+      assert {:cont, goodbye} =
+               CallGoodbye.owner_words(goodbye, " Bye, Sam! Talk soon.", 2_300, 3_100)
 
       assert {:end, _goodbye} = CallGoodbye.reply_played_out(goodbye)
     end
@@ -126,7 +128,7 @@ defmodule FermixCore.Realtime.CallGoodbyeTest do
       goodbye = goodbye |> CallGoodbye.reply_started(2_000) |> CallGoodbye.interrupted()
 
       assert {:cont, goodbye} = CallGoodbye.reply_played_out(goodbye)
-      assert {:cont, _goodbye} = CallGoodbye.owner_words(goodbye, "thanks", 1_800)
+      assert {:cont, _goodbye} = CallGoodbye.owner_words(goodbye, "thanks", 1_800, 2_000)
     end
 
     test "a reply that starts more than ten seconds after the goodbye's last word does not end the call" do
@@ -142,7 +144,7 @@ defmodule FermixCore.Realtime.CallGoodbyeTest do
       goodbye = CallGoodbye.reply_started(goodbye, 3_000)
 
       assert {:cont, goodbye} = CallGoodbye.reply_played_out(goodbye)
-      assert {:cont, _goodbye} = CallGoodbye.owner_words(goodbye, "bye", 1_500)
+      assert {:cont, _goodbye} = CallGoodbye.owner_words(goodbye, "bye", 1_500, 1_700)
     end
 
     test "a goodbye after a request is not a goodbye: the whole turn counts" do
@@ -174,16 +176,80 @@ defmodule FermixCore.Realtime.CallGoodbyeTest do
       assert {:end, _goodbye} = CallGoodbye.reply_played_out(goodbye)
     end
 
+    # GPT-Live may begin its reply in a pause mid-sentence; the owner's words
+    # that carry on without a longer pause are still the turn it answers.
+    test "words carrying on the owner's speech past the reply's start join the turn it answers" do
+      goodbye = said(CallGoodbye.new(nil), [{6_400, "Okay"}, {7_200, ", thanks"}])
+      goodbye = CallGoodbye.reply_started(goodbye, 7_600)
+      assert {:cont, goodbye} = CallGoodbye.owner_words(goodbye, ". Bye", 7_800, 8_000)
+
+      assert {:end, _goodbye} = CallGoodbye.reply_played_out(goodbye)
+    end
+
+    test "carried-on words whose transcript lands before the reply's own still join its turn" do
+      goodbye =
+        said(CallGoodbye.new(nil), [{6_400, "Okay"}, {7_200, ", thanks"}, {7_800, ". Bye"}])
+
+      goodbye = CallGoodbye.reply_started(goodbye, 7_600)
+
+      assert {:end, _goodbye} = CallGoodbye.reply_played_out(goodbye)
+    end
+
+    test "carried-on words that land after the reply played out end the call then" do
+      goodbye = said(CallGoodbye.new(nil), [{6_400, "Okay, thanks"}])
+      goodbye = CallGoodbye.reply_started(goodbye, 6_900)
+      assert {:cont, goodbye} = CallGoodbye.reply_played_out(goodbye)
+
+      assert {:end, _goodbye} = CallGoodbye.owner_words(goodbye, " bye", 7_500, 7_700)
+    end
+
+    test "a request carried on past the reply's start keeps the call up" do
+      goodbye = said(CallGoodbye.new(nil), [{1_000, "Okay, bye"}])
+      goodbye = CallGoodbye.reply_started(goodbye, 1_400)
+      {:cont, goodbye} = CallGoodbye.owner_words(goodbye, " and water the ferns", 1_600, 2_400)
+
+      assert {:cont, _goodbye} = CallGoodbye.reply_played_out(goodbye)
+    end
+
+    test "a pause of more than a second after the owner's last word starts the next turn" do
+      goodbye = said(CallGoodbye.new(nil), [{1_000, 1_400, "Okay, thanks"}])
+      goodbye = CallGoodbye.reply_started(goodbye, 1_600)
+      assert {:cont, goodbye} = CallGoodbye.owner_words(goodbye, " bye", 2_401, 2_600)
+      assert {:cont, goodbye} = CallGoodbye.reply_played_out(goodbye)
+
+      carried = said(CallGoodbye.new(nil), [{1_000, 1_400, "Okay, thanks"}])
+      carried = CallGoodbye.reply_started(carried, 1_600)
+      assert {:cont, carried} = CallGoodbye.owner_words(carried, " bye", 2_400, 2_600)
+      assert {:end, _carried} = CallGoodbye.reply_played_out(carried)
+
+      # The goodbye said after that pause is a turn of its own, for the next reply.
+      goodbye = CallGoodbye.reply_started(goodbye, 3_000)
+      assert {:end, _goodbye} = CallGoodbye.reply_played_out(goodbye)
+    end
+
+    test "a transcript with no times of its own is dated by its start" do
+      goodbye = said(CallGoodbye.new(nil), [{1_000, 0, "bye"}])
+      goodbye = CallGoodbye.reply_started(goodbye, 1_500)
+
+      assert {:end, _goodbye} = CallGoodbye.reply_played_out(goodbye)
+    end
+
     test "a reply with no turn before it, the greeting, never ends the call" do
       goodbye = CallGoodbye.reply_started(CallGoodbye.new("Nova"), 500)
       assert {:cont, _goodbye} = CallGoodbye.reply_played_out(goodbye)
     end
   end
 
+  # Each fragment as `{start_ms, text}`, spoken for 200 ms as GPT-Live dates
+  # words, or as `{start_ms, end_ms, text}`.
   defp said(goodbye, fragments) do
-    Enum.reduce(fragments, goodbye, fn {start_ms, text}, acc ->
-      {:cont, acc} = CallGoodbye.owner_words(acc, text, start_ms)
+    Enum.reduce(fragments, goodbye, fn fragment, acc ->
+      {start_ms, end_ms, text} = timed(fragment)
+      {:cont, acc} = CallGoodbye.owner_words(acc, text, start_ms, end_ms)
       acc
     end)
   end
+
+  defp timed({start_ms, text}), do: {start_ms, start_ms + 200, text}
+  defp timed({_start_ms, _end_ms, _text} = fragment), do: fragment
 end

@@ -8,19 +8,23 @@ defmodule FermixCore.Realtime.CallGoodbye do
   goodbye is heard in full. Each engine feeds four signals, in milliseconds on
   one timeline of its own, and acts on what they answer:
 
-    * `owner_words/3`: words of the owner's, with when they were spoken.
+    * `owner_words/4`: words of the owner's, with when they were spoken.
     * `reply_started/2`: the voice began a reply at `at_ms`. Every word spoken
-      before it since the reply before is the turn it answers.
+      before it since the reply before is the turn it answers, and so is every
+      word that carries that speech on past `at_ms` without a pause longer than
+      `@continuation_gap_ms`: a full-duplex voice (GPT-Live) may begin its reply
+      in a pause mid-sentence.
     * `reply_played_out/1`: the reply has been heard to its end.
     * `interrupted/1`: the reply was cut short (a barge-in, the client's
       `interrupt`); the turn it answered no longer ends the call.
 
   Words are grouped by when they were spoken, never by when their transcript
   arrived: a transcript that lands after the reply began still joins the turn
-  that reply answers, and the reply's own echo of "Bye!" (spoken after it
-  began) can neither end the call nor keep it open. When the answered turn's
-  last words arrive after its reply already played out, `owner_words/3` ends
-  the call then: whichever comes last ends it.
+  that reply answers. Words spoken after a longer pause start the next turn, so
+  the reply's own echo of "Bye!" cannot end the call; echo heard within the
+  pause bound joins the turn and can only keep the call up, never end it early.
+  When the answered turn's last words arrive after its reply already played
+  out, `owner_words/4` ends the call then: whichever comes last ends it.
 
   Bounded: a goodbye counts only when its reply started within
   `@reply_window_ms` of its last word; the turn in progress and the answered
@@ -36,6 +40,9 @@ defmodule FermixCore.Realtime.CallGoodbye do
   # A goodbye counts only when the voice began its reply within this long of
   # the goodbye's last word.
   @reply_window_ms 10_000
+  # Words that start within this long of the end of the owner's words before
+  # them carry the same turn on, even past the start of the voice's reply.
+  @continuation_gap_ms 1_000
   # What one turn holds: transcript fragments and their bytes. Past either, the
   # turn is too long to be a goodbye and is held only as such.
   @max_fragments 32
@@ -63,7 +70,7 @@ defmodule FermixCore.Realtime.CallGoodbye do
   @closings [~w(bye), ~w(bye bye), ~w(goodbye), ~w(good bye)]
   @tails [~w(then), ~w(now), ~w(for now), ~w(thanks), ~w(thank you), ~w(fermix)]
 
-  @typep fragment :: {non_neg_integer(), String.t()}
+  @typep fragment :: {non_neg_integer(), non_neg_integer(), String.t()}
   @typep spill :: {non_neg_integer(), non_neg_integer()} | nil
   @typep turn :: %{fragments: [fragment()], spill: spill()}
   @typep answered :: %{
@@ -93,25 +100,32 @@ defmodule FermixCore.Realtime.CallGoodbye do
     do: %__MODULE__{tails: tails(assistant_name)}
 
   @doc """
-  Words of the owner's, spoken at `start_ms`. Fragments of one turn are
-  joined verbatim in the order they were spoken, as a transcript's deltas are,
-  so a caller passing whole utterances ends each with a space. `:end` when they
-  complete a goodbye whose reply has already played out.
+  Words of the owner's, spoken from `start_ms` to `end_ms` (an `end_ms` before
+  `start_ms`, a transcript with no times of its own, counts as `start_ms`).
+  Fragments of one turn are joined verbatim in the order they were spoken, as
+  a transcript's deltas are, so a caller passing whole utterances ends each
+  with a space. `:end` when they complete a goodbye whose reply has already
+  played out.
   """
-  @spec owner_words(t(), String.t(), non_neg_integer()) :: {:end | :cont, t()}
-  def owner_words(%__MODULE__{} = goodbye, text, start_ms)
-      when is_binary(text) and is_integer(start_ms) and start_ms >= 0 do
+  @spec owner_words(t(), String.t(), non_neg_integer(), non_neg_integer()) ::
+          {:end | :cont, t()}
+  def owner_words(%__MODULE__{} = goodbye, text, start_ms, end_ms)
+      when is_binary(text) and is_integer(start_ms) and start_ms >= 0 and is_integer(end_ms) and
+             end_ms >= 0 do
+    end_ms = max(start_ms, end_ms)
+
     cond do
-      late_for_answered?(goodbye, start_ms) -> late_words(goodbye, text, start_ms)
+      into_answered?(goodbye, start_ms) -> late_words(goodbye, text, start_ms, end_ms)
       before_last_reply?(goodbye, start_ms) -> {:cont, goodbye}
-      true -> {:cont, %{goodbye | turn: add(goodbye.turn, start_ms, text)}}
+      true -> {:cont, %{goodbye | turn: add(goodbye.turn, start_ms, end_ms, text)}}
     end
   end
 
   @doc """
   The voice began a reply at `at_ms`. What the owner said before it since the
-  last reply began is the turn it answers; what they said from `at_ms` on
-  starts the next one. The turn an earlier reply answered is forgotten.
+  last reply began is the turn it answers, with what carries that speech on
+  past `at_ms` without a longer pause; what they said after such a pause starts
+  the next one. The turn an earlier reply answered is forgotten.
   """
   @spec reply_started(t(), non_neg_integer()) :: t()
   def reply_started(%__MODULE__{} = goodbye, at_ms) when is_integer(at_ms) and at_ms >= 0 do
@@ -157,18 +171,29 @@ defmodule FermixCore.Realtime.CallGoodbye do
 
   ## The turns
 
-  defp late_for_answered?(%{answered: nil}, _start_ms), do: false
+  # Spoken into the turn the last reply answers: before that reply began, or
+  # carrying the turn's speech on past it.
+  defp into_answered?(%{answered: nil}, _start_ms), do: false
 
-  defp late_for_answered?(%{answered: answered}, start_ms),
-    do: start_ms >= answered.from_ms and start_ms < answered.reply_at
+  defp into_answered?(%{answered: answered}, start_ms) do
+    (start_ms >= answered.from_ms and start_ms < answered.reply_at) or
+      carries_on?(answered, start_ms)
+  end
+
+  defp carries_on?(%{fragments: []}, _start_ms), do: false
+
+  defp carries_on?(%{fragments: fragments}, start_ms),
+    do: start_ms <= speech_end(fragments) + @continuation_gap_ms
+
+  defp speech_end(fragments), do: fragments |> Enum.map(&elem(&1, 1)) |> Enum.max()
 
   # Spoken before the last reply began, and not into the turn it answers: an
   # older turn's, or one an interruption forgot.
   defp before_last_reply?(%{reply_at: nil}, _start_ms), do: false
   defp before_last_reply?(%{reply_at: reply_at}, start_ms), do: start_ms < reply_at
 
-  defp late_words(goodbye, text, start_ms) do
-    answered = Map.merge(goodbye.answered, add(goodbye.answered, start_ms, text))
+  defp late_words(goodbye, text, start_ms, end_ms) do
+    answered = Map.merge(goodbye.answered, add(goodbye.answered, start_ms, end_ms, text))
     goodbye = %{goodbye | answered: answered}
 
     if answered.played_out? and goodbye_turn?(answered, goodbye.tails),
@@ -184,15 +209,15 @@ defmodule FermixCore.Realtime.CallGoodbye do
   defp goodbye_turn?(_answered, _tails), do: false
 
   defp joined(fragments),
-    do: fragments |> Enum.reverse() |> Enum.sort_by(&elem(&1, 0)) |> Enum.map_join(&elem(&1, 1))
+    do: fragments |> Enum.reverse() |> Enum.sort_by(&elem(&1, 0)) |> Enum.map_join(&elem(&1, 2))
 
   # Newest first. A fragment past the bounds is not kept: only when it was
   # spoken, so the turn it belongs to is known to be too long.
-  defp add(%{fragments: fragments, spill: spill}, start_ms, text) do
-    bytes = fragments |> Enum.map(&byte_size(elem(&1, 1))) |> Enum.sum()
+  defp add(%{fragments: fragments, spill: spill}, start_ms, end_ms, text) do
+    bytes = fragments |> Enum.map(&byte_size(elem(&1, 2))) |> Enum.sum()
 
     if length(fragments) < @max_fragments and bytes + byte_size(text) <= @max_turn_bytes,
-      do: %{fragments: [{start_ms, text} | fragments], spill: spill},
+      do: %{fragments: [{start_ms, end_ms, text} | fragments], spill: spill},
       else: %{fragments: fragments, spill: widen(spill, start_ms)}
   end
 
@@ -200,11 +225,32 @@ defmodule FermixCore.Realtime.CallGoodbye do
   defp widen({from, to}, start_ms), do: {min(from, start_ms), max(to, start_ms)}
 
   defp split(%{fragments: fragments, spill: spill}, at_ms) do
-    {before, rest} = Enum.split_with(fragments, fn {start_ms, _text} -> start_ms < at_ms end)
+    {before, rest} =
+      Enum.split_with(fragments, fn {start_ms, _end, _text} -> start_ms < at_ms end)
+
+    {before, rest} = carry_on(before, rest)
 
     {%{fragments: before, spill: spill_before(spill, at_ms)},
      %{fragments: rest, spill: spill_from(spill, at_ms)}}
   end
+
+  # The fragments dated from the reply on that carry the speech before it on,
+  # each within `@continuation_gap_ms` of the end of the speech so far, move to
+  # the turn the reply answers. Newest first, as `add/4` keeps them.
+  defp carry_on([], rest), do: {[], rest}
+
+  defp carry_on(before, rest) do
+    sorted = Enum.sort_by(rest, &elem(&1, 0))
+    carried = carried_on(sorted, speech_end(before), [])
+    {carried ++ before, sorted |> Enum.drop(length(carried)) |> Enum.reverse()}
+  end
+
+  # Bounded by the turn's `@max_fragments`.
+  defp carried_on([{start_ms, end_ms, _text} = fragment | rest], until_ms, carried)
+       when start_ms <= until_ms + @continuation_gap_ms,
+       do: carried_on(rest, max(until_ms, end_ms), [fragment | carried])
+
+  defp carried_on(_rest, _until_ms, carried), do: carried
 
   defp spill_before({from, to}, at_ms) when from < at_ms, do: {from, min(to, at_ms - 1)}
   defp spill_before(_spill, _at_ms), do: nil
