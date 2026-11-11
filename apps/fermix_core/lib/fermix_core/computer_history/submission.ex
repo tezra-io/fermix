@@ -40,7 +40,7 @@ defmodule FermixCore.ComputerHistory.Submission do
   `expired` (never sent again), or `off`, `no_summarizer`,
   `route_not_permitted`, `summarizer_unavailable` or `store` (sent again later).
 
-  Options: `:repo`, `:home` (the home folder, for its store's identity),
+  Options: `:repo` (the home's store, whose token is its identity),
   `:config` (the home's history settings, `Config.current/0`),
   `:now`, `:contributors` (the machines that contribute, or a function that
   answers them as `ComputerHistory.contributors/1` does, in its place), and a
@@ -219,7 +219,7 @@ defmodule FermixCore.ComputerHistory.Submission do
   end
 
   defp identity(opts) do
-    case ComputerHistory.home_identity(Keyword.take(opts, [:repo, :home])) do
+    case ComputerHistory.home_identity(Keyword.take(opts, [:repo])) do
       {:ok, home} -> {:ok, home}
       {:error, reason} -> {:answer, store_error(reason)}
     end

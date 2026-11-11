@@ -390,10 +390,11 @@ defmodule FermixCore.Memory.Repo.ComputerHistorySql do
   def reports_schema(conn), do: add_missing_columns(conn, @reports_columns)
 
   # Migration 61 (M97 §8.5): the home's store gets a token of its own, made
-  # once, at random. Every store, a server's rebuilt from nothing or another
-  # home's, makes its own; a restored one keeps its snapshot's, so the home's
-  # identity joins it with the home's epoch, which a restore moves
-  # (`ComputerHistory.home_identity/1`).
+  # at random, which is the home's history identity
+  # (`ComputerHistory.home_identity/1`). Every store, a server's rebuilt from
+  # nothing or another home's, makes its own, and a store installed from a
+  # stored copy is given a new one (`renew_home_token/1`, HS-4), since its
+  # interval ids may start again below what its computers counted.
   @home_schema_sql """
   CREATE TABLE IF NOT EXISTS computer_history_home (
     id INTEGER PRIMARY KEY CHECK (id = 1),
@@ -406,6 +407,31 @@ defmodule FermixCore.Memory.Repo.ComputerHistorySql do
   @doc "Migration 61, in `conn`'s open transaction: the home store's own token. Safe to run again."
   @spec home_schema(term()) :: :ok | {:error, term()}
   def home_schema(conn), do: Sqlite3.execute(conn, @home_schema_sql)
+
+  @doc """
+  Gives the home store in `conn` a new token (migration 61's), so its history
+  is another identity: for a store installed from a stored copy
+  (`Home.Archive.install/5`). A store from before migration 61 has none to
+  renew, and its first start makes one.
+  """
+  @spec renew_home_token(term()) :: :ok | {:error, term()}
+  def renew_home_token(conn) do
+    sql = "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = ?"
+
+    case query_all(conn, sql, ["computer_history_home"]) do
+      {:ok, [[0]]} ->
+        :ok
+
+      {:ok, [[1]]} ->
+        Sqlite3.execute(
+          conn,
+          "UPDATE computer_history_home SET token = lower(hex(randomblob(16))) WHERE id = 1"
+        )
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
 
   @doc "The home store's own token (migration 61)."
   @spec home_token(term()) :: {:ok, String.t()} | {:error, term()}

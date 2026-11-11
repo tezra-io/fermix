@@ -22,6 +22,7 @@ defmodule FermixCore.Home.Candidate.ActivationTest do
   # The computer a move leaves, and another computer of the home.
   @mac "5a6b7c8d-9e0f-4a1b-8c2d-3e4f5a6b7c8d"
   @other "0f1e2d3c-4b5a-4968-8778-695a4b3c2d1e"
+  @token_sql "SELECT token FROM computer_history_home"
 
   setup do
     tmp = SafeRm.make_tmp_dir!("activation")
@@ -456,6 +457,26 @@ defmodule FermixCore.Home.Candidate.ActivationTest do
                with_conn(staged, &ComputerHistorySql.rename_machine(&1, "", @mac))
 
       assert machines(staged) == expected
+    end
+
+    # M97 §8.5, HS-4: a computer's purge mark counts one store's interval
+    # ids. A move's live stream goes on with the source's ids, so its store
+    # keeps its history identity and the computers keep their marks; any
+    # other copy may start ids again below them, so it is staged with a new
+    # one.
+    test "a move keeps the store's history identity, and a stored copy gets a new one", ctx do
+      :ok = seed_history!(ctx.source)
+      :ok = recapture!(ctx)
+      [[source_token]] = rows(Path.join(ctx.source, "memory.db"), @token_sql)
+      staged = Path.join(Candidate.staging_path(ctx.home), "memory.db")
+      continued = [history: :continued] ++ restore_opts()
+
+      assert {:ok, 7} = Activation.stage(ctx.home, ctx.incoming, ctx.pair, %{}, continued)
+      assert rows(staged, @token_sql) == [[source_token]]
+
+      assert {:ok, 7} = Activation.stage(ctx.home, ctx.incoming, ctx.pair, %{}, restore_opts())
+      [[fresh]] = rows(staged, @token_sql)
+      refute fresh == source_token
     end
 
     test "a move that names no computer stages them as they were", ctx do

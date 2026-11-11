@@ -103,15 +103,18 @@ defmodule FermixCore.Home.ArchiveTest do
                   plugins_to_reinstall: []
                 }}
 
-      # The restore opens no database (M97 §8.6), so every file arrives as it
-      # was archived, the database and its sidecars included.
-      for {path, file_mode} <- @included do
+      # Every file arrives as it was archived but the database: the restore
+      # opens it only to give its history a new identity (M97 §8.5, HS-4), and
+      # SQLite folds its sidecars into it as it closes.
+      for {path, file_mode} <- Map.drop(@included, ["memory.db-wal", "memory.db-shm"]) do
         restored = Path.join(into, path)
         assert mode(restored) == file_mode, path
 
-        if path != "config.toml",
+        if path not in ["config.toml", "memory.db"],
           do: assert(File.read!(restored) == File.read!(Path.join(home, path)), path)
       end
+
+      refute token(Path.join(into, "memory.db")) == "invented-token"
 
       # The value that named the old home moved and consent was withdrawn;
       # nothing else in the file changed.
@@ -232,6 +235,20 @@ defmodule FermixCore.Home.ArchiveTest do
 
       bad = Path.join(into, "a/one/below-a-file")
       assert restore(archive, into) == {:error, {:file, bad, :enotdir}}
+      refute File.exists?(into)
+    end
+
+    # M97 §8.5, HS-4: the store gets a new history identity before the home is
+    # used, so one that is no database refuses the restore, and nothing stays.
+    test "a memory.db that is no database refuses it, and nothing it wrote stays",
+         %{tmp: tmp, into: into} do
+      archive =
+        craft!(tmp, [
+          {%{path: "memory.db", content: "not a database"}, "not a database"},
+          {%{path: "journals/day.md", content: "an invented day\n"}, "an invented day\n"}
+        ])
+
+      assert {:error, {:history_identity, _reason}} = restore(archive, into)
       refute File.exists?(into)
     end
 
@@ -558,6 +575,8 @@ defmodule FermixCore.Home.ArchiveTest do
           ComputerHistorySql.state_schema_sql(),
           ComputerHistorySql.access_schema_sql(),
           ComputerHistorySql.purges_schema_sql(@now - 86_400_000),
+          "CREATE TABLE computer_history_home (id INTEGER PRIMARY KEY, token TEXT NOT NULL); " <>
+            "INSERT INTO computer_history_home VALUES (1, 'invented-token');",
           "CREATE TABLE unrelated (id INTEGER); INSERT INTO unrelated VALUES (1);",
           "INSERT INTO computer_history_events (boot_id, source_seq, ts, type) " <>
             "VALUES ('invented', 1, #{@now - 7_200_000}, 'app_switch'), " <>
@@ -663,5 +682,18 @@ defmodule FermixCore.Home.ArchiveTest do
        socket_path: socket_path,
        task_supervisor: sup}
     )
+  end
+
+  defp token(db) do
+    {:ok, conn} = Sqlite3.open(db, mode: :readonly)
+
+    try do
+      {:ok, statement} = Sqlite3.prepare(conn, "SELECT token FROM computer_history_home")
+      {:ok, [[token]]} = Sqlite3.fetch_all(conn, statement)
+      :ok = Sqlite3.release(conn, statement)
+      token
+    after
+      Sqlite3.close(conn)
+    end
   end
 end

@@ -47,8 +47,11 @@
 (*    mark, oldest first, the fences first and the mark last, so its mark  *)
 (*    never steps over an interval it has not applied (HS-2, fixed).       *)
 (*  - The home store's identity (ComputerHistory.home_identity/1): the     *)
-(*    store's own token (memory.db migration 61) joined with the home's    *)
-(*    epoch, which a restore and a move raise. A mark is kept with the     *)
+(*    store's own token (memory.db migration 61), which Archive.install/5  *)
+(*    makes again for every store it installs from a stored copy, however  *)
+(*    often the same copy (RestoreRenews; a move's or a move back's live   *)
+(*    stream, whose ids go on, keeps it: history: :continued, candidate.ex *)
+(*    stage_fun/4). A mark is kept with the                                *)
 (*    identity of the store it counts (computer_history_link.home):        *)
 (*    set_home_mark/3 raises it under the same identity and replaces mark  *)
 (*    and identity together under another; history.apply and every answer  *)
@@ -57,8 +60,9 @@
 (*    (MarkTiedToHome). A restore from a backup, a store whose ids start   *)
 (*    again from the backup's, is TakeBackup and Restore (HomeCanRestore,  *)
 (*    checks 16 to 20); a server rebuilt from nothing and another home are *)
-(*    the same with a token never seen. Two restores from one backup share *)
-(*    an identity (HS-4, open). Spool.forget_home/1 at a join or a leave,  *)
+(*    the same with a token never seen. Two restores from one backup get   *)
+(*    two identities (HS-4, fixed). Spool.forget_home/1 at a join or a     *)
+(*    leave,                                                               *)
 (*    which sets the mark to 0 under no store, is left out: a mark of 0    *)
 (*    counts the same under any store.                                     *)
 (*                                                                         *)
@@ -78,7 +82,7 @@
 (***************************************************************************)
 \* SOURCE: apps/fermix_core/lib/fermix_core/computer_history/sittings.ex#run,step,dispatch,send_sitting,sitting,settle,settled @ 6b43d6f6534b
 \* SOURCE: apps/fermix_core/lib/fermix_core/computer_history/submission.ex#accept,checked,identity,mark,unnoted,unrefused,refused_by,make,write @ f16b3d5013b6
-\* SOURCE: apps/fermix_core/lib/fermix_core/computer_history.ex#home_identity,epoch @ d8514f24c0d5
+\* SOURCE: apps/fermix_core/lib/fermix_core/computer_history.ex#home_identity @ d8514f24c0d5
 \* SOURCE: apps/fermix_core/lib/fermix_core/memory/repo/computer_history_sql.ex#insert_note,insert_note_in_tx,noted,reaching_intervals,intervals_after,purge_notes,purge_notes_in_tx,scoped_notes,fence_window,fence_window_in_tx,insert_events,insert_unless_purged,stamped_in_purge?,link,set_home_mark @ b24f49d2e1e9
 \* SOURCE: apps/fermix_core/lib/fermix_core/computer_history/spool.ex#link,events_after,fence,apply_intervals,apply_interval,mark_applied,apply_at @ ec5d295f5f69
 \* SOURCE: apps/fermix_core/lib/fermix_core/computer_history/delivery.ex @ 605d0be092c9
@@ -113,8 +117,13 @@ CONSTANTS
     RefusalNamesAllPending, \* a refusal names every interval above the sitting's mark, not only those reaching it (submission.ex refused_by)
     MarkAfterFences,    \* apply_intervals fences every interval first and writes the mark last (spool.ex mark_applied)
     HereAppliesPending, \* the home's own machine applies every interval of its own above its mark (delivery.ex apply_here)
-    MarkTiedToHome      \* a mark is kept with the identity of the home store it counts, and counts only
+    MarkTiedToHome,     \* a mark is kept with the identity of the home store it counts, and counts only
                         \* under it (submission.ex mark/2, delivery.ex mark/2, set_home_mark/3)
+    RestoreRenews       \* a restore gives the store it installs a new token, so a new identity
+                        \* each time (archive.ex history_identity/4, renew_home_token/1); FALSE keeps
+                        \* the backup's token, and the identity is the one the home had the first
+                        \* time it was restored from that backup (the token and the backup's epoch
+                        \* plus one: HS-4)
 
 VARIABLES
     recorded,   \* computer -> stamps it has recorded (each once)
@@ -492,11 +501,13 @@ TakeBackup ==
                    fstamps, answer, notes, purges, hereApply, nextId, ident>>
 
 \* The home is restored from that backup (Archive.install/5): its store starts
-\* its interval ids again from the backup's, and the home's epoch is the
-\* backup's plus one (next_epoch/1), so its identity (home_identity/1: the
-\* store's token, which the backup carries, and that epoch) is the one the
-\* home had the first time it was restored from it. A server rebuilt from
-\* nothing or another home is the same with a token never seen. Its notes
+\* its interval ids again from the backup's, and the install gives it a new
+\* token (RestoreRenews), so its identity (home_identity/1, the token) is one
+\* no machine has counted under, the second restore from one backup as much
+\* as the first. Without it the store keeps the backup's token, and the
+\* identity is the one the home had the first time it was restored from that
+\* backup (HS-4). A server rebuilt from nothing or another home is the same
+\* with a token never seen. Its notes
 \* are none of these (fewer notes only answer fewer sittings from a note).
 \* The machines' own stores are not in the backup and keep their marks. The
 \* engine restarts, so no sitting is being summarized then; one on its way,
@@ -510,7 +521,7 @@ Restore ==
     /\ hereApply' = hereApply \cap bk.purges
     /\ nextId' = bk.next
     /\ notes' = {}
-    /\ ident' = [ident EXCEPT !.home = bk.epoch + 1]
+    /\ ident' = [ident EXCEPT !.home = IF RestoreRenews THEN bk.restores + 2 ELSE bk.epoch + 1]
     /\ bk' = [bk EXCEPT !.restores = @ + 1]
     /\ UNCHANGED <<recorded, raw, sent, fence, mark, applying, connected, away, stage, fmark,
                    fstamps, answer>>

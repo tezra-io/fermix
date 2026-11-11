@@ -171,6 +171,9 @@ less:
   replaced, not raised, under another (`Submission.mark/2`,
   `Delivery.mark/2`, `set_home_mark/3`). Off, the code before `c6fe1c48`: a
   mark counts whatever store it was made under.
+- `RestoreRenews`: a restore gives the store it installs a new token, so a
+  new identity each time (`Archive.install/5`'s `history_identity/4`);
+  `FALSE` keeps the backup's token (HS-4).
 
 ## What holds
 
@@ -200,7 +203,9 @@ With a backup taken at any moment and one restore from it
 (`HomeCanRestore`, one purge before it and one after, two stamps): `16`
 holds the safety rule for a computer that goes away and `18` for a Mac that
 is its own home, and each needs `MarkTiedToHome` (`17`, 12 states; `19`).
-With two restores from that backup the rule breaks (`20`, HS-4, open). The
+With two restores from that backup it holds too (`20`), because each
+restore gives the store a new token, and it needs `RestoreRenews` (`21`, the
+counterexample HS-4 found). The
 identities start at the first store, so the checks without a restore
 explore the states they did before.
 
@@ -286,7 +291,19 @@ refuses the sitting with every interval it holds, and the computer replaces
 its mark and store together. Check `19` shows the same on a Mac that is its
 own home, whose store keeps its mark across a restore of its memory.db.
 
-### HS-4: a home restored twice from one backup has the same identity both times, and a mark from the first restore steps over a new purge (open)
+### HS-4: a home restored twice from one backup has the same identity both times, and a mark from the first restore steps over a new purge (fixed)
+
+Fixed in the M97 fix pass (uncommitted at this writing; re-pin with its
+commit). The identity is now the store's token alone, and
+`Archive.install/5` gives every store it installs from a stored copy a new
+one before the epoch is written, under the same roll-back
+(`history_identity/4`, `ComputerHistorySql.renew_home_token/1`): a restore
+from an archive or a snapshot, Restore here, a server rebuilt from a
+snapshot, however often the same copy is restored. A move's or a move
+back's live stream (`history: :continued`, `candidate.ex` `stage_fun/4`)
+keeps its token, since its ids go on, so a move no longer resets any
+computer's mark. Model: `RestoreRenews` in `Restore`; check `20` holds with
+it, and `21` is its mechanism check, the counterexample below.
 
 Found in the re-read of `c6fe1c48`. The home store's identity is its token
 and its epoch (`ComputerHistory.home_identity/1`). A restore writes the
@@ -314,9 +331,7 @@ from the backup), so the note needs the sitting to reach the home first: a
 computer that was away during the purge sends its held sitting at once when
 it is back, while the home's delivery waits for its scheduler's tick.
 Restoring the same backup twice, or a backup whose epoch plus one is an
-epoch the home already had under the same token, is enough. A fix makes the
-identity new at every restore, for example a new token written at
-`Archive.install/5`; check `20` then holds.
+epoch the home already had under the same token, was enough.
 
 ## Seen while reading, not modelled
 
@@ -374,8 +389,8 @@ and `purge.ex` pins:
   model had left out. It is modelled now (`TakeBackup`, `Restore`, `ident`,
   `bk`, `MarkTiedToHome`, checks 16 to 20, HS-3 above), since a check can
   show the defect the fix closes, and one it leaves: a restore's identity
-  is the backup's token and its epoch plus one, so two restores from one
-  backup share it (HS-4, open). Every read of the mark (`Spool.link/1`) answers
+  was the backup's token and its epoch plus one, so two restores from one
+  backup shared it (HS-4, fixed: each restore now writes a new token). Every read of the mark (`Spool.link/1`) answers
   its store too, so the sitting's mark and store are one read; the home reads
   its identity once per sitting, before its three Repo calls, so a restore
   cannot fall between them (the engine restarts).

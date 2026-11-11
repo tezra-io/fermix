@@ -508,6 +508,11 @@ defmodule Fermix.CLI.HomeCommand do
       "old home cannot be moved safely. Nothing was written."
   end
 
+  defp sentence({:history_identity, reason}, _root) do
+    "The restored memory.db could not be opened to give its computer history a new identity " <>
+      "(#{inspect(reason)}), so the copy may be damaged. Nothing was written."
+  end
+
   defp sentence({:file, _path, _reason} = reason, _root), do: Archive.collect_sentence(reason)
   defp sentence({:tar, name, reason}, _root), do: "Writing #{name} failed: #{inspect(reason)}."
   defp sentence(reason, _root), do: "The command failed: #{inspect(reason)}."

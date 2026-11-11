@@ -606,14 +606,19 @@ defmodule FermixChannels.Home.Candidate do
       {:reply, {:error, "move_mismatch", "That is not the move this candidate is receiving."},
        state}
 
-  # A return stages the server's home for the computer the home left.
+  # A return stages the server's home for the computer the home left. Both
+  # stream the live home of a source that stopped serving it, whose history's
+  # interval ids go on here, so its store keeps its identity and every
+  # computer its mark (`Archive.install/5`'s `:history`, M97 §8.5).
   defp stage_fun(%{phase: %{"kind" => "return"}} = state, incoming, pair, facts) do
     %{home: home, restore_opts: opts} = state
-    fn -> Activation.stage(home, incoming, pair, facts, :return, opts) end
+    fn -> Activation.stage(home, incoming, pair, facts, :return, continued(opts)) end
   end
 
   defp stage_fun(%{home: home, restore_opts: opts}, incoming, pair, facts),
-    do: fn -> Activation.stage(home, incoming, pair, facts, opts) end
+    do: fn -> Activation.stage(home, incoming, pair, facts, continued(opts)) end
+
+  defp continued(opts), do: Keyword.put(opts, :history, :continued)
 
   defp restored({:ok, epoch}, %{restore: %{move_id: move_id, reply_to: reply_to}} = state) do
     :ok = MoveTelemetry.phase_ended(state.restore.phase, :done, nil)

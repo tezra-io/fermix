@@ -25,7 +25,6 @@ defmodule FermixCore.ComputerHistory do
   alias FermixCore.ComputerHistory.Spool
   alias FermixCore.Computers
   alias FermixCore.Computers.Switches
-  alias FermixCore.Home.Epoch
   alias FermixCore.Memory.Repo
   alias FermixCore.Setup.ConfigStore
 
@@ -113,35 +112,22 @@ defmodule FermixCore.ComputerHistory do
 
   @doc """
   The identity of the home's history store (M97 §8.5), which every purge and
-  pause interval's id belongs to: the store's own token (made once, at random,
-  by `memory.db`'s migration 61), joined with the home's epoch
-  (`Home.Epoch`), which a restore and a move raise. It changes wherever the
-  ids can start again: another home, a server rebuilt from nothing, a home
-  restored from a snapshot. A machine's mark is a mark under one identity
+  pause interval's id belongs to: the store's own token, made at random by
+  `memory.db`'s migration 61 and made again wherever the ids can start
+  again: another home and a server rebuilt from nothing make their own store,
+  and a store installed from a stored copy (a backup, a snapshot, Restore
+  here), however often the same copy is restored, gets a new one
+  (`Home.Archive.install/5`, HS-4). A move or a move back carries the live
+  store on with its ids, so it keeps the identity, and every machine its
+  mark. A machine's mark is a mark under one identity
   (`Spool.apply_intervals/4`); every delivery and every answer to a sitting
   carries it.
 
-  A home that has not yet booted as the primary has no epoch: it is counted
-  as 0 here, and the first primary boot's epoch changes the identity, which
-  costs each machine one apply of every interval again.
-
-  `opts`: `:repo`, `:home` (the home folder, `ConfigStore.fermix_home/0` by
-  default).
+  `opts`: `:repo`.
   """
   @spec home_identity(keyword()) :: {:ok, String.t()} | {:error, term()}
-  def home_identity(opts \\ []) when is_list(opts) do
-    repo = Keyword.get(opts, :repo, Repo)
-    home = Keyword.get_lazy(opts, :home, &ConfigStore.fermix_home/0)
-
-    with {:ok, token} <- Repo.computer_history_home(:home_token, [], server: repo),
-         {:ok, epoch} <- epoch(Epoch.read(home)) do
-      {:ok, "#{token}.#{epoch}"}
-    end
-  end
-
-  defp epoch({:ok, epoch}), do: {:ok, epoch}
-  defp epoch(:absent), do: {:ok, 0}
-  defp epoch({:error, reason}), do: {:error, {:epoch, reason}}
+  def home_identity(opts \\ []) when is_list(opts),
+    do: Repo.computer_history_home(:home_token, [], server: Keyword.get(opts, :repo, Repo))
 
   @doc """
   Whether this machine's history store opened (M97 §8.1), for readiness: a

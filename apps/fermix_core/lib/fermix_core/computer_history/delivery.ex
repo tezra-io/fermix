@@ -30,7 +30,7 @@ defmodule FermixCore.ComputerHistory.Delivery do
   (`ComputerHistory.home_identity/1`): every request names it, and a machine
   whose mark names another store applies from the first interval again.
 
-  Options: `:repo`, `:home` (the home folder, for its identity), `:spool`
+  Options: `:repo` (the home's store, whose token is its identity), `:spool`
   (this machine's store), `:now`, `:computers` (the
   home's computers, `Computers.list/0`), `:call` (how a computer is asked,
   `Computers.call/6`'s shape, a test's seam) and `:call_opts`
@@ -76,7 +76,7 @@ defmodule FermixCore.ComputerHistory.Delivery do
     spool = [server: Keyword.fetch!(opts, :spool)]
     now = Keyword.get_lazy(opts, :now, &DateTime.utc_now/0)
 
-    with {:ok, home} <- ComputerHistory.home_identity(Keyword.take(opts, [:repo, :home])),
+    with {:ok, home} <- ComputerHistory.home_identity(Keyword.take(opts, [:repo])),
          {:ok, link} <- Spool.link(spool),
          {:ok, intervals} <-
            Repo.computer_history_home(:intervals_after, ["", mark(link, home), @max_intervals],
@@ -105,7 +105,7 @@ defmodule FermixCore.ComputerHistory.Delivery do
     computers = Keyword.get_lazy(opts, :computers, &Computers.list/0)
     empty = %{applied: [], away: [], failed: [], no_store: []}
 
-    with {:ok, home} <- ComputerHistory.home_identity(Keyword.take(opts, [:repo, :home])),
+    with {:ok, home} <- ComputerHistory.home_identity(Keyword.take(opts, [:repo])),
          {:ok, rows} <- Repo.computer_history_home(:computer_rows, [], server: repo) do
       rows = Map.new(rows, &{&1.computer_id, &1})
 

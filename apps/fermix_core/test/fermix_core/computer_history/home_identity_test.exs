@@ -17,13 +17,17 @@ defmodule FermixCore.ComputerHistory.HomeIdentityTest do
   alias FermixCore.ComputerHistory.Submission
   alias FermixCore.Computers.Computer
   alias FermixCore.Computers.Outcome
+  alias FermixCore.Home.Archive
   alias FermixCore.Home.Epoch
   alias FermixCore.Memory.Repo
+  alias FermixCore.Memory.Repo.ComputerHistorySql
   alias FermixTestSupport.SafeRm
 
   @now ~U[2031-05-04 09:00:00.000Z]
   @hour 3_600_000
   @studio "studio-7f3a"
+  @passphrase "invented-harbour-lantern"
+  @archive_host "macos-aarch64"
 
   defmodule Adapter do
     @moduledoc false
@@ -94,9 +98,44 @@ defmodule FermixCore.ComputerHistory.HomeIdentityTest do
   defp start_repo!(repo, db),
     do: start_supervised!({Repo, name: repo, enabled: true, database_path: db}, id: repo)
 
+  # A home to back up: its epoch, and a store its own Repo made (with its
+  # token), checkpointed and copied in alone, so nothing beside it changes
+  # while the archive reads it.
+  defp backup_home!(ctx) do
+    seed = Path.join([ctx.dir, "seed", "memory.db"])
+    File.mkdir_p!(Path.dirname(seed))
+    repo = :"ch_identity_seed_#{System.unique_integer([:positive])}"
+    start_repo!(repo, seed)
+    stop_supervised!(repo)
+    raw(seed, "PRAGMA wal_checkpoint(TRUNCATE);")
+
+    root = Path.join(ctx.dir, "backed-up")
+    File.mkdir_p!(root)
+    {:ok, :created, 1} = Epoch.initialise(root)
+    File.cp!(seed, Path.join(root, "memory.db"))
+    root
+  end
+
+  # A home restored from `archive` into a folder of its own, with its store
+  # running.
+  defp restored!(ctx, archive, name) do
+    root = Path.join(ctx.dir, name)
+
+    {:ok, _restored} =
+      Archive.restore(archive, @passphrase, root,
+        host: @archive_host,
+        keyring_usable?: fn -> true end
+      )
+
+    repo = :"ch_identity_#{name}_#{System.unique_integer([:positive])}"
+    db = Path.join(root, "memory.db")
+    start_repo!(repo, db)
+    %{root: root, repo: repo, db: db}
+  end
+
   # The home's store as a snapshot taken after its first interval was applied
-  # there, restored in place: its ids restart above that one, and its epoch
-  # moves, as a restore's does.
+  # there, restored in place: its ids restart above that one, and it gets a
+  # new identity, as `Archive.install/5` gives a restored store.
   defp restore_after_first!(home) do
     stop_supervised!(home.repo)
 
@@ -106,8 +145,18 @@ defmodule FermixCore.ComputerHistory.HomeIdentityTest do
     UPDATE computer_history_computers SET delivered_mark = 1;
     """)
 
-    {:ok, _epoch} = Epoch.bump(home.root)
+    renew!(home.db)
     start_repo!(home.repo, home.db)
+  end
+
+  defp renew!(db) do
+    {:ok, conn} = Sqlite3.open(db)
+
+    try do
+      :ok = ComputerHistorySql.renew_home_token(conn)
+    after
+      Sqlite3.close(conn)
+    end
   end
 
   defp raw(db, sql) do
@@ -160,21 +209,26 @@ defmodule FermixCore.ComputerHistory.HomeIdentityTest do
     Enum.map(events, & &1.source_seq)
   end
 
-  test "a home's identity holds across a restart, and moves with its epoch or another home",
+  # A move raises the epoch and carries the store on with its ids, so it keeps
+  # the identity; a restored store gets a new one (`Archive.install/5`).
+  test "a home's identity holds across a restart and a move, and differs for another home",
        ctx do
     first = home!(ctx, "first")
-    {:ok, identity} = ComputerHistory.home_identity(repo: first.repo, home: first.root)
+    {:ok, identity} = ComputerHistory.home_identity(repo: first.repo)
 
     stop_supervised!(first.repo)
     start_repo!(first.repo, first.db)
-    assert {:ok, ^identity} = ComputerHistory.home_identity(repo: first.repo, home: first.root)
+    {:ok, 2} = Epoch.bump(first.root)
+    assert {:ok, ^identity} = ComputerHistory.home_identity(repo: first.repo)
 
     second = home!(ctx, "second")
-    {:ok, other} = ComputerHistory.home_identity(repo: second.repo, home: second.root)
+    {:ok, other} = ComputerHistory.home_identity(repo: second.repo)
     refute other == identity
 
-    {:ok, 2} = Epoch.bump(first.root)
-    {:ok, restored} = ComputerHistory.home_identity(repo: first.repo, home: first.root)
+    stop_supervised!(first.repo)
+    renew!(first.db)
+    start_repo!(first.repo, first.db)
+    {:ok, restored} = ComputerHistory.home_identity(repo: first.repo)
     refute restored == identity
   end
 
@@ -218,6 +272,60 @@ defmodule FermixCore.ComputerHistory.HomeIdentityTest do
     second = home!(ctx, "second")
     purge!(second, t(500), t(1_500))
     purge!(second, t(1_500), t(3_500))
+
+    uplink = fn payload ->
+      {:ok,
+       Submission.accept(@studio, payload,
+         repo: second.repo,
+         home: second.root,
+         contributors: [@studio],
+         config: [summarizer: :local],
+         adapter: Adapter,
+         route_opts: [model: "llama3"],
+         now: DateTime.add(@now, 2, :hour)
+       )}
+    end
+
+    assert {:ok, %{notes: 0}} =
+             Sittings.run(
+               uplink: uplink,
+               spool: ctx.spool,
+               home: ctx.machine,
+               now: DateTime.add(@now, 2, :hour),
+               timezone: "Etc/UTC",
+               config: [enabled: true]
+             )
+
+    assert seqs(ctx.spool) == []
+
+    assert {:ok, []} =
+             Repo.computer_history_memories_in_window(0, t(10 * @hour), 10, server: second.repo)
+  end
+
+  # HS-4: a home restored twice from one backup. Each restore is a store whose
+  # interval ids start again from the backup's, so each is another identity: a
+  # sitting still counting the first restore's mark is checked against every
+  # purge of the second, and a window the second purged gains no note.
+  test "a home restored twice from one backup refuses a sitting counted under the first",
+       ctx do
+    backup = backup_home!(ctx)
+    archive = Path.join(ctx.dir, "home.fxhome")
+
+    {:ok, _created} =
+      Archive.create(backup, @passphrase,
+        to: archive,
+        hello: fn -> {:error, :not_running} end,
+        host: @archive_host
+      )
+
+    first = restored!(ctx, archive, "first-restore")
+    assert purge!(first, t(500), t(1_500)) == 1
+    assert %{applied: ["studio Mac"]} = deliver(ctx, first)
+    assert seqs(ctx.spool) == [2, 3]
+    stop_supervised!(first.repo)
+
+    second = restored!(ctx, archive, "second-restore")
+    assert purge!(second, t(1_500), t(3_500)) == 1
 
     uplink = fn payload ->
       {:ok,

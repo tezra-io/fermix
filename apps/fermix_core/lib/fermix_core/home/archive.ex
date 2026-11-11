@@ -59,6 +59,7 @@ defmodule FermixCore.Home.Archive do
   without them.
   """
 
+  alias Exqlite.Sqlite3
   alias Fermix.CLI.Upgrade.Manifest, as: HostTarget
   alias FermixCore.BuildInfo
   alias FermixCore.Home.Archive.ConfigText
@@ -70,6 +71,7 @@ defmodule FermixCore.Home.Archive do
   alias FermixCore.Home.Epoch
   alias FermixCore.Home.Moved
   alias FermixCore.Home.Readable
+  alias FermixCore.Memory.Repo.ComputerHistorySql
   alias FermixCore.Setup.SecretWriter
 
   require Logger
@@ -77,6 +79,8 @@ defmodule FermixCore.Home.Archive do
   @manifest_entry "manifest.json"
   @config "config.toml"
   @plugin_lockfile "plugins/installed.json"
+  @database "memory.db"
+  @database_sidecars ~w(memory.db-wal memory.db-shm memory.db-journal)
   @home_prefix "home/"
   @max_depth 64
   @dir_mode 0o700
@@ -195,26 +199,33 @@ defmodule FermixCore.Home.Archive do
   share: `primary_epoch` the manifest's plus one, `config.toml` settled for
   this host and path (`RestoredConfig`), the plugins built for another host
   named, each file written with its recorded mode under
-  `0700` directories, and every link recreated. A failure part-way removes
+  `0700` directories, and every link recreated. The memory store's history
+  gets a new identity (M97 §8.5, HS-4: its interval ids may start again below
+  what the home's computers counted), the one change made to a file's
+  contents; then the epoch is written, last. A failure part-way removes
   exactly what it wrote.
 
   `source` holds the files the manifest lists, each already checked against
   its entry: `{:memory, contents}` (path to bytes) or `{:staged, dir}` (the
   files under a private directory on the root's own filesystem, each renamed
   into place). `root_state` is `root_state/1`'s answer for `root`. `opts` as
-  `restore/4`.
+  `restore/4`, and `:history`: `:fresh` (the default) for any stored copy, or
+  `:continued` for a move's or a move back's live stream, whose interval ids
+  go on, so its store keeps its identity and the computers their marks.
   """
   @spec install(Manifest.t(), source(), Path.t(), :absent | :empty, keyword()) ::
           {:ok, restored()} | {:error, term()}
   def install(manifest, source, root, root_state, opts)
       when is_map(manifest) and is_binary(root) and root_state in [:absent, :empty] and
              is_list(opts) do
+    history = history!(opts)
+
     with {:ok, host} <- host(opts),
          :ok <- not_newer(manifest),
          {:ok, epoch} <- next_epoch(manifest.primary_epoch),
          {:ok, source, settled} <- settle_config(source, manifest, root, host, opts),
          {:ok, reinstall} <- plugins_to_reinstall(source, manifest, host),
-         :ok <- write_home(root, root_state, manifest, source, epoch) do
+         :ok <- write_home(root, root_state, manifest, source, {epoch, history}) do
       {:ok,
        Map.merge(settled, %{
          files: length(manifest.files),
@@ -797,12 +808,60 @@ defmodule FermixCore.Home.Archive do
   # memory.db, and its first boot's migration 59 moves them into that
   # machine's own store (`device/history.db`); only an Always On server drops
   # them there, since nothing records on it.
-  defp write_home(root, root_state, manifest, source, epoch) do
+  defp write_home(root, root_state, manifest, source, {epoch, history}) do
     with :ok <- prepare_root(root, root_state) do
       case write_entries(root, manifest, source) do
-        {:ok, written} -> write_epoch(root, root_state, written, epoch)
+        {:ok, written} -> settle_home(root, root_state, written, epoch, history)
         {:error, reason, touched} -> roll_back(root, root_state, touched, reason)
       end
+    end
+  end
+
+  # The history's identity, then the epoch, which is written last. SQLite may
+  # leave its own sidecars beside the database it changed, so a roll-back
+  # after that removes those too.
+  defp settle_home(root, root_state, written, epoch, history) do
+    touched = @database_sidecars ++ written
+
+    with :ok <- history_identity(root, root_state, touched, history),
+         do: write_epoch(root, root_state, touched, epoch)
+  end
+
+  # M97 §8.5, HS-4: a computer's purge mark counts one store's interval ids,
+  # and a stored copy (a backup, a snapshot) may start them again below what
+  # the computers counted, the same copy as often as it is restored. So the
+  # store it installs gets a new identity before anything uses it; a move's or
+  # a move back's live stream (`:continued`), whose ids go on, keeps its own,
+  # and with it every computer's mark.
+  defp history_identity(_root, _root_state, _touched, :continued), do: :ok
+
+  defp history_identity(root, root_state, touched, :fresh) do
+    db = Path.join(root, @database)
+
+    case if(File.regular?(db), do: renew_token(db), else: :ok) do
+      :ok -> :ok
+      {:error, reason} -> roll_back(root, root_state, touched, {:history_identity, reason})
+    end
+  end
+
+  defp renew_token(db) do
+    case Sqlite3.open(db, mode: :readwrite) do
+      {:ok, conn} -> renewed(ComputerHistorySql.renew_home_token(conn), Sqlite3.close(conn))
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp renewed(:ok, :ok), do: :ok
+  defp renewed({:error, reason}, _closed), do: {:error, reason}
+  defp renewed(:ok, {:error, reason}), do: {:error, reason}
+
+  defp history!(opts) do
+    case Keyword.get(opts, :history, :fresh) do
+      history when history in [:fresh, :continued] ->
+        history
+
+      other ->
+        raise ArgumentError, "a restore's :history is :fresh or :continued: #{inspect(other)}"
     end
   end
 
