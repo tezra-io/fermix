@@ -90,10 +90,14 @@ Not modelled, each covered elsewhere:
 - the browser switch, and `Browser.HeldTurnListener` (the switches' fourth
   listener), which ends every held turn when the master or the browser
   switch goes off: a turn that runs no request holds nothing this spec
-  sees, and one at work ends as its run does (`held_turn_listener_test.exs`,
-  `two_engines_browser_test.exs`). So does the rule that a conversation's
-  next turn ends the turn held before it, which is about whose pane task a
-  request runs in, not whether it runs (`held_turn_test.exs`);
+  sees, and one at work ends with its run, both ways, since the two are
+  linked: a held turn the listener ends takes its run with it, which
+  Admission then answers `failed` ("It stopped before it finished."),
+  unless it had already ended that run itself on the master switch
+  (`held_turn_listener_test.exs`, `two_engines_browser_test.exs`). So does
+  the rule that a conversation's next turn ends the turn held before it,
+  which is about whose pane task a request runs in, not whether it runs
+  (`held_turn_test.exs`);
 - an id asked twice: the server never repeats one, and the computer
   answers one it still runs, waits on or holds as a status ask
   (`invoke_test.exs`). That is memory, not the journal: an id whose held
@@ -104,7 +108,11 @@ Not modelled, each covered elsewhere:
 - a link file that cannot be written: the relay does not use the newer
   copy's session (`connected`, `keep_epoch`), so it is no `MoveOn`, and the
   relay and Admission read one epoch, the file's;
-- a computer's own request to its server (the home's services);
+- a computer's own request to its server (`history.submit`, M97 §8.1):
+  `Desktop.HistoryUplink` opens it, waits on it and cancels it in the
+  process that sends it, under an id of its own, outside Admission's
+  journal, epoch check and runs; Admission only hands its `invoke_result`
+  on. Why no rule here depends on it is in the last re-read below;
 - the switch going back on, a second computer, and a restart of the
   server's `Calls`, whose waiters time out;
 - a journal that cannot be written: a `started` record that fails runs
@@ -166,11 +174,11 @@ The `.tla` header pins these sources:
 `01_what_the_computer_keeps` (one effect, two ids at most, two drops, and
 everything the environment can do) holds five rules:
 - `EffectAtMostOnce`: whatever is lost, what a call changes on the computer
-  happens at most once. It needs `NoResendOfEffects` (check 02, 14 states):
-  the effect acts, the session drops, the computer stops before it
-  answers, and the status ask the caller sends at the next session is
-  answered with the receipt, `unknown`, interrupted; asked again as a read
-  would be, the request and its repeat both run.
+  happens at most once. It needs `NoResendOfEffects` (check 02, 10 states):
+  the effect acts, the computer stops before it answers, and its restart
+  tells the server the receipt, `unknown`, interrupted (a status ask at the
+  next session hears the same when the session was down); asked again as
+  a read would be, the request and its repeat both run.
 - `ActedIsJournaled`: whatever acted on the computer is in its journal at
   every moment, a stop included. It needs `JournalBeforeRun` (check 03, 5
   states): a run that acted has no record until it ends, so a stop there
@@ -208,11 +216,12 @@ session that never comes back, leaves the caller waiting.
 
 Witnesses: a call whose session dropped while it waited is answered in
 full once the session is back (08); an effect happens, the computer stops
-before it answers, and the receipt the server asks for says only that the
-outcome is not known (09); a read whose answer was lost runs again under a
-new id and answers (10); a request from an older copy of the home is
-refused by name and journaled (11); the master switch going off ends a
-run, and its call hears it was stopped at the computer (12); an effect
+before it answers, and the receipt, which the restart sends or the server
+asks for, says only that the outcome is not known (09); a read whose answer
+was lost runs again under a new id and answers (10); a request from an older
+copy of the home is refused by name and journaled (11); the master switch
+going off ends a run, and its call hears it was stopped at the computer
+(12); an effect
 runs, its answer leaves the computer's memory, and the receipt alone tells
 the server it was done (13); a request admitted to wait for a slot or its
 upload is refused off when it would start, the switch having gone off
@@ -300,7 +309,8 @@ invocation's fixes above), which staled every pin but the journal's and
 ## Re-read (M97, the off switch reaches a held browser turn)
 
 Read against the working tree after `15f1ef38`, uncommitted when written;
-re-pin once committed. Each change, and what it does to the model:
+`826ba83a` committed it, and the re-read below re-pins against that commit.
+Each change, and what it does to the model:
 - `held_turn.ex` (whole): a request runs linked to its run, and one whose
   run is gone is dropped unstarted (`HeldEndsWithRun`, INVOKE-1 fixed); a
   held turn is keyed by its server turn's session and conversation, and a
@@ -325,6 +335,101 @@ re-pin once committed. Each change, and what it does to the model:
 - `invoke_family.ex#init,handle_event,reconcile`: changed by the computer
   history work, not this re-read; to be read at the re-pin.
 
+## Re-read (M97, `826ba83a`: the held turn's fix and computer history, 2026-11-11)
+
+Read against `826ba83a`, which committed the section above and computer
+history from every computer, and staled every pin but the device
+supervisor's, the relay's and the lanes'. Each change, and what it does to
+the model:
+- `held_turn.ex` (whole), walked step by step: `handle_call {:run, fun}`
+  (`:134-145`) links the held process to its caller, the run's task, before
+  it starts the request, and unlinks it only once the request answered;
+  `link/1` (`:224`) fails with `noproc` for a task already gone, and the
+  request is dropped unanswered. The held process does not trap exits, so
+  `stop_task/2`'s `terminate_child` (`admission.ex:626-634`) and a restart
+  of `Desktop.Invoke`'s `:one_for_all` (`invoke.ex:103-113`) end the
+  request it runs. `Cancel`, `HearSwitch` and `Stop` leave `heldWork` alone
+  under `HeldEndsWithRun`, which is that. One abstraction: the exit signal
+  is sent as the task ends, before `terminate_child` returns and Admission
+  answers, and taken by the held process a moment later; the model makes
+  the two one step. A request that waits in the held process's mailbox
+  behind the one that ended is not taken: its own caller's call exits with
+  the held process (`:shutdown` is not one `run/4` retries), so that run
+  ends `failed` before it acted. Check 17 holds and check 18 (6 states)
+  needs the link.
+- `admission.ex` (whole): a restart answers every run its recovery closed,
+  once it stands (`handle_continue`, `:144-151`, the journal's receipt), as
+  `Stop` says; that made check 02's path shorter (14 states to 10: the
+  restart's own receipt, no drop needed) and gives witness 09 a second way.
+  The new `invoke_result` clause (`:168-174`) is computer history's, below.
+  Every `admission.ex` line cited moved, and is walked again here.
+- `journal.ex#interrupted,close_all,closed_entry`: the entries it closed,
+  as `lookup/2` would read them, for the restart's answers. No modelled
+  step changes; `write_line` moved to `:263-271`.
+- `invocation.ex`, `calls.ex`, `computers.ex#call`: `cancel/2` gone from
+  all three; no modelled step changes. Every `invocation.ex` line cited
+  past the removed function moved up by five, `tell_reconnected` and
+  `route` in `calls.ex` by twelve, and `Computers.call/6` down by two.
+- `switches.ex#notify`: the fourth listener, `Browser.HeldTurnListener`.
+  Admission is told as before.
+- `capabilities/browser.ex#run` (`:233-248`): hands the held turn its
+  turn's session, conversation and whether it is a worker's. No modelled
+  step changes.
+- `invoke.ex`, `invoke_family.ex#init,handle_event,reconcile` (computer
+  history): a capability `history` on the computer (`MachineService`, its
+  op `apply`), a service `history` on the home (`HomeService`, its op
+  `submit`), and the family's context names the computer that asked. The
+  family's three pinned functions do what they did; their lines moved.
+  `history.apply` is a request of the server like any other: admitted,
+  journaled, gated by the master switch alone (it offers nothing of its
+  own), so every rule here covers it.
+
+**The computer's own requests (computer to home).** A computer now opens
+invocations toward its home: `Desktop.HistoryUplink` sends one
+`history.submit` at a time, waits on it in the process that sent it, and
+sends its own `invoke_cancel` after its deadline. No rule here changes, and
+the direction needs no modelling in this spec:
+- Ids cannot meet: the server mints `inv-…` (`Invocation.mint_id/0`), the
+  computer `hist-…` (`HistoryUplink.request/1`). Each side hands an
+  `invoke_result` only to its own waiters: the home's family to `Calls`
+  (`route/4` drops an id nobody waits on), the computer's Admission to
+  `HistoryUplink.answer/4`, whose waiter takes only its own id. Admission's
+  `open`, `cancel` and `status` see only the server's requests, and the
+  home's family `serve`, `cancel` and `status` only the computer's.
+- Admission's state does not move for the computer's own request: the new
+  clause runs nothing, journals nothing and holds nothing, so `run`,
+  `journal`, `held` and the rest are as before. Its epoch check and journal
+  never see it; the home does not check the epoch the computer names, and
+  the computer reaches only a copy whose session its relay accepted
+  (`Relay.hello_ack/2` refuses a lower epoch).
+- The switch off: `HistoryUplink.submit/2` sends nothing while the master
+  or the `history` switch is off; a sitting sent before is not work running
+  on the computer (its text has left, the home finishes it), so
+  `OffAlwaysWins` still describes everything the computer runs.
+- A restart of Admission, or a session that drops, loses an answer on its
+  way to the computer's waiter; the waiter gives up at its deadline and the
+  next cycle sends the sitting again, which the home answers from the note
+  it made. What a lost or repeated sitting does to the home's notes is
+  `history_submit`'s rule, and that spec models the resend.
+- Shared with the server's requests: the relay's 512 events for
+  Admission, now also the answers to the computer's own requests (not
+  modelled, as the bound is not), and the lanes, where a history submit
+  and its cancel ride the bulk lane (pinned).
+
+Seen while reading, not modelled and not a rule here:
+- A held turn that the browser switch alone ends (the master switch on)
+  takes its run with it, which Admission answers `failed`, "It stopped
+  before it finished. The computer's log says why.", not `refused` `off`:
+  the server hears a crash for what the owner switched off. Admission ends
+  runs on the master switch only.
+- A restart of Admission answers only what had a started record. A request
+  still waiting for a slot has none and is answered by nothing: a call with
+  a deadline ends at it, but a long-lived one (`imessage.watch`,
+  `screen.watch`, deadline 0) queued behind eight runs waits until its
+  caller ends while the session stays up. The moduledoc's "a restart of
+  this process while the session stays up leaves no caller waiting, a
+  long-lived one included" holds for one that ran.
+
 ## Findings
 
 The first pin's three (a status ask that could reach the computer before
@@ -336,9 +441,7 @@ modelled above.
 - **Severity:** medium. The trigger is rare, but the master switch is the
   owner's stop at the computer, and for the browser it answers "The person
   at this computer stopped it." and stops nothing already handed over.
-- **Status:** fixed in the working tree after `15f1ef38` (uncommitted when
-  this was written; the re-pin names the commit). Found in the re-read of
-  `26196634`.
+- **Status:** fixed in `826ba83a`. Found in the re-read of `26196634`.
 - **Check:** 18 (6 states) reaches it without the fix; 17 holds with it.
 - **Counterexample:** the server sends a browser request that changes
   something; Admission records it started and runs it, and the run hands
@@ -346,7 +449,7 @@ modelled above.
   computer and Admission hears: it answers the request `refused`
   `stopped_here` and ends the run, while the held process still has the
   request. The rule breaks there; the request can then act (`ActHeld`).
-- **Code:**
+- **Code** (lines as they were at `26196634`):
   - `Capabilities.Browser.run/4` (`computers/capabilities/browser.ex:233-242`)
     makes each request through `HeldTurn.run/3`, a
     `GenServer.call(…, :infinity)` (`held_turn.ex:108`) into the turn's

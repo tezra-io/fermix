@@ -739,6 +739,22 @@ order, so nothing the spec models changed.
   `application.ex` line down by one, and the cue tree's by two; the comments
   point at the committed file.
 
+## Re-read for computer history on every computer (2026-11-11)
+
+Computer history from every computer (M97 §8.1, `826ba83a`) staled the
+`application.ex` pin. The computer-history supervisor is now started with the
+engine's role: on every primary, whatever its platform (a Linux server
+included), and on a device only where this system has a recorder. It keeps
+its place after `JobScheduler` and the temporal rail, so a crash of it
+restarts only what follows it (the origin backfill through the cue tree), and
+it reads and writes no job, run or delivery row. `JobRunnerSupervisor`,
+`MeetingsSupervisor` and `JobScheduler` keep their order, so nothing the spec
+models changed.
+
+- **Line numbers**: the change touched only that one child's line and the
+  function below the tree, so every cited `application.ex` line is where it
+  was.
+
 ## Plan hypotheses
 
 The plan (`docs/design/TLA_PLUS_MODELS.md` §4.3) listed four expected

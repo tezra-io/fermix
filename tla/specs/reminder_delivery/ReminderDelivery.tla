@@ -43,7 +43,7 @@
 \* SOURCE: apps/fermix_core/lib/fermix_core/delivery/channel_send.ex @ 9b06289e25ae
 \* SOURCE: apps/fermix_core/lib/fermix_core/delivery/error.ex @ 2f1ce6530e0b
 \* SOURCE: apps/fermix_core/lib/fermix_core/memory/repo/mobile_sql.ex @ 20b02d329b95
-\* SOURCE: apps/fermix_core/lib/fermix_core/application.ex#start_supervision_tree,supervision_children,temporal_scheduler_opts @ e82fd2014387
+\* SOURCE: apps/fermix_core/lib/fermix_core/application.ex#start_supervision_tree,supervision_children,temporal_scheduler_opts @ 4a04930f038e
 \* SOURCE: apps/fermix_core/lib/fermix_core/temporal/registry.ex @ 26a90999cd1c
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/channels/mobile.ex @ c60a5fda0ed7
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/companion/output.ex @ 71be1c83368c

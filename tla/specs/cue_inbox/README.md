@@ -595,3 +595,16 @@ The server's use of a computer's screen and Messages (M97 §6.4,
 
 Nothing the spec models changed; it cites no `application.ex` or
 `proposals.ex` line the change moved.
+
+## Re-read for computer history on every computer (2026-11-11)
+
+Computer history from every computer (M97 §8.1, `826ba83a`) staled the
+`application.ex` pin. The computer-history supervisor is now started with the
+engine's role: on every primary, whatever its platform (a Linux server
+included, where it was absent before), and on a device only where this system
+has a recorder. It keeps its place, after `Jobs.Scheduler` and the temporal
+rail and before the cue tree, which is still the tree's last child, so a
+crash of it restarts the cue tree, which the model takes as
+`FiltersRestart`, and `Jobs.Scheduler`, before it, is untouched. It reads and
+writes no delivery, watcher, run or proposal row. Nothing the spec models
+changed; it cites no `application.ex` line the change moved.

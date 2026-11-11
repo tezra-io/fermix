@@ -503,6 +503,16 @@ pins:
 
 No delivery path the spec models changed.
 
+Re-read on 2026-11-11 for computer history on every computer (M97,
+`826ba83a`), which staled the `application.ex` pin: the computer-history
+supervisor is now started with the engine's role, on every primary whatever
+its platform and on a device only where this system has a recorder. It keeps
+its place after the temporal scheduler and its delivery supervisor, which
+keep their order, so a crash of it reaches neither, and it touches no
+`temporal:` row. The change touched only that child's line and the function
+below the tree, so every cited `application.ex` line is where it was. No
+delivery path the spec models changed.
+
 ## Code and doc drift
 
 - `delivery_worker.ex:160-163` says a claim past the validity boundary "cannot

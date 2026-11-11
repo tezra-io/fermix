@@ -4,14 +4,22 @@ Models Computer History's write path against the owner's three privacy
 controls. The compux sidecar stamps each observed event with the wall clock.
 The `Capturer` GenServer keeps it in an in-memory buffer, and a flush (the 2 s
 timer, the 25-event size trigger, or `terminate/2`) hands the buffer to
-`Ingest`. `Ingest` makes two `Memory.Repo` calls: it reads the pause horizon
-and drops each event stamped before it (or arriving while it is in force), then
-inserts the rest into the spool, which refuses a row stamped inside a recorded
-purge interval. Against that it models:
+`Ingest`. `Ingest` makes two calls to this machine's own store
+(`ComputerHistory.Spool`, `device/history.db`, one GenServer and the one
+writer of that file here): it reads the pause horizon and drops each event
+stamped before it (or arriving while it is in force), then inserts the rest
+into the spool, which refuses a row stamped inside an interval of the
+store's fence. Against that it models:
 
-- `/history pause <d>`: one Repo call that stores `pause_until`, then the reply.
-- `/history purge <w>`: one Repo transaction that deletes spool rows in
-  `[now - w, now]` and records that interval.
+- `/history pause <d>`: on this machine's store, one transaction that deletes
+  the rows stamped in `[now, now + d]` and records that window in the fence,
+  then the horizon (`pause_until`), then the reply. The home records the
+  pause for every machine first and tells the computers before the reply;
+  neither touches this store.
+- `/history purge <w>`: the home's transaction (its notes and its interval,
+  in `memory.db`), then, on this machine's store, one transaction that
+  deletes spool rows in `[now - w, now]` and records that interval in the
+  fence.
 - `/history off`: flip the app env, call the `Controller`, save `config.toml`
   whatever the call returned, and reply with what the stop confirmed.
 
@@ -24,30 +32,32 @@ restarts the Controller.
 Two events and a clock of 0..3 cover the interleavings that matter: an event
 stamped inside a window, and a flush before or after the window ends. Out of
 scope as single calls (TLA_PLUS_MODELS.md §5.1), and covered by ExUnit: the
-summarizer and the roll-up with their purge guard (a note or thread is refused
-when a purge issued after its batch was read reaches it), the migration of a
-stored watermark into one interval, pruning at the 48 h sweep, `purge all`
-(`[0, now]`, a window like any other) and the Setup UI disable path. The spec
-header lists everything else left out.
+roll-up's purge guard, the carry of `memory.db`'s spool into this store
+(migration 59), pruning at the 48 h sweep, `purge all` (`[0, now]`, a window
+like any other) and the Setup UI disable path. The sending of sittings, the
+home's refusal and note write, the home's half of a purge or pause and the
+delivery to computers are `history_submit`'s. The spec header lists
+everything else left out.
 
 **Environment switches** (set per check):
 - `OwnerCanPause`, `OwnerCanPurge`, `OwnerCanDisable`: the owner sends that
   command. Pause and purge are sent at most once. `/history off` is sent once,
   or again if a daemon restart killed it before its reply.
-- `DaemonCanRestart`: the daemon stops and boots again. Only SQLite rows
-  (the spool, `pause_until`, the purge intervals) and `config.toml` survive.
+- `DaemonCanRestart`: the daemon stops and boots again. Only this machine's
+  store (the spool, `pause_until`, the fence's intervals) and `config.toml`
+  survive.
 - `ControllerCanCrash`: the Controller dies alone, at any point (for example
   `do_reconcile` raises), and `ComputerHistory.Supervisor` restarts it.
 - `CapturerCanCrash`: a Capturer callback raises, and its DynamicSupervisor
   restarts it.
 - `ReconcileCanTimeOut`: `/history off`'s reconcile call gives up after its
-  15 s timeout (`controller.ex:50`, `:58-59`). The timer starts at
-  `history.ex:487`.
+  15 s timeout (`controller.ex:51`, `:59-60`). The timer starts at
+  `history.ex:629`.
 - `ReconcileCanStall`: that timeout can fire before the DynamicSupervisor has
   sent the Capturer `:shutdown`. Setting it `FALSE` is a timing assumption:
   the work before the `:shutdown` is app-env reads, `File.regular?` stats in
-  `SidecarInstaller.installed?` (`controller.ex:103`,
-  `sidecar_installer.ex:94-99`) and a `Process.whereis` (`controller.ex:137`),
+  `SidecarInstaller.installed?` (`controller.ex:138`,
+  `sidecar_installer.ex:94-99`) and a `Process.whereis` (`controller.ex:179`),
   so the assumption fails only if the filesystem or the scheduler stalls for
   seconds. No safety rule needs it any more (see What holds).
 - `MaxFaults` bounds restarts and crashes together (1 in every check).
@@ -56,42 +66,49 @@ header lists everything else left out.
 `needs` checks that show a rule depends on it):
 - `IngestChecksPause`: Ingest has a pause gate at all. It reads the horizon
   once per batch and drops each event while the pause is in force,
-  `now < pause_until` (`ingest.ex:175`, `:178`, `:231-240`). Off, nothing is
+  `now < pause_until` (`ingest.ex:176`, `:179`, `:232-241`). Off, nothing is
   dropped.
 - `PauseByStamp`: the gate also drops each event stamped before the horizon,
   however late its batch is flushed: the `ts` half of
-  `min(ts, now) < pause_until` (`ingest.ex:234-235`), the CH-1 fix. Off, the
+  `min(ts, now) < pause_until` (`ingest.ex:235-236`), the CH-1 fix. Off, the
   gate is the flush-time rule of 693970b7.
 - `StopBeforeReply`: `/history off` replies only after its reconcile call
   returns, and that call returns only after the Capturer has exited
-  (`history.ex:487`, `computer_history.ex:70`, `controller.ex:58-59`, `:142`).
+  (`history.ex:629`, `computer_history.ex:125`, `controller.ex:59-60`, `:184`).
 - `SaveBeforeReply`: `/history off` writes `config.toml` before it replies
-  (`history.ex:482`, `:490-493` before `:426-427`).
+  (`history.ex:624`, `:632-635` before `:568-569`).
 - `BootReconciles`: a started or restarted Controller reconciles in
-  `handle_continue` (`controller.ex:62-82`).
+  `handle_continue` (`controller.ex:63-84`).
 - `OffConfirmsStop`: an exit of the reconcile call (no Controller, a crash
   mid-call, a timeout) comes back as `{:error, {:reconcile_failed, _}}`
-  (`computer_history.ex:68-75`), and `/history off` then says the stop could
-  not be confirmed instead of "nothing new is captured" (`history.ex:447-452`).
+  (`computer_history.ex:123-130`), and `/history off` then says the stop could
+  not be confirmed instead of "nothing new is captured" (`history.ex:589-594`).
   Off, the exit reads as a confirmed stop (the code at 693970b7).
 - `InitChecksEnabled`: every Capturer start, a DynamicSupervisor restart
   included, re-reads `ComputerHistory.operative?/0` and returns `:ignore`
   while the feature is off (`capturer.ex:130-136`); the DynamicSupervisor then
   deletes the child.
 - `InsertChecksIntervals`: the spool insert refuses, inside its own
-  transaction, each row whose `ts` lies inside a recorded purge interval,
-  bounds inclusive like the purge's `DELETE` (`computer_history_sql.ex:359-403`,
-  `:665-676`), the CH-2 fix. Off, it is the plain `INSERT OR IGNORE` of
-  693970b7.
+  transaction, each row whose `ts` lies inside an interval of the store's
+  fence, a purge's or a pause's, bounds inclusive like the fence's `DELETE`
+  (`computer_history_sql.ex:588-631`, `:938`, `:1053-1064`), the CH-2 fix.
+  Off, it is the plain `INSERT OR IGNORE` of 693970b7.
 - `StopsBeforeFlush`: `terminate/2` runs `stop_driver` and the lock release
   before its best-effort flush (`capturer.ex:603-605`), the C1 fix. Off, it is
   the code before the fix: the flush first, then the stop.
+- `PauseFences`: `/history pause` applies its window `[now, until]` to this
+  machine's store before it stores the horizon (`history.ex:495`, `:509-515`
+  → `Spool.apply_intervals/3`, `spool.ex:168-209`): one `fence_window`
+  transaction deletes the rows stamped inside it and records it in the fence,
+  then `pause_from`/`later_pause` store the horizon. Off, the pause is the
+  horizon alone, the code before 826ba83a.
 
 ## What holds
 
 Check 01 runs with daemon restarts, a Controller or a Capturer crash at any
 point, reconcile timeouts that may fire before the `:shutdown`
-(`ReconcileCanStall = TRUE`, so it needs no timing assumption), and a pause:
+(`ReconcileCanStall = TRUE`, so it needs no timing assumption), and a pause.
+Checks 31 and 32 run in the same setting:
 - Nothing captured after the `/history off` reply lands in the spool (the
   disable half of M32 invariant 12). This rests on `StopBeforeReply` (check
   02), on `SaveBeforeReply` across a restart (check 03), on `OffConfirmsStop`
@@ -101,14 +118,24 @@ point, reconcile timeouts that may fire before the `:shutdown`
 - Nothing captured after the pause reply is stored, and nothing captured
   while the stored pause is in force is ever stored, whenever its batch is
   flushed (M32 invariant 12's pause half, and the claim at
-  `ingest.ex:217-230`). Both rest on the gate existing at all:
-  `IngestChecksPause` off (checks 17 and 04) stores an event while the pause
-  is still in force, in 6 and 5 states. The first also rests on the CH-1 fix:
-  `PauseByStamp` off (check 27) brings back CH-1's 7-state path, a flush
-  after the horizon.
+  `ingest.ex:220-231`). Since 826ba83a two mechanisms each hold this alone:
+  Ingest's gate, and the pause's own fence (`PauseFences`), which records the
+  window before the horizon is stored, so every event a stored pause covers
+  reaches an insert that refuses it. With both on, as in the code, no single
+  switch breaks the rule, so each is checked with the other off, and the
+  code holds a fortiori (a fence or a gate only ever keeps an event out):
+  - 31, the fence off: the rules rest on the gate existing at all
+    (`IngestChecksPause` off, checks 17 and 04, store an event while the
+    pause is still in force, in 7 and 6 states) and the first also on the
+    CH-1 fix (`PauseByStamp` off, check 27, brings back CH-1's path, a flush
+    after the horizon, in 8 states).
+  - 32, the gate off: the rules rest on the fence (`PauseFences` off, checks
+    34 and 33, the same configurations as 17 and 04) and on the insert
+    reading it (`InsertChecksIntervals` off, check 35, 6 states: the window
+    is recorded but never read).
 - `terminate/2` stops the sidecar and releases the lock before its flush
-  makes any Repo call (a proposed rule from the Capturer moduledoc; C1, fixed in
-  eebf68fb). Those Repo calls can outlast the
+  makes any store call (a proposed rule from the Capturer moduledoc; C1, fixed in
+  eebf68fb). Those store calls can outlast the
   DynamicSupervisor's 5 s shutdown, and the kill that follows skips whatever
   `terminate/2` has not reached. This rests on `StopsBeforeFlush` (check 30):
   flush-first, a Capturer crash reaches the flush's pause check with the
@@ -136,8 +163,9 @@ Check 11 runs with a purge, `/history off`, Capturer crashes and daemon
 restarts:
 - No event stamped inside the purged window lands in the spool after the
   purge, whether it was still buffered, in a batch already past its pause
-  check, or flushed by `terminate/2` (the claim at `purge.ex:3-9`, and M32
-  §12). This rests on `InsertChecksIntervals`: off (check 28), CH-2's 5-state
+  check, or flushed by `terminate/2` (`purge.ex:3-7`, the claim at
+  `computer_history_sql.ex:608-614`, and M32 §12). This rests on
+  `InsertChecksIntervals`: off (check 28), CH-2's 5-state
   path is back. With the fence switched off for `terminate/2`'s insert only
   (a hand edit, reverted), 11 fails in 6 states through a Capturer crash, so
   11 covers that path too.
@@ -147,8 +175,10 @@ restarts:
 The checks that found CH-1, CH-3 and CH-4 now hold in their original,
 smaller settings, each with a `needs` check that switches the fix off and
 gets the old counterexample back: 09 and 10 (CH-1; checks 21, 22 with
-`PauseByStamp` off), 12 and 15 (CH-3; checks 23, 26 with `OffConfirmsStop`
-off), 13 and 14 (CH-4; checks 24, 25 with `InitChecksEnabled` off).
+`PauseByStamp` off; these four run with the pause's own fence off, which
+would otherwise hold them alone), 12 and 15 (CH-3; checks 23, 26 with
+`OffConfirmsStop` off), 13 and 14 (CH-4; checks 24, 25 with
+`InitChecksEnabled` off).
 
 Witnesses:
 - Check 07: the terminate-time flush of `/history off` writes buffered events
@@ -160,15 +190,18 @@ Witnesses:
 - Check 16: CH-4's second path, now harmless. The Controller's `whereis`
   returns a Capturer that then exits; its restart declines because the
   feature is off, so the Controller's `terminate_child` is answered
-  `{:error, :not_found}`, logged "already gone" (`controller.ex:151-152`),
+  `{:error, :not_found}`, logged "already gone" (`controller.ex:193-194`),
   with no Capturer running.
 - Check 29: CH-2's path, now closed. A row stamped inside the purged window
   reaches the spool insert after the purge committed, and the fence refuses
-  it (`computer_history_sql.ex:386-396`), so the fence is not vacuous.
+  it (`computer_history_sql.ex:615-625`), so the fence is not vacuous.
 
 **One more of each entity, run by hand** (TLC 2.19, `-workers auto`): each row
 changes the check's constants as shown, and every other constant stays as in
 the check.
+
+Checks 31 and 32 (826ba83a) were not re-run by hand with one more of each
+entity; 01, 31 and 32 each take about 40 s at the committed bounds.
 
 On this revision (per-event pause gate, `OffConfirmsStop`,
 `InitChecksEnabled`, and 01/05 with every fault switch on). These runs predate
@@ -210,8 +243,8 @@ Controller's split lookup and crashes at any point) both held: 01 with
   `Ingest.ingest` called `capture_paused?`, which read `pause_until` through
   `computer_history_ensure_state` and compared it with `DateTime.utc_now()`,
   never the event's own `ts`. Since the CH-1 fix it reads the horizon once
-  (`ingest.ex:175`, `:243`) and judges each event by `min(ts, now)`
-  (`:178`, `:231-240`).
+  (`ingest.ex:176`, `:244`) and judges each event by `min(ts, now)`
+  (`:179`, `:232-241`).
 - **Purge is one transaction that sets the watermark, and spool inserts do
   not check it: confirmed** (at 693970b7). `purge_window`
   (`computer_history_sql.ex:510-562`) deleted, then raised
@@ -219,17 +252,18 @@ Controller's split lookup and crashes at any point) both held: 01 with
   in one Repo call. `insert_events` (`:311-336`) was a plain `INSERT OR
   IGNORE`. Only the summarizer's `write_cycle_result` read the watermark
   (`:996-1024`). Since the CH-2 and CH-5 fix the purge records an interval
-  in the same transaction (`:607-648`), and the insert checks every recorded
-  interval (`:359-403`).
+  in the same transaction as its `DELETE`, today in this machine's store
+  (`fence_window`, `:928-950`), and the insert checks every recorded interval
+  (`:588-631`).
 - **`/history off`: env flip, then terminate the Capturer, then save
   config: confirmed.** The order is:
-  1. flip (`history.ex:479-480`);
-  2. a synchronous reconcile (`:482`, `:487`), which returns after
+  1. flip (`history.ex:621-622`);
+  2. a synchronous reconcile (`:624`, `:629`), which returns after
      `DynamicSupervisor.terminate_child` returns, which waits for
      `terminate/2`; since the CH-3 fix an exit of the call comes back as an
      error, not `:ok`;
-  3. save (`:490-493`), whatever the reconcile returned;
-  4. reply (`:426-459`), chosen by both outcomes.
+  3. save (`:632-635`), whatever the reconcile returned;
+  4. reply (`:568-611`), chosen by both outcomes.
 - **Events captured during a pause but flushed after it ends are stored:
   confirmed → CH-1 (fixed).**
 - **Buffered events land inside a purged window, known and tolerated:
@@ -263,12 +297,14 @@ the fixed code.
   one 2 s flush interval or 25 events).
 - **Status:** fixed (d514e149).
 - **Checks:** 09 (M32 invariant 12) and 10 (the rule the fix now claims) hold;
-  21 and 22 get the old 7- and 6-state counterexamples back with
-  `PauseByStamp` off (the flush-time gate). 01 holds both rules with every
-  fault on; 27 gets the same 7-state path back there with `PauseByStamp` off.
-  04 and 17 switch the whole gate off (`IngestChecksPause`), so their 5- and
-  6-state traces store an event while the pause is still in force, not
-  CH-1's flush after the horizon.
+  21 and 22 get the old counterexamples back with `PauseByStamp` off (the
+  flush-time gate), in 8 and 7 states (7 and 6 before 826ba83a, whose pause
+  stores its horizon a step after its fence). 31 holds both rules with every
+  fault on; 27 gets the same path back there with `PauseByStamp` off. 04 and
+  17 switch the whole gate off (`IngestChecksPause`), so their 6- and 7-state
+  traces store an event while the pause is still in force, not CH-1's flush
+  after the horizon. All of these run with the pause's own fence off: since
+  826ba83a the fence alone also holds both rules (32).
 - **Counterexample:**
   1. The owner pauses for one tick, and the reply comes back.
   2. The sidecar observes an event inside the pause, and the Capturer buffers
@@ -580,11 +616,30 @@ the fixed code.
   it (logged at info, counts only). The window stays purged, so this is the
   fence working, not a defect; the model has one clock that never steps back.
   A row stamped after `now` by the same step survives `purge all` (see CH-5).
-- The owner purges once, so the model holds at most one interval; that the
-  insert checks every recorded interval, not only the latest, is covered by
-  ExUnit (`purge_test.exs`).
+- The owner purges once and pauses once, so the model holds at most one
+  interval of each; that the insert checks every recorded interval, not only
+  the latest, is covered by ExUnit (`purge_test.exs`).
+- A purge or pause from chat is two transactions on two stores: the home's
+  (`purge_notes/5` or `pause_window/5`, in `memory.db`), then this machine's
+  (`fence_window/4`). Only the second touches what this spec models, and it
+  is one `BEGIN IMMEDIATE` transaction on this store's single writer, as the
+  insert is, so the fence's either-or (the `DELETE` removes the row, or the
+  insert sees the interval) holds as it did when the purge was one
+  transaction. The window is fixed when the command starts, so an event
+  captured between the two transactions is stamped after a purge's window.
+  Where the second fails after the first, the reply says the command failed,
+  and the rule is not claimed (see `history_submit`'s README). On a computer,
+  a purge or pause delivered by its home reaches this store through a
+  connection of its own (`Spool.apply_at/3`), whose transactions SQLite
+  serializes with the `Spool` process's, so the same holds there.
+- The pause's horizon is written by `later_pause/2` as a read and a write
+  (`Spool.state`, then `Spool.set_pause_until`), folded into one step: in the
+  model nothing else writes the horizon. In the code a pause the home names in
+  a refusal or a delivery can write it beside a pause from chat; the later
+  write may lower the horizon, but each pause's fence still covers its own
+  window.
 - `/history off`'s env flip is a `get_env` and a `put_env`
-  (`history.ex:479-480`), folded into one step: no other writer of that key
+  (`history.ex:621-622`), folded into one step: no other writer of that key
   is in scope.
 - The Controller's start of a Capturer (`ensure_started`) is folded with the
   DynamicSupervisor's `start_child` and the Capturer's `init` read of the
@@ -595,8 +650,10 @@ the fixed code.
   its `init` read of the enable bit into one step. That is sound: a
   Controller `whereis` after the flip either sees the new pid and stops it,
   or the `init` read sees the flip.
-- The model's host is macOS. Off macOS `/history off` makes no reconcile call
-  (`history.ex:488`), and there is no rail to stop.
+- The model's host has a recorder (a Mac). On a host with none, `/history
+  off` makes no reconcile call (`history.ex:630`): since 826ba83a the rail's
+  supervisor runs on every primary, a Linux server's included, with no
+  recorder to stop.
 - Two `/history` commands from different channels can run at once (each runs
   in its ingress process, `gateway.ex:377`), so each command is its own actor.
 
@@ -605,23 +662,67 @@ the fixed code.
 These are single-call facts rather than interleavings, so each belongs in
 ExUnit or a doc fix.
 - Ingest's pause check fails **open** on a state-read error
-  (`ingest.ex:247-250`: "a state-read error: not paused"). An unparseable
-  horizon fails **closed** (`:254-266`, `:232`), and its comment calls the
-  pause "a privacy control".
+  (`ingest.ex:248-251`: "a state-read error: not paused"). An unparseable
+  horizon fails **closed** (`:255-267`, `:233`), and its comment calls the
+  pause "a privacy control". Since 826ba83a a pause's own fence refuses the
+  events it covers whatever the horizon read says.
 - There is no resume verb. The design says "resume is explicit or after the
   duration, announced either way" (MILESTONE_32 §12). The code has only the
-  horizon: `history.ex:71-75`, and `set_pause_until(nil)` has no caller. It
+  horizon: `history.ex:79-94`, and `set_pause_until(nil)` has no caller. It
   sends no announcement when the horizon passes. Because the horizon is never
   cleared, an event with no integer `ts` is dropped for good once any pause
-  was set (`ingest.ex:237-240`); every real event carries one.
+  was set (`ingest.ex:238-241`); every real event carries one.
 - Resolved: the design's stop-fence (MILESTONE_32 §12, invariant 12) does not
   exist as such. For `/history off` the synchronous terminate makes it
   unnecessary on the normal path; for the pause, Ingest's per-event stamp
   check now does its job (CH-1).
 - Resolved: `controller.ex` called the Controller "the LAST child of the
-  Supervisor", but `Retention` comes after it (`supervisor.ex:60-64`). The
+  Supervisor", but `Retention` comes after it (`supervisor.ex:73-78`). The
   moduledoc now says it follows the DynamicSupervisor (`controller.ex:12-15`).
 - Resolved: `controller.ex` said reconcile re-runs "on every enable/disable
   act (the wizard's enable, `/history off`)". The moduledoc now says it runs
   only from `/history off`, and an enable takes effect at the next boot
   (`controller.ex:15-17`).
+- `history.ex:627-628` still says the rail runs only on macOS because
+  `FermixCore.Application` starts its supervisor there alone; since 826ba83a
+  it starts on every primary. The behaviour it describes (no reconcile call
+  where there is no recorder) is right.
+- The failure reply of `/history pause` says "capture is NOT paused" when this
+  machine's apply fails, but the home has already recorded the pause, so the
+  home refuses sittings inside it and its next delivery pauses every
+  computer.
+
+## Re-read for computer history on every computer (826ba83a, 2026-11-11)
+
+Computer history from every computer (M97 §8.1, §8.5) staled every pin:
+- **The store.** The raw spool moved out of `memory.db` into this machine's
+  own store, `ComputerHistory.Spool` (`device/history.db`), one GenServer
+  that runs the same SQL (`ComputerHistorySql`) on its own connection.
+  `Ingest`'s two calls, the Capturer's flush and the fence are the same calls
+  on that process, each one transaction; the `memory/repo.ex` pins gave way
+  to a `spool.ex` pin (`call`, `handle_call`, `insert_events`, `state`,
+  `set_pause_until`, `fence`, `apply_intervals`, `apply_interval`,
+  `pause_from`, `later_pause`, `mark_applied`). The Capturer's text changed
+  only from Repo to store calls. No modelled step changed.
+- **The purge** deletes the home's notes and records the home's interval
+  first, then fences this machine's store (`Purge.fence_here/4`). The second
+  is the spec's `PurgeCommit`, still one transaction; see Assumptions for why
+  the atomicity the fence rests on still holds. The text and citations
+  changed; the step did not.
+- **The pause changed what the model does.** It now records its window in
+  this store's fence before it stores the horizon, so the store refuses the
+  events it covers, beside Ingest's gate. The model splits the pause into
+  `PauseFence` and `PauseSet` and adds the mechanism `PauseFences`. With
+  both on, checks 04, 17, 21, 22 and 27 would hold (their switch no longer
+  breaks the rule), so the pause half left 01: 31 holds it with the fence
+  off (04, 17 and 27 now cover 31), 32 with the gate off (33, 34 and 35 cover
+  it), and 09, 10, 21 and 22 run with the fence off. Every pause
+  counterexample is one state longer (the horizon is its own step).
+- **The Controller** keeps the summarizer's scheduler running on the home and
+  stops it with the Capturer on a computer; the scheduler is not modelled.
+  The Capturer's reconcile is as before. The rail's supervisor gained `Spool`
+  as its first child, and now starts on every primary and on a computer with
+  a recorder.
+- **Line numbers** in the spec and in this README's current-code sections
+  point at the committed files. The findings' **Code** lines cite the code at
+  693970b7 and their **Fix** lines the code at their fix, and were not moved.
