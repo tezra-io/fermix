@@ -150,6 +150,33 @@ defmodule FermixChannels.Home.ReturnTest do
                      %{phase: :finished, side: :candidate, result: :done, epoch: 6}}
   end
 
+  # M97 §8.4: on the server the Mac's notes are its computer's; once the Mac
+  # is its own home again they are the home's own (""), with its reads, its
+  # purge and its delivered mark. Another computer's notes keep their computer.
+  # An off request still pending for the Mac is a computer's, never the home's
+  # own machine's, which switches off in process.
+  test "the Mac's history notes are the home's own again once it takes Fermix back", ctx do
+    assert {:ok, %{device_id: mac}} = DesktopLink.read(ctx.mac.root)
+    other = "7e8f9a0b-1c2d-4e3f-8a5b-6c7d8e9f0a1b"
+    :ok = HomeMove.history!(ctx.server.root, mac, [other], off: true)
+    assert %{offs: [^mac]} = HomeMove.history(ctx.server.root)
+
+    back = move_back!(ctx)
+    assert {:ok, _move} = move_now(ctx, back, @passphrase)
+    run_worker(ctx.server.root, back)
+    assert_received :source_restart
+    assert_received {:scheduled, :restart, _delay}
+    assert {:ok, %{role: :primary}} = Role.configured(ctx.mac.root)
+
+    assert %{
+             notes: [{"", "session"}, {^other, "session"}, {"", "thread"}],
+             reads: [""],
+             intervals: [""],
+             rows: [{"", 2}, {^other, 2}],
+             offs: []
+           } = HomeMove.history(ctx.mac.root)
+  end
+
   test "a recovery passphrase that is not the one set is refused by the server", ctx do
     back = move_back!(ctx)
 

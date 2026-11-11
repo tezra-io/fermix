@@ -26,7 +26,9 @@ defmodule FermixChannels.Home.MoveWorker do
     3. the worker dials the candidate (`Mobile.Rail`, `:ik_move`: the gateway
        key as its static key, the candidate's Noise key as the responder's),
        sends `move_offer` (the file's size and SHA-256, the source epoch, the
-       recovery recipient, and the attempt, which only grows across restarts),
+       recovery recipient, the attempt, which only grows across restarts, and
+       the desktop row's device id of a source kept as a desktop, for which
+       the new primary names the home's own history notes, M97 §8.4),
        checks `move_accept` names the same recipient,
        streams the file as `move_chunk`s and `move_end`, and waits for
        `move_ready {epoch}`.
@@ -216,7 +218,7 @@ defmodule FermixChannels.Home.MoveWorker do
          :ok <- record(ctx, "streaming", %{"device_id" => desktop.device_id}),
          {:ok, snapshot} <- capture(ctx),
          {:ok, rail} <- open_candidate(ctx) do
-      case stream(ctx, rail, snapshot) do
+      case stream(ctx, rail, snapshot, desktop.device_id) do
         {:ok, epoch} ->
           commit(ctx, rail, desktop, epoch)
 
@@ -430,25 +432,31 @@ defmodule FermixChannels.Home.MoveWorker do
     end
   end
 
-  defp stream(ctx, rail, snapshot) do
-    with :ok <- timed(ctx, "send", fn -> send_snapshot(ctx, rail, snapshot) end, snapshot.size),
+  defp stream(ctx, rail, snapshot, device_id) do
+    sending = fn -> send_snapshot(ctx, rail, snapshot, device_id) end
+
+    with :ok <- timed(ctx, "send", sending, snapshot.size),
          {:ok, %{"epoch" => epoch}} <-
            timed(ctx, "staging", fn -> await(rail, "move_ready", @ready_ms) end, nil) do
       {:ok, epoch}
     end
   end
 
-  defp send_snapshot(ctx, rail, snapshot) do
+  # A source kept as a linked computer names its own device id, so the new
+  # primary names the home's own history notes for it (M97 §8.4).
+  defp send_snapshot(ctx, rail, snapshot, device_id) do
     move_id = ctx.request["move_id"]
 
-    offer = %{
-      "move_id" => move_id,
-      "size_bytes" => snapshot.size,
-      "sha256" => snapshot.sha256,
-      "source_epoch" => ctx.request["source_epoch"],
-      "recovery_recipient" => ctx.request["recovery_recipient"],
-      "attempt" => ctx.attempt
-    }
+    offer =
+      %{
+        "move_id" => move_id,
+        "size_bytes" => snapshot.size,
+        "sha256" => snapshot.sha256,
+        "source_epoch" => ctx.request["source_epoch"],
+        "recovery_recipient" => ctx.request["recovery_recipient"],
+        "attempt" => ctx.attempt
+      }
+      |> put_device(device_id)
 
     with :ok <- Rail.send_event(rail, "move_offer", offer),
          {:ok, accept} <- await(rail, "move_accept", @accept_ms),
@@ -457,6 +465,9 @@ defmodule FermixChannels.Home.MoveWorker do
       Rail.send_event(rail, "move_end", %{"move_id" => move_id})
     end
   end
+
+  defp put_device(offer, nil), do: offer
+  defp put_device(offer, device_id), do: Map.put(offer, "device_id", device_id)
 
   # Runs one phase's step and logs its line once it answered: the bytes
   # `sent` only when it did what it was for.

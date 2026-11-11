@@ -63,8 +63,9 @@ The move to a server, the roles and the epoch: skill_view(name:
 - **Afterwards.** Back on this computer as the primary, Fermix says so once
   ("Fermix is back on this Mac. Your own server still runs its retired copy:
   turn it off or delete it."). Computer history's notes and threads come
-  back with the home, those of every computer; raw history never left this
-  Mac's `device/history.db`.
+  back with the home, those of every computer, and the notes this Mac made
+  are "this computer" again; raw history never left this Mac's
+  `device/history.db`.
 - **Restore here, when the server is gone.** When nothing answers from the
   server (no answer for 10 minutes: turned off, deleted or unreachable, or
   no link at all; a server that answers, even one that

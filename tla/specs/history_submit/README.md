@@ -47,10 +47,15 @@ The steps, each one call of the real code:
 - **Purge** (`Purge.purge/2` → `ComputerHistorySql.purge_notes/5`): one
   transaction that deletes the notes of that scope reaching the window and
   records the interval.
-- **Apply here** (`Purge.fence_here/4`; `History.pause_here/3` for a pause):
-  on the home's own machine, the purge command then applies its own interval
-  alone (`Spool.apply_intervals([interval])`), and `mark_applied` records its
-  id as the mark. No delivery reaches the home's own machine.
+- **Apply here** (`Delivery.apply_here/1`, from `Purge.purge/2`, from the
+  pause command's `History.apply_here/2` and from the home scheduler's tick,
+  `Scheduler.apply_here/1`): no delivery reaches the home's own machine, so it
+  applies what it owes itself: every interval of its own above its mark
+  (`intervals_after/4`), oldest first, the fences first and the mark last, in
+  two steps like a delivery's (it shares `DeliverSecond`). A command whose
+  apply failed, or one beside which a second command ran, is applied by the
+  next command or the next tick. Before the fix it applied the command's own
+  interval alone (HS-2).
 - **Deliver, in two steps** (`Delivery.deliver/1` → `MachineService` →
   `Spool.apply_at/3`): a connected computer is sent every interval it has not
   applied and applies them in a process of its own, beside its sending
@@ -120,6 +125,9 @@ less:
 - `MarkAfterFences`: `Spool.apply_intervals/3` fences every interval before it
   writes the mark (`mark_applied/3`). Mark first, a sitting formed beside a
   delivery reads the new mark and an event the fence has not yet deleted.
+- `HereAppliesPending`: the home's own machine applies every interval of its
+  own above its mark (`Delivery.apply_here/1`), not the command's own one
+  alone, so its mark never steps over one it has not applied.
 
 ## What holds
 
@@ -127,6 +135,8 @@ less:
   no note holds an event stamped inside a purged window (one computer).
 - `10`: the same with two computers and purges of one of them or of all
   (under symmetry of the two computers).
+- `14`: the same on a Mac that is its own home, with two purges that may run
+  at once and an apply here that may come late.
 - `06`: every event a computer still holds is noted in the end, under weak
   fairness on the computer's cycle, the home's answer, its delivery and the
   computer's apply of it.
@@ -134,13 +144,14 @@ less:
 Each has its `needs` checks: `02` (the write's recheck), `03` (the
 computer's fence), `04` (the mark read first), `05` (the purge's own delete),
 `12` (the refusal names every pending interval), `13` (the mark written after
-the fences) and `11` (the recheck, with two computers) for the safety rule,
+the fences), `11` (the recheck, with two computers) and `15` (the home's own
+machine applies every pending interval, for `14`) for the safety rule,
 and `07` (the mark) for the liveness one. `08` and `09` are witnesses: a late
 sitting refused for a purge, and a note made from events either side of a
 purged window.
 
-None of these has the home's own machine record (`HomeMachine` is outside
-`Computers`): with it, the rule breaks (HS-2, check `14`).
+Only `14` and `15` have the home's own machine record (`HomeMachine` in
+`Computers`); the others have it outside `Computers`.
 
 ## Findings
 
@@ -157,10 +168,16 @@ every interval of the computer above the sitting's mark, oldest first, so the
 mark is always a true prefix (`Submission.refused_by/4`); check `12` shows the
 rule depends on it.
 
-### HS-2: the home's own machine applies a purge alone, and its mark can step over one it never applied (open)
+### HS-2: the home's own machine applies a purge alone, and its mark can step over one it never applied (fixed)
 
-Check `14`, 9 states, on a Mac that is its own home. Walked through the code
-at `826ba83a`:
+Found by check `14` at `826ba83a` (9 states), on a Mac that is its own home.
+Fixed in the change that adds `Delivery.apply_here/1`: this machine applies
+every interval of its own above its mark, oldest first, before its mark
+moves, the rule computers already followed through refusals and deliveries;
+every purge and pause command runs it, and so does the home scheduler's tick,
+which is how an apply that failed is done. Check `14` now holds, and check
+`15` (`HereAppliesPending` off) shows the rule depends on it. The path, as it
+was:
 
 1. The recorder stores an event stamped `1` in this machine's store
    (`Ingest.ingest/2` → `Spool.insert_events/2`).
@@ -190,31 +207,27 @@ refuses this machine's sittings inside a window that may still be running.
 The computers are not affected: what a refusal names and what a delivery
 sends both start at or below the next interval they have not applied.
 
-A fix keeps the home's machine's mark a true prefix, for example by having
-`fence_here/4` and `pause_here/3` apply every interval of this machine above
-its mark (as `refused_by/4` names them), not their own one alone. Check `14`
-then holds, and a `needs` check for that mechanism goes with it.
+The fix keeps the home's machine's mark a true prefix, as `refused_by/4`
+keeps a computer's.
 
 ## Seen while reading, not modelled
 
-- **A delivery to a machine with no store answers a mark it did not
-  record.** `Spool.apply_at/3` answers `:ok` when this machine has no store
-  file, `MachineService.run/4` answers the highest id, and the home records it
-  as delivered. A machine that later opens a store starts at mark 0 while the
-  home's record is ahead, so the next delivery sends only intervals above
-  that record and the machine records their highest id: HS-1's shape through
-  delivery, and a pause still running among the skipped ones would no longer
-  refuse its sittings. Today only a machine with no recorder (Linux) has no
-  store, and it records nothing, so this is latent until a Linux recorder.
-- **A failed purge or pause from chat is half done.** `purge_notes/5` (notes
-  deleted, interval recorded) and `pause_window/5` commit before this
-  machine's own apply. When that apply fails, the reply says the purge
-  failed, or that capture is not paused, but the interval stands: the home
-  refuses sittings inside it and the scheduler's next tick delivers it to
-  every computer, which deletes and, for a pause, pauses.
-- **The store has a second writer.** `Spool`'s documentation calls it the
-  single writer of `device/history.db`, but `MachineService` applies a
-  delivery through `Spool.apply_at/3` on a connection of its own. Each call is
-  still one `BEGIN IMMEDIATE` transaction, which SQLite serializes with the
-  `Spool` process's, so every step above stays atomic; a write that waits
-  past the 5 s `busy_timeout` fails with an error rather than interleaving.
+- **A delivery to a machine with no store answered a mark it did not
+  record (fixed with HS-2).** `Spool.apply_at/3` now answers the store's own
+  mark, and 0 where there is no store, so the home records nothing as applied
+  there (`Delivery` names that computer under `no_store`) and a store it opens
+  later is sent every interval from the first.
+- **A failed purge or pause from chat was half done (now said so).**
+  `purge_notes/5` and `pause_window/5` commit before this machine's own apply,
+  in a separate database. Once the home's transaction commits, the interval
+  stands and is never taken back (undoing it would leave notes deleted with
+  nothing refusing a late sitting); the reply says the home recorded it, that
+  this Mac's own apply has not happened yet and why, and that it is tried
+  again on every tick of the scheduler. A transaction that does not commit
+  changes nothing, and the reply says that.
+- **The store has a second writer.** `MachineService` applies a delivery
+  through `Spool.apply_at/3` on a connection of its own, beside the `Spool`
+  process (whose documentation now says so). Each call is one `BEGIN
+  IMMEDIATE` transaction, which SQLite serializes with the `Spool` process's,
+  so every step above stays atomic; a write that waits past the 5 s
+  `busy_timeout` fails with an error rather than interleaving.

@@ -3,15 +3,21 @@ defmodule FermixCore.Setup.MachineFile do
   `machine.toml`, beside `config.toml` in every home (M97 §4): the settings
   that describe the computer an engine runs on rather than the home. They are
   the sections only this machine configures
-  (`Management.Placement.device_sections/0`: its sandbox, computer use, screen
-  history, the accessory link, and what Fermix on its server may use on it,
+  (`Management.Placement.device_sections/0`: its sandbox, computer use, the
+  accessory link, and what Fermix on its server may use on it,
   `Computers.Switches`, whose `imessage` switch says this Mac carries
-  Messages), whole, and one key of a home table, `[fermix_core.plugins]
+  Messages), whole, and some keys of a home table: `[fermix_core.plugins]
   dev_local`, the dev plugin folder, which names this machine's own
-  checkouts. `[fermix_channels.imessage]` is the home's: that the home uses
-  iMessage, its owner and its guests travel with it, so a server knows them
-  (§4), and the helper's own state is files under `imessage/` that never
-  leave the Mac (`Home.DeviceLocal`).
+  checkouts, and of `[fermix_core.computer_history]`, whose screen history
+  section splits by key (§4, `ComputerHistory.Config`): `enabled` and `apps`
+  are this machine's, `remote_summaries` the home's, and `summarizer` the
+  home's route, except that `summarizer = "local"` is this machine's own
+  choice too (it makes its own notes), so it is copied here and never taken
+  out of `config.toml`, and only that value is read here.
+  `[fermix_channels.imessage]` is the home's: that the home uses iMessage,
+  its owner and its guests travel with it, so a server knows them (§4), and
+  the helper's own state is files under `imessage/` that never leave the Mac
+  (`Home.DeviceLocal`).
 
   The file never travels: it is device-local (`Home.DeviceLocal`), so no
   archive, snapshot or move carries it, a restore leaves these settings out
@@ -33,13 +39,23 @@ defmodule FermixCore.Setup.MachineFile do
   and the settings a server inherited from the computer its home came from
   are left out, which `notice/1` says once.
 
+  Computer history's keys follow the same steps: `enabled` and `apps` move,
+  a local `summarizer` is copied (`copied/1`) and stays in `config.toml` as
+  the home's route, and the home's `remote_summaries` stays. A server takes
+  none of the computer's (its machine file is its own default) and keeps the
+  home's route and grants.
+
   **Back to the home.** An engine of this milestone's stage 0 wrote
-  `[fermix_channels.imessage]` into `machine.toml`. `homeward/2` says what one
-  boot does about that, before the step above: `config.toml` takes the
-  section from the machine file, replacing any copy of it there, then the
-  machine file loses it, each write atomic. A boot stopped between the two
-  finds the section in both and does the same again, which changes nothing
-  in `config.toml`.
+  `[fermix_channels.imessage]`, and the whole `[fermix_core.computer_history]`,
+  into `machine.toml`. `homeward/2` says what one boot does about that,
+  before the step above: `config.toml` takes the iMessage section and the
+  home's history keys (`remote_summaries`, and a `summarizer` that is not
+  `"local"`) from the machine file, replacing any copy of them there, then the
+  machine file loses them, each write atomic. A local `summarizer` stays
+  here, and `config.toml` takes it as the home's route only where it names
+  none, so a later edit of the route there is never undone. A boot stopped
+  between the two finds them in both and does the same again, which changes
+  nothing in `config.toml`.
   """
 
   alias FermixCore.Home.Archive.ConfigText
@@ -53,30 +69,44 @@ defmodule FermixCore.Setup.MachineFile do
     "accessories" => "fermix_channels.accessories",
     "computer" => "fermix_core.computer"
   }
-  @tables ~w(sandbox fermix_core.computer_use fermix_core.computer_history
-             fermix_channels.accessories fermix_core.computer)
+  @tables ~w(sandbox fermix_core.computer_use fermix_channels.accessories fermix_core.computer)
   # Tables an earlier engine kept here that are the home's (`homeward/2`).
   @homeward ~w(fermix_channels.imessage)
   # The keys of a home table that are this machine's, as table and key.
-  @keys [{"fermix_core.plugins", "dev_local"}]
+  @keys [
+    {"fermix_core.plugins", "dev_local"},
+    {"fermix_core.computer_history", "enabled"},
+    {"fermix_core.computer_history", "apps"}
+  ]
+  # A key of a home table that is this machine's own only with one value,
+  # which is then both: copied here, never taken out of config.toml.
+  @local_summarizer {"fermix_core.computer_history", "summarizer", "local"}
+  # Keys an earlier engine kept here that are the home's (`homeward/2`).
+  @homeward_keys [
+    {"fermix_core.computer_history", "remote_summaries"},
+    {"fermix_core.computer_history", "summarizer"}
+  ]
   @server_sandbox_mode :open
   @header "# This computer's own settings, which stay on it when the home moves. Managed by " <>
             "Fermix:\n# the app, the setup page, fermix setup and fermix settings rewrite this file."
 
-  if Enum.sort(Map.values(@sections)) != Enum.sort(@tables) do
-    raise CompileError, description: "machine file: every section names one of its tables"
+  if Map.values(@sections) -- (@tables ++ Enum.map(@keys, &elem(&1, 0))) != [] do
+    raise CompileError,
+      description: "machine file: every section names one of its tables, whole or by key"
   end
 
   @typedoc """
   What one boot's migration writes: the new `machine.toml` (nil to leave it
   as it is), the new `config.toml` (nil likewise), the dotted names it removed
-  from `config.toml`, and whether the machine file is an Always On server's
-  own default.
+  from `config.toml`, those it copied into the new machine file and left in
+  `config.toml` (`copied/1`), and whether the machine file is an Always On
+  server's own default.
   """
   @type plan :: %{
           machine: String.t() | nil,
           config: String.t() | nil,
           removed: [String.t()],
+          copied: [String.t()],
           server_default?: boolean()
         }
 
@@ -167,7 +197,25 @@ defmodule FermixCore.Setup.MachineFile do
   def strip(text) when is_binary(text) do
     {text, tables} = Enum.reduce(@tables, {text, []}, &strip_table/2)
     {text, keys} = Enum.reduce(@keys, {text, []}, &strip_key/2)
-    {text, Enum.reverse(tables) ++ Enum.reverse(keys)}
+    keys = Enum.reverse(keys)
+    {drop_emptied(text, keys), Enum.reverse(tables) ++ keys}
+  end
+
+  # A home table whose keys here were all this machine's is left as a bare
+  # header; it goes too, where no table beneath it holds a key either.
+  defp drop_emptied(text, stripped) do
+    for({table, key} <- @keys, "#{table}.#{key}" in stripped, uniq: true, do: table)
+    |> Enum.reduce(text, fn table, acc ->
+      blocks = ConfigText.tables(acc, table)
+      if Enum.all?(blocks, &keyless?/1), do: ConfigText.drop_tables(acc, table), else: acc
+    end)
+  end
+
+  defp keyless?(block) do
+    block
+    |> String.split("\n")
+    |> Enum.drop(1)
+    |> Enum.all?(&(String.trim(&1) == "" or String.starts_with?(String.trim(&1), "#")))
   end
 
   defp strip_table(table, {text, removed}) do
@@ -186,23 +234,57 @@ defmodule FermixCore.Setup.MachineFile do
 
   @doc """
   The machine settings `config.toml`'s `text` holds, as a machine file, as
-  written (comments included); `""` when it holds none.
+  written (comments included), with a local summarizer copied (`copied/1`);
+  `""` when it holds none. Keys of one table are one table here.
   """
   @spec extract(String.t()) :: String.t()
   def extract(text) when is_binary(text) do
-    case Enum.flat_map(@tables, &ConfigText.tables(text, &1)) ++
-           Enum.flat_map(@keys, &key(text, &1)) do
+    case Enum.flat_map(@tables, &ConfigText.tables(text, &1)) ++ key_blocks(text) do
       [] -> ""
       blocks -> Enum.map_join([@header | blocks], "\n\n", &String.trim_trailing/1) <> "\n"
     end
   end
 
-  defp key(text, {table, key}) do
+  defp key_blocks(text) do
+    lines = for {table, key, raw} <- machine_values(text), do: {table, "#{key} = #{raw}"}
+
+    for table <- lines |> Enum.map(&elem(&1, 0)) |> Enum.uniq(),
+        do: Enum.join(["[#{table}]" | for({^table, line} <- lines, do: line)], "\n")
+  end
+
+  # This machine's keys `text` sets, each as table, key and raw value: the
+  # ones it owns, then a local summarizer.
+  defp machine_values(text) do
+    owned =
+      for {table, key} <- @keys,
+          {:ok, raw} <- [ConfigText.value(text, table, key)],
+          do: {table, key, raw}
+
+    owned ++ local_summarizer(text)
+  end
+
+  defp local_summarizer(text) do
+    {table, key, _local} = @local_summarizer
+
     case ConfigText.value(text, table, key) do
-      {:ok, raw} -> ["[#{table}]\n#{key} = #{raw}"]
+      {:ok, raw} -> if local?({table, key, raw}), do: [{table, key, raw}], else: []
       :absent -> []
     end
   end
+
+  defp local?({table, key, raw}) do
+    {local_table, local_key, local} = @local_summarizer
+    {table, key, ConfigText.string(raw)} == {local_table, local_key, {:ok, local}}
+  end
+
+  @doc """
+  The dotted names `extract/1` copies from `config.toml`'s `text` without
+  `strip/1` removing them: a summarizer that says `"local"`, which is this
+  machine's choice and the home's route both.
+  """
+  @spec copied(String.t()) :: [String.t()]
+  def copied(text) when is_binary(text),
+    do: for({table, key, _raw} <- local_summarizer(text), do: "#{table}.#{key}")
 
   # -- migration -----------------------------------------------------------------
 
@@ -219,11 +301,13 @@ defmodule FermixCore.Setup.MachineFile do
       when is_binary(config) and (is_binary(machine) or machine == :absent) and
              is_boolean(server?) do
     {stripped, removed} = strip(config)
+    extracted? = machine == :absent and not server?
 
     %{
       machine: new_machine(config, machine, server?),
       config: if(removed == [], do: nil, else: stripped),
       removed: removed,
+      copied: if(extracted?, do: copied(config), else: []),
       server_default?: server? and machine == :absent
     }
   end
@@ -239,30 +323,66 @@ defmodule FermixCore.Setup.MachineFile do
   end
 
   @doc """
-  What one boot does with the home's tables an earlier engine wrote into the
-  machine file (the moduledoc's "Back to the home"): from `config`
+  What one boot does with the home's tables and keys an earlier engine wrote
+  into the machine file (the moduledoc's "Back to the home"): from `config`
   (`config.toml`'s text, `""` when there is none) and `machine`
   (`machine.toml`'s, or `:absent`), the new `config.toml`, written first, and
-  the new `machine.toml`; nil for either when it holds none of them.
+  the new `machine.toml`, nil for either when it changes nothing; and the
+  dotted name of each it gave `config.toml`.
   """
   @spec homeward(String.t(), String.t() | :absent) ::
           %{config: String.t() | nil, machine: String.t() | nil, moved: [String.t()]}
   def homeward(config, machine) when is_binary(config) and is_binary(machine) do
-    case Enum.filter(@homeward, &(ConfigText.tables(machine, &1) != [])) do
-      [] ->
-        %{config: nil, machine: nil, moved: []}
+    tables = Enum.filter(@homeward, &(ConfigText.tables(machine, &1) != []))
 
-      moved ->
-        %{
-          config: home_with(config, machine, moved),
-          machine: without(machine, moved),
-          moved: moved
+    start =
+      if tables == [],
+        do: %{config: config, machine: machine, out: [], copied: []},
+        else: %{
+          config: home_with(config, machine, tables),
+          machine: without(machine, tables),
+          out: tables,
+          copied: []
         }
-    end
+
+    done = Enum.reduce(@homeward_keys, start, &homeward_key/2)
+
+    %{
+      config: if(done.out == [] and done.copied == [], do: nil, else: done.config),
+      machine: if(done.out == [], do: nil, else: done.machine),
+      moved: done.out ++ done.copied
+    }
   end
 
   def homeward(config, :absent) when is_binary(config),
     do: %{config: nil, machine: nil, moved: []}
+
+  defp homeward_key({table, key}, acc) do
+    case ConfigText.value(acc.machine, table, key) do
+      {:ok, raw} -> homeward_value({table, key, raw}, acc)
+      :absent -> acc
+    end
+  end
+
+  # A home key goes to config.toml, replacing its copy there, and leaves the
+  # machine file; a local summarizer is this machine's too, so it stays, and
+  # config.toml takes it only where it names no route of its own.
+  defp homeward_value({table, key, raw}, acc) do
+    name = "#{table}.#{key}"
+
+    cond do
+      not local?({table, key, raw}) ->
+        {machine, true} = ConfigText.drop(acc.machine, table, key)
+        config = ConfigText.put(acc.config, table, key, raw)
+        %{acc | config: config, machine: machine, out: acc.out ++ [name]}
+
+      ConfigText.value(acc.config, table, key) == :absent ->
+        %{acc | config: ConfigText.put(acc.config, table, key, raw), copied: acc.copied ++ [name]}
+
+      true ->
+        acc
+    end
+  end
 
   # The machine file's copy of each table replaces any in config.toml.
   defp home_with(config, machine, tables) do
@@ -300,8 +420,10 @@ defmodule FermixCore.Setup.MachineFile do
        "inherited from the computer its home came from were left out: #{Enum.join(removed, ", ")}."}
   end
 
-  def notice(%{machine: machine, removed: removed}) when is_binary(machine),
-    do: {:info, "This computer's own settings moved to #{@name}: #{Enum.join(removed, ", ")}."}
+  def notice(%{machine: machine, removed: removed, copied: copied}) when is_binary(machine),
+    do:
+      {:info,
+       "This computer's own settings moved to #{@name}: #{Enum.join(removed ++ copied, ", ")}."}
 
   # A boot stopped between the two writes, or a section written into
   # config.toml by hand since: either way the machine file is what is read.

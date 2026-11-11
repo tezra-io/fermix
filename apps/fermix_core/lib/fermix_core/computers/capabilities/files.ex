@@ -35,6 +35,7 @@ defmodule FermixCore.Computers.Capabilities.Files do
 
   alias FermixCore.Capabilities.Builtin.Tool
   alias FermixCore.Computers.Capabilities.Local
+  alias FermixCore.Computers.Offers.Files, as: FilesOffer
   alias FermixCore.Tools.ContentSearch
   alias FermixCore.Tools.FileEdit
   alias FermixCore.Tools.FileRead
@@ -53,6 +54,16 @@ defmodule FermixCore.Computers.Capabilities.Files do
     "file.send" => SendAttachment
   }
   @effects ["file.write", "file.edit"]
+  # Each op in the owner's words (`op_label/1`).
+  @op_labels %{
+    "file.read" => "read a file",
+    "file.write" => "write a file",
+    "file.edit" => "edit a file",
+    "file.glob" => "find files by name",
+    "file.search" => "search inside files",
+    "image.view" => "look at an image",
+    "file.send" => "send a file to the chat"
+  }
   @max_part_bytes 20 * 1_024 * 1_024
   @result_bytes 256 * 1_024 + 16 * 1_024
   # A read is 100 KB at most and its marker; a write's or an edit's answer is
@@ -77,6 +88,12 @@ defmodule FermixCore.Computers.Capabilities.Files do
 
   @impl true
   def ops, do: @ops |> Map.keys() |> Enum.sort()
+
+  @impl true
+  def label, do: FilesOffer.label()
+
+  @impl true
+  def op_label(op) when is_map_key(@ops, op), do: Map.fetch!(@op_labels, op)
 
   @impl true
   def effect?(op) when is_map_key(@ops, op), do: op in @effects

@@ -89,11 +89,14 @@ defmodule FermixCore.Management.Placement do
   @composed_deadline_ms 5_000
 
   # The settings sections that configure only this machine: the sandbox its
-  # commands run in, computer use of this screen, this screen's history, the
-  # accessory link to this Mac's USB ports, and what Fermix on its server may
-  # use on it (M97 §7.2), which the server can never write. iMessage's owner
-  # and guests are the home's (M97 §4); who Fermix may write to is confirmed
-  # on the Mac that carries Messages (`imessage.policy.confirm`).
+  # commands run in, computer use of this screen, this machine's part of its
+  # screen history (whether it records, which apps, whether it makes its own
+  # notes; the home's summarizer route and grants stay in the home's
+  # config.toml with no row, M97 §4), the accessory link to this Mac's USB
+  # ports, and what Fermix on its server may use on it (M97 §7.2), which the
+  # server can never write. iMessage's owner and guests are the home's (M97
+  # §4); who Fermix may write to is confirmed on the Mac that carries Messages
+  # (`imessage.policy.confirm`).
   @device_sections ~w(sandbox computer_use computer_history accessories computer)
   @section_methods ~w(settings.get settings.apply)
 

@@ -13,6 +13,7 @@ defmodule FermixChannels.Desktop.TwoEnginesInvokeTest do
   alias FermixCore.Computers.Capabilities.System, as: SystemCapability
   alias FermixCore.Computers.Journal
   alias FermixCore.Computers.Outcome
+  alias FermixTestSupport.TelemetryCapture
 
   setup do
     %{engines: TwoEngines.start!()}
@@ -118,6 +119,34 @@ defmodule FermixChannels.Desktop.TwoEnginesInvokeTest do
 
     assert {:error, %Outcome{status: :unknown}} = Task.await(task, 15_000)
     refute_received {:running, "notes.txt", _pid, _part}
+  end
+
+  # A watch that waited behind eight runs never started, so the computer's
+  # journal holds nothing of it: the restart still answers it, as never run,
+  # and the server's caller hears that at once, with no deadline of its own.
+  test "a restart under a live session answers a watch that only waited, as never run",
+       %{engines: e} do
+    TelemetryCapture.attach([[:fermix, :computer_invocation, :start]],
+      capability: "hold",
+      op: "hold"
+    )
+
+    _reads = for n <- 1..8, do: TwoEngines.call(e, Wait, "wait", %{"name" => "busy #{n}"})
+    for n <- 1..8, do: TwoEngines.running("busy #{n}")
+    watch = TwoEngines.call(e, Hold, "hold", %{"name" => "watch"}, deadline_ms: 0)
+    # The computer has taken the watch, and it waits for a slot.
+    assert_receive {:telemetry, [:fermix, :computer_invocation, :start], _m, _meta}, 10_000
+    _state = :sys.get_state(e.admission)
+
+    ExUnit.CaptureLog.capture_log(fn -> crash_admission!(e) end)
+
+    assert {:error, %Outcome{status: :refused, refusal: :unavailable} = outcome} =
+             Task.await(watch, 15_000)
+
+    assert Outcome.sentence(outcome, "studio Mac") ==
+             "Fermix on this computer restarted before it ran this, so it did not run."
+
+    refute_received {:running, "watch", _pid, _part}
   end
 
   # A caller that ends is the server's one way to stop what it asked: its

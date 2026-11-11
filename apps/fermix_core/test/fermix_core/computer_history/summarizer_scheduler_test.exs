@@ -9,6 +9,7 @@ defmodule FermixCore.ComputerHistory.Summarizer.SchedulerTest do
 
   import ExUnit.CaptureLog
 
+  alias FermixCore.ComputerHistory.Report
   alias FermixCore.ComputerHistory.Spool
   alias FermixCore.ComputerHistory.Summarizer.Scheduler
 
@@ -33,7 +34,8 @@ defmodule FermixCore.ComputerHistory.Summarizer.SchedulerTest do
       timer_enabled: false,
       run_sittings_fun: fn _opts -> {:ok, %{sittings: 0, sent: 0, notes: 0, events: 0}} end,
       run_rollup_fun: fn _opts -> :skipped end,
-      deliver_fun: fn _opts -> %{applied: [], away: [], failed: []} end
+      deliver_fun: fn _opts -> %{applied: [], away: [], failed: []} end,
+      apply_here_fun: fn _opts -> {:ok, 0} end
     ]
 
     start_supervised!({Scheduler, Keyword.merge(defaults, opts)})
@@ -176,6 +178,63 @@ defmodule FermixCore.ComputerHistory.Summarizer.SchedulerTest do
     tick(computer)
     refute_received {:delivered, _repo}
   end
+
+  # M97 §8.5, history_submit HS-2: a purge or pause from chat this machine has
+  # not applied (its own apply failed) is applied on the home's next tick,
+  # whether or not history records here now: a store that holds raw events from
+  # before an off still owes the purge its delete.
+  test "the home's tick applies this machine's own pending intervals, recording or not", ctx do
+    test_pid = self()
+    apply_here = fn opts -> send(test_pid, {:applied_here, opts}) && {:ok, 0} end
+
+    pid =
+      start_scheduler(ctx,
+        repo: :a_home_repo,
+        recording_fun: fn -> false end,
+        apply_here_fun: apply_here
+      )
+
+    tick(pid)
+    spool = ctx.spool
+    assert_receive {:applied_here, [repo: :a_home_repo, spool: ^spool]}
+  end
+
+  test "a home that keeps no store applies nothing here and sends nothing", ctx do
+    test_pid = self()
+
+    pid =
+      start_scheduler(ctx,
+        repo: :a_home_repo,
+        spool: nil,
+        run_sittings_fun: fn _opts -> send(test_pid, :sent) end,
+        apply_here_fun: fn _opts -> send(test_pid, :applied_here) && {:ok, 0} end
+      )
+
+    tick(pid)
+    refute_received :sent
+    refute_received :applied_here
+  end
+
+  # M97 §8.5: the home holds no raw record of a computer, so a computer reports
+  # its recorder (a state word and counts) from its sending cycle.
+  test "a computer reports its recorder after its sittings, from the same cycle", ctx do
+    test_pid = self()
+
+    pid =
+      start_scheduler(ctx,
+        report: fn report -> send(test_pid, {:report, self(), report}) && :ok end,
+        run_sittings_fun: fn _opts -> send(test_pid, {:sittings, self()}) && {:ok, empty()} end,
+        status_fun: fn -> %{mode: :capturing, reason: nil, lock_holder: nil} end
+      )
+
+    tick(pid)
+    assert_receive {:sittings, cycle}
+    assert_receive {:report, ^cycle, report}
+    assert %{"recorder" => "running", "events" => 0, "unsent" => 0} = report
+    assert Report.validate(report) == :ok
+  end
+
+  defp empty, do: %{sittings: 0, sent: 0, notes: 0, events: 0}
 
   test "a computer, with no home store, never rolls up", ctx do
     test_pid = self()

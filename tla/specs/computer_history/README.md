@@ -97,11 +97,11 @@ everything else left out.
   before its best-effort flush (`capturer.ex:603-605`), the C1 fix. Off, it is
   the code before the fix: the flush first, then the stop.
 - `PauseFences`: `/history pause` applies its window `[now, until]` to this
-  machine's store before it stores the horizon (`history.ex:495`, `:509-515`
-  → `Spool.apply_intervals/3`, `spool.ex:168-209`): one `fence_window`
+  machine's store before it stores the horizon (`history.ex` `apply_here/2`
+  → `Delivery.apply_here/1` → `Spool.apply_intervals/3`): one `fence_window`
   transaction deletes the rows stamped inside it and records it in the fence,
-  then `pause_from`/`later_pause` store the horizon. Off, the pause is the
-  horizon alone, the code before 826ba83a.
+  then `pause_from` stores the horizon (`raise_pause_until/2`). Off, the pause
+  is the horizon alone, the code before 826ba83a.
 
 ## What holds
 
@@ -627,17 +627,18 @@ the fixed code.
   insert sees the interval) holds as it did when the purge was one
   transaction. The window is fixed when the command starts, so an event
   captured between the two transactions is stamped after a purge's window.
-  Where the second fails after the first, the reply says the command failed,
-  and the rule is not claimed (see `history_submit`'s README). On a computer,
+  Where the second fails after the first, the first stands (the home takes
+  nothing from the window), the reply says this machine has not applied it
+  yet, and the home scheduler's tick applies it (see `history_submit`'s
+  README). On a computer,
   a purge or pause delivered by its home reaches this store through a
   connection of its own (`Spool.apply_at/3`), whose transactions SQLite
   serializes with the `Spool` process's, so the same holds there.
-- The pause's horizon is written by `later_pause/2` as a read and a write
-  (`Spool.state`, then `Spool.set_pause_until`), folded into one step: in the
-  model nothing else writes the horizon. In the code a pause the home names in
-  a refusal or a delivery can write it beside a pause from chat; the later
-  write may lower the horizon, but each pause's fence still covers its own
-  window.
+- The pause's horizon is written in one statement that only ever raises it
+  (`ComputerHistorySql.raise_pause_until/2`, from `Spool.pause_from/4`), so a
+  pause the home names in a refusal or a delivery, written beside a pause from
+  chat, can no longer lower it (it was a read and a write until the change
+  after 826ba83a).
 - `/history off`'s env flip is a `get_env` and a `put_env`
   (`history.ex:621-622`), folded into one step: no other writer of that key
   is in scope.
@@ -705,7 +706,8 @@ Computer history from every computer (M97 §8.1, §8.5) staled every pin:
   `pause_from`, `later_pause`, `mark_applied`). The Capturer's text changed
   only from Repo to store calls. No modelled step changed.
 - **The purge** deletes the home's notes and records the home's interval
-  first, then fences this machine's store (`Purge.fence_here/4`). The second
+  first, then fences this machine's store (`Delivery.apply_here/1`, which
+  applies every interval this machine owes, this one included). The second
   is the spec's `PurgeCommit`, still one transaction; see Assumptions for why
   the atomicity the fence rests on still holds. The text and citations
   changed; the step did not.

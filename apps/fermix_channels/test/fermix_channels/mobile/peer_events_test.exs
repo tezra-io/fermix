@@ -162,6 +162,13 @@ defmodule FermixChannels.Mobile.PeerEventsTest do
       assert {:error, {:invalid_field, "recovery_recipient"}} =
                decode("move_offer", Map.put(offer, "recovery_recipient", "passphrase"))
 
+      # M97 §8.4: a source kept as a linked computer names its own row.
+      device = "6f1e2d3c-4b5a-4968-8778-695a4b3c2d1e"
+      assert {:ok, _event} = decode("move_offer", Map.put(offer, "device_id", device))
+
+      assert {:error, {:invalid_field, "device_id"}} =
+               decode("move_offer", Map.put(offer, "device_id", ""))
+
       assert {:ok, _event} =
                decode("move_chunk", %{"move_id" => "mv-1", "index" => 0}, "ciphertext")
 

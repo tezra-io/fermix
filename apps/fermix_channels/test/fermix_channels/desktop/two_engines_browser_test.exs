@@ -419,6 +419,11 @@ defmodule FermixChannels.Desktop.TwoEnginesBrowserTest do
     metadata
   end
 
+  # The computer's switches changed: one of the two told hears it first, as
+  # `Computers.Switches.notify/0` tells both on a running engine.
+  defp hear_switches(:admission, ctx), do: Admission.switches_changed(ctx.e.admission)
+  defp hear_switches(:listener, ctx), do: HeldTurnListener.changed(ctx.listener)
+
   # The computer's journal, newest first, without the turns' ends
   # (`browser.end`), which the tests that need them read on their own.
   defp journal(e), do: Enum.reject(whole_journal(e), &(&1.op == "browser.end"))
@@ -897,6 +902,37 @@ defmodule FermixChannels.Desktop.TwoEnginesBrowserTest do
       assert error =~ "The person at studio Mac stopped it."
       assert [%{op: "browser.open", status: "refused", refusal: "stopped_here"}] = journal(ctx.e)
       assert held_turns(ctx) == []
+    end
+
+    # The browser's own switch, the master on: the request at work there is
+    # refused off, in the words a request that arrives while it is off gets,
+    # whether Admission hears first or the held turns' listener ends it first.
+    for first <- [:admission, :listener] do
+      test "the browser switch off refuses the request at work there as off (#{first} first)",
+           ctx do
+        turn =
+          Task.async(fn ->
+            call(
+              ctx,
+              on_mac(%{"action" => "open", "url" => "https://slow.allotment.example.com"})
+            )
+          end)
+
+        assert_receive {:chrome_holding, chrome}, 10_000
+        [held] = held_turns(ctx)
+        ref = Process.monitor(held)
+
+        Agent.update(ctx.e.switch_agent, &Keyword.put(&1, :browser, false))
+        :ok = hear_switches(unquote(first), ctx)
+
+        assert_receive {:DOWN, ^ref, :process, ^held, _ended_with_its_run}, 10_000
+        send(chrome, :answer)
+
+        assert {:ok, %{success: false, error: error}} = Task.await(turn, 30_000)
+        assert error =~ "studio Mac has the browser switched off"
+        assert [%{op: "browser.open", status: "refused", refusal: "off"}] = journal(ctx.e)
+        assert exec_event().refusal == :off
+      end
     end
 
     @tag :pane

@@ -38,11 +38,19 @@ defmodule FermixCore.Browser.HeldTurn do
       for a server that never says so (its link dropped).
 
   Requests run one at a time, in order, which is how a turn makes them.
+
+  At its start it tells the listener its seams name (`Browser.HeldTurnListener`),
+  which watches it and records the stretch the server's turns use this
+  browser for the computer-history recorder (M97 §8.7); seams that name no
+  listener record nothing.
   """
 
   use GenServer, restart: :temporary
 
   require Logger
+
+  alias FermixCore.Browser.HeldTurnListener
+  alias FermixCore.Computers.Switches
 
   @idle_ms 10 * 60_000
   @max_attempts 3
@@ -51,8 +59,15 @@ defmodule FermixCore.Browser.HeldTurn do
   @supersede_ms 30_000
   @session ~r/\A[A-Za-z0-9._:-]{1,128}\z/
 
-  @typedoc "Where the held turns live: their registry and their supervisor."
-  @type seams :: %{registry: atom(), supervisor: atom()}
+  @typedoc """
+  Where the held turns live: their registry and their supervisor, and the
+  listener each tells at its start.
+  """
+  @type seams :: %{
+          required(:registry) => atom(),
+          required(:supervisor) => atom(),
+          optional(:listener) => GenServer.server()
+        }
 
   @typedoc """
   The server's turn a request comes from: its session id, the conversation
@@ -63,10 +78,14 @@ defmodule FermixCore.Browser.HeldTurn do
   @typedoc "How the server's turn ended: `ended` normally, `stopped` otherwise."
   @type ending :: String.t()
 
-  @doc "The production registry and supervisor (`Browser.Supervisor`)."
+  @doc "The production registry, supervisor and listener (`Browser.Supervisor`)."
   @spec seams() :: seams()
   def seams,
-    do: %{registry: FermixCore.Browser.Turns, supervisor: FermixCore.Browser.TurnSupervisor}
+    do: %{
+      registry: FermixCore.Browser.Turns,
+      supervisor: FermixCore.Browser.TurnSupervisor,
+      listener: Switches.browser_listener()
+    }
 
   @doc "Whether `session_id` is a turn's session id as the wire carries it."
   @spec session?(term()) :: boolean()
@@ -121,11 +140,14 @@ defmodule FermixCore.Browser.HeldTurn do
   def start_link(opts) when is_list(opts) do
     turn = Keyword.fetch!(opts, :turn)
     name = {:via, Registry, {Keyword.fetch!(opts, :registry), key(turn), turn.worker?}}
-    GenServer.start_link(__MODULE__, turn.session, name: name)
+    GenServer.start_link(__MODULE__, {turn.session, Keyword.get(opts, :listener)}, name: name)
   end
 
   @impl true
-  def init(session_id), do: {:ok, arm(%{session: session_id, idle: nil})}
+  def init({session_id, listener}) do
+    if listener, do: :ok = HeldTurnListener.held(listener, self())
+    {:ok, arm(%{session: session_id, idle: nil})}
+  end
 
   # The request runs linked to its caller, the invocation's run, so the run's
   # end is the request's; a caller already gone is answered by nothing and
@@ -184,7 +206,7 @@ defmodule FermixCore.Browser.HeldTurn do
   end
 
   defp start(seams, turn) do
-    spec = {__MODULE__, registry: seams.registry, turn: turn}
+    spec = {__MODULE__, registry: seams.registry, turn: turn, listener: seams[:listener]}
 
     case DynamicSupervisor.start_child(seams.supervisor, spec) do
       {:ok, pid} -> pid

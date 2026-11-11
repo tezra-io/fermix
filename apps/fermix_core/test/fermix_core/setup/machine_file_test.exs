@@ -39,8 +39,9 @@ defmodule FermixCore.Setup.MachineFileTest do
   enabled = true
   """
 
-  @removed ~w(sandbox fermix_core.computer_use fermix_core.computer_history
-              fermix_channels.accessories fermix_core.plugins.dev_local)
+  @removed ~w(sandbox fermix_core.computer_use fermix_channels.accessories
+              fermix_core.plugins.dev_local fermix_core.computer_history.enabled
+              fermix_core.computer_history.apps)
 
   test "the machine sections are exactly the ones only this machine configures" do
     assert Enum.sort(Map.keys(MachineFile.sections())) == Enum.sort(Placement.device_sections())
@@ -61,7 +62,7 @@ defmodule FermixCore.Setup.MachineFileTest do
       assert ConfigText.value(home, "fermix_channels.imessage", "enabled") == {:ok, "true"}
       refute home =~ "sandbox"
       refute home =~ "computer_use"
-      refute home =~ "computer_history"
+      refute home =~ "apps = "
       refute home =~ "accessories"
       refute home =~ "dev_local"
 
@@ -90,6 +91,61 @@ defmodule FermixCore.Setup.MachineFileTest do
       text = ~s([fermix_core.agent]\nname = "Orchard"\n)
       assert MachineFile.strip(text) == {text, []}
       assert MachineFile.extract(text) == ""
+    end
+
+    # M97 §4: computer history splits by key. The home's route and grants stay
+    # in config.toml; a summarizer that says "local" is this machine's too, so
+    # it is copied and never removed.
+    test "computer history splits by key, a local summarizer copied to both" do
+      text = """
+      [fermix_core.computer_history]
+      enabled = true
+      apps = ["com.example.Notes"]
+      summarizer = "local"
+      remote_summaries = ["anthropic"]
+      """
+
+      {home, removed} = MachineFile.strip(text)
+
+      assert removed ==
+               ~w(fermix_core.computer_history.enabled fermix_core.computer_history.apps)
+
+      assert ConfigText.value(home, "fermix_core.computer_history", "summarizer") ==
+               {:ok, ~s("local")}
+
+      assert ConfigText.value(home, "fermix_core.computer_history", "remote_summaries") ==
+               {:ok, ~s(["anthropic"])}
+
+      refute home =~ "enabled"
+
+      machine = MachineFile.extract(text)
+
+      # One table, never a header per key.
+      assert length(String.split(machine, "[fermix_core.computer_history]")) == 2
+      assert ConfigText.value(machine, "fermix_core.computer_history", "enabled") == {:ok, "true"}
+
+      assert ConfigText.value(machine, "fermix_core.computer_history", "summarizer") ==
+               {:ok, ~s("local")}
+
+      refute machine =~ "remote_summaries"
+      assert MachineFile.copied(text) == ["fermix_core.computer_history.summarizer"]
+    end
+
+    test "a summarizer that is not local is the home's alone" do
+      text = ~s([fermix_core.computer_history]\nenabled = true\nsummarizer = "anthropic"\n)
+
+      assert ConfigText.value(
+               MachineFile.extract(text),
+               "fermix_core.computer_history",
+               "summarizer"
+             ) ==
+               :absent
+
+      assert MachineFile.copied(text) == []
+      {home, _removed} = MachineFile.strip(text)
+
+      assert ConfigText.value(home, "fermix_core.computer_history", "summarizer") ==
+               {:ok, ~s("anthropic")}
     end
   end
 
@@ -198,6 +254,72 @@ defmodule FermixCore.Setup.MachineFileTest do
       assert MachineFile.homeward("", ~s([sandbox]\nmode = "open"\n)) ==
                %{config: nil, machine: nil, moved: []}
     end
+
+    # Stage 0 kept the whole [fermix_core.computer_history] table here. The
+    # home's route and grants go back to config.toml; whether this machine
+    # records, which apps, and a local summarizer stay.
+    @stage0_history """
+    [fermix_core.computer_history]
+    enabled = true
+    apps = ["com.example.Notes"]
+    summarizer = "anthropic"
+    remote_summaries = ["anthropic"]
+    """
+
+    test "the home's history keys go back to config.toml, this machine's stay" do
+      plan = MachineFile.homeward(~s([fermix_core.agent]\nname = "Orchard"\n), @stage0_history)
+
+      assert plan.moved ==
+               ~w(fermix_core.computer_history.remote_summaries fermix_core.computer_history.summarizer)
+
+      assert ConfigText.value(plan.config, "fermix_core.computer_history", "summarizer") ==
+               {:ok, ~s("anthropic")}
+
+      assert ConfigText.value(plan.config, "fermix_core.computer_history", "remote_summaries") ==
+               {:ok, ~s(["anthropic"])}
+
+      refute plan.config =~ "com.example.Notes"
+
+      assert ConfigText.value(plan.machine, "fermix_core.computer_history", "enabled") ==
+               {:ok, "true"}
+
+      refute plan.machine =~ "summarizer"
+      refute plan.machine =~ "remote_summaries"
+    end
+
+    # A Mac that is its own home and chose local: the machine keeps its choice,
+    # and config.toml takes it as the home's route where it names none, so the
+    # roll-up stays on the Mac and a later move carries the choice.
+    test "a local summarizer stays here, and config.toml takes it only where it names none" do
+      machine = String.replace(@stage0_history, ~s("anthropic"\n), ~s("local"\n), global: false)
+      plan = MachineFile.homeward("", machine)
+
+      assert ConfigText.value(plan.config, "fermix_core.computer_history", "summarizer") ==
+               {:ok, ~s("local")}
+
+      assert ConfigText.value(plan.machine, "fermix_core.computer_history", "summarizer") ==
+               {:ok, ~s("local")}
+
+      # The owner's own route in config.toml is never overwritten from here.
+      owned = ~s([fermix_core.computer_history]\nsummarizer = "default"\n)
+      again = MachineFile.homeward(owned, plan.machine)
+      assert again == %{config: nil, machine: nil, moved: []}
+    end
+
+    test "a boot stopped between the writes finishes and changes nothing more" do
+      first = MachineFile.homeward("", @stage0_history)
+      # Stopped after config.toml was written: the machine file is as it was.
+      again = MachineFile.homeward(first.config, @stage0_history)
+
+      assert again.config == first.config
+      assert again.machine == first.machine
+
+      assert MachineFile.homeward(again.config, again.machine) == %{
+               config: nil,
+               machine: nil,
+               moved: []
+             }
+    end
   end
 
   # A machine setting written into config.toml by hand after the boot moved
@@ -218,7 +340,7 @@ defmodule FermixCore.Setup.MachineFileTest do
   describe "migration/3" do
     test "a home with neither file is left as it is" do
       assert MachineFile.migration("", :absent, false) ==
-               %{machine: nil, config: nil, removed: [], server_default?: false}
+               %{machine: nil, config: nil, removed: [], copied: [], server_default?: false}
 
       assert MachineFile.notice(MachineFile.migration("", :absent, false)) == nil
     end
@@ -253,7 +375,7 @@ defmodule FermixCore.Setup.MachineFileTest do
       {home, _removed} = MachineFile.strip(@old_config)
       plan = MachineFile.migration(home, MachineFile.extract(@old_config), false)
 
-      assert plan == %{machine: nil, config: nil, removed: [], server_default?: false}
+      assert plan == %{machine: nil, config: nil, removed: [], copied: [], server_default?: false}
       assert MachineFile.notice(plan) == nil
     end
 
@@ -285,7 +407,81 @@ defmodule FermixCore.Setup.MachineFileTest do
 
     test "a server whose machine file exists keeps it" do
       plan = MachineFile.migration("", ~s([sandbox]\nmode = "strict"\n), true)
-      assert plan == %{machine: nil, config: nil, removed: [], server_default?: false}
+
+      assert plan == %{
+               machine: nil,
+               config: nil,
+               removed: [],
+               copied: [],
+               server_default?: false
+             }
+    end
+
+    # A home a released engine wrote, whose owner chose local: the Mac keeps
+    # its choice in machine.toml, and the home's route stays local.
+    @released_history """
+    [fermix_core.agent]
+    name = "Orchard"
+
+    [fermix_core.computer_history]
+    enabled = true
+    apps = ["com.example.Notes"]
+    summarizer = "local"
+    remote_summaries = ["anthropic"]
+    """
+
+    test "a Mac's history: its keys move, a local summarizer is copied, the home's stay" do
+      plan = MachineFile.migration(@released_history, :absent, false)
+
+      assert ConfigText.value(plan.machine, "fermix_core.computer_history", "summarizer") ==
+               {:ok, ~s("local")}
+
+      assert ConfigText.value(plan.machine, "fermix_core.computer_history", "apps") ==
+               {:ok, ~s(["com.example.Notes"])}
+
+      assert ConfigText.value(plan.config, "fermix_core.computer_history", "summarizer") ==
+               {:ok, ~s("local")}
+
+      assert ConfigText.value(plan.config, "fermix_core.computer_history", "remote_summaries") ==
+               {:ok, ~s(["anthropic"])}
+
+      refute plan.config =~ "com.example.Notes"
+      assert plan.copied == ["fermix_core.computer_history.summarizer"]
+      assert {:info, sentence} = MachineFile.notice(plan)
+
+      assert sentence =~
+               "fermix_core.computer_history.apps, fermix_core.computer_history.summarizer."
+    end
+
+    # A server never takes a computer's machine keys, and keeps the home's.
+    test "a server leaves out the history keys of the computer, and keeps the home's" do
+      plan = MachineFile.migration(@released_history, :absent, true)
+
+      assert plan.machine == MachineFile.server_default()
+      assert plan.copied == []
+
+      assert plan.removed ==
+               ~w(fermix_core.computer_history.enabled fermix_core.computer_history.apps)
+
+      assert ConfigText.value(plan.config, "fermix_core.computer_history", "summarizer") ==
+               {:ok, ~s("local")}
+
+      assert ConfigText.value(plan.config, "fermix_core.computer_history", "remote_summaries") ==
+               {:ok, ~s(["anthropic"])}
+
+      refute plan.config =~ "com.example.Notes"
+    end
+
+    # Stopped after the machine file was written: config.toml still holds the
+    # Mac's keys, and the machine file wins.
+    test "a boot stopped between the two writes finishes, losing nothing" do
+      first = MachineFile.migration(@released_history, :absent, false)
+      again = MachineFile.migration(@released_history, first.machine, false)
+
+      assert again.machine == nil
+      assert again.config == first.config
+      assert again.copied == []
+      assert MachineFile.migration(again.config, first.machine, false).config == nil
     end
   end
 end

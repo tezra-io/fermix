@@ -592,9 +592,10 @@ defmodule FermixCore.Management.Settings do
   defp family_sections(module, _opts), do: module.sections()
 
   # The search section offers place search's backends as this build can run
-  # them, so Tools is also handed the build's host value when a caller names it.
+  # them, so Tools is also handed the build's host value when a caller names it,
+  # and the history promise's facts (`ComputerHistory.Promise.facts/2`) a test names.
   defp family_rows(Tools, section, snapshot, opts),
-    do: Tools.rows(section, snapshot, Keyword.take(opts, [:host]))
+    do: Tools.rows(section, snapshot, Keyword.take(opts, [:host, :promise]))
 
   defp family_rows(module, section, snapshot, _opts), do: module.rows(section, snapshot)
 end

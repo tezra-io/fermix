@@ -166,7 +166,8 @@ defmodule FermixChannels.Mobile.PeerEvents do
          {"sha256", :sha256},
          {"source_epoch", :positive},
          {"recovery_recipient", {:optional, :recipient}},
-         {"attempt", :positive}
+         {"attempt", :positive},
+         {"device_id", {:optional, :id}}
        ], :none},
     "move_chunk" => {[{"move_id", :id}, {"index", :count}], :required},
     "move_end" => {[{"move_id", :id}], :none},

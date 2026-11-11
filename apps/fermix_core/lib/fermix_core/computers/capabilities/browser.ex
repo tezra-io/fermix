@@ -50,6 +50,7 @@ defmodule FermixCore.Computers.Capabilities.Browser do
   alias FermixCore.Browser.HeldTurn
   alias FermixCore.Browser.Scope
   alias FermixCore.Browser.TurnMarker
+  alias FermixCore.Computers.Offers.Browser, as: BrowserOffer
   alias FermixCore.Computers.Origin
   alias FermixCore.Sandbox.PathPolicy
   alias FermixCore.Setup.ConfigStore
@@ -92,6 +93,37 @@ defmodule FermixCore.Computers.Capabilities.Browser do
     "storage" => {"browser.storage", "browser.storage.write"},
     "webmcp" => {"browser.webmcp", "browser.webmcp.call"}
   }
+  # Each op in the owner's words (`op_label/1`).
+  @op_labels %{
+    "browser.doctor" => "check the browser",
+    "browser.status" => "read the browser's state",
+    "browser.start" => "start the browser",
+    "browser.stop" => "stop the browser",
+    "browser.open" => "open a page",
+    "browser.navigate" => "go to a page",
+    "browser.snapshot" => "read a page",
+    "browser.tabs" => "list the tabs",
+    "browser.focus" => "switch to a tab",
+    "browser.close" => "close a tab",
+    "browser.screenshot" => "take a screenshot",
+    "browser.pdf" => "save a page as a PDF",
+    "browser.console" => "read a page's console",
+    "browser.dialog" => "answer a page's dialog",
+    "browser.cookies" => "read cookies",
+    "browser.cookies.clear" => "clear cookies",
+    "browser.storage" => "read a site's stored data",
+    "browser.storage.write" => "change a site's stored data",
+    "browser.upload" => "upload a file",
+    "browser.download" => "download a file",
+    "browser.act" => "click or type on a page",
+    "browser.act.read" => "read part of a page",
+    "browser.webmcp" => "list a page's tools",
+    "browser.webmcp.call" => "use a page's tool",
+    "browser.handover" => "hand a page to you",
+    "browser.login_for" => "look up a saved sign-in",
+    "browser.sign_in" => "sign in to a site",
+    "browser.end" => "end a browser task"
+  }
   @artifacts %{"screenshot" => "screenshots", "pdf" => "pdf", "download" => "downloads"}
   @inline_bytes 256 * 1_024
   @result_bytes @inline_bytes + 16 * 1_024
@@ -129,6 +161,12 @@ defmodule FermixCore.Computers.Capabilities.Browser do
 
   @impl true
   def ops, do: @ops |> Map.keys() |> Enum.sort()
+
+  @impl true
+  def label, do: BrowserOffer.label()
+
+  @impl true
+  def op_label(op) when is_map_key(@ops, op), do: Map.fetch!(@op_labels, op)
 
   @impl true
   def effect?(op) when is_map_key(@ops, op), do: elem(Map.fetch!(@ops, op), 1)

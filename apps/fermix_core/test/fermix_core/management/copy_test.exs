@@ -998,6 +998,30 @@ defmodule FermixCore.Management.CopyTest do
           do: assert_owner_words(module.label(), :name, [], "offer label #{module.id()}")
     end
 
+    # This computer's record of what its server did here (M97 §6.3) names
+    # each entry's capability and op in the owner's words, from the
+    # capability's own module: every capability a computer can be asked has
+    # them, for every op, and each obeys the rules (`Management.Computer`).
+    test "every capability and op a computer journals has the owner's words" do
+      capabilities = Application.fetch_env!(:fermix_core, :computer_capabilities).capabilities()
+
+      assert map_size(capabilities) >= 6
+
+      for {id, module} <- capabilities do
+        Code.ensure_loaded!(module)
+        assert function_exported?(module, :label, 0), "the #{id} capability has no label"
+        assert_owner_words(module.label(), :name, [], "capability label #{id}")
+
+        for op <- module.ops() do
+          label = module.op_label(op)
+          assert is_binary(label) and byte_size(label) in 1..64, "#{id} #{op}"
+          # Lower case, as an offer's label: a client capitalises it.
+          refute label =~ ~r/\A\p{Lu}/u, "#{id} #{op}: #{label}"
+          assert_owner_words(label, :name, ["Git", "PDF", "Messages"], "op label #{id} #{op}")
+        end
+      end
+    end
+
     # A block names the offers it keeps on by their labels, for a Mac and a
     # Linux computer, in every sandbox mode, its warning included.
     test "every block of what a computer keeps on obeys the rules" do
@@ -1007,6 +1031,16 @@ defmodule FermixCore.Management.CopyTest do
       assert Enum.any?(sentences, &String.starts_with?(&1, "With commands on"))
 
       for text <- sentences, do: assert_owner_words(text, :prose, [], "keep block")
+    end
+
+    # M97 §8.2: what switching history on agrees to, with and without a
+    # server, from the one function every surface says it with. A provider is
+    # named by its label, which stands as data.
+    test "every sentence of the history promise obeys the rules" do
+      alias FermixCore.ComputerHistory.Promise
+
+      for text <- Promise.sentences(),
+          do: assert_owner_words(String.trim(text), :prose, ["Anthropic"], "history promise")
     end
 
     # A rename refusal names the computer or the server as the owner typed it.

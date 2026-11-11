@@ -57,6 +57,20 @@ defmodule FermixCore.ComputerHistory.PurgeTest do
     )
   end
 
+  # A machine store that answers every request with an error.
+  defmodule FailingStore do
+    @moduledoc false
+    use GenServer
+
+    def start_link(_arg), do: GenServer.start_link(__MODULE__, nil)
+
+    @impl true
+    def init(nil), do: {:ok, nil}
+
+    @impl true
+    def handle_call(_request, _from, state), do: {:reply, {:error, :injected}, state}
+  end
+
   defp purge(window, now, ctx, opts \\ []),
     do: Purge.purge(window, [now: now, repo: ctx.repo, spool: ctx.spool] ++ opts)
 
@@ -151,10 +165,53 @@ defmodule FermixCore.ComputerHistory.PurgeTest do
     test "a home that keeps no machine store purges its notes alone", %{repo: repo} = ctx do
       {:ok, _} = Repo.computer_history_insert_memory(memory(900, 1_100), server: repo)
 
-      assert {:ok, %{events: 0, memories: 1}} =
+      assert {:ok, %{events: 0, memories: 1, here: :none}} =
                Purge.purge({:last, 2_000}, now: 2_000, repo: repo, spool: nil)
 
       assert home_intervals(ctx.db_path) == [[0, 2_000, 2_000, nil, "purge"]]
+    end
+
+    # history_submit HS-2 (check 14): an interval the home recorded that this
+    # machine never applied (a second command ran beside it, or its own apply
+    # failed after the home's transaction) is applied before the mark moves past
+    # it, so the mark never says this machine applied what it did not.
+    test "a purge here first applies every earlier interval this machine has not applied",
+         %{repo: repo, spool: spool} = ctx do
+      {:ok, 2} = Spool.insert_events([event(1, 1_000), event(2, 5_000)], server: spool)
+
+      {:ok, %{interval: earlier}} =
+        Repo.computer_history_home(:purge_notes, [900, 1_100, 3_000, :all], server: repo)
+
+      assert {:ok, %{events: 1, interval: later, here: :ok}} = purge({:last, 100}, 6_000, ctx)
+      assert later > earlier
+
+      assert {:ok, [%{ts: 5_000}]} = Spool.events_after(0, 10, server: spool)
+      assert machine_intervals(ctx.spool_path) == [[900, 1_100, 3_000], [5_900, 6_000, 6_000]]
+      assert {:ok, %{home_mark: ^later}} = Spool.link(server: spool)
+      assert {:ok, 0} = Spool.insert_events([event(3, 1_050)], server: spool)
+    end
+
+    # Two stores, no shared transaction: once the home's commits, the purge
+    # stands, and the result says this machine has not applied it yet.
+    test "a purge whose apply here fails stands on the home and says so", %{repo: repo} = ctx do
+      {:ok, _} = Repo.computer_history_insert_memory(memory(900, 1_100), server: repo)
+      failing = start_supervised!(FailingStore)
+
+      assert {:ok, %{memories: 1, events: 0, here: {:failed, :injected}}} =
+               Purge.purge({:last, 2_000}, now: 2_000, repo: repo, spool: failing)
+
+      assert home_intervals(ctx.db_path) == [[0, 2_000, 2_000, nil, "purge"]]
+      assert {:ok, 0} = Repo.computer_history_count_memories(server: repo)
+    end
+
+    test "a purge the home cannot record changes nothing", %{repo: repo, spool: spool} = ctx do
+      {:ok, 1} = Spool.insert_events([event(1, 1_000)], server: spool)
+
+      assert {:error, :invalid_window} =
+               Purge.purge({:last, -5}, now: 2_000, repo: repo, spool: spool)
+
+      assert home_intervals(ctx.db_path) == []
+      assert {:ok, 1} = Spool.count_events(server: spool)
     end
   end
 

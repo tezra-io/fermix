@@ -1433,10 +1433,13 @@ activity, and keeps the content switch.
 **A sitting sent from a computer is an invocation of a home service.** On the
 home, `history.submit` runs as `Desktop.InvokeFamily` runs any home service:
 an `inv_<id>` run with `[:fermix, :computer_invocation, :start | :complete |
-:error]` bookends (capability `history`, op `submit`), never its arguments.
+:error]` bookends (capability `history`, op `submit`), never its arguments. A
+computer's report of its recorder (`history.report`, a state word and counts)
+is the same kind of run with op `report`.
 The home telling a computer of a purge or pause from chat
 (`ComputerHistory.Delivery`) is an ordinary server invocation of
-`history.apply`, its turn named `computer_history_delivery:<unix_ms>`; that id
+`history.apply`, and of `history.off` when the owner switches that computer's
+history off from chat, its turn named `computer_history_delivery:<unix_ms>`; that id
 emits nothing on the home and rides on the computer only as its `inv_` run's
 `parent_session` correlation, so it is not a run kind and the exporter needs no
 clause for it.

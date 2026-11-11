@@ -29,10 +29,18 @@ defmodule FermixCore.Computers.Consent do
   only those: the offers whose device end comes later are switched on at
   that computer when they arrive.
 
+  Where computer history stays on, the block restates what switching it on
+  agrees to (M97 §8.2), from the one function that says it
+  (`ComputerHistory.Promise.sentence/2`), as it will hold after the move: the
+  sitting goes to the server, or, where this computer makes its own notes,
+  only the summary does.
+
   `opts`: `:snapshot` (the settings, `ConfigStore.current_snapshot/0`'s
   shape) and `:os` (`:macos` or `:linux`), so a test names the computer.
   """
 
+  alias FermixCore.ComputerHistory.Config, as: HistoryConfig
+  alias FermixCore.ComputerHistory.Promise
   alias FermixCore.Computers.Offers
   alias FermixCore.Computers.Switches
   alias FermixCore.Home.DesktopLink
@@ -72,7 +80,8 @@ defmodule FermixCore.Computers.Consent do
   The block of `keep`, the offers to stay on: its sentence names them, each
   with its words, the commands with the sandbox mode they run in. `kind:`
   `:move` (a move's review, the default) or `:review` (the review of a
-  computer that moved before M97).
+  computer that moved before M97). `history_local?:` says whether this
+  computer makes its own history notes, in place of its settings.
   """
   @spec block([Switches.offer()], keyword()) :: block()
   def block(keep, opts \\ []) when is_list(keep) and is_list(opts) do
@@ -87,7 +96,7 @@ defmodule FermixCore.Computers.Consent do
           Keyword.get(opts, :kind, :move),
           for(%{on: true} = line <- lines, do: words(line, mode)),
           machine
-        ) <> history_clause(:history in keep, machine),
+        ) <> history_clause(:history in keep, machine, opts),
       warning: warning(:shell in keep and mode == :open, machine),
       lines: lines
     }
@@ -171,8 +180,9 @@ defmodule FermixCore.Computers.Consent do
     for os <- [:macos, :linux],
         mode <- [:strict, :standard, :open],
         keep <- [decided(), [], [:files]],
-        kind <- [:move, :review] do
-      block = block(keep, os: os, sandbox_mode: mode, kind: kind)
+        kind <- [:move, :review],
+        local? <- [false, true] do
+      block = block(keep, os: os, sandbox_mode: mode, kind: kind, history_local?: local?)
       [block.sentence, block.warning | Enum.map(block.lines, & &1.label)]
     end
     |> List.flatten()
@@ -205,14 +215,25 @@ defmodule FermixCore.Computers.Consent do
         Enum.join(words, ", ") <> ". Change this here."
 
   # M97 §8.2: a sitting of history kept on now passes through the server, so
-  # the block restates what switching it on agrees to.
-  defp history_clause(false, _machine), do: ""
+  # the block restates what switching it on agrees to. After the move this
+  # computer reads only its own keys (`HistoryConfig.for_role/2`), so whether
+  # it makes its own notes is its machine file's choice, never the home's route.
+  defp history_clause(false, _machine, _opts), do: ""
 
-  defp history_clause(true, machine),
-    do:
-      " Your computer history's raw record stays on this #{machine} for 48 hours; each " <>
-        "finished sitting is sent to your Fermix server, which has its summarizer summarize it " <>
-        "and keeps the summary."
+  defp history_clause(true, machine, opts) do
+    local? = Keyword.get_lazy(opts, :history_local?, fn -> history_local?(opts) end)
+    Promise.sentence(:clause, %{server?: true, local?: local?, provider: nil, machine: machine})
+  end
+
+  defp history_local?(opts) do
+    snapshot = Keyword.get_lazy(opts, :snapshot, &ConfigStore.current_snapshot/0)
+
+    snapshot
+    |> core(:computer_history)
+    |> HistoryConfig.normalize()
+    |> HistoryConfig.for_role(:device)
+    |> HistoryConfig.summarizer() == :local
+  end
 
   defp warning(true, machine),
     do:

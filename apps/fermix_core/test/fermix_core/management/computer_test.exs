@@ -58,6 +58,47 @@ defmodule FermixCore.Management.ComputerTest do
     assert Enum.map(older, & &1["id"]) == ["inv-2", "inv-1"]
   end
 
+  # The app shows each entry in the owner's words, which the capability's own
+  # module says; the ids stay beside them. A capability or an op this engine
+  # has no words for (an older journal row) keeps its id, and its words are
+  # null.
+  test "each entry carries the owner's words for its capability and op", %{home: home} do
+    dir = Journal.dir(home)
+
+    rows = [
+      {"inv-1", "shell", "shell.run"},
+      {"inv-2", "files", "file.read"},
+      {"inv-3", "files", "file.rename"},
+      {"inv-4", "notes", "notes.add"}
+    ]
+
+    for {{id, capability, op}, n} <- Enum.with_index(rows) do
+      fields = %{
+        id: id,
+        at: DateTime.add(@at, n, :second),
+        capability: capability,
+        op: op,
+        target: "drafts",
+        origin: :chat,
+        epoch: 3,
+        turn_session: nil
+      }
+
+      :ok = Journal.append_started(dir, fields)
+    end
+
+    assert {:ok, %{"entries" => entries}} = Computer.journal_list(%{}, home: home)
+    words = Map.new(entries, &{&1["id"], {&1["capability_label"], &1["op_label"]}})
+
+    assert words["inv-1"] == {"commands", "run a command"}
+    assert words["inv-2"] == {"files", "read a file"}
+    assert words["inv-3"] == {"files", nil}
+    assert words["inv-4"] == {nil, nil}
+
+    assert %{"capability" => "notes", "op" => "notes.add"} =
+             Enum.find(entries, &(&1["id"] == "inv-4"))
+  end
+
   test "a computer that never moved has no entries", %{home: home} do
     assert Computer.journal_list(%{}, home: home) == {:ok, %{"entries" => [], "more" => false}}
   end

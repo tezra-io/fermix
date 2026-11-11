@@ -3599,6 +3599,12 @@
       "field": "params:confirmed",
       "kind": "engine_only",
       "why": "M97 §3.3: mobile.devices.revoke now removes a computer too, and takes an optional confirmed, which the one computer that keeps the only copies of the server's backups needs. The draft predates it; a request without it forgets a phone as before."
+    },
+    {
+      "method": "setup.state.get",
+      "field": "readiness.failures[].sentence",
+      "kind": "engine_only",
+      "why": "M97: a readiness failure carries the engine's own sentence where it has one (the iMessage rows, naming the Mac that carries Messages), null elsewhere. Optional and additive: an app built against the draft keeps its own words."
     }
   ]
 }

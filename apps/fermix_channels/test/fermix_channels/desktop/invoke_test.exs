@@ -92,6 +92,46 @@ defmodule FermixChannels.Desktop.InvokeTest do
     def target("touch", %{"name" => name}), do: "touch #{name}"
   end
 
+  # A long-lived read of another offer, as a Messages watch is: it runs until
+  # the test says how it ends.
+  defmodule Watch do
+    @moduledoc false
+    @behaviour FermixCore.Computers.Capability
+
+    @impl true
+    def id, do: :watch
+    @impl true
+    def offer, do: :imessage
+    @impl true
+    def ops, do: ["watch"]
+    @impl true
+    def effect?(_op), do: false
+    @impl true
+    def long_lived?(_op), do: true
+    @impl true
+    def validate("watch", %{"name" => name}) when is_binary(name), do: :ok
+    def validate("watch", _args), do: {:error, "Watch needs a name."}
+    @impl true
+    def bounds(_op), do: %{result_bytes: 1_024, part_bytes: 0}
+    @impl true
+    def admit(_op, _args, _context), do: :ok
+
+    @impl true
+    def run("watch", %{"name" => name}, nil, context) do
+      test = :persistent_term.get({Wait, context.home})
+      send(test, {:running, name, self(), nil})
+
+      receive do
+        {:finish, result} -> result
+      after
+        30_000 -> {:failed, "The test never finished it."}
+      end
+    end
+
+    @impl true
+    def target("watch", %{"name" => name}), do: "watch #{name}"
+  end
+
   setup do
     home = SafeRm.make_tmp_dir!("desktop_invoke")
     on_exit(fn -> SafeRm.rm_rf!(home) end)
@@ -113,7 +153,8 @@ defmodule FermixChannels.Desktop.InvokeTest do
       capabilities: %{
         "system" => FermixCore.Computers.Capabilities.System,
         "wait" => Wait,
-        "touch" => Touch
+        "touch" => Touch,
+        "watch" => Watch
       },
       clock: fn -> Agent.get(clock, & &1) end,
       relay: :no_relay,
@@ -439,6 +480,66 @@ defmodule FermixChannels.Desktop.InvokeTest do
     end
   end
 
+  # One rule, the one a request is admitted by: the capability's offer
+  # against this computer's switches.
+  describe "an offer's own switch off, the master on" do
+    test "refuses that capability's work that runs and waits as off, and nothing else", ctx do
+      Agent.update(ctx.switches, fn _ -> Switches.only([:files, :imessage]) end)
+      open(ctx, "inv-watch", "watch", "watch", %{"name" => "watch"}, %{"deadline_ms" => 0})
+      {watch, nil} = running("watch")
+      for n <- 1..7, do: open(ctx, "inv-#{n}", "wait", "wait", %{"name" => "f#{n}"})
+      for n <- 1..7, do: running("f#{n}")
+      open(ctx, "inv-8", "wait", "wait", %{"name" => "f8"})
+      open(ctx, "inv-later", "watch", "watch", %{"name" => "later"}, %{"deadline_ms" => 0})
+      # Admission has taken both before the switch goes off: each waits for a slot.
+      _state = :sys.get_state(ctx.admission)
+
+      Agent.update(ctx.switches, fn _ -> Switches.only([:imessage]) end)
+      :ok = Admission.switches_changed(ctx.admission)
+
+      for n <- 1..8 do
+        {event, _payload} = answer("inv-#{n}")
+        assert %{"status" => "refused", "refusal" => "off"} = event
+        assert event["message"] =~ "Switched off on this"
+        assert %{status: "refused", refusal: "off"} = journal(ctx, "inv-#{n}")
+      end
+
+      # The other offer's work goes on, and its request that waited takes a slot.
+      assert {_later, nil} = running("later")
+      refute_received {:running, "f8", _pid, _part}
+      refute_received {:sent, %{"id" => "inv-watch"}, _payload}
+      finish(watch, {:ok, %{"seen" => 1}, nil})
+      assert {%{"status" => "ok"}, ~s({"seen":1})} = answer("inv-watch")
+
+      open(ctx, "inv-after", "wait", "wait", %{"name" => "after"})
+      assert {%{"status" => "refused", "refusal" => "off"}, _p} = answer("inv-after")
+    end
+
+    # A switch's own listener (the browser's held turns, the screen's seat) can
+    # end a run before Admission hears: its answer is still the switch's.
+    test "a run that ends under its switch, off before Admission heard, is answered off", ctx do
+      open(ctx, "inv-x", "wait", "wait", %{"name" => "x"})
+      {pid, nil} = running("x")
+
+      Agent.update(ctx.switches, fn _ -> Switches.only([]) end)
+      Process.exit(pid, :kill)
+
+      {event, _payload} = answer("inv-x")
+      assert %{"status" => "refused", "refusal" => "off"} = event
+      assert event["message"] =~ "Switched off on this"
+      assert %{status: "refused", refusal: "off"} = journal(ctx, "inv-x")
+
+      Agent.update(ctx.switches, fn _ -> Switches.only([:files]) end)
+      open(ctx, "inv-y", "wait", "wait", %{"name" => "y"})
+      {other, nil} = running("y")
+
+      Agent.update(ctx.switches, fn _ -> Switches.only([:files], enabled: false) end)
+      Process.exit(other, :kill)
+
+      assert {%{"status" => "refused", "refusal" => "stopped_here"}, _p} = answer("inv-y")
+    end
+  end
+
   describe "after a lost answer" do
     test "a held answer is sent again, then the receipt alone, then unknown", ctx do
       open(ctx, "inv-h", "system", "echo", %{"text" => "kept"})
@@ -510,6 +611,52 @@ defmodule FermixChannels.Desktop.InvokeTest do
       Invoke.handle(ctx.admission, "invoke_status", %{"id" => "inv-x"}, <<>>)
       {event, ~s({"receipt_only":true})} = answer("inv-x")
       assert event == told
+    end
+
+    # What only waited never started, so the journal holds nothing of it: the
+    # restart answers it too, at once, as never run, a long-lived one and one
+    # that waited for its upload included, while what ran stays not known.
+    test "a crash while requests waited answers each, never run", ctx do
+      Agent.update(ctx.switches, fn _ -> Switches.only([:files, :imessage]) end)
+      for n <- 1..8, do: open(ctx, "inv-#{n}", "wait", "wait", %{"name" => "r#{n}"})
+      for n <- 1..8, do: running("r#{n}")
+      open(ctx, "inv-watch", "watch", "watch", %{"name" => "watch"}, %{"deadline_ms" => 0})
+      sha = :sha256 |> :crypto.hash("abc") |> Base.encode16(case: :lower)
+      part = %{"size_bytes" => 3, "sha256" => sha, "mime" => "text/plain"}
+      open(ctx, "inv-up", "wait", "wait", %{"name" => "up"}, %{"part" => part})
+      # Admission has taken both before it stops: one waits for a slot, one for its part.
+      _state = :sys.get_state(ctx.admission)
+
+      admission = Process.whereis(ctx.admission)
+      ref = Process.monitor(admission)
+
+      ExUnit.CaptureLog.capture_log(fn ->
+        Process.exit(admission, :kill)
+        assert_receive {:DOWN, ^ref, :process, ^admission, :killed}
+        await_restarted(ctx.admission, admission)
+      end)
+
+      for id <- ["inv-watch", "inv-up"] do
+        {event, "{}"} = answer(id)
+        assert %{"status" => "refused", "refusal" => "unavailable", "message" => message} = event
+
+        assert message ==
+                 "Fermix on this computer restarted before it ran this, so it did not run."
+
+        assert %{status: "refused", refusal: "unavailable", capability: _named} =
+                 journal(ctx, id)
+      end
+
+      for n <- 1..8 do
+        assert {%{"status" => "unknown"}, ~s({"receipt_only":true})} = answer("inv-#{n}")
+      end
+
+      refute_received {:running, "watch", _pid, _part}
+      frame = %{"id" => "inv-up", "size_bytes" => 3, "index" => 0, "last" => true}
+      Invoke.handle(ctx.admission, "invoke_part", frame, "abc")
+      Invoke.handle(ctx.admission, "invoke_status", %{"id" => "inv-watch"}, <<>>)
+      assert {%{"status" => "refused", "refusal" => "unavailable"}, "{}"} = answer("inv-watch")
+      refute_received {:running, "up", _pid, _part}
     end
   end
 

@@ -218,8 +218,22 @@ defmodule FermixCore.Setup.ConfigStore do
   defp loaded(:absent, :absent, _opts), do: {:ok, empty_runtime_config()}
 
   defp loaded(config, machine, opts) do
-    document = MachineFile.join(decode_document(text(config)), decode_document(text(machine)))
-    platform_checked(normalize_document(document), opts)
+    machine = decode_document(text(machine))
+    document = MachineFile.join(decode_document(text(config)), machine)
+    platform_checked(document |> normalize_document() |> with_machine_history(machine), opts)
+  end
+
+  # The machine file's own `[fermix_core.computer_history]` (M97 §4): its keys
+  # checked, and its `summarizer`, which says only "local", held beside the
+  # home's route as `machine_summarizer` (`ComputerHistoryConfig.machine_file/1`).
+  defp with_machine_history(snapshot, machine) do
+    own = ComputerHistoryConfig.machine_file(get_in(machine, ["fermix_core", "computer_history"]))
+
+    update_in(
+      snapshot,
+      [:fermix_core, :computer_history],
+      &ComputerHistoryConfig.normalize(&1 ++ own)
+    )
   end
 
   defp read_settings(file) do
@@ -633,7 +647,12 @@ defmodule FermixCore.Setup.ConfigStore do
     apply_memory_config(Keyword.get(persisted.fermix_core, :memory, []))
     apply_realtime_config(Keyword.get(persisted.fermix_core, :realtime, []))
     apply_computer_use_config(Keyword.get(persisted.fermix_core, :computer_use, []))
-    apply_computer_history_config(Keyword.get(persisted.fermix_core, :computer_history, []))
+
+    apply_computer_history_config(
+      Keyword.get(persisted.fermix_core, :computer_history, []),
+      Keyword.get(persisted.fermix_core, :engine, [])
+    )
+
     apply_transcription_config(Keyword.get(persisted.fermix_core, :transcription, []))
     apply_meetings_config(Keyword.get(persisted.fermix_core, :meetings, []))
     apply_tools_config(Keyword.get(persisted.fermix_core, :tools, []))
@@ -1014,7 +1033,7 @@ defmodule FermixCore.Setup.ConfigStore do
           snapshot
           |> Map.get(:fermix_core, [])
           |> Keyword.get(:computer_history, [])
-          |> normalize_computer_history()
+          |> normalize_computer_history(ComputerHistoryConfig.env_keys(), "the settings")
           |> ComputerHistoryConfig.to_keyword(),
         transcription:
           snapshot
@@ -1664,11 +1683,19 @@ defmodule FermixCore.Setup.ConfigStore do
   # persistable_snapshot's TOML strings (save/apply) — so the app env holds
   # exactly one shape (normalized atoms) on every path. normalize/1 is
   # idempotent over its own output by contract (config_test).
-  defp apply_computer_history_config(computer_history_config) do
+  # On a computer whose home is elsewhere (the role its `engine` section
+  # names), the home's keys are left out (M97 §4, `for_role/2`): its
+  # config.toml may still carry the route and grants from before its move,
+  # and a computer never acts on them; its next save writes them no more.
+  defp apply_computer_history_config(computer_history_config, engine_config) do
+    role = engine_config |> Role.normalize() |> Keyword.get(:role, :primary)
+
     Application.put_env(
       :fermix_core,
       :computer_history,
-      ComputerHistoryConfig.normalize(computer_history_config)
+      computer_history_config
+      |> ComputerHistoryConfig.normalize()
+      |> ComputerHistoryConfig.for_role(role)
     )
 
     :ok
@@ -1781,6 +1808,7 @@ defmodule FermixCore.Setup.ConfigStore do
     cues = Keyword.get(fermix_core, :cues, [])
     memory = Keyword.get(fermix_core, :memory, [])
     realtime = Keyword.get(fermix_core, :realtime, [])
+    computer_history = Keyword.get(fermix_core, :computer_history, [])
     transcription = Keyword.get(fermix_core, :transcription, [])
     meetings = Keyword.get(fermix_core, :meetings, [])
     tools = Keyword.get(fermix_core, :tools, [])
@@ -1831,6 +1859,11 @@ defmodule FermixCore.Setup.ConfigStore do
       render_cues(cues),
       render_section(["fermix_core", "memory"], memory),
       render_section(["fermix_core", "realtime"], realtime),
+      # The home's history keys: the route it summarizes on and its grants (M97 §4).
+      render_section(
+        ["fermix_core", "computer_history"],
+        ComputerHistoryConfig.home_keyword(computer_history)
+      ),
       render_section(["fermix_core", "transcription"], transcription),
       render_section(["fermix_core", "meetings"], meetings),
       render_section(["fermix_core", "tools", "web_search"], Keyword.get(tools, :web_search, [])),
@@ -1881,9 +1914,11 @@ defmodule FermixCore.Setup.ConfigStore do
         ["fermix_core", "computer_use"],
         Keyword.get(fermix_core, :computer_use, [])
       ),
+      # This machine's history keys: whether it records, its apps, and
+      # `summarizer = "local"` where it makes its own notes (M97 §4).
       render_section(
         ["fermix_core", "computer_history"],
-        Keyword.get(fermix_core, :computer_history, [])
+        ComputerHistoryConfig.machine_keyword(Keyword.get(fermix_core, :computer_history, []))
       ),
       render_section(
         ["fermix_core", "computer"],
@@ -2441,15 +2476,24 @@ defmodule FermixCore.Setup.ConfigStore do
   # mirroring validate_harness_section_keys!/1. The accepted set is
   # `accepted_keys/0` (live + retired), so a key this release retired keeps
   # booting an existing config.toml; normalize names it once and drops it.
-  defp normalize_computer_history(config) do
-    validate_computer_history_section_keys!(config)
+  # The joined document's table is config.toml's with this machine's `enabled`
+  # and `apps` (M97 §4), so a key it does not know is config.toml's; the
+  # machine file's own are checked apart (`with_machine_history/2`). A
+  # snapshot also holds `machine_summarizer` (`ComputerHistoryConfig.env_keys/0`).
+  defp normalize_computer_history(
+         config,
+         keys \\ ComputerHistoryConfig.accepted_keys(),
+         where \\ "config.toml"
+       ) do
+    validate_computer_history_section_keys!(config, keys, where)
     ComputerHistoryConfig.normalize(config)
   end
 
-  defp validate_computer_history_section_keys!(nil), do: :ok
+  defp validate_computer_history_section_keys!(nil, _keys, _where), do: :ok
 
-  defp validate_computer_history_section_keys!(config) when is_map(config) or is_list(config) do
-    allowed = MapSet.new(ComputerHistoryConfig.accepted_keys(), &Atom.to_string/1)
+  defp validate_computer_history_section_keys!(config, keys, where)
+       when is_map(config) or is_list(config) do
+    allowed = MapSet.new(keys, &Atom.to_string/1)
 
     unknown =
       config
@@ -2461,7 +2505,7 @@ defmodule FermixCore.Setup.ConfigStore do
       :ok
     else
       raise ArgumentError, """
-      machine.toml [fermix_core.computer_history] has unknown key(s): #{Enum.join(unknown, ", ")}.
+      #{where} [fermix_core.computer_history] has unknown key(s): #{Enum.join(unknown, ", ")}.
 
       Allowed keys: #{Enum.map_join(ComputerHistoryConfig.config_keys(), ", ", &Atom.to_string/1)}.
       Remove or fix the key(s); the daemon will not boot until this is fixed.

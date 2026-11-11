@@ -4,7 +4,9 @@ defmodule FermixChannels.Desktop.HistoryUplink do
   §6.1, §8.1): one `history.submit` invocation toward the home, its arguments
   the sitting (`FermixCore.ComputerHistory.Sittings`), sent through this
   computer's relay in the bulk lane (`Mobile.Lanes`), and its `invoke_result`
-  waited for here, in the process that sent it.
+  waited for here, in the process that sent it. Its report of its recorder
+  (`FermixCore.ComputerHistory.Report`, §8.5) goes the same way with
+  `history.report`, in the interactive lane, from the same sending cycle.
 
   - Only while the owner lets the home have this computer's history: the
     master switch and the `history` switch (`Computers.Switches`); otherwise
@@ -39,10 +41,28 @@ defmodule FermixChannels.Desktop.HistoryUplink do
   """
   @spec submit(map(), keyword()) :: {:ok, Submission.answer()} | {:error, term()}
   def submit(payload, opts \\ []) when is_map(payload) and is_list(opts) do
+    with {:ok, result} <- send_allowed("submit", payload, opts),
+         do: Submission.from_wire(result)
+  end
+
+  @doc """
+  Send `report` (`ComputerHistory.Report`) to the home and wait for it to be
+  kept: `:ok`, or why not. Under the same switches as a sitting.
+  """
+  @spec report(map(), keyword()) :: :ok | {:error, term()}
+  def report(report, opts \\ []) when is_map(report) and is_list(opts) do
+    case send_allowed("report", report, opts) do
+      {:ok, %{"kept" => true}} -> :ok
+      {:ok, other} -> {:error, {:answer, other}}
+      {:error, _reason} = error -> error
+    end
+  end
+
+  defp send_allowed(op, payload, opts) do
     switches = Keyword.get_lazy(opts, :switches, &Switches.current/0)
 
     if Switches.enabled?(switches) and Switches.on?(switches, :history),
-      do: send_registered(payload, opts),
+      do: send_registered(op, payload, opts),
       else: {:error, :switched_off}
   end
 
@@ -63,13 +83,13 @@ defmodule FermixChannels.Desktop.HistoryUplink do
     end
   end
 
-  defp send_registered(payload, opts) do
+  defp send_registered(op, payload, opts) do
     waiter = Keyword.get(opts, :waiter, @waiter)
 
     case register(waiter) do
       :ok ->
         try do
-          send_and_wait(payload, Keyword.get(opts, :relay, Relay))
+          send_and_wait(op, payload, Keyword.get(opts, :relay, Relay))
         after
           Process.unregister(waiter)
         end
@@ -87,21 +107,22 @@ defmodule FermixChannels.Desktop.HistoryUplink do
     ArgumentError -> {:error, :busy}
   end
 
-  defp send_and_wait(payload, relay) do
+  defp send_and_wait(op, payload, relay) do
     with {:ok, epoch} <- epoch(relay),
-         %{"id" => id} = open = request(epoch),
+         %{"id" => id} = open = request(epoch, op),
          :ok <- Relay.send_event(relay, open, Jason.encode!(payload)) do
-      await(id, relay)
+      await(id, op, relay)
     end
   end
 
   @doc false
-  # The `invoke_open` of one sitting under `epoch`, with an id never used
-  # before, in the wire's alphabet (letters, digits and `._:-`,
+  # The `invoke_open` of one sitting (or report, `op`) under `epoch`, with an
+  # id never used before, in the wire's alphabet (letters, digits and `._:-`,
   # `Mobile.PeerEvents`). Public so its test holds it against the codec.
-  @spec request(pos_integer()) :: map()
-  def request(epoch) when is_integer(epoch) and epoch > 0,
-    do: open("hist-" <> Base.encode16(:crypto.strong_rand_bytes(12), case: :lower), epoch)
+  @spec request(pos_integer(), String.t()) :: map()
+  def request(epoch, op \\ "submit")
+      when is_integer(epoch) and epoch > 0 and op in ["submit", "report"],
+      do: open("hist-" <> Base.encode16(:crypto.strong_rand_bytes(12), case: :lower), epoch, op)
 
   defp epoch(relay) do
     case Relay.status(relay) do
@@ -110,29 +131,29 @@ defmodule FermixChannels.Desktop.HistoryUplink do
     end
   end
 
-  defp open(id, epoch) do
+  defp open(id, epoch, op) do
     %{
       "t" => "invoke_open",
       "id" => id,
       "capability" => "history",
-      "op" => "submit",
+      "op" => op,
       "deadline_ms" => @deadline_ms,
       "epoch" => epoch,
       "origin" => "computer"
     }
   end
 
-  defp await(id, relay) do
+  defp await(id, op, relay) do
     receive do
       {__MODULE__, ^id, fields, payload} -> read(fields, payload)
     after
-      @deadline_ms + @margin_ms -> give_up(id, relay)
+      @deadline_ms + @margin_ms -> give_up(id, op, relay)
     end
   end
 
   defp read(fields, payload) do
     case Outcome.from_wire(fields, payload) do
-      {:ok, %Outcome{status: :ok, result: result}} -> Submission.from_wire(result)
+      {:ok, %Outcome{status: :ok, result: result}} -> {:ok, result}
       {:ok, %Outcome{status: status, refusal: refusal}} -> {:error, {status, refusal}}
       {:error, reason} -> {:error, {:answer, reason}}
     end
@@ -140,8 +161,8 @@ defmodule FermixChannels.Desktop.HistoryUplink do
 
   # The request's own cancel, after its open and from its process, naming its
   # capability and op so it rides the same lane.
-  defp give_up(id, relay) do
-    cancel = %{"t" => "invoke_cancel", "id" => id, "capability" => "history", "op" => "submit"}
+  defp give_up(id, op, relay) do
+    cancel = %{"t" => "invoke_cancel", "id" => id, "capability" => "history", "op" => op}
 
     case Relay.send_event(relay, cancel) do
       :ok ->

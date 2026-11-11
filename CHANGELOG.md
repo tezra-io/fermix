@@ -57,6 +57,13 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   catalog offers Obsidian 1.0.5 with the fix: a new install gets it, an
   installed copy moves with `fermix plugins upgrade obsidian`, and the Mac app
   has no plugin update yet.
+- **What computer history records no longer reaches a trace or Opik.** The
+  call that summarizes a sitting carries what you typed and the pages you
+  visited in the apps you chose, and with content capture on
+  (`[fermix_core.telemetry] capture_content`) its request and reply went into
+  the trace and to Opik like any other call's. That call's content is now
+  never kept, whatever the setting says; its provider, model, tokens and
+  timing still are.
 
 ### Added
 
@@ -140,16 +147,50 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   in what keeps the one call now ends the call in progress rather than
   letting a second one start beside it.
 - **This computer's own settings now live in `machine.toml`.** The sandbox,
-  computer use, computer history and the dev plugin folder describe
-  the computer Fermix runs on, not your home, so the first start of this
-  version moves them from `config.toml` into `machine.toml` beside it, once,
-  and every save writes them there. To change one by hand, edit
+  computer use, whether computer history records here and which apps it
+  watches, and the dev plugin folder describe the computer Fermix runs on,
+  not your home, so the first start of this version moves them from
+  `config.toml` into `machine.toml` beside it, once, and every save writes
+  them there. What your home summarizes computer history with (`summarizer`)
+  and the providers that may see the summaries (`remote_summaries`) stay in
+  `config.toml`; `summarizer = "local"` is also written to `machine.toml`,
+  where it keeps this computer's history on its own model, the daily roll-up
+  included. To change one by hand, edit
   `machine.toml`: one added to `config.toml` is not read there, reloading the
   settings says so in the log, and the next save or start takes it out of
   `config.toml`. In a home the Mac app manages only the app moves them: a
   `fermix` command from another install refuses to start there until the app
   has. As with `config.toml`, no command or file tool the agent
   runs can read or change `machine.toml`.
+- **The Computer history switch says what turning it on agrees to.** Its
+  footer in settings now reads "Fermix records what you do in the apps you
+  choose on this Mac. The raw record stays on this Mac for 48 hours; each
+  finished sitting is summarized by Anthropic, and Fermix keeps the summary."
+  with the provider your history is summarized by, or "on this Mac" for a
+  local summarizer.
+- **Computer history's raw record has a store of its own.** On a Mac, what
+  the recorder captures (kept 48 hours) moves out of `memory.db` at the first
+  start of this version into `device/history.db` in your Fermix home, a file
+  only your account can read that no backup, snapshot or move carries; the
+  notes made from it stay in `memory.db`. A Linux install, which has no
+  recorder, keeps no such store and runs no part of computer history unless
+  its home holds notes, and a home restored there from a Mac's backup drops
+  the raw rows instead of keeping them where nothing would delete them.
+- **Restoring your home keeps your computer history notes.** A restore from a
+  snapshot deleted every note, as if they could not leave the Mac they were
+  made on. Notes are your home's and now come back with it; the raw record
+  never travels.
+- **`recall_activity` can be asked about one machine.** Each result names
+  where it happened once your home has more than one computer, and
+  `computer` ("this computer", or a computer's name) takes one machine's
+  notes alone.
+- **A source checkout no longer falls back to your installed home.** A `mix`
+  command run in a Fermix checkout with no `FERMIX_HOME` read and could
+  rewrite `~/.fermix`, the home of the app you have installed, whose engine
+  may be another release. It now stops before it reads or writes anything:
+  "this is a Fermix source checkout, which never uses the installed home by
+  default. Set FERMIX_HOME to the home it should use...". Releases and the
+  test suite are not affected.
 
 ### Fixed
 
@@ -233,6 +274,33 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   as the helper stopping and restarts it with the usual backoff. A helper
   that stops as it starts now fails at once, as having exited during
   startup, instead of after a 10-second wait reported as a timeout.
+- **`/history off` means no more provider calls for your history.** After
+  it, the daily roll-up still ran once more over the notes made since the
+  last one. Now nothing more is sent anywhere for a machine whose history is
+  off: the roll-up reads only the notes of machines still recording, and on
+  a Mac that is its own home, with no other computer contributing, it makes
+  no call at all. The notes stay, and recall still reads them.
+- **A pause also keeps out what arrives late.** `/history pause` dropped
+  events while it lasted, but one stamped inside the paused time that reached
+  this Mac's raw record after the pause ended, such as a flush that came
+  late, was kept. The paused time is now fenced in the raw record as a purge
+  is, so nothing stamped inside it is kept, whenever it arrives.
+- **A pause never shortens a longer one.** Two pauses set close together
+  could leave the earlier end in force, ending a long pause early. A pause
+  now only ever moves the end later.
+- **A purge or pause that ran beside another is never skipped on this Mac.**
+  Two `/history purge` or `/history pause` commands at once, or one whose own
+  step on this Mac failed, could leave this Mac counting the earlier one as
+  done when it was not, and a later summary could then include activity from
+  the purged window. This Mac now applies every purge and pause it has not
+  applied, oldest first, each time, and its five-minute tick retries one that
+  failed.
+- **A purge or pause that half fails says exactly what happened.** The two
+  steps live in separate databases: the reply said "Purge failed" or
+  "capture is NOT paused" when only this Mac's step had failed, though the
+  purge or pause stood and no summary was being made from that window. The
+  reply now says what stands, what did not happen yet and that Fermix tries
+  again every five minutes; when nothing changed, it says that.
 
 ### Behind a feature flag
 
@@ -632,18 +700,37 @@ will be part of a future release; nothing in this group is in a release yet.
   marked with that computer. "What was I working on on the studio Mac this
   morning?" and "what did I do across my computers yesterday?" both have an
   answer: each result names the machine, the daily roll-up runs once across
-  all of them, and work that moved from one computer to another is one
-  thread. The sitting's text is never written on your server, and its
-  summary call is kept out of traces and Opik. A computer set to summarize on
-  its own model sends only the note. `/history purge` and `/history pause`
-  from chat reach every computer, one that is asleep when it is next
-  connected, and until then your home takes nothing from it inside that
-  window; a purged window never gains a note. `/history status` shows one
-  block per computer, and what Fermix itself did on a computer's screen is
-  no longer reported as yours. Your notes now travel with your home when it
-  moves, and on a Mac that is its own home the raw record moves out of
-  `memory.db` into the Mac's own store at the first start. A Linux computer
-  does not record yet.
+  the computers still recording, and work that moved from one computer to
+  another is one thread. The sitting's text is never written on your server.
+  A computer set to summarize on its own model sends only the note.
+  `/history purge` and `/history pause` from chat reach every computer, one
+  that is asleep when it is next connected, and until then your home takes
+  nothing from it inside that window; a purged window never gains a note.
+  `/history off studio Mac` switches that computer's history off from
+  anywhere: your home takes nothing more from it at once, and the computer
+  stops recording and sending when told, or once it is back; only someone at
+  it switches it on again. `/history status` shows one block per computer,
+  with what it last reported of its recorder (its state, what it has not
+  sent and its coverage, with the report's age). What Fermix on your server
+  did on a computer's screen or in its browser is no longer reported as
+  yours. Your notes travel with your home when it moves, and the notes a Mac
+  made as its own home are named for that Mac on your server once it moves
+  and stays linked, and are "this computer" again after a move back. A
+  Linux computer does not record yet.
+- **What a computer's switches end is answered as switched off.** Switching
+  off one thing at a computer (the browser, the screen, Messages, files or
+  commands) with the master switch on now ends at once what Fermix on your
+  server was running or had waiting there for it, each answered "studio Mac
+  has the browser switched off. Only someone at studio Mac can switch it
+  on.", where the browser said it had failed and other work went on; work
+  using the computer's other offers goes on. Requests waiting for a turn when
+  the computer's request handler restarts are answered at once as not run,
+  where a queued Messages or screen watch used to wait until the link
+  dropped. On your server, iMessage shows away while the Mac that carries
+  Messages is asleep or offline, and asks for setup only when setup is owed;
+  the engine gives the apps its own sentence for each iMessage readiness
+  problem, naming that Mac; and "What Fermix did on this computer" names
+  each entry in plain words ("commands", "run a command") beside its ids.
 
 ## [0.18.0] - 2026-11-03
 

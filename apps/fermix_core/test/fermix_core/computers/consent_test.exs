@@ -3,6 +3,7 @@ defmodule FermixCore.Computers.ConsentTest do
   # the review of a computer that moved before M97.
   use ExUnit.Case, async: true
 
+  alias FermixCore.ComputerHistory.Promise
   alias FermixCore.Computers.Consent
   alias FermixCore.Computers.Switches
   alias FermixCore.Home.DesktopLink
@@ -52,6 +53,27 @@ defmodule FermixCore.Computers.ConsentTest do
     assert block.warning == nil
     assert block.sentence =~ "this computer for: files, commands (strict)."
     assert Consent.block([], os: :linux, sandbox_mode: :strict).sentence =~ "can use nothing"
+  end
+
+  # M97 §8.2: where history stays on, the block restates the promise, from the
+  # one function that decides it. After a move the sitting goes to the server,
+  # or, where this Mac makes its own notes, only the summary does.
+  test "history kept on restates the promise as this Mac will keep it" do
+    for local <- [[], [machine_summarizer: "local"]] do
+      snapshot = %{fermix_core: [computer_history: [enabled: true] ++ local], sandbox: []}
+      block = Consent.block([:history], os: :macos, sandbox_mode: :standard, snapshot: snapshot)
+      facts = %{server?: true, local?: local != [], provider: nil, machine: "Mac"}
+
+      assert String.ends_with?(block.sentence, Promise.sentence(:clause, facts))
+    end
+
+    local = %{fermix_core: [computer_history: [machine_summarizer: "local"]], sandbox: []}
+    block = Consent.block([:history], os: :macos, sandbox_mode: :standard, snapshot: local)
+    assert block.sentence =~ "only the summary is sent to your Fermix server"
+    # The home's route is the home's: a Mac about to move reads its own choice.
+    home_local = %{fermix_core: [computer_history: [summarizer: "local"]], sandbox: []}
+    block = Consent.block([:history], os: :macos, sandbox_mode: :standard, snapshot: home_local)
+    assert block.sentence =~ "each finished sitting is sent to your Fermix server"
   end
 
   test "keep names only the offers a move decides" do

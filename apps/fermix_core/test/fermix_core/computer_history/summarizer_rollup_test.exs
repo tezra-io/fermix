@@ -12,8 +12,11 @@ defmodule FermixCore.ComputerHistory.Summarizer.RollupTest do
 
   import ExUnit.CaptureLog
 
+  alias FermixCore.ComputerHistory
+  alias FermixCore.ComputerHistory.Config
   alias FermixCore.ComputerHistory.Spool
   alias FermixCore.ComputerHistory.Summarizer
+  alias FermixCore.Computers.Computer
   alias FermixCore.Memory.Repo
 
   defmodule FakeAdapter do
@@ -147,6 +150,7 @@ defmodule FermixCore.ComputerHistory.Summarizer.RollupTest do
   # This machine's own store, named after the home's (a Mac that is its own home).
   defp spool_of(repo), do: :"#{repo}_spool"
 
+  # The home's own machine contributes (`machines`) unless a test says which do.
   defp run(repo, opts \\ []) do
     {spool, opts} = Keyword.pop_lazy(opts, :spool, fn -> spool_of(repo) end)
 
@@ -155,6 +159,7 @@ defmodule FermixCore.ComputerHistory.Summarizer.RollupTest do
         [
           repo: repo,
           spool: spool,
+          machines: [""],
           adapter: FakeAdapter,
           route_opts: [model: "llama3"],
           timezone: "Etc/UTC",
@@ -827,6 +832,68 @@ defmodule FermixCore.ComputerHistory.Summarizer.RollupTest do
       assert length(calls()) == 1
       assert threads(repo) == []
       assert state(repo).last_rollup_ts == nil
+    end
+
+    # M97 §8.5: off means no further provider call for a machine's history. The
+    # machines that contribute are the one rule's (`ComputerHistory.contributors/1`):
+    # this machine while history records here, a computer while its offer is on.
+    test "after off on the home's own machine, with no computer contributing, no call", %{
+      repo: repo
+    } do
+      note(repo, %{summary: "drafted the Apollo migration plan"})
+
+      contributors = fn computers ->
+        {:ok, machines} =
+          ComputerHistory.contributors(
+            repo: repo,
+            recording?: Config.enabled?(),
+            computers: computers
+          )
+
+        machines
+      end
+
+      reply("## Apollo migration\nDrafted.\nsources: 1\n")
+      assert run(repo, machines: contributors.([])) in [:ok, :skipped]
+      assert length(calls()) == 1
+
+      # Off, as `/history off` leaves this machine; a note the roll-up has not
+      # read yet, from before the off; a day later the roll-up is due again.
+      Application.put_env(:fermix_core, :computer_history, enabled: false, summarizer: :local)
+      note(repo, %{summary: "chased the restore check", created_at: ms(@now) + 60_000})
+      later = DateTime.add(@now, 25, :hour)
+
+      assert contributors.([]) == []
+      assert run(repo, machines: contributors.([]), now: later) == :skipped
+      assert length(calls()) == 1
+    end
+
+    test "with a computer still contributing, the roll-up reads only that computer's notes", %{
+      repo: repo
+    } do
+      note(repo, %{summary: "notes of this Mac, whose history went off"})
+      studio_note = note(repo, %{summary: "balanced the loft ledger", computer_id: "studio-7f3a"})
+
+      studio = %Computer{
+        device_id: "studio-7f3a",
+        name: "studio Mac",
+        offers: [%{id: "history", state: :on, sentence: nil, detail: nil}]
+      }
+
+      {:ok, machines} =
+        ComputerHistory.contributors(
+          repo: repo,
+          recording?: false,
+          computers: [studio]
+        )
+
+      assert machines == ["studio-7f3a"]
+      reply("## The ledger\nBalanced.\nsources: #{studio_note}\n")
+      assert run(repo, machines: machines) in [:ok, :skipped]
+
+      assert [%{messages: [_system, %{content: input}]}] = calls()
+      assert input =~ "balanced the loft ledger"
+      refute input =~ "whose history went off"
     end
 
     test "one info line names the counts", %{repo: repo} do

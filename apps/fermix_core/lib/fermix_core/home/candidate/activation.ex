@@ -28,6 +28,19 @@ defmodule FermixCore.Home.Candidate.Activation do
   staged plugin store (`FermixCore.Plugins.Dist.Reinstall.request/2`), and
   the new primary's first boot installs them again for this computer.
 
+  **History notes** (M97 §8.4). The staged `memory.db` names each note's
+  machine, `""` for the home's own. A move names the computer it left, which
+  stays as a linked computer (the move's `"device_id"`): every row of the
+  home's own machine (its notes, reads, purge and pause intervals, and its row
+  with its delivered mark) becomes that computer's, so the new primary names
+  the computer they were made on. A return does the reverse for this
+  computer, by the device id its desktop link holds: its notes on the server
+  are the home's own again, and every other computer keeps its own.
+  Threads are the home's. One transaction in the staged store
+  (`Memory.Repo.ComputerHistorySql.rename_machine/3`), before anything of it is
+  in use, so a staging that runs again changes nothing more; a store from
+  before notes named their machine is left as it is.
+
   **Activation** renames each staged entry into the home (an entry of the
   candidate's own engine already there, such as a log, is moved aside into
   `candidate/replaced/` first), `config.toml` last: that rename is the commit
@@ -81,6 +94,7 @@ defmodule FermixCore.Home.Candidate.Activation do
   (`finish_activation/1`).
   """
 
+  alias Exqlite.Sqlite3
   alias FermixCore.Home.Archive.ConfigText
   alias FermixCore.Home.Archive.InstanceRole
   alias FermixCore.Home.Candidate
@@ -93,12 +107,14 @@ defmodule FermixCore.Home.Candidate.Activation do
   alias FermixCore.Home.Snapshot
   alias FermixCore.Home.Snapshot.Recipient
   alias FermixCore.Home.Snapshot.Status
+  alias FermixCore.Memory.Repo.ComputerHistorySql
   alias FermixCore.Plugins.Dist.Reinstall
   alias FermixCore.Setup.SecretWriter
 
   require Logger
 
   @config "config.toml"
+  @database "memory.db"
   @file_mode 0o600
   @return_kinds ~w(return local)
   @return_opts [:impl, :supervised, :drop_desktop_row]
@@ -108,8 +124,10 @@ defmodule FermixCore.Home.Candidate.Activation do
   @doc """
   Restores the stream at `incoming` into the staging directory with `pair`
   and settles its settings for `home`. `facts`: `"destination"` (the
-  candidate's `destination.json`) and `"recovery_recipient"` (or nil).
-  `opts` go to `Snapshot.restore/4`. Answers the staged epoch.
+  candidate's `destination.json`), `"recovery_recipient"` (or nil) and
+  `"device_id"`, the computer the move left as the home's (or nil, when it
+  stays as nothing). `opts` go to `Snapshot.restore/4`. Answers the staged
+  epoch.
   """
   @spec stage(Path.t(), Path.t(), Recipient.pair(), map(), keyword()) ::
           {:ok, pos_integer()} | {:error, term()}
@@ -133,6 +151,7 @@ defmodule FermixCore.Home.Candidate.Activation do
     with :ok <- remove_tree(staging),
          {:ok, restored} <- Snapshot.restore(incoming, pair, staging, restore_opts),
          :ok <- settle_config(home, staging, facts, {mode, settle_opts}),
+         :ok <- own_notes(mode, home, staging, facts),
          :ok <- Reinstall.request(Path.join(staging, "plugins"), restored.plugins_to_reinstall) do
       {:ok, restored.epoch}
     else
@@ -347,6 +366,50 @@ defmodule FermixCore.Home.Candidate.Activation do
 
   # A JSON string of printable text is a TOML basic string.
   defp toml_string(value) when is_binary(value), do: Jason.encode!(value)
+
+  # -- history notes ------------------------------------------------------------
+
+  # The machine the home was on is named for what it is now (the moduledoc).
+  defp own_notes(:move, _home, staging, facts) do
+    case Map.get(facts, "device_id") do
+      nil -> :ok
+      device_id when is_binary(device_id) -> rename_machine(staging, "", device_id)
+    end
+  end
+
+  defp own_notes(:return, home, staging, _facts) do
+    case DesktopLink.read(home) do
+      {:ok, %{device_id: device_id}} -> rename_machine(staging, device_id, "")
+      {:error, {:file, _path, :enoent}} -> :ok
+      {:error, reason} -> {:error, {:desktop_link, reason}}
+    end
+  end
+
+  defp rename_machine(staging, from, to) do
+    db = Path.join(staging, @database)
+    if File.regular?(db), do: rename_in(db, from, to), else: :ok
+  end
+
+  defp rename_in(db, from, to) do
+    case Sqlite3.open(db, mode: :readwrite) do
+      {:ok, conn} ->
+        renamed(ComputerHistorySql.rename_machine(conn, from, to), Sqlite3.close(conn))
+
+      {:error, reason} ->
+        {:error, {:history_notes, reason}}
+    end
+  end
+
+  defp renamed({:ok, :unnamed}, :ok) do
+    Logger.info("move: the history store names no machine yet, so no note is renamed")
+  end
+
+  defp renamed({:ok, counts}, :ok) do
+    Logger.info("move: history notes named for the machine they were made on: #{inspect(counts)}")
+  end
+
+  defp renamed({:error, reason}, _closed), do: {:error, {:history_notes, reason}}
+  defp renamed({:ok, _renamed}, {:error, reason}), do: {:error, {:history_notes, reason}}
 
   # -- activation -------------------------------------------------------------
 

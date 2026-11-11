@@ -2067,7 +2067,12 @@
         "component": { "type": "string" },
         "gating": { "type": "boolean" },
         "pane": { "$ref": "#/$defs/settingsPane" },
-        "detail_key": { "type": "string" }
+        "detail_key": { "type": "string" },
+        "sentence": {
+          "description": "The engine's own sentence for this failure where it publishes one, which a client shows in place of its own words for the detail_key: the iMessage rows channel:imessage:helper, channel:imessage:carrier, channel:imessage:mac_only, channel:imessage:conflict and channel:imessage:away, which name the Mac that carries Messages where the engine knows it. Null on every other row, whose words each client keeps by its detail_key. Absent from an engine older than it, which a client reads as null.",
+          "type": ["string", "null"],
+          "minLength": 1
+        }
       }
     },
     "restartReason": {
@@ -6790,7 +6795,7 @@
     },
     "computerJournalEntry": {
       "type": "object",
-      "description": "One invocation as this computer journaled it: when it came, when it ended (null while it runs), what it was and what it acted on (a path, a host or an action, never content), the kind of turn that asked, how it ended (null while it runs) and the size of its answer. A request refused before it ran opens and ends at once.",
+      "description": "One invocation as this computer journaled it: when it came, when it ended (null while it runs), what it was and what it acted on (a path, a host or an action, never content), the kind of turn that asked, how it ended (null while it runs) and the size of its answer. A request refused before it ran opens and ends at once. capability_label and op_label are the owner's words for capability and op, lower case as an offer's label (commands, run a command), each null where this computer's engine has no words for its id (an older journal row) and absent from an engine older than them: a client shows them, and the id where one is null or absent.",
       "required": ["id", "at", "finished_at", "capability", "op", "target", "origin", "status", "refusal", "result_bytes", "duration_ms"],
       "additionalProperties": false,
       "properties": {
@@ -6798,7 +6803,9 @@
         "at": { "type": "string" },
         "finished_at": { "type": ["string", "null"] },
         "capability": { "type": ["string", "null"], "pattern": "^[a-z][a-z0-9_]{0,31}$" },
+        "capability_label": { "type": ["string", "null"], "minLength": 1, "maxLength": 64 },
         "op": { "type": ["string", "null"], "maxLength": 64 },
+        "op_label": { "type": ["string", "null"], "minLength": 1, "maxLength": 64 },
         "target": { "type": ["string", "null"], "maxLength": 256 },
         "origin": { "enum": ["chat", "voice", "scheduled", "cue", "worker", "background", "computer", null] },
         "status": { "enum": ["ok", "failed", "refused", "timed_out", "cancelled", "unknown", null] },

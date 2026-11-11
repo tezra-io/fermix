@@ -153,6 +153,13 @@ config :fermix_core, :computers_transport, FermixChannels.Desktop.InvokeTranspor
 # dispatcher above (`FermixCore.Computers.Offers.label/1`).
 config :fermix_core, :computer_offers, FermixChannels.Desktop.Offers
 
+# What a computer can be asked by its server (M97 §6), by the wire's
+# capability name: the module whose `capabilities/0` maps each to its module,
+# so this computer's journal names each in the owner's words. Injected by
+# module for the same reason as the dispatcher above
+# (`FermixCore.Management.Computer`).
+config :fermix_core, :computer_capabilities, FermixChannels.Desktop.Invoke
+
 # Where the primary keeps snapshots beyond S3 (M75 §8, D19): its connected
 # desktops, over the rail. Injected by module for the same reason as the
 # dispatcher above; the scheduler writes to `Snapshot.S3` and then these

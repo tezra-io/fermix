@@ -633,12 +633,14 @@ defmodule FermixCore.Application do
       else: []
   end
 
-  # Computer History (MILESTONE_32 §6.3; M97 §8.1): the always-present, inert
-  # supervisor of both halves. On the home it is always there, whatever the
-  # platform, since the home keeps every machine's notes and rolls them up; on a
-  # computer only where this system has a recorder. Retention must always run so
-  # a spool left behind by a disable still drains by the 48h horizon (inv. 16).
-  # Its work is tick-gated; the timer is disabled in `:test` (the scheduler
+  # Computer History (MILESTONE_32 §6.3; M97 §8.1): the inert supervisor of both
+  # halves, offered on every home and on a computer only where this system has
+  # a recorder. Its own start decides whether anything here uses it (a
+  # recorder, or a home where a computer can contribute or that holds notes)
+  # and otherwise answers `:ignore`, so a plain Linux install runs none of it
+  # and creates no store. Where it runs, Retention must always run so a spool
+  # left behind by a disable still drains by the 48h horizon (inv. 16). Its
+  # work is tick-gated; the timer is disabled in `:test` (the scheduler
   # precedent), never by omission.
   defp maybe_computer_history_supervisor(role) do
     if role == :primary or ComputerHistory.recorder?() do

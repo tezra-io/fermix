@@ -32,9 +32,9 @@ defmodule FermixCore.ComputerHistory.Sittings do
   again on a later cycle. Raw events still expire after 48 hours
   (`Retention`), counted when they were never sent.
 
-  Events stamped while this computer's server drove its screen are marked as
-  Fermix's own in the sitting (`by=fermix`, M97 §8.7), from the record under
-  this computer's home (`:home`).
+  Events stamped while this computer's server drove its screen or used its
+  browser are marked as Fermix's own in the sitting (`by=fermix`, M97 §8.7),
+  from the records under this computer's home (`:home`).
 
   Options: `:uplink` (required), `:spool`, `:home`, `:config` (this machine's history
   settings), `:now`, `:timezone`, `:limit`, `:budget`, and a local summary's
@@ -102,10 +102,11 @@ defmodule FermixCore.ComputerHistory.Sittings do
   end
 
   # M97 §8.7, D11: the stretches Fermix on this computer's server drove its
-  # screen (`ComputerUse.ServerControl`), as epoch-ms ranges; one still open
-  # runs to now. An event stamped inside one is Fermix's own, and the sitting
-  # says so (`by=fermix`), so the summary never reports the agent's clicks as
-  # the owner's. A record that cannot be read marks nothing, loudly.
+  # screen or used its browser (`ComputerUse.ServerControl`, one reader of
+  # both records), as epoch-ms ranges; one still open runs to now. An event
+  # stamped inside one is Fermix's own, and the sitting says so (`by=fermix`),
+  # so the summary never reports the agent's clicks or browsing as the
+  # owner's. A record that cannot be read marks nothing, loudly.
   defp own_stretches(home, now) do
     case ServerControl.stretches(home) do
       {:ok, stretches} ->
@@ -113,7 +114,7 @@ defmodule FermixCore.ComputerHistory.Sittings do
 
       {:error, reason} ->
         Logger.warning(
-          "computer_history: the screen control record is unreadable: #{inspect(reason)}"
+          "computer_history: the record of the server's control is unreadable: #{inspect(reason)}"
         )
 
         []

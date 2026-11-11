@@ -9,8 +9,17 @@ defmodule FermixCore.Management.Settings.Tools do
   place search's backend (M72 §14.1), offered as this build can run it (Brave
   alone where the build carries no Apple Maps helper), and the Brave key row
   stands whenever web or place search uses Brave.
+
+  `computer_history` is this machine's part of the history settings (M97 §4,
+  a machine section in `Management.Placement`): whether it records, which
+  apps, and how its own sittings are summarized (read-only). The home's route
+  and grants are in the home's `config.toml` and have no row, so a write here
+  never reaches them. The switch's footer is the history promise
+  (`ComputerHistory.Promise`), true on this machine: with or without a server.
   """
 
+  alias FermixCore.ComputerHistory.Config, as: ComputerHistoryConfig
+  alias FermixCore.ComputerHistory.Promise
   alias FermixCore.Harness.Config, as: HarnessConfig
   alias FermixCore.Harness.Vendors
   alias FermixCore.Management.Secrets
@@ -23,14 +32,6 @@ defmodule FermixCore.Management.Settings.Tools do
   alias FermixCore.Tools.PlaceSearch.Config, as: PlaceConfig
   alias FermixCore.Tools.WebSearch
 
-  # What switching history on agrees to (M97 §8.2), where it is switched on: the
-  # raw record stays on this computer, and each finished sitting goes to the
-  # home to be summarized there, whether the home is this Mac or a server.
-  @history_consent "Fermix records what you do in the apps you choose on this computer. " <>
-                     "The raw record stays here and is deleted after 48 hours. Each " <>
-                     "finished sitting goes to your Fermix home, on this computer or your " <>
-                     "Fermix server, which has its summarizer summarize it and keeps the " <>
-                     "summary. Summaries from all your computers can be recalled in chat."
   @sections [
     %{id: "computer_use", pane: "computer", title: "Computer use"},
     %{id: "computer_history", pane: "computer", title: "Computer history"},
@@ -107,7 +108,8 @@ defmodule FermixCore.Management.Settings.Tools do
   @doc """
   The rows of one owned section. `host:` (`BootProfile.host/0`'s shape) names
   the build for a test; the search section's place search options are the ones
-  this build can run.
+  this build can run. `promise:` holds `ComputerHistory.Promise.facts/2`'s
+  seams for the history switch's footer.
   """
   @spec rows(String.t(), Source.snapshot(), keyword()) :: [Row.t()]
   def rows(section, snapshot, opts \\ [])
@@ -132,13 +134,15 @@ defmodule FermixCore.Management.Settings.Tools do
     ]
   end
 
-  def rows("computer_history", snapshot, _opts) do
+  def rows("computer_history", snapshot, opts) do
     block = Source.core(snapshot, :computer_history)
     restart = Row.restart?(:computer_history)
+    # As this engine holds it: a computer holds none of the home's keys.
+    here = ComputerHistoryConfig.normalize(block)
 
     [
       Row.new("computer_history_enabled", :toggle, "Computer history",
-        footer: @history_consent,
+        footer: Promise.sentence(:footer, Promise.facts(here, Keyword.get(opts, :promise, []))),
         value: Source.boolean(block, :enabled, false),
         restart: restart
       ),
@@ -147,7 +151,7 @@ defmodule FermixCore.Management.Settings.Tools do
         value: Source.strings(block, :apps),
         restart: restart
       ),
-      summarizer_row(block, restart)
+      summarizer_row(here, restart)
     ]
   end
 
@@ -282,10 +286,19 @@ defmodule FermixCore.Management.Settings.Tools do
   end
 
   # Read-only until the summarizer has an answer key of its own: a control whose
-  # save always refuses is worse than a row that says what is in force.
-  defp summarizer_row(block, restart) do
+  # save always refuses is worse than a row that says what is in force. What
+  # is in force for this machine's own sittings (`ComputerHistoryConfig.summarizer/1`):
+  # `local` where it makes its own notes, else the home's route, a pinned
+  # provider by its id.
+  defp summarizer_row(here, restart) do
+    value =
+      case ComputerHistoryConfig.summarizer(here) do
+        {:provider, provider} -> Atom.to_string(provider)
+        summarizer -> Atom.to_string(summarizer)
+      end
+
     Row.new("computer_history_summarizer", :choice, "Summarize with",
-      value: Source.string(block, :summarizer, "default_provider"),
+      value: value,
       options: [
         Row.option("default_provider", "The primary provider"),
         Row.option("local", "On this Mac")

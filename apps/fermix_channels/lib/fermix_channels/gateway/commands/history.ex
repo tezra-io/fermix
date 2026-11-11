@@ -8,6 +8,7 @@ defmodule FermixChannels.Gateway.Commands.History do
     * `/history pause <10m|1h|…>`  — persist a capture pause horizon (§7.3)
     * `/history purge 10m|1h|24h|all` — erase a window from the spool + memories
     * `/history off`               — disable (un-advertises next turn); data stays
+    * `/history off <computer>`    — switch a computer's history off (M97 §8.5)
 
   Enabling is the wizard's job (the consent act, §5.5), never a chat command.
   """
@@ -27,7 +28,6 @@ defmodule FermixChannels.Gateway.Commands.History do
   alias FermixCore.ComputerHistory.Spool
   alias FermixCore.Computers
   alias FermixCore.Memory.Repo
-  alias FermixCore.Setup.ConfigStore
 
   # The spool's own retention horizon: a coverage state older than the events it
   # describes is not current information.
@@ -58,6 +58,7 @@ defmodule FermixChannels.Gateway.Commands.History do
       recorder?: Map.get_lazy(context, :computer_history_recorder?, &ComputerHistory.recorder?/0),
       computers: Map.get_lazy(context, :computer_history_computers, &Computers.list/0),
       deliver: Map.get(context, :computer_history_deliver, &Delivery.deliver/1),
+      switch_off: Map.get(context, :computer_history_switch_off, &Delivery.switch_off/2),
       controller: controller(context)
     }
 
@@ -66,10 +67,11 @@ defmodule FermixChannels.Gateway.Commands.History do
 
   # `:computer_history_repo` / `:computer_history_spool` /
   # `:computer_history_recorder?` / `:computer_history_computers` /
-  # `:computer_history_deliver` / `:computer_history_controller` in context are
-  # test-only injection seams; production dispatch runs in the daemon against
-  # the home's single-writer Repo, this machine's store and recorder, the
-  # home's computers, the real delivery and the real Controller.
+  # `:computer_history_deliver` / `:computer_history_switch_off` /
+  # `:computer_history_controller` in context are test-only injection seams;
+  # production dispatch runs in the daemon against the home's single-writer
+  # Repo, this machine's store and recorder, the home's computers, the real
+  # delivery and the real Controller.
   defp repo(context), do: Map.get(context, :computer_history_repo, Repo)
 
   defp controller(context), do: Map.get(context, :computer_history_controller, Controller)
@@ -88,8 +90,11 @@ defmodule FermixChannels.Gateway.Commands.History do
   defp dispatch(["purge", window], reply_fn, host),
     do: purge(window, reply_fn, host)
 
-  defp dispatch(["off" | _rest], reply_fn, host),
+  defp dispatch(["off"], reply_fn, host),
     do: off(reply_fn, host.recorder?, host.controller)
+
+  defp dispatch(["off" | name], reply_fn, host),
+    do: reply(reply_fn, off_computer(Enum.join(name, " "), host))
 
   defp dispatch(_other, reply_fn, _host), do: reply(reply_fn, usage())
 
@@ -351,9 +356,67 @@ defmodule FermixChannels.Gateway.Commands.History do
 
   defp computer_block(computer, row, notes, repo) do
     "#{computer.name}: history #{offer_phrase(computer)}; #{seen_phrase(computer)}; " <>
-      "#{sitting_phrase(row)}; #{quantity(Map.get(notes, computer.device_id, 0), "session note")}" <>
-      pending_phrase(computer, row, repo) <> "."
+      "#{report_phrase(row)}; #{sitting_phrase(row)}; " <>
+      "#{quantity(Map.get(notes, computer.device_id, 0), "session note")}" <>
+      pending_phrase(computer, row, repo) <> off_phrase(row) <> "."
   end
+
+  # What the computer last reported of its recorder (M97 §8.5): its state, what
+  # it has not sent, and its coverage, with how old the report is. The home
+  # holds no raw record of a computer, so this is the only way it knows.
+  defp report_phrase(%{report: report, report_at: at}) when is_binary(report) do
+    case Jason.decode(report) do
+      {:ok, %{"recorder" => state} = fields} ->
+        "recorder #{recorder_word(state)}#{unsent_clause(fields)}#{remote_coverage(fields)} " <>
+          "(reported #{age_phrase(System.system_time(:millisecond) - at)} ago)"
+
+      _unreadable ->
+        "recorder report unreadable"
+    end
+  end
+
+  defp report_phrase(_row), do: "no recorder report yet"
+
+  defp recorder_word("standing_down"), do: "standing down"
+  defp recorder_word("not_running"), do: "not running"
+  defp recorder_word("not_answering"), do: "not answering"
+  defp recorder_word(state), do: state
+
+  defp unsent_clause(%{"unsent" => 0, "expired_unsent" => expired}),
+    do: ", nothing unsent" <> expired_remote(expired)
+
+  defp unsent_clause(%{"unsent" => unsent, "oldest_unsent_ts" => oldest} = fields) do
+    ", #{unsent} event(s) unsent#{lag_display(unsent, oldest)}" <>
+      expired_remote(fields["expired_unsent"])
+  end
+
+  defp expired_remote(count) when is_integer(count) and count > 0,
+    do: ", #{count} expired before they were sent"
+
+  defp expired_remote(_count), do: ""
+
+  defp remote_coverage(fields) do
+    [
+      {"title_only", "title-only"},
+      {"private_unknown", "private-window state unknown"},
+      {"ax_refused", "AX refused"}
+    ]
+    |> Enum.flat_map(fn {key, words} ->
+      case Map.get(fields, key, 0) do
+        0 -> []
+        count -> ["#{words} in #{quantity(count, "app")}"]
+      end
+    end)
+    |> case do
+      [] -> ""
+      clauses -> ", coverage: " <> Enum.join(clauses, ", ")
+    end
+  end
+
+  defp off_phrase(%{off_requested_at: at}) when is_integer(at),
+    do: "; asked to switch its history off, not yet done there"
+
+  defp off_phrase(_row), do: ""
 
   defp offer_phrase(computer) do
     case Enum.find(computer.offers, &(&1.id == "history")) do
@@ -370,7 +433,9 @@ defmodule FermixChannels.Gateway.Commands.History do
   defp seen_phrase(%{last_seen: %DateTime{} = at}),
     do: "away, last seen #{age_phrase(DateTime.diff(DateTime.utc_now(), at, :millisecond))} ago"
 
+  # A row a delivery, an off or a report made has no sitting in it yet.
   defp sitting_phrase(nil), do: "no sitting received"
+  defp sitting_phrase(%{last_submission_at: nil}), do: "no sitting received"
 
   defp sitting_phrase(%{last_submission_at: at, last_status: status, last_reason: reason}) do
     word = if reason, do: "#{status}, #{reason}", else: status
@@ -483,35 +548,54 @@ defmodule FermixChannels.Gateway.Commands.History do
 
   # The horizon is enforced by each machine's Ingest (each batch re-reads it) and
   # by the home's refusal, so the success reply is true the moment the writes
-  # land — and a failed write must never be reported as a pause the owner then
-  # relies on.
+  # land, and a failed write is never reported as a pause the owner then relies
+  # on. The two stores share no transaction, so the reply says which stood: once
+  # the home recorded it, the pause stands (the home summarizes nothing inside
+  # it) even when this machine could not apply it yet, which its scheduler does
+  # at its next tick.
   defp pause_everywhere(now, until_ms, host) do
     until = until_ms |> DateTime.from_unix!(:millisecond) |> DateTime.to_iso8601()
 
-    with {:ok, id} <-
-           Repo.computer_history_home(:pause_window, [now, until_ms, now, :all],
-             server: host.repo
-           ),
-         :ok <- pause_here(%{id: id, from_ts: now, to_ts: until_ms, issued_at: now}, now, host) do
-      "Computer-history capture paused until #{until}. It resumes automatically then." <>
-        told(host)
-    else
+    case Repo.computer_history_home(:pause_window, [now, until_ms, now, :all], server: host.repo) do
+      {:ok, _id} ->
+        pause_text(apply_here(now, host), until) <> told(host)
+
       {:error, reason} ->
         Logger.error("computer_history pause persist failed: #{inspect(reason)}")
 
-        "Couldn't persist the pause (#{inspect(reason)}) — capture is NOT paused. " <>
-          "Check the daemon log and try again."
+        "Couldn't record the pause (#{inspect(reason)}): nothing changed and capture is NOT " <>
+          "paused. Check the daemon log and try again."
     end
   end
 
-  defp pause_here(_interval, _now, %{recorder?: false}), do: :ok
+  defp pause_text(here, until) when here in [:ok, :none],
+    do: "Computer-history capture paused until #{until}. It resumes automatically then."
 
-  defp pause_here(interval, now, host) do
-    Spool.apply_intervals(
-      [Map.put(interval, :kind, "pause")],
-      DateTime.from_unix!(now, :millisecond),
-      server: host.spool
-    )
+  defp pause_text({:failed, reason}, until) do
+    "The pause is recorded on this home until #{until}: nothing stamped inside it is " <>
+      "summarized from any computer. This Mac's recorder could not be paused yet " <>
+      "(#{inspect(reason)}). Fermix tries again every five minutes, and deletes what this Mac " <>
+      "recorded inside the pause once it does."
+  end
+
+  # This machine's own pending intervals, the new one among them (M97 §8.5,
+  # history_submit HS-2): every one above its mark, in order, before its mark
+  # moves. A home with no recorder keeps no store.
+  defp apply_here(_now, %{recorder?: false}), do: :none
+
+  defp apply_here(now, host) do
+    case Delivery.apply_here(
+           repo: host.repo,
+           spool: host.spool,
+           now: DateTime.from_unix!(now, :millisecond)
+         ) do
+      {:ok, _events} ->
+        :ok
+
+      {:error, reason} ->
+        Logger.error("computer_history pause was not applied here yet: #{inspect(reason)}")
+        {:failed, reason}
+    end
   end
 
   # --- purge --------------------------------------------------------------
@@ -523,12 +607,18 @@ defmodule FermixChannels.Gateway.Commands.History do
     end
   end
 
+  # The home's transaction commits whole or not at all; once it did, the purge
+  # stands, and the reply says whether this machine's own raw record went too
+  # (see `Purge`).
   defp run_purge(window, host) do
-    case Purge.purge(window, repo: host.repo, spool: host.spool) do
-      {:ok, %{events: events, memories: memories}} ->
-        "Purged #{events} event(s) and #{memories} activity memory(ies). Threads that drew on " <>
-          "that window were removed too; the next roll-up rewrites the thread list from the " <>
-          "surviving threads and the session notes written since the last roll-up." <>
+    spool = if host.recorder?, do: host.spool
+
+    case Purge.purge(window, repo: host.repo, spool: spool) do
+      {:ok, result} ->
+        purged_text(result) <>
+          " Threads that drew on that window were removed too; the next roll-up rewrites the " <>
+          "thread list from the surviving threads and the session notes written since the last " <>
+          "roll-up." <>
           told(host) <>
           " This cannot reach: replies already delivered, any summaries already sent to a " <>
           "remote provider, backups (yours, and your Fermix server's if you have one), or " <>
@@ -536,9 +626,20 @@ defmodule FermixChannels.Gateway.Commands.History do
           "query, but raw bytes may linger in the database until overwritten."
 
       {:error, reason} ->
-        "Purge failed: #{inspect(reason)}."
+        "Purge failed (#{inspect(reason)}): nothing was deleted. Check the daemon log and try " <>
+          "again."
     end
   end
+
+  defp purged_text(%{here: {:failed, reason}, memories: memories}) do
+    "Deleted #{memories} activity memory(ies) on this home, and the purge stands: nothing " <>
+      "from that window is summarized from any computer. This Mac's raw record in that window " <>
+      "could not be deleted yet (#{inspect(reason)}); Fermix tries again every five minutes " <>
+      "until it is."
+  end
+
+  defp purged_text(%{events: events, memories: memories}),
+    do: "Purged #{events} event(s) and #{memories} activity memory(ies)."
 
   # What the home's computers were told (M97 §8.5): a computer that is away is
   # told when it next connects, and until then the home takes nothing from it in
@@ -568,6 +669,60 @@ defmodule FermixChannels.Gateway.Commands.History do
   defp off(reply_fn, macos?, controller),
     do: reply(reply_fn, off_text(disable(macos?, controller)))
 
+  # `/history off <computer>` (M97 §7.2, §8.5): narrowing may come from
+  # anywhere. The home records it at once and takes nothing more from that
+  # computer; the computer switches its own history off when told, now if it
+  # is connected, once it is back if not.
+  defp off_computer(name, host) do
+    case find_computer(name, host.computers) do
+      {:ok, computer} ->
+        computer_off_text(computer.name, host.switch_off.(computer, repo: host.repo))
+
+      :error ->
+        no_such_computer(name, host.computers)
+    end
+  end
+
+  defp find_computer(name, computers) do
+    wanted = String.downcase(name)
+
+    case Enum.find(computers, &(&1.device_id == name or String.downcase(&1.name) == wanted)) do
+      nil -> :error
+      computer -> {:ok, computer}
+    end
+  end
+
+  defp no_such_computer(name, []),
+    do: "This home has no computer named #{name}. /history off alone switches off this one."
+
+  defp no_such_computer(name, computers),
+    do:
+      "This home has no computer named #{name}. Its computers: " <>
+        Enum.map_join(computers, ", ", & &1.name) <> "."
+
+  defp computer_off_text(name, :done) do
+    "Computer history is off on #{name}: it records nothing more and sends nothing to this " <>
+      "home. Its notes stay here until you /history purge; only someone at #{name} can switch " <>
+      "it on again."
+  end
+
+  defp computer_off_text(name, :away) do
+    "#{name} is away. Its computer history goes off once it is back, and until then this " <>
+      "home summarizes nothing from it."
+  end
+
+  defp computer_off_text(name, {:failed, reason}) do
+    "#{name} could not be told now (#{inspect(reason)}). This home summarizes nothing from it " <>
+      "from now on, and tells it again every five minutes until its history is off."
+  end
+
+  defp computer_off_text(_name, {:error, reason}) do
+    Logger.error("computer_history off for a computer was not recorded: #{inspect(reason)}")
+
+    "Couldn't record that (#{inspect(reason)}): nothing changed. Check the daemon log and try " <>
+      "again."
+  end
+
   # One reply per {stop, save} outcome. "Nothing new is captured" goes out only
   # when the Controller confirmed the stop: its reconcile returns only once the
   # Capturer has exited.
@@ -582,7 +737,7 @@ defmodule FermixChannels.Gateway.Commands.History do
   defp off_text({:ok, {:error, reason}}) do
     "Computer history capture is stopped for now, but saving the setting failed " <>
       "(#{inspect(reason)}) — it will turn back ON at the next daemon restart. " <>
-      "Fix config.toml write access and run /history off again."
+      "Fix write access to machine.toml in your Fermix home and run /history off again."
   end
 
   # Nobody confirmed the recorder stopped, so the reply must not say it did.
@@ -597,7 +752,8 @@ defmodule FermixChannels.Gateway.Commands.History do
     "Computer history is disabled for now, but the recorder could not be confirmed stopped " <>
       "(#{unconfirmed_phrase(stop_reason)}) and saving the setting failed (#{inspect(save_reason)}) — " <>
       "capture may still be running, and it will turn back ON at the next daemon restart. " <>
-      "Fix config.toml write access, run /history off again and check `/history status`."
+      "Fix write access to machine.toml in your Fermix home, run /history off again and " <>
+      "check `/history status`."
   end
 
   # Why the stop is unconfirmed, in words; the full exit reason is in the error
@@ -610,36 +766,18 @@ defmodule FermixChannels.Gateway.Commands.History do
 
   defp unconfirmed_phrase({:reconcile_failed, _exit}), do: "its controller failed mid-call"
 
-  # Flip app env for the immediate un-advertise, stop the live capture rail, then
-  # persist to config.toml so the disable survives a restart (§5.4). The persisted
-  # snapshot is built from live app env (already normalized at boot), the wizard's
-  # own save pattern. Reconcile AFTER the env flip so the controller reads the
-  # disabled posture and tears the capturer down now, not on the next boot. The
-  # save runs whatever the stop's outcome: the durable disable must not depend on
-  # the live stop. Returns both outcomes for the reply.
-  defp disable(macos?, controller) do
-    current = Application.get_env(:fermix_core, :computer_history, [])
-    Application.put_env(:fermix_core, :computer_history, Keyword.put(current, :enabled, false))
+  # Flip app env for the immediate un-advertise, stop the live capture rail,
+  # then persist `enabled = false` to this machine's `machine.toml` so the
+  # disable survives a restart (§5.4), all in `ComputerHistory.switch_off/1`,
+  # the one off a computer told from chat runs too. The stop runs only where
+  # this system has a recorder, the only place the rail records, and the save
+  # runs whatever the stop's outcome: the durable disable must not depend on the
+  # live stop. Returns both outcomes for the reply.
+  defp disable(recorder?, controller) do
+    %{stop: stop, save: save} =
+      ComputerHistory.switch_off(recorder?: recorder?, controller: controller)
 
-    {stop_capture(macos?, controller), save_disabled()}
-  end
-
-  # The rail runs only on macOS (`FermixCore.Application` starts its supervisor
-  # there alone), so elsewhere there is no recorder to stop.
-  defp stop_capture(true, controller), do: ComputerHistory.reconcile_runtime(controller)
-  defp stop_capture(false, _controller), do: :ok
-
-  defp save_disabled do
-    snapshot = ConfigStore.current_snapshot()
-
-    case ConfigStore.save_snapshot(snapshot) do
-      :ok ->
-        :ok
-
-      {:error, reason} = error ->
-        Logger.warning("computer_history disable persist failed: #{inspect(reason)}")
-        error
-    end
+    {stop, save}
   end
 
   # --- shared -------------------------------------------------------------

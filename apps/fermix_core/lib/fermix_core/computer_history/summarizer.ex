@@ -299,23 +299,39 @@ defmodule FermixCore.ComputerHistory.Summarizer do
   Run the home's daily roll-up if it is due (`Summarizer.Rollup`), on the home's
   summarizer route after the same check a sitting passes. `opts`: `:repo`,
   `:spool` (this machine's store, whose newest raw text the guard reads; nil on
-  a home that records nothing), `:now`, `:timezone`, `:config`, and a test's
-  `:adapter` and `:route_opts`.
+  a home that records nothing), `:now`, `:timezone`, `:config`, `:machines`
+  (the machines that contribute, in place of `ComputerHistory.contributors/1`),
+  and a test's `:adapter` and `:route_opts`.
+
+  Off means no further call for a machine's history (M97 §8.5): the roll-up
+  reads only the new notes of the machines that still contribute, and with
+  none it makes no call at all. A machine's notes written while it was on and
+  not yet rolled up when it went off stay in the journal, recallable, and never
+  reach a roll-up.
   Returns `:ok`, `:skipped`, `{:paused, reason}` (no route, or one not
   permitted) or `{:error, reason}` (the route or the store refused).
   """
   @spec run_rollup(keyword()) :: :ok | :skipped | {:paused, term()} | {:error, term()}
   def run_rollup(opts \\ []) when is_list(opts) do
-    # The home's scheduler ticks on every primary: one that holds no note has
-    # nothing to roll up, and resolves no route.
-    case Repo.computer_history_count_memories(
-           server: Keyword.get(opts, :repo, Repo),
-           kind: :session
-         ) do
-      {:ok, 0} -> :skipped
-      {:ok, _notes} -> rollup_on_route(opts)
+    repo = Keyword.get(opts, :repo, Repo)
+
+    # The home's scheduler ticks on every primary: one that holds no note, or
+    # whose machines all went off, has nothing to roll up, and resolves no route.
+    with {:ok, [_ | _] = machines} <- machines(repo, opts),
+         {:ok, notes} when notes > 0 <-
+           Repo.computer_history_count_memories(server: repo, kind: :session) do
+      rollup_on_route(Keyword.put(opts, :machines, machines))
+    else
+      {:ok, _none} -> :skipped
       {:error, :disabled} -> :skipped
       {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp machines(repo, opts) do
+    case Keyword.fetch(opts, :machines) do
+      {:ok, machines} when is_list(machines) -> {:ok, machines}
+      :error -> FermixCore.ComputerHistory.contributors(repo: repo)
     end
   end
 
@@ -338,7 +354,7 @@ defmodule FermixCore.ComputerHistory.Summarizer do
 
     rollup_opts =
       opts
-      |> Keyword.take([:timezone, :spool])
+      |> Keyword.take([:timezone, :spool, :machines])
       |> Keyword.merge(now: now, model: route_key.model)
 
     case Rollup.maybe_run(Keyword.get(opts, :repo, Repo), rollup_opts, call_fun) do

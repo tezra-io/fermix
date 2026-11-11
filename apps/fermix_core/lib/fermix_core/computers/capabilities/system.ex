@@ -23,6 +23,12 @@ defmodule FermixCore.Computers.Capabilities.System do
   def ops, do: ["echo"]
 
   @impl true
+  def label, do: "the connection"
+
+  @impl true
+  def op_label("echo"), do: "check the connection"
+
+  @impl true
   def effect?("echo"), do: false
 
   @impl true

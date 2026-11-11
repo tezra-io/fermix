@@ -154,12 +154,14 @@ defmodule FermixCore.Home.Archive.RestoredConfigTest do
              enabled = true
              """
 
+      # Computer history splits by key (M97 §4): whether the computer records
+      # is its own; the home's route and grants would be kept.
       assert settled.device_settings_dropped == [
                "sandbox",
                "fermix_core.computer_use",
-               "fermix_core.computer_history",
                "fermix_channels.accessories",
-               "fermix_core.plugins.dev_local"
+               "fermix_core.plugins.dev_local",
+               "fermix_core.computer_history.enabled"
              ]
 
       assert settled.rewritten == []

@@ -41,9 +41,11 @@
 (*    MachineService (machine_service.ex): a connected computer is sent  *)
 (*    every interval it has not applied, and applies them, in a process   *)
 (*    of its own beside its sending cycle (Spool.apply_at/3).             *)
-(*  - The home's own machine (Purge.fence_here/4, History.pause_here/3):  *)
-(*    no delivery reaches it; the purge command applies its own interval  *)
-(*    there, alone, once the home recorded it, and that sets the mark.    *)
+(*  - The home's own machine (Delivery.apply_here/1, from Purge.purge/2,  *)
+(*    the pause command's apply_here/2 and the home scheduler's tick): no  *)
+(*    delivery reaches it; it applies every interval of its own above its  *)
+(*    mark, oldest first, the fences first and the mark last, so its mark  *)
+(*    never steps over an interval it has not applied (HS-2, fixed).       *)
 (*                                                                         *)
 (* Left out, each a single call ExUnit covers or a step that only writes  *)
 (* less: the signal gate, the renderer and the summary itself, the pause  *)
@@ -63,9 +65,10 @@
 \* SOURCE: apps/fermix_core/lib/fermix_core/computer_history/spool.ex#link,events_after,fence,apply_intervals,apply_interval,mark_applied,apply_at @ fc70161b94bd
 \* SOURCE: apps/fermix_core/lib/fermix_core/computer_history/delivery.ex @ 4fc6f21a0126
 \* SOURCE: apps/fermix_core/lib/fermix_core/computer_history/machine_service.ex @ 815c371fb715
-\* SOURCE: apps/fermix_core/lib/fermix_core/computer_history/purge.ex#purge,fence_here @ b178c33529f3
+\* SOURCE: apps/fermix_core/lib/fermix_core/computer_history/purge.ex#purge,apply_here @ b178c33529f3
 \* SOURCE: apps/fermix_core/lib/fermix_core/computer_history/controller.ex#home_uplink @ 8176fcfadb34
-\* SOURCE: apps/fermix_channels/lib/fermix_channels/gateway/commands/history.ex#pause_everywhere,pause_here @ d193aac722a6
+\* SOURCE: apps/fermix_core/lib/fermix_core/computer_history/summarizer/scheduler.ex#maybe_roll_up,apply_here @ 000000000000
+\* SOURCE: apps/fermix_channels/lib/fermix_channels/gateway/commands/history.ex#pause_everywhere,apply_here @ d193aac722a6
 
 EXTENDS Naturals, FiniteSets, TLC
 
@@ -87,7 +90,8 @@ CONSTANTS
     PurgeDeletesNotes,  \* purge_notes deletes the notes that reach the window (purge_notes_in_tx)
     MarkSkipsApplied,   \* the sitting carries the mark, so an interval it applied is not asked again (reaching_intervals after_id)
     RefusalNamesAllPending, \* a refusal names every interval above the sitting's mark, not only those reaching it (submission.ex refused_by)
-    MarkAfterFences     \* apply_intervals fences every interval first and writes the mark last (spool.ex mark_applied)
+    MarkAfterFences,    \* apply_intervals fences every interval first and writes the mark last (spool.ex mark_applied)
+    HereAppliesPending  \* the home's own machine applies every interval of its own above its mark (delivery.ex apply_here)
 
 VARIABLES
     recorded,   \* computer -> stamps it has recorded (each once)
@@ -104,7 +108,7 @@ VARIABLES
     answer,     \* computer -> the intervals refusing its sitting; {} when it was noted
     notes,      \* the home's notes: [c, stamps]
     purges,     \* the home's purge intervals: [id, from, to, scope]
-    hereApply,  \* purges the home recorded whose own command has not yet applied them on its machine
+    hereApply,  \* without HereAppliesPending: purges whose own command has not yet applied them here
     nextId
 
 vars == <<recorded, raw, sent, fence, mark, applying, connected, away, stage, fmark, fstamps,
@@ -309,8 +313,8 @@ Write(c) ==
                    purges, hereApply, nextId>>
 
 \* /history purge from chat (Purge.purge/2 -> purge_notes/5): one transaction.
-\* When it covers the home's own machine, the same command then applies it
-\* there (fence_here/4, ApplyHere below), a step of its own.
+\* When it covers the home's own machine, the same command then applies what
+\* that machine owes there (ApplyHere below), in steps of their own.
 Purge(w, scope) ==
     /\ OwnerCanPurge
     /\ nextId <= MaxPurges
@@ -319,25 +323,55 @@ Purge(w, scope) ==
           /\ notes' = IF PurgeDeletesNotes
                          THEN {n \in notes : ~(Covers(p, n.c) /\ Reaches(p, n.stamps))}
                          ELSE notes
-          /\ hereApply' = IF HomeMachine \in Computers /\ Covers(p, HomeMachine)
+          /\ hereApply' = IF ~HereAppliesPending /\ HomeMachine \in Computers
+                                /\ Covers(p, HomeMachine)
                              THEN hereApply \cup {p} ELSE hereApply
     /\ nextId' = nextId + 1
     /\ UNCHANGED <<recorded, raw, sent, fence, mark, applying, connected, away, stage, fmark,
                    fstamps, answer>>
 
-\* Purge.fence_here/4 (and History.pause_here/3 for a pause): this machine's
-\* store applies the purge's own interval, alone (Spool.apply_intervals([p])),
-\* and mark_applied records its id as the mark. Two commands may run at once,
-\* and one that fails after the home recorded its interval never applies it,
-\* which up to the point it matters is the same as applying it later.
+\* The first half of applying R on the home's own machine, as DeliverFirst
+\* does on a computer: the fences (or, with MarkAfterFences off, the mark), the
+\* other half to follow in DeliverSecond(HomeMachine).
+ApplyHereOf(R) ==
+    /\ applying' = [applying EXCEPT ![HomeMachine] = R]
+    /\ IF MarkAfterFences
+          THEN /\ raw' = [raw EXCEPT ![HomeMachine] = Without(HomeMachine, R)]
+               /\ fence' = [fence EXCEPT ![HomeMachine] = @ \cup R]
+               /\ UNCHANGED mark
+          ELSE /\ mark' = [mark EXCEPT ![HomeMachine] = Raised(HomeMachine, R)]
+               /\ UNCHANGED <<raw, fence>>
+
+\* The home's own machine applies what it owes (Delivery.apply_here/1): run by
+\* each purge command (Purge.purge/2) and pause command (History.apply_here/2)
+\* once the home recorded its interval, and by the home scheduler's tick
+\* (Scheduler.apply_here/1), which is how one whose apply failed is applied.
+\* It reads the mark (Spool.link/1), then every interval of this machine above
+\* it (intervals_after/4), and applies them (Spool.apply_intervals/3): every
+\* fence first, here, and the mark last, in DeliverSecond, which this machine
+\* shares with a computer's delivery. The two reads are folded: the mark only
+\* rises and an interval is read once committed, so a step between them only
+\* applies more. Two commands may run at once, and one that fails after the
+\* home recorded its interval applies nothing, which up to the point it
+\* matters is the same as applying it later.
+\*
+\* Without HereAppliesPending (the code at 826ba83a, HS-2): Purge.fence_here/4
+\* and History.pause_here/3 applied the command's own interval alone, and
+\* mark_applied recorded its id as the mark.
 ApplyHere ==
-    \E p \in hereApply :
-        /\ hereApply' = hereApply \ {p}
-        /\ raw' = [raw EXCEPT ![HomeMachine] = Without(HomeMachine, {p})]
-        /\ fence' = [fence EXCEPT ![HomeMachine] = @ \cup {p}]
-        /\ mark' = [mark EXCEPT ![HomeMachine] = Raised(HomeMachine, {p})]
-        /\ UNCHANGED <<recorded, sent, applying, connected, away, stage, fmark, fstamps, answer,
-                       notes, purges, nextId>>
+    /\ HomeMachine \in Computers
+    /\ applying[HomeMachine] = {}
+    /\ \/ /\ HereAppliesPending
+          /\ Pending(HomeMachine) /= {}
+          /\ ApplyHereOf(Pending(HomeMachine))
+          /\ UNCHANGED hereApply
+       \/ /\ ~HereAppliesPending
+          /\ \E p \in hereApply :
+                /\ hereApply' = hereApply \ {p}
+                /\ ApplyHereOf({p})
+    /\ UNCHANGED <<recorded, sent, connected, away, stage, fmark, fstamps, answer, notes, purges,
+                   nextId>>
+
 
 \* Delivery.deliver/1 to a connected computer (never the home's own machine):
 \* MachineService.run/4 -> Spool.apply_at/3 applies every interval it has not,

@@ -23,14 +23,21 @@ defmodule FermixCore.ComputerHistory.Submission do
   - A machine that summarizes on its own device sends the note alone, and the
     home stores it under the same checks.
 
+  - **Off means no call** (§8.5): a sitting from a machine that no longer
+    contributes (`ComputerHistory.contributors/1`: this machine while it
+    records, a computer while its `history` offer is on and no `/history off`
+    naming it waits) is refused `off`, before any provider is asked.
+
   The answer is `summarized`, `abstained`, `no_signal` or `refused` with its
   reason: `purged` or `paused` (with the intervals to apply), `invalid` (never
-  sent again), or `no_summarizer`, `route_not_permitted`,
+  sent again), or `off`, `no_summarizer`, `route_not_permitted`,
   `summarizer_unavailable` or `store` (sent again later).
 
   Options: `:repo`, `:config` (the home's history settings, `Config.current/0`),
-  `:now`, and a test's `:adapter` (its provider) and `:route_opts` (what the
-  route resolves with).
+  `:now`, `:contributors` (the machines that contribute, or a function that
+  answers them as `ComputerHistory.contributors/1` does, in its place), and a
+  test's `:adapter` (its provider) and
+  `:route_opts` (what the route resolves with).
   """
 
   require Logger
@@ -59,6 +66,7 @@ defmodule FermixCore.ComputerHistory.Submission do
           :purged
           | :paused
           | :invalid
+          | :off
           | :no_summarizer
           | :route_not_permitted
           | :summarizer_unavailable
@@ -81,6 +89,7 @@ defmodule FermixCore.ComputerHistory.Submission do
     with :ok <- valid(payload),
          :ok <- unnoted(repo, computer, payload),
          :ok <- unrefused(repo, computer, payload),
+         :ok <- contributing(repo, computer, opts),
          :ok <- with_signal(payload) do
       payload |> make(computer, repo, opts) |> logged(computer, payload)
     else
@@ -189,6 +198,25 @@ defmodule FermixCore.ComputerHistory.Submission do
     case Repo.computer_history_home(:intervals_after, args, server: repo) do
       {:ok, pending} -> %{status: :refused, reason: reason, intervals: pending}
       {:error, error} -> store_error(error)
+    end
+  end
+
+  # Off means no further provider call for that machine's history (M97 §8.5):
+  # a sitting from a machine that no longer contributes is refused, and held
+  # there. Asked after the purge check, so a sitting in a purged window still
+  # brings its machine the intervals to apply.
+  defp contributing(repo, computer, opts) do
+    case contributors(repo, opts) do
+      {:ok, machines} -> if computer in machines, do: :ok, else: {:answer, refused(:off)}
+      {:error, reason} -> {:answer, store_error(reason)}
+    end
+  end
+
+  defp contributors(repo, opts) do
+    case Keyword.fetch(opts, :contributors) do
+      {:ok, machines} when is_list(machines) -> {:ok, machines}
+      {:ok, read} when is_function(read, 0) -> read.()
+      :error -> FermixCore.ComputerHistory.contributors(repo: repo)
     end
   end
 
@@ -319,6 +347,7 @@ defmodule FermixCore.ComputerHistory.Submission do
     :purged,
     :paused,
     :invalid,
+    :off,
     :no_summarizer,
     :route_not_permitted,
     :summarizer_unavailable,

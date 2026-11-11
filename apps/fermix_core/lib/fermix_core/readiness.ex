@@ -92,6 +92,15 @@ defmodule FermixCore.Readiness do
   # Slack over Socket Mode (M75) needs the app-level token where the webhook
   # needs the signing secret, so it has a sentence of its own.
   @slack_socket_action "Add the Slack bot token and app-level token in Channels settings."
+  # The rows whose sentence the engine publishes beside the key (M97 §6.4):
+  # the iMessage rows, which say what only the engine knows, the Mac of the
+  # home that carries Messages. Every other row's words are each surface's.
+  @published_sentences ~w(channel:imessage:helper channel:imessage:carrier
+                          channel:imessage:mac_only channel:imessage:conflict
+                          channel:imessage:away)
+  # The rows that say a channel's computer is away rather than that setup is
+  # owed (M97 D4).
+  @away_keys ["channel:imessage:away"]
 
   @doc """
   The readiness of this engine's settings. `opts` names the host and the
@@ -179,6 +188,26 @@ defmodule FermixCore.Readiness do
   @spec gating_failures([failure()]) :: [failure()]
   def gating_failures(failures) when is_list(failures),
     do: Enum.filter(failures, &(Map.get(&1, :gating, true) == true))
+
+  @doc """
+  The engine's own sentence for `failure` where it publishes one beside the
+  detail key (M97 §6.4): the iMessage rows, which name the Mac of the home
+  that carries Messages where the engine knows it. Nil for every other row,
+  whose words each surface keeps by its detail key.
+  """
+  @spec sentence(failure()) :: String.t() | nil
+  def sentence(%{detail_key: detail_key, action: action})
+      when is_binary(detail_key) and is_binary(action),
+      do: if(detail_key in @published_sentences, do: action)
+
+  @doc """
+  Whether `failure` says a channel's computer is away (the Mac that carries
+  Messages, M97 D4) rather than that setup is owed: the channel is away
+  while that computer is, and its transport says when.
+  """
+  @spec away?(failure()) :: boolean()
+  def away?(%{detail_key: detail_key}) when is_binary(detail_key),
+    do: detail_key in @away_keys
 
   @doc "Whether no gating failure remains. The one definition of ready."
   @spec ready?() :: boolean()

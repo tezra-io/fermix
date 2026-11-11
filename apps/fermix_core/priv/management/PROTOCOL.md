@@ -701,7 +701,7 @@ daemon onto anything else.
 | `method` | Params | Result |
 |---|---|---|
 | `hello` | none | Supported range, method catalog, immutable engine identity, PID, and the loopback Setup endpoint. |
-| `overview.get` | none | Typed projection of readiness, health, daemon, provider, channels, memory, jobs, agents, realtime, and capability counts. |
+| `overview.get` | none | Typed projection of readiness, health, daemon, provider, channels, memory, jobs, agents, realtime, and capability counts. A channel's `status` is `away` while the computer that carries it is asleep or offline (iMessage on a server, through the Mac that carries Messages, M97 D4), as that channel reads it now; a readiness row that says so owes no setup, so it never makes the channel `setup_required`, which a row that does owe setup still does. |
 | `setup.session.create` | none | A one-use Setup URL and its absolute expiry. The durable token is never returned. An owner decision. |
 | `doctor.start` | `scope` (`local` \| `network`, default `local`) | A session view; the run continues in the background. In the device role the local scope, named or by default, runs on this computer, and the network scope is `unavailable` {`capability`: `doctor`, `sentence`}: its probes would call a provider with this computer's retired credentials. |
 | `doctor.get` | `session_id` | The session view with the checks that have landed so far. |
@@ -806,7 +806,7 @@ daemon onto anything else.
 | `computer.join.start` | `code` (text, at most 4,096 bytes: the code Add a computer opened) | This computer joins the home the code names (M97, *Adding a computer*): it makes its own key in the secret store, records the join (`device/join.json`, mode `0600`), becomes a device, and the engine restarts, dials the server and waits for the owner there; `home.status` then carries `join`. Answers `{joining: true, sentence}`. Refusals, each with `sentence`: `invalid_params` on `code` for a code Fermix did not open ("That is not a code Fermix opened. Copy the code again from Add a computer."), one for the owner's own server ("That code sets up a server of your own, so a computer cannot join with it. Use Add a computer in Always On.") and one that expired ("That code expired. Open a new one with Add a computer."); `unavailable` {`capability`: `computer`} for a computer that has a home of its own ("This computer already has a Fermix of its own (it holds <what>), so it cannot join another. Two homes cannot be merged.": any message, memory or scheduled job, a paired phone or computer, the moved marker, or a link to a server; nothing is deleted to make a home empty), one already joining, and a secret store that cannot keep the key. A refusal leaves nothing behind. An owner decision. Device-class: answered on the computer that asks. Gated with Always On. Minimum version `2`. |
 | `computer.join.cancel` | none | Ends this computer's join wherever it stands: the key it made and its record go, the engine restarts as its own home, and `{cancelled: true, sentence}` is the answer; `unavailable` {`capability`: `computer`} with "This computer is not joining a Fermix." when none is under way. `home.act`'s `cancel` on the joining screen does the same. An owner decision. Device-class. Gated with Always On. Minimum version `2`. |
 | `computer.disconnect` | `confirmed` (optional boolean) | This computer leaves the home it is linked to (M97): it tells the server (`mobile.devices.revoke` for its own id, over the link), which forgets it and closes its session, then deletes its key from the secret store, its link and what the server may use here, and the engine restarts; a computer that joined is its own home again, and the one a home moved from stays retired with its own copies of the server's backups. Answers `{disconnected: true, server_told, sentence}`. A server that cannot be told is `unavailable` {`capability`: `computer`, `sentence`: "Fermix could not tell your server. Disconnect anyway? Your server lists this computer until you remove it there.", `confirm`: true} and nothing changes; with `confirmed: true` the computer leaves anyway and `server_told` is false. A computer with no link is `unavailable` with "This computer is not connected to a Fermix." An owner decision. Device-class. Gated with Always On. Minimum version `2`. |
-| `computer.journal.list` | `limit` (integer 1 to 200, default 50), `before` (an invocation's id) | What Fermix on its server did on this computer (M97 §6.3), from this computer's own journal, which the server cannot edit: the app shows it as "What Fermix did on this computer". Answers `{entries, more}`, the newest first, at most `limit`, only those older than the invocation `before` when it is given; `more` is true while older ones remain. Each entry is `{id, at, finished_at, capability, op, target, origin, status, refusal, result_bytes, duration_ms}`: `at` when it came (an RFC 3339 instant), `finished_at` when it ended, null while it runs; `target` a short description of what it acted on (a path, a host or an action, never content); `origin` the kind of turn that asked (`chat`, `voice`, `scheduled`, `cue`, `worker`, `background`, or `computer` for a computer's own request); `status` `ok`, `failed`, `refused`, `timed_out`, `cancelled` or `unknown` (the engine stopped while it ran), null while it runs; `refusal` (`off`, `unavailable`, `outside_sandbox`, `not_attended`, `stopped_here`, `busy`, `stale_epoch`) only when refused, else null; `result_bytes` and `duration_ms` null while it runs. A request refused before it ran opens and ends at once. The journal keeps the newest 2,000 invocations of the last 7 days. A computer that never moved, and a server, answer no entries. Refusals: a parameter it does not take, a `limit` outside its range or a `before` that is not an id is `invalid_params` with `field`; a journal this computer cannot read is `unavailable` with `sentence` ("This computer's record of what Fermix did here could not be read. See the daemon log."). Device-class: answered on the computer that asks; a server refuses a forwarded one (`device_class_method`). Gated with Always On (*The Always On summary*). Minimum version `2`. |
+| `computer.journal.list` | `limit` (integer 1 to 200, default 50), `before` (an invocation's id) | What Fermix on its server did on this computer (M97 §6.3), from this computer's own journal, which the server cannot edit: the app shows it as "What Fermix did on this computer". Answers `{entries, more}`, the newest first, at most `limit`, only those older than the invocation `before` when it is given; `more` is true while older ones remain. Each entry is `{id, at, finished_at, capability, capability_label, op, op_label, target, origin, status, refusal, result_bytes, duration_ms}`: `capability_label` and `op_label` the owner's words for `capability` and `op`, from the capability's own module, lower case as an offer's `label` (`commands` and `run a command`, `files` and `write a file`), each null where this computer's engine has no words for its id (an older journal row), which a client shows as the id, as it does for an engine before them, which sends neither; `at` when it came (an RFC 3339 instant), `finished_at` when it ended, null while it runs; `target` a short description of what it acted on (a path, a host or an action, never content); `origin` the kind of turn that asked (`chat`, `voice`, `scheduled`, `cue`, `worker`, `background`, or `computer` for a computer's own request); `status` `ok`, `failed`, `refused`, `timed_out`, `cancelled` or `unknown` (the engine stopped while it ran), null while it runs; `refusal` (`off`, `unavailable`, `outside_sandbox`, `not_attended`, `stopped_here`, `busy`, `stale_epoch`) only when refused, else null; `result_bytes` and `duration_ms` null while it runs. A request refused before it ran opens and ends at once. The journal keeps the newest 2,000 invocations of the last 7 days. A computer that never moved, and a server, answer no entries. Refusals: a parameter it does not take, a `limit` outside its range or a `before` that is not an id is `invalid_params` with `field`; a journal this computer cannot read is `unavailable` with `sentence` ("This computer's record of what Fermix did here could not be read. See the daemon log."). Device-class: answered on the computer that asks; a server refuses a forwarded one (`device_class_method`). Gated with Always On (*The Always On summary*). Minimum version `2`. |
 | `computer.screen.stop` | none | The person at this computer stops Fermix on its server controlling its screen (M97 §7.4): the Stop beside the mark `home.status`'s `screen` draws. The server's hold ends at once: held keys and buttons are released, the helper stops, the mark goes (`screen` null, told as `home_status_changed`), and the server hears that the person at this computer stopped it and tells the model so; the server's session on this screen ends and that session is refused from then on, so the screen is used again only when the owner asks again. Answers `{stopped}`, false when the server held nothing. Switching the master switch or the screen switch off in the `computer` section ends the hold the same way. A parameter it does not take is `invalid_params` with `field`. Device-class: answered on the computer that asks. Gated with Always On. Minimum version `2`. |
 | `accessories.status` | none; or `after` (a `key`) and `wait_ms` (at most 25,000) together, to wait for a change | The accessory picture this Mac draws (see *Accessories*): `key`, `state` (`off`, `needs_local_primary`, `not_running`, `on`), `sentence`, `enabled`, `kinds`, `voice`, `voice_device`, `ports`, `accessories`, `pairing` and `call`. Answered in every role and with accessories off. With `after` and `wait_ms` it is answered once its `key` is not `after`, or when `wait_ms` passed. Device-class. Minimum version `2`. |
 | `accessories.pair.start` | `path` | Opens the port the owner selected for pairing, ending whatever held it, and answers the status. A port must be listed (`invalid_params` on `path`) and not released for a firmware update. An owner decision. Device-class. Minimum version `2`. |
@@ -1191,7 +1191,14 @@ Notes that the shapes alone do not carry:
   advisory because the daemon's first boot seeds it from the machine (the
   system time zone, the account's full name, a default style), so its row
   fires only where the machine could not answer; engines before this gated on
-  it, so a client keeps reading `gating` rather than assuming it.
+  it, so a client keeps reading `gating` rather than assuming it. A failure
+  also carries `sentence`, the engine's own words where it publishes them,
+  which a client shows in place of its own for the `detail_key`: the iMessage
+  rows (`channel:imessage:helper`, `:carrier`, `:mac_only`, `:conflict` and
+  `:away`), which name the Mac of the home that carries Messages where the
+  engine knows it ("studio-mac, the Mac that carries Messages, is asleep or
+  offline."). It is null on every other row, whose words a client keeps by
+  its key, and absent from an engine before it, which a client reads as null.
 - **Restart truth has one owner.** `restart.required` and `restart.reasons` come
   from the daemon's two baselines: the application environment captured at boot,
   and the parsed settings file as this daemon last saw it. The sentence for each
@@ -1910,6 +1917,24 @@ Notes that the shapes alone do not carry:
   takes `snapshot_s3_access_key_id` and `snapshot_s3_secret_access_key`
   though no row shows them). Neither row needs a restart: the scheduler reads
   the section at every run and plans again when it is saved.
+- **`computer_history` is this computer's part of computer history** (M97),
+  answered on this computer (*After a move*): `computer_history_enabled`
+  (whether it records), `computer_history_apps` (which apps), both in
+  `[fermix_core.computer_history]` of this computer's `machine.toml`, and
+  `computer_history_summarizer` (read-only), what this computer's own
+  sittings are summarized with: `local` where its `machine.toml` says
+  `summarizer = "local"` (it makes its own notes, and where it is the home,
+  its roll-up stays on it too), else the home's route (`default_provider`,
+  `local`, or a pinned provider's id). The home's route and the providers
+  that may receive summaries (`summarizer`, `remote_summaries` in the home's
+  `config.toml`) have no row, so no write here reaches them. The switch's
+  footer says what switching history on agrees to, true on this computer:
+  with no server, that the raw record stays here for 48 hours and each
+  finished sitting is summarized by the provider it names (or on this Mac);
+  where this computer's history goes to its server (a computer linked to it,
+  or the server itself, where Always On is offered), that each sitting is
+  sent there (or only its summary, where this computer makes its own notes)
+  and summaries from every computer can be recalled in chat.
 - **`computer` is a linked computer's own section** (M97), under pane
   `always_on`, titled `This computer`: what Fermix on the server may use on
   this computer, `[fermix_core.computer]` in this computer's `machine.toml`,
@@ -2253,10 +2278,13 @@ own client tests against the same golden frames the daemon is tested against.
   `mobile.pair.get` one per session state, for `job.get` a browser download
   both completed and failed, for `computer_use.permissions.get` a Mac
   answer and a Linux one, for `home.status` one per family of the Always On
-  summary's states and three of M97's (a server listing its two computers,
+  summary's states and four of M97's (a server listing its two computers,
   `home_status_server_computers`; a linked Mac waiting for the review of
-  what its server may use, `home_status_on_review`; and `ready` with what the
-  Mac keeps on for its server after the move, `home_status_ready_keeps_on`),
+  what its server may use, `home_status_on_review`; `ready` with what the
+  Mac keeps on for its server after the move, `home_status_ready_keeps_on`;
+  and the linked Mac of `home_status_on` while its server controls its
+  screen, with the mark's `screen`, `home_status_on_screen`, where every
+  other golden has no `screen`, which a client reads as null),
   for `accessories.status` one per family of the setup and
   call states (off, needs a local Mac primary, a port with no Fermix answer,
   incompatible firmware, pairing with its code, a pairing just done, a paired

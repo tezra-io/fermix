@@ -4,13 +4,18 @@ defmodule FermixCore.ComputerHistory.Summarizer.Scheduler do
   §8.1), cloned from `SkillCuration.Scheduler`: a tiny GenServer ticking on a
   fixed interval, first tick shortly after boot, a monitored Task per cycle.
 
-  - **Where this engine records** (`:uplink` given and `:recording_fun` true):
-    `ComputerHistory.Sittings` sends each closed sitting to the home, under an
-    atomic claim in this machine's store with stale-claim recovery, so two
-    daemons on one machine never send the same sitting at once.
-  - **Where this engine is the home** (`:repo` given): the daily roll-up across
-    every machine (`Summarizer.run_rollup/1`), and telling each connected
-    computer of the purges and pauses from chat it has not applied
+  - **Where this engine records** (`:uplink` and `:spool` given and
+    `:recording_fun` true): `ComputerHistory.Sittings` sends each closed
+    sitting to the home, under an atomic claim in this machine's store with
+    stale-claim recovery, so two daemons on one machine never send the same
+    sitting at once. A computer (`:report` given) then sends its home the
+    report of its recorder (`ComputerHistory.Report`), from the same cycle.
+  - **Where this engine is the home** (`:repo` given): this machine applies
+    any purge or pause from chat it has not yet applied, when it keeps a store
+    (`Delivery.apply_here/1`: one whose own apply failed is applied here, at
+    the latest); the daily roll-up across the machines that still contribute
+    (`Summarizer.run_rollup/1`); and telling each connected computer of the
+    purges, pauses and offs from chat it has not applied
     (`ComputerHistory.Delivery`), which is how one that was away gets them.
 
   A Mac that is its own home runs both; a computer whose home is a server runs
@@ -24,7 +29,9 @@ defmodule FermixCore.ComputerHistory.Summarizer.Scheduler do
   require Logger
 
   alias FermixCore.ComputerHistory
+  alias FermixCore.ComputerHistory.Capturer
   alias FermixCore.ComputerHistory.Delivery
+  alias FermixCore.ComputerHistory.Report
   alias FermixCore.ComputerHistory.Sittings
   alias FermixCore.ComputerHistory.Spool
   alias FermixCore.ComputerHistory.Summarizer
@@ -53,7 +60,9 @@ defmodule FermixCore.ComputerHistory.Summarizer.Scheduler do
       spool: Keyword.get(opts, :spool, Spool),
       repo: Keyword.get(opts, :repo, Repo),
       uplink: Keyword.get(opts, :uplink),
+      report: Keyword.get(opts, :report),
       recording_fun: Keyword.get(opts, :recording_fun, &ComputerHistory.operative?/0),
+      status_fun: Keyword.get(opts, :status_fun, fn -> Capturer.status() end),
       task_supervisor: Keyword.get(opts, :task_supervisor, FermixCore.TaskSupervisor),
       tick_interval_ms: Keyword.get(opts, :tick_interval_ms, @tick_interval_ms),
       claim_stale_after_ms: Keyword.get(opts, :claim_stale_after_ms, @claim_stale_after_ms),
@@ -61,6 +70,7 @@ defmodule FermixCore.ComputerHistory.Summarizer.Scheduler do
       run_sittings_fun: Keyword.get(opts, :run_sittings_fun, &Sittings.run/1),
       run_rollup_fun: Keyword.get(opts, :run_rollup_fun, &Summarizer.run_rollup/1),
       deliver_fun: Keyword.get(opts, :deliver_fun, &Delivery.deliver/1),
+      apply_here_fun: Keyword.get(opts, :apply_here_fun, &Delivery.apply_here/1),
       timer_enabled?: Keyword.get(opts, :timer_enabled, true)
     }
 
@@ -79,6 +89,7 @@ defmodule FermixCore.ComputerHistory.Summarizer.Scheduler do
   # -- the machine's half ------------------------------------------------------------
 
   defp maybe_send(%{uplink: nil}, _now), do: :ok
+  defp maybe_send(%{spool: nil}, _now), do: :ok
 
   defp maybe_send(state, now) do
     if state.recording_fun.(), do: claim_and_send(state, now), else: :ok
@@ -87,7 +98,13 @@ defmodule FermixCore.ComputerHistory.Summarizer.Scheduler do
   defp claim_and_send(state, now) do
     case Spool.claim(now, state.claim_stale_after_ms, server: state.spool) do
       {:ok, _claimed} ->
-        result = run_monitored(state, fn -> state.run_sittings_fun.(sittings_opts(state)) end)
+        result =
+          run_monitored(state, fn ->
+            sent = state.run_sittings_fun.(sittings_opts(state))
+            report(state)
+            sent
+          end)
+
         _ = Spool.release(DateTime.utc_now(), server: state.spool)
         log_sittings(result)
 
@@ -101,15 +118,50 @@ defmodule FermixCore.ComputerHistory.Summarizer.Scheduler do
 
   defp sittings_opts(state), do: [uplink: state.uplink, spool: state.spool]
 
+  # A computer's report of its recorder, at most once a tick, after its
+  # sittings and in the same process (one request waits at a time). Its
+  # failure is the next tick's to repair: a report is a status, never data.
+  defp report(%{report: nil}), do: :ok
+
+  defp report(state) do
+    built =
+      Report.build(
+        spool: state.spool,
+        now_ms: System.system_time(:millisecond),
+        recording?: state.recording_fun.(),
+        status: state.status_fun.()
+      )
+
+    with {:ok, report} <- built, :ok <- state.report.(report) do
+      :ok
+    else
+      {:error, reason} -> Logger.info("computer_history report not sent: #{inspect(reason)}")
+    end
+  end
+
   # -- the home's half ---------------------------------------------------------------
 
   defp maybe_roll_up(%{repo: nil}), do: :ok
 
   defp maybe_roll_up(state) do
+    apply_here(state)
     spool = if state.uplink && state.recording_fun.(), do: state.spool, else: nil
     result = run_monitored(state, fn -> state.run_rollup_fun.(repo: state.repo, spool: spool) end)
     log_rollup(result)
     log_delivery(run_monitored(state, fn -> state.deliver_fun.(repo: state.repo) end))
+  end
+
+  # Whether or not it records now: a store that holds raw events from before an
+  # off still owes every purge its delete.
+  defp apply_here(%{spool: nil}), do: :ok
+
+  defp apply_here(state) do
+    case run_monitored(state, fn ->
+           state.apply_here_fun.(repo: state.repo, spool: state.spool)
+         end) do
+      {:ok, _events} -> :ok
+      {:error, reason} -> Logger.warning("computer_history: not applied here: #{inspect(reason)}")
+    end
   end
 
   # Monitored Task bounded by the cycle timeout, so a crash or hang becomes a

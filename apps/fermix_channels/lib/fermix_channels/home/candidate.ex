@@ -583,7 +583,15 @@ defmodule FermixChannels.Home.Candidate do
        ) do
     {:ok, pair} = Files.recipient_pair(state.home)
     {:ok, destination} = Files.destination(state.home)
-    facts = %{"destination" => destination, "recovery_recipient" => move["recovery_recipient"]}
+
+    # The source's own device id, when it stays as a linked computer: the
+    # home's own history notes become that computer's (M97 §8.4).
+    facts = %{
+      "destination" => destination,
+      "recovery_recipient" => move["recovery_recipient"],
+      "device_id" => move["device_id"]
+    }
+
     incoming = Files.incoming_path(state.home)
     staging = stage_fun(state, incoming, pair, facts)
     phase = MoveTelemetry.phase(:candidate, "staging", move_id, state.clock)

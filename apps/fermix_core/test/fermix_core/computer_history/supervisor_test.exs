@@ -36,7 +36,7 @@ defmodule FermixCore.ComputerHistory.SupervisorTest do
   describe "supervisor structure" do
     test "supervises the machine store first, then the runtime children and Retention" do
       {:ok, {flags, children}} =
-        HistorySupervisor.init(timer_enabled: false, engine_role: :primary)
+        HistorySupervisor.init(timer_enabled: false, engine_role: :primary, recorder?: true)
 
       # rest_for_one so a DynamicSupervisor crash restarts the Controller after it,
       # and a store crash restarts everything that reads it.
@@ -53,7 +53,7 @@ defmodule FermixCore.ComputerHistory.SupervisorTest do
 
     test "on the home, Retention sweeps the home's notes too" do
       {:ok, {_flags, children}} =
-        HistorySupervisor.init(timer_enabled: false, engine_role: :primary)
+        HistorySupervisor.init(timer_enabled: false, engine_role: :primary, recorder?: true)
 
       %{start: {Retention, :start_link, [opts]}} = child(children, Retention)
       assert Keyword.fetch!(opts, :repo) == Repo
@@ -63,7 +63,7 @@ defmodule FermixCore.ComputerHistory.SupervisorTest do
     # it keeps no notes, so its Retention has no home store.
     test "on a computer, the same children run and Retention has no home store" do
       {:ok, {_flags, children}} =
-        HistorySupervisor.init(timer_enabled: false, engine_role: :device)
+        HistorySupervisor.init(timer_enabled: false, engine_role: :device, recorder?: true)
 
       assert length(children) == 4
       %{start: {Retention, :start_link, [opts]}} = child(children, Retention)
@@ -75,11 +75,87 @@ defmodule FermixCore.ComputerHistory.SupervisorTest do
         HistorySupervisor.init(
           timer_enabled: false,
           engine_role: :primary,
+          recorder?: true,
           spool_path: "/elsewhere/device/history.db"
         )
 
       assert %{start: {Spool, :start_link, [[path: "/elsewhere/device/history.db"]]}} =
                child(children, Spool)
+    end
+
+    # M97 §8.3: only a system with a recorder keeps a store of raw history.
+    test "a home with no recorder keeps no store, and its children are told so" do
+      {:ok, {_flags, children}} =
+        HistorySupervisor.init(
+          timer_enabled: false,
+          engine_role: :primary,
+          recorder?: false,
+          always_on?: true
+        )
+
+      assert Enum.map(children, & &1.id) == [
+               FermixCore.ComputerHistory.DynamicSupervisor,
+               Controller,
+               Retention
+             ]
+
+      %{start: {Retention, :start_link, [retention]}} = child(children, Retention)
+      assert Keyword.fetch!(retention, :spool) == nil
+      %{start: {Controller, :start_link, [controller]}} = child(children, Controller)
+      assert Keyword.fetch!(controller, :spool) == nil
+    end
+
+    # A Linux install with no notes and no Always On: nothing here uses it.
+    test "nothing starts where nothing uses it" do
+      assert :ignore =
+               HistorySupervisor.init(
+                 timer_enabled: false,
+                 engine_role: :primary,
+                 recorder?: false,
+                 always_on?: false,
+                 holds_notes?: false
+               )
+
+      assert :ignore =
+               HistorySupervisor.init(
+                 timer_enabled: false,
+                 engine_role: :device,
+                 recorder?: false,
+                 always_on?: true,
+                 holds_notes?: true
+               )
+    end
+
+    test "a home that holds notes runs its half, with no store", %{unique: unique} do
+      repo = :"ch_supervisor_notes_#{unique}"
+      dir = FermixTestSupport.SafeRm.make_tmp_dir!("ch-supervisor-notes")
+      on_exit(fn -> FermixTestSupport.SafeRm.rm_rf(dir) end)
+
+      start_supervised!(
+        Supervisor.child_spec(
+          {Repo, name: repo, enabled: true, database_path: Path.join(dir, "memory.db")},
+          id: repo
+        )
+      )
+
+      opts = [timer_enabled: false, engine_role: :primary, recorder?: false, always_on?: false]
+      assert :ignore = HistorySupervisor.init([repo: repo] ++ opts)
+
+      {:ok, _id} =
+        Repo.computer_history_insert_memory(
+          %{
+            created_at: 2,
+            provenance_from_ts: 1,
+            provenance_to_ts: 2,
+            summary: "planned the week",
+            model: "llama3",
+            event_count: 1
+          },
+          server: repo
+        )
+
+      assert {:ok, {_flags, children}} = HistorySupervisor.init([repo: repo] ++ opts)
+      refute child(children, Spool)
     end
 
     test "exposes the DynamicSupervisor name" do

@@ -4,6 +4,8 @@ defmodule FermixCore.HealthTest do
   alias FermixCore.BuildInfo
   alias FermixCore.Health
   alias FermixCore.Home.Role
+  alias FermixCore.IMessage
+  alias FermixCore.Readiness
   alias FermixCore.Setup.ConfigStore
   alias FermixCore.Setup.Wizard
 
@@ -438,6 +440,49 @@ defmodule FermixCore.HealthTest do
       refute report.status == :degraded
     end
 
+    # M97 D4: the boot report holds the readiness rows as they were read, the
+    # row that says the Mac that carries Messages is away among them. That row
+    # owes no setup: the channel is away while that Mac is, as its transport
+    # says now, and ready once it is back. A row that owes setup, iMessage's
+    # or another channel's, still makes its channel setup_required.
+    test "iMessage's away row owes no setup: away while its Mac is, ready once it is back" do
+      Application.put_env(:fermix_channels, :imessage,
+        enabled: true,
+        owner_user_id: "+15551234567"
+      )
+
+      Application.put_env(:fermix_channels, :telegram, enabled: true, mode: :polling)
+      studio = %{device_id: "d-7", name: "studio Mac", connected: false}
+
+      rows = Readiness.report(macos?: false, imessage_carrier: {:computer, studio}).failures
+      assert Enum.any?(rows, &(&1.detail_key == "channel:imessage:away"))
+      assert Enum.any?(rows, &(&1.detail_key == "channel:telegram"))
+
+      away = %{status: :away, detail: IMessage.away_sentence("studio Mac")}
+      asleep = health_with(rows, fn _name -> self() end, imessage_transport(away))
+
+      assert %{name: "imessage", status: :away, transport: ^away} = channel(asleep, "imessage")
+      assert %{name: "telegram", status: :setup_required} = channel(asleep, "telegram")
+
+      back = %{status: :ready, detail: nil}
+      awake = health_with(rows, fn _name -> self() end, imessage_transport(back))
+      assert %{name: "imessage", status: :ready} = channel(awake, "imessage")
+
+      # No Mac of the home carries Messages: setup is owed, whatever the
+      # transport says.
+      none = Readiness.report(macos?: false, imessage_carrier: :none).failures
+      assert Enum.any?(none, &(&1.detail_key == "channel:imessage:carrier"))
+
+      unset =
+        health_with(
+          none,
+          fn _name -> self() end,
+          imessage_transport(%{status: :degraded, detail: IMessage.none_sentence()})
+        )
+
+      assert %{name: "imessage", status: :setup_required} = channel(unset, "imessage")
+    end
+
     test "probes the acp transport through its endpoint, not its supervisor" do
       previous = Application.get_env(:fermix_channels, :acp)
       Application.put_env(:fermix_channels, :acp, enabled: true, mode: :gateway)
@@ -454,6 +499,26 @@ defmodule FermixCore.HealthTest do
   end
 
   defp channel(report, name), do: Enum.find(report.channels, &(&1.name == name))
+
+  defp health_with(failures, process_resolver, transport_health) do
+    Health.report(
+      boot_report: %{
+        status: :ready,
+        failures: failures,
+        config_path: ConfigStore.path(),
+        restart_required?: false
+      },
+      process_resolver: process_resolver,
+      transport_health: transport_health
+    )
+  end
+
+  defp imessage_transport(health) do
+    fn
+      :imessage_health_provider -> health
+      _other -> nil
+    end
+  end
 
   defp restore_env(app, key, nil), do: Application.delete_env(app, key)
   defp restore_env(app, key, value), do: Application.put_env(app, key, value)

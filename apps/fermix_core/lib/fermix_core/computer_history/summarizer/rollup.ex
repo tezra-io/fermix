@@ -56,7 +56,8 @@ defmodule FermixCore.ComputerHistory.Summarizer.Rollup do
   @doc """
   Run the roll-up if it is due and there is anything new to roll up. `opts`
   carries `:now` (UTC DateTime), `:model` (the resolved route's model, stored on
-  every thread row) and optionally `:timezone`. `call_fun` is the caller's pinned,
+  every thread row) and optionally `:timezone` and `:machines` (whose notes it
+  reads: `:all`, the default, or the ids of the machines that contribute). `call_fun` is the caller's pinned,
   gate-checked provider call — the roll-up never resolves a route of its own and
   never fails over.
 
@@ -72,7 +73,8 @@ defmodule FermixCore.ComputerHistory.Summarizer.Rollup do
     with {:ok, state} <- Repo.computer_history_ensure_state(server: repo),
          true <- due?(state, now_ms),
          {:ok, purge_mark} <- Repo.computer_history_purge_mark(server: repo),
-         {:ok, [_first | _rest] = notes} <- read_notes(repo, state.last_rollup_ts),
+         {:ok, [_first | _rest] = notes} <-
+           read_notes(repo, state.last_rollup_ts, Keyword.get(opts, :machines, :all)),
          {:ok, threads} <- Repo.computer_history_active_threads(@max_active_threads, server: repo) do
       run(repo, opts, call_fun, notes, threads, read_scope(purge_mark, notes, threads), now_ms)
     else
@@ -94,12 +96,14 @@ defmodule FermixCore.ComputerHistory.Summarizer.Rollup do
 
   # The store hands back the NEWEST notes within the bound (that is the half most
   # likely to describe current work); the roll-up reads them chronologically.
-  defp read_notes(repo, last_ts) do
+  # Only the notes of the machines that still contribute (M97 §8.5): a machine
+  # whose history went off reaches no roll-up.
+  defp read_notes(repo, last_ts, machines) do
     since = last_ts || 0
+    read = [server: repo, machines: machines]
 
-    with {:ok, notes} <-
-           Repo.computer_history_session_notes_since(since, @max_new_notes, server: repo),
-         {:ok, total} <- Repo.computer_history_count_session_notes_since(since, server: repo) do
+    with {:ok, notes} <- Repo.computer_history_session_notes_since(since, @max_new_notes, read),
+         {:ok, total} <- Repo.computer_history_count_session_notes_since(since, read) do
       log_note_bound(length(notes), total)
       {:ok, Enum.reverse(notes)}
     end

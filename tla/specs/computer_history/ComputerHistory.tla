@@ -76,7 +76,7 @@
 \* SOURCE: apps/fermix_core/lib/fermix_core/computer_history/purge.ex @ 5afcc7d79bec
 \* SOURCE: apps/fermix_core/lib/fermix_core/computer_use/sidecar_installer.ex @ a2681ba9c881
 \* SOURCE: apps/fermix_core/lib/fermix_core/memory/repo/computer_history_sql.ex @ 31704e85435a
-\* SOURCE: apps/fermix_core/lib/fermix_core/computer_history/spool.ex#call,handle_call,insert_events,state,set_pause_until,fence,apply_intervals,apply_interval,pause_from,later_pause,mark_applied @ 0b6533a7fa90
+\* SOURCE: apps/fermix_core/lib/fermix_core/computer_history/spool.ex#call,handle_call,insert_events,state,set_pause_until,fence,apply_intervals,apply_interval,pause_from,mark_applied @ 0b6533a7fa90
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/gateway/commands/history.ex @ e9d1424e04a6
 EXTENDS Naturals, Sequences, FiniteSets
 
@@ -126,9 +126,9 @@ CONSTANTS
                         \* best-effort flush (capturer.ex:603-605). Off, it is the code before
                         \* the fix: the flush first, then the stop
     PauseFences         \* /history pause applies its window [now, until] to this machine's store
-                        \* before it stores the horizon (history.ex:495, :509-515 ->
-                        \* Spool.apply_intervals -> fence_window, spool.ex:178-181, then
-                        \* pause_from/later_pause, :184-202): rows stamped inside it are deleted
+                        \* before it stores the horizon (history.ex apply_here/2 ->
+                        \* Delivery.apply_here/1 -> Spool.apply_intervals -> fence_window, then
+                        \* pause_from -> raise_pause_until): rows stamped inside it are deleted
                         \* and the insert refuses later ones. Off, the pause is the horizon alone,
                         \* the code before 826ba83a
 
@@ -692,9 +692,9 @@ CommandUnchanged ==
 \* The owner sends /history pause <d>: now is read and until = now + d
 \* (history.ex:476-477). pause_everywhere records the pause for every machine
 \* on the home (pause_window/5, in memory.db, not this store: folded in), then
-\* pause_here applies it to this machine's store (history.ex:495, :509-515 ->
-\* Spool.apply_intervals -> apply_interval -> fence, spool.ex:168-181 ->
-\* fence_window, computer_history_sql.ex:928-950): one BEGIN IMMEDIATE
+\* apply_here applies it to this machine's store, with any earlier interval
+\* this machine owes (history.ex apply_here/2 -> Delivery.apply_here/1 ->
+\* Spool.apply_intervals -> apply_interval -> fence -> fence_window): one BEGIN IMMEDIATE
 \* transaction that deletes the rows stamped in [now, until] and records the
 \* window in the store's fence. With PauseFences off, the step only reads now:
 \* the pause before 826ba83a, the horizon alone.
@@ -712,10 +712,9 @@ PauseFence(d) ==
     /\ CommandUnchanged
     /\ GhostsUnchanged
 
-\* pause_from -> later_pause (spool.ex:184-202) stores the horizon, unless a
-\* later one already is: Spool.state, then Spool.set_pause_until, two calls
-\* folded into one step, as no other writer of the horizon is in scope. The
-\* mark written after it (mark_applied, :204-209) is not read here.
+\* pause_from -> ComputerHistorySql.raise_pause_until/2 stores the horizon,
+\* unless a later one already is, in one write that never lowers it. The mark
+\* written after it (mark_applied) is not read here.
 PauseSet ==
     /\ pausePc = "fenced"
     /\ pauseUntil' = (CHOOSE win \in pauseWin : TRUE).hi
@@ -739,9 +738,9 @@ PauseReply ==
 \* The owner sends /history purge <w>: Purge.purge takes now and the window
 \* [now - w, now] (purge.ex:60-63, :106). purge_notes/5 first deletes the
 \* home's notes in it and records the home's interval (memory.db, not this
-\* store: folded in); then fence_here/4 applies it to this machine's store
-\* (purge.ex:86-97 -> Spool.apply_intervals -> fence_window,
-\* computer_history_sql.ex:928-950): one BEGIN IMMEDIATE transaction that
+\* store: folded in); then apply_here/3 applies it to this machine's store,
+\* with any earlier interval this machine owes (purge.ex -> Delivery.apply_here/1
+\* -> Spool.apply_intervals -> fence_window): one BEGIN IMMEDIATE transaction that
 \* deletes the spool rows in the window (:938) and records the interval
 \* (:945), on the same single writer as the insert. The window is fixed at
 \* the command's start, so an event captured between the home's transaction

@@ -372,6 +372,23 @@ defmodule FermixCore.Memory.Repo.ComputerHistorySql do
     end
   end
 
+  # Migration 60 (M97 §8.5): each machine's row on the home also keeps when the
+  # owner asked from chat that its history go off and it has not yet said it
+  # did, and the last report it sent of its recorder, its unsent sittings and its
+  # coverage, with when it came (counts and a state word, never raw text).
+  @reports_columns [
+    {"computer_history_computers", "off_requested_at", "INTEGER"},
+    {"computer_history_computers", "report", "TEXT"},
+    {"computer_history_computers", "report_at", "INTEGER"}
+  ]
+
+  @doc """
+  Migration 60, in `conn`'s open transaction: each column of the machines' rows
+  is added where it is missing. Safe to run again.
+  """
+  @spec reports_schema(term()) :: :ok | {:error, term()}
+  def reports_schema(conn), do: add_missing_columns(conn, @reports_columns)
+
   defp add_missing_columns(conn, columns) do
     Enum.reduce_while(columns, :ok, fn column, :ok ->
       case add_missing_column(conn, column) do
@@ -1220,35 +1237,54 @@ defmodule FermixCore.Memory.Repo.ComputerHistorySql do
   ones that reach it, and the rest stay in the journal. The caller re-orders for
   rendering.
   """
-  @spec session_notes_since(term(), integer(), pos_integer()) ::
+  @spec session_notes_since(term(), integer(), pos_integer(), machines()) ::
           {:ok, [map()]} | {:error, term()}
-  def session_notes_since(conn, since_ts, limit)
+  def session_notes_since(conn, since_ts, limit, machines \\ :all)
       when is_integer(since_ts) and is_integer(limit) and limit > 0 do
+    {machine_sql, machine_params} = machines_clause(machines)
+
     sql =
       "SELECT #{@memory_read_select} FROM computer_history_memories " <>
-        "WHERE superseded_at IS NULL AND kind = 'session' AND created_at > ? " <>
-        "ORDER BY created_at DESC, id DESC LIMIT ?"
+        "WHERE superseded_at IS NULL AND kind = 'session' AND created_at > ?" <>
+        machine_sql <> " ORDER BY created_at DESC, id DESC LIMIT ?"
 
-    with {:ok, rows} <- query_all(conn, sql, [since_ts, limit]) do
+    with {:ok, rows} <- query_all(conn, sql, [since_ts] ++ machine_params ++ [limit]) do
       {:ok, Enum.map(rows, &memory_row/1)}
     end
   end
 
   @doc """
   How many session notes exist after `since_ts` — the honest denominator behind
-  `session_notes_since/3`'s bounded page, so the roll-up can say it read the newest
+  `session_notes_since/4`'s bounded page, so the roll-up can say it read the newest
   N of M instead of implying it read everything.
   """
-  @spec count_session_notes_since(term(), integer()) ::
+  @spec count_session_notes_since(term(), integer(), machines()) ::
           {:ok, non_neg_integer()} | {:error, term()}
-  def count_session_notes_since(conn, since_ts) when is_integer(since_ts) do
+  def count_session_notes_since(conn, since_ts, machines \\ :all) when is_integer(since_ts) do
+    {machine_sql, machine_params} = machines_clause(machines)
+
     sql =
       "SELECT count(*) FROM computer_history_memories " <>
-        "WHERE superseded_at IS NULL AND kind = 'session' AND created_at > ?"
+        "WHERE superseded_at IS NULL AND kind = 'session' AND created_at > ?" <> machine_sql
 
-    with {:ok, [[count]]} <- query_all(conn, sql, [since_ts]) do
+    with {:ok, [[count]]} <- query_all(conn, sql, [since_ts] ++ machine_params) do
       {:ok, count}
     end
+  end
+
+  @typedoc """
+  Whose session notes a roll-up reads (M97 §8.5): every machine's, or only
+  those of the machines named (`""` is the home's own), at most
+  #{@max_ids_per_lookup}.
+  """
+  @type machines :: :all | [String.t()]
+
+  defp machines_clause(:all), do: {"", []}
+
+  defp machines_clause([_ | _] = machines) when length(machines) <= @max_ids_per_lookup do
+    true = Enum.all?(machines, &is_binary/1)
+    marks = Enum.map_join(machines, ", ", fn _machine -> "?" end)
+    {" AND computer_id IN (#{marks})", machines}
   end
 
   @doc """
@@ -1690,26 +1726,80 @@ defmodule FermixCore.Memory.Repo.ComputerHistorySql do
     )
   end
 
+  @doc """
+  Record that the owner asked from chat, at `at_ts`, that `computer`'s history
+  go off (M97 §8.5): until it says it did (`clear_off/3`), the home takes no
+  sitting from it and leaves its notes out of the roll-up. A later request
+  replaces an earlier one's time.
+  """
+  @spec request_off(term(), String.t(), integer()) :: :ok | {:error, term()}
+  def request_off(conn, computer, at_ts)
+      when is_binary(computer) and computer != "" and is_integer(at_ts) do
+    execute(
+      conn,
+      "INSERT INTO computer_history_computers (computer_id, off_requested_at) VALUES (?, ?) " <>
+        "ON CONFLICT(computer_id) DO UPDATE SET off_requested_at = excluded.off_requested_at",
+      [computer, at_ts]
+    )
+  end
+
+  @doc """
+  Record that `computer` switched its history off as asked at `requested_ts`:
+  that request is done. A request made after it (another `/history off` while
+  the answer was on its way) stands.
+  """
+  @spec clear_off(term(), String.t(), integer()) :: :ok | {:error, term()}
+  def clear_off(conn, computer, requested_ts)
+      when is_binary(computer) and is_integer(requested_ts) do
+    execute(
+      conn,
+      "UPDATE computer_history_computers SET off_requested_at = NULL " <>
+        "WHERE computer_id = ? AND off_requested_at <= ?",
+      [computer, requested_ts]
+    )
+  end
+
+  @doc """
+  Record `computer`'s report of its recorder (`report`, the JSON text
+  `ComputerHistory.Report` validated), received at `at_ts`.
+  """
+  @spec record_report(term(), String.t(), String.t(), integer()) :: :ok | {:error, term()}
+  def record_report(conn, computer, report, at_ts)
+      when is_binary(computer) and computer != "" and is_binary(report) and is_integer(at_ts) do
+    execute(
+      conn,
+      "INSERT INTO computer_history_computers (computer_id, report, report_at) VALUES (?, ?, ?) " <>
+        "ON CONFLICT(computer_id) DO UPDATE SET report = excluded.report, " <>
+        "report_at = excluded.report_at",
+      [computer, report, at_ts]
+    )
+  end
+
   @doc "Every machine's row, by its id (`\"\"` for the home's own)."
   @spec computer_rows(term()) :: {:ok, [map()]} | {:error, term()}
   def computer_rows(conn) do
     sql =
       "SELECT computer_id, delivered_mark, last_submission_at, last_status, last_reason, " <>
-        "submitted FROM computer_history_computers ORDER BY computer_id"
+        "submitted, off_requested_at, report, report_at FROM computer_history_computers " <>
+        "ORDER BY computer_id"
 
     with {:ok, rows} <- query_all(conn, sql, []) do
-      {:ok,
-       Enum.map(rows, fn [id, mark, at, status, reason, submitted] ->
-         %{
-           computer_id: id,
-           delivered_mark: mark,
-           last_submission_at: at,
-           last_status: status,
-           last_reason: reason,
-           submitted: submitted
-         }
-       end)}
+      {:ok, Enum.map(rows, &computer_row/1)}
     end
+  end
+
+  defp computer_row([id, mark, at, status, reason, submitted, off_at, report, report_at]) do
+    %{
+      computer_id: id,
+      delivered_mark: mark,
+      last_submission_at: at,
+      last_status: status,
+      last_reason: reason,
+      submitted: submitted,
+      off_requested_at: off_at,
+      report: report,
+      report_at: report_at
+    }
   end
 
   @doc """
@@ -1913,6 +2003,27 @@ defmodule FermixCore.Memory.Repo.ComputerHistorySql do
     end
   end
 
+  @doc """
+  Raise the capture pause horizon to `until` (an ISO 8601 string) in one write
+  that never lowers it (M97 §8.5): a horizon already set that ends later is
+  kept, and so is one that cannot be read, which keeps capture paused until it
+  is cleared (`Ingest` fails closed on it). Two writers that race (a pause from
+  chat, and one applied from a refusal or a delivery) cannot leave the earlier
+  horizon in place.
+  """
+  @spec raise_pause_until(term(), String.t()) :: :ok | {:error, term()}
+  def raise_pause_until(conn, until) when is_binary(until) and until != "" do
+    with {:ok, _row} <- ensure_state(conn) do
+      execute(
+        conn,
+        "UPDATE computer_history_state SET pause_until = ?1, updated_at = " <>
+          "strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id = 1 AND julianday(?1) IS NOT NULL " <>
+          "AND (pause_until IS NULL OR julianday(pause_until) < julianday(?1))",
+        [until]
+      )
+    end
+  end
+
   @doc "Record why the summarizer is paused (e.g. no-local-model, route-down), surfaced to status."
   @spec set_paused_reason(term(), String.t() | nil) :: :ok | {:error, term()}
   def set_paused_reason(conn, reason) do
@@ -2007,4 +2118,90 @@ defmodule FermixCore.Memory.Repo.ComputerHistorySql do
   defp to_param(true), do: 1
   defp to_param(false), do: 0
   defp to_param(other), do: other
+
+  # --- a move's machine (M97 §8.4) --------------------------------------------
+
+  @doc """
+  At a move, every row of the home's history that names the machine `from`
+  names `to` instead, in one transaction: its session notes, its reads, its
+  purge and pause intervals, and its machine's row with its delivered mark (a
+  row `to` already had gives way to it). Threads are the home's, drawn from
+  every machine, and stay. The home's own machine is `""`: a move to a server
+  names the computer it left for the notes it made there, and a move back
+  makes them `""` again. The home's own machine is switched off and reports in
+  process, so a row that becomes `""` keeps no off request or report of a
+  computer (migration 60); `offs` counts an off request that was still
+  pending. Run again over its own work it changes nothing. A store from before
+  notes named their machine (migration 59) has none to rename:
+  `{:ok, :unnamed}`.
+  """
+  @spec rename_machine(term(), String.t(), String.t()) ::
+          {:ok,
+           %{notes: count, reads: count, intervals: count, rows: count, offs: count}
+           | :unnamed}
+          | {:error, term()}
+        when count: non_neg_integer()
+  def rename_machine(conn, from, to) when is_binary(from) and is_binary(to) and from != to do
+    case column?(conn, "computer_history_memories", "computer_id") do
+      {:ok, true} -> in_transaction(conn, fn -> rename_machine_in_tx(conn, from, to) end)
+      {:ok, false} -> {:ok, :unnamed}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp rename_machine_in_tx(conn, from, to) do
+    rename = "SET computer_id = ? WHERE computer_id = ?"
+
+    with {:ok, notes} <-
+           renamed(conn, "UPDATE computer_history_memories #{rename} AND kind = 'session'", [
+             to,
+             from
+           ]),
+         {:ok, reads} <- renamed(conn, "UPDATE computer_history_access #{rename}", [to, from]),
+         {:ok, intervals} <- renamed(conn, "UPDATE computer_history_purges #{rename}", [to, from]),
+         :ok <-
+           execute(
+             conn,
+             "DELETE FROM computer_history_computers WHERE computer_id = ? AND EXISTS " <>
+               "(SELECT 1 FROM computer_history_computers WHERE computer_id = ?)",
+             [to, from]
+           ),
+         {:ok, rows} <- renamed(conn, "UPDATE computer_history_computers #{rename}", [to, from]),
+         {:ok, offs} <- own_row(conn, to) do
+      {:ok, %{notes: notes, reads: reads, intervals: intervals, rows: rows, offs: offs}}
+    end
+  end
+
+  defp own_row(conn, "") do
+    case column?(conn, "computer_history_computers", "off_requested_at") do
+      {:ok, true} -> clear_own_row(conn)
+      {:ok, false} -> {:ok, 0}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp own_row(_conn, _computer), do: {:ok, 0}
+
+  defp clear_own_row(conn) do
+    with {:ok, [[offs]]} <-
+           query_all(
+             conn,
+             "SELECT count(*) FROM computer_history_computers " <>
+               "WHERE computer_id = '' AND off_requested_at IS NOT NULL",
+             []
+           ),
+         :ok <-
+           execute(
+             conn,
+             "UPDATE computer_history_computers " <>
+               "SET off_requested_at = NULL, report = NULL, report_at = NULL WHERE computer_id = ''",
+             []
+           ) do
+      {:ok, offs}
+    end
+  end
+
+  defp renamed(conn, sql, params) do
+    with :ok <- execute(conn, sql, params), do: {:ok, changed(conn)}
+  end
 end

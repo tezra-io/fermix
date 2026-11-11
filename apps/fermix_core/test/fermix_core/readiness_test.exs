@@ -378,6 +378,43 @@ defmodule FermixCore.ReadinessTest do
       refute action =~ "server"
     end
 
+    # M97 D4: of the iMessage rows only the away one owes no setup, and the
+    # engine publishes its own sentence for each, which names the Mac where it
+    # knows one; a row of another kind leaves its words to each surface.
+    test "only the away row is away, and each iMessage row's sentence is published" do
+      Application.put_env(:fermix_channels, :imessage,
+        enabled: true,
+        owner_user_id: "+15551234567"
+      )
+
+      studio = %{device_id: "d-1", name: "studio Mac", connected: false}
+
+      away = imessage_failure(macos?: false, imessage_carrier: {:computer, studio})
+      none = imessage_failure(macos?: false, imessage_carrier: :none)
+      helper = imessage_failure(macos?: true)
+
+      assert Readiness.away?(away)
+      refute Readiness.away?(none)
+      refute Readiness.away?(helper)
+
+      assert Readiness.sentence(away) ==
+               "studio Mac, the Mac that carries Messages, is asleep or offline."
+
+      assert Readiness.sentence(none) == none.action
+      assert Readiness.sentence(helper) == helper.action
+
+      provider = %{
+        component: "provider:anthropic",
+        action: "Add the Anthropic API key in Providers settings.",
+        gating: true,
+        pane: "providers",
+        detail_key: "provider:missing_credentials:anthropic"
+      }
+
+      refute Readiness.away?(provider)
+      assert Readiness.sentence(provider) == nil
+    end
+
     test "the carrier rows are published for the copy gate" do
       keys = Enum.map(Readiness.published_actions(), &elem(&1, 0))
 

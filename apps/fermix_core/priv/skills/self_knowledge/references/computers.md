@@ -200,9 +200,13 @@ request (*Files and commands on a computer*).
   home, anything while its master switch is off, and what its own switch
   for that offer has off, before anything runs; switching the master off
   also ends what is running ("The person at studio Mac stopped it."), and
-  switching it or the browser off ends what that computer's browser is
-  doing for the server, its tabs for it included. It
-  runs at most 8 requests at once with 32 waiting, and refuses past that.
+  switching one offer off (the browser, the screen, Messages, files or
+  commands) ends what runs or waits there for it, answered switched off with
+  the same sentence a new request gets, the browser's tabs for the server
+  included; other offers' work goes on. It runs at most 8 requests at once
+  with 32 waiting, and refuses past that; when its request handler restarts,
+  the waiting ones are answered at once as not run ("Fermix on this computer
+  restarted before it ran this, so it did not run.").
 - **The kind of turn that asked is the server's word.** Each request names
   it (a chat, a call, a scheduled run, a cue, a worker, background), and the
   computer applies its own rules to it. That check guards against a bug on
@@ -375,9 +379,10 @@ computer."
   again in that turn; ask. With no action for two minutes the server lets
   go.
 - Each stretch the server drove that screen is recorded there
-  (`device/screen_control.jsonl`), and its computer history marks events in
-  it as Fermix's own (`by=fermix`), so the summary never reports Fermix's
-  clicks as the owner's. Voice screen sharing (`screen_share`) is this
+  (`device/screen_control.jsonl`), as is each stretch a server turn held its
+  browser (`device/browser_control.jsonl`), and its computer history marks
+  events in them as Fermix's own (`by=fermix`), so the summary never reports
+  Fermix's clicks or browsing as the owner's. Voice screen sharing (`screen_share`) is this
   server's own screen only.
 
 ## Computer history from every computer
@@ -387,11 +392,14 @@ computer."
   server with `history.submit`; the server makes the note on its summarizer,
   marks it with the computer, and keeps it. Raw text is never written on the
   server, and the summary call's content stays out of its traces and Opik.
-  A computer whose summarizer is `local` sends only the note.
+  A computer whose summarizer is `local` (its `machine.toml`) sends only the
+  note.
 - `recall_activity` takes a `computer` and names the machine of each
   sitting; `/history purge` and `/history pause` from chat reach every
-  computer (one that is away when next connected), and `/history status`
-  shows one block per computer. Details: `computer_history.md`.
+  computer (one that is away when next connected); `/history off <name>`
+  switches one computer's history off from anywhere; and `/history status`
+  shows one block per computer with its last report of its recorder.
+  Details: `computer_history.md`.
 
 ## iMessage through a Mac
 

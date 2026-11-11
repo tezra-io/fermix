@@ -1641,7 +1641,7 @@ a staged home the source may have retired for.
 
 | `t` | Required payload | Rules |
 |---|---|---|
-| `move_offer` | `move_id`, `size_bytes`, `sha256`, `source_epoch`, `attempt`; `recovery_recipient?` | source to candidate: the home's snapshot is ready to stream; `size_bytes` and `sha256` are the encrypted stream's; `attempt` counts the source's attempts at this move (1, 2, …; it only grows across restarts); `recovery_recipient` is the snapshot recipient the new primary keeps, `fxsnap1.<salt>.<key>` |
+| `move_offer` | `move_id`, `size_bytes`, `sha256`, `source_epoch`, `attempt`; `recovery_recipient?`, `device_id?` | source to candidate: the home's snapshot is ready to stream; `size_bytes` and `sha256` are the encrypted stream's; `attempt` counts the source's attempts at this move (1, 2, …; it only grows across restarts); `recovery_recipient` is the snapshot recipient the new primary keeps, `fxsnap1.<salt>.<key>`; `device_id` is the source's own row in the moved device list when it stays as a linked computer (M97), and the new primary names the home's own computer-history notes for that computer |
 | `move_accept` | `move_id`, `recipient` | candidate to source: the one-time X25519 public key, 32 bytes in standard base64, the stream is encrypted to |
 | `move_chunk` | `move_id`, `index` + raw bytes | source to candidate: the encrypted stream, contiguous from 0 |
 | `move_end` | `move_id` | source to candidate: the stream is complete |

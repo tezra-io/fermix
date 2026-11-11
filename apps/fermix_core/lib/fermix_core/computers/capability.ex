@@ -24,6 +24,10 @@ defmodule FermixCore.Computers.Capability do
   - `target/2`, a short description of what it acts on (a path, a host or
     an action, at most #{256} bytes), never content: the journal and the
     receipt hold it;
+  - `label/0` and `op_label/1`, the owner's words for it and each op, which
+    this computer's journal is shown in (`computer.journal.list`); optional
+    for a test's capability, and every capability a computer runs has them
+    (`Management.CopyTest`);
   - optionally `here?/1`, whether the server's own host has it too, which
     `Computers.Choice` reads for a call that names no computer,
     `continues_on/1`, the computer the turn's earlier calls ran on, which
@@ -129,7 +133,22 @@ defmodule FermixCore.Computers.Capability do
   """
   @callback continues_on(map()) :: String.t() | nil
 
-  @optional_callbacks cancel: 2, here?: 1, deadline_ms: 2, continues_on: 1
+  @doc """
+  The owner's words for the capability, lower case as an offer's label
+  ("commands", "the browser"): what this computer's record of what its
+  server did here shows (`computer.journal.list`).
+  """
+  @callback label() :: String.t()
+
+  @doc "The owner's words for `op`, one of `ops/0`, lower case (\"run a command\")."
+  @callback op_label(String.t()) :: String.t()
+
+  @optional_callbacks cancel: 2,
+                      here?: 1,
+                      deadline_ms: 2,
+                      continues_on: 1,
+                      label: 0,
+                      op_label: 1
 
   @doc "The most bytes a target holds."
   @spec max_target_bytes() :: pos_integer()

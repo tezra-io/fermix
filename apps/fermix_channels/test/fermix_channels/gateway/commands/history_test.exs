@@ -430,6 +430,167 @@ defmodule FermixChannels.Gateway.Commands.HistoryTest do
     assert paused =~ "loft Linux gets it when next connected"
   end
 
+  # A machine store that answers every request with an error.
+  defmodule FailingStore do
+    @moduledoc false
+    use GenServer
+
+    def start_link(_arg), do: GenServer.start_link(__MODULE__, nil)
+
+    @impl true
+    def init(nil), do: {:ok, nil}
+
+    @impl true
+    def handle_call(_request, _from, state), do: {:reply, {:error, :injected}, state}
+  end
+
+  # The two stores share no transaction: once the home recorded a pause or a
+  # purge it stands, and the reply says exactly what did not happen yet.
+  test "a pause this Mac could not apply yet says the pause stands and what is owed", %{
+    ctx: ctx,
+    repo: repo
+  } do
+    ctx = ctx |> macos_ctx() |> Map.put(:computer_history_spool, start_supervised!(FailingStore))
+
+    assert :ok = History.execute(message("pause 30m"), reply_fn(self()), ctx)
+    assert_receive {:reply, text}
+
+    assert text =~ "The pause is recorded on this home until"
+    assert text =~ "nothing stamped inside it is summarized from any computer"
+    assert text =~ "This Mac's recorder could not be paused yet (:injected)"
+    assert text =~ "tries again every five minutes"
+    refute text =~ "NOT paused"
+
+    assert {:ok, [%{kind: "pause"}]} =
+             Repo.computer_history_home(:intervals_after, ["", 0, 10], server: repo)
+  end
+
+  test "a purge this Mac could not apply yet says the purge stands and what is owed", %{ctx: ctx} do
+    ctx = ctx |> macos_ctx() |> Map.put(:computer_history_spool, start_supervised!(FailingStore))
+
+    assert :ok = History.execute(message("purge 1h"), reply_fn(self()), ctx)
+    assert_receive {:reply, text}
+
+    assert text =~ "Deleted 0 activity memory(ies) on this home, and the purge stands"
+    assert text =~ "This Mac's raw record in that window could not be deleted yet (:injected)"
+    refute text =~ "Purge failed"
+  end
+
+  test "a purge the home could not record says nothing was deleted", %{spool: spool} do
+    unique = System.unique_integer([:positive])
+    disabled = :"history_cmd_disabled_purge_#{unique}"
+    start_supervised!({Repo, name: disabled, enabled: false}, id: :disabled_purge_repo)
+
+    {:ok, 1} =
+      Spool.insert_events([%{boot_id: "b1", source_seq: 1, ts: 1_000, type: "app.activated"}],
+        server: spool
+      )
+
+    ctx = %{
+      computer_history_repo: disabled,
+      computer_history_spool: spool,
+      computer_history_recorder?: true
+    }
+
+    assert :ok = History.execute(message("purge all"), reply_fn(self()), ctx)
+    assert_receive {:reply, text}
+    assert text =~ "Purge failed (:disabled): nothing was deleted."
+    assert {:ok, 1} = Spool.count_events(server: spool)
+  end
+
+  # M97 §7.2, §8.5: narrowing from anywhere; off for a named computer stands on
+  # the home at once and the computer applies it now, or once it is back.
+  test "off naming a computer switches it off there, or says it will once it is back", %{
+    ctx: ctx
+  } do
+    test_pid = self()
+
+    switch_off = fn answer ->
+      fn computer, opts ->
+        send(test_pid, {:switch_off, computer.device_id, Keyword.fetch!(opts, :repo)})
+        answer
+      end
+    end
+
+    ctx =
+      ctx
+      |> Map.put(:computer_history_computers, [studio(true)])
+      |> Map.put(:computer_history_switch_off, switch_off.(:done))
+
+    assert :ok = History.execute(message("off Studio mac"), reply_fn(self()), ctx)
+    assert_receive {:reply, done}
+    assert_received {:switch_off, "studio-7f3a", _repo}
+    assert done =~ "Computer history is off on studio Mac: it records nothing more"
+    assert done =~ "only someone at studio Mac can switch it on again"
+    assert ComputerHistoryConfig.enabled?()
+
+    ctx = Map.put(ctx, :computer_history_switch_off, switch_off.(:away))
+    assert :ok = History.execute(message("off studio-7f3a"), reply_fn(self()), ctx)
+    assert_receive {:reply, away}
+    assert away =~ "studio Mac is away. Its computer history goes off once it is back"
+
+    ctx = Map.put(ctx, :computer_history_switch_off, switch_off.({:failed, :timeout}))
+    assert :ok = History.execute(message("off studio Mac"), reply_fn(self()), ctx)
+    assert_receive {:reply, failed}
+    assert failed =~ "studio Mac could not be told now (:timeout)"
+    assert failed =~ "summarizes nothing from it from now on"
+  end
+
+  test "off naming a computer the home does not have names the ones it has", %{ctx: ctx} do
+    ctx = Map.put(ctx, :computer_history_computers, [studio(true)])
+
+    assert :ok = History.execute(message("off attic pc"), reply_fn(self()), ctx)
+    assert_receive {:reply, text}
+    assert text == "This home has no computer named attic pc. Its computers: studio Mac."
+  end
+
+  # M97 §8.5: the home holds no raw record of a computer, so its status block
+  # shows what the computer last reported, with its age.
+  test "status shows what a computer last reported of its recorder, and an off owed", %{
+    ctx: ctx,
+    repo: repo
+  } do
+    now = System.system_time(:millisecond)
+
+    report = %{
+      "v" => 1,
+      "recorder" => "running",
+      "events" => 40,
+      "unsent" => 12,
+      "oldest_unsent_ts" => now - 3_900_000,
+      "expired_unsent" => 2,
+      "title_only" => 1,
+      "private_unknown" => 0,
+      "ax_refused" => 2
+    }
+
+    :ok =
+      Repo.computer_history_home(
+        :record_report,
+        ["studio-7f3a", Jason.encode!(report), now - 240_000],
+        server: repo
+      )
+
+    :ok = Repo.computer_history_home(:request_off, ["studio-7f3a", now], server: repo)
+
+    ctx = Map.put(ctx, :computer_history_computers, [studio(true)])
+    assert :ok = History.execute(message("status"), reply_fn(self()), ctx)
+    assert_receive {:reply, text}
+
+    assert text =~
+             "recorder running, 12 event(s) unsent (oldest 1h 5m old), 2 expired before they " <>
+               "were sent, coverage: title-only in 1 app, AX refused in 2 apps (reported 4m ago)"
+
+    assert text =~ "asked to switch its history off, not yet done there"
+  end
+
+  test "status says when a computer has not reported yet", %{ctx: ctx} do
+    ctx = Map.put(ctx, :computer_history_computers, [studio(false)])
+    assert :ok = History.execute(message("status"), reply_fn(self()), ctx)
+    assert_receive {:reply, text}
+    assert text =~ "no recorder report yet"
+  end
+
   test "pause without a duration shows usage", %{ctx: ctx} do
     assert :ok = History.execute(message("pause"), reply_fn(self()), ctx)
     assert_receive {:reply, text}

@@ -2213,6 +2213,81 @@ defmodule FermixCore.Management.SettingsTest do
     end
   end
 
+  # M97 §4, §8.2: the computer_history section is this machine's (whether it
+  # records, which apps, whether it makes its own notes). The home's route
+  # and grants stay in config.toml, with no row, so a write here never
+  # reaches them; and the switch's footer says what is true on this machine.
+  describe "computer history, this machine's section" do
+    test "a Mac with no server names the provider, and no server", %{home: home} do
+      footer = history_footer([summarizer: "anthropic"], home, on_server?: false)
+
+      assert footer =~ "summarized by Anthropic, and Fermix keeps the summary."
+      assert footer =~ "for 48 hours"
+      refute footer =~ "server"
+      refute footer =~ "all your computers"
+    end
+
+    test "a home with Always On in use says the sitting goes to the server", %{home: home} do
+      footer = history_footer([summarizer: "anthropic"], home, on_server?: true)
+
+      assert footer =~ "each finished sitting is sent to your Fermix server"
+      assert footer =~ "Summaries from all your computers can be recalled in chat."
+      refute footer =~ "Anthropic"
+    end
+
+    test "the summarizer row reads this machine's summarizer in force", %{home: home} do
+      assert summarizer_value([machine_summarizer: "local", summarizer: "default"], home) ==
+               "local"
+
+      assert summarizer_value([summarizer: "default"], home) == "default_provider"
+      assert summarizer_value([], home) == "default_provider"
+    end
+
+    test "a write reaches this machine's keys alone, and the home's stay", %{home: home} do
+      Application.put_env(:fermix_core, :computer_history,
+        enabled: false,
+        apps: ["com.example.Notes"],
+        summarizer: :anthropic,
+        remote_summaries: [:anthropic]
+      )
+
+      assert {:ok, _result} =
+               Settings.apply("computer_history", %{"computer_history_enabled" => true})
+
+      machine = File.read!(Path.join(home, "machine.toml"))
+      config = File.read!(Path.join(home, "config.toml"))
+
+      [_before, own] = String.split(machine, "[fermix_core.computer_history]\n")
+      assert own =~ "enabled = true"
+      assert own =~ ~s(apps = ["com.example.Notes"])
+      refute machine =~ "remote_summaries"
+      refute machine =~ "summarizer"
+      assert config =~ ~s([fermix_core.computer_history]\nsummarizer = "anthropic")
+      assert config =~ ~s(remote_summaries = ["anthropic"])
+      refute config =~ "com.example.Notes"
+    end
+  end
+
+  defp history_rows(block, home, promise) do
+    snapshot = %{fermix_core: [computer_history: block]}
+    promise = [home: home, os: :macos] ++ promise
+
+    assert {:ok, %{"rows" => rows}} =
+             Settings.get("computer_history", snapshot: snapshot, promise: promise)
+
+    rows
+  end
+
+  defp history_footer(block, home, promise) do
+    rows = history_rows(block, home, promise)
+    Enum.find(rows, &(&1["key"] == "computer_history_enabled"))["footer"]
+  end
+
+  defp summarizer_value(block, home) do
+    rows = history_rows(block, home, on_server?: false)
+    Enum.find(rows, &(&1["key"] == "computer_history_summarizer"))["value"]
+  end
+
   describe "the save then load round trip" do
     test "every section a write touches survives being written and read back", %{home: home} do
       seed_normalized_app_env()

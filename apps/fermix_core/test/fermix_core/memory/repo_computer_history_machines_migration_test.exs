@@ -120,6 +120,19 @@ defmodule FermixCore.Memory.RepoComputerHistoryMachinesMigrationTest do
              )
   end
 
+  # A home restored from an archive made before migration 59 onto a system with
+  # no recorder (a Linux install): no store is made, since nothing here would
+  # ever sweep it, and the raw rows go (M97 §8.3).
+  test "a system with no recorder carries nothing and makes no store", ctx do
+    old_home(ctx)
+    seed_spool(ctx.db_path)
+    start_repo(ctx, :upgraded, recorder?: false)
+
+    refute File.exists?(ctx.spool_path)
+    refute "computer_history_events" in tables(ctx.db_path)
+    assert @version in versions(ctx.db_path)
+  end
+
   # Stopped between the two steps: the carry committed, memory.db did not. The
   # next boot carries again (nothing twice) and finishes.
   test "a boot stopped after the carry and before memory.db's step finishes it", ctx do
@@ -154,7 +167,8 @@ defmodule FermixCore.Memory.RepoComputerHistoryMachinesMigrationTest do
                 enabled: true,
                 database_path: ctx.db_path,
                 history_spool_path: Path.join([blocked, "device", "history.db"]),
-                history_server?: false},
+                history_server?: false,
+                history_recorder?: true},
                id: :blocked
              )
 
@@ -176,13 +190,15 @@ defmodule FermixCore.Memory.RepoComputerHistoryMachinesMigrationTest do
        enabled: true,
        database_path: ctx.db_path,
        history_spool_path: ctx.spool_path,
-       history_server?: Keyword.get(opts, :server?, false)},
+       history_server?: Keyword.get(opts, :server?, false),
+       history_recorder?: Keyword.get(opts, :recorder?, true)},
       id: id
     )
   end
 
   # The history tables as migrations 23 to 32 built them, from the same DDL,
-  # in a store otherwise at today's version, with 59 not yet run.
+  # in a store otherwise at today's version, with 59 and every later history
+  # migration not yet run (60 adds columns to the table 59 makes).
   defp old_home(ctx) do
     start_repo(ctx, :current)
     stop_supervised!(:current)
@@ -204,7 +220,7 @@ defmodule FermixCore.Memory.RepoComputerHistoryMachinesMigrationTest do
     #{ComputerHistorySql.access_schema_sql()}
     #{ComputerHistorySql.sessions_schema_sql()}
     #{ComputerHistorySql.purges_schema_sql(@t0)}
-    DELETE FROM schema_migrations WHERE version = #{@version};
+    DELETE FROM schema_migrations WHERE version IN (#{@version}, #{@version + 1});
     """)
   end
 

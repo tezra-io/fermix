@@ -32,7 +32,7 @@
 {"v":2,"t":"enroll_request","seq":1,"host":{"name":"basement-box","os":"ubuntu","arch":"x86_64","version":"0.17.0"},"candidate":{"node_id":"3c0f6e2a91b84d57a6e2f0c4d8b1937e5a2c6f08d4b7e19a3f5c2d8e6b0a4f71","relays":[{"url":"https://eu1.relay.fermix.ai/","quic_port":7842}],"recipient":"r8Ts2NcVq1LmYw0bKj6HdPf3XgZa9UeB5oIiR4tWy7A="}}
 {"v":2,"t":"join_request","seq":1,"host":{"name":"loft-linux","os":"linux","arch":"x86_64","version":"4.12.3"},"platform":"linux"}
 {"v":2,"t":"join_request","seq":1,"host":{"name":"den-mac","os":"darwin","arch":"aarch64","version":"4.12.3"},"platform":"macos"}
-{"v":2,"t":"move_offer","seq":1,"move_id":"mv-8e41","size_bytes":58213377,"sha256":"4f2a7d3c9e1b6058a2d4c7e9f1b3a5d7c9e2f4a6b8d0c1e3f5a7b9c2d4e6f8a0","source_epoch":3,"recovery_recipient":"fxsnap1.0Xn2b6QeT1o9cVr4yA8s3g.PtYk2mW9xQ4rB7nC1vL5zH8sD3fJ6gK0aE2uI9oR4wT","attempt":2}
+{"v":2,"t":"move_offer","seq":1,"move_id":"mv-8e41","size_bytes":58213377,"sha256":"4f2a7d3c9e1b6058a2d4c7e9f1b3a5d7c9e2f4a6b8d0c1e3f5a7b9c2d4e6f8a0","source_epoch":3,"recovery_recipient":"fxsnap1.0Xn2b6QeT1o9cVr4yA8s3g.PtYk2mW9xQ4rB7nC1vL5zH8sD3fJ6gK0aE2uI9oR4wT","attempt":2,"device_id":"3b4c5d6e-7f80-4a91-b2c3-d4e5f6a7b8c9"}
 {"v":2,"t":"move_end","seq":15,"move_id":"mv-8e41"}
 {"v":2,"t":"move_commit","seq":16,"move_id":"mv-8e41"}
 {"v":2,"t":"move_resume","seq":1,"move_id":"mv-8e41"}

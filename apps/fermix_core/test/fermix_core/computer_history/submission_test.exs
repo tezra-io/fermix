@@ -71,8 +71,10 @@ defmodule FermixCore.ComputerHistory.SubmissionTest do
       adapter: FakeAdapter,
       config: [summarizer: :local],
       route_opts: [model: "llama3"],
-      now: DateTime.from_unix!(@t0 + 60_000, :millisecond)
-    ] ++ extra
+      now: DateTime.from_unix!(@t0 + 60_000, :millisecond),
+      contributors: [@studio, @loft]
+    ]
+    |> Keyword.merge(extra)
   end
 
   defp field(seq, ts, text) do
@@ -276,6 +278,59 @@ defmodule FermixCore.ComputerHistory.SubmissionTest do
     assert [%{summary: "Planned the move in Calendar.", model: "on-device-llm"}] = notes(ctx.repo)
   end
 
+  # M97 §8.5: off means no further provider call for that machine's history.
+  test "a sitting from a machine that no longer contributes is refused off, with no call", ctx do
+    assert %{status: :refused, reason: :off, intervals: []} =
+             Submission.accept(@studio, sitting(), opts(ctx.repo, contributors: [@loft]))
+
+    assert calls() == []
+    assert notes(ctx.repo) == []
+
+    note = %{"summary" => "Planned the move in Calendar.", "model" => "on-device-llm"}
+    payload = sitting("1-2:#{@t0}") |> Map.delete("text") |> Map.put("note", note)
+
+    assert %{status: :refused, reason: :off} =
+             Submission.accept(@studio, payload, opts(ctx.repo, contributors: []))
+
+    assert notes(ctx.repo) == []
+  end
+
+  # The home's own rule (`ComputerHistory.contributors/1`): a computer whose
+  # history the owner switched off from chat contributes nothing until it says
+  # it switched off, and then contributes only if its offer is on again.
+  test "a computer asked from chat to switch off is refused until it says it did", ctx do
+    studio = %FermixCore.Computers.Computer{
+      device_id: @studio,
+      name: "studio Mac",
+      offers: [%{id: "history", state: :on, sentence: nil, detail: nil}]
+    }
+
+    contributors = fn ->
+      FermixCore.ComputerHistory.contributors(
+        repo: ctx.repo,
+        recording?: false,
+        computers: [studio]
+      )
+    end
+
+    assert {:ok, [@studio]} = contributors.()
+    :ok = Repo.computer_history_home(:request_off, [@studio, @t0], server: ctx.repo)
+    assert {:ok, []} = contributors.()
+
+    {:ok, machines} = contributors.()
+
+    assert %{status: :refused, reason: :off} =
+             Submission.accept(@studio, sitting(), opts(ctx.repo, contributors: machines))
+
+    assert calls() == []
+
+    # An answer to an earlier request does not clear a later one.
+    :ok = Repo.computer_history_home(:clear_off, [@studio, @t0 - 1], server: ctx.repo)
+    assert {:ok, []} = contributors.()
+    :ok = Repo.computer_history_home(:clear_off, [@studio, @t0], server: ctx.repo)
+    assert {:ok, [@studio]} = contributors.()
+  end
+
   test "an answer survives the wire" do
     answer = %{
       status: :refused,
@@ -287,5 +342,8 @@ defmodule FermixCore.ComputerHistory.SubmissionTest do
 
     assert {:error, _reason} =
              Submission.from_wire(%{"status" => "invented", "reason" => nil, "intervals" => []})
+
+    off = %{status: :refused, reason: :off, intervals: []}
+    assert {:ok, ^off} = off |> Submission.to_wire() |> Submission.from_wire()
   end
 end

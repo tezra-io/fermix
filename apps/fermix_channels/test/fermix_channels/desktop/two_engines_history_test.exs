@@ -9,11 +9,14 @@ defmodule FermixChannels.Desktop.TwoEnginesHistoryTest do
   use ExUnit.Case, async: false
 
   alias FermixChannels.Desktop.HistoryUplink
+  alias FermixChannels.Desktop.Offers
   alias FermixChannels.Test.TwoEngines
+  alias FermixCore.ComputerHistory
   alias FermixCore.ComputerHistory.Delivery
   alias FermixCore.ComputerHistory.Ingest
   alias FermixCore.ComputerHistory.Purge
   alias FermixCore.ComputerHistory.Recall
+  alias FermixCore.ComputerHistory.Report
   alias FermixCore.ComputerHistory.Sittings
   alias FermixCore.ComputerHistory.Spool
   alias FermixCore.ComputerHistory.Submission
@@ -77,14 +80,27 @@ defmodule FermixChannels.Desktop.TwoEnginesHistoryTest do
     repo = :"two_engines_history_repo_#{System.unique_integer([:positive])}"
     start_supervised!({Repo, name: repo, enabled: true, database_path: db_path}, id: repo)
 
+    # Which machines the server takes history from, by the one rule, from what
+    # its computer offers now (M97 §8.5).
+    contributors = fn ->
+      ComputerHistory.contributors(
+        repo: repo,
+        recording?: false,
+        computers: [TwoEngines.computer(:persistent_term.get({__MODULE__, :engines}))]
+      )
+    end
+
     history = [
       repo: repo,
       adapter: Provider,
       config: [summarizer: :local],
-      route_opts: [model: "llama3"]
+      route_opts: [model: "llama3"],
+      contributors: contributors
     ]
 
     e = TwoEngines.start!(offers: [:files, :history], history: history)
+    :persistent_term.put({__MODULE__, :engines}, e)
+    on_exit(fn -> :persistent_term.erase({__MODULE__, :engines}) end)
 
     spool =
       start_supervised!({Spool, path: Path.join([e.root, "device", "history.db"]), name: nil})
@@ -345,7 +361,8 @@ defmodule FermixChannels.Desktop.TwoEnginesHistoryTest do
                repo: ctx.repo,
                adapter: Provider,
                config: [summarizer: :local],
-               route_opts: [model: "llama3"]
+               route_opts: [model: "llama3"],
+               contributors: ["loft-91c2"]
              )
 
     machines = %{ctx.e.device_id => "studio Mac", "loft-91c2" => "loft Linux"}
@@ -382,7 +399,8 @@ defmodule FermixChannels.Desktop.TwoEnginesHistoryTest do
                repo: ctx.repo,
                adapter: Provider,
                config: [summarizer: :local],
-               route_opts: [model: "llama3"]
+               route_opts: [model: "llama3"],
+               contributors: ["loft-91c2"]
              )
 
     [%{id: loft_note}] = notes(ctx, "loft-91c2")
@@ -397,6 +415,7 @@ defmodule FermixChannels.Desktop.TwoEnginesHistoryTest do
              Summarizer.run_rollup(
                repo: ctx.repo,
                spool: nil,
+               machines: [ctx.e.device_id, "loft-91c2"],
                adapter: Provider,
                config: [summarizer: :local],
                route_opts: [model: "llama3"],
@@ -405,5 +424,85 @@ defmodule FermixChannels.Desktop.TwoEnginesHistoryTest do
 
     assert {:ok, [thread]} = Repo.computer_history_active_threads(8, server: ctx.repo)
     assert Enum.sort(Jason.decode!(thread.source_ids)) == Enum.sort([studio_note, loft_note])
+  end
+
+  # M97 §7.2, §8.5: `/history off` naming the computer, over the real link. The
+  # home records it, the computer switches its history off as its own switch
+  # does (the recorder's setting and the server's offer), and from then on the
+  # home takes no sitting from it and makes no call for it.
+  test "off from chat for this computer switches it off there, and the home takes nothing", ctx do
+    record!(ctx, [0, 1, 2], @typed)
+    # The computer's own file holds the switches its rig reads from an Agent.
+    :ok = Switches.write(ctx.e.root, Switches.only([:files, :history]))
+    computer = TwoEngines.computer(ctx.e)
+    deliver = [repo: ctx.repo, call_opts: TwoEngines.call_opts(ctx.e)]
+
+    assert :done = Delivery.switch_off(computer, deliver)
+
+    assert {:ok, switches} = Switches.read(ctx.e.root)
+    refute Keyword.fetch!(switches, :history)
+    assert Keyword.fetch!(switches, :files)
+    machine = File.read!(Path.join(ctx.e.root, "machine.toml"))
+    assert machine =~ ~r/\[fermix_core\.computer_history\]\s+enabled = false/
+
+    assert {:ok, [%{computer_id: id, off_requested_at: nil}]} =
+             Repo.computer_history_home(:computer_rows, [], server: ctx.repo)
+
+    assert id == ctx.e.device_id
+
+    # What the computer's own reader does when its switches change: read them
+    # again and send its offers.
+    Agent.update(ctx.e.switch_agent, fn _switches -> switches end)
+    Offers.changed(ctx.e.offers)
+    await_history_off(ctx)
+
+    # A sitting still sent (one the computer formed before it went off) is
+    # refused off, with no call.
+    assert {:held, "off"} = send_sittings(ctx)
+    refute_received {:provider, _agent, _messages}
+    assert notes(ctx) == []
+  end
+
+  # The home keeps a computer's report of its recorder (a state word and
+  # counts, no text), which its `/history status` shows.
+  test "a computer's report of its recorder is kept on the home", ctx do
+    record!(ctx, [0, 1], @typed)
+
+    {:ok, report} =
+      Report.build(
+        spool: ctx.spool,
+        now_ms: ctx.t0 + 60 * @minute,
+        recording?: true,
+        status: %{mode: :capturing, reason: nil, lock_holder: nil}
+      )
+
+    assert :ok =
+             HistoryUplink.report(report,
+               relay: ctx.e.relay,
+               switches: Switches.only([:files, :history])
+             )
+
+    assert {:ok, [%{report: kept, report_at: at}]} =
+             Repo.computer_history_home(:computer_rows, [], server: ctx.repo)
+
+    assert is_integer(at)
+    assert %{"recorder" => "running", "events" => 2, "unsent" => 2} = Jason.decode!(kept)
+    refute kept =~ "Juniper"
+  end
+
+  # The computer re-sends its offers when a switch changes; the server's live
+  # record follows within the suite's bound.
+  defp await_history_off(ctx, attempts \\ 1_000) do
+    case Enum.find(TwoEngines.computer(ctx.e).offers, &(&1.id == "history")) do
+      %{state: :on} when attempts > 0 ->
+        Process.sleep(10)
+        await_history_off(ctx, attempts - 1)
+
+      %{state: :on} ->
+        flunk("the server never heard that this computer's history went off")
+
+      _off ->
+        :ok
+    end
   end
 end

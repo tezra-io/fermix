@@ -11,10 +11,14 @@ defmodule FermixCore.Management.Computer do
 
   Params: `limit` (1 to #{200}, default #{50}) and `before` (an invocation's
   id: only older ones). Answers `{entries, more}`, the newest first, each
-  `{id, at, finished_at, capability, op, target, origin, status, refusal,
-  result_bytes, duration_ms}` (null where it does not apply yet: a request
-  still running has no `finished_at` and no `status`). Seams in `opts`:
-  `:home`.
+  `{id, at, finished_at, capability, capability_label, op, op_label, target,
+  origin, status, refusal, result_bytes, duration_ms}` (null where it does
+  not apply yet: a request still running has no `finished_at` and no
+  `status`). The two labels are the owner's words for the capability and
+  the op, from the capability's own module in this engine's registry
+  (`:computer_capabilities`, `FermixChannels.Desktop.Invoke`, injected by
+  module as `Computers.Offers.label/1` is), each null for an id this engine
+  has no words for. Seams in `opts`: `:home`.
 
   `computer.screen.stop` (M97 §7.4) is the Stop beside the mark an app draws
   while Fermix on its server controls this computer's screen (`home.status`'s
@@ -26,6 +30,7 @@ defmodule FermixCore.Management.Computer do
 
   require Logger
 
+  alias FermixCore.Computers.Capability
   alias FermixCore.Computers.Journal
   alias FermixCore.ComputerUse.Seat
   alias FermixCore.Management.Protocol
@@ -75,21 +80,27 @@ defmodule FermixCore.Management.Computer do
   @spec sentences() :: [String.t()]
   def sentences, do: [@unreadable]
 
-  defp listed({:ok, %{entries: entries, more: more}}),
-    do: {:ok, %{"entries" => Enum.map(entries, &view/1), "more" => more}}
+  defp listed({:ok, %{entries: entries, more: more}}) do
+    capabilities = Application.fetch_env!(:fermix_core, :computer_capabilities).capabilities()
+    {:ok, %{"entries" => Enum.map(entries, &view(&1, capabilities)), "more" => more}}
+  end
 
   defp listed({:error, reason}) do
     Logger.error("the invocation journal could not be read: #{inspect(reason)}")
     {:error, :unavailable, %{"sentence" => @unreadable}}
   end
 
-  defp view(entry) do
+  defp view(entry, capabilities) do
+    {capability_label, op_label} = labels(capabilities, entry.capability, entry.op)
+
     %{
       "id" => entry.id,
       "at" => entry.at,
       "finished_at" => entry.finished_at,
       "capability" => entry.capability,
+      "capability_label" => capability_label,
       "op" => entry.op,
+      "op_label" => op_label,
       "target" => entry.target,
       "origin" => entry.origin,
       "status" => entry.status,
@@ -97,6 +108,29 @@ defmodule FermixCore.Management.Computer do
       "result_bytes" => entry.result_bytes,
       "duration_ms" => entry.duration_ms
     }
+  end
+
+  # The owner's words for an entry's capability and op, from the capability's
+  # own module (`Computers.Capability`'s `label/0` and `op_label/1`), each nil
+  # where this engine has none for its id: an older journal row may name a
+  # capability or an op this engine no longer has.
+  defp labels(capabilities, capability, op) do
+    module = Map.get(capabilities, capability)
+
+    if worded?(module),
+      do: {module.label(), op_label(module, op)},
+      else: {nil, nil}
+  end
+
+  defp worded?(nil), do: false
+
+  defp worded?(module) do
+    Code.ensure_loaded?(module) and function_exported?(module, :label, 0) and
+      function_exported?(module, :op_label, 1)
+  end
+
+  defp op_label(module, op) do
+    if is_binary(op) and Capability.runs?(module, op), do: module.op_label(op)
   end
 
   defp known_params(params) do

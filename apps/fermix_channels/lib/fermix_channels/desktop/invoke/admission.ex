@@ -46,24 +46,37 @@ defmodule FermixChannels.Desktop.Invoke.Admission do
 
   **The master switch off** (`switches_changed/1`, told by
   `FermixCore.Computers.Switches`) refuses every later request and ends
-  what runs or waits as `refused` `stopped_here` (`stop_all/2`). A request
-  that waited for a slot or its upload has the switches read again the
-  moment it would start, as at admission, so none starts while they are off
-  though this process has not heard yet.
+  what runs or waits as `refused` `stopped_here` (`stop_all/2`). **An
+  offer's own switch off**, the master on, ends the work of each capability
+  whose offer it is, running or waiting, by the rule a request is admitted
+  by (the capability's `offer/0` against `Switches.on?/2`): `refused` `off`,
+  the sentence a request of it arriving now gets; every other capability's
+  work goes on. A run that ends while the switches no longer let its
+  capability run was ended by them (a switch's own listener, such as the
+  browser's held turns, can end it before this process hears) and is
+  answered as they say, never `failed`. A request that waited for a slot or
+  its upload has the switches read again the moment it would start, as at
+  admission, so none starts while they are off though this process has not
+  heard yet.
 
   Each invocation is a run of its own on this computer's trace
   (`FermixCore.Computers.Telemetry`), its bookend emitted before the answer.
 
   At start it closes what a crash left started (`unknown`, `interrupted`)
   and tells the server of each as soon as it has started, with the
-  journal's receipt as a status ask is answered: a restart of this process
-  while the session stays up leaves no caller waiting, a long-lived one
-  (`imessage.watch`, `screen.watch`) included; with no session the answer is
-  not sent, and the server asks once one comes back. It applies the
-  journal's retention then, and every hour. Seams: `:timer`
-  (2-arity, `Process.send_after/3` to this process), `:send` (3-arity, in
-  place of `Relay.send_event/3`), `:link_epoch` (0-arity, in place of
-  reading `device/desktop.json`).
+  journal's receipt as a status ask is answered. What only waited, for a
+  slot or its upload, never started and has no record: its facts (never its
+  args or bytes) are kept while it waits in `:waiting_table`, which
+  `Desktop.Invoke` owns, so the restart answers each too, `refused`
+  `unavailable` ("restarted before it ran"), journaled as one refused
+  before it ran. So a restart of this process while the session stays up
+  leaves no caller waiting, a long-lived one (`imessage.watch`,
+  `screen.watch`) included, whether it ran or waited; with no session the
+  answer is not sent, and the server asks once one comes back. It applies
+  the journal's retention then, and every hour. Seams: `:timer` (2-arity,
+  `Process.send_after/3` to this process), `:send` (3-arity, in place of
+  `Relay.send_event/3`), `:link_epoch` (0-arity, in place of reading
+  `device/desktop.json`).
   """
 
   use GenServer
@@ -91,6 +104,8 @@ defmodule FermixChannels.Desktop.Invoke.Admission do
   @max_held_bytes 32 * 1_024 * 1_024
   @prune_every_ms 60 * 60_000
   @part_chunk_bytes 60 * 1_024
+  # What answering a request that never started needs, and nothing more.
+  @waiting_facts [:id, :capability, :op, :target, :origin, :epoch, :turn, :arrived_at]
 
   @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(opts) when is_list(opts),
@@ -124,6 +139,7 @@ defmodule FermixChannels.Desktop.Invoke.Admission do
       clock: Keyword.fetch!(opts, :clock),
       relay: Keyword.fetch!(opts, :relay),
       runs: Keyword.fetch!(opts, :runs),
+      waiting_table: Keyword.fetch!(opts, :waiting_table),
       timer: Keyword.get(opts, :timer, &Process.send_after(self(), &1, &2)),
       send: Keyword.get(opts, :send, &Relay.send_event/3),
       link_epoch: Keyword.get(opts, :link_epoch, fn -> link_epoch(home) end),
@@ -135,19 +151,22 @@ defmodule FermixChannels.Desktop.Invoke.Admission do
     }
 
     closed = recover(state)
+    waited = waited_before(closed, state)
     _timer = state.timer.(:prune, @prune_every_ms)
-    {:ok, state, {:continue, {:interrupted, closed}}}
+    {:ok, state, {:continue, {:interrupted, closed, waited}}}
   end
 
-  # Each run a crash ended is answered once this process stands again.
+  # Each run a crash ended, and each request that only waited then, is
+  # answered once this process stands again.
   @impl true
-  def handle_continue({:interrupted, closed}, state) do
+  def handle_continue({:interrupted, closed, waited}, state) do
     Enum.each(
       closed,
       &send_answer(receipt_answer(&1), Outcome.receipt_only_payload(), nil, state)
     )
 
-    {:noreply, state}
+    never_ran = Outcome.refused(:unavailable, sentence(:restarted))
+    {:noreply, Enum.reduce(waited, state, &answer(&1, never_ran, &2))}
   end
 
   @impl true
@@ -174,8 +193,10 @@ defmodule FermixChannels.Desktop.Invoke.Admission do
   end
 
   def handle_cast(:switches_changed, state) do
-    if Switches.enabled?(switches(state)),
-      do: {:noreply, state},
+    switches = switches(state)
+
+    if Switches.enabled?(switches),
+      do: {:noreply, offer_switched_off(switches, state)},
       else: {:noreply, stopped(:stopped_here, state)}
   end
 
@@ -249,6 +270,23 @@ defmodule FermixChannels.Desktop.Invoke.Admission do
       {:error, reason} ->
         Logger.error("the invocation journal was not pruned: #{inspect(reason)}")
     end
+  end
+
+  # What waited when this process last stopped, oldest first: at most 32
+  # (`@max_waiting`). One the crash caught as it started has a started record
+  # and is among `closed`, answered from the journal; it is only let go here.
+  defp waited_before(closed, state) do
+    started = MapSet.new(closed, & &1.id)
+
+    {ran, waited} =
+      state.waiting_table
+      |> :ets.tab2list()
+      |> Enum.map(fn {_id, facts} -> facts end)
+      |> Enum.split_with(&MapSet.member?(started, &1.id))
+
+    Enum.each(ran, &forget_waiting(&1.id, state))
+    if waited != [], do: Logger.warning("#{length(waited)} request(s) waited when Fermix stopped")
+    Enum.sort_by(waited, &DateTime.to_unix(&1.arrived_at, :microsecond))
   end
 
   # -- admitting ----------------------------------------------------------------------
@@ -444,12 +482,28 @@ defmodule FermixChannels.Desktop.Invoke.Admission do
     state
   end
 
-  defp queue(state, entry), do: %{state | waiting: :queue.in(entry, state.waiting)}
+  defp queue(state, entry) do
+    :ok = keep_waiting(entry, state)
+    %{state | waiting: :queue.in(entry, state.waiting)}
+  end
 
   defp upload(state, entry) do
     %{"size_bytes" => size, "sha256" => sha} = entry.part
     upload = %{entry: entry, size: size, sha256: sha, next: 0, received: 0, parts: []}
+    :ok = keep_waiting(entry, state)
     %{state | uploads: Map.put(state.uploads, entry.id, upload)}
+  end
+
+  # What waits is kept outside this process until it starts or is answered,
+  # so a restart answers it (the moduledoc).
+  defp keep_waiting(entry, state) do
+    true = :ets.insert(state.waiting_table, {entry.id, Map.take(entry, @waiting_facts)})
+    :ok
+  end
+
+  defp forget_waiting(id, state) do
+    true = :ets.delete(state.waiting_table, id)
+    :ok
   end
 
   # The next request that waits, once one has ended.
@@ -527,6 +581,7 @@ defmodule FermixChannels.Desktop.Invoke.Admission do
 
     case Journal.append_started(state.dir, started_record(entry, started_at)) do
       :ok ->
+        :ok = forget_waiting(entry.id, state)
         launch(Map.put(entry, :started_at, started_at), part, state)
 
       {:error, reason} ->
@@ -556,8 +611,26 @@ defmodule FermixChannels.Desktop.Invoke.Admission do
 
   defp crashed(id, reason, state) do
     {entry, state} = pop_running(id, state)
-    Logger.error("invocation #{id} stopped: #{inspect(reason)}")
-    answer(entry, %Outcome{status: :failed, message: sentence(:crashed)}, state) |> next()
+    outcome = crash_outcome(entry, switches(state))
+
+    if outcome.status == :failed,
+      do: Logger.error("invocation #{id} stopped: #{inspect(reason)}"),
+      else: Logger.info("invocation #{id} ended with its switch off: #{inspect(reason)}")
+
+    answer(entry, outcome, state) |> next()
+  end
+
+  # A run that ended while the switches no longer let its capability run was
+  # ended by them, and is answered as they would have ended it: the master
+  # off as stopped here, its offer off as a request of it now; else failed.
+  defp crash_outcome(entry, switches) do
+    with true <- Switches.enabled?(switches),
+         :ok <- switched_on(entry, switches) do
+      %Outcome{status: :failed, message: sentence(:crashed)}
+    else
+      false -> Outcome.refused(:stopped_here, sentence(:stopped_here))
+      {:refused, refusal, sentence} -> Outcome.refused(refusal, sentence)
+    end
   end
 
   defp pop_running(id, state) do
@@ -721,6 +794,29 @@ defmodule FermixChannels.Desktop.Invoke.Admission do
     Enum.reduce(ids, state, &drop_waiting(&1, outcome, &2))
   end
 
+  # An offer's own switch off, the master on: each capability's work, running
+  # or waiting, is held to the rule it was admitted by (`switched_on/2`), and
+  # what that rule now refuses ends with its refusal (`off`, the sentence a
+  # request of it arriving now gets). What then has a slot starts.
+  defp offer_switched_off(switches, state) do
+    running = for {id, entry} <- state.running, do: {:running, id, entry}
+    uploads = for {id, upload} <- state.uploads, do: {:upload, id, upload.entry}
+    waiting = for entry <- :queue.to_list(state.waiting), do: {:waiting, entry.id, entry}
+
+    refused =
+      for {where, id, entry} <- running ++ uploads ++ waiting,
+          {:refused, refusal, sentence} <- [switched_on(entry, switches)],
+          do: {where, id, Outcome.refused(refusal, sentence)}
+
+    refused
+    |> Enum.reduce(state, fn {where, id, outcome}, acc -> end_work(where, id, outcome, acc) end)
+    |> next()
+  end
+
+  defp end_work(:running, id, outcome, state), do: stop_running(id, outcome, state)
+  defp end_work(:upload, id, outcome, state), do: drop_upload(id, outcome, state)
+  defp end_work(:waiting, id, outcome, state), do: drop_waiting(id, outcome, state)
+
   # -- recording and answering ---------------------------------------------------------
 
   # The finished record is synced, the run's bookend emitted, the answer
@@ -737,6 +833,9 @@ defmodule FermixChannels.Desktop.Invoke.Admission do
     :ok = Telemetry.finished(meta(entry), %{outcome | duration_ms: duration}, bytes)
     held = %{fields: fields, payload: payload, part: part, at: now, bytes: bytes}
     send_answer(fields, payload, part, state)
+    # Let go only once recorded and on its way: a restart in between answers
+    # it again, never not at all.
+    :ok = forget_waiting(entry.id, state)
     hold(entry.id, held, state)
   end
 
@@ -947,7 +1046,8 @@ defmodule FermixChannels.Desktop.Invoke.Admission do
     :receipt_failed,
     :receipt_refused,
     :receipt_unknown,
-    :stopped_here
+    :stopped_here,
+    :restarted
   ]
 
   @doc """
@@ -982,4 +1082,7 @@ defmodule FermixChannels.Desktop.Invoke.Admission do
   defp sentence(:receipt_refused), do: "This computer refused it."
   defp sentence(:receipt_unknown), do: "Fermix on this computer stopped while it ran."
   defp sentence(:stopped_here), do: "The person at this computer stopped it."
+
+  defp sentence(:restarted),
+    do: "Fermix on this computer restarted before it ran this, so it did not run."
 end

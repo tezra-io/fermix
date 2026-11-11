@@ -23,7 +23,9 @@ defmodule FermixCore.ComputerHistory do
   alias FermixCore.ComputerHistory.Config
   alias FermixCore.ComputerHistory.Controller
   alias FermixCore.Computers
+  alias FermixCore.Computers.Switches
   alias FermixCore.Memory.Repo
+  alias FermixCore.Setup.ConfigStore
 
   @doc "Whether the operator has enabled computer history in config."
   @spec enabled?() :: boolean()
@@ -72,10 +74,107 @@ defmodule FermixCore.ComputerHistory do
          holds_notes?(Keyword.get(opts, :repo, Repo)))
   end
 
-  defp offered?(computers) do
-    Enum.any?(computers, fn computer ->
-      Enum.any?(computer.offers, &(&1.id == "history" and &1.state == :on))
-    end)
+  defp offered?(computers), do: Enum.any?(computers, &history_on?/1)
+
+  defp history_on?(computer),
+    do: Enum.any?(computer.offers, &(&1.id == "history" and &1.state == :on))
+
+  @doc """
+  The machines whose history the home still takes (M97 §8.5): this machine
+  (`""`) while it records, and each computer of the home whose `history`
+  offer is on, unless the owner asked from chat that its history go off and
+  it has not yet said it did. Off means no further provider call for a
+  machine's history: the home refuses a sitting from any other machine
+  (`Submission`), and the roll-up reads only these machines' notes and makes
+  no call when there are none (`Summarizer.run_rollup/1`). A store that does
+  not answer is returned as its error; the caller takes nothing.
+
+  `opts` (seams): `:recording?`, `:computers` (`Computers.list/0`), `:repo`.
+  """
+  @spec contributors(keyword()) :: {:ok, [String.t()]} | {:error, term()}
+  def contributors(opts \\ []) when is_list(opts) do
+    repo = Keyword.get(opts, :repo, Repo)
+
+    with {:ok, rows} <- Repo.computer_history_home(:computer_rows, [], server: repo) do
+      pending = for %{computer_id: id, off_requested_at: at} <- rows, is_integer(at), do: id
+      own = if Keyword.get_lazy(opts, :recording?, &operative?/0), do: [""], else: []
+
+      offered =
+        opts
+        |> Keyword.get_lazy(:computers, &Computers.list/0)
+        |> Enum.filter(&history_on?/1)
+        |> Enum.map(& &1.device_id)
+
+      {:ok, own ++ (offered -- pending)}
+    end
+  end
+
+  @machine_table "fermix_core.computer_history"
+
+  @doc """
+  Switch this machine's computer history off (`/history off`, M97 §8.5), in
+  `home` (`:home`, the running engine's by default): the recorder's
+  `enabled` is written false in that home's `machine.toml`, and on the
+  running engine's own home it is put into application environment at once
+  (the tools leave the next turn) and the recorder is stopped
+  (`reconcile_runtime/1`, only where this system has a recorder,
+  `:recorder?`). With `offer: true` (a computer told from chat) the
+  server's `history` offer goes off too (`Computers.Switches`), so its
+  server knows at once and nothing more is sent.
+
+  Each step's outcome is answered, whatever the others': the stop
+  (`:stop`), the saved setting (`:save`) and the offer (`:offer`, `:ok`
+  when not asked). `:controller` is the Controller to reconcile.
+  """
+  @spec switch_off(keyword()) :: %{
+          stop: :ok | {:error, term()},
+          save: :ok | {:error, term()},
+          offer: :ok | {:error, term()}
+        }
+  def switch_off(opts \\ []) when is_list(opts) do
+    home = Keyword.get_lazy(opts, :home, &ConfigStore.fermix_home/0)
+    running? = Path.expand(home) == Path.expand(ConfigStore.fermix_home())
+
+    if running? do
+      Application.put_env(
+        :fermix_core,
+        :computer_history,
+        Keyword.put(Config.current(), :enabled, false)
+      )
+    end
+
+    %{
+      stop: stop_here(running?, opts),
+      save: saved(ConfigStore.put_machine_table(home, @machine_table, [{"enabled", "false"}])),
+      offer: if(Keyword.get(opts, :offer, false), do: offer_off(home), else: :ok)
+    }
+  end
+
+  defp stop_here(true, opts) do
+    if Keyword.get_lazy(opts, :recorder?, &recorder?/0),
+      do: reconcile_runtime(Keyword.get(opts, :controller, Controller)),
+      else: :ok
+  end
+
+  defp stop_here(false, _opts), do: :ok
+
+  defp saved(:ok), do: :ok
+
+  defp saved({:error, reason} = error) do
+    Logger.warning("computer_history: the off setting was not saved: #{inspect(reason)}")
+    error
+  end
+
+  defp offer_off(home) do
+    case Switches.read(home) do
+      {:ok, switches} ->
+        if Keyword.get(switches, :history, false),
+          do: Switches.write(home, Keyword.put(switches, :history, false)),
+          else: :ok
+
+      {:error, _reason} = error ->
+        error
+    end
   end
 
   # A store that does not answer denies, loudly: a gate fails closed.

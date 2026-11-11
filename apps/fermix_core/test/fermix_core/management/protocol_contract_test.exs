@@ -891,7 +891,8 @@ defmodule FermixCore.Management.ProtocolContractTest do
   end
 
   # M97 §6.3: what Fermix on its server did on this computer, read from its
-  # own journal: an answer, a refusal before anything ran, and one that runs.
+  # own journal: an answer, a refusal before anything ran, and one that runs,
+  # each with the owner's words for its capability and op.
   test "the golden computer journal is the router's own" do
     home = FermixTestSupport.SafeRm.make_tmp_dir!("contract_journal")
     on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(home) end)
@@ -928,7 +929,7 @@ defmodule FermixCore.Management.ProtocolContractTest do
              result_bytes: 151,
              duration_ms: 0,
              capability: "files",
-             op: "write",
+             op: "file.write",
              target: "drafts/plan.txt",
              origin: :scheduled
            }},
@@ -937,7 +938,7 @@ defmodule FermixCore.Management.ProtocolContractTest do
              id: "inv-t5bn8q3zk7mx2cw9vh4dj6rpfa",
              at: ~U[2031-06-08 09:22:10.000Z],
              capability: "shell",
-             op: "run",
+             op: "shell.run",
              target: "ls drafts",
              origin: :chat,
              epoch: 3,
@@ -2287,8 +2288,50 @@ defmodule FermixCore.Management.ProtocolContractTest do
       # The server's part a linked Mac reads is the server's answer to its
       # own forward: its row is marked.
       {"home_status_on_review", on_review(server_computers(@desktop_id))},
-      {"home_status_ready_keeps_on", ready_keeps_on()}
+      {"home_status_ready_keeps_on", ready_keeps_on()},
+      {"home_status_on_screen", Map.put(golden_row("home_status_on"), "screen", held_screen())}
     ]
+  end
+
+  # M97 §7.4: the linked Mac of the `on` golden while Fermix on its server
+  # controls its screen. The mark is this computer's own `home.status` part,
+  # read as `Management.Home.status/1` reads it on a linked computer from the
+  # seat its server holds; the rest of the picture is the `on` golden's.
+  defp held_screen do
+    {spec, _knobs} = ScreenHelperDouble.driver(self())
+    name = :"contract_held_seat_#{System.unique_integer([:positive])}"
+    home = SafeRm.make_tmp_dir!("contract_held_seat")
+    on_exit(fn -> SafeRm.rm_rf!(home) end)
+
+    start_supervised!(
+      {Seat,
+       name: name,
+       driver: fn -> {:ok, spec} end,
+       home: home,
+       clock: fn -> ~U[2031-05-04 11:42:07.512Z] end,
+       changed: fn -> :ok end,
+       timer: fn _message, _delay -> make_ref() end},
+      id: name
+    )
+
+    {:ok, _held} = Seat.acquire(name, "cua_golden")
+
+    {:ok, status} =
+      ManagementHome.status(
+        home: home,
+        engine_role: %{role: :device, primary: @golden_server},
+        config: [],
+        scheduler: nil,
+        profile: "general",
+        now: ~U[2031-05-04 12:00:00Z],
+        host_os: :macos,
+        version: "1.2.3",
+        link_status: fn -> %{primary: connected_server(), desktops: [], enrollment: nil} end,
+        webhook_settings: fn -> %{whatsapp: [], cues: [], web_port: 4030} end,
+        screen: fn -> Seat.view(name) end
+      )
+
+    status["screen"]
   end
 
   # The server golden's own facts (`HomeSummaryGoldens`), with its two

@@ -92,6 +92,7 @@ defmodule FermixCore.Memory.Repo do
   @checklist_edits_migration_version 57
   @follow_up_always_allow_migration_version 58
   @computer_history_machines_migration_version 59
+  @computer_history_reports_migration_version 60
   @sqlite_open_intent :readwritecreate
 
   # The home's requests about notes from every machine (M97 §8), all served by
@@ -103,6 +104,9 @@ defmodule FermixCore.Memory.Repo do
     :intervals_after,
     :record_submission,
     :record_delivered,
+    :request_off,
+    :clear_off,
+    :record_report,
     :computer_rows,
     :notes_by_computer,
     :purge_notes,
@@ -2162,20 +2166,30 @@ defmodule FermixCore.Memory.Repo do
     call({:computer_history_memories_by_ids, ids, memory_kind(opts, :session)}, opts)
   end
 
-  @doc "Session notes written after `since_ts` (the roll-up's input), newest first."
+  @doc """
+  Session notes written after `since_ts` (the roll-up's input), newest first;
+  `machines:` (`:all`, the default, or the machine ids to read) narrows them.
+  """
   @spec computer_history_session_notes_since(integer(), pos_integer(), keyword()) ::
           {:ok, [map()]} | {:error, term()}
   def computer_history_session_notes_since(since_ts, limit, opts \\ [])
       when is_integer(since_ts) and is_integer(limit) and limit > 0 do
-    call({:computer_history_session_notes_since, since_ts, limit}, opts)
+    call(
+      {:computer_history_session_notes_since, since_ts, limit,
+       Keyword.get(opts, :machines, :all)},
+      opts
+    )
   end
 
-  @doc "How many session notes exist after `since_ts` (the roll-up's denominator)."
+  @doc "How many session notes exist after `since_ts` (the roll-up's denominator), as above."
   @spec computer_history_count_session_notes_since(integer(), keyword()) ::
           {:ok, non_neg_integer()} | {:error, term()}
   def computer_history_count_session_notes_since(since_ts, opts \\ [])
       when is_integer(since_ts) do
-    call({:computer_history_count_session_notes_since, since_ts}, opts)
+    call(
+      {:computer_history_count_session_notes_since, since_ts, Keyword.get(opts, :machines, :all)},
+      opts
+    )
   end
 
   @doc """
@@ -2262,7 +2276,8 @@ defmodule FermixCore.Memory.Repo do
   by the `Memory.Repo.ComputerHistorySql` function `op` names on this store's
   connection, its arguments `args` after the connection: `insert_note`, `noted`,
   `reaching_intervals`, `intervals_after`, `record_submission`,
-  `record_delivered`, `computer_rows`, `notes_by_computer`, `purge_notes`,
+  `record_delivered`, `request_off`, `clear_off`, `record_report`,
+  `computer_rows`, `notes_by_computer`, `purge_notes`,
   `pause_window` or `prune_home_intervals`. Only `ComputerHistory`'s home half
   calls it.
   """
@@ -4481,13 +4496,27 @@ defmodule FermixCore.Memory.Repo do
     {:reply, reply, state}
   end
 
-  def handle_call({:computer_history_session_notes_since, since_ts, limit}, _from, state) do
-    reply = with_connection(state, &ComputerHistorySql.session_notes_since(&1, since_ts, limit))
+  def handle_call(
+        {:computer_history_session_notes_since, since_ts, limit, machines},
+        _from,
+        state
+      ) do
+    reply =
+      with_connection(
+        state,
+        &ComputerHistorySql.session_notes_since(&1, since_ts, limit, machines)
+      )
+
     {:reply, reply, state}
   end
 
-  def handle_call({:computer_history_count_session_notes_since, since_ts}, _from, state) do
-    reply = with_connection(state, &ComputerHistorySql.count_session_notes_since(&1, since_ts))
+  def handle_call({:computer_history_count_session_notes_since, since_ts, machines}, _from, state) do
+    reply =
+      with_connection(
+        state,
+        &ComputerHistorySql.count_session_notes_since(&1, since_ts, machines)
+      )
+
     {:reply, reply, state}
   end
 
@@ -4966,16 +4995,20 @@ defmodule FermixCore.Memory.Repo do
   defp request_name(request) when is_atom(request), do: request
 
   # Where migration 59 carries a home's raw computer history (M97 §8.1): this
-  # machine's own store under the home, and whether the home is an Always On
-  # server, whose leftovers are a move's and are never carried. Read only when
-  # memory.db holds something to carry. `:fermix_home`, `:history_spool_path`
-  # and `:history_server?` are a test's seams.
+  # machine's own store under the home, whether the home is an Always On
+  # server, whose leftovers are a move's and are never carried, and whether
+  # this system has a recorder at all: one with none keeps no store (nothing
+  # would ever sweep it), so it drops them too. Read only when memory.db holds
+  # something to carry. `:fermix_home`, `:history_spool_path`,
+  # `:history_server?` and `:history_recorder?` are a test's seams.
   defp history_carry(opts) do
     home = Keyword.get_lazy(opts, :fermix_home, &ConfigStore.fermix_home/0)
 
     %{
       spool_path: Keyword.get_lazy(opts, :history_spool_path, fn -> Spool.path(home) end),
-      server?: Keyword.get_lazy(opts, :history_server?, fn -> Candidate.server?(home) end)
+      server?: Keyword.get_lazy(opts, :history_server?, fn -> Candidate.server?(home) end),
+      recorder?:
+        Keyword.get_lazy(opts, :history_recorder?, &FermixCore.ComputerHistory.recorder?/0)
     }
   end
 
@@ -5073,8 +5106,32 @@ defmodule FermixCore.Memory.Repo do
          :ok <- apply_checklists_migration(conn, versions),
          :ok <- apply_checklist_edits_migration(conn, versions),
          :ok <- apply_follow_up_always_allow_migration(conn, versions),
-         :ok <- apply_computer_history_machines_migration(conn, versions, carry) do
+         :ok <- apply_computer_history_machines_migration(conn, versions, carry),
+         :ok <- apply_computer_history_reports_migration(conn, versions) do
       :ok
+    end
+  end
+
+  # M97 §8.5: each machine's row on the home gains the owner's pending request
+  # from chat that its history go off, and its last report of its recorder, in
+  # one transaction with the version. Nothing is rewritten.
+  defp apply_computer_history_reports_migration(conn, versions) do
+    if Enum.member?(versions, @computer_history_reports_migration_version) do
+      :ok
+    else
+      with :ok <- Sqlite3.execute(conn, "BEGIN;") do
+        conn |> reports_step() |> commit_migration(conn)
+      end
+    end
+  end
+
+  defp reports_step(conn) do
+    with :ok <- ComputerHistorySql.reports_schema(conn) do
+      Sqlite3.execute(
+        conn,
+        "INSERT INTO schema_migrations(version) " <>
+          "VALUES (#{@computer_history_reports_migration_version});"
+      )
     end
   end
 
@@ -5127,6 +5184,15 @@ defmodule FermixCore.Memory.Repo do
     Logger.info(
       "computer history: this server's memory.db held a move's leftover spool rows; " <>
         "they are dropped, not carried"
+    )
+
+    :ok
+  end
+
+  defp carry_to(_conn, %{recorder?: false}) do
+    Logger.info(
+      "computer history: memory.db held raw history rows, and this system has no recorder " <>
+        "to keep a store for them; they are dropped, not carried"
     )
 
     :ok

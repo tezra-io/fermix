@@ -47,6 +47,7 @@ defmodule FermixChannels.Channels.IMessage.Capability do
 
   alias FermixChannels.Channels.IMessage.Protocol
   alias FermixChannels.Channels.IMessage.Watch
+  alias FermixCore.Computers.Offers.IMessage, as: IMessageOffer
   alias FermixCore.Computers.Outcome
 
   @reads ~w(probe policy.get watch.subscribe watch.unsubscribe messages.after attachment.fetch)
@@ -68,6 +69,14 @@ defmodule FermixChannels.Channels.IMessage.Capability do
 
   @impl true
   def ops, do: ["imessage.call", "imessage.send", "imessage.watch"]
+
+  @impl true
+  def label, do: IMessageOffer.label()
+
+  @impl true
+  def op_label("imessage.call"), do: "read Messages"
+  def op_label("imessage.send"), do: "send a message"
+  def op_label("imessage.watch"), do: "watch for new messages"
 
   @impl true
   def effect?("imessage.send"), do: true

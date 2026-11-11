@@ -21,9 +21,10 @@ defmodule FermixCore.ComputerHistory.Controller do
   missing binary keeps the children absent (fail-closed) rather than crash-looping
   a `Capturer` that can never resolve its Port.
 
-  A device-role engine (`FermixCore.Home.Role`) runs neither: the summarizer
-  calls a provider (M75 D5), and capture writes the `memory.db` a device never
-  opens (a retired copy, which a return replaces), as the purge does.
+  On a computer whose home is a server (the device role, `FermixCore.Home.Role`)
+  both run while history records there: the recorder writes this machine's
+  own store, and the scheduler sends its sittings and its report to the home,
+  which summarizes them (M97 §8.1).
   """
 
   use GenServer
@@ -69,7 +70,7 @@ defmodule FermixCore.ComputerHistory.Controller do
       children:
         Keyword.get_lazy(opts, :children, fn ->
           role = Keyword.get_lazy(opts, :engine_role, &Role.current/0)
-          default_children(role, Keyword.take(opts, [:timer_enabled]))
+          default_children(role, Keyword.take(opts, [:timer_enabled, :spool]))
         end)
     }
 
@@ -118,12 +119,14 @@ defmodule FermixCore.ComputerHistory.Controller do
 
   # Where a sitting goes (M97 §8.1): on the home, in process; from a computer,
   # over the link (`FermixChannels.Desktop.HistoryUplink`, the channels app's,
-  # named at run time). A computer keeps no notes, so it has no roll-up.
+  # named at run time), with the report of its recorder (§8.5). A computer
+  # keeps no notes, so it has no roll-up. `:spool` is this machine's store, nil
+  # where it keeps none (no recorder).
   defp scheduler_opts(:primary, opts),
     do: Keyword.put(opts, :uplink, &home_uplink/1)
 
   defp scheduler_opts(:device, opts),
-    do: Keyword.merge(opts, uplink: &device_uplink/1, repo: nil)
+    do: Keyword.merge(opts, uplink: &device_uplink/1, report: &device_report/1, repo: nil)
 
   @doc false
   @spec home_uplink(map()) :: {:ok, Submission.answer()}
@@ -133,6 +136,11 @@ defmodule FermixCore.ComputerHistory.Controller do
   @spec device_uplink(map()) :: {:ok, Submission.answer()} | {:error, term()}
   def device_uplink(payload) when is_map(payload),
     do: apply(Module.concat([FermixChannels, Desktop, HistoryUplink]), :submit, [payload])
+
+  @doc false
+  @spec device_report(map()) :: :ok | {:error, term()}
+  def device_report(report) when is_map(report),
+    do: apply(Module.concat([FermixChannels, Desktop, HistoryUplink]), :report, [report])
 
   defp do_reconcile(state) do
     recording? = state.operative_fun.() and state.installed_fun.()

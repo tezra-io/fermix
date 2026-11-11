@@ -87,12 +87,15 @@ defmodule FermixCore.Setup.ConfigStoreMachineTest do
         |> ComputerUseConfig.normalize()
         |> ComputerUseConfig.to_keyword()
 
+      # Application environment's own shapes: this machine's local summarizer
+      # beside the home's route (M97 §4).
       computer_history =
         ComputerHistoryConfig.normalize(
           enabled: true,
           apps: ["com.apple.Safari"],
-          summarizer: "default",
-          remote_summaries: ["anthropic"]
+          machine_summarizer: :local,
+          summarizer: :default_provider,
+          remote_summaries: [:anthropic]
         )
 
       imessage = [
@@ -127,8 +130,23 @@ defmodule FermixCore.Setup.ConfigStoreMachineTest do
 
       assert ConfigText.value(machine, "sandbox", "mode") == {:ok, ~s("strict")}
 
+      # Computer history splits by key: this machine records, its apps and
+      # its own notes here; the home's route and grants in config.toml.
       assert ConfigText.value(machine, "fermix_core.computer_history", "summarizer") ==
+               {:ok, ~s("local")}
+
+      assert ConfigText.value(machine, "fermix_core.computer_history", "apps") ==
+               {:ok, ~s(["com.apple.Safari"])}
+
+      refute machine =~ "remote_summaries"
+
+      assert ConfigText.value(config, "fermix_core.computer_history", "summarizer") ==
                {:ok, ~s("default")}
+
+      assert ConfigText.value(config, "fermix_core.computer_history", "remote_summaries") ==
+               {:ok, ~s(["anthropic"])}
+
+      refute config =~ "com.apple.Safari"
 
       # The home uses iMessage, with its owner and guests (M97 §4).
       assert ConfigText.value(config, "fermix_channels.imessage", "enabled") == {:ok, "true"}
@@ -547,6 +565,154 @@ defmodule FermixCore.Setup.ConfigStoreMachineTest do
 
     refute again =~ "sandbox setting"
   end
+
+  # M97 §4: [fermix_core.computer_history] splits by key. This machine's file
+  # keeps whether it records, its apps and `summarizer = "local"`; the home's
+  # config.toml keeps the route the home summarizes on and its grants.
+  describe "computer history split by key" do
+    # A released engine kept the whole table in config.toml; this Mac is its
+    # own home and chose local.
+    @released_history """
+    [fermix_core.agent]
+    name = "Orchard"
+
+    [fermix_core.computer_history]
+    enabled = true
+    apps = ["com.example.Notes"]
+    summarizer = "local"
+    remote_summaries = ["anthropic"]
+    """
+
+    # Stage 0 of M97 kept the whole table in machine.toml.
+    @stage0_machine """
+    [sandbox]
+    mode = "standard"
+
+    [fermix_core.computer_history]
+    enabled = true
+    apps = ["com.example.Notes"]
+    summarizer = "anthropic"
+    remote_summaries = ["anthropic"]
+    """
+
+    test "a Mac that is its own home and chose local stays local, sittings and roll-up", ctx do
+      File.write!(Path.join(ctx.home, "config.toml"), @released_history)
+
+      assert :ok = ConfigStore.migrate_machine_file(ctx.home, server?: false)
+      history = loaded_history()
+
+      assert history[:machine_summarizer] == :local
+      assert history[:summarizer] == :local
+      assert history[:enabled] == true
+      assert history[:remote_summaries] == [:anthropic]
+      # The one reader every half asks: the sittings and the roll-up alike.
+      assert ComputerHistoryConfig.summarizer(history) == :local
+
+      config = File.read!(Path.join(ctx.home, "config.toml"))
+      refute config =~ "com.example.Notes"
+      assert :ok = ConfigStore.migrate_machine_file(ctx.home, server?: false)
+      assert File.read!(Path.join(ctx.home, "config.toml")) == config
+    end
+
+    # Interrupted after the machine file was written: config.toml still holds
+    # the Mac's keys; the next boot finishes the removal and loses nothing.
+    test "a release boot stopped after its first write is finished by the next", ctx do
+      plan = MachineFile.migration(@released_history, :absent, false)
+      File.write!(Path.join(ctx.home, "config.toml"), @released_history)
+      File.write!(MachineFile.path(ctx.home), plan.machine)
+
+      assert :ok = ConfigStore.migrate_machine_file(ctx.home, server?: false)
+
+      assert File.read!(Path.join(ctx.home, "config.toml")) == plan.config
+      assert File.read!(MachineFile.path(ctx.home)) == plan.machine
+      assert ComputerHistoryConfig.summarizer(loaded_history()) == :local
+      assert loaded_history()[:apps] == ["com.example.Notes"]
+    end
+
+    test "a server keeps the home's keys and never takes the computer's", ctx do
+      File.write!(Path.join(ctx.home, "config.toml"), @released_history)
+
+      assert :ok = ConfigStore.migrate_machine_file(ctx.home, server?: true)
+
+      assert File.read!(MachineFile.path(ctx.home)) == MachineFile.server_default()
+      history = loaded_history()
+
+      assert history[:summarizer] == :local
+      assert history[:remote_summaries] == [:anthropic]
+      refute Keyword.has_key?(history, :machine_summarizer)
+      refute Keyword.has_key?(history, :enabled)
+      refute Keyword.has_key?(history, :apps)
+    end
+
+    test "stage 0's whole table: the home's keys go back to config.toml, once", ctx do
+      File.write!(Path.join(ctx.home, "config.toml"), ~s([fermix_core.agent]\nname = "Orchard"\n))
+      File.write!(MachineFile.path(ctx.home), @stage0_machine)
+
+      assert :ok = ConfigStore.migrate_machine_file(ctx.home, server?: false)
+
+      config = File.read!(Path.join(ctx.home, "config.toml"))
+      machine = File.read!(MachineFile.path(ctx.home))
+
+      assert ConfigText.value(config, "fermix_core.computer_history", "summarizer") ==
+               {:ok, ~s("anthropic")}
+
+      refute machine =~ "summarizer"
+      refute machine =~ "remote_summaries"
+      assert loaded_history() == stage0_loaded()
+
+      assert :ok = ConfigStore.migrate_machine_file(ctx.home, server?: false)
+      assert File.read!(Path.join(ctx.home, "config.toml")) == config
+      assert File.read!(MachineFile.path(ctx.home)) == machine
+    end
+
+    # Interrupted after config.toml took the home's keys: the machine file
+    # still holds them; the next boot writes the same config.toml and then
+    # the machine file.
+    test "a stage 0 boot stopped after its first write is finished by the next", ctx do
+      plan = MachineFile.homeward("", @stage0_machine)
+      File.write!(Path.join(ctx.home, "config.toml"), plan.config)
+      File.write!(MachineFile.path(ctx.home), @stage0_machine)
+
+      assert :ok = ConfigStore.migrate_machine_file(ctx.home, server?: false)
+
+      assert File.read!(Path.join(ctx.home, "config.toml")) == plan.config
+      assert File.read!(MachineFile.path(ctx.home)) == plan.machine
+      assert loaded_history() == stage0_loaded()
+    end
+
+    # A computer runs nothing that reads the home's keys, and never acts on
+    # one its config.toml still carries from before its move.
+    test "a computer's application environment holds no home key", ctx do
+      File.write!(
+        Path.join(ctx.home, "config.toml"),
+        ~s([fermix_core.engine]\nrole = "device"\n\n) <> @released_history
+      )
+
+      assert :ok = ConfigStore.migrate_machine_file(ctx.home, server?: false)
+      assert {:ok, loaded} = ConfigStore.load_runtime_config(resolve_secrets: false)
+      :ok = ConfigStore.apply_snapshot(loaded, supervised: false)
+
+      history = Application.get_env(:fermix_core, :computer_history)
+      assert history[:machine_summarizer] == :local
+      refute Keyword.has_key?(history, :summarizer)
+      refute Keyword.has_key?(history, :remote_summaries)
+      assert ComputerHistoryConfig.granted_providers() == MapSet.new()
+    end
+  end
+
+  defp loaded_history do
+    assert {:ok, loaded} = ConfigStore.load_runtime_config(resolve_secrets: false)
+    Keyword.fetch!(loaded.fermix_core, :computer_history)
+  end
+
+  defp stage0_loaded,
+    do:
+      ComputerHistoryConfig.normalize(
+        enabled: true,
+        apps: ["com.example.Notes"],
+        summarizer: :anthropic,
+        remote_summaries: [:anthropic]
+      )
 
   # The home's marker names the Mac app, whose bundle (a folder of this
   # test's) is there.

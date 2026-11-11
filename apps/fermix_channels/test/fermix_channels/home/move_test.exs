@@ -157,6 +157,30 @@ defmodule FermixChannels.Home.MoveTest do
                      %{phase: :finished, side: :candidate, result: :done, epoch: 5}}
   end
 
+  # M97 §8.4: the notes the source made while it was its own home are the
+  # home's own (""). On the server they are the notes of the computer it
+  # stays as, so recall there names it; its reads, its purge and its delivered
+  # mark go with them. A thread is the home's, and another computer's notes
+  # keep their computer.
+  test "the home's own history notes become the notes of the computer it left", ctx do
+    other = "2c9d4e5f-6a7b-4c8d-9e0f-1a2b3c4d5e6f"
+    :ok = HomeMove.history!(ctx.primary.root, "", [other])
+
+    run_worker(ctx.primary.root, ctx.candidate)
+    assert_received :source_restart
+    assert_received {:scheduled, :restart, _delay}
+    assert {:ok, %{device_id: mac}} = DesktopLink.read(ctx.primary.root)
+
+    assert %{
+             notes: [{^mac, "session"}, {^other, "session"}, {"", "thread"}],
+             reads: [^mac],
+             intervals: [^mac],
+             rows: rows
+           } = HomeMove.history(ctx.home)
+
+    assert Enum.sort(rows) == Enum.sort([{mac, 2}, {other, 2}])
+  end
+
   # L16: the computer the home leaves is kept awake while the move runs, from
   # the worker's start until the restart it ends with, and only then.
   test "this computer is kept awake from the worker's start to its restart", ctx do

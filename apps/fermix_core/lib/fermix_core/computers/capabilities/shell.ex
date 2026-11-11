@@ -26,12 +26,19 @@ defmodule FermixCore.Computers.Capabilities.Shell do
   @behaviour FermixCore.Computers.Capability
 
   alias FermixCore.Computers.Capabilities.Local
+  alias FermixCore.Computers.Offers.Shell, as: ShellOffer
   alias FermixCore.Tools.GitRead
   alias FermixCore.Tools.GitWrite
   alias FermixCore.Tools.Shell, as: ShellTool
 
   @ops %{"shell.run" => ShellTool, "git.read" => GitRead, "git.write" => GitWrite}
   @effects ["shell.run", "git.write"]
+  # Each op in the owner's words (`op_label/1`).
+  @op_labels %{
+    "shell.run" => "run a command",
+    "git.read" => "read a Git repository",
+    "git.write" => "change a Git repository"
+  }
   @result_bytes 256 * 1_024 + 16 * 1_024
   # A command's output is 1 MiB at most; its exit line and the note on what
   # the sandbox could not pass ride with it.
@@ -53,6 +60,12 @@ defmodule FermixCore.Computers.Capabilities.Shell do
 
   @impl true
   def ops, do: @ops |> Map.keys() |> Enum.sort()
+
+  @impl true
+  def label, do: ShellOffer.label()
+
+  @impl true
+  def op_label(op) when is_map_key(@ops, op), do: Map.fetch!(@op_labels, op)
 
   @impl true
   def effect?(op) when is_map_key(@ops, op), do: op in @effects

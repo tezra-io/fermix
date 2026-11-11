@@ -15,10 +15,15 @@ defmodule FermixCore.ComputerHistory.Spool do
   0600 in a 0700 folder. A home that kept its spool in `memory.db` has it moved
   here by memory.db's migration 59 (`Memory.Repo`), which attaches this file.
 
-  One GenServer is the single writer, the `Memory.Repo` shape; every request
-  runs `Memory.Repo.ComputerHistorySql` on this file's connection, so the raw
-  reads and writes have one implementation. Options: `:path` (the file),
-  `:name` (nil for none, a test's seam). A caller passes `server:` and may pass
+  One GenServer holds the store's connection, the `Memory.Repo` shape; every
+  request runs `Memory.Repo.ComputerHistorySql` on it, so the raw reads and
+  writes have one implementation. It is not the only writer: a computer applies
+  what its home tells it (`apply_at/3`, from `ComputerHistory.MachineService`)
+  on a connection of its own, opened and closed for that one apply. Every write
+  of either is one `BEGIN IMMEDIATE` transaction, which SQLite serializes, so
+  neither interleaves with the other; a write that waits past the 5 s
+  `busy_timeout` fails with an error. Options: `:path` (the file), `:name`
+  (nil for none, a test's seam). A caller passes `server:` and may pass
   `timeout:` and `on_timeout: :error` (answered `{:error, :spool_timeout}`).
   """
 
@@ -181,25 +186,19 @@ defmodule FermixCore.ComputerHistory.Spool do
     end
   end
 
+  # A pause already set here that ends later is kept: one write that only ever
+  # raises the horizon, so a pause applied from a refusal or a delivery that
+  # races one from chat can never lower it.
   defp pause_from("pause", until_ts, now, opts) do
     if until_ts > DateTime.to_unix(now, :millisecond) do
       until = until_ts |> DateTime.from_unix!(:millisecond) |> DateTime.to_iso8601()
-      later_pause(until, opts)
+      call({:sql, :raise_pause_until, [until]}, opts)
     else
       :ok
     end
   end
 
   defp pause_from("purge", _to_ts, _now, _opts), do: :ok
-
-  # A pause already set here that ends later is kept.
-  defp later_pause(until, opts) do
-    with {:ok, %{pause_until: current}} <- state(opts) do
-      if is_binary(current) and current >= until,
-        do: :ok,
-        else: set_pause_until(until, opts)
-    end
-  end
 
   defp mark_applied(:ok, [], _opts), do: :ok
 
@@ -212,17 +211,23 @@ defmodule FermixCore.ComputerHistory.Spool do
   Apply the home's intervals (`apply_intervals/3`) to the store at `file`, on a
   connection of its own, opened and closed here: how a computer applies what
   its home sends it (`ComputerHistory.MachineService`), from the invocation's
-  home alone. A machine with no store has no raw event to fence: nothing is
-  created, and the mark is answered.
+  home alone. Answers the store's mark once they are applied: the highest
+  interval this machine has applied, every one below it included. A machine
+  with no store has no raw event to fence and applied nothing: nothing is
+  created and the mark is 0, so a store it opens later starts from the first
+  interval.
   """
-  @spec apply_at(Path.t(), [map()], DateTime.t()) :: :ok | {:error, term()}
+  @spec apply_at(Path.t(), [map()], DateTime.t()) :: {:ok, non_neg_integer()} | {:error, term()}
   def apply_at(file, intervals, %DateTime{} = now) when is_binary(file) and is_list(intervals) do
-    if File.exists?(file), do: apply_open(file, intervals, now), else: :ok
+    if File.exists?(file), do: apply_open(file, intervals, now), else: {:ok, 0}
   end
 
   defp apply_open(file, intervals, now) do
     with {:ok, conn} <- open(file) do
-      result = apply_intervals(intervals, now, conn: conn)
+      result =
+        with :ok <- apply_intervals(intervals, now, conn: conn),
+             {:ok, %{home_mark: mark}} <- link(conn: conn),
+             do: {:ok, mark}
 
       case Sqlite3.close(conn) do
         :ok -> result

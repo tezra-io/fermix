@@ -920,12 +920,15 @@ defmodule FermixCore.Setup.ConfigStoreTest do
 
     assert :ok = ConfigStore.save_snapshot(snapshot)
 
-    # This computer's own setting (M97 §4).
+    # Split by key (M97 §4): whether this computer records and which apps are
+    # its own; the route the home summarizes on is the home's.
     contents = File.read!(Path.join(tmp_home, "machine.toml"))
     assert contents =~ "[fermix_core.computer_history]"
     assert contents =~ "enabled = true"
-    assert contents =~ ~s(summarizer = "local")
-    refute File.read!(Path.join(tmp_home, "config.toml")) =~ "computer_history"
+    refute contents =~ "summarizer"
+    config = File.read!(Path.join(tmp_home, "config.toml"))
+    assert config =~ ~s([fermix_core.computer_history]\nsummarizer = "local")
+    refute config =~ "com.apple.Safari"
 
     assert {:ok, loaded} = ConfigStore.load_runtime_config(resolve_secrets: false)
     computer_history = Keyword.get(loaded.fermix_core, :computer_history, [])
@@ -969,10 +972,12 @@ defmodule FermixCore.Setup.ConfigStoreTest do
 
       assert :ok = ConfigStore.save_snapshot(snapshot)
 
-      contents = File.read!(Path.join(tmp_home, "machine.toml"))
+      # The home's keys (M97 §4): its route and its grants.
+      contents = File.read!(Path.join(tmp_home, "config.toml"))
       assert contents =~ toml_line
       # The internal atom spelling must never reach disk.
       refute contents =~ "default_provider"
+      refute File.read!(Path.join(tmp_home, "machine.toml")) =~ "default_provider"
       assert contents =~ ~s(remote_summaries = ["anthropic"])
 
       assert {:ok, loaded} = ConfigStore.load_runtime_config(resolve_secrets: false)

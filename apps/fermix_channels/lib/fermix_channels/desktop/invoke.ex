@@ -10,9 +10,16 @@ defmodule FermixChannels.Desktop.Invoke do
   sibling of the dial subtree, started while this home is linked: a relay
   or dial helper that restarts takes no running invocation with it, so a
   command survives a relay switch (§5.2). If Admission crashes, its runs end
-  with it and are journaled `unknown` (`interrupted`) when it starts again;
-  what only waited, never journaled, leaves no record, and the results it
-  held are lost.
+  with it and are journaled `unknown` (`interrupted`) when it starts again,
+  and the results it held are lost. What only waited was never journaled:
+  this supervisor owns the table that keeps its facts while it waits (an
+  unnamed ETS table, at most 32 rows, handed to Admission as
+  `:waiting_table`), so a restart of Admission or of the runs' supervisor
+  answers it as never run. A restart of this supervisor itself, which
+  follows more than three of theirs in five seconds, or of the engine, takes
+  the table with it: what waited then is answered by nothing, and its
+  caller ends at its deadline, at its next session's ask, or, for a
+  long-lived one while the session stays up, when the caller itself ends.
 
   `capabilities/0` is the one map of what this computer can be asked, one
   line per capability (`FermixCore.Computers.Capability`).
@@ -103,11 +110,17 @@ defmodule FermixChannels.Desktop.Invoke do
   def init(opts) do
     name = Keyword.get(opts, :name, __MODULE__)
     runs = runs(name)
+    # Owned by this process, so it outlives a restart of Admission (the moduledoc).
+    waiting = :ets.new(:invoke_waiting, [:set, :public])
+
+    admission_opts =
+      opts
+      |> Keyword.delete(:name)
+      |> Keyword.merge(name: admission(name), runs: runs, waiting_table: waiting)
 
     children = [
       {Task.Supervisor, name: runs},
-      {Admission,
-       opts |> Keyword.delete(:name) |> Keyword.merge(name: admission(name), runs: runs)}
+      {Admission, admission_opts}
     ]
 
     Supervisor.init(children, strategy: :one_for_all)

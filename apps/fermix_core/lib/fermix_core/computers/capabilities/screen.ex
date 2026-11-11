@@ -42,6 +42,7 @@ defmodule FermixCore.Computers.Capabilities.Screen do
   @behaviour FermixCore.Computers.Capability
 
   alias Compux.Protocol
+  alias FermixCore.Computers.Offers.ComputerUse, as: ComputerUseOffer
   alias FermixCore.Computers.Origin
   alias FermixCore.ComputerUse
   alias FermixCore.ComputerUse.Config
@@ -84,6 +85,15 @@ defmodule FermixCore.Computers.Capabilities.Screen do
 
   @impl true
   def ops, do: @ops
+
+  @impl true
+  def label, do: ComputerUseOffer.label()
+
+  @impl true
+  def op_label("screen.look"), do: "look at the screen"
+  def op_label("screen.act"), do: "use the mouse or keyboard"
+  def op_label("screen.control"), do: "pause, resume or let go of the screen"
+  def op_label("screen.watch"), do: "hold the screen"
 
   @impl true
   def effect?("screen.act"), do: true

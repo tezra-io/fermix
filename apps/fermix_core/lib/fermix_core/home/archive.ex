@@ -793,7 +793,10 @@ defmodule FermixCore.Home.Archive do
 
   # Computer history's notes are the home's and travel with it (M97 §8.6); its
   # raw events never were in the home's database once memory.db's migration 59
-  # ran, and a restored home from before it drops them at its first boot.
+  # ran. A home restored from an archive made before it still holds them in
+  # memory.db, and its first boot's migration 59 moves them into that
+  # machine's own store (`device/history.db`); only an Always On server drops
+  # them there, since nothing records on it.
   defp write_home(root, root_state, manifest, source, epoch) do
     with :ok <- prepare_root(root, root_state) do
       case write_entries(root, manifest, source) do
