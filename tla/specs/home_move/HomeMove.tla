@@ -68,7 +68,7 @@
 (* one wait the worker ends.                                               *)
 (***************************************************************************)
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/home/move_worker.ex @ d3298b98dff7
-\* SOURCE: apps/fermix_channels/lib/fermix_channels/home/candidate.ex @ d88807a674be
+\* SOURCE: apps/fermix_channels/lib/fermix_channels/home/candidate.ex @ 1693ba385dfe
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/home/move_responder.ex @ e8b3fa2f99b9
 \* SOURCE: apps/fermix_core/lib/fermix_core/home/candidate/activation.ex @ 5a71862e2f64
 \* SOURCE: apps/fermix_core/lib/fermix_core/home/move.ex#start,move_id,write_request,put_phase,pending?,not_pending,max_attempts,@max_attempts,@pending,@running,@phases,finish_at_boot,finish_due,ending,finish,view,remember_unrecorded_ending,boot_ending,@boot_key @ edf6fd077214
@@ -107,7 +107,7 @@ CONSTANTS
                         \* holds once the socket closes is the helper's (outside this repo)
     \* Mechanism switches: what the code does about it. TRUE is the real code.
     CandidateWaitsForCommit, \* the candidate activates only on move_commit for the move
-                             \* it staged (commit_move/2, candidate.ex:653-684)
+                             \* it staged (commit_move/2, candidate.ex:658-689)
     MarkerBeforeCommit,      \* the worker writes moved.json and records committing before
                              \* it sends move_commit (commit/4 then retired/4,
                              \* move_worker.ex:528-551)
@@ -120,7 +120,7 @@ CONSTANTS
                              \* started (move_id/1, move.ex:550-559)
     ReadyAfterStaged,        \* move_ready goes out only once staged is written: restored/2
                              \* records staged, then tells the responder
-                             \* (candidate.ex:618-625), which answers move_ready only then
+                             \* (candidate.ex:623-630), which answers move_ready only then
                              \* (move_responder.ex:65-69)
     AwaitPinsRail,           \* the worker takes an answer only from the rail it waits on
                              \* (await_any/3 matches {:rail, ^rail, _},
@@ -620,10 +620,10 @@ OnStream(tag) ==
          /\ IF ReadyAfterStaged THEN NoAnswer ELSE Answer(tag, "ready")
     ELSE /\ Answer(tag, "error") /\ UNCHANGED CandAll
 
-\* move_commit -> Candidate.commit/2 -> commit_move/2 (candidate.ex:653-684).
+\* move_commit -> Candidate.commit/2 -> commit_move/2 (candidate.ex:658-689).
 \* Once the home is in place (the activated? flag, set where activate/1
-\* succeeded, :671, :691), a second move_commit for the move, from a rail its
-\* source gave up on, is answered as the first was (:653-657). Staged or
+\* succeeded, :676, :696), a second move_commit for the move, from a rail its
+\* source gave up on, is answered as the first was (:658-662). Staged or
 \* activating, for this move: record activating; the renames and the answer
 \* follow in the same callback (Activate). Otherwise move_unknown.
 OnCommit(tag) ==
@@ -679,7 +679,7 @@ HandleOldOffer(a) ==
     /\ OnOffer("gone", a)
     /\ UNCHANGED <<railUp, req, oldReq, SrcFiles, boot, unsaid, wpc, Budgets, doneLost>>
 
-\* The restore task's result -> restored/2 (candidate.ex:268-271, :618-625):
+\* The restore task's result -> restored/2 (candidate.ex:268-271, :623-630):
 \* record staged, then tell the responder of the rail that staged it, which
 \* answers move_ready (move_responder.ex:65-69).
 Restored ==
@@ -699,7 +699,7 @@ SelfActivate ==
 \* Activation.activate/1 (activation.ex:166-175): the staged entries, then
 \* config.toml last (place_config/2, :458-463), the commit point: the next boot
 \* reads role = "primary". Then candidate/ goes, the restart is scheduled
-\* (candidate.ex:670, :690), and commit_move/2 answers, so the responder sends
+\* (candidate.ex:675, :695), and commit_move/2 answers, so the responder sends
 \* move_done and closes (move_responder.ex:119-124). A crash between the
 \* rename and the answer is a crash after this step, which loses the answer.
 Activate ==
@@ -784,7 +784,7 @@ OfferRefusedForRoom ==
     /\ Answer("cur", "error")
     /\ UNCHANGED <<CandAll, railUp, oldReq, oldOffers, SrcFiles, boot, unsaid, wpc, Budgets, Hist>>
 
-\* restored/2's error clause (candidate.ex:627-641): back to enrolled, holding
+\* restored/2's error clause (candidate.ex:632-646): back to enrolled, holding
 \* no move (put/3 drops the nil "move"), and the
 \* responder refuses (move_failed, move_responder.ex:71-75).
 RestoreFails ==
@@ -805,7 +805,7 @@ SourceCrash ==
 \* The candidate engine dies and boots again: as the primary once config.toml
 \* is in place; otherwise as the candidate, whose handle_continue/2 runs
 \* carry_on/1 first (candidate.ex:198-215), and activating finishes the
-\* activation (finish_activation/1, :686-696). Its restore task dies with it.
+\* activation (finish_activation/1, :691-701). Its restore task dies with it.
 CandidateCrash ==
     /\ CandidateCanCrash /\ candCrashes < MaxCrashes /\ candUp = "candidate"
     /\ candCrashes' = candCrashes + 1

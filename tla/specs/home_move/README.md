@@ -64,7 +64,7 @@ Models one move of M75 §7.2 (B5). Three parts take part:
 
 **Mechanism switches** (`TRUE` is the real code):
 - `CandidateWaitsForCommit`: the candidate activates only on `move_commit`
-  for the move it staged (`commit_move/2`, `candidate.ex:653-684`).
+  for the move it staged (`commit_move/2`, `candidate.ex:658-689`).
 - `MarkerBeforeCommit`: the worker writes `moved.json` and records
   `committing` before it sends `move_commit` (`commit/4`, then `retired/4`,
   `move_worker.ex:528-551`).
@@ -78,7 +78,7 @@ Models one move of M75 §7.2 (B5). Three parts take part:
   orders by attempt.
 - `ReadyAfterStaged`: `move_ready` goes out only after `staged` is written.
   `restored/2` records `staged`, then tells the responder
-  (`candidate.ex:618-625`), which answers `move_ready` only then
+  (`candidate.ex:623-630`), which answers `move_ready` only then
   (`move_responder.ex:65-69`).
 - `AwaitPinsRail`: the worker takes an answer only from the rail it waits on
   (`await_any/3` matches `{:rail, ^rail, _}`, `move_worker.ex:955-968`).
@@ -235,7 +235,7 @@ Nothing in Fermix's own code fenced it.
   home untouched.
 
 The same change answers a second `move_commit` after activation from the
-`activated?` flag (`candidate.ex:653-657`). Before, it crashed in `put/3`,
+`activated?` flag (`candidate.ex:658-662`). Before, it crashed in `put/3`,
 because `activate/1` had removed `candidate/`. The model's `OnCommit` now
 answers it `move_done`.
 
@@ -417,3 +417,13 @@ request an undo removes, and Try again reads them (`Move.undone_keep/1`,
 not pinned). One more field in the same write of `phase.json`, which no rule
 reads; no modelled step changed. The comments' line numbers into `move.ex`
 point at the committed code.
+
+## Re-read for HS-4's fix (M97, 2026-11-11)
+
+Re-read against 1a89beae, which staled the `candidate.ex` pin: the
+candidate stages a move's live stream with `history: :continued`
+(`stage_fun/4`, `continued/1`), so `Archive.install/5` keeps the store's
+history token, where a stored copy gets a new one. A write no rule reads;
+no modelled step changed. Why keeping it is safe is in `history_submit`'s
+README (the re-read for HS-4's fix). The comments' line numbers into
+`candidate.ex` point at the committed code.

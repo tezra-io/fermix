@@ -204,10 +204,9 @@ With a backup taken at any moment and one restore from it
 holds the safety rule for a computer that goes away and `18` for a Mac that
 is its own home, and each needs `MarkTiedToHome` (`17`, 12 states; `19`).
 With two restores from that backup it holds too (`20`), because each
-restore gives the store a new token, and it needs `RestoreRenews` (`21`, the
-counterexample HS-4 found). The
-identities start at the first store, so the checks without a restore
-explore the states they did before.
+restore gives the store a new token, and it needs `RestoreRenews` (`21`, 13
+states, the counterexample HS-4 found). The identities start at the first
+store, so the checks without a restore explore the states they did before.
 
 ## Findings
 
@@ -293,8 +292,7 @@ own home, whose store keeps its mark across a restore of its memory.db.
 
 ### HS-4: a home restored twice from one backup has the same identity both times, and a mark from the first restore steps over a new purge (fixed)
 
-Fixed in the M97 fix pass (uncommitted at this writing; re-pin with its
-commit). The identity is now the store's token alone, and
+Fixed in `1a89beae`. The identity is now the store's token alone, and
 `Archive.install/5` gives every store it installs from a stored copy a new
 one before the epoch is written, under the same roll-back
 (`history_identity/4`, `ComputerHistorySql.renew_home_token/1`): a restore
@@ -311,7 +309,8 @@ backup's own epoch plus one (`Home.Archive.install/5` → `next_epoch/1`,
 `archive.ex:214`, `:790-792`), and the token is the one in the backup's
 memory.db (`computer_history_home`, migration 61). Restoring the same backup
 again gives the same identity, while the store's interval ids start again
-from the backup's. Check `20` (13 states), on a computer:
+from the backup's. Check `21` (13 states; check `20` before the fix), on a
+computer:
 1. The recorder stores an event stamped `1`; the owner backs the home up
    (no interval yet, epoch 1).
 2. The home is restored from that backup: epoch 2, identity `T.2`.
@@ -407,5 +406,43 @@ and `purge.ex` pins:
 - **The pins** now name `Submission`'s `checked`, `identity` and `mark`, and
   `ComputerHistory.home_identity/1` with its `epoch/1`, which the identity's
   steps encode.
+
+Every earlier check keeps its verdict and its state count.
+
+## Re-read for HS-4's fix (1a89beae, 2026-11-11)
+
+`1a89beae` staled the `submission.ex`, `computer_history.ex#home_identity`
+and `delivery.ex` pins. Walked against the commit:
+- **The identity is the token alone** (`home_identity/1` reads
+  `computer_history_home`; the epoch left it, and with it `epoch/1` the
+  pin). `Submission` and `Delivery` read it from the store alone.
+- **A restore renews it**: `Archive.install/5` takes `history:` (`:fresh` by
+  default, `history!/1`), and for `:fresh` gives the installed memory.db a
+  new token (`settle_home/5` → `history_identity/4` → `renew_token/1` →
+  `ComputerHistorySql.renew_home_token/1`) before it writes the epoch, under
+  the same roll-back. Every stored copy takes that path: the CLI's restore,
+  a snapshot's (`Snapshot.restore/4`), and Restore here
+  (`LocalReturn` → `Activation.stage/6` without `:history`). `Restore`
+  models it with `RestoreRenews`: each restore's identity is one no machine
+  counted under. Check 20 holds; 21 (13 states) needs it.
+- **A move and a move back keep it**: the candidate stages their live
+  stream with `history: :continued` (`stage_fun/4`, `continued/1`), so the
+  token travels and every computer's mark with it. That is safe only if the
+  moved store's ids never start again below a mark counted under that
+  token. They do not: the source's role is the device's from
+  `Move.start/5` on (`write_request/3`), before its worker captures the home,
+  and a device-role engine runs none of the home's channels or its history
+  delivery (`Role` `@primary_only`), so no interval is recorded after the
+  capture; a later attempt sends that same capture; an undone move leaves
+  the source's store serving with its ids, and Try again captures anew; a
+  move back streams the server's live store, never the Mac's retired copy;
+  and the purge ids are `AUTOINCREMENT`, so pruning old intervals never
+  hands an id out again. Restore here, from a stored copy, renews the token.
+  Not modelled: the model has no move, and a move that keeps the store's
+  ids and token is, to every computer, the same home.
+- **The pins** now name `archive.ex`'s `install`, `write_home`,
+  `settle_home`, `history_identity`, `renew_token`, `renewed` and
+  `history!`, `candidate.ex`'s `stage_fun` and `continued`, and
+  `ComputerHistorySql.renew_home_token`.
 
 Every earlier check keeps its verdict and its state count.

@@ -54,7 +54,7 @@ everything else left out.
   restarts it.
 - `ReconcileCanTimeOut`: `/history off`'s reconcile call gives up after its
   15 s timeout (`controller.ex:54`, `:62-63`). The timer starts at
-  `computer_history.ex:278`.
+  `computer_history.ex:264`.
 - `ReconcileCanStall`: that timeout can fire before the DynamicSupervisor has
   sent the Capturer `:shutdown`. Setting it `FALSE` is a timing assumption:
   the work before the `:shutdown` is app-env reads, `File.regular?` stats in
@@ -76,15 +76,15 @@ everything else left out.
   gate is the flush-time rule of 693970b7.
 - `StopBeforeReply`: `/history off` replies only after its reconcile call
   returns, and that call returns only after the Capturer has exited
-  (`computer_history.ex:201`, `:207-211`, `:278`, `controller.ex:62-63`,
+  (`computer_history.ex:187`, `:193-197`, `:264`, `controller.ex:62-63`,
   `:201`).
 - `SaveBeforeReply`: `/history off` writes `machine.toml` before it replies
-  (`computer_history.ex:200-204` before `history.ex:699-700`).
+  (`computer_history.ex:186-190` before `history.ex:699-700`).
 - `BootReconciles`: a started or restarted Controller reconciles in
   `handle_continue` (`controller.ex:66-88`).
 - `OffConfirmsStop`: an exit of the reconcile call (no Controller, a crash
   mid-call, a timeout) comes back as `{:error, {:reconcile_failed, _}}`
-  (`computer_history.ex:276-283`), and `/history off` then says the stop could
+  (`computer_history.ex:262-269`), and `/history off` then says the stop could
   not be confirmed instead of "nothing new is captured" (`history.ex:779-784`).
   Off, the exit reads as a confirmed stop (the code at 693970b7).
 - `InitChecksEnabled`: every Capturer start, a DynamicSupervisor restart
@@ -94,7 +94,7 @@ everything else left out.
 - `InsertChecksIntervals`: the spool insert refuses, inside its own
   transaction, each row whose `ts` lies inside an interval of the store's
   fence, a purge's or a pause's, bounds inclusive like the fence's `DELETE`
-  (`computer_history_sql.ex:633-676`, `:1005`, `:1120-1131`), the CH-2 fix.
+  (`computer_history_sql.ex:659-702`, `:1031`, `:1146-1157`), the CH-2 fix.
   Off, it is the plain `INSERT OR IGNORE` of 693970b7.
 - `StopsBeforeFlush`: `terminate/2` runs `stop_driver` and the lock release
   before its best-effort flush (`capturer.ex:603-605`), the C1 fix. Off, it is
@@ -167,7 +167,7 @@ restarts:
 - No event stamped inside the purged window lands in the spool after the
   purge, whether it was still buffered, in a batch already past its pause
   check, or flushed by `terminate/2` (`purge.ex:3-14`, the claim at
-  `computer_history_sql.ex:653-659`, and M32 §12). This rests on
+  `computer_history_sql.ex:679-685`, and M32 §12). This rests on
   `InsertChecksIntervals`: off (check 28), CH-2's 5-state
   path is back. With the fence switched off for `terminate/2`'s insert only
   (a hand edit, reverted), 11 fails in 6 states through a Capturer crash, so
@@ -197,7 +197,7 @@ Witnesses:
   with no Capturer running.
 - Check 29: CH-2's path, now closed. A row stamped inside the purged window
   reaches the spool insert after the purge committed, and the fence refuses
-  it (`computer_history_sql.ex:660-670`), so the fence is not vacuous.
+  it (`computer_history_sql.ex:686-696`), so the fence is not vacuous.
 
 **One more of each entity, run by hand** (TLC 2.19, `-workers auto`): each row
 changes the check's constants as shown, and every other constant stays as in
@@ -256,17 +256,17 @@ Controller's split lookup and crashes at any point) both held: 01 with
   IGNORE`. Only the summarizer's `write_cycle_result` read the watermark
   (`:996-1024`). Since the CH-2 and CH-5 fix the purge records an interval
   in the same transaction as its `DELETE`, today in this machine's store
-  (`fence_window`, `:995-1017`), and the insert checks every recorded interval
-  (`:633-676`).
+  (`fence_window`, `:1021-1043`), and the insert checks every recorded interval
+  (`:659-702`).
 - **`/history off`: env flip, then terminate the Capturer, then save
   config: confirmed.** The order is (`ComputerHistory.switch_off/1`, from
   `disable/1`, `history.ex:811-816`):
-  1. flip (`computer_history.ex:192-198`);
-  2. a synchronous reconcile (`:201`, `:207-211`), which returns after
+  1. flip (`computer_history.ex:178-184`);
+  2. a synchronous reconcile (`:187`, `:193-197`), which returns after
      `DynamicSupervisor.terminate_child` returns, which waits for
      `terminate/2`; since the CH-3 fix an exit of the call comes back as an
      error, not `:ok`;
-  3. save to `machine.toml` (`:202`), whatever the reconcile returned;
+  3. save to `machine.toml` (`:188`), whatever the reconcile returned;
   4. reply (`history.ex:764-795`), chosen by both outcomes.
 - **Events captured during a pause but flushed after it ends are stored:
   confirmed → CH-1 (fixed).**
@@ -643,7 +643,7 @@ the fixed code.
   pause the home names in a refusal or a delivery, written beside a pause from
   chat, can no longer lower it (it was a read and a write until 18710c89).
 - `/history off`'s env flip is a `get_env` (`Config.current/0`) and a
-  `put_env` (`computer_history.ex:192-198`), folded into one step: no other
+  `put_env` (`computer_history.ex:178-184`), folded into one step: no other
   writer of that key is in scope.
 - The Controller's start of a Capturer (`ensure_started`) is folded with the
   DynamicSupervisor's `start_child` and the Capturer's `init` read of the
@@ -655,7 +655,7 @@ the fixed code.
   Controller `whereis` after the flip either sees the new pid and stops it,
   or the `init` read sees the flip.
 - The model's host has a recorder (a Mac). On a host with none, `/history
-  off` makes no reconcile call (`stop_here/2`, `computer_history.ex:207-213`),
+  off` makes no reconcile call (`stop_here/2`, `computer_history.ex:193-199`),
   and since 18710c89 the rail's supervisor runs there only on a home that a
   computer can contribute to or that holds notes, with no store and no
   recorder to stop (`supervisor.ex:60-67`); elsewhere its `init/1` answers
@@ -811,3 +811,13 @@ the sidecar installer's:
 
 No modelled step changed. The line numbers in the spec and in this README's
 current-code sections point at the committed files.
+
+## Re-read for HS-4's fix (1a89beae, 2026-11-11)
+
+`1a89beae` staled the `computer_history.ex`, `delivery.ex#apply_here` and
+`computer_history_sql.ex` pins: the home's history identity is its store's
+token alone (`home_identity/1`), renewed when a stored copy is installed
+(`renew_home_token/1`), and `Delivery.apply_here/1` reads it from the store
+alone. In this scene the store never changes; no modelled step changed. The
+line numbers in the spec and in this README's current-code sections point at
+the committed files.

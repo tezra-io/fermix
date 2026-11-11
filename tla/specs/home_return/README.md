@@ -418,6 +418,12 @@ rule reads, and Try again is not modelled. Move back, Move now, Cancel and
 Restore here are as before. The comments' line numbers into `always_on.ex`
 point at the committed code.
 
+Walked again against 1a89beae (HS-4's fix), which staled the
+`candidate.ex` pin: a return's staging passes `history: :continued`, so the
+server's live store keeps its history token; Restore here, from a stored
+copy, gets a new one. No rule reads it, no modelled step changed, and the
+comments' line numbers into `candidate.ex` point at the committed code.
+
 ## Done
 
 Deadlock checking is on. `Done` has these ends:

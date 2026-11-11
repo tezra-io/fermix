@@ -26,13 +26,13 @@
 (*    apply, and the history_submit spec models them; the mark this        *)
 (*    store records after an apply (Spool.mark_applied), which only the    *)
 (*    sending cycle reads; the roll-up's purge guard                       *)
-(*    (computer_history_sql.ex:1941-1948); the carry of memory.db's raw    *)
+(*    (computer_history_sql.ex:1967-1974); the carry of memory.db's raw    *)
 (*    spool and purge intervals into this store (migration 59,             *)
-(*    computer_history_sql.ex:530); pruning at the 48 h sweep (:839, far   *)
+(*    computer_history_sql.ex:556); pruning at the 48 h sweep (:865, far   *)
 (*    beyond MaxTime); `purge all`, whose [0, now] has the shape of a      *)
 (*    window (purge.ex:130); more than one purge or pause (the owner sends *)
 (*    each once; the insert checks every interval, computer_history_sql.ex:*)
-(*    641, :1120-1131); the Setup UI disable path; a crash of the Spool,   *)
+(*    641, :1146-1157); the Setup UI disable path; a crash of the Spool,   *)
 (*    which restarts the rail after it (supervisor.ex:117-132) like a      *)
 (*    Controller crash with the Capturer's; a store that does not open,    *)
 (*    which leaves the Spool up answering store_unavailable and the        *)
@@ -82,11 +82,11 @@
 \* SOURCE: apps/fermix_core/lib/fermix_core/computer_history/ingest.ex @ 48ba431592fb
 \* SOURCE: apps/fermix_core/lib/fermix_core/computer_history/controller.ex @ fea8fcc80c2d
 \* SOURCE: apps/fermix_core/lib/fermix_core/computer_history/supervisor.ex @ 76033f680ab0
-\* SOURCE: apps/fermix_core/lib/fermix_core/computer_history.ex @ a681482f385e
+\* SOURCE: apps/fermix_core/lib/fermix_core/computer_history.ex @ 7e9a05f20685
 \* SOURCE: apps/fermix_core/lib/fermix_core/computer_history/purge.ex @ a066c0ea7e38
-\* SOURCE: apps/fermix_core/lib/fermix_core/computer_history/delivery.ex#apply_here @ b4168daf1b7e
+\* SOURCE: apps/fermix_core/lib/fermix_core/computer_history/delivery.ex#apply_here @ fb5801d6ac6d
 \* SOURCE: apps/fermix_core/lib/fermix_core/computer_use/sidecar_installer.ex @ a2681ba9c881
-\* SOURCE: apps/fermix_core/lib/fermix_core/memory/repo/computer_history_sql.ex @ 702867c4423f
+\* SOURCE: apps/fermix_core/lib/fermix_core/memory/repo/computer_history_sql.ex @ c73b0049538a
 \* SOURCE: apps/fermix_core/lib/fermix_core/computer_history/spool.ex#call,handle_call,insert_events,state,fence,apply_intervals,apply_interval,pause_from,mark_applied @ cccf5927f54a
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/gateway/commands/history.ex @ 6719d11f7a58
 EXTENDS Naturals, Sequences, FiniteSets
@@ -106,7 +106,7 @@ CONSTANTS
     CapturerCanCrash,   \* the Capturer raises; its DynamicSupervisor restarts it
     ReconcileCanTimeOut,\* /history off's reconcile call gives up after its 15 s timeout
                         \* (controller.ex:54, :62-63; the timer starts at
-                        \* computer_history.ex:278)
+                        \* computer_history.ex:264)
     ReconcileCanStall,  \* the timeout can fire BEFORE the DynamicSupervisor has sent the
                         \* Capturer :shutdown. FALSE is a timing assumption: the work before
                         \* it (app env, file stats in installed?, whereis: controller.ex:149,
@@ -120,20 +120,20 @@ CONSTANTS
                         \* late its batch is flushed: the ts half of min(ts, now) < pause_until
                         \* (ingest.ex:235-236). Off, it is the flush-time gate of 693970b7
     StopBeforeReply,    \* /history off waits for the reconcile call, which returns after the
-                        \* Capturer exited (computer_history.ex:201, :207-211, :278,
+                        \* Capturer exited (computer_history.ex:187, :193-197, :264,
                         \* controller.ex:62-63, :201)
     SaveBeforeReply,    \* /history off saves machine.toml before it replies
-                        \* (computer_history.ex:200-204, then history.ex:699-700)
+                        \* (computer_history.ex:186-190, then history.ex:699-700)
     BootReconciles,     \* a (re)started Controller reconciles in handle_continue (controller.ex:66-88)
     OffConfirmsStop,    \* an exit of the reconcile call (no Controller, a crash mid-call, a
                         \* timeout) is returned as an error, and /history off then says the
                         \* stop is unconfirmed instead of "nothing new is captured"
-                        \* (computer_history.ex:276-283, history.ex:779-784)
+                        \* (computer_history.ex:262-269, history.ex:779-784)
     InitChecksEnabled,  \* every Capturer start re-reads the enable bit and declines (:ignore)
                         \* while the feature is off (capturer.ex:130-136)
     InsertChecksIntervals, \* the spool insert refuses, inside its own transaction, each row
                         \* stamped inside an interval of the store's fence (computer_history_sql.ex:
-                        \* 588-631, :1120-1131). Off, it is the plain INSERT OR IGNORE of 693970b7
+                        \* 588-631, :1146-1157). Off, it is the plain INSERT OR IGNORE of 693970b7
     StopsBeforeFlush,   \* terminate/2 runs stop_driver and the lock release before its
                         \* best-effort flush (capturer.ex:603-605). Off, it is the code before
                         \* the fix: the flush first, then the stop
@@ -278,9 +278,9 @@ Split == [e \in Events |-> IF where[e] = "buffer"
                            ELSE where[e]]
 
 \* The spool insert's fence, per event: insert_unless_purged
-\* (computer_history_sql.ex:660-670) refuses a row whose ts lies inside any
+\* (computer_history_sql.ex:686-696) refuses a row whose ts lies inside any
 \* recorded interval, a purge's or a pause's, bounds inclusive like the
-\* fence's DELETE (:1005, :1120-1131). At tick granularity it also refuses an
+\* fence's DELETE (:1031, :1146-1157). At tick granularity it also refuses an
 \* event captured after the purge in the same tick (ts = clock = hi), or before
 \* the pause in the same tick (ts = clock = lo): an over-approximation of the
 \* 1 ms edge that no property depends on.
@@ -297,7 +297,7 @@ Insert == [e \in Events |-> IF where[e] = "batch"
 Kept == {e \in Buffer : ~GateDrops(e)}
 
 \* The call exited without a confirmed stop: the fixed code returns that as an
-\* error (computer_history.ex:276-283) and the reply says so; without the
+\* error (computer_history.ex:262-269) and the reply says so; without the
 \* mechanism the exit is read as :ok, a confirmed stop.
 Unconfirmed == IF OffConfirmsStop THEN "unconfirmed" ELSE "reconciled"
 
@@ -383,7 +383,7 @@ FlushCheck ==
     /\ CapturerOthersUnchanged
 
 \* Ingest's second store call: Spool.insert_events (ingest.ex:202,
-\* spool.ex:63-64 -> computer_history_sql.ex:621-676), one BEGIN IMMEDIATE
+\* spool.ex:63-64 -> computer_history_sql.ex:647-702), one BEGIN IMMEDIATE
 \* transaction that checks each row against the store's fence intervals, then
 \* INSERT OR IGNOREs the rest. It does not read the pause horizon.
 FlushInsert ==
@@ -540,7 +540,7 @@ CtrlUnchanged ==
 
 \* handle_continue(:reconcile) after a start (controller.ex:66-88), or
 \* handle_call(:reconcile) (:91-94) -> do_reconcile (:148-155). The Capturer's
-\* want is recording?: operative? (the app env, computer_history.ex:58),
+\* want is recording?: operative? (the app env, computer_history.ex:57),
 \* installed? and, since c6fe1c48, whether the store opened (store_open?/1,
 \* controller.ex:149, :160-161, a call to the Spool); the model's store always
 \* opens, and the off path never asks it (`and` stops at the env). The
@@ -588,7 +588,7 @@ CtrlSend ==
 \* The Controller dies alone, at any point (for example do_reconcile raises,
 \* controller.ex:148-155). A queued or running call dies with it: the
 \* caller's GenServer.call exits, and reconcile_runtime returns that as
-\* {:error, {:reconcile_failed, _}} (computer_history.ex:276-283), an
+\* {:error, {:reconcile_failed, _}} (computer_history.ex:262-269), an
 \* unconfirmed stop. A terminate_child it already sent still runs; the
 \* reply goes to the dead process (see ReplyTo).
 ControllerCrash ==
@@ -629,7 +629,7 @@ OffUnchanged ==
 
 \* The owner sends /history off; disable/1 (history.ex:811-816) calls
 \* ComputerHistory.switch_off/1, which flips the app env
-\* (computer_history.ex:192-198). That is a get_env (Config.current/0) then a
+\* (computer_history.ex:178-184). That is a get_env (Config.current/0) then a
 \* put_env, folded into one step: no other writer of this key is in scope.
 OffFlip ==
     /\ OwnerCanDisable
@@ -639,8 +639,8 @@ OffFlip ==
     /\ UNCHANGED <<ctrlCall, config, offAcked, offUnconfirmed>>
     /\ OffUnchanged
 
-\* stop_here -> ComputerHistory.reconcile_runtime (computer_history.ex:201,
-\* :207-211, :276-283) -> GenServer.call(Controller, :reconcile). The model's
+\* stop_here -> ComputerHistory.reconcile_runtime (computer_history.ex:187,
+\* :193-197, :262-269) -> GenServer.call(Controller, :reconcile). The model's
 \* host records (a Mac; on a host with no recorder, stop_here skips the call:
 \* there is no recorder to stop). A dead Controller: the call
 \* exits at once, an unconfirmed stop. With
@@ -667,9 +667,9 @@ OffTimeout ==
     /\ UNCHANGED <<ctrlCall, env, config, offAcked, offUnconfirmed>>
     /\ OffUnchanged
 
-\* ConfigStore.put_machine_table/3 (computer_history.ex:202), one write of
+\* ConfigStore.put_machine_table/3 (computer_history.ex:188), one write of
 \* this machine's machine.toml with enabled = false, under the config lock. It
-\* runs whatever the stop's outcome (:200-204). With SaveBeforeReply off it
+\* runs whatever the stop's outcome (:186-190). With SaveBeforeReply off it
 \* runs after the reply.
 OffSave ==
     /\ IF SaveBeforeReply
@@ -758,8 +758,8 @@ PauseReply ==
 \* store: folded in); then apply_here/3 applies it to this machine's store,
 \* with any earlier interval this machine owes (purge.ex -> Delivery.apply_here/1
 \* -> Spool.apply_intervals -> fence_window): one BEGIN IMMEDIATE transaction that
-\* deletes the spool rows in the window (computer_history_sql.ex:1005) and
-\* records the interval (:1012), on the same single writer as the insert. The window is fixed at
+\* deletes the spool rows in the window (computer_history_sql.ex:1031) and
+\* records the interval (:1038), on the same single writer as the insert. The window is fixed at
 \* the command's start, so an event captured between the home's transaction
 \* and this one is stamped after it: the step is this store's transaction.
 \* Rows still in a Capturer buffer, or in a batch past its pause check, are
@@ -914,7 +914,7 @@ CapturedWhilePausedNeverStored == \A e \in inPause : where[e] /= "spool"
 
 \* After purge(W) commits here, no spool row with a timestamp in W appears:
 \* purge.ex:3-14 ("which deletes and fences its own raw events in each"), the claim at
-\* computer_history_sql.ex:653-659 (the fence "also stops a batch already past
+\* computer_history_sql.ex:679-685 (the fence "also stops a batch already past
 \* Ingest's pause check when the purge committed"), and MILESTONE_32 12
 \* (line 469: purge "deletes spool rows in the window").
 PurgedWindowStaysPurged == \A e \in purged : where[e] /= "spool"
@@ -950,7 +950,7 @@ Witness_WriteAfterPauseAck ==
 \* CH-2's path, now closed: a row stamped inside the purged window reaches the
 \* spool insert after the purge committed (buffered, or in a batch past its
 \* pause check), and the insert's purge fence refuses it
-\* (computer_history_sql.ex:660-670).
+\* (computer_history_sql.ex:686-696).
 Witness_LateRowFenced == \A e \in Events : where[e] /= "fenced"
 
 \* CH-4's second path, now harmless: the Controller's whereis returned a

@@ -81,11 +81,14 @@
 (* pending intervals and some it already applied.                         *)
 (***************************************************************************)
 \* SOURCE: apps/fermix_core/lib/fermix_core/computer_history/sittings.ex#run,step,dispatch,send_sitting,sitting,settle,settled @ 6b43d6f6534b
-\* SOURCE: apps/fermix_core/lib/fermix_core/computer_history/submission.ex#accept,checked,identity,mark,unnoted,unrefused,refused_by,make,write @ f16b3d5013b6
-\* SOURCE: apps/fermix_core/lib/fermix_core/computer_history.ex#home_identity @ d8514f24c0d5
+\* SOURCE: apps/fermix_core/lib/fermix_core/computer_history/submission.ex#accept,checked,identity,mark,unnoted,unrefused,refused_by,make,write @ bbeaf8434c2d
+\* SOURCE: apps/fermix_core/lib/fermix_core/computer_history.ex#home_identity @ 2eedfe384754
+\* SOURCE: apps/fermix_core/lib/fermix_core/home/archive.ex#install,write_home,settle_home,history_identity,renew_token,renewed,history! @ 797f91e393db
+\* SOURCE: apps/fermix_channels/lib/fermix_channels/home/candidate.ex#stage_fun,continued @ 9b5ceaa10793
+\* SOURCE: apps/fermix_core/lib/fermix_core/memory/repo/computer_history_sql.ex#renew_home_token @ 5665fd6cbf1b
 \* SOURCE: apps/fermix_core/lib/fermix_core/memory/repo/computer_history_sql.ex#insert_note,insert_note_in_tx,noted,reaching_intervals,intervals_after,purge_notes,purge_notes_in_tx,scoped_notes,fence_window,fence_window_in_tx,insert_events,insert_unless_purged,stamped_in_purge?,link,set_home_mark @ b24f49d2e1e9
 \* SOURCE: apps/fermix_core/lib/fermix_core/computer_history/spool.ex#link,events_after,fence,apply_intervals,apply_interval,mark_applied,apply_at @ ec5d295f5f69
-\* SOURCE: apps/fermix_core/lib/fermix_core/computer_history/delivery.ex @ 605d0be092c9
+\* SOURCE: apps/fermix_core/lib/fermix_core/computer_history/delivery.ex @ 5d4a6f817ffc
 \* SOURCE: apps/fermix_core/lib/fermix_core/computer_history/machine_service.ex @ d4f4245b1320
 \* SOURCE: apps/fermix_core/lib/fermix_core/computer_history/purge.ex#purge,apply_here @ f5b3d0524839
 \* SOURCE: apps/fermix_core/lib/fermix_core/computer_history/controller.ex#home_uplink @ 8176fcfadb34
