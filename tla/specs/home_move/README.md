@@ -16,7 +16,7 @@ Models one move of M75 §7.2 (B5). Three parts take part:
 **Who serves as the primary**:
 - The source serves as the primary when its engine booted as one, or when its
   next boot will: `config.toml` says primary and `moved.json` is absent
-  (`Role.resolve/2`, `role.ex:200-210`). Counting the next boot keeps the end
+  (`Role.resolve/2`, `role.ex:206-216`). Counting the next boot keeps the end
   of `undo/3` on the cautious side: the role is written there, and the restart
   comes after.
 - The candidate serves as the primary once `config.toml` is renamed into
@@ -81,7 +81,7 @@ Models one move of M75 §7.2 (B5). Three parts take part:
   (`candidate.ex:606-612`), which answers `move_ready` only then
   (`move_responder.ex:65-69`).
 - `AwaitPinsRail`: the worker takes an answer only from the rail it waits on
-  (`await_any/3` matches `{:rail, ^rail, _}`, `move_worker.ex:907-920`).
+  (`await_any/3` matches `{:rail, ^rail, _}`, `move_worker.ex:944-957`).
 - `EndingsAfterRestart`: the worker records `committed` (after `move_done`)
   or `undoing` (after an undo) and then restarts itself (`SelfRestart`,
   `Lifecycle.restart_self/0`); the engine that boots after it records `done`
@@ -328,7 +328,7 @@ This was noticed while reading the code. TLC does not show it.
   exclusively, then writes it (`moved.ex:45-59`). If the write or the close
   fails (a full disk), the file may be left unreadable. `commit/4` then
   aborts, and `abort/3` raises on the unreadable marker
-  (`move_worker.ex:808-814`). The worker's restart reaches `carry_on/3`'s
+  (`move_worker.ex:845-851`). The worker's restart reaches `carry_on/3`'s
   clause for an unreadable marker (`:169`), which records a sentence asking for the
   marker to be fixed and does nothing else. The source stays a device and
   the candidate stays staged: safe, never two primaries, and stopped until a
@@ -363,3 +363,26 @@ Re-read against db21a29d, which staled the `move_worker.ex`, `activation.ex`,
 
 The comments' line numbers for these four files had drifted before this
 change too; they now point at the committed code.
+
+## Re-read for a second computer and the server's lead on versions (M97, 2026-11-10)
+
+Re-read against 16207ff5, which staled the `move_worker.ex`,
+`activation.ex` and `device_supervisor.ex` pins:
+- **The switches on a resume.** `resume/1` still writes the link, then the
+  switches, then `committing`, but a source not kept as a computer is owed
+  no switches and its `machine.toml` is no longer read. A switches write
+  that fails, at the commit or on a resume, ends the worker with a sentence
+  of its own where it shared the link's. An offer the request keeps that
+  this engine does not know is left off and logged where it crashed the
+  worker. None is a write a rule reads.
+- **`activation.ex`** changed in a return's step c (`home_return`), its
+  moduledoc and its aliases; the forward `activate/1` and `place_config/2`
+  are as before.
+- **The device tree** starts this computer's invocations (`Desktop.Invoke`)
+  beside the dial subtree while the home is linked, and a joiner in the
+  dial subtree only while this computer joins a home and has no link. The
+  move worker still starts only while a move is pending, the first of the
+  dial subtree's users after the helper.
+
+No modelled step changed. The comments' line numbers into these files, and
+into `role.ex` and `home_move.ex`, point at the committed code.

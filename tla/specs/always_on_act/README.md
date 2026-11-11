@@ -6,8 +6,9 @@ serializer per engine. The act reads the summary first and runs the step
 only when the summary offers that action under the key it was drawn with
 (`HomeSummary.find_action/3`).
 
-The scene is Restore here on a linked desktop whose server went silent, the
-one step that starts a job of the family. Two surfaces press at once. The
+The scene is Restore here on a linked desktop the home moved from (its
+moved marker) whose server went silent, and whose Fermix reads the server's
+home: the one step that starts a job of the family. Two surfaces press at once. The
 act keeps its request in `return.json` before the `home_restore` job starts,
 and takes it back when the start is refused. The job's ending takes it back
 however the run ended, while the family still counts the job running.
@@ -27,13 +28,18 @@ The modules it describes:
   `restoring` draws the restore running, with nothing to press, while its
   request stands beside its running job (`restore_running?`, `Home`'s
   `restoring?`); elsewhere a silent server offers Restore here
-  (`restore_offer`). `offered` and `find_action` read what a screen offers.
+  (`restore_offer`) on the computer the home moved from. `offered` and `find_action` read what a screen offers.
 
 Not modelled, each covered elsewhere:
 - the other steps of `home.act` (Move back, Move now, Cancel, the review of
-  what a computer keeps on for its server, and the rest): one act each
+  what a computer keeps on for its server, adding a computer and the
+  owner's answer to one that asks to join, and the rest): one act each
   through the same serializer and key rule, with no job of the family
   (`always_on_test.exs`; `home_return` models the move back's);
+- a computer that joined the home, which has no moved marker and is offered
+  neither Move back nor Restore here, and one whose Fermix cannot read the
+  server's home, which is offered Update in their place: neither has the
+  press this scene starts with (`home_summary_test.exs`);
 - the run itself (`LocalReturn.restore/3`), its candidate, which draws
   moving once written, the restart its success ends in, and what the ending
   settles after a run stopped from outside (`home_return`);
@@ -62,7 +68,7 @@ the spec STALE when one of them changes:
   `ending_down`, `end_closing`;
 - `apps/fermix_core/lib/fermix_core/management/home_summary.ex`, by
   function: `offered`, `find_action`, `device`, `restoring`,
-  `restore_running?`, `restore_offer`;
+  `restore_running?`, `restore_offer`, `readable_or_update`;
 - `apps/fermix_core/lib/fermix_core/management/home.ex`, by function:
   `restoring?`.
 
@@ -124,3 +130,20 @@ refusal and the ending are as before, so nothing the spec models changed.
 The comments' line numbers into `always_on.ex`, and into `home_summary.ex`
 and `home.ex`, which the same commit changed, had drifted before it too;
 they now point at the committed code.
+
+## Re-read for a second computer and the server's lead on versions (M97, 2026-11-10)
+
+Re-read against 16207ff5, which staled the `always_on.ex` and
+`home_summary.ex` pins. The act gained three steps, each run after the key
+rule like the others and none starting a job: `add_computer`, and
+`approve_computer` and `deny_computer` for a computer that asks to join;
+`cancel` on a computer that is joining ends the join. The serializer, the
+key rule, Restore here's request, its job, the busy refusal and the ending
+are as before. The summary now offers Restore here only on the computer the
+home moved from, and offers Update in its place where this computer's
+Fermix cannot read the server's home; a computer joining draws its own
+screen ahead of the others. The modelled desktop is one the home moved from
+that reads its server's home, which the scene now says, so no modelled step
+changed; the `home_summary.ex` pin now names `readable_or_update`, whose
+answer the scene takes as read. The comments' line numbers into
+`always_on.ex`, `home_summary.ex` and `home.ex` point at the committed code.

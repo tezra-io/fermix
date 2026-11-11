@@ -557,3 +557,17 @@ snapshot scheduler already did: for the dispatcher that is the filtering
 group's restart, its call tasks first, which the model takes as
 `FiltersRestart`, and `Jobs.Scheduler`, before it, is untouched. Nothing the
 spec models changed; it cites no `application.ex` line.
+
+## Re-read for the server's calls and the release table (2026-11-10)
+
+The core tree gained two primary-only processes (M97) between
+`Computers.Registry` and the snapshot scheduler: `Computers.Calls`, the
+invocations the server waits on from the home's computers, and
+`Home.ReleaseTable`, the release table an Always On server's update chooses
+from. It staled the `application.ex` pin. Neither reads or writes a
+delivery, watcher, run or proposal row. The cue tree is still the tree's
+last child. A crash of either restarts the snapshot scheduler and the cue
+tree, as a crash of the registry or the snapshot scheduler already did,
+which the model takes as `FiltersRestart`; `Jobs.Scheduler`, before them, is
+untouched. Nothing the spec models changed; it cites no `application.ex`
+line.

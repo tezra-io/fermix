@@ -38,7 +38,7 @@
 (* Only the daemon-to-client side of a socket is a queue: a Connection's   *)
 (* mailbox, then the socket, in order (what it writes outside the step     *)
 (* that produced it reaches it as {:companion_event, _},                   *)
-(* connection.ex:311-312). A client event, the Connection's handling of    *)
+(* connection.ex:314-315). A client event, the Connection's handling of    *)
 (* it, and the request worker, Repo and Queue calls it makes are one step, *)
 (* up to the worker's casts into Turns (the hand-off during ingest, the    *)
 (* settlement once ingest returned). Nothing distinct is lost: a client    *)
@@ -66,6 +66,9 @@
 (* 1 client joins any more: the checks that name one (34, 35) prove the    *)
 (* gate the code still keeps (every_client_reads?), not a client the       *)
 (* daemon admits.                                                          *)
+(* A client newer than the window that still speaks its newest version    *)
+(* (client_hello.min_protocol_version) is served that version, which is   *)
+(* then its version here.                                                  *)
 (*                                                                         *)
 (* Not modelled:                                                           *)
 (* - text_delta, tool_event, reasoning, turn_started, read_state:          *)
@@ -114,7 +117,7 @@
 (* a /skills review or approval) defers its request, which settles when    *)
 (* the command reports;                                                    *)
 (* - the peer check at the hand-over (handle_info(:socket_handover),       *)
-(* connection.ex:284-291): a client the daemon cannot place is sent        *)
+(* connection.ex:287-294): a client the daemon cannot place is sent        *)
 (* error{unidentified_client} and closed before a line is read, which it   *)
 (* sees as a drop before server_hello; the caller it places rides on each  *)
 (* turn (metadata.caller) and decides only what the turn's tools may do;   *)
@@ -189,11 +192,11 @@
 (* One step = one callback of one process, one Memory.Repo call, or one    *)
 (* thing a client or the environment does.                                 *)
 (***************************************************************************)
-\* SOURCE: apps/fermix_core/priv/companion/PROTOCOL.md @ 909f75b08e9b
+\* SOURCE: apps/fermix_core/priv/companion/PROTOCOL.md @ 9f0db14b0ea6
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/companion/requests.ex#request,cancel,claim_and_run,acquire_and_run,run_started,ingest_span,settle_after_ingest,settle_unless_handed_off,handoff_settlement,fail_attempt,report_failure,settle_failed,append_user,after_user_append,settle_inline,ingest_gateway,approval_resolution_fn,history,fit_page,cut_page,take_within,accepted_event,history_event,emit,best_effort_emit @ 97be58f8e741
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/companion/turns.ex @ 028bd206fc14
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/companion/output.ex#text_done,turn_error,row,timeline_message,approval,approval_resolved,persist_text,persist_output,complete_request,fail_request @ 28a393bb68d2
-\* SOURCE: apps/fermix_channels/lib/fermix_channels/companion/connection.ex#handle_info,dispatch,hello,join,send_pending_approvals,write_pending_approval,write_event,send_event,transport,request_failure_reporter,announce_user_row,request_opts,read_opts,sink @ c358d689e71c
+\* SOURCE: apps/fermix_channels/lib/fermix_channels/companion/connection.ex#handle_info,dispatch,hello,join,send_pending_approvals,write_pending_approval,write_event,send_event,transport,request_failure_reporter,announce_user_row,request_opts,read_opts,sink @ 67c58285ab46
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/companion/fanout.ex @ abddae4baafe
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/companion/approvals.ex @ 59c135c36360
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/companion/endpoint.ex#@max_clients,accept_connection,start_connection,hand_over @ c9885a5286f1
@@ -253,13 +256,13 @@ CONSTANTS
                          \* page says more and on a gap, and applies a live row only at
                          \* cursor + 1 (PROTOCOL.md "Keeping a client's timeline")
     SubscribeBeforePull, \* the Connection joins the registry before it writes
-                         \* server_hello (join, connection.ex:561-579)
+                         \* server_hello (join, connection.ex:574-592)
     PageWrittenInReadStep, \* the Connection writes history_page to the socket in the step
-                         \* that read it (read_opts, connection.ex:1242-1246); FALSE sends it
+                         \* that read it (read_opts, connection.ex:1255-1259); FALSE sends it
                          \* through its own mailbox, behind live rows sent meanwhile
     AnnouncesEveryRow,   \* every row written outside a turn's completion is announced as
                          \* a row as it is written: the user's (announce_user_row,
-                         \* connection.ex:1230-1231) and a delivery's (announce_written,
+                         \* connection.ex:1243-1244) and a delivery's (announce_written,
                          \* channels/companion.ex:409-410), both built by Output.row and
                          \* sent through Fanout.announce; FALSE announces no user row
     SingleAnswer,        \* an approval token is consumed once: Confirmations.take is
@@ -267,7 +270,7 @@ CONSTANTS
                          \* sandbox.ex:730-739)
     ResendsPendingApprovals, \* the Connection writes every card still waiting right
                          \* after server_hello, in the step that joined the registry
-                         \* (join, send_pending_approvals, connection.ex:561-650, from
+                         \* (join, send_pending_approvals, connection.ex:574-663, from
                          \* Approvals.pending, approvals.ex:112-115); FALSE: a card goes
                          \* out once, live
     DropsCardsAtHello,   \* when server_hello arrives the client drops every approval card
@@ -303,8 +306,8 @@ CONSTANTS
                          \* (settle_inline, run_settle, turns.ex:371-406; fail_attempt,
                          \* report_failure, requests.ex:383-403, through the
                          \* transport's report_failure, which the Connection writes as
-                         \* a failed worker's error, connection.ex:1218-1225,
-                         \* :328-329); FALSE only logs
+                         \* a failed worker's error, connection.ex:1231-1238,
+                         \* :331-332); FALSE only logs
                          \* the failure: the request stays running, and the next boot
                          \* runs the command again
     SeqAssignedOnInsert, \* server_seq comes from the per-profile counter inside the one
@@ -465,11 +468,11 @@ PagesAfter(a) ==
         least == IF PagesCanBeCut /\ most > 1 THEN 1 ELSE most
     IN {[rows |-> SubSeq(later, 1, k), more |-> Len(later) > k] : k \in least..most}
 
-\* history_pull on connection c (dispatch, connection.ex:499-500 ->
+\* history_pull on connection c (dispatch, connection.ex:502-503 ->
 \* Requests.history): the Repo read, in the step the client sends the pull;
 \* `w` is c's mailbox and socket as that step left them. With
 \* PageWrittenInReadStep the page is written to the socket in this step
-\* (read_opts -> send_event, connection.ex:1242-1246, :1140-1144), ahead of any
+\* (read_opts -> send_event, connection.ex:1255-1259, :1153-1157), ahead of any
 \* live row sent after the read; without it, it goes through the mailbox in a
 \* later step (SendPage). Without SubscribeBeforePull the Connection joins the
 \* registry after its first page (Join).
@@ -533,7 +536,7 @@ StopTurn(m, box) ==
 
 -----------------------------------------------------------------------------
 (* The request path: a Connection's request worker (request_job,           *)
-(* connection.ex:1040-1052) runs Companion.Requests.request                 *)
+(* connection.ex:1053-1065) runs Companion.Requests.request                 *)
 
 \* The worker's casts into Turns' mailbox, in the order it sends them: the
 \* hand-off during ingest, unless the gateway answered inline, then the
@@ -557,7 +560,7 @@ Casts(m) ==
 \*  - an attempt appends the user's row (append_client_message, keyed by
 \*    client_msg_id: an existing row is returned, not written again), and a
 \*    row it created is announced to every connection (after_user_append ->
-\*    announce_user_row, requests.ex:518-522, connection.ex:1230-1231);
+\*    announce_user_row, requests.ex:518-522, connection.ex:1243-1244);
 \*  - Gateway.ingest calls Companion.Turns.handle_message, which casts the
 \*    hand-off into Turns' mailbox and returns (turns.ex:140-145). A slash
 \*    command the gateway answers inline hands nothing off;
@@ -582,7 +585,7 @@ OnMsg(c, m) ==
     /\ UNCHANGED <<sub, reading, settled, known, queue, job, jobSeq, dseq, answeredBy,
                    cancelEarly, refused, told>>
 
-\* cancel{client_msg_id} (dispatch, connection.ex:496-497 -> Requests.cancel,
+\* cancel{client_msg_id} (dispatch, connection.ex:499-500 -> Requests.cancel,
 \* requests.ex:192-208), in the Connection's own step.
 \*  - CancelMarksRequest: the mark is recorded on a request that has not
 \*    settled, in one Repo call (cancel_request, mobile_sql.ex:821-840;
@@ -669,11 +672,13 @@ Resend(m) ==
 \* The client connects: the Endpoint starts its Connection and hands it the
 \* socket (accept_connection, start_connection, hand_over, endpoint.ex:240-293;
 \* @max_clients 4, two here). The client sends client_hello; the Connection
-\* joins the registry under the version that hello declared, which a turn's
+\* joins the registry under the version it is served (the one that hello
+\* declared, or the daemon's newest where a newer client still speaks it:
+\* client_hello.min_protocol_version), which a turn's
 \* silence decision reads (SubscribeBeforePull), then writes server_hello straight
 \* to the socket, and right behind it every card still waiting
 \* (ResendsPendingApprovals; hello, join, send_pending_approvals,
-\* connection.ex:529-650). The store keeps a card before it announces it, in
+\* connection.ex:534-663). The store keeps a card before it announces it, in
 \* one step (Approvals.announce, approvals.ex:79-88, :130-134), and the
 \* Connection joins before it reads the kept cards, so however the two
 \* interleave, a connection gets the
@@ -692,7 +697,7 @@ Connect(c) ==
     /\ UNCHANGED <<composed, outbox, sentOn, view, pulling, prompt, resent, reading, turns,
                    reqs, queue, store, env, obs>>
 
-\* The connection drops. The Connection exits (connection.ex:304) with its
+\* The connection drops. The Connection exits (connection.ex:307) with its
 \* mailbox; its registry entry goes with it. A request worker it started runs
 \* on, since it is not linked, so a claimed request still settles. The client
 \* keeps its outbox, its view, and any approval card it shows until its next
@@ -822,8 +827,8 @@ Join(c) ==
 \*    by error{request_failed, client_msg_id} to the Connection that ran the
 \*    request (Requests.fail_attempt, report_failure, requests.ex:383-403,
 \*    through the transport's report_failure, request_failure_reporter,
-\*    connection.ex:1218-1225, which the Connection writes as a failed
-\*    worker's error, :328-329). That report is best effort
+\*    connection.ex:1231-1238, which the Connection writes as a failed
+\*    worker's error, :331-332). That report is best effort
 \*    and no client rule reads it, so it is only observed here (told).
 \*    Without FailsUnsettled the failure is only logged and the request
 \*    stays running;

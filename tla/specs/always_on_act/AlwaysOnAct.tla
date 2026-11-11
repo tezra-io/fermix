@@ -6,12 +6,13 @@
 (* only when the summary offers that action under the key it was drawn    *)
 (* with (HomeSummary.find_action/3).                                       *)
 (*                                                                         *)
-(* The scene is Restore here on a linked desktop whose server went        *)
-(* silent, the one step that starts a job of the family: two surfaces     *)
-(* press at once, the act keeps its request in return.json before the     *)
-(* job starts and takes it back when the start is refused, and the job's  *)
-(* ending takes it back however its run ended, while the job still counts *)
-(* as running.                                                             *)
+(* The scene is Restore here on a linked desktop the home moved from (its *)
+(* moved marker) whose server went silent, and whose Fermix reads the     *)
+(* server's home: the one step that starts a job of the family. Two       *)
+(* surfaces press at once, the act keeps its request in return.json       *)
+(* before the job starts and takes it back when the start is refused, and *)
+(* the job's ending takes it back however its run ended, while the job    *)
+(* still counts as running.                                                *)
 (*                                                                         *)
 (* What it describes:                                                      *)
 (*  - Management.AlwaysOn (always_on.ex): act/2 hands the request to the  *)
@@ -29,13 +30,20 @@
 (*  - Management.HomeSummary and Management.Home: restoring/1 draws the   *)
 (*    restore running, with nothing to press, while its request stands    *)
 (*    beside its running job (restore_running?/1, Home's restoring?/2);   *)
-(*    elsewhere a silent server offers Restore here (restore_offer/1).    *)
+(*    elsewhere a silent server offers Restore here (restore_offer/1) on  *)
+(*    the computer the home moved from.                                   *)
 (*                                                                         *)
 (* Not modelled:                                                           *)
 (*  - the other steps of home.act (Move back, Move now, Cancel, the review *)
-(*    of what a computer keeps on for its server, and the rest): one act   *)
+(*    of what a computer keeps on for its server, adding a computer and    *)
+(*    the owner's answer to one that asks to join, and the rest): one act  *)
 (*    each through the same serializer and key rule, with no job of the    *)
 (*    family (home_return models the move back's);                         *)
+(*  - a computer that joined the home (no moved marker), which is offered  *)
+(*    neither Move back nor Restore here, and one whose Fermix cannot read *)
+(*    the server's home, which is offered Update in their place            *)
+(*    (readable_or_update/2): neither has the press this scene starts      *)
+(*    with;                                                                *)
 (*  - the run itself (LocalReturn.restore/3), its candidate, which draws  *)
 (*    moving once written, and the restart its success ends in: all       *)
 (*    home_return's;                                                       *)
@@ -55,9 +63,9 @@
 (* or one step of a job's ending.                                          *)
 (***************************************************************************)
 
-\* SOURCE: apps/fermix_core/lib/fermix_core/management/always_on.ex @ 96ca2ab14da9
+\* SOURCE: apps/fermix_core/lib/fermix_core/management/always_on.ex @ 1a45dace8410
 \* SOURCE: apps/fermix_core/lib/fermix_core/management/jobs.ex#start,handle_call,start_job,running?,running_count,complete_task,task_down,finish,begin_ending,ending_done,ending_down,end_closing @ 5095f2e28157
-\* SOURCE: apps/fermix_core/lib/fermix_core/management/home_summary.ex#offered,find_action,device,restoring,restore_running?,restore_offer @ 9afc8810cd4f
+\* SOURCE: apps/fermix_core/lib/fermix_core/management/home_summary.ex#offered,find_action,device,restoring,restore_running?,restore_offer,readable_or_update @ 0384823a2278
 \* SOURCE: apps/fermix_core/lib/fermix_core/management/home.ex#restoring? @ 10524f88be3d
 
 EXTENDS Naturals, FiniteSets, TLC
@@ -133,11 +141,12 @@ Init ==
 \* done").
 Running == {j \in Slots : jobs[j] # "none"}
 
-\* What the desktop's summary offers (device/1, :580): restoring/1 draws the
-\* restore running, with nothing to press, while the request stands beside
-\* a running job (restore_running?/1, :842-843; Home's restoring?/2,
-\* home.ex:233-242, reads the family); otherwise the silent server's screen
-\* offers Restore here (restore_offer/1, :847-853).
+\* What the desktop's summary offers (device/1, :617-618): restoring/1 draws
+\* the restore running, with nothing to press, while the request stands
+\* beside a running job (restore_running?/1, :909-910; Home's restoring?/2,
+\* home.ex:263-272, reads the family); otherwise the silent server's screen
+\* offers Restore here (restore_offer/1, :914-927) on the computer the home
+\* moved from.
 Offered == IF request /\ Running # {} THEN {} ELSE {"restore_here"}
 
 Goto(c, p) == pc' = [pc EXCEPT ![c] = p]
@@ -166,8 +175,8 @@ Press(c) ==
     /\ Goto(c, "queued")
     /\ UNCHANGED <<job_vars, drawn, acts, holder, hist_vars>>
 
-\* The serializer takes the act (act/2, always_on.ex:242-250, handle_call,
-\* :255-257): one at a time.
+\* The serializer takes the act (act/2, always_on.ex:253-261, handle_call,
+\* :266-268): one at a time.
 Take(c) ==
     /\ pc[c] = "queued"
     /\ Serialized => holder = "none"
@@ -175,8 +184,8 @@ Take(c) ==
     /\ Goto(c, "check")
     /\ UNCHANGED <<job_vars, drawn, acts, hist_vars>>
 
-\* run/3 and offered/4 (:261-287): the summary as it is now, and the key
-\* rule; then restore_here/3 (:700-709), whose copy is chosen first (a read).
+\* run/3 and offered/4 (:272-298): the summary as it is now, and the key
+\* rule; then restore_here/3 (:753-762), whose copy is chosen first (a read).
 Check(c) ==
     /\ pc[c] = "check"
     /\ IF KeyRule /\ "restore_here" \notin Offered
@@ -184,7 +193,7 @@ Check(c) ==
           ELSE Goto(c, "request") /\ UNCHANGED changedSeen
     /\ UNCHANGED <<job_vars, drawn, acts, holder, busySeen, crashed>>
 
-\* keep_record/2 of restore_record/3 (:720-723, :632-637): the request in
+\* keep_record/2 of restore_record/3 (:773-776, :685-690): the request in
 \* return.json, before the job.
 Request(c) ==
     /\ pc[c] = "request"
@@ -192,7 +201,7 @@ Request(c) ==
     /\ request' = TRUE
     /\ UNCHANGED <<jobs, drawn, acts, holder, hist_vars>>
 
-\* start_restore/3 (:733-748): Jobs.start/2, refused busy beside a running
+\* start_restore/3 (:786-801): Jobs.start/2, refused busy beside a running
 \* job of the kind (jobs.ex:230-238); else the job runs, its ending kept.
 Start(c) ==
     /\ pc[c] = "start"
@@ -205,8 +214,8 @@ Start(c) ==
                /\ UNCHANGED busySeen
     /\ UNCHANGED <<request, drawn, acts, holder, changedSeen, crashed>>
 
-\* The refused start takes the request back (request_done/1, :791-799); the
-\* refusal names a restore only when one runs (busy_with/1, :752-756).
+\* The refused start takes the request back (request_done/1, :844-852); the
+\* refusal names a restore only when one runs (busy_with/1, :805-809).
 Unstart(c) ==
     /\ pc[c] = "unstart"
     /\ Goto(c, "done")
@@ -241,8 +250,8 @@ RunCrashes(j) ==
     /\ crashed' = TRUE
     /\ UNCHANGED <<request, caller_vars, changedSeen, busySeen>>
 
-\* The ending (restore_ended/3, always_on.ex:765-789) takes the request back
-\* (request_done/1, :791-799), which tells the watch, then settles a local
+\* The ending (restore_ended/3, always_on.ex:818-842) takes the request back
+\* (request_done/1, :844-852), which tells the watch, then settles a local
 \* candidate a run stopped from outside left (home_return's RhSettle: no
 \* request here); the job still runs until the family hears the ending is
 \* done.

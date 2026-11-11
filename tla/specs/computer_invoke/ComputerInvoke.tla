@@ -14,9 +14,11 @@
 (* What it describes:                                                      *)
 (*  - Computers.Invocation (invocation.ex), which Computers.call/6 runs   *)
 (*    in the caller: it mints an id never used before, registers it,      *)
-(*    sends invoke_open, waits at most the deadline and the link's        *)
-(*    allowance, and decides what a lost answer means: an effect ends     *)
-(*    there (never sent twice), a read is asked once more under a new id. *)
+(*    then sends invoke_open (two steps: a session that starts between    *)
+(*    them asks about a request not sent yet), waits at most the deadline *)
+(*    and the link's allowance, and decides what a lost answer means: an  *)
+(*    effect ends there (never sent twice), a read is asked once more     *)
+(*    under a new id.                                                      *)
 (*  - Computers.Calls (calls.ex): the waiters, which outlive a session,   *)
 (*    and the ids still waited on from a computer.                         *)
 (*  - Desktop.InvokeFamily (invoke_family.ex): as the computer's next     *)
@@ -43,7 +45,22 @@
 (*  - a caller that ends before its answer (Calls sends a cancel) and     *)
 (*    Computers.cancel/2: the cancel the deadline sends is the same step; *)
 (*  - an id asked twice: the server never repeats one (mint_id), and the  *)
-(*    computer answers a known one as a status ask (repeated/2);          *)
+(*    computer answers one it still runs, waits on or holds as a status   *)
+(*    ask (known?/2, repeated/2). That is memory, not the journal: one    *)
+(*    whose held answer is gone would run again, so the rule rests on     *)
+(*    the server and the link never repeating a request;                  *)
+(*  - a request that waits for a slot or for its upload: it is admitted   *)
+(*    as it arrives and starts later (next/1, uploaded/3) with no second  *)
+(*    look at the epoch or at any switch, so one can start in the moment  *)
+(*    after the master switch went off and before Admission hears. The    *)
+(*    hearing ends it (stopped/2), as it ends a run;                      *)
+(*  - a machine.toml changed by hand: Admission is told only by           *)
+(*    Switches.write/2 and forget/1, so later requests are refused and    *)
+(*    what runs goes on;                                                   *)
+(*  - a journal or a link file that cannot be written or read: a started  *)
+(*    record that fails runs nothing, a finished record that fails is     *)
+(*    logged and the answer still goes, an epoch that could not be kept   *)
+(*    in device/desktop.json is not the one Admission reads;              *)
 (*  - a computer's own request to its server (the home's services);       *)
 (*  - the switch going back on, a second computer, and a restart of the   *)
 (*    server's Calls (its waiters time out);                              *)
@@ -55,14 +72,16 @@
 (* acts, or one thing the world does (a drop, a stop, a switch).          *)
 (***************************************************************************)
 
-\* SOURCE: apps/fermix_core/lib/fermix_core/computers/invocation.ex
-\* SOURCE: apps/fermix_core/lib/fermix_core/computers/calls.ex
-\* SOURCE: apps/fermix_core/lib/fermix_core/computers/journal.ex#append_started,append_finished,lookup,interrupted,close_all
-\* SOURCE: apps/fermix_core/lib/fermix_core/computers.ex#call,cancel
-\* SOURCE: apps/fermix_channels/lib/fermix_channels/desktop/invoke.ex
-\* SOURCE: apps/fermix_channels/lib/fermix_channels/desktop/invoke/admission.ex
-\* SOURCE: apps/fermix_channels/lib/fermix_channels/desktop/invoke_family.ex#init,handle_event,reconcile,outstanding
-\* SOURCE: apps/fermix_channels/lib/fermix_channels/desktop/device_supervisor.ex#children,invoke_spec
+\* SOURCE: apps/fermix_core/lib/fermix_core/computers/invocation.ex @ 8af9126b6fdd
+\* SOURCE: apps/fermix_core/lib/fermix_core/computers/calls.ex @ 376bd17d7b0e
+\* SOURCE: apps/fermix_core/lib/fermix_core/computers/journal.ex#append_started,append_finished,lookup,interrupted,close_all,append,write_line,entries,entry @ 344561793d17
+\* SOURCE: apps/fermix_core/lib/fermix_core/computers.ex#call,cancel @ 15ac082efc1f
+\* SOURCE: apps/fermix_channels/lib/fermix_channels/desktop/invoke.ex @ 643b7b0d615f
+\* SOURCE: apps/fermix_channels/lib/fermix_channels/desktop/invoke/admission.ex @ a161f6f11968
+\* SOURCE: apps/fermix_channels/lib/fermix_channels/desktop/invoke_family.ex#init,handle_event,reconcile,outstanding @ c3dad94c2d72
+\* SOURCE: apps/fermix_channels/lib/fermix_channels/desktop/device_supervisor.ex#children,invoke_spec @ 58075520c4ff
+\* SOURCE: apps/fermix_core/lib/fermix_core/computers/switches.ex#write,forget,notify @ a80b512f1bdd
+\* SOURCE: apps/fermix_channels/lib/fermix_channels/desktop/relay.ex#hello_ack,keep_epoch,invocation @ 8ce6841cb147
 
 EXTENDS Naturals, FiniteSets, TLC
 
@@ -83,7 +102,8 @@ CONSTANTS
     \* Mechanism switches: TRUE is the code.
     JournalBeforeRun,   \* the started record is synced before the run
                         \* (Admission.start/3, admission.ex:487-499;
-                        \* Journal.append_started/2, journal.ex:81); FALSE
+                        \* Journal.append_started/2, journal.ex:81;
+                        \* write_line/3's :file.sync, :247-255); FALSE
                         \* writes the journal only when it ends
     NoResendOfEffects,  \* an effect whose answer is lost ends there
                         \* (Invocation.again/5, invocation.ex:384-390:
@@ -95,7 +115,7 @@ CONSTANTS
     SwitchReadAtAdmit,  \* the switches are read as each request is
                         \* admitted (Admission.admit/2, admission.ex:299-300;
                         \* switches/1, :834; Invoke.switches_in/1,
-                        \* invoke.ex:49-61); FALSE uses what was read when
+                        \* invoke.ex:49-60); FALSE uses what was read when
                         \* Admission started
     ServerDeadline      \* the caller waits at most its deadline and the
                         \* link's allowance (Invocation.await/5,
@@ -120,7 +140,8 @@ Asks == [t : {"open", "status", "cancel"}, id : Ids]
 
 VARIABLES
     \* the server: Computers.Invocation in the caller, and Computers.Calls
-    st,             \* each call: "idle", "waiting", "done"
+    st,             \* each call: "idle", "registered" (its id is with
+                    \* Calls and its request not sent yet), "waiting", "done"
     try,            \* the ids the call has used; its current id is <<c, try[c]>>
     out,            \* how the call ended, "none" until then
     \* the link: the computer's session
@@ -154,7 +175,7 @@ hist_vars == <<staleAdmitted, startedOff, dropSeen, via>>
 vars == <<server_vars, link_vars, computer_vars, hist_vars>>
 
 TypeOK ==
-    /\ st \in [Calls -> {"idle", "waiting", "done"}]
+    /\ st \in [Calls -> {"idle", "registered", "waiting", "done"}]
     /\ try \in [Calls -> 0..MaxTries]
     /\ out \in [Calls -> Closed \cup {"none"}]
     /\ up \in BOOLEAN /\ down \subseteq Asks /\ back \subseteq Answers
@@ -182,8 +203,8 @@ Init ==
 
 Current(c) == <<c, try[c]>>
 \* The ids Calls still waits on from the computer (Calls.outstanding/2,
-\* calls.ex:77, ids_on/2, :139).
-Outstanding == {Current(c) : c \in {w \in Calls : st[w] = "waiting"}}
+\* calls.ex:77, ids_on/2, :139): each from its registration on.
+Outstanding == {Current(c) : c \in {w \in Calls : st[w] \in {"registered", "waiting"}}}
 Live == {i \in Ids : run[i] \in {"running", "acted"}}
 
 End(c, how, by) ==
@@ -195,19 +216,25 @@ End(c, how, by) ==
 (* The server: Computers.call/6 (computers.ex:129), Computers.Invocation   *)
 
 \* invoke/3 (invocation.ex:215-249): a new id (mint_id/0, :440), registered
-\* with Calls (calls.ex:59) before invoke_open goes (the transport's
-\* open/5). With no session nothing is sent and the call is refused at once
-\* (reachable/2, :95; sent/5's :not_connected, :259).
-Send(c) ==
+\* with Calls (register/2, calls.ex:59; :222-231) before anything is sent.
+Register(c) ==
     /\ st[c] = "idle"
+    /\ st' = [st EXCEPT ![c] = "registered"]
+    /\ try' = [try EXCEPT ![c] = 1]
+    /\ UNCHANGED <<out, link_vars, computer_vars, hist_vars>>
+
+\* Then invoke_open goes (the transport's open/5, :235-242). With no session
+\* nothing is sent and the call is refused (sent/5's :not_connected, :259;
+\* reachable/2, :95, says the same before an id is minted).
+SendOpen(c) ==
+    /\ st[c] = "registered"
     /\ IF up
-          THEN /\ try' = [try EXCEPT ![c] = 1]
-               /\ st' = [st EXCEPT ![c] = "waiting"]
-               /\ down' = down \cup {[t |-> "open", id |-> <<c, 1>>]}
+          THEN /\ st' = [st EXCEPT ![c] = "waiting"]
+               /\ down' = down \cup {[t |-> "open", id |-> Current(c)]}
                /\ UNCHANGED <<out, via>>
           ELSE /\ End(c, "refused_unavailable", "local")
-               /\ UNCHANGED <<try, down>>
-    /\ UNCHANGED <<up, back, drops, computer_vars, staleAdmitted, startedOff, dropSeen>>
+               /\ UNCHANGED down
+    /\ UNCHANGED <<try, up, back, drops, computer_vars, staleAdmitted, startedOff, dropSeen>>
 
 \* An answer says the outcome is not known, or holds only the journal's
 \* receipt (lost?/1, :394-396).
@@ -216,26 +243,27 @@ Lost(m) == m.status = "unknown" \/ m.rec = "receipt"
 \* An invoke_result reaches the family (invoke_family.ex:65), which hands it
 \* to Calls (deliver/4, calls.ex:65; route/4, :147), and the caller takes it
 \* (await/5, :269; take/3, :293). One for an id nobody waits on is dropped
-\* (route/4's :error). A lost answer ends an effect there; a read is asked
-\* once more under a new id (again/5, :384-390), where the session allows.
+\* (route/4's :error); one for a request registered and not sent yet stays
+\* in the caller's mailbox until it waits. A lost answer ends an effect
+\* there; a read is asked once more under a new id (again/5, :384-390),
+\* registered and sent as the first was.
 Receive(m) ==
     /\ m \in back
+    /\ ~(st[CallOf(m.id)] = "registered" /\ m.id = Current(CallOf(m.id)))
     /\ back' = back \ {m}
     /\ LET c == CallOf(m.id)
            again == Lost(m) /\ try[c] < MaxTries
                     /\ (c \notin Effects \/ ~NoResendOfEffects)
            heard == IF m.rec = "none" THEN "no_record" ELSE m.rec
        IN IF st[c] # "waiting" \/ m.id # Current(c)
-             THEN UNCHANGED <<server_vars, down, via>>
-             ELSE IF again /\ up
+             THEN UNCHANGED <<server_vars, via>>
+             ELSE IF again
                      THEN /\ try' = [try EXCEPT ![c] = try[c] + 1]
-                          /\ down' = down \cup {[t |-> "open", id |-> <<c, try[c] + 1>>]}
-                          /\ UNCHANGED <<st, out, via>>
-                     ELSE /\ IF again
-                                THEN End(c, "refused_unavailable", "local")
-                                ELSE End(c, m.status, heard)
-                          /\ UNCHANGED <<try, down>>
-    /\ UNCHANGED <<up, drops, computer_vars, staleAdmitted, startedOff, dropSeen>>
+                          /\ st' = [st EXCEPT ![c] = "registered"]
+                          /\ UNCHANGED <<out, via>>
+                     ELSE /\ End(c, m.status, heard)
+                          /\ UNCHANGED try
+    /\ UNCHANGED <<up, down, drops, computer_vars, staleAdmitted, startedOff, dropSeen>>
 
 \* The wait ends (await/5's after, :279; gave_up/4, :348-359): an effect's
 \* outcome is not known, a read timed out, and the computer is told to
@@ -281,8 +309,8 @@ Say(id, status, rec) ==
     back' = IF up THEN back \cup {[id |-> id, status |-> status, rec |-> rec]} ELSE back
 
 \* answer/3 (:679-692): the finished record is synced (record_finished/6,
-\* :709; Journal.append_finished/2, journal.ex:105), then the answer is held
-\* (hold/3, :803) and sent.
+\* :709; Journal.append_finished/2, journal.ex:105), then the answer is sent
+\* and held (hold/3, :803), in the one callback.
 Answer(id, status) ==
     /\ journal' = [journal EXCEPT ![id] = status]
     /\ held' = [held EXCEPT ![id] = status]
@@ -290,9 +318,13 @@ Answer(id, status) ==
 
 Take(m) == m \in down /\ down' = down \ {m}
 
-\* Admission takes its mailbox in order, and the server asks about an id
-\* only after it sent that id's request: a status ask or a cancel is taken
-\* after the request it is about, where that one is still to be taken.
+\* Admission takes its mailbox in order, and each session hands it what it
+\* received in order: a status ask or a cancel is taken after the request it
+\* is about, where that one is still to be taken. (Every invoke_open a
+\* capability here takes rides the interactive lane, as invoke_status and
+\* invoke_cancel do, Mobile.Lanes; only a history submit's would ride bulk.)
+\* A status ask for a request registered and not sent yet finds nothing to
+\* wait for, and is answered that there is no record.
 AfterItsOpen(m) == [t |-> "open", id |-> m.id] \notin down
 
 \* invoke_open (open/3, :219; admitted/2, :288; admit/2, :299-310): the
@@ -399,7 +431,7 @@ Expire(id) ==
                    linkEpoch, stopped, hist_vars>>
 
 \* Admission stops and starts again (Desktop.Invoke is :one_for_all,
-\* invoke.ex:91): its runs end with it, what it held and what waited in its
+\* invoke.ex:91-102): its runs end with it, what it held and what waited in its
 \* mailbox are gone, and at start it closes what the crash left started as
 \* unknown, interrupted (init/1, :102; recover/1, :192; Journal.interrupted/2,
 \* journal.ex:175), and reads the switches anew.
@@ -430,7 +462,7 @@ Done == \A c \in Calls : st[c] = "done"
 Terminated == Done /\ UNCHANGED vars
 
 Next ==
-    \/ \E c \in Calls : Send(c) \/ Deadline(c) \/ Wait(c)
+    \/ \E c \in Calls : Register(c) \/ SendOpen(c) \/ Deadline(c) \/ Wait(c)
     \/ \E m \in back : Receive(m)
     \/ \E m \in down : Open(m) \/ Status(m) \/ Cancel(m)
     \/ \E i \in Ids : Act(i) \/ Finish(i) \/ Expire(i)
@@ -441,7 +473,7 @@ Next ==
 \* answer that reached the server is taken, and a wait ends. The link, the
 \* computer and the owner owe nothing.
 Fairness ==
-    /\ \A c \in Calls : WF_vars(Send(c)) /\ WF_vars(Deadline(c))
+    /\ \A c \in Calls : WF_vars(Register(c)) /\ WF_vars(SendOpen(c)) /\ WF_vars(Deadline(c))
     /\ WF_vars(\E m \in back : Receive(m))
 
 Spec == Init /\ [][Next]_vars /\ Fairness
@@ -492,5 +524,11 @@ Witness_StoppedHere == ~(\E c \in Calls : out[c] = "refused_stopped_here")
 \* alone says it was done, and it is not done again.
 Witness_ReceiptOnly ==
     ~(\E c \in Effects : out[c] = "ok" /\ via[c] = "receipt" /\ acted[<<c, 1>>] = 1)
+
+\* A session started between an effect's registration and its request: the
+\* status ask found no record, the call ended not known, and the request,
+\* sent after that, ran.
+Witness_AskedBeforeSent ==
+    ~(\E c \in Effects : out[c] = "unknown" /\ via[c] = "no_record" /\ acted[<<c, 1>>] = 1)
 
 =============================================================================

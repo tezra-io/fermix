@@ -14,8 +14,9 @@ something on the computer (an effect) and a call that only reads.
 The modules it describes:
 - `FermixCore.Computers.Invocation` (whole), which `Computers.call/6` runs
   in the caller: a new id for every request (`mint_id`), registered before
-  it is sent (`invoke`), waited on at most its deadline and the link's
-  allowance (`await`, `wait_left`, `gave_up`), and what a lost answer means
+  it is sent (`invoke`; two steps, so a session that starts between them
+  asks about a request not sent yet), waited on at most its deadline and
+  the link's allowance (`await`, `wait_left`, `gave_up`), and what a lost answer means
   (`lost?`, `again`): an effect ends there, a read is asked once more under
   a new id.
 - `FermixCore.Computers.Calls` (whole): the waiters, which outlive a
@@ -32,11 +33,18 @@ The modules it describes:
   (`handle_cast :switches_changed`, `stopped`), and what a restart finds
   (`init`, `recover`).
 - `FermixCore.Computers.Journal`: the two records (`append_started`,
-  `append_finished`), the read a status ask makes (`lookup`), and the mark
-  a restart leaves on what a crash left started (`interrupted`).
+  `append_finished`), each synced before the caller goes on (`append`,
+  `write_line`), the read a status ask makes (`lookup`, `entries`), and
+  the mark a restart leaves on what a crash left started (`interrupted`).
 - `FermixChannels.Desktop.DeviceSupervisor`: `Desktop.Invoke` beside the
   dial subtree, never inside it (`children`, `invoke_spec`), so a relay or
   helper restart is a session that drops, not a computer that stops.
+- `FermixCore.Computers.Switches`: a write of the switches tells Admission
+  (`write`, `forget`, `notify`).
+- `FermixChannels.Desktop.Relay`: a session with an older copy of the home
+  is refused and a newer copy's epoch kept (`hello_ack`, `keep_epoch`),
+  and each `invoke_*` event is handed to Admission as it came
+  (`invocation`).
 
 Not modelled, each covered elsewhere:
 - the bound (8 running, 32 waiting, `busy` past it), an upload or an
@@ -52,26 +60,37 @@ Not modelled, each covered elsewhere:
   and `Computers.cancel/2`: the cancel the deadline sends is the same step
   (`invocation_test.exs`);
 - an id asked twice: the server never repeats one, and the computer
-  answers one it knows as a status ask (`invoke_test.exs`);
+  answers one it still runs, waits on or holds as a status ask
+  (`invoke_test.exs`). That is memory, not the journal: an id whose held
+  answer is gone would run again, so the rule rests on the server and the
+  link never repeating a request;
+- a request that waits for a slot or for its upload. It is admitted as it
+  arrives and starts later (`next`, `uploaded`) with no second look at the
+  epoch or at any switch, so one can start in the moment after the master
+  switch went off and before Admission hears; the hearing ends it, as it
+  ends a run;
+- a `machine.toml` changed by hand. Admission is told only by a write
+  through `Switches`, so later requests are refused and what runs goes on;
+- a link file that cannot be written: an epoch the relay could not keep in
+  `device/desktop.json` is not the one Admission reads;
 - a computer's own request to its server (the home's services);
 - the switch going back on, a second computer, and a restart of the
   server's `Calls`, whose waiters time out;
-- a journal that cannot be written: nothing runs (`invoke_test.exs`);
+- a journal that cannot be written: a `started` record that fails runs
+  nothing (`invoke_test.exs`); a `finished` record that fails is logged and
+  the answer still goes;
 - a run admitted before the computer learned of a newer copy of its home.
   It finishes: the epoch is checked when a request is admitted.
 
 ## Pins
 
-The `.tla` header names these sources. They are **not pinned yet**: the
-code is uncommitted, and a pin names code that exists in history. Until
-`make -C tla repin SPECS=computer_invoke` runs after the commit, every run
-reports the spec STALE.
+The `.tla` header pins these sources:
 
 - `apps/fermix_core/lib/fermix_core/computers/invocation.ex`, whole;
 - `apps/fermix_core/lib/fermix_core/computers/calls.ex`, whole;
 - `apps/fermix_core/lib/fermix_core/computers/journal.ex`, by function:
   `append_started`, `append_finished`, `lookup`, `interrupted`,
-  `close_all`;
+  `close_all`, `append`, `write_line`, `entries`, `entry`;
 - `apps/fermix_core/lib/fermix_core/computers.ex`, by function: `call`,
   `cancel`;
 - `apps/fermix_channels/lib/fermix_channels/desktop/invoke.ex`, whole;
@@ -80,7 +99,11 @@ reports the spec STALE.
 - `apps/fermix_channels/lib/fermix_channels/desktop/invoke_family.ex`, by
   function: `init`, `handle_event`, `reconcile`, `outstanding`;
 - `apps/fermix_channels/lib/fermix_channels/desktop/device_supervisor.ex`,
-  by function: `children`, `invoke_spec`.
+  by function: `children`, `invoke_spec`;
+- `apps/fermix_core/lib/fermix_core/computers/switches.ex`, by function:
+  `write`, `forget`, `notify`;
+- `apps/fermix_channels/lib/fermix_channels/desktop/relay.ex`, by
+  function: `hello_ack`, `keep_epoch`, `invocation`.
 
 ## Switches
 
@@ -102,23 +125,24 @@ reports the spec STALE.
 `01_what_the_computer_keeps` (one effect, two ids at most, two drops, and
 everything the environment can do) holds four rules:
 - `EffectAtMostOnce`: whatever is lost, what a call changes on the computer
-  happens at most once. It needs `NoResendOfEffects` (check 02, 11 states):
-  the run acts, the session drops, the computer stops, and the server's
-  status ask after the reconnect is answered with the journal's receipt
-  alone (`unknown`, interrupted); asked again as a read would be, the
-  effect happens a second time.
+  happens at most once. It needs `NoResendOfEffects` (check 02, 12 states):
+  a session starts between the effect's registration and its request, so
+  the status ask finds no record and is answered `unknown`; asked again as
+  a read would be, the request and its repeat both run. The same holds
+  after a computer that stops in the middle, whose receipt says `unknown`,
+  interrupted.
 - `ActedIsJournaled`: whatever acted on the computer is in its journal at
-  every moment, a stop included. It needs `JournalBeforeRun` (check 03, 4
+  every moment, a stop included. It needs `JournalBeforeRun` (check 03, 5
   states): a run that acted has no record until it ends, so a stop there
   leaves none.
 - `StaleEpochNeverActs`: no request from an older copy of the home is
-  admitted. It needs `EpochCheck` (check 04, 5 states): a request handed to
+  admitted. It needs `EpochCheck` (check 04, 6 states): a request handed to
   Admission as the session dropped is taken after the computer met the
   newer copy. The relay refuses a session with an older copy too; this is
   the request that was already inside.
 - `OffAlwaysWins`: nothing starts while the master switch is off, and once
   Admission has heard, nothing runs. It needs `SwitchReadAtAdmit` (check
-  05, 4 states): a request taken after the switch went off, and before
+  05, 5 states): a request taken after the switch went off, and before
   Admission heard, starts.
 
 `06_every_call_ends` (an effect and a read asked at once, one drop, a
@@ -136,8 +160,42 @@ new id and answers (10); a request from an older copy of the home is
 refused by name and journaled (11); the master switch going off ends a
 run, and its call hears it was stopped at the computer (12); an effect
 runs, its answer leaves the computer's memory, and the receipt alone tells
-the server it was done (13).
+the server it was done (13); a session starts between an effect's
+registration and its request, the status ask finds no record, the call
+ends not known, and the request, sent after that, runs once (14).
+
+## Pinned (M97, 2026-11-10)
+
+Read against 16207ff5, which committed the code, before the first pin:
+- **Registering and sending are two steps.** `invoke/3` registers the id
+  with `Calls` and only then sends `invoke_open`, and a session that starts
+  between the two asks the computer about a request it was not sent yet
+  (the reconcile's `invoke_status` and the caller's `invoke_open` reach the
+  session from two processes, in either order). The computer answers that
+  it has no record, `unknown`, and the caller takes that answer from its
+  mailbox once it waits: an effect ends not known while its request, sent
+  after, runs once; a read is asked again and runs twice. `Register` and
+  `SendOpen` model the two steps, `Outstanding` counts a registered id, and
+  witness 14 reaches the path. Check 02's shortest path is now this one.
+- **The pins** name the journal's `append`, `write_line`, `entries` and
+  `entry` (the sync and the read the steps rest on), `Switches.write`,
+  `forget` and `notify` (how Admission hears the switch), and the relay's
+  `hello_ack`, `keep_epoch` and `invocation` (the session refused for an
+  older copy, the newer epoch kept, each event handed as it came).
+- **The order a status ask relies on** holds because every `invoke_open` a
+  capability here takes rides the interactive lane with `invoke_status` and
+  `invoke_cancel`; a history submit's open would ride bulk, and a cancel or
+  status ask could then pass it.
 
 ## Findings
 
-None.
+None from TLC. Read beside the code, outside the model's steps:
+- The race above is not a broken rule, but it costs the owner an effect
+  whose outcome Fermix says it does not know though it ran.
+- A request that waited for a slot or its upload can start after the master
+  switch went off and before Admission hears (`next/1` and `uploaded/3`
+  look at no switch), which `OffAlwaysWins` says never happens; the hearing
+  ends it.
+- An epoch the relay could not write to `device/desktop.json` is kept in
+  the relay's memory only, so Admission, which reads the file, would admit
+  a request from the older copy that was already inside.

@@ -348,6 +348,48 @@ None changes a modelled step. The comments' line numbers into the files
 this commit changed had drifted before it too; they now point at the
 committed code.
 
+Walked again against 16207ff5 (M97: a second computer, and the server's
+lead on versions):
+- **Move back and Restore here need the moved marker.** `move_back/1` and
+  `restore_offer/1` now offer them only where the home moved from this
+  computer (`moved`), so a computer that joined has neither. The model had
+  offered Restore here on a Mac with no marker: a Restore here whose engine
+  died while activating is finished by the candidate at the next start, and
+  between its last step and the restart the engine is still a device with
+  no marker, no link and no candidate, beside a request with no job.
+  `RestoreOffer` and `DeviceOffers` now read the marker (`mMarker`). The
+  press there was refused before any write (`Preparable` reads the marker
+  too), so every check has the result it had; the reachable states are
+  fewer (check 01: 54613, from 54682).
+- **Update in their place.** Where this computer's Fermix cannot read the
+  server's home, the summary offers Update where Move back or Restore here
+  would stand. Here the Mac reads it (the header says so).
+- **The pin** of `home_summary.ex` now names `move_back` and
+  `readable_or_update` as well, since `DeviceOffers` reads the first's
+  marker and the model takes the second's answer as read.
+- **Step c** (`end_tenure/2`) records which key is this home's once, in
+  `candidate/tenure.json`, before anything is deleted, deletes the stored
+  key only while it still holds that key, then removes the link. A link it
+  cannot read no longer fails the step: it is removed, the reason logged,
+  and any key it named stays. The record and the key are writes no rule
+  reads, and a later run reads the record and still removes the link, so
+  `CTenure` stays one step; its comment said an unreadable link fails the
+  step, and no longer does. A record that cannot be read or written, a
+  store that cannot be read, or one that will not delete, still fails it.
+- **The device tree** starts this computer's invocations (`Desktop.Invoke`)
+  beside the dial subtree while the home is linked, and a joiner inside the
+  dial subtree only while this computer joins a home and has no link. The
+  candidate subtree starts and stops as before.
+- **The act** gained Add a computer, the owner's answer to a computer that
+  asks to join, and Cancel on a computer that is joining: acts that write
+  nothing a rule reads. Move back, Move now, Cancel on a return and Restore
+  here are as before.
+- **The server's move worker** no longer reads its `machine.toml` on a
+  resume when it is not kept as a computer, as here.
+
+The comments' line numbers into the files this commit changed point at the
+committed code.
+
 ## Done
 
 Deadlock checking is on. `Done` has these ends:
@@ -401,8 +443,12 @@ The `.tla` header lists what is left out, with the reason for each:
 - a second desktop (the stale epoch, the passed return's drop);
 - the copy's choice and a wrong passphrase;
 - the key's derivation;
-- the Mac's other acts: Back up now, and the review of what a computer that
-  moved before M97 keeps on for its server.
+- the Mac's other acts: Back up now, Add a computer and the owner's answer
+  to one that asks to join, and the review of what a computer that moved
+  before M97 keeps on for its server;
+- a computer that joined the home, which carries no moved marker and is
+  offered neither Move back nor Restore here, and a Mac whose Fermix cannot
+  read the server's home, which is offered Update in their place.
 
 ## Outside the model
 
