@@ -147,3 +147,13 @@ that reads its server's home, which the scene now says, so no modelled step
 changed; the `home_summary.ex` pin now names `readable_or_update`, whose
 answer the scene takes as read. The comments' line numbers into
 `always_on.ex`, `home_summary.ex` and `home.ex` point at the committed code.
+
+## Re-read for the review's fixes (M97, 2026-11-11)
+
+Re-read against c6fe1c48, which staled the `always_on.ex` pin. Try again
+with no block ticked (its undone screen offers none) now moves with the keep
+the undone move started with, read from that move's phase
+(`Move.undone_keep/1`), not the engine's proposal: a field of the request
+no rule reads. The serializer, the key rule, Restore here's request, its
+job, the busy refusal and the ending are as before. The comments' line
+numbers into `always_on.ex` point at the committed code.

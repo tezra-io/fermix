@@ -513,6 +513,11 @@ keep their order, so a crash of it reaches neither, and it touches no
 below the tree, so every cited `application.ex` line is where it was. No
 delivery path the spec models changed.
 
+Re-read on 2026-11-11 for the review's fixes (`c6fe1c48`), which staled the
+`application.ex` pin with two comments inside `supervision_children`. No
+child moved and no delivery path the spec models changed; the spec cites no
+line the change moved.
+
 ## Code and doc drift
 
 - `delivery_worker.ex:160-163` says a claim past the validity boundary "cannot

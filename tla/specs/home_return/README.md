@@ -411,6 +411,13 @@ None changes a modelled step. The comments' line numbers into these three
 files point at the committed code; those into the candidate's
 `candidate.ex` had drifted before this change too.
 
+Walked again against c6fe1c48 (the review's fixes), which staled the
+`always_on.ex` pin: Try again with no block ticked moves with the keep the
+undone move started with (`Move.undone_keep/1`), a field of its request no
+rule reads, and Try again is not modelled. Move back, Move now, Cancel and
+Restore here are as before. The comments' line numbers into `always_on.ex`
+point at the committed code.
+
 ## Done
 
 Deadlock checking is on. `Done` has these ends:

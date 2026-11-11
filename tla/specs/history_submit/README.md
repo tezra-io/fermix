@@ -69,6 +69,24 @@ The steps, each one call of the real code:
   (the home's scheduler always runs, `Controller.default_children/2`); a
   computer that is away is skipped and gets them at the first tick after it
   is back, and until then the home refuses its sittings that reach them.
+- **The home store's identity** (`ComputerHistory.home_identity/1`: the
+  store's own token, migration 61, and the home's epoch). A machine keeps its
+  mark with the identity of the store it counts (`computer_history_link.home`).
+  Its sitting names it, and the home counts the mark only when it names this
+  store, reading it as 0 otherwise (`Submission.mark/2`; `Delivery.mark/2`
+  for the home's own machine); every answer and every `history.apply` names
+  the store, and `set_home_mark/3` raises the mark under the same store and
+  replaces mark and store together under another.
+- **Take a backup, Restore**: the owner backs the home up once, at any
+  moment (`TakeBackup`: its intervals, its next id and the home's epoch
+  then); a restore from it (`Restore`, `Home.Archive.install/5`) puts those
+  intervals and that next id back, so the store's ids start again from the
+  backup's, holds none of the notes, and sets the epoch to the backup's plus
+  one, which makes the identity. A server rebuilt from nothing and another
+  home are the same with a token never seen. The machines' own stores are not
+  in the backup and keep their marks. The engine restarts, so no sitting is
+  being summarized then; one on its way, and an answer or an apply on its
+  way back, goes on under the store it was made under.
 
 Out of scope, each a single call ExUnit covers or a step that only writes
 less:
@@ -119,6 +137,8 @@ less:
   `:computer` that no caller passes yet.
 - `ComputersGoAway`: a computer's link drops, at most `MaxAway` times, and
   comes back. The home's own machine never goes away.
+- `HomeCanRestore`: the owner takes a backup, and the home is restored from
+  it at most `MaxRestores` times (0 in every check but 16 to 20).
 - `HomeMachine`: which of `Computers` is the home's own machine (a Mac that is
   its own home), or a value outside them for a home that records nothing
   itself.
@@ -147,6 +167,10 @@ less:
 - `HereAppliesPending`: the home's own machine applies every interval of its
   own above its mark (`Delivery.apply_here/1`), not the command's own one
   alone, so its mark never steps over one it has not applied.
+- `MarkTiedToHome`: a mark counts only under the home store it names, and is
+  replaced, not raised, under another (`Submission.mark/2`,
+  `Delivery.mark/2`, `set_home_mark/3`). Off, the code before `c6fe1c48`: a
+  mark counts whatever store it was made under.
 
 ## What holds
 
@@ -169,8 +193,16 @@ and `07` (the mark) for the liveness one. `08` and `09` are witnesses: a late
 sitting refused for a purge, and a note made from events either side of a
 purged window.
 
-Only `14` and `15` have the home's own machine record (`HomeMachine` in
-`Computers`); the others have it outside `Computers`.
+Only `14`, `15`, `18` and `19` have the home's own machine record
+(`HomeMachine` in `Computers`); the others have it outside `Computers`.
+
+With a backup taken at any moment and one restore from it
+(`HomeCanRestore`, one purge before it and one after, two stamps): `16`
+holds the safety rule for a computer that goes away and `18` for a Mac that
+is its own home, and each needs `MarkTiedToHome` (`17`, 12 states; `19`).
+With two restores from that backup the rule breaks (`20`, HS-4, open). The
+identities start at the first store, so the checks without a restore
+explore the states they did before.
 
 ## Findings
 
@@ -229,6 +261,63 @@ sends both start at or below the next interval they have not applied.
 The fix keeps the home's machine's mark a true prefix, as `refused_by/4`
 keeps a computer's.
 
+### HS-3: a mark kept from a home store whose ids started again steps over a new purge (fixed)
+
+Found by the review of M97 and fixed in `c6fe1c48`; check `17` shows it
+without `MarkTiedToHome` (12 states), on a computer:
+1. The recorder stores an event stamped `1`; the owner backs the home up
+   before any interval.
+2. A purge records interval 1 over `[2, 2]`; a delivery applies it and the
+   computer's mark is 1.
+3. The computer's cycle forms a sitting with mark 1 and the event stamped
+   `1`.
+4. The home is restored from that backup: its next interval id is 1 again.
+5. The sitting arrives: nothing above mark 1 reaches it, so it is
+   summarized.
+6. A purge records a new interval 1, over `[1, 1]`.
+7. The write checks again above mark 1 and finds nothing: the note holds an
+   event inside the purged window.
+
+The same holds for a server rebuilt from nothing and for a computer that
+joins another home: ids start again, and a mark made under the old store
+names intervals it never saw. The fix ties the mark to the store's identity:
+the sitting names it, the home reads a mark under another store as 0 and
+refuses the sitting with every interval it holds, and the computer replaces
+its mark and store together. Check `19` shows the same on a Mac that is its
+own home, whose store keeps its mark across a restore of its memory.db.
+
+### HS-4: a home restored twice from one backup has the same identity both times, and a mark from the first restore steps over a new purge (open)
+
+Found in the re-read of `c6fe1c48`. The home store's identity is its token
+and its epoch (`ComputerHistory.home_identity/1`). A restore writes the
+backup's own epoch plus one (`Home.Archive.install/5` → `next_epoch/1`,
+`archive.ex:214`, `:790-792`), and the token is the one in the backup's
+memory.db (`computer_history_home`, migration 61). Restoring the same backup
+again gives the same identity, while the store's interval ids start again
+from the backup's. Check `20` (13 states), on a computer:
+1. The recorder stores an event stamped `1`; the owner backs the home up
+   (no interval yet, epoch 1).
+2. The home is restored from that backup: epoch 2, identity `T.2`.
+3. A purge records interval 1 over `[2, 2]`; a delivery applies it, and the
+   computer's mark is 1 under `T.2`.
+4. The home is restored from the same backup again: epoch 2, identity `T.2`
+   again, and its next interval id is 1 again.
+5. A purge records a new interval 1, over `[1, 1]`.
+6. The computer's sitting (mark 1 under `T.2`, the event stamped `1`)
+   arrives: the mark counts, nothing above it reaches the sitting, and the
+   note is written: the purged window gained a note.
+
+In the code the computer is still linked after the second restore: its link
+refuses only an epoch below the one it saw, and this one is equal. A delivery
+would have applied the new interval's fence (the home's delivered mark comes
+from the backup), so the note needs the sitting to reach the home first: a
+computer that was away during the purge sends its held sitting at once when
+it is back, while the home's delivery waits for its scheduler's tick.
+Restoring the same backup twice, or a backup whose epoch plus one is an
+epoch the home already had under the same token, is enough. A fix makes the
+identity new at every restore, for example a new token written at
+`Archive.install/5`; check `20` then holds.
+
 ## Seen while reading, not modelled
 
 - **A delivery to a machine with no store answered a mark it did not
@@ -274,3 +363,34 @@ against the commit:
   are left out, for the reason under Out of scope.
 - Checks: every verdict as the commit left it; `14` holds and `15` needs
   `HereAppliesPending`.
+
+## Re-read for the review's fixes (c6fe1c48, 2026-11-11)
+
+`c6fe1c48` staled the `sittings.ex`, `submission.ex`,
+`computer_history_sql.ex`, `spool.ex`, `delivery.ex`, `machine_service.ex`
+and `purge.ex` pins:
+- **The home store's identity.** Interval ids are not the same for ever: a
+  restore, a rebuilt server or another home starts them again, which the
+  model had left out. It is modelled now (`TakeBackup`, `Restore`, `ident`,
+  `bk`, `MarkTiedToHome`, checks 16 to 20, HS-3 above), since a check can
+  show the defect the fix closes, and one it leaves: a restore's identity
+  is the backup's token and its epoch plus one, so two restores from one
+  backup share it (HS-4, open). Every read of the mark (`Spool.link/1`) answers
+  its store too, so the sitting's mark and store are one read; the home reads
+  its identity once per sitting, before its three Repo calls, so a restore
+  cannot fall between them (the engine restarts).
+- **`expired`.** The home refuses a sitting older than the retention window
+  before any other check (`Submission.fresh/2`), and the machine moves past
+  it; each cycle first sweeps its expired raw events (`Retention.sweep/3`).
+  Both only write less, and the 48 hours are far beyond the model's time.
+- **`apply_intervals/4`, `apply_at/4`, `set_home_mark/3`** take the store;
+  `forget_home/1` (a join or a leave) sets the mark to 0 under no store,
+  which counts as any 0 does. `history.apply` names the store and is refused
+  without one.
+- **A store that does not open** answers every call `store_unavailable`; no
+  step here runs then.
+- **The pins** now name `Submission`'s `checked`, `identity` and `mark`, and
+  `ComputerHistory.home_identity/1` with its `epoch/1`, which the identity's
+  steps encode.
+
+Every earlier check keeps its verdict and its state count.

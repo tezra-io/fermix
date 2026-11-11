@@ -74,7 +74,7 @@ Models one move of M75 §7.2 (B5). Three parts take part:
   untouched (`fenced_offer/2`, `later?/2`, `candidate.ex:508-520`).
   `move_offer` carries the attempt (`send_snapshot/4`, `move_worker.ex:457`),
   which only grows across restarts. Move ids are ordered by when the move
-  started (`move_id/1`, `move.ex:532-541`); with one move id, the fence
+  started (`move_id/1`, `move.ex:550-559`); with one move id, the fence
   orders by attempt.
 - `ReadyAfterStaged`: `move_ready` goes out only after `staged` is written.
   `restored/2` records `staged`, then tells the responder
@@ -408,3 +408,12 @@ and `activation.ex` pins:
 No modelled step changed. The comments' line numbers into these three
 files point at the committed code; those into `candidate.ex` had drifted
 before this change too.
+
+## Re-read for the review's fixes (M97, 2026-11-11)
+
+Re-read against c6fe1c48, which staled the `move.ex` pin: `write_request/3`
+records the request's `keep_offers` in the phase too, so they outlast the
+request an undo removes, and Try again reads them (`Move.undone_keep/1`,
+not pinned). One more field in the same write of `phase.json`, which no rule
+reads; no modelled step changed. The comments' line numbers into `move.ex`
+point at the committed code.

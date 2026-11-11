@@ -75,7 +75,16 @@ Not modelled, each covered elsewhere:
   for a slot or its upload is one step here (`Queue`, the second branch of
   `Open`), and starts later (`StartQueued`);
 - a capability's own refusals and failures: its switch, its origin rules,
-  the sandbox. Each is an answer like any other (`invoke_test.exs`);
+  the sandbox. Each is an answer like any other (`invoke_test.exs`). Its own
+  rules (`admit/3`, which may read the owner's folders) run first in the
+  run's process, after the `started` record, so a refusal there is a run
+  that answers without acting;
+- a request its capability says is no thing done here
+  (`Capability.recorded?/3`, read once as it arrives: the screen hold's
+  `keep`, which the server renews every 30 s while its session exists). It
+  gets no journal record, started or finished, by design, so it is outside
+  `ActedIsJournaled` and `NoRecordIsFinal`; it is a read, so one whose
+  answer is lost is asked again, which renews the hold once more;
 - the computer's own deadline timer, which ends a run `timed_out` as a
   cancel ends it `cancelled`, and the running slot a long-lived request (a
   deadline of 0: `screen.watch`, `imessage.watch`) holds for as long as it
@@ -222,11 +231,15 @@ everything the environment can do) holds five rules:
   (`asked before sent`) of the first pin; it is unreachable now.
 
 `06_every_call_ends` (an effect and a read asked at once, one drop, a
-computer that may stop and answers that may expire) holds `EveryCallEnds`:
-every call ends, in the closed set. Fairness is only on what the server
-drives: making a call, taking an answer that reached it, and its deadline.
-It needs `ServerDeadline` (check 07): a computer that never answers, or a
-session that never comes back, leaves the caller waiting.
+computer that may stop) and `24_every_call_ends_answers_expire` (the same
+with answers that may expire, the computer never stopping) hold
+`EveryCallEnds`: every call ends, in the closed set. Fairness is only on what
+the server drives: making a call, taking an answer that reached it, and its
+deadline. Each needs `ServerDeadline` (checks 07 and 25): a computer that
+never answers, or a session that never comes back, leaves the caller
+waiting. The two were one check until the restart notice: with both a stop
+and expiry it holds (run by hand, 1,418,113 states), but takes about two
+minutes, past the runner's bound.
 
 Witnesses: a call whose session dropped while it waited is answered in
 full once the session is back (08); an effect happens, the computer stops
@@ -247,9 +260,11 @@ request that waited when Admission restarted is answered `refused`
 is told of the restart, hears there is no record and is asked again under a
 new id (23).
 
-Finding INVOKE-2 (check 19, 4 states, below) is the proposed rule
-`WatchNeverUnheard`, with a watch, a session that may drop once and a
-computer that may stop.
+`22_watch_heard_after_restart` (a watch, a session that may drop once and a
+computer that may stop) holds the rule `WatchNeverUnheard`, the moduledoc's
+claim that a restart on the computer while the session stays up leaves no
+caller waiting, a long-lived one included. It needs `RestartTold` (check 19,
+4 states, INVOKE-2 below, fixed).
 
 ## Pinned (M97, 2026-11-10)
 
@@ -506,6 +521,57 @@ Read against `18710c89`, which staled the `invoke.ex`, `admission.ex` and
 Every `admission.ex`, `invoke.ex` and `held_turn.ex` line the `.tla` cites
 was walked against the commit and moved to it.
 
+## Re-read (M97, `c6fe1c48`: the review's fixes, 2026-11-11)
+
+Read against `c6fe1c48`, which committed the fix of INVOKE-2 and the
+spec's change for it, and staled the `invocation.ex`, `invoke.ex`,
+`admission.ex`, `invoke_family.ex`, `lanes.ex` and `capabilities/browser.ex`
+pins. Each change, and what it does to the model:
+- **The restart notice** (`RestartTold`, INVOKE-2 fixed): once Admission
+  stands again it answers what waited, then sends `invoke_restarted` from a
+  task of its own (`tell_started/1`), on the interactive lane (`lanes.ex`)
+  and only to a server whose `hello_ack` takes the invocation's events. The
+  server's family reconciles as at a new session (`InvokeFamily`
+  `handle_event "invoke_restarted"` → `reconcile/1` → `Calls.reconnected/2`),
+  so each caller still waiting asks after its own request, after the request
+  itself. `Stop` folds the notice in where the session is up; where it is
+  not, the notice is not sent and the next session tells the callers
+  (`Reconnect`). The builder's model matches the code; check 22 holds,
+  19 needs `RestartTold` (4 states), witness 20 is the lost watch without
+  the notice and 23 (8 states) the watch told, answered no record and asked
+  again under a new id.
+- **A stop runs beside Admission**: `stop_running/3` hands the run to a
+  task of its own (`stop_task/2`, `stop_run/4`: the capability's
+  `cancel/2`, then `terminate_child`), keeps it in `stopping`, its slot held,
+  and answers it once that task ended (`run_stopped/2`); a cancel or a
+  status ask for it meanwhile waits for that answer. `Cancel` and
+  `HearSwitch` still end a run and answer it in one step: the run may act
+  until it is ended, which is an `Act` before that step, and nothing is
+  answered before it ended, so every rule reads the same. `stop_all/2` is
+  gone; the master switch off ends what runs as `stopped/1`.
+- **A capability's own rules** (`admit/3`) run in the run's process, first,
+  after the `started` record, no longer in Admission: a refusal there is a
+  run that answers without acting, and a folder that hangs holds that run
+  alone. Not modelled, as before.
+- **A request that is no thing done here** (`Capability.recorded?/3`, the
+  screen hold's `keep`, renewed every 30 s) gets no journal record; Not
+  modelled, above.
+- **`invocation.ex`**: an effect whose part (its file) is lost keeps its
+  outcome, marked `part_lost`; parts are not modelled. Its lines moved.
+- **`invoke_family.ex`**: `init/1` keeps the session's standing, and a
+  computer past the version window is refused the home's services; neither
+  is a step here.
+- **`capabilities/browser.ex#run`**: the turn comes from the context, and a
+  file the browser made is kept on the computer for a day; the held turn
+  is called as before.
+- **Check 06 split.** With the notice, 06's state space grew from 550,141
+  to 1,418,113 and passed the runner's two-minute bound under load. It now
+  runs without answer expiry (06 and its `needs` 07) and with expiry but no
+  stop (24 and 25); the combined scene holds when run by hand.
+
+Every `admission.ex`, `invoke.ex`, `invocation.ex` and `invoke_family.ex`
+line the `.tla` cites was moved to the commit.
+
 ## Findings
 
 ### INVOKE-2: a long-lived request a restart on the computer loses is answered by nothing while the session stays up
@@ -514,8 +580,7 @@ was walked against the commit and moved to it.
   keeps one `imessage.watch` waiting there at all times and re-arms it after
   every batch, and a lost one stops the Mac's messages reaching the server
   until the session drops or the engine restarts.
-- **Status:** fixed in the M97 fix pass (uncommitted at this writing; re-pin
-  with its commit). Found in the re-read of `18710c89`. Admission tells the
+- **Status:** fixed in `c6fe1c48`. Found in the re-read of `18710c89`. Admission tells the
   server each time it stands again (`invoke_restarted`, `tell_started/1`,
   under `caps.computer.invoke`), and the server's `InvokeFamily` tells
   `Calls` as at a new session (`Calls.reconnected/2`), so every caller still
@@ -526,7 +591,8 @@ was walked against the commit and moved to it.
   (`WatchNeverUnheard`) holds with it, check 19 is its mechanism check (the
   counterexample below, with `RestartTold = FALSE`), witness 20 is the lost
   watch without it, and witness 23 the watch asked again with it.
-- **Check:** 19 (4 states) breaks the proposed rule `WatchNeverUnheard`,
+- **Check:** 19 (4 states, now the `needs RestartTold` check of 22) broke
+  the rule `WatchNeverUnheard`, then proposed,
   the moduledoc's claim (`admission.ex` moduledoc: "a restart of this
   process while the session stays up leaves no caller waiting, a long-lived
   one ... included, whether it ran or waited"); witness 20 (5 states)

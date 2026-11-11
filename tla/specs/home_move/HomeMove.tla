@@ -71,7 +71,7 @@
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/home/candidate.ex @ d88807a674be
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/home/move_responder.ex @ e8b3fa2f99b9
 \* SOURCE: apps/fermix_core/lib/fermix_core/home/candidate/activation.ex @ 5a71862e2f64
-\* SOURCE: apps/fermix_core/lib/fermix_core/home/move.ex#start,move_id,write_request,put_phase,pending?,not_pending,max_attempts,@max_attempts,@pending,@running,@phases,finish_at_boot,finish_due,ending,finish,view,remember_unrecorded_ending,boot_ending,@boot_key @ 757a2a32638e
+\* SOURCE: apps/fermix_core/lib/fermix_core/home/move.ex#start,move_id,write_request,put_phase,pending?,not_pending,max_attempts,@max_attempts,@pending,@running,@phases,finish_at_boot,finish_due,ending,finish,view,remember_unrecorded_ending,boot_ending,@boot_key @ edf6fd077214
 \* SOURCE: apps/fermix_core/lib/fermix_core/home/role.ex#resolve,primary,configured_role @ 6b56d83c809d
 \* SOURCE: apps/fermix_core/lib/fermix_core/home/moved.ex#write,exclusive_write,read @ f1fa82381547
 \* SOURCE: apps/fermix_core/lib/fermix_core/home/candidate.ex#put_state,write_private @ 622ba87194f2
@@ -117,7 +117,7 @@ CONSTANTS
                              \* candidate.ex:508-520). move_offer carries the attempt
                              \* (send_snapshot/4, move_worker.ex:457), which only grows
                              \* across restarts; move ids are ordered by when the move
-                             \* started (move_id/1, move.ex:532-541)
+                             \* started (move_id/1, move.ex:550-559)
     ReadyAfterStaged,        \* move_ready goes out only once staged is written: restored/2
                              \* records staged, then tells the responder
                              \* (candidate.ex:618-625), which answers move_ready only then
@@ -243,7 +243,7 @@ OldRequest ==
 \* The source boots from its files r, m, p (its service manager, after
 \* the deliberate self-restart, Lifecycle.restart_self/0, or a crash). DeviceSupervisor.dial_children/1 starts the
 \* worker only on a device boot while a move is pending (device_supervisor.ex:96-112,
-\* Move.pending?/1, move.ex:340-345). Its rails end with it: an owner that exits
+\* Move.pending?/1, move.ex:358-363). Its rails end with it: an owner that exits
 \* takes its session down (rail.ex moduledoc). A request already sent may still
 \* arrive; an answer reaches no one.
 SourceBoots(r, m, p) ==
@@ -329,7 +329,7 @@ Goto(w) ==
 \* (Snapshot.Recovery.verify_or_set/2: a config.toml key no rule reads, and a
 \* refusal writes nothing here), then Move.start/5, given that key,
 \* writes request.json, phase "requested", then role = "device", the last
-\* write (write_request/3, move.ex:587-614: a failure part-way removes .move/,
+\* write (write_request/3, move.ex:605-632: a failure part-way removes .move/,
 \* so a part-way start leaves the primary as it was), and the handler removes
 \* the record of a move back that ended here (device/return.json, a file no
 \* rule reads) and restarts through Lifecycle.restart_self/0. The boot is a device with a move pending,

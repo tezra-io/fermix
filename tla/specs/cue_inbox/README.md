@@ -608,3 +608,11 @@ crash of it restarts the cue tree, which the model takes as
 `FiltersRestart`, and `Jobs.Scheduler`, before it, is untouched. It reads and
 writes no delivery, watcher, run or proposal row. Nothing the spec models
 changed; it cites no `application.ex` line the change moved.
+
+## Re-read for the review's fixes (2026-11-11)
+
+`c6fe1c48` staled the `application.ex` pin with two comments inside
+`supervision_children`: the computers' record is rebuilt by asking each open
+session again, and the computer-history store failing to open never stops
+the tree. No child moved, so nothing the spec models changed, and it cites
+no `application.ex` line the change moved.

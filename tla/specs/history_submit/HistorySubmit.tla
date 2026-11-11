@@ -53,12 +53,14 @@
 (*    set_home_mark/3 raises it under the same identity and replaces mark  *)
 (*    and identity together under another; history.apply and every answer  *)
 (*    to a sitting carry the identity, and a sitting's mark counts only    *)
-(*    when its identity is the home's, else the home reads it as 0. The    *)
-(*    model has one home store, whose identity never changes, so its mark  *)
-(*    behaves as modelled; a restore, a server rebuilt from nothing and    *)
-(*    another home (ids that start again) are left out, covered by ExUnit  *)
-(*    (home_identity_test.exs), as is Spool.forget_home/1 at a join or a   *)
-(*    leave.                                                               *)
+(*    when its identity is the home's, else the home reads it as 0         *)
+(*    (MarkTiedToHome). A restore from a backup, a store whose ids start   *)
+(*    again from the backup's, is TakeBackup and Restore (HomeCanRestore,  *)
+(*    checks 16 to 20); a server rebuilt from nothing and another home are *)
+(*    the same with a token never seen. Two restores from one backup share *)
+(*    an identity (HS-4, open). Spool.forget_home/1 at a join or a leave,  *)
+(*    which sets the mark to 0 under no store, is left out: a mark of 0    *)
+(*    counts the same under any store.                                     *)
 (*                                                                         *)
 (* Left out, each a single call ExUnit covers or a step that only writes  *)
 (* less: the signal gate, the renderer and the summary itself, the pause  *)
@@ -74,13 +76,14 @@
 (* at most the computer's own mark, so a delivery from it sends the same  *)
 (* pending intervals and some it already applied.                         *)
 (***************************************************************************)
-\* SOURCE: apps/fermix_core/lib/fermix_core/computer_history/sittings.ex#run,step,dispatch,send_sitting,sitting,settle,settled @ 29d8a7f0d8ef
-\* SOURCE: apps/fermix_core/lib/fermix_core/computer_history/submission.ex#accept,unnoted,unrefused,refused_by,make,write @ b15e685ca908
-\* SOURCE: apps/fermix_core/lib/fermix_core/memory/repo/computer_history_sql.ex#insert_note,insert_note_in_tx,noted,reaching_intervals,intervals_after,purge_notes,purge_notes_in_tx,scoped_notes,fence_window,fence_window_in_tx,insert_events,insert_unless_purged,stamped_in_purge?,link,set_home_mark @ 6a465364b796
-\* SOURCE: apps/fermix_core/lib/fermix_core/computer_history/spool.ex#link,events_after,fence,apply_intervals,apply_interval,mark_applied,apply_at @ 278f51a2319a
-\* SOURCE: apps/fermix_core/lib/fermix_core/computer_history/delivery.ex @ c951071b0b22
-\* SOURCE: apps/fermix_core/lib/fermix_core/computer_history/machine_service.ex @ 98dc1a74bb86
-\* SOURCE: apps/fermix_core/lib/fermix_core/computer_history/purge.ex#purge,apply_here @ c6c55d547d1e
+\* SOURCE: apps/fermix_core/lib/fermix_core/computer_history/sittings.ex#run,step,dispatch,send_sitting,sitting,settle,settled @ 6b43d6f6534b
+\* SOURCE: apps/fermix_core/lib/fermix_core/computer_history/submission.ex#accept,checked,identity,mark,unnoted,unrefused,refused_by,make,write @ f16b3d5013b6
+\* SOURCE: apps/fermix_core/lib/fermix_core/computer_history.ex#home_identity,epoch @ d8514f24c0d5
+\* SOURCE: apps/fermix_core/lib/fermix_core/memory/repo/computer_history_sql.ex#insert_note,insert_note_in_tx,noted,reaching_intervals,intervals_after,purge_notes,purge_notes_in_tx,scoped_notes,fence_window,fence_window_in_tx,insert_events,insert_unless_purged,stamped_in_purge?,link,set_home_mark @ b24f49d2e1e9
+\* SOURCE: apps/fermix_core/lib/fermix_core/computer_history/spool.ex#link,events_after,fence,apply_intervals,apply_interval,mark_applied,apply_at @ ec5d295f5f69
+\* SOURCE: apps/fermix_core/lib/fermix_core/computer_history/delivery.ex @ 605d0be092c9
+\* SOURCE: apps/fermix_core/lib/fermix_core/computer_history/machine_service.ex @ d4f4245b1320
+\* SOURCE: apps/fermix_core/lib/fermix_core/computer_history/purge.ex#purge,apply_here @ f5b3d0524839
 \* SOURCE: apps/fermix_core/lib/fermix_core/computer_history/controller.ex#home_uplink @ 8176fcfadb34
 \* SOURCE: apps/fermix_core/lib/fermix_core/computer_history/summarizer/scheduler.ex#maybe_roll_up,apply_here @ f144c2cf4979
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/gateway/commands/history.ex#pause_everywhere,apply_here,run_purge @ 085fc4f0e215
@@ -94,10 +97,13 @@ CONSTANTS
     Stamps,             \* the times an event can be stamped at
     MaxPurges,          \* purges from chat in one behaviour
     MaxAway,            \* times a computer goes away in one behaviour
+    MaxRestores,        \* times the home's store starts its ids again in one behaviour
     \* Environment switches
     OwnerCanPurge,      \* the owner purges from chat
     ScopedPurges,       \* a purge may name one computer, not only every one
     ComputersGoAway,    \* a computer's link drops (asleep, offline)
+    HomeCanRestore,     \* the home's store is restored from a backup (or rebuilt, or the
+                        \* machines join another home): its interval ids start again
     \* Mechanism switches (TRUE is the real code)
     WriteRechecks,      \* insert_note checks the intervals in its transaction (computer_history_sql.ex insert_note_in_tx)
     ComputerFences,     \* an applied interval refuses an event recorded inside it later (insert_unless_purged)
@@ -106,7 +112,9 @@ CONSTANTS
     MarkSkipsApplied,   \* the sitting carries the mark, so an interval it applied is not asked again (reaching_intervals after_id)
     RefusalNamesAllPending, \* a refusal names every interval above the sitting's mark, not only those reaching it (submission.ex refused_by)
     MarkAfterFences,    \* apply_intervals fences every interval first and writes the mark last (spool.ex mark_applied)
-    HereAppliesPending  \* the home's own machine applies every interval of its own above its mark (delivery.ex apply_here)
+    HereAppliesPending, \* the home's own machine applies every interval of its own above its mark (delivery.ex apply_here)
+    MarkTiedToHome      \* a mark is kept with the identity of the home store it counts, and counts only
+                        \* under it (submission.ex mark/2, delivery.ex mark/2, set_home_mark/3)
 
 VARIABLES
     recorded,   \* computer -> stamps it has recorded (each once)
@@ -124,10 +132,16 @@ VARIABLES
     notes,      \* the home's notes: [c, stamps]
     purges,     \* the home's purge intervals: [id, from, to, scope]
     hereApply,  \* without HereAppliesPending: purges whose own command has not yet applied them here
-    nextId
+    nextId,
+    ident,      \* the home stores' identities (ComputerHistory.home_identity/1), 1 the first:
+                \* home, the home's now; mark, the one each computer's mark counts
+                \* (computer_history_link.home); sit, the one its sitting in flight names;
+                \* ans, the one its answer names; dlv, the one the apply under way names
+    bk          \* the owner's backup of the home (Home.Archive): taken, and the intervals,
+                \* next id and epoch it holds; restores, how often a home was restored from it
 
 vars == <<recorded, raw, sent, fence, mark, applying, connected, away, stage, fmark, fstamps,
-          answer, notes, purges, hereApply, nextId>>
+          answer, notes, purges, hereApply, nextId, ident, bk>>
 
 \* Every purge window over the stamps, as <<from, to>>.
 Windows == {w \in Stamps \X Stamps : w[1] <= w[2]}
@@ -148,9 +162,18 @@ Reaches(p, S) == S /= {} /\ p.from <= Max(S) /\ p.to >= Min(S)
 Refusing(c, m, S) == {p \in purges : p.id > m /\ Covers(p, c) /\ Reaches(p, S)}
 Above(c, m) == {p \in purges : p.id > m /\ Covers(p, c)}
 Named(c, m, S) == IF RefusalNamesAllPending THEN Above(c, m) ELSE Refusing(c, m, S)
-Pending(c) == {p \in purges : p.id > mark[c] /\ Covers(p, c)}
+\* A mark counts only under the home store it names (submission.ex mark/2,
+\* delivery.ex mark/2); without MarkTiedToHome, the code before c6fe1c48,
+\* every mark counts.
+Eff(m, h) == IF MarkTiedToHome /\ h # ident.home THEN 0 ELSE m
+MarkNow(c) == Eff(mark[c], ident.mark[c])
+SitMark(c) == Eff(fmark[c], ident.sit[c])
+Pending(c) == {p \in purges : p.id > MarkNow(c) /\ Covers(p, c)}
 MaxId(R) == Max({p.id : p \in R})
 Raised(c, R) == IF MaxId(R) > mark[c] THEN MaxId(R) ELSE mark[c]
+\* set_home_mark/3 for R applied under store h: raised under the same store,
+\* replaced under another (without MarkTiedToHome, always raised).
+SetMark(c, h, R) == IF MarkTiedToHome /\ ident.mark[c] # h THEN MaxId(R) ELSE Raised(c, R)
 \* fence_window/4 for each interval of R: the raw events inside go.
 Without(c, R) == {t \in raw[c] : ~\E p \in R : Inside(p, t)}
 
@@ -177,6 +200,11 @@ TypeOK ==
     /\ purges \subseteq Interval
     /\ hereApply \subseteq Interval
     /\ nextId \in 1..(MaxPurges + 1)
+    /\ bk \in [taken : BOOLEAN, purges : SUBSET Interval, next : 1..(MaxPurges + 1),
+               epoch : 1..(MaxRestores + 1), restores : 0..MaxRestores]
+    /\ ident \in [home : 1..(MaxRestores + 1), mark : [Computers -> 1..(MaxRestores + 1)],
+                  sit : [Computers -> 1..(MaxRestores + 1)], ans : [Computers -> 1..(MaxRestores + 1)],
+                  dlv : [Computers -> 1..(MaxRestores + 1)]]
 
 Init ==
     /\ recorded = [c \in Computers |-> {}]
@@ -195,6 +223,11 @@ Init ==
     /\ purges = {}
     /\ hereApply = {}
     /\ nextId = 1
+    \* A machine that applied nothing names no store (0 in the code, home NULL);
+    \* its mark 0 counts the same under any, so it starts named for the first.
+    /\ bk = [taken |-> FALSE, purges |-> {}, next |-> 1, epoch |-> 1, restores |-> 0]
+    /\ ident = [home |-> 1, mark |-> [c \in Computers |-> 1], sit |-> [c \in Computers |-> 1],
+               ans |-> [c \in Computers |-> 1], dlv |-> [c \in Computers |-> 1]]
 
 -----------------------------------------------------------------------------
 (* THE COMPUTER *)
@@ -208,7 +241,7 @@ Record(c, t) ==
     /\ raw' = [raw EXCEPT ![c] =
                  IF ComputerFences /\ \E p \in fence[c] : Inside(p, t) THEN @ ELSE @ \cup {t}]
     /\ UNCHANGED <<sent, fence, mark, applying, connected, away, stage, fmark, fstamps, answer,
-                   notes, purges, hereApply, nextId>>
+                   notes, purges, hereApply, nextId, ident, bk>>
 
 TheMark(c) == IF MarkSkipsApplied THEN mark[c] ELSE 0
 Unsent(c) == raw[c] \ sent[c]
@@ -220,27 +253,31 @@ ReadFirst(c) ==
     /\ Unsent(c) /= {}
     /\ stage' = [stage EXCEPT ![c] = "half"]
     /\ IF MarkBeforeEvents
-          THEN fmark' = [fmark EXCEPT ![c] = TheMark(c)] /\ UNCHANGED fstamps
-          ELSE fstamps' = [fstamps EXCEPT ![c] = Unsent(c)] /\ UNCHANGED fmark
+          THEN /\ fmark' = [fmark EXCEPT ![c] = TheMark(c)]
+               /\ ident' = [ident EXCEPT !.sit[c] = ident.mark[c]]
+               /\ UNCHANGED fstamps
+          ELSE fstamps' = [fstamps EXCEPT ![c] = Unsent(c)] /\ UNCHANGED <<fmark, ident>>
     /\ UNCHANGED <<recorded, raw, sent, fence, mark, applying, connected, away, answer, notes,
-                   purges, hereApply, nextId>>
+                   purges, hereApply, nextId, bk>>
 
 ReadSecond(c) ==
     /\ stage[c] = "half"
     /\ IF MarkBeforeEvents
           THEN /\ fstamps' = [fstamps EXCEPT ![c] = Unsent(c)]
                /\ stage' = [stage EXCEPT ![c] = IF Unsent(c) = {} THEN "none" ELSE "out"]
-               /\ UNCHANGED fmark
+               /\ UNCHANGED <<fmark, ident>>
           ELSE /\ fmark' = [fmark EXCEPT ![c] = TheMark(c)]
+               /\ ident' = [ident EXCEPT !.sit[c] = ident.mark[c]]
                /\ stage' = [stage EXCEPT ![c] = "out"]
                /\ UNCHANGED fstamps
     /\ UNCHANGED <<recorded, raw, sent, fence, mark, applying, connected, away, answer, notes,
-                   purges, hereApply, nextId>>
+                   purges, hereApply, nextId, bk>>
 
 \* The answer reaches the computer (HistoryUplink.submit -> Sittings.settle):
 \* summarized moves the cursor past the sitting; a refusal's intervals are
-\* applied (Spool.apply_intervals/3), the ones it already applied again, and
-\* the sitting is formed again. Its fences and its mark are separate calls of
+\* applied (Spool.apply_intervals/4) under the home store the answer names
+\* (SetMark), the ones it already applied again, and the sitting is formed
+\* again. Its fences and its mark are separate calls of
 \* the cycle's own process, folded here: the reads that could fall between
 \* them are this same cycle's, and a Record between them meets the fence
 \* already written.
@@ -249,14 +286,15 @@ Settle(c) ==
     /\ connected[c]
     /\ IF answer[c] = {}
           THEN /\ sent' = [sent EXCEPT ![c] = @ \cup fstamps[c]]
-               /\ UNCHANGED <<raw, fence, mark>>
+               /\ UNCHANGED <<raw, fence, mark, ident>>
           ELSE /\ raw' = [raw EXCEPT ![c] = Without(c, answer[c])]
                /\ fence' = [fence EXCEPT ![c] = @ \cup answer[c]]
-               /\ mark' = [mark EXCEPT ![c] = Raised(c, answer[c])]
+               /\ mark' = [mark EXCEPT ![c] = SetMark(c, ident.ans[c], answer[c])]
+               /\ ident' = [ident EXCEPT !.mark[c] = ident.ans[c]]
                /\ UNCHANGED sent
     /\ stage' = [stage EXCEPT ![c] = "none"]
     /\ UNCHANGED <<recorded, applying, connected, away, fmark, fstamps, answer, notes, purges,
-                   hereApply, nextId>>
+                   hereApply, nextId, bk>>
 
 \* No answer: the request or its answer was lost with the link. The sitting is
 \* held and formed again later (`{:held, "unanswered"}`).
@@ -265,7 +303,7 @@ Lose(c) ==
     /\ ~connected[c]
     /\ stage' = [stage EXCEPT ![c] = "none"]
     /\ UNCHANGED <<recorded, raw, sent, fence, mark, applying, connected, away, fmark, fstamps,
-                   answer, notes, purges, hereApply, nextId>>
+                   answer, notes, purges, hereApply, nextId, ident, bk>>
 
 \* The home's own machine never goes away from its home.
 GoAway(c) ==
@@ -276,13 +314,13 @@ GoAway(c) ==
     /\ connected' = [connected EXCEPT ![c] = FALSE]
     /\ away' = away + 1
     /\ UNCHANGED <<recorded, raw, sent, fence, mark, applying, stage, fmark, fstamps, answer,
-                   notes, purges, hereApply, nextId>>
+                   notes, purges, hereApply, nextId, ident, bk>>
 
 Return(c) ==
     /\ ~connected[c]
     /\ connected' = [connected EXCEPT ![c] = TRUE]
     /\ UNCHANGED <<recorded, raw, sent, fence, mark, applying, away, stage, fmark, fstamps,
-                   answer, notes, purges, hereApply, nextId>>
+                   answer, notes, purges, hereApply, nextId, ident, bk>>
 
 -----------------------------------------------------------------------------
 (* THE HOME *)
@@ -292,40 +330,47 @@ Return(c) ==
 \* (unrefused/3), naming what refused_by/4 reads, otherwise summarized next.
 \* Three Repo calls folded into one step: a purge between them only adds an
 \* interval to what the refusal names, which is still every one above the
-\* mark, oldest first.
+\* mark, oldest first. Before them, accept/3 reads the home store's identity
+\* (identity/1) and puts the sitting's mark in its place: kept when the
+\* sitting names this store, 0 otherwise (mark/2, SitMark); the answer names
+\* the store (ans).
 Arrive(c) ==
     /\ stage[c] = "out"
     /\ connected[c]
     /\ LET noted == [c |-> c, stamps |-> fstamps[c]] \in notes
-           refusing == Refusing(c, fmark[c], fstamps[c])
+           refusing == Refusing(c, SitMark(c), fstamps[c])
        IN \/ /\ noted
              /\ answer' = [answer EXCEPT ![c] = {}]
              /\ stage' = [stage EXCEPT ![c] = "answered"]
+             /\ UNCHANGED ident
           \/ /\ ~noted
              /\ refusing /= {}
-             /\ answer' = [answer EXCEPT ![c] = Named(c, fmark[c], fstamps[c])]
+             /\ answer' = [answer EXCEPT ![c] = Named(c, SitMark(c), fstamps[c])]
+             /\ ident' = [ident EXCEPT !.ans[c] = ident.home]
              /\ stage' = [stage EXCEPT ![c] = "answered"]
           \/ /\ ~noted
              /\ refusing = {}
              /\ stage' = [stage EXCEPT ![c] = "summarizing"]
-             /\ UNCHANGED answer
+             /\ UNCHANGED <<answer, ident>>
     /\ UNCHANGED <<recorded, raw, sent, fence, mark, applying, connected, away, fmark, fstamps,
-                   notes, purges, hereApply, nextId>>
+                   notes, purges, hereApply, nextId, bk>>
 
 \* The summary is made (a provider call), then insert_note/6 writes it in one
 \* transaction that checks the intervals again (WriteRechecks). A refused
 \* write's answer names what refused_by/4 reads after it, folded in as above.
 Write(c) ==
     /\ stage[c] = "summarizing"
-    /\ LET refusing == Refusing(c, fmark[c], fstamps[c])
+    /\ LET refusing == Refusing(c, SitMark(c), fstamps[c])
        IN IF WriteRechecks /\ refusing /= {}
-             THEN /\ answer' = [answer EXCEPT ![c] = Named(c, fmark[c], fstamps[c])]
+             THEN /\ answer' = [answer EXCEPT ![c] = Named(c, SitMark(c), fstamps[c])]
+                  /\ ident' = [ident EXCEPT !.ans[c] = ident.home]
                   /\ UNCHANGED notes
              ELSE /\ notes' = notes \cup {[c |-> c, stamps |-> fstamps[c]]}
                   /\ answer' = [answer EXCEPT ![c] = {}]
+                  /\ UNCHANGED ident
     /\ stage' = [stage EXCEPT ![c] = "answered"]
     /\ UNCHANGED <<recorded, raw, sent, fence, mark, applying, connected, away, fmark, fstamps,
-                   purges, hereApply, nextId>>
+                   purges, hereApply, nextId, bk>>
 
 \* /history purge from chat (Purge.purge/2 -> purge_notes/5): one transaction.
 \* When it covers the home's own machine, the same command then applies what
@@ -343,7 +388,7 @@ Purge(w, scope) ==
                              THEN hereApply \cup {p} ELSE hereApply
     /\ nextId' = nextId + 1
     /\ UNCHANGED <<recorded, raw, sent, fence, mark, applying, connected, away, stage, fmark,
-                   fstamps, answer>>
+                   fstamps, answer, ident, bk>>
 
 \* The first half of applying R on the home's own machine, as DeliverFirst
 \* does on a computer: the fences (or, with MarkAfterFences off, the mark), the
@@ -353,16 +398,20 @@ ApplyHereOf(R) ==
     /\ IF MarkAfterFences
           THEN /\ raw' = [raw EXCEPT ![HomeMachine] = Without(HomeMachine, R)]
                /\ fence' = [fence EXCEPT ![HomeMachine] = @ \cup R]
+               /\ ident' = [ident EXCEPT !.dlv[HomeMachine] = ident.home]
                /\ UNCHANGED mark
-          ELSE /\ mark' = [mark EXCEPT ![HomeMachine] = Raised(HomeMachine, R)]
+          ELSE /\ mark' = [mark EXCEPT ![HomeMachine] = SetMark(HomeMachine, ident.home, R)]
+               /\ ident' = [ident EXCEPT !.dlv[HomeMachine] = ident.home,
+                                          !.mark[HomeMachine] = ident.home]
                /\ UNCHANGED <<raw, fence>>
 
 \* The home's own machine applies what it owes (Delivery.apply_here/1): run by
 \* each purge command (Purge.purge/2) and pause command (History.apply_here/2)
 \* once the home recorded its interval, and by the home scheduler's tick
 \* (Scheduler.apply_here/1), which is how one whose apply failed is applied.
-\* It reads the mark (Spool.link/1), then every interval of this machine above
-\* it (intervals_after/4), and applies them (Spool.apply_intervals/3): every
+\* It reads the home store's identity and the mark (Spool.link/1, counted as
+\* 0 under another store: mark/2), then every interval of this machine above
+\* it (intervals_after/4), and applies them (Spool.apply_intervals/4): every
 \* fence first, here, and the mark last, in DeliverSecond, which this machine
 \* shares with a computer's delivery. The two reads are folded: the mark only
 \* rises and an interval is read once committed, so a step between them only
@@ -372,7 +421,8 @@ ApplyHereOf(R) ==
 \* here (applying is empty); in the code two may overlap (two commands, or a
 \* command and the tick), which is safe in any order of their calls: each
 \* fences every interval above the mark it read before it raises the mark
-\* to the highest of them, and set_home_mark/2 never lowers it.
+\* to the highest of them, and set_home_mark/3 never lowers it under the
+\* same store.
 \*
 \* Without HereAppliesPending (the code at 826ba83a, HS-2): Purge.fence_here/4
 \* and History.pause_here/3 applied the command's own interval alone, and
@@ -389,15 +439,18 @@ ApplyHere ==
                 /\ hereApply' = hereApply \ {p}
                 /\ ApplyHereOf({p})
     /\ UNCHANGED <<recorded, sent, connected, away, stage, fmark, fstamps, answer, notes, purges,
-                   nextId>>
+                   nextId, bk>>
 
 
 \* Delivery.deliver/1 to a connected computer (never the home's own machine):
-\* MachineService.run/4 -> Spool.apply_at/3 applies every interval it has not,
-\* in a process of its own beside the computer's sending cycle. Its two
-\* halves: every interval's fence_window/4 (raw events inside go, the fence
-\* holds it), and then the mark (set_home_mark/2). With MarkAfterFences off,
-\* the mark comes first.
+\* MachineService.run/4 -> Spool.apply_at/4 applies every interval it has not,
+\* in a process of its own beside the computer's sending cycle; the request
+\* names the home store (dlv). Its two halves: every interval's
+\* fence_window/4 (raw events inside go, the fence holds it), and then the
+\* mark (set_home_mark/3, SetMark). With MarkAfterFences off, the mark comes
+\* first. After a restore the home sends from the delivered mark its backup
+\* held, which may sit above what a computer applied under the restored
+\* store; it then sends fewer than Pending, and the refusal names the rest.
 DeliverFirst(c) ==
     /\ ~IsHere(c)
     /\ connected[c]
@@ -407,23 +460,60 @@ DeliverFirst(c) ==
     /\ IF MarkAfterFences
           THEN /\ raw' = [raw EXCEPT ![c] = Without(c, Pending(c))]
                /\ fence' = [fence EXCEPT ![c] = @ \cup Pending(c)]
+               /\ ident' = [ident EXCEPT !.dlv[c] = ident.home]
                /\ UNCHANGED mark
-          ELSE /\ mark' = [mark EXCEPT ![c] = Raised(c, Pending(c))]
+          ELSE /\ mark' = [mark EXCEPT ![c] = SetMark(c, ident.home, Pending(c))]
+               /\ ident' = [ident EXCEPT !.dlv[c] = ident.home, !.mark[c] = ident.home]
                /\ UNCHANGED <<raw, fence>>
     /\ UNCHANGED <<recorded, sent, connected, away, stage, fmark, fstamps, answer, notes, purges,
-                   hereApply, nextId>>
+                   hereApply, nextId, bk>>
 
 DeliverSecond(c) ==
     /\ applying[c] /= {}
     /\ applying' = [applying EXCEPT ![c] = {}]
     /\ IF MarkAfterFences
-          THEN /\ mark' = [mark EXCEPT ![c] = Raised(c, applying[c])]
+          THEN /\ mark' = [mark EXCEPT ![c] = SetMark(c, ident.dlv[c], applying[c])]
+               /\ ident' = [ident EXCEPT !.mark[c] = ident.dlv[c]]
                /\ UNCHANGED <<raw, fence>>
           ELSE /\ raw' = [raw EXCEPT ![c] = Without(c, applying[c])]
                /\ fence' = [fence EXCEPT ![c] = @ \cup applying[c]]
-               /\ UNCHANGED mark
+               /\ UNCHANGED <<mark, ident>>
     /\ UNCHANGED <<recorded, sent, connected, away, stage, fmark, fstamps, answer, notes, purges,
-                   hereApply, nextId>>
+                   hereApply, nextId, bk>>
+
+\* The owner backs the home up (Home.Archive): its memory.db, with its
+\* intervals and the next id, and the home's epoch then (the manifest's
+\* primary_epoch). Once in a behaviour, at any moment.
+TakeBackup ==
+    /\ HomeCanRestore
+    /\ ~bk.taken
+    /\ bk' = [bk EXCEPT !.taken = TRUE, !.purges = purges, !.next = nextId, !.epoch = ident.home]
+    /\ UNCHANGED <<recorded, raw, sent, fence, mark, applying, connected, away, stage, fmark,
+                   fstamps, answer, notes, purges, hereApply, nextId, ident>>
+
+\* The home is restored from that backup (Archive.install/5): its store starts
+\* its interval ids again from the backup's, and the home's epoch is the
+\* backup's plus one (next_epoch/1), so its identity (home_identity/1: the
+\* store's token, which the backup carries, and that epoch) is the one the
+\* home had the first time it was restored from it. A server rebuilt from
+\* nothing or another home is the same with a token never seen. Its notes
+\* are none of these (fewer notes only answer fewer sittings from a note).
+\* The machines' own stores are not in the backup and keep their marks. The
+\* engine restarts, so no sitting is being summarized then; one on its way,
+\* or an answer or an apply on its way back, goes on and names the store it
+\* was made under.
+Restore ==
+    /\ bk.taken
+    /\ bk.restores < MaxRestores
+    /\ \A c \in Computers : stage[c] /= "summarizing"
+    /\ purges' = bk.purges
+    /\ hereApply' = hereApply \cap bk.purges
+    /\ nextId' = bk.next
+    /\ notes' = {}
+    /\ ident' = [ident EXCEPT !.home = bk.epoch + 1]
+    /\ bk' = [bk EXCEPT !.restores = @ + 1]
+    /\ UNCHANGED <<recorded, raw, sent, fence, mark, applying, connected, away, stage, fmark,
+                   fstamps, answer>>
 
 -----------------------------------------------------------------------------
 
@@ -449,6 +539,7 @@ Next ==
           \/ GoAway(c) \/ Return(c) \/ DeliverFirst(c) \/ DeliverSecond(c)
     \/ \E w \in Windows, s \in Scopes : Purge(w, s)
     \/ ApplyHere
+    \/ TakeBackup \/ Restore
     \/ Terminated
 
 \* Fermix's own steps always happen: a computer's cycle and the home's answer,

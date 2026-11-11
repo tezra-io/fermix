@@ -755,6 +755,14 @@ models changed.
   function below the tree, so every cited `application.ex` line is where it
   was.
 
+## Re-read for the review's fixes (2026-11-11)
+
+`c6fe1c48` staled the `application.ex` pin with two comments inside
+`supervision_children`, one above the computers' record and one above the
+computer-history supervisor. No child moved, so nothing the spec models
+changed; the one cited `application.ex` line after them moved by one
+(`:437`).
+
 ## Plan hypotheses
 
 The plan (`docs/design/TLA_PLUS_MODELS.md` §4.3) listed four expected
