@@ -34,7 +34,11 @@ The modules it describes:
   `record_finished`), the answers held for a status ask (`hold`, `status`),
   the journal's receipt after that (`from_journal`), the master switch off
   (`handle_cast :switches_changed`, `stopped`), and what a restart finds
-  (`init`, `recover`).
+  (`init`, `recover`, `waited_before`, `handle_continue`): what ran, in the
+  journal, and what waited for a slot or its upload, in a table
+  `Desktop.Invoke` owns and hands Admission (`:waiting_table`,
+  `keep_waiting`, `forget_waiting`), so it outlives a restart of Admission
+  but not one of `Desktop.Invoke` itself.
 - `FermixCore.Computers.Journal`: the two records (`append_started`,
   `append_finished`), each synced before the caller goes on (`append`,
   `write_line`), the read a status ask makes (`lookup`, `entries`), and
@@ -73,27 +77,35 @@ Not modelled, each covered elsewhere:
 - a capability's own refusals and failures: its switch, its origin rules,
   the sandbox. Each is an answer like any other (`invoke_test.exs`);
 - the computer's own deadline timer, which ends a run `timed_out` as a
-  cancel ends it `cancelled`, and a long-lived request (a deadline of 0:
-  `screen.watch`, `imessage.watch`), which holds a running slot for as long
-  as it waits (one `imessage.watch` at a time, a newer one ending the
-  older; a `screen.watch` until the seat's hold ends) and is waited on
-  until its caller ends or an answer comes. One whose run a restart of
-  Admission ended is answered by that restart (`Stop`, the journal's
-  receipt), so a watch is asked again at once (`two_engines_invoke_test.exs`);
-  `EveryCallEnds` is about calls with a deadline and does not cover a
-  watch;
+  cancel ends it `cancelled`, and the running slot a long-lived request (a
+  deadline of 0: `screen.watch`, `imessage.watch`) holds for as long as it
+  waits (one `imessage.watch` at a time, a newer one ending the older; a
+  `screen.watch` until the seat's hold ends). The long-lived request itself,
+  waited on until its caller ends or an answer comes, is the scene's
+  `Watches` (a call with no `Deadline`), in checks 19 and 20 only. One whose
+  run a restart of Admission ended is answered by that restart (`Stop`, the
+  journal's receipt), and one that waited for a slot is answered `refused`
+  `unavailable` from the table, so a watch is asked again at once
+  (`two_engines_invoke_test.exs`); `EveryCallEnds` is about calls with a
+  deadline and does not cover a watch (INVOKE-2);
 - a caller that ends before its answer, for which `Calls` sends a cancel
   (`abandoned/2`), after the request the caller itself sent: the cancel the
   deadline sends is the same step (`invocation_test.exs`). `Computers.cancel/2`,
   a cancel sent from `Calls` that could pass its request, is gone: nothing
   called it, and a caller stops what it asked by ending;
-- the browser switch, and `Browser.HeldTurnListener` (the switches' fourth
-  listener), which ends every held turn when the master or the browser
-  switch goes off: a turn that runs no request holds nothing this spec
-  sees, and one at work ends with its run, both ways, since the two are
-  linked: a held turn the listener ends takes its run with it, which
-  Admission then answers `failed` ("It stopped before it finished."),
-  unless it had already ended that run itself on the master switch
+- a capability's own switch (its offer's: the browser's, the screen's, and
+  so on), which Admission hears as it hears the master switch
+  (`handle_cast :switches_changed`): with the master on, it ends that
+  capability's running and waiting work `refused` `off`, the sentence a
+  request of it arriving now gets, and lets every other capability's work
+  go on (`offer_switched_off`); and `Browser.HeldTurnListener` (the
+  switches' fourth listener), which ends every held turn when the master or
+  the browser switch goes off: a turn that runs no request holds nothing
+  this spec sees, and one at work ends with its run, both ways, since the
+  two are linked. A run that ends while its switches no longer let its
+  capability run (the listener can end a browser run before Admission
+  hears) is answered as they say, `refused` `stopped_here` for the master
+  and `refused` `off` for its offer, never `failed` (`crash_outcome`)
   (`held_turn_listener_test.exs`, `two_engines_browser_test.exs`). So does
   the rule that a conversation's next turn ends the turn held before it,
   which is about whose pane task a request runs in, not whether it runs
@@ -156,7 +168,8 @@ The `.tla` header pins these sources:
 |---|---|---|
 | `Held` | scene | (a set of calls) the calls that are the browser's, each run in its server turn's held process; `{}`, every other capability, in every check but 17 and 18 |
 | `SessionCanDrop` | environment | the session ends with words in flight: answers on their way are lost, requests on their way are lost or were already handed to Admission |
-| `ComputerCanStop` | environment | the computer's Admission, or its engine, stops in the middle and starts again |
+| `Watches` | scene | (a set of calls) the long-lived calls, which the server waits on with no deadline; `{}`, a call with a deadline, in every check but 19 and 20 |
+| `ComputerCanStop` | environment | the computer's Admission stops in the middle and starts again, `Desktop.Invoke` keeping its table of what waits, or `Desktop.Invoke` itself or the engine does, the table gone with it (`Stop` chooses) |
 | `AnswersCanExpire` | environment | a held answer leaves memory (10 minutes, or the bounds of what is held) |
 | `OwnerCanSwitchOff` | environment | the master switch goes off at the computer |
 | `HomeCanMoveOn` | environment | the computer learns of a newer copy of its home while this server still asks |
@@ -225,7 +238,15 @@ going off ends a run, and its call hears it was stopped at the computer
 runs, its answer leaves the computer's memory, and the receipt alone tells
 the server it was done (13); a request admitted to wait for a slot or its
 upload is refused off when it would start, the switch having gone off
-before Admission heard (16).
+before Admission heard (16); a watch that waited for a slot is forgotten
+when `Desktop.Invoke` itself restarts, and nothing answers it while the
+session stays up (20, INVOKE-2's second path); a request that waited when
+Admission restarted is answered `refused` `unavailable` from the table
+(21).
+
+Finding INVOKE-2 (check 19, 4 states, below) is the proposed rule
+`WatchNeverUnheard`, with a watch, a session that may drop once and a
+computer that may stop.
 
 ## Pinned (M97, 2026-11-10)
 
@@ -416,7 +437,8 @@ the direction needs no modelling in this spec:
   modelled, as the bound is not), and the lanes, where a history submit
   and its cancel ride the bulk lane (pinned).
 
-Seen while reading, not modelled and not a rule here:
+Seen while reading, not modelled and not a rule here (both resolved in
+18710c89, the re-read below):
 - A held turn that the browser switch alone ends (the master switch on)
   takes its run with it, which Admission answers `failed`, "It stopped
   before it finished. The computer's log says why.", not `refused` `off`:
@@ -430,7 +452,100 @@ Seen while reading, not modelled and not a rule here:
   this process while the session stays up leaves no caller waiting, a
   long-lived one included" holds for one that ran.
 
+## Re-read (M97, `18710c89`: what waited answered at a restart, an offer's switch, 2026-11-11)
+
+Read against `18710c89`, which staled the `invoke.ex`, `admission.ex` and
+`held_turn.ex` pins. Each change, and what it does to the model:
+- `invoke.ex` (whole): `init/1` creates an unnamed ETS table, at most 32
+  rows, and hands it to Admission as `:waiting_table` (`:113-119`). The
+  supervisor process owns it, so a restart of Admission, or of the runs'
+  supervisor, which `:one_for_all` makes the same restart, leaves it in
+  place; a restart of `Desktop.Invoke` itself, after more than three of
+  theirs in five seconds (the default intensity), or of the engine, takes
+  it. The device tree is `:one_for_one`, so that restart leaves the relay
+  and the session up.
+- `admission.ex` (whole), what a restart finds: a request that waits for a
+  slot or its upload has its facts (never its args or bytes) kept in that
+  table from `queue/2` and `upload/2` (`keep_waiting/2`) until its started
+  record is synced (`start/3`) or its answer is recorded and sent
+  (`answer/3`, `forget_waiting/2` last, so a restart between answers it
+  again, never not at all). At start, `waited_before/2` reads the table,
+  lets go of one the journal shows started (`recover/1` closed it), and
+  `handle_continue` answers the rest `refused` `unavailable`, "restarted
+  before it ran", journaled as one refused before it ran, oldest first.
+  **This changes `Stop`**, which now chooses whether the table survived:
+  kept, every request that waited ends answered `refused_unavailable` in
+  full (held and journaled, sent where the session is up); lost, it is
+  `forgotten` (run's new value), as before. Witness 21 reaches the first,
+  witness 20 the second. Every earlier check keeps its verdict and every
+  `needs` counterexample its length; the state counts grow with the choice
+  (01 and 17: 9,653 to 11,197; 06: 332,220 to 550,141, about 37 s).
+- `admission.ex`, an offer's own switch: with the master on, a switch
+  change ends the running and waiting work of each capability whose offer
+  is now off, `refused` `off` (`offer_switched_off/2`), and a run that
+  ends while its switches no longer let it run is answered as they say,
+  `stopped_here` or `off`, never `failed` (`crash_outcome/2`). The model has
+  the master switch only and no run that fails: Not modelled above, where
+  the browser switch bullet now says this. The first bullet of the Seen
+  while reading list above is resolved by it.
+- `held_turn.ex` (whole): at its start a held turn tells the listener its
+  seams name (`Browser.HeldTurnListener`), which watches it to record when
+  the server's turns use this browser, for the computer-history recorder.
+  `handle_call {:run, fun}` (`:156-167`) and `link/1` (`:246`) are as
+  before, so `HeldEndsWithRun` is unchanged.
+- The second bullet of the Seen while reading list above is resolved for a
+  restart of Admission, and stays open for a restart of `Desktop.Invoke`
+  itself; reading the restart again found a second way to it, a request on
+  its way to Admission when it stops: INVOKE-2, below. `Watches`,
+  `WatchNeverUnheard` and checks 19 and 20 model it.
+
+Every `admission.ex`, `invoke.ex` and `held_turn.ex` line the `.tla` cites
+was walked against the commit and moved to it.
+
 ## Findings
+
+### INVOKE-2: a long-lived request a restart on the computer loses is answered by nothing while the session stays up
+- **Severity:** low. Each path needs a crash of Admission, a bug, and the
+  request in a narrow place; but the server's Messages channel on a Mac
+  keeps one `imessage.watch` waiting there at all times and re-arms it after
+  every batch, and a lost one stops the Mac's messages reaching the server
+  until the session drops or the engine restarts.
+- **Status:** open. Found in the re-read of `18710c89`.
+- **Check:** 19 (4 states) breaks the proposed rule `WatchNeverUnheard`,
+  the moduledoc's claim (`admission.ex` moduledoc: "a restart of this
+  process while the session stays up leaves no caller waiting, a long-lived
+  one ... included, whether it ran or waited"); witness 20 (5 states)
+  reaches the second path.
+- **Counterexample (check 19):** the server registers a watch and sends its
+  `invoke_open`; Admission stops before it takes it. The request was in its
+  mailbox and goes with it. The session stays up, so nothing tells the
+  caller to ask, and the caller has no deadline.
+- **The two paths, in the code:**
+  1. *What is on its way.* The relay hands each `invoke_*` event to
+     Admission by a cast (`Relay.invocation/4`, `relay.ex:1379-1392`,
+     `hand_off/3`, `:1227-1241`), and while Admission is down it drops them
+     and logs (`:1389-1390`). An `invoke_open`, or a status ask, in
+     Admission's mailbox when it stops, or arriving while it restarts, is
+     never taken, never journaled and never in the table, so
+     `handle_continue` has nothing to answer.
+  2. *What waited, when `Desktop.Invoke` itself restarts.* Admission
+     crashing more than three times in five seconds (for example in
+     `init/1`, before `handle_continue`) exceeds `Desktop.Invoke`'s restart
+     intensity; `DeviceSupervisor` (`:one_for_one`) restarts it with a new,
+     empty table, and the relay's session stays up. The moduledoc of
+     `invoke.ex` says so (`:13-22`).
+  The server's caller waits with `:infinity` for a deadline of 0
+  (`Invocation.wait_left/3`, `invocation.ex:285`), and only a new session
+  (`Calls.reconnected/2`) makes it ask. The Messages helper on the server
+  (`ComputerHelper.rewatch/1`, `computer_helper.ex:451-464`) re-arms only
+  when the watch answers.
+- **Calls with a deadline** end at it, and every other rule here holds.
+- **What a fix needs:** the server's callers to hear that the computer's
+  Admission started again, as they hear a new session: for example
+  Admission telling the server at its start, and `Calls` telling each caller
+  still waiting on that computer to ask, so a lost request is answered "no
+  record" and its caller asks again. That covers both paths; keeping the
+  table elsewhere covers only the second.
 
 The first pin's three (a status ask that could reach the computer before
 its request, a request that waited and could start after the switch went

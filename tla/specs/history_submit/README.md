@@ -55,7 +55,12 @@ The steps, each one call of the real code:
   two steps like a delivery's (it shares `DeliverSecond`). A command whose
   apply failed, or one beside which a second command ran, is applied by the
   next command or the next tick. Before the fix it applied the command's own
-  interval alone (HS-2).
+  interval alone (HS-2). In the model one apply here runs at a time; in the
+  code two can overlap (two commands, or a command and the tick). That is
+  safe whatever order their calls take: each fences every interval above the
+  mark it read before it raises the mark to the highest of them, and the
+  mark never goes down (`set_home_mark/2`), so the mark only ever names a
+  prefix that some apply fenced whole.
 - **Deliver, in two steps** (`Delivery.deliver/1` → `MachineService` →
   `Spool.apply_at/3`): a connected computer is sent every interval it has not
   applied and applies them in a process of its own, beside its sending
@@ -91,7 +96,21 @@ less:
   (one exception under Seen while reading);
 - a computer whose master switch is off: `history.apply` is refused there and
   its sittings are not sent (`HistoryUplink.submit/2`), so it neither gains a
-  note nor applies the purge until the switch is back on.
+  note nor applies the purge until the switch is back on;
+- a machine whose history is off (`/history off` naming a computer and not
+  yet done there, a computer whose `history` offer is off, or the home's own
+  machine while it does not record): the home refuses its sitting `off`
+  before any provider call (`Submission.contributing/3`,
+  `ComputerHistory.contributors/1`), and the machine holds it, as after a
+  lost answer. That only writes less: no note, no cursor moved and nothing
+  to apply, so the safety rule cannot break through it, and it is asked
+  after the purge check, so a sitting in a purged window is still refused
+  `purged` and brings its machine the intervals. `EverySittingSettles` is
+  about machines that contribute; one that is off holds its events until it
+  is on again, as with the master switch. Not modelled for that reason. One
+  window the check leaves, seen while reading: a sitting that passed it is
+  summarized and written even if the owner's off lands during that
+  provider call, since the write does not ask again.
 
 **Environment switches** (set per check):
 - `OwnerCanPurge`: the owner purges from chat, at most `MaxPurges` times.
@@ -171,7 +190,7 @@ rule depends on it.
 ### HS-2: the home's own machine applies a purge alone, and its mark can step over one it never applied (fixed)
 
 Found by check `14` at `826ba83a` (9 states), on a Mac that is its own home.
-Fixed in the change that adds `Delivery.apply_here/1`: this machine applies
+Fixed in `18710c89`, which adds `Delivery.apply_here/1`: this machine applies
 every interval of its own above its mark, oldest first, before its mark
 moves, the rule computers already followed through refusals and deliveries;
 every purge and pause command runs it, and so does the home scheduler's tick,
@@ -231,3 +250,27 @@ keeps a computer's.
   IMMEDIATE` transaction, which SQLite serializes with the `Spool` process's,
   so every step above stays atomic; a write that waits past the 5 s
   `busy_timeout` fails with an error rather than interleaving.
+
+## Re-read for the fix (18710c89, 2026-11-11)
+
+18710c89 committed HS-2's fix and the spec's change for it, and staled the
+`submission.ex`, `spool.ex`, `delivery.ex`, `machine_service.ex`,
+`purge.ex` and `history.ex` pins; it added the `scheduler.ex` pin. Walked
+against the commit:
+- **Apply here** is as `ApplyHere` and `DeliverSecond(HomeMachine)` say:
+  `Delivery.apply_here/1` reads this machine's mark, then every interval of
+  its own above it (at most 256, oldest first), and applies them with
+  `Spool.apply_intervals/3`, each fence (and a pause's horizon) first and
+  the mark last. `Purge.purge/2`, the pause command's `apply_here/2` (both
+  only where this home records, `run_purge/2` and `apply_here/2`'s first
+  clause) and the scheduler's tick (`Scheduler.apply_here/1`, from
+  `maybe_roll_up/1`, wherever this home keeps a store) call it. The pin of
+  `history.ex` now names `run_purge`, which decides whether the purge
+  command applies here.
+- **A delivery** is as before; `Spool.apply_at/3` answers the store's own
+  mark, 0 where there is none, which the home records as delivered.
+- **The off refusal** (`Submission.contributing/3`, asked after
+  `unrefused/3`) and `history.off` (`MachineService`, `Delivery.switch_off/2`)
+  are left out, for the reason under Out of scope.
+- Checks: every verdict as the commit left it; `14` holds and `15` needs
+  `HereAppliesPending`.

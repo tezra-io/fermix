@@ -29,7 +29,8 @@
 (*    request that waited would start, the started record before the run,*)
 (*    the finished record before the answer, the answers held in memory   *)
 (*    for a status ask, the receipt alone after that, the master switch   *)
-(*    off, and what a restart finds.                                      *)
+(*    off, and what a restart finds: what ran, in the journal, and what   *)
+(*    waited, in a table Desktop.Invoke keeps across Admission's restart. *)
 (*  - Computers.Journal (journal.ex): the started and finished records    *)
 (*    and the mark a restart leaves on what a crash left started.         *)
 (*  - The browser's requests (Computers.Capabilities.Browser.run/4,       *)
@@ -48,20 +49,22 @@
 (*  - a capability's own refusals and failures (its switch, its origin    *)
 (*    rules, the sandbox): each is an answer like any other;              *)
 (*  - the computer's own deadline timer, which ends a run as timed_out    *)
-(*    as a cancel ends it as cancelled, and a long-lived request (a       *)
-(*    deadline of 0: screen.watch, imessage.watch), which holds a         *)
-(*    running slot and is waited on until its caller ends or an answer    *)
-(*    comes; one whose run a restart of Admission ended is answered by    *)
-(*    that restart (Stop);                                                *)
+(*    as a cancel ends it as cancelled, and the running slot a long-lived *)
+(*    request holds; the long-lived request itself (a deadline of 0:      *)
+(*    screen.watch, imessage.watch, waited on until its caller ends or an *)
+(*    answer comes) is the scene's Watches, in checks 19 and 20 only;     *)
 (*  - a caller that ends before its answer: Calls sends the cancel,       *)
 (*    after the request the caller sent, and it is the step the           *)
 (*    deadline's cancel is (Computers.cancel/2 is gone: nothing needed    *)
 (*    it);                                                                *)
-(*  - the browser switch, and Browser.HeldTurnListener, which ends every  *)
-(*    held turn when the master or browser switch goes off: an idle turn  *)
-(*    holds no request here, and one at work ends with its run, both      *)
-(*    ways, since they are linked (its run then ends as one that crashed, *)
-(*    unless Admission ended it first on the master switch);              *)
+(*  - a capability's own switch (an offer's), which Admission hears as it *)
+(*    hears the master switch and which ends that capability's running    *)
+(*    and waiting work refused off (offer_switched_off/2), and            *)
+(*    Browser.HeldTurnListener, which ends every held turn when the master *)
+(*    or browser switch goes off: an idle turn holds no request here, and *)
+(*    one at work ends with its run, both ways, since they are linked; a  *)
+(*    run that ends while its switches no longer let it run is answered   *)
+(*    as they say, never failed (crash_outcome/2);                        *)
 (*  - an id asked twice: the server never repeats one (mint_id), and the  *)
 (*    computer answers one it still runs, waits on or holds as a status   *)
 (*    ask (known?/2, repeated/2). That is memory, not the journal: one    *)
@@ -96,15 +99,15 @@
 \* SOURCE: apps/fermix_core/lib/fermix_core/computers/calls.ex @ 86e5a3bd8884
 \* SOURCE: apps/fermix_core/lib/fermix_core/computers/journal.ex#append_started,append_finished,lookup,interrupted,close_all,closed_entry,append,write_line,entries,entry @ a6fec2dd5ee7
 \* SOURCE: apps/fermix_core/lib/fermix_core/computers.ex#call @ 1db7ef7e8b31
-\* SOURCE: apps/fermix_channels/lib/fermix_channels/desktop/invoke.ex @ 78448c959eaa
-\* SOURCE: apps/fermix_channels/lib/fermix_channels/desktop/invoke/admission.ex @ ac4670ac3f8a
+\* SOURCE: apps/fermix_channels/lib/fermix_channels/desktop/invoke.ex @ 906702119d3b
+\* SOURCE: apps/fermix_channels/lib/fermix_channels/desktop/invoke/admission.ex @ eead64e1064c
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/desktop/invoke_family.ex#init,handle_event,reconcile @ c528b9332e57
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/desktop/device_supervisor.ex#children,invoke_spec @ f6ac6a300a5b
 \* SOURCE: apps/fermix_core/lib/fermix_core/computers/switches.ex#write,forget,notify @ f0032711fcb1
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/desktop/relay.ex#hello_ack,connected,keep_epoch,invocation @ 2b7075eee2d1
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/mobile/lanes.ex @ 57286e685875
 \* SOURCE: apps/fermix_core/lib/fermix_core/computers/capabilities/browser.ex#run @ 024be7dd7409
-\* SOURCE: apps/fermix_core/lib/fermix_core/browser/held_turn.ex @ 3759eb97d750
+\* SOURCE: apps/fermix_core/lib/fermix_core/browser/held_turn.ex @ 030374c72d18
 
 EXTENDS Naturals, FiniteSets, TLC
 
@@ -114,15 +117,20 @@ CONSTANTS
     Held,               \* those of the browser: each runs in its server turn's
                         \* Browser.HeldTurn (Capabilities.Browser.run/4,
                         \* capabilities/browser.ex:233-248; handle_call {:run,
-                        \* fun}, held_turn.ex:134), which the run calls; {} is
+                        \* fun}, held_turn.ex:156), which the run calls; {} is
                         \* every other capability, whose work runs in the run's
                         \* own task and ends with it (Admission.stop_task/2)
+    Watches,            \* those that are long-lived (a deadline of 0: imessage.watch,
+                        \* screen.watch): the caller waits on each until it is
+                        \* answered (Invocation.wait_left/3, invocation.ex:285); {} is
+                        \* a call with a deadline, in every check but 19 and 20
     MaxTries,           \* the ids one call may use (2: asked once more)
     MaxDrops,           \* the times the session drops (a bound)
     \* Environment switches: what may happen.
     SessionCanDrop,     \* the session ends with words in flight
-    ComputerCanStop,    \* the computer's Admission (or its engine) stops
-                        \* in the middle and starts again
+    ComputerCanStop,    \* the computer's Admission stops in the middle and starts
+                        \* again (Desktop.Invoke keeps its table of what waits), or
+                        \* Desktop.Invoke itself, or the engine, which takes the table
     AnswersCanExpire,   \* a held answer leaves memory (10 minutes, or the
                         \* bounds of what is held)
     OwnerCanSwitchOff,  \* the master switch goes off at the computer
@@ -130,7 +138,7 @@ CONSTANTS
                         \* while this server still asks
     \* Mechanism switches: TRUE is the code.
     JournalBeforeRun,   \* the started record is synced before the run
-                        \* (Admission.start/3, admission.ex:525-536;
+                        \* (Admission.start/3, admission.ex:579-591;
                         \* Journal.append_started/2, journal.ex:81;
                         \* write_line/3's :file.sync, :263-271); FALSE
                         \* writes the journal only when it ends
@@ -146,15 +154,15 @@ CONSTANTS
                         \* every id registered, sent or not
     EpochCheck,         \* a request from an epoch below the link's is
                         \* refused (Admission.current_epoch/2,
-                        \* admission.ex:349-361); FALSE admits it
+                        \* admission.ex:387-399); FALSE admits it
     SwitchReadAtAdmit,  \* the switches are read as each request is
-                        \* admitted (Admission.admit/2, admission.ex:336-337;
+                        \* admitted (Admission.admit/2, admission.ex:374-375;
                         \* switches/1; Invoke.switches_in/1, invoke.ex);
                         \* FALSE uses what was read when Admission started
     SwitchReadAtStart,  \* the switches are read again the moment a request
                         \* that waited for a slot or its upload would start
-                        \* (Admission.waited/3, admission.ex:468-473, from
-                        \* next/1, :456, and uploaded/3, :509); FALSE starts
+                        \* (Admission.waited/3, admission.ex:522-527, from
+                        \* next/1, :510, and uploaded/3, :563); FALSE starts
                         \* it as it was admitted
     ServerDeadline,     \* the caller waits at most its deadline and the
                         \* link's allowance (Invocation.await/5,
@@ -162,14 +170,14 @@ CONSTANTS
                         \* gave_up/4, :362-373); FALSE waits for ever
     HeldEndsWithRun     \* a held turn runs each request linked to the run
                         \* that made it (HeldTurn.handle_call {:run, fun},
-                        \* held_turn.ex:134-145; link/1, :224), so whatever
+                        \* held_turn.ex:156-167; link/1, :246), so whatever
                         \* ends the run (stop_task/2's terminate_child, a
                         \* restart of Desktop.Invoke's :one_for_all) ends the
                         \* request, and a request whose run is gone is never
                         \* started; FALSE: the run only calls the held turn,
                         \* which goes on with what it took (INVOKE-1)
 
-ASSUME Effects \subseteq Calls /\ Held \subseteq Calls
+ASSUME Effects \subseteq Calls /\ Held \subseteq Calls /\ Watches \subseteq Calls
 
 ServerEpoch == 1
 Ids == Calls \X (1..MaxTries)
@@ -201,7 +209,9 @@ VARIABLES
     \* the computer: Desktop.Invoke's Admission and its journal
     run,            \* each id: "none", "queued" (admitted, waiting for a slot
                     \* or its upload), "running", "acted" (the run did its
-                    \* work and has not answered yet), "ended"
+                    \* work and has not answered yet), "ended", "forgotten"
+                    \* (it waited when a restart took Desktop.Invoke's table:
+                    \* nothing on the computer knows of it)
     held,           \* the answer held in memory for the id, "none"
     journal,        \* the id's record: "none", "started", or how it ended
     acted,          \* the times the id's work happened on the computer
@@ -235,7 +245,7 @@ TypeOK ==
     /\ owed \in [Calls -> BOOLEAN]
     /\ up \in BOOLEAN /\ down \subseteq Asks /\ back \subseteq Answers
     /\ drops \in 0..MaxDrops
-    /\ run \in [Ids -> {"none", "queued", "running", "acted", "ended"}]
+    /\ run \in [Ids -> {"none", "queued", "running", "acted", "ended", "forgotten"}]
     /\ held \in [Ids -> Closed \cup {"none"}]
     /\ journal \in [Ids -> Closed \cup {"none", "started"}]
     /\ acted \in [Ids -> 0..1]
@@ -354,14 +364,15 @@ Ask(c) ==
 \* outcome is not known, a read timed out, and the computer is told to
 \* cancel it, best-effort, by the caller (cancel_sent/4, :375).
 Deadline(c) ==
-    /\ ServerDeadline /\ st[c] = "waiting"
+    /\ ServerDeadline /\ c \notin Watches /\ st[c] = "waiting"
     /\ End(c, IF c \in Effects THEN "unknown" ELSE "timed_out", "deadline")
     /\ down' = IF up THEN down \cup {[t |-> "cancel", id |-> Current(c)]} ELSE down
     /\ UNCHANGED <<try, up, back, drops, computer_vars, staleAdmitted, startedOff, saidNone,
                    dropSeen>>
 
-\* Without its deadline a caller goes on waiting.
-Wait(c) == ~ServerDeadline /\ st[c] = "waiting" /\ UNCHANGED vars
+\* Without its deadline, or for a watch, a caller goes on waiting
+\* (wait_left/3, invocation.ex:285: :infinity for a deadline of 0).
+Wait(c) == (~ServerDeadline \/ c \in Watches) /\ st[c] = "waiting" /\ UNCHANGED vars
 
 -----------------------------------------------------------------------------
 (* The link: the computer's session                                        *)
@@ -396,14 +407,14 @@ Reconnect ==
 -----------------------------------------------------------------------------
 (* The computer: Desktop.Invoke's Admission                                *)
 
-\* The answer goes if the session is up (send_answer/4, admission.ex:804;
-\* deliver/5, :817: a refused send is said and nothing more).
+\* The answer goes if the session is up (send_answer/4, admission.ex:903;
+\* deliver/5, :916: a refused send is said and nothing more).
 Say(id, status, rec) ==
     back' = IF up THEN back \cup {[id |-> id, status |-> status, rec |-> rec]} ELSE back
 
-\* answer/3 (admission.ex:728-741): the finished record is synced
-\* (record_finished/6, :758; Journal.append_finished/2, journal.ex:105), then
-\* the answer is sent and held (hold/3, :852), in the one callback.
+\* answer/3 (admission.ex:824-840): the finished record is synced
+\* (record_finished/6, :857; Journal.append_finished/2, journal.ex:105), then
+\* the answer is sent and held (hold/3, :951), in the one callback.
 Answer(id, status) ==
     /\ journal' = [journal EXCEPT ![id] = status]
     /\ held' = [held EXCEPT ![id] = status]
@@ -419,13 +430,14 @@ Take(m) == m \in down /\ down' = down \ {m}
 \* submit and the interactive one for every other, so none passes it.
 AfterItsOpen(m) == [t |-> "open", id |-> m.id] \notin down
 
-\* invoke_open (open/3, admission.ex:256; admitted/2, :325; admit/2,
-\* :336-347): the epoch first (current_epoch/2, :349-361), then the switches
-\* as they are now (switched_on/2, :369-378), each a refusal with only a
+\* invoke_open (open/3, admission.ex:294; admitted/2, :363; admit/2,
+\* :374-385): the epoch first (current_epoch/2, :387-399), then the switches
+\* as they are now (switched_on/2, :407-416), each a refusal with only a
 \* finished record. Then the started record is synced and the run starts
-\* (accept/2, :411; start/3, :525-536; launch/3, :538), or the request waits
-\* for a slot or its upload (queue/2, :447; upload/2, :449), with no record
-\* yet.
+\* (accept/2, :449; start/3, :579-591; launch/3, :593), or the request waits
+\* for a slot or its upload (queue/2, :485-488; upload/2, :490), with no
+\* record yet: its facts are kept in Desktop.Invoke's table (keep_waiting/2,
+\* :499-502), which Stop reads.
 Open(m) ==
     /\ Take(m) /\ m.t = "open"
     /\ LET id == m.id
@@ -449,8 +461,8 @@ Open(m) ==
                    stopped, heldWork, saidNone, dropSeen, via>>
 
 \* A request that waited starts once a slot is free or its upload is whole
-\* (next/1, admission.ex:456; uploaded/3, :509), the switches read again at
-\* that moment (waited/3, :468-473): off, it is refused as at admission and never runs.
+\* (next/1, admission.ex:510; uploaded/3, :563), the switches read again at
+\* that moment (waited/3, :522-527): off, it is refused as at admission and never runs.
 StartQueued(id) ==
     /\ run[id] = "queued"
     /\ IF SwitchReadAtStart /\ ~master
@@ -473,8 +485,8 @@ Act(id) ==
     /\ UNCHANGED <<server_vars, link_vars, held, journal, master, seen, stopOwed,
                    linkEpoch, stopped, heldWork, hist_vars>>
 
-\* The run answers Admission (handle_info {ref, result}, admission.ex:186;
-\* ran/3, :552),
+\* The run answers Admission (handle_info {ref, result}, admission.ex:207;
+\* ran/3, :607),
 \* which records and answers.
 Finish(id) ==
     /\ run[id] = "acted"
@@ -483,8 +495,8 @@ Finish(id) ==
     /\ UNCHANGED <<server_vars, up, down, drops, acted, master, seen, stopOwed,
                    linkEpoch, stopped, heldWork, hist_vars>>
 
-\* What a status ask is answered (status/2, admission.ex:665-678;
-\* from_journal/2, :680-694): nothing while it runs or waits, the held answer, else the
+\* What a status ask is answered (status/2, admission.ex:738-751;
+\* from_journal/2, :753-767): nothing while it runs or waits, the held answer, else the
 \* journal's receipt alone, else that there is no record.
 StatusAnswer(id) ==
     IF id \in Pending THEN /\ back' = back /\ UNCHANGED saidNone
@@ -500,10 +512,10 @@ Status(m) ==
     /\ UNCHANGED <<server_vars, up, drops, computer_vars, staleAdmitted, startedOff,
                    dropSeen, via>>
 
-\* invoke_cancel (cancel/2, admission.ex:649-663): a run, or a request that
-\* waits, is stopped and answered cancelled (stop_running/3, :619;
-\* drop_waiting/3, :641), exactly once; one that already ended is answered as
-\* a status ask is. Stopping a run ends its task (stop_task/2, :626-634), and with it a
+\* invoke_cancel (cancel/2, admission.ex:722-736): a run, or a request that
+\* waits, is stopped and answered cancelled (stop_running/3, :692;
+\* drop_waiting/3, :714), exactly once; one that already ended is answered as
+\* a status ask is. Stopping a run ends its task (stop_task/2, :699-707), and with it a
 \* browser run's request in its held turn (HeldEndsWithRun; without it the
 \* request goes on there, INVOKE-1).
 Cancel(m) ==
@@ -527,8 +539,9 @@ SwitchOff ==
     /\ UNCHANGED <<server_vars, link_vars, run, held, journal, acted, seen, linkEpoch,
                    stopped, heldWork, hist_vars>>
 
-\* Admission hears (handle_cast :switches_changed, admission.ex:176-180): what
-\* runs or waits ends as refused, stopped here (stopped/2, :716-722), each recorded
+\* Admission hears (handle_cast :switches_changed, admission.ex:195-201), the
+\* master switch off (an offer's own is not modelled): what
+\* runs or waits ends as refused, stopped here (stopped/2, :789-795), each recorded
 \* and answered, and a browser run's request with its run
 \* (HeldEndsWithRun; without it the request goes on there, INVOKE-1).
 HearSwitch ==
@@ -545,8 +558,8 @@ HearSwitch ==
     /\ UNCHANGED <<server_vars, up, down, drops, acted, master, seen, linkEpoch, stopped,
                    hist_vars>>
 
-\* A held answer leaves memory (held?/3, expired?/2, admission.ex:858-865;
-\* within_bounds/1, :868).
+\* A held answer leaves memory (held?/3, expired?/2, admission.ex:957-964;
+\* within_bounds/1, :967).
 Expire(id) ==
     /\ AnswersCanExpire /\ held[id] # "none"
     /\ held' = [held EXCEPT ![id] = "none"]
@@ -554,31 +567,49 @@ Expire(id) ==
                    linkEpoch, stopped, heldWork, hist_vars>>
 
 \* Admission stops and starts again (Desktop.Invoke is :one_for_all,
-\* invoke.ex:103-113): its runs end with it, what it held, what waited and
-\* what waited in its mailbox are gone, and at start it closes what the
-\* crash left started as unknown, interrupted (init/1, admission.ex:114;
-\* recover/1, :222; Journal.interrupted/2, journal.ex:176), reads the
-\* switches anew, and tells the server of each run it closed with the
-\* journal's receipt, once it stands again (handle_continue, :144-151;
-\* receipt_answer/1, :698), where the session is up; the server asks after
-\* one that is not. A request that waited for a slot has no started record
-\* and is answered by nothing: its caller's deadline, or the next session's
-\* ask, ends it. A held turn lives
-\* in the engine's browser tree (Browser.Supervisor), not in Desktop.Invoke:
-\* its request ends with its run (HeldEndsWithRun); without that a restart
-\* of Admission leaves it going, and a stop of the engine ends it.
+\* invoke.ex:110-126): its runs end with it, what it held and what waited in
+\* its mailbox are gone, and at start it closes what the crash left started
+\* as unknown, interrupted (init/1, admission.ex:129; recover/1, :243;
+\* Journal.interrupted/2, journal.ex:176) and reads the switches anew. Once
+\* it stands again it tells the server of each run it closed with the
+\* journal's receipt, and answers each request that waited for a slot or its
+\* upload refused, unavailable ("restarted before it ran"), journaled as one
+\* refused before it ran (handle_continue, admission.ex:162-170;
+\* waited_before/2, :278-290; receipt_answer/1, :771), where the session is up; the server
+\* asks after one that is not. What waited is read from a table
+\* Desktop.Invoke owns (invoke.ex:113-119), so it outlives Admission (keep).
+\* The stop may instead be a restart of Desktop.Invoke itself, which follows
+\* more than three of Admission's in five seconds, or of the engine, which
+\* takes the table with it (~keep): what waited is forgotten, answered by
+\* nothing, as what was in the mailbox is, and a caller with a deadline ends
+\* at it or at the next session's ask (INVOKE-2 for one without). The
+\* engine's stop also drops the session, a Drop of its own here. A held turn
+\* lives in the engine's browser tree (Browser.Supervisor), not in
+\* Desktop.Invoke: its request ends with its run (HeldEndsWithRun); without
+\* that a restart of Admission leaves it going, and a stop of the engine ends
+\* it.
 Stop ==
     /\ ComputerCanStop /\ ~stopped
     /\ stopped' = TRUE
-    /\ run' = [i \in Ids |-> IF i \in Pending THEN "none" ELSE run[i]]
+    /\ \E keep \in BOOLEAN :
+          LET waited == {i \in Ids : run[i] = "queued"}
+              answered == IF keep THEN waited ELSE {}
+              never == "refused_unavailable"
+          IN /\ run' = [i \in Ids |-> IF i \in answered THEN "ended"
+                                      ELSE IF i \in waited THEN "forgotten"
+                                      ELSE IF i \in Pending THEN "none" ELSE run[i]]
+             /\ held' = [i \in Ids |-> IF i \in answered THEN never ELSE "none"]
+             /\ journal' = [i \in Ids |-> IF journal[i] = "started" THEN "unknown"
+                                          ELSE IF i \in answered THEN never
+                                          ELSE journal[i]]
+             /\ back' = IF up
+                           THEN back \cup {[id |-> i, status |-> "unknown", rec |-> "receipt"] :
+                                             i \in {j \in Ids : journal[j] = "started"}}
+                                     \cup {[id |-> i, status |-> never, rec |-> "full"] :
+                                             i \in answered}
+                           ELSE back
     /\ heldWork' \in IF HeldEndsWithRun THEN {heldWork}
                      ELSE {heldWork, heldWork \cup HeldRunning}
-    /\ held' = [i \in Ids |-> "none"]
-    /\ journal' = [i \in Ids |-> IF journal[i] = "started" THEN "unknown" ELSE journal[i]]
-    /\ back' = IF up
-                  THEN back \cup {[id |-> i, status |-> "unknown", rec |-> "receipt"] :
-                                    i \in {j \in Ids : journal[j] = "started"}}
-                  ELSE back
     /\ down' = {}
     /\ seen' = master /\ stopOwed' = FALSE
     /\ UNCHANGED <<server_vars, up, drops, acted, master, linkEpoch, hist_vars>>
@@ -663,6 +694,22 @@ NoRecordIsFinal == \A i \in Ids : saidNone[i] => acted[i] = 0
 \* set (§6.1): TypeOK holds every outcome to it.
 EveryCallEnds == <>(Done /\ \A c \in Calls : out[c] \in Closed)
 
+\* Proposed rule, Admission's moduledoc: "a restart of this process while the
+\* session stays up leaves no caller waiting, a long-lived one
+\* (`imessage.watch`, `screen.watch`) included, whether it ran or waited". A
+\* watch has no deadline, so while its session stays up something must still
+\* answer it: its request or its status ask on the way to the computer, the
+\* computer running or waiting on it, an answer on the way back, or the word
+\* of a new session it has not asked after yet. A session that drops tells it
+\* at the next one (Reconnect).
+Heard(c) ==
+    LET i == Current(c)
+    IN \/ \E m \in down : m.id = i
+       \/ i \in Pending
+       \/ \E a \in back : a.id = i
+       \/ owed[c]
+WatchNeverUnheard == \A c \in Watches : (st[c] = "waiting" /\ up) => Heard(c)
+
 \* Witnesses: each defined as "the scenario never happens".
 \* A call is answered in full after its session dropped and came back.
 Witness_ResultAfterReconnect ==
@@ -688,5 +735,13 @@ Witness_ReceiptOnly ==
 \* would have started: the switch went off before Admission heard.
 Witness_WaitedRefusedOff ==
     ~(\E i \in Ids : journal[i] = "refused_off" /\ run[i] = "ended")
+\* A request that waited for a slot when Admission restarted is answered
+\* refused, unavailable, from the table Desktop.Invoke kept.
+Witness_WaitedAnsweredAtRestart == ~(\E i \in Ids : journal[i] = "refused_unavailable")
+\* A watch that waited for a slot is forgotten when Desktop.Invoke itself
+\* restarts, and nothing answers it while its session stays up (INVOKE-2's
+\* second path).
+Witness_WatchForgotten ==
+    ~(\E c \in Watches : st[c] = "waiting" /\ up /\ run[Current(c)] = "forgotten" /\ ~Heard(c))
 
 =============================================================================

@@ -12,7 +12,7 @@
 (* inserts the rest into the spool, which refuses a row stamped inside an *)
 (* interval of the store's fence. /history pause records its window in    *)
 (* that fence, then stores the horizon. /history off flips the app env, asks *)
-(* the Controller to stop the Capturer, saves config.toml and replies     *)
+(* the Controller to stop the Capturer, saves machine.toml and replies    *)
 (* with what the stop confirmed. The Controller and the Capturer are      *)
 (* supervised, and the model follows their real restarts; every Capturer  *)
 (* start re-reads the enable bit.                                          *)
@@ -26,14 +26,14 @@
 (*    apply, and the history_submit spec models them; the mark this        *)
 (*    store records after an apply (Spool.mark_applied), which only the    *)
 (*    sending cycle reads; the roll-up's purge guard                       *)
-(*    (computer_history_sql.ex:1801-1808); the carry of memory.db's raw    *)
+(*    (computer_history_sql.ex:1891-1898); the carry of memory.db's raw    *)
 (*    spool and purge intervals into this store (migration 59,             *)
-(*    computer_history_sql.ex:485); pruning at the 48 h sweep (:761, far   *)
+(*    computer_history_sql.ex:502); pruning at the 48 h sweep (:778, far   *)
 (*    beyond MaxTime); `purge all`, whose [0, now] has the shape of a      *)
-(*    window (purge.ex:105); more than one purge or pause (the owner sends *)
+(*    window (purge.ex:129); more than one purge or pause (the owner sends *)
 (*    each once; the insert checks every interval, computer_history_sql.ex:*)
-(*    624, :1053-1064); the Setup UI disable path; a crash of the Spool,   *)
-(*    which restarts the rail after it (supervisor.ex:67-80) like a        *)
+(*    641, :1070-1081); the Setup UI disable path; a crash of the Spool,   *)
+(*    which restarts the rail after it (supervisor.ex:113-128) like a      *)
 (*    Controller crash with the Capturer's: single-call facts covered by   *)
 (*    ExUnit (TLA_PLUS_MODELS.md 5.1);                                     *)
 (*  - the observe_start handshake: every Capturer starts already          *)
@@ -44,18 +44,26 @@
 (*    which do not depend on timing;                                      *)
 (*  - the Summarizer.Scheduler child the Controller reconciles after the  *)
 (*    Capturer, stopped with it on a computer and kept on the home         *)
-(*    (controller.ex:104-117), the singleton lock, a 2nd daemon;           *)
+(*    (controller.ex:105-118), the singleton lock, a 2nd daemon;           *)
 (*  - the DynamicSupervisor's 5 s shutdown kill (it only loses buffered   *)
 (*    events: stop_driver and the lock release come first, which          *)
 (*    TeardownBeforeTermFlush checks), a Capturer crash in the middle of  *)
 (*    a flush, a failed config save, a state-read error in Ingest's pause *)
 (*    check (it fails open, ingest.ex:248-251), an unparseable horizon    *)
 (*    and an event with no integer ts (both fail closed, ingest.ex:233,   *)
-(*    :241), a pause whose fence or horizon write fails (the reply says   *)
-(*    capture is not paused): single-call facts, covered by ExUnit;       *)
-(*  - re-enable (the wizard's job, never a chat command: history.ex:12).  *)
+(*    :241), a pause or purge whose apply here fails (the reply says the  *)
+(*    home holds it and this Mac's own store does not yet; the home       *)
+(*    scheduler's tick applies it, Delivery.apply_here/1): single-call    *)
+(*    facts, covered by ExUnit; an apply here run by another command or   *)
+(*    by that tick, which is the same transaction at another moment;      *)
+(*  - re-enable (the wizard's job, never a chat command: history.ex:13).  *)
 (*    The owner sends pause and purge at most once, and /history off     *)
 (*    once, or again after a daemon restart killed it unanswered.         *)
+(*  - /history off naming a computer: its home tells it (history.off,     *)
+(*    MachineService.run/4), and it runs the same switch_off/1 as         *)
+(*    /history off here, with its server's history offer switched off as  *)
+(*    well, and answers off only once the stop is confirmed: the steps    *)
+(*    below, run from an invocation instead of the chat.                  *)
 (*                                                                         *)
 (* One step = one indivisible thing in the code: one GenServer callback,  *)
 (* one call to this machine's store (every access goes through the Spool  *)
@@ -70,14 +78,15 @@
 \* SOURCE: apps/fermix_core/lib/fermix_core/computer_history/capturer.ex @ 08663df01d25
 \* SOURCE: apps/fermix_core/lib/fermix_core/computer_history/wire.ex @ 35da392f4930
 \* SOURCE: apps/fermix_core/lib/fermix_core/computer_history/ingest.ex @ 48ba431592fb
-\* SOURCE: apps/fermix_core/lib/fermix_core/computer_history/controller.ex @ a418978c1d04
-\* SOURCE: apps/fermix_core/lib/fermix_core/computer_history/supervisor.ex @ 3c292851575c
-\* SOURCE: apps/fermix_core/lib/fermix_core/computer_history.ex @ 51c45ba31842
-\* SOURCE: apps/fermix_core/lib/fermix_core/computer_history/purge.ex @ 5afcc7d79bec
+\* SOURCE: apps/fermix_core/lib/fermix_core/computer_history/controller.ex @ 8f42b2134207
+\* SOURCE: apps/fermix_core/lib/fermix_core/computer_history/supervisor.ex @ cc584e9b5e43
+\* SOURCE: apps/fermix_core/lib/fermix_core/computer_history.ex @ 195ef86b3f7c
+\* SOURCE: apps/fermix_core/lib/fermix_core/computer_history/purge.ex @ 30ef4042747f
+\* SOURCE: apps/fermix_core/lib/fermix_core/computer_history/delivery.ex#apply_here @ 27caf4b6820e
 \* SOURCE: apps/fermix_core/lib/fermix_core/computer_use/sidecar_installer.ex @ a2681ba9c881
-\* SOURCE: apps/fermix_core/lib/fermix_core/memory/repo/computer_history_sql.ex @ 31704e85435a
-\* SOURCE: apps/fermix_core/lib/fermix_core/computer_history/spool.ex#call,handle_call,insert_events,state,set_pause_until,fence,apply_intervals,apply_interval,pause_from,mark_applied @ 0b6533a7fa90
-\* SOURCE: apps/fermix_channels/lib/fermix_channels/gateway/commands/history.ex @ e9d1424e04a6
+\* SOURCE: apps/fermix_core/lib/fermix_core/memory/repo/computer_history_sql.ex @ 3c403c6f27f1
+\* SOURCE: apps/fermix_core/lib/fermix_core/computer_history/spool.ex#call,handle_call,insert_events,state,set_pause_until,fence,apply_intervals,apply_interval,pause_from,mark_applied @ 6d8fb6552a9d
+\* SOURCE: apps/fermix_channels/lib/fermix_channels/gateway/commands/history.ex @ 4d6167438489
 EXTENDS Naturals, Sequences, FiniteSets
 
 CONSTANTS
@@ -94,11 +103,12 @@ CONSTANTS
     ControllerCanCrash, \* the Controller dies alone; ComputerHistory.Supervisor restarts it
     CapturerCanCrash,   \* the Capturer raises; its DynamicSupervisor restarts it
     ReconcileCanTimeOut,\* /history off's reconcile call gives up after its 15 s timeout
-                        \* (controller.ex:51, :59-60; the timer starts at history.ex:629)
+                        \* (controller.ex:52, :60-61; the timer starts at
+                        \* computer_history.ex:224)
     ReconcileCanStall,  \* the timeout can fire BEFORE the DynamicSupervisor has sent the
                         \* Capturer :shutdown. FALSE is a timing assumption: the work before
-                        \* it (app env, file stats in installed?, whereis: controller.ex:138,
-                        \* :179, sidecar_installer.ex:94-99) takes far less than the timeout
+                        \* it (app env, file stats in installed?, whereis: controller.ex:146,
+                        \* :187, sidecar_installer.ex:94-99) takes far less than the timeout
     \* Mechanism switches: what the code does about it. TRUE is the real code;
     \* each is switched off by the checks that show a property needs it.
     IngestChecksPause,  \* Ingest has a pause gate: it reads the horizon once per batch and
@@ -108,20 +118,20 @@ CONSTANTS
                         \* late its batch is flushed: the ts half of min(ts, now) < pause_until
                         \* (ingest.ex:235-236). Off, it is the flush-time gate of 693970b7
     StopBeforeReply,    \* /history off waits for the reconcile call, which returns after the
-                        \* Capturer exited (history.ex:629, computer_history.ex:125,
-                        \* controller.ex:59-60, :184)
-    SaveBeforeReply,    \* /history off saves config.toml before it replies (history.ex:624,
-                        \* :632-635, then :568-569)
-    BootReconciles,     \* a (re)started Controller reconciles in handle_continue (controller.ex:63-84)
+                        \* Capturer exited (computer_history.ex:147, :153-157, :224,
+                        \* controller.ex:60-61, :192)
+    SaveBeforeReply,    \* /history off saves machine.toml before it replies
+                        \* (computer_history.ex:146-150, then history.ex:669-670)
+    BootReconciles,     \* a (re)started Controller reconciles in handle_continue (controller.ex:64-85)
     OffConfirmsStop,    \* an exit of the reconcile call (no Controller, a crash mid-call, a
                         \* timeout) is returned as an error, and /history off then says the
                         \* stop is unconfirmed instead of "nothing new is captured"
-                        \* (computer_history.ex:123-130, history.ex:589-594)
+                        \* (computer_history.ex:222-229, history.ex:744-749)
     InitChecksEnabled,  \* every Capturer start re-reads the enable bit and declines (:ignore)
                         \* while the feature is off (capturer.ex:130-136)
     InsertChecksIntervals, \* the spool insert refuses, inside its own transaction, each row
                         \* stamped inside an interval of the store's fence (computer_history_sql.ex:
-                        \* 588-631, :1053-1064). Off, it is the plain INSERT OR IGNORE of 693970b7
+                        \* 588-631, :1070-1081). Off, it is the plain INSERT OR IGNORE of 693970b7
     StopsBeforeFlush,   \* terminate/2 runs stop_driver and the lock release before its
                         \* best-effort flush (capturer.ex:603-605). Off, it is the code before
                         \* the fix: the flush first, then the stop
@@ -151,7 +161,7 @@ VARIABLES
     ctrlPid,      \* Controller GenServer: the Capturer pid its whereis returned (0 = none)
     ctrlCall,     \* Controller mailbox: /history off's reconcile call is queued
     env,          \* app env: computer_history enabled
-    config,       \* config.toml: computer_history enabled (survives a restart)
+    config,       \* machine.toml: computer_history enabled (survives a restart)
     pauseUntil,   \* SQLite: computer_history_state.pause_until (0 = no horizon)
     pausePc,      \* the /history pause command's process
     purges,       \* SQLite: the store's computer_history_purges rows a purge wrote, each
@@ -266,9 +276,9 @@ Split == [e \in Events |-> IF where[e] = "buffer"
                            ELSE where[e]]
 
 \* The spool insert's fence, per event: insert_unless_purged
-\* (computer_history_sql.ex:615-625) refuses a row whose ts lies inside any
+\* (computer_history_sql.ex:632-642) refuses a row whose ts lies inside any
 \* recorded interval, a purge's or a pause's, bounds inclusive like the
-\* fence's DELETE (:938, :1053-1064). At tick granularity it also refuses an
+\* fence's DELETE (:955, :1070-1081). At tick granularity it also refuses an
 \* event captured after the purge in the same tick (ts = clock = hi), or before
 \* the pause in the same tick (ts = clock = lo): an over-approximation of the
 \* 1 ms edge that no property depends on.
@@ -285,7 +295,7 @@ Insert == [e \in Events |-> IF where[e] = "batch"
 Kept == {e \in Buffer : ~GateDrops(e)}
 
 \* The call exited without a confirmed stop: the fixed code returns that as an
-\* error (computer_history.ex:123-130) and the reply says so; without the
+\* error (computer_history.ex:222-229) and the reply says so; without the
 \* mechanism the exit is read as :ok, a confirmed stop.
 Unconfirmed == IF OffConfirmsStop THEN "unconfirmed" ELSE "reconciled"
 
@@ -371,7 +381,7 @@ FlushCheck ==
     /\ CapturerOthersUnchanged
 
 \* Ingest's second store call: Spool.insert_events (ingest.ex:202,
-\* spool.ex:54-55 -> computer_history_sql.ex:576-631), one BEGIN IMMEDIATE
+\* spool.ex:59-60 -> computer_history_sql.ex:593-648), one BEGIN IMMEDIATE
 \* transaction that checks each row against the store's fence intervals, then
 \* INSERT OR IGNOREs the rest. It does not read the pause horizon.
 FlushInsert ==
@@ -428,7 +438,7 @@ TermStop ==
 
 \* A Capturer callback raises (for example a store call past its 5 s timeout,
 \* Timeouts.repo_call/0, which exits a caller that passes no on_timeout: :error,
-\* and Ingest passes none, spool.ex:239-247). gen_server then runs terminate/2.
+\* and Ingest passes none, spool.ex:244-252). gen_server then runs terminate/2.
 CapturerCrash ==
     /\ CapturerCanCrash
     /\ faultsLeft > 0
@@ -444,7 +454,7 @@ CapturerCrash ==
 CapturerStep == FlushCheck \/ FlushInsert \/ TermCheck \/ TermInsert \/ TermStop
 
 -----------------------------------------------------------------------------
-(* The DynamicSupervisor that owns the Capturer (supervisor.ex:75).        *)
+(* The DynamicSupervisor that owns the Capturer (supervisor.ex:121).       *)
 (* OTP semantics: it handles its mailbox in order; a child is :permanent   *)
 (* (the use GenServer default), so an EXIT it did not ask for restarts    *)
 (* it in the same message; terminate_child/2 monitors and unlinks the      *)
@@ -476,12 +486,12 @@ DsRestart ==
     /\ UNCHANGED <<exitQueued, dsBusy, dsFor, ctrlPc, ctrlPid, ctrlCall, offPc>>
     /\ DsUnchanged
 
-\* A terminate_child(pid) call at the head (controller.ex:184). The pid is
+\* A terminate_child(pid) call at the head (controller.ex:192). The pid is
 \* still its child (alive, or dead with its EXIT not yet handled): send
 \* :shutdown (it queues behind the Capturer's other messages) and block.
 \* Otherwise (a Capturer that exited after the Controller's whereis, whose
 \* restart declined or was replaced) reply {:error, :not_found}, which
-\* ensure_stopped logs as "already gone" (controller.ex:193-194).
+\* ensure_stopped logs as "already gone" (controller.ex:201-202).
 DsTerminate ==
     /\ dsBusy = 0
     /\ dsBox /= <<>>
@@ -519,27 +529,27 @@ DynSupStep == DsRestart \/ DsTerminate \/ DsReaped
 -----------------------------------------------------------------------------
 (* The Controller (controller.ex), a middle child of the :rest_for_one    *)
 (* ComputerHistory.Supervisor: Spool, DynamicSupervisor, Controller,       *)
-(* Retention (supervisor.ex:73-80).                                        *)
+(* Retention (supervisor.ex:119-128).                                      *)
 
 CtrlUnchanged ==
     UNCHANGED <<clock, where, ts, exitQueued, dsBusy, dsFor, ctrl, ctrlGen, env, config,
                 pauseUntil, pausePc, purges, pauseWin, faultsLeft>>
     /\ GhostsUnchanged
 
-\* handle_continue(:reconcile) after a start (controller.ex:63-84), or
-\* handle_call(:reconcile) (:87-90) -> do_reconcile (:137-144). The Capturer's
-\* want is recording?: operative? (the app env, computer_history.ex:54) and
+\* handle_continue(:reconcile) after a start (controller.ex:64-85), or
+\* handle_call(:reconcile) (:88-91) -> do_reconcile (:145-152). The Capturer's
+\* want is recording?: operative? (the app env, computer_history.ex:56) and
 \* installed?. The Scheduler, reconciled after it, is not modelled.
-\*  - want: ensure_started (controller.ex:152-176). whereis nil and no child at all:
+\*  - want: ensure_started (controller.ex:160-184). whereis nil and no child at all:
 \*    start_child starts one (the DynamicSupervisor's start is folded in,
 \*    with the Capturer's init read of the same env in this step; a disable
-\*    racing it makes start_child answer :ignore, :168-169, which ExUnit
+\*    racing it makes start_child answer :ignore, :176-177, which ExUnit
 \*    covers). whereis nil because the child is "dead" with its EXIT queued:
 \*    that EXIT is ahead of start_child in the DynamicSupervisor's mailbox,
 \*    so the restart comes first and start_child answers already_started
-\*    (:164), a no-op here.
-\*  - not want: ensure_stopped (:178-186) reads Process.whereis(Capturer)
-\*    (:179). The call to the DynamicSupervisor is the next step.
+\*    (:172), a no-op here.
+\*  - not want: ensure_stopped (:186-194) reads Process.whereis(Capturer)
+\*    (:187). The call to the DynamicSupervisor is the next step.
 CtrlLookup ==
     /\ ctrl = "up"
     /\ \/ ctrlPc = "boot"
@@ -559,7 +569,7 @@ CtrlLookup ==
     /\ UNCHANGED dsBox
     /\ CtrlUnchanged
 
-\* DynamicSupervisor.terminate_child(sup, pid) (controller.ex:184): send the
+\* DynamicSupervisor.terminate_child(sup, pid) (controller.ex:192): send the
 \* call with the pid whereis returned, then block until the reply. The
 \* DynamicSupervisor may have restarted the Capturer since the lookup.
 CtrlSend ==
@@ -571,9 +581,9 @@ CtrlSend ==
     /\ CtrlUnchanged
 
 \* The Controller dies alone, at any point (for example do_reconcile raises,
-\* controller.ex:137-144). A queued or running call dies with it: the
+\* controller.ex:145-152). A queued or running call dies with it: the
 \* caller's GenServer.call exits, and reconcile_runtime returns that as
-\* {:error, {:reconcile_failed, _}} (computer_history.ex:123-130), an
+\* {:error, {:reconcile_failed, _}} (computer_history.ex:222-229), an
 \* unconfirmed stop. A terminate_child it already sent still runs; the
 \* reply goes to the dead process (see ReplyTo).
 ControllerCrash ==
@@ -590,7 +600,7 @@ ControllerCrash ==
                    ctrlGen, env, config, pauseUntil, pausePc, purges, pauseWin>>
     /\ GhostsUnchanged
 
-\* ComputerHistory.Supervisor (:rest_for_one, supervisor.ex:80) restarts the
+\* ComputerHistory.Supervisor (:rest_for_one, supervisor.ex:126-128) restarts the
 \* Controller (and Retention after it); init continues to :reconcile.
 ControllerRestart ==
     /\ ctrl = "down"
@@ -605,16 +615,17 @@ ControllerRestart ==
 ControllerStep == CtrlLookup \/ CtrlSend \/ ControllerRestart
 
 -----------------------------------------------------------------------------
-(* /history off (history.ex:566-643), in the channel's ingress process    *)
+(* /history off (history.ex:667-781), in the channel's ingress process    *)
 
 OffUnchanged ==
     UNCHANGED <<clock, where, ts, sidecar, cap, exitQueued, inc, dsBox, dsBusy, dsFor, ctrl,
                 ctrlGen, ctrlPc, ctrlPid, pauseUntil, pausePc, purges, pauseWin, faultsLeft>>
     /\ UNCHANGED <<pauseAcked, inPause, inAckedPause, afterOff, purged>>
 
-\* The owner sends /history off; disable/2 flips the app env (history.ex:621-622).
-\* That is a get_env then a put_env, folded into one step: no other writer
-\* of this key is in scope.
+\* The owner sends /history off; disable/2 (history.ex:776-781) calls
+\* ComputerHistory.switch_off/1, which flips the app env
+\* (computer_history.ex:138-144). That is a get_env (Config.current/0) then a
+\* put_env, folded into one step: no other writer of this key is in scope.
 OffFlip ==
     /\ OwnerCanDisable
     /\ offPc = "idle"
@@ -623,10 +634,10 @@ OffFlip ==
     /\ UNCHANGED <<ctrlCall, config, offAcked, offUnconfirmed>>
     /\ OffUnchanged
 
-\* stop_capture -> ComputerHistory.reconcile_runtime (history.ex:624, :629,
-\* computer_history.ex:123-130) -> GenServer.call(Controller, :reconcile). The
-\* model's host records (a Mac; on a host with no recorder, history.ex:630
-\* skips the call: there is no recorder to stop). A dead Controller: the call
+\* stop_here -> ComputerHistory.reconcile_runtime (computer_history.ex:147,
+\* :153-157, :222-229) -> GenServer.call(Controller, :reconcile). The model's
+\* host records (a Mac; on a host with no recorder, stop_here skips the call:
+\* there is no recorder to stop). A dead Controller: the call
 \* exits at once, an unconfirmed stop. With
 \* StopBeforeReply off, History does not wait for the Controller.
 OffCall ==
@@ -638,7 +649,7 @@ OffCall ==
     /\ UNCHANGED <<env, config, offAcked, offUnconfirmed>>
     /\ OffUnchanged
 
-\* The call's 15 s timeout (controller.ex:51) fires: an unconfirmed stop. This
+\* The call's 15 s timeout (controller.ex:52) fires: an unconfirmed stop. This
 \* is the environment's timing, not something the History process reads.
 \* Without ReconcileCanStall it fires only once the DynamicSupervisor has sent
 \* the Capturer :shutdown (dsBusy /= 0), i.e. while it waits for terminate/2,
@@ -651,9 +662,10 @@ OffTimeout ==
     /\ UNCHANGED <<ctrlCall, env, config, offAcked, offUnconfirmed>>
     /\ OffUnchanged
 
-\* save_disabled: ConfigStore.current_snapshot + save_snapshot (history.ex:632-635),
-\* one write of config.toml with enabled = false. It runs whatever the stop's
-\* outcome (history.ex:624). With SaveBeforeReply off it runs after the reply.
+\* ConfigStore.put_machine_table/3 (computer_history.ex:148), one write of
+\* this machine's machine.toml with enabled = false, under the config lock. It
+\* runs whatever the stop's outcome (:146-150). With SaveBeforeReply off it
+\* runs after the reply.
 OffSave ==
     /\ IF SaveBeforeReply
        THEN /\ offPc \in {"reconciled", "unconfirmed"}
@@ -664,10 +676,10 @@ OffSave ==
     /\ UNCHANGED <<ctrlCall, env, offAcked, offUnconfirmed>>
     /\ OffUnchanged
 
-\* The reply, chosen by off_text from the {stop, save} outcomes (history.ex:568-611).
+\* The reply, chosen by off_text from the {stop, save} outcomes (history.ex:669-767).
 \* A confirmed stop: "Computer history disabled - nothing new is captured ..."
-\* (:574-577). An unconfirmed one: "... the recorder could not be confirmed
-\* stopped ... it may still be capturing" (:589-594).
+\* (:729-732). An unconfirmed one: "... the recorder could not be confirmed
+\* stopped ... it may still be capturing" (:744-749).
 OffReply ==
     /\ IF SaveBeforeReply
        THEN /\ offPc \in {"saved", "saved_unconfirmed"}
@@ -683,14 +695,14 @@ OffReply ==
 OffStep == OffCall \/ OffSave \/ OffReply
 
 -----------------------------------------------------------------------------
-(* /history pause and /history purge (history.ex:468-541)                 *)
+(* /history pause and /history purge (history.ex:533-632)                 *)
 
 CommandUnchanged ==
     UNCHANGED <<clock, ts, sidecar, cap, exitQueued, inc, dsBox, dsBusy, dsFor, ctrl, ctrlGen,
                 ctrlPc, ctrlPid, ctrlCall, env, config, offPc, faultsLeft>>
 
 \* The owner sends /history pause <d>: now is read and until = now + d
-\* (history.ex:476-477). pause_everywhere records the pause for every machine
+\* (history.ex:541-542). pause_everywhere records the pause for every machine
 \* on the home (pause_window/5, in memory.db, not this store: folded in), then
 \* apply_here applies it to this machine's store, with any earlier interval
 \* this machine owes (history.ex apply_here/2 -> Delivery.apply_here/1 ->
@@ -723,7 +735,7 @@ PauseSet ==
     /\ CommandUnchanged
     /\ GhostsUnchanged
 
-\* The reply (history.ex:496-497), after the computers were told (told/1,
+\* The reply (history.ex:561, :571-572), after the computers were told (told/1,
 \* folded in): "paused until <until>. It resumes automatically then." There is
 \* no resume verb: the horizon passing is the only unpause (Ingest re-reads it
 \* per batch, ingest.ex:220-231).
@@ -736,17 +748,17 @@ PauseReply ==
     /\ UNCHANGED <<offAcked, offUnconfirmed, inPause, inAckedPause, afterOff, purged>>
 
 \* The owner sends /history purge <w>: Purge.purge takes now and the window
-\* [now - w, now] (purge.ex:60-63, :106). purge_notes/5 first deletes the
+\* [now - w, now] (purge.ex:76-79, :130). purge_notes/5 first deletes the
 \* home's notes in it and records the home's interval (memory.db, not this
 \* store: folded in); then apply_here/3 applies it to this machine's store,
 \* with any earlier interval this machine owes (purge.ex -> Delivery.apply_here/1
 \* -> Spool.apply_intervals -> fence_window): one BEGIN IMMEDIATE transaction that
-\* deletes the spool rows in the window (:938) and records the interval
-\* (:945), on the same single writer as the insert. The window is fixed at
+\* deletes the spool rows in the window (computer_history_sql.ex:955) and
+\* records the interval (:962), on the same single writer as the insert. The window is fixed at
 \* the command's start, so an event captured between the home's transaction
 \* and this one is stamped after it: the step is this store's transaction.
 \* Rows still in a Capturer buffer, or in a batch past its pause check, are
-\* not in the spool yet. The reply (history.ex:526-541) is folded in: no
+\* not in the spool yet. The reply (history.ex:613-632) is folded in: no
 \* property depends on its timing.
 PurgeCommit(w) ==
     /\ OwnerCanPurge
@@ -762,12 +774,13 @@ PurgeCommit(w) ==
     /\ UNCHANGED <<pauseAcked, offAcked, offUnconfirmed, inPause, inAckedPause, afterOff>>
 
 -----------------------------------------------------------------------------
-(* The daemon restarts. Only this machine's store (the spool, pause_until, *)
-(* the fence's intervals) and config.toml survive; every process and its  *)
-(* memory is gone. Boot loads the app env from config.toml, and the fresh *)
-(* Controller reconciles in handle_continue. A command in flight dies     *)
-(* unanswered: the owner may send /history off again (not once it was    *)
-(* answered, either way); an unanswered pause keeps what it stored.       *)
+(* The daemon restarts. Only this machine's store (the spool,             *)
+(* pause_until, the fence's intervals) and machine.toml survive; every    *)
+(* process and its memory is gone. Boot loads the app env from            *)
+(* machine.toml, and the fresh Controller reconciles in handle_continue.  *)
+(* A command in flight dies unanswered: the owner may send /history off   *)
+(* again (not once it was answered, either way); an unanswered pause      *)
+(* keeps what it stored.                                                  *)
 DaemonRestart ==
     /\ DaemonCanRestart
     /\ faultsLeft > 0
@@ -876,7 +889,7 @@ Spec == Init /\ [][Next]_vars /\ Fairness
 \* "Pause and disable both halt ingestion at the ack - no event timestamped
 \* after the pause or the disable acknowledgment lands in the spool".
 \* The disable half. The off reply itself says "nothing new is captured"
-\* (history.ex:575), and only after a confirmed stop.
+\* (history.ex:730), and only after a confirmed stop.
 DisableHaltsAtAck == \A e \in afterOff : where[e] /= "spool"
 
 \* The pause half, read up to the horizon: 12 says after the ack, and 12
@@ -887,7 +900,7 @@ PauseHaltsAtAck == \A e \in inAckedPause : where[e] /= "spool"
 \* whenever its batch is flushed: the claim at ingest.ex:220-231 ("an event
 \* stamped inside the pause therefore never reaches the spool, even when its
 \* batch is flushed after the horizon"), which since 826ba83a the pause's own
-\* fence makes as well (history.ex:509-515, spool.ex:161-166: each interval
+\* fence makes as well (history.ex:584-600, spool.ex:166-171: each interval
 \* "deletes the raw events stamped inside it and fences later ones"). It
 \* implies PauseHaltsAtAck
 \* (inAckedPause is a subset of inPause) and that nothing captured during the
@@ -895,8 +908,8 @@ PauseHaltsAtAck == \A e \in inAckedPause : where[e] /= "spool"
 CapturedWhilePausedNeverStored == \A e \in inPause : where[e] /= "spool"
 
 \* After purge(W) commits here, no spool row with a timestamp in W appears:
-\* purge.ex:3-7 ("fences this machine's own raw events in it"), the claim at
-\* computer_history_sql.ex:608-614 (the fence "also stops a batch already past
+\* purge.ex:3-14 ("which deletes and fences its own raw events in each"), the claim at
+\* computer_history_sql.ex:625-631 (the fence "also stops a batch already past
 \* Ingest's pause check when the purge committed"), and MILESTONE_32 12
 \* (line 469: purge "deletes spool rows in the window").
 PurgedWindowStaysPurged == \A e \in purged : where[e] /= "spool"
@@ -932,14 +945,14 @@ Witness_WriteAfterPauseAck ==
 \* CH-2's path, now closed: a row stamped inside the purged window reaches the
 \* spool insert after the purge committed (buffered, or in a batch past its
 \* pause check), and the insert's purge fence refuses it
-\* (computer_history_sql.ex:615-625).
+\* (computer_history_sql.ex:632-642).
 Witness_LateRowFenced == \A e \in Events : where[e] /= "fenced"
 
 \* CH-4's second path, now harmless: the Controller's whereis returned a
 \* Capturer that then exited, and its restart declined because the feature
 \* is off, so the DynamicSupervisor is about to answer the terminate_child
 \* {:error, :not_found}, which the Controller logs as "already gone"
-\* (controller.ex:193-194), with no Capturer running.
+\* (controller.ex:201-202), with no Capturer running.
 Witness_StaleTerminate ==
     ~(/\ dsBox /= <<>>
       /\ Head(dsBox).kind = "term"

@@ -37,7 +37,7 @@ Models one move of M75 §7.2 (B5). Three parts take part:
     reason than room), and the worker tries again (`AttemptFails`);
   - an attempt fails at the source before its offer is out in a way another
     would not mend, and the worker aborts the move (`AttemptAborts`,
-    `attempt_failed/2`, `move_worker.ex:236-250`): the secret store refuses
+    `attempt_failed/2`, `move_worker.ex:238-252`): the secret store refuses
     the desktop key, or its item holds another home's key under the same
     profile; the keychain does not give the settings' secrets; or the
     capture has no room;
@@ -56,7 +56,7 @@ Models one move of M75 §7.2 (B5). Three parts take part:
 - `OldRequestsArrive`: a request the worker sent on a rail it has since given
   up on still reaches the candidate. Two rails are two streams, so nothing
   orders one rail's frames against another's. The worker closes a rail it
-  gives up on (`close_rail/1`, `move_worker.ex:224`, `:523`, `:537`), but
+  gives up on (`close_rail/1`, `move_worker.ex:226`, `:534`, `:548`), but
   `Rail.close/1` sends its close frame behind whatever the rail already sent
   (`rail.ex`). Whether the iroh helper still delivers what it holds once the
   socket closes ("the helper ends its stream on its own", `helper.ex`) is
@@ -64,24 +64,24 @@ Models one move of M75 §7.2 (B5). Three parts take part:
 
 **Mechanism switches** (`TRUE` is the real code):
 - `CandidateWaitsForCommit`: the candidate activates only on `move_commit`
-  for the move it staged (`commit_move/2`, `candidate.ex:637-670`).
+  for the move it staged (`commit_move/2`, `candidate.ex:653-684`).
 - `MarkerBeforeCommit`: the worker writes `moved.json` and records
   `committing` before it sends `move_commit` (`commit/4`, then `retired/4`,
-  `move_worker.ex:517-540`).
+  `move_worker.ex:528-551`).
 - `OffersFenced`: the candidate takes an offer only when it is later than the
   move it holds, a later move id or a later attempt of the same move, and
   refuses an earlier or equal one (`move_mismatch`), leaving what it holds
-  untouched (`fenced_offer/2`, `later?/2`, `candidate.ex:506-518`).
-  `move_offer` carries the attempt (`send_snapshot/3`, `move_worker.ex:450`),
+  untouched (`fenced_offer/2`, `later?/2`, `candidate.ex:508-520`).
+  `move_offer` carries the attempt (`send_snapshot/4`, `move_worker.ex:457`),
   which only grows across restarts. Move ids are ordered by when the move
   started (`move_id/1`, `move.ex:532-541`); with one move id, the fence
   orders by attempt.
 - `ReadyAfterStaged`: `move_ready` goes out only after `staged` is written.
   `restored/2` records `staged`, then tells the responder
-  (`candidate.ex:606-612`), which answers `move_ready` only then
+  (`candidate.ex:618-625`), which answers `move_ready` only then
   (`move_responder.ex:65-69`).
 - `AwaitPinsRail`: the worker takes an answer only from the rail it waits on
-  (`await_any/3` matches `{:rail, ^rail, _}`, `move_worker.ex:944-957`).
+  (`await_any/3` matches `{:rail, ^rail, _}`, `move_worker.ex:955-968`).
 - `EndingsAfterRestart`: the worker records `committed` (after `move_done`)
   or `undoing` (after an undo) and then restarts itself (`SelfRestart`,
   `Lifecycle.restart_self/0`); the engine that boots after it records `done`
@@ -101,7 +101,7 @@ in `abort/3` never finds a marker. Every road to `abort/3` starts before
   in `transfer/1` and `attempt_failed/2`, which run only while the marker is
   absent;
 - `commit/4`'s error clause, after the ready epoch or the marker could not
-  be written (`move_worker.ex:521-524`);
+  be written (`move_worker.ex:532-535`);
 - a recorded `aborting`, which `carry_on/3` reaches only when the marker is
   absent.
 
@@ -235,7 +235,7 @@ Nothing in Fermix's own code fenced it.
   home untouched.
 
 The same change answers a second `move_commit` after activation from the
-`activated?` flag (`candidate.ex:639-643`). Before, it crashed in `put/3`,
+`activated?` flag (`candidate.ex:653-657`). Before, it crashed in `put/3`,
 because `activate/1` had removed `candidate/`. The model's `OnCommit` now
 answers it `move_done`.
 
@@ -386,3 +386,25 @@ Re-read against 16207ff5, which staled the `move_worker.ex`,
 
 No modelled step changed. The comments' line numbers into these files, and
 into `role.ex` and `home_move.ex`, point at the committed code.
+
+## Re-read for history notes named for their machine (M97, 2026-11-11)
+
+Re-read against 18710c89, which staled the `move_worker.ex`, `candidate.ex`
+and `activation.ex` pins:
+- **`move_offer` names the source's device id** when the source stays as a
+  linked computer (`send_snapshot/4`, `put_device/2`), and the candidate
+  hands it to the staging as the fact `"device_id"` (`stage_move/3`). A
+  field no rule reads; the attempt it carries beside it is as before.
+- **The staging names the home's own notes for that computer.** After the
+  settings and before the plugin reinstall request, `Activation.stage/5`
+  renames the staged `memory.db`'s rows of the home's own machine (`""`) to
+  that device id in one transaction (`own_notes/4`,
+  `ComputerHistorySql.rename_machine/3`). A failure there is one more way
+  the staging fails (`restored/2`'s error clause, back to enrolled), which
+  the model has; a staging run again restores afresh first, so it renames
+  once. No rule reads the notes.
+- **`activate/1` and `place_config/2`** are as before.
+
+No modelled step changed. The comments' line numbers into these three
+files point at the committed code; those into `candidate.ex` had drifted
+before this change too.

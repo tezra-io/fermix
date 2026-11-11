@@ -390,6 +390,27 @@ lead on versions):
 The comments' line numbers into the files this commit changed point at the
 committed code.
 
+Walked again against 18710c89 (M97: history notes named for their
+machine), which staled the `move_worker.ex`, `candidate.ex` and
+`activation.ex` pins:
+- **A return's staging names this computer's notes as the home's own
+  again.** `Activation.stage/6` for a return (from `stage_fun/4`, and from
+  Restore here's `LocalReturn`) renames the staged copy's rows of the device
+  id its desktop link holds back to `""` in one transaction (`own_notes/4`,
+  `ComputerHistorySql.rename_machine/3`). A link that is gone renames
+  nothing; one that cannot be read, or a rename that fails, fails the
+  staging, which the model has under `TransferCanFail` (`RestoreFails`, and
+  `RhStage` for Restore here). The link is still in place at every staging:
+  step c removes it only during the activation, after the staging. No rule
+  reads the notes.
+- **The server's move worker** names the source's device id in `move_offer`
+  when it is kept as a computer (`send_snapshot/4`), a field no rule reads.
+- **The activation** (`activate/2`, steps a to g) is as before.
+
+None changes a modelled step. The comments' line numbers into these three
+files point at the committed code; those into the candidate's
+`candidate.ex` had drifted before this change too.
+
 ## Done
 
 Deadlock checking is on. `Done` has these ends:

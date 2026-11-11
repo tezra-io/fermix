@@ -60,15 +60,15 @@
 (* pending intervals and some it already applied.                         *)
 (***************************************************************************)
 \* SOURCE: apps/fermix_core/lib/fermix_core/computer_history/sittings.ex#run,step,dispatch,send_sitting,sitting,settle,settled @ 29d8a7f0d8ef
-\* SOURCE: apps/fermix_core/lib/fermix_core/computer_history/submission.ex#accept,unnoted,unrefused,refused_by,make,write @ b6dd8e5fabdf
+\* SOURCE: apps/fermix_core/lib/fermix_core/computer_history/submission.ex#accept,unnoted,unrefused,refused_by,make,write @ b15e685ca908
 \* SOURCE: apps/fermix_core/lib/fermix_core/memory/repo/computer_history_sql.ex#insert_note,insert_note_in_tx,noted,reaching_intervals,intervals_after,purge_notes,purge_notes_in_tx,scoped_notes,fence_window,fence_window_in_tx,insert_events,insert_unless_purged,stamped_in_purge?,link,set_home_mark @ 6a465364b796
-\* SOURCE: apps/fermix_core/lib/fermix_core/computer_history/spool.ex#link,events_after,fence,apply_intervals,apply_interval,mark_applied,apply_at @ fc70161b94bd
-\* SOURCE: apps/fermix_core/lib/fermix_core/computer_history/delivery.ex @ 4fc6f21a0126
-\* SOURCE: apps/fermix_core/lib/fermix_core/computer_history/machine_service.ex @ 815c371fb715
-\* SOURCE: apps/fermix_core/lib/fermix_core/computer_history/purge.ex#purge,apply_here @ b178c33529f3
+\* SOURCE: apps/fermix_core/lib/fermix_core/computer_history/spool.ex#link,events_after,fence,apply_intervals,apply_interval,mark_applied,apply_at @ 278f51a2319a
+\* SOURCE: apps/fermix_core/lib/fermix_core/computer_history/delivery.ex @ c951071b0b22
+\* SOURCE: apps/fermix_core/lib/fermix_core/computer_history/machine_service.ex @ 98dc1a74bb86
+\* SOURCE: apps/fermix_core/lib/fermix_core/computer_history/purge.ex#purge,apply_here @ c6c55d547d1e
 \* SOURCE: apps/fermix_core/lib/fermix_core/computer_history/controller.ex#home_uplink @ 8176fcfadb34
-\* SOURCE: apps/fermix_core/lib/fermix_core/computer_history/summarizer/scheduler.ex#maybe_roll_up,apply_here @ 000000000000
-\* SOURCE: apps/fermix_channels/lib/fermix_channels/gateway/commands/history.ex#pause_everywhere,apply_here @ d193aac722a6
+\* SOURCE: apps/fermix_core/lib/fermix_core/computer_history/summarizer/scheduler.ex#maybe_roll_up,apply_here @ f144c2cf4979
+\* SOURCE: apps/fermix_channels/lib/fermix_channels/gateway/commands/history.ex#pause_everywhere,apply_here,run_purge @ 085fc4f0e215
 
 EXTENDS Naturals, FiniteSets, TLC
 
@@ -353,7 +353,11 @@ ApplyHereOf(R) ==
 \* rises and an interval is read once committed, so a step between them only
 \* applies more. Two commands may run at once, and one that fails after the
 \* home recorded its interval applies nothing, which up to the point it
-\* matters is the same as applying it later.
+\* matters is the same as applying it later. One apply here runs at a time
+\* here (applying is empty); in the code two may overlap (two commands, or a
+\* command and the tick), which is safe in any order of their calls: each
+\* fences every interval above the mark it read before it raises the mark
+\* to the highest of them, and set_home_mark/2 never lowers it.
 \*
 \* Without HereAppliesPending (the code at 826ba83a, HS-2): Purge.fence_here/4
 \* and History.pause_here/3 applied the command's own interval alone, and
