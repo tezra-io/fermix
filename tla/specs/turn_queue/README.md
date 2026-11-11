@@ -44,7 +44,7 @@ the checks that show a property needs it):
   fires `{:failed, _}` (`queue.ex:920-928`).
 - `TurnsShareQueueFate`: turn tasks run under a `Task.Supervisor` that
   `QueueSupervisor` (`:one_for_all`) terminates before it restarts the Queue
-  (`queue_supervisor.ex:46-51`, `application.ex:168`).
+  (`queue_supervisor.ex:46-51`, `application.ex:176`).
 - `CrashClosesUserMessage`: a crashed turn's `:DOWN` writes the stopped marker
   before the next message starts (`queue.ex:879`, `:893-899`).
 - `StopSparesClaimedTurn`: a stop leaves a turn that has claimed its outcome
@@ -209,6 +209,14 @@ watch was added to the model).
   never reaches the Queue. A turn the Mac's connection carries after it pulled
   the lists' index is stamped `draws_lists`, which `run_message_loop` reads
   for the list line it appends at the turn's start, with no Queue state.
+- A Mac's Messages carried for its server (M97 §6.4): `application.ex`
+  registers `IMessage.ComputerHelper` as core's iMessage health provider
+  before it starts any child, and starts `IMessage.Bridge` after
+  `DeviceSupervisor`, on a linked Mac with the helper installed and nowhere
+  else. The bridge runs the helper and the watch that answers the server's
+  invocations; it makes no turn on the Mac and never reaches the Queue. The
+  server's turns from those messages enter the server's Queue as any
+  channel's do.
 - Consumers other than `Acp.Peer`. `Companion.Turns`, the settlement owner of
   the companion socket's turns and the phone's alike, watches the Queue it
   handed each turn to and answers the turn the Peer's way, with one
@@ -241,7 +249,7 @@ counterexample, run `make -C tla check SPECS=turn_queue` and open
     while the new Queue's turn ran, and nobody could stop it.
 - **Fix:** `FermixChannels.Gateway.QueueSupervisor` (`queue_supervisor.ex`)
   runs `{Task.Supervisor, name: FermixChannels.Gateway.TurnTasks}` and the
-  Queue, in that order, `:one_for_all`; `application.ex:168` starts it in the
+  Queue, in that order, `:one_for_all`; `application.ex:176` starts it in the
   Queue's slot. `:task_supervisor` is a required Queue option
   (`queue.ex:199`), so no Queue runs turns under a supervisor that outlives
   it. When the Queue dies, the supervisor terminates the task supervisor, and

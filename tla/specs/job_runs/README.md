@@ -29,15 +29,15 @@ what is left out and every step folded into another.
   what the platform took survive. This also covers a crash of any core child
   started before the `RunnerSupervisor` (`CommandHostSupervisor` through
   `MainAgent`, `Memory.Repo`, `Trace` and `Finch` among them,
-  `application.ex:291-369`) or of the `RunnerSupervisor` itself, since
-  `:rest_for_one` restarts every job process in each case (`:186`). A
+  `application.ex:292-370`) or of the `RunnerSupervisor` itself, since
+  `:rest_for_one` restarts every job process in each case (`:187`). A
   runner's send helper and its AgentLoop are linked to it, so none outlives
   the restart; `LoopDiesWithRunner` off lets the loop outlive it (JOB-8).
 - `SchedulerCrashes`: how many times the Scheduler alone may die, at any point
   of any callback, including its own init. A Repo timeout no longer kills it
   (`SchedulerTimeouts`); another cause still does, such as `:rest_for_one`
   restarting it when `MeetingsSupervisor`, started between the
-  `RunnerSupervisor` and the Scheduler, dies (`application.ex:370-377`).
+  `RunnerSupervisor` and the Scheduler, dies (`application.ex:371-378`).
   Runners keep running. When it dies waiting on the reaper's write, that write
   may still land (see late writes).
 - `SchedulerTimeouts`: how many of the Scheduler's Repo calls may time out.
@@ -722,6 +722,23 @@ job, run or delivery row. `JobRunnerSupervisor`, `MeetingsSupervisor` and
   `application.ex` line down by one, and the cue tree's by nine; the comments
   point at the committed file.
 
+## Re-read for a computer's screen and Messages (2026-11-11)
+
+The server's use of a computer's screen (M97 §6.4, `26196634`) staled the
+`application.ex` pin. The computer-use supervisor now also starts on an
+engine that drives a computer's screen or has its own driven by its server,
+and `ComputerUse.Seat`, this computer's screen while its server drives it,
+joins the tree beside it on a linked computer, never under `mix test`. Both
+start after `JobScheduler` and the temporal rail, so a crash of either
+restarts only what follows it (the computer-history supervisor through the
+cue tree), and neither reads or writes a job, run or delivery row.
+`JobRunnerSupervisor`, `MeetingsSupervisor` and `JobScheduler` keep their
+order, so nothing the spec models changed.
+
+- **Line numbers**: the commit's new alias moved every cited
+  `application.ex` line down by one, and the cue tree's by two; the comments
+  point at the committed file.
+
 ## Plan hypotheses
 
 The plan (`docs/design/TLA_PLUS_MODELS.md` §4.3) listed four expected
@@ -1122,8 +1139,8 @@ shortest and can change between runs.
   write or Scheduler call (`job_registry_support.ex:36-41`): a request the owner
   never made. That check's job-row read feeds no modelled column. The store
   of parked confirmations (`Capabilities.AccessGate.Pending`,
-  `application.ex:363`) and the holder of a conversation's place records
-  (`ReplyBlocks`, `:367`, which no job process reads) are two more core
+  `application.ex:364`) and the holder of a conversation's place records
+  (`ReplyBlocks`, `:368`, which no job process reads) are two more core
   children started before the `RunnerSupervisor`, so a crash of either is the
   daemon crash above.
 - The run-row value `unset` stands for the `"none"` the claim writes before a

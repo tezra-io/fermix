@@ -42,7 +42,7 @@ attempt like every platform's, so nothing here models it separately.
   (`delivery_worker.ex:197-200`, `:66`).
 - `SchedulerCanRestart`: the scheduler crashes while the BEAM stays up. Any
   earlier child of the flat `:rest_for_one` list (`Repo`, `MainAgent`,
-  `JobScheduler`, …; `application.ex:291-377`) restarts it too. A scheduler
+  `JobScheduler`, …; `application.ex:292-378`) restarts it too. A scheduler
   Repo call that times out no longer does: it returns an error (see
   `RepoCanFail`).
 - `DaemonCanCrash`: the whole daemon dies and boots again.
@@ -71,7 +71,7 @@ least one check):
   (`:1033`) repeat it inside the same Repo callback (`repo.ex:3134-3137`), where
   no other writer can interleave, so removing only them would change nothing.
 - `WorkersDieWithScheduler`: `DeliverySupervisor` starts after the scheduler
-  under `:rest_for_one` (`application.ex:385-386`, `:186`).
+  under `:rest_for_one` (`application.ex:386-387`, `:187`).
 - `SendsDieWithWorker`: a worker's send process is spawned linked to it
   (`Process.spawn(fun, [:link, :monitor])`, `channel_send.ex:219-224`), so a
   worker killed mid-send takes its send with it. Off, it is the code before the
@@ -97,7 +97,7 @@ least one check):
   - No sixth attempt (`scheduler.ex:332-335`). This rests on `AttemptCap`
     (check 02).
   - Never two workers for the row (`delivery_supervisor.ex:5-10`,
-    `application.ex:378-386`). This rests on `ClaimRequiresPending` (check 03),
+    `application.ex:379-387`). This rests on `ClaimRequiresPending` (check 03),
     `WorkersDieWithScheduler` (check 04) and `ResetSkipsMonitored` (check 05),
     and on the timing fact `DownHandledBeforeRetryDue` (check 20).
   - Never two sends for the row either (the premise of M30 §19.10's no-lease
@@ -254,7 +254,7 @@ counterexample, run `tla/bin/check.py reminder_delivery` and open
 - **Code:**
   - The watchdog reports `:delivery_timeout` without knowing whether the request
     landed (`channel_send.ex:239`, `:284-300`), and that result is retryable
-    (`error.ex:191`, `delivery_worker.ex:121-138`). A result the send posted
+    (`error.ex:195`, `delivery_worker.ex:121-138`). A result the send posted
     just before the kill is discarded too, so a send that did deliver can still
     be reported as a timeout and sent again.
   - A failed settlement exits with `{:settlement_failed, _}`
@@ -266,7 +266,7 @@ counterexample, run `tla/bin/check.py reminder_delivery` and open
   out:**
   - the HTTP client's own receive timeout (Req's 15 s default;
     `telegram.ex:577-580` sets none), which returns a retryable
-    `{:transport, :timeout}` (`error.ex:165-169`, `:190`) and is the usual way
+    `{:transport, :timeout}` (`error.ex:169-173`, `:194`) and is the usual way
     an attempt gives up on a request the platform may already hold, as are a
     connection reset after the write and signal-cli's own timeout
     (`signal.ex:544-547`);
@@ -481,6 +481,27 @@ its delivery supervisor, which keep their order, so a crash of either
 reaches neither, and they touch no `temporal:` row. The commit's new alias
 moved every cited `application.ex` line down by one; the comments point at
 the committed file. No delivery path the spec models changed.
+
+Re-read on 2026-11-11 for the server's use of a computer's screen and
+Messages (M97, `26196634`), which staled the `error.ex` and `application.ex`
+pins:
+- `error.ex`: one more permanent kind, `:carrier_away`, which the iMessage
+  adapter returns at once when the Mac that carries Messages for the server
+  is asleep or offline. `retryable?/1` answers false for it, as for every
+  permanent kind, so a reminder sent over iMessage while that Mac is away
+  ends `failed` on its first attempt: the spec's `"permanent"` answer, whose
+  path (`settle_failed`) is unchanged. The comments' `error.ex` numbers moved
+  down by four with the new lines.
+- `application.ex`: the computer-use supervisor now also starts on an engine
+  that drives a computer's screen or has its own driven by its server, and
+  `ComputerUse.Seat` (this computer's screen while its server drives it)
+  joins the tree beside it on a linked computer. Both start after the
+  temporal scheduler and its delivery supervisor, which keep their order, so
+  a crash of either reaches neither, and neither touches a `temporal:` row.
+  The commit's new alias moved every cited `application.ex` line down by
+  one; the comments point at the committed file.
+
+No delivery path the spec models changed.
 
 ## Code and doc drift
 

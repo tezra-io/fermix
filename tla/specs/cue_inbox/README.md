@@ -571,3 +571,27 @@ tree, as a crash of the registry or the snapshot scheduler already did,
 which the model takes as `FiltersRestart`; `Jobs.Scheduler`, before them, is
 untouched. Nothing the spec models changed; it cites no `application.ex`
 line.
+
+## Re-read for a computer's screen and Messages (2026-11-11)
+
+The server's use of a computer's screen and Messages (M97 §6.4,
+`26196634`) staled the `proposals.ex` and `application.ex` pins:
+- `proposals.ex`: a proposal's card goes to the inbox
+  `OwnerInbox.for_approval/1` picks (`owner_dm`), no longer `resolve/1`'s.
+  It keeps `resolve/1`'s order except that iMessage carried by a computer
+  comes after every inbox on this engine and is never picked while that
+  computer is asleep or offline; with no inbox left the proposal is refused
+  as before. Which chat is picked is not modelled: `OwnerConfirm(right)`
+  takes the chat the card was sent to, and `decide_waiting` still fences on
+  the `sent_platform`, chat and user written with it, so the confirm and the
+  proposal's states are as before.
+- `application.ex`: the computer-use supervisor now also starts on an engine
+  that drives a computer's screen or has its own driven by its server, and
+  `ComputerUse.Seat` joins the tree beside it on a linked computer. Both
+  start before the cue tree, which is still the tree's last child, so a
+  crash of either restarts the cue tree, which the model takes as
+  `FiltersRestart`, and `Jobs.Scheduler`, before them, is untouched.
+  Neither reads or writes a delivery, watcher, run or proposal row.
+
+Nothing the spec models changed; it cites no `application.ex` or
+`proposals.ex` line the change moved.

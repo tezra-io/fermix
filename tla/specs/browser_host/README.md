@@ -39,7 +39,10 @@ process the design spec guessed at:
   is live for it, and pins every later request of it to the backend the live
   profile was started on.
 - `FermixCore.Browser.execute`/`dispatch` (`browser.ex`): where a call first
-  meets a lost turn's `TurnMarker` mark and, past that, `Routing`.
+  meets a lost turn's `TurnMarker` mark and, past that, `Routing`. On a
+  computer that serves a server's turn (M97 §6.4), `Browser.serve/6`, run
+  in the turn's `Browser.HeldTurn`, reads the same two in the same order
+  (`browser.ex:340-357`).
 - `FermixChannels.BrowserHost.{Endpoint,Connection,Supervisor}`: the listener
   (one host at a time) and its connection process, the handshake and the line
   codec. A connection forwards every task's request and release in the order
@@ -289,6 +292,16 @@ more of an entity its rules are about. All still hold:
   `DaemonDown`'s, and a waiting task has no turn to mark (`mark_turn`). A turn
   cancelled or crashed after a handover ends its task as before. No rule
   changes, and no variable needs a turn.
+- A server's turn using a computer's browser (M97 §6.4). Each of its requests
+  reaches the computer as an invocation run by a process of its own, so
+  `Browser.HeldTurn` (`held_turn.ex`), one per server turn, stands for the
+  turn there and makes every request (`Browser.serve/6`): a pane task binds
+  to it as to a turn's process, and a lost pane marks it. It ends when the
+  server says the turn ended (normally, so a handed-over task waits for the
+  next turn) or stopped (its task ends), or after ten minutes with no request
+  (normally). That is a caller's own end as `caller_ended` reads it, and
+  nothing on the wire differs: a `Task` here still stands for that one
+  turn's browser use.
 - `page.login_for` and `page.sign_in` (protocol 2): two requests on a tab the
   task owns, answered like `page.act`, with the owner's in-call wait
   (`AccessGate.ask_in_call/3`) between them in the caller, which holds no
@@ -321,7 +334,7 @@ more of an entity its rules are about. All still hold:
   design spec. A turn (the process that made the first browser call — a
   conversation's turn, a scheduled run, a subagent — not the task itself) that
   loses its pane is marked, and `dispatch` reads that mark before `Routing`
-  ever runs (`browser.ex:154-160`), so every later browser call of *that
+  ever runs (`browser.ex:208-214`), so every later browser call of *that
   turn* answers the same sentence instead of being routed — a turn whose
   first task failed on the host never starts a second task that `Routing`
   could send to Chrome. This is a strictly stronger version of

@@ -40,7 +40,10 @@
 (*    (ProfileManager.backend, not this spec's: it is not one of the files *)
 (*    below, since it also covers profiles this design never routes);      *)
 (*  - FermixCore.Browser.execute/dispatch (browser.ex): where a call first *)
-(*    meets a lost turn's TurnMarker mark and, past that, Routing;         *)
+(*    meets a lost turn's TurnMarker mark and, past that, Routing; on a    *)
+(*    computer that serves a server's turn (M97 §6.4), Browser.serve/6,    *)
+(*    run in the turn's Browser.HeldTurn, reads the same two in the same   *)
+(*    order (browser.ex:340-357);                                          *)
 (*  - FermixChannels.BrowserHost.{Endpoint,Connection,Supervisor}: the     *)
 (*    listener (one host at a time, endpoint.ex:225-235) and its           *)
 (*    connection process, the handshake and the line codec. A connection   *)
@@ -95,7 +98,7 @@
 (*  - FermixCore.Browser.TurnMarker: a turn (the caller of a task, not the *)
 (*    task itself) that loses its pane marks every later browser call of   *)
 (*    THAT TURN with the same sentence (dispatch reads the mark before     *)
-(*    Routing ever runs, browser.ex:157-163), so a turn whose first task   *)
+(*    Routing ever runs, browser.ex:208-214), so a turn whose first task   *)
 (*    failed on the host never starts a second task Routing could send to  *)
 (*    Chrome. This spec's Tasks are already turn-sized: a Task is one      *)
 (*    script run to one Terminal state, and nothing here lets a second     *)
@@ -118,11 +121,21 @@
 (*    and DaemonDown's, and a waiting task has no turn for TurnMarker to   *)
 (*    mark (mark_turn). A turn cancelled or crashed after a handover ends  *)
 (*    its task as before. So no rule changes and no variable needs a turn. *)
+(*  - a server's turn using a computer's browser (M97 §6.4): each of its   *)
+(*    requests reaches the computer as an invocation run by a process of   *)
+(*    its own, so Browser.HeldTurn (held_turn.ex), one per server turn,    *)
+(*    stands for the turn there and makes every request (Browser.serve/6): *)
+(*    a pane task binds to it as to a turn's process, and a lost pane      *)
+(*    marks it. It ends when the server says the turn ended (normally, so  *)
+(*    a handed-over task waits for the next turn) or stopped (its task     *)
+(*    ends), or after ten minutes with no request (normally). That is a    *)
+(*    caller's own end, as caller_ended reads it, and nothing on the wire  *)
+(*    differs: a Task here still stands for that one turn's browser use.   *)
 (*                                                                         *)
 (* One step = one callback of the HostServer, one reducer step of the      *)
 (* host, or one thing the person, a page or the environment does.          *)
 (***************************************************************************)
-\* SOURCE: apps/fermix_core/lib/fermix_core/browser.ex#dispatch,dispatch_profile @ e3d1d93a906c
+\* SOURCE: apps/fermix_core/lib/fermix_core/browser.ex#dispatch,dispatch_profile,serve @ 6cf3d33648a0
 \* SOURCE: apps/fermix_core/lib/fermix_core/browser/host_server.ex#init,stop,handle_message,caller_ended,operate,ensure_task,bind,take_over,check_host,lose,mark_turn,lost_error,request,host_error,public_id @ 618ac5e87417
 \* SOURCE: apps/fermix_core/lib/fermix_core/browser/host_availability.ex @ fc61de7c765c
 \* SOURCE: apps/fermix_core/lib/fermix_core/browser/host_launcher.ex @ 927740e4c233
