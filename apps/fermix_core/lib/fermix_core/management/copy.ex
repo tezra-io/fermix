@@ -211,11 +211,14 @@ defmodule FermixCore.Management.Copy do
     "Android",
     "Node.js",
     "Atom",
-    # The robot's own pairing prompt and its Matches confirm, the Mac app's
-    # Pet destination, its Reconnect action and its This Mac voice device,
-    # named as the robot and the app show them (M91).
+    # The robot's own pairing prompt, its Matches confirm and its Forget
+    # button, the Mac app's Pet destination, its Pair and Reconnect actions
+    # and its This Mac voice device, named as the robot and the app show
+    # them (M91).
     "Pair with this Mac",
     "Matches",
+    "Forget",
+    "Pair",
     "Pet",
     "Reconnect",
     "This Mac",

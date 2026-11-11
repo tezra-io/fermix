@@ -103,6 +103,11 @@ defmodule FermixCore.Management.Accessories do
     vanished: "The USB device was unplugged.",
     failed: "The USB connection failed. Try again."
   }
+  # The robot refused this Mac as another host: it ignores a pairing request
+  # until the owner forgets that Mac on the robot itself.
+  @paired_elsewhere_sentence "This StackChan is paired with another Mac. To pair it here, " <>
+                               "hold the right edge of its screen for 3 seconds, tap Forget, " <>
+                               "then choose Pair."
   @update_sentences %{
     firmware: "Update the robot firmware.",
     fermix: "Update Fermix: this robot's firmware is newer than this Fermix."
@@ -247,6 +252,7 @@ defmodule FermixCore.Management.Accessories do
       VoiceDevice.sentences() ++
       Map.values(@voice_sentences) ++
       Map.values(@port_sentences) ++
+      [@paired_elsewhere_sentence] ++
       Map.values(@update_sentences) ++
       Map.values(@connection_sentences) ++
       Map.values(@calibration_sentences) ++
@@ -1119,6 +1125,10 @@ defmodule FermixCore.Management.Accessories do
 
   defp port_sentence(:incompatible, update, _link), do: Map.fetch!(@update_sentences, update)
   defp port_sentence(:pairing, _update, link), do: enrollment_sentence(link.enrollment)
+
+  defp port_sentence(:not_paired, _update, %{refusal: {:accessory, :unknown_host}}),
+    do: @paired_elsewhere_sentence
+
   defp port_sentence(status, _update, _link), do: Map.fetch!(@port_sentences, status)
 
   # -- accessories -----------------------------------------------------------------

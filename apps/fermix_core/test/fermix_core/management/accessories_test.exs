@@ -188,6 +188,28 @@ defmodule FermixCore.Management.AccessoriesTest do
         assert port["actions"] == ["pair"]
       end
     end
+
+    # A robot paired with another Mac ignores a pairing request until it
+    # forgets that Mac, so Pair alone would only wait.
+    test "a robot paired with another Mac says to forget that Mac on the robot first" do
+      sentence = fn link ->
+        [port] = status!(with_status(Goldens.running([Goldens.entry(:linked, link)])))["ports"]
+        port["sentence"]
+      end
+
+      elsewhere =
+        sentence.(Goldens.link(%{phase: :refused, refusal: {:accessory, :unknown_host}}))
+
+      assert elsewhere =~ "paired with another Mac"
+      assert elsewhere =~ "tap Forget"
+
+      for link <- [
+            Goldens.link(%{phase: :refused, refusal: :bad_proof}),
+            Goldens.link(%{phase: :unenrolled, mode: :attach})
+          ] do
+        assert sentence.(link) == "This robot isn't paired with this Mac."
+      end
+    end
   end
 
   describe "pairing" do

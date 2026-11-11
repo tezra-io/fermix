@@ -2012,7 +2012,7 @@ A **port**'s `status`, its `sentence` and the `actions` it offers:
 | `busy` | "Another app is using StackChan's USB port. Close it and try again." | `retry` |
 | `needs_firmware` | "This USB device isn't running Fermix firmware. If it's your StackChan, install the firmware first." | `open_install_guide`, `retry` |
 | `incompatible` | `update` `firmware`: "Update the robot firmware." `update` `fermix`: "Update Fermix: this robot's firmware is newer than this Fermix." | `open_install_guide` or `update_fermix`, then `release` |
-| `not_paired` | "This robot isn't paired with this Mac." (a robot whose proof failed, or one that forgot its pairing) | `pair` |
+| `not_paired` | "This robot isn't paired with this Mac." (a robot whose proof failed, or one that forgot its pairing); a robot that refused this Mac as another host (`unknown_host`), which ignores a pairing request until it forgets that Mac: "This StackChan is paired with another Mac. To pair it here, hold the right edge of its screen for 3 seconds, tap Forget, then choose Pair." | `pair` |
 | `released` | "Install the firmware update now, then choose Reconnect." | `reconnect` |
 | `vanished` | "The USB device was unplugged." | none |
 | `failed` | "The USB connection failed. Try again." | `retry` |
@@ -2037,7 +2037,7 @@ sentence comes first while attached):
 | `unplugged` | "Plug StackChan into this Mac." |
 | `released` | "Install the firmware update now, then choose Reconnect." |
 | `busy` | the port's |
-| `not_paired` | "This robot isn't paired with this Mac." |
+| `not_paired` | the port's `not_paired` sentence |
 | `incompatible` | the port's |
 | `failed` | "StackChan's USB connection failed. Try again." |
 | `off` | the status's |
