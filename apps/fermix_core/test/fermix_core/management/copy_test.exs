@@ -1043,6 +1043,14 @@ defmodule FermixCore.Management.CopyTest do
           do: assert_owner_words(String.trim(text), :prose, ["Anthropic"], "history promise")
     end
 
+    # M97 §4: what the summarizer row says while this Mac's machine file
+    # decides over the summarizer in config.toml.
+    test "the summarizer row's footer obeys the rules" do
+      footer = FermixCore.ComputerHistory.Config.shadowed_footer()
+      assert_clean(footer, :prose, [], "summarizer footer")
+      refute_command(footer, "summarizer footer")
+    end
+
     # A rename refusal names the computer or the server as the owner typed it.
     test "every rename refusal and switch refusal obeys the rules" do
       for text <- Computers.sentences(),

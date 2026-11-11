@@ -15,9 +15,9 @@ defmodule FermixChannels.Desktop.Companion do
   open, is answered `companion_close` with its reason, and the session stays
   open. The channels end with the session.
 
-  A computer past the server's window (its peer's `standing` is
-  `:settings_only`, `FermixCore.Computers.Versions`, M97 §3.4) keeps its link
-  for settings alone: every `companion_open` is answered `companion_close`
+  A computer past the server's window (its peer's `standing` is not served,
+  `FermixCore.Computers.Versions.served?/1`, M97 §3.4) keeps its link for
+  settings alone: every `companion_open` is answered `companion_close`
   with `settings_only_sentence/0`, and no connection starts.
 
   A phone's list channel (M85 E4) is this family too, for a phone's session
@@ -40,6 +40,7 @@ defmodule FermixChannels.Desktop.Companion do
   alias FermixChannels.Companion.Endpoint
   alias FermixChannels.Desktop.CompanionPump
   alias FermixChannels.Desktop.Peer
+  alias FermixCore.Computers.Versions
   alias FermixCore.Setup.ConfigStore
 
   @max_channels 4
@@ -78,12 +79,11 @@ defmodule FermixChannels.Desktop.Companion do
   end
 
   @impl true
-  def handle_event("companion_open", %{"channel" => channel}, _payload, state)
-      when state.standing == :settings_only,
-      do: {:ok, close(state, channel, @settings_only_sentence)}
-
-  def handle_event("companion_open", %{"channel" => channel}, _payload, state),
-    do: {:ok, open(channel, prune(state))}
+  def handle_event("companion_open", %{"channel" => channel}, _payload, state) do
+    if Versions.served?(state.standing),
+      do: {:ok, open(channel, prune(state))},
+      else: {:ok, close(state, channel, @settings_only_sentence)}
+  end
 
   def handle_event("companion_line", %{"channel" => channel}, line, state) do
     case Map.fetch(state.channels, channel) do

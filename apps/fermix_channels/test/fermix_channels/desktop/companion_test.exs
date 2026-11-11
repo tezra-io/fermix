@@ -86,15 +86,18 @@ defmodule FermixChannels.Desktop.CompanionTest do
       assert_receive {:standing, ^standing}
     end
 
-    {:ok, _peer} =
-      Peer.start(ctx.supervisor,
-        device_id: @device,
-        session: forwarder(),
-        registry: ctx.registry,
-        families: %{manage: StandingFamily}
-      )
+    # Where it stands is never assumed: a peer told nothing does not start.
+    Process.flag(:trap_exit, true)
 
-    assert_receive {:standing, :current}
+    assert {:error, _missing} =
+             Peer.start_link(
+               device_id: @device,
+               session: forwarder(),
+               registry: ctx.registry,
+               families: %{manage: StandingFamily}
+             )
+
+    refute_received {:standing, _assumed}
   end
 
   defp start_peer!(ctx, standing) do

@@ -6,6 +6,8 @@ defmodule FermixChannels.Desktop.TwoEnginesInvokeTest do
   # a new id. async: false: the relay's dial names are VM-wide.
   use ExUnit.Case, async: false
 
+  alias FermixChannels.Desktop.Invoke.Admission
+  alias FermixChannels.Desktop.Relay
   alias FermixChannels.Test.TwoEngines
   alias FermixChannels.Test.TwoEngines.Hold
   alias FermixChannels.Test.TwoEngines.Touch
@@ -15,8 +17,29 @@ defmodule FermixChannels.Desktop.TwoEnginesInvokeTest do
   alias FermixCore.Computers.Outcome
   alias FermixTestSupport.TelemetryCapture
 
-  setup do
-    %{engines: TwoEngines.start!()}
+  setup context do
+    %{engines: TwoEngines.start!(mid_part_send(context[:mid_part] == true))}
+  end
+
+  # With `mid_part`, the first answer's file stops after its first frame,
+  # once, until the test lets its sender go: the moment a session can end in.
+  defp mid_part_send(false), do: []
+
+  defp mid_part_send(true) do
+    test = self()
+    once = start_supervised!({Agent, fn -> true end}, id: :mid_part_once)
+
+    [
+      send: fn relay, event, payload ->
+        if event["t"] == "invoke_part" and event["index"] == 1 and
+             Agent.get_and_update(once, &{&1, false}) do
+          send(test, {:mid_part, self()})
+          receive do: (:go -> :ok)
+        end
+
+        Relay.send_event(relay, event, payload)
+      end
+    ]
   end
 
   test "an echo goes to the computer and back, and the computer journals it", %{engines: e} do
@@ -149,6 +172,55 @@ defmodule FermixChannels.Desktop.TwoEnginesInvokeTest do
     refute_received {:running, "watch", _pid, _part}
   end
 
+  # INVOKE-2: a request that reached the computer while its request handler
+  # was down was dropped there, and nothing remembers it. The handler tells
+  # the server as it starts again, the caller asks, hears there is no record,
+  # and a watch, a long-lived read, is asked again under a new id.
+  test "a request lost on its way to a stopped request handler is asked again once it starts",
+       %{engines: e} do
+    :ok = Supervisor.terminate_child(e.invoke, Admission)
+
+    ExUnit.CaptureLog.capture_log(fn ->
+      task = TwoEngines.call(e, Hold, "hold", %{"name" => "lost watch"}, deadline_ms: 0)
+      await_dropped(e)
+      {:ok, _admission} = Supervisor.restart_child(e.invoke, Admission)
+
+      {again, nil} = TwoEngines.running("lost watch")
+      TwoEngines.finish(again, {:ok, %{"seen" => 1}, nil})
+
+      assert {:ok, %Outcome{result: %{"seen" => 1}, invocation: id}} = Task.await(task, 15_000)
+      assert {:ok, %{entries: [%{id: ^id, status: "ok"}]}} = Journal.list(Journal.dir(e.root))
+    end)
+  end
+
+  # INVOKE-2: what waited when the request handler's own supervisor restarted
+  # went with its table, so no restart answers it. The new handler tells the
+  # server, and the watch that waited is asked again.
+  test "a watch that waited when the whole request handler restarted is asked again",
+       %{engines: e} do
+    touches =
+      for n <- 1..8,
+          do: TwoEngines.call(e, Touch, "touch", %{"name" => "t#{n}.txt"}, deadline_ms: 600_000)
+
+    for n <- 1..8, do: TwoEngines.running("t#{n}.txt")
+    watch = TwoEngines.call(e, Hold, "hold", %{"name" => "waiting watch"}, deadline_ms: 0)
+    await_waiting(e, 1)
+    invoke = Process.whereis(e.invoke)
+    ref = Process.monitor(invoke)
+
+    ExUnit.CaptureLog.capture_log(fn ->
+      Process.exit(invoke, :kill)
+      assert_receive {:DOWN, ^ref, :process, ^invoke, :killed}
+
+      for task <- touches,
+          do: assert({:error, %Outcome{status: :unknown}} = Task.await(task, 15_000))
+
+      {again, nil} = TwoEngines.running("waiting watch")
+      TwoEngines.finish(again, {:ok, %{"seen" => 2}, nil})
+      assert {:ok, %Outcome{result: %{"seen" => 2}}} = Task.await(watch, 15_000)
+    end)
+  end
+
   # A caller that ends is the server's one way to stop what it asked: its
   # waiter cancels the request on the computer, which only ever follows the
   # request, since the caller sent that before it ended.
@@ -175,6 +247,31 @@ defmodule FermixChannels.Desktop.TwoEnginesInvokeTest do
     {run, part} = TwoEngines.running("files")
     assert part == upload
     TwoEngines.finish(run, {:ok, %{"kind" => "picture"}, download})
+
+    assert {:ok, %Outcome{result: %{"kind" => "picture"}, part_bytes: ^download}} =
+             Task.await(task, 15_000)
+  end
+
+  # C3, settled: a file cut off with its session goes with that session's
+  # half on the server. The caller asks after the reconnect, and the computer
+  # sends the answer it holds again, its file from its first frame, so it
+  # arrives whole in the new session.
+  @tag :mid_part
+  test "an answer's file cut off with its session arrives whole after the reconnect",
+       %{engines: e} do
+    download = :crypto.strong_rand_bytes(280 * 1_024)
+    task = TwoEngines.call(e, Wait, "wait", %{"name" => "cut off"})
+    {run, nil} = TwoEngines.running("cut off")
+    TwoEngines.finish(run, {:ok, %{"kind" => "picture"}, download})
+    assert_receive {:mid_part, sender}, 10_000
+    ref = Process.monitor(sender)
+
+    ExUnit.CaptureLog.capture_log(fn ->
+      :ok = TwoEngines.drop_session!(e)
+      send(sender, :go)
+      assert_receive {:DOWN, ^ref, :process, ^sender, _reason}, 10_000
+      :ok = TwoEngines.reconnect!(e)
+    end)
 
     assert {:ok, %Outcome{result: %{"kind" => "picture"}, part_bytes: ^download}} =
              Task.await(task, 15_000)
@@ -221,6 +318,39 @@ defmodule FermixChannels.Desktop.TwoEnginesInvokeTest do
     # sleep: polls the computer's journal, which announces nothing
     Process.sleep(10)
     await_closed_unknown(root, attempts - 1)
+  end
+
+  # The computer's relay dropped an invocation event: its request handler
+  # was not running.
+  defp await_dropped(e, attempts \\ 1_000) do
+    case :sys.get_state(e.relay).drops do
+      %{invoke: %{dropped: dropped}} when dropped > 0 ->
+        :ok
+
+      _not_yet when attempts == 0 ->
+        flunk("the computer's relay never dropped the request")
+
+      _not_yet ->
+        # sleep: polls the relay's state, which announces a drop only in its log
+        Process.sleep(10)
+        await_dropped(e, attempts - 1)
+    end
+  end
+
+  # The computer's request handler holds `count` request(s) waiting for a slot.
+  defp await_waiting(e, count, attempts \\ 1_000) do
+    case :queue.len(:sys.get_state(e.admission).waiting) do
+      ^count ->
+        :ok
+
+      _not_yet when attempts == 0 ->
+        flunk("the computer never queued the request")
+
+      _not_yet ->
+        # sleep: polls the request handler's state, which announces a wait to nobody
+        Process.sleep(10)
+        await_waiting(e, count, attempts - 1)
+    end
   end
 
   defp await_journaled(root, status, attempts \\ 1_000) do

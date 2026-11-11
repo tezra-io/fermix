@@ -69,7 +69,10 @@ defmodule FermixCore.Management.AlwaysOn do
       input's `keep_offers` stay on, every other is off, and the switches are
       reviewed (`Computers.Consent.review/3`); with none given, the block as
       the summary proposed it. `move_now` and `try_again` record their
-      `keep_offers` in the move the same way (`HomeMove.move_start/3`).
+      `keep_offers` in the move the same way (`HomeMove.move_start/3`); a
+      `try_again` with none, whose undone screen offers no block, moves with
+      the keep the undone move started with (`Move.undone_keep/1`), never
+      the proposal.
     * `add_computer` (M97 §3.1): a code a new computer joins the home with
       (`home.enroll.open {purpose: computer}`, here on the server, over the
       link on a linked computer), answered once as `{code, expires_at}`.
@@ -462,17 +465,24 @@ defmodule FermixCore.Management.AlwaysOn do
   defp local_move(candidate_id, request, opts) do
     with :ok <- reviewed(candidate_id, opts),
          :ok <- still_offered(request, opts),
-         {:ok, keep} <- keep_offers(request.input, opts),
+         {:ok, keep} <- keep_offers(request, opts),
          {:ok, started} <-
            HomeMove.move_start(candidate_id, request.input.recovery_passphrase, opts ++ keep),
          do: {:ok, %{"move_id" => started["move_id"]}}
   end
 
   # What this computer keeps on for its server after the move (M97 §7.3): the
-  # lines the owner left ticked, else the block as the engine proposed it.
-  defp keep_offers(%Input{keep_offers: nil}, _opts), do: {:ok, []}
+  # lines the owner left ticked; Try again, which offers no block to tick,
+  # moves with the keep the undone move started with (`Move.undone_keep/1`);
+  # else the block as the engine proposed it.
+  defp keep_offers(%{input: %Input{keep_offers: nil}, action: "try_again"}, opts),
+    do: cast_keep(Move.undone_keep(home(opts)))
 
-  defp keep_offers(%Input{keep_offers: keep}, _opts) do
+  defp keep_offers(%{input: %Input{keep_offers: keep}}, _opts), do: cast_keep(keep)
+
+  defp cast_keep(nil), do: {:ok, []}
+
+  defp cast_keep(keep) do
     case Consent.cast(keep) do
       {:ok, offers} -> {:ok, [keep_offers: offers]}
       {:error, _offer} -> {:error, {:invalid_params, "keep_offers", @keep_sentence}}

@@ -261,6 +261,7 @@ defmodule FermixChannels.Desktop.PeerTest do
           device_id: @device,
           session: session,
           registry: ctx.registry,
+          standing: :current,
           connected_since: @since,
           families: @families
         ],

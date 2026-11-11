@@ -23,7 +23,10 @@ defmodule FermixCore.Computers.Outcome do
   A `receipt` is the computer's record that it took the request: when, and
   what it acted on (`target`, a path, a host or an action; never content).
   An answer that says only what the computer's journal recorded, its result
-  no longer held there (`receipt_only`), carries no result.
+  no longer held there (`receipt_only`), carries no result. An effect whose
+  answer arrived and whose file (its part) did not is `part_lost`, the
+  server's own word, never on the wire: it ran, and its output was lost on
+  the way.
 
   On the wire an outcome is the `invoke_result` event (`to_wire/1`,
   `from_wire/2`): its header and its result JSON. `sentence/2` is what the
@@ -87,6 +90,7 @@ defmodule FermixCore.Computers.Outcome do
             part_bytes: nil,
             duration_ms: 0,
             receipt_only: false,
+            part_lost: false,
             invocation: nil,
             computer: nil,
             capability: nil,
@@ -103,6 +107,7 @@ defmodule FermixCore.Computers.Outcome do
           part_bytes: binary() | nil,
           duration_ms: non_neg_integer(),
           receipt_only: boolean(),
+          part_lost: boolean(),
           invocation: String.t() | nil,
           computer: String.t() | nil,
           capability: String.t() | nil,
@@ -314,7 +319,16 @@ defmodule FermixCore.Computers.Outcome do
   def sentence(%__MODULE__{status: :ok, receipt_only: true}, name),
     do: "#{name} did it, but its answer was lost on the way back."
 
+  def sentence(%__MODULE__{status: :ok, part_lost: true}, name),
+    do: "#{name} ran it, but its output was lost on the way back, so it is not run again."
+
   def sentence(%__MODULE__{status: :ok}, name), do: "Done on #{name}."
+
+  def sentence(%__MODULE__{status: :failed, part_lost: true, message: message}, name),
+    do:
+      "#{name}: #{message} The rest of its output was lost on the way back, so it is not " <>
+        "run again."
+
   def sentence(%__MODULE__{status: :failed, message: message}, name), do: "#{name}: #{message}"
 
   def sentence(%__MODULE__{status: :refused} = outcome, name),
@@ -395,7 +409,9 @@ defmodule FermixCore.Computers.Outcome do
     [
       %{base | status: :ok},
       %{base | status: :ok, receipt_only: true},
+      %{base | status: :ok, part_lost: true},
       %{base | status: :failed, message: "No such file."},
+      %{base | status: :failed, message: "Command failed (exit code 2):", part_lost: true},
       %{base | status: :timed_out, deadline_ms: 20_000},
       %{base | status: :timed_out, deadline_ms: 1_000},
       %{base | status: :timed_out},

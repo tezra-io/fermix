@@ -10,6 +10,11 @@ defmodule FermixChannels.Gateway.Commands.History do
     * `/history off`               — disable (un-advertises next turn); data stays
     * `/history off <computer>`    — switch a computer's history off (M97 §8.5)
 
+  On a home with no computer, whatever follows `off` switches this machine
+  off, as it always did. On a home that records nothing itself (an Always On
+  server), `off` alone changes nothing and names the computers and what to
+  type.
+
   Enabling is the wizard's job (the consent act, §5.5), never a chat command.
   """
 
@@ -90,11 +95,7 @@ defmodule FermixChannels.Gateway.Commands.History do
   defp dispatch(["purge", window], reply_fn, host),
     do: purge(window, reply_fn, host)
 
-  defp dispatch(["off"], reply_fn, host),
-    do: off(reply_fn, host.recorder?, host.controller)
-
-  defp dispatch(["off" | name], reply_fn, host),
-    do: reply(reply_fn, off_computer(Enum.join(name, " "), host))
+  defp dispatch(["off" | words], reply_fn, host), do: reply(reply_fn, off(words, host))
 
   defp dispatch(_other, reply_fn, _host), do: reply(reply_fn, usage())
 
@@ -102,19 +103,26 @@ defmodule FermixChannels.Gateway.Commands.History do
 
   # This machine's own lines where it records, the home's, then one block per
   # computer of the home (M97 §8.5).
-  defp status_text(%{repo: repo, spool: spool} = host) do
-    [machine_lines(host), home_lines(repo, spool, host), computer_blocks(host)]
+  # A store that did not open (M97 §8.1) is said instead of the lines read
+  # from it.
+  defp status_text(%{repo: repo} = host) do
+    host = Map.put(host, :store, store(host))
+
+    [machine_lines(host), home_lines(repo, host), computer_blocks(host)]
     |> List.flatten()
     |> Enum.reject(&is_nil/1)
     |> Enum.join("\n")
   end
 
-  defp machine_lines(%{recorder?: true, spool: spool}),
+  defp store(%{recorder?: false}), do: :none
+  defp store(%{spool: spool}), do: Spool.status(server: spool)
+
+  defp machine_lines(%{recorder?: true, spool: spool, store: store}),
     do: [
       enabled_line(),
       capture_line(),
       allowlist_line(),
-      coverage_line(spool),
+      store_line(store, spool),
       summarizer_line()
     ]
 
@@ -124,11 +132,18 @@ defmodule FermixChannels.Gateway.Commands.History do
   defp machine_lines(%{recorder?: false}),
     do: "Computer history: kept on this home for its computers. #{home_summarizer_line()}"
 
-  defp home_lines(repo, spool, %{recorder?: true}),
+  defp home_lines(repo, %{store: :open, spool: spool}),
     do: [chain_line(), spool_line(spool), memory_line(repo, spool), access_line(repo)]
 
-  defp home_lines(repo, _spool, %{recorder?: false}),
+  defp home_lines(repo, _host),
     do: [chain_line(), memory_line(repo, nil), access_line(repo)]
+
+  defp store_line(:open, spool), do: coverage_line(spool)
+
+  defp store_line({:unavailable, path, reason}, _spool) do
+    "Store: this Mac's history store at #{path} did not open (#{inspect(reason)}), so nothing " <>
+      "is recorded. Fermix opens it again when it restarts."
+  end
 
   defp enabled_line do
     "Computer history: #{if Config.enabled?(), do: "on", else: "off"}."
@@ -247,18 +262,28 @@ defmodule FermixChannels.Gateway.Commands.History do
   defp ax_refused_clause(apps),
     do: "AX refused for #{Enum.join(apps, ", ")} (the app declined to report changes)"
 
+  # A local summarizer in this Mac's machine file decides over a different one
+  # in config.toml (M97 §4), and the line says which file decides.
   defp summarizer_line do
-    case Config.summarizer() do
-      :local ->
-        "Summarizer: on-device (local)."
-
-      :default_provider ->
-        "Summarizer: #{default_provider_label()} (raw activity leaves this Mac)."
-
-      {:provider, provider} ->
-        "Summarizer: #{provider} (raw activity leaves this Mac)."
+    case Config.shadowed_route() do
+      nil -> summarizer_phrase(Config.summarizer())
+      route -> shadowed_phrase(route)
     end
   end
+
+  defp shadowed_phrase(route) do
+    ~s|Summarizer: on-device (local), set by summarizer = "local" in this Mac's machine.toml; | <>
+      "the summarizer in config.toml (#{Config.route_word(route)}) is not used while that " <>
+      "line is there."
+  end
+
+  defp summarizer_phrase(:local), do: "Summarizer: on-device (local)."
+
+  defp summarizer_phrase(:default_provider),
+    do: "Summarizer: #{default_provider_label()} (raw activity leaves this Mac)."
+
+  defp summarizer_phrase({:provider, provider}),
+    do: "Summarizer: #{provider} (raw activity leaves this Mac)."
 
   # Whether recall can surface in chat at all, and on which providers (§9.4). The
   # chain rule can deny every owner turn — a configured, capturing, summarizing
@@ -666,8 +691,21 @@ defmodule FermixChannels.Gateway.Commands.History do
 
   # --- off ----------------------------------------------------------------
 
-  defp off(reply_fn, macos?, controller),
-    do: reply(reply_fn, off_text(disable(macos?, controller)))
+  # One rule (M97 §8.5): a home with no computer switches this machine off,
+  # whatever follows `off`, as before computers could be named. With
+  # computers, `off` alone switches this machine off where it records, says
+  # so where it records nothing (a server), and a name switches that computer
+  # off.
+  defp off(_words, %{computers: []} = host), do: off_text(disable(host))
+  defp off([], %{recorder?: true} = host), do: off_text(disable(host))
+  defp off([], host), do: records_nothing(host.computers)
+  defp off(name, host), do: off_computer(Enum.join(name, " "), host)
+
+  defp records_nothing(computers) do
+    "This server records no computer history itself, so there is nothing to switch off " <>
+      "here. Each computer records its own: " <>
+      Enum.map_join(computers, "; ", &"/history off #{&1.name} switches off #{&1.name}") <> "."
+  end
 
   # `/history off <computer>` (M97 §7.2, §8.5): narrowing may come from
   # anywhere. The home records it at once and takes nothing more from that
@@ -691,9 +729,6 @@ defmodule FermixChannels.Gateway.Commands.History do
       computer -> {:ok, computer}
     end
   end
-
-  defp no_such_computer(name, []),
-    do: "This home has no computer named #{name}. /history off alone switches off this one."
 
   defp no_such_computer(name, computers),
     do:
@@ -773,9 +808,9 @@ defmodule FermixChannels.Gateway.Commands.History do
   # this system has a recorder, the only place the rail records, and the save
   # runs whatever the stop's outcome: the durable disable must not depend on the
   # live stop. Returns both outcomes for the reply.
-  defp disable(recorder?, controller) do
+  defp disable(host) do
     %{stop: stop, save: save} =
-      ComputerHistory.switch_off(recorder?: recorder?, controller: controller)
+      ComputerHistory.switch_off(recorder?: host.recorder?, controller: host.controller)
 
     {stop, save}
   end

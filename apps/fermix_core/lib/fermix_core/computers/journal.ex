@@ -21,7 +21,11 @@ defmodule FermixCore.Computers.Journal do
   capability, op, target and origin itself. A finished record may carry a
   `refusal` and a `note` (`interrupted`: the engine stopped while it ran).
   The journal never holds content: the target is a short description (a
-  path, a host or an action).
+  path, a host or an action). A request its capability says is no thing
+  Fermix did on this computer (`Capability.recorded?/3`: the renewal of a
+  screen hold, sent every 30 s while a server session holds the screen) has
+  no record at all, so bookkeeping never pushes what Fermix did out of the
+  bound below.
 
   A torn last line (a crash in the middle of a write) is skipped when read,
   logged once per read, and the next append starts on a fresh line.

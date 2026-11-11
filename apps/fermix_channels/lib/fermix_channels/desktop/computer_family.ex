@@ -6,7 +6,8 @@ defmodule FermixChannels.Desktop.ComputerFamily do
   (`FermixCore.Computers.Registry`).
 
   As the computer's peer starts, its session is up (`Registry.connected/3`,
-  with when the peer registered); as the peer ends, the session ended
+  with when the peer registered and where its session's hello found it
+  standing); as the peer ends, the session ended
   (`Registry.disconnected/3`). Until the session's first `offers` the
   computer offers nothing.
 
@@ -16,6 +17,11 @@ defmodule FermixChannels.Desktop.ComputerFamily do
   with the sentence that names what was wrong, the session stays open, and
   the computer is recorded as offering nothing until it sends a payload the
   home takes: a bad payload fails closed for that computer alone.
+
+  The family keeps what it last told the live view, so a view that restarted
+  is told it all again (`announce/2`, which the view asks for as it starts,
+  through `Home.Link`'s `announce_computers/1`): it is rebuilt from the open
+  sessions, never left empty under them.
 
   Options in the context (a test's seams): `:registry`, the Registry's name.
   """
@@ -30,44 +36,89 @@ defmodule FermixChannels.Desktop.ComputerFamily do
 
   @paths %{"direct" => :direct, "relay" => :relay}
 
+  @doc """
+  Asks the family of every computer whose session is up in `peers` (the
+  primary's desktop peers) to tell the live view named `registry` its facts
+  again. A family that reports to another view keeps still; a session that
+  ended in between has nothing to tell.
+  """
+  @spec announce(atom(), GenServer.server()) :: :ok
+  def announce(registry, peers) when is_atom(registry) do
+    Enum.each(Peer.connected(peers), fn %{device_id: device_id} ->
+      case Peer.tell(device_id, :computer, {:announce, registry}, registry: peers) do
+        :ok -> :ok
+        {:error, :not_connected} -> :ok
+      end
+    end)
+  end
+
   @impl true
   def init(%{device_id: device_id, session: session, registry: peers} = context) do
-    registry = Keyword.get(context.options, :registry, Registry)
+    state = %{
+      device_id: device_id,
+      session: session,
+      registry: Keyword.get(context.options, :registry, Registry),
+      since: since(peers, device_id),
+      standing: context.standing,
+      offers: nil,
+      path: nil
+    }
 
-    :ok =
-      Registry.connected(registry, device_id, %{since: since(peers, device_id), session: session})
-
-    {:ok, %{device_id: device_id, session: session, registry: registry}}
+    :ok = connected(state)
+    {:ok, state}
   end
 
   @impl true
   def handle_event("offers", %{"rev" => rev}, payload, state) do
     case checked(payload, rev) do
       {:ok, offers} ->
-        :ok = Registry.offers(state.registry, state.device_id, state.session, offers, rev)
-        {:ok, state}
+        {:ok, offered(state, {offers, rev})}
 
       {:error, {:invalid_offers, sentence}} = refused ->
         Logger.warning(
           "computer #{state.device_id}: #{sentence} It offers nothing until it sends offers this server takes."
         )
 
-        :ok = Registry.offers(state.registry, state.device_id, state.session, [], nil)
-        {:error, elem(refused, 1), state}
+        {:error, elem(refused, 1), offered(state, {[], nil})}
     end
   end
 
   def handle_event("link_path", %{"path" => path}, _payload, state) do
-    :ok = Registry.path(state.registry, state.device_id, state.session, Map.fetch!(@paths, path))
+    state = %{state | path: Map.fetch!(@paths, path)}
+    :ok = Registry.path(state.registry, state.device_id, state.session, state.path)
     {:ok, state}
   end
 
+  # The live view it reports to restarted and asks again: everything it was
+  # told, in the order it was first told it.
   @impl true
+  def handle_info({:announce, registry}, %{registry: registry} = state) do
+    :ok = connected(state)
+    if state.offers, do: :ok = told_offers(state)
+    if state.path, do: :ok = Registry.path(registry, state.device_id, state.session, state.path)
+    {:ok, state}
+  end
+
   def handle_info(_message, state), do: {:ok, state}
 
   @impl true
   def terminate(_reason, state),
     do: Registry.disconnected(state.registry, state.device_id, state.session)
+
+  defp connected(state) do
+    facts = %{since: state.since, session: state.session, standing: state.standing}
+    Registry.connected(state.registry, state.device_id, facts)
+  end
+
+  # What the view is told offered, a refused payload as nothing.
+  defp offered(state, offers) do
+    state = %{state | offers: offers}
+    :ok = told_offers(state)
+    state
+  end
+
+  defp told_offers(%{offers: {offers, rev}} = state),
+    do: Registry.offers(state.registry, state.device_id, state.session, offers, rev)
 
   # The payload is the one its revision names.
   defp checked(payload, rev) do

@@ -674,7 +674,8 @@ ExUnit or a doc fix.
   events it covers whatever the horizon read says.
 - There is no resume verb. The design says "resume is explicit or after the
   duration, announced either way" (MILESTONE_32 §12). The code has only the
-  horizon: `history.ex:79-94`, and `set_pause_until(nil)` has no caller. It
+  horizon: `history.ex:79-94`; nothing clears it (`Spool.set_pause_until/2`
+  is gone, H8 of the M97 review). It
   sends no announcement when the horizon passes. Because the horizon is never
   cleared, an event with no integer `ts` is dropped for good once any pause
   was set (`ingest.ex:238-241`); every real event carries one.

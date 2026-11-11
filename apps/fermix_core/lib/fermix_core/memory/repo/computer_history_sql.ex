@@ -389,6 +389,34 @@ defmodule FermixCore.Memory.Repo.ComputerHistorySql do
   @spec reports_schema(term()) :: :ok | {:error, term()}
   def reports_schema(conn), do: add_missing_columns(conn, @reports_columns)
 
+  # Migration 61 (M97 §8.5): the home's store gets a token of its own, made
+  # once, at random. Every store, a server's rebuilt from nothing or another
+  # home's, makes its own; a restored one keeps its snapshot's, so the home's
+  # identity joins it with the home's epoch, which a restore moves
+  # (`ComputerHistory.home_identity/1`).
+  @home_schema_sql """
+  CREATE TABLE IF NOT EXISTS computer_history_home (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    token TEXT NOT NULL
+  );
+  INSERT OR IGNORE INTO computer_history_home (id, token)
+    VALUES (1, lower(hex(randomblob(16))));
+  """
+
+  @doc "Migration 61, in `conn`'s open transaction: the home store's own token. Safe to run again."
+  @spec home_schema(term()) :: :ok | {:error, term()}
+  def home_schema(conn), do: Sqlite3.execute(conn, @home_schema_sql)
+
+  @doc "The home store's own token (migration 61)."
+  @spec home_token(term()) :: {:ok, String.t()} | {:error, term()}
+  def home_token(conn) do
+    case query_all(conn, "SELECT token FROM computer_history_home WHERE id = 1", []) do
+      {:ok, [[token]]} when is_binary(token) -> {:ok, token}
+      {:ok, _none} -> {:error, :no_home_token}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
   defp add_missing_columns(conn, columns) do
     Enum.reduce_while(columns, :ok, fn column, :ok ->
       case add_missing_column(conn, column) do
@@ -718,20 +746,22 @@ defmodule FermixCore.Memory.Repo.ComputerHistorySql do
 
   @doc """
   What a machine last heard from its home (`computer_history_link`): the highest
-  purge or pause interval it applied (`home_mark`), how many raw events expired
-  before they were sent, and its last answer.
+  purge or pause interval it applied (`home_mark`) of the home store `home`
+  names (its identity, `ComputerHistory.home_identity/1`, nil before any), how
+  many raw events expired before they were sent, and its last answer.
   """
   @spec link(term()) :: {:ok, map()} | {:error, term()}
   def link(conn) do
     sql =
-      "SELECT home_mark, expired_unsent, last_answer, last_reason, last_answer_at " <>
+      "SELECT home_mark, home, expired_unsent, last_answer, last_reason, last_answer_at " <>
         "FROM computer_history_link WHERE id = 1"
 
     with :ok <- ensure_link(conn),
-         {:ok, [[mark, expired, answer, reason, at]]} <- query_all(conn, sql, []) do
+         {:ok, [[mark, home, expired, answer, reason, at]]} <- query_all(conn, sql, []) do
       {:ok,
        %{
          home_mark: mark,
+         home: home,
          expired_unsent: expired,
          last_answer: answer,
          last_reason: reason,
@@ -754,17 +784,48 @@ defmodule FermixCore.Memory.Repo.ComputerHistorySql do
     end
   end
 
-  @doc "Record that this machine applied its home's intervals up to `mark`; it never goes back."
-  @spec set_home_mark(term(), non_neg_integer()) :: :ok | {:error, term()}
-  def set_home_mark(conn, mark) when is_integer(mark) and mark >= 0 do
+  @doc """
+  Record that this machine applied every interval up to `mark` of the home
+  store `home` names, in one write: under the same store the mark never goes
+  back; under another (a restore, a rebuilt server, another home, whose ids
+  start again) the mark and the store are replaced together.
+  """
+  @spec set_home_mark(term(), String.t(), non_neg_integer()) :: :ok | {:error, term()}
+  def set_home_mark(conn, home, mark)
+      when is_binary(home) and home != "" and is_integer(mark) and mark >= 0 do
     with :ok <- ensure_link(conn) do
       execute(
         conn,
-        "UPDATE computer_history_link SET home_mark = MAX(home_mark, ?) WHERE id = 1",
-        [mark]
+        "UPDATE computer_history_link SET " <>
+          "home_mark = CASE WHEN home IS ?1 THEN MAX(home_mark, ?2) ELSE ?2 END, home = ?1 " <>
+          "WHERE id = 1",
+        [home, mark]
       )
     end
   end
+
+  @doc "Forget which home store this machine's mark belongs to: the mark is 0 again."
+  @spec forget_home(term()) :: :ok | {:error, term()}
+  def forget_home(conn) do
+    with :ok <- ensure_link(conn) do
+      execute(
+        conn,
+        "UPDATE computer_history_link SET home_mark = 0, home = NULL WHERE id = 1",
+        []
+      )
+    end
+  end
+
+  # The machine store's columns added after its first version (`spool_columns/1`).
+  @spool_columns [{"computer_history_link", "home", "TEXT"}]
+
+  @doc """
+  The machine store's second version (M97 §8.5), safe to run again: what this
+  machine heard from its home also names that home's store (`home`), each
+  column added where it is missing.
+  """
+  @spec spool_columns(term()) :: :ok | {:error, term()}
+  def spool_columns(conn), do: add_missing_columns(conn, @spool_columns)
 
   # An interval matters to the fence while a row stamped inside it could still
   # arrive or be kept, and to the note and thread guard while a batch read before
@@ -820,17 +881,6 @@ defmodule FermixCore.Memory.Repo.ComputerHistorySql do
   def count_events(conn) do
     with {:ok, [[count]]} <- query_all(conn, "SELECT count(*) FROM computer_history_events", []) do
       {:ok, count}
-    end
-  end
-
-  @doc "The oldest spool event's `ts` (epoch ms), or nil when the spool is empty."
-  @spec oldest_event_ts(term()) :: {:ok, integer() | nil} | {:error, term()}
-  def oldest_event_ts(conn) do
-    with {:ok, rows} <- query_all(conn, "SELECT min(ts) FROM computer_history_events", []) do
-      case rows do
-        [[ts]] -> {:ok, ts}
-        _empty -> {:ok, nil}
-      end
     end
   end
 
@@ -1982,23 +2032,6 @@ defmodule FermixCore.Memory.Repo.ComputerHistorySql do
         conn,
         "UPDATE computer_history_state SET status = 'idle', updated_at = ? WHERE id = 1",
         [now_iso]
-      )
-    end
-  end
-
-  @doc """
-  Set (or clear, with nil) the capture pause horizon — an ISO8601 string. A
-  `/history pause 30m` persists this so the pause survives a mid-pause daemon
-  restart rather than silently lapsing (§7.3).
-  """
-  @spec set_pause_until(term(), String.t() | nil) :: :ok | {:error, term()}
-  def set_pause_until(conn, pause_until) do
-    with {:ok, _row} <- ensure_state(conn) do
-      execute(
-        conn,
-        "UPDATE computer_history_state SET pause_until = ?, updated_at = " <>
-          "strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id = 1",
-        [pause_until]
       )
     end
   end

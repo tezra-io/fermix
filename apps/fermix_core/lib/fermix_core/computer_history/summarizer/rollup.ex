@@ -57,7 +57,8 @@ defmodule FermixCore.ComputerHistory.Summarizer.Rollup do
   Run the roll-up if it is due and there is anything new to roll up. `opts`
   carries `:now` (UTC DateTime), `:model` (the resolved route's model, stored on
   every thread row) and optionally `:timezone` and `:machines` (whose notes it
-  reads: `:all`, the default, or the ids of the machines that contribute). `call_fun` is the caller's pinned,
+  reads, and whose threads it shows: `:all`, the default, or the ids of the
+  machines that contribute). `call_fun` is the caller's pinned,
   gate-checked provider call — the roll-up never resolves a route of its own and
   never fails over.
 
@@ -69,13 +70,14 @@ defmodule FermixCore.ComputerHistory.Summarizer.Rollup do
           :ok | :skipped | {:route_down, term()} | {:error, term()}
   def maybe_run(repo, opts, call_fun) when is_list(opts) and is_function(call_fun, 1) do
     now_ms = opts |> Keyword.fetch!(:now) |> DateTime.to_unix(:millisecond)
+    machines = Keyword.get(opts, :machines, :all)
 
     with {:ok, state} <- Repo.computer_history_ensure_state(server: repo),
          true <- due?(state, now_ms),
          {:ok, purge_mark} <- Repo.computer_history_purge_mark(server: repo),
-         {:ok, [_first | _rest] = notes} <-
-           read_notes(repo, state.last_rollup_ts, Keyword.get(opts, :machines, :all)),
-         {:ok, threads} <- Repo.computer_history_active_threads(@max_active_threads, server: repo) do
+         {:ok, [_first | _rest] = notes} <- read_notes(repo, state.last_rollup_ts, machines),
+         {:ok, current} <- Repo.computer_history_active_threads(@max_active_threads, server: repo),
+         {:ok, threads} <- shown_threads(repo, current, machines) do
       run(repo, opts, call_fun, notes, threads, read_scope(purge_mark, notes, threads), now_ms)
     else
       false -> :skipped
@@ -121,6 +123,26 @@ defmodule FermixCore.ComputerHistory.Summarizer.Rollup do
       from_ts: rows |> Enum.map(& &1.provenance_from_ts) |> Enum.min(),
       to_ts: rows |> Enum.map(& &1.provenance_to_ts) |> Enum.max()
     }
+  end
+
+  # A current thread's state is its notes' history in other words, so it is
+  # shown to the call only when every note it cites is found and belongs to a
+  # machine that still contributes (M97 §8.5); the others are not shown, and
+  # retire with this write as any thread the reply leaves out does.
+  defp shown_threads(_repo, threads, :all), do: {:ok, threads}
+
+  defp shown_threads(repo, threads, machines) do
+    ids = threads |> Enum.flat_map(&decode_ids(&1.source_ids)) |> Enum.uniq()
+
+    with {:ok, cited} <- fetch_prior(ids, repo) do
+      machine_of = Map.new(cited, &{&1.id, &1.computer_id})
+      {:ok, Enum.filter(threads, &contributing?(&1, machine_of, machines))}
+    end
+  end
+
+  defp contributing?(thread, machine_of, machines) do
+    ids = decode_ids(thread.source_ids)
+    ids != [] and Enum.all?(ids, &(Map.get(machine_of, &1) in machines))
   end
 
   defp log_note_bound(read, total) when read >= total, do: :ok

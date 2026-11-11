@@ -12,6 +12,7 @@ defmodule FermixChannels.Gateway.Commands.HistoryTest do
   alias FermixCore.ComputerHistory.Spool
   alias FermixCore.Computers.Computer
   alias FermixCore.Memory.Repo
+  alias FermixTestSupport.HistorySpool
   alias FermixTestSupport.SafeRm
 
   defp message(content) do
@@ -616,7 +617,7 @@ defmodule FermixChannels.Gateway.Commands.HistoryTest do
     # horizon is written. The pause's window is fenced too (M97 §8.5), so only
     # an event stamped after its end is.
     past = DateTime.utc_now() |> DateTime.add(-60, :second) |> DateTime.to_iso8601()
-    assert :ok = Spool.set_pause_until(past, server: spool)
+    assert :ok = HistorySpool.put_pause_until(spool, past)
     resumed = %{event | source_seq: 2, ts: System.system_time(:millisecond) + 31 * 60_000}
 
     assert {:ok, %{written: 1, dropped: 1}} =
@@ -627,7 +628,7 @@ defmodule FermixChannels.Gateway.Commands.HistoryTest do
   end
 
   test "an unparseable pause horizon fails CLOSED (capture stays off)", %{spool: spool} do
-    assert :ok = Spool.set_pause_until("not-a-timestamp", server: spool)
+    assert :ok = HistorySpool.put_pause_until(spool, "not-a-timestamp")
 
     event = %{boot_id: "b1", source_seq: 1, ts: 1_000, type: "app.activated", bundle_id: "com.a"}
 
@@ -826,6 +827,71 @@ defmodule FermixChannels.Gateway.Commands.HistoryTest do
     refute_received :reconciled
     assert text =~ "disabled — nothing new is captured"
     refute ComputerHistoryConfig.enabled?()
+  end
+
+  # One rule for `/history off`: on a home with no computer, whatever follows
+  # it, this machine goes off, as before computers could be named.
+  test "off with more words on a home with no computer switches this machine off", %{ctx: ctx} do
+    ctx = ctx |> macos_ctx() |> Map.put(:computer_history_controller, controller_stub(:ok))
+
+    assert :ok = History.execute(message("off for now"), reply_fn(self()), ctx)
+    assert_receive {:reply, text}
+    assert_received :reconciled
+    assert text =~ "disabled — nothing new is captured"
+    refute ComputerHistoryConfig.enabled?()
+  end
+
+  # A server records nothing itself: bare off there changes nothing, says so,
+  # and names the computers that do and what to type.
+  test "off alone on a home that records nothing itself names its computers", %{ctx: ctx} do
+    ctx =
+      ctx
+      |> Map.put(:computer_history_recorder?, false)
+      |> Map.put(:computer_history_computers, [studio(true)])
+      |> Map.put(:computer_history_controller, controller_stub(:ok))
+
+    text = off_reply(ctx)
+    refute_received :reconciled
+
+    assert text ==
+             "This server records no computer history itself, so there is nothing to switch " <>
+               "off here. Each computer records its own: /history off studio Mac switches off " <>
+               "studio Mac."
+
+    assert ComputerHistoryConfig.enabled?()
+  end
+
+  # M97 §8.1: a store that did not open keeps the recorder off, and the
+  # status says why.
+  test "status says this Mac's store did not open, and why", %{ctx: ctx} do
+    store = SafeRm.make_tmp_dir!("history_cmd_blocked")
+    on_exit(fn -> SafeRm.rm_rf!(store) end)
+    File.write!(Path.join(store, "home"), "")
+    blocked = Spool.path(Path.join(store, "home"))
+    spool = start_supervised!({Spool, path: blocked, name: nil}, id: :blocked_spool)
+
+    text = status_reply(Map.put(ctx, :computer_history_spool, spool))
+
+    assert text =~
+             "Store: this Mac's history store at #{blocked} did not open (:enotdir), so " <>
+               "nothing is recorded. Fermix opens it again when it restarts."
+  end
+
+  # M97 §4: a local summarizer in this Mac's machine file decides, and the
+  # status says the home's choice in config.toml is not used while it does.
+  test "status names the machine file's summarizer when it shadows the home's", %{ctx: ctx} do
+    Application.put_env(:fermix_core, :computer_history,
+      enabled: true,
+      summarizer: :anthropic,
+      machine_summarizer: :local
+    )
+
+    text = status_reply(ctx)
+
+    assert text =~
+             ~s|Summarizer: on-device (local), set by summarizer = "local" in this Mac's | <>
+               "machine.toml; the summarizer in config.toml (anthropic) is not used while " <>
+               "that line is there."
   end
 
   test "an unknown subcommand shows usage", %{ctx: ctx} do

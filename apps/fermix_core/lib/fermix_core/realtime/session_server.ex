@@ -1316,9 +1316,14 @@ defmodule FermixCore.Realtime.SessionServer do
   # whether a command it parked still waits on the owner's answer. While one
   # waits nothing else runs, so the model cannot supply that yes itself (a shell
   # `say yes` the mic would pick up). A call that has read nothing from outside
-  # cannot have parked one, so it never asks the store.
+  # cannot have parked one, so it never asks the store. Each call runs in a
+  # process of its own, so the turn is named: this call (`turn_pid`), which a
+  # browser task on a computer stays with from one tool call to the next.
   defp tool_call_context(state) do
-    context = Map.put(state.tool_bridge.context, :outside_sources, state.outside_sources)
+    context =
+      state.tool_bridge.context
+      |> Map.put(:outside_sources, state.outside_sources)
+      |> Map.put(:turn_pid, self())
 
     if MapSet.size(state.outside_sources) > 0 and AccessGate.waiting?(context),
       do: Map.put(context, :access_waiting, true),

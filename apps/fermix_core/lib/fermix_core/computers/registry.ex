@@ -1,8 +1,11 @@
 defmodule FermixCore.Computers.Registry do
   @moduledoc """
   What the home knows live of each connected computer (M97 §3.2), on the
-  primary: whose session is up, the offers it sent in that session, and the
-  path its session runs (`direct` or `relay`), as the computer reports it.
+  primary: whose session is up, where it stands against this server
+  (`Computers.Versions`, as its session's hello found it, the one standing
+  its chat, its requests and its history are served by), the offers it sent
+  in that session, and the path its session runs (`direct` or `relay`), as
+  the computer reports it.
 
   The computer's server-side family (`FermixChannels.Desktop.ComputerFamily`,
   in the computer's `Desktop.Peer`) tells it each fact as it comes:
@@ -21,15 +24,18 @@ defmodule FermixCore.Computers.Registry do
 
   It monitors each session, so a session that ended without its family's
   word is let go all the same. Primary-only (`Home.Role`). If it restarts,
-  its live facts are gone until each computer's next event: the list of
-  computers (`FermixCore.Computers.list/1`) still reads who is connected
-  from the link and each computer's last offers from the records, and loses
-  only the path until it next changes.
+  its live facts are gone with its table, so as it starts it asks every
+  session that is up to say them again (`Home.Link`'s
+  `announce_computers/1`), and each computer's family tells it all it was
+  told: the view is rebuilt from the open sessions. Until then the list of
+  computers (`FermixCore.Computers.list/1`) reads who is connected from the
+  link and each computer's last offers and version from the records.
 
   Each change tells the Always On watch (`Home.StatusWatch`, `:computers`).
 
-  Seams: `:name`, `:home`, `:clock` (0-arity, the wall clock) and
-  `:status_changed` (0-arity, in place of telling the watch).
+  Seams: `:name`, `:home`, `:clock` (0-arity, the wall clock),
+  `:status_changed` (0-arity, in place of telling the watch) and `:announce`
+  (1-arity, told this registry's name, in place of asking the link).
   """
 
   use GenServer
@@ -38,6 +44,8 @@ defmodule FermixCore.Computers.Registry do
 
   alias FermixCore.Computers.Offers
   alias FermixCore.Computers.Store
+  alias FermixCore.Computers.Versions
+  alias FermixCore.Home.Link
   alias FermixCore.Home.StatusWatch
   alias FermixCore.Setup.ConfigStore
 
@@ -45,6 +53,7 @@ defmodule FermixCore.Computers.Registry do
   @type live :: %{
           since: DateTime.t(),
           session: pid(),
+          standing: Versions.standing(),
           offers: [Offers.offer()],
           offers_rev: String.t() | nil,
           path: :direct | :relay | nil
@@ -54,11 +63,24 @@ defmodule FermixCore.Computers.Registry do
   def start_link(opts \\ []) when is_list(opts),
     do: GenServer.start_link(__MODULE__, opts, name: Keyword.get(opts, :name, __MODULE__))
 
-  @doc "The computer `device_id`'s session `session` is up since `since`."
-  @spec connected(GenServer.server(), String.t(), %{since: DateTime.t(), session: pid()}) :: :ok
-  def connected(server \\ __MODULE__, device_id, %{since: %DateTime{}, session: session} = facts)
-      when is_binary(device_id) and is_pid(session),
-      do: GenServer.cast(server, {:connected, device_id, facts})
+  @doc """
+  The computer `device_id`'s session `session` is up since `since`, standing
+  `standing` against this server.
+  """
+  @spec connected(GenServer.server(), String.t(), %{
+          since: DateTime.t(),
+          session: pid(),
+          standing: Versions.standing()
+        }) :: :ok
+  def connected(
+        server \\ __MODULE__,
+        device_id,
+        %{since: %DateTime{}, session: session, standing: standing} = facts
+      )
+      when is_binary(device_id) and is_pid(session) do
+    true = standing in Versions.standings()
+    GenServer.cast(server, {:connected, device_id, facts})
+  end
 
   @doc """
   The computer `device_id`'s session `session` sent `offers` at revision
@@ -99,13 +121,24 @@ defmodule FermixCore.Computers.Registry do
 
     {:ok,
      %{
+       name: name,
        table: table,
        home: Keyword.get_lazy(opts, :home, &ConfigStore.fermix_home/0),
        clock: Keyword.get(opts, :clock, &DateTime.utc_now/0),
        status_changed:
          Keyword.get(opts, :status_changed, fn -> StatusWatch.changed(:computers) end),
+       announce:
+         Keyword.get(opts, :announce, fn name -> Link.impl().announce_computers(name) end),
        monitors: %{}
-     }}
+     }, {:continue, :announce}}
+  end
+
+  # A start after a restart holds no live facts: every open session is asked
+  # to say them again. At the first start no session is up yet.
+  @impl true
+  def handle_continue(:announce, state) do
+    :ok = state.announce.(state.name)
+    {:noreply, state}
   end
 
   @impl true
@@ -134,14 +167,10 @@ defmodule FermixCore.Computers.Registry do
 
   # -- the facts -------------------------------------------------------------
 
-  defp connect(device_id, %{since: since, session: session}, state) do
+  defp connect(device_id, %{since: since, session: session, standing: standing}, state) do
     ref = Process.monitor(session)
-
-    true =
-      :ets.insert(
-        state.table,
-        {device_id, %{since: since, session: session, offers: [], offers_rev: nil, path: nil}}
-      )
+    live = %{since: since, session: session, standing: standing, offers: [], offers_rev: nil}
+    true = :ets.insert(state.table, {device_id, Map.put(live, :path, nil)})
 
     changed(%{state | monitors: Map.put(state.monitors, ref, {device_id, session})})
   end

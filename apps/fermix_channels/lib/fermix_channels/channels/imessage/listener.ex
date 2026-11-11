@@ -803,8 +803,9 @@ defmodule FermixChannels.Channels.IMessage.Listener do
 
   # --- Shared ------------------------------------------------------------------------
 
+  # The channel's own reads, which no turn made.
   defp call(state, method, params),
-    do: state.helper.call(state.server, method, params, @call_timeout_ms)
+    do: state.helper.call(state.server, method, params, @call_timeout_ms, %{})
 
   defp posture_match?(row, %{posture: :dedicated_account, handles: handles}) do
     nested(row, "sender", "is_me") == false and

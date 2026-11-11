@@ -14,6 +14,14 @@ defmodule FermixChannels.Home.LinkDesktopRowTest do
     %{staging: staging}
   end
 
+  # M97 §3.4: an Always On server's update reads who keeps its backups from
+  # the computer rows; rows it cannot read are not known, never none, so the
+  # update holds rather than install past a computer it could not see.
+  test "with the desktop peers not running, the computer rows are not known" do
+    refute Process.whereis(FermixChannels.Desktop.Peers)
+    assert Link.computer_rows() == {:error, :not_running}
+  end
+
   test "drops the row of that key and keeps every other", %{staging: staging} do
     mac = row(:desktop, "orchard-mac")
     other = row(:desktop, "studio-mac")

@@ -418,6 +418,27 @@ defmodule FermixCore.Management.AlwaysOnTest do
       assert {:ok, %{"phase" => "requested"}} = Move.read_phase(ctx.home)
     end
 
+    # M97 §7.3: what the owner left ticked is the move's. A move undone and
+    # tried again moves with the keep it was started with, never the
+    # engine's proposal: the undone screen carries no block to choose again.
+    test "Try again after an undone move keeps what the owner left ticked", ctx do
+      input = %Input{recovery_passphrase: @passphrase, keep_offers: ["files"]}
+      assert {:ok, _answer} = press(ctx, "move_now", input)
+      assert {:ok, request} = Move.read_request(ctx.home)
+      assert Move.keep_offers(request) == ["files"]
+
+      # The move undone: its request goes, and the engine is the primary again.
+      :ok = Move.remove_request(ctx.home)
+      :ok = Move.put_phase(ctx.home, "aborted", %{}, @at)
+      assert %{"state" => "undone"} = summary(ctx.opts)
+
+      assert {:ok, _answer} =
+               press(ctx, "try_again", %Input{recovery_passphrase: @passphrase})
+
+      assert {:ok, request} = Move.read_request(ctx.home)
+      assert Move.keep_offers(request) == ["files"]
+    end
+
     # Re-check finding 2: a move undone, with its server still held, offers
     # Forget this server beside Try again, and it drops that server.
     test "Forget this server after an undone move drops the held server", ctx do

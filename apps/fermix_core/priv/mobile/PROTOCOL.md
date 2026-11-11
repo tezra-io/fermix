@@ -267,7 +267,7 @@ session, not a second connection, and nothing on the wire names it.
 | Lane | Events | Rule |
 |---|---|---|
 | live | `call_open`, `call_attached`, `call_line`, `call_audio`, `call_frame`, `call_close` | written first |
-| interactive | every event of no other lane: chat, `manage` and `manage_result`, `companion_*`, `loopback_*`, a computer's `offers` and `link_path`, `invoke_open`, `invoke_cancel`, `invoke_result` and `invoke_status`, an `invoke_part` whose `size_bytes` is at most 256 KiB, `hello`, `ping`, `pong`, `error`, `ack` | written before bulk |
+| interactive | every event of no other lane: chat, `manage` and `manage_result`, `companion_*`, `loopback_*`, a computer's `offers` and `link_path`, `invoke_open`, `invoke_cancel`, `invoke_result`, `invoke_status` and `invoke_restarted`, an `invoke_part` whose `size_bytes` is at most 256 KiB, `hello`, `ping`, `pong`, `error`, `ack` | written before bulk |
 | bulk | `media_fetch`, `media_begin`, `media_chunk`, `media_end`, `attach_*`, `snapshot_*`, `move_*`, an `invoke_part` whose `size_bytes` is over 256 KiB, an `invoke_open`, `invoke_cancel` or `invoke_status` that names a history sitting's submit (`capability` `history`, `op` `submit`) | written when nothing live or interactive waits, one frame at a time |
 
 - A family's events share one lane, so a lane never reorders a family's own
@@ -1201,11 +1201,12 @@ see *Lists on a phone*):
 | `snapshot_refused` | `snapshot_id`, `reason` | the desktop kept no copy: `disk_floor` (it would have left under 2 GiB free), `space_unknown`, `mismatch` (size or SHA-256 not `snapshot_begin`'s), `out_of_order`, `invalid_name` or `write_failed`; nothing partial is left |
 | `offers` | `rev`, `index`, `last` + raw bytes | what the computer offers its server, a JSON payload chunked, at most 64 KiB; `rev` is the payload's revision; sent only when `hello_ack` says `caps.computer.offers: true` (see *A computer's own record*) |
 | `link_path` | `path` | the session the desktop dialed runs `direct` or through a `relay`; sent only when `hello_ack` says `caps.computer.link_path: true` |
+| `invoke_restarted` | (none) | the desktop's request handler started again while the session stayed up; sent only when `hello_ack` says `caps.computer.invoke: true` (see *After a reconnect*) |
 
 The invocation's five events (`invoke_open`, `invoke_part`, `invoke_cancel`,
 `invoke_result`, `invoke_status`) go both ways on a desktop's session, a
-desktop sending them only when `hello_ack` says `caps.computer.invoke: true`
-(see *Invocations*).
+desktop sending them, and `invoke_restarted`, only when `hello_ack` says
+`caps.computer.invoke: true` (see *Invocations*).
 
 The primary sends a desktop `hello_ack`, `pong`, `error`, `event_part`,
 `media_begin`, `media_chunk` and `media_end`, `companion_line` and
@@ -1253,7 +1254,8 @@ computer's record; a phone sends none of it.
 - **What the primary takes.** A desktop's `hello_ack` carries
   `caps.computer`, with `{"v":1,"offers":true,"link_path":true,"invoke":true}`
   among its keys from this primary: `v` is a positive integer, and `offers`,
-  `link_path` and `invoke` (the five events of *Invocations*), each a
+  `link_path` and `invoke` (the five events of *Invocations*, and
+  `invoke_restarted`), each a
   boolean when present, say whether the primary takes that event. A later
   primary may add keys, which a desktop ignores. A phone's `hello_ack`, and a
   primary's older than the record, carry no `computer`.
@@ -1273,8 +1275,8 @@ computer's record; a phone sends none of it.
   `[min, max]`. A primary older than the window sends neither.
 - **Sent only when taken.** A desktop sends `offers` only when
   `caps.computer.offers` is true, `link_path` only when
-  `caps.computer.link_path` is true, and an `invoke_*` event only when
-  `caps.computer.invoke` is true. A primary older than these events does
+  `caps.computer.link_path` is true, and an `invoke_*` event, including
+  `invoke_restarted`, only when `caps.computer.invoke` is true. A primary older than these events does
   not know their `t`, and an unknown client event is refused `unsupported`
   and closes the session (`1002`, see *Errors*), so a desktop that sent
   one unasked would lose its session at every reconnect.
@@ -1409,6 +1411,12 @@ and never hears the ask before the request. The computer answers each:
   status with the receipt, the payload `{"receipt_only":true}` and no part;
 - with no record, `unknown` with no receipt;
 - a request still running or waiting is answered when it ends.
+
+The same happens, with the session up, when a computer sends
+`invoke_restarted`: its request handler started again, so a request on its
+way to it while it was down, or one that waited there when it stopped, may
+be lost, with no record, and is answered `unknown`. A computer sends it each
+time its request handler starts.
 
 The primary never sends an operation that changes something (an effect)
 again: an answer that is `unknown`, or that holds only the receipt, ends it
@@ -1590,7 +1598,7 @@ window, and `enroll_request` on a computer's, are answered `error` with
 |---|---|---|
 | `join_request` | `host{name, os, arch, version}`, `platform` | computer to primary, the session's first event, within 10 s of the handshake; `platform` is `macos` or `linux`; each text at most 128 bytes |
 | `join_approved` | `device_id`, `name`, `primary_epoch`, `primary{name, node_id, relays[], relays_rev, addrs[]?}` | primary to computer, once the owner approved; `name` is the home's name for the computer, the one it said unless another device holds it (then suffixed ` 2`, ` 3` and on); `primary` is where the computer reaches the primary from now on, as a desktop route's (`relays` 1 to 8, `addrs` 0 to 8); the session then closes `1000` (`joined`) |
-| `join_denied` | `reason` | primary to computer; `reason` is `denied` (the owner said no, or typed digits that are not the computer's), `timeout` (the window's thirty minutes ran out), `cancelled` (the owner cancelled the code or opened another) or `device_disconnected`; the session then closes `4003` (`join <reason>`) |
+| `join_denied` | `reason` | primary to computer; `reason` is `denied` (the owner said no, or typed digits that are not the computer's), `timeout` (the window's thirty minutes ran out) or `cancelled` (the owner cancelled the code or opened another); the session then closes `4003` (`join <reason>`) |
 
 The join has the second step a phone's pairing has. After the handshake both
 ends derive six digits from the handshake hash exactly as a pairing's SAS is
@@ -1603,8 +1611,10 @@ derived (see *Noise modes and pairing*), with a label of their own:
 The label differs from a pairing's, so a phone's digits and a computer's
 never match by construction (`noise_vectors.json` carries both for each
 vector, as `sas` and `computer_sas`). The computer shows the digits with its
-name and system; the surface that opened the code shows the same digits and
-its owner approves with them (management `home.act`, `approve_computer`).
+name and system. The primary never shows or sends them: the owner reads them
+on the new computer and types them where it is approved (management
+`home.act`'s `approve_computer`, `home.enroll.approve`), so a join cannot be
+approved without looking at the computer that asks.
 The `join_request` burns the window as an enrollment does, and the primary
 then holds the session with no deadline but the window's own: while the
 owner decides it answers `ping` with `pong` and refuses every other event
@@ -1612,12 +1622,14 @@ owner decides it answers `ping` with `pong` and refuses every other event
 approves, the computer has no row and no access. Approval writes its
 `desktop` row (its `platform`, no backup copies, every offer off) and
 answers `join_approved`; a denial, digits that are not the computer's, a
-session that ends while it waits, a cancelled code and the window running
-out answer `join_denied` where the session still stands and write nothing.
-The code is spent either way. A computer whose answer was lost dials again
-with the same key while the window lasts and is answered as it was:
-`join_approved` again, or `join_denied` with the reason kept; any other key
-is `enrollment_used`. Once approved, the computer links with `IK` (`0x01`)
+cancelled code and the window running out answer `join_denied` where the
+session still stands and write nothing. The code is spent either way. A
+session that ends while the computer waits ends nothing: nobody waits until
+the computer dials again with the same key, which the window admits while
+it lasts, and it then waits with the digits of its new session. A computer
+whose answer was lost dials again with the same key while the window lasts
+and is answered as it was: `join_approved` again, or `join_denied` with the
+reason kept; any other key is `enrollment_used`. Once approved, the computer links with `IK` (`0x01`)
 as every desktop does (see *Desktop sessions*).
 
 **The move** (`FXM1 0x04`, `IK`). The source of a move, the old primary in the
@@ -1670,7 +1682,7 @@ sent is never sent to it. `FermixChannels.Mobile.Peers` is this table.
 | Kind | Sends | Is sent |
 |---|---|---|
 | phone | `hello` `msg` `attach_begin` `attach_chunk` `attach_end` `command` `cancel` `history_pull` `media_fetch` `push_register` `push_unregister` `ack` `read_state` `request_status` `unpair` `ping` `call_open` `call_line` `call_audio` `call_frame` `call_close` `companion_open` `companion_line` `companion_close` | `hello_ack` `accepted` `attach_status` `turn_started` `text_delta` `tool_event` `text_done` `turn_done` `media_begin` `media_chunk` `media_end` `turn_error` `row` `reaction` `approval` `approval_resolved` `link_preview` `read_state` `history_page` `request_status_page` `notice` `error` `pong` `event_part` `call_attached` `call_line` `call_audio` `call_close` `companion_line` `companion_close` |
-| desktop | `hello` `ping` `media_fetch` `ack` `companion_open` `companion_line` `companion_close` `manage` `loopback_request` `loopback_failed` `snapshot_stored` `snapshot_refused` `offers` `link_path` `invoke_open` `invoke_part` `invoke_cancel` `invoke_result` `invoke_status` | `hello_ack` `error` `pong` `event_part` `media_begin` `media_chunk` `media_end` `companion_line` `companion_close` `manage_result` `loopback_open` `loopback_response` `loopback_close` `snapshot_begin` `snapshot_chunk` `snapshot_end` `invoke_open` `invoke_part` `invoke_cancel` `invoke_result` `invoke_status` |
+| desktop | `hello` `ping` `media_fetch` `ack` `companion_open` `companion_line` `companion_close` `manage` `loopback_request` `loopback_failed` `snapshot_stored` `snapshot_refused` `offers` `link_path` `invoke_open` `invoke_part` `invoke_cancel` `invoke_result` `invoke_status` `invoke_restarted` | `hello_ack` `error` `pong` `event_part` `media_begin` `media_chunk` `media_end` `companion_line` `companion_close` `manage_result` `loopback_open` `loopback_response` `loopback_close` `snapshot_begin` `snapshot_chunk` `snapshot_end` `invoke_open` `invoke_part` `invoke_cancel` `invoke_result` `invoke_status` |
 | enrollment | `enroll_request` `join_request` `ping` | `enroll_accepted` `join_approved` `join_denied` `error` `pong` |
 | move | `move_offer` `move_chunk` `move_end` `move_commit` `move_resume` `ping` | `move_accept` `move_ready` `move_done` `error` `pong` |
 

@@ -264,6 +264,36 @@ defmodule FermixCore.Management.HomeTest do
                route("home.status", %{}, opts(home, engine_role: @device))
     end
 
+    # An unknown list is not "no computers": the server cannot see whether
+    # one that keeps its backups needs an app that is not out yet, so the
+    # update installs nothing newer than what runs, and the status says why.
+    test "a server that cannot list its computers holds its update, and says why",
+         %{home: home} do
+      table = release_table(["app 9.9.10 macos 3.1.0", "app 9.10.0 linux 1.4.0"])
+      at = ~U[2031-05-04 11:55:00Z]
+
+      server = [
+        always_on_server: true,
+        release_table: fn -> {:ok, table, at, nil} end,
+        computers: {:error, :not_running}
+      ]
+
+      assert {:ok, %{"update" => update, "update_ceiling" => ceiling, "computers" => []}} =
+               route("home.status", %{}, opts(home, server))
+
+      assert ceiling in [nil, "9.9.9"]
+
+      assert %{
+               "running" => "9.9.9",
+               "held" => %{"version" => "9.10.0", "sentence" => sentence},
+               "ahead_of_apps" => false
+             } = update
+
+      assert sentence ==
+               "A newer Fermix is released. Your server takes it once Fermix can list your " <>
+                 "computers again."
+    end
+
     # The table fails closed: none read yet is no eligible release, with the
     # sentence that says why, so the update installs nothing.
     test "a server with no table read installs nothing, and says why", %{home: home} do

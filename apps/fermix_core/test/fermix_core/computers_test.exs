@@ -84,7 +84,15 @@ defmodule FermixCore.ComputersTest do
         @loft => %{engine_version: "0.17.0", seen_at: @seen, offers: [@shell]}
       }
 
-      live = %{@studio => %{offers: [@files, @shell], path: :relay, since: @since}}
+      # The connected one stands where its session's hello put it.
+      live = %{
+        @studio => %{
+          offers: [@files, @shell],
+          path: :relay,
+          since: @since,
+          standing: :settings_only
+        }
+      }
 
       assert [loft, studio] = Computers.list(opts(rows, records: records, live: live))
       assert {loft.standing, loft.offers} == {:behind, [@shell]}
@@ -93,8 +101,33 @@ defmodule FermixCore.ComputersTest do
 
       ahead = %{@loft => %{engine_version: "0.20.0", seen_at: @seen}}
       assert [_loft, _studio] = listed = Computers.list(opts(rows, records: ahead, live: live))
-      assert Enum.map(listed, & &1.standing) == [:ahead, nil]
-      assert Computer.view(List.last(listed))["standing"] == nil
+      assert Enum.map(listed, & &1.standing) == [:ahead, :settings_only]
+    end
+
+    # M97 §3.4: one decision. A connected computer stands as its session found
+    # it at hello, the standing its chat and its history are served by, never
+    # by a record that may lag; an away one by the version it last said; and
+    # one whose version is not known (no record, or one that holds none) is
+    # not served: the window fails closed.
+    test "the window is the session's for a connected computer and fails closed with no record" do
+      rows = [
+        row(@studio, "studio Mac", "macos", connected: true, since: @since),
+        row(@loft, "loft Linux", "linux")
+      ]
+
+      stale = %{
+        @studio => %{engine_version: "0.12.0", seen_at: @seen},
+        @loft => %{seen_at: @seen, offers: [@files, @shell]}
+      }
+
+      live = %{@studio => %{offers: [@files], path: :direct, since: @since, standing: :behind}}
+
+      assert [loft, studio] = Computers.list(opts(rows, records: stale, live: live))
+      assert {studio.standing, studio.offers} == {:behind, [@files]}
+      assert {loft.standing, loft.offers} == {:settings_only, []}
+
+      assert [loft, _studio] = Computers.list(opts(rows, records: %{}, live: live))
+      assert {loft.standing, loft.offers} == {:settings_only, []}
     end
 
     test "an away computer has its last offers and when the home last heard it" do
@@ -116,16 +149,41 @@ defmodule FermixCore.ComputersTest do
       rows = [row(@studio, "studio Mac", "macos", connected: true, since: @since, backups: false)]
       records = %{@studio => %{offers: [@files], seen_at: @seen}}
 
-      waiting = %{@studio => %{offers: [], path: nil, since: @since}}
+      waiting = %{@studio => %{offers: [], path: nil, since: @since, standing: :current}}
       assert [studio] = Computers.list(opts(rows, records: records, live: waiting))
       assert studio.connected
       assert studio.offers == []
       refute studio.backups
 
-      sent = %{@studio => %{offers: [@files, @history_off], path: :direct, since: @since}}
+      sent = %{
+        @studio => %{
+          offers: [@files, @history_off],
+          path: :direct,
+          since: @since,
+          standing: :current
+        }
+      }
+
       assert [studio] = Computers.list(opts(rows, records: records, live: sent))
       assert studio.offers == [@files, @history_off]
       assert studio.path == :direct
+    end
+
+    # Rows that cannot be read are not known, never none: `fetch/1` says so,
+    # and a turn's list reaches none of them.
+    test "a list that cannot be read is an error, and a turn sees none" do
+      defmodule DownLink do
+        @moduledoc false
+        def computer_rows, do: {:error, :not_running}
+      end
+
+      down = opts([], link: DownLink)
+      assert Computers.fetch(down) == {:error, :not_running}
+      assert Computers.list(down) == []
+
+      rows = [row(@loft, "loft Linux", "linux")]
+      assert {:ok, [%Computer{name: "loft Linux"}]} = Computers.fetch(opts(rows))
+      assert Computers.fetch(opts(rows, role: :device)) == {:ok, []}
     end
 
     test "a computer that never sent offers offers nothing" do
@@ -188,8 +246,16 @@ defmodule FermixCore.ComputersTest do
         row(@loft, "loft Linux", "linux")
       ]
 
-      live = %{@studio => %{offers: [@files, @history_off], path: :direct, since: @since}}
-      records = %{@loft => %{seen_at: @seen, offers: [@files, @shell]}}
+      live = %{
+        @studio => %{
+          offers: [@files, @history_off],
+          path: :direct,
+          since: @since,
+          standing: :current
+        }
+      }
+
+      records = %{@loft => %{engine_version: "0.19.0", seen_at: @seen, offers: [@files, @shell]}}
 
       section =
         Computers.prompt_section(

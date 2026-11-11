@@ -19,7 +19,10 @@ defmodule FermixChannels.Desktop.Join do
   A server that cannot be reached, or a session that ends with no answer, is
   dialled again, 1 s doubling to 60 s, until the code's half hour is over;
   then the join is `denied` in its own words. The window re-admits this
-  computer's key, so an answer lost to a dropped session reaches it again.
+  computer's key while it lasts (`FermixChannels.Home.Enrollment`): a
+  session that drops while it waits for the owner spends nothing, so it
+  waits again, showing the digits of its new session, and an answer lost to
+  a dropped session reaches it again.
   A helper that restarts takes this worker with it (the dial subtree is
   `:rest_for_one`), and it starts again from the file.
 
@@ -200,19 +203,14 @@ defmodule FermixChannels.Desktop.Join do
     :ok
   end
 
-  defp denied_sentence("denied", state),
-    do: "#{server(state)} did not add this computer. Open a new code there to try again."
-
   defp denied_sentence("timeout", state),
     do: "Nobody added this computer on #{server(state)} in time. Open a new code there."
 
   defp denied_sentence("cancelled", state),
     do: "The code was cancelled on #{server(state)}. Open a new one there to try again."
 
-  defp denied_sentence(_disconnected, state),
-    do:
-      "This computer's connection to #{server(state)} dropped before it was added. Open a " <>
-        "new code there to try again."
+  defp denied_sentence(_denied, state),
+    do: "#{server(state)} did not add this computer. Open a new code there to try again."
 
   defp refused_sentence("enrollment_used", state),
     do: "That code was already used on #{server(state)}. Open a new one there."

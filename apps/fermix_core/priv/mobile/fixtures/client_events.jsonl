@@ -45,3 +45,4 @@
 {"v":2,"t":"link_path","seq":14,"path":"relay"}
 {"v":2,"t":"invoke_status","seq":39,"id":"inv-q6n472b3oiugnj262ktxowsgsy","capability":"history","op":"submit"}
 {"v":2,"t":"invoke_cancel","seq":40,"id":"inv-q6n472b3oiugnj262ktxowsgsy","capability":"history","op":"submit"}
+{"v":2,"t":"invoke_restarted","seq":21}

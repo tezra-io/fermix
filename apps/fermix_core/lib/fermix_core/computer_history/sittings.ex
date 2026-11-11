@@ -26,11 +26,14 @@ defmodule FermixCore.ComputerHistory.Sittings do
 
   The answer decides the cursor: `summarized`, `abstained` and `no_signal` move
   it past the sitting; `refused` for a purge or pause applies the intervals the
-  home named here first (`Spool.apply_intervals/3`) and forms the sitting again
-  from what is left; `refused` as `invalid` moves past it, loudly, since it can
-  never be taken; any other refusal, and no answer at all, holds it to be sent
-  again on a later cycle. Raw events still expire after 48 hours
-  (`Retention`), counted when they were never sent.
+  home named here first, under the home store the answer names
+  (`Spool.apply_intervals/4`), and forms the sitting again from what is left;
+  `refused` as `invalid` or `expired` moves past it, loudly, since it can never
+  be taken; any other refusal, and no answer at all, holds it to be sent again
+  on a later cycle. Each sitting carries this machine's mark and the home store
+  it belongs to (`home`). Raw events expire after 48 hours (`Retention`),
+  counted when they were never sent, and each cycle takes the expired ones
+  first, so nothing older than that is ever sent.
 
   Events stamped while this computer's server drove its screen or used its
   browser are marked as Fermix's own in the sitting (`by=fermix`, M97 §8.7),
@@ -45,6 +48,7 @@ defmodule FermixCore.ComputerHistory.Sittings do
 
   alias FermixCore.ComputerHistory.Config
   alias FermixCore.ComputerHistory.Gate
+  alias FermixCore.ComputerHistory.Retention
   alias FermixCore.ComputerHistory.Spool
   alias FermixCore.ComputerHistory.Submission
   alias FermixCore.ComputerHistory.Summarizer
@@ -74,11 +78,16 @@ defmodule FermixCore.ComputerHistory.Sittings do
   def run(opts) when is_list(opts) do
     ctx = context(opts)
 
-    Enum.reduce_while(
-      1..@max_sittings_per_cycle//1,
-      {:ok, %{sittings: 0, sent: 0, notes: 0, events: 0}},
-      fn _sitting, {:ok, acc} -> step(ctx, acc) end
-    )
+    # Nothing older than the retention window is ever sent (M97 §8.1): the
+    # home keeps its intervals no longer than that, so it goes first, as the
+    # hourly sweep would take it, counted when it was never sent.
+    with {:ok, _swept} <- Retention.sweep(ctx.now_ms, Retention.window_ms(), ctx.spool) do
+      Enum.reduce_while(
+        1..@max_sittings_per_cycle//1,
+        {:ok, %{sittings: 0, sent: 0, notes: 0, events: 0}},
+        fn _sitting, {:ok, acc} -> step(ctx, acc) end
+      )
+    end
   end
 
   defp context(opts) do
@@ -131,15 +140,16 @@ defmodule FermixCore.ComputerHistory.Sittings do
 
   defp mark_own(event, _own), do: event
 
-  # The mark of the home's intervals this machine applied is read before the
-  # events: a sitting read after it holds no event stamped inside any of them.
+  # The mark of the home's intervals this machine applied, and the home store
+  # it belongs to, are read before the events: a sitting read after them holds
+  # no event stamped inside any of them.
   defp step(ctx, acc) do
-    with {:ok, %{home_mark: mark}} <- Spool.link(ctx.spool),
+    with {:ok, %{home_mark: mark, home: store}} <- Spool.link(ctx.spool),
          {:ok, %{last_summarized_id: cursor}} <- Spool.state(ctx.spool),
          {:ok, events} <- Spool.events_after(cursor || 0, ctx.limit, ctx.spool) do
       {decision, open} = Sessions.next_closed(events, ctx.now_ms, length(events) == ctx.limit)
       record_open(open, ctx)
-      dispatch(decision, Map.merge(ctx, %{cursor: cursor || 0, mark: mark}), acc)
+      dispatch(decision, Map.merge(ctx, %{cursor: cursor || 0, mark: mark, store: store}), acc)
     else
       {:error, _reason} = error -> {:halt, error}
     end
@@ -234,7 +244,8 @@ defmodule FermixCore.ComputerHistory.Sittings do
         "to_ts" => Enum.max(stamps),
         "event_count" => length(rendered),
         "field_values" => fields,
-        "mark" => ctx.mark
+        "mark" => ctx.mark,
+        "home" => ctx.store
       })
 
     if ctx.local?,
@@ -288,17 +299,19 @@ defmodule FermixCore.ComputerHistory.Sittings do
     settled(Atom.to_string(status), last_id, rendered, ctx, %{acc | sent: acc.sent + 1})
   end
 
+  # The intervals belong to the home store the answer names, which may not be
+  # the one this machine's mark did (`Spool.apply_intervals/4`).
   defp settle(
-         {:ok, %{status: :refused, reason: reason, intervals: intervals}},
+         {:ok, %{status: :refused, reason: reason, intervals: intervals, home: home}},
          _last_id,
          _r,
          ctx,
          acc
        )
-       when reason in [:purged, :paused] do
+       when reason in [:purged, :paused] and is_binary(home) do
     record("refused", Atom.to_string(reason), ctx)
 
-    case Spool.apply_intervals(intervals, ctx.now, ctx.spool) do
+    case Spool.apply_intervals(intervals, home, ctx.now, ctx.spool) do
       :ok -> {:cont, {:ok, %{acc | sent: acc.sent + 1}}}
       {:error, _reason} = error -> {:halt, error}
     end
@@ -308,6 +321,14 @@ defmodule FermixCore.ComputerHistory.Sittings do
     Logger.error("computer_history: the home cannot read a sitting from here; it is skipped")
     record("refused", "invalid", ctx)
     settled("refused:invalid", last_id, rendered, ctx, acc)
+  end
+
+  # Older than the home keeps intervals for, by the home's clock: never taken,
+  # so passed, as the sweep here takes such events.
+  defp settle({:ok, %{status: :refused, reason: :expired}}, last_id, rendered, ctx, acc) do
+    Logger.warning("computer_history: the home found a sitting from here too old; it is skipped")
+    record("refused", "expired", ctx)
+    settled("refused:expired", last_id, rendered, ctx, acc)
   end
 
   defp settle({:ok, %{status: :refused, reason: reason}}, _last_id, _rendered, ctx, _acc) do

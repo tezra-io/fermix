@@ -63,16 +63,24 @@ defmodule FermixChannels.Home.Enrollment do
   waits (`join/5`): the responder holds the session with the six digits it
   derived from the handshake under the computer label (`Mobile.Noise.sas/2`)
   until the owner approves with those digits (`approve/2`), denies
-  (`deny/1`), cancels the code, the session ends (`device_disconnected`) or
-  the window's half hour runs out (`timeout`). Approval writes the
-  computer's row (`kind: :desktop`, its `platform`, `backups: false`, a name
-  no other row holds, compared without case, suffixed " 2" and on where it
-  must) and answers the responder `{:join_approved, payload}`; anything else
-  answers `{:join_denied, reason}` and writes nothing. Digits that are not
-  the computer's deny it too. The code is spent either way, and the window
-  keeps how it ended (`approved` with the computer's device id, or
-  `denied`): an answer that was lost reaches the same computer again (its
-  Noise key) while the window lasts.
+  (`deny/1`), cancels the code or the window's half hour runs out
+  (`timeout`). Approval writes the computer's row (`kind: :desktop`, its
+  `platform`, `backups: false`, a name no other row holds, compared without
+  case, suffixed " 2" and on where it must) and answers the responder
+  `{:join_approved, payload}`; any other ending answers `{:join_denied,
+  reason}` and writes nothing. Digits that are not the computer's deny it
+  too. The code is spent either way, and the window keeps how it ended
+  (`approved` with the computer's device id, or `denied`): an answer that
+  was lost reaches the same computer again (its Noise key) while the window
+  lasts.
+
+  **A session that ends while the computer waits** ends nothing: the wait is
+  forgotten (nobody waits, so an approval then answers `:none`), and the
+  window, which keeps the computer's key, admits that key again while its
+  half hour lasts, as after an engine restart, which keeps the window and
+  never the wait. The computer dials again and waits with the digits of its
+  new session, which it shows; those are the ones the owner types, so an
+  approval is always of a session that is up.
 
   A code needs the rail ready: one asleep (no phone paired yet) or starting
   is woken and waited for, up to 10 s (`Iroh.Helper.await_ready/2`), so the
@@ -118,7 +126,7 @@ defmodule FermixChannels.Home.Enrollment do
   @file_mode 0o600
   @purposes [:candidate, :computer]
   # How a computer's join ends without approval (`join_denied`'s `reason`).
-  @denials ~w(denied timeout cancelled device_disconnected)
+  @denials ~w(denied timeout cancelled)
   # The rows a computer's name is kept apart from: every one the store holds.
   @max_name_suffix 99
   @other_open_sentences %{
@@ -180,7 +188,8 @@ defmodule FermixChannels.Home.Enrollment do
   A computer that proved the secret with the Noise key `noise_pk` asks to
   join (`join_request`), showing `sas`; `responder` is told how it ends
   (`{:join_approved, payload}` or `{:join_denied, reason}`) and watched, so
-  a session that ends while it waits denies it. Answers `{:ok,
+  a session that ends while it waits is forgotten, and its key may ask
+  again (the moduledoc). Answers `{:ok,
   :awaiting_approval}`, `{:ok, {:approved, payload}}` to the computer an
   approval was already given (its answer was lost), or why not: `:purpose`
   (a candidate's window), `:used`, `:expired`, `{:denied, reason}`.
@@ -411,20 +420,41 @@ defmodule FermixChannels.Home.Enrollment do
     {:noreply, state}
   end
 
-  # The session of the computer that waits ended: it is denied, and the
-  # code is spent.
+  # The session of the computer that waits ended: nobody waits now, and the
+  # window, which keeps its key, admits it again when it dials (`join/5`).
+  # Nothing of the wait was written, so nothing is written now.
   def handle_info(
         {:DOWN, ref, :process, _pid, _reason},
-        %{window: %{joiner: %{monitor: ref}}} = state
+        %{window: %{joiner: %{monitor: ref} = joiner} = window} = state
       ) do
-    {_reply, state} = deny_or_none("device_disconnected", state)
-    {:noreply, state}
+    Logger.info("enrollment: #{joiner.name}'s session ended while it waited; it may dial again")
+    :ok = state.status_changed.()
+    {:noreply, %{state | window: %{window | joiner: nil}}}
   end
 
   def handle_info({:DOWN, _ref, :process, _pid, _reason}, state), do: {:noreply, state}
 
   # A timer of a window another replaced.
   def handle_info({:expire, _expires_at}, state), do: {:noreply, state}
+
+  # A crash report and `:sys.get_status/1` print the state and the message
+  # being handled: never the code's secret, nor the digits a waiting computer
+  # shows, which only the owner types (M97 §7.5).
+  @impl true
+  def format_status(status), do: status |> redact(:state) |> redact(:message)
+
+  defp redact(%{state: %{window: %{} = window} = state} = status, :state) do
+    joiner = window.joiner && %{window.joiner | sas: :redacted}
+    %{status | state: %{state | window: %{window | secret: :redacted, joiner: joiner}}}
+  end
+
+  defp redact(%{message: {:approve, _sas}} = status, :message),
+    do: %{status | message: {:approve, :redacted}}
+
+  defp redact(%{message: {:join, request, noise_pk, _sas, responder}} = status, :message),
+    do: %{status | message: {:join, request, noise_pk, :redacted, responder}}
+
+  defp redact(status, _key), do: status
 
   # -- opening ----------------------------------------------------------------
 
@@ -518,7 +548,8 @@ defmodule FermixChannels.Home.Enrollment do
   end
 
   # The computer waits, in memory alone: a session that ends while it waits
-  # (an engine restart among them) denies it.
+  # (an engine restart among them) leaves nobody waiting, and the key dials
+  # again.
   defp await_owner(request, noise_pk, sas, responder, %{window: window} = state) do
     host = request["host"]
     _forgot = forget_joiner(window.joiner)

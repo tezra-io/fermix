@@ -4,8 +4,13 @@ defmodule FermixChannels.Channels.IMessage.Helper do
   (MILESTONE_54 §5). `IMessage.Port` is the production implementation, owning
   the helper's OS process; tests and the bench inject a fake.
 
-  Requests are synchronous: `call/4` answers the helper's result map or a typed
-  error `{kind, message, data}`, where `kind` is one of the helper's closed kinds
+  Requests are synchronous: `call/5` answers the helper's result map or a typed
+  error `{kind, message, data}`. Each request carries the origin facts of the
+  turn that made it (`FermixCore.Computers.Origin.facts/1`, `%{}` for the
+  channel's own reads, which `Origin.of/1` reads as `background`): a helper
+  reached through a computer hands them on, so that computer's own rules and
+  journal see the turn's real origin; the local helper has no use for them.
+  `kind` is one of the helper's closed kinds
   (`IMessage.Protocol.error_kind/0`) or one of the engine's own:
 
     * `:request_timeout` — the helper did not answer within the caller's budget;
@@ -30,8 +35,17 @@ defmodule FermixChannels.Channels.IMessage.Helper do
   @type error_kind :: Protocol.error_kind() | engine_error_kind()
   @type error :: {error_kind(), String.t(), map()}
 
-  @doc "Sends one request and waits at most `timeout` ms for its answer."
-  @callback call(server(), method :: String.t(), params :: map(), timeout :: pos_integer()) ::
+  @doc """
+  Sends one request, for the turn whose origin facts are `turn`, and waits at
+  most `timeout` ms for its answer.
+  """
+  @callback call(
+              server(),
+              method :: String.t(),
+              params :: map(),
+              timeout :: pos_integer(),
+              turn :: map()
+            ) ::
               {:ok, map()} | {:error, error()}
 
   @doc """

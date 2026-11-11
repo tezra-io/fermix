@@ -31,8 +31,10 @@ defmodule FermixCore.Computers.Capability do
   - optionally `here?/1`, whether the server's own host has it too, which
     `Computers.Choice` reads for a call that names no computer,
     `continues_on/1`, the computer the turn's earlier calls ran on, which
-    such a call carries on on, and `deadline_ms/2`, the tool's own timeout
-    for an op.
+    such a call carries on on, `deadline_ms/2`, the tool's own timeout
+    for an op, and `recorded?/2`, false for a request that is no thing Fermix
+    did on the computer (the renewal of a screen hold), which its journal
+    then never records (`recorded?/3`).
 
   A capability's code reads this computer's settings from the context it is
   handed (`context/0`), never from application environment, so two engines
@@ -143,12 +145,21 @@ defmodule FermixCore.Computers.Capability do
   @doc "The owner's words for `op`, one of `ops/0`, lower case (\"run a command\")."
   @callback op_label(String.t()) :: String.t()
 
+  @doc """
+  Whether a request of `op` with `args` is a thing Fermix did on this
+  computer, which its journal records. False only for bookkeeping between
+  the server and the computer (the renewal of a screen hold). Without it,
+  true.
+  """
+  @callback recorded?(String.t(), map()) :: boolean()
+
   @optional_callbacks cancel: 2,
                       here?: 1,
                       deadline_ms: 2,
                       continues_on: 1,
                       label: 0,
-                      op_label: 1
+                      op_label: 1,
+                      recorded?: 2
 
   @doc "The most bytes a target holds."
   @spec max_target_bytes() :: pos_integer()
@@ -169,6 +180,17 @@ defmodule FermixCore.Computers.Capability do
   @doc "Whether `module` runs `op`."
   @spec runs?(module(), String.t()) :: boolean()
   def runs?(module, op) when is_atom(module) and is_binary(op), do: op in module.ops()
+
+  @doc """
+  Whether the journal records a request of `module`'s `op` with `args`: its
+  `recorded?/2`, true for a capability without one.
+  """
+  @spec recorded?(module(), String.t(), map()) :: boolean()
+  def recorded?(module, op, args) when is_atom(module) and is_binary(op) and is_map(args) do
+    if Code.ensure_loaded?(module) and function_exported?(module, :recorded?, 2),
+      do: module.recorded?(op, args),
+      else: true
+  end
 
   @doc """
   A target cut to at most #{@max_target_bytes} bytes on a character

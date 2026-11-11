@@ -184,7 +184,7 @@ defmodule FermixCore.ComputerHistory.SupervisorTest do
       # cutoff = now - window = 90_000; the ts=80_000 row goes, ts=95_000 stays.
       assert {:ok, %{deleted: 1}} = Retention.sweep(now, window, server: spool)
       assert {:ok, 1} = Spool.count_events(server: spool)
-      assert {:ok, 95_000} = Spool.oldest_event_ts(server: spool)
+      assert FermixTestSupport.HistorySpool.oldest_ts(spool) == 95_000
     end
 
     test "a disabled memory store is not a fault for the home's half", %{

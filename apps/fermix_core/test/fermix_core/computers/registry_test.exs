@@ -22,9 +22,11 @@ defmodule FermixCore.Computers.RegistryTest do
        name: name,
        home: home,
        clock: fn -> @ended end,
-       status_changed: fn -> send(test, :computers_changed) && :ok end}
+       status_changed: fn -> send(test, :computers_changed) && :ok end,
+       announce: fn registry -> send(test, {:announce, registry}) && :ok end}
     )
 
+    assert_receive {:announce, ^name}
     %{home: home, name: name}
   end
 
@@ -39,10 +41,13 @@ defmodule FermixCore.Computers.RegistryTest do
 
   test "a session starts offering nothing, then what it sent", %{name: name, home: home} do
     session = session()
-    :ok = Registry.connected(name, @studio, %{since: @since, session: session})
+    :ok = Registry.connected(name, @studio, %{since: @since, session: session, standing: :behind})
     settled(name)
 
-    assert %{@studio => %{offers: [], path: nil, since: @since}} = Registry.live(name)
+    # It stands where its session's hello put it, for as long as it is up.
+    assert %{@studio => %{offers: [], path: nil, since: @since, standing: :behind}} =
+             Registry.live(name)
+
     assert_receive :computers_changed
 
     :ok = Registry.offers(name, @studio, session, @offers, "0123456789abcdef")
@@ -57,7 +62,10 @@ defmodule FermixCore.Computers.RegistryTest do
 
   test "a refused payload is nothing offered, kept as such", %{name: name, home: home} do
     session = session()
-    :ok = Registry.connected(name, @studio, %{since: @since, session: session})
+
+    :ok =
+      Registry.connected(name, @studio, %{since: @since, session: session, standing: :current})
+
     :ok = Registry.offers(name, @studio, session, @offers, "0123456789abcdef")
     :ok = Registry.offers(name, @studio, session, [], nil)
     settled(name)
@@ -69,8 +77,8 @@ defmodule FermixCore.Computers.RegistryTest do
   test "an older session's word is not the computer's", %{name: name} do
     old = session()
     new = session()
-    :ok = Registry.connected(name, @studio, %{since: @since, session: old})
-    :ok = Registry.connected(name, @studio, %{since: @ended, session: new})
+    :ok = Registry.connected(name, @studio, %{since: @since, session: old, standing: :current})
+    :ok = Registry.connected(name, @studio, %{since: @ended, session: new, standing: :current})
     :ok = Registry.offers(name, @studio, old, @offers, "0123456789abcdef")
     :ok = Registry.disconnected(name, @studio, old)
     settled(name)
@@ -80,7 +88,10 @@ defmodule FermixCore.Computers.RegistryTest do
 
   test "the session's end records when the home last heard it", %{name: name, home: home} do
     session = session()
-    :ok = Registry.connected(name, @studio, %{since: @since, session: session})
+
+    :ok =
+      Registry.connected(name, @studio, %{since: @since, session: session, standing: :current})
+
     :ok = Registry.disconnected(name, @studio, session)
     settled(name)
 
@@ -90,7 +101,10 @@ defmodule FermixCore.Computers.RegistryTest do
 
   test "a session that ends with no word is let go all the same", %{name: name} do
     session = session()
-    :ok = Registry.connected(name, @studio, %{since: @since, session: session})
+
+    :ok =
+      Registry.connected(name, @studio, %{since: @since, session: session, standing: :current})
+
     assert_receive :computers_changed
 
     send(session, :stop)
@@ -101,5 +115,27 @@ defmodule FermixCore.Computers.RegistryTest do
 
   test "a registry that does not run lists nothing" do
     assert Registry.live(:computers_registry_absent) == %{}
+  end
+
+  # A restart loses the live facts with the table; the new registry asks every
+  # computer whose session is up to say them again (`Home.Link`'s
+  # `announce_computers/1`), so the home's view is rebuilt, never left empty
+  # under open sessions.
+  test "a restart asks every open session to say its facts again", %{name: name} do
+    session = session()
+
+    :ok =
+      Registry.connected(name, @studio, %{since: @since, session: session, standing: :current})
+
+    settled(name)
+    assert %{@studio => _live} = Registry.live(name)
+
+    old = Process.whereis(name)
+    ref = Process.monitor(old)
+    Process.exit(old, :kill)
+    assert_receive {:DOWN, ^ref, :process, ^old, :killed}
+
+    assert_receive {:announce, ^name}, 10_000
+    assert Registry.live(name) == %{}
   end
 end

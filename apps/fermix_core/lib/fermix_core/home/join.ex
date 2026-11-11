@@ -28,7 +28,8 @@ defmodule FermixCore.Home.Join do
   computer's switches, every offer off and reviewed (M97 §7.3: a computer
   that joins starts with every offer off), then its link
   (`FermixCore.Home.DesktopLink`, naming the key's store), then the file
-  goes, and the engine restarts as a linked computer. `cancel/2` ends a join
+  goes, the computer history mark an earlier home left is forgotten
+  (`forget_history_mark/1`), and the engine restarts as a linked computer. `cancel/2` ends a join
   wherever it stands: the key and the file go, the engine is the primary of
   its own home again, and it restarts.
 
@@ -43,7 +44,10 @@ defmodule FermixCore.Home.Join do
   for a caller with no engine tree, and the secret writer's test seams).
   """
 
+  require Logger
+
   alias Exqlite.Sqlite3
+  alias FermixCore.ComputerHistory.Spool
   alias FermixCore.Computers.Switches
   alias FermixCore.Home.ComputerKey
   alias FermixCore.Home.DesktopLink
@@ -97,8 +101,9 @@ defmodule FermixCore.Home.Join do
          :ok <- own_home(home),
          {:ok, facts} <- computer_code(code, now(opts)),
          {:ok, keypair, store} <- new_key(home, opts),
-         :ok <- undo_key_unless(write_state(home, initial(facts, keypair, store)), home, opts),
-         :ok <- undo_all_unless(device_role(home), home, opts) do
+         state = initial(facts, keypair, store),
+         :ok <- undo_unless(write_state(home, state), home, state, opts),
+         :ok <- undo_unless(device_role(home), home, state, opts) do
       restart(opts)
     end
   end
@@ -168,7 +173,25 @@ defmodule FermixCore.Home.Join do
          :ok <- config(Switches.write(home, Switches.only([]))),
          :ok <- link(DesktopLink.write(home, link_of(approved, state, store))),
          :ok <- remove_file(path(home)) do
+      :ok = forget_history_mark(home)
       restart(opts)
+    end
+  end
+
+  @doc """
+  Forgets which home this machine's computer history mark counts
+  (`ComputerHistory.Spool.forget_home/1`), as a join and a disconnect do. The
+  home's identity carried with each delivery decides on its own, so a store
+  that cannot be opened is logged and never stops the step that asked.
+  """
+  @spec forget_history_mark(Path.t()) :: :ok
+  def forget_history_mark(home) when is_binary(home) and home != "" do
+    case Spool.forget_home(home) do
+      :ok ->
+        :ok
+
+      {:error, reason} ->
+        Logger.error("this computer's history mark could not be forgotten: #{inspect(reason)}")
     end
   end
 
@@ -315,19 +338,19 @@ defmodule FermixCore.Home.Join do
 
   defp device_role(home), do: config(ConfigStore.put_engine_role(home, :device))
 
-  # A step that fails takes back what the ones before it wrote.
-  defp undo_key_unless(:ok, _home, _opts), do: :ok
+  # A step that fails takes back what the ones before it wrote: the key this
+  # join made (its store and public key are in `state`, whether or not the
+  # file was written) and the file. The step's own error is the answer; an
+  # undo that fails as well is logged, since the next join meets what it left.
+  defp undo_unless(:ok, _home, _state, _opts), do: :ok
 
-  defp undo_key_unless({:error, _reason} = error, home, opts) do
-    _ = ComputerKey.delete(home, nil, Keyword.get(opts, :key_opts, []))
-    error
-  end
+  defp undo_unless({:error, _reason} = error, home, state, opts) do
+    for {what, {:error, reason}} <- [
+          key: forget_key(home, state, opts),
+          file: remove_file(path(home))
+        ],
+        do: Logger.error("a failed join could not take back its #{what}: #{inspect(reason)}")
 
-  defp undo_all_unless(:ok, _home, _opts), do: :ok
-
-  defp undo_all_unless({:error, _reason} = error, home, opts) do
-    with {:ok, state} <- read_present(home), do: forget_key(home, state, opts)
-    _ = remove_file(path(home))
     error
   end
 

@@ -7,7 +7,8 @@ defmodule FermixChannels.Mobile.PeerEvents do
   (`offers`, `link_path`) and a computer's join on an enrollment session
   (`join_request`, `join_approved`, `join_denied`), and the invocation, the
   same five events either way (`invoke_open`, `invoke_part`,
-  `invoke_cancel`, `invoke_result`, `invoke_status`, M97 §6.1).
+  `invoke_cancel`, `invoke_result`, `invoke_status`, M97 §6.1), and a
+  computer's word that its request handler started (`invoke_restarted`).
 
   One declarative table per direction, `client` for what the initiator sends
   (a phone, a desktop, a candidate, the source of a move) and `server` for what
@@ -50,7 +51,7 @@ defmodule FermixChannels.Mobile.PeerEvents do
   @link_paths ~w(direct relay)
   @snapshot_refusals ~w(disk_floor space_unknown mismatch out_of_order invalid_name write_failed)
   @computer_platforms ~w(macos linux)
-  @join_denials ~w(denied timeout cancelled device_disconnected)
+  @join_denials ~w(denied timeout cancelled)
 
   @relay {:object, [{"url", :relay_url}, {"quic_port", :port}]}
 
@@ -185,7 +186,8 @@ defmodule FermixChannels.Mobile.PeerEvents do
        ], {:jpeg, @max_raw}},
     "call_close" => {[{"call_id", :id}, {"reason", {:optional, :text}}], :none},
     "offers" => {[{"rev", :rev}, {"index", :count}, {"last", :boolean}], :required},
-    "link_path" => {[{"path", {:enum, @link_paths}}], :none}
+    "link_path" => {[{"path", {:enum, @link_paths}}], :none},
+    "invoke_restarted" => {[], :none}
   }
 
   @server %{
@@ -262,10 +264,11 @@ defmodule FermixChannels.Mobile.PeerEvents do
     join_denied
   )
 
-  # The invocation rides both directions with one table.
+  # The invocation rides both directions with one table; a computer's word
+  # that its request handler started rides from the computer alone.
   @client Map.merge(@client, @invoke)
   @server Map.merge(@server, @invoke)
-  @client_events @client_events ++ @invoke_events
+  @client_events @client_events ++ @invoke_events ++ ~w(invoke_restarted)
   @server_events @server_events ++ @invoke_events
 
   if Enum.sort(@client_events) != Enum.sort(Map.keys(@client)) or

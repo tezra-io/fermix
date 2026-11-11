@@ -169,6 +169,7 @@ defmodule FermixChannels.Desktop.ManageTest do
           device_id: DesktopRail.device_id(),
           session: test,
           registry: registry,
+          standing: :current,
           families: %{manage: {Manage, serve: serve, task_supervisor: task_supervisor}}
         )
 

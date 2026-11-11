@@ -10,10 +10,12 @@ defmodule FermixChannels.Desktop.Invoke.Admission do
   switches reviewed and the capability's offer on, read from this
   computer's switches at that moment (`off`); a deadline of 0 only for a
   long-lived op and a turn named for every turn's origin (`unavailable`);
-  args the capability takes (`failed`, its sentence); then the
-  capability's own rules (`admit/3`: the origin, the sandbox's roots).
-  The origin is the server's word: the check guards against a bug there,
-  not against a server that was taken over.
+  args the capability takes (`failed`, its sentence). The capability's own
+  rules (`admit/3`: the origin, the sandbox's roots) may read the owner's
+  folders, so they run first in the run's own process, never in this one:
+  a folder that stops answering holds that run alone. The origin is the
+  server's word: the check guards against a bug there, not against a
+  server that was taken over.
 
   **Bound**: at most #{8} run at once and #{32} wait, first come first
   served; past that, `busy`. A request that announces an upload waits for
@@ -26,15 +28,22 @@ defmodule FermixChannels.Desktop.Invoke.Admission do
   (`FermixCore.Computers.Journal`) before the run, which is a task under
   the runs' supervisor; a journal that cannot be written runs nothing. A
   deadline counts from the request's arrival, its wait included: past it a
-  run is stopped (the capability's `cancel/2` first) and answered
-  `timed_out`. A run that ran and failed with a result of its own (a
+  run is stopped and answered `timed_out`. A run stopped (past its
+  deadline, cancelled, or by a switch) is stopped beside this process, the
+  capability's `cancel/2` first, then its process, and is answered once it
+  ended, holding its slot until then: a `cancel/2` that hangs or fails is
+  logged and never holds or ends this process. A run that ran and failed
+  with a result of its own (a
   tool's error) is answered `failed` with its short message, and carries
   its result and part within the capability's bounds (its message alone
   past them), so its journal record is never `ok`.
 
   **Record, then answer**: the `finished` record is synced before the
   `invoke_result` goes, then its part (`invoke_part`). A request refused
-  before it ran has only a `finished` record. Answers are sent by a task of
+  before it started has only a `finished` record; one its capability's own
+  rules refuse started, and has both. A request its capability says is no
+  thing Fermix did here (`Capability.recorded?/3`, read once as it arrives:
+  the renewal of a screen hold) has neither. Answers are sent by a task of
   their own, so a slow link never holds this process.
 
   **Held**: each answer stays here #{10} minutes, at most #{32} answers and
@@ -46,7 +55,7 @@ defmodule FermixChannels.Desktop.Invoke.Admission do
 
   **The master switch off** (`switches_changed/1`, told by
   `FermixCore.Computers.Switches`) refuses every later request and ends
-  what runs or waits as `refused` `stopped_here` (`stop_all/2`). **An
+  what runs or waits as `refused` `stopped_here`. **An
   offer's own switch off**, the master on, ends the work of each capability
   whose offer it is, running or waiting, by the rule a request is admitted
   by (the capability's `offer/0` against `Switches.on?/2`): `refused` `off`,
@@ -69,11 +78,17 @@ defmodule FermixChannels.Desktop.Invoke.Admission do
   args or bytes) are kept while it waits in `:waiting_table`, which
   `Desktop.Invoke` owns, so the restart answers each too, `refused`
   `unavailable` ("restarted before it ran"), journaled as one refused
-  before it ran. So a restart of this process while the session stays up
-  leaves no caller waiting, a long-lived one (`imessage.watch`,
-  `screen.watch`) included, whether it ran or waited; with no session the
-  answer is not sent, and the server asks once one comes back. It applies
-  the journal's retention then, and every hour. Seams: `:timer` (2-arity,
+  before it ran. Then it tells the server it started (`invoke_restarted`),
+  and each caller still waiting on this computer asks about its request
+  (`invoke_status`), as after a new session: a request that was on its way
+  while this process was down never reached it, and one that waited when
+  `Desktop.Invoke` itself restarted went with its table, so either has no
+  record and is answered `unknown`, which ends an effect and has a read,
+  a long-lived one (`imessage.watch`, `screen.watch`) included, asked
+  again. So a restart of this process or of `Desktop.Invoke` while the
+  session stays up leaves no caller waiting; with no session nothing is
+  sent, and the server asks once one comes back. It applies the journal's
+  retention then, and every hour. Seams: `:timer` (2-arity,
   `Process.send_after/3` to this process), `:send` (3-arity, in place of
   `Relay.send_event/3`), `:link_epoch` (0-arity, in place of reading
   `device/desktop.json`).
@@ -105,7 +120,7 @@ defmodule FermixChannels.Desktop.Invoke.Admission do
   @prune_every_ms 60 * 60_000
   @part_chunk_bytes 60 * 1_024
   # What answering a request that never started needs, and nothing more.
-  @waiting_facts [:id, :capability, :op, :target, :origin, :epoch, :turn, :arrived_at]
+  @waiting_facts [:id, :capability, :op, :target, :origin, :epoch, :turn, :arrived_at, :recorded?]
 
   @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(opts) when is_list(opts),
@@ -119,11 +134,6 @@ defmodule FermixChannels.Desktop.Invoke.Admission do
   @doc "The switches changed: the master switch is read again."
   @spec switches_changed(GenServer.server()) :: :ok
   def switches_changed(server), do: GenServer.cast(server, :switches_changed)
-
-  @doc "Ends everything running or waiting here as refused `refusal`."
-  @spec stop_all(GenServer.server(), Outcome.refusal()) :: :ok
-  def stop_all(server, refusal) when refusal in [:stopped_here, :off],
-    do: GenServer.call(server, {:stop_all, refusal})
 
   @impl true
   def init(opts) do
@@ -145,6 +155,7 @@ defmodule FermixChannels.Desktop.Invoke.Admission do
       link_epoch: Keyword.get(opts, :link_epoch, fn -> link_epoch(home) end),
       running: %{},
       tasks: %{},
+      stopping: %{},
       waiting: :queue.new(),
       uploads: %{},
       held: %{}
@@ -166,7 +177,9 @@ defmodule FermixChannels.Desktop.Invoke.Admission do
     )
 
     never_ran = Outcome.refused(:unavailable, sentence(:restarted))
-    {:noreply, Enum.reduce(waited, state, &answer(&1, never_ran, &2))}
+    state = Enum.reduce(waited, state, &answer(&1, never_ran, &2))
+    :ok = tell_started(state)
+    {:noreply, state}
   end
 
   @impl true
@@ -197,28 +210,38 @@ defmodule FermixChannels.Desktop.Invoke.Admission do
 
     if Switches.enabled?(switches),
       do: {:noreply, offer_switched_off(switches, state)},
-      else: {:noreply, stopped(:stopped_here, state)}
+      else: {:noreply, stopped(state)}
   end
 
   @impl true
-  def handle_call({:stop_all, refusal}, _from, state), do: {:reply, :ok, stopped(refusal, state)}
-
-  @impl true
   def handle_info({ref, result}, state) when is_reference(ref) do
-    case Map.pop(state.tasks, ref) do
-      {nil, _tasks} ->
-        {:noreply, state}
-
-      {id, tasks} ->
+    cond do
+      Map.has_key?(state.tasks, ref) ->
+        {id, tasks} = Map.pop!(state.tasks, ref)
         Process.demonitor(ref, [:flush])
         {:noreply, ran(id, result, %{state | tasks: tasks})}
+
+      Map.has_key?(state.stopping, ref) ->
+        Process.demonitor(ref, [:flush])
+        {:noreply, run_stopped(ref, state)}
+
+      true ->
+        {:noreply, state}
     end
   end
 
   def handle_info({:DOWN, ref, :process, _pid, reason}, state) do
-    case Map.pop(state.tasks, ref) do
-      {nil, _tasks} -> {:noreply, state}
-      {id, tasks} -> {:noreply, crashed(id, reason, %{state | tasks: tasks})}
+    cond do
+      Map.has_key?(state.tasks, ref) ->
+        {id, tasks} = Map.pop!(state.tasks, ref)
+        {:noreply, crashed(id, reason, %{state | tasks: tasks})}
+
+      Map.has_key?(state.stopping, ref) ->
+        Logger.error("a run here was not stopped cleanly: #{inspect(reason)}")
+        {:noreply, run_stopped(ref, state)}
+
+      true ->
+        {:noreply, state}
     end
   end
 
@@ -299,8 +322,11 @@ defmodule FermixChannels.Desktop.Invoke.Admission do
 
   defp known?(id, state) do
     Map.has_key?(state.running, id) or Map.has_key?(state.uploads, id) or
-      Map.has_key?(state.held, id) or waiting?(id, state)
+      Map.has_key?(state.held, id) or waiting?(id, state) or stopping?(id, state)
   end
+
+  defp stopping?(id, state),
+    do: Enum.any?(state.stopping, fn {_ref, {entry, _outcome}} -> entry.id == id end)
 
   defp waiting?(id, state), do: Enum.any?(:queue.to_list(state.waiting), &(&1.id == id))
 
@@ -329,10 +355,18 @@ defmodule FermixChannels.Desktop.Invoke.Admission do
       part: fields["part"],
       args: args,
       target: target(module, fields["op"], args, capability),
+      recorded?: recorded?(module, fields["op"], args),
       arrived_at: state.clock.(),
       arrived_ms: System.monotonic_time(:millisecond)
     }
   end
+
+  # Read once: what the capability says is no thing done here (the renewal
+  # of a screen hold) gets no journal record, started or finished.
+  defp recorded?(module, op, {:ok, args}) when is_atom(module) and not is_nil(module),
+    do: Capability.recorded?(module, op, args)
+
+  defp recorded?(_module, _op, _args), do: true
 
   defp args(payload) do
     case Jason.decode(payload) do
@@ -371,16 +405,16 @@ defmodule FermixChannels.Desktop.Invoke.Admission do
     end
   end
 
+  # The capability's own rules (`admit/3`) are not here: they may read the
+  # owner's folders, so they run first in the run's own process (`launch/3`).
   defp admit(entry, state) do
-    switches = switches(state)
-
     with :ok <- current_epoch(entry, state),
          :ok <- known_op(entry),
-         :ok <- switched_on(entry, switches),
+         :ok <- switched_on(entry, switches(state)),
          :ok <- deadline_allowed(entry),
          :ok <- turn_named(entry),
-         {:ok, args} <- valid_args(entry) do
-      entry.module.admit(entry.op, args, context(entry, switches, state))
+         {:ok, _args} <- valid_args(entry) do
+      :ok
     end
   end
 
@@ -448,7 +482,7 @@ defmodule FermixChannels.Desktop.Invoke.Admission do
 
   defp accept(%{part: nil} = entry, state) do
     cond do
-      map_size(state.running) < @max_running ->
+      slot_free?(state) ->
         entry |> armed(state) |> then(&start(entry, nil, &1))
 
       waiting_count(state) < @max_waiting ->
@@ -468,6 +502,9 @@ defmodule FermixChannels.Desktop.Invoke.Admission do
   end
 
   defp busy(entry, state), do: answer(entry, Outcome.refused(:busy, sentence(:busy)), state)
+
+  # A run being stopped still holds its slot until it ended.
+  defp slot_free?(state), do: map_size(state.running) + map_size(state.stopping) < @max_running
 
   defp waiting_count(state), do: :queue.len(state.waiting) + map_size(state.uploads)
 
@@ -508,7 +545,7 @@ defmodule FermixChannels.Desktop.Invoke.Admission do
 
   # The next request that waits, once one has ended.
   defp next(state) do
-    with true <- map_size(state.running) < @max_running,
+    with true <- slot_free?(state),
          {{:value, entry}, waiting} <- :queue.out(state.waiting) do
       next(waited(entry, Map.get(entry, :part_bytes), %{state | waiting: waiting}))
     else
@@ -561,7 +598,7 @@ defmodule FermixChannels.Desktop.Invoke.Admission do
   end
 
   defp uploaded(entry, bytes, state) do
-    if map_size(state.running) < @max_running,
+    if slot_free?(state),
       do: waited(entry, bytes, state),
       else: queue(state, entry)
   end
@@ -579,7 +616,7 @@ defmodule FermixChannels.Desktop.Invoke.Admission do
   defp start(entry, part, state) do
     started_at = state.clock.()
 
-    case Journal.append_started(state.dir, started_record(entry, started_at)) do
+    case record_started(entry, started_at, state) do
       :ok ->
         :ok = forget_waiting(entry.id, state)
         launch(Map.put(entry, :started_at, started_at), part, state)
@@ -590,12 +627,18 @@ defmodule FermixChannels.Desktop.Invoke.Admission do
     end
   end
 
+  # The run's own process first applies the capability's rules, which may
+  # read the owner's folders, then runs it: neither ever holds this process.
   defp launch(entry, part, state) do
     {:ok, args} = entry.args
     context = context(entry, switches(state), state)
     module = entry.module
     op = entry.op
-    task = Task.Supervisor.async_nolink(state.runs, fn -> module.run(op, args, part, context) end)
+
+    task =
+      Task.Supervisor.async_nolink(state.runs, fn ->
+        with :ok <- module.admit(op, args, context), do: module.run(op, args, part, context)
+      end)
 
     %{
       state
@@ -689,21 +732,49 @@ defmodule FermixChannels.Desktop.Invoke.Admission do
     end
   end
 
+  # Past its deadline, cancelled, or ended by a switch: the run is stopped
+  # beside this process and answered `outcome` once it ended, its slot held
+  # until then.
   defp stop_running(id, outcome, state) do
     {entry, state} = pop_running(id, state)
-    :ok = stop_task(entry, state)
-    answer(entry, outcome, %{state | tasks: Map.delete(state.tasks, entry.task.ref)})
+    Process.demonitor(entry.task.ref, [:flush])
+    stopper = stop_task(entry, state)
+
+    %{
+      state
+      | tasks: Map.delete(state.tasks, entry.task.ref),
+        stopping: Map.put(state.stopping, stopper.ref, {entry, outcome})
+    }
   end
 
-  # The capability lets go of what the run holds, then the run is ended.
-  defp stop_task(%{task: task, module: module, op: op}, state) do
-    if function_exported?(module, :cancel, 2), do: :ok = module.cancel(op, task.pid)
-    Process.demonitor(task.ref, [:flush])
+  defp run_stopped(ref, state) do
+    {{entry, outcome}, stopping} = Map.pop!(state.stopping, ref)
+    answer(entry, outcome, %{state | stopping: stopping}) |> next()
+  end
 
-    case Task.Supervisor.terminate_child(state.runs, task.pid) do
+  # The capability lets go of what the run holds, then the run is ended, in a
+  # process of its own: a letting go that hangs or fails never holds or ends
+  # this one.
+  defp stop_task(%{task: task, module: module, op: op}, state) do
+    runs = state.runs
+    Task.Supervisor.async_nolink(runs, fn -> stop_run(module, op, task.pid, runs) end)
+  end
+
+  defp stop_run(module, op, pid, runs) do
+    :ok = let_go(module, op, pid)
+
+    case Task.Supervisor.terminate_child(runs, pid) do
       :ok -> :ok
       {:error, :not_found} -> :ok
     end
+  end
+
+  defp let_go(module, op, pid) do
+    if function_exported?(module, :cancel, 2), do: module.cancel(op, pid), else: :ok
+  catch
+    :exit, reason ->
+      Logger.warning("a run of #{op} did not let go of what it held: #{inspect(reason)}")
+      :ok
   end
 
   defp drop_upload(id, outcome, state) do
@@ -730,6 +801,10 @@ defmodule FermixChannels.Desktop.Invoke.Admission do
       waiting?(id, state) ->
         drop_waiting(id, %Outcome{status: :cancelled}, state)
 
+      # Being stopped already: answered once it ended.
+      stopping?(id, state) ->
+        state
+
       true ->
         status(id, state)
     end
@@ -739,7 +814,8 @@ defmodule FermixChannels.Desktop.Invoke.Admission do
     now = state.clock.()
 
     cond do
-      Map.has_key?(state.running, id) or Map.has_key?(state.uploads, id) or waiting?(id, state) ->
+      Map.has_key?(state.running, id) or Map.has_key?(state.uploads, id) or waiting?(id, state) or
+          stopping?(id, state) ->
         state
 
       held?(state, id, now) ->
@@ -786,8 +862,8 @@ defmodule FermixChannels.Desktop.Invoke.Admission do
   defp receipt_message("unknown"), do: sentence(:receipt_unknown)
   defp receipt_message(_status), do: nil
 
-  defp stopped(refusal, state) do
-    outcome = Outcome.refused(refusal, sentence(:stopped_here))
+  defp stopped(state) do
+    outcome = Outcome.refused(:stopped_here, sentence(:stopped_here))
     state = Enum.reduce(Map.keys(state.running), state, &stop_running(&1, outcome, &2))
     state = Enum.reduce(Map.keys(state.uploads), state, &drop_upload(&1, outcome, &2))
     ids = for entry <- :queue.to_list(state.waiting), do: entry.id
@@ -854,6 +930,14 @@ defmodule FermixChannels.Desktop.Invoke.Admission do
   defp announce(bytes),
     do: %{size_bytes: byte_size(bytes), sha256: sha256(bytes), mime: "application/octet-stream"}
 
+  # A request its capability says is no thing done here has no record.
+  defp record_started(%{recorded?: false}, _at, _state), do: :ok
+
+  defp record_started(entry, at, state),
+    do: Journal.append_started(state.dir, started_record(entry, at))
+
+  defp record_finished(%{recorded?: false}, _outcome, _now, _duration, _bytes, _state), do: :ok
+
   defp record_finished(entry, outcome, now, duration, bytes, state) do
     record =
       %{
@@ -907,6 +991,29 @@ defmodule FermixChannels.Desktop.Invoke.Admission do
 
     {:ok, _pid} =
       Task.Supervisor.start_child(state.runs, fn -> deliver(send, relay, event, payload, part) end)
+
+    :ok
+  end
+
+  # The server hears this process started (`invoke_restarted`), so each
+  # caller still waiting on this computer asks about its request: one that
+  # was on its way while this process was down, or that waited when
+  # `Desktop.Invoke` itself restarted, has no record here and is answered so.
+  # With no session it is not sent: the next session's start asks the same.
+  defp tell_started(state) do
+    send = state.send
+    relay = state.relay
+
+    {:ok, _pid} =
+      Task.Supervisor.start_child(state.runs, fn ->
+        case send.(relay, %{"t" => "invoke_restarted"}, <<>>) do
+          :ok ->
+            :ok
+
+          {:error, reason} ->
+            Logger.info("the server was not told of this start: #{inspect(reason)}")
+        end
+      end)
 
     :ok
   end

@@ -239,6 +239,57 @@ defmodule FermixCore.ComputerHistory.Config do
     end
   end
 
+  @doc """
+  The home's route this machine's own local summarizer decides over (M97 §4):
+  where `machine.toml` says `summarizer = "local"` and the home's
+  `config.toml` names another, that one, as `summarizer/1` would answer it
+  without the machine's; nil where nothing is overridden. A computer holds no
+  home route (`for_role/2`), so there it is always nil. Deleting the line
+  from `machine.toml` hands the choice back to `config.toml`.
+  """
+  @spec shadowed_route(keyword()) :: summarizer() | nil
+  def shadowed_route(config \\ current()) when is_list(config) do
+    machine? = Keyword.get(config, :machine_summarizer) != nil
+
+    if machine? and Keyword.has_key?(config, :summarizer) and route(config) != :local,
+      do: route(config),
+      else: nil
+  end
+
+  @doc """
+  Say once, where it is true, that this machine's local summarizer decides
+  over the home's route in `config.toml` (`shadowed_route/1`). Called as the
+  history rail starts, so a route edited in `config.toml` that does not take
+  is never silent.
+  """
+  @spec warn_if_shadowed(keyword()) :: :ok
+  def warn_if_shadowed(config \\ current()) when is_list(config) do
+    case shadowed_route(config) do
+      nil ->
+        :ok
+
+      route ->
+        Logger.warning(
+          ~s(computer_history: summarizer = "local" in this machine's machine.toml decides ) <>
+            "over config.toml's summarizer (#{route_word(route)}), which is not used while " <>
+            "that line is there; delete it from machine.toml to use config.toml's"
+        )
+    end
+  end
+
+  @doc "What a settings row says while `shadowed_route/1` names a route."
+  @spec shadowed_footer() :: String.t()
+  def shadowed_footer,
+    do:
+      ~s(This Mac's `machine.toml` says `summarizer = "local"`, so its notes are made here ) <>
+        "and the summarizer in `config.toml` is not used while that line is there."
+
+  @doc "A route as `config.toml` spells it: `default`, `local` or a provider's id."
+  @spec route_word(summarizer()) :: String.t()
+  def route_word(:default_provider), do: "default"
+  def route_word(:local), do: "local"
+  def route_word({:provider, provider}), do: Atom.to_string(provider)
+
   defp route(config) do
     case Keyword.get(config, :summarizer, @default_summarizer) do
       :local -> :local

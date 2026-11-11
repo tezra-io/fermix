@@ -17,9 +17,13 @@ defmodule FermixCore.ComputerHistory.Spool do
 
   One GenServer holds the store's connection, the `Memory.Repo` shape; every
   request runs `Memory.Repo.ComputerHistorySql` on it, so the raw reads and
-  writes have one implementation. It is not the only writer: a computer applies
-  what its home tells it (`apply_at/3`, from `ComputerHistory.MachineService`)
-  on a connection of its own, opened and closed for that one apply. Every write
+  writes have one implementation. A store that does not open never stops the
+  engine: the process stays up and answers every request with why
+  (`status/1`), and the recorder stays off. It is not the only writer: a
+  computer applies what its home tells it (`apply_at/4`, from
+  `ComputerHistory.MachineService`), and forgets its home when it joins or
+  leaves one (`forget_home/1`), each on a connection of its own, opened and
+  closed for that one write. Every write
   of either is one `BEGIN IMMEDIATE` transaction, which SQLite serializes, so
   neither interleaves with the other; a write that waits past the 5 s
   `busy_timeout` fails with an error. Options: `:path` (the file), `:name`
@@ -37,7 +41,7 @@ defmodule FermixCore.ComputerHistory.Spool do
   alias FermixCore.Timeouts
 
   @file_name "history.db"
-  @schema_version 1
+  @schema_version 2
 
   @doc "The machine store under `home`."
   @spec path(Path.t()) :: Path.t()
@@ -77,10 +81,6 @@ defmodule FermixCore.ComputerHistory.Spool do
   @spec count_events(keyword()) :: {:ok, non_neg_integer()} | {:error, term()}
   def count_events(opts \\ []), do: call({:sql, :count_events, []}, opts)
 
-  @doc "The oldest raw event's stamp, or nil."
-  @spec oldest_event_ts(keyword()) :: {:ok, integer() | nil} | {:error, term()}
-  def oldest_event_ts(opts \\ []), do: call({:sql, :oldest_event_ts, []}, opts)
-
   @doc "Up to `limit` events past the id `after_id`, oldest first (the cursor's read)."
   @spec events_after(non_neg_integer(), pos_integer(), keyword()) ::
           {:ok, [map()]} | {:error, term()}
@@ -117,11 +117,6 @@ defmodule FermixCore.ComputerHistory.Spool do
   @doc "The state row (cursor, pause, open sitting, claim), made when absent."
   @spec state(keyword()) :: {:ok, map()} | {:error, term()}
   def state(opts \\ []), do: call({:sql, :ensure_state, []}, opts)
-
-  @doc "Set or clear (nil) the capture pause, an ISO 8601 horizon."
-  @spec set_pause_until(String.t() | nil, keyword()) :: :ok | {:error, term()}
-  def set_pause_until(until, opts \\ []) when is_binary(until) or is_nil(until),
-    do: call({:sql, :set_pause_until, [until]}, opts)
 
   @doc "Record why sending or summarizing is held, or clear it (nil)."
   @spec set_paused_reason(String.t() | nil, keyword()) :: :ok | {:error, term()}
@@ -163,21 +158,25 @@ defmodule FermixCore.ComputerHistory.Spool do
     do: call({:sql, :record_answer, [answer, reason, at_ts]}, opts)
 
   @doc """
-  Apply the home's purge and pause intervals (M97 §8.5), oldest first: each
+  Apply the purge and pause intervals of the home store `home` names (its
+  identity, `ComputerHistory.home_identity/1`; M97 §8.5), oldest first: each
   deletes the raw events stamped inside it and fences later ones, a pause that
   has not ended also pauses capture here until it does, and the mark of the
-  highest one applied is recorded last, so an interrupted apply is done again
-  whole. `now` is the wall clock.
+  highest one applied is recorded last, with `home`, so an interrupted apply is
+  done again whole. A mark under another store means nothing under this one:
+  it is replaced, never raised (`ComputerHistorySql.set_home_mark/3`). `now`
+  is the wall clock.
   """
-  @spec apply_intervals([map()], DateTime.t(), keyword()) :: :ok | {:error, term()}
-  def apply_intervals(intervals, %DateTime{} = now, opts \\ []) when is_list(intervals) do
+  @spec apply_intervals([map()], String.t(), DateTime.t(), keyword()) :: :ok | {:error, term()}
+  def apply_intervals(intervals, home, %DateTime{} = now, opts \\ [])
+      when is_list(intervals) and is_binary(home) and home != "" do
     Enum.reduce_while(intervals, :ok, fn interval, :ok ->
       case apply_interval(interval, now, opts) do
         :ok -> {:cont, :ok}
         {:error, _reason} = error -> {:halt, error}
       end
     end)
-    |> mark_applied(intervals, opts)
+    |> mark_applied(intervals, home, opts)
   end
 
   defp apply_interval(%{from_ts: from_ts, to_ts: to_ts, kind: kind} = interval, now, opts) do
@@ -200,34 +199,56 @@ defmodule FermixCore.ComputerHistory.Spool do
 
   defp pause_from("purge", _to_ts, _now, _opts), do: :ok
 
-  defp mark_applied(:ok, [], _opts), do: :ok
-
-  defp mark_applied(:ok, intervals, opts),
-    do: call({:sql, :set_home_mark, [intervals |> Enum.map(& &1.id) |> Enum.max()]}, opts)
-
-  defp mark_applied({:error, _reason} = error, _intervals, _opts), do: error
-
-  @doc """
-  Apply the home's intervals (`apply_intervals/3`) to the store at `file`, on a
-  connection of its own, opened and closed here: how a computer applies what
-  its home sends it (`ComputerHistory.MachineService`), from the invocation's
-  home alone. Answers the store's mark once they are applied: the highest
-  interval this machine has applied, every one below it included. A machine
-  with no store has no raw event to fence and applied nothing: nothing is
-  created and the mark is 0, so a store it opens later starts from the first
-  interval.
-  """
-  @spec apply_at(Path.t(), [map()], DateTime.t()) :: {:ok, non_neg_integer()} | {:error, term()}
-  def apply_at(file, intervals, %DateTime{} = now) when is_binary(file) and is_list(intervals) do
-    if File.exists?(file), do: apply_open(file, intervals, now), else: {:ok, 0}
+  # Written even when nothing was applied: a store that names another home
+  # starts again from 0 under this one.
+  defp mark_applied(:ok, intervals, home, opts) do
+    mark = intervals |> Enum.map(& &1.id) |> Enum.max(fn -> 0 end)
+    call({:sql, :set_home_mark, [home, mark]}, opts)
   end
 
-  defp apply_open(file, intervals, now) do
+  defp mark_applied({:error, _reason} = error, _intervals, _home, _opts), do: error
+
+  @doc """
+  Apply the intervals of the home store `home` names (`apply_intervals/4`) to
+  the store at `file`, on a connection of its own, opened and closed here: how
+  a computer applies what its home sends it (`ComputerHistory.MachineService`),
+  from the invocation's home alone. Answers the store's mark once they are
+  applied: the highest interval of that home store this machine has applied,
+  every one below it included. A machine with no store has no raw event to
+  fence and applied nothing: nothing is created and the mark is 0, so a store
+  it opens later starts from the first interval.
+  """
+  @spec apply_at(Path.t(), String.t(), [map()], DateTime.t()) ::
+          {:ok, non_neg_integer()} | {:error, term()}
+  def apply_at(file, home, intervals, %DateTime{} = now)
+      when is_binary(file) and is_binary(home) and is_list(intervals) do
+    if File.exists?(file),
+      do: on_own_connection(file, &applied(&1, home, intervals, now)),
+      else: {:ok, 0}
+  end
+
+  defp applied(conn, home, intervals, now) do
+    with :ok <- apply_intervals(intervals, home, now, conn: conn),
+         {:ok, %{home_mark: mark}} <- link(conn: conn),
+         do: {:ok, mark}
+  end
+
+  @doc """
+  Forget which home store this machine's mark belongs to (M97 §8.5): its mark
+  is 0 again and names no store, so the next home it hears from starts from
+  its first interval. For a computer that joins a home or leaves one. The
+  store under `home` (this engine's home folder) is opened on a connection of
+  its own; a machine with no store has no mark, and nothing is created.
+  """
+  @spec forget_home(Path.t()) :: :ok | {:error, term()}
+  def forget_home(home) when is_binary(home) and home != "" do
+    file = path(home)
+    if File.exists?(file), do: on_own_connection(file, &Sql.forget_home/1), else: :ok
+  end
+
+  defp on_own_connection(file, run) do
     with {:ok, conn} <- open(file) do
-      result =
-        with :ok <- apply_intervals(intervals, now, conn: conn),
-             {:ok, %{home_mark: mark}} <- link(conn: conn),
-             do: {:ok, mark}
+      result = run.(conn)
 
       case Sqlite3.close(conn) do
         :ok -> result
@@ -236,9 +257,21 @@ defmodule FermixCore.ComputerHistory.Spool do
     end
   end
 
+  @doc """
+  Whether this machine's store opened (M97 §8.1): `:open`, or
+  `{:unavailable, file, reason}` when it did not, in which case every request
+  is answered `{:error, {:store_unavailable, reason}}` and the recorder stays
+  off (`ComputerHistory.Controller`) until the engine starts again.
+  """
+  @spec status(keyword()) :: :open | {:unavailable, Path.t(), term()}
+  def status(opts \\ []) do
+    server = Keyword.get(opts, :server, __MODULE__)
+    GenServer.call(server, :status, Keyword.get(opts, :timeout, Timeouts.repo_call()))
+  end
+
   # -- the process -----------------------------------------------------------------
 
-  # `conn:` runs the request on a connection the caller opened (`apply_at/3`).
+  # `conn:` runs the request on a connection the caller opened (`apply_at/4`).
   defp call({:sql, function, args}, conn: conn), do: apply(Sql, function, [conn | args])
 
   defp call(request, opts) do
@@ -257,28 +290,43 @@ defmodule FermixCore.ComputerHistory.Spool do
     :exit, {:timeout, _call} -> {:error, :spool_timeout}
   end
 
+  # A store that does not open (a full disk, a damaged file, a folder that
+  # cannot be made) never stops the engine or the children after this one
+  # (AGENTS.md "Cascade roots"): the process stays up holding the reason, logged
+  # once here, and answers every request with it.
   @impl true
   def init(opts) do
     file = Keyword.get_lazy(opts, :path, fn -> path(ConfigStore.fermix_home()) end)
 
     case open(file) do
       {:ok, conn} ->
-        {:ok, %{conn: conn, path: file}}
+        {:ok, %{conn: conn, path: file, unavailable: nil}}
 
       {:error, reason} ->
         Logger.error(
-          "computer history: the machine store #{file} did not open: #{inspect(reason)}"
+          "computer history: the machine store #{file} did not open: #{inspect(reason)}; " <>
+            "nothing is recorded until Fermix starts again"
         )
 
-        {:stop, {:spool, reason}}
+        {:ok, %{conn: nil, path: file, unavailable: reason}}
     end
   end
 
   @impl true
+  def handle_call(:status, _from, %{unavailable: nil} = state), do: {:reply, :open, state}
+
+  def handle_call(:status, _from, state),
+    do: {:reply, {:unavailable, state.path, state.unavailable}, state}
+
+  def handle_call({:sql, _function, _args}, _from, %{conn: nil} = state),
+    do: {:reply, {:error, {:store_unavailable, state.unavailable}}, state}
+
   def handle_call({:sql, function, args}, _from, state),
     do: {:reply, apply(Sql, function, [state.conn | args]), state}
 
   @impl true
+  def terminate(_reason, %{conn: nil}), do: :ok
+
   def terminate(_reason, %{conn: conn}) do
     _ = Sqlite3.close(conn)
     :ok
@@ -313,18 +361,32 @@ defmodule FermixCore.ComputerHistory.Spool do
     {:error, reason}
   end
 
-  # One version so far, its statements each safe to run again, recorded in the
-  # same transaction.
+  # Two versions, each statement safe to run again and recorded in the same
+  # transaction: the tables, then the home store each mark belongs to.
   defp migrate(conn) do
-    Sqlite3.execute(
-      conn,
-      """
-      CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY);
-      BEGIN;
-      #{Sql.spool_schema_sql()}
-      INSERT OR IGNORE INTO schema_migrations(version) VALUES (#{@schema_version});
-      COMMIT;
-      """
-    )
+    with :ok <-
+           Sqlite3.execute(
+             conn,
+             "CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY); BEGIN;"
+           ) do
+      conn |> upgrade() |> settle_migration(conn)
+    end
+  end
+
+  defp upgrade(conn) do
+    with :ok <- Sqlite3.execute(conn, Sql.spool_schema_sql()),
+         :ok <- Sql.spool_columns(conn) do
+      Sqlite3.execute(
+        conn,
+        "INSERT OR IGNORE INTO schema_migrations(version) VALUES (1), (#{@schema_version});"
+      )
+    end
+  end
+
+  defp settle_migration(:ok, conn), do: Sqlite3.execute(conn, "COMMIT;")
+
+  defp settle_migration({:error, reason}, conn) do
+    _ = Sqlite3.execute(conn, "ROLLBACK;")
+    {:error, reason}
   end
 end

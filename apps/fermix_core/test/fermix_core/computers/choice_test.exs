@@ -141,6 +141,18 @@ defmodule FermixCore.Computers.ChoiceTest do
             %{context(sid, [studio()]) | source_trust: :guest},
             Map.delete(context(sid, [studio()]), :source_trust),
             Map.put(context(sid, [studio()]), :always_on, false),
+            # A plugin skill's worker: its parent's context, at guest.
+            context(sid, [studio()])
+            |> Map.put(:skill_depth, 1)
+            |> Map.put(:effective_trust, :guest),
+            # Any skill's or sub-agent's worker, at the owner's trust too.
+            context(sid, [studio()])
+            |> Map.put(:skill_depth, 1)
+            |> Map.put(:effective_trust, :operator),
+            context(sid, [studio()])
+            |> Map.delete(:source_trust)
+            |> Map.put(:subagent_depth, 1)
+            |> Map.put(:effective_trust, :operator),
             %{
               session_id: sid,
               source_trust: :operator,

@@ -199,13 +199,16 @@ defmodule FermixCore.ComputerHistory.SubmissionTest do
 
     assert Enum.map(intervals, & &1.id) == [later, reaching]
 
-    # A machine that already applied the first is told of the second alone.
-    assert %{status: :refused, intervals: [%{id: ^reaching}]} =
-             Submission.accept(@studio, Map.put(sitting(), "mark", later), opts(ctx.repo))
+    # A machine that already applied the first of this home's store is told of
+    # the second alone.
+    {:ok, home} = FermixCore.ComputerHistory.home_identity(repo: ctx.repo)
+    applied = fn mark -> sitting() |> Map.put("mark", mark) |> Map.put("home", home) end
+
+    assert %{status: :refused, intervals: [%{id: ^reaching}], home: ^home} =
+             Submission.accept(@studio, applied.(later), opts(ctx.repo))
 
     # And one that applied both is taken.
-    assert %{status: :summarized} =
-             Submission.accept(@studio, Map.put(sitting(), "mark", reaching), opts(ctx.repo))
+    assert %{status: :summarized} = Submission.accept(@studio, applied.(reaching), opts(ctx.repo))
   end
 
   # The other order: the note is read before the purge and written after it.
@@ -331,11 +334,40 @@ defmodule FermixCore.ComputerHistory.SubmissionTest do
     assert {:ok, [@studio]} = contributors.()
   end
 
+  # M97 §8.1: the home keeps purge and pause intervals for the retention
+  # window alone, so a sitting older than the window is never noted: it is
+  # refused, with no call, and the machine moves past it.
+  test "a sitting older than the retention window is refused expired, with no call", ctx do
+    late = DateTime.from_unix!(@t0 + 49 * 3_600_000, :millisecond)
+
+    assert %{status: :refused, reason: :expired, intervals: []} =
+             Submission.accept(@studio, sitting(), opts(ctx.repo, now: late))
+
+    assert calls() == []
+    assert notes(ctx.repo) == []
+  end
+
+  # M97 §8.5: a mark is the highest interval of one home's store a machine
+  # applied, so a sitting that names no home, or another, is checked against
+  # every interval of this one.
+  test "a sitting whose mark is not this home's is checked against every interval", ctx do
+    {:ok, %{interval: reaching}} =
+      Repo.computer_history_home(:purge_notes, [@t0, @t0 + 100, @t0 + 800, :all],
+        server: ctx.repo
+      )
+
+    assert %{status: :refused, reason: :purged, intervals: [%{id: ^reaching}]} =
+             Submission.accept(@studio, Map.put(sitting(), "mark", reaching), opts(ctx.repo))
+
+    assert calls() == []
+  end
+
   test "an answer survives the wire" do
     answer = %{
       status: :refused,
       reason: :paused,
-      intervals: [%{id: 3, from_ts: 1, to_ts: 2, issued_at: 2, kind: "pause"}]
+      intervals: [%{id: 3, from_ts: 1, to_ts: 2, issued_at: 2, kind: "pause"}],
+      home: "4f2a9c1e7b3d5a60.2"
     }
 
     assert {:ok, ^answer} = answer |> Submission.to_wire() |> Submission.from_wire()
@@ -343,7 +375,14 @@ defmodule FermixCore.ComputerHistory.SubmissionTest do
     assert {:error, _reason} =
              Submission.from_wire(%{"status" => "invented", "reason" => nil, "intervals" => []})
 
-    off = %{status: :refused, reason: :off, intervals: []}
+    # Intervals mean nothing without the home store they belong to.
+    assert {:error, _reason} =
+             answer |> Map.put(:home, nil) |> Submission.to_wire() |> Submission.from_wire()
+
+    off = %{status: :refused, reason: :off, intervals: [], home: nil}
     assert {:ok, ^off} = off |> Submission.to_wire() |> Submission.from_wire()
+
+    expired = %{status: :refused, reason: :expired, intervals: [], home: nil}
+    assert {:ok, ^expired} = expired |> Submission.to_wire() |> Submission.from_wire()
   end
 end

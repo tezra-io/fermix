@@ -190,7 +190,7 @@ defmodule FermixCore.Computers.Store do
         "engine_version" => entry.engine_version,
         "seen_at" => entry.seen_at && iso(entry.seen_at),
         "offers_rev" => entry.offers_rev,
-        "offers" => Enum.map(entry.offers, &wire/1)
+        "offers" => Enum.map(entry.offers, &Offers.to_wire/1)
       })
 
     with :ok <- file_op(File.write(tmp, contents), tmp),
@@ -202,13 +202,6 @@ defmodule FermixCore.Computers.Store do
         _ = File.rm(tmp)
         error
     end
-  end
-
-  # As the wire carries an offer: its absent fields left out.
-  defp wire(offer) do
-    offer
-    |> Offers.view()
-    |> Map.reject(fn {_key, value} -> is_nil(value) end)
   end
 
   defp iso(%DateTime{} = at), do: at |> DateTime.truncate(:second) |> DateTime.to_iso8601()

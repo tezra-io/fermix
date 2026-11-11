@@ -25,13 +25,14 @@ defmodule FermixChannels.Desktop.InvokeFamilyTest do
     %{peers: peers, calls: calls}
   end
 
-  defp init(ctx) do
+  defp init(ctx, standing \\ :current) do
     {:ok, state} =
       InvokeFamily.init(%{
         device_id: @device,
         session: self(),
         peer: self(),
         registry: ctx.peers,
+        standing: standing,
         options: [calls: ctx.calls, home: System.tmp_dir!()]
       })
 
@@ -60,6 +61,22 @@ defmodule FermixChannels.Desktop.InvokeFamilyTest do
 
     assert_receive {:computer_invoke, "inv-a", :reconnected}
     assert_receive {:computer_invoke, "inv-b", :reconnected}
+    refute_received {:mobile_event, %{"t" => "invoke_status"}}
+  end
+
+  # INVOKE-2: the computer's request handler started again under a live
+  # session, so a request may have been lost on its way, or with what waited:
+  # everyone still waiting on that computer asks, as after a new session.
+  test "a computer whose request handler restarted has everyone waiting on it ask again",
+       ctx do
+    state = init(ctx)
+    waited_on(ctx, "inv-c")
+    waited_on(ctx, "inv-d")
+
+    assert {:ok, ^state} = InvokeFamily.handle_event("invoke_restarted", %{}, <<>>, state)
+
+    assert_receive {:computer_invoke, "inv-c", :reconnected}
+    assert_receive {:computer_invoke, "inv-d", :reconnected}
     refute_received {:mobile_event, %{"t" => "invoke_status"}}
   end
 
@@ -222,6 +239,25 @@ defmodule FermixChannels.Desktop.InvokeFamilyTest do
 
       assert frame["bytes"] =~ "from the computer"
       assert_receive {:desktop_family, :invoke, {:service_done, "inv-e"}}, 10_000
+    end
+
+    # M97 §3.4: a computer past the version window is served settings alone,
+    # so none of the home's services runs for it, its history above all; the
+    # standing is its session's, the one its chat is refused by.
+    test "a computer past the window is served none of them", ctx do
+      state = init(ctx, :settings_only)
+      fields = open("inv-s", "system", "echo", nil) |> Map.delete("args")
+
+      {:ok, state} =
+        InvokeFamily.handle_event("invoke_open", fields, ~s({"text":"from the computer"}), state)
+
+      assert_receive {:mobile_event,
+                      %{"t" => "invoke_result", "id" => "inv-s", "refusal" => "unavailable"} =
+                        frame}
+
+      assert frame["message"] =~ "Update Fermix on this computer"
+      assert state.running == %{}
+      refute_received {:desktop_family, :invoke, {:service_done, "inv-s"}}
     end
 
     test "what the server does not offer is unavailable, and an unknown id unknown", ctx do

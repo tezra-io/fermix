@@ -69,12 +69,21 @@ defmodule FermixCore.Computers.Remote do
   The tool result the model reads for `outcome` on `computer`: the tool's own
   result where it ran, whether it succeeded (`ok`) or failed with a result
   of its own (`failed`, the whole error, not only the outcome's first line),
-  else the outcome's sentence (the moduledoc). A result that says otherwise
-  than its status is not a tool's result.
+  else the outcome's sentence (the moduledoc). One that ran and whose output
+  was lost on the way (`part_lost`) says so in its sentence. A result that
+  says otherwise than its status is not a tool's result.
   """
   @spec result(Outcome.t(), Computer.t()) :: Tool.tool_result()
   def result(%Outcome{status: :ok, receipt_only: true} = outcome, %Computer{name: name}),
     do: Tool.success(Outcome.sentence(outcome, name))
+
+  # It ran, and its output was lost on the way: said so, in the status it
+  # ran to, never a failure that would have it run again.
+  def result(%Outcome{status: :ok, part_lost: true} = outcome, %Computer{name: name}),
+    do: Tool.success(Outcome.sentence(outcome, name))
+
+  def result(%Outcome{status: :failed, part_lost: true} = outcome, %Computer{name: name}),
+    do: Tool.error(Outcome.sentence(outcome, name))
 
   def result(%Outcome{status: :ok} = outcome, %Computer{} = computer),
     do: tool_result(outcome, true, computer)

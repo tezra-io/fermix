@@ -261,7 +261,9 @@ defmodule FermixCore.Management.SetupState do
       "computer_history" => %{
         "enabled" => history_enabled?,
         "installed" => installed?,
-        "ready" => history_enabled? and installed? and ComputerHistory.macos?()
+        "ready" =>
+          history_enabled? and installed? and ComputerHistory.macos?() and
+            source(opts, :history_store_open?, &ComputerHistory.store_open?/0)
       }
     }
   end

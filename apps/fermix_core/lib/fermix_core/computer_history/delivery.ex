@@ -24,7 +24,14 @@ defmodule FermixCore.ComputerHistory.Delivery do
   never gains a note in the meantime; delivery is what makes the computer
   delete its own raw events, never what keeps the home clean.
 
-  Options: `:repo`, `:spool` (this machine's store), `:now`, `:computers` (the
+  **A mark belongs to one home store.** Interval ids start again wherever the
+  home's store does (a restore, a server rebuilt from nothing, another home),
+  so each mark is kept with that store's identity
+  (`ComputerHistory.home_identity/1`): every request names it, and a machine
+  whose mark names another store applies from the first interval again.
+
+  Options: `:repo`, `:home` (the home folder, for its identity), `:spool`
+  (this machine's store), `:now`, `:computers` (the
   home's computers, `Computers.list/0`), `:call` (how a computer is asked,
   `Computers.call/6`'s shape, a test's seam) and `:call_opts`
   (`Computers.call/6`'s options).
@@ -32,6 +39,7 @@ defmodule FermixCore.ComputerHistory.Delivery do
 
   require Logger
 
+  alias FermixCore.ComputerHistory
   alias FermixCore.ComputerHistory.MachineService
   alias FermixCore.ComputerHistory.Spool
   alias FermixCore.Computers
@@ -56,7 +64,8 @@ defmodule FermixCore.ComputerHistory.Delivery do
   This machine's own intervals (a home that records itself): every one of the
   home's purge and pause intervals above this machine's mark, for every
   machine or for this one, at most #{@max_intervals} oldest first, applied in
-  order and the mark moved last (`Spool.apply_intervals/3`). Any past the
+  order and the mark moved last (`Spool.apply_intervals/4`); from the first
+  where its mark names another home store. Any past the
   bound wait for the next call, the scheduler's tick at the latest, and the
   home refuses this machine's sittings inside them meanwhile. Answers how
   many raw events the intervals deleted here.
@@ -67,34 +76,46 @@ defmodule FermixCore.ComputerHistory.Delivery do
     spool = [server: Keyword.fetch!(opts, :spool)]
     now = Keyword.get_lazy(opts, :now, &DateTime.utc_now/0)
 
-    with {:ok, %{home_mark: mark}} <- Spool.link(spool),
+    with {:ok, home} <- ComputerHistory.home_identity(Keyword.take(opts, [:repo, :home])),
+         {:ok, link} <- Spool.link(spool),
          {:ok, intervals} <-
-           Repo.computer_history_home(:intervals_after, ["", mark, @max_intervals], server: repo),
+           Repo.computer_history_home(:intervals_after, ["", mark(link, home), @max_intervals],
+             server: repo
+           ),
          {:ok, before} <- Spool.count_events(spool),
-         :ok <- Spool.apply_intervals(intervals, now, spool),
+         :ok <- Spool.apply_intervals(intervals, home, now, spool),
          {:ok, left} <- Spool.count_events(spool) do
       {:ok, max(before - left, 0)}
     end
   end
 
-  @doc "Send each connected computer what it has not applied, and any off it owes; names by outcome."
+  # A mark under another home store is no mark under this one.
+  defp mark(%{home: home, home_mark: mark}, home), do: mark
+  defp mark(_link, _home), do: 0
+
+  @doc """
+  Send each connected computer what it has not applied, and any off it owes;
+  names by outcome. Every request names the home store its intervals belong
+  to (`ComputerHistory.home_identity/1`), so the mark each answers is one
+  under this store; one that cannot be named sends nothing and is `failed`.
+  """
   @spec deliver(keyword()) :: result()
   def deliver(opts \\ []) when is_list(opts) do
     repo = Keyword.get(opts, :repo, Repo)
     computers = Keyword.get_lazy(opts, :computers, &Computers.list/0)
     empty = %{applied: [], away: [], failed: [], no_store: []}
 
-    case Repo.computer_history_home(:computer_rows, [], server: repo) do
-      {:ok, rows} ->
-        rows = Map.new(rows, &{&1.computer_id, &1})
+    with {:ok, home} <- ComputerHistory.home_identity(Keyword.take(opts, [:repo, :home])),
+         {:ok, rows} <- Repo.computer_history_home(:computer_rows, [], server: repo) do
+      rows = Map.new(rows, &{&1.computer_id, &1})
 
-        Enum.reduce(computers, empty, fn computer, acc ->
-          row = Map.get(rows, computer.device_id, %{delivered_mark: 0, off_requested_at: nil})
-          _off = owed_off(computer, row.off_requested_at, repo, opts)
-          outcome = deliver_one(computer, row.delivered_mark, repo, opts)
-          Map.update!(acc, outcome, &[computer.name | &1])
-        end)
-
+      Enum.reduce(computers, empty, fn computer, acc ->
+        row = Map.get(rows, computer.device_id, %{delivered_mark: 0, off_requested_at: nil})
+        _off = owed_off(computer, row.off_requested_at, repo, opts)
+        outcome = deliver_one(computer, {home, row.delivered_mark}, repo, opts)
+        Map.update!(acc, outcome, &[computer.name | &1])
+      end)
+    else
       {:error, reason} ->
         Logger.error(
           "computer_history delivery could not read the home's marks: #{inspect(reason)}"
@@ -104,20 +125,20 @@ defmodule FermixCore.ComputerHistory.Delivery do
     end
   end
 
-  defp deliver_one(computer, mark, repo, opts) do
+  defp deliver_one(computer, {home, mark}, repo, opts) do
     case Repo.computer_history_home(:intervals_after, [computer.device_id, mark, @max_intervals],
            server: repo
          ) do
       {:ok, []} -> :applied
-      {:ok, intervals} -> send_to(computer, intervals, repo, opts)
+      {:ok, intervals} -> send_to(computer, {home, intervals}, repo, opts)
       {:error, reason} -> failed(computer, reason)
     end
   end
 
   defp send_to(%{connected: false}, _intervals, _repo, _opts), do: :away
 
-  defp send_to(computer, intervals, repo, opts) do
-    args = %{"intervals" => Enum.map(intervals, &wire/1)}
+  defp send_to(computer, {home, intervals}, repo, opts) do
+    args = %{"home" => home, "intervals" => Enum.map(intervals, &wire/1)}
 
     case ask(computer, "apply", args, opts) do
       {:ok, %Outcome{result: %{"applied" => applied}}}

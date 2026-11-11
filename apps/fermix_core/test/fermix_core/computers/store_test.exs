@@ -49,6 +49,22 @@ defmodule FermixCore.Computers.StoreTest do
              Store.read_all(home)
   end
 
+  # M97 §6.4: the screen's offer carries its helper's actions, which the
+  # server's `computer_use` tool follows; a computer listed from its record
+  # (away, or while the live view restarts) keeps them.
+  test "the screen offer's helper is kept on the record", %{home: home} do
+    screen = %{
+      id: "computer_use",
+      state: :on,
+      sentence: nil,
+      detail: nil,
+      helper: %{actions: ["click", "type_text"], input_methods: ["keyboard"]}
+    }
+
+    assert :ok = Store.record(home, @studio, %{offers: [screen], offers_rev: "0123456789abcdef"})
+    assert {:ok, %{@studio => %{offers: [^screen]}}} = Store.read_all(home)
+  end
+
   test "a field or an id that is not one is refused, and nothing is written", %{home: home} do
     assert {:error, {:invalid_device_id, "../escape"}} =
              Store.record(home, "../escape", %{seen_at: @at})

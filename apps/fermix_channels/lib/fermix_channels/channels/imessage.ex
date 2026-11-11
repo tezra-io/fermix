@@ -339,7 +339,13 @@ defmodule FermixChannels.Channels.IMessage do
 
     {result, duration_us} =
       Telemetry.timed_us(fn ->
-        runtime.helper.call(runtime.server, "send.text", params, @send_text_timeout_ms)
+        runtime.helper.call(
+          runtime.server,
+          "send.text",
+          params,
+          @send_text_timeout_ms,
+          runtime.turn
+        )
       end)
 
     send_outcome(result, key, duration_us)
@@ -489,7 +495,13 @@ defmodule FermixChannels.Channels.IMessage do
 
     {result, duration_us} =
       Telemetry.timed_us(fn ->
-        runtime.helper.call(runtime.server, "send.file", params, @send_file_timeout_ms)
+        runtime.helper.call(
+          runtime.server,
+          "send.file",
+          params,
+          @send_file_timeout_ms,
+          runtime.turn
+        )
       end)
 
     with :ok <- send_outcome(result, file_key, duration_us) do
@@ -601,7 +613,7 @@ defmodule FermixChannels.Channels.IMessage do
   @spec build_text_reply(FermixChannels.Gateway.Channel.message()) ::
           (String.t() -> :ok | {:error, term()})
   def build_text_reply(%Message{reply_target: reply_target, metadata: metadata}) do
-    opts = routing_opts(metadata)
+    opts = reply_opts(metadata)
     fn text -> send_message(reply_target, text, opts) end
   end
 
@@ -609,9 +621,14 @@ defmodule FermixChannels.Channels.IMessage do
   @spec build_media_reply(FermixChannels.Gateway.Channel.message()) ::
           (FermixChannels.Gateway.Channel.media_part() -> :ok | {:error, term()})
   def build_media_reply(%Message{reply_target: reply_target, metadata: metadata}) do
-    opts = routing_opts(metadata)
+    opts = reply_opts(metadata)
     fn media_part -> send_media(reply_target, media_part, opts) end
   end
+
+  # A reply is the turn that answers the message here: that conversation's
+  # chat turn, whose origin facts it carries.
+  defp reply_opts(metadata),
+    do: [{:turn_origin, %{computer_use_origin: :interactive}} | routing_opts(metadata)]
 
   # --- Inbound attachments (§8.3) ----------------------------------------------------
 
@@ -659,7 +676,13 @@ defmodule FermixChannels.Channels.IMessage do
   defp fetch_attachment(runtime, guid, index, convert?) do
     params = %{"message_guid" => guid, "index" => index, "convert" => convert?}
 
-    case runtime.helper.call(runtime.server, "attachment.fetch", params, @fetch_timeout_ms) do
+    case runtime.helper.call(
+           runtime.server,
+           "attachment.fetch",
+           params,
+           @fetch_timeout_ms,
+           runtime.turn
+         ) do
       {:ok, %{"path" => path}} when is_binary(path) -> {:ok, path}
       {:ok, other} -> {:error, {:protocol_error, bounded(other)}}
       {:error, {kind, message, _data}} -> {:error, {kind, message}}
@@ -874,11 +897,15 @@ defmodule FermixChannels.Channels.IMessage do
   # --- Shared ---------------------------------------------------------------------
 
   # The helper a call goes through: explicit options (tests, the bench), then
-  # the inbound message's routing, then the channel's own Port.
+  # the inbound message's routing, then the channel's own Port. `turn` is the
+  # origin facts of the turn that sends (`:turn_origin`), which a helper
+  # reached through a Mac hands on to its rules and journal; none is
+  # `background`.
   defp runtime(opts, metadata) do
     %{
       helper: Keyword.get(opts, :helper) || Map.get(metadata, :imessage_helper) || HelperPort,
-      server: Keyword.get(opts, :server) || Map.get(metadata, :imessage_server) || HelperPort
+      server: Keyword.get(opts, :server) || Map.get(metadata, :imessage_server) || HelperPort,
+      turn: Keyword.get(opts, :turn_origin, %{})
     }
   end
 

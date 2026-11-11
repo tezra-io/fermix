@@ -27,7 +27,10 @@ iMessage (*iMessage through a Mac*). The move, the link and the summary: skill_v
   `fermix home status --json` shows the same. Only the server lists them: on
   a computer `computers` is empty, and `primary` is its link to the server.
 - A computer that is away is still listed, with what it last offered and the
-  version it last ran, which the server keeps on its own disk.
+  version it last ran, which the server keeps on its own disk. A connected
+  one stands as its session's hello found it; one whose version is not known
+  is served settings only, as one past the window is: no chat, no requests,
+  no history.
 - **Names.** The owner can rename a computer with the management method
   `computers.rename` (`device_id`, `name`), answered on the server (a
   computer's app forwards it there). A name is one line of at most 64
@@ -68,9 +71,10 @@ no memory of its own.
 - Until the owner adds it, the new computer has no access and no record.
   Not adding it, typing digits that are not its own ("Those digits are not
   the ones the new computer showed, so it was not added. Open a new code to
-  try again."), its connection dropping while it waits and the 30 minutes
-  running out all add nothing, and the code is spent each time: open a new
-  one. **Cancel** on the new computer makes it its own Fermix again.
+  try again.") and the 30 minutes running out add nothing, and the code is
+  spent each time: open a new one. A connection that drops while it waits
+  spends nothing: it reconnects with new digits, and those are the ones to
+  type. **Cancel** on the new computer makes it its own Fermix again.
 - Once added it is listed at once, under the name it gave (with " 2" when
   another device has that name), and the owner's other surfaces are told "A
   computer named loft-linux joined your Fermix." It starts with every offer
@@ -105,7 +109,8 @@ no memory of its own.
   own Fermix again; the one the home moved from stays retired, with its own
   copies of the backups. A server that cannot be told asks first: "Fermix
   could not tell your server. Disconnect anyway? Your server lists this
-  computer until you remove it there."
+  computer until you remove it there." The link goes last, so a disconnect
+  that fails part-way leaves the computer linked, and asking again finishes.
 - Adding, removing and disconnecting are the owner's decisions: the agent
   has no tool for them, and a command Fermix runs is refused.
 
@@ -206,7 +211,8 @@ request (*Files and commands on a computer*).
   included; other offers' work goes on. It runs at most 8 requests at once
   with 32 waiting, and refuses past that; when its request handler restarts,
   the waiting ones are answered at once as not run ("Fermix on this computer
-  restarted before it ran this, so it did not run.").
+  restarted before it ran this, so it did not run."), and it tells the
+  server, which asks again about whatever it still waits on there.
 - **The kind of turn that asked is the server's word.** Each request names
   it (a chat, a call, a scheduled run, a cue, a worker, background), and the
   computer applies its own rules to it. That check guards against a bug on
@@ -223,7 +229,10 @@ request (*Files and commands on a computer*).
   restarted), Fermix says so in a sentence of its own: "Fermix lost studio
   Mac's answer, so whether <what> happened is not known. Check before doing
   it again." Check, or tell the owner; never repeat it on a guess. A read
-  is simply asked once more.
+  is simply asked once more. One that ran but whose output was lost on the
+  way says so ("studio Mac ran it, but its output was lost on the way back,
+  so it is not run again."); a file the browser saved for the server stays
+  on that computer for a day, at the path the reply names.
 - **The receipt and the journal.** The computer writes each request to its
   own journal before it runs and again when it ends: when, what kind (the
   offer and operation), what it acted on (a path, a host or an action), the
@@ -249,7 +258,8 @@ request (*Files and commands on a computer*).
   Mac's sandbox open, a server that is taken over can read and change this
   account's files on this Mac." The owner can untick any line before
   starting. The choice is written to that computer's switches when the move
-  commits, so a move that is undone leaves none. Voice calls, attachments,
+  commits, so a move that is undone leaves none, and Try again after it moves
+  with the same choice, never the defaults. Voice calls, attachments,
   the robot and notifications are not in the block: they are switched on at
   the computer once they arrive.
 - A computer that joins later starts with everything off.
@@ -282,8 +292,10 @@ computer."
   that offer it, an away one included: `file_read`, `file_write`,
   `file_edit`, `glob_search`, `content_search`, `view_image` and
   `send_attachment` under Files; `shell`, `git_read` and `git_write` under
-  Commands. A guest's turn, a build without Always On and a home with no
-  computer offering it never show it.
+  Commands. A guest's turn, a worker a skill or a sub-agent runs (a plugin
+  skill's above all), a build without Always On and a home with no computer
+  offering it never show it, and such a turn naming one is refused as no
+  such computer. The owner's scheduled jobs and cues do see it.
 - **Where a call runs, never silently:** with no `computer`, on the server
   (it has files and commands of its own); with a name, on that computer.
   A computer that is away is refused at once with when it was last seen
@@ -376,8 +388,10 @@ computer."
   `screen`, management `computer.screen.stop`). Stop, or switching **Your
   screen** or everything off there, ends it at once, held keys released,
   and the turn is told the person at that computer stopped it: do not try
-  again in that turn; ask. With no action for two minutes the server lets
-  go.
+  again in that turn; ask. The server holds the screen for as long as its
+  session lasts, paused included, renewing its hold every 30 seconds (the
+  renewals are not in that computer's record); the computer lets go only
+  after two minutes without hearing from it.
 - Each stretch the server drove that screen is recorded there
   (`device/screen_control.jsonl`), as is each stretch a server turn held its
   browser (`device/browser_control.jsonl`), and its computer history marks

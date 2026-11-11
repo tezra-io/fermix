@@ -29,7 +29,12 @@ defmodule FermixCore.Computers.Invocation do
   not known. A read (`effect?/1` false) is asked once more under a new id
   with the time left. When no answer comes before the wait ends, an effect
   is `unknown` and a read `timed_out`, and the computer is told to cancel
-  it, best-effort.
+  it, best-effort. An answer whose file (its part) does not arrive whole, or
+  in time, fails a read; an effect ran, so it stays as it ended, marked
+  `part_lost`, whose sentence says its output was lost on the way and that
+  it is not run again. A part cut off with its session goes with that
+  session's half here: the caller's ask after the reconnect has the computer
+  send the answer it holds again, its part from the first frame.
 
   Seams in `opts` (beside `deadline_ms`, `part` and `on_part`): `:calls`
   (the `Calls` server), `:transport` (`{module, opts}`), `:computers`
@@ -339,9 +344,10 @@ defmodule FermixCore.Computers.Invocation do
   defp complete(%{result: outcome, part: {:error, sentence}}, request),
     do: {:done, part_lost(outcome, request, sentence)}
 
-  # An effect that ran stays done without its file; a read fails, and is asked
-  # again by the model if it wants.
-  defp part_lost(outcome, %{effect?: true}, _sentence), do: outcome
+  # An effect that ran stays as it ended, said to have lost its output on the
+  # way (`part_lost`), never a failure that would have it run again; a read
+  # fails, and is asked again by the model if it wants.
+  defp part_lost(outcome, %{effect?: true}, _sentence), do: %{outcome | part_lost: true}
   defp part_lost(_outcome, _request, sentence), do: %Outcome{status: :failed, message: sentence}
 
   # The computer has a new session: this caller, which sent the request, asks

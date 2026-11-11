@@ -741,7 +741,7 @@ defmodule FermixChannels.Mobile.ProtocolContractTest do
     refute client_errors(Map.delete(request, "host"), schema) == []
 
     reasons = schema["$defs"]["join_denied"]["properties"]["reason"]["enum"]
-    assert reasons == ~w(denied timeout cancelled device_disconnected)
+    assert reasons == ~w(denied timeout cancelled)
 
     for reason <- reasons ++ ["attestation"] do
       event = server_event("join_denied", %{"reason" => reason})

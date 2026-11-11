@@ -33,8 +33,9 @@ defmodule FermixCore.Computers.Choice do
   The home's computers are the ones the turn can see
   (`Argument.computers/1`, by `Computers.visible?/1`), read only when a call
   names a computer or the host lacks the capability: a turn that cannot see
-  them (a guest's, say, which is never offered the argument but can still
-  send it) names no computer of the home, and the link is not asked.
+  them (a guest's, or a skill's or sub-agent's worker, `Computers.turn_trust/1`,
+  which is never offered the argument but can still send it) names no
+  computer of the home, and the link is not asked.
   """
 
   alias FermixCore.Capabilities.Builtin.Tool

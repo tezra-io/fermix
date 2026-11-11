@@ -11,7 +11,9 @@ defmodule FermixChannels.Home.Link do
   `forget_candidate/1` and `status/0`'s
   `enrollment` by the enrollment window, `drop_desktop_row/2` and
   `home_desktops/1` by the device store of the home they name, read from its
-  file, and `start_return/1` and `stop_return/0` by the device tree
+  file, `announce_computers/1` by each open session's computer family
+  (`FermixChannels.Desktop.ComputerFamily`), and `start_return/1` and
+  `stop_return/0` by the device tree
   (`FermixChannels.Desktop.DeviceSupervisor`), whose candidate subtree
   receives a move back beside the relay.
 
@@ -26,6 +28,7 @@ defmodule FermixChannels.Home.Link do
 
   require Logger
 
+  alias FermixChannels.Desktop.ComputerFamily
   alias FermixChannels.Desktop.DeviceSupervisor
   alias FermixChannels.Desktop.Peer
   alias FermixChannels.Desktop.Relay
@@ -107,12 +110,22 @@ defmodule FermixChannels.Home.Link do
   end
 
   # The primary's computer rows (M97 §3.2), with whether each session is up;
-  # none where no store runs.
+  # where the store or the peers are not running they are not known, which
+  # is never read as none.
   @impl true
   def computer_rows do
     if Process.whereis(DeviceStore) && Process.whereis(FermixChannels.Desktop.Peers),
       do: computer_rows(DeviceStore.list()),
-      else: {:ok, []}
+      else: {:error, :not_running}
+  end
+
+  # A live view that started asks every open session's family to say its
+  # facts again; with no peers running there is no session to ask.
+  @impl true
+  def announce_computers(registry) when is_atom(registry) do
+    if Process.whereis(FermixChannels.Desktop.Peers),
+      do: ComputerFamily.announce(registry, FermixChannels.Desktop.Peers),
+      else: :ok
   end
 
   defp computer_rows({:ok, devices}) do

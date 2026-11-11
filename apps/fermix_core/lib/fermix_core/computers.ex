@@ -13,9 +13,11 @@ defmodule FermixCore.Computers do
   computer offers what its session said, nothing before its first
   `offers`; one that is away is listed with the offers it last said, so the
   model can say it is away rather than guess. Nothing is ever inferred.
-  Each stands against this engine's version by the one it last said
-  (`Computers.Versions`, §3.4); one past the window (`:settings_only`)
-  offers nothing until it updates, whatever it said.
+  Each stands against this engine's version (`Computers.Versions`, §3.4):
+  a connected one as its session's hello found it, any other by the version
+  its record holds, and one whose version is not known is not served. One
+  not served (`:settings_only`) offers nothing until it updates, whatever it
+  said.
 
   Off the primary there are none: a computer's own list lives on its server.
 
@@ -36,6 +38,7 @@ defmodule FermixCore.Computers do
   require Logger
 
   alias FermixCore.BuildInfo
+  alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
   alias FermixCore.Computers.Computer
   alias FermixCore.Computers.Invocation
   alias FermixCore.Computers.Prompt
@@ -48,15 +51,37 @@ defmodule FermixCore.Computers do
   alias FermixCore.Home.Role
   alias FermixCore.HostFacts
   alias FermixCore.Setup.ConfigStore
+  alias FermixCore.Temporal.Access
 
   @platforms %{"macos" => :macos, "linux" => :linux}
   @max_name_bytes 64
   @controls ~r/[\x{0000}-\x{001F}\x{007F}-\x{009F}]/u
 
-  @doc "Every computer of the home, by name (the moduledoc); none off the primary."
+  @doc """
+  Every computer of the home, by name (the moduledoc); none off the primary.
+  Rows the link cannot read are not known: `{:error, reason}`, never none,
+  so a caller that must not read "no computers" into it (an Always On
+  server's update, `Management.Home`) holds instead.
+  """
+  @spec fetch(keyword()) :: {:ok, [Computer.t()]} | {:error, term()}
+  def fetch(opts \\ []) when is_list(opts) do
+    if primary?(opts), do: joined(rows(opts), opts), else: {:ok, []}
+  end
+
+  @doc """
+  `fetch/1` for a turn: a list that cannot be read is said in the log and
+  reaches no computer.
+  """
   @spec list(keyword()) :: [Computer.t()]
   def list(opts \\ []) when is_list(opts) do
-    if primary?(opts), do: joined(rows(opts), opts), else: []
+    case fetch(opts) do
+      {:ok, computers} ->
+        computers
+
+      {:error, reason} ->
+        Logger.warning("the home's computers could not be listed: #{inspect(reason)}")
+        []
+    end
   end
 
   @doc "One computer, by its device id or its name (compared without case)."
@@ -98,15 +123,34 @@ defmodule FermixCore.Computers do
 
   @doc """
   Whether a turn can see the home's computers (M97 §6.5): an owner's turn
-  (`:trust`, `:operator` when not given), where Always On is offered, on an
-  engine booted as the primary. Every check is this engine's own, made before
-  the link is asked, so a turn that cannot see computers never reaches it.
-  The one rule for `prompt_section/1`, the `computer` argument
-  (`Computers.Argument`) and where a call runs (`Computers.Choice`).
+  (`:trust`, `:operator` when not given; a run's is `turn_trust/1`), where
+  Always On is offered, on an engine booted as the primary. Every check is
+  this engine's own, made before the link is asked, so a turn that cannot see
+  computers never reaches it. The one rule for `prompt_section/1`, the
+  `computer` argument (`Computers.Argument`) and where a call runs
+  (`Computers.Choice`).
   """
   @spec visible?(keyword()) :: boolean()
   def visible?(opts) when is_list(opts),
     do: Keyword.get(opts, :trust, :operator) == :operator and always_on?(opts) and primary?(opts)
+
+  @doc """
+  The trust `visible?/1` reads for the run whose loop context is `context`:
+  `:operator` only on the owner's own turn. Its person is the owner
+  (`source_trust`), it runs at the owner's trust
+  (`Capabilities.Registry.run_trust/1`, so a plugin
+  skill's worker, which runs at guest under the owner's turn, does not), and
+  it is no delegated worker (`Temporal.Access.worker?/1`: a skill's or a
+  sub-agent's, at any trust). Anything else, a missing trust included, is
+  `:guest`.
+  """
+  @spec turn_trust(map()) :: :operator | :guest
+  def turn_trust(context) when is_map(context) do
+    if Map.get(context, :source_trust) == :operator and
+         CapabilityRegistry.run_trust(context) == :operator and not Access.worker?(context),
+       do: :operator,
+       else: :guest
+  end
 
   @doc """
   The `## Computers` section (M97 §6.5), or nil: only on a turn that can see
@@ -156,51 +200,49 @@ defmodule FermixCore.Computers do
 
   # -- the list ----------------------------------------------------------------
 
-  defp joined({:ok, []}, _opts), do: []
+  defp joined({:ok, []}, _opts), do: {:ok, []}
 
   defp joined({:ok, rows}, opts) do
     live = Keyword.get_lazy(opts, :live, fn -> Registry.live() end)
     records = records(opts)
     version = Keyword.get_lazy(opts, :version, &BuildInfo.product_version/0)
 
-    rows
-    |> Enum.map(&computer(&1, live[&1.device_id], Map.get(records, &1.device_id, %{})))
-    |> Enum.map(&stand(&1, version))
-    |> Enum.sort_by(&String.downcase(&1.name))
+    {:ok,
+     rows
+     |> Enum.map(&computer(&1, live[&1.device_id], Map.get(records, &1.device_id, %{}), version))
+     |> Enum.sort_by(&String.downcase(&1.name))}
   end
 
-  defp joined({:error, reason}, _opts) do
-    Logger.warning("the home's computers could not be listed: #{inspect(reason)}")
-    []
-  end
+  defp joined({:error, _reason} = error, _opts), do: error
 
-  defp computer(row, live, record) do
+  defp computer(row, live, record, version) do
     connected = row.connected and live != nil
+    standing = standing(connected, live, record, version)
 
     %Computer{
       device_id: row.device_id,
       name: row.name,
       platform: Map.get(@platforms, row.platform),
       engine_version: Map.get(record, :engine_version),
+      standing: standing,
       connected: row.connected,
       since: row.since,
       last_seen: latest(row.last_seen, Map.get(record, :seen_at)),
       path: if(connected, do: live.path),
-      offers: offers(row.connected, live, record),
+      offers: if(Versions.served?(standing), do: offers(row.connected, live, record), else: []),
       backups: row.backups != false
     }
   end
 
-  # Where the computer stands against this engine (M97 §3.4); one past the
-  # window offers nothing until it updates.
-  defp stand(%Computer{engine_version: nil} = computer, _version), do: computer
+  # Where the computer stands against this engine (M97 §3.4), decided once: a
+  # connected one as its session's hello found it (the standing its chat and
+  # history are served by), any other by the version it last said, and one
+  # whose version is not known is not served. One not served offers nothing
+  # until it updates.
+  defp standing(true, %{standing: standing}, _record, _version), do: standing
 
-  defp stand(%Computer{engine_version: theirs} = computer, version) do
-    case Versions.standing(theirs, version) do
-      :settings_only -> %{computer | standing: :settings_only, offers: []}
-      standing -> %{computer | standing: standing}
-    end
-  end
+  defp standing(_connected, _live, record, version),
+    do: Versions.standing(Map.get(record, :engine_version), version)
 
   # A session's own offers while it is up; the last ones said while it is
   # away, or while the live view restarted under an open session.

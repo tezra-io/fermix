@@ -13,9 +13,12 @@ defmodule FermixChannels.Channels.IMessage.ComputerHelper do
   it and none carries it yet, none is chosen, and each is named. The home's
   computers are read every #{5} s.
 
-  **Requests.** `call/4` is one invocation each: a send is `imessage.send`
+  **Requests.** `call/5` is one invocation each: a send is `imessage.send`
   (an effect, never sent twice by the link), every other method
-  `imessage.call`. `policy.set` is never forwarded: who Fermix may write to
+  `imessage.call`, each with the origin of the turn that made it (its
+  origin facts; none for the channel's own reads and the watch, which are
+  `background`), so the Mac's rule that a delegated worker sends nothing is
+  its own, and its journal names the turn's real origin. `policy.set` is never forwarded: who Fermix may write to
   is confirmed on the Mac's screen. A file travels as the invocation's part
   (at most 20 MiB) in both directions: `send.file` reads the file the
   adapter staged here and the Mac stages it in its own outbox;
@@ -56,6 +59,7 @@ defmodule FermixChannels.Channels.IMessage.ComputerHelper do
   alias FermixChannels.Telemetry, as: ChannelTelemetry
   alias FermixCore.Computers
   alias FermixCore.Computers.Computer
+  alias FermixCore.Computers.Origin
   alias FermixCore.Computers.Outcome
   alias FermixCore.IMessage, as: Channel
   alias FermixCore.Setup.ConfigStore
@@ -79,11 +83,12 @@ defmodule FermixChannels.Channels.IMessage.ComputerHelper do
   end
 
   @impl FermixChannels.Channels.IMessage.Helper
-  def call(server, method, params, timeout)
-      when is_binary(method) and is_map(params) and is_integer(timeout) and timeout > 0 do
+  def call(server, method, params, timeout, turn)
+      when is_binary(method) and is_map(params) and is_integer(timeout) and timeout > 0 and
+             is_map(turn) do
     with :ok <- forwardable(method),
          {:ok, route} <- route(server, :route) do
-      invoke(server, route, method, params, timeout)
+      invoke(server, route, method, params, timeout, turn)
     end
   end
 
@@ -122,7 +127,7 @@ defmodule FermixChannels.Channels.IMessage.ComputerHelper do
     :exit, {:noproc, _call} -> {:error, not_running()}
   end
 
-  defp invoke(server, route, method, params, timeout) do
+  defp invoke(server, route, method, params, timeout, turn) do
     op =
       if method in Capability.methods("imessage.send"), do: "imessage.send", else: "imessage.call"
 
@@ -130,7 +135,7 @@ defmodule FermixChannels.Channels.IMessage.ComputerHelper do
 
     with {:ok, args, part} <- outgoing(method, args) do
       opts = Keyword.merge(route.opts, deadline_ms: Capability.deadline_ms(op, args), part: part)
-      context = context(params, route.computer)
+      context = context(turn, route.computer)
 
       route.computer
       |> Computers.call(Capability, op, args, context, opts)
@@ -162,17 +167,12 @@ defmodule FermixChannels.Channels.IMessage.ComputerHelper do
 
   defp outgoing(_method, args), do: {:ok, args, nil}
 
-  # Who asked, as the computer's admission reads it: a turn's reply, a
-  # proactive delivery (a reminder), or the channel's own reads.
-  defp context(params, %Computer{device_id: device_id}) do
-    session = "imessage-" <> String.slice(device_id, 0, 16)
-
-    case Map.get(params, "idempotency_key") do
-      "turn:" <> _rest -> %{session_id: session, computer_use_origin: :interactive}
-      "proactive:" <> _rest -> %{session_id: session, trigger: "schedule"}
-      _read_or_once -> %{session_id: session}
-    end
-  end
+  # Who asked, as the computer's admission reads it: the origin facts of the
+  # turn that made the request (`Computers.Origin.facts/1`), so the Mac's own
+  # rules and journal see that turn's origin; the channel's own reads carry
+  # none, which is `background`.
+  defp context(turn, %Computer{device_id: device_id}),
+    do: Map.put(Origin.facts(turn), :session_id, "imessage-" <> String.slice(device_id, 0, 16))
 
   defp answered(
          {:ok, %Outcome{result: %{"result" => result}} = outcome},

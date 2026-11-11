@@ -17,13 +17,20 @@ defmodule FermixCore.Home.Leave do
 
   Then this computer lets go of everything that linked it: its key, from
   the store its link names, and only while the item holds that key (another
-  home's under the same profile stays, `ComputerKey`); its link
-  (`device/desktop.json`); and what Fermix on the server may use here
-  (`[fermix_core.computer]` in `machine.toml`, `Computers.Switches`). A
-  computer that never moved a home (one that joined) is the primary of its
-  own home again; the one a home moved from keeps its moved marker and the
-  device role, retired, and its own copies of the server's backups. Then
-  the engine restarts.
+  home's under the same profile stays, `ComputerKey`); what Fermix on the
+  server may use here (`[fermix_core.computer]` in `machine.toml`,
+  `Computers.Switches`); its role; and last its link
+  (`device/desktop.json`). A computer that never moved a home (one that
+  joined) is the primary of its own home again; the one a home moved from
+  keeps its moved marker and the device role, retired, and its own copies
+  of the server's backups. Then the computer history mark that home left is
+  forgotten (`Home.Join.forget_history_mark/1`), and the engine restarts.
+
+  The link is the record that a disconnect is unfinished: it goes last, and
+  every step before it is safe to repeat, so one that fails part-way leaves
+  this computer linked and asking again finishes the job. Which role it
+  ends in is read first, so a moved marker that cannot be read refuses
+  before anything changes.
 
   `opts`: `:forward` (required, the link), `:confirmed` (boolean), `:restart`
   (0-arity, in place of `Management.Lifecycle.restart_self/0`), `:key_opts`
@@ -34,6 +41,7 @@ defmodule FermixCore.Home.Leave do
   alias FermixCore.Computers.Switches
   alias FermixCore.Home.ComputerKey
   alias FermixCore.Home.DesktopLink
+  alias FermixCore.Home.Join
   alias FermixCore.Home.Link
   alias FermixCore.Home.Moved
   alias FermixCore.Management.Lifecycle
@@ -47,6 +55,7 @@ defmodule FermixCore.Home.Leave do
           | :not_told
           | {:computer_key, ComputerKey.error()}
           | {:link, DesktopLink.error()}
+          | {:moved, Moved.error()}
           | {:file, Path.t(), File.posix()}
           | {:config, term()}
 
@@ -59,11 +68,13 @@ defmodule FermixCore.Home.Leave do
     forward = Keyword.fetch!(opts, :forward)
 
     with {:ok, link} <- linked(home),
+         {:ok, role} <- role_after(home),
          {:ok, told?} <- tell(forward, link, opts),
          :ok <- forget_key(home, link, Keyword.get(opts, :key_opts, [])),
-         :ok <- remove_link(home),
          :ok <- config(Switches.forget(home)),
-         :ok <- own_role(home) do
+         :ok <- put_role(home, role),
+         :ok <- remove_link(home) do
+      :ok = Join.forget_history_mark(home)
       :ok = Keyword.get(opts, :restart, &Lifecycle.restart_self/0).()
       {:ok, told?}
     end
@@ -81,6 +92,11 @@ defmodule FermixCore.Home.Leave do
   def error_sentence({:computer_key, reason}), do: ComputerKey.error_sentence(reason)
   def error_sentence({:link, reason}), do: DesktopLink.error_sentence(reason)
 
+  def error_sentence({:moved, _reason}),
+    do:
+      "Fermix could not read whether your Fermix moved from this computer, so nothing " <>
+        "changed. Its log says why."
+
   def error_sentence({:file, _path, reason}),
     do: "Fermix could not remove this computer's link (#{:file.format_error(reason)})."
 
@@ -92,7 +108,13 @@ defmodule FermixCore.Home.Leave do
   def sentences,
     do:
       Enum.map(
-        [:not_linked, :not_told, {:file, "desktop.json", :eacces}, {:config, :eacces}],
+        [
+          :not_linked,
+          :not_told,
+          {:moved, {:file, "moved.json", :eacces}},
+          {:file, "desktop.json", :eacces},
+          {:config, :eacces}
+        ],
         &error_sentence/1
       )
 
@@ -171,13 +193,23 @@ defmodule FermixCore.Home.Leave do
   end
 
   # A computer that joined is its own home's primary again; the one a home
-  # moved from stays retired, in the device role its marker needs.
-  defp own_role(home) do
+  # moved from stays retired, in the device role its marker needs. Read
+  # before anything changes, so a marker that cannot be read refuses then.
+  defp role_after(home) do
     case Moved.read(home) do
-      :absent -> config(ConfigStore.put_engine_role(home, :primary))
-      _marker -> :ok
+      :absent -> {:ok, :primary}
+      {:ok, _marker} -> {:ok, :device}
+      {:error, reason} -> unread_marker(reason)
     end
   end
+
+  defp unread_marker(reason) do
+    Logger.error("disconnect: the moved marker could not be read: #{inspect(reason)}")
+    {:error, {:moved, reason}}
+  end
+
+  defp put_role(_home, :device), do: :ok
+  defp put_role(home, :primary), do: config(ConfigStore.put_engine_role(home, :primary))
 
   defp config(:ok), do: :ok
   defp config({:error, reason}), do: {:error, {:config, reason}}

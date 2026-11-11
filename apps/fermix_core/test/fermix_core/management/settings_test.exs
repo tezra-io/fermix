@@ -47,6 +47,7 @@ defmodule FermixCore.Management.SettingsTest do
     :meetings,
     :computer_use,
     :computer_history,
+    :computer,
     :harness,
     :tools,
     :sandbox,
@@ -2243,6 +2244,24 @@ defmodule FermixCore.Management.SettingsTest do
       assert summarizer_value([], home) == "default_provider"
     end
 
+    # M97 §4: the machine file's local summarizer decides over a different one
+    # in config.toml, and the row says so; where both agree, nothing is said.
+    test "the summarizer row says when this Mac's machine file decides over config.toml", %{
+      home: home
+    } do
+      shadowed = summarizer_row([machine_summarizer: "local", summarizer: "anthropic"], home)
+      assert shadowed["value"] == "local"
+
+      assert shadowed["footer"] ==
+               ~s(This Mac's `machine.toml` says `summarizer = "local"`, so its notes are made ) <>
+                 "here and the summarizer in `config.toml` is not used while that line is there."
+
+      assert summarizer_row([machine_summarizer: "local", summarizer: "local"], home)["footer"] ==
+               nil
+
+      assert summarizer_row([machine_summarizer: "local"], home)["footer"] == nil
+    end
+
     test "a write reaches this machine's keys alone, and the home's stay", %{home: home} do
       Application.put_env(:fermix_core, :computer_history,
         enabled: false,
@@ -2283,15 +2302,20 @@ defmodule FermixCore.Management.SettingsTest do
     Enum.find(rows, &(&1["key"] == "computer_history_enabled"))["footer"]
   end
 
-  defp summarizer_value(block, home) do
+  defp summarizer_value(block, home), do: summarizer_row(block, home)["value"]
+
+  defp summarizer_row(block, home) do
     rows = history_rows(block, home, on_server?: false)
-    Enum.find(rows, &(&1["key"] == "computer_history_summarizer"))["value"]
+    Enum.find(rows, &(&1["key"] == "computer_history_summarizer"))
   end
 
   describe "the save then load round trip" do
     test "every section a write touches survives being written and read back", %{home: home} do
       seed_normalized_app_env()
 
+      # This computer's own settings are written by their own section; a write
+      # of another leaves them as the machine file holds them (M97 §4).
+      assert {:ok, _result} = Settings.apply("sandbox", %{"sandbox_mode" => "strict"})
       assert {:ok, _result} = Settings.apply("memory", %{"review_interval_hours" => 6})
       assert File.exists?(Path.join(home, "config.toml"))
 
@@ -2304,6 +2328,33 @@ defmodule FermixCore.Management.SettingsTest do
       assert core[:transcription][:backend] == "deepgram"
       assert Map.get(reloaded, :sandbox).mode == :strict
       assert core[:realtime][:voice] == "cedar"
+    end
+
+    # M97 §4, §7.2: a write of one section writes exactly the machine tables
+    # it changed. The machine file is the truth for every other: a table
+    # written to the file alone (`ConfigStore.put_machine_table/3`, as a
+    # switch or a history off is) is never written back from what this engine
+    # last loaded, and what runs follows the file.
+    test "a write of another section never rewrites this computer's settings", %{home: home} do
+      Application.put_env(:fermix_core, :computer, enabled: true, reviewed: true, shell: true)
+      assert {:ok, _result} = Settings.apply("sandbox", %{"sandbox_mode" => "strict"})
+
+      :ok =
+        ConfigStore.put_machine_table(home, "fermix_core.computer", [
+          {"enabled", "false"},
+          {"reviewed", "true"},
+          {"shell", "true"}
+        ])
+
+      Application.put_env(:fermix_core, :sandbox, SandboxConfig.normalize(%{mode: :open}))
+      assert {:ok, _result} = Settings.apply("memory", %{"review_interval_hours" => 6})
+
+      assert {:ok, reloaded} = ConfigStore.load_runtime_config()
+      assert Keyword.fetch!(reloaded.fermix_core[:computer], :enabled) == false
+      assert Map.get(reloaded, :sandbox).mode == :strict
+      assert reloaded.fermix_core[:memory][:review_interval_hours] == 6
+      assert Keyword.fetch!(Application.get_env(:fermix_core, :computer), :enabled) == false
+      assert Application.get_env(:fermix_core, :sandbox).mode == :strict
     end
 
     # The phone block normalizes its mode to an atom and carries a push table;

@@ -413,8 +413,9 @@ defmodule FermixCore.Application do
         {OriginBackfill, enabled: @compiled_env != :test},
         # What the home knows live of its computers (M97 §3.2), primary-only.
         # A crash restarts the snapshot scheduler and the cue tree, which
-        # re-read their state; its own is rebuilt from each computer's next
-        # event, the records holding the last offers meanwhile.
+        # re-read their state; its own is rebuilt as it starts, by asking each
+        # open session to say its facts again (`Home.Link`'s
+        # `announce_computers/1`), the records holding the last offers meanwhile.
         FermixCore.Computers.Registry,
         # The invocations the server waits on (M97 §6.1), primary-only: a
         # crash loses only its waiters' routing, and they time out.
@@ -641,7 +642,9 @@ defmodule FermixCore.Application do
   # and creates no store. Where it runs, Retention must always run so a spool
   # left behind by a disable still drains by the 48h horizon (inv. 16). Its
   # work is tick-gated; the timer is disabled in `:test` (the scheduler
-  # precedent), never by omission.
+  # precedent), never by omission. Its machine store failing to open never
+  # stops it or a child after it: the store stays up saying why and the
+  # recorder stays off (`ComputerHistory.Spool`).
   defp maybe_computer_history_supervisor(role) do
     if role == :primary or ComputerHistory.recorder?() do
       [{ComputerHistorySupervisor, timer_enabled: @compiled_env != :test}]

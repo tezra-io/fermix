@@ -11,6 +11,7 @@ defmodule FermixChannels.Desktop.TwoEnginesScreenTest do
   alias FermixChannels.Test.TwoEngines
   alias FermixCore.Computers
   alias FermixCore.Computers.Capabilities.Screen
+  alias FermixCore.Computers.Journal
   alias FermixCore.Computers.Outcome
   alias FermixCore.Computers.Switches
   alias FermixCore.ComputerUse.Config
@@ -57,7 +58,10 @@ defmodule FermixChannels.Desktop.TwoEnginesScreenTest do
        switches: fn -> Agent.get(engines.switch_agent, & &1) end,
        home: engines.root,
        changed: fn -> send(test, :screen_changed) end,
-       timer: fn _message, _delay -> make_ref() end}
+       timer: fn message, _delay ->
+         send(test, {:lapse_armed, message})
+         make_ref()
+       end}
     )
 
     start_supervised!(CuSupervisor)
@@ -199,6 +203,65 @@ defmodule FermixChannels.Desktop.TwoEnginesScreenTest do
     end
   end
 
+  # C1: the computer lets go of a screen only when its server went quiet. A
+  # session that exists renews its hold, paused or not, so a long gap between
+  # steps resets nothing, and a pause holds until /resume.
+  describe "a session's hold lasts as long as the session" do
+    test "a paused session keeps the screen across a long gap, and stays paused", ctx do
+      {:ok, _result} = ComputerUse.execute(%{"action" => "screenshot"}, turn(ctx))
+      assert_received {:screen_helper, "screenshot", _first}
+      {:ok, session} = SessionManager.lookup(turn(ctx))
+      seat = SessionManager.session_id(session)
+      ref = Process.monitor(session)
+
+      assert Session.pause(session) in [:paused, :paused_in_flight]
+      assert_receive {:screen_helper_control, :pause}, 10_000
+      stale = last_lapse()
+
+      # The server renews its hold, as it does every 30 s while the session
+      # exists; the lapse armed before is stale.
+      send(watch_of(session), :keep)
+      assert_receive {:lapse_armed, {:lapse, renewed}}, 10_000
+      send(Process.whereis(Seat.name()), {:lapse, stale})
+
+      assert Seat.watch_state(seat) == :held
+      assert Session.paused?(session)
+
+      assert {:ok, %{success: false, error: error}} =
+               ComputerUse.execute(%{"action" => "screenshot"}, turn(ctx))
+
+      assert error =~ "paused"
+      refute_received {:screen_helper, "screenshot", _second}
+
+      # A server that went quiet is let go of after the lapse: the bound holds.
+      send(Process.whereis(Seat.name()), {:lapse, last_lapse(renewed)})
+      assert_receive {:DOWN, ^ref, :process, ^session, _ended}, 10_000
+      assert Seat.view() == nil
+    end
+  end
+
+  # A renewal is no thing Fermix did on that computer: "What Fermix did on
+  # this computer" holds its real steps, however long a session holds the
+  # screen.
+  describe "the computer's journal" do
+    test "a paused session held across several renewals adds nothing to the journal", ctx do
+      {:ok, _result} = ComputerUse.execute(%{"action" => "screenshot"}, turn(ctx))
+      {:ok, session} = SessionManager.lookup(turn(ctx))
+      assert Session.pause(session) in [:paused, :paused_in_flight]
+      assert_receive {:screen_helper_control, :pause}, 10_000
+      _stale = last_lapse()
+      before = journal_ids(ctx)
+
+      for _renewal <- 1..3 do
+        send(watch_of(session), :keep)
+        assert_receive {:lapse_armed, {:lapse, _renewed}}, 10_000
+      end
+
+      assert journal_ids(ctx) == before
+      assert Session.paused?(session)
+    end
+  end
+
   describe "attended only, on both sides" do
     test "each unattended origin is refused on the server before anything is sent", ctx do
       for {origin, more} <- unattended() do
@@ -262,6 +325,27 @@ defmodule FermixChannels.Desktop.TwoEnginesScreenTest do
       computer: TwoEngines.computer(ctx.engines),
       computer_call_opts: TwoEngines.call_opts(ctx.engines)
     }
+  end
+
+  defp journal_ids(ctx) do
+    {:ok, %{entries: entries}} = Journal.list(Journal.dir(ctx.engines.root), limit: 200)
+    Enum.map(entries, & &1.id)
+  end
+
+  # The newest lapse the computer's seat armed, all older ones taken.
+  defp last_lapse(last \\ nil) do
+    receive do
+      {:lapse_armed, {:lapse, ref}} -> last_lapse(ref)
+    after
+      0 -> last || flunk("the seat armed no lapse")
+    end
+  end
+
+  # The server's watch over the computer's screen, which the session's
+  # driver holds.
+  defp watch_of(session) do
+    {_driver, %{watch: watch}} = :sys.get_state(session).driver
+    watch
   end
 
   # Every origin that is not the owner in the conversation now, as a turn

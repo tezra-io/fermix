@@ -24,9 +24,11 @@ defmodule FermixCore.Computers.Capabilities.Browser do
 
   Bytes cross as the invocation's part, at most 20 MiB: a screenshot, a PDF
   and a download come back (`artifact`), and the server keeps them in its own
-  browser folder; an upload's file goes over, into this computer's upload
-  folder inside its workspace, where its browser takes it. A result above
-  #{256} KiB rides the part too.
+  browser folder; this computer keeps each for a day too, in a folder of its
+  own (`kept_dir/1`, the artifact's `kept`), so one lost on the way is never
+  lost on both machines. An upload's file goes over, into this computer's
+  upload folder inside its workspace, where its browser takes it, kept by the
+  same rule. A result above #{256} KiB rides the part too.
 
   On this computer, before anything runs (`admit/3`): a sign-in only on a
   chat turn (a call's voice is refused, as the server refuses it), a hand-over
@@ -134,7 +136,7 @@ defmodule FermixCore.Computers.Capabilities.Browser do
   @transfer_slack_ms 15_000
   @conversation ~r/\A[A-Za-z0-9_-]{1,64}\z/
   @upload_name_bytes 255
-  @staged_ms 24 * 60 * 60_000
+  @kept_ms 24 * 60 * 60_000
   @owner "owner"
 
   @typedoc """
@@ -181,7 +183,7 @@ defmodule FermixCore.Computers.Capabilities.Browser do
 
   @impl true
   def continues_on(context) when is_map(context),
-    do: ComputerTurn.continues_on(turn_seams(context), self())
+    do: ComputerTurn.continues_on(turn_seams(context), ComputerTurn.turn(context))
 
   @doc "The held turns of the server's own side, from the loop context (tests name theirs)."
   @spec turn_seams(map()) :: ComputerTurn.seams()
@@ -281,7 +283,7 @@ defmodule FermixCore.Computers.Capabilities.Browser do
       {served, backend} =
         HeldTurn.run(seams.turns, turn, fn -> serve(op, request, args, seams) end)
 
-      answered(served, backend, request["action"], seams)
+      answered(served, backend, request["action"], seams, context.id)
     end
   end
 
@@ -334,11 +336,11 @@ defmodule FermixCore.Computers.Capabilities.Browser do
 
   # -- the answer -------------------------------------------------------------------
 
-  defp answered({:ok, result}, backend, action, seams)
+  defp answered({:ok, result}, backend, action, seams, id)
        when is_map_key(@artifacts, action) and is_binary(:erlang.map_get("path", result)),
-       do: with_artifact(result, backend, action, seams)
+       do: with_artifact(result, backend, action, seams, id)
 
-  defp answered({:ok, result}, backend, _action, _seams) do
+  defp answered({:ok, result}, backend, _action, _seams, _id) do
     json = Jason.encode!(result)
 
     if byte_size(json) <= @inline_bytes,
@@ -346,18 +348,24 @@ defmodule FermixCore.Computers.Capabilities.Browser do
       else: {:ok, %{"result_part" => true, "backend" => label(backend)}, json}
   end
 
-  defp answered({:error, %Error{} = error}, backend, _action, _seams) do
+  defp answered({:error, %Error{} = error}, backend, _action, _seams, _id) do
     said = Error.to_map(error)
     said = if inline?(said), do: said, else: Map.put(said, "details", %{})
     {:failed, first_line(error.message), %{"error" => said, "backend" => label(backend)}, nil}
   end
 
   # The browser wrote the file into this computer's browser folder; its bytes
-  # are the answer, and the server keeps them, so this copy goes.
-  defp with_artifact(%{"path" => path} = result, backend, action, seams) do
-    with {:ok, bytes} <- artifact_bytes(path, seams.browser_dir) do
-      _removed = File.rm(path)
-      artifact = %{"kind" => Map.fetch!(@artifacts, action), "name" => Path.basename(path)}
+  # are the answer, and the server keeps them. This computer keeps it too,
+  # for a day, in a folder of its own (`kept`, its path here), so a file lost
+  # on the way is never lost on both machines.
+  defp with_artifact(%{"path" => path} = result, backend, action, seams, id) do
+    with {:ok, bytes} <- artifact_bytes(path, seams.browser_dir),
+         {:ok, kept} <- keep_artifact(path, seams.browser_dir, id) do
+      artifact = %{
+        "kind" => Map.fetch!(@artifacts, action),
+        "name" => Path.basename(path),
+        "kept" => kept
+      }
 
       {:ok,
        %{
@@ -367,6 +375,29 @@ defmodule FermixCore.Computers.Capabilities.Browser do
        }, bytes}
     end
   end
+
+  defp keep_artifact(path, browser_dir, id) do
+    kept = kept_dir(browser_dir)
+    :ok = prune_kept(kept)
+    dir = Path.join(kept, id)
+    to = Path.join(dir, Path.basename(path))
+
+    with :ok <- File.mkdir_p(dir), :ok <- File.rename(path, to) do
+      {:ok, to}
+    else
+      {:error, reason} ->
+        {:failed,
+         "The browser saved the file, but this computer could not keep it for its server: " <>
+           "#{format(reason)}."}
+    end
+  end
+
+  @doc """
+  The folder of `browser_dir` where this computer keeps each file it sent its
+  server, for a day, one folder per request.
+  """
+  @spec kept_dir(Path.t()) :: Path.t()
+  def kept_dir(browser_dir) when is_binary(browser_dir), do: Path.join(browser_dir, "for-server")
 
   defp artifact_bytes(path, browser_dir) do
     canonical = PathPolicy.canonical_path(path)
@@ -401,7 +432,7 @@ defmodule FermixCore.Computers.Capabilities.Browser do
   defp staged("browser.upload", %{"args" => args}, part, seams, id) when is_binary(part) do
     dir = Path.join(seams.uploads, id)
     path = Path.join(dir, args["upload_name"])
-    :ok = prune_staged(seams.uploads)
+    :ok = prune_kept(seams.uploads)
 
     with :ok <- File.mkdir_p(dir), :ok <- File.write(path, part) do
       {:ok, args |> Map.delete("upload_name") |> Map.put("path", path)}
@@ -416,15 +447,17 @@ defmodule FermixCore.Computers.Capabilities.Browser do
   defp staged(_op, %{"args" => args}, nil, _seams, _id), do: {:ok, args}
   defp staged(_op, _request, _part, _seams, _id), do: {:failed, "This takes no file."}
 
-  # Files a page was given more than a day ago are gone; bounded by what the
-  # folder holds.
-  defp prune_staged(uploads) do
-    cutoff = System.os_time(:millisecond) - @staged_ms
+  # One rule for what this computer keeps for its server's requests, the
+  # uploads a page was given and the files it sent back: each request's
+  # folder goes once it is more than a day old; bounded by what the folder
+  # holds.
+  defp prune_kept(dir) do
+    cutoff = System.os_time(:millisecond) - @kept_ms
 
-    case File.ls(uploads) do
-      {:ok, entries} -> Enum.each(entries, &prune_entry(Path.join(uploads, &1), cutoff))
+    case File.ls(dir) do
+      {:ok, entries} -> Enum.each(entries, &prune_entry(Path.join(dir, &1), cutoff))
       {:error, :enoent} -> :ok
-      {:error, reason} -> Logger.warning("browser uploads not pruned: #{inspect(reason)}")
+      {:error, reason} -> Logger.warning("browser files kept here not pruned: #{inspect(reason)}")
     end
 
     :ok

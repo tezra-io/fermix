@@ -103,7 +103,7 @@ defmodule FermixCore.ComputerHistory.PurgeTest do
 
       assert is_integer(id)
       assert {:ok, 1} = Spool.count_events(server: spool)
-      assert {:ok, 5_000} = Spool.oldest_event_ts(server: spool)
+      assert FermixTestSupport.HistorySpool.oldest_ts(spool) == 5_000
       assert {:ok, 1} = Repo.computer_history_count_memories(server: repo)
 
       # The home records it for every machine; this machine fences its own raw events.
@@ -227,7 +227,7 @@ defmodule FermixCore.ComputerHistory.PurgeTest do
       assert {:ok, 1} = Spool.insert_events(late, server: spool)
 
       assert {:ok, 1} = Spool.count_events(server: spool)
-      assert {:ok, 2_001} = Spool.oldest_event_ts(server: spool)
+      assert FermixTestSupport.HistorySpool.oldest_ts(spool) == 2_001
     end
 
     test "every recorded window fences, not only the latest", %{spool: spool} = ctx do
@@ -236,7 +236,7 @@ defmodule FermixCore.ComputerHistory.PurgeTest do
 
       assert {:ok, 1} = Spool.insert_events([event(1, 1_500), event(2, 5_000)], server: spool)
 
-      assert {:ok, 5_000} = Spool.oldest_event_ts(server: spool)
+      assert FermixTestSupport.HistorySpool.oldest_ts(spool) == 5_000
     end
   end
 end

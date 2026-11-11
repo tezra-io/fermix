@@ -16,10 +16,11 @@ defmodule FermixChannels.Desktop.Invoke do
   unnamed ETS table, at most 32 rows, handed to Admission as
   `:waiting_table`), so a restart of Admission or of the runs' supervisor
   answers it as never run. A restart of this supervisor itself, which
-  follows more than three of theirs in five seconds, or of the engine, takes
-  the table with it: what waited then is answered by nothing, and its
-  caller ends at its deadline, at its next session's ask, or, for a
-  long-lived one while the session stays up, when the caller itself ends.
+  follows more than three of theirs in five seconds, takes the table with
+  it: what waited then has no record, and the new Admission's start tells
+  the server (`invoke_restarted`), whose callers ask about their requests
+  and hear so. A restart of the engine ends the session, and the next
+  session's start asks the same.
 
   `capabilities/0` is the one map of what this computer can be asked, one
   line per capability (`FermixCore.Computers.Capability`).

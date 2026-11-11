@@ -12,7 +12,7 @@ defmodule FermixChannels.Mobile.ProtocolTest do
     snapshot_stored snapshot_refused enroll_request move_offer move_chunk move_end
     move_commit move_resume call_open call_line call_audio call_frame call_close
     offers link_path join_request
-    invoke_open invoke_part invoke_cancel invoke_result invoke_status
+    invoke_open invoke_part invoke_cancel invoke_result invoke_status invoke_restarted
   )
   @server_events ~w(
     hello_ack accepted attach_status turn_started text_delta tool_event text_done turn_done

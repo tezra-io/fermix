@@ -34,8 +34,10 @@
 (*    each once; the insert checks every interval, computer_history_sql.ex:*)
 (*    641, :1070-1081); the Setup UI disable path; a crash of the Spool,   *)
 (*    which restarts the rail after it (supervisor.ex:113-128) like a      *)
-(*    Controller crash with the Capturer's: single-call facts covered by   *)
-(*    ExUnit (TLA_PLUS_MODELS.md 5.1);                                     *)
+(*    Controller crash with the Capturer's; a store that does not open,    *)
+(*    which leaves the Spool up answering store_unavailable and the        *)
+(*    recorder off (Controller) until the engine starts again: single-call *)
+(*    facts covered by ExUnit (TLA_PLUS_MODELS.md 5.1);                    *)
 (*  - the observe_start handshake: every Capturer starts already          *)
 (*    capturing (before the ack, sidecar frames are held, never written:  *)
 (*    capturer.ex:480-485);                                               *)
@@ -85,7 +87,7 @@
 \* SOURCE: apps/fermix_core/lib/fermix_core/computer_history/delivery.ex#apply_here @ 27caf4b6820e
 \* SOURCE: apps/fermix_core/lib/fermix_core/computer_use/sidecar_installer.ex @ a2681ba9c881
 \* SOURCE: apps/fermix_core/lib/fermix_core/memory/repo/computer_history_sql.ex @ 3c403c6f27f1
-\* SOURCE: apps/fermix_core/lib/fermix_core/computer_history/spool.ex#call,handle_call,insert_events,state,set_pause_until,fence,apply_intervals,apply_interval,pause_from,mark_applied @ 6d8fb6552a9d
+\* SOURCE: apps/fermix_core/lib/fermix_core/computer_history/spool.ex#call,handle_call,insert_events,state,fence,apply_intervals,apply_interval,pause_from,mark_applied @ 6d8fb6552a9d
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/gateway/commands/history.ex @ 4d6167438489
 EXTENDS Naturals, Sequences, FiniteSets
 

@@ -235,6 +235,27 @@ defmodule FermixCore.Computers.InvocationTest do
                Task.await(task)
     end
 
+    # C3: an effect ran, so losing its file on the way never makes it a
+    # failure the model would run again: it stays done, and says its output
+    # was lost (`part_lost`).
+    test "an effect whose file is lost on the way stays done, its output said lost", ctx do
+      part = %{"size_bytes" => 3, "sha256" => String.duplicate("0", 64), "mime" => "text/plain"}
+      task = call_async(ctx, Touch, "touch", %{"path" => "a"})
+      assert_receive {:opened, @device, %{"id" => id}, _payload, nil}
+
+      answer(ctx, id, %{"status" => "ok", "part" => part}, ~s({"success":true}))
+
+      :ok =
+        Calls.part(ctx.calls, @device, id, {:error, "The answer's file did not arrive whole."})
+
+      assert {:ok, %Outcome{status: :ok, part_lost: true, part_bytes: nil} = outcome} =
+               Task.await(task)
+
+      assert Outcome.sentence(outcome, "studio Mac") ==
+               "studio Mac ran it, but its output was lost on the way back, so it is not run " <>
+                 "again."
+    end
+
     test "an upload is announced with the request and handed to the link", ctx do
       task = call_async(ctx, Look, "look", %{"path" => "a"}, part: {"notes", "text/plain"})
       assert_receive {:opened, @device, %{"id" => id} = header, _payload, "notes"}

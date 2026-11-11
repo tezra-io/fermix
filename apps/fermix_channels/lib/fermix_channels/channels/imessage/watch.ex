@@ -262,8 +262,9 @@ defmodule FermixChannels.Channels.IMessage.Watch do
   defp perform(_helper, _method, _params, _part, _args),
     do: {:unavailable, "That request takes no file."}
 
+  # This Mac's own helper: the turn's origin was decided at admission here.
   defp call(helper, method, params, %{"timeout_ms" => timeout}) do
-    case helper.helper.call(helper.server, method, params, timeout) do
+    case helper.helper.call(helper.server, method, params, timeout, %{}) do
       {:ok, result} -> {:ok, result, nil}
       {:error, {_kind, _message, _data}} = error -> error
     end

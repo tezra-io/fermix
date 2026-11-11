@@ -597,6 +597,98 @@ defmodule FermixCore.Setup.ConfigStore do
     with_config_lock(fermix_home(), fn -> write_snapshot(snapshot, opts) end)
   end
 
+  @doc """
+  `save_snapshot/2` for a save built on `base`, a snapshot read earlier, as a
+  setup page's is, which may have gone stale while this computer's own
+  settings changed elsewhere (M97 §4, §7.2): under the config lock, each
+  machine table the save did not change (the same in `snapshot` and `base`)
+  is taken from `machine.toml` as it is at the write, so a save writes only
+  the machine tables it changed and never turns a switch back, loosens the
+  sandbox or starts the recorder. Answers the snapshot it wrote, which is
+  what the caller applies.
+  """
+  @spec save_changes(runtime_config(), runtime_config(), keyword()) ::
+          {:ok, runtime_config()} | {:error, term()}
+  def save_changes(snapshot, base, opts \\ [])
+      when is_map(snapshot) and is_map(base) and is_list(opts) do
+    with_config_lock(fermix_home(), fn ->
+      with {:ok, current} <- load_runtime_config(resolve_secrets: false),
+           written = machine_rebased(snapshot, base, current),
+           :ok <- write_snapshot(written, opts) do
+        {:ok, written}
+      end
+    end)
+  end
+
+  # The machine tables `dump_machine/1` writes, each as a snapshot holds it.
+  @machine_parts [:sandbox, :computer_use, :computer_history, :computer, :dev_local, :accessories]
+
+  defp machine_rebased(snapshot, base, current) do
+    Enum.reduce(@machine_parts, snapshot, fn part, acc ->
+      if machine_part(snapshot, part) == machine_part(base, part),
+        do: put_machine_part(acc, part, machine_part(current, part)),
+        else: acc
+    end)
+  end
+
+  defp machine_part(snapshot, :sandbox), do: Map.get(snapshot, :sandbox)
+
+  defp machine_part(snapshot, :dev_local),
+    do: snapshot |> core_section(:plugins) |> Keyword.get(:dev_local)
+
+  defp machine_part(snapshot, :accessories),
+    do: snapshot |> Map.get(:fermix_channels, []) |> Keyword.get(:accessories)
+
+  # The history section is split by key: its machine keys are every one the
+  # home's are not (`ComputerHistoryConfig.home_keyword/1`).
+  defp machine_part(snapshot, :computer_history) do
+    block = core_section(snapshot, :computer_history)
+    home = Keyword.keys(ComputerHistoryConfig.home_keyword(block))
+    Enum.reject(block, fn {key, _value} -> key in home end)
+  end
+
+  defp machine_part(snapshot, key), do: snapshot |> Map.get(:fermix_core, []) |> Keyword.get(key)
+
+  defp put_machine_part(snapshot, :sandbox, nil), do: Map.delete(snapshot, :sandbox)
+  defp put_machine_part(snapshot, :sandbox, value), do: Map.put(snapshot, :sandbox, value)
+
+  defp put_machine_part(snapshot, :dev_local, value) do
+    plugins = snapshot |> core_section(:plugins) |> put_or_delete(:dev_local, value)
+    put_core(snapshot, :plugins, plugins)
+  end
+
+  defp put_machine_part(snapshot, :accessories, value) do
+    channels = snapshot |> Map.get(:fermix_channels, []) |> put_or_delete(:accessories, value)
+    Map.put(snapshot, :fermix_channels, channels)
+  end
+
+  defp put_machine_part(snapshot, :computer_history, machine) do
+    home = ComputerHistoryConfig.home_keyword(core_section(snapshot, :computer_history))
+    put_core(snapshot, :computer_history, home ++ machine)
+  end
+
+  defp put_machine_part(snapshot, key, value),
+    do:
+      Map.put(
+        snapshot,
+        :fermix_core,
+        put_or_delete(Map.get(snapshot, :fermix_core, []), key, value)
+      )
+
+  defp core_section(snapshot, key),
+    do: snapshot |> Map.get(:fermix_core, []) |> Keyword.get(key, [])
+
+  defp put_core(snapshot, key, value),
+    do:
+      Map.put(
+        snapshot,
+        :fermix_core,
+        Keyword.put(Map.get(snapshot, :fermix_core, []), key, value)
+      )
+
+  defp put_or_delete(keyword, key, nil), do: Keyword.delete(keyword, key)
+  defp put_or_delete(keyword, key, value), do: Keyword.put(keyword, key, value)
+
   defp write_snapshot(snapshot, opts) do
     with {:ok, contents} <- read_home_document(fermix_home()),
          mcp = mcp_document(contents),

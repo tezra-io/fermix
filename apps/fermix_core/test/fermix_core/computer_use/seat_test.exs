@@ -92,7 +92,9 @@ defmodule FermixCore.ComputerUse.SeatTest do
     assert Seat.watch_state(name, "cua_one") == :held
   end
 
-  test "a hold that sends nothing lets go, and that seat may take it again", %{name: name} do
+  # C8: a hold that lapsed is over, and its watch answered: the same seat is
+  # never taken again without one. Its server's next session takes a new seat.
+  test "a hold that sends nothing lets go, and that seat is not taken again", %{name: name} do
     {:ok, _held} = Seat.acquire(name, "cua_one")
     assert_receive {:lapse_armed, {:lapse, ref}}
     watcher = Task.async(fn -> Seat.watch(name, "cua_one") end)
@@ -102,7 +104,23 @@ defmodule FermixCore.ComputerUse.SeatTest do
 
     assert Task.await(watcher) == :idle
     assert Seat.watch_state(name, "cua_one") == :gone
-    assert {:ok, _held} = Seat.acquire(name, "cua_one")
+    assert {:error, :ended} = Seat.acquire(name, "cua_one")
+    assert {:ok, _held} = Seat.acquire(name, "cua_two")
+  end
+
+  # C1: the server renews its hold while its session exists, paused or not,
+  # so the lapse frees only a screen whose server went quiet.
+  test "a renewal keeps the hold, and makes the lapse before it stale", %{name: name} do
+    {:ok, _held} = Seat.acquire(name, "cua_one")
+    assert_receive {:lapse_armed, {:lapse, first}}
+
+    assert Seat.keep(name, "cua_one") == :held
+    assert_receive {:lapse_armed, {:lapse, _second}}
+    send(Process.whereis(name), {:lapse, first})
+    assert Seat.watch_state(name, "cua_one") == :held
+
+    assert Seat.keep(name, "cua_other") == :gone
+    refute_received {:lapse_armed, _message}
   end
 
   test "a lapse armed before the last request is stale", %{name: name} do
@@ -193,6 +211,94 @@ defmodule FermixCore.ComputerUse.SeatTest do
 
   test "a computer that runs no seat shows no mark" do
     assert Seat.view(:no_seat_runs_here) == nil
+  end
+
+  # A helper that takes its time to start: it tells the test, then waits.
+  defmodule SlowStart do
+    @moduledoc false
+    @behaviour Compux.Driver
+
+    @impl true
+    def start(opts) do
+      send(Keyword.fetch!(opts, :test), {:starting, self()})
+
+      receive do
+        :go -> {:ok, %{test: Keyword.fetch!(opts, :test)}}
+      after
+        10_000 -> {:error, :never_let_go}
+      end
+    end
+
+    @impl true
+    def execute(_state, %{"action" => "hello"}),
+      do: {:ok, %{"actions" => [], "capabilities" => %{"input_methods" => ["ax"]}}}
+
+    def execute(_state, _request), do: {:ok, %{"ok" => true}}
+
+    @impl true
+    def stop(state) do
+      send(state.test, :slow_helper_stopped)
+      :ok
+    end
+  end
+
+  # C7: the helper starts beside the seat, so what the app asks meanwhile (the
+  # mark, the person's Stop) is answered at once, and a Stop wins.
+  test "the mark and Stop answer while the helper starts, and Stop wins", %{home: home} do
+    name = :"seat_slow_#{System.unique_integer([:positive])}"
+    test = self()
+
+    start_supervised!(
+      {Seat,
+       name: name,
+       driver: fn -> {:ok, {SlowStart, test: test}} end,
+       home: home,
+       changed: fn -> :ok end,
+       timer: fn _message, _delay -> make_ref() end},
+      id: :slow
+    )
+
+    taking = Task.async(fn -> Seat.acquire(name, "cua_slow") end)
+    assert_receive {:starting, starter}
+    ref = Process.monitor(starter)
+
+    assert Seat.view(name) == nil
+    assert Seat.watch_state(name, "cua_slow") == :held
+    assert {:error, {:busy, %DateTime{}}} = Seat.acquire(name, "cua_other")
+    assert Seat.stop(name) == :stopped
+
+    assert Task.await(taking) == {:error, :stopped}
+    assert_receive {:DOWN, ^ref, :process, ^starter, _reason}
+    assert {:error, :stopped} = Seat.acquire(name, "cua_slow")
+  end
+
+  test "a helper that starts slowly is answered once it started", %{home: home} do
+    name = :"seat_slow_ok_#{System.unique_integer([:positive])}"
+    test = self()
+
+    start_supervised!(
+      {Seat,
+       name: name,
+       driver: fn -> {:ok, {SlowStart, test: test}} end,
+       home: home,
+       changed: fn -> send(test, :screen_changed) end,
+       timer: fn _message, _delay -> make_ref() end},
+      id: :slow_ok
+    )
+
+    taking = Task.async(fn -> Seat.acquire(name, "cua_slow") end)
+    again = Task.async(fn -> Seat.acquire(name, "cua_slow") end)
+    assert_receive {:starting, starter}
+    send(starter, :go)
+
+    assert {:ok, %{driver: {SlowStart, _state}}} = Task.await(taking)
+    assert {:ok, %{driver: {SlowStart, _state}}} = Task.await(again)
+    assert_receive :screen_changed
+    assert %{since: %DateTime{}} = Seat.view(name)
+    refute_received {:starting, _second}
+
+    assert Seat.stop(name) == :stopped
+    assert_receive :slow_helper_stopped
   end
 
   # The watch is a call the seat holds: wait until it is held, never for time.

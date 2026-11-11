@@ -30,9 +30,13 @@ defmodule FermixChannels.Desktop.ComputerFamilyTest do
 
     start_supervised!(
       {Registry,
-       name: registry, home: home, status_changed: fn -> send(test, :computers_changed) && :ok end}
+       name: registry,
+       home: home,
+       status_changed: fn -> send(test, :computers_changed) && :ok end,
+       announce: fn name -> send(test, {:announce, name}) && :ok end}
     )
 
+    assert_receive {:announce, ^registry}
     %{registry: registry, home: home}
   end
 
@@ -145,6 +149,7 @@ defmodule FermixChannels.Desktop.ComputerFamilyTest do
           session: session,
           peer: self(),
           registry: peers,
+          standing: :behind,
           options: [registry: ctx.registry]
         })
 
@@ -163,7 +168,8 @@ defmodule FermixChannels.Desktop.ComputerFamilyTest do
 
       bad = ~s({"v":1,"offers":[{"id":"files","state":"maybe"}]})
 
-      assert {:error, {:invalid_offers, sentence}, ^state} =
+      # The family keeps what it told the view: nothing offered.
+      assert {:error, {:invalid_offers, sentence}, %{offers: {[], nil}} = state} =
                ComputerFamily.handle_event(
                  "offers",
                  %{"rev" => FermixCore.Computers.Offers.rev(bad)},
@@ -187,5 +193,67 @@ defmodule FermixChannels.Desktop.ComputerFamilyTest do
       assert_receive :computers_changed
       assert Registry.live(ctx.registry)[DesktopRail.device_id()].path == :relay
     end
+
+    # A live view that restarted holds nothing; asked, the family says again
+    # what its session said: up since when, where it stands, its offers and
+    # its path. A view it does not report to is not its own.
+    test "the family says its facts again when its live view asks", ctx do
+      good = ~s({"v":1,"offers":[{"id":"files","state":"on"}]})
+      rev = FermixCore.Computers.Offers.rev(good)
+      {:ok, state} = ComputerFamily.handle_event("offers", %{"rev" => rev}, good, ctx.state)
+      {:ok, state} = ComputerFamily.handle_event("link_path", %{"path" => "relay"}, <<>>, state)
+      said = await_offers(ctx.registry, ["files"])
+
+      old = Process.whereis(ctx.registry)
+      ref = Process.monitor(old)
+      Process.exit(old, :kill)
+      assert_receive {:DOWN, ^ref, :process, ^old, :killed}
+      registry = ctx.registry
+      assert_receive {:announce, ^registry}, 10_000
+      assert Registry.live(ctx.registry) == %{}
+
+      assert {:ok, ^state} = ComputerFamily.handle_info({:announce, :another_view}, state)
+      assert {:ok, ^state} = ComputerFamily.handle_info({:announce, ctx.registry}, state)
+
+      assert %{standing: :behind, offers: ^said} =
+               await_live(ctx.registry, &match?(%{path: :relay}, &1))
+    end
+  end
+
+  # End to end: the live view that restarts under an open session asks the
+  # sessions' families, through each peer, to say their facts again
+  # (`Home.Link`'s `announce_computers/1`), so it is rebuilt.
+  test "a live view that restarts is rebuilt from the open sessions", ctx do
+    view = :"computer_family_view_#{System.unique_integer([:positive])}"
+    test = self()
+
+    primary = DesktopRail.primary!(families: %{computer: {ComputerFamily, registry: view}})
+
+    start_supervised!(
+      {Registry,
+       name: view,
+       home: ctx.home,
+       status_changed: fn -> send(test, :computers_changed) && :ok end,
+       announce: &ComputerFamily.announce(&1, primary.peers)},
+      id: :view
+    )
+
+    _desktop = desktop!(primary, Switches.only([:files, :shell]))
+    said = await_offers(view, ["files", "shell"])
+
+    old = Process.whereis(view)
+    ref = Process.monitor(old)
+    Process.exit(old, :kill)
+    assert_receive {:DOWN, ^ref, :process, ^old, :killed}
+
+    assert await_offers(view, ["files", "shell"]) == said
+    refute Process.whereis(view) == old
+  end
+
+  # The computer's live facts once `ready?` holds, read at each change.
+  defp await_live(registry, ready?) do
+    assert_receive :computers_changed, 10_000
+    live = Registry.live(registry)[DesktopRail.device_id()]
+    if live && ready?.(live), do: live, else: await_live(registry, ready?)
   end
 end

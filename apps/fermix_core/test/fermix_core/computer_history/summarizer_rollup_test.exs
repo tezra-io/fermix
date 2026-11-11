@@ -896,6 +896,36 @@ defmodule FermixCore.ComputerHistory.Summarizer.RollupTest do
       refute input =~ "whose history went off"
     end
 
+    # Off means no further provider call for that machine's history: a current
+    # thread drawn from a machine that no longer contributes is not shown to
+    # the call either, since its state is that machine's history in other words.
+    test "a thread drawn from a machine that no longer contributes never reaches the call", %{
+      repo: repo
+    } do
+      off_note = note(repo, %{summary: "notes of this Mac, whose history went off"})
+
+      thread(repo, "Apollo migration", %{
+        summary: "the Apollo plan this Mac drafted",
+        source_ids: Jason.encode!([off_note])
+      })
+
+      studio_note = note(repo, %{summary: "balanced the loft ledger", computer_id: "studio-7f3a"})
+
+      thread(repo, "The ledger", %{
+        summary: "the ledger the studio Mac keeps",
+        source_ids: Jason.encode!([studio_note])
+      })
+
+      reply("## The ledger\nBalanced.\nsources: #{studio_note}\n")
+      assert run(repo, machines: ["studio-7f3a"]) in [:ok, :skipped]
+
+      assert [%{messages: [_system, %{content: input}]}] = calls()
+      assert input =~ "balanced the loft ledger"
+      assert input =~ "the ledger the studio Mac keeps"
+      refute input =~ "the Apollo plan this Mac drafted"
+      refute input =~ "whose history went off"
+    end
+
     test "one info line names the counts", %{repo: repo} do
       id = note(repo, %{summary: "chased the restore check"})
       thread(repo, "Finished cleanup", %{})

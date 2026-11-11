@@ -11,6 +11,9 @@ defmodule FermixChannels.Desktop.InvokeFamily do
     (`invoke_status`) once it has sent the request, never before: the ask
     and the request come from one process, in that order. Each answer comes
     back as any other.
+  - **`invoke_restarted`**: the computer's request handler started again
+    under this session, so a request may have been lost on its way to it,
+    or with what waited there; it reconciles as a new session does.
   - **`invoke_result`** (put back together by the peer) goes to `Calls`.
   - **`invoke_part`** frames are put back together here, one part per
     invocation, at most 20 MiB each and #{64} MiB across the computer's;
@@ -21,7 +24,9 @@ defmodule FermixChannels.Desktop.InvokeFamily do
   - **`invoke_open`** from the computer asks one of the home's services
     (`:services`: `system`, and `history.submit`, a finished sitting of
     computer history, M97 §8.1), run in a process of its own, which is told
-    the computer that asked, and
+    the computer that asked, refused `unavailable` for a computer past the
+    version window (its session's `standing`, `Computers.Versions.served?/1`),
+    and
     answered with `invoke_result`; `invoke_cancel` and `invoke_status` for
     one are answered as the computer answers its server's.
 
@@ -40,6 +45,7 @@ defmodule FermixChannels.Desktop.InvokeFamily do
   alias FermixCore.Computers.Origin
   alias FermixCore.Computers.Outcome
   alias FermixCore.Computers.Telemetry
+  alias FermixCore.Computers.Versions
   alias FermixCore.Setup.ConfigStore
 
   @services %{"system" => SystemCapability, "history" => HistoryService}
@@ -47,6 +53,7 @@ defmodule FermixChannels.Desktop.InvokeFamily do
   @max_parts_bytes 64 * 1_024 * 1_024
   @progress_every 16
   @lost_part "The answer's file did not arrive whole."
+  @settings_only "Update Fermix on this computer to use your server for more than settings."
 
   @impl true
   def init(%{device_id: device_id, registry: registry} = context) do
@@ -55,6 +62,7 @@ defmodule FermixChannels.Desktop.InvokeFamily do
     state = %{
       device_id: device_id,
       registry: registry,
+      standing: context.standing,
       calls: Keyword.get(options, :calls, Calls),
       services: Keyword.get(options, :services, @services),
       history: Keyword.get(options, :history, []),
@@ -80,6 +88,11 @@ defmodule FermixChannels.Desktop.InvokeFamily do
 
   def handle_event("invoke_cancel", %{"id" => id}, _payload, state), do: {:ok, cancel(id, state)}
   def handle_event("invoke_status", %{"id" => id}, _payload, state), do: {:ok, status(id, state)}
+
+  def handle_event("invoke_restarted", _fields, _payload, state) do
+    :ok = reconcile(state)
+    {:ok, state}
+  end
 
   @impl true
   def handle_info({:service_done, id}, state),
@@ -179,10 +192,19 @@ defmodule FermixChannels.Desktop.InvokeFamily do
     meta = meta(fields)
     :ok = Telemetry.started(meta)
 
-    case service_args(module, fields["op"], payload) do
+    case service_args(module, fields["op"], payload, state) do
       {:ok, args} -> run_service(module, args, fields, meta, state)
       {:error, outcome} -> answered(id, outcome, meta, state)
     end
+  end
+
+  # A computer past the version window is served settings alone (its
+  # session's standing, `Versions.served?/1`): none of the home's services,
+  # its history above all, runs for it.
+  defp service_args(module, op, payload, state) do
+    if Versions.served?(state.standing),
+      do: service_args(module, op, payload),
+      else: {:error, Outcome.refused(:unavailable, @settings_only)}
   end
 
   defp service_args(nil, _op, _payload), do: {:error, unknown()}

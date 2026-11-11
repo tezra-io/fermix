@@ -36,6 +36,14 @@ defmodule FermixCore.Computers.Origin do
   @wire_origins @origins ++ [:computer]
   @words Map.new(@wire_origins, &{Atom.to_string(&1), &1})
   @scheduled_triggers ~w(schedule manual watcher)
+  # Every key `of/1` reads (`Access.worker?/1`'s depths among them).
+  @facts [
+    :subagent_depth,
+    :skill_depth,
+    :trigger,
+    :harness_continuation_depth,
+    :computer_use_origin
+  ]
 
   @doc "Every origin a turn can have."
   @spec origins() :: [t()]
@@ -56,6 +64,15 @@ defmodule FermixCore.Computers.Origin do
       true -> surface(Map.get(context, :computer_use_origin))
     end
   end
+
+  @doc """
+  The facts of the loop context `context` that `of/1` reads, and nothing
+  else: what a request carries from the turn that makes it to where its
+  origin is decided later (an iMessage send through a computer), so
+  `of(facts(context)) == of(context)`.
+  """
+  @spec facts(map()) :: map()
+  def facts(context) when is_map(context), do: Map.take(context, @facts)
 
   @doc "The origin a wire word names, or `:error`."
   @spec from_wire(term()) :: {:ok, t() | :computer} | :error

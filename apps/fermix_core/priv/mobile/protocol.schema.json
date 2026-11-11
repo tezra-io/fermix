@@ -34,7 +34,8 @@
           "move_offer", "move_chunk", "move_end", "move_commit", "move_resume",
           "call_open", "call_line", "call_audio", "call_frame", "call_close",
           "offers", "link_path", "join_request",
-          "invoke_open", "invoke_part", "invoke_cancel", "invoke_result", "invoke_status"
+          "invoke_open", "invoke_part", "invoke_cancel", "invoke_result", "invoke_status",
+          "invoke_restarted"
         ]}
       },
       "allOf": [
@@ -81,7 +82,8 @@
         {"if": {"properties": {"t": {"const": "invoke_part"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/invoke_part"}},
         {"if": {"properties": {"t": {"const": "invoke_cancel"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/invoke_cancel"}},
         {"if": {"properties": {"t": {"const": "invoke_result"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/invoke_result"}},
-        {"if": {"properties": {"t": {"const": "invoke_status"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/invoke_status"}}
+        {"if": {"properties": {"t": {"const": "invoke_status"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/invoke_status"}},
+        {"if": {"properties": {"t": {"const": "invoke_restarted"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/invoke_restarted"}}
       ]
     },
     "serverEvent": {
@@ -318,7 +320,7 @@
         "v": {"type": "integer", "minimum": 1},
         "offers": {"type": "boolean"},
         "link_path": {"type": "boolean"},
-        "invoke": {"type": "boolean", "description": "true when this server takes the invocation's five events (invoke_open, invoke_part, invoke_cancel, invoke_result, invoke_status) from the computer; a computer sends none of them otherwise."},
+        "invoke": {"type": "boolean", "description": "true when this server takes the invocation's five events (invoke_open, invoke_part, invoke_cancel, invoke_result, invoke_status) and invoke_restarted from the computer; a computer sends none of them otherwise."},
         "standing": {"enum": ["current", "behind", "ahead", "settings_only"]},
         "versions": {
           "type": "object", "required": ["engine", "companion", "management"],
@@ -650,6 +652,11 @@
       "description": "Desktop to primary (M97), only when the hello_ack's caps.computer.link_path is true: whether the session the computer dialed runs direct or through a relay, once it is known at the session's start and again at each change.",
       "properties": {"t": {"const": "link_path"}, "path": {"enum": ["direct", "relay"]}}
     },
+    "invoke_restarted": {
+      "allOf": [{"$ref": "#/$defs/envelope"}], "required": ["v", "t", "seq"],
+      "description": "Desktop to primary (M97), only when the hello_ack's caps.computer.invoke is true: the computer's request handler started again while the session stayed up, so a request on its way to it, or one that waited there, may be lost. The primary has every caller still waiting on that computer ask with invoke_status, as at a new session; one the computer has no record of is answered unknown.",
+      "properties": {"t": {"const": "invoke_restarted"}}
+    },
     "invoke_open": {
       "allOf": [{"$ref": "#/$defs/envelope"}], "x-raw-bytes": true, "x-chunked": true, "x-chunk-key": "id", "x-max-payload-bytes": 1048576,
       "required": ["v", "t", "seq", "id", "capability", "op", "deadline_ms", "epoch", "origin", "index", "last"],
@@ -768,7 +775,7 @@
     "join_denied": {
       "allOf": [{"$ref": "#/$defs/envelope"}], "required": ["v", "t", "seq", "reason"],
       "description": "Primary to the computer that asked to join (M97): it was not added, and its code is spent. The session then closes 4003 (join <reason>).",
-      "properties": {"t": {"const": "join_denied"}, "reason": {"enum": ["denied", "timeout", "cancelled", "device_disconnected"]}}
+      "properties": {"t": {"const": "join_denied"}, "reason": {"enum": ["denied", "timeout", "cancelled"]}}
     },
     "move_offer": {
       "allOf": [{"$ref": "#/$defs/envelope"}], "required": ["v", "t", "seq", "move_id", "size_bytes", "sha256", "source_epoch", "attempt"],

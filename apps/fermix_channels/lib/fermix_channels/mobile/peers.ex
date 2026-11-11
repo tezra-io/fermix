@@ -45,7 +45,7 @@ defmodule FermixChannels.Mobile.Peers do
   @desktop_client ~w(
     hello ping media_fetch ack companion_open companion_line companion_close manage
     loopback_request loopback_failed snapshot_stored snapshot_refused offers link_path
-    invoke_open invoke_part invoke_cancel invoke_result invoke_status
+    invoke_open invoke_part invoke_cancel invoke_result invoke_status invoke_restarted
   )
   @phone_server ~w(
     hello_ack accepted attach_status turn_started text_delta tool_event text_done turn_done

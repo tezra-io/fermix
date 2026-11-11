@@ -99,6 +99,35 @@ defmodule FermixCore.Computers.ArgumentTest do
     assert Argument.computers(Map.delete(owner([studio()]), :source_trust)) == []
   end
 
+  # A skill's worker keeps its parent turn's context (`Capabilities.Skill`
+  # raises only `skill_depth`) and its own loop stamps the trust it runs at: a
+  # plugin skill runs at guest under the owner's turn. A sub-agent's worker
+  # loses `source_trust` and runs at its parent's. None is the owner's own turn.
+  defp plugin_skill_worker(computers),
+    do: owner(computers) |> Map.put(:skill_depth, 1) |> Map.put(:effective_trust, :guest)
+
+  test "a delegated worker sees no computer, a plugin skill's above all" do
+    assert Argument.computers(Map.put(owner([studio()]), :effective_trust, :operator)) ==
+             [studio()]
+
+    for worker <- [
+          plugin_skill_worker([studio()]),
+          owner([studio()]) |> Map.put(:skill_depth, 1) |> Map.put(:effective_trust, :operator),
+          owner([studio()])
+          |> Map.delete(:source_trust)
+          |> Map.put(:subagent_depth, 1)
+          |> Map.put(:effective_trust, :operator),
+          Map.put(owner([studio()]), :effective_trust, :guest)
+        ] do
+      assert Argument.computers(worker) == []
+
+      assert Enum.all?(
+               Advertisement.prepare([Builtin.from_tool_module(FileRead)], worker),
+               &(computer_property(&1) == nil)
+             )
+    end
+  end
+
   # The rule is `Computers.visible?/1`'s, decided before the link is asked, so
   # a turn that cannot see computers is advertised with no link implementation
   # loaded at all.

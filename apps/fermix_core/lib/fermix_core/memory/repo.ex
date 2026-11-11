@@ -93,6 +93,7 @@ defmodule FermixCore.Memory.Repo do
   @follow_up_always_allow_migration_version 58
   @computer_history_machines_migration_version 59
   @computer_history_reports_migration_version 60
+  @computer_history_home_migration_version 61
   @sqlite_open_intent :readwritecreate
 
   # The home's requests about notes from every machine (M97 §8), all served by
@@ -111,7 +112,8 @@ defmodule FermixCore.Memory.Repo do
     :notes_by_computer,
     :purge_notes,
     :pause_window,
-    :prune_home_intervals
+    :prune_home_intervals,
+    :home_token
   ]
 
   # The cue SQL modules (M60), one per lane, all served by `cues_call/3`.
@@ -5107,8 +5109,31 @@ defmodule FermixCore.Memory.Repo do
          :ok <- apply_checklist_edits_migration(conn, versions),
          :ok <- apply_follow_up_always_allow_migration(conn, versions),
          :ok <- apply_computer_history_machines_migration(conn, versions, carry),
-         :ok <- apply_computer_history_reports_migration(conn, versions) do
+         :ok <- apply_computer_history_reports_migration(conn, versions),
+         :ok <- apply_computer_history_home_migration(conn, versions) do
       :ok
+    end
+  end
+
+  # M97 §8.5: the home's store gets its own token, made once at random, in one
+  # transaction with the version.
+  defp apply_computer_history_home_migration(conn, versions) do
+    if Enum.member?(versions, @computer_history_home_migration_version) do
+      :ok
+    else
+      with :ok <- Sqlite3.execute(conn, "BEGIN;") do
+        conn |> home_step() |> commit_migration(conn)
+      end
+    end
+  end
+
+  defp home_step(conn) do
+    with :ok <- ComputerHistorySql.home_schema(conn) do
+      Sqlite3.execute(
+        conn,
+        "INSERT INTO schema_migrations(version) " <>
+          "VALUES (#{@computer_history_home_migration_version});"
+      )
     end
   end
 

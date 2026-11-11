@@ -1925,9 +1925,12 @@ Notes that the shapes alone do not carry:
   sittings are summarized with: `local` where its `machine.toml` says
   `summarizer = "local"` (it makes its own notes, and where it is the home,
   its roll-up stays on it too), else the home's route (`default_provider`,
-  `local`, or a pinned provider's id). The home's route and the providers
-  that may receive summaries (`summarizer`, `remote_summaries` in the home's
-  `config.toml`) have no row, so no write here reaches them. The switch's
+  `local`, or a pinned provider's id). Where `machine.toml`'s local
+  summarizer decides over a different one in this home's `config.toml`, the
+  row's footer says so; otherwise it has none. Deleting that line from
+  `machine.toml` hands the choice back to `config.toml`. The home's route and
+  the providers that may receive summaries (`summarizer`, `remote_summaries`
+  in the home's `config.toml`) have no row, so no write here reaches them. The switch's
   footer says what switching history on agrees to, true on this computer:
   with no server, that the raw record stays here for 48 hours and each
   finished sitting is summarized by the provider it names (or on this Mac);

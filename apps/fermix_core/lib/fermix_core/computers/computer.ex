@@ -2,8 +2,10 @@ defmodule FermixCore.Computers.Computer do
   @moduledoc """
   One computer of the home, as the primary knows it (M97 §3.2): its id and
   the name the owner calls it (unique in the home), its system, the engine
-  version it last said and where that stands against this server
-  (`Computers.Versions`, §3.4; nil before it said one), whether its session
+  version it last said and where it stands against this server
+  (`Computers.Versions`, §3.4, decided by `Computers.list/1`: its session's
+  for a connected one, and never served when its version is not known),
+  whether its session
   is up and since when, when the home last heard it, the path its session
   runs, what it offers, and whether it keeps the home's backup copies.
 

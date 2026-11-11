@@ -837,7 +837,7 @@ defmodule FermixCore.ComputerHistory.IngestTest do
     @horizon ~U[2026-01-01 00:00:10.000Z]
 
     defp pause_until(spool, horizon) do
-      :ok = Spool.set_pause_until(DateTime.to_iso8601(horizon), server: spool)
+      :ok = FermixTestSupport.HistorySpool.put_pause_until(spool, DateTime.to_iso8601(horizon))
     end
 
     defp horizon_ms, do: DateTime.to_unix(@horizon, :millisecond)
@@ -877,7 +877,7 @@ defmodule FermixCore.ComputerHistory.IngestTest do
     end
 
     test "an unparseable horizon drops every event, a future-stamped one too", %{spool: spool} do
-      :ok = Spool.set_pause_until("not-a-timestamp", server: spool)
+      :ok = FermixTestSupport.HistorySpool.put_pause_until(spool, "not-a-timestamp")
 
       log =
         capture_log(fn ->

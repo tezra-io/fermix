@@ -35,6 +35,7 @@ defmodule FermixCore.Tools.SendToChannel do
   @behaviour FermixCore.Capabilities.Builtin.Tool
 
   alias FermixCore.Capabilities.Builtin.Tool
+  alias FermixCore.Computers.Origin
   alias FermixCore.Delivery.ChannelSend
   alias FermixCore.Delivery.Error
   alias FermixCore.Delivery.OwnerInbox
@@ -140,7 +141,7 @@ defmodule FermixCore.Tools.SendToChannel do
          {:ok, text} <- text_arg(args),
          {:ok, session_id} <- session_id(context),
          {:ok, inbox} <- on_platform(platform, opts),
-         :ok <- deliver(inbox, text, proactive_key(session_id, platform, text), opts) do
+         :ok <- deliver(inbox, text, proactive_key(session_id, platform, text), context, opts) do
       {"sent", {:ok, Tool.success("Sent to the owner's inbox on #{platform}.")}}
     else
       {:error, reason} -> refusal(reason, Map.get(args, "channel"), opts)
@@ -176,11 +177,15 @@ defmodule FermixCore.Tools.SendToChannel do
   end
 
   # One attempt under the watchdog, reduced to the closed delivery vocabulary
-  # (`Delivery.Error`), whose every reason has its sentence.
-  defp deliver(inbox, text, key, opts) do
+  # (`Delivery.Error`), whose every reason has its sentence. The send carries
+  # the turn's origin facts, which a channel reached through a computer (iMessage
+  # on a server) hands on to that computer's own rules.
+  defp deliver(inbox, text, key, context, opts) do
+    send_opts = [proactive_key: key, turn_origin: Origin.facts(context)]
+
     @send_timeout_ms
     |> ChannelSend.with_timeout(fn ->
-      ChannelSend.send(inbox.platform, inbox.destination, text, [proactive_key: key],
+      ChannelSend.send(inbox.platform, inbox.destination, text, send_opts,
         channels: delivery_channels(opts),
         delivery_max_attempts: 1
       )

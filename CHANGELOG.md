@@ -155,7 +155,13 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   and the providers that may see the summaries (`remote_summaries`) stay in
   `config.toml`; `summarizer = "local"` is also written to `machine.toml`,
   where it keeps this computer's history on its own model, the daily roll-up
-  included. To change one by hand, edit
+  included. While that line is there it decides over the summarizer
+  `config.toml` names: `/history status` and the settings row say so, the log
+  says it once at start, and deleting the line from `machine.toml` hands the
+  choice back to `config.toml`. A save from the setup page writes only the
+  machine settings it changed and takes the rest from the file as it is
+  then, so a page left open in another tab never switches back on what you
+  switched off since. To change one by hand, edit
   `machine.toml`: one added to `config.toml` is not read there, reloading the
   settings says so in the log, and the next save or start takes it out of
   `config.toml`. In a home the Mac app manages only the app moves them: a
@@ -175,7 +181,12 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   notes made from it stay in `memory.db`. A Linux install, which has no
   recorder, keeps no such store and runs no part of computer history unless
   its home holds notes, and a home restored there from a Mac's backup drops
-  the raw rows instead of keeping them where nothing would delete them.
+  the raw rows instead of keeping them where nothing would delete them. A
+  store that cannot be opened (a full disk, a damaged file) no longer stops
+  Fermix from starting: the recorder stays off, the rest runs, and `/history
+  status` and the settings say why. Nothing older than the 48 hours is ever
+  summarized: the computer deletes it before it sends, and the home refuses
+  a sitting that starts before them.
 - **Restoring your home keeps your computer history notes.** A restore from a
   snapshot deleted every note, as if they could not leave the Mac they were
   made on. Notes are your home's and now come back with it; the raw record
@@ -277,9 +288,10 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **`/history off` means no more provider calls for your history.** After
   it, the daily roll-up still ran once more over the notes made since the
   last one. Now nothing more is sent anywhere for a machine whose history is
-  off: the roll-up reads only the notes of machines still recording, and on
-  a Mac that is its own home, with no other computer contributing, it makes
-  no call at all. The notes stay, and recall still reads them.
+  off: the roll-up reads only the notes of machines still recording, and
+  leaves out every thread that cites a note of one that is off, and on a Mac
+  that is its own home, with no other computer contributing, it makes no
+  call at all. The notes stay, and recall still reads them.
 - **A pause also keeps out what arrives late.** `/history pause` dropped
   events while it lasted, but one stamped inside the paused time that reached
   this Mac's raw record after the pause ended, such as a flush that came
@@ -361,10 +373,12 @@ will be part of a future release; nothing in this group is in a release yet.
   computer keeping its backups already carries, read from fermix.ai's release
   table (`update` in `fermix home status --json`: the release it runs, the
   one it may install, and a newer one still waiting for an app), never back
-  down, and nothing while it cannot read the table. A computer that has not
-  installed an update never holds the server back: one up to two minor
-  versions behind the server works as before, and one further behind keeps
-  its settings and says to update Fermix on it. A computer ahead of its
+  down, and nothing while it cannot read the table or list its computers. A
+  computer that has not installed an update never holds the server back: one
+  up to two minor versions behind the server works as before, and one further
+  behind, or one whose version is not known, keeps its settings and says to
+  update Fermix on it: its chat, the server's work on it and its computer
+  history all wait until it does. A computer ahead of its
   server speaks the server's version of the chat protocol. Move back and
   Restore here need this computer's Fermix to be at least as new as the
   server's, and say "Update Fermix on this Mac first" in their place when it
@@ -555,7 +569,9 @@ will be part of a future release; nothing in this group is in a release yet.
   alone still succeeds whatever it shows. Every surface reads whether
   Always On is still at it from the screen itself (its `outcome`).
   A server waiting for its move, whose review blocks it, or whose move was
-  undone can be dropped with Forget this server (after a confirm); Connecting
+  undone can be dropped with Forget this server (after a confirm); Try again
+  after an undone move keeps on for your server only what you left ticked
+  when you started it, never the defaults; Connecting
   your server can be cancelled, and a code whose half hour ran out with no
   server recorded leaves that screen; and a new code beside an open one says
   the current one stops working. Waiting for your server names the systems the
@@ -617,18 +633,23 @@ will be part of a future release; nothing in this group is in a release yet.
   already in your Fermix, or on the server (`fermix always-on add-computer`),
   Always On's Add a computer opens a code that works once, for 30 minutes.
   On the new computer you connect to a Fermix that already runs with that
-  code (`fermix computer join CODE` where there is no app), and both show six
-  digits taken from their encrypted connection: you add the computer only if
-  they match, so someone who merely saw the code cannot join. Until you add
-  it, it has no access; not adding it, wrong digits or the code running out
-  add nothing. A computer that joins moves nothing, starts with everything
-  Fermix on your server may use switched off, keeps no backups, and offers no
-  Move back. One that already has a Fermix of its own is refused, and nothing
-  is deleted to make room. You can remove a computer from your devices
-  (`fermix devices revoke`), after which it joins again only with a new code;
-  the one that keeps the only copies of your server's backups asks first.
-  Disconnect this computer does the same from the computer itself and
-  deletes its key. A phone cannot add a computer yet.
+  code (`fermix computer join CODE` where there is no app). It shows six
+  digits taken from its encrypted connection, and you add it by typing them
+  where you approve it; that side is never shown them, so someone who merely
+  saw the code cannot join. Until you add it, it has no access; not adding
+  it, wrong digits or the code running out add nothing. A connection that
+  drops while it waits spends nothing: the computer connects again and shows
+  new digits, the ones to type. A join that fails as it starts leaves no key
+  behind, so the next one is not refused. A computer that joins moves
+  nothing, starts with everything Fermix on your server may use switched
+  off, keeps no backups, and offers no Move back. One that already has a
+  Fermix of its own is refused, and nothing is deleted to make room. You can
+  remove a computer from your devices (`fermix devices revoke`), after which
+  it joins again only with a new code; the one that keeps the only copies of
+  your server's backups asks first. Disconnect this computer does the same
+  from the computer itself and deletes its key; one that fails part-way
+  leaves the computer connected, and asking again finishes it. A phone
+  cannot add a computer yet.
 - **Fermix on your Always On server can work with files and commands on your
   computers.** Ask for a file on your studio Mac, or to run something there,
   and Fermix reads, writes, edits and searches files, looks at pictures,
@@ -644,10 +665,14 @@ will be part of a future release; nothing in this group is in a release yet.
   something from outside, a command on a Mac still runs, held by its
   sandbox, and a command on a Linux computer waits for your confirm in the
   chat, which names the computer. A command or a write whose answer is lost
-  is never run twice: Fermix says whether it happened is not known. Each
+  is never run twice: Fermix says whether it happened is not known, and one
+  that ran but whose output was lost on the way says it ran and is not run
+  again. Each
   request is in that computer's own record of what Fermix did there, and a
   command that failed is recorded as failed, while Fermix still reads its
-  whole output.
+  whole output. Only your own turns can name a computer, your scheduled
+  jobs among them: a guest's turn, and a worker a skill or a sub-agent runs
+  (a plugin skill's above all), is offered none and refused if it names one.
 - **Fermix on your server can use your computer's browser, where you are
   signed in.** Ask for something on a site you are signed in to on your
   studio Mac and Fermix drives that Mac's browser: the Fermix app's own
@@ -659,9 +684,11 @@ will be part of a future release; nothing in this group is in a release yet.
   channel, which your server refuses and your Mac refuses again. Your
   server's own browser stays the default, and a task that began in your
   Mac's browser stays there: if the Mac goes to sleep mid-task, Fermix says
-  so rather than carry on somewhere else. Screenshots, PDFs and downloads
-  come back to your server, and a file you upload goes to your Mac, up to
-  20 MiB. It works only while The browser is switched on in that computer's
+  so rather than carry on somewhere else; on a voice call a task stays on
+  your Mac across the call. Screenshots, PDFs and downloads come back to
+  your server, and your Mac keeps its own copy for a day, so a download whose
+  bytes were lost on the way is still there and Fermix names where; a file
+  you upload goes to your Mac, up to 20 MiB. It works only while The browser is switched on in that computer's
   This computer settings, and each step is in that computer's record of what
   Fermix did there.
 - **Fermix on your server can see and control your computer's screen.** Ask
@@ -676,9 +703,13 @@ will be part of a future release; nothing in this group is in a release yet.
   typing at it. While your server holds the screen your Mac's app shows a
   mark, "Fermix on your server is controlling this screen.", with Stop; Stop,
   or switching Your screen or everything off there, ends it at once, and
-  Fermix is told the person at the Mac stopped it. One conversation holds a
-  screen at a time, and each step is in that computer's record of what
-  Fermix did there. Screen sharing on a voice call stays your server's own.
+  Fermix is told the person at the Mac stopped it; the mark and Stop work
+  while the screen's helper is still starting. Your server holds the screen
+  for as long as its session lasts, paused included, so a pause holds until
+  you resume and a long gap between steps starts nothing over; your Mac lets
+  go of a server it has not heard from for two minutes. One conversation
+  holds a screen at a time, and each step is in that computer's record of
+  what Fermix did there. Screen sharing on a voice call stays your server's own.
 - **iMessage keeps working after your home moves to your server.** Your Mac's
   Messages carry it: you text the same Apple ID as before, your server reads
   and answers, and the helper, its macOS permissions and the list of who
@@ -690,7 +721,9 @@ will be part of a future release; nothing in this group is in a release yet.
   that waits on you (an approval) goes to a channel on your server instead.
   When the Mac is back, Fermix reads what came in meanwhile, up to 500
   messages from the last day, and tells you once if it missed more. Photos
-  and files go both ways, up to 20 MiB. Your iMessage owner and guests are
+  and files go both ways, up to 20 MiB. Each message names the kind of turn
+  that sent it, so your Mac refuses one a delegated worker sends and its
+  record says who asked. Your iMessage owner and guests are
   now kept with your home, so your server knows them. The move's review no
   longer lists iMessage among what stops.
 - **Computer history from every computer becomes one memory on your home.**
@@ -726,7 +759,12 @@ will be part of a future release; nothing in this group is in a release yet.
   using the computer's other offers goes on. Requests waiting for a turn when
   the computer's request handler restarts are answered at once as not run,
   where a queued Messages or screen watch used to wait until the link
-  dropped. On your server, iMessage shows away while the Mac that carries
+  dropped, and the restart tells your server, which asks again about
+  whatever it still waits on there, so a request the restart lost is never
+  waited on for ever. A folder that does not answer, or a stop that hangs,
+  holds up only its own request. Your server rebuilds its view of each
+  computer when that view restarts, and an away computer keeps the screen
+  actions it last offered. On your server, iMessage shows away while the Mac that carries
   Messages is asleep or offline, and asks for setup only when setup is owed;
   the engine gives the apps its own sentence for each iMessage readiness
   problem, naming that Mac; and "What Fermix did on this computer" names

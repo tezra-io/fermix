@@ -1292,13 +1292,16 @@ defmodule FermixChannels.Mobile.Session do
   end
 
   # A desktop's peer is the desktops', and its families know where the
-  # computer stands; a phone's runs its list channel alone.
+  # computer stands; a phone's runs its list channel alone. The version
+  # window is a computer's (`Computers.Versions`): a phone, which its own
+  # protocol versions govern, is served as one that stands current.
   defp peer_place(:desktop, state),
     do: [registry: state.desktop_peers, standing: state.computer_standing]
 
   defp peer_place(:phone, state),
     do: [
       registry: DesktopSupervisor.phone_registry(state.desktop_peers),
+      standing: :current,
       families: state.phone_families
     ]
 

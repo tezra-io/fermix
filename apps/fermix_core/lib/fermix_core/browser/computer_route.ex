@@ -24,7 +24,9 @@ defmodule FermixCore.Browser.ComputerRoute do
   **Every result names the computer**: a result carries `computer`, and an
   error starts "On <name>:". An answer the link lost or the computer refused
   is the browser's error in `Computers.Outcome`'s sentence (`outcome_unknown`
-  for an effect whose outcome is not known, never sent twice).
+  for an effect whose outcome is not known, never sent twice). An effect
+  whose file was lost on the way (`part_lost`) ran: its result says so, and
+  where the computer keeps the file for a day.
 
   Each invocation records the turn's use of the computer
   (`Browser.ComputerTurn`), so a later call that names none carries on there
@@ -90,7 +92,8 @@ defmodule FermixCore.Browser.ComputerRoute do
   # -- one request ---------------------------------------------------------------------
 
   defp send_request(action, args, computer, profile, keys, context, call) do
-    :ok = ComputerTurn.used(BrowserCapability.turn_seams(context), self(), computer, context)
+    turn = ComputerTurn.turn(context)
+    :ok = ComputerTurn.used(BrowserCapability.turn_seams(context), turn, computer, context)
 
     with {:ok, wire_args, part} <- outgoing(action, args) do
       request = %{
@@ -168,6 +171,18 @@ defmodule FermixCore.Browser.ComputerRoute do
      }}
   end
 
+  # It ran, and its file was lost on the way: said so, never a failure that
+  # would have it done again, with where the computer keeps the file.
+  defp answer(%Outcome{status: :ok, part_lost: true} = outcome, _action, computer, _owner) do
+    {:ok,
+     %{
+       "ok" => true,
+       "page" => "unobserved",
+       "computer" => computer.name,
+       "note" => lost_note(outcome, computer)
+     }}
+  end
+
   defp answer(%Outcome{status: :ok, result: said} = outcome, _action, computer, owner) do
     with {:ok, result} <- result(said, outcome.part_bytes, computer),
          {:ok, result} <- landed(result, said["artifact"], outcome.part_bytes, computer, owner) do
@@ -223,6 +238,15 @@ defmodule FermixCore.Browser.ComputerRoute do
   end
 
   defp landed(_result, _artifact, _part, computer, _owner), do: not_a_result(computer)
+
+  # The computer keeps a file it sent for a day (`kept`, its own path there).
+  defp lost_note(%Outcome{result: %{"artifact" => %{"kept" => kept}}} = outcome, computer)
+       when is_binary(kept),
+       do:
+         Outcome.sentence(outcome, computer.name) <>
+           " It stays on #{computer.name} for a day, at #{kept}."
+
+  defp lost_note(outcome, computer), do: Outcome.sentence(outcome, computer.name)
 
   defp artifact_dir("downloads", owner),
     do: Path.join([ConfigStore.workspace_paths().browser, "downloads", owner])

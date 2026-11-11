@@ -194,7 +194,8 @@ defmodule FermixChannels.Channels.IMessage.TwoEnginesIMessageTest do
              IMessage.send_message(@owner, "Yes, I still text you from here.",
                helper: ComputerHelper,
                server: server.helper,
-               turn_id: "turn-81"
+               turn_id: "turn-81",
+               turn_origin: %{computer_use_origin: :interactive}
              )
 
     mac = ctx.mac
@@ -211,6 +212,45 @@ defmodule FermixChannels.Channels.IMessage.TwoEnginesIMessageTest do
     # A method and a shortened handle, never the text.
     assert target == "send.text to +1555…4567"
     refute Enum.any?(entries, &(&1.target =~ "still text"))
+  end
+
+  # C6: the request carries the origin of the turn that sends, never one read
+  # off its idempotency key: a reply to a message is that conversation's chat
+  # turn, and a delegated worker's send meets the Mac's own rule.
+  test "a send carries its turn's real origin, so the Mac's worker rule applies", ctx do
+    server = server!(ctx)
+    live!(ctx, server)
+    metadata = %{imessage_helper: ComputerHelper, imessage_server: server.helper}
+
+    reply =
+      IMessage.build_text_reply(%FermixChannels.Gateway.Message{
+        id: "m-1",
+        content: "are you there?",
+        sender: @owner,
+        channel: "imessage",
+        chat_id: @owner,
+        reply_target: @owner,
+        metadata: metadata
+      })
+
+    assert :ok = reply.("Here.")
+    mac = ctx.mac
+    assert_receive {:fake_helper_call, ^mac, "send.text", %{"text" => "Here."}}, 10_000
+
+    assert {:error, _refused} =
+             IMessage.send_message(@owner, "Done with the list.",
+               helper: ComputerHelper,
+               server: server.helper,
+               proactive_key: "worker-note-1",
+               turn_origin: %{subagent_depth: 1, computer_use_origin: :interactive}
+             )
+
+    refute_received {:fake_helper_call, ^mac, "send.text", %{"text" => "Done with the list."}}
+    assert {:ok, %{entries: entries}} = Journal.list(Journal.dir(ctx.engines.root))
+    sends = Enum.filter(entries, &(&1.op == "imessage.send"))
+
+    assert [%{origin: "worker", status: "refused"}, %{origin: "chat", status: "ok"}] =
+             Enum.map(sends, &Map.take(&1, [:origin, :status]))
   end
 
   test "an attachment goes each way as bytes, and no path of the Mac's reaches the server",
@@ -350,7 +390,8 @@ defmodule FermixChannels.Channels.IMessage.TwoEnginesIMessageTest do
           server.helper,
           "send.text",
           %{"to" => @owner, "text" => "On my way.", "idempotency_key" => "turn:t-9:0:text:0"},
-          5_000
+          5_000,
+          %{computer_use_origin: :interactive}
         )
       end)
 
@@ -379,7 +420,8 @@ defmodule FermixChannels.Channels.IMessage.TwoEnginesIMessageTest do
                server.helper,
                "policy.set",
                %{"owner" => "+15559990000", "handles" => ["+15559990000"]},
-               5_000
+               5_000,
+               %{computer_use_origin: :interactive}
              )
 
     assert sentence =~ "the server cannot change it"

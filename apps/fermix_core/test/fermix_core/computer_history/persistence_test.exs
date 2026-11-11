@@ -86,7 +86,7 @@ defmodule FermixCore.ComputerHistory.PersistenceTest do
 
       assert {:ok, 2} = Spool.insert_events(events, server: spool)
       assert {:ok, 2} = Spool.count_events(server: spool)
-      assert {:ok, 3_000} = Spool.oldest_event_ts(server: spool)
+      assert FermixTestSupport.HistorySpool.oldest_ts(spool) == 3_000
     end
 
     test "re-delivering the same (boot_id, source_seq) does not double-insert", %{spool: spool} do
@@ -105,7 +105,7 @@ defmodule FermixCore.ComputerHistory.PersistenceTest do
     end
 
     test "empty spool reports a nil oldest", %{spool: spool} do
-      assert {:ok, nil} = Spool.oldest_event_ts(server: spool)
+      assert is_nil(FermixTestSupport.HistorySpool.oldest_ts(spool))
       assert {:ok, 0} = Spool.count_events(server: spool)
     end
   end
@@ -180,7 +180,7 @@ defmodule FermixCore.ComputerHistory.PersistenceTest do
       # ts < 1000 ⇒ only the ts=500 row goes; ts=1000 (== cutoff) survives.
       assert {:ok, %{deleted: 1}} = Spool.sweep_expired(1_000, server: spool)
       assert {:ok, 2} = Spool.count_events(server: spool)
-      assert {:ok, 1_000} = Spool.oldest_event_ts(server: spool)
+      assert FermixTestSupport.HistorySpool.oldest_ts(spool) == 1_000
     end
 
     test "sweeping an empty spool removes nothing", %{spool: spool} do
@@ -202,7 +202,7 @@ defmodule FermixCore.ComputerHistory.PersistenceTest do
       assert {:ok, 7} = Spool.sweep_over_bytes(3_600, server: spool)
       assert {:ok, 3} = Spool.count_events(server: spool)
       # The survivors are the NEWEST rows (ids/ts 8..10), not the oldest.
-      assert {:ok, 8_000} = Spool.oldest_event_ts(server: spool)
+      assert FermixTestSupport.HistorySpool.oldest_ts(spool) == 8_000
     end
 
     test "a spool under the ceiling is untouched", %{spool: spool} do
@@ -1043,7 +1043,7 @@ defmodule FermixCore.ComputerHistory.PersistenceTest do
         %{id: 6, from_ts: 9_000, to_ts: 20_000, issued_at: 9_000, kind: "pause"}
       ]
 
-      assert :ok = Spool.apply_intervals(intervals, now, server: spool)
+      assert :ok = Spool.apply_intervals(intervals, "4f2a9c1e7b3d5a60.1", now, server: spool)
 
       assert {:ok, 0} = Spool.count_events(server: spool)
       assert {:ok, %{home_mark: 6}} = Spool.link(server: spool)

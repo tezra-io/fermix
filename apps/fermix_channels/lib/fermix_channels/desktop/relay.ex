@@ -243,7 +243,8 @@ defmodule FermixChannels.Desktop.Relay do
   @status_wait_ms 5_000
   # A computer's own events (M97 §5.3), each sent only where the server's
   # hello_ack takes it, by the flag of `caps.computer` that says so: the
-  # invocation's five (M97 §6.1) go under one.
+  # invocation's five (M97 §6.1), and the computer's word that its request
+  # handler started (`invoke_restarted`), go under one.
   @computer_events %{
     "offers" => "offers",
     "link_path" => "link_path",
@@ -251,7 +252,8 @@ defmodule FermixChannels.Desktop.Relay do
     "invoke_part" => "invoke",
     "invoke_cancel" => "invoke",
     "invoke_result" => "invoke",
-    "invoke_status" => "invoke"
+    "invoke_status" => "invoke",
+    "invoke_restarted" => "invoke"
   }
 
   # Every event the primary sends a desktop, and the family that serves it

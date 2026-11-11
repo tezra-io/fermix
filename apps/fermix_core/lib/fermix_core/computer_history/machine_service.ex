@@ -3,12 +3,16 @@ defmodule FermixCore.ComputerHistory.MachineService do
   What a computer does when its home tells it of the owner's narrowing from
   chat (M97 §7.2, §8.5):
 
-  - `history.apply`: a purge or a pause. Each interval deletes this computer's
-    raw events stamped inside it and fences any that arrive later, a pause
-    that has not ended also pauses recording here until it does, and the
-    store's mark is answered: the highest interval this computer has applied,
-    every one below it included, which the home records so it never sends
-    them again (`ComputerHistory.Delivery`). The store is the one under the
+  - `history.apply`: a purge or a pause, with the identity of the home store
+    they belong to (`home`, `ComputerHistory.home_identity/1`). Each interval
+    deletes this computer's raw events stamped inside it and fences any that
+    arrive later, a pause that has not ended also pauses recording here until
+    it does, and the store's mark is answered: the highest interval of that
+    home store this computer has applied, every one below it included, which
+    the home records so it never sends them again
+    (`ComputerHistory.Delivery`). A mark under another home store (one this
+    computer left, or this home's before a restore) is replaced, never
+    raised. The store is the one under the
     invocation's home (`Spool.apply_at/3`); a computer that keeps no store
     applied nothing and answers 0, so a store it opens later is sent every
     interval from the first.
@@ -30,6 +34,7 @@ defmodule FermixCore.ComputerHistory.MachineService do
   alias FermixCore.Computers.Offers.History, as: HistoryOffer
 
   @max_intervals 256
+  @max_home_bytes 128
 
   @impl true
   def id, do: :history
@@ -47,16 +52,20 @@ defmodule FermixCore.ComputerHistory.MachineService do
   def long_lived?(op) when op in ["apply", "off"], do: false
 
   @impl true
-  def validate("apply", %{"intervals" => intervals} = args)
-      when map_size(args) == 1 and is_list(intervals) and intervals != [] and
-             length(intervals) <= @max_intervals do
+  def validate("apply", %{"intervals" => intervals, "home" => home} = args)
+      when map_size(args) == 2 and is_list(intervals) and intervals != [] and
+             length(intervals) <= @max_intervals and is_binary(home) and home != "" and
+             byte_size(home) <= @max_home_bytes do
     if Enum.all?(intervals, &interval?/1),
       do: :ok,
       else: {:error, "Each interval needs its id, its times and its kind."}
   end
 
   def validate("apply", _args),
-    do: {:error, "Apply takes the intervals to apply, at most #{@max_intervals}."}
+    do:
+      {:error,
+       "Apply takes the home's history store and the intervals to apply, at most " <>
+         "#{@max_intervals}."}
 
   def validate("off", args) when args == %{}, do: :ok
   def validate("off", _args), do: {:error, "Off takes nothing."}
@@ -75,8 +84,8 @@ defmodule FermixCore.ComputerHistory.MachineService do
   def admit(op, _args, _context) when op in ["apply", "off"], do: :ok
 
   @impl true
-  def run("apply", %{"intervals" => intervals}, nil, %{home: home, clock: clock}) do
-    case Spool.apply_at(Spool.path(home), Enum.map(intervals, &read/1), clock.()) do
+  def run("apply", %{"intervals" => intervals, "home" => store}, nil, %{home: home, clock: clock}) do
+    case Spool.apply_at(Spool.path(home), store, Enum.map(intervals, &read/1), clock.()) do
       {:ok, mark} -> {:ok, %{"applied" => mark}, nil}
       {:error, reason} -> {:failed, "This computer could not apply it: #{inspect(reason)}"}
     end

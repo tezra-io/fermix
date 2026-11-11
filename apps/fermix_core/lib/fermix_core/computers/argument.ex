@@ -40,8 +40,8 @@ defmodule FermixCore.Computers.Argument do
 
   @doc """
   The home's computers for a turn whose loop context is `context`: none
-  unless the turn can see them (`Computers.visible?/1`, its trust the
-  context's `source_trust`), then the context's `:computers`, else
+  unless the turn can see them (`Computers.visible?/1`, its trust the run's,
+  `Computers.turn_trust/1`), then the context's `:computers`, else
   `Computers.list/1`'s. The link is asked only after that.
   """
   @spec computers(map()) :: [Computer.t()]
@@ -86,11 +86,12 @@ defmodule FermixCore.Computers.Argument do
     end
   end
 
-  # The turn's trust, never defaulted: a context without one sees nothing.
+  # The run's trust (`Computers.turn_trust/1`), never defaulted: only the
+  # owner's own turn sees anything, never a delegated worker.
   defp computers_opts(context) do
     context
     |> Map.get(:computers_opts, [])
-    |> Keyword.put(:trust, Map.get(context, :source_trust))
+    |> Keyword.put(:trust, Computers.turn_trust(context))
     |> Keyword.put_new_lazy(:always_on, fn ->
       Map.get_lazy(context, :always_on, &AlwaysOnRelease.available?/0)
     end)

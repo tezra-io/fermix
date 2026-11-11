@@ -176,9 +176,14 @@ defmodule FermixCore.ComputerHistory.SummarizerTest do
   # to the home's half (`Submission`), with the result in the counts these cases
   # read: whether a note was written, the events and sittings, and how many
   # sittings wrote none.
+  # The cycle's clock is a day after the newest event the case recorded,
+  # unless the case says otherwise: within the retention window, which a cycle
+  # sweeps before it sends (M97 §8.1), and long after any sitting closed.
   defp run_cycle(opts) do
     {repo, opts} = Keyword.pop!(opts, :repo)
-    now = Keyword.get(opts, :now, DateTime.utc_now())
+    spool = Keyword.get(opts, :spool, spool_of(repo))
+    opts = Keyword.put_new_lazy(opts, :now, fn -> a_day_after_newest(spool) end)
+    now = Keyword.fetch!(opts, :now)
     home = [repo: repo, adapter: FakeAdapter, now: now] ++ Keyword.take(opts, [:route_opts])
     uplink = fn payload -> {:ok, Submission.accept("", payload, home)} end
 
@@ -200,6 +205,15 @@ defmodule FermixCore.ComputerHistory.SummarizerTest do
 
       other ->
         other
+    end
+  end
+
+  defp a_day_after_newest(spool) do
+    {:ok, events} = Spool.events_after(0, 100_000, server: spool)
+
+    case Enum.map(events, & &1.ts) do
+      [] -> DateTime.utc_now()
+      stamps -> DateTime.from_unix!(Enum.max(stamps) + 86_400_000, :millisecond)
     end
   end
 

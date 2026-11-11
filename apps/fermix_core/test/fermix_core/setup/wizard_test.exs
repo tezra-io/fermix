@@ -4,6 +4,7 @@ defmodule FermixCore.Setup.WizardTest do
   import ExUnit.CaptureLog
 
   alias FermixCore.Auth.Store, as: AuthStore
+  alias FermixCore.Computers.Switches
   alias FermixCore.Memory.Repo, as: MemoryRepo
   alias FermixCore.Realtime.Config, as: RealtimeConfig
   alias FermixCore.Sandbox.Config, as: SandboxConfig
@@ -3243,6 +3244,70 @@ defmodule FermixCore.Setup.WizardTest do
 
       assert provider_auth_mode(:anthropic) == :oauth
       assert provider_auth_mode(:xai) == :oauth
+    end
+  end
+
+  # M97 §4, §7.2: a setup page left open while this computer's own settings
+  # changed elsewhere (the app switching an offer off, another tab tightening
+  # the sandbox, the recorder turned off) saves an unrelated answer. The save
+  # writes the machine tables it changed and nothing else of the machine
+  # file: every other is the file's at save time, and so is what runs.
+  describe "a page that went stale" do
+    setup do
+      saved =
+        for key <- [:computer, :computer_history, :computer_use],
+            do: {key, Application.fetch_env(:fermix_core, key)}
+
+      on_exit(fn ->
+        Enum.each(saved, fn {key, value} -> restore_env(:fermix_core, key, value) end)
+      end)
+    end
+
+    test "never turns a machine switch back on, loosens the sandbox or starts the recorder" do
+      home = System.get_env("FERMIX_HOME")
+
+      File.write!(Path.join(home, "machine.toml"), """
+      [sandbox]
+      mode = "open"
+
+      [fermix_core.computer_history]
+      enabled = true
+
+      [fermix_core.computer]
+      enabled = true
+      shell = true
+      """)
+
+      {:ok, opened} = ConfigStore.load_runtime_config()
+      :ok = ConfigStore.apply_snapshot(opened)
+      stale = Wizard.report().wizard
+
+      # Elsewhere, since: the app switches this computer off on disk, another
+      # page tightens the sandbox and turns the recorder off.
+      :ok = Switches.write(home, enabled: false, shell: true)
+      assert {:ok, _report} = Wizard.set_sandbox_overrides(:strict, nil, nil)
+
+      assert {:ok, _report} =
+               Wizard.save_answers(Wizard.report().wizard, computer_history_enabled: false)
+
+      assert {:ok, _report} = Wizard.save_answers(stale, bot_name: "Orchard")
+
+      {:ok, saved} = ConfigStore.load_runtime_config()
+      assert Keyword.fetch!(saved.fermix_core[:computer], :enabled) == false
+      assert Keyword.fetch!(saved.fermix_core[:computer], :shell) == true
+      assert SandboxConfig.normalize(saved.sandbox).mode == :strict
+      assert Keyword.fetch!(saved.fermix_core[:computer_history], :enabled) == false
+
+      # What runs is the file's too.
+      assert Keyword.fetch!(Application.get_env(:fermix_core, :computer), :enabled) == false
+
+      assert Keyword.fetch!(Application.get_env(:fermix_core, :computer_history), :enabled) ==
+               false
+
+      assert SandboxConfig.normalize(Application.get_env(:fermix_core, :sandbox)).mode == :strict
+
+      # The answer the stale page did give is saved.
+      assert saved.fermix_core |> Keyword.fetch!(:agent) |> Keyword.fetch!(:name) == "Orchard"
     end
   end
 

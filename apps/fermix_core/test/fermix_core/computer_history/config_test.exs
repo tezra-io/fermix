@@ -21,6 +21,36 @@ defmodule FermixCore.ComputerHistory.ConfigTest do
 
   defp configure(kw), do: Application.put_env(:fermix_core, :computer_history, kw)
 
+  # M97 §4: this machine's local summarizer decides over a different one in
+  # config.toml, and that is never silent: said once as the rail starts.
+  describe "a machine summarizer that decides over config.toml's" do
+    test "names the route it overrides, and only where one differs" do
+      assert Config.shadowed_route(machine_summarizer: :local, summarizer: :anthropic) ==
+               {:provider, :anthropic}
+
+      assert Config.shadowed_route(machine_summarizer: :local, summarizer: :default_provider) ==
+               :default_provider
+
+      assert is_nil(Config.shadowed_route(machine_summarizer: :local, summarizer: :local))
+      assert is_nil(Config.shadowed_route(machine_summarizer: :local))
+      assert is_nil(Config.shadowed_route(summarizer: :anthropic))
+    end
+
+    test "is said once at the rail's start, and nothing where nothing is overridden" do
+      log =
+        capture_log(fn ->
+          assert :ok = Config.warn_if_shadowed(machine_summarizer: :local, summarizer: :anthropic)
+        end)
+
+      assert log =~
+               ~s|summarizer = "local" in this machine's machine.toml decides over | <>
+                 "config.toml's summarizer (anthropic)"
+
+      quiet = capture_log(fn -> assert :ok = Config.warn_if_shadowed(summarizer: :anthropic) end)
+      refute quiet =~ "machine.toml"
+    end
+  end
+
   describe "defaults (key absent)" do
     test "everything is off / empty; summarizer defaults to the default provider" do
       Application.delete_env(:fermix_core, :computer_history)

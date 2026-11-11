@@ -90,11 +90,13 @@ defmodule FermixChannels.Channels.IMessage.Port do
     GenServer.start_link(__MODULE__, opts, name: name)
   end
 
+  # The helper runs here, so the turn's origin decides nothing it does.
   @impl FermixChannels.Channels.IMessage.Helper
-  @spec call(GenServer.server(), String.t(), map(), pos_integer()) ::
+  @spec call(GenServer.server(), String.t(), map(), pos_integer(), map()) ::
           {:ok, map()} | {:error, FermixChannels.Channels.IMessage.Helper.error()}
-  def call(server, method, params, timeout)
-      when is_binary(method) and is_map(params) and is_integer(timeout) and timeout > 0 do
+  def call(server, method, params, timeout, turn)
+      when is_binary(method) and is_map(params) and is_integer(timeout) and timeout > 0 and
+             is_map(turn) do
     GenServer.call(server, {:request, method, params, timeout}, timeout + @call_margin_ms)
   catch
     :exit, {:noproc, _call} -> {:error, not_running()}

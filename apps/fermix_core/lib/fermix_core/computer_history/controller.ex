@@ -19,7 +19,8 @@ defmodule FermixCore.ComputerHistory.Controller do
   "Operative" is `ComputerHistory.operative?/0` (enabled ∧ macOS) AND the sidecar
   binary being installed — capture cannot run without the compux sidecar, so a
   missing binary keeps the children absent (fail-closed) rather than crash-looping
-  a `Capturer` that can never resolve its Port.
+  a `Capturer` that can never resolve its Port — AND this machine's store having
+  opened (`Spool.status/1`): a store that did not keeps the recorder off.
 
   On a computer whose home is a server (the device role, `FermixCore.Home.Role`)
   both run while history records there: the recorder writes this machine's
@@ -33,6 +34,7 @@ defmodule FermixCore.ComputerHistory.Controller do
 
   alias FermixCore.ComputerHistory
   alias FermixCore.ComputerHistory.Capturer
+  alias FermixCore.ComputerHistory.Spool
   alias FermixCore.ComputerHistory.Submission
   alias FermixCore.ComputerHistory.Summarizer.Scheduler
   alias FermixCore.ComputerHistory.Supervisor, as: CHSupervisor
@@ -67,6 +69,7 @@ defmodule FermixCore.ComputerHistory.Controller do
         Keyword.get(opts, :dynamic_supervisor, CHSupervisor.dynamic_supervisor()),
       operative_fun: Keyword.get(opts, :operative_fun, &ComputerHistory.operative?/0),
       installed_fun: Keyword.get(opts, :installed_fun, &SidecarInstaller.installed?/0),
+      spool: Keyword.get(opts, :spool),
       children:
         Keyword.get_lazy(opts, :children, fn ->
           role = Keyword.get_lazy(opts, :engine_role, &Role.current/0)
@@ -143,13 +146,19 @@ defmodule FermixCore.ComputerHistory.Controller do
     do: apply(Module.concat([FermixChannels, Desktop, HistoryUplink]), :report, [report])
 
   defp do_reconcile(state) do
-    recording? = state.operative_fun.() and state.installed_fun.()
+    recording? = state.operative_fun.() and state.installed_fun.() and store_open?(state.spool)
 
     Enum.each(
       state.children,
       &reconcile_child(state.dynamic_supervisor, &1, want?(&1, recording?))
     )
   end
+
+  # Nothing records into a store that did not open (M97 §8.1): `Spool` stays up
+  # holding why, which `/history status` says. A rail with no store (no
+  # recorder on this system) never records, so it has nothing to ask.
+  defp store_open?(nil), do: true
+  defp store_open?(spool), do: Spool.status(server: spool) == :open
 
   defp want?(%{want: :always}, _recording?), do: true
   defp want?(_child, recording?), do: recording?

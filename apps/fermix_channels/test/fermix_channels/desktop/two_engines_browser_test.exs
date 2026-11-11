@@ -21,6 +21,7 @@ defmodule FermixChannels.Desktop.TwoEnginesBrowserTest do
 
   alias FermixChannels.Desktop.Invoke.Admission
   alias FermixChannels.Desktop.Offers
+  alias FermixChannels.Desktop.Relay
   alias FermixChannels.Test.TwoEngines
   alias FermixCore.Browser.Config
   alias FermixCore.Browser.HeldTurnListener
@@ -252,7 +253,10 @@ defmodule FermixChannels.Desktop.TwoEnginesBrowserTest do
     browser = computer_browser!(computer_dir, context[:pane] == true)
 
     engines =
-      TwoEngines.start!(offers: [:browser], browser: fn -> {:ok, browser.seams} end)
+      TwoEngines.start!(
+        [offers: [:browser], browser: fn -> {:ok, browser.seams} end] ++
+          part_lost_send(context[:part_lost] == true)
+      )
 
     # The computer's switches end the turns its browser holds, as
     # `Computers.Switches` tells its listener by name on a running engine.
@@ -280,6 +284,21 @@ defmodule FermixChannels.Desktop.TwoEnginesBrowserTest do
       turns: turns,
       pending: pending
     }
+  end
+
+  # With `part_lost`, every file the computer sends back arrives changed, as
+  # bytes lost on the way would: its size holds and its SHA-256 does not.
+  defp part_lost_send(false), do: []
+
+  defp part_lost_send(true) do
+    [
+      send: fn relay, event, payload ->
+        payload =
+          if event["t"] == "invoke_part", do: :binary.copy("x", byte_size(payload)), else: payload
+
+        Relay.send_event(relay, event, payload)
+      end
+    ]
   end
 
   defp restore_home(nil), do: System.delete_env("FERMIX_HOME")
@@ -514,6 +533,11 @@ defmodule FermixChannels.Desktop.TwoEnginesBrowserTest do
 
     test "a screenshot, a PDF and a download come back as bytes into the server's own folder",
          ctx do
+      old = Path.join(ctx.computer_dir, "browser/for-server/inv-from-two-days-ago")
+      File.mkdir_p!(old)
+      File.write!(Path.join(old, "old.png"), "an old capture")
+      File.touch!(old, System.os_time(:second) - 2 * 86_400)
+
       [shot, report, receipts] =
         in_turn(fn ->
           call(ctx, on_mac(%{"action" => "open", "url" => "https://allotment.example.com"}))
@@ -538,10 +562,39 @@ defmodule FermixChannels.Desktop.TwoEnginesBrowserTest do
       assert receipts_said["suggested_filename"] == "receipts.csv"
       assert_server_copy(ctx, receipts_said["path"], ["downloads", "owner"], @receipts)
 
-      # Nothing of them stays in the computer's own browser folder.
+      # C3: the computer keeps what it sent for a day, in a folder of its own,
+      # so a file lost on the way is never lost on both machines; older ones go.
       left = Path.wildcard(Path.join(ctx.computer_dir, "browser/**/*"))
-      assert Enum.filter(left, &File.regular?/1) == []
+      kept = Path.join(ctx.computer_dir, "browser/for-server")
+      kept_files = Enum.filter(left, &File.regular?/1)
+      assert length(kept_files) == 3
+      assert Enum.all?(kept_files, &String.starts_with?(&1, kept <> "/"))
+
+      assert Enum.sort(Enum.map(kept_files, &File.read!/1)) ==
+               Enum.sort([@capture, @report, @receipts])
+
+      refute File.exists?(Path.join(kept, "inv-from-two-days-ago"))
       assert ops(ctx.e) == ~w(browser.open browser.screenshot browser.pdf browser.download)
+    end
+
+    # C3: the download ran, and its bytes did not arrive whole: the call says
+    # so and where the file stays, never a failure that would download again.
+    @tag :part_lost
+    test "a download whose bytes are lost on the way says so, and stays on the computer", ctx do
+      receipts =
+        in_turn(fn ->
+          call(ctx, on_mac(%{"action" => "open", "url" => "https://allotment.example.com"}))
+          call(ctx, %{"action" => "download"})
+        end)
+
+      said = decoded(receipts)
+      assert said["computer"] == "studio Mac"
+      refute Map.has_key?(said, "path")
+      assert said["note"] =~ "studio Mac ran it, but its output was lost on the way back"
+      [kept] = Path.wildcard(Path.join(ctx.computer_dir, "browser/for-server/*/*"))
+      assert File.read!(kept) == @receipts
+      assert said["note"] =~ "It stays on studio Mac for a day, at #{kept}."
+      assert ops(ctx.e) == ~w(browser.open browser.download)
     end
 
     test "an upload's file goes from the server's workspace to the computer's page", ctx do
@@ -874,6 +927,26 @@ defmodule FermixChannels.Desktop.TwoEnginesBrowserTest do
       assert {:ok, %{success: false, error: error}} = after_away
       assert error =~ "studio Mac is asleep or offline"
       assert ops(ctx.e) == ~w(browser.open browser.status)
+    end
+
+    # C2: a voice call runs each tool call in a process of its own. The turn
+    # is the call (its `turn_pid`), so the task stays on the computer from one
+    # tool call to the next, and the computer hears it end only with the call.
+    test "a voice call's task stays on the computer across its tool calls", ctx do
+      the_call = spawn(fn -> receive do: (:hang_up -> :ok) end)
+      voice = %{turn_pid: the_call, computer_use_origin: :voice, session_id: "voice-#{ctx.sid}"}
+      open = on_mac(%{"action" => "open", "url" => "https://allotment.example.com"})
+
+      opened = in_turn(fn -> call(ctx, open, voice) end)
+      looked = in_turn(fn -> call(ctx, %{"action" => "status"}, voice) end)
+
+      assert decoded(opened)["computer"] == "studio Mac"
+      assert decoded(looked)["computer"] == "studio Mac"
+      assert ops(ctx.e) == ~w(browser.open browser.status)
+      refute Enum.any?(whole_journal(ctx.e), &(&1.op == "browser.end"))
+
+      send(the_call, :hang_up)
+      await_turn_ends(ctx.e, 1)
     end
   end
 

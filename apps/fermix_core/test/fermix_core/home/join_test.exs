@@ -5,6 +5,7 @@ defmodule FermixCore.Home.JoinTest do
   use ExUnit.Case, async: true
 
   alias Exqlite.Sqlite3
+  alias FermixCore.ComputerHistory.Spool
   alias FermixCore.Computers.Switches
   alias FermixCore.Home.ComputerKey
   alias FermixCore.Home.DesktopLink
@@ -120,6 +121,22 @@ defmodule FermixCore.Home.JoinTest do
       :ok = Join.start(ctx.home, code(), ctx.opts)
       assert Join.start(ctx.home, code(), ctx.opts) == {:error, :computer_join_running}
     end
+
+    # A step that fails takes back the key it made, so the next join is not
+    # refused by a key nothing records.
+    test "a join that cannot be written takes back its key, and the next join starts", ctx do
+      blocked = Join.path(ctx.home) <> ".tmp"
+      File.mkdir_p!(Path.join(blocked, "kept"))
+
+      assert {:error, {:file, _path, _reason}} = Join.start(ctx.home, code(), ctx.opts)
+      assert ComputerKey.read(ctx.home, store: :keyring) == {:error, {:missing, :keyring}}
+      refute Join.present?(ctx.home)
+      refute_received :restarted
+
+      SafeRm.rm_rf!(blocked)
+      assert :ok = Join.start(ctx.home, code(), ctx.opts)
+      assert_received :restarted
+    end
   end
 
   test "a denial is recorded with its sentence, and the code's secret leaves the file", ctx do
@@ -175,6 +192,16 @@ defmodule FermixCore.Home.JoinTest do
     assert {:ok, switches} = Switches.read(ctx.home)
     assert Switches.switched_on(switches) == []
     assert Switches.reviewed?(switches) and Switches.enabled?(switches)
+  end
+
+  # M97 §8.5: a machine's purge mark counts one home's intervals, so joining
+  # a home forgets the mark an earlier home left.
+  test "the server's approval forgets the history mark of an earlier home", ctx do
+    spool = marked_spool!(ctx.home)
+    :ok = Join.start(ctx.home, code(), ctx.opts)
+
+    assert :ok = Join.finish(ctx.home, approved(), ctx.opts)
+    assert {:ok, %{home_mark: 0, home: nil}} = Spool.link(server: spool)
   end
 
   # M97 §3.3: a computer leaves; the home is told first.
@@ -242,6 +269,52 @@ defmodule FermixCore.Home.JoinTest do
       refute File.exists?(DesktopLink.path(ctx.home))
     end
 
+    # The link goes last, so a step that fails before it leaves this computer
+    # linked, and asking again finishes the job.
+    test "a disconnect that fails part-way finishes when asked again", ctx do
+      told = fn request, _opts -> {:ok, %{"device_id" => request.params["device_id"]}} end
+      opts = [forward: told] ++ ctx.opts
+      machine = Path.join(ctx.home, "machine.toml")
+      SafeRm.rm!(machine)
+      File.mkdir_p!(Path.join(machine, "kept"))
+
+      assert {:error, {:config, _reason}} = Leave.disconnect(ctx.home, opts)
+      refute_received :restarted
+
+      SafeRm.rm_rf!(machine)
+      assert {:ok, true} = Leave.disconnect(ctx.home, opts)
+      assert_received :restarted
+      refute File.exists?(DesktopLink.path(ctx.home))
+      assert ComputerKey.read(ctx.home, store: :keyring) == {:error, {:missing, :keyring}}
+      assert {:ok, %{role: :primary}} = Role.configured(ctx.home)
+    end
+
+    test "a moved marker that cannot be read refuses before anything changes", ctx do
+      test = self()
+      File.write!(Moved.path(ctx.home), "not a marker")
+
+      forward = fn request, _opts ->
+        send(test, {:forwarded, request.method})
+        {:ok, %{}}
+      end
+
+      assert {:error, {:moved, _reason} = reason} =
+               Leave.disconnect(ctx.home, [forward: forward] ++ ctx.opts)
+
+      assert Leave.error_sentence(reason) in Leave.sentences()
+      refute_received {:forwarded, _method}
+      assert File.exists?(DesktopLink.path(ctx.home))
+      assert {:ok, %{public: _public}} = ComputerKey.read(ctx.home, store: :keyring)
+    end
+
+    test "a disconnect forgets the history mark of the home it left", ctx do
+      spool = marked_spool!(ctx.home)
+      told = fn request, _opts -> {:ok, %{"device_id" => request.params["device_id"]}} end
+
+      assert {:ok, true} = Leave.disconnect(ctx.home, [forward: told] ++ ctx.opts)
+      assert {:ok, %{home_mark: 0, home: nil}} = Spool.link(server: spool)
+    end
+
     test "the computer a home moved from stays retired, in the device role", ctx do
       :ok = Moved.write(ctx.home, %{to: "studio-mac", moved_at: @now, epoch: 5})
       :ok = ConfigStore.put_engine_role(ctx.home, :device)
@@ -253,6 +326,17 @@ defmodule FermixCore.Home.JoinTest do
   end
 
   # -- facts ----------------------------------------------------------------------
+
+  # This machine's history store, holding the mark 7 of an earlier home.
+  defp marked_spool!(home) do
+    spool =
+      start_supervised!({Spool, name: nil, path: Spool.path(home)}, id: :machine_spool)
+
+    pause = %{id: 7, from_ts: 1, to_ts: 2, issued_at: 1, kind: "pause"}
+    :ok = Spool.apply_intervals([pause], "earlier-home.3", @now, server: spool)
+    {:ok, %{home_mark: 7, home: "earlier-home.3"}} = Spool.link(server: spool)
+    spool
+  end
 
   defp home!(tmp, name, profile \\ nil) do
     home = Path.join(tmp, name)

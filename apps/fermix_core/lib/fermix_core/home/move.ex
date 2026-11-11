@@ -160,13 +160,31 @@ defmodule FermixCore.Home.Move do
 
   @doc """
   The offers a request keeps on for the server (M97 §7.3), as `start/5`
-  recorded them; nil in a request written before the choice existed.
+  recorded them; nil in a request written before the choice existed. The
+  phase records them too, so they outlast the request.
   """
   @spec keep_offers(map()) :: [String.t()] | nil
   def keep_offers(%{} = request) do
     case Map.get(request, "keep_offers") do
       offers when is_list(offers) -> offers
       _absent -> nil
+    end
+  end
+
+  @doc """
+  What the move undone here kept on for its server (M97 §7.3), as the owner
+  chose it when it started, read from its phase, which outlasts the request
+  an undo removes: the keep a Try again moves with. Nil when no move is undone
+  here, or the undone one recorded no choice.
+  """
+  @spec undone_keep(Path.t()) :: [String.t()] | nil
+  def undone_keep(home) when is_binary(home) do
+    case read_phase(home) do
+      {:ok, %{"phase" => phase} = state} when phase in ~w(aborting undoing aborted) ->
+        keep_offers(state)
+
+      _none_undone ->
+        nil
     end
   end
 
@@ -593,11 +611,11 @@ defmodule FermixCore.Home.Move do
              put_phase(
                home,
                "requested",
-               %{
+               Map.merge(Map.take(request, ["keep_offers"]), %{
                  "move_id" => request["move_id"],
                  "candidate" => request["candidate"]["name"],
                  "keep_as_desktop" => request["keep_as_desktop"]
-               },
+               }),
                now
              ) do
         ConfigStore.put_engine_role(home, :device)

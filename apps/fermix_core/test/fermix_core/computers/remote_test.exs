@@ -92,6 +92,34 @@ defmodule FermixCore.Computers.RemoteTest do
              Remote.result(outcome, @studio)
   end
 
+  # C3: a command ran, and its output, riding the answer's file, was lost on
+  # the way: it says so, never a failure the model would run again.
+  test "a command whose output was lost on the way says it ran, and is not run again" do
+    {json, _part} = ToolResult.encode(Tool.success(:binary.copy("o", 300 * 1_024)))
+    lost = %Outcome{status: :ok, result: json, part_lost: true, target: "make release"}
+
+    assert %{success: true, output: output} = Remote.result(lost, @studio)
+
+    assert output ==
+             "studio Mac ran it, but its output was lost on the way back, so it is not run again."
+
+    whole = "Command failed (exit code 2):\n" <> :binary.copy("e", 300 * 1_024)
+    {json, _part} = ToolResult.encode(Tool.error(whole))
+
+    failed = %Outcome{
+      status: :failed,
+      message: "Command failed (exit code 2):",
+      result: json,
+      part_lost: true
+    }
+
+    assert %{success: false, error: error} = Remote.result(failed, @studio)
+
+    assert error ==
+             "studio Mac: Command failed (exit code 2): The rest of its output was lost on the " <>
+               "way back, so it is not run again."
+  end
+
   test "an answer that is not a tool result fails, naming the computer" do
     outcome = %Outcome{status: :ok, result: %{"kind" => "picture"}}
 

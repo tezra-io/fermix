@@ -112,7 +112,10 @@ defmodule FermixCore.Management.Home do
   carries, `Home.Releases.eligible/3`; null when none, or when no table was
   read: the update installs nothing then), `held` (a newer release not
   eligible yet: its `version`, the systems it `waits_for` and a `sentence`
-  that names no version; null when there is none), `ahead_of_apps` (this
+  that names no version; null when there is none; computers that cannot be
+  listed are never read as none: the update holds as for a computer whose
+  system is not known, and the sentence says the list could not be read),
+  `ahead_of_apps` (this
   engine runs past what some backup system's app carries, an owner's
   override) and `table` (`read_at`, when the table was last read, and the
   `sentence` of a fetch that failed or of why none was read, each null
@@ -195,6 +198,9 @@ defmodule FermixCore.Management.Home do
   alias FermixCore.Setup.Endpoint
 
   require Logger
+
+  @unlisted_sentence "A newer Fermix is released. Your server takes it once Fermix can list " <>
+                       "your computers again."
 
   @device_sentence "Snapshots are the primary's to write; this engine runs in the device role."
   @candidate_sentence "Snapshots are the primary's to write; this engine is a candidate " <>
@@ -304,6 +310,7 @@ defmodule FermixCore.Management.Home do
     :ok = passed_return(home, role, link, opts)
     move = HomeMove.facts(home, role, link, opts)
     {primary_home, primary_missing, gap} = primary_home(opts)
+    listed = computers(home, role, opts)
 
     facts = %{
       role: role.role,
@@ -321,14 +328,14 @@ defmodule FermixCore.Management.Home do
       disk: disk(home, role, opts),
       version: Keyword.get_lazy(opts, :version, &BuildInfo.product_version/0),
       webhooks: webhooks(role, opts),
-      computers: computers(home, role, opts),
+      computers: known_computers(listed),
       asking: asking(opts),
       join: joining(home, role),
       screen: screen(role, opts),
       restart_hold: restart_hold(move.move, opts)
     }
 
-    facts = put_update(facts, role, opts)
+    facts = put_update(facts, role, listed, opts)
 
     summary_status =
       Map.merge(facts, %{
@@ -413,19 +420,34 @@ defmodule FermixCore.Management.Home do
   # What an Always On server's update may install (M97 §3.4), and the field
   # every update script reads (`update_ceiling`, its `eligible`); null on any
   # other engine.
-  defp put_update(facts, role, opts) do
-    case update(role, facts, opts) do
+  defp put_update(facts, role, listed, opts) do
+    case update(role, facts, listed, opts) do
       nil -> Map.merge(facts, %{update: nil, update_ceiling: nil})
       update -> Map.merge(facts, %{update: update, update_ceiling: update["eligible"]})
     end
   end
 
-  defp update(role, facts, opts) do
+  defp update(role, facts, listed, opts) do
     if always_on_server?(role, facts.epoch, opts) do
       reader = Keyword.get(opts, :release_table, &ReleaseTable.current/0)
-      backups = backup_systems(facts.computers)
-      update_view(reader.(), facts.version, backups)
+      update_view(reader.(), facts.version, backup_systems(listed))
     end
+  end
+
+  # Computers that cannot be listed are not known, never none: any of them
+  # could keep backups on either system, so the update holds as for a
+  # computer that has not said its system, says why, and claims nothing about
+  # the apps.
+  defp update_view({:ok, table, read_at, failure}, running, :unlisted) do
+    %{eligible: eligible, held: held} = Releases.eligible(table, running, [:unknown])
+
+    %{
+      "running" => running,
+      "eligible" => eligible,
+      "held" => held && %{held_view(held) | "sentence" => @unlisted_sentence},
+      "ahead_of_apps" => false,
+      "table" => %{"read_at" => iso8601(read_at), "sentence" => failure}
+    }
   end
 
   defp update_view({:ok, table, read_at, failure}, running, backups) do
@@ -475,12 +497,15 @@ defmodule FermixCore.Management.Home do
 
   # The systems of the computers that keep the home's backups; one that has
   # not said its system could need either app (`Releases.eligible/3`).
-  defp backup_systems(computers) do
+  # `:unlisted` when the computers could not be listed.
+  defp backup_systems({:ok, computers}) do
     computers
     |> Enum.filter(& &1.backups)
     |> Enum.map(&(&1.platform || :unknown))
     |> Enum.uniq()
   end
+
+  defp backup_systems({:error, _reason}), do: :unlisted
 
   # This engine is an Always On server's (`Home.AlwaysOn`): its primary, a
   # Linux package with no app, at an epoch above 1, from the facts its boot
@@ -527,9 +552,23 @@ defmodule FermixCore.Management.Home do
 
   # The home's computers (M97 §3.2), on the primary; none anywhere else. A
   # caller with no engine tree reads a stopped Fermix, whose computers have
-  # no session.
-  defp computers(home, %{role: role}, opts),
-    do: Keyword.get_lazy(opts, :computers, fn -> Computers.list(home: home, role: role) end)
+  # no session. A list that cannot be read is `{:error, reason}`, said in the
+  # log once here; `:computers` in a test, a list or such an error.
+  defp computers(home, %{role: role}, opts) do
+    case Keyword.get_lazy(opts, :computers, fn -> Computers.fetch(home: home, role: role) end) do
+      computers when is_list(computers) -> {:ok, computers}
+      {:ok, computers} -> {:ok, computers}
+      {:error, reason} -> unlisted(reason)
+    end
+  end
+
+  defp unlisted(reason) do
+    Logger.warning("home status: the home's computers could not be listed: #{inspect(reason)}")
+    {:error, reason}
+  end
+
+  defp known_computers({:ok, computers}), do: computers
+  defp known_computers({:error, _reason}), do: []
 
   # The computer whose request this answers (a linked computer's forward),
   # which finds its own row marked in `computers`; nil for every other caller.

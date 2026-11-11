@@ -42,6 +42,14 @@ defmodule FermixCore.ComputerHistory.Retention do
   # it is row-capped instead (Code Rule 2).
   @access_row_cap 10_000
 
+  @doc """
+  How long a raw event is kept, and so how long the home keeps a purge or
+  pause interval: the one window a machine's sending (`Sittings`) and the
+  home's refusal of an older sitting (`Submission`) both read.
+  """
+  @spec window_ms() :: pos_integer()
+  def window_ms, do: @retention_window_ms
+
   @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(opts \\ []) do
     {name, opts} = Keyword.pop(opts, :name, __MODULE__)

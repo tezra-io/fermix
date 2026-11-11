@@ -132,6 +132,90 @@ defmodule FermixChannels.Desktop.InvokeTest do
     def target("watch", %{"name" => name}), do: "watch #{name}"
   end
 
+  # A read whose own rules wait for the test, as a probe of a folder on a
+  # network mount that stopped answering does.
+  defmodule Probing do
+    @moduledoc false
+    @behaviour FermixCore.Computers.Capability
+
+    @impl true
+    def id, do: :probing
+    @impl true
+    def offer, do: :files
+    @impl true
+    def ops, do: ["probe"]
+    @impl true
+    def effect?(_op), do: false
+    @impl true
+    def long_lived?(_op), do: false
+    @impl true
+    def validate("probe", %{"name" => name}) when is_binary(name), do: :ok
+    def validate("probe", _args), do: {:error, "Probe needs a name."}
+    @impl true
+    def bounds(_op), do: %{result_bytes: 1_024, part_bytes: 0}
+
+    @impl true
+    def admit("probe", %{"name" => name}, context) do
+      test = :persistent_term.get({Wait, context.home})
+      send(test, {:admitting, name, self()})
+
+      receive do
+        {:admit, answer} -> answer
+      after
+        30_000 -> {:refused, :unavailable, "The test never admitted it."}
+      end
+    end
+
+    @impl true
+    def run("probe", %{"name" => name}, nil, _context), do: {:ok, %{"probed" => name}, nil}
+
+    @impl true
+    def target("probe", %{"name" => name}), do: "probe #{name}"
+  end
+
+  # A read whose own cancel never answers in time, as a screen seat busy
+  # starting its helper did.
+  defmodule Stubborn do
+    @moduledoc false
+    @behaviour FermixCore.Computers.Capability
+
+    @impl true
+    def id, do: :stubborn
+    @impl true
+    def offer, do: :files
+    @impl true
+    def ops, do: ["hold"]
+    @impl true
+    def effect?(_op), do: false
+    @impl true
+    def long_lived?(_op), do: false
+    @impl true
+    def validate("hold", %{"name" => name}) when is_binary(name), do: :ok
+    def validate("hold", _args), do: {:error, "Hold needs a name."}
+    @impl true
+    def bounds(_op), do: %{result_bytes: 1_024, part_bytes: 0}
+    @impl true
+    def admit(_op, _args, _context), do: :ok
+
+    @impl true
+    def run("hold", %{"name" => name}, nil, context) do
+      test = :persistent_term.get({Wait, context.home})
+      send(test, {:running, name, self(), nil})
+
+      receive do
+        {:finish, result} -> result
+      after
+        30_000 -> {:failed, "The test never finished it."}
+      end
+    end
+
+    @impl true
+    def cancel("hold", _pid), do: exit({:timeout, {GenServer, :call, [:a_seat, :close, 5_000]}})
+
+    @impl true
+    def target("hold", %{"name" => name}), do: "hold #{name}"
+  end
+
   setup do
     home = SafeRm.make_tmp_dir!("desktop_invoke")
     on_exit(fn -> SafeRm.rm_rf!(home) end)
@@ -154,7 +238,9 @@ defmodule FermixChannels.Desktop.InvokeTest do
         "system" => FermixCore.Computers.Capabilities.System,
         "wait" => Wait,
         "touch" => Touch,
-        "watch" => Watch
+        "watch" => Watch,
+        "probing" => Probing,
+        "stubborn" => Stubborn
       },
       clock: fn -> Agent.get(clock, & &1) end,
       relay: :no_relay,
@@ -465,11 +551,14 @@ defmodule FermixChannels.Desktop.InvokeTest do
       refute_received {:running, "upoff", _pid, _part}
     end
 
-    test "stop_all ends what waits too", ctx do
+    test "the master switch off ends what waits too", ctx do
       for n <- 1..9, do: open(ctx, "inv-#{n}", "wait", "wait", %{"name" => "s#{n}"})
       for n <- 1..8, do: running("s#{n}")
+      # Admission has taken all nine before the switch goes off: the ninth waits.
+      _state = :sys.get_state(ctx.admission)
 
-      :ok = Admission.stop_all(ctx.admission, :stopped_here)
+      Agent.update(ctx.switches, fn _ -> Switches.only([:files], enabled: false) end)
+      :ok = Admission.switches_changed(ctx.admission)
 
       for n <- 1..9 do
         id = "inv-#{n}"
@@ -477,6 +566,63 @@ defmodule FermixChannels.Desktop.InvokeTest do
       end
 
       refute_received {:running, "s9", _pid, _part}
+    end
+
+    # A capability's cancel that never answers in time is the run's to bear:
+    # Admission answers at once and goes on, and the run still ends.
+    test "a cancel that times out is answered, and Admission goes on", ctx do
+      open(ctx, "inv-stuck", "stubborn", "hold", %{"name" => "stuck"})
+      {pid, nil} = running("stuck")
+      ref = Process.monitor(pid)
+      admission = Process.whereis(ctx.admission)
+
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          Invoke.handle(ctx.admission, "invoke_cancel", %{"id" => "inv-stuck"}, <<>>)
+          assert {%{"status" => "cancelled"}, _p} = answer("inv-stuck")
+          assert_receive {:DOWN, ^ref, :process, ^pid, _reason}
+        end)
+
+      assert log =~ "did not let go"
+      assert Process.whereis(ctx.admission) == admission
+      open(ctx, "inv-next", "system", "echo", %{"text" => "x"})
+      assert {%{"status" => "ok"}, _p} = answer("inv-next")
+    end
+  end
+
+  # A capability's own rules may read the owner's folders, which can hang on
+  # a network mount that stopped answering: they run beside Admission, so it
+  # admits, cancels and answers everything else meanwhile.
+  describe "the capability's own rules" do
+    test "run beside Admission, which answers other requests meanwhile", ctx do
+      open(ctx, "inv-probe", "probing", "probe", %{"name" => "slow mount"})
+      assert_receive {:admitting, "slow mount", admitting}
+
+      open(ctx, "inv-echo", "system", "echo", %{"text" => "x"})
+      assert {%{"status" => "ok"}, _p} = answer("inv-echo")
+
+      send(admitting, {:admit, :ok})
+      assert {%{"status" => "ok"}, ~s({"probed":"slow mount"})} = answer("inv-probe")
+    end
+
+    test "still refuse, and the refusal is journaled", ctx do
+      open(ctx, "inv-no", "probing", "probe", %{"name" => "outside"})
+      assert_receive {:admitting, "outside", admitting}
+      send(admitting, {:admit, {:refused, :outside_sandbox, "Not inside the sandbox."}})
+
+      assert {%{"status" => "refused", "refusal" => "outside_sandbox"}, _p} = answer("inv-no")
+      assert %{status: "refused", refusal: "outside_sandbox"} = journal(ctx, "inv-no")
+    end
+
+    test "a request whose rules are still deciding is cancelled at once", ctx do
+      open(ctx, "inv-held", "probing", "probe", %{"name" => "held"})
+      assert_receive {:admitting, "held", admitting}
+      ref = Process.monitor(admitting)
+
+      Invoke.handle(ctx.admission, "invoke_cancel", %{"id" => "inv-held"}, <<>>)
+
+      assert {%{"status" => "cancelled"}, _p} = answer("inv-held")
+      assert_receive {:DOWN, ^ref, :process, ^admitting, _reason}
     end
   end
 
@@ -657,6 +803,54 @@ defmodule FermixChannels.Desktop.InvokeTest do
       Invoke.handle(ctx.admission, "invoke_status", %{"id" => "inv-watch"}, <<>>)
       assert {%{"status" => "refused", "refusal" => "unavailable"}, "{}"} = answer("inv-watch")
       refute_received {:running, "up", _pid, _part}
+    end
+
+    # INVOKE-2: a request on its way while Admission was down never reached
+    # it, so no restart answers it: the restart tells the server, which asks
+    # about everything it still waits on, and hears there is no record.
+    test "each start tells the server, which asks again about what it waits on", ctx do
+      assert_receive {:sent, %{"t" => "invoke_restarted"}, ""}
+      admission = Process.whereis(ctx.admission)
+      ref = Process.monitor(admission)
+
+      ExUnit.CaptureLog.capture_log(fn ->
+        Process.exit(admission, :kill)
+        assert_receive {:DOWN, ^ref, :process, ^admission, :killed}
+        await_restarted(ctx.admission, admission)
+      end)
+
+      assert_receive {:sent, %{"t" => "invoke_restarted"} = told, ""}
+      assert Map.keys(told) == ["t"]
+
+      Invoke.handle(ctx.admission, "invoke_status", %{"id" => "inv-lost"}, <<>>)
+      assert {%{"status" => "unknown"}, "{}"} = answer("inv-lost")
+    end
+
+    # What waited when the request handler's own supervisor restarted went
+    # with its table: the new Admission still tells the server, whose ask is
+    # answered unknown, so no caller is left waiting.
+    test "a restart of the whole request handler is told too", ctx do
+      assert_receive {:sent, %{"t" => "invoke_restarted"}, ""}
+      Agent.update(ctx.switches, fn _ -> Switches.only([:files, :imessage]) end)
+      for n <- 1..8, do: open(ctx, "inv-#{n}", "wait", "wait", %{"name" => "h#{n}"})
+      for n <- 1..8, do: running("h#{n}")
+      open(ctx, "inv-watch", "watch", "watch", %{"name" => "watch"}, %{"deadline_ms" => 0})
+      # Admission has taken the watch, and it waits for a slot.
+      _state = :sys.get_state(ctx.admission)
+      admission = Process.whereis(ctx.admission)
+      sup_ref = Process.monitor(ctx.sup)
+
+      ExUnit.CaptureLog.capture_log(fn ->
+        Process.exit(ctx.sup, :kill)
+        assert_receive {:DOWN, ^sup_ref, :process, _sup, :killed}
+        await_restarted(ctx.admission, admission)
+      end)
+
+      assert_receive {:sent, %{"t" => "invoke_restarted"}, ""}
+      refute_received {:sent, %{"id" => "inv-watch"}, _payload}
+
+      Invoke.handle(ctx.admission, "invoke_status", %{"id" => "inv-watch"}, <<>>)
+      assert {%{"status" => "unknown"}, "{}"} = answer("inv-watch")
     end
   end
 

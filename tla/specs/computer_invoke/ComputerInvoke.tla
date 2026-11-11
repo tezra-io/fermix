@@ -20,10 +20,12 @@
 (*    answer means: an effect ends there (never sent twice), a read is    *)
 (*    asked once more under a new id.                                     *)
 (*  - Computers.Calls (calls.ex): the waiters, which outlive a session,   *)
-(*    and the word to each caller still waiting that a new session began. *)
+(*    and the word to each caller still waiting that a new session began, *)
+(*    or that the computer's Admission started again.                     *)
 (*  - Desktop.InvokeFamily (invoke_family.ex): as the computer's next     *)
-(*    session starts it tells Calls (reconcile), and hands each           *)
-(*    invoke_result to Calls.                                             *)
+(*    session starts, and when the computer says its Admission started    *)
+(*    again (invoke_restarted), it tells Calls (reconcile), and it hands  *)
+(*    each invoke_result to Calls.                                        *)
 (*  - Desktop.Invoke and its Admission (invoke.ex, admission.ex): the     *)
 (*    epoch check, the switches read at that moment and again when a      *)
 (*    request that waited would start, the started record before the run,*)
@@ -52,7 +54,7 @@
 (*    as a cancel ends it as cancelled, and the running slot a long-lived *)
 (*    request holds; the long-lived request itself (a deadline of 0:      *)
 (*    screen.watch, imessage.watch, waited on until its caller ends or an *)
-(*    answer comes) is the scene's Watches, in checks 19 and 20 only;     *)
+(*    answer comes) is the scene's Watches, in checks 19, 20, 22, 23;     *)
 (*  - a caller that ends before its answer: Calls sends the cancel,       *)
 (*    after the request the caller sent, and it is the step the           *)
 (*    deadline's cancel is (Computers.cancel/2 is gone: nothing needed    *)
@@ -168,7 +170,7 @@ CONSTANTS
                         \* link's allowance (Invocation.await/5,
                         \* invocation.ex:267-283; wait_left/3, :285-290;
                         \* gave_up/4, :362-373); FALSE waits for ever
-    HeldEndsWithRun     \* a held turn runs each request linked to the run
+    HeldEndsWithRun,    \* a held turn runs each request linked to the run
                         \* that made it (HeldTurn.handle_call {:run, fun},
                         \* held_turn.ex:156-167; link/1, :246), so whatever
                         \* ends the run (stop_task/2's terminate_child, a
@@ -176,6 +178,12 @@ CONSTANTS
                         \* request, and a request whose run is gone is never
                         \* started; FALSE: the run only calls the held turn,
                         \* which goes on with what it took (INVOKE-1)
+    RestartTold         \* Admission tells the server each time it stands again
+                        \* (Admission.tell_started/1, invoke_restarted), and the
+                        \* server's family tells every caller still waiting on
+                        \* that computer, as at a new session (InvokeFamily
+                        \* handle_event "invoke_restarted"; Calls.reconnected/2);
+                        \* FALSE: only a new session tells them (INVOKE-2)
 
 ASSUME Effects \subseteq Calls /\ Held \subseteq Calls /\ Watches \subseteq Calls
 
@@ -580,10 +588,17 @@ Expire(id) ==
 \* Desktop.Invoke owns (invoke.ex:113-119), so it outlives Admission (keep).
 \* The stop may instead be a restart of Desktop.Invoke itself, which follows
 \* more than three of Admission's in five seconds, or of the engine, which
-\* takes the table with it (~keep): what waited is forgotten, answered by
-\* nothing, as what was in the mailbox is, and a caller with a deadline ends
-\* at it or at the next session's ask (INVOKE-2 for one without). The
-\* engine's stop also drops the session, a Drop of its own here. A held turn
+\* takes the table with it (~keep): what waited is forgotten, as what was in
+\* the mailbox is. Whichever restarted, Admission tells the server as it
+\* stands again (RestartTold: tell_started/1, invoke_restarted, under
+\* caps.computer.invoke), and the server's family tells every caller still
+\* waiting on the computer, as a new session does (InvokeFamily
+\* handle_event "invoke_restarted" -> Calls.reconnected/2), so each asks
+\* after its id: one the restart lost has no record and is answered
+\* "unknown", which ends an effect and has a read, a watch included, asked
+\* again (INVOKE-2, fixed). Where the session is down, the notice is lost
+\* and the next session tells them (Reconnect). The engine's stop also drops
+\* the session, a Drop of its own here. A held turn
 \* lives in the engine's browser tree (Browser.Supervisor), not in
 \* Desktop.Invoke: its request ends with its run (HeldEndsWithRun); without
 \* that a restart of Admission leaves it going, and a stop of the engine ends
@@ -610,9 +625,16 @@ Stop ==
                            ELSE back
     /\ heldWork' \in IF HeldEndsWithRun THEN {heldWork}
                      ELSE {heldWork, heldWork \cup HeldRunning}
-    /\ down' = {}
+    /\ IF RestartTold /\ up /\ AskOnceSent
+          THEN /\ owed' = [c \in Calls |-> owed[c] \/ c \in Registered]
+               /\ down' = {}
+          ELSE IF RestartTold /\ up
+          THEN /\ down' = {[t |-> "status", id |-> Current(c)] : c \in Registered}
+               /\ UNCHANGED owed
+          ELSE /\ down' = {}
+               /\ UNCHANGED owed
     /\ seen' = master /\ stopOwed' = FALSE
-    /\ UNCHANGED <<server_vars, up, drops, acted, master, linkEpoch, hist_vars>>
+    /\ UNCHANGED <<st, try, out, up, drops, acted, master, linkEpoch, hist_vars>>
 
 \* The held turn does a request Admission no longer runs, which only
 \* happens without HeldEndsWithRun (INVOKE-1): the one it was running when
@@ -694,14 +716,14 @@ NoRecordIsFinal == \A i \in Ids : saidNone[i] => acted[i] = 0
 \* set (§6.1): TypeOK holds every outcome to it.
 EveryCallEnds == <>(Done /\ \A c \in Calls : out[c] \in Closed)
 
-\* Proposed rule, Admission's moduledoc: "a restart of this process while the
-\* session stays up leaves no caller waiting, a long-lived one
-\* (`imessage.watch`, `screen.watch`) included, whether it ran or waited". A
-\* watch has no deadline, so while its session stays up something must still
-\* answer it: its request or its status ask on the way to the computer, the
-\* computer running or waiting on it, an answer on the way back, or the word
-\* of a new session it has not asked after yet. A session that drops tells it
-\* at the next one (Reconnect).
+\* Admission's moduledoc: "a restart on the computer while the session stays
+\* up leaves no caller waiting, a long-lived one (`imessage.watch`,
+\* `screen.watch`) included". A watch has no deadline, so while its session
+\* stays up something must still answer it: its request or its status ask
+\* on the way to the computer, the computer running or waiting on it, an
+\* answer on the way back, or the word of a new session or of Admission's
+\* restart it has not asked after yet. A session that drops tells it at the
+\* next one (Reconnect); a restart tells it at once (RestartTold).
 Heard(c) ==
     LET i == Current(c)
     IN \/ \E m \in down : m.id = i
@@ -740,8 +762,12 @@ Witness_WaitedRefusedOff ==
 Witness_WaitedAnsweredAtRestart == ~(\E i \in Ids : journal[i] = "refused_unavailable")
 \* A watch that waited for a slot is forgotten when Desktop.Invoke itself
 \* restarts, and nothing answers it while its session stays up (INVOKE-2's
-\* second path).
+\* second path, without RestartTold).
 Witness_WatchForgotten ==
     ~(\E c \in Watches : st[c] = "waiting" /\ up /\ run[Current(c)] = "forgotten" /\ ~Heard(c))
+\* The same watch, told of the restart, asks after it, hears there is no
+\* record, and is asked again under a new id (INVOKE-2's second path, fixed).
+Witness_WatchAskedAgainAfterRestart ==
+    ~(\E c \in Watches : run[<<c, 1>>] = "forgotten" /\ saidNone[<<c, 1>>] /\ try[c] = 2)
 
 =============================================================================

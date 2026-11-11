@@ -2,8 +2,10 @@ defmodule FermixCore.Browser.ComputerTurn do
   @moduledoc """
   A turn's browser on the home's computers, on the server (M97 §6.4). One
   process per turn that used a computer's browser, by the turn's process
-  (the one that makes its tool calls, as `TurnMarker` keys a turn), holding
-  two facts and a duty:
+  (`turn/1`: the loop context's `:turn_pid` where a turn runs each tool call
+  in a process of its own, as a voice call does, else the process making
+  the call, since the agent loop runs its tools inline), holding two facts
+  and a duty:
 
     * **where the turn's browser runs** (`continues_on/2`): the computer its
       last browser call ran on. A later call that names no computer runs
@@ -46,6 +48,15 @@ defmodule FermixCore.Browser.ComputerTurn do
 
   @typedoc "Where the turns live: their registry and their supervisor."
   @type seams :: %{registry: atom(), supervisor: atom()}
+
+  @doc """
+  The process that is the turn of the loop context `context` (the
+  moduledoc): its `:turn_pid` (a voice call, whose tool calls each run in a
+  process of their own), else the calling process.
+  """
+  @spec turn(map()) :: pid()
+  def turn(%{turn_pid: turn}) when is_pid(turn), do: turn
+  def turn(context) when is_map(context), do: self()
 
   @doc """
   The turn `turn` ran a browser call on `computer`, with the loop context

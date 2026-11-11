@@ -10,7 +10,7 @@ defmodule FermixCore.Computers.Capabilities.Screen do
   |---|---|---|
   | `screen.look` | one read-only request: a screenshot, `elements`, `inspect`, `windows`, a wait, the helper's `hello` and `probe` | no |
   | `screen.act` | one action that sends input: a click, keys, typing, a drag, a scroll, a paste, `set_value`, a verb on a control | yes |
-  | `screen.control` | `pause`, `resume` or `release` of the helper's input barrier | no |
+  | `screen.control` | `pause`, `resume` or `release` of the helper's input barrier, or `keep`: the server renews its hold while its session exists, which the journal never records (`recorded?/2`) | no |
   | `screen.watch` | waits, until cancelled, for the server's hold on the screen to end | no |
 
   An action is never sent twice by the link: a lost answer to `screen.act` is
@@ -30,7 +30,9 @@ defmodule FermixCore.Computers.Capabilities.Screen do
       signal decides whether to wait for them or step aside
       (`ComputerUse.Yield`, with this computer's computer use config);
     * one server session holds the screen at a time (`busy`), and a seat the
-      person stopped, or whose switch went off, is refused `stopped_here`.
+      person stopped, or whose switch went off, is refused `stopped_here`; a
+      seat whose hold ended otherwise (its server went quiet past the
+      seat's lapse, or let go) is refused `unavailable`, never taken again.
 
   The answer of a look or an action is the helper's own reply, its image (a PNG
   of at most #{1366} by #{768}) riding as the part. A step the helper refused,
@@ -55,7 +57,7 @@ defmodule FermixCore.Computers.Capabilities.Screen do
 
   @ops ["screen.act", "screen.control", "screen.look", "screen.watch"]
   @steps ["screen.act", "screen.look"]
-  @controls ~w(pause resume release)
+  @controls ~w(pause resume release keep)
   @seat ~r/\A[A-Za-z0-9_-]{1,64}\z/
   @result_bytes 1_024 * 1_024
   @part_bytes 16 * 1_024 * 1_024
@@ -73,6 +75,8 @@ defmodule FermixCore.Computers.Capabilities.Screen do
   @busy_sentence "Fermix on your server is already using this computer's screen in another " <>
                    "conversation."
   @stopped_sentence "The person at this computer stopped it."
+  @ended_sentence "Fermix on your server let go of this computer's screen. A new session " <>
+                    "takes it again."
   @no_seat_sentence "Fermix on this computer cannot hold its screen for its server now."
   @helper_sentence "The screen helper on this computer did not start. Its log says why."
   @no_file_sentence "This takes no file."
@@ -92,7 +96,7 @@ defmodule FermixCore.Computers.Capabilities.Screen do
   @impl true
   def op_label("screen.look"), do: "look at the screen"
   def op_label("screen.act"), do: "use the mouse or keyboard"
-  def op_label("screen.control"), do: "pause, resume or let go of the screen"
+  def op_label("screen.control"), do: "pause, resume, keep or let go of the screen"
   def op_label("screen.watch"), do: "hold the screen"
 
   @impl true
@@ -102,6 +106,11 @@ defmodule FermixCore.Computers.Capabilities.Screen do
   @impl true
   def long_lived?("screen.watch"), do: true
   def long_lived?(op) when op in @ops, do: false
+
+  # The server renewing its hold is no thing Fermix did here: never journaled.
+  @impl true
+  def recorded?("screen.control", %{"control" => "keep"}), do: false
+  def recorded?(_op, _args), do: true
 
   @doc "Whether this engine's own host can drive its own screen."
   @impl true
@@ -152,10 +161,15 @@ defmodule FermixCore.Computers.Capabilities.Screen do
     case Seat.acquire(server, seat) do
       {:ok, held} -> step(request, held, {server, seat})
       {:error, :stopped} -> {:refused, :stopped_here, @stopped_sentence}
+      {:error, :ended} -> {:refused, :unavailable, @ended_sentence}
       {:error, {:busy, _since}} -> {:refused, :busy, @busy_sentence}
       {:error, {:helper, reason}} -> {:failed, helper_sentence(reason)}
     end
   end
+
+  # The server renews its hold, as it does while its session exists.
+  defp ran("screen.control", %{"seat" => seat, "control" => "keep"}, nil, context),
+    do: {:ok, %{"held" => Seat.keep(seats(context), seat) == :held}, nil}
 
   defp ran("screen.control", %{"seat" => seat, "control" => control}, nil, context) do
     case Seat.driver(seats(context), seat) do
@@ -201,6 +215,7 @@ defmodule FermixCore.Computers.Capabilities.Screen do
         @strict_sentence,
         @busy_sentence,
         @stopped_sentence,
+        @ended_sentence,
         @no_seat_sentence,
         @helper_sentence,
         @no_file_sentence

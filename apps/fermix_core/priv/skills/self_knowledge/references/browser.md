@@ -201,7 +201,8 @@ to there or a website login saved in that Mac's Fermix app. Without
   in the server's browser instead. Naming another computer moves on, in so
   many words. The pane task and its tabs and refs last the turn there and
   end with it, unless `handover` keeps them for the conversation's next
-  turn, as here.
+  turn, as here. On a voice call the turn is the call, so a task stays on
+  its computer across the call's tool calls.
 - **Website logins keep every rule.** The password stays in that Mac's
   keychain and its app types it, after the owner approves in the chat
   within a minute; never by voice, from a shared channel, a worker, a cue,
@@ -210,7 +211,8 @@ to there or a website login saved in that Mac's Fermix app. Without
 - **Files cross as bytes, at most 20 MiB.** A screenshot, a PDF or a
   download comes back and is kept in the server's own browser folder, and
   its `path` is that copy (a larger download stays on the computer and the
-  call says so). An upload's `path` is a file in the server's workspace;
+  call says so). The computer keeps its own copy for a day, so one whose
+  bytes were lost on the way is still there, and the reply names its path. An upload's `path` is a file in the server's workspace;
   its bytes go to that computer for the page.
 - **The computer decides.** Its **The browser** switch (This computer, on
   that computer) must be on; each request is in its journal ("What Fermix

@@ -107,21 +107,54 @@ defmodule FermixChannels.Home.EnrollmentJoinTest do
     assert_spent(ctx)
   end
 
-  test "a computer whose session ends while it waits is not added", ctx do
-    {rail, _keypair} = join!(ctx)
+  # A dropped session spends nothing: the window keeps the computer's key,
+  # nobody waits until it dials again, and then it waits with the digits of
+  # its new session, which are the ones the owner types.
+  test "a computer whose session drops while it waits is admitted again by its key", ctx do
+    {rail, keypair} = join!(ctx)
+    first = Rail.sas(rail, :computer)
     _waiting = wait_status(ctx)
 
     :ok = Rail.close(rail)
 
-    assert %{state: :denied} =
+    assert %{state: :used, joiner: nil} =
              HomeMove.await(fn ->
                case Enrollment.status(ctx.primary.enrollment) do
-                 %{state: :denied} = done -> done
-                 _waiting -> nil
+                 %{state: :awaiting_approval} -> nil
+                 settled -> settled
                end
              end)
 
+    assert {:error, :none} = Enrollment.approve(ctx.primary.enrollment, first)
     assert {:ok, []} = DeviceStore.list(ctx.primary.store)
+    assert_spent(ctx)
+
+    {again, ^keypair} = join!(ctx, keypair)
+    _waiting = wait_status(ctx)
+
+    assert {:ok, %{name: "loft-linux"}} =
+             Enrollment.approve(ctx.primary.enrollment, Rail.sas(again, :computer))
+
+    assert_receive {:rail, ^again, {:event, %{"t" => "join_approved"}, _bytes}}, @wait
+  end
+
+  # What a crash report or `:sys.get_status/1` prints of the window: never
+  # the digits the owner types, nor the code's secret.
+  test "the status of the window shows neither the digits nor the secret", ctx do
+    {rail, _keypair} = join!(ctx)
+    sas = Rail.sas(rail, :computer)
+    _waiting = wait_status(ctx)
+    {:ok, facts} = EnrollmentCode.decode(ctx.code)
+
+    printed =
+      ctx.primary.enrollment
+      |> GenServer.whereis()
+      |> :sys.get_status()
+      |> inspect(limit: :infinity, printable_limit: :infinity)
+
+    refute printed =~ sas
+    refute printed =~ inspect(facts.secret, limit: :infinity)
+    assert printed =~ "loft-linux"
   end
 
   test "the window closing while a computer waits denies it as a timeout", ctx do

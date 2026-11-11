@@ -65,8 +65,10 @@ defmodule FermixCore.ComputerHistory.Purge do
 
   @doc """
   Execute a purge over `window`. `opts`: `:now` (epoch ms, injected for tests),
-  `:repo` (the home's store), `:spool` (this machine's, nil when this engine
-  keeps none), `:computer` (`:all`, the default, or one machine's id, `""` for
+  `:repo` (the home's store), `:home` (the home folder, for the store's
+  identity, `ComputerHistory.home_identity/1`), `:spool` (this machine's, nil
+  when this engine keeps none), `:computer` (`:all`, the default, or one
+  machine's id, `""` for
   the home's own). `{:ok, result}` once the home's transaction committed,
   whatever this machine's apply did (`result.here`); `{:error, reason}` when it
   did not, and nothing changed.
@@ -80,7 +82,7 @@ defmodule FermixCore.ComputerHistory.Purge do
 
     case Repo.computer_history_home(:purge_notes, [from_ts, to_ts, now, scope], server: repo) do
       {:ok, %{memories: memories, interval: id}} ->
-        {events, here} = apply_here(Keyword.get(opts, :spool), repo, now)
+        {events, here} = apply_here(Keyword.get(opts, :spool), now, opts)
 
         Logger.info(
           "computer_history purge removed #{memories} memory(ies) in [#{from_ts}, #{to_ts}] " <>
@@ -105,13 +107,12 @@ defmodule FermixCore.ComputerHistory.Purge do
 
   # This machine's own raw events: every interval it has not applied, this one
   # among them, as any machine applies what it is told of.
-  defp apply_here(nil, _repo, _now), do: {0, :none}
+  defp apply_here(nil, _now, _opts), do: {0, :none}
 
-  defp apply_here(spool, repo, now) do
+  defp apply_here(spool, now, opts) do
     case Delivery.apply_here(
-           spool: spool,
-           repo: repo,
-           now: DateTime.from_unix!(now, :millisecond)
+           [spool: spool, now: DateTime.from_unix!(now, :millisecond)] ++
+             Keyword.take(opts, [:repo, :home])
          ) do
       {:ok, events} ->
         {events, :ok}

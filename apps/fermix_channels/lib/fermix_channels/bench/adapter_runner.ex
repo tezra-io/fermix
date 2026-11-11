@@ -111,7 +111,7 @@ defmodule FermixChannels.Bench.AdapterRunner do
     @behaviour FermixChannels.Channels.IMessage.Helper
 
     @impl true
-    def call(_home, method, _params, _timeout) when method in ["send.text", "send.file"] do
+    def call(_home, method, _params, _timeout, _turn) when method in ["send.text", "send.file"] do
       rowid = System.unique_integer([:positive])
       {:ok, %{"disposition" => "recorded", "guid" => "bench-#{rowid}", "rowid" => rowid}}
     end

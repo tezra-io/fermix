@@ -53,6 +53,13 @@ defmodule FermixCore.Computers.VersionsTest do
       end
     end
 
+    # The window fails closed: a hello that names no version, or a computer
+    # whose record holds none, is not served until it says one.
+    test "a computer whose version is not known keeps settings alone" do
+      assert Versions.standing(nil, @server) == :settings_only
+      refute Versions.served?(Versions.standing(nil, @server))
+    end
+
     test "a prerelease counts by its major.minor" do
       assert Versions.standing("4.12.0-rc.1", @server) == :current
       assert Versions.standing("4.11.0-dev", @server) == :behind

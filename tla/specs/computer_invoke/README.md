@@ -82,7 +82,7 @@ Not modelled, each covered elsewhere:
   waits (one `imessage.watch` at a time, a newer one ending the older; a
   `screen.watch` until the seat's hold ends). The long-lived request itself,
   waited on until its caller ends or an answer comes, is the scene's
-  `Watches` (a call with no `Deadline`), in checks 19 and 20 only. One whose
+  `Watches` (a call with no `Deadline`), in checks 19, 20, 22 and 23 only. One whose
   run a restart of Admission ended is answered by that restart (`Stop`, the
   journal's receipt), and one that waited for a slot is answered `refused`
   `unavailable` from the table, so a watch is asked again at once
@@ -168,7 +168,7 @@ The `.tla` header pins these sources:
 |---|---|---|
 | `Held` | scene | (a set of calls) the calls that are the browser's, each run in its server turn's held process; `{}`, every other capability, in every check but 17 and 18 |
 | `SessionCanDrop` | environment | the session ends with words in flight: answers on their way are lost, requests on their way are lost or were already handed to Admission |
-| `Watches` | scene | (a set of calls) the long-lived calls, which the server waits on with no deadline; `{}`, a call with a deadline, in every check but 19 and 20 |
+| `Watches` | scene | (a set of calls) the long-lived calls, which the server waits on with no deadline; `{}`, a call with a deadline, in every check but 19, 20, 22 and 23 |
 | `ComputerCanStop` | environment | the computer's Admission stops in the middle and starts again, `Desktop.Invoke` keeping its table of what waits, or `Desktop.Invoke` itself or the engine does, the table gone with it (`Stop` chooses) |
 | `AnswersCanExpire` | environment | a held answer leaves memory (10 minutes, or the bounds of what is held) |
 | `OwnerCanSwitchOff` | environment | the master switch goes off at the computer |
@@ -181,6 +181,7 @@ The `.tla` header pins these sources:
 | `AskOnceSent` | mechanism | a new session's status ask comes from the caller, once its request was sent (`Calls.reconnected/2`, `Invocation.ask_again/3`); `FALSE` has the family ask for every id registered, sent or not |
 | `ServerDeadline` | mechanism | the caller waits at most its deadline and the link's allowance (`Invocation.await/5`, `gave_up/4`); `FALSE` waits for ever |
 | `HeldEndsWithRun` | mechanism | a held turn runs each request linked to the run that made it (`HeldTurn.handle_call {:run, fun}`, `link/1`), so whatever ends the run ends the request, and one whose run is gone never starts; `FALSE` has the run only call it, and the request goes on (INVOKE-1) |
+| `RestartTold` | mechanism | Admission tells the server each time it stands again (`tell_started/1`, `invoke_restarted`), and the server's family tells every caller still waiting on that computer, as at a new session (`Calls.reconnected/2`); `FALSE` leaves only a new session to tell them (INVOKE-2) |
 
 ## What holds
 
@@ -240,9 +241,11 @@ the server it was done (13); a request admitted to wait for a slot or its
 upload is refused off when it would start, the switch having gone off
 before Admission heard (16); a watch that waited for a slot is forgotten
 when `Desktop.Invoke` itself restarts, and nothing answers it while the
-session stays up (20, INVOKE-2's second path); a request that waited when
-Admission restarted is answered `refused` `unavailable` from the table
-(21).
+session stays up without the restart notice (20, INVOKE-2's second path); a
+request that waited when Admission restarted is answered `refused`
+`unavailable` from the table (21); and with the notice, that forgotten watch
+is told of the restart, hears there is no record and is asked again under a
+new id (23).
 
 Finding INVOKE-2 (check 19, 4 states, below) is the proposed rule
 `WatchNeverUnheard`, with a watch, a session that may drop once and a
@@ -497,7 +500,8 @@ Read against `18710c89`, which staled the `invoke.ex`, `admission.ex` and
   restart of Admission, and stays open for a restart of `Desktop.Invoke`
   itself; reading the restart again found a second way to it, a request on
   its way to Admission when it stops: INVOKE-2, below. `Watches`,
-  `WatchNeverUnheard` and checks 19 and 20 model it.
+  `WatchNeverUnheard` and checks 19, 20, 22 and 23 model it, and
+  `RestartTold` its fix.
 
 Every `admission.ex`, `invoke.ex` and `held_turn.ex` line the `.tla` cites
 was walked against the commit and moved to it.
@@ -510,7 +514,18 @@ was walked against the commit and moved to it.
   keeps one `imessage.watch` waiting there at all times and re-arms it after
   every batch, and a lost one stops the Mac's messages reaching the server
   until the session drops or the engine restarts.
-- **Status:** open. Found in the re-read of `18710c89`.
+- **Status:** fixed in the M97 fix pass (uncommitted at this writing; re-pin
+  with its commit). Found in the re-read of `18710c89`. Admission tells the
+  server each time it stands again (`invoke_restarted`, `tell_started/1`,
+  under `caps.computer.invoke`), and the server's `InvokeFamily` tells
+  `Calls` as at a new session (`Calls.reconnected/2`), so every caller still
+  waiting on that computer asks `invoke_status`. A request lost on its way to
+  a stopped Admission, or with `Desktop.Invoke`'s table, has no record and is
+  answered `unknown`: that ends an effect, and has a read, a watch included,
+  asked again under a new id. Model: `RestartTold` in `Stop`; check 22
+  (`WatchNeverUnheard`) holds with it, check 19 is its mechanism check (the
+  counterexample below, with `RestartTold = FALSE`), witness 20 is the lost
+  watch without it, and witness 23 the watch asked again with it.
 - **Check:** 19 (4 states) breaks the proposed rule `WatchNeverUnheard`,
   the moduledoc's claim (`admission.ex` moduledoc: "a restart of this
   process while the session stays up leaves no caller waiting, a long-lived

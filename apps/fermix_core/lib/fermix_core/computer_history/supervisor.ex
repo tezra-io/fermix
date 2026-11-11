@@ -11,7 +11,9 @@ defmodule FermixCore.ComputerHistory.Supervisor do
     * **`Spool`**, this machine's own store of raw history
       (`device/history.db`), only where this system has a recorder, the home's
       own machine included (D9). A home with no recorder (an Always On server)
-      keeps no store: nothing records there.
+      keeps no store: nothing records there. A store that does not open never
+      stops this rail or the engine: `Spool` stays up and says why, and the
+      recorder stays off.
 
     * a **`DynamicSupervisor`** that starts/stops the runtime-controlled
       `Capturer` and `Summarizer.Scheduler` (the `ComputerUse.Supervisor`
@@ -37,6 +39,7 @@ defmodule FermixCore.ComputerHistory.Supervisor do
   require Logger
 
   alias FermixCore.ComputerHistory
+  alias FermixCore.ComputerHistory.Config
   alias FermixCore.ComputerHistory.Controller
   alias FermixCore.ComputerHistory.Retention
   alias FermixCore.ComputerHistory.Spool
@@ -93,6 +96,7 @@ defmodule FermixCore.ComputerHistory.Supervisor do
   end
 
   defp children(role, recorder?, opts) do
+    :ok = Config.warn_if_shadowed()
     spool = if recorder?, do: Keyword.get(opts, :spool, Spool)
 
     # The home keeps the read audit and the purge intervals, which a device does

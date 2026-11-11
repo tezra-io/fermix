@@ -150,7 +150,7 @@ defmodule FermixCore.Computers.Offers do
   """
   @spec encode([offer()]) :: {:ok, binary(), String.t()} | {:error, {:invalid_offers, String.t()}}
   def encode(offers) when is_list(offers) do
-    payload = Jason.encode!(%{"v" => @version, "offers" => Enum.map(offers, &wire/1)})
+    payload = Jason.encode!(%{"v" => @version, "offers" => Enum.map(offers, &to_wire/1)})
 
     with {:ok, _offers} <- decode(payload), do: {:ok, payload, rev(payload)}
   end
@@ -176,8 +176,7 @@ defmodule FermixCore.Computers.Offers do
   end
 
   @doc """
-  An offer as the home records it on disk and as `home.status` lists it:
-  string keys, absent ones null.
+  An offer as `home.status` lists it: string keys, absent ones null.
   """
   @spec view(offer()) :: map()
   def view(%{id: id, state: state} = offer) do
@@ -189,7 +188,13 @@ defmodule FermixCore.Computers.Offers do
     }
   end
 
-  defp wire(%{id: id, state: state} = offer) do
+  @doc """
+  An offer as the wire carries it and the home records it on disk
+  (`Computers.Store`): string keys, absent ones left out, the screen's
+  helper included, so `decode/1` reads it back whole.
+  """
+  @spec to_wire(offer()) :: map()
+  def to_wire(%{id: id, state: state} = offer) do
     %{"id" => id, "state" => Atom.to_string(state)}
     |> put_some("sentence", Map.get(offer, :sentence))
     |> put_some("detail", Map.get(offer, :detail))

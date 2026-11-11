@@ -23,11 +23,15 @@ defmodule FermixCore.ComputerUse.ComputerDriver do
   (`screen.look` of the helper's `hello`, which the computer answers by
   starting its helper and showing its mark, or refusing `busy` or
   `stopped_here`), then holds one long-lived `screen.watch` that the computer
-  answers when its hold ends. A Stop there, or its switch going off, answers
-  `stopped_here`: the session is told as the helper's own Stop button tells
-  it (`{:compux_session_event, _, operator_stop}` to the process that started
-  this driver), so the model hears that the person at the computer stopped
-  it. Any other end (the computer let go after a while, its helper ended, its
+  answers when its hold ends, and renews the hold every #{div(30_000, 1_000)} s
+  for as long as the session exists, paused included (`screen.control`
+  `keep`), so a gap between steps or a long pause never lets the computer go:
+  it lets go only of a screen whose server went quiet. A Stop there, or its
+  switch going off, answers `stopped_here`: the session is told as the
+  helper's own Stop button tells it (`{:compux_session_event, _,
+  operator_stop}` to the process that started this driver), so the model
+  hears that the person at the computer stopped it. Any other end (the
+  computer let go of a server it no longer heard, its helper ended, its
   engine stopped) ends the session quietly (`SessionManager.end_session/2`).
   `stop/1` ends the watch, which lets go of the computer's screen.
 
@@ -56,6 +60,9 @@ defmodule FermixCore.ComputerUse.ComputerDriver do
   alias FermixCore.ComputerUse.SessionManager
 
   @turn_key "fermix_turn"
+  # Well inside the computer's lapse (`Seat`, 120 s), so a lost renewal or two
+  # never lets the screen go while the session exists.
+  @keep_every_ms 30_000
   # What an invocation reads of a turn (`Computers.Origin`, `Computers.Invocation`).
   @turn_keys [
     :session_id,
@@ -255,22 +262,56 @@ defmodule FermixCore.ComputerUse.ComputerDriver do
 
   # A process of its own, which `stop/1` ends, and which ends with the driver's
   # owner too; the call it waits in is its linked task, so ending it cancels
-  # the call and the computer lets go.
+  # the call and the computer lets go. While it waits it renews the hold.
   defp watch(state) do
     spawn(fn ->
       owner = Process.monitor(state.owner)
       task = Task.async(fn -> watch_call(state) end)
-      task_ref = task.ref
-
-      receive do
-        {^task_ref, answer} ->
-          Process.demonitor(task_ref, [:flush])
-          watched(answer, state)
-
-        {:DOWN, ^owner, :process, _pid, _reason} ->
-          Task.shutdown(task, :brutal_kill)
-      end
+      keep_later()
+      watching(state, owner, task)
     end)
+  end
+
+  defp watching(state, owner, %Task{ref: task_ref} = task) do
+    receive do
+      {^task_ref, answer} ->
+        Process.demonitor(task_ref, [:flush])
+        watched(answer, state)
+
+      {:DOWN, ^owner, :process, _pid, _reason} ->
+        Task.shutdown(task, :brutal_kill)
+
+      :keep ->
+        :ok = keep(state)
+        keep_later()
+        watching(state, owner, task)
+    end
+  end
+
+  defp keep_later, do: Process.send_after(self(), :keep, @keep_every_ms)
+
+  # The session exists, so its hold is renewed; one the computer did not hear
+  # is said, and its watch tells the session if the computer let go.
+  defp keep(state) do
+    args = %{"seat" => state.seat, "control" => "keep"}
+
+    case Computers.call(
+           state.computer,
+           Screen,
+           "screen.control",
+           args,
+           state.turn,
+           call_opts(state.turn)
+         ) do
+      {:ok, %Outcome{}} ->
+        :ok
+
+      {:error, %Outcome{} = outcome} ->
+        Logger.info(
+          "computer_use: #{state.computer.name} did not hear the hold renewed: " <>
+            "#{outcome.status}"
+        )
+    end
   end
 
   defp watched({:error, %Outcome{status: :refused, refusal: refusal}}, state)

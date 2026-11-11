@@ -290,6 +290,8 @@ defmodule FermixCore.Management.Settings.Tools do
   # is in force for this machine's own sittings (`ComputerHistoryConfig.summarizer/1`):
   # `local` where it makes its own notes, else the home's route, a pinned
   # provider by its id.
+  # Where this machine's local summarizer decides over a different one in
+  # config.toml, the footer says so (`ComputerHistoryConfig.shadowed_route/1`).
   defp summarizer_row(here, restart) do
     value =
       case ComputerHistoryConfig.summarizer(here) do
@@ -297,8 +299,13 @@ defmodule FermixCore.Management.Settings.Tools do
         summarizer -> Atom.to_string(summarizer)
       end
 
+    footer =
+      if ComputerHistoryConfig.shadowed_route(here),
+        do: ComputerHistoryConfig.shadowed_footer()
+
     Row.new("computer_history_summarizer", :choice, "Summarize with",
       value: value,
+      footer: footer,
       options: [
         Row.option("default_provider", "The primary provider"),
         Row.option("local", "On this Mac")

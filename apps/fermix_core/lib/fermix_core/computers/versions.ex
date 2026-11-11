@@ -14,8 +14,16 @@ defmodule FermixCore.Computers.Versions do
       and its chat is refused. It never holds the server back.
 
   The patch is never compared. A computer's version that is not one (no
-  engine ever says so) stands `:settings_only`: the window fails closed. The
-  server's own version is this engine's, so one that is not a version raises.
+  engine ever says so), or that is not known (nil: a hello that named none, a
+  record that holds none), stands `:settings_only`: the window fails closed.
+  The server's own version is this engine's, so one that is not a version
+  raises.
+
+  `served?/1` is the one decision a standing makes, read by everything that
+  serves a computer: its chat (`Desktop.Companion`), the home's services it
+  asks for, its history among them (`Desktop.InvokeFamily`), and the tools
+  that run on it (`Computers.list/1`, which lists one not served as offering
+  nothing).
   """
 
   @window_minors 2
@@ -35,8 +43,9 @@ defmodule FermixCore.Computers.Versions do
   Where a computer running `computer` stands against a server running
   `server`, both engine versions (the moduledoc).
   """
-  @spec standing(String.t(), String.t()) :: standing()
-  def standing(computer, server) when is_binary(computer) and is_binary(server) do
+  @spec standing(String.t() | nil, String.t()) :: standing()
+  def standing(computer, server)
+      when (is_binary(computer) or is_nil(computer)) and is_binary(server) do
     ours = key!(server)
 
     case key(computer) do
@@ -57,6 +66,8 @@ defmodule FermixCore.Computers.Versions do
 
   defp compare(theirs, ours) when theirs > ours, do: :ahead
   defp compare(_theirs, _ours), do: :settings_only
+
+  defp key(nil), do: :error
 
   defp key(text) do
     case Version.parse(text) do

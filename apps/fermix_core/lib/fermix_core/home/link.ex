@@ -174,9 +174,18 @@ defmodule FermixCore.Home.Link do
 
   @doc """
   Primary role: every computer's device row (M97 §3.2), with whether its
-  session is up. None on any other engine, which holds no device store.
+  session is up. Where the device store or the desktop peers are not
+  running, the rows are not known: `{:error, :not_running}`, never none.
   """
   @callback computer_rows() :: {:ok, [computer_row()]} | {:error, term()}
+
+  @doc """
+  Primary role: asks the computer of every session that is up to tell the
+  home's live view of its computers (the `Computers.Registry` named
+  `registry`) everything its session said, so a view that restarted is
+  rebuilt. The view asks as it starts; with no session up, nothing is told.
+  """
+  @callback announce_computers(atom()) :: :ok
 
   @doc """
   Primary role: names the computer `device_id` `name` on its device row

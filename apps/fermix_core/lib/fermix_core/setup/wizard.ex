@@ -740,7 +740,7 @@ defmodule FermixCore.Setup.Wizard do
     snapshot =
       SecretStore.put_snapshot_value(state.config_snapshot, [:fermix_core, :secret_store], store)
 
-    with {:ok, report} <- commit_snapshot(snapshot) do
+    with {:ok, report} <- commit_snapshot(snapshot, base: state.config_snapshot) do
       {:ok, %WizardState{state | config_snapshot: ConfigStore.current_snapshot()}, report}
     end
   end
@@ -848,7 +848,7 @@ defmodule FermixCore.Setup.Wizard do
       |> put_bot_name(answers)
       |> ensure_sandbox_env_sources(answers)
 
-    with {:ok, report} <- commit_snapshot(snapshot) do
+    with {:ok, report} <- commit_snapshot(snapshot, base: state.config_snapshot) do
       refresh_user_document(answers)
       {:ok, report}
     end
@@ -1138,6 +1138,11 @@ defmodule FermixCore.Setup.Wizard do
   caller's world: a tree-less CLI verb passes `supervised: false` and each
   helper runs inline, while the daemon passes nothing and keeps its supervised
   command host (`CommandRunner.run/3`).
+
+  `:base` is the snapshot a save of answers was built on (a setup page's,
+  which may be stale): the save writes only the machine tables it changed,
+  every other taken from `machine.toml` at the write
+  (`ConfigStore.save_changes/3`), and what is applied is what was written.
   """
   @spec commit_snapshot(ConfigStore.runtime_config(), keyword()) ::
           {:ok, report()} | {:error, term()}
@@ -1147,12 +1152,18 @@ defmodule FermixCore.Setup.Wizard do
     # `save_snapshot/2` records the new baseline itself, so there is one
     # recording site for every writer rather than one per tail.
     with :ok <- RestartState.writable(),
-         :ok <- ConfigStore.save_snapshot(snapshot, supervised),
-         :ok <- ConfigStore.apply_snapshot(snapshot, supervised),
-         {:ok, seeding_results} <- seed_prompt_files(snapshot) do
+         {:ok, written} <- saved(snapshot, Keyword.get(opts, :base), supervised),
+         :ok <- ConfigStore.apply_snapshot(written, supervised),
+         {:ok, seeding_results} <- seed_prompt_files(written) do
       {:ok, BootReport.refresh_if_started(seeding_results) || report(seeding_results)}
     end
   end
+
+  defp saved(snapshot, nil, supervised) do
+    with :ok <- ConfigStore.save_snapshot(snapshot, supervised), do: {:ok, snapshot}
+  end
+
+  defp saved(snapshot, base, supervised), do: ConfigStore.save_changes(snapshot, base, supervised)
 
   # "Newly configured" = a pre/post eligibility diff against the persisted
   # TOML snapshot (docs/design/MULTI_PROVIDER_FAILOVER.md §2). Runs in the

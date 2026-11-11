@@ -125,7 +125,7 @@ defmodule FermixChannels.Channels.IMessage.PortTest do
       {:ok, port} = start_port(ctx)
 
       assert {:ok, %{"db" => "readable", "echo" => home}} =
-               HelperPort.call(port, "probe", %{}, 2_000)
+               HelperPort.call(port, "probe", %{}, 2_000, %{})
 
       assert home == ctx.home
       assert HelperPort.home(port) == {:ok, ctx.home}
@@ -148,7 +148,7 @@ defmodule FermixChannels.Channels.IMessage.PortTest do
                HelperPort.attach(port, self())
 
       assert {:ok, %{"started_at_rowid" => 10}} =
-               HelperPort.call(port, "watch.subscribe", %{"since_rowid" => nil}, 2_000)
+               HelperPort.call(port, "watch.subscribe", %{"since_rowid" => nil}, 2_000, %{})
 
       assert_receive {:imessage_event, "watch.overflow", %{"dropped" => 3}}
     end
@@ -159,24 +159,24 @@ defmodule FermixChannels.Channels.IMessage.PortTest do
       {:ok, port} = start_port(ctx)
 
       assert {:error, {:request_timeout, _message, %{"method" => "policy.get"}}} =
-               HelperPort.call(port, "policy.get", %{}, 50)
+               HelperPort.call(port, "policy.get", %{}, 50, %{})
 
-      assert {:ok, _probe} = HelperPort.call(port, "probe", %{}, 2_000)
+      assert {:ok, _probe} = HelperPort.call(port, "probe", %{}, 2_000, %{})
     end
 
     test "the helper's busy is surfaced as its closed kind", ctx do
       {:ok, port} = start_port(ctx)
 
       assert {:error, {:busy, "more than 32 outstanding requests", %{}}} =
-               HelperPort.call(port, "messages.after", %{}, 2_000)
+               HelperPort.call(port, "messages.after", %{}, 2_000, %{})
     end
 
     test "more outstanding requests than the cap are refused as busy without being sent", ctx do
       {:ok, port} = start_port(ctx, max_outstanding: 1)
-      task = Task.async(fn -> HelperPort.call(port, "policy.get", %{}, 1_000) end)
+      task = Task.async(fn -> HelperPort.call(port, "policy.get", %{}, 1_000, %{}) end)
 
       assert_eventually(fn -> HelperPort.status(port).outstanding == 1 end)
-      assert {:error, {:busy, _message, %{}}} = HelperPort.call(port, "probe", %{}, 1_000)
+      assert {:error, {:busy, _message, %{}}} = HelperPort.call(port, "probe", %{}, 1_000, %{})
       assert {:error, {:request_timeout, _, _}} = Task.await(task)
     end
 
@@ -184,19 +184,19 @@ defmodule FermixChannels.Channels.IMessage.PortTest do
       {:ok, port} = start_port(ctx)
 
       assert {:error, {:protocol_error, _message, %{"kind" => "teleported"}}} =
-               HelperPort.call(port, "policy.set", %{}, 2_000)
+               HelperPort.call(port, "policy.set", %{}, 2_000, %{})
     end
 
     test "an unknown method never reaches the helper", ctx do
       {:ok, port} = start_port(ctx)
 
       assert {:error, {:protocol_error, _message, %{"method" => "messages.delete"}}} =
-               HelperPort.call(port, "messages.delete", %{}, 2_000)
+               HelperPort.call(port, "messages.delete", %{}, 2_000, %{})
     end
 
     test "a port that is not running answers helper_unavailable" do
       assert {:error, {:helper_unavailable, _message, %{}}} =
-               HelperPort.call(:imessage_port_not_running, "probe", %{}, 100)
+               HelperPort.call(:imessage_port_not_running, "probe", %{}, 100, %{})
     end
   end
 
@@ -214,7 +214,7 @@ defmodule FermixChannels.Channels.IMessage.PortTest do
       assert spawns(ctx.home) == 1
 
       assert {:error, {:helper_unavailable, _message, %{"class" => "helper_exit 64"}}} =
-               HelperPort.call(port, "probe", %{}, 100)
+               HelperPort.call(port, "probe", %{}, 100, %{})
     end
 
     test "every disclaim exit class (70-72) is never retried", ctx do
@@ -259,11 +259,11 @@ defmodule FermixChannels.Channels.IMessage.PortTest do
       {:ok, _handshake} = HelperPort.attach(port, self())
 
       assert {:error, {:helper_unavailable, _message, %{"class" => "helper_exit 75"}}} =
-               HelperPort.call(port, "grant", %{"service" => "automation"}, 2_000)
+               HelperPort.call(port, "grant", %{"service" => "automation"}, 2_000, %{})
 
       assert_receive {:imessage_helper, :down, {:helper_exit, 75}}
       assert_receive {:imessage_helper, :up, _handshake}
-      assert {:ok, _probe} = HelperPort.call(port, "probe", %{}, 2_000)
+      assert {:ok, _probe} = HelperPort.call(port, "probe", %{}, 2_000, %{})
     end
 
     test "a missing executable backs off as helper_missing", ctx do
@@ -343,11 +343,11 @@ defmodule FermixChannels.Channels.IMessage.PortTest do
     SafeRm.rm!(close_stdin)
 
     assert {:error, {:helper_unavailable, _message, %{"class" => "helper_exited"}}} =
-             HelperPort.call(port, "probe", %{}, @arrival_ms)
+             HelperPort.call(port, "probe", %{}, @arrival_ms, %{})
 
     assert_receive {:imessage_helper, :down, :helper_exited}
     assert_receive {:imessage_helper, :up, _handshake}, @arrival_ms
-    assert {:ok, _probe} = HelperPort.call(port, "probe", %{}, 2_000)
+    assert {:ok, _probe} = HelperPort.call(port, "probe", %{}, 2_000, %{})
   end
 
   # Sends `reason` as an exit signal to the helper's port once the fake has

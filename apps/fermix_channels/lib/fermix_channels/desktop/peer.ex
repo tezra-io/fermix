@@ -30,6 +30,7 @@ defmodule FermixChannels.Desktop.Peer do
   alias FermixChannels.Mobile.Chunks
   alias FermixChannels.Mobile.Peers
   alias FermixChannels.Mobile.Protocol
+  alias FermixCore.Computers.Versions
 
   # Family => the module implementing `Desktop.Family` for it. Each family's
   # module is added here, one line each, as it is built.
@@ -57,7 +58,8 @@ defmodule FermixChannels.Desktop.Peer do
     "invoke_part" => :invoke,
     "invoke_cancel" => :invoke,
     "invoke_result" => :invoke,
-    "invoke_status" => :invoke
+    "invoke_status" => :invoke,
+    "invoke_restarted" => :invoke
   }
   @family_names [:companion, :manage, :loopback, :snapshots, :computer, :invoke]
   @registry FermixChannels.Desktop.Peers
@@ -104,9 +106,9 @@ defmodule FermixChannels.Desktop.Peer do
 
   @doc """
   Starts the peer of a desktop session under `supervisor`. `opts`:
-  `:device_id`, `:session` (the session's process), and optionally
-  `:standing` (the context's; `:current` when not given), `:registry` and
-  `:families` (a test's own map of families, each a module or
+  `:device_id`, `:session` (the session's process), `:standing` (where the
+  desktop stands, `Computers.Versions`: required, never assumed), and
+  optionally `:registry` and `:families` (a test's own map of families, each a module or
   `{module, options}`, the options reaching the family's `init/1` as the
   context's `options`).
   """
@@ -248,10 +250,21 @@ defmodule FermixChannels.Desktop.Peer do
       session: Keyword.fetch!(opts, :session),
       registry: Keyword.get(opts, :registry, @registry),
       open_bytes_budget: Keyword.get(opts, :open_bytes_budget, @open_bytes_budget),
-      standing: Keyword.get(opts, :standing, :current),
+      standing: standing!(opts),
       families: %{},
       open: %{}
     }
+  end
+
+  # Where the desktop stands is its session's to say, never assumed: a peer
+  # told none does not start, so nothing is served on a guess.
+  defp standing!(opts) do
+    standing = Keyword.fetch!(opts, :standing)
+
+    unless standing in Versions.standings(),
+      do: raise(ArgumentError, "a desktop peer's standing is #{inspect(standing)}")
+
+    standing
   end
 
   # A desktop that reconnected has a newer session; its older peer goes, its
