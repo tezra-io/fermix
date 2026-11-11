@@ -19,7 +19,9 @@ defmodule FermixCore.Capabilities.Advertisement do
   After a tool's own schema refresh, a tool one of the home's computers can
   run gains the `computer` argument where a computer offers it
   (`Computers.Argument`, M97 §6.5), so no tool's refresh can drop it. The
-  home's computers are read once per call.
+  home's computers are read once per call, and each hook is handed them in its
+  context (`:computers`), so a tool whose offer follows a computer's
+  (`computer_use`, M97 §6.4) reads the same list.
 
   Last, in a cue run under a mandate, a mandate tool's schema loses the
   mandate's `idempotency_arg`, which Fermix sets itself (M60 §10.2, C39).
@@ -32,6 +34,7 @@ defmodule FermixCore.Capabilities.Advertisement do
   @spec prepare([Capability.t()], map()) :: [Capability.t()]
   def prepare(capabilities, context) when is_list(capabilities) and is_map(context) do
     computers = Argument.computers(context)
+    context = Map.put_new(context, :computers, computers)
 
     capabilities
     |> Enum.filter(&advertised?(&1, context))

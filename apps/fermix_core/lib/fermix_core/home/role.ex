@@ -94,7 +94,9 @@ defmodule FermixCore.Home.Role do
     {FermixChannels.Channels.Discord.Gateway, "takes Discord messages into turns"},
     {FermixChannels.Channels.Slack.SocketMode, "takes Slack events into turns over Socket Mode"},
     {FermixChannels.Channels.Signal.Listener, "takes Signal messages into turns"},
-    {FermixChannels.Channels.IMessage.Supervisor, "takes iMessages into turns"},
+    {FermixChannels.Channels.IMessage.Supervisor,
+     "takes iMessages into turns; a Mac whose home is on a server carries them for it " <>
+       "(the bridge, device-only)"},
     {FermixChannels.Channels.Acp.Supervisor, "runs an ACP client's prompts as turns"},
     {FermixChannels.Mobile.Supervisor,
      "admits phone turns through the identity bundle, which moved with the primary"},
@@ -154,7 +156,11 @@ defmodule FermixCore.Home.Role do
   @device_only [
     {FermixChannels.Desktop.DeviceSupervisor,
      "dials the primary from a desktop whose home moved, carries the move from its source, " <>
-       "and receives the home back on a move back"}
+       "and receives the home back on a move back"},
+    {FermixChannels.Channels.IMessage.Bridge,
+     "carries the home's iMessage through this Mac's Messages for its server (M97 §6.4): " <>
+       "the helper and what it says, never the listener that makes a turn, which the " <>
+       "primary runs"}
   ]
 
   @device_only_modules Enum.map(@device_only, &elem(&1, 0))

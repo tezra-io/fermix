@@ -144,7 +144,7 @@ defmodule Mix.Tasks.Fermix.Cues.Funnel do
           snapshot
 
         {:error, reason} ->
-          Mix.raise("config.toml could not be read: #{ConfigStore.load_error_sentence(reason)}")
+          Mix.raise("The settings could not be read: #{ConfigStore.load_error_sentence(reason)}")
       end
 
     cues = Keyword.get(snapshot.fermix_core, :cues, [])

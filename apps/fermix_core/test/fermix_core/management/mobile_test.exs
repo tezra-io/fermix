@@ -398,11 +398,12 @@ defmodule FermixCore.Management.MobileTest do
     end
 
     # M97 §3.3: the one computer that keeps the server's backup copies is
-    # named, and the owner confirms before it is removed.
+    # named, and the owner confirms before it is removed: a refusal that is a
+    # question, which `confirmed` turns into the act.
     test "the only computer keeping backups is named before it is removed" do
       assert Mobile.devices_revoke(@device_id, fake({:error, {:only_backups, "Loft Mac"}})) ==
                {:error,
-                {:unavailable, "mobile",
+                {:confirm, "mobile",
                  "Loft Mac keeps the only copies of your server's backups. Remove it anyway?"}}
     end
   end

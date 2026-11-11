@@ -250,7 +250,7 @@ will be part of a future release; nothing in this group is in a release yet.
   you review the move (the secrets that travel, the server's Fermix,
   which must be this computer's own, since a newer one could never move the
   home back, free disk, the plugins with no build for the server, and what stops: those
-  of iMessage, this computer's own voice calls and meetings you use, WhatsApp,
+  of this computer's own voice calls and meetings you use, WhatsApp,
   and Slack unless it uses Socket Mode; calls from your phone carry on at the
   server when Talk to Fermix is on there and its key is in the server's
   secret store; coding agents ask for your approval again on the server,
@@ -578,6 +578,53 @@ will be part of a future release; nothing in this group is in a release yet.
   request is in that computer's own record of what Fermix did there, and a
   command that failed is recorded as failed, while Fermix still reads its
   whole output.
+- **Fermix on your server can use your computer's browser, where you are
+  signed in.** Ask for something on a site you are signed in to on your
+  studio Mac and Fermix drives that Mac's browser: the Fermix app's own
+  browser when the app is open there, else its Chrome, or a tab you granted
+  with the extension, with that computer's own settings and network checks.
+  Your website logins keep every rule: the password stays in that Mac's
+  keychain and the app there types it, after you approve in the chat, and
+  never for a scheduled run, a cue, a worker, a voice call or a shared
+  channel, which your server refuses and your Mac refuses again. Your
+  server's own browser stays the default, and a task that began in your
+  Mac's browser stays there: if the Mac goes to sleep mid-task, Fermix says
+  so rather than carry on somewhere else. Screenshots, PDFs and downloads
+  come back to your server, and a file you upload goes to your Mac, up to
+  20 MiB. It works only while The browser is switched on in that computer's
+  This computer settings, and each step is in that computer's record of what
+  Fermix did there.
+- **Fermix on your server can see and control your computer's screen.** Ask
+  for something on your studio Mac's screen and Fermix on your server, which
+  has no screen of its own, looks at it and acts on it there, one step at a
+  time, with the actions that Mac's own helper offers. It works only while
+  Your screen is switched on in that computer's This computer settings, only
+  from your own chat or call (never a scheduled run, a cue, a worker or a
+  shared channel, which your server refuses and your Mac refuses again), and
+  under that Mac's own rules: its sandbox mode sets what Fermix may do there
+  (strict only looks), and an action waits or steps aside while you are
+  typing at it. While your server holds the screen your Mac's app shows a
+  mark, "Fermix on your server is controlling this screen.", with Stop; Stop,
+  or switching Your screen or everything off there, ends it at once, and
+  Fermix is told the person at the Mac stopped it. One conversation holds a
+  screen at a time, and each step is in that computer's record of what
+  Fermix did there. Screen sharing on a voice call stays your server's own.
+- **iMessage keeps working after your home moves to your server.** Your Mac's
+  Messages carry it: you text the same Apple ID as before, your server reads
+  and answers, and the helper, its macOS permissions and the list of who
+  Fermix may message stay on that Mac, which only someone at the Mac can
+  change. It works while Messages is switched on in that Mac's This computer
+  settings; one Mac carries it, and a second one that offers it is refused by
+  name. While that Mac is asleep or offline iMessage is away: a message to you
+  fails at once, saying so, and nothing is kept to send later, and a question
+  that waits on you (an approval) goes to a channel on your server instead.
+  When the Mac is back, Fermix reads what came in meanwhile, up to 500
+  messages from the last day, and tells you once if it missed more. Photos
+  and files go both ways, up to 20 MiB. Your iMessage owner and guests are
+  now kept with your home, so your server knows them, and a home whose
+  iMessage settings an earlier build put in this computer's own file moves
+  them back at its first start. The move's review no longer lists iMessage
+  among what stops.
 
 ## [0.18.0] - 2026-11-03
 

@@ -67,10 +67,29 @@ defmodule FermixChannels.Channels.IMessage.SupervisorTest do
       listener_name: :"imessage_sup_listener_#{unique}",
       executable: executable,
       home: home,
-      recipients: %{owner: "+15551234567", handles: ["+15551234567"]}
+      recipients: %{owner: "+15551234567", handles: ["+15551234567"]},
+      macos?: true
     ]
 
     %{home: home, executable: executable, opts: opts}
+  end
+
+  # M97 §6.4: off a Mac the helper is the Mac of the home that carries
+  # Messages; nothing is spawned here and no executable is looked for.
+  test "off a Mac it runs the computer helper and spawns nothing", ctx do
+    opts =
+      ctx.opts
+      |> Keyword.drop([:executable, :macos?])
+      |> Keyword.merge(macos?: false, installer: NotInstalled, computers: fn -> [] end)
+
+    sup = start_supervised!({IMessage.Supervisor, opts})
+
+    assert [
+             {Listener, _listener, :worker, _},
+             {FermixChannels.Channels.IMessage.ComputerHelper, _helper, :worker, _}
+           ] = Supervisor.which_children(sup)
+
+    assert_eventually(fn -> Listener.status(opts[:listener_name]).class == "no_carrier" end)
   end
 
   test "starts the Port, then a Listener that subscribes through it", %{opts: opts} do

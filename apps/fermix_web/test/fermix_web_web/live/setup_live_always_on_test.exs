@@ -729,9 +729,13 @@ defmodule FermixWebWeb.SetupLiveAlwaysOnTest do
       asking!(seams)
       {view, html} = open_view!(conn, "/setup")
 
+      # The page names the computer and asks for the digits it shows: it
+      # never shows them itself (M97 §7.5).
       assert text(html, "#always-on-sentence") ==
-               "A computer named loft-linux (Linux) asks to join your Fermix. Add it only " <>
-                 "if it shows 482 913."
+               "A computer named loft-linux (Linux) asks to join your Fermix. To add it, type " <>
+                 "the six digits it shows."
+
+      refute html =~ "482"
 
       html = press(view, "approve_computer")
       assert html =~ ~s(name="always_on_step[sas]")
@@ -935,7 +939,7 @@ defmodule FermixWebWeb.SetupLiveAlwaysOnTest do
       "expires_at" => "2031-05-04T12:30:00Z",
       "candidate_id" => nil,
       "purpose" => "computer",
-      "joiner" => %{"name" => "loft-linux", "platform" => "linux", "sas" => "482913"},
+      "joiner" => %{"name" => "loft-linux", "platform" => "linux"},
       "joined" => nil
     }
 

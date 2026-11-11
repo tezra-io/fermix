@@ -43,9 +43,14 @@ defmodule FermixCore.Computers.Computer do
           backups: boolean()
         }
 
-  @doc "The computer as `home.status` lists it in `computers`."
-  @spec view(t()) :: map()
-  def view(%__MODULE__{} = computer) do
+  @doc """
+  The computer as `home.status` lists it in `computers`, each offer with the
+  words it goes by (`Offers.label/1`), and `this_computer` true on the row
+  of `asking`, the device id of the linked computer whose request this
+  answers (nil for any other caller).
+  """
+  @spec view(t(), String.t() | nil) :: map()
+  def view(%__MODULE__{} = computer, asking \\ nil) when is_binary(asking) or is_nil(asking) do
     %{
       "device_id" => computer.device_id,
       "name" => computer.name,
@@ -56,10 +61,24 @@ defmodule FermixCore.Computers.Computer do
       "since" => iso(computer.since),
       "last_seen" => iso(computer.last_seen),
       "path" => computer.path && Atom.to_string(computer.path),
-      "offers" => Enum.map(computer.offers, &Offers.view/1),
-      "backups" => computer.backups
+      "offers" => Enum.map(computer.offers, &offer_view/1),
+      "backups" => computer.backups,
+      "this_computer" => computer.device_id == asking
     }
   end
+
+  defp offer_view(offer), do: Map.put(Offers.view(offer), "label", Offers.label(offer.id))
+
+  @doc """
+  The computer whose request a management answer is for, from the router's
+  `actor`: a linked computer's forward over its own session
+  (`{:desktop, device_id}`, which the daemon names from that session) is its
+  device id; every other caller (the server's own app, its setup page, a
+  verb) is nil.
+  """
+  @spec asking(term()) :: String.t() | nil
+  def asking({:desktop, device_id}) when is_binary(device_id), do: device_id
+  def asking(_actor), do: nil
 
   defp iso(nil), do: nil
   defp iso(%DateTime{} = at), do: at |> DateTime.truncate(:second) |> DateTime.to_iso8601()

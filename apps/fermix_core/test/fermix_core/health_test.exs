@@ -414,6 +414,30 @@ defmodule FermixCore.HealthTest do
       assert %{name: "slack", status: :ready, transport: ^connected} = channel(report, "slack")
     end
 
+    # M97 D4: off a Mac, iMessage runs through the Mac that carries Messages;
+    # while that Mac sleeps the channel is away, and the report stays ready.
+    test "iMessage whose Mac is asleep is away, never degraded" do
+      Application.put_env(:fermix_channels, :imessage, enabled: true)
+      on_exit(fn -> Application.delete_env(:fermix_channels, :imessage) end)
+
+      away = %{
+        status: :away,
+        detail: "studio Mac, the Mac that carries Messages, is asleep or offline."
+      }
+
+      transport_health = fn
+        :imessage_health_provider -> away
+        _other -> nil
+      end
+
+      report = health_report(fn _name -> self() end, transport_health: transport_health)
+
+      assert %{name: "imessage", status: :away, process_alive: true, transport: ^away} =
+               channel(report, "imessage")
+
+      refute report.status == :degraded
+    end
+
     test "probes the acp transport through its endpoint, not its supervisor" do
       previous = Application.get_env(:fermix_channels, :acp)
       Application.put_env(:fermix_channels, :acp, enabled: true, mode: :gateway)

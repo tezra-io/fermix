@@ -115,10 +115,26 @@ defmodule FermixChannels.Mobile.LanesTest do
         do: assert(Lanes.lane("invoke_open", header) == {:ok, :interactive})
   end
 
+  # A request's own cancel and status ask ride its lane, so neither can pass
+  # a request still waiting in bulk (tla/specs/computer_invoke, AfterItsOpen).
+  test "a request's cancel and status ask ride the lane of the request they name" do
+    history = %{"id" => "inv-h", "capability" => "history", "op" => "submit"}
+    files = %{"id" => "inv-f", "capability" => "files", "op" => "read"}
+
+    for type <- ~w(invoke_open invoke_cancel invoke_status) do
+      assert Lanes.lane(type, history) == {:ok, :bulk}, type
+      assert Lanes.lane(type, files) == {:ok, :interactive}, type
+    end
+
+    assert Lanes.lane("invoke_result", history) == {:ok, :interactive}
+  end
+
   test "the header fields the table reads are named in one place" do
     assert Lanes.header_fields() == %{
              "invoke_part" => ["size_bytes"],
-             "invoke_open" => ["capability", "op"]
+             "invoke_open" => ["capability", "op"],
+             "invoke_cancel" => ["capability", "op"],
+             "invoke_status" => ["capability", "op"]
            }
   end
 

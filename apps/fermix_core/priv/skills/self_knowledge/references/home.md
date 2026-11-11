@@ -389,7 +389,7 @@ it, never a second writer.
   working; the server installs every other one again itself); a dev plugin
   folder (warns: it stays here); what this
   home has turned on that runs only here stopping after the move, each named
-  (iMessage on a Mac, voice calls, meetings; nothing to warn of when none is
+  (voice calls, meetings; nothing to warn of when none is
   on); WhatsApp
   turned on (warns: it stops until you run the Tailscale Funnel command
   Always On shows for the server and point Meta at its address);
@@ -616,7 +616,8 @@ it, never a second writer.
   Fermix's own status and lifecycle, its logs, diagnostics and Doctor, the
   setup page, computer use, iMessage, the browser and capability
   installers, and the settings sections sandbox, computer use, computer
-  history, iMessage, accessories and This computer.
+  history, accessories and This computer; iMessage's owner and guests:
+  the primary's.
 - Two answers are put together here: the home's status is this computer's
   own (its role, its link to the primary, where the move went) with the
   primary's own picture added (its recovery, its enrollment and candidates,
@@ -722,7 +723,7 @@ it, never a second writer.
   - before the move, on the computer that sets it up: nothing set up ("Keep
     Fermix running when this Mac sleeps. It moves to a server you own.", with
     a second line only when this home uses something that stops after the
-    move, naming only that: iMessage on a Mac, voice calls, meetings; and
+    move, naming only that: voice calls, meetings; and
     **Use my own Linux server**); a code open for the server ("Waiting for
     your server: run the command on it and paste the code when it asks.",
     then the systems the server's first boot takes, Debian 12, Debian 13 or

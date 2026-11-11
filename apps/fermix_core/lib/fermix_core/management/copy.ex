@@ -493,18 +493,16 @@ defmodule FermixCore.Management.Copy do
   def summary_sentence(:notice_server_backup_week, _values),
     do: "The last backup is a week old. It runs when your Mac is online."
 
-  def summary_sentence(:computer_asks, %{name: name, system: system, sas: sas}),
+  def summary_sentence(:computer_asks, %{name: name, system: system}),
     do:
-      "A computer named #{name} (#{system}) asks to join your Fermix. Add it only if it " <>
-        "shows #{digits(sas)}."
+      "A computer named #{name} (#{system}) asks to join your Fermix. To add it, type the " <>
+        "six digits it shows."
 
   def summary_sentence(:join_dialing, %{machine: machine, to: to}),
     do: "Connecting this #{machine} to your Fermix on #{to}."
 
   def summary_sentence(:join_waiting, %{machine: machine, to: to, sas: sas}),
-    do:
-      "Add this #{machine} on #{to}, where it asks you to. Both show #{digits(sas)}; if " <>
-        "they differ, do not add it."
+    do: "Type #{digits(sas)} on #{to}, where it asks you to add this #{machine}."
 
   def summary_sentence(:notice_computer_joined, %{name: name}),
     do: "A computer named #{name} joined your Fermix."

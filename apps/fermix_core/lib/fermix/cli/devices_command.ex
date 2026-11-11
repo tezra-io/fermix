@@ -11,7 +11,6 @@ defmodule Fermix.CLI.DevicesCommand do
   """
 
   alias Fermix.CLI.Daemon.Client
-  alias FermixCore.Management.Mobile
 
   @call_timeout_ms 5_000
   @uuid_pattern ~r/^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/
@@ -57,9 +56,9 @@ defmodule Fermix.CLI.DevicesCommand do
         IO.puts(io.stdout, "revoked device #{device_id}")
         0
 
-      {:error, {:management_error, "unavailable", _message, %{"sentence" => sentence}}}
+      {:error, {:management_error, "unavailable", _message, %{"sentence" => sentence} = details}}
       when is_binary(sentence) and not confirmed? ->
-        asked(sentence, io)
+        asked(sentence, details["confirm"] == true, io)
 
       {:ok, _other} ->
         fail(io, "fermix devices revoke: invalid daemon reply")
@@ -75,15 +74,12 @@ defmodule Fermix.CLI.DevicesCommand do
   defp revoke_params(device_id, false), do: %{"device_id" => device_id}
   defp revoke_params(device_id, true), do: %{"device_id" => device_id, "confirmed" => true}
 
-  # The daemon's question about the one computer that keeps the backups is
-  # answered by running the verb again with --yes; any other refusal is said
-  # as it came.
-  defp asked(sentence, io) do
+  # The daemon's question about the one computer that keeps the backups (a
+  # refusal it marks `confirm`) is answered by running the verb again with
+  # --yes; any other refusal is said as it came.
+  defp asked(sentence, question?, io) do
     IO.puts(io.stderr, "fermix devices revoke: #{scrub(sentence)}")
-
-    if Mobile.only_backups_sentence?(sentence),
-      do: IO.puts(io.stderr, "Run it again with --yes to remove it.")
-
+    if question?, do: IO.puts(io.stderr, "Run it again with --yes to remove it.")
     1
   end
 

@@ -135,6 +135,7 @@ defmodule FermixChannels.Desktop.OffersTest do
 
       case module.state(s, f) do
         {:on, _detail} -> :ok
+        {:on, _detail, _helper} -> :ok
         {_state, said} -> assert Copy.violations(said, :prose) == [], said
       end
     end

@@ -10,8 +10,7 @@ defmodule FermixCore.Prompt.RuntimeSections do
   alias FermixCore.Capabilities.Deferral
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
   alias FermixCore.Computers
-  alias FermixCore.ComputerUse.Config, as: ComputerUseConfig
-  alias FermixCore.ComputerUse.HelperActions
+  alias FermixCore.ComputerUse.Reach
   alias FermixCore.Harness.Config, as: HarnessConfig
   alias FermixCore.HostFacts
   alias FermixCore.OpenLoops.Config, as: OpenLoopsConfig
@@ -126,13 +125,15 @@ defmodule FermixCore.Prompt.RuntimeSections do
   defp format_capability_summary_or_empty(capabilities),
     do: format_capability_summary(capabilities)
 
+  # The computer-use lines follow the helper of the machine a call runs on
+  # (`ComputerUse.Reach`): this host's, or a computer's the turn can see (M97 §6.4).
   defp runtime_contract(trust) do
-    offered = HelperActions.offered()
+    offered = Reach.reading(%{source_trust: trust}).actions
 
     """
     ## Runtime Contract
     #{deferred_tools_contract()}- Prefer direct Fermix built-ins over shell, curl, grep, computer-use, or external automation when a built-in owns the verb — but `computer_use` is the ONLY tool that acts on the user's OWN live screen; use it when the task is about a page/app/session they already have open (`browser`/`shell` run in their own context and won't touch their screen).
-    #{computer_use_rules(offered)}#{background_computer_use_rule()}- Web routing — pick ONE and commit; switch only on a new reason, never rotate through tools for the same goal:
+    #{computer_use_rules(offered)}#{background_computer_use_rule(offered)}- Web routing — pick ONE and commit; switch only on a new reason, never rotate through tools for the same goal:
       - If a connected plugin owns the surface (e.g. `github_*` for GitHub, `notion_*` for Notion, `obsidian_*` for the vault, `x_*` for X/Twitter, the Google tools for mail/calendar/drive) use its tools — they hit the real API directly; do NOT open the browser or `web_search` for what they cover. What no listed tool does, or what the service rejects for a reason a retry or a reconnect won't change, is a new reason to switch to `browser` (say why); a hold or refusal from Fermix or the user never is. Any such plugin is listed under Plugins below.
       - `web_search` for a fact with no known URL — anything current, changing, or possibly moved since training (prices, rates, versions, who holds a role, schedules, hours, addresses, news) as well as plain lookups; a confident memory of a mutable fact is still a reason to search.
       - `web_fetch` for the readable text of ONE known URL whose content is in the server HTML.
@@ -341,8 +342,9 @@ defmodule FermixCore.Prompt.RuntimeSections do
   # bound-window surface on, exactly like the tool schema that offers it — the
   # off-path prompt stays byte-identical to what shipped before it, so a daemon
   # without the flag is never steered toward actions it does not advertise.
-  defp background_computer_use_rule do
-    if ComputerUseConfig.background?() and "select_target" in HelperActions.offered() do
+  # The reading's actions carry its machine's bound-window flag already.
+  defp background_computer_use_rule(offered) do
+    if "select_target" in offered do
       "- `computer_use` can work INSIDE ONE WINDOW: `windows` to find it, `select_target` " <>
         "with its `window_id` to bind it, and from then on every look and every action is " <>
         "answered from that window's own picture, even when something covers it. Prefer it " <>
@@ -409,6 +411,7 @@ defmodule FermixCore.Prompt.RuntimeSections do
       capabilities
       |> Enum.reject(&(&1.metadata[:category] == :plugin))
       |> Enum.reject(&harness_when_unusable?/1)
+      |> Enum.reject(&screen_out_of_reach?/1)
       |> Enum.reject(&credential_gated_when_unready?/1)
       |> Enum.reject(&call_scoped?/1)
       |> Enum.reject(&open_loop_unlisted?/1)
@@ -431,6 +434,14 @@ defmodule FermixCore.Prompt.RuntimeSections do
   end
 
   defp harness_usable?, do: HarnessConfig.enabled?() and HarnessConfig.approved?()
+
+  # Computer use is registered on a server that may drive a computer's screen
+  # and offered only while one is in reach (its `advertise?/1`, M97 §6.4), so
+  # the catalog names it under the same rule.
+  defp screen_out_of_reach?(%{name: "computer_use"}),
+    do: not Reach.reachable?(%{source_trust: :operator})
+
+  defp screen_out_of_reach?(_capability), do: false
 
   # The same rule for the other family the wire gates: a built-in that declares
   # `requires_setup` (M31 §14.1) is dropped by `Advertisement.prepare/2` while its

@@ -674,14 +674,14 @@
       "properties": {"t": {"const": "invoke_part"}, "id": {"$ref": "#/$defs/wireId"}, "index": {"$ref": "#/$defs/chunkIndex"}, "last": {"type": "boolean"}, "size_bytes": {"type": "integer", "minimum": 1, "maximum": 20971520}}
     },
     "invoke_cancel": {
-      "allOf": [{"$ref": "#/$defs/envelope"}], "required": ["v", "t", "seq", "id"],
-      "description": "Either direction (M97): the caller cancels its invocation. It is answered with exactly one invoke_result for that id: cancelled, or the outcome reached first; one the receiver no longer runs is answered as invoke_status is.",
-      "properties": {"t": {"const": "invoke_cancel"}, "id": {"$ref": "#/$defs/wireId"}}
+      "allOf": [{"$ref": "#/$defs/envelope"}], "required": ["v", "t", "seq", "id", "capability", "op"],
+      "description": "Either direction (M97): the caller cancels its invocation. It names its invoke_open's capability and op, which put it in that request's lane, so it never passes the request it is about. It is answered with exactly one invoke_result for that id: cancelled, or the outcome reached first; one the receiver no longer runs is answered as invoke_status is.",
+      "properties": {"t": {"const": "invoke_cancel"}, "id": {"$ref": "#/$defs/wireId"}, "capability": {"type": "string", "pattern": "^[a-z][a-z0-9_]{0,31}$"}, "op": {"type": "string", "maxLength": 64, "pattern": "^[a-z][a-z0-9_]*(\\.[a-z][a-z0-9_]*)*$"}}
     },
     "invoke_status": {
-      "allOf": [{"$ref": "#/$defs/envelope"}], "required": ["v", "t", "seq", "id"],
-      "description": "Either direction (M97): the caller asks again for its invocation's answer, as the primary does for every invocation it still waits on when a computer's session comes back. The receiver sends the invoke_result it holds again; holding only its journal's receipt, an invoke_result of that status with the receipt and the payload {\"receipt_only\":true}; with no record, status unknown and no receipt. One still running or waiting is answered when it ends.",
-      "properties": {"t": {"const": "invoke_status"}, "id": {"$ref": "#/$defs/wireId"}}
+      "allOf": [{"$ref": "#/$defs/envelope"}], "required": ["v", "t", "seq", "id", "capability", "op"],
+      "description": "Either direction (M97): the caller asks again for its invocation's answer, as the primary does for every invocation it still waits on when a computer's session comes back, and only once it has sent that invocation's invoke_open. It names that request's capability and op, which put it in the request's lane, so it never passes the request it is about. The receiver sends the invoke_result it holds again; holding only its journal's receipt, an invoke_result of that status with the receipt and the payload {\"receipt_only\":true}; with no record, status unknown and no receipt. One still running or waiting is answered when it ends.",
+      "properties": {"t": {"const": "invoke_status"}, "id": {"$ref": "#/$defs/wireId"}, "capability": {"type": "string", "pattern": "^[a-z][a-z0-9_]{0,31}$"}, "op": {"type": "string", "maxLength": 64, "pattern": "^[a-z][a-z0-9_]*(\\.[a-z][a-z0-9_]*)*$"}}
     },
     "invoke_result": {
       "allOf": [

@@ -4,9 +4,9 @@ defmodule FermixCore.Computers.Calls do
   one place a computer's answers are routed to the process that asked.
 
   A caller (`FermixCore.Computers.call/6`) registers each invocation before
-  it sends it (`register/2`), with the computer it went to, whether it
-  changes something and its deadline, and forgets it once answered
-  (`forget/2`). The computer's server-side family
+  it sends it (`register/2`), with the computer it went to, its capability
+  and op, whether it changes something and its deadline, and forgets it
+  once answered (`forget/2`). The computer's server-side family
   (`FermixChannels.Desktop.InvokeFamily`) hands each `invoke_result` here
   (`deliver/4`) and each part's progress, bytes or failure (`part/4`); each
   goes to its caller as `{:computer_invoke, id, {:result, fields, payload}}`
@@ -15,8 +15,13 @@ defmodule FermixCore.Computers.Calls do
 
   The waiters live here and not in the session's peer, so a session that
   ends and comes back loses none: as the computer's next session starts,
-  its family asks for the state of each one still waited on
-  (`outstanding/2`, `invoke_status`), and the answer comes here.
+  its family says so (`reconnected/2`), and each caller still waiting on
+  that computer is told `{:computer_invoke, id, :reconnected}`. The caller
+  asks for its invocation's state itself (`invoke_status`), once it has
+  sent the request: one process sends a request and every status ask about
+  it, so the computer is never asked about a request it was not sent yet,
+  and never hears the ask before the request (Erlang keeps the order of one
+  process's messages to another). The answer comes here as any other.
 
   It monitors each caller; one that ends without forgetting its invocation
   has the invocation cancelled on the computer (`invoke_cancel`, through the
@@ -37,6 +42,8 @@ defmodule FermixCore.Computers.Calls do
   @type call :: %{
           required(:id) => String.t(),
           required(:device_id) => String.t(),
+          required(:capability) => String.t(),
+          required(:op) => String.t(),
           required(:caller) => pid(),
           required(:effect?) => boolean(),
           required(:started_at) => DateTime.t(),
@@ -56,9 +63,22 @@ defmodule FermixCore.Computers.Calls do
 
   @doc "Waits on `call` for its caller: answered once it is registered."
   @spec register(GenServer.server(), call()) :: :ok
-  def register(server \\ __MODULE__, %{id: id, device_id: device, caller: caller} = call)
-      when is_binary(id) and is_binary(device) and is_pid(caller),
+  def register(
+        server \\ __MODULE__,
+        %{id: id, device_id: device, capability: capability, op: op, caller: caller} = call
+      )
+      when is_binary(id) and is_binary(device) and is_binary(capability) and is_binary(op) and
+             is_pid(caller),
       do: GenServer.call(server, {:register, call})
+
+  @doc """
+  The computer `device_id` has a new session: each caller still waiting on
+  it is told `{:computer_invoke, id, :reconnected}`, and asks for its
+  invocation's state once its request is sent.
+  """
+  @spec reconnected(GenServer.server(), String.t()) :: :ok
+  def reconnected(server \\ __MODULE__, device_id) when is_binary(device_id),
+    do: GenServer.call(server, {:reconnected, device_id})
 
   @doc "The computer `device_id` answered the invocation `id`."
   @spec deliver(GenServer.server(), String.t(), String.t(), {map(), binary()}) :: :ok
@@ -72,7 +92,10 @@ defmodule FermixCore.Computers.Calls do
       when is_binary(device_id) and is_binary(id),
       do: GenServer.cast(server, {:deliver, device_id, id, {:part, message}})
 
-  @doc "The invocations still waited on from the computer `device_id`."
+  @doc """
+  The invocations still waited on from the computer `device_id`, their
+  requests sent or about to be.
+  """
   @spec outstanding(GenServer.server(), String.t()) :: [String.t()]
   def outstanding(server \\ __MODULE__, device_id) when is_binary(device_id),
     do: GenServer.call(server, {:outstanding, device_id})
@@ -86,7 +109,9 @@ defmodule FermixCore.Computers.Calls do
   @doc """
   Cancels the invocation `id` on its computer (`invoke_cancel`), whose
   answer comes to its caller as any other: `{:error, :not_found}` for one
-  not waited on.
+  not waited on. The cancel goes from here, not from the caller, so one
+  asked before the caller sent the request could reach the computer first:
+  cancel an invocation only once its request went.
   """
   @spec cancel(GenServer.server(), String.t()) :: :ok | {:error, :not_found | term()}
   def cancel(server \\ __MODULE__, id) when is_binary(id),
@@ -105,6 +130,9 @@ defmodule FermixCore.Computers.Calls do
 
   def handle_call({:outstanding, device_id}, _from, state),
     do: {:reply, ids_on(state, device_id), state}
+
+  def handle_call({:reconnected, device_id}, _from, state),
+    do: {:reply, tell_reconnected(state, device_id), state}
 
   def handle_call(:running_effects, _from, state), do: {:reply, effects(state), state}
   def handle_call({:cancel, id}, _from, state), do: {:reply, cancel_call(id, state), state}
@@ -138,6 +166,13 @@ defmodule FermixCore.Computers.Calls do
 
   defp ids_on(state, device_id),
     do: for({id, %{device_id: ^device_id}} <- state.calls, do: id) |> Enum.sort()
+
+  defp tell_reconnected(state, device_id) do
+    for {id, %{device_id: ^device_id, caller: caller}} <- state.calls,
+        do: send(caller, {:computer_invoke, id, :reconnected})
+
+    :ok
+  end
 
   defp effects(state) do
     for {id, %{effect?: true} = call} <- state.calls,
@@ -193,8 +228,9 @@ defmodule FermixCore.Computers.Calls do
 
   defp send_cancel(%{id: id, device_id: device_id} = call) do
     {transport, opts} = Map.get_lazy(call, :transport, &Transport.impl/0)
+    about = Map.take(call, [:id, :capability, :op])
 
-    case transport.cancel(device_id, id, opts) do
+    case transport.cancel(device_id, about, opts) do
       :ok ->
         :ok
 

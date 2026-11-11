@@ -98,6 +98,7 @@ defmodule FermixCore.Management.Mobile do
           {:busy, String.t()}
           | {:unavailable, String.t()}
           | {:unavailable, String.t(), String.t()}
+          | {:confirm, String.t(), String.t()}
           | {:invalid_params, String.t(), String.t()}
           | {:unknown_pairing_session, String.t()}
   @type result :: {:ok, map()} | {:error, refusal()}
@@ -140,15 +141,11 @@ defmodule FermixCore.Management.Mobile do
 
   @doc """
   What removing the one computer that keeps the server's backup copies asks
-  the owner first; the removal is sent again with `confirmed` once they agree.
+  the owner first, a refusal marked `details.confirm`; the removal is sent
+  again with `confirmed` once they agree.
   """
   @spec only_backups_sentence(String.t()) :: String.t()
   def only_backups_sentence(name) when is_binary(name), do: name <> @only_backups_tail
-
-  @doc "Whether `sentence` is that question, whatever computer it names."
-  @spec only_backups_sentence?(String.t()) :: boolean()
-  def only_backups_sentence?(sentence) when is_binary(sentence),
-    do: String.ends_with?(sentence, @only_backups_tail)
 
   @doc """
   The sentence the daemon socket's refusal of a pairing or forgetting decision
@@ -354,8 +351,9 @@ defmodule FermixCore.Management.Mobile do
   defp revoke_reply({:error, :device_not_found}),
     do: {:error, {:invalid_params, "device_id", @unknown_device_sentence}}
 
+  # A refusal that is a question: `confirmed` turns it into the act.
   defp revoke_reply({:error, {:only_backups, name}}) when is_binary(name),
-    do: {:error, {:unavailable, @capability, only_backups_sentence(name)}}
+    do: {:error, {:confirm, @capability, only_backups_sentence(name)}}
 
   defp revoke_reply({:error, reason}) when reason in @channel_down,
     do: {:error, {:unavailable, @capability}}

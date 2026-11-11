@@ -297,6 +297,41 @@ defmodule FermixCore.Management.HomeTest do
       assert hold["wait_s"] == 360
     end
 
+    # M97 §3.2: each offer carries the words it goes by, from its offer
+    # module (the core ones and those beside the link alike), so an app that
+    # keeps no list of offers can name it; one a newer computer offers that
+    # this engine has no module for has none. A linked computer reading its
+    # server's list over the rail finds its own row marked, and only there.
+    test "each offer has its words, and the row of the computer that asks is marked",
+         %{home: home} do
+      offers = [
+        %{id: "shell", state: :on, sentence: nil, detail: "strict"},
+        %{id: "voice", state: :off, sentence: "Switched off on this Mac.", detail: nil},
+        %{id: "lantern", state: :on, sentence: nil, detail: nil}
+      ]
+
+      mac = %{computer("studio-mac", :macos, true) | offers: offers}
+      linux = computer("loft-linux", :linux, false)
+      listed = opts(home, computers: [mac, linux])
+
+      assert {:ok, %{"computers" => [studio, loft]}} =
+               route("home.status", %{}, Keyword.put(listed, :actor, {:desktop, @mac_id}))
+
+      assert Enum.map(studio["offers"], &{&1["id"], &1["label"]}) == [
+               {"shell", "commands"},
+               {"voice", "voice calls"},
+               {"lantern", nil}
+             ]
+
+      assert {studio["this_computer"], loft["this_computer"]} == {true, false}
+
+      # The server's own app and its setup page are no computer of the home.
+      for asked <- [listed, Keyword.put(listed, :actor, :setup_page)] do
+        assert {:ok, %{"computers" => rows}} = route("home.status", %{}, asked)
+        assert Enum.map(rows, & &1["this_computer"]) == [false, false]
+      end
+    end
+
     # Always On's inbound webhooks (design, "Inbound webhooks without a public
     # IP"): the primary names what it serves on loopback that the internet
     # must reach, from its own settings: WhatsApp when its channel is on, on
@@ -413,15 +448,22 @@ defmodule FermixCore.Management.HomeTest do
       enabled = true
       """)
 
-      # This Mac's own setting (M97 §4).
-      File.write!(MachineFile.path(home), "[fermix_channels.imessage]\nenabled = true\n")
+      # This Mac carries Messages for the server after a move (M97 §6.4), so
+      # iMessage on is not among what stops.
+      File.write!(MachineFile.path(home), "[fermix_core.computer]\nimessage = true\n")
+
+      File.write!(
+        Path.join(home, "config.toml"),
+        File.read!(Path.join(home, "config.toml")) <>
+          "\n[fermix_channels.imessage]\nenabled = true\n"
+      )
 
       assert {:ok, %{"summary" => summary}} =
                route("home.status", %{}, opts(home, host_os: :macos))
 
       assert summary["sentence"] ==
                "Keep Fermix running when this Mac sleeps. It moves to a server you own. " <>
-                 "iMessage and meetings stop after the move."
+                 "Meetings stop after the move."
 
       File.write!(Path.join(home, "config.toml"), "")
       File.write!(MachineFile.path(home), "")

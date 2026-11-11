@@ -15,11 +15,19 @@ defmodule FermixCore.Management.Computer do
   result_bytes, duration_ms}` (null where it does not apply yet: a request
   still running has no `finished_at` and no `status`). Seams in `opts`:
   `:home`.
+
+  `computer.screen.stop` (M97 §7.4) is the Stop beside the mark an app draws
+  while Fermix on its server controls this computer's screen (`home.status`'s
+  `screen`): the server's hold ends at once, held input is released and the
+  server hears that the person here stopped it (`ComputerUse.Seat.stop/1`).
+  No params; answers `{stopped}`, false when nothing held the screen. Device-
+  class as well. Seam: `:seat` (the seat's name).
   """
 
   require Logger
 
   alias FermixCore.Computers.Journal
+  alias FermixCore.ComputerUse.Seat
   alias FermixCore.Management.Protocol
   alias FermixCore.Setup.ConfigStore
 
@@ -39,6 +47,28 @@ defmodule FermixCore.Management.Computer do
       home = Keyword.get_lazy(opts, :home, &ConfigStore.fermix_home/0)
       listed(Journal.list(Journal.dir(home), limit: limit, before: before))
     end
+  end
+
+  @doc "`computer.screen.stop` (the moduledoc)."
+  @spec screen_stop(map(), keyword()) :: Protocol.route_result()
+  def screen_stop(params, opts \\ []) when is_map(params) and is_list(opts) do
+    with :ok <- no_params(params) do
+      {:ok, %{"stopped" => stopped?(Keyword.get(opts, :seat, Seat.name()))}}
+    end
+  end
+
+  defp no_params(params) do
+    case Map.keys(params) do
+      [] -> :ok
+      [field | _more] -> {:error, :invalid_params, %{"field" => field}}
+    end
+  end
+
+  # A computer that runs no seat holds no screen for its server.
+  defp stopped?(seat) do
+    Seat.stop(seat) == :stopped
+  catch
+    :exit, {:noproc, _call} -> false
   end
 
   @doc "Every sentence this method says, for the copy rules."

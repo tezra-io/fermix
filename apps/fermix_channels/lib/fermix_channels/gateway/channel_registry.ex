@@ -30,16 +30,26 @@ defmodule FermixChannels.Gateway.ChannelRegistry do
   - `commands?: false` — the gateway skips the slash-command pipeline for the
     channel entirely; message content is always model input. Absent means `true`.
   - `platform: :macos` — the transport only exists on a Mac (iMessage reads the
-    Messages of the Mac it runs on). Elsewhere it is never started and never
-    reported as missing an owner. Absent means every platform. The host
-    platform is injected (`macos?:`) and read from the OS in one place only.
+    Messages of a Mac). Elsewhere it is never started and never reported as
+    missing an owner, unless it is `carried: true` and this engine is one a
+    Mac of the home can carry it for (M97 §6.4): one where Always On is
+    offered, since only there does a home have computers. Then it runs here
+    and its own helper finds the Mac that carries it, live
+    (`IMessage.ComputerHelper`, `FermixCore.IMessage.carrier/1`): at a
+    server's start no computer has connected yet, and right after a move none
+    has said what it offers, so a carrier read here would never start it.
+    Absent means every platform. The host platform and whether a Mac may
+    carry it are injected (`macos?:`, `carried?:`) and read in one place
+    only.
   - `helper: Module` — the transport runs a helper that must be on disk
     (`Module.installed?/0`). Without it the channel is not started and
     `missing_helpers/1` names it, so a pin that moved with a release never
-    fails the boot. Absent means nothing is required.
+    fails the boot. Absent means nothing is required. A channel a Mac carries
+    needs no helper here: it runs on that Mac.
   """
 
   alias FermixCore.Config
+  alias FermixCore.Home.AlwaysOnRelease
 
   @type trust :: :local_operator
   @type ingress_auth :: :paired_device
@@ -58,6 +68,7 @@ defmodule FermixChannels.Gateway.ChannelRegistry do
           optional(:commands?) => boolean(),
           optional(:platform) => platform(),
           optional(:helper) => module(),
+          optional(:carried) => boolean(),
           optional(:live_switch) => boolean()
         }
 
@@ -113,7 +124,9 @@ defmodule FermixChannels.Gateway.ChannelRegistry do
       transport: :subprocess,
       child: FermixChannels.Channels.IMessage.Supervisor,
       platform: :macos,
-      helper: FermixCore.IMessage.HelperInstaller
+      helper: FermixCore.IMessage.HelperInstaller,
+      # M97 §6.4: off a Mac, a Mac of the home carries it.
+      carried: true
     },
     # The ACP agent surface (M29). `remote?: true` is deliberate: sessions are
     # persistent, so browsers stay warm across turns and detached continuation
@@ -288,10 +301,10 @@ defmodule FermixChannels.Gateway.ChannelRegistry do
   def transport_children(readiness, opts \\ [])
 
   def transport_children(%{status: :ready}, opts) when is_list(opts) do
-    host = [macos?: host_macos?(opts)]
+    host = host(opts)
 
     channels()
-    |> Enum.filter(&(platform_ok?(&1, host) and startable?(&1)))
+    |> Enum.filter(&(platform_ok?(&1, host) and startable?(&1, host)))
     |> Enum.map(fn %{child: child} -> {child, []} end)
   end
 
@@ -303,7 +316,7 @@ defmodule FermixChannels.Gateway.ChannelRegistry do
   """
   @spec missing_ingress_authorizations(keyword()) :: [atom()]
   def missing_ingress_authorizations(opts \\ []) when is_list(opts) do
-    host = [macos?: host_macos?(opts)]
+    host = host(opts)
 
     channels()
     |> Enum.filter(&(&1.remote? and needs_ingress?(&1) and platform_ok?(&1, host)))
@@ -320,34 +333,45 @@ defmodule FermixChannels.Gateway.ChannelRegistry do
   """
   @spec missing_helpers(keyword()) :: [atom()]
   def missing_helpers(opts \\ []) when is_list(opts) do
-    host = [macos?: host_macos?(opts)]
+    host = host(opts)
 
     channels()
     |> Enum.filter(&(Map.has_key?(&1, :helper) and platform_ok?(&1, host)))
     |> Enum.filter(fn %{config_key: key} = channel ->
-      enabled?(channel_config(key)) and not helper_present?(channel)
+      enabled?(channel_config(key)) and not helper_present?(channel, host)
     end)
     |> Enum.map(& &1.config_key)
   end
 
   @doc """
-  Whether a registry entry can run on the host described by `opts`. The host
-  must be injected (`macos?: boolean`); this function never reads the OS.
+  Whether a registry entry can run on the host described by `opts`: this
+  host is a Mac, or a Mac of the home carries a `carried` channel. The host
+  must be injected (`macos?: boolean`, and `carried?: boolean`, false when
+  absent); this function never reads the OS or the home.
   """
   @spec platform_ok?(channel(), keyword()) :: boolean()
   def platform_ok?(channel, opts) when is_map(channel) and is_list(opts) do
     case Map.get(channel, :platform) do
       nil -> true
-      :macos -> Keyword.fetch!(opts, :macos?) == true
+      :macos -> Keyword.fetch!(opts, :macos?) == true or carried?(channel, opts)
     end
   end
 
+  defp carried?(channel, opts),
+    do: Map.get(channel, :carried, false) and Keyword.get(opts, :carried?, false) == true
+
   defp find(name), do: Enum.find(channels(), fn channel -> channel.name == name end)
 
-  # The one place the host platform is read from the OS; every caller can
-  # inject it instead.
-  defp host_macos?(opts),
-    do: Keyword.get_lazy(opts, :macos?, fn -> match?({:unix, :darwin}, :os.type()) end)
+  # The one place the host platform is read from the OS, and whether a Mac of
+  # the home may carry iMessage here (Always On offered: only then are there
+  # computers); every caller can inject both instead.
+  defp host(opts) do
+    macos? = Keyword.get_lazy(opts, :macos?, fn -> match?({:unix, :darwin}, :os.type()) end)
+    [macos?: macos?, carried?: not macos? and host_carried?(opts)]
+  end
+
+  defp host_carried?(opts),
+    do: Keyword.get_lazy(opts, :carried?, &AlwaysOnRelease.available?/0)
 
   defp trust_of(channel) when is_map(channel), do: Map.get(channel, :trust)
 
@@ -357,23 +381,26 @@ defmodule FermixChannels.Gateway.ChannelRegistry do
     trust_of(channel) != :local_operator and Map.get(channel, :ingress_auth) == nil
   end
 
-  defp startable?(%{child: nil}), do: false
+  defp startable?(%{child: nil}, _host), do: false
 
-  defp startable?(%{config_key: key, transport: transport, child: child} = channel)
+  defp startable?(%{config_key: key, transport: transport, child: child} = channel, host)
        when not is_nil(child) do
     config = channel_config(key)
 
     (enabled?(config) or Map.get(channel, :live_switch, false)) and
       mode_ok?(key, config, transport) and
-      (not needs_ingress?(channel) or ingress_authorized?(key)) and helper_present?(channel)
+      (not needs_ingress?(channel) or ingress_authorized?(key)) and
+      helper_present?(channel, host)
   end
 
   # A transport that runs a helper (MILESTONE_54 §14: Fermix Messages) starts
   # only once the helper is on disk; the readiness row and Doctor name the gap.
-  defp helper_present?(channel) do
-    case Map.get(channel, :helper) do
-      nil -> true
-      helper -> helper.installed?()
+  # Off a Mac the helper is the carrying Mac's, never this host's.
+  defp helper_present?(channel, host) do
+    cond do
+      not Map.has_key?(channel, :helper) -> true
+      Map.get(channel, :platform) == :macos and not Keyword.fetch!(host, :macos?) -> true
+      true -> channel.helper.installed?()
     end
   end
 

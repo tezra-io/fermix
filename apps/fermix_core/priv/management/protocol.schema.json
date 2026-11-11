@@ -245,6 +245,7 @@
     "computer.join.cancel": 2,
     "computer.disconnect": 2,
     "computer.journal.list": 2,
+    "computer.screen.stop": 2,
     "accessories.status": 2,
     "accessories.pair.start": 2,
     "accessories.pair.begin": 2,
@@ -383,6 +384,7 @@
             "computer.join.cancel",
             "computer.disconnect",
             "computer.journal.list",
+            "computer.screen.stop",
             "accessories.status",
             "accessories.pair.start",
             "accessories.pair.begin",
@@ -1137,6 +1139,13 @@
         {
           "if": {
             "required": ["method"],
+            "properties": { "method": { "const": "computer.screen.stop" } }
+          },
+          "then": { "properties": { "params": { "$ref": "#/$defs/computer_screen_stop_params" } } }
+        },
+        {
+          "if": {
+            "required": ["method"],
             "properties": { "method": { "const": "accessories.status" } }
           },
           "then": { "properties": { "params": { "$ref": "#/$defs/accessories_status_params" } } }
@@ -1446,6 +1455,7 @@
         { "$ref": "#/$defs/computer_join_cancel_result" },
         { "$ref": "#/$defs/computer_disconnect_result" },
         { "$ref": "#/$defs/computer_journal_list_result" },
+        { "$ref": "#/$defs/computer_screen_stop_result" },
         { "$ref": "#/$defs/accessories_status_result" },
         { "$ref": "#/$defs/accessories_pair_start_result" },
         { "$ref": "#/$defs/accessories_pair_begin_result" },
@@ -3874,7 +3884,7 @@
     },
     "mobile_devices_revoke_params": {
       "type": "object",
-      "description": "The phone to forget or the computer to remove. A removed computer can join again with a code. The one computer that keeps the server's backup copies is removed only with confirmed true: without it the answer is unavailable, with the sentence that names the computer and asks.",
+      "description": "The phone to forget or the computer to remove. A removed computer can join again with a code. The one computer that keeps the server's backup copies is removed only with confirmed true: without it the answer is unavailable, with the sentence that names the computer and asks, marked details.confirm true.",
       "required": ["device_id"],
       "additionalProperties": false,
       "properties": {
@@ -6125,12 +6135,26 @@
           "maxItems": 64,
           "items": { "$ref": "#/$defs/homeComputer" }
         },
-        "join": { "$ref": "#/$defs/homeJoin" }
+        "join": { "$ref": "#/$defs/homeJoin" },
+        "screen": {
+          "description": "On a linked computer, while Fermix on its server controls this computer's screen: when it took it and the sentence the mark says, with Stop beside it (computer.screen.stop); null while it does not. Absent on every other engine and from an engine older than it, which a client reads as null.",
+          "oneOf": [{ "$ref": "#/$defs/homeScreen" }, { "type": "null" }]
+        }
+      }
+    },
+    "homeScreen": {
+      "type": "object",
+      "description": "Fermix on the server controls this computer's screen: since when (an RFC 3339 instant), and the sentence the mark says.",
+      "required": ["since", "sentence"],
+      "additionalProperties": false,
+      "properties": {
+        "since": { "type": "string", "minLength": 1 },
+        "sentence": { "type": "string", "minLength": 1 }
       }
     },
     "homeJoin": {
       "type": "object",
-      "description": "On a computer joining a home with a code (computer.join.start), where the join stands: dialing while it reaches the server, awaiting_approval once the server answered and the owner has not yet added it there, denied once it was not added. server is the server's name, sas the six digits both ends show (null until the server answered), and sentence says where it stands or why it was not added. Absent on every other engine.",
+      "description": "On a computer joining a home with a code (computer.join.start), where the join stands: dialing while it reaches the server, awaiting_approval once the server answered and the owner has not yet added it there, denied once it was not added. server is the server's name, sas the six digits this computer shows once the server answered (null until then), which the owner types where the home asks to add it and which no other screen of the home shows, and sentence says where it stands or why it was not added. Absent on every other engine.",
       "required": ["phase", "server", "sas", "sentence"],
       "additionalProperties": false,
       "properties": {
@@ -6312,7 +6336,7 @@
     },
     "homeComputer": {
       "type": "object",
-      "description": "A computer of the home, as its primary knows it: device_id and name (unique in the home, compared without case); platform macos or linux, null before it said; engine_version, the Fermix version it last said, null before it did; standing, where that version stands against this server's by major.minor (M97: current, behind by at most two minor versions, ahead, or settings_only past that, when it keeps its link for settings alone and offers nothing until it updates), null before it said a version, absent from a server older than it; connected and since (null while not connected); last_seen, when the home last heard it, null before it did; path direct or relay while its session is up and the path is known, else null; offers, what it offers its server in this session (none before its first offers), and while it is away what it last offered; backups, whether it keeps copies of the home's backups.",
+      "description": "A computer of the home, as its primary knows it: device_id and name (unique in the home, compared without case); platform macos or linux, null before it said; engine_version, the Fermix version it last said, null before it did; standing, where that version stands against this server's by major.minor (M97: current, behind by at most two minor versions, ahead, or settings_only past that, when it keeps its link for settings alone and offers nothing until it updates), null before it said a version, absent from a server older than it; connected and since (null while not connected); last_seen, when the home last heard it, null before it did; path direct or relay while its session is up and the path is known, else null; offers, what it offers its server in this session (none before its first offers), and while it is away what it last offered; backups, whether it keeps copies of the home's backups; this_computer, true on the row of the linked computer whose request the server answers (its own row, which its app never offers to remove), false on every other row and to every other caller, absent from a server older than it.",
       "required": ["device_id", "name", "platform", "engine_version", "connected", "since", "last_seen", "path", "offers", "backups"],
       "additionalProperties": false,
       "properties": {
@@ -6326,16 +6350,18 @@
         "last_seen": { "type": ["string", "null"] },
         "path": { "enum": ["direct", "relay", null] },
         "offers": { "type": "array", "maxItems": 32, "items": { "$ref": "#/$defs/computerOffer" } },
-        "backups": { "type": "boolean" }
+        "backups": { "type": "boolean" },
+        "this_computer": { "type": "boolean" }
       }
     },
     "computerOffer": {
       "type": "object",
-      "description": "One thing a computer offers its server. id is files, shell, browser, computer_use, imessage, history, voice, attachments, accessory or notifications; one a newer computer names is kept as it came, and a client that does not know it shows its sentence as it is. state on, off (switched off on that computer, or not reviewed yet) or unavailable (it cannot work there). sentence says why it is not on, in the engine's words, null while on. detail is a short word while on, such as the sandbox mode commands run in (strict, standard or open), else null.",
+      "description": "One thing a computer offers its server. id is files, shell, browser, computer_use, imessage, history, voice, attachments, accessory or notifications; one a newer computer names is kept as it came, and a client that does not know it shows its sentence as it is. label is the words it goes by in the server's own offer list (files, commands, the browser, your screen, Messages, your computer history, voice calls, attachments, the robot, notifications), null for one the server does not know, absent from a server older than it: a client shows it, and the id where it is null or absent. state on, off (switched off on that computer, or not reviewed yet) or unavailable (it cannot work there). sentence says why it is not on, in the engine's words, null while on. detail is a short word while on, such as the sandbox mode commands run in (strict, standard or open), else null.",
       "required": ["id", "state", "sentence", "detail"],
       "additionalProperties": false,
       "properties": {
         "id": { "type": "string", "pattern": "^[a-z][a-z0-9_]{0,31}$" },
+        "label": { "type": ["string", "null"], "minLength": 1 },
         "state": { "enum": ["on", "off", "unavailable"] },
         "sentence": { "type": ["string", "null"], "minLength": 1, "maxLength": 300 },
         "detail": { "type": ["string", "null"], "minLength": 1, "maxLength": 64 }
@@ -6713,7 +6739,7 @@
     },
     "computer_disconnect_params": {
       "type": "object",
-      "description": "confirmed true disconnects even when the server cannot be told; without it, a server that cannot be told is unavailable with the sentence that asks, and nothing changes.",
+      "description": "confirmed true disconnects even when the server cannot be told; without it, a server that cannot be told is unavailable with the sentence that asks, marked details.confirm true, and nothing changes.",
       "additionalProperties": false,
       "properties": { "confirmed": { "type": "boolean" } }
     },
@@ -6745,6 +6771,21 @@
       "properties": {
         "entries": { "type": "array", "maxItems": 200, "items": { "$ref": "#/$defs/computerJournalEntry" } },
         "more": { "type": "boolean" }
+      }
+    },
+    "computer_screen_stop_params": {
+      "type": "object",
+      "description": "None: the person at this computer stops Fermix on its server controlling its screen.",
+      "additionalProperties": false,
+      "properties": {}
+    },
+    "computer_screen_stop_result": {
+      "type": "object",
+      "description": "Whether the server held this computer's screen and was stopped; false when it held nothing.",
+      "required": ["stopped"],
+      "additionalProperties": false,
+      "properties": {
+        "stopped": { "type": "boolean" }
       }
     },
     "computerJournalEntry": {
@@ -6808,7 +6849,7 @@
     },
     "homeEnrollment": {
       "type": "object",
-      "description": "The primary's enrollment window: open until expires_at, used once a candidate enrolled with it, or expired. candidate_id is the candidate that enrolled with it, null until one did. A window opened for a computer that joins the home says purpose computer and carries joiner and joined; a candidate's carries none of the three. Its state is also awaiting_approval while a computer waits for the owner (joiner names it, its system and the six digits it shows), approved once the owner added it (joined names it) and denied once it was not added; the code is spent either way.",
+      "description": "The primary's enrollment window: open until expires_at, used once a candidate enrolled with it, or expired. candidate_id is the candidate that enrolled with it, null until one did. A window opened for a computer that joins the home says purpose computer and carries joiner and joined; a candidate's carries none of the three. Its state is also awaiting_approval while a computer waits for the owner (joiner names it and its system, never the six digits it shows: the owner reads them on the new computer and types them with home.enroll.approve), approved once the owner added it (joined names it) and denied once it was not added; the code is spent either way.",
       "required": ["state", "expires_at", "candidate_id"],
       "additionalProperties": false,
       "properties": {
@@ -6820,12 +6861,11 @@
           "oneOf": [
             {
               "type": "object",
-              "required": ["name", "platform", "sas"],
+              "required": ["name", "platform"],
               "additionalProperties": false,
               "properties": {
                 "name": { "type": "string", "minLength": 1, "maxLength": 128 },
-                "platform": { "enum": ["macos", "linux"] },
-                "sas": { "type": "string", "pattern": "^[0-9]{6}$" }
+                "platform": { "enum": ["macos", "linux"] }
               }
             },
             { "type": "null" }

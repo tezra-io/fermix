@@ -136,6 +136,39 @@ defmodule FermixChannels.Desktop.RelayTest do
     assert {:ok, %{epoch: 6}} = DesktopLink.read(root)
   end
 
+  # tla/specs/computer_invoke: the relay and the invocations' Admission read
+  # one epoch, the file's. A newer one this computer cannot write is never
+  # held in memory alone: the session is not used, and it says why.
+  test "a newer epoch this computer cannot write is not used: refused, said, the file kept" do
+    test = self()
+    primary = DesktopRail.primary!(epoch: 5)
+    root = DesktopRail.desktop_home!(primary, epoch: 3)
+
+    refuse = fn _root, _link, epoch ->
+      send(test, {:recording, epoch})
+      {:error, {:file, Path.join(root, "device/desktop.json"), :enospc}}
+    end
+
+    log =
+      ExUnit.CaptureLog.capture_log(fn ->
+        relay = DesktopRail.start_relay!(root, primary, record_epoch: refuse)
+        assert_receive {:recording, 5}, 10_000
+        assert_receive {:scheduled, {:relay_timer, :reconnect, _token}, 1_000}, 10_000
+        assert_receive {:relay_emit, :degraded, 1, :epoch_not_kept}
+
+        assert %{connected: false, status: :unreachable, epoch: 3, sentence: sentence} =
+                 Relay.status(relay)
+
+        assert sentence ==
+                 "Fermix could not record that the server fermix-vm is a newer copy of this " <>
+                   "computer's home, so it does not use it: the link file could not be " <>
+                   "written (no space left on device). Fermix tries again in 1 s."
+      end)
+
+    assert log =~ "the primary epoch 5 was not kept"
+    assert {:ok, %{epoch: 3}} = DesktopLink.read(root)
+  end
+
   test "a primary that refuses the epoch this desktop has seen is a stale primary too" do
     primary = DesktopRail.primary!(epoch: 4)
     root = DesktopRail.desktop_home!(primary, epoch: 7)

@@ -20,7 +20,8 @@ defmodule FermixCore.Home.AlwaysOnReleaseTest do
 
   @sentence "Always On is not in this release of Fermix yet."
   @gated ~w(home.status home.enroll.approve home.enroll.deny home.act computers.rename
-             computer.join.start computer.join.cancel computer.disconnect computer.journal.list)
+             computer.join.start computer.join.cancel computer.disconnect computer.journal.list
+             computer.screen.stop)
 
   test "a prod build offers Always On only where its home turns it on, dev and test always" do
     refute AlwaysOnRelease.available?(:prod, [])

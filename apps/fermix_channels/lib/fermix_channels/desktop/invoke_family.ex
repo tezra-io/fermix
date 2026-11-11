@@ -6,9 +6,11 @@ defmodule FermixChannels.Desktop.InvokeFamily do
   none.
 
   - **A new session reconciles.** As the computer's peer starts (each
-    session), it asks the computer for the state of every invocation still
-    waited on from it (`Calls.outstanding/2`, one `invoke_status` each);
-    each answer comes back as any other.
+    session), it tells `Calls` (`Calls.reconnected/2`), and each caller
+    still waiting on the computer asks for its invocation's state
+    (`invoke_status`) once it has sent the request, never before: the ask
+    and the request come from one process, in that order. Each answer comes
+    back as any other.
   - **`invoke_result`** (put back together by the peer) goes to `Calls`.
   - **`invoke_part`** frames are put back together here, one part per
     invocation, at most 20 MiB each and #{64} MiB across the computer's;
@@ -86,33 +88,18 @@ defmodule FermixChannels.Desktop.InvokeFamily do
 
   # -- a new session ---------------------------------------------------------------
 
-  # Every invocation still waited on is asked for; a Calls that does not
-  # answer leaves its waiters to their deadlines, said once.
+  # Every caller still waiting on this computer is told, and asks for its own
+  # invocation once its request is sent; a Calls that does not answer leaves
+  # its waiters to their deadlines, said once.
   defp reconcile(state) do
-    for id <- outstanding(state) do
-      event = %{"t" => "invoke_status", "id" => id}
-
-      case Peer.send(state.device_id, event, <<>>, registry: state.registry) do
-        :ok ->
-          :ok
-
-        {:error, reason} ->
-          Logger.warning("invocation #{id}: not asked again: #{inspect(reason)}")
-      end
-    end
-
-    :ok
-  end
-
-  defp outstanding(state) do
-    Calls.outstanding(state.calls, state.device_id)
+    Calls.reconnected(state.calls, state.device_id)
   catch
     :exit, reason ->
       Logger.error(
         "computer #{state.device_id}: its invocations were not asked again: #{inspect(reason)}"
       )
 
-      []
+      :ok
   end
 
   # -- an answer's part ----------------------------------------------------------------

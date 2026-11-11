@@ -5,6 +5,11 @@ defmodule FermixCore.Computers.Offers.ComputerUse do
   use helper installed and, where it is known, the permission to see and
   control the screen. Anything short of that leaves it unavailable, in the
   words of what is missing.
+
+  On, it carries what the server's `computer_use` tool follows (M97 §6.4):
+  its detail is the access level this computer's sandbox mode gives
+  (`strict`, `standard` or `open`; strict is look only), and its helper what
+  this computer's helper offers (`Facts`' `screen`).
   """
 
   @behaviour FermixCore.Computers.Offer
@@ -34,9 +39,16 @@ defmodule FermixCore.Computers.Offers.ComputerUse do
       facts.arch != Map.fetch!(@arches, os) -> {:unavailable, @arch_sentence}
       facts.helpers[:computer_use] != true -> {:unavailable, helper_sentence(machine)}
       facts.permissions[:screen] == false -> {:unavailable, permission_sentence(machine)}
-      true -> Offers.switched(switches, id(), facts, nil)
+      true -> with_helper(Offers.switched(switches, id(), facts, access(facts)), facts)
     end
   end
+
+  defp access(%{sandbox_mode: mode}), do: Atom.to_string(mode)
+
+  defp with_helper({:on, detail}, %{screen: %{actions: [_ | _]} = screen}),
+    do: {:on, detail, Map.take(screen, [:actions, :input_methods])}
+
+  defp with_helper(state, _facts), do: state
 
   @doc "Every sentence this offer says, for the copy rules."
   @spec sentences() :: [String.t()]

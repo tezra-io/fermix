@@ -36,7 +36,7 @@ defmodule FermixCore.Home.Link do
   `:expired`, a computer's join's `:awaiting_approval`, `:approved` or
   `:denied` (M97 §3.1), its `purpose`, when it expires, the `candidate_id`
   that enrolled through it (nil until one did), the `joiner` waiting for the
-  owner (`name`, `platform`, `sas`, or nil) and the computer that joined
+  owner (`name` and `platform`, never its digits, or nil) and the computer that joined
   through it (`joined`, its `device_id` and `name`, nil until one did);
   `nil` when no window is kept. `down_ms` is on the
   monotonic clock, which stops while the computer sleeps

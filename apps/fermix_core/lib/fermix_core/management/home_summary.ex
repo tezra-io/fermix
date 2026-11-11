@@ -138,14 +138,17 @@ defmodule FermixCore.Management.HomeSummary do
   **Computers** (M97 §3.1, §7.5). A linked computer's `on` and the server's
   own `primary` offer Add a computer (`add_computer`, a code a new computer
   joins with). While a computer asks to join (the server's enrollment window
-  `awaiting_approval`), that screen's sentence names it, its system and the
-  six digits it shows, its action is `approve_computer` (needs `sas`, the
-  digits as the owner reads them on the new computer; its key binds the
-  digits shown) and `deny_computer` stands beside it. On the computer that
+  `awaiting_approval`), that screen's sentence names it and its system and
+  asks for the six digits it shows, its action is `approve_computer` (needs
+  `sas`, the digits as the owner reads them on the new computer; its key
+  binds the computer that asks) and `deny_computer` stands beside it. The
+  digits prove the computer the owner looks at is the one asking, so no
+  screen of the home shows them: they are read on the new computer and
+  typed. On the computer that
   joins (`device/join.json`, `Home.Join`), the screen is `creating`, with
   Cancel, while it dials and while it waits for the owner (outcome `running`,
-  then `waiting`, the sentence carrying the digits), and once it was not
-  added, its sentence says why (outcome `failed`). Move back and Restore
+  then `waiting`, the sentence carrying the digits to type), and once it was
+  not added, its sentence says why (outcome `failed`). Move back and Restore
   here are offered only where the home moved from this computer (its moved
   marker): a computer that joined has neither.
 
@@ -332,7 +335,8 @@ defmodule FermixCore.Management.HomeSummary do
   `target`, the one thing it acts on: the server a move goes to
   (`move_now`, `try_again`, `check_again`), the server Forget this server
   drops (`cancel` on a held server), the copy a restore takes
-  (`restore_here`), or nil.
+  (`restore_here`), the computer that asks to join (`approve_computer`, its
+  name and system, never its digits), or nil.
   """
   @spec action_key(String.t(), String.t(), String.t() | nil, [String.t()], String.t() | nil) ::
           String.t()
@@ -478,6 +482,7 @@ defmodule FermixCore.Management.HomeSummary do
       keeps_on: keeps_on(home, {role, link}, host_os, opts),
       offers_review: offers_review(DesktopLink.linked?(record, home), host_os, opts),
       join: if(role == :device, do: Join.view(home)),
+      screen: Map.get(status, :screen),
       server_sandbox: server_sandbox(home, role, reads)
     }
   end
@@ -995,7 +1000,8 @@ defmodule FermixCore.Management.HomeSummary do
   defp joining(_facts), do: nil
 
   # A computer that asks to join the home, on the server's screen and on each
-  # linked computer's: the owner adds it with the digits it shows, or not.
+  # linked computer's: the owner adds it by typing the digits it shows, or
+  # not. Neither screen holds the digits.
   defp asking(%{"state" => state} = view, facts) when state in ["on", "primary"] do
     case joiner(facts) do
       nil -> view
@@ -1007,12 +1013,12 @@ defmodule FermixCore.Management.HomeSummary do
 
   defp ask(view, joiner, facts) do
     deny = action(:deny_computer)
-    values = %{name: joiner.name, system: system(joiner.platform), sas: joiner.sas}
+    values = %{name: joiner.name, system: system(joiner.platform)}
 
     %{
       view
       | "sentence" => sentence(:computer_asks, facts, values),
-        "action" => action(:approve_computer, %{sas: joiner.sas})
+        "action" => action(:approve_computer, %{joiner: "#{joiner.name} (#{joiner.platform})"})
     }
     |> update_in(
       ["detail"],
@@ -1024,8 +1030,8 @@ defmodule FermixCore.Management.HomeSummary do
   # `home.status` on a linked computer.
   defp joiner(%{role: :device} = facts) do
     case get_in(facts, [:primary_home, "enrollment"]) do
-      %{"state" => "awaiting_approval", "joiner" => %{"sas" => sas} = joiner} ->
-        %{name: joiner["name"], platform: joiner["platform"], sas: sas}
+      %{"state" => "awaiting_approval", "joiner" => %{"name" => name} = joiner} ->
+        %{name: name, platform: joiner["platform"]}
 
       _none ->
         nil
@@ -1368,7 +1374,7 @@ defmodule FermixCore.Management.HomeSummary do
   defp target_of(:cancel, %{forget: true}, facts), do: candidate_id(target(facts))
 
   defp target_of(:restore_here, %{copy: name}, _facts), do: name
-  defp target_of(:approve_computer, %{sas: sas}, _facts), do: sas
+  defp target_of(:approve_computer, %{joiner: joiner}, _facts), do: joiner
   defp target_of(_act, _values, _facts), do: nil
 
   defp candidate_id(%{"candidate_id" => id}), do: id
@@ -1658,6 +1664,10 @@ defmodule FermixCore.Management.HomeSummary do
 
     {newest_backup(snapshots), match?(%{"running" => true}, snapshots), failed_tries(snapshots)}
   end
+
+  # A linked computer's mark (M97 §7.4): the app draws it from `home.status`'s
+  # `screen`, so taking and letting go of the screen is a change it is told of.
+  defp drawn(%{role: :device, screen: screen}) when is_map(screen), do: screen
 
   defp drawn(_facts), do: nil
 

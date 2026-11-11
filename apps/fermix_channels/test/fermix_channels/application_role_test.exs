@@ -108,6 +108,18 @@ defmodule FermixChannels.ApplicationRoleTest do
     refute FermixChannels.Desktop.DeviceSupervisor in modules(primary)
   end
 
+  # M97 §6.4: a Mac carries its server's Messages with the helper alone; the
+  # listener, which makes turns, is the primary's.
+  test "only a device carries Messages for its server, and only the primary listens" do
+    %{children: primary} = ChannelsApplication.boot_plan(@ready, "bridge-epoch", :primary)
+    %{children: device} = ChannelsApplication.boot_plan(@ready, "bridge-epoch", :device)
+
+    assert FermixChannels.Channels.IMessage.Bridge in modules(device)
+    refute FermixChannels.Channels.IMessage.Bridge in modules(primary)
+    assert FermixChannels.Channels.IMessage.Bridge in Role.device_only()
+    assert FermixChannels.Channels.IMessage.Supervisor in Role.primary_only()
+  end
+
   # A held transport asks for the restart that would start it; a device's
   # restart starts none, so a device boot holds nothing and asks for nothing.
   test "a device boot holds no transport for setup, so it never waits for a restart" do

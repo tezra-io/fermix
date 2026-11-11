@@ -4,10 +4,14 @@ defmodule FermixCore.Setup.MachineFile do
   that describe the computer an engine runs on rather than the home. They are
   the sections only this machine configures
   (`Management.Placement.device_sections/0`: its sandbox, computer use, screen
-  history, this Mac's Messages, the accessory link, and what Fermix on its
-  server may use on it, `Computers.Switches`), whole, and one key of
-  a home table, `[fermix_core.plugins] dev_local`, the dev plugin folder,
-  which names this machine's own checkouts.
+  history, the accessory link, and what Fermix on its server may use on it,
+  `Computers.Switches`, whose `imessage` switch says this Mac carries
+  Messages), whole, and one key of a home table, `[fermix_core.plugins]
+  dev_local`, the dev plugin folder, which names this machine's own
+  checkouts. `[fermix_channels.imessage]` is the home's: that the home uses
+  iMessage, its owner and its guests travel with it, so a server knows them
+  (§4), and the helper's own state is files under `imessage/` that never
+  leave the Mac (`Home.DeviceLocal`).
 
   The file never travels: it is device-local (`Home.DeviceLocal`), so no
   archive, snapshot or move carries it, a restore leaves these settings out
@@ -28,6 +32,14 @@ defmodule FermixCore.Setup.MachineFile do
   inside the server's account, Fermix's secrets unreadable in every mode),
   and the settings a server inherited from the computer its home came from
   are left out, which `notice/1` says once.
+
+  **Back to the home.** An engine of this milestone's stage 0 wrote
+  `[fermix_channels.imessage]` into `machine.toml`. `homeward/2` says what one
+  boot does about that, before the step above: `config.toml` takes the
+  section from the machine file, replacing any copy of it there, then the
+  machine file loses it, each write atomic. A boot stopped between the two
+  finds the section in both and does the same again, which changes nothing
+  in `config.toml`.
   """
 
   alias FermixCore.Home.Archive.ConfigText
@@ -38,12 +50,13 @@ defmodule FermixCore.Setup.MachineFile do
     "sandbox" => "sandbox",
     "computer_use" => "fermix_core.computer_use",
     "computer_history" => "fermix_core.computer_history",
-    "channels.imessage" => "fermix_channels.imessage",
     "accessories" => "fermix_channels.accessories",
     "computer" => "fermix_core.computer"
   }
   @tables ~w(sandbox fermix_core.computer_use fermix_core.computer_history
-             fermix_channels.imessage fermix_channels.accessories fermix_core.computer)
+             fermix_channels.accessories fermix_core.computer)
+  # Tables an earlier engine kept here that are the home's (`homeward/2`).
+  @homeward ~w(fermix_channels.imessage)
   # The keys of a home table that are this machine's, as table and key.
   @keys [{"fermix_core.plugins", "dev_local"}]
   @server_sandbox_mode :open
@@ -226,6 +239,52 @@ defmodule FermixCore.Setup.MachineFile do
   end
 
   @doc """
+  What one boot does with the home's tables an earlier engine wrote into the
+  machine file (the moduledoc's "Back to the home"): from `config`
+  (`config.toml`'s text, `""` when there is none) and `machine`
+  (`machine.toml`'s, or `:absent`), the new `config.toml`, written first, and
+  the new `machine.toml`; nil for either when it holds none of them.
+  """
+  @spec homeward(String.t(), String.t() | :absent) ::
+          %{config: String.t() | nil, machine: String.t() | nil, moved: [String.t()]}
+  def homeward(config, machine) when is_binary(config) and is_binary(machine) do
+    case Enum.filter(@homeward, &(ConfigText.tables(machine, &1) != [])) do
+      [] ->
+        %{config: nil, machine: nil, moved: []}
+
+      moved ->
+        %{
+          config: home_with(config, machine, moved),
+          machine: without(machine, moved),
+          moved: moved
+        }
+    end
+  end
+
+  def homeward(config, :absent) when is_binary(config),
+    do: %{config: nil, machine: nil, moved: []}
+
+  # The machine file's copy of each table replaces any in config.toml.
+  defp home_with(config, machine, tables) do
+    blocks = Enum.flat_map(tables, &ConfigText.tables(machine, &1))
+    rest = config |> without(tables) |> String.trim_trailing()
+
+    Enum.map_join(Enum.reject([rest | blocks], &(&1 == "")), "\n\n", &String.trim_trailing/1) <>
+      "\n"
+  end
+
+  defp without(text, tables), do: Enum.reduce(tables, text, &ConfigText.drop_tables(&2, &1))
+
+  @doc "What `homeward/2`'s `moved` is said with once it is done, or nil when it moved none."
+  @spec homeward_notice([String.t()]) :: String.t() | nil
+  def homeward_notice([]), do: nil
+
+  def homeward_notice(moved),
+    do:
+      "These settings are the home's, so they moved from #{@name} back to config.toml: " <>
+        Enum.join(moved, ", ") <> "."
+
+  @doc """
   What `plan` is said with once it is done, as a level and a sentence, or nil
   when it changes nothing.
   """
@@ -246,10 +305,19 @@ defmodule FermixCore.Setup.MachineFile do
 
   # A boot stopped between the two writes, or a section written into
   # config.toml by hand since: either way the machine file is what is read.
-  def notice(%{machine: nil, removed: removed}) do
+  def notice(%{machine: nil, removed: removed}), do: dropped_notice(removed)
+
+  @doc """
+  What removing machine settings from `config.toml` is said with (`names`, as
+  `strip/1` names them): at a start (`notice/1`), and at a settings save,
+  which writes `config.toml` from what runs and so never keeps one written
+  there by hand (`Setup.ConfigStore.save_snapshot/2`).
+  """
+  @spec dropped_notice([String.t(), ...]) :: {:warning, String.t()}
+  def dropped_notice([_ | _] = names) do
     {:warning,
      "config.toml held this computer's own settings, which Fermix reads only from #{@name}, " <>
-       "so they were removed from it: #{Enum.join(removed, ", ")}."}
+       "so they were removed from it: #{Enum.join(names, ", ")}."}
   end
 
   @doc """

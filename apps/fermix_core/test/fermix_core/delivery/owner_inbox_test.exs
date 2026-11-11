@@ -169,6 +169,69 @@ defmodule FermixCore.Delivery.OwnerInboxTest do
     end
   end
 
+  describe "for_approval/1 (M97 §14: a sleeping Mac is no inbox for a prompt that waits)" do
+    @owners %{"imessage" => "+15550104477", "telegram" => "owner-t"}
+    @imessage_target [
+      default_delivery_target: %{"channel" => "imessage", "chat_id" => "+15550104477"}
+    ]
+
+    defp carried(connected),
+      do:
+        {:computer,
+         %FermixCore.Computers.Computer{
+           device_id: "d-7",
+           name: "studio Mac",
+           connected: connected
+         }}
+
+    test "iMessage on this Mac keeps its place, configured first" do
+      assert {:ok, %{platform: "imessage", source: :configured}} =
+               OwnerInbox.for_approval(
+                 configured_owners: @owners,
+                 jobs_config: @imessage_target,
+                 imessage_carrier: :here
+               )
+    end
+
+    test "iMessage a computer carries comes after a channel that lives on the server" do
+      assert {:ok, %{platform: "telegram", source: :derived}} =
+               OwnerInbox.for_approval(
+                 configured_owners: @owners,
+                 jobs_config: @imessage_target,
+                 imessage_carrier: carried(true)
+               )
+    end
+
+    test "iMessage a connected computer carries is chosen when it is the only inbox" do
+      assert {:ok, %{platform: "imessage", destination: "+15550104477"}} =
+               OwnerInbox.for_approval(
+                 configured_owners: %{"imessage" => "+15550104477"},
+                 jobs_config: [],
+                 imessage_carrier: carried(true)
+               )
+    end
+
+    test "iMessage is never chosen while the Mac that carries it is away, or nobody carries it" do
+      for carrier <- [carried(false), :none, {:conflict, []}] do
+        assert :no_delivery_target =
+                 OwnerInbox.for_approval(
+                   configured_owners: %{"imessage" => "+15550104477"},
+                   jobs_config: @imessage_target,
+                   imessage_carrier: carrier
+                 )
+      end
+    end
+
+    test "the carrier is not read when no iMessage inbox is a candidate" do
+      assert {:ok, %{platform: "telegram"}} =
+               OwnerInbox.for_approval(
+                 configured_owners: %{"telegram" => "owner-t"},
+                 jobs_config: [],
+                 imessage_carrier: :not_read
+               )
+    end
+  end
+
   describe "derived_candidates/1" do
     test "derivation follows one fixed order: telegram, then signal, then whatsapp" do
       owners = %{"whatsapp" => "owner-w", "signal" => "owner-s", "telegram" => "owner-t"}

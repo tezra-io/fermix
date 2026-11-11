@@ -62,6 +62,8 @@ defmodule Fermix.CLI.ComputerCommandTest do
       end)
 
     assert output =~ "This computer joins your Fermix on studio-mac when Fermix starts here."
+    # The digits are this computer's to show and the owner's to type (M97 §7.5).
+    assert output =~ "It then shows six digits: type them on studio-mac to add it."
     assert Join.present?(ctx.home)
     assert {:ok, _keypair} = ComputerKey.read(ctx.home, store: :keyring)
     assert {:ok, %{role: :device}} = Role.configured(ctx.home)

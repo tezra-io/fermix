@@ -177,7 +177,48 @@ the Fermix app on their Mac, and never asks for the password in the chat. A
 build of the app that cannot open its keychain group has no login store
 (`sign_in_store_unavailable`), and an app too old to sign in
 answers `sign_in_app_too_old`. After a sign-in the pane stays signed in, as
-after the owner signs in there by hand.
+after the owner signs in there by hand. On an Always On server it is that
+Mac's pane, by naming the Mac (below).
+
+## A computer's browser (Always On)
+
+On an Always On server the `browser` tool can run in the browser of one of
+the owner's computers, where their own sign-ins are: name it in `computer`,
+as `## Computers` lists it, when a task needs a site the owner is signed in
+to there or a website login saved in that Mac's Fermix app. Without
+`computer` a call runs in the server's own browser, which has none of them.
+
+- **That computer's browser, as it is there.** Its own profiles and
+  `[fermix_core.browser]` settings, its `allowed_hosts` and network checks;
+  the Fermix app's pane on a Mac with the app open (`backend` `fermix_app`),
+  else its Chrome (`cdp`); the tab the owner granted there
+  (`profile: "selected_tab"`, only on a turn they are in, with the granted
+  tab's narrower set of actions). Every result carries `computer`, and an
+  error starts "On <name>:".
+- **A task stays where it began.** Once a turn's browser ran on a computer,
+  a call that names no computer carries on there; if that computer goes
+  away mid-task the call is refused with when it was last seen, never run
+  in the server's browser instead. Naming another computer moves on, in so
+  many words. The pane task and its tabs and refs last the turn there and
+  end with it, unless `handover` keeps them for the conversation's next
+  turn, as here.
+- **Website logins keep every rule.** The password stays in that Mac's
+  keychain and its app types it, after the owner approves in the chat
+  within a minute; never by voice, from a shared channel, a worker, a cue,
+  a scheduled run or an unattended turn: the server refuses those, and that
+  computer refuses them again.
+- **Files cross as bytes, at most 20 MiB.** A screenshot, a PDF or a
+  download comes back and is kept in the server's own browser folder, and
+  its `path` is that copy (a larger download stays on the computer and the
+  call says so). An upload's `path` is a file in the server's workspace;
+  its bytes go to that computer for the page.
+- **The computer decides.** Its **The browser** switch (This computer, on
+  that computer) must be on; each request is in its journal ("What Fermix
+  did on this computer") by action and host or site, never a page's
+  content. A navigation, a click or a sign-in whose answer is lost is never
+  repeated: the reply says whether it happened is not known
+  (`outcome_unknown`). `computer_refused`, `computer_timed_out`,
+  `computer_cancelled` and `computer_failed` say the rest.
 
 ## Launching Chrome on macOS
 

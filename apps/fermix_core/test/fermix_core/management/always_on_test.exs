@@ -631,7 +631,7 @@ defmodule FermixCore.Management.AlwaysOnTest do
         expires_at: ~U[2031-05-04 12:30:00Z],
         candidate_id: nil,
         purpose: :computer,
-        joiner: %{name: "loft-linux", platform: "linux", sas: "482913"},
+        joiner: %{name: "loft-linux", platform: "linux"},
         joined: nil
       }
 
@@ -1362,7 +1362,7 @@ defmodule FermixCore.Management.AlwaysOnTest do
     end
   end
 
-  defp joiner, do: %{"name" => "loft-linux", "platform" => "linux", "sas" => "482913"}
+  defp joiner, do: %{"name" => "loft-linux", "platform" => "linux"}
 
   # The server's part while its backup runs.
   defp backing_up(script) do

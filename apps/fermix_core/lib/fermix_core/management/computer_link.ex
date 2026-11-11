@@ -15,8 +15,9 @@ defmodule FermixCore.Management.ComputerLink do
       linked to (`Home.Leave.disconnect/2`): the server is told over the
       link, then the key, the link and what the server may use here go,
       and the engine restarts. A server that cannot be told is `unavailable`
-      with the sentence that asks to confirm, and nothing changes;
-      `confirmed: true` disconnects anyway and answers `server_told: false`.
+      with the sentence that asks to confirm, marked `details.confirm`, and
+      nothing changes; `confirmed: true` disconnects anyway and answers
+      `server_told: false`.
 
   Seams in `opts`: `:home`, `:now`, `:restart`, `:key_opts`, `:link_status`
   and `:primary_forward` (the link, on a linked computer).
@@ -71,6 +72,10 @@ defmodule FermixCore.Management.ComputerLink do
       {:ok, told?} ->
         {:ok,
          %{"disconnected" => true, "server_told" => told?, "sentence" => left_sentence(told?)}}
+
+      # A refusal that is a question: `confirmed` turns it into the act.
+      {:error, :not_told} ->
+        {:error, {:confirm, @capability, Leave.error_sentence(:not_told)}}
 
       {:error, reason} ->
         {:error, {:unavailable, @capability, Leave.error_sentence(reason)}}

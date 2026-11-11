@@ -20,6 +20,7 @@ defmodule FermixCore.Management.ProtocolContractTest do
   alias FermixCore.Computers.Journal
   alias FermixCore.Computers.Offers
   alias FermixCore.Computers.Switches
+  alias FermixCore.ComputerUse.Seat
   alias FermixCore.Cues.Config, as: CuesConfig
   alias FermixCore.Home.Candidates, as: HomeCandidates
   alias FermixCore.Home.DesktopLink
@@ -68,6 +69,7 @@ defmodule FermixCore.Management.ProtocolContractTest do
   alias FermixTestSupport.HomeSummaryGoldens
   alias FermixTestSupport.MandateFixtures
   alias FermixTestSupport.SafeRm
+  alias FermixTestSupport.ScreenHelperDouble
 
   @protocol_doc Application.app_dir(:fermix_core, "priv/management/PROTOCOL.md")
   @schema_path Application.app_dir(:fermix_core, "priv/management/protocol.schema.json")
@@ -958,6 +960,37 @@ defmodule FermixCore.Management.ProtocolContractTest do
 
     assert {:ok, answer} = Router.route(request, operation_opts: [home: home])
     assert named_fixture_result("computer_journal_list") == json(answer)
+  end
+
+  # M97 §7.4: the Stop beside the mark a linked computer's app draws while its
+  # server controls the screen. The golden is the answer for a held screen.
+  test "the golden screen stop is the one a computer answers for a held screen" do
+    {spec, _knobs} = ScreenHelperDouble.driver(self())
+    name = :"contract_seat_#{System.unique_integer([:positive])}"
+    home = SafeRm.make_tmp_dir!("contract_seat")
+    on_exit(fn -> SafeRm.rm_rf!(home) end)
+
+    start_supervised!(
+      {Seat,
+       name: name,
+       driver: fn -> {:ok, spec} end,
+       home: home,
+       changed: fn -> :ok end,
+       timer: fn _message, _delay -> make_ref() end}
+    )
+
+    {:ok, _held} = Seat.acquire(name, "cua_golden")
+
+    request = %{
+      request_id: "req-computer-screen-stop-1",
+      protocol_version: 2,
+      method: "computer.screen.stop",
+      params: %{}
+    }
+
+    assert {:ok, answer} = Router.route(request, operation_opts: [seat: name])
+    assert named_fixture_result("computer_screen_stop") == json(answer)
+    assert {:ok, %{"stopped" => false}} = Router.route(request, operation_opts: [seat: name])
   end
 
   # M97 §7.2: a computer linked to its server publishes `computer`, what Fermix
@@ -1900,7 +1933,7 @@ defmodule FermixCore.Management.ProtocolContractTest do
       expires_at: ~U[2031-05-04 10:30:00Z],
       candidate_id: nil,
       purpose: :computer,
-      joiner: %{name: "loft-linux", platform: "linux", sas: "482913"},
+      joiner: %{name: "loft-linux", platform: "linux"},
       joined: nil
     }
 
@@ -2247,19 +2280,21 @@ defmodule FermixCore.Management.ProtocolContractTest do
   end
 
   defp computer_status_goldens do
-    server = server_computers()
+    server = server_computers(nil)
 
     [
       {"home_status_server_computers", server},
-      {"home_status_on_review", on_review(server)},
+      # The server's part a linked Mac reads is the server's answer to its
+      # own forward: its row is marked.
+      {"home_status_on_review", on_review(server_computers(@desktop_id))},
       {"home_status_ready_keeps_on", ready_keeps_on()}
     ]
   end
 
   # The server golden's own facts (`HomeSummaryGoldens`), with its two
   # computers, both desktops of it, and the settings it inherited left out
-  # two days ago.
-  defp server_computers do
+  # two days ago; `asking`, the computer whose forward it answers, or nil.
+  defp server_computers(asking) do
     server = golden_row("home_status_server")
     computers = Computers.list(computer_seams())
     desktops = Enum.map(computers, &Map.take(&1, [:device_id, :name, :connected, :since]))
@@ -2283,7 +2318,8 @@ defmodule FermixCore.Management.ProtocolContractTest do
       update_ceiling: server["update_ceiling"],
       webhooks: server["webhooks"],
       desktops: desktops,
-      computers: computers
+      computers: computers,
+      asking: asking
     })
   end
 

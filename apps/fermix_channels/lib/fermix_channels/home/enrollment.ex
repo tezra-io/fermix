@@ -134,7 +134,7 @@ defmodule FermixChannels.Home.Enrollment do
           purpose: purpose(),
           expires_at: DateTime.t(),
           candidate_id: String.t() | nil,
-          joiner: %{name: String.t(), platform: String.t(), sas: String.t()} | nil,
+          joiner: %{name: String.t(), platform: String.t()} | nil,
           joined: %{device_id: String.t(), name: String.t()} | nil
         }
 
@@ -664,8 +664,11 @@ defmodule FermixChannels.Home.Enrollment do
   defp forget_joiner(%{monitor: monitor}), do: Process.demonitor(monitor, [:flush])
   defp forget_joiner(nil), do: true
 
+  # The computer that waits, never its digits: they prove the computer the
+  # owner looks at is the one asking, so they are read on it and typed here
+  # (M97 §7.5), and no screen of the home may show them.
   defp joiner_view(nil), do: nil
-  defp joiner_view(joiner), do: Map.take(joiner, [:name, :platform, :sas])
+  defp joiner_view(joiner), do: Map.take(joiner, [:name, :platform])
 
   defp expired?(window, state), do: DateTime.compare(state.clock.(), window.expires_at) != :lt
 

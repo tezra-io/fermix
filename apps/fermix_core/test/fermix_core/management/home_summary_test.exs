@@ -99,8 +99,8 @@ defmodule FermixCore.Management.HomeSummaryTest do
       {"a desktop the server forgot", desktop(link_primary: primary(:revoked)), "retired",
        "Fermix moved to your server, and this Mac is no longer connected to it.", "learn_more"},
       {"a computer asking to join the home", desktop(primary_home: asking_home()), "on",
-       "A computer named loft-linux (Linux) asks to join your Fermix. Add it only if it " <>
-         "shows 482 913.", "approve_computer"},
+       "A computer named loft-linux (Linux) asks to join your Fermix. To add it, type the six " <>
+         "digits it shows.", "approve_computer"},
       {"a server's copy retired by a move back",
        device(linked: false, moved: moved_to("studio-mac"), moved_back: true, host_os: :linux),
        "retired", "This copy is retired: Fermix moved back to studio-mac.", "learn_more"},
@@ -1740,13 +1740,16 @@ defmodule FermixCore.Management.HomeSummaryTest do
       assert "add_computer" in ids(HomeSummary.offered(HomeSummary.summary(desktop([]))))
     end
 
+    # The digits prove the computer the owner looks at is the one that asks,
+    # so they are read on the new computer and typed here: no screen of the
+    # home shows them (M97 §7.5).
     test "a computer that asks to join is added with the digits it shows, or not" do
       waiting = %{
         state: :awaiting_approval,
         expires_at: ~U[2031-05-04 12:30:00Z],
         candidate_id: nil,
         purpose: :computer,
-        joiner: %{name: "loft-linux", platform: "linux", sas: "482913"},
+        joiner: %{name: "loft-linux", platform: "linux"},
         joined: nil
       }
 
@@ -1761,25 +1764,33 @@ defmodule FermixCore.Management.HomeSummaryTest do
       assert [%{"id" => "deny_computer", "needs" => []}] = on_server["detail"]["alternatives"]
 
       assert on_server["sentence"] ==
-               "A computer named loft-linux (Linux) asks to join your Fermix. Add it only if " <>
-                 "it shows 482 913."
+               "A computer named loft-linux (Linux) asks to join your Fermix. To add it, type " <>
+                 "the six digits it shows."
 
       home =
         Map.put(server_home([]), "enrollment", %{
           "state" => "awaiting_approval",
           "purpose" => "computer",
-          "joiner" => %{"name" => "loft-linux", "platform" => "linux", "sas" => "482913"}
+          "joiner" => %{"name" => "loft-linux", "platform" => "linux"}
         })
 
       linked = HomeSummary.summary(desktop(primary_home: home))
       assert {linked["state"], linked["action"]["id"]} == {"on", "approve_computer"}
       assert linked["action"]["key"] == on_server["action"]["key"]
 
-      # Other digits are another approval: the key binds the digits shown.
-      other = put_in(home, ["enrollment", "joiner", "sas"], "100200")
+      # Another computer asking is another approval: the key binds the
+      # computer that asks, never digits a screen would have to hold.
+      other = put_in(home, ["enrollment", "joiner", "name"], "attic-linux")
 
       refute HomeSummary.summary(desktop(primary_home: other))["action"]["key"] ==
                linked["action"]["key"]
+
+      # A server older than this one still names the digits; no screen here
+      # draws them, and the key does not move with them.
+      older = put_in(home, ["enrollment", "joiner", "sas"], "482913")
+      from_older = HomeSummary.summary(desktop(primary_home: older))
+      assert from_older["action"]["key"] == linked["action"]["key"]
+      refute from_older["sentence"] =~ "482"
     end
 
     test "a computer that joined is told once on the owner's other screens" do
@@ -1838,7 +1849,11 @@ defmodule FermixCore.Management.HomeSummaryTest do
         )
 
       assert {waiting["state"], waiting["outcome"]} == {"creating", "waiting"}
-      assert waiting["sentence"] =~ "Both show 482 913"
+
+      # The digits are this computer's to show, and the owner's to type where
+      # the home asks.
+      assert waiting["sentence"] ==
+               "Type 482 913 on studio-mac, where it asks you to add this Mac."
 
       said = "studio-mac did not add this computer. Open a new code there to try again."
 
@@ -2079,7 +2094,7 @@ defmodule FermixCore.Management.HomeSummaryTest do
     Map.put(server_home([]), "enrollment", %{
       "state" => "awaiting_approval",
       "purpose" => "computer",
-      "joiner" => %{"name" => "loft-linux", "platform" => "linux", "sas" => "482913"}
+      "joiner" => %{"name" => "loft-linux", "platform" => "linux"}
     })
   end
 

@@ -18,13 +18,23 @@ defmodule FermixCore.Management.IMessage do
   own-account mode is supported.
 
   Off a Mac the channel does not exist, so every method is unavailable there.
+
+  **The recipients are the home's** (M97 §4). On a computer linked to its
+  server they are the server's, asked through the link (`settings.get
+  channels.imessage`) when a confirmation or a read compares them, so this
+  Mac confirms what its server holds; the confirmation itself stays here, on
+  this Mac's screen, and a server can never ask for one. A server that does
+  not answer refuses the confirmation with a sentence of its own.
   """
 
   alias FermixCore.Auth.Redaction
+  alias FermixCore.Home.Link
   alias FermixCore.IMessage, as: Channel
   alias FermixCore.IMessage.Control
   alias FermixCore.IMessage.HelperInstaller
   alias FermixCore.Management.Jobs
+  alias FermixCore.Management.Placement
+  alias FermixCore.Management.Protocol
 
   require Logger
 
@@ -96,7 +106,8 @@ defmodule FermixCore.Management.IMessage do
     set = Keyword.get(opts, :policy_set, &Control.policy_set/1)
 
     fn _job_id, _report ->
-      with {:ok, policy} <- policy_for(config(opts)) do
+      with {:ok, config} <- config(opts),
+           {:ok, policy} <- policy_for(config) do
         confirmed(set.(policy), opts)
       end
     end
@@ -173,8 +184,11 @@ defmodule FermixCore.Management.IMessage do
   defp policy_matches?(%{policy: :confirmed}, opts) do
     reader = Keyword.get(opts, :policy, fn -> Control.policy_get() end)
 
-    case reader.() do
-      {:ok, policy} -> Control.policy_matches_config?(policy, config(opts))
+    with {:ok, policy} <- reader.(),
+         {:ok, config} <- config(opts) do
+      Control.policy_matches_config?(policy, config)
+    else
+      {:error, {:unavailable, _sentence}} -> false
       {:error, reason} -> log_false("policy read", reason)
     end
   end
@@ -186,11 +200,55 @@ defmodule FermixCore.Management.IMessage do
     false
   end
 
-  defp config(opts),
-    do:
-      Keyword.get_lazy(opts, :config, fn ->
-        Application.get_env(:fermix_channels, :imessage, [])
-      end)
+  # The home's owner and guests: this engine's own, or on a linked computer
+  # its server's (the moduledoc).
+  defp config(opts) do
+    case Keyword.fetch(opts, :config) do
+      {:ok, config} -> {:ok, config}
+      :error -> home_config(Keyword.get_lazy(opts, :forwarding, &Link.forwarding/0))
+    end
+  end
+
+  defp home_config(primary_forward: forward) do
+    request = %{
+      request_id: "imessage-recipients",
+      protocol_version: Protocol.protocol_version(),
+      method: "settings.get",
+      params: %{"section" => "channels.imessage"}
+    }
+
+    case forward.(request, deadline_ms: Placement.forward_deadline_ms("settings.get")) do
+      {:ok, %{"rows" => rows}} when is_list(rows) ->
+        {:ok, recipients(rows)}
+
+      other ->
+        Logger.warning(
+          "the server did not give iMessage's recipients: #{Redaction.format(other)}"
+        )
+
+        {:error, {:unavailable, sentence(:server_unreachable)}}
+    end
+  end
+
+  defp home_config([]), do: {:ok, Application.get_env(:fermix_channels, :imessage, [])}
+
+  # The section's rows as the config it was read from; a value that is no
+  # handle is left out, so it can never be confirmed.
+  defp recipients(rows) do
+    values = Map.new(rows, fn row -> {row["key"], row["value"]} end)
+    owner = handle(values["imessage_owner_user_id"])
+    guests = values |> Map.get("imessage_allowed_sender_ids") |> List.wrap()
+
+    [allowed_sender_ids: Enum.flat_map(guests, &List.wrap(handle(&1)))]
+    |> then(&if(owner, do: [{:owner_user_id, owner} | &1], else: &1))
+  end
+
+  defp handle(value) do
+    case Channel.normalize_handle(value) do
+      {:ok, handle} -> handle
+      {:error, :invalid_handle} -> nil
+    end
+  end
 
   defp macos?(opts), do: Keyword.get_lazy(opts, :macos?, &Channel.macos?/0)
 
@@ -211,6 +269,11 @@ defmodule FermixCore.Management.IMessage do
         "separate Apple ID for Fermix, then confirm again."
 
   defp sentence(:timeout), do: "Nobody answered in time. Try again when you are at the Mac."
+
+  defp sentence(:server_unreachable),
+    do:
+      "Your server did not answer with who Fermix may message. Try again when it is " <>
+        "reachable."
 
   # The residue. A helper reason carries its own words and the path it was
   # spawned from, so it goes to the daemon log and the sentence stays fixed.

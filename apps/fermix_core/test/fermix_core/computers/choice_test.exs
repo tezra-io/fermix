@@ -182,6 +182,69 @@ defmodule FermixCore.Computers.ChoiceTest do
     end
   end
 
+  # The browser's rule (M97 §6.4): a task whose browser ran on a computer
+  # carries on there, never moved to this server's own browser silently.
+  defmodule CarriedOn do
+    @moduledoc false
+    def id, do: :browser
+    def offer, do: :browser
+    def here?(_context), do: true
+    def continues_on(context), do: Map.get(context, :carried_on)
+  end
+
+  defp carried_on do
+    Capability.new(%{
+      name: "browse_elsewhere",
+      description: "A tool whose task carries on where it began.",
+      parameters: %{type: "object", properties: %{}},
+      kind: :builtin,
+      executor: {__MODULE__, :run, [self()]},
+      metadata: %{computer: CarriedOn}
+    })
+  end
+
+  defp browsing(sid, computers, carried_on),
+    do: Map.put(context(sid, computers), :carried_on, carried_on)
+
+  describe "a turn whose earlier calls ran on a computer" do
+    setup do
+      mac = %{studio() | offers: [offer("browser", :on)]}
+      %{mac: mac}
+    end
+
+    test "carries on there when the call names none, though this server has it",
+         %{sid: sid, mac: mac} do
+      assert {:ok, %{}, %{computer: %Computer{device_id: "a1"}}} =
+               Choice.resolve(carried_on(), %{}, browsing(sid, [mac], "a1"))
+
+      assert {:ok, %{}, %{computer: :here}} =
+               Choice.resolve(carried_on(), %{}, browsing(sid, [mac], nil))
+    end
+
+    test "is refused when that computer went away, and never runs here", %{sid: sid, mac: mac} do
+      away = %{mac | connected: false, last_seen: ~U[2026-11-09 14:02:00Z]}
+
+      assert {:refused, :away, _sentence} =
+               Choice.resolve(carried_on(), %{}, browsing(sid, [away], "a1"))
+
+      assert {:refused, :no_such_computer, sentence} =
+               Choice.resolve(carried_on(), %{}, browsing(sid, [], "a1"))
+
+      assert sentence =~ "no longer one of yours"
+    end
+
+    test "moves only to a computer the call names", %{sid: sid, mac: mac} do
+      loft = %{loft() | offers: [offer("browser", :on)]}
+
+      assert {:ok, %{}, %{computer: %Computer{device_id: "b2"}}} =
+               Choice.resolve(
+                 carried_on(),
+                 %{"computer" => "loft Linux"},
+                 browsing(sid, [mac, loft], "a1")
+               )
+    end
+  end
+
   test "a tool no computer can run keeps its arguments, a computer key too", %{sid: sid} do
     fetch = Builtin.from_tool_module(WebFetch)
     args = %{"url" => "https://example.test", "computer" => "studio Mac"}

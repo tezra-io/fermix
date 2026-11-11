@@ -12,16 +12,21 @@ defmodule FermixCore.Computers.Offer do
   the ones whose device end lives beside the link.
 
   A state is `{:on, detail}` (a short word or nil, such as the sandbox mode
-  of the shell), `{:off, sentence}` (switched off on this computer, or never
-  switched on) or `{:unavailable, sentence}` (it cannot work here, in the
-  engine's words). Every sentence obeys `Management.Copy`'s rules.
+  of the shell), `{:on, detail, helper}` for an offer that also says what its
+  helper offers (`computer_use`'s actions and input methods, M97 §6.4),
+  `{:off, sentence}` (switched off on this computer, or never switched on) or
+  `{:unavailable, sentence}` (it cannot work here, in the engine's words).
+  Every sentence obeys `Management.Copy`'s rules.
   """
 
   alias FermixCore.Computers.Facts
   alias FermixCore.Computers.Switches
 
   @typedoc "An offer's state on this computer."
-  @type state :: {:on, String.t() | nil} | {:off | :unavailable, String.t()}
+  @type state ::
+          {:on, String.t() | nil}
+          | {:on, String.t() | nil, %{actions: [String.t()], input_methods: [String.t()]}}
+          | {:off | :unavailable, String.t()}
 
   @doc "The offer's id, one of `Switches.offers/0`."
   @callback id() :: Switches.offer()

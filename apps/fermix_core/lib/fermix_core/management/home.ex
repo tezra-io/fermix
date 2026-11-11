@@ -25,10 +25,14 @@ defmodule FermixCore.Management.Home do
       (`macos`, `linux`, or null before it said), `engine_version`,
       `connected`, `since`, `last_seen`, `path` (`direct` or `relay` while
       its session is up and it said, else null), `offers` (each `{id,
-      state, sentence, detail}`: what it offers in its session, nothing
-      before its first offers; while away, what it last offered) and
-      `backups`; empty otherwise. Optional: a server older than the
-      computer record answers none.
+      label, state, sentence, detail}`: what it offers in its session,
+      nothing before its first offers; while away, what it last offered;
+      `label` the words it goes by, `Computers.Offers.label/1`, null for one
+      this engine does not know), `backups` and `this_computer` (true on the
+      row of the linked computer whose forward this answers, so its app
+      never offers Remove on its own row; false everywhere else); empty
+      otherwise. Optional: a server older than the computer record answers
+      none, and one older than `label` and `this_computer` answers neither.
     * `primary_home`: on a linked desktop, the primary's own `home.status`
       (its recovery, enrollment, candidates and move), asked within
       `Management.Placement.composed_deadline_ms/0`; null on any other engine
@@ -37,10 +41,18 @@ defmodule FermixCore.Management.Home do
       status file is a retired copy, so its `snapshots` lists no target: the
       primary's are in `primary_home`.
 
+  `screen` (M97 §7.4): on a linked computer, while Fermix on its server
+  controls this computer's screen, `since` (when it took it) and the
+  `sentence` the app's mark carries, with Stop beside it
+  (`computer.screen.stop`); null while it does not, absent on every other
+  engine. A change tells the Always On watch (`:screen`).
+
   `join` (M97 §3.1): on a computer joining a home (`Home.Join`), `phase`
   (`dialing`, `awaiting_approval` or `denied`), the `server`'s name, `sas`
-  (the six digits both ends show once the server answered, else null) and
-  the `sentence`; absent on every other engine.
+  (the six digits this computer shows once the server answered, which the
+  owner types where the home asks; else null) and the `sentence`; absent on
+  every other engine. The digits are shown here alone: the home's other
+  screens name the computer that asks, never its digits.
 
   Enrollment and the move (`FermixCore.Management.HomeMove`):
 
@@ -153,6 +165,7 @@ defmodule FermixCore.Management.Home do
   alias FermixCore.Computers
   alias FermixCore.Computers.Calls
   alias FermixCore.Computers.Computer
+  alias FermixCore.ComputerUse.Seat
   alias FermixCore.Cues.Config, as: CuesConfig
   alias FermixCore.Home.AlwaysOn
   alias FermixCore.Home.Candidate
@@ -309,7 +322,9 @@ defmodule FermixCore.Management.Home do
       version: Keyword.get_lazy(opts, :version, &BuildInfo.product_version/0),
       webhooks: webhooks(role, opts),
       computers: computers(home, role, opts),
+      asking: asking(opts),
       join: joining(home, role),
+      screen: screen(role, opts),
       restart_hold: restart_hold(move.move, opts)
     }
 
@@ -516,6 +531,10 @@ defmodule FermixCore.Management.Home do
   defp computers(home, %{role: role}, opts),
     do: Keyword.get_lazy(opts, :computers, fn -> Computers.list(home: home, role: role) end)
 
+  # The computer whose request this answers (a linked computer's forward),
+  # which finds its own row marked in `computers`; nil for every other caller.
+  defp asking(opts), do: Computer.asking(Keyword.get(opts, :actor))
+
   # What the primary serves on loopback that the internet must reach, from
   # its applied settings; a source's URL is its sentinel, never a store read.
   # A verb with no engine tree reads a stopped Fermix, which serves nothing.
@@ -590,9 +609,10 @@ defmodule FermixCore.Management.Home do
   null when absent), a linked desktop's `primary_home` and `primary_missing`
   (null when absent), the primary's `disk` (null when absent), the
   `update_ceiling` (null when absent) and the primary's `webhooks` (none when
-  absent) and the primary's `computers` (none when absent), and the server's
-  `update` and `restart_hold` (null when absent). Pure, so the CLI's goldens
-  are built from it.
+  absent) and the primary's `computers` (none when absent, the row of the
+  linked computer `asking` marked), and the server's `update` and
+  `restart_hold` (null when absent). Pure, so the CLI's goldens are built
+  from it.
   """
   @spec picture(%{
           required(:role) => Role.role(),
@@ -615,7 +635,9 @@ defmodule FermixCore.Management.Home do
           optional(:restart_hold) => map() | nil,
           optional(:webhooks) => [map()],
           optional(:computers) => [Computer.t()],
-          optional(:join) => map() | nil
+          optional(:asking) => String.t() | nil,
+          optional(:join) => map() | nil,
+          optional(:screen) => map() | nil | :absent
         }) :: map()
   def picture(
         %{
@@ -648,10 +670,40 @@ defmodule FermixCore.Management.Home do
       "update" => Map.get(facts, :update),
       "restart_hold" => Map.get(facts, :restart_hold),
       "webhooks" => Map.get(facts, :webhooks, []),
-      "computers" => Enum.map(Map.get(facts, :computers, []), &Computer.view/1)
+      "computers" =>
+        Enum.map(Map.get(facts, :computers, []), &Computer.view(&1, Map.get(facts, :asking)))
     }
     |> put_join(Map.get(facts, :join))
+    |> put_screen(Map.get(facts, :screen, :absent))
   end
+
+  # Only on a linked computer: absent everywhere else.
+  defp put_screen(record, :absent), do: record
+  defp put_screen(record, screen), do: Map.put(record, "screen", screen)
+
+  @screen_sentence "Fermix on your server is controlling this screen."
+
+  @doc "The sentence the mark carries while the server controls this screen."
+  @spec screen_sentence() :: String.t()
+  def screen_sentence, do: @screen_sentence
+
+  # This computer's screen while its server controls it (M97 §7.4,
+  # `ComputerUse.Seat`): the view on a linked computer, `:absent` elsewhere.
+  # Seam `:screen` (0-arity, the seat's view).
+  defp screen(%{role: :device}, opts) do
+    case Keyword.get(opts, :screen, &Seat.view/0).() do
+      %{since: %DateTime{} = since} ->
+        %{
+          "since" => since |> DateTime.truncate(:second) |> DateTime.to_iso8601(),
+          "sentence" => @screen_sentence
+        }
+
+      nil ->
+        nil
+    end
+  end
+
+  defp screen(_record, _opts), do: :absent
 
   # Only on a computer that joins a home: absent everywhere else, so a
   # client before the join reads the record it always read.

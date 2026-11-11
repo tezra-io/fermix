@@ -555,6 +555,8 @@ def test_the_shipped_numbered_rubrics_parse():
                       # computers.yaml
                       "how_do_i_connect_my_linux_laptop": 5,
                       "second_mac_without_moving_anything": 5,
+                      "can_you_still_text_me_on_imessage": 4,
+                      "a_text_while_the_mac_sleeps": 3,
                       # coding_agent_models.yaml
                       "lantern_gray_notes": 3, "harbor_mist_todo_scan": 3,
                       # grok_voice.yaml

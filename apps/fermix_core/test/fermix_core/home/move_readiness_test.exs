@@ -41,12 +41,16 @@ defmodule FermixCore.Home.MoveReadinessTest do
 
     [fermix_core.meetings]
     enabled = true
-    """)
 
-    # This Mac's own settings (M97 §4).
-    File.write!(MachineFile.path(home), """
     [fermix_channels.imessage]
     enabled = true
+    """)
+
+    # This Mac's own settings (M97 §4): it carries Messages, which the home
+    # uses (config.toml's [fermix_channels.imessage], the home's own).
+    File.write!(MachineFile.path(home), """
+    [fermix_core.computer]
+    imessage = true
     """)
 
     File.mkdir_p!(Path.join(home, "plugins"))
@@ -108,10 +112,10 @@ defmodule FermixCore.Home.MoveReadinessTest do
 
     assert sentence.("engine_version") == "north-box runs this computer's Fermix."
 
-    # Only what this home uses of what runs here alone is named.
+    # Only what this home uses of what runs here alone is named. iMessage is
+    # not: after the move this Mac carries it for north-box (M97 §6.4).
     assert sentence.("stays_here") ==
-             "iMessage and meetings stop after the move: neither this Mac nor north-box " <>
-               "runs them."
+             "Meetings stop after the move: neither this Mac nor north-box runs them."
 
     # The server reaches the internet for WhatsApp only through a Funnel
     # mount, whose command Always On shows once Fermix runs there, and Meta
@@ -160,7 +164,7 @@ defmodule FermixCore.Home.MoveReadinessTest do
     assert %{status: :ok, sentence: "No coding agent has your approval on this computer."} =
              item.("coding_agents")
 
-    assert %{status: :ok, sentence: "iMessage, voice calls and meetings are not turned on."} =
+    assert %{status: :ok, sentence: "Voice calls and meetings are not turned on."} =
              item.("stays_here")
 
     File.write!(Path.join(ctx.home, "config.toml"), "")
@@ -399,8 +403,9 @@ defmodule FermixCore.Home.MoveReadinessTest do
   end
 
   # M97 §4: what runs only on this computer is read from its machine file; a
-  # section an earlier engine left in config.toml is read by nothing.
-  test "iMessage and StackChan are read from this computer's machine file only", ctx do
+  # section an earlier engine left in config.toml is read by nothing. iMessage
+  # is the home's, and never named: the Mac carries it for its server (§6.4).
+  test "StackChan is read from this computer's machine file only, iMessage never named", ctx do
     File.write!(Path.join(ctx.home, "config.toml"), """
     [fermix_channels.imessage]
     enabled = true
@@ -413,7 +418,7 @@ defmodule FermixCore.Home.MoveReadinessTest do
 
     assert %{items: items} = MoveReadiness.report(ctx.home, ctx.candidate, opts(ctx))
 
-    assert %{status: :ok, sentence: "iMessage, voice calls and meetings are not turned on."} =
+    assert %{status: :ok, sentence: "Voice calls and meetings are not turned on."} =
              item_in(items, "stays_here")
 
     assert MoveReadiness.stays_here(ctx.home, true, unreadable_files: nil) == {:ok, []}

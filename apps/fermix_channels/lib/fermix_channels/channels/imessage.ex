@@ -19,12 +19,18 @@ defmodule FermixChannels.Channels.IMessage do
 
   No typing, no drafts, no reactions, no ephemeral messages: the Messages
   dictionary offers none of them (§21), so they are declared absent.
+
+  On a server (M97 §6.4) the helper is the Mac of the home that carries
+  Messages (`IMessage.ComputerHelper`): while that Mac is asleep or offline a
+  send fails at once with `{:permanent, :carrier_away}`, whose sentence says
+  so, and nothing is kept to send later (D4).
   """
 
   @behaviour FermixChannels.Gateway.Channel
 
   require Logger
 
+  alias FermixChannels.Channels.IMessage.ComputerHelper
   alias FermixChannels.Channels.IMessage.Port, as: HelperPort
   alias FermixChannels.Channels.IMessage.Protocol
   alias FermixChannels.Gateway.Idempotency
@@ -366,6 +372,13 @@ defmodule FermixChannels.Channels.IMessage do
     {:error, {:unexpected_delivery_result, :invalid_contract}}
   end
 
+  # The Mac that carries Messages is asleep or offline (M97 D4): nothing is
+  # kept to send later.
+  defp send_outcome({:error, {kind, message, %{"class" => "computer_away"}}}, key, _duration_us) do
+    Logger.warning("iMessage send #{key} not sent (#{kind}): #{bounded(message)}")
+    {:error, {:permanent, :carrier_away}}
+  end
+
   defp send_outcome({:error, {kind, message, _data}}, key, _duration_us) do
     Logger.warning("iMessage send #{key} refused (#{kind}): #{bounded(message)}")
     {:error, delivery_error(kind)}
@@ -680,11 +693,32 @@ defmodule FermixChannels.Channels.IMessage do
   serving helper: Doctor asks from a tree-less CLI process where no Port runs,
   and the daemon's own answer must be the same one, so there is one path.
   The owner it checks against the account's own aliases is the saved one.
-  `control:`, `home:` and `owner:` are test seams.
+  Off a Mac (M97 §6.4) there is no helper here to probe: health is the
+  posture of the Mac that carries Messages, as this engine's computer
+  helper holds it (`IMessage.ComputerHelper.poll_health/1`), away while that
+  Mac is asleep. `control:`, `home:`, `owner:`, `macos?:` and
+  `carried_health:` are test seams.
   """
   @impl true
   @spec health_check(keyword()) :: FermixChannels.Gateway.Channel.health_result()
   def health_check(opts \\ []) when is_list(opts) do
+    if Keyword.get_lazy(opts, :macos?, &FermixCore.IMessage.macos?/0),
+      do: probed_health(opts),
+      else: carried_health(Keyword.get_lazy(opts, :carried_health, &ComputerHelper.poll_health/0))
+  end
+
+  defp carried_health(%{status: :ready}),
+    do: {:ok, %{detail: "The Mac that carries Messages is connected", latency_ms: 0}}
+
+  defp carried_health(%{status: status, detail: detail}), do: {:error, {status, detail}}
+
+  defp carried_health(nil),
+    do:
+      {:error,
+       {:not_running,
+        "iMessage runs through the Mac that carries Messages, and this engine is not running it"}}
+
+  defp probed_health(opts) do
     control = Keyword.get(opts, :control, Control)
     owner = Keyword.get_lazy(opts, :owner, &configured_owner/0)
     started = System.monotonic_time(:millisecond)

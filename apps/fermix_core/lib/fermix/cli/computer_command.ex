@@ -15,7 +15,7 @@ defmodule Fermix.CLI.ComputerCommand do
   call runs inline, with no command host to own it). Nothing is left behind
   by a refusal. Once it is done, the next start of Fermix here dials the
   server, shows six digits and waits until the owner adds this computer
-  there, comparing the same digits.
+  there by typing them.
 
   Exit status: `0` done, `1` refused (one sentence on stderr), `2` usage
   error.
@@ -99,7 +99,7 @@ defmodule Fermix.CLI.ComputerCommand do
   defp joined(server) do
     IO.puts(
       "This computer joins your Fermix on #{server} when Fermix starts here. It then shows " <>
-        "six digits: add it on #{server} only if the same digits show there."
+        "six digits: type them on #{server} to add it."
     )
 
     0

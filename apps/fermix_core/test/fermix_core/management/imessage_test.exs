@@ -241,6 +241,77 @@ defmodule FermixCore.Management.IMessageTest do
     end
   end
 
+  # M97 §4: on a computer linked to its server the owner and guests are the
+  # home's, asked of the server; the confirmation stays on this Mac's screen.
+  describe "on a Mac linked to its server" do
+    defp forwarding(answer) do
+      test_pid = self()
+
+      [
+        primary_forward: fn request, opts ->
+          send(test_pid, {:forwarded, request, opts})
+          answer
+        end
+      ]
+    end
+
+    defp section(owner, guests),
+      do:
+        {:ok,
+         %{
+           "id" => "channels.imessage",
+           "rows" => [
+             %{"key" => "imessage_owner_user_id", "value" => owner},
+             %{"key" => "imessage_allowed_sender_ids", "value" => guests},
+             %{"key" => "imessage_enabled", "value" => true}
+           ]
+         }}
+
+    test "the confirmation asks the server for the recipients and confirms them here", ctx do
+      test_pid = self()
+      set = fn policy -> send(test_pid, {:confirming, policy}) && {:ok, %{}} end
+
+      opts =
+        sources(jobs: ctx.jobs, policy_set: set)
+        |> Keyword.delete(:config)
+        |> Keyword.put(
+          :forwarding,
+          forwarding(section("+1 555 010 4477", ["Friend@Example.org"]))
+        )
+
+      assert {:ok, started} = IMessage.policy_confirm(opts)
+      assert %{"status" => "completed"} = await(started, ctx.jobs)
+
+      assert_received {:forwarded, %{method: "settings.get", params: params}, _opts}
+      assert params == %{"section" => "channels.imessage"}
+
+      assert_received {:confirming, %{owner_handle: "+15550104477", handles: handles}}
+
+      assert Enum.sort(handles) == ["+15550104477", "friend@example.org"]
+    end
+
+    test "a server that does not answer refuses the confirmation in its own words", ctx do
+      set = fn _policy -> flunk("nothing is confirmed without the server's recipients") end
+
+      opts =
+        sources(jobs: ctx.jobs, policy_set: set)
+        |> Keyword.delete(:config)
+        |> Keyword.put(:forwarding, forwarding({:error, :primary_unreachable, %{}}))
+
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          assert {:ok, started} = IMessage.policy_confirm(opts)
+
+          assert %{"failure" => %{"code" => "unavailable", "sentence" => sentence}} =
+                   await(started, ctx.jobs)
+
+          assert sentence =~ "Your server did not answer with who Fermix may message"
+        end)
+
+      assert log =~ "the server did not give iMessage's recipients"
+    end
+  end
+
   defp sources(overrides \\ []) do
     Keyword.merge(
       [

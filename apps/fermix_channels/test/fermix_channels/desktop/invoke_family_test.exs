@@ -43,6 +43,8 @@ defmodule FermixChannels.Desktop.InvokeFamilyTest do
       Calls.register(ctx.calls, %{
         id: id,
         device_id: @device,
+        capability: "files",
+        op: "read",
         caller: self(),
         effect?: false,
         started_at: DateTime.utc_now(),
@@ -50,13 +52,83 @@ defmodule FermixChannels.Desktop.InvokeFamilyTest do
       })
   end
 
-  test "a new session asks the computer for every invocation still waited on", ctx do
+  test "a new session tells everyone still waiting on the computer, and asks nothing itself",
+       ctx do
     waited_on(ctx, "inv-a")
     waited_on(ctx, "inv-b")
     _state = init(ctx)
 
-    assert_receive {:mobile_event, %{"t" => "invoke_status", "id" => "inv-a"}}
-    assert_receive {:mobile_event, %{"t" => "invoke_status", "id" => "inv-b"}}
+    assert_receive {:computer_invoke, "inv-a", :reconnected}
+    assert_receive {:computer_invoke, "inv-b", :reconnected}
+    refute_received {:mobile_event, %{"t" => "invoke_status"}}
+  end
+
+  # The real link, held by the test just before the request goes: the
+  # moment a new session can start in.
+  defmodule HeldLink do
+    @moduledoc false
+    @behaviour FermixCore.Computers.Transport
+
+    alias FermixChannels.Desktop.InvokeTransport
+
+    @impl true
+    def open(device_id, header, payload, part, opts) do
+      send(Keyword.fetch!(opts, :test), {:opening, header["id"], self()})
+      receive do: (:go -> :ok)
+      InvokeTransport.open(device_id, header, payload, part, opts)
+    end
+
+    @impl true
+    def cancel(device_id, about, opts), do: InvokeTransport.cancel(device_id, about, opts)
+
+    @impl true
+    def status(device_id, about, opts), do: InvokeTransport.status(device_id, about, opts)
+  end
+
+  # M97 §6.3 and tla/specs/computer_invoke: the computer is asked about a
+  # request only once it was sent, so its answer that it has no record is
+  # never followed by the request itself.
+  test "a session that starts before a request is sent asks about it only after it", ctx do
+    computer = %FermixCore.Computers.Computer{
+      device_id: @device,
+      name: "studio Mac",
+      connected: true,
+      offers: [%{id: "files", state: :on, sentence: nil, detail: nil}]
+    }
+
+    turn = %{session_id: "main-44", computer_use_origin: :interactive, source_trust: :operator}
+
+    opts = [
+      calls: ctx.calls,
+      transport: {HeldLink, [test: self(), registry: ctx.peers]},
+      epoch: 3
+    ]
+
+    alias FermixCore.Computers.Capabilities.System, as: Echo
+
+    task =
+      Task.async(fn ->
+        FermixCore.Computers.call(computer, Echo, "echo", %{"text" => "hi"}, turn, opts)
+      end)
+
+    assert_receive {:opening, id, caller}
+    state = init(ctx)
+    send(caller, :go)
+
+    assert_receive {:mobile_event, %{"t" => first, "id" => ^id}}
+    assert first == "invoke_open"
+
+    assert_receive {:mobile_event,
+                    %{
+                      "t" => "invoke_status",
+                      "id" => ^id,
+                      "capability" => "system",
+                      "op" => "echo"
+                    }}
+
+    fields = %{"id" => id, "status" => "ok", "duration_ms" => 2}
+    {:ok, _state} = InvokeFamily.handle_event("invoke_result", fields, ~s({"text":"hi"}), state)
+    assert {:ok, %FermixCore.Computers.Outcome{status: :ok}} = Task.await(task)
   end
 
   test "an answer goes to the one who waits on it", ctx do
@@ -92,6 +164,7 @@ defmodule FermixChannels.Desktop.InvokeFamilyTest do
   test "a part with a gap or past its size is told failed, and its later frames dropped", ctx do
     waited_on(ctx, "inv-g")
     state = init(ctx)
+    assert_receive {:computer_invoke, "inv-g", :reconnected}
     frame = %{"id" => "inv-g", "size_bytes" => 6}
 
     ExUnit.CaptureLog.capture_log(fn ->

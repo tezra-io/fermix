@@ -300,6 +300,14 @@ defmodule Mix.Tasks.Fermix.Cues.LoadTest do
       assert_raise Mix.Error, ~r/At most 5 sources/, fn -> Load.plan!([]) end
     end
 
+    # The settings are two files; a refusal names the one that failed.
+    test "names machine.toml when it is the file that cannot be read", ctx do
+      File.mkdir!(Path.join(ctx.home, "machine.toml"))
+      error = assert_raise Mix.Error, fn -> Load.plan!([]) end
+      assert error.message =~ "#{Path.join(ctx.home, "machine.toml")} could not be read"
+      refute error.message =~ "config.toml"
+    end
+
     test "refuses a home with no enabled local_push source", ctx do
       write_config(ctx.home, [])
 

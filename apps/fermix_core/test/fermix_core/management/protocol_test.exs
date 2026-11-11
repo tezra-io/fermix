@@ -167,6 +167,7 @@ defmodule FermixCore.Management.ProtocolTest do
              "computer.join.cancel",
              "computer.disconnect",
              "computer.journal.list",
+             "computer.screen.stop",
              "accessories.status",
              "accessories.pair.start",
              "accessories.pair.begin",

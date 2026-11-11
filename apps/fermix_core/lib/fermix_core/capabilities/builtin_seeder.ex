@@ -171,9 +171,12 @@ defmodule FermixCore.Capabilities.BuiltinSeeder do
   ]
 
   # Computer use: the single tool is seeded only when `ComputerUse.ready?()`
-  # (enabled + sidecar installed + OS permissions granted). Disabled-or-unready =
-  # zero residue: the LLM never sees a tool it cannot run. Re-evaluated each boot,
-  # which (with the save+restart enable flow) is the readiness-transition trigger.
+  # (enabled + sidecar installed + OS permissions granted), or on a primary that
+  # may drive a computer's screen (`ComputerUse.drives_computers?/1`, M97 §6.4),
+  # where each turn offers it only while a screen is in reach (its
+  # `advertise?/1`). Neither = zero residue: the LLM never sees a tool it cannot
+  # run. Re-evaluated each boot, which (with the save+restart enable flow) is the
+  # readiness-transition trigger.
   @computer_use_tool_modules [FermixCore.Tools.ComputerUse]
 
   # Meetings notetaker (MILESTONE_21 C2 §14.1): seeded only when
@@ -302,7 +305,7 @@ defmodule FermixCore.Capabilities.BuiltinSeeder do
       :error ->
         @builtin_tool_modules ++
           bridge_modules() ++
-          computer_use_modules() ++
+          computer_use_modules([]) ++
           auto_harness_modules() ++ meetings_modules() ++ cue_modules()
     end
   end
@@ -322,8 +325,23 @@ defmodule FermixCore.Capabilities.BuiltinSeeder do
     if Deferral.enabled?(), do: @bridge_tool_modules, else: []
   end
 
-  defp computer_use_modules do
-    if ComputerUse.ready?(), do: @computer_use_tool_modules, else: []
+  @doc """
+  The computer-use tool, when this boot can reach a screen: its own
+  (`:ready?`, `ComputerUse.ready?/0`) or a computer's (`:drives_computers?`,
+  `ComputerUse.drives_computers?/1`). The second is off under `mix test`
+  (compile-time env), so the shared test registry is not perturbed; a test
+  passes it.
+  """
+  @spec computer_use_modules(keyword()) :: [module()]
+  def computer_use_modules(opts) when is_list(opts) do
+    ready? = Keyword.get_lazy(opts, :ready?, &ComputerUse.ready?/0)
+
+    computers? =
+      Keyword.get_lazy(opts, :drives_computers?, fn ->
+        @compiled_env != :test and ComputerUse.drives_computers?()
+      end)
+
+    if ready? or computers?, do: @computer_use_tool_modules, else: []
   end
 
   defp meetings_modules do

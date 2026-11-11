@@ -26,6 +26,7 @@ defmodule FermixCore.Application do
   alias FermixCore.ComputerHistory
   alias FermixCore.ComputerHistory.Supervisor, as: ComputerHistorySupervisor
   alias FermixCore.ComputerUse
+  alias FermixCore.ComputerUse.Seat, as: ComputerUseSeat
   alias FermixCore.ComputerUse.Supervisor, as: ComputerUseSupervisor
   alias FermixCore.Cues
   alias FermixCore.Cues.Supervisor, as: CuesSupervisor
@@ -400,7 +401,8 @@ defmodule FermixCore.Application do
         maybe_daemon_socket(),
         maybe_native_host(),
         maybe_realtime_supervisor(),
-        maybe_computer_use_supervisor(),
+        maybe_computer_use_supervisor(role),
+        maybe_screen_seat(role),
         maybe_computer_history_supervisor(),
         maybe_skill_curation_scheduler(),
         # Says where a scheduled job's or a cue's message came from on the
@@ -605,15 +607,30 @@ defmodule FermixCore.Application do
   end
 
   # Same gate as tool registration (`ComputerUse.ready?/0`): the session
-  # infrastructure boots only when computer use is enabled, the sidecar is
-  # installed, and OS permissions are granted. Off/unready (the default) starts
+  # infrastructure boots when computer use is enabled and the sidecar is
+  # installed; and on an engine that may drive a computer's screen or have its
+  # own driven by its server (M97 §6.4), which spawns no helper until asked.
+  # The second half is gated on the compile-time env, as the scheduler's is:
+  # `mix test` starts the tree it tests itself. Off (the default) starts
   # nothing — no OS-driver process is ever spawned.
-  defp maybe_computer_use_supervisor do
-    if ComputerUse.ready?() do
+  defp maybe_computer_use_supervisor(role) do
+    if ComputerUse.ready?() or (@compiled_env != :test and computer_screens?(role)) do
       [ComputerUseSupervisor]
     else
       []
     end
+  end
+
+  defp computer_screens?(role),
+    do: ComputerUse.drives_computers?(role: role) or ComputerUse.driven?(role: role)
+
+  # This computer's screen while its server drives it (M97 §6.4,
+  # `ComputerUse.Seat`): only on a linked computer with the helper installed,
+  # and never under `mix test`, which starts its own with a driver double.
+  defp maybe_screen_seat(role) do
+    if @compiled_env != :test and ComputerUse.driven?(role: role),
+      do: [ComputerUseSeat],
+      else: []
   end
 
   # Computer History (MILESTONE_32 §6.3): the always-present, inert supervisor

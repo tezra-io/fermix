@@ -17,7 +17,8 @@ defmodule FermixCore.Delivery.ErrorTest do
     :invalid_destination,
     :malformed_request,
     :remote_rejected,
-    :adapter_unavailable
+    :adapter_unavailable,
+    :carrier_away
   ]
 
   @transport_kinds [

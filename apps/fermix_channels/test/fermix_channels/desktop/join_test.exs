@@ -35,10 +35,14 @@ defmodule FermixChannels.Desktop.JoinTest do
     %{primary: primary, joiner: joiner, restart: restart}
   end
 
-  test "joins, is added with the digits both ends show, and its relay connects", ctx do
+  test "joins, is added with the digits it shows, and its relay connects", ctx do
     worker = start_worker(ctx)
     sas = await_digits(ctx)
-    assert %{joiner: %{sas: ^sas}} = await_window(ctx)
+
+    # The server's window names the computer and never its digits: the owner
+    # types the ones the new computer shows, and those approve it.
+    assert %{joiner: joiner} = await_window(ctx)
+    refute Map.has_key?(joiner, :sas)
 
     assert {:ok, %{device_id: id, name: "loft-linux"}} =
              Enrollment.approve(ctx.primary.enrollment, sas)

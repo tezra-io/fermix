@@ -21,7 +21,8 @@ defmodule FermixCore.Home.Join do
 
   The device tree dials the server while the file is here
   (`FermixChannels.Desktop.Join`), and records what it learns (`record/3`):
-  `dialing`, `awaiting_approval` with the six digits both ends show, or
+  `dialing`, `awaiting_approval` with the six digits it shows, which the
+  owner types on the server, or
   `denied` with the sentence that says why; the code's secret leaves the
   file once denied. `finish/3` takes the server's approval: this
   computer's switches, every offer off and reviewed (M97 §7.3: a computer
@@ -173,8 +174,9 @@ defmodule FermixCore.Home.Join do
 
   @doc """
   The join as `home.status` shows it on the computer that joins: its phase,
-  the server's name, the six digits once both ends show them, and the
-  sentence; nil when no join is under way.
+  the server's name, the six digits once the server answered (shown here
+  alone, for the owner to type on the server), and the sentence; nil when no
+  join is under way.
   """
   @spec view(Path.t()) :: map() | nil
   def view(home) when is_binary(home) and home != "" do

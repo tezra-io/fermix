@@ -3836,21 +3836,21 @@ defmodule FermixCore.Setup.ConfigStoreTest do
       end
     end
 
-    test "an enabled section off a Mac refuses with the typed platform error", %{home: home} do
+    # M97 §6.4: a home that moved to a server keeps its iMessage section, and
+    # runs it through the Mac that carries Messages.
+    test "an enabled section loads off a Mac, owner and guests kept", %{home: home} do
       write_config!(home, """
       [fermix_channels.imessage]
       enabled = true
       owner_user_id = "+15551234567"
+      allowed_sender_ids = ["friend@example.com"]
       """)
 
-      assert ConfigStore.load_runtime_config(macos?: false) ==
-               {:error, {:unsupported_platform, :imessage}}
-
-      assert ConfigStore.load_error_sentence({:unsupported_platform, :imessage}) ==
-               "imessage runs only on the Mac whose Messages it reads"
-
-      assert ConfigStore.bootstrap_runtime_config(supervised: false, macos?: false) ==
-               {:error, {:unsupported_platform, :imessage}}
+      assert {:ok, loaded} = ConfigStore.load_runtime_config(macos?: false)
+      section = Keyword.fetch!(loaded.fermix_channels, :imessage)
+      assert section[:enabled] == true
+      assert section[:owner_user_id] == "+15551234567"
+      assert section[:allowed_sender_ids] == ["friend@example.com"]
     end
 
     test "a disabled section loads off a Mac", %{home: home} do
@@ -3879,8 +3879,9 @@ defmodule FermixCore.Setup.ConfigStoreTest do
       snapshot = %{fermix_core: [], fermix_channels: [imessage: section], fermix_web: []}
 
       assert :ok = ConfigStore.save_snapshot(snapshot)
-      contents = File.read!(Path.join(home, "machine.toml"))
+      contents = File.read!(Path.join(home, "config.toml"))
       assert contents =~ "[fermix_channels.imessage]"
+      refute File.read!(Path.join(home, "machine.toml")) =~ "[fermix_channels.imessage]"
       refute contents =~ "posture"
       refute contents =~ ~r/\[fermix_channels\.imessage\][^\[]*mode =/
 
@@ -3907,7 +3908,9 @@ defmodule FermixCore.Setup.ConfigStoreTest do
     end
 
     # This Mac's own section (M97 §4).
-    defp write_config!(home, contents), do: File.write!(Path.join(home, "machine.toml"), contents)
+    # The home's section (M97 §4): that the home uses iMessage, its owner
+    # and its guests travel with it.
+    defp write_config!(home, contents), do: File.write!(Path.join(home, "config.toml"), contents)
   end
 
   # `[fermix_channels.accessories]` (M91 Phase A): one switch, off when the

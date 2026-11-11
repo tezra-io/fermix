@@ -147,6 +147,12 @@ config :fermix_core, :home_link, FermixChannels.Home.Link
 # above (`FermixCore.Computers.Transport`).
 config :fermix_core, :computers_transport, FermixChannels.Desktop.InvokeTransport
 
+# Every offer a computer reports, the device ends beside the link included
+# (M97 §3.2): the module whose `modules/0` lists them, so `home.status` names
+# each offer in its own words. Injected by module for the same reason as the
+# dispatcher above (`FermixCore.Computers.Offers.label/1`).
+config :fermix_core, :computer_offers, FermixChannels.Desktop.Offers
+
 # Where the primary keeps snapshots beyond S3 (M75 §8, D19): its connected
 # desktops, over the rail. Injected by module for the same reason as the
 # dispatcher above; the scheduler writes to `Snapshot.S3` and then these

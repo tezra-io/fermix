@@ -32,7 +32,10 @@ defmodule FermixChannels.Desktop.Relay do
   The `hello_ack` decides the rest. One with a lower primary epoch, or none,
   comes from a stale primary (a retired copy that kept the identity): the
   relay closes the session, says so, and keeps the epoch it holds. A higher
-  one is recorded. A route with another relay revision is recorded too, so
+  one is recorded in `device/desktop.json` before anything relies on it, the
+  one place it lives (the invocations' Admission reads it there); one this
+  computer cannot write leaves the session unused, said, and tried again
+  with the backoff. A route with another relay revision is recorded too, so
   the next `hello` acknowledges it and the primary may use it, and so are
   the route's address hints, an Always On server's tailnet addresses at its
   fixed port (`FermixChannels.Mobile.Iroh.Hints`), none when it gives none.
@@ -123,7 +126,7 @@ defmodule FermixChannels.Desktop.Relay do
   | media | 256 frames | the fetch fails `busy`, its blob's later frames are dropped |
   | loopback | 64 events | the event is dropped |
   | snapshots | 256 frames | the copy is refused (`write_failed`), its later frames dropped |
-  | invocations | 512 events in `Desktop.Invoke`'s Admission | the event is dropped; the server asks for the state of what it waits on |
+  | invocations | 512 events in `Desktop.Invoke`'s Admission | the event is dropped, unanswered: the server waits out its deadline, or asks at the next session |
 
   A family whose process is not running has its events dropped until it
   runs again; a media fetch's waiters are told so. Each run of drops is
@@ -183,7 +186,8 @@ defmodule FermixChannels.Desktop.Relay do
   `:status_changed` (a 0-arity call in place of telling the Always On
   watch), `:families` (the `media`, `loopback` and `snapshots` processes,
   by name or pid), `:write` (in place of `Rail.send_event/4`, run in the
-  writer) and `:key_opts` (handed to `ComputerKey`: its secret writer).
+  writer), `:key_opts` (handed to `ComputerKey`: its secret writer) and
+  `:record_epoch` (3-arity, in place of `DesktopLink.record_epoch/3`).
   """
 
   use GenServer
@@ -493,6 +497,7 @@ defmodule FermixChannels.Desktop.Relay do
         Keyword.get(opts, :emit, &ChannelTelemetry.emit_transport(:desktop_relay, &1, &2, &3)),
       status_changed: Keyword.get(opts, :status_changed, fn -> StatusWatch.changed(:link) end),
       key_opts: Keyword.get(opts, :key_opts, []),
+      record_epoch: Keyword.get(opts, :record_epoch, &DesktopLink.record_epoch/3),
       offers: Keyword.get(opts, :offers, ComputerSwitches.listener()),
       computer_caps: %{},
       link: nil,
@@ -903,7 +908,13 @@ defmodule FermixChannels.Desktop.Relay do
   end
 
   defp connected(epoch, fields, state) do
-    link = state.link |> keep_epoch(epoch, state.root) |> keep_route(fields, state.root)
+    case keep_epoch(state.link, epoch, state) do
+      {:ok, link} -> session_up(keep_route(link, fields, state.root), fields, state)
+      {:error, reason} -> drop_session({:epoch_not_kept, epoch, reason}, state)
+    end
+  end
+
+  defp session_up(link, fields, state) do
     max_media = media_bound(get_in(fields, ["caps", "max_media_bytes"]))
     caps = Map.get(fields, "caps", %{})
     :ok = state.status_changed.()
@@ -964,16 +975,23 @@ defmodule FermixChannels.Desktop.Relay do
 
   defp media_bound(_unsaid), do: @default_max_media_bytes
 
-  # The epoch the file holds is raised before anything relies on it; a write
-  # that fails keeps the higher value for this run and says so.
-  defp keep_epoch(link, epoch, root) do
-    case DesktopLink.record_epoch(root, link, epoch) do
+  # The epoch the file holds is raised before anything relies on it, and the
+  # file is the one place it lives: `Desktop.Invoke`'s Admission reads it
+  # there for every request. A newer epoch this computer cannot write is
+  # never held in memory alone: the session is not used, said once here and
+  # in the status, and tried again with the backoff.
+  defp keep_epoch(link, epoch, state) do
+    case state.record_epoch.(state.root, link, epoch) do
       {:ok, link} ->
-        link
+        {:ok, link}
 
-      {:error, reason} ->
-        Logger.error("desktop relay: the primary epoch #{epoch} was not kept: #{inspect(reason)}")
-        %{link | epoch: max(link.epoch, epoch)}
+      {:error, reason} = error ->
+        Logger.error(
+          "desktop relay: the primary epoch #{epoch} was not kept, so the session is not used: " <>
+            inspect(reason)
+        )
+
+        error
     end
   end
 
@@ -1354,8 +1372,10 @@ defmodule FermixChannels.Desktop.Relay do
   # -- the invocations (M97 §6.2) --------------------------------------------------------
 
   # A request, its part's frames, a cancel or a status ask, each as it came.
-  # One that cannot be handed is dropped: the server asks for its state once
-  # it waits on it, and hears it was never taken.
+  # One that cannot be handed is dropped and answered by nothing: while the
+  # session stays up the server waits out its deadline (an effect ends not
+  # known, a read timed out); only a session that ends first has the server
+  # ask for its state at the next one, and hear that there is no record.
   defp invocation(type, fields, payload, state) do
     case hand_off(state, :invoke, &Invoke.handle(&1, type, fields, payload)) do
       :handed ->
@@ -1961,11 +1981,21 @@ defmodule FermixChannels.Desktop.Relay do
       "(#{stale_epochs(mine, theirs)}), so Fermix does not use it."
   end
 
+  defp down_sentence({:epoch_not_kept, _epoch, reason}, state) do
+    "Fermix could not record that the server #{state.link.primary.name} is a newer copy of " <>
+      "this computer's home, so it does not use it: #{unkept(reason)}."
+  end
+
   defp down_sentence({:renewed_again, _renewals}, state),
     do: "The server #{state.link.primary.name} ends this computer's session each time it opens."
 
   defp down_sentence(reason, state),
     do: "The server #{state.link.primary.name} is unreachable: #{why(reason)}."
+
+  defp unkept({:file, _path, posix}),
+    do: "the link file could not be written (#{:file.format_error(posix)})"
+
+  defp unkept({:invalid_link, _path, field}), do: "the link file's #{field} is not valid"
 
   defp stale_epochs(mine, :refused),
     do: "it is behind epoch #{mine}, which this computer has seen"
@@ -1993,6 +2023,7 @@ defmodule FermixChannels.Desktop.Relay do
   defp error_class({:dial, _reason}), do: :helper
   defp error_class({:remote, _code, _text}), do: :remote_closed
   defp error_class({:stale_primary, _mine, _theirs}), do: :stale_primary
+  defp error_class({:epoch_not_kept, _epoch, _reason}), do: :epoch_not_kept
   defp error_class({:renewed_again, _renewals}), do: :renewed_again
   defp error_class({:handshake, _reason}), do: :handshake
   defp error_class({:protocol_error, _reason}), do: :protocol

@@ -130,7 +130,9 @@ defmodule FermixCore.Setup.ConfigStoreMachineTest do
       assert ConfigText.value(machine, "fermix_core.computer_history", "summarizer") ==
                {:ok, ~s("default")}
 
-      assert ConfigText.value(machine, "fermix_channels.imessage", "enabled") == {:ok, "true"}
+      # The home uses iMessage, with its owner and guests (M97 §4).
+      assert ConfigText.value(config, "fermix_channels.imessage", "enabled") == {:ok, "true"}
+      refute machine =~ "imessage"
       assert ConfigText.value(machine, "fermix_channels.accessories", "enabled") == {:ok, "true"}
       assert ConfigText.value(machine, "fermix_core.plugins", "dev_local") != :absent
       refute machine =~ "Orchard"
@@ -167,7 +169,8 @@ defmodule FermixCore.Setup.ConfigStoreMachineTest do
 
       assert loaded.sandbox.mode == :standard
       assert loaded.sandbox.allowed_roots == []
-      assert Keyword.fetch!(loaded.fermix_channels, :imessage) == []
+      # The home's own: read from config.toml, on a host that is no Mac too.
+      assert Keyword.fetch!(loaded.fermix_channels, :imessage)[:owner_user_id] == "+15550100231"
       assert Keyword.fetch!(loaded.fermix_core, :computer_use)[:enabled] == false
       refute Keyword.has_key?(Keyword.fetch!(loaded.fermix_core, :plugins), :dev_local)
       assert Keyword.fetch!(loaded.fermix_core, :agent)[:name] == "Orchard"
@@ -181,12 +184,32 @@ defmodule FermixCore.Setup.ConfigStoreMachineTest do
       File.write!(Path.join(ctx.home, "config.toml"), @old_config)
 
       assert ConfigStore.misplaced_machine_settings(ctx.home) ==
-               {:ok, ~w(sandbox fermix_core.computer_use fermix_channels.imessage
-                        fermix_core.plugins.dev_local)}
+               {:ok, ~w(sandbox fermix_core.computer_use fermix_core.plugins.dev_local)}
 
       {home_only, _removed} = MachineFile.strip(@old_config)
       File.write!(Path.join(ctx.home, "config.toml"), home_only)
       assert ConfigStore.misplaced_machine_settings(ctx.home) == {:ok, []}
+    end
+
+    # A save writes config.toml from what runs, which never holds those, so
+    # it drops them: it says which, in the sentence a start says it with.
+    test "a save that drops machine settings from config.toml names them", ctx do
+      File.write!(Path.join(ctx.home, "config.toml"), @old_config)
+      File.write!(MachineFile.path(ctx.home), ~s([sandbox]\nmode = "standard"\n))
+      {:ok, loaded} = ConfigStore.load_runtime_config(resolve_secrets: false, macos?: false)
+
+      log = capture_log(fn -> assert :ok = ConfigStore.save_snapshot(loaded) end)
+
+      assert log =~
+               "config.toml held this computer's own settings, which Fermix reads only from " <>
+                 "machine.toml, so they were removed from it: sandbox, " <>
+                 "fermix_core.computer_use, fermix_core.plugins.dev_local."
+
+      assert ConfigStore.misplaced_machine_settings(ctx.home) == {:ok, []}
+
+      # The next save finds none there, and says nothing of them.
+      refute capture_log(fn -> assert :ok = ConfigStore.save_snapshot(loaded) end) =~
+               "own settings"
     end
   end
 
@@ -214,6 +237,52 @@ defmodule FermixCore.Setup.ConfigStoreMachineTest do
       assert :ok = ConfigStore.migrate_machine_file(ctx.home, server?: false)
       assert File.read!(MachineFile.path(ctx.home)) == machine
       assert File.read!(Path.join(ctx.home, "config.toml")) == config
+    end
+
+    # M97 stage 0 wrote the iMessage section into machine.toml; it is the
+    # home's, so the boot gives it back to config.toml and a server that
+    # receives the home knows the owner and guests (§4).
+    test "the iMessage section a machine file holds goes back to config.toml, once", ctx do
+      {home_only, _removed} = MachineFile.strip(@old_config)
+      config_without = ConfigText.drop_tables(home_only, "fermix_channels.imessage")
+      File.write!(Path.join(ctx.home, "config.toml"), config_without)
+
+      File.write!(MachineFile.path(ctx.home), """
+      [sandbox]
+      mode = "standard"
+
+      [fermix_channels.imessage]
+      enabled = true
+      owner_user_id = "+15550100231"
+      allowed_sender_ids = ["+15550100232"]
+
+      [fermix_core.computer]
+      imessage = true
+      """)
+
+      assert :ok = ConfigStore.migrate_machine_file(ctx.home, server?: false)
+
+      config = File.read!(Path.join(ctx.home, "config.toml"))
+      machine = File.read!(MachineFile.path(ctx.home))
+
+      assert ConfigText.value(config, "fermix_channels.imessage", "owner_user_id") ==
+               {:ok, ~s("+15550100231")}
+
+      refute machine =~ "[fermix_channels.imessage]"
+      assert ConfigText.value(machine, "fermix_core.computer", "imessage") == {:ok, "true"}
+
+      assert {:ok, loaded} =
+               ConfigStore.load_runtime_config(resolve_secrets: false, macos?: false)
+
+      assert Keyword.fetch!(loaded.fermix_channels, :imessage) == [
+               enabled: true,
+               owner_user_id: "+15550100231",
+               allowed_sender_ids: ["+15550100232"]
+             ]
+
+      assert :ok = ConfigStore.migrate_machine_file(ctx.home, server?: false)
+      assert File.read!(Path.join(ctx.home, "config.toml")) == config
+      assert File.read!(MachineFile.path(ctx.home)) == machine
     end
 
     # Interrupted between the two writes: both files hold the settings. The
@@ -344,18 +413,24 @@ defmodule FermixCore.Setup.ConfigStoreMachineTest do
       end)
 
     assert length(String.split(log, "This server now uses its own sandbox setting: open.")) == 2
-    assert log =~ "left out: sandbox, fermix_core.computer_use, fermix_channels.imessage"
+    assert log =~ "left out: sandbox, fermix_core.computer_use, fermix_core.plugins.dev_local"
+    # The home uses iMessage, and its server knows the owner (M97 §4).
+    refute log =~ "fermix_channels.imessage"
 
     assert File.read!(MachineFile.path(ctx.home)) == MachineFile.server_default()
     config = File.read!(Path.join(ctx.home, "config.toml"))
     assert config == elem(MachineFile.strip(@old_config), 0)
     refute config =~ "/Users/invented"
 
-    # Off a Mac, an inherited iMessage switch would refuse the load.
+    # The server knows who the owner is: the Mac that carries Messages runs
+    # the helper (M97 §4, §6.4).
     assert {:ok, loaded} = ConfigStore.load_runtime_config(resolve_secrets: false, macos?: false)
     assert loaded.sandbox.mode == :open
     assert loaded.sandbox.allowed_roots == []
-    assert Keyword.fetch!(loaded.fermix_channels, :imessage) == []
+
+    assert Keyword.fetch!(loaded.fermix_channels, :imessage) ==
+             [enabled: true, owner_user_id: "+15550100231"]
+
     refute Keyword.has_key?(Keyword.fetch!(loaded.fermix_core, :plugins), :dev_local)
 
     again =

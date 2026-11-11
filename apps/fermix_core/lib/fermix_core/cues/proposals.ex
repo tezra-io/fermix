@@ -585,7 +585,9 @@ defmodule FermixCore.Cues.Proposals do
   # (`OwnerInbox.dm_origin/1` owns the rule that makes that origin checkable).
   defp owner_dm(opts) do
     with {:ok, inbox} <-
-           OwnerInbox.resolve(Keyword.take(opts, [:jobs_config, :configured_owners])),
+           OwnerInbox.for_approval(
+             Keyword.take(opts, [:jobs_config, :configured_owners, :imessage_carrier])
+           ),
          {:ok, origin} <- OwnerInbox.dm_origin(inbox) do
       {:ok, inbox, origin}
     else

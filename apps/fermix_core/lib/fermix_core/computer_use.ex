@@ -18,6 +18,8 @@ defmodule FermixCore.ComputerUse do
   alias FermixCore.ComputerUse.PortDriver
   alias FermixCore.ComputerUse.SessionManager
   alias FermixCore.ComputerUse.SidecarInstaller
+  alias FermixCore.Home.AlwaysOnRelease
+  alias FermixCore.Home.Role
 
   require Logger
 
@@ -152,6 +154,31 @@ defmodule FermixCore.ComputerUse do
   @spec ready?() :: boolean()
   def ready? do
     Config.current().enabled? and SidecarInstaller.installed?()
+  end
+
+  @doc """
+  Whether this engine may drive a computer's screen (M97 §6.4): it is the
+  primary, where Always On is offered, so a computer of the home may offer its
+  screen even when this host has none. Whether one does is a turn's question
+  (`ComputerUse.Reach.reachable?/1`); this is the boot's, for the tool's
+  registration and the session tree. Seams: `:role`, `:always_on`.
+  """
+  @spec drives_computers?(keyword()) :: boolean()
+  def drives_computers?(opts \\ []) when is_list(opts) do
+    Keyword.get_lazy(opts, :role, &Role.current/0) == :primary and
+      Keyword.get_lazy(opts, :always_on, &AlwaysOnRelease.available?/0)
+  end
+
+  @doc """
+  Whether this engine's own screen may be driven by its server (M97 §6.4): a
+  linked computer (the device role) with the helper installed. Its switch is
+  read at each request, so it can be turned on without a restart. Seams:
+  `:role`, `:installed?`.
+  """
+  @spec driven?(keyword()) :: boolean()
+  def driven?(opts \\ []) when is_list(opts) do
+    Keyword.get_lazy(opts, :role, &Role.current/0) == :device and
+      Keyword.get_lazy(opts, :installed?, &SidecarInstaller.installed?/0)
   end
 
   @doc """

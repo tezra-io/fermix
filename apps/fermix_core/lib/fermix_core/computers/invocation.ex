@@ -19,8 +19,11 @@ defmodule FermixCore.Computers.Invocation do
   cancelled (`Computers.cancel/2`).
 
   **An effect is never sent twice by the link.** When the session ends and
-  comes back, the family asks the computer for each invocation still waited
-  on (`invoke_status`); its answer arrives here as any other. An answer
+  comes back, `Calls` tells this caller (`{:computer_invoke, id,
+  :reconnected}`), which asks the computer for its invocation's state
+  (`invoke_status`) once it has sent the request, never before: a computer
+  that answers it has no record of a request is never sent that request
+  after. Its answer arrives here as any other. An answer
   that says the outcome is not known (`unknown`), or that holds only the
   journal's receipt, ends an effect there: the model is told the outcome is
   not known. A read (`effect?/1` false) is asked once more under a new id
@@ -88,15 +91,15 @@ defmodule FermixCore.Computers.Invocation do
   defp computer(name, opts) when is_binary(name) do
     case Computers.get(name, Keyword.get(opts, :computers, [])) do
       {:ok, computer} -> {:ok, computer}
-      {:error, :not_found} -> refuse(:unavailable, "Your Fermix has no such computer.")
+      {:error, :not_found} -> refuse(:unavailable, sentence(:no_such_computer))
     end
   end
 
   defp reachable(%Computer{connected: false, name: name}, _module),
-    do: refuse(:unavailable, "#{name} is asleep or offline, so Fermix cannot reach it now.")
+    do: refuse(:unavailable, sentence({:away, name}))
 
   defp reachable(%Computer{offers: []} = computer, _module),
-    do: refuse(:unavailable, "#{computer.name} has not said yet what Fermix may use there.")
+    do: refuse(:unavailable, sentence({:not_said, computer.name}))
 
   defp reachable(%Computer{}, _module), do: :ok
 
@@ -147,7 +150,7 @@ defmodule FermixCore.Computers.Invocation do
     do: refuse(:unavailable, sentence)
 
   defp offer_refusal(nil, computer, _module),
-    do: refuse(:unavailable, "#{computer.name} has not said yet what Fermix may use there.")
+    do: refuse(:unavailable, sentence({:not_said, computer.name}))
 
   defp valid_args(module, op, args) do
     case module.validate(op, args) do
@@ -161,7 +164,7 @@ defmodule FermixCore.Computers.Invocation do
 
     if byte_size(payload) <= @max_args_bytes,
       do: {:ok, payload},
-      else: {:refused, %Outcome{status: :failed, message: "The request is larger than 1 MiB."}}
+      else: {:refused, %Outcome{status: :failed, message: sentence(:args_too_large)}}
   end
 
   defp part(nil), do: {:ok, nil}
@@ -172,7 +175,7 @@ defmodule FermixCore.Computers.Invocation do
       sha = :sha256 |> :crypto.hash(bytes) |> Base.encode16(case: :lower)
       {:ok, %{bytes: bytes, announce: %{size_bytes: byte_size(bytes), sha256: sha, mime: mime}}}
     else
-      {:refused, %Outcome{status: :failed, message: "The file is larger than 20 MiB."}}
+      {:refused, %Outcome{status: :failed, message: sentence(:file_too_large)}}
     end
   end
 
@@ -223,6 +226,8 @@ defmodule FermixCore.Computers.Invocation do
       Calls.register(calls, %{
         id: id,
         device_id: device,
+        capability: request.capability,
+        op: request.op,
         caller: self(),
         effect?: request.effect?,
         started_at: now,
@@ -257,17 +262,19 @@ defmodule FermixCore.Computers.Invocation do
   end
 
   defp sent({:error, :not_connected}, request, _id, _started, _opts),
-    do: Outcome.refused(:unavailable, away(request.computer))
+    do: Outcome.refused(:unavailable, sentence({:away, request.computer.name}))
 
   defp sent({:error, reason}, request, id, _started, _opts) do
     Logger.error("invocation #{id} was not sent to #{request.computer.name}: #{inspect(reason)}")
-    Outcome.refused(:unavailable, "#{request.computer.name} could not be sent the request.")
+    Outcome.refused(:unavailable, sentence({:not_sent, request.computer.name}))
   end
-
-  defp away(computer), do: "#{computer.name} is asleep or offline, so Fermix cannot reach it now."
 
   defp await(request, id, started, state, opts) do
     receive do
+      {:computer_invoke, ^id, :reconnected} ->
+        :ok = ask_again(request, id, opts)
+        await(request, id, started, state, opts)
+
       {:computer_invoke, ^id, message} ->
         state = take(message, state, opts)
 
@@ -298,10 +305,7 @@ defmodule FermixCore.Computers.Invocation do
       {:error, reason} ->
         Logger.warning("an invocation's answer was refused: #{inspect(reason)}")
 
-        %{
-          state
-          | result: %Outcome{status: :failed, message: "The computer's answer could not be read."}
-        }
+        %{state | result: %Outcome{status: :failed, message: sentence(:unreadable_answer)}}
     end
   end
 
@@ -334,7 +338,7 @@ defmodule FermixCore.Computers.Invocation do
 
     if whole?,
       do: {:done, %{outcome | part_bytes: bytes}},
-      else: {:done, part_lost(outcome, request, "The answer's file did not arrive whole.")}
+      else: {:done, part_lost(outcome, request, sentence(:file_lost))}
   end
 
   defp complete(%{result: outcome, part: {:error, sentence}}, request),
@@ -345,21 +349,36 @@ defmodule FermixCore.Computers.Invocation do
   defp part_lost(outcome, %{effect?: true}, _sentence), do: outcome
   defp part_lost(_outcome, _request, sentence), do: %Outcome{status: :failed, message: sentence}
 
+  # The computer has a new session: this caller, which sent the request, asks
+  # for its state, so the ask always follows the request. One that cannot be
+  # sent waits for the next session.
+  defp ask_again(request, id, opts) do
+    {transport, transport_opts} = Keyword.get_lazy(opts, :transport, &Transport.impl/0)
+
+    case transport.status(request.computer.device_id, about(request, id), transport_opts) do
+      :ok ->
+        :ok
+
+      {:error, reason} ->
+        Logger.warning("invocation #{id} was not asked again: #{inspect(reason)}")
+    end
+  end
+
   defp gave_up(request, id, state, opts) do
     {transport, transport_opts} = Keyword.get_lazy(opts, :transport, &Transport.impl/0)
 
     case state.result do
       %Outcome{} = outcome ->
-        part_lost(outcome, request, "The answer's file did not arrive in time.")
+        part_lost(outcome, request, sentence(:file_late))
 
       nil ->
-        _cancelled = cancel_sent(transport, request.computer.device_id, id, transport_opts)
+        _cancelled = cancel_sent(transport, request, id, transport_opts)
         if request.effect?, do: %Outcome{status: :unknown}, else: %Outcome{status: :timed_out}
     end
   end
 
-  defp cancel_sent(transport, device, id, opts) do
-    case transport.cancel(device, id, opts) do
+  defp cancel_sent(transport, request, id, opts) do
+    case transport.cancel(request.computer.device_id, about(request, id), opts) do
       :ok ->
         :ok
 
@@ -367,6 +386,8 @@ defmodule FermixCore.Computers.Invocation do
         Logger.warning("invocation #{id} was not cancelled on its computer: #{inspect(reason)}")
     end
   end
+
+  defp about(request, id), do: %{id: id, capability: request.capability, op: request.op}
 
   defp finished(%Outcome{} = outcome, request, id) do
     %{
@@ -446,4 +467,36 @@ defmodule FermixCore.Computers.Invocation do
   defp clock(opts), do: Keyword.get(opts, :clock, &DateTime.utc_now/0).()
 
   defp sha256(bytes), do: :sha256 |> :crypto.hash(bytes) |> Base.encode16(case: :lower)
+
+  # -- what the model reads -----------------------------------------------------
+
+  @said [
+    :no_such_computer,
+    {:away, "studio Mac"},
+    {:not_said, "studio Mac"},
+    {:not_sent, "studio Mac"},
+    :args_too_large,
+    :file_too_large,
+    :unreadable_answer,
+    :file_lost,
+    :file_late
+  ]
+
+  @doc """
+  Every sentence this module puts in an outcome's `message`, which the
+  model reads, on a computer called "studio Mac": one place, held to the
+  copy rules.
+  """
+  @spec sentences() :: [String.t(), ...]
+  def sentences, do: Enum.map(@said, &sentence/1)
+
+  defp sentence(:no_such_computer), do: "Your Fermix has no such computer."
+  defp sentence({:away, name}), do: "#{name} is asleep or offline, so Fermix cannot reach it now."
+  defp sentence({:not_said, name}), do: "#{name} has not said yet what Fermix may use there."
+  defp sentence({:not_sent, name}), do: "#{name} could not be sent the request."
+  defp sentence(:args_too_large), do: "The request is larger than 1 MiB."
+  defp sentence(:file_too_large), do: "The file is larger than 20 MiB."
+  defp sentence(:unreadable_answer), do: "The computer's answer could not be read."
+  defp sentence(:file_lost), do: "The answer's file did not arrive whole."
+  defp sentence(:file_late), do: "The answer's file did not arrive in time."
 end

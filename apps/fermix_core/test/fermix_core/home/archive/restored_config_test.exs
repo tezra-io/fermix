@@ -141,19 +141,23 @@ defmodule FermixCore.Home.Archive.RestoredConfigTest do
     for macos? <- [true, false] do
       {:ok, text, settled} = RestoredConfig.settle(config, facts(macos?: macos?, keyring: true))
 
+      # The home uses iMessage, with its owner and guests: the home's own
+      # (M97 §4), kept on any host, where a Mac of the home may carry it.
       assert text == """
              [fermix_core.agent]
              name = "Orchard"
 
              [fermix_core.plugins]
              enabled = ["invented-notes"]
+
+             [fermix_channels.imessage]
+             enabled = true
              """
 
       assert settled.device_settings_dropped == [
                "sandbox",
                "fermix_core.computer_use",
                "fermix_core.computer_history",
-               "fermix_channels.imessage",
                "fermix_channels.accessories",
                "fermix_core.plugins.dev_local"
              ]

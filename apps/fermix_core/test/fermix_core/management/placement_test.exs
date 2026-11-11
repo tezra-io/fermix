@@ -70,16 +70,21 @@ defmodule FermixCore.Management.PlacementTest do
   end
 
   test "settings are placed by section: this machine's own, else the primary's" do
-    for section <- ~w(sandbox computer_use computer_history channels.imessage) do
+    for section <- ~w(sandbox computer_use computer_history accessories computer) do
       assert Placement.place("settings.get", %{"section" => section}) == :device
 
       assert Placement.place("settings.apply", %{"section" => section, "values" => %{}}) ==
                :device
     end
 
-    for section <- ~w(providers.openai routing memory browser channels.telegram snapshots) do
+    # iMessage's owner and guests are the home's (M97 §4): a linked Mac asks
+    # its server, and confirms who Fermix may write to itself.
+    for section <- ~w(providers.openai routing memory browser channels.telegram
+                      channels.imessage snapshots) do
       assert Placement.place("settings.get", %{"section" => section}) == :primary
     end
+
+    assert Placement.place("imessage.policy.confirm", %{}) == :device
 
     assert Placement.place("settings.get", %{}) == :primary
   end

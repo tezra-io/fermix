@@ -159,7 +159,7 @@ defmodule Fermix.CLI.DevicesCommandTest do
       else
         {:error,
          {:management_error, "unavailable", "The requested management capability is unavailable.",
-          %{"capability" => "mobile", "sentence" => sentence}}}
+          %{"capability" => "mobile", "sentence" => sentence, "confirm" => true}}}
       end
     end
 
@@ -175,6 +175,21 @@ defmodule Fermix.CLI.DevicesCommandTest do
              {0, "revoked device #{@device_id}\n", ""}
 
     assert_received {:asked, %{"device_id" => @device_id, "confirmed" => true}}
+
+    # The daemon marks its question (`details.confirm`); its words are its
+    # own, and a server in other words asks the same.
+    reworded = "Loft Mac holds the server's only backups. Remove it anyway?"
+
+    asks = fn "mobile.devices.revoke", _params, _opts ->
+      {:error,
+       {:management_error, "unavailable", "The requested management capability is unavailable.",
+        %{"capability" => "mobile", "sentence" => reworded, "confirm" => true}}}
+    end
+
+    assert run(["revoke", @device_id], asks) ==
+             {1, "",
+              "fermix devices revoke: #{reworded}\n" <>
+                "Run it again with --yes to remove it.\n"}
   end
 
   test "rejects malformed ids before calling the daemon" do

@@ -14,6 +14,7 @@ defmodule FermixCore.Readiness do
 
   alias FermixCore.Auth.ChatGPT
   alias FermixCore.Config
+  alias FermixCore.IMessage
   alias FermixCore.IMessage.HelperInstaller
   alias FermixCore.Management.Settings.Channels.Inventory
   alias FermixCore.Providers.Descriptor
@@ -92,8 +93,12 @@ defmodule FermixCore.Readiness do
   # needs the signing secret, so it has a sentence of its own.
   @slack_socket_action "Add the Slack bot token and app-level token in Channels settings."
 
-  @spec report() :: report()
-  def report do
+  @doc """
+  The readiness of this engine's settings. `opts` names the host and the
+  home for a test (`macos?:`, `imessage_carrier:`): iMessage reads them.
+  """
+  @spec report(keyword()) :: report()
+  def report(opts \\ []) when is_list(opts) do
     failures =
       Enum.reject(
         [
@@ -103,7 +108,7 @@ defmodule FermixCore.Readiness do
           discord_failure(),
           slack_failure(),
           signal_failure(),
-          imessage_failure(),
+          imessage_failure(opts),
           realtime_failure(),
           personalization_failure()
         ],
@@ -150,6 +155,9 @@ defmodule FermixCore.Readiness do
           multiple_primary_action(),
           invalid_auth_mode_action("provider:anthropic", "subscription"),
           imessage_helper_row(),
+          imessage_carrier_row(:none),
+          imessage_carrier_row({:conflict, ["loft Mac", "studio Mac"]}),
+          imessage_carrier_row({:away, "studio Mac"}),
           slack_socket_row()
         ] ++ Enum.map(realtime_providers(), &realtime_key_row/1),
       &{&1.detail_key, &1.action}
@@ -457,10 +465,13 @@ defmodule FermixCore.Readiness do
 
   defp signal_failure, do: channel_credentials_failure(:signal)
 
-  # iMessage (M54 §14) reads presence only: the saved section, then whether the
-  # helper is on disk. Its probe spawns the helper, so it is read by Doctor and
-  # `imessage.permissions.get`, never on this hot path.
-  defp imessage_failure do
+  # iMessage (M54 §14) reads presence only: the saved section, then on a Mac
+  # whether the helper is on disk, and anywhere else the Mac of the home that
+  # carries Messages (M97 §6.4): none, more than one, or one that is away
+  # (advisory: the channel is away, not broken). Its probe spawns the helper,
+  # so it is read by Doctor and `imessage.permissions.get`, never on this hot
+  # path.
+  defp imessage_failure(opts) do
     cond do
       not channel_enabled?(:imessage) ->
         nil
@@ -468,13 +479,37 @@ defmodule FermixCore.Readiness do
       not channel_configured?(:imessage) ->
         channel_failure(:imessage, @channel_actions[:imessage])
 
-      not HelperInstaller.installed?() ->
-        imessage_helper_row()
+      Keyword.get_lazy(opts, :macos?, &IMessage.macos?/0) ->
+        if HelperInstaller.installed?(), do: nil, else: imessage_helper_row()
 
       true ->
-        nil
+        opts |> Keyword.get_lazy(:imessage_carrier, &carrier/0) |> carrier_failure()
     end
   end
+
+  defp carrier, do: IMessage.carrier(macos?: false)
+
+  defp carrier_failure(:none), do: imessage_carrier_row(:none)
+
+  defp carrier_failure({:conflict, computers}),
+    do: imessage_carrier_row({:conflict, Enum.map(computers, & &1.name)})
+
+  defp carrier_failure({:computer, %{connected: false, name: name}}),
+    do: imessage_carrier_row({:away, name})
+
+  defp carrier_failure({:computer, _connected}), do: nil
+
+  defp imessage_carrier_row(:none),
+    do: imessage_row(IMessage.none_sentence(), "channel:imessage:carrier")
+
+  defp imessage_carrier_row({:conflict, names}),
+    do: imessage_row(IMessage.conflict_sentence(names), "channel:imessage:conflict")
+
+  defp imessage_carrier_row({:away, name}),
+    do: imessage_row(IMessage.away_sentence(name), "channel:imessage:away")
+
+  defp imessage_row(action, detail_key),
+    do: advisory(%{component: "channel:imessage", action: action}, "channels", detail_key)
 
   defp imessage_helper_row do
     advisory(

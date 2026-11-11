@@ -96,6 +96,29 @@ defmodule FermixCore.Capabilities.BuiltinSeederTest do
     assert cap.metadata.category == :computer
   end
 
+  # M97 §6.4: a server with no screen of its own registers the tool when it may
+  # drive a computer's (a primary where Always On is offered); each turn then
+  # offers it only while a screen is in reach (`Tools.ComputerUse.advertise?/1`).
+  describe "computer_use_modules/1 gating" do
+    test "a screenless primary that may drive a computer's screen registers the tool" do
+      assert BuiltinSeeder.computer_use_modules(ready?: false, drives_computers?: true) ==
+               [FermixCore.Tools.ComputerUse]
+    end
+
+    test "neither a screen here nor a computer's registers nothing" do
+      assert BuiltinSeeder.computer_use_modules(ready?: false, drives_computers?: false) == []
+    end
+
+    test "a ready host registers it whatever its computers" do
+      assert BuiltinSeeder.computer_use_modules(ready?: true, drives_computers?: false) ==
+               [FermixCore.Tools.ComputerUse]
+    end
+
+    test "under mix test the computers half is off, so the shared registry is unchanged" do
+      assert BuiltinSeeder.computer_use_modules(ready?: false) == []
+    end
+  end
+
   # --- Coding-harness seeding gate (§7.3 boot snapshot) -------------------
 
   describe "harness_modules/1 gating" do

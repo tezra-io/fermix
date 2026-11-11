@@ -3,6 +3,8 @@ defmodule FermixCore.Browser.Supervisor do
 
   use Supervisor
 
+  alias FermixCore.Browser.HeldTurn
+
   @spec start_link(keyword()) :: Supervisor.on_start()
   def start_link(opts \\ []) do
     Supervisor.start_link(__MODULE__, opts, name: __MODULE__)
@@ -15,6 +17,10 @@ defmodule FermixCore.Browser.Supervisor do
     manager_name = Keyword.get(opts, :profile_manager, FermixCore.Browser.ProfileManager)
     host_name = Keyword.get(opts, :host_availability, FermixCore.Browser.HostAvailability)
     marker_name = Keyword.get(opts, :turn_marker, FermixCore.Browser.TurnMarker)
+    # A turn's browser on another machine of the home (M97 §6.4): on a server
+    # the turns whose browser runs on a computer (`ComputerTurn`), on a
+    # computer the server's turns its browser serves (`HeldTurn`).
+    turns = HeldTurn.seams()
 
     children =
       [
@@ -23,7 +29,9 @@ defmodule FermixCore.Browser.Supervisor do
         {FermixCore.Browser.HostAvailability, name: host_name},
         {FermixCore.Browser.TurnMarker, name: marker_name},
         {FermixCore.Browser.ProfileManager,
-         name: manager_name, dynamic_supervisor: dynamic_name, registry: registry_name}
+         name: manager_name, dynamic_supervisor: dynamic_name, registry: registry_name},
+        {Registry, keys: :unique, name: turns.registry},
+        {DynamicSupervisor, strategy: :one_for_one, name: turns.supervisor}
       ] ++ bridge_children(opts)
 
     Supervisor.init(children, strategy: :one_for_one)

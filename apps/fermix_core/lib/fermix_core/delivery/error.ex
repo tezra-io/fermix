@@ -53,7 +53,10 @@ defmodule FermixCore.Delivery.Error do
     :invalid_destination,
     :malformed_request,
     :remote_rejected,
-    :adapter_unavailable
+    :adapter_unavailable,
+    # The computer a channel runs through is asleep or offline (M97 D4): the
+    # message is not sent and not kept to send later.
+    :carrier_away
   ]
 
   # Every `%Req.TransportError{}` reason with a place in the closed vocabulary.
@@ -99,6 +102,7 @@ defmodule FermixCore.Delivery.Error do
           | :malformed_request
           | :remote_rejected
           | :adapter_unavailable
+          | :carrier_away
 
   @type t ::
           :delivery_timeout

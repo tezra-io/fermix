@@ -17,7 +17,10 @@ defmodule FermixChannels.Channels.IMessage.Listener do
   channel with that class until the probe shows a separate account again.
 
   **Cursor.** `FERMIX_HOME/imessage/cursor` holds `{generation, rowid}`, written
-  by atomic rename. A row is acknowledged only once it is settled: dropped by
+  by atomic rename. On a server whose iMessage a Mac carries (M97 §6.4) the
+  cursor is kept here, in the home, per computer:
+  `FERMIX_HOME/imessage/cursors/<device id>`, named by the handshake's
+  `carrier`, so a different Mac's rows never move another's cursor. A row is acknowledged only once it is settled: dropped by
   admission, already handed off (dedupe on its guid), or accepted by
   `Gateway.ingest/2`. A daemon crash after the in-memory hand-off loses that
   turn, exactly as on every remote channel (D11). The cursor is valid only for
@@ -26,7 +29,11 @@ defmodule FermixChannels.Channels.IMessage.Listener do
   log line.
 
   **Replay and overflow.** The first subscription after start replays at most
-  50 rows no older than 10 minutes and reports how many it skipped. A
+  50 rows no older than 10 minutes and reports how many it skipped. Through a
+  computer, every subscription after its helper comes up (the server's start,
+  and each time the Mac's link comes back, as after a night asleep) replays
+  at most 500 rows from the last 24 hours, and when more were missed the
+  owner is told how many, once, in the chat. A
   `watch.overflow` is recovered without any bound: the Listener pages
   `messages.after` from its own acknowledged row until `has_more` is false and
   then subscribes again from there.
@@ -59,6 +66,8 @@ defmodule FermixChannels.Channels.IMessage.Listener do
   @handoff_retry_ms 5_000
   @max_handoff_attempts 3
   @boot_replay %{"max_rows" => 50, "max_age_s" => 600}
+  @computer_replay %{"max_rows" => 500, "max_age_s" => 86_400}
+  @safe_segment ~r/\A[A-Za-z0-9._-]{1,128}\z/
   @buffer_limit 256
   @page_limit 64
   @loop_max_rows 6
@@ -134,6 +143,11 @@ defmodule FermixChannels.Channels.IMessage.Listener do
       generation: nil,
       cursor: :unloaded,
       booted?: false,
+      # The computer whose Messages carry the channel (M97 §6.4), and whether
+      # the next subscription catches up within the computer's bounds.
+      carrier: nil,
+      carrier_name: nil,
+      replay_next?: false,
       replay_skipped: 0,
       retry: nil,
       sms_logged: MapSet.new(),
@@ -218,9 +232,24 @@ defmodule FermixChannels.Channels.IMessage.Listener do
 
   defp helper_up(state, handshake) do
     state
+    |> adopt_carrier(handshake)
     |> adopt_generation(handshake["db_generation"])
     |> start_watch()
   end
+
+  # A Mac that carries Messages for this server names itself in the
+  # handshake: its own cursor, and a catch-up within the computer's bounds
+  # each time its helper comes up here.
+  defp adopt_carrier(state, %{"carrier" => carrier} = handshake) when is_binary(carrier) do
+    state =
+      if carrier == state.carrier,
+        do: state,
+        else: %{state | carrier: carrier, cursor: :unloaded, generation: nil}
+
+    %{state | carrier_name: handshake["carrier_name"], replay_next?: true}
+  end
+
+  defp adopt_carrier(state, _handshake), do: state
 
   defp helper_down(state, class) do
     %{state | phase: :helper_down}
@@ -393,15 +422,56 @@ defmodule FermixChannels.Channels.IMessage.Listener do
   end
 
   # The boot bounds belong to the first subscription after a start, and only
-  # when there is a cursor to replay from (§7.3).
+  # when there is a cursor to replay from (§7.3); through a computer, the
+  # computer's bounds to each subscription after its helper came up.
+  defp replay_bounds(%{replay_next?: true, cursor: rowid}) when is_integer(rowid),
+    do: @computer_replay
+
   defp replay_bounds(%{booted?: false, cursor: rowid}) when is_integer(rowid), do: @boot_replay
   defp replay_bounds(_state), do: nil
 
   defp subscribed(state, started, skipped) do
     state = if state.cursor == nil, do: ack(state, started), else: state
-    state = if state.booted?, do: state, else: note_replay_skipped(state, skipped)
+
+    state =
+      cond do
+        state.replay_next? -> caught_up(state, skipped)
+        state.booted? -> state
+        true -> note_replay_skipped(state, skipped)
+      end
+
     Logger.info("iMessage channel subscribed from row #{cursor_rowid(state.cursor)}")
-    note_live(%{state | phase: :live, booted?: true, retry: nil})
+    note_live(%{state | phase: :live, booted?: true, retry: nil, replay_next?: false})
+  end
+
+  defp caught_up(state, 0), do: state
+
+  # More were missed than a catch-up reads: the owner is told how many, once.
+  defp caught_up(state, skipped) do
+    mac = state.carrier_name || "the Mac that carries Messages"
+
+    Logger.warning("iMessage: #{skipped} messages that came while #{mac} was away were not read")
+
+    text =
+      "Fermix did not read #{skipped} of the messages that came while #{mac} was asleep or " <>
+        "offline: it reads at most 500 from the last day."
+
+    opts = [
+      helper: state.helper,
+      server: state.server,
+      proactive_key: "replay-skipped:#{state.carrier}:#{cursor_rowid(state.cursor)}"
+    ]
+
+    owner = state.recipients.owner
+    {:ok, _pid} = Task.start(fn -> tell_owner(owner, text, opts) end)
+    %{state | replay_skipped: skipped}
+  end
+
+  defp tell_owner(owner, text, opts) do
+    case IMessage.send_message(owner, text, opts) do
+      :ok -> :ok
+      {:error, reason} -> Logger.error("iMessage could not tell the owner: #{inspect(reason)}")
+    end
   end
 
   defp note_replay_skipped(state, 0), do: state
@@ -641,7 +711,7 @@ defmodule FermixChannels.Channels.IMessage.Listener do
   defp adopt_generation(%{cursor: :unloaded} = state, generation) do
     state = %{state | generation: generation}
 
-    case read_cursor(state.home) do
+    case read_cursor(state) do
       {:ok, %{"generation" => ^generation, "rowid" => rowid}} when generation != nil ->
         %{state | cursor: rowid}
 
@@ -668,8 +738,8 @@ defmodule FermixChannels.Channels.IMessage.Listener do
     %{state | cursor: nil}
   end
 
-  defp read_cursor(home) do
-    case File.read(cursor_path(home)) do
+  defp read_cursor(state) do
+    case File.read(cursor_path(state)) do
       {:ok, body} -> decode_cursor(body)
       {:error, :enoent} -> :none
       {:error, reason} -> {:error, reason}
@@ -692,11 +762,12 @@ defmodule FermixChannels.Channels.IMessage.Listener do
 
   # Written by rename, so a crash mid-write leaves the previous cursor intact.
   defp write_cursor(state, rowid) do
-    dir = Path.join(state.home, "imessage")
-    path = cursor_path(state.home)
+    path = cursor_path(state)
+    dir = Path.dirname(path)
     body = Jason.encode!(%{"generation" => state.generation, "rowid" => rowid})
 
     with :ok <- File.mkdir_p(dir),
+         :ok <- File.chmod(Path.join(state.home, "imessage"), 0o700),
          :ok <- File.chmod(dir, 0o700),
          :ok <- File.write(path <> ".tmp", body),
          :ok <- File.rename(path <> ".tmp", path) do
@@ -710,7 +781,16 @@ defmodule FermixChannels.Channels.IMessage.Listener do
     end
   end
 
-  defp cursor_path(home), do: Path.join([home, "imessage", "cursor"])
+  defp cursor_path(%{carrier: nil, home: home}), do: Path.join([home, "imessage", "cursor"])
+
+  defp cursor_path(%{carrier: carrier, home: home}),
+    do: Path.join([home, "imessage", "cursors", segment(carrier)])
+
+  defp segment(carrier) do
+    if Regex.match?(@safe_segment, carrier),
+      do: carrier,
+      else: :sha256 |> :crypto.hash(carrier) |> Base.encode16(case: :lower)
+  end
 
   defp cursor_rowid(rowid) when is_integer(rowid), do: rowid
   defp cursor_rowid(_none), do: nil

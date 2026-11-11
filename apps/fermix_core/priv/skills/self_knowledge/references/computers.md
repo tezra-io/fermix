@@ -5,9 +5,10 @@ member of the home: the computer the home moved from, and every computer
 the owner added with a code (*Adding a computer*). The server keeps a record of each,
 and each computer decides for itself what Fermix on the server may use on
 it. The server reads, writes and searches files and runs commands and git on
-a computer that offers them (*Files and commands on a computer*); the
-browser, the screen and Messages of a computer are listed but not used from
-the server yet. The move, the link and the summary: skill_view(name:
+a computer that offers them (*Files and commands on a computer*) and uses
+its browser (*A computer's browser* in the `browser` reference) and its
+screen (*A computer's screen*), and a Mac's Messages carry the home's
+iMessage (*iMessage through a Mac*). The move, the link and the summary: skill_view(name:
 "self-knowledge", file: "home").
 
 ## The record
@@ -20,7 +21,9 @@ the server yet. The move, the link and the summary: skill_view(name:
   (the computer the home moved from does).
 - `home.status` lists them as `computers` (`device_id`, `name`, `platform`,
   `engine_version`, `connected`, `since`, `last_seen`, `path`, `offers`,
-  `backups`), beside `desktops`, which stays for the apps that read it;
+  each with its `label`, `backups`, and `this_computer`, true on a linked
+  computer's own row in the list it reads from its server), beside
+  `desktops`, which stays for the apps that read it;
   `fermix home status --json` shows the same. Only the server lists them: on
   a computer `computers` is empty, and `primary` is its link to the server.
 - A computer that is away is still listed, with what it last offered and the
@@ -51,15 +54,16 @@ no memory of its own.
    choice to connect to a Fermix that already runs (management
    `computer.join.start`). With no app: stop Fermix there, run `fermix
    computer join CODE`, then start Fermix.
-3. **Compare six digits.** The new computer shows them: "Add this Mac on
-   <server>, where it asks you to. Both show 482 913; if they differ, do not
-   add it." The Always On screen of the server and of every linked computer
-   says "A computer named loft-linux (Linux) asks to join your Fermix. Add it
-   only if it shows 482 913.", with **Add it** (type the digits read on the
-   new computer; on the server `fermix always-on approve-computer --sas
-   482913`) and **Do not add it** (`deny-computer`). The digits come from
-   the encrypted connection itself, so someone who only saw the code cannot
-   make them match. A phone cannot add a computer yet.
+3. **Type six digits.** Only the new computer shows them: "Type 482 913 on
+   <server>, where it asks you to add this Mac." The Always On screen of the
+   server and of every linked computer says "A computer named loft-linux
+   (Linux) asks to join your Fermix. To add it, type the six digits it
+   shows.", with **Add it** (type the digits read on the new computer; on
+   the server `fermix always-on approve-computer --sas 482913`) and **Do not
+   add it** (`deny-computer`). The digits come from the encrypted connection
+   itself, so typing them proves the computer being added is the one in
+   front of the owner, and someone who only saw the code cannot make them
+   match. A phone cannot add a computer yet.
 
 - Until the owner adds it, the new computer has no access and no record.
   Not adding it, typing digits that are not its own ("Those digits are not
@@ -332,14 +336,75 @@ computer."
   connected yet` for one never heard from), and the offers that are on (shell
   with its mode), or `offers nothing`. Never an address or an id. Offers
   that are off or unavailable are not listed; `home.status` keeps why.
-- Files and commands on a computer are reached by naming it (above). Its
-  browser, screen and Messages are not used from the server yet: a turn's
-  browser is the server's own, whatever a computer offers. Say so plainly
-  when the owner asks for one of those on a computer, rather than doing it
-  on the server as if it were that computer.
+- Files and commands on a computer are reached by naming it (above), and
+  so is its browser, where the owner's own sign-ins are: `browser` with
+  `computer` (skill_view(name: "self-knowledge", file: "browser"), *A
+  computer's browser*); without it a turn's browser is the server's own.
+  So is its screen: `computer_use` with `computer` (*A computer's screen*),
+  never this server's screen as if it were that computer's.
 - A computer that is away is asleep or offline: say so and when it was last
   seen, never act as if it was reached, and nothing waits for it to wake.
 - What a computer offers changes only at that computer: its **This
   computer** section in the Always On pane (`fermix settings` there on a
   Linux computer without the app). Fermix cannot change it from the server
   or from a chat.
+
+## A computer's screen
+
+- A server with no screen of its own sees and controls the screen of a
+  computer that offers it (**Your screen**, `computer_use`, under its
+  **This computer** switches): `computer_use` with `computer`, or with no
+  name when this server has no screen and exactly one computer offers its
+  own. Each step is one action sent to that computer and one image back.
+  The session (its action budget, the images it may name, `/pause`,
+  `/resume`) stays on the server; the tool's actions and words follow that
+  computer's helper (a Linux one may work by controls alone).
+- That computer decides for itself: only the owner's own chat or call may
+  use its screen (a scheduled run, a cue, a delegated worker or a shared
+  channel is refused on the server and again there); its sandbox mode is
+  the access level (`strict`: look only; `## Computers` says `screen (look
+  only)`); a person typing there holds an action back. One conversation
+  holds a screen at a time: another is refused, naming where it is held.
+- While the server holds it, that computer shows a mark, "Fermix on your
+  server is controlling this screen.", with **Stop** (`home.status`
+  `screen`, management `computer.screen.stop`). Stop, or switching **Your
+  screen** or everything off there, ends it at once, held keys released,
+  and the turn is told the person at that computer stopped it: do not try
+  again in that turn; ask. With no action for two minutes the server lets
+  go.
+- Each stretch the server drove that screen is recorded there
+  (`device/screen_control.jsonl`), so its computer history can tell
+  Fermix's clicks from the owner's. Voice screen sharing (`screen_share`)
+  is this server's own screen only.
+
+## iMessage through a Mac
+
+- Once the home runs on a server, iMessage goes on through the Mac that
+  offers Messages (`imessage`, **Messages** under its **This computer**
+  switches): the server runs the listener and the replies, the Mac runs
+  Fermix Messages and nothing that makes a turn. The owner texts the same
+  Apple ID as before. The helper, its two macOS permissions and the
+  confirmed list of who Fermix may message stay on that Mac; the server can
+  never change the list (`policy.set` is refused there), only someone at
+  the Mac can, on its screen (*Confirm…*). Owner and guests are the home's
+  settings (`[fermix_channels.imessage]` in the server's `config.toml`); a
+  linked Mac's iMessage settings ask the server for them.
+- One home has one Messages bridge: a second Mac that offers Messages is
+  refused by name ("loft Mac offers Messages too … refuses loft Mac"), and
+  with two offering from the start neither is used until one is switched
+  off.
+- While that Mac is asleep or offline, iMessage is **away**, not broken: a
+  message to the owner fails at once ("the Mac that carries Messages is
+  asleep or offline, so the message was not sent, and nothing is kept to
+  send later"), and nothing is queued for later. Questions that wait on the
+  owner (an approval, a proposal) go to a channel that lives on the server
+  first, and never to iMessage while its Mac is away.
+- When the Mac's link comes back, Fermix reads what came in meanwhile from
+  where it stopped, at most 500 messages from the last 24 hours; if more
+  were missed, it tells the owner how many, once, in the chat.
+- Photos and files go both ways as bytes, at most 20 MiB each; a larger
+  attachment is refused.
+- Health and readiness say away (`channel:imessage:away`), name a home with
+  no Mac carrying Messages (`channel:imessage:carrier`) or two
+  (`channel:imessage:conflict`). Setup: skill_view(name: "self-knowledge",
+  file: "channel_setup"), *iMessage*.

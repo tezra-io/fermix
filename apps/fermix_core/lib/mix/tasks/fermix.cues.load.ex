@@ -133,7 +133,7 @@ defmodule Mix.Tasks.Fermix.Cues.Load do
          Keyword.get(snapshot.fermix_core, :profile)}
 
       {:error, reason} ->
-        Mix.raise("config.toml could not be read: #{ConfigStore.load_error_sentence(reason)}")
+        Mix.raise("The settings could not be read: #{ConfigStore.load_error_sentence(reason)}")
     end
   end
 

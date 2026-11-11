@@ -41,6 +41,7 @@ defmodule FermixChannels.Desktop.DeviceSupervisor do
   alias FermixChannels.Desktop.Relay
   alias FermixChannels.Home.CandidateSupervisor
   alias FermixChannels.Mobile.Iroh.Helper
+  alias FermixCore.Computers.Capabilities.Browser, as: BrowserCapability
   alias FermixCore.Home.Candidate
   alias FermixCore.Home.DesktopLink
   alias FermixCore.Home.Join
@@ -175,8 +176,8 @@ defmodule FermixChannels.Desktop.DeviceSupervisor do
   # Every option explicit, none read from application environment on the
   # way: this computer's switches are read from its own machine file at each
   # request, and one that cannot be read refuses everything
-  # (`Invoke.switches_in/1`); its sandbox is this engine's own, as its live
-  # settings hold it, at each request.
+  # (`Invoke.switches_in/1`); its sandbox and its browser are this engine's
+  # own, as its live settings hold them, at each request.
   defp invoke_spec(root),
     do:
       Supervisor.child_spec(
@@ -184,6 +185,7 @@ defmodule FermixChannels.Desktop.DeviceSupervisor do
          home: root,
          switches: Invoke.switches_in(root),
          sandbox: &SandboxConfig.current/0,
+         browser: &BrowserCapability.local/0,
          capabilities: Invoke.capabilities(),
          clock: &DateTime.utc_now/0,
          relay: Relay},

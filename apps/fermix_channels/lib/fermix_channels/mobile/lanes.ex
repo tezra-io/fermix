@@ -7,7 +7,7 @@ defmodule FermixChannels.Mobile.Lanes do
   |---|---|---|
   | `live` | a call's frames (`call_*`) | written first |
   | `interactive` | chat, management calls and results, sign-in forwards, invocations (`invoke_*`), a computer's `offers` and `link_path`, `hello`, `ping`, `pong`, `error`, `ack` and every other event | written before bulk |
-  | `bulk` | the frames of a stream: media, attachments, snapshot copies, the move; an invocation's large file bytes and a history sitting | written when the other two are empty, one frame at a time |
+  | `bulk` | the frames of a stream: media, attachments, snapshot copies, the move; an invocation's large file bytes, and a history sitting with its own cancel and status ask | written when the other two are empty, one frame at a time |
 
   A lane is a function of an event's type and its header (`lane/2`), so one
   type can ride two lanes by what its header says. The header fields the
@@ -16,7 +16,10 @@ defmodule FermixChannels.Mobile.Lanes do
   - `invoke_part` is interactive up to 256 KiB of announced bytes
     (`size_bytes`) and bulk above it; a part that announces none has no lane;
   - `invoke_open` is bulk when it submits a history sitting (`capability`
-    `history`, `op` `submit`), interactive otherwise.
+    `history`, `op` `submit`), interactive otherwise; `invoke_cancel` and
+    `invoke_status` name their request's capability and op and ride its
+    lane by the same rule, so a request's own cancel or status ask never
+    passes it.
 
   Every other type rides one lane whatever its header. A family's events
   share one lane, so lanes never reorder a family's own events: a snapshot's
@@ -51,8 +54,12 @@ defmodule FermixChannels.Mobile.Lanes do
   @interactive_part_bytes 256 * 1_024
   @header_fields %{
     "invoke_part" => [@size_field],
-    "invoke_open" => [@capability_field, @op_field]
+    "invoke_open" => [@capability_field, @op_field],
+    "invoke_cancel" => [@capability_field, @op_field],
+    "invoke_status" => [@capability_field, @op_field]
   }
+  # A request and its own cancel and status ask: one lane, the request's.
+  @follow_request ~w(invoke_open invoke_cancel invoke_status)
 
   @live ~w(call_open call_attached call_line call_audio call_frame call_close)
 
@@ -72,7 +79,7 @@ defmodule FermixChannels.Mobile.Lanes do
     companion_open companion_line companion_close manage manage_result
     loopback_open loopback_request loopback_response loopback_close loopback_failed
     enroll_request enroll_accepted join_request join_approved join_denied
-    invoke_cancel invoke_result invoke_status
+    invoke_result
     offers link_path
   )
 
@@ -93,7 +100,7 @@ defmodule FermixChannels.Mobile.Lanes do
                      (type == "invoke_part" and is_map_key(header, @size_field) and
                         is_integer(:erlang.map_get(@size_field, header)) and
                         :erlang.map_get(@size_field, header) <= @interactive_part_bytes) or
-                     (type == "invoke_open" and
+                     (type in @follow_request and
                         not (is_map_key(header, @capability_field) and
                                :erlang.map_get(@capability_field, header) == "history" and
                                is_map_key(header, @op_field) and
@@ -106,7 +113,7 @@ defmodule FermixChannels.Mobile.Lanes do
                      (type == "invoke_part" and is_map_key(header, @size_field) and
                         is_integer(:erlang.map_get(@size_field, header)) and
                         :erlang.map_get(@size_field, header) > @interactive_part_bytes) or
-                     (type == "invoke_open" and is_map_key(header, @capability_field) and
+                     (type in @follow_request and is_map_key(header, @capability_field) and
                         :erlang.map_get(@capability_field, header) == "history" and
                         is_map_key(header, @op_field) and
                         :erlang.map_get(@op_field, header) == "submit"))

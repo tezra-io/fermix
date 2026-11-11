@@ -15,11 +15,16 @@ defmodule FermixCore.Computers.Transport do
     session, before anything was sent; `{:error, {:part, reason}}` when the
     request went and its part did not (the computer answers `failed`);
     any other `{:error, reason}` when nothing was sent.
-  - `cancel/3` and `status/3` send `invoke_cancel` and `invoke_status`.
+  - `cancel/3` and `status/3` send `invoke_cancel` and `invoke_status`
+    about an invocation: its id, and its request's capability and op, which
+    the wire names so each rides its request's lane (`Mobile.Lanes`).
   """
 
   @typedoc "A transport and its options."
   @type t :: {module(), keyword()}
+
+  @typedoc "The invocation a cancel or a status ask is about."
+  @type about :: %{id: String.t(), capability: String.t(), op: String.t()}
 
   @doc "Sends an invocation, then its part (the moduledoc)."
   @callback open(
@@ -30,12 +35,12 @@ defmodule FermixCore.Computers.Transport do
               opts :: keyword()
             ) :: :ok | {:error, :not_connected | {:part, term()} | term()}
 
-  @doc "Sends `invoke_cancel` for the invocation `id`."
-  @callback cancel(device_id :: String.t(), id :: String.t(), opts :: keyword()) ::
+  @doc "Sends `invoke_cancel` for the invocation `about`."
+  @callback cancel(device_id :: String.t(), about :: about(), opts :: keyword()) ::
               :ok | {:error, term()}
 
-  @doc "Sends `invoke_status` for the invocation `id`."
-  @callback status(device_id :: String.t(), id :: String.t(), opts :: keyword()) ::
+  @doc "Sends `invoke_status` for the invocation `about`."
+  @callback status(device_id :: String.t(), about :: about(), opts :: keyword()) ::
               :ok | {:error, term()}
 
   @doc "The configured transport, with no options."

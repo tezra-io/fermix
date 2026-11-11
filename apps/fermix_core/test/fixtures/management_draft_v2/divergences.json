@@ -1063,6 +1063,12 @@
       "why": "unavailable is illustrated twice: once with details {capability} for a capability that could not answer, and once with details {capability, sentence} for the phone channel refusing a pairing or forgetting decision from a caller that is not the owner. The sentence is what tells that refusal from a channel that is not running; without it the CLI sent the operator to doctor, which reported the channel healthy. The draft predates the phone pairing surface and drew only the {capability} case."
     },
     {
+      "method": "(errors)",
+      "field": "unavailable:capability,confirm,sentence",
+      "kind": "engine_only",
+      "why": "M97 §3.3: a refusal that is a question carries details {capability, sentence, confirm: true}, removing the one computer that keeps the server's backups and disconnecting a computer whose server cannot be told, where the same request with confirmed true is the act, so a surface asks the owner instead of showing an error. The draft predates computers; a client that does not read confirm shows the sentence as before."
+    },
+    {
       "method": "(schema)",
       "field": "error_codes:unknown_pairing_session",
       "kind": "engine_only",
@@ -3461,6 +3467,24 @@
       "field": "params:limit",
       "kind": "engine_only",
       "why": "M97 §6.3: computer.journal.list takes how many entries to answer, 1 to 200 and 50 when absent. The draft predates the method."
+    },
+    {
+      "method": "(schema)",
+      "field": "methods:computer.screen.stop",
+      "kind": "engine_only",
+      "why": "M97 §7.4: computer.screen.stop is the Stop beside the mark a linked computer's app draws while Fermix on its server controls its screen. It postdates the draft and is published under minimum version 2 with no protocol bump, gated with Always On like home.act, so a client that has not re-vendored never calls it."
+    },
+    {
+      "method": "(schema)",
+      "field": "minimum_versions:computer.screen.stop=2",
+      "kind": "engine_only",
+      "why": "M97 §7.4: computer.screen.stop is published with minimum version 2 in the whole-table minimum versions, as every v2 method is. The draft predates it; the addition is additive and needs no protocol bump."
+    },
+    {
+      "method": "hello",
+      "field": "capabilities.minimum_versions.computer.screen.stop",
+      "kind": "engine_only",
+      "why": "M97 §7.4: hello publishes every method this daemon serves with its minimum version, computer.screen.stop included where Always On is offered. The draft predates it; a client ignores a method it does not know."
     },
     {
       "method": "(schema)",

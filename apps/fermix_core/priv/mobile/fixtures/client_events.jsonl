@@ -43,5 +43,5 @@
 {"v":2,"t":"hello","seq":1,"device_id":"desktop-7b2e","app_version":"0.19.0","last_server_seq":0,"protocol_v":2,"primary_epoch":3,"platform":"macos"}
 {"v":2,"t":"link_path","seq":3,"path":"direct"}
 {"v":2,"t":"link_path","seq":14,"path":"relay"}
-{"v":2,"t":"invoke_status","seq":39,"id":"inv-q6n472b3oiugnj262ktxowsgsy"}
-{"v":2,"t":"invoke_cancel","seq":40,"id":"inv-q6n472b3oiugnj262ktxowsgsy"}
+{"v":2,"t":"invoke_status","seq":39,"id":"inv-q6n472b3oiugnj262ktxowsgsy","capability":"history","op":"submit"}
+{"v":2,"t":"invoke_cancel","seq":40,"id":"inv-q6n472b3oiugnj262ktxowsgsy","capability":"history","op":"submit"}

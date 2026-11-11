@@ -1560,6 +1560,7 @@ defaulted whenever its fact was not established.
 | `cu_surfaces_count` | non-negative integer | the helper looked for open surfaces after input it dispatched | how many dialogs, alerts, menus and popups the action left open; never their names |
 | `cu_truncated` | `nodes \| depth \| time` | an `elements` or `wait_for` listing stopped before the tree did | why the walk was cut short |
 | `cu_ax_messages` | non-negative integer | the helper counted the walk's accessibility messages | what the walk cost |
+| `computer` | a computer's device id | the call drove the screen of one of the home's computers (M97 §6.4) | whose screen it was; each step of it is also an invocation run on that computer (*Computer invocations*), so one call can be several `inv_` runs there and is still exactly one exec row here |
 
 `control_origin` is the one addition to the **lifecycle** rows: on
 `session_pause` and `session_resume` it is `:command` when a chat `/pause` or
@@ -1635,6 +1636,17 @@ non-zero, a path its sandbox refused in the tool's own words) is `invoke_status:
 failed`, never `ok`, on this row and in the computer's journal; its `success` is
 false and its `error_summary` the first 500 characters of the tool's error, while
 the model still reads the whole error.
+
+A `browser` call on a computer (M97 §6.4) may make more than one invocation: a
+sign-in's lookup and its fill, a fill and the submit that follows it. It is
+still the model's one call and one exec row, under `browser`, whose
+`invocation`, `invoke_status` and `refusal` are the **last** invocation's (the
+one whose answer the model reads), and whose `backend` is the computer's own
+browser (`cdp` or `fermix_app`). A row whose call was refused before any
+invocation carries `computer` alone. When a turn whose browser ran on a computer
+ends, the server's `Browser.ComputerTurn` tells that computer with one more
+invocation, `browser.end`, which no model call made and so has no exec row; it
+is a root on the computer like any other.
 
 A call the home refused **before** anything was sent (`Computers.Choice`, M97
 §6.5) has no invocation, so it carries none of the four: its exec row carries

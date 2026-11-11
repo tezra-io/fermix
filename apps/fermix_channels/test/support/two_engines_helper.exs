@@ -142,7 +142,10 @@ defmodule FermixChannels.Test.TwoEngines do
   `Sandbox.Config.normalize/1`, its paths relative to the computer's home) or
   `strict` with the workspace under that home; the server's is the test VM's
   application environment, which never names the computer's home. `:send`
-  replaces how the computer's answers reach the link (`Admission`'s seam).
+  replaces how the computer's answers reach the link (`Admission`'s seam),
+  and `:browser` is the computer's browser (`Desktop.Invoke`'s option).
+  `:facts` replaces facts of the computer its offers are worked out from
+  (`Computers.Facts.read/1`'s options, over an Apple silicon Mac's).
   """
   @spec start!(keyword()) :: map()
   def start!(opts \\ []) do
@@ -211,7 +214,7 @@ defmodule FermixChannels.Test.TwoEngines do
          capabilities: capabilities(),
          clock: &DateTime.utc_now/0,
          relay: names.relay
-       ] ++ Keyword.take(opts, [:send])}
+       ] ++ Keyword.take(opts, [:send, :browser])}
     )
 
     start_supervised!(
@@ -219,7 +222,7 @@ defmodule FermixChannels.Test.TwoEngines do
        name: names.offers,
        home: root,
        relay: names.relay,
-       facts: fn -> Facts.read(@mac) end,
+       facts: fn -> Facts.read(Keyword.merge(@mac, Keyword.get(opts, :facts, []))) end,
        switches: read_switches,
        timer: fn _message, _delay -> make_ref() end}
     )

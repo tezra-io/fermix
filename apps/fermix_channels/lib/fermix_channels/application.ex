@@ -81,6 +81,14 @@ defmodule FermixChannels.Application do
       FermixChannels.Channels.Slack.SocketMode
     )
 
+    # iMessage a Mac carries for a server (M97 §6.4) reports its posture the
+    # same way: away while that Mac is asleep; nothing on a Mac of its own.
+    Application.put_env(
+      :fermix_core,
+      :imessage_health_provider,
+      FermixChannels.Channels.IMessage.ComputerHelper
+    )
+
     # The Live voice engine delegates every task back to a Core turn through
     # this bridge (M41 §6). Core owns the behaviour and resolves an
     # implementation; it must not compile-depend on channels, so the bridge
@@ -179,6 +187,9 @@ defmodule FermixChannels.Application do
         # A device's link to its primary (M75 §6; the primary starts none),
         # before the companion socket that tunnels through it.
         DeviceSupervisor,
+        # A Mac's Messages, carried for its server (M97 §6.4): device-only,
+        # and it starts only on a linked Mac with the helper installed.
+        FermixChannels.Channels.IMessage.Bridge,
         # A candidate's enrollment and the move it waits for (M75 §7; only a
         # candidate starts it, and it starts little else), and the primary's
         # enrollment window (only the primary starts it).

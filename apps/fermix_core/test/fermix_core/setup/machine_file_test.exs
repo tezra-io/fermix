@@ -40,7 +40,7 @@ defmodule FermixCore.Setup.MachineFileTest do
   """
 
   @removed ~w(sandbox fermix_core.computer_use fermix_core.computer_history
-              fermix_channels.imessage fermix_channels.accessories fermix_core.plugins.dev_local)
+              fermix_channels.accessories fermix_core.plugins.dev_local)
 
   test "the machine sections are exactly the ones only this machine configures" do
     assert Enum.sort(Map.keys(MachineFile.sections())) == Enum.sort(Placement.device_sections())
@@ -57,10 +57,11 @@ defmodule FermixCore.Setup.MachineFileTest do
                {:ok, ~s(["invented-notes"])}
 
       assert ConfigText.value(home, "fermix_channels.telegram", "enabled") == {:ok, "true"}
+      # The home uses iMessage, with its owner and guests (M97 §4).
+      assert ConfigText.value(home, "fermix_channels.imessage", "enabled") == {:ok, "true"}
       refute home =~ "sandbox"
       refute home =~ "computer_use"
       refute home =~ "computer_history"
-      refute home =~ "imessage"
       refute home =~ "accessories"
       refute home =~ "dev_local"
 
@@ -74,7 +75,7 @@ defmodule FermixCore.Setup.MachineFileTest do
       assert ConfigText.value(machine, "fermix_core.computer_history", "apps") ==
                {:ok, ~s(["Safari"])}
 
-      assert ConfigText.value(machine, "fermix_channels.imessage", "enabled") == {:ok, "true"}
+      refute machine =~ "imessage"
       assert ConfigText.value(machine, "fermix_channels.accessories", "enabled") == {:ok, "true"}
 
       assert ConfigText.value(machine, "fermix_core.plugins", "dev_local") ==
@@ -123,8 +124,79 @@ defmodule FermixCore.Setup.MachineFileTest do
     test "drop/1 leaves the home's own settings" do
       assert MachineFile.drop(%{
                "sandbox" => %{"mode" => "open"},
-               "fermix_channels" => %{"imessage" => %{"enabled" => true}, "slack" => %{}}
-             }) == %{"fermix_channels" => %{"slack" => %{}}}
+               "fermix_channels" => %{
+                 "accessories" => %{"enabled" => true},
+                 "imessage" => %{"enabled" => true},
+                 "slack" => %{}
+               }
+             }) == %{"fermix_channels" => %{"imessage" => %{"enabled" => true}, "slack" => %{}}}
+    end
+
+    test "the iMessage section is the home's: a machine file's copy is not read" do
+      config = %{"fermix_channels" => %{"imessage" => %{"owner_user_id" => "+15550104477"}}}
+      machine = %{"fermix_channels" => %{"imessage" => %{"owner_user_id" => "+15550109999"}}}
+      assert MachineFile.join(config, machine) == config
+    end
+  end
+
+  # Stage 0 of M97 wrote [fermix_channels.imessage] into machine.toml; the
+  # owner and guests are the home's, so a server must know them (§4).
+  describe "homeward/2" do
+    @stage0_machine """
+    # This computer's own settings
+    [sandbox]
+    mode = "standard"
+
+    [fermix_channels.imessage]
+    enabled = true
+    owner_user_id = "+15550104477" # the owner's phone
+    allowed_sender_ids = ["guest@example.org"]
+
+    [fermix_core.computer]
+    imessage = true
+    """
+
+    test "the section goes back to config.toml first, then leaves the machine file" do
+      config = ~s([fermix_core.agent]\nname = "Orchard"\n)
+      plan = MachineFile.homeward(config, @stage0_machine)
+
+      assert plan.moved == ["fermix_channels.imessage"]
+      assert ConfigText.value(plan.config, "fermix_core.agent", "name") == {:ok, ~s("Orchard")}
+
+      assert ConfigText.value(plan.config, "fermix_channels.imessage", "owner_user_id") ==
+               {:ok, ~s("+15550104477")}
+
+      assert plan.config =~ "# the owner's phone"
+      refute plan.machine =~ "[fermix_channels.imessage]"
+      assert ConfigText.value(plan.machine, "sandbox", "mode") == {:ok, ~s("standard")}
+      # This Mac carries Messages: the switch stays on the machine.
+      assert ConfigText.value(plan.machine, "fermix_core.computer", "imessage") == {:ok, "true"}
+
+      assert MachineFile.homeward_notice(plan.moved) =~
+               "moved from machine.toml back to config.toml: fermix_channels.imessage."
+    end
+
+    # A boot stopped between the two writes finds the section in both: the
+    # machine file's copy replaces config.toml's, and the machine file loses it.
+    test "an interrupted move finishes and changes nothing in config.toml" do
+      first = MachineFile.homeward("", @stage0_machine)
+      again = MachineFile.homeward(first.config, @stage0_machine)
+
+      assert again.config == first.config
+      assert again.machine == first.machine
+
+      assert MachineFile.homeward(again.config, again.machine) == %{
+               config: nil,
+               machine: nil,
+               moved: []
+             }
+    end
+
+    test "a machine file without the section, or none, changes nothing" do
+      assert MachineFile.homeward("", :absent) == %{config: nil, machine: nil, moved: []}
+
+      assert MachineFile.homeward("", ~s([sandbox]\nmode = "open"\n)) ==
+               %{config: nil, machine: nil, moved: []}
     end
   end
 

@@ -22,8 +22,11 @@ defmodule FermixCore.Management.Settings.Channels do
   @doc """
   Every channel section that exists on this host, plus editors.
 
-  iMessage exists only on a Mac (M54 §12), so off one its section is neither
-  published nor readable. `macos?:` names the host for a test.
+  iMessage exists on a Mac (M54 §12), and off one only where a Mac of the
+  home carries Messages (M97 §6.4, `FermixCore.IMessage.carrier/1`): its
+  owner and guests are the home's, so a server holds them. Elsewhere its
+  section is neither published nor readable. `macos?:` and
+  `:imessage_carrier` name the host and the home for a test.
   """
   @spec sections(keyword()) :: [%{id: String.t(), pane: String.t(), title: String.t()}]
   def sections(opts \\ []) when is_list(opts) do
@@ -50,8 +53,15 @@ defmodule FermixCore.Management.Settings.Channels do
 
   def owns?(_section, _opts), do: false
 
-  defp available_channels(opts),
-    do: Inventory.available_channels(Keyword.get_lazy(opts, :macos?, &IMessage.macos?/0))
+  defp available_channels(opts) do
+    macos? = Keyword.get_lazy(opts, :macos?, &IMessage.macos?/0)
+    Inventory.available_channels(macos? or carried?(opts))
+  end
+
+  defp carried?(opts) do
+    Keyword.get_lazy(opts, :imessage_carrier, fn -> IMessage.carrier(macos?: false) end) !=
+      :none
+  end
 
   # The one line under a row that needs more than its label. Rows whose label
   # says everything carry none.

@@ -50,8 +50,9 @@ defmodule FermixCore.Home.MoveReadiness do
       (`FermixCore.Home.DeviceLocal`), so the server runs none of them, and
       the walk never blocks on them;
     * `stays_here`: what the home has turned on that runs only on this
-      computer (iMessage on a Mac, voice calls, meetings, StackChan on a Mac;
-  `stays_here/2`)
+      computer (voice calls, meetings, StackChan on a Mac; `stays_here/2`;
+      iMessage is not among them: the Mac carries it for the server, M97
+      §6.4, as the move's keep-on block shows)
       stops after the move, each named; with none of them on it is `ok`.
       Voice is this computer's own (its socket): calls from the phone carry
       on at the server when Talk to Fermix is on there and its key is in the
@@ -160,7 +161,7 @@ defmodule FermixCore.Home.MoveReadiness do
   @doc """
   The items of a review of the move to the server `name` that read nothing
   but `config` (this home's settings, as `settings/2` reads them) and this
-  engine, in the review's order and words: `stays_here` (iMessage only when
+  engine, in the review's order and words: `stays_here` (StackChan only when
   `macos?`), `whatsapp`, `slack`, `coding_agents`, `cutover_gap`,
   `serves_nothing`, `service`. `report/3` ends with them, and `home.status`'s
   summary builds Move now's confirm from them before any review. `opts` are
@@ -214,16 +215,17 @@ defmodule FermixCore.Home.MoveReadiness do
 
   @doc """
   What the home at `home` has turned on that runs only on this computer and
-  stops after a move, read from its settings: iMessage (only when `macos?`),
-  voice calls and meetings, in that order; or the sentence that says the
-  settings could not be read. StackChan (`:accessories`, M91) is named last,
-  on a Mac only. `home.status` reads it on every poll, so an
+  stops after a move, read from its settings: voice calls and meetings, in
+  that order; or the sentence that says the settings could not be read.
+  StackChan (`:accessories`, M91) is named last, on a Mac only. iMessage is
+  never named: after the move this Mac carries it for the server (M97
+  §6.4). `home.status` reads it on every poll, so an
   unreadable file is logged once when it stops being readable and once when
   it reads again (`Home.UnreadableFiles`, `opts`' `:unreadable_files`: that
   memory, or nil for none).
   """
   @spec stays_here(Path.t(), boolean(), keyword()) ::
-          {:ok, [:imessage | :voice | :meetings | :accessories]} | {:error, String.t()}
+          {:ok, [:voice | :meetings | :accessories]} | {:error, String.t()}
   def stays_here(home, macos?, opts \\ [])
       when is_binary(home) and is_boolean(macos?) and is_list(opts) do
     with {:ok, text} <- settings(home, opts), do: {:ok, features(text, macos?)}
@@ -630,7 +632,7 @@ defmodule FermixCore.Home.MoveReadiness do
   defp stays_behind([], _machine, _name), do: ""
 
   defp stays_behind(features, machine, name) do
-    them = if features in [[:imessage], [:accessories]], do: "it", else: "them"
+    them = if features == [:accessories], do: "it", else: "them"
     "#{Copy.stops_after_move(features)}: neither this #{machine} nor #{name} runs #{them}."
   end
 
@@ -640,13 +642,12 @@ defmodule FermixCore.Home.MoveReadiness do
     if :voice in features, do: "#{Copy.voice_after_move(machine, name)}.", else: ""
   end
 
-  defp none_on(true), do: "iMessage, voice calls and meetings are not turned on."
-  defp none_on(false), do: "Voice calls and meetings are not turned on."
+  defp none_on(_macos?), do: "Voice calls and meetings are not turned on."
 
-  # iMessage runs only on a Mac, so another computer never names it.
+  # iMessage is not here: after a move the Mac carries it for the server
+  # (M97 §6.4), and the move's keep-on block names it.
   defp features(text, macos?) do
     [
-      imessage: macos? and on?(text, "fermix_channels.imessage", "enabled"),
       voice: on?(text, "fermix_core.realtime", "enabled"),
       meetings: on?(text, "fermix_core.meetings", "enabled"),
       # M91 D7, D13: a server carries the pairing and starts no accessory link.

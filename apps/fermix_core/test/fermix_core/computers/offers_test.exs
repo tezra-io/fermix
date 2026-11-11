@@ -30,12 +30,12 @@ defmodule FermixCore.Computers.OffersTest do
   end
 
   describe "compute" do
-    test "an Apple silicon Mac with everything on offers all of it, the shell with its mode" do
+    test "an Apple silicon Mac with everything on offers all of it, the shell and the screen with its mode" do
       assert states(@mac) == %{
                "files" => {:on, nil},
                "shell" => {:on, "standard"},
                "browser" => {:on, nil},
-               "computer_use" => {:on, nil},
+               "computer_use" => {:on, "standard"},
                "imessage" => {:on, nil},
                "history" => {:on, nil}
              }
@@ -55,6 +55,28 @@ defmodule FermixCore.Computers.OffersTest do
       facts = Keyword.put(@linux, :landlock, {:error, "Landlock is absent"})
       assert {:unavailable, sentence} = states(facts)["shell"]
       assert sentence =~ "kernel"
+    end
+
+    # M97 §6.4: the server's tool follows the helper of the machine a call runs
+    # on, so the screen's offer carries what this computer's helper offers.
+    test "the screen carries its helper's actions and input methods, and its access level" do
+      screen = %{actions: ~w(screenshot left_click elements press), input_methods: ["ax"]}
+      facts = Facts.read(Keyword.merge(@linux, screen: screen))
+
+      [offer] = Offers.compute([FermixCore.Computers.Offers.ComputerUse], @all_on, facts)
+
+      assert %{id: "computer_use", state: :on, detail: "strict", helper: ^screen} = offer
+      assert {:ok, payload, _rev} = Offers.encode([offer])
+      assert {:ok, [^offer]} = Offers.decode(payload)
+    end
+
+    test "a screen whose helper said nothing yet carries no helper" do
+      facts = Facts.read(Keyword.merge(@mac, screen: %{actions: [], input_methods: []}))
+      [offer] = Offers.compute([FermixCore.Computers.Offers.ComputerUse], @all_on, facts)
+
+      refute Map.has_key?(offer, :helper)
+      assert {:ok, payload, _rev} = Offers.encode([offer])
+      refute payload =~ "helper"
     end
 
     test "the screen needs the right processor, the helper and its permission" do
@@ -119,6 +141,23 @@ defmodule FermixCore.Computers.OffersTest do
         {one(%{"id" => "files", "state" => "on", "detail" => String.duplicate("a", 65)}),
          "its detail"},
         {one(%{"state" => "on"}), "no id or no state"},
+        {one(%{"id" => "computer_use", "state" => "on", "helper" => %{"actions" => []}}),
+         "names no actions or no input methods"},
+        {one(%{
+           "id" => "computer_use",
+           "state" => "on",
+           "helper" => %{"actions" => [], "input_methods" => []}
+         }), "its helper is not"},
+        {one(%{
+           "id" => "computer_use",
+           "state" => "on",
+           "helper" => %{"actions" => ["Click"], "input_methods" => []}
+         }), "its helper is not"},
+        {one(%{
+           "id" => "computer_use",
+           "state" => "on",
+           "helper" => %{"actions" => many_names(65), "input_methods" => []}
+         }), "its helper is not"},
         {~s({"v":1,"offers":[1]}), "not an object"},
         {~s({"v":1,"offers":[{"id":"files","state":"on"},{"id":"files","state":"on"}]}),
          "files is named more than once"}
@@ -150,4 +189,6 @@ defmodule FermixCore.Computers.OffersTest do
     offers = for index <- 1..count, do: %{"id" => "offer_#{index}", "state" => "on"}
     Jason.encode!(%{"v" => 1, "offers" => offers})
   end
+
+  defp many_names(count), do: for(index <- 1..count, do: "action_#{index}")
 end

@@ -989,7 +989,12 @@ defmodule FermixCore.Management.CopyTest do
     test "every offer sentence and label obeys the rules" do
       for {where, text} <- offer_copy(), do: assert_owner_words(text, :prose, [], where)
 
-      for module <- Offers.core_modules(),
+      # `home.status` names every offer a computer reports by its label, the
+      # device ends beside the link included (`Offers.label/1`).
+      offers = Application.fetch_env!(:fermix_core, :computer_offers).modules()
+      assert Offers.core_modules() -- offers == []
+
+      for module <- offers,
           do: assert_owner_words(module.label(), :name, [], "offer label #{module.id()}")
     end
 

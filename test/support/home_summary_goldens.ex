@@ -43,10 +43,11 @@ defmodule FermixTestSupport.HomeSummaryGoldens do
   end
 
   # M97 §3.1, §7.5: a computer asks to join on the code Add a computer
-  # opened. The server's screen names it, its system and the six digits it
-  # shows, and its owner adds it or not.
+  # opened. The server's screen names it and its system and asks for the six
+  # digits it shows, which it never shows itself, and its owner adds it or
+  # not.
   defp server_asking do
-    joiner = %{name: "loft-linux", platform: "linux", sas: "482913"}
+    joiner = %{name: "loft-linux", platform: "linux"}
 
     server_with_window(
       Map.merge(window(:awaiting_approval, nil, ~U[2031-05-04 12:20:00Z]), %{
@@ -59,7 +60,7 @@ defmodule FermixTestSupport.HomeSummaryGoldens do
         "expires_at" => "2031-05-04T12:20:00Z",
         "candidate_id" => nil,
         "purpose" => "computer",
-        "joiner" => %{"name" => "loft-linux", "platform" => "linux", "sas" => "482913"},
+        "joiner" => %{"name" => "loft-linux", "platform" => "linux"},
         "joined" => nil
       }
     )
@@ -105,7 +106,7 @@ defmodule FermixTestSupport.HomeSummaryGoldens do
   end
 
   # The computer that joins, once the server answered: it shows the six
-  # digits and waits for its owner to add it there.
+  # digits and waits for its owner to type them there.
   defp joining do
     join = %{
       "phase" => "awaiting_approval",

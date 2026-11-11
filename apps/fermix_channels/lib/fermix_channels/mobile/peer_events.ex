@@ -90,8 +90,10 @@ defmodule FermixChannels.Mobile.PeerEvents do
          {"last", :boolean},
          {"size_bytes", {:range, 1, @max_part_bytes}}
        ], :required},
-    "invoke_cancel" => {[{"id", :id}], :none},
-    "invoke_status" => {[{"id", :id}], :none},
+    # A cancel and a status ask name their request's capability and op, which
+    # decide their lane: the request's own (`Mobile.Lanes`).
+    "invoke_cancel" => {[{"id", :id}, {"capability", :capability}, {"op", :op}], :none},
+    "invoke_status" => {[{"id", :id}, {"capability", :capability}, {"op", :op}], :none},
     "invoke_result" =>
       {[
          {"id", :id},

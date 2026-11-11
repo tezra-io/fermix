@@ -10,6 +10,8 @@ defmodule FermixChannels.Desktop.InvokeTransport do
   `Mobile.Lanes`), and waits every #{16} frames for the session to have
   written them (`{:mobile_sync, from, ref}`, at most #{60} s), so a slow
   link slows the upload instead of filling the session's mailbox.
+  `cancel/3` and `status/3` name the request's capability and op beside its
+  id, so each rides its request's lane.
 
   Option (a test's seam): `:registry`, the peers' registry.
   """
@@ -36,16 +38,20 @@ defmodule FermixChannels.Desktop.InvokeTransport do
   end
 
   @impl true
-  def cancel(device_id, id, opts) when is_binary(device_id) and is_binary(id),
-    do:
-      Peer.send(device_id, %{"t" => "invoke_cancel", "id" => id}, <<>>, registry: registry(opts))
+  def cancel(device_id, about, opts) when is_binary(device_id),
+    do: Peer.send(device_id, asking("invoke_cancel", about), <<>>, registry: registry(opts))
 
   @impl true
-  def status(device_id, id, opts) when is_binary(device_id) and is_binary(id),
-    do:
-      Peer.send(device_id, %{"t" => "invoke_status", "id" => id}, <<>>, registry: registry(opts))
+  def status(device_id, about, opts) when is_binary(device_id),
+    do: Peer.send(device_id, asking("invoke_status", about), <<>>, registry: registry(opts))
 
   defp registry(opts), do: Keyword.get(opts, :registry, FermixChannels.Desktop.Peers)
+
+  # A cancel or a status ask names its request's capability and op, which
+  # decide its lane: its request's own (`Mobile.Lanes`).
+  defp asking(type, %{id: id, capability: capability, op: op})
+       when is_binary(id) and is_binary(capability) and is_binary(op),
+       do: %{"t" => type, "id" => id, "capability" => capability, "op" => op}
 
   defp send_part(_device_id, _id, nil, _registry), do: :ok
 

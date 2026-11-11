@@ -268,13 +268,15 @@ session, not a second connection, and nothing on the wire names it.
 |---|---|---|
 | live | `call_open`, `call_attached`, `call_line`, `call_audio`, `call_frame`, `call_close` | written first |
 | interactive | every event of no other lane: chat, `manage` and `manage_result`, `companion_*`, `loopback_*`, a computer's `offers` and `link_path`, `invoke_open`, `invoke_cancel`, `invoke_result` and `invoke_status`, an `invoke_part` whose `size_bytes` is at most 256 KiB, `hello`, `ping`, `pong`, `error`, `ack` | written before bulk |
-| bulk | `media_fetch`, `media_begin`, `media_chunk`, `media_end`, `attach_*`, `snapshot_*`, `move_*`, an `invoke_part` whose `size_bytes` is over 256 KiB, an `invoke_open` that submits a history sitting (`capability` `history`, `op` `submit`) | written when nothing live or interactive waits, one frame at a time |
+| bulk | `media_fetch`, `media_begin`, `media_chunk`, `media_end`, `attach_*`, `snapshot_*`, `move_*`, an `invoke_part` whose `size_bytes` is over 256 KiB, an `invoke_open`, `invoke_cancel` or `invoke_status` that names a history sitting's submit (`capability` `history`, `op` `submit`) | written when nothing live or interactive waits, one frame at a time |
 
 - A family's events share one lane, so a lane never reorders a family's own
   events (a snapshot's `snapshot_stored` rides bulk with its chunks), except
-  the invocation's: `invoke_part` and `invoke_open` take their lane from
-  their header, so a large part's frames ride bulk while its `invoke_result`
-  rides interactive (see *Invocations*). Events
+  the invocation's: `invoke_part`, `invoke_open`, `invoke_cancel` and
+  `invoke_status` take their lane from their header, so a large part's
+  frames ride bulk while its `invoke_result` rides interactive (see
+  *Invocations*). A request's own `invoke_cancel` and `invoke_status` name
+  its `capability` and `op` and so ride its lane, and never pass it. Events
   of different lanes may overtake one another: a reply's `row` may arrive
   before the blob a `media_begin` push carries, as it does during a call.
 - Within a lane, frames go in the order they were handed over: a chunked
@@ -1291,7 +1293,8 @@ computer's record; a phone sends none of it.
 | `id` | `^[a-z][a-z0-9_]{0,31}$`: `files`, `shell`, `browser`, `computer_use`, `imessage`, `history`, `voice`, `attachments`, `accessory` and `notifications` today; the primary keeps an id it does not know as it came, since a newer computer may offer more |
 | `state` | `on`, `off` or `unavailable` |
 | `sentence?` | why the offer is not on, for the owner to read: required unless `state` is `on`, 1 to 300 bytes of UTF-8 with no control character |
-| `detail?` | a short note on the offer, such as the sandbox mode `shell` runs commands in: 1 to 64 bytes of UTF-8 with no control character |
+| `detail?` | a short note on the offer, such as the sandbox mode `shell` runs commands in, or the access level `computer_use` gives (its sandbox mode: `strict` looks only): 1 to 64 bytes of UTF-8 with no control character |
+| `helper?` | what the offer's helper offers, which the primary's tool for it follows (`computer_use`: what this computer's screen helper says it does): `{actions, input_methods}`, 1 to 64 action names and 0 to 8 input methods, each `^[a-z][a-z0-9_]{0,31}$`; absent while the helper has said nothing, and from a computer older than it, which the primary reads as the actions every helper has |
 
 The header's `rev` is the payload's revision, the first 8 bytes of its
 SHA-256 as 16 lowercase hex digits, and the payload's chunk key. A desktop
@@ -1329,8 +1332,8 @@ on.
 |---|---|---|
 | `invoke_open` | `id`, `capability`, `op`, `deadline_ms`, `epoch`, `origin`, `index`, `last` + raw bytes; `turn?`, `part?` | the request: its arguments, a JSON object, chunked, at most 1 MiB |
 | `invoke_part` | `id`, `index`, `last`, `size_bytes` + raw bytes | the one part a request or its answer announced, a stream (see *The part*) |
-| `invoke_cancel` | `id` | the caller cancels its request; answered with exactly one `invoke_result` |
-| `invoke_status` | `id` | the caller asks for the answer again (see *After a reconnect*) |
+| `invoke_cancel` | `id`, `capability`, `op` | the caller cancels its request, naming the request's `capability` and `op` (its lane); answered with exactly one `invoke_result` |
+| `invoke_status` | `id`, `capability`, `op` | the caller asks for the answer again, naming the request's `capability` and `op` (its lane; see *After a reconnect*) |
 | `invoke_result` | `id`, `status`, `duration_ms`, `index`, `last` + raw bytes; `refusal?`, `message?`, `receipt?`, `part?` | how the request ended: its result, a JSON object, chunked, at most 4 MiB (each operation's own bound is tighter), `{}` for none |
 
 **The request.**
@@ -1397,7 +1400,9 @@ caller keeps the first answer it took.
 **After a reconnect.** The primary waits on its invocations, not on a
 session. When a computer's session comes back, the primary sends
 `invoke_status` for every invocation it still waits on from that computer,
-and the computer answers each:
+each only once that invocation's `invoke_open` was sent and from the same
+sender, so a computer is never asked about a request it was not sent yet
+and never hears the ask before the request. The computer answers each:
 
 - an answer it still holds is sent again, its part included;
 - holding only its journal's record, an `invoke_result` of the recorded

@@ -25,8 +25,10 @@ defmodule FermixCore.Computers.Capability do
     an action, at most #{256} bytes), never content: the journal and the
     receipt hold it;
   - optionally `here?/1`, whether the server's own host has it too, which
-    `Computers.Choice` reads for a call that names no computer, and
-    `deadline_ms/2`, the tool's own timeout for an op.
+    `Computers.Choice` reads for a call that names no computer,
+    `continues_on/1`, the computer the turn's earlier calls ran on, which
+    such a call carries on on, and `deadline_ms/2`, the tool's own timeout
+    for an op.
 
   A capability's code reads this computer's settings from the context it is
   handed (`context/0`), never from application environment, so two engines
@@ -119,7 +121,15 @@ defmodule FermixCore.Computers.Capability do
   """
   @callback deadline_ms(String.t(), map()) :: pos_integer()
 
-  @optional_callbacks cancel: 2, here?: 1, deadline_ms: 2
+  @doc """
+  The computer (its device id) this turn's earlier calls of the capability
+  ran on, which a call that names no computer carries on on, for the turn
+  whose loop context is given; nil when none (M97 §6.4: a task in a
+  computer's browser is never moved to this server's, silently).
+  """
+  @callback continues_on(map()) :: String.t() | nil
+
+  @optional_callbacks cancel: 2, here?: 1, deadline_ms: 2, continues_on: 1
 
   @doc "The most bytes a target holds."
   @spec max_target_bytes() :: pos_integer()

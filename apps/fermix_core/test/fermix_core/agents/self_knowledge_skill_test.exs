@@ -716,6 +716,36 @@ defmodule FermixCore.Agents.SelfKnowledgeSkillTest do
     end
   end
 
+  # M97 §6.4: once the home runs on a server, a Mac's Messages carry its
+  # iMessage. "Can you still text me?" and "what if the Mac sleeps?" are
+  # answered only if the reference names the carrier, the away state and the
+  # policy that stays on the Mac. Each string is a key, a readiness key or a
+  # section name, not a phrasing.
+  test "documents iMessage through a Mac: the bridge, away, and the policy kept on the Mac" do
+    computers = "computers" |> reference_path() |> File.read!() |> String.replace(~r/\s+/, " ")
+    setup = channel_setup_reference_path() |> File.read!() |> String.replace(~r/\s+/, " ")
+
+    for required <- [
+          "## iMessage through a Mac",
+          "`imessage`",
+          "one Messages bridge",
+          "**away**",
+          "`policy.set`",
+          "500",
+          "20 MiB",
+          "channel:imessage:away",
+          "channel:imessage:carrier",
+          "channel:imessage:conflict",
+          "[fermix_channels.imessage]"
+        ] do
+      assert computers =~ required, "computers reference does not mention #{required}"
+    end
+
+    assert setup =~ "*iMessage through a Mac*"
+    refute setup =~ "There is no remote-Mac mode"
+    refute computers =~ "screen and Messages of a computer are listed but not used"
+  end
+
   # iMessage is the one channel whose setup is macOS permissions rather than
   # platform credentials, and the one that refuses Linux outright, so "how do I
   # connect iMessage?" and "why is it silent?" are answered only if the grants,

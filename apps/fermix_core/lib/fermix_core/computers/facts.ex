@@ -14,21 +14,28 @@ defmodule FermixCore.Computers.Facts do
   itself can say whether the screen may be seen and controlled, and asking
   it starts it, so this reader asks nothing and a caller that knows passes
   them (`permissions: %{screen: false}`); unknown refuses nothing.
+
+  `screen` is what this computer's screen helper offers, as its latest
+  reading says (`ComputerUse.Reach.offered_helper/0`: its actions, with this
+  computer's bound-window flag applied, and its input methods), which the
+  `computer_use` offer carries to the server (M97 §6.4); `screen:` names it.
   """
 
   alias FermixCore.BuildInfo
+  alias FermixCore.ComputerUse.Reach
   alias FermixCore.ComputerUse.SidecarInstaller
   alias FermixCore.Sandbox.Config, as: SandboxConfig
   alias FermixCore.Sandbox.Landlock
 
   @typedoc "The facts of one machine."
   @type t :: %{
-          os: :macos | :linux | :other,
-          arch: String.t(),
-          landlock: :ok | :not_asked | {:error, String.t()},
-          helpers: %{optional(:computer_use) => boolean()},
-          permissions: %{optional(:screen) => boolean()},
-          sandbox_mode: :strict | :standard | :open
+          required(:os) => :macos | :linux | :other,
+          required(:arch) => String.t(),
+          required(:landlock) => :ok | :not_asked | {:error, String.t()},
+          required(:helpers) => %{optional(:computer_use) => boolean()},
+          required(:permissions) => %{optional(:screen) => boolean()},
+          required(:sandbox_mode) => :strict | :standard | :open,
+          optional(:screen) => %{actions: [String.t()], input_methods: [String.t()]}
         }
 
   @doc "The facts of this machine, each from its option when one is given."
@@ -42,7 +49,8 @@ defmodule FermixCore.Computers.Facts do
       landlock: Keyword.get_lazy(opts, :landlock, fn -> landlock(os) end),
       helpers: Keyword.get_lazy(opts, :helpers, &helpers/0),
       permissions: Keyword.get(opts, :permissions, %{}),
-      sandbox_mode: Keyword.get_lazy(opts, :sandbox_mode, &sandbox_mode/0)
+      sandbox_mode: Keyword.get_lazy(opts, :sandbox_mode, &sandbox_mode/0),
+      screen: Keyword.get_lazy(opts, :screen, &Reach.offered_helper/0)
     }
   end
 

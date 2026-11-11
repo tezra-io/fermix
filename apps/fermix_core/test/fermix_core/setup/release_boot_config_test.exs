@@ -100,6 +100,7 @@ defmodule FermixCore.Setup.ReleaseBootConfigTest do
   # restores what was already there; they need no restatement.
   defp unhydrated_pins do
     [
+      :computer_offers,
       :computers_transport,
       :context_window_limit,
       :harness_continuation_dispatcher,

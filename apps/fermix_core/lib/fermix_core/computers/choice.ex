@@ -4,6 +4,10 @@ defmodule FermixCore.Computers.Choice do
   computers, for a tool a computer can run (`metadata.computer`, its
   `computer_capability/0`). The rules are fixed and never silent:
 
+    * no `computer`, in a turn whose earlier calls of the capability ran
+      on a computer (its `continues_on/1`, the browser's): that computer,
+      refused as a named one is when it is away, and by itself when it is no
+      longer the home's; a task never moves back here silently;
     * no `computer`, and this engine's host has the capability (its
       `here?/1`): here;
     * no `computer`, and exactly one computer offers it: that one;
@@ -91,8 +95,8 @@ defmodule FermixCore.Computers.Choice do
 
   # -- the rules ---------------------------------------------------------------
 
-  defp target(nil, module, context), do: unnamed(module, context)
-  defp target("", module, context), do: unnamed(module, context)
+  defp target(nil, module, context), do: carried_on(module, context)
+  defp target("", module, context), do: carried_on(module, context)
 
   defp target(name, module, context) when is_binary(name) do
     wanted = String.downcase(name)
@@ -105,6 +109,28 @@ defmodule FermixCore.Computers.Choice do
 
   defp target(_not_a_name, _module, _context),
     do: {:refused, :no_such_computer, "Name the computer as ## Computers lists it."}
+
+  # A turn whose earlier calls ran on a computer carries on there
+  # (`continues_on/1`), refused as any named call is when it cannot.
+  defp carried_on(module, context) do
+    case continues_on(module, context) do
+      nil -> unnamed(module, context)
+      device_id -> carried_on(module, context, device_id)
+    end
+  end
+
+  defp carried_on(module, context, device_id) do
+    case Enum.find(computers(context), &(&1.device_id == device_id)) do
+      nil -> {:refused, :no_such_computer, gone_sentence()}
+      computer -> usable(computer, module)
+    end
+  end
+
+  defp continues_on(module, context) do
+    if Code.ensure_loaded?(module) and function_exported?(module, :continues_on, 1),
+      do: module.continues_on(context),
+      else: nil
+  end
 
   defp unnamed(module, context) do
     if here?(module, context),
@@ -157,6 +183,11 @@ defmodule FermixCore.Computers.Choice do
 
   defp no_such_sentence(name), do: "Your Fermix has no computer called #{name}."
 
+  defp gone_sentence,
+    do:
+      "The computer this task ran on is no longer one of yours, so it does not carry on " <>
+        "anywhere else. Tell the owner."
+
   defp nobody_sentence(module), do: "None of your computers offers #{label(module)} now."
 
   defp ambiguous_sentence(module, [_first, _second] = names),
@@ -207,6 +238,7 @@ defmodule FermixCore.Computers.Choice do
       away_sentence(%{base | connected: false}),
       settings_only_sentence("studio Mac"),
       no_such_sentence("studio Mac"),
+      gone_sentence(),
       nobody_sentence(module),
       ambiguous_sentence(module, ["studio Mac", "loft Linux"]),
       ambiguous_sentence(module, ["studio Mac", "loft Linux", "attic Mac"]),

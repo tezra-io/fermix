@@ -35,7 +35,9 @@ defmodule FermixChannels.Home.EnrollmentJoinTest do
     refute sas == Rail.sas(rail, :phone)
 
     assert %{state: :awaiting_approval, purpose: :computer, joiner: joiner} = wait_status(ctx)
-    assert joiner == %{name: "loft-linux", platform: "linux", sas: sas}
+    # The digits are the new computer's to show: the window names it, never
+    # them, so no screen of the home can show them (M97 §7.5).
+    assert joiner == %{name: "loft-linux", platform: "linux"}
     assert {:ok, []} = DeviceStore.list(ctx.primary.store)
 
     # The session is held while the owner decides, answering ping.

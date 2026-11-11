@@ -801,7 +801,10 @@ defmodule FermixChannels.Mobile.ProtocolContractTest do
       Map.put(part, "size_bytes", largest + 1),
       Map.delete(part, "size_bytes"),
       Map.put(cancel, "id", "-inv"),
-      Map.delete(status, "id")
+      Map.delete(status, "id"),
+      Map.delete(cancel, "capability"),
+      Map.delete(status, "op"),
+      Map.put(status, "op", "Glob")
     ]
 
     for header <- taken ++ drifted do

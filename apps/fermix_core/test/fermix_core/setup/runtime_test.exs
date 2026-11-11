@@ -236,9 +236,13 @@ defmodule FermixCore.Setup.RuntimeTest do
     # Evaluate through Config.Reader (not Code.eval_file): runtime.exs uses
     # `config/2`, which only works inside the Config context. The bootstrap
     # block raises before any env-dependent config is read.
-    assert_raise RuntimeError, ~r/bootstrap_runtime_config failed.*:enotdir/s, fn ->
-      read_runtime_config!(runtime_exs)
-    end
+    # The failure names the file it could not read (M97: config.toml or
+    # machine.toml) and why.
+    assert_raise RuntimeError,
+                 ~r/bootstrap_runtime_config failed: .*config\.toml could not be read: not a directory/s,
+                 fn ->
+                   read_runtime_config!(runtime_exs)
+                 end
   end
 
   test "runtime config overlays only the nested APNs credential from FERMIX_APNS_KEY" do

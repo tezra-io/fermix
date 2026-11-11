@@ -27,14 +27,14 @@ defmodule FermixCore.Computers.InvocationTest do
     end
 
     @impl true
-    def cancel(device_id, id, opts) do
-      send(Keyword.fetch!(opts, :test), {:cancelled, device_id, id})
+    def cancel(device_id, %{id: id} = about, opts) do
+      send(Keyword.fetch!(opts, :test), {:cancelled, device_id, id, about})
       :ok
     end
 
     @impl true
-    def status(device_id, id, opts) do
-      send(Keyword.fetch!(opts, :test), {:asked, device_id, id})
+    def status(device_id, %{id: id} = about, opts) do
+      send(Keyword.fetch!(opts, :test), {:asked, device_id, id, about})
       :ok
     end
   end
@@ -309,13 +309,26 @@ defmodule FermixCore.Computers.InvocationTest do
       task = call_async(ctx, Touch, "touch", %{"path" => "a"}, fast)
       assert_receive {:opened, @device, %{"id" => effect}, _payload, nil}
       assert {:error, %Outcome{status: :unknown}} = Task.await(task)
-      assert_received {:cancelled, @device, ^effect}
+      assert_received {:cancelled, @device, ^effect, %{capability: "files", op: "touch"}}
 
       task = call_async(ctx, Look, "look", %{"path" => "a"}, fast)
       assert_receive {:opened, @device, %{"id" => read}, _payload, nil}
       assert {:error, %Outcome{status: :timed_out, deadline_ms: 1}} = Task.await(task)
-      assert_received {:cancelled, @device, ^read}
+      assert_received {:cancelled, @device, ^read, %{capability: "files", op: "look"}}
       assert Calls.outstanding(ctx.calls, @device) == []
+    end
+
+    test "a new session has the caller ask for its own invocation, naming its request", ctx do
+      task = call_async(ctx, Look, "look", %{"path" => "a"})
+      assert_receive {:opened, @device, %{"id" => id}, _payload, nil}
+
+      assert :ok = Calls.reconnected(ctx.calls, @device)
+      assert :ok = Calls.reconnected(ctx.calls, "0d3f8a7e-5c21-4b9e-8f60-2a4c6e8b1d37")
+      assert_receive {:asked, @device, ^id, %{id: ^id, capability: "files", op: "look"}}
+      refute_received {:asked, _device, _id, _about}
+
+      answer(ctx, id, %{"status" => "ok"})
+      assert {:ok, %Outcome{status: :ok}} = Task.await(task)
     end
 
     test "a session with no computer behind it sends nothing and refuses at once", ctx do
@@ -337,6 +350,8 @@ defmodule FermixCore.Computers.InvocationTest do
             Calls.register(ctx.calls, %{
               id: "inv-abandoned",
               device_id: @device,
+              capability: "files",
+              op: "touch",
               caller: self(),
               effect?: true,
               started_at: DateTime.utc_now(),
@@ -355,7 +370,7 @@ defmodule FermixCore.Computers.InvocationTest do
       assert [%{id: "inv-abandoned", device_id: @device}] = Calls.running_effects(ctx.calls)
       Process.exit(caller, :kill)
 
-      assert_receive {:cancelled, @device, "inv-abandoned"}
+      assert_receive {:cancelled, @device, "inv-abandoned", %{capability: "files", op: "touch"}}
       assert Calls.running_effects(ctx.calls) == []
     end
 
@@ -364,7 +379,7 @@ defmodule FermixCore.Computers.InvocationTest do
       assert_receive {:opened, @device, %{"id" => id}, _payload, nil}
 
       assert :ok = Computers.cancel(id, calls: ctx.calls)
-      assert_receive {:cancelled, @device, ^id}
+      assert_receive {:cancelled, @device, ^id, _about}
       answer(ctx, id, %{"status" => "cancelled"})
 
       assert {:error, %Outcome{status: :cancelled}} = Task.await(task)

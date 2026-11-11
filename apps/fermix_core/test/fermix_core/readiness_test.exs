@@ -325,9 +325,51 @@ defmodule FermixCore.ReadinessTest do
       assert "channel:imessage:helper" in keys
     end
 
-    defp imessage_failure do
+    # M97 §6.4: off a Mac the channel runs through the Mac of the home that
+    # carries Messages, and its row names that Mac.
+    test "off a Mac, the row names the carrying Mac: none, more than one, or away" do
+      Application.put_env(:fermix_channels, :imessage,
+        enabled: true,
+        owner_user_id: "+15551234567"
+      )
+
+      studio = %FermixCore.Computers.Computer{device_id: "d-1", name: "studio Mac"}
+      loft = %FermixCore.Computers.Computer{device_id: "d-2", name: "loft Mac"}
+
+      assert %{detail_key: "channel:imessage:carrier", gating: false, action: none} =
+               imessage_failure(macos?: false, imessage_carrier: :none)
+
+      assert none =~ "No Mac of yours carries Messages"
+
+      assert %{detail_key: "channel:imessage:conflict", action: conflict} =
+               imessage_failure(macos?: false, imessage_carrier: {:conflict, [studio, loft]})
+
+      assert conflict =~ "loft Mac and studio Mac each offer Messages"
+
+      assert %{detail_key: "channel:imessage:away", gating: false, action: away} =
+               imessage_failure(
+                 macos?: false,
+                 imessage_carrier: {:computer, %{studio | connected: false}}
+               )
+
+      assert away == "studio Mac, the Mac that carries Messages, is asleep or offline."
+
+      refute imessage_failure(
+               macos?: false,
+               imessage_carrier: {:computer, %{studio | connected: true}}
+             )
+    end
+
+    test "the carrier rows are published for the copy gate" do
+      keys = Enum.map(Readiness.published_actions(), &elem(&1, 0))
+
+      for key <- ~w(channel:imessage:carrier channel:imessage:conflict channel:imessage:away),
+          do: assert(key in keys)
+    end
+
+    defp imessage_failure(opts \\ [macos?: true]) do
       Enum.find(
-        Readiness.report().failures,
+        Readiness.report(opts).failures,
         &String.starts_with?(&1.detail_key, "channel:imessage")
       )
     end

@@ -20,7 +20,11 @@ defmodule FermixCore.Computers.Offers do
     * `state` one of `on`, `off` and `unavailable`;
     * `sentence` present unless the state is `on`, 1 to 300 bytes of
       printable UTF-8;
-    * `detail`, when present, 1 to 64 bytes of printable text.
+    * `detail`, when present, 1 to 64 bytes of printable text;
+    * `helper`, when present (the `computer_use` offer, M97 §6.4: what this
+      computer's screen helper offers, which the server's `computer_use` tool
+      follows), `{actions, input_methods}`: 1 to #{64} action names and 0 to
+      #{8} input methods, each `^[a-z][a-z0-9_]{0,31}$`.
 
   An id this engine has no module for is kept as it came: a newer computer
   may offer more, and the home lists only what it was told.
@@ -35,6 +39,8 @@ defmodule FermixCore.Computers.Offers do
   @max_detail_bytes 64
   @id ~r/\A[a-z][a-z0-9_]{0,31}\z/
   @controls ~r/[\x{0000}-\x{001F}\x{007F}-\x{009F}]/u
+  @max_helper_actions 64
+  @max_input_methods 8
   @states %{"on" => :on, "off" => :off, "unavailable" => :unavailable}
   # The offers whose capability lives in core, in the order a computer lists
   # them; the device ends beside the link follow them
@@ -51,10 +57,11 @@ defmodule FermixCore.Computers.Offers do
 
   @typedoc "One offer as the home records it."
   @type offer :: %{
-          id: String.t(),
-          state: :on | :off | :unavailable,
-          sentence: String.t() | nil,
-          detail: String.t() | nil
+          required(:id) => String.t(),
+          required(:state) => :on | :off | :unavailable,
+          required(:sentence) => String.t() | nil,
+          required(:detail) => String.t() | nil,
+          optional(:helper) => %{actions: [String.t()], input_methods: [String.t()]}
         }
 
   @doc "The most offers one computer sends."
@@ -69,6 +76,21 @@ defmodule FermixCore.Computers.Offers do
   @spec no_system_sentence() :: String.t()
   def no_system_sentence, do: @no_system_sentence
 
+  @doc """
+  The words the offer `id` goes by ("commands", "voice calls"), from its
+  offer module: the core ones and those whose device end lives beside the
+  link, which the module configured at `:computer_offers` lists in its
+  `modules/0` (`FermixChannels.Desktop.Offers`, injected by module as
+  `FermixCore.Computers.Transport` is). Nil for an id this engine has no
+  module for: a newer computer may offer more.
+  """
+  @spec label(String.t()) :: String.t() | nil
+  def label(id) when is_binary(id) do
+    Enum.find_value(Application.fetch_env!(:fermix_core, :computer_offers).modules(), fn module ->
+      if Atom.to_string(module.id()) == id, do: module.label()
+    end)
+  end
+
   @doc "Each module's offer on this computer, in the modules' order."
   @spec compute([module()], Switches.t(), Facts.t()) :: [offer()]
   def compute(modules, switches, facts)
@@ -77,6 +99,9 @@ defmodule FermixCore.Computers.Offers do
       case module.state(switches, facts) do
         {:on, detail} ->
           offer(module.id(), :on, nil, detail)
+
+        {:on, detail, helper} ->
+          module.id() |> offer(:on, nil, detail) |> Map.put(:helper, helper)
 
         {state, sentence} when state in [:off, :unavailable] ->
           offer(module.id(), state, sentence)
@@ -168,7 +193,13 @@ defmodule FermixCore.Computers.Offers do
     %{"id" => id, "state" => Atom.to_string(state)}
     |> put_some("sentence", Map.get(offer, :sentence))
     |> put_some("detail", Map.get(offer, :detail))
+    |> put_some("helper", helper_wire(Map.get(offer, :helper)))
   end
+
+  defp helper_wire(%{actions: actions, input_methods: methods}),
+    do: %{"actions" => actions, "input_methods" => methods}
+
+  defp helper_wire(nil), do: nil
 
   defp put_some(map, _key, nil), do: map
   defp put_some(map, key, value), do: Map.put(map, key, value)
@@ -209,13 +240,37 @@ defmodule FermixCore.Computers.Offers do
     with :ok <- id(id),
          {:ok, state} <- state(state),
          {:ok, sentence} <- sentence(Map.get(item, "sentence"), state),
-         {:ok, detail} <- detail(Map.get(item, "detail")) do
-      {:ok, %{id: id, state: state, sentence: sentence, detail: detail}}
+         {:ok, detail} <- detail(Map.get(item, "detail")),
+         {:ok, helper} <- helper(Map.get(item, "helper")) do
+      {:ok, put_helper(%{id: id, state: state, sentence: sentence, detail: detail}, helper)}
     end
   end
 
   defp one(%{}), do: {:error, "it names no id or no state"}
   defp one(_item), do: {:error, "it is not an object"}
+
+  defp put_helper(offer, nil), do: offer
+  defp put_helper(offer, helper), do: Map.put(offer, :helper, helper)
+
+  defp helper(nil), do: {:ok, nil}
+
+  defp helper(%{"actions" => actions, "input_methods" => methods}) do
+    if names?(actions, 1, @max_helper_actions) and names?(methods, 0, @max_input_methods),
+      do: {:ok, %{actions: actions, input_methods: methods}},
+      else:
+        {:error,
+         "its helper is not 1 to #{@max_helper_actions} actions and 0 to " <>
+           "#{@max_input_methods} input methods, each a name"}
+  end
+
+  defp helper(_other), do: {:error, "its helper names no actions or no input methods"}
+
+  defp names?(list, min, max) when is_list(list),
+    do:
+      length(list) in min..max and
+        Enum.all?(list, &(is_binary(&1) and Regex.match?(@id, &1)))
+
+  defp names?(_not_a_list, _min, _max), do: false
 
   defp id(id) do
     if is_binary(id) and Regex.match?(@id, id), do: :ok, else: {:error, "its id is not an id"}

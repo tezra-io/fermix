@@ -24,6 +24,10 @@ defmodule FermixChannels.Desktop.Invoke do
   `FermixCore.Sandbox.Config`, read at each request: the files and shell
   capabilities run under it), `:capabilities`, `:clock` (0-arity wall clock)
   and `:relay` (the relay's name), with `:name` and Admission's own seams.
+  `:browser` (0-arity, this computer's browser,
+  `FermixCore.Computers.Capabilities.Browser.local/0`, read at each request)
+  is what the browser capability serves with; without it that capability
+  refuses.
   """
 
   use Supervisor
@@ -36,7 +40,10 @@ defmodule FermixChannels.Desktop.Invoke do
   @capabilities %{
     "system" => FermixCore.Computers.Capabilities.System,
     "files" => FermixCore.Computers.Capabilities.Files,
-    "shell" => FermixCore.Computers.Capabilities.Shell
+    "shell" => FermixCore.Computers.Capabilities.Shell,
+    "imessage" => FermixChannels.Channels.IMessage.Capability,
+    "browser" => FermixCore.Computers.Capabilities.Browser,
+    "computer_use" => FermixCore.Computers.Capabilities.Screen
   }
   @required [:home, :switches, :sandbox, :capabilities, :clock, :relay]
 

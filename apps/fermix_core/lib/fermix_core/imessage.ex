@@ -12,18 +12,91 @@ defmodule FermixCore.IMessage do
   `macos?/0` reads the host once per call; every consumer takes a `macos?:`
   option so a test names the platform it means instead of inheriting the CI
   host's.
+
+  **Where it runs** (M97 §6.4) is `carrier/1`, the one answer the channel
+  registry, the channel's own helper on a server, the owner-inbox choice for
+  approvals, health and readiness all read: this host when it is a Mac, else
+  the one computer of the home whose Messages carry it.
   """
+
+  alias FermixCore.Computers
+  alias FermixCore.Computers.Computer
 
   @unsupported_platform_message "imessage runs only on the Mac whose Messages it reads"
   @phone_separators ~r/[\s\-().]/
   @e164 ~r/^\+[1-9]\d{6,14}$/
   @email ~r/^[^@\s]+@[^@\s]+$/
+  @offer "imessage"
 
   @type unsupported_platform :: {:unsupported_platform, :imessage}
+
+  @typedoc """
+  Where the channel runs: this host, the one computer that carries it,
+  every computer that offers it when more than one does, or nowhere.
+  """
+  @type carrier ::
+          :here | {:computer, Computer.t()} | {:conflict, [Computer.t(), ...]} | :none
 
   @doc "Whether this host is a Mac."
   @spec macos?() :: boolean()
   def macos?, do: :os.type() == {:unix, :darwin}
+
+  @doc """
+  Where this home's iMessage runs (M97 §6.4): `:here` on a Mac, whose own
+  Messages the channel reads; elsewhere the one computer of the home that
+  offers `imessage` as it last said (`{:computer, computer}`, away or not:
+  `connected` says which), each of them when more than one does
+  (`{:conflict, computers}`, since one home has one Messages bridge), or
+  `:none`.
+
+  `opts`: `:macos?` and `:computers` (the home's computers, in place of
+  `FermixCore.Computers.list/1`'s), so a test names the host and the home.
+  """
+  @spec carrier(keyword()) :: carrier()
+  def carrier(opts \\ []) when is_list(opts) do
+    if Keyword.get_lazy(opts, :macos?, &macos?/0), do: :here, else: computer_carrier(opts)
+  end
+
+  defp computer_carrier(opts) do
+    case Enum.filter(Keyword.get_lazy(opts, :computers, &Computers.list/0), &offers?/1) do
+      [] -> :none
+      [computer] -> {:computer, computer}
+      computers -> {:conflict, computers}
+    end
+  end
+
+  @doc "Whether `computer` offers `imessage` as it last said."
+  @spec offers?(Computer.t()) :: boolean()
+  def offers?(%Computer{offers: offers}),
+    do: Enum.any?(offers, &match?(%{id: @offer, state: :on}, &1))
+
+  @doc "The sentence for a carrier that is asleep or offline."
+  @spec away_sentence(String.t()) :: String.t()
+  def away_sentence(name) when is_binary(name),
+    do: "#{name}, the Mac that carries Messages, is asleep or offline."
+
+  @doc "The sentence for more than one Mac offering Messages, naming each."
+  @spec conflict_sentence([String.t(), ...]) :: String.t()
+  def conflict_sentence([_, _ | _] = names) do
+    {last, rest} = names |> Enum.sort() |> List.pop_at(-1)
+
+    "#{Enum.join(rest, ", ")} and #{last} each offer Messages, and one home has one " <>
+      "Messages bridge, so switch Messages off on all but one of them."
+  end
+
+  @doc "The sentence for a second Mac offering Messages while `bridge` carries it."
+  @spec second_bridge_sentence(String.t(), String.t()) :: String.t()
+  def second_bridge_sentence(second, bridge) when is_binary(second) and is_binary(bridge),
+    do:
+      "#{second} offers Messages too, and one home has one Messages bridge, so Fermix " <>
+        "goes on using #{bridge} and refuses #{second}."
+
+  @doc "The sentence for a home off a Mac where no Mac of its carries Messages."
+  @spec none_sentence() :: String.t()
+  def none_sentence,
+    do:
+      "No Mac of yours carries Messages. On the Mac you text from, let Fermix on your " <>
+        "server use Messages."
 
   @doc """
   The platform gate for one parsed `[fermix_channels.imessage]` section.

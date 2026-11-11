@@ -72,5 +72,9 @@ defmodule FermixCore.Computers.Prompt do
   end
 
   defp word(%{id: "shell", detail: mode}) when is_binary(mode), do: "shell (#{mode})"
+
+  # The screen's access level follows the computer's sandbox mode; strict is
+  # look only (M97 §6.4).
+  defp word(%{id: "computer_use", detail: "strict"}), do: "screen (look only)"
   defp word(%{id: id}), do: Map.get(@words, id, String.replace(id, "_", " "))
 end

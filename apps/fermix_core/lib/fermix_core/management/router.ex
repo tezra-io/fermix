@@ -311,14 +311,20 @@ defmodule FermixCore.Management.Router do
   defp route_known("computer.journal.list", params, opts),
     do: ComputerMethods.journal_list(params, opts |> operation_opts() |> Keyword.take([:home]))
 
+  # The person at this computer stops its server's use of its screen (M97
+  # §7.4): answered here (`Management.Computer`).
+  defp route_known("computer.screen.stop", params, opts),
+    do: ComputerMethods.screen_stop(params, opts |> operation_opts() |> Keyword.take([:seat]))
+
   defp route_known("computers.rename", params, opts) do
     with :ok <- reject_unknown_params(params, @computers_rename_params),
          {:ok, device_id} <- text_param(params, "device_id"),
          {:ok, name} <- text_param(params, "name") do
       computer_opts = opts |> operation_opts() |> Keyword.get(:computers, [])
+      asking = Computer.asking(opts[:actor])
 
       case Computers.rename(device_id, name, computer_opts) do
-        {:ok, computer} -> {:ok, %{"computer" => Computer.view(computer)}}
+        {:ok, computer} -> {:ok, %{"computer" => Computer.view(computer, asking)}}
         {:error, {:not_found, sentence}} -> invalid_params("device_id", sentence)
         {:error, {_refused, sentence}} -> invalid_params("name", sentence)
       end
@@ -1095,6 +1101,14 @@ defmodule FermixCore.Management.Router do
 
   defp operation_result({:error, {:unavailable, capability, sentence}}),
     do: {:error, :unavailable, %{"capability" => capability, "sentence" => sentence}}
+
+  # A refusal that is a question (M97 §3.3): the same request with
+  # `confirmed: true` is the act, so a surface asks the owner instead of
+  # showing an error.
+  defp operation_result({:error, {:confirm, capability, sentence}}),
+    do:
+      {:error, :unavailable,
+       %{"capability" => capability, "sentence" => sentence, "confirm" => true}}
 
   defp operation_result({:error, {:invalid_params, field, sentence}}),
     do: {:error, :invalid_params, %{"field" => field, "sentence" => sentence}}

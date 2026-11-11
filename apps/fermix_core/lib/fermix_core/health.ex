@@ -72,13 +72,15 @@ defmodule FermixCore.Health do
       health_provider_key: nil
     },
     # iMessage (M54 §5.1) is probed through its Supervisor: it owns the helper's
-    # Port and the Listener, and both are its children.
+    # Port and the Listener, and both are its children. Off a Mac (M97 §6.4)
+    # the helper is the Mac that carries Messages, whose posture comes through
+    # the provider: `:away` while that Mac is asleep or offline.
     %{
       key: :imessage,
       name: "imessage",
       default_enabled: false,
       child: FermixChannels.Channels.IMessage.Supervisor,
-      health_provider_key: nil
+      health_provider_key: :imessage_health_provider
     },
     %{
       key: :acp,
@@ -200,6 +202,8 @@ defmodule FermixCore.Health do
         failure = failure_status(failures, "channel:#{channel.name}") -> failure
         process_alive == false -> :degraded
         match?(%{status: :degraded}, transport) -> :degraded
+        # A channel whose computer is asleep is away, never degraded (M97 D4).
+        match?(%{status: :away}, transport) -> :away
         true -> :ready
       end
 

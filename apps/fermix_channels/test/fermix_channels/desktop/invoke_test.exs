@@ -392,6 +392,38 @@ defmodule FermixChannels.Desktop.InvokeTest do
       assert {%{"status" => "refused", "refusal" => "off"}, _p} = answer("inv-after")
     end
 
+    # Nothing starts while the switch is off, though Admission has not heard
+    # yet: the switches are read again the moment a waiting request would start.
+    test "a request that waited for a slot never starts once the switch went off", ctx do
+      for n <- 1..9, do: open(ctx, "inv-#{n}", "wait", "wait", %{"name" => "q#{n}"})
+      [{first, nil} | _runs] = for n <- 1..8, do: running("q#{n}")
+      # Admission has taken all nine before the switch goes off: the ninth waits.
+      _state = :sys.get_state(ctx.admission)
+
+      Agent.update(ctx.switches, fn _ -> Switches.only([:files], enabled: false) end)
+      finish(first, {:ok, %{}, nil})
+
+      assert {%{"status" => "ok"}, _p} = answer("inv-1")
+      assert {%{"status" => "refused", "refusal" => "off"}, _p} = answer("inv-9")
+      refute_received {:running, "q9", _pid, _part}
+      assert %{status: "refused", refusal: "off"} = journal(ctx, "inv-9")
+    end
+
+    test "a request that waited for its upload never starts once the switch went off", ctx do
+      sha = :sha256 |> :crypto.hash("abc") |> Base.encode16(case: :lower)
+      part = %{"size_bytes" => 3, "sha256" => sha, "mime" => "text/plain"}
+      open(ctx, "inv-up-off", "wait", "wait", %{"name" => "upoff"}, %{"part" => part})
+      # Admission has taken it, and it waits for its part, before the switch goes off.
+      _state = :sys.get_state(ctx.admission)
+
+      Agent.update(ctx.switches, fn _ -> Switches.only([:browser]) end)
+      frame = %{"id" => "inv-up-off", "size_bytes" => 3, "index" => 0, "last" => true}
+      Invoke.handle(ctx.admission, "invoke_part", frame, "abc")
+
+      assert {%{"status" => "refused", "refusal" => "off"}, _p} = answer("inv-up-off")
+      refute_received {:running, "upoff", _pid, _part}
+    end
+
     test "stop_all ends what waits too", ctx do
       for n <- 1..9, do: open(ctx, "inv-#{n}", "wait", "wait", %{"name" => "s#{n}"})
       for n <- 1..8, do: running("s#{n}")

@@ -144,6 +144,7 @@ defmodule FermixCore.Management.Protocol do
     {"computer.join.cancel", 2},
     {"computer.disconnect", 2},
     {"computer.journal.list", 2},
+    {"computer.screen.stop", 2},
     {"accessories.status", 2},
     {"accessories.pair.start", 2},
     {"accessories.pair.begin", 2},

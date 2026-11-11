@@ -46,7 +46,10 @@ defmodule FermixChannels.Desktop.Invoke.Admission do
 
   **The master switch off** (`switches_changed/1`, told by
   `FermixCore.Computers.Switches`) refuses every later request and ends
-  what runs or waits as `refused` `stopped_here` (`stop_all/2`).
+  what runs or waits as `refused` `stopped_here` (`stop_all/2`). A request
+  that waited for a slot or its upload has the switches read again the
+  moment it would start, as at admission, so none starts while they are off
+  though this process has not heard yet.
 
   Each invocation is a run of its own on this computer's trace
   (`FermixCore.Computers.Telemetry`), its bookend emitted before the answer.
@@ -110,6 +113,7 @@ defmodule FermixChannels.Desktop.Invoke.Admission do
       dir: Journal.dir(home),
       switches: Keyword.fetch!(opts, :switches),
       sandbox: Keyword.fetch!(opts, :sandbox),
+      browser: Keyword.get(opts, :browser),
       capabilities: Keyword.fetch!(opts, :capabilities),
       clock: Keyword.fetch!(opts, :clock),
       relay: Keyword.fetch!(opts, :relay),
@@ -319,22 +323,19 @@ defmodule FermixChannels.Desktop.Invoke.Admission do
         :ok
 
       {:ok, _newer} ->
-        {:refused, :stale_epoch,
-         "This computer has seen a newer copy of its home than the one that asked."}
+        {:refused, :stale_epoch, sentence(:stale_epoch)}
 
       {:error, reason} ->
         Logger.error("an invocation was refused: the link could not be read: #{inspect(reason)}")
-        {:refused, :unavailable, "This computer cannot read its link to its server."}
+        {:refused, :unavailable, sentence(:link_unread)}
     end
   end
 
-  defp known_op(%{module: nil}), do: {:refused, :unavailable, unknown_sentence()}
+  defp known_op(%{module: nil}), do: {:refused, :unavailable, sentence(:unknown_op)}
 
   defp known_op(%{module: module, op: op}) do
-    if op in module.ops(), do: :ok, else: {:refused, :unavailable, unknown_sentence()}
+    if op in module.ops(), do: :ok, else: {:refused, :unavailable, sentence(:unknown_op)}
   end
-
-  defp unknown_sentence, do: "Fermix on this computer does not know how to do that."
 
   defp switched_on(%{module: module}, switches) do
     machine = machine()
@@ -353,21 +354,21 @@ defmodule FermixChannels.Desktop.Invoke.Admission do
   defp deadline_allowed(%{deadline_ms: 0, module: module, op: op}) do
     if module.long_lived?(op),
       do: :ok,
-      else: {:refused, :unavailable, "This request names no deadline, and it needs one."}
+      else: {:refused, :unavailable, sentence(:no_deadline)}
   end
 
   defp deadline_allowed(_entry), do: :ok
 
   defp turn_named(%{origin: origin, turn: nil}) do
     if Origin.turn?(origin),
-      do: {:refused, :unavailable, "This request names no turn, and it needs one."},
+      do: {:refused, :unavailable, sentence(:no_turn)},
       else: :ok
   end
 
   defp turn_named(_entry), do: :ok
 
   defp valid_args(%{args: :error}),
-    do: {:failed, "The request's arguments are not a JSON object."}
+    do: {:failed, sentence(:args_not_object)}
 
   defp valid_args(%{args: {:ok, args}, module: module, op: op}) do
     case module.validate(op, args) do
@@ -399,13 +400,7 @@ defmodule FermixChannels.Desktop.Invoke.Admission do
     if fits?, do: entry |> armed(state) |> upload(entry), else: busy(entry, state)
   end
 
-  defp busy(entry, state),
-    do:
-      answer(
-        entry,
-        Outcome.refused(:busy, "This computer is running as much as it allows right now."),
-        state
-      )
+  defp busy(entry, state), do: answer(entry, Outcome.refused(:busy, sentence(:busy)), state)
 
   defp waiting_count(state), do: :queue.len(state.waiting) + map_size(state.uploads)
 
@@ -432,9 +427,19 @@ defmodule FermixChannels.Desktop.Invoke.Admission do
   defp next(state) do
     with true <- map_size(state.running) < @max_running,
          {{:value, entry}, waiting} <- :queue.out(state.waiting) do
-      next(start(entry, Map.get(entry, :part_bytes), %{state | waiting: waiting}))
+      next(waited(entry, Map.get(entry, :part_bytes), %{state | waiting: waiting}))
     else
       _full_or_empty -> state
+    end
+  end
+
+  # A request that waited for a slot or its upload starts only if the
+  # switches let it now: nothing starts while they are off, though this
+  # process has not heard yet (`switches_changed/1`).
+  defp waited(entry, part, state) do
+    case switched_on(entry, switches(state)) do
+      :ok -> start(entry, part, state)
+      {:refused, refusal, sentence} -> answer(entry, Outcome.refused(refusal, sentence), state)
     end
   end
 
@@ -474,7 +479,7 @@ defmodule FermixChannels.Desktop.Invoke.Admission do
 
   defp uploaded(entry, bytes, state) do
     if map_size(state.running) < @max_running,
-      do: start(entry, bytes, state),
+      do: waited(entry, bytes, state),
       else: queue(state, entry)
   end
 
@@ -483,7 +488,7 @@ defmodule FermixChannels.Desktop.Invoke.Admission do
     answer(upload.entry, upload_outcome(), state)
   end
 
-  defp upload_outcome, do: %Outcome{status: :failed, message: "The upload did not arrive whole."}
+  defp upload_outcome, do: %Outcome{status: :failed, message: sentence(:upload_lost)}
 
   # -- running ----------------------------------------------------------------------
 
@@ -497,8 +502,7 @@ defmodule FermixChannels.Desktop.Invoke.Admission do
 
       {:error, reason} ->
         Logger.error("invocation #{entry.id} did not run: its journal: #{inspect(reason)}")
-        sentence = "This computer could not record the request, so it did not run it."
-        answer(entry, %Outcome{status: :failed, message: sentence}, state)
+        answer(entry, %Outcome{status: :failed, message: sentence(:not_recorded)}, state)
     end
   end
 
@@ -524,8 +528,7 @@ defmodule FermixChannels.Desktop.Invoke.Admission do
   defp crashed(id, reason, state) do
     {entry, state} = pop_running(id, state)
     Logger.error("invocation #{id} stopped: #{inspect(reason)}")
-    sentence = "It stopped before it finished. The computer's log says why."
-    answer(entry, %Outcome{status: :failed, message: sentence}, state) |> next()
+    answer(entry, %Outcome{status: :failed, message: sentence(:crashed)}, state) |> next()
   end
 
   defp pop_running(id, state) do
@@ -536,7 +539,7 @@ defmodule FermixChannels.Desktop.Invoke.Admission do
   defp outcome({:ok, result, part}, entry) when is_map(result) do
     if within_bounds?(result, part, entry),
       do: %Outcome{status: :ok, result: result, part_bytes: part},
-      else: %Outcome{status: :failed, message: "The answer is larger than this computer sends."}
+      else: %Outcome{status: :failed, message: sentence(:answer_too_large)}
   end
 
   defp outcome({:failed, sentence}, _entry) when is_binary(sentence),
@@ -557,7 +560,7 @@ defmodule FermixChannels.Desktop.Invoke.Admission do
 
   defp outcome(other, entry) do
     Logger.error("invocation #{entry.id}: #{entry.capability} answered #{inspect(other)}")
-    %Outcome{status: :failed, message: "It answered in a way this computer cannot send."}
+    %Outcome{status: :failed, message: sentence(:unsendable)}
   end
 
   defp within_bounds?(result, part, entry) do
@@ -676,13 +679,13 @@ defmodule FermixChannels.Desktop.Invoke.Admission do
     |> put_some("message", receipt_message(status))
   end
 
-  defp receipt_message("failed"), do: "It failed, and this computer no longer holds what it said."
-  defp receipt_message("refused"), do: "This computer refused it."
-  defp receipt_message("unknown"), do: "Fermix on this computer stopped while it ran."
+  defp receipt_message("failed"), do: sentence(:receipt_failed)
+  defp receipt_message("refused"), do: sentence(:receipt_refused)
+  defp receipt_message("unknown"), do: sentence(:receipt_unknown)
   defp receipt_message(_status), do: nil
 
   defp stopped(refusal, state) do
-    outcome = Outcome.refused(refusal, "The person at this computer stopped it.")
+    outcome = Outcome.refused(refusal, sentence(:stopped_here))
     state = Enum.reduce(Map.keys(state.running), state, &stop_running(&1, outcome, &2))
     state = Enum.reduce(Map.keys(state.uploads), state, &drop_upload(&1, outcome, &2))
     ids = for entry <- :queue.to_list(state.waiting), do: entry.id
@@ -859,10 +862,16 @@ defmodule FermixChannels.Desktop.Invoke.Admission do
       home: state.home,
       switches: switches,
       sandbox: state.sandbox.(),
+      browser: browser(state),
       clock: state.clock,
       deadline_ms: entry.deadline_ms
     }
   end
+
+  # This computer's browser, read at each request (`Desktop.Invoke`'s
+  # `:browser`); nil where it was given none.
+  defp browser(%{browser: nil}), do: nil
+  defp browser(%{browser: read}) when is_function(read, 0), do: read.()
 
   defp meta(entry) do
     %{
@@ -890,4 +899,58 @@ defmodule FermixChannels.Desktop.Invoke.Admission do
 
   defp put_some(map, _key, nil), do: map
   defp put_some(map, key, value), do: Map.put(map, key, value)
+
+  # -- what the server's model reads ----------------------------------------------
+
+  @said [
+    :stale_epoch,
+    :link_unread,
+    :unknown_op,
+    :no_deadline,
+    :no_turn,
+    :args_not_object,
+    :busy,
+    :upload_lost,
+    :not_recorded,
+    :crashed,
+    :answer_too_large,
+    :unsendable,
+    :receipt_failed,
+    :receipt_refused,
+    :receipt_unknown,
+    :stopped_here
+  ]
+
+  @doc """
+  Every sentence this module puts in an answer's `message`, which the
+  server's model reads: one place, held to the copy rules. An offer's
+  refusal is in that offer's words (`FermixCore.Computers.Offers`).
+  """
+  @spec sentences() :: [String.t(), ...]
+  def sentences, do: Enum.map(@said, &sentence/1)
+
+  defp sentence(:stale_epoch),
+    do: "This computer has seen a newer copy of its home than the one that asked."
+
+  defp sentence(:link_unread), do: "This computer cannot read its link to its server."
+  defp sentence(:unknown_op), do: "Fermix on this computer does not know how to do that."
+  defp sentence(:no_deadline), do: "This request names no deadline, and it needs one."
+  defp sentence(:no_turn), do: "This request names no turn, and it needs one."
+  defp sentence(:args_not_object), do: "The request's arguments are not a JSON object."
+  defp sentence(:busy), do: "This computer is running as much as it allows right now."
+  defp sentence(:upload_lost), do: "The upload did not arrive whole."
+
+  defp sentence(:not_recorded),
+    do: "This computer could not record the request, so it did not run it."
+
+  defp sentence(:crashed), do: "It stopped before it finished. The computer's log says why."
+  defp sentence(:answer_too_large), do: "The answer is larger than this computer sends."
+  defp sentence(:unsendable), do: "It answered in a way this computer cannot send."
+
+  defp sentence(:receipt_failed),
+    do: "It failed, and this computer no longer holds what it said."
+
+  defp sentence(:receipt_refused), do: "This computer refused it."
+  defp sentence(:receipt_unknown), do: "Fermix on this computer stopped while it ran."
+  defp sentence(:stopped_here), do: "The person at this computer stopped it."
 end

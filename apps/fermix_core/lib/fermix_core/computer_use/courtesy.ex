@@ -16,6 +16,15 @@ defmodule FermixCore.ComputerUse.Courtesy do
   """
 
   alias Compux.Protocol
+  alias FermixCore.ComputerUse.Controls
+
+  # The actions that reach their control through accessibility rather than the
+  # pointer: every verb a control lists (M86 P2, PROTOCOL.md §6.3) apart from
+  # `type`, which is one only when it names a control on a helper that types by
+  # accessibility (`ax_addressed?/2`). One list, two readers: it decides which
+  # evidence an action comes back with (M42 slice 6, `Session`) and, since a bound
+  # window, how wide the contention question is (M42 §5.3, `Yield`).
+  @ax_addressed Controls.verbs() -- ["type"]
 
   # Actions that act on the machine the human is sitting at: they DISTURB them.
   # DERIVED, not listed (M42 slice 4 §4): every action the library offers that is
@@ -67,6 +76,19 @@ defmodule FermixCore.ComputerUse.Courtesy do
   @spec scope(boolean(), :window | :desktop | nil) :: scope()
   def scope(true = _ax_addressed?, :window), do: :target_process
   def scope(_ax_addressed?, _target_kind), do: :desktop
+
+  @doc """
+  Whether `request` reaches its control through accessibility rather than the
+  pointer, on a helper whose reading is `capabilities`: a verb a control lists,
+  or `type` with an `element_ref` where that helper types by accessibility
+  (`input_methods` holds `"ax"`, PROTOCOL.md §1).
+  """
+  @spec ax_addressed?(map(), map()) :: boolean()
+  def ax_addressed?(%{"action" => "type", "element_ref" => ref}, %{input_methods: methods})
+      when is_binary(ref),
+      do: "ax" in methods
+
+  def ax_addressed?(%{"action" => action}, _capabilities), do: action in @ax_addressed
 
   @doc """
   Whether the agent should step aside, given the scope, whether the person is

@@ -462,11 +462,21 @@ defmodule FermixChannels.Mobile.PeerEventsTest do
       end
     end
 
-    test "a cancel and a status ask carry an id and nothing else" do
+    # Its request's capability and op decide the lane it rides (Mobile.Lanes).
+    test "a cancel and a status ask carry an id and their request's capability and op" do
+      asked = Map.take(@open, ["id", "capability", "op"])
+
       for type <- ~w(invoke_cancel invoke_status) do
-        assert {:ok, _event} = decode(type, %{"id" => @open["id"]})
-        assert {:ok, _frame} = encode(type, %{"id" => @open["id"]})
+        assert {:ok, _event} = decode(type, asked)
+        assert {:ok, _frame} = encode(type, asked)
         assert {:error, {:missing_field, "id"}} = decode(type, %{})
+
+        for field <- ["capability", "op"] do
+          assert {:error, {:missing_field, ^field}} = decode(type, Map.delete(asked, field))
+        end
+
+        assert {:error, {:invalid_field, "capability"}} =
+                 decode(type, %{asked | "capability" => "Files"})
       end
     end
 

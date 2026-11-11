@@ -190,17 +190,25 @@ defmodule FermixCore.Setup.ConfigStore do
   Reads and normalizes the settings file and the machine file beside it, each
   setting from its own file only (`MachineFile.join/2`).
 
-  A value a normalizer refuses raises with the key named. A section the file
-  enables on a host that cannot run it answers a typed error instead: an
-  enabled `[fermix_channels.imessage]` off a Mac is
-  `{:error, {:unsupported_platform, :imessage}}`. `macos?:` names the host for a
-  test; every other caller reads the real one.
+  A value a normalizer refuses raises with the key named. An enabled
+  `[fermix_channels.imessage]` loads on any host (M97 §6.4): a home that moved
+  to a server keeps it there and runs it through the Mac that carries
+  Messages, and the channel registry decides whether this engine can run it.
   """
   @spec load_runtime_config(keyword()) :: {:ok, runtime_config()} | {:error, term()}
   def load_runtime_config(opts \\ []) do
-    with {:ok, config} <- read_settings(path()),
-         {:ok, machine} <- read_settings(MachineFile.path(fermix_home())) do
+    with {:ok, config} <- read_named(path()),
+         {:ok, machine} <- read_named(MachineFile.path(fermix_home())) do
       loaded(config, machine, opts)
+    end
+  end
+
+  # The settings are two files, so one that cannot be read is named
+  # (`{:config, file, reason}`, `load_error_sentence/1`).
+  defp read_named(file) do
+    case read_settings(file) do
+      {:error, reason} -> {:error, {:config, file, reason}}
+      read -> read
     end
   end
 
@@ -248,11 +256,24 @@ defmodule FermixCore.Setup.ConfigStore do
   defp migrate_locked(home, server?) do
     with {:ok, config} <- read_settings(home_document_path(home)),
          {:ok, machine} <- read_settings(MachineFile.path(home)),
-         plan = MachineFile.migration(text(config), machine, server?),
+         {:ok, config, machine} <- homeward(home, text(config), machine),
+         plan = MachineFile.migration(config, machine, server?),
          :ok <- write_if(MachineFile.path(home), plan.machine),
          :ok <- write_if(home_document_path(home), plan.config),
          :ok <- record_server_sandbox(home, plan) do
       log_notice(MachineFile.notice(plan))
+    end
+  end
+
+  # The home's tables an earlier engine wrote into the machine file go back
+  # to config.toml, which is written first (`MachineFile.homeward/2`).
+  defp homeward(home, config, machine) do
+    plan = MachineFile.homeward(config, machine)
+
+    with :ok <- write_if(home_document_path(home), plan.config),
+         :ok <- write_if(MachineFile.path(home), plan.machine) do
+      if notice = MachineFile.homeward_notice(plan.moved), do: Logger.info(notice)
+      {:ok, plan.config || config, plan.machine || machine}
     end
   end
 
@@ -451,22 +472,16 @@ defmodule FermixCore.Setup.ConfigStore do
   end
 
   @doc """
-  The sentence a load refusal is reported with: a typed platform refusal in its
-  operator words, any other reason as its term.
+  The sentence a load refusal is reported with: a file of the settings that
+  could not be read, by its path and why; any other reason as its term.
   """
   @spec load_error_sentence(term()) :: String.t()
-  def load_error_sentence({:unsupported_platform, :imessage} = reason),
-    do: IMessage.error_message(reason)
+  def load_error_sentence({:config, file, reason}) when is_binary(file) and is_atom(reason),
+    do: "#{file} could not be read: #{:file.format_error(reason)}."
 
   def load_error_sentence(reason), do: inspect(reason)
 
-  defp platform_checked(snapshot, opts) do
-    imessage = Keyword.get(snapshot.fermix_channels, :imessage, [])
-
-    with :ok <- IMessage.check_platform(imessage, opts) do
-      {:ok, maybe_resolve_keyring(snapshot, opts)}
-    end
-  end
+  defp platform_checked(snapshot, opts), do: {:ok, maybe_resolve_keyring(snapshot, opts)}
 
   @spec realtime_configured?() :: boolean()
   def realtime_configured? do
@@ -513,14 +528,22 @@ defmodule FermixCore.Setup.ConfigStore do
   defp write_snapshot(snapshot, opts) do
     with {:ok, contents} <- read_home_document(fermix_home()),
          mcp = mcp_document(contents),
+         {_home_only, dropped} = MachineFile.strip(contents),
          {:ok, persisted} <- persisted_snapshot(snapshot, opts),
          :ok <- File.mkdir_p(fermix_home()),
          :ok <- ensure_workspace(),
          :ok <- write_atomic(MachineFile.path(fermix_home()), dump_machine(persisted)),
          :ok <- File.write(path(), dump_snapshot(Map.put(persisted, :mcp, mcp))) do
+      :ok = said_dropped(dropped)
       RestartState.record_persisted_baseline()
     end
   end
+
+  # Machine settings written into config.toml by hand: the write above takes
+  # this computer's settings from what runs, so it dropped them, and says so
+  # as a start does (`MachineFile.dropped_notice/1`).
+  defp said_dropped([]), do: :ok
+  defp said_dropped(names), do: log_notice(MachineFile.dropped_notice(names))
 
   @spec apply_snapshot(runtime_config()) :: :ok
   @spec apply_snapshot(runtime_config(), keyword()) :: :ok
@@ -1773,6 +1796,8 @@ defmodule FermixCore.Setup.ConfigStore do
       render_section(["fermix_channels", "discord"], Keyword.get(channels, :discord, [])),
       render_section(["fermix_channels", "slack"], Keyword.get(channels, :slack, [])),
       render_section(["fermix_channels", "signal"], Keyword.get(channels, :signal, [])),
+      # The home uses iMessage, with its owner and guests (M97 §4).
+      render_section(["fermix_channels", "imessage"], Keyword.get(channels, :imessage, [])),
       render_section(["fermix_channels", "acp"], Keyword.get(channels, :acp, [])),
       render_mobile(Keyword.get(channels, :mobile, [])),
       render_section(["fermix_web"], web),
@@ -1807,7 +1832,6 @@ defmodule FermixCore.Setup.ConfigStore do
         ComputerSwitches.to_keyword(Keyword.get(fermix_core, :computer, []))
       ),
       render_section(["fermix_core", "plugins"], dev_local),
-      render_section(["fermix_channels", "imessage"], Keyword.get(channels, :imessage, [])),
       render_section(["fermix_channels", "accessories"], Keyword.get(channels, :accessories, []))
     ]
     |> Enum.reject(&(&1 in [nil, ""]))

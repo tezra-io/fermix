@@ -105,11 +105,11 @@ from evallib import safe_rm  # noqa: E402
 
 DEV_HOME = os.path.expanduser("~/.fermix-dev")
 # This computer's own settings, beside config.toml (M97 §4): the engine reads
-# the sandbox, computer use and history, iMessage, the accessory link and the
-# dev plugin folder from it only.
+# the sandbox, computer use and history, the accessory link and the dev plugin
+# folder from it only. iMessage's section is the home's, in config.toml.
 MACHINE_FILE = "machine.toml"
 MACHINE_TABLES = ("sandbox", "fermix_core.computer_use", "fermix_core.computer_history",
-                  "fermix_channels.imessage", "fermix_channels.accessories")
+                  "fermix_channels.accessories")
 # Homes this script must never touch, compared as REALPATHS so a symlink cannot dress
 # one of them up as a disposable eval home.
 _NON_DISPOSABLE = tuple(os.path.realpath(os.path.expanduser(p))

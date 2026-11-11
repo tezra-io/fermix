@@ -274,6 +274,18 @@ defmodule Mix.Tasks.Fermix.Cues.FunnelTest do
       refute_received {:tailscale, _args}
     end
 
+    # The settings are two files; a refusal names the one that failed.
+    test "names machine.toml when it is the file that cannot be read" do
+      home = System.fetch_env!("FERMIX_HOME")
+      File.mkdir!(Path.join(home, "machine.toml"))
+
+      error =
+        assert_raise Mix.Error, fn -> Funnel.execute(["gh-hooks"], runner: runner(%{})) end
+
+      assert error.message =~ "#{Path.join(home, "machine.toml")} could not be read"
+      refute error.message =~ "config.toml"
+    end
+
     test "a failing tailscale command is reported with its own words" do
       responses = Map.put(reads(), @mount, {"error: Funnel not available on this port\n", 1})
 

@@ -50,8 +50,9 @@ defmodule FermixCore.Management.HomeMove do
     `expired`, `expires_at`, and the `candidate_id` that enrolled through
     it, null until one did; a computer's window also says `purpose`
     `computer`, its `state` may be `awaiting_approval`, `approved` or
-    `denied`, and it names the `joiner` that waits, `{name, platform, sas}`,
-    or null, and the computer that joined through it, `joined {device_id,
+    `denied`, and it names the `joiner` that waits, `{name, platform}`, or
+    null (never its digits, which the owner reads on the new computer and
+    types), and the computer that joined through it, `joined {device_id,
     name}`, or null) or null; `candidates` the held candidates on
     a primary, empty elsewhere; `move` the move's `phase`, `candidate` (its
     name, null on the candidate itself) and `sentence`, or null.
@@ -389,8 +390,8 @@ defmodule FermixCore.Management.HomeMove do
 
   defp joiner_view(nil), do: nil
 
-  defp joiner_view(%{name: name, platform: platform, sas: sas}),
-    do: %{"name" => name, "platform" => platform, "sas" => sas}
+  defp joiner_view(%{name: name, platform: platform}),
+    do: %{"name" => name, "platform" => platform}
 
   defp joined_view(nil), do: nil
   defp joined_view(%{device_id: id, name: name}), do: %{"device_id" => id, "name" => name}

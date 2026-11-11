@@ -55,7 +55,7 @@ defmodule FermixCore.Home.AlwaysOnRelease do
   @compiled_env Mix.env()
   @methods ~w(home.status home.enroll.approve home.enroll.deny home.act computers.rename
                computer.join.start computer.join.cancel computer.disconnect
-               computer.journal.list)
+               computer.journal.list computer.screen.stop)
   @sentence "Always On is not in this release of Fermix yet."
   @section "[fermix_core.always_on]"
 
