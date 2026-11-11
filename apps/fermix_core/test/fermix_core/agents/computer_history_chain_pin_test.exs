@@ -6,7 +6,7 @@ defmodule FermixCore.Agents.ComputerHistoryChainPinTest do
   `turn_state.ordered_routes`, so this is the one place the pin is applied and
   the one place it has to be proven.
 
-  The platform is injected (`computer_history_macos?`), the provider chain comes
+  Whether history surfaces is injected (`computer_history_surfaces`), the provider chain comes
   from config the test establishes, and `FERMIX_HOME` points at a throwaway dir
   so no host credential can add a hop.
   """
@@ -17,6 +17,7 @@ defmodule FermixCore.Agents.ComputerHistoryChainPinTest do
   alias FermixCore.Agents.MainAgent
   alias FermixCore.Agents.SkillRegistry
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
+  alias FermixCore.ComputerHistory.Config, as: HistoryConfig
   alias FermixCore.Memory.ConversationStore
 
   setup do
@@ -96,7 +97,7 @@ defmodule FermixCore.Agents.ComputerHistoryChainPinTest do
        skill_registry: skill_registry,
        conversation_store: conversation_store,
        task_supervisor: task_supervisor,
-       computer_history_macos?: true},
+       computer_history_surfaces: &HistoryConfig.enabled?/0},
       id: agent_name
     )
 

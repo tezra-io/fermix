@@ -2683,23 +2683,22 @@ defmodule Fermix.CLI.Doctor.Checks do
   end
 
   @doc """
-  Computer history (MILESTONE_32 §15.3): a macOS-only, opt-in row. Tree-less —
+  Computer history (MILESTONE_32 §15.3): this machine's opt-in row, where it
+  has a recorder (M97 §8.3: a Mac, until a Linux recorder ships). Tree-less —
   reports config-level state (availability, on/off, summarizer posture, allowlist
   sizes) plus the chain posture (§9.4): an enabled rail whose primary is not
   granted for history captures and summarizes but never appears in a reply, which
   is a **warn** here, with the grant that would fix it named. Runtime detail
   (spool size, pause) integrates with the capturer stage over the control socket.
-  `:macos?`/`:config`/`:routes` are injectable so the row is hermetic on non-macOS
+  `:recorder?`/`:config`/`:routes` are injectable so the row is hermetic on any
   CI; `:routes` takes `Selection.ordered_routes/0`'s own shape.
   """
   @spec computer_history(keyword()) :: result()
   def computer_history(opts \\ []) when is_list(opts) do
-    macos? = Keyword.get_lazy(opts, :macos?, &ComputerHistory.macos?/0)
-
-    if macos? do
+    if Keyword.get_lazy(opts, :recorder?, &ComputerHistory.recorder?/0) do
       computer_history_result(opts)
     else
-      ok("computer history", "macOS only; unavailable on this host")
+      ok("computer history", "no recorder on this system; a Mac records")
     end
   end
 
@@ -2719,7 +2718,7 @@ defmodule Fermix.CLI.Doctor.Checks do
   defp enabled_history_result(config, opts) do
     posture =
       ComputerHistoryGate.chain_posture(
-        [macos?: true, config: config] ++ Keyword.take(opts, [:routes])
+        [surfaces?: true, config: config] ++ Keyword.take(opts, [:routes])
       )
 
     detail =

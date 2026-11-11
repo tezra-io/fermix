@@ -47,7 +47,6 @@ defmodule FermixCore.MeetingsTest do
   alias FermixCore.Meetings.Supervisor, as: MeetingsSupervisor
   alias FermixCore.MeetingsTest.IdleSource
   alias FermixCore.Memory.Repo
-  alias FermixCore.Setup.ConfigStore
 
   @meet_url "https://meet.google.com/abc-defg-hij"
   @zoom_url "https://zoom.us/j/123456789"
@@ -62,19 +61,26 @@ defmodule FermixCore.MeetingsTest do
     start_supervised!({Repo, name: repo_name, enabled: true, database_path: db_path})
 
     dev_local = FermixTestSupport.SafeRm.make_tmp_dir!("meetings-dev-local")
+    home = FermixTestSupport.SafeRm.make_tmp_dir!("meetings-home")
+    prior_home = System.get_env("FERMIX_HOME")
     prior_meetings = Application.get_env(:fermix_core, :meetings)
     prior_plugins = Application.get_env(:fermix_core, :plugins)
 
     # Both lanes' readiness is established here rather than inherited: an empty
     # dev_local makes "the sidecar is not installed" a fact of this test, not of
-    # whatever checkout the operator happens to have.
+    # whatever checkout the operator happens to have, and an empty home of its
+    # own makes "the sidecar's browser is not installed" one too, whatever home
+    # the run was given and whatever another test left in it.
     put_meetings(enabled: true)
     Application.put_env(:fermix_core, :plugins, dev_local: dev_local)
+    System.put_env("FERMIX_HOME", home)
 
     on_exit(fn ->
+      restore_home(prior_home)
       restore(:meetings, prior_meetings)
       restore(:plugins, prior_plugins)
       FermixTestSupport.SafeRm.rm_rf!(dev_local)
+      FermixTestSupport.SafeRm.rm_rf!(home)
 
       Enum.each([db_path, "#{db_path}-wal", "#{db_path}-shm"], fn path ->
         FermixTestSupport.SafeRm.rm(path)
@@ -347,22 +353,9 @@ defmodule FermixCore.MeetingsTest do
     on_exit(fn -> send(holder, :release) end)
   end
 
-  # The browser marker lives under the shared test `FERMIX_HOME`, not under
-  # `dev_local`, so it has to be removed again or it leaks into every later test
-  # that asserts the Meet lane is not ready.
-  defp install_fake_browser do
-    :ok = SidecarInstaller.mark_browser_installed()
-
-    on_exit(fn ->
-      FermixTestSupport.SafeRm.rm(
-        Path.join([
-          ConfigStore.workspace_paths().plugins,
-          "meetbot",
-          "browser_installed"
-        ])
-      )
-    end)
-  end
+  # The browser marker lives under this test's own `FERMIX_HOME`, which goes
+  # with the test.
+  defp install_fake_browser, do: :ok = SidecarInstaller.mark_browser_installed()
 
   defp install_fake_sidecar(dev_local) do
     {:ok, target} = SidecarInstaller.target()
@@ -412,4 +405,7 @@ defmodule FermixCore.MeetingsTest do
 
   defp restore(key, nil), do: Application.delete_env(:fermix_core, key)
   defp restore(key, prior), do: Application.put_env(:fermix_core, key, prior)
+
+  defp restore_home(nil), do: System.delete_env("FERMIX_HOME")
+  defp restore_home(prior), do: System.put_env("FERMIX_HOME", prior)
 end

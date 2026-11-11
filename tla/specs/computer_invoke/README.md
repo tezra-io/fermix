@@ -56,9 +56,11 @@ The modules it describes:
   `bulk?` guards it reads), so neither passes it on the link.
 - The browser's requests (`FermixCore.Computers.Capabilities.Browser.run/4`
   and `FermixCore.Browser.HeldTurn`, whole): each runs in the held process
-  that stands for its server turn on the computer, which the run only
-  calls, so a run Admission ends leaves what that process took to go on
-  (`Held`, INVOKE-1).
+  that stands for its server turn on the computer, linked to the run that
+  made it for as long as it runs (`handle_call {:run, fun}`, `link/1`), so
+  whatever ends the run ends the request there, and a request whose run
+  ended before the held process took it is never started (`Held`,
+  `HeldEndsWithRun`; INVOKE-1, fixed).
 
 Not modelled, each covered elsewhere:
 - the bound (8 running, 32 waiting, `busy` past it), the relay's 512
@@ -75,16 +77,23 @@ Not modelled, each covered elsewhere:
   `screen.watch`, `imessage.watch`), which holds a running slot for as long
   as it waits (one `imessage.watch` at a time, a newer one ending the
   older; a `screen.watch` until the seat's hold ends) and is waited on
-  until it is cancelled or a new session asks for it. One whose run a
-  restart of Admission ended while the session stayed up is answered by
-  nothing: `recover/1` only marks it `unknown` in the journal, and its
-  caller, which has no deadline, waits until the session next ends and the
-  caller asks. For Messages carried by a Mac, the server hears no message
-  from that Mac until then. `EveryCallEnds` is about calls with a deadline
-  and does not cover this;
-- a caller that ends before its answer, for which `Calls` sends a cancel,
-  and `Computers.cancel/2`: the cancel the deadline sends is the same step
-  (`invocation_test.exs`);
+  until its caller ends or an answer comes. One whose run a restart of
+  Admission ended is answered by that restart (`Stop`, the journal's
+  receipt), so a watch is asked again at once (`two_engines_invoke_test.exs`);
+  `EveryCallEnds` is about calls with a deadline and does not cover a
+  watch;
+- a caller that ends before its answer, for which `Calls` sends a cancel
+  (`abandoned/2`), after the request the caller itself sent: the cancel the
+  deadline sends is the same step (`invocation_test.exs`). `Computers.cancel/2`,
+  a cancel sent from `Calls` that could pass its request, is gone: nothing
+  called it, and a caller stops what it asked by ending;
+- the browser switch, and `Browser.HeldTurnListener` (the switches' fourth
+  listener), which ends every held turn when the master or the browser
+  switch goes off: a turn that runs no request holds nothing this spec
+  sees, and one at work ends as its run does (`held_turn_listener_test.exs`,
+  `two_engines_browser_test.exs`). So does the rule that a conversation's
+  next turn ends the turn held before it, which is about whose pane task a
+  request runs in, not whether it runs (`held_turn_test.exs`);
 - an id asked twice: the server never repeats one, and the computer
   answers one it still runs, waits on or holds as a status ask
   (`invoke_test.exs`). That is memory, not the journal: an id whose held
@@ -104,11 +113,6 @@ Not modelled, each covered elsewhere:
 - a run admitted before the computer learned of a newer copy of its home.
   It finishes: the epoch is checked when a request is admitted, not again
   when one that waited starts;
-- a cancel `Computers.cancel/2` asks for, which `Calls` sends rather than
-  the caller: an id is cancelled only once its request went. No code in
-  the engine calls it yet (its tests do); a caller added must keep that
-  order, or the cancel can reach the computer first, be answered no
-  record, and the request run after (`NoRecordIsFinal`).
 
 ## Pins
 
@@ -118,9 +122,8 @@ The `.tla` header pins these sources:
 - `apps/fermix_core/lib/fermix_core/computers/calls.ex`, whole;
 - `apps/fermix_core/lib/fermix_core/computers/journal.ex`, by function:
   `append_started`, `append_finished`, `lookup`, `interrupted`,
-  `close_all`, `append`, `write_line`, `entries`, `entry`;
-- `apps/fermix_core/lib/fermix_core/computers.ex`, by function: `call`,
-  `cancel`;
+  `close_all`, `closed_entry`, `append`, `write_line`, `entries`, `entry`;
+- `apps/fermix_core/lib/fermix_core/computers.ex`, by function: `call`;
 - `apps/fermix_channels/lib/fermix_channels/desktop/invoke.ex`, whole;
 - `apps/fermix_channels/lib/fermix_channels/desktop/invoke/admission.ex`,
   whole;
@@ -143,7 +146,7 @@ The `.tla` header pins these sources:
 
 | Switch | Kind | `TRUE` means |
 |---|---|---|
-| `Held` | scene | (a set of calls) the calls that are the browser's, each run in its server turn's held process, which outlives the run (INVOKE-1); `{}`, every other capability, in every check but 17 |
+| `Held` | scene | (a set of calls) the calls that are the browser's, each run in its server turn's held process; `{}`, every other capability, in every check but 17 and 18 |
 | `SessionCanDrop` | environment | the session ends with words in flight: answers on their way are lost, requests on their way are lost or were already handed to Admission |
 | `ComputerCanStop` | environment | the computer's Admission, or its engine, stops in the middle and starts again |
 | `AnswersCanExpire` | environment | a held answer leaves memory (10 minutes, or the bounds of what is held) |
@@ -156,6 +159,7 @@ The `.tla` header pins these sources:
 | `SwitchReadAtStart` | mechanism | the switches are read again the moment a request that waited for a slot or its upload would start (`Admission.waited/3`); `FALSE` starts it as it was admitted |
 | `AskOnceSent` | mechanism | a new session's status ask comes from the caller, once its request was sent (`Calls.reconnected/2`, `Invocation.ask_again/3`); `FALSE` has the family ask for every id registered, sent or not |
 | `ServerDeadline` | mechanism | the caller waits at most its deadline and the link's allowance (`Invocation.await/5`, `gave_up/4`); `FALSE` waits for ever |
+| `HeldEndsWithRun` | mechanism | a held turn runs each request linked to the run that made it (`HeldTurn.handle_call {:run, fun}`, `link/1`), so whatever ends the run ends the request, and one whose run is gone never starts; `FALSE` has the run only call it, and the request goes on (INVOKE-1) |
 
 ## What holds
 
@@ -179,8 +183,10 @@ everything the environment can do) holds five rules:
 - `OffAlwaysWins`: nothing starts while the master switch is off, a
   request that waited included, and once Admission has heard, nothing runs
   or waits, in Admission or in a browser turn's held process (`Working`).
-  It holds for every capability but the browser (`Held = {}`); the
-  browser breaks it (INVOKE-1, check 17). It needs `SwitchReadAtAdmit` (check 05, 5 states): a request
+  It holds for the browser too (`Held = {e}`, check 17), and there it
+  needs `HeldEndsWithRun` (check 18, 6 states): a browser request the held
+  process took goes on after Admission ended its run and answered it
+  stopped here (INVOKE-1). It needs `SwitchReadAtAdmit` (check 05, 5 states): a request
   taken after the switch went off, and before Admission heard, starts; and
   `SwitchReadAtStart` (check 15, 6 states): a request admitted to wait,
   the switch off before Admission heard, starts when its slot frees.
@@ -291,6 +297,34 @@ invocation's fixes above), which staled every pin but the journal's and
   `defguard`s, which a definition pin cannot name; the browser
   capability's `run` and `held_turn.ex`, which INVOKE-1 describes.
 
+## Re-read (M97, the off switch reaches a held browser turn)
+
+Read against the working tree after `15f1ef38`, uncommitted when written;
+re-pin once committed. Each change, and what it does to the model:
+- `held_turn.ex` (whole): a request runs linked to its run, and one whose
+  run is gone is dropped unstarted (`HeldEndsWithRun`, INVOKE-1 fixed); a
+  held turn is keyed by its server turn's session and conversation, and a
+  conversation's own next turn ends the one held before it, normally, before
+  its first request runs (not modelled: whose pane task, not whether);
+  `stop_all/1` for `Browser.HeldTurnListener`.
+- `capabilities/browser.ex#run`: hands the held turn the request's turn,
+  conversation and whether it is a worker's. No modelled step changes.
+- `switches.ex#notify`: a fourth listener, `Browser.HeldTurnListener`.
+  Admission is told as before.
+- `admission.ex` (whole): at start it answers every run its recovery
+  closed with the journal's receipt (`handle_continue`), which `Stop` now
+  says; every line cited moved, the other builder's `invoke_result` clause
+  for a computer's own request included, so each cite is to be walked again
+  at the re-pin.
+- `journal.ex#interrupted,close_all` (and the new `closed_entry`): answers
+  the entries it closed instead of their count. No modelled step changes.
+- `computers.ex#call` (`cancel` is gone), `invocation.ex` (its `cancel/2`
+  and a moduledoc sentence gone) and `calls.ex` (its `cancel/2` gone): no
+  modelled step changes; the README's last Not modelled item, the order a
+  caller of `Computers.cancel/2` had to keep, is gone with it.
+- `invoke_family.ex#init,handle_event,reconcile`: changed by the computer
+  history work, not this re-read; to be read at the re-pin.
+
 ## Findings
 
 The first pin's three (a status ask that could reach the computer before
@@ -302,8 +336,10 @@ modelled above.
 - **Severity:** medium. The trigger is rare, but the master switch is the
   owner's stop at the computer, and for the browser it answers "The person
   at this computer stopped it." and stops nothing already handed over.
-- **Status:** open. Found in the re-read of `26196634`.
-- **Check:** 17 (6 states).
+- **Status:** fixed in the working tree after `15f1ef38` (uncommitted when
+  this was written; the re-pin names the commit). Found in the re-read of
+  `26196634`.
+- **Check:** 18 (6 states) reaches it without the fix; 17 holds with it.
 - **Counterexample:** the server sends a browser request that changes
   something; Admission records it started and runs it, and the run hands
   it to the turn's held process. The owner switches everything off at the
@@ -338,3 +374,17 @@ modelled above.
   and a held process that drops a call whose caller is gone before it
   starts it. Check 17 then holds and becomes the `holds` check, with a
   `needs` check for that mechanism.
+- **The fix:** no `cancel/2`: the held process links itself to the run
+  for as long as it runs that run's request (`HeldTurn.handle_call {:run,
+  fun}`, `link/1`), so every way Admission ends a run (`stop_task/2`'s
+  `terminate_child`, a restart of `Desktop.Invoke`'s `:one_for_all`) ends
+  the request there and the held process with it, and its pane task as a
+  stopped turn's; a call whose run is already gone fails the link and is
+  dropped unstarted. `HeldEndsWithRun` models it; check 17 holds, check 18
+  is its `needs` check. The request a browser already has (one CDP or pane
+  operation, inside its profile's process) is not interrupted: that
+  operation completes in the browser, as on the server's own browser when a
+  turn is cancelled, and nothing the held process would do after it
+  starts. Beside it, `Browser.HeldTurnListener` ends every held turn when
+  the master or the browser switch goes off, so no pane task and tab wait
+  for the 10-minute idle bound.

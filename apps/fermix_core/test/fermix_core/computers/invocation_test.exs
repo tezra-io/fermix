@@ -373,18 +373,6 @@ defmodule FermixCore.Computers.InvocationTest do
       assert_receive {:cancelled, @device, "inv-abandoned", %{capability: "files", op: "touch"}}
       assert Calls.running_effects(ctx.calls) == []
     end
-
-    test "cancel asks the computer, and its answer comes to the caller", ctx do
-      task = call_async(ctx, Touch, "touch", %{"path" => "a"})
-      assert_receive {:opened, @device, %{"id" => id}, _payload, nil}
-
-      assert :ok = Computers.cancel(id, calls: ctx.calls)
-      assert_receive {:cancelled, @device, ^id, _about}
-      answer(ctx, id, %{"status" => "cancelled"})
-
-      assert {:error, %Outcome{status: :cancelled}} = Task.await(task)
-      assert {:error, :not_found} = Computers.cancel(id, calls: ctx.calls)
-    end
   end
 
   # The server runs no model tool on a computer yet (stage 1 does); this

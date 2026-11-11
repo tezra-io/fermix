@@ -2,9 +2,9 @@ defmodule FermixCore.ComputerHistory.CapturerTest do
   @moduledoc """
   MILESTONE_32 §8.4a / §6.4 — the capture rail against a fake compux sidecar
   (`fake_capture_sidecar.pl`). Proves the async event push end-to-end: handshake
-  (the protocol ack), buffered flush into `Ingest` → `Repo`, protocol-mismatch and
+  (the protocol ack), buffered flush into `Ingest` → `Spool`, protocol-mismatch and
   refused-start degradation, the machine-wide singleton stand-down, and that a
-  malformed frame becomes a gap rather than a crash — all with an injected repo
+  malformed frame becomes a gap rather than a crash — all with an injected store
   and an injected lock path so the suite never touches the real machine lock.
   """
   # async: false — the flush-accounting case lowers the global Logger level, which
@@ -15,7 +15,7 @@ defmodule FermixCore.ComputerHistory.CapturerTest do
 
   alias FermixCore.ComputerHistory.Capturer
   alias FermixCore.ComputerHistory.Controller
-  alias FermixCore.Memory.Repo
+  alias FermixCore.ComputerHistory.Spool
 
   @fake Path.expand("fake_capture_sidecar.pl", __DIR__)
 
@@ -27,19 +27,14 @@ defmodule FermixCore.ComputerHistory.CapturerTest do
 
   setup do
     unique = System.unique_integer([:positive])
-    db_path = Path.join(System.tmp_dir!(), "fermix-ch-capturer-#{unique}.db")
-    lock_path = Path.join(System.tmp_dir!(), "fermix-ch-capturer-#{unique}.lock")
-    repo_name = :"ch_capturer_repo_#{unique}"
+    dir = FermixTestSupport.SafeRm.make_tmp_dir!("ch-capturer")
+    lock_path = Path.join(dir, "capture.lock")
+    spool_name = :"ch_capturer_spool_#{unique}"
 
-    start_supervised!({Repo, name: repo_name, enabled: true, database_path: db_path})
+    start_supervised!({Spool, name: spool_name, path: Path.join([dir, "device", "history.db"])})
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf(dir) end)
 
-    on_exit(fn ->
-      FermixTestSupport.SafeRm.rm(lock_path)
-
-      Enum.each([db_path, "#{db_path}-wal", "#{db_path}-shm"], &FermixTestSupport.SafeRm.rm/1)
-    end)
-
-    %{repo: repo_name, db_path: db_path, lock_path: lock_path, tmp: unique}
+    %{spool: spool_name, lock_path: lock_path, tmp: unique}
   end
 
   # --- helpers -----------------------------------------------------------
@@ -62,7 +57,7 @@ defmodule FermixCore.ComputerHistory.CapturerTest do
 
     defaults = [
       name: :"ch_capturer_#{tag}",
-      repo: ctx.repo,
+      spool: ctx.spool,
       binary_path: @fake,
       lock_path: ctx.lock_path,
       apps: ["com.apple.Safari"],
@@ -85,10 +80,10 @@ defmodule FermixCore.ComputerHistory.CapturerTest do
       else: [{~c"FAKE_PROTO", ~c"#{@protocol}"} | env]
   end
 
-  defp stored(repo), do: elem(Repo.computer_history_events_after_id(0, 1_000, server: repo), 1)
+  defp stored(spool), do: elem(Spool.events_after(0, 1_000, server: spool), 1)
 
   # Bounded async wait: the capture push is genuinely asynchronous (OS subprocess
-  # → Port → timed flush → repo write), so a deadline-bounded poll is the correct
+  # → Port → timed flush → store write), so a deadline-bounded poll is the correct
   # tool, not a fixed sleep masking a race.
   defp eventually(fun, timeout_ms \\ 2_000) do
     deadline = System.monotonic_time(:millisecond) + timeout_ms
@@ -207,7 +202,7 @@ defmodule FermixCore.ComputerHistory.CapturerTest do
       assert {:protocol_mismatch, %{required: @protocol}} = status.reason
     end
 
-    test "acked frames flow through Ingest into the repo", ctx do
+    test "acked frames flow through Ingest into the store", ctx do
       frames = [
         app_event(1),
         app_event(2, %{
@@ -223,7 +218,7 @@ defmodule FermixCore.ComputerHistory.CapturerTest do
 
       rows =
         eventually(fn ->
-          if length(stored(ctx.repo)) >= 2, do: {:ok, stored(ctx.repo)}, else: :retry
+          if length(stored(ctx.spool)) >= 2, do: {:ok, stored(ctx.spool)}, else: :retry
         end)
 
       seqs = rows |> Enum.map(& &1.source_seq) |> Enum.sort()
@@ -289,7 +284,7 @@ defmodule FermixCore.ComputerHistory.CapturerTest do
 
       rows =
         eventually(fn ->
-          if length(stored(ctx.repo)) >= 3, do: {:ok, stored(ctx.repo)}, else: :retry
+          if length(stored(ctx.spool)) >= 3, do: {:ok, stored(ctx.spool)}, else: :retry
         end)
 
       by_seq = Map.new(rows, &{&1.source_seq, &1})
@@ -323,7 +318,7 @@ defmodule FermixCore.ComputerHistory.CapturerTest do
 
       rows =
         eventually(fn ->
-          if length(stored(ctx.repo)) >= 2, do: {:ok, stored(ctx.repo)}, else: :retry
+          if length(stored(ctx.spool)) >= 2, do: {:ok, stored(ctx.spool)}, else: :retry
         end)
 
       assert rows |> Enum.map(& &1.source_seq) |> Enum.sort() == [1, 2]
@@ -362,7 +357,7 @@ defmodule FermixCore.ComputerHistory.CapturerTest do
         start_capturer(ctx, sidecar_env: [{~c"FAKE_EVENTS_FILE", String.to_charlist(events)}])
 
         eventually(fn ->
-          if stored(ctx.repo) == [], do: :retry, else: {:ok, :written}
+          if stored(ctx.spool) == [], do: :retry, else: {:ok, :written}
         end)
       end)
 
@@ -391,7 +386,7 @@ defmodule FermixCore.ComputerHistory.CapturerTest do
         end)
 
       assert {:protocol_mismatch, %{required: @protocol, sidecar: 5}} = status.reason
-      assert stored(ctx.repo) == []
+      assert stored(ctx.spool) == []
     end
 
     # The cached release sidecar (compux 0.7.3, protocol 5) has no `observe_start`
@@ -412,7 +407,7 @@ defmodule FermixCore.ComputerHistory.CapturerTest do
       refute File.exists?(ctx.lock_path)
       # The wire was never verified, so there is no captured discontinuity to
       # record: a mismatch is a degrade, never an observer.gap.
-      assert stored(ctx.repo) == []
+      assert stored(ctx.spool) == []
       assert Process.alive?(pid)
     end
 
@@ -476,7 +471,7 @@ defmodule FermixCore.ComputerHistory.CapturerTest do
         end)
 
       assert Capturer.status(pid).mode == :capturing
-      assert Enum.any?(stored(ctx.repo), &(&1.source_seq == 1))
+      assert Enum.any?(stored(ctx.spool), &(&1.source_seq == 1))
     end
 
     test "a refused observe_start degrades", ctx do
@@ -512,7 +507,7 @@ defmodule FermixCore.ComputerHistory.CapturerTest do
       # report the failure rather than a supervisor restart storm.
       assert Process.alive?(pid)
 
-      rows = stored(ctx.repo)
+      rows = stored(ctx.spool)
       # No unverified sidecar events leak (the wire never verified), but the
       # self-authored 'restart' gaps DO survive the degrade — the discontinuity is
       # recorded, never a silent hole.
@@ -551,7 +546,7 @@ defmodule FermixCore.ComputerHistory.CapturerTest do
           if Capturer.status(pid).mode == :degraded, do: {:ok, :done}, else: :retry
         end)
 
-      rows = stored(ctx.repo)
+      rows = stored(ctx.spool)
 
       assert Enum.any?(rows, &(&1.source_seq == 1 and &1.type == "app.activated")),
              "the verified event was dropped by the exhausted-restart degrade"
@@ -587,7 +582,7 @@ defmodule FermixCore.ComputerHistory.CapturerTest do
 
       rows =
         eventually(fn ->
-          rows = stored(ctx.repo)
+          rows = stored(ctx.spool)
           if Enum.any?(rows, &(&1.type == "observer.gap")), do: {:ok, rows}, else: :retry
         end)
 
@@ -615,7 +610,7 @@ defmodule FermixCore.ComputerHistory.CapturerTest do
 
       rows =
         eventually(fn ->
-          rows = stored(ctx.repo)
+          rows = stored(ctx.spool)
           if Enum.any?(rows, &(&1.type == "observer.gap")), do: {:ok, rows}, else: :retry
         end)
 
@@ -634,7 +629,7 @@ defmodule FermixCore.ComputerHistory.CapturerTest do
 
       rows =
         eventually(fn ->
-          rows = stored(ctx.repo)
+          rows = stored(ctx.spool)
           if Enum.any?(rows, &(&1.type == "observer.gap")), do: {:ok, rows}, else: :retry
         end)
 
@@ -700,7 +695,7 @@ defmodule FermixCore.ComputerHistory.CapturerTest do
       # And it is really capturing: the standee's own sidecar events land.
       _ =
         eventually(fn ->
-          if Enum.any?(stored(ctx.repo), &(&1.source_seq == 1)), do: {:ok, :done}, else: :retry
+          if Enum.any?(stored(ctx.spool), &(&1.source_seq == 1)), do: {:ok, :done}, else: :retry
         end)
     end
   end
@@ -737,15 +732,15 @@ defmodule FermixCore.ComputerHistory.CapturerTest do
     end
   end
 
-  # C1: the terminate-time flush makes Repo calls, each bounded by
+  # C1: the terminate-time flush makes store calls, each bounded by
   # GenServer.call's 5 s, against the DynamicSupervisor's own 5 s shutdown. A
   # kill there skips whatever terminate/2 has not reached, so the sidecar and
-  # the machine-wide lock go first and the best-effort flush last. The Repo is
+  # the machine-wide lock go first and the best-effort flush last. The store is
   # held suspended, and the flush's first call parked in its mailbox is the
   # barrier: by then the sidecar's Port is closed and the lock released. The
-  # Repo is resumed at once, so no wait races the flush's own call timeout.
+  # store is resumed at once, so no wait races the flush's own call timeout.
   describe "teardown ahead of a slow terminate flush (C1)" do
-    test "a flush blocked on the Repo leaves the sidecar reaped and the lock released", ctx do
+    test "a flush blocked on the store leaves the sidecar reaped and the lock released", ctx do
       pid_file =
         Path.join(
           System.tmp_dir!(),
@@ -759,7 +754,7 @@ defmodule FermixCore.ComputerHistory.CapturerTest do
       # until terminate/2 flushes it.
       opts = [
         name: :"ch_capturer_#{System.unique_integer([:positive])}",
-        repo: ctx.repo,
+        spool: ctx.spool,
         binary_path: @fake,
         lock_path: ctx.lock_path,
         apps: ["com.apple.Safari"],
@@ -784,38 +779,42 @@ defmodule FermixCore.ComputerHistory.CapturerTest do
       assert File.exists?(ctx.lock_path)
       assert [_sidecar_port] = ports_of(pid)
 
-      repo = Process.whereis(ctx.repo)
-      :ok = :sys.suspend(repo)
+      store = Process.whereis(ctx.spool)
+      :ok = :sys.suspend(store)
       stopping = Task.async(fn -> DynamicSupervisor.terminate_child(sup, pid) end)
 
       try do
-        eventually(fn -> if call_parked?(repo, pid), do: {:ok, :parked}, else: :retry end, 10_000)
+        eventually(
+          fn -> if call_parked?(store, pid), do: {:ok, :parked}, else: :retry end,
+          10_000
+        )
+
         refute File.exists?(ctx.lock_path)
         assert ports_of(pid) == []
       after
-        :sys.resume(repo)
+        :sys.resume(store)
       end
 
       assert :ok = Task.await(stopping, 10_000)
       eventually(fn -> if os_process_alive?(os_pid), do: :retry, else: {:ok, :reaped} end, 10_000)
 
       # The flush still ran, last.
-      assert Enum.any?(stored(ctx.repo), &(&1.source_seq == 1))
+      assert Enum.any?(stored(ctx.spool), &(&1.source_seq == 1))
     end
   end
 
   # C1's sibling: a degrade runs inside a callback, so a `:shutdown` that
   # arrives during its flush waits in the mailbox, and the kill 5 s later skips
-  # whatever the degrade has not reached. That flush makes two Repo calls
+  # whatever the degrade has not reached. That flush makes two store calls
   # (Ingest's pause read, then the insert), each bounded by GenServer.call's
   # 5 s, so the sidecar and the lock go first there too. A malformed line ahead
   # of a mismatched ack buffers a self-authored gap, which gives the degrade's
-  # flush a row to write. The Repo is suspended before the Capturer starts (its
-  # start makes no Repo call), and the flush's first call parked in the Repo's
-  # mailbox is the barrier. The Repo is resumed at once after two in-memory
+  # flush a row to write. The store is suspended before the Capturer starts (its
+  # start makes no store call), and the flush's first call parked in the store's
+  # mailbox is the barrier. The store is resumed at once after two in-memory
   # assertions.
   describe "teardown ahead of a slow degrade flush" do
-    test "a degrade flush blocked on the Repo leaves the sidecar reaped and the lock released",
+    test "a degrade flush blocked on the store leaves the sidecar reaped and the lock released",
          ctx do
       unique = System.unique_integer([:positive])
       pid_file = Path.join(System.tmp_dir!(), "fermix-ch-pid-#{ctx.tmp}-#{unique}")
@@ -827,8 +826,8 @@ defmodule FermixCore.ComputerHistory.CapturerTest do
       end)
 
       File.write!(pre_ack, "{ not json\n")
-      repo = Process.whereis(ctx.repo)
-      :ok = :sys.suspend(repo)
+      store = Process.whereis(ctx.spool)
+      :ok = :sys.suspend(store)
 
       {pid, os_pid} =
         try do
@@ -845,7 +844,7 @@ defmodule FermixCore.ComputerHistory.CapturerTest do
           os_pid = eventually(fn -> read_pid_file(pid_file) end, 10_000)
 
           eventually(
-            fn -> if call_parked?(repo, pid), do: {:ok, :parked}, else: :retry end,
+            fn -> if call_parked?(store, pid), do: {:ok, :parked}, else: :retry end,
             10_000
           )
 
@@ -853,7 +852,7 @@ defmodule FermixCore.ComputerHistory.CapturerTest do
           assert ports_of(pid) == []
           {pid, os_pid}
         after
-          :sys.resume(repo)
+          :sys.resume(store)
         end
 
       status =
@@ -869,7 +868,7 @@ defmodule FermixCore.ComputerHistory.CapturerTest do
       eventually(fn -> if os_process_alive?(os_pid), do: :retry, else: {:ok, :reaped} end, 10_000)
 
       # The flush still ran, last: the malformed line's gap is in the spool.
-      assert Enum.any?(stored(ctx.repo), &(&1.type == "observer.gap"))
+      assert Enum.any?(stored(ctx.spool), &(&1.type == "observer.gap"))
     end
   end
 
@@ -886,7 +885,7 @@ defmodule FermixCore.ComputerHistory.CapturerTest do
 
       opts = [
         name: name,
-        repo: ctx.repo,
+        spool: ctx.spool,
         binary_path: @fake,
         lock_path: ctx.lock_path,
         apps: ["com.apple.Safari"],

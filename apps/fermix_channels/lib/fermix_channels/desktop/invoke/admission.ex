@@ -55,7 +55,12 @@ defmodule FermixChannels.Desktop.Invoke.Admission do
   (`FermixCore.Computers.Telemetry`), its bookend emitted before the answer.
 
   At start it closes what a crash left started (`unknown`, `interrupted`)
-  and applies the journal's retention, then every hour. Seams: `:timer`
+  and tells the server of each as soon as it has started, with the
+  journal's receipt as a status ask is answered: a restart of this process
+  while the session stays up leaves no caller waiting, a long-lived one
+  (`imessage.watch`, `screen.watch`) included; with no session the answer is
+  not sent, and the server asks once one comes back. It applies the
+  journal's retention then, and every hour. Seams: `:timer`
   (2-arity, `Process.send_after/3` to this process), `:send` (3-arity, in
   place of `Relay.send_event/3`), `:link_epoch` (0-arity, in place of
   reading `device/desktop.json`).
@@ -65,6 +70,7 @@ defmodule FermixChannels.Desktop.Invoke.Admission do
 
   require Logger
 
+  alias FermixChannels.Desktop.HistoryUplink
   alias FermixChannels.Desktop.Relay
   alias FermixChannels.Mobile.Chunks
   alias FermixCore.Computers.Capability
@@ -128,9 +134,20 @@ defmodule FermixChannels.Desktop.Invoke.Admission do
       held: %{}
     }
 
-    :ok = recover(state)
+    closed = recover(state)
     _timer = state.timer.(:prune, @prune_every_ms)
-    {:ok, state}
+    {:ok, state, {:continue, {:interrupted, closed}}}
+  end
+
+  # Each run a crash ended is answered once this process stands again.
+  @impl true
+  def handle_continue({:interrupted, closed}, state) do
+    Enum.each(
+      closed,
+      &send_answer(receipt_answer(&1), Outcome.receipt_only_payload(), nil, state)
+    )
+
+    {:noreply, state}
   end
 
   @impl true
@@ -146,8 +163,13 @@ defmodule FermixChannels.Desktop.Invoke.Admission do
   def handle_cast({:event, "invoke_status", %{"id" => id}, _payload}, state),
     do: {:noreply, status(id, state)}
 
-  def handle_cast({:event, "invoke_result", %{"id" => id}, _payload}, state) do
-    Logger.warning("invocation #{id}: an answer came for a request this computer never sent")
+  # The home's answer to a request this computer sent it (`history.submit`,
+  # M97 §8.1) goes to the process waiting on it.
+  def handle_cast({:event, "invoke_result", %{"id" => id} = fields, payload}, state) do
+    if HistoryUplink.answer(id, fields, payload) == :unknown,
+      do:
+        Logger.warning("invocation #{id}: an answer came for a request this computer never sent")
+
     {:noreply, state}
   end
 
@@ -196,20 +218,27 @@ defmodule FermixChannels.Desktop.Invoke.Admission do
 
   # What a crash left started is closed, then the retention runs; a journal
   # this computer cannot read or write is said, and the requests that need
-  # it are refused as they come.
+  # it are refused as they come. Answers what it closed.
   defp recover(state) do
-    case Journal.interrupted(state.dir, state.clock.()) do
-      {:ok, 0} ->
-        :ok
+    closed =
+      case Journal.interrupted(state.dir, state.clock.()) do
+        {:ok, []} ->
+          []
 
-      {:ok, count} ->
-        Logger.warning("#{count} invocation(s) were interrupted when Fermix stopped here")
+        {:ok, closed} ->
+          Logger.warning(
+            "#{length(closed)} invocation(s) were interrupted when Fermix stopped here"
+          )
 
-      {:error, reason} ->
-        Logger.error("the invocation journal could not be read: #{inspect(reason)}")
-    end
+          closed
 
-    prune(state)
+        {:error, reason} ->
+          Logger.error("the invocation journal could not be read: #{inspect(reason)}")
+          []
+      end
+
+    :ok = prune(state)
+    closed
   end
 
   defp prune(state) do

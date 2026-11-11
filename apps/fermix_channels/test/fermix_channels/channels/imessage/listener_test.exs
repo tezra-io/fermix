@@ -69,6 +69,8 @@ defmodule FermixChannels.Channels.IMessage.ListenerTest do
   end
 
   defp start_listener(ctx, opts \\ []) do
+    tasks = start_supervised!(Task.Supervisor, id: :listener_tasks)
+
     listener_opts =
       Keyword.merge(
         [
@@ -77,6 +79,7 @@ defmodule FermixChannels.Channels.IMessage.ListenerTest do
           server: ctx.fake,
           home: ctx.home,
           recipients: @recipients,
+          tasks: tasks,
           agent: CapturingAgent,
           agent_server: ctx.agent,
           probe_retry_ms: 20,

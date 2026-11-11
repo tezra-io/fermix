@@ -49,7 +49,6 @@ defmodule FermixChannels.Gateway.ChannelRegistry do
   """
 
   alias FermixCore.Config
-  alias FermixCore.Home.AlwaysOnRelease
 
   @type trust :: :local_operator
   @type ingress_auth :: :paired_device
@@ -371,7 +370,7 @@ defmodule FermixChannels.Gateway.ChannelRegistry do
   end
 
   defp host_carried?(opts),
-    do: Keyword.get_lazy(opts, :carried?, &AlwaysOnRelease.available?/0)
+    do: Keyword.get_lazy(opts, :carried?, &FermixCore.IMessage.carried_off_mac?/0)
 
   defp trust_of(channel) when is_map(channel), do: Map.get(channel, :trust)
 

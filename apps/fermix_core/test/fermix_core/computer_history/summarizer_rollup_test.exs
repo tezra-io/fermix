@@ -2,15 +2,17 @@ defmodule FermixCore.ComputerHistory.Summarizer.RollupTest do
   @moduledoc """
   MILESTONE_32 §24.3 — the daily roll-up that rewrites the active thread set.
 
-  Driven through `Summarizer.run_cycle/1` so the roll-up rides the same resolved
-  route and the same Gate check the sittings do: a fake adapter records the call
-  and returns a canned block list, the spool is empty (so the sitting loop has
-  nothing to do), and the session notes are seeded directly.
+  Driven through `Summarizer.run_rollup/1`, the home's half (M97 §8.1), so the
+  roll-up rides the same resolved route and the same check a sitting's note
+  does: a fake adapter records the call and returns a canned block list, and the
+  session notes are seeded directly. This machine's own store (`Spool`) is the
+  verbatim guard's source of raw text.
   """
   use ExUnit.Case, async: false
 
   import ExUnit.CaptureLog
 
+  alias FermixCore.ComputerHistory.Spool
   alias FermixCore.ComputerHistory.Summarizer
   alias FermixCore.Memory.Repo
 
@@ -45,7 +47,9 @@ defmodule FermixCore.ComputerHistory.Summarizer.RollupTest do
     defp purge_mid_call({repo, to_ts}), do: purge_mid_call({repo, 0, to_ts})
 
     defp purge_mid_call({repo, from_ts, to_ts}) do
-      {:ok, _counts} = Repo.computer_history_purge_window(from_ts, to_ts, to_ts, server: repo)
+      {:ok, _counts} =
+        Repo.computer_history_home(:purge_notes, [from_ts, to_ts, to_ts, :all], server: repo)
+
       :ok
     end
 
@@ -95,7 +99,9 @@ defmodule FermixCore.ComputerHistory.Summarizer.RollupTest do
     defp purge_once(request, %{read: read, window: {from_ts, to_ts}} = state)
          when is_tuple(request) and elem(request, 0) == read do
       {:ok, _counts} =
-        Repo.computer_history_purge_window(from_ts, to_ts, to_ts, server: state.repo)
+        Repo.computer_history_home(:purge_notes, [from_ts, to_ts, to_ts, :all],
+          server: state.repo
+        )
 
       %{state | window: nil}
     end
@@ -106,10 +112,16 @@ defmodule FermixCore.ComputerHistory.Summarizer.RollupTest do
   @now ~U[2026-09-10 18:00:00Z]
 
   setup do
-    unique = System.unique_integer([:positive])
-    db_path = Path.join(System.tmp_dir!(), "fermix-ch-rollup-#{unique}.db")
-    repo_name = :"ch_rollup_repo_#{unique}"
-    start_supervised!({Repo, name: repo_name, enabled: true, database_path: db_path})
+    dir = FermixTestSupport.SafeRm.make_tmp_dir!("ch-rollup")
+    repo_name = :"ch_rollup_repo_#{System.unique_integer([:positive])}"
+
+    start_supervised!(
+      {Repo, name: repo_name, enabled: true, database_path: Path.join(dir, "memory.db")}
+    )
+
+    start_supervised!(
+      {Spool, name: spool_of(repo_name), path: Path.join([dir, "device", "history.db"])}
+    )
 
     original = Application.get_env(:fermix_core, :computer_history)
     Application.put_env(:fermix_core, :computer_history, enabled: true, summarizer: :local)
@@ -124,7 +136,7 @@ defmodule FermixCore.ComputerHistory.Summarizer.RollupTest do
         value -> Application.put_env(:fermix_core, :computer_history, value)
       end
 
-      Enum.each([db_path, "#{db_path}-wal", "#{db_path}-shm"], &FermixTestSupport.SafeRm.rm/1)
+      FermixTestSupport.SafeRm.rm_rf(dir)
     end)
 
     %{repo: repo_name}
@@ -132,12 +144,17 @@ defmodule FermixCore.ComputerHistory.Summarizer.RollupTest do
 
   defp ms(datetime), do: DateTime.to_unix(datetime, :millisecond)
 
+  # This machine's own store, named after the home's (a Mac that is its own home).
+  defp spool_of(repo), do: :"#{repo}_spool"
+
   defp run(repo, opts \\ []) do
-    Summarizer.run_cycle(
+    {spool, opts} = Keyword.pop_lazy(opts, :spool, fn -> spool_of(repo) end)
+
+    Summarizer.run_rollup(
       opts ++
         [
           repo: repo,
-          macos?: true,
+          spool: spool,
           adapter: FakeAdapter,
           route_opts: [model: "llama3"],
           timezone: "Etc/UTC",
@@ -218,7 +235,7 @@ defmodule FermixCore.ComputerHistory.Summarizer.RollupTest do
       sources: #{first}, #{second}
       """)
 
-      assert {:ok, _cycle} = run(repo)
+      assert run(repo) in [:ok, :skipped]
 
       assert [thread] = threads(repo)
       assert thread.kind == "thread"
@@ -253,7 +270,7 @@ defmodule FermixCore.ComputerHistory.Summarizer.RollupTest do
       sources: #{id}
       """)
 
-      assert {:ok, _cycle} = run(repo)
+      assert run(repo) in [:ok, :skipped]
 
       assert Enum.map(threads(repo), & &1.subject) == ["Apollo migration"]
 
@@ -294,7 +311,7 @@ defmodule FermixCore.ComputerHistory.Summarizer.RollupTest do
       # Yesterday's roll-up put the mark PAST that note, so today's input cannot
       # see it among the new notes — only the thread's own citation reaches it.
       reply("## Apollo migration\nWaiting on the restore check.\nsources: #{old_note}")
-      assert {:ok, _first} = run(repo, now: ~U[2026-09-08 18:00:00Z])
+      assert run(repo, now: ~U[2026-09-08 18:00:00Z]) in [:ok, :skipped]
       assert [_apollo] = threads(repo)
 
       # The only NEW note is about something else entirely.
@@ -316,7 +333,7 @@ defmodule FermixCore.ComputerHistory.Summarizer.RollupTest do
       sources: #{new_note}
       """)
 
-      assert {:ok, _cycle} = run(repo, now: ~U[2026-09-09 20:00:00Z])
+      assert run(repo, now: ~U[2026-09-09 20:00:00Z]) in [:ok, :skipped]
 
       threads = threads(repo)
       assert Enum.sort(Enum.map(threads, & &1.subject)) == ["Apollo migration", "Invoices"]
@@ -336,7 +353,7 @@ defmodule FermixCore.ComputerHistory.Summarizer.RollupTest do
       thread(repo, "Apollo migration", %{source_ids: Jason.encode!([old_note])})
       reply("nothing usable")
 
-      assert {:ok, _cycle} = run(repo)
+      assert run(repo) in [:ok, :skipped]
 
       assert [call] = calls()
       user = call.messages |> Enum.at(1) |> Map.fetch!(:content)
@@ -354,14 +371,16 @@ defmodule FermixCore.ComputerHistory.Summarizer.RollupTest do
         })
 
       reply("## Apollo migration\nWaiting on the restore check.\nsources: #{purged_note}")
-      assert {:ok, _first} = run(repo, now: ~U[2026-09-08 18:00:00Z])
+      assert run(repo, now: ~U[2026-09-08 18:00:00Z]) in [:ok, :skipped]
 
       # The owner purges that day. The thread still cites the note; the store does
       # not hold it any more, so re-emitting it must not resurrect it.
       purged_to = ms(~U[2026-09-08 23:00:00Z])
 
       assert {:ok, _purged} =
-               Repo.computer_history_purge_window(0, purged_to, purged_to, server: repo)
+               Repo.computer_history_home(:purge_notes, [0, purged_to, purged_to, :all],
+                 server: repo
+               )
 
       new_note =
         note(repo, %{
@@ -381,7 +400,7 @@ defmodule FermixCore.ComputerHistory.Summarizer.RollupTest do
       sources: #{new_note}
       """)
 
-      assert {:ok, _cycle} = run(repo, now: ~U[2026-09-09 20:00:00Z])
+      assert run(repo, now: ~U[2026-09-09 20:00:00Z]) in [:ok, :skipped]
       assert Enum.map(threads(repo), & &1.subject) == ["Invoices"]
     end
 
@@ -390,7 +409,7 @@ defmodule FermixCore.ComputerHistory.Summarizer.RollupTest do
       thread(repo, "Apollo migration", %{summary: "Waiting on the restore check."})
       reply("## Apollo migration\nStill waiting.\nsources: #{id}")
 
-      assert {:ok, _cycle} = run(repo)
+      assert run(repo) in [:ok, :skipped]
 
       assert [call] = calls()
       [system, user] = Enum.map(call.messages, & &1.content)
@@ -405,18 +424,18 @@ defmodule FermixCore.ComputerHistory.Summarizer.RollupTest do
     end
 
     # S9: the roll-up is a different kind of run from a sitting summary — its own
-    # session id, under the cycle's, so a trace reader can tell the two apart and
-    # still see which cycle produced it.
-    test "the call is its own run, parented to the cycle", %{repo: repo} do
+    # session id, so a trace reader can tell the two apart. It runs on the home on
+    # its own tick (M97 §8.1), so it is a run of its own, parented to none.
+    test "the call is its own run, a root", %{repo: repo} do
       id = note(repo, %{summary: "chased the restore check"})
       reply("## Apollo migration\nOpen.\nsources: #{id}")
 
-      assert {:ok, _cycle} = run(repo)
+      assert run(repo) in [:ok, :skipped]
 
       assert [call] = calls()
       assert call.agent == "computer_history_rollup"
       assert call.session_id == "computer_history_rollup:#{ms(@now)}"
-      assert call.parent_session == "computer_history_summarize:#{ms(@now)}"
+      assert call.parent_session == nil
     end
 
     test "an uncited block is dropped", %{repo: repo} do
@@ -431,7 +450,7 @@ defmodule FermixCore.ComputerHistory.Summarizer.RollupTest do
       sources: #{id}
       """)
 
-      assert {:ok, _cycle} = run(repo)
+      assert run(repo) in [:ok, :skipped]
       assert Enum.map(threads(repo), & &1.subject) == ["Apollo migration"]
     end
 
@@ -444,7 +463,7 @@ defmodule FermixCore.ComputerHistory.Summarizer.RollupTest do
       sources: #{id}, 9999
       """)
 
-      assert {:ok, _cycle} = run(repo)
+      assert run(repo) in [:ok, :skipped]
       assert [thread] = threads(repo)
       assert Jason.decode!(thread.source_ids) == [id]
     end
@@ -462,7 +481,7 @@ defmodule FermixCore.ComputerHistory.Summarizer.RollupTest do
       sources: #{id}
       """)
 
-      assert {:ok, _cycle} = run(repo)
+      assert run(repo) in [:ok, :skipped]
       assert Enum.map(threads(repo), & &1.subject) == ["Apollo migration"]
     end
 
@@ -486,7 +505,7 @@ defmodule FermixCore.ComputerHistory.Summarizer.RollupTest do
 
       reply(blocks)
 
-      assert {:ok, _cycle} = run(repo)
+      assert run(repo) in [:ok, :skipped]
 
       subjects = Enum.map(threads(repo), & &1.subject)
       assert length(subjects) == 8
@@ -523,7 +542,7 @@ defmodule FermixCore.ComputerHistory.Summarizer.RollupTest do
       Logger.configure(level: :info)
       on_exit(fn -> Logger.configure(level: previous_level) end)
 
-      log = capture_log([level: :info], fn -> assert {:ok, _cycle} = run(repo) end)
+      log = capture_log([level: :info], fn -> assert run(repo) in [:ok, :skipped] end)
 
       assert [thread] = threads(repo)
       # The most recently touched of the two blocks wins.
@@ -536,7 +555,7 @@ defmodule FermixCore.ComputerHistory.Summarizer.RollupTest do
       echoed = "the quarterly revenue projection deck for next year"
 
       {:ok, _inserted} =
-        Repo.computer_history_insert_events(
+        Spool.insert_events(
           [
             %{
               boot_id: "b1",
@@ -547,7 +566,7 @@ defmodule FermixCore.ComputerHistory.Summarizer.RollupTest do
               text: echoed
             }
           ],
-          server: repo
+          server: spool_of(repo)
         )
 
       reply("""
@@ -556,9 +575,8 @@ defmodule FermixCore.ComputerHistory.Summarizer.RollupTest do
       sources: #{id}
       """)
 
-      # The spool event is inside an open sitting (it is minutes old relative to
-      # `now`), so the sitting loop leaves it alone and only the roll-up runs.
-      assert {:ok, %{sessions: 0}} = run(repo, now: ~U[2026-09-10 09:05:00Z])
+      # The raw text is still in this machine's store: the guard reads it there.
+      assert :ok = run(repo, now: ~U[2026-09-10 09:05:00Z])
 
       assert [thread] = threads(repo)
       assert thread.summary =~ "[…]"
@@ -568,7 +586,7 @@ defmodule FermixCore.ComputerHistory.Summarizer.RollupTest do
 
   describe "when the roll-up runs" do
     test "not at all without a session note since the mark", %{repo: repo} do
-      assert {:ok, _cycle} = run(repo)
+      assert run(repo) in [:ok, :skipped]
       assert calls() == []
       assert state(repo).last_rollup_ts == nil
     end
@@ -577,7 +595,7 @@ defmodule FermixCore.ComputerHistory.Summarizer.RollupTest do
       first = note(repo, %{summary: "chased the restore check"})
       reply("## Apollo migration\nOpen.\nsources: #{first}")
 
-      assert {:ok, _cycle} = run(repo)
+      assert run(repo) in [:ok, :skipped]
       assert length(calls()) == 1
 
       # A new note, but only an hour later: not due.
@@ -588,11 +606,11 @@ defmodule FermixCore.ComputerHistory.Summarizer.RollupTest do
         })
 
       reply("## Apollo migration\nStill open.\nsources: #{second}")
-      assert {:ok, _cycle} = run(repo, now: ~U[2026-09-10 19:30:00Z])
+      assert run(repo, now: ~U[2026-09-10 19:30:00Z]) in [:ok, :skipped]
       assert length(calls()) == 1
 
       # A day later it is due again, and it reads the note written since.
-      assert {:ok, _cycle} = run(repo, now: ~U[2026-09-11 19:00:00Z])
+      assert run(repo, now: ~U[2026-09-11 19:00:00Z]) in [:ok, :skipped]
       assert length(calls()) == 2
 
       assert calls() |> List.last() |> Map.fetch!(:messages) |> Enum.at(1) |> Map.get(:content) =~
@@ -616,7 +634,7 @@ defmodule FermixCore.ComputerHistory.Summarizer.RollupTest do
       Logger.configure(level: :info)
       on_exit(fn -> Logger.configure(level: previous_level) end)
 
-      log = capture_log([level: :info], fn -> assert {:ok, _cycle} = run(repo) end)
+      log = capture_log([level: :info], fn -> assert run(repo) in [:ok, :skipped] end)
 
       assert [call] = calls()
       user = call.messages |> Enum.at(1) |> Map.fetch!(:content)
@@ -636,14 +654,14 @@ defmodule FermixCore.ComputerHistory.Summarizer.RollupTest do
       note(repo, %{summary: "chased the restore check"})
       reply("I could not identify any threads.")
 
-      assert {:ok, _first} = run(repo)
+      assert run(repo) in [:ok, :skipped]
       assert length(calls()) == 1
       assert state(repo).last_rollup_attempt_ts == ms(@now)
       assert state(repo).last_rollup_ts == nil
 
       # Two more cycles inside the day: the attempt mark holds them off.
-      assert {:ok, _second} = run(repo, now: ~U[2026-09-10 19:00:00Z])
-      assert {:ok, _third} = run(repo, now: ~U[2026-09-11 10:00:00Z])
+      assert run(repo, now: ~U[2026-09-10 19:00:00Z]) in [:ok, :skipped]
+      assert run(repo, now: ~U[2026-09-11 10:00:00Z]) in [:ok, :skipped]
       assert length(calls()) == 1
     end
 
@@ -652,7 +670,7 @@ defmodule FermixCore.ComputerHistory.Summarizer.RollupTest do
     } do
       first_note = note(repo, %{summary: "chased the restore check"})
       reply("I could not identify any threads.")
-      assert {:ok, _failed} = run(repo)
+      assert run(repo) in [:ok, :skipped]
       assert length(calls()) == 1
 
       second_note =
@@ -662,7 +680,7 @@ defmodule FermixCore.ComputerHistory.Summarizer.RollupTest do
         })
 
       reply("## Apollo migration\nOpen.\nsources: #{first_note}, #{second_note}")
-      assert {:ok, _retried} = run(repo, now: ~U[2026-09-11 19:00:00Z])
+      assert run(repo, now: ~U[2026-09-11 19:00:00Z]) in [:ok, :skipped]
       assert length(calls()) == 2
 
       # The notes cursor is the last real WRITE, so the note the failed attempt
@@ -683,7 +701,7 @@ defmodule FermixCore.ComputerHistory.Summarizer.RollupTest do
       Logger.configure(level: :info)
       on_exit(fn -> Logger.configure(level: previous_level) end)
 
-      log = capture_log([level: :info], fn -> assert {:ok, _cycle} = run(repo) end)
+      log = capture_log([level: :info], fn -> assert run(repo) in [:ok, :skipped] end)
 
       assert log =~ "computer_history rollup: no usable threads"
       # Nothing was superseded: "the model said nothing" is not "nothing is current".
@@ -710,7 +728,7 @@ defmodule FermixCore.ComputerHistory.Summarizer.RollupTest do
       Logger.configure(level: :info)
       on_exit(fn -> Logger.configure(level: previous_level) end)
 
-      log = capture_log([level: :info], fn -> assert {:ok, _cycle} = run(repo) end)
+      log = capture_log([level: :info], fn -> assert run(repo) in [:ok, :skipped] end)
 
       assert log =~
                "computer_history rollup: a purge during the call reached the notes and threads it read"
@@ -736,7 +754,7 @@ defmodule FermixCore.ComputerHistory.Summarizer.RollupTest do
            window: {0, ms(~U[2026-09-10 12:00:00Z])}}
         )
 
-      assert {:ok, _cycle} = run(proxy)
+      assert run(proxy, spool: spool_of(repo)) in [:ok, :skipped]
       assert length(calls()) == 1
       assert threads(repo) == []
       assert state(repo).last_rollup_ts == nil
@@ -760,16 +778,15 @@ defmodule FermixCore.ComputerHistory.Summarizer.RollupTest do
       purged_to = ms(~U[2026-09-10 11:00:00Z])
 
       assert {:ok, _purged} =
-               Repo.computer_history_purge_window(
-                 ms(~U[2026-09-10 10:00:00Z]),
-                 purged_to,
-                 purged_to,
+               Repo.computer_history_home(
+                 :purge_notes,
+                 [ms(~U[2026-09-10 10:00:00Z]), purged_to, purged_to, :all],
                  server: repo
                )
 
       reply("## Apollo migration\nThe restore check is open.\nsources: #{morning}, #{afternoon}")
 
-      assert {:ok, _cycle} = run(repo)
+      assert run(repo) in [:ok, :skipped]
       assert Enum.map(threads(repo), & &1.subject) == ["Apollo migration"]
       assert state(repo).last_rollup_ts == ms(@now)
     end
@@ -797,7 +814,7 @@ defmodule FermixCore.ComputerHistory.Summarizer.RollupTest do
         {repo, ms(~U[2026-09-10 12:00:00Z]), ms(~U[2026-09-10 15:00:00Z])}
       )
 
-      assert {:ok, _cycle} = run(repo)
+      assert run(repo) in [:ok, :skipped]
       assert threads(repo) == []
       assert state(repo).last_rollup_ts == nil
     end
@@ -810,7 +827,6 @@ defmodule FermixCore.ComputerHistory.Summarizer.RollupTest do
       assert length(calls()) == 1
       assert threads(repo) == []
       assert state(repo).last_rollup_ts == nil
-      assert state(repo).paused_reason == "route_down"
     end
 
     test "one info line names the counts", %{repo: repo} do
@@ -827,7 +843,7 @@ defmodule FermixCore.ComputerHistory.Summarizer.RollupTest do
       Logger.configure(level: :info)
       on_exit(fn -> Logger.configure(level: previous_level) end)
 
-      log = capture_log([level: :info], fn -> assert {:ok, _cycle} = run(repo) end)
+      log = capture_log([level: :info], fn -> assert run(repo) in [:ok, :skipped] end)
 
       assert log =~ "computer_history rollup: 1 thread(s) (1 retired, 1 new)"
     end

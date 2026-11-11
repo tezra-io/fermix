@@ -19,9 +19,11 @@ defmodule FermixChannels.Desktop.TwoEnginesBrowserTest do
   # `FERMIX_HOME`.
   use ExUnit.Case, async: false
 
+  alias FermixChannels.Desktop.Invoke.Admission
   alias FermixChannels.Desktop.Offers
   alias FermixChannels.Test.TwoEngines
   alias FermixCore.Browser.Config
+  alias FermixCore.Browser.HeldTurnListener
   alias FermixCore.Browser.HostAvailability
   alias FermixCore.Browser.ProfileManager
   alias FermixCore.Browser.TurnMarker
@@ -78,7 +80,20 @@ defmodule FermixChannels.Desktop.TwoEnginesBrowserTest do
     @impl true
     def console_buffer(_state), do: []
 
+    # A page that answers only when the test says, so a request is at work
+    # on the computer while the test acts.
     @impl true
+    def open(%{"url" => "https://slow.allotment.example.com" <> _} = args, context, state) do
+      told(state, :open, args, context)
+      send(state.test, {:chrome_holding, self()})
+
+      receive do
+        :answer -> {:ok, look("t0", args["url"]), state}
+      after
+        30_000 -> {:error, Error.new("timeout", "The test never let the page answer."), state}
+      end
+    end
+
     def open(args, context, state) do
       id = "t#{state.next}"
       told(state, :open, args, context)
@@ -239,6 +254,17 @@ defmodule FermixChannels.Desktop.TwoEnginesBrowserTest do
     engines =
       TwoEngines.start!(offers: [:browser], browser: fn -> {:ok, browser.seams} end)
 
+    # The computer's switches end the turns its browser holds, as
+    # `Computers.Switches` tells its listener by name on a running engine.
+    listener =
+      start_supervised!(
+        {HeldTurnListener,
+         name: :"computer_browser_listener_#{System.unique_integer([:positive])}",
+         turns: browser.seams.turns,
+         switches: fn -> Agent.get(engines.switch_agent, & &1) end},
+        id: :computer_browser_listener
+      )
+
     turns = server_turns!()
     pending = start_supervised!({Pending, name: nil}, id: make_ref())
 
@@ -249,6 +275,7 @@ defmodule FermixChannels.Desktop.TwoEnginesBrowserTest do
       agent: agent,
       server: server_home,
       browser: browser,
+      listener: listener,
       computer_dir: computer_dir,
       turns: turns,
       pending: pending
@@ -845,9 +872,126 @@ defmodule FermixChannels.Desktop.TwoEnginesBrowserTest do
     end
   end
 
+  # INVOKE-1: what the server handed a turn the computer holds goes no
+  # further once the computer said no, and a turn's pane task is that turn's
+  # alone.
+  describe "the computer's no reaches the turns its browser holds" do
+    test "the master switch off ends the request at work there, and its turn", ctx do
+      turn =
+        Task.async(fn ->
+          call(ctx, on_mac(%{"action" => "open", "url" => "https://slow.allotment.example.com"}))
+        end)
+
+      assert_receive {:chrome_holding, chrome}, 10_000
+      [held] = held_turns(ctx)
+      ref = Process.monitor(held)
+
+      # Only what Admission does when it hears: it ends the run.
+      Agent.update(ctx.e.switch_agent, &Keyword.put(&1, :enabled, false))
+      :ok = Admission.switches_changed(ctx.e.admission)
+
+      assert_receive {:DOWN, ^ref, :process, ^held, _ended_with_its_run}, 10_000
+      send(chrome, :answer)
+
+      assert {:ok, %{success: false, error: error}} = Task.await(turn, 30_000)
+      assert error =~ "The person at studio Mac stopped it."
+      assert [%{op: "browser.open", status: "refused", refusal: "stopped_here"}] = journal(ctx.e)
+      assert held_turns(ctx) == []
+    end
+
+    @tag :pane
+    test "the browser switch off ends the turn it holds, and its pane task with it", ctx do
+      test = self()
+
+      turn =
+        Task.async(fn ->
+          opened = call(ctx, on_mac(%{"action" => "open", "url" => "https://example.com/login"}))
+          send(test, :opened)
+          receive do: (:go_on -> opened)
+        end)
+
+      assert_receive :opened, 10_000
+      assert [_held] = held_turns(ctx)
+      assert FakeBrowserHostConnection.releases(ctx.browser.connection) == []
+
+      Agent.update(ctx.e.switch_agent, &Keyword.put(&1, :browser, false))
+      :ok = HeldTurnListener.changed(ctx.listener)
+
+      await_no_held_turns(ctx)
+      await_release(ctx)
+      send(turn.pid, :go_on)
+      assert decoded(Task.await(turn, 30_000))["computer"] == "studio Mac"
+    end
+
+    # The conversation's next turn asks before the computer heard the first
+    # one end: the earlier turn ends there first, its pane task with it, and
+    # the next turn's own task is never ended by that word when it comes.
+    @tag :pane
+    test "a conversation's next turn never takes over, and loses, the turn before's task",
+         ctx do
+      first_notice =
+        in_turn(fn ->
+          call(ctx, on_mac(%{"action" => "open", "url" => "https://example.com/login"}))
+
+          [{notice, _device}] =
+            Elixir.Registry.lookup(ctx.turns.registry, {:computer_turn, self()})
+
+          :ok = :sys.suspend(notice)
+          notice
+        end)
+
+      test = self()
+
+      next =
+        Task.async(fn ->
+          opened = call(ctx, on_mac(%{"action" => "open", "url" => "https://example.com/login"}))
+          send(test, :next_opened)
+          receive do: (:go_on -> {opened, call(ctx, %{"action" => "tabs"})})
+        end)
+
+      assert_receive :next_opened, 10_000
+      assert [first_task] = FakeBrowserHostConnection.releases(ctx.browser.connection)
+
+      :ok = :sys.resume(first_notice)
+      await_turn_ends(ctx.e, 1)
+      send(next.pid, :go_on)
+
+      {opened, listed} = Task.await(next, 30_000)
+      assert decoded(opened)["computer"] == "studio Mac"
+      assert [%{"target" => "h1:t1"}] = decoded(listed)["tabs"]
+      assert FakeBrowserHostConnection.releases(ctx.browser.connection) == [first_task]
+    end
+  end
+
   # -- helpers -------------------------------------------------------------------------
 
   defp browser_capability, do: Builtin.from_tool_module(BrowserTool)
+
+  # The server's turns the computer's browser holds now.
+  defp held_turns(ctx) do
+    for {_id, pid, _type, _modules} <-
+          DynamicSupervisor.which_children(ctx.browser.seams.turns.supervisor),
+        is_pid(pid),
+        do: pid
+  end
+
+  # Waits until the computer has journaled `count` turns' ends (`browser.end`).
+  defp await_turn_ends(e, count, attempts \\ 1_000) do
+    ends = e |> whole_journal() |> Enum.count(&(&1.op == "browser.end" and &1.status == "ok"))
+
+    cond do
+      ends >= count ->
+        :ok
+
+      attempts == 0 ->
+        flunk("the computer never heard #{count} turn(s) end")
+
+      true ->
+        # sleep: polls the computer's journal, which announces nothing
+        Process.sleep(10)
+        await_turn_ends(e, count, attempts - 1)
+    end
+  end
 
   defp assert_server_copy(ctx, path, under, bytes) do
     assert String.starts_with?(path, Path.join([ctx.server, "browser" | under]) <> "/")

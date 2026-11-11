@@ -65,8 +65,12 @@
 \* SOURCE: apps/fermix_core/lib/fermix_core/computer_history/purge.ex @ 2f22405f1e30
 \* SOURCE: apps/fermix_core/lib/fermix_core/computer_use/sidecar_installer.ex @ a2681ba9c881
 \* SOURCE: apps/fermix_core/lib/fermix_core/memory/repo/computer_history_sql.ex @ 06ec5cd206ab
-\* SOURCE: apps/fermix_core/lib/fermix_core/memory/repo.ex#call,request_message,deadline_after,deadline_passed?,computer_history_insert_events,computer_history_purge_window,computer_history_set_pause_until @ 479dc8c0111c
-\* SOURCE: apps/fermix_core/lib/fermix_core/memory/repo.ex#computer_history_ensure_state @ ad9078b46f85
+\* M97 §8.1 moved the raw spool out of memory.db into this machine's own
+\* store, one GenServer of its own on the same SQL (`ComputerHistory.Spool`);
+\* the purge from chat now deletes the home's notes first and then fences
+\* this machine's spool, and the pause from chat fences its window too. To be
+\* re-read and re-pinned once that change is committed.
+\* SOURCE: apps/fermix_core/lib/fermix_core/computer_history/spool.ex#call,insert_events,state,set_pause_until,fence,apply_intervals,apply_interval,mark_applied
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/gateway/commands/history.ex @ 1911dca78a4e
 EXTENDS Naturals, Sequences, FiniteSets
 

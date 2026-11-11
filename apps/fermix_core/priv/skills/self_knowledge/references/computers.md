@@ -199,7 +199,9 @@ request (*Files and commands on a computer*).
 - **The computer decides.** It refuses a request from an older copy of the
   home, anything while its master switch is off, and what its own switch
   for that offer has off, before anything runs; switching the master off
-  also ends what is running ("The person at studio Mac stopped it."). It
+  also ends what is running ("The person at studio Mac stopped it."), and
+  switching it or the browser off ends what that computer's browser is
+  doing for the server, its tabs for it included. It
   runs at most 8 requests at once with 32 waiting, and refuses past that.
 - **The kind of turn that asked is the server's word.** Each request names
   it (a chat, a call, a scheduled run, a cue, a worker, background), and the
@@ -373,9 +375,23 @@ computer."
   again in that turn; ask. With no action for two minutes the server lets
   go.
 - Each stretch the server drove that screen is recorded there
-  (`device/screen_control.jsonl`), so its computer history can tell
-  Fermix's clicks from the owner's. Voice screen sharing (`screen_share`)
-  is this server's own screen only.
+  (`device/screen_control.jsonl`), and its computer history marks events in
+  it as Fermix's own (`by=fermix`), so the summary never reports Fermix's
+  clicks as the owner's. Voice screen sharing (`screen_share`) is this
+  server's own screen only.
+
+## Computer history from every computer
+
+- A computer whose history switch is on records into its own
+  `device/history.db` (raw, 48 hours) and sends each finished sitting to the
+  server with `history.submit`; the server makes the note on its summarizer,
+  marks it with the computer, and keeps it. Raw text is never written on the
+  server, and the summary call's content stays out of its traces and Opik.
+  A computer whose summarizer is `local` sends only the note.
+- `recall_activity` takes a `computer` and names the machine of each
+  sitting; `/history purge` and `/history pause` from chat reach every
+  computer (one that is away when next connected), and `/history status`
+  shows one block per computer. Details: `computer_history.md`.
 
 ## iMessage through a Mac
 

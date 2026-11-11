@@ -140,13 +140,15 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   in what keeps the one call now ends the call in progress rather than
   letting a second one start beside it.
 - **This computer's own settings now live in `machine.toml`.** The sandbox,
-  computer use, computer history, iMessage and the dev plugin folder describe
+  computer use, computer history and the dev plugin folder describe
   the computer Fermix runs on, not your home, so the first start of this
   version moves them from `config.toml` into `machine.toml` beside it, once,
   and every save writes them there. To change one by hand, edit
   `machine.toml`: one added to `config.toml` is not read there, reloading the
   settings says so in the log, and the next save or start takes it out of
-  `config.toml`. As with `config.toml`, no command or file tool the agent
+  `config.toml`. In a home the Mac app manages only the app moves them: a
+  `fermix` command from another install refuses to start there until the app
+  has. As with `config.toml`, no command or file tool the agent
   runs can read or change `machine.toml`.
 
 ### Fixed
@@ -621,10 +623,27 @@ will be part of a future release; nothing in this group is in a release yet.
   When the Mac is back, Fermix reads what came in meanwhile, up to 500
   messages from the last day, and tells you once if it missed more. Photos
   and files go both ways, up to 20 MiB. Your iMessage owner and guests are
-  now kept with your home, so your server knows them, and a home whose
-  iMessage settings an earlier build put in this computer's own file moves
-  them back at its first start. The move's review no longer lists iMessage
-  among what stops.
+  now kept with your home, so your server knows them. The move's review no
+  longer lists iMessage among what stops.
+- **Computer history from every computer becomes one memory on your home.**
+  Each computer with history switched on records into its own store, and the
+  raw record stays there and is deleted after 48 hours; each finished sitting
+  goes to your home, which has its summarizer summarize it and keeps the note,
+  marked with that computer. "What was I working on on the studio Mac this
+  morning?" and "what did I do across my computers yesterday?" both have an
+  answer: each result names the machine, the daily roll-up runs once across
+  all of them, and work that moved from one computer to another is one
+  thread. The sitting's text is never written on your server, and its
+  summary call is kept out of traces and Opik. A computer set to summarize on
+  its own model sends only the note. `/history purge` and `/history pause`
+  from chat reach every computer, one that is asleep when it is next
+  connected, and until then your home takes nothing from it inside that
+  window; a purged window never gains a note. `/history status` shows one
+  block per computer, and what Fermix itself did on a computer's screen is
+  no longer reported as yours. Your notes now travel with your home when it
+  moves, and on a Mac that is its own home the raw record moves out of
+  `memory.db` into the Mac's own store at the first start. A Linux computer
+  does not record yet.
 
 ## [0.18.0] - 2026-11-03
 

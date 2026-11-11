@@ -19,8 +19,7 @@ defmodule FermixCore.Home.Snapshot do
   every file as it arrives, and only once the whole stream opened and every
   file matched its entry makes the root the next primary through the archive's
   own path (`FermixCore.Home.Archive.install/5`): epoch plus one, the settled
-  `config.toml`, consent withdrawn, screen history deleted, plugins built for
-  another host named. A failure on any path leaves the root as it found it:
+  `config.toml`, consent withdrawn, plugins built for another host named. A failure on any path leaves the root as it found it:
   absent stays absent, empty stays empty.
 
   Both refuse by name rather than guess: `write/4` a home that moved

@@ -360,10 +360,29 @@ defmodule FermixCore.ReadinessTest do
              )
     end
 
+    # A build that offers no Always On has no server and no computers: off a
+    # Mac the row says iMessage needs a Mac, as the channel registry, which
+    # starts nothing there, already has it.
+    test "off a Mac, on a build no Mac can carry it for, the row speaks of no server" do
+      Application.put_env(:fermix_channels, :imessage,
+        enabled: true,
+        owner_user_id: "+15551234567"
+      )
+
+      carrier = FermixCore.IMessage.carrier(macos?: false, carried?: false)
+
+      assert %{detail_key: "channel:imessage:mac_only", gating: false, action: action} =
+               imessage_failure(macos?: false, imessage_carrier: carrier)
+
+      assert action == "iMessage runs only on the Mac whose Messages it reads."
+      refute action =~ "server"
+    end
+
     test "the carrier rows are published for the copy gate" do
       keys = Enum.map(Readiness.published_actions(), &elem(&1, 0))
 
-      for key <- ~w(channel:imessage:carrier channel:imessage:conflict channel:imessage:away),
+      for key <-
+            ~w(channel:imessage:carrier channel:imessage:mac_only channel:imessage:conflict channel:imessage:away),
           do: assert(key in keys)
     end
 

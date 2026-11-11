@@ -31,7 +31,10 @@ defmodule FermixCore.Browser.Supervisor do
         {FermixCore.Browser.ProfileManager,
          name: manager_name, dynamic_supervisor: dynamic_name, registry: registry_name},
         {Registry, keys: :unique, name: turns.registry},
-        {DynamicSupervisor, strategy: :one_for_one, name: turns.supervisor}
+        {DynamicSupervisor, strategy: :one_for_one, name: turns.supervisor},
+        # The computer's switches end the server's turns it holds
+        # (`Computers.Switches.browser_listener/0`).
+        {FermixCore.Browser.HeldTurnListener, turns: turns}
       ] ++ bridge_children(opts)
 
     Supervisor.init(children, strategy: :one_for_one)

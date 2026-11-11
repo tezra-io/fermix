@@ -1,72 +1,93 @@
 defmodule FermixCore.ComputerHistory.Summarizer.SchedulerTest do
-  @moduledoc "MILESTONE_32 §10 — the summarizer scheduler's claim/run/release loop."
+  @moduledoc """
+  MILESTONE_32 §10; M97 §8.1 — the scheduler's two halves: sending this
+  machine's sittings under a claim in its own store, and the home's roll-up.
+  """
   # async: false — the cycle-line case lowers the global Logger level, which
   # config/test.exs pins to :warning.
   use ExUnit.Case, async: false
 
   import ExUnit.CaptureLog
 
+  alias FermixCore.ComputerHistory.Spool
   alias FermixCore.ComputerHistory.Summarizer.Scheduler
-  alias FermixCore.Memory.Repo
 
   setup do
     unique = System.unique_integer([:positive])
-    db_path = Path.join(System.tmp_dir!(), "fermix-ch-sched-#{unique}.db")
-    repo_name = :"ch_sched_repo_#{unique}"
-    start_supervised!({Repo, name: repo_name, enabled: true, database_path: db_path})
+    dir = FermixTestSupport.SafeRm.make_tmp_dir!("ch-sched")
+    spool = start_supervised!({Spool, name: nil, path: Path.join([dir, "device", "history.db"])})
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf(dir) end)
 
-    on_exit(fn ->
-      Enum.each([db_path, "#{db_path}-wal", "#{db_path}-shm"], &FermixTestSupport.SafeRm.rm/1)
-    end)
-
-    %{repo: repo_name, unique: unique}
+    %{spool: spool, unique: unique}
   end
 
-  defp start_scheduler(repo, unique, run_cycle_fun) do
-    start_supervised!(
-      {Scheduler,
-       name: :"ch_sched_#{unique}", repo: repo, timer_enabled: false, run_cycle_fun: run_cycle_fun}
-    )
+  defp uplink(_payload), do: {:error, :unused}
+
+  defp start_scheduler(ctx, opts) do
+    defaults = [
+      name: :"ch_sched_#{ctx.unique}",
+      spool: ctx.spool,
+      repo: nil,
+      uplink: &uplink/1,
+      recording_fun: fn -> true end,
+      timer_enabled: false,
+      run_sittings_fun: fn _opts -> {:ok, %{sittings: 0, sent: 0, notes: 0, events: 0}} end,
+      run_rollup_fun: fn _opts -> :skipped end,
+      deliver_fun: fn _opts -> %{applied: [], away: [], failed: []} end
+    ]
+
+    start_supervised!({Scheduler, Keyword.merge(defaults, opts)})
   end
 
-  test "a tick claims, runs the cycle, and releases the claim", %{repo: repo, unique: unique} do
+  defp tick(pid) do
+    send(pid, :tick)
+    _ = :sys.get_state(pid)
+    :ok
+  end
+
+  test "a tick claims, sends this machine's sittings, and releases the claim", ctx do
     test_pid = self()
 
     fun = fn opts ->
-      send(test_pid, {:ran, opts[:repo]})
-      {:ok, %{memory_written: true, events: 1, sessions: 1, empty_batches: 0}}
+      send(test_pid, {:ran, opts[:spool], opts[:uplink]})
+      {:ok, %{sittings: 1, sent: 1, notes: 1, events: 3}}
     end
 
-    pid = start_scheduler(repo, unique, fun)
-    send(pid, :tick)
-    _ = :sys.get_state(pid)
+    pid = start_scheduler(ctx, run_sittings_fun: fun)
+    tick(pid)
 
-    assert_receive {:ran, ^repo}
+    spool = ctx.spool
+    assert_receive {:ran, ^spool, uplink} when is_function(uplink, 1)
     # The claim was released — status is idle again.
-    {:ok, state} = Repo.computer_history_fetch_state(server: repo)
+    {:ok, state} = Spool.state(server: spool)
     assert state.status == "idle"
   end
 
-  # The cycle line reads every key of `Summarizer.cycle_result`, so a result shape
-  # that drifts must fail here rather than in a production daemon's debug log.
-  test "the cycle line names the sitting and empty counts", %{repo: repo, unique: unique} do
+  # The cycle line reads every key of `Sittings.result`, so a result shape that
+  # drifts must fail here rather than in a production daemon's debug log.
+  test "the cycle line names the sittings, sends and notes", ctx do
     previous_level = Logger.level()
     Logger.configure(level: :debug)
     on_exit(fn -> Logger.configure(level: previous_level) end)
 
-    fun = fn _opts ->
-      {:ok, %{memory_written: false, events: 7, sessions: 3, empty_batches: 2}}
-    end
+    fun = fn _opts -> {:ok, %{sittings: 3, sent: 2, notes: 1, events: 7}} end
+    pid = start_scheduler(ctx, run_sittings_fun: fun)
 
-    pid = start_scheduler(repo, unique, fun)
+    log = capture_log([level: :debug], fn -> tick(pid) end)
 
-    log =
-      capture_log([level: :debug], fn ->
-        send(pid, :tick)
-        _ = :sys.get_state(pid)
-      end)
+    assert log =~ "3 sitting(s), 2 sent, 1 note(s), 7 event(s)"
+  end
 
-    assert log =~ "7 events in 3 session(s), 2 empty, memory=false"
+  test "a held cycle says why", ctx do
+    previous_level = Logger.level()
+    Logger.configure(level: :info)
+    on_exit(fn -> Logger.configure(level: previous_level) end)
+
+    pid = start_scheduler(ctx, run_sittings_fun: fn _opts -> {:held, "unanswered"} end)
+
+    log = capture_log([level: :info], fn -> tick(pid) end)
+
+    assert log =~ ~s(computer_history sending held: "unanswered")
   end
 
   # A tick is cheap when nothing closed, and 5 minutes is what makes "summarized
@@ -82,18 +103,87 @@ defmodule FermixCore.ComputerHistory.Summarizer.SchedulerTest do
     assert state.cycle_timeout_ms == :timer.minutes(15)
   end
 
-  test "a concurrent claim is not run twice", %{repo: repo, unique: unique} do
+  test "a concurrent claim is not run twice", ctx do
     test_pid = self()
     fun = fn _opts -> send(test_pid, :ran) end
 
     # Pre-claim the cycle (status -> running) so the scheduler's tick sees it held.
-    {:ok, _} =
-      Repo.computer_history_claim_cycle(DateTime.utc_now(), :timer.minutes(30), server: repo)
+    {:ok, _} = Spool.claim(DateTime.utc_now(), :timer.minutes(30), server: ctx.spool)
 
-    pid = start_scheduler(repo, unique, fun)
-    send(pid, :tick)
-    _ = :sys.get_state(pid)
+    pid = start_scheduler(ctx, run_sittings_fun: fun)
+    tick(pid)
 
-    refute_receive :ran, 200
+    refute_received :ran
+  end
+
+  test "nothing is sent while this machine does not record", ctx do
+    test_pid = self()
+    fun = fn _opts -> send(test_pid, :ran) end
+
+    pid = start_scheduler(ctx, run_sittings_fun: fun, recording_fun: fn -> false end)
+    tick(pid)
+
+    refute_received :ran
+  end
+
+  # The home: its roll-up runs on every tick it holds a home store, with this
+  # machine's store for the guard while it records, and none while it does not.
+  test "the home rolls up with this machine's store while it records", ctx do
+    test_pid = self()
+    fun = fn opts -> send(test_pid, {:rolled, opts[:repo], opts[:spool]}) && :ok end
+
+    pid = start_scheduler(ctx, repo: :a_home_repo, run_rollup_fun: fun)
+    tick(pid)
+
+    spool = ctx.spool
+    assert_receive {:rolled, :a_home_repo, ^spool}
+  end
+
+  test "a home that records nothing rolls up with no machine store", ctx do
+    test_pid = self()
+    fun = fn opts -> send(test_pid, {:rolled, opts[:spool]}) && :ok end
+
+    pid =
+      start_scheduler(ctx,
+        repo: :a_home_repo,
+        uplink: nil,
+        recording_fun: fn -> false end,
+        run_rollup_fun: fun
+      )
+
+    tick(pid)
+
+    assert_receive {:rolled, nil}
+  end
+
+  # M97 §8.5: the home's tick tells its computers of the purges and pauses they
+  # have not applied, which is how one that was away gets them; a computer,
+  # which keeps no home store, tells nobody.
+  test "the home's tick delivers purges and pauses; a computer's does not", ctx do
+    test_pid = self()
+
+    deliver = fn opts ->
+      send(test_pid, {:delivered, opts[:repo]})
+      %{applied: [], away: [], failed: []}
+    end
+
+    home = start_scheduler(ctx, repo: :a_home_repo, deliver_fun: deliver)
+    tick(home)
+    assert_receive {:delivered, :a_home_repo}
+    stop_supervised!(Scheduler)
+
+    computer = start_scheduler(ctx, repo: nil, deliver_fun: deliver)
+    tick(computer)
+    refute_received {:delivered, _repo}
+  end
+
+  test "a computer, with no home store, never rolls up", ctx do
+    test_pid = self()
+    fun = fn _opts -> send(test_pid, :rolled) && :ok end
+
+    pid = start_scheduler(ctx, repo: nil, run_rollup_fun: fun)
+    tick(pid)
+
+    refute_received :rolled
   end
 end

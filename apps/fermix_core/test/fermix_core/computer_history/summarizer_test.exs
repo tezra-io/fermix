@@ -19,7 +19,9 @@ defmodule FermixCore.ComputerHistory.SummarizerTest do
   alias FermixCore.ComputerHistory.Locality
   alias FermixCore.ComputerHistory.Purge
   alias FermixCore.ComputerHistory.Recall
-  alias FermixCore.ComputerHistory.Summarizer
+  alias FermixCore.ComputerHistory.Sittings
+  alias FermixCore.ComputerHistory.Spool
+  alias FermixCore.ComputerHistory.Submission
   alias FermixCore.ComputerHistory.Summarizer.Sessions
   alias FermixCore.Memory.Repo
 
@@ -28,7 +30,7 @@ defmodule FermixCore.ComputerHistory.SummarizerTest do
   defmodule FakeAdapter do
     @behaviour FermixCore.Providers.Adapter
 
-    alias FermixCore.Memory.Repo
+    alias FermixCore.ComputerHistory.Purge
 
     @impl true
     def chat(messages, _capabilities, opts) do
@@ -52,7 +54,9 @@ defmodule FermixCore.ComputerHistory.SummarizerTest do
     defp purge_mid_call(nil), do: :ok
 
     defp purge_mid_call({repo, from_ts, to_ts}) do
-      {:ok, _counts} = Repo.computer_history_purge_window(from_ts, to_ts, to_ts, server: repo)
+      {:ok, _counts} =
+        Purge.purge({:last, to_ts - from_ts}, now: to_ts, repo: repo, spool: :"#{repo}_spool")
+
       :ok
     end
 
@@ -90,15 +94,15 @@ defmodule FermixCore.ComputerHistory.SummarizerTest do
     end
   end
 
-  # Stands in for the Repo: forwards every call to the real one, and purges
-  # `window` once, right after it has served the first `read` request and before
-  # it replies. That is a purge landing exactly between the batch read and
-  # whatever the summarizer asks next, the one gap the purge mark's placement
-  # (taken BEFORE the read) decides. `read` is the Repo request's tag.
+  # Stands in for this machine's store: forwards every call to the real one, and
+  # purges `window` from chat (the home's notes and this machine's raw events)
+  # once, right after it has served the first `read` request and before it
+  # replies. That is a purge landing exactly between the sitting's read and its
+  # note, which the home's interval check decides (M97 §8.5).
   defmodule PurgeAfterRead do
     use GenServer
 
-    alias FermixCore.Memory.Repo
+    alias FermixCore.ComputerHistory.Purge
 
     def start_link(opts), do: GenServer.start_link(__MODULE__, Map.new(opts))
 
@@ -107,14 +111,17 @@ defmodule FermixCore.ComputerHistory.SummarizerTest do
 
     @impl true
     def handle_call(request, _from, state) do
-      reply = GenServer.call(state.repo, request)
+      reply = GenServer.call(state.spool, request)
       {:reply, reply, purge_once(request, state)}
     end
 
-    defp purge_once(request, %{read: read, window: {from_ts, to_ts}} = state)
-         when is_tuple(request) and elem(request, 0) == read do
+    defp purge_once({:sql, read, _args}, %{read: read, window: {from_ts, to_ts}} = state) do
       {:ok, _counts} =
-        Repo.computer_history_purge_window(from_ts, to_ts, to_ts, server: state.repo)
+        Purge.purge({:last, to_ts - from_ts},
+          now: to_ts,
+          repo: state.repo,
+          spool: state.spool
+        )
 
       %{state | window: nil}
     end
@@ -124,9 +131,8 @@ defmodule FermixCore.ComputerHistory.SummarizerTest do
 
   setup do
     unique = System.unique_integer([:positive])
-    db_path = Path.join(System.tmp_dir!(), "fermix-ch-summarizer-#{unique}.db")
     repo_name = :"ch_summarizer_repo_#{unique}"
-    start_supervised!({Repo, name: repo_name, enabled: true, database_path: db_path})
+    start_stores!(repo_name, :stores)
 
     original = Application.get_env(:fermix_core, :computer_history)
     Process.delete(:ch_calls)
@@ -138,17 +144,69 @@ defmodule FermixCore.ComputerHistory.SummarizerTest do
         nil -> Application.delete_env(:fermix_core, :computer_history)
         value -> Application.put_env(:fermix_core, :computer_history, value)
       end
-
-      Enum.each([db_path, "#{db_path}-wal", "#{db_path}-shm"], &FermixTestSupport.SafeRm.rm/1)
     end)
 
     %{repo: repo_name}
   end
 
+  # The home's store (`repo`) and this machine's (`spool_of/1`), side by side in a
+  # folder of their own: a Mac that is its own home, in one pipeline (M97 §8.1).
+  defp start_stores!(repo, id) do
+    dir = FermixTestSupport.SafeRm.make_tmp_dir!("ch-summarizer")
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf(dir) end)
+
+    start_supervised!(
+      Supervisor.child_spec(
+        {Repo, name: repo, enabled: true, database_path: Path.join(dir, "memory.db")},
+        id: {id, :repo}
+      )
+    )
+
+    start_supervised!(
+      Supervisor.child_spec(
+        {Spool, name: spool_of(repo), path: Path.join([dir, "device", "history.db"])},
+        id: {id, :spool}
+      )
+    )
+  end
+
+  defp spool_of(repo), do: :"#{repo}_spool"
+
+  # One cycle of the machine's half (`Sittings`), sending each sitting in process
+  # to the home's half (`Submission`), with the result in the counts these cases
+  # read: whether a note was written, the events and sittings, and how many
+  # sittings wrote none.
+  defp run_cycle(opts) do
+    {repo, opts} = Keyword.pop!(opts, :repo)
+    now = Keyword.get(opts, :now, DateTime.utc_now())
+    home = [repo: repo, adapter: FakeAdapter, now: now] ++ Keyword.take(opts, [:route_opts])
+    uplink = fn payload -> {:ok, Submission.accept("", payload, home)} end
+
+    machine =
+      opts
+      |> Keyword.take([:spool, :route_opts, :timezone, :limit, :budget, :now, :config])
+      |> Keyword.merge(uplink: uplink, adapter: FakeAdapter)
+      |> Keyword.put_new(:spool, spool_of(repo))
+
+    case Sittings.run(machine) do
+      {:ok, cycle} ->
+        {:ok,
+         %{
+           memory_written: cycle.notes > 0,
+           events: cycle.events,
+           sessions: cycle.sittings,
+           empty_batches: cycle.sittings - cycle.notes
+         }}
+
+      other ->
+        other
+    end
+  end
+
   defp enable(kw), do: Application.put_env(:fermix_core, :computer_history, [enabled: true] ++ kw)
 
   defp insert(repo, events),
-    do: {:ok, _} = Repo.computer_history_insert_events(events, server: repo)
+    do: {:ok, _} = Spool.insert_events(events, server: spool_of(repo))
 
   defp event(seq, ts, text),
     do: %{
@@ -188,16 +246,25 @@ defmodule FermixCore.ComputerHistory.SummarizerTest do
 
   defp user_message(call), do: call.messages |> Enum.at(1) |> Map.fetch!(:content)
 
+  # A user message without the home's continuity line: the sitting as sent.
+  defp sitting_text("Previous note" <> _rest = message),
+    do: message |> String.split("\n\n", parts: 2) |> List.last()
+
+  defp sitting_text(message), do: message
+
   defp local_opts(repo, opts \\ []) do
     opts ++
       [
         repo: repo,
-        macos?: true,
-        adapter: FakeAdapter,
         route_opts: [model: "llama3"],
         timezone: "Etc/UTC"
       ]
   end
+
+  # The sitting is sent as text and summarized on the home (on its local route,
+  # the app env's): this machine's own settings choose the default summarizer.
+  defp home_opts(repo, opts \\ []),
+    do: local_opts(repo, [config: [enabled: true, summarizer: :default_provider]] ++ opts)
 
   defp stored_memory(repo) do
     {:ok, [memory]} =
@@ -220,23 +287,14 @@ defmodule FermixCore.ComputerHistory.SummarizerTest do
   # unit of work — rather than microseconds. A cost property asserted in
   # reductions holds on a runner of any speed and under any load.
   defp cycle_cost(events, content) do
-    unique = System.unique_integer([:positive])
-    db_path = Path.join(System.tmp_dir!(), "fermix-ch-cost-#{unique}.db")
-    repo = :"ch_cost_repo_#{unique}"
-
-    start_supervised!(
-      Supervisor.child_spec({Repo, name: repo, enabled: true, database_path: db_path}, id: repo)
-    )
-
-    on_exit(fn ->
-      Enum.each([db_path, "#{db_path}-wal", "#{db_path}-shm"], &FermixTestSupport.SafeRm.rm/1)
-    end)
+    repo = :"ch_cost_repo_#{System.unique_integer([:positive])}"
+    start_stores!(repo, repo)
 
     insert(repo, events)
     Process.put(:ch_content, content)
 
     {:reductions, before} = Process.info(self(), :reductions)
-    result = Summarizer.run_cycle(local_opts(repo))
+    result = run_cycle(local_opts(repo))
     {:reductions, spent} = Process.info(self(), :reductions)
 
     %{reductions: spent - before, result: result}
@@ -249,7 +307,7 @@ defmodule FermixCore.ComputerHistory.SummarizerTest do
     canary = FermixTestSupport.ComputerHistoryCanary.token("raw")
     insert(repo, [event(1, 1_000, "typed #{canary}")])
 
-    assert {:ok, %{memory_written: true, events: 1}} = Summarizer.run_cycle(local_opts(repo))
+    assert {:ok, %{memory_written: true, events: 1}} = run_cycle(local_opts(repo))
 
     assert [call] = calls()
     assert Locality.loopback?(call.base_url)
@@ -266,12 +324,11 @@ defmodule FermixCore.ComputerHistory.SummarizerTest do
 
     opts = [
       repo: repo,
-      macos?: true,
       adapter: FakeAdapter,
       route_opts: [model: "claude-x", api_key: "test-key"]
     ]
 
-    assert {:ok, %{memory_written: true}} = Summarizer.run_cycle(opts)
+    assert {:ok, %{memory_written: true}} = run_cycle(opts)
 
     assert [call] = calls()
     assert call.base_url == "https://api.anthropic.com/v1"
@@ -287,19 +344,20 @@ defmodule FermixCore.ComputerHistory.SummarizerTest do
 
     opts = [
       repo: repo,
-      macos?: true,
       adapter: FakeAdapter,
       route_opts: [model: "claude-x", api_key: "k"]
     ]
 
-    assert {:error, :provider_unavailable} = Summarizer.run_cycle(opts)
+    # The home refuses for now, and the sitting waits here to be sent again.
+    assert {:held, "summarizer_unavailable"} = run_cycle(opts)
 
     # Exactly one call — no failover to a second vendor.
     assert length(calls()) == 1
     assert {:ok, 0} = Repo.computer_history_count_memories(server: repo)
 
-    {:ok, state} = Repo.computer_history_fetch_state(server: repo)
-    assert state.paused_reason == "route_down"
+    {:ok, state} = Spool.state(server: spool_of(repo))
+    assert state.paused_reason == "summarizer_unavailable"
+    assert state.last_summarized_id == 0
   end
 
   # --- inv. 17: a non-loopback local route refuses ------------------------
@@ -312,12 +370,11 @@ defmodule FermixCore.ComputerHistory.SummarizerTest do
 
     opts = [
       repo: repo,
-      macos?: true,
       adapter: FakeAdapter,
       route_opts: [model: "llama3", base_url: "http://10.0.0.5:11434/v1"]
     ]
 
-    assert {:paused, :route_not_permitted} = Summarizer.run_cycle(opts)
+    assert {:error, {:local_summarizer, :route_not_permitted}} = run_cycle(opts)
     assert calls() == []
     assert {:ok, 0} = Repo.computer_history_count_memories(server: repo)
   end
@@ -331,7 +388,7 @@ defmodule FermixCore.ComputerHistory.SummarizerTest do
     # Force the model to echo the field value verbatim.
     Process.put(:ch_content, "The owner typed #{secret_field} into a field.")
 
-    assert {:ok, %{memory_written: true}} = Summarizer.run_cycle(local_opts(repo))
+    assert {:ok, %{memory_written: true}} = run_cycle(local_opts(repo))
 
     summary = stored_memory(repo).summary
     refute summary =~ secret_field
@@ -339,8 +396,8 @@ defmodule FermixCore.ComputerHistory.SummarizerTest do
     assert summary =~ "The owner typed"
     assert summary =~ "into a field."
 
-    {:ok, state} = Repo.computer_history_fetch_state(server: repo)
-    assert state.last_status == "ok"
+    {:ok, state} = Spool.state(server: spool_of(repo))
+    assert state.last_status == "summarized"
   end
 
   test "verbatim_middle: an interior copy is redacted, the sentence around it survives", %{
@@ -356,7 +413,7 @@ defmodule FermixCore.ComputerHistory.SummarizerTest do
     # a run from the MIDDLE of the field was echoed.
     Process.put(:ch_content, "The owner wrote #{middle} into the payment form.")
 
-    assert {:ok, %{memory_written: true}} = Summarizer.run_cycle(local_opts(repo))
+    assert {:ok, %{memory_written: true}} = run_cycle(local_opts(repo))
 
     summary = stored_memory(repo).summary
     refute summary =~ middle
@@ -383,7 +440,7 @@ defmodule FermixCore.ComputerHistory.SummarizerTest do
 
     Process.put(:ch_content, "The owner typed #{echoed}. They also edited Fermix in Xcode.")
 
-    assert {:ok, %{memory_written: true, events: 2}} = Summarizer.run_cycle(local_opts(repo))
+    assert {:ok, %{memory_written: true, events: 2}} = run_cycle(local_opts(repo))
 
     summary = stored_memory(repo).summary
     refute summary =~ echoed
@@ -403,7 +460,7 @@ defmodule FermixCore.ComputerHistory.SummarizerTest do
         "DOB 1979-04-02, salary 214000. They then switched to Mail."
     )
 
-    assert {:ok, %{memory_written: true}} = Summarizer.run_cycle(local_opts(repo))
+    assert {:ok, %{memory_written: true}} = run_cycle(local_opts(repo))
 
     summary = stored_memory(repo).summary
     refute summary =~ "512-88-9031"
@@ -426,7 +483,7 @@ defmodule FermixCore.ComputerHistory.SummarizerTest do
         "salary 214000! Then Mail."
     )
 
-    assert {:ok, %{memory_written: true}} = Summarizer.run_cycle(local_opts(repo))
+    assert {:ok, %{memory_written: true}} = run_cycle(local_opts(repo))
 
     summary = stored_memory(repo).summary
     refute summary =~ "AMY CHEN"
@@ -446,7 +503,7 @@ defmodule FermixCore.ComputerHistory.SummarizerTest do
       "The owner typed abcdefghijklmnopqrst. Then zed. Then fghijklmnopqrstuvwxy. Done."
     )
 
-    assert {:ok, %{memory_written: true}} = Summarizer.run_cycle(local_opts(repo))
+    assert {:ok, %{memory_written: true}} = run_cycle(local_opts(repo))
 
     assert stored_memory(repo).summary ==
              "The owner typed […]. Then zed. Then […]. Done."
@@ -458,7 +515,7 @@ defmodule FermixCore.ComputerHistory.SummarizerTest do
     insert(repo, [event(1, 1_000, field)])
     Process.put(:ch_content, "The owner reviewed #{field} in Calendar.")
 
-    assert {:ok, %{memory_written: true}} = Summarizer.run_cycle(local_opts(repo))
+    assert {:ok, %{memory_written: true}} = run_cycle(local_opts(repo))
 
     summary = stored_memory(repo).summary
     assert String.valid?(summary)
@@ -474,7 +531,7 @@ defmodule FermixCore.ComputerHistory.SummarizerTest do
     insert(repo, [event(1, 1_000, :unicode.characters_to_nfd_binary(phrase))])
     Process.put(:ch_content, "The owner drafted #{phrase} in Pages.")
 
-    assert {:ok, %{memory_written: true}} = Summarizer.run_cycle(local_opts(repo))
+    assert {:ok, %{memory_written: true}} = run_cycle(local_opts(repo))
 
     summary = stored_memory(repo).summary
     assert String.valid?(summary)
@@ -489,7 +546,7 @@ defmodule FermixCore.ComputerHistory.SummarizerTest do
     insert(repo, [event(1, 1_000, "a-b-c d.e, f/g h_i (jkl)")])
     Process.put(:ch_content, "The owner typed a-b-c d.e, f/g h_i (jkl) somewhere.")
 
-    assert {:ok, %{memory_written: true}} = Summarizer.run_cycle(local_opts(repo))
+    assert {:ok, %{memory_written: true}} = run_cycle(local_opts(repo))
     assert stored_memory(repo).summary == "The owner typed a-b-c d.e, f/g h_i (jkl) somewhere."
   end
 
@@ -502,7 +559,7 @@ defmodule FermixCore.ComputerHistory.SummarizerTest do
       "Saw quarterly revenue projection deck — final approval memo today."
     )
 
-    assert {:ok, %{memory_written: true}} = Summarizer.run_cycle(local_opts(repo))
+    assert {:ok, %{memory_written: true}} = run_cycle(local_opts(repo))
 
     summary = stored_memory(repo).summary
     refute summary =~ "[…][…]"
@@ -578,11 +635,11 @@ defmodule FermixCore.ComputerHistory.SummarizerTest do
     insert(repo, [event(1, 1_000, echoed)])
     Process.put(:ch_content, echoed)
 
-    assert {:ok, %{memory_written: false}} = Summarizer.run_cycle(local_opts(repo))
+    assert {:ok, %{memory_written: false}} = run_cycle(local_opts(repo))
     assert {:ok, 0} = Repo.computer_history_count_memories(server: repo)
 
-    {:ok, state} = Repo.computer_history_fetch_state(server: repo)
-    assert state.last_status == "summarized_empty"
+    {:ok, state} = Spool.state(server: spool_of(repo))
+    assert state.last_status == "abstained"
 
     assert Recall.recent_digest(
              repo: repo,
@@ -596,7 +653,7 @@ defmodule FermixCore.ComputerHistory.SummarizerTest do
     insert(repo, [event(1, 1_000, "budget")])
     Process.put(:ch_content, "The owner opened the budget spreadsheet.")
 
-    assert {:ok, %{memory_written: true}} = Summarizer.run_cycle(local_opts(repo))
+    assert {:ok, %{memory_written: true}} = run_cycle(local_opts(repo))
     assert stored_memory(repo).summary == "The owner opened the budget spreadsheet."
   end
 
@@ -605,11 +662,11 @@ defmodule FermixCore.ComputerHistory.SummarizerTest do
     insert(repo, [event(1, 1_000, "some text here")])
     Process.put(:ch_content, <<"ok", 255>>)
 
-    assert {:error, :invalid_summary} = Summarizer.run_cycle(local_opts(repo))
+    assert {:error, {:local_summarizer, :invalid_summary}} = run_cycle(local_opts(repo))
     assert {:ok, 0} = Repo.computer_history_count_memories(server: repo)
 
-    {:ok, state} = Repo.computer_history_fetch_state(server: repo)
-    assert state.paused_reason == "route_down"
+    {:ok, state} = Spool.state(server: spool_of(repo))
+    assert state.paused_reason == "invalid_summary"
   end
 
   test "empty_output: whitespace-only content writes no memory but advances the cursor", %{
@@ -619,12 +676,12 @@ defmodule FermixCore.ComputerHistory.SummarizerTest do
     insert(repo, [event(1, 1_000, "some text here")])
     Process.put(:ch_content, "   \n  ")
 
-    assert {:ok, %{memory_written: false}} = Summarizer.run_cycle(local_opts(repo))
+    assert {:ok, %{memory_written: false}} = run_cycle(local_opts(repo))
     assert {:ok, 0} = Repo.computer_history_count_memories(server: repo)
 
-    {:ok, state} = Repo.computer_history_fetch_state(server: repo)
+    {:ok, state} = Spool.state(server: spool_of(repo))
     assert state.last_summarized_id > 0
-    assert state.last_status == "summarized_empty"
+    assert state.last_status == "abstained"
   end
 
   test "the abstention marker never becomes a memory", %{repo: repo} do
@@ -632,11 +689,11 @@ defmodule FermixCore.ComputerHistory.SummarizerTest do
     insert(repo, [event(1, 1_000, "idle noise")])
     Process.put(:ch_content, "NO_MEANINGFUL_ACTIVITY.")
 
-    assert {:ok, %{memory_written: false}} = Summarizer.run_cycle(local_opts(repo))
+    assert {:ok, %{memory_written: false}} = run_cycle(local_opts(repo))
     assert {:ok, 0} = Repo.computer_history_count_memories(server: repo)
 
-    {:ok, state} = Repo.computer_history_fetch_state(server: repo)
-    assert state.last_status == "summarized_empty"
+    {:ok, state} = Spool.state(server: spool_of(repo))
+    assert state.last_status == "abstained"
   end
 
   test "output_budget: a 135,000-char answer is stored bounded and recall stays bounded", %{
@@ -646,7 +703,7 @@ defmodule FermixCore.ComputerHistory.SummarizerTest do
     insert(repo, [event(1, 1_000, "some text here")])
     Process.put(:ch_content, String.duplicate("The owner reviewed the plan. ", 4_655))
 
-    assert {:ok, %{memory_written: true}} = Summarizer.run_cycle(local_opts(repo))
+    assert {:ok, %{memory_written: true}} = run_cycle(local_opts(repo))
 
     summary = stored_memory(repo).summary
     assert String.length(summary) <= 900
@@ -668,7 +725,7 @@ defmodule FermixCore.ComputerHistory.SummarizerTest do
     insert(repo, [event(1, 1_000, "some text here")])
     Process.put(:ch_content, String.duplicate("x", 5_000))
 
-    assert {:ok, %{memory_written: true}} = Summarizer.run_cycle(local_opts(repo))
+    assert {:ok, %{memory_written: true}} = run_cycle(local_opts(repo))
 
     summary = stored_memory(repo).summary
     assert String.length(summary) == 901
@@ -682,13 +739,13 @@ defmodule FermixCore.ComputerHistory.SummarizerTest do
 
     Process.put(:ch_content, "reviewed the quarterly plan")
     insert(repo, [event(1, 1_000, "a"), event(2, 2_000, "b")])
-    assert {:ok, %{memory_written: true}} = Summarizer.run_cycle(local_opts(repo))
+    assert {:ok, %{memory_written: true}} = run_cycle(local_opts(repo))
 
     # A late-flushed event whose ts reaches back inside the first memory's
     # provenance window, plus one beyond it.
     Process.put(:ch_content, "drafted the release notes")
     insert(repo, [event(3, 1_500, "c"), event(4, 2_500, "d")])
-    assert {:ok, %{memory_written: true}} = Summarizer.run_cycle(local_opts(repo))
+    assert {:ok, %{memory_written: true}} = run_cycle(local_opts(repo))
 
     # Both memories remain: each event was summarized exactly once, so the
     # second memory never covers the first one's sources.
@@ -708,10 +765,10 @@ defmodule FermixCore.ComputerHistory.SummarizerTest do
   test "a cycle with no new events writes nothing", %{repo: repo} do
     enable(summarizer: :local)
     insert(repo, [event(1, 1_000, "a")])
-    assert {:ok, %{memory_written: true}} = Summarizer.run_cycle(local_opts(repo))
+    assert {:ok, %{memory_written: true}} = run_cycle(local_opts(repo))
 
     # Second cycle: cursor is past every event.
-    assert {:ok, %{memory_written: false, events: 0}} = Summarizer.run_cycle(local_opts(repo))
+    assert {:ok, %{memory_written: false, events: 0}} = run_cycle(local_opts(repo))
   end
 
   # --- stored artifacts are ranked and bounded (§9.4) ---------------------
@@ -739,7 +796,7 @@ defmodule FermixCore.ComputerHistory.SummarizerTest do
       enable(summarizer: :local)
       insert(repo, incidental ++ carried)
 
-      assert {:ok, %{memory_written: true}} = Summarizer.run_cycle(local_opts(repo))
+      assert {:ok, %{memory_written: true}} = run_cycle(local_opts(repo))
 
       titles = repo |> stored_memory() |> Map.fetch!(:titles) |> Jason.decode!()
       assert length(titles) == 12
@@ -768,7 +825,7 @@ defmodule FermixCore.ComputerHistory.SummarizerTest do
         })
       ])
 
-      assert {:ok, %{memory_written: true}} = Summarizer.run_cycle(local_opts(repo))
+      assert {:ok, %{memory_written: true}} = run_cycle(local_opts(repo))
 
       memory = stored_memory(repo)
       assert Jason.decode!(memory.titles) == ["Q3 Report — Docs"]
@@ -810,7 +867,7 @@ defmodule FermixCore.ComputerHistory.SummarizerTest do
         })
       ])
 
-      assert {:ok, %{memory_written: true}} = Summarizer.run_cycle(local_opts(repo))
+      assert {:ok, %{memory_written: true}} = run_cycle(local_opts(repo))
 
       [call] = calls()
       input = user_message(call)
@@ -848,7 +905,7 @@ defmodule FermixCore.ComputerHistory.SummarizerTest do
         })
       ])
 
-      assert {:ok, %{memory_written: true}} = Summarizer.run_cycle(local_opts(repo))
+      assert {:ok, %{memory_written: true}} = run_cycle(local_opts(repo))
 
       input = calls() |> hd() |> user_message()
       assert input =~ "app=com.microsoft.VSCode"
@@ -862,7 +919,7 @@ defmodule FermixCore.ComputerHistory.SummarizerTest do
       text = String.duplicate("x", 5_600) <> " The decision is to postpone the migration."
       insert(repo, [event(1, 1_000, text)])
 
-      assert {:ok, %{memory_written: true}} = Summarizer.run_cycle(local_opts(repo))
+      assert {:ok, %{memory_written: true}} = run_cycle(local_opts(repo))
 
       input = calls() |> hd() |> user_message()
       assert input =~ "The decision is to postpone the migration."
@@ -877,7 +934,7 @@ defmodule FermixCore.ComputerHistory.SummarizerTest do
         Enum.map(1..500, fn seq -> event(seq, 1_000 + seq, "unchanged draft text") end)
       )
 
-      assert {:ok, %{memory_written: true, events: 500}} = Summarizer.run_cycle(local_opts(repo))
+      assert {:ok, %{memory_written: true, events: 500}} = run_cycle(local_opts(repo))
 
       input = calls() |> hd() |> user_message()
       assert input =~ "×500"
@@ -894,7 +951,7 @@ defmodule FermixCore.ComputerHistory.SummarizerTest do
         field_event(2, 2_000, "Body", base <> " and then the new sentence.")
       ])
 
-      assert {:ok, %{memory_written: true}} = Summarizer.run_cycle(local_opts(repo))
+      assert {:ok, %{memory_written: true}} = run_cycle(local_opts(repo))
 
       input = calls() |> hd() |> user_message()
       assert input =~ "text(unchanged first 400 chars)=\" and then the new sentence.\""
@@ -910,7 +967,7 @@ defmodule FermixCore.ComputerHistory.SummarizerTest do
         event(2, ms(~U[2026-08-15 23:55:00Z]), "before midnight")
       ])
 
-      assert {:ok, %{sessions: 1, events: 2}} = Summarizer.run_cycle(local_opts(repo))
+      assert {:ok, %{sessions: 1, events: 2}} = run_cycle(local_opts(repo))
 
       input = calls() |> hd() |> user_message()
       assert input =~ "Activity events (Aug 15–Aug 16, times in Etc/UTC):"
@@ -921,7 +978,7 @@ defmodule FermixCore.ComputerHistory.SummarizerTest do
       insert(repo, [event(1, 1_000, "text")])
 
       assert {:ok, _cycle} =
-               Summarizer.run_cycle(local_opts(repo, timezone: "America/New York"))
+               run_cycle(local_opts(repo, timezone: "America/New York"))
 
       input = calls() |> hd() |> user_message()
       assert input =~ "times in Etc/UTC"
@@ -945,7 +1002,7 @@ defmodule FermixCore.ComputerHistory.SummarizerTest do
         })
       ])
 
-      assert {:ok, %{memory_written: true, events: 2}} = Summarizer.run_cycle(local_opts(repo))
+      assert {:ok, %{memory_written: true, events: 2}} = run_cycle(local_opts(repo))
 
       input = calls() |> hd() |> user_message()
       # Without a label these are two different fields, not one field edited.
@@ -970,10 +1027,12 @@ defmodule FermixCore.ComputerHistory.SummarizerTest do
       Process.put(:ch_content, String.duplicate("The owner reviewed the migration plan. ", 24))
 
       assert {:ok, %{memory_written: true, events: summarized}} =
-               Summarizer.run_cycle(local_opts(repo))
+               run_cycle(home_opts(repo))
 
       messages = Enum.map(ordered_calls(), &user_message/1)
-      assert Enum.all?(messages, &(String.length(&1) <= 60_000))
+      # The sitting a machine sends is the bounded text; the home puts the
+      # continuity line ahead of it.
+      assert Enum.all?(messages, &(&1 |> sitting_text() |> String.length() <= 60_000))
       assert messages |> Enum.at(1) |> String.starts_with?("Previous note (continuity only")
       # One `text="` per rendered event: the cycle's count is what was rendered.
       rendered = Enum.map(messages, &(length(String.split(&1, "text=\"")) - 1))
@@ -1000,17 +1059,17 @@ defmodule FermixCore.ComputerHistory.SummarizerTest do
       }
 
       # App-less, so an empty allowlist still admits it (§8.4 metadata kinds).
-      assert {:ok, %{written: 1}} = Ingest.ingest([gap], repo: repo, apps: [])
+      assert {:ok, %{written: 1}} = Ingest.ingest([gap], spool: spool_of(repo), apps: [])
       # Signal, so the sitting is rendered rather than recorded empty (§24.2).
       insert(repo, [event(2, 1_100, "a note")])
 
-      assert {:ok, %{memory_written: true, events: 2}} = Summarizer.run_cycle(local_opts(repo))
+      assert {:ok, %{memory_written: true, events: 2}} = run_cycle(local_opts(repo))
 
       input = calls() |> hd() |> user_message()
       assert String.length(input) <= 60_000
       assert length(String.split(input, "\n")) == 3
 
-      {:ok, state} = Repo.computer_history_fetch_state(server: repo)
+      {:ok, state} = Spool.state(server: spool_of(repo))
       assert state.last_summarized_id > 0
     end
 
@@ -1026,16 +1085,16 @@ defmodule FermixCore.ComputerHistory.SummarizerTest do
       }
 
       assert {:ok, %{written: 1}} =
-               Ingest.ingest([event], repo: repo, apps: ["com.apple.Safari"])
+               Ingest.ingest([event], spool: spool_of(repo), apps: ["com.apple.Safari"])
 
       insert(repo, [event(2, 1_100, "a note")])
 
-      assert {:ok, %{memory_written: true, events: 2}} = Summarizer.run_cycle(local_opts(repo))
+      assert {:ok, %{memory_written: true, events: 2}} = run_cycle(local_opts(repo))
 
       input = calls() |> hd() |> user_message()
       assert String.length(input) <= 60_000
 
-      {:ok, state} = Repo.computer_history_fetch_state(server: repo)
+      {:ok, state} = Spool.state(server: spool_of(repo))
       assert state.last_summarized_id > 0
     end
 
@@ -1052,7 +1111,7 @@ defmodule FermixCore.ComputerHistory.SummarizerTest do
         })
       ])
 
-      assert {:ok, %{memory_written: true, events: 1}} = Summarizer.run_cycle(local_opts(repo))
+      assert {:ok, %{memory_written: true, events: 1}} = run_cycle(local_opts(repo))
 
       input = calls() |> hd() |> user_message()
       assert String.length(input) <= 60_000
@@ -1061,16 +1120,18 @@ defmodule FermixCore.ComputerHistory.SummarizerTest do
 
   # --- continuity (§10) ---------------------------------------------------
 
+  # The previous note is read where the notes are: the home, which makes the
+  # note of a sitting sent to it (M97 §8.1).
   describe "continuity" do
     test "the previous note is offered as context to the next batch", %{repo: repo} do
       enable(summarizer: :local)
       Process.put(:ch_content, "Drafted the Apollo migration plan.")
       insert(repo, [event(1, 1_000, "a")])
-      assert {:ok, %{memory_written: true}} = Summarizer.run_cycle(local_opts(repo))
+      assert {:ok, %{memory_written: true}} = run_cycle(home_opts(repo))
 
       Process.put(:ch_content, "Continued the plan.")
       insert(repo, [event(2, 60_000, "b")])
-      assert {:ok, %{memory_written: true}} = Summarizer.run_cycle(local_opts(repo))
+      assert {:ok, %{memory_written: true}} = run_cycle(home_opts(repo))
 
       second = ordered_calls() |> Enum.at(1) |> user_message()
 
@@ -1098,13 +1159,13 @@ defmodule FermixCore.ComputerHistory.SummarizerTest do
 
       insert(repo, [event(1, 60_000, "a normal field value")])
 
-      assert {:ok, %{memory_written: true, events: 1}} = Summarizer.run_cycle(local_opts(repo))
+      assert {:ok, %{memory_written: true, events: 1}} = run_cycle(home_opts(repo))
 
       message = calls() |> hd() |> user_message()
       assert String.length(message) <= 60_000
       assert message =~ "Activity events ("
 
-      {:ok, state} = Repo.computer_history_fetch_state(server: repo)
+      {:ok, state} = Spool.state(server: spool_of(repo))
       assert state.last_summarized_id > 0
     end
 
@@ -1112,11 +1173,11 @@ defmodule FermixCore.ComputerHistory.SummarizerTest do
       enable(summarizer: :local)
       Process.put(:ch_content, "Drafted the Apollo migration plan.")
       insert(repo, [event(1, 1_000, "a")])
-      assert {:ok, %{memory_written: true}} = Summarizer.run_cycle(local_opts(repo))
+      assert {:ok, %{memory_written: true}} = run_cycle(home_opts(repo))
 
       # Three hours later: a different sitting.
       insert(repo, [event(2, 1_000 + 3 * 3_600_000, "b")])
-      assert {:ok, %{memory_written: true}} = Summarizer.run_cycle(local_opts(repo))
+      assert {:ok, %{memory_written: true}} = run_cycle(home_opts(repo))
 
       second = ordered_calls() |> Enum.at(1) |> user_message()
       refute second =~ "Previous note"
@@ -1152,7 +1213,7 @@ defmodule FermixCore.ComputerHistory.SummarizerTest do
 
       insert(repo, incidental ++ important)
 
-      assert {:ok, %{memory_written: true, events: 502}} = Summarizer.run_cycle(local_opts(repo))
+      assert {:ok, %{memory_written: true, events: 502}} = run_cycle(local_opts(repo))
 
       messages = Enum.map(ordered_calls(), &user_message/1)
       assert length(messages) == 2
@@ -1165,10 +1226,10 @@ defmodule FermixCore.ComputerHistory.SummarizerTest do
       insert(repo, Enum.map(1..35, fn seq -> event(seq, 1_000 + seq, "text-#{seq}") end))
 
       # Seven read-limited sittings of five are available; the cycle takes six.
-      assert {:ok, %{events: 30}} = Summarizer.run_cycle(local_opts(repo, limit: 5))
+      assert {:ok, %{events: 30}} = run_cycle(local_opts(repo, limit: 5))
       assert length(calls()) == 6
 
-      {:ok, state} = Repo.computer_history_fetch_state(server: repo)
+      {:ok, state} = Spool.state(server: spool_of(repo))
       assert state.last_summarized_id == 30
     end
 
@@ -1177,12 +1238,13 @@ defmodule FermixCore.ComputerHistory.SummarizerTest do
       insert(repo, Enum.map(1..4, fn seq -> event(seq, 1_000 + seq, "text-#{seq}") end))
       Process.put(:ch_behavior, {:error_after, 1})
 
-      assert {:error, :provider_unavailable} = Summarizer.run_cycle(local_opts(repo, limit: 2))
+      assert {:error, {:local_summarizer, :provider_unavailable}} =
+               run_cycle(local_opts(repo, limit: 2))
 
       assert {:ok, 1} = Repo.computer_history_count_memories(server: repo)
-      {:ok, state} = Repo.computer_history_fetch_state(server: repo)
+      {:ok, state} = Spool.state(server: spool_of(repo))
       assert state.last_summarized_id == 2
-      assert state.paused_reason == "route_down"
+      assert state.paused_reason == "provider_unavailable"
     end
   end
 
@@ -1193,7 +1255,7 @@ defmodule FermixCore.ComputerHistory.SummarizerTest do
     enable(summarizer: :local)
     insert(repo, [event(1, 1_000, "some text")])
 
-    assert {:ok, %{memory_written: true}} = Summarizer.run_cycle(local_opts(repo))
+    assert {:ok, %{memory_written: true}} = run_cycle(local_opts(repo))
 
     system = calls() |> hd() |> Map.fetch!(:messages) |> hd() |> Map.fetch!(:content)
     assert system =~ "gap=title_only"
@@ -1210,7 +1272,7 @@ defmodule FermixCore.ComputerHistory.SummarizerTest do
     enable(summarizer: :local)
     insert(repo, [event(1, 1_000, "some text")])
 
-    assert {:ok, %{memory_written: true}} = Summarizer.run_cycle(local_opts(repo))
+    assert {:ok, %{memory_written: true}} = run_cycle(local_opts(repo))
 
     system = calls() |> hd() |> Map.fetch!(:messages) |> hd() |> Map.fetch!(:content)
     assert system =~ "every site they visit"
@@ -1223,7 +1285,9 @@ defmodule FermixCore.ComputerHistory.SummarizerTest do
 
   # The abstention path was silent: with no memories since Sep 6 there was no way
   # to tell "the model abstains on every sitting" from "the summarizer never ran".
-  describe "session outcome logging" do
+  # M97 §8.1: the home names each sitting's outcome as it answers it, in counts
+  # and words only; a summary the guard cut says how many runs went.
+  describe "outcome logging" do
     setup do
       # The outcome line is Logger.info and config/test.exs pins the primary level
       # to :warning, which drops it before any capture handler sees it. Establish
@@ -1234,24 +1298,24 @@ defmodule FermixCore.ComputerHistory.SummarizerTest do
       :ok
     end
 
-    test "an ok sitting names the outcome, the event count and the window", %{repo: repo} do
+    test "a summarized sitting names the outcome, the machine and the event count", %{
+      repo: repo
+    } do
       enable(summarizer: :local)
       insert(repo, [event(1, ms(~U[2026-09-10 09:15:00Z]), "typed a note")])
 
       log =
         capture_log([level: :info], fn ->
           assert {:ok, %{memory_written: true, sessions: 1, empty_batches: 0}} =
-                   Summarizer.run_cycle(local_opts(repo))
+                   run_cycle(home_opts(repo))
         end)
 
-      assert log =~ "computer_history summarizer session: ok"
-      assert log =~ "1 event(s)"
-      assert log =~ "Sep 10 09:15"
-      assert log =~ "Etc/UTC"
+      assert log =~ "computer_history sitting from this machine: summarized, 1 event(s)"
+      refute log =~ "typed a note"
       refute log =~ "redacted"
     end
 
-    test "a redacted sitting names how many runs were cut", %{repo: repo} do
+    test "a redacted summary names how many runs were cut", %{repo: repo} do
       enable(summarizer: :local)
       echoed = "my-private-note-abcdefghijklmnop"
       insert(repo, [event(1, 1_000, echoed)])
@@ -1259,14 +1323,14 @@ defmodule FermixCore.ComputerHistory.SummarizerTest do
 
       log =
         capture_log([level: :info], fn ->
-          assert {:ok, %{memory_written: true}} = Summarizer.run_cycle(local_opts(repo))
+          assert {:ok, %{memory_written: true}} = run_cycle(home_opts(repo))
         end)
 
-      assert log =~ "computer_history summarizer session: ok"
-      assert log =~ "redacted 1"
+      assert log =~ "computer_history summary redacted 1 verbatim run(s)"
+      assert log =~ "computer_history sitting from this machine: summarized"
     end
 
-    test "an abstention is logged as abstained, distinctly from empty", %{repo: repo} do
+    test "an abstention is logged as abstained", %{repo: repo} do
       enable(summarizer: :local)
       insert(repo, [event(1, 1_000, "idle noise")])
       Process.put(:ch_content, "NO_MEANINGFUL_ACTIVITY")
@@ -1274,88 +1338,29 @@ defmodule FermixCore.ComputerHistory.SummarizerTest do
       log =
         capture_log([level: :info], fn ->
           assert {:ok, %{memory_written: false, sessions: 1, empty_batches: 1}} =
-                   Summarizer.run_cycle(local_opts(repo))
+                   run_cycle(home_opts(repo))
         end)
 
-      assert log =~ "computer_history summarizer session: abstained"
+      assert log =~ "computer_history sitting from this machine: abstained"
     end
 
-    test "a blank reply is logged as empty", %{repo: repo} do
-      enable(summarizer: :local)
-      insert(repo, [event(1, 1_000, "some text here")])
-      Process.put(:ch_content, "   \n  ")
-
-      log =
-        capture_log([level: :info], fn ->
-          assert {:ok, %{memory_written: false, empty_batches: 1}} =
-                   Summarizer.run_cycle(local_opts(repo))
-        end)
-
-      assert log =~ "computer_history summarizer session: empty"
-    end
-
-    test "a redaction-only reply is logged as empty", %{repo: repo} do
-      enable(summarizer: :local)
-      echoed = "the quarterly revenue projection deck for next year"
-      insert(repo, [event(1, 1_000, echoed)])
-      Process.put(:ch_content, echoed)
-
-      log =
-        capture_log([level: :info], fn ->
-          assert {:ok, %{memory_written: false}} = Summarizer.run_cycle(local_opts(repo))
-        end)
-
-      assert log =~ "computer_history summarizer session: empty"
-    end
-
-    # A cycle that dies on batch four is a different event from one that dies on
-    # batch one, and the returned tuple carries only the reason.
-    test "a cycle that stops early reports what it did before it stopped", %{repo: repo} do
-      enable(summarizer: :local)
-      insert(repo, Enum.map(1..4, fn seq -> event(seq, 1_000 + seq, "text-#{seq}") end))
-      Process.put(:ch_behavior, {:error_after, 1})
-
-      log =
-        capture_log([level: :info], fn ->
-          assert {:error, :provider_unavailable} =
-                   Summarizer.run_cycle(local_opts(repo, limit: 2))
-        end)
-
-      assert log =~ "computer_history summarizer cycle stopped after 1 session(s) (0 empty)"
-      assert log =~ "provider_unavailable"
-    end
-
-    test "a cycle that never ran a sitting logs no stopped line", %{repo: repo} do
-      enable(summarizer: :local)
-      insert(repo, [event(1, 1_000, "text")])
-      Process.put(:ch_behavior, :error)
-
-      log =
-        capture_log([level: :info], fn ->
-          assert {:error, :provider_unavailable} = Summarizer.run_cycle(local_opts(repo))
-        end)
-
-      refute log =~ "cycle stopped after"
-    end
-
-    # The outcome word has to describe what the store actually holds: a memory the
-    # purge guard refused is not an `ok` batch.
-    test "a note the repo refuses is never logged as ok", %{repo: repo} do
+    # The outcome word has to describe what the store actually holds: a note a
+    # purge refused is never logged as summarized.
+    test "a note the home refuses is never logged as summarized", %{repo: repo} do
       enable(summarizer: :local)
       insert(repo, [event(1, 1_000, "typed a note")])
-      # The owner purges the sitting's window while its call is in flight, after the
-      # batch was read: the write refuses the note built from the erased rows.
+      # The owner purges the sitting's window while the home's call is in flight:
+      # the note write refuses the note built from the erased rows.
       Process.put(:ch_purge, {repo, 0, 5_000})
 
       log =
         capture_log([level: :info], fn ->
-          assert {:ok, %{memory_written: false, empty_batches: 1}} =
-                   Summarizer.run_cycle(local_opts(repo))
+          assert {:ok, %{memory_written: false}} = run_cycle(home_opts(repo))
         end)
 
       assert {:ok, 0} = Repo.computer_history_count_memories(server: repo)
-      assert log =~ "computer_history summarizer session: not_written"
-      refute log =~ "session: ok"
+      assert log =~ "computer_history sitting from this machine: refused (purged)"
+      refute log =~ "from this machine: summarized"
     end
 
     test "the cycle result counts every sitting it ran and every empty one", %{repo: repo} do
@@ -1364,7 +1369,7 @@ defmodule FermixCore.ComputerHistory.SummarizerTest do
       Process.put(:ch_content, "NO_MEANINGFUL_ACTIVITY")
 
       assert {:ok, %{sessions: 2, empty_batches: 2, events: 2, memory_written: false}} =
-               Summarizer.run_cycle(local_opts(repo, limit: 1))
+               run_cycle(local_opts(repo, limit: 1))
     end
   end
 
@@ -1375,10 +1380,10 @@ defmodule FermixCore.ComputerHistory.SummarizerTest do
     # later note for good.
     test "a note is written for activity after purge all", %{repo: repo} do
       enable(summarizer: :local)
-      assert {:ok, _purged} = Purge.purge(:all, now: 5_000, repo: repo)
+      assert {:ok, _purged} = Purge.purge(:all, now: 5_000, repo: repo, spool: spool_of(repo))
       insert(repo, [event(1, 6_000, "typed a note")])
 
-      assert {:ok, %{memory_written: true}} = Summarizer.run_cycle(local_opts(repo))
+      assert {:ok, %{memory_written: true}} = run_cycle(local_opts(repo))
       assert {:ok, 1} = Repo.computer_history_count_memories(server: repo)
     end
 
@@ -1387,17 +1392,19 @@ defmodule FermixCore.ComputerHistory.SummarizerTest do
     test "a purge issued before the read does not void a sitting that spans it", %{repo: repo} do
       enable(summarizer: :local)
       insert(repo, [event(1, 1_000, "typed a note"), event(2, 1_500, "typed more")])
-      assert {:ok, %{events: 0}} = Purge.purge({:last, 1_000}, now: 3_000, repo: repo)
+
+      assert {:ok, %{events: 0}} =
+               Purge.purge({:last, 1_000}, now: 3_000, repo: repo, spool: spool_of(repo))
+
       insert(repo, [event(3, 3_500, "typed after the purge")])
 
-      assert {:ok, %{memory_written: true, events: 3}} = Summarizer.run_cycle(local_opts(repo))
+      assert {:ok, %{memory_written: true, events: 3}} = run_cycle(local_opts(repo))
       assert %{provenance_from_ts: 1_000, provenance_to_ts: 3_500} = stored_memory(repo)
     end
 
-    # The mark is taken before the batch read, so a purge landing right after the
-    # read counts as issued after it and refuses the note. A mark taken after the
-    # read would already count that purge as seen, and write a note built from
-    # erased rows.
+    # A purge landing right after the sitting was read reaches the home before its
+    # note does: the home refuses the note, this machine applies the purge, and the
+    # erased rows are never read again (M97 §8.5).
     test "a purge landing right after the batch read refuses the note", %{repo: repo} do
       enable(summarizer: :local)
       insert(repo, [event(1, 1_000, "typed a note")])
@@ -1405,10 +1412,10 @@ defmodule FermixCore.ComputerHistory.SummarizerTest do
       proxy =
         start_supervised!(
           {PurgeAfterRead,
-           repo: repo, read: :computer_history_events_after_id, window: {0, 5_000}}
+           repo: repo, spool: spool_of(repo), read: :events_after_id, window: {0, 5_000}}
         )
 
-      assert {:ok, %{memory_written: false}} = Summarizer.run_cycle(local_opts(proxy))
+      assert {:ok, %{memory_written: false}} = run_cycle(local_opts(repo, spool: proxy))
       assert {:ok, 0} = Repo.computer_history_count_memories(server: repo)
       assert {:ok, 1} = Repo.computer_history_purge_mark(server: repo)
     end
@@ -1418,7 +1425,7 @@ defmodule FermixCore.ComputerHistory.SummarizerTest do
       insert(repo, [event(1, 1_000, "typed a note")])
       Process.put(:ch_purge, {repo, 5_000, 6_000})
 
-      assert {:ok, %{memory_written: true}} = Summarizer.run_cycle(local_opts(repo))
+      assert {:ok, %{memory_written: true}} = run_cycle(local_opts(repo))
       assert {:ok, 1} = Repo.computer_history_count_memories(server: repo)
     end
   end
@@ -1451,7 +1458,7 @@ defmodule FermixCore.ComputerHistory.SummarizerTest do
     end
 
     defp state(repo) do
-      {:ok, state} = Repo.computer_history_fetch_state(server: repo)
+      {:ok, state} = Spool.state(server: spool_of(repo))
       state
     end
 
@@ -1460,7 +1467,7 @@ defmodule FermixCore.ComputerHistory.SummarizerTest do
       insert(repo, [at(1, 0, "the first sitting"), at(2, minutes(11), "the second sitting")])
 
       assert {:ok, %{sessions: 2, events: 2, memory_written: true}} =
-               Summarizer.run_cycle(session_opts(repo, 30))
+               run_cycle(session_opts(repo, 30))
 
       messages = Enum.map(ordered_calls(), &user_message/1)
       assert length(messages) == 2
@@ -1475,7 +1482,7 @@ defmodule FermixCore.ComputerHistory.SummarizerTest do
       insert(repo, [at(1, 0, "opened the plan"), at(2, minutes(9), "kept editing it")])
 
       assert {:ok, %{sessions: 1, events: 2, memory_written: true}} =
-               Summarizer.run_cycle(session_opts(repo, 30))
+               run_cycle(session_opts(repo, 30))
 
       assert [call] = calls()
       assert user_message(call) =~ "opened the plan"
@@ -1488,17 +1495,8 @@ defmodule FermixCore.ComputerHistory.SummarizerTest do
       enable(summarizer: :local)
 
       for kind <- Sessions.boundary_kinds() do
-        unique = System.unique_integer([:positive])
-        db_path = Path.join(System.tmp_dir!(), "fermix-ch-boundary-#{unique}.db")
-        repo_name = :"ch_boundary_repo_#{unique}"
-
-        start_supervised!({Repo, name: repo_name, enabled: true, database_path: db_path},
-          id: {:boundary, kind}
-        )
-
-        on_exit(fn ->
-          Enum.each([db_path, "#{db_path}-wal", "#{db_path}-shm"], &FermixTestSupport.SafeRm.rm/1)
-        end)
+        repo_name = :"ch_boundary_repo_#{System.unique_integer([:positive])}"
+        start_stores!(repo_name, {:boundary, kind})
 
         Process.delete(:ch_calls)
 
@@ -1511,7 +1509,7 @@ defmodule FermixCore.ComputerHistory.SummarizerTest do
         # Two minutes of idle: the trailing sitting is still open, so only the
         # sitting the boundary closed is summarized.
         assert {:ok, %{sessions: 1, memory_written: true}} =
-                 Summarizer.run_cycle(session_opts(repo_name, 3)),
+                 run_cycle(session_opts(repo_name, 3)),
                "#{kind} did not close the sitting before it"
 
         assert [call] = calls()
@@ -1533,7 +1531,7 @@ defmodule FermixCore.ComputerHistory.SummarizerTest do
       )
 
       assert {:ok, %{sessions: 2, events: 21, memory_written: true}} =
-               Summarizer.run_cycle(session_opts(repo, 200))
+               run_cycle(session_opts(repo, 200))
 
       messages = Enum.map(ordered_calls(), &user_message/1)
       # 0..90 minutes is the first sitting (19 events); 95 and 100 start the next.
@@ -1550,7 +1548,7 @@ defmodule FermixCore.ComputerHistory.SummarizerTest do
       insert(repo, [at(1, 0, "still typing"), at(2, minutes(1), "still typing more")])
 
       assert {:ok, %{sessions: 0, events: 0, memory_written: false}} =
-               Summarizer.run_cycle(session_opts(repo, 2))
+               run_cycle(session_opts(repo, 2))
 
       assert calls() == []
       # The cursor never advances past an open sitting.
@@ -1558,7 +1556,7 @@ defmodule FermixCore.ComputerHistory.SummarizerTest do
       assert state(repo).session_open_since_ts == @base
 
       assert {:ok, %{sessions: 1, events: 2, memory_written: true}} =
-               Summarizer.run_cycle(session_opts(repo, 20))
+               run_cycle(session_opts(repo, 20))
 
       assert state(repo).last_summarized_id == 2
       assert state(repo).session_open_since_ts == nil
@@ -1571,7 +1569,7 @@ defmodule FermixCore.ComputerHistory.SummarizerTest do
       insert(repo, [at(3, minutes(2), "edited the middle")])
 
       assert {:ok, %{sessions: 1, events: 3, memory_written: true}} =
-               Summarizer.run_cycle(session_opts(repo, 30))
+               run_cycle(session_opts(repo, 30))
 
       assert [call] = calls()
       input = user_message(call)
@@ -1596,7 +1594,7 @@ defmodule FermixCore.ComputerHistory.SummarizerTest do
       log =
         capture_log(fn ->
           assert {:ok, %{sessions: 1, events: 1, memory_written: true}} =
-                   Summarizer.run_cycle(session_opts(repo, 30, budget: 220))
+                   run_cycle(session_opts(repo, 30, budget: 220))
         end)
 
       assert log =~ "will be re-read"
@@ -1606,7 +1604,7 @@ defmodule FermixCore.ComputerHistory.SummarizerTest do
       assert length(calls()) == 1
 
       # The next cycle has room for both and summarizes what the cut left behind.
-      assert {:ok, %{sessions: 1, events: 2}} = Summarizer.run_cycle(session_opts(repo, 30))
+      assert {:ok, %{sessions: 1, events: 2}} = run_cycle(session_opts(repo, 30))
       assert state(repo).last_summarized_id == 2
       assert ordered_calls() |> List.last() |> user_message() =~ "the later half"
     end
@@ -1616,7 +1614,7 @@ defmodule FermixCore.ComputerHistory.SummarizerTest do
       insert(repo, [boundary(1, 0, "system.sleep"), boundary(2, minutes(1), "session.locked")])
 
       assert {:ok, %{sessions: 0, events: 0, memory_written: false}} =
-               Summarizer.run_cycle(session_opts(repo, 30))
+               run_cycle(session_opts(repo, 30))
 
       assert calls() == []
       assert state(repo).last_summarized_id == 2
@@ -1630,17 +1628,17 @@ defmodule FermixCore.ComputerHistory.SummarizerTest do
       insert(repo, [at(1, 0, "drafted the plan")])
 
       assert {:ok, %{sessions: 1, memory_written: true}} =
-               Summarizer.run_cycle(session_opts(repo, 30))
+               run_cycle(session_opts(repo, 30))
 
-      assert state(repo).last_status == "ok"
+      assert state(repo).last_status == "summarized"
 
       insert(repo, [boundary(2, minutes(40), "system.sleep")])
 
       assert {:ok, %{sessions: 0, empty_batches: 0, memory_written: false}} =
-               Summarizer.run_cycle(session_opts(repo, 60))
+               run_cycle(session_opts(repo, 60))
 
       assert state(repo).last_summarized_id == 2
-      assert state(repo).last_status == "ok"
+      assert state(repo).last_status == "summarized"
     end
   end
 
@@ -1664,18 +1662,13 @@ defmodule FermixCore.ComputerHistory.SummarizerTest do
         title_event(3, minutes(2), "Inbox — Mail")
       ])
 
-      log =
-        capture_log([level: :info], fn ->
-          assert {:ok, %{sessions: 1, empty_batches: 1, events: 3, memory_written: false}} =
-                   Summarizer.run_cycle(session_opts(repo, 30))
-        end)
+      assert {:ok, %{sessions: 1, empty_batches: 1, events: 3, memory_written: false}} =
+               run_cycle(session_opts(repo, 30))
 
       assert calls() == []
       assert {:ok, 0} = Repo.computer_history_count_memories(server: repo)
-      assert log =~ "computer_history summarizer session: no_signal"
-      assert log =~ "3 event(s)"
-      assert log =~ "0 field value(s)"
-      assert log =~ "1 distinct title(s)"
+      # Never sent: the home has no submission from this machine.
+      assert {:ok, []} = Repo.computer_history_home(:computer_rows, [], server: repo)
 
       # The window is recorded and the cursor moves on: no re-processing forever.
       assert state(repo).last_summarized_id == 3
@@ -1687,7 +1680,7 @@ defmodule FermixCore.ComputerHistory.SummarizerTest do
       insert(repo, [title_event(1, 0, "Inbox — Mail"), at(2, minutes(1), "drafted a reply")])
 
       assert {:ok, %{sessions: 1, memory_written: true}} =
-               Summarizer.run_cycle(session_opts(repo, 30))
+               run_cycle(session_opts(repo, 30))
 
       assert length(calls()) == 1
     end
@@ -1701,7 +1694,7 @@ defmodule FermixCore.ComputerHistory.SummarizerTest do
       ])
 
       assert {:ok, %{sessions: 1, memory_written: true}} =
-               Summarizer.run_cycle(session_opts(repo, 30))
+               run_cycle(session_opts(repo, 30))
 
       assert length(calls()) == 1
     end
@@ -1711,7 +1704,7 @@ defmodule FermixCore.ComputerHistory.SummarizerTest do
       insert(repo, [at(1, 0, "   "), title_event(2, minutes(1), "Inbox — Mail")])
 
       assert {:ok, %{sessions: 1, empty_batches: 1, memory_written: false}} =
-               Summarizer.run_cycle(session_opts(repo, 30))
+               run_cycle(session_opts(repo, 30))
 
       assert calls() == []
     end

@@ -59,8 +59,10 @@ defmodule FermixCore.Management.Settings.Channels do
   end
 
   defp carried?(opts) do
-    Keyword.get_lazy(opts, :imessage_carrier, fn -> IMessage.carrier(macos?: false) end) !=
-      :none
+    Keyword.get_lazy(opts, :imessage_carrier, fn -> IMessage.carrier(macos?: false) end) not in [
+      :none,
+      :mac_only
+    ]
   end
 
   # The one line under a row that needs more than its label. Rows whose label

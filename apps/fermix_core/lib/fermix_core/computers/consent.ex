@@ -87,7 +87,7 @@ defmodule FermixCore.Computers.Consent do
           Keyword.get(opts, :kind, :move),
           for(%{on: true} = line <- lines, do: words(line, mode)),
           machine
-        ),
+        ) <> history_clause(:history in keep, machine),
       warning: warning(:shell in keep and mode == :open, machine),
       lines: lines
     }
@@ -203,6 +203,16 @@ defmodule FermixCore.Computers.Consent do
     do:
       "Fermix on your server may use this #{machine} for: " <>
         Enum.join(words, ", ") <> ". Change this here."
+
+  # M97 §8.2: a sitting of history kept on now passes through the server, so
+  # the block restates what switching it on agrees to.
+  defp history_clause(false, _machine), do: ""
+
+  defp history_clause(true, machine),
+    do:
+      " Your computer history's raw record stays on this #{machine} for 48 hours; each " <>
+        "finished sitting is sent to your Fermix server, which has its summarizer summarize it " <>
+        "and keeps the summary."
 
   defp warning(true, machine),
     do:

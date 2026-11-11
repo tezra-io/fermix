@@ -648,7 +648,6 @@ defmodule FermixCore.OpenLoops.DueNoteTest do
       operative?: true,
       attended_operator?: true,
       granted: MapSet.new(),
-      summarizer_target: :local,
       chain: [],
       routes: [],
       dropped_hops: [],

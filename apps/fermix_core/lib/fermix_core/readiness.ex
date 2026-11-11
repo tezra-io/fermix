@@ -156,6 +156,7 @@ defmodule FermixCore.Readiness do
           invalid_auth_mode_action("provider:anthropic", "subscription"),
           imessage_helper_row(),
           imessage_carrier_row(:none),
+          imessage_carrier_row(:mac_only),
           imessage_carrier_row({:conflict, ["loft Mac", "studio Mac"]}),
           imessage_carrier_row({:away, "studio Mac"}),
           slack_socket_row()
@@ -468,9 +469,9 @@ defmodule FermixCore.Readiness do
   # iMessage (M54 §14) reads presence only: the saved section, then on a Mac
   # whether the helper is on disk, and anywhere else the Mac of the home that
   # carries Messages (M97 §6.4): none, more than one, or one that is away
-  # (advisory: the channel is away, not broken). Its probe spawns the helper,
-  # so it is read by Doctor and `imessage.permissions.get`, never on this hot
-  # path.
+  # (advisory: the channel is away, not broken), and on a build no Mac can
+  # carry it for, that it needs a Mac. Its probe spawns the helper, so it is
+  # read by Doctor and `imessage.permissions.get`, never on this hot path.
   defp imessage_failure(opts) do
     cond do
       not channel_enabled?(:imessage) ->
@@ -490,6 +491,7 @@ defmodule FermixCore.Readiness do
   defp carrier, do: IMessage.carrier(macos?: false)
 
   defp carrier_failure(:none), do: imessage_carrier_row(:none)
+  defp carrier_failure(:mac_only), do: imessage_carrier_row(:mac_only)
 
   defp carrier_failure({:conflict, computers}),
     do: imessage_carrier_row({:conflict, Enum.map(computers, & &1.name)})
@@ -501,6 +503,9 @@ defmodule FermixCore.Readiness do
 
   defp imessage_carrier_row(:none),
     do: imessage_row(IMessage.none_sentence(), "channel:imessage:carrier")
+
+  defp imessage_carrier_row(:mac_only),
+    do: imessage_row(IMessage.mac_only_sentence(), "channel:imessage:mac_only")
 
   defp imessage_carrier_row({:conflict, names}),
     do: imessage_row(IMessage.conflict_sentence(names), "channel:imessage:conflict")

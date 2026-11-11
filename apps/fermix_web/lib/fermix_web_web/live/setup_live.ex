@@ -3689,7 +3689,7 @@ defmodule FermixWebWeb.SetupLive do
   defp computer_history_recall_sentence do
     ComputerHistoryConfig.current()
     |> Keyword.put(:enabled, true)
-    |> then(&ComputerHistoryGate.chain_posture(config: &1))
+    |> then(&ComputerHistoryGate.chain_posture(config: &1, surfaces?: true))
     |> ComputerHistoryGate.chain_posture_sentence()
     |> then(&" #{&1}")
   end

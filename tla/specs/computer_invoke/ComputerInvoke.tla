@@ -34,8 +34,9 @@
 (*    and the mark a restart leaves on what a crash left started.         *)
 (*  - The browser's requests (Computers.Capabilities.Browser.run/4,       *)
 (*    Browser.HeldTurn): each runs in its server turn's held process,     *)
-(*    which the run only calls, so a run Admission ends leaves what that  *)
-(*    process took to go on (Held, INVOKE-1).                             *)
+(*    linked to the run that made it, so whatever ends the run ends the   *)
+(*    request there, and one whose run ended before the held process      *)
+(*    took it never starts (Held, HeldEndsWithRun; INVOKE-1, fixed).      *)
 (*                                                                         *)
 (* Not modelled:                                                           *)
 (*  - the bound (8 running, 32 waiting, busy past it), the relay's 512    *)
@@ -46,15 +47,19 @@
 (*    invoke_family_test.exs, two_engines_invoke_test.exs);               *)
 (*  - a capability's own refusals and failures (its switch, its origin    *)
 (*    rules, the sandbox): each is an answer like any other;              *)
-(*  - the computer's own deadline timer, which ends a run as timed_out as *)
-(*    a cancel ends it as cancelled, and a long-lived request (a deadline *)
-(*    of 0: screen.watch, imessage.watch), which holds a running slot and *)
-(*    is waited on until cancelled or a new session asks for it, so one   *)
-(*    whose run a restart of Admission ended while the session stayed up  *)
-(*    is answered by nothing (README, Not modelled);                      *)
-(*  - a caller that ends before its answer (Calls sends a cancel) and     *)
-(*    Computers.cancel/2, which no code calls yet: the cancel the         *)
-(*    deadline sends is the same step;                                    *)
+(*  - the computer's own deadline timer, which ends a run as timed_out    *)
+(*    as a cancel ends it as cancelled, and a long-lived request (a       *)
+(*    deadline of 0: screen.watch, imessage.watch), which holds a         *)
+(*    running slot and is waited on until its caller ends or an answer    *)
+(*    comes; one whose run a restart of Admission ended is answered by    *)
+(*    that restart (Stop);                                                *)
+(*  - a caller that ends before its answer: Calls sends the cancel,       *)
+(*    after the request the caller sent, and it is the step the           *)
+(*    deadline's cancel is (Computers.cancel/2 is gone: nothing needed    *)
+(*    it);                                                                *)
+(*  - the browser switch, and Browser.HeldTurnListener, which ends every  *)
+(*    held turn when the master or browser switch goes off: an idle turn  *)
+(*    holds no request here, and one at work ends as its run does;        *)
 (*  - an id asked twice: the server never repeats one (mint_id), and the  *)
 (*    computer answers one it still runs, waits on or holds as a status   *)
 (*    ask (known?/2, repeated/2). That is memory, not the journal: one    *)
@@ -82,8 +87,8 @@
 
 \* SOURCE: apps/fermix_core/lib/fermix_core/computers/invocation.ex @ b9c2a52f4883
 \* SOURCE: apps/fermix_core/lib/fermix_core/computers/calls.ex @ 8a46173d76cf
-\* SOURCE: apps/fermix_core/lib/fermix_core/computers/journal.ex#append_started,append_finished,lookup,interrupted,close_all,append,write_line,entries,entry @ 344561793d17
-\* SOURCE: apps/fermix_core/lib/fermix_core/computers.ex#call,cancel @ 15ac082efc1f
+\* SOURCE: apps/fermix_core/lib/fermix_core/computers/journal.ex#append_started,append_finished,lookup,interrupted,close_all,closed_entry,append,write_line,entries,entry @ 344561793d17
+\* SOURCE: apps/fermix_core/lib/fermix_core/computers.ex#call @ 15ac082efc1f
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/desktop/invoke.ex @ b71842df3295
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/desktop/invoke/admission.ex @ 740e1e827d2d
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/desktop/invoke_family.ex#init,handle_event,reconcile @ 8a7c3466672c
@@ -101,12 +106,10 @@ CONSTANTS
     Effects,            \* those that change something on the computer
     Held,               \* those of the browser: each runs in its server turn's
                         \* Browser.HeldTurn (Capabilities.Browser.run/4,
-                        \* capabilities/browser.ex:233-242; handle_call {:run,
-                        \* fun}, held_turn.ex:87), which the run only calls,
-                        \* so ending the run leaves what the held turn took to
-                        \* go on (INVOKE-1); {} is every other capability,
-                        \* whose work ends with its run (Admission.stop_task/2,
-                        \* admission.ex:597-605)
+                        \* capabilities/browser.ex:233-248; handle_call {:run,
+                        \* fun}, held_turn.ex:134), which the run calls; {} is
+                        \* every other capability, whose work runs in the run's
+                        \* own task and ends with it (Admission.stop_task/2)
     MaxTries,           \* the ids one call may use (2: asked once more)
     MaxDrops,           \* the times the session drops (a bound)
     \* Environment switches: what may happen.
@@ -146,10 +149,18 @@ CONSTANTS
                         \* (Admission.waited/3, admission.ex:439-444, from
                         \* next/1, :427, and uploaded/3, :480); FALSE starts
                         \* it as it was admitted
-    ServerDeadline      \* the caller waits at most its deadline and the
+    ServerDeadline,     \* the caller waits at most its deadline and the
                         \* link's allowance (Invocation.await/5,
                         \* invocation.ex:272-288; wait_left/3, :290-295;
                         \* gave_up/4, :367-378); FALSE waits for ever
+    HeldEndsWithRun     \* a held turn runs each request linked to the run
+                        \* that made it (HeldTurn.handle_call {:run, fun},
+                        \* held_turn.ex:134-144; link/1, :224), so whatever
+                        \* ends the run (stop_task/2's terminate_child, a
+                        \* restart of Desktop.Invoke's :one_for_all) ends the
+                        \* request, and a request whose run is gone is never
+                        \* started; FALSE: the run only calls the held turn,
+                        \* which goes on with what it took (INVOKE-1)
 
 ASSUME Effects \subseteq Calls /\ Held \subseteq Calls
 
@@ -249,7 +260,8 @@ Live == {i \in Ids : run[i] \in {"running", "acted"}}
 \* answered when it ends.
 Pending == Live \cup {i \in Ids : run[i] = "queued"}
 \* A browser run that has not acted yet: its request is with the held turn,
-\* which goes on if Admission ends the run (INVOKE-1).
+\* which goes on if Admission ends the run, unless the request ends with its
+\* run (HeldEndsWithRun; INVOKE-1).
 HeldRunning == {i \in Ids : run[i] = "running" /\ CallOf(i) \in Held}
 \* What still works on the computer: what Admission runs or waits on, and
 \* what a held turn goes on with.
@@ -478,16 +490,18 @@ Status(m) ==
     /\ UNCHANGED <<server_vars, up, drops, computer_vars, staleAdmitted, startedOff,
                    dropSeen, via>>
 
-\* invoke_cancel (cancel/2, :620-634): a run, or a request that waits, is
-\* stopped and answered cancelled (stop_running/3, :590; drop_waiting/3,
-\* :612), exactly once; one that already ended is answered as a status ask
-\* is. Stopping a run ends its task (stop_task/2, :597-605); a browser run's
-\* request goes on in its held turn (INVOKE-1).
+\* invoke_cancel (cancel/2, :641-655): a run, or a request that waits, is
+\* stopped and answered cancelled (stop_running/3, :611; drop_waiting/3),
+\* exactly once; one that already ended is answered as a status ask is.
+\* Stopping a run ends its task (stop_task/2, :618-626), and with it a
+\* browser run's request in its held turn (HeldEndsWithRun; without it the
+\* request goes on there, INVOKE-1).
 Cancel(m) ==
     /\ Take(m) /\ m.t = "cancel" /\ AfterItsOpen(m)
     /\ IF m.id \in Pending
           THEN /\ run' = [run EXCEPT ![m.id] = "ended"]
-               /\ heldWork' = heldWork \cup (HeldRunning \cap {m.id})
+               /\ heldWork' = IF HeldEndsWithRun THEN heldWork
+                              ELSE heldWork \cup (HeldRunning \cap {m.id})
                /\ Answer(m.id, "cancelled")
                /\ UNCHANGED saidNone
           ELSE /\ StatusAnswer(m.id)
@@ -503,15 +517,15 @@ SwitchOff ==
     /\ UNCHANGED <<server_vars, link_vars, run, held, journal, acted, seen, linkEpoch,
                    stopped, heldWork, hist_vars>>
 
-\* Admission hears (handle_cast :switches_changed, :154-158): what runs or
-\* waits ends as refused, stopped here (stopped/2, :687-692), each recorded
-\* and answered. A browser run's request goes on in its held turn
-\* (INVOKE-1).
+\* Admission hears (handle_cast :switches_changed, :171-175): what runs or
+\* waits ends as refused, stopped here (stopped/2, :708-714), each recorded
+\* and answered, and a browser run's request with its run
+\* (HeldEndsWithRun; without it the request goes on there, INVOKE-1).
 HearSwitch ==
     /\ stopOwed
     /\ stopOwed' = FALSE
     /\ run' = [i \in Ids |-> IF i \in Pending THEN "ended" ELSE run[i]]
-    /\ heldWork' = heldWork \cup HeldRunning
+    /\ heldWork' = IF HeldEndsWithRun THEN heldWork ELSE heldWork \cup HeldRunning
     /\ journal' = [i \in Ids |-> IF i \in Pending THEN "refused_stopped_here" ELSE journal[i]]
     /\ held' = [i \in Ids |-> IF i \in Pending THEN "refused_stopped_here" ELSE held[i]]
     /\ back' = IF up
@@ -532,26 +546,34 @@ Expire(id) ==
 \* Admission stops and starts again (Desktop.Invoke is :one_for_all,
 \* invoke.ex:102-112): its runs end with it, what it held, what waited and
 \* what waited in its mailbox are gone, and at start it closes what the
-\* crash left started as unknown, interrupted (init/1, :108; recover/1, :200;
-\* Journal.interrupted/2, journal.ex:175), and reads the switches anew. A
-\* held turn lives in the engine's browser tree (Browser.Supervisor), not in
-\* Desktop.Invoke: a restart of Admission leaves it going, a stop of the
-\* engine ends it too.
+\* crash left started as unknown, interrupted (init/1, :114; recover/1, :217;
+\* Journal.interrupted/2, journal.ex:176), reads the switches anew, and tells
+\* the server of each run it closed with the journal's receipt, once it
+\* stands again (handle_continue, :144-147; receipt_answer/1), where the
+\* session is up; the server asks after one that is not. A held turn lives
+\* in the engine's browser tree (Browser.Supervisor), not in Desktop.Invoke:
+\* its request ends with its run (HeldEndsWithRun); without that a restart
+\* of Admission leaves it going, and a stop of the engine ends it.
 Stop ==
     /\ ComputerCanStop /\ ~stopped
     /\ stopped' = TRUE
     /\ run' = [i \in Ids |-> IF i \in Pending THEN "none" ELSE run[i]]
-    /\ heldWork' \in {heldWork, heldWork \cup HeldRunning}
+    /\ heldWork' \in IF HeldEndsWithRun THEN {heldWork}
+                     ELSE {heldWork, heldWork \cup HeldRunning}
     /\ held' = [i \in Ids |-> "none"]
     /\ journal' = [i \in Ids |-> IF journal[i] = "started" THEN "unknown" ELSE journal[i]]
+    /\ back' = IF up
+                  THEN back \cup {[id |-> i, status |-> "unknown", rec |-> "receipt"] :
+                                    i \in {j \in Ids : journal[j] = "started"}}
+                  ELSE back
     /\ down' = {}
     /\ seen' = master /\ stopOwed' = FALSE
-    /\ UNCHANGED <<server_vars, up, back, drops, acted, master, linkEpoch, hist_vars>>
+    /\ UNCHANGED <<server_vars, up, drops, acted, master, linkEpoch, hist_vars>>
 
-\* The held turn does a request Admission no longer runs (INVOKE-1): the one
-\* it was running when the run was ended, or one waiting in its mailbox
-\* behind that, which it takes though its caller is gone (handle_call
-\* {:run, fun}, held_turn.ex:87; the caller's GenServer.call, :108).
+\* The held turn does a request Admission no longer runs, which only
+\* happens without HeldEndsWithRun (INVOKE-1): the one it was running when
+\* the run was ended, or one waiting in its mailbox behind that, which it
+\* would take though its caller is gone.
 ActHeld(id) ==
     /\ id \in heldWork
     /\ heldWork' = heldWork \ {id}

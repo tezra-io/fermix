@@ -3814,15 +3814,15 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
   # `Harness.ArtifactsTest`, where a dead supervisor name reproduces the CLI's
   # world for real.
   describe "computer_history/1" do
-    test "non-macOS host reports macOS-only" do
-      result = Checks.computer_history(macos?: false)
+    test "a system with no recorder says so" do
+      result = Checks.computer_history(recorder?: false)
       assert result.name == "computer history"
       assert result.status == :ok
-      assert result.detail =~ "macOS only"
+      assert result.detail =~ "no recorder on this system"
     end
 
     test "macOS + disabled config reports off" do
-      result = Checks.computer_history(macos?: true, config: [enabled: false])
+      result = Checks.computer_history(recorder?: true, config: [enabled: false])
       assert result.status == :ok
       assert result.detail =~ "off"
     end
@@ -3832,7 +3832,7 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
       # without it this case would read whatever provider config ran before it.
       result =
         Checks.computer_history(
-          macos?: true,
+          recorder?: true,
           config: [enabled: true, apps: ["com.apple.Safari"], summarizer: :local],
           routes: {:ok, [loopback_route()]}
         )
@@ -3848,7 +3848,7 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
     test "macOS + Tier-3 summarizer flags the remote egress" do
       result =
         Checks.computer_history(
-          macos?: true,
+          recorder?: true,
           config: [enabled: true, summarizer: :anthropic],
           routes: {:ok, [route(:anthropic)]}
         )
@@ -3861,7 +3861,7 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
     test "an enabled rail names the pinned chain and the failover it turns off" do
       result =
         Checks.computer_history(
-          macos?: true,
+          recorder?: true,
           config: [enabled: true, summarizer: :local, remote_summaries: [:openai]],
           routes: {:ok, [route(:openai), route(:anthropic)]}
         )
@@ -3874,7 +3874,7 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
     test "an ungranted primary is a WARN naming the grant that would surface it" do
       result =
         Checks.computer_history(
-          macos?: true,
+          recorder?: true,
           config: [enabled: true, summarizer: :local],
           routes: {:ok, [route(:anthropic)]}
         )
@@ -3887,7 +3887,7 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
     test "a chain that could not be built is reported, never raised" do
       result =
         Checks.computer_history(
-          macos?: true,
+          recorder?: true,
           config: [enabled: true, summarizer: :local],
           routes: {:error, :multiple_primary}
         )

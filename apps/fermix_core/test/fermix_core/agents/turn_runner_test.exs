@@ -2895,7 +2895,6 @@ defmodule FermixCore.Agents.TurnRunnerTest do
       operative?: operative?,
       attended_operator?: true,
       granted: MapSet.new(),
-      summarizer_target: :local,
       chain: local_routes(),
       routes: local_routes(),
       dropped_hops: [],

@@ -112,13 +112,6 @@ defmodule FermixCore.Home.Role do
        "comes back through the primary"},
     {FermixChannels.Voice.Supervisor,
      "routes realtime delegations, and a device runs no realtime session"},
-    {FermixCore.ComputerHistory.Summarizer.Scheduler,
-     "summarizes captured history with a provider"},
-    {FermixCore.ComputerHistory.Capturer,
-     "captures this screen's history into memory.db; a device's captures are never " <>
-       "summarized and a return discards them"},
-    {FermixCore.ComputerHistory.Retention,
-     "purges captured history from memory.db, which a device does not open"},
     {FermixCore.Memory.Repo,
      "opens memory.db; a device's database is a retired copy, and a return replaces it in " <>
        "place while the device engine runs"},

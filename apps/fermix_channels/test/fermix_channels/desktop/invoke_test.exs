@@ -500,9 +500,16 @@ defmodule FermixChannels.Desktop.InvokeTest do
 
       assert %{status: "unknown"} = journal(ctx, "inv-x")
 
+      # The restart tells the server itself, with the journal's receipt, so a
+      # caller with no session that ends is not left waiting; a status ask
+      # after it is answered the same.
+      {told, ~s({"receipt_only":true})} = answer("inv-x")
+      assert %{"status" => "unknown", "message" => "Fermix on this computer stopped" <> _} = told
+      assert %{"receipt" => %{"target" => "wait x"}} = told
+
       Invoke.handle(ctx.admission, "invoke_status", %{"id" => "inv-x"}, <<>>)
       {event, ~s({"receipt_only":true})} = answer("inv-x")
-      assert %{"status" => "unknown", "message" => "Fermix on this computer stopped" <> _} = event
+      assert event == told
     end
   end
 

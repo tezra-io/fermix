@@ -37,18 +37,19 @@ defmodule FermixCore.Management.HomeSummaryTest do
     [
       {"a home with nothing", facts([]), "off",
        "Keep Fermix running when this Mac sleeps. It moves to a server you own.", "own_server"},
-      {"a home that uses iMessage and meetings", facts(stays_here: [:imessage, :meetings]), "off",
-       "Keep Fermix running when this Mac sleeps. It moves to a server you own. iMessage and " <>
-         "meetings stop after the move.", "own_server"},
+      {"a home that uses meetings and StackChan", facts(stays_here: [:meetings, :accessories]),
+       "off",
+       "Keep Fermix running when this Mac sleeps. It moves to a server you own. Meetings and " <>
+         "StackChan stop after the move.", "own_server"},
       # M87 §07: the Mac's own voice stays with the Mac; a phone's calls ride its
       # session to wherever the home runs.
-      {"a home that uses all three", facts(stays_here: [:imessage, :voice, :meetings]), "off",
-       "Keep Fermix running when this Mac sleeps. It moves to a server you own. iMessage and " <>
-         "meetings stop after the move. This Mac's voice calls stop after the move; calls " <>
+      {"a home that uses all three", facts(stays_here: [:voice, :meetings, :accessories]), "off",
+       "Keep Fermix running when this Mac sleeps. It moves to a server you own. Meetings and " <>
+         "StackChan stop after the move. This Mac's voice calls stop after the move; calls " <>
          "from your phone carry on at your server when Talk to Fermix is on there and its " <>
          "key is in your server's secret store.", "own_server"},
-      {"a home that uses only iMessage", facts(stays_here: [:imessage]), "off",
-       "Keep Fermix running when this Mac sleeps. It moves to a server you own. iMessage " <>
+      {"a home that uses only StackChan", facts(stays_here: [:accessories]), "off",
+       "Keep Fermix running when this Mac sleeps. It moves to a server you own. StackChan " <>
          "stops after the move.", "own_server"},
       {"a Linux home with nothing", facts(host_os: :linux), "off",
        "Keep Fermix running when this computer sleeps. It moves to a server you own.",
@@ -1261,7 +1262,7 @@ defmodule FermixCore.Management.HomeSummaryTest do
       assert %{"id" => "move_now", "needs" => ["recovery_passphrase"]} = summary["action"]
 
       assert summary["action"]["confirm"] ==
-               "Move Fermix back to this Mac now? iMessage, voice calls and meetings run " <>
+               "Move Fermix back to this Mac now? Voice calls, meetings and StackChan run " <>
                  "here again. Your server stays until you delete it."
 
       assert [%{"id" => "cancel", "confirm" => nil, "label" => "Cancel"}] =
@@ -1271,7 +1272,7 @@ defmodule FermixCore.Management.HomeSummaryTest do
                "lines"
              ]
 
-      assert %{"label" => "Runs here again", "value" => "iMessage, voice calls and meetings"} in summary[
+      assert %{"label" => "Runs here again", "value" => "Voice calls, meetings and StackChan"} in summary[
                "detail"
              ]["lines"]
 
@@ -1297,7 +1298,7 @@ defmodule FermixCore.Management.HomeSummaryTest do
       telegram = HomeSummary.summary(returning(back("enrolled"), return_costs: [:telegram]))
 
       assert telegram["action"]["confirm"] ==
-               "Move Fermix back to this Mac now? iMessage, voice calls and meetings run " <>
+               "Move Fermix back to this Mac now? Voice calls, meetings and StackChan run " <>
                  "here again. Messages sent to Telegram while it moves wait until it is done. " <>
                  "Your server stays until you delete it."
 
@@ -1585,13 +1586,13 @@ defmodule FermixCore.Management.HomeSummaryTest do
     end
 
     test "off watches nothing: no deadline, and the key says off" do
-      for facts <- [facts([]), facts(stays_here: [:imessage]), facts(host_os: :linux)] do
+      for facts <- [facts([]), facts(stays_here: [:accessories]), facts(host_os: :linux)] do
         assert %{off: true, next_change_ms: nil} = HomeSummary.watch(facts)
       end
 
       # The line naming what stops after the move is read when the pane
       # opens, never told: an app forgets Always On while it is off.
-      assert HomeSummary.watch(facts(stays_here: [:imessage, :voice])).key ==
+      assert HomeSummary.watch(facts(stays_here: [:accessories, :voice])).key ==
                HomeSummary.watch(facts([])).key
 
       refute HomeSummary.watch(ready_facts([])).off
@@ -1952,7 +1953,7 @@ defmodule FermixCore.Management.HomeSummaryTest do
         returning: state,
         return: if(record?, do: record),
         primary_home: home,
-        stays_here: [:imessage, :voice, :meetings]
+        stays_here: [:voice, :meetings, :accessories]
       ] ++ overrides
     )
   end

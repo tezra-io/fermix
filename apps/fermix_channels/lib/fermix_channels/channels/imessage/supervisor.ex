@@ -1,9 +1,10 @@
 defmodule FermixChannels.Channels.IMessage.Supervisor do
   @moduledoc """
-  The iMessage transport (MILESTONE_54 §5): `IMessage.Port`, which owns the
-  Fermix Messages helper, then `IMessage.Listener`, which subscribes through it.
-  `:rest_for_one`, so a Port crash restarts the Listener with it, while a
-  Listener crash leaves the helper running.
+  The iMessage transport (MILESTONE_54 §5): a `Task.Supervisor` for what the
+  Listener sends on its own (a notice to the owner), `IMessage.Port`, which
+  owns the Fermix Messages helper, then `IMessage.Listener`, which subscribes
+  through it. `:rest_for_one`, so a Port crash restarts the Listener with it,
+  while a Listener crash leaves the helper running.
 
   Off a Mac (M97 §6.4) the helper is the Mac of the home that carries
   Messages: `IMessage.ComputerHelper` takes the Port's place, the Listener
@@ -30,13 +31,14 @@ defmodule FermixChannels.Channels.IMessage.Supervisor do
 
   @installer FermixCore.IMessage.HelperInstaller
   @home_dir FermixCore.IMessage.Home
+  @tasks FermixChannels.Channels.IMessage.Tasks
   @port_options [:backoff_initial_ms, :backoff_max_ms, :init_timeout_ms, :max_outstanding]
   @computer_options [:computers, :call_opts, :poll_ms, :retry_ms]
   @listener_options [:agent, :agent_server, :probe_retry_ms, :handoff_retry_ms, :loop_pause_ms]
 
   @doc """
-  Starts the transport. Options: `:name`, `:port_name`, `:listener_name`;
-  `:executable` or `:installer`; `:home` or `:home_dir`; `:recipients`
+  Starts the transport. Options: `:name`, `:port_name`, `:listener_name`,
+  `:tasks_name`; `:executable` or `:installer`; `:home` or `:home_dir`; `:recipients`
   (default: `IMessage.recipients_from_config/0`); and the Port's and Listener's own tuning
   options, passed through.
   """
@@ -64,6 +66,7 @@ defmodule FermixChannels.Channels.IMessage.Supervisor do
   @impl Supervisor
   def init(opts) do
     {helper, helper_spec} = helper_spec(opts)
+    tasks = Keyword.get(opts, :tasks_name, @tasks)
 
     listener_opts =
       [
@@ -71,10 +74,14 @@ defmodule FermixChannels.Channels.IMessage.Supervisor do
         helper: helper,
         server: Keyword.fetch!(elem(helper_spec, 1), :name),
         home: opts[:home],
-        recipients: opts[:recipients]
+        recipients: opts[:recipients],
+        tasks: tasks
       ] ++ Keyword.take(opts, @listener_options)
 
-    Supervisor.init([helper_spec, {Listener, listener_opts}], strategy: :rest_for_one)
+    Supervisor.init(
+      [{Task.Supervisor, name: tasks}, helper_spec, {Listener, listener_opts}],
+      strategy: :rest_for_one
+    )
   end
 
   # This Mac's helper, or the Mac of the home that carries Messages.

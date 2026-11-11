@@ -33,6 +33,7 @@ defmodule FermixCore.ComputerHistory.Summarizer.Rollup do
   require Logger
 
   alias FermixCore.ComputerHistory.Config
+  alias FermixCore.ComputerHistory.Spool
   alias FermixCore.ComputerHistory.Summarizer
   alias FermixCore.Memory.Repo
 
@@ -45,7 +46,7 @@ defmodule FermixCore.ComputerHistory.Summarizer.Rollup do
   @note_artifacts 3
   @subject_max_chars 120
   @max_artifacts 12
-  # The verbatim guard's source side: the newest spool text still present.
+  # The verbatim guard's source side: the newest raw text this machine still holds.
   @guard_event_limit 2_000
   # Bound on the prior-citation lookup: at most 8 threads, so this is generous.
   @max_prior_notes 200
@@ -145,14 +146,19 @@ defmodule FermixCore.ComputerHistory.Summarizer.Rollup do
     do: {:route_down, reason}
 
   defp write(repo, opts, content, notes, previous, scope, now_ms) do
-    with {:ok, texts} <-
-           Repo.computer_history_recent_event_texts(@guard_event_limit, server: repo),
+    with {:ok, texts} <- guard_texts(Keyword.get(opts, :spool)),
          {:ok, prior_notes} <- prior_notes(repo, notes, previous) do
       content
       |> build_threads(notes, prior_notes, texts, opts, now_ms)
       |> persist(repo, previous, now_ms, scope)
     end
   end
+
+  # The guard's source side (M97 §8.1): the newest raw text this machine's own
+  # store still holds. A home that records nothing holds none, and the notes the
+  # roll-up reads were each guarded against their own sitting's text when made.
+  defp guard_texts(nil), do: {:ok, []}
+  defp guard_texts(spool), do: Spool.recent_texts(@guard_event_limit, server: spool)
 
   # The notes the current threads already cite, fetched BY ID from the store: a
   # thread may be re-emitted on the strength of them, and fetching (rather than

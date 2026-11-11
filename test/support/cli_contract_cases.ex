@@ -255,7 +255,7 @@ defmodule FermixTestSupport.CliContractCases do
 
   # `fermix home status`: a primary at epoch 4 whose last snapshot S3 stored,
   # with nothing of Always On set up yet, so its summary is the first screen;
-  # it uses iMessage, voice calls and meetings, which that screen names.
+  # it uses voice calls, meetings and StackChan, which that screen names.
   defp home_status do
     Home.picture(%{
       role: :primary,
@@ -285,7 +285,7 @@ defmodule FermixTestSupport.CliContractCases do
       primary_home: nil,
       primary_too_old: false,
       copies_bytes: nil,
-      stays_here: [:imessage, :voice, :meetings],
+      stays_here: [:voice, :meetings, :accessories],
       return_costs: [],
       zone: "Etc/UTC",
       return: nil,

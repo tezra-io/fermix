@@ -23,6 +23,14 @@ defmodule FermixCore.Management.Settings.Tools do
   alias FermixCore.Tools.PlaceSearch.Config, as: PlaceConfig
   alias FermixCore.Tools.WebSearch
 
+  # What switching history on agrees to (M97 §8.2), where it is switched on: the
+  # raw record stays on this computer, and each finished sitting goes to the
+  # home to be summarized there, whether the home is this Mac or a server.
+  @history_consent "Fermix records what you do in the apps you choose on this computer. " <>
+                     "The raw record stays here and is deleted after 48 hours. Each " <>
+                     "finished sitting goes to your Fermix home, on this computer or your " <>
+                     "Fermix server, which has its summarizer summarize it and keeps the " <>
+                     "summary. Summaries from all your computers can be recalled in chat."
   @sections [
     %{id: "computer_use", pane: "computer", title: "Computer use"},
     %{id: "computer_history", pane: "computer", title: "Computer history"},
@@ -130,6 +138,7 @@ defmodule FermixCore.Management.Settings.Tools do
 
     [
       Row.new("computer_history_enabled", :toggle, "Computer history",
+        footer: @history_consent,
         value: Source.boolean(block, :enabled, false),
         restart: restart
       ),

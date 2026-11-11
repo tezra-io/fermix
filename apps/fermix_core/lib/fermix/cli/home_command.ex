@@ -64,7 +64,7 @@ defmodule Fermix.CLI.HomeCommand do
   archives), `:terminal` (the `Fermix.CLI.SecretInput` terminal), `:hello`
   (the daemon probe), `:now` (a 0-arity clock for the moved marker), and the
   host facts `FermixCore.Home.Archive.restore/4` takes (`:host`,
-  `:keyring_usable?`, `:now_ms`).
+  `:keyring_usable?`).
   """
   @spec run([String.t()], keyword()) :: non_neg_integer()
   def run(argv, deps) when is_list(argv) and is_list(deps) do
@@ -179,7 +179,7 @@ defmodule Fermix.CLI.HomeCommand do
   # with the recovery key its passphrase and the header's salt derive; anything
   # else is an archive, as it always was.
   defp restore(file, root, opts, deps) do
-    restore_opts = Keyword.take(deps, [:host, :keyring_usable?, :now_ms])
+    restore_opts = Keyword.take(deps, [:host, :keyring_usable?])
     kind = if Format.snapshot?(file), do: :snapshot, else: :archive
 
     with {:ok, passphrase} <- passphrase(opts, deps, kind),
@@ -213,7 +213,6 @@ defmodule Fermix.CLI.HomeCommand do
     print_left_out(restored.device_settings_dropped)
 
     print_keyring(restored.keyring_secrets, "The archived home kept", "on this host")
-    print_screen_history(restored.screen_history_removed)
     print_reinstall(restored)
   end
 
@@ -231,15 +230,6 @@ defmodule Fermix.CLI.HomeCommand do
     IO.puts(
       "Kept as they were; review them, they hold paths outside the old home: " <>
         Enum.join(keys, ", ") <> "."
-    )
-  end
-
-  defp print_screen_history(0), do: :ok
-
-  defp print_screen_history(rows) do
-    IO.puts(
-      "Removed #{count(rows, "screen-history row")}: screen history stays on the machine " <>
-        "it describes."
     )
   end
 
@@ -411,14 +401,6 @@ defmodule Fermix.CLI.HomeCommand do
     "The archive was written to #{path}, but this home was not marked moved " <>
       "(#{inspect(reason)}). Run fermix home mark-moved --to TEXT before it runs again."
   end
-
-  defp sentence({:screen_history_remaining, rows}, _root) do
-    "The archive's screen history holds #{rows} rows stamped after this host's clock, so it " <>
-      "was not cleared. Check this host's clock. Nothing was written."
-  end
-
-  defp sentence({:screen_history, reason}, _root),
-    do: "Screen history could not be cleared from the restored database (#{inspect(reason)})."
 
   defp sentence({:plugin_lockfile, reason}, _root) do
     "The archive's plugin lockfile could not be read (#{inspect(reason)}). Nothing was written."

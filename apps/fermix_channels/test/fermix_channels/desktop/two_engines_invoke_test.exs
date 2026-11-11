@@ -7,9 +7,9 @@ defmodule FermixChannels.Desktop.TwoEnginesInvokeTest do
   use ExUnit.Case, async: false
 
   alias FermixChannels.Test.TwoEngines
+  alias FermixChannels.Test.TwoEngines.Hold
   alias FermixChannels.Test.TwoEngines.Touch
   alias FermixChannels.Test.TwoEngines.Wait
-  alias FermixCore.Computers
   alias FermixCore.Computers.Capabilities.System, as: SystemCapability
   alias FermixCore.Computers.Journal
   alias FermixCore.Computers.Outcome
@@ -52,8 +52,8 @@ defmodule FermixChannels.Desktop.TwoEnginesInvokeTest do
     {_run, nil} = TwoEngines.running("plan.txt")
 
     ExUnit.CaptureLog.capture_log(fn ->
-      crash_admission!(e)
       :ok = TwoEngines.drop_session!(e)
+      crash_admission!(e)
       :ok = TwoEngines.reconnect!(e)
     end)
 
@@ -74,8 +74,8 @@ defmodule FermixChannels.Desktop.TwoEnginesInvokeTest do
     {_run, nil} = TwoEngines.running("look")
 
     ExUnit.CaptureLog.capture_log(fn ->
-      crash_admission!(e)
       :ok = TwoEngines.drop_session!(e)
+      crash_admission!(e)
       :ok = TwoEngines.reconnect!(e)
     end)
 
@@ -89,17 +89,49 @@ defmodule FermixChannels.Desktop.TwoEnginesInvokeTest do
     refute first.id == second
   end
 
-  test "a cancel from the server stops the run and is its one answer", %{engines: e} do
+  # The computer's invocations restart while its session stays up: no
+  # session ends, so no caller would ask. The computer tells the server of
+  # each run the restart ended, and a long-lived read, which has no
+  # deadline (a Messages or screen watch), is asked again at once.
+  test "a restart under a live session is told to the server, which asks a watch again",
+       %{engines: e} do
+    task = TwoEngines.call(e, Hold, "hold", %{"name" => "watch"}, deadline_ms: 0)
+    {_run, nil} = TwoEngines.running("watch")
+
+    ExUnit.CaptureLog.capture_log(fn -> crash_admission!(e) end)
+
+    {again, nil} = TwoEngines.running("watch")
+    TwoEngines.finish(again, {:ok, %{"seen" => 2}, nil})
+
+    assert {:ok, %Outcome{result: %{"seen" => 2}, invocation: second}} = Task.await(task, 15_000)
+    assert {:ok, %{entries: [newest, first]}} = Journal.list(Journal.dir(e.root))
+    assert newest.id == second and newest.status == "ok"
+    assert first.status == "unknown"
+  end
+
+  test "an effect a restart under a live session ended is said not known, at once",
+       %{engines: e} do
+    task = TwoEngines.call(e, Touch, "touch", %{"name" => "notes.txt"}, deadline_ms: 600_000)
+    {_run, nil} = TwoEngines.running("notes.txt")
+
+    ExUnit.CaptureLog.capture_log(fn -> crash_admission!(e) end)
+
+    assert {:error, %Outcome{status: :unknown}} = Task.await(task, 15_000)
+    refute_received {:running, "notes.txt", _pid, _part}
+  end
+
+  # A caller that ends is the server's one way to stop what it asked: its
+  # waiter cancels the request on the computer, which only ever follows the
+  # request, since the caller sent that before it ended.
+  test "a caller that ends has its run stopped on the computer", %{engines: e} do
     task = TwoEngines.call(e, Wait, "wait", %{"name" => "stop me"})
     {run, nil} = TwoEngines.running("stop me")
     ref = Process.monitor(run)
-    id = TwoEngines.outstanding!(e)
 
-    assert :ok = Computers.cancel(id, calls: e.calls)
+    _ended = Task.shutdown(task, :brutal_kill)
 
-    assert {:error, %Outcome{status: :cancelled}} = Task.await(task, 15_000)
     assert_receive {:DOWN, ^ref, :process, ^run, _reason}, 10_000
-    assert {:ok, %{entries: [%{status: "cancelled"}]}} = Journal.list(Journal.dir(e.root))
+    await_journaled(e.root, "cancelled")
   end
 
   # A file above 256 KiB rides the bulk lane while its request and answer
@@ -132,12 +164,34 @@ defmodule FermixChannels.Desktop.TwoEnginesInvokeTest do
 
   # Its Admission dies under a run, as a crash would: the run goes with it,
   # and the restarted Admission journals it unknown (interrupted).
+  # The restart closes the run it ended as unknown; a read the server asks
+  # again at once may be journaled after it.
   defp crash_admission!(e) do
     admission = Process.whereis(e.admission)
     ref = Process.monitor(admission)
     Process.exit(admission, :kill)
     assert_receive {:DOWN, ^ref, :process, ^admission, :killed}
-    await_journaled(e.root, "unknown")
+    await_closed_unknown(e.root)
+  end
+
+  defp await_closed_unknown(root, attempts \\ 1_000) do
+    case Journal.list(Journal.dir(root)) do
+      {:ok, %{entries: entries}} when is_list(entries) and entries != [] ->
+        if Enum.any?(entries, &(&1.status == "unknown")),
+          do: :ok,
+          else: retry_closed_unknown(root, attempts)
+
+      _not_yet ->
+        retry_closed_unknown(root, attempts)
+    end
+  end
+
+  defp retry_closed_unknown(_root, 0), do: flunk("the computer never journaled unknown")
+
+  defp retry_closed_unknown(root, attempts) do
+    # sleep: polls the computer's journal, which announces nothing
+    Process.sleep(10)
+    await_closed_unknown(root, attempts - 1)
   end
 
   defp await_journaled(root, status, attempts \\ 1_000) do

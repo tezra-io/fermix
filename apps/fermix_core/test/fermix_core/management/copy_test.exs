@@ -1310,7 +1310,7 @@ defmodule FermixCore.Management.CopyTest do
       days: 5,
       percent: 90,
       block: "This home is about 4 GiB; the move needs about 9 GiB free.",
-      stays_here: [:imessage, :voice, :meetings],
+      stays_here: [:voice, :meetings, :accessories],
       ports: [whatsapp: 4030, cues: 4032],
       carried: [:whatsapp, :cues],
       costs: [:coding_agents, :telegram],

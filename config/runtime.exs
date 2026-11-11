@@ -99,6 +99,22 @@ if service_run? and Code.ensure_loaded?(FermixCore.BuildInfo) and
   end
 end
 
+# --- a source checkout names its home (must precede the config reader) ------
+#
+# Every `mix` command that loads this file reads, migrates and then boots the
+# home it finds, and with no FERMIX_HOME that is the installed app's
+# `~/.fermix`, whose engine may be another release: a `mix run --no-start` in
+# a checkout once moved a live home's sandbox settings out of the config.toml
+# its engine reads. So in a source checkout (`:dev`) there is no default home;
+# a release and the test suite (which names its own) are not affected.
+if Code.ensure_loaded?(FermixCore.Setup.ConfigStore) and
+     function_exported?(FermixCore.Setup.ConfigStore, :source_home, 2) do
+  case FermixCore.Setup.ConfigStore.source_home(config_env(), System.get_env("FERMIX_HOME")) do
+    :ok -> :ok
+    {:error, sentence} -> raise "fermix: " <> sentence
+  end
+end
+
 # config/runtime.exs is executed for all environments, including
 # during releases. It is executed after compilation and before the
 # system starts, so it is typically used to load production configuration

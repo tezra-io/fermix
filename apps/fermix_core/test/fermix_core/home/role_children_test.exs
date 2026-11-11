@@ -92,13 +92,18 @@ defmodule FermixCore.Home.RoleChildrenTest do
 
   # A device's database is a retired copy, which a return replaces in place
   # while the device engine runs (Always On's move back): a device opens it
-  # never, so nothing it starts captures into it, purges it, migrates it or
-  # fills in its timeline.
-  test "a device opens no database: no repo, no template pass, no screen capture or purge" do
+  # never, so nothing it starts migrates it or fills in its timeline. Computer
+  # history records into the machine's own store on every engine (M97 §8.1,
+  # D9), so its recorder, retention and scheduler run on a device too, with no
+  # home store: a computer keeps no notes and rolls nothing up.
+  test "a device opens no database, and records history into its own store" do
     database = [
       FermixCore.Memory.Repo,
       FermixCore.Prompt.TemplateReconciler,
-      FermixCore.Companion.OriginBackfill,
+      FermixCore.Companion.OriginBackfill
+    ]
+
+    history = [
       FermixCore.ComputerHistory.Capturer,
       FermixCore.ComputerHistory.Retention,
       FermixCore.ComputerHistory.Summarizer.Scheduler
@@ -107,18 +112,26 @@ defmodule FermixCore.Home.RoleChildrenTest do
     assert Role.children(database, :primary) == database
     assert Role.children(database, :device) == []
     refute Enum.any?(modules(tree(:device)), &(&1 in database))
+    assert Role.children(history, :device) == history
 
-    assert ComputerHistoryController.default_children(:device) == []
+    names = &Enum.map(ComputerHistoryController.default_children(&1), fn child -> child.name end)
+    assert names.(:device) == history -- [FermixCore.ComputerHistory.Retention]
+    assert names.(:primary) == history -- [FermixCore.ComputerHistory.Retention]
 
-    assert Enum.map(ComputerHistoryController.default_children(:primary), & &1.name) == [
-             FermixCore.ComputerHistory.Capturer,
-             FermixCore.ComputerHistory.Summarizer.Scheduler
-           ]
+    [_capturer, %{spec: {_scheduler, device_opts}}] =
+      ComputerHistoryController.default_children(:device)
 
-    assert history_children(:device) == [DynamicSupervisor, ComputerHistoryController]
+    assert Keyword.fetch!(device_opts, :repo) == nil
 
-    assert history_children(:primary) ==
-             [DynamicSupervisor, ComputerHistoryController, FermixCore.ComputerHistory.Retention]
+    expected = [
+      FermixCore.ComputerHistory.Spool,
+      DynamicSupervisor,
+      ComputerHistoryController,
+      FermixCore.ComputerHistory.Retention
+    ]
+
+    assert history_children(:device) == expected
+    assert history_children(:primary) == expected
   end
 
   defp history_children(role) do

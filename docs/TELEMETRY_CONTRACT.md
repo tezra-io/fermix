@@ -1406,17 +1406,41 @@ exporter places each under its turn's or job run's trace as a point span
 
 ## Computer-history summarizer (a headless run with no bookends)
 
-The summarizer is **one bounded provider call per cycle**, not an agent loop:
-it mints `session_id = "computer_history_summarize:<unix_ms>"` with **no**
+The summarizer is **one bounded provider call per sitting**, not an agent loop,
+made on the home for a sitting a computer sent (`ComputerHistory.Submission`)
+or on a computer whose summarizer is `local` (`ComputerHistory.Sittings`): it
+mints `session_id = "computer_history_summarize:<unix_ms>"` with **no**
 `parent_session` and emits **no** lifecycle bookends — its provider span (via
 the standard provider emitter, `agent: "computer_history_summarizer"`) is the
 whole run. The Opik exporter keys the run kind off the id prefix
 (`infer_kind("computer_history_summarize:" <> _) → :computer_history_summary`)
 and the root closes by TTL sweep; keep the prefix and the exporter clause in
-lockstep if either changes. Event **content** rides the summarizer's own
-consent gate (`Gate.allow?({:summarizer, route})`) before it ever reaches the
-provider emitter, so the content-capture switch below is the second gate, not
-the first.
+lockstep if either changes. The route is checked by
+`Gate.summarizer_permitted?/2` before the call.
+
+**Its content is never captured (M97 D10).** The call's input is the owner's raw
+activity, and a trace file or an Opik export holding it would be a second raw
+store, on a server most of all. `Providers.Telemetry.emit_call/3` therefore
+drops `:input`, `:output` and `:tool_calls` for every agent in
+`Providers.Telemetry.content_withheld/0` (this one), whatever
+`capture_content` says, and sets `content_withheld: true` instead; the call
+keeps its provider, model, tokens, status and timing. The rule keys on the
+agent the adapter puts in the call's metadata, so it holds for every adapter;
+`providers/telemetry_test.exs` and the two-engines history test pin it. The
+daily roll-up (`agent: "computer_history_rollup"`) reads notes, never raw
+activity, and keeps the content switch.
+
+**A sitting sent from a computer is an invocation of a home service.** On the
+home, `history.submit` runs as `Desktop.InvokeFamily` runs any home service:
+an `inv_<id>` run with `[:fermix, :computer_invocation, :start | :complete |
+:error]` bookends (capability `history`, op `submit`), never its arguments.
+The home telling a computer of a purge or pause from chat
+(`ComputerHistory.Delivery`) is an ordinary server invocation of
+`history.apply`, its turn named `computer_history_delivery:<unix_ms>`; that id
+emits nothing on the home and rides on the computer only as its `inv_` run's
+`parent_session` correlation, so it is not a run kind and the exporter needs no
+clause for it.
+
 ## Management socket runs (Doctor sessions and management jobs)
 
 The management wire has two **run kinds** and no others. A Doctor session mints

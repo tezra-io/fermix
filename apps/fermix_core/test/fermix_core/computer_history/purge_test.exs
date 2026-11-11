@@ -4,28 +4,29 @@ defmodule FermixCore.ComputerHistory.PurgeTest do
 
   alias Exqlite.Sqlite3
   alias FermixCore.ComputerHistory.Purge
+  alias FermixCore.ComputerHistory.Spool
   alias FermixCore.Memory.Repo
 
   setup do
-    unique = System.unique_integer([:positive])
-    db_path = Path.join(System.tmp_dir!(), "fermix-ch-purge-#{unique}.db")
-    repo_name = :"ch_purge_repo_#{unique}"
+    dir = FermixTestSupport.SafeRm.make_tmp_dir!("ch-purge")
+    db_path = Path.join(dir, "memory.db")
+    spool_path = Path.join([dir, "device", "history.db"])
+    repo_name = :"ch_purge_repo_#{System.unique_integer([:positive])}"
 
     start_supervised!({Repo, name: repo_name, enabled: true, database_path: db_path})
+    spool = start_supervised!({Spool, name: nil, path: spool_path})
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf(dir) end)
 
-    on_exit(fn ->
-      Enum.each([db_path, "#{db_path}-wal", "#{db_path}-shm"], &FermixTestSupport.SafeRm.rm/1)
-    end)
-
-    %{repo: repo_name, db_path: db_path}
+    %{repo: repo_name, spool: spool, db_path: db_path, spool_path: spool_path}
   end
 
-  # The recorded purge intervals, read straight from the store: `[from, to, issued_at]`.
-  defp intervals(db_path) do
+  # The recorded intervals, read straight from a store: the home's
+  # `[from, to, issued_at, computer_id, kind]`, a machine's `[from, to, issued_at]`.
+  defp intervals(db_path, columns) do
     {:ok, conn} = Sqlite3.open(db_path, mode: :readonly)
 
     try do
-      sql = "SELECT from_ts, to_ts, issued_at FROM computer_history_purges ORDER BY id"
+      sql = "SELECT #{columns} FROM computer_history_purges ORDER BY id"
       {:ok, stmt} = Sqlite3.prepare(conn, sql)
       {:ok, rows} = Sqlite3.fetch_all(conn, stmt)
       :ok = Sqlite3.release(conn, stmt)
@@ -35,18 +36,29 @@ defmodule FermixCore.ComputerHistory.PurgeTest do
     end
   end
 
+  defp home_intervals(db_path),
+    do: intervals(db_path, "from_ts, to_ts, issued_at, computer_id, kind")
+
+  defp machine_intervals(path), do: intervals(path, "from_ts, to_ts, issued_at")
+
   defp event(seq, ts), do: %{boot_id: "b1", source_seq: seq, ts: ts, type: "app.activated"}
 
-  defp memory(from_ts, to_ts) do
-    %{
-      created_at: to_ts,
-      provenance_from_ts: from_ts,
-      provenance_to_ts: to_ts,
-      summary: "worked in an app",
-      model: "ollama",
-      event_count: 1
-    }
+  defp memory(from_ts, to_ts, extra \\ %{}) do
+    Map.merge(
+      %{
+        created_at: to_ts,
+        provenance_from_ts: from_ts,
+        provenance_to_ts: to_ts,
+        summary: "worked in an app",
+        model: "ollama",
+        event_count: 1
+      },
+      extra
+    )
   end
+
+  defp purge(window, now, ctx, opts \\ []),
+    do: Purge.purge(window, [now: now, repo: ctx.repo, spool: ctx.spool] ++ opts)
 
   describe "parse_window/1" do
     test "accepts minutes, hours, and all" do
@@ -64,49 +76,85 @@ defmodule FermixCore.ComputerHistory.PurgeTest do
   end
 
   describe "purge/2" do
-    test "removes in-window events + intersecting memories, keeps the rest, records the interval",
-         %{repo: repo, db_path: db_path} do
-      assert {:ok, 2} =
-               Repo.computer_history_insert_events([event(1, 1_000), event(2, 5_000)],
-                 server: repo
-               )
+    test "removes in-window events + intersecting notes, keeps the rest, records the interval",
+         %{repo: repo, spool: spool} = ctx do
+      assert {:ok, 2} = Spool.insert_events([event(1, 1_000), event(2, 5_000)], server: spool)
 
       {:ok, _} = Repo.computer_history_insert_memory(memory(900, 1_100), server: repo)
       {:ok, _} = Repo.computer_history_insert_memory(memory(4_000, 6_000), server: repo)
 
-      # Window [0, 2000]: catches the ts=1000 event and the [900,1100] memory.
-      assert {:ok, %{events: 1, memories: 1, from_ts: 0, to_ts: 2_000}} =
-               Purge.purge({:last, 2_000}, now: 2_000, repo: repo)
+      # Window [0, 2000]: catches the ts=1000 event and the [900,1100] note.
+      assert {:ok, %{events: 1, memories: 1, from_ts: 0, to_ts: 2_000, interval: id}} =
+               purge({:last, 2_000}, 2_000, ctx)
 
-      assert {:ok, 1} = Repo.computer_history_count_events(server: repo)
-      assert {:ok, 5_000} = Repo.computer_history_oldest_event_ts(server: repo)
+      assert is_integer(id)
+      assert {:ok, 1} = Spool.count_events(server: spool)
+      assert {:ok, 5_000} = Spool.oldest_event_ts(server: spool)
       assert {:ok, 1} = Repo.computer_history_count_memories(server: repo)
 
-      assert intervals(db_path) == [[0, 2_000, 2_000]]
+      # The home records it for every machine; this machine fences its own raw events.
+      assert home_intervals(ctx.db_path) == [[0, 2_000, 2_000, nil, "purge"]]
+      assert machine_intervals(ctx.spool_path) == [[0, 2_000, 2_000]]
+      assert {:ok, %{home_mark: ^id}} = Spool.link(server: spool)
     end
 
-    test "purge all clears everything", %{repo: repo} do
+    test "purge all clears everything", %{repo: repo, spool: spool} = ctx do
       assert {:ok, 3} =
-               Repo.computer_history_insert_events(
-                 [event(1, 1_000), event(2, 5_000), event(3, 9_000)],
-                 server: repo
+               Spool.insert_events([event(1, 1_000), event(2, 5_000), event(3, 9_000)],
+                 server: spool
                )
 
       {:ok, _} = Repo.computer_history_insert_memory(memory(1_000, 2_000), server: repo)
 
-      assert {:ok, %{events: 3, memories: 1}} = Purge.purge(:all, now: 10_000, repo: repo)
-      assert {:ok, 0} = Repo.computer_history_count_events(server: repo)
+      assert {:ok, %{events: 3, memories: 1}} = purge(:all, 10_000, ctx)
+      assert {:ok, 0} = Spool.count_events(server: spool)
       assert {:ok, 0} = Repo.computer_history_count_memories(server: repo)
     end
 
     # CH-5: `all` ends at now. A far-future ceiling would fence every later event
     # and refuse every later note for good.
     test "purge all records [0, now] and later capture is still stored",
-         %{repo: repo, db_path: db_path} do
-      assert {:ok, %{from_ts: 0, to_ts: 10_000}} = Purge.purge(:all, now: 10_000, repo: repo)
-      assert intervals(db_path) == [[0, 10_000, 10_000]]
+         %{spool: spool} = ctx do
+      assert {:ok, %{from_ts: 0, to_ts: 10_000}} = purge(:all, 10_000, ctx)
+      assert home_intervals(ctx.db_path) == [[0, 10_000, 10_000, nil, "purge"]]
+      assert machine_intervals(ctx.spool_path) == [[0, 10_000, 10_000]]
 
-      assert {:ok, 1} = Repo.computer_history_insert_events([event(1, 10_001)], server: repo)
+      assert {:ok, 1} = Spool.insert_events([event(1, 10_001)], server: spool)
+    end
+
+    # M97 §8.5: a purge of one computer's notes takes that computer's notes and
+    # every thread that reaches the window, never another machine's notes, and
+    # leaves this machine's own raw events alone.
+    test "a purge for one computer takes its notes and the threads, and no other machine's",
+         %{repo: repo, spool: spool} = ctx do
+      {:ok, 1} = Spool.insert_events([event(1, 1_000)], server: spool)
+
+      {:ok, _} =
+        Repo.computer_history_insert_memory(memory(900, 1_100, %{computer_id: "studio"}),
+          server: repo
+        )
+
+      {:ok, _} = Repo.computer_history_insert_memory(memory(900, 1_100), server: repo)
+
+      {:ok, _} =
+        Repo.computer_history_insert_memory(memory(900, 1_100, %{kind: "thread"}), server: repo)
+
+      assert {:ok, %{events: 0, memories: 2}} =
+               purge({:last, 2_000}, 2_000, ctx, computer: "studio")
+
+      assert {:ok, 1} = Repo.computer_history_count_memories(server: repo)
+      assert {:ok, 1} = Spool.count_events(server: spool)
+      assert home_intervals(ctx.db_path) == [[0, 2_000, 2_000, "studio", "purge"]]
+      assert machine_intervals(ctx.spool_path) == []
+    end
+
+    test "a home that keeps no machine store purges its notes alone", %{repo: repo} = ctx do
+      {:ok, _} = Repo.computer_history_insert_memory(memory(900, 1_100), server: repo)
+
+      assert {:ok, %{events: 0, memories: 1}} =
+               Purge.purge({:last, 2_000}, now: 2_000, repo: repo, spool: nil)
+
+      assert home_intervals(ctx.db_path) == [[0, 2_000, 2_000, nil, "purge"]]
     end
   end
 
@@ -114,27 +162,24 @@ defmodule FermixCore.ComputerHistory.PurgeTest do
   # committed (a batch in flight, or still buffered). The insert refuses it.
   describe "the spool fence" do
     test "a row stamped inside a purged window that lands after the purge stays out",
-         %{repo: repo} do
-      assert {:ok, %{events: 0}} = Purge.purge({:last, 2_000}, now: 2_000, repo: repo)
+         %{spool: spool} = ctx do
+      assert {:ok, %{events: 0}} = purge({:last, 2_000}, 2_000, ctx)
 
       # Both bounds are inside the window, as in the purge's own DELETE.
       late = [event(1, 1_500), event(2, 0), event(3, 2_000), event(4, 2_001)]
-      assert {:ok, 1} = Repo.computer_history_insert_events(late, server: repo)
+      assert {:ok, 1} = Spool.insert_events(late, server: spool)
 
-      assert {:ok, 1} = Repo.computer_history_count_events(server: repo)
-      assert {:ok, 2_001} = Repo.computer_history_oldest_event_ts(server: repo)
+      assert {:ok, 1} = Spool.count_events(server: spool)
+      assert {:ok, 2_001} = Spool.oldest_event_ts(server: spool)
     end
 
-    test "every recorded window fences, not only the latest", %{repo: repo} do
-      assert {:ok, _first} = Purge.purge({:last, 1_000}, now: 2_000, repo: repo)
-      assert {:ok, _second} = Purge.purge({:last, 1_000}, now: 9_000, repo: repo)
+    test "every recorded window fences, not only the latest", %{spool: spool} = ctx do
+      assert {:ok, _first} = purge({:last, 1_000}, 2_000, ctx)
+      assert {:ok, _second} = purge({:last, 1_000}, 9_000, ctx)
 
-      assert {:ok, 1} =
-               Repo.computer_history_insert_events([event(1, 1_500), event(2, 5_000)],
-                 server: repo
-               )
+      assert {:ok, 1} = Spool.insert_events([event(1, 1_500), event(2, 5_000)], server: spool)
 
-      assert {:ok, 5_000} = Repo.computer_history_oldest_event_ts(server: repo)
+      assert {:ok, 5_000} = Spool.oldest_event_ts(server: spool)
     end
   end
 end

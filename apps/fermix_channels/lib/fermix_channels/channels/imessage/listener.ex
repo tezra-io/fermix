@@ -88,10 +88,12 @@ defmodule FermixChannels.Channels.IMessage.Listener do
   # --- Public API ------------------------------------------------------------
 
   @doc """
-  Starts the listener. Options: `:home` and `:recipients` (required, an
-  `IMessage.recipients()`); `:helper` and `:server` (default `IMessage.Port`);
-  `:agent` and `:agent_server` (default `Gateway.Queue`); `:name`; and
-  `:probe_retry_ms`, `:handoff_retry_ms`, `:loop_pause_ms` (tests shrink these).
+  Starts the listener. Options: `:home`, `:recipients` (an
+  `IMessage.recipients()`) and `:tasks` (the channel's `Task.Supervisor`,
+  which runs what it tells the owner on its own) are required; `:helper` and
+  `:server` (default `IMessage.Port`); `:agent` and `:agent_server` (default
+  `Gateway.Queue`); `:name`; and `:probe_retry_ms`, `:handoff_retry_ms`,
+  `:loop_pause_ms` (tests shrink these).
   """
   @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(opts) when is_list(opts) do
@@ -128,6 +130,7 @@ defmodule FermixChannels.Channels.IMessage.Listener do
       server: Keyword.get(opts, :server, HelperPort),
       home: Keyword.fetch!(opts, :home),
       recipients: Keyword.fetch!(opts, :recipients),
+      tasks: Keyword.fetch!(opts, :tasks),
       # The recipients plus the posture the helper derived, set by `policy.get`
       # before every subscription; nothing is admitted while it is nil.
       policy: nil,
@@ -463,7 +466,10 @@ defmodule FermixChannels.Channels.IMessage.Listener do
     ]
 
     owner = state.recipients.owner
-    {:ok, _pid} = Task.start(fn -> tell_owner(owner, text, opts) end)
+
+    {:ok, _pid} =
+      Task.Supervisor.start_child(state.tasks, fn -> tell_owner(owner, text, opts) end)
+
     %{state | replay_skipped: skipped}
   end
 

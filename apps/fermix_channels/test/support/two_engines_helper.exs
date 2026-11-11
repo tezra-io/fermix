@@ -96,6 +96,38 @@ defmodule FermixChannels.Test.TwoEngines do
     def target("wait", %{"name" => name}), do: "wait #{name}"
   end
 
+  defmodule Hold do
+    @moduledoc "A long-lived read, asked with no deadline: it runs until the test finishes it."
+    @behaviour FermixCore.Computers.Capability
+
+    @impl true
+    def id, do: :hold
+    @impl true
+    def offer, do: :files
+    @impl true
+    def ops, do: ["hold"]
+    @impl true
+    def effect?(_op), do: false
+    @impl true
+    def long_lived?(_op), do: true
+    @impl true
+    def validate("hold", %{"name" => name}) when is_binary(name), do: :ok
+    def validate("hold", _args), do: {:error, "Hold needs a name."}
+    @impl true
+    def bounds(_op), do: %{result_bytes: 1_024, part_bytes: 0}
+    @impl true
+    def admit(_op, _args, _context), do: :ok
+
+    @impl true
+    def run("hold", %{"name" => name}, nil, context) do
+      Probe.tell(context, {:running, name, self(), nil})
+      Probe.await_finish({:failed, "The test never finished it."})
+    end
+
+    @impl true
+    def target("hold", %{"name" => name}), do: "hold #{name}"
+  end
+
   defmodule Touch do
     @moduledoc "An effect: it writes a file in the computer's home, then runs until finished."
     @behaviour FermixCore.Computers.Capability
@@ -132,7 +164,7 @@ defmodule FermixChannels.Test.TwoEngines do
   @doc "The test capabilities a computer started here offers, by name."
   @spec capabilities() :: %{String.t() => module()}
   def capabilities,
-    do: Map.merge(Invoke.capabilities(), %{"wait" => Wait, "touch" => Touch})
+    do: Map.merge(Invoke.capabilities(), %{"wait" => Wait, "hold" => Hold, "touch" => Touch})
 
   @doc """
   Starts the server and its computer, connected, the computer offering
@@ -146,6 +178,8 @@ defmodule FermixChannels.Test.TwoEngines do
   and `:browser` is the computer's browser (`Desktop.Invoke`'s option).
   `:facts` replaces facts of the computer its offers are worked out from
   (`Computers.Facts.read/1`'s options, over an Apple silicon Mac's).
+  `:history` is the server's computer-history service's options
+  (`ComputerHistory.Submission`'s: its store, summarizer and settings).
   """
   @spec start!(keyword()) :: map()
   def start!(opts \\ []) do
@@ -164,7 +198,9 @@ defmodule FermixChannels.Test.TwoEngines do
       DesktopRail.primary!(
         families: %{
           computer: {ComputerFamily, registry: names.registry},
-          invoke: {InvokeFamily, calls: names.calls, home: server_home}
+          invoke:
+            {InvokeFamily,
+             [calls: names.calls, home: server_home] ++ Keyword.take(opts, [:history])}
         }
       )
 
@@ -303,23 +339,6 @@ defmodule FermixChannels.Test.TwoEngines do
     computer = computer(engines)
     opts = call_opts(engines, more)
     Task.async(fn -> Computers.call(computer, module, op, args, turn(), opts) end)
-  end
-
-  @doc "The one invocation the server waits on from the computer, once it does."
-  @spec outstanding!(map(), non_neg_integer()) :: String.t()
-  def outstanding!(engines, attempts \\ 1_000) do
-    case Calls.outstanding(engines.calls, engines.device_id) do
-      [id] ->
-        id
-
-      _none when attempts == 0 ->
-        flunk("the server never waited on one invocation")
-
-      _none ->
-        # sleep: polls the waiters, which tell nobody when one registers
-        Process.sleep(10)
-        outstanding!(engines, attempts - 1)
-    end
   end
 
   @doc "A test capability's run, as it reports itself."

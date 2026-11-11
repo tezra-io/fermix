@@ -1,29 +1,38 @@
 defmodule FermixCore.ComputerHistory.PersistenceTest do
   @moduledoc """
-  MILESTONE_32 §7 — the three new tables round-trip on the shared single-writer
-  connection: idempotent spool ingest, the 48h sweep, and the summarizer
-  singleton state row. Plus §24.1: migration 28's kinds, threads, the FTS
-  companion and the two new state marks.
+  MILESTONE_32 §7; M97 §8.1 — the tables round-trip on each store's
+  single-writer connection: idempotent spool ingest, the 48h sweep, the cursor
+  and the pause in this machine's own store (`ComputerHistory.Spool`), and the
+  home's notes, reads, purges and roll-up marks in memory.db. Plus §24.1:
+  migration 28's kinds, threads, the FTS companion and the state marks.
   """
   use ExUnit.Case, async: true
 
   alias Exqlite.Sqlite3
+  alias FermixCore.ComputerHistory.Spool
   alias FermixCore.Memory.Repo
   alias FermixCore.Memory.Repo.ComputerHistorySql
   alias FermixCore.Memory.Repo.MobileSql
 
   setup do
-    unique = System.unique_integer([:positive])
-    db_path = Path.join(System.tmp_dir!(), "fermix-computer-history-#{unique}.db")
-    repo_name = :"computer_history_repo_#{unique}"
+    dir = FermixTestSupport.SafeRm.make_tmp_dir!("ch-persistence")
+    db_path = Path.join(dir, "memory.db")
+    spool_path = Path.join([dir, "device", "history.db"])
+    repo_name = :"computer_history_repo_#{System.unique_integer([:positive])}"
 
-    start_supervised!({Repo, name: repo_name, enabled: true, database_path: db_path})
+    start_supervised!(
+      {Repo,
+       name: repo_name,
+       enabled: true,
+       database_path: db_path,
+       history_spool_path: spool_path,
+       history_server?: false}
+    )
 
-    on_exit(fn ->
-      Enum.each([db_path, "#{db_path}-wal", "#{db_path}-shm"], &FermixTestSupport.SafeRm.rm/1)
-    end)
+    spool = start_supervised!({Spool, name: nil, path: spool_path})
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf(dir) end)
 
-    %{repo: repo_name, db_path: db_path}
+    %{repo: repo_name, spool: spool, db_path: db_path, spool_path: spool_path, dir: dir}
   end
 
   # Rows of `sql`, read on a second connection to the same file (WAL allows it).
@@ -40,44 +49,64 @@ defmodule FermixCore.ComputerHistory.PersistenceTest do
     end
   end
 
-  defp intervals(db_path),
+  defp home_intervals(db_path),
     do:
       raw_rows(
         db_path,
-        "SELECT from_ts, to_ts, issued_at FROM computer_history_purges ORDER BY id"
+        "SELECT from_ts, to_ts, issued_at, computer_id, kind FROM computer_history_purges " <>
+          "ORDER BY id"
       )
+
+  defp machine_intervals(path),
+    do:
+      raw_rows(path, "SELECT from_ts, to_ts, issued_at FROM computer_history_purges ORDER BY id")
+
+  # A store opened the way a boot opens it, carrying any raw spool into this
+  # test's own machine store, never the suite's home.
+  defp upgraded_opts(name, db_path, ctx) do
+    [
+      name: name,
+      enabled: true,
+      database_path: db_path,
+      history_spool_path: ctx.spool_path,
+      history_server?: false
+    ]
+  end
+
+  defp purge_notes(repo, from_ts, to_ts, issued_at, scope \\ :all),
+    do: Repo.computer_history_home(:purge_notes, [from_ts, to_ts, issued_at, scope], server: repo)
 
   defp event(boot_id, seq, ts, extra \\ %{}) do
     Map.merge(%{boot_id: boot_id, source_seq: seq, ts: ts, type: "app.activated"}, extra)
   end
 
   describe "spool events" do
-    test "insert a batch, then count and oldest reflect it", %{repo: repo} do
+    test "insert a batch, then count and oldest reflect it", %{spool: spool} do
       events = [event("b1", 1, 5_000), event("b1", 2, 3_000, %{bundle_id: "com.apple.Safari"})]
 
-      assert {:ok, 2} = Repo.computer_history_insert_events(events, server: repo)
-      assert {:ok, 2} = Repo.computer_history_count_events(server: repo)
-      assert {:ok, 3_000} = Repo.computer_history_oldest_event_ts(server: repo)
+      assert {:ok, 2} = Spool.insert_events(events, server: spool)
+      assert {:ok, 2} = Spool.count_events(server: spool)
+      assert {:ok, 3_000} = Spool.oldest_event_ts(server: spool)
     end
 
-    test "re-delivering the same (boot_id, source_seq) does not double-insert", %{repo: repo} do
+    test "re-delivering the same (boot_id, source_seq) does not double-insert", %{spool: spool} do
       events = [event("b1", 1, 5_000)]
 
-      assert {:ok, 1} = Repo.computer_history_insert_events(events, server: repo)
+      assert {:ok, 1} = Spool.insert_events(events, server: spool)
       # Idempotent: the UNIQUE(boot_id, source_seq) ignores the duplicate.
-      assert {:ok, 0} = Repo.computer_history_insert_events(events, server: repo)
-      assert {:ok, 1} = Repo.computer_history_count_events(server: repo)
+      assert {:ok, 0} = Spool.insert_events(events, server: spool)
+      assert {:ok, 1} = Spool.count_events(server: spool)
     end
 
-    test "boolean content_withheld is coerced to an integer", %{repo: repo} do
+    test "boolean content_withheld is coerced to an integer", %{spool: spool} do
       events = [event("b1", 1, 5_000, %{content_withheld: true, char_len: 42})]
-      assert {:ok, 1} = Repo.computer_history_insert_events(events, server: repo)
-      assert {:ok, 1} = Repo.computer_history_count_events(server: repo)
+      assert {:ok, 1} = Spool.insert_events(events, server: spool)
+      assert {:ok, 1} = Spool.count_events(server: spool)
     end
 
-    test "empty spool reports a nil oldest", %{repo: repo} do
-      assert {:ok, nil} = Repo.computer_history_oldest_event_ts(server: repo)
-      assert {:ok, 0} = Repo.computer_history_count_events(server: repo)
+    test "empty spool reports a nil oldest", %{spool: spool} do
+      assert {:ok, nil} = Spool.oldest_event_ts(server: spool)
+      assert {:ok, 0} = Spool.count_events(server: spool)
     end
   end
 
@@ -85,7 +114,7 @@ defmodule FermixCore.ComputerHistory.PersistenceTest do
   # {app, reason} pairs the operator has to be told about, so `/history status` can
   # name the apps where only titles are observable.
   describe "coverage gaps" do
-    test "returns the distinct app/reason pairs inside the window", %{repo: repo} do
+    test "returns the distinct app/reason pairs inside the window", %{spool: spool} do
       events = [
         event("b1", 1, 1_000, %{
           type: "observer.gap",
@@ -108,9 +137,9 @@ defmodule FermixCore.ComputerHistory.PersistenceTest do
         event("b1", 5, 2_200, %{bundle_id: "com.microsoft.VSCode"})
       ]
 
-      assert {:ok, 5} = Repo.computer_history_insert_events(events, server: repo)
+      assert {:ok, 5} = Spool.insert_events(events, server: spool)
 
-      assert {:ok, pairs} = Repo.computer_history_coverage_gaps(0, server: repo)
+      assert {:ok, pairs} = Spool.coverage_gaps(0, server: spool)
 
       assert Enum.sort(pairs) == [
                {"com.docker.docker", "ax_refused:AXValueChanged,AXFocusedUIElementChanged"},
@@ -118,7 +147,7 @@ defmodule FermixCore.ComputerHistory.PersistenceTest do
              ]
     end
 
-    test "excludes rows older than the window", %{repo: repo} do
+    test "excludes rows older than the window", %{spool: spool} do
       events = [
         event("b1", 1, 1_000, %{
           type: "observer.gap",
@@ -127,35 +156,35 @@ defmodule FermixCore.ComputerHistory.PersistenceTest do
         })
       ]
 
-      assert {:ok, 1} = Repo.computer_history_insert_events(events, server: repo)
+      assert {:ok, 1} = Spool.insert_events(events, server: spool)
 
-      assert {:ok, []} = Repo.computer_history_coverage_gaps(1_001, server: repo)
-      assert {:ok, [_pair]} = Repo.computer_history_coverage_gaps(1_000, server: repo)
+      assert {:ok, []} = Spool.coverage_gaps(1_001, server: spool)
+      assert {:ok, [_pair]} = Spool.coverage_gaps(1_000, server: spool)
     end
 
-    test "an empty spool reports no coverage gaps", %{repo: repo} do
-      assert {:ok, []} = Repo.computer_history_coverage_gaps(0, server: repo)
+    test "an empty spool reports no coverage gaps", %{spool: spool} do
+      assert {:ok, []} = Spool.coverage_gaps(0, server: spool)
     end
   end
 
   describe "retention sweep" do
-    test "deletes events strictly older than the cutoff, keeps the rest", %{repo: repo} do
+    test "deletes events strictly older than the cutoff, keeps the rest", %{spool: spool} do
       events = [
         event("b1", 1, 500),
         event("b1", 2, 1_000),
         event("b1", 3, 2_000)
       ]
 
-      assert {:ok, 3} = Repo.computer_history_insert_events(events, server: repo)
+      assert {:ok, 3} = Spool.insert_events(events, server: spool)
 
       # ts < 1000 ⇒ only the ts=500 row goes; ts=1000 (== cutoff) survives.
-      assert {:ok, 1} = Repo.computer_history_sweep_expired_events(1_000, server: repo)
-      assert {:ok, 2} = Repo.computer_history_count_events(server: repo)
-      assert {:ok, 1_000} = Repo.computer_history_oldest_event_ts(server: repo)
+      assert {:ok, %{deleted: 1}} = Spool.sweep_expired(1_000, server: spool)
+      assert {:ok, 2} = Spool.count_events(server: spool)
+      assert {:ok, 1_000} = Spool.oldest_event_ts(server: spool)
     end
 
-    test "sweeping an empty spool removes nothing", %{repo: repo} do
-      assert {:ok, 0} = Repo.computer_history_sweep_expired_events(9_999, server: repo)
+    test "sweeping an empty spool removes nothing", %{spool: spool} do
+      assert {:ok, %{deleted: 0, unsent: 0}} = Spool.sweep_expired(9_999, server: spool)
     end
   end
 
@@ -164,30 +193,30 @@ defmodule FermixCore.ComputerHistory.PersistenceTest do
     # LENGTH(page_title) + LENGTH(url) + 160 overhead. A 1 KiB text ⇒ ~1184.
     defp fat_event(seq, ts), do: event("b1", seq, ts, %{text: String.duplicate("x", 1_024)})
 
-    test "deletes the oldest rows beyond the ceiling, keeps the newest", %{repo: repo} do
+    test "deletes the oldest rows beyond the ceiling, keeps the newest", %{spool: spool} do
       events = Enum.map(1..10, fn seq -> fat_event(seq, seq * 1_000) end)
-      assert {:ok, 10} = Repo.computer_history_insert_events(events, server: repo)
+      assert {:ok, 10} = Spool.insert_events(events, server: spool)
 
       # Ceiling of ~3 rows (3 * 1184 = 3552 fits; the 4th crosses): the 6
       # oldest rows plus the crossing row go, newest 3 stay.
-      assert {:ok, 7} = Repo.computer_history_sweep_spool_over_bytes(3_600, server: repo)
-      assert {:ok, 3} = Repo.computer_history_count_events(server: repo)
+      assert {:ok, 7} = Spool.sweep_over_bytes(3_600, server: spool)
+      assert {:ok, 3} = Spool.count_events(server: spool)
       # The survivors are the NEWEST rows (ids/ts 8..10), not the oldest.
-      assert {:ok, 8_000} = Repo.computer_history_oldest_event_ts(server: repo)
+      assert {:ok, 8_000} = Spool.oldest_event_ts(server: spool)
     end
 
-    test "a spool under the ceiling is untouched", %{repo: repo} do
+    test "a spool under the ceiling is untouched", %{spool: spool} do
       assert {:ok, 2} =
-               Repo.computer_history_insert_events([fat_event(1, 1_000), fat_event(2, 2_000)],
-                 server: repo
+               Spool.insert_events([fat_event(1, 1_000), fat_event(2, 2_000)],
+                 server: spool
                )
 
-      assert {:ok, 0} = Repo.computer_history_sweep_spool_over_bytes(1_000_000, server: repo)
-      assert {:ok, 2} = Repo.computer_history_count_events(server: repo)
+      assert {:ok, 0} = Spool.sweep_over_bytes(1_000_000, server: spool)
+      assert {:ok, 2} = Spool.count_events(server: spool)
     end
 
-    test "an empty spool is a no-op", %{repo: repo} do
-      assert {:ok, 0} = Repo.computer_history_sweep_spool_over_bytes(1, server: repo)
+    test "an empty spool is a no-op", %{spool: spool} do
+      assert {:ok, 0} = Spool.sweep_over_bytes(1, server: spool)
     end
   end
 
@@ -235,7 +264,9 @@ defmodule FermixCore.ComputerHistory.PersistenceTest do
                  server: repo
                )
 
-      assert {:ok, _counts} = Repo.computer_history_purge_window(0, 5_000, 5_000, server: repo)
+      assert {:ok, _counts} =
+               Repo.computer_history_home(:purge_notes, [0, 5_000, 5_000, :all], server: repo)
+
       # Only the read recorded outside the purge window survives.
       assert {:ok, {1, 9_000}} = Repo.computer_history_access_stats(server: repo)
     end
@@ -364,26 +395,21 @@ defmodule FermixCore.ComputerHistory.PersistenceTest do
       :ok = Sqlite3.close(conn)
     end
 
-    defp start_upgraded_repo!(label) do
-      unique = System.unique_integer([:positive])
-      db_path = Path.join(System.tmp_dir!(), "fermix-ch-#{label}-#{unique}.db")
-
-      on_exit(fn ->
-        Enum.each([db_path, "#{db_path}-wal", "#{db_path}-shm"], &FermixTestSupport.SafeRm.rm/1)
-      end)
-
+    defp start_upgraded_repo!(ctx, label) do
+      db_path = Path.join(ctx.dir, "#{label}.db")
       seed_v27_database!(db_path)
-      repo_name = :"ch_upgrade_repo_#{unique}"
+      repo_name = :"ch_upgrade_repo_#{System.unique_integer([:positive])}"
 
-      start_supervised!({Repo, name: repo_name, enabled: true, database_path: db_path},
+      start_supervised!(
+        {Repo, upgraded_opts(repo_name, db_path, ctx)},
         id: :upgraded
       )
 
       {repo_name, db_path}
     end
 
-    test "a store already at 27 gains the columns and reads old rows as session notes" do
-      {repo, _path} = start_upgraded_repo!("v27")
+    test "a store already at 27 gains the columns and reads old rows as session notes", ctx do
+      {repo, _path} = start_upgraded_repo!(ctx, "v27")
 
       assert {:ok, versions} = Repo.migration_versions(server: repo)
       assert 28 in versions
@@ -395,8 +421,8 @@ defmodule FermixCore.ComputerHistory.PersistenceTest do
       assert memory.last_touched_ts == nil
     end
 
-    test "the FTS companion is rebuilt over rows that existed before it" do
-      {repo, _path} = start_upgraded_repo!("v27fts")
+    test "the FTS companion is rebuilt over rows that existed before it", ctx do
+      {repo, _path} = start_upgraded_repo!(ctx, "v27fts")
 
       assert {:ok, [found]} = Repo.computer_history_search_memories("apollo", 10, server: repo)
       assert found.summary == "read the Apollo migration plan"
@@ -405,31 +431,29 @@ defmodule FermixCore.ComputerHistory.PersistenceTest do
     # Every column of 28 arrives by ALTER, which is not idempotent: the version
     # check in the runner is the only thing standing between a second open and a
     # "duplicate column name" that would take the whole store down at boot.
-    test "a second open of the same store re-runs no migration" do
+    test "a second open of the same store re-runs no migration", ctx do
       unique = System.unique_integer([:positive])
-      db_path = Path.join(System.tmp_dir!(), "fermix-ch-reopen-#{unique}.db")
-
-      on_exit(fn ->
-        Enum.each([db_path, "#{db_path}-wal", "#{db_path}-shm"], &FermixTestSupport.SafeRm.rm/1)
-      end)
+      db_path = Path.join(ctx.dir, "reopen.db")
 
       first = :"ch_reopen_a_#{unique}"
-      start_supervised!({Repo, name: first, enabled: true, database_path: db_path}, id: :first)
+      start_supervised!({Repo, upgraded_opts(first, db_path, ctx)}, id: :first)
       assert {:ok, versions} = Repo.migration_versions(server: first)
       assert 28 in versions
+      assert 59 in versions
       :ok = stop_supervised(:first)
 
       second = :"ch_reopen_b_#{unique}"
-      start_supervised!({Repo, name: second, enabled: true, database_path: db_path}, id: :second)
+      start_supervised!({Repo, upgraded_opts(second, db_path, ctx)}, id: :second)
       assert {:ok, ^versions} = Repo.migration_versions(server: second)
       assert {:ok, 0} = Repo.computer_history_count_memories(server: second)
     end
   end
 
-  # MILESTONE_32 §12: the one high-water purge watermark becomes recorded purge
-  # intervals. A stored watermark W becomes one interval [0, min(W, now)], issued
-  # at the migration, and the column is gone.
-  describe "migration 32" do
+  # MILESTONE_32 §12: the one high-water purge watermark became recorded purge
+  # intervals (32); M97 §8.1 then carries every interval, with the rest of the raw
+  # spool, into this machine's own store (59), where the fence lives now, and the
+  # home's purge record starts empty.
+  describe "migration 32, then 59" do
     defp seed_watermark!(path, watermark) do
       {:ok, conn} = Sqlite3.open(path, mode: :readwrite)
 
@@ -441,37 +465,30 @@ defmodule FermixCore.ComputerHistory.PersistenceTest do
       :ok = Sqlite3.close(conn)
     end
 
-    defp start_seeded_repo!(label, watermark) do
-      unique = System.unique_integer([:positive])
-      db_path = Path.join(System.tmp_dir!(), "fermix-ch-#{label}-#{unique}.db")
-
-      on_exit(fn ->
-        Enum.each([db_path, "#{db_path}-wal", "#{db_path}-shm"], &FermixTestSupport.SafeRm.rm/1)
-      end)
-
+    defp start_seeded_repo!(ctx, label, watermark) do
+      db_path = Path.join(ctx.dir, "#{label}.db")
       seed_v27_database!(db_path)
       if watermark, do: seed_watermark!(db_path, watermark)
-      repo_name = :"ch_purges_repo_#{unique}"
+      repo_name = :"ch_purges_repo_#{System.unique_integer([:positive])}"
 
       before = System.system_time(:millisecond)
-
-      start_supervised!({Repo, name: repo_name, enabled: true, database_path: db_path},
-        id: :seeded
-      )
-
+      start_supervised!({Repo, upgraded_opts(repo_name, db_path, ctx)}, id: :seeded)
       {repo_name, db_path, before, System.system_time(:millisecond)}
     end
 
     # The old column stays, unread and unchanged: `fermix upgrade` can roll back
     # to the previous engine after this migration ran, and that engine reads it
     # on every state read.
-    test "a stored watermark becomes one interval and its column is left for a rollback" do
-      {repo, db_path, before, later} = start_seeded_repo!("wm", 2_000)
+    test "a stored watermark becomes one interval in this machine's store, its column kept",
+         ctx do
+      {repo, db_path, before, later} = start_seeded_repo!(ctx, "wm", 2_000)
 
       assert {:ok, versions} = Repo.migration_versions(server: repo)
       assert 32 in versions
+      assert 59 in versions
 
-      assert [[0, 2_000, issued_at]] = intervals(db_path)
+      assert home_intervals(db_path) == []
+      assert [[0, 2_000, issued_at]] = machine_intervals(ctx.spool_path)
       assert issued_at in before..later
 
       assert [[2_000]] =
@@ -482,23 +499,25 @@ defmodule FermixCore.ComputerHistory.PersistenceTest do
     end
 
     # CH-5: the `purge all` sentinel is clamped to the migration's now, so the
-    # fence and the note guard both work again from the first event after it.
-    test "the purge-all sentinel is clamped to the migration's now, and capture stores again" do
-      {repo, db_path, before, later} = start_seeded_repo!("sentinel", 9_999_999_999_999)
+    # fence works again from the first event after it, here in the machine's store.
+    test "the purge-all sentinel is clamped to the migration's now, and capture stores again",
+         ctx do
+      {repo, _db_path, before, later} = start_seeded_repo!(ctx, "sentinel", 9_999_999_999_999)
 
-      assert [[0, to_ts, issued_at]] = intervals(db_path)
+      assert [[0, to_ts, issued_at]] = machine_intervals(ctx.spool_path)
       assert to_ts == issued_at
       assert issued_at in before..later
 
       event = %{boot_id: "b2", source_seq: 1, ts: later + 1_000, type: "app.activated"}
-      assert {:ok, 1} = Repo.computer_history_insert_events([event], server: repo)
-      assert {:ok, 1} = Repo.computer_history_purge_mark(server: repo)
+      assert {:ok, 1} = Spool.insert_events([event], server: ctx.spool)
+      assert {:ok, 0} = Repo.computer_history_purge_mark(server: repo)
     end
 
-    test "a store that never purged gains an empty table" do
-      {repo, db_path, _before, _later} = start_seeded_repo!("none", nil)
+    test "a store that never purged carries no interval", ctx do
+      {repo, db_path, _before, _later} = start_seeded_repo!(ctx, "none", nil)
 
-      assert intervals(db_path) == []
+      assert home_intervals(db_path) == []
+      assert machine_intervals(ctx.spool_path) == []
       assert {:ok, 0} = Repo.computer_history_purge_mark(server: repo)
     end
   end
@@ -522,42 +541,72 @@ defmodule FermixCore.ComputerHistory.PersistenceTest do
     } do
       assert {:ok, 0} = Repo.computer_history_purge_mark(server: repo)
 
-      assert {:ok, _first} = Repo.computer_history_purge_window(0, 5_000, 5_000, server: repo)
+      assert {:ok, %{interval: 1}} = purge_notes(repo, 0, 5_000, 5_000)
       assert {:ok, 1} = Repo.computer_history_purge_mark(server: repo)
 
-      assert {:ok, _second} =
-               Repo.computer_history_purge_window(8_000, 9_000, 9_000, server: repo)
-
+      assert {:ok, %{interval: 2}} = purge_notes(repo, 8_000, 9_000, 9_000, "studio")
       assert {:ok, 2} = Repo.computer_history_purge_mark(server: repo)
 
-      assert intervals(db_path) == [[0, 5_000, 5_000], [8_000, 9_000, 9_000]]
+      # M97 §8.5: an interval names the machine it is for, nil for every machine.
+      assert home_intervals(db_path) == [
+               [0, 5_000, 5_000, nil, "purge"],
+               [8_000, 9_000, 9_000, "studio", "purge"]
+             ]
     end
 
-    # An interval matters to the fence while a row stamped inside it could still
-    # arrive or be kept, and to the note guard while a batch read before it could
-    # still be written. Both have ended once it was issued, and ended, before the
-    # retention cutoff: no such row is kept, and no cycle lives that long.
-    test "the retention sweep prunes the intervals that can no longer matter", %{
+    # A pause from chat is recorded beside the purges, and refuses what a purge
+    # does, but a roll-up's guard reads purges alone: a pause deletes nothing.
+    test "a pause is an interval of its own kind, and moves the mark", %{
       repo: repo,
       db_path: db_path
     } do
-      assert {:ok, _old} = Repo.computer_history_purge_window(0, 1_000, 1_000, server: repo)
-      assert {:ok, _new} = Repo.computer_history_purge_window(0, 9_000, 9_000, server: repo)
-      assert {:ok, _edge} = Repo.computer_history_purge_window(0, 5_000, 5_000, server: repo)
+      assert {:ok, 1} =
+               Repo.computer_history_home(:pause_window, [1_000, 4_000, 1_000, :all],
+                 server: repo
+               )
 
-      assert {:ok, 0} = Repo.computer_history_sweep_expired_events(5_000, server: repo)
+      assert home_intervals(db_path) == [[1_000, 4_000, 1_000, nil, "pause"]]
+      assert {:ok, 1} = Repo.computer_history_purge_mark(server: repo)
+    end
+
+    # An interval matters to a machine's fence while a row stamped inside it could
+    # still arrive or be kept. It has ended once it was issued, and ended, before
+    # the retention cutoff: no such row is kept, and no cycle lives that long.
+    test "a machine's retention sweep prunes the fence intervals that can no longer matter", %{
+      spool: spool,
+      spool_path: spool_path
+    } do
+      assert {:ok, _old} = Spool.fence(0, 1_000, 1_000, server: spool)
+      assert {:ok, _new} = Spool.fence(0, 9_000, 9_000, server: spool)
+      assert {:ok, _edge} = Spool.fence(0, 5_000, 5_000, server: spool)
+
+      assert {:ok, %{deleted: 0}} = Spool.sweep_expired(5_000, server: spool)
 
       # Issued before the cutoff: gone. At or after it: kept (the edge is kept,
       # as a row stamped exactly at the cutoff is).
-      assert intervals(db_path) == [[0, 9_000, 9_000], [0, 5_000, 5_000]]
-      # The mark still names the latest purge; a later one still reads as later.
+      assert machine_intervals(spool_path) == [[0, 9_000, 9_000], [0, 5_000, 5_000]]
+    end
+
+    test "the home prunes its intervals the same way, and the mark still names the latest", %{
+      repo: repo,
+      db_path: db_path
+    } do
+      assert {:ok, _old} = purge_notes(repo, 0, 1_000, 1_000)
+      assert {:ok, _new} = purge_notes(repo, 0, 9_000, 9_000)
+      assert {:ok, _edge} = purge_notes(repo, 0, 5_000, 5_000)
+
+      assert {:ok, 1} =
+               Repo.computer_history_home(:prune_home_intervals, [5_000], server: repo)
+
+      assert [[0, 9_000, 9_000, nil, "purge"], [0, 5_000, 5_000, nil, "purge"]] =
+               home_intervals(db_path)
+
+      # Ids only grow: a later purge still reads as later.
       assert {:ok, 3} = Repo.computer_history_purge_mark(server: repo)
     end
 
-    test "a purge refuses a window that ends before it starts", %{repo: repo} do
-      assert_raise FunctionClauseError, fn ->
-        Repo.computer_history_purge_window(5_000, 1_000, 5_000, server: repo)
-      end
+    test "a fence refuses a window that ends before it starts", %{spool: spool} do
+      assert_raise FunctionClauseError, fn -> Spool.fence(5_000, 1_000, 5_000, server: spool) end
     end
   end
 
@@ -702,7 +751,9 @@ defmodule FermixCore.ComputerHistory.PersistenceTest do
       session_memory(repo, thread_row("Still current", [note_id], 9_000))
 
       assert {:ok, mark} = Repo.computer_history_purge_mark(server: repo)
-      assert {:ok, _counts} = Repo.computer_history_purge_window(0, 5_000, 6_000, server: repo)
+
+      assert {:ok, _counts} =
+               Repo.computer_history_home(:purge_notes, [0, 5_000, 6_000, :all], server: repo)
 
       proposed = [
         %{
@@ -739,7 +790,9 @@ defmodule FermixCore.ComputerHistory.PersistenceTest do
       kept_note = session_memory(repo, %{provenance_from_ts: 8_000, provenance_to_ts: 9_000})
 
       assert {:ok, mark} = Repo.computer_history_purge_mark(server: repo)
-      assert {:ok, _counts} = Repo.computer_history_purge_window(0, 5_000, 9_500, server: repo)
+
+      assert {:ok, _counts} =
+               Repo.computer_history_home(:purge_notes, [0, 5_000, 9_500, :all], server: repo)
 
       proposed = [
         proposed_thread("Purged work", [purged_note], 500, 1_000),
@@ -763,7 +816,7 @@ defmodule FermixCore.ComputerHistory.PersistenceTest do
       assert {:ok, mark} = Repo.computer_history_purge_mark(server: repo)
 
       assert {:ok, _counts} =
-               Repo.computer_history_purge_window(8_000, 9_000, 9_000, server: repo)
+               Repo.computer_history_home(:purge_notes, [8_000, 9_000, 9_000, :all], server: repo)
 
       assert {:ok, %{written: 1, purged: 0, subjects: ["Apollo"]}} =
                Repo.computer_history_write_rollup(
@@ -779,7 +832,10 @@ defmodule FermixCore.ComputerHistory.PersistenceTest do
     test "a purge issued before the read refuses nothing", %{repo: repo} do
       before = session_memory(repo, %{provenance_from_ts: 100, provenance_to_ts: 400})
       later = session_memory(repo, %{provenance_from_ts: 8_000, provenance_to_ts: 9_000})
-      assert {:ok, _counts} = Repo.computer_history_purge_window(500, 5_000, 5_000, server: repo)
+
+      assert {:ok, _counts} =
+               Repo.computer_history_home(:purge_notes, [500, 5_000, 5_000, :all], server: repo)
+
       assert {:ok, mark} = Repo.computer_history_purge_mark(server: repo)
 
       assert {:ok, %{written: 1, purged: 0}} =
@@ -916,7 +972,9 @@ defmodule FermixCore.ComputerHistory.PersistenceTest do
       assert {:ok, [_new]} = Repo.computer_history_search_memories("apollo", 10, server: repo)
 
       # Purge removes the row AND its index entry.
-      assert {:ok, _purged} = Repo.computer_history_purge_window(0, 9_999, 9_999, server: repo)
+      assert {:ok, _purged} =
+               Repo.computer_history_home(:purge_notes, [0, 9_999, 9_999, :all], server: repo)
+
       assert {:ok, []} = Repo.computer_history_search_memories("quarterly", 10, server: repo)
     end
   end
@@ -934,15 +992,64 @@ defmodule FermixCore.ComputerHistory.PersistenceTest do
     end
   end
 
-  describe "session open marker" do
-    test "records and clears the open-session mark", %{repo: repo} do
-      assert :ok = Repo.computer_history_set_session_open_since(4_200, server: repo)
-      {:ok, state} = Repo.computer_history_fetch_state(server: repo)
+  # M97 §8.1: the sitting still open is this machine's, so its mark, the cursor
+  # and the pause live in this machine's store.
+  describe "this machine's state row" do
+    test "records and clears the open-session mark", %{spool: spool} do
+      assert :ok = Spool.set_open_since(4_200, server: spool)
+      {:ok, state} = Spool.state(server: spool)
       assert state.session_open_since_ts == 4_200
 
-      assert :ok = Repo.computer_history_set_session_open_since(nil, server: repo)
-      {:ok, cleared} = Repo.computer_history_fetch_state(server: repo)
+      assert :ok = Spool.set_open_since(nil, server: spool)
+      {:ok, cleared} = Spool.state(server: spool)
       assert cleared.session_open_since_ts == nil
+    end
+
+    test "the cursor only moves forward and keeps the last outcome on a nil", %{spool: spool} do
+      now = DateTime.utc_now()
+
+      assert :ok = Spool.advance(7, now, "summarized", server: spool)
+      assert :ok = Spool.advance(3, now, nil, server: spool)
+
+      assert {:ok, %{last_summarized_id: 7, last_status: "summarized"}} =
+               Spool.state(server: spool)
+    end
+
+    test "the unsent stats read the cursor in the same call", %{spool: spool} do
+      events = [event("b1", 1, 1_000), event("b1", 2, 2_000), event("b1", 3, 3_000)]
+      assert {:ok, 3} = Spool.insert_events(events, server: spool)
+      assert {:ok, {3, 1_000}} = Spool.unsent_stats(server: spool)
+
+      assert :ok = Spool.advance(2, DateTime.utc_now(), "summarized", server: spool)
+      assert {:ok, {1, 3_000}} = Spool.unsent_stats(server: spool)
+    end
+
+    test "a claim is single-flight until released", %{spool: spool} do
+      now = DateTime.utc_now()
+
+      assert {:ok, %{status: "running"}} = Spool.claim(now, :timer.minutes(30), server: spool)
+      assert {:error, :concurrent_run} = Spool.claim(now, :timer.minutes(30), server: spool)
+      assert :ok = Spool.release(now, server: spool)
+      assert {:ok, %{status: "running"}} = Spool.claim(now, :timer.minutes(30), server: spool)
+    end
+
+    test "a pause persists, and the home's intervals apply here once", %{spool: spool} do
+      now = DateTime.from_unix!(10_000, :millisecond)
+
+      assert {:ok, 1} = Spool.insert_events([event("b1", 1, 2_000)], server: spool)
+
+      intervals = [
+        %{id: 4, from_ts: 1_000, to_ts: 3_000, issued_at: 3_000, kind: "purge"},
+        %{id: 6, from_ts: 9_000, to_ts: 20_000, issued_at: 9_000, kind: "pause"}
+      ]
+
+      assert :ok = Spool.apply_intervals(intervals, now, server: spool)
+
+      assert {:ok, 0} = Spool.count_events(server: spool)
+      assert {:ok, %{home_mark: 6}} = Spool.link(server: spool)
+      # The pause has not ended: capture here pauses until it does.
+      assert {:ok, %{pause_until: until}} = Spool.state(server: spool)
+      assert until == 20_000 |> DateTime.from_unix!(:millisecond) |> DateTime.to_iso8601()
     end
   end
 end

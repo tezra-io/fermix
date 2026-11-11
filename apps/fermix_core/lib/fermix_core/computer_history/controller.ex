@@ -32,6 +32,7 @@ defmodule FermixCore.ComputerHistory.Controller do
 
   alias FermixCore.ComputerHistory
   alias FermixCore.ComputerHistory.Capturer
+  alias FermixCore.ComputerHistory.Submission
   alias FermixCore.ComputerHistory.Summarizer.Scheduler
   alias FermixCore.ComputerHistory.Supervisor, as: CHSupervisor
   alias FermixCore.ComputerUse.SidecarInstaller
@@ -67,7 +68,8 @@ defmodule FermixCore.ComputerHistory.Controller do
       installed_fun: Keyword.get(opts, :installed_fun, &SidecarInstaller.installed?/0),
       children:
         Keyword.get_lazy(opts, :children, fn ->
-          opts |> Keyword.get_lazy(:engine_role, &Role.current/0) |> default_children()
+          role = Keyword.get_lazy(opts, :engine_role, &Role.current/0)
+          default_children(role, Keyword.take(opts, [:timer_enabled]))
         end)
     }
 
@@ -91,18 +93,58 @@ defmodule FermixCore.ComputerHistory.Controller do
 
   # Production children: the module IS the registered name (each `start_link`
   # defaults `name` to its module), which is how "already running?" is checked.
-  # Public (@doc false) so the role's filter is pinned without a running capture.
+  # `want` says when each runs: the recorder while history records here, the
+  # scheduler always on the home (its roll-up) and while history records on a
+  # computer (its sittings, sent over the link). Public (@doc false) so the
+  # role's filter is pinned without a running capture.
   @doc false
-  @spec default_children(Role.role()) :: [%{name: module(), spec: module()}]
-  def default_children(role) when role in [:primary, :device] do
-    [%{name: Capturer, spec: Capturer}, %{name: Scheduler, spec: Scheduler}]
-    |> Enum.filter(&(Role.children([&1.spec], role) != []))
+  @spec default_children(Role.role(), keyword()) :: [
+          %{name: module(), spec: module() | {module(), keyword()}, want: :recording | :always}
+        ]
+  def default_children(role, opts \\ []) when role in [:primary, :device] and is_list(opts) do
+    [
+      %{name: Capturer, spec: Capturer, want: :recording},
+      %{
+        name: Scheduler,
+        spec: {Scheduler, scheduler_opts(role, opts)},
+        want: scheduler_want(role)
+      }
+    ]
+    |> Enum.filter(&(Role.children([&1.name], role) != []))
   end
 
+  defp scheduler_want(:primary), do: :always
+  defp scheduler_want(:device), do: :recording
+
+  # Where a sitting goes (M97 §8.1): on the home, in process; from a computer,
+  # over the link (`FermixChannels.Desktop.HistoryUplink`, the channels app's,
+  # named at run time). A computer keeps no notes, so it has no roll-up.
+  defp scheduler_opts(:primary, opts),
+    do: Keyword.put(opts, :uplink, &home_uplink/1)
+
+  defp scheduler_opts(:device, opts),
+    do: Keyword.merge(opts, uplink: &device_uplink/1, repo: nil)
+
+  @doc false
+  @spec home_uplink(map()) :: {:ok, Submission.answer()}
+  def home_uplink(payload) when is_map(payload), do: {:ok, Submission.accept("", payload)}
+
+  @doc false
+  @spec device_uplink(map()) :: {:ok, Submission.answer()} | {:error, term()}
+  def device_uplink(payload) when is_map(payload),
+    do: apply(Module.concat([FermixChannels, Desktop, HistoryUplink]), :submit, [payload])
+
   defp do_reconcile(state) do
-    want? = state.operative_fun.() and state.installed_fun.()
-    Enum.each(state.children, &reconcile_child(state.dynamic_supervisor, &1, want?))
+    recording? = state.operative_fun.() and state.installed_fun.()
+
+    Enum.each(
+      state.children,
+      &reconcile_child(state.dynamic_supervisor, &1, want?(&1, recording?))
+    )
   end
+
+  defp want?(%{want: :always}, _recording?), do: true
+  defp want?(_child, recording?), do: recording?
 
   defp reconcile_child(sup, child, true), do: ensure_started(sup, child)
   defp reconcile_child(sup, child, false), do: ensure_stopped(sup, child)

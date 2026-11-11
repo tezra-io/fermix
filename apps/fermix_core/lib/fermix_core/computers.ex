@@ -134,20 +134,14 @@ defmodule FermixCore.Computers do
   `opts`: `:deadline_ms` (30 s by default, 0 only for a long-lived op),
   `:part` (bytes, or `{bytes, mime}`, uploaded with the request) and
   `:on_part` (1-arity, told `%{received_bytes, size_bytes}` as the answer's
-  part arrives), and `Computers.Invocation`'s seams.
+  part arrives), and `Computers.Invocation`'s seams. A caller stops what it
+  asked by ending: its waiter has the computer cancel it
+  (`Computers.Calls`).
   """
   @spec call(Computer.t() | String.t(), module(), String.t(), map(), map(), keyword()) ::
           {:ok, FermixCore.Computers.Outcome.t()} | {:error, FermixCore.Computers.Outcome.t()}
   def call(computer, module, op, args, context, opts \\ []),
     do: Invocation.call(computer, module, op, args, context, opts)
-
-  @doc """
-  Cancels the invocation `id` (`invoke_cancel`): its caller hears the
-  computer's answer, `cancelled` or the outcome it reached first.
-  """
-  @spec cancel(String.t(), keyword()) :: :ok | {:error, :not_found | term()}
-  def cancel(id, opts \\ []) when is_binary(id) and is_list(opts),
-    do: Invocation.cancel(id, opts)
 
   @doc "Every sentence a rename refusal says, for the copy rules."
   @spec sentences() :: [String.t()]

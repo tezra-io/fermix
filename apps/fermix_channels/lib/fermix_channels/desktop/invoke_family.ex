@@ -19,12 +19,14 @@ defmodule FermixChannels.Desktop.InvokeFamily do
     frames dropped, and the session stays open. Its progress is told every
     #{16} frames, and its bytes once whole.
   - **`invoke_open`** from the computer asks one of the home's services
-    (`:services`, `system` alone so far), run in a process of its own and
+    (`:services`: `system`, and `history.submit`, a finished sitting of
+    computer history, M97 §8.1), run in a process of its own, which is told
+    the computer that asked, and
     answered with `invoke_result`; `invoke_cancel` and `invoke_status` for
     one are answered as the computer answers its server's.
 
   Options in the context (a test's seams): `:calls` (the `Calls` server),
-  `:services` and `:home`.
+  `:services`, `:home` and `:history` (`ComputerHistory.Submission`'s options).
   """
 
   @behaviour FermixChannels.Desktop.Family
@@ -32,6 +34,7 @@ defmodule FermixChannels.Desktop.InvokeFamily do
   require Logger
 
   alias FermixChannels.Desktop.Peer
+  alias FermixCore.ComputerHistory.HomeService, as: HistoryService
   alias FermixCore.Computers.Calls
   alias FermixCore.Computers.Capabilities.System, as: SystemCapability
   alias FermixCore.Computers.Origin
@@ -39,7 +42,7 @@ defmodule FermixChannels.Desktop.InvokeFamily do
   alias FermixCore.Computers.Telemetry
   alias FermixCore.Setup.ConfigStore
 
-  @services %{"system" => SystemCapability}
+  @services %{"system" => SystemCapability, "history" => HistoryService}
   @max_part_bytes 20 * 1_024 * 1_024
   @max_parts_bytes 64 * 1_024 * 1_024
   @progress_every 16
@@ -54,6 +57,7 @@ defmodule FermixChannels.Desktop.InvokeFamily do
       registry: registry,
       calls: Keyword.get(options, :calls, Calls),
       services: Keyword.get(options, :services, @services),
+      history: Keyword.get(options, :history, []),
       home: Keyword.get_lazy(options, :home, &ConfigStore.fermix_home/0),
       parts: %{},
       running: %{}
@@ -209,6 +213,8 @@ defmodule FermixChannels.Desktop.InvokeFamily do
   defp run_service(module, args, %{"id" => id, "op" => op} = fields, meta, state) do
     context = %{
       id: id,
+      computer: state.device_id,
+      history: state.history,
       origin: :computer,
       epoch: fields["epoch"],
       turn: nil,

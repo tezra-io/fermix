@@ -234,6 +234,7 @@ CODEX_MODEL_LIST = {
 # `model` is the string the move writes for each system. Every value is invented,
 # and fixed, so every seed writes the same bytes.
 COMPUTERS_MANIFEST = os.path.join("eval-fixtures", "computers.json")
+HISTORY_MANIFEST = os.path.join("eval-fixtures", "computer_history.json")
 DEVICES_FILE = os.path.join("mobile", "devices.toml")
 COMPUTER_RECORDS_DIR = os.path.join("device", "computers")
 COMPUTERS = (
@@ -678,7 +679,10 @@ def clear_computer_fixtures(home: str) -> None:
     section. A home without the manifest is left as it is."""
     if not os.path.isfile(os.path.join(home, COMPUTERS_MANIFEST)):
         return
-    for path in computer_paths(home):
+    # seed_history.exs's manifest, written after a --computers seed with the
+    # daemon down; its notes went with memory.db.
+    history = os.path.join(home, HISTORY_MANIFEST)
+    for path in [history, *computer_paths(home)]:
         if os.path.isfile(path):
             os.remove(safe_rm.check(path, home, min_below=1))
 

@@ -46,8 +46,8 @@ it, never a second writer.
 - A device-role engine makes no provider call and refreshes no token: it
   starts no token manager and no realtime voice (the voice socket is absent,
   so the app sees no connection rather than a refusal), it opens no database
-  (its `memory.db` is the retired copy, so computer history records nothing
-  there, though its settings stay this computer's own), and the management
+  (its `memory.db` is the retired copy; computer history records into
+  `device/history.db` and sends sittings to the server), and the management
   methods that sign in, sign out, import a login, probe a provider, list a
   provider's live models or run the network doctor answer that the engine
   runs in the device role. `fermix memory review --now` and `fermix memory
@@ -96,8 +96,7 @@ it, never a second writer.
   directory as the next primary, one epoch above the archived home. Settings
   in `config.toml` that named the old home's path are moved to the new one and
   the keys are named; paths stored inside the memory database are not changed.
-  Importing also withdraws coding-harness consent, deletes screen history
-  from the restored database, moves a keyring-mode home to the file store on
+  Importing also withdraws coding-harness consent, moves a keyring-mode home to the file store on
   a host whose keyring does not answer that it is available (a check that
   timed out counts as no answer, and the log says so; macOS keeps its
   keyring), and names the

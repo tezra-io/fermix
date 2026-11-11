@@ -141,6 +141,56 @@ scenarios:
   # file nobody read; the claim to have opened one is the other fabrication.
   # Neither gate is sticky: a fabricated answer is a quality failure, and a retry
   # that answers honestly is the measurement.
+  # M97 §8.4: computer history from every computer is one memory on the home.
+  # `seed_history.exs` (run by `capability-daemon.sh up` on a --computers home)
+  # writes three notes as the home keeps them: the studio Mac this morning
+  # 08:30-09:40 Eastern (the Juniper Street lease reply), the studio Mac
+  # yesterday 14:00-15:10 (the tomato seed order), and the home's own machine
+  # yesterday 16:00-16:45 (the electricity bill). loft Linux records no
+  # history. The notes are the home's, so recall answers while both computers
+  # are away. A note written by the seed is invented, never anyone's activity,
+  # so this reads only the eval home's own fixture: host_readonly. No route
+  # assertion: which window or filter the model asks for is its own call; the
+  # floors are words every correct answer carries, and the rubric owns the rest.
+  - id: history_across_computers
+    title: "What the owner did, on one computer or across them, from the home's memory"
+    severity: normal
+    risk: host_readonly
+    tags: [computers, always-on, history]
+    cases:
+      - id: studio_mac_this_morning
+        query: What was I working on on the studio Mac this morning?
+        expect:
+          reply_matches: '(?i)juniper'
+          reply_not_matches: '(?i)electricity\s+bill|riverbend'
+          max_cost_usd: 1.2
+          max_duration_ms: 160000
+        rubric: >
+          Says that this morning on the studio Mac the owner drafted the reply
+          to the Juniper Street lease renewal (in Mail and Pages: accepting the
+          new rent from March and asking for the porch light to be fixed
+          first), naming the studio Mac as where it happened. It does not
+          present the electricity bill or the seed order as this morning's work
+          on the studio Mac, does not say the Mac had to be awake or reached to
+          answer, and does not invent other activity. Saying the Mac is
+          currently away is fine.
+      - id: across_my_computers_yesterday
+        query: What did I do across my computers yesterday?
+        expect:
+          reply_matches: '(?i)seed|tomato'
+          max_cost_usd: 1.2
+          max_duration_ms: 160000
+        rubric: >
+          Covers both pieces of yesterday's recorded activity and says which
+          machine each happened on: the tomato seed order built in Numbers on
+          the studio Mac in the afternoon (twelve varieties trimmed to a
+          sixty-dollar budget, not yet ordered), and the electricity bill paid
+          on the utility's website on the home's own computer (this computer,
+          or this server) later that afternoon. It does not attribute either to
+          loft Linux, which records no history, does not present this
+          morning's lease reply as yesterday's, and invents nothing else. A
+          note that loft Linux keeps no history is welcome but not required.
+
   - id: a_file_on_an_away_computer
     title: "A file on the studio Mac while it is asleep or offline"
     severity: normal

@@ -1420,6 +1420,29 @@ the primary sends `invoke_cancel`, best-effort. A computer never runs an
 `invoke_status` is. The primary holds no answer to a computer's own request
 once sent, so its `invoke_status` for one that ended is answered `unknown`.
 
+**Computer history (M97 §8).** The home's one service a computer asks is
+`history` `submit`: one finished sitting of its computer history, sent with no
+part in the bulk lane, as its cancel and status ask are (`capability`
+`history`, `op` `submit`), origin `computer`. Its arguments: `v` (1),
+`sitting` (its key, at most 128 bytes), `from_ts` and `to_ts` (epoch ms),
+`event_count`, `field_values`, `mark` (the highest of the home's purge and
+pause intervals this computer has applied), `apps`, `sites`, `titles` and
+`urls` (each at most 12 strings of at most 2,048 characters), and either
+`text` (the rendered sitting, at most 60,000 characters) or `note` (`summary`,
+at most 901 characters, and `model`) from a computer that summarizes on its
+own device. A sitting with any other field is refused `invalid`. The result
+is `{status, reason, intervals}`: `status` `summarized`, `abstained`,
+`no_signal` or `refused`; on a refusal, `reason` `purged` or `paused` with
+`intervals`, every interval of that computer or of every computer above its
+`mark`, oldest first, at most 256 (`id`, `from_ts`, `to_ts`, `issued_at`,
+`kind` `purge` or `pause`), which the computer applies before it sends what is
+left; or `invalid` (never sent again), `no_summarizer`, `route_not_permitted`,
+`summarizer_unavailable` or `store` (sent again later). The home never writes
+the sitting's text down. The primary hands a computer the intervals it has not
+applied with its capability `history` `apply` (`{intervals}`, the same five
+fields each), gated by the computer's master switch alone and answered
+`{applied}`, the highest id applied.
+
 **On the computer.** A computer admits a request in this order, each step a
 refusal with the computer's sentence:
 

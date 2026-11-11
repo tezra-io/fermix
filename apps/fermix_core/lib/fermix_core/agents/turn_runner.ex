@@ -263,7 +263,7 @@ defmodule FermixCore.Agents.TurnRunner do
   `recall_activity`'s advertise/execute gates, the pinned route chain, and the
   commit-time taint stamp — consumes this one snapshot, so a config flip landing
   mid-turn cannot make any two of them disagree. `opts` is passed to
-  `Gate.snapshot/2` (`:macos?`, `:config`), the platform/posture injection seam.
+  `Gate.snapshot/2` (`:surfaces?`, `:config`), the surfacing/posture injection seam.
   """
   @spec computer_history_gate(map(), term(), keyword()) :: ComputerHistoryGate.Snapshot.t()
   def computer_history_gate(msg, ordered_routes, opts \\ []) when is_list(opts) do

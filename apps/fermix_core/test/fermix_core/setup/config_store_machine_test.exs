@@ -353,6 +353,113 @@ defmodule FermixCore.Setup.ConfigStoreMachineTest do
     end
   end
 
+  # A home the Mac app manages is the app engine's to migrate: another
+  # engine pointed at it (a formula binary, a source checkout) moves nothing
+  # there, while the app's own first start on a release that reads
+  # machine.toml does, and so does any engine on a home the app does not
+  # manage. Every home is this test's temporary one.
+  describe "who moves a home's settings" do
+    test "the app's own engine moves them in the home the app manages", ctx do
+      app_manages!(ctx)
+      File.write!(Path.join(ctx.home, "config.toml"), @old_config)
+
+      assert :ok = ConfigStore.migrate_machine_file(ctx.home, server?: false, app_engine?: true)
+      assert File.read!(MachineFile.path(ctx.home)) == MachineFile.extract(@old_config)
+    end
+
+    test "another engine refuses by name, and writes nothing there", ctx do
+      app_manages!(ctx)
+      File.write!(Path.join(ctx.home, "config.toml"), @old_config)
+
+      assert {:error, {:app_managed, home} = reason} =
+               ConfigStore.migrate_machine_file(ctx.home, server?: false, app_engine?: false)
+
+      assert home == ctx.home
+      assert ConfigStore.load_error_sentence(reason) =~ "#{ctx.home} is managed by Fermix.app"
+      assert File.read!(Path.join(ctx.home, "config.toml")) == @old_config
+      refute File.exists?(MachineFile.path(ctx.home))
+      refute File.exists?(Path.join(ctx.home, "config.toml.lock"))
+    end
+
+    test "another engine boots on a home the app already moved, with nothing to move", ctx do
+      app_manages!(ctx)
+      {home_only, _removed} = MachineFile.strip(@old_config)
+      File.write!(Path.join(ctx.home, "config.toml"), home_only)
+      File.write!(MachineFile.path(ctx.home), MachineFile.extract(@old_config))
+
+      assert :ok = ConfigStore.migrate_machine_file(ctx.home, server?: false, app_engine?: false)
+      assert File.read!(Path.join(ctx.home, "config.toml")) == home_only
+    end
+
+    test "a home whose app is gone, or that no app manages, is moved by any engine", ctx do
+      app_manages!(ctx)
+      File.write!(Path.join(ctx.home, "config.toml"), @old_config)
+
+      assert :ok =
+               ConfigStore.migrate_machine_file(ctx.home,
+                 server?: false,
+                 app_engine?: false,
+                 bundle_exists?: fn _bundle -> false end
+               )
+
+      assert File.read!(MachineFile.path(ctx.home)) == MachineFile.extract(@old_config)
+
+      other = Path.join(ctx.tmp, "dev-home")
+      File.mkdir!(other)
+      File.write!(Path.join(other, "config.toml"), @old_config)
+      assert :ok = ConfigStore.migrate_machine_file(other, server?: false, app_engine?: false)
+      assert File.read!(MachineFile.path(other)) == MachineFile.extract(@old_config)
+    end
+
+    test "a settings file it cannot read is named", ctx do
+      config = Path.join(ctx.home, "config.toml")
+      File.write!(config, @old_config)
+      File.chmod!(config, 0o000)
+      on_exit(fn -> File.chmod(config, 0o600) end)
+
+      assert {:error, {:config, ^config, :eacces} = reason} =
+               ConfigStore.migrate_machine_file(ctx.home, server?: false)
+
+      assert ConfigStore.load_error_sentence(reason) ==
+               "#{config} could not be read: permission denied."
+    end
+  end
+
+  # A source checkout (`:dev`) has no default home: with no FERMIX_HOME it
+  # refuses before it reads or writes anything; with one, and in every other
+  # build, it goes on.
+  describe "a source checkout names its home" do
+    test "the dev environment needs FERMIX_HOME; a release and the suite do not" do
+      for unset <- [nil, ""] do
+        assert {:error, sentence} = ConfigStore.source_home(:dev, unset)
+        assert sentence =~ "Set FERMIX_HOME to the home it should use"
+      end
+
+      assert :ok = ConfigStore.source_home(:dev, "/tmp/fermix-dev-home-invented")
+      assert :ok = ConfigStore.source_home(:prod, nil)
+      assert :ok = ConfigStore.source_home(:test, nil)
+    end
+
+    # In a VM of its own, as a `mix` command starts one, with no FERMIX_HOME:
+    # this suite's VM keeps its own home throughout, so nothing here can fall
+    # back to the installed one.
+    test "the configuration a dev command loads refuses before it reads a home" do
+      runtime = Path.expand("../../../../../config/runtime.exs", __DIR__)
+      script = "Config.Reader.read!(#{inspect(runtime)}, env: :dev, target: :host)"
+
+      {output, status} =
+        System.cmd(
+          System.find_executable("elixir"),
+          ["-pa", Application.app_dir(:fermix_core, "ebin"), "-e", script],
+          env: [{"FERMIX_HOME", nil}],
+          stderr_to_stdout: true
+        )
+
+      refute status == 0
+      assert output =~ "this is a Fermix source checkout, which never uses the installed home"
+    end
+  end
+
   describe "a machine with no machine file" do
     # Fresh machines, the platform injected, never read from the host.
     test "a Mac and a Linux desktop take the shipped defaults and write nothing", ctx do
@@ -439,6 +546,24 @@ defmodule FermixCore.Setup.ConfigStoreMachineTest do
       end)
 
     refute again =~ "sandbox setting"
+  end
+
+  # The home's marker names the Mac app, whose bundle (a folder of this
+  # test's) is there.
+  defp app_manages!(ctx) do
+    bundle = Path.join(ctx.tmp, "Fermix.app")
+    File.mkdir_p!(bundle)
+
+    File.write!(
+      Path.join(ctx.home, "engine-owner.json"),
+      Jason.encode!(%{
+        "distribution_identity" => "macos_app",
+        "product_version" => "0.18.0",
+        "build_id" => "orchard-build-7",
+        "app_bundle_path" => bundle,
+        "written_at" => "2026-11-02T08:15:00Z"
+      })
+    )
   end
 
   defp restore_env({app, entries}) do

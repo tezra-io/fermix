@@ -601,7 +601,7 @@ defmodule FermixCore.Agents.TurnRunnerOutsideSourcesTest do
 
       gate =
         TurnRunner.computer_history_gate(msg, routes,
-          macos?: true,
+          surfaces?: true,
           config: [enabled: true, summarizer: :local]
         )
 

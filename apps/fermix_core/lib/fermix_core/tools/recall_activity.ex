@@ -10,6 +10,11 @@ defmodule FermixCore.Tools.RecallActivity do
   signal, never the only barrier — `execute/2` re-checks the Gate (the
   place_search discipline).
 
+  Every computer of the home feeds one memory (M97 §8.4): a result names the
+  machine each sitting happened on, and `computer` (a name from `## Computers`,
+  or "this computer" for the home's own) takes one machine's alone. It filters
+  notes; it is never a request to run on that computer.
+
   Naming avoids the `memory_recall` / "history" (message-history) collision
   (§13.4): the model-facing tool is `recall_activity`.
   """
@@ -56,6 +61,13 @@ defmodule FermixCore.Tools.RecallActivity do
             "Optional topic to search activity for — a word or two, matched against the " <>
               "summaries, page titles and URLs of both threads and sittings. When given, " <>
               "window is ignored and results come from every date on record."
+        },
+        computer: %{
+          type: "string",
+          description:
+            "Optional: the name of one computer, as the Computers section lists it, to " <>
+              ~s|recall only what happened on it ("this computer" for this home's own). | <>
+              "Omit it for every computer. Current threads span every computer."
         }
       }
     }
@@ -93,7 +105,7 @@ defmodule FermixCore.Tools.RecallActivity do
   # disable keeps the stamp consistent with what actually flowed.
   defp run(args, context) do
     if Gate.allow?(turn_snapshot(context), {:tool_execute, context}) do
-      recall(args, Map.get(context, :memory_repo, Repo))
+      recall(args, Map.get(context, :memory_repo, Repo), machines(context))
     else
       {:ok, Tool.error("Computer history is not available on this turn.")}
     end
@@ -101,18 +113,49 @@ defmodule FermixCore.Tools.RecallActivity do
 
   # A topic answers from every date on record, so it replaces the window rather
   # than narrowing it — one read per call, never both.
-  defp recall(args, repo) do
-    args
-    |> Map.get("about")
-    |> read(args, repo)
-    |> reply()
+  # The home's machines by name: `:computer_history_machines` in the context is
+  # a test's seam.
+  defp machines(context),
+    do: Map.get_lazy(context, :computer_history_machines, &Recall.machine_names/0)
+
+  defp recall(args, repo, machines) do
+    case machine(Map.get(args, "computer"), Map.put_new(machines, "", Recall.here())) do
+      {:ok, computer} ->
+        args
+        |> Map.get("about")
+        |> read(args, repo: repo, computer: computer, machines: machines)
+        |> reply()
+
+      {:error, sentence} ->
+        {:ok, Tool.error(sentence)}
+    end
   end
 
-  defp read(about, _args, repo) when is_binary(about) and about != "",
-    do: Recall.search(about, repo: repo)
+  defp read(about, _args, opts) when is_binary(about) and about != "",
+    do: Recall.search(about, opts)
 
-  defp read(_about, args, repo),
-    do: Recall.query(Map.get(args, "window", "today"), repo: repo)
+  defp read(_about, args, opts),
+    do: Recall.query(Map.get(args, "window", "today"), opts)
+
+  # A name the home knows, compared without case; none for every machine.
+  defp machine(nil, _names), do: {:ok, :all}
+  defp machine("", _names), do: {:ok, :all}
+
+  defp machine(name, names) when is_binary(name) do
+    wanted = name |> String.trim() |> String.downcase()
+
+    case Enum.find(names, fn {_id, known} -> String.downcase(known) == wanted end) do
+      {id, _known} -> {:ok, id}
+      nil -> {:error, unknown_machine(name, names)}
+    end
+  end
+
+  defp machine(_other, _names), do: {:error, "Name the computer as text."}
+
+  defp unknown_machine(name, names),
+    do:
+      "This home has no computer named #{name}; its computers are " <>
+        Enum.map_join(Map.values(names), ", ", & &1) <> "."
 
   defp reply({:ok, text}), do: {:ok, Tool.success(text)}
 

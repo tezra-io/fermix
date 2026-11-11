@@ -281,8 +281,8 @@ defmodule Fermix.CLI.HomeCommandTest do
     assert out =~
              ~s(This host has no usable keyring, so secrets are kept in files here: secret_store = "file".)
 
-    assert out =~
-             "Removed 1 screen-history row: screen history stays on the machine it describes."
+    # Computer history's notes travel with the home (M97 §8.6): nothing is removed.
+    refute out =~ "screen-history"
 
     assert out =~
              "Installed plugins were built for macos-aarch64, and this host is linux-x86_64. " <>
@@ -343,13 +343,12 @@ defmodule Fermix.CLI.HomeCommandTest do
     assert out =~ "Exported #{ctx.home} to #{ctx.archive}"
   end
 
-  # This host's facts, pinned: a macOS host whose keyring answers, at a fixed now.
+  # This host's facts, pinned: a macOS host whose keyring answers.
   defp run(argv, deps \\ [], input \\ "") do
     defaults = [
       hello: fn -> @not_running end,
       host: "macos-aarch64",
-      keyring_usable?: fn -> true end,
-      now_ms: @now
+      keyring_usable?: fn -> true end
     ]
 
     deps = Keyword.merge(defaults, deps)

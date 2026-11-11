@@ -106,17 +106,6 @@ defmodule FermixCore.Computers.Calls do
         ]
   def running_effects(server \\ __MODULE__), do: GenServer.call(server, :running_effects)
 
-  @doc """
-  Cancels the invocation `id` on its computer (`invoke_cancel`), whose
-  answer comes to its caller as any other: `{:error, :not_found}` for one
-  not waited on. The cancel goes from here, not from the caller, so one
-  asked before the caller sent the request could reach the computer first:
-  cancel an invocation only once its request went.
-  """
-  @spec cancel(GenServer.server(), String.t()) :: :ok | {:error, :not_found | term()}
-  def cancel(server \\ __MODULE__, id) when is_binary(id),
-    do: GenServer.call(server, {:cancel, id})
-
   @doc "The invocation `id` is answered, or given up on: no more words for it."
   @spec forget(GenServer.server(), String.t()) :: :ok
   def forget(server \\ __MODULE__, id) when is_binary(id),
@@ -135,7 +124,6 @@ defmodule FermixCore.Computers.Calls do
     do: {:reply, tell_reconnected(state, device_id), state}
 
   def handle_call(:running_effects, _from, state), do: {:reply, effects(state), state}
-  def handle_call({:cancel, id}, _from, state), do: {:reply, cancel_call(id, state), state}
   def handle_call({:forget, id}, _from, state), do: {:reply, :ok, dropped(id, state)}
 
   @impl true
@@ -192,13 +180,6 @@ defmodule FermixCore.Computers.Calls do
 
       :error ->
         Logger.debug("computer #{device_id} answered invocation #{id}, which nobody waits on")
-    end
-  end
-
-  defp cancel_call(id, state) do
-    case Map.fetch(state.calls, id) do
-      {:ok, call} -> send_cancel(call)
-      :error -> {:error, :not_found}
     end
   end
 

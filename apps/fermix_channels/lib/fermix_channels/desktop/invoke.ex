@@ -43,7 +43,8 @@ defmodule FermixChannels.Desktop.Invoke do
     "shell" => FermixCore.Computers.Capabilities.Shell,
     "imessage" => FermixChannels.Channels.IMessage.Capability,
     "browser" => FermixCore.Computers.Capabilities.Browser,
-    "computer_use" => FermixCore.Computers.Capabilities.Screen
+    "computer_use" => FermixCore.Computers.Capabilities.Screen,
+    "history" => FermixCore.ComputerHistory.MachineService
   }
   @required [:home, :switches, :sandbox, :capabilities, :clock, :relay]
 

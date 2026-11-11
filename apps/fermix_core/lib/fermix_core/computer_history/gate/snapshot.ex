@@ -20,13 +20,10 @@ defmodule FermixCore.ComputerHistory.Gate.Snapshot do
       turn reader consults it.
   """
 
-  @type summarizer :: :local | {:provider, atom()}
-
   @type t :: %__MODULE__{
           operative?: boolean(),
           attended_operator?: boolean(),
           granted: MapSet.t(atom()),
-          summarizer_target: summarizer(),
           chain: term(),
           routes: term(),
           dropped_hops: [atom()],
@@ -37,7 +34,6 @@ defmodule FermixCore.ComputerHistory.Gate.Snapshot do
     :operative?,
     :attended_operator?,
     :granted,
-    :summarizer_target,
     :chain,
     :routes,
     :dropped_hops,
@@ -46,7 +42,6 @@ defmodule FermixCore.ComputerHistory.Gate.Snapshot do
   defstruct operative?: false,
             attended_operator?: false,
             granted: nil,
-            summarizer_target: :local,
             chain: nil,
             routes: nil,
             dropped_hops: [],

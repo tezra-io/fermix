@@ -21,8 +21,11 @@ defmodule FermixChannels.Gateway.Commands.History do
   alias FermixCore.ComputerHistory.Capturer
   alias FermixCore.ComputerHistory.Config
   alias FermixCore.ComputerHistory.Controller
+  alias FermixCore.ComputerHistory.Delivery
   alias FermixCore.ComputerHistory.Gate
   alias FermixCore.ComputerHistory.Purge
+  alias FermixCore.ComputerHistory.Spool
+  alias FermixCore.Computers
   alias FermixCore.Memory.Repo
   alias FermixCore.Setup.ConfigStore
 
@@ -49,17 +52,25 @@ defmodule FermixChannels.Gateway.Commands.History do
 
   @impl true
   def execute(message, reply_fn, context) do
-    dispatch(args(message), reply_fn, {repo(context), macos?(context), controller(context)})
+    host = %{
+      repo: repo(context),
+      spool: Map.get(context, :computer_history_spool, Spool),
+      recorder?: Map.get_lazy(context, :computer_history_recorder?, &ComputerHistory.recorder?/0),
+      computers: Map.get_lazy(context, :computer_history_computers, &Computers.list/0),
+      deliver: Map.get(context, :computer_history_deliver, &Delivery.deliver/1),
+      controller: controller(context)
+    }
+
+    dispatch(args(message), reply_fn, host)
   end
 
-  # `:computer_history_repo` / `:computer_history_macos?` /
-  # `:computer_history_controller` in context are test-only injection seams;
-  # production dispatch runs in the daemon against the default single-writer
-  # Repo, the real platform and the real Controller.
+  # `:computer_history_repo` / `:computer_history_spool` /
+  # `:computer_history_recorder?` / `:computer_history_computers` /
+  # `:computer_history_deliver` / `:computer_history_controller` in context are
+  # test-only injection seams; production dispatch runs in the daemon against
+  # the home's single-writer Repo, this machine's store and recorder, the
+  # home's computers, the real delivery and the real Controller.
   defp repo(context), do: Map.get(context, :computer_history_repo, Repo)
-
-  defp macos?(context),
-    do: Map.get(context, :computer_history_macos?, ComputerHistory.macos?())
 
   defp controller(context), do: Map.get(context, :computer_history_controller, Controller)
 
@@ -71,38 +82,48 @@ defmodule FermixChannels.Gateway.Commands.History do
   defp dispatch(["pause"], reply_fn, _host),
     do: reply(reply_fn, "Usage: /history pause 10m|1h|24h")
 
-  defp dispatch(["pause", duration], reply_fn, {repo, _macos?, _controller}),
-    do: pause(duration, reply_fn, repo)
+  defp dispatch(["pause", duration], reply_fn, host),
+    do: pause(duration, reply_fn, host)
 
-  defp dispatch(["purge", window], reply_fn, {repo, _macos?, _controller}),
-    do: purge(window, reply_fn, repo)
+  defp dispatch(["purge", window], reply_fn, host),
+    do: purge(window, reply_fn, host)
 
-  defp dispatch(["off" | _rest], reply_fn, {_repo, macos?, controller}),
-    do: off(reply_fn, macos?, controller)
+  defp dispatch(["off" | _rest], reply_fn, host),
+    do: off(reply_fn, host.recorder?, host.controller)
 
   defp dispatch(_other, reply_fn, _host), do: reply(reply_fn, usage())
 
   # --- status -------------------------------------------------------------
 
-  defp status_text({repo, macos?, _controller}) do
-    if macos? do
-      [
-        enabled_line(),
-        capture_line(),
-        allowlist_line(),
-        coverage_line(repo),
-        summarizer_line(),
-        chain_line(),
-        spool_line(repo),
-        memory_line(repo),
-        access_line(repo)
-      ]
-      |> Enum.reject(&is_nil/1)
-      |> Enum.join("\n")
-    else
-      "Computer history is macOS only; unavailable on this host."
-    end
+  # This machine's own lines where it records, the home's, then one block per
+  # computer of the home (M97 §8.5).
+  defp status_text(%{repo: repo, spool: spool} = host) do
+    [machine_lines(host), home_lines(repo, spool, host), computer_blocks(host)]
+    |> List.flatten()
+    |> Enum.reject(&is_nil/1)
+    |> Enum.join("\n")
   end
+
+  defp machine_lines(%{recorder?: true, spool: spool}),
+    do: [
+      enabled_line(),
+      capture_line(),
+      allowlist_line(),
+      coverage_line(spool),
+      summarizer_line()
+    ]
+
+  defp machine_lines(%{recorder?: false, computers: []}),
+    do: "Computer history: no computer of this home records it yet; a Mac records."
+
+  defp machine_lines(%{recorder?: false}),
+    do: "Computer history: kept on this home for its computers. #{home_summarizer_line()}"
+
+  defp home_lines(repo, spool, %{recorder?: true}),
+    do: [chain_line(), spool_line(spool), memory_line(repo, spool), access_line(repo)]
+
+  defp home_lines(repo, _spool, %{recorder?: false}),
+    do: [chain_line(), memory_line(repo, nil), access_line(repo)]
 
   defp enabled_line do
     "Computer history: #{if Config.enabled?(), do: "on", else: "off"}."
@@ -155,8 +176,8 @@ defmodule FermixChannels.Gateway.Commands.History do
   # an app it can only read titles in observes no typed text at all, which changes
   # what history can answer about that app — and it is otherwise visible only as a
   # gap row nobody reads. Omitted entirely when there is nothing to report.
-  defp coverage_line(repo) do
-    case Repo.computer_history_coverage_gaps(coverage_since(), server: repo) do
+  defp coverage_line(spool) do
+    case Spool.coverage_gaps(coverage_since(), server: spool) do
       {:ok, []} ->
         nil
 
@@ -171,7 +192,7 @@ defmodule FermixChannels.Gateway.Commands.History do
 
   defp coverage_since, do: System.system_time(:millisecond) - @coverage_window_ms
 
-  # The SQL filter (`Repo.computer_history_coverage_gaps/2`) is the contract for
+  # The SQL filter (`Spool.coverage_gaps/2`) is the contract for
   # which reasons arrive here, so a reason with no bucket is a code defect, not
   # input to absorb: it RAISES rather than landing in whichever clause happens to
   # be last (an unbucketed reason silently rendering as "AX refused" would tell
@@ -237,10 +258,19 @@ defmodule FermixChannels.Gateway.Commands.History do
   # Whether recall can surface in chat at all, and on which providers (§9.4). The
   # chain rule can deny every owner turn — a configured, capturing, summarizing
   # rail that never appears in a reply — and this is the line that says so, from
-  # the same resolver the doctor row and the setup card read. Reached only inside
-  # the macOS branch, so the posture is resolved for the platform the rest of this
-  # status body already describes.
-  defp chain_line, do: Gate.chain_posture_sentence(Gate.chain_posture(macos?: true))
+  # the same resolver the doctor row and the setup card read, resolved as if
+  # history surfaces, since the rest of this status body describes it.
+  defp chain_line, do: Gate.chain_posture_sentence(Gate.chain_posture(surfaces?: true))
+
+  # The route the home summarizes its computers' sittings on: what each sitting
+  # sent here reaches.
+  defp home_summarizer_line do
+    case Config.summarizer() do
+      :local -> "Summarizer: on-device (local)."
+      :default_provider -> "Summarizer: #{default_provider_label()}."
+      {:provider, provider} -> "Summarizer: #{provider}."
+    end
+  end
 
   # The one shared resolver (§22.1): subagent provider else primary — the same
   # answer the Gate and the summarizer use, so this privacy line never names a
@@ -254,14 +284,15 @@ defmodule FermixChannels.Gateway.Commands.History do
 
   # The unsummarized count is always shown: a summarizer that has fallen behind
   # is otherwise invisible until the spool starts expiring under it.
-  defp spool_line(repo) do
-    with {:ok, count} <- Repo.computer_history_count_events(server: repo),
-         {:ok, {unsummarized, oldest_ts}} <-
-           Repo.computer_history_unsummarized_stats(server: repo),
-         {:ok, state} <- Repo.computer_history_ensure_state(server: repo) do
+  defp spool_line(spool) do
+    with {:ok, count} <- Spool.count_events(server: spool),
+         {:ok, {unsummarized, oldest_ts}} <- Spool.unsent_stats(server: spool),
+         {:ok, state} <- Spool.state(server: spool),
+         {:ok, link} <- Spool.link(server: spool) do
       paused = pause_display(state.pause_until)
 
       "Spool: #{count} event(s), #{unsummarized} unsummarized#{lag_display(unsummarized, oldest_ts)}. " <>
+        expired_clause(link.expired_unsent) <>
         "Last summarization: #{state.last_status || "none"}. Paused until: #{paused}."
     else
       {:error, reason} ->
@@ -271,20 +302,92 @@ defmodule FermixChannels.Gateway.Commands.History do
     end
   end
 
+  # M97 §8.1: raw events that expired before they were ever sent are counted
+  # and shown, never hidden.
+  defp expired_clause(0), do: ""
+  defp expired_clause(1), do: "1 event expired before it was sent. "
+  defp expired_clause(count), do: "#{count} events expired before they were sent. "
+
   # The two derived layers (§24.4): how much journal there is, how much current
   # work, when the roll-up last ran, and whether a sitting is still open. A
   # roll-up that stopped happening is otherwise invisible until "what am I working
   # on" goes stale.
-  defp memory_line(repo) do
+  defp memory_line(repo, spool) do
     with {:ok, notes} <- Repo.computer_history_count_memories(server: repo, kind: :session),
          {:ok, threads} <- Repo.computer_history_count_memories(server: repo, kind: :thread),
-         {:ok, state} <- Repo.computer_history_ensure_state(server: repo) do
+         {:ok, state} <- Repo.computer_history_ensure_state(server: repo),
+         {:ok, open_since} <- open_since(spool) do
       "Memory: #{quantity(notes, "session note")}, #{quantity(threads, "active thread")}" <>
-        rollup_clause(state.last_rollup_ts) <> open_clause(state.session_open_since_ts) <> "."
+        rollup_clause(state.last_rollup_ts) <> open_clause(open_since) <> "."
     else
       {:error, reason} ->
         Logger.warning("computer_history memory status unavailable: #{inspect(reason)}")
         "Memory: unavailable."
+    end
+  end
+
+  defp open_since(nil), do: {:ok, nil}
+
+  defp open_since(spool) do
+    with {:ok, state} <- Spool.state(server: spool), do: {:ok, state.session_open_since_ts}
+  end
+
+  # -- one block per computer (M97 §8.5) --------------------------------------------
+
+  defp computer_blocks(%{computers: []}), do: []
+
+  defp computer_blocks(%{computers: computers, repo: repo}) do
+    with {:ok, rows} <- Repo.computer_history_home(:computer_rows, [], server: repo),
+         {:ok, notes} <- Repo.computer_history_home(:notes_by_computer, [], server: repo) do
+      rows = Map.new(rows, &{&1.computer_id, &1})
+      notes = Map.new(notes)
+      Enum.map(computers, &computer_block(&1, Map.get(rows, &1.device_id), notes, repo))
+    else
+      {:error, reason} ->
+        Logger.warning("computer_history computer status unavailable: #{inspect(reason)}")
+        "Computers: unavailable."
+    end
+  end
+
+  defp computer_block(computer, row, notes, repo) do
+    "#{computer.name}: history #{offer_phrase(computer)}; #{seen_phrase(computer)}; " <>
+      "#{sitting_phrase(row)}; #{quantity(Map.get(notes, computer.device_id, 0), "session note")}" <>
+      pending_phrase(computer, row, repo) <> "."
+  end
+
+  defp offer_phrase(computer) do
+    case Enum.find(computer.offers, &(&1.id == "history")) do
+      %{state: :on} -> "on"
+      %{state: state, sentence: sentence} when is_binary(sentence) -> "#{state} (#{sentence})"
+      %{state: state} -> "#{state}"
+      nil -> "not said"
+    end
+  end
+
+  defp seen_phrase(%{connected: true}), do: "connected"
+  defp seen_phrase(%{last_seen: nil}), do: "not seen yet"
+
+  defp seen_phrase(%{last_seen: %DateTime{} = at}),
+    do: "away, last seen #{age_phrase(DateTime.diff(DateTime.utc_now(), at, :millisecond))} ago"
+
+  defp sitting_phrase(nil), do: "no sitting received"
+
+  defp sitting_phrase(%{last_submission_at: at, last_status: status, last_reason: reason}) do
+    word = if reason, do: "#{status}, #{reason}", else: status
+    "last sitting #{age_phrase(System.system_time(:millisecond) - at)} ago (#{word})"
+  end
+
+  # The purges and pauses from chat it has not applied: until it does, the home
+  # takes nothing from it inside them.
+  defp pending_phrase(computer, row, repo) do
+    mark = if row, do: row.delivered_mark, else: 0
+
+    case Repo.computer_history_home(:intervals_after, [computer.device_id, mark, 256],
+           server: repo
+         ) do
+      {:ok, []} -> ""
+      {:ok, pending} -> "; #{length(pending)} purge or pause not yet applied there"
+      {:error, _reason} -> "; purges and pauses not yet applied there: unknown"
     end
   end
 
@@ -364,61 +467,100 @@ defmodule FermixChannels.Gateway.Commands.History do
 
   # --- pause --------------------------------------------------------------
 
-  defp pause(duration, reply_fn, repo) do
+  # A pause from chat (M97 §8.5) is recorded on the home, which then takes no
+  # sitting stamped inside it from any machine; this machine pauses at once, and
+  # each connected computer is told.
+  defp pause(duration, reply_fn, host) do
     case Purge.parse_window(duration) do
       {:ok, {:last, ms}} ->
-        until = DateTime.utc_now() |> DateTime.add(ms, :millisecond) |> DateTime.to_iso8601()
-        persist_pause(until, reply_fn, repo)
+        now = System.system_time(:millisecond)
+        reply(reply_fn, pause_everywhere(now, now + ms, host))
 
       _invalid ->
         reply(reply_fn, "Usage: /history pause 10m|1h|24h")
     end
   end
 
-  # The horizon is enforced by Ingest (each batch re-reads it), so the success
-  # reply is true the moment the write lands — and a failed write must never be
-  # reported as a pause the owner then relies on.
-  defp persist_pause(until, reply_fn, repo) do
-    case Repo.computer_history_set_pause_until(until, server: repo) do
-      :ok ->
-        reply(
-          reply_fn,
-          "Computer-history capture paused until #{until}. It resumes automatically then."
-        )
+  # The horizon is enforced by each machine's Ingest (each batch re-reads it) and
+  # by the home's refusal, so the success reply is true the moment the writes
+  # land — and a failed write must never be reported as a pause the owner then
+  # relies on.
+  defp pause_everywhere(now, until_ms, host) do
+    until = until_ms |> DateTime.from_unix!(:millisecond) |> DateTime.to_iso8601()
 
+    with {:ok, id} <-
+           Repo.computer_history_home(:pause_window, [now, until_ms, now, :all],
+             server: host.repo
+           ),
+         :ok <- pause_here(%{id: id, from_ts: now, to_ts: until_ms, issued_at: now}, now, host) do
+      "Computer-history capture paused until #{until}. It resumes automatically then." <>
+        told(host)
+    else
       {:error, reason} ->
         Logger.error("computer_history pause persist failed: #{inspect(reason)}")
 
-        reply(
-          reply_fn,
-          "Couldn't persist the pause (#{inspect(reason)}) — capture is NOT paused. " <>
-            "Check the daemon log and try again."
-        )
+        "Couldn't persist the pause (#{inspect(reason)}) — capture is NOT paused. " <>
+          "Check the daemon log and try again."
     end
+  end
+
+  defp pause_here(_interval, _now, %{recorder?: false}), do: :ok
+
+  defp pause_here(interval, now, host) do
+    Spool.apply_intervals(
+      [Map.put(interval, :kind, "pause")],
+      DateTime.from_unix!(now, :millisecond),
+      server: host.spool
+    )
   end
 
   # --- purge --------------------------------------------------------------
 
-  defp purge(window, reply_fn, repo) do
+  defp purge(window, reply_fn, host) do
     case Purge.parse_window(window) do
-      {:ok, parsed} -> reply(reply_fn, run_purge(parsed, repo))
+      {:ok, parsed} -> reply(reply_fn, run_purge(parsed, host))
       {:error, :invalid_window} -> reply(reply_fn, "Usage: /history purge 10m|1h|24h|all")
     end
   end
 
-  defp run_purge(window, repo) do
-    case Purge.purge(window, repo: repo) do
+  defp run_purge(window, host) do
+    case Purge.purge(window, repo: host.repo, spool: host.spool) do
       {:ok, %{events: events, memories: memories}} ->
         "Purged #{events} event(s) and #{memories} activity memory(ies). Threads that drew on " <>
           "that window were removed too; the next roll-up rewrites the thread list from the " <>
-          "surviving threads and the session notes written since the last roll-up. This cannot " <>
-          "reach: replies already delivered, any summaries already sent to a remote provider, " <>
-          "backups you keep yourself, or another daemon's store on the same Mac. Purge is logical " <>
-          "deletion — rows leave every query, but raw bytes may linger in the database until overwritten."
+          "surviving threads and the session notes written since the last roll-up." <>
+          told(host) <>
+          " This cannot reach: replies already delivered, any summaries already sent to a " <>
+          "remote provider, backups (yours, and your Fermix server's if you have one), or " <>
+          "another daemon's store on the same Mac. Purge is logical deletion — rows leave every " <>
+          "query, but raw bytes may linger in the database until overwritten."
 
       {:error, reason} ->
         "Purge failed: #{inspect(reason)}."
     end
+  end
+
+  # What the home's computers were told (M97 §8.5): a computer that is away is
+  # told when it next connects, and until then the home takes nothing from it in
+  # that window.
+  defp told(%{computers: []}), do: ""
+
+  defp told(host) do
+    %{applied: applied, away: away, failed: failed} = host.deliver.(repo: host.repo)
+
+    [applied_clause(applied), later_clause(away ++ failed)]
+    |> Enum.reject(&(&1 == ""))
+    |> Enum.join()
+  end
+
+  defp applied_clause([]), do: ""
+  defp applied_clause(names), do: " Applied on #{Enum.join(names, ", ")}."
+
+  defp later_clause([]), do: ""
+
+  defp later_clause(names) do
+    " #{Enum.join(names, ", ")} #{if length(names) == 1, do: "gets", else: "get"} it when " <>
+      "next connected; until then this home takes nothing from them inside that window."
   end
 
   # --- off ----------------------------------------------------------------

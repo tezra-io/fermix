@@ -24,6 +24,35 @@ defmodule FermixCore.IMessageTest do
              "imessage runs only on the Mac whose Messages it reads"
   end
 
+  # M97 §6.4: off a Mac a Mac of the home carries it, but only on a build
+  # that offers Always On; on any other there is no server to speak of.
+  describe "carrier/1" do
+    test "a Mac carries its own Messages" do
+      assert IMessage.carrier(macos?: true, carried?: false) == :here
+    end
+
+    test "off a Mac, on a build a Mac can carry it for, the Mac that offers it" do
+      studio = %FermixCore.Computers.Computer{
+        device_id: "d-1",
+        name: "studio Mac",
+        offers: [%{id: "imessage", state: :on}]
+      }
+
+      assert IMessage.carrier(macos?: false, carried?: true, computers: [studio]) ==
+               {:computer, studio}
+
+      assert IMessage.carrier(macos?: false, carried?: true, computers: []) == :none
+    end
+
+    test "off a Mac, on a build no Mac can carry it for, it runs only on a Mac" do
+      assert IMessage.carrier(macos?: false, carried?: false, computers: []) ==
+               :mac_only
+
+      assert IMessage.mac_only_sentence() ==
+               "iMessage runs only on the Mac whose Messages it reads."
+    end
+  end
+
   describe "normalize_handle/1" do
     test "a phone number loses its separators and keeps its plus" do
       assert IMessage.normalize_handle(" +1 (555) 123-4567 ") == {:ok, "+15551234567"}

@@ -234,8 +234,14 @@ defmodule FermixCore.Computers.Capabilities.Browser do
     with {:ok, seams} <- seams(context),
          {:ok, session} <- session(context),
          {:ok, args} <- staged(op, request, part, seams, context.id) do
+      turn = %{
+        session: session,
+        conversation: request["conversation"],
+        worker?: context.origin == :worker
+      }
+
       {served, backend} =
-        HeldTurn.run(seams.turns, session, fn -> serve(op, request, args, seams) end)
+        HeldTurn.run(seams.turns, turn, fn -> serve(op, request, args, seams) end)
 
       answered(served, backend, request["action"], seams)
     end

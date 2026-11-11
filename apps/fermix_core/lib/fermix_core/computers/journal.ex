@@ -169,9 +169,10 @@ defmodule FermixCore.Computers.Journal do
   @doc """
   Closes every invocation the journal holds as started and never finished:
   a `finished` record with status `unknown` and the note `interrupted`, at
-  `now`. Answers how many it closed.
+  `now`. Answers each one it closed, as `lookup/2` would read it now, oldest
+  first.
   """
-  @spec interrupted(Path.t(), DateTime.t()) :: {:ok, non_neg_integer()} | {:error, error()}
+  @spec interrupted(Path.t(), DateTime.t()) :: {:ok, [entry()]} | {:error, error()}
   def interrupted(dir, %DateTime{} = now) when is_binary(dir) do
     with {:ok, records} <- read_all(dir) do
       open = for %{status: nil} = entry <- entries(records), do: entry
@@ -180,7 +181,8 @@ defmodule FermixCore.Computers.Journal do
   end
 
   defp close_all(dir, open, now) do
-    Enum.reduce_while(open, {:ok, 0}, fn entry, {:ok, count} ->
+    open
+    |> Enum.reduce_while({:ok, []}, fn entry, {:ok, closed} ->
       fields = %{
         id: entry.id,
         at: now,
@@ -191,10 +193,24 @@ defmodule FermixCore.Computers.Journal do
       }
 
       case append_finished(dir, fields) do
-        :ok -> {:cont, {:ok, count + 1}}
+        :ok -> {:cont, {:ok, [closed_entry(entry, fields) | closed]}}
         {:error, _reason} = error -> {:halt, error}
       end
     end)
+    |> then(fn
+      {:ok, closed} -> {:ok, Enum.reverse(closed)}
+      error -> error
+    end)
+  end
+
+  defp closed_entry(entry, fields) do
+    %{
+      entry
+      | finished_at: iso(fields.at),
+        status: "unknown",
+        result_bytes: 0,
+        duration_ms: fields.duration_ms
+    }
   end
 
   # -- writing ------------------------------------------------------------------

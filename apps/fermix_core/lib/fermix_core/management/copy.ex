@@ -86,13 +86,12 @@ defmodule FermixCore.Management.Copy do
   @internal_words ~r/\b(?:epochs?|primar(?:y|ies)|candidates?|relays?|rails?|phases?|ledgers?|daemons?|(?<!access )key ids?)\b/i
   # What runs only on the computer a move leaves, in the order it is named.
   @stays_here [
-    imessage: "iMessage",
     voice: "voice calls",
     meetings: "meetings",
     accessories: "StackChan"
   ]
   # The features named alone in the singular.
-  @singular_features [[:imessage], [:accessories]]
+  @singular_features [[:accessories]]
   # What each loopback port a tunnel reaches carries, in the order named.
   @carried [whatsapp: "WhatsApp", cues: "webhook sources"]
   # What reaches the server through Funnel, as the webhooks' sentence starts.
@@ -638,11 +637,11 @@ defmodule FermixCore.Management.Copy do
         "to your recovery passphrase."
 
   @doc """
-  What a move stops among `features` (`:imessage`, `:voice`, `:meetings`),
-  as a sentence starts: "iMessage, voice calls and meetings stop after the
-  move", "Voice calls stop after the move".
+  What a move stops among `features` (`:voice`, `:meetings`,
+  `:accessories`), as a sentence starts: "Voice calls and meetings stop
+  after the move", "StackChan stops after the move".
   """
-  @spec stops_after_move([:imessage | :voice | :meetings | :accessories, ...]) :: String.t()
+  @spec stops_after_move([:voice | :meetings | :accessories, ...]) :: String.t()
   def stops_after_move([_ | _] = features) do
     names = for {feature, name} <- @stays_here, feature in features, do: name
     true = length(names) == length(Enum.uniq(features))
@@ -663,11 +662,11 @@ defmodule FermixCore.Management.Copy do
   end
 
   @doc """
-  What a move back brings back among `features` (`:imessage`, `:voice`,
-  `:meetings`) on the computer `name` it returns to, as a sentence starts:
+  What a move back brings back among `features` (`:voice`, `:meetings`,
+  `:accessories`) on the computer `name` it returns to, as a sentence starts:
   "Voice calls and meetings run on studio-mac again after the move".
   """
-  @spec runs_again([:imessage | :voice | :meetings | :accessories, ...], String.t()) :: String.t()
+  @spec runs_again([:voice | :meetings | :accessories, ...], String.t()) :: String.t()
   def runs_again([_ | _] = features, name) when is_binary(name) do
     names = for {feature, label} <- @stays_here, feature in features, do: label
     true = length(names) == length(Enum.uniq(features))

@@ -51,9 +51,7 @@ defmodule FermixCore.Home.Archive do
   **What does not travel as consent or history.** A restore withdraws
   coding-harness consent, moves a keyring-mode home to the file store on a host
   whose keyring did not answer `available` (`FermixCore.Home.Archive.RestoredConfig`;
-  a probe that timed out counts as not answering, logged once), deletes
-  screen history from the restored database
-  (`FermixCore.Home.Archive.ScreenHistory`), and names the installed plugins
+  a probe that timed out counts as not answering, logged once), and names the installed plugins
   built for another OS or architecture (the manifest's `host`). Sandbox grants
   and the machine file (`machine.toml`, `FermixCore.Setup.MachineFile`) are
   device-local and never in the archive, and a home an earlier engine wrote,
@@ -66,7 +64,6 @@ defmodule FermixCore.Home.Archive do
   alias FermixCore.Home.Archive.ConfigText
   alias FermixCore.Home.Archive.Manifest
   alias FermixCore.Home.Archive.RestoredConfig
-  alias FermixCore.Home.Archive.ScreenHistory
   alias FermixCore.Home.Archive.Seal
   alias FermixCore.Home.DaemonProbe
   alias FermixCore.Home.DeviceLocal
@@ -79,8 +76,6 @@ defmodule FermixCore.Home.Archive do
 
   @manifest_entry "manifest.json"
   @config "config.toml"
-  @database "memory.db"
-  @database_sidecars ~w(memory.db-wal memory.db-shm memory.db-journal)
   @plugin_lockfile "plugins/installed.json"
   @home_prefix "home/"
   @max_depth 64
@@ -112,7 +107,6 @@ defmodule FermixCore.Home.Archive do
           instance_role_dropped: boolean(),
           device_settings_dropped: [String.t()],
           keyring_secrets: non_neg_integer(),
-          screen_history_removed: non_neg_integer(),
           source_host: String.t(),
           host: String.t(),
           plugins_to_reinstall: [String.t()]
@@ -169,9 +163,8 @@ defmodule FermixCore.Home.Archive do
 
   `opts` replace this host's facts in tests: `:host` (the plugin installer's
   target name, such as `linux-x86_64`), `:keyring_usable?` (a 0-arity
-  function), `:probe_timeout_ms` (the bound on each question the keyring
-  probe asks, when `:keyring_usable?` is not given) and `:now_ms` (the
-  screen-history clear's bound).
+  function) and `:probe_timeout_ms` (the bound on each question the keyring
+  probe asks, when `:keyring_usable?` is not given).
 
   Refuses, by name: a passphrase under twelve bytes, a root that is not empty
   (`:root_not_empty`), an archive that does not open (`:archive_rejected`), a
@@ -200,8 +193,8 @@ defmodule FermixCore.Home.Archive do
   Makes `root` the next primary from a verified `manifest` and its files, the
   one restore path an archive and a snapshot (`FermixCore.Home.Snapshot`)
   share: `primary_epoch` the manifest's plus one, `config.toml` settled for
-  this host and path (`RestoredConfig`), screen history cleared, the plugins
-  built for another host named, each file written with its recorded mode under
+  this host and path (`RestoredConfig`), the plugins built for another host
+  named, each file written with its recorded mode under
   `0700` directories, and every link recreated. A failure part-way removes
   exactly what it wrote.
 
@@ -221,12 +214,11 @@ defmodule FermixCore.Home.Archive do
          {:ok, epoch} <- next_epoch(manifest.primary_epoch),
          {:ok, source, settled} <- settle_config(source, manifest, root, host, opts),
          {:ok, reinstall} <- plugins_to_reinstall(source, manifest, host),
-         {:ok, removed} <- write_home(root, root_state, manifest, source, epoch, now_ms(opts)) do
+         :ok <- write_home(root, root_state, manifest, source, epoch) do
       {:ok,
        Map.merge(settled, %{
          files: length(manifest.files),
          epoch: epoch,
-         screen_history_removed: removed,
          source_host: manifest.host,
          host: host,
          plugins_to_reinstall: reinstall
@@ -248,8 +240,6 @@ defmodule FermixCore.Home.Archive do
 
   defp host_target({:ok, {os, arch}}), do: {:ok, "#{os}-#{arch}"}
   defp host_target({:error, reason}), do: {:error, {:host_unsupported, reason}}
-
-  defp now_ms(opts), do: Keyword.get_lazy(opts, :now_ms, fn -> System.os_time(:millisecond) end)
 
   # -- create -----------------------------------------------------------------
 
@@ -801,34 +791,15 @@ defmodule FermixCore.Home.Archive do
     if epoch + 1 <= Epoch.max_epoch(), do: {:ok, epoch + 1}, else: {:error, :epoch_overflow}
   end
 
-  defp write_home(root, root_state, manifest, source, epoch, now_ms) do
+  # Computer history's notes are the home's and travel with it (M97 §8.6); its
+  # raw events never were in the home's database once memory.db's migration 59
+  # ran, and a restored home from before it drops them at its first boot.
+  defp write_home(root, root_state, manifest, source, epoch) do
     with :ok <- prepare_root(root, root_state) do
       case write_entries(root, manifest, source) do
-        {:ok, written} -> finish_home(root, root_state, manifest, written, epoch, now_ms)
+        {:ok, written} -> write_epoch(root, root_state, written, epoch)
         {:error, reason, touched} -> roll_back(root, root_state, touched, reason)
       end
-    end
-  end
-
-  # SQLite may leave its own sidecars beside the database it just changed, so a
-  # roll-back after the clear removes those too.
-  defp finish_home(root, root_state, manifest, written, epoch, now_ms) do
-    touched = @database_sidecars ++ written
-
-    with {:ok, removed} <- clear_screen_history(root, root_state, manifest, touched, now_ms),
-         :ok <- write_epoch(root, root_state, touched, epoch) do
-      {:ok, removed}
-    end
-  end
-
-  defp clear_screen_history(root, root_state, manifest, touched, now_ms) do
-    if Enum.any?(manifest.files, &(&1.path == @database)) do
-      case ScreenHistory.clear(Path.join(root, @database), now_ms) do
-        {:ok, removed} -> {:ok, removed}
-        {:error, reason} -> roll_back(root, root_state, touched, reason)
-      end
-    else
-      {:ok, 0}
     end
   end
 

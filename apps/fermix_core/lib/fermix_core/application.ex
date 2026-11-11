@@ -403,7 +403,7 @@ defmodule FermixCore.Application do
         maybe_realtime_supervisor(),
         maybe_computer_use_supervisor(role),
         maybe_screen_seat(role),
-        maybe_computer_history_supervisor(),
+        maybe_computer_history_supervisor(role),
         maybe_skill_curation_scheduler(),
         # Says where a scheduled job's or a cue's message came from on the
         # timeline rows written before `metadata.origin` existed, once most of
@@ -633,14 +633,15 @@ defmodule FermixCore.Application do
       else: []
   end
 
-  # Computer History (MILESTONE_32 §6.3): the always-present, inert supervisor
-  # is present on macOS whenever the daemon boots, regardless of `enabled?()` —
-  # Retention must always run so a spool left behind by a disable still drains
-  # by the 48h horizon (inv. 16). Its work is tick-gated; the timer is disabled
-  # in `:test` (the scheduler precedent), never by omission. Off macOS the whole
-  # feature is unavailable, so the supervisor is absent (Decision 12).
-  defp maybe_computer_history_supervisor do
-    if ComputerHistory.macos?() do
+  # Computer History (MILESTONE_32 §6.3; M97 §8.1): the always-present, inert
+  # supervisor of both halves. On the home it is always there, whatever the
+  # platform, since the home keeps every machine's notes and rolls them up; on a
+  # computer only where this system has a recorder. Retention must always run so
+  # a spool left behind by a disable still drains by the 48h horizon (inv. 16).
+  # Its work is tick-gated; the timer is disabled in `:test` (the scheduler
+  # precedent), never by omission.
+  defp maybe_computer_history_supervisor(role) do
+    if role == :primary or ComputerHistory.recorder?() do
       [{ComputerHistorySupervisor, timer_enabled: @compiled_env != :test}]
     else
       []

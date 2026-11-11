@@ -111,6 +111,8 @@ defmodule FermixChannels.Channels.IMessage.TwoEnginesIMessageTest do
       id: :server_helper
     )
 
+    tasks = start_supervised!(Task.Supervisor, id: :server_listener_tasks)
+
     start_supervised!(
       {Listener,
        name: listener,
@@ -118,6 +120,7 @@ defmodule FermixChannels.Channels.IMessage.TwoEnginesIMessageTest do
        server: helper,
        home: ctx.server_home,
        recipients: @recipients,
+       tasks: tasks,
        agent: CapturingAgent,
        agent_server: self(),
        probe_retry_ms: 20,

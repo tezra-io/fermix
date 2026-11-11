@@ -15,8 +15,8 @@ defmodule FermixCore.Computers.Invocation do
   and its part through the transport, and waits for `invoke_result` and any
   part it announces (the two may cross lanes), at most `deadline_ms` and
   #{2_000} ms more for the link. A computer that names no deadline
-  (`deadline_ms` 0, a long-lived op) is waited on until it answers or is
-  cancelled (`Computers.cancel/2`).
+  (`deadline_ms` 0, a long-lived op) is waited on until it answers or its
+  caller ends, which has `Computers.Calls` cancel it on the computer.
 
   **An effect is never sent twice by the link.** When the session ends and
   comes back, `Calls` tells this caller (`{:computer_invoke, id,
@@ -75,11 +75,6 @@ defmodule FermixCore.Computers.Invocation do
       {:refused, %Outcome{} = outcome} -> {:error, outcome}
     end
   end
-
-  @doc "Cancels the invocation `id` on its computer; its answer comes to its caller."
-  @spec cancel(String.t(), keyword()) :: :ok | {:error, :not_found | term()}
-  def cancel(id, opts) when is_binary(id) and is_list(opts),
-    do: Calls.cancel(Keyword.get(opts, :calls, Calls), id)
 
   defp answer(%Outcome{status: :ok} = outcome), do: {:ok, outcome}
   defp answer(%Outcome{} = outcome), do: {:error, outcome}

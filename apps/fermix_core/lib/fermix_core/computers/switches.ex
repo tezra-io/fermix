@@ -35,8 +35,10 @@ defmodule FermixCore.Computers.Switches do
   switches, and tells this computer's offers reporter
   (`FermixChannels.Desktop.Offers`, registered as `listener/0`) to send its
   offers again, its invocations (`invoke_listener/0`) to read the master
-  switch again, and its screen (`screen_listener/0`) to let go of the server
-  when the master or the screen switch went off.
+  switch again, its screen (`screen_listener/0`) to let go of the server
+  when the master or the screen switch went off, and its browser
+  (`browser_listener/0`) to end the server's turns it holds when the master
+  or the browser switch went off.
   """
 
   alias FermixCore.Setup.ConfigStore
@@ -62,6 +64,7 @@ defmodule FermixCore.Computers.Switches do
   @listener :fermix_computer_offers
   @invoke_listener :fermix_computer_invoke
   @screen_listener :fermix_computer_screen
+  @browser_listener :fermix_computer_browser
   @review_kept_sentence "A review cannot be taken back. Switch off what Fermix on your server " <>
                           "may use instead."
 
@@ -108,6 +111,14 @@ defmodule FermixCore.Computers.Switches do
   """
   @spec screen_listener() :: atom()
   def screen_listener, do: @screen_listener
+
+  @doc """
+  The registered name of the server's turns this computer's browser holds
+  (`FermixCore.Browser.HeldTurnListener`), told as well: the master or the
+  browser switch off ends every one of them at once, with what it runs.
+  """
+  @spec browser_listener() :: atom()
+  def browser_listener, do: @browser_listener
 
   @doc """
   The section as application environment holds it: accepts the parsed file
@@ -229,11 +240,11 @@ defmodule FermixCore.Computers.Switches do
   def sentences, do: [@review_kept_sentence]
 
   # The offers reporter re-sends what this computer offers, the invocations
-  # read the master switch again, and the screen lets go of the server when its
-  # switch went off; none of the first two runs on an engine that is no linked
-  # computer.
+  # read the master switch again, the screen lets go of the server and the
+  # browser ends the server's turns it holds when their switch went off; none
+  # of the first two runs on an engine that is no linked computer.
   defp notify do
-    for name <- [@listener, @invoke_listener, @screen_listener] do
+    for name <- [@listener, @invoke_listener, @screen_listener, @browser_listener] do
       case Process.whereis(name) do
         nil -> :ok
         pid -> GenServer.cast(pid, :switches_changed)

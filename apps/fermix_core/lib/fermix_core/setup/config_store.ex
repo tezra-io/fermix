@@ -10,6 +10,7 @@ defmodule FermixCore.Setup.ConfigStore do
 
   alias FermixCore.Accessories.Config, as: AccessoriesConfig
   alias FermixCore.Browser.Config, as: BrowserConfig
+  alias FermixCore.BuildInfo
   alias FermixCore.Capabilities.MCP.Config, as: McpConfig
   alias FermixCore.Capabilities.MCP.OAuth.Grant, as: McpGrant
   alias FermixCore.Capabilities.MCP.Secrets, as: McpSecrets
@@ -38,6 +39,7 @@ defmodule FermixCore.Setup.ConfigStore do
   alias FermixCore.Realtime.Config, as: RealtimeConfig
   alias FermixCore.Sandbox.Config, as: SandboxConfig
   alias FermixCore.Sandbox.EnvHealth
+  alias FermixCore.Setup.EngineOwner
   alias FermixCore.Setup.MachineFile
   alias FermixCore.Setup.RestartState
   alias FermixCore.Setup.SecretStore
@@ -239,23 +241,74 @@ defmodule FermixCore.Setup.ConfigStore do
   (`bootstrap_runtime_config/1`, which `config/runtime.exs` calls for the
   daemon and every CLI verb alike), so a boot stopped between the writes is
   finished by the next. A home that is not there yet has nothing to move.
-  `opts`: `:server?`, whether this machine is an Always On server, in place of
-  `Home.Candidate.server?/1` (tests).
+
+  A home the Mac app manages (its `engine-owner.json` names the app, whose
+  bundle is still there: `EngineOwner.app_managed_marker?/1`) is migrated by
+  an app engine only: there the app's own engine moves the settings, at its
+  first start on a release that reads `machine.toml`. Any other engine (a
+  formula binary, a source checkout) refuses by name a migration that would
+  write anything there, `{:app_managed, home}`, and takes no lock; one with
+  nothing to move goes on. `opts`: `:server?`, whether this machine is an
+  Always On server, in place of `Home.Candidate.server?/1`, `:app_engine?`
+  in place of `BuildInfo.app_engine?/0`, and `:bundle_exists?` for the
+  marker (tests).
   """
   @spec migrate_machine_file(Path.t(), keyword()) :: :ok | {:error, term()}
   def migrate_machine_file(home, opts \\ [])
       when is_binary(home) and home != "" and is_list(opts) do
-    if File.dir?(home) do
-      server? = Keyword.get_lazy(opts, :server?, fn -> Candidate.server?(home) end)
-      with_config_lock(home, fn -> migrate_locked(home, server?) end)
-    else
-      :ok
+    if File.dir?(home), do: migrate_home(home, opts), else: :ok
+  end
+
+  defp migrate_home(home, opts) do
+    server? = Keyword.get_lazy(opts, :server?, fn -> Candidate.server?(home) end)
+
+    if app_managed_elsewhere?(home, opts),
+      do: refuse_if_pending(home, server?),
+      else: with_config_lock(home, fn -> migrate_locked(home, server?) end)
+  end
+
+  @doc """
+  Whether a boot of the Mix environment `env` may name its home as
+  `fermix_home` (`FERMIX_HOME`, nil or blank when unset) says: a source
+  checkout (`:dev`) never falls back to the installed home, so it needs the
+  variable, and refuses with the sentence that says so; every other build
+  defaults as `fermix_home/0` does. `config/runtime.exs` asks before the
+  configuration is read or anything is written.
+  """
+  @spec source_home(atom(), String.t() | nil) :: :ok | {:error, String.t()}
+  def source_home(:dev, fermix_home) when fermix_home in [nil, ""],
+    do:
+      {:error,
+       "this is a Fermix source checkout, which never uses the installed home by default. " <>
+         "Set FERMIX_HOME to the home it should use: a new temporary folder, or " <>
+         "~/.fermix-dev for the development daemon."}
+
+  def source_home(env, fermix_home)
+      when is_atom(env) and (is_nil(fermix_home) or is_binary(fermix_home)),
+      do: :ok
+
+  defp app_managed_elsewhere?(home, opts) do
+    not Keyword.get_lazy(opts, :app_engine?, &BuildInfo.app_engine?/0) and
+      EngineOwner.app_managed_marker?([home: home] ++ Keyword.take(opts, [:bundle_exists?]))
+  end
+
+  # What the migration would write, read without the lock: nothing, or a
+  # refusal naming the home the app's engine migrates.
+  defp refuse_if_pending(home, server?) do
+    with {:ok, config} <- read_named(home_document_path(home)),
+         {:ok, machine} <- read_named(MachineFile.path(home)) do
+      homeward = MachineFile.homeward(text(config), machine)
+      config = homeward.config || text(config)
+      plan = MachineFile.migration(config, homeward.machine || machine, server?)
+      writes = [homeward.config, homeward.machine, plan.machine, plan.config]
+
+      if Enum.all?(writes, &is_nil/1), do: :ok, else: {:error, {:app_managed, home}}
     end
   end
 
   defp migrate_locked(home, server?) do
-    with {:ok, config} <- read_settings(home_document_path(home)),
-         {:ok, machine} <- read_settings(MachineFile.path(home)),
+    with {:ok, config} <- read_named(home_document_path(home)),
+         {:ok, machine} <- read_named(MachineFile.path(home)),
          {:ok, config, machine} <- homeward(home, text(config), machine),
          plan = MachineFile.migration(config, machine, server?),
          :ok <- write_if(MachineFile.path(home), plan.machine),
@@ -478,6 +531,11 @@ defmodule FermixCore.Setup.ConfigStore do
   @spec load_error_sentence(term()) :: String.t()
   def load_error_sentence({:config, file, reason}) when is_binary(file) and is_atom(reason),
     do: "#{file} could not be read: #{:file.format_error(reason)}."
+
+  def load_error_sentence({:app_managed, home}) when is_binary(home),
+    do:
+      "#{home} is managed by Fermix.app, so only the app's engine moves this computer's " <>
+        "settings into its machine.toml. Open Fermix.app, or set FERMIX_HOME to another home."
 
   def load_error_sentence(reason), do: inspect(reason)
 

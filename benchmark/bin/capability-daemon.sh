@@ -65,6 +65,13 @@ up() {
     ( cd "$REPO_ROOT" && FERMIX_HOME="$HOME_DIR" \
         mix run --no-start --no-compile benchmark/bin/seed_cues.exs )
   fi
+  # With --computers, the computers suite's history notes are memory.db rows,
+  # written the same way (M97 §8.4).
+  if [ -f "$HOME_DIR/eval-fixtures/computers.json" ]; then
+    log "seeding the computers' history notes (--computers)"
+    ( cd "$REPO_ROOT" && FERMIX_HOME="$HOME_DIR" \
+        mix run --no-start --no-compile benchmark/bin/seed_history.exs )
+  fi
   # The world every `reset` puts back, taken while the daemon is still down.
   log "snapshotting the seeded state"
   "$BIN_DIR/eval_home_state.py" snapshot "$HOME_DIR"

@@ -16,13 +16,16 @@ defmodule FermixCore.IMessage do
   **Where it runs** (M97 §6.4) is `carrier/1`, the one answer the channel
   registry, the channel's own helper on a server, the owner-inbox choice for
   approvals, health and readiness all read: this host when it is a Mac, else
-  the one computer of the home whose Messages carry it.
+  the one computer of the home whose Messages carry it, and only on a build
+  that offers Always On (`carried_off_mac?/0`, the one check of that).
   """
 
   alias FermixCore.Computers
   alias FermixCore.Computers.Computer
+  alias FermixCore.Home.AlwaysOnRelease
 
   @unsupported_platform_message "imessage runs only on the Mac whose Messages it reads"
+  @mac_only_sentence "iMessage runs only on the Mac whose Messages it reads."
   @phone_separators ~r/[\s\-().]/
   @e164 ~r/^\+[1-9]\d{6,14}$/
   @email ~r/^[^@\s]+@[^@\s]+$/
@@ -32,29 +35,50 @@ defmodule FermixCore.IMessage do
 
   @typedoc """
   Where the channel runs: this host, the one computer that carries it,
-  every computer that offers it when more than one does, or nowhere.
+  every computer that offers it when more than one does, nowhere, or only
+  on a Mac, on a build where no Mac of the home can carry it.
   """
   @type carrier ::
-          :here | {:computer, Computer.t()} | {:conflict, [Computer.t(), ...]} | :none
+          :here
+          | {:computer, Computer.t()}
+          | {:conflict, [Computer.t(), ...]}
+          | :none
+          | :mac_only
 
   @doc "Whether this host is a Mac."
   @spec macos?() :: boolean()
   def macos?, do: :os.type() == {:unix, :darwin}
 
   @doc """
+  Whether a Mac of the home can carry iMessage for this engine when it is no
+  Mac (M97 §6.4): only on a build that offers Always On, since only there
+  does a home have computers. The one check the channel registry and
+  `carrier/1` read.
+  """
+  @spec carried_off_mac?() :: boolean()
+  def carried_off_mac?, do: AlwaysOnRelease.available?()
+
+  @doc """
   Where this home's iMessage runs (M97 §6.4): `:here` on a Mac, whose own
-  Messages the channel reads; elsewhere the one computer of the home that
+  Messages the channel reads; elsewhere, on a build a Mac of the home can
+  carry it for (`carried_off_mac?/0`), the one computer of the home that
   offers `imessage` as it last said (`{:computer, computer}`, away or not:
   `connected` says which), each of them when more than one does
   (`{:conflict, computers}`, since one home has one Messages bridge), or
-  `:none`.
+  `:none`; on any other build `:mac_only`, which speaks of no server.
 
-  `opts`: `:macos?` and `:computers` (the home's computers, in place of
-  `FermixCore.Computers.list/1`'s), so a test names the host and the home.
+  `opts`: `:macos?`, `:carried?` (in place of `carried_off_mac?/0`) and
+  `:computers` (the home's computers, in place of
+  `FermixCore.Computers.list/1`'s), so a test names the host, the build and
+  the home.
   """
   @spec carrier(keyword()) :: carrier()
   def carrier(opts \\ []) when is_list(opts) do
-    if Keyword.get_lazy(opts, :macos?, &macos?/0), do: :here, else: computer_carrier(opts)
+    cond do
+      Keyword.get_lazy(opts, :macos?, &macos?/0) -> :here
+      Keyword.get_lazy(opts, :carried?, &carried_off_mac?/0) -> computer_carrier(opts)
+      true -> :mac_only
+    end
   end
 
   defp computer_carrier(opts) do
@@ -90,6 +114,10 @@ defmodule FermixCore.IMessage do
     do:
       "#{second} offers Messages too, and one home has one Messages bridge, so Fermix " <>
         "goes on using #{bridge} and refuses #{second}."
+
+  @doc "The sentence for a build off a Mac where no Mac of the home can carry Messages."
+  @spec mac_only_sentence() :: String.t()
+  def mac_only_sentence, do: @mac_only_sentence
 
   @doc "The sentence for a home off a Mac where no Mac of its carries Messages."
   @spec none_sentence() :: String.t()

@@ -144,10 +144,11 @@ defmodule FermixCore.Computers.JournalTest do
     finished(dir, "inv-b", @now)
 
     later = DateTime.add(@now, 5, :second)
-    assert {:ok, 1} = Journal.interrupted(dir, later)
-    assert {:ok, 0} = Journal.interrupted(dir, later)
+    assert {:ok, [closed]} = Journal.interrupted(dir, later)
+    assert {:ok, []} = Journal.interrupted(dir, later)
 
-    assert {:ok, %{status: "unknown", duration_ms: 5_000}} = Journal.lookup(dir, "inv-a")
+    assert {:ok, %{status: "unknown", duration_ms: 5_000} = looked} = Journal.lookup(dir, "inv-a")
+    assert closed == looked
 
     note =
       dir

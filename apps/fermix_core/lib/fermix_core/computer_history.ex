@@ -1,46 +1,101 @@
 defmodule FermixCore.ComputerHistory do
   @moduledoc """
-  On-device computer-history rail (MILESTONE_32): an opt-in, off-by-default,
-  macOS-only recorder of an interaction-event stream, summarized on-device
-  into durable activity memories the owner can recall.
+  Computer history (MILESTONE_32; M97 §8): an opt-in, off-by-default recorder
+  of an interaction-event stream on each machine that has one, whose finished
+  sittings become notes on the home, marked with the machine they came from.
 
   This module is the thin facade over the subsystem's operative state. Every
   flow decision ("may activity reach *this* sink") goes through
   `FermixCore.ComputerHistory.Gate`, never a scattered `enabled?()` check —
-  the Gate is the single resolver (§9). This facade answers only the two
-  coarse questions the supervisor and the Gate snapshot need: is the feature
-  enabled, and is this a macOS host where it can run at all.
+  the Gate is the single resolver (§9). This facade answers the coarse
+  questions, each where its fact is (M97 §8.3): on a machine, whether it has a
+  recorder (`recorder?/0`) and records (`operative?/0`); on the home, whether
+  history can surface at all (`surfaces?/1`).
 
-  The capture layer *is* macOS (Accessibility TCC, NSWorkspace, AXObserver);
-  it does not port. On any non-macOS host the feature is unavailable —
-  `operative?/0` is false, nothing is advertised, and the config section is
-  inert (§4.2, Decision 12).
+  The capture layer is macOS today (Accessibility TCC, NSWorkspace,
+  AXObserver); a Linux recorder comes with a paired compux release (§8.8), and
+  until then a Linux machine records nothing, while a Linux server still keeps
+  and recalls the notes of the computers that do.
   """
+
+  require Logger
 
   alias FermixCore.ComputerHistory.Config
   alias FermixCore.ComputerHistory.Controller
-
-  require Logger
+  alias FermixCore.Computers
+  alias FermixCore.Memory.Repo
 
   @doc "Whether the operator has enabled computer history in config."
   @spec enabled?() :: boolean()
   def enabled?, do: Config.enabled?()
 
   @doc """
-  Whether this host is macOS. Production reads `:os.type/0`; tests inject the
-  platform through `Gate.snapshot/2`'s `:macos?` opt rather than mutating this,
-  so the suite stays hermetic on Linux CI (Code Rule 5, pass deps explicitly).
+  Whether this host is macOS: the fact `recorder?/0` reads. Tests inject the
+  facts the gates read (`:recording?`, `:recorder?`, `:surfaces?`) rather than
+  mutate this, so the suite stays hermetic on Linux CI (Code Rule 5).
   """
   @spec macos?() :: boolean()
   def macos?, do: :os.type() == {:unix, :darwin}
 
   @doc """
-  Whether the feature is operative: enabled *and* on a macOS host. This is the
-  master switch every Gate consumer sink is gated on; retention and purge run
-  independently of it (§6.3), so they do not consult this.
+  Whether this system has a recorder (M97 §8.3, §8.8): a Mac, in this release;
+  a Linux recorder comes with a paired compux release. The fact a computer's
+  recording is decided by, never whether the home can surface history.
+  """
+  @spec recorder?() :: boolean()
+  def recorder?, do: macos?()
+
+  @doc """
+  Whether history records here (M97 §8.3): this system has a recorder *and* it
+  is switched on. The master switch of the recorder and of this machine's
+  sending; retention and purge run independently of it (§6.3).
   """
   @spec operative?() :: boolean()
-  def operative?, do: macos?() and enabled?()
+  def operative?, do: recorder?() and enabled?()
+
+  @doc """
+  Whether computer history can surface in this home (M97 §8.3): what the home's
+  gates read in place of this host's platform; the grant rule then decides each
+  turn, as before. True when this machine records, or a computer of the home
+  offers its history, or, on a home with no recorder of its own (an Always On
+  server), the home holds notes. A home that records itself and switches its
+  history off hides it, as it always has, unless a computer still offers it.
+
+  `opts` (a test's or a caller's seams): `:recording?`, `:recorder?`,
+  `:computers` (the home's computers, `Computers.list/0`), `:repo`.
+  """
+  @spec surfaces?(keyword()) :: boolean()
+  def surfaces?(opts \\ []) when is_list(opts) do
+    Keyword.get_lazy(opts, :recording?, &operative?/0) or
+      offered?(Keyword.get_lazy(opts, :computers, &Computers.list/0)) or
+      (not Keyword.get_lazy(opts, :recorder?, &recorder?/0) and
+         holds_notes?(Keyword.get(opts, :repo, Repo)))
+  end
+
+  defp offered?(computers) do
+    Enum.any?(computers, fn computer ->
+      Enum.any?(computer.offers, &(&1.id == "history" and &1.state == :on))
+    end)
+  end
+
+  # A store that does not answer denies, loudly: a gate fails closed.
+  defp holds_notes?(repo) do
+    case Repo.computer_history_count_memories(server: repo, on_timeout: :error) do
+      {:ok, count} -> count > 0
+      {:error, :disabled} -> false
+      {:error, reason} -> notes_unknown(reason)
+    end
+  catch
+    :exit, reason -> notes_unknown(reason)
+  end
+
+  defp notes_unknown(reason) do
+    Logger.warning(
+      "computer_history: whether the home holds notes is unknown: #{inspect(reason)}"
+    )
+
+    false
+  end
 
   @doc """
   Raise the macOS Accessibility grant capture needs, via the shared compux driver

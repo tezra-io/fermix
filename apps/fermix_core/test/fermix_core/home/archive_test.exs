@@ -35,8 +35,6 @@ defmodule FermixCore.Home.ArchiveTest do
     "plugins/installed/invented/1.0.0/bin/run" => 0o755
   }
 
-  @database_files ["memory.db", "memory.db-wal", "memory.db-shm"]
-
   # An installed plugin names its version through a relative link.
   @link {"plugins/installed/invented/current", "1.0.0"}
 
@@ -100,23 +98,20 @@ defmodule FermixCore.Home.ArchiveTest do
                   instance_role_dropped: false,
                   device_settings_dropped: [],
                   keyring_secrets: 2,
-                  screen_history_removed: 3,
                   source_host: @host,
                   host: @host,
                   plugins_to_reinstall: []
                 }}
 
-      # The database's own files belong to SQLite once the restore has cleared
-      # screen history from it; the database is checked below.
-      for {path, file_mode} <- @included, path not in @database_files do
+      # The restore opens no database (M97 §8.6), so every file arrives as it
+      # was archived, the database and its sidecars included.
+      for {path, file_mode} <- @included do
         restored = Path.join(into, path)
         assert mode(restored) == file_mode, path
 
         if path != "config.toml",
           do: assert(File.read!(restored) == File.read!(Path.join(home, path)), path)
       end
-
-      assert mode(Path.join(into, "memory.db")) == @included["memory.db"]
 
       # The value that named the old home moved and consent was withdrawn;
       # nothing else in the file changed.
@@ -128,11 +123,12 @@ defmodule FermixCore.Home.ArchiveTest do
                )
                |> String.replace("approved = true", "approved = false")
 
-      # Screen history went from the restored database and nothing else did; the
-      # archived home's own database is untouched.
-      assert screen_history_rows(Path.join(into, "memory.db")) == 0
+      # Computer history's notes are the home's and travel with it (M97 §8.6): a
+      # restore deletes none of them. A home from before memory.db's migration 59
+      # still holds raw events, which its first boot drops (`Memory.Repo`).
+      assert history_rows(Path.join(into, "memory.db")) == 3
       assert unrelated_rows(Path.join(into, "memory.db")) == 1
-      assert screen_history_rows(Path.join(home, "memory.db")) == 3
+      assert history_rows(Path.join(home, "memory.db")) == 3
 
       {link, target} = @link
       assert File.read_link(Path.join(into, link)) == {:ok, target}
@@ -498,10 +494,10 @@ defmodule FermixCore.Home.ArchiveTest do
   defp create(home, archive),
     do: Archive.create(home, @passphrase, to: archive, hello: fn -> @not_running end, host: @host)
 
-  # This host's facts, pinned: a macOS host whose keyring answers, at a fixed now.
+  # This host's facts, pinned: a macOS host whose keyring answers.
   defp restore(archive, into, opts \\ []) do
     {passphrase, opts} = Keyword.pop(opts, :passphrase, @passphrase)
-    defaults = [host: @host, keyring_usable?: fn -> true end, now_ms: @now]
+    defaults = [host: @host, keyring_usable?: fn -> true end]
     Archive.restore(archive, passphrase, into, Keyword.merge(defaults, opts))
   end
 
@@ -550,8 +546,8 @@ defmodule FermixCore.Home.ArchiveTest do
     do: ~s({"invented": {"version": "1.0.0"}, "github": {"version": "2.0.0"}}\n)
 
   # A real database in rollback-journal mode, so SQLite never reads the seeded
-  # `-wal` and `-shm` text beside it: two screen-history events, one summary
-  # and one unrelated row.
+  # `-wal` and `-shm` text beside it: a home from before migration 59, with two
+  # raw computer-history events, one note and one unrelated row.
   defp seed_database!(db) do
     SafeRm.rm!(db)
     {:ok, conn} = Sqlite3.open(db)
@@ -578,7 +574,7 @@ defmodule FermixCore.Home.ArchiveTest do
     File.chmod!(db, @included["memory.db"])
   end
 
-  defp screen_history_rows(db) do
+  defp history_rows(db) do
     count(
       db,
       "SELECT (SELECT COUNT(*) FROM computer_history_events) + " <>
