@@ -6,11 +6,17 @@ defmodule FermixCore.Tools.SendAttachment do
   @behaviour FermixCore.Capabilities.Builtin.Tool
 
   alias FermixCore.Capabilities.Builtin.Tool
+  alias FermixCore.Computers.Capabilities.Files
+  alias FermixCore.Computers.Computer
+  alias FermixCore.Computers.Outcome
+  alias FermixCore.Computers.Remote
   alias FermixCore.Reply
   alias FermixCore.Sandbox
+  alias FermixCore.Tools.Media.Support, as: MediaSupport
   alias FermixCore.Tools.Telemetry, as: ToolTelemetry
 
   @kinds ~w(image document audio video voice)a
+  @kind_words Map.new(@kinds, &{Atom.to_string(&1), &1})
 
   @impl true
   @spec name() :: String.t()
@@ -86,8 +92,38 @@ defmodule FermixCore.Tools.SendAttachment do
   def category, do: :channel
 
   @impl true
+  def computer_capability, do: Files
+
+  @impl true
   @spec execute(map(), Tool.context()) :: {:ok, Tool.tool_result()}
   def execute(args, context) when is_map(args) and is_map(context) do
+    if Remote.computer(context),
+      do: execute_from_computer(args, context),
+      else: execute_here(args, context)
+  end
+
+  @doc """
+  The file to send, checked against the sandbox `context` names: its path
+  resolved inside the roots, a regular file, and how it is named and kinded.
+  What `execute/2` sends on this machine, and what a computer of the home
+  reads for its server (`Computers.Capabilities.Files`), which then sends it.
+  """
+  @spec attachment(map(), map()) :: {:ok, Reply.media_part()} | {:error, term()}
+  def attachment(args, context) when is_map(args) and is_map(context) do
+    with {:ok, input_path} <- input_path(args),
+         :ok <- reject_url(input_path),
+         {:ok, kind} <- kind(args),
+         {:ok, resolved_path} <- Sandbox.read_path(input_path, :send_attachment, context),
+         :ok <- regular_file(resolved_path) do
+      media_part(args, resolved_path, kind)
+    end
+  end
+
+  @doc "The words the model reads for a refusal `attachment/2` or a delivery gave."
+  @spec error_text(term()) :: String.t()
+  def error_text(reason), do: format_error(reason)
+
+  defp execute_here(args, context) do
     start = System.monotonic_time(:millisecond)
 
     result =
@@ -106,14 +142,78 @@ defmodule FermixCore.Tools.SendAttachment do
 
   defp do_execute(args, context) do
     with {:ok, reply_fn} <- reply_fn(context),
-         {:ok, input_path} <- input_path(args),
-         :ok <- reject_url(input_path),
-         {:ok, kind} <- kind(args),
-         {:ok, resolved_path} <- Sandbox.read_path(input_path, :send_attachment, context),
-         :ok <- regular_file(resolved_path),
-         {:ok, part} <- media_part(args, resolved_path, kind),
+         {:ok, part} <- attachment(args, context),
          :ok <- deliver(reply_fn, part) do
       {:ok, part.filename}
+    end
+  end
+
+  # From a computer of the home (M97 §6.4): that computer reads the file inside
+  # its own sandbox and answers its bytes; they land in this server's
+  # workspace (`media/computers/`) and go to the chat from here, once. Nothing
+  # is asked of the computer without a chat to send to.
+  defp execute_from_computer(args, context) do
+    started = System.monotonic_time(:millisecond)
+
+    case reply_fn(context) do
+      {:ok, reply_fn} ->
+        {_ended, outcome} = Remote.invoke(Files, "file.send", args, context)
+        result = sent_from(outcome, reply_fn, Remote.computer(context), context)
+        :ok = Remote.exec(name(), context, outcome, result, args, started)
+        {:ok, result}
+
+      {:error, reason} ->
+        result = Tool.error(reason)
+        ToolTelemetry.exec(name(), context, false, 0, input: args, result: {:ok, result})
+        {:ok, result}
+    end
+  end
+
+  defp sent_from(
+         %Outcome{status: :ok, result: %{"success" => true} = read} = outcome,
+         reply_fn,
+         computer,
+         context
+       )
+       when is_binary(outcome.part_bytes) do
+    with {:ok, part} <- received_part(read, outcome.part_bytes, computer, context),
+         :ok <- deliver(reply_fn, part) do
+      Tool.success("Sent attachment from #{computer.name}: #{part.filename}")
+    else
+      {:error, reason} ->
+        Tool.error("#{computer.name}'s file was not sent: #{format_error(reason)}")
+    end
+  end
+
+  defp sent_from(%Outcome{} = outcome, _reply_fn, %Computer{} = computer, _context),
+    do: Remote.result(outcome, computer)
+
+  defp received_part(%{"filename" => filename, "kind" => kind} = read, bytes, computer, context)
+       when is_binary(filename) and is_map_key(@kind_words, kind) do
+    name = safe_filename(filename)
+    rel = Path.join(["media", "computers", "#{MediaSupport.token()}-#{name}"])
+
+    case MediaSupport.write_bytes(rel, bytes, context, action: :send_attachment) do
+      {:ok, path} ->
+        {:ok,
+         %{kind: Map.fetch!(@kind_words, kind), path: path, filename: name}
+         |> maybe_put(:caption, optional_string(read, "caption"))
+         |> maybe_put(:mime_type, optional_string(read, "mime_type"))}
+
+      {:error, reason} ->
+        {:error, "#{computer.name}'s file could not be kept here: #{reason}"}
+    end
+  end
+
+  defp received_part(_read, _bytes, computer, _context),
+    do: {:error, "#{computer.name} answered with something that is not a file."}
+
+  # The name the file goes by, never a path: the computer's word is not trusted
+  # with this server's folders.
+  defp safe_filename(filename) do
+    case Path.basename(filename) do
+      name when name in ["", ".", ".."] -> "attachment"
+      name -> name
     end
   end
 

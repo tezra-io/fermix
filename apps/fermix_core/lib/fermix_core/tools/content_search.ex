@@ -5,6 +5,9 @@ defmodule FermixCore.Tools.ContentSearch do
 
   @behaviour FermixCore.Capabilities.Builtin.Tool
 
+  alias FermixCore.Capabilities.Builtin.Tool
+  alias FermixCore.Computers.Capabilities.Files
+  alias FermixCore.Computers.Remote
   alias FermixCore.Sandbox
   alias FermixCore.Tools.Support
 
@@ -67,9 +70,22 @@ defmodule FermixCore.Tools.ContentSearch do
   def category, do: :file
 
   @impl true
+  def computer_capability, do: Files
+
+  @impl true
   def execute(args, context) when is_map(args) and is_map(context) do
-    Support.run(name(), context, fn -> do_execute(args, context) end)
+    if Remote.computer(context),
+      do: Remote.run(name(), Files, "file.search", args, context),
+      else: Support.run(name(), context, fn -> do_execute(args, context) end)
   end
+
+  @doc """
+  The search without its exec event, under the sandbox `context` names: what
+  `execute/2` runs on this machine and what a computer of the home runs for
+  its server (`Computers.Capabilities.Files`).
+  """
+  @spec perform(map(), map()) :: {:ok, Tool.tool_result()}
+  def perform(args, context) when is_map(args) and is_map(context), do: do_execute(args, context)
 
   defp do_execute(args, context) do
     with {:ok, pattern} <- Support.required_string(args, "pattern"),

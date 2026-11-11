@@ -12,6 +12,7 @@ The sandbox bounds what the file, image, search, git, attachment and shell tools
 
 - The request folder counts only on a trusted local operator turn; remote channels and guests get the workspace, the skills folder, the start folder and grants. A background service (the Mac app, launchd, systemd) starts in `/` or the home folder, so there only a `fermix ask` or ACP folder adds anything. The home folder itself is never a `standard` root.
 - The mode and roots are this computer's own, in `[sandbox]` of its `machine.toml` (see the `config` reference), so a move takes none of them to another computer: `workspace_root`, `allowed_roots` (grants), `blocked_roots` (wins inside a grant or mode root).
+- On an Always On server, a file, command or git call that names one of the home's computers (its `computer` argument) runs under that computer's sandbox, never the server's: its mode, roots, blocked roots and allowed variables, and a grant for it is made only at that computer. See the `computers` reference.
 
 ## Always refused
 

@@ -251,17 +251,28 @@ defmodule FermixCore.Sandbox.PathPolicy do
   def allowed_path?(_path, _config, _protected_roots, _effective_roots),
     do: {:error, :invalid_path}
 
+  # The daemon's own state is protected under this process's Fermix home and,
+  # where the config names another, under that one too (the home a computer's
+  # sandbox config names when it runs a tool for its server, M97 §6.4, which
+  # `OsSandbox` already confines by `config.home`): never fewer paths.
   @spec protected_paths(Config.t()) :: [String.t()]
   def protected_paths(config) do
     os_home = config.os_home
-    fermix_home = fermix_home()
 
     (@os_roots ++
        [@fermix_run_dir | credentials(os_home)] ++
        pane_website_data(os_home) ++
-       Enum.map(@protected_fermix_entries, &Path.join(fermix_home, &1)))
+       Enum.flat_map(fermix_homes(config), &home_entries/1))
     |> Enum.map(&link_resolved_path/1)
+    |> Enum.uniq()
   end
+
+  defp fermix_homes(%{home: home}) when is_binary(home) and home != "",
+    do: Enum.uniq([fermix_home(), home])
+
+  defp fermix_homes(_config), do: [fermix_home()]
+
+  defp home_entries(home), do: Enum.map(@protected_fermix_entries, &Path.join(home, &1))
 
   @doc """
   The Mac app browser pane's website data folders, a subset of

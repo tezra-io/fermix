@@ -6,6 +6,8 @@ defmodule FermixCore.Tools.FileRead do
   @behaviour FermixCore.Capabilities.Builtin.Tool
 
   alias FermixCore.Capabilities.Builtin.Tool
+  alias FermixCore.Computers.Capabilities.Files
+  alias FermixCore.Computers.Remote
   alias FermixCore.Sandbox
   alias FermixCore.Tools.Telemetry, as: ToolTelemetry
 
@@ -70,8 +72,25 @@ defmodule FermixCore.Tools.FileRead do
   def category, do: :file
 
   @impl true
+  def computer_capability, do: Files
+
+  @impl true
   @spec execute(map(), Tool.context()) :: {:ok, Tool.tool_result()}
   def execute(args, context) when is_map(args) and is_map(context) do
+    if Remote.computer(context),
+      do: Remote.run(name(), Files, "file.read", args, context),
+      else: execute_here(args, context)
+  end
+
+  @doc """
+  The read without its exec event, under the sandbox `context` names: what
+  `execute/2` runs on this machine and what a computer of the home runs for
+  its server (`Computers.Capabilities.Files`).
+  """
+  @spec perform(map(), map()) :: {:ok, Tool.tool_result()}
+  def perform(args, context) when is_map(args) and is_map(context), do: do_execute(args, context)
+
+  defp execute_here(args, context) do
     start = System.monotonic_time(:millisecond)
     result = do_execute(args, context)
     duration = System.monotonic_time(:millisecond) - start

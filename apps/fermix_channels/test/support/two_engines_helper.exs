@@ -35,6 +35,7 @@ defmodule FermixChannels.Test.TwoEngines do
   alias FermixCore.Computers.Facts
   alias FermixCore.Computers.Registry
   alias FermixCore.Computers.Switches
+  alias FermixCore.Sandbox.Config, as: SandboxConfig
   alias FermixTestSupport.SafeRm
 
   @mac [
@@ -136,6 +137,12 @@ defmodule FermixChannels.Test.TwoEngines do
   @doc """
   Starts the server and its computer, connected, the computer offering
   `:offers` (files by default). Answers what the test reaches them by.
+
+  The computer's sandbox is its own: `:sandbox` (keyword for
+  `Sandbox.Config.normalize/1`, its paths relative to the computer's home) or
+  `strict` with the workspace under that home; the server's is the test VM's
+  application environment, which never names the computer's home. `:send`
+  replaces how the computer's answers reach the link (`Admission`'s seam).
   """
   @spec start!(keyword()) :: map()
   def start!(opts \\ []) do
@@ -161,7 +168,19 @@ defmodule FermixChannels.Test.TwoEngines do
     root = DesktopRail.desktop_home!(primary)
     :persistent_term.put({Probe, root}, self())
     on_exit(fn -> :persistent_term.erase({Probe, root}) end)
-    computer!(primary, root, names, Keyword.get(opts, :offers, [:files]))
+    computer!(primary, root, names, opts)
+  end
+
+  @doc "The computer's sandbox config for `opts`' `:sandbox` (the moduledoc of `start!/1`)."
+  @spec sandbox(Path.t(), keyword()) :: SandboxConfig.t()
+  def sandbox(root, given) do
+    [mode: :strict, workspace_root: "workspace", allowed_roots: [], blocked_roots: []]
+    |> Keyword.merge(given)
+    |> Keyword.update!(:workspace_root, &Path.join(root, &1))
+    |> Keyword.update!(:allowed_roots, fn roots -> Enum.map(roots, &Path.join(root, &1)) end)
+    |> Keyword.update!(:blocked_roots, fn roots -> Enum.map(roots, &Path.join(root, &1)) end)
+    |> Keyword.merge(home: root, os_home: root)
+    |> SandboxConfig.normalize()
   end
 
   defp names(suffix) do
@@ -175,18 +194,24 @@ defmodule FermixChannels.Test.TwoEngines do
     }
   end
 
-  defp computer!(primary, root, names, offered) do
+  defp computer!(primary, root, names, opts) do
+    offered = Keyword.get(opts, :offers, [:files])
     switches = start_supervised!({Agent, fn -> Switches.only(offered) end}, id: names.switches)
     read_switches = fn -> Agent.get(switches, & &1) end
+    sandbox = sandbox(root, Keyword.get(opts, :sandbox, []))
+    File.mkdir_p!(sandbox.workspace_root)
 
     start_supervised!(
       {Invoke,
-       name: names.invoke,
-       home: root,
-       switches: read_switches,
-       capabilities: capabilities(),
-       clock: &DateTime.utc_now/0,
-       relay: names.relay}
+       [
+         name: names.invoke,
+         home: root,
+         switches: read_switches,
+         sandbox: fn -> sandbox end,
+         capabilities: capabilities(),
+         clock: &DateTime.utc_now/0,
+         relay: names.relay
+       ] ++ Keyword.take(opts, [:send])}
     )
 
     start_supervised!(
@@ -213,6 +238,7 @@ defmodule FermixChannels.Test.TwoEngines do
         root: root,
         admission: Invoke.admission(names.invoke),
         switch_agent: switches,
+        sandbox: sandbox,
         device_id: DesktopRail.device_id()
       })
 
@@ -245,7 +271,9 @@ defmodule FermixChannels.Test.TwoEngines do
     %Computer{
       device_id: engines.device_id,
       name: "studio Mac",
+      platform: :macos,
       connected: live != nil,
+      last_seen: ~U[2026-11-09 22:40:00Z],
       offers: if(live, do: live.offers, else: [])
     }
   end

@@ -218,4 +218,35 @@ defmodule FermixCore.ComputersTest do
       assert Computers.prompt_section(opts([], always_on: true, host_facts: @host)) == nil
     end
   end
+
+  # One rule for whether a turn can see the home's computers, decided by this
+  # engine alone before the link is asked: a turn that cannot see them runs
+  # with no link implementation loaded at all.
+  describe "who can see the computers" do
+    @no_link FermixCore.ComputersTest.NoLinkLoaded
+
+    test "an owner's turn, where Always On is offered, on the primary; nothing else" do
+      base = [role: :primary, always_on: true]
+
+      assert Computers.visible?(base)
+      assert Computers.visible?([trust: :operator] ++ base)
+      refute Computers.visible?([trust: :guest] ++ base)
+      refute Computers.visible?([trust: nil] ++ base)
+      refute Computers.visible?(Keyword.put(base, :always_on, false))
+      refute Computers.visible?(Keyword.put(base, :role, :device))
+      refute Computers.visible?(Keyword.put(base, :role, nil))
+    end
+
+    test "a turn that cannot see them never asks the link" do
+      refute Code.ensure_loaded?(@no_link)
+      base = [link: @no_link, role: :primary, always_on: true, host_facts: @host]
+
+      assert Computers.prompt_section([trust: :guest] ++ base) == nil
+      assert Computers.prompt_section(Keyword.put(base, :always_on, false)) == nil
+      assert Computers.prompt_section(Keyword.put(base, :role, :device)) == nil
+
+      # The one turn that can see them asks it, and so meets the missing module.
+      assert_raise UndefinedFunctionError, fn -> Computers.prompt_section(base) end
+    end
+  end
 end

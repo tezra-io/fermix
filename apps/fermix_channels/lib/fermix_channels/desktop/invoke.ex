@@ -20,8 +20,10 @@ defmodule FermixChannels.Desktop.Invoke do
   Every option is explicit, and none is read from application environment
   on the way, so two engines run in one test VM: `:home`, `:switches`
   (0-arity, this computer's switches, `FermixCore.Computers.Switches`),
-  `:capabilities`, `:clock` (0-arity wall clock) and `:relay` (the relay's
-  name), with `:name` and Admission's own seams.
+  `:sandbox` (0-arity, this computer's sandbox config,
+  `FermixCore.Sandbox.Config`, read at each request: the files and shell
+  capabilities run under it), `:capabilities`, `:clock` (0-arity wall clock)
+  and `:relay` (the relay's name), with `:name` and Admission's own seams.
   """
 
   use Supervisor
@@ -32,9 +34,11 @@ defmodule FermixChannels.Desktop.Invoke do
   alias FermixCore.Computers.Switches
 
   @capabilities %{
-    "system" => FermixCore.Computers.Capabilities.System
+    "system" => FermixCore.Computers.Capabilities.System,
+    "files" => FermixCore.Computers.Capabilities.Files,
+    "shell" => FermixCore.Computers.Capabilities.Shell
   }
-  @required [:home, :switches, :capabilities, :clock, :relay]
+  @required [:home, :switches, :sandbox, :capabilities, :clock, :relay]
 
   @doc "What this computer can be asked, by the wire's capability name."
   @spec capabilities() :: %{String.t() => module()}

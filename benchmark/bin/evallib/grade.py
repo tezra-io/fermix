@@ -328,11 +328,14 @@ def _first_start(view: TurnView, name: str) -> datetime | None:
 
 # Which decisions each enforcing source stamps (docs/TELEMETRY_CONTRACT.md,
 # "Proving a policy denial"). The access gate holds a call for the owner's
-# confirmation or refuses it; either way its executor never ran.
+# confirmation or refuses it; either way its executor never ran. `computers`
+# is the home refusing a call that names one of its computers before anything
+# is sent (away, no such computer, not offered): it ran nowhere.
 _PRE_EXECUTION_DECISIONS = {
     "sandbox": {"deny", "hardline"},
     "netguard": {"deny", "hardline"},
     "access_gate": {"confirm", "deny"},
+    "computers": {"deny"},
 }
 
 

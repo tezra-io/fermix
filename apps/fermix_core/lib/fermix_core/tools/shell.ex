@@ -7,6 +7,8 @@ defmodule FermixCore.Tools.Shell do
 
   alias FermixCore.Capabilities.Builtin.Tool
   alias FermixCore.CommandRunner
+  alias FermixCore.Computers.Capabilities.Shell, as: ShellCapability
+  alias FermixCore.Computers.Remote
   alias FermixCore.Sandbox
   alias FermixCore.Sandbox.Env
   alias FermixCore.Sandbox.EnvHealth
@@ -83,8 +85,33 @@ defmodule FermixCore.Tools.Shell do
   def category, do: :system
 
   @impl true
+  def computer_capability, do: ShellCapability
+
+  @impl true
   @spec execute(map(), Tool.context()) :: {:ok, Tool.tool_result()}
   def execute(args, context) when is_map(args) and is_map(context) do
+    if Remote.computer(context),
+      do: Remote.run(name(), ShellCapability, "shell.run", args, context),
+      else: execute_here(args, context)
+  end
+
+  @doc """
+  The command without its exec event, under the sandbox `context` names, its
+  result already scrubbed of the allowed values it ran with: what `execute/2`
+  runs on this machine and what a computer of the home runs for its server
+  (`Computers.Capabilities.Shell`).
+  """
+  @spec perform(map(), map()) :: {:ok, Tool.tool_result()}
+  def perform(args, context) when is_map(args) and is_map(context) do
+    {result, _trace, _secrets} = do_execute(args, context)
+    result
+  end
+
+  @doc "The timeout a command runs with when the call names none."
+  @spec default_timeout_ms() :: pos_integer()
+  def default_timeout_ms, do: @default_timeout_ms
+
+  defp execute_here(args, context) do
     start = System.monotonic_time(:millisecond)
     {result, trace_metadata, secrets} = do_execute(args, context)
     duration = System.monotonic_time(:millisecond) - start

@@ -19,8 +19,10 @@ defmodule FermixCore.Computers do
 
   Off the primary there are none: a computer's own list lives on its server.
 
-  `prompt_section/1` is the `## Computers` section (§6.5) on an owner's turn,
-  where Always On is offered, on the primary, when the home has a computer.
+  `visible?/1` is the one rule for whether a turn can see the computers (an
+  owner's turn, where Always On is offered, on the primary), decided before
+  the link is asked. `prompt_section/1` is the `## Computers` section (§6.5)
+  on such a turn, when the home has a computer.
   `rename/3` is `computers.rename`: names are unique in the home, compared
   without case, and differ from the server's own.
 
@@ -95,14 +97,24 @@ defmodule FermixCore.Computers do
   end
 
   @doc """
-  The `## Computers` section (M97 §6.5), or nil: only on an owner's turn
-  (`trust: :operator`), where Always On is offered, on the primary, and when
-  the home has a computer.
+  Whether a turn can see the home's computers (M97 §6.5): an owner's turn
+  (`:trust`, `:operator` when not given), where Always On is offered, on an
+  engine booted as the primary. Every check is this engine's own, made before
+  the link is asked, so a turn that cannot see computers never reaches it.
+  The one rule for `prompt_section/1`, the `computer` argument
+  (`Computers.Argument`) and where a call runs (`Computers.Choice`).
+  """
+  @spec visible?(keyword()) :: boolean()
+  def visible?(opts) when is_list(opts),
+    do: Keyword.get(opts, :trust, :operator) == :operator and always_on?(opts) and primary?(opts)
+
+  @doc """
+  The `## Computers` section (M97 §6.5), or nil: only on a turn that can see
+  the computers (`visible?/1`) and when the home has one.
   """
   @spec prompt_section(keyword()) :: String.t() | nil
   def prompt_section(opts \\ []) when is_list(opts) do
-    with :operator <- Keyword.get(opts, :trust, :operator),
-         true <- always_on?(opts),
+    with true <- visible?(opts),
          [_ | _] = computers <- list(opts) do
       host = Keyword.get_lazy(opts, :host_facts, &HostFacts.current/0)
       Prompt.render(host, computers, Keyword.take(opts, [:personalization]))

@@ -13,6 +13,7 @@ defmodule FermixChannels.Desktop.InvokeSwitchesTest do
   alias FermixChannels.Desktop.Invoke
   alias FermixChannels.Test.DesktopRail
   alias FermixCore.Computers.Switches
+  alias FermixCore.Sandbox.Config
   alias FermixTestSupport.ParentProcess
 
   @reply_ms 10_000
@@ -91,6 +92,7 @@ defmodule FermixChannels.Desktop.InvokeSwitchesTest do
        name: name,
        home: root,
        switches: fn -> Switches.only([:files]) end,
+       sandbox: fn -> Config.normalize(mode: :strict, home: root, os_home: root) end,
        capabilities: %{"widen" => Widen},
        clock: &DateTime.utc_now/0,
        relay: :no_relay,

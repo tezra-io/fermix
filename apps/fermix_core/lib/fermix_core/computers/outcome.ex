@@ -6,7 +6,7 @@ defmodule FermixCore.Computers.Outcome do
   | Status | Means |
   |---|---|
   | `ok` | it ran; `result` is its answer |
-  | `failed` | it ran and failed; `message` is the capability's own words |
+  | `failed` | it ran and failed; `message` is the capability's own words, and a tool that failed with a result of its own carries it in `result` (and its part) as well |
   | `refused` | it never ran; `refusal` says why, `message` in the computer's words |
   | `timed_out` | it did not finish within its deadline |
   | `cancelled` | it was cancelled before it finished |

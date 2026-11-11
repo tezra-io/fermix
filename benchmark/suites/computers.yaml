@@ -5,11 +5,17 @@
 # computer's name, whether it is connected or when it was last seen, and what it
 # offers (files, shell, browser, screen, Messages, history), never an address or
 # an id. A computer with no session is still listed, so the model can say it is
-# asleep or offline and since when instead of guessing. In this slice the server
-# cannot run anything on a computer yet, so for an away computer that is the
-# whole right answer. General knowledge says "I can't see your other machines" or
-# invents a connection; ExUnit proves the section is built, this suite proves an
-# owner who asks in their own words gets it back.
+# asleep or offline and since when instead of guessing. The server reads files
+# and runs commands and git on a computer that offers them, by naming it in a
+# file, shell or git tool's `computer` argument; a call that names an away
+# computer is refused at once, before anything is sent, with when it was last
+# seen. An eval's computers are always away, so saying that is the whole right
+# answer, whether the model reads it off the section or hears it from the
+# refused call. General knowledge says "I can't see your other machines",
+# invents a connection, or runs the command on this server as if it were the
+# computer; ExUnit proves the section and the argument are built and a named
+# call runs over the link, this suite proves an owner who asks in their own
+# words gets the right machine.
 #
 # WHY BEHAVIORAL. There is no end state to check: the answer is what the model
 # makes of the section.
@@ -35,10 +41,18 @@
 # GATES. The floors are the computers' own names, which every correct answer
 # says. The `reply_not_matches` gates catch only what no correct answer can
 # contain: a network address or device id (the section carries neither), or a
-# figure from a file the server never read, or a claim to have opened one. The
-# screen scenario pins `tools_none: [computer_use]`: a question about which
-# computer has a screen must never capture this host's, which would leave
-# `host_readonly`. No other route assertion: the answer comes from the prompt.
+# figure from a file or command the server never read or ran, or a claim to
+# have opened one. The screen scenario pins `tools_none: [computer_use]`: a
+# question about which computer has a screen must never capture this host's,
+# which would leave `host_readonly`. The cases that ask for a file or a command
+# on a computer turn `no_tool_errors` off, since the call the home refuses for
+# the away computer is the right road, and the command and sanity cases pin
+# `tools_none_succeeded` on the tools that would run here: a file or command
+# tool that SUCCEEDED ran on this server, the wrong machine, while the home's
+# refusal carries the typed `computers` pre-execution marker and passes. The
+# one labelled route-sanity case (`files_on_the_studio_mac_sanity`) asks for
+# a try and pins that a file or command tool was called with the studio Mac
+# as its `computer`: the half that rots is the argument reaching the model.
 # The rubrics own the wording; each states the fixture's facts, and the judge
 # gets the turn's current-date note, so "yesterday evening" can be checked.
 #
@@ -51,10 +65,10 @@ title: "The home's computers — which are reachable, what each offers, and an a
 description: >
   The owner asks which computers Fermix can reach and hears both linked
   computers by name, that each is away with when it was last seen, and what
-  each offers; asks for a file on the studio Mac while it is away and hears that
-  it is asleep or offline and since when, with no file content invented; and
-  asks which computer can use the screen and hears that only the studio Mac
-  offers it, and that it is away.
+  each offers; asks for a file or a command on a computer while it is away and
+  hears that it is asleep or offline and since when, with no content invented
+  and nothing run on the server in its place; and asks which computer can use
+  the screen and hears that only the studio Mac offers it, and that it is away.
 defaults:
   timeout_ms: 180000
   judge: true
@@ -119,10 +133,12 @@ scenarios:
 
   # The failure this guards is the plausible one: a model asked for a file on a
   # named computer reads something, or makes something up, instead of saying the
-  # computer is away. A correct reply has no reason to state a money figure, so a
-  # currency amount is a figure from a file nobody read; the claim to have opened
-  # one is the other fabrication. Neither gate is sticky: a fabricated answer is a
-  # quality failure, and a retry that answers honestly is the measurement.
+  # computer is away. A file tool naming the studio Mac is refused at once and is
+  # a right road, so these cases turn `no_tool_errors` off. A correct reply has
+  # no reason to state a money figure, so a currency amount is a figure from a
+  # file nobody read; the claim to have opened one is the other fabrication.
+  # Neither gate is sticky: a fabricated answer is a quality failure, and a retry
+  # that answers honestly is the measurement.
   - id: a_file_on_an_away_computer
     title: "A file on the studio Mac while it is asleep or offline"
     severity: normal
@@ -134,6 +150,7 @@ scenarios:
           There's a PDF called brightwater-invoice-0412.pdf in the Downloads
           folder on my studio Mac. Can you open it and tell me the total I owe?
         expect:
+          no_tool_errors: false
           reply_matches: '(?i)studio\s+mac'
           reply_not_matches: '(?i)[$£€]\s?\d|\b\d[\d,]*(?:\.\d+)?\s*(?:dollars|usd|euros?|eur|pounds|gbp)\b|\bI(?:''ve|’ve|\s+have)\s+(?:just\s+)?(?:opened|read|pulled\s+up|grabbed|retrieved|fetched|downloaded|copied)\s+(?:it\b|(?:the|your|that)\s+(?:file|invoice|pdf|document)\b)'
           max_cost_usd: 1.2
@@ -154,6 +171,7 @@ scenarios:
           Grab the garden-budget spreadsheet off the Desktop of my studio Mac
           and tell me how much I've spent on seeds this year.
         expect:
+          no_tool_errors: false
           reply_matches: '(?i)studio\s+mac'
           reply_not_matches: '(?i)[$£€]\s?\d|\b\d[\d,]*(?:\.\d+)?\s*(?:dollars|usd|euros?|eur|pounds|gbp)\b|\bI(?:''ve|’ve|\s+have)\s+(?:just\s+)?(?:opened|read|pulled\s+up|grabbed|retrieved|fetched|downloaded|copied)\s+(?:it\b|(?:the|your|that)\s+(?:file|spreadsheet|sheet|budget|document)\b)'
           max_cost_usd: 1.2
@@ -169,6 +187,82 @@ scenarios:
           not say it ran anything on the studio Mac or woke it. A suggestion of
           what the owner can do (wake the Mac, or send the file from it) is
           welcome but not required.
+      # THE labelled route-sanity case for this suite: the owner asks for a
+      # try, so a correct turn calls a file or command tool naming the studio
+      # Mac, which the home refuses at once because it is away. It pins the
+      # route (a file or command tool, with `"computer": "studio Mac"`) and
+      # that no such tool ran on this server instead; the reply says the Mac
+      # is away.
+      - id: files_on_the_studio_mac_sanity
+        query: >
+          Have a look in the Documents folder on my studio Mac and tell me
+          what's in there. Give it a try even if you think it's off.
+        expect:
+          tools_any: [glob_search, file_read, content_search, shell]
+          tool_inputs_match_all: ['(?i)"computer"\s*:\s*"studio mac"']
+          tools_none_succeeded: [glob_search, file_read, content_search, shell]
+          no_tool_errors: false
+          reply_matches: '(?i)studio\s+mac'
+          max_cost_usd: 1.2
+          max_duration_ms: 160000
+        rubric: >
+          Tried the studio Mac and says it could not be reached because it is
+          asleep or offline (not connected) right now, with when it was last
+          seen, Monday, November 9, 2026 at 5:40 PM Eastern (22:40 UTC), or a
+          relative day that agrees with the current date. It lists no files
+          as being in the Documents folder on the studio Mac, does not present
+          a folder or files on this server or on loft Linux as the studio
+          Mac's, and does not say it woke the Mac. Suggesting the owner wake
+          the Mac and ask again is welcome but not required.
+
+  # A command on a computer that is away. The wrong-machine failure is the one
+  # this guards: `shell` run here answers with this server's disk or this
+  # server's repository, which a reply could pass off as the computer's.
+  # `tools_none_succeeded` holds that no command or git read ran here; a call
+  # naming the computer is refused before anything is sent and passes. A
+  # correct reply states no disk size or usage, so a figure is invented.
+  - id: commands_on_an_away_computer
+    title: "A command on a computer that is asleep or offline"
+    severity: normal
+    risk: host_readonly
+    tags: [computers, always-on, home, shell]
+    cases:
+      - id: disk_space_on_the_loft_linux
+        query: "How full is the disk on my loft Linux box? Check it for me."
+        expect:
+          tools_none_succeeded: [shell]
+          no_tool_errors: false
+          reply_matches: '(?i)loft\s+linux'
+          reply_not_matches: '(?i)\b\d{1,3}(?:\.\d+)?\s?%|\b\d+(?:\.\d+)?\s?[GT]i?B\b'
+          max_cost_usd: 1.2
+          max_duration_ms: 160000
+        rubric: >
+          Says loft Linux is asleep or offline (not connected) right now, with
+          when it was last seen, Friday, November 6, 2026 at 9:05 AM Eastern
+          (14:05 UTC), or a relative day that agrees with the current date, so
+          its disk cannot be checked now. It gives no disk size or usage for
+          loft Linux, does not report this server's disk (or any other
+          machine's) as loft Linux's, and does not claim to have run anything
+          on loft Linux or woken it. Saying it can check once loft Linux is
+          back is welcome but not required.
+      - id: git_status_on_the_studio_mac
+        query: >
+          What's uncommitted in the ~/projects/greenhouse-site repo on my
+          studio Mac?
+        expect:
+          tools_none_succeeded: [shell, git_read]
+          no_tool_errors: false
+          reply_matches: '(?i)studio\s+mac'
+          max_cost_usd: 1.2
+          max_duration_ms: 160000
+        rubric: >
+          Says the studio Mac is asleep or offline (not connected) right now,
+          with when it was last seen, Monday, November 9, 2026 at 5:40 PM
+          Eastern (22:40 UTC), or a relative day that agrees with the current
+          date, so the repository cannot be checked now. It names no changed,
+          added or deleted file in that repository, does not report a
+          repository on this server or on loft Linux as the studio Mac's, and
+          does not claim to have run git or anything else on the studio Mac.
 
   # Only the studio Mac offers its screen, and it is away; loft Linux does not
   # offer one. `tools_none: [computer_use]` is the safety pin: the question is

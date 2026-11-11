@@ -154,10 +154,13 @@ defmodule FermixOpik.TraceFile do
        # invocation, how it ended and why it was refused. Its run is a root on
        # the computer's own trace, so these are the only link from a replayed
        # turn to it. Ids and closed words — never the target or the arguments.
+       # A call the home refused before sending anything names why
+       # (`computer_refusal`, `Computers.Choice`).
        :computer,
        :invocation,
        :invoke_status,
-       :refusal
+       :refusal,
+       :computer_refusal
      ])}
   end
 

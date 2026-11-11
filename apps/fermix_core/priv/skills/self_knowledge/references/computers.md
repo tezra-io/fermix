@@ -4,8 +4,10 @@ Once the home runs on an Always On server, every computer linked to it is a
 member of the home: the computer the home moved from, and every computer
 the owner added with a code (*Adding a computer*). The server keeps a record of each,
 and each computer decides for itself what Fermix on the server may use on
-it. In this release the server lists its computers and what they offer, but
-runs nothing on them yet. The move, the link and the summary: skill_view(name:
+it. The server reads, writes and searches files and runs commands and git on
+a computer that offers them (*Files and commands on a computer*); the
+browser, the screen and Messages of a computer are listed but not used from
+the server yet. The move, the link and the summary: skill_view(name:
 "self-knowledge", file: "home").
 
 ## The record
@@ -187,8 +189,8 @@ move's review warns of it.
 ## What the server asks of a computer, and that computer's record
 
 The link carries a request from the server to a computer and its answer
-back. No tool of a turn sends one yet (the last section), so today the
-record below stays empty; this is how each request is held once one does.
+back: each file, command or git call a turn makes on a computer is one
+request (*Files and commands on a computer*).
 
 - **The computer decides.** It refuses a request from an older copy of the
   home, anything while its master switch is off, and what its own switch
@@ -202,7 +204,10 @@ record below stays empty; this is how each request is held once one does.
 - **Every request ends one way:** done, failed (in the computer's words),
   refused (switched off, unavailable, outside its sandbox, only while the
   owner is in the conversation, stopped at the computer, busy, an older copy
-  of the home), timed out, cancelled, or not known.
+  of the home), timed out, cancelled, or not known. A tool that ran there
+  and failed (a command that exited with an error, a file it could not
+  read) is failed, never done: the journal says so, and the reply carries
+  the tool's whole error.
 - **Not known.** Something that changes that computer is never sent twice
   by the link. When its answer is lost (the session dropped, the computer
   restarted), Fermix says so in a sentence of its own: "Fermix lost studio
@@ -260,6 +265,55 @@ Always On summary says so once, for a week: "This server now uses its own
 sandbox setting: open. The settings it had from your computer stay on that
 computer."
 
+## Files and commands on a computer
+
+- **Naming the computer.** On an owner's turn, each tool a computer can run
+  gains a `computer` argument whose values are the names of the computers
+  that offer it, an away one included: `file_read`, `file_write`,
+  `file_edit`, `glob_search`, `content_search`, `view_image` and
+  `send_attachment` under Files; `shell`, `git_read` and `git_write` under
+  Commands. A guest's turn, a build without Always On and a home with no
+  computer offering it never show it.
+- **Where a call runs, never silently:** with no `computer`, on the server
+  (it has files and commands of its own); with a name, on that computer.
+  A computer that is away is refused at once with when it was last seen
+  ("studio Mac is asleep or offline (last seen …), so Fermix cannot reach it
+  now. Nothing waits for it to wake."); a name the home has no computer for,
+  a computer that does not offer it (switched off, or unavailable, in its
+  own words) and a computer too old for this server ("… is used for
+  settings only until it updates.") are refused by name. Nothing is sent to
+  a computer for a refusal.
+- **A path belongs to one machine.** Every result starts "On <name>:", so
+  the server's `~/` is never mistaken for a Mac's. Name the computer a path
+  is on; never read a server file as if it were that computer's.
+- **That computer's sandbox, not the server's.** The call runs the same tool
+  code there, held by that computer's own sandbox mode, folders, blocked
+  folders and allowed variables, and its kernel sandbox for commands
+  (Seatbelt on a Mac, Landlock on Linux). A path outside its folders is
+  refused: "<path> is outside this computer's sandbox. Someone at <name> can
+  allow the folder; it cannot be allowed from here." `request_directory_access`
+  naming a computer asks for nothing: "Folders on <name> are allowed only at
+  <name>: someone there adds the folder to its sandbox. Fermix cannot ask for
+  it from here." Its settings, secrets, key and journal stay refused, as
+  Fermix's own files are here.
+- **After outside content** (a web page, a message, a file someone else
+  wrote), a command on a Mac runs, its sandbox holding it; every command on
+  a Linux computer waits for the owner's confirm in the chat, which names
+  the computer ("Confirm shell? It runs a command on loft Linux, which
+  Fermix cannot sandbox there."). The confirm is a yes to that one call, not
+  a wider sandbox.
+- **Bounds are the tools' own:** a read stops at 100 KB, a command's output
+  at 1 MiB, an image at 10 MiB, and a file sent from a computer at 20 MiB.
+  Large output and files travel in pieces on the link's bulk lane.
+- **Sending a file from a computer** (`send_attachment` with `computer`):
+  that computer reads it inside its sandbox, the server keeps a copy in its
+  workspace (`media/computers/`) and sends it to the chat once.
+- **A lost answer.** A read whose answer is lost is read again; a command,
+  a write, an edit or a git write is never sent twice, and the reply says
+  whether it happened is not known (above).
+- A scheduled job that a cue started under a mandate cannot name a
+  computer in a file tool: its skill folder is on the server.
+
 ## `## Computers` on the owner's turn
 
 - On the server, an owner's turn carries a `## Computers` section right
@@ -278,10 +332,11 @@ computer."
   connected yet` for one never heard from), and the offers that are on (shell
   with its mode), or `offers nothing`. Never an address or an id. Offers
   that are off or unavailable are not listed; `home.status` keeps why.
-- In this release Fermix on the server runs nothing on a computer: the
-  files, commands and browser a turn uses are the server's own, whatever a
-  computer offers. Say so plainly when the owner asks for something on a
-  computer, rather than doing it on the server as if it were that computer.
+- Files and commands on a computer are reached by naming it (above). Its
+  browser, screen and Messages are not used from the server yet: a turn's
+  browser is the server's own, whatever a computer offers. Say so plainly
+  when the owner asks for one of those on a computer, rather than doing it
+  on the server as if it were that computer.
 - A computer that is away is asleep or offline: say so and when it was last
   seen, never act as if it was reached, and nothing waits for it to wake.
 - What a computer offers changes only at that computer: its **This

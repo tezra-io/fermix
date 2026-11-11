@@ -23,7 +23,10 @@ defmodule FermixCore.Computers.Capability do
     sandbox's roots), and `run/4`, which does it;
   - `target/2`, a short description of what it acts on (a path, a host or
     an action, at most #{256} bytes), never content: the journal and the
-    receipt hold it.
+    receipt hold it;
+  - optionally `here?/1`, whether the server's own host has it too, which
+    `Computers.Choice` reads for a call that names no computer, and
+    `deadline_ms/2`, the tool's own timeout for an op.
 
   A capability's code reads this computer's settings from the context it is
   handed (`context/0`), never from application environment, so two engines
@@ -41,7 +44,9 @@ defmodule FermixCore.Computers.Capability do
   What a capability is handed on the computer: the invocation's id, its
   origin, the primary epoch it named, the turn that asked (nil for a
   computer's own request), this computer's home and switches, the clock,
-  and the deadline it runs within (0: until cancelled).
+  and the deadline it runs within (0: until cancelled); and this computer's
+  sandbox config (`sandbox`, `FermixCore.Sandbox.Config`), which the files and
+  shell capabilities run under.
   """
   @type context :: %{
           required(:id) => String.t(),
@@ -80,10 +85,18 @@ defmodule FermixCore.Computers.Capability do
   @callback admit(String.t(), map(), context()) ::
               :ok | {:refused, Outcome.refusal(), String.t()}
 
-  @doc "Runs `op` with `args` and the part that came with it, on this computer."
+  @doc """
+  Runs `op` with `args` and the part that came with it, on this computer:
+  `{:ok, result, part}` when it did what was asked; `{:failed, message}` when
+  it could not; `{:failed, message, result, part}` when it ran and failed
+  with a result of its own (a tool's error), whose short `message` the
+  journal and the server's exec event go by and whose whole result and part
+  the answer still carries; or a refusal.
+  """
   @callback run(String.t(), map(), binary() | nil, context()) ::
               {:ok, map(), binary() | nil}
               | {:failed, String.t()}
+              | {:failed, String.t(), map(), binary() | nil}
               | {:refused, Outcome.refusal(), String.t()}
 
   @doc "What `op` acts on, in at most #{@max_target_bytes} bytes; never content."
@@ -92,7 +105,21 @@ defmodule FermixCore.Computers.Capability do
   @doc "Lets go of what the run `pid` holds before it is stopped."
   @callback cancel(String.t(), pid()) :: :ok
 
-  @optional_callbacks cancel: 2
+  @doc """
+  Whether this engine's own host has the capability, for the turn whose loop
+  context is given (M97 §6.5: a call that names no computer runs here when it
+  does). A capability that does not say is not taken to run here.
+  """
+  @callback here?(map()) :: boolean()
+
+  @doc """
+  The deadline the server gives `op` with `args`: the tool's own timeout and
+  the time its sandbox takes to start, at most #{900_000} ms. Without it a
+  request waits #{30_000} ms (`Computers.call/6`).
+  """
+  @callback deadline_ms(String.t(), map()) :: pos_integer()
+
+  @optional_callbacks cancel: 2, here?: 1, deadline_ms: 2
 
   @doc "The most bytes a target holds."
   @spec max_target_bytes() :: pos_integer()

@@ -83,6 +83,18 @@ user content), both from `AccessGate.held_metadata/2`, so its Opik span carries
 succeeded. A confirmed call (`access_gate: "confirmed"`) runs its executor,
 whose own event reports its own outcome.
 
+A third source stamps it in the same function, ahead of the access gate:
+`Computers.Choice`, which decides where a tool one of the home's computers can
+run runs (M97 §6.5). A call it refuses before anything is sent (the named
+computer is away, no computer of that name, several offer it and none was named,
+none offers it, or one is past the version window) never reaches the gate, the
+executor or the link, so `Choice.refuse/5` emits the call's single exec event
+with `success: false`, `policy_enforcement` from `Choice.refusal_metadata/1`
+(`source: "computers"`, `decision: "deny"`, `phase: "pre_execution"`),
+`error_code: "computer_<refusal>"`, a fixed `error_summary` ("refused before
+anything was sent to a computer") and `computer_refusal` (see "Computer
+invocations").
+
 ### Access-gate labels
 
 Every call the gate decides (every access-sensitive call, every host command it
@@ -1618,7 +1630,19 @@ must pass: `Mapper.tool_span/3`'s `Map.take` and
 `TraceFile.normalize("tool_exec", …)`. As with `outcome`, their **types differ by
 seam**: `invoke_status` and `refusal` are atoms on the live path and strings
 after replay, both pinned by tests, so a consumer that compares them must accept
-both spellings.
+both spellings. A tool that ran on the computer and failed (a command that exited
+non-zero, a path its sandbox refused in the tool's own words) is `invoke_status:
+failed`, never `ok`, on this row and in the computer's journal; its `success` is
+false and its `error_summary` the first 500 characters of the tool's error, while
+the model still reads the whole error.
+
+A call the home refused **before** anything was sent (`Computers.Choice`, M97
+§6.5) has no invocation, so it carries none of the four: its exec row carries
+`computer_refusal` instead, one closed word, a string on both seams: `away`,
+`ambiguous`, `no_such_computer`, `not_offered` or `settings_only`
+(`Choice.refusals/0`), beside the `computers` pre-execution marker (see "Proving
+a policy denial"). Never the computer's name the call carried, which is the
+model's argument and content. It is in both allowlists with the four.
 
 ## Content (prompts / responses / tool IO)
 

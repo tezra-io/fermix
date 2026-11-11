@@ -27,7 +27,10 @@ defmodule FermixChannels.Desktop.Invoke.Admission do
   the runs' supervisor; a journal that cannot be written runs nothing. A
   deadline counts from the request's arrival, its wait included: past it a
   run is stopped (the capability's `cancel/2` first) and answered
-  `timed_out`.
+  `timed_out`. A run that ran and failed with a result of its own (a
+  tool's error) is answered `failed` with its short message, and carries
+  its result and part within the capability's bounds (its message alone
+  past them), so its journal record is never `ok`.
 
   **Record, then answer**: the `finished` record is synced before the
   `invoke_result` goes, then its part (`invoke_part`). A request refused
@@ -106,6 +109,7 @@ defmodule FermixChannels.Desktop.Invoke.Admission do
       home: home,
       dir: Journal.dir(home),
       switches: Keyword.fetch!(opts, :switches),
+      sandbox: Keyword.fetch!(opts, :sandbox),
       capabilities: Keyword.fetch!(opts, :capabilities),
       clock: Keyword.fetch!(opts, :clock),
       relay: Keyword.fetch!(opts, :relay),
@@ -530,11 +534,7 @@ defmodule FermixChannels.Desktop.Invoke.Admission do
   end
 
   defp outcome({:ok, result, part}, entry) when is_map(result) do
-    %{result_bytes: max_result, part_bytes: max_part} = entry.module.bounds(entry.op)
-    payload_bytes = byte_size(Jason.encode!(result))
-    part_size = if is_binary(part), do: byte_size(part), else: 0
-
-    if payload_bytes <= min(max_result, Outcome.max_result_bytes()) and part_size <= max_part,
+    if within_bounds?(result, part, entry),
       do: %Outcome{status: :ok, result: result, part_bytes: part},
       else: %Outcome{status: :failed, message: "The answer is larger than this computer sends."}
   end
@@ -542,12 +542,29 @@ defmodule FermixChannels.Desktop.Invoke.Admission do
   defp outcome({:failed, sentence}, _entry) when is_binary(sentence),
     do: %Outcome{status: :failed, message: sentence}
 
+  # It ran and failed with a result of its own (a tool's error): failed, never
+  # ok, its result and part carried within the same bounds, else its message
+  # alone.
+  defp outcome({:failed, sentence, result, part}, entry)
+       when is_binary(sentence) and is_map(result) do
+    if within_bounds?(result, part, entry),
+      do: %Outcome{status: :failed, message: sentence, result: result, part_bytes: part},
+      else: %Outcome{status: :failed, message: sentence}
+  end
+
   defp outcome({:refused, refusal, sentence}, _entry) when is_binary(sentence),
     do: Outcome.refused(refusal, sentence)
 
   defp outcome(other, entry) do
     Logger.error("invocation #{entry.id}: #{entry.capability} answered #{inspect(other)}")
     %Outcome{status: :failed, message: "It answered in a way this computer cannot send."}
+  end
+
+  defp within_bounds?(result, part, entry) do
+    %{result_bytes: max_result, part_bytes: max_part} = entry.module.bounds(entry.op)
+    payload_bytes = byte_size(Jason.encode!(result))
+    part_size = if is_binary(part), do: byte_size(part), else: 0
+    payload_bytes <= min(max_result, Outcome.max_result_bytes()) and part_size <= max_part
   end
 
   # Past its deadline: what runs is stopped, what waits never runs.
@@ -841,6 +858,7 @@ defmodule FermixChannels.Desktop.Invoke.Admission do
       turn: entry.turn,
       home: state.home,
       switches: switches,
+      sandbox: state.sandbox.(),
       clock: state.clock,
       deadline_ms: entry.deadline_ms
     }

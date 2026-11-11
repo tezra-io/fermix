@@ -268,11 +268,14 @@ defmodule FermixOpik.Mapper do
             # refused it. Its run is a root on the computer's own trace, so
             # these are the only link from the turn to it. Two ids and two
             # closed words (atoms live, strings after replay); the target and
-            # the arguments are content and never a field.
+            # the arguments are content and never a field. A call the home
+            # refused before sending anything (`Computers.Choice`) carries
+            # `computer_refusal`, a closed word.
             :computer,
             :invocation,
             :invoke_status,
-            :refusal
+            :refusal,
+            :computer_refusal
           ])
         )
     }

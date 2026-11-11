@@ -9,6 +9,7 @@ defmodule FermixChannels.Desktop.InvokeTest do
   alias FermixChannels.Desktop.Invoke.Admission
   alias FermixCore.Computers.Journal
   alias FermixCore.Computers.Switches
+  alias FermixCore.Sandbox.Config
   alias FermixTestSupport.SafeRm
   alias FermixTestSupport.TelemetryCapture
 
@@ -108,6 +109,7 @@ defmodule FermixChannels.Desktop.InvokeTest do
       name: name,
       home: home,
       switches: fn -> Agent.get(switches, & &1) end,
+      sandbox: fn -> Config.normalize(mode: :strict, home: home, os_home: home) end,
       capabilities: %{
         "system" => FermixCore.Computers.Capabilities.System,
         "wait" => Wait,
@@ -231,6 +233,46 @@ defmodule FermixChannels.Desktop.InvokeTest do
       assert_receive {:sent, %{"t" => "invoke_part", "index" => 1, "last" => true} = second, b}
       assert first["size_bytes"] == 70_000 and second["size_bytes"] == 70_000
       assert a <> b == bytes
+    end
+
+    # A tool that ran and failed is failed, never ok: its short message on the
+    # answer, its whole result and part beside it, `failed` in the journal and
+    # an error bookend.
+    test "a run that failed with its result is answered failed, the result and part whole",
+         ctx do
+      TelemetryCapture.attach([[:fermix, :computer_invocation, :error]],
+        session_id: "inv_inv-fail"
+      )
+
+      open(ctx, "inv-fail", "wait", "wait", %{"name" => "fail"})
+      {pid, nil} = running("fail")
+      whole = "Command failed (exit code 3):\n" <> :binary.copy("x", 70_000)
+      result = %{"success" => false, "output" => nil, "error" => nil, "text_part" => "error"}
+      finish(pid, {:failed, "Command failed (exit code 3):", result, whole})
+
+      {event, payload} = answer("inv-fail")
+      assert event["status"] == "failed"
+      assert event["message"] == "Command failed (exit code 3):"
+      assert event["part"]["size_bytes"] == byte_size(whole)
+      assert Jason.decode!(payload) == result
+      assert_receive {:sent, %{"t" => "invoke_part", "index" => 0}, a}
+      assert_receive {:sent, %{"t" => "invoke_part", "index" => 1, "last" => true}, b}
+      assert a <> b == whole
+      assert journal(ctx, "inv-fail").status == "failed"
+      assert_receive {:telemetry, [:fermix, :computer_invocation, :error], _m, %{status: :failed}}
+    end
+
+    test "a failed run's result past its bounds keeps the message alone", ctx do
+      open(ctx, "inv-big-fail", "wait", "wait", %{"name" => "big-fail"})
+      {pid, nil} = running("big-fail")
+      result = %{"success" => false, "output" => nil, "error" => :binary.copy("y", 2_000)}
+      finish(pid, {:failed, "It failed.", result, nil})
+
+      {event, payload} = answer("inv-big-fail")
+      assert event["status"] == "failed"
+      assert event["message"] == "It failed."
+      assert payload == "{}"
+      refute Map.has_key?(event, "part")
     end
   end
 

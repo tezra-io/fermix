@@ -175,7 +175,7 @@ Deeper detail loads on demand with `skill_view(name: "self-knowledge", file: "<n
 - `sandbox_env` — which environment variables reach shell commands, and where their values come from.
 - `commands` — trust tiers, every slash command and who may run it, the in-person rule, and what `/stop` settles.
 - `observability` — logs, trace files and session ids, finding failures, content capture, Opik per install type, the support bundle, and what a restart loses.
-- `computers` — an Always On server's computers: adding and removing one, names, offers, each computer's switches, what a moved computer keeps on, `## Computers`, and what the server can never do.
+- `computers` — an Always On server's computers: adding and removing one, names, offers, switches, files and commands on one, what a moved computer keeps on, `## Computers`, and what the server can never do.
 - `move_back` — Always On's move back to the computer the home left: Move back and Move now, Cancel, what comes back and stays, the server afterwards, and Restore here from that computer's own copy when the server is gone.
 - `home` — the home as the primary: the primary epoch, the `primary`, `device` and `candidate` roles, `fermix home export`, `import` and `mark-moved`, enrollment and the Always On move (its phases and failures), the one summary every surface prints and each of its problems, `fermix always-on` and its steps, an Always On server's first boot, restoring a lost one onto a new server, what travels and what stays, the desktop's link to the primary after a move, and what a restart or a move does to a message in flight.
 

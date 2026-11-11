@@ -936,6 +936,33 @@ defmodule FermixOpik.TraceFileTest do
     refute Map.has_key?(meta, :args)
   end
 
+  # A call the home refused before sending anything (`Computers.Choice`)
+  # replays why, beside its marker; the computer's name it carried does not.
+  test "a tool_exec row of a call refused before sending replays its computer_refusal" do
+    row =
+      Jason.decode!(
+        Jason.encode!(%{
+          ts: "2026-11-10T09:00:00.000Z",
+          type: "tool_exec",
+          tool: "file_read",
+          agent: "main",
+          session_id: "main-41",
+          success: false,
+          duration_ms: 0,
+          computer_refusal: "away",
+          policy_enforcement: %{source: "computers", decision: "deny", phase: "pre_execution"},
+          args: %{path: "/Users/ines/notes.txt", computer: "studio Mac"}
+        })
+      )
+
+    assert {[:fermix, :tool, :exec], _measurements, meta} =
+             TraceFile.normalize("tool_exec", row)
+
+    assert meta.computer_refusal == "away"
+    assert meta.policy_enforcement["source"] == "computers"
+    refute Map.has_key?(meta, :args)
+  end
+
   # Replay must rebuild the root live traffic builds. The rows are written the
   # way `Trace.TelemetryHandler` writes them (measurements and metadata
   # flattened, `agent` the capability, `event` the trace_event name), so the

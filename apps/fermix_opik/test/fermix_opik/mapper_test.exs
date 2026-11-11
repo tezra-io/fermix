@@ -778,6 +778,35 @@ defmodule FermixOpik.MapperTest do
     assert Jason.encode!(span.metadata.refusal) == ~s("outside_sandbox")
   end
 
+  # M97 §6.5: a call the home refused before sending anything to a computer
+  # (`Computers.Choice`) names why in a closed word, beside the typed
+  # pre-execution marker; the computer's name the call carried is content.
+  test "tool_span keeps a call the home refused before sending, and its marker" do
+    metadata = %{
+      tool: "file_read",
+      success: false,
+      computer_refusal: "away",
+      policy_enforcement: %{source: "computers", decision: "deny", phase: "pre_execution"},
+      error_code: "computer_away",
+      error_summary: "refused before anything was sent to a computer",
+      args: %{"path" => "/Users/ines/notes.txt", "computer" => "studio Mac"}
+    }
+
+    span =
+      Mapper.tool_span(metadata, %{duration_ms: 0},
+        trace_id: "t",
+        project_name: "fermix",
+        ended: @ended
+      )
+
+    assert span.metadata == %{
+             computer_refusal: "away",
+             policy_enforcement: %{source: "computers", decision: "deny", phase: "pre_execution"}
+           }
+
+    assert span.error_info.message == "refused before anything was sent to a computer"
+  end
+
   @invocation_meta %{
     session_id: "inv_inv-mfrgg2lt5vgmy3dpqzt7xk4wha",
     parent_session: "main-41",

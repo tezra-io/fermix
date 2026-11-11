@@ -16,6 +16,8 @@ defmodule FermixCore.Tools.ViewImage do
   @behaviour FermixCore.Capabilities.Builtin.Tool
 
   alias FermixCore.Capabilities.Builtin.Tool
+  alias FermixCore.Computers.Capabilities.Files
+  alias FermixCore.Computers.Remote
   alias FermixCore.Tools.Media.Support, as: MediaSupport
   alias FermixCore.Tools.Telemetry, as: ToolTelemetry
 
@@ -98,8 +100,26 @@ defmodule FermixCore.Tools.ViewImage do
   def category, do: :file
 
   @impl true
+  def computer_capability, do: Files
+
+  @impl true
   @spec execute(map(), Tool.context()) :: {:ok, Tool.tool_result()}
   def execute(args, context) when is_map(args) and is_map(context) do
+    if Remote.computer(context),
+      do: Remote.run(name(), Files, "image.view", args, context),
+      else: execute_here(args, context)
+  end
+
+  @doc """
+  The look without its exec event, under the sandbox `context` names: what
+  `execute/2` runs on this machine and what a computer of the home runs for
+  its server (`Computers.Capabilities.Files`).
+  """
+  @spec perform(map(), map()) :: {:ok, Tool.tool_result()}
+  def perform(args, context) when is_map(args) and is_map(context),
+    do: args |> load(context) |> to_result()
+
+  defp execute_here(args, context) do
     start = System.monotonic_time(:millisecond)
     loaded = load(args, context)
     result = to_result(loaded)

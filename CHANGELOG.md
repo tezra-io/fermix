@@ -542,11 +542,6 @@ will be part of a future release; nothing in this group is in a release yet.
   enrolling names the port in `fermix home status` once its code expires.
   Tailscale in userspace-networking mode gives the server no tailnet
   address, so that link runs through the relay.
-
-## [0.18.0] - 2026-11-03
-
-### Added
-
 - **Add another computer to your Fermix with a code and six digits.** A
   computer no longer has to be the one your Fermix moved from. On a computer
   already in your Fermix, or on the server (`fermix always-on add-computer`),
@@ -564,6 +559,30 @@ will be part of a future release; nothing in this group is in a release yet.
   the one that keeps the only copies of your server's backups asks first.
   Disconnect this computer does the same from the computer itself and
   deletes its key. A phone cannot add a computer yet.
+- **Fermix on your Always On server can work with files and commands on your
+  computers.** Ask for a file on your studio Mac, or to run something there,
+  and Fermix reads, writes, edits and searches files, looks at pictures,
+  runs commands and git, and sends you a file from that computer, inside
+  that computer's own sandbox: its mode, its folders and its allowed
+  variables, with Seatbelt or Landlock holding each command. It works only
+  with what that computer offers, which is switched on at that computer
+  (Files and Commands in its This computer settings). Every answer names the
+  computer it came from, so a path on your server is never taken for one on
+  your Mac. A computer that is asleep or offline is refused at once with when
+  it was last seen, and nothing waits for it to wake; a folder outside that
+  computer's sandbox can be allowed only at that computer. After Fermix read
+  something from outside, a command on a Mac still runs, held by its
+  sandbox, and a command on a Linux computer waits for your confirm in the
+  chat, which names the computer. A command or a write whose answer is lost
+  is never run twice: Fermix says whether it happened is not known. Each
+  request is in that computer's own record of what Fermix did there, and a
+  command that failed is recorded as failed, while Fermix still reads its
+  whole output.
+
+## [0.18.0] - 2026-11-03
+
+### Added
+
 - **The Linux installer installs a release you name.** `curl -fsSL
   https://fermix.ai/install | sh -s -- --version X.Y.Z` installs that
   release instead of the latest, from that release's own files, under the
