@@ -332,7 +332,42 @@ it is back, while the home's delivery waits for its scheduler's tick.
 Restoring the same backup twice, or a backup whose epoch plus one is an
 epoch the home already had under the same token, was enough.
 
+### HS-5: the D27 upgrade makes a computer that sent no history a contributor (open)
+
+Found in the re-read of `101830533` (M97 D27); no check: it is one rewrite
+of a machine file at boot, not an interleaving. Before D27 a computer had a
+`history` switch for its server beside its recorder's own setting
+(`[fermix_core.computer_history] enabled`): with the switch off,
+`HistoryUplink` sent nothing and the home took nothing, while the recorder
+could stay on and keep its raw record on the computer. D27's boot migration
+drops the switch and lets the recorder decide
+(`Computers.Switches.upgrade/1`, `switches.ex:326-345`; `:333-335`), and
+only logs where the two disagreed (`history_sentence/2`, `:357-368`), where
+it reads files and commands conservatively (on only where both were). So:
+1. A computer, master on and reviewed, has `history = false` for its server
+   and its recorder on.
+2. It is updated to a D27 engine; the boot's migration removes `history`.
+3. `history_on?/2` is now true (master on, reviewed, recorder on), the
+   offers reporter tells the home, and the home counts it among the machines
+   that contribute (`ComputerHistory.contributors/1`).
+4. Its sending cycle sends every sitting it holds, the raw record of up to
+   48 hours that the owner had kept from the server, and the home summarizes
+   each with its provider.
+
+Nobody at the computer agreed to that. A fix keeps the conservative reading
+for history too: where the old switch was off, the migration switches the
+recorder off (or keeps its record local) rather than letting it decide.
+
 ## Seen while reading, not modelled
+
+- **A sitting on its way when `/history off <name>` is done (D27).** The
+  home refuses the computer's sittings `off` while the request waits; once
+  the computer answers that its recorder is off, the home clears the request
+  (`clear_off/3`) and counts the computer by its offer, which the computer's
+  offers reporter changes in a message of its own. A sitting sent before the
+  off on the bulk lane, behind other traffic, that arrives after the clear and
+  before the new offers is taken and summarized. The window is short and the
+  sitting's events precede the off.
 
 - **A delivery to a machine with no store answered a mark it did not
   record (fixed with HS-2).** `Spool.apply_at/3` now answers the store's own
@@ -446,3 +481,14 @@ and `delivery.ex` pins. Walked against the commit:
   `ComputerHistorySql.renew_home_token`.
 
 Every earlier check keeps its verdict and its state count.
+
+## Re-read for the computer's switches (M97 D27, 2026-11-12)
+
+`101830533` staled the `machine_service.ex` pin: `history.off` runs
+`ComputerHistory.switch_off/1` without the offer step, since a computer's
+history offer now follows its recorder (`Switches.history_on?/2`: master on,
+reviewed, recorder on), which is what the home counts as contributing. An
+off machine is still left out (Out of scope), and its sittings are refused
+`off` after the purge check, so no modelled step changed. HS-5 above is the
+upgrade's own defect; the sitting on its way during an off is under Seen
+while reading.

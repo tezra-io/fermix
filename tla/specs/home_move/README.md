@@ -443,3 +443,11 @@ then retires the source. The readiness check before a move
 No modelled step changed, and the readability rule is a single read of the
 manifest at the staging, so it is not modelled on its own. The comments'
 line numbers into `candidate.ex` point at the committed code.
+
+## Re-read for the computer's switches (M97 D27, 2026-11-12)
+
+Re-read against 101830533, which staled the `move_worker.ex` pin: the kept
+offers a request names are read through `Consent.known/1`, so a request an
+engine before D27 wrote is read as a surface's is. The switches it writes
+are read by no rule; no modelled step changed. The comments' line numbers
+into `move_worker.ex` point at the committed code.

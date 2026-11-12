@@ -436,6 +436,12 @@ it; the summary offers Update where Move back or Restore here would stand
 a home that no machine serves. No modelled step changed; the comments' line
 numbers into `candidate.ex` point at the committed code.
 
+Walked again against 101830533 (M97 D27, the computer's switches), which
+staled the `move_worker.ex` and `always_on.ex` pins: the kept lines are read
+through `Consent.known/1` and set the recorder through the history line.
+Switches no rule reads; no modelled step changed. The comments' line numbers
+into both files point at the committed code.
+
 ## Done
 
 Deadlock checking is on. `Done` has these ends:

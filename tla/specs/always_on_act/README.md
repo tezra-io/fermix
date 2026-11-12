@@ -157,3 +157,12 @@ the undone move started with, read from that move's phase
 no rule reads. The serializer, the key rule, Restore here's request, its
 job, the busy refusal and the ending are as before. The comments' line
 numbers into `always_on.ex` point at the committed code.
+
+## Re-read for the computer's switches (M97 D27, 2026-11-12)
+
+Re-read against 101830533, which staled the `always_on.ex` pin: a move's
+kept lines now set the recorder through the history line, and an earlier
+app's `files` and `shell` keep files and commands on only together
+(`Consent.known/1`). Fields of the request and switches no rule reads; no
+modelled step changed. The comments' line numbers into `always_on.ex` point
+at the committed code.

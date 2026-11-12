@@ -54,7 +54,7 @@ everything else left out.
   restarts it.
 - `ReconcileCanTimeOut`: `/history off`'s reconcile call gives up after its
   15 s timeout (`controller.ex:54`, `:62-63`). The timer starts at
-  `computer_history.ex:264`.
+  `computer_history.ex:282`.
 - `ReconcileCanStall`: that timeout can fire before the DynamicSupervisor has
   sent the Capturer `:shutdown`. Setting it `FALSE` is a timing assumption:
   the work before the `:shutdown` is app-env reads, `File.regular?` stats in
@@ -76,15 +76,15 @@ everything else left out.
   gate is the flush-time rule of 693970b7.
 - `StopBeforeReply`: `/history off` replies only after its reconcile call
   returns, and that call returns only after the Capturer has exited
-  (`computer_history.ex:187`, `:193-197`, `:264`, `controller.ex:62-63`,
+  (`computer_history.ex:211`, `:219-223`, `:282`, `controller.ex:62-63`,
   `:201`).
 - `SaveBeforeReply`: `/history off` writes `machine.toml` before it replies
-  (`computer_history.ex:186-190` before `history.ex:699-700`).
+  (`computer_history.ex:210-213` before `history.ex:699-700`).
 - `BootReconciles`: a started or restarted Controller reconciles in
   `handle_continue` (`controller.ex:66-88`).
 - `OffConfirmsStop`: an exit of the reconcile call (no Controller, a crash
   mid-call, a timeout) comes back as `{:error, {:reconcile_failed, _}}`
-  (`computer_history.ex:262-269`), and `/history off` then says the stop could
+  (`computer_history.ex:280-287`), and `/history off` then says the stop could
   not be confirmed instead of "nothing new is captured" (`history.ex:779-784`).
   Off, the exit reads as a confirmed stop (the code at 693970b7).
 - `InitChecksEnabled`: every Capturer start, a DynamicSupervisor restart
@@ -261,12 +261,12 @@ Controller's split lookup and crashes at any point) both held: 01 with
 - **`/history off`: env flip, then terminate the Capturer, then save
   config: confirmed.** The order is (`ComputerHistory.switch_off/1`, from
   `disable/1`, `history.ex:811-816`):
-  1. flip (`computer_history.ex:178-184`);
-  2. a synchronous reconcile (`:187`, `:193-197`), which returns after
+  1. flip (`computer_history.ex:200-206`);
+  2. a synchronous reconcile (`:211`, `:219-223`), which returns after
      `DynamicSupervisor.terminate_child` returns, which waits for
      `terminate/2`; since the CH-3 fix an exit of the call comes back as an
      error, not `:ok`;
-  3. save to `machine.toml` (`:188`), whatever the reconcile returned;
+  3. save to `machine.toml` (`:212`), whatever the reconcile returned;
   4. reply (`history.ex:764-795`), chosen by both outcomes.
 - **Events captured during a pause but flushed after it ends are stored:
   confirmed → CH-1 (fixed).**
@@ -321,7 +321,7 @@ the fixed code.
     timer flushes the buffer (`:325-335`).
   - `capture_paused?` compares `utc_now()` with `pause_until`
     (`ingest.ex:213-222`) and never the event's `ts`, then inserts
-    (`:188`).
+    (`:212`).
   - Nothing flushes or fences the buffer at the pause ack. The design
     describes that step (MILESTONE_32 §7.1, and invariant 12: "the capturer
     stamps a stop-fence and drops later-stamped events"), and the code has
@@ -643,7 +643,7 @@ the fixed code.
   pause the home names in a refusal or a delivery, written beside a pause from
   chat, can no longer lower it (it was a read and a write until 18710c89).
 - `/history off`'s env flip is a `get_env` (`Config.current/0`) and a
-  `put_env` (`computer_history.ex:178-184`), folded into one step: no other
+  `put_env` (`computer_history.ex:200-206`), folded into one step: no other
   writer of that key is in scope.
 - The Controller's start of a Capturer (`ensure_started`) is folded with the
   DynamicSupervisor's `start_child` and the Capturer's `init` read of the
@@ -655,7 +655,7 @@ the fixed code.
   Controller `whereis` after the flip either sees the new pid and stops it,
   or the `init` read sees the flip.
 - The model's host has a recorder (a Mac). On a host with none, `/history
-  off` makes no reconcile call (`stop_here/2`, `computer_history.ex:193-199`),
+  off` makes no reconcile call (`reconcile_here/2`, `computer_history.ex:219-225`),
   and since 18710c89 the rail's supervisor runs there only on a home that a
   computer can contribute to or that holds notes, with no store and no
   recorder to stop (`supervisor.ex:60-67`); elsewhere its `init/1` answers
@@ -821,3 +821,17 @@ token alone (`home_identity/1`), renewed when a stored copy is installed
 alone. In this scene the store never changes; no modelled step changed. The
 line numbers in the spec and in this README's current-code sections point at
 the committed files.
+
+## Re-read for the computer's switches (M97 D27, 2026-11-12)
+
+`101830533` staled the `computer_history.ex` pin. `switch_off/1` is now
+`switch_recorder(false, _)`: the env flip, the reconcile where this system
+has a recorder (`reconcile_here/2`, was `stop_here/2`), the save to
+`machine.toml`, then, on the running engine's home, a word to the offers
+reporter (`Switches.offers_changed/0`), since a computer's history offer now
+follows its recorder; the offer step of `/history off <name>` is gone. The
+modelled steps and their order are as before, and the word to the reporter
+comes after the save and changes nothing this spec reads. `switch_on/1`, the
+same steps the other way for a history line ticked at the computer, is no
+step here (no re-enable is modelled). The line numbers into
+`computer_history.ex` point at the committed file.

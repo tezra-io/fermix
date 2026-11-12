@@ -82,7 +82,7 @@
 \* SOURCE: apps/fermix_core/lib/fermix_core/computer_history/ingest.ex @ 48ba431592fb
 \* SOURCE: apps/fermix_core/lib/fermix_core/computer_history/controller.ex @ fea8fcc80c2d
 \* SOURCE: apps/fermix_core/lib/fermix_core/computer_history/supervisor.ex @ 76033f680ab0
-\* SOURCE: apps/fermix_core/lib/fermix_core/computer_history.ex @ 7e9a05f20685
+\* SOURCE: apps/fermix_core/lib/fermix_core/computer_history.ex @ 798a323ea272
 \* SOURCE: apps/fermix_core/lib/fermix_core/computer_history/purge.ex @ a066c0ea7e38
 \* SOURCE: apps/fermix_core/lib/fermix_core/computer_history/delivery.ex#apply_here @ fb5801d6ac6d
 \* SOURCE: apps/fermix_core/lib/fermix_core/computer_use/sidecar_installer.ex @ a2681ba9c881
@@ -106,7 +106,7 @@ CONSTANTS
     CapturerCanCrash,   \* the Capturer raises; its DynamicSupervisor restarts it
     ReconcileCanTimeOut,\* /history off's reconcile call gives up after its 15 s timeout
                         \* (controller.ex:54, :62-63; the timer starts at
-                        \* computer_history.ex:264)
+                        \* computer_history.ex:282)
     ReconcileCanStall,  \* the timeout can fire BEFORE the DynamicSupervisor has sent the
                         \* Capturer :shutdown. FALSE is a timing assumption: the work before
                         \* it (app env, file stats in installed?, whereis: controller.ex:149,
@@ -120,15 +120,15 @@ CONSTANTS
                         \* late its batch is flushed: the ts half of min(ts, now) < pause_until
                         \* (ingest.ex:235-236). Off, it is the flush-time gate of 693970b7
     StopBeforeReply,    \* /history off waits for the reconcile call, which returns after the
-                        \* Capturer exited (computer_history.ex:187, :193-197, :264,
+                        \* Capturer exited (computer_history.ex:211, :219-223, :282,
                         \* controller.ex:62-63, :201)
     SaveBeforeReply,    \* /history off saves machine.toml before it replies
-                        \* (computer_history.ex:186-190, then history.ex:699-700)
+                        \* (computer_history.ex:210-213, then history.ex:699-700)
     BootReconciles,     \* a (re)started Controller reconciles in handle_continue (controller.ex:66-88)
     OffConfirmsStop,    \* an exit of the reconcile call (no Controller, a crash mid-call, a
                         \* timeout) is returned as an error, and /history off then says the
                         \* stop is unconfirmed instead of "nothing new is captured"
-                        \* (computer_history.ex:262-269, history.ex:779-784)
+                        \* (computer_history.ex:280-287, history.ex:779-784)
     InitChecksEnabled,  \* every Capturer start re-reads the enable bit and declines (:ignore)
                         \* while the feature is off (capturer.ex:130-136)
     InsertChecksIntervals, \* the spool insert refuses, inside its own transaction, each row
@@ -297,7 +297,7 @@ Insert == [e \in Events |-> IF where[e] = "batch"
 Kept == {e \in Buffer : ~GateDrops(e)}
 
 \* The call exited without a confirmed stop: the fixed code returns that as an
-\* error (computer_history.ex:262-269) and the reply says so; without the
+\* error (computer_history.ex:280-287) and the reply says so; without the
 \* mechanism the exit is read as :ok, a confirmed stop.
 Unconfirmed == IF OffConfirmsStop THEN "unconfirmed" ELSE "reconciled"
 
@@ -588,7 +588,7 @@ CtrlSend ==
 \* The Controller dies alone, at any point (for example do_reconcile raises,
 \* controller.ex:148-155). A queued or running call dies with it: the
 \* caller's GenServer.call exits, and reconcile_runtime returns that as
-\* {:error, {:reconcile_failed, _}} (computer_history.ex:262-269), an
+\* {:error, {:reconcile_failed, _}} (computer_history.ex:280-287), an
 \* unconfirmed stop. A terminate_child it already sent still runs; the
 \* reply goes to the dead process (see ReplyTo).
 ControllerCrash ==
@@ -629,7 +629,7 @@ OffUnchanged ==
 
 \* The owner sends /history off; disable/1 (history.ex:811-816) calls
 \* ComputerHistory.switch_off/1, which flips the app env
-\* (computer_history.ex:178-184). That is a get_env (Config.current/0) then a
+\* (computer_history.ex:200-206). That is a get_env (Config.current/0) then a
 \* put_env, folded into one step: no other writer of this key is in scope.
 OffFlip ==
     /\ OwnerCanDisable
@@ -639,9 +639,9 @@ OffFlip ==
     /\ UNCHANGED <<ctrlCall, config, offAcked, offUnconfirmed>>
     /\ OffUnchanged
 
-\* stop_here -> ComputerHistory.reconcile_runtime (computer_history.ex:187,
-\* :193-197, :262-269) -> GenServer.call(Controller, :reconcile). The model's
-\* host records (a Mac; on a host with no recorder, stop_here skips the call:
+\* reconcile_here -> ComputerHistory.reconcile_runtime (computer_history.ex:211,
+\* :219-223, :280-287) -> GenServer.call(Controller, :reconcile). The model's
+\* host records (a Mac; on a host with no recorder, reconcile_here skips the call:
 \* there is no recorder to stop). A dead Controller: the call
 \* exits at once, an unconfirmed stop. With
 \* StopBeforeReply off, History does not wait for the Controller.
@@ -667,9 +667,9 @@ OffTimeout ==
     /\ UNCHANGED <<ctrlCall, env, config, offAcked, offUnconfirmed>>
     /\ OffUnchanged
 
-\* ConfigStore.put_machine_table/3 (computer_history.ex:188), one write of
+\* ConfigStore.put_machine_table/3 (computer_history.ex:212), one write of
 \* this machine's machine.toml with enabled = false, under the config lock. It
-\* runs whatever the stop's outcome (:186-190). With SaveBeforeReply off it
+\* runs whatever the stop's outcome (:210-213). With SaveBeforeReply off it
 \* runs after the reply.
 OffSave ==
     /\ IF SaveBeforeReply
