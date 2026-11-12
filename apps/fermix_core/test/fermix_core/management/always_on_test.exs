@@ -422,10 +422,10 @@ defmodule FermixCore.Management.AlwaysOnTest do
     # tried again moves with the keep it was started with, never the
     # engine's proposal: the undone screen carries no block to choose again.
     test "Try again after an undone move keeps what the owner left ticked", ctx do
-      input = %Input{recovery_passphrase: @passphrase, keep_offers: ["files"]}
+      input = %Input{recovery_passphrase: @passphrase, keep_offers: ["files_and_shell"]}
       assert {:ok, _answer} = press(ctx, "move_now", input)
       assert {:ok, request} = Move.read_request(ctx.home)
-      assert Move.keep_offers(request) == ["files"]
+      assert Move.keep_offers(request) == ["files_and_shell"]
 
       # The move undone: its request goes, and the engine is the primary again.
       :ok = Move.remove_request(ctx.home)
@@ -436,7 +436,7 @@ defmodule FermixCore.Management.AlwaysOnTest do
                press(ctx, "try_again", %Input{recovery_passphrase: @passphrase})
 
       assert {:ok, request} = Move.read_request(ctx.home)
-      assert Move.keep_offers(request) == ["files"]
+      assert Move.keep_offers(request) == ["files_and_shell"]
     end
 
     # Re-check finding 2: a move undone, with its server still held, offers
@@ -522,22 +522,25 @@ defmodule FermixCore.Management.AlwaysOnTest do
     # M97 §7.3: a computer that moved before its server could ask what it may
     # use here offers nothing until the owner reviews it, here.
     test "the review of a computer's offers keeps what the owner ticked", ctx do
-      waiting = Switches.only([:files, :shell, :browser], reviewed: false)
+      waiting = Switches.only([:files_and_shell, :browser], reviewed: false)
       opts = Keyword.put(ctx.opts, :computer_switches, waiting)
 
       assert %{"notice" => %{"id" => "computer_review"}, "detail" => %{"review" => review}} =
                summary(opts)
 
       assert Enum.map(Enum.filter(review["lines"], & &1["on"]), & &1["offer"]) ==
-               ~w(files shell browser)
+               ~w(files_and_shell browser)
 
-      input = %Input{keep_offers: ["files"]}
+      # An app from before D27 ticks files and commands as two lines; both
+      # keep the one switch on (M97 §3.4).
+      input = %Input{keep_offers: ["files", "shell"]}
       assert {:ok, %{"result" => nil}} = press(%{ctx | opts: opts}, "review_offers", input)
 
       assert {:ok, switches} = Switches.read(ctx.home)
       assert Switches.reviewed?(switches)
       assert Switches.on?(switches, :files)
-      refute Switches.on?(switches, :shell)
+      assert Switches.on?(switches, :shell)
+      refute Switches.on?(switches, :browser)
 
       assert {:error, :invalid_params, %{"field" => "keep_offers"}} =
                press(%{ctx | opts: opts}, "review_offers", %Input{keep_offers: ["camera"]})

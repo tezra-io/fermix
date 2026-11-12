@@ -7,9 +7,9 @@ defmodule FermixCore.Computers.Offer do
 
   Each offer is one module, so the session that builds its capability flips
   its state in one place. `Computers.Offers.compute/3` asks each module of a
-  list, in order; the computer's offers reporter
-  (`FermixChannels.Desktop.Offers`) holds that list, the core offers here and
-  the ones whose device end lives beside the link.
+  list, in order; every offer a computer makes is in `Offers.modules/0`,
+  which the computer's offers reporter (`FermixChannels.Desktop.Offers`)
+  works out.
 
   A state is `{:on, detail}` (a short word or nil, such as the sandbox mode
   of the shell), `{:on, detail, helper}` for an offer that also says what its
@@ -28,7 +28,7 @@ defmodule FermixCore.Computers.Offer do
           | {:on, String.t() | nil, %{actions: [String.t()], input_methods: [String.t()]}}
           | {:off | :unavailable, String.t()}
 
-  @doc "The offer's id, one of `Switches.offers/0`."
+  @doc "The offer's id."
   @callback id() :: Switches.offer()
 
   @doc ~s(What the offer is, in the owner's words: "commands", "the browser", "your screen".)

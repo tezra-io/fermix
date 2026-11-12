@@ -110,7 +110,7 @@ defmodule FermixCore.Management.HomeSummaryTest do
       # M97 §7.3: a computer that moved before its server could ask what it
       # may use here offers nothing until the owner reviews it.
       {"a desktop whose switches wait for the review",
-       desktop(offers_review: Consent.view(Consent.block([:files, :shell], os: :macos))), "on",
+       desktop(offers_review: Consent.view(Consent.block([:files_and_shell], os: :macos))), "on",
        "Fermix runs on your server. Last backup 2 hours ago.", nil},
       {"a desktop whose server's part did not arrive", desktop(primary_home: nil), "on",
        "Fermix runs on your server.", nil},
@@ -377,7 +377,7 @@ defmodule FermixCore.Management.HomeSummaryTest do
   # that took its own sandbox setting.
   describe "a computer's offers" do
     test "a desktop whose switches wait offers the review, says it once, and shows its block" do
-      block = Consent.view(Consent.block([:files, :shell], os: :macos))
+      block = Consent.view(Consent.block([:files_and_shell], os: :macos))
       summary = HomeSummary.summary(desktop(offers_review: block))
 
       assert %{"id" => "computer_review", "sentence" => said} = summary["notice"]
@@ -392,7 +392,7 @@ defmodule FermixCore.Management.HomeSummaryTest do
     end
 
     test "the move's ready screen shows what this computer keeps on" do
-      block = Consent.view(Consent.block([:files, :shell, :browser], os: :macos))
+      block = Consent.view(Consent.block([:files_and_shell, :browser], os: :macos))
 
       candidate = %{
         "candidate_id" => "cand-1",

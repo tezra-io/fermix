@@ -259,6 +259,10 @@ defmodule FermixCore.Setup.ConfigStore do
   (`bootstrap_runtime_config/1`, which `config/runtime.exs` calls for the
   daemon and every CLI verb alike), so a boot stopped between the writes is
   finished by the next. A home that is not there yet has nothing to move.
+  The machine file's write also rewrites this computer's switches where an
+  engine before M97 D27 wrote them (`Computers.Switches.upgrade/1`), once,
+  and logs it once; an old key whose value is not a boolean stops the boot
+  by name, with nothing written.
 
   A home the Mac app manages (its `engine-owner.json` names the app, whose
   bundle is still there: `EngineOwner.app_managed_marker?/1`) is migrated by
@@ -314,12 +318,12 @@ defmodule FermixCore.Setup.ConfigStore do
   # refusal naming the home the app's engine migrates.
   defp refuse_if_pending(home, server?) do
     with {:ok, config} <- read_named(home_document_path(home)),
-         {:ok, machine} <- read_named(MachineFile.path(home)) do
-      homeward = MachineFile.homeward(text(config), machine)
-      config = homeward.config || text(config)
-      plan = MachineFile.migration(config, homeward.machine || machine, server?)
-      writes = [homeward.config, homeward.machine, plan.machine, plan.config]
-
+         {:ok, machine} <- read_named(MachineFile.path(home)),
+         homeward = MachineFile.homeward(text(config), machine),
+         machine = homeward.machine || machine,
+         plan = MachineFile.migration(homeward.config || text(config), machine, server?),
+         {:ok, switches} <- upgraded_switches(home, plan.machine || machine) do
+      writes = [homeward.config, homeward.machine, plan.machine, plan.config, switches.machine]
       if Enum.all?(writes, &is_nil/1), do: :ok, else: {:error, {:app_managed, home}}
     end
   end
@@ -329,10 +333,21 @@ defmodule FermixCore.Setup.ConfigStore do
          {:ok, machine} <- read_named(MachineFile.path(home)),
          {:ok, config, machine} <- homeward(home, text(config), machine),
          plan = MachineFile.migration(config, machine, server?),
-         :ok <- write_if(MachineFile.path(home), plan.machine),
+         {:ok, switches} <- upgraded_switches(home, plan.machine || machine),
+         :ok <- write_if(MachineFile.path(home), switches.machine || plan.machine),
          :ok <- write_if(home_document_path(home), plan.config),
          :ok <- record_server_sandbox(home, plan) do
+      log_notice(switches.notice)
       log_notice(MachineFile.notice(plan))
+    end
+  end
+
+  # This computer's switches as an engine before M97 D27 wrote them,
+  # rewritten in the machine file's one write (`Computers.Switches.upgrade/1`).
+  defp upgraded_switches(home, machine) do
+    case ComputerSwitches.upgrade(machine) do
+      {:error, sentence} -> {:error, {:config, MachineFile.path(home), sentence}}
+      plan -> {:ok, plan}
     end
   end
 
@@ -549,6 +564,10 @@ defmodule FermixCore.Setup.ConfigStore do
   @spec load_error_sentence(term()) :: String.t()
   def load_error_sentence({:config, file, reason}) when is_binary(file) and is_atom(reason),
     do: "#{file} could not be read: #{:file.format_error(reason)}."
+
+  def load_error_sentence({:config, file, sentence})
+      when is_binary(file) and is_binary(sentence),
+      do: "#{file} could not be read: #{sentence} Fix it and start Fermix again."
 
   def load_error_sentence({:app_managed, home}) when is_binary(home),
     do:

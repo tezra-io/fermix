@@ -992,12 +992,9 @@ defmodule FermixCore.Management.CopyTest do
     test "every offer sentence and label obeys the rules" do
       for {where, text} <- offer_copy(), do: assert_owner_words(text, :prose, [], where)
 
-      # `home.status` names every offer a computer reports by its label, the
-      # device ends beside the link included (`Offers.label/1`).
-      offers = Application.fetch_env!(:fermix_core, :computer_offers).modules()
-      assert Offers.core_modules() -- offers == []
-
-      for module <- offers,
+      # `home.status` names every offer a computer reports by its label
+      # (`Offers.label/1`).
+      for module <- Offers.modules(),
           do: assert_owner_words(module.label(), :name, [], "offer label #{module.id()}")
     end
 
@@ -1031,7 +1028,7 @@ defmodule FermixCore.Management.CopyTest do
       sentences = Consent.sentences()
 
       assert length(sentences) > 10
-      assert Enum.any?(sentences, &String.starts_with?(&1, "With commands on"))
+      assert Enum.any?(sentences, &String.starts_with?(&1, "With files and commands on"))
 
       for text <- sentences, do: assert_owner_words(text, :prose, [], "keep block")
     end
@@ -1058,8 +1055,6 @@ defmodule FermixCore.Management.CopyTest do
     test "every rename refusal and switch refusal obeys the rules" do
       for text <- Computers.sentences(),
           do: assert_owner_words(text, :prose, ["studio Mac", "garden server"], "rename")
-
-      for text <- Switches.sentences(), do: assert_owner_words(text, :prose, [], "switches")
 
       # A command the daemon started is refused the switches in words of their own.
       assert_owner_words(computer_owner_sentence(), :prose, [], "computer owner")
@@ -1098,7 +1093,13 @@ defmodule FermixCore.Management.CopyTest do
           do: assert_owner_words(text, :prose, [], "computer footer")
 
       for reviewed <- [true, false],
-          row <- ThisComputer.rows("computer", %{fermix_core: [computer: [reviewed: reviewed]]}),
+          macos? <- [true, false],
+          row <-
+            ThisComputer.rows(
+              "computer",
+              %{fermix_core: [computer: [reviewed: reviewed]]},
+              macos?: macos?
+            ),
           {field, text} <- [label: row["label"], footer: row["footer"]],
           is_binary(text),
           do: assert_owner_words(text, :prose, [], "computer.#{row["key"]} #{field}")
@@ -1156,7 +1157,7 @@ defmodule FermixCore.Management.CopyTest do
   defp offer_copy do
     for facts <- offer_facts(),
         switches <- offer_switches(),
-        offer <- Offers.compute(Offers.core_modules(), switches, facts),
+        offer <- Offers.compute(Offers.modules(), switches, facts),
         is_binary(offer.sentence),
         uniq: true,
         do: {"offer #{offer.id}", offer.sentence}
@@ -1167,14 +1168,20 @@ defmodule FermixCore.Management.CopyTest do
   # whose kernel does not hold commands to the sandbox; and a system Fermix
   # offers nothing on.
   defp offer_facts do
-    base = [helpers: %{computer_use: true}, permissions: %{}, sandbox_mode: :standard]
+    base = [
+      helpers: %{computer_use: true},
+      permissions: %{},
+      sandbox_mode: :standard,
+      recording: true
+    ]
+
     mac = [os: :macos, arch: "arm64", landlock: :not_asked]
     linux = [os: :linux, arch: "x86_64", landlock: :ok]
     no_helper = [helpers: %{computer_use: false}]
     no_screen = [permissions: %{screen: false}]
 
     for machine <- [mac, linux],
-        change <- [[], [arch: "riscv64"], no_helper, no_screen] do
+        change <- [[], [arch: "riscv64"], no_helper, no_screen, [recording: false]] do
       ComputerFacts.read(base |> Keyword.merge(machine) |> Keyword.merge(change))
     end ++
       [
@@ -1186,10 +1193,10 @@ defmodule FermixCore.Management.CopyTest do
   # Waiting for the review, the master off, every offer off, every offer on.
   defp offer_switches do
     [
-      Switches.only(Switches.offers(), reviewed: false),
-      Switches.only(Switches.offers(), enabled: false),
+      Switches.only(Switches.switches(), reviewed: false),
+      Switches.only(Switches.switches(), enabled: false),
       Switches.only([]),
-      Switches.only(Switches.offers())
+      Switches.only(Switches.switches())
     ]
   end
 

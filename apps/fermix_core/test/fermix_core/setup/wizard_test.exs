@@ -3281,7 +3281,7 @@ defmodule FermixCore.Setup.WizardTest do
 
       [fermix_core.computer]
       enabled = true
-      shell = true
+      files_and_shell = true
       """)
 
       {:ok, opened} = ConfigStore.load_runtime_config()
@@ -3290,7 +3290,7 @@ defmodule FermixCore.Setup.WizardTest do
 
       # Elsewhere, since: the app switches this computer off on disk, another
       # page tightens the sandbox and turns the recorder off.
-      :ok = Switches.write(home, enabled: false, shell: true)
+      :ok = Switches.write(home, enabled: false, files_and_shell: true)
       assert {:ok, _report} = Wizard.set_sandbox_overrides(:strict, nil, nil)
 
       assert {:ok, _report} =
@@ -3300,7 +3300,7 @@ defmodule FermixCore.Setup.WizardTest do
 
       {:ok, saved} = ConfigStore.load_runtime_config()
       assert Keyword.fetch!(saved.fermix_core[:computer], :enabled) == false
-      assert Keyword.fetch!(saved.fermix_core[:computer], :shell) == true
+      assert Keyword.fetch!(saved.fermix_core[:computer], :files_and_shell) == true
       assert SandboxConfig.normalize(saved.sandbox).mode == :strict
       assert Keyword.fetch!(saved.fermix_core[:computer_history], :enabled) == false
 

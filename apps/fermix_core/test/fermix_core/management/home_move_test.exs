@@ -365,11 +365,11 @@ defmodule FermixCore.Management.HomeMoveTest do
                HomeMove.move_start(
                  record.candidate_id,
                  @passphrase,
-                 [keep_offers: [:files]] ++ seams
+                 [keep_offers: [:files_and_shell]] ++ seams
                )
 
       assert {:ok, request} = Move.read_request(ctx.home)
-      assert Move.keep_offers(request) == ["files"]
+      assert Move.keep_offers(request) == ["files_and_shell"]
     end
 
     test "a start with no choice keeps the block as proposed", ctx do
@@ -378,7 +378,7 @@ defmodule FermixCore.Management.HomeMoveTest do
 
       assert {:ok, _started} = HomeMove.move_start(record.candidate_id, @passphrase, seams)
       assert {:ok, request} = Move.read_request(ctx.home)
-      assert Move.keep_offers(request) == ~w(files shell browser computer_use)
+      assert Move.keep_offers(request) == ~w(files_and_shell browser computer_use)
     end
   end
 

@@ -7,7 +7,9 @@ defmodule FermixCore.Computers.Offers do
   this computer. The words around a switch are here, so every offer says
   them the same way (`switched/4`): an offer is off while the switches wait
   for the owner's review (a computer that moved before M97), while the
-  master is off, or while its own switch is off.
+  master is off, or while its own consent is off: the switch that decides it
+  (`Switches.on?/2`), and for history its recorder's setting
+  (`Switches.history_on?/2`, M97 D27).
 
   On the wire (`offers`, the mobile protocol's *Desktop sessions*) the list
   travels as one JSON payload, `{"v":1,"offers":[…]}`, each offer
@@ -42,10 +44,10 @@ defmodule FermixCore.Computers.Offers do
   @max_helper_actions 64
   @max_input_methods 8
   @states %{"on" => :on, "off" => :off, "unavailable" => :unavailable}
-  # The offers whose capability lives in core, in the order a computer lists
-  # them; the device ends beside the link follow them
-  # (`FermixChannels.Desktop.Offers`).
-  @core [
+  # Every offer a computer makes, in the order it lists them. What reaches
+  # the server from a computer (calls, attachments, a robot, notifications)
+  # is no offer (M97 D27).
+  @modules [
     FermixCore.Computers.Offers.Files,
     FermixCore.Computers.Offers.Shell,
     FermixCore.Computers.Offers.Browser,
@@ -68,25 +70,31 @@ defmodule FermixCore.Computers.Offers do
   @spec max_offers() :: pos_integer()
   def max_offers, do: @max_offers
 
-  @doc "The offer modules whose capability lives in core, in the order a computer lists them."
-  @spec core_modules() :: [module()]
-  def core_modules, do: @core
+  @doc "Every offer module, in the order a computer lists them."
+  @spec modules() :: [module()]
+  def modules, do: @modules
+
+  @doc "The module of the offer `id`."
+  @spec module(Switches.offer()) :: module()
+  def module(id) when is_atom(id) do
+    case Enum.find(@modules, &(&1.id() == id)) do
+      nil -> raise ArgumentError, "#{inspect(id)} is no offer"
+      module -> module
+    end
+  end
 
   @doc "An offer's sentence on a system Fermix offers nothing on."
   @spec no_system_sentence() :: String.t()
   def no_system_sentence, do: @no_system_sentence
 
   @doc """
-  The words the offer `id` goes by ("commands", "voice calls"), from its
-  offer module: the core ones and those whose device end lives beside the
-  link, which the module configured at `:computer_offers` lists in its
-  `modules/0` (`FermixChannels.Desktop.Offers`, injected by module as
-  `FermixCore.Computers.Transport` is). Nil for an id this engine has no
-  module for: a newer computer may offer more.
+  The words the offer `id` goes by ("commands", "the browser"), from its
+  offer module. Nil for an id this engine has no module for: another
+  computer may offer more, or an earlier one an offer this engine retired.
   """
   @spec label(String.t()) :: String.t() | nil
   def label(id) when is_binary(id) do
-    Enum.find_value(Application.fetch_env!(:fermix_core, :computer_offers).modules(), fn module ->
+    Enum.find_value(@modules, fn module ->
       if Atom.to_string(module.id()) == id, do: module.label()
     end)
   end
@@ -113,7 +121,7 @@ defmodule FermixCore.Computers.Offers do
     do: %{id: Atom.to_string(id), state: state, sentence: sentence, detail: detail}
 
   @doc """
-  An offer that its switch decides, on a machine that can have it: on with
+  An offer that its consent decides, on a machine that can have it: on with
   `detail`, or off with the sentence that says why (the moduledoc).
   """
   @spec switched(Switches.t(), Switches.offer(), Facts.t(), String.t() | nil) ::
@@ -124,10 +132,17 @@ defmodule FermixCore.Computers.Offers do
     cond do
       not Switches.reviewed?(switches) -> {:off, waiting_sentence(machine)}
       not Switches.enabled?(switches) -> {:off, master_off_sentence(machine)}
-      Switches.on?(switches, id) -> {:on, detail}
+      consented?(switches, id, facts) -> {:on, detail}
       true -> {:off, switched_off_sentence(machine)}
     end
   end
+
+  # The one rule (`Computers.Switches`): history follows its recorder, every
+  # other offer the switch that decides it.
+  defp consented?(switches, :history, facts),
+    do: Switches.history_on?(switches, Map.fetch!(facts, :recording))
+
+  defp consented?(switches, id, _facts), do: Switches.on?(switches, id)
 
   @doc "An offer's sentence while the switches wait for the owner's review."
   @spec waiting_sentence(String.t()) :: String.t()

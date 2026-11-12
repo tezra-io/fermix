@@ -8,9 +8,10 @@ defmodule FermixChannels.Desktop.HistoryUplink do
   (`FermixCore.ComputerHistory.Report`, §8.5) goes the same way with
   `history.report`, in the interactive lane, from the same sending cycle.
 
-  - Only while the owner lets the home have this computer's history: the
-    master switch and the `history` switch (`Computers.Switches`); otherwise
-    nothing is sent and the sitting waits.
+  - Only while this computer offers its history, by the one rule its offer
+    follows (`Computers.Switches.history_on?/2`, M97 D27): its recorder
+    switched on (its own setting), its master switch on and its switches
+    reviewed; otherwise nothing is sent and the sitting waits.
   - At most one sitting is in flight per computer: the sending cycle is single
     flight (its claim), and the waiting process is registered under one name,
     so `answer/3`, which `Desktop.Invoke.Admission` calls with every answer the
@@ -21,12 +22,14 @@ defmodule FermixChannels.Desktop.HistoryUplink do
     later cycle, which the home answers from its note if it made one.
 
   Options (a test's seams): `:relay`, `:switches` (this computer's switches),
-  `:waiter` (the registered name).
+  `:recording?` (whether its recorder is switched on), `:waiter` (the
+  registered name).
   """
 
   require Logger
 
   alias FermixChannels.Desktop.Relay
+  alias FermixCore.ComputerHistory
   alias FermixCore.ComputerHistory.Submission
   alias FermixCore.Computers.Outcome
   alias FermixCore.Computers.Switches
@@ -60,8 +63,9 @@ defmodule FermixChannels.Desktop.HistoryUplink do
 
   defp send_allowed(op, payload, opts) do
     switches = Keyword.get_lazy(opts, :switches, &Switches.current/0)
+    recording? = Keyword.get_lazy(opts, :recording?, &ComputerHistory.enabled?/0)
 
-    if Switches.enabled?(switches) and Switches.on?(switches, :history),
+    if Switches.history_on?(switches, recording?),
       do: send_registered(op, payload, opts),
       else: {:error, :switched_off}
   end

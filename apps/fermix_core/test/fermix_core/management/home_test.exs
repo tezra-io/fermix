@@ -358,15 +358,17 @@ defmodule FermixCore.Management.HomeTest do
     end
 
     # M97 §3.2: each offer carries the words it goes by, from its offer
-    # module (the core ones and those beside the link alike), so an app that
-    # keeps no list of offers can name it; one a newer computer offers that
-    # this engine has no module for has none. A linked computer reading its
-    # server's list over the rail finds its own row marked, and only there.
+    # module, so an app that keeps no list of offers can name it; one a newer
+    # computer offers that this engine has no module for has none, and so does
+    # one an earlier computer still sends that this engine no longer offers
+    # (`voice`, M97 D27). A linked computer reading its server's list over the
+    # rail finds its own row marked, and only there.
     test "each offer has its words, and the row of the computer that asks is marked",
          %{home: home} do
       offers = [
         %{id: "shell", state: :on, sentence: nil, detail: "strict"},
-        %{id: "voice", state: :off, sentence: "Switched off on this Mac.", detail: nil},
+        %{id: "browser", state: :off, sentence: "Switched off on this Mac.", detail: nil},
+        %{id: "voice", state: :unavailable, sentence: "Not on this Fermix.", detail: nil},
         %{id: "lantern", state: :on, sentence: nil, detail: nil}
       ]
 
@@ -379,7 +381,8 @@ defmodule FermixCore.Management.HomeTest do
 
       assert Enum.map(studio["offers"], &{&1["id"], &1["label"]}) == [
                {"shell", "commands"},
-               {"voice", "voice calls"},
+               {"browser", "the browser"},
+               {"voice", nil},
                {"lantern", nil}
              ]
 

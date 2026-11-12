@@ -65,14 +65,16 @@ defmodule FermixCore.Management.AlwaysOn do
       one the server cannot be asked to close lapses by itself), and the
       candidate and the record go.
     * `review_offers` (M97 §7.3): on a linked computer that moved before
-      M97, whose switches wait for the owner's review: the offers in the
-      input's `keep_offers` stay on, every other is off, and the switches are
-      reviewed (`Computers.Consent.review/3`); with none given, the block as
-      the summary proposed it. `move_now` and `try_again` record their
+      M97, whose switches wait for the owner's review: the lines in the
+      input's `keep_offers` stay on, every other is off, the history line
+      sets the recorder, and the switches are reviewed
+      (`Computers.Consent.review/3`); with none given, the block as the
+      summary proposed it. `move_now` and `try_again` record their
       `keep_offers` in the move the same way (`HomeMove.move_start/3`); a
       `try_again` with none, whose undone screen offers no block, moves with
       the keep the undone move started with (`Move.undone_keep/1`), never
-      the proposal.
+      the proposal. An earlier app's `files` and `shell` keep files and
+      commands on only together (`Consent.known/1`, M97 D27).
     * `add_computer` (M97 §3.1): a code a new computer joins the home with
       (`home.enroll.open {purpose: computer}`, here on the server, over the
       link on a linked computer), answered once as `{code, expires_at}`.

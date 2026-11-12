@@ -61,7 +61,7 @@ defmodule FermixCore.Browser.HeldTurnListenerTest do
   test "a change that leaves the browser on ends nothing", ctx do
     held = HeldTurn.run(ctx.turns, turn("main-64"), fn -> self() end)
 
-    Agent.update(ctx.switches, &Keyword.put(&1, :files, true))
+    Agent.update(ctx.switches, &Keyword.put(&1, :files_and_shell, true))
     :ok = HeldTurnListener.changed(ctx.listener)
 
     # The listener took the change: a call behind it is answered after it.

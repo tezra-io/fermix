@@ -372,6 +372,130 @@ defmodule FermixCore.Setup.ConfigStoreMachineTest do
     end
   end
 
+  # M97 D27: this computer's switches as an engine before D27 wrote them, one
+  # for files and one for commands, one for history and four for what reaches
+  # the server from the computer. The boot's migration rewrites them once,
+  # in the one write of the machine file, and says so once.
+  describe "the switches an earlier engine wrote" do
+    @old_switches """
+    [fermix_core.computer_history]
+    enabled = true
+
+    [fermix_core.computer]
+    enabled = true
+    reviewed = false
+    files = true
+    shell = false
+    browser = true
+    computer_use = false
+    imessage = true
+    history = false
+    voice = false
+    attachments = false
+    accessory = false
+    notifications = false
+    """
+
+    test "are rewritten once: files and commands on only where both were, the recorder deciding",
+         ctx do
+      File.write!(MachineFile.path(ctx.home), MachineFile.header() <> "\n\n" <> @old_switches)
+
+      log =
+        capture_log(fn ->
+          assert :ok = ConfigStore.migrate_machine_file(ctx.home, server?: false)
+        end)
+
+      assert log =~ "files_and_shell = false"
+      assert log =~ "its recorder is on"
+      machine = File.read!(MachineFile.path(ctx.home))
+
+      for gone <- ~w(files shell history voice attachments accessory notifications),
+          do: assert(ConfigText.value(machine, "fermix_core.computer", gone) == :absent)
+
+      assert {:ok, loaded} = ConfigStore.load_runtime_config(resolve_secrets: false, macos?: true)
+
+      assert Keyword.fetch!(loaded.fermix_core, :computer) == [
+               enabled: true,
+               reviewed: false,
+               files_and_shell: false,
+               browser: true,
+               computer_use: false,
+               imessage: true
+             ]
+
+      assert Keyword.fetch!(loaded.fermix_core, :computer_history)[:enabled] == true
+
+      # A second boot finds nothing to do, and says nothing.
+      refute capture_log(fn ->
+               assert :ok = ConfigStore.migrate_machine_file(ctx.home, server?: false)
+             end) =~ "files_and_shell"
+
+      assert File.read!(MachineFile.path(ctx.home)) == machine
+    end
+
+    # A stage 0 engine kept the table in config.toml: the one boot moves it
+    # and rewrites it before the machine file is written.
+    test "a table config.toml held moves and is rewritten in the same write", ctx do
+      File.write!(Path.join(ctx.home, "config.toml"), @old_config <> "\n" <> @old_switches)
+
+      assert :ok = ConfigStore.migrate_machine_file(ctx.home, server?: false)
+
+      machine = File.read!(MachineFile.path(ctx.home))
+      assert ConfigText.value(machine, "fermix_core.computer", "files") == :absent
+
+      assert ConfigText.value(machine, "fermix_core.computer", "files_and_shell") ==
+               {:ok, "false"}
+
+      refute File.read!(Path.join(ctx.home, "config.toml")) =~ "fermix_core.computer]"
+
+      assert {:ok, _loaded} =
+               ConfigStore.load_runtime_config(resolve_secrets: false, macos?: true)
+    end
+
+    # Interrupted inside its write: the old file and a temporary one are
+    # there; the next boot rewrites it whole. Interrupted after it: nothing
+    # is left to do.
+    test "a boot stopped while writing them rewrites them; one stopped after has nothing to do",
+         ctx do
+      old = MachineFile.header() <> "\n\n" <> @old_switches
+      File.write!(MachineFile.path(ctx.home), old)
+      File.write!(MachineFile.path(ctx.home) <> ".tmp", "[fermix_core.computer]\nfiles_and")
+
+      assert :ok = ConfigStore.migrate_machine_file(ctx.home, server?: false)
+      refute File.exists?(MachineFile.path(ctx.home) <> ".tmp")
+      machine = File.read!(MachineFile.path(ctx.home))
+
+      assert ConfigText.value(machine, "fermix_core.computer", "files_and_shell") ==
+               {:ok, "false"}
+
+      assert :ok = ConfigStore.migrate_machine_file(ctx.home, server?: false)
+      assert File.read!(MachineFile.path(ctx.home)) == machine
+    end
+
+    test "on a home the app manages, another engine refuses the rewrite by name", ctx do
+      app_manages!(ctx)
+      old = MachineFile.header() <> "\n\n" <> @old_switches
+      File.write!(MachineFile.path(ctx.home), old)
+
+      assert {:error, {:app_managed, _home}} =
+               ConfigStore.migrate_machine_file(ctx.home, server?: false, app_engine?: false)
+
+      assert File.read!(MachineFile.path(ctx.home)) == old
+    end
+
+    test "a value that is no boolean stops the boot by name, and nothing is written", ctx do
+      old = MachineFile.header() <> "\n\n[fermix_core.computer]\nfiles = \"maybe\"\n"
+      File.write!(MachineFile.path(ctx.home), old)
+
+      assert {:error, {:config, path, sentence}} =
+               ConfigStore.migrate_machine_file(ctx.home, server?: false)
+
+      assert path == MachineFile.path(ctx.home)
+      assert sentence =~ "files takes true or false"
+      assert File.read!(MachineFile.path(ctx.home)) == old
+    end
+  end
+
   # A home the Mac app manages is the app engine's to migrate: another
   # engine pointed at it (a formula binary, a source checkout) moves nothing
   # there, while the app's own first start on a release that reads

@@ -391,7 +391,7 @@ defmodule FermixCore.Computers.Outcome do
   # The words an offer goes by, for the capability that is that offer; none
   # for one gated by the master switch alone.
   defp label(capability) when is_binary(capability) do
-    Enum.find_value(Offers.core_modules(), fn module ->
+    Enum.find_value(Offers.modules(), fn module ->
       if Atom.to_string(module.id()) == capability, do: module.label()
     end)
   end

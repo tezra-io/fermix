@@ -19,7 +19,8 @@ defmodule FermixChannels.Desktop.ComputerFamilyTest do
     arch: "arm64",
     landlock: :not_asked,
     helpers: %{computer_use: true},
-    sandbox_mode: :standard
+    sandbox_mode: :standard,
+    recording: false
   ]
 
   setup do
@@ -82,7 +83,7 @@ defmodule FermixChannels.Desktop.ComputerFamilyTest do
     primary =
       DesktopRail.primary!(families: %{computer: {ComputerFamily, registry: ctx.registry}})
 
-    desktop = desktop!(primary, Switches.only([:files, :shell]))
+    desktop = desktop!(primary, Switches.only([:files_and_shell]))
 
     offers = await_offers(ctx.registry, ["files", "shell"])
     assert Enum.find(offers, &(&1.id == "shell")).detail == "standard"
@@ -114,7 +115,7 @@ defmodule FermixChannels.Desktop.ComputerFamilyTest do
         families: %{computer: {ComputerFamily, registry: ctx.registry}}
       )
 
-    desktop = desktop!(primary, Switches.only([:files]))
+    desktop = desktop!(primary, Switches.only([:files_and_shell]))
 
     # The relay refuses a computer's own event the session does not take, so
     # nothing reaches a server that would close the session on it.
@@ -238,7 +239,7 @@ defmodule FermixChannels.Desktop.ComputerFamilyTest do
       id: :view
     )
 
-    _desktop = desktop!(primary, Switches.only([:files, :shell]))
+    _desktop = desktop!(primary, Switches.only([:files_and_shell]))
     said = await_offers(view, ["files", "shell"])
 
     old = Process.whereis(view)

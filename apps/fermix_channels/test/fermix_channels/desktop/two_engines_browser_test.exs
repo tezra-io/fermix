@@ -254,7 +254,7 @@ defmodule FermixChannels.Desktop.TwoEnginesBrowserTest do
 
     engines =
       TwoEngines.start!(
-        [offers: [:browser], browser: fn -> {:ok, browser.seams} end] ++
+        [switches: [:browser], browser: fn -> {:ok, browser.seams} end] ++
           part_lost_send(context[:part_lost] == true)
       )
 

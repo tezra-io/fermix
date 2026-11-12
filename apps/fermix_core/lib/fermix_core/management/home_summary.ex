@@ -1765,16 +1765,22 @@ defmodule FermixCore.Management.HomeSummary do
   defp keeps_on(_home, _role_link, _host_os, _opts), do: nil
 
   # A linked computer whose switches wait for the owner's review: the block
-  # of what they propose to keep on.
+  # of what they propose to keep on, history where its recorder is on.
   defp offers_review(true, host_os, opts) do
     switches = Keyword.get_lazy(opts, :computer_switches, &Switches.current/0)
 
     if Switches.reviewed?(switches),
       do: nil,
-      else: Consent.view(Consent.block(Consent.proposed(switches), os: host_os, kind: :review))
+      else: review_block(switches, host_os, opts)
   end
 
   defp offers_review(false, _host_os, _opts), do: nil
+
+  defp review_block(switches, host_os, opts) do
+    snapshot = Keyword.get(opts, :settings_snapshot, &ConfigStore.current_snapshot/0).()
+    proposed = Consent.proposed(switches, snapshot: snapshot, os: host_os)
+    Consent.view(Consent.block(proposed, os: host_os, kind: :review, snapshot: snapshot))
+  end
 
   # That this server left out the settings it inherited, and when; one that
   # cannot be read is logged once while it stays so.

@@ -1,8 +1,9 @@
 defmodule FermixCore.Computers.Offers.Files do
   @moduledoc """
   `files` (M97 §3.2): reading, writing, editing and searching files inside
-  this computer's sandbox roots, on a Mac or a Linux computer. Its switch
-  decides it (`Computers.Offers.switched/4`).
+  this computer's sandbox roots, on a Mac or a Linux computer. The one switch
+  for files and commands decides it (`files_and_shell`,
+  `Computers.Offers.switched/4`, M97 D27).
   """
 
   @behaviour FermixCore.Computers.Offer

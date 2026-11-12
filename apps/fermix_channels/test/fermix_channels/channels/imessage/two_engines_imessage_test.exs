@@ -50,7 +50,7 @@ defmodule FermixChannels.Channels.IMessage.TwoEnginesIMessageTest do
       end
     end)
 
-    engines = TwoEngines.start!(offers: [:imessage])
+    engines = TwoEngines.start!(switches: [:imessage])
     offers = TwoEngines.await_offers(engines)
     mac = mac!(engines)
     server_home = SafeRm.make_tmp_dir!("imessage_server")
@@ -439,7 +439,7 @@ defmodule FermixChannels.Channels.IMessage.TwoEnginesIMessageTest do
   test "with Messages switched off at the Mac, the Mac refuses, and nothing is sent", ctx do
     server = server!(ctx)
     live!(ctx, server)
-    Agent.update(ctx.engines.switch_agent, fn _on -> Switches.only([:files]) end)
+    Agent.update(ctx.engines.switch_agent, fn _on -> Switches.only([:files_and_shell]) end)
 
     capture_log(fn ->
       assert {:error, {:permanent, :adapter_unavailable}} =

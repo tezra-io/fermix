@@ -18,8 +18,8 @@ defmodule FermixChannels.Desktop.InvokeSwitchesTest do
 
   @reply_ms 10_000
 
-  # A run that asks this computer's daemon to switch commands on for the
-  # server, and answers what the daemon said.
+  # A run that asks this computer's daemon to switch files and commands on
+  # for the server, and answers what the daemon said.
   defmodule Widen do
     @moduledoc false
     @behaviour FermixCore.Computers.Capability
@@ -44,7 +44,7 @@ defmodule FermixChannels.Desktop.InvokeSwitchesTest do
     @impl true
     def run("widen", _args, nil, context) do
       socket = :persistent_term.get({__MODULE__, context.home})
-      params = %{"section" => "computer", "values" => %{"computer_shell" => true}}
+      params = %{"section" => "computer", "values" => %{"computer_files_and_shell" => true}}
 
       case Client.request_v1("settings.apply", params, socket_path: socket, timeout: 10_000) do
         {:error, {:management_error, code, _message, details}} ->
@@ -56,7 +56,7 @@ defmodule FermixChannels.Desktop.InvokeSwitchesTest do
     end
 
     @impl true
-    def target("widen", _args), do: "switch commands on"
+    def target("widen", _args), do: "switch files and commands on"
   end
 
   setup do
@@ -91,7 +91,7 @@ defmodule FermixChannels.Desktop.InvokeSwitchesTest do
       {Invoke,
        name: name,
        home: root,
-       switches: fn -> Switches.only([:files]) end,
+       switches: fn -> Switches.only([:browser]) end,
        sandbox: fn -> Config.normalize(mode: :strict, home: root, os_home: root) end,
        capabilities: %{"widen" => Widen},
        clock: &DateTime.utc_now/0,

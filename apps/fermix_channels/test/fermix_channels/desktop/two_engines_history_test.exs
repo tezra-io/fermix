@@ -98,7 +98,7 @@ defmodule FermixChannels.Desktop.TwoEnginesHistoryTest do
       contributors: contributors
     ]
 
-    e = TwoEngines.start!(offers: [:files, :history], history: history)
+    e = TwoEngines.start!(switches: [:files_and_shell], recording: true, history: history)
     :persistent_term.put({__MODULE__, :engines}, e)
     on_exit(fn -> :persistent_term.erase({__MODULE__, :engines}) end)
 
@@ -139,7 +139,8 @@ defmodule FermixChannels.Desktop.TwoEnginesHistoryTest do
 
       HistoryUplink.submit(payload,
         relay: ctx.e.relay,
-        switches: Switches.only([:files, :history])
+        switches: Switches.only([:files_and_shell]),
+        recording?: true
       )
     end
 
@@ -426,22 +427,23 @@ defmodule FermixChannels.Desktop.TwoEnginesHistoryTest do
     assert Enum.sort(Jason.decode!(thread.source_ids)) == Enum.sort([studio_note, loft_note])
   end
 
-  # M97 §7.2, §8.5: `/history off` naming the computer, over the real link. The
-  # home records it, the computer switches its history off as its own switch
-  # does (the recorder's setting and the server's offer), and from then on the
-  # home takes no sitting from it and makes no call for it.
+  # M97 §7.2, §8.5, D27: `/history off` naming the computer, over the real
+  # link. The home records it, the computer turns its recorder off, which is
+  # all its history offer follows, and from then on the home takes no sitting
+  # from it and makes no call for it.
   test "off from chat for this computer switches it off there, and the home takes nothing", ctx do
     record!(ctx, [0, 1, 2], @typed)
     # The computer's own file holds the switches its rig reads from an Agent.
-    :ok = Switches.write(ctx.e.root, Switches.only([:files, :history]))
+    :ok = Switches.write(ctx.e.root, Switches.only([:files_and_shell]))
     computer = TwoEngines.computer(ctx.e)
+    assert %{state: :on} = Enum.find(computer.offers, &(&1.id == "history"))
     deliver = [repo: ctx.repo, call_opts: TwoEngines.call_opts(ctx.e)]
 
     assert :done = Delivery.switch_off(computer, deliver)
 
+    # Its switches are untouched; its recorder is off.
     assert {:ok, switches} = Switches.read(ctx.e.root)
-    refute Keyword.fetch!(switches, :history)
-    assert Keyword.fetch!(switches, :files)
+    assert Switches.switched_on(switches) == [:files_and_shell]
     machine = File.read!(Path.join(ctx.e.root, "machine.toml"))
     assert machine =~ ~r/\[fermix_core\.computer_history\]\s+enabled = false/
 
@@ -450,9 +452,8 @@ defmodule FermixChannels.Desktop.TwoEnginesHistoryTest do
 
     assert id == ctx.e.device_id
 
-    # What the computer's own reader does when its switches change: read them
-    # again and send its offers.
-    Agent.update(ctx.e.switch_agent, fn _switches -> switches end)
+    # What the computer's own reporter does when its recorder is switched:
+    # work its offers out again and send them.
     Offers.changed(ctx.e.offers)
     await_history_off(ctx)
 
@@ -479,7 +480,8 @@ defmodule FermixChannels.Desktop.TwoEnginesHistoryTest do
     assert :ok =
              HistoryUplink.report(report,
                relay: ctx.e.relay,
-               switches: Switches.only([:files, :history])
+               switches: Switches.only([:files_and_shell]),
+               recording?: true
              )
 
     assert {:ok, [%{report: kept, report_at: at}]} =
@@ -490,8 +492,8 @@ defmodule FermixChannels.Desktop.TwoEnginesHistoryTest do
     refute kept =~ "Juniper"
   end
 
-  # The computer re-sends its offers when a switch changes; the server's live
-  # record follows within the suite's bound.
+  # The computer re-sends its offers when its recorder is switched; the
+  # server's live record follows within the suite's bound.
   defp await_history_off(ctx, attempts \\ 1_000) do
     case Enum.find(TwoEngines.computer(ctx.e).offers, &(&1.id == "history")) do
       %{state: :on} when attempts > 0 ->

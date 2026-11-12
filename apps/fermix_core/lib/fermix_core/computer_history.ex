@@ -84,11 +84,16 @@ defmodule FermixCore.ComputerHistory do
   The machines whose history the home still takes (M97 §8.5): this machine
   (`""`) while it records, and each computer of the home whose `history`
   offer is on, unless the owner asked from chat that its history go off and
-  it has not yet said it did. Off means no further provider call for a
-  machine's history: the home refuses a sitting from any other machine
-  (`Submission`), and the roll-up reads only these machines' notes and makes
-  no call when there are none (`Summarizer.run_rollup/1`). A store that does
-  not answer is returned as its error; the caller takes nothing.
+  it has not yet said it did. A computer's offer is on exactly while its
+  recorder is switched on there, under its master switch and its review
+  (`Computers.Switches.history_on?/2`, M97 D27), the rule the computer works
+  its offer out by and sends by (`FermixChannels.Desktop.HistoryUplink`), so
+  a computer whose recorder is off never counts. Off means no further
+  provider call for a machine's history: the home refuses a sitting from any
+  other machine (`Submission`), and the roll-up reads only these machines'
+  notes and makes no call when there are none (`Summarizer.run_rollup/1`). A
+  store that does not answer is returned as its error; the caller takes
+  nothing.
 
   `opts` (seams): `:recording?`, `:computers` (`Computers.list/0`), `:repo`.
   """
@@ -152,26 +157,43 @@ defmodule FermixCore.ComputerHistory do
   @machine_table "fermix_core.computer_history"
 
   @doc """
-  Switch this machine's computer history off (`/history off`, M97 §8.5), in
-  `home` (`:home`, the running engine's by default): the recorder's
-  `enabled` is written false in that home's `machine.toml`, and on the
-  running engine's own home it is put into application environment at once
-  (the tools leave the next turn) and the recorder is stopped
+  Switch this machine's computer history off (`/history off`, M97 §8.5; a
+  computer told from chat; a move's or a review's history line left
+  unticked), in `home` (`:home`, the running engine's by default): the
+  recorder's `enabled` is written false in that home's `machine.toml`, and
+  on the running engine's own home it is put into application environment
+  at once (the tools leave the next turn), the recorder is stopped
   (`reconcile_runtime/1`, only where this system has a recorder,
-  `:recorder?`). With `offer: true` (a computer told from chat) the
-  server's `history` offer goes off too (`Computers.Switches`), so its
-  server knows at once and nothing more is sent.
+  `:recorder?`), and this computer's offers reporter is told: its history
+  offer follows the recorder (M97 D27), so its server knows at once and
+  nothing more is sent.
 
-  Each step's outcome is answered, whatever the others': the stop
-  (`:stop`), the saved setting (`:save`) and the offer (`:offer`, `:ok`
-  when not asked). `:controller` is the Controller to reconcile.
+  Each step's outcome is answered, whatever the other's: the stop (`:stop`)
+  and the saved setting (`:save`). `:controller` is the Controller to
+  reconcile.
   """
-  @spec switch_off(keyword()) :: %{
-          stop: :ok | {:error, term()},
-          save: :ok | {:error, term()},
-          offer: :ok | {:error, term()}
-        }
+  @spec switch_off(keyword()) :: %{stop: :ok | {:error, term()}, save: :ok | {:error, term()}}
   def switch_off(opts \\ []) when is_list(opts) do
+    %{runtime: stop, save: save} = switch_recorder(false, opts)
+    %{stop: stop, save: save}
+  end
+
+  @doc """
+  Switch this machine's computer history on, from a move's or a review's
+  history line ticked at this computer (M97 §7.3, D27), the same steps as
+  `switch_off/1` the other way: written, applied at once on the running
+  engine's own home, the recorder started where this system has one, and
+  the offers reporter told. Only someone at this computer turns it on: the
+  server never asks for this. Answers the start (`:start`) and the saved
+  setting (`:save`).
+  """
+  @spec switch_on(keyword()) :: %{start: :ok | {:error, term()}, save: :ok | {:error, term()}}
+  def switch_on(opts \\ []) when is_list(opts) do
+    %{runtime: start, save: save} = switch_recorder(true, opts)
+    %{start: start, save: save}
+  end
+
+  defp switch_recorder(on?, opts) do
     home = Keyword.get_lazy(opts, :home, &ConfigStore.fermix_home/0)
     running? = Path.expand(home) == Path.expand(ConfigStore.fermix_home())
 
@@ -179,42 +201,38 @@ defmodule FermixCore.ComputerHistory do
       Application.put_env(
         :fermix_core,
         :computer_history,
-        Keyword.put(Config.current(), :enabled, false)
+        Keyword.put(Config.current(), :enabled, on?)
       )
     end
 
-    %{
-      stop: stop_here(running?, opts),
-      save: saved(ConfigStore.put_machine_table(home, @machine_table, [{"enabled", "false"}])),
-      offer: if(Keyword.get(opts, :offer, false), do: offer_off(home), else: :ok)
+    pair = [{"enabled", to_string(on?)}]
+
+    result = %{
+      runtime: reconcile_here(running?, opts),
+      save: saved(ConfigStore.put_machine_table(home, @machine_table, pair), on?)
     }
+
+    if running?, do: Switches.offers_changed()
+    result
   end
 
-  defp stop_here(true, opts) do
+  defp reconcile_here(true, opts) do
     if Keyword.get_lazy(opts, :recorder?, &recorder?/0),
       do: reconcile_runtime(Keyword.get(opts, :controller, Controller)),
       else: :ok
   end
 
-  defp stop_here(false, _opts), do: :ok
+  defp reconcile_here(false, _opts), do: :ok
 
-  defp saved(:ok), do: :ok
+  defp saved(:ok, _on?), do: :ok
 
-  defp saved({:error, reason} = error) do
-    Logger.warning("computer_history: the off setting was not saved: #{inspect(reason)}")
+  defp saved({:error, reason} = error, on?) do
+    Logger.warning(
+      "computer_history: the #{if on?, do: "on", else: "off"} setting was not saved: " <>
+        inspect(reason)
+    )
+
     error
-  end
-
-  defp offer_off(home) do
-    case Switches.read(home) do
-      {:ok, switches} ->
-        if Keyword.get(switches, :history, false),
-          do: Switches.write(home, Keyword.put(switches, :history, false)),
-          else: :ok
-
-      {:error, _reason} = error ->
-        error
-    end
   end
 
   # A store that does not answer denies, loudly: a gate fails closed.

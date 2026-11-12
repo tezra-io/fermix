@@ -165,6 +165,12 @@ defmodule FermixCore.Home.JoinTest do
   test "the server's approval links this computer, every offer off", ctx do
     :ok = Join.start(ctx.home, code(), ctx.opts)
     {:ok, keypair} = ComputerKey.read(ctx.home, store: :keyring)
+    # Its recorder was on before it joined; its history would now go to the
+    # server, so it starts off with the rest (M97 §3.1, §7.3, D27).
+    :ok =
+      ConfigStore.put_machine_table(ctx.home, "fermix_core.computer_history", [
+        {"enabled", "true"}
+      ])
 
     approved = %{
       "device_id" => "7e1f0c2a-3b4d-4e5f-8a6b-7c8d9e0f1a2b",
@@ -192,6 +198,9 @@ defmodule FermixCore.Home.JoinTest do
     assert {:ok, switches} = Switches.read(ctx.home)
     assert Switches.switched_on(switches) == []
     assert Switches.reviewed?(switches) and Switches.enabled?(switches)
+
+    assert {:ok, %{"enabled" => false}} =
+             ConfigStore.machine_table(ctx.home, "fermix_core.computer_history")
   end
 
   # M97 §8.5: a machine's purge mark counts one home's intervals, so joining

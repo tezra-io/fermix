@@ -7,7 +7,6 @@ defmodule FermixChannels.Desktop.OffersTest do
   alias FermixCore.Computers.Facts
   alias FermixCore.Computers.Switches
   alias FermixCore.Home.DesktopLink
-  alias FermixCore.Management.Copy
   alias FermixTestSupport.SafeRm
 
   @takes %{"computer" => %{"v" => 1, "offers" => true, "link_path" => true}}
@@ -16,7 +15,8 @@ defmodule FermixChannels.Desktop.OffersTest do
     arch: "arm64",
     landlock: :not_asked,
     helpers: %{computer_use: true},
-    sandbox_mode: :standard
+    sandbox_mode: :standard,
+    recording: false
   ]
 
   # A relay that answers every send, telling the test what it was asked.
@@ -40,7 +40,7 @@ defmodule FermixChannels.Desktop.OffersTest do
     home = SafeRm.make_tmp_dir!("desktop_offers")
     on_exit(fn -> SafeRm.rm_rf!(home) end)
     relay = start_supervised!({FakeRelay, self()})
-    switches = start_supervised!({Agent, fn -> Switches.only([:files, :shell]) end})
+    switches = start_supervised!({Agent, fn -> Switches.only([:files_and_shell]) end})
     name = :"desktop_offers_#{System.unique_integer([:positive])}"
     test = self()
 
@@ -80,11 +80,11 @@ defmodule FermixChannels.Desktop.OffersTest do
     refute_received {:sent, "offers", _fields, _payload}
 
     # A switch moved: they go again.
-    Agent.update(ctx.switches, fn _ -> Switches.only([:files]) end)
+    Agent.update(ctx.switches, fn _ -> Switches.only([:browser]) end)
     :ok = Offers.changed(ctx.name)
     assert_receive {:sent, "offers", %{"rev" => moved}, payload}
     assert moved != rev
-    assert offered(payload) == ["files"]
+    assert offered(payload) == ["browser"]
   end
 
   test "a new session hears the offers again, the same ones included", ctx do
@@ -106,39 +106,12 @@ defmodule FermixChannels.Desktop.OffersTest do
     refute_received {:sent, _type, _fields, _payload}
   end
 
-  test "every switch has its module, in the switches' order" do
-    assert Enum.map(Offers.modules(), & &1.id()) == Switches.offers()
-
-    offers =
-      FermixCore.Computers.Offers.compute(
-        Offers.modules(),
-        Switches.only(Switches.offers()),
-        Facts.read(@mac)
-      )
-
-    # The device ends of later stages are unavailable, whatever the switch.
-    for %{id: id, state: state, sentence: sentence} <- offers,
-        id in ~w(voice attachments accessory notifications) do
-      assert state == :unavailable
-      assert sentence =~ "later update of Fermix"
-    end
-  end
-
-  # The copy gate (`Management.Copy`) for the offers whose device end lives
-  # beside the link: an app and the prompt show their words as they are.
-  test "every offer this computer says obeys the copy rules" do
-    switches = [Switches.only(Switches.offers()), Switches.only([]), []]
-    facts = [Facts.read(@mac), Facts.read(Keyword.put(@mac, :os, :linux))]
-
-    for module <- Offers.modules(), s <- switches, f <- facts do
-      assert Copy.violations(module.label(), :name) == [], module.label()
-
-      case module.state(s, f) do
-        {:on, _detail} -> :ok
-        {:on, _detail, _helper} -> :ok
-        {_state, said} -> assert Copy.violations(said, :prose) == [], said
-      end
-    end
+  # M97 D27: a computer offers what its server may reach in to use; what
+  # reaches the server from the computer (calls, attachments, a robot,
+  # notifications) follows its own feature's setting and is no offer.
+  test "it offers files, commands, the browser, the screen, Messages and history", ctx do
+    assert Enum.map(Offers.current(ctx.name), & &1.id) ==
+             ~w(files shell browser computer_use imessage history)
   end
 
   test "a computer that moved before M97 starts waiting for its review" do
@@ -160,6 +133,6 @@ defmodule FermixChannels.Desktop.OffersTest do
 
     assert {:ok, switches} = Switches.read(home)
     refute Switches.reviewed?(switches)
-    assert :files in Switches.switched_on(switches)
+    assert :files_and_shell in Switches.switched_on(switches)
   end
 end

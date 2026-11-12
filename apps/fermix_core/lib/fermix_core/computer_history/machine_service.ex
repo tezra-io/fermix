@@ -18,9 +18,9 @@ defmodule FermixCore.ComputerHistory.MachineService do
     interval from the first.
   - `history.off`: `/history off` naming this computer. Its history goes off
     as its own switch turns it off (`ComputerHistory.switch_off/1`): the
-    recorder stops and stays off, and the server's `history` offer goes off,
-    so nothing more is recorded or sent. Only someone at this computer turns
-    it on again.
+    recorder stops and stays off, and the `history` offer, which follows the
+    recorder (M97 D27), goes off with it, so nothing more is recorded or
+    sent. Only someone at this computer turns it on again.
 
   Narrowing may come from anywhere (§7.2), so this is gated by the computer's
   master switch alone, never by its `history` offer: a computer whose history
@@ -92,8 +92,8 @@ defmodule FermixCore.ComputerHistory.MachineService do
   end
 
   def run("off", %{}, nil, %{home: home}) do
-    case ComputerHistory.switch_off(home: home, offer: true) do
-      %{stop: :ok, save: :ok, offer: :ok} ->
+    case ComputerHistory.switch_off(home: home) do
+      %{stop: :ok, save: :ok} ->
         {:ok, %{"off" => true}, nil}
 
       outcome ->

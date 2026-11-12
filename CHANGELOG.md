@@ -679,8 +679,9 @@ will be part of a future release; nothing in this group is in a release yet.
   new digits, the ones to type. A join that fails as it starts leaves no key
   behind, so the next one is not refused. A computer that joins moves
   nothing, starts with everything Fermix on your server may use switched
-  off, keeps no backups, and offers no Move back. One that already has a
-  Fermix of its own is refused, and nothing is deleted to make room. You can
+  off, its computer history too, keeps no backups, and offers no Move back.
+  One that already has a Fermix of its own is refused, and nothing is
+  deleted to make room. You can
   remove a computer from your devices (`fermix devices revoke`), after which
   it joins again only with a new code; the one that keeps the only copies of
   your server's backups asks first. Disconnect this computer does the same
@@ -694,7 +695,7 @@ will be part of a future release; nothing in this group is in a release yet.
   that computer's own sandbox: its mode, its folders and its allowed
   variables, with Seatbelt or Landlock holding each command. It works only
   with what that computer offers, which is switched on at that computer
-  (Files and Commands in its This computer settings). Every answer names the
+  (Files and commands in its This computer settings). Every answer names the
   computer it came from, so a path on your server is never taken for one on
   your Mac. A computer that is asleep or offline is refused at once with when
   it was last seen, and nothing waits for it to wake; a folder outside that
@@ -764,8 +765,9 @@ will be part of a future release; nothing in this group is in a release yet.
   now kept with your home, so your server knows them. The move's review no
   longer lists iMessage among what stops.
 - **Computer history from every computer becomes one memory on your home.**
-  Each computer with history switched on records into its own store, and the
-  raw record stays there and is deleted after 48 hours; each finished sitting
+  Each computer with history switched on (its own Computer history switch,
+  with everything Fermix on your server may use there on) records into its
+  own store, and the raw record stays there and is deleted after 48 hours; each finished sitting
   goes to your home, which has its summarizer summarize it and keeps the note,
   marked with that computer. "What was I working on on the studio Mac this
   morning?" and "what did I do across my computers yesterday?" both have an
@@ -778,8 +780,8 @@ will be part of a future release; nothing in this group is in a release yet.
   nothing from it inside that window; a purged window never gains a note.
   `/history off studio Mac` switches that computer's history off from
   anywhere: your home takes nothing more from it at once, and the computer
-  stops recording and sending when told, or once it is back; only someone at
-  it switches it on again. `/history status` shows one block per computer,
+  turns its recorder off when told, or once it is back; only someone at it
+  switches it on again. `/history status` shows one block per computer,
   with what it last reported of its recorder (its state, what it has not
   sent and its coverage, with the report's age). What Fermix on your server
   did on a computer's screen or in its browser is no longer reported as
@@ -787,9 +789,28 @@ will be part of a future release; nothing in this group is in a release yet.
   made as its own home are named for that Mac on your server once it moves
   and stays linked, and are "this computer" again after a move back. A
   Linux computer does not record yet.
+- **This computer's settings are five switches.** What Fermix on your server
+  may use on a computer is now: everything (the switch that turns it all off),
+  Files and commands, The browser, Your screen and, on a Mac, Messages. Files
+  and commands are one switch, since a command reads the same files under the
+  same sandbox; a computer that had only one of them on has both off after the
+  update, and the log says so once. Computer history is no longer switched
+  here: a computer gives your server its history while its own Computer
+  history switch is on, with everything on there, so a computer whose
+  recording is off never counts as sending history, and `/history off studio
+  Mac` turns that computer's recording off. Where the old history switch and
+  the recording disagreed, the recording decides, and the log says so once.
+  The move's review still has a line for your computer history, which now
+  turns recording on or off on that computer once the move goes through; the
+  review of a computer that moved before shows it ticked where recording is
+  on, and sets it the same way. Calls, attachments, the robot and
+  notifications reaching your server from a computer are no longer listed as
+  switches or offers: each will follow its own setting. An app or a move from
+  before this change that names files and commands separately keeps them on
+  only together.
 - **What a computer's switches end is answered as switched off.** Switching
-  off one thing at a computer (the browser, the screen, Messages, files or
-  commands) with the master switch on now ends at once what Fermix on your
+  off one thing at a computer (the browser, the screen, Messages, or files
+  and commands) with the master switch on now ends at once what Fermix on your
   server was running or had waiting there for it, each answered "studio Mac
   has the browser switched off. Only someone at studio Mac can switch it
   on.", where the browser said it had failed and other work went on; work

@@ -12,19 +12,21 @@ defmodule FermixCore.Computers.OffersTest do
     arch: "arm64",
     landlock: :not_asked,
     helpers: %{computer_use: true},
-    sandbox_mode: :standard
+    sandbox_mode: :standard,
+    recording: true
   ]
   @linux [
     os: :linux,
     arch: "x86_64",
     landlock: :ok,
     helpers: %{computer_use: true},
-    sandbox_mode: :strict
+    sandbox_mode: :strict,
+    recording: false
   ]
-  @all_on Switches.only(Switches.offers())
+  @all_on Switches.only(Switches.switches())
 
   defp states(facts, switches \\ @all_on) do
-    Offers.core_modules()
+    Offers.modules()
     |> Offers.compute(switches, Facts.read(facts))
     |> Map.new(&{&1.id, {&1.state, &1.sentence || &1.detail}})
   end
@@ -95,8 +97,9 @@ defmodule FermixCore.Computers.OffersTest do
     end
 
     test "a switch off, the master off and a review waiting each say why" do
-      off = states(@mac, Switches.only([:files]))
-      assert off["files"] == {:on, nil}
+      off = states(@mac, Switches.only([:browser]))
+      assert off["browser"] == {:on, nil}
+      assert {:off, "Switched off on this Mac." <> _rest} = off["files"]
       assert {:off, "Switched off on this Mac." <> _rest} = off["shell"]
 
       master = states(@mac, Keyword.put(@all_on, :enabled, false))
@@ -109,14 +112,40 @@ defmodule FermixCore.Computers.OffersTest do
       assert {:unavailable, _sentence} = waiting["imessage"]
     end
 
-    test "a computer with no section offers nothing" do
-      for {_id, {state, _said}} <- states(@mac, []), do: assert(state == :off)
+    test "a computer with no section offers nothing a switch decides" do
+      states = states(@mac, [])
+      for {id, {state, _said}} <- states, id != "history", do: assert(state == :off, id)
+      # Its history follows its recorder alone (M97 D27).
+      assert states["history"] == {:on, nil}
+    end
+
+    # M97 D27: one switch decides files and commands together.
+    test "files and commands are on and off together" do
+      on = states(@mac, Switches.only([:files_and_shell]))
+      assert on["files"] == {:on, nil}
+      assert on["shell"] == {:on, "standard"}
+      assert {:off, _sentence} = on["browser"]
+    end
+
+    # M97 D27: history has no switch here. It is offered while this
+    # computer's recorder is on (its own setting, the history section's), the
+    # master on and the switches reviewed, and in no other case.
+    test "history follows its recorder under the master, and nothing else" do
+      for enabled <- [true, false], reviewed <- [true, false], recording <- [true, false] do
+        switches = Switches.only([], enabled: enabled, reviewed: reviewed)
+        {state, _said} = states(Keyword.put(@mac, :recording, recording), switches)["history"]
+        offered = enabled and reviewed and recording
+        assert state == if(offered, do: :on, else: :off), inspect({enabled, reviewed, recording})
+      end
+
+      assert {:off, "Switched off on this Mac." <> _rest} =
+               states(Keyword.put(@mac, :recording, false))["history"]
     end
   end
 
   describe "the wire" do
     test "encode and decode round-trip, and the rev is the payload's own" do
-      offers = Offers.compute(Offers.core_modules(), @all_on, Facts.read(@linux))
+      offers = Offers.compute(Offers.modules(), @all_on, Facts.read(@linux))
 
       assert {:ok, payload, rev} = Offers.encode(offers)
       assert Offers.rev?(rev)

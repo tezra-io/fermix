@@ -8,6 +8,9 @@ defmodule FermixCore.ComputerHistory.SurfacesTest do
 
   alias FermixCore.ComputerHistory
   alias FermixCore.Computers.Computer
+  alias FermixCore.Computers.Facts
+  alias FermixCore.Computers.Offers
+  alias FermixCore.Computers.Switches
   alias FermixCore.Memory.Repo
   alias FermixTestSupport.SafeRm
 
@@ -55,6 +58,51 @@ defmodule FermixCore.ComputerHistory.SurfacesTest do
     assert ComputerHistory.surfaces?([computers: [computer(:on)]] ++ base)
     refute ComputerHistory.surfaces?([computers: [computer(:off)]] ++ base)
     refute ComputerHistory.surfaces?([computers: [computer(:unavailable)]] ++ base)
+  end
+
+  # M97 D27: one rule decides whether a computer's history reaches the home:
+  # its recorder on, under its master switch and the review. The home reads it
+  # from the offer the computer works out by that rule, so a computer whose
+  # recorder is off never counts, whatever an earlier switch said.
+  test "a computer contributes and surfaces exactly while its recorder and master are on" do
+    repo = repo_with(0)
+
+    for enabled <- [true, false], reviewed <- [true, false], recording <- [true, false] do
+      facts =
+        Facts.read(
+          os: :macos,
+          arch: "arm64",
+          landlock: :not_asked,
+          helpers: %{computer_use: false},
+          sandbox_mode: :standard,
+          screen: %{actions: [], input_methods: []},
+          recording: recording
+        )
+
+      switches = Switches.only([:files_and_shell], enabled: enabled, reviewed: reviewed)
+
+      computer = %Computer{
+        device_id: "studio-7f3a",
+        name: "studio Mac",
+        offers: Offers.compute(Offers.modules(), switches, facts)
+      }
+
+      expected = enabled and reviewed and recording
+      seen = inspect({enabled, reviewed, recording})
+
+      assert {:ok, contributors} =
+               ComputerHistory.contributors(repo: repo, recording?: false, computers: [computer])
+
+      assert "studio-7f3a" in contributors == expected, seen
+
+      assert ComputerHistory.surfaces?(
+               recording?: false,
+               recorder?: false,
+               repo: repo,
+               computers: [computer]
+             ) == expected,
+             seen
+    end
   end
 
   test "a server holding notes surfaces them; a Mac that switched its own history off does not" do

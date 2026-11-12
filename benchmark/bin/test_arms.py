@@ -387,6 +387,13 @@ def test_a_fragment_setting_a_machine_harness_key_is_refused(key, value):
     assert problem and f"fermix_core.harness.{key}" in problem and seed.MACHINE_FILE in problem
 
 
+def test_a_fragment_setting_this_computers_switches_is_refused():
+    # What Fermix on a server may use on this computer is machine.toml's alone
+    # (M97 §7.2): appended to config.toml it would be dropped at boot.
+    problem = seed.extra_config_error(_seeded(), "[fermix_core.computer]\nbrowser = true\n")
+    assert problem and "fermix_core.computer" in problem and seed.MACHINE_FILE in problem
+
+
 def test_a_fragment_redefining_the_sandbox_is_refused():
     problem = seed.extra_config_error(_seeded(), '[sandbox]\nmode = "open"\n')
     assert problem and "sandbox" in problem

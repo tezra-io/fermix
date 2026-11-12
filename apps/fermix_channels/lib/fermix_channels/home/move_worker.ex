@@ -680,11 +680,11 @@ defmodule FermixChannels.Home.MoveWorker do
     end
   end
 
-  # An offer this engine does not decide (a request a newer engine wrote) is
-  # left off and named in the log, and the move goes on.
+  # A line this engine does not decide (a request a newer engine wrote) is
+  # left off and named in the log, and the move goes on. A request an engine
+  # before D27 wrote is read as a surface's is (`Consent.known/1`).
   defp known_offers(offers) do
-    names = Enum.map(Consent.decided(), &Atom.to_string/1)
-    {known, unknown} = Enum.split_with(offers, &(&1 in names))
+    {known, unknown} = Consent.known(offers)
 
     if unknown != [] do
       Logger.warning(
@@ -693,7 +693,7 @@ defmodule FermixChannels.Home.MoveWorker do
       )
     end
 
-    for offer <- Consent.decided(), Atom.to_string(offer) in known, do: offer
+    known
   end
 
   # Resuming after the marker: a source kept as a desktop gets its switches

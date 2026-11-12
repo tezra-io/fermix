@@ -2336,14 +2336,19 @@ defmodule FermixCore.Management.SettingsTest do
     # switch or a history off is) is never written back from what this engine
     # last loaded, and what runs follows the file.
     test "a write of another section never rewrites this computer's settings", %{home: home} do
-      Application.put_env(:fermix_core, :computer, enabled: true, reviewed: true, shell: true)
+      Application.put_env(:fermix_core, :computer,
+        enabled: true,
+        reviewed: true,
+        files_and_shell: true
+      )
+
       assert {:ok, _result} = Settings.apply("sandbox", %{"sandbox_mode" => "strict"})
 
       :ok =
         ConfigStore.put_machine_table(home, "fermix_core.computer", [
           {"enabled", "false"},
           {"reviewed", "true"},
-          {"shell", "true"}
+          {"files_and_shell", "true"}
         ])
 
       Application.put_env(:fermix_core, :sandbox, SandboxConfig.normalize(%{mode: :open}))

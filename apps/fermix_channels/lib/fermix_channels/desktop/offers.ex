@@ -4,19 +4,18 @@ defmodule FermixChannels.Desktop.Offers do
   sent as the `offers` event, on a linked computer, beside the relay
   (`Desktop.DeviceServices`).
 
-  `@offers` is the one list of offer modules, one line each, in the order the
-  computer lists them: the offers whose capability lives in core
-  (`FermixCore.Computers.Offers.core_modules/0`) and those whose device end
-  lives beside the link (`Desktop.Offers.*`). Each module's state comes from
-  this computer's switches (`FermixCore.Computers.Switches`) and its facts
-  (`FermixCore.Computers.Facts`).
+  The offers are every offer module (`FermixCore.Computers.Offers.modules/0`),
+  in the order the computer lists them. Each module's state comes from this
+  computer's switches (`FermixCore.Computers.Switches`) and its facts
+  (`FermixCore.Computers.Facts`, its recorder's setting among them).
 
   When it sends:
 
     * at each session's start, once the relay has the server's `hello_ack`
       (`connected/2`): always, since the server holds no offers from an
       earlier session;
-    * when the switches are written (`FermixCore.Computers.Switches` tells
+    * when the switches are written or the recorder is switched
+      (`FermixCore.Computers.Switches` and `FermixCore.ComputerHistory` tell
       this process, registered under `Switches.listener/0`), and when the
       facts are read again, every #{60} seconds: only when the offers'
       revision moved since the last one sent.
@@ -49,22 +48,7 @@ defmodule FermixChannels.Desktop.Offers do
   alias FermixCore.Computers.Switches
   alias FermixCore.Setup.ConfigStore
 
-  @offers Offers.core_modules() ++
-            [
-              FermixChannels.Desktop.Offers.Voice,
-              FermixChannels.Desktop.Offers.Attachments,
-              FermixChannels.Desktop.Offers.Accessory,
-              FermixChannels.Desktop.Offers.Notifications
-            ]
   @interval_ms 60_000
-
-  if Enum.map(@offers, & &1.id()) != Switches.offers() do
-    raise CompileError, description: "Desktop.Offers: one module per switch, in its order"
-  end
-
-  @doc "Every offer module, in the order this computer lists them."
-  @spec modules() :: [module()]
-  def modules, do: @offers
 
   @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(opts \\ []) when is_list(opts),
@@ -93,7 +77,7 @@ defmodule FermixChannels.Desktop.Offers do
 
     state = %{
       relay: Keyword.get(opts, :relay, Relay),
-      modules: Keyword.get(opts, :modules, @offers),
+      modules: Keyword.get(opts, :modules, Offers.modules()),
       facts: Keyword.get(opts, :facts, fn -> Facts.read() end),
       switches: Keyword.get(opts, :switches, &Switches.current/0),
       timer: Keyword.get(opts, :timer, &Process.send_after(self(), &1, &2)),

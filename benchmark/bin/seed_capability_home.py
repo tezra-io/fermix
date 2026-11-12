@@ -116,11 +116,12 @@ from evallib import safe_rm  # noqa: E402
 
 DEV_HOME = os.path.expanduser("~/.fermix-dev")
 # This computer's own settings, beside config.toml (M97 §4): the engine reads
-# the sandbox, computer use and history, the accessory link and the dev plugin
+# the sandbox, computer use and history, the accessory link, what Fermix on a
+# server may use on this computer (`[fermix_core.computer]`) and the dev plugin
 # folder from it only. iMessage's section is the home's, in config.toml.
 MACHINE_FILE = "machine.toml"
 MACHINE_TABLES = ("sandbox", "fermix_core.computer_use", "fermix_core.computer_history",
-                  "fermix_channels.accessories")
+                  "fermix_channels.accessories", "fermix_core.computer")
 # Keys of a home table that are this computer's own, as table and key: the dev
 # plugin folder (M97 §4), and the coding agents' approval and sign-in folders
 # (M98 D5). The engine reads them from machine.toml only and strips a copy from

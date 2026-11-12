@@ -40,7 +40,7 @@ defmodule FermixChannels.Desktop.TwoEnginesScreenTest do
 
     engines =
       TwoEngines.start!(
-        offers: [:computer_use],
+        switches: [:computer_use],
         sandbox: [mode: Map.get(context, :computer_sandbox, :standard)],
         facts: [screen: @screen]
       )

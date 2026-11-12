@@ -25,8 +25,9 @@ defmodule FermixCore.Home.Join do
   owner types on the server, or
   `denied` with the sentence that says why; the code's secret leaves the
   file once denied. `finish/3` takes the server's approval: this
-  computer's switches, every offer off and reviewed (M97 §7.3: a computer
-  that joins starts with every offer off), then its link
+  computer's switches, every offer off and reviewed, its recorder off
+  (`Computers.Consent.none/2`, M97 §7.3: a computer that joins starts with
+  every offer off), then its link
   (`FermixCore.Home.DesktopLink`, naming the key's store), then the file
   goes, the computer history mark an earlier home left is forgotten
   (`forget_history_mark/1`), and the engine restarts as a linked computer. `cancel/2` ends a join
@@ -48,7 +49,7 @@ defmodule FermixCore.Home.Join do
 
   alias Exqlite.Sqlite3
   alias FermixCore.ComputerHistory.Spool
-  alias FermixCore.Computers.Switches
+  alias FermixCore.Computers.Consent
   alias FermixCore.Home.ComputerKey
   alias FermixCore.Home.DesktopLink
   alias FermixCore.Home.EnrollmentCode
@@ -162,15 +163,15 @@ defmodule FermixCore.Home.Join do
 
   @doc """
   Takes the server's approval (`join_approved`'s fields): this computer's
-  switches, every offer off, then its link, then the file goes and the
-  engine restarts as a linked computer.
+  switches, every offer off and its recorder off, then its link, then the
+  file goes and the engine restarts as a linked computer.
   """
   @spec finish(Path.t(), map(), keyword()) :: :ok | {:error, error()}
   def finish(home, %{"device_id" => _id, "primary" => _primary} = approved, opts \\ [])
       when is_binary(home) and home != "" and is_list(opts) do
     with {:ok, state} <- read_present(home),
          {:ok, store} <- recorded_store(state),
-         :ok <- config(Switches.write(home, Switches.only([]))),
+         :ok <- config(Consent.none(home)),
          :ok <- link(DesktopLink.write(home, link_of(approved, state, store))),
          :ok <- remove_file(path(home)) do
       :ok = forget_history_mark(home)

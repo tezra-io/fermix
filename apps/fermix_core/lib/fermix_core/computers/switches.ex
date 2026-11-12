@@ -1,27 +1,56 @@
 defmodule FermixCore.Computers.Switches do
   @moduledoc """
-  What Fermix on the server may use on this computer (M97 §7.2): the
+  What Fermix on the server may use on this computer (M97 §7.2, D27): the
   `[fermix_core.computer]` section of this computer's `machine.toml`
-  (`Setup.MachineFile`), one master switch and one switch per offer.
+  (`Setup.MachineFile`), one master switch and one switch for each thing the
+  owner decides.
 
       [fermix_core.computer]
-      enabled = true        # the master: false refuses everything
-      reviewed = true       # false only on a computer that moved before M97
-      files = false
-      shell = false
-      ...
+      enabled = true            # the master: false refuses everything
+      reviewed = true           # false only on a computer that moved before M97
+      files_and_shell = false   # files and commands, in this computer's sandbox
+      browser = false
+      computer_use = false      # the screen
+      imessage = false          # Messages
 
-  Every value is a boolean. An absent offer is off, an absent `enabled` and
-  `reviewed` are on, so a computer with no section offers nothing. An unknown
-  key or a value that is not a boolean refuses the load by name
+  Every value is a boolean. An absent switch is off, an absent `enabled` and
+  `reviewed` are on, so a computer with no section offers nothing a switch
+  decides (every linked computer has one: a join, a move and the first start
+  after a move before M97 write it). An unknown key or a value that is not a boolean refuses the load by name
   (`normalize/1`), as every section does; `to_keyword/1` is its inverse, the
   shape the settings file holds (the config round-trip rule).
 
+  **One rule.** A switch decides the offers it names (`decides/1`):
+  `files_and_shell` both `files` and `shell`, since a command reads the same
+  files under the same sandbox, and each other switch the offer of its name.
+  An offer is on only while the master is on, the switches were reviewed and
+  its switch is on (`on?/2`). Computer history has no switch here: its
+  consent is its recorder's own setting (`[fermix_core.computer_history]
+  enabled`, the Computer history section's), and it is offered only while that
+  is on, the master on and the switches reviewed (`history_on?/2`). Every
+  reader asks one of these two: the offers this computer reports
+  (`Computers.Offers`), its admission of a request
+  (`FermixChannels.Desktop.Invoke.Admission`), its screen and browser
+  listeners, and its sending of history (`FermixChannels.Desktop.HistoryUplink`).
+  What reaches the server from this computer (calls, attachments, a robot,
+  notifications) is no offer and has no switch: it follows its feature's own
+  setting.
+
+  **A section an earlier engine wrote.** An engine before D27 wrote a switch
+  for `files` and one for `shell`, one for `history`, and four for offers that
+  never came (`voice`, `attachments`, `accessory`, `notifications`).
+  `upgrade/1` rewrites such a section once, in the boot's machine-file
+  migration (`ConfigStore.migrate_machine_file/2`), the only reader of those
+  keys: `files_and_shell` is on only where both `files` and `shell` were (the
+  conservative reading); `history` goes and the recorder's setting decides,
+  which the log says once where the two disagreed; the four go; `enabled` and
+  `reviewed` stay as they were. A section that already names
+  `files_and_shell` keeps it and loses the old keys beside it. Any other load
+  that meets an old key refuses it by name.
+
   The section is a machine section: it never travels with the home, and
   `settings.apply` for it is answered only on this computer
-  (`Management.Placement`), so the server can never widen it. A computer
-  offers an offer only while the master is on, the offer is on and the
-  switches were reviewed (`on?/2`).
+  (`Management.Placement`), so the server can never widen it.
 
   **Writers.** `forget/1` removes the section (a computer that
   disconnects). `write/2` sets the whole section in a home's `machine.toml`,
@@ -30,63 +59,62 @@ defmodule FermixCore.Computers.Switches do
   before M97 (`Computers.Consent.derive_moved/2`) and the review
   (`Consent.review/3`). `save/2` is the settings door's (the `computer`
   section, `Management.Settings`), refused while the settings file changed
-  outside Fermix. Each write to the running engine's own home is put into
-  application environment at once, so a later settings save renders the same
-  switches, and tells this computer's offers reporter
-  (`FermixChannels.Desktop.Offers`, registered as `listener/0`) to send its
-  offers again, its invocations (`invoke_listener/0`) to read the master
-  switch again, its screen (`screen_listener/0`) to let go of the server
-  when the master or the screen switch went off, and its browser
-  (`browser_listener/0`) to end the server's turns it holds when the master
-  or the browser switch went off.
+  outside Fermix; the review is never one of its keys. Each write to the
+  running engine's own home is put into application environment at once, so
+  a later settings save renders the same switches, and tells this computer's
+  offers reporter (`FermixChannels.Desktop.Offers`, registered as
+  `listener/0`) to send its offers again, its invocations
+  (`invoke_listener/0`) to read the master switch again, its screen
+  (`screen_listener/0`) to let go of the server when the master or the
+  screen switch went off, and its browser (`browser_listener/0`) to end the
+  server's turns it holds when the master or the browser switch went off.
+  `offers_changed/0` tells the offers reporter alone, for a fact an offer
+  rests on that is no switch: the recorder's setting.
   """
 
+  alias FermixCore.Home.Archive.ConfigText
   alias FermixCore.Setup.ConfigStore
   alias FermixCore.Setup.RestartState
 
   @table "fermix_core.computer"
   @section "machine.toml [#{@table}]"
-  @offers [
-    :files,
-    :shell,
-    :browser,
-    :computer_use,
-    :imessage,
-    :history,
-    :voice,
-    :attachments,
-    :accessory,
-    :notifications
+  # Each switch, in the order the section lists them, with the offers it
+  # decides (the moduledoc's one rule).
+  @decides [
+    files_and_shell: [:files, :shell],
+    browser: [:browser],
+    computer_use: [:computer_use],
+    imessage: [:imessage]
   ]
+  @switches Keyword.keys(@decides)
+  @switch_of for {switch, offers} <- @decides, offer <- offers, into: %{}, do: {offer, switch}
   @flags [:enabled, :reviewed]
-  @keys @flags ++ @offers
+  @keys @flags ++ @switches
   @key_names Map.new(@keys, &{Atom.to_string(&1), &1})
+  # The keys an engine before D27 wrote that this one has not (`upgrade/1`).
+  @retired ~w(files shell history voice attachments accessory notifications)
+  @history_table "fermix_core.computer_history"
   @listener :fermix_computer_offers
   @invoke_listener :fermix_computer_invoke
   @screen_listener :fermix_computer_screen
   @browser_listener :fermix_computer_browser
-  @review_kept_sentence "A review cannot be taken back. Switch off what Fermix on your server " <>
-                          "may use instead."
 
   @typedoc "The normalized section: a keyword of booleans, each key at most once."
   @type t :: [{atom(), boolean()}]
 
-  @typedoc "One offer this section has a switch for."
-  @type offer ::
-          :files
-          | :shell
-          | :browser
-          | :computer_use
-          | :imessage
-          | :history
-          | :voice
-          | :attachments
-          | :accessory
-          | :notifications
+  @typedoc "One switch of the section, besides the master and the review."
+  @type switch :: :files_and_shell | :browser | :computer_use | :imessage
 
-  @doc "Every offer this section has a switch for, in the order it lists them."
-  @spec offers() :: [offer()]
-  def offers, do: @offers
+  @typedoc "One thing a computer may offer its server (`Computers.Offer`)."
+  @type offer :: :files | :shell | :browser | :computer_use | :imessage | :history
+
+  @doc "Every switch besides the master and the review, in the order the section lists them."
+  @spec switches() :: [switch()]
+  def switches, do: @switches
+
+  @doc "The offers `switch` decides."
+  @spec decides(switch()) :: [offer(), ...]
+  def decides(switch) when switch in @switches, do: Keyword.fetch!(@decides, switch)
 
   @doc "The section's table in `machine.toml`."
   @spec table() :: String.t()
@@ -143,10 +171,24 @@ defmodule FermixCore.Computers.Switches do
   def to_keyword(section) when is_map(section) or is_list(section) or is_nil(section),
     do: normalize(section)
 
-  @doc "Whether this computer offers `offer`: the master on, the offer on, and reviewed."
+  @doc """
+  Whether this computer offers `offer`, one a switch decides: the master on,
+  reviewed, and that switch on.
+  """
   @spec on?(t(), offer()) :: boolean()
-  def on?(switches, offer) when is_list(switches) and offer in @offers,
-    do: enabled?(switches) and reviewed?(switches) and Keyword.get(switches, offer, false)
+  def on?(switches, offer) when is_list(switches) and is_map_key(@switch_of, offer),
+    do: open?(switches) and Keyword.get(switches, Map.fetch!(@switch_of, offer), false)
+
+  @doc """
+  Whether this computer offers its history: its recorder switched on
+  (`recording?`, the Computer history section's own setting), the master on,
+  and reviewed.
+  """
+  @spec history_on?(t(), boolean()) :: boolean()
+  def history_on?(switches, recording?) when is_list(switches) and is_boolean(recording?),
+    do: open?(switches) and recording?
+
+  defp open?(switches), do: enabled?(switches) and reviewed?(switches)
 
   @doc "Whether the master switch is on (an absent one is)."
   @spec enabled?(t()) :: boolean()
@@ -156,17 +198,23 @@ defmodule FermixCore.Computers.Switches do
   @spec reviewed?(t()) :: boolean()
   def reviewed?(switches) when is_list(switches), do: Keyword.get(switches, :reviewed, true)
 
-  @doc "The whole section with exactly `on` switched on, the master on and reviewed."
-  @spec only([offer()], keyword()) :: t()
+  @doc """
+  The whole section with exactly the switches `on` switched on, the master
+  on and reviewed unless `flags` say otherwise. Anything in `on` that is no
+  switch (an offer such as `files`, or `history`) raises `ArgumentError`.
+  """
+  @spec only([switch()], keyword()) :: t()
   def only(on, flags \\ []) when is_list(on) and is_list(flags) do
+    for key <- on, key not in @switches, do: raise(ArgumentError, "#{inspect(key)} is no switch")
+
     [enabled: Keyword.get(flags, :enabled, true), reviewed: Keyword.get(flags, :reviewed, true)] ++
-      for(offer <- @offers, do: {offer, offer in on})
+      for(switch <- @switches, do: {switch, switch in on})
   end
 
-  @doc "The offers `switches` has on, whatever the master and the review say."
-  @spec switched_on(t()) :: [offer()]
+  @doc "The switches `switches` has on, whatever the master and the review say."
+  @spec switched_on(t()) :: [switch()]
   def switched_on(switches) when is_list(switches),
-    do: for(offer <- @offers, Keyword.get(switches, offer, false), do: offer)
+    do: for(switch <- @switches, Keyword.get(switches, switch, false), do: switch)
 
   @doc "The switches of the running engine, from application environment."
   @spec current() :: t()
@@ -215,18 +263,19 @@ defmodule FermixCore.Computers.Switches do
 
   @doc """
   The settings door's write of the `computer` section (`answers`: its keys as
-  atoms, `enabled`, `reviewed` and each offer): refused while the settings
-  file changed outside Fermix, as every settings write is. Any write is the
-  owner's review of these switches, so it leaves them reviewed; a review is
-  never taken back. A key this section does not have raises `ArgumentError`.
-  `opts`: `:home` and `:restart_state` (the `RestartState` server's name),
-  for a test.
+  atoms, `enabled` and each switch): refused while the settings file changed
+  outside Fermix, as every settings write is. Any write is the owner's review
+  of these switches, so it leaves them reviewed. The review is this
+  computer's state, never one of the door's keys: `reviewed`, or any key this
+  section does not have, raises `ArgumentError`. `opts`: `:home` and
+  `:restart_state` (the `RestartState` server's name), for a test.
   """
   @spec save(keyword(), keyword()) :: {:ok, map()} | {:error, term()}
   def save(answers, opts \\ []) when is_list(answers) and is_list(opts) do
     changes = normalize(answers)
 
-    if Keyword.get(changes, :reviewed) == false, do: raise(ArgumentError, @review_kept_sentence)
+    if Keyword.has_key?(changes, :reviewed),
+      do: raise(ArgumentError, "#{@section} reviewed is written by a review, never by a save")
 
     with :ok <- RestartState.writable(server: Keyword.get(opts, :restart_state, RestartState)),
          merged = Keyword.merge(current(), changes) |> Keyword.put(:reviewed, true),
@@ -235,9 +284,91 @@ defmodule FermixCore.Computers.Switches do
     end
   end
 
-  @doc "Every sentence this module says, for the copy rules."
-  @spec sentences() :: [String.t()]
-  def sentences, do: [@review_kept_sentence]
+  @doc """
+  The offers reporter alone is told to work its offers out again, for a fact
+  an offer rests on that is no switch: this computer's recorder setting,
+  which its history offer follows (`ComputerHistory.switch_off/1`).
+  """
+  @spec offers_changed() :: :ok
+  def offers_changed do
+    case Process.whereis(@listener) do
+      nil -> :ok
+      pid -> GenServer.cast(pid, :switches_changed)
+    end
+  end
+
+  @doc """
+  What the boot's machine-file migration does with a section an engine
+  before D27 wrote (the moduledoc), given the machine file's `text`
+  (`:absent` when there is none): `%{machine: new_text, notice: {level,
+  sentence}}`, or both nil when there is nothing to rewrite, or `{:error,
+  sentence}` for an old key whose value is not a boolean, as a load refuses
+  one. The notice is a warning where the rewrite turned something off that
+  was on (one of files and commands) or changed whether history is offered
+  (its old switch and its recorder disagreed), else information. Pure: the
+  migration writes `machine`, atomically, and logs `notice` once.
+  """
+  @spec upgrade(String.t() | :absent) ::
+          %{machine: String.t() | nil, notice: {:info | :warning, String.t()} | nil}
+          | {:error, String.t()}
+  def upgrade(:absent), do: %{machine: nil, notice: nil}
+
+  def upgrade(text) when is_binary(text) do
+    old = for key <- @retired, {:ok, raw} <- [ConfigText.value(text, @table, key)], do: {key, raw}
+
+    case Enum.find(old, fn {_key, raw} -> raw not in ["true", "false"] end) do
+      nil when old == [] -> %{machine: nil, notice: nil}
+      nil -> upgraded(text, Map.new(old))
+      {key, raw} -> {:error, "#{@section} #{key} takes true or false, and #{raw} is not."}
+    end
+  end
+
+  defp upgraded(text, old) do
+    merged =
+      case ConfigText.value(text, @table, "files_and_shell") do
+        {:ok, raw} -> {:kept, raw}
+        :absent -> {:merged, to_string(old["files"] == "true" and old["shell"] == "true")}
+      end
+
+    without = Enum.reduce(Map.keys(old), text, &elem(ConfigText.drop(&2, @table, &1), 0))
+    recorder = ConfigText.value(text, @history_table, "enabled") == {:ok, "true"}
+    history = if old["history"], do: old["history"] == "true"
+
+    halved? = merged == {:merged, "false"} and "true" in [old["files"], old["shell"]]
+    said = history_sentence(history, recorder)
+    level = if halved? or said != [], do: :warning, else: :info
+
+    %{
+      machine: with_merged(without, merged),
+      notice: {level, Enum.join([merged_sentence(merged) | said], " ")}
+    }
+  end
+
+  defp with_merged(text, {:kept, _raw}), do: text
+  defp with_merged(text, {:merged, raw}), do: ConfigText.put(text, @table, "files_and_shell", raw)
+
+  defp merged_sentence({how, raw}) do
+    "#{@section} was written by an earlier Fermix and is rewritten once: files and commands " <>
+      "are one switch, files_and_shell = #{raw}" <>
+      if(how == :merged, do: " (on only where both files and shell were)", else: "") <>
+      ", and history, voice, attachments, accessory and notifications are no switches here."
+  end
+
+  # The history switch is gone: the recorder's own setting decides, which is
+  # said where the two disagreed.
+  defp history_sentence(nil, _recorder), do: []
+  defp history_sentence(same, same), do: []
+
+  defp history_sentence(switch, recorder) do
+    [
+      "Computer history's old switch was #{on_off(switch)} while its recorder is " <>
+        "#{on_off(recorder)}: the recorder's setting decides, so this computer " <>
+        if(recorder, do: "offers its history to the server.", else: "offers no history.")
+    ]
+  end
+
+  defp on_off(true), do: "on"
+  defp on_off(false), do: "off"
 
   # The offers reporter re-sends what this computer offers, the invocations
   # read the master switch again, the screen lets go of the server and the

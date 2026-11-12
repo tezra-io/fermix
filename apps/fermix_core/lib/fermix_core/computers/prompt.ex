@@ -26,11 +26,7 @@ defmodule FermixCore.Computers.Prompt do
     "browser" => "browser",
     "computer_use" => "screen",
     "imessage" => "Messages",
-    "history" => "history",
-    "voice" => "voice",
-    "attachments" => "attachments",
-    "accessory" => "robot",
-    "notifications" => "notifications"
+    "history" => "history"
   }
 
   @doc """

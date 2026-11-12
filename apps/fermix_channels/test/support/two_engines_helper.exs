@@ -36,6 +36,7 @@ defmodule FermixChannels.Test.TwoEngines do
   alias FermixCore.Computers.Registry
   alias FermixCore.Computers.Switches
   alias FermixCore.Sandbox.Config, as: SandboxConfig
+  alias FermixCore.Setup.ConfigStore
   alias FermixTestSupport.SafeRm
 
   @mac [
@@ -167,8 +168,9 @@ defmodule FermixChannels.Test.TwoEngines do
     do: Map.merge(Invoke.capabilities(), %{"wait" => Wait, "hold" => Hold, "touch" => Touch})
 
   @doc """
-  Starts the server and its computer, connected, the computer offering
-  `:offers` (files by default). Answers what the test reaches them by.
+  Starts the server and its computer, connected, the computer's switches on
+  for `:switches` (`Computers.Switches.only/1`; files and commands by
+  default). Answers what the test reaches them by.
 
   The computer's sandbox is its own: `:sandbox` (keyword for
   `Sandbox.Config.normalize/1`, its paths relative to the computer's home) or
@@ -177,7 +179,10 @@ defmodule FermixChannels.Test.TwoEngines do
   replaces how the computer's answers reach the link (`Admission`'s seam),
   and `:browser` is the computer's browser (`Desktop.Invoke`'s option).
   `:facts` replaces facts of the computer its offers are worked out from
-  (`Computers.Facts.read/1`'s options, over an Apple silicon Mac's).
+  (`Computers.Facts.read/1`'s options, over an Apple silicon Mac's). Its
+  recorder's setting is read from its own `machine.toml` each time, as a
+  computer reads its own (`recording`); `:recording` writes it there before
+  the computer starts.
   `:history` is the server's computer-history service's options
   (`ComputerHistory.Submission`'s: its store, summarizer and settings).
   """
@@ -234,8 +239,9 @@ defmodule FermixChannels.Test.TwoEngines do
   end
 
   defp computer!(primary, root, names, opts) do
-    offered = Keyword.get(opts, :offers, [:files])
-    switches = start_supervised!({Agent, fn -> Switches.only(offered) end}, id: names.switches)
+    on = Keyword.get(opts, :switches, [:files_and_shell])
+    switches = start_supervised!({Agent, fn -> Switches.only(on) end}, id: names.switches)
+    if Keyword.has_key?(opts, :recording), do: record!(root, Keyword.fetch!(opts, :recording))
     read_switches = fn -> Agent.get(switches, & &1) end
     sandbox = sandbox(root, Keyword.get(opts, :sandbox, []))
     File.mkdir_p!(sandbox.workspace_root)
@@ -258,7 +264,7 @@ defmodule FermixChannels.Test.TwoEngines do
        name: names.offers,
        home: root,
        relay: names.relay,
-       facts: fn -> Facts.read(Keyword.merge(@mac, Keyword.get(opts, :facts, []))) end,
+       facts: fn -> Facts.read(Keyword.merge(mac(root), Keyword.get(opts, :facts, []))) end,
        switches: read_switches,
        timer: fn _message, _delay -> make_ref() end}
     )
@@ -283,6 +289,20 @@ defmodule FermixChannels.Test.TwoEngines do
 
     await_offers(engines)
     engines
+  end
+
+  # The computer's recorder, in its own machine file (M97 D27: what its
+  # history offer follows).
+  defp record!(root, on?) when is_boolean(on?) do
+    :ok =
+      ConfigStore.put_machine_table(root, "fermix_core.computer_history", [
+        {"enabled", to_string(on?)}
+      ])
+  end
+
+  defp mac(root) do
+    {:ok, recorder} = ConfigStore.machine_table(root, "fermix_core.computer_history")
+    Keyword.put(@mac, :recording, Map.get(recorder || %{}, "enabled") == true)
   end
 
   @doc "Waits until the server holds the computer's offers, within 10 s."

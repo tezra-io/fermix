@@ -119,7 +119,11 @@ defmodule FermixCore.Computers.CapabilitiesTest do
 
     test "the computer's own settings and secrets stay refused, in the tool's words",
          %{root: root} do
-      File.write!(Path.join(root, "machine.toml"), "[fermix_core.computer]\nfiles = true\n")
+      File.write!(
+        Path.join(root, "machine.toml"),
+        "[fermix_core.computer]\nfiles_and_shell = true\n"
+      )
+
       File.mkdir_p!(Path.join(root, "secrets"))
       ctx = context(root, mode: :open)
 
@@ -140,7 +144,7 @@ defmodule FermixCore.Computers.CapabilitiesTest do
         )
 
       assert write.error =~ "Sandbox denied protected path"
-      assert File.read!(Path.join(root, "machine.toml")) =~ "files = true"
+      assert File.read!(Path.join(root, "machine.toml")) =~ "files_and_shell = true"
     end
 
     test "writes, edits, globs and searches inside the roots", %{root: root, workspace: ws} do

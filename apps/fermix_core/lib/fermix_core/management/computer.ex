@@ -17,8 +17,8 @@ defmodule FermixCore.Management.Computer do
   `status`). The two labels are the owner's words for the capability and
   the op, from the capability's own module in this engine's registry
   (`:computer_capabilities`, `FermixChannels.Desktop.Invoke`, injected by
-  module as `Computers.Offers.label/1` is), each null for an id this engine
-  has no words for. Seams in `opts`: `:home`.
+  module as `Computers.Transport` is), each null for an id this engine has
+  no words for. Seams in `opts`: `:home`.
 
   `computer.screen.stop` (M97 §7.4) is the Stop beside the mark an app draws
   while Fermix on its server controls this computer's screen (`home.status`'s

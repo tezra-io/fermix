@@ -6403,7 +6403,7 @@
     },
     "computerOffer": {
       "type": "object",
-      "description": "One thing a computer offers its server. id is files, shell, browser, computer_use, imessage, history, voice, attachments, accessory or notifications; one a newer computer names is kept as it came, and a client that does not know it shows its sentence as it is. label is the words it goes by in the server's own offer list (files, commands, the browser, your screen, Messages, your computer history, voice calls, attachments, the robot, notifications), null for one the server does not know, absent from a server older than it: a client shows it, and the id where it is null or absent. state on, off (switched off on that computer, or not reviewed yet) or unavailable (it cannot work there). sentence says why it is not on, in the engine's words, null while on. detail is a short word while on, such as the sandbox mode commands run in (strict, standard or open), else null.",
+      "description": "One thing a computer offers its server. id is files, shell, browser, computer_use, imessage or history; one another computer names is kept as it came (a computer from before M97 D27 may still name voice, attachments, accessory or notifications, always unavailable), and a client that does not know it shows its sentence as it is. label is the words it goes by in the server's own offer list (files, commands, the browser, your screen, Messages, your computer history), null for one the server does not know, absent from a server older than it: a client shows it, and the id where it is null or absent. state on, off (switched off on that computer: files and shell by its one switch for files and commands, history by its recorder's own setting; or the master switch off, or not reviewed yet) or unavailable (it cannot work there). sentence says why it is not on, in the engine's words, null while on. detail is a short word while on, such as the sandbox mode commands run in (strict, standard or open), else null.",
       "required": ["id", "state", "sentence", "detail"],
       "additionalProperties": false,
       "properties": {
@@ -6416,7 +6416,7 @@
     },
     "computerKeepBlock": {
       "type": "object",
-      "description": "What a computer keeps on for its server: sentence names what stays on, warning is the plain warning where commands stay on while this computer's sandbox is open (null otherwise), and lines are one per offer this computer's system can have, in order: offer (files, shell, browser, computer_use, imessage, history), label in the owner's words and on, whether it stays on. A surface draws each line as a tick the owner may change, and sends the offers left ticked as home.act's input.keep_offers.",
+      "description": "What a computer keeps on for its server: sentence names what stays on, warning is the plain warning where files and commands stay on while this computer's sandbox is open (null otherwise), and lines are one per thing this computer's system can have, in order: offer (files_and_shell, browser, computer_use, imessage, history; files and commands are one line, M97 D27, and history's line sets this computer's recorder), label in the owner's words (files and commands, the browser, your screen, Messages, your computer history) and on, whether it stays on. A surface draws each line as a tick the owner may change, and sends the lines left ticked as home.act's input.keep_offers.",
       "required": ["sentence", "warning", "lines"],
       "additionalProperties": false,
       "properties": {
@@ -6682,7 +6682,7 @@
           "pattern": "^[0-9 ]+$"
         },
         "keep_offers": {
-          "description": "For move_now and try_again on the computer that sets Always On up, the offers of the ready screen's detail.keeps_on left ticked: what this computer keeps on for its server after the move; absent, the block as it was shown. For review_offers, the offers of on's detail.review left ticked: what stays on after the owner's review; absent, the review as it was shown. A list that is not of text is refused (invalid_params on keep_offers), and so is an id other than files, shell, browser, computer_use, imessage and history.",
+          "description": "For move_now and try_again on the computer that sets Always On up, the offers of the ready screen's detail.keeps_on left ticked: what this computer keeps on for its server after the move; absent, the block as it was shown. For review_offers, the offers of on's detail.review left ticked: what stays on after the owner's review; absent, the review as it was shown. A list that is not of text is refused (invalid_params on keep_offers), and so is an id other than files_and_shell, browser, computer_use, imessage and history, or files and shell: the two lines an app from before M97 D27 sends for files and commands, which keep files_and_shell on only when both are sent (one alone keeps it off).",
           "type": "array",
           "maxItems": 32,
           "items": { "type": "string", "pattern": "^[a-z][a-z0-9_]{0,31}$" }

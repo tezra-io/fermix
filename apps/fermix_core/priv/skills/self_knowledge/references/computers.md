@@ -132,7 +132,10 @@ log says why).
 | Your screen (`computer_use`) | seeing and controlling its screen | Apple silicon Mac or Linux x86_64, with the Computer Use helper installed and not refused the permission to see and control the screen |
 | Messages (`imessage`) | the iMessage channel, through that Mac's Messages | Mac only |
 | Your computer history (`history`) | recording activity there for computer history | Mac only for now |
-| Voice calls (`voice`), Attachments (`attachments`), The robot (`accessory`), Notifications (`notifications`) | calls, attached files, a robot and notifications between that computer and the server | nowhere yet: a later update of Fermix |
+
+What reaches the server from a computer (a call, an attached file, a robot,
+a notification) is no offer and has no switch: each follows its own
+feature's setting.
 
 Each offer is in one of three states, in the computer's own words when it is
 not on ("Mac" reads "computer" off a Mac):
@@ -148,33 +151,37 @@ not on ("Mac" reads "computer" off a Mac):
   Computer Use helper is not installed on this Mac.", "This Mac has not
   allowed Fermix Computer Use to see and control the screen.", "Fermix cannot
   see or control the screen on this kind of processor.", "Commands need the
-  kernel to hold them to the sandbox, and this computer's kernel does not.",
-  and for the four that come later, a sentence that says so ("Calls from
-  this computer reach your server in a later update of Fermix.").
+  kernel to hold them to the sandbox, and this computer's kernel does not.".
 
-A newer computer may offer something this server has no word for; it is
+Another computer may offer something this server has no word for; it is
 listed as it came.
 
 ## Each computer's switches
 
 - What Fermix on the server may use on a computer is that computer's own
   choice: the `[fermix_core.computer]` section of its `machine.toml` (the
-  `config` reference): `enabled`, the master switch; `reviewed`; and one
-  switch per offer (`files`, `shell`, `browser`, `computer_use`, `imessage`,
-  `history`, `voice`, `attachments`, `accessory`, `notifications`). An offer
-  is on only while the master is on, its own switch is on and the switches
-  are reviewed. An absent offer is off; an absent `enabled` or `reviewed` is
-  on, so a computer with no section offers nothing. Each value is `true` or
-  `false`; anything else keeps Fermix from starting, naming the key.
+  `config` reference): `enabled`, the master switch; `reviewed`; and
+  `files_and_shell` (files and commands together: a command reads the same
+  files in the same sandbox), `browser`, `computer_use` and `imessage`. An
+  offer is on only while the master is on, its switch is on and the
+  switches are reviewed. Computer history has no switch here: its history
+  offer is on while its recorder is on (the Computer history section, the
+  `computer_history` reference) with the master on, and only then does the
+  server take its sittings. An absent switch is off; an absent `enabled` or
+  `reviewed` is on. Each value is `true` or `false`; anything else keeps
+  Fermix from starting, naming the key. A section an earlier Fermix wrote
+  (a switch each for `files`, `shell` and `history`, and four for what
+  reaches the server) is rewritten once at start: files and commands stay on
+  only where both were, and the recorder's own setting decides history.
 - In the app it is the **This computer** settings section of the Always On
   pane, on that computer: **Fermix on your server may use this computer**
   (the master: "Off stops everything Fermix on your server does here, from
-  its next request."), **Reviewed**, then **Files**, **Commands**, **The
-  browser**, **Your screen**, **Messages**, **Your computer history**,
-  **Voice calls**, **Attachments**, **The robot** and **Notifications**. It
-  shows only on a computer linked to its server where Always On is offered:
-  a computer that never moved has none, and the server has none. On a Linux
-  computer without the app, `fermix settings set computer computer_shell=false`
+  its next request."), **Files and commands**, **The browser**, **Your
+  screen**, and on a Mac **Messages**. While a review waits, the master's
+  footer says so, and changing any switch is the review. It shows only on a
+  computer linked to its server where Always On is offered: a computer that
+  never moved has none, and the server has none. On a Linux computer without
+  the app, `fermix settings set computer computer_files_and_shell=false`
   (each key is `computer_` and the switch) changes it from that computer.
 - Every switch is live: no restart, and the computer sends its offers again
   at once.
@@ -191,9 +198,9 @@ Whoever asks, and from whatever surface, Fermix on the server cannot turn an
 offer on, change a computer's sandbox mode, add a folder grant there, answer
 a macOS permission prompt, change who iMessage may write to, or read a
 website password saved there: each is done at that computer. What remains:
-with commands on and that computer's sandbox `open`, a server that is
-taken over could read and change the account's files there, which is why the
-move's review warns of it.
+with files and commands on and that computer's sandbox `open`, a server
+that is taken over could read and change the account's files there, which
+is why the move's review warns of it.
 
 ## What the server asks of a computer, and that computer's record
 
@@ -252,29 +259,27 @@ request (*Files and commands on a computer*).
   the screen, Messages and computer history where their own settings had
   them on (Messages and history on a Mac only). Move now's review shows it as
   a block of its own: a sentence ("After the move, Fermix on your server can
-  still use this Mac for: files, commands (standard), the browser, your
-  screen. Change this here."), one line per offer, and, where commands stay
-  on while the sandbox is `open`, the warning "With commands on and this
-  Mac's sandbox open, a server that is taken over can read and change this
-  account's files on this Mac." The owner can untick any line before
-  starting. The choice is written to that computer's switches when the move
-  commits, so a move that is undone leaves none, and Try again after it moves
-  with the same choice, never the defaults. Voice calls, attachments,
-  the robot and notifications are not in the block: they are switched on at
-  the computer once they arrive.
-- A computer that joins later starts with everything off.
+  still use this Mac for: files and commands (standard), the browser, your
+  screen. Change this here."), one line each (files and commands are one),
+  and, where files and commands stay on while the sandbox is `open`, the
+  warning "With files and commands on and this Mac's sandbox open, a server
+  that is taken over can read and change this account's files on this Mac."
+  The owner can untick any line before starting. The choice is written to
+  that computer when the move commits (the history line sets its recorder,
+  on or off), so a move that is undone leaves nothing, and Try again after
+  it moves with the same choice, never the defaults.
+- A computer that joins later starts with everything off, its recorder too.
 - A computer that moved to its server with an earlier Fermix offers nothing
   until the owner reviews it. At its first start on this Fermix its switches
   are set as a move would have kept them, waiting for the review; Always On
   tells the owner once, as a notification, "Fermix on your server can use
   nothing on this Mac until you review what it may use.", and its Details
   show the block with **Review what your server may use**, which keeps the
-  ticked lines on and turns the rest off. The **This computer** section
-  finishes the review too: turning **Reviewed** on accepts the switches as
-  they are, and changing any switch counts as the review. A review cannot be
-  taken back ("A review cannot be taken back. Switch off what Fermix on your
-  server may use instead."). From a terminal, on a home the Mac app does not
-  manage: `fermix always-on review-offers`.
+  ticked lines on and turns the rest off; its history line is ticked where
+  the recorder is on, and sets it. Changing any switch of the **This
+  computer** section counts as the review too. A review is never taken
+  back. From a terminal, on a home the Mac app does not manage: `fermix
+  always-on review-offers`.
 
 ## The server's own sandbox
 
@@ -401,8 +406,8 @@ computer."
 
 ## Computer history from every computer
 
-- A computer whose history switch is on records into its own
-  `device/history.db` (raw, 48 hours) and sends each finished sitting to the
+- A computer whose recorder is on, with its master switch on, records into
+  its own `device/history.db` (raw, 48 hours) and sends each finished sitting to the
   server with `history.submit`; the server makes the note on its summarizer,
   marks it with the computer, and keeps it. Raw text is never written on the
   server, and the summary call's content stays out of its traces and Opik.
@@ -411,7 +416,7 @@ computer."
 - `recall_activity` takes a `computer` and names the machine of each
   sitting; `/history purge` and `/history pause` from chat reach every
   computer (one that is away when next connected); `/history off <name>`
-  switches one computer's history off from anywhere; and `/history status`
+  switches one computer's recorder off from anywhere; and `/history status`
   shows one block per computer with its last report of its recorder.
   Details: `computer_history.md`.
 

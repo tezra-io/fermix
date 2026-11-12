@@ -1025,10 +1025,8 @@ defmodule FermixCore.Management.ProtocolContractTest do
       computer_snapshot(
         enabled: true,
         reviewed: true,
-        files: true,
-        shell: true,
-        browser: true,
-        history: true
+        files_and_shell: true,
+        browser: true
       )
 
     params = %{"section" => "computer"}
@@ -2257,10 +2255,11 @@ defmodule FermixCore.Management.ProtocolContractTest do
         landlock: :not_asked,
         helpers: %{computer_use: false},
         permissions: %{},
-        sandbox_mode: :standard
+        sandbox_mode: :standard,
+        recording: true
       )
 
-    Offers.compute(Offers.core_modules(), Switches.only(~w(files shell browser history)a), facts)
+    Offers.compute(Offers.modules(), Switches.only(~w(files_and_shell browser)a), facts)
   end
 
   defp linux_offers do
@@ -2271,10 +2270,11 @@ defmodule FermixCore.Management.ProtocolContractTest do
         landlock: :ok,
         helpers: %{computer_use: true},
         permissions: %{},
-        sandbox_mode: :strict
+        sandbox_mode: :strict,
+        recording: false
       )
 
-    Offers.compute(Offers.core_modules(), Switches.only(~w(files shell browser)a), facts)
+    Offers.compute(Offers.modules(), Switches.only(~w(files_and_shell browser)a), facts)
   end
 
   defp computer_snapshot(switches) do
@@ -2374,10 +2374,15 @@ defmodule FermixCore.Management.ProtocolContractTest do
   defp on_review(server) do
     on = golden_row("home_status_on")
     moved = %{to: @golden_server, moved_at: ~U[2031-05-01 09:00:00Z], epoch: 4}
-    waiting = Switches.only(~w(files shell browser history)a, reviewed: false)
+    waiting = Switches.only(~w(files_and_shell browser)a, reviewed: false)
+    recording = %{fermix_core: [computer_history: [enabled: true]], sandbox: []}
 
     review =
-      Consent.block(Consent.proposed(waiting), os: :macos, sandbox_mode: :standard, kind: :review)
+      Consent.block(Consent.proposed(waiting, snapshot: recording, os: :macos),
+        os: :macos,
+        sandbox_mode: :standard,
+        kind: :review
+      )
 
     summary =
       golden_summary(
@@ -2415,7 +2420,8 @@ defmodule FermixCore.Management.ProtocolContractTest do
       candidate_id: @golden_candidate
     }
 
-    keep = Consent.block(~w(files shell browser computer_use)a, os: :macos, sandbox_mode: :open)
+    keep =
+      Consent.block(~w(files_and_shell browser computer_use)a, os: :macos, sandbox_mode: :open)
 
     summary =
       golden_summary(

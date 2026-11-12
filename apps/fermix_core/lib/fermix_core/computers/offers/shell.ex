@@ -2,8 +2,9 @@ defmodule FermixCore.Computers.Offers.Shell do
   @moduledoc """
   `shell` (M97 §3.2): commands confined by this computer's sandbox, on a Mac
   (Seatbelt) or on Linux where the kernel holds commands to the sandbox
-  (Landlock); a Linux kernel that does not leaves it unavailable. On, its
-  detail is the sandbox mode commands run in (`strict`, `standard` or
+  (Landlock); a Linux kernel that does not leaves it unavailable. The one
+  switch for files and commands decides it (`files_and_shell`, M97 D27). On,
+  its detail is the sandbox mode commands run in (`strict`, `standard` or
   `open`).
   """
 

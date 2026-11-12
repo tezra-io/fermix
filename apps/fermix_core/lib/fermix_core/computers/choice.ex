@@ -222,7 +222,7 @@ defmodule FermixCore.Computers.Choice do
   defp label(module) do
     wanted = module.offer()
 
-    Enum.find_value(Offers.core_modules(), Atom.to_string(module.id()), fn offer ->
+    Enum.find_value(Offers.modules(), Atom.to_string(module.id()), fn offer ->
       if offer.id() == wanted, do: offer.label()
     end)
   end

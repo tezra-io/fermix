@@ -19,6 +19,7 @@ defmodule FermixChannels.Home.MoveTest do
   alias FermixChannels.Test.DesktopRail
   alias FermixChannels.Test.HomeMove
   alias FermixCore.Computers.Switches
+  alias FermixCore.Home.Archive.ConfigText
   alias FermixCore.Home.Candidate
   alias FermixCore.Home.ComputerKey
   alias FermixCore.Home.DesktopLink
@@ -381,7 +382,11 @@ defmodule FermixChannels.Home.MoveTest do
       rewrite_request!(source, &Map.put(&1, "keep_as_desktop", false))
       :ok = Move.put_phase(source, "streaming", %{"device_id" => nil}, HomeMove.now())
       retire_by_hand(source, ctx)
-      File.write!(MachineFile.path(source), "[fermix_core.computer]\nfiles = \"maybe\"\n")
+
+      File.write!(
+        MachineFile.path(source),
+        "[fermix_core.computer]\nfiles_and_shell = \"maybe\"\n"
+      )
 
       run_worker(source, ctx.candidate)
 
@@ -395,7 +400,11 @@ defmodule FermixChannels.Home.MoveTest do
     test "switches that cannot be written hold the commit, with a sentence of their own", ctx do
       source = ctx.primary.root
       retire_by_hand(source, ctx)
-      File.write!(MachineFile.path(source), "[fermix_core.computer]\nfiles = \"maybe\"\n")
+
+      File.write!(
+        MachineFile.path(source),
+        "[fermix_core.computer]\nfiles_and_shell = \"maybe\"\n"
+      )
 
       log = capture_log(fn -> run_worker(source, ctx.candidate) end)
 
@@ -408,18 +417,41 @@ defmodule FermixChannels.Home.MoveTest do
     end
 
     # A request a newer engine wrote may keep an offer this engine does not
-    # know: it is left off, named in the log, and the move goes on.
+    # know: it is left off, named in the log, and the move goes on. The
+    # history line decides this computer's recorder (M97 D27).
     test "an offer this engine does not know is left off, named, and the move goes on", ctx do
       source = ctx.primary.root
-      rewrite_request!(source, &Map.put(&1, "keep_offers", ["files", "teleport"]))
+      keep = ["files_and_shell", "teleport", "history"]
+      rewrite_request!(source, &Map.put(&1, "keep_offers", keep))
       retire_by_hand(source, ctx)
 
       log = capture_log(fn -> run_worker(source, ctx.candidate) end)
 
       assert {:ok, %{"phase" => "committed", "epoch" => 5}} = Move.read_phase(source)
       assert {:ok, switches} = Switches.read(source)
-      assert Switches.switched_on(switches) == [:files]
+      assert Switches.switched_on(switches) == [:files_and_shell]
       assert log =~ "teleport"
+
+      assert ConfigText.value(
+               File.read!(MachineFile.path(source)),
+               "fermix_core.computer_history",
+               "enabled"
+             ) == {:ok, "true"}
+    end
+
+    # M97 §3.4, D27: a request an engine before D27 wrote names files and
+    # commands as two lines; they keep the one switch on only together.
+    test "a request's two old lines for files and commands keep the switch on only together",
+         ctx do
+      source = ctx.primary.root
+      rewrite_request!(source, &Map.put(&1, "keep_offers", ["files", "browser"]))
+      retire_by_hand(source, ctx)
+
+      run_worker(source, ctx.candidate)
+
+      assert {:ok, %{"phase" => "committed", "epoch" => 5}} = Move.read_phase(source)
+      assert {:ok, switches} = Switches.read(source)
+      assert Switches.switched_on(switches) == [:browser]
     end
 
     test "a candidate that never answers leaves the move committed, with its sentence", ctx do

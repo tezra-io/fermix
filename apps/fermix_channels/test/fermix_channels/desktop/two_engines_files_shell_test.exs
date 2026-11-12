@@ -41,7 +41,7 @@ defmodule FermixChannels.Desktop.TwoEnginesFilesShellTest do
         do: [send: drop_first_answer(self(), :counters.new(1, []))],
         else: []
 
-    engines = TwoEngines.start!([offers: [:files, :shell]] ++ sends)
+    engines = TwoEngines.start!([switches: [:files_and_shell]] ++ sends)
     workspace = engines.sandbox.workspace_root
     assert engines.sandbox.mode == :strict
     refute Config.current().mode == :strict
@@ -263,7 +263,10 @@ defmodule FermixChannels.Desktop.TwoEnginesFilesShellTest do
     end
 
     test "its own settings, secrets and keys stay refused", %{e: e} = ctx do
-      File.write!(Path.join(e.root, "machine.toml"), "[fermix_core.computer]\nfiles = true\n")
+      File.write!(
+        Path.join(e.root, "machine.toml"),
+        "[fermix_core.computer]\nfiles_and_shell = true\n"
+      )
 
       for path <- ["machine.toml", "config.toml", "device/desktop.json", "secrets/token"] do
         assert {:ok, %{success: false, error: error}} =
@@ -352,10 +355,13 @@ defmodule FermixChannels.Desktop.TwoEnginesFilesShellTest do
   end
 
   describe "the computer's own switch" do
+    # M97 D27: one switch decides files and commands; off, the server hears
+    # both off.
     test "off, and the server knows it: nothing is sent", %{e: e} = ctx do
-      Agent.update(e.switch_agent, &Keyword.put(&1, :files, false))
+      Agent.update(e.switch_agent, &Keyword.put(&1, :files_and_shell, false))
       :ok = Offers.changed(e.offers)
       await_offer(e, "files", :off)
+      await_offer(e, "shell", :off)
 
       assert {:ok, %{success: false, error: error}} =
                call(ctx, FileRead, %{"path" => "notes.txt"})
@@ -368,7 +374,7 @@ defmodule FermixChannels.Desktop.TwoEnginesFilesShellTest do
     end
 
     test "off before the server heard: the computer refuses it", %{e: e, ws: ws} = ctx do
-      Agent.update(e.switch_agent, &Keyword.put(&1, :files, false))
+      Agent.update(e.switch_agent, &Keyword.put(&1, :files_and_shell, false))
 
       assert {:ok, %{success: false, error: error}} =
                call(ctx, FileRead, %{"path" => Path.join(ws, "notes.txt")})

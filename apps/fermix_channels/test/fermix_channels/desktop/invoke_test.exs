@@ -92,6 +92,47 @@ defmodule FermixChannels.Desktop.InvokeTest do
     def target("touch", %{"name" => name}), do: "touch #{name}"
   end
 
+  # A command, as `shell.run` is: the `shell` offer, which the one switch for
+  # files and commands decides with `files` (M97 D27). It runs until the test
+  # says how it ends.
+  defmodule Command do
+    @moduledoc false
+    @behaviour FermixCore.Computers.Capability
+
+    @impl true
+    def id, do: :command
+    @impl true
+    def offer, do: :shell
+    @impl true
+    def ops, do: ["run"]
+    @impl true
+    def effect?(_op), do: true
+    @impl true
+    def long_lived?(_op), do: false
+    @impl true
+    def validate("run", %{"name" => name}) when is_binary(name), do: :ok
+    def validate("run", _args), do: {:error, "A command needs a name."}
+    @impl true
+    def bounds(_op), do: %{result_bytes: 1_024, part_bytes: 0}
+    @impl true
+    def admit(_op, _args, _context), do: :ok
+
+    @impl true
+    def run("run", %{"name" => name}, nil, context) do
+      test = :persistent_term.get({Wait, context.home})
+      send(test, {:running, name, self(), nil})
+
+      receive do
+        {:finish, result} -> result
+      after
+        30_000 -> {:failed, "The test never finished it."}
+      end
+    end
+
+    @impl true
+    def target("run", %{"name" => name}), do: "run #{name}"
+  end
+
   # A long-lived read of another offer, as a Messages watch is: it runs until
   # the test says how it ends.
   defmodule Watch do
@@ -224,7 +265,10 @@ defmodule FermixChannels.Desktop.InvokeTest do
 
     test = self()
     suffix = System.unique_integer([:positive])
-    switches = start_supervised!({Agent, fn -> Switches.only([:files]) end}, id: :switches)
+
+    switches =
+      start_supervised!({Agent, fn -> Switches.only([:files_and_shell]) end}, id: :switches)
+
     clock = start_supervised!({Agent, fn -> @start end}, id: :clock)
     epoch = start_supervised!({Agent, fn -> {:ok, 3} end}, id: :epoch)
     name = :"desktop_invoke_#{suffix}"
@@ -237,6 +281,7 @@ defmodule FermixChannels.Desktop.InvokeTest do
       capabilities: %{
         "system" => FermixCore.Computers.Capabilities.System,
         "wait" => Wait,
+        "command" => Command,
         "touch" => Touch,
         "watch" => Watch,
         "probing" => Probing,
@@ -417,7 +462,7 @@ defmodule FermixChannels.Desktop.InvokeTest do
     end
 
     test "the master switch off refuses everything, and an offer's switch its own", ctx do
-      Agent.update(ctx.switches, fn _ -> Switches.only([:files], enabled: false) end)
+      Agent.update(ctx.switches, fn _ -> Switches.only([:files_and_shell], enabled: false) end)
       open(ctx, "inv-m", "system", "echo", %{"text" => "x"})
       assert {%{"status" => "refused", "refusal" => "off"}, _payload} = answer("inv-m")
 
@@ -427,7 +472,7 @@ defmodule FermixChannels.Desktop.InvokeTest do
       assert event["message"] =~ "Switched off on this"
       refute File.exists?(Path.join(ctx.home, "o.txt"))
 
-      Agent.update(ctx.switches, fn _ -> Switches.only([:files], reviewed: false) end)
+      Agent.update(ctx.switches, fn _ -> Switches.only([:files_and_shell], reviewed: false) end)
       open(ctx, "inv-r", "touch", "touch", %{"name" => "r.txt"})
       assert {%{"refusal" => "off", "message" => "Waiting for you" <> _}, _p} = answer("inv-r")
     end
@@ -509,7 +554,7 @@ defmodule FermixChannels.Desktop.InvokeTest do
       {pid, nil} = running("run")
       ref = Process.monitor(pid)
 
-      Agent.update(ctx.switches, fn _ -> Switches.only([:files], enabled: false) end)
+      Agent.update(ctx.switches, fn _ -> Switches.only([:files_and_shell], enabled: false) end)
       :ok = Admission.switches_changed(ctx.admission)
 
       assert {%{"status" => "refused", "refusal" => "stopped_here"}, _p} = answer("inv-run")
@@ -527,7 +572,7 @@ defmodule FermixChannels.Desktop.InvokeTest do
       # Admission has taken all nine before the switch goes off: the ninth waits.
       _state = :sys.get_state(ctx.admission)
 
-      Agent.update(ctx.switches, fn _ -> Switches.only([:files], enabled: false) end)
+      Agent.update(ctx.switches, fn _ -> Switches.only([:files_and_shell], enabled: false) end)
       finish(first, {:ok, %{}, nil})
 
       assert {%{"status" => "ok"}, _p} = answer("inv-1")
@@ -557,7 +602,7 @@ defmodule FermixChannels.Desktop.InvokeTest do
       # Admission has taken all nine before the switch goes off: the ninth waits.
       _state = :sys.get_state(ctx.admission)
 
-      Agent.update(ctx.switches, fn _ -> Switches.only([:files], enabled: false) end)
+      Agent.update(ctx.switches, fn _ -> Switches.only([:files_and_shell], enabled: false) end)
       :ok = Admission.switches_changed(ctx.admission)
 
       for n <- 1..9 do
@@ -630,7 +675,7 @@ defmodule FermixChannels.Desktop.InvokeTest do
   # against this computer's switches.
   describe "an offer's own switch off, the master on" do
     test "refuses that capability's work that runs and waits as off, and nothing else", ctx do
-      Agent.update(ctx.switches, fn _ -> Switches.only([:files, :imessage]) end)
+      Agent.update(ctx.switches, fn _ -> Switches.only([:files_and_shell, :imessage]) end)
       open(ctx, "inv-watch", "watch", "watch", %{"name" => "watch"}, %{"deadline_ms" => 0})
       {watch, nil} = running("watch")
       for n <- 1..7, do: open(ctx, "inv-#{n}", "wait", "wait", %{"name" => "f#{n}"})
@@ -661,6 +706,43 @@ defmodule FermixChannels.Desktop.InvokeTest do
       assert {%{"status" => "refused", "refusal" => "off"}, _p} = answer("inv-after")
     end
 
+    # M97 D27: files and commands are one switch. Off, it ends the files and
+    # the commands work alike, running and waiting, as off; Messages goes on.
+    test "the one switch for files and commands ends both, running and waiting", ctx do
+      Agent.update(ctx.switches, fn _ -> Switches.only([:files_and_shell, :imessage]) end)
+      open(ctx, "inv-watch", "watch", "watch", %{"name" => "watch"}, %{"deadline_ms" => 0})
+      {watch, nil} = running("watch")
+      for n <- 1..3, do: open(ctx, "inv-f#{n}", "wait", "wait", %{"name" => "f#{n}"})
+      for n <- 1..4, do: open(ctx, "inv-c#{n}", "command", "run", %{"name" => "c#{n}"})
+      for name <- ~w(f1 f2 f3 c1 c2 c3 c4), do: running(name)
+      open(ctx, "inv-f4", "wait", "wait", %{"name" => "f4"})
+      open(ctx, "inv-c5", "command", "run", %{"name" => "c5"})
+      # Admission has taken both before the switch goes off: each waits for a slot.
+      _state = :sys.get_state(ctx.admission)
+
+      Agent.update(ctx.switches, fn _ -> Switches.only([:imessage]) end)
+      :ok = Admission.switches_changed(ctx.admission)
+
+      for id <- ~w(inv-f1 inv-f2 inv-f3 inv-f4 inv-c1 inv-c2 inv-c3 inv-c4 inv-c5) do
+        {event, _payload} = answer(id)
+        assert %{"status" => "refused", "refusal" => "off"} = event, id
+        assert event["message"] =~ "Switched off on this"
+        assert %{status: "refused", refusal: "off"} = journal(ctx, id)
+      end
+
+      refute_received {:running, "f4", _pid, _part}
+      refute_received {:running, "c5", _pid, _part}
+      refute_received {:sent, %{"id" => "inv-watch"}, _payload}
+
+      for {id, capability, op} <- [{"inv-fa", "wait", "wait"}, {"inv-ca", "command", "run"}] do
+        open(ctx, id, capability, op, %{"name" => id})
+        assert {%{"status" => "refused", "refusal" => "off"}, _p} = answer(id)
+      end
+
+      finish(watch, {:ok, %{"seen" => 1}, nil})
+      assert {%{"status" => "ok"}, ~s({"seen":1})} = answer("inv-watch")
+    end
+
     # A switch's own listener (the browser's held turns, the screen's seat) can
     # end a run before Admission hears: its answer is still the switch's.
     test "a run that ends under its switch, off before Admission heard, is answered off", ctx do
@@ -675,11 +757,11 @@ defmodule FermixChannels.Desktop.InvokeTest do
       assert event["message"] =~ "Switched off on this"
       assert %{status: "refused", refusal: "off"} = journal(ctx, "inv-x")
 
-      Agent.update(ctx.switches, fn _ -> Switches.only([:files]) end)
+      Agent.update(ctx.switches, fn _ -> Switches.only([:files_and_shell]) end)
       open(ctx, "inv-y", "wait", "wait", %{"name" => "y"})
       {other, nil} = running("y")
 
-      Agent.update(ctx.switches, fn _ -> Switches.only([:files], enabled: false) end)
+      Agent.update(ctx.switches, fn _ -> Switches.only([:files_and_shell], enabled: false) end)
       Process.exit(other, :kill)
 
       assert {%{"status" => "refused", "refusal" => "stopped_here"}, _p} = answer("inv-y")
@@ -763,7 +845,7 @@ defmodule FermixChannels.Desktop.InvokeTest do
     # restart answers it too, at once, as never run, a long-lived one and one
     # that waited for its upload included, while what ran stays not known.
     test "a crash while requests waited answers each, never run", ctx do
-      Agent.update(ctx.switches, fn _ -> Switches.only([:files, :imessage]) end)
+      Agent.update(ctx.switches, fn _ -> Switches.only([:files_and_shell, :imessage]) end)
       for n <- 1..8, do: open(ctx, "inv-#{n}", "wait", "wait", %{"name" => "r#{n}"})
       for n <- 1..8, do: running("r#{n}")
       open(ctx, "inv-watch", "watch", "watch", %{"name" => "watch"}, %{"deadline_ms" => 0})
@@ -831,7 +913,7 @@ defmodule FermixChannels.Desktop.InvokeTest do
     # answered unknown, so no caller is left waiting.
     test "a restart of the whole request handler is told too", ctx do
       assert_receive {:sent, %{"t" => "invoke_restarted"}, ""}
-      Agent.update(ctx.switches, fn _ -> Switches.only([:files, :imessage]) end)
+      Agent.update(ctx.switches, fn _ -> Switches.only([:files_and_shell, :imessage]) end)
       for n <- 1..8, do: open(ctx, "inv-#{n}", "wait", "wait", %{"name" => "h#{n}"})
       for n <- 1..8, do: running("h#{n}")
       open(ctx, "inv-watch", "watch", "watch", %{"name" => "watch"}, %{"deadline_ms" => 0})

@@ -1,10 +1,14 @@
 defmodule FermixCore.Management.Settings.ThisComputer do
   @moduledoc """
-  The `computer` section (M97 §7.2, §7.4): what Fermix on the server may use
-  on this computer, `[fermix_core.computer]` in its `machine.toml`
+  The `computer` section (M97 §7.2, §7.4, D27): what Fermix on the server may
+  use on this computer, `[fermix_core.computer]` in its `machine.toml`
   (`Computers.Switches`), under the `always_on` pane, titled "This
-  computer". One switch that turns everything off, one per offer, and
-  whether the owner has reviewed them.
+  computer". Five rows on a Mac: the switch that turns everything off, then
+  one per switch this system can have (files and commands as one, the
+  browser, the screen, Messages, only where Messages runs). Nothing else is a
+  row: the review is this computer's state, computer history's consent is
+  its recorder in the Computer history section, and what reaches the server
+  from this computer has no switch.
 
   Published only on a computer linked to its server where Always On is
   offered (`Home.AlwaysOnRelease`): an install that never moved sees no new
@@ -15,11 +19,8 @@ defmodule FermixCore.Management.Settings.ThisComputer do
   **The review.** A computer that moved before M97 starts with its switches
   waiting for the owner's review, offering nothing until then
   (`Computers.Consent.derive_moved/2`). Any write to this section is that
-  review (`Switches.save/2`): a released app that knows no review notice
-  draws this section generically, so the review is never stuck behind an
-  older app. While it waits, the `computer_reviewed` row says so and is the
-  one to turn on to accept the switches as they are; once done it is shown
-  and not written.
+  review (`Switches.save/2`), so it is never stuck behind an app that draws
+  this section generically; while it waits, the master row's footer says so.
 
   Every switch is live: the next request reads it, and this computer sends
   its offers again at once.
@@ -35,27 +36,20 @@ defmodule FermixCore.Management.Settings.ThisComputer do
   alias FermixCore.Setup.ConfigStore
 
   @section %{id: "computer", pane: "always_on", title: "This computer"}
-  @offer_labels [
-    files: "Files",
-    shell: "Commands",
+  # Each switch's row label, in the switches' order.
+  @labels [
+    files_and_shell: "Files and commands",
     browser: "The browser",
     computer_use: "Your screen",
-    imessage: "Messages",
-    history: "Your computer history",
-    voice: "Voice calls",
-    attachments: "Attachments",
-    accessory: "The robot",
-    notifications: "Notifications"
+    imessage: "Messages"
   ]
 
-  if Keyword.keys(@offer_labels) != Switches.offers() do
-    raise CompileError, description: "ThisComputer: one row per offer, in the switches' order"
+  if Keyword.keys(@labels) != Switches.switches() do
+    raise CompileError, description: "ThisComputer: one row per switch, in the switches' order"
   end
 
   @enabled_footer "Off stops everything Fermix on your server does here, from its next request."
-  @reviewed_footer "Turn this on, or change any switch here, to let Fermix on your server use " <>
-                     "what is switched on."
-  @reviewed_done_footer "You reviewed what Fermix on your server may use here."
+  @review_footer "Change any switch here to let Fermix on your server use what is switched on."
 
   @doc """
   The section on a linked computer where Always On is offered, none
@@ -70,28 +64,26 @@ defmodule FermixCore.Management.Settings.ThisComputer do
   def owns?(section, opts \\ []) when is_binary(section) and is_list(opts),
     do: section == @section.id and computer?(opts)
 
-  @doc "The rows of the owned section."
-  @spec rows(String.t(), Source.snapshot()) :: [Row.t()]
-  def rows("computer", snapshot) when is_map(snapshot) do
+  @doc """
+  The rows of the owned section, for a Mac or another system (`macos?:`,
+  this host's by default): the master, then each switch whose offers this
+  system can have.
+  """
+  @spec rows(String.t(), Source.snapshot(), keyword()) :: [Row.t()]
+  def rows("computer", snapshot, opts \\ []) when is_map(snapshot) and is_list(opts) do
     switches = Switches.normalize(Source.core(snapshot, :computer))
-    reviewed = Switches.reviewed?(switches)
+    os = if Keyword.get_lazy(opts, :macos?, &macos?/0), do: :macos, else: :linux
 
     [
       Row.new("computer_enabled", :toggle, "Fermix on your server may use this computer",
-        footer: @enabled_footer,
+        footer: master_footer(Switches.reviewed?(switches), os),
         value: Switches.enabled?(switches),
-        restart: false
-      ),
-      Row.new("computer_reviewed", :toggle, "Reviewed",
-        footer: reviewed_footer(reviewed),
-        value: reviewed,
-        read_only: reviewed,
         restart: false
       )
     ] ++
-      for {offer, label} <- @offer_labels do
-        Row.new("computer_#{offer}", :toggle, label,
-          value: Keyword.get(switches, offer, false),
+      for {switch, label} <- @labels, here?(switch, os) do
+        Row.new("computer_#{switch}", :toggle, label,
+          value: Keyword.get(switches, switch, false),
           restart: false
         )
       end
@@ -99,21 +91,22 @@ defmodule FermixCore.Management.Settings.ThisComputer do
 
   @doc "Every sentence this section says, for the copy rules."
   @spec sentences() :: [String.t()]
-  def sentences, do: [@enabled_footer, @reviewed_done_footer | reviewed_footers()]
+  def sentences, do: [@enabled_footer | Enum.map([:macos, :linux], &master_footer(false, &1))]
 
-  defp reviewed_footer(true), do: @reviewed_done_footer
+  # A switch is a row where every offer it decides can work on this system.
+  defp here?(switch, os),
+    do: Enum.all?(Switches.decides(switch), &(os in Offers.module(&1).systems()))
 
-  defp reviewed_footer(false),
-    do: Offers.waiting_sentence(machine()) <> " " <> @reviewed_footer
+  # While the review waits, the master's footer says so: any change here is
+  # the review.
+  defp master_footer(true, _os), do: @enabled_footer
 
-  defp reviewed_footers,
+  defp master_footer(false, os),
     do:
-      for(
-        machine <- ["Mac", "computer"],
-        do: Offers.waiting_sentence(machine) <> " " <> @reviewed_footer
-      )
+      Offers.waiting_sentence(if(os == :macos, do: "Mac", else: "computer")) <>
+        " " <> @review_footer
 
-  defp machine, do: if(:os.type() == {:unix, :darwin}, do: "Mac", else: "computer")
+  defp macos?, do: :os.type() == {:unix, :darwin}
 
   defp computer?(opts), do: Keyword.get_lazy(opts, :computer?, &linked_computer?/0)
 
