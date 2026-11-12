@@ -168,6 +168,22 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `fermix` command from another install refuses to start there until the app
   has. As with `config.toml`, no command or file tool the agent
   runs can read or change `machine.toml`.
+- **Whether coding agents may run, and where they keep their sign-ins,
+  belong to each computer.** The approval ("Allow coding agents to run on
+  this Mac") and the folders Codex and Claude Code sign in from
+  (`codex_home`, `claude_config_dir`) now live in `machine.toml`, so the
+  first start of this version moves them out of `config.toml`, once, and no
+  move, backup or restore carries them; the preferred tool stays your
+  home's. After a move to your server, coding agents run there only once you
+  approve them there, and your Mac keeps its own approval for a move back:
+  the move's review now says coding agents stop on this Mac and run on the
+  server only with your approval there, and moving back no longer says they
+  ask for approval again. The switch has its own part of the Coding agents
+  pane, This Mac (This computer on Linux and on a server), labelled for the
+  machine it approves. A Mac whose home is on its server shows its own
+  agents there and no switch: before, it showed one labelled for the Mac
+  that approved them on the server. A server that took your home before
+  this version starts with coding agents off; approve them there again.
 - **The Computer history switch says what turning it on agrees to.** Its
   footer in settings now reads "Fermix records what you do in the apps you
   choose on this Mac. The raw record stays on this Mac for 48 hours; each
@@ -205,6 +221,22 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Codex signed in with an API key reads as signed in.** Fermix looked only
+  for a ChatGPT sign-in in Codex's `auth.json`, so after `codex login
+  --with-api-key` the Coding agents pane, the setup page and `fermix doctor`
+  said Codex was not signed in. Both forms Codex writes now count. Fermix
+  still only checks that the sign-in is there and never reads the key out.
+- **A coding agent whose sign-in stopped working no longer reads as signed
+  in once a run fails on it.** Fermix only sees that Codex's or Claude Code's
+  sign-in file is there, so an expired sign-in read "Signed in" while every
+  run failed. Now a run that fails because the agent could not sign in gives
+  the agent's own words, then says which agent is signed out on which
+  machine and that the run stopped. The agent then reads signed out on the
+  setup page and in `fermix doctor`, the Mac app's Coding agents pane says
+  so under the agents, and a watcher follow-up that would start it waits,
+  until a run of it works or its sign-in file changes when you sign in
+  again. On the setup page and in `fermix doctor` a sign-in file that is
+  there now reads "sign-in found" rather than "authenticated".
 - **A Grok call no longer goes quiet about a finished task after you speak
   as a reply starts.** Grok could drop a reply it had just begun when you
   spoke, without ever closing it, and the call then waited on that reply for

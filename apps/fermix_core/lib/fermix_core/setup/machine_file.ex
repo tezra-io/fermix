@@ -45,6 +45,18 @@ defmodule FermixCore.Setup.MachineFile do
   none of the computer's (its machine file is its own default) and keeps the
   home's route and grants.
 
+  **The coding agents' keys (M98 D5).** `[fermix_core.harness]` splits by key
+  too (`Harness.Config`): `approved`, `codex_home` and `claude_config_dir` are
+  this machine's, every other key the home's. A machine file an earlier engine
+  wrote has none of them, and the rule above would drop them from
+  `config.toml` with nothing taking them. So every machine file this engine
+  writes holds the table, `approved` written even when off (`@markers`), and
+  a machine file without it, while `config.toml` holds one of those keys,
+  takes them from `config.toml` once (`generated`): written into the machine
+  file first, then removed from `config.toml`, after which the rule above
+  holds. A machine file without the table and a `config.toml` without the
+  keys are left as they are.
+
   **Back to the home.** An engine of this milestone's stage 0 wrote
   `[fermix_channels.imessage]`, and the whole `[fermix_core.computer_history]`,
   into `machine.toml`. `homeward/2` says what one boot does about that,
@@ -58,6 +70,7 @@ defmodule FermixCore.Setup.MachineFile do
   nothing in `config.toml`.
   """
 
+  alias FermixCore.Harness.Config, as: HarnessConfig
   alias FermixCore.Home.Archive.ConfigText
 
   @name "machine.toml"
@@ -67,17 +80,27 @@ defmodule FermixCore.Setup.MachineFile do
     "computer_use" => "fermix_core.computer_use",
     "computer_history" => "fermix_core.computer_history",
     "accessories" => "fermix_channels.accessories",
-    "computer" => "fermix_core.computer"
+    "computer" => "fermix_core.computer",
+    "harness_machine" => "fermix_core.harness"
   }
   @tables ~w(sandbox fermix_core.computer_use fermix_channels.accessories fermix_core.computer)
   # Tables an earlier engine kept here that are the home's (`homeward/2`).
   @homeward ~w(fermix_channels.imessage)
+  # The coding agents' keys that are this machine's (`Harness.Config`).
+  @harness_keys for key <- HarnessConfig.machine_keys(),
+                    do: {"fermix_core.harness", Atom.to_string(key)}
   # The keys of a home table that are this machine's, as table and key.
   @keys [
     {"fermix_core.plugins", "dev_local"},
     {"fermix_core.computer_history", "enabled"},
     {"fermix_core.computer_history", "apps"}
+    | @harness_keys
   ]
+  # The tables whose machine keys an earlier machine file never held, each
+  # with the key every machine file this engine writes sets there and that
+  # key's value when nothing gives one: a machine file without the table was
+  # written before those keys were this machine's (`migration/3`).
+  @markers [{"fermix_core.harness", "approved", "false"}]
   # A key of a home table that is this machine's own only with one value,
   # which is then both: copied here, never taken out of config.toml.
   @local_summarizer {"fermix_core.computer_history", "summarizer", "local"}
@@ -99,14 +122,16 @@ defmodule FermixCore.Setup.MachineFile do
   What one boot's migration writes: the new `machine.toml` (nil to leave it
   as it is), the new `config.toml` (nil likewise), the dotted names it removed
   from `config.toml`, those it copied into the new machine file and left in
-  `config.toml` (`copied/1`), and whether the machine file is an Always On
-  server's own default.
+  `config.toml` (`copied/1`), those it took from `config.toml` into a machine
+  file that exists (`generated`, the moduledoc's coding agents' keys), and
+  whether the machine file is an Always On server's own default.
   """
   @type plan :: %{
           machine: String.t() | nil,
           config: String.t() | nil,
           removed: [String.t()],
           copied: [String.t()],
+          generated: [String.t()],
           server_default?: boolean()
         }
 
@@ -122,9 +147,10 @@ defmodule FermixCore.Setup.MachineFile do
   @spec server_sandbox_mode() :: :open
   def server_sandbox_mode, do: @server_sandbox_mode
 
-  @doc "The text of an Always On server's new machine file."
+  @doc "The text of an Always On server's new machine file, coding agents not approved."
   @spec server_default() :: String.t()
-  def server_default, do: @header <> "\n\n[sandbox]\nmode = \"#{@server_sandbox_mode}\"\n"
+  def server_default,
+    do: with_markers(@header <> "\n\n[sandbox]\nmode = \"#{@server_sandbox_mode}\"\n")
 
   @doc "The header a rendered machine file starts with."
   @spec header() :: String.t()
@@ -234,15 +260,42 @@ defmodule FermixCore.Setup.MachineFile do
 
   @doc """
   The machine settings `config.toml`'s `text` holds, as a machine file, as
-  written (comments included), with a local summarizer copied (`copied/1`);
-  `""` when it holds none. Keys of one table are one table here.
+  written (comments included), with a local summarizer copied (`copied/1`)
+  and each marker table (the moduledoc's coding agents' keys); `""` when it
+  holds none. Keys of one table are one table here.
   """
   @spec extract(String.t()) :: String.t()
   def extract(text) when is_binary(text) do
     case Enum.flat_map(@tables, &ConfigText.tables(text, &1)) ++ key_blocks(text) do
-      [] -> ""
-      blocks -> Enum.map_join([@header | blocks], "\n\n", &String.trim_trailing/1) <> "\n"
+      [] ->
+        ""
+
+      blocks ->
+        with_markers(Enum.map_join([@header | blocks], "\n\n", &String.trim_trailing/1) <> "\n")
     end
+  end
+
+  # Every machine file this engine writes holds each marker table, its key
+  # written even at its default (`@markers`).
+  defp with_markers(text) do
+    Enum.reduce(@markers, text, fn {table, key, default}, acc ->
+      if ConfigText.value(acc, table, key) == :absent,
+        do: ConfigText.put(acc, table, key, default),
+        else: acc
+    end)
+  end
+
+  # This machine's keys of each marker table `machine` lacks, as `config`
+  # sets them, each as table, key and raw value: what the generation step
+  # takes into a machine file that exists.
+  defp ungenerated(_config, :absent), do: []
+
+  defp ungenerated(config, machine) do
+    for {table, _key, _default} <- @markers,
+        ConfigText.tables(machine, table) == [],
+        {^table, key} <- @keys,
+        {:ok, raw} <- [ConfigText.value(config, table, key)],
+        do: {table, key, raw}
   end
 
   defp key_blocks(text) do
@@ -292,9 +345,10 @@ defmodule FermixCore.Setup.MachineFile do
   What one boot does with `config` (`config.toml`'s text, `""` when there is
   none) and `machine` (`machine.toml`'s, or `:absent`) on a machine that is an
   Always On server or not (`server?`), in the moduledoc's order: a machine
-  file that exists is kept and `config.toml` loses its machine settings; one
-  that does not is written from them, or on a server from the server's
-  default, before `config.toml` loses them.
+  file that exists is kept and `config.toml` loses its machine settings,
+  after the machine file takes the keys of a marker table it lacks from
+  `config.toml` (`generated`); one that does not is written from them, or on
+  a server from the server's default, before `config.toml` loses them.
   """
   @spec migration(String.t(), String.t() | :absent, boolean()) :: plan()
   def migration(config, machine, server?)
@@ -302,20 +356,29 @@ defmodule FermixCore.Setup.MachineFile do
              is_boolean(server?) do
     {stripped, removed} = strip(config)
     extracted? = machine == :absent and not server?
+    generated = ungenerated(config, machine)
 
     %{
-      machine: new_machine(config, machine, server?),
+      machine: new_machine(config, machine, server?, generated),
       config: if(removed == [], do: nil, else: stripped),
       removed: removed,
       copied: if(extracted?, do: copied(config), else: []),
+      generated: for({table, key, _raw} <- generated, do: "#{table}.#{key}"),
       server_default?: server? and machine == :absent
     }
   end
 
-  defp new_machine(_config, machine, _server?) when is_binary(machine), do: nil
-  defp new_machine(_config, :absent, true), do: server_default()
+  defp new_machine(_config, machine, _server?, []) when is_binary(machine), do: nil
 
-  defp new_machine(config, :absent, false) do
+  defp new_machine(_config, machine, _server?, generated) when is_binary(machine) do
+    generated
+    |> Enum.reduce(machine, fn {table, key, raw}, acc -> ConfigText.put(acc, table, key, raw) end)
+    |> with_markers()
+  end
+
+  defp new_machine(_config, :absent, true, _generated), do: server_default()
+
+  defp new_machine(config, :absent, false, _generated) do
     case extract(config) do
       "" -> nil
       text -> text
@@ -420,14 +483,24 @@ defmodule FermixCore.Setup.MachineFile do
        "inherited from the computer its home came from were left out: #{Enum.join(removed, ", ")}."}
   end
 
+  # The generation step: what it took into the machine file moved; any other
+  # machine setting config.toml held is dropped, since the machine file wins.
+  def notice(%{generated: [_ | _] = generated, removed: removed}) do
+    case removed -- generated do
+      [] -> {:info, moved_sentence(generated)}
+      dropped -> {:warning, moved_sentence(generated) <> " " <> elem(dropped_notice(dropped), 1)}
+    end
+  end
+
   def notice(%{machine: machine, removed: removed, copied: copied}) when is_binary(machine),
-    do:
-      {:info,
-       "This computer's own settings moved to #{@name}: #{Enum.join(removed ++ copied, ", ")}."}
+    do: {:info, moved_sentence(removed ++ copied)}
 
   # A boot stopped between the two writes, or a section written into
   # config.toml by hand since: either way the machine file is what is read.
   def notice(%{machine: nil, removed: removed}), do: dropped_notice(removed)
+
+  defp moved_sentence(names),
+    do: "This computer's own settings moved to #{@name}: #{Enum.join(names, ", ")}."
 
   @doc """
   What removing machine settings from `config.toml` is said with (`names`, as

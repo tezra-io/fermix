@@ -98,7 +98,6 @@ defmodule FermixCore.Management.Copy do
   @reached [whatsapp: "WhatsApp", cues: "your webhook sources"]
   # What a move back costs, each where the home has it.
   @return_costs [
-    coding_agents: " Coding agents ask for your approval again.",
     telegram: " Messages sent to Telegram while it moves wait until it is done."
   ]
   @summary_keys ~w(off connect connecting ready moving waiting on on_backup on_no_backup undone

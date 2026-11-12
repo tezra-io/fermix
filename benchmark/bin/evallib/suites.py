@@ -24,10 +24,12 @@ _TOP_KEYS = {
     "suite", "title", "description", "risk", "confirm_cost", "defaults", "scenarios", "soft",
     "abort_on_tool_error", "requires",
 }
-# What a suite may require of the eval home beyond the defaults (`requires:`). A
-# home seeded without it holds the suite's cases out as NOT EVALUATED, never as
-# zeros. `cues`: seeded with `seed_capability_home.py --cues` and seed_cues.exs.
-REQUIREMENTS = ("cues", "computers")
+# What a suite, or one case of it, may require of the eval home beyond the
+# defaults (`requires:`). A home seeded without it holds those cases out as NOT
+# EVALUATED, never as zeros. `cues`: seeded with `seed_capability_home.py --cues`
+# and seed_cues.exs; `computers`: with --computers; `coding_signed_out`: with
+# --coding-signed-out (a stub `claude` that fails every run as signed out).
+REQUIREMENTS = ("cues", "computers", "coding_signed_out")
 _DEFAULT_KEYS = {"timeout_ms", "judge", "expect"}
 _SCENARIO_KEYS = {"id", "title", "severity", "risk", "confirm_cost", "tags", "cases",
                   "sticky_gates", "platforms"}
@@ -39,7 +41,7 @@ PLATFORMS = ("linux", "macos")
 _CASE_KEYS = {
     "id", "query", "turns", "expect", "rubric", "judge", "timeout_ms", "drive",
     "image", "images", "score", "checker", "requires_tools", "requires_tools_all",
-    "cross_session", "companion", "watch", "voice", "cue",
+    "cross_session", "companion", "watch", "voice", "cue", "requires",
 }
 _TURN_KEYS = {"query", "expect"}
 
@@ -165,6 +167,8 @@ class Case:
     #   and when; evallib/voice.py.
     cue: dict = field(default_factory=dict)  # drive: cue — the source and the events
     #   the runner posts to the door; evallib/cue_drive.py.
+    requires: tuple[str, ...] = ()  # what the eval home must be seeded with for this case
+    #   beyond its suite's `requires` (REQUIREMENTS); run_eval.py holds it out without.
 
     @property
     def needs_operator(self) -> bool:
@@ -910,6 +914,7 @@ def _load_one(path: str, fixtures_dir: str, problems: list[str]) -> Suite | None
                 problems.append(f"{cloc}: a case may carry only one of score/checker/rubric, got {present}")
             requires_tools = _validate_tool_list(cs, "requires_tools", cloc, problems)
             requires_all = _validate_tool_list(cs, "requires_tools_all", cloc, problems)
+            case_requires = _case_requirements(cs, str(name), cloc, problems)
             # cross_session: every turn but the last runs in one session, the last
             # (the recall) in a fresh one — needs 2+ turns and a scorer for the
             # recall: a `score` block on its reply, or a case-level `fixture_state`
@@ -987,7 +992,7 @@ def _load_one(path: str, fixtures_dir: str, problems: list[str]) -> Suite | None
                         score_spec=score_spec, checker_spec=checker_spec,
                         requires_tools=requires_tools, cross_session=cross_session,
                         requires_tools_all=tuple(requires_all), companion=companion_spec,
-                        watch=watch, voice=voice_spec, cue=cue_spec)
+                        watch=watch, voice=voice_spec, cue=cue_spec, requires=case_requires)
             _refuse_misplaced_fixture_state(case, turn_expects, cloc, problems)
             _refuse_misplaced_workspace_paths(case, str(name), cloc, problems)
             cases.append(case)
@@ -1017,6 +1022,22 @@ def _requirements(value, fname: str, problems: list[str]) -> tuple[str, ...]:
         problems.append(f"{fname}: `requires` must be a list drawn from {list(REQUIREMENTS)}")
         return ()
     return tuple(dict.fromkeys(value))
+
+
+def _case_requirements(cs: dict, suite_name: str, where: str,
+                       problems: list[str]) -> tuple[str, ...]:
+    """A case's own `requires:`, for a case whose suite runs without that seed.
+
+    A capability suite may not declare it: `run_capability.py` holds a task out by
+    its suite's `cues` only, so the case would be driven on a home that cannot
+    measure it."""
+    if "requires" not in cs:
+        return ()
+    if suite_name.startswith(CAPABILITY_SUITE_PREFIX):
+        problems.append(f"{where}: a case's `requires` is read by run_eval.py only; a "
+                        "capability suite's case would be driven on any home")
+        return ()
+    return _requirements(cs["requires"], where, problems)
 
 
 def _abort_fragments(value, fname: str, problems: list[str]) -> list[str]:

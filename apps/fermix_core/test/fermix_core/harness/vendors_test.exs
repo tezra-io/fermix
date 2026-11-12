@@ -83,6 +83,37 @@ defmodule FermixCore.Harness.VendorsTest do
                :absent
     end
 
+    # The file `codex login --with-api-key` writes (codex-cli 0.166.0, captured in a
+    # throwaway CODEX_HOME with an invented key): two keys, no tokens.
+    test "codex is :authenticated with an API-key sign-in" do
+      home = home_with_file("harness-vendors-codex-apikey", api_key_auth())
+
+      assert Vendors.auth_state("codex", codex_home: home) == :authenticated
+    end
+
+    test "codex is :absent with neither ChatGPT tokens nor an API key" do
+      for body <- [
+            ~s({"auth_mode":"chatgpt","OPENAI_API_KEY":null,"tokens":null}),
+            ~s({"auth_mode":"apikey","OPENAI_API_KEY":""}),
+            ~s({"tokens":{"refresh_token":""}}),
+            ~s({"OPENAI_API_KEY":42}),
+            "not json",
+            ""
+          ] do
+        home = home_with_file("harness-vendors-codex-none", body)
+
+        assert Vendors.auth_state("codex", codex_home: home) == :absent, body
+      end
+    end
+
+    test "a ChatGPT-only check counts ChatGPT tokens and never an API key" do
+      chatgpt = home_with_auth("harness-vendors-codex-chatgpt")
+      api_key = home_with_file("harness-vendors-codex-chatgpt-key", api_key_auth())
+
+      assert Vendors.codex_chatgpt_signed_in?(Path.join(chatgpt, "auth.json"))
+      refute Vendors.codex_chatgpt_signed_in?(Path.join(api_key, "auth.json"))
+    end
+
     test "claude is :unverified when the config dir exists but carries no credentials file" do
       config_dir = FermixTestSupport.SafeRm.make_tmp_dir!("harness-vendors-claude-unverified")
       on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(config_dir) end)
@@ -104,6 +135,26 @@ defmodule FermixCore.Harness.VendorsTest do
         Vendors.detect("claude", find_executable: fn _ -> nil end, claude_config_dir: missing)
 
       assert detection.auth == :absent
+    end
+  end
+
+  # M98 G1b: the file a sign-in mark compares against, never its contents.
+  describe "sign_in_file/2" do
+    test "names each agent's sign-in file where it is there, and nil where it is not" do
+      codex_home = home_with_auth("harness-vendors-sign-in-codex")
+      claude_dir = FermixTestSupport.SafeRm.make_tmp_dir!("harness-vendors-sign-in-claude")
+      on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(claude_dir) end)
+      opts = [codex_home: codex_home, claude_config_dir: claude_dir]
+
+      assert Vendors.sign_in_file("codex", opts) == Path.join(codex_home, "auth.json")
+      assert Vendors.sign_in_file("claude", opts) == nil
+
+      credentials = Path.join(claude_dir, ".credentials.json")
+      File.write!(credentials, "{}")
+      assert Vendors.sign_in_file("claude", opts) == credentials
+
+      FermixTestSupport.SafeRm.rm!(Path.join(codex_home, "auth.json"))
+      assert Vendors.sign_in_file("codex", opts) == nil
     end
   end
 
@@ -213,6 +264,15 @@ defmodule FermixCore.Harness.VendorsTest do
     File.write!(Path.join(home, "auth.json"), ~s({"tokens":{"refresh_token":"rt-abc"}}))
     home
   end
+
+  defp home_with_file(prefix, body) do
+    home = FermixTestSupport.SafeRm.make_tmp_dir!(prefix)
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(home) end)
+    File.write!(Path.join(home, "auth.json"), body)
+    home
+  end
+
+  defp api_key_auth, do: ~s({"auth_mode":"apikey","OPENAI_API_KEY":"sk-invented-q4t7"})
 
   defp restore_path(nil), do: System.delete_env("PATH")
   defp restore_path(value), do: System.put_env("PATH", value)

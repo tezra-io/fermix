@@ -767,7 +767,9 @@ defmodule FermixCore.Setup.ConfigStoreTest do
 
       assert :ok = ConfigStore.save_snapshot(loaded)
       assert {:ok, reloaded} = ConfigStore.load_runtime_config(resolve_secrets: false)
-      assert reloaded == loaded
+      # A save writes this computer's coding approval as it is, off (M98 D5).
+      assert loaded.fermix_core[:harness] == []
+      assert reloaded == put_in(loaded, [:fermix_core, :harness], approved: false)
     end
   end
 
@@ -2586,7 +2588,11 @@ defmodule FermixCore.Setup.ConfigStoreTest do
     assert contents =~ "max_active = 3"
     assert contents =~ "max_event_bytes = 2097152"
     assert contents =~ "max_framing_errors = 0"
-    assert contents =~ ~s(codex_home = "/home/op/.codex")
+    # Where Codex keeps its sign-in is this computer's own (M98 D5).
+    refute contents =~ "codex_home"
+
+    assert File.read!(Path.join(tmp_home, "machine.toml")) =~
+             ~s(codex_home = "/home/op/.codex")
 
     assert {:ok, loaded} = ConfigStore.load_runtime_config()
     harness = Keyword.get(loaded.fermix_core, :harness, [])

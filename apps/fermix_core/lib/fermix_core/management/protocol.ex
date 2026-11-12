@@ -50,6 +50,7 @@ defmodule FermixCore.Management.Protocol do
     {"diagnostics.build", 1},
     {"setup.state.get", 2},
     {"setup.detect", 2},
+    {"coding_agents.check", 2},
     {"settings.sections", 2},
     {"settings.get", 2},
     {"settings.apply", 2},

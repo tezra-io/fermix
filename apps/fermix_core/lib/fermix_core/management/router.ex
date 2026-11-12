@@ -63,6 +63,8 @@ defmodule FermixCore.Management.Router do
   @secret_set_params ~w(id value)
   @secret_clear_params ~w(id)
   @detect_params ~w(targets)
+  @coding_agents_check_params ~w(vendors)
+  @coding_agents ~w(codex claude)
   @job_id_params ~w(job_id)
   @provider_params ~w(provider)
   @models_params ~w(provider live query cursor limit)
@@ -204,6 +206,12 @@ defmodule FermixCore.Management.Router do
   defp route_known("secret.set", params, opts), do: secret_set(params, opts)
   defp route_known("secret.clear", params, opts), do: secret_clear(params, opts)
   defp route_known("setup.detect", params, opts), do: setup_detect(params, opts)
+
+  # Check again (M98 G1b-3), answered on the machine whose agents it names
+  # (`Management.Placement`).
+  defp route_known("coding_agents.check", params, opts),
+    do: coding_agents_check(params, opts)
+
   defp route_known("providers.set_primary", params, opts), do: providers_primary(params, opts)
   defp route_known("providers.models.list", params, opts), do: providers_models(params, opts)
   defp route_known("providers.probe.start", params, opts), do: providers_probe(params, opts)
@@ -557,6 +565,30 @@ defmodule FermixCore.Management.Router do
     with :ok <- reject_unknown_params(params, @detect_params),
          {:ok, targets} <- fetch_targets(params) do
       {:ok, Detect.run(targets, operation_opts(opts))}
+    end
+  end
+
+  defp coding_agents_check(params, opts) do
+    with :ok <- reject_unknown_params(params, @coding_agents_check_params),
+         {:ok, vendors} <- fetch_coding_agents(params) do
+      operation_result(Detect.check_agents(vendors, operation_opts(opts)))
+    end
+  end
+
+  # Every agent when none is named; a named list is non-empty, known and
+  # without repeats.
+  defp fetch_coding_agents(params) do
+    case Map.fetch(params, "vendors") do
+      :error ->
+        {:ok, @coding_agents}
+
+      {:ok, [_ | _] = vendors} ->
+        if Enum.all?(vendors, &(&1 in @coding_agents)) and Enum.uniq(vendors) == vendors,
+          do: {:ok, vendors},
+          else: invalid_params("vendors")
+
+      {:ok, _not_a_list} ->
+        invalid_params("vendors")
     end
   end
 

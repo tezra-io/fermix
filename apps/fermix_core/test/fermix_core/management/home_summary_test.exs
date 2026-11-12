@@ -1284,16 +1284,16 @@ defmodule FermixCore.Management.HomeSummaryTest do
                "Move Fermix back to this Mac now? Your server stays until you delete it."
 
       # The costs are named only where the home's settings have them (EC2
-      # test finding 15).
+      # test finding 15). Coding agents are none: this Mac kept its own
+      # approval (M98 D5).
       costly =
         HomeSummary.summary(
-          returning(back("enrolled"), stays_here: [], return_costs: [:coding_agents, :telegram])
+          returning(back("enrolled"), stays_here: [], return_costs: [:telegram])
         )
 
       assert costly["action"]["confirm"] ==
-               "Move Fermix back to this Mac now? Coding agents ask for your approval again. " <>
-                 "Messages sent to Telegram while it moves wait until it is done. Your server " <>
-                 "stays until you delete it."
+               "Move Fermix back to this Mac now? Messages sent to Telegram while it moves " <>
+                 "wait until it is done. Your server stays until you delete it."
 
       telegram = HomeSummary.summary(returning(back("enrolled"), return_costs: [:telegram]))
 

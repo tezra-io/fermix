@@ -5708,11 +5708,30 @@ defmodule FermixWebWeb.SetupLiveTest do
       html = view |> element("button[phx-value-tab=\"coding\"]") |> render_click()
 
       assert html =~ "Coding agents"
-      assert html =~ "codex 1.0.0"
-      assert html =~ "authenticated"
+      assert html =~ "codex 1.0.0 · sign-in found"
       assert html =~ "not installed"
       # The cloud rail is off this release — a static note, no cloud control.
       assert html =~ "Cloud runs (Codex cloud) are off in this release"
+    end
+
+    # M98 D10: an agent whose last run failed to sign in reads signed out, in
+    # the words doctor uses, until a check sees its sign-in file change.
+    test "coding pane names an agent whose last run failed to sign in", %{conn: conn} do
+      prior = Application.get_env(:fermix_web, :harness_sign_in_marks)
+      on_exit(fn -> restore_env(:fermix_web, :harness_sign_in_marks, prior) end)
+
+      Application.put_env(:fermix_web, :harness_detector, fn ->
+        harness_detections(true, false)
+      end)
+
+      Application.put_env(:fermix_web, :harness_sign_in_marks, fn ->
+        {:ok, %{"codex" => %{run_id: "hr_0a1b2c3d4e5f"}}}
+      end)
+
+      {:ok, view, _html} = live(conn, "/setup")
+      html = view |> element("button[phx-value-tab=\"coding\"]") |> render_click()
+
+      assert html =~ "codex 1.0.0 · signed out (a run failed to sign in)"
     end
 
     test "coding pane shows the CLI dropdown when both CLIs are detected", %{
@@ -5792,7 +5811,7 @@ defmodule FermixWebWeb.SetupLiveTest do
       assert html =~ "Off. Approve before the first coding run."
     end
 
-    test "toggling harness consent on persists approved=true to config", %{
+    test "toggling harness consent on persists approved=true to this computer's machine file", %{
       conn: conn,
       tmp_home: tmp_home
     } do
@@ -5815,8 +5834,9 @@ defmodule FermixWebWeb.SetupLiveTest do
       # cached) runtime prompt, so granting it offers the restart (design §23.4).
       assert html =~ "Apply &amp; restart"
 
-      contents = File.read!(Path.join(tmp_home, "config.toml"))
-      assert contents =~ "approved = true"
+      # The approval is this computer's own (M98 D5).
+      assert File.read!(Path.join(tmp_home, "machine.toml")) =~ "approved = true"
+      refute File.read!(Path.join(tmp_home, "config.toml")) =~ "approved"
     end
   end
 

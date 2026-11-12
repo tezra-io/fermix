@@ -28,6 +28,7 @@ defmodule FermixCore.Management.Settings do
   alias FermixCore.Management.Settings.Assistant
   alias FermixCore.Management.Settings.Browser
   alias FermixCore.Management.Settings.Channels
+  alias FermixCore.Management.Settings.CodingMachine
   alias FermixCore.Management.Settings.Cues, as: CuesSection
   alias FermixCore.Management.Settings.Mobile
   alias FermixCore.Management.Settings.Providers
@@ -56,6 +57,9 @@ defmodule FermixCore.Management.Settings do
     CuesSection,
     Voice,
     Accessories,
+    # Before Tools: both apps draw the coding pane's sections in this order,
+    # this machine's own approval first, then the home's preferred tool.
+    CodingMachine,
     Tools,
     Browser,
     Secrets,
@@ -577,18 +581,21 @@ defmodule FermixCore.Management.Settings do
   end
 
   # Channels and Accessories have sections that exist on one platform only,
-  # and This computer's exists on a linked computer only, so they are handed
+  # This computer's exists on a linked computer only, and this machine's
+  # coding approval only off one (named for the host), so they are handed
   # the options that name the host; every other family is the same everywhere.
   defp family(section, opts), do: Enum.find(@families, &family_owns?(&1, section, opts))
 
   defp family_owns?(Channels, section, opts), do: Channels.owns?(section, opts)
   defp family_owns?(Accessories, section, opts), do: Accessories.owns?(section, opts)
   defp family_owns?(ThisComputer, section, opts), do: ThisComputer.owns?(section, opts)
+  defp family_owns?(CodingMachine, section, opts), do: CodingMachine.owns?(section, opts)
   defp family_owns?(module, section, _opts), do: module.owns?(section)
 
   defp family_sections(Channels, opts), do: Channels.sections(opts)
   defp family_sections(Accessories, opts), do: Accessories.sections(opts)
   defp family_sections(ThisComputer, opts), do: ThisComputer.sections(opts)
+  defp family_sections(CodingMachine, opts), do: CodingMachine.sections(opts)
   defp family_sections(module, _opts), do: module.sections()
 
   # The search section offers place search's backends as this build can run
@@ -596,6 +603,9 @@ defmodule FermixCore.Management.Settings do
   # and the history promise's facts (`ComputerHistory.Promise.facts/2`) a test names.
   defp family_rows(Tools, section, snapshot, opts),
     do: Tools.rows(section, snapshot, Keyword.take(opts, [:host, :promise]))
+
+  defp family_rows(CodingMachine, section, snapshot, opts),
+    do: CodingMachine.rows(section, snapshot, Keyword.take(opts, [:macos?]))
 
   defp family_rows(module, section, snapshot, _opts), do: module.rows(section, snapshot)
 end

@@ -34,6 +34,7 @@ defmodule Fermix.CLI.Doctor.Checks do
   alias FermixCore.Harness.Config, as: HarnessConfig
   alias FermixCore.Harness.Identity
   alias FermixCore.Harness.Ledger, as: HarnessLedger
+  alias FermixCore.Harness.SignIn, as: HarnessSignIn
   alias FermixCore.Harness.Vendors, as: HarnessVendors
   alias FermixCore.Home.DesktopLink
   alias FermixCore.Home.Epoch
@@ -2662,9 +2663,16 @@ defmodule Fermix.CLI.Doctor.Checks do
   (active/pending/dead-letter), and artifact quota usage. Returns `nil` to skip
   when the harness is disabled AND no vendor CLI is present.
 
-  Vendor detection, the capability registry, run counts, and the quota probe are
-  all injectable (`:detections`, `:registry`, `:counts`, `:quota`,
-  `:harness_enabled`) so the check unit-tests hermetically. Run counts and the
+  Each vendor's sign-in reads in the owner's words (`Harness.SignIn.word/1`):
+  "sign-in found" (a file Fermix never asks the vendor about), "sign-in not
+  verified", "not signed in", or "signed out (a run failed to sign in)" from
+  this machine's coding store, read on a connection of its own so a tree-less
+  CLI reads it too; the last two warn.
+
+  Vendor detection, the sign-in marks, the capability registry, run counts, and
+  the quota probe are all injectable (`:detections`, `:sign_in_marks`,
+  `:registry`, `:counts`, `:quota`, `:harness_enabled`) so the check unit-tests
+  hermetically. Run counts and the
   registry lookup degrade to a skip when the memory repo / registry are
   unavailable (the tree-less CLI), never a crash.
   """
@@ -2677,10 +2685,13 @@ defmodule Fermix.CLI.Doctor.Checks do
 
     cond do
       not enabled? and not any_vendor_available?(detections) -> nil
-      enabled? -> enabled_harness_result(detections, opts)
-      true -> disabled_harness_result(detections)
+      enabled? -> enabled_harness_result(detections, harness_marks(opts), opts)
+      true -> disabled_harness_result(detections, harness_marks(opts))
     end
   end
+
+  defp harness_marks(opts),
+    do: Keyword.get_lazy(opts, :sign_in_marks, fn -> HarnessSignIn.marks([]) end)
 
   @doc """
   Computer history (MILESTONE_32 §15.3): this machine's opt-in row, where it
@@ -2814,14 +2825,15 @@ defmodule Fermix.CLI.Doctor.Checks do
   # Enabled: the feature is on, so no CLI at all is a real fault (fail); an
   # installed-but-unauthenticated vendor, a boot/PATH mismatch, dead-lettered
   # deliveries, or a breached quota each warn; otherwise ok.
-  defp enabled_harness_result(detections, opts) do
+  defp enabled_harness_result(detections, marks, opts) do
     counts = harness_counts(opts)
     quota = harness_quota(opts)
     mismatch = harness_mismatch(detections, opts)
 
     detail =
       [
-        harness_vendor_detail(detections),
+        harness_vendor_detail(detections, marks),
+        harness_marks_detail(marks),
         harness_consent_detail(opts),
         harness_counts_detail(counts),
         harness_quota_detail(quota),
@@ -2832,24 +2844,25 @@ defmodule Fermix.CLI.Doctor.Checks do
 
     %{
       name: "coding harness",
-      status: harness_status(detections, counts, quota, mismatch),
+      status: harness_status({detections, marks}, counts, quota, mismatch),
       detail: detail
     }
   end
 
   # Disabled but a CLI is present (else `harness/1` skipped): a valid config, not
   # a fault — report the detected vendors and how to turn the feature on.
-  defp disabled_harness_result(detections) do
+  defp disabled_harness_result(detections, marks) do
     ok(
       "coding harness",
-      "disabled in config; #{harness_vendor_detail(detections)} — enable [fermix_core.harness] to use"
+      "disabled in config; #{harness_vendor_detail(detections, marks)} — enable " <>
+        "[fermix_core.harness] to use"
     )
   end
 
-  defp harness_status(detections, counts, quota, mismatch) do
+  defp harness_status(sign_ins, counts, quota, mismatch) do
     cond do
       harness_quota_fail?(quota) -> :fail
-      harness_warn?(detections, counts, quota, mismatch) -> :warn
+      harness_warn?(sign_ins, counts, quota, mismatch) -> :warn
       true -> :ok
     end
   end
@@ -2862,17 +2875,23 @@ defmodule Fermix.CLI.Doctor.Checks do
   defp harness_quota_fail?({:error, {:artifact_quota, %{kind: :quota_exceeded}}}), do: true
   defp harness_quota_fail?(_other), do: false
 
-  defp harness_warn?(detections, counts, quota, mismatch) do
+  defp harness_warn?({detections, marks}, counts, quota, mismatch) do
     not any_vendor_available?(detections) or mismatch != nil or
       harness_quota_warn?(quota) or harness_dead_letter?(counts) or
-      harness_unauthenticated?(detections)
+      harness_not_signed_in?(detections, marks) or match?({:error, _reason}, marks)
   end
 
-  defp harness_unauthenticated?(detections) do
+  # Installed and either with no sign-in at all or signed out by a failed run.
+  defp harness_not_signed_in?(detections, marks) do
     Enum.any?(detections, fn {_vendor, detection} ->
-      detection.available? and detection.auth == :absent
+      detection.available? and harness_sign_in(detection, marks) in [:not_signed_in, :signed_out]
     end)
   end
+
+  defp harness_sign_in(%{vendor: vendor, auth: auth}, {:ok, marks}),
+    do: HarnessSignIn.view(auth, Map.get(marks, vendor))
+
+  defp harness_sign_in(%{auth: auth}, {:error, _reason}), do: HarnessSignIn.view(auth, nil)
 
   defp harness_dead_letter?(:skipped), do: false
   defp harness_dead_letter?(%{dead_letter: dead_letter}), do: dead_letter > 0
@@ -2890,23 +2909,26 @@ defmodule Fermix.CLI.Doctor.Checks do
     if approved?, do: "consent: approved", else: "consent: not yet approved"
   end
 
-  # Per-vendor one-liner: name + version (or "not installed") + auth word.
-  defp harness_vendor_detail(detections) do
+  # Per-vendor one-liner: name + version (or "not installed") + sign-in word.
+  defp harness_vendor_detail(detections, marks) do
     detections
     |> Map.values()
     |> Enum.sort_by(& &1.vendor)
-    |> Enum.map_join(", ", &harness_vendor_line/1)
+    |> Enum.map_join(", ", &harness_vendor_line(&1, marks))
   end
 
-  defp harness_vendor_line(%{vendor: vendor, available?: false}), do: "#{vendor} not installed"
+  defp harness_vendor_line(%{vendor: vendor, available?: false}, _marks),
+    do: "#{vendor} not installed"
 
-  defp harness_vendor_line(%{vendor: vendor, version: version, auth: auth}) do
-    "#{vendor} #{version || "installed"} (#{harness_auth_word(auth)})"
+  defp harness_vendor_line(%{vendor: vendor, version: version} = detection, marks) do
+    "#{vendor} #{version || "installed"} " <>
+      "(#{HarnessSignIn.word(harness_sign_in(detection, marks))})"
   end
 
-  defp harness_auth_word(:authenticated), do: "authenticated"
-  defp harness_auth_word(:unverified), do: "auth unverified"
-  defp harness_auth_word(:absent), do: "not authenticated"
+  # This machine's coding store could not be read: the marks are unknown, so
+  # the row says so rather than read every agent as never marked.
+  defp harness_marks_detail({:ok, _marks}), do: nil
+  defp harness_marks_detail({:error, reason}), do: "sign-in marks unreadable (#{inspect(reason)})"
 
   # Boot registry (which run tools seeded at boot) vs current-PATH detection: a
   # disagreement means a CLI was installed/removed since boot and a restart syncs

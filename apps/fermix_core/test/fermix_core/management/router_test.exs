@@ -2,6 +2,7 @@ defmodule FermixCore.Management.RouterTest do
   use ExUnit.Case, async: true
 
   alias FermixCore.BuildInfo
+  alias FermixCore.Harness.MachineStore
   alias FermixCore.Management.Doctor
   alias FermixCore.Management.Jobs
   alias FermixCore.Management.Lifecycle
@@ -1282,6 +1283,79 @@ defmodule FermixCore.Management.RouterTest do
     test "a protocol-1 session is told the methods need version 2" do
       assert {:error, :method_not_found, %{"method" => "mcp.servers.list", "requires" => 2}} =
                Router.route(request("mcp.servers.list"))
+    end
+  end
+
+  # M98 G1b-3: Check again, the owner's word that an agent is signed in again.
+  describe "coding_agents.check" do
+    setup do
+      home = FermixTestSupport.SafeRm.make_tmp_dir!("router-coding-agents")
+      on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(home) end)
+
+      path = MachineStore.path(home)
+      store = start_supervised!({MachineStore, name: nil, path: path, open?: true})
+
+      for vendor <- ~w(codex claude) do
+        mark = %{marked_at: ~U[2026-03-14 09:26:53Z], run_id: "hr_0a1b2c3d4e5f"}
+        :ok = MachineStore.put_mark(vendor, mark, server: store)
+      end
+
+      detections =
+        Map.new(~w(codex claude), fn vendor ->
+          {vendor, %{vendor: vendor, available?: true, version: "9.9", auth: :authenticated}}
+        end)
+
+      operation_opts = [
+        probes: [
+          harness_vendors: fn -> detections end,
+          machine: fn -> "this computer" end,
+          engine_role: fn -> :primary end
+        ],
+        sign_in: [path: path, vendor_opts: [codex_home: home, claude_config_dir: home]]
+      ]
+
+      %{store: store, operation_opts: operation_opts}
+    end
+
+    test "clears every agent's mark by default and answers the agents' row", ctx do
+      assert {:ok, %{"results" => [row]}} =
+               Router.route(v2("coding_agents.check"), operation_opts: ctx.operation_opts)
+
+      assert row["target"] == "harness_vendors"
+      assert Enum.all?(row["vendors"], &(&1["signed_out"] == false))
+      assert MachineStore.marks(server: ctx.store) == {:ok, %{}}
+    end
+
+    test "clears only the agents it names", ctx do
+      params = %{"vendors" => ["codex"]}
+
+      assert {:ok, %{"results" => [_row]}} =
+               Router.route(v2("coding_agents.check", params), operation_opts: ctx.operation_opts)
+
+      assert {:ok, marks} = MachineStore.marks(server: ctx.store)
+      assert Map.keys(marks) == ["claude"]
+    end
+
+    test "an agent it does not know, an empty list or another field is refused by field", ctx do
+      for params <- [%{"vendors" => ["gemini"]}, %{"vendors" => []}, %{"vendors" => "codex"}] do
+        assert {:error, :invalid_params, %{"field" => "vendors"}} =
+                 Router.route(v2("coding_agents.check", params),
+                   operation_opts: ctx.operation_opts
+                 )
+      end
+
+      assert {:error, :invalid_params, %{"field" => "extra"}} =
+               Router.route(v2("coding_agents.check", %{"extra" => 1}),
+                 operation_opts: ctx.operation_opts
+               )
+
+      assert {:ok, %{"codex" => _codex, "claude" => _claude}} =
+               MachineStore.marks(server: ctx.store)
+    end
+
+    test "a protocol-1 session is told it needs version 2" do
+      assert {:error, :method_not_found, %{"method" => "coding_agents.check", "requires" => 2}} =
+               Router.route(request("coding_agents.check"))
     end
   end
 

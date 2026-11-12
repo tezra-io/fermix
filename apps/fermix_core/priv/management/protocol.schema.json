@@ -151,6 +151,7 @@
     "diagnostics.build": 1,
     "setup.state.get": 2,
     "setup.detect": 2,
+    "coding_agents.check": 2,
     "settings.sections": 2,
     "settings.get": 2,
     "settings.apply": 2,
@@ -290,6 +291,7 @@
             "diagnostics.build",
             "setup.state.get",
             "setup.detect",
+            "coding_agents.check",
             "settings.sections",
             "settings.get",
             "settings.apply",
@@ -515,6 +517,13 @@
             "properties": { "method": { "const": "setup.detect" } }
           },
           "then": { "properties": { "params": { "$ref": "#/$defs/setup_detect_params" } } }
+        },
+        {
+          "if": {
+            "required": ["method"],
+            "properties": { "method": { "const": "coding_agents.check" } }
+          },
+          "then": { "properties": { "params": { "$ref": "#/$defs/coding_agents_check_params" } } }
         },
         {
           "if": {
@@ -1367,6 +1376,7 @@
         { "$ref": "#/$defs/secret_set_result" },
         { "$ref": "#/$defs/secret_clear_result" },
         { "$ref": "#/$defs/setup_detect_result" },
+        { "$ref": "#/$defs/coding_agents_check_result" },
         { "$ref": "#/$defs/providers_set_primary_result" },
         { "$ref": "#/$defs/providers_models_list_result" },
         { "$ref": "#/$defs/providers_probe_start_result" },
@@ -2585,7 +2595,8 @@
         "vendor": { "enum": ["claude", "codex"] },
         "installed": { "type": "boolean" },
         "version": { "type": ["string", "null"], "maxLength": 512 },
-        "auth": { "enum": ["authenticated", "unverified", "absent"] }
+        "auth": { "enum": ["authenticated", "unverified", "absent"] },
+        "signed_out": { "type": "boolean" }
       }
     },
     "detectResult": {
@@ -2628,6 +2639,32 @@
       "additionalProperties": false,
       "properties": {
         "results": { "type": "array", "maxItems": 6, "items": { "$ref": "#/$defs/detectResult" } }
+      }
+    },
+    "coding_agents_check_params": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "vendors": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 2,
+          "uniqueItems": true,
+          "items": { "enum": ["claude", "codex"] }
+        }
+      }
+    },
+    "coding_agents_check_result": {
+      "type": "object",
+      "required": ["results"],
+      "additionalProperties": false,
+      "properties": {
+        "results": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 1,
+          "items": { "$ref": "#/$defs/detectResult" }
+        }
       }
     },
     "providers_set_primary_params": {

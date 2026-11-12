@@ -11,8 +11,10 @@ defmodule FermixCore.Harness.ManagerTest do
   alias FermixCore.Harness.Delivery
   alias FermixCore.Harness.DeliveryWorker
   alias FermixCore.Harness.Ledger
+  alias FermixCore.Harness.MachineStore
   alias FermixCore.Harness.Manager
   alias FermixCore.Harness.RunSupervisor
+  alias FermixCore.Harness.SignIn
   alias FermixCore.Harness.VendorConfig
   alias FermixCore.Memory.Repo
   alias FermixCore.Timeouts
@@ -23,6 +25,10 @@ defmodule FermixCore.Harness.ManagerTest do
   @codex_session "019f7d3f-3f21-7482-8c91-749fb4713417"
   @poll_max 200
   @poll_ms 20
+  # A run's terminal delivery: a real process group, under load.
+  @arrival_ms 10_000
+  @stat %{"size" => 412, "mtime" => 1_773_480_413, "inode" => 90_211}
+  @stat_after %{"size" => 418, "mtime" => 1_773_481_002, "inode" => 90_377}
 
   # Delivery seam: a channel adapter that records every send to the sink pid the
   # test stashes in app-env (safe under `async: false` — no test runs concurrently
@@ -845,6 +851,73 @@ defmodule FermixCore.Harness.ManagerTest do
 
   # --- Boot reconciliation ------------------------------------------------
 
+  # M98 D10: the Manager, the single terminal writer, marks an agent whose run
+  # failed to sign in, after the outcome's hand-off, and clears the mark when a
+  # run of that agent completes.
+  describe "sign-in marks" do
+    setup ctx do
+      path = MachineStore.path(ctx.home)
+      store = start_supervised!({MachineStore, name: nil, path: path, open?: true})
+
+      sign_in = [
+        store: store,
+        path: path,
+        vendor_opts: [codex_home: Path.join(ctx.home, "codex-home")],
+        stat: fn _file -> {:ok, @stat} end,
+        now: fn -> ~U[2026-03-14 09:26:53Z] end
+      ]
+
+      %{store: store, sign_in: sign_in}
+    end
+
+    test "a run that failed to sign in is marked after its outcome is handed off", ctx do
+      manager = start_manager(ctx, sign_in: ctx.sign_in)
+
+      stub =
+        FakeVendorCli.write!(ctx.stub_dir,
+          lines: fixture_lines("codex_0_166_0_refresh_failed.jsonl"),
+          exit_code: 1
+        )
+
+      {:ok, run_id} = Manager.start_run(chat_request(ctx, stub), manager)
+
+      assert row = await_status(ctx.repo, run_id, "failed")
+      assert row.reason == "signed_out"
+
+      assert_receive {:delivered, "123", text}, @arrival_ms
+      assert text =~ "Please log out and sign in again"
+      assert text =~ "Codex is signed out on this"
+
+      _barrier = :sys.get_state(manager)
+      assert {:ok, %{"codex" => %{run_id: ^run_id}}} = MachineStore.marks(server: ctx.store)
+    end
+
+    test "a run that completes clears its agent's mark", ctx do
+      :ok = SignIn.record_outcome(signed_out_row("hr_0a1b2c3d4e5f"), ctx.sign_in)
+      manager = start_manager(ctx, sign_in: ctx.sign_in)
+
+      {:ok, run_id} = Manager.start_run(chat_request(ctx, completing_stub(ctx)), manager)
+
+      assert await_status(ctx.repo, run_id, "completed")
+      assert_receive {:delivered, "123", _text}, @arrival_ms
+      _barrier = :sys.get_state(manager)
+      assert MachineStore.marks(server: ctx.store) == {:ok, %{}}
+    end
+
+    test "at boot a mark whose sign-in file changed is deleted", ctx do
+      codex_home = ctx.sign_in[:vendor_opts][:codex_home]
+      File.mkdir_p!(codex_home)
+      File.write!(Path.join(codex_home, "auth.json"), "{}")
+      :ok = SignIn.record_outcome(signed_out_row("hr_0a1b2c3d4e5f"), ctx.sign_in)
+
+      signed_in_again = Keyword.put(ctx.sign_in, :stat, fn _file -> {:ok, @stat_after} end)
+      manager = start_manager(ctx, timer_enabled: true, sign_in: signed_in_again)
+      _barrier = :sys.get_state(manager)
+
+      assert MachineStore.marks(server: ctx.store) == {:ok, %{}}
+    end
+  end
+
   describe "boot reconciliation" do
     test "finalizes interrupted with resume guidance and delivers", ctx do
       run_id = seed_active_run(ctx.repo, ctx.workspace)
@@ -1204,6 +1277,9 @@ defmodule FermixCore.Harness.ManagerTest do
       exit_code: 1
     )
   end
+
+  defp signed_out_row(run_id),
+    do: %{id: run_id, vendor: "codex", status: "failed", reason: "signed_out"}
 
   defp hanging_stub(ctx) do
     FakeVendorCli.write!(ctx.stub_dir,

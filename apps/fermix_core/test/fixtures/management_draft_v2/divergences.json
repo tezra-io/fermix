@@ -943,6 +943,18 @@
       "why": "M72 section 14 makes place search's backend a choice (Apple Maps in the Fermix Mac app, Brave in the Homebrew and Linux builds) after the draft was written, and publishes it in this section after the web backend. It is the ordinary choice row with the options this host can run, so the app draws it through the descriptor form with no Swift work; the Brave key row now stands only while web or place search uses Brave."
     },
     {
+      "method": "settings.get:harness",
+      "field": "rows:harness_approved",
+      "kind": "draft_only",
+      "why": "M98 D5: whether coding agents may run is each machine's own setting, in its machine.toml, so the consent row left the home's harness section for harness_machine. The harness section keeps the preferred tool. The app's coding pane draws every section of the coding pane and specialises the consent row by its key, so it follows with no Swift change; only a test that looks for the row in harness moves."
+    },
+    {
+      "method": "settings.get:harness_machine",
+      "field": "rows:harness_approved",
+      "kind": "engine_only",
+      "why": "M98 D5: the section the draft predates, titled This Mac or This computer under the coding pane, before harness, published wherever coding agents run and never on a computer whose home is on its server. Its one row is the consent toggle the draft drew in harness, labelled for the machine that answers."
+    },
+    {
       "method": "plugins.list",
       "field": "oauth_clients[].client_id",
       "kind": "engine_only",
@@ -3605,6 +3617,36 @@
       "field": "readiness.failures[].sentence",
       "kind": "engine_only",
       "why": "M97: a readiness failure carries the engine's own sentence where it has one (the iMessage rows, naming the Mac that carries Messages), null elsewhere. Optional and additive: an app built against the draft keeps its own words."
+    },
+    {
+      "method": "(schema)",
+      "field": "methods:coding_agents.check",
+      "kind": "engine_only",
+      "why": "M98: coding_agents.check is Check again for this computer's coding agents, the owner's word that they signed in again: it clears their sign-in marks and answers the harness_vendors row. Minimum version 2 and additive: an app calls it only when hello lists it, and calls setup.detect otherwise, as an app built against the draft does."
+    },
+    {
+      "method": "(schema)",
+      "field": "minimum_versions:coding_agents.check=2",
+      "kind": "engine_only",
+      "why": "M98: coding_agents.check is published with minimum version 2 in the whole-table minimum versions, as every v2 method is. The draft predates it, so its table has no entry for it; the addition is additive and needs no protocol bump."
+    },
+    {
+      "method": "hello",
+      "field": "capabilities.minimum_versions.coding_agents.check",
+      "kind": "engine_only",
+      "why": "M98: hello's minimum-version table carries coding_agents.check, the table being whole. A client built against the draft never calls the method, so the entry changes nothing for it."
+    },
+    {
+      "method": "coding_agents.check",
+      "field": "params:vendors",
+      "kind": "engine_only",
+      "why": "M98: the optional list of agents whose sign-in marks Check again clears, both when absent. The draft has no coding_agents.check at all."
+    },
+    {
+      "method": "setup.detect",
+      "field": "results[].vendors[].signed_out",
+      "kind": "engine_only",
+      "why": "M98 D10: an agent whose last run on this computer failed to sign in is marked signed out until a run of it works, its sign-in file changes or Check again is pressed. A new optional boolean beside auth, never a new auth value, because the app decodes auth as a closed set; an app built against the draft keeps drawing auth alone."
     }
   ]
 }

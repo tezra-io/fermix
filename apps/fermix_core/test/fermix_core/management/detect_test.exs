@@ -1,6 +1,7 @@
 defmodule FermixCore.Management.DetectTest do
   use ExUnit.Case, async: true
 
+  alias FermixCore.Harness.MachineStore
   alias FermixCore.Management.Detect
 
   defp probes do
@@ -9,7 +10,10 @@ defmodule FermixCore.Management.DetectTest do
       claude_code: fn -> true end,
       codex_cli: fn -> false end,
       ollama: fn -> {:error, :econnrefused} end,
-      harness_vendors: fn -> vendors(true) end
+      harness_vendors: fn -> vendors(true) end,
+      sign_in_marks: fn -> {:ok, %{}} end,
+      machine: fn -> "this computer" end,
+      engine_role: fn -> :primary end
     ] ++ meetbot_probes(true, true, true)
   end
 
@@ -119,16 +123,109 @@ defmodule FermixCore.Management.DetectTest do
     assert row["guidance"] == nil
 
     assert row["vendors"] == [
-             %{"vendor" => "claude", "installed" => false, "version" => nil, "auth" => "absent"},
+             %{
+               "vendor" => "claude",
+               "installed" => false,
+               "version" => nil,
+               "auth" => "absent",
+               "signed_out" => false
+             },
              %{
                "vendor" => "codex",
                "installed" => true,
                "version" => "codex 1.2",
-               "auth" => "authenticated"
+               "auth" => "authenticated",
+               "signed_out" => false
              }
            ]
 
     refute Jason.encode!(result) =~ "/private/"
+  end
+
+  # M98 D10: a run that failed to sign in marked its agent. `auth` keeps its
+  # three published values (released apps decode it as a closed set); the mark
+  # is its own optional fact beside it, with a sentence the apps already draw.
+  describe "a sign-in mark" do
+    test "a marked agent reads signed out, with the sentence that says what clears it" do
+      probes = marked_probes({:ok, %{"codex" => %{run_id: "hr_0a1b2c3d4e5f"}}})
+
+      assert %{"results" => [row]} = Detect.run(["harness_vendors"], probes: probes)
+
+      assert [%{"vendor" => "claude"} = claude, %{"vendor" => "codex"} = codex] = row["vendors"]
+      assert codex["signed_out"] == true
+      assert codex["auth"] == "authenticated"
+      assert claude["signed_out"] == false
+
+      assert row["guidance"] ==
+               "Codex failed to sign in on its last run on this Mac. Sign in again (run codex " <>
+                 "login in a terminal); the next run that works clears this."
+    end
+
+    test "marks that cannot be read leave the fact out rather than guess it" do
+      probes = marked_probes({:error, :enotdir})
+
+      assert %{"results" => [row]} = Detect.run(["harness_vendors"], probes: probes)
+      for vendor <- row["vendors"], do: refute(Map.has_key?(vendor, "signed_out"))
+      assert row["guidance"] == nil
+    end
+
+    test "a computer whose home is on a server says whose agents these are" do
+      probes = Keyword.put(marked_probes({:ok, %{}}), :engine_role, fn -> :device end)
+
+      assert %{"results" => [row]} = Detect.run(["harness_vendors"], probes: probes)
+
+      assert row["guidance"] ==
+               "These are this Mac's coding agents. While your home is on your server, " <>
+                 "Fermix runs coding agents there, approved and signed in there."
+    end
+  end
+
+  # M98 G1b-3: the owner pressed Check again, their word that they signed in:
+  # the named agents' marks are cleared in this machine's store, and the answer
+  # is this machine's agents read again.
+  describe "check_agents/2" do
+    setup do
+      home = FermixTestSupport.SafeRm.make_tmp_dir!("detect-check-agents")
+      on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(home) end)
+
+      path = MachineStore.path(home)
+      store = start_supervised!({MachineStore, name: nil, path: path, open?: true})
+
+      for {vendor, run_id} <- [{"codex", "hr_0a1b2c3d4e5f"}, {"claude", "hr_1234abcd5678"}] do
+        mark = %{marked_at: ~U[2026-03-14 09:26:53Z], run_id: run_id}
+        :ok = MachineStore.put_mark(vendor, mark, server: store)
+      end
+
+      opts = [
+        probes: Keyword.take(marked_probes(nil), [:harness_vendors, :machine, :engine_role]),
+        sign_in: [path: path, vendor_opts: [codex_home: home, claude_config_dir: home]]
+      ]
+
+      %{store: store, opts: opts}
+    end
+
+    test "clears the named agents' marks and answers the agents' row", ctx do
+      assert {:ok, %{"results" => [row]}} = Detect.check_agents(["claude"], ctx.opts)
+
+      assert row["target"] == "harness_vendors"
+      assert [%{"vendor" => "claude"} = claude, %{"vendor" => "codex"} = codex] = row["vendors"]
+      assert claude["signed_out"] == false
+      assert codex["signed_out"] == true
+      assert {:ok, marks} = MachineStore.marks(server: ctx.store)
+      assert Map.keys(marks) == ["codex"]
+    end
+
+    test "a store that cannot be read is refused with a sentence, nothing cleared", ctx do
+      blocked = Path.join(ctx.opts[:sign_in][:path], "not-a-folder/coding.db")
+      opts = put_in(ctx.opts, [:sign_in, :path], blocked)
+
+      assert {:error, {:unavailable, "coding_agents", sentence}} =
+               Detect.check_agents(["codex"], opts)
+
+      assert sentence =~ "sign-in"
+      assert {:ok, marks} = MachineStore.marks(server: ctx.store)
+      assert map_size(marks) == 2
+    end
   end
 
   test "no coding CLI carries installation guidance and preserves unverified auth" do
@@ -145,6 +242,20 @@ defmodule FermixCore.Management.DetectTest do
     assert hd(row["vendors"])["auth"] == "unverified"
   end
 
+  defp marked_probes(marks) do
+    detections = %{
+      "claude" => %{vendor: "claude", available?: true, version: "2.1.9", auth: :unverified},
+      "codex" => %{vendor: "codex", available?: true, version: "codex 0.9", auth: :authenticated}
+    }
+
+    [
+      harness_vendors: fn -> detections end,
+      sign_in_marks: fn -> marks end,
+      machine: fn -> "this Mac" end,
+      engine_role: fn -> :primary end
+    ]
+  end
+
   defp vendors(installed) do
     Map.new(["claude", "codex"], fn vendor ->
       {vendor, %{vendor: vendor, available?: installed, version: nil, auth: :absent}}
@@ -153,7 +264,13 @@ defmodule FermixCore.Management.DetectTest do
 
   defp vendor_rows do
     Enum.map(["claude", "codex"], fn vendor ->
-      %{"vendor" => vendor, "installed" => true, "version" => nil, "auth" => "absent"}
+      %{
+        "vendor" => vendor,
+        "installed" => true,
+        "version" => nil,
+        "auth" => "absent",
+        "signed_out" => false
+      }
     end)
   end
 

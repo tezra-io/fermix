@@ -44,6 +44,13 @@ defmodule FermixCore.Harness.Adapters.ClaudeHeadless do
   # which is what `Harness.VendorConfig` covers.
   @vendor_config_denials ~w[Edit(.codex/**) Edit(**/.codex/**) Edit(.agents/**) Edit(**/.agents/**)]
 
+  # Claude Code's words on its terminal `result` event when it cannot sign in
+  # (M98 D10): "Not logged in · Please run /login", from the 2026-07-26
+  # incident (`Harness.Run`). They lead the vendor's own failure; a failed
+  # run's `result` can also be the model's final prose, which may mention them
+  # anywhere, so only a result that starts with them counts.
+  @signed_out_phrase "Not logged in"
+
   @known_params ~w(model effort permission_mode allowed_tools disallowed_tools
                    dangerously_skip_permissions append_system_prompt append_system_prompt_file
                    add_dirs max_turns json_schema resume continue bare)a
@@ -90,6 +97,11 @@ defmodule FermixCore.Harness.Adapters.ClaudeHeadless do
 
   def extract(%{"type" => "assistant"}), do: %{phase: "assistant"}
   def extract(_event), do: %{}
+
+  @impl true
+  @spec signed_out?(String.t()) :: boolean()
+  def signed_out?(text) when is_binary(text),
+    do: text |> String.trim_leading() |> String.starts_with?(@signed_out_phrase)
 
   @impl true
   @spec resume_hint(map()) :: String.t() | nil

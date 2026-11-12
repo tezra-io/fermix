@@ -44,6 +44,7 @@ defmodule FermixCore.Harness.Continuation do
 
   alias FermixCore.Capabilities.UntrustedContent
   alias FermixCore.Delivery.ChannelSend
+  alias FermixCore.Harness.SignIn
   alias FermixCore.Harness.VendorConfig
 
   @max_depth 3
@@ -152,13 +153,14 @@ defmodule FermixCore.Harness.Continuation do
   the harness Manager: a wedged or crashing re-ingest must not block it. Cap
   behavior is the honest one — a timeout/crash is an `{:error, _}` dispatch, so
   the row stays `pending` and the `DeliveryWorker` delivers the outcome as text.
+  `opts[:machine]` names this machine in a sign-in sentence (`notice_text/3`).
   """
   @spec dispatch(module(), map(), String.t() | nil, keyword()) :: :ok | {:error, term()}
   def dispatch(dispatcher, row, result_text, opts \\ [])
       when is_atom(dispatcher) and is_map(row) and is_list(opts) do
     case destination(row) do
       {:ok, platform, target} ->
-        notice = notice(row, result_text, platform, target)
+        notice = notice(row, result_text, platform, target, opts)
         timeout_ms = Keyword.get(opts, :timeout_ms, @dispatch_timeout_ms)
         ChannelSend.with_timeout(timeout_ms, fn -> dispatcher.dispatch(notice) end)
 
@@ -177,16 +179,20 @@ defmodule FermixCore.Harness.Continuation do
   @doc """
   The system-voiced notice text (pure, golden-tested): the run tag, the
   vendor/status/cwd line, the bounded outcome body inside the untrusted-content
-  frame, the files of auto-executing vendor config the run changed (in Fermix's
-  own voice, outside the frame), the launching request (client-owned origins
-  only, in a frame of its own), and the closing instruction.
+  frame, for a run that failed to sign in the sentence naming the agent and
+  this machine (`Harness.SignIn`, M98 D10), the files of auto-executing vendor
+  config the run changed (both in Fermix's own voice, outside the frame), the
+  launching request (client-owned origins only, in a frame of its own), and the
+  closing instruction. `opts[:machine]` names this machine; without it the
+  sign-in sentence reads it off this host.
   """
-  @spec notice_text(map(), String.t() | nil) :: String.t()
-  def notice_text(row, result_text) when is_map(row) do
+  @spec notice_text(map(), String.t() | nil, keyword()) :: String.t()
+  def notice_text(row, result_text, opts \\ []) when is_map(row) and is_list(opts) do
     [
       "[coding run #{Map.get(row, :id)} finished]",
       status_line(row),
       body(row, result_text),
+      SignIn.run_note(row, opts),
       vendor_config_note(row),
       launching_request(row),
       closing(row)
@@ -240,7 +246,7 @@ defmodule FermixCore.Harness.Continuation do
 
   # --- Notice construction ------------------------------------------------
 
-  defp notice(row, result_text, platform, destination) do
+  defp notice(row, result_text, platform, destination, opts) do
     %{
       platform: platform,
       destination: destination,
@@ -251,7 +257,7 @@ defmodule FermixCore.Harness.Continuation do
       # continuation turn's env and cwd (§17.6(c)). `nil` on every framework-
       # delivered origin.
       client_origin: Map.get(row, :client_origin),
-      content: notice_text(row, result_text),
+      content: notice_text(row, result_text, opts),
       metadata: %{
         harness_continuation: true,
         harness_run_id: Map.get(row, :id),

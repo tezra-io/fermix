@@ -77,8 +77,9 @@ defmodule FermixCore.Home.Candidate.ReturnSettleTest do
     assert value(config, "fermix_core.memory", "enabled") == "true"
     assert value(config, "fermix_core.always_on", "enabled") == "true"
     assert value(config, "fermix_core.agent", "name") == ~s("Orchard")
-    # Every restore withdraws coding-agent consent.
-    assert value(config, "fermix_core.harness", "approved") == "false"
+    # Whether coding agents may run is this computer's own (M98 D5): the
+    # server's approval stays on the server, and this computer's own file says.
+    assert ConfigText.value(config, "fermix_core.harness", "approved") == :absent
     # Still a device until the move commits.
     assert File.read!(Path.join(ctx.mac, "config.toml")) =~ ~s(role = "device")
     assert {:ok, _marker} = Moved.read(ctx.mac)

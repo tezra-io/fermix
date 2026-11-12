@@ -50,15 +50,15 @@ defmodule FermixCore.Home.Archive do
   (`Home.Readable`, the one rule, which also says what a manifest with no
   format is).
 
-  **What does not travel as consent or history.** A restore withdraws
-  coding-harness consent, moves a keyring-mode home to the file store on a host
+  **What does not travel as consent or history.** A restore moves a
+  keyring-mode home to the file store on a host
   whose keyring did not answer `available` (`FermixCore.Home.Archive.RestoredConfig`;
   a probe that timed out counts as not answering, logged once), and names the installed plugins
   built for another OS or architecture (the manifest's `host`). Sandbox grants
   and the machine file (`machine.toml`, `FermixCore.Setup.MachineFile`) are
   device-local and never in the archive, and a home an earlier engine wrote,
   whose `config.toml` still held that machine's own settings, is restored
-  without them.
+  without them: coding-agent consent among them (M98 D5).
   """
 
   alias Exqlite.Sqlite3
@@ -107,7 +107,6 @@ defmodule FermixCore.Home.Archive do
           epoch: pos_integer(),
           rewritten: [String.t()],
           kept_paths: [String.t()],
-          harness_consent_reset: boolean(),
           secret_store_switched: boolean(),
           instance_role_dropped: boolean(),
           device_settings_dropped: [String.t()],

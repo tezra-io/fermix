@@ -20,6 +20,7 @@ defmodule FermixWebWeb.SetupLive do
   alias FermixCore.ComputerUse
   alias FermixCore.ComputerUse.SidecarInstaller
   alias FermixCore.Delivery.OwnerInbox
+  alias FermixCore.Harness.SignIn, as: HarnessSignIn
   alias FermixCore.Harness.Vendors, as: HarnessVendors
   alias FermixCore.Home.Role
   alias FermixCore.IMessage
@@ -2626,11 +2627,16 @@ defmodule FermixWebWeb.SetupLive do
   # `Vendors.detect_all/0` (which probes each CLI's `--version` in a subprocess and
   # reads `~/.codex`/`~/.claude`), while `config/test.exs` overrides it with an
   # inert stub so `mix test` never spawns a vendor CLI or touches host auth.
+  # Each vendor also carries its sign-in state (`Harness.SignIn`, M98 D10), from
+  # this machine's coding store read on a connection of its own.
   defp build_harness_setup(snapshot) do
+    marks = harness_sign_in_marks()
+
     detections =
       harness_detector().()
       |> Map.values()
       |> Enum.sort_by(& &1.vendor)
+      |> Enum.map(&Map.put(&1, :sign_in, HarnessSignIn.view(&1.auth, Map.get(marks, &1.vendor))))
 
     harness = get_fermix_core(snapshot, :harness)
 
@@ -2644,6 +2650,25 @@ defmodule FermixWebWeb.SetupLive do
 
   defp harness_detector do
     Application.get_env(:fermix_web, :harness_detector, &HarnessVendors.detect_all/0)
+  end
+
+  # Marks that cannot be read are logged and the page shows each sign-in as
+  # its file reads; doctor's coding harness row says the marks are unreadable.
+  defp harness_sign_in_marks do
+    reader =
+      Application.get_env(:fermix_web, :harness_sign_in_marks, fn -> HarnessSignIn.marks([]) end)
+
+    case reader.() do
+      {:ok, marks} ->
+        marks
+
+      {:error, reason} ->
+        Logger.warning(
+          "setup: coding agents' sign-in marks could not be read: #{inspect(reason)}"
+        )
+
+        %{}
+    end
   end
 
   defp build_personalization_form(snapshot) do

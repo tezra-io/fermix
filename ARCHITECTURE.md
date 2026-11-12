@@ -456,8 +456,8 @@ desktop waits for a forwarded answer (8 s; 60 s for `home.move.readiness` and
 on a primary boot and is the only writer of the first epoch. `Home.Archive`
 seals a stopped home (manifest, PBKDF2 key, AES-256-GCM) minus
 `Home.DeviceLocal`, the single list both export exclusion and restore refusal
-read; `Archive.RestoredConfig` rebases the old home path, resets coding-harness
-consent and moves a keyring-mode home to the file store on a keyring-less host
+read; `Archive.RestoredConfig` rebases the old home path, leaves the old
+machine's own settings out (coding-agent consent among them, M98 D5) and moves a keyring-mode home to the file store on a keyring-less host
 in the restored `config.toml` through `Archive.ConfigText`, `Archive.ScreenHistory`
 clears computer-history rows from the restored database, and a restore writes
 the archived epoch plus one. `Home.Snapshot` is the streaming twin of the
@@ -519,9 +519,9 @@ those of iMessage, voice calls and meetings the home has turned on
 review says this computer's voice stops and a phone's calls carry on at the
 server), a voice call in progress, which the move's restart ends,
 WhatsApp, and Slack without Socket Mode;
-coding agents asking for approval again, read from `config.toml`; the
+coding agents stopping on this computer, read from its `machine.toml`; the
 cutover gap, naming Telegram only where it is set up (`MoveReadiness.costs/1`
-gives a move back's confirm the same two facts); an engine nothing starts again, `Lifecycle.restarts_itself?/1`,
+gives a move back's confirm the Telegram fact); an engine nothing starts again, `Lifecycle.restarts_itself?/1`,
 which the setup page's Apply & restart reads too; the settings-only items
 alone are `MoveReadiness.summary_items/4`) and
 `Home.Move.start/5`, given the recipient `Snapshot.Recovery` answered,
@@ -1032,7 +1032,8 @@ The coding harness runs vendor coding CLIs as background runs: Codex
 run streams the CLI under a sanitized environment (`Harness.Env`,
 `Harness.Identity`) and spools output under `FERMIX_HOME/harness/runs/<id>`.
 Launch needs both `Authorization` (an attended owner turn or an allowlisted job)
-and `Consent` (`[fermix_core.harness] approved`). Outcomes come back through
+and `Consent` (`[fermix_core.harness] approved`, this computer's own in its
+`machine.toml`, with `codex_home` and `claude_config_dir`: M98 D5). Outcomes come back through
 `Continuation` or `Harness.Delivery`.
 
 Architecture Invariant: run state is ledgered before any OS process starts, and

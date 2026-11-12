@@ -29,7 +29,7 @@ scenarios:                     # required, >= 1
 ### `requires`
 
 What the suite needs the eval home to have been seeded with, beyond the defaults.
-Two values: `cues` — the home was seeded with `seed_capability_home.py
+Three values: `cues` — the home was seeded with `seed_capability_home.py
 --cues` and `seed_cues.exs` (`FERMIX_CAP_SEED_ARGS=--cues capability-daemon.sh up`
 does both), which turns cues on, writes the door, the local-push sources and the
 default filter model, and makes the watchers. It is opt-in because cues add
@@ -45,6 +45,27 @@ away computers to an Always On home (their device rows and records) for the
 `## Computers` prompt section. On a home seeded without it `run_eval.py` holds
 the suite's cases out as **NOT EVALUATED** (it reads
 `eval-fixtures/computers.json` in the home).
+
+`coding_signed_out` — the home was seeded with `seed_capability_home.py
+--coding-signed-out` (`FERMIX_CAP_SEED_ARGS=--coding-signed-out
+capability-daemon.sh up`), which puts a stub `claude` first on the daemon's PATH
+that answers `--version` and fails every run the way Claude Code fails one it
+cannot sign in for ("Not logged in · Please run /login", exit 1), so no vendor
+runs. On a home seeded without it `run_eval.py` holds the case out as **NOT
+EVALUATED** (it looks for the executable stub at `eval-bin/claude` in the home).
+With it every Claude Code run in the home fails, so a case that needs a real
+Claude Code is not run on that seed.
+
+A **case** may declare `requires:` too, from the same values, when its suite runs
+without that seed (`coding_harness.yaml`'s `claude_code_signed_out_run`): the
+case needs its suite's requirements and its own, and only that case is held out,
+its siblings still run. A held-out case is listed on the console before the run
+(`note: NOT EVALUATED — N case(s) …`, each `suite/case — reason`), never driven,
+never scored and never a failure; a run left with nothing to drive exits 3.
+`--dry-run` does not look at the home, so it plans the case either way. Only
+`run_eval.py` reads a case's `requires`: in a capability suite (`cap_*`) it is a
+load error, since `run_capability.py` holds a task out by its suite's `cues`
+alone.
 
 ### `abort_on_tool_error`
 
@@ -335,6 +356,9 @@ the `query` shorthand; multi-turn uses `turns`.
   follow. The measured duration gate uses the driver's end-to-end wall clock,
   not Opik's trace duration. Size it to the worst-case turn:
   ~180000 for normal turns, **~900000 for subagent/`/ultra` fan-out**.
+- `requires` (list, optional) — what the eval home must be seeded with for this
+  case beyond its suite's `requires`; see *`requires`* above. `run_eval.py`
+  only.
 
 The loader is allowlist-strict at the top/default/scenario/case/turn/expect
 levels: unknown keys fail validation. `soft`, `judge`, `cross_session`, and

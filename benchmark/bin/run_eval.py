@@ -264,33 +264,57 @@ def voice_cases_left_out(suites, args, profiles) -> int:
 
 
 def hold_out_unseeded(cfg, chosen) -> tuple[list, list]:
-    """Suites whose `requires:` the eval home was not seeded with (`cues`: --cues;
-    `computers`: --computers). They are NOT EVALUATED, named and left out of the
+    """Cases whose `requires:` (their suite's, then their own) the eval home was not
+    seeded with (`cues`: --cues; `computers`: --computers; `coding_signed_out`:
+    --coding-signed-out). They are NOT EVALUATED, named and left out of the
     run, never driven and never failures: the capability runner's rule for an unmet
     precondition, so a sweep over an unseeded home reports the gap instead of a
-    suite of zeros."""
+    suite of zeros. A case's sibling that needs no seed still runs."""
     home = cfg.daemon.fermix_home
-    problems = {need: requirement_problem(need, home)
-                for need in {n for suite, _scns in chosen for n in suite.requires}}
+    needs = {need for suite, scns in chosen for scenario in scns for case in scenario.cases
+             for need in case_requirements(suite, case)}
+    problems = {need: requirement_problem(need, home) for need in needs}
     unmet = {need: why for need, why in problems.items() if why is not None}
     kept, held = [], []
     for suite, scns in chosen:
-        why = next((unmet[need] for need in suite.requires if need in unmet), None)
-        if why is None:
-            kept.append((suite, scns))
-        else:
-            held.extend((suite.name, case.id, why) for scenario in scns for case in scenario.cases)
+        runs = []
+        for scenario in scns:
+            reasons = [(case, unmet_reason(suite, case, unmet)) for case in scenario.cases]
+            held.extend((suite.name, case.id, why) for case, why in reasons if why is not None)
+            cases = [case for case, why in reasons if why is None]
+            if cases:
+                runs.append(scenario if len(cases) == len(scenario.cases)
+                            else replace(scenario, cases=cases))
+        if runs:
+            kept.append((suite, runs))
     return kept, held
 
 
+def case_requirements(suite, case) -> tuple[str, ...]:
+    """What the eval home must be seeded with for `case`: its suite's `requires`,
+    then its own."""
+    return tuple(dict.fromkeys((*suite.requires, *case.requires)))
+
+
+def unmet_reason(suite, case, unmet: dict[str, str]) -> str | None:
+    """Why `case` cannot run on this home (the first unmet requirement), or None."""
+    return next((unmet[need] for need in case_requirements(suite, case) if need in unmet), None)
+
+
 def requirement_problem(need: str, home: str) -> str | None:
-    """Why `home` cannot run a suite that requires `need`, or None."""
+    """Why `home` cannot run a case that requires `need`, or None."""
     if need == "cues":
         return cue_drive.home_problem(home)
     if need == "computers":
         marker = os.path.join(os.path.expanduser(home), "eval-fixtures", "computers.json")
         return None if os.path.isfile(marker) else (
             "the eval home was not seeded with --computers (seed_capability_home.py)")
+    if need == "coding_signed_out":
+        # seed_capability_home.CLAUDE_STUB: the stub `claude` capability-daemon.sh
+        # puts first on the daemon's PATH.
+        stub = os.path.join(os.path.expanduser(home), "eval-bin", "claude")
+        return None if os.path.isfile(stub) and os.access(stub, os.X_OK) else (
+            "the eval home was not seeded with --coding-signed-out (seed_capability_home.py)")
     raise ValueError(f"unknown requirement {need!r}")
 
 

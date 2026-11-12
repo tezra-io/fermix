@@ -302,6 +302,40 @@ defmodule FermixCore.Harness.Adapters.ClaudeHeadlessTest do
     end
   end
 
+  # M98 D10: Claude Code's words when it cannot sign in, as its terminal
+  # `result` event carries them ("Not logged in · Please run /login", quoted
+  # from the 2026-07-26 incident in `Harness.Run`; not yet captured from a
+  # current CLI).
+  describe "signed_out?/1" do
+    test "the words of a run that could not sign in" do
+      event = %{
+        "type" => "result",
+        "subtype" => "success",
+        "is_error" => true,
+        "result" => "Not logged in · Please run /login"
+      }
+
+      assert ClaudeHeadless.signed_out?(ClaudeHeadless.extract(event).result_text)
+    end
+
+    # A failed run's `result` can be the model's own final prose, which may
+    # mention the words; only the vendor's sign-in failure leads with them.
+    test "the words inside the model's own prose are not a sign-in failure" do
+      refute ClaudeHeadless.signed_out?(
+               "The staging page showed Not logged in until the session cookie was set; " <>
+                 "the tests now pass."
+             )
+    end
+
+    test "words that are not about the sign-in are not" do
+      words = extract_value(read_events("claude_stream_failure.jsonl"), :result_text)
+
+      assert words =~ "issue with the selected model"
+      refute ClaudeHeadless.signed_out?(words)
+      refute ClaudeHeadless.signed_out?("")
+    end
+  end
+
   describe "resume_hint/1" do
     test "a run with a session id yields the cwd-scoped resume invocation" do
       row = %{vendor_session_id: "sess-9", cwd: "/repo"}

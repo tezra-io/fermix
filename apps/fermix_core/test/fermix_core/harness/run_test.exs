@@ -22,6 +22,8 @@ defmodule FermixCore.Harness.RunTest do
   # command_host_stream_test.
   @poll_max 100
   @poll_ms 20
+  # The bound on a run's terminal report: a real process group, under load.
+  @arrival_ms 10_000
 
   setup do
     prior = Application.get_env(:fermix_core, :harness)
@@ -155,6 +157,9 @@ defmodule FermixCore.Harness.RunTest do
     # The event below is the shape captured verbatim from that run's events.jsonl
     # (note `subtype: "success"` alongside `is_error: true` — the classification
     # rides the exit code, not either field).
+    #
+    # M98 D10: those words are Claude Code's sign-in failure, so the run's
+    # reason is `signed_out`; the words stay its result.
     test "a failed run persists the vendor's own error text as its result artifact", ctx do
       stub =
         FakeVendorCli.write!(ctx.stub_dir,
@@ -171,10 +176,39 @@ defmodule FermixCore.Harness.RunTest do
       assert_receive {:harness_report_terminal, ^run_id, "failed", fields}, 5_000
       refute_run_alive(pid)
 
-      assert fields.reason == "exit_1"
+      assert fields.reason == "signed_out"
+      assert fields.exit_code == 1
       assert fields.result_text == "Not logged in · Please run /login"
       assert fields.diagnostics_tail == ["Not logged in · Please run /login"]
       assert File.read!(result_path(ctx.runs_root, run_id)) =~ "Not logged in"
+    end
+
+    # The model's own prose on a failed run can mention the words; only a result
+    # that leads with them is the vendor's sign-in failure.
+    test "a claude result that mentions the words mid-text keeps its exit reason", ctx do
+      prose = "The login page read Not logged in, so I stopped before the form."
+
+      stub =
+        FakeVendorCli.write!(ctx.stub_dir,
+          lines: [
+            ~s({"type":"system","subtype":"init","session_id":"#{@claude_session}"}),
+            Jason.encode!(%{
+              "type" => "result",
+              "subtype" => "success",
+              "is_error" => true,
+              "result" => prose
+            })
+          ],
+          exit_code: 1
+        )
+
+      {run_id, pid} = start_run(ctx, ClaudeHeadless, stub, %{})
+
+      assert_receive {:harness_report_terminal, ^run_id, "failed", fields}, @arrival_ms
+      refute_run_alive(pid)
+
+      assert fields.reason == "exit_1"
+      assert fields.result_text == prose
     end
 
     # 2026-11-03: Codex refused the model on `turn.failed` and wrote no `-o` result,
@@ -205,6 +239,29 @@ defmodule FermixCore.Harness.RunTest do
       assert fields.result_text == message
       assert hd(fields.diagnostics_tail) == message
       assert File.read!(result_path(ctx.runs_root, run_id)) == message
+    end
+
+    # M98 D10: the streams codex-cli 0.166.0 printed with no sign-in and with
+    # one it could not refresh (captured in a throwaway CODEX_HOME), through the
+    # real stream and adapter: `signed_out`, with Codex's words kept as the result.
+    test "a codex run that could not sign in is signed_out, with Codex's words", ctx do
+      for {fixture, words} <- [
+            {"codex_0_166_0_refresh_failed.jsonl",
+             "Your access token could not be refreshed. Please log out and sign in again."},
+            {"codex_0_166_0_not_signed_in.jsonl",
+             "Missing bearer or basic authentication in header"}
+          ] do
+        stub = FakeVendorCli.write!(ctx.stub_dir, lines: fixture_lines(fixture), exit_code: 1)
+        {run_id, pid} = start_run(ctx, CodexExec, stub, %{})
+
+        assert_receive {:harness_report_terminal, ^run_id, "failed", fields}, @arrival_ms
+        refute_run_alive(pid)
+
+        assert fields.reason == "signed_out", fixture
+        assert fields.exit_code == 1
+        assert fields.result_text =~ words
+        assert File.read!(result_path(ctx.runs_root, run_id)) =~ words
+      end
     end
 
     test "a non-zero exit is failed/:exit_<code> regardless of events", ctx do

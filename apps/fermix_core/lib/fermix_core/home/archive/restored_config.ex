@@ -5,15 +5,15 @@ defmodule FermixCore.Home.Archive.RestoredConfig do
   of the file stays as it was:
 
     * the archived machine's own settings (`FermixCore.Setup.MachineFile`:
-      its sandbox, computer use, screen history, Messages, accessory link and
-      dev plugin folder) are left out, on any host. An engine keeps them in
+      its sandbox, computer use, screen history, Messages, accessory link, dev
+      plugin folder, and whether coding agents may run there and where they
+      keep their sign-ins) are left out, on any host. An engine keeps them in
       its `machine.toml`, which no archive carries, so only a home an earlier
       engine wrote has them in `config.toml`; the restored engine takes its
-      own machine file, or the shipped defaults;
+      own machine file, or the shipped defaults. So coding-agent consent,
+      given for one machine, is never copied as consent for another (M75 §13,
+      M98 D5);
     * values that named the old home's path name the new one;
-    * `[fermix_core.harness] approved` becomes `false`: coding-harness consent
-      was given for one machine and is never copied as consent for another
-      (M75 §13);
     * a home in keyring mode (no `[fermix_core] secret_store`, or
       `"keyring"`, read by `SecretWriter.parse_store/1`) restored on a host
       that is not macOS and whose keyring cannot be used (`keyring_usable?`,
@@ -46,7 +46,6 @@ defmodule FermixCore.Home.Archive.RestoredConfig do
   @type settled :: %{
           rewritten: [String.t()],
           kept_paths: [String.t()],
-          harness_consent_reset: boolean(),
           secret_store_switched: boolean(),
           instance_role_dropped: boolean(),
           device_settings_dropped: [String.t()],
@@ -59,7 +58,6 @@ defmodule FermixCore.Home.Archive.RestoredConfig do
     %{
       rewritten: [],
       kept_paths: [],
-      harness_consent_reset: false,
       secret_store_switched: false,
       instance_role_dropped: false,
       device_settings_dropped: [],
@@ -89,27 +87,18 @@ defmodule FermixCore.Home.Archive.RestoredConfig do
   defp flatten({:error, _reason} = error), do: error
 
   defp settle_rebased(original, {rebased, rewritten, dropped}, facts) do
-    {consent_text, consent_reset?} = reset_harness_consent(rebased)
-    {store_text, switched?} = file_store_without_keyring(consent_text, facts)
+    {store_text, switched?} = file_store_without_keyring(rebased, facts)
     {settled_text, instance_role_dropped?} = instance_role_off_a_mac(store_text, facts)
 
     {settled_text,
      %{
        rewritten: rewritten,
        kept_paths: ConfigText.paths_outside(original, facts.old_root),
-       harness_consent_reset: consent_reset?,
        secret_store_switched: switched?,
        instance_role_dropped: instance_role_dropped?,
        device_settings_dropped: dropped,
        keyring_secrets: ConfigText.keyring_references(original)
      }}
-  end
-
-  defp reset_harness_consent(text) do
-    case ConfigText.value(text, "fermix_core.harness", "approved") do
-      {:ok, "true"} -> {ConfigText.put(text, "fermix_core.harness", "approved", "false"), true}
-      _not_given -> {text, false}
-    end
   end
 
   defp instance_role_off_a_mac(text, %{macos?: true}) do

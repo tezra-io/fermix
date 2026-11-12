@@ -8,9 +8,13 @@ defmodule FermixCore.Cues.FollowUpReadinessTest do
   """
   use ExUnit.Case, async: true
 
+  @stat %{"size" => 412, "mtime" => 1_773_480_413, "inode" => 90_211}
+
   alias FermixCore.Capabilities.Capability
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
   alias FermixCore.Cues.FollowUpReadiness
+  alias FermixCore.Harness.MachineStore
+  alias FermixCore.Harness.SignIn
   alias FermixCore.Sandbox.PathPolicy
   alias FermixTestSupport.SafeRm
 
@@ -56,6 +60,27 @@ defmodule FermixCore.Cues.FollowUpReadinessTest do
 
       assert {:not_ready, "Claude Code is not signed in on this computer" <> _} =
                FollowUpReadiness.check(job(["claude_code_run"]), opts(ctx, claude_dir: false))
+    end
+
+    # M98 D10: a run of it here failed to sign in, so a follow-up that would
+    # start it waits, in the words the setup page shows.
+    test "holds one whose last run here failed to sign in", ctx do
+      register!(ctx, "codex_run")
+      opts = opts(ctx)
+      store_path = opts[:sign_in][:path]
+      store = start_supervised!({MachineStore, name: nil, path: store_path, open?: true})
+
+      mark = %{
+        marked_at: ~U[2026-03-14 09:26:53Z],
+        run_id: "hr_0a1b2c3d4e5f",
+        sign_in_file: Path.join(opts[:vendor_opts][:codex_home], "auth.json"),
+        file_stat: @stat
+      }
+
+      :ok = MachineStore.put_mark("codex", mark, server: store)
+
+      assert FollowUpReadiness.check(job(["codex_run"]), opts) ==
+               {:not_ready, SignIn.marked_sentence("codex", "this computer")}
     end
 
     test "installed after Fermix started, it is not loaded until a restart", ctx do
@@ -319,6 +344,11 @@ defmodule FermixCore.Cues.FollowUpReadinessTest do
       end,
       plugin_status: Keyword.get(overrides, :plugin_status, fn _plugin -> :needs_auth end),
       channel_ready?: fn channel -> channel in channels end,
+      sign_in: [
+        path: MachineStore.path(Path.join(ctx.root, "fermix")),
+        stat: fn _file -> {:ok, @stat} end,
+        machine: "this computer"
+      ],
       sandbox_config: %{
         mode: :strict,
         home: Path.join(ctx.root, "fermix"),

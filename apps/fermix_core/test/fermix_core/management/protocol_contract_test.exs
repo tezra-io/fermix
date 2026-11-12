@@ -1686,6 +1686,9 @@ defmodule FermixCore.Management.ProtocolContractTest do
       # The job-backed methods run against the live job registry with only
       # their operation injected, so the view under test is the daemon's own.
       {"setup.detect", %{"targets" => Detect.targets()}, [operation_opts: detect_probes()]},
+      # M98: the suite's home holds no coding store, so Check again clears
+      # nothing and answers the agents' row read again.
+      {"coding_agents.check", %{"vendors" => ["codex"]}, [operation_opts: detect_probes()]},
       {"providers.models.list", %{"provider" => "anthropic", "live" => false}, []},
       {"providers.probe.start", %{"provider" => "anthropic"},
        [operation_opts: [jobs: [server: jobs_server()], probe: probe()]]},

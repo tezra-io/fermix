@@ -2,6 +2,7 @@ defmodule FermixWebWeb.SetupLive.Components do
   use FermixWebWeb, :html
 
   alias FermixCore.Auth.Redaction
+  alias FermixCore.Harness.SignIn, as: HarnessSignIn
   alias FermixCore.Providers.Descriptor
   alias FermixCore.Providers.ModelCatalog
   alias FermixWebWeb.SetupLive.Accessories
@@ -2601,13 +2602,11 @@ defmodule FermixWebWeb.SetupLive.Components do
 
   defp harness_vendor_status(%{available?: false}), do: "not installed"
 
-  defp harness_vendor_status(%{version: version, auth: auth}) do
-    "#{version || "installed"} · #{harness_auth_label(auth)}"
+  # The sign-in in doctor's words (`Harness.SignIn.word/1`, M98): a file that is
+  # there reads "sign-in found", never "signed in", since the vendor is not asked.
+  defp harness_vendor_status(%{version: version, sign_in: sign_in}) do
+    "#{version || "installed"} · #{HarnessSignIn.word(sign_in)}"
   end
-
-  defp harness_auth_label(:authenticated), do: "authenticated"
-  defp harness_auth_label(:unverified), do: "installed; auth unverified"
-  defp harness_auth_label(:absent), do: "not authenticated"
 
   defp doctor_pane(assigns) do
     ~H"""

@@ -3990,7 +3990,7 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
         )
 
       assert result.status == :ok
-      assert result.detail =~ "codex codex 1.0.0 (authenticated)"
+      assert result.detail =~ "codex codex 1.0.0 (sign-in found)"
       assert result.detail =~ "1 active, 0 pending delivery, 0 dead-letter"
       assert result.detail =~ "artifacts within quota"
     end
@@ -4049,7 +4049,7 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
         )
 
       assert result.status == :warn
-      assert result.detail =~ "codex codex 1.0.0 (not authenticated)"
+      assert result.detail =~ "codex codex 1.0.0 (not signed in)"
     end
 
     test "dead-letter deliveries warn with the count surfaced" do
@@ -4140,6 +4140,50 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
 
       assert result.status == :warn
       assert result.detail =~ "low free space"
+    end
+
+    # M98 D10: a found sign-in file is not proof the vendor accepts it, so the
+    # row says what was found, and an agent whose run failed to sign in warns.
+    test "an agent whose last run failed to sign in reads signed out and warns" do
+      registry = registry_with([FermixCore.Tools.CodexRun, FermixCore.Tools.ClaudeCodeRun])
+
+      result =
+        Checks.harness(
+          harness_enabled: true,
+          detections: %{
+            "codex" => detection("codex", true, "codex 1.0.0", :authenticated),
+            "claude" => detection("claude", true, "claude 2.0.0", :unverified)
+          },
+          sign_in_marks: {:ok, %{"codex" => %{run_id: "hr_0a1b2c3d4e5f"}}},
+          registry: registry,
+          counts: %{active: 0, pending: 0, dead_letter: 0},
+          quota: :ok
+        )
+
+      assert result.status == :warn
+      assert result.detail =~ "codex codex 1.0.0 (signed out (a run failed to sign in))"
+      assert result.detail =~ "claude claude 2.0.0 (sign-in not verified)"
+    end
+
+    test "marks that cannot be read are said, and warn" do
+      registry = registry_with([FermixCore.Tools.CodexRun])
+
+      result =
+        Checks.harness(
+          harness_enabled: true,
+          detections: %{
+            "codex" => detection("codex", true, "codex 1.0.0", :authenticated),
+            "claude" => detection("claude", false, nil, :absent)
+          },
+          sign_in_marks: {:error, :enotdir},
+          registry: registry,
+          counts: %{active: 0, pending: 0, dead_letter: 0},
+          quota: :ok
+        )
+
+      assert result.status == :warn
+      assert result.detail =~ "codex codex 1.0.0 (sign-in found)"
+      assert result.detail =~ "sign-in marks unreadable (:enotdir)"
     end
 
     test "unavailable run counts skip honestly instead of crashing" do

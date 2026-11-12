@@ -29,6 +29,7 @@ defmodule FermixCore.Management.CopyTest do
   alias FermixCore.Cues.FollowUps
   alias FermixCore.Cues.Mandates
   alias FermixCore.Cues.ProposalView
+  alias FermixCore.Harness.SignIn
   alias FermixCore.Home.Archive
   alias FermixCore.Home.Candidate, as: HomeCandidate
   alias FermixCore.Home.Join, as: HomeJoin
@@ -55,6 +56,7 @@ defmodule FermixCore.Management.CopyTest do
   alias FermixCore.Management.Cues.SourceForm, as: CueSourceForm
   alias FermixCore.Management.Cues.SourceRow, as: CueSourceRow
   alias FermixCore.Management.Cues.WatcherRow, as: CueWatcherRow
+  alias FermixCore.Management.Detect
   alias FermixCore.Management.Doctor.Remediation
   alias FermixCore.Management.Home, as: ManagementHome
   alias FermixCore.Management.HomeMove, as: ManagementHomeMove
@@ -66,6 +68,7 @@ defmodule FermixCore.Management.CopyTest do
   alias FermixCore.Management.Plugins.Row, as: PluginRow
   alias FermixCore.Management.Protocol
   alias FermixCore.Management.Settings
+  alias FermixCore.Management.Settings.CodingMachine
   alias FermixCore.Management.Settings.ThisComputer
   alias FermixCore.Providers.DecisionModel
   alias FermixCore.Providers.Descriptor
@@ -1101,6 +1104,31 @@ defmodule FermixCore.Management.CopyTest do
           do: assert_owner_words(text, :prose, [], "computer.#{row["key"]} #{field}")
     end
 
+    # M98 D5: the coding approval's section is named for the machine that
+    # answers, so both hosts' words are held to the rules, whichever this is.
+    test "this machine's coding section obeys the rules on a Mac and elsewhere" do
+      for macos? <- [true, false],
+          section <- CodingMachine.sections(macos?: macos?, computer?: false),
+          row <- CodingMachine.rows(section.id, %{}, macos?: macos?),
+          {field, text} <- [title: section.title, label: row["label"], footer: row["footer"]],
+          do: assert_owner_words(text, :prose, [], "harness_machine #{field} macos?=#{macos?}")
+
+      assert length(CodingMachine.sentences()) == 5
+
+      for text <- CodingMachine.sentences(),
+          do: assert_owner_words(text, :prose, [], "harness_machine")
+    end
+
+    # M98 D10: what `setup.detect` and `coding_agents.check` say about this
+    # machine's coding agents, and the sentence a run that failed to sign in
+    # carries, for each agent and each machine word.
+    test "the coding agents' sign-in sentences obey the rules" do
+      assert length(SignIn.sentences()) == 12
+
+      for text <- Detect.sentences(),
+          do: assert_owner_words(text, :prose, [], "coding agents sign-in")
+    end
+
     # Each offer's state rests on more than one fact, so a case set that
     # stopped reaching a branch would pass on the sentences left. These are
     # the ones it must reach.
@@ -1355,7 +1383,7 @@ defmodule FermixCore.Management.CopyTest do
       stays_here: [:voice, :meetings, :accessories],
       ports: [whatsapp: 4030, cues: 4032],
       carried: [:whatsapp, :cues],
-      costs: [:coding_agents, :telegram],
+      costs: [:telegram],
       telegram: true,
       to: "studio-mac",
       name: "loft-linux",

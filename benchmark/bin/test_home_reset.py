@@ -52,7 +52,8 @@ home = os.environ["FERMIX_HOME"]
 db = os.path.join(home, "memory.db")
 seen = open(db).read() if os.path.exists(db) else None
 with open(os.path.join(home, "fake-daemon.log"), "a") as log:
-    log.write(json.dumps({"pid": os.getpid(), "memory_db": seen}) + "\n")
+    log.write(json.dumps({"pid": os.getpid(), "memory_db": seen,
+                          "path": os.environ.get("PATH", "")}) + "\n")
 with open(db, "a") as fh:
     fh.write("+written-by-the-daemon")
 path = os.path.join(home, "daemon.sock")
@@ -207,6 +208,33 @@ def test_restore_puts_back_the_seeded_state_and_removes_what_came_after(scratch)
     assert (home / "auth.json").read_text() == '{"rotated": true}'
 
 
+def test_restore_removes_a_sign_in_mark_written_after_the_snapshot(scratch):
+    # M98 D10: each attempt starts without the marks an earlier attempt's run left
+    # in this machine's coding store; the computers' records beside it stay.
+    home = _seeded_home(scratch)
+    _write_tree(home, {"device/computers/b47e0d93.json": '{"v": 1}'})
+    state.snapshot(str(home))
+    store = ("device/coding.db", "device/coding.db-wal", "device/coding.db-shm")
+    _write_tree(home, {name: "claude signed out" for name in store})
+
+    state.restore(str(home))
+
+    assert not any((home / name).exists() for name in store)
+    assert (home / "device/computers/b47e0d93.json").read_text() == '{"v": 1}'
+
+
+def test_a_snapshot_taken_with_the_coding_store_present_puts_it_back(scratch):
+    # `capability-daemon.sh snapshot` may run after a daemon made device/coding.db.
+    home = _seeded_home(scratch)
+    _write_tree(home, {"device/coding.db": "seeded store"})
+    state.snapshot(str(home))
+    (home / "device/coding.db").write_text("a mark from the attempt")
+
+    state.restore(str(home))
+
+    assert (home / "device/coding.db").read_text() == "seeded store"
+
+
 def test_snapshot_keeps_what_reset_state_clears_and_the_config():
     # The seeded sandbox is the machine's own setting (M97 §4), which a grant changes.
     assert set(state.KEPT) == {*seed.STATE_DIRS, *seed.STATE_FILES, "config.toml",
@@ -269,6 +297,22 @@ def test_up_snapshots_the_seed_before_the_daemon_starts(scratch, fake_mix, stray
         assert (saved / "skills").is_dir()
         # The daemon wrote memory.db once it started; the snapshot was taken before.
         assert (home / "memory.db").exists() and not (saved / "memory.db").exists()
+    finally:
+        _down(home, stray_daemons)
+
+
+@pytest.mark.parametrize("flag, leads", [("--coding-signed-out", True), ("", False)])
+def test_up_puts_the_eval_bin_first_on_the_daemons_path_only_for_a_stub(
+        scratch, fake_mix, stray_daemons, flag, leads):
+    # The signed-out stub `claude` is the Claude Code the daemon finds at boot only
+    # when its folder leads the daemon's PATH, as the cue suites' stub codex does.
+    home = scratch / "cap-eval"
+    up = _script("up", home, FERMIX_CAP_SEED_ARGS=f"--provider ollama --model brindle-7b {flag}")
+    try:
+        assert up.returncode == 0, up.stderr
+        [start] = _starts(home)
+        eval_bin = str(home / seed.CUE_BIN_DIR)
+        assert (start["path"].split(os.pathsep)[0] == eval_bin) is leads
     finally:
         _down(home, stray_daemons)
 

@@ -120,6 +120,22 @@
         "invokes skill self_knowledge",
         "says nothing can ring on this Mac from the standalone install, because no Fermix app is attached, so its reminders go to a chat channel; says the Fermix app can, and that fermix migrate-to-app moves the install to it; does not offer osascript, terminal-notifier or another stand-in"
       ]
+    },
+    {
+      "name": "codex_signed_in_but_runs_fail",
+      "prompt": "Fermix says Codex is signed in but my runs keep failing, why?",
+      "expectations": [
+        "invokes skill self_knowledge",
+        "explains that Fermix only reads whether Codex's sign-in file is there (shown as sign-in found), so a sign-in that has expired still shows that way until a run fails; that a run which fails for sign-in is named as Codex signed out on that machine, and Codex is marked signed out there until a run succeeds, the sign-in file changes, or Check again is pressed; and that the fix is to sign in again with Codex itself (codex login in a terminal on that machine)"
+      ]
+    },
+    {
+      "name": "server_runs_codex_after_move",
+      "prompt": "I moved Fermix to my server; how do I let it run Codex there?",
+      "expectations": [
+        "invokes skill self_knowledge",
+        "says to approve coding agents on the server itself (the server's setup page, Coding Agents tab, or machine.toml there), because the approval and the sign-in folders are each computer's own settings and do not travel with the home, so the Mac keeps its own approval; and that Codex must be installed and signed in on the server"
+      ]
     }
   ]
 }

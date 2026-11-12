@@ -5,8 +5,9 @@
 """Seed a disposable capability-eval FERMIX_HOME so `make capability` can run.
 
 Creates the home, a git-backed workspace (the checker's per-trial scoring root),
-a minimal config.toml with a strict machine.toml beside it (the sandbox is the
-machine's own setting), and the auth the scored model needs. The scored
+a minimal config.toml with a strict machine.toml beside it (the sandbox and the
+coding agents' approval are the machine's own settings), and the auth the scored
+model needs. The scored
 model is DERIVED from the primary provider in ~/.fermix-dev/config.toml, so the
 disposable daemon benchmarks the same model you develop against, reusing the dev
 home's credentials:
@@ -59,7 +60,7 @@ daemon's PATH; it answers `--version` and refuses to run anything), a stub
 Codex sign-in in `<home>/eval-codex` (`codex_home`), and a Claude Code config
 dir that does not exist (`claude_config_dir`), so Claude Code is never ready
 whether or not its program is installed. The harness consent is pre-granted
-for every home (below).
+for every home (`harness_lines`); it and both folders are machine.toml keys.
 
 `--voice` turns voice on for the `drive: voice` suites (grok_voice.yaml,
 voice_greeting_goodbye.yaml): `[fermix_core.realtime]` enabled with one task
@@ -82,6 +83,16 @@ would move the measured prompt of every unrelated suite. No session ever
 exists in an eval, so both computers are listed as away. The seed records what
 it wrote in `eval-fixtures/computers.json`; a seed without `--computers`
 removes all of it, and a seed with it refuses a devices file it did not write.
+
+`--coding-signed-out` (M98 D10) gives coding_harness's signed-out case a Claude
+Code that fails every run as signed out: a stub `claude` in `<home>/eval-bin`
+(`capability-daemon.sh` puts that folder first on the daemon's PATH) that
+answers `--version` and, for a run, prints Claude Code's stream for a run it
+cannot sign in for, ending "Not logged in · Please run /login", and exits 1. The
+run starts no vendor and spends nothing outside Fermix. Off by default: with it,
+every Claude Code run in the home fails, the lifecycle cases' included. A seed
+without it removes the stub; the case's `requires: [coding_signed_out]` holds it
+out of a home seeded without it.
 """
 
 from __future__ import annotations
@@ -110,6 +121,14 @@ DEV_HOME = os.path.expanduser("~/.fermix-dev")
 MACHINE_FILE = "machine.toml"
 MACHINE_TABLES = ("sandbox", "fermix_core.computer_use", "fermix_core.computer_history",
                   "fermix_channels.accessories")
+# Keys of a home table that are this computer's own, as table and key: the dev
+# plugin folder (M97 §4), and the coding agents' approval and sign-in folders
+# (M98 D5). The engine reads them from machine.toml only and strips a copy from
+# config.toml at boot; the rest of `[fermix_core.harness]` stays in config.toml.
+MACHINE_KEYS = (("fermix_core.plugins", "dev_local"),
+                ("fermix_core.harness", "approved"),
+                ("fermix_core.harness", "codex_home"),
+                ("fermix_core.harness", "claude_config_dir"))
 # Homes this script must never touch, compared as REALPATHS so a symlink cannot dress
 # one of them up as a disposable eval home.
 _NON_DISPOSABLE = tuple(os.path.realpath(os.path.expanduser(p))
@@ -124,9 +143,14 @@ _NON_DISPOSABLE = tuple(os.path.realpath(os.path.expanduser(p))
 # `ChromeLauncher` persists per owner/profile, and `harness/` holds `Harness.Artifacts`
 # run trees — both survive a sweep and are inherited by the next one's web and harness
 # tasks, which is the residue this reset exists to remove.
+# `device/coding.db` is this machine's coding store (`Harness.MachineStore`, M98 D3),
+# where a run that fails to sign in marks its agent signed out (D10): the mark is
+# sweep state, while the rest of `device/` (the --computers records) is the seed's.
 STATE_DIRS = ("skills", "memory", "job_runs", "journals", "grants", "bootstrap",
               "browser", "harness", "eval-mcp")
-STATE_FILES = ("memory.db", "memory.db-wal", "memory.db-shm")
+STATE_FILES = ("memory.db", "memory.db-wal", "memory.db-shm",
+               os.path.join("device", "coding.db"), os.path.join("device", "coding.db-wal"),
+               os.path.join("device", "coding.db-shm"))
 # Only these keys are allowed in a provider block (else the daemon refuses boot).
 _PROVIDER_KEYS = ("default_model", "reasoning_effort", "auth_mode", "base_url", "api_key")
 # M45 external skill credentials: one allowed sandbox variable whose value a harmless
@@ -227,6 +251,36 @@ CODEX_MODEL_LIST = {
         {"slug": "gpt-quiet-reserve", "display_name": "Quiet Reserve", "visibility": "hide"},
     ],
 }
+# With --coding-signed-out (M98 D10): a stub `claude` in the same folder, first on
+# the daemon's PATH, that fails every run the way Claude Code fails one it cannot
+# sign in for. The adapter reads the session id from the `system`/`init` event and
+# the vendor's words from the terminal `result` event (the line `Harness.Run`
+# quotes); the lines a real signed-out CLI prints between them are to confirm.
+# The session id is invented.
+CLAUDE_STUB = os.path.join(CUE_BIN_DIR, "claude")
+CLAUDE_STUB_INIT = {"type": "system", "subtype": "init",
+                    "session_id": "3f6b2d84-91ce-4a07-b5e2-6d0c8a71f9e3",
+                    "apiKeySource": "none", "claude_code_version": "eval-stub"}
+CLAUDE_NOT_LOGGED_IN = {"type": "result", "subtype": "success", "is_error": True,
+                        "result": "Not logged in · Please run /login"}
+
+
+def _json_line(event: dict) -> str:
+    return json.dumps(event, ensure_ascii=False, separators=(",", ":"))
+
+
+CLAUDE_SIGNED_OUT_STUB = f"""#!/bin/sh
+# The coding_harness suite's stand-in for a signed-out Claude Code
+# (seed_capability_home.py --coding-signed-out): it answers --version, and every
+# run prints the stream Claude Code prints when it is not signed in, then exits 1.
+if [ "$1" = "--version" ]; then
+  echo "eval-stub (Claude Code)"
+  exit 0
+fi
+printf '%s\\n' '{_json_line(CLAUDE_STUB_INIT)}'
+printf '%s\\n' '{_json_line(CLAUDE_NOT_LOGGED_IN)}'
+exit 1
+"""
 # Computers (M97), with --computers: two computers linked to this home, neither
 # with a session. Each is a desktop row in the paired-device store (`DeviceStore`:
 # lowercase uuid, name and model 1..255 bytes, a unique 32-byte Noise key, ISO
@@ -338,28 +392,16 @@ def render_config(
                    "--state-dir", os.path.join(home, MCP_STATE_DIR, "halden_ops")]
     lines += ["[mcp.servers.halden_ops]", 'command = "/usr/bin/env"',
               f"args = [{', '.join(json.dumps(arg) for arg in server_args)}]", ""]
-    # Pre-approve coding agents in the disposable home. Consent is a setup decision
-    # (design §23.3) and defaults false, and an unapproved host advertises no run
-    # tool and renders no delegation steering at all (§23.4) — it does not stall,
-    # it silently makes the candidate model do the coding by hand, so the harness
-    # suite would grade main-agent coding instead of delegation and every
-    # delegating task would score zero. Approving here is scoped to this throwaway home
-    # whose sandbox is strict and rooted at the workspace above (the isolation the
-    # --confirm-daemon-isolated / --confirm-isolated-env flags attest to). Left
-    # unset: default_vendor (so both CLIs stay advertised for tasks that name
-    # either) and cloud_enabled (defaults off — the cloud rail is not evaluated).
-    lines += ["[fermix_core.harness]", "approved = true"]
-    # With --cues, the follow-up cases' coding agents: the stub Codex sign-in, and
-    # a Claude Code config dir that is never made (see the module docstring).
-    if cues:
-        lines += [f"codex_home = {json.dumps(os.path.join(home, CUE_CODEX_HOME))}",
-                  f"claude_config_dir = {json.dumps(os.path.join(home, CUE_CLAUDE_DIR))}"]
-    lines += [""]
+    # No `[fermix_core.harness]` here: the coding agents' approval and sign-in
+    # folders are this computer's own (`render_machine`), and the home's harness
+    # keys are left unset: default_vendor (so both CLIs stay advertised for tasks
+    # that name either) and cloud_enabled (defaults off — the cloud rail is not
+    # evaluated).
     # Meetings (MILESTONE_21) are off until the operator turns them on, and a
     # fresh eval home has never made that decision — so `Meetings.ready?()` is
     # false, the seeder registers NO meetings tool, and a task asking the
     # notetaker to join scores 0 with nothing wrong in the product. Same rule as
-    # the harness consent above: pre-grant every human-decision gate, scoped to
+    # the harness consent (`harness_lines`): pre-grant every human-decision gate, scoped to
     # this throwaway home. It is deliberately not sufficient on its own —
     # `ready?()` also wants an installed meetbot sidecar or complete Zoom RTMS
     # credentials, and this seeder installs neither — so a home that never gets a
@@ -390,7 +432,7 @@ def render_config(
     # eval home has never made that decision — so the open_loop_* tools are not
     # advertised, the scheduler never starts, and both open-loop suites
     # (open_loops.yaml, capability/candidates/open_loop_checkin.yaml) score 0 with
-    # nothing wrong in the product. Same rule as the harness consent above:
+    # nothing wrong in the product. Same rule as the harness consent (`harness_lines`):
     # pre-grant every human-decision gate, scoped to this throwaway home. `enabled`
     # is the section's only key; any other stops the daemon booting.
     lines += ["[fermix_core.open_loops]", "enabled = true", ""]
@@ -433,7 +475,8 @@ def render_machine(home: str, allowed_roots: tuple[str, ...] = (),
     """The eval home's `machine.toml` (M97 §4): the settings that describe the
     computer the daemon runs on, which the engine reads from this file only and
     never from config.toml. The sandbox, the skill-credential fixture's
-    environment source, computer history held off and, with cue mandates, the
+    environment source, computer history held off, the coding agents' approval
+    and, with --cues, their sign-in folders (M98 D5), and, with cue mandates, the
     dev plugin folder the stub plugin is installed from."""
     workspace = os.path.join(home, "workspace")
     lines = ["# Managed by benchmark/bin/seed_capability_home.py — regenerated on each run.",
@@ -445,7 +488,7 @@ def render_machine(home: str, allowed_roots: tuple[str, ...] = (),
     # approval no eval can answer — so the turn ends before the deliverable
     # is written and the task scores 0 with nothing wrong in the product
     # (create_and_confirm_skill, 2026-08-06: 9 of 10 base trials died there).
-    # Same rule as the harness consent in `render_config`: pre-grant every
+    # Same rule as the harness consent in `harness_lines`: pre-grant every
     # human-decision gate, scoped to this throwaway home. The runner
     # precondition tolerates it — only roots that escape the home are refused.
     roots = ", ".join(
@@ -471,10 +514,32 @@ def render_machine(home: str, allowed_roots: tuple[str, ...] = (),
     # If a future capability task legitimately needs recall_activity, seed a
     # synthetic spool instead of enabling live capture.
     lines += ["[fermix_core.computer_history]", "enabled = false", ""]
+    lines += harness_lines(home, cues)
     if cues and cues["mandates"]:
         lines += ["[fermix_core.plugins]",
                   f"dev_local = {json.dumps(os.path.join(home, CUE_PLUGIN_DIR))}", ""]
     return "\n".join(lines)
+
+
+def harness_lines(home: str, cues: dict | None) -> list[str]:
+    """This computer's `[fermix_core.harness]` keys (M98 D5): the approval, and with
+    --cues the follow-up cases' sign-in folders. Fermix reads these three from
+    machine.toml only; every other harness key is the home's, in config.toml."""
+    # Pre-approve coding agents in the disposable home. Consent is a setup decision
+    # (design §23.3) and defaults false, and an unapproved host advertises no run
+    # tool and renders no delegation steering at all (§23.4) — it does not stall,
+    # it silently makes the candidate model do the coding by hand, so the harness
+    # suite would grade main-agent coding instead of delegation and every
+    # delegating task would score zero. Approving here is scoped to this throwaway home
+    # whose sandbox is strict and rooted at the workspace above (the isolation the
+    # --confirm-daemon-isolated / --confirm-isolated-env flags attest to).
+    lines = ["[fermix_core.harness]", "approved = true"]
+    # With --cues, the follow-up cases' coding agents: the stub Codex sign-in, and
+    # a Claude Code config dir that is never made (see the module docstring).
+    if cues:
+        lines += [f"codex_home = {json.dumps(os.path.join(home, CUE_CODEX_HOME))}",
+                  f"claude_config_dir = {json.dumps(os.path.join(home, CUE_CLAUDE_DIR))}"]
+    return lines + [""]
 
 
 def cue_lines(home: str, cues: dict) -> list[str]:
@@ -572,6 +637,22 @@ def write_coding_stubs(home: str) -> None:
     write_private(os.path.join(home, CUE_CODEX_HOME, "auth.json"), json.dumps(auth))
     write_private(os.path.join(home, CUE_CODEX_HOME, "models_cache.json"),
                   json.dumps(CODEX_MODEL_LIST))
+
+
+def write_signed_out_claude(home: str) -> str:
+    """The stub `claude` (executable, private) that fails every run as signed out."""
+    stub = os.path.join(home, CLAUDE_STUB)
+    write_private(stub, CLAUDE_SIGNED_OUT_STUB)
+    os.chmod(stub, 0o700)
+    return stub
+
+
+def clear_signed_out_claude(home: str) -> None:
+    """A seed without --coding-signed-out: remove the stub a previous seed left, so
+    no other suite's daemon finds a Claude Code that fails every run."""
+    stub = os.path.join(home, CLAUDE_STUB)
+    if os.path.isfile(stub):
+        os.remove(safe_rm.check(stub, home, min_below=1))
 
 
 def write_private(path: str, text: str) -> None:
@@ -714,7 +795,7 @@ def table_headers(toml_text: str) -> list[str]:
     Explicit headers, not tomllib's nested result: a fragment adding
     `[fermix_core.browser]` is fine beside the seeder's
     `[fermix_core.providers.<id>]` — both only imply `[fermix_core]` — while a
-    second `[fermix_core.harness]` is the duplicate TOML itself refuses. Only the
+    second `[fermix_core.meetings]` is the duplicate TOML itself refuses. Only the
     headers each document actually writes can tell those apart."""
     headers = []
     for line in toml_text.splitlines():
@@ -722,6 +803,15 @@ def table_headers(toml_text: str) -> list[str]:
         if match:
             headers.append(match.group(1).strip())
     return headers
+
+
+def nested_table(parsed: dict, dotted: str) -> dict:
+    """The table a parsed TOML document holds at `dotted` (`fermix_core.harness`),
+    or an empty one where it holds none."""
+    node = parsed
+    for part in dotted.split("."):
+        node = node.get(part) if isinstance(node, dict) else None
+    return node if isinstance(node, dict) else {}
 
 
 def extra_config_error(rendered: str, fragment: str) -> str | None:
@@ -742,10 +832,16 @@ def extra_config_error(rendered: str, fragment: str) -> str | None:
         # THAT table instead of the document root.
         return (f"--extra-config must start with a table header; top-level key(s) "
                 f"{bare} would be appended into the seeder's last table")
+    # The fragment is appended to config.toml only, so this computer's own settings
+    # in it would be stripped at boot or never read. A home table split by key
+    # (`MACHINE_KEYS`) is refused only for the machine's keys: the seeder writes no
+    # `[fermix_core.harness]` in config.toml, so an arm may set its home keys.
     machine = sorted(header for header in table_headers(fragment)
                      if any(header == t or header.startswith(t + ".") for t in MACHINE_TABLES))
-    if machine or "dev_local" in parsed.get("fermix_core", {}).get("plugins", {}):
-        return (f"--extra-config sets this computer's own settings {machine or ['dev_local']}, "
+    machine += [f"{table}.{key}" for table, key in MACHINE_KEYS
+                if key in nested_table(parsed, table)]
+    if machine:
+        return (f"--extra-config sets this computer's own settings {machine}, "
                 f"which Fermix reads from {MACHINE_FILE}, never from config.toml")
     written = set(table_headers(rendered))
     clashes = sorted(set(table_headers(fragment)) & written)
@@ -960,6 +1056,10 @@ def parse_args() -> argparse.Namespace:
                         help="link two computers to the home (studio Mac, loft Linux), both "
                              "away, and turn Always On on, for the computers suite; off by "
                              "default")
+    parser.add_argument("--coding-signed-out", dest="coding_signed_out", action="store_true",
+                        help="put a stub claude first on the daemon's PATH that fails every "
+                             "run as signed out, for coding_harness's signed-out case; off "
+                             "by default")
     parser.add_argument("--extra-config", dest="extra_config",
                         help="TOML fragment appended to the rendered config (one "
                              "configuration ARM's difference); refused when it "
@@ -1036,6 +1136,10 @@ def main() -> None:
         write_computer_fixtures(home)
     else:
         clear_computer_fixtures(home)
+    if args.coding_signed_out:
+        write_signed_out_claude(home)
+    else:
+        clear_signed_out_claude(home)
     config = render_config(home, pid, blk, profile, explicit=bool(args.provider),
                            voice=voice_engine, cues=cues, computers=args.computers)
     if args.extra_config:
@@ -1065,6 +1169,9 @@ def main() -> None:
     if args.computers:
         names = " and ".join(c["name"] for c in COMPUTERS)
         print(f"computers: {names} linked, both away; Always On on")
+    if args.coding_signed_out:
+        print(f"coding signed out: {CLAUDE_STUB} fails every Claude Code run as signed out; "
+              "capability-daemon.sh puts it first on the daemon's PATH")
 
 
 if __name__ == "__main__":

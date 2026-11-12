@@ -20,26 +20,27 @@ defmodule FermixCore.Home.Archive.RestoredConfigTest do
   extra_roots = ["/Users/invented/Projects"]
   """
 
-  test "a restore onto another host moves the home's paths, withdraws harness consent and names the rest" do
+  # M98 D5: whether coding agents may run is the computer's own, so a restore
+  # leaves the approval out with the rest of its machine settings, named; the
+  # restored engine's own machine file says whether they run there.
+  test "a restore onto another host moves the home's paths, leaves the coding approval out and names the rest" do
     {:ok, text, settled} = RestoredConfig.settle(@config, facts(macos?: false, keyring: false))
 
     assert settled == %{
              rewritten: ["fermix_core.meetings.recordings"],
              kept_paths: ["fermix_core.meetings.extra_roots"],
-             harness_consent_reset: true,
              secret_store_switched: true,
              instance_role_dropped: false,
-             device_settings_dropped: [],
+             device_settings_dropped: ["fermix_core.harness.approved"],
              keyring_secrets: 1
            }
 
     assert ConfigText.value(text, "fermix_core.meetings", "recordings") ==
              {:ok, ~s("/home/invented/.fermix/workspace/meetings")}
 
-    assert ConfigText.value(text, "fermix_core.harness", "approved") ==
-             {:ok, "false"}
-
-    assert text =~ "approved = false # given on the invented Mac"
+    assert ConfigText.value(text, "fermix_core.harness", "approved") == :absent
+    assert ConfigText.value(text, "fermix_core.harness", "enabled") == {:ok, "true"}
+    refute text =~ "given on the invented Mac"
     assert ConfigText.value(text, "fermix_core", "secret_store") == {:ok, ~s("file")}
 
     assert ConfigText.value(text, "fermix_core.meetings", "extra_roots") ==
@@ -56,10 +57,10 @@ defmodule FermixCore.Home.Archive.RestoredConfigTest do
     assert ConfigText.value(linux_text, "fermix_core", "secret_store") == :absent
   end
 
-  test "a home already on the file store, or without consent, is left as it was" do
-    config = ~s([fermix_core]\nsecret_store = "file"\n\n[fermix_core.harness]\napproved = false\n)
+  test "a home already on the file store is left as it was" do
+    config = ~s([fermix_core]\nsecret_store = "file"\n\n[fermix_core.harness]\nenabled = true\n)
 
-    assert {:ok, ^config, %{secret_store_switched: false, harness_consent_reset: false}} =
+    assert {:ok, ^config, %{secret_store_switched: false, device_settings_dropped: []}} =
              RestoredConfig.settle(config, facts(macos?: false, keyring: false))
   end
 

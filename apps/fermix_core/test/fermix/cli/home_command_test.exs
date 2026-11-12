@@ -272,11 +272,12 @@ defmodule Fermix.CLI.HomeCommandTest do
              "Kept as they were; review them, they hold paths outside the old home: " <>
                "fermix_core.meetings.extra."
 
-    assert out =~ "Coding-harness consent does not travel; approve it again here."
+    refute out =~ "Coding-harness consent"
 
+    # Whether coding agents may run is the computer's own too (M98 D5).
     assert out =~
              "Settings of the computer the home came from stay there: " <>
-               "sandbox, fermix_core.plugins.dev_local."
+               "sandbox, fermix_core.plugins.dev_local, fermix_core.harness.approved."
 
     assert out =~
              ~s(This host has no usable keyring, so secrets are kept in files here: secret_store = "file".)

@@ -818,11 +818,17 @@ defmodule FermixCore.Setup.WizardTest do
     assert {:ok, granted} = ConfigStore.load_runtime_config()
     assert granted.fermix_core |> Keyword.get(:harness, []) |> Keyword.get(:approved) == true
 
-    # `false` clears the key back to the default (never written explicitly).
+    # `false` clears the key back to the default, which this computer's
+    # machine.toml writes as it is (M98 D5: the table always says it).
     assert {:ok, _} = Wizard.report().wizard |> Wizard.save_answers(harness_approved: false)
 
     assert {:ok, revoked} = ConfigStore.load_runtime_config()
-    refute revoked.fermix_core |> Keyword.get(:harness, []) |> Keyword.has_key?(:approved)
+    assert revoked.fermix_core |> Keyword.get(:harness, []) |> Keyword.get(:approved) == false
+
+    assert tmp_home |> Path.join("machine.toml") |> File.read!() =~
+             "[fermix_core.harness]\napproved = false"
+
+    refute tmp_home |> Path.join("config.toml") |> File.read!() =~ "approved"
   end
 
   test "save_answers writes skill_curation enabled only on decline" do

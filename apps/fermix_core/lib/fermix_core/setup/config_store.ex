@@ -217,8 +217,12 @@ defmodule FermixCore.Setup.ConfigStore do
   # Neither file: the in-memory defaults of a home nobody set up.
   defp loaded(:absent, :absent, _opts), do: {:ok, empty_runtime_config()}
 
+  # `join/2` takes only this machine's keys from the machine file, so the
+  # machine file's own coding-agent table is checked here (M98 D5): a key of
+  # the home's there would otherwise be dropped without a word.
   defp loaded(config, machine, opts) do
     machine = decode_document(text(machine))
+    :ok = HarnessConfig.machine_file!(get_in(machine, ["fermix_core", "harness"]))
     document = MachineFile.join(decode_document(text(config)), machine)
     platform_checked(document |> normalize_document() |> with_machine_history(machine), opts)
   end
@@ -621,7 +625,15 @@ defmodule FermixCore.Setup.ConfigStore do
   end
 
   # The machine tables `dump_machine/1` writes, each as a snapshot holds it.
-  @machine_parts [:sandbox, :computer_use, :computer_history, :computer, :dev_local, :accessories]
+  @machine_parts [
+    :sandbox,
+    :computer_use,
+    :computer_history,
+    :computer,
+    :harness,
+    :dev_local,
+    :accessories
+  ]
 
   defp machine_rebased(snapshot, base, current) do
     Enum.reduce(@machine_parts, snapshot, fn part, acc ->
@@ -647,6 +659,12 @@ defmodule FermixCore.Setup.ConfigStore do
     Enum.reject(block, fn {key, _value} -> key in home end)
   end
 
+  # The coding agents' table is split by key too (M98 D5), and compared as
+  # the machine file holds it: an approval no page gave is off, so a form
+  # that clears the key is no change.
+  defp machine_part(snapshot, :harness),
+    do: snapshot |> core_section(:harness) |> HarnessConfig.machine_keyword()
+
   defp machine_part(snapshot, key), do: snapshot |> Map.get(:fermix_core, []) |> Keyword.get(key)
 
   defp put_machine_part(snapshot, :sandbox, nil), do: Map.delete(snapshot, :sandbox)
@@ -665,6 +683,11 @@ defmodule FermixCore.Setup.ConfigStore do
   defp put_machine_part(snapshot, :computer_history, machine) do
     home = ComputerHistoryConfig.home_keyword(core_section(snapshot, :computer_history))
     put_core(snapshot, :computer_history, home ++ machine)
+  end
+
+  defp put_machine_part(snapshot, :harness, machine) do
+    home = HarnessConfig.home_keyword(core_section(snapshot, :harness))
+    put_core(snapshot, :harness, home ++ machine)
   end
 
   defp put_machine_part(snapshot, key, value),
@@ -1944,7 +1967,8 @@ defmodule FermixCore.Setup.ConfigStore do
       render_section(["fermix_core", "routing"], routing),
       render_section(["fermix_core", "compaction"], compaction),
       render_section(["fermix_core", "network"], network),
-      render_section(["fermix_core", "harness"], harness),
+      # The home's coding keys; this computer's are in machine.toml (M98 D5).
+      render_section(["fermix_core", "harness"], HarnessConfig.home_keyword(harness)),
       render_section(["fermix_core", "browser"], browser),
       render_section(["fermix_core", "skill_curation"], skill_curation),
       render_section(["fermix_core", "open_loops"], open_loops),
@@ -2015,6 +2039,13 @@ defmodule FermixCore.Setup.ConfigStore do
       render_section(
         ["fermix_core", "computer"],
         ComputerSwitches.to_keyword(Keyword.get(fermix_core, :computer, []))
+      ),
+      # Whether coding agents may run here and where they keep their sign-ins
+      # (M98 D5), `approved` always written: the table marks the file as one
+      # that holds them (`MachineFile`).
+      render_section(
+        ["fermix_core", "harness"],
+        HarnessConfig.machine_keyword(Keyword.get(fermix_core, :harness, []))
       ),
       render_section(["fermix_core", "plugins"], dev_local),
       render_section(["fermix_channels", "accessories"], Keyword.get(channels, :accessories, []))

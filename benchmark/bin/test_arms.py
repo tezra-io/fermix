@@ -352,9 +352,11 @@ def _seeded() -> str:
 
 def test_table_headers_lists_what_a_document_writes():
     headers = seed.table_headers(_seeded())
-    assert "fermix_core.harness" in headers
-    # M97 §4: the sandbox is the machine's own setting, which machine.toml holds.
-    assert "sandbox" not in headers
+    assert "fermix_core.meetings" in headers
+    # M97 §4: the sandbox is the machine's own setting, which machine.toml holds;
+    # so is the harness approval (M98 D5), and config.toml writes no harness key.
+    assert "sandbox" not in headers and "fermix_core.harness" not in headers
+    assert "fermix_core.harness" in seed.table_headers(seed.render_machine("/tmp/x-eval"))
     assert "fermix_core.providers.openai" in headers
 
 
@@ -364,8 +366,25 @@ def test_a_fragment_the_seeder_does_not_own_is_accepted():
 
 
 def test_a_fragment_redefining_a_seeded_table_is_refused():
-    problem = seed.extra_config_error(_seeded(), '[fermix_core.harness]\napproved = false\n')
-    assert problem and "fermix_core.harness" in problem
+    problem = seed.extra_config_error(_seeded(), '[fermix_core.meetings]\nenabled = false\n')
+    assert problem and "fermix_core.meetings" in problem
+
+
+def test_a_fragment_setting_a_home_harness_key_is_accepted():
+    # config.toml keeps every harness key but the machine's three, and the seeder
+    # writes none of them, so an arm may choose the default coding agent.
+    assert seed.extra_config_error(
+        _seeded(), '[fermix_core.harness]\ndefault_vendor = "codex"\n') is None
+
+
+@pytest.mark.parametrize("key, value", [
+    ("approved", "false"), ("codex_home", '"/tmp/x-eval/other-codex"'),
+    ("claude_config_dir", '"/tmp/x-eval/other-claude"')])
+def test_a_fragment_setting_a_machine_harness_key_is_refused(key, value):
+    # Fermix reads these from machine.toml only and strips a copy from config.toml
+    # at boot, so appended to config.toml they would vanish without a word.
+    problem = seed.extra_config_error(_seeded(), f"[fermix_core.harness]\n{key} = {value}\n")
+    assert problem and f"fermix_core.harness.{key}" in problem and seed.MACHINE_FILE in problem
 
 
 def test_a_fragment_redefining_the_sandbox_is_refused():
@@ -390,7 +409,7 @@ def test_an_accepted_fragment_keeps_the_merged_config_parseable(tmp_path):
     assert seed.extra_config_error(_seeded(), fragment) is None
     merged = tomllib.loads(_seeded() + "\n" + fragment)
     assert merged["fermix_core"]["browser"]["allowed_hosts"] == ["example.com"]
-    assert merged["fermix_core"]["harness"]["approved"] is True
+    assert merged["fermix_core"]["meetings"]["enabled"] is True
 
 
 if __name__ == "__main__":

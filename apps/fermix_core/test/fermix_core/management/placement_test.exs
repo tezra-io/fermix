@@ -8,7 +8,7 @@ defmodule FermixCore.Management.PlacementTest do
 
   @device ~w(
     hello lifecycle.prepare lifecycle.commit lifecycle.cancel diagnostics.build logs.query
-    doctor.start doctor.get doctor.cancel setup.session.create setup.detect
+    doctor.start doctor.get doctor.cancel setup.session.create setup.detect coding_agents.check
     computer_use.grant.start computer_use.permissions.get imessage.permissions.get
     imessage.grant.start imessage.policy.confirm browser.install.start
     capabilities.install.start home.status settings.sections home.act
@@ -184,10 +184,21 @@ defmodule FermixCore.Management.PlacementTest do
     assert {:ok, _response} = Protocol.respond("req-1", {:error, :unconfirmed, details})
   end
 
-  # This computer's section (M97 §7.2) is served on a linked computer only.
-  test "every device-class section is one this daemon serves" do
-    served = for section <- Settings.sections(macos?: true, computer?: true), do: section.id
+  # This computer's section (M97 §7.2) is served on a linked computer only,
+  # and whether coding agents may run here (M98 D5) only where the coding
+  # rail runs, never on a computer whose home is on its server.
+  test "every device-class section is one this daemon serves, on a computer or on its own" do
+    served =
+      for computer? <- [true, false],
+          section <- Settings.sections(macos?: true, computer?: computer?),
+          do: section.id
+
     assert Placement.device_sections() -- served == []
+
+    refute "harness_machine" in for(
+             section <- Settings.sections(macos?: true, computer?: true),
+             do: section.id
+           )
   end
 
   test "the refusals are published codes with their sentences" do

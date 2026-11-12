@@ -35,13 +35,17 @@ defmodule FermixCore.Harness.Manager do
       (`next_delivery_at`, `handoff_lease_ms/0`), so the worker sees the row only
       after the lease ends. While the wall clock runs normally it does not race
       the hand-off; a sleep or clock jump past the lease mid-hand-off is the
-      designed at-least-once duplicate.
+      designed at-least-once duplicate. After the hand-off, outside the lease,
+      the run's agent is marked signed out (reason `signed_out`) or its mark
+      cleared (`completed`) in this machine's coding store (`Harness.SignIn`).
     * **Monitoring.** An abnormal `Harness.Run` DOWN with a still-active row →
       `failed/:run_crashed` + delivery, exactly mirroring the scheduler's monitor
       map + `:normal`/`:shutdown` drop-only handling.
     * **Boot reconciliation (`handle_continue`).** Non-terminal local rows are
       finalized `interrupted` with resume guidance in the delivery, then a bounded
-      artifact GC runs and the daily GC timer is armed. Never blocks the
+      artifact GC runs, sign-in marks whose sign-in file changed while the engine
+      was down are deleted (`SignIn.check_all/1`), and the daily GC timer is
+      armed. Never blocks the
       supervisor. Cloud (`submitting`/`polling`) rows are P2 — logged, not
       touched. An interrupted local row usually belongs to a run that died with
       the daemon, but it can belong to a run that finished and whose report was
@@ -70,6 +74,7 @@ defmodule FermixCore.Harness.Manager do
   alias FermixCore.Harness.MemoryWriteback
   alias FermixCore.Harness.Run
   alias FermixCore.Harness.RunSupervisor
+  alias FermixCore.Harness.SignIn
   alias FermixCore.Harness.Telemetry
   alias FermixCore.Harness.VendorConfig
   alias FermixCore.Harness.Vendors
@@ -248,7 +253,7 @@ defmodule FermixCore.Harness.Manager do
   def handle_continue(:reconcile, %{timer_enabled?: false} = state), do: {:noreply, state}
 
   def handle_continue(:reconcile, state) do
-    {:noreply, state |> reconcile() |> run_gc() |> arm_gc_timer()}
+    {:noreply, state |> reconcile() |> run_gc() |> check_sign_ins() |> arm_gc_timer()}
   end
 
   @impl true
@@ -1137,10 +1142,13 @@ defmodule FermixCore.Harness.Manager do
     log_terminalize_error(state, run_id, reason, run_info)
   end
 
+  # The sign-in mark (M98 D10) is written after the hand-off, outside the
+  # hand-off lease, so the lease's budget is unchanged.
   defp post_terminal(state, run_id, row, outcome, run_info) do
     emit_terminal_telemetry(row, outcome)
     MemoryWriteback.write(row, outcome.result_text, repo: state.repo)
     hand_off_outcome(row, outcome, state)
+    SignIn.record_outcome(row, state.sign_in_opts)
     drop_run(state, run_id, run_info)
   end
 
@@ -1547,6 +1555,13 @@ defmodule FermixCore.Harness.Manager do
     state
   end
 
+  # A sign-in mark whose agent's sign-in file changed while the engine was
+  # down (the owner signed in again) is deleted (M98 D10).
+  defp check_sign_ins(state) do
+    :ok = SignIn.check_all(state.sign_in_opts)
+    state
+  end
+
   defp arm_gc_timer(%{timer_enabled?: false} = state), do: state
 
   defp arm_gc_timer(state) do
@@ -1607,6 +1622,9 @@ defmodule FermixCore.Harness.Manager do
       home: Keyword.get(opts, :home),
       path: Keyword.get(opts, :path),
       user: Keyword.get(opts, :user),
+      # `Harness.SignIn`'s options: this machine's coding store and the agents'
+      # sign-in files (tests inject their own).
+      sign_in_opts: Keyword.get(opts, :sign_in, []),
       runs: %{},
       run_monitors: %{},
       gc_timer: nil

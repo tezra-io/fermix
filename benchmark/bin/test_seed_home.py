@@ -149,6 +149,7 @@ def _populate_state(home):
         (home / name / "leftover").mkdir(parents=True)
         (home / name / "leftover" / "f.txt").write_text("from the previous sweep\n")
     for name in seed.STATE_FILES:
+        (home / name).parent.mkdir(parents=True, exist_ok=True)
         (home / name).write_text("stale\n")
 
 
@@ -247,6 +248,26 @@ def test_reset_state_removes_every_durable_state_path(tmp_path):
     seed.reset_state(str(home))
     for name in seed.STATE_DIRS + seed.STATE_FILES:
         assert not (home / name).exists(), name
+
+
+def test_reset_state_clears_the_coding_stores_sign_in_marks_and_keeps_the_rest_of_device(
+        tmp_path):
+    # M98 D10: a run that fails to sign in marks its agent signed out in this
+    # machine's coding store (`Harness.MachineStore`, device/coding.db). A mark left
+    # by one sweep's signed-out case must not greet the next sweep of the same home.
+    # The computers' records beside it are the --computers seed's own, not sweep state.
+    home = tmp_path / "x-eval"
+    (home / "device" / "computers").mkdir(parents=True)
+    record = home / "device" / "computers" / "6f1c2a9e-3b7d-4c21-9a8e-1d2f3a4b5c6d.json"
+    record.write_text('{"v": 1}\n')
+    store = [home / "device" / name for name in ("coding.db", "coding.db-wal", "coding.db-shm")]
+    for path in store:
+        path.write_text("a mark from the last sweep\n")
+
+    seed.reset_state(str(home))
+
+    assert not any(path.exists() for path in store)
+    assert record.read_text() == '{"v": 1}\n'
 
 
 def test_reset_state_keeps_the_homes_configuration(tmp_path):
@@ -495,9 +516,29 @@ def _seed_main(monkeypatch, home, *flags):
                                       "openai", "--model", "gpt-x", *flags])
     seed.main()
     # M97 §4: the seed writes the machine's own settings beside config.toml.
-    machine = tomllib.loads((home / seed.MACHINE_FILE).read_text())
-    assert machine["sandbox"]["mode"] == "strict"
+    assert _machine(home)["sandbox"]["mode"] == "strict"
     return tomllib.loads((home / "config.toml").read_text())
+
+
+def _machine(home):
+    return tomllib.loads((home / seed.MACHINE_FILE).read_text())
+
+
+# The harness keys that are each computer's own (M98 D5): Fermix reads them from
+# machine.toml only and strips a copy from config.toml at boot.
+_HARNESS_MACHINE_KEYS = {"approved", "codex_home", "claude_config_dir"}
+
+
+@pytest.mark.parametrize("cues", [None, _cues()])
+def test_the_harness_approval_is_this_computers_own_setting(cues):
+    # Pre-granted in every eval home, and written where Fermix reads it: a copy in
+    # config.toml would be stripped at boot and every harness suite would score 0.
+    cfg = tomllib.loads(seed.render_config(
+        "/tmp/x-eval", "openai", {"default_model": "m"}, None, cues=cues))
+    assert not _HARNESS_MACHINE_KEYS & set(cfg["fermix_core"].get("harness", {}))
+    harness = tomllib.loads(seed.render_machine("/tmp/x-eval", cues=cues))["fermix_core"]["harness"]
+    assert harness["approved"] is True
+    assert set(harness) <= _HARNESS_MACHINE_KEYS
 
 
 def test_a_default_seed_leaves_cues_off_and_no_cue_manifest(tmp_path, monkeypatch):
@@ -524,10 +565,11 @@ def test_cues_ready_codex_and_leave_claude_code_unready_for_the_follow_up_cases(
     # consent is granted for every home, and the operator's own sign-ins are never read.
     home = tmp_path / "x-eval"
     on = _seed_main(monkeypatch, home, "--cues")
-    harness = on["fermix_core"]["harness"]
-    assert harness["approved"] is True
-    assert harness["codex_home"] == str(home / seed.CUE_CODEX_HOME)
-    assert harness["claude_config_dir"] == str(home / seed.CUE_CLAUDE_DIR)
+    # The approval and both sign-in folders are this computer's own (M98 D5).
+    assert "harness" not in on["fermix_core"]
+    assert _machine(home)["fermix_core"]["harness"] == {
+        "approved": True, "codex_home": str(home / seed.CUE_CODEX_HOME),
+        "claude_config_dir": str(home / seed.CUE_CLAUDE_DIR)}
     assert not (home / seed.CUE_CLAUDE_DIR).exists()
 
     stub = home / seed.CUE_BIN_DIR / "codex"
@@ -544,7 +586,8 @@ def test_cues_ready_codex_and_leave_claude_code_unready_for_the_follow_up_cases(
 
     # A seed without --cues takes the stubs away, so no other suite finds them.
     off = _seed_main(monkeypatch, home)
-    assert off["fermix_core"]["harness"] == {"approved": True}
+    assert "harness" not in off["fermix_core"]
+    assert _machine(home)["fermix_core"]["harness"] == {"approved": True}
     assert not stub.exists() and not (home / seed.CUE_CODEX_HOME / "auth.json").exists()
     assert not (home / seed.CUE_CODEX_HOME / "models_cache.json").exists()
 
@@ -700,6 +743,67 @@ def test_computers_turn_always_on_on_and_a_seed_without_them_takes_them_away(
 def test_without_computers_the_config_has_no_always_on_section():
     cfg = seed.render_config("/tmp/x-eval", "openai", {"default_model": "m"}, None)
     assert "always_on" not in tomllib.loads(cfg)["fermix_core"]
+
+
+# --- a signed-out Claude Code (M98 D10) ------------------------------------------
+
+# Claude Code's terminal line for a run it cannot sign in for, as `Harness.Run`
+# quotes it; the lines before it are to confirm against a real signed-out CLI.
+_NOT_LOGGED_IN = ('{"type":"result","subtype":"success","is_error":true,'
+                  '"result":"Not logged in · Please run /login"}')
+
+
+def _claude_run(stub):
+    """The stub run the way `Adapters.ClaudeHeadless` renders a run."""
+    return subprocess.run(
+        [str(stub), "-p", "--output-format", "stream-json", "--verbose", "--disallowed-tools",
+         "Edit(.codex/**)", "--", "Add a --shout flag to the greeter."],
+        capture_output=True, text=True, encoding="utf-8", env={"PATH": "/usr/bin:/bin"})
+
+
+def test_coding_signed_out_puts_a_claude_first_that_fails_every_run_as_signed_out(
+        tmp_path, monkeypatch, capsys):
+    home = tmp_path / "x-eval"
+    on = _seed_main(monkeypatch, home, "--coding-signed-out")
+    stub = home / seed.CLAUDE_STUB
+    assert stub.parent == home / seed.CUE_BIN_DIR   # the folder the daemon's PATH starts with
+    assert stub.stat().st_mode & 0o777 == 0o700
+    assert "coding signed out:" in capsys.readouterr().out
+
+    # Found at boot: `Harness.Vendors` reads the first line of `--version`.
+    version = subprocess.run([str(stub), "--version"], capture_output=True, text=True)
+    assert version.returncode == 0 and version.stdout.strip()
+
+    run = _claude_run(stub)
+    assert run.returncode == 1
+    lines = run.stdout.splitlines()
+    events = [json.loads(line) for line in lines]
+    # The init event carries the session id the adapter records; the terminal
+    # `result` event, with its words, is the last line.
+    assert events[0]["type"] == "system" and events[0]["subtype"] == "init"
+    assert events[0]["session_id"]
+    assert lines[-1] == _NOT_LOGGED_IN
+    assert [e["type"] for e in events].count("result") == 1
+
+    # Nothing else in the home changes: the approval stays the only harness key,
+    # and Claude Code's sign-in folder is the host's own as in any other seed.
+    assert "harness" not in on["fermix_core"]
+    assert _machine(home)["fermix_core"]["harness"] == {"approved": True}
+
+
+def test_a_seed_without_coding_signed_out_takes_the_stub_claude_away(tmp_path, monkeypatch):
+    home = tmp_path / "x-eval"
+    _seed_main(monkeypatch, home, "--coding-signed-out", "--cues")
+    claude, codex = home / seed.CLAUDE_STUB, home / seed.CUE_BIN_DIR / "codex"
+    assert claude.is_file() and codex.is_file()
+
+    # Each flag takes away only its own stub.
+    _seed_main(monkeypatch, home, "--cues")
+    assert not claude.exists() and codex.is_file()
+    _seed_main(monkeypatch, home, "--coding-signed-out")
+    assert claude.is_file() and not codex.exists()
+    _seed_main(monkeypatch, home)
+    assert not claude.exists() and not codex.exists()
 
 
 def test_computers_refuse_a_devices_file_the_seed_did_not_write(tmp_path, monkeypatch):

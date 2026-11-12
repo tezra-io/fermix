@@ -84,7 +84,11 @@ defmodule FermixCore.Setup.MachineFileTest do
 
       refute machine =~ "invented-notes"
       refute machine =~ "telegram"
-      assert machine |> MachineFile.strip() |> elem(1) == @removed
+      # And the coding agents' table every machine file holds (M98 D5).
+      assert ConfigText.value(machine, "fermix_core.harness", "approved") == {:ok, "false"}
+
+      assert machine |> MachineFile.strip() |> elem(1) ==
+               @removed ++ ["fermix_core.harness.approved"]
     end
 
     test "a file with no machine settings is left as it is and gives no machine file" do
@@ -340,7 +344,14 @@ defmodule FermixCore.Setup.MachineFileTest do
   describe "migration/3" do
     test "a home with neither file is left as it is" do
       assert MachineFile.migration("", :absent, false) ==
-               %{machine: nil, config: nil, removed: [], copied: [], server_default?: false}
+               %{
+                 machine: nil,
+                 config: nil,
+                 removed: [],
+                 copied: [],
+                 generated: [],
+                 server_default?: false
+               }
 
       assert MachineFile.notice(MachineFile.migration("", :absent, false)) == nil
     end
@@ -375,7 +386,15 @@ defmodule FermixCore.Setup.MachineFileTest do
       {home, _removed} = MachineFile.strip(@old_config)
       plan = MachineFile.migration(home, MachineFile.extract(@old_config), false)
 
-      assert plan == %{machine: nil, config: nil, removed: [], copied: [], server_default?: false}
+      assert plan == %{
+               machine: nil,
+               config: nil,
+               removed: [],
+               copied: [],
+               generated: [],
+               server_default?: false
+             }
+
       assert MachineFile.notice(plan) == nil
     end
 
@@ -413,6 +432,7 @@ defmodule FermixCore.Setup.MachineFileTest do
                config: nil,
                removed: [],
                copied: [],
+               generated: [],
                server_default?: false
              }
     end
@@ -482,6 +502,201 @@ defmodule FermixCore.Setup.MachineFileTest do
       assert again.config == first.config
       assert again.copied == []
       assert MachineFile.migration(again.config, first.machine, false).config == nil
+    end
+  end
+
+  # M98 D5: whether coding agents may run here and where Codex and Claude Code
+  # keep their sign-ins are this computer's own (`[fermix_core.harness]`
+  # approved, codex_home and claude_config_dir); the rest of the table, the
+  # default agent among it, is the home's.
+  describe "the coding agents' machine keys" do
+    @harness_config """
+    [fermix_core.agent]
+    name = "Orchard"
+
+    [fermix_core.harness]
+    enabled = true
+    approved = true # given on this Mac
+    default_vendor = "codex"
+    codex_home = "/Users/invented/.codex-work"
+    claude_config_dir = "/Users/invented/.claude-work"
+    """
+
+    @harness_removed ~w(fermix_core.harness.approved fermix_core.harness.codex_home
+                        fermix_core.harness.claude_config_dir)
+
+    @moved_sentence "This computer's own settings moved to machine.toml: " <>
+                      "fermix_core.harness.approved, fermix_core.harness.codex_home, " <>
+                      "fermix_core.harness.claude_config_dir."
+
+    test "split by key: the approval and the sign-in folders are this computer's" do
+      {home, removed} = MachineFile.strip(@harness_config)
+
+      assert removed == @harness_removed
+
+      assert ConfigText.value(home, "fermix_core.harness", "default_vendor") ==
+               {:ok, ~s("codex")}
+
+      assert ConfigText.value(home, "fermix_core.harness", "enabled") == {:ok, "true"}
+      refute home =~ "approved"
+      refute home =~ ".codex-work"
+      refute home =~ ".claude-work"
+
+      machine = MachineFile.extract(@harness_config)
+
+      assert ConfigText.value(machine, "fermix_core.harness", "approved") == {:ok, "true"}
+
+      assert ConfigText.value(machine, "fermix_core.harness", "codex_home") ==
+               {:ok, ~s("/Users/invented/.codex-work")}
+
+      assert ConfigText.value(machine, "fermix_core.harness", "claude_config_dir") ==
+               {:ok, ~s("/Users/invented/.claude-work")}
+
+      refute machine =~ "default_vendor"
+      refute machine =~ "enabled"
+      refute machine =~ "Orchard"
+    end
+
+    test "a table that held only this computer's keys leaves no header behind" do
+      {home, removed} = MachineFile.strip(~s([fermix_core.harness]\napproved = true\n))
+
+      assert removed == ["fermix_core.harness.approved"]
+      refute home =~ "[fermix_core.harness]"
+    end
+
+    # The marker: every machine file this engine writes holds the table, its
+    # approval written even when off, so a later boot knows the keys were
+    # taken; a home with no machine setting at all still gets no file.
+    test "every machine file it writes holds the table, the approval off unless given" do
+      for text <- [MachineFile.extract(@old_config), MachineFile.server_default()] do
+        assert ConfigText.value(text, "fermix_core.harness", "approved") == {:ok, "false"}
+      end
+
+      machine =
+        MachineFile.extract(~s([fermix_core.harness]\ncodex_home = "/Users/invented/.codex"\n))
+
+      assert ConfigText.value(machine, "fermix_core.harness", "approved") == {:ok, "false"}
+
+      assert ConfigText.value(machine, "fermix_core.harness", "codex_home") ==
+               {:ok, ~s("/Users/invented/.codex")}
+
+      assert length(String.split(machine, "[fermix_core.harness]")) == 2
+      assert MachineFile.extract(~s([fermix_core.agent]\nname = "Orchard"\n)) == ""
+    end
+
+    # A machine file an earlier engine wrote holds no such table: the keys are
+    # taken from config.toml once, into the machine file first.
+    test "a machine file without the table takes them from config.toml, written first" do
+      machine = MachineFile.header() <> "\n\n[sandbox]\nmode = \"standard\"\n"
+      plan = MachineFile.migration(@harness_config, machine, false)
+
+      assert plan.machine =~ ~s([sandbox]\nmode = "standard")
+      assert ConfigText.value(plan.machine, "fermix_core.harness", "approved") == {:ok, "true"}
+
+      assert ConfigText.value(plan.machine, "fermix_core.harness", "codex_home") ==
+               {:ok, ~s("/Users/invented/.codex-work")}
+
+      assert ConfigText.value(plan.machine, "fermix_core.harness", "claude_config_dir") ==
+               {:ok, ~s("/Users/invented/.claude-work")}
+
+      refute plan.machine =~ "default_vendor"
+      assert plan.config == elem(MachineFile.strip(@harness_config), 0)
+      assert plan.removed == @harness_removed
+      assert plan.generated == @harness_removed
+      assert MachineFile.notice(plan) == {:info, @moved_sentence}
+    end
+
+    # T7: a server whose machine file an earlier engine wrote keeps the folder
+    # its config.toml names in force, and the notice names it.
+    test "on a server that has a machine file, a sign-in folder stays in force and is named" do
+      config = ~s([fermix_core.harness]\ncodex_home = "/Users/invented/.codex"\n)
+      plan = MachineFile.migration(config, ~s([sandbox]\nmode = "open"\n), true)
+
+      assert ConfigText.value(plan.machine, "fermix_core.harness", "codex_home") ==
+               {:ok, ~s("/Users/invented/.codex")}
+
+      assert ConfigText.value(plan.machine, "fermix_core.harness", "approved") == {:ok, "false"}
+      refute plan.server_default?
+
+      assert MachineFile.notice(plan) ==
+               {:info,
+                "This computer's own settings moved to machine.toml: " <>
+                  "fermix_core.harness.codex_home."}
+    end
+
+    test "with the table, the machine file wins and config.toml's copy is dropped" do
+      machine = MachineFile.header() <> "\n\n[fermix_core.harness]\napproved = false\n"
+      plan = MachineFile.migration(@harness_config, machine, false)
+
+      assert plan.machine == nil
+      assert plan.generated == []
+      assert plan.config == elem(MachineFile.strip(@harness_config), 0)
+      assert {:warning, sentence} = MachineFile.notice(plan)
+      assert sentence =~ "so they were removed from it: fermix_core.harness.approved"
+    end
+
+    # Stopped after the machine file was written: it holds the table now, so
+    # the next boot finishes the removal and keeps what the first one took.
+    test "a boot stopped after its first write is finished by the next, losing nothing" do
+      first = MachineFile.migration(@harness_config, ~s([sandbox]\nmode = "standard"\n), false)
+      again = MachineFile.migration(@harness_config, first.machine, false)
+
+      assert again.machine == nil
+      assert again.generated == []
+      assert again.config == first.config
+      assert {:warning, _dropped} = MachineFile.notice(again)
+      assert MachineFile.migration(again.config, first.machine, false).config == nil
+    end
+
+    # The marker is not added at a boot: a machine file without the table
+    # while config.toml holds none of the keys is left as it is.
+    test "a machine file without the table, and none of the keys in config.toml, changes nothing" do
+      config = ~s([fermix_core.harness]\ndefault_vendor = "claude"\n)
+      plan = MachineFile.migration(config, ~s([sandbox]\nmode = "standard"\n), false)
+
+      assert plan.machine == nil
+      assert plan.config == nil
+      assert plan.generated == []
+      assert MachineFile.notice(plan) == nil
+    end
+
+    test "another machine setting config.toml still holds is named as dropped beside what moved" do
+      config = @old_config <> "\n[fermix_core.harness]\napproved = true\n"
+      plan = MachineFile.migration(config, ~s([sandbox]\nmode = "standard"\n), false)
+
+      assert plan.generated == ["fermix_core.harness.approved"]
+      assert ConfigText.value(plan.machine, "sandbox", "mode") == {:ok, ~s("standard")}
+      assert {:warning, sentence} = MachineFile.notice(plan)
+
+      assert sentence =~
+               "This computer's own settings moved to machine.toml: fermix_core.harness.approved."
+
+      assert sentence =~ "so they were removed from it: sandbox, fermix_core.computer_use"
+      refute sentence =~ "removed from it: fermix_core.harness"
+      refute sentence =~ "fermix_core.computer_history.apps, fermix_core.harness"
+    end
+
+    # A server takes none of a computer's machine settings: an approval given
+    # on a server before this change fails closed there, and is named.
+    test "a server with no machine file leaves the approval and the folders out, and says so" do
+      plan = MachineFile.migration(@harness_config, :absent, true)
+
+      assert plan.machine == MachineFile.server_default()
+      assert plan.removed == @harness_removed
+      assert {:warning, sentence} = MachineFile.notice(plan)
+
+      assert sentence =~
+               "left out: fermix_core.harness.approved, fermix_core.harness.codex_home, " <>
+                 "fermix_core.harness.claude_config_dir."
+    end
+
+    test "a computer with no machine file takes them, with the rest of its own settings" do
+      plan = MachineFile.migration(@harness_config, :absent, false)
+
+      assert ConfigText.value(plan.machine, "fermix_core.harness", "approved") == {:ok, "true"}
+      assert plan.removed == @harness_removed
+      assert plan.generated == []
+      assert MachineFile.notice(plan) == {:info, @moved_sentence}
     end
   end
 end

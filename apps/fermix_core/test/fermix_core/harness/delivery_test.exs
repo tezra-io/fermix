@@ -333,6 +333,30 @@ defmodule FermixCore.Harness.DeliveryTest do
                  "Resume: cd /repo && codex exec resume sess-1 --json"
     end
 
+    # M98 D10: the vendor's words first, then Fermix's sentence naming the agent
+    # and the machine, then the way back in.
+    test "a run that failed to sign in names the agent and the machine after its words" do
+      row =
+        completed_row(%{
+          id: "hr_000000000010",
+          vendor: "claude",
+          status: "failed",
+          cwd: "/repo",
+          reason: "signed_out",
+          vendor_session_id: "sess-10"
+        })
+
+      message =
+        Delivery.compose(row, "Not logged in · Please run /login", machine: "this server")
+
+      assert message ==
+               "[run hr_000000000010] failed — claude · repo · 2m14s\n" <>
+                 "Not logged in · Please run /login\n" <>
+                 "Claude Code is signed out on this server, so the run stopped. Sign in to " <>
+                 "Claude Code on this server (run claude in a terminal), then tell me.\n" <>
+                 "Resume: cd /repo && claude --resume sess-10"
+    end
+
     test "an interrupted run offers the resume hint" do
       row =
         completed_row(%{
@@ -550,6 +574,27 @@ defmodule FermixCore.Harness.DeliveryTest do
       assert {:ok, :sent} = Delivery.deliver(row, adapter: RecordingAdapter)
       assert [{"chat-1", text, _opts}] = recorded()
       assert text =~ "Not logged in · Please run /login"
+    end
+
+    test "a retried run that failed to sign in carries the sentence too" do
+      dir = tmp_run_dir()
+      File.write!(Path.join(dir, "result.txt"), "Not logged in · Please run /login")
+
+      row =
+        completed_row(%{
+          vendor: "claude",
+          status: "failed",
+          reason: "signed_out",
+          artifacts_dir: dir
+        })
+
+      assert {:ok, :sent} =
+               Delivery.deliver(row, adapter: RecordingAdapter, machine: "this computer")
+
+      assert [{"chat-1", text, _opts}] = recorded()
+
+      assert text =~
+               "Not logged in · Please run /login\nClaude Code is signed out on this computer"
     end
   end
 

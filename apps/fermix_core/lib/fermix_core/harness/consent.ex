@@ -8,10 +8,12 @@ defmodule FermixCore.Harness.Consent do
   sub-agent workers, and unauthorized cron are refused by
   `Harness.Authorization` regardless. Awareness is served by an explicit setup
   toggle, so this module is a config read plus actionable guidance: consent is
-  granted in Setup → Coding Agents or by setting `[fermix_core.harness] approved`
-  (default `false`) in config. Two knobs, two jobs — `enabled` says the feature
-  exists, `approved` says the owner consented on this machine; a permanent
-  "never" is `enabled = false`, there is no third state.
+  granted in this computer's own settings (Setup → Coding Agents) or by setting
+  `[fermix_core.harness] approved` (default `false`) in its `machine.toml`, since
+  the approval is this machine's and never travels with the home (M98 D5). Two
+  knobs, two jobs — `enabled` says the feature exists, `approved` says the owner
+  consented on this machine; a permanent "never" is `enabled = false`, there is
+  no third state.
 
   There is no mid-conversation consent prompt: the removed interactive path was
   the harness's only *stall* state (a pending token nothing could answer). And
@@ -46,7 +48,8 @@ defmodule FermixCore.Harness.Consent do
   """
   @spec scheduled_guidance() :: String.t()
   def scheduled_guidance do
-    "Coding agents are not yet approved on this machine. Approve them in " <>
-      "Setup → Coding Agents, or set [fermix_core.harness] approved = true in config."
+    "Coding agents are not yet approved on this computer. Approve them in this " <>
+      "computer's own settings (Setup → Coding Agents), or set " <>
+      "[fermix_core.harness] approved = true in its machine.toml."
   end
 end

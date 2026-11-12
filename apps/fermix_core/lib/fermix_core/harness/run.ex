@@ -470,8 +470,21 @@ defmodule FermixCore.Harness.Run do
     fields = terminal_fields(state, summary) |> Map.put(:reason, reason) |> Map.merge(extra)
     {status, fields} = persist_streamed_result(state, status, fields)
     {status, fields} = persist_vendor_failure(state, status, fields)
+    fields = classify_sign_in(fields, status, state.adapter)
     {status, backfill_diagnostics(status, fields)}
   end
+
+  # M98 D10: a failed run whose own words — settled only here, after the codex
+  # `turn.failed` text became its result — are the vendor's pinned sign-in
+  # failure is `signed_out`, so the Manager marks the agent and the notices
+  # name it. The words stay the result; words that match nothing keep the
+  # reason the exit gave.
+  defp classify_sign_in(%{result_text: text} = fields, "failed", adapter)
+       when is_binary(text) do
+    if adapter.signed_out?(text), do: %{fields | reason: "signed_out"}, else: fields
+  end
+
+  defp classify_sign_in(fields, _status, _adapter), do: fields
 
   # A vendor that reports its failure as well-formed JSON (claude's terminal
   # `result` event, codex's `turn.failed`) leaves the non-JSON diagnostics tail

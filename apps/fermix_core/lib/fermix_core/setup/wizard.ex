@@ -1828,7 +1828,7 @@ defmodule FermixCore.Setup.Wizard do
   # `[fermix_core.harness] approved` is the first-use consent gate (design §22).
   # Web-only, mirroring `default_vendor`: an ABSENT answer (nil) PRESERVES the
   # existing value; `true` grants consent, `false` clears the key back to the
-  # `false` default (kept out of the TOML rather than written explicitly).
+  # `false` default, which this computer's machine.toml writes (M98 D5).
   defp put_harness_approved(snapshot, nil), do: snapshot
   defp put_harness_approved(snapshot, true), do: put_harness_key(snapshot, :approved, true)
   defp put_harness_approved(snapshot, false), do: delete_harness_key(snapshot, :approved)

@@ -3,8 +3,13 @@ defmodule FermixCore.Harness.Supervisor do
   Supervises the coding-harness local rail as one `:rest_for_one` unit so a
   crash tears the rail down in dependency order (design §6.4, spec §5).
 
-  Order — `Manager`, `RunSupervisor`, `DeliveryWorker`:
+  Order — `MachineStore`, `Manager`, `RunSupervisor`, `DeliveryWorker`:
 
+    * the `MachineStore` (this machine's `device/coding.db`) is first because
+      the Manager reads it at boot. It never raises on its input or its I/O
+      (AGENTS.md "Cascade roots"): a store that does not open stays up and
+      answers every request with why, so nothing after it restarts for it.
+      Its own crash restarts the Manager and the rest, as a Manager crash does.
     * a `Manager` crash restarts the `RunSupervisor` (and `DeliveryWorker`) that
       follow it, sweeping every live `Harness.Run` first — so the restarted
       Manager's boot reconciliation only ever finds genuinely dead rows. Without
@@ -19,12 +24,14 @@ defmodule FermixCore.Harness.Supervisor do
   Always started, even with the feature disabled: boot reconciliation and the
   delivery-outbox drain must finish in-flight work regardless of `enabled?`. The
   worker timer seam (`opts`) rides through to `Manager`/`DeliveryWorker`;
-  `RunSupervisor` takes no options.
+  `RunSupervisor` takes no options, and the store opens its file only where an
+  agent can run (`MachineStore`'s `:open?`).
   """
 
   use Supervisor
 
   alias FermixCore.Harness.DeliveryWorker
+  alias FermixCore.Harness.MachineStore
   alias FermixCore.Harness.Manager
   alias FermixCore.Harness.RunSupervisor
 
@@ -36,6 +43,7 @@ defmodule FermixCore.Harness.Supervisor do
   @impl true
   def init(opts) do
     children = [
+      MachineStore,
       {Manager, opts},
       RunSupervisor,
       {DeliveryWorker, opts}

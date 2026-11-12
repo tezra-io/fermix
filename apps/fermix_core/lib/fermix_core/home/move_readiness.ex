@@ -69,9 +69,10 @@ defmodule FermixCore.Home.MoveReadiness do
       points Meta at that address;
     * `slack`: Slack turned on in its Events (webhook) mode warns for the
       same reason, unless it is switched to Socket Mode first;
-    * `coding_agents`: coding-harness consent given here warns: a move
-      withdraws it, as every restore does (`Archive.RestoredConfig`), so
-      coding agents ask for the owner's approval again on the server;
+    * `coding_agents`: coding agents approved here warn that they stop on
+      this computer after the move: the approval is this computer's own
+      (M98 D5, its `machine.toml`), which stays here, and the server runs
+      them only with its own;
     * `cutover_gap`: a recurring job more than an hour late is skipped, and
       while Telegram is set up (a bot token, and not turned off), its
       messages sent during the move wait until it is done (Telegram keeps
@@ -176,7 +177,7 @@ defmodule FermixCore.Home.MoveReadiness do
       stays_here_item(config, macos?, name, Keyword.get(opts, :returning, false)),
       whatsapp(config, name),
       slack(config, name),
-      coding_agents(config, name),
+      coding_agents(config, macos?, name),
       item("cutover_gap", :warn, cutover_sentence(config)),
       item(
         "serves_nothing",
@@ -234,16 +235,12 @@ defmodule FermixCore.Home.MoveReadiness do
 
   @doc """
   What a move costs that this home's settings (`settings/2`'s answer) turn
-  on, in this order: `:coding_agents` (coding-harness consent given, which a
-  restore withdraws) and `:telegram` (set up, so its messages wait while the
-  move runs). None when the settings could not be read.
+  on: `:telegram` (set up, so its messages wait while the move runs). None
+  when the settings could not be read. Coding agents cost a move back
+  nothing: this computer kept its own approval (M98 D5).
   """
-  @spec costs({:ok, String.t()} | {:error, String.t()}) :: [:coding_agents | :telegram]
-  def costs({:ok, text}) do
-    [coding_agents: on?(text, "fermix_core.harness", "approved"), telegram: telegram?(text)]
-    |> Enum.filter(fn {_cost, on} -> on end)
-    |> Enum.map(fn {cost, _on} -> cost end)
-  end
+  @spec costs({:ok, String.t()} | {:error, String.t()}) :: [:telegram]
+  def costs({:ok, text}), do: if(telegram?(text), do: [:telegram], else: [])
 
   def costs({:error, _sentence}), do: []
 
@@ -712,15 +709,24 @@ defmodule FermixCore.Home.MoveReadiness do
 
   defp slack({:error, sentence}, _name), do: item("slack", :warn, sentence)
 
-  # A restore withdraws coding-harness consent (`Archive.RestoredConfig`), and
-  # the move restores the home on the server.
-  defp coding_agents({:ok, text}, name) do
+  # The approval is this computer's own (M98 D5): it stays here, where no
+  # coding agent runs after the move, and each machine decides with its own.
+  defp coding_agents({:ok, text}, macos?, name) do
+    machine = if macos?, do: "Mac", else: "computer"
+
     if on?(text, "fermix_core.harness", "approved"),
-      do: item("coding_agents", :warn, "Coding agents ask for your approval again on #{name}."),
+      do:
+        item(
+          "coding_agents",
+          :warn,
+          "Coding agents stop on this #{machine} after the move. They run on #{name} only " <>
+            "with your approval there."
+        ),
       else: item("coding_agents", :ok, "No coding agent has your approval on this computer.")
   end
 
-  defp coding_agents({:error, sentence}, _name), do: item("coding_agents", :warn, sentence)
+  defp coding_agents({:error, sentence}, _macos?, _name),
+    do: item("coding_agents", :warn, sentence)
 
   defp on?(text, section, key), do: ConfigText.value(text, section, key) == {:ok, "true"}
 

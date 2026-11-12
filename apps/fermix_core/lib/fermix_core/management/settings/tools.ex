@@ -10,6 +10,9 @@ defmodule FermixCore.Management.Settings.Tools do
   alone where the build carries no Apple Maps helper), and the Brave key row
   stands whenever web or place search uses Brave.
 
+  `harness` is the home's coding settings, the preferred tool; whether coding
+  agents may run is each machine's own (M98 D5, `Settings.CodingMachine`).
+
   `computer_history` is this machine's part of the history settings (M97 §4,
   a machine section in `Management.Placement`): whether it records, which
   apps, and how its own sittings are summarized (read-only). The home's route
@@ -20,7 +23,6 @@ defmodule FermixCore.Management.Settings.Tools do
 
   alias FermixCore.ComputerHistory.Config, as: ComputerHistoryConfig
   alias FermixCore.ComputerHistory.Promise
-  alias FermixCore.Harness.Config, as: HarnessConfig
   alias FermixCore.Harness.Vendors
   alias FermixCore.Management.Secrets
   alias FermixCore.Management.Settings.Row
@@ -157,18 +159,12 @@ defmodule FermixCore.Management.Settings.Tools do
 
   def rows("harness", snapshot, _opts) do
     block = Source.core(snapshot, :harness)
-    restart = Row.restart?(:harness)
 
     [
-      Row.new("harness_approved", :toggle, "Allow coding agents to run on this Mac",
-        footer: "Each tool keeps its own login. Cloud runs are off in this release.",
-        value: Source.boolean(block, :approved, HarnessConfig.approved?([])),
-        restart: restart
-      ),
       Row.new("harness_default_vendor", :choice, "Preferred tool",
         value: Source.string(block, :default_vendor),
         options: [Row.option("", "No preference") | vendor_options()],
-        restart: restart
+        restart: Row.restart?(:harness)
       )
     ]
   end

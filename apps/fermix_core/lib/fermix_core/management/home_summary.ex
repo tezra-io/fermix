@@ -266,7 +266,7 @@ defmodule FermixCore.Management.HomeSummary do
           required(:primary_too_old) => boolean(),
           required(:copies_bytes) => non_neg_integer() | nil,
           required(:stays_here) => [:voice | :meetings | :accessories],
-          required(:return_costs) => [:coding_agents | :telegram],
+          required(:return_costs) => [:telegram],
           required(:zone) => String.t(),
           required(:return) => map() | nil,
           required(:returning) => map() | :unreadable | nil,

@@ -30,9 +30,6 @@ defmodule FermixCore.Home.MoveReadinessTest do
     [fermix_core.providers.anthropic]
     api_key = "@keyring"
 
-    [fermix_core.harness]
-    approved = true
-
     [fermix_channels.whatsapp]
     enabled = true
 
@@ -47,10 +44,14 @@ defmodule FermixCore.Home.MoveReadinessTest do
     """)
 
     # This Mac's own settings (M97 §4): it carries Messages, which the home
-    # uses (config.toml's [fermix_channels.imessage], the home's own).
+    # uses (config.toml's [fermix_channels.imessage], the home's own), and
+    # coding agents may run on it (M98 D5).
     File.write!(MachineFile.path(home), """
     [fermix_core.computer]
     imessage = true
+
+    [fermix_core.harness]
+    approved = true
     """)
 
     File.mkdir_p!(Path.join(home, "plugins"))
@@ -129,8 +130,11 @@ defmodule FermixCore.Home.MoveReadinessTest do
              "Slack stops after the move unless it uses Socket Mode, which you turn on in " <>
                "your Slack app's settings and then in Fermix's Slack settings."
 
+    # M98 D5: the approval is this Mac's and stays here; the server's own
+    # decides there.
     assert sentence.("coding_agents") ==
-             "Coding agents ask for your approval again on north-box."
+             "Coding agents stop on this Mac after the move. They run on north-box only " <>
+               "with your approval there."
 
     # This home sets up no Telegram, so the gap names only the jobs (EC2 test
     # finding 7).
@@ -197,7 +201,8 @@ defmodule FermixCore.Home.MoveReadinessTest do
   end
 
   # What a move back costs that its confirm names: only what the settings
-  # turn on (EC2 test finding 15).
+  # turn on (EC2 test finding 15). Coding agents cost nothing: this computer
+  # kept its own approval in its machine file (M98 D5).
   test "the costs a confirm names are what the settings turn on, and none unread" do
     assert MoveReadiness.costs({:ok, ""}) == []
     assert MoveReadiness.costs({:error, "The settings file could not be read."}) == []
@@ -206,12 +211,39 @@ defmodule FermixCore.Home.MoveReadinessTest do
              {:ok,
               "[fermix_core.harness]\napproved = true\n\n" <>
                 ~s([fermix_channels.telegram]\nbot_token = "@keyring"\n)}
-           ) == [:coding_agents, :telegram]
+           ) == [:telegram]
 
     assert MoveReadiness.costs(
              {:ok,
-              ~s([fermix_core.harness]\napproved = false\n\n[fermix_channels.telegram]\nenabled = false\nbot_token = "@keyring"\n)}
+              ~s([fermix_core.harness]\napproved = true\n\n[fermix_channels.telegram]\nenabled = false\nbot_token = "@keyring"\n)}
            ) == []
+  end
+
+  # The approval is read from this computer's machine file alone: a copy
+  # written into config.toml by hand is read by nothing (M98 D5).
+  test "a coding approval left in config.toml is not this computer's", ctx do
+    File.write!(Path.join(ctx.home, "config.toml"), "[fermix_core.harness]\napproved = true\n")
+    File.write!(MachineFile.path(ctx.home), "[fermix_core.harness]\napproved = false\n")
+
+    assert %{items: items} = MoveReadiness.report(ctx.home, ctx.candidate, opts(ctx))
+
+    assert %{status: :ok, sentence: "No coding agent has your approval on this computer."} =
+             item_in(items, "coding_agents")
+  end
+
+  # On a computer that is no Mac, the machine is named as one.
+  test "the review names the computer that is no Mac", ctx do
+    settings = {:ok, "[fermix_core.harness]\napproved = true\n"}
+
+    assert %{status: :warn, sentence: sentence} =
+             item_in(
+               MoveReadiness.summary_items(settings, false, "north-box", opts(ctx)),
+               "coding_agents"
+             )
+
+    assert sentence ==
+             "Coding agents stop on this computer after the move. They run on north-box only " <>
+               "with your approval there."
   end
 
   test "plugins with a build for the server are installed again there, and say so", ctx do

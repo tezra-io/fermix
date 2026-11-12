@@ -86,9 +86,12 @@ start_daemon() {
   local -a opik_env=(FERMIX_OPIK_ENABLED=1 FERMIX_OPIK_PROJECT="$PROJECT")
   if [ "${FERMIX_CAP_OPIK:-1}" = "0" ]; then opik_env=(); fi
   # With --cues the seeder leaves a stub `codex` in eval-bin for the follow-up
-  # cases; first on the daemon's PATH, it is the Codex the daemon finds at boot.
+  # cases, and with --coding-signed-out a stub `claude` that fails every run as
+  # signed out; first on the daemon's PATH, each is the CLI the daemon finds at boot.
   local daemon_path="$PATH"
-  if [ -x "$HOME_DIR/eval-bin/codex" ]; then daemon_path="$HOME_DIR/eval-bin:$PATH"; fi
+  if [ -x "$HOME_DIR/eval-bin/codex" ] || [ -x "$HOME_DIR/eval-bin/claude" ]; then
+    daemon_path="$HOME_DIR/eval-bin:$PATH"
+  fi
   ( cd "$REPO_ROOT" && exec env \
       PATH="$daemon_path" \
       FERMIX_HOME="$HOME_DIR" \

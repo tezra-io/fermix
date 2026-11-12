@@ -94,10 +94,10 @@ defmodule FermixCore.Home.ArchiveTest do
                   epoch: 4,
                   rewritten: ["fermix_core.meetings.recordings"],
                   kept_paths: ["fermix_core.meetings.helper"],
-                  harness_consent_reset: true,
                   secret_store_switched: false,
                   instance_role_dropped: false,
-                  device_settings_dropped: [],
+                  # The coding approval is the computer's own (M98 D5).
+                  device_settings_dropped: ["fermix_core.harness.approved"],
                   keyring_secrets: 2,
                   source_host: @host,
                   host: @host,
@@ -117,15 +117,15 @@ defmodule FermixCore.Home.ArchiveTest do
 
       refute token(Path.join(into, "memory.db")) == "invented-token"
 
-      # The value that named the old home moved and consent was withdrawn;
-      # nothing else in the file changed.
+      # The value that named the old home moved and the computer's coding
+      # approval was left out (M98 D5); nothing else in the file changed.
       assert File.read!(Path.join(into, "config.toml")) ==
                config_toml(home)
                |> String.replace(
                  ~s("#{home}/workspace/meetings"),
                  ~s("#{into}/workspace/meetings")
                )
-               |> String.replace("approved = true", "approved = false")
+               |> String.replace("[fermix_core.harness]\napproved = true\n\n", "")
 
       # Computer history's notes are the home's and travel with it (M97 §8.6): a
       # restore deletes none of them. A home from before memory.db's migration 59
@@ -182,7 +182,7 @@ defmodule FermixCore.Home.ArchiveTest do
       assert {:ok, %{rewritten: [], epoch: 4}} = restore(archive, home)
 
       assert File.read!(Path.join(home, "config.toml")) ==
-               String.replace(config_toml(home), "approved = true", "approved = false")
+               String.replace(config_toml(home), "[fermix_core.harness]\napproved = true\n\n", "")
     end
 
     test "leaves only the archive beside the destination", %{home: home, archive: archive} do

@@ -199,9 +199,6 @@ defmodule Fermix.CLI.HomeCommand do
     print_rewritten(restored.rewritten)
     print_kept_paths(restored.kept_paths)
 
-    if restored.harness_consent_reset,
-      do: IO.puts("Coding-harness consent does not travel; approve it again here.")
-
     if restored.secret_store_switched do
       IO.puts(
         ~s(This host has no usable keyring, so secrets are kept in files here: secret_store = "file".)

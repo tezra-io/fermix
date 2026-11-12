@@ -96,7 +96,7 @@ it, never a second writer.
   directory as the next primary, one epoch above the archived home. Settings
   in `config.toml` that named the old home's path are moved to the new one and
   the keys are named; paths stored inside the memory database are not changed.
-  Importing also withdraws coding-harness consent, moves a keyring-mode home to the file store on
+  Importing also leaves coding-agent consent with the computer it was given on, moves a keyring-mode home to the file store on
   a host whose keyring does not answer that it is available (a check that
   timed out counts as none, and is logged; macOS keeps its keyring),
   and names the
@@ -119,7 +119,7 @@ it, never a second writer.
   host and bind the service there (`fermix service install`); start the new
   host; then start this one in the device role if the desktop app still needs
   it. What import tells the owner to finish by hand: the keyring secrets to
-  enter again, the coding-harness consent to give again, the settings that
+  enter again, coding-agent consent to give here, the settings that
   still hold absolute paths outside the old home, and the installed plugins
   built for the old OS to install again.
 - After a stage-one move iMessage, ACP, voice and meetings stop on both
@@ -394,8 +394,8 @@ it, never a second writer.
   Always On shows for the server and point Meta at its address);
   Slack turned on without Socket Mode (warns: it stops
   unless switched to Socket Mode in the Slack app's settings and Fermix's);
-  coding agents approved here (warns: they ask again on the server, as
-  after any restore); the cutover gap
+  coding agents approved here (warns: they stop here, and run on the
+  server only once approved there); the cutover gap
   (a recurring job more than an hour late is skipped; while Telegram is set
   up, its messages wait until the move is done); this computer
   serving nothing while the move runs; and Fermix run from a terminal

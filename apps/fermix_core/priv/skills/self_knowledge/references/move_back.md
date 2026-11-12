@@ -38,9 +38,10 @@ The move to a server, the roles and the epoch: skill_view(name:
   holds it: "This Mac is ready to take Fermix back.", with **Move now**,
   which asks for the server's recovery passphrase, and a confirm from this
   computer's settings: what runs here again (iMessage, voice calls,
-  meetings), that coding agents ask for approval again and Telegram
-  messages wait, each only where those settings have it (not Telegram set
-  up on the server after the move), and that the server stays until deleted. **Cancel** is offered until Move now, and again only once the
+  meetings) and that Telegram messages wait, each only where those settings
+  have it (not Telegram set up on the server after the move), and that the
+  server stays until deleted. Coding agents need nothing again: this Mac
+  kept its own approval in its `machine.toml`, in force once it is back. **Cancel** is offered until Move now, and again only once the
   server undid the move or answers with no move at all, never while it
   moves: it stops receiving, closes the code on the server and forgets the
   move back.

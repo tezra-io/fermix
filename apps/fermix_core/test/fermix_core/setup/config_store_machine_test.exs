@@ -8,6 +8,7 @@ defmodule FermixCore.Setup.ConfigStoreMachineTest do
 
   alias FermixCore.ComputerHistory.Config, as: ComputerHistoryConfig
   alias FermixCore.ComputerUse.Config, as: ComputerUseConfig
+  alias FermixCore.Harness.Config, as: HarnessConfig
   alias FermixCore.Home.Archive.ConfigText
   alias FermixCore.Home.Candidate
   alias FermixCore.Sandbox.Config, as: SandboxConfig
@@ -698,6 +699,292 @@ defmodule FermixCore.Setup.ConfigStoreMachineTest do
       refute Keyword.has_key?(history, :remote_summaries)
       assert ComputerHistoryConfig.granted_providers() == MapSet.new()
     end
+  end
+
+  # M98 D5: whether coding agents may run here, and where Codex and Claude
+  # Code keep their sign-ins, are this computer's own; the rest of
+  # `[fermix_core.harness]`, the default agent among it, is the home's.
+  describe "the coding agents' machine keys" do
+    # A home a released engine wrote: the whole table in config.toml.
+    @released_harness """
+    [fermix_core.agent]
+    name = "Orchard"
+
+    [fermix_core.harness]
+    approved = true
+    default_vendor = "claude"
+    codex_home = "/Users/invented/.codex-work"
+    """
+
+    # An earlier engine of M97 moved the other machine settings already, and
+    # wrote a machine file without the table.
+    @m97_machine MachineFile.header() <> "\n\n[sandbox]\nmode = \"standard\"\n"
+
+    # The Config round-trips rule: seeded with the shapes application
+    # environment holds, which is what setup saves.
+    test "save then load: the approval and folders through machine.toml only, the rest through config.toml",
+         ctx do
+      harness =
+        HarnessConfig.normalize(
+          enabled: true,
+          approved: true,
+          default_vendor: "claude",
+          max_active: 3,
+          codex_home: Path.join(ctx.tmp, "codex"),
+          claude_config_dir: Path.join(ctx.tmp, "claude")
+        )
+
+      snapshot = %{
+        fermix_core: [agent: [name: "Orchard"], harness: harness],
+        fermix_channels: [],
+        fermix_web: []
+      }
+
+      assert :ok = ConfigStore.save_snapshot(snapshot)
+
+      config = File.read!(Path.join(ctx.home, "config.toml"))
+      machine = File.read!(MachineFile.path(ctx.home))
+
+      assert ConfigText.value(config, "fermix_core.harness", "default_vendor") ==
+               {:ok, ~s("claude")}
+
+      assert ConfigText.value(config, "fermix_core.harness", "max_active") == {:ok, "3"}
+      assert MachineFile.strip(config) == {config, []}
+      assert ConfigText.value(machine, "fermix_core.harness", "approved") == {:ok, "true"}
+
+      assert ConfigText.value(machine, "fermix_core.harness", "codex_home") ==
+               {:ok, inspect(Path.join(ctx.tmp, "codex"))}
+
+      assert ConfigText.value(machine, "fermix_core.harness", "claude_config_dir") ==
+               {:ok, inspect(Path.join(ctx.tmp, "claude"))}
+
+      refute machine =~ "default_vendor"
+      refute machine =~ "max_active"
+
+      assert {:ok, loaded} = ConfigStore.load_runtime_config(resolve_secrets: false)
+      assert Enum.sort(Keyword.fetch!(loaded.fermix_core, :harness)) == Enum.sort(harness)
+
+      # And again: a save of what was loaded writes the same two files.
+      assert :ok = ConfigStore.save_snapshot(loaded)
+      assert File.read!(MachineFile.path(ctx.home)) == machine
+      assert File.read!(Path.join(ctx.home, "config.toml")) == config
+    end
+
+    # The marker: a save writes the approval even when it is off.
+    test "a save with no approval writes it off, and it loads off", ctx do
+      snapshot = %{
+        fermix_core: [harness: HarnessConfig.normalize(default_vendor: "codex")],
+        fermix_channels: [],
+        fermix_web: []
+      }
+
+      assert :ok = ConfigStore.save_snapshot(snapshot)
+
+      machine = File.read!(MachineFile.path(ctx.home))
+      assert ConfigText.value(machine, "fermix_core.harness", "approved") == {:ok, "false"}
+
+      assert {:ok, loaded} = ConfigStore.load_runtime_config(resolve_secrets: false)
+      assert Keyword.fetch!(loaded.fermix_core, :harness)[:approved] == false
+    end
+
+    test "a released engine's home: the boot moves them with the rest, once", ctx do
+      File.write!(Path.join(ctx.home, "config.toml"), @released_harness)
+
+      assert :ok = ConfigStore.migrate_machine_file(ctx.home, server?: false)
+
+      machine = File.read!(MachineFile.path(ctx.home))
+      config = File.read!(Path.join(ctx.home, "config.toml"))
+      assert ConfigText.value(machine, "fermix_core.harness", "approved") == {:ok, "true"}
+
+      assert ConfigText.value(config, "fermix_core.harness", "default_vendor") ==
+               {:ok, ~s("claude")}
+
+      refute config =~ "approved"
+      refute config =~ "codex-work"
+      assert loaded_harness()[:approved] == true
+      assert loaded_harness()[:codex_home] == "/Users/invented/.codex-work"
+
+      assert :ok = ConfigStore.migrate_machine_file(ctx.home, server?: false)
+      assert File.read!(MachineFile.path(ctx.home)) == machine
+      assert File.read!(Path.join(ctx.home, "config.toml")) == config
+    end
+
+    # The trap: without the step, the machine file would win and config.toml
+    # would lose the approval and the folder with nothing taking them.
+    test "a machine file without the table takes them first, then config.toml loses them", ctx do
+      File.write!(Path.join(ctx.home, "config.toml"), @released_harness)
+      File.write!(MachineFile.path(ctx.home), @m97_machine)
+
+      # Its notice is an info line (`MachineFile.notice/1`, pinned there).
+      assert :ok = ConfigStore.migrate_machine_file(ctx.home, server?: false)
+
+      machine = File.read!(MachineFile.path(ctx.home))
+      assert machine =~ ~s([sandbox]\nmode = "standard")
+      assert ConfigText.value(machine, "fermix_core.harness", "approved") == {:ok, "true"}
+      refute File.read!(Path.join(ctx.home, "config.toml")) =~ "approved"
+      assert loaded_harness()[:approved] == true
+      assert loaded_harness()[:codex_home] == "/Users/invented/.codex-work"
+      assert loaded_harness()[:default_vendor] == "claude"
+
+      config = File.read!(Path.join(ctx.home, "config.toml"))
+      assert :ok = ConfigStore.migrate_machine_file(ctx.home, server?: false)
+      assert File.read!(MachineFile.path(ctx.home)) == machine
+      assert File.read!(Path.join(ctx.home, "config.toml")) == config
+    end
+
+    # Stopped after the machine file was written: it holds the table, so the
+    # next boot finishes the removal and keeps what the first one took.
+    test "a boot stopped after its first write is finished by the next", ctx do
+      plan = MachineFile.migration(@released_harness, @m97_machine, false)
+      File.write!(Path.join(ctx.home, "config.toml"), @released_harness)
+      File.write!(MachineFile.path(ctx.home), plan.machine)
+
+      log =
+        capture_log(fn ->
+          assert :ok = ConfigStore.migrate_machine_file(ctx.home, server?: false)
+        end)
+
+      assert log =~ "so they were removed from it: fermix_core.harness.approved"
+      assert File.read!(MachineFile.path(ctx.home)) == plan.machine
+      assert File.read!(Path.join(ctx.home, "config.toml")) == plan.config
+      assert loaded_harness()[:approved] == true
+    end
+
+    # Stopped inside the first write: the old machine file is still there,
+    # so the step runs again and loses nothing.
+    test "a boot stopped while writing the machine file takes them again", ctx do
+      File.write!(Path.join(ctx.home, "config.toml"), @released_harness)
+      File.write!(MachineFile.path(ctx.home), @m97_machine)
+      File.write!(MachineFile.path(ctx.home) <> ".tmp", "[fermix_core.harness]\nappr")
+
+      assert :ok = ConfigStore.migrate_machine_file(ctx.home, server?: false)
+
+      refute File.exists?(MachineFile.path(ctx.home) <> ".tmp")
+
+      assert File.read!(MachineFile.path(ctx.home)) ==
+               MachineFile.migration(@released_harness, @m97_machine, false).machine
+
+      assert loaded_harness()[:approved] == true
+    end
+
+    # With the table the machine file wins: a copy written into config.toml
+    # by hand is dropped and named, never read.
+    test "a machine file with the table wins over config.toml's copy", ctx do
+      File.write!(Path.join(ctx.home, "config.toml"), @released_harness)
+
+      File.write!(
+        MachineFile.path(ctx.home),
+        @m97_machine <> "\n[fermix_core.harness]\napproved = false\n"
+      )
+
+      assert {:ok, loaded} = ConfigStore.load_runtime_config(resolve_secrets: false)
+      assert Keyword.fetch!(loaded.fermix_core, :harness)[:approved] == false
+      refute Keyword.has_key?(Keyword.fetch!(loaded.fermix_core, :harness), :codex_home)
+
+      log =
+        capture_log(fn ->
+          assert :ok = ConfigStore.migrate_machine_file(ctx.home, server?: false)
+        end)
+
+      assert log =~ "so they were removed from it: fermix_core.harness.approved"
+      assert loaded_harness()[:approved] == false
+    end
+
+    # M75's servers moved before this change: an approval given there never
+    # moves into the server's own default, and the boot says so.
+    test "a server with no machine file takes its default, coding agents not approved", ctx do
+      File.write!(Path.join(ctx.home, "config.toml"), @released_harness)
+
+      log =
+        capture_log(fn ->
+          assert :ok = ConfigStore.migrate_machine_file(ctx.home, server?: true)
+        end)
+
+      assert log =~ "left out: fermix_core.harness.approved, fermix_core.harness.codex_home."
+      assert File.read!(MachineFile.path(ctx.home)) == MachineFile.server_default()
+
+      assert ConfigText.value(MachineFile.server_default(), "fermix_core.harness", "approved") ==
+               {:ok, "false"}
+
+      assert loaded_harness()[:approved] == false
+      assert loaded_harness()[:default_vendor] == "claude"
+      refute Keyword.has_key?(loaded_harness(), :codex_home)
+    end
+
+    test "a machine file that names a key of the home's refuses the load, naming machine.toml",
+         ctx do
+      File.write!(
+        MachineFile.path(ctx.home),
+        "[fermix_core.harness]\napproved = true\ndefault_vendor = \"codex\"\n"
+      )
+
+      error =
+        assert_raise ArgumentError, fn ->
+          ConfigStore.load_runtime_config(resolve_secrets: false)
+        end
+
+      assert error.message ==
+               "machine.toml [fermix_core.harness] has unknown key(s): default_vendor. It " <>
+                 "takes this computer's approved, codex_home and claude_config_dir; the rest " <>
+                 "are in config.toml."
+    end
+
+    # M97 §7.2: a setup page left open while coding agents were approved
+    # elsewhere saves its coding tab, whose form posts the switch it shows
+    # (off): the approval it never changed is the file's at the save.
+    test "a stale setup page never takes back an approval given elsewhere" do
+      base = %{
+        fermix_core: [harness: HarnessConfig.normalize(approved: false)],
+        fermix_channels: [],
+        fermix_web: []
+      }
+
+      assert :ok = ConfigStore.save_snapshot(base)
+      {:ok, base} = ConfigStore.load_runtime_config(resolve_secrets: false)
+
+      # Elsewhere, since: the app approves coding agents on this computer.
+      approved = put_in(base, [:fermix_core, :harness, :approved], true)
+      assert :ok = ConfigStore.save_snapshot(approved)
+
+      # The stale page: its form's unticked box clears the key, as the
+      # wizard does, beside the preference it did change.
+      stale =
+        update_in(base, [:fermix_core, :harness], fn harness ->
+          harness |> Keyword.delete(:approved) |> Keyword.put(:default_vendor, "codex")
+        end)
+
+      assert {:ok, written} = ConfigStore.save_changes(stale, base, supervised: false)
+      assert Keyword.fetch!(written.fermix_core, :harness)[:approved] == true
+      assert loaded_harness()[:approved] == true
+      assert loaded_harness()[:default_vendor] == "codex"
+    end
+
+    # A home the Mac app manages is the app engine's to migrate: the step is
+    # a write, so another engine refuses it by name; with nothing pending it
+    # boots, and nothing adds the table to a machine file at a boot.
+    test "on a home the app manages, another engine refuses a pending step and boots without one",
+         ctx do
+      app_manages!(ctx)
+      File.write!(Path.join(ctx.home, "config.toml"), @released_harness)
+      File.write!(MachineFile.path(ctx.home), @m97_machine)
+
+      assert {:error, {:app_managed, _home}} =
+               ConfigStore.migrate_machine_file(ctx.home, server?: false, app_engine?: false)
+
+      assert File.read!(MachineFile.path(ctx.home)) == @m97_machine
+      assert File.read!(Path.join(ctx.home, "config.toml")) == @released_harness
+
+      {home_only, _removed} = MachineFile.strip(@released_harness)
+      File.write!(Path.join(ctx.home, "config.toml"), home_only)
+
+      assert :ok = ConfigStore.migrate_machine_file(ctx.home, server?: false, app_engine?: false)
+      assert File.read!(MachineFile.path(ctx.home)) == @m97_machine
+    end
+  end
+
+  defp loaded_harness do
+    assert {:ok, loaded} = ConfigStore.load_runtime_config(resolve_secrets: false)
+    Keyword.fetch!(loaded.fermix_core, :harness)
   end
 
   defp loaded_history do

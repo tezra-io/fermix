@@ -73,7 +73,8 @@ defmodule FermixCore.Home.SnapshotTest do
       assert {:ok, restored} = restore(out, pair, into)
       assert restored.epoch == 4
       assert restored.rewritten == ["fermix_core.meetings.recordings"]
-      assert restored.harness_consent_reset
+      # The coding approval is the computer's own (M98 D5).
+      assert restored.device_settings_dropped == ["fermix_core.harness.approved"]
       # The included files, the database, the epoch and the plugin lockfile.
       assert restored.files == map_size(@included) + 3
 
@@ -88,7 +89,7 @@ defmodule FermixCore.Home.SnapshotTest do
                  ~s("#{home}/workspace/meetings"),
                  ~s("#{into}/workspace/meetings")
                )
-               |> String.replace("approved = true", "approved = false")
+               |> String.replace("[fermix_core.harness]\napproved = true\n\n", "")
 
       assert rows(Path.join(into, "memory.db")) == 2
       assert mode(Path.join(into, "memory.db")) == 0o644

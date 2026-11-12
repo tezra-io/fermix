@@ -9,9 +9,11 @@ defmodule FermixCore.Cues.FollowUpReadiness do
     * **Coding agents** (`codex_run`, `claude_code_run`, `codex_cloud_run`):
       the harness on and allowed (`[fermix_core.harness] enabled`, `approved`),
       the vendor's program on `PATH`, and signed in: Codex by its sign-in file
-      (a refresh token), while Claude Code's `:unverified` (its config dir,
-      with the credentials in the Mac keychain, which Fermix never reads)
-      counts as signed in. Codex cloud also needs `cloud_enabled`.
+      (a refresh token or an API key), while Claude Code's `:unverified` (its
+      config dir, with the credentials in the Mac keychain, which Fermix never
+      reads) counts as signed in, unless its last run here failed to sign in
+      (`Harness.SignIn`'s mark, M98 D10). Codex cloud also needs
+      `cloud_enabled`.
     * **Plugins**: a tool no capability carries is looked up in the plugins'
       manifests, and the plugin that declares it is named with its state
       (`Plugins.Status`).
@@ -42,7 +44,8 @@ defmodule FermixCore.Cues.FollowUpReadiness do
   words.
 
   Cheap reads only, since the scheduler asks at every trigger: the
-  application's config, `PATH` lookups, the Codex sign-in file, the plugin
+  application's config, `PATH` lookups, the Codex sign-in file, this
+  machine's sign-in marks (a read-only connection to its coding store), the plugin
   manifests and the auth file, and for instructions that name a path, the
   sandbox's roots and the folders on each path's way. Never a subprocess, the
   network or the keychain, so a plugin whose host runtime is a program on this
@@ -51,7 +54,8 @@ defmodule FermixCore.Cues.FollowUpReadiness do
 
   Seams (opts): `:capability_registry`, `:harness_config` (the
   `[fermix_core.harness]` keyword), `:vendor_opts` (`Harness.Vendors`'
-  `:find_executable`, `:codex_home` and `:claude_config_dir`), `:plugins` (a
+  `:find_executable`, `:codex_home` and `:claude_config_dir`), `:sign_in`
+  (`Harness.SignIn`'s `:path`, `:stat` and `:machine`), `:plugins` (a
   0-arity function answering `{:ok, [Plugin.t()]}`), `:plugin_status` (a
   1-arity function of a plugin answering its status), `:channel_ready?` (a
   1-arity function of a channel's config key) and `:sandbox_config` (the
@@ -62,6 +66,7 @@ defmodule FermixCore.Cues.FollowUpReadiness do
 
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
   alias FermixCore.Harness.Config, as: HarnessConfig
+  alias FermixCore.Harness.SignIn
   alias FermixCore.Harness.Vendors
   alias FermixCore.Plugins.Registry, as: PluginRegistry
   alias FermixCore.Plugins.Status, as: PluginStatus
@@ -73,6 +78,7 @@ defmodule FermixCore.Cues.FollowUpReadiness do
   @seams [
     :harness_config,
     :vendor_opts,
+    :sign_in,
     :plugins,
     :plugin_status,
     :channel_ready?,
@@ -217,22 +223,53 @@ defmodule FermixCore.Cues.FollowUpReadiness do
   defp add(gaps, nil), do: gaps
   defp add(gaps, sentence), do: [sentence | gaps]
 
-  # The harness, the program, the sign-in, then whether the tool was loaded:
-  # a program installed after Fermix started is loaded at its next start.
+  # The harness, the program, the sign-in, a run that failed to sign in, then
+  # whether the tool was loaded: a program installed after Fermix started is
+  # loaded at its next start.
   defp coding_gap(tool, opts) do
     {vendor, rail} = Map.fetch!(@coding_tools, tool)
     config = harness_config(opts)
-    vendor_opts = Keyword.get(opts, :vendor_opts, [])
 
     cond do
       not HarnessConfig.enabled?(config) -> @agents_off
       not HarnessConfig.approved?(config) -> @agents_not_allowed
       rail == :cloud and not HarnessConfig.cloud_enabled?(config) -> @cloud_off
+      true -> agent_gap(tool, vendor, opts)
+    end
+  end
+
+  defp agent_gap(tool, vendor, opts) do
+    vendor_opts = Keyword.get(opts, :vendor_opts, [])
+
+    cond do
       not Vendors.available?(vendor, vendor_opts) -> not_installed(vendor)
       Vendors.auth_state(vendor, vendor_opts) == :absent -> signed_out(vendor)
+      marked?(vendor, opts) -> SignIn.marked_sentence(vendor, machine(opts))
       not registered?(tool, opts) -> restart(vendor)
       true -> nil
     end
+  end
+
+  # Marks that cannot be read hold nothing; the reason is logged, and doctor's
+  # coding harness row says the marks are unreadable.
+  defp marked?(vendor, opts) do
+    case SignIn.marks(sign_in_opts(opts)) do
+      {:ok, marks} ->
+        Map.has_key?(marks, vendor)
+
+      {:error, reason} ->
+        Logger.warning("follow-up readiness: sign-in marks could not be read: #{inspect(reason)}")
+        false
+    end
+  end
+
+  defp machine(opts), do: SignIn.machine_word(sign_in_opts(opts))
+
+  defp sign_in_opts(opts) do
+    Keyword.merge(
+      [vendor_opts: Keyword.get(opts, :vendor_opts, [])],
+      Keyword.get(opts, :sign_in, [])
+    )
   end
 
   defp not_installed(vendor) do

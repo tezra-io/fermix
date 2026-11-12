@@ -968,12 +968,14 @@ intersects.
 
 `seed_capability_home.py --extra-config <file.toml>` is the other half of an arm:
 its fragment is appended to the rendered config, and it is REFUSED when it
-redefines a table the seeder already writes (`[fermix_core.harness]`, the
+redefines a table the seeder already writes (`[fermix_core.meetings]`, the
 provider block, …) or starts with a bare key — both would otherwise surface
 as a TOML error at daemon boot, naming a line in a generated file — and when it
 sets one of this computer's own settings (`[sandbox]` and the other
-`machine.toml` tables, or `dev_local`), which Fermix never reads from
-`config.toml`. An arm changes what the seeder does not own; if it needs to
+`machine.toml` tables, `dev_local`, or the harness's `approved`, `codex_home`
+and `claude_config_dir`), which Fermix never reads from `config.toml`. The
+harness's other keys (`default_vendor`, …) are the home's, and an arm may set
+them. An arm changes what the seeder does not own; if it needs to
 change what the seeder does own, the seeder learns the setting.
 
 **Comparing two code revisions** (this release's loop against the last) is the

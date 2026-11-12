@@ -73,6 +73,7 @@ defmodule FermixCore.Management.ProtocolTest do
              "diagnostics.build",
              "setup.state.get",
              "setup.detect",
+             "coding_agents.check",
              "settings.sections",
              "settings.get",
              "settings.apply",

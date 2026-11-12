@@ -63,8 +63,9 @@ defmodule FermixCore.Management.Placement do
   alias FermixCore.Management.Copy
   alias FermixCore.Management.Protocol
 
+  # `coding_agents.check`: the sign-in marks of this machine's own agents (M98).
   @device_methods ~w(
-    hello diagnostics.build logs.query setup.session.create setup.detect
+    hello diagnostics.build logs.query setup.session.create setup.detect coding_agents.check
     browser.install.start capabilities.install.start
     home.status settings.sections home.act
     computer.join.start computer.join.cancel computer.disconnect
@@ -96,8 +97,10 @@ defmodule FermixCore.Management.Placement do
   # ports, and what Fermix on its server may use on it (M97 §7.2), which the
   # server can never write. iMessage's owner and guests are the home's (M97
   # §4); who Fermix may write to is confirmed on the Mac that carries Messages
-  # (`imessage.policy.confirm`).
-  @device_sections ~w(sandbox computer_use computer_history accessories computer)
+  # (`imessage.policy.confirm`). Whether coding agents may run on this machine
+  # is its own too (M98 D5, `harness_machine`), published only where the coding
+  # rail runs: a linked computer shows neither its own nor its server's.
+  @device_sections ~w(sandbox computer_use computer_history accessories computer harness_machine)
   @section_methods ~w(settings.get settings.apply)
 
   @device_class_sentence "This request configures the computer it came from, so the " <>
