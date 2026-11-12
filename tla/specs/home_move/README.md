@@ -64,21 +64,21 @@ Models one move of M75 §7.2 (B5). Three parts take part:
 
 **Mechanism switches** (`TRUE` is the real code):
 - `CandidateWaitsForCommit`: the candidate activates only on `move_commit`
-  for the move it staged (`commit_move/2`, `candidate.ex:658-689`).
+  for the move it staged (`commit_move/2`, `candidate.ex:666-697`).
 - `MarkerBeforeCommit`: the worker writes `moved.json` and records
   `committing` before it sends `move_commit` (`commit/4`, then `retired/4`,
   `move_worker.ex:528-551`).
 - `OffersFenced`: the candidate takes an offer only when it is later than the
   move it holds, a later move id or a later attempt of the same move, and
   refuses an earlier or equal one (`move_mismatch`), leaving what it holds
-  untouched (`fenced_offer/2`, `later?/2`, `candidate.ex:508-520`).
+  untouched (`fenced_offer/2`, `later?/2`, `candidate.ex:509-521`).
   `move_offer` carries the attempt (`send_snapshot/4`, `move_worker.ex:457`),
   which only grows across restarts. Move ids are ordered by when the move
   started (`move_id/1`, `move.ex:550-559`); with one move id, the fence
   orders by attempt.
 - `ReadyAfterStaged`: `move_ready` goes out only after `staged` is written.
   `restored/2` records `staged`, then tells the responder
-  (`candidate.ex:623-630`), which answers `move_ready` only then
+  (`candidate.ex:624-631`), which answers `move_ready` only then
   (`move_responder.ex:65-69`).
 - `AwaitPinsRail`: the worker takes an answer only from the rail it waits on
   (`await_any/3` matches `{:rail, ^rail, _}`, `move_worker.ex:955-968`).
@@ -235,7 +235,7 @@ Nothing in Fermix's own code fenced it.
   home untouched.
 
 The same change answers a second `move_commit` after activation from the
-`activated?` flag (`candidate.ex:658-662`). Before, it crashed in `put/3`,
+`activated?` flag (`candidate.ex:666-670`). Before, it crashed in `put/3`,
 because `activate/1` had removed `candidate/`. The model's `OnCommit` now
 answers it `move_done`.
 
@@ -427,3 +427,19 @@ history token, where a stored copy gets a new one. A write no rule reads;
 no modelled step changed. Why keeping it is safe is in `history_submit`'s
 README (the re-read for HS-4's fix). The comments' line numbers into
 `candidate.ex` point at the committed code.
+
+## Re-read for the home's format (M97 D16, 2026-11-11)
+
+Re-read against c4c72e1f, which staled the `candidate.ex` pin: the
+candidate names its `home_format` in its enrolment, and a staging the
+restore refuses for a newer format (`Archive.install/5`'s `not_newer`,
+`Home.Readable`) is said in the candidate's words. That refusal comes in
+the staging, before `move_ready`, so it is a failed staging (`restored/2`'s
+error clause, back to enrolled) that the responder refuses and the source's
+worker aborts on, which the model has; the source retires only for a staged
+candidate, so no move stages on a candidate that cannot read the home and
+then retires the source. The readiness check before a move
+(`MoveReadiness`, `Releases.eligible/3`) refuses earlier and writes nothing.
+No modelled step changed, and the readability rule is a single read of the
+manifest at the staging, so it is not modelled on its own. The comments'
+line numbers into `candidate.ex` point at the committed code.

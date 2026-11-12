@@ -98,7 +98,7 @@
 (* the server.                                                             *)
 (***************************************************************************)
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/home/move_worker.ex @ d3298b98dff7
-\* SOURCE: apps/fermix_channels/lib/fermix_channels/home/candidate.ex @ 1693ba385dfe
+\* SOURCE: apps/fermix_channels/lib/fermix_channels/home/candidate.ex @ 433d4ef550e0
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/home/move_responder.ex @ e8b3fa2f99b9
 \* SOURCE: apps/fermix_core/lib/fermix_core/home/candidate/activation.ex @ 5a71862e2f64
 \* SOURCE: apps/fermix_core/lib/fermix_core/home/candidate.ex#prepare_return,returnable,return_checks,returnable_engine,returnable_home,linked_and_still,no_move_here,replaceable_return,present?,remove @ 1c0fff782879
@@ -148,7 +148,7 @@ CONSTANTS
     RecordEntries,       \* the staged entries are recorded once, in
                          \* candidate/entries.json, before any rename, and every run reads
                          \* them back (record_entries/1, activation.ex:185-193; activate/1,
-                         \* candidate.ex:716-719); FALSE lists the staging again at each
+                         \* candidate.ex:724-727); FALSE lists the staging again at each
                          \* run, as the forward activate/1 does
     PruneRetired,        \* step a sets aside every path of the retired copy the entries
                          \* do not name and this machine does not keep (prune_retired/3,
@@ -555,9 +555,9 @@ UndoRole ==
 -----------------------------------------------------------------------------
 (* The Mac's candidate: FermixChannels.Home.Candidate under the device tree *)
 
-\* move_offer -> offer_move/2 (candidate.ex:493-501): enrolled, receiving or
-\* staged takes it (fenced_offer/2, :505-512: every offer here is later than
-\* the one held), accept_offer/2 (:519-541) discards any staging and records
+\* move_offer -> offer_move/2 (candidate.ex:494-502): enrolled, receiving or
+\* staged takes it (fenced_offer/2, :506-513: every offer here is later than
+\* the one held), accept_offer/2 (:520-542) discards any staging and records
 \* receiving. Any other phase, or a home already in place, refuses it.
 OnOffer(tag) ==
     IF ~activated /\ cPhase \in {"enrolled", "receiving", "staged"}
@@ -567,8 +567,8 @@ OnOffer(tag) ==
     ELSE /\ Answer(tag, "error")
          /\ UNCHANGED <<cPhase, stDb, stCfg, restore, apc, aOwner, aTo, activated>>
 
-\* move_end -> stage_move/3 (candidate.ex:579-602): a receiving candidate
-\* starts the restore task (stage_fun/4, :613-616: Activation.stage/6 for a
+\* move_end -> stage_move/3 (candidate.ex:580-603): a receiving candidate
+\* starts the restore task (stage_fun/4, :614-617: Activation.stage/6 for a
 \* return); the answer waits for it (move_responder.ex:65-69).
 OnStream(tag) ==
     IF cPhase = "receiving" /\ ~activated
@@ -577,7 +577,7 @@ OnStream(tag) ==
     ELSE /\ Answer(tag, "error")
          /\ UNCHANGED <<cPhase, stDb, stCfg, restore, apc, aOwner, aTo, activated>>
 
-\* move_commit -> commit_move/2 (candidate.ex:658-689): a second one after the
+\* move_commit -> commit_move/2 (candidate.ex:666-697): a second one after the
 \* home is in place is answered as the first was; staged or activating,
 \* record activating and run the activation in the same call (Activation
 \* below), whose end answers. Otherwise move_unknown.
@@ -592,7 +592,7 @@ OnCommit(tag) ==
              /\ Answer(tag, "error")
              /\ UNCHANGED <<cPhase, stDb, stCfg, restore, apc, aOwner, aTo, activated>>
 
-\* move_resume (candidate.ex:239-257, move_responder.ex:126-143): staged
+\* move_resume (candidate.ex:240-258, move_responder.ex:126-143): staged
 \* answers move_ready, a home in place move_done, anything else is refused.
 OnResume(tag) ==
     /\ CASE activated -> Answer(tag, "done")
@@ -611,7 +611,7 @@ Handle ==
     /\ UNCHANGED <<srvFiles, srvRun, railUp, mCfg, mMarker, mLink, mDb, mStale, rj, cKind,
                    cRec, rq, mBoot, cUp, act, budgets, hist>>
 
-\* The restore task's result -> restored/2 (candidate.ex:623-630): the
+\* The restore task's result -> restored/2 (candidate.ex:624-631): the
 \* staging is complete (the server's copy, settled for this computer), staged
 \* is recorded, and the responder that staged it answers move_ready.
 Restored ==
@@ -622,7 +622,7 @@ Restored ==
     /\ UNCHANGED <<srvFiles, srvRun, railUp, req, mCfg, mMarker, mLink, mDb, mStale, rj, cKind,
                    cRec, rq, mBoot, cUp, apc, aOwner, aTo, activated, act, budgets, hist>>
 
-\* The enrolment (enroll_once/1 and enrolled/2, candidate.ex:367-413): the
+\* The enrolment (enroll_once/1 and enrolled/2, candidate.ex:368-414): the
 \* candidate reaches the server as the primary, which adds it.
 Enroll ==
     /\ CandIdle /\ cKind = "return" /\ cPhase = "enrolling" /\ ServerAnswers
@@ -634,8 +634,8 @@ Enroll ==
 (* A return's activation: Activation.record_entries/1 and activate/3       *)
 (* (activation.ex:185-193, :249-263), one durable write per step, run by   *)
 (* the candidate process on move_commit or at its start in activating      *)
-(* (carry_on/1, finish_activation/1, activate/1: candidate.ex:205-215,     *)
-(* :691-721), or by Restore here's home_restore job.                       *)
+(* (carry_on/1, finish_activation/1, activate/1: candidate.ex:206-216,     *)
+(* :699-729), or by Restore here's home_restore job.                       *)
 
 \* Whether the run places the staged entry: the recorded entries, or, without
 \* RecordEntries, the staging as listed now.
@@ -729,7 +729,7 @@ FConfig ==
     /\ UNCHANGED <<mMarker, mLink, mDb, mStale, rj, cPhase, cKind, cRec, stDb, rq, ARest>>
 
 \* g. candidate/ removed, replaced/ and entries.json with it. The candidate
-\* process then answers (commit_move/2's :ok, candidate.ex:672-676: the
+\* process then answers (commit_move/2's :ok, candidate.ex:680-684: the
 \* responder sends move_done) and schedules its restart; the job goes on to
 \* its restart. A crash after g ends the rail, which loses an answer as
 \* surely as one never sent.
@@ -754,8 +754,8 @@ GDone ==
 \* restore task die with the engine before it; its rails end. A device boot
 \* starts the candidate subtree when candidate/ exists
 \* (DeviceSupervisor.children/1), whose process carries on (carry_on/1,
-\* candidate.ex:205-215): activating finishes the activation; a local
-\* candidate in any other phase is removed (drop_local/1, :727-737). A
+\* candidate.ex:206-216): activating finishes the activation; a local
+\* candidate in any other phase is removed (drop_local/1, :735-745). A
 \* primary boot runs prepare_home (application.ex:202-241) first:
 \* finish_activation/1 removes a candidate whose settings are in place
 \* (activation.ex:288-300), and Return.done/2 records moved_at
@@ -781,7 +781,7 @@ MacBoots ==
     /\ mDb' = IF b = "primary" /\ mDb = "none" THEN "fresh" ELSE mDb
     /\ UNCHANGED <<mCfg, mMarker, mLink, mStale, cKind, rq>>
 
-\* handle_info(:restart) (candidate.ex:285-289) -> Lifecycle.restart_self/0,
+\* handle_info(:restart) (candidate.ex:286-290) -> Lifecycle.restart_self/0,
 \* scheduled once the home is in place.
 CandRestart ==
     /\ CandIdle /\ activated
@@ -1172,7 +1172,7 @@ Late ==
     /\ UNCHANGED <<srvFiles, sBoot, sAlive, rail, macFiles, macRun, net, sCrashes, mCrashes,
                    presses, crashEF, fromCopy>>
 
-\* The Mac's staging fails (restored/2's error clause, candidate.ex:632-646):
+\* The Mac's staging fails (restored/2's error clause, candidate.ex:633-647):
 \* back to enrolled with the staging removed, and the responder refuses.
 RestoreFails ==
     /\ TransferCanFail /\ CandIdle /\ restore # "none"

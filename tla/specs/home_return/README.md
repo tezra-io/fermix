@@ -424,6 +424,18 @@ server's live store keeps its history token; Restore here, from a stored
 copy, gets a new one. No rule reads it, no modelled step changed, and the
 comments' line numbers into `candidate.ex` point at the committed code.
 
+Walked again against c4c72e1f (M97 D16, a home's format), which staled
+the `candidate.ex` pin. A Mac whose Fermix cannot read the server's home
+format refuses it in the staging (`Archive.install/5`'s `not_newer`), a
+failed staging the model has (`RestoreFails`): the server's worker aborts
+and serves again, since it retires only once the Mac staged. Restore here
+refuses a copy in a newer format the same way (`LocalReturn`'s
+`failed_sentence/2`, `RhStage`), and the copy stays for a Fermix that reads
+it; the summary offers Update where Move back or Restore here would stand
+(`readable_or_update`, read as the scene takes it). So no move back leaves
+a home that no machine serves. No modelled step changed; the comments' line
+numbers into `candidate.ex` point at the committed code.
+
 ## Done
 
 Deadlock checking is on. `Done` has these ends:
