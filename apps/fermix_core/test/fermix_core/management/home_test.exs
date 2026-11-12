@@ -10,6 +10,7 @@ defmodule FermixCore.Management.HomeTest do
   alias FermixCore.Home.Epoch
   alias FermixCore.Home.Move
   alias FermixCore.Home.Moved
+  alias FermixCore.Home.Readable
   alias FermixCore.Home.Releases
   alias FermixCore.Home.Return
   alias FermixCore.Home.Snapshot.Capture
@@ -262,6 +263,35 @@ defmodule FermixCore.Management.HomeTest do
 
       assert {:ok, %{"update" => nil, "update_ceiling" => nil}} =
                route("home.status", %{}, opts(home, engine_role: @device))
+    end
+
+    # M97 D16: the gate reads the home formats the table names, so a release
+    # that keeps the format is eligible on the app already published, and
+    # only one that raises it waits for an app; `home.status` says this
+    # engine's own format.
+    test "a server's update waits for an app only for a release that raises the home format",
+         %{home: home} do
+      at = ~U[2031-05-04 11:55:00Z]
+      mac = computer("studio-mac", :macos, true)
+      apps = ["app 9.9.10 macos 3.1.0", "home_format 9.9.10 1"]
+
+      status = fn rows ->
+        server = [always_on_server: true, release_table: fn -> {:ok, rows, at, nil} end]
+        {:ok, status} = route("home.status", %{}, opts(home, server ++ [computers: [mac]]))
+        status
+      end
+
+      kept = status.(release_table(apps ++ ["home_format 9.10.0 1"]))
+      assert %{"update_ceiling" => "9.10.0", "update" => %{"held" => nil}} = kept
+      assert kept["home_format"] == Readable.home_format()
+
+      raised = status.(release_table(apps ++ ["home_format 9.10.0 2"]))
+
+      assert %{
+               "eligible" => "9.9.10",
+               "held" => %{"version" => "9.10.0", "waits_for" => ["macos"]}
+             } =
+               raised["update"]
     end
 
     # An unknown list is not "no computers": the server cannot see whether
@@ -670,13 +700,18 @@ defmodule FermixCore.Management.HomeTest do
 
     # M97 §3.4: a desktop stands against its server's version by
     # major.minor: past the window it keeps settings alone and is asked to
-    # update; a newer server inside it takes Move back's place with Update.
+    # update. Whether it could take the server's home back is the home's
+    # format (D16), never the version: a newer server in a newer format
+    # takes Move back's place with Update, and one in this format keeps it.
     test "a desktop reads where it stands against its server's version", %{home: home} do
       :ok = DesktopLink.write(home, desktop_link())
       :ok = Moved.write(home, %{epoch: 4, moved_at: @at, to: "invented-vm"})
+      newer_format = Readable.home_format() + 1
 
-      status_with = fn server_version ->
-        part = %{"role" => "primary", "version" => server_version, "snapshots" => %{}}
+      status_with = fn server_version, format ->
+        part =
+          %{"role" => "primary", "version" => server_version, "snapshots" => %{}}
+          |> Map.merge(if format == :none, do: %{}, else: %{"home_format" => format})
 
         {:ok, status} =
           route(
@@ -693,14 +728,26 @@ defmodule FermixCore.Management.HomeTest do
         status["summary"]
       end
 
-      assert %{"state" => "problem", "detail" => %{"kind" => "update"}} = status_with.("9.12.0")
+      assert %{"state" => "problem", "detail" => %{"kind" => "update"}} =
+               status_with.("9.12.0", newer_format)
 
-      inside = status_with.("9.10.1")
+      inside = status_with.("9.10.1", newer_format)
       assert inside["state"] == "on"
       assert "update" in Enum.map(inside["detail"]["actions"], & &1["id"])
       refute "move_back" in Enum.map(inside["detail"]["actions"], & &1["id"])
 
-      assert "move_back" in Enum.map(status_with.("9.9.0")["detail"]["actions"], & &1["id"])
+      # The same newer server, writing this computer's home format, or one
+      # from before home formats, which names none: Move back stays.
+      for format <- [Readable.home_format(), :none] do
+        actions = status_with.("9.10.1", format)["detail"]["actions"]
+        assert "move_back" in Enum.map(actions, & &1["id"]), inspect(format)
+        refute "update" in Enum.map(actions, & &1["id"]), inspect(format)
+      end
+
+      assert "move_back" in Enum.map(
+               status_with.("9.9.0", :none)["detail"]["actions"],
+               & &1["id"]
+             )
     end
 
     # Review M4: a desktop that updated first meets a server on an older

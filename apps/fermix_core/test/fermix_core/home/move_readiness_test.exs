@@ -110,7 +110,8 @@ defmodule FermixCore.Home.MoveReadinessTest do
              "These plugins have no build for north-box, so they stop working after the " <>
                "move: invented-notes."
 
-    assert sentence.("engine_version") == "north-box runs this computer's Fermix."
+    assert sentence.("engine_version") ==
+             "north-box runs a Fermix that reads this home, and this computer could read it back."
 
     # Only what this home uses of what runs here alone is named. iMessage is
     # not: after the move this Mac carries it for north-box (M97 §6.4).
@@ -257,43 +258,81 @@ defmodule FermixCore.Home.MoveReadinessTest do
     assert disk =~ "make room first"
   end
 
-  # M97 §3.4, the server leads: a server newer than this computer is fine
-  # once an update for this computer's system that carries its engine is
-  # published, read from the release table at the review; until then, or
-  # with the table unread, it blocks: the home could never come back here.
-  test "a newer server is fine once this computer's update is published, and blocks before",
+  # M97 §3.4, D16: whether the home could come back here is its format,
+  # never the server's version. A newer server in this computer's format is
+  # fine with nothing read; one in a newer format is fine once a published
+  # update for this computer's system reads it, read from the release table
+  # at the review; until then, or with the table unread, it blocks: the
+  # home could never come back here.
+  test "a newer server in this computer's home format is fine, with no table read", ctx do
+    refuse = fn -> flunk("the table is read only for a home this computer cannot read") end
+    newer = %{ctx.candidate | version: "0.19.0"} |> Map.put(:home_format, 3)
+    seams = Keyword.merge(opts(ctx), release_table: refuse, home_format: 3)
+
+    assert %{items: items} = MoveReadiness.report(ctx.home, newer, seams)
+
+    assert item_in(items, "engine_version") == %{
+             id: "engine_version",
+             status: :ok,
+             sentence:
+               "north-box runs a Fermix that reads this home, and this computer could read it back."
+           }
+  end
+
+  test "a server in a newer home format is fine once this computer's update is published, " <>
+         "and blocks before",
        ctx do
-    newer = %{ctx.candidate | version: "0.18.0"}
+    newer = %{ctx.candidate | version: "0.18.0"} |> Map.put(:home_format, 2)
+    seams = Keyword.put(opts(ctx), :home_format, 1)
     table = fn rows -> fn -> Releases.parse(release_table(rows)) end end
 
-    published = Keyword.put(opts(ctx), :release_table, table.(["app 0.18.0 macos 2.4.0"]))
-    assert %{items: items} = MoveReadiness.report(ctx.home, newer, published)
-    assert %{status: :ok, sentence: sentence} = item_in(items, "engine_version")
+    for rows <- [
+          ["app 0.18.0 macos 2.4.0"],
+          ["app 0.17.0 macos 2.3.0", "home_format 0.17.0 2", "home_format 0.18.0 2"]
+        ] do
+      published = Keyword.put(seams, :release_table, table.(rows))
+      assert %{items: items} = MoveReadiness.report(ctx.home, newer, published)
+      assert %{status: :ok, sentence: sentence} = item_in(items, "engine_version")
 
-    assert sentence ==
-             "north-box runs a newer Fermix than this computer. The update for this computer " <>
-               "is published: install it before you move Fermix back here."
+      assert sentence ==
+               "north-box runs a newer Fermix than this computer. The update for this " <>
+                 "computer is published: install it before you move Fermix back here."
+    end
 
-    # Only the Linux app carries it, and this computer is a Mac.
-    linux_only = Keyword.put(opts(ctx), :release_table, table.(["app 0.18.0 linux 1.3.0"]))
-    assert %{ready: false, items: items} = MoveReadiness.report(ctx.home, newer, linux_only)
-    assert %{status: :block, sentence: sentence} = item_in(items, "engine_version")
+    # Only the Linux app reads it, and this computer is a Mac; or the Mac's
+    # app is in the older format.
+    for rows <- [
+          ["app 0.18.0 linux 1.3.0"],
+          ["app 0.17.0 macos 2.3.0", "home_format 0.17.0 1", "home_format 0.18.0 2"]
+        ] do
+      unpublished = Keyword.put(seams, :release_table, table.(rows))
+      assert %{ready: false, items: items} = MoveReadiness.report(ctx.home, newer, unpublished)
+      assert %{status: :block, sentence: sentence} = item_in(items, "engine_version")
 
-    assert sentence ==
-             "north-box runs a newer Fermix than this computer, and no update for this " <>
-               "computer carries it yet, so Fermix could not move back. Set the server up " <>
-               "with this computer's version, or wait for that update."
+      assert sentence ==
+               "north-box runs a newer Fermix than this computer, and no update for this " <>
+                 "computer reads its home yet, so Fermix could not move back. Set the server " <>
+                 "up with this computer's version, or wait for that update."
+    end
 
-    unread = Keyword.put(opts(ctx), :release_table, fn -> {:error, "An invented failure."} end)
+    unread = Keyword.put(seams, :release_table, fn -> {:error, "An invented failure."} end)
     assert %{ready: false, items: items} = MoveReadiness.report(ctx.home, newer, unread)
     assert %{status: :block, sentence: sentence} = item_in(items, "engine_version")
     assert sentence =~ "Fermix could not read which updates are published. Check again."
+  end
 
-    # The table is read only for a newer server.
-    refuse = fn -> flunk("the table is read only for a newer server") end
-    same = Keyword.put(opts(ctx), :release_table, refuse)
-    assert %{items: items} = MoveReadiness.report(ctx.home, ctx.candidate, same)
-    assert %{status: :ok} = item_in(items, "engine_version")
+  # A server whose Fermix names a home format below this home's cannot read
+  # it, whatever its version; one from before formats reads by version.
+  test "a server that cannot read this home's format blocks, whatever its version", ctx do
+    seams = Keyword.put(opts(ctx), :home_format, 2)
+    behind = %{ctx.candidate | version: "0.20.0"} |> Map.put(:home_format, 1)
+
+    assert %{ready: false, items: items} = MoveReadiness.report(ctx.home, behind, seams)
+    assert %{status: :block, sentence: sentence} = item_in(items, "engine_version")
+
+    assert sentence ==
+             "north-box runs an older Fermix than this computer, one that cannot read this " <>
+               "home: update Fermix on north-box first, then check again."
   end
 
   # The same review on the server, when the candidate is the desktop the
@@ -328,13 +367,28 @@ defmodule FermixCore.Home.MoveReadinessTest do
            } =
              item_in(items, "stays_here")
 
-    assert %{status: :ok, sentence: "studio-box runs this computer's Fermix, or a newer one."} =
+    assert %{status: :ok, sentence: "studio-box runs a Fermix that reads this home."} =
              item_in(items, "engine_version")
 
+    # An engine before home formats reads by its version, so an older one
+    # blocks; an older one that reads the server's home format does not
+    # (M97 D16), and one whose format is below it does.
     older = %{desktop | version: "0.16.0"}
     assert %{ready: false, items: items} = MoveReadiness.report(ctx.home, older, server)
     assert %{status: :block, sentence: sentence} = item_in(items, "engine_version")
-    assert sentence =~ "studio-box runs an older Fermix than this computer: update Fermix on"
+
+    assert sentence =~
+             "studio-box runs an older Fermix than this computer, one that cannot read this " <>
+               "home: update Fermix on"
+
+    same_format = Map.put(older, :home_format, 2)
+    formatted = Keyword.put(server, :home_format, 2)
+    assert %{items: items} = MoveReadiness.report(ctx.home, same_format, formatted)
+    assert %{status: :ok} = item_in(items, "engine_version")
+
+    below = Map.put(older, :home_format, 1)
+    assert %{ready: false, items: items} = MoveReadiness.report(ctx.home, below, formatted)
+    assert %{status: :block} = item_in(items, "engine_version")
 
     File.write!(Path.join(ctx.home, "config.toml"), "")
     assert %{items: items} = MoveReadiness.report(ctx.home, newer, server)
@@ -350,8 +404,10 @@ defmodule FermixCore.Home.MoveReadinessTest do
 
     unread = Keyword.put(opts(ctx), :release_table, fn -> {:error, "An invented failure."} end)
 
+    newer = mac |> Map.put(:version, "0.18.0") |> Map.put(:home_format, 2)
+
     assert %{ready: false, items: items} =
-             MoveReadiness.report(ctx.home, %{mac | version: "0.18.0"}, unread)
+             MoveReadiness.report(ctx.home, newer, Keyword.put(unread, :home_format, 1))
 
     assert %{status: :block, sentence: sentence} = item_in(items, "engine_version")
     assert sentence =~ "studio-mac runs a newer Fermix than this computer"

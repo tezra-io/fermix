@@ -100,6 +100,7 @@ defmodule FermixChannels.Home.Candidate do
   alias FermixCore.Home.Disk
   alias FermixCore.Home.MoveAwake
   alias FermixCore.Home.MoveTelemetry
+  alias FermixCore.Home.Readable
   alias FermixCore.Management.Lifecycle
   alias FermixCore.Management.Settings
   alias FermixCore.Setup.ConfigStore
@@ -650,6 +651,13 @@ defmodule FermixChannels.Home.Candidate do
   defp restore_sentence({:keychain_refused, [_ | _]} = refused, state),
     do: Return.error_sentence(refused, state.secret_names.())
 
+  # A home in a newer format than this Fermix reads (`Home.Readable`): the
+  # source reads this sentence in its refusal too, so it says "here".
+  defp restore_sentence({:newer_home_format, _theirs, _ours}, state),
+    do:
+      "The home from #{primary_name(state)} is in a newer form than the Fermix here reads. " <>
+        "Update Fermix here first, then try again."
+
   defp restore_sentence(_reason, state),
     do: "The home from #{primary_name(state)} could not be restored here."
 
@@ -875,7 +883,8 @@ defmodule FermixChannels.Home.Candidate do
       "name" => name,
       "os" => Atom.to_string(os),
       "arch" => arch,
-      "version" => BuildInfo.product_version()
+      "version" => BuildInfo.product_version(),
+      "home_format" => Readable.home_format()
     }
   end
 

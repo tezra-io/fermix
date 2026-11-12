@@ -143,7 +143,14 @@ defmodule FermixChannels.Mobile.PeerEvents do
     "enroll_request" =>
       {[
          {"host",
-          {:object, [{"name", :name}, {"os", :name}, {"arch", :name}, {"version", :name}]}},
+          {:object,
+           [
+             {"name", :name},
+             {"os", :name},
+             {"arch", :name},
+             {"version", :name},
+             {"home_format", {:optional, :positive}}
+           ]}},
          {"candidate",
           {:object,
            [

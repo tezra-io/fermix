@@ -102,21 +102,25 @@ defmodule FermixCore.Management.Home do
   exits: the daemon serves each request in a process of its own. `disk` is how full this primary's disk is (`Home.Disk.usage/2`:
   `used`, a fraction, and `nearly_full` from 85%), null in any other role and
   when it cannot be read, so a linked desktop reads its server's from
-  `primary_home`. `version` is this engine's.
+  `primary_home`. `version` is this engine's, and `home_format` the home
+  format it reads and writes (`Home.Readable`, M97 D16), which a linked
+  computer reads from `primary_home` to tell whether it could read its
+  server's home; an engine before home formats answers none.
 
   **The server leads** (M97 §3.4, D14). On an Always On server
   (`Home.AlwaysOn.server?/1`), `update` is what its update may install, from
   the release table it keeps (`Home.ReleaseTable`) and its computers:
   `running` (this engine's version), `eligible` (the newest release, at or
-  above it, that the app of each system whose computers keep backups
-  carries, `Home.Releases.eligible/3`; null when none, or when no table was
+  above it, whose home a published app for each system whose computers keep
+  backups reads, by the home formats the table names,
+  `Home.Releases.eligible/3`; null when none, or when no table was
   read: the update installs nothing then), `held` (a newer release not
   eligible yet: its `version`, the systems it `waits_for` and a `sentence`
   that names no version; null when there is none; computers that cannot be
   listed are never read as none: the update holds as for a computer whose
   system is not known, and the sentence says the list could not be read),
-  `ahead_of_apps` (this
-  engine runs past what some backup system's app carries, an owner's
+  `ahead_of_apps` (no published app
+  for some backup system reads the home this engine writes, an owner's
   override) and `table` (`read_at`, when the table was last read, and the
   `sentence` of a fetch that failed or of why none was read, each null
   otherwise). Null on every other engine. `update_ceiling` is `update`'s
@@ -178,6 +182,7 @@ defmodule FermixCore.Management.Home do
   alias FermixCore.Home.Link
   alias FermixCore.Home.Moved
   alias FermixCore.Home.MoveSecrets
+  alias FermixCore.Home.Readable
   alias FermixCore.Home.Releases
   alias FermixCore.Home.ReleaseTable
   alias FermixCore.Home.RestartHold
@@ -439,7 +444,7 @@ defmodule FermixCore.Management.Home do
   # computer that has not said its system, says why, and claims nothing about
   # the apps.
   defp update_view({:ok, table, read_at, failure}, running, :unlisted) do
-    %{eligible: eligible, held: held} = Releases.eligible(table, running, [:unknown])
+    %{eligible: eligible, held: held} = Releases.eligible(table, engine(running), [:unknown])
 
     %{
       "running" => running,
@@ -452,7 +457,7 @@ defmodule FermixCore.Management.Home do
 
   defp update_view({:ok, table, read_at, failure}, running, backups) do
     %{eligible: eligible, held: held, ahead_of_apps: ahead} =
-      Releases.eligible(table, running, backups)
+      Releases.eligible(table, engine(running), backups)
 
     %{
       "running" => running,
@@ -472,6 +477,10 @@ defmodule FermixCore.Management.Home do
       "table" => %{"read_at" => nil, "sentence" => sentence}
     }
   end
+
+  # This engine as the update gate reads it: its version and the home format
+  # it writes (`Home.Readable`).
+  defp engine(running), do: %{engine_version: running, home_format: Readable.home_format()}
 
   defp held_view(nil), do: nil
 
@@ -642,7 +651,8 @@ defmodule FermixCore.Management.Home do
 
   @doc """
   The `home.status` record from its facts: the role, the epoch (or nil), the
-  marker (or nil), the snapshots view, the summary, this engine's version,
+  marker (or nil), the snapshots view, the summary, this engine's version
+  and home format (`Home.Readable`),
   the rail's `primary` (or nil) and `desktops` (none when absent),
   `HomeMove.facts/4`'s `enrollment`, `candidates` and `move` (null, none and
   null when absent), a linked desktop's `primary_home` and `primary_missing`
@@ -705,6 +715,7 @@ defmodule FermixCore.Management.Home do
       "secrets_missing" => Map.get(facts, :secrets_missing, []),
       "disk" => Map.get(facts, :disk),
       "version" => version,
+      "home_format" => Readable.home_format(),
       "update_ceiling" => Map.get(facts, :update_ceiling),
       "update" => Map.get(facts, :update),
       "restart_hold" => Map.get(facts, :restart_hold),

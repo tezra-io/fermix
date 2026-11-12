@@ -3,6 +3,7 @@ defmodule FermixCore.Home.Archive.ManifestTest do
 
   alias FermixCore.BuildInfo
   alias FermixCore.Home.Archive.Manifest
+  alias FermixCore.Home.Readable
 
   @sha String.duplicate("ab", 32)
 
@@ -18,6 +19,7 @@ defmodule FermixCore.Home.Archive.ManifestTest do
              "created_at" => created_at,
              "primary_epoch" => 4,
              "engine_version" => version,
+             "home_format" => home_format,
              "home_root" => "/home/invented/.fermix",
              "host" => "macos-aarch64",
              "files" => [
@@ -28,7 +30,23 @@ defmodule FermixCore.Home.Archive.ManifestTest do
 
     assert {:ok, _at, 0} = DateTime.from_iso8601(created_at)
     assert version == BuildInfo.product_version()
+    assert home_format == Readable.home_format()
     assert Manifest.decode(json) == {:ok, manifest}
+  end
+
+  # M97 D16: an engine before home formats wrote none, and the manifest says
+  # so as it is; `Home.Readable` decides what such a home is.
+  test "a manifest with no home format decodes with none" do
+    assert {:ok, %{home_format: nil, engine_version: "0.0.0"}} = Manifest.decode(json(%{}))
+    assert {:ok, %{home_format: 7}} = Manifest.decode(json(%{"home_format" => 7}))
+  end
+
+  test "a home format that is not a positive whole number is invalid" do
+    for bad <- [0, -1, "1", 1.5, nil] do
+      assert Manifest.decode(json(%{"home_format" => bad})) ==
+               {:error, {:invalid_manifest, {:home_format, bad}}},
+             inspect(bad)
+    end
   end
 
   test "a format this build does not read is refused by name" do

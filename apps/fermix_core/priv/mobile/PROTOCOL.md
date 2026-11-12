@@ -1575,7 +1575,7 @@ first frame within 10 s of the handshake, or the stream closes `1008`.
 
 | `t` | Required payload | Rules |
 |---|---|---|
-| `enroll_request` | `host{name, os, arch, version}`, `candidate{node_id, relays[], recipient, addrs[]?}`; `snapshots?{s3_bucket, s3_region}` | candidate to primary, the session's first event; `node_id` and `relays` (1 to 8) as a route's; `recipient` the one-time X25519 public key (32 bytes, standard base64) the move's stream will be encrypted to; `addrs` (1 to 8, absent when it has none) the direct addresses an Always On server listens on, as a desktop route's, which the move dials and the moved desktop's link keeps; each text at most 128 bytes |
+| `enroll_request` | `host{name, os, arch, version, home_format?}`, `candidate{node_id, relays[], recipient, addrs[]?}`; `snapshots?{s3_bucket, s3_region}` | candidate to primary, the session's first event; `home_format` the home format the candidate's Fermix reads and writes (M97 D16), absent from an engine before home formats, which the move's review then judges by `version`; `node_id` and `relays` (1 to 8) as a route's; `recipient` the one-time X25519 public key (32 bytes, standard base64) the move's stream will be encrypted to; `addrs` (1 to 8, absent when it has none) the direct addresses an Always On server listens on, as a desktop route's, which the move dials and the moved desktop's link keeps; each text at most 128 bytes |
 | `enroll_accepted` | `candidate_id`, `primary_name` | primary to candidate; the session then closes `1000` |
 
 A refused enrollment is an `error` with `code` `enrollment_expired`,

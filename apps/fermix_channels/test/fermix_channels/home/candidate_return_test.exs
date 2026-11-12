@@ -23,10 +23,12 @@ defmodule FermixChannels.Home.CandidateReturnTest do
   alias FermixCore.Home.EnrollmentCode
   alias FermixCore.Home.Epoch
   alias FermixCore.Home.Moved
+  alias FermixCore.Home.Readable
   alias FermixCore.Home.Role
   alias FermixCore.Home.Snapshot
   alias FermixCore.Home.Snapshot.Recipient
   alias FermixCore.Setup.MachineFile
+  alias FermixTestSupport.CraftedSnapshot
   alias FermixTestSupport.SafeRm
 
   @now ~U[2031-06-01 09:00:00Z]
@@ -90,6 +92,37 @@ defmodule FermixChannels.Home.CandidateReturnTest do
       assert_receive first when first in [:awake_released, :candidate_restart]
       assert first == :awake_released
       assert_receive :candidate_restart
+    end
+
+    # M97 D16: a server's home in a newer format than this computer's Fermix
+    # reads is refused before anything is staged, in words that say what to
+    # do, which the server reads in its refusal too.
+    test "a server's home in a newer format says to update Fermix here first", ctx do
+      {:ok, pair} = Candidate.recipient_pair(ctx.mac)
+      newer = Path.join(ctx.tmp, "newer.fxsnap")
+      format = Readable.home_format() + 1
+
+      CraftedSnapshot.write!(newer, Recipient.public(pair), ctx.server,
+        home_format: format,
+        engine_version: "0.1.0",
+        host: "linux-aarch64"
+      )
+
+      name = start_candidate!(ctx.mac)
+      assert {:ok, %{incoming: incoming}} = CandidateProcess.offer(name, offer(newer))
+      File.cp!(newer, incoming)
+
+      assert :ok = CandidateProcess.stage(name, @move_id, self())
+      assert_receive {:candidate_staged, @move_id, {:error, sentence}}, 30_000
+
+      assert sentence ==
+               "The home from north-box is in a newer form than the Fermix here reads. Update " <>
+                 "Fermix here first, then try again."
+
+      refute File.exists?(Candidate.staging_path(ctx.mac))
+
+      assert {:ok, %{"phase" => "enrolled", "sentence" => ^sentence}} =
+               Candidate.read_state(ctx.mac)
     end
 
     test "a staging that fails lets the computer sleep again until the next offer", ctx do

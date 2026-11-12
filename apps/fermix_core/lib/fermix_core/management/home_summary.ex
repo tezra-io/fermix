@@ -127,13 +127,16 @@ defmodule FermixCore.Management.HomeSummary do
   `home.status` `version`): past the window (`settings_only`) it is the
   `update` problem in its own sentence (this computer keeps its link for
   settings alone). A server that installed a release ahead of the apps
-  (its `update.ahead_of_apps`, an owner's override) that this computer
-  cannot read (`readable`, `Home.Readable`) is the problem `server_ahead`,
-  with Update, until this computer's Fermix catches up. Where this computer
-  cannot read the server's home, Move back and Restore here are not offered:
-  in their place an Update action says "Update Fermix on this computer
-  first". A server that says no version (one that is silent) is not
-  compared; the restore itself refuses a home it cannot read.
+  (its `update.ahead_of_apps`, an owner's override) whose home this
+  computer cannot read (`readable`, `Home.Readable`: by the home format the
+  server's `home.status` names, never by its version, M97 D16) is the
+  problem `server_ahead`, with Update, until this computer's Fermix catches
+  up. Where this computer cannot read the server's home, Move back and
+  Restore here are not offered: in their place an Update action says
+  "Update Fermix on this computer first". A newer server whose home format
+  this computer reads keeps both. A server that says no version (one that
+  is silent) is not compared; the restore itself refuses a home it cannot
+  read.
 
   **Computers** (M97 §3.1, §7.5). A linked computer's `on` and the server's
   own `primary` offer Add a computer (`add_computer`, a code a new computer
@@ -477,7 +480,7 @@ defmodule FermixCore.Management.HomeSummary do
       moved_back: moved_back(home, role, reads),
       primary_behind: Map.get(status, :primary_behind, false),
       standing: server_compared(status, &Versions.standing/2),
-      readable: server_compared(status, &readable_from/2),
+      readable: server_readable(status),
       restarts_itself: restarts_itself(role, opts),
       keeps_on: keeps_on(home, {role, link}, host_os, opts),
       offers_review: offers_review(DesktopLink.linked?(record, home), host_os, opts),
@@ -1914,8 +1917,23 @@ defmodule FermixCore.Management.HomeSummary do
 
   defp version?(text), do: match?({:ok, _version}, Version.parse(text))
 
-  # Whether this engine reads a home the server's engine wrote.
-  defp readable_from(ours, theirs), do: Readable.readable?(%{engine_version: theirs}, ours)
+  # Whether this engine reads the home its server writes (`Home.Readable`,
+  # M97 D16): by the home format the server's own `home.status` names, one
+  # from before home formats naming none (format 1). Nil where the server
+  # said no version (a silent one), as for its standing, or named a format
+  # that is not one.
+  defp server_readable(%{primary_home: %{"version" => version} = server})
+       when is_binary(version) do
+    case Map.get(server, "home_format") do
+      format when is_nil(format) or (is_integer(format) and format >= 1) ->
+        Readable.readable?(%{home_format: format, engine_version: version})
+
+      _not_a_format ->
+        nil
+    end
+  end
+
+  defp server_readable(_status), do: nil
 
   # The copies a desktop keeps of its server's snapshots, newest first, by
   # the time their names carry (`Snapshot.name/2`); a name that is no

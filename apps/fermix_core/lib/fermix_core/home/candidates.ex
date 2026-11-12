@@ -20,6 +20,11 @@ defmodule FermixCore.Home.Candidates do
   nil for any other: the one fact that says a move goes back to the computer
   the home left. The move's request carries it; `view/1` does not show it.
 
+  `home_format` is the newest home format the candidate's Fermix reads, as
+  its enrollment said it (M97 D16, `FermixCore.Home.Readable`), nil from an
+  engine before home formats, which reads by engine version; a move's review
+  reads it (`Home.MoveReadiness`), and `view/1` does not show it.
+
   `addrs` are the direct address hints the candidate gave
   (`FermixChannels.Mobile.Iroh.Hints`, `FermixCore.Home.DesktopLink.hint?/1`):
   an Always On server's tailnet addresses at its fixed port, none for any
@@ -47,6 +52,7 @@ defmodule FermixCore.Home.Candidates do
           os: String.t(),
           arch: String.t(),
           version: String.t(),
+          home_format: pos_integer() | nil,
           node_id: String.t(),
           relays: [map(), ...],
           noise_pk: <<_::256>>,
@@ -112,8 +118,8 @@ defmodule FermixCore.Home.Candidates do
   @doc """
   Holds a new candidate enrolled at `now`, under a fresh id: refused as
   `{:error, :limit}` while #{@max_candidates} are held. `attrs` is the
-  record without its id and its times (`returning` nil and `addrs` none when
-  absent).
+  record without its id and its times (`returning` and `home_format` nil and
+  `addrs` none when absent).
   """
   @spec add(Path.t(), map(), DateTime.t()) :: {:ok, record()} | {:error, term()}
   def add(home, attrs, %DateTime{} = now) when is_binary(home) and is_map(attrs) do
@@ -122,6 +128,7 @@ defmodule FermixCore.Home.Candidates do
       record =
         Map.merge(attrs, %{
           returning: Map.get(attrs, :returning),
+          home_format: Map.get(attrs, :home_format),
           addrs: Map.get(attrs, :addrs, []),
           candidate_id: "cand-" <> Base.encode16(:crypto.strong_rand_bytes(8), case: :lower),
           enrolled_at: DateTime.truncate(now, :second),
@@ -168,6 +175,7 @@ defmodule FermixCore.Home.Candidates do
       "noise_pk" => Base.encode64(record.noise_pk),
       "recipient" => Base.encode64(record.recipient),
       "returning" => record.returning,
+      "home_format" => record.home_format,
       "addrs" => record.addrs
     })
   end
@@ -181,6 +189,7 @@ defmodule FermixCore.Home.Candidates do
          {:ok, expires_at, _offset} <- DateTime.from_iso8601(map["expires_at"] || ""),
          true <- Enum.all?(~w(candidate_id name os arch version node_id), &is_binary(map[&1])),
          true <- is_nil(map["returning"]) or is_binary(map["returning"]),
+         true <- home_format?(map["home_format"]),
          {:ok, addrs} <- hints(Map.get(map, "addrs", [])),
          [_ | _] = relays <- map["relays"] do
       {:ok,
@@ -190,6 +199,7 @@ defmodule FermixCore.Home.Candidates do
          os: map["os"],
          arch: map["arch"],
          version: map["version"],
+         home_format: map["home_format"],
          node_id: map["node_id"],
          relays: relays,
          noise_pk: noise_pk,
@@ -215,6 +225,10 @@ defmodule FermixCore.Home.Candidates do
   end
 
   defp key(_other), do: :error
+
+  # Absent is none: a record from before formats were kept, or a candidate
+  # from an engine before them.
+  defp home_format?(format), do: is_nil(format) or (is_integer(format) and format >= 1)
 
   # Absent is none: a record from before hints were kept.
   defp hints(addrs) when is_list(addrs) and length(addrs) <= 8 do

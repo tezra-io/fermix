@@ -1022,6 +1022,7 @@ defmodule FermixChannels.Home.Enrollment do
       os: host["os"],
       arch: host["arch"],
       version: host["version"],
+      home_format: host["home_format"],
       node_id: candidate["node_id"],
       relays: candidate["relays"],
       addrs: Map.get(candidate, "addrs", []),

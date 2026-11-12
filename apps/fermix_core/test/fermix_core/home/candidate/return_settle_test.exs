@@ -12,10 +12,12 @@ defmodule FermixCore.Home.Candidate.ReturnSettleTest do
   alias FermixCore.Home.DesktopLink
   alias FermixCore.Home.Epoch
   alias FermixCore.Home.Moved
+  alias FermixCore.Home.Readable
   alias FermixCore.Home.Snapshot
   alias FermixCore.Home.Snapshot.Recipient
   alias FermixCore.Setup.MachineFile
   alias FermixCore.Setup.SecretWriter
+  alias FermixTestSupport.CraftedSnapshot
   alias FermixTestSupport.SafeRm
 
   @now ~U[2031-06-01 09:00:00Z]
@@ -182,6 +184,23 @@ defmodule FermixCore.Home.Candidate.ReturnSettleTest do
     end
   end
 
+  # M97 D16: a move back stages the server's home by its format, as a move
+  # and a restore do: a newer engine's home of this format comes back here.
+  test "a move back stages the server's home of this format that a newer engine wrote", ctx do
+    stream = crafted!(ctx, "same", home_format: Readable.home_format(), engine_version: "99.0.0")
+
+    assert {:ok, 7} = stage(%{ctx | incoming: stream})
+    assert {:ok, 7} = Epoch.read(Candidate.staging_path(ctx.mac))
+  end
+
+  test "a move back refuses the server's home in a newer format, and stages nothing", ctx do
+    ours = Readable.home_format()
+    stream = crafted!(ctx, "newer", home_format: ours + 1, engine_version: "0.1.0")
+
+    assert stage(%{ctx | incoming: stream}) == {:error, {:newer_home_format, ours + 1, ours}}
+    refute File.exists?(Candidate.staging_path(ctx.mac))
+  end
+
   test "a computer whose own settings cannot be read stages nothing", ctx do
     SafeRm.rm!(Path.join(ctx.mac, "config.toml"))
 
@@ -203,6 +222,13 @@ defmodule FermixCore.Home.Candidate.ReturnSettleTest do
       :return,
       [host: "macos-aarch64", keyring_usable?: fn -> true end] ++ opts
     )
+  end
+
+  # The server's home as a stream whose manifest says what the test states.
+  defp crafted!(ctx, name, opts) do
+    path = Path.join(ctx.tmp, "#{name}.fxsnap")
+    server = Path.join(ctx.tmp, "server")
+    CraftedSnapshot.write!(path, Recipient.public(ctx.pair), server, opts)
   end
 
   defp prepare(mac),

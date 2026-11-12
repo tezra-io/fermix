@@ -44,6 +44,7 @@ defmodule Fermix.CLI.HomeCommand do
   alias Fermix.CLI.SecretInput
   alias FermixCore.Home.Archive
   alias FermixCore.Home.Moved
+  alias FermixCore.Home.Readable
   alias FermixCore.Home.Snapshot
   alias FermixCore.Home.Snapshot.Format
   alias FermixCore.Home.Snapshot.Recipient
@@ -477,10 +478,8 @@ defmodule Fermix.CLI.HomeCommand do
       "primary. Nothing was written."
   end
 
-  defp sentence({:newer_engine, theirs, ours}, _root) do
-    "Fermix #{theirs} wrote this home, and this is Fermix #{ours}: update Fermix here first, " <>
-      "then restore it. Nothing was written."
-  end
+  defp sentence({:newer_home_format, _theirs, _ours}, _root),
+    do: Readable.refusal_sentence() <> " Nothing was written."
 
   defp sentence({kind, path}, _root)
        when kind in [:corrupt_entry, :missing_entry, :unsafe_path, :device_local_entry] do

@@ -20,18 +20,22 @@ defmodule FermixCore.Home.MoveReadiness do
       prompt), and the sentence says so; a start soon after a ready review
       takes the review rather than reading again (`Move.review/3`), so a move
       opens the keychain here and once more in its capture;
-    * `engine_version`: a server that runs an older Fermix than this computer
-      blocks (a restore by an older engine is refused anyway,
-      `Archive.install/5`), as does a version that cannot be read; both by
-      the one rule of what an engine reads (`Home.Readable`). A newer server
-      is `ok` once an update for this computer's system that carries its
-      engine, or a newer one, is published (M97 §3.4: the server leads; the
+    * `engine_version`, by the one rule of what an engine reads
+      (`Home.Readable`, M97 D16: a home's format, never the engine that
+      wrote it): a server whose Fermix cannot read this home blocks (its
+      staging would refuse it anyway, `Archive.install/5`), by the home
+      format its enrollment named, or, from an engine before formats, by
+      its version, which blocks when it cannot be read. A server whose home
+      this computer could not read back is `ok` once a published update for
+      this computer's system reads it (M97 §3.4: the server leads; the
       release table read once, `Home.ReleaseTable.fetch/1`, `:release_table`
-      in a test), and blocks otherwise, or when the table cannot be read,
-      since the home could never move back here. A move back, to the
-      desktop the home left (a candidate that enrolled through the window
-      that desktop opened, `Home.Candidates`' `returning`), blocks only a
-      desktop older than the server;
+      in a test, `Home.Releases.restorable?/3`), and blocks otherwise, or
+      when the table cannot be read, since the home could never move back
+      here; a newer server of this computer's format is `ok` with no table
+      read. A move back, to the desktop the home left (a candidate that
+      enrolled through the window that desktop opened, `Home.Candidates`'
+      `returning`), blocks only a desktop that cannot read the server's
+      home;
     * `disk`: the capture needs about twice the home free on this computer
       (`FermixCore.Home.Disk`); short of it, or with the free space unknown,
       it blocks, saying how much is needed; the server needs as much again.
@@ -85,7 +89,8 @@ defmodule FermixCore.Home.MoveReadiness do
 
   `opts`: `:free_bytes` (a 1-arity reader of free space), `:supervised` (for
   `CommandRunner` and the keychain read from a tree-less verb), `:version`
-  (this engine's, `BuildInfo.product_version/0`), `:host` (this host's plugin
+  and `:home_format` (this engine's, `BuildInfo.product_version/0` and
+  `Readable.home_format/0`), `:host` (this host's plugin
   target, `Archive.host/1`), `:home_bytes` (the home's size, in place of
   walking it), `:index_opts` (`Plugins.Dist.Index.load/1`'s, the catalog),
   `:restarts_itself` (a boolean, in place of
@@ -143,11 +148,7 @@ defmodule FermixCore.Home.MoveReadiness do
       call_in_progress(Keyword.get(opts, :call_holder, &call_holder/0)) ++
         [
           keychain(config, opts),
-          version(
-            candidate,
-            Keyword.get_lazy(opts, :version, &BuildInfo.product_version/0),
-            {system(macos?), opts}
-          ),
+          version(candidate, this_engine(opts), {system(macos?), opts}),
           disk(home, home_bytes, name, opts),
           s3_size(candidate, home_bytes),
           plugins(home, host, candidate, opts)
@@ -340,34 +341,39 @@ defmodule FermixCore.Home.MoveReadiness do
   defp them([_one]), do: "it"
   defp them(_many), do: "them"
 
-  # The versions themselves are on the candidate's row; the sentence says
-  # which way they differ, by the one rule of what an engine reads
-  # (`Home.Readable`). An older one can never restore this home. A newer
-  # server is fine once an update for this computer that reads its home is
-  # published (M97 §3.4: the server leads), read from the release table at
-  # the review; otherwise it could never move back here.
-  defp version(%{name: name, version: theirs} = candidate, ours, system_opts) do
-    case {Version.parse(theirs), Version.parse(ours)} do
-      {{:ok, _there}, {:ok, _here}} ->
-        versions(read_both(theirs, ours), returning?(candidate), name, {theirs, system_opts})
+  # By the one rule of what an engine reads (`Home.Readable`, M97 D16): the
+  # candidate's Fermix must read this home, by the home format its
+  # enrollment named (one from before formats names none and reads by its
+  # version, which must then be one). On a move this computer must also read
+  # the candidate's home back, now or once an update for it is published
+  # (M97 §3.4: the server leads), read from the release table at the review;
+  # otherwise the home could never move back here. A move back needs only
+  # the first.
+  defp version(%{name: name} = candidate, ours, system_opts) do
+    theirs = %{home_format: Map.get(candidate, :home_format), engine_version: candidate.version}
 
-      _unreadable ->
-        item(
-          "engine_version",
-          :block,
-          "Fermix cannot read which version #{name} runs: enroll it again from an " <>
-            "up-to-date Fermix."
-        )
+    if known?(theirs) do
+      versions(read_both(theirs, ours), returning?(candidate), name, {theirs, system_opts})
+    else
+      item(
+        "engine_version",
+        :block,
+        "Fermix cannot read which version #{name} runs: enroll it again from an " <>
+          "up-to-date Fermix."
+      )
     end
   end
 
-  # Whether the server reads this home, and whether this computer would read
-  # the server's back.
+  defp known?(%{home_format: format}) when is_integer(format), do: true
+  defp known?(%{engine_version: version}), do: match?({:ok, _parsed}, Version.parse(version))
+
+  # Whether the candidate reads this home, and whether this computer reads
+  # the candidate's.
   defp read_both(theirs, ours) do
     cond do
-      Readable.readable?(%{engine_version: ours}, theirs) != :ok -> :older
-      Readable.readable?(%{engine_version: theirs}, ours) != :ok -> :newer
-      true -> :same
+      not Readable.reads?(theirs, ours) -> :older
+      not Readable.reads?(ours, theirs) -> :newer
+      true -> :both
     end
   end
 
@@ -376,18 +382,23 @@ defmodule FermixCore.Home.MoveReadiness do
       item(
         "engine_version",
         :block,
-        "#{name} runs an older Fermix than this computer: update Fermix on #{name} " <>
-          "first, then check again."
+        "#{name} runs an older Fermix than this computer, one that cannot read this home: " <>
+          "update Fermix on #{name} first, then check again."
       )
-
-  defp versions(:newer, true, name, _newer),
-    do: item("engine_version", :ok, "#{name} runs this computer's Fermix, or a newer one.")
 
   defp versions(:newer, false, name, {theirs, {system, opts}}),
     do: newer_server(published_for(theirs, system, opts), name)
 
-  defp versions(:same, _returning?, name, _newer),
-    do: item("engine_version", :ok, "#{name} runs this computer's Fermix.")
+  defp versions(:both, false, name, _newer),
+    do:
+      item(
+        "engine_version",
+        :ok,
+        "#{name} runs a Fermix that reads this home, and this computer could read it back."
+      )
+
+  defp versions(_reads, true, name, _newer),
+    do: item("engine_version", :ok, "#{name} runs a Fermix that reads this home.")
 
   defp newer_server(:published, name),
     do:
@@ -404,7 +415,7 @@ defmodule FermixCore.Home.MoveReadiness do
         "engine_version",
         :block,
         "#{name} runs a newer Fermix than this computer, and no update for this computer " <>
-          "carries it yet, so Fermix could not move back. Set the server up with this " <>
+          "reads its home yet, so Fermix could not move back. Set the server up with this " <>
           "computer's version, or wait for that update."
       )
 
@@ -417,24 +428,29 @@ defmodule FermixCore.Home.MoveReadiness do
           "updates are published. Check again."
       )
 
-  # Whether an app for this computer's system carries the server's engine,
-  # or a newer one, by the release table (`Home.ReleaseTable.fetch/1`;
-  # `:release_table` in a test).
-  # A release is a plain MAJOR.MINOR.PATCH; no app carries any other.
+  # Whether a published app for this computer's system reads the server's
+  # home, by the release table (`Home.Releases.restorable?/3`,
+  # `Home.ReleaseTable.fetch/1`; `:release_table` in a test).
   defp published_for(theirs, system, opts) do
-    with true <- Regex.match?(~r/\A\d+\.\d+\.\d+\z/, theirs),
-         {:ok, table} <- Keyword.get(opts, :release_table, &ReleaseTable.fetch/0).() do
-      if Releases.eligible(table, theirs, [system]).eligible,
-        do: :published,
-        else: :not_published
-    else
-      false -> :not_published
-      {:error, sentence} -> {:unread, sentence}
+    case Keyword.get(opts, :release_table, &ReleaseTable.fetch/0).() do
+      {:ok, table} ->
+        if Releases.restorable?(table, system, theirs), do: :published, else: :not_published
+
+      {:error, sentence} ->
+        {:unread, sentence}
     end
   end
 
   defp system(true), do: :macos
   defp system(false), do: :linux
+
+  # This engine as a reader and a writer of homes: its version and its home
+  # format (`:version` and `:home_format` in a test).
+  defp this_engine(opts),
+    do: %{
+      engine_version: Keyword.get_lazy(opts, :version, &BuildInfo.product_version/0),
+      home_format: Keyword.get_lazy(opts, :home_format, &Readable.home_format/0)
+    }
 
   # A move back goes to the desktop the home left: the candidate that
   # enrolled through the window that desktop opened on this server.

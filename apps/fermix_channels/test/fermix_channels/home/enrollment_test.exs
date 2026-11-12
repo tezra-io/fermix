@@ -61,6 +61,7 @@ defmodule FermixChannels.Home.EnrollmentTest do
     assert record.noise_pk == noise.public
     assert record.recipient == pair.public_key
     assert record.addrs == []
+    assert record.home_format == nil
     refute Map.has_key?(record, :instance)
     assert Bitwise.band(File.stat!(Candidates.path(ctx.primary.root)).mode, 0o777) == 0o600
 
@@ -88,6 +89,19 @@ defmodule FermixChannels.Home.EnrollmentTest do
 
     assert_receive {:rail, ^rail, {:event, %{"t" => "enroll_accepted"}, _bytes}}, 10_000
     assert {:ok, [%{addrs: ^hints}]} = Candidates.list(ctx.primary.root, HomeMove.now())
+  end
+
+  # M97 D16: the home format the candidate reads is kept for the move's
+  # review; an engine before home formats says none.
+  test "a candidate's home format is kept with its record, and none when it said none", ctx do
+    home = HomeMove.candidate_home!(ctx.code)
+    {:ok, rail} = open_enrollment(ctx.primary, ctx.code, home)
+
+    :ok =
+      Rail.send_event(rail, "enroll_request", put_in(request(home), ["host", "home_format"], 4))
+
+    assert_receive {:rail, ^rail, {:event, %{"t" => "enroll_accepted"}, _bytes}}, 10_000
+    assert {:ok, [%{home_format: 4}]} = Candidates.list(ctx.primary.root, HomeMove.now())
   end
 
   test "a candidate whose enroll_accepted was lost hears it again, as the same candidate",

@@ -6052,13 +6052,18 @@
           "type": "string",
           "minLength": 1
         },
+        "home_format": {
+          "description": "The home format this engine reads and writes (M97 D16): it reads every home of this format or an older one, whichever engine wrote it, and refuses a newer one. A linked computer reads its server's from primary_home to tell whether it could take the server's home back (Move back, Restore here). Absent from an engine older than it, whose home is format 1.",
+          "type": "integer",
+          "minimum": 1
+        },
         "update_ceiling": {
           "description": "The release an Always On server's update may install: update.eligible, null where update is null or names none. Kept for every server's update script, which reads it, so a script an older first boot wrote follows the server too. An engine before the server led (M97) answered the oldest engine among its desktops here. Absent from an engine older than it.",
           "type": ["string", "null"],
           "minLength": 1
         },
         "update": {
-          "description": "On an Always On server, what its update may install (M97: the server leads, from the release table fermix.ai serves): running, this engine's version; eligible, the newest release at or above it that the app of each system whose computers keep backups carries, null when none or when no table was read, and the update then installs nothing; held, a newer release not eligible yet, with the systems it waits_for (macos, linux, or unknown for a computer that has not said its system) and a sentence that names no version, null when there is none; ahead_of_apps, true when this engine runs past what some backup system's app carries (an owner's override); table, read_at when the table was last read and the sentence of a fetch that failed or of why none was read, each null otherwise. Null on every other engine. Absent from an engine older than it.",
+          "description": "On an Always On server, what its update may install (M97: the server leads, from the release table fermix.ai serves): running, this engine's version; eligible, the newest release at or above it whose home a published app for each system whose computers keep backups reads (by the home formats the release table names; an app from before home formats reads only its own release's home or an older one's), null when none or when no table was read, and the update then installs nothing; held, a newer release not eligible yet, with the systems it waits_for (macos, linux, or unknown for a computer that has not said its system) and a sentence that names no version, null when there is none; ahead_of_apps, true when no published app for some backup system reads the home this engine writes (an owner's override); table, read_at when the table was last read and the sentence of a fetch that failed or of why none was read, each null otherwise. Null on every other engine. Absent from an engine older than it.",
           "oneOf": [
             {
               "type": "object",

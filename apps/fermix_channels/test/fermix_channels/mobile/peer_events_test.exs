@@ -128,6 +128,15 @@ defmodule FermixChannels.Mobile.PeerEventsTest do
       assert {:error, {:invalid_field, "candidate.relays"}} =
                decode("enroll_request", put_in(request, ["candidate", "relays"], []))
 
+      # M97 D16: the home format the candidate reads, absent from an engine
+      # before home formats.
+      assert {:ok, _event} = decode("enroll_request", put_in(request, ["host", "home_format"], 3))
+
+      for bad <- [0, "1", nil, 1.5] do
+        assert {:error, {:invalid_field, "host.home_format"}} =
+                 decode("enroll_request", put_in(request, ["host", "home_format"], bad))
+      end
+
       # An Always On server's address hints: one to eight `ip:port`, or none.
       hinted =
         put_in(request, ["candidate", "addrs"], ["100.64.0.9:4033", "[fd7a:115c:a1e0::9]:4033"])

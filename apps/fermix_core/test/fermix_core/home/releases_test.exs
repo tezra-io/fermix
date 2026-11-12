@@ -1,8 +1,9 @@
 defmodule FermixCore.Home.ReleasesTest do
   # M97 §3.4, the server leads: the release table fermix.ai serves gains
-  # `app <engine_version> <system> <app_version>` rows, and a server takes the
-  # newest release whose apps are published for every system that keeps its
-  # backup copies. test/fixtures/release_tables is a byte copy of
+  # `app <engine_version> <system> <app_version>` rows and (D16)
+  # `home_format <engine_version> <home_format>` rows, and a server takes the
+  # newest release whose home a published app reads for every system that
+  # keeps its backup copies. test/fixtures/release_tables is a byte copy of
   # tests/fixtures/release-tables in tezra-io/fermix-site, whose parser reads
   # the same tables; both suites check the copy's combined digest. The site
   # refuses every row it does not know; this reader ignores one, as the
@@ -14,7 +15,7 @@ defmodule FermixCore.Home.ReleasesTest do
   @fixtures Path.expand("../../fixtures/release_tables", __DIR__)
   # sha256 over each fixture, in name order, as "<name>\n<contents>"; the
   # site's test states the same constant.
-  @shared_fixtures_sha256 "779393907dfb178f28c9a49811a647bef14bda6fa60b8bff927bf0fa4effb3c6"
+  @shared_fixtures_sha256 "18ebacc769950f683b51bb443f97234a8eabd956528c6099d7fb9dea90461736"
 
   # What apps.txt lists, in its order.
   @apps [
@@ -32,6 +33,10 @@ defmodule FermixCore.Home.ReleasesTest do
   end
 
   defp header(latest), do: "format 1\nlatest #{latest}\n"
+
+  # The engine that runs, writing the home format given (this engine's own
+  # when none is).
+  defp running(version, format \\ 1), do: %{engine_version: version, home_format: format}
   defp digest(version, file), do: "#{version} #{String.duplicate("e", 64)} #{file}\n"
 
   describe "parse/1" do
@@ -60,10 +65,44 @@ defmodule FermixCore.Home.ReleasesTest do
     end
 
     test "rows it does not know are ignored, as install.sh ignores them" do
-      # home_format and channel rows, and an app row for a system no
-      # computer of a home runs: the same table as without them.
-      assert table!("unknown_rows.txt") == table!("apps.txt")
+      # A channel row, and an app row for a system no computer of a home
+      # runs: the same table as without them. unknown_rows.txt also carries
+      # a home_format row, which this reader now knows (M97 D16).
+      assert table!("unknown_rows.txt") == %{table!("apps.txt") | formats: %{"4.2.0" => 3}}
       assert table!("app_other_system.txt") == table!("apps.txt")
+    end
+
+    # M97 D16: the home format each engine release reads and writes, once a
+    # release; one with none is from before home formats.
+    test "reads the home format rows" do
+      assert table!("home_formats.txt").formats == %{"4.1.0" => 1, "4.2.0" => 1}
+      assert table!("apps.txt").formats == %{}
+    end
+
+    test "a malformed home format row, or formats out of order, refuse the table by name" do
+      row = ~s(is not "home_format <engine_version> <home_format>")
+
+      cases = %{
+        "home_format_not_a_number.txt" => ~s("home_format 4.1.0 one" #{row}),
+        "home_format_missing_field.txt" => ~s("home_format 4.1.0" #{row}),
+        "home_format_listed_twice.txt" => "the home format of 4.1.0 is listed twice",
+        "home_format_not_pinned.txt" =>
+          "a home format is given for engine 4.3.0, which the table does not pin",
+        "home_format_gap.txt" => "4.1.0 names no home format, though the older 4.0.3 does",
+        "home_format_falls.txt" => "4.2.0's home format 1 is below the older 4.1.0's 2"
+      }
+
+      for {name, reason} <- cases do
+        assert Releases.parse(fixture(name)) == {:error, {:invalid_table, reason}}, name
+      end
+
+      for format <- ["0", "01", "-1", "1.0"] do
+        text = header("4.1.0") <> digest("4.1.0", "fermix_linux_x86_64")
+        bad = "home_format 4.1.0 #{format}"
+
+        assert Releases.parse(text <> bad <> "\n") ==
+                 {:error, {:invalid_table, ~s("#{bad}" #{row})}}
+      end
     end
 
     test "a malformed app row refuses the table by name" do
@@ -137,17 +176,33 @@ defmodule FermixCore.Home.ReleasesTest do
     end
   end
 
+  describe "restorable?/3" do
+    test "whether a published app for a system reads a home, by format or by version" do
+      table = table!("home_formats.txt")
+
+      assert Releases.restorable?(table, :macos, %{home_format: 1, engine_version: "9.0.0"})
+      refute Releases.restorable?(table, :macos, %{home_format: 2, engine_version: "4.2.0"})
+      assert Releases.restorable?(table, :macos, %{home_format: nil, engine_version: "3.0.0"})
+
+      # The Linux app carries 4.0.3, from before home formats: by version.
+      assert Releases.restorable?(table, :linux, %{home_format: 1, engine_version: "4.0.3"})
+      refute Releases.restorable?(table, :linux, %{home_format: 1, engine_version: "4.1.0"})
+
+      refute Releases.restorable?(table, :unknown, %{home_format: 1, engine_version: "1.0.0"})
+    end
+  end
+
   describe "eligible/3" do
     test "with no backup systems the latest release is eligible" do
-      assert Releases.eligible(table!("apps.txt"), "4.0.3", []) ==
+      assert Releases.eligible(table!("apps.txt"), running("4.0.3"), []) ==
                %{eligible: "4.2.0", held: nil, ahead_of_apps: false}
 
-      assert Releases.eligible(table!("no_apps.txt"), "4.0.3", []) ==
+      assert Releases.eligible(table!("no_apps.txt"), running("4.0.3"), []) ==
                %{eligible: "4.2.0", held: nil, ahead_of_apps: false}
     end
 
     test "one system with its app published: the newest release that app carries" do
-      assert Releases.eligible(table!("apps.txt"), "4.0.3", [:macos]) ==
+      assert Releases.eligible(table!("apps.txt"), running("4.0.3"), [:macos]) ==
                %{
                  eligible: "4.1.0",
                  held: %{version: "4.2.0", waits_for: [:macos]},
@@ -159,7 +214,7 @@ defmodule FermixCore.Home.ReleasesTest do
       # The shape of the table served today: no app rows yet, so every
       # release waits, and the server is not called ahead of apps the table
       # says nothing about.
-      assert Releases.eligible(table!("no_apps.txt"), "4.0.3", [:macos]) ==
+      assert Releases.eligible(table!("no_apps.txt"), running("4.0.3"), [:macos]) ==
                %{
                  eligible: nil,
                  held: %{version: "4.2.0", waits_for: [:macos]},
@@ -169,7 +224,7 @@ defmodule FermixCore.Home.ReleasesTest do
       # A table with app rows, none of them for macOS.
       linux_only = only_apps(table!("apps.txt"), :linux)
 
-      assert Releases.eligible(linux_only, "4.0.3", [:macos]) ==
+      assert Releases.eligible(linux_only, running("4.0.3"), [:macos]) ==
                %{
                  eligible: nil,
                  held: %{version: "4.2.0", waits_for: [:macos]},
@@ -185,10 +240,12 @@ defmodule FermixCore.Home.ReleasesTest do
         ahead_of_apps: false
       }
 
-      assert Releases.eligible(table!("apps.txt"), "4.0.3", [:macos, :linux]) == result
-      assert Releases.eligible(table!("apps.txt"), "4.0.3", [:linux, :macos, :linux]) == result
+      assert Releases.eligible(table!("apps.txt"), running("4.0.3"), [:macos, :linux]) == result
 
-      assert Releases.eligible(table!("apps.txt"), "4.0.3", [:linux]) ==
+      assert Releases.eligible(table!("apps.txt"), running("4.0.3"), [:linux, :macos, :linux]) ==
+               result
+
+      assert Releases.eligible(table!("apps.txt"), running("4.0.3"), [:linux]) ==
                %{
                  eligible: "4.0.3",
                  held: %{version: "4.2.0", waits_for: [:linux]},
@@ -198,23 +255,23 @@ defmodule FermixCore.Home.ReleasesTest do
 
     test "running ahead of the apps: nothing is eligible, and nothing below it ever is" do
       # Installed past the gate: no app carries 4.2.0 yet.
-      assert Releases.eligible(table!("apps.txt"), "4.2.0", [:macos]) ==
+      assert Releases.eligible(table!("apps.txt"), running("4.2.0"), [:macos]) ==
                %{eligible: nil, held: nil, ahead_of_apps: true}
 
       # 4.1.0 waits for Linux, and 4.0.3, which both carry, is below it.
-      assert Releases.eligible(table!("apps.txt"), "4.1.0", [:macos, :linux]) ==
+      assert Releases.eligible(table!("apps.txt"), running("4.1.0"), [:macos, :linux]) ==
                %{
                  eligible: nil,
                  held: %{version: "4.2.0", waits_for: [:macos, :linux]},
                  ahead_of_apps: true
                }
 
-      assert Releases.eligible(table!("apps.txt"), "9.0.0", []) ==
+      assert Releases.eligible(table!("apps.txt"), running("9.0.0"), []) ==
                %{eligible: nil, held: nil, ahead_of_apps: false}
     end
 
     test "running the eligible release itself: it stays" do
-      assert Releases.eligible(table!("apps.txt"), "4.1.0", [:macos]) ==
+      assert Releases.eligible(table!("apps.txt"), running("4.1.0"), [:macos]) ==
                %{
                  eligible: "4.1.0",
                  held: %{version: "4.2.0", waits_for: [:macos]},
@@ -226,7 +283,7 @@ defmodule FermixCore.Home.ReleasesTest do
       table = table!("apps.txt")
 
       # Below the oldest app row: every app carries a newer engine.
-      assert Releases.eligible(table, "3.9.0", [:macos, :linux]) ==
+      assert Releases.eligible(table, running("3.9.0"), [:macos, :linux]) ==
                %{
                  eligible: "4.0.3",
                  held: %{version: "4.2.0", waits_for: [:macos, :linux]},
@@ -234,24 +291,24 @@ defmodule FermixCore.Home.ReleasesTest do
                }
 
       # The newest macOS app carries 4.1.0, the newest Linux app 4.0.3.
-      assert %{ahead_of_apps: false} = Releases.eligible(table, "4.1.0", [:macos])
-      assert %{ahead_of_apps: true} = Releases.eligible(table, "4.1.0", [:macos, :linux])
-      assert %{ahead_of_apps: true} = Releases.eligible(table, "4.1.0", [:linux])
-      assert %{ahead_of_apps: false} = Releases.eligible(table, "4.0.3", [:linux])
+      assert %{ahead_of_apps: false} = Releases.eligible(table, running("4.1.0"), [:macos])
+      assert %{ahead_of_apps: true} = Releases.eligible(table, running("4.1.0"), [:macos, :linux])
+      assert %{ahead_of_apps: true} = Releases.eligible(table, running("4.1.0"), [:linux])
+      assert %{ahead_of_apps: false} = Releases.eligible(table, running("4.0.3"), [:linux])
 
       # The table served today has no app rows: never ahead.
       assert %{ahead_of_apps: false} =
-               Releases.eligible(table!("no_apps.txt"), "4.2.0", [:macos, :linux])
+               Releases.eligible(table!("no_apps.txt"), running("4.2.0"), [:macos, :linux])
     end
 
     test "an empty table makes nothing eligible" do
-      assert Releases.eligible(%Releases{}, "4.0.3", []) == %{
+      assert Releases.eligible(%Releases{}, running("4.0.3"), []) == %{
                eligible: nil,
                held: nil,
                ahead_of_apps: false
              }
 
-      assert Releases.eligible(%Releases{}, "4.0.3", [:macos]) == %{
+      assert Releases.eligible(%Releases{}, running("4.0.3"), [:macos]) == %{
                eligible: nil,
                held: nil,
                ahead_of_apps: false
@@ -261,7 +318,7 @@ defmodule FermixCore.Home.ReleasesTest do
     test "a computer whose system is not known holds every release above running" do
       table = table!("apps.txt")
 
-      assert Releases.eligible(table, "4.0.3", [:unknown]) ==
+      assert Releases.eligible(table, running("4.0.3"), [:unknown]) ==
                %{
                  eligible: "4.0.3",
                  held: %{version: "4.2.0", waits_for: [:unknown]},
@@ -269,7 +326,7 @@ defmodule FermixCore.Home.ReleasesTest do
                }
 
       # Listed with known systems, in any order: it waits beside them.
-      assert Releases.eligible(table, "4.1.0", [:unknown, :macos]) ==
+      assert Releases.eligible(table, running("4.1.0"), [:unknown, :macos]) ==
                %{
                  eligible: "4.1.0",
                  held: %{version: "4.2.0", waits_for: [:macos, :unknown]},
@@ -278,9 +335,9 @@ defmodule FermixCore.Home.ReleasesTest do
 
       # Even a release every known app carries, as both carry 4.0.3, which
       # would be eligible without it.
-      assert %{eligible: "4.0.3"} = Releases.eligible(table, "3.9.0", [:macos, :linux])
+      assert %{eligible: "4.0.3"} = Releases.eligible(table, running("3.9.0"), [:macos, :linux])
 
-      assert Releases.eligible(table, "3.9.0", [:linux, :unknown, :macos]) ==
+      assert Releases.eligible(table, running("3.9.0"), [:linux, :unknown, :macos]) ==
                %{
                  eligible: nil,
                  held: %{version: "4.2.0", waits_for: [:macos, :linux, :unknown]},
@@ -288,7 +345,7 @@ defmodule FermixCore.Home.ReleasesTest do
                }
 
       # Running a release the table does not list: nothing is eligible.
-      assert Releases.eligible(table, "3.9.0", [:unknown]) ==
+      assert Releases.eligible(table, running("3.9.0"), [:unknown]) ==
                %{
                  eligible: nil,
                  held: %{version: "4.2.0", waits_for: [:unknown]},
@@ -296,13 +353,75 @@ defmodule FermixCore.Home.ReleasesTest do
                }
 
       # Running the newest release: it stays, and nothing is held.
-      assert %{eligible: "4.2.0", held: nil} = Releases.eligible(table, "4.2.0", [:unknown])
+      assert %{eligible: "4.2.0", held: nil} =
+               Releases.eligible(table, running("4.2.0"), [:unknown])
 
       # A table from before app rows says nothing about being ahead.
-      assert Releases.eligible(table!("no_apps.txt"), "4.0.3", [:unknown]) ==
+      assert Releases.eligible(table!("no_apps.txt"), running("4.0.3"), [:unknown]) ==
                %{
                  eligible: "4.0.3",
                  held: %{version: "4.2.0", waits_for: [:unknown]},
+                 ahead_of_apps: false
+               }
+    end
+
+    # M97 D16: an app reads the home a release writes when its engine's home
+    # format is at or above that release's, so a release that keeps the
+    # format is eligible on the apps already published.
+    test "a release in a home format a published app reads is eligible without an app of its own" do
+      table = table!("home_formats.txt")
+
+      # No macOS app carries 4.2.0, and the one carrying 4.1.0 reads its home.
+      assert Releases.eligible(table, running("4.1.0"), [:macos]) ==
+               %{eligible: "4.2.0", held: nil, ahead_of_apps: false}
+
+      # The Linux app carries 4.0.3, from before home formats: it reads by
+      # version, so only its own release's home or an older one's.
+      assert Releases.eligible(table, running("4.0.3"), [:macos, :linux]) ==
+               %{
+                 eligible: "4.0.3",
+                 held: %{version: "4.2.0", waits_for: [:linux]},
+                 ahead_of_apps: false
+               }
+
+      assert %{ahead_of_apps: true} = Releases.eligible(table, running("4.1.0"), [:linux])
+    end
+
+    test "a release that raises the home format waits for an app that reads it" do
+      raised =
+        fixture("home_formats.txt")
+        |> String.replace("home_format 4.2.0 1", "home_format 4.2.0 2")
+
+      assert {:ok, table} = Releases.parse(raised)
+
+      assert Releases.eligible(table, running("4.1.0"), [:macos]) ==
+               %{
+                 eligible: "4.1.0",
+                 held: %{version: "4.2.0", waits_for: [:macos]},
+                 ahead_of_apps: false
+               }
+
+      # Running it past the gate: the macOS app cannot read the home it writes.
+      assert %{eligible: nil, held: nil, ahead_of_apps: true} =
+               Releases.eligible(table, running("4.2.0", 2), [:macos])
+    end
+
+    # With no home format rows every engine reads by version, so an app
+    # carrying a newer engine reads an older release's home too.
+    test "with no home format rows, an app carrying the release or a newer one reads it" do
+      text =
+        header("4.2.0") <>
+          digest("4.2.0", "fermix_linux_x86_64") <>
+          digest("4.1.0", "fermix_linux_x86_64") <>
+          "app 4.2.0 macos 7.4.0\napp 4.1.0 linux 2.8.0\n"
+
+      assert {:ok, table} = Releases.parse(text)
+
+      # No macOS app carries 4.1.0 itself; the one carrying 4.2.0 reads it.
+      assert Releases.eligible(table, running("4.1.0"), [:macos, :linux]) ==
+               %{
+                 eligible: "4.1.0",
+                 held: %{version: "4.2.0", waits_for: [:linux]},
                  ahead_of_apps: false
                }
     end
@@ -311,21 +430,21 @@ defmodule FermixCore.Home.ReleasesTest do
       table = table!("apps.txt")
 
       assert_raise ArgumentError, ~r/running is not a MAJOR\.MINOR\.PATCH version: "4\.1"/, fn ->
-        Releases.eligible(table, "4.1", [:macos])
+        Releases.eligible(table, running("4.1"), [:macos])
       end
 
       assert_raise ArgumentError,
                    ~r/backup systems are :macos, :linux or :unknown, got: \[:windows\]/,
                    fn ->
-                     Releases.eligible(table, "4.1.0", [:macos, :windows])
+                     Releases.eligible(table, running("4.1.0"), [:macos, :windows])
                    end
 
       assert_raise ArgumentError, ~r/got: \[nil\]/, fn ->
-        Releases.eligible(table, "4.1.0", [nil])
+        Releases.eligible(table, running("4.1.0"), [nil])
       end
 
       assert_raise ArgumentError, ~r/got: \["macos"\]/, fn ->
-        Releases.eligible(table, "4.1.0", ["macos"])
+        Releases.eligible(table, running("4.1.0"), ["macos"])
       end
     end
   end

@@ -24,6 +24,13 @@ defmodule FermixCore.Computers.Versions do
   asks for, its history among them (`Desktop.InvokeFamily`), and the tools
   that run on it (`Computers.list/1`, which lists one not served as offering
   nothing).
+
+  This window answers what the server and a computer can say to each other,
+  a question about the wire. Whether a computer's Fermix can take the home
+  into its keeping (Move back, Restore here, a restore of a backup) is the
+  home's format, `FermixCore.Home.Readable` (D16), never a standing: a
+  computer can be served and unable to read the server's home, or past the
+  window and able to.
   """
 
   @window_minors 2

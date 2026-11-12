@@ -7,6 +7,7 @@ defmodule FermixCore.Home.Candidate.ActivationTest do
   alias FermixCore.Home.Candidate.Activation
   alias FermixCore.Home.EnrollmentCode
   alias FermixCore.Home.Epoch
+  alias FermixCore.Home.Readable
   alias FermixCore.Home.Snapshot
   alias FermixCore.Home.Snapshot.Config
   alias FermixCore.Home.Snapshot.Recipient
@@ -15,6 +16,7 @@ defmodule FermixCore.Home.Candidate.ActivationTest do
   alias FermixCore.Memory.Repo.ComputerHistorySql
   alias FermixCore.Plugins.Dist.Reinstall
   alias FermixCore.Setup.MachineFile
+  alias FermixTestSupport.CraftedSnapshot
   alias FermixTestSupport.SafeRm
 
   @now ~U[2031-05-04 10:00:00Z]
@@ -272,6 +274,30 @@ defmodule FermixCore.Home.Candidate.ActivationTest do
     secret = Path.join(staging, "secrets/ANTHROPIC_API_KEY")
     assert File.read!(secret) == "sk-ant-invented"
     assert Bitwise.band(File.stat!(secret).mode, 0o777) == 0o600
+  end
+
+  # M97 D16: a move's staging reads the home by its format, as a restore
+  # does, never by the engine that wrote it.
+  test "a move stages a home in this format that a newer engine wrote", ctx do
+    stream = crafted!(ctx, "same", home_format: Readable.home_format(), engine_version: "99.0.0")
+
+    assert {:ok, 7} = Activation.stage(ctx.home, stream, ctx.pair, %{}, restore_opts())
+    assert File.exists?(Path.join(Candidate.staging_path(ctx.home), "config.toml"))
+  end
+
+  test "a move refuses a home in a newer format, and stages nothing", ctx do
+    ours = Readable.home_format()
+    stream = crafted!(ctx, "newer", home_format: ours + 1, engine_version: "0.1.0")
+
+    assert Activation.stage(ctx.home, stream, ctx.pair, %{}, restore_opts()) ==
+             {:error, {:newer_home_format, ours + 1, ours}}
+
+    refute File.exists?(Candidate.staging_path(ctx.home))
+  end
+
+  test "a move stages a home whose manifest names no format", ctx do
+    stream = crafted!(ctx, "unformatted", home_format: :absent, engine_version: "0.17.0")
+    assert {:ok, 7} = Activation.stage(ctx.home, stream, ctx.pair, %{}, restore_opts())
   end
 
   test "activation asks the new primary's first boot for a snapshot at once", ctx do
@@ -608,6 +634,12 @@ defmodule FermixCore.Home.Candidate.ActivationTest do
   end
 
   defp restore_opts, do: [host: "linux-aarch64", keyring_usable?: fn -> false end]
+
+  # The source's home as a stream whose manifest says what the test states.
+  defp crafted!(ctx, name, opts) do
+    path = Path.join(ctx.tmp, "#{name}.fxsnap")
+    CraftedSnapshot.write!(path, Recipient.public(ctx.pair), ctx.source, opts)
+  end
 
   defp code_facts do
     %{

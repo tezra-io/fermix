@@ -223,9 +223,15 @@ settings only. Every release therefore owes the two minor versions before it:
 - `home.status` and the settings rows only gain optional fields, since an
   older app reads a newer server's answers.
 
-Move back and Restore here are the one place a version must match: a computer
-reads a home only as new as its own engine (`FermixCore.Home.Readable`), which
-is why eligibility waits for the app and not for its install.
+A restore, Restore here, a move and a move back read a home by its **format**,
+never by the engine that wrote it (`FermixCore.Home.Readable`, M97 D16): an
+engine reads a home of its own home format or an older one. Eligibility waits
+for a published app that reads the home a release writes, not for its install,
+so a release that keeps the format needs no new app, and one whose change
+raises `@home_format` (the module says when) waits for the apps that carry it.
+The release table names each release's format in a `home_format
+<engine_version> <home_format>` row; once one release has a row, every newer
+one needs its own, or the server refuses the table and installs nothing.
 
 **The version rule, and what it costs.** Neither package may carry a Debian
 revision or an rpm epoch, because `fermix-desktop` pins `Depends: fermix (= <v>)`

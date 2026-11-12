@@ -42,11 +42,13 @@ defmodule FermixCore.Home.Archive do
   archive carries only their `@keyring` references. Both directions answer how
   many there are, so the owner knows how many to enter again on the new host.
 
-  **A newer engine's home is refused.** The manifest names the engine that
-  wrote it; a restore by an older engine refuses it by name
-  (`{:newer_engine, theirs, ours}`) before it writes anything, since the home
-  may hold settings and data this engine cannot read (`Home.Readable`, the
-  one rule).
+  **A home in a newer format is refused.** The manifest names the home's
+  format (M97 D16); one newer than this engine's is refused by name
+  (`{:newer_home_format, theirs, ours}`) before anything is written, since it
+  may hold settings and data this engine cannot read. Which engine wrote it
+  decides nothing, so a newer engine's home of this format restores here
+  (`Home.Readable`, the one rule, which also says what a manifest with no
+  format is).
 
   **What does not travel as consent or history.** A restore withdraws
   coding-harness consent, moves a keyring-mode home to the file store on a host
@@ -61,7 +63,6 @@ defmodule FermixCore.Home.Archive do
 
   alias Exqlite.Sqlite3
   alias Fermix.CLI.Upgrade.Manifest, as: HostTarget
-  alias FermixCore.BuildInfo
   alias FermixCore.Home.Archive.ConfigText
   alias FermixCore.Home.Archive.Manifest
   alias FermixCore.Home.Archive.RestoredConfig
@@ -793,10 +794,10 @@ defmodule FermixCore.Home.Archive do
   defp installed_names({:ok, %{} = installed}), do: {:ok, installed |> Map.keys() |> Enum.sort()}
   defp installed_names(other), do: {:error, {:plugin_lockfile, other}}
 
-  # A home a newer engine wrote is refused by name (`Home.Readable`, the one
-  # rule a restore, a move's review and Always On's screen share).
-  defp not_newer(%{engine_version: _theirs} = manifest),
-    do: Readable.readable?(manifest, BuildInfo.product_version())
+  # A home in a newer format than this engine's is refused by name
+  # (`Home.Readable`, the one rule a restore, a move's review and Always On's
+  # screen share).
+  defp not_newer(%{home_format: _format} = manifest), do: Readable.readable?(manifest)
 
   defp next_epoch(epoch) do
     if epoch + 1 <= Epoch.max_epoch(), do: {:ok, epoch + 1}, else: {:error, :epoch_overflow}

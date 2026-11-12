@@ -10,6 +10,7 @@ defmodule FermixCore.Home.ArchiveTest do
   alias FermixCore.Home.Archive.Seal
   alias FermixCore.Home.Epoch
   alias FermixCore.Home.Moved
+  alias FermixCore.Home.Readable
   alias FermixCore.Memory.Repo.ComputerHistorySql
   alias FermixTestSupport.SafeRm
 
@@ -484,19 +485,32 @@ defmodule FermixCore.Home.ArchiveTest do
                {:error, {:unlisted_entry, "home/stowaway"}}
     end
 
-    test "refuses a home a newer engine wrote, and writes nothing", %{tmp: tmp, into: into} do
-      archive =
-        craft!(tmp, [{%{path: "config.toml", content: "x"}, "x"}], engine_version: "99.0.0")
+    # M97 D16: a restore reads a home by its format, never by the engine
+    # that wrote it.
+    test "refuses a home in a newer format, and writes nothing", %{tmp: tmp, into: into} do
+      ours = Readable.home_format()
+      config = [{%{path: "config.toml", content: "x"}, "x"}]
+      archive = craft!(tmp, config, engine_version: "0.0.1", home_format: ours + 1)
 
-      assert restore(archive, into) ==
-               {:error, {:newer_engine, "99.0.0", FermixCore.BuildInfo.product_version()}}
-
+      assert restore(archive, into) == {:error, {:newer_home_format, ours + 1, ours}}
       refute File.exists?(into)
+    end
 
-      older =
-        craft!(tmp, [{%{path: "config.toml", content: "x"}, "x"}], engine_version: "0.0.1")
+    test "restores a home of this format that a newer engine wrote", %{tmp: tmp, into: into} do
+      config = [{%{path: "config.toml", content: "x"}, "x"}]
+      archive = craft!(tmp, config, engine_version: "99.0.0", home_format: Readable.home_format())
 
-      assert {:ok, _restored} = restore(older, into)
+      assert {:ok, %{epoch: 4}} = restore(archive, into)
+      assert File.read!(Path.join(into, "config.toml")) == "x"
+    end
+
+    # An engine before home formats wrote none; every such engine is older
+    # than this one, and its home is format 1, the oldest there is.
+    test "restores a home whose manifest names no format", %{tmp: tmp, into: into} do
+      config = [{%{path: "config.toml", content: "x"}, "x"}]
+      archive = craft!(tmp, config, engine_version: "0.17.0", home_format: :absent)
+
+      assert {:ok, %{epoch: 4}} = restore(archive, into)
     end
 
     test "refuses a manifest at the highest epoch, which has no next one", %{tmp: tmp, into: into} do
@@ -645,6 +659,7 @@ defmodule FermixCore.Home.ArchiveTest do
       |> Manifest.new(files, Keyword.get(opts, :links, []))
       |> Map.update!(:engine_version, &Keyword.get(opts, :engine_version, &1))
       |> Manifest.encode()
+      |> home_format(Keyword.get(opts, :home_format, :as_written))
 
     tar_path = Path.join(tmp, "crafted.tar")
     {:ok, tar} = :erl_tar.open(String.to_charlist(tar_path), [:write])
@@ -662,6 +677,16 @@ defmodule FermixCore.Home.ArchiveTest do
     File.write!(archive, sealed)
     archive
   end
+
+  # The manifest's `home_format` as a test states it: as this engine wrote
+  # it, another number, or absent (an engine before home formats).
+  defp home_format(json, :as_written), do: json
+
+  defp home_format(json, :absent),
+    do: json |> Jason.decode!() |> Map.delete("home_format") |> Jason.encode!()
+
+  defp home_format(json, format),
+    do: json |> Jason.decode!() |> Map.put("home_format", format) |> Jason.encode!()
 
   # A unix socket address is capped at 104 bytes on macOS, so a home that hosts
   # a live daemon socket sits directly under the temp dir.

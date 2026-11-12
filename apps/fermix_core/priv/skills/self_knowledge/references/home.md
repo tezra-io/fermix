@@ -98,12 +98,13 @@ it, never a second writer.
   the keys are named; paths stored inside the memory database are not changed.
   Importing also withdraws coding-harness consent, moves a keyring-mode home to the file store on
   a host whose keyring does not answer that it is available (a check that
-  timed out counts as no answer, and the log says so; macOS keeps its
-  keyring), and names the
+  timed out counts as none, and is logged; macOS keeps its keyring),
+  and names the
   settings that still hold paths outside the old home and the installed
   plugins built for another OS, which `fermix plugins install NAME`
-  reinstalls. It never marks the old home moved. A home a newer Fermix wrote
-  is refused by name, and nothing is written: update Fermix first.
+  reinstalls. It never marks the old home moved. A home in a newer format
+  than this Fermix reads is refused, whichever Fermix wrote it, and nothing
+  is written: update Fermix first.
 - `fermix home mark-moved --to TEXT [--json]` writes the `moved.json` marker
   once, with the home's current epoch, while Fermix is stopped; it refuses by
   name when Fermix is running (`daemon_running`), when the home has no primary
@@ -264,8 +265,8 @@ it, never a second writer.
   release files, not an apt source, so two root timers run
   `/usr/local/sbin/fermix-update`: `fermix-follow.timer` every five minutes
   and `fermix-update.timer` every night at 04:00 UTC. The server leads:
-  each installs the newest release whose app is published for every
-  computer keeping its backups (`fermix home status --json`'s `update`,
+  each installs the newest release whose home a published app reads for
+  every computer keeping its backups (`fermix home status --json`'s `update`,
   read from fermix.ai's release table; `held` names a newer one waiting for
   an app), never back down, nothing while no table was read, then takes
   that release's own update script; then `fermix restart` as `fermix` when
@@ -376,11 +377,10 @@ it, never a second writer.
   as `ok`, `warn` or `block`: the secrets this computer keeps in its keychain, which move with
   the home (one the keychain will not give blocks, named as its settings row
   labels it, "your Anthropic key", one no row shows counted, never by its id
-  or its value); the server's Fermix (an older one blocks, and so does a
-  newer one, which could never move the home back here: update Fermix on
-  this computer first; a move back, to the desktop the home left, known by
-  the code that desktop opened for its candidate, blocks only a desktop
-  older than the server); free disk here (the
+  or its value); the server's Fermix (one that cannot read this home's format
+  blocks, as does one whose home this computer could not read back until
+  a published update does; a move back, to the desktop the
+  home left, blocks only a desktop that cannot read the server's); free disk here (the
   capture needs about twice the home; short of it blocks, with the numbers);
   a home over one S3 upload (5 GiB) when the server keeps snapshots in S3
   (warns: it would never back up there); on a server of another system, the

@@ -144,7 +144,7 @@ defmodule FermixCore.Management.HomeSummaryTest do
       {"a server ahead of the apps",
        desktop(
          primary_home: Map.put(server_home([]), "update", %{"ahead_of_apps" => true}),
-         readable: {:error, {:newer_engine, "0.9.0", "0.8.0"}}
+         readable: {:error, {:newer_home_format, 2, 1}}
        ), "problem",
        "Your server runs a newer Fermix than this Mac can restore. Update Fermix on this Mac.",
        "update"},
@@ -1174,7 +1174,7 @@ defmodule FermixCore.Management.HomeSummaryTest do
     # runs a newer Fermix) is offered Update in place of Move back, and in
     # place of Restore here, by the one rule (`Home.Readable`).
     test "a computer that cannot read the server's home is asked to update first" do
-      newer = {:error, {:newer_engine, "0.9.0", "0.8.0"}}
+      newer = {:error, {:newer_home_format, 2, 1}}
       summary = HomeSummary.summary(desktop(readable: newer))
 
       assert summary["state"] == "on"
@@ -1210,7 +1210,7 @@ defmodule FermixCore.Management.HomeSummaryTest do
                  "Mac can change settings only."
 
       ahead_home = Map.put(server_home([]), "update", %{"ahead_of_apps" => true})
-      newer = {:error, {:newer_engine, "0.9.0", "0.8.0"}}
+      newer = {:error, {:newer_home_format, 2, 1}}
       ahead = HomeSummary.summary(desktop(primary_home: ahead_home, readable: newer))
 
       assert {ahead["state"], ahead["detail"]["kind"], ahead["action"]["id"]} ==

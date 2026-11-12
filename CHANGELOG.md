@@ -330,8 +330,8 @@ will be part of a future release; nothing in this group is in a release yet.
   server enrolled with it waits for the move (each side names the other by
   its hostname, or a Mac by the computer name in its Sharing settings), and
   you review the move (the secrets that travel, the server's Fermix,
-  which must be this computer's own, since a newer one could never move the
-  home back, free disk, the plugins with no build for the server, and what stops: those
+  which must read this home, and whose home this computer must be able to
+  read back, now or once its update is published, free disk, the plugins with no build for the server, and what stops: those
   of this computer's own voice calls and meetings you use, WhatsApp,
   and Slack unless it uses Socket Mode; calls from your phone carry on at the
   server when Talk to Fermix is on there and its key is in the server's
@@ -369,9 +369,9 @@ will be part of a future release; nothing in this group is in a release yet.
   your computer say: it is no host on your local network.
   Your server keeps itself up to date and your computers follow it. Use my
   own Linux server's command names the release it starts on, and every five
-  minutes the server installs the newest release that the app of each
-  computer keeping its backups already carries, read from fermix.ai's release
-  table (`update` in `fermix home status --json`: the release it runs, the
+  minutes the server installs the newest release whose home a published app
+  for each computer keeping its backups reads, by fermix.ai's release table
+  (`update` in `fermix home status --json`: the release it runs, the
   one it may install, and a newer one still waiting for an app), never back
   down, and nothing while it cannot read the table or list its computers. A
   computer that has not installed an update never holds the server back: one
@@ -379,12 +379,17 @@ will be part of a future release; nothing in this group is in a release yet.
   behind, or one whose version is not known, keeps its settings and says to
   update Fermix on it: its chat, the server's work on it and its computer
   history all wait until it does. A computer ahead of its
-  server speaks the server's version of the chat protocol. Move back and
-  Restore here need this computer's Fermix to be at least as new as the
-  server's, and say "Update Fermix on this Mac first" in their place when it
-  is not. On the server, `sudo fermix-update --release X` updates by hand
-  behind the same rule: it refuses an older release, one fermix.ai does not
-  list, and one no app carries yet unless `--ahead-of-apps` is added, after
+  server speaks the server's version of the chat protocol. A home is read by
+  its format, never by which Fermix wrote it: a release changes the format
+  only when it writes something an older Fermix cannot read, so most
+  releases need no new app, and a restore, Restore here, a move and a move
+  back all take a newer Fermix's home of the same format. A home in a newer
+  format is refused before anything is written, saying to update Fermix on
+  that computer first, and Move back and Restore here say "Update Fermix on
+  this Mac first" in their place. On the server, `sudo fermix-update
+  --release X` updates by hand behind the same rule: it refuses an older
+  release, one fermix.ai does not list, and one whose home no published app
+  reads yet unless `--ahead-of-apps` is added, after
   which each computer that keeps backups says the server runs a newer Fermix
   than it can restore. After an update the restart waits for a move, and
   for a command, screen session or message send running on a computer, ten

@@ -11,17 +11,26 @@ defmodule FermixCore.Home.Releases do
       latest <version>
       <version> <sha256> <file>
       app <engine_version> <system> <app_version>
+      home_format <engine_version> <home_format>
 
   A digest row pins one file of an engine release; an `app` row says that
   release of the macOS or Linux app is published and carries that engine
-  release, which the table pins.
+  release, which the table pins; a `home_format` row names the home format
+  that engine release reads and writes (`FermixCore.Home.Readable`, M97
+  D16), once per release. A release with no `home_format` row is one from
+  before home formats, which reads a home by engine version: so once a
+  release has one, every newer release has one too, and no newer release's
+  is lower, or the table is refused, since a missing row could otherwise
+  pass a release that raised the format as one an older app reads.
 
-  A row is known by its first word: `latest`, `app`, or a MAJOR.MINOR.PATCH
-  version for a digest row. A row known otherwise is ignored, as
-  `scripts/install.sh` reads only its two- and three-field rows, and so is an
-  `app` row for a system other than macOS and Linux: a table that gains a
-  kind of row never stops a server that does not know it. Ignoring a row can
-  only withhold a release, never make one eligible. A known row that is
+  A row is known by its first word: `latest`, `app`, `home_format`, or a
+  MAJOR.MINOR.PATCH version for a digest row. A row known otherwise is
+  ignored, as `scripts/install.sh` reads only its two- and three-field rows,
+  and so is an `app` row for a system other than macOS and Linux: a table
+  that gains a kind of row never stops a server that does not know it.
+  Ignoring a row can only withhold a release, never make one eligible (a
+  server before home formats ignores `home_format` rows and waits for an app
+  that carries each release). A known row that is
   malformed refuses the whole table, by name, as does a table that does not
   end with a newline (one cut short), lists no release, or names a `latest`
   that is not its highest release. The site refuses all of these too, and
@@ -30,20 +39,27 @@ defmodule FermixCore.Home.Releases do
   there, byte copies of each other.
 
   `eligible/3`: a release is eligible once, for each system of the computers
-  that keep the home's backup copies, an `app` row carries exactly that
-  engine release, since a computer restores a backup with the engine its app
-  carries. The newest such release at or above the running one is the one
-  to install; with no backup systems, the latest. A server never installs a
-  release below the one it runs. A computer whose system is not known
-  (`:unknown`) could need either app, so it holds every release above the
-  running one.
+  that keep the home's backup copies, an `app` row carries an engine that
+  reads the home that release writes (`Readable.reads?/2`, by the formats
+  the table names), since a computer restores a backup with the engine its
+  app carries. So a release that keeps the home format is eligible on the
+  apps already published, and only one that raises it waits for an app; an
+  engine the table names no format for reads only its own release's home or
+  an older one's. The newest eligible release at or above the running one
+  is the one to install; with no backup systems, the latest. A server never
+  installs a release below the one it runs. A computer whose system is not
+  known (`:unknown`) could need either app, so it holds every release above
+  the running one. `restorable?/3` asks the same of one system and one
+  home, for a move's review.
   """
+
+  alias FermixCore.Home.Readable
 
   # In the order `waits_for` lists them.
   @backup_systems [:macos, :linux, :unknown]
   @systems %{"macos" => :macos, "linux" => :linux}
 
-  defstruct latest: nil, releases: %{}, apps: []
+  defstruct latest: nil, releases: %{}, apps: [], formats: %{}
 
   @type system :: :macos | :linux
   @type app :: %{engine: String.t(), system: system(), version: String.t()}
@@ -52,8 +68,11 @@ defmodule FermixCore.Home.Releases do
   @type t :: %__MODULE__{
           latest: String.t() | nil,
           releases: %{optional(String.t()) => files()},
-          apps: [app()]
+          apps: [app()],
+          formats: %{optional(String.t()) => pos_integer()}
         }
+  @typedoc "The engine that runs: its version and the home format it writes."
+  @type running :: %{engine_version: String.t(), home_format: pos_integer()}
   @type table :: t()
   @typedoc "The system of a computer that keeps backup copies, `:unknown` when it has not said."
   @type backup_system :: system() | :unknown
@@ -73,32 +92,37 @@ defmodule FermixCore.Home.Releases do
   end
 
   @doc """
-  What a server running `running` may install, given the systems of the
-  computers that keep backup copies:
+  What a server running `running` (this engine's version and home format)
+  may install, given the systems of the computers that keep backup copies:
 
-    * `eligible`: the newest release, at or above `running`, that every
-      listed system has an app for that carries exactly it; `nil` if none.
-      With `:unknown` listed, `running` itself when the table lists it, else
+    * `eligible`: the newest release, at or above `running`, whose home every
+      listed system has a published app to read; `nil` if none. With
+      `:unknown` listed, `running` itself when the table lists it, else
       `nil`.
     * `held`: the newest release above that (or above `running` when none
       is eligible), which is not eligible yet, and the systems whose app it
       waits for (`:unknown` among them when listed); `nil` when there is none.
-    * `ahead_of_apps`: `running` is above the newest engine some listed
-      system's app carries (it was installed past the gate). A listed system
-      no `app` row names, `:unknown` included, counts as behind it, unless the
-      table has no `app` rows at all: such a table predates them and says
-      nothing about the apps.
+    * `ahead_of_apps`: some listed system has no published app that reads
+      the home `running` writes (it was installed past the gate). A listed
+      system no `app` row names, `:unknown` included, counts as behind it,
+      unless the table has no `app` rows at all: such a table predates them
+      and says nothing about the apps.
   """
-  @spec eligible(t(), String.t(), [backup_system()]) :: eligibility()
-  def eligible(%__MODULE__{} = table, running, backup_systems)
-      when is_binary(running) and is_list(backup_systems) do
-    floor = version_key!(running)
+  @spec eligible(t(), running(), [backup_system()]) :: eligibility()
+  def eligible(
+        %__MODULE__{} = table,
+        %{engine_version: version, home_format: format} = running,
+        backup_systems
+      )
+      when is_binary(version) and is_integer(format) and format >= 1 and
+             is_list(backup_systems) do
+    floor = version_key!(version)
     systems = systems!(backup_systems)
     newest_first = table.releases |> Map.keys() |> Enum.sort_by(&version_key/1, :desc)
 
     eligible =
       if :unknown in systems,
-        do: listed(table, running),
+        do: listed(table, version),
         else:
           Enum.find(
             newest_first,
@@ -107,17 +131,29 @@ defmodule FermixCore.Home.Releases do
 
     %{
       eligible: eligible,
-      held: held(table, List.first(newest_first), eligible || running, systems),
-      ahead_of_apps: ahead_of_apps?(table, floor, systems)
+      held: held(table, List.first(newest_first), eligible || version, systems),
+      ahead_of_apps: ahead_of_apps?(table, running, systems)
     }
   end
+
+  @doc """
+  Whether a published app for `system` carries an engine that reads the home
+  `written` describes (`Readable.reads?/2`, its format and engine version),
+  as a move's review asks before a server's home could come back to that
+  system. `:unknown` has no app.
+  """
+  @spec restorable?(t(), backup_system(), Readable.engine()) :: boolean()
+  def restorable?(%__MODULE__{} = table, system, %{home_format: _format} = written)
+      when system in @backup_systems,
+      do: Enum.any?(table.apps, &(&1.system == system and reads?(table, &1.engine, written)))
 
   defp read(text) do
     with {:ok, lines} <- lines(text),
          {:ok, latest, rows} <- header(lines),
          {:ok, table} <- read_rows(rows, %__MODULE__{latest: latest}),
-         :ok <- check_releases(table) do
-      check_apps(table)
+         :ok <- check_releases(table),
+         {:ok, table} <- check_apps(table) do
+      check_formats(table)
     end
   end
 
@@ -153,6 +189,7 @@ defmodule FermixCore.Home.Releases do
   defp in_file_order(error), do: error
 
   defp read_row(["app" | fields], row, table), do: app_row(fields, row, table)
+  defp read_row(["home_format" | fields], row, table), do: format_row(fields, row, table)
 
   defp read_row(["latest" | _fields], row, _table),
     do: {:error, ~s("#{row}" repeats the latest line)}
@@ -210,6 +247,25 @@ defmodule FermixCore.Home.Releases do
     end
   end
 
+  # One home format per engine release, a whole number from 1.
+  defp format_row([engine, format], row, table) do
+    cond do
+      not version?(engine) or not Regex.match?(~r/\A[1-9][0-9]{0,8}\z/, format) ->
+        malformed_format(row)
+
+      Map.has_key?(table.formats, engine) ->
+        {:error, "the home format of #{engine} is listed twice"}
+
+      true ->
+        {:ok, %{table | formats: Map.put(table.formats, engine, String.to_integer(format))}}
+    end
+  end
+
+  defp format_row(_fields, row, _table), do: malformed_format(row)
+
+  defp malformed_format(row),
+    do: {:error, ~s("#{row}" is not "home_format <engine_version> <home_format>")}
+
   defp check_releases(%__MODULE__{releases: releases}) when map_size(releases) == 0,
     do: {:error, "lists no release"}
 
@@ -232,6 +288,47 @@ defmodule FermixCore.Home.Releases do
     end
   end
 
+  # Every engine a `home_format` row names is pinned, and from the oldest
+  # release that names one, every newer release names one, never lower.
+  defp check_formats(%__MODULE__{formats: formats, releases: releases} = table) do
+    case Enum.find(Map.keys(formats), &(not Map.has_key?(releases, &1))) do
+      nil ->
+        formats_in_order(table)
+
+      engine ->
+        {:error, "a home format is given for engine #{engine}, which the table does not pin"}
+    end
+  end
+
+  defp formats_in_order(table) do
+    oldest_first = table.releases |> Map.keys() |> Enum.sort_by(&version_key/1)
+
+    case Enum.reduce_while(oldest_first, {:ok, nil}, &format_after(table.formats, &1, &2)) do
+      {:ok, _newest} -> {:ok, table}
+      {:error, _reason} = error -> error
+    end
+  end
+
+  # `last` is the newest older release that names a format, with it; nil
+  # before any does.
+  defp format_after(formats, release, {:ok, last}) do
+    case {Map.get(formats, release), last} do
+      {nil, nil} ->
+        {:cont, {:ok, nil}}
+
+      {nil, {older, _format}} ->
+        {:halt, {:error, "#{release} names no home format, though the older #{older} does"}}
+
+      {format, {older, older_format}} when format < older_format ->
+        {:halt,
+         {:error,
+          "#{release}'s home format #{format} is below the older #{older}'s #{older_format}"}}
+
+      {format, _last} ->
+        {:cont, {:ok, {release, format}}}
+    end
+  end
+
   # The newest release is held when it is above what the server would run
   # after this update; being above the newest eligible release (or above
   # `running`, when none is), it is not eligible, so it waits for some system.
@@ -243,26 +340,27 @@ defmodule FermixCore.Home.Releases do
       else: nil
   end
 
+  # The systems with no published app that reads the home `release` writes.
   # No `app` row names `:unknown`, so it waits for every release.
-  defp waits_for(table, engine, systems) do
-    Enum.reject(systems, fn system ->
-      Enum.any?(table.apps, &(&1.engine == engine and &1.system == system))
-    end)
-  end
+  defp waits_for(table, release, systems),
+    do: Enum.reject(systems, &restorable?(table, &1, engine(table, release)))
 
   # With `:unknown` listed nothing above `running` is eligible; staying on it is.
   defp listed(table, running),
     do: if(Map.has_key?(table.releases, running), do: running, else: nil)
 
-  defp ahead_of_apps?(%__MODULE__{apps: []}, _floor, _systems), do: false
-  defp ahead_of_apps?(table, floor, systems), do: Enum.any?(systems, &ahead_of?(table, floor, &1))
+  defp ahead_of_apps?(%__MODULE__{apps: []}, _running, _systems), do: false
 
-  defp ahead_of?(table, floor, system) do
-    case for(%{system: ^system, engine: engine} <- table.apps, do: version_key(engine)) do
-      [] -> true
-      carried -> floor > Enum.max(carried)
-    end
-  end
+  defp ahead_of_apps?(table, running, systems),
+    do: not Enum.all?(systems, &restorable?(table, &1, running))
+
+  # Whether the app engine `carried` reads the home `written` describes.
+  defp reads?(table, carried, written), do: Readable.reads?(engine(table, carried), written)
+
+  # An engine release as the table knows it: its version and the home format
+  # its row names, nil for a release from before home formats.
+  defp engine(table, version),
+    do: %{engine_version: version, home_format: Map.get(table.formats, version)}
 
   defp systems!(backup_systems) do
     case Enum.reject(backup_systems, &(&1 in @backup_systems)) do

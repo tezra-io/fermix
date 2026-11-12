@@ -111,6 +111,26 @@ defmodule FermixCore.Home.CandidatesTest do
              |> Candidates.decode()
   end
 
+  # M97 D16: the home format the candidate said it reads, which a move's
+  # review reads; none from an engine before home formats.
+  test "a candidate keeps the home format it enrolled with, and none when it said none",
+       %{home: home} do
+    {:ok, said} = Candidates.add(home, Map.put(attrs("north-box"), :home_format, 2), @now)
+    {:ok, silent} = Candidates.add(home, attrs("south-box"), @now)
+
+    assert {said.home_format, silent.home_format} == {2, nil}
+    assert {:ok, [^said, ^silent]} = Candidates.list(home, @now)
+    refute Map.has_key?(Candidates.view(said), "home_format")
+
+    assert {:ok, %{home_format: nil}} =
+             said |> Candidates.encode() |> Map.delete("home_format") |> Candidates.decode()
+
+    for bad <- [0, "2", 1.5] do
+      assert {:error, :invalid_candidate} =
+               said |> Candidates.encode() |> Map.put("home_format", bad) |> Candidates.decode()
+    end
+  end
+
   test "a file Fermix did not write is refused, not read", %{home: home} do
     File.mkdir_p!(Path.dirname(Candidates.path(home)))
     File.write!(Candidates.path(home), ~s({"v":1,"candidates":[{"name":"x"}]}))

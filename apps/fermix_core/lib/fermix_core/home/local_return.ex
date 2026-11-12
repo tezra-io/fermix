@@ -45,6 +45,7 @@ defmodule FermixCore.Home.LocalReturn do
   alias FermixCore.Home.Candidate.Activation
   alias FermixCore.Home.Candidate.Return
   alias FermixCore.Home.MoveTelemetry
+  alias FermixCore.Home.Readable
   alias FermixCore.Home.Return, as: ReturnRecord
   alias FermixCore.Home.Snapshot.Capture
   alias FermixCore.Home.Snapshot.Format
@@ -261,6 +262,10 @@ defmodule FermixCore.Home.LocalReturn do
     names = Keyword.get(opts, :secret_names, &Settings.secret_names/0)
     Return.error_sentence(refused, names.())
   end
+
+  # A copy in a newer format than this Fermix reads (`Home.Readable`).
+  defp failed_sentence({:newer_home_format, _theirs, _ours}, _opts),
+    do: Readable.refusal_sentence()
 
   defp failed_sentence(_reason, _opts), do: @failed_sentence
 
