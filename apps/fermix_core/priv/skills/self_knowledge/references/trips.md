@@ -56,6 +56,8 @@ A stop's `place` is one of two things, resolved before the transaction opens:
 
 At most 40 lookups a call, four at a time, inside 45 s: "One call looks up at most 40 places; split the rest into another call." A search that answers rate limited stops the lookups not started, and those stops are saved without a place and named; on a Brave home four at a time can meet Brave's per-second limit. With no place search set up here, every stop by name is saved without a place, and the answer says so. A lookup is Fermix's own and is no `place_search` call; its records join the conversation, so their links resolve in a later turn.
 
+A trip is made, with what the owner already said, before any search in the turn: after a search only `add` runs, so what the search found is added in the same turn, and a turn that searched first says what it would make and makes the trip on the owner's next message.
+
 A change to a stop already in a trip that depends on a search waits for the owner: the reply says what the search found and what it would change, and the change is made after the owner's yes, in the next turn, with the place's link. A new stop found by a search is added in the same turn.
 
 ## Who can use them

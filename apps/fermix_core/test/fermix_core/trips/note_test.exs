@@ -64,6 +64,8 @@ defmodule FermixCore.Trips.NoteTest do
     assert rules =~ "read it with trip_read, change it with trip_edit, only as the owner asks"
     assert rules =~ "never what happens there"
     assert rules =~ "ask before moving a fixed stop"
+    assert rules =~ "Make a trip and add what you already know before you search"
+    assert rules =~ "and a new trip after one, wait for the owner"
     assert rules =~ "after their yes, with the place's link from that search"
 
     assert String.ends_with?(

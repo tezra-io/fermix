@@ -763,6 +763,7 @@ def test_the_shipped_numbered_rubrics_parse():
                       "restaurant_notice": 3, "note_from_the_restaurant": 3,
                       "for_my_sister": 3, "copy_for_a_friend": 3,
                       "ostrel_route_sanity": 2, "corvelo_plan": 2,
+                      "penrask_dinners": 4, "vellmora_route_sanity": 4,
                       # lists.yaml
                       "batteries": 2, "garden_and_kitchen": 3, "groceries": 2,
                       "hardware": 2, "landing_page": 2, "newsletter": 2,

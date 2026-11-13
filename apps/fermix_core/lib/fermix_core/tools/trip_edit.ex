@@ -43,7 +43,9 @@ defmodule FermixCore.Tools.TripEdit do
   @spec description() :: String.t()
   def description do
     "Make and change the owner's trips as the owner asks; a call lands whole or not at " <>
-      "all. place: the place's own name, never the activity, or a link a search returned."
+      "all. Make a trip with what is known before any search in the turn; after a search, " <>
+      "only adding stops runs. place: the place's own name, never the activity, or a link " <>
+      "a search returned."
   end
 
   @impl true
