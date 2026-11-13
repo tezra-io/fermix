@@ -6,14 +6,14 @@
       "id": "own_server",
       "key": "Mx_U6542oONDPqGb3qliTQ",
       "label": "Use my own Linux server",
-      "needs": [],
-      "url": null
+      "needs": []
     },
     "detail": {},
-    "key": "dYcDTlQY19MPy0MvFW5Bng",
+    "help": "https://fermix.ai/docs/always-on/#what-you-need",
+    "key": "GcKRLPn02n-iziW6YiLWZg",
     "notice": null,
     "outcome": "done",
-    "sentence": "Keep Fermix running when this Mac sleeps. It moves to a server you own. Meetings and StackChan stop after the move. This Mac's voice calls stop after the move; calls from your phone carry on at your server when Talk to Fermix is on there and its key is in your server's secret store.",
+    "sentence": "Keep Fermix running when this Mac sleeps. It moves to a server you own.",
     "state": "off"
   },
   "schema_version": 1

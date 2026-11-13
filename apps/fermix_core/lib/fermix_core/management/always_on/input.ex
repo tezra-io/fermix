@@ -8,7 +8,8 @@ defmodule FermixCore.Management.AlwaysOn.Input do
 
     * `recovery_passphrase`: for `move_now` and `try_again`, checked against
       the recovery key set, or set when none is; for `restore_here`, the one
-      that opens the copy restored. Text, or nil when not given.
+      that opens the copy restored; for `change_passphrase`, the new one.
+      Text, or nil when not given.
     * `keep_offers` (M97 §7.3): for `move_now` and `try_again`, what this
       computer keeps on for its server after the move, the lines of the
       review's block left ticked; for `review_offers`, what it keeps on after

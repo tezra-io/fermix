@@ -28,7 +28,6 @@ defmodule FermixCore.Management.ProtocolContractTest do
   alias FermixCore.Home.Epoch
   alias FermixCore.Home.Join, as: HomeJoin
   alias FermixCore.Home.Move, as: HomeMove
-  alias FermixCore.Home.MoveReadiness
   alias FermixCore.Home.Snapshot
   alias FermixCore.Home.Snapshot.Recipient, as: SnapshotRecipient
   alias FermixCore.Home.Snapshot.Scheduler, as: SnapshotScheduler
@@ -997,9 +996,13 @@ defmodule FermixCore.Management.ProtocolContractTest do
   # M97 §7.2: a computer linked to its server publishes `computer`, what Fermix
   # on the server may use on it, among its own sections; its inventory is the
   # server's sections and its own (provider sections are data, as above), and
-  # the section's golden is the one it answers for its switches.
+  # the section's golden is the one it answers for its switches. The server is
+  # an Always On server's primary, so its Backup settings are among its own
+  # (ALWAYS_ON_PANE §3.12, D18).
   test "the golden linked computer's sections are the ones it publishes" do
-    server = fn request, _opts -> Router.route(request, macos?: false, computer?: false) end
+    server = fn request, _opts ->
+      Router.route(request, macos?: false, computer?: false, server_primary?: true)
+    end
 
     sections = %{
       request_id: "req-1",
@@ -1974,8 +1977,7 @@ defmodule FermixCore.Management.ProtocolContractTest do
     opts = [operation_opts: [always_on: seams]]
 
     add = fn ->
-      %{"detail" => %{"actions" => actions}} = summary.()
-      %{"key" => key} = Enum.find(actions, &(&1["id"] == "add_computer"))
+      %{"key" => key} = Enum.find(HomeSummary.offered(summary.()), &(&1["id"] == "add_computer"))
       {%{"action" => "add_computer", "key" => key}, opts}
     end
 
@@ -2374,15 +2376,6 @@ defmodule FermixCore.Management.ProtocolContractTest do
   defp on_review(server) do
     on = golden_row("home_status_on")
     moved = %{to: @golden_server, moved_at: ~U[2031-05-01 09:00:00Z], epoch: 4}
-    waiting = Switches.only(~w(files_and_shell browser)a, reviewed: false)
-    recording = %{fermix_core: [computer_history: [enabled: true]], sandbox: []}
-
-    review =
-      Consent.block(Consent.proposed(waiting, snapshot: recording, os: :macos),
-        os: :macos,
-        sandbox_mode: :standard,
-        kind: :review
-      )
 
     summary =
       golden_summary(
@@ -2394,7 +2387,7 @@ defmodule FermixCore.Management.ProtocolContractTest do
         primary_home: server,
         copies_bytes: 3 * 48_211,
         copies: desktop_copies(),
-        offers_review: Consent.view(review)
+        offers_review: true
       )
 
     ManagementHome.picture(%{
@@ -2427,9 +2420,8 @@ defmodule FermixCore.Management.ProtocolContractTest do
       golden_summary(
         link: %{primary: nil, desktops: [], enrollment: window},
         candidates: ready["candidates"],
-        review: ready_review(),
-        move_items:
-          MoveReadiness.summary_items({:ok, ""}, true, @golden_server, restarts_itself: true),
+        review: elem(HomeSummaryGoldens.ready_review(), 0),
+        move_items: elem(HomeSummaryGoldens.ready_review(), 1),
         snapshots: ready["snapshots"],
         disk: ready["disk"],
         keeps_on: Consent.view(keep)
@@ -2446,21 +2438,6 @@ defmodule FermixCore.Management.ProtocolContractTest do
       enrollment: ready["enrollment"],
       candidates: ready["candidates"]
     })
-  end
-
-  defp ready_review do
-    sentence =
-      "iMessage and meetings stop after the move: neither this Mac nor #{@golden_server} " <>
-        "runs them. This Mac's voice calls stop after the move; calls from your phone carry " <>
-        "on at #{@golden_server} when Talk to Fermix is on there and its key is in " <>
-        "#{@golden_server}'s secret store."
-
-    %{
-      candidate_id: @golden_candidate,
-      reviewed_at: ~U[2031-05-04 11:30:00Z],
-      ready: true,
-      items: [%{"id" => "stays_here", "status" => "warn", "sentence" => sentence}]
-    }
   end
 
   # The summary of `overrides` over the facts `HomeSummaryGoldens` builds every
@@ -3062,12 +3039,17 @@ defmodule FermixCore.Management.ProtocolContractTest do
   # reads the vendored fixture for the keys it binds, so a section with no
   # golden result is a pane whose keys nothing on the far side is held to.
   # The `computer` section is published only on a computer linked to its
-  # server (M97 §7.2), so it is asked for as one.
+  # server (M97 §7.2), and Backup settings only on an Always On server's
+  # primary (ALWAYS_ON_PANE §3.12, D18), so each is asked for as one.
   defp settings_cases do
     for(
       section <- Settings.sections(macos?: true),
       do: {"settings.get", %{"section" => section.id}, [macos?: true]}
-    ) ++ [{"settings.get", %{"section" => "computer"}, [macos?: true, computer?: true]}]
+    ) ++
+      [
+        {"settings.get", %{"section" => "computer"}, [macos?: true, computer?: true]},
+        {"settings.get", %{"section" => "snapshots"}, [macos?: false, server_primary?: true]}
+      ]
   end
 
   # Sources, never rendered rows: the projection under test is the daemon's.

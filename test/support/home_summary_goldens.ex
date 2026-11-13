@@ -3,11 +3,13 @@ defmodule FermixTestSupport.HomeSummaryGoldens do
   The `home.status` goldens beyond the first (`success.jsonl`), one for each
   family of the summary's states (M75 lean v1 §7): the computer that sets
   Always On up while its server connects and once it is ready, the server
-  before and after its move, and a linked desktop when all is well (Move back
-  among its actions, and the Tailscale Funnel mounts of what its server
-  serves), when its server's last backup failed (the `backup_failed` problem,
-  in the try's own words), and when its server stopped answering (Restore
-  here beside it, from the copies the desktop keeps). Each is the record
+  before and after its move, a linked desktop when all is well (Move back
+  among its steps, its backup settings, and the Tailscale Funnel mounts of
+  what its server serves), when its server's last backup failed (the
+  `backup_failed` problem, the try's own words its note), and when its
+  server stopped answering (Restore here beside it, from the copies the
+  desktop keeps); the move while it sends the home (its steps, route and
+  transfer), and a move back the server holds. Each is the record
   `Management.Home.picture/1`
   builds from invented facts, with the summary `HomeSummary.summary/1`
   answers for the same facts, so a golden can only say what the engine says.
@@ -38,8 +40,84 @@ defmodule FermixTestSupport.HomeSummaryGoldens do
       {"home_status_problem", problem()},
       {"home_status_server_asking", server_asking()},
       {"home_status_server_joined", server_joined()},
-      {"home_status_joining", joining()}
+      {"home_status_joining", joining()},
+      {"home_status_moving", moving()},
+      {"home_status_return_ready", return_ready()}
     ]
+  end
+
+  # The move from this Mac to its server, sending the home: its steps, its
+  # route, what it is doing, and the bytes it handed on so far, counted in
+  # whole twentieths (Always On pane §3.13).
+  defp moving do
+    move = %{
+      "phase" => "streaming",
+      "candidate" => @server_name,
+      "sentence" => "This home is being sent to #{@server_name}."
+    }
+
+    sent = %{move_id: "mv-0001f2e3d4c5b6a7", step: :send, bytes: 734_003_200, size: 1_503_238_554}
+
+    record(:device, %{epoch: 4, snapshots: retired_snapshots(:device)}, %{
+      move: move,
+      move_progress: sent
+    })
+  end
+
+  # A move back held by the server: Fermix has not moved yet, Move now moves
+  # it, and until when this Mac waits is the note (Always On pane §3.11, D16).
+  defp return_ready do
+    moved = %{to: @server_name, moved_at: ~U[2031-05-01 09:00:00Z], epoch: 4}
+
+    returning = %{
+      "v" => 1,
+      "phase" => "enrolled",
+      "kind" => "return",
+      "primary" => %{"name" => @server_name},
+      "candidate_id" => "cand-7a3e1c9b5d2f4086",
+      "listen_until" => "2031-05-04T12:30:00Z"
+    }
+
+    record(:device, %{epoch: 4, moved: moved, snapshots: retired_snapshots(:device)}, %{
+      link: link(primary: primary(:connected, nil)),
+      linked: true,
+      primary_home: server(),
+      returning: returning,
+      return: %{from: @server_name, started_at: ~U[2031-05-04 11:30:00Z], primary_epoch: 5},
+      copies_bytes: 3 * 48_211
+    })
+  end
+
+  @doc """
+  The `ready` goldens' last review of the held server and the review's
+  items this home's settings decide. The home has meetings on, so the review
+  warns that they stop, as the settings do; it also found plugins the server
+  has no build for, which only the review can say. Move now's confirm says
+  both, since the screen shows neither (the Always On pane's D3).
+  """
+  @spec ready_review() :: {map(), [MoveReadiness.item()]}
+  def ready_review do
+    settings = {:ok, "[fermix_core.meetings]\nenabled = true\n"}
+    items = MoveReadiness.summary_items(settings, true, @server_name, restarts_itself: true)
+    stays_here = Enum.find(items, &(&1.id == "stays_here"))
+
+    review = %{
+      candidate_id: @cand,
+      reviewed_at: ~U[2031-05-04 11:30:00Z],
+      ready: true,
+      items: [
+        %{"id" => "stays_here", "status" => "warn", "sentence" => stays_here.sentence},
+        %{
+          "id" => "plugins",
+          "status" => "warn",
+          "sentence" =>
+            "These plugins have no build for #{@server_name}, so they stop working after " <>
+              "the move: invented-notes."
+        }
+      ]
+    }
+
+    {review, items}
   end
 
   # M97 §3.1, §7.5: a computer asks to join on the code Add a computer
@@ -137,29 +215,13 @@ defmodule FermixTestSupport.HomeSummaryGoldens do
   # Ready with the recovery key kept, and ready for the first move, which
   # sets it (Move now's needs say which).
   defp ready(snapshots) do
-    review = %{
-      candidate_id: @cand,
-      reviewed_at: ~U[2031-05-04 11:30:00Z],
-      ready: true,
-      items: [
-        %{
-          "id" => "stays_here",
-          "status" => "warn",
-          "sentence" =>
-            "iMessage and meetings stop after the move: neither this Mac nor " <>
-              "#{@server_name} runs them. This Mac's voice calls stop after the move; " <>
-              "calls from your phone carry on at #{@server_name} when Talk to Fermix is on " <>
-              "there and its key is in #{@server_name}'s secret store."
-        }
-      ]
-    }
+    {review, items} = ready_review()
 
     record(:primary, %{epoch: 4, snapshots: snapshots, disk: disk(0.31)}, %{
       link: link(enrollment: window(:used, @cand, ~U[2031-05-04 11:15:00Z])),
       candidates: [candidate_view()],
       review: review,
-      move_items:
-        MoveReadiness.summary_items({:ok, ""}, true, @server_name, restarts_itself: true),
+      move_items: items,
       enrollment: %{
         "state" => "used",
         "expires_at" => "2031-05-04T11:15:00Z",
@@ -270,8 +332,9 @@ defmodule FermixTestSupport.HomeSummaryGoldens do
         stays_here: [],
         return_costs: [],
         zone: "Europe/Berlin",
-        return: nil,
-        returning: nil,
+        return: Map.get(extra, :return),
+        returning: Map.get(extra, :returning),
+        move_progress: Map.get(extra, :move_progress),
         restoring: false,
         join: Map.get(extra, :join),
         copies: Map.get(extra, :copies, []),

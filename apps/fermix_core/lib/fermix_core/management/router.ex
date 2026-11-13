@@ -1190,7 +1190,7 @@ defmodule FermixCore.Management.Router do
   end
 
   defp settings_opts(opts),
-    do: Keyword.take(opts, [:snapshot, :supervised, :macos?, :computer?])
+    do: Keyword.take(opts, [:snapshot, :supervised, :macos?, :computer?, :server_primary?])
 
   defp invalid_params(field), do: {:error, :invalid_params, %{"field" => field}}
 

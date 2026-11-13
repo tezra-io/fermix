@@ -53,14 +53,19 @@ defmodule FermixCore.ComputerHistory.PromiseTest do
                  "to your Fermix server, which keeps it."
     end
 
-    # The clause a move's review adds: the same promise, after the move.
-    test "the review's clause is the same promise" do
+    # The clause a move's review adds: where the history goes once its line
+    # is ticked, after the move, in a sentence the Always On pane keeps short
+    # (its R1); the 48 hours stay the switch's footer's.
+    test "the review's clause says where the history goes once ticked" do
       facts = %{server?: true, local?: false, provider: nil, machine: "Mac"}
 
       assert Promise.sentence(:clause, facts) ==
-               " Your computer history's raw record stays on this Mac for 48 hours; each " <>
-                 "finished sitting is sent to your Fermix server, which has its summarizer " <>
-                 "summarize it and keeps the summary."
+               " Ticked, each sitting of your computer history goes to your server, which " <>
+                 "keeps its summary."
+
+      assert Promise.sentence(:clause, %{facts | local?: true}) ==
+               " Ticked, only the summary of each sitting of your computer history goes to " <>
+                 "your server."
     end
   end
 
@@ -117,7 +122,8 @@ defmodule FermixCore.ComputerHistory.PromiseTest do
     sentences = Promise.sentences()
 
     assert length(sentences) >= 8
-    assert Enum.all?(sentences, &(&1 =~ "48 hours"))
+    footers = Enum.reject(sentences, &String.starts_with?(&1, " Ticked"))
+    assert Enum.all?(footers, &(&1 =~ "48 hours"))
     refute Enum.any?(sentences, &(&1 =~ ~r/\d+\.\d+/))
   end
 

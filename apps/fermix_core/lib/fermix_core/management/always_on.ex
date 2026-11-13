@@ -5,10 +5,13 @@ defmodule FermixCore.Management.AlwaysOn do
   `needs`, asks its `confirm`, and sends the action's id, the key it was
   drawn with and the input (`AlwaysOn.Input`); `act/2` runs the step and
   answers `{summary, result}`: the summary after it, and the step's result
-  (`own_server`: `{code, expires_at, command, tailscale}`, the code answered
-  once, the command carrying none, and `tailscale` the optional step that
-  also joins the server to the owner's tailnet, `{sentence, command}`;
-  `move_now` and `try_again`: `{move_id}`; otherwise null).
+  (`own_server`: `{code, expires_at, command, sentence, tailscale}`, the code
+  answered once, the command carrying none, `sentence` the one the code is
+  shown with (the systems it takes and until when it works, in the owner's
+  zone), and `tailscale` the optional step that also joins the server to the
+  owner's tailnet, `{label, sentence, command, url}`, folded under `label`
+  with its docs page; `move_now` and `try_again`: `{move_id}`; otherwise
+  null).
 
   **One rule for "the owner saw this".** Acts run one at a time per engine,
   in this process, and each reads the summary first: one that does not offer
@@ -35,6 +38,10 @@ defmodule FermixCore.Management.AlwaysOn do
       the screen is off again.
     * `back_up_now` and `check_again`: run here, or on a linked desktop sent
       as `home.snapshots.run` and `home.move.readiness`.
+    * `change_passphrase` (the backup settings' Change, Always On pane
+      §3.12): a new recovery passphrase, `input.recovery_passphrase`, set
+      by `home.snapshots.passphrase` here, or on a linked desktop sent to
+      its server; backups made before keep the key they were written for.
     * `move_now`, `try_again`: the server a move goes to is the engine's
       own rule (`HomeSummary.target/1`). Here the review runs at the press
       unless a ready one under 15 minutes old is kept (`Move.review/3`); a
@@ -64,12 +71,13 @@ defmodule FermixCore.Management.AlwaysOn do
       server's copied code is closed (`home.enroll.withdraw`;
       one the server cannot be asked to close lapses by itself), and the
       candidate and the record go.
-    * `review_offers` (M97 §7.3): on a linked computer that moved before
-      M97, whose switches wait for the owner's review: the lines in the
-      input's `keep_offers` stay on, every other is off, the history line
-      sets the recorder, and the switches are reviewed
-      (`Computers.Consent.review/3`); with none given, the block as the
-      summary proposed it. `move_now` and `try_again` record their
+    * `review_offers` (M97 §7.3; Keep these switches): on a linked computer
+      that moved before M97, whose switches wait for the owner's review:
+      with no `keep_offers`, its switches as they are (set under This
+      computer, the one place they are set), and the recorder as it is;
+      with `keep_offers` (an app that drew the review's ticks), those lines
+      stay on, every other is off and the history line sets the recorder;
+      either way the switches are reviewed (`Computers.Consent.review/3`). `move_now` and `try_again` record their
       `keep_offers` in the move the same way (`HomeMove.move_start/3`); a
       `try_again` with none, whose undone screen offers no block, moves with
       the keep the undone move started with (`Move.undone_keep/1`), never
@@ -94,8 +102,9 @@ defmodule FermixCore.Management.AlwaysOn do
       (`Home.LocalReturn.restore/3`); Fermix deletes no server, and the
       derived key lives only in that job.
 
-  Every action the summary offers is one of `acts/0`, or one a surface opens
-  itself (`learn_more`, `update`), refused as `invalid_params` on `action`.
+  Every action the summary offers is one of `acts/0`, or the one a surface
+  opens itself (`update`, the app's own update), refused as `invalid_params`
+  on `action`.
 
   Restore here keeps its request in the return's record before its job
   starts, so the summary the act answers already says the restore runs; a
@@ -153,8 +162,8 @@ defmodule FermixCore.Management.AlwaysOn do
 
   @capability "home"
   @acts ~w(cancel move_now try_again back_up_now check_again own_server move_back restore_here
-           review_offers add_computer approve_computer deny_computer)
-  @opened ~w(learn_more update)
+           review_offers add_computer approve_computer deny_computer change_passphrase)
+  @opened ~w(update)
   # Every client allows `home.act` this long: a review sent to the server
   # takes up to 60 s.
   @deadline_ms 90_000
@@ -165,7 +174,7 @@ defmodule FermixCore.Management.AlwaysOn do
   @busy_backup_sentence "A backup is already running, and it finishes by itself."
   @busy_restore_sentence "Fermix is already restoring its backup here, and it finishes by itself."
   @busy_sentence "Fermix is busy with other work right now, so try again in a minute."
-  @opened_sentence "This one opens a page of its own; Fermix takes no step for it."
+  @opened_sentence "This one is the app's own update; Fermix takes no step for it."
   @unknown_sentence "Name one of the steps Always On offers."
   @key_sentence "Send the key the action came with."
   @nothing_to_move_sentence "There is no server to move to yet."
@@ -319,7 +328,11 @@ defmodule FermixCore.Management.AlwaysOn do
 
   defp step(%{action: "cancel"}, seen, opts), do: cancel(seen, opts)
   defp step(%{action: "review_offers", input: input}, _seen, opts), do: review_offers(input, opts)
-  defp step(%{action: "own_server"}, _seen, opts), do: own_server(opts)
+  defp step(%{action: "own_server"}, seen, opts), do: own_server(seen.facts.zone, opts)
+
+  defp step(%{action: "change_passphrase", input: input}, _seen, opts),
+    do: change_passphrase(input.recovery_passphrase, opts)
+
   defp step(%{action: "add_computer"}, _seen, opts), do: add_computer(opts)
 
   defp step(%{action: "approve_computer", input: input}, _seen, opts),
@@ -399,22 +412,40 @@ defmodule FermixCore.Management.AlwaysOn do
   end
 
   # The commands name the release this engine runs (`:version`, as
-  # `home.status` reads it), which the server installs.
-  defp own_server(opts) do
+  # `home.status` reads it), which the server installs; the code's sentence
+  # says until when it works in the owner's `zone`.
+  defp own_server(zone, opts) do
     version = Keyword.get_lazy(opts, :version, &BuildInfo.product_version/0)
 
     with {:ok, %{"code" => code, "expires_at" => at}} <- HomeMove.enroll_open(opts) do
+      {:ok, until, 0} = DateTime.from_iso8601(at)
+
       {:ok,
        %{
          "code" => code,
          "expires_at" => at,
          "command" => Copy.own_server_command(version),
+         "sentence" => Copy.summary_sentence(:own_server, %{at: until, zone: zone}),
          "tailscale" => %{
+           "label" => Copy.tailscale_label(),
            "sentence" => Copy.summary_sentence(:own_server_tailscale, %{}),
-           "command" => Copy.own_server_tailscale_command(version)
+           "command" => Copy.own_server_tailscale_command(version),
+           "url" => Copy.always_on_docs_url("tailscale")
          }
        }}
     end
+  end
+
+  # A new recovery passphrase (the backup settings' Change): the server's
+  # key, set there, or over the link from a linked computer, as Back up now
+  # is. Backups made before keep the key they were written for.
+  defp change_passphrase(passphrase, opts) do
+    on_server(
+      "home.snapshots.passphrase",
+      %{"recovery_passphrase" => passphrase},
+      fn -> Home.snapshots_passphrase(passphrase, opts) end,
+      opts
+    )
   end
 
   # A step the server takes: here, or over the link on a linked desktop.
@@ -491,12 +522,18 @@ defmodule FermixCore.Management.AlwaysOn do
     end
   end
 
-  # The owner's review of what a computer that moved before M97 keeps on.
+  # The owner's review of what a computer that moved before M97 keeps on:
+  # with no lines named, its switches as the screen showed them (the
+  # summary's `:computer_switches`, the running engine's), taken as they
+  # are; an app that drew the review's ticks names the lines it left ticked.
   defp review_offers(input, opts) do
     keep =
       case input.keep_offers do
-        nil -> {:ok, Consent.proposed(Switches.current())}
-        offers -> Consent.cast(offers)
+        nil ->
+          {:ok, Consent.proposed(Keyword.get_lazy(opts, :computer_switches, &Switches.current/0))}
+
+        offers ->
+          Consent.cast(offers)
       end
 
     with {:ok, offers} <- keep_or_refuse(keep),

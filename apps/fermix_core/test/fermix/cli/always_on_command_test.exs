@@ -24,8 +24,13 @@ defmodule Fermix.CLI.AlwaysOnCommandTest do
 
   @passphrase "invented-lantern-orchard"
   @changed "Always On changed since this was shown, so look at it again."
+  @help "https://fermix.ai/docs/always-on/"
   @command "curl -fsSL https://fermix.ai/install | sudo sh -s -- --always-on --version 1.2.3"
-  @tailscale_sentence "Optional: to also join the server to your tailnet, run this instead."
+  @code_sentence "Run this on your Debian 12 or 13, or Ubuntu 24.04 server, then paste the code " <>
+                   "when it asks. The code works once, until Sunday, May 4, 2031 at 2:30 PM CEST."
+  @tailscale_label "Also join your tailnet (optional)"
+  @tailscale_sentence "For WhatsApp and webhook sources: run this instead. It also asks for a " <>
+                        "one-off, pre-approved Tailscale auth key tagged tag:fermix-server."
   @tailscale_command "curl -fsSL https://fermix.ai/install | sudo sh -s -- --always-on --version 1.2.3 --tailscale"
   @unconfirmed "The server fermix-general-a3f9 did not confirm in time whether the move " <>
                  "started. Its state shows once the server answers again, and starting it " <>
@@ -204,11 +209,13 @@ defmodule Fermix.CLI.AlwaysOnCommandTest do
         assert exit_status == expected, "#{ending["state"]} exited #{exit_status}: #{out}"
 
         if expected == 1 do
-          assert %{"error" => %{"code" => "step_failed", "sentence" => sentence}} =
-                   Jason.decode!(out)
+          assert %{
+                   "error" => %{"code" => "step_failed", "sentence" => sentence, "summary" => at}
+                 } = Jason.decode!(out)
 
-          assert sentence =~ "Backing up to S3 failed on"
-          assert sentence =~ "S3 could not be reached: the connection timed out."
+          assert sentence =~ "Backing up to S3 failed."
+          # The try's own words are the screen's note, which the screen prints.
+          assert at["detail"]["note"] =~ "S3 could not be reached: the connection timed out."
         else
           assert %{"ok" => true, "result" => %{"summary" => ^on}} = Jason.decode!(out)
         end
@@ -225,36 +232,104 @@ defmodule Fermix.CLI.AlwaysOnCommandTest do
   end
 
   describe "the screen" do
-    test "with no terminal it prints the summary and each step as a command", ctx do
+    # The Always On pane's R7: one help page per screen, the screen's last
+    # line, ahead of the steps.
+    test "with no terminal it prints the summary, its help page and each step as a command",
+         ctx do
       client = script([hello(), {"home.status", {:ok, status(off())}}])
 
       {0, out, ""} = run([], ctx, client)
 
       assert [
                "Keep Fermix running when this Mac sleeps. It moves to a server you own.",
+               "Learn more: https://fermix.ai/docs/always-on/#what-you-need",
                "Steps:",
                "  Use my own Linux server: fermix always-on own-server"
              ] == lines(out)
     end
 
-    test "Details are the summary's lines, and --json prints the summary itself", ctx do
+    # R4 and R8: the one secondary sentence right under the sentence, and
+    # Details facts only.
+    test "the note is under the sentence, Details are the summary's lines, and --json prints " <>
+           "the summary itself",
+         ctx do
       ready = golden_summary("home_status_ready")
       client = script([hello(), {"home.status", {:ok, status(ready)}}])
 
       {0, out, ""} = run([], ctx, client)
-      assert out =~ "Details:\n  Server: fermix-general-a3f9\n  System: linux x86_64\n"
-      assert out =~ "  Move now: fermix always-on move-now"
+
+      assert lines(out) ==
+               [ready["sentence"], ready["detail"]["note"], "Details:"] ++
+                 for(
+                   %{"label" => l, "value" => v} <- ready["detail"]["lines"],
+                   do: "  #{l}: #{v}"
+                 ) ++
+                 [
+                   "Learn more: " <> ready["help"],
+                   "Steps:",
+                   "  Move now: fermix always-on move-now",
+                   "  Forget this server: fermix always-on cancel"
+                 ]
 
       client = script([hello(), {"home.status", {:ok, status(ready)}}])
       {0, out, ""} = run(["--json"], ctx, client)
       assert Jason.decode!(out) == %{"schema_version" => 1, "ok" => true, "result" => ready}
     end
 
+    # R5: a block's reason and what to check are never hidden; a problem that
+    # no step of the owner's fixes offers only what it has.
+    test "a problem's note and a review's blocks print under the sentence", ctx do
+      problem = golden_summary("home_status_problem")
+      client = script([hello(), {"home.status", {:ok, status(problem)}}])
+
+      {0, out, ""} = run([], ctx, client)
+
+      assert lines(out) == [
+               problem["sentence"],
+               problem["detail"]["note"],
+               "Learn more: " <> problem["help"],
+               "Steps:",
+               "  Restore on this Mac: fermix always-on restore-here"
+             ]
+
+      client = script([hello(), {"home.status", {:ok, status(not_ready())}}])
+      {0, out, ""} = run([], ctx, client)
+
+      assert lines(out) == [
+               "The move cannot start yet.",
+               "- fermix-larch-52e0 is too full.",
+               "Learn more: https://fermix.ai/docs/always-on/#the-move",
+               "Steps:",
+               "  Check again: fermix always-on check-again"
+             ]
+    end
+
+    # R12: the count is the engine's, said beside the step in hand, on the
+    # screen and on the wait's line.
+    test "while the home moves, the engine's count is beside the step in hand" do
+      assert Render.screen(sending()) == [
+               "Moving. This Mac restarts and reconnects to your server.",
+               "Sending your home to fermix-larch-52e0… 502 MiB of 1.4 GiB sent",
+               "Learn more: https://fermix.ai/docs/always-on/#the-move"
+             ]
+
+      assert Render.progress(sending()) ==
+               "Moving. This Mac restarts and reconnects to your server. Sending your home to " <>
+                 "fermix-larch-52e0… 502 MiB of 1.4 GiB sent"
+
+      no_count = update_in(sending(), ["detail"], &Map.delete(&1, "transfer"))
+      assert Render.progress(no_count) =~ ~r/fermix-larch-52e0…\z/
+    end
+
     # Always On's inbound webhooks: the Funnel mounts the server needs, each
-    # command on a line of its own to copy, as the engine words them.
+    # command on a line of its own to copy, as the engine words them, then
+    # the one tailnet step and the page that holds the rest.
     test "the Funnel mounts print under their sentence, each command on its own line", ctx do
       on = golden_summary("home_status_on")
-      %{"sentence" => said, "mounts" => mounts, "notes" => notes} = on["detail"]["webhooks"]
+
+      %{"sentence" => said, "mounts" => mounts, "notes" => [note], "url" => url} =
+        on["detail"]["webhooks"]
+
       client = script([hello(), {"home.status", {:ok, status(on)}}])
 
       {0, out, ""} = run([], ctx, client)
@@ -264,32 +339,61 @@ defmodule Fermix.CLI.AlwaysOnCommandTest do
           Enum.flat_map(
             mounts,
             &["  #{&1["label"]}:", "    #{&1["command"]}", "  #{&1["note"]}"]
-          ) ++ notes
+          ) ++ [note, "Learn more: " <> url]
 
       assert out =~ Enum.join(printed, "\n") <> "\n"
 
       assert out =~
                "  WhatsApp:\n    sudo tailscale funnel --bg --set-path=/webhook/whatsapp " <>
-                 "http://127.0.0.1:4030/webhook/whatsapp\n  Tailscale prints the address " <>
-                 "this gives. In Meta's app dashboard"
+                 "http://127.0.0.1:4030/webhook/whatsapp\n"
+    end
+
+    # The backup settings (the pane's §3.12): whether the recovery passphrase
+    # is set is a Details line, and Change is a step like any other.
+    test "a linked desktop's screen says the recovery passphrase is set and offers Change", ctx do
+      on = golden_summary("home_status_on")
+      client = script([hello(), {"home.status", {:ok, status(on)}}])
+
+      {0, out, ""} = run([], ctx, client)
+
+      %{"passphrase" => %{"label" => label, "value" => value}} = on["detail"]["backup"]
+      assert out =~ "  Connection: Direct\n  #{label}: #{value}\n"
+      assert out =~ "  Change: fermix always-on change-passphrase\n"
+      assert List.last(lines(out)) == "  Change: fermix always-on change-passphrase"
+      assert out =~ "\nLearn more: " <> on["help"] <> "\nSteps:\n"
     end
   end
 
   # Review F9 (D17): the code is shown once, so a result of any other shape
   # than own_server's fails loud rather than print nothing.
   describe "a step's result" do
+    # The Always On pane's D10: the code's sentence and the Tailscale step's
+    # label are the engine's, printed as they came.
     test "own_server's is matched whole, the code's fields and its Tailscale step apart" do
       code = own_code()
 
-      assert ["On your server, run:" | _rest] = Render.result(code)
+      assert Render.result(code) == [
+               @code_sentence,
+               "  " <> @command,
+               "Code:",
+               "  fxenroll1.invented",
+               @tailscale_label <> ":",
+               "  " <> @tailscale_sentence,
+               "    " <> @tailscale_command,
+               "  Learn more: https://fermix.ai/docs/always-on/#tailscale"
+             ]
+
       assert Render.result(nil) == []
       assert Render.result(%{"move_id" => "mv-0001"}) == []
 
       for bad <- [
             Map.delete(code, "tailscale"),
             Map.delete(code, "command"),
+            Map.delete(code, "sentence"),
             Map.put(code, "code", nil),
             Map.put(code, "tailscale", %{"sentence" => @tailscale_sentence}),
+            Map.update!(code, "tailscale", &Map.delete(&1, "label")),
+            Map.update!(code, "tailscale", &Map.delete(&1, "url")),
             Map.put(code, "tailscale", nil),
             %{"move_id" => "mv-0001", "code" => "fxenroll1.invented"}
           ] do
@@ -318,7 +422,7 @@ defmodule Fermix.CLI.AlwaysOnCommandTest do
 
     test "add-computer prints the code the server opened, once", ctx do
       server = golden_summary("home_status_server")
-      add = Enum.find(server["detail"]["actions"], &(&1["id"] == "add_computer"))
+      add = Enum.find(server["detail"]["alternatives"], &(&1["id"] == "add_computer"))
       result = %{"code" => "fxenroll1.invented", "expires_at" => "2031-05-04T10:30:00Z"}
 
       act = fn params ->
@@ -438,7 +542,7 @@ defmodule Fermix.CLI.AlwaysOnCommandTest do
     # offers them, by the one rule that names an action's step.
     test "move-back sends the step the on screen offers, asking nothing", ctx do
       on = golden_summary("home_status_on")
-      move_back = Enum.find(on["detail"]["actions"], &(&1["id"] == "move_back"))
+      move_back = Enum.find(on["detail"]["alternatives"], &(&1["id"] == "move_back"))
       assert "move-back" in AlwaysOnCommand.steps()
 
       act = fn params ->
@@ -540,26 +644,77 @@ defmodule Fermix.CLI.AlwaysOnCommandTest do
 
       {0, out, _err} = run(["own-server"], ctx, client)
 
-      # The optional Tailscale step under the plain command, in its words.
+      # The engine's sentence for the code, the command and the code, then
+      # the optional Tailscale step under its label.
       assert out =~
-               "On your server, run:\n  #{@command}\n#{@tailscale_sentence}\n  " <>
-                 "#{@tailscale_command}\nWhen it asks"
+               "#{@code_sentence}\n  #{@command}\nCode:\n  fxenroll1.invented\n" <>
+                 "#{@tailscale_label}:\n  #{@tailscale_sentence}\n    #{@tailscale_command}\n"
 
-      assert out =~ "until 2031-05-04T12:30:00Z:\n  fxenroll1.invented\n"
       assert length(String.split(out, "fxenroll1.invented")) == 2
+      refute out =~ "2031-05-04T12:30:00Z"
 
       client = script([hello(), {"home.status", {:ok, status(off())}}, {"home.act", act}])
       {0, json, _err} = run(["own-server", "--json"], ctx, client)
       assert %{"result" => %{"result" => ^result}} = Jason.decode!(json)
     end
 
-    test "Learn more prints its page and sends nothing", ctx do
+    # R7: Learn more is no step; the screen's help page is its last line.
+    test "learn-more is no step any more, and the help page is printed with the screen", ctx do
+      {status, out, err} = run(["learn-more"], ctx, script([]))
+      assert {status, out} == {2, ""}
+      refute err =~ "learn-more"
+      refute_received {:called, _method, _params, _opts}
+
       client = script([hello(), {"home.status", {:ok, status(retired())}}])
+      {0, out, ""} = run([], ctx, client)
 
-      {0, out, ""} = run(["learn-more"], ctx, client)
+      assert lines(out) == [
+               "Fermix moved to your server, and this Mac is no longer connected to it.",
+               "Learn more: https://fermix.ai/docs/always-on/#when-the-server-is-gone"
+             ]
+    end
 
-      assert out == "https://fermix.ai/docs/always-on/\n"
+    # The backup settings' Change (the pane's §3.12, S2): the new recovery
+    # passphrase is collected as the first Move now's is, and the confirm
+    # asked first.
+    test "change-passphrase takes the new passphrase from its file and needs --yes", ctx do
+      on = golden_summary("home_status_on")
+      %{"key" => key, "needs" => ["new_recovery_passphrase"]} = on["detail"]["backup"]["change"]
+      assert "change-passphrase" in AlwaysOnCommand.steps()
+
+      {2, _out, usage} = run(["--yes"], ctx, script([]))
+      assert usage =~ "change-passphrase"
+
+      client = script([hello(), {"home.status", {:ok, status(on)}}])
+      {2, "", err} = run(["change-passphrase", "--yes"], ctx, client)
+      assert err =~ "pass --recovery-passphrase-file PATH"
       refute_act()
+
+      argv = ["change-passphrase", "--recovery-passphrase-file", passphrase_file(ctx), "--json"]
+      client = script([hello(), {"home.status", {:ok, status(on)}}])
+      {1, out, _err} = run(argv, ctx, client)
+
+      assert %{"error" => %{"code" => "confirm_required", "sentence" => sentence}} =
+               Jason.decode!(out)
+
+      assert sentence =~ "Change the recovery passphrase?\n"
+      refute_act()
+
+      act = fn params ->
+        assert params == %{
+                 "action" => "change_passphrase",
+                 "key" => key,
+                 "input" => %{"recovery_passphrase" => @passphrase}
+               }
+
+        {:ok, %{"summary" => on, "result" => nil}}
+      end
+
+      client = script([hello(), {"home.status", {:ok, status(on)}}, {"home.act", act}])
+      {0, out, err} = run(["change-passphrase", "--yes" | tl(argv)], ctx, client)
+      assert %{"result" => %{"result" => nil}} = Jason.decode!(out)
+      refute out =~ @passphrase
+      refute err =~ @passphrase
     end
   end
 
@@ -583,7 +738,7 @@ defmodule Fermix.CLI.AlwaysOnCommandTest do
       assert err =~ "Ctrl-C stops waiting"
       assert err =~ "\n  Connecting your server…\n"
       assert length(String.split(err, "Connecting your server")) == 2
-      assert err =~ "\n  Your server is ready for the move."
+      assert err =~ "\n  " <> ready["sentence"] <> "\n"
 
       assert_received {:called, "home.status", %{}, _opts}
 
@@ -714,7 +869,7 @@ defmodule Fermix.CLI.AlwaysOnCommandTest do
       {0, out, _err} = run(["own-server", "--wait"], ctx, client)
 
       assert out =~ "fxenroll1.invented"
-      assert out =~ "Your server is ready for the move."
+      assert out =~ ready["sentence"]
     end
 
     test "the wait ends after 45 minutes, exit 1, with the screen as it stands", ctx do
@@ -769,9 +924,9 @@ defmodule Fermix.CLI.AlwaysOnCommandTest do
       {{0, out, err}, _prompts} = run_tty([], ctx, client, "\nq\n")
 
       assert out =~ "  1. Use my own Linux server\n"
-      assert out =~ "On your server, run:\n  #{@command}\n"
+      assert out =~ "#{@code_sentence}\n  #{@command}\n"
       assert out =~ "  fxenroll1.invented\n"
-      assert out =~ "Your server is ready for the move."
+      assert out =~ ready["sentence"]
       assert out =~ "  1. Move now\n"
       assert err =~ "fermix always-on: own_server\n"
       assert_received {:called, "home.act", _params, opts}
@@ -785,7 +940,7 @@ defmodule Fermix.CLI.AlwaysOnCommandTest do
 
       {{0, out, _err}, _prompts} = run_tty([], ctx, client, "q\n")
 
-      assert out =~ "  1. Use my own Linux server\n  2. Cancel the code\n"
+      assert out =~ "  1. Replace the code\n  2. Cancel the code\n"
       refute_received {:called, "home.status", %{"after" => _key}, _opts}
     end
 
@@ -852,22 +1007,33 @@ defmodule Fermix.CLI.AlwaysOnCommandTest do
       {{0, out, err}, _prompts} = run_tty([], ctx, client, "\nq\n")
 
       assert err =~ "fermix always-on: #{@changed}\n"
-      assert out =~ "Fermix moved to your server, and this Mac is no longer connected to it."
-      assert out =~ "  1. Learn more\n"
+      # A screen that offers no step ends on its help page: nothing to number.
+      assert String.ends_with?(
+               out,
+               "Fermix moved to your server, and this Mac is no longer connected to it.\n" <>
+                 "Learn more: https://fermix.ai/docs/always-on/#when-the-server-is-gone\n"
+             )
+    end
+
+    test "a new recovery passphrase for the backups is typed twice, then confirmed", ctx do
+      on = golden_summary("home_status_on")
+      client = script([hello(), {"home.status", {:ok, status(on)}}])
+
+      stdin = @passphrase <> "\n" <> @passphrase <> "\n\n"
+      {{1, _out, err}, prompts} = run_tty(["change-passphrase"], ctx, client, stdin)
+
+      assert prompts =~ "New recovery passphrase: "
+      assert prompts =~ "Repeat it: "
+      assert err =~ on["detail"]["backup"]["change"]["confirm"] <> " [y/N] "
+      assert err =~ "fermix always-on: nothing was done.\n"
+      refute_act()
     end
   end
 
   # ── fixtures ──────────────────────────────────────────────────────────────
 
-  defp record(id, label, needs, confirm, key, url \\ nil),
-    do: %{
-      "id" => id,
-      "label" => label,
-      "needs" => needs,
-      "confirm" => confirm,
-      "key" => key,
-      "url" => url
-    }
+  defp record(id, label, needs, confirm, key),
+    do: %{"id" => id, "label" => label, "needs" => needs, "confirm" => confirm, "key" => key}
 
   defp off do
     %{
@@ -877,7 +1043,8 @@ defmodule Fermix.CLI.AlwaysOnCommandTest do
       "action" => record("own_server", "Use my own Linux server", [], nil, "a-own"),
       "detail" => %{},
       "notice" => nil,
-      "outcome" => "done"
+      "outcome" => "done",
+      "help" => @help <> "#what-you-need"
     }
   end
 
@@ -898,28 +1065,34 @@ defmodule Fermix.CLI.AlwaysOnCommandTest do
     %{
       "key" => "k-connect",
       "state" => "connect",
-      "sentence" =>
-        "Waiting for your server: run the command on it and paste the code when it asks.",
+      "sentence" => "Waiting for your server to use its code.",
       "action" => nil,
       "detail" => %{
         "alternatives" => [
-          record("own_server", "Use my own Linux server", [], nil, "a-own"),
+          record("own_server", "Replace the code", [], nil, "a-own"),
           record("cancel", "Cancel the code", [], nil, "a-cancel-code")
         ]
       },
       "notice" => nil,
-      "outcome" => "waiting"
+      "outcome" => "waiting",
+      "help" => @help <> "#set-up-your-server"
     }
   end
 
-  # What Use my own Linux server answers once: the code, the command and the
-  # optional Tailscale step.
+  # What Use my own Linux server answers once: the code, the command, the
+  # engine's sentence for them and the optional Tailscale step.
   defp own_code do
     %{
       "code" => "fxenroll1.invented",
       "expires_at" => "2031-05-04T12:30:00Z",
       "command" => @command,
-      "tailscale" => %{"sentence" => @tailscale_sentence, "command" => @tailscale_command}
+      "sentence" => @code_sentence,
+      "tailscale" => %{
+        "label" => @tailscale_label,
+        "sentence" => @tailscale_sentence,
+        "command" => @tailscale_command,
+        "url" => @help <> "#tailscale"
+      }
     }
   end
 
@@ -962,23 +1135,59 @@ defmodule Fermix.CLI.AlwaysOnCommandTest do
       details}}
   end
 
+  # Nothing to press: the help line is the way on.
   defp retired do
     %{
       "key" => "k-retired",
       "state" => "retired",
       "sentence" => "Fermix moved to your server, and this Mac is no longer connected to it.",
-      "action" =>
-        record(
-          "learn_more",
-          "Learn more",
-          [],
-          nil,
-          "a-learn",
-          "https://fermix.ai/docs/always-on/"
-        ),
+      "action" => nil,
       "detail" => %{},
       "notice" => nil,
-      "outcome" => "done"
+      "outcome" => "done",
+      "help" => @help <> "#when-the-server-is-gone"
+    }
+  end
+
+  # The move from this computer while it sends the home, as the engine counts
+  # it.
+  defp sending do
+    %{
+      "key" => "k-sending",
+      "state" => "moving",
+      "sentence" => "Moving. This Mac restarts and reconnects to your server.",
+      "action" => nil,
+      "detail" => %{
+        "progress" => "Sending your home to fermix-larch-52e0…",
+        "transfer" => %{"fraction" => 0.35, "label" => "502 MiB of 1.4 GiB sent"},
+        "route" => %{"from" => "This Mac", "to" => "fermix-larch-52e0", "direction" => "forward"}
+      },
+      "notice" => nil,
+      "outcome" => "running",
+      "help" => @help <> "#the-move"
+    }
+  end
+
+  # A review that blocks the move: its blocks, and nothing else of the
+  # review.
+  defp not_ready do
+    %{
+      "key" => "k-not-ready",
+      "state" => "problem",
+      "sentence" => "The move cannot start yet.",
+      "action" => record("check_again", "Check again", [], nil, "a-check"),
+      "detail" => %{
+        "kind" => "not_ready",
+        "note" => nil,
+        "seen_at" => nil,
+        "readiness" => [
+          %{"id" => "disk", "status" => "block", "sentence" => "fermix-larch-52e0 is too full."}
+        ],
+        "alternatives" => []
+      },
+      "notice" => nil,
+      "outcome" => "failed",
+      "help" => @help <> "#the-move"
     }
   end
 

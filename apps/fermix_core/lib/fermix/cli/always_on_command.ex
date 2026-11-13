@@ -91,8 +91,8 @@ defmodule Fermix.CLI.AlwaysOnCommand do
     fermix always-on ACTION [--recovery-passphrase-file PATH] [--sas DIGITS] [--yes] [--wait] [--json]
 
   ACTION is one of the steps Always On offers now:
-    cancel move-now try-again learn-more update back-up-now check-again own-server
-    move-back restore-here add-computer approve-computer deny-computer
+    cancel move-now try-again update back-up-now check-again own-server move-back
+    restore-here add-computer approve-computer deny-computer change-passphrase
 
   approve-computer takes the six digits the new computer shows (--sas, or asked).
   """
@@ -302,9 +302,10 @@ defmodule Fermix.CLI.AlwaysOnCommand do
     end
   end
 
+  # Update sends nothing: it says how this computer updates.
   defp finish({:opened, record}, summary, ctx) do
     if ctx.flags.json,
-      do: IO.puts(ctx.stdout, MachineOutput.ok(step_result(summary, %{"url" => record["url"]}))),
+      do: IO.puts(ctx.stdout, MachineOutput.ok(step_result(summary, nil))),
       else: IO.puts(ctx.stdout, Render.opened(record))
 
     0

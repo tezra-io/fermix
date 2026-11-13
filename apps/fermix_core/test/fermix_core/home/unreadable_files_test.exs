@@ -103,13 +103,17 @@ defmodule FermixCore.Home.UnreadableFilesTest do
     assert line =~ "reads again after 3 failed reads"
   end
 
+  # A linked desktop reads its settings for what runs here again after a
+  # move back (the computer that sets Always On up names what stops only at
+  # Move now, from the review's items).
   test "the summary's gather passes its memory to the settings read", ctx do
     settings = unreadable_settings!(ctx.home)
+    desktop = %{role: :device, primary: nil}
 
     log =
       capture_log(fn ->
         for _poll <- 1..3 do
-          assert %{stays_here: []} = gather(ctx.home, unreadable_files: ctx.server)
+          assert %{stays_here: []} = gather(ctx.home, [unreadable_files: ctx.server], desktop)
         end
       end)
 

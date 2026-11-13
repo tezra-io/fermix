@@ -6213,8 +6213,8 @@
     },
     "homeSummary": {
       "type": "object",
-      "description": "Where Always On stands, the screen every surface draws: state maps to a screen, sentence and every label are printed as they are, detail sits behind Details, key is the digest a home.status wait and the watch compare, outcome is what a surface following a step reads (PROTOCOL.md, The Always On summary).",
-      "required": ["key", "state", "sentence", "action", "detail", "notice", "outcome"],
+      "description": "Where Always On stands, the screen every surface draws: state maps to a screen, sentence and every label are printed as they are, action is the one main step or null, detail holds the note, the other steps and what Details draws, key is the digest a home.status wait and the watch compare, outcome is what a surface following a step reads, and help is the screen's page of the Always On docs (PROTOCOL.md, The Always On summary).",
+      "required": ["key", "state", "sentence", "action", "detail", "notice", "outcome", "help"],
       "additionalProperties": false,
       "properties": {
         "key": { "type": "string", "minLength": 1, "maxLength": 64 },
@@ -6240,26 +6240,30 @@
         "outcome": {
           "description": "running while Always On is at something that moves this screen on by itself (the server connecting, the move, from its request until the restart shows, a restore), waiting while it waits on the owner's server to use its code, or, on a computer that joins a home, on the owner to add it there, failed on a problem and on a join that was not added, done when the next step is the owner's.",
           "enum": ["running", "waiting", "done", "failed"]
+        },
+        "help": {
+          "description": "The Always On docs page at the screen's anchor, which a surface opens from one help control: what-you-need, set-up-your-server, tailscale, the-move, on-your-server, webhooks, backups, when-the-server-is-gone, updates, server-disk, move-back or add-a-computer.",
+          "type": "string",
+          "pattern": "^https://fermix\\.ai/docs/always-on/#(what-you-need|set-up-your-server|tailscale|the-move|on-your-server|webhooks|backups|when-the-server-is-gone|updates|server-disk|move-back|add-a-computer)$"
         }
       }
     },
     "homeSummaryAction": {
       "type": "object",
-      "description": "One action a summary offers, the same record wherever it sits: its id, the label it is shown under, what the surface collects first (needs), the sentence the owner accepts first (confirm, null when none), the page a surface opens for it (url, null when none) and its key.",
-      "required": ["id", "label", "needs", "confirm", "url", "key"],
+      "description": "One action a summary offers, the same record wherever it sits (action, detail.alternatives, detail.backup.change): its id, the label it is shown under, what the surface collects first (needs), the sentence the owner accepts first (confirm, null when none; its parts one per line) and its key.",
+      "required": ["id", "label", "needs", "confirm", "key"],
       "additionalProperties": false,
       "properties": {
-        "id": { "enum": ["cancel", "move_now", "try_again", "learn_more", "update", "back_up_now", "check_again", "own_server", "move_back", "restore_here", "review_offers", "add_computer", "approve_computer", "deny_computer"] },
+        "id": { "enum": ["cancel", "move_now", "try_again", "update", "back_up_now", "check_again", "own_server", "move_back", "restore_here", "review_offers", "add_computer", "approve_computer", "deny_computer", "change_passphrase"] },
         "label": { "type": "string", "minLength": 1 },
         "needs": { "type": "array", "maxItems": 1, "uniqueItems": true, "items": { "enum": ["recovery_passphrase", "new_recovery_passphrase", "sas"] } },
         "confirm": { "type": ["string", "null"], "minLength": 1 },
-        "url": { "type": ["string", "null"], "minLength": 1 },
         "key": { "type": "string", "minLength": 1, "maxLength": 64 }
       }
     },
     "homeSummaryDetail": {
       "type": "object",
-      "description": "What Details holds for the state: on connect and creating alternatives; on ready server, readiness, waits_until and alternatives (Forget this server), and, on the computer that sets Always On up, keeps_on (what it keeps on for its server after the move); on undone alternatives (Forget this server); on on server, backups, copies_bytes, disk_used, data and actions, and review while this computer waits for the owner's review of what its server may use on it (review_offers first in actions); on primary actions (add_computer, which on also lists); on on and primary, while a computer asks to join, alternatives (deny_computer, beside the screen's approve_computer); on problem kind, note, seen_at and alternatives (readiness where the problem has it); lines on ready, on and problem wherever there are any; progress while a move back or a restore runs; webhooks on a linked desktop's on only, where its server serves any (never on the server's own primary, whose summary rides inside each desktop's home.status under max_json_depth).",
+      "description": "What the state draws, a field only where it has something: note, the one secondary sentence, on any state (the wait, why a move was undone, what to check or do, a failure's own words); alternatives, every step but the main one (on on Back up now, Add a computer and Move back; on primary Add a computer; while a computer asks to join, deny_computer first, then the step the screen led with before); on ready server, waits_until and alternatives (Forget this server), and, on the computer that sets Always On up, keeps_on; on undone alternatives (Forget this server); on on server, backups, copies_bytes and disk_used; on problem kind, note, seen_at and alternatives, readiness on not_ready only, its blocks only; lines, facts only, on ready, on and problem wherever there are any; progress while a move, a move back, a restore or a backup runs; steps on each screen of the move and the move back, route while either moves and transfer only while its bytes move; backup on a linked desktop's on and the server's primary; webhooks on a linked desktop's on only, where its server serves any (never on the server's own primary, whose summary rides inside each desktop's home.status under max_json_depth).",
       "additionalProperties": false,
       "properties": {
         "lines": {
@@ -6276,8 +6280,7 @@
           }
         },
         "progress": { "type": "string", "minLength": 1 },
-        "alternatives": { "type": "array", "maxItems": 4, "items": { "$ref": "#/$defs/homeSummaryAction" } },
-        "actions": { "type": "array", "maxItems": 4, "items": { "$ref": "#/$defs/homeSummaryAction" } },
+        "alternatives": { "type": "array", "maxItems": 6, "items": { "$ref": "#/$defs/homeSummaryAction" } },
         "server": { "$ref": "#/$defs/homeSummaryServer" },
         "readiness": { "type": "array", "maxItems": 32, "items": { "$ref": "#/$defs/homeReadinessItem" } },
         "waits_until": { "type": ["string", "null"] },
@@ -6296,16 +6299,70 @@
         },
         "copies_bytes": { "type": ["integer", "null"], "minimum": 0 },
         "disk_used": { "type": ["number", "null"], "minimum": 0, "maximum": 1 },
-        "data": { "type": "string", "minLength": 1 },
         "kind": { "enum": ["cannot_reach", "not_set_up", "waited_too_long", "update", "server_older", "server_ahead", "disk_full", "backup_old", "backup_failed", "not_ready", "return_failed"] },
         "note": { "type": ["string", "null"] },
         "seen_at": { "type": ["string", "null"] },
         "keeps_on": { "$ref": "#/$defs/computerKeepBlock" },
-        "review": { "$ref": "#/$defs/computerKeepBlock" },
-        "webhooks": {
-          "description": "On a linked desktop's on only: the Tailscale Funnel mounts the owner runs on the server for what it serves (home.status webhooks: the server's own, never this computer's): the sentence with the one-time tailnet steps, each mount's label, command (run as root, with sudo) and note (where its sender is pointed), WhatsApp's first, and the caveats. A webhook source's mount is its /cues/hooks/<ref> prefix, so no command carries its URL's secret. Never on the server's own primary: its summary rides inside each desktop's home.status as primary_home, where the mounts would pass max_json_depth.",
+        "steps": {
+          "description": "A flow's steps in order, one line that never wraps: the move's Connect your server, Move now, Send your home, Switch over, or the move back's Get this Mac ready (this computer off a Mac), Move now, Receive your home, Put Fermix in place; state done, active (it runs), yours (the owner takes it: the screen's action) or pending.",
+          "type": "array",
+          "minItems": 4,
+          "maxItems": 4,
+          "items": {
+            "type": "object",
+            "required": ["label", "state"],
+            "additionalProperties": false,
+            "properties": {
+              "label": { "type": "string", "minLength": 1 },
+              "state": { "enum": ["done", "active", "yours", "pending"] }
+            }
+          }
+        },
+        "route": {
+          "description": "While the move or the move back runs: this computer (from, This Mac or This computer), the server (to, its name) and which way the home goes (forward, to the server; back, to this computer).",
           "type": "object",
-          "required": ["sentence", "mounts", "notes"],
+          "required": ["from", "to", "direction"],
+          "additionalProperties": false,
+          "properties": {
+            "from": { "type": "string", "minLength": 1 },
+            "to": { "type": "string", "minLength": 1 },
+            "direction": { "enum": ["forward", "back"] }
+          }
+        },
+        "transfer": {
+          "description": "Only while the move's bytes move: what it counted, the bytes sent (the move) or received (the move back) over the home's size in whole twentieths (fraction), and its words (label). A surface fills only to fraction and never runs ahead of it; absent, nothing is counted and nothing fills.",
+          "type": "object",
+          "required": ["fraction", "label"],
+          "additionalProperties": false,
+          "properties": {
+            "fraction": { "type": "number", "minimum": 0, "maximum": 1 },
+            "label": { "type": "string", "minLength": 1 }
+          }
+        },
+        "backup": {
+          "description": "Where Backup settings shows (a linked desktop's on, the server's primary): whether the recovery passphrase is set (passphrase, its label, value and footer, the key never shown), change (change_passphrase, which needs new_recovery_passphrase and asks its confirm), and s3, the sentence that the server keeps an S3 copy, null where it keeps none.",
+          "type": "object",
+          "required": ["passphrase", "change", "s3"],
+          "additionalProperties": false,
+          "properties": {
+            "passphrase": {
+              "type": "object",
+              "required": ["label", "value", "footer"],
+              "additionalProperties": false,
+              "properties": {
+                "label": { "type": "string", "minLength": 1 },
+                "value": { "type": "string", "minLength": 1 },
+                "footer": { "type": "string", "minLength": 1 }
+              }
+            },
+            "change": { "$ref": "#/$defs/homeSummaryAction" },
+            "s3": { "type": ["string", "null"], "minLength": 1 }
+          }
+        },
+        "webhooks": {
+          "description": "On a linked desktop's on only: the Tailscale Funnel mounts the owner runs on the server for what it serves (home.status webhooks: the server's own, never this computer's): the sentence that says what needs them, each mount's label, command (run as root, with sudo) and note (where its sender is pointed), WhatsApp's first, notes with the one step a tailnet takes once, and url, the docs page that holds the rest. A webhook source's mount is its /cues/hooks/<ref> prefix, so no command carries its URL's secret. Never on the server's own primary: its summary rides inside each desktop's home.status as primary_home, where the mounts would pass max_json_depth.",
+          "type": "object",
+          "required": ["sentence", "mounts", "notes", "url"],
           "additionalProperties": false,
           "properties": {
             "sentence": { "type": "string", "minLength": 1 },
@@ -6326,9 +6383,10 @@
             },
             "notes": {
               "type": "array",
-              "maxItems": 4,
+              "maxItems": 1,
               "items": { "type": "string", "minLength": 1 }
-            }
+            },
+            "url": { "type": "string", "pattern": "^https://fermix\\.ai/docs/always-on/#webhooks$" }
           }
         }
       }
@@ -6416,7 +6474,7 @@
     },
     "computerKeepBlock": {
       "type": "object",
-      "description": "What a computer keeps on for its server: sentence names what stays on, warning is the plain warning where files and commands stay on while this computer's sandbox is open (null otherwise), and lines are one per thing this computer's system can have, in order: offer (files_and_shell, browser, computer_use, imessage, history; files and commands are one line, M97 D27, and history's line sets this computer's recorder), label in the owner's words (files and commands, the browser, your screen, Messages, your computer history) and on, whether it stays on. A surface draws each line as a tick the owner may change, and sends the lines left ticked as home.act's input.keep_offers.",
+      "description": "What a computer keeps on for its server after the move (ready's keeps_on): sentence asks the owner to tick what stays on and, on a Mac, says where a ticked history goes; warning is the plain warning where files and commands stay on while this computer's sandbox is open (null otherwise), and lines are one per thing this computer's system can have, in order: offer (files_and_shell, browser, computer_use, imessage, history; files and commands are one line, M97 D27, and history's line sets this computer's recorder), label in the owner's words (files and commands with the sandbox mode they run in, the browser, your screen, Messages, your computer history) and on, whether it stays on. A surface draws each line as a tick the owner may change, and sends the lines left ticked as home.act's input.keep_offers.",
       "required": ["sentence", "warning", "lines"],
       "additionalProperties": false,
       "properties": {
@@ -6644,7 +6702,7 @@
     },
     "home_act_params": {
       "type": "object",
-      "description": "One Always On step: an action the summary offers (its action, an alternative or one of on's detail.actions) and the key it was drawn with, with what the action's needs asked for. learn_more and update are opened by the surface and refused here on action. The key is checked against the summary as it is now: one that does not offer the action under it answers changed with details {sentence} alone, nothing is done, and the surface reads home.status again.",
+      "description": "One Always On step: an action the summary offers (its action, an alternative or the backup settings' change) and the key it was drawn with, with what the action's needs asked for. update is the app's own and refused here on action. The key is checked against the summary as it is now: one that does not offer the action under it answers changed with details {sentence} alone, nothing is done, and the surface reads home.status again.",
       "required": ["action", "key"],
       "additionalProperties": false,
       "properties": {
@@ -6661,7 +6719,8 @@
             "review_offers",
             "add_computer",
             "approve_computer",
-            "deny_computer"
+            "deny_computer",
+            "change_passphrase"
           ]
         },
         "key": { "type": "string", "minLength": 1, "maxLength": 64 },
@@ -6670,7 +6729,7 @@
     },
     "homeActInput": {
       "type": "object",
-      "description": "What the action's needs collected: recovery_passphrase (needs recovery_passphrase, typed once, or new_recovery_passphrase, typed twice and compared by the surface; restore_here's opens the copy it restores), never logged and never answered; keep_offers, the offers of a keeps_on or review block left ticked; and sas (needs sas), the six digits the computer that asks to join shows.",
+      "description": "What the action's needs collected: recovery_passphrase (needs recovery_passphrase, typed once, or new_recovery_passphrase, typed twice and compared by the surface; restore_here's opens the copy it restores, change_passphrase's is the new one), never logged and never answered; keep_offers, the offers of the keeps_on block left ticked; and sas (needs sas), the six digits the computer that asks to join shows.",
       "additionalProperties": false,
       "properties": {
         "recovery_passphrase": { "type": "string", "minLength": 12, "maxLength": 1024 },
@@ -6682,7 +6741,7 @@
           "pattern": "^[0-9 ]+$"
         },
         "keep_offers": {
-          "description": "For move_now and try_again on the computer that sets Always On up, the offers of the ready screen's detail.keeps_on left ticked: what this computer keeps on for its server after the move; absent, the block as it was shown. For review_offers, the offers of on's detail.review left ticked: what stays on after the owner's review; absent, the review as it was shown. A list that is not of text is refused (invalid_params on keep_offers), and so is an id other than files_and_shell, browser, computer_use, imessage and history, or files and shell: the two lines an app from before M97 D27 sends for files and commands, which keep files_and_shell on only when both are sent (one alone keeps it off).",
+          "description": "For move_now and try_again on the computer that sets Always On up, the offers of the ready screen's detail.keeps_on left ticked: what this computer keeps on for its server after the move; absent, the block as it was shown. For review_offers, absent: this computer's switches as they are (set under This computer); an app from before the review's switches moved there sends the lines it left ticked, which stay on. A list that is not of text is refused (invalid_params on keep_offers), and so is an id other than files_and_shell, browser, computer_use, imessage and history, or files and shell: the two lines an app from before M97 D27 sends for files and commands, which keep files_and_shell on only when both are sent (one alone keeps it off).",
           "type": "array",
           "maxItems": 32,
           "items": { "type": "string", "pattern": "^[a-z][a-z0-9_]{0,31}$" }
@@ -6691,7 +6750,7 @@
     },
     "home_act_result": {
       "type": "object",
-      "description": "The summary after the step, and the step's own result: own_server's code (answered once, never again) with the command for the server, which carries no code, and the optional step that also joins the server to the owner's tailnet (tailscale: its sentence and command, the same command with --tailscale, after which the server asks for the code and the Tailscale auth key at the terminal without echo, so the key is on no command line); move_now's and try_again's move id; add_computer's code for the computer that joins (answered once, never again); approve_computer's computer, as the home added it; null for every other step.",
+      "description": "The summary after the step, and the step's own result: own_server's code (answered once, never again) with the command for the server, which carries no code, the sentence the code is shown with (the systems the server takes and until when the code works, in the owner's zone), and the optional step that also joins the server to the owner's tailnet (tailscale: the label it is folded under, its sentence, its command and its docs page, the same command with --tailscale, after which the server asks for the code and the Tailscale auth key at the terminal without echo, so the key is on no command line); move_now's and try_again's move id; add_computer's code for the computer that joins (answered once, never again); approve_computer's computer, as the home added it; null for every other step.",
       "required": ["summary", "result"],
       "additionalProperties": false,
       "properties": {
@@ -6700,19 +6759,22 @@
           "oneOf": [
             {
               "type": "object",
-              "required": ["code", "expires_at", "command", "tailscale"],
+              "required": ["code", "expires_at", "command", "sentence", "tailscale"],
               "additionalProperties": false,
               "properties": {
                 "code": { "type": "string", "maxLength": 2048, "pattern": "^fxenroll1\\.[A-Za-z0-9_-]+$" },
                 "expires_at": { "type": "string" },
                 "command": { "type": "string", "minLength": 1 },
+                "sentence": { "type": "string", "minLength": 1 },
                 "tailscale": {
                   "type": "object",
-                  "required": ["sentence", "command"],
+                  "required": ["label", "sentence", "command", "url"],
                   "additionalProperties": false,
                   "properties": {
+                    "label": { "type": "string", "minLength": 1 },
                     "sentence": { "type": "string", "minLength": 1 },
-                    "command": { "type": "string", "minLength": 1 }
+                    "command": { "type": "string", "minLength": 1 },
+                    "url": { "type": "string", "pattern": "^https://fermix\\.ai/docs/always-on/#tailscale$" }
                   }
                 }
               }

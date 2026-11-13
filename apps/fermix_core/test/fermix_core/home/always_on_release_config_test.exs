@@ -109,7 +109,11 @@ defmodule FermixCore.Home.AlwaysOnReleaseConfigTest do
     File.write!(ctx.config, @section <> "\n")
     boot!()
 
-    assert {:ok, _result} = Settings.apply("snapshots", %{"snapshots_interval_hours" => 12})
+    # Backup settings are an Always On server's (ALWAYS_ON_PANE §3.12, D18).
+    assert {:ok, _result} =
+             Settings.apply("snapshots", %{"snapshots_interval_hours" => 12},
+               server_primary?: true
+             )
 
     contents = File.read!(ctx.config)
     assert contents =~ "interval_hours = 12"

@@ -832,6 +832,32 @@ will be part of a future release; nothing in this group is in a release yet.
   the engine gives the apps its own sentence for each iMessage readiness
   problem, naming that Mac; and "What Fermix did on this computer" names
   each entry in plain words ("commands", "run a command") beside its ids.
+- **Always On says less, and only what you need now.** Each screen has one
+  short sentence, at most one more under it (what to check or do, until when
+  your server waits, why a move was undone, a failure's own words), one main
+  button or none, and every other step beside it as a button; Details hold
+  facts only, and one help link opens the Always On docs at that screen's
+  section in place of Learn more. The first screen no longer lists what stops
+  after the move and the code's screen no longer lists kernels: Move now's
+  confirm names every warning of the review, one per line, before anything
+  moves, and the ready screens say Fermix has not moved yet ("Your server is
+  ready. Fermix moves to it when you press Move now."; the move back's "Fermix
+  still runs on your server. It moves back to this Mac when you press Move
+  now.", its notification the same). Each screen of the move and of the move
+  back shows its four steps with yours marked, and while it moves the route
+  to your server, what it is doing, and how much it sent or received, from
+  what Fermix counted. On a computer linked to your server, Back up now, Add
+  a computer and Move back are buttons on the screen, the backup settings
+  show whether the recovery passphrase is set with Change, and that your
+  server keeps an S3 copy where it does; a Mac that never moved shows no
+  backup settings. The webhooks your server needs say what they are for in
+  one sentence, each command folded under its name, with the one tailnet
+  step and a link to the rest; the code's Tailscale step folds under "Also
+  join your tailnet (optional)". Restore on this Mac's confirm names the
+  backup's date. A computer that moved before asks you to keep or change the
+  switches under This computer, where they are set, rather than ticking the
+  same switches twice. The setup page and `fermix always-on` show the same,
+  and `fermix always-on change-passphrase` sets a new recovery passphrase.
 
 ## [0.18.0] - 2026-11-03
 

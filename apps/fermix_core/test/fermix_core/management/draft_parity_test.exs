@@ -267,9 +267,12 @@ defmodule FermixCore.Management.DraftParityTest do
   # value nothing edits. Compared by name rather than by shape.
   # The Mac's inventory, named rather than inherited: the app is a Mac app, and a
   # section that exists only there (`channels.imessage`) must be compared on
-  # every CI leg or its recorded divergences read as stale off a Mac.
+  # every CI leg or its recorded divergences read as stale off a Mac. A linked
+  # Mac also draws its server's Backup settings, which only an Always On
+  # server's primary lists (ALWAYS_ON_PANE §3.12, D18), so they are compared
+  # as the server publishes them.
   defp row_divergences(draft, export) do
-    Enum.flat_map(Settings.sections(macos?: true), fn section ->
+    Enum.flat_map(Settings.sections(macos?: true, server_primary?: true), fn section ->
       set_divergence(
         "settings.get:#{section.id}",
         "rows",

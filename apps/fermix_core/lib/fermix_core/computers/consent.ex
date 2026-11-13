@@ -37,14 +37,15 @@ defmodule FermixCore.Computers.Consent do
   **A computer that moved before M97** has a link and no switches. At its
   first start on this engine its switches are derived as a move would have
   kept them, waiting for the owner's review (`derive_moved/2`): until the
-  owner reviews them it offers nothing, and its summary says so with the
-  review (`review/3`, the history line deciding the recorder as at a move),
-  which the plain "This computer" settings section can also finish
-  (`Switches.save/2`). Its recorder is left as it is: whether the review
-  proposes history is the recorder's setting (`proposed/2`).
+  owner reviews them it offers nothing. Its switches are reviewed where they
+  are set, the "This computer" settings section (`Switches.save/2`): its
+  summary says so, and its one step keeps them as they are (`review/3` with
+  `proposed/2`, the history line deciding the recorder as at a move). Its
+  recorder is left as it is: whether the review proposes history is the
+  recorder's setting (`proposed/2`).
 
-  Where computer history stays on, the block restates what switching it on
-  agrees to (M97 §8.2), from the one function that says it
+  On a Mac, whose block has a history line, the block says where that
+  history goes once ticked (M97 §8.2), from the one function that says it
   (`ComputerHistory.Promise.sentence/2`), as it will hold after the move: the
   sitting goes to the server, or, where this computer makes its own notes,
   only the summary does.
@@ -92,12 +93,14 @@ defmodule FermixCore.Computers.Consent do
     do: block(default_keep(opts), opts)
 
   @doc """
-  The block of `keep`, the lines to stay on: its sentence names them, each
-  with its words, files and commands with the sandbox mode they run in.
-  `kind:` `:move` (a move's review, the default) or `:review` (the review of
-  a computer that moved before M97). `history_local?:` says whether this
-  computer makes its own history notes, in place of its settings. A line
-  that is not one of `decided/0` raises `ArgumentError`.
+  The block of `keep`, the lines to stay on: one line each, ticked where it
+  stays on, files and commands labelled with the sandbox mode they run in.
+  Its sentence asks the owner to tick what stays on (the lines say what, so
+  the sentence never repeats them, the Always On pane's R9), and on a
+  computer with a history line, where that history goes once it is ticked.
+  `history_local?:` says whether this computer makes its own history notes,
+  in place of its settings. A line that is not one of `decided/0` raises
+  `ArgumentError`.
   """
   @spec block([decision()], keyword()) :: block()
   def block(keep, opts \\ []) when is_list(keep) and is_list(opts) do
@@ -108,15 +111,12 @@ defmodule FermixCore.Computers.Consent do
     os = os(opts)
     mode = sandbox_mode(opts)
     machine = machine(os)
-    lines = for decision <- lines(os), do: line(decision, decision in keep)
+    lines = for decision <- lines(os), do: line(decision, decision in keep, mode)
 
     %{
       sentence:
-        sentence(
-          Keyword.get(opts, :kind, :move),
-          for(%{on: true} = line <- lines, do: words(line, mode)),
-          machine
-        ) <> history_clause(:history in keep, machine, opts),
+        "Tick what Fermix on your server may still use on this #{machine} after the move." <>
+          history_clause(Enum.any?(lines, &(&1.offer == :history)), machine, opts),
       warning: warning(:files_and_shell in keep and mode == :open, machine),
       lines: lines
     }
@@ -241,9 +241,8 @@ defmodule FermixCore.Computers.Consent do
     for os <- [:macos, :linux],
         mode <- [:strict, :standard, :open],
         keep <- [decided(), [], [:files_and_shell]],
-        kind <- [:move, :review],
         local? <- [false, true] do
-      block = block(keep, os: os, sandbox_mode: mode, kind: kind, history_local?: local?)
+      block = block(keep, os: os, sandbox_mode: mode, history_local?: local?)
       [block.sentence, block.warning | Enum.map(block.lines, & &1.label)]
     end
     |> List.flatten()
@@ -264,12 +263,15 @@ defmodule FermixCore.Computers.Consent do
     |> Enum.reduce(&MapSet.intersection/2)
   end
 
-  # Its offers' own words: "files and commands", "the browser".
-  defp line(decision, on),
-    do: %{offer: decision, label: Enum.map_join(offers(decision), " and ", & &1.label()), on: on}
+  # Its offers' own words: "files and commands", "the browser"; files and
+  # commands with the sandbox mode they run in.
+  defp line(decision, on, mode),
+    do: %{offer: decision, label: label(decision, offers_label(decision), mode), on: on}
 
-  defp words(%{offer: :files_and_shell, label: label}, mode), do: "#{label} (#{mode})"
-  defp words(%{label: label}, _mode), do: label
+  defp offers_label(decision), do: Enum.map_join(offers(decision), " and ", & &1.label())
+
+  defp label(:files_and_shell, label, mode), do: "#{label} (#{mode})"
+  defp label(_decision, label, _mode), do: label
 
   # The history line sets the recorder first; the switches, written after,
   # mark the decision written (`FermixChannels.Home.MoveWorker` resumes on
@@ -320,27 +322,8 @@ defmodule FermixCore.Computers.Consent do
     )
   end
 
-  defp sentence(:move, [], machine),
-    do:
-      "After the move, Fermix on your server can use nothing on this #{machine}. Change this here."
-
-  defp sentence(:move, words, machine),
-    do:
-      "After the move, Fermix on your server can still use this #{machine} for: " <>
-        Enum.join(words, ", ") <> ". Change this here."
-
-  # A review of a computer that moved before M97: what it offers once the
-  # owner accepts it.
-  defp sentence(:review, [], machine),
-    do: "Fermix on your server may use nothing on this #{machine}. Change this here."
-
-  defp sentence(:review, words, machine),
-    do:
-      "Fermix on your server may use this #{machine} for: " <>
-        Enum.join(words, ", ") <> ". Change this here."
-
   # M97 §8.2: a sitting of history kept on now passes through the server, so
-  # the block restates what switching it on agrees to. After the move this
+  # the block restates where it goes once ticked. After the move this
   # computer reads only its own keys (`HistoryConfig.for_role/2`), so whether
   # it makes its own notes is its machine file's choice, never the home's route.
   defp history_clause(false, _machine, _opts), do: ""

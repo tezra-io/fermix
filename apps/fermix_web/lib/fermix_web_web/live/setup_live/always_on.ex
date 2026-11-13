@@ -11,7 +11,7 @@ defmodule FermixWebWeb.SetupLive.AlwaysOn do
   `actor: :setup_page`, then draws the summary it answers. A `changed`
   refusal is shown in its sentence and the summary is read again. It never
   sequences calls, follows a job, picks a server or words what the engine
-  words; Learn more is a link to the action's `url`, and Update is the
+  words; Learn more is a link to the summary's `help`, and Update is the
   sentence alone (this page installs nothing).
 
   **Reads** run in `start_async` when the tab opens and at each
@@ -64,26 +64,30 @@ defmodule FermixWebWeb.SetupLive.AlwaysOn do
   defmodule Code do
     @moduledoc """
     The one-time code of the owner's server, answered once by
-    `own_server`, with the command to run there, the optional step that also
-    joins it to the owner's tailnet (`tailscale`, its sentence and command)
-    and until when the code works; or the one-time code a new computer joins
-    with (M97 §3.1), answered once by `add_computer`, which has no command
-    and no Tailscale step (both nil). LiveView's crash report prints every
-    assign, so no print of it spells the code.
+    `own_server`, with the command to run there, the engine's sentence for
+    both (`sentence`: the systems it takes and until when the code works) and
+    the optional step that also joins it to the owner's tailnet (`tailscale`,
+    its label, sentence, command and docs page); or the one-time code a new
+    computer joins with (M97 §3.1), answered once by `add_computer`, which has
+    no command, no sentence and no Tailscale step (each nil) and says until
+    when it works (`until`, nil for the owner's server, whose sentence says
+    it). LiveView's crash report prints every assign, so no print of it
+    spells the code.
     """
-    @enforce_keys [:code, :command, :tailscale, :until]
-    defstruct [:code, :command, :tailscale, :until]
+    @enforce_keys [:code, :command, :sentence, :tailscale, :until]
+    defstruct [:code, :command, :sentence, :tailscale, :until]
 
     @type t :: %__MODULE__{
             code: String.t(),
             command: String.t() | nil,
+            sentence: String.t() | nil,
             tailscale: %{String.t() => String.t()} | nil,
-            until: String.t()
+            until: String.t() | nil
           }
 
     @doc """
     The card a step's `result` makes: `own_server`'s, matched whole (the
-    code's three fields, then its Tailscale step on its own),
+    code's five fields, then its Tailscale step's four on their own),
     `add_computer`'s (`{code, expires_at}` and nothing else), or none for a
     step that answers none (null, a move's `{move_id}`, or the computer
     `approve_computer` added, which the screen after it names). Any other
@@ -97,24 +101,36 @@ defmodule FermixWebWeb.SetupLive.AlwaysOn do
       do: nil
 
     def from_result(
-          %{"code" => code, "expires_at" => at, "command" => command, "tailscale" => step} =
-            result
+          %{
+            "code" => code,
+            "expires_at" => at,
+            "command" => command,
+            "sentence" => sentence,
+            "tailscale" => step
+          } = result
         )
-        when is_binary(code) and is_binary(at) and is_binary(command) and map_size(result) == 4 do
-      {:ok, expires, _offset} = DateTime.from_iso8601(at)
-
+        when is_binary(code) and is_binary(at) and is_binary(command) and is_binary(sentence) and
+               map_size(result) == 5 do
       %__MODULE__{
         code: code,
         command: command,
+        sentence: sentence,
         tailscale: tailscale_step(step),
-        until: Clock.stated_instant(expires)
+        until: nil
       }
     end
 
     def from_result(%{"code" => code, "expires_at" => at} = result)
         when is_binary(code) and is_binary(at) and map_size(result) == 2 do
       {:ok, expires, _offset} = DateTime.from_iso8601(at)
-      %__MODULE__{code: code, command: nil, tailscale: nil, until: Clock.stated_instant(expires)}
+
+      %__MODULE__{
+        code: code,
+        command: nil,
+        sentence: nil,
+        tailscale: nil,
+        until: Clock.stated_instant(expires)
+      }
     end
 
     def from_result(%{"device_id" => id, "name" => name} = result)
@@ -123,8 +139,12 @@ defmodule FermixWebWeb.SetupLive.AlwaysOn do
 
     def from_result(result), do: raise(ArgumentError, "home.act answered #{shape(result)}")
 
-    defp tailscale_step(%{"sentence" => sentence, "command" => command} = step)
-         when is_binary(sentence) and is_binary(command) and map_size(step) == 2,
+    defp tailscale_step(
+           %{"label" => label, "sentence" => sentence, "command" => command, "url" => url} =
+             step
+         )
+         when is_binary(label) and is_binary(sentence) and is_binary(command) and
+                is_binary(url) and map_size(step) == 4,
          do: step
 
     defp tailscale_step(step),
@@ -303,7 +323,8 @@ defmodule FermixWebWeb.SetupLive.AlwaysOn do
   # -- events --------------------------------------------------------------------
 
   @doc """
-  One `always_on_*` event: a press of an action the summary drew, the step's
+  One `always_on_*` event: a press of an action the summary drew (its main
+  step, an alternative, or the backup settings' Change), the step's
   form submitted, Back (closes the step) and Done (puts the code away).
   Nothing here raises: a failure is the tab's error line.
   """
@@ -344,10 +365,7 @@ defmodule FermixWebWeb.SetupLive.AlwaysOn do
 
   defp press(socket, _id, _key), do: ignored(socket, "always_on_press")
 
-  # A link (Learn more) and Update are never pressed here.
-  defp pressed(socket, %{"url" => url}) when is_binary(url),
-    do: ignored(socket, "always_on_press")
-
+  # Update is never pressed here: this page installs nothing.
   defp pressed(socket, %{"id" => "update"}), do: ignored(socket, "always_on_press")
 
   defp pressed(socket, %{"needs" => [], "confirm" => nil} = action),

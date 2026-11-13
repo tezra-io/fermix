@@ -11,12 +11,30 @@
             "id": "cancel",
             "key": "PGFKmgUa3i48MJgwQSKf-g",
             "label": "Cancel the code",
-            "needs": [],
-            "url": null
+            "needs": []
+          }
+        ],
+        "steps": [
+          {
+            "label": "Connect your server",
+            "state": "active"
+          },
+          {
+            "label": "Move now",
+            "state": "pending"
+          },
+          {
+            "label": "Send your home",
+            "state": "pending"
+          },
+          {
+            "label": "Switch over",
+            "state": "pending"
           }
         ]
       },
-      "key": "R9nJeBmx5PeiJJdvfG9Hcg",
+      "help": "https://fermix.ai/docs/always-on/#set-up-your-server",
+      "key": "MYG-kWQCVf9PYa0b7sKbYw",
       "notice": null,
       "outcome": "running",
       "sentence": "Connecting your server…",

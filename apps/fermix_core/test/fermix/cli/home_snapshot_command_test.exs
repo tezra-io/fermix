@@ -193,9 +193,9 @@ defmodule Fermix.CLI.HomeSnapshotCommandTest do
         "role" => "device",
         "summary" => %{
           "state" => "problem",
-          "sentence" => "Your server's disk is 90% full.",
-          "action" => %{"id" => "learn_more", "label" => "Learn more"},
-          "detail" => %{"kind" => "disk_full"}
+          "sentence" => "Your server's last backup is 4 days old.",
+          "action" => %{"id" => "back_up_now", "label" => "Back up now"},
+          "detail" => %{"kind" => "backup_old"}
         },
         "snapshots" => %{"sentence" => "Snapshots are the server's.", "targets" => []}
       }
@@ -204,8 +204,8 @@ defmodule Fermix.CLI.HomeSnapshotCommandTest do
       {0, out, ""} = run(["status"], home: ctx.home, client: client)
 
       assert [
-               "Your server's disk is 90% full.",
-               "Next: Learn more (fermix always-on)",
+               "Your server's last backup is 4 days old.",
+               "Next: Back up now (fermix always-on)",
                "Role: device" | _
              ] =
                String.split(out, "\n")
@@ -213,7 +213,9 @@ defmodule Fermix.CLI.HomeSnapshotCommandTest do
       quiet = put_in(answer, ["summary", "action"], nil)
       client = fn "home.status", %{}, _opts -> {:ok, quiet} end
       {0, out, ""} = run(["status"], home: ctx.home, client: client)
-      assert ["Your server's disk is 90% full.", "Role: device" | _] = String.split(out, "\n")
+
+      assert ["Your server's last backup is 4 days old.", "Role: device" | _] =
+               String.split(out, "\n")
     end
 
     # Always On setup §8.2: a home the Fermix app manages takes its steps in

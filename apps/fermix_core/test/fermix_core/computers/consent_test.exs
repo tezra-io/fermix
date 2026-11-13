@@ -31,14 +31,17 @@ defmodule FermixCore.Computers.ConsentTest do
 
     block = Consent.keep_on_block(home, opts)
 
+    # The lines say what stays on, so the sentence never repeats them (the
+    # Always On pane's R9); a Mac's block says where a ticked history goes.
     assert block.sentence ==
-             "After the move, Fermix on your server can still use this Mac for: files and " <>
-               "commands (open), the browser, your screen, Messages. Change this here."
+             "Tick what Fermix on your server may still use on this Mac after the move. " <>
+               "Ticked, each sitting of your computer history goes to your server, which " <>
+               "keeps its summary."
 
     assert block.warning =~ "sandbox open, a server that is taken over can read and change"
 
     assert Enum.map(block.lines, &{&1.offer, &1.label, &1.on}) == [
-             {:files_and_shell, "files and commands", true},
+             {:files_and_shell, "files and commands (open)", true},
              {:browser, "the browser", true},
              {:computer_use, "your screen", true},
              {:imessage, "Messages", true},
@@ -51,14 +54,18 @@ defmodule FermixCore.Computers.ConsentTest do
 
     assert Enum.map(block.lines, & &1.offer) == [:files_and_shell, :browser, :computer_use]
     assert block.warning == nil
-    assert block.sentence =~ "this computer for: files and commands (strict)."
-    assert Consent.block([], os: :linux, sandbox_mode: :strict).sentence =~ "can use nothing"
+
+    assert block.sentence ==
+             "Tick what Fermix on your server may still use on this computer after the move."
+
+    assert hd(block.lines).label == "files and commands (strict)"
   end
 
-  # M97 §8.2: where history stays on, the block restates the promise, from the
-  # one function that decides it. After a move the sitting goes to the server,
-  # or, where this Mac makes its own notes, only the summary does.
-  test "history kept on restates the promise as this Mac will keep it" do
+  # M97 §8.2: a Mac's block, which has a history line, says where a ticked
+  # history goes, from the one function that decides it. After a move the
+  # sitting goes to the server, or, where this Mac makes its own notes, only
+  # the summary does.
+  test "a Mac's history line says where the history goes once ticked" do
     for local <- [[], [machine_summarizer: "local"]] do
       snapshot = %{fermix_core: [computer_history: [enabled: true] ++ local], sandbox: []}
       block = Consent.block([:history], os: :macos, sandbox_mode: :standard, snapshot: snapshot)
@@ -69,11 +76,11 @@ defmodule FermixCore.Computers.ConsentTest do
 
     local = %{fermix_core: [computer_history: [machine_summarizer: "local"]], sandbox: []}
     block = Consent.block([:history], os: :macos, sandbox_mode: :standard, snapshot: local)
-    assert block.sentence =~ "only the summary is sent to your Fermix server"
+    assert block.sentence =~ "only the summary of each sitting"
     # The home's route is the home's: a Mac about to move reads its own choice.
     home_local = %{fermix_core: [computer_history: [summarizer: "local"]], sandbox: []}
     block = Consent.block([:history], os: :macos, sandbox_mode: :standard, snapshot: home_local)
-    assert block.sentence =~ "each finished sitting is sent to your Fermix server"
+    assert block.sentence =~ "each sitting of your computer history goes to your server"
   end
 
   test "keep names only the lines a move decides, in the block's order" do

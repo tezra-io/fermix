@@ -24,7 +24,14 @@ defmodule FermixChannels.Home.MoveResponder do
   `move_failed` and a sentence, then close `4003 move <code>`. `ping` is
   answered `pong`; any other event, `unsupported_event` (`Mobile.Peers`).
 
-  Options: `:candidate` (the candidate process).
+  **Counted** (Always On pane §3.13, P4). The bytes written are kept where
+  the Always On summary reads them (`FermixCore.Home.MoveProgress`): `:receive`
+  at 0 of the offer's size as the offer is accepted and again at each whole
+  5% crossed, never per chunk, and forgotten as the stream ends at
+  `move_end` or as the session closes.
+
+  Options: `:candidate` (the candidate process), `:progress` (the
+  `MoveProgress` server).
   """
 
   @behaviour FermixChannels.Home.Responder
@@ -33,6 +40,7 @@ defmodule FermixChannels.Home.MoveResponder do
 
   alias FermixChannels.Home.Candidate
   alias FermixChannels.Home.ResponderWire
+  alias FermixCore.Home.MoveProgress
   alias FermixCore.Home.MoveTelemetry
 
   @impl true
@@ -46,7 +54,8 @@ defmodule FermixChannels.Home.MoveResponder do
          {:ok, reply, session, remote} <-
            ResponderWire.handshake(:ik_move, wire, [static_keypair: keys.noise], :move),
          true <- :crypto.hash_equals(remote, keys.source_pk) do
-      {:push, [reply], %{server: server, wire: session, move: nil, io: nil}}
+      progress = Keyword.get(opts, :progress, MoveProgress)
+      {:push, [reply], %{server: server, wire: session, move: nil, io: nil, progress: progress}}
     else
       false -> {:stop, :not_the_source, {1002, "mobile protocol error"}, %{io: nil}}
       {:error, reason} -> {:stop, reason, {1002, "mobile protocol error"}, %{io: nil}}
@@ -82,6 +91,7 @@ defmodule FermixChannels.Home.MoveResponder do
   @impl true
   def terminate(_reason, state) do
     close_io(state)
+    :ok = forget(state)
 
     case state do
       %{move: %{phase: phase, received: received}} ->
@@ -171,6 +181,8 @@ defmodule FermixChannels.Home.MoveResponder do
           phase: MoveTelemetry.phase(:candidate, "receive", offer["move_id"], &DateTime.utc_now/0)
         }
 
+        :ok = MoveProgress.put(state.progress, receiving(move, 0))
+
         send_event("move_accept", %{"move_id" => move.move_id, "recipient" => recipient}, %{
           state
           | move: move,
@@ -186,7 +198,8 @@ defmodule FermixChannels.Home.MoveResponder do
     received = move.received + byte_size(bytes)
 
     with true <- received <= move.size,
-         :ok <- IO.binwrite(io, bytes) do
+         :ok <- IO.binwrite(io, bytes),
+         :ok <- counted(state, move, received) do
       move = %{
         move
         | next: move.next + 1,
@@ -206,6 +219,7 @@ defmodule FermixChannels.Home.MoveResponder do
 
   defp end_stream(%{move: move} = state) do
     close_io(state)
+    :ok = forget(state)
     state = %{state | io: nil}
     digest = move.hash |> :crypto.hash_final() |> Base.encode16(case: :lower)
 
@@ -272,6 +286,24 @@ defmodule FermixChannels.Home.MoveResponder do
 
   defp close_io(%{io: io}) when not is_nil(io), do: File.close(io)
   defp close_io(_state), do: :ok
+
+  # -- the count --------------------------------------------------------------
+
+  # The bytes written, put at each whole 5% they cross
+  # (`MoveProgress.crossed?/3`), never per chunk.
+  defp counted(state, move, received) do
+    if MoveProgress.crossed?(move.received, received, move.size),
+      do: MoveProgress.put(state.progress, receiving(move, received)),
+      else: :ok
+  end
+
+  defp receiving(move, bytes),
+    do: %{move_id: move.move_id, step: :receive, bytes: bytes, size: move.size}
+
+  defp forget(%{progress: progress, move: %{move_id: move_id}}),
+    do: MoveProgress.clear(progress, move_id)
+
+  defp forget(_state), do: :ok
 
   defp server(opts), do: Keyword.get(opts, :candidate, Candidate)
 end

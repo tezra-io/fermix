@@ -13,7 +13,8 @@ defmodule FermixCore.Home.StatusWatch do
 
   **When it reads.** On `changed/2` from the writes that feed the summary:
   `:move` (a move's phase, `Move.put_phase/4`; a move back's record and
-  candidate, `Home.Return`, `Home.Candidate`), `:enrollment` (the enrollment window
+  candidate, `Home.Return`, `Home.Candidate`; the move's step and each whole
+  5% of its bytes, `Home.MoveProgress`), `:enrollment` (the enrollment window
   opened, used, enrolled, withdrawn or expired, `FermixChannels.Home.Enrollment`),
   `:snapshots` (a backup run finished,
   `Snapshot.Scheduler`), `:link` (the desktop's session to its server up or

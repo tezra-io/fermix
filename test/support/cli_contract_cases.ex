@@ -255,7 +255,8 @@ defmodule FermixTestSupport.CliContractCases do
 
   # `fermix home status`: a primary at epoch 4 whose last snapshot S3 stored,
   # with nothing of Always On set up yet, so its summary is the first screen;
-  # it uses voice calls, meetings and StackChan, which that screen names.
+  # it uses voice calls, meetings and StackChan, which Move now's confirm
+  # names and that screen does not (the Always On pane's D1).
   defp home_status do
     Home.picture(%{
       role: :primary,

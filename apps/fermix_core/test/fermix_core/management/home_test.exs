@@ -466,7 +466,7 @@ defmodule FermixCore.Management.HomeTest do
                  "command" =>
                    "sudo tailscale funnel --bg --set-path=/webhook/whatsapp " <>
                      "http://127.0.0.1:4130/webhook/whatsapp",
-                 "note" => "Tailscale prints the address this gives." <> _rest
+                 "note" => "Then set the address it prints as Meta's Callback URL" <> _rest
                }
              ] = webhooks["mounts"]
     end
@@ -501,7 +501,10 @@ defmodule FermixCore.Management.HomeTest do
       assert status["version"] == "9.9.9"
     end
 
-    test "off names what this home uses that stops after the move, read from its settings",
+    # The Always On pane's D1: what stops after the move is said at Move now,
+    # from the review's own items, never on the first screen, whatever the
+    # settings turn on.
+    test "off says what Always On does, and nothing of what stops after the move",
          %{home: home} do
       File.write!(Path.join(home, "config.toml"), """
       [fermix_core.realtime]
@@ -525,8 +528,7 @@ defmodule FermixCore.Management.HomeTest do
                route("home.status", %{}, opts(home, host_os: :macos))
 
       assert summary["sentence"] ==
-               "Keep Fermix running when this Mac sleeps. It moves to a server you own. " <>
-                 "Meetings stop after the move."
+               "Keep Fermix running when this Mac sleeps. It moves to a server you own."
 
       File.write!(Path.join(home, "config.toml"), "")
       File.write!(MachineFile.path(home), "")
@@ -537,10 +539,12 @@ defmodule FermixCore.Management.HomeTest do
       assert sentence == "Keep Fermix running when this Mac sleeps. It moves to a server you own."
     end
 
-    test "a server held with its code makes ready, with the last review's warnings",
+    test "a server held with its code makes ready, the last review's warnings in Move now's confirm",
          %{home: home} do
       {:ok, held} = Candidates.add(home, candidate_attrs(), @at)
-      report = %{ready: true, items: [%{id: "whatsapp", status: :warn, sentence: "Warned."}]}
+      # A warning only the review can give: Move now's confirm says it, since
+      # the screen shows no warning (the Always On pane's D3).
+      report = %{ready: true, items: [%{id: "plugins", status: :warn, sentence: "Warned."}]}
       :ok = Move.put_review(home, held.candidate_id, report, @at)
 
       window = manual(:used, held.candidate_id)
@@ -551,9 +555,8 @@ defmodule FermixCore.Management.HomeTest do
       assert summary["state"] == "ready"
       assert summary["action"]["id"] == "move_now"
 
-      assert summary["detail"]["readiness"] == [
-               %{"id" => "whatsapp", "status" => "warn", "sentence" => "Warned."}
-             ]
+      refute Map.has_key?(summary["detail"], "readiness")
+      assert summary["action"]["confirm"] =~ ~r/\nWarned\.(\n|\z)/
 
       assert summary["detail"]["server"]["name"] == "fermix-general-a3f9"
     end
@@ -604,7 +607,8 @@ defmodule FermixCore.Management.HomeTest do
                )
 
       assert summary["detail"]["kind"] == "cannot_reach"
-      assert summary["action"]["id"] == "learn_more"
+      assert summary["action"] == nil
+      assert summary["help"] == "https://fermix.ai/docs/always-on/#when-the-server-is-gone"
     end
 
     # Always On's move back (design §9, §14): a desktop's screen reads its own
@@ -618,7 +622,11 @@ defmodule FermixCore.Management.HomeTest do
       assert {:ok, %{"summary" => summary}} = desktop_status(home, link(primary: primary(nil)))
 
       assert summary["state"] == "ready"
-      assert summary["sentence"] == "This computer is ready to take Fermix back."
+
+      assert summary["sentence"] ==
+               "Fermix still runs on your server. It moves back to this computer when you " <>
+                 "press Move now."
+
       assert summary["action"]["id"] == "move_now"
     end
 
@@ -635,14 +643,11 @@ defmodule FermixCore.Management.HomeTest do
       assert {:ok, %{"summary" => summary}} =
                desktop_status(home, link(primary: primary(11 * 60_000)))
 
-      assert "restore_here" in Enum.map(HomeSummary.offered(summary), & &1["id"])
+      restore = Enum.find(HomeSummary.offered(summary), &(&1["id"] == "restore_here"))
 
-      assert %{
-               "label" => "Backup on this computer",
-               "value" => "Sunday, May 4, 2031 at 10:00 AM UTC"
-             } in summary[
-               "detail"
-             ]["lines"]
+      assert restore["confirm"] =~
+               "Restore Fermix on this computer from its backup of Sunday, May 4, 2031 at " <>
+                 "10:00 AM UTC?"
     end
 
     # A second desktop's move back the home went past (design §14): the link
@@ -736,19 +741,19 @@ defmodule FermixCore.Management.HomeTest do
 
       inside = status_with.("9.10.1", newer_format)
       assert inside["state"] == "on"
-      assert "update" in Enum.map(inside["detail"]["actions"], & &1["id"])
-      refute "move_back" in Enum.map(inside["detail"]["actions"], & &1["id"])
+      assert "update" in Enum.map(inside["detail"]["alternatives"], & &1["id"])
+      refute "move_back" in Enum.map(inside["detail"]["alternatives"], & &1["id"])
 
       # The same newer server, writing this computer's home format, or one
       # from before home formats, which names none: Move back stays.
       for format <- [Readable.home_format(), :none] do
-        actions = status_with.("9.10.1", format)["detail"]["actions"]
+        actions = status_with.("9.10.1", format)["detail"]["alternatives"]
         assert "move_back" in Enum.map(actions, & &1["id"]), inspect(format)
         refute "update" in Enum.map(actions, & &1["id"]), inspect(format)
       end
 
       assert "move_back" in Enum.map(
-               status_with.("9.9.0", :none)["detail"]["actions"],
+               status_with.("9.9.0", :none)["detail"]["alternatives"],
                & &1["id"]
              )
     end
@@ -770,7 +775,8 @@ defmodule FermixCore.Management.HomeTest do
 
       assert status["summary"]["state"] == "problem"
       assert status["summary"]["detail"]["kind"] == "server_older"
-      assert status["summary"]["action"]["id"] == "learn_more"
+      assert status["summary"]["action"] == nil
+      assert status["summary"]["help"] == "https://fermix.ai/docs/always-on/#updates"
       assert status["primary_home"] == nil
       assert is_binary(status["primary_missing"])
     end

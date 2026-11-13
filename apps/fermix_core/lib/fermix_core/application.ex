@@ -411,6 +411,11 @@ defmodule FermixCore.Application do
         # `:temporary`, so a crash restarts nothing after it; dark under `mix
         # test`, whose suites run their own pass on their own Repo.
         {OriginBackfill, enabled: @compiled_env != :test},
+        # What the move in hand counted (`Home.MoveProgress`), in memory, for
+        # the Always On summary. Late, so a crash restarts only the
+        # primary-only children after it, which the device a move runs on
+        # never starts; it raises on nothing its guarded callers hand it.
+        maybe_move_progress(),
         # What the home knows live of its computers (M97 §3.2), primary-only.
         # A crash restarts the snapshot scheduler and the cue tree, which
         # re-read their state; its own is rebuilt as it starts, by asking each
@@ -651,6 +656,15 @@ defmodule FermixCore.Application do
     else
       []
     end
+  end
+
+  # The move's count (Always On pane §3.13, P4): child-ABSENT under `mix
+  # test`, so no suite's summary reads another suite's move; a test starts a
+  # store of its own. A candidate's tree leaves it out too (`Role.children/2`
+  # keeps only `candidate_keeps/0`). Public (@doc false) for the gating test.
+  @doc false
+  def maybe_move_progress(compiled_env \\ @compiled_env) do
+    if compiled_env != :test, do: [FermixCore.Home.MoveProgress], else: []
   end
 
   # Skill-curation clock (MILESTONE_26_SKILL_CURATION §6.1): child-ABSENT when

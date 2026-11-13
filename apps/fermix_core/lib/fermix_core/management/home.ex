@@ -502,7 +502,7 @@ defmodule FermixCore.Management.Home do
   defp waits_on([:macos, :linux]), do: "the Mac and Linux apps that carry it are published"
 
   defp waits_on(_with_unknown),
-    do: "every computer that keeps your backups has updated Fermix and its app carries it"
+    do: "each computer keeping your backups has an app carrying it"
 
   # The systems of the computers that keep the home's backups; one that has
   # not said its system could need either app (`Releases.eligible/3`).

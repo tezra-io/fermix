@@ -35,7 +35,8 @@ The move to a server, the roles and the epoch: skill_view(name:
   says so when the server could not be asked. It is refused while the
   server reports a move of its own, and with the sentence above where
   Fermix runs from a terminal. Once the server
-  holds it: "This Mac is ready to take Fermix back.", with **Move now**,
+  holds it: "Fermix still runs on your server. It moves back to this Mac
+  when you press Move now.", with until when this Mac waits, **Move now**,
   which asks for the server's recovery passphrase, and a confirm from this
   computer's settings: what runs here again (iMessage, voice calls,
   meetings) and that Telegram messages wait, each only where those settings

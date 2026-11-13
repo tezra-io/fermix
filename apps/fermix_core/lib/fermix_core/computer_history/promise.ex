@@ -53,8 +53,15 @@ defmodule FermixCore.ComputerHistory.Promise do
       where(facts) <> "." <> recall(facts)
   end
 
-  def sentence(:clause, %{machine: machine} = facts) when is_binary(machine),
-    do: " Your computer history's " <> where(facts) <> "."
+  # A move's review says only where the history goes once the line is
+  # ticked (the Always On pane's R1): how long the raw record stays is the
+  # switch's footer and the docs page's.
+  def sentence(:clause, %{machine: machine, local?: true}) when is_binary(machine),
+    do: " Ticked, only the summary of each sitting of your computer history goes to your server."
+
+  def sentence(:clause, %{machine: machine, local?: false}) when is_binary(machine),
+    do:
+      " Ticked, each sitting of your computer history goes to your server, which keeps its summary."
 
   defp where(%{machine: machine} = facts),
     do: "raw record stays on this #{machine} for 48 hours; each finished sitting is " <> to(facts)

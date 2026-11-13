@@ -6,6 +6,7 @@ defmodule FermixCore.Management.HomeSummaryTest do
   use ExUnit.Case, async: true
 
   alias FermixCore.Computers.Consent
+  alias FermixCore.Home.Move
   alias FermixCore.Home.Snapshot.S3
   alias FermixCore.Home.Snapshot.Status
   alias FermixCore.Management.Copy
@@ -20,11 +21,9 @@ defmodule FermixCore.Management.HomeSummaryTest do
   @cand "cand-5e2a9c1f7b3d4086"
   @back_cand "cand-7a3e1c9b5d2f4086"
   @copy "20310504T093000Z-e5.fxsnap"
-  @connect_sentence "Waiting for your server: run the command on it and paste the code when " <>
-                      "it asks. It takes Debian 12, Debian 13 or Ubuntu 24.04 on arm64 or " <>
-                      "x86_64 with Linux 6.2 or later, which Debian 12 has only with a newer " <>
-                      "kernel than its own. The code works for 30 minutes, and installing " <>
-                      "takes a few of them."
+  @ready_sentence "Your server is ready. Fermix moves to it when you press Move now."
+  @return_ready_sentence "Fermix still runs on your server. It moves back to this Mac when " <>
+                           "you press Move now."
 
   # -- the table ----------------------------------------------------------------
 
@@ -37,40 +36,20 @@ defmodule FermixCore.Management.HomeSummaryTest do
     [
       {"a home with nothing", facts([]), "off",
        "Keep Fermix running when this Mac sleeps. It moves to a server you own.", "own_server"},
-      {"a home that uses meetings and StackChan", facts(stays_here: [:meetings, :accessories]),
-       "off",
-       "Keep Fermix running when this Mac sleeps. It moves to a server you own. Meetings and " <>
-         "StackChan stop after the move.", "own_server"},
-      # M87 §07: the Mac's own voice stays with the Mac; a phone's calls ride its
-      # session to wherever the home runs.
+      # The pane's D1: what stops after the move is said at Move now, never on
+      # the first screen.
       {"a home that uses all three", facts(stays_here: [:voice, :meetings, :accessories]), "off",
-       "Keep Fermix running when this Mac sleeps. It moves to a server you own. Meetings and " <>
-         "StackChan stop after the move. This Mac's voice calls stop after the move; calls " <>
-         "from your phone carry on at your server when Talk to Fermix is on there and its " <>
-         "key is in your server's secret store.", "own_server"},
-      {"a home that uses only StackChan", facts(stays_here: [:accessories]), "off",
-       "Keep Fermix running when this Mac sleeps. It moves to a server you own. StackChan " <>
-         "stops after the move.", "own_server"},
+       "Keep Fermix running when this Mac sleeps. It moves to a server you own.", "own_server"},
       {"a Linux home with nothing", facts(host_os: :linux), "off",
        "Keep Fermix running when this computer sleeps. It moves to a server you own.",
        "own_server"},
-      {"a Linux home with voice calls on", facts(host_os: :linux, stays_here: [:voice]), "off",
-       "Keep Fermix running when this computer sleeps. It moves to a server you own. This " <>
-         "computer's voice calls stop after the move; calls from your phone carry on at your " <>
-         "server when Talk to Fermix is on there and its key is in your server's secret " <>
-         "store.", "own_server"},
       {"a code for the owner's server", facts(link: link(enrollment: manual(:open))), "connect",
-       @connect_sentence, nil},
-      {"a server waiting for its move", ready_facts([]), "ready",
-       "Your server is ready for the move. You can move Fermix back to this Mac from Always " <>
-         "On whenever you want.", "move_now"},
+       "Waiting for your server to use its code.", nil},
+      {"a server waiting for its move", ready_facts([]), "ready", @ready_sentence, "move_now"},
       {"a server waiting, the review warning", ready_facts(review: review([warn()])), "ready",
-       "Your server is ready for the move. You can move Fermix back to this Mac from Always " <>
-         "On whenever you want.", "move_now"},
+       @ready_sentence, "move_now"},
       {"a server waiting, the review blocking", ready_facts(review: review([warn(), block()])),
-       "problem",
-       "The move cannot start yet. This home is about 4 GiB; the move needs about 9 GiB free.",
-       "check_again"},
+       "problem", "The move cannot start yet.", "check_again"},
       {"a server presenting its code", facts(link: link(enrollment: manual(:used))), "creating",
        "Connecting your server…", nil},
       {"a code a server used, past its half hour with no server recorded",
@@ -96,22 +75,21 @@ defmodule FermixCore.Management.HomeSummaryTest do
       {"the move being undone", device(move: move("undoing")), "undone",
        "The move was undone. Fermix still runs on this Mac.", nil},
       {"a computer the move left with no link", device(linked: false, moved: moved()), "retired",
-       "Fermix moved to your server, and this Mac is no longer connected to it.", "learn_more"},
+       "Fermix moved to your server, and this Mac is no longer connected to it.", nil},
       {"a desktop the server forgot", desktop(link_primary: primary(:revoked)), "retired",
-       "Fermix moved to your server, and this Mac is no longer connected to it.", "learn_more"},
+       "Fermix moved to your server, and this Mac is no longer connected to it.", nil},
       {"a computer asking to join the home", desktop(primary_home: asking_home()), "on",
        "A computer named loft-linux (Linux) asks to join your Fermix. To add it, type the six " <>
          "digits it shows.", "approve_computer"},
       {"a server's copy retired by a move back",
        device(linked: false, moved: moved_to("studio-mac"), moved_back: true, host_os: :linux),
-       "retired", "This copy is retired: Fermix moved back to studio-mac.", "learn_more"},
+       "retired", "This copy is retired: Fermix moved back to studio-mac.", nil},
       {"a desktop with a fresh backup", desktop([]), "on",
        "Fermix runs on your server. Last backup 2 hours ago.", nil},
       # M97 §7.3: a computer that moved before its server could ask what it
-      # may use here offers nothing until the owner reviews it.
-      {"a desktop whose switches wait for the review",
-       desktop(offers_review: Consent.view(Consent.block([:files_and_shell], os: :macos))), "on",
-       "Fermix runs on your server. Last backup 2 hours ago.", nil},
+      # may use here offers nothing until the owner reviews it: its one step.
+      {"a desktop whose switches wait for the review", desktop(offers_review: true), "on",
+       "Fermix runs on your server. Last backup 2 hours ago.", "review_offers"},
       {"a desktop whose server's part did not arrive", desktop(primary_home: nil), "on",
        "Fermix runs on your server.", nil},
       {"a desktop while Fermix is stopped", desktop(link_primary: nil, primary_home: nil), "on",
@@ -124,32 +102,27 @@ defmodule FermixCore.Management.HomeSummaryTest do
        "Fermix runs on your server. Last backup 2 hours ago.", nil},
       {"a server silent for ten minutes",
        desktop(link_primary: primary(:unreachable, 10 * @minute)), "problem",
-       "Fermix cannot reach your server. Your messages wait until it is back.", "learn_more"},
+       "Fermix cannot reach your server. Your messages wait until it is back.", nil},
       {"a server answering as an older copy for ten minutes",
        desktop(link_primary: primary(:stale, 11 * @minute)), "problem",
-       "Fermix cannot reach your server. Your messages wait until it is back.", "learn_more"},
+       "Fermix cannot reach your server. Your messages wait until it is back.", nil},
       {"a server this Mac is too old for", desktop(primary_too_old: true, primary_home: nil),
        "problem", "Update Fermix on this Mac to keep using Always On.", "update"},
       # M97 §3.4: the server leads, from the release channel, once the app
       # for each computer that keeps the backups carries the release.
       {"a server older than this Mac", desktop(primary_behind: true, primary_home: nil),
-       "problem",
-       "Your server runs an older Fermix than this Mac. It updates on its own once the app " <>
-         "for each computer that keeps your backups carries the newer one.", "learn_more"},
+       "problem", "Your server runs an older Fermix than this Mac.", nil},
       # M97 §3.4: past the server's window, settings only; and a server that
       # went ahead of the apps, which this Mac cannot read.
       {"a Mac past the server's window", desktop(standing: :settings_only), "problem",
-       "Update Fermix on this Mac. Your server runs a newer Fermix, so until then this Mac " <>
-         "can change settings only.", "update"},
+       "Your server runs a newer Fermix, so this Mac can change settings only.", "update"},
       {"a server ahead of the apps",
        desktop(
          primary_home: Map.put(server_home([]), "update", %{"ahead_of_apps" => true}),
          readable: {:error, {:newer_home_format, 2, 1}}
-       ), "problem",
-       "Your server runs a newer Fermix than this Mac can restore. Update Fermix on this Mac.",
-       "update"},
+       ), "problem", "Your server runs a newer Fermix than this Mac can restore.", "update"},
       {"a server disk nearly full", desktop(primary_home: server_home(disk: 0.9)), "problem",
-       "Your server's disk is 90% full.", "learn_more"},
+       "Your server's disk is 90% full.", nil},
       {"a last backup five days old",
        desktop(primary_home: server_home(backups: [{"desktop", ~U[2031-04-29 11:00:00Z]}])),
        "problem", "Your last backup is 5 days old. It runs when this Mac is online.",
@@ -162,8 +135,7 @@ defmodule FermixCore.Management.HomeSummaryTest do
       {"a backup that failed",
        desktop(
          primary_home: status_home(tried(Status.empty(), @failed_at, "S3 refused the snapshot."))
-       ), "problem", "Backing up to S3 failed on #{@failed_said}: S3 refused the snapshot.",
-       "back_up_now"}
+       ), "problem", "Backing up to S3 failed.", "back_up_now"}
     ]
   end
 
@@ -174,7 +146,7 @@ defmodule FermixCore.Management.HomeSummaryTest do
       {"the server the day it took its own sandbox setting",
        server(server_sandbox: ~U[2031-05-03 12:00:00Z]), "primary", "Fermix runs here.", nil},
       {"the server's disk nearly full", server(disk: %{"used" => 0.87, "nearly_full" => true}),
-       "problem", "This server's disk is 87% full.", "learn_more"},
+       "problem", "This server's disk is 87% full.", nil},
       {"the server's last backup five days old",
        server(snapshots: snapshots([{"desktop", ~U[2031-04-29 10:00:00Z]}])), "problem",
        "The last backup is 5 days old. It runs when your Mac is online.", "back_up_now"}
@@ -190,11 +162,11 @@ defmodule FermixCore.Management.HomeSummaryTest do
       {"a server receiving its home", candidate_role("receiving"), "candidate",
        "Your home is moving to this server.", nil},
       {"a server waited past its day", candidate_role("expired"), "problem",
-       "This server waited too long for its move. Open a new code in Always On and run the " <>
-         "command here again.", "learn_more"},
+       "This server waited too long. Open a new code in Always On and run the command here " <>
+         "again.", nil},
       {"a server whose enrollment failed", candidate_role("failed"), "problem",
        "This server did not finish setting up. Open a new code in Always On and run the " <>
-         "command here again.", "learn_more"},
+         "command here again.", nil},
       {"a candidate whose state is unreadable", facts(role: :candidate), "candidate",
        "This server is waiting for its move.", nil}
     ]
@@ -208,11 +180,13 @@ defmodule FermixCore.Management.HomeSummaryTest do
 
     [
       {"a desktop asking its server for the code to move back", returning(back("enrolling")),
-       "creating", "Connecting this Mac to your server…", "cancel"},
+       "creating", "Connecting this Mac to your server…", nil},
       {"a desktop ready to take Fermix back", returning(back("enrolled")), "ready",
-       "This Mac is ready to take Fermix back.", "move_now"},
+       @return_ready_sentence, "move_now"},
       {"a Linux desktop ready to take Fermix back", returning(back("enrolled"), host_os: :linux),
-       "ready", "This computer is ready to take Fermix back.", "move_now"},
+       "ready",
+       "Fermix still runs on your server. It moves back to this computer when you press Move " <>
+         "now.", "move_now"},
       {"the move back asked of the server",
        returning(back("enrolled"), started: true, server_move: "requested"), "moving",
        "Moving Fermix back to this Mac. Messages wait until it is done.", nil},
@@ -238,8 +212,7 @@ defmodule FermixCore.Management.HomeSummaryTest do
        returning(back("enrolled"), started: true, server_move: "undoing"), "moving",
        "Moving Fermix back to this Mac. Messages wait until it is done.", nil},
       {"a start recorded that the server, still the primary, never took",
-       returning(back("enrolled"), started: true), "ready",
-       "This Mac is ready to take Fermix back.", "move_now"},
+       returning(back("enrolled"), started: true), "ready", @return_ready_sentence, "move_now"},
       {"a move back arriving with no record of it",
        returning(back("receiving"), record: false, server_move: "streaming"), "moving",
        "Moving Fermix back to this Mac. Messages wait until it is done.", nil},
@@ -345,7 +318,14 @@ defmodule FermixCore.Management.HomeSummaryTest do
   # none of the engine's own words for the move. The systems the server's
   # first boot takes are names the copy interpolates (`Copy.own_server_names/0`).
   test "every sentence, label and detail line obeys the copy rules and names nothing internal" do
-    names = [@failed_said | Copy.own_server_names()]
+    # The times a note and a confirm state, as `FermixCore.Clock` states them.
+    stated = [
+      "Monday, May 5, 2031 at 11:00 AM UTC",
+      "Sunday, May 4, 2031 at 9:30 AM UTC",
+      "Sunday, May 4, 2031 at 10:00 AM UTC"
+    ]
+
+    names = [@failed_said | stated ++ Copy.own_server_names()]
 
     for {name, facts, _state, _sentence, _action} <- cases(),
         text <- printed(HomeSummary.summary(facts)) do
@@ -376,14 +356,23 @@ defmodule FermixCore.Management.HomeSummaryTest do
   # M97 §7.3 and §4: what a computer keeps on for its server, and a server
   # that took its own sandbox setting.
   describe "a computer's offers" do
-    test "a desktop whose switches wait offers the review, says it once, and shows its block" do
-      block = Consent.view(Consent.block([:files_and_shell], os: :macos))
-      summary = HomeSummary.summary(desktop(offers_review: block))
+    # The pane's R9 for M97's review: the five things are set in one place,
+    # the This computer switches; the screen says so once and its one step
+    # keeps them as they are.
+    test "a desktop whose switches wait leads with Keep these switches, says where they are, once" do
+      summary = HomeSummary.summary(desktop(offers_review: true))
 
       assert %{"id" => "computer_review", "sentence" => said} = summary["notice"]
       assert said =~ "until you review"
-      assert summary["detail"]["review"] == block
-      assert "review_offers" in Enum.map(HomeSummary.offered(summary), & &1["id"])
+
+      assert %{"id" => "review_offers", "label" => "Keep these switches", "needs" => []} =
+               summary["action"]
+
+      assert summary["detail"]["note"] ==
+               "Fermix on your server can use nothing on this Mac until you review the " <>
+                 "switches under This computer."
+
+      refute Map.has_key?(summary["detail"], "review")
 
       reviewed = HomeSummary.summary(desktop([]))
       refute Map.has_key?(reviewed["detail"], "review")
@@ -393,6 +382,7 @@ defmodule FermixCore.Management.HomeSummaryTest do
 
     test "the move's ready screen shows what this computer keeps on" do
       block = Consent.view(Consent.block([:files_and_shell, :browser], os: :macos))
+      assert block["sentence"] =~ "Tick what Fermix on your server may still use on this Mac"
 
       candidate = %{
         "candidate_id" => "cand-1",
@@ -453,7 +443,7 @@ defmodule FermixCore.Management.HomeSummaryTest do
       assert cancel["confirm"] == nil
 
       # Review m2: a new code ends the one the server may be using already.
-      assert renew["label"] == "Open a new code (the current one stops working)"
+      assert renew["label"] == "Replace the code"
       assert renew["confirm"] == nil
     end
 
@@ -479,7 +469,7 @@ defmodule FermixCore.Management.HomeSummaryTest do
         assert forget["needs"] == []
 
         assert forget["confirm"] ==
-                 "Forget this server? Fermix stops holding it for the move. To move later, " <>
+                 "Forget this server?\nFermix stops holding it for the move. To move later, " <>
                    "set up a server with a new code."
       end
 
@@ -488,9 +478,11 @@ defmodule FermixCore.Management.HomeSummaryTest do
       assert moving["detail"]["alternatives"] in [nil, []]
     end
 
-    test "ready holds the server's facts, the readiness warnings and blocks, and until when" do
+    # The pane's D3: ready's warnings are Move now's confirm, which the owner
+    # reads before anything moves; until when the server waits is its note.
+    test "ready holds the server's facts and until when, in its note; no warning on the screen" do
       %{"detail" => detail} =
-        HomeSummary.summary(ready_facts(review: review([ok(), warn()])))
+        HomeSummary.summary(ready_facts(review: review([ok(), warn()]), zone: "Europe/Berlin"))
 
       assert detail["server"] == %{
                "name" => "fermix-general-a3f9",
@@ -498,18 +490,22 @@ defmodule FermixCore.Management.HomeSummaryTest do
                "version" => "0.9.0"
              }
 
-      assert detail["readiness"] == [warn()]
+      refute Map.has_key?(detail, "readiness")
       assert detail["waits_until"] == "2031-05-05T11:00:00Z"
+
+      assert detail["note"] ==
+               "fermix-general-a3f9 waits for the move until Monday, May 5, 2031 at 1:00 PM CEST."
     end
 
-    test "a blocked move lists every warning and block" do
-      %{"detail" => detail} = HomeSummary.summary(ready_facts(review: review([warn(), block()])))
+    test "a blocked move lists its blocks alone, under a plain sentence" do
+      summary = HomeSummary.summary(ready_facts(review: review([warn(), block()])))
 
-      assert detail["kind"] == "not_ready"
-      assert detail["readiness"] == [warn(), block()]
+      assert summary["sentence"] == "The move cannot start yet."
+      assert summary["detail"]["kind"] == "not_ready"
+      assert summary["detail"]["readiness"] == [block()]
     end
 
-    test "on holds the server, each backup, this Mac's copies, the disk and its actions" do
+    test "on holds the server, each backup, this Mac's copies, the disk, and its steps beside" do
       %{"detail" => detail} = HomeSummary.summary(desktop(copies_bytes: 3_221_225_472))
 
       assert detail["server"] == %{"name" => "fermix-general-a3f9", "version" => "0.9.0"}
@@ -521,12 +517,9 @@ defmodule FermixCore.Management.HomeSummaryTest do
 
       assert detail["copies_bytes"] == 3_221_225_472
       assert detail["disk_used"] == 0.42
-      assert ids(detail["actions"]) == ["back_up_now", "add_computer", "move_back"]
-
-      assert detail["data"] ==
-               "Your conversations and memories, the secrets, the browser and traces live on " <>
-                 "your server, and whoever hosts it can technically read its disk. Backups " <>
-                 "are encrypted to your recovery passphrase."
+      assert ids(detail["alternatives"]) == ["back_up_now", "add_computer", "move_back"]
+      refute Map.has_key?(detail, "actions")
+      refute Map.has_key?(detail, "data")
     end
 
     test "a problem says what Fermix last saw, and when" do
@@ -562,15 +555,14 @@ defmodule FermixCore.Management.HomeSummaryTest do
     end
 
     test "every state with nothing more to say holds an empty detail" do
-      for facts <- [device(move: move("streaming")), candidate_role("enrolled")] do
-        assert HomeSummary.summary(facts)["detail"] == %{}
-      end
+      assert HomeSummary.summary(candidate_role("enrolled"))["detail"] == %{}
 
-      # The server's own screen offers Add a computer (M97 §3.1), and nothing more.
-      assert %{"actions" => [%{"id" => "add_computer"}]} =
+      # The server's own screen offers Add a computer (M97 §3.1), and nothing
+      # more: it rides inside each desktop's home.status, under the depth bound.
+      assert %{"alternatives" => [%{"id" => "add_computer"}]} =
                detail = HomeSummary.summary(server([]))["detail"]
 
-      assert Map.keys(detail) == ["actions"]
+      assert Map.keys(detail) == ["alternatives"]
     end
   end
 
@@ -580,37 +572,26 @@ defmodule FermixCore.Management.HomeSummaryTest do
   # server's own `home.status`, with the one-time policy step and the
   # caveats, and nothing when it serves none.
   describe "the webhooks a server needs" do
-    # Review F6 (D12): the one-time tailnet steps Funnel needs first, after
-    # what the server serves, and only that (EC2 test finding 7).
-    @webhooks_steps "Tailscale Funnel. Once, in your tailnet policy, give tag:fermix-server " <>
-                      "the funnel node attribute, and turn on MagicDNS and HTTPS " <>
-                      "certificates. Then run each of these on the server; a new address can " <>
-                      "take about ten minutes to resolve."
-    @webhooks_sentence "WhatsApp and your webhook sources reach Fermix on your server through " <>
-                         @webhooks_steps
-    # Review F3 (D10): where Meta is pointed, and that nothing arrives until then.
-    @whatsapp_note "Tailscale prints the address this gives. In Meta's app dashboard, set it " <>
-                     "as the Callback URL with your verify token and press Verify and save; " <>
-                     "until then WhatsApp messages do not arrive."
+    # The pane's R6: what they are for, in one sentence; each command once,
+    # on the server; the one step a tailnet takes once; and the docs for the
+    # rest (Cloudflare Tunnel instead, port 443, the ingress, the wait).
+    @webhooks_run "a public address to reach your server. Run each command once, on the server."
+    # Review F3 (D10): where Meta is pointed.
+    @whatsapp_note "Then set the address it prints as Meta's Callback URL, with your verify token."
     # Review F4 (D11): the mount is the source's prefix, so no secret is on the
-    # screen; the sender keeps its path and takes Tailscale's host.
-    @cue_note "Tailscale prints the address this gives. In the sender (GitHub and the like), " <>
-                "change the host of the source's webhook address to the one it prints, and " <>
-                "keep the path."
-    @port_note "Funnel publishes everything tailscale serve has on port 443, so put only " <>
-                 "these paths there."
-    # With Funnel, its ingress is the one way in; without Tailscale, the tunnel
-    # the next note names is (EC2 test finding 8).
-    @ingress_note "Funnel traffic comes in through Tailscale's ingress servers, which see " <>
-                    "only encrypted bytes: with Funnel, they are the one way a webhook " <>
-                    "reaches your server."
+    # screen; the sender takes Tailscale's host.
+    @cue_note "In the sender, change the host of the source's webhook address to the one it " <>
+                "prints."
+    @tailnet_note "These use Tailscale Funnel. Once per tailnet, let tag:fermix-server use " <>
+                    "Funnel, and turn on MagicDNS and HTTPS certificates."
+    @webhooks_url "https://fermix.ai/docs/always-on/#webhooks"
 
-    test "a server with WhatsApp alone: its one mount, the policy step and the caveats" do
+    test "a server with WhatsApp alone: its one mount, the tailnet step and the docs" do
       %{"state" => "on", "detail" => detail} =
         HomeSummary.summary(desktop(primary_home: server_home(webhooks: [whatsapp(4130)])))
 
       assert detail["webhooks"] == %{
-               "sentence" => "WhatsApp reaches Fermix on your server through " <> @webhooks_steps,
+               "sentence" => "WhatsApp needs " <> @webhooks_run,
                "mounts" => [
                  %{
                    "label" => "WhatsApp",
@@ -621,12 +602,8 @@ defmodule FermixCore.Management.HomeSummaryTest do
                    "note" => @whatsapp_note
                  }
                ],
-               "notes" => [
-                 @port_note,
-                 @ingress_note,
-                 "Without Tailscale, run Cloudflare Tunnel to the same loopback port " <>
-                   "instead: 4130 for WhatsApp."
-               ]
+               "notes" => [@tailnet_note],
+               "url" => @webhooks_url
              }
     end
 
@@ -655,18 +632,11 @@ defmodule FermixCore.Management.HomeSummaryTest do
 
       refute detail["webhooks"] |> Jason.encode!() |> String.contains?("<random>")
 
-      assert detail["webhooks"]["sentence"] ==
-               "Your webhook sources reach Fermix on your server through " <> @webhooks_steps
-
-      assert detail["webhooks"]["notes"] == [
-               @port_note,
-               @ingress_note,
-               "Without Tailscale, run Cloudflare Tunnel to the same loopback port instead: " <>
-                 "4532 for webhook sources."
-             ]
+      assert detail["webhooks"]["sentence"] == "Your webhook sources need " <> @webhooks_run
+      assert detail["webhooks"]["notes"] == [@tailnet_note]
     end
 
-    test "both: WhatsApp first, then each source, and the tunnel names both ports" do
+    test "both: WhatsApp first, then each source, under one sentence" do
       served = [whatsapp(4130), cue("github", 4532)]
 
       %{"detail" => detail} =
@@ -675,10 +645,8 @@ defmodule FermixCore.Management.HomeSummaryTest do
       assert Enum.map(detail["webhooks"]["mounts"], & &1["label"]) ==
                ["WhatsApp", "Webhook source github"]
 
-      assert detail["webhooks"]["sentence"] == @webhooks_sentence
-
-      assert ("Without Tailscale, run Cloudflare Tunnel to the same loopback ports instead: " <>
-                "4130 for WhatsApp and 4532 for webhook sources.") in detail["webhooks"]["notes"]
+      assert detail["webhooks"]["sentence"] ==
+               "WhatsApp and your webhook sources need " <> @webhooks_run
     end
 
     test "neither: no webhooks at all, and none from a server whose part did not arrive" do
@@ -731,9 +699,9 @@ defmodule FermixCore.Management.HomeSummaryTest do
   # -- the summary is the screen (Always On setup §3.1) -------------------------
 
   # Review simplification 3: one reading of what a screen offers.
-  test "what a screen offers is its action, then the alternatives, then Details' actions" do
+  test "what a screen offers is its action, then the alternatives, then the backup's Change" do
     assert ids(HomeSummary.offered(HomeSummary.summary(desktop([])))) ==
-             ["back_up_now", "add_computer", "move_back"]
+             ["back_up_now", "add_computer", "move_back", "change_passphrase"]
 
     code = facts(link: link(enrollment: manual(:open)))
     assert ids(HomeSummary.offered(HomeSummary.summary(code))) == ["own_server", "cancel"]
@@ -745,20 +713,22 @@ defmodule FermixCore.Management.HomeSummaryTest do
   end
 
   describe "every action is one record" do
-    test "each action anywhere has its needs, confirm, url and key" do
+    test "each action anywhere has its needs, confirm and key" do
       for {name, facts, _state, _sentence, _action} <- cases(),
           summary = HomeSummary.summary(facts),
           action <- every_action(summary) do
-        assert Map.keys(action) |> Enum.sort() == ~w(confirm id key label needs url), name
+        assert Map.keys(action) |> Enum.sort() == ~w(confirm id key label needs), name
         assert Enum.all?(action["needs"], &(&1 in HomeSummary.needs())), name
         assert is_binary(action["key"]), name
 
         assert {:ok, ^action} = HomeSummary.find_action(summary, action["id"], action["key"]),
                name
 
-        # A confirm is stable: no time and no price in it.
+        # A confirm is stable: no time that moves with the clock and no price
+        # in it (a restore names the absolute date of its backup).
         if action["confirm"] do
-          refute action["confirm"] =~ ~r/[€$£]|\d:\d\d|\b\d{4}\b|\ba month\b/,
+          refute action["confirm"] =~
+                   ~r/[€$£]|\bago\b|\bin \d+ (?:minutes|hours|days)\b|\ba month\b/,
                  "#{name}: #{action["confirm"]}"
         end
       end
@@ -771,9 +741,9 @@ defmodule FermixCore.Management.HomeSummaryTest do
             into: %{},
             do: {action["id"], action["confirm"] != nil}
 
-      for id <- ~w(move_now try_again restore_here), do: assert(asks[id], id)
+      for id <- ~w(move_now try_again restore_here change_passphrase), do: assert(asks[id], id)
 
-      for id <- ~w(learn_more update back_up_now check_again own_server move_back cancel),
+      for id <- ~w(update back_up_now check_again own_server move_back cancel),
           do: refute(asks[id], id)
     end
 
@@ -792,15 +762,11 @@ defmodule FermixCore.Management.HomeSummaryTest do
 
       assert needs.(returning(back("enrolled"))) == ["recovery_passphrase"]
 
-      %{"detail" => %{"actions" => [back_up, add, move_back]}} = HomeSummary.summary(desktop([]))
+      %{"detail" => %{"alternatives" => [back_up, add, move_back], "backup" => backup}} =
+        HomeSummary.summary(desktop([]))
+
       assert {back_up["needs"], add["needs"], move_back["needs"]} == {[], [], []}
-    end
-
-    test "Learn more opens the docs" do
-      %{"action" => learn} = HomeSummary.summary(device(linked: false, moved: moved()))
-
-      assert learn["url"] == "https://fermix.ai/docs/always-on/"
-      assert HomeSummary.summary(facts([]))["action"]["url"] == nil
+      assert backup["change"]["needs"] == ["new_recovery_passphrase"]
     end
 
     test "an action's key is its id, label, confirm, needs and what it acts on" do
@@ -836,7 +802,7 @@ defmodule FermixCore.Management.HomeSummaryTest do
 
     test "find_action/3 finds an action by its id and key wherever it sits, and nothing else" do
       summary = HomeSummary.summary(desktop([]))
-      [_back_up, _add, move_back] = summary["detail"]["actions"]
+      [_back_up, _add, move_back] = summary["detail"]["alternatives"]
 
       assert {:ok, ^move_back} = HomeSummary.find_action(summary, "move_back", move_back["key"])
       assert :error = HomeSummary.find_action(summary, "move_back", "another-key")
@@ -852,9 +818,9 @@ defmodule FermixCore.Management.HomeSummaryTest do
       summary = HomeSummary.summary(ready_facts(move_items: move_items()))
 
       assert summary["action"]["confirm"] ==
-               "Move Fermix to your server now? " <>
+               "Move Fermix to your server now? You can move it back to this Mac any time.\n" <>
                  "WhatsApp stops after the move: it needs an address on the internet that " <>
-                 "WhatsApp can send messages to, and fermix-general-a3f9 has none. " <>
+                 "WhatsApp can send messages to, and fermix-general-a3f9 has none.\n" <>
                  "This computer serves nothing while the move runs."
     end
 
@@ -875,27 +841,52 @@ defmodule FermixCore.Management.HomeSummaryTest do
       reviewed = HomeSummary.summary(ready_facts(move_items: move_items(), review: review([s3])))
 
       assert reviewed["action"]["confirm"] =~
-               "Move Fermix to your server now? This home is about 6 GiB"
+               "any time.\nThis home is about 6 GiB"
 
       refute reviewed["action"]["key"] == plain["action"]["key"]
       refute reviewed["key"] == plain["key"]
     end
+
+    # The pane's D3, held: the ready screen shows no warning, so Move now's
+    # confirm says every one the owner must read, each on its own line: those
+    # this home's settings decide now (a review's older word for the same
+    # item gives way to them) and every other the last review gave.
+    test "says every warning the screen no longer shows, one per line" do
+      s3 = %{
+        "id" => "s3_size",
+        "status" => "warn",
+        "sentence" => "This home is about 6 GiB, more than one S3 upload carries (5 GiB)."
+      }
+
+      stale = %{warn() | "sentence" => "An older word for the same WhatsApp warning."}
+      facts = ready_facts(move_items: move_items(), review: review([stale, s3, ok()]))
+      summary = HomeSummary.summary(facts)
+      [question | lines] = String.split(summary["action"]["confirm"], "\n")
+
+      assert question ==
+               "Move Fermix to your server now? You can move it back to this Mac any time."
+
+      own = for %{status: :warn, sentence: said} <- move_items(), do: said
+      assert Enum.sort(lines) == Enum.sort([s3["sentence"] | own])
+      refute summary["action"]["confirm"] =~ "An older word"
+      refute Map.has_key?(summary["detail"], "readiness")
+    end
   end
 
   describe "Details' lines" do
-    test "ready: the server, its system, version and until when" do
+    # The pane's R8: facts only; until when the server waits is the note.
+    test "ready: the server, its system and version" do
       %{"detail" => %{"lines" => lines}} =
         HomeSummary.summary(ready_facts(zone: "Europe/Berlin"))
 
       assert lines == [
                %{"label" => "Server", "value" => "fermix-general-a3f9"},
                %{"label" => "System", "value" => "linux x86_64"},
-               %{"label" => "Version", "value" => "0.9.0"},
-               %{"label" => "Waits until", "value" => "Monday, May 5, 2031 at 1:00 PM CEST"}
+               %{"label" => "Version", "value" => "0.9.0"}
              ]
     end
 
-    test "on: the server, each backup, this Mac's copies and the server's disk" do
+    test "on: the server, each backup and the S3 bucket, this Mac's copies and the disk" do
       %{"detail" => %{"lines" => lines}} =
         HomeSummary.summary(desktop(copies_bytes: 3_221_225_472))
 
@@ -910,6 +901,7 @@ defmodule FermixCore.Management.HomeSummaryTest do
                  "label" => "Last backup to S3",
                  "value" => "Saturday, May 3, 2031 at 10:00 AM UTC"
                },
+               %{"label" => "S3 bucket", "value" => "invented-larch-backups"},
                %{"label" => "Backups on this Mac", "value" => "3 GiB"},
                %{"label" => "Server disk", "value" => "42% used"}
              ]
@@ -1082,9 +1074,10 @@ defmodule FermixCore.Management.HomeSummaryTest do
 
       assert %{"state" => "problem", "detail" => %{"kind" => "backup_failed"} = detail} = summary
 
-      assert summary["sentence"] ==
-               "Backing up to S3 failed on Sunday, May 4, 2031 at 10:00 AM UTC: S3 refused " <>
-                 "the snapshot."
+      assert summary["sentence"] == "Backing up to S3 failed."
+
+      assert detail["note"] ==
+               "S3 refused the snapshot. Tried Sunday, May 4, 2031 at 10:00 AM UTC."
 
       assert {summary["action"]["id"], summary["outcome"]} == {"back_up_now", "failed"}
       assert detail["seen_at"] == "2031-05-04T10:00:00Z"
@@ -1103,10 +1096,10 @@ defmodule FermixCore.Management.HomeSummaryTest do
       assert {failed["detail"]["kind"], on["state"]} == {"backup_failed", "on"}
       assert raised["detail"]["kind"] == "backup_failed"
 
-      assert raised["sentence"] ==
-               "Backing up to S3 failed on Sunday, May 4, 2031 at 11:30 AM UTC: S3 did not " <>
-                 "answer in time."
+      assert raised["detail"]["note"] ==
+               "S3 did not answer in time. Tried Sunday, May 4, 2031 at 11:30 AM UTC."
 
+      # The note is in the key, so a later try in other words is told.
       refute raised["key"] == failed["key"]
 
       # A try that fails again with no backup stored between moves the key too.
@@ -1125,9 +1118,8 @@ defmodule FermixCore.Management.HomeSummaryTest do
       summary = HomeSummary.summary(desktop(primary_home: status_home(waited)))
       assert %{"state" => "problem", "detail" => %{"kind" => "backup_failed"}} = summary
 
-      assert summary["sentence"] ==
-               "Backing up to S3 failed on Sunday, May 4, 2031 at 10:00 AM UTC: S3 refused " <>
-                 "the snapshot."
+      assert summary["detail"]["note"] ==
+               "S3 refused the snapshot. Tried Sunday, May 4, 2031 at 10:00 AM UTC."
 
       cleared = stored(waited, ~U[2031-05-04 11:30:00Z])
       assert HomeSummary.summary(desktop(primary_home: status_home(cleared)))["state"] == "on"
@@ -1161,12 +1153,12 @@ defmodule FermixCore.Management.HomeSummaryTest do
 
   describe "moving back" do
     test "on offers Move back beside Back up now, asking nothing" do
-      %{"detail" => %{"actions" => actions}} = HomeSummary.summary(desktop([]))
+      %{"detail" => %{"alternatives" => actions}} = HomeSummary.summary(desktop([]))
       move_back = Enum.find(actions, &(&1["id"] == "move_back"))
 
       assert %{"label" => "Move back to this Mac", "needs" => [], "confirm" => nil} = move_back
 
-      linux = HomeSummary.summary(desktop(host_os: :linux))["detail"]["actions"]
+      linux = HomeSummary.summary(desktop(host_os: :linux))["detail"]["alternatives"]
       assert Enum.find(linux, &(&1["id"] == "move_back"))["label"] == "Move back to this computer"
     end
 
@@ -1178,11 +1170,11 @@ defmodule FermixCore.Management.HomeSummaryTest do
       summary = HomeSummary.summary(desktop(readable: newer))
 
       assert summary["state"] == "on"
-      assert ids(summary["detail"]["actions"]) == ["back_up_now", "add_computer", "update"]
+      assert ids(summary["detail"]["alternatives"]) == ["back_up_now", "add_computer", "update"]
       refute "move_back" in ids(HomeSummary.offered(summary))
 
       assert %{"label" => "Update Fermix on this Mac first", "needs" => [], "confirm" => nil} =
-               Enum.find(summary["detail"]["actions"], &(&1["id"] == "update"))
+               Enum.find(summary["detail"]["alternatives"], &(&1["id"] == "update"))
 
       silent = primary(:unreachable, 10 * @minute)
       copy = %{name: "20310504T100000Z-e5.fxsnap", at: ~U[2031-05-04 10:00:00Z]}
@@ -1206,8 +1198,7 @@ defmodule FermixCore.Management.HomeSummaryTest do
               settings_only["action"]["id"]} == {"problem", "update", "update"}
 
       assert settings_only["sentence"] ==
-               "Update Fermix on this Mac. Your server runs a newer Fermix, so until then this " <>
-                 "Mac can change settings only."
+               "Your server runs a newer Fermix, so this Mac can change settings only."
 
       ahead_home = Map.put(server_home([]), "update", %{"ahead_of_apps" => true})
       newer = {:error, {:newer_home_format, 2, 1}}
@@ -1216,9 +1207,7 @@ defmodule FermixCore.Management.HomeSummaryTest do
       assert {ahead["state"], ahead["detail"]["kind"], ahead["action"]["id"]} ==
                {"problem", "server_ahead", "update"}
 
-      assert ahead["sentence"] ==
-               "Your server runs a newer Fermix than this Mac can restore. Update Fermix on " <>
-                 "this Mac."
+      assert ahead["sentence"] == "Your server runs a newer Fermix than this Mac can restore."
 
       # One this computer reads, or a server inside the apps, is no problem.
       for facts <- [
@@ -1236,7 +1225,7 @@ defmodule FermixCore.Management.HomeSummaryTest do
       summary = HomeSummary.summary(desktop(restarts_itself: false))
 
       assert summary["state"] == "on"
-      assert ids(summary["detail"]["actions"]) == ["back_up_now", "add_computer"]
+      assert ids(summary["detail"]["alternatives"]) == ["back_up_now", "add_computer"]
       refute "move_back" in ids(HomeSummary.offered(summary))
 
       assert %{"label" => "Move back", "value" => said} =
@@ -1255,33 +1244,33 @@ defmodule FermixCore.Management.HomeSummaryTest do
              )
     end
 
-    test "ready names the server, what runs here again and until when it waits, and Move " <>
-           "now asks the server's passphrase with a confirm built here, Cancel beside it" do
+    # The pane's §3.11 and D16: the ready screen says Fermix has not moved
+    # yet and that Move now moves it; until when this Mac waits is its note;
+    # what runs here again is Move now's confirm, never a line.
+    test "ready says Move now moves Fermix back, names the server and until when it waits, and " <>
+           "Move now asks the server's passphrase with a confirm built here, Cancel beside it" do
       summary = HomeSummary.summary(returning(back("enrolled")))
 
       assert %{"id" => "move_now", "needs" => ["recovery_passphrase"]} = summary["action"]
 
       assert summary["action"]["confirm"] ==
-               "Move Fermix back to this Mac now? Voice calls, meetings and StackChan run " <>
-                 "here again. Your server stays until you delete it."
+               "Move Fermix back to this Mac now?\nVoice calls, meetings and StackChan run " <>
+                 "here again.\nYour server stays until you delete it."
 
       assert [%{"id" => "cancel", "confirm" => nil, "label" => "Cancel"}] =
                summary["detail"]["alternatives"]
 
-      assert %{"label" => "Server", "value" => "fermix-general-a3f9"} in summary["detail"][
-               "lines"
+      assert summary["detail"]["lines"] == [
+               %{"label" => "Server", "value" => "fermix-general-a3f9"}
              ]
 
-      assert %{"label" => "Runs here again", "value" => "Voice calls, meetings and StackChan"} in summary[
-               "detail"
-             ]["lines"]
-
-      assert Enum.any?(summary["detail"]["lines"], &(&1["label"] == "Waits until"))
+      assert summary["detail"]["note"] =~ ~r/\AThis Mac waits for it until \w+day, /
+      refute Map.has_key?(summary["detail"], "readiness")
 
       quiet = HomeSummary.summary(returning(back("enrolled"), stays_here: []))
 
       assert quiet["action"]["confirm"] ==
-               "Move Fermix back to this Mac now? Your server stays until you delete it."
+               "Move Fermix back to this Mac now?\nYour server stays until you delete it."
 
       # The costs are named only where the home's settings have them (EC2
       # test finding 15). Coding agents are none: this Mac kept its own
@@ -1292,19 +1281,21 @@ defmodule FermixCore.Management.HomeSummaryTest do
         )
 
       assert costly["action"]["confirm"] ==
-               "Move Fermix back to this Mac now? Messages sent to Telegram while it moves " <>
-                 "wait until it is done. Your server stays until you delete it."
+               "Move Fermix back to this Mac now?\nMessages sent to Telegram while it moves " <>
+                 "wait until it is done.\nYour server stays until you delete it."
 
       telegram = HomeSummary.summary(returning(back("enrolled"), return_costs: [:telegram]))
 
       assert telegram["action"]["confirm"] ==
-               "Move Fermix back to this Mac now? Voice calls, meetings and StackChan run " <>
-                 "here again. Messages sent to Telegram while it moves wait until it is done. " <>
-                 "Your server stays until you delete it."
+               "Move Fermix back to this Mac now?\nVoice calls, meetings and StackChan run " <>
+                 "here again.\nMessages sent to Telegram while it moves wait until it is " <>
+                 "done.\nYour server stays until you delete it."
 
       assert summary["notice"] == %{
                "id" => "ready:" <> @back_cand,
-               "sentence" => "This Mac is ready to take Fermix back."
+               "sentence" =>
+                 "Fermix still runs on your server. Open Always On and press Move now to move " <>
+                   "it back to this Mac."
              }
     end
 
@@ -1466,10 +1457,10 @@ defmodule FermixCore.Management.HomeSummaryTest do
       assert %{"label" => "Restore on this Mac", "needs" => ["recovery_passphrase"]} = restore
 
       assert restore["confirm"] ==
-               "Restore Fermix on this Mac from its backup? Confirm only once you deleted " <>
-                 "your server, or stopped it for good: if it runs again, two copies of Fermix " <>
-                 "answer the same channels. Messages, memory and jobs since that backup are " <>
-                 "gone."
+               "Restore Fermix on this Mac from its backup of Sunday, May 4, 2031 at 9:30 AM " <>
+                 "UTC?\nConfirm only once you deleted your server, or stopped it for good: if " <>
+                 "it runs again, two copies of Fermix answer the same channels.\nMessages, " <>
+                 "memory and jobs since that backup are gone."
 
       # Telegram's 24 hours are named only where this computer's settings have
       # it set up (the EC2 test's F7 rule).
@@ -1480,15 +1471,18 @@ defmodule FermixCore.Management.HomeSummaryTest do
                &(&1["id"] == "restore_here")
              )[
                "confirm"
-             ] ==
-               "Restore Fermix on this Mac from its backup? Confirm only once you deleted " <>
-                 "your server, or stopped it for good: if it runs again, two copies of Fermix " <>
-                 "answer the same channels. Messages, memory and jobs since that backup are " <>
-                 "gone, and Telegram keeps nothing older than 24 hours."
+             ] =~ ~r/are gone, and Telegram keeps nothing older than 24 hours\.\z/
 
-      assert summary["detail"]["lines"] == [
-               %{"label" => "Backup on this Mac", "value" => "Sunday, May 4, 2031 at 9:30 AM UTC"}
-             ]
+      # The pane's D8: the copy's date is the confirm's, never a Details line;
+      # the note says what to check, and that Restore is the answer for good.
+      refute Map.has_key?(summary["detail"], "lines")
+
+      assert summary["detail"]["note"] ==
+               "Check that your server is on and online. If it is gone for good, restore " <>
+                 "Fermix on this Mac."
+
+      without_copy = HomeSummary.summary(%{facts | copies: []})
+      assert without_copy["detail"]["note"] == "Check that your server is on and online."
 
       newer = %{facts | copies: [copy("20310504T120000Z-e5.fxsnap"), copy()]}
 
@@ -1762,7 +1756,10 @@ defmodule FermixCore.Management.HomeSummaryTest do
       assert %{"id" => "approve_computer", "needs" => ["sas"], "label" => "Add it"} =
                on_server["action"]
 
-      assert [%{"id" => "deny_computer", "needs" => []}] = on_server["detail"]["alternatives"]
+      assert [%{"id" => "deny_computer", "needs" => []}, %{"id" => "add_computer"}] =
+               on_server["detail"]["alternatives"]
+
+      assert on_server["help"] == "https://fermix.ai/docs/always-on/#add-a-computer"
 
       assert on_server["sentence"] ==
                "A computer named loft-linux (Linux) asks to join your Fermix. To add it, type " <>
@@ -1778,6 +1775,11 @@ defmodule FermixCore.Management.HomeSummaryTest do
       linked = HomeSummary.summary(desktop(primary_home: home))
       assert {linked["state"], linked["action"]["id"]} == {"on", "approve_computer"}
       assert linked["action"]["key"] == on_server["action"]["key"]
+
+      # A review that waits keeps its step beside the ask, after Do not add it.
+      reviewing = HomeSummary.summary(desktop(primary_home: home, offers_review: true))
+      assert reviewing["action"]["id"] == "approve_computer"
+      assert ["deny_computer", "review_offers" | _rest] = ids(reviewing["detail"]["alternatives"])
 
       # Another computer asking is another approval: the key binds the
       # computer that asks, never digits a screen would have to hold.
@@ -1827,6 +1829,9 @@ defmodule FermixCore.Management.HomeSummaryTest do
       assert HomeSummary.summary(desktop(primary_home: home))["notice"] == notice
     end
 
+    # The pane's R2: nothing is the owner's to do here while it dials or
+    # waits, so Cancel stands beside; once it was not added, Cancel is the
+    # one step left.
     test "the computer that joins shows where it stands, with Cancel" do
       join = %{"server" => "studio-mac", "sas" => nil, "sentence" => nil}
 
@@ -1835,8 +1840,11 @@ defmodule FermixCore.Management.HomeSummaryTest do
           device(linked: false, moved: nil, join: Map.put(join, "phase", "dialing"))
         )
 
-      assert {dialing["state"], dialing["outcome"], dialing["action"]["id"]} ==
-               {"creating", "running", "cancel"}
+      assert {dialing["state"], dialing["outcome"], dialing["action"]} ==
+               {"creating", "running", nil}
+
+      assert ids(dialing["detail"]["alternatives"]) == ["cancel"]
+      assert dialing["help"] == "https://fermix.ai/docs/always-on/#add-a-computer"
 
       assert dialing["sentence"] == "Connecting this Mac to your Fermix on studio-mac."
 
@@ -1849,7 +1857,8 @@ defmodule FermixCore.Management.HomeSummaryTest do
           )
         )
 
-      assert {waiting["state"], waiting["outcome"]} == {"creating", "waiting"}
+      assert {waiting["state"], waiting["outcome"], waiting["action"]} ==
+               {"creating", "waiting", nil}
 
       # The digits are this computer's to show, and the owner's to type where
       # the home asks.
@@ -1869,6 +1878,8 @@ defmodule FermixCore.Management.HomeSummaryTest do
 
       assert {denied["state"], denied["outcome"], denied["sentence"]} ==
                {"creating", "failed", said}
+
+      assert denied["action"]["id"] == "cancel"
     end
 
     test "a computer that joined has no Move back and no Restore here" do
@@ -1885,6 +1896,230 @@ defmodule FermixCore.Management.HomeSummaryTest do
       end
 
       assert "move_back" in ids(HomeSummary.offered(HomeSummary.summary(desktop([]))))
+    end
+  end
+
+  # -- the pane's rules (Always On pane draft 3, R1 to R12) -----------------------
+
+  describe "the pane's rules" do
+    # R7 and §4: one help page per screen, at the anchor of its family; Learn
+    # more is no action, and no action record carries a page.
+    test "every screen has its help page, and no Learn more and no url anywhere" do
+      for {name, facts, _state, _sentence, _action} <- cases() do
+        summary = HomeSummary.summary(facts)
+        "https://fermix.ai/docs/always-on/#" <> anchor = summary["help"]
+
+        assert anchor in Copy.docs_anchors(), name
+        refute "learn_more" in all_actions(summary), name
+        assert Enum.all?(every_action(summary), &(not Map.has_key?(&1, "url"))), name
+
+        for gone <- ~w(actions data review),
+            do: refute(Map.has_key?(summary["detail"], gone), "#{name}: #{gone}")
+      end
+
+      help = &HomeSummary.summary(&1)["help"]
+      page = &("https://fermix.ai/docs/always-on/#" <> &1)
+
+      assert help.(facts([])) == page.("what-you-need")
+      assert help.(facts(link: link(enrollment: manual(:open)))) == page.("set-up-your-server")
+      assert help.(facts(link: link(enrollment: manual(:used)))) == page.("set-up-your-server")
+      assert help.(ready_facts([])) == page.("the-move")
+      assert help.(ready_facts(review: review([block()]))) == page.("the-move")
+      assert help.(device(move: move("streaming"))) == page.("the-move")
+      assert help.(desktop([])) == page.("on-your-server")
+      assert help.(server([])) == page.("on-your-server")
+
+      assert help.(desktop(link_primary: primary(:unreachable, 11 * @minute))) ==
+               page.("when-the-server-is-gone")
+
+      assert help.(desktop(primary_home: server_home(disk: 0.9))) == page.("server-disk")
+      assert help.(desktop(primary_behind: true, primary_home: nil)) == page.("updates")
+      assert help.(returning(back("enrolled"))) == page.("move-back")
+      assert help.(returning(back("failed"))) == page.("move-back")
+      assert help.(returning(restore("failed"))) == page.("when-the-server-is-gone")
+      assert help.(candidate_role("expired")) == page.("set-up-your-server")
+    end
+
+    # R4 and D9: why a move was undone, in the words its record keeps; the
+    # phase's own words are the sentence's, so they are no note.
+    test "a move undone says why, where its record has the words" do
+      said = "fermix-general-a3f9 refused the move: its disk is full."
+      undone = %{move("aborted") | "sentence" => said}
+
+      assert HomeSummary.summary(ready_facts(move: undone))["detail"]["note"] == said
+
+      plain = %{
+        move("aborted")
+        | "sentence" => Move.sentence("aborted", "fermix-general-a3f9")
+      }
+
+      refute Map.has_key?(HomeSummary.summary(ready_facts(move: plain))["detail"], "note")
+    end
+
+    test "a disk nearly full says what to do, and a server older than this Mac what follows" do
+      disk = HomeSummary.summary(desktop(primary_home: server_home(disk: 0.9)))
+      assert disk["detail"]["note"] == "Free some space on it, or give it a bigger disk."
+      assert disk["action"] == nil
+
+      older = HomeSummary.summary(desktop(primary_behind: true, primary_home: nil))
+
+      assert older["detail"]["note"] ==
+               "It updates on its own once the app for each computer that keeps your backups " <>
+                 "carries it."
+    end
+
+    # R2: nothing is the owner's to do while a move back connects.
+    test "Cancel stands beside a move back that connects, never as its action" do
+      summary = HomeSummary.summary(returning(back("enrolling")))
+
+      assert summary["action"] == nil
+      assert ids(summary["detail"]["alternatives"]) == ["cancel"]
+    end
+
+    # R11, P1: a flow shows its steps, the owner's marked, on each of its
+    # screens; a step done is never worded as the flow done.
+    test "each screen of the move and the move back shows its steps, the owner's marked" do
+      steps = fn facts ->
+        for %{"label" => label, "state" => state} <- HomeSummary.summary(facts)["detail"]["steps"],
+            do: {label, state}
+      end
+
+      move = ["Connect your server", "Move now", "Send your home", "Switch over"]
+      back = ["Get this Mac ready", "Move now", "Receive your home", "Put Fermix in place"]
+
+      assert steps.(facts(link: link(enrollment: manual(:open)))) ==
+               Enum.zip(move, ~w(yours pending pending pending))
+
+      assert steps.(facts(link: link(enrollment: manual(:used)))) ==
+               Enum.zip(move, ~w(active pending pending pending))
+
+      assert steps.(ready_facts([])) == Enum.zip(move, ~w(done yours pending pending))
+
+      assert steps.(ready_facts(move: move("aborted"))) ==
+               Enum.zip(move, ~w(done yours pending pending))
+
+      assert steps.(device(move: move("streaming"))) ==
+               Enum.zip(move, ~w(done done active pending))
+
+      assert steps.(device(move: move("committing"))) == Enum.zip(move, ~w(done done done active))
+
+      assert steps.(returning(back("enrolling"))) ==
+               Enum.zip(back, ~w(active pending pending pending))
+
+      assert steps.(returning(back("enrolled"))) == Enum.zip(back, ~w(done yours pending pending))
+
+      assert steps.(returning(back("receiving"), started: true, server_move: "streaming")) ==
+               Enum.zip(back, ~w(done done active pending))
+
+      assert steps.(returning(back("activating"), started: true, linked: false)) ==
+               Enum.zip(back, ~w(done done done active))
+
+      assert steps.(returning(back("enrolled"), started: true, server_move: "aborted")) ==
+               Enum.zip(back, ~w(done yours pending pending))
+
+      for facts <- [facts([]), desktop([]), returning(restore("receiving"))],
+          do: refute(Map.has_key?(HomeSummary.summary(facts)["detail"], "steps"))
+    end
+
+    # R12, P2, P3: the route names this computer and the server; the fill is
+    # only what was counted, in whole twentieths, and only while bytes move.
+    test "a move's route, and its transfer only while the bytes it counted move" do
+      sending = %{move_id: "mv-1", step: :send, bytes: 734_003_200, size: 1_503_238_554}
+      facts = device(move: move("streaming"), move_progress: sending)
+      detail = HomeSummary.summary(facts)["detail"]
+
+      assert detail["route"] == %{
+               "from" => "This Mac",
+               "to" => "fermix-general-a3f9",
+               "direction" => "forward"
+             }
+
+      assert detail["transfer"] == %{"fraction" => 0.45, "label" => "700 MiB of 1.4 GiB sent"}
+      assert detail["progress"] == "Sending your home to fermix-general-a3f9…"
+
+      for progress <- [nil, %{sending | step: :staging, bytes: 0, size: nil}] do
+        summary = HomeSummary.summary(device(move: move("streaming"), move_progress: progress))
+        refute Map.has_key?(summary["detail"], "transfer")
+      end
+
+      receiving = %{move_id: "mv-2", step: :receive, bytes: 52_428_800, size: 104_857_600}
+      back = returning(back("receiving"), started: true, server_move: "streaming")
+      detail = HomeSummary.summary(Map.put(back, :move_progress, receiving))["detail"]
+
+      assert detail["route"]["direction"] == "back"
+      assert detail["transfer"] == %{"fraction" => 0.5, "label" => "50 MiB of 100 MiB received"}
+
+      # The count moves the key, in whole twentieths only.
+      key = &HomeSummary.summary(device(move: move("streaming"), move_progress: &1))["key"]
+      refute key.(sending) == key.(%{sending | bytes: 0})
+      assert key.(sending) == key.(%{sending | bytes: 734_003_200 + 1})
+    end
+
+    # P5: the forward move says its step, as the move back does.
+    test "the move from this Mac says the step in hand" do
+      progress = fn move, step ->
+        HomeSummary.summary(device(move: move, move_progress: step))["detail"]["progress"]
+      end
+
+      at = &%{move_id: "mv-1", step: &1, bytes: 0, size: nil}
+
+      assert progress.(move("requested"), nil) == "Packing your home…"
+      assert progress.(move("streaming"), at.(:capture)) == "Packing your home…"
+
+      assert progress.(move("streaming"), at.(:staging)) ==
+               "fermix-general-a3f9 is unpacking your home…"
+
+      assert progress.(move("committed"), nil) == "Switching over to fermix-general-a3f9…"
+      assert progress.(move("committing"), nil) == nil
+    end
+
+    # §3.12, S2, S3, D18: backups show only once the home has a server.
+    test "the backup settings show the passphrase with Change, and S3 where the server keeps it" do
+      %{"detail" => %{"backup" => backup}} = HomeSummary.summary(desktop([]))
+
+      assert backup["passphrase"] == %{
+               "label" => "Recovery passphrase",
+               "value" => "Set",
+               "footer" => "Every backup is encrypted to it, and Fermix never stores it."
+             }
+
+      assert backup["s3"] == "Also kept in S3, set up with your server."
+
+      assert %{"id" => "change_passphrase", "label" => "Change"} = change = backup["change"]
+      assert change["needs"] == ["new_recovery_passphrase"]
+
+      assert change["confirm"] ==
+               "Change the recovery passphrase?\nBackups made before now still open only with " <>
+                 "the passphrase you set before."
+
+      summary = HomeSummary.summary(desktop([]))
+      assert {:ok, ^change} = HomeSummary.find_action(summary, "change_passphrase", change["key"])
+
+      desk_only =
+        desktop(primary_home: server_home(backups: [{"desktop", ~U[2031-05-04 10:00:00Z]}]))
+
+      assert HomeSummary.summary(desk_only)["detail"]["backup"]["s3"] == nil
+
+      for facts <- [
+            facts([]),
+            ready_facts([]),
+            facts(link: link(enrollment: manual(:open))),
+            server([])
+          ],
+          do: refute(Map.has_key?(HomeSummary.summary(facts)["detail"], "backup"))
+    end
+
+    # R1: a screen's own words are short.
+    test "every screen's sentence and note say at most the word bound" do
+      for {name, facts, _state, _sentence, _action} <- cases() do
+        summary = HomeSummary.summary(facts)
+
+        for text <- [summary["sentence"] | List.wrap(summary["detail"]["note"])],
+            summary["detail"]["kind"] != "backup_failed" or text == summary["sentence"] do
+          words = text |> String.split(~r/\s+/, trim: true) |> length()
+          assert words <= Copy.word_bound(), "#{name}: #{words} words: #{text}"
+        end
+      end
     end
   end
 
@@ -2128,11 +2363,13 @@ defmodule FermixCore.Management.HomeSummaryTest do
           "id" => id,
           "label" => if(id == "s3", do: "S3", else: "your desktop"),
           "configured" => true,
+          "destination" => if(id == "s3", do: "s3://invented-larch-backups/fermix/general/"),
           "last_verified" => %{"at" => DateTime.to_iso8601(at)}
         }
       end
 
-    %{"configured" => targets != [], "targets" => targets}
+    # A home that kept backups has its recovery key set.
+    %{"configured" => targets != [], "recipient_set" => targets != [], "targets" => targets}
   end
 
   # The server's own `home.status` whose snapshots `Snapshot.Status` gives,
@@ -2206,14 +2443,23 @@ defmodule FermixCore.Management.HomeSummaryTest do
   defp all_actions(summary), do: ids(HomeSummary.offered(summary))
 
   # Every word a surface prints as prose: the sentence, each action's label
-  # and confirm, the notes, the step in hand, the labels of Details' lines
-  # and the notice.
+  # and confirm, the note, the step in hand, the labels of Details' lines and
+  # of a flow's steps, the backup's words and the notice.
   defp printed(%{"sentence" => sentence, "detail" => detail} = summary) do
     words = Enum.flat_map(HomeSummary.offered(summary), &[&1["label"] | List.wrap(&1["confirm"])])
-    notes = for key <- ~w(note data progress), is_binary(detail[key]), do: detail[key]
-    lines = for %{"label" => label} <- detail["lines"] || [], do: label
+    notes = for key <- ~w(note progress), is_binary(detail[key]), do: detail[key]
+
+    lines =
+      for %{"label" => label} <- (detail["lines"] || []) ++ (detail["steps"] || []), do: label
+
     notice = for %{"sentence" => said} <- List.wrap(summary["notice"]), do: said
 
-    [sentence | words] ++ notes ++ lines ++ notice
+    backup =
+      case detail["backup"] do
+        %{"passphrase" => passphrase, "s3" => s3} -> [passphrase["footer"] | List.wrap(s3)]
+        nil -> []
+      end
+
+    [sentence | words] ++ notes ++ lines ++ notice ++ backup
   end
 end

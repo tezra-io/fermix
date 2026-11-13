@@ -130,12 +130,14 @@ defmodule FermixCore.Management.AlwaysOnTest do
       assert {:ok, %{action: "move_now", key: "k", input: %Input{}}} =
                AlwaysOn.decode(%{"action" => "move_now", "key" => "k"})
 
-      for opened <- ~w(learn_more update) do
-        assert {:error, {:invalid_params, "action", sentence}} =
-                 AlwaysOn.decode(%{"action" => opened, "key" => "k"})
+      assert {:error, {:invalid_params, "action", sentence}} =
+               AlwaysOn.decode(%{"action" => "update", "key" => "k"})
 
-        assert is_binary(sentence)
-      end
+      assert sentence == "This one is the app's own update; Fermix takes no step for it."
+
+      # Learn more is no action (the Always On pane's R7): the summary's help.
+      assert {:error, {:invalid_params, "action", "Name one of the steps Always On offers."}} =
+               AlwaysOn.decode(%{"action" => "learn_more", "key" => "k"})
 
       assert {:error, {:invalid_params, "action", _sentence}} =
                AlwaysOn.decode(%{"action" => "set_up", "key" => "k"})
@@ -147,7 +149,7 @@ defmodule FermixCore.Management.AlwaysOnTest do
                AlwaysOn.decode(%{"action" => "cancel"})
 
       assert AlwaysOn.acts() -- HomeSummary.actions() == []
-      assert HomeSummary.actions() -- AlwaysOn.acts() == ~w(learn_more update)
+      assert HomeSummary.actions() -- AlwaysOn.acts() == ~w(update)
     end
   end
 
@@ -189,26 +191,29 @@ defmodule FermixCore.Management.AlwaysOnTest do
 
       # The Tailscale step is optional (design, "Connectivity: iroh only"):
       # the server asks for its auth key at the terminal without echo, so the
-      # key is on no command line.
+      # key is on no command line. The code's sentence is the engine's (the
+      # Always On pane's D10), and the step folds under its label, its
+      # tagOwners and policy on the docs page.
       assert result == %{
                "code" => @manual_code,
                "expires_at" => "2031-05-04T12:30:00Z",
                "command" =>
                  "curl -fsSL https://fermix.ai/install | sudo sh -s -- --always-on --version " <>
                    version,
+               "sentence" =>
+                 "Run this on your Debian 12 or 13, or Ubuntu 24.04 server, then paste the " <>
+                   "code when it asks. The code works once, until Sunday, May 4, 2031 at " <>
+                   "12:30 PM UTC.",
                "tailscale" => %{
-                 # Review I2 (D12): the tag is declared before a key can carry it.
+                 "label" => "Also join your tailnet (optional)",
+                 # Review I2 (D12): the key carries the server's tag.
                  "sentence" =>
-                   "Optional: to also join the server to your tailnet, which WhatsApp and " <>
-                     "webhook sources need, run this instead. It asks for the enrollment " <>
-                     "code and then a Tailscale auth key, and shows neither. First declare " <>
-                     "tag:fermix-server under tagOwners in your tailnet policy, then create " <>
-                     "the key in Tailscale's admin console with that tag, one-off and " <>
-                     "pre-approved, and in the policy let only your own devices reach the " <>
-                     "server.",
+                   "For WhatsApp and webhook sources: run this instead. It also asks for a " <>
+                     "one-off, pre-approved Tailscale auth key tagged tag:fermix-server.",
                  "command" =>
                    "curl -fsSL https://fermix.ai/install | sudo sh -s -- --always-on --version " <>
-                     "#{version} --tailscale"
+                     "#{version} --tailscale",
+                 "url" => "https://fermix.ai/docs/always-on/#tailscale"
                }
              }
 
@@ -238,7 +243,7 @@ defmodule FermixCore.Management.AlwaysOnTest do
     test "an open code's screen opens a new code that replaces it", ctx do
       Agent.update(ctx.link, &%{&1 | enrollment: window(:open, nil)})
 
-      assert %{"label" => "Open a new code (the current one stops working)"} =
+      assert %{"label" => "Replace the code"} =
                offered!(summary(ctx.opts), "own_server")
 
       assert {:ok, %{"result" => %{"code" => @manual_code}}} = press(ctx, "own_server")
@@ -291,14 +296,17 @@ defmodule FermixCore.Management.AlwaysOnTest do
     # `moved_at`) on the primary it came back to. A move away from that home
     # starts a new tenure: the record describes nothing any more, so the
     # start removes it, and none of the three screens below reads it.
-    test "a move away from a home that once moved back draws no move back's progress", ctx do
+    test "a move away from a home that once moved back draws its own progress, not a move " <>
+           "back's",
+         ctx do
       :ok = Return.write(ctx.home, ended_return())
       assert {:ok, _answer} = press(ctx, "move_now", %Input{recovery_passphrase: @passphrase})
 
       moving = summary(Keyword.put(ctx.opts, :engine_role, @device))
 
       assert moving["state"] == "moving"
-      assert get_in(moving, ["detail", "progress"]) == nil
+      assert get_in(moving, ["detail", "progress"]) == "Packing your home…"
+      assert get_in(moving, ["detail", "route", "direction"]) == "forward"
     end
 
     test "a later move back stopped between its two writes draws the stopped screen, not the " <>
@@ -520,19 +528,30 @@ defmodule FermixCore.Management.AlwaysOnTest do
     end
 
     # M97 §7.3: a computer that moved before its server could ask what it may
-    # use here offers nothing until the owner reviews it, here.
-    test "the review of a computer's offers keeps what the owner ticked", ctx do
+    # use here offers nothing until the owner reviews it. Its switches are set
+    # in one place, This computer (the Always On pane's R9): Keep these
+    # switches takes them as they are.
+    test "the review of a computer's offers keeps its switches as they are", ctx do
       waiting = Switches.only([:files_and_shell, :browser], reviewed: false)
+      :ok = Switches.write(ctx.home, waiting)
       opts = Keyword.put(ctx.opts, :computer_switches, waiting)
 
-      assert %{"notice" => %{"id" => "computer_review"}, "detail" => %{"review" => review}} =
+      assert %{"notice" => %{"id" => "computer_review"}, "action" => keep, "detail" => detail} =
                summary(opts)
 
-      assert Enum.map(Enum.filter(review["lines"], & &1["on"]), & &1["offer"]) ==
-               ~w(files_and_shell browser)
+      assert %{"id" => "review_offers", "label" => "Keep these switches"} = keep
+      refute Map.has_key?(detail, "review")
 
-      # An app from before D27 ticks files and commands as two lines; both
-      # keep the one switch on (M97 §3.4).
+      assert {:ok, %{"result" => nil}} = press(%{ctx | opts: opts}, "review_offers")
+
+      assert {:ok, kept} = Switches.read(ctx.home)
+      assert Switches.reviewed?(kept)
+      assert Switches.on?(kept, :browser)
+
+      # An app from before this change ticked lines and sends them: still
+      # read, and files and commands named as two lines (before D27) keep the
+      # one switch on (M97 §3.4).
+      :ok = Switches.write(ctx.home, waiting)
       input = %Input{keep_offers: ["files", "shell"]}
       assert {:ok, %{"result" => nil}} = press(%{ctx | opts: opts}, "review_offers", input)
 

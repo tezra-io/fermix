@@ -47,20 +47,34 @@ defmodule FermixCore.Management.Copy do
   code or secret id does either.
 
   Beside them sit the rest of what an Always On screen shows (Always On
-  setup §3.1): the sentence each action's confirm asks (`summary_sentence/2`'s
-  `confirm_*` keys, and `move_confirm/1` for Move now, built from the
-  review's own warnings), never with a time in it; the sentence of the step
-  a move back, a restore or a backup is in (`progress_*`); a notice's sentence
+  setup §3.1, the Always On pane draft 3): a screen's one secondary sentence
+  (the `*_note` and `*_waits` keys); the sentence each action's confirm asks
+  (`summary_sentence/2`'s `confirm_*` keys, and `move_confirm/2` for Move
+  now, built from the review's own warnings), one part per line and never
+  with a time that moves with the clock (a restore names the absolute date
+  of the backup it takes); the sentence of the step a move, a move back, a
+  restore or a backup is in (`progress_*`); a notice's sentence
   (`notice_*`); the Details lines (`summary_line/3`), each a label and a
   value finished here, times stated absolutely in the owner's zone
-  (`FermixCore.Clock`); the Always On docs page (`always_on_docs_url/0`);
-  the command for the owner's server (`own_server_command/0`), which
-  carries no code, and the one that also joins it to the owner's tailnet
-  (`own_server_tailscale_command/0`, with `own_server_tailscale`'s
-  sentence); the systems, architectures and kernel the server's first boot
-  takes, which a waiting code's sentence names and the copy rules are given
-  as data (`own_server_names/0`); and the words around the Tailscale Funnel
-  mounts a server needs (`webhooks*`, `mount_label/1`).
+  (`FermixCore.Clock`); a flow's steps (`step_labels/2`), its route
+  (`route_here/1`) and the bytes it counted (`transfer_label/3`); the
+  backup line and its words (`backup_words/1`); the Always On docs page
+  with a screen's anchor (`always_on_docs_url/1`); the command for the
+  owner's server (`own_server_command/0`), which carries no code, the
+  sentence the code is shown with (`own_server`), and the one that also
+  joins it to the owner's tailnet (`own_server_tailscale_command/0`, with
+  `own_server_tailscale`'s sentence and `tailscale_label/0`); the systems,
+  architectures and kernel the server's first boot takes, which the code's
+  sentence names and the copy rules are given as data
+  (`own_server_names/0`); and the words around the Tailscale Funnel mounts
+  a server needs (`webhooks*`, `mount_label/1`).
+
+  A screen's own words are short (the pane's rule R1): every summary key a
+  screen draws as its sentence, its note, its progress or its webhooks says
+  at most 20 words (`word_bound/0`), except the keys `unbounded_keys/0`
+  names: a confirm, which says each warning in its own words; a notice, which
+  is a system notification; the code's sentence, which names a date; the
+  failure's own words a note carries; and the phone's message.
   """
 
   alias FermixCore.BuildInfo
@@ -92,51 +106,64 @@ defmodule FermixCore.Management.Copy do
   ]
   # The features named alone in the singular.
   @singular_features [[:accessories]]
-  # What each loopback port a tunnel reaches carries, in the order named.
-  @carried [whatsapp: "WhatsApp", cues: "webhook sources"]
   # What reaches the server through Funnel, as the webhooks' sentence starts.
   @reached [whatsapp: "WhatsApp", cues: "your webhook sources"]
   # What a move back costs, each where the home has it.
   @return_costs [
-    telegram: " Messages sent to Telegram while it moves wait until it is done."
+    telegram: "Messages sent to Telegram while it moves wait until it is done."
   ]
-  @summary_keys ~w(off connect connecting ready moving waiting on on_backup on_no_backup undone
-                   retired retired_back candidate_waiting candidate_receiving primary
-                   cannot_reach server_not_set_up server_waited_too_long update server_older
-                   update_settings_only server_ahead
-                   disk_full server_disk_full backup_old backup_none server_backup_old
-                   backup_failed
-                   backup_push not_ready data notice_ready notice_moved notice_backup_week
-                   notice_server_backup_week notice_server_lapsed notice_restored
-                   return_connecting return_ready return_moving return_undone return_failed
-                   return_stopped restore_moving restore_failed notice_back
+  @summary_keys ~w(off connect connecting ready ready_waits moving waiting on on_backup
+                   on_no_backup undone retired retired_back candidate_waiting
+                   candidate_receiving primary cannot_reach cannot_reach_note
+                   server_not_set_up server_waited_too_long update server_older
+                   server_older_note update_settings_only server_ahead disk_full
+                   server_disk_full disk_note backup_old backup_none server_backup_old
+                   backup_failed backup_failed_note backup_push not_ready notice_ready
+                   notice_moved notice_backup_week notice_server_backup_week
+                   notice_server_lapsed notice_restored return_connecting return_ready
+                   return_waits notice_return_ready return_moving return_undone return_failed
+                   return_stopped restore_moving restore_failed notice_back progress_packing
+                   progress_sending progress_unpacking progress_switching
                    progress_return_receiving progress_return_staged progress_return_placing
-                   progress_restoring progress_backing_up confirm_restore_here confirm_return_move confirm_forget
-                   webhooks webhooks_whatsapp webhooks_cue webhooks_port webhooks_ingress
-                   webhooks_tunnel own_server_tailscale notice_computer_review
+                   progress_restoring progress_backing_up confirm_restore_here
+                   confirm_return_move confirm_forget confirm_change_passphrase webhooks
+                   webhooks_whatsapp webhooks_cue webhooks_tailnet own_server
+                   own_server_tailscale review_note notice_computer_review
                    notice_server_sandbox computer_asks join_dialing join_waiting
                    notice_computer_joined)a
+  # The keys a screen does not draw as its own short words (the moduledoc).
+  @unbounded_keys ~w(confirm_restore_here confirm_return_move confirm_forget
+                     confirm_change_passphrase notice_ready notice_moved notice_backup_week
+                     notice_server_backup_week notice_server_lapsed notice_restored
+                     notice_return_ready notice_back notice_computer_review
+                     notice_server_sandbox notice_computer_joined own_server
+                     backup_failed_note backup_push)a
+  # The most words a screen's own sentence says (R1).
+  @word_bound 20
   # Each Details line's label, by its key.
   @line_labels [
     server: "Server",
     system: "System",
     version: "Version",
-    waits_until: "Waits until",
     disk: "Server disk",
-    runs_again: "Runs here again",
     move_back: "Move back",
-    connection: "Connection"
+    connection: "Connection",
+    s3_bucket: "S3 bucket"
   ]
-  @line_keys Keyword.keys(@line_labels) ++ [:backup, :copies, :backup_here]
+  @line_keys Keyword.keys(@line_labels) ++ [:backup, :copies]
   @docs_url "https://fermix.ai/docs/always-on/"
+  # The docs page's anchors, one per screen family (the pane's §4): the
+  # contract between the engine and the page.
+  @docs_anchors ~w(what-you-need set-up-your-server tailscale the-move on-your-server webhooks
+                   backups when-the-server-is-gone updates server-disk move-back add-a-computer)
+  # A flow's steps, in order: the move, and the move back to this computer.
+  @move_steps ["Connect your server", "Move now", "Send your home", "Switch over"]
+  @return_steps ["Move now", "Receive your home", "Put Fermix in place"]
   @own_server_command "curl -fsSL https://fermix.ai/install | sudo sh -s -- --always-on --version "
-  # What the server's first boot takes (`packaging/cloud/first-boot.sh`'s
-  # `check_host`): its systems, its architectures as an owner picks them in a
-  # provider's console, and the kernel its Landlock ABI 3 needs. Names the
-  # copy interpolates, so the version rule passes them as data.
+  # The systems the server's first boot takes (`packaging/cloud/first-boot.sh`'s
+  # `check_host`). Names the copy interpolates, so the version rule passes
+  # them as data.
   @server_systems ["Debian 12", "Debian 13", "Ubuntu 24.04"]
-  @server_arches ["arm64", "x86_64"]
-  @server_kernel "Linux 6.2"
   # A sentence starts at the beginning of the string and after a terminator or
   # a colon, which is how this copy introduces a command or a list.
   @sentence_break ~r/(?<=[.?:])\s+/
@@ -151,6 +178,8 @@ defmodule FermixCore.Management.Copy do
     # Always On's step for a computer that joins the home, as its screens
     # label it (M97).
     "Add a computer",
+    # Always On's step that moves the home, as its screens label it.
+    "Move now",
     # The system of the server Always On moves to.
     "Linux",
     # The display server the Linux computer-use rows name.
@@ -189,18 +218,14 @@ defmodule FermixCore.Management.Copy do
     "Google Meet",
     "Zoom",
     "Personality",
-    # The Tailscale Funnel mounts of an Always On server's webhooks, and the
-    # tunnel an owner without Tailscale runs instead.
+    # The Tailscale Funnel mounts of an Always On server's webhooks.
     "Tailscale Funnel",
     "Funnel",
     "Tailscale",
-    "Cloudflare Tunnel",
     "MagicDNS",
     # Meta's app dashboard, as WhatsApp's webhook form labels it.
     "Meta",
     "Callback URL",
-    "Verify and save",
-    "GitHub",
     "Google Chrome for Testing",
     "Google Chrome Canary",
     "Google Chrome",
@@ -221,6 +246,9 @@ defmodule FermixCore.Management.Copy do
     "Pet",
     "Reconnect",
     "This Mac",
+    # The Always On pane's section of this computer's switches, as it is
+    # titled.
+    "This computer",
     # GitHub's webhook form, named as GitHub labels it.
     "Add webhook",
     "Payload URL",
@@ -355,34 +383,48 @@ defmodule FermixCore.Management.Copy do
   def summary_keys, do: @summary_keys
 
   @doc """
+  The summary keys a screen does not draw as its own short words: confirms,
+  notices, the code's sentence, a failure's own words and the phone's
+  message. Every other key says at most `word_bound/0` words.
+  """
+  @spec unbounded_keys() :: [atom()]
+  def unbounded_keys, do: @unbounded_keys
+
+  @doc "The most words a screen's own sentence, note, progress or webhooks say (R1)."
+  @spec word_bound() :: pos_integer()
+  def word_bound, do: @word_bound
+
+  @doc """
   One sentence of `home.status.summary`, by its key, with the values it
   names: `machine` ("Mac" or "computer"), `age` (seconds since the last
-  backup), `days`, `percent`, `block` (a readiness sentence) or `stays_here`
-  (what this home uses that stops after a move, `off`'s second line only
-  when there is something).
+  backup), `days`, `percent`, `to` (the server's name), `at` and `zone` (a
+  time, stated in the owner's zone), `place` and `error` (a failed backup's
+  own words), `restore` (whether Restore here is offered).
   """
   @spec summary_sentence(atom(), map()) :: String.t()
-  def summary_sentence(:off, %{machine: machine, stays_here: features}),
-    do:
-      "Keep Fermix running when this #{machine} sleeps. It moves to a server you own." <>
-        stops_line(features -- [:voice]) <> voice_line(features, machine)
+  def summary_sentence(:off, %{machine: machine}),
+    do: "Keep Fermix running when this #{machine} sleeps. It moves to a server you own."
 
-  def summary_sentence(:connect, _values) do
-    [debian12, debian13, ubuntu] = @server_systems
-    [arm, x86] = @server_arches
-
-    "Waiting for your server: run the command on it and paste the code when it asks. It " <>
-      "takes #{debian12}, #{debian13} or #{ubuntu} on #{arm} or #{x86} with #{@server_kernel} " <>
-      "or later, which #{debian12} has only with a newer kernel than its own. The code works " <>
-      "for 30 minutes, and installing takes a few of them."
-  end
+  def summary_sentence(:connect, _values), do: "Waiting for your server to use its code."
 
   def summary_sentence(:connecting, _values), do: "Connecting your server…"
 
-  def summary_sentence(:ready, %{machine: machine}),
-    do:
-      "Your server is ready for the move. You can move Fermix back to this #{machine} from " <>
-        "Always On whenever you want."
+  def summary_sentence(:ready, _values),
+    do: "Your server is ready. Fermix moves to it when you press Move now."
+
+  def summary_sentence(:ready_waits, %{to: to, at: %DateTime{} = at, zone: zone})
+      when is_binary(to),
+      do: "#{to} waits for the move until #{stated(at, zone)}."
+
+  # The code's sentence, under the command it names: the systems the
+  # server's first boot takes, and until when the code works.
+  def summary_sentence(:own_server, %{at: %DateTime{} = at, zone: zone}) do
+    [debian12, debian13, ubuntu] = @server_systems
+    [_debian, release] = String.split(debian13, " ")
+
+    "Run this on your #{debian12} or #{release}, or #{ubuntu} server, then paste the code " <>
+      "when it asks. The code works once, until #{stated(at, zone)}."
+  end
 
   def summary_sentence(:moving, %{machine: machine}),
     do:
@@ -416,6 +458,16 @@ defmodule FermixCore.Management.Copy do
   def summary_sentence(:cannot_reach, _values),
     do: "Fermix cannot reach your server. Your messages wait until it is back."
 
+  # What to check, and, where this computer can restore, when to.
+  def summary_sentence(:cannot_reach_note, %{machine: machine, restore: restore?})
+      when is_boolean(restore?) do
+    "Check that your server is on and online." <>
+      if(restore?,
+        do: " If it is gone for good, restore Fermix on this #{machine}.",
+        else: ""
+      )
+  end
+
   def summary_sentence(:server_not_set_up, _values),
     do:
       "This server did not finish setting up. Open a new code in Always On and run the " <>
@@ -423,26 +475,23 @@ defmodule FermixCore.Management.Copy do
 
   def summary_sentence(:server_waited_too_long, _values),
     do:
-      "This server waited too long for its move. Open a new code in Always On and run the " <>
-        "command here again."
+      "This server waited too long. Open a new code in Always On and run the command " <>
+        "here again."
 
   def summary_sentence(:update, %{machine: machine}),
     do: "Update Fermix on this #{machine} to keep using Always On."
 
   def summary_sentence(:update_settings_only, %{machine: machine}),
-    do:
-      "Update Fermix on this #{machine}. Your server runs a newer Fermix, so until then " <>
-        "this #{machine} can change settings only."
+    do: "Your server runs a newer Fermix, so this #{machine} can change settings only."
 
   def summary_sentence(:server_older, %{machine: machine}),
-    do:
-      "Your server runs an older Fermix than this #{machine}. It updates on its own once " <>
-        "the app for each computer that keeps your backups carries the newer one."
+    do: "Your server runs an older Fermix than this #{machine}."
+
+  def summary_sentence(:server_older_note, _values),
+    do: "It updates on its own once the app for each computer that keeps your backups carries it."
 
   def summary_sentence(:server_ahead, %{machine: machine}),
-    do:
-      "Your server runs a newer Fermix than this #{machine} can restore. Update Fermix on " <>
-        "this #{machine}."
+    do: "Your server runs a newer Fermix than this #{machine} can restore."
 
   def summary_sentence(:disk_full, %{percent: percent}),
     do: "Your server's disk is #{percent}% full."
@@ -450,15 +499,18 @@ defmodule FermixCore.Management.Copy do
   def summary_sentence(:server_disk_full, %{percent: percent}),
     do: "This server's disk is #{percent}% full."
 
+  def summary_sentence(:disk_note, _values),
+    do: "Free some space on it, or give it a bigger disk."
+
   def summary_sentence(:backup_old, %{days: days, machine: machine}),
     do: "Your last backup is #{days} days old. It runs when this #{machine} is online."
 
-  # The try's own words, where the backup went and when it was tried.
-  def summary_sentence(
-        :backup_failed,
-        %{place: place, at: %DateTime{} = at, zone: zone} = values
-      ),
-      do: "Backing up to #{place} failed on #{stated(at, zone)}: #{terminated(values.error)}"
+  def summary_sentence(:backup_failed, %{place: place}) when is_binary(place),
+    do: "Backing up to #{place} failed."
+
+  # The try's own words, then when it was tried.
+  def summary_sentence(:backup_failed_note, %{at: %DateTime{} = at, zone: zone} = values),
+    do: "#{terminated(values.error)} Tried #{stated(at, zone)}."
 
   def summary_sentence(:backup_none, %{days: days, machine: machine}),
     do:
@@ -473,7 +525,7 @@ defmodule FermixCore.Management.Copy do
       "Your last backup is #{days} days old. It runs when your Mac is online: open Fermix " <>
         "on your Mac to back up now."
 
-  def summary_sentence(:not_ready, %{block: block}), do: "The move cannot start yet. #{block}"
+  def summary_sentence(:not_ready, _values), do: "The move cannot start yet."
 
   def summary_sentence(:notice_ready, _values), do: "Your server is ready for the move."
   def summary_sentence(:notice_moved, _values), do: "Fermix moved to your server."
@@ -485,6 +537,13 @@ defmodule FermixCore.Management.Copy do
     do:
       "Fermix on your server can use nothing on this #{machine} until you review what it " <>
         "may use."
+
+  # While a linked computer's switches wait for the owner's review: they are
+  # set under This computer, and Keep these switches takes them as they are.
+  def summary_sentence(:review_note, %{machine: machine}),
+    do:
+      "Fermix on your server can use nothing on this #{machine} until you review the " <>
+        "switches under This computer."
 
   def summary_sentence(:notice_server_sandbox, _values),
     do:
@@ -520,7 +579,16 @@ defmodule FermixCore.Management.Copy do
     do: "Connecting this #{machine} to your server…"
 
   def summary_sentence(:return_ready, %{machine: machine}),
-    do: "This #{machine} is ready to take Fermix back."
+    do:
+      "Fermix still runs on your server. It moves back to this #{machine} when you press Move now."
+
+  def summary_sentence(:return_waits, %{machine: machine, at: %DateTime{} = at, zone: zone}),
+    do: "This #{machine} waits for it until #{stated(at, zone)}."
+
+  def summary_sentence(:notice_return_ready, %{machine: machine}),
+    do:
+      "Fermix still runs on your server. Open Always On and press Move now to move it back " <>
+        "to this #{machine}."
 
   def summary_sentence(:return_moving, %{machine: machine}),
     do: "Moving Fermix back to this #{machine}. Messages wait until it is done."
@@ -545,6 +613,17 @@ defmodule FermixCore.Management.Copy do
       "Fermix is back on this #{machine}. Your own server still runs its retired copy: turn " <>
         "it off or delete it."
 
+  def summary_sentence(:progress_packing, _values), do: "Packing your home…"
+
+  def summary_sentence(:progress_sending, %{to: to}) when is_binary(to),
+    do: "Sending your home to #{to}…"
+
+  def summary_sentence(:progress_unpacking, %{to: to}) when is_binary(to),
+    do: "#{to} is unpacking your home…"
+
+  def summary_sentence(:progress_switching, %{to: to}) when is_binary(to),
+    do: "Switching over to #{to}…"
+
   def summary_sentence(:progress_return_receiving, _values),
     do: "Receiving your Fermix from the server…"
 
@@ -559,18 +638,37 @@ defmodule FermixCore.Management.Copy do
 
   def summary_sentence(:progress_backing_up, _values), do: "Backing up now…"
 
-  def summary_sentence(:confirm_restore_here, %{machine: machine, telegram: telegram?})
+  # The date of the backup it restores, stated absolutely: no time that
+  # moves with the clock.
+  def summary_sentence(:confirm_restore_here, %{
+        machine: machine,
+        telegram: telegram?,
+        at: %DateTime{} = at,
+        zone: zone
+      })
       when is_boolean(telegram?) do
-    "Restore Fermix on this #{machine} from its backup? Confirm only once you deleted " <>
-      "your server, or stopped it for good: if it runs again, two copies of Fermix answer " <>
-      "the same channels. Messages, memory and jobs since that backup are gone" <>
-      if(telegram?, do: ", and Telegram keeps nothing older than 24 hours.", else: ".")
+    lines([
+      "Restore Fermix on this #{machine} from its backup of #{stated(at, zone)}?",
+      "Confirm only once you deleted your server, or stopped it for good: if it runs again, " <>
+        "two copies of Fermix answer the same channels.",
+      "Messages, memory and jobs since that backup are gone" <>
+        if(telegram?, do: ", and Telegram keeps nothing older than 24 hours.", else: ".")
+    ])
   end
 
   def summary_sentence(:confirm_forget, _values),
     do:
-      "Forget this server? Fermix stops holding it for the move. To move later, set up a " <>
-        "server with a new code."
+      lines([
+        "Forget this server?",
+        "Fermix stops holding it for the move. To move later, set up a server with a new code."
+      ])
+
+  def summary_sentence(:confirm_change_passphrase, _values),
+    do:
+      lines([
+        "Change the recovery passphrase?",
+        "Backups made before now still open only with the passphrase you set before."
+      ])
 
   def summary_sentence(:confirm_return_move, %{
         machine: machine,
@@ -578,65 +676,38 @@ defmodule FermixCore.Management.Copy do
         costs: costs
       }),
       do:
-        "Move Fermix back to this #{machine} now?" <>
-          runs_here_line(features) <>
-          Enum.map_join(costs, &Keyword.fetch!(@return_costs, &1)) <>
-          " Your server stays until you delete it."
+        lines(
+          ["Move Fermix back to this #{machine} now?"] ++
+            runs_here_line(features) ++
+            Enum.map(costs, &Keyword.fetch!(@return_costs, &1)) ++
+            ["Your server stays until you delete it."]
+        )
 
   def summary_sentence(:webhooks, %{carried: [_ | _] = carried}) do
     names = for {kind, name} <- @reached, kind in carried, do: name
     true = length(names) == length(Enum.uniq(carried))
-    verb = if carried == [:whatsapp], do: "reaches", else: "reach"
+    verb = if carried == [:whatsapp], do: "needs", else: "need"
 
-    "#{names |> join_names() |> capitalised()} #{verb} Fermix on your server through " <>
-      "Tailscale Funnel. Once, in your tailnet policy, give tag:fermix-server the funnel " <>
-      "node attribute, and turn on MagicDNS and HTTPS certificates. Then run each of these " <>
-      "on the server; a new address can take about ten minutes to resolve."
+    "#{names |> join_names() |> capitalised()} #{verb} a public address to reach your " <>
+      "server. Run each command once, on the server."
   end
 
   def summary_sentence(:webhooks_whatsapp, _values),
-    do:
-      "Tailscale prints the address this gives. In Meta's app dashboard, set it as the " <>
-        "Callback URL with your verify token and press Verify and save; until then " <>
-        "WhatsApp messages do not arrive."
+    do: "Then set the address it prints as Meta's Callback URL, with your verify token."
 
   def summary_sentence(:webhooks_cue, _values),
+    do: "In the sender, change the host of the source's webhook address to the one it prints."
+
+  # The one step a tailnet takes once, under the mounts.
+  def summary_sentence(:webhooks_tailnet, _values),
     do:
-      "Tailscale prints the address this gives. In the sender (GitHub and the like), change " <>
-        "the host of the source's webhook address to the one it prints, and keep the path."
-
-  def summary_sentence(:webhooks_port, _values),
-    do:
-      "Funnel publishes everything tailscale serve has on port 443, so put only these " <>
-        "paths there."
-
-  def summary_sentence(:webhooks_ingress, _values),
-    do:
-      "Funnel traffic comes in through Tailscale's ingress servers, which see only " <>
-        "encrypted bytes: with Funnel, they are the one way a webhook reaches your server."
-
-  def summary_sentence(:webhooks_tunnel, %{ports: [_ | _] = ports}) do
-    noun = if length(ports) == 1, do: "port", else: "ports"
-    each = for {kind, port} <- ports, do: "#{port} for #{Keyword.fetch!(@carried, kind)}"
-
-    "Without Tailscale, run Cloudflare Tunnel to the same loopback #{noun} instead: " <>
-      join_names(each) <> "."
-  end
+      "These use Tailscale Funnel. Once per tailnet, let tag:fermix-server use Funnel, and " <>
+        "turn on MagicDNS and HTTPS certificates."
 
   def summary_sentence(:own_server_tailscale, _values),
     do:
-      "Optional: to also join the server to your tailnet, which WhatsApp and webhook " <>
-        "sources need, run this instead. It asks for the enrollment code and then a " <>
-        "Tailscale auth key, and shows neither. First declare tag:fermix-server under " <>
-        "tagOwners in your tailnet policy, then create the key in Tailscale's admin console " <>
-        "with that tag, one-off and pre-approved, and in the policy let only your own " <>
-        "devices reach the server."
-
-  def summary_sentence(:data, _values),
-    do:
-      "Your conversations and memories, the secrets, the browser and traces live on your " <>
-        "server, and whoever hosts it can technically read its disk. Backups are encrypted " <>
-        "to your recovery passphrase."
+      "For WhatsApp and webhook sources: run this instead. It also asks for a one-off, " <>
+        "pre-approved Tailscale auth key tagged tag:fermix-server."
 
   @doc """
   What a move stops among `features` (`:voice`, `:meetings`,
@@ -677,19 +748,17 @@ defmodule FermixCore.Management.Copy do
     "#{names |> join_names() |> capitalised()} #{verb} on #{name} again after the move"
   end
 
-  defp stops_line([]), do: ""
-  defp stops_line(features), do: " #{stops_after_move(features)}."
-
-  defp voice_line(features, machine) do
-    if :voice in features, do: " #{voice_after_move(machine, "your server")}.", else: ""
-  end
-
-  defp runs_here_line([]), do: ""
+  defp runs_here_line([]), do: []
 
   defp runs_here_line(features) do
     verb = if features in @singular_features, do: "runs", else: "run"
-    " #{feature_names(features)} #{verb} here again."
+    ["#{feature_names(features)} #{verb} here again."]
   end
+
+  # A confirm's parts, one per line: the question, then each thing it says.
+  # An alert, a sheet, a terminal and the setup page draw a line break as it
+  # is.
+  defp lines(parts), do: Enum.join(parts, "\n")
 
   # What runs only on this computer among `features`, named in order, as a
   # sentence starts.
@@ -707,12 +776,17 @@ defmodule FermixCore.Management.Copy do
   defp capitalised(<<first::utf8, rest::binary>>), do: String.upcase(<<first::utf8>>) <> rest
 
   @doc """
-  Move now's confirm: the question, then each warning of the review in its
-  own words (`warnings`, the sentences, in the review's order).
+  Move now's confirm, one part per line: the question with the way back to
+  this `machine`, then each warning of the review in its own words
+  (`warnings`, the sentences, in the review's order).
   """
-  @spec move_confirm([String.t()]) :: String.t()
-  def move_confirm(warnings) when is_list(warnings),
-    do: Enum.join(["Move Fermix to your server now?" | warnings], " ")
+  @spec move_confirm([String.t()], String.t()) :: String.t()
+  def move_confirm(warnings, machine) when is_list(warnings) and is_binary(machine),
+    do:
+      lines([
+        "Move Fermix to your server now? You can move it back to this #{machine} any time."
+        | warnings
+      ])
 
   @doc "Every key `summary_line/3` takes."
   @spec summary_line_keys() :: [atom()]
@@ -722,20 +796,16 @@ defmodule FermixCore.Management.Copy do
   @spec summary_line_label(atom()) :: String.t()
   def summary_line_label(:backup), do: "Last backup to your desktop"
   def summary_line_label(:copies), do: "Backups on this Mac"
-  def summary_line_label(:backup_here), do: "Backup on this Mac"
   def summary_line_label(key), do: Keyword.fetch!(@line_labels, key)
 
   @doc """
   One Details line, `%{"label", "value"}`, its value finished here from
-  `value`: a name, a system or a version as it is; a time (`waits_until`, a
-  `backup`'s `{place, at}`) stated in `ctx`'s `zone`; the space this
+  `value`: a name, a system, a version or an S3 bucket as it is; a
+  `backup`'s `{place, at}` stated in `ctx`'s `zone`; the space this
   computer's `copies` take, in bytes, on `ctx`'s `machine`; how full the
-  server's `disk` is, a fraction; the copy on `ctx`'s `machine` a restore
-  takes (`backup_here`, when it was written); what runs on this computer
-  again after a move back (`runs_again`, the features); why Move back is not
-  offered (`move_back`, the move back's own refusal); and whether the link
-  to the server runs direct or through Fermix's relay (`connection`, `:direct`
-  or `:relay`).
+  server's `disk` is, a fraction; why Move back is not offered (`move_back`,
+  the move back's own refusal); and whether the link to the server runs
+  direct or through Fermix's relay (`connection`, `:direct` or `:relay`).
   """
   @spec summary_line(atom(), term(), map()) :: %{String.t() => String.t()}
   def summary_line(:backup, {place, %DateTime{} = at}, %{zone: zone}),
@@ -744,17 +814,8 @@ defmodule FermixCore.Management.Copy do
   def summary_line(:copies, bytes, %{machine: machine}) when is_integer(bytes),
     do: line("Backups on this #{machine}", Disk.gib(bytes))
 
-  def summary_line(:backup_here, %DateTime{} = at, %{machine: machine, zone: zone}),
-    do: line("Backup on this #{machine}", stated(at, zone))
-
-  def summary_line(:runs_again, [_ | _] = features, _ctx),
-    do: line(summary_line_label(:runs_again), feature_names(features))
-
   def summary_line(:disk, used, _ctx) when is_number(used),
     do: line(summary_line_label(:disk), "#{round(used * 100)}% used")
-
-  def summary_line(:waits_until, %DateTime{} = at, %{zone: zone}),
-    do: line(summary_line_label(:waits_until), stated(at, zone))
 
   def summary_line(:connection, :direct, _ctx),
     do: line(summary_line_label(:connection), "Direct")
@@ -763,10 +824,66 @@ defmodule FermixCore.Management.Copy do
     do: line(summary_line_label(:connection), "Through Fermix's network")
 
   def summary_line(key, value, _ctx)
-      when key in [:server, :system, :version, :move_back] and is_binary(value),
+      when key in [:server, :system, :version, :move_back, :s3_bucket] and is_binary(value),
       do: line(summary_line_label(key), value)
 
   defp line(label, value), do: %{"label" => label, "value" => value}
+
+  @doc """
+  A flow's steps, in order: the move to the owner's server (`:move`) and
+  the move back to this `machine` (`:return`), whose first step names it.
+  """
+  @spec step_labels(:move | :return, String.t()) :: [String.t(), ...]
+  def step_labels(:move, machine) when is_binary(machine), do: @move_steps
+
+  def step_labels(:return, machine) when is_binary(machine),
+    do: ["Get this #{machine} ready" | @return_steps]
+
+  @doc "This computer as a flow's route names its end: This Mac, or This computer off a Mac."
+  @spec route_here(String.t()) :: String.t()
+  def route_here(machine) when is_binary(machine), do: "This #{machine}"
+
+  @doc """
+  The bytes a move counted, as the route's words: `bytes` of `size`, `:sent`
+  (the source) or `:received` (the computer taking the home back), "502 MiB
+  of 1.4 GiB sent". Sizes under a GiB in whole MiB, larger ones in GiB to
+  one decimal.
+  """
+  @spec transfer_label(non_neg_integer(), pos_integer(), :sent | :received) :: String.t()
+  def transfer_label(bytes, size, way)
+      when is_integer(bytes) and bytes >= 0 and is_integer(size) and size > 0 and
+             way in [:sent, :received],
+      do: "#{size_words(bytes)} of #{size_words(size)} #{way}"
+
+  @gib 1_073_741_824
+  @mib 1_048_576
+
+  defp size_words(bytes) when bytes < @gib, do: "#{div(bytes + div(@mib, 2), @mib)} MiB"
+
+  defp size_words(bytes) do
+    tenths = div(bytes * 10 + div(@gib, 2), @gib)
+    "#{div(tenths, 10)}.#{rem(tenths, 10)} GiB"
+  end
+
+  @doc """
+  The backup words a server's backup settings show (the pane's §3.12): the
+  recovery passphrase's label, whether one is `set?`, its footer, and the
+  line that says a copy is kept in S3.
+  """
+  @spec backup_words(boolean()) :: %{
+          label: String.t(),
+          value: String.t(),
+          footer: String.t(),
+          s3: String.t()
+        }
+  def backup_words(set?) when is_boolean(set?) do
+    %{
+      label: "Recovery passphrase",
+      value: if(set?, do: "Set", else: "Not set"),
+      footer: "Every backup is encrypted to it, and Fermix never stores it.",
+      s3: "Also kept in S3, set up with your server."
+    }
+  end
 
   defp stated(at, zone), do: Clock.stated_instant(at, personalization: [timezone: zone])
 
@@ -775,16 +892,24 @@ defmodule FermixCore.Management.Copy do
   end
 
   @doc """
-  The names the own-server copy interpolates rather than writes: the systems,
-  architectures and kernel the server's first boot takes (`connect`'s
-  sentence), which the copy rules are given as data.
+  The names the own-server copy interpolates rather than writes: the systems
+  the server's first boot takes (the code's sentence), which the copy rules
+  are given as data. Its architectures and kernel are the docs page's.
   """
   @spec own_server_names() :: [String.t()]
-  def own_server_names, do: @server_systems ++ @server_arches ++ [@server_kernel]
+  def own_server_names, do: @server_systems
 
-  @doc "The Always On docs page."
-  @spec always_on_docs_url() :: String.t()
-  def always_on_docs_url, do: @docs_url
+  @doc "Every anchor of the Always On docs page a screen links to (the pane's §4)."
+  @spec docs_anchors() :: [String.t()]
+  def docs_anchors, do: @docs_anchors
+
+  @doc "The Always On docs page at `anchor` (`docs_anchors/0`), a screen's help."
+  @spec always_on_docs_url(String.t()) :: String.t()
+  def always_on_docs_url(anchor) when anchor in @docs_anchors, do: @docs_url <> "#" <> anchor
+
+  @doc "The label the optional Tailscale step of the code is folded under."
+  @spec tailscale_label() :: String.t()
+  def tailscale_label, do: "Also join your tailnet (optional)"
 
   @doc """
   The command an owner runs on a Linux server of their own to install Fermix
@@ -833,7 +958,6 @@ defmodule FermixCore.Management.Copy do
   def summary_label(:cancel, _values), do: "Cancel"
   def summary_label(:move_now, _values), do: "Move now"
   def summary_label(:try_again, _values), do: "Try again"
-  def summary_label(:learn_more, _values), do: "Learn more"
 
   def summary_label(:update, %{first: true, machine: machine}),
     do: "Update Fermix on this #{machine} first"
@@ -841,13 +965,13 @@ defmodule FermixCore.Management.Copy do
   def summary_label(:update, _values), do: "Update"
   def summary_label(:back_up_now, _values), do: "Back up now"
   def summary_label(:check_again, _values), do: "Check again"
-  def summary_label(:review_offers, _values), do: "Review what your server may use"
+  def summary_label(:review_offers, _values), do: "Keep these switches"
   def summary_label(:add_computer, _values), do: "Add a computer"
   def summary_label(:approve_computer, _values), do: "Add it"
   def summary_label(:deny_computer, _values), do: "Do not add it"
+  def summary_label(:change_passphrase, _values), do: "Change"
 
-  def summary_label(:own_server, %{renew: true}),
-    do: "Open a new code (the current one stops working)"
+  def summary_label(:own_server, %{renew: true}), do: "Replace the code"
 
   def summary_label(:own_server, _values), do: "Use my own Linux server"
   def summary_label(:move_back, %{machine: machine}), do: "Move back to this #{machine}"

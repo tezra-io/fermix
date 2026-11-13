@@ -859,7 +859,8 @@ defmodule FermixCore.Management.CopyTest do
   # while it enrolls.
   describe "the Always On copy an app shows" do
     test "names no fermix command" do
-      {:ok, view} = Settings.get("snapshots")
+      # Backup settings are an Always On server's alone (ALWAYS_ON_PANE §3.12, D18).
+      {:ok, view} = Settings.get("snapshots", server_primary?: true)
 
       section_rows =
         for row <- view["rows"],
@@ -1265,8 +1266,8 @@ defmodule FermixCore.Management.CopyTest do
       ctx = %{zone: "Europe/Berlin", machine: "Mac"}
       at = ~U[2031-05-04 10:00:00Z]
 
-      assert Copy.summary_line(:waits_until, at, ctx) ==
-               %{"label" => "Waits until", "value" => "Sunday, May 4, 2031 at 12:00 PM CEST"}
+      assert Copy.summary_line(:s3_bucket, "invented-larch-backups", ctx) ==
+               %{"label" => "S3 bucket", "value" => "invented-larch-backups"}
 
       assert Copy.summary_line(:backup, {"S3", at}, ctx) ==
                %{
@@ -1288,24 +1289,69 @@ defmodule FermixCore.Management.CopyTest do
     end
 
     # Move now's confirm names what the move costs the owner, in the
-    # review's own words, and never a time or a price, so it is stable.
-    test "Move now's confirm asks once and names each warning in its words" do
+    # review's own words, one per line, and never a time or a price, so it is
+    # stable (the pane's D3).
+    test "Move now's confirm asks once, says the way back, and names each warning on its line" do
       warnings = [
         "WhatsApp stops after the move: it needs an address on the internet that WhatsApp " <>
-          "can send messages to, and north-box has none."
+          "can send messages to, and north-box has none.",
+        "This computer serves nothing while the move runs."
       ]
 
-      assert Copy.move_confirm(warnings) ==
-               "Move Fermix to your server now? WhatsApp stops after the move: it needs an " <>
-                 "address on the internet that WhatsApp can send messages to, and north-box " <>
-                 "has none."
+      assert Copy.move_confirm(warnings, "Mac") ==
+               "Move Fermix to your server now? You can move it back to this Mac any time.\n" <>
+                 "WhatsApp stops after the move: it needs an address on the internet that " <>
+                 "WhatsApp can send messages to, and north-box has none.\n" <>
+                 "This computer serves nothing while the move runs."
 
-      assert Copy.move_confirm([]) == "Move Fermix to your server now?"
+      assert Copy.move_confirm([], "computer") ==
+               "Move Fermix to your server now? You can move it back to this computer any time."
     end
 
-    # The systems the own-server copy names are the ones the server's first
-    # boot takes: read from the script it runs, so the two cannot drift.
-    test "the systems the own-server copy names are the ones the first boot takes" do
+    # R1: a screen's own words are short. Seen failing on the copy before the
+    # pane's draft 3 (`off` 47 words with what stops, `connect` 55, the
+    # webhooks sentence 50).
+    test "every screen's sentence, note, progress and webhooks say at most the word bound" do
+      over =
+        for {"summary " <> key, text, :prose} <- summary_copy(),
+            String.to_existing_atom(key) not in Copy.unbounded_keys(),
+            (words = text |> String.split(~r/\s+/, trim: true) |> length()) > Copy.word_bound(),
+            do: {key, words, text}
+
+      assert over == []
+      assert Copy.word_bound() == 20
+    end
+
+    # §4: the anchors are the contract with the docs page.
+    test "each screen's help is the docs page at one of its anchors" do
+      for anchor <- Copy.docs_anchors() do
+        assert Copy.always_on_docs_url(anchor) == "https://fermix.ai/docs/always-on/#" <> anchor
+      end
+
+      assert_raise FunctionClauseError, fn -> Copy.always_on_docs_url("nowhere") end
+    end
+
+    test "a flow's steps, its route and the bytes it counted are the engine's words" do
+      assert Copy.step_labels(:move, "Mac") ==
+               ["Connect your server", "Move now", "Send your home", "Switch over"]
+
+      assert Copy.step_labels(:return, "computer") ==
+               ["Get this computer ready", "Move now", "Receive your home", "Put Fermix in place"]
+
+      assert Copy.route_here("Mac") == "This Mac"
+      assert Copy.transfer_label(526_385_152, 1_503_238_554, :sent) == "502 MiB of 1.4 GiB sent"
+      assert Copy.transfer_label(0, 104_857_600, :received) == "0 MiB of 100 MiB received"
+
+      for label <- Copy.step_labels(:move, "Mac") ++ Copy.step_labels(:return, "Mac") do
+        assert Copy.violations(label, :name) == [], label
+        assert Copy.summary_violations(label) == [], label
+      end
+    end
+
+    # The systems the code's sentence names are the ones the server's first
+    # boot takes: read from the script it runs, so the two cannot drift. Its
+    # architectures and kernel are the docs page's.
+    test "the systems the code's sentence names are the ones the first boot takes" do
       script =
         File.read!(Path.join(TestSourceScan.umbrella_root(), "packaging/cloud/first-boot.sh"))
 
@@ -1317,15 +1363,19 @@ defmodule FermixCore.Management.CopyTest do
         |> Regex.scan(systems)
         |> Enum.map(fn [_all, id, version] -> "#{String.capitalize(id)} #{version}" end)
 
-      names = Copy.own_server_names()
-      assert taken == ["Debian 12", "Debian 13", "Ubuntu 24.04"]
-      assert Enum.all?(taken, &(&1 in names))
-      assert arches == "aarch64 | x86_64" and "arm64" in names and "x86_64" in names
-      assert script =~ "LANDLOCK_ABI_MIN=3" and "Linux 6.2" in names
+      assert taken == Copy.own_server_names()
+      assert arches == "aarch64 | x86_64"
+
+      said = Copy.summary_sentence(:own_server, %{at: ~U[2031-06-03 13:30:00Z], zone: "Etc/UTC"})
+
+      assert said ==
+               "Run this on your Debian 12 or 13, or Ubuntu 24.04 server, then paste the code " <>
+                 "when it asks. The code works once, until Tuesday, June 3, 2031 at 1:30 PM UTC."
     end
 
-    test "the docs and the own-server command are the engine's to word" do
-      assert Copy.always_on_docs_url() == "https://fermix.ai/docs/always-on/"
+    test "the own-server command and its Tailscale step are the engine's to word" do
+      assert Copy.tailscale_label() == "Also join your tailnet (optional)"
+
       # The server installs the release this computer runs (design §6).
       assert Copy.own_server_command() ==
                "curl -fsSL https://fermix.ai/install | sudo sh -s -- --always-on --version " <>
@@ -1343,8 +1393,9 @@ defmodule FermixCore.Management.CopyTest do
       refute Copy.own_server_tailscale_command() =~ "--ts-authkey"
     end
 
-    # The Funnel mounts' labels are names, and a webhook source's is its own.
-    test "a failed backup says the try's own words, where it went and when, as one sentence" do
+    # The pane's R4: where it went is the sentence, the try's own words and
+    # when it was tried the note.
+    test "a failed backup says where it went, and its note the try's own words and when" do
       values = %{
         place: "S3",
         at: ~U[2031-05-04 10:00:00Z],
@@ -1353,20 +1404,18 @@ defmodule FermixCore.Management.CopyTest do
         machine: "Mac"
       }
 
-      assert Copy.summary_sentence(:backup_failed, values) ==
-               "Backing up to S3 failed on #{@failed_at}: S3 refused the snapshot."
+      assert Copy.summary_sentence(:backup_failed, values) == "Backing up to S3 failed."
+
+      assert Copy.summary_sentence(:backup_failed_note, values) ==
+               "S3 refused the snapshot. Tried #{@failed_at}."
 
       done = %{values | error: "Your desk did not confirm the snapshot in time."}
-      assert Copy.summary_sentence(:backup_failed, done) =~ ~r/in time\.\z/
+      assert Copy.summary_sentence(:backup_failed_note, done) =~ ~r/in time\. Tried /
     end
 
     test "each Funnel mount is labelled by what it carries" do
       assert Copy.mount_label(:whatsapp) == "WhatsApp"
       assert Copy.mount_label({:cue, "gh-hooks"}) == "Webhook source gh-hooks"
-
-      assert Copy.summary_sentence(:webhooks_tunnel, %{ports: [whatsapp: 4030]}) ==
-               "Without Tailscale, run Cloudflare Tunnel to the same loopback port instead: " <>
-                 "4030 for WhatsApp."
     end
 
     test "every key and every action answers its words" do
@@ -1406,8 +1455,11 @@ defmodule FermixCore.Management.CopyTest do
     sentences =
       for key <- Copy.summary_keys(),
           machine <- ["Mac", "computer"],
+          restore <- [true, false],
+          uniq: true,
           do:
-            {"summary #{key}", Copy.summary_sentence(key, Map.put(values, :machine, machine)),
+            {"summary #{key}",
+             Copy.summary_sentence(key, Map.merge(values, %{machine: machine, restore: restore})),
              :prose}
 
     labels =
@@ -1427,7 +1479,23 @@ defmodule FermixCore.Management.CopyTest do
       for mount <- [:whatsapp, {:cue, "gh-hooks"}],
           do: {"mount #{inspect(mount)}", Copy.mount_label(mount), :name}
 
-    sentences ++ labels ++ mounts ++ [{"too old", too_old, :prose}]
+    words = Copy.backup_words(true)
+
+    flows =
+      for flow <- [:move, :return],
+          machine <- ["Mac", "computer"],
+          label <- Copy.step_labels(flow, machine),
+          uniq: true,
+          do: {"step", label, :name}
+
+    backup = [{"backup", words.footer, :prose}, {"backup", words.s3, :prose}]
+
+    names = [
+      {"tailscale", Copy.tailscale_label(), :name},
+      {"route", Copy.route_here("Mac"), :name}
+    ]
+
+    sentences ++ labels ++ mounts ++ flows ++ backup ++ names ++ [{"too old", too_old, :prose}]
   end
 
   # The older copy the apps and the setup page show (readiness actions and
@@ -2382,6 +2450,12 @@ defmodule FermixCore.Management.CopyTest do
       for {where, sentence} <- held ++ table ++ hold do
         assert_clean(sentence, :prose, ["Mac", "Linux"], where)
         assert Copy.summary_violations(sentence) == [], "#{where}: #{sentence}"
+      end
+
+      # The Always On pane's R1: the update words an app draws are short.
+      for {where, sentence} <- held do
+        words = sentence |> String.split(~r/\s+/, trim: true) |> length()
+        assert words <= Copy.word_bound(), "#{where}: #{words} words"
       end
 
       for machine <- ["Mac", "computer"],

@@ -858,11 +858,12 @@ ReturnOffers ==
 \* computer (move_back/1, :886-889: its moved marker; the act refuses it
 \* while the server reports a move, which it cannot while it answers as the
 \* primary), beside Back up now, Add a computer and, where this computer
-\* moved before M97 and its switches wait for the owner, the review of them
-\* (review_action/1, :755-757): acts that write nothing a rule reads, not
+\* moved before M97 and its switches wait for the owner, Keep these
+\* switches (reviewing/2): acts that write nothing a rule reads, not
 \* modelled, as the owner's answer to a computer that asks to join is not;
 \* one whose server does not answer (away_here/1 and retired/1:
-\* cannot_reach, retired) offers Restore here beside its own action. Ten
+\* cannot_reach, retired, neither with an action of its own) offers
+\* Restore here among its other steps. Ten
 \* minutes of silence are not modelled: the link is down or up.
 DeviceOffers ==
     (IF LinkUp /\ mMarker THEN {"move_back"} ELSE {})

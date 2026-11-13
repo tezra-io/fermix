@@ -248,7 +248,7 @@ its enrollment stands).
 | `secrets_missing` | array | On a running primary, the ids (as `fermix setup` and `secret.set` take them) of the secret references in its settings that did not resolve on this host: each needs entering again. Empty in every other role, and while Fermix is stopped. The human output names them on a line of its own. |
 | `primary_home` | object, null | On a running linked desktop, the primary's own record (this table's fields, as the primary answers them), asked within 5 s; its recovery, enrollment, candidates and move are the server's. Null on any other engine, while it is missing, and while Fermix is stopped. |
 | `primary_missing` | string, null | On a running linked desktop whose primary is unreachable or did not answer within 5 s, the sentence that says why `primary_home` is missing. Null otherwise. |
-| `summary` | object | Where Always On stands, as every surface prints it: `key`, `state`, `sentence`, `action` (the action record, or null), `detail` and `notice`, as the management `home.status` answers it (`priv/management/PROTOCOL.md`, "The Always On summary"). With Fermix stopped it is worked out from the home's own files, so the link, the window and the server's own part read as absent. The human output leads with its sentence and, on a line of its own, its action and where to take it: `fermix always-on`, or the Fermix app on a home the app manages. |
+| `summary` | object | Where Always On stands, as every surface prints it: `key`, `state`, `sentence`, `action` (the action record, or null), `detail`, `notice`, `outcome` and `help` (the docs page for the screen), as the management `home.status` answers it (`priv/management/PROTOCOL.md`, "The Always On summary"). With Fermix stopped it is worked out from the home's own files, so the link, the window and the server's own part read as absent. The human output leads with its sentence and, on a line of its own, its action and where to take it: `fermix always-on`, or the Fermix app on a home the app manages. |
 | `disk` | object, null | On the primary, how full its disk is: `used` (a fraction from 0 to 1) and `nearly_full` (from 0.85). Null in every other role and when it cannot be read. |
 | `version` | string | This engine's version. |
 | `home_format` | integer | The home format this engine reads and writes: it restores a home of this format or an older one, whichever Fermix wrote it, and refuses a newer one. Absent from an engine before home formats. |
@@ -339,18 +339,22 @@ and answers the step result:
   with `--wait`, the screen once the step settled.
 - `result` — object or null. What the step answered beyond its screen: for
   `own-server`, `code` (the enrollment code, answered this once and never
-  again), `expires_at` and `command` (what to run on the server, which carries
-  no code); for `move-now` and `try-again`, `move_id`; for `add-computer`,
-  `code` (the code a new computer joins with, answered this once) and
-  `expires_at`; for `approve-computer`, `device_id` and `name` (the computer
-  as the home added it); for `learn-more`, which
-  sends nothing, `url`; null for every other step.
+  again), `expires_at`, `command` (what to run on the server, which carries
+  no code), `sentence` (the engine's line for the code: the systems it takes
+  and until when it works, in the owner's zone) and `tailscale` (`label`,
+  `sentence`, `command` and `url`: the optional step that also joins the
+  server to the owner's tailnet); for `move-now` and `try-again`, `move_id`;
+  for `add-computer`, `code` (the code a new computer joins with, answered
+  this once) and `expires_at`; for `approve-computer`, `device_id` and
+  `name` (the computer as the home added it); null for every other step,
+  `update` among them, which sends nothing.
 
 Golden: `always_on/step.json`.
 
 Under `--json`, or with no terminal, the verb never prompts. A step needs what
 the action's `needs` lists, from flags only: `--recovery-passphrase-file
-PATH` the recovery passphrase, and `--sas DIGITS` the six digits the
+PATH` the recovery passphrase (a new one for `change-passphrase`, the backup
+settings' Change, and for the first `move-now`), and `--sas DIGITS` the six digits the
 computer that asks to join shows (`approve-computer`; they are no secret,
 and on a terminal the verb asks for them). A need no flag gives is a usage error, exit
 `2`, naming the flag. A step whose `confirm` is not null needs `--yes`;

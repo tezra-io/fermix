@@ -80,10 +80,19 @@ defmodule FermixChannels.Home.MoveWorker do
   A request file that cannot be read is recorded with its sentence, and the
   worker ends without changing anything else.
 
+  **Counted** (Always On pane §3.13, P4). The step the worker is in and the
+  bytes it handed the rail are kept where the Always On summary reads them
+  (`FermixCore.Home.MoveProgress`): `:capture` as the capture starts, `:send`
+  at 0 of the capture's size as the send starts and again at each whole 5%
+  crossed, never per chunk, `:staging` while it awaits `move_ready`, and
+  `:commit` while it commits or resumes the commit. The record is forgotten
+  however the worker's move ends.
+
   Test seams: `:home`, `:helper`, `:connect` (route to a `Mobile.Rail`
   `:connect` function), `:clock`, `:sleep`, `:restart`, `:snapshot_opts`,
   `:resume_for_ms`, `:awake` (0-arity, as `MoveAwake.hold/0`), `:key_opts`
-  (handed to `ComputerKey`: its secret writer).
+  (handed to `ComputerKey`: its secret writer), `:progress` (the
+  `MoveProgress` server).
   """
 
   use Task, restart: :transient
@@ -106,6 +115,7 @@ defmodule FermixChannels.Home.MoveWorker do
   alias FermixCore.Home.Move
   alias FermixCore.Home.MoveAwake
   alias FermixCore.Home.Moved
+  alias FermixCore.Home.MoveProgress
   alias FermixCore.Home.MoveSecrets
   alias FermixCore.Home.MoveTelemetry
   alias FermixCore.Home.Snapshot
@@ -161,14 +171,19 @@ defmodule FermixChannels.Home.MoveWorker do
     end
   end
 
+  # The move's count is forgotten however its carrying on ends.
   defp carry_on(ctx, request, phase) do
     ctx = Map.merge(ctx, %{request: request, started_ms: started(request, phase)})
 
-    case {phase["phase"], Moved.read(ctx.home)} do
-      {_phase, {:ok, _marker}} -> resume(ctx)
-      {"aborting", :absent} -> abort(ctx, :recorded_abort, phase["sentence"])
-      {_before_commit, :absent} -> transfer(ctx)
-      {phase_name, {:error, reason}} -> unconfirmed(ctx, phase_name, marker_sentence(reason))
+    try do
+      case {phase["phase"], Moved.read(ctx.home)} do
+        {_phase, {:ok, _marker}} -> resume(ctx)
+        {"aborting", :absent} -> abort(ctx, :recorded_abort, phase["sentence"])
+        {_before_commit, :absent} -> transfer(ctx)
+        {phase_name, {:error, reason}} -> unconfirmed(ctx, phase_name, marker_sentence(reason))
+      end
+    after
+      :ok = MoveProgress.clear(ctx.progress, request["move_id"])
     end
   end
 
@@ -185,7 +200,8 @@ defmodule FermixChannels.Home.MoveWorker do
       snapshot_opts: Keyword.get(opts, :snapshot_opts, []),
       resume_for_ms: Keyword.get(opts, :resume_for_ms, @resume_for_ms),
       awake: Keyword.get(opts, :awake, default_awake()),
-      key_opts: Keyword.get(opts, :key_opts, [])
+      key_opts: Keyword.get(opts, :key_opts, []),
+      progress: Keyword.get(opts, :progress, MoveProgress)
     }
   end
 
@@ -353,6 +369,7 @@ defmodule FermixChannels.Home.MoveWorker do
   # is in the device role, so the file an earlier attempt wrote, of the size
   # the phase recorded, is sent again.
   defp capture(ctx) do
+    :ok = progress(ctx, :capture)
     path = Move.snapshot_path(ctx.home, ctx.request["move_id"])
     {:ok, phase} = Move.read_phase(ctx.home)
 
@@ -436,6 +453,7 @@ defmodule FermixChannels.Home.MoveWorker do
     sending = fn -> send_snapshot(ctx, rail, snapshot, device_id) end
 
     with :ok <- timed(ctx, "send", sending, snapshot.size),
+         :ok <- progress(ctx, :staging),
          {:ok, %{"epoch" => epoch}} <-
            timed(ctx, "staging", fn -> await(rail, "move_ready", @ready_ms) end, nil) do
       {:ok, epoch}
@@ -445,6 +463,7 @@ defmodule FermixChannels.Home.MoveWorker do
   # A source kept as a linked computer names its own device id, so the new
   # primary names the home's own history notes for it (M97 §8.4).
   defp send_snapshot(ctx, rail, snapshot, device_id) do
+    :ok = progress(ctx, :send, 0, snapshot.size)
     move_id = ctx.request["move_id"]
 
     offer =
@@ -461,7 +480,7 @@ defmodule FermixChannels.Home.MoveWorker do
     with :ok <- Rail.send_event(rail, "move_offer", offer),
          {:ok, accept} <- await(rail, "move_accept", @accept_ms),
          :ok <- same_recipient(accept, ctx),
-         :ok <- send_file(rail, move_id, snapshot.path) do
+         :ok <- send_file(ctx, rail, snapshot) do
       Rail.send_event(rail, "move_end", %{"move_id" => move_id})
     end
   end
@@ -494,15 +513,17 @@ defmodule FermixChannels.Home.MoveWorker do
       else: {:error, {:refused, "move_mismatch", "the candidate's key changed; enroll it again"}}
   end
 
-  defp send_file(rail, move_id, path) do
-    File.open(path, [:read, :binary], fn io -> send_chunks(rail, move_id, io, 0) end)
+  defp send_file(ctx, rail, snapshot) do
+    count = %{index: 0, sent: 0, size: snapshot.size}
+
+    File.open(snapshot.path, [:read, :binary], fn io -> send_chunks(ctx, rail, io, count) end)
     |> case do
       {:ok, result} -> result
-      {:error, reason} -> {:error, {:file, path, reason}}
+      {:error, reason} -> {:error, {:file, snapshot.path, reason}}
     end
   end
 
-  defp send_chunks(rail, move_id, io, index) do
+  defp send_chunks(ctx, rail, io, count) do
     case IO.binread(io, @chunk_bytes) do
       :eof ->
         :ok
@@ -511,11 +532,22 @@ defmodule FermixChannels.Home.MoveWorker do
         {:error, {:read, reason}}
 
       bytes ->
-        payload = %{"move_id" => move_id, "index" => index}
+        payload = %{"move_id" => ctx.request["move_id"], "index" => count.index}
 
         with :ok <- Rail.send_event(rail, "move_chunk", payload, bytes),
-             do: send_chunks(rail, move_id, io, index + 1)
+             do: send_chunks(ctx, rail, io, sent(ctx, count, byte_size(bytes)))
     end
+  end
+
+  # A chunk handed to the rail is sent; the count is put at each whole 5% it
+  # crosses (`MoveProgress.crossed?/3`), never per chunk.
+  defp sent(ctx, count, bytes) do
+    now = count.sent + bytes
+
+    if MoveProgress.crossed?(count.sent, now, count.size),
+      do: :ok = progress(ctx, :send, now, count.size)
+
+    %{count | index: count.index + 1, sent: now}
   end
 
   # -- the commit -------------------------------------------------------------
@@ -540,6 +572,7 @@ defmodule FermixChannels.Home.MoveWorker do
     with :ok <- link(ctx, desktop.device_id, epoch),
          :ok <- keep_offers(ctx),
          :ok <- record(ctx, "committing", %{"sentence" => nil}),
+         :ok <- progress(ctx, :commit),
          {:ok, %{"epoch" => done_epoch}} <-
            timed(ctx, "commit", fn -> send_commit(ctx, rail) end, nil) do
       done(ctx, done_epoch)
@@ -629,7 +662,8 @@ defmodule FermixChannels.Home.MoveWorker do
 
     with :ok <- ensure_link(ctx, phase, epoch),
          :ok <- ensure_offers(ctx),
-         :ok <- record(ctx, "committing", %{}) do
+         :ok <- record(ctx, "committing", %{}),
+         :ok <- progress(ctx, :commit) do
       deadline = System.monotonic_time(:millisecond) + ctx.resume_for_ms
       resume_loop(ctx, epoch, deadline, @first_resume_ms)
     else
@@ -974,6 +1008,13 @@ defmodule FermixChannels.Home.MoveWorker do
       Map.merge(%{"move_id" => ctx.request["move_id"], "candidate" => name(ctx)}, fields)
 
     Move.put_phase(ctx.home, phase, fields, ctx.clock.())
+  end
+
+  # The step this move is in, and its count while bytes move, where the
+  # Always On summary reads them.
+  defp progress(ctx, step, bytes \\ 0, size \\ nil) do
+    record = %{move_id: ctx.request["move_id"], step: step, bytes: bytes, size: size}
+    MoveProgress.put(ctx.progress, record)
   end
 
   defp name(ctx), do: ctx.request["candidate"].name

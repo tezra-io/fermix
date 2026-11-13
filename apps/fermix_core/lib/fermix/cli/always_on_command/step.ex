@@ -5,8 +5,9 @@ defmodule Fermix.CLI.AlwaysOnCommand.Step do
   `confirm`, and send one `home.act {action, key, input}` with the key it
   was drawn with. The engine runs the step; nothing here sequences calls.
 
-  What a need takes: `new_recovery_passphrase`, masked twice and compared,
-  or `--recovery-passphrase-file`; `recovery_passphrase`, masked once, or
+  What a need takes: `new_recovery_passphrase` (the first Move now's, and
+  the backup settings' Change, `change_passphrase`), masked twice and
+  compared, or `--recovery-passphrase-file`; `recovery_passphrase`, masked once, or
   the file. Either is sent as `input.recovery_passphrase`, and Fermix checks
   it. `sas` (M97 §7.5) is the six digits the computer that asks to join
   shows, read from `--sas` or asked on the terminal, sent as `input.sas`.
@@ -14,8 +15,8 @@ defmodule Fermix.CLI.AlwaysOnCommand.Step do
   The input is held as `AlwaysOn.Input`, whose `Inspect` withholds the
   passphrase, until the one call that sends it.
 
-  Answers `{:acted, record, answer}`, `{:opened, record}` for a step the
-  surface opens itself, `{:changed, sentence}`, `{:unconfirmed, record,
+  Answers `{:acted, record, answer}`, `{:opened, record}` for the step the
+  surface opens itself (`update`), `{:changed, sentence}`, `{:unconfirmed, record,
   sentence}` (a linked desktop's Move now the server had but whose answer
   was lost: the move may have started, so it is followed as a started one),
   `:declined`, `{:missing, flag}` (no terminal to ask on and no flag that
@@ -27,7 +28,7 @@ defmodule Fermix.CLI.AlwaysOnCommand.Step do
   alias Fermix.CLI.SecretInput
   alias FermixCore.Management.AlwaysOn.Input
 
-  @opened ~w(learn_more update)
+  @opened ~w(update)
   # A review sent to the server takes up to 60 s, so every client allows
   # `home.act` this long (PROTOCOL.md).
   @act_ms 90_000
