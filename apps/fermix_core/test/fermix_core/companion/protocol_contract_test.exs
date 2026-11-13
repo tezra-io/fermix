@@ -18,6 +18,9 @@ defmodule FermixCore.Companion.ProtocolContractTest do
   alias FermixCore.Temporal.Card
   alias FermixCore.Temporal.Defaults
   alias FermixCore.Temporal.Registry
+  alias FermixCore.Trips.Ops, as: TripOps
+  alias FermixCore.Trips.Place
+  alias FermixCore.Trips.Registry, as: TripRegistry
 
   @priv_dir Application.app_dir(:fermix_core, "priv/companion")
   @schema_path Path.join(@priv_dir, "protocol.schema.json")
@@ -44,6 +47,13 @@ defmodule FermixCore.Companion.ProtocolContractTest do
   # The events version 7 brought: the owner's files, by path.
   @version_7_client_events ~w(attach_file)
   @version_7_server_events ~w(attach_status)
+  # The events version 8 brought for the owner's trips (M89 §06).
+  @version_8_trip_client_events ~w(trips_pull trip_pull trip_edit trip_share)
+  @version_8_trip_server_events ~w(trips trip trip_shared)
+  # The fields a stop's place keeps (`Trips.Place`, C32).
+  @trip_place_fields ~w(name location address apple_place_id source_url canonical_url categories)
+  # The characters an engine-minted id is made of (`Kept.Ids`): no i, l, o, u.
+  @minted_trip_id ~r/\At[ri]_[0-9a-hjkmnp-tv-z]{10}\z/
   # The follow-up's fields of a card version 5 brought (M60_WATCHER_CODING_RUNS.md §6.2).
   @follow_up_fields ~w(asks offers_always_allow name instructions tools reports_to)
 
@@ -131,7 +141,8 @@ defmodule FermixCore.Companion.ProtocolContractTest do
     end
 
     assert Protocol.owner_server_events() ==
-             @version_4_server_events ++ @version_6_list_server_events
+             @version_4_server_events ++
+               @version_6_list_server_events ++ @version_8_trip_server_events
 
     assert protocol =~ "### Version 4: proposals on the owner's devices"
     assert protocol =~ "## Proposals"
@@ -276,6 +287,123 @@ defmodule FermixCore.Companion.ProtocolContractTest do
 
     for op <- ChecklistRegistry.device_ops() do
       assert protocol =~ ~r/^\| `#{op}`|, `#{op}` \|/m, "PROTOCOL.md has no row for the #{op} op"
+    end
+  end
+
+  # M89 §06: the owner's trips are the lists' family again on version 8, under
+  # the lists' rules word for word, sent only to the owner's connection; the
+  # ops and bounds the schema publishes are the engine's, and the goldens carry
+  # every op, what a create and an add made, a duplicate, a refusal, every
+  # shape of a row and the shared form.
+  test "the owner's trips are version 8 events this wire does not share, with goldens", %{
+    schema: schema,
+    protocol: protocol
+  } do
+    defs = schema["$defs"]
+
+    for type <- @version_8_trip_client_events do
+      assert Protocol.client_event_version(type) == 8, "#{type} is not a version 8 event"
+      assert defs[type]["x-since-version"] == 8
+      refute type in Protocol.shared_client_events()
+    end
+
+    for type <- @version_8_trip_server_events do
+      assert Protocol.server_event_version(type) == 8, "#{type} is not a version 8 event"
+      assert defs[type]["x-since-version"] == 8
+      refute type in Protocol.shared_server_events()
+      assert type in Protocol.owner_server_events()
+    end
+
+    assert defs["tripOp"]["properties"]["op"]["enum"] == TripRegistry.device_ops()
+
+    for type <- ~w(trip_edit trip_share) do
+      assert defs[type]["properties"]["client_msg_id"]["maxLength"] == Protocol.max_trip_msg_id()
+    end
+
+    assert defs["trips"]["properties"]["trips"]["maxItems"] == TripOps.max_trips()
+    assert defs["tripObject"]["properties"]["rows"]["maxItems"] == TripOps.max_rows()
+
+    assert defs["tripPlace"]["properties"] |> Map.keys() |> Enum.sort() ==
+             Enum.sort(@trip_place_fields)
+
+    assert Enum.sort(defs["tripPlace"]["required"]) == ~w(location name)
+
+    edits = @client_fixtures |> jsonl() |> Enum.filter(&(&1["type"] == "trip_edit"))
+
+    assert edits |> Enum.map(& &1["op"]["op"]) |> MapSet.new() ==
+             MapSet.new(TripRegistry.device_ops())
+
+    assert Enum.any?(edits, &match?(%{"op" => %{"op" => "restore", "title" => _}}, &1))
+    assert Enum.any?(edits, &match?(%{"op" => %{"op" => "add", "place" => _}}, &1))
+    assert Enum.any?(edits, &match?(%{"op" => %{"op" => "edit", "unplace" => true}}, &1))
+
+    server = jsonl(@server_fixtures)
+    trips = Enum.filter(server, &(&1["type"] == "trip"))
+    assert_trip_goldens(trips, edits)
+
+    shared = Enum.find(server, &(&1["type"] == "trip_shared"))
+    assert shared["profile_id"] == "main"
+    assert shared["text"] =~ "https://maps.apple.com/"
+
+    assert Enum.any?(
+             server,
+             &(&1["type"] == "accepted" and &1["duplicate"] == true and
+                 &1["client_msg_id"] in Enum.map(edits, fn edit -> edit["client_msg_id"] end))
+           )
+
+    assert Enum.any?(
+             server,
+             &(&1["reason"] == "request_failed" and
+                 &1["message"] == "That row is not in this trip any more; pull the trip again." and
+                 is_binary(&1["client_msg_id"]))
+           )
+
+    for id <- golden_trip_ids(jsonl(@client_fixtures) ++ server) do
+      assert Regex.match?(@minted_trip_id, id), "#{id} is not an id the engine mints"
+    end
+
+    for place <- golden_trip_places(trips ++ edits), do: assert(Place.cut(place) == {:ok, place})
+
+    assert_trips_documented(protocol)
+  end
+
+  defp assert_trip_goldens(trips, edits) do
+    made = Enum.flat_map(trips, &Map.to_list(Map.get(&1, "made", %{})))
+    rows = Enum.flat_map(trips, & &1["trip"]["rows"])
+    stops = Enum.filter(rows, &(&1["kind"] == "stop"))
+    sent = Map.new(edits, &{&1["client_msg_id"], &1["op"]["op"]})
+    made_by = for {id, made_id} <- made, do: {sent[id], binary_part(made_id, 0, 3)}
+
+    assert {"create", "tr_"} in made_by
+    assert {"add", "ti_"} in made_by
+    assert Enum.any?(stops, &(Map.has_key?(&1, "place") and Map.has_key?(&1, "leg_m")))
+    assert Enum.any?(stops, &(not Map.has_key?(&1, "place")))
+    assert Enum.any?(stops, &(&1["fixed"] == true and is_binary(&1["note"])))
+    assert Enum.any?(rows, &(&1["kind"] == "day" and is_binary(&1["date"])))
+    assert Enum.any?(rows, &(&1["kind"] == "day" and not Map.has_key?(&1, "text")))
+    assert Enum.any?(trips, &Map.has_key?(&1["trip"], "removed_at"))
+    assert Enum.any?(trips, &Map.has_key?(&1["trip"], "removed"))
+    assert Enum.any?(trips, &(not Map.has_key?(&1["trip"], "starts_on")))
+  end
+
+  defp assert_trips_documented(protocol) do
+    flat = String.replace(protocol, ~r/\s+/, " ")
+    assert protocol =~ "## Trips"
+    assert flat =~ "Version 8 also brings the owner's trips"
+    assert flat =~ "at most once per 100 ms"
+
+    for section <- ["## Lists", "## Trips"] do
+      [_before, rest] = String.split(protocol, section <> "\n", parts: 2)
+      [body | _after] = String.split(rest, "\n## ", parts: 2)
+
+      assert String.replace(body, ~r/\s+/, " ") =~ "A `client_msg_id` names one edit of any kind",
+             "#{section} does not say a client_msg_id names one edit of any kind"
+    end
+
+    [_before, trips] = String.split(protocol, "## Trips\n", parts: 2)
+
+    for op <- TripRegistry.device_ops() do
+      assert trips =~ ~r/^\| `#{op}`|, `#{op}` \|/m, "PROTOCOL.md has no row for the #{op} op"
     end
   end
 
@@ -1208,8 +1336,44 @@ defmodule FermixCore.Companion.ProtocolContractTest do
         "mime" => "application/pdf",
         "size_bytes" => 0,
         "sha256" => String.duplicate("a", 64)
+      },
+      "trips_pull" => %{"profile_id" => "main"},
+      "trip_pull" => %{"profile_id" => "main", "trip_id" => "tr_0123456789"},
+      "trip_edit" => %{
+        "client_msg_id" => "c",
+        "profile_id" => "main",
+        "op" => %{"op" => "remove_trip"}
+      },
+      "trip_share" => %{
+        "client_msg_id" => "c",
+        "profile_id" => "main",
+        "trip_id" => "tr_0123456789"
       }
     }
+  end
+
+  # Every trip and row id the goldens carry, wherever it sits.
+  defp golden_trip_ids(frames) do
+    frames
+    |> Enum.flat_map(&json_strings/1)
+    |> Enum.filter(&String.starts_with?(&1, ["tr_", "ti_"]))
+    |> Enum.uniq()
+  end
+
+  defp json_strings(value) when is_map(value),
+    do: Enum.flat_map(value, fn {key, sub} -> [key | json_strings(sub)] end)
+
+  defp json_strings(value) when is_list(value), do: Enum.flat_map(value, &json_strings/1)
+  defp json_strings(value) when is_binary(value), do: [value]
+  defp json_strings(_value), do: []
+
+  # Every place a golden trip's row or a golden device op carries.
+  defp golden_trip_places(frames) do
+    for frame <- frames,
+        row <- Map.get(Map.get(frame, "trip", %{}), "rows", []) ++ [Map.get(frame, "op", %{})],
+        place = Map.get(row, "place"),
+        is_map(place),
+        do: place
   end
 
   defp row_payload do

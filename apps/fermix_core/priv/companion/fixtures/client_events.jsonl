@@ -40,3 +40,26 @@
 {"type":"attach_file","attach_id":"mac-att-2b81d0","kind":"voice","mime":"audio/mp4","size_bytes":40817,"sha256":"c4e1a7b9d3f5028e6a1c9b7d5f3e1a0c8b6d4f2e0a9c7b5d3f1e8a6c4b2d0f9e"}
 {"type":"msg","client_msg_id":"mac-40","profile_id":"main","text":"What is in this picture?","attach_ids":["mac-att-7f3a9c"]}
 {"type":"msg","client_msg_id":"mac-41","profile_id":"main","text":"","attach_ids":["mac-att-2b81d0"]}
+{"type":"trips_pull","profile_id":"main"}
+{"type":"trip_pull","profile_id":"main","trip_id":"tr_4q8m2x7v1d"}
+{"type":"trip_pull","profile_id":"main","trip_id":"tr_2b7n5r8c3j","removed":true}
+{"type":"trip_edit","client_msg_id":"mac-60","profile_id":"main","op":{"op":"create","title":"Orvenne"}}
+{"type":"trip_edit","client_msg_id":"mac-61","profile_id":"main","trip_id":"tr_4q8m2x7v1d","op":{"op":"add","text":"Coffee by the walls","after_id":"ti_5w7p0t4n6b"}}
+{"type":"trip_edit","client_msg_id":"mac-62","profile_id":"main","trip_id":"tr_4q8m2x7v1d","op":{"op":"add","text":"Boat to the lighthouse","day_id":"ti_9a1b5c7d3e","time":"11:30","duration":45,"place":{"name":"Cais da Varonne","location":{"latitude":38.5391,"longitude":-27.215},"apple_place_id":"I9K3M5N7P2Q4R6","source_url":"https://maps.apple.com/place?place-id=I9K3M5N7P2Q4R6"}}}
+{"type":"trip_edit","client_msg_id":"mac-63","profile_id":"main","trip_id":"tr_4q8m2x7v1d","op":{"op":"edit","row_id":"ti_3d8f1q6z2x","time":"20:00","fixed":true,"note":"Table for two"}}
+{"type":"trip_edit","client_msg_id":"mac-64","profile_id":"main","trip_id":"tr_4q8m2x7v1d","op":{"op":"edit","row_id":"ti_2k6n8q4s7w","unplace":true}}
+{"type":"trip_edit","client_msg_id":"mac-65","profile_id":"main","trip_id":"tr_4q8m2x7v1d","op":{"op":"edit","row_id":"ti_6m3p9r1t5y","time":"","duration":0}}
+{"type":"trip_edit","client_msg_id":"mac-66","profile_id":"main","trip_id":"tr_4q8m2x7v1d","op":{"op":"move","row_id":"ti_6m3p9r1t5y","day_id":"ti_7h2k9m4p1c"}}
+{"type":"trip_edit","client_msg_id":"mac-67","profile_id":"main","trip_id":"tr_4q8m2x7v1d","op":{"op":"move","row_id":"ti_2k6n8q4s7w","after_id":"ti_3d8f1q6z2x"}}
+{"type":"trip_edit","client_msg_id":"mac-68","profile_id":"main","trip_id":"tr_4q8m2x7v1d","op":{"op":"move","row_id":"ti_9a1b5c7d3e"}}
+{"type":"trip_edit","client_msg_id":"mac-69","profile_id":"main","trip_id":"tr_4q8m2x7v1d","op":{"op":"day","row_id":"ti_9a1b5c7d3e","text":"Harbour"}}
+{"type":"trip_edit","client_msg_id":"mac-70","profile_id":"main","trip_id":"tr_4q8m2x7v1d","op":{"op":"day","after_id":"ti_7h2k9m4p1c","text":"Rest day"}}
+{"type":"trip_edit","client_msg_id":"mac-71","profile_id":"main","trip_id":"tr_4q8m2x7v1d","op":{"op":"remove","row_id":"ti_2k6n8q4s7w"}}
+{"type":"trip_edit","client_msg_id":"mac-72","profile_id":"main","trip_id":"tr_4q8m2x7v1d","op":{"op":"restore","row_id":"ti_2k6n8q4s7w"}}
+{"type":"trip_edit","client_msg_id":"mac-73","profile_id":"main","trip_id":"tr_2b7n5r8c3j","op":{"op":"restore"}}
+{"type":"trip_edit","client_msg_id":"mac-74","profile_id":"main","trip_id":"tr_2b7n5r8c3j","op":{"op":"restore","title":"Spring in Salvé, again"}}
+{"type":"trip_edit","client_msg_id":"mac-75","profile_id":"main","trip_id":"tr_4q8m2x7v1d","op":{"op":"rename","text":"Varonne, long weekend"}}
+{"type":"trip_edit","client_msg_id":"mac-76","profile_id":"main","trip_id":"tr_4q8m2x7v1d","op":{"op":"dates","starts_on":"2031-07-12"}}
+{"type":"trip_edit","client_msg_id":"mac-77","profile_id":"main","trip_id":"tr_9t3k6w0p5h","op":{"op":"dates","starts_on":""}}
+{"type":"trip_edit","client_msg_id":"mac-78","profile_id":"main","trip_id":"tr_9t3k6w0p5h","op":{"op":"remove_trip"}}
+{"type":"trip_share","client_msg_id":"mac-79","profile_id":"main","trip_id":"tr_4q8m2x7v1d"}

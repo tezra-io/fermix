@@ -314,7 +314,7 @@ under the reply as a calendar shows an event; and `trips`, the owner's trips
 the reply's turn read or changed, by id, which a client that pulled the trips
 index draws as it draws a list (see *Blocks under a reply*).
 
-It adds no event and no field: a block's `type` names what it needs. The
+The blocks add no event and no field: a block's `type` names what it needs. The
 daemon sends a connection on version 7 only `places` and `checklists`
 blocks, wherever a reply reaches it (its `text_done`, its `row`, and a
 `history_page` message), so a reply stored with an `events` or a `trips`
@@ -323,6 +323,25 @@ written for a client that draws no events. A turn a version 8 connection
 carries is told its events are drawn under the reply, so its text confirms
 in a sentence and does not write each event out (see *Blocks under a
 reply*, *Which blocks a client draws*).
+
+Version 8 also brings the owner's trips (M89) to the Mac, drawn and changed
+live beside the chat as the lists are. It adds:
+
+- four client events: `trips_pull { profile_id }`, the index; `trip_pull {
+  profile_id, trip_id, removed? }`, one whole trip; `trip_edit {
+  client_msg_id, profile_id, trip_id?, op }`, one change by row id; and
+  `trip_share { client_msg_id, profile_id, trip_id }`, the trip as it is
+  shared;
+- three server events: `trips`, the index, and `trip`, one whole trip, each
+  the answer to its pull and pushed again, whole, after every committed
+  change; and `trip_shared`, the answer to a share (see *Trips*).
+
+Each of the seven names version 8 as its `x-since-version`. The daemon takes
+them from, and sends them to, only a connection on version 8 placed as the
+owner's, and sends a trip event only to a connection that pulled: the index
+to one that pulled the index, a trip to one that holds it. A version 7
+connection that sends one is refused with `error: unknown_event` and closed,
+and is never sent one.
 
 Every version 7 event, field and rule holds unchanged on version 8. Since
 version 8 the window is {7, 8}, so a version 6 client is refused with
@@ -443,6 +462,10 @@ in a fixed order:
 | `checklist_pull` | `profile_id`, `list_id` (`ck_` id); `removed?` (boolean) | Version 6. Asks for one whole list, answered `checklist`; the connection then holds it (at most 16) and is sent it again after every change. `removed: true` adds the rows removed in the last 30 days. Owner's connection only; see *Lists*. |
 | `checklist_edit` | `client_msg_id` (at most 128 characters), `profile_id`, `op`; `list_id?` (`ck_` id, for every op but `create`) | Version 6. One op on the owner's lists, by row id. Answered `accepted` once applied, `duplicate: true` when the `client_msg_id` was already applied; a refusal is `error: request_failed` with the engine's sentence and `client_msg_id`, and changes nothing. Owner's connection only; see *Lists*. |
 | `attach_file` | `attach_id` (1–64 of `A–Z a–z 0–9 _ -`), `kind`, `mime` (at most 255 bytes), `size_bytes`, `sha256` (64 lowercase hex digits); `name?` (at most 255 bytes) | Version 7. Hands the daemon the file the client wrote at `<attachments.dir>/<attach_id>`; there is no path field. `kind` is `image`, `animation`, `video`, `audio`, `voice`, `document` or `file`, a hint. Answered `attach_status` (`present`), or `error: request_failed` with the daemon's sentence and `attach_id`; the daemon removes the file either way. Owner's connection only; see *Attachments*. |
+| `trips_pull` | `profile_id` | Version 8. Asks for the index of the owner's trips, answered `trips`; from then on this connection is sent the index again after any change. Taken only from a connection placed as the owner's; see *Trips*. |
+| `trip_pull` | `profile_id`, `trip_id` (`tr_` id); `removed?` (boolean) | Version 8. Asks for one whole trip, answered `trip`; the connection then holds it (at most 16) and is sent it again after every change. `removed: true` adds the days and stops removed in the last 30 days. Owner's connection only; see *Trips*. |
+| `trip_edit` | `client_msg_id` (at most 128 characters), `profile_id`, `op`; `trip_id?` (`tr_` id, for every op but `create`) | Version 8. One op on the owner's trips, by row id. Answered `accepted` once applied, `duplicate: true` when the `client_msg_id` was already applied; a refusal is `error: request_failed` with the engine's sentence and `client_msg_id`, and changes nothing. Owner's connection only; see *Trips*. |
+| `trip_share` | `client_msg_id` (at most 128 characters), `profile_id`, `trip_id` (`tr_` id) | Version 8. Asks for the trip in its shared form, answered `trip_shared`; a refusal is `error: request_failed` with the engine's sentence and `client_msg_id`. Changes nothing. Owner's connection only; see *Trips*. |
 
 `profile_id` is `main`, the one profile; any other is refused with
 `error: unsupported_profile`, and the connection stays open.
@@ -452,7 +475,7 @@ in a fixed order:
 | `type` | Fields | Notes |
 |---|---|---|
 | `server_hello` | `min_version`, `max_version`; `primary_epoch?`, `role?`, `commands[]?`, `attachments?` | Handshake reply. `primary_epoch` is the home's primary epoch, absent only from a home that has never booted as the primary; `role` is the engine's, `primary` or `device`, which this daemon always sends and an older daemon leaves out; see *Primary epoch*. `commands` is the slash command palette, each `{name, aliases[], description}`, which this daemon always sends; `attachments` is `{dir, max_bytes}`, sent only to a connection placed as the owner's while the media store runs; see *Version 7* and *Attachments*. |
-| `accepted` | `client_msg_id`, `duplicate`; `server_seq?` | Durable receipt for a `msg`, a `command` or (version 6) a `checklist_edit`; clears the outbox item. `server_seq` is present only on a duplicate whose request already has a reply row: that reply's seq. A first `accepted` never carries it; the request's own row arrives as a `row`. |
+| `accepted` | `client_msg_id`, `duplicate`; `server_seq?` | Durable receipt for a `msg`, a `command`, (version 6) a `checklist_edit` or (version 8) a `trip_edit`; clears the outbox item. `server_seq` is present only on a duplicate whose request already has a reply row: that reply's seq. A first `accepted` never carries it; the request's own row arrives as a `row`. |
 | `turn_started` | `profile_id`, `turn_id`, `in_reply_to` | A turn began answering `in_reply_to`. |
 | `text_delta` | `turn_id`, `text` | Text to append to the turn's draft, exactly as sent. |
 | `tool_event` | `turn_id`, `tool`, `phase`; `detail?`, `activity?` | `phase` is `start` or `stop`. `detail` is at most 512 bytes. `activity`, on a start, is the engine's sentence for the step, at most 120 bytes; see *Version 6*. |
@@ -475,6 +498,9 @@ in a fixed order:
 | `checklists` | `profile_id`, `lists[]` | Version 6. The index: every live list as `{list_id, title, folder?, open, done, rev}`, in picker order. The answer to `checklists_pull`, and pushed again, whole, after any change. Sent only to a connection on version 6 or later placed as the owner's that pulled the index; see *Lists*. |
 | `checklist` | `profile_id`, `list`; `made?` | Version 6. One whole list, `{list_id, title, rev, rows[], removed[]?, removed_at?}`. The answer to `checklist_pull`, and pushed again, whole, after every committed change to it, at most once per 100 ms. Sent only to a connection on version 6 or later placed as the owner's that holds the list; see *Lists*. |
 | `attach_status` | `attach_id`, `status` | Version 7. The answer to an `attach_file` the daemon now holds: `status` is `present`, the only value this wire sends, and a `msg` may name `attach_id` from then on. Sent only to the owner's connection on version 7 or later that sent it; see *Attachments*. |
+| `trips` | `profile_id`, `trips[]` | Version 8. The index: every live trip as `{trip_id, title, days, stops, rev, starts_on?, ends_on?}`, in picker order. The answer to `trips_pull`, and pushed again, whole, after any change. Sent only to a connection on version 8 placed as the owner's that pulled the index; see *Trips*. |
+| `trip` | `profile_id`, `trip`; `made?` | Version 8. One whole trip, `{trip_id, title, rev, starts_on?, timezone?, rows[], removed[]?, removed_at?}`. The answer to `trip_pull`, and pushed again, whole, after every committed change to it, at most once per 100 ms. Sent only to a connection on version 8 placed as the owner's that holds the trip; see *Trips*. |
+| `trip_shared` | `profile_id`, `client_msg_id`, `trip_id`, `rev`, `text` | Version 8. The answer to `trip_share`: the trip in its shared form, as plain text the engine writes, at the `rev` it shows. Sent only to the owner's connection that asked; see *Trips*. |
 | `error` | `reason`; `message?`, `field?`, `event?`, `client_msg_id?`, `ref?`, `attach_id?`, `direction?`, `client_version?`, `min_version?`, `max_version?` | A refusal; see *Errors*. |
 
 ### Timeline shapes
@@ -860,7 +886,7 @@ client is not sent:
   drawn under the reply.
 - **A kept kind** (`checklists`, the owner's lists, and `trips`, the owner's trips)
   is drawn by a connection that pulled its index (`checklists_pull`, see
-  *Lists*, and the trips index for trips), and is sent to every connection
+  *Lists*, and `trips_pull`, see *Trips*), and is sent to every connection
   whose version carries its block, since its block names the ids a client
   pulls to draw it. A turn is told a kept kind is drawn under the reply only
   when its connection pulled that index; every other turn is told to write
@@ -1216,7 +1242,10 @@ and draws every change as it commits, whoever made it.
   `made` on the next push of a list maps the `client_msg_id` of each `create`
   or `add` a device sent since the last one to what it made: a `create`'s
   `list_id`, an `add`'s `row_id`. A client matches the ids it sent and
-  ignores the rest.
+  ignores the rest. A `client_msg_id` names one edit of any kind, a list's
+  or a trip's (see *Trips*): a client mints a new one for every edit it
+  sends, and an edit whose id an edit of the other kind already used is
+  refused and changes nothing.
 - **Refusals.** An op the engine cannot take changes nothing and is answered
   `error: request_failed` with the engine's sentence as `message` and the
   edit's `client_msg_id`; the connection stays open. A client shows the
@@ -1261,6 +1290,121 @@ The ops, the model's by row id without its `replace`, with `clear_done` and
 | `clear_done` | — | Removes every done item; each stays in Recently removed. |
 | `restore` | `row_id?`; `title?` | With `row_id`, brings that removed row back at its place. Without it, brings the removed list back, under `title` when given, else under its own; a live list holding that title refuses it ("Another list is named "…" now, so this one cannot come back under that name; restore it with a new title, or rename the other list first."). |
 
+## Trips
+
+The owner's trips (M89) live in the engine's store beside the lists, and the
+model, a scheduled job and the Mac change them through one transaction.
+Version 8 brings them to this socket as the lists' family again, under the
+lists' rules: the Mac reads the index and whole trips, changes them by row
+id, asks for a trip's shared form, and draws every change as it commits,
+whoever made it.
+
+- **Who.** Trip events go only to connections on version 8 the daemon placed
+  as the owner's (see *Transport*). A pull, an edit or a share from any other
+  connection is refused with `error: request_failed`, `message` "Only the
+  owner's own Fermix app can read or change the owner's trips.", and reads or
+  changes nothing. An engine in the device role refuses each with its
+  sentence, an edit's and a share's with its `client_msg_id`.
+- **The index** (`trips_pull`, answered `trips`). Every live trip in picker
+  order, each `{trip_id, title, days, stops, rev, starts_on?, ends_on?}`:
+  `days` and `stops` count its rows, `rev` moves with every change to it, and
+  `starts_on` and `ends_on`, its first and last days' dates, are there only
+  when it has a start. Once a connection has pulled the index it is sent the
+  index again, whole, after any change to any trip.
+- **A trip** (`trip_pull`, answered `trip`). `trip` is `{trip_id, title, rev,
+  starts_on?, timezone?, rows[]}`, the rows in order: each day, then its
+  stops. A day is `{row_id, kind: "day", text?, date?, timezone?}`: `text`
+  only when it is named, `date` only when the trip has a start (the start
+  plus its place among the days, so no client adds days to a date), and
+  `timezone` only when it names its own. A stop is `{row_id, kind: "stop",
+  text, time?, duration?, fixed?, note?, place?, leg_m?}`: `time` is `HH:MM`,
+  the wall clock where the stop is, `duration` its minutes, `fixed` present
+  only when true (a booking, a timed ticket), and `place` the record a
+  lookup or a device made (`tripPlace`: `name` and `location` always,
+  `address`, `apple_place_id`, `source_url`, `canonical_url` and `categories`
+  where given). `leg_m` is the straight line in metres from the placed stop
+  before it in its day, passing over any unplaced stop between; the day's
+  first placed stop and an unplaced stop have none. A client builds every
+  Maps address from the record and opens no link a row carries. With
+  `removed: true` the trip also carries `removed[]`, the days and stops
+  removed in the last 30 days, newest first, each with its `removed_at` and
+  no `date` or `leg_m`; a day and the stops removed with it share one
+  `removed_at`. A trip itself removed and not yet swept still answers, with
+  `removed_at`, so it can be restored. A trip that is gone is `error:
+  request_failed` ("No trip has that id; it may have been removed more than
+  30 days ago."). Times are RFC 3339 UTC with microseconds.
+- **Holding.** A connection holds each trip it pulled, and the trip a
+  `create` from it made, at most 16, apart from the lists it holds: pulling
+  another lets the one it pulled longest ago go, and nothing more of that
+  trip is sent to it until it pulls it again. A trip is held with or without
+  its removed rows, as its last pull asked. A trip swept while held is let
+  go.
+- **Pushes.** After every committed change to a trip, by the model, a job or
+  any device, every connection that holds it is sent `trip`, the whole trip
+  again, and every connection that pulled the index `trips`, at most once per
+  100 ms per connection, in a window of the trips' own: a burst of changes is
+  one push of each trip carrying the rev it ended on, then the index. Every
+  push is whole state, never a delta; a client drops one whose `rev` is below
+  the one it shows. A connection that never pulled is sent nothing. A trip's
+  whole `trip` object stays within 768 KiB: an op that would pass it is
+  refused, so every push fits a line.
+- **An edit** (`trip_edit`). One `op`, applied in the same transaction as the
+  model's edits, its rows recorded as made from the Mac. `trip_id` names the
+  trip for every op but `create`. It is answered `accepted` (`duplicate:
+  false`) once applied, and its change reaches every holder as a push, the
+  sender too. An edit sent again with a `client_msg_id` already applied (kept
+  30 days) is answered `accepted` with `duplicate: true`, changes nothing,
+  and the sender, when it holds the trip, is sent it again. `made` on the
+  next push of a trip maps the `client_msg_id` of each `create`, `add` or new
+  `day` a device sent since the last one to what it made: a `create`'s
+  `trip_id`, an `add`'s or a new day's `row_id`. A client matches the ids it
+  sent and ignores the rest. A `client_msg_id` names one edit of any kind, a
+  list's or a trip's: a client mints a new one for every edit it sends, and
+  an edit whose id an edit of the other kind already used is refused and
+  changes nothing. There is no rev on an edit: a row another edit removed
+  refuses the op with its sentence, and the client pulls the trip again.
+- **A share** (`trip_share`, answered `trip_shared`). The trip in its one
+  shared form, which the engine writes and a client hands to the pasteboard
+  or the share sheet as it is: plain text, the title and dates, each day by
+  its date (or its number) and name, a line a stop with its time and words,
+  and on every placed stop a link to it in Apple Maps; no notes and no fixed
+  mark. `rev` is the trip's when it was written. A share changes nothing; a
+  removed trip has none, and is refused as one that is gone.
+- **Refusals.** An op the engine cannot take changes nothing and is answered
+  `error: request_failed` with the engine's sentence as `message` and the
+  edit's `client_msg_id`, as a refused share is with the share's; the
+  connection stays open. A client shows the sentence and pulls the trip
+  again. A `row_id` the trip no longer has is "That row is not in this trip
+  any more; pull the trip again."
+- **Bounds.** A title is at most 80 characters, a day's name 80, a stop's
+  text 200 and a note 1,000, each one line, trimmed (a note may hold line
+  breaks); a duration is 1 to 1,440 minutes. The owner keeps at most 30
+  trips and a trip holds at most 1,000 days and stops together. Ids are the
+  engine's: `tr_` and ten lowercase letters or digits for a trip, `ti_` for a
+  day or a stop, stable for the row's life.
+- **The reply.** A turn this connection carries after it pulled the trips
+  index is told the app draws trips, so the reply says in a sentence or two
+  what changed and leaves the days to the trip drawn under it (the reply's
+  `trips` block, see *Blocks under a reply*). A turn from a connection that
+  never pulled the index writes the days that changed out as text.
+- **A phone.** A phone's list channel does not carry trips yet: its scope is
+  the lists' events alone (see *Lists*).
+
+The ops, the model's by row id, with `restore`:
+
+| `op` | Fields | Effect |
+|---|---|---|
+| `create` | `title` | Makes a trip of one day, with no start, held by the sending connection. A live trip with the title, compared without case, is refused. |
+| `add` | `text`; `day_id` or `after_id`; `time?`, `duration?`, `fixed?`, `note?`, `place?` | Adds a stop at the end of that day, or right after that row. |
+| `edit` | `row_id`; `text?`, `time?`, `duration?`, `fixed?`, `note?`, `place?` or `unplace?` (one at least) | Changes the stop; `time: ""`, `note: ""` or `duration: 0` clears it, and `unplace: true` takes its place away. |
+| `move` | `row_id`; `day_id?` or `after_id?` | Moves a stop to the end of that day, or right after that row (one of the two). A day's `row_id` moves the day with its stops after `after_id`'s day, or first with neither; every day's date follows its new place. |
+| `day` | `row_id?`; `text?`, `after_id?` | With `row_id`, names that day (`text: ""` takes its name away). Without it, adds a day after `after_id`'s day, or at the end. |
+| `remove` | `row_id` | Removes the stop, or the day with its stops; each stays in Recently removed for 30 days. A trip keeps at least one day. |
+| `restore` | `row_id?`; `title?` | With `row_id`, brings that removed row back at its place, a day with the stops removed with it. Without it, brings the removed trip back, under `title` when given, else under its own; a live trip holding that title refuses it ("Another trip is named "…" now, so this one cannot come back under that name; restore it with a new title, or rename the other trip first."). |
+| `rename` | `text` | Renames the trip. |
+| `dates` | `starts_on` | Sets the first day's date, `YYYY-MM-DD`, or `""` for none; every day's date follows. |
+| `remove_trip` | — | Removes the trip; it can be restored for 30 days. |
+
 ## Errors
 
 | `reason` | Context | Connection |
@@ -1298,7 +1442,9 @@ a `media_fetch`, and `attach_id` only on an error that answers an
 message's `client_msg_id`. A refused `proposal_answer` is a `request_failed` whose
 `message` is the daemon's sentence, with the answer's `client_msg_id`. So is
 a refused `checklist_edit`, with the edit's `client_msg_id`; a refused
-`checklists_pull` or `checklist_pull` carries none.
+`checklists_pull` or `checklist_pull` carries none. So are a refused
+`trip_edit` and a refused `trip_share` (version 8), each with its
+`client_msg_id`; a refused `trips_pull` or `trip_pull` carries none.
 
 ## Chat sequence
 

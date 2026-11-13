@@ -93,7 +93,25 @@ defmodule FermixChannels.Companion.Connection do
   The pull, edit and flush plumbing is one for every kind of thing Fermix
   keeps (M89 §07): what the connection holds of a kind is `Companion.Kept`,
   and what the kind is on the wire, its store calls, events and shapes, is
-  its `Companion.KeptKind` module (`Companion.Checklists` for the lists).
+  its `Companion.KeptKind` module (`Companion.Checklists` for the lists,
+  `Companion.Trips` for the trips).
+
+  ## Trips (version 8, M89 §06)
+
+  The owner's trips are the lists' family again, under the lists' rules:
+  `trips_pull`, `trip_pull` and `trip_edit` are served as the lists' events
+  are, by the same plumbing, for a connection on version 8 placed as the
+  owner's (`FermixCore.Trips.Registry` refuses any other with its sentence),
+  and a version 7 one is refused each as unknown. The connection holds at
+  most 16 trips apart from its lists, and their changes,
+  `{:trips_changed, trips}` from the same notifier, wait in a window of their
+  own (`:trip_window_ms`, 100 ms) before each pending trip goes out whole,
+  with `made`, then the index. A `trip_share` is neither a pull nor an edit:
+  it is answered `trip_shared`, the trip's shared form, in the step that read
+  it, or `error: request_failed` with the share's `client_msg_id`. A turn
+  this connection carries says it draws trips (`metadata.draws_trips`) once
+  it has pulled the trips index. `:trip_opts` are the Registry's options. A
+  phone's list channel serves no trip event.
 
   ## Blocks under a reply (version 8)
 
@@ -102,8 +120,8 @@ defmodule FermixChannels.Companion.Connection do
   message of a `history_page` keep only the block types this connection's
   version carries, so a version 7 client is sent no `events` block. A turn
   this connection carries says what it draws by the same answer
-  (`ReplyBlocks.drawn_types/3`): lists once it pulled their index, events
-  from version 8 (`metadata.draws_events`).
+  (`ReplyBlocks.drawn_types/3`): lists and trips once it pulled their index,
+  events from version 8 (`metadata.draws_events`).
 
   ## A phone's list channel (M85 E4)
 
@@ -190,6 +208,7 @@ defmodule FermixChannels.Companion.Connection do
   alias FermixChannels.Companion.Output
   alias FermixChannels.Companion.Proposals
   alias FermixChannels.Companion.Requests
+  alias FermixChannels.Companion.Trips
   alias FermixChannels.Companion.Turns
   alias FermixChannels.Gateway.Commands.Registry, as: CommandRegistry
   alias FermixChannels.Mobile.Identity
@@ -212,6 +231,7 @@ defmodule FermixChannels.Companion.Connection do
   @handover_timeout_ms 5_000
   @task_not_running_message "No task of that call is still running under that revision."
   @checklist_window_ms 100
+  @trip_window_ms 100
   @max_error_message_bytes 512
   @attachment_gone_message "Fermix no longer has a file this message names. Attach it again."
 
@@ -283,6 +303,11 @@ defmodule FermixChannels.Companion.Connection do
           Kept.new(
             Keyword.get(opts, :checklist_opts, []),
             Keyword.get(opts, :checklist_window_ms, @checklist_window_ms)
+          ),
+        Trips =>
+          Kept.new(
+            Keyword.get(opts, :trip_opts, []),
+            Keyword.get(opts, :trip_window_ms, @trip_window_ms)
           )
       },
       # A phone's list channel (moduledoc): the scope it serves, who its edits
@@ -345,6 +370,11 @@ defmodule FermixChannels.Companion.Connection do
     do: {:noreply, kept_changed(Checklists, changes, state)}
 
   def handle_info(:checklists_flush, state), do: flush_kept(Checklists, state)
+
+  def handle_info({:trips_changed, changes}, state),
+    do: {:noreply, kept_changed(Trips, changes, state)}
+
+  def handle_info(:trips_flush, state), do: flush_kept(Trips, state)
 
   def handle_info({:companion_request_failed, client_msg_id, reason}, state),
     do: write_request_error(while_moving(reason, state), client_msg_id, state)
@@ -453,7 +483,8 @@ defmodule FermixChannels.Companion.Connection do
   # `command`, which `Requests.request/3` refuses itself before it claims
   # anything.
   @store_events ~w(cancel read_state proposal_answer checklist_edit attach_file history_pull
-                   history_search checklists_pull checklist_pull)
+                   history_search checklists_pull checklist_pull trips_pull trip_pull trip_edit
+                   trip_share)
 
   # A device-role engine runs a retired copy of a moved home (M75) and opens
   # no database: every event that would read or write the store is refused by
@@ -470,10 +501,11 @@ defmodule FermixChannels.Companion.Connection do
 
   defp serve_admitted(event, state), do: serve(event, state)
 
-  # A proposal answer and a list edit name themselves, so the refusal carries
-  # the id; a cancel's id names the request it would stop, which has not failed.
+  # A proposal answer, a list's or a trip's edit and a share name themselves,
+  # so the refusal carries the id; a cancel's id names the request it would
+  # stop, which has not failed.
   defp refuse_write(%{type: type, payload: payload}, refusal, state)
-       when type in ["proposal_answer", "checklist_edit"] do
+       when type in ["proposal_answer", "checklist_edit", "trip_edit", "trip_share"] do
     refusal = while_moving(refusal, state)
 
     case send_event("error", error_payload(refusal, payload["client_msg_id"]), state) do
@@ -540,6 +572,17 @@ defmodule FermixChannels.Companion.Connection do
 
   defp serve(%{type: "checklist_edit", payload: payload}, state),
     do: kept_edit(Checklists, payload, state)
+
+  defp serve(%{type: "trips_pull", payload: payload}, state),
+    do: pull_index(Trips, payload, state)
+
+  defp serve(%{type: "trip_pull", payload: payload}, state),
+    do: pull_one(Trips, payload, state)
+
+  defp serve(%{type: "trip_edit", payload: payload}, state),
+    do: kept_edit(Trips, payload, state)
+
+  defp serve(%{type: "trip_share", payload: payload}, state), do: share_trip(payload, state)
 
   defp serve(%{type: "attach_file", payload: payload}, state), do: attach_file(payload, state)
 
@@ -933,6 +976,26 @@ defmodule FermixChannels.Companion.Connection do
     written(send_event("error", payload, state), state)
   end
 
+  # A trip's shared form, answered in the step that read it; it is neither a
+  # pull nor an edit, so nothing is held and nothing changes (moduledoc).
+  defp share_trip(%{"profile_id" => @profile, "client_msg_id" => id} = payload, state) do
+    opts = Keyword.put(kept(state, Trips).opts, :made_via, state.made_via)
+
+    case Trips.share(payload["trip_id"], state.caller, opts) do
+      {:ok, shared} ->
+        written(
+          send_event("trip_shared", Trips.shared_payload(@profile, id, shared), state),
+          state
+        )
+
+      {:error, reason} ->
+        kept_refusal(Trips, reason, id, state)
+    end
+  end
+
+  defp share_trip(%{"client_msg_id" => id}, state),
+    do: written(send_event("error", error_payload(:unsupported_profile, id), state), state)
+
   defp written(:ok, state), do: {:cont, state}
   defp written({:error, _reason}, state), do: {:stop, state}
 
@@ -1067,7 +1130,8 @@ defmodule FermixChannels.Companion.Connection do
   # `Channels.Companion` to stamp on the turn (moduledoc), and what this
   # connection draws: the one answer that also decides what it is sent
   # (`ReplyBlocks.drawn_types/3`): each kept kind once it pulled its index
-  # (its lists, `draws_lists`), its events from version 8.
+  # (its lists, `draws_lists`; its trips, `draws_trips`), its events from
+  # version 8.
   defp queue_request(event, state) do
     drawn = ReplyBlocks.drawn_types(:companion, state.version, pulled_kinds(state))
 

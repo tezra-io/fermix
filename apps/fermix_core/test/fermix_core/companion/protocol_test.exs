@@ -11,20 +11,22 @@ defmodule FermixCore.Companion.ProtocolTest do
     assert Protocol.client_events() ==
              ~w(client_hello msg command cancel history_pull history_search read_state
                 media_fetch media_release proposal_answer checklists_pull checklist_pull
-                checklist_edit attach_file)
+                checklist_edit attach_file trips_pull trip_pull trip_edit trip_share)
 
     assert Protocol.server_events() ==
              ~w(server_hello accepted turn_started text_delta tool_event reasoning text_done
                 turn_error turn_done row row_updated approval approval_resolved read_state
                 history_page search_results media_path media_missing proposal proposal_resolved
-                home_status_changed checklists checklist attach_status error)
+                home_status_changed checklists checklist attach_status trips trip trip_shared
+                error)
   end
 
   # M56 §6: a turn that ends with no reply needs a frame an older client would
   # not survive, so it goes only to a connection that declared version 2; the
   # media grant and the changed row (M66) only to one that declared 3; what a
   # turn is reasoning and the owner's lists (M85) only to one that declared 6;
-  # a file's answer only to one that declared 7.
+  # a file's answer only to one that declared 7; the owner's trips (M89) only
+  # to one that declared 8.
   test "every server event names the version that brought it" do
     later = %{
       "turn_done" => 2,
@@ -37,7 +39,10 @@ defmodule FermixCore.Companion.ProtocolTest do
       "home_status_changed" => 6,
       "checklists" => 6,
       "checklist" => 6,
-      "attach_status" => 7
+      "attach_status" => 7,
+      "trips" => 8,
+      "trip" => 8,
+      "trip_shared" => 8
     }
 
     for type <- Protocol.server_events() do
@@ -56,7 +61,11 @@ defmodule FermixCore.Companion.ProtocolTest do
       "checklists_pull" => 6,
       "checklist_pull" => 6,
       "checklist_edit" => 6,
-      "attach_file" => 7
+      "attach_file" => 7,
+      "trips_pull" => 8,
+      "trip_pull" => 8,
+      "trip_edit" => 8,
+      "trip_share" => 8
     }
 
     for type <- Protocol.client_events() do
@@ -185,6 +194,192 @@ defmodule FermixCore.Companion.ProtocolTest do
                    "profile_id" => "main",
                    "lists" => [bad]
                  })
+      end
+    end
+  end
+
+  # M89 §06: the lists' family again for the owner's trips, on version 8; the
+  # wire holds what an event is carried in, the op is the Registry's to judge.
+  describe "the owner's trips (version 8)" do
+    @trip_id "tr_4q8m2x7v1d"
+    @day_id "ti_7h2k9m4p1c"
+    @stop_id "ti_5w7p0t4n6b"
+    @place %{
+      "name" => "Torre de Vale Escuro",
+      "location" => %{"latitude" => 38.5412, "longitude" => -27.2105}
+    }
+
+    test "the four client events and the three server events are version 8's, the owner's" do
+      for type <- ~w(trips_pull trip_pull trip_edit trip_share) do
+        assert Protocol.client_event_version(type) == 8
+        refute type in Protocol.shared_client_events()
+      end
+
+      for type <- ~w(trips trip trip_shared) do
+        assert Protocol.server_event_version(type) == 8
+        assert type in Protocol.owner_server_events()
+        refute type in Protocol.shared_server_events()
+      end
+    end
+
+    test "a pull names a trip by its id, and removed is a boolean" do
+      pull = %{"profile_id" => "main", "trip_id" => @trip_id}
+
+      assert :ok = Protocol.validate_client_payload("trips_pull", %{"profile_id" => "main"})
+      assert :ok = Protocol.validate_client_payload("trip_pull", pull)
+      assert :ok = Protocol.validate_client_payload("trip_pull", Map.put(pull, "removed", true))
+
+      for bad <- [
+            %{pull | "trip_id" => "Varonne"},
+            %{pull | "trip_id" => "ck_4q8m2x7v1d"},
+            %{pull | "trip_id" => @day_id},
+            Map.put(pull, "removed", "yes")
+          ] do
+        assert {:error, {:invalid_field, _field}} =
+                 Protocol.validate_client_payload("trip_pull", bad)
+      end
+    end
+
+    test "an edit carries one op object, its id bounded as the store keeps it" do
+      edit = %{
+        "client_msg_id" => "mac-61",
+        "profile_id" => "main",
+        "trip_id" => @trip_id,
+        "op" => %{"op" => "remove", "row_id" => @stop_id}
+      }
+
+      assert :ok = Protocol.validate_client_payload("trip_edit", edit)
+      assert :ok = Protocol.validate_client_payload("trip_edit", Map.delete(edit, "trip_id"))
+
+      long = String.duplicate("a", Protocol.max_trip_msg_id() + 1)
+
+      for {field, bad} <- [
+            {"op", %{edit | "op" => "remove"}},
+            {"op", %{edit | "op" => %{"row_id" => @stop_id}}},
+            {"op", %{edit | "op" => %{"op" => ""}}},
+            {"trip_id", %{edit | "trip_id" => "Varonne"}},
+            {"client_msg_id", %{edit | "client_msg_id" => long}}
+          ] do
+        assert {:error, {:invalid_field, ^field}} =
+                 Protocol.validate_client_payload("trip_edit", bad)
+      end
+    end
+
+    test "a share names the trip and its own client_msg_id" do
+      share = %{"client_msg_id" => "mac-78", "profile_id" => "main", "trip_id" => @trip_id}
+
+      assert :ok = Protocol.validate_client_payload("trip_share", share)
+
+      for {field, bad} <- [
+            {"trip_id", %{share | "trip_id" => "Varonne"}},
+            {"client_msg_id", %{share | "client_msg_id" => ""}}
+          ] do
+        assert {:error, {:invalid_field, ^field}} =
+                 Protocol.validate_client_payload("trip_share", bad)
+      end
+
+      assert {:error, {:missing_field, "trip_id"}} =
+               Protocol.validate_client_payload("trip_share", Map.delete(share, "trip_id"))
+    end
+
+    test "a pushed trip is whole, without a null: days with their dates, stops with their place" do
+      day = %{"row_id" => @day_id, "kind" => "day", "text" => "Old town", "date" => "2031-07-05"}
+
+      stop = %{
+        "row_id" => @stop_id,
+        "kind" => "stop",
+        "text" => "Torre de Vale Escuro",
+        "time" => "10:00",
+        "duration" => 90,
+        "fixed" => true,
+        "note" => "Tickets at the gate",
+        "leg_m" => 380,
+        "place" => @place
+      }
+
+      trip = %{
+        "trip_id" => @trip_id,
+        "title" => "Varonne weekend",
+        "rev" => 3,
+        "starts_on" => "2031-07-05",
+        "timezone" => "Europe/Lisbon",
+        "rows" => [day, stop, %{"row_id" => "ti_3d8f1q6z2x", "kind" => "stop", "text" => "Fish"}]
+      }
+
+      event = %{"profile_id" => "main", "trip" => trip}
+      assert {:ok, _line} = Protocol.encode_server_event("trip", event)
+
+      assert {:ok, _line} =
+               Protocol.encode_server_event("trip", Map.put(event, "made", %{"a" => @stop_id}))
+
+      gone = Map.put(stop, "removed_at", "2031-06-02T14:05:00.000000Z")
+      removed = trip |> Map.put("removed", [gone]) |> Map.put("removed_at", gone["removed_at"])
+      assert {:ok, _line} = Protocol.encode_server_event("trip", %{event | "trip" => removed})
+
+      for bad <- [
+            Map.put(trip, "removed", [stop]),
+            %{trip | "rows" => [%{day | "kind" => "night"}]},
+            %{trip | "rows" => [%{stop | "fixed" => false}]},
+            %{trip | "rows" => [%{stop | "time" => "25:00"}]},
+            %{trip | "rows" => [%{stop | "leg_m" => -1}]},
+            %{trip | "rows" => [Map.delete(stop, "text")]},
+            %{trip | "rows" => [Map.put(stop, "note", nil)]},
+            %{trip | "rows" => [%{stop | "place" => Map.delete(@place, "location")}]},
+            %{trip | "rows" => [%{stop | "row_id" => "ci_5w7p0t4n6b"}]},
+            %{trip | "trip_id" => "Varonne"}
+          ] do
+        assert {:error, {:invalid_field, "trip"}} =
+                 Protocol.encode_server_event("trip", %{event | "trip" => bad})
+      end
+
+      assert {:error, {:invalid_field, "made"}} =
+               Protocol.encode_server_event("trip", Map.put(event, "made", %{}))
+    end
+
+    test "the index lists each trip by id with its days, stops, rev and dates" do
+      entry = %{
+        "trip_id" => @trip_id,
+        "title" => "Varonne weekend",
+        "days" => 2,
+        "stops" => 5,
+        "rev" => 3,
+        "starts_on" => "2031-07-05",
+        "ends_on" => "2031-07-06"
+      }
+
+      index = &Protocol.encode_server_event("trips", %{"profile_id" => "main", "trips" => &1})
+      assert {:ok, _line} = index.([entry])
+      assert {:ok, _line} = index.([Map.drop(entry, ~w(starts_on ends_on))])
+      assert {:ok, _line} = index.([])
+
+      for bad <- [
+            Map.delete(entry, "rev"),
+            %{entry | "days" => 0},
+            %{entry | "ends_on" => "6 July"},
+            Map.put(entry, "starts_on", nil)
+          ] do
+        assert {:error, {:invalid_field, "trips"}} = index.([bad])
+      end
+    end
+
+    test "trip_shared answers a share with its id, the trip's rev and its shared text" do
+      shared = %{
+        "profile_id" => "main",
+        "client_msg_id" => "mac-78",
+        "trip_id" => @trip_id,
+        "rev" => 3,
+        "text" => "Varonne weekend, Sat 5 to Sun 6 Jul 2031"
+      }
+
+      assert {:ok, _line} = Protocol.encode_server_event("trip_shared", shared)
+
+      for {field, bad} <- [
+            {"text", %{shared | "text" => ""}},
+            {"rev", %{shared | "rev" => -1}},
+            {"trip_id", %{shared | "trip_id" => @day_id}}
+          ] do
+        assert {:error, {:invalid_field, ^field}} =
+                 Protocol.encode_server_event("trip_shared", bad)
       end
     end
   end

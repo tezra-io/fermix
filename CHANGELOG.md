@@ -152,9 +152,14 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the plan sent to someone: the shared text links every place in Apple Maps
   and leaves your booking notes out. Trips are yours alone, as your lists are:
   a guest or a group chat sees none, and once a request has read a web page
-  or a search, Fermix only adds to a trip until you ask again. Until the Mac
-  and phone apps draw trips, a reply writes out the days that changed, each
-  place linked.
+  or a search, Fermix only adds to a trip until you ask again. The Mac app
+  draws your trips: a trip shows under the reply that read or changed it and
+  opens in a panel beside the chat, where you move, add, edit, remove,
+  restore and share its days and stops, each change showing at once wherever
+  the trip is open; Share and Copy itinerary hand on the same text Fermix
+  sends from the chat. On a paired phone, until its app draws trips, and on
+  every other channel, a reply writes out the days that changed, each place
+  linked.
 - **Your lists on your phone, live.** A paired phone now reads and changes
   your lists as the Mac app does. A reply that read or changed a list shows
   the list under it, and you tick, add, edit, move and restore items there.

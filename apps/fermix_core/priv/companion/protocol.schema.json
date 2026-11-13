@@ -28,7 +28,11 @@
             "checklists_pull",
             "checklist_pull",
             "checklist_edit",
-            "attach_file"
+            "attach_file",
+            "trips_pull",
+            "trip_pull",
+            "trip_edit",
+            "trip_share"
           ]
         }
       },
@@ -88,6 +92,22 @@
         {
           "if": { "required": ["type"], "properties": { "type": { "const": "attach_file" } } },
           "then": { "$ref": "#/$defs/attach_file" }
+        },
+        {
+          "if": { "required": ["type"], "properties": { "type": { "const": "trips_pull" } } },
+          "then": { "$ref": "#/$defs/trips_pull" }
+        },
+        {
+          "if": { "required": ["type"], "properties": { "type": { "const": "trip_pull" } } },
+          "then": { "$ref": "#/$defs/trip_pull" }
+        },
+        {
+          "if": { "required": ["type"], "properties": { "type": { "const": "trip_edit" } } },
+          "then": { "$ref": "#/$defs/trip_edit" }
+        },
+        {
+          "if": { "required": ["type"], "properties": { "type": { "const": "trip_share" } } },
+          "then": { "$ref": "#/$defs/trip_share" }
         }
       ]
     },
@@ -121,6 +141,9 @@
             "checklists",
             "checklist",
             "attach_status",
+            "trips",
+            "trip",
+            "trip_shared",
             "error"
           ]
         }
@@ -230,6 +253,18 @@
         {
           "if": { "required": ["type"], "properties": { "type": { "const": "attach_status" } } },
           "then": { "$ref": "#/$defs/attach_status" }
+        },
+        {
+          "if": { "required": ["type"], "properties": { "type": { "const": "trips" } } },
+          "then": { "$ref": "#/$defs/trips" }
+        },
+        {
+          "if": { "required": ["type"], "properties": { "type": { "const": "trip" } } },
+          "then": { "$ref": "#/$defs/trip" }
+        },
+        {
+          "if": { "required": ["type"], "properties": { "type": { "const": "trip_shared" } } },
+          "then": { "$ref": "#/$defs/trip_shared" }
         },
         {
           "if": { "required": ["type"], "properties": { "type": { "const": "error" } } },
@@ -424,6 +459,53 @@
         "name": { "type": "string", "minLength": 1, "x-max-bytes": 255 }
       }
     },
+    "trips_pull": {
+      "type": "object",
+      "description": "Version 8. Asks for the index of the owner's trips, answered trips. From then on this connection is sent trips again after every change to any trip, and a turn it carries is told the app draws trips. Taken only from a connection the daemon placed as the owner's; any other is answered error request_failed with the engine's sentence.",
+      "x-since-version": 8,
+      "required": ["type", "profile_id"],
+      "properties": {
+        "type": { "const": "trips_pull" },
+        "profile_id": { "type": "string", "minLength": 1 }
+      }
+    },
+    "trip_pull": {
+      "type": "object",
+      "description": "Version 8. Asks for one whole trip by its id, answered trip. The connection then holds the trip and is sent trip after every committed change to it, whoever made it; it holds at most 16, and pulling another lets the one it pulled longest ago go. removed true adds the days and stops removed in the last 30 days, in that pull and in every push of the trip after it. A removed trip not yet swept still answers, with removed_at; a trip that is gone is error request_failed. Taken only from a connection the daemon placed as the owner's.",
+      "x-since-version": 8,
+      "required": ["type", "profile_id", "trip_id"],
+      "properties": {
+        "type": { "const": "trip_pull" },
+        "profile_id": { "type": "string", "minLength": 1 },
+        "trip_id": { "type": "string", "pattern": "^tr_[0-9a-z]{10}$" },
+        "removed": { "type": "boolean" }
+      }
+    },
+    "trip_edit": {
+      "type": "object",
+      "description": "Version 8. One op on the owner's trips, by row id, through the same transaction as the model's edits; trip_id names the trip for every op but create. Answered accepted (duplicate false) once applied, then trip to every connection holding the trip; sent again with the same client_msg_id it is answered accepted with duplicate true and changes nothing. A client_msg_id names one edit of any kind, a list's or a trip's. A refused op changes nothing and is answered error request_failed with the engine's sentence and client_msg_id. Taken only from a connection the daemon placed as the owner's.",
+      "x-since-version": 8,
+      "required": ["type", "client_msg_id", "profile_id", "op"],
+      "properties": {
+        "type": { "const": "trip_edit" },
+        "client_msg_id": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "profile_id": { "type": "string", "minLength": 1 },
+        "trip_id": { "type": "string", "pattern": "^tr_[0-9a-z]{10}$" },
+        "op": { "$ref": "#/$defs/tripOp" }
+      }
+    },
+    "trip_share": {
+      "type": "object",
+      "description": "Version 8. Asks for the trip in its shared form, the text Copy itinerary and Share hand on, answered trip_shared with this client_msg_id; a removed or unknown trip is error request_failed with the engine's sentence and client_msg_id. It changes nothing. Taken only from a connection the daemon placed as the owner's.",
+      "x-since-version": 8,
+      "required": ["type", "client_msg_id", "profile_id", "trip_id"],
+      "properties": {
+        "type": { "const": "trip_share" },
+        "client_msg_id": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "profile_id": { "type": "string", "minLength": 1 },
+        "trip_id": { "type": "string", "pattern": "^tr_[0-9a-z]{10}$" }
+      }
+    },
     "server_hello": {
       "type": "object",
       "required": ["type", "min_version", "max_version"],
@@ -464,7 +546,7 @@
     },
     "accepted": {
       "type": "object",
-      "description": "Durable receipt for a msg, a command or (version 6) a checklist_edit; clears the outbox item. server_seq is present only on a duplicate whose request already has a reply row: that reply's seq.",
+      "description": "Durable receipt for a msg, a command, (version 6) a checklist_edit or (version 8) a trip_edit; clears the outbox item. server_seq is present only on a duplicate whose request already has a reply row: that reply's seq.",
       "required": ["type", "client_msg_id", "duplicate"],
       "properties": {
         "type": { "const": "accepted" },
@@ -755,9 +837,51 @@
         "status": { "enum": ["present"] }
       }
     },
+    "trips": {
+      "type": "object",
+      "description": "Version 8. The index of the owner's trips, every live trip in picker order: the answer to trips_pull, and sent again, whole, to a connection that pulled it after any trip changes, at most once per 100 ms. Sent only to a connection on version 8 that the daemon placed as the owner's and that pulled the index.",
+      "x-since-version": 8,
+      "required": ["type", "profile_id", "trips"],
+      "properties": {
+        "type": { "const": "trips" },
+        "profile_id": { "type": "string", "minLength": 1 },
+        "trips": { "type": "array", "maxItems": 30, "items": { "$ref": "#/$defs/tripsEntry" } }
+      }
+    },
+    "trip": {
+      "type": "object",
+      "description": "Version 8. One whole trip: the answer to trip_pull, and sent again, whole, to every connection holding it after each committed change to it, whoever made it, at most once per 100 ms per trip and carrying the rev it ended on. A client drops one whose rev is below the one it shows. made maps the client_msg_id of each create, add or new day a device sent since the trip's last push to the id it made, a create's trip_id, an add's or a new day's row_id; a client matches the ids it sent and ignores the rest. Sent only to a connection on version 8 that the daemon placed as the owner's and that holds the trip.",
+      "x-since-version": 8,
+      "required": ["type", "profile_id", "trip"],
+      "properties": {
+        "type": { "const": "trip" },
+        "profile_id": { "type": "string", "minLength": 1 },
+        "trip": { "$ref": "#/$defs/tripObject" },
+        "made": {
+          "type": "object",
+          "minProperties": 1,
+          "maxProperties": 100,
+          "additionalProperties": { "type": "string", "pattern": "^t[ri]_[0-9a-z]{10}$" }
+        }
+      }
+    },
+    "trip_shared": {
+      "type": "object",
+      "description": "Version 8. The answer to trip_share: the trip in its shared form, written by the engine, which a client hands to the pasteboard or the share sheet as it is. Plain text, the title and dates, each day and a line a stop, every placed stop linked in Apple Maps, no notes. rev is the trip's when it was written. Sent only to the owner's connection that asked.",
+      "x-since-version": 8,
+      "required": ["type", "profile_id", "client_msg_id", "trip_id", "rev", "text"],
+      "properties": {
+        "type": { "const": "trip_shared" },
+        "profile_id": { "type": "string", "minLength": 1 },
+        "client_msg_id": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "trip_id": { "type": "string", "pattern": "^tr_[0-9a-z]{10}$" },
+        "rev": { "type": "integer", "minimum": 0 },
+        "text": { "type": "string", "minLength": 1 }
+      }
+    },
     "error": {
       "type": "object",
-      "description": "A refusal. reason is the code; the other fields are context. Protocol violations close the connection; request failures do not. ref is set only on the request_failed answering a media_fetch the daemon could not serve, and attach_id only on an error answering an attach_file (version 7), whose message is the engine's sentence. A request_failed answering a checklists_pull, checklist_pull or checklist_edit carries the engine's sentence in message, and client_msg_id when it answers an edit. A desktop whose home moved also sends primary_unreachable (its message names the primary; the app keeps its outbox), desktop_revoked (the primary no longer knows this computer, so nothing waiting can be sent) and unattended_client, each before it closes.",
+      "description": "A refusal. reason is the code; the other fields are context. Protocol violations close the connection; request failures do not. ref is set only on the request_failed answering a media_fetch the daemon could not serve, and attach_id only on an error answering an attach_file (version 7), whose message is the engine's sentence. A request_failed answering a checklists_pull, checklist_pull or checklist_edit carries the engine's sentence in message, and client_msg_id when it answers an edit; so does one answering a trips_pull, trip_pull, trip_edit or trip_share (version 8), with client_msg_id when it answers an edit or a share. A desktop whose home moved also sends primary_unreachable (its message names the primary; the app keeps its outbox), desktop_revoked (the primary no longer knows this computer, so nothing waiting can be sent) and unattended_client, each before it closes.",
       "required": ["type", "reason"],
       "properties": {
         "type": { "const": "error" },
@@ -1135,6 +1259,135 @@
         {
           "if": { "required": ["op"], "properties": { "op": { "const": "folder" } } },
           "then": { "required": ["folder"] }
+        }
+      ]
+    },
+    "tripsEntry": {
+      "type": "object",
+      "description": "One trip in the index: its id, title, how many days and stops it holds, and its rev, which moves with every change to the trip; starts_on and ends_on, its first and last days' dates, only when it has a start.",
+      "required": ["trip_id", "title", "days", "stops", "rev"],
+      "properties": {
+        "trip_id": { "type": "string", "pattern": "^tr_[0-9a-z]{10}$" },
+        "title": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "days": { "type": "integer", "minimum": 1 },
+        "stops": { "type": "integer", "minimum": 0 },
+        "rev": { "type": "integer", "minimum": 0 },
+        "starts_on": { "type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$" },
+        "ends_on": { "type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$" }
+      }
+    },
+    "tripObject": {
+      "type": "object",
+      "description": "A whole trip, its rows in order: each day, then its stops. starts_on and timezone only when the trip has them. removed holds the days and stops removed in the last 30 days, newest first, only when the pull asked for them; a day and the stops removed with it share one removed_at. removed_at is set only on a trip that was itself removed and is not yet swept. Times are RFC 3339 UTC with microseconds.",
+      "required": ["trip_id", "title", "rev", "rows"],
+      "properties": {
+        "trip_id": { "type": "string", "pattern": "^tr_[0-9a-z]{10}$" },
+        "title": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "rev": { "type": "integer", "minimum": 0 },
+        "starts_on": { "type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$" },
+        "timezone": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "rows": { "type": "array", "minItems": 1, "maxItems": 1000, "items": { "$ref": "#/$defs/tripRow" } },
+        "removed": { "type": "array", "items": { "$ref": "#/$defs/tripRemovedRow" } },
+        "removed_at": { "type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{6}Z$" }
+      }
+    },
+    "tripRow": {
+      "type": "object",
+      "description": "One row. A day has its text only when it is named, its date only when the trip has a start (the start plus its place among the days, so no client adds days to a date), and its own timezone only when it names one. A stop has its text and only what it has of time (HH:MM, the wall clock where the stop is), duration (minutes), fixed (present only when true), note, place and leg_m: the straight line in metres from the placed stop before it in its day, passing over any unplaced stop between; the day's first placed stop and an unplaced stop have none. row_id is stable for the row's life, across moves and edits.",
+      "required": ["row_id", "kind"],
+      "properties": {
+        "row_id": { "type": "string", "pattern": "^ti_[0-9a-z]{10}$" },
+        "kind": { "enum": ["day", "stop"] },
+        "text": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "date": { "type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$" },
+        "timezone": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "time": { "type": "string", "pattern": "^([01][0-9]|2[0-3]):[0-5][0-9]$" },
+        "duration": { "type": "integer", "minimum": 1, "maximum": 1440 },
+        "fixed": { "const": true },
+        "note": { "type": "string", "minLength": 1, "maxLength": 1000 },
+        "leg_m": { "type": "integer", "minimum": 0 },
+        "place": { "$ref": "#/$defs/tripPlace" }
+      },
+      "allOf": [
+        {
+          "if": { "required": ["kind"], "properties": { "kind": { "const": "stop" } } },
+          "then": { "required": ["text"] }
+        },
+        {
+          "if": { "required": ["kind"], "properties": { "kind": { "const": "day" } } },
+          "then": { "properties": { "text": { "maxLength": 80 } } }
+        }
+      ]
+    },
+    "tripRemovedRow": {
+      "type": "object",
+      "description": "A day or stop removed in the last 30 days, with when; restore brings it back, a day with the stops removed with it. A removed row has no date and no leg_m: it has no place among the days.",
+      "required": ["removed_at"],
+      "properties": { "removed_at": { "type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{6}Z$" } },
+      "allOf": [{ "$ref": "#/$defs/tripRow" }]
+    },
+    "tripPlace": {
+      "type": "object",
+      "description": "A stop's place as a trip keeps it: name and location always, and address, apple_place_id (Apple Maps' identifier, for a place Apple found), source_url and canonical_url (HTTPS) and categories where they were given. No rating, hours or distance. The engine builds every link a lookup's place carries; a client builds its Maps address from the record and opens no link a row carries. A device's add or edit sends a whole record in this shape, as only Apple's own search on the device makes one; the engine refuses one out of these bounds, or past 4,096 bytes.",
+      "required": ["name", "location"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "location": {
+          "type": "object",
+          "required": ["latitude", "longitude"],
+          "properties": {
+            "latitude": { "type": "number", "minimum": -90, "maximum": 90 },
+            "longitude": { "type": "number", "minimum": -180, "maximum": 180 }
+          }
+        },
+        "address": { "type": "string", "minLength": 1, "maxLength": 300 },
+        "apple_place_id": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "source_url": { "type": "string", "pattern": "^https://", "maxLength": 2048 },
+        "canonical_url": { "type": "string", "pattern": "^https://", "maxLength": 2048 },
+        "categories": {
+          "type": "array",
+          "maxItems": 5,
+          "items": { "type": "string", "minLength": 1, "maxLength": 64 }
+        }
+      }
+    },
+    "tripOp": {
+      "type": "object",
+      "description": "One op of trip_edit, the model's ops by row id, with restore. create {title} makes a one-day trip; add {text, day_id or after_id, time?, duration?, fixed?, note?, place?} adds a stop at the end of that day or right after that row; edit {row_id, text?, time?, duration?, fixed?, note?, place? or unplace?}, one of them at least, time \"\", note \"\" or duration 0 clearing it and unplace true taking its place away; move {row_id, day_id? or after_id?} moves a stop to the end of that day or right after that row, and a day, with its stops, after after_id's day, or first with neither; day {row_id?, text?, after_id?} names the day row_id names (text \"\" taking its name away), or with no row_id adds a day after after_id's day or at the end; remove {row_id} removes a stop, or a day with its stops; restore {row_id?, title?} brings back a removed row of the trip at its place (a day with the stops removed with it), or with no row_id the removed trip itself, under title when given, and is refused while a live trip holds the title it would come back under; rename {text}; dates {starts_on} sets the first day's date, \"\" for none, every day's date following; remove_trip. A stop's text is 1 to 200 characters, a day's name and a title 1 to 80, a note 1,000, each one line, trimmed (a note may hold line breaks).",
+      "required": ["op"],
+      "properties": {
+        "op": {
+          "enum": ["create", "add", "edit", "move", "day", "remove", "restore", "rename", "dates", "remove_trip"]
+        },
+        "title": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "text": { "type": "string", "maxLength": 200 },
+        "row_id": { "type": "string", "pattern": "^ti_[0-9a-z]{10}$" },
+        "day_id": { "type": "string", "pattern": "^ti_[0-9a-z]{10}$" },
+        "after_id": { "type": "string", "pattern": "^ti_[0-9a-z]{10}$" },
+        "time": { "type": "string", "pattern": "^(([01][0-9]|2[0-3]):[0-5][0-9])?$" },
+        "duration": { "type": "integer", "minimum": 0, "maximum": 1440 },
+        "fixed": { "type": "boolean" },
+        "note": { "type": "string", "maxLength": 1000 },
+        "place": { "$ref": "#/$defs/tripPlace" },
+        "unplace": { "type": "boolean" },
+        "starts_on": { "type": "string", "pattern": "^([0-9]{4}-[0-9]{2}-[0-9]{2})?$" }
+      },
+      "allOf": [
+        {
+          "if": { "required": ["op"], "properties": { "op": { "const": "create" } } },
+          "then": { "required": ["title"] }
+        },
+        {
+          "if": { "required": ["op"], "properties": { "op": { "enum": ["add", "rename"] } } },
+          "then": { "required": ["text"] }
+        },
+        {
+          "if": { "required": ["op"], "properties": { "op": { "enum": ["edit", "move", "remove"] } } },
+          "then": { "required": ["row_id"] }
+        },
+        {
+          "if": { "required": ["op"], "properties": { "op": { "const": "dates" } } },
+          "then": { "required": ["starts_on"] }
         }
       ]
     },

@@ -324,8 +324,8 @@ defmodule FermixChannels.Companion.ConnectionChecklistsTest do
   end
 
   # M89: a trip's change goes out through the lists' notifier, by kind, to
-  # every connection, whoever made it. Until the daemon serves trips (E3) a
-  # connection holds none, so it lets the change pass and goes on serving.
+  # every connection, whoever made it. A connection that holds no trip lets
+  # the change pass and goes on serving its lists.
   test "a trip change through the notifier leaves every connection serving", ctx do
     list_id = groceries!(ctx)
     mac = hello(ctx.socket_path, 8)

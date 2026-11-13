@@ -482,7 +482,11 @@ defmodule FermixChannels.Channels.Companion do
       chat_id: profile,
       reply_target: profile,
       metadata:
-        metadata |> put_caller(event) |> put_draws_lists(event) |> put_draws_events(event),
+        metadata
+        |> put_caller(event)
+        |> put_draws_lists(event)
+        |> put_draws_trips(event)
+        |> put_draws_events(event),
       attachments: declared_attachments(event)
     })
   end
@@ -508,6 +512,11 @@ defmodule FermixChannels.Channels.Companion do
   # pulled their index (M85 §07), read off the connection, never the payload.
   defp put_draws_lists(metadata, %{draws_lists: true}), do: Map.put(metadata, :draws_lists, true)
   defp put_draws_lists(metadata, _event), do: metadata
+
+  # Whether it draws the owner's trips: it pulled their index (M89 §06), read
+  # off the connection, never the payload.
+  defp put_draws_trips(metadata, %{draws_trips: true}), do: Map.put(metadata, :draws_trips, true)
+  defp put_draws_trips(metadata, _event), do: metadata
 
   # Whether it draws the events a reply carries: it negotiated version 8
   # (`ReplyBlocks.drawn_types/3`), read off the connection, never the payload.

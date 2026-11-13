@@ -84,3 +84,5 @@ A plugin named `trip`, or starting with `trip_`, is refused when it is installed
 ## Where a trip shows
 
 A reply that read or changed a trip carries the trip's id and the rows it touched as a `trips` block. An app that draws trips draws the trip under the reply, live, once it has pulled the trips index; on such a turn the trip line says the trip is drawn under the reply, so the reply says in a sentence or two what changed and does not write the days out. Everywhere else, a reply writes out the days that changed, a stop a line with its time, each stop with a place linked, as the shared form gives them.
+
+The Fermix Mac app draws trips: a trip under the reply that read or changed it, which opens in a panel beside the chat where the owner moves, adds, edits, removes, restores and shares days and stops, every change landing live wherever the trip is open. A paired phone draws them after its own update; until then a phone's reply writes the days out.

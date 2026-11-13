@@ -149,6 +149,16 @@ defmodule FermixCore.Companion.Protocol do
   at or below the version the engine release two minor versions back
   speaks, so a computer within the server's window always connects.
 
+  Version 8 also brings the owner's trips (M89 §06), the lists' family again
+  under the lists' rules: `trips_pull` and `trip_pull` ask for the index and
+  one whole trip, answered `trips` and `trip`; `trip_edit` changes one by row
+  id, answered `accepted` once, by its `client_msg_id`, or `error:
+  request_failed` with the engine's sentence; and `trip_share` asks for the
+  trip in its shared form, answered `trip_shared`. Every one is taken from,
+  and sent to, only a connection on version 8 placed as the owner's, and a
+  trip event only to a connection that pulled. A `client_msg_id` names one
+  edit of any kind, a list's or a trip's.
+
   Both hellos carry the primary epoch (M75 D14), additive and optional on
   every version: `server_hello.primary_epoch` is the home's, absent only from a
   home that has never booted as the primary, and `client_hello.primary_epoch`
@@ -212,6 +222,16 @@ defmodule FermixCore.Companion.Protocol do
   @row_id ~r/\Aci_[0-9a-z]{10}\z/
   @max_checklist_msg_id 128
   @row_kinds ~w(item section)
+  # The owner's trips (version 8, M89 §06): ids as the engine mints them, a
+  # device edit's own id bounded as the store keeps it, and a row's fields as
+  # `Trips.Wire` writes them.
+  @trip_id ~r/\Atr_[0-9a-z]{10}\z/
+  @trip_row_id ~r/\Ati_[0-9a-z]{10}\z/
+  @max_trip_msg_id 128
+  @trip_date ~r/\A[0-9]{4}-[0-9]{2}-[0-9]{2}\z/
+  @trip_time ~r/\A([01][0-9]|2[0-3]):[0-5][0-9]\z/
+  @trip_minutes 1..1440
+  @trip_place_strings ~w(address apple_place_id source_url canonical_url)
   # The owner's files (version 7): an attach id names a file in the inbox, so
   # it is a file name and never a path; a kind is a hint, as the phone's is;
   # a mime and a name are bounded as the media store keeps them.
@@ -231,12 +251,13 @@ defmodule FermixCore.Companion.Protocol do
   @client_events ~w(
     client_hello msg command cancel history_pull history_search read_state media_fetch
     media_release proposal_answer checklists_pull checklist_pull checklist_edit attach_file
+    trips_pull trip_pull trip_edit trip_share
   )
   @server_events ~w(
     server_hello accepted turn_started text_delta tool_event reasoning text_done turn_error
     turn_done row row_updated approval approval_resolved read_state history_page search_results
     media_path media_missing proposal proposal_resolved home_status_changed checklists
-    checklist attach_status error
+    checklist attach_status trips trip trip_shared error
   )
 
   # The events a version after 1 brought; every other one is version 1.
@@ -247,7 +268,11 @@ defmodule FermixCore.Companion.Protocol do
     "checklists_pull" => 6,
     "checklist_pull" => 6,
     "checklist_edit" => 6,
-    "attach_file" => 7
+    "attach_file" => 7,
+    "trips_pull" => 8,
+    "trip_pull" => 8,
+    "trip_edit" => 8,
+    "trip_share" => 8
   }
   @server_event_versions %{
     "turn_done" => 2,
@@ -260,11 +285,14 @@ defmodule FermixCore.Companion.Protocol do
     "home_status_changed" => 6,
     "checklists" => 6,
     "checklist" => 6,
-    "attach_status" => 7
+    "attach_status" => 7,
+    "trips" => 8,
+    "trip" => 8,
+    "trip_shared" => 8
   }
 
-  # The events only the owner's connection is sent or may send (versions 4 and 6).
-  @owner_server_events ~w(proposal proposal_resolved checklists checklist)
+  # The events only the owner's connection is sent or may send (versions 4, 6 and 8).
+  @owner_server_events ~w(proposal proposal_resolved checklists checklist trips trip trip_shared)
 
   # A row a Live call writes carries `metadata.call` (M56 §6): what happened
   # on the call, and which task it was about.
@@ -308,7 +336,11 @@ defmodule FermixCore.Companion.Protocol do
     "checklists_pull" => ~w(profile_id),
     "checklist_pull" => ~w(profile_id list_id),
     "checklist_edit" => ~w(client_msg_id profile_id op),
-    "attach_file" => ~w(attach_id kind mime size_bytes sha256)
+    "attach_file" => ~w(attach_id kind mime size_bytes sha256),
+    "trips_pull" => ~w(profile_id),
+    "trip_pull" => ~w(profile_id trip_id),
+    "trip_edit" => ~w(client_msg_id profile_id op),
+    "trip_share" => ~w(client_msg_id profile_id trip_id)
   }
 
   @server_required %{
@@ -336,6 +368,9 @@ defmodule FermixCore.Companion.Protocol do
     "checklists" => ~w(profile_id lists),
     "checklist" => ~w(profile_id list),
     "attach_status" => ~w(attach_id status),
+    "trips" => ~w(profile_id trips),
+    "trip" => ~w(profile_id trip),
+    "trip_shared" => ~w(profile_id client_msg_id trip_id rev text),
     "error" => ~w(reason)
   }
 
@@ -420,6 +455,10 @@ defmodule FermixCore.Companion.Protocol do
   @doc "The longest `client_msg_id` of a `checklist_edit`, in characters (version 6)."
   @spec max_checklist_msg_id() :: pos_integer()
   def max_checklist_msg_id, do: @max_checklist_msg_id
+
+  @doc "The longest `client_msg_id` of a `trip_edit` or a `trip_share`, in characters (version 8)."
+  @spec max_trip_msg_id() :: pos_integer()
+  def max_trip_msg_id, do: @max_trip_msg_id
 
   @doc "The kinds an `attach_file` may declare (version 7), a hint as the phone's `kind` is."
   @spec attach_kinds() :: [String.t()]
@@ -769,6 +808,35 @@ defmodule FermixCore.Companion.Protocol do
     end
   end
 
+  # Version 8: the trips' events are the lists', by the trips' ids; the op is
+  # the engine's to judge (`Trips.Registry`), as a list's is.
+  defp validate_client("trips_pull", payload), do: nonempty(payload, "profile_id")
+
+  defp validate_client("trip_pull", payload) do
+    with :ok <- nonempty(payload, "profile_id"),
+         :ok <- pattern(payload, "trip_id", @trip_id) do
+      optional_boolean(payload, "removed")
+    end
+  end
+
+  defp validate_client("trip_edit", payload) do
+    with :ok <- bounded_nonempty(payload, "client_msg_id", @max_trip_msg_id),
+         :ok <- nonempty(payload, "profile_id"),
+         :ok <- optional_pattern(payload, "trip_id", @trip_id) do
+      case payload["op"] do
+        %{"op" => op} when is_binary(op) and op != "" -> :ok
+        _other -> {:error, {:invalid_field, "op"}}
+      end
+    end
+  end
+
+  defp validate_client("trip_share", payload) do
+    with :ok <- bounded_nonempty(payload, "client_msg_id", @max_trip_msg_id),
+         :ok <- nonempty(payload, "profile_id") do
+      pattern(payload, "trip_id", @trip_id)
+    end
+  end
+
   # Version 2 (M56 §4.6): a cancel may name a task that outlived its call by
   # exactly its three ids, the ones its `task_running` row carries.
   defp optional_task_ref(%{"task_ref" => task_ref}) do
@@ -960,6 +1028,29 @@ defmodule FermixCore.Companion.Protocol do
     end
   end
 
+  defp validate_server("trips", payload) do
+    with :ok <- nonempty(payload, "profile_id") do
+      if is_list(payload["trips"]) and Enum.all?(payload["trips"], &trip_entry?/1),
+        do: :ok,
+        else: {:error, {:invalid_field, "trips"}}
+    end
+  end
+
+  defp validate_server("trip", payload) do
+    with :ok <- nonempty(payload, "profile_id"),
+         :ok <- trip_field(payload["trip"]) do
+      optional_made(payload)
+    end
+  end
+
+  # A share's answer: the trip's shared form at the rev it shows.
+  defp validate_server("trip_shared", payload) do
+    with :ok <- strings(payload, ~w(profile_id client_msg_id text)),
+         :ok <- pattern(payload, "trip_id", @trip_id) do
+      nonnegative_u64(payload, "rev")
+    end
+  end
+
   defp validate_server("error", payload) do
     with :ok <- nonempty(payload, "reason"),
          :ok <- optional_media_ref(payload, "ref") do
@@ -1054,6 +1145,90 @@ defmodule FermixCore.Companion.Protocol do
   end
 
   defp checklist_row?(_row, _removed?), do: false
+
+  # A trip in the index: its id, title, day and stop counts and rev, and its
+  # first and last dates when it has a start.
+  defp trip_entry?(%{"trip_id" => id, "title" => title} = entry)
+       when is_binary(id) and is_binary(title) do
+    Regex.match?(@trip_id, id) and title != "" and
+      integer_range(entry, "days", 1, @max_u64) == :ok and
+      Enum.all?(~w(stops rev), &(nonnegative_u64(entry, &1) == :ok)) and
+      Enum.all?(~w(starts_on ends_on), &(optional_pattern(entry, &1, @trip_date) == :ok)) and
+      not has_null?(entry)
+  end
+
+  defp trip_entry?(_entry), do: false
+
+  # A whole trip, its rows in order and at least one; `removed` the rows
+  # removed in the last 30 days when asked for, and `removed_at` when the trip
+  # itself was removed.
+  defp trip_field(%{"trip_id" => id, "title" => title, "rows" => [_ | _] = rows} = trip)
+       when is_binary(id) and is_binary(title) do
+    ok = trip_meta?(trip) and Enum.all?(rows, &trip_row?(&1, false)) and removed_trip_parts?(trip)
+    if ok, do: :ok, else: {:error, {:invalid_field, "trip"}}
+  end
+
+  defp trip_field(_trip), do: {:error, {:invalid_field, "trip"}}
+
+  defp trip_meta?(%{"trip_id" => id, "title" => title} = trip) do
+    Regex.match?(@trip_id, id) and title != "" and nonnegative_u64(trip, "rev") == :ok and
+      optional_pattern(trip, "starts_on", @trip_date) == :ok and
+      optional_nonempty(trip, "timezone") == :ok
+  end
+
+  defp removed_trip_parts?(trip),
+    do:
+      removed_trip_rows?(trip) and optional_nonempty(trip, "removed_at") == :ok and
+        not has_null?(trip)
+
+  defp removed_trip_rows?(%{"removed" => rows}) when is_list(rows),
+    do: Enum.all?(rows, &trip_row?(&1, true))
+
+  defp removed_trip_rows?(%{"removed" => _rows}), do: false
+  defp removed_trip_rows?(_trip), do: true
+
+  # A day: its name when named, its date when the trip has a start, its own
+  # zone. A stop: its words and only what it has of the rest, `fixed` only when
+  # true, and its place as a stop keeps one. No null anywhere.
+  defp trip_row?(%{"row_id" => id, "kind" => "day"} = row, removed?) when is_binary(id) do
+    Regex.match?(@trip_row_id, id) and optional_nonempty(row, "text") == :ok and
+      optional_pattern(row, "date", @trip_date) == :ok and
+      optional_nonempty(row, "timezone") == :ok and trip_row_removed?(row, removed?)
+  end
+
+  defp trip_row?(%{"row_id" => id, "kind" => "stop", "text" => text} = row, removed?)
+       when is_binary(id) and is_binary(text) do
+    Regex.match?(@trip_row_id, id) and text != "" and stop_fields?(row) and
+      trip_row_removed?(row, removed?)
+  end
+
+  defp trip_row?(_row, _removed?), do: false
+
+  defp stop_fields?(row) do
+    optional_pattern(row, "time", @trip_time) == :ok and
+      Map.get(row, "duration", 1) in @trip_minutes and Map.get(row, "fixed", true) == true and
+      optional_nonempty(row, "note") == :ok and optional_nonnegative_u64(row, "leg_m") == :ok and
+      trip_place?(Map.get(row, "place", :none))
+  end
+
+  defp trip_row_removed?(row, removed?),
+    do: not has_null?(row) and (not removed? or nonempty(row, "removed_at") == :ok)
+
+  # A stop's place as a trip keeps it (`Trips.Place`): its name and where it
+  # is always, and only what it has of an address, Apple's id, its links and
+  # its kinds.
+  defp trip_place?(:none), do: true
+
+  defp trip_place?(
+         %{"name" => name, "location" => %{"latitude" => lat, "longitude" => lon}} = place
+       )
+       when is_binary(name) and name != "" and is_number(lat) and lat >= -90 and lat <= 90 and
+              is_number(lon) and lon >= -180 and lon <= 180 do
+    Enum.all?(@trip_place_strings, &(optional_nonempty(place, &1) == :ok)) and
+      string_list(Map.put_new(place, "categories", []), "categories") == :ok
+  end
+
+  defp trip_place?(_place), do: false
 
   # An add's or a create's `client_msg_id` to the id it made.
   defp optional_made(%{"made" => made}) when is_map(made) and map_size(made) > 0 do
