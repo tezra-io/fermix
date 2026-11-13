@@ -530,7 +530,7 @@
         "blocks": {
           "type": "array",
           "minItems": 1,
-          "maxItems": 3,
+          "maxItems": 4,
           "items": { "$ref": "#/$defs/replyBlock" }
         }
       }
@@ -580,7 +580,7 @@
         "blocks": {
           "type": "array",
           "minItems": 1,
-          "maxItems": 3,
+          "maxItems": 4,
           "items": { "$ref": "#/$defs/replyBlock" }
         }
       }
@@ -907,16 +907,16 @@
         "blocks": {
           "type": "array",
           "minItems": 1,
-          "maxItems": 3,
+          "maxItems": 4,
           "items": { "$ref": "#/$defs/replyBlock" }
         }
       }
     },
     "replyBlock": {
       "type": "object",
-      "description": "Records a reply carries beside its text, drawn under it (the companion PROTOCOL.md, Blocks under a reply). type says what the block holds, at most one block of each type, and a client skips a type it does not know; the types are places, checklists and events. A type rides from the protocol version that brought it (events: companion 8, mobile 3), and a session on an older version is sent only the types its version carries.",
+      "description": "Records a reply carries beside its text, drawn under it (the companion PROTOCOL.md, Blocks under a reply). type says what the block holds, at most one block of each type, and a client skips a type it does not know; the types are places, checklists, events and trips. A type rides from the protocol version that brought it (events and trips: companion 8, mobile 3), and a session on an older version is sent only the types its version carries.",
       "required": ["type"],
-      "properties": { "type": { "enum": ["places", "checklists", "events"] } },
+      "properties": { "type": { "enum": ["places", "checklists", "events", "trips"] } },
       "allOf": [
         {
           "if": { "required": ["type"], "properties": { "type": { "const": "places" } } },
@@ -929,6 +929,10 @@
         {
           "if": { "required": ["type"], "properties": { "type": { "const": "events" } } },
           "then": { "$ref": "#/$defs/eventsBlock" }
+        },
+        {
+          "if": { "required": ["type"], "properties": { "type": { "const": "trips" } } },
+          "then": { "$ref": "#/$defs/tripsBlock" }
         }
       ]
     },
@@ -973,6 +977,31 @@
           "maxItems": 8,
           "items": { "$ref": "#/$defs/eventCard" }
         }
+      }
+    },
+    "tripsBlock": {
+      "type": "object",
+      "description": "Companion version 8, mobile version 3. The owner's trips trip_read or trip_edit read or changed in the reply's turn, in the order the turn first touched them, at most 4, each with the ids of the rows (days and stops) the turn added or changed, none for a trip it only read. Ids and the title only: a client that pulled the trips index draws each trip as it stands now.",
+      "x-since-versions": { "companion": 8, "mobile": 3 },
+      "required": ["type", "trips"],
+      "properties": {
+        "type": { "const": "trips" },
+        "trips": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 4,
+          "items": { "$ref": "#/$defs/tripRef" }
+        }
+      }
+    },
+    "tripRef": {
+      "type": "object",
+      "description": "One trip a turn touched: its id, its title when the turn ended, and the ids of the rows the turn added or changed.",
+      "required": ["trip_id", "title", "rows"],
+      "properties": {
+        "trip_id": { "type": "string", "pattern": "^tr_[0-9a-z]{10}$" },
+        "title": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "rows": { "type": "array", "items": { "type": "string", "pattern": "^ti_[0-9a-z]{10}$" } }
       }
     },
     "eventCard": {

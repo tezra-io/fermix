@@ -212,6 +212,10 @@ defmodule FermixCore.Capabilities.Builtin do
     # barrier, and these registry fields do not replace it.
     "checklist_read" => %{policy_class: :read_only, hidden_from_agent?: false, owner_only?: true},
     "checklist_edit" => %{policy_class: :read_write, hidden_from_agent?: false, owner_only?: true},
+    # The owner's trips (M89 §14), as the lists: every row is the owner's, and
+    # the advertise?/execute gates (`Kept.Access`) are the hard barrier.
+    "trip_read" => %{policy_class: :read_only, hidden_from_agent?: false, owner_only?: true},
+    "trip_edit" => %{policy_class: :read_write, hidden_from_agent?: false, owner_only?: true},
     # Meetings notetaker (MILESTONE_21 C2 §14.1). `:external_api` sits in the
     # operator's default policy and the guest deny-list, and owner-only keeps
     # the owner's own meetings out of a guest's surface; the attended-operator

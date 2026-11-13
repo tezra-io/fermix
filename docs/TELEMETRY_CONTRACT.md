@@ -1406,6 +1406,15 @@ exporter places each under its turn's or job run's trace as a point span
 
 ## The owner's trips (M89)
 
+`trip_read` and `trip_edit` are ordinary built-ins riding
+`[:fermix, :tool, :exec]` through `Tools.Telemetry.exec/5`: one event per model
+call, under the name the model used, and a refused call's event carries
+`error_code` (`Trips.Registry.error_tag/1`) and `error_summary`, the sentence
+the model received. The place lookups inside a `trip_edit` call are the
+engine's, not the model's: they go through `PlaceSearch.lookup/2`, which emits
+no `place_search` row, and are counted on the call's `[:fermix, :trip, :edit]`
+event below.
+
 A trip is the lists' second kind on the same mechanism, and its events are the
 lists' again. `Trips.Registry` emits **one point event per read and per edit**
 through `FermixCore.Trips.Telemetry`, an edit a device sends included

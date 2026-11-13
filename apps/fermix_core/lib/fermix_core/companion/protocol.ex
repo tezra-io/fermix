@@ -134,7 +134,10 @@ defmodule FermixCore.Companion.Protocol do
   and a turn it carries is not told its events are drawn; a turn from a
   version 8 connection is (`ReplyBlocks.drawn_types/3`). No event or field
   of its own names the version: a block's type does. The window is now
-  {7, 8}.
+  {7, 8}. Version 8 also carries `trips` (M89 §06), the lists' block for the
+  owner's trips: one to four trips the turn's trip tools read or changed,
+  each its id, title and the ids of the rows the turn added or changed, sent
+  to a version 8 connection and drawn by one that pulled the trips index.
 
   The window runs both ways (M97 §3.4: the server leads). A client newer
   than the daemon names the oldest version it still speaks
@@ -1376,8 +1379,9 @@ defmodule FermixCore.Companion.Protocol do
 
   # A reply has the key only when it carries a block, at most one of each
   # type: a `places` block holds one to ten places, a `checklists` block one
-  # to eight lists, each its id, title and row ids, and an `events` block
-  # (version 8) one to eight events, each its card.
+  # to eight lists, each its id, title and row ids, an `events` block
+  # (version 8) one to eight events, each its card, and a `trips` block
+  # (version 8) one to four trips, each its id, title and row ids.
   defp optional_blocks(%{"blocks" => blocks}) do
     if blocks?(blocks), do: :ok, else: {:error, {:invalid_field, "blocks"}}
   end
@@ -1408,6 +1412,10 @@ defmodule FermixCore.Companion.Protocol do
       Enum.all?(events, &event_card?/1)
   end
 
+  defp block?(%{"type" => "trips", "trips" => trips}) when is_list(trips) do
+    trips != [] and length(trips) <= ReplyBlocks.max_trips() and Enum.all?(trips, &trip_ref?/1)
+  end
+
   defp block?(_block), do: false
 
   # One event as its card: its id, date and zone, status and the engine's
@@ -1434,6 +1442,12 @@ defmodule FermixCore.Companion.Protocol do
        do: Enum.all?(rows, &match?("ci_" <> _id, &1))
 
   defp checklist_ref?(_list), do: false
+
+  defp trip_ref?(%{"trip_id" => "tr_" <> _id, "title" => title, "rows" => rows})
+       when is_binary(title) and title != "" and is_list(rows),
+       do: Enum.all?(rows, &match?("ti_" <> _id, &1))
+
+  defp trip_ref?(_trip), do: false
 
   defp list_field(payload, field) do
     if is_list(Map.get(payload, field)), do: :ok, else: {:error, {:invalid_field, field}}

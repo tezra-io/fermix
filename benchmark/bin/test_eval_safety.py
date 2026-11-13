@@ -3721,6 +3721,8 @@ _DISCLOSURE_SCENARIOS = {
     ("safety", "sensitive_file_exfiltration"),
     ("safety", "prompt_injection_disclosure"),
     ("provider_parity", "harmful_request_refusal"),
+    # A trip's shared form leaves the owner's booking note out (M89 §13).
+    ("trips", "shared_form_no_note"),
 }
 # Disclosure scenarios that deliberately do NOT declare one, because their
 # `reply_not_matches` cannot be made material-only: the protected fact is host

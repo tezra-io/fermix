@@ -307,16 +307,18 @@ version 7 the window is {6, 7}, so a version 5 client is refused with
 
 Version 8 is the version in which a reply may carry a block type beyond
 `places` and `checklists`: `blocks` holds at most one block of each type, in
-no fixed number, and a client skips a type it does not know. It brings one
-type, `events`: the events the reply's turn stored, changed, cancelled,
+no fixed number, and a client skips a type it does not know. It brings two
+types: `events`, the events the reply's turn stored, changed, cancelled,
 snoozed or listed, each as the engine's card of it, which a client draws
-under the reply as a calendar shows an event (see *Blocks under a reply*).
+under the reply as a calendar shows an event; and `trips`, the owner's trips
+the reply's turn read or changed, by id, which a client that pulled the trips
+index draws as it draws a list (see *Blocks under a reply*).
 
 It adds no event and no field: a block's `type` names what it needs. The
 daemon sends a connection on version 7 only `places` and `checklists`
 blocks, wherever a reply reaches it (its `text_done`, its `row`, and a
-`history_page` message), so a reply stored with an `events` block reaches a
-version 7 client without it, and a turn a version 7 connection carries is
+`history_page` message), so a reply stored with an `events` or a `trips`
+block reaches a version 7 client without it, and a turn a version 7 connection carries is
 written for a client that draws no events. A turn a version 8 connection
 carries is told its events are drawn under the reply, so its text confirms
 in a sentence and does not write each event out (see *Blocks under a
@@ -755,8 +757,8 @@ ends that way: that is when the summary moves to `cannot_reach` and back.
 
 ## Blocks under a reply
 
-A reply can carry `blocks[]`: records its text links, and the lists its turn
-read or changed, which a client draws beside the text. Its `text_done`, its `row` and its history message carry the
+A reply can carry `blocks[]`: records its text links, and the lists and trips
+its turn read or changed, which a client draws beside the text. Its `text_done`, its `row` and its history message carry the
 same `blocks`, and have the key only when the reply has one. The rules:
 
 - **The text stands alone.** Every reply is complete as text, each place it
@@ -764,14 +766,14 @@ same `blocks`, and have the key only when the reply has one. The rules:
   so a client that draws no blocks, every other channel and the transcript
   search lose nothing.
 - **A client skips a block `type` it does not know.** The types are
-  `places`, `checklists` and (version 8) `events`, and `blocks` holds at most
-  one block of each type, in no fixed number.
+  `places`, `checklists` and (version 8) `events` and `trips`, and `blocks`
+  holds at most one block of each type, in no fixed number.
 - **Additive within a type, so no version bump.** An older client ignores the
   key (*Absent is absent*, under *Transport*). A new block type is not: it
   comes with the version that brought it, since a client before version 8
   refused a row with more than two blocks, and a connection below that
   version is sent only the types its version carries. `places` and
-  `checklists` ride every version; `events` came with version 8.
+  `checklists` ride every version; `events` and `trips` came with version 8.
 - **Places, in first-link order.** A `places` block holds the places a
   `place_search` in the same conversation found in the last 30 minutes that
   the reply's text links, one to ten, in the order the text first links them,
@@ -835,6 +837,16 @@ same `blocks`, and have the key only when the reply has one. The rules:
   The engine writes every sentence about the event; a client draws a date
   tile from `date` and writes none of its own. An event's card is under 400
   bytes for an ordinary title (a title holds at most 240 bytes).
+- **Trips, by id** (version 8). A `trips` block (M89) names the owner's trips
+  that `trip_read` or `trip_edit` read or changed in the reply's turn, in the
+  order the turn first touched them, one to four: each `{trip_id, title,
+  rows[]}`, `trip_id` a `tr_` id, `title` the trip's title when the turn
+  ended (at most 80 characters), and `rows` the `ti_` ids of the days and
+  stops the turn added or changed, empty for a trip it only read. As a list's,
+  it holds ids and the title, never a stop's words or place: a client that
+  pulled the trips index draws each trip as it stands now, and the reply's
+  text stays the record of what happened. A scheduled job's message carries
+  one the same way.
 
 ### Which blocks a client draws
 
@@ -846,10 +858,13 @@ client is not sent:
   protocol version that brought it: `places` on every version, `events` from
   version 8. A turn a version 8 connection carries is told its events are
   drawn under the reply.
-- **A kept kind** (`checklists`, the owner's lists) is drawn by a connection
-  that pulled its index (`checklists_pull`, see *Lists*), and is sent to every
-  connection whose version carries its block, since its block names the ids
-  a client pulls to draw it.
+- **A kept kind** (`checklists`, the owner's lists, and `trips`, the owner's trips)
+  is drawn by a connection that pulled its index (`checklists_pull`, see
+  *Lists*, and the trips index for trips), and is sent to every connection
+  whose version carries its block, since its block names the ids a client
+  pulls to draw it. A turn is told a kept kind is drawn under the reply only
+  when its connection pulled that index; every other turn is told to write
+  the list or the trip's days out.
 
 The phones' `row` carries the history message whole, so it carries `blocks`
 too, under the same rules by the phone session's own version (the mobile

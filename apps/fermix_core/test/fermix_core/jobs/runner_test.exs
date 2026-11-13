@@ -1571,6 +1571,47 @@ defmodule FermixCore.Jobs.RunnerTest do
     assert FermixCore.ReplyBlocks.take({:scheduled_job, job.id, run.id}) == []
   end
 
+  # M89 §06: a job that read or changed a trip draws it, as it draws a list.
+  test "delivers the trips the run touched as the message's trips block, after the lists", %{
+    repo: repo,
+    capability_registry: capability_registry,
+    output_base_dir: output_base_dir
+  } do
+    assert {:ok, {job, run}} =
+             create_claimed_job(repo,
+               name: "Trip Morning",
+               schedule: "every 15 minutes",
+               task_prompt: "Read today's day of the Varonne trip.",
+               delivery_mode: "channel",
+               delivery_target: %{"platform" => "telegram", "chat_id" => "123"}
+             )
+
+    key = {:scheduled_job, job.id, run.id}
+    trip = %{trip_id: "tr_4q8m2x7v1d", title: "Varonne", rows: []}
+    list = %{list_id: "ck_3m9q2x7d1a", title: "Packing", rows: []}
+    :ok = FermixCore.ReplyBlocks.put_trips(key, [trip])
+    :ok = FermixCore.ReplyBlocks.put_checklists(key, [list])
+
+    assert_runner_exits_normally(
+      job,
+      run,
+      repo: repo,
+      capability_registry: capability_registry,
+      output_base_dir: output_base_dir,
+      delivery_adapter: RecordingDelivery,
+      delivery_opts: [test_pid: self()],
+      script: [%{content: "The fish market at half past eight."}]
+    )
+
+    assert_receive {:delivery_send, "123", "The fish market at half past eight.", opts}
+
+    assert [%{"type" => "checklists"}, %{"type" => "trips", "trips" => [only]}] =
+             Keyword.fetch!(opts, :blocks)
+
+    assert only == %{"trip_id" => "tr_4q8m2x7v1d", "title" => "Varonne", "rows" => []}
+    assert FermixCore.ReplyBlocks.take(key) == []
+  end
+
   test "skips delivery when the final response is the silent marker", %{
     repo: repo,
     capability_registry: capability_registry,

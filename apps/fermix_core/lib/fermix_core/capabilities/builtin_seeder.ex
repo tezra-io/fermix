@@ -65,6 +65,14 @@ defmodule FermixCore.Capabilities.BuiltinSeeder do
     FermixCore.Tools.ChecklistEdit
   ]
 
+  # The owner's trips (M89 §14), named as its own list for the same reason:
+  # `trip_tools_trust_invariant_test.exs` loops over it. Seeded always, gated
+  # by `Kept.Access` as the lists' tools are.
+  @trip_tool_modules [
+    FermixCore.Tools.TripRead,
+    FermixCore.Tools.TripEdit
+  ]
+
   @builtin_tool_modules [
     FermixCore.Tools.Shell,
     FermixCore.Tools.FileRead,
@@ -128,7 +136,10 @@ defmodule FermixCore.Capabilities.BuiltinSeeder do
     FermixCore.Tools.OpenLoopRespond,
     # The lists family; keep `@checklist_tool_modules` in step.
     FermixCore.Tools.ChecklistRead,
-    FermixCore.Tools.ChecklistEdit
+    FermixCore.Tools.ChecklistEdit,
+    # The trips family; keep `@trip_tool_modules` in step.
+    FermixCore.Tools.TripRead,
+    FermixCore.Tools.TripEdit
   ]
 
   def child_spec(opts) do
@@ -279,6 +290,14 @@ defmodule FermixCore.Capabilities.BuiltinSeeder do
   """
   @spec checklist_tool_modules() :: [module()]
   def checklist_tool_modules, do: @checklist_tool_modules
+
+  @doc """
+  The trip tool family (M89 §14). Exposed so the whole-surface invariant test
+  gates EVERY member: none is offered outside the owner's private turn or
+  voice call and a job that names it.
+  """
+  @spec trip_tool_modules() :: [module()]
+  def trip_tool_modules, do: @trip_tool_modules
 
   @doc """
   The meetings notetaker tool family (MILESTONE_21 C2 §14.1). Exposed so the

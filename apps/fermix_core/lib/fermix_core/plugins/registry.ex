@@ -81,11 +81,12 @@ defmodule FermixCore.Plugins.Registry do
   @runtime_kinds ~w(node python binary escript)
   @runtime_floor_regex ~r/^\d+(\.\d+){0,2}$/
   @name_regex ~r/^[a-z][a-z0-9_]{0,63}$/
-  # M85 §04: Fermix keeps the name of its own list tools. A plugin's tools are
-  # `<plugin>_<tool>`, so a plugin named `checklist`, or starting with
-  # `checklist_`, could declare `checklist_read` and lose it without a word to
-  # the built-in that registers first.
-  @reserved_name "checklist"
+  # M85 §04, M89 §04: Fermix keeps the names of its own list and trip tools.
+  # A plugin's tools are `<plugin>_<tool>`, so a plugin named `checklist`, or
+  # starting with `checklist_`, could declare `checklist_read` and lose it
+  # without a word to the built-in that registers first; `trip` the same way.
+  # Each name with the words its sentence uses for the tools it keeps.
+  @reserved_names %{"checklist" => "list", "trip" => "trip"}
   @tool_name_regex ~r/^[A-Za-z0-9_-]{1,64}$/
   @max_tool_description_bytes 100
 
@@ -1522,19 +1523,28 @@ defmodule FermixCore.Plugins.Registry do
   end
 
   @doc """
-  Whether a plugin may not be named `name`: `checklist`, or a name starting
-  with `checklist_`, the names Fermix keeps for its own list tools (M85 §04).
-  Refused when a plugin is installed and when one is read from disk.
+  Whether a plugin may not be named `name`: `checklist` or `trip`, or a name
+  starting with `checklist_` or `trip_`, the names Fermix keeps for its own
+  list and trip tools (M85 §04, M89 §04). Refused when a plugin is installed
+  and when one is read from disk.
   """
   @spec reserved_name?(String.t()) :: boolean()
-  def reserved_name?(name) when is_binary(name),
-    do: name == @reserved_name or String.starts_with?(name, @reserved_name <> "_")
+  def reserved_name?(name) when is_binary(name), do: reserved_root(name) != nil
 
-  @doc "The sentence a plugin with a reserved name is refused with."
-  @spec reserved_name_sentence() :: String.t()
-  def reserved_name_sentence,
-    do:
-      "checklist is a name Fermix keeps for its own list tools. Rename the plugin to install it."
+  @doc "The sentence a plugin named `name`, a reserved name, is refused with."
+  @spec reserved_name_sentence(String.t()) :: String.t()
+  def reserved_name_sentence(name) when is_binary(name) do
+    root = reserved_root(name) || raise ArgumentError, "#{inspect(name)} is not a reserved name"
+
+    "#{root} is a name Fermix keeps for its own #{Map.fetch!(@reserved_names, root)} tools. " <>
+      "Rename the plugin to install it."
+  end
+
+  defp reserved_root(name) do
+    @reserved_names
+    |> Map.keys()
+    |> Enum.find(&(name == &1 or String.starts_with?(name, &1 <> "_")))
+  end
 
   defp continue_or_halt(:ok), do: {:cont, :ok}
   defp continue_or_halt({:error, reason}), do: {:halt, {:error, reason}}

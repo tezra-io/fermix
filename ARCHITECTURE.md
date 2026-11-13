@@ -986,11 +986,45 @@ included. Nothing new is stored; the card is a receipt.
 Architecture Invariant: one function decides which block types a session
 draws and which it is sent (`ReplyBlocks.drawn_types/3`): a snapshot of tool
 records (`places`, `events`) from the protocol version that brought it, a
-kept kind (`checklists`) once its index is pulled. Every row leaves by one
+kept kind (`checklists`, and `trips` from companion 8 and mobile 3) once its
+index is pulled. Every row leaves by one
 filter on it (`ReplyBlocks.for_session/4`), at `Companion.Connection`'s
 encoder and `Mobile.Session`'s, so a companion 7 or mobile 2 client, which
 refuses a row with a third block type, is never sent `events`, and a turn is
 never told a card is drawn that its connection is not sent.
+
+### `FermixCore.Trips`: the owner's trips
+
+A trip (M89) is the lists' second kind on the same mechanism: days and the
+stops in them, each stop with its time, length, a fixed mark, a note and a
+place. Its rows live in `memory.db` (`trips` and `trip_rows`, migration 63,
+`Memory.Repo.TripsSql`), a day's date is the trip's start plus its position,
+and `Trips.Registry` is their one writer, a module over the Repo. The model
+sees a trip only as text: `trip_read` renders a trip, some of its days, the
+index or the shared form (`Trips.Render`, each row with its `[n]`, the outline
+past 32 KB), and `trip_edit` takes one trip's ops, which `Trips.Shape` checks
+in the caller and `Trips.Ops`, pure, applies in the Repo's one transaction. A
+stop's `place` is a place's own name or a link a search in the conversation
+returned: before the transaction opens, `Trips.Placing` runs the call over the
+trip as read to learn each stop's day, and `Trips.Lookup` resolves the words
+with the configured place search around that day (`PlaceSearch.lookup/2`, at
+most 40 a call, four at a time, 45 s) and the links from the conversation's
+30-minute place index (`ReplyBlocks.place_by_url/3`); every lookup's record
+joins the conversation first, so an offered link resolves in a later call.
+`Trips.Note` is the rules line and the line naming the trips, only while one
+exists, and `ReplyBlocks` keeps the trips a turn touched for its reply's
+`trips` block (a kept kind: drawn once a connection pulls the trips index).
+
+Architecture Invariant: one `trip_edit` call is one transaction: every op
+lands or none does, the trip's `rev` moves once, and a row's `n` is never
+reused. The place lookups run before it and never inside it, and a lookup is
+no tool call: one model call is one `[:fermix, :tool, :exec]` event.
+
+Architecture Invariant: the trips are the owner's, by the lists' rule
+(`Kept.Access`), and the tools are left out of the cached catalog. After a
+turn read outside content it may only add, the stop stamped and framed when
+read back; the engine's own lookups do not taint the turn, their names and
+addresses quoted as a provider's words.
 
 ### Sandbox and Command Execution
 

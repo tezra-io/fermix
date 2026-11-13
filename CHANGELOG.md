@@ -143,6 +143,18 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   robot burns one key on its chip for good, and that returning to stock still
   works. The robot's checks, Calibrate head and its own settings stay in the
   Mac app.
+- **Plan a trip in chat.** Ask for a day trip, a week or three weeks away and
+  Fermix keeps it as a trip: days in order, and on each the stops with their
+  times, how long each takes, fixed bookings, notes and places. It looks each
+  place up itself, near the rest of that day, and says which it placed, which
+  it found under another name (with the link, so you can pick it) and which it
+  could not find. Ask what Thursday holds, move the museum to Friday, or have
+  the plan sent to someone: the shared text links every place in Apple Maps
+  and leaves your booking notes out. Trips are yours alone, as your lists are:
+  a guest or a group chat sees none, and once a request has read a web page
+  or a search, Fermix only adds to a trip until you ask again. Until the Mac
+  and phone apps draw trips, a reply writes out the days that changed, each
+  place linked.
 - **Your lists on your phone, live.** A paired phone now reads and changes
   your lists as the Mac app does. A reply that read or changed a list shows
   the list under it, and you tick, add, edit, move and restore items there.

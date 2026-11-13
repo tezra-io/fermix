@@ -303,6 +303,39 @@ defmodule FermixChannels.Mobile.ProtocolContractTest do
     assert protocol =~ "**An engine speaks the oldest version it serves**"
   end
 
+  # M89 §06: protocol 3 carries `trips` too, the lists' block for the owner's
+  # trips: the goldens at 3 carry one for a turn that changed rows and one for
+  # a turn that only read, none at 2 does, and a session at 2 is sent neither.
+  test "the protocol 3 goldens carry a reply's trips, which a session at 2 is never sent", %{
+    protocol: protocol
+  } do
+    headers = jsonl(@server_fixtures)
+    {current, older} = Enum.split_with(headers, &(&1["v"] == Protocol.protocol_version()))
+
+    trips =
+      for header <- current,
+          header["t"] in ~w(text_done row history_page),
+          row <- [header | Map.get(header, "messages", [])],
+          %{"type" => "trips"} = block <- Map.get(row, "blocks", []),
+          do: {header, block}
+
+    refs = for {_header, block} <- trips, trip <- block["trips"], do: trip
+    assert Enum.any?(refs, &(&1["rows"] != []))
+    assert Enum.any?(refs, &(&1["rows"] == []))
+
+    for header <- older, row <- [header | Map.get(header, "messages", [])] do
+      refute Enum.any?(Map.get(row, "blocks", []), &(&1["type"] == "trips")), inspect(header)
+    end
+
+    for {header, _block} <- trips do
+      old = ReplyBlocks.for_session(header["t"], Map.drop(header, ~w(v t seq)), :mobile, 2)
+      refute old |> Jason.encode!() |> String.contains?(~s("type":"trips"))
+      assert {:ok, _frame} = Protocol.encode_server_frame(header["t"], old, 1, <<>>, version: 2)
+    end
+
+    assert protocol =~ "A `trips` block is the companion socket's too"
+  end
+
   test "binary fixture wrappers reconstruct and round-trip exact frames" do
     for fixture <- jsonl(@client_binary_fixtures) do
       bytes = Base.decode64!(fixture["bytes_b64"])

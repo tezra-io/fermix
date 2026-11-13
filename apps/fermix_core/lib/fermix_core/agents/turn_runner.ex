@@ -61,6 +61,7 @@ defmodule FermixCore.Agents.TurnRunner do
   alias FermixCore.Telemetry
   alias FermixCore.Temporal.Access, as: TemporalAccess
   alias FermixCore.Tools.HarnessSupport
+  alias FermixCore.Trips.Note, as: TripNote
 
   @auto_compaction_failure_backoff_ms 60_000
 
@@ -678,9 +679,19 @@ defmodule FermixCore.Agents.TurnRunner do
     messages =
       append_system_note(messages, ChecklistNote.rules(context, msg.channel, draws_lists?(msg)))
 
+    # The owner's trips (M89 §04) beside the lists, only while a trip exists
+    # (C8); a trip tool tells a turn that was not told how its channel shows
+    # a trip (`trips_told`).
+    trips = TripNote.lines(context, msg.channel, draws_trips?(msg))
+
+    context =
+      Map.merge(context, %{trips_told: trips.rules != nil, draws_trips: draws_trips?(msg)})
+
+    messages = append_system_note(messages, trips.rules)
     messages = append_system_note(messages, events_note(context, msg))
     messages = inject_current_date(messages)
     messages = append_system_note(messages, ChecklistNote.index(context))
+    messages = append_system_note(messages, trips.index)
     messages = inject_recent_calls(messages, state, source_trust, voice_call)
     {messages, context} = inject_recent_activity(messages, context)
     :ok = capture_open_loop_reply(context, owner_text)
@@ -832,6 +843,13 @@ defmodule FermixCore.Agents.TurnRunner do
   # key, never read from a payload.
   defp draws_lists?(%{metadata: %{draws_lists: true}}), do: true
   defp draws_lists?(_msg), do: false
+
+  # The connection that carried the turn pulled the trips' index, so its app
+  # draws them (M89 §06), stamped by the channel under an atom key, never read
+  # from a payload. No connection pulls it until the daemon serves trips
+  # (E3), so every turn is told to write a trip's days out.
+  defp draws_trips?(%{metadata: %{draws_trips: true}}), do: true
+  defp draws_trips?(_msg), do: false
 
   # The connection that carried the turn draws the events its reply carries
   # (EVENTS_DRAWN_AS_CARDS §04: companion 8 or mobile 3), stamped by the

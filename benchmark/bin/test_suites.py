@@ -755,6 +755,14 @@ def test_the_shipped_numbered_rubrics_parse():
                       "codex_quotes_the_post": 3,
                       "summarise_each_post_into_notes": 3, "run_every_time_without_asking": 4,
                       "stop_asking_me_each_time": 4,
+                      # trips.yaml
+                      "varonne_saturday": 3, "lisset_friday": 3, "corvane_thursday": 3,
+                      "halden_wednesday": 3, "barrow_loop": 3, "lisset_month": 3,
+                      "museum_to_friday": 3, "caves_to_thursday": 3, "booked_dinner": 3,
+                      "flight": 3, "show_saturday": 3, "whole_trip": 3,
+                      "restaurant_notice": 3, "note_from_the_restaurant": 3,
+                      "for_my_sister": 3, "copy_for_a_friend": 3,
+                      "ostrel_route_sanity": 2, "corvelo_plan": 2,
                       # lists.yaml
                       "batteries": 2, "garden_and_kitchen": 3, "groceries": 2,
                       "hardware": 2, "landing_page": 2, "newsletter": 2,

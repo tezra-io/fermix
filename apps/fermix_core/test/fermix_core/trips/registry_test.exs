@@ -376,7 +376,9 @@ defmodule FermixCore.Trips.RegistryTest do
       assert %{stamped: true} = Enum.find(rows, &(&1.text == "Night market"))
 
       assert refusal(edit(repo, "Varonne", [%{"op" => "rename", "text" => "Elsewhere"}], tainted)) ==
-               "That change waits for a turn that read nothing from outside; ask me again. " <>
+               "This turn read something from outside, so it can only add stops to a trip " <>
+                 "that already exists; a new trip and every other change wait for the owner's " <>
+                 "next message, so say what you would make or change and ask. " <>
                  "Nothing in this call was changed (op 1)."
     end
 

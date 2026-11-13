@@ -9,6 +9,7 @@ defmodule FermixCore.Agents.SelfKnowledgeSkillTest do
   alias FermixCore.Plugins.Registry, as: PluginRegistry
   alias FermixCore.Temporal.Registry, as: TemporalRegistry
   alias FermixCore.Trace
+  alias FermixCore.Trips.Registry, as: TripRegistry
 
   test "bundled self-knowledge skill loads as a core skill with no tools" do
     local =
@@ -371,7 +372,33 @@ defmodule FermixCore.Agents.SelfKnowledgeSkillTest do
           ChecklistAccess.outside_refusal(),
           ChecklistRegistry.describe_error({:list_full, "Fermix"}),
           ChecklistRegistry.describe_error({:stale, 112, 113}),
-          PluginRegistry.reserved_name_sentence()
+          PluginRegistry.reserved_name_sentence("checklist")
+        ] do
+      assert reference =~ sentence
+    end
+  end
+
+  # M89: the trips reference quotes the engine's own refusals, as the lists'
+  # does, so a reworded sentence fails here until the reference follows.
+  test "documents the owner's trips, their tools and the sentences their refusals say" do
+    body = File.read!(self_knowledge_path())
+    reference = "trips" |> reference_path() |> File.read!() |> String.replace(~r/\s+/, " ")
+
+    for tool <- ["trip_read", "trip_edit"] do
+      assert body =~ "`#{tool}`"
+      assert reference =~ "`#{tool}`"
+    end
+
+    assert body =~ ~s{skill_view(name: "self-knowledge", file: "trips")}
+
+    for sentence <- [
+          TripRegistry.describe_error(:outside_content),
+          TripRegistry.describe_error(:too_many_lookups),
+          TripRegistry.describe_error(:unknown_place_link),
+          TripRegistry.describe_error({:trip_full, "Varonne"}),
+          TripRegistry.describe_error({:last_day, "Varonne"}),
+          TripRegistry.describe_error(:too_many_ops),
+          PluginRegistry.reserved_name_sentence("trip")
         ] do
       assert reference =~ sentence
     end

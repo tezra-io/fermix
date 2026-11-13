@@ -504,7 +504,7 @@ the daemon's own newest is.
 **Protocol 3: a row may carry any number of block types.** On protocol 3 a
 `text_done`, a `row` and a history message may carry any number of block
 types under `blocks`, one block of each, and a phone skips a type it does not
-know. Protocol 3 brings one, `events` (see *Timeline shapes*). A session at
+know. Protocol 3 brings two, `events` and `trips` (see *Timeline shapes*). A session at
 protocol 2 is sent only `places` and `checklists` blocks, wherever a row
 reaches it (its `text_done`, its `row`, a `history_page` message), since a
 protocol 2 phone app refuses a row with more than two blocks; and its turns
@@ -696,17 +696,18 @@ stored before links were kept has none). A row carries at most 4, and has the
 key only when it has one.
 
 `blocks[]` are records a reply carries, such as the places a search found
-that it recommends, the lists its turn read or changed, or the events its
-turn stored, changed or listed, which the Mac's chat draws beside the text,
+that it recommends, the lists or trips its turn read or changed, or the events
+its turn stored, changed or listed, which the Mac's chat draws beside the text,
 and a phone's turn carries too (*Lists on a phone*): the shape and rules are
 the companion socket's (`priv/companion/PROTOCOL.md`, *Blocks under a reply*,
 *Which blocks a client draws*). A row has the key only when it has one. The
 text stands alone, so a phone may ignore them, and skips a block `type` it
 does not know. Which types a session is sent is its protocol's: at protocol
 2, `places` and `checklists`, at most one of each; at protocol 3 any number
-of types, one block of each, `events` among them. A snapshot of tool records
-(`places`, `events`) is drawn from the protocol that brought it; a kept kind
-(`checklists`) by a phone whose list channel pulled its index.
+of types, one block of each, `events` and `trips` among them. A snapshot of
+tool records (`places`, `events`) is drawn from the protocol that brought it;
+a kept kind (`checklists`, and from protocol 3 `trips`) by a phone whose list
+channel pulled its index.
 
 An `events` block is the companion socket's, field for field: every event
 the turn's event tools returned, one to eight, each `{event_id, title, kind,
@@ -714,6 +715,12 @@ date, time?, timezone, yearly?, status, change?, when, reminds?, rings?}`,
 the engine's sentences in `when`, `reminds` and `rings`, and a date a phone
 draws its tile from. A turn on a protocol 3 session is told its events are
 drawn, so its text confirms in a sentence.
+
+A `trips` block is the companion socket's too, field for field: the owner's
+trips the turn's trip tools read or changed, one to four, each `{trip_id,
+title, rows[]}`, the ids of the days and stops the turn added or changed,
+none for a trip it only read. Ids and the title, never a stop's words: a
+phone draws a trip as it stands now, once its channel pulled the trips index.
 
 A `row` is the same message with `text` in place of `content`, plus
 `profile_id`. It is the companion socket's `row` event, which on that wire

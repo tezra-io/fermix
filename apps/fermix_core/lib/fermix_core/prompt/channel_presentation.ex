@@ -122,6 +122,26 @@ defmodule FermixCore.Prompt.ChannelPresentation do
         "No list is drawn here: when the owner asks to see a list, write it as a short checklist."
 
   @doc """
+  The line about the owner's trips (M89 §04), which `Trips.Note.rules/3`
+  carries on the owner's private turns while a trip exists, and the trip
+  tools' answers on a turn that was not told it (C8). The drawn line goes to a
+  turn on the Mac's chat or a phone whose connection draws trips (`draws?`: it
+  pulled their index, `FermixCore.ReplyBlocks.drawn_types/3`); every other
+  turn is told to write the days out, each placed stop linked.
+  """
+  @spec trip_line(String.t() | nil, boolean()) :: String.t()
+  def trip_line(channel, true) when channel in ["companion", "mobile"] do
+    "A trip you read or change is drawn under your reply, live: say in a sentence or two " <>
+      "what changed and do not write its days out."
+  end
+
+  def trip_line(channel, draws?)
+      when (is_binary(channel) or is_nil(channel)) and is_boolean(draws?) do
+    "No trip is drawn here: write out the days that changed, a stop a line with its time, " <>
+      "each placed stop linked; trip_read with as: \"share\" gives them in that form."
+  end
+
+  @doc """
   The line about the events a reply carries (EVENTS_DRAWN_AS_CARDS §04), for
   a turn on the Mac's chat or a phone whose connection draws them (`draws?`:
   it negotiated companion 8 or mobile 3, `FermixCore.ReplyBlocks.drawn_types/3`,

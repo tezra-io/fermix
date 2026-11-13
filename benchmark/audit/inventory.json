@@ -213,6 +213,14 @@
       "name": "checklist_edit",
       "family": "F17"
     },
+    "TripRead": {
+      "name": "trip_read",
+      "family": "F17"
+    },
+    "TripEdit": {
+      "name": "trip_edit",
+      "family": "F17"
+    },
     "ToolSearch": {
       "name": "tool_search",
       "family": "F05"
@@ -366,6 +374,24 @@
         "rename",
         "remove_list",
         "replace"
+      ]
+    },
+    "trip_edit": {
+      "/properties/ops/items/properties/op": [
+        "create",
+        "add",
+        "edit",
+        "move",
+        "day",
+        "remove",
+        "rename",
+        "dates",
+        "remove_trip"
+      ]
+    },
+    "trip_read": {
+      "/properties/as": [
+        "share"
       ]
     },
     "recall_activity": {

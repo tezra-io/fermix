@@ -20,7 +20,9 @@ defmodule FermixChannels.Companion.ConnectionChecklistsTest do
   alias FermixChannels.Companion.Output
   alias FermixChannels.Mobile.RequestCoordinator
   alias FermixCore.Checklists.Registry, as: ChecklistRegistry
+  alias FermixCore.Kept.Notify, as: KeptNotify
   alias FermixCore.Memory.Repo
+  alias FermixCore.Trips.Registry, as: TripRegistry
   alias FermixTestSupport.ParentProcess
 
   # A line's arrival over the socket on a loaded runner.
@@ -319,6 +321,35 @@ defmodule FermixChannels.Companion.ConnectionChecklistsTest do
 
     assert %{"lists" => [%{"open" => 3, "rev" => 2}]} =
              Enum.find(pushes, &(&1["type"] == "checklists"))
+  end
+
+  # M89: a trip's change goes out through the lists' notifier, by kind, to
+  # every connection, whoever made it. Until the daemon serves trips (E3) a
+  # connection holds none, so it lets the change pass and goes on serving.
+  test "a trip change through the notifier leaves every connection serving", ctx do
+    list_id = groceries!(ctx)
+    mac = hello(ctx.socket_path, 8)
+    _ = pull(mac, list_id)
+    [{connection, _version}] = Registry.lookup(ctx.registry, "main")
+    watch = Process.monitor(connection)
+
+    {:ok, _answer} =
+      TripRegistry.edit(
+        %{"trip" => "Varonne", "ops" => [%{"op" => "create"}]},
+        @owner_turn,
+        ctx.checklist_opts
+      )
+
+    # The notice reached the connection's mailbox before this pull did.
+    assert [%{"list_id" => ^list_id}] = pull_index(mac)
+    refute_received {:DOWN, ^watch, :process, _pid, _reason}
+    assert Process.alive?(connection)
+  end
+
+  test "the notifier the channels app gives core hears a trip change without raising" do
+    assert Application.get_env(:fermix_core, :checklists_notifier) == ChecklistNotifier
+    change = %{id: "tr_4q8m2x7v1d", rev: 1, made: %{}}
+    assert :ok = KeptNotify.announce(:trips, "owner-l", [change], [])
   end
 
   # --- holding ---------------------------------------------------------------------

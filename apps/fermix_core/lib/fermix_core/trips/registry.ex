@@ -18,26 +18,50 @@ defmodule FermixCore.Trips.Registry do
       `client_msg_id`;
     * **provenance** — after outside content a call may only add, the stop it
       adds stamped (`Trips.Ops`);
-    * **the answers** — an edit's line, with the fixed stops whose date moved,
-      and one sentence for every refusal (`describe_error/1`);
+    * **the places** — a model's `place`, words or a link, resolved before the
+      store is asked (`Trips.Placing`, `Trips.Lookup`), the lookups' records
+      joining the conversation first, so a link the answer offers resolves
+      even when the store refuses the call;
+    * **the answers** — a read rendered as text (`Trips.Render`), an edit's
+      line with what each place came to and the fixed stops whose date moved,
+      the shared form a device's Share hands on, and one sentence for every
+      refusal (`describe_error/1`);
     * **what devices hear** — every committed change, whoever made it, with
       what a device's create, add or new day made (`Kept.Notify`).
 
-  Every edit emits its event (`Trips.Telemetry`). A model's `place` is
-  resolved by the place lookup before the store is asked; this module saves a
-  place the call did not resolve as no place (C28).
+  Every read and edit emits its event (`Trips.Telemetry`).
 
   Seams (`opts`): `:repo` (the Repo server; nil when the turn has none),
-  `:now`, `:notifier` and, for a device, `:made_via`.
+  `:now`, `:notifier`, `:reply_blocks` (the holder a lookup's records join)
+  and, for a device, `:made_via`. The place search is the one in force for
+  the turn (`Lookup.backend/1`; a context's `:place_lookup` stands in for it).
   """
 
   alias FermixCore.Kept.Access, as: KeptAccess
   alias FermixCore.Kept.Ids
   alias FermixCore.Kept.Notify, as: KeptNotify
   alias FermixCore.Memory.Repo
+  alias FermixCore.ReplyBlocks
+  alias FermixCore.Tools.PlaceSearch
+  alias FermixCore.Trips.Lookup
   alias FermixCore.Trips.Ops
+  alias FermixCore.Trips.Placing
+  alias FermixCore.Trips.Render
   alias FermixCore.Trips.Shape
   alias FermixCore.Trips.Telemetry
+
+  # An edit that gave no place to look up.
+  @no_lookups %{
+    lookups: 0,
+    placed: 0,
+    offered: 0,
+    not_found: 0,
+    not_looked_up: 0,
+    backend: nil,
+    rate_limited: false
+  }
+  # A read's `day`: a day's position, or a run of them (C13).
+  @run ~r/\A([0-9]{1,4})(?:\s*[-–]\s*([0-9]{1,4}))?\z/u
 
   @typedoc "A trip a call read or changed, as a reply's block names it."
   @type touch :: %{trip_id: String.t(), title: String.t(), rows: [String.t()]}
@@ -56,28 +80,150 @@ defmodule FermixCore.Trips.Registry do
   @spec max_ops() :: pos_integer()
   def max_ops, do: Shape.max_ops()
 
+  # --- the model's read ------------------------------------------------------
+
+  @doc """
+  A `trip_read` call: with no `"trip"` the index; with one (a title or id)
+  the trip whole, or the days `"day"` names (a day's position, `"2"`, or a
+  run, `"2-4"`, C13), as text, or with `"as": "share"` in its shared form.
+  Any read past 32 KB is its outline (`Trips.Render.read/4`, C26). `touched`
+  names the trip read, with no rows: a read changes none.
+  """
+  @spec read(map(), map(), keyword()) :: {:ok, answer()} | {:error, term()}
+  def read(params, context, opts \\ [])
+      when is_map(params) and is_map(context) and is_list(opts) do
+    start = System.monotonic_time(:microsecond)
+
+    {result, read} =
+      with :ok <- gate(context, "trip_read"),
+           {:ok, asked} <- read_params(params) do
+        do_read(asked, context, opts)
+      else
+        {:error, reason} -> {{:error, reason}, %{scope: asked_scope(params), trips: 0}}
+      end
+
+    emit_read(context, read, result, start)
+    result
+  end
+
+  defp read_params(params) do
+    with {:ok, ref} <- read_ref(Map.get(params, "trip")),
+         {:ok, run} <- read_run(Map.get(params, "day")),
+         {:ok, form} <- read_form(Map.get(params, "as")) do
+      case {ref, run, form} do
+        {nil, :all, :text} -> {:ok, :index}
+        {nil, _run, _form} -> {:error, :trip_needed}
+        asked -> {:ok, asked}
+      end
+    end
+  end
+
+  defp read_ref(nil), do: {:ok, nil}
+
+  defp read_ref(ref) when is_binary(ref) do
+    case String.trim(ref) do
+      "" -> {:ok, nil}
+      trimmed -> {:ok, trimmed}
+    end
+  end
+
+  defp read_ref(_ref), do: {:error, {:invalid_param, :trip}}
+
+  defp read_run(nil), do: {:ok, :all}
+  defp read_run(k) when is_integer(k) and k >= 1, do: {:ok, {k, k}}
+
+  defp read_run(text) when is_binary(text) do
+    case Regex.run(@run, String.trim(text)) do
+      [_whole, from] -> run_of(from, from, text)
+      [_whole, from, to] -> run_of(from, to, text)
+      nil -> if String.trim(text) == "", do: {:ok, :all}, else: {:error, {:not_a_day_run, text}}
+    end
+  end
+
+  defp read_run(value), do: {:error, {:not_a_day_run, value}}
+
+  defp run_of(from, to, value) do
+    {from, to} = {String.to_integer(from), String.to_integer(to)}
+    if from >= 1 and to >= from, do: {:ok, {from, to}}, else: {:error, {:not_a_day_run, value}}
+  end
+
+  defp read_form(value) when value in [nil, ""], do: {:ok, :text}
+  defp read_form("share"), do: {:ok, :share}
+  defp read_form(_value), do: {:error, {:invalid_param, :as}}
+
+  defp do_read(:index, context, opts) do
+    case store(context, opts, :index) do
+      {:ok, trips} ->
+        {{:ok, %{text: Render.index(trips), touched: []}}, %{scope: :index, trips: length(trips)}}
+
+      {:error, reason} ->
+        {{:error, reason}, %{scope: :index, trips: 0}}
+    end
+  end
+
+  defp do_read({ref, run, form}, context, opts) do
+    with {:ok, %{trip: trip, rows: rows}} <- store(context, opts, {:read_trip, ref}),
+         :ok <- within_days(rows, run) do
+      {shape, text} = Render.read(trip, rows, run, form)
+      touched = [%{trip_id: trip.id, title: trip.title, rows: []}]
+      {{:ok, %{text: text, touched: touched}}, %{scope: read_scope(shape, run, form), trips: 1}}
+    else
+      {:error, reason} -> {{:error, reason}, %{scope: read_scope(:whole, run, form), trips: 0}}
+    end
+  end
+
+  defp within_days(_rows, :all), do: :ok
+
+  defp within_days(rows, {from, to}) do
+    {days, _stops} = Ops.counts(rows)
+
+    cond do
+      from > days -> {:error, {:no_day, from, days}}
+      to > days -> {:error, {:no_day, to, days}}
+      true -> :ok
+    end
+  end
+
+  defp read_scope(:outline, _run, _form), do: :outline
+  defp read_scope(:whole, _run, :share), do: :share
+  defp read_scope(:whole, :all, :text), do: :trip
+  defp read_scope(:whole, _run, :text), do: :days
+
+  # The scope a refused read asked for, as far as its params say.
+  defp asked_scope(params) do
+    cond do
+      Map.get(params, "as") == "share" -> :share
+      Map.get(params, "trip") in [nil, ""] -> :index
+      Map.get(params, "day") != nil -> :days
+      true -> :trip
+    end
+  end
+
   # --- the model's edit ------------------------------------------------------
 
   @doc """
-  Applies a `trip_edit` call (`"trip"`, `"ops"`) in one transaction. The
-  answer is the trip's line, and `touched` names it with the live rows the
-  call added or changed.
+  Applies a `trip_edit` call (`"trip"`, `"ops"`) in one transaction. A place
+  given by words or a link is resolved first: the trip is read, the call run
+  over it to learn each stop's day (`Trips.Placing`), the lookups run
+  (`Trips.Lookup`), and their records join the conversation
+  (`ReplyBlocks.put_places/3`) before the store is asked. The answer is the
+  trip's line and what each place came to (`Trips.Render.answer/2`), and
+  `touched` names the trip with the live rows the call added or changed.
   """
   @spec edit(map(), map(), keyword()) :: {:ok, answer()} | {:error, term()}
   def edit(params, context, opts \\ [])
       when is_map(params) and is_map(context) and is_list(opts) do
     start = System.monotonic_time(:microsecond)
 
-    result =
+    {result, looked} =
       with :ok <- gate(context, "trip_edit"),
-           {:ok, call} <- Shape.call(params),
-           request = {:edit, unresolved_unplaced(call), edit_context(context, opts)},
-           {:ok, applied} <- store(context, opts, request) do
-        :ok = announce(context, applied, %{}, opts)
-        {:ok, edit_answer(applied)}
+           {:ok, call} <- Shape.call(params) do
+        edit_call(call, context, opts)
+      else
+        {:error, reason} -> {{:error, reason}, @no_lookups}
       end
 
-    emit_edit(context, params, result, start)
+    emit_edit(context, params, {result, looked}, start)
     result
   end
 
@@ -89,43 +235,104 @@ defmodule FermixCore.Trips.Registry do
     }
   end
 
-  # A place reaches the store as a record or none: a model's words or link
-  # that nothing resolved is saved as no place, as with no place search (C28).
-  defp unresolved_unplaced(%{ops: ops} = call),
-    do: %{call | ops: Enum.map(ops, &unplaced/1)}
+  defp edit_call(call, context, opts) do
+    edit = edit_context(context, opts)
 
-  defp unplaced(%{place: {kind, _value}} = op) when kind in [:words, :link],
-    do: %{op | place: nil}
-
-  defp unplaced(op), do: op
-
-  defp edit_answer(applied) do
-    trip = applied.trip
-    touched = [%{trip_id: trip.id, title: trip.title, rows: applied.touched_rows}]
-    %{text: answer_text(applied), touched: touched}
-  end
-
-  defp answer_text(%{trip: %{removed_at: %DateTime{}, title: title}}),
-    do: "#{title} · removed, restorable for 30 days"
-
-  defp answer_text(%{trip: trip, rows: rows, events: events, dates_moved: moved}) do
-    {days, stops} = Ops.counts(rows)
-    words = if events == [], do: "nothing changed", else: Enum.join(events, "; ")
-
-    line =
-      "#{trip.title} · rev #{trip.rev} · #{words} · #{plural(days, "day")}, #{plural(stops, "stop")}"
-
-    case moved do
-      [] -> line
-      moved -> line <> "\nDates moved: " <> Enum.map_join(moved, "; ", &moved_words/1) <> "."
+    if Placing.needed?(call) do
+      case look_up(call, edit, context, opts) do
+        {:ok, placed, outcomes, looked} -> {commit(placed, edit, context, opts, outcomes), looked}
+        {:error, reason, looked} -> {{:error, reason}, looked}
+      end
+    else
+      {commit(call, edit, context, opts, []), @no_lookups}
     end
   end
 
-  defp moved_words(%{row: row, to: to}),
-    do: "[#{row.n}] #{quoted(row.text)} (fixed) is now #{stated_date(to)}"
+  # The trip as it stands and the call run over it, which may refuse it before
+  # any lookup is spent; then the lookups, whose records join the conversation
+  # before the store is asked.
+  defp look_up(call, edit, context, opts) do
+    with {:ok, loaded} <- load(call, context, opts),
+         {:ok, requests, placed} <- Placing.requests(loaded, call, edit),
+         {:ok, found} <- resolve(requests, placed, context, opts) do
+      :ok = join_conversation(found.records, context, opts)
+      {placed_call, outcomes} = Placing.placed_call(call, found.outcomes)
+      {:ok, placed_call, outcomes, looked(call, outcomes, found.lookups, context)}
+    else
+      {:error, reason} -> {:error, reason, @no_lookups}
+    end
+  end
 
-  defp stated_date(nil), do: "undated"
-  defp stated_date(%Date{} = date), do: Calendar.strftime(date, "%a %-d %b %Y")
+  defp load(%{ops: [%{op: :create} | _rest]}, context, opts) do
+    with {:ok, trips} <- store(context, opts, :index), do: {:ok, %{trips: trips, rows: []}}
+  end
+
+  defp load(%{trip: ref}, context, opts) do
+    with {:ok, %{trip: trip, rows: rows}} <- store(context, opts, {:read_trip, ref}),
+         do: {:ok, %{trips: [trip], rows: rows}}
+  end
+
+  defp resolve(requests, placed, context, opts) do
+    lookup_opts = [
+      backend: Lookup.backend(context),
+      conversation_key: Map.fetch!(context, :conversation_key),
+      reply_blocks: reply_blocks(opts)
+    ]
+
+    case Lookup.resolve(requests, placed, lookup_opts) do
+      {:ok, found} -> {:ok, found}
+      {:error, {:unknown_place_link, index}} -> {:error, {:op_failed, index, :unknown_place_link}}
+      {:error, :too_many_lookups} -> {:error, :too_many_lookups}
+    end
+  end
+
+  defp join_conversation([], _context, _opts), do: :ok
+
+  defp join_conversation(records, context, opts),
+    do:
+      ReplyBlocks.put_places(reply_blocks(opts), Map.fetch!(context, :conversation_key), records)
+
+  defp reply_blocks(opts), do: Keyword.get(opts, :reply_blocks, ReplyBlocks)
+
+  defp commit(call, edit, context, opts, outcomes) do
+    with {:ok, applied} <- store(context, opts, {:edit, call, edit}) do
+      :ok = announce(context, applied, %{}, opts)
+      {:ok, edit_answer(applied, Placing.placements(call, applied, outcomes))}
+    end
+  end
+
+  defp edit_answer(applied, placements) do
+    trip = applied.trip
+    touched = [%{trip_id: trip.id, title: trip.title, rows: applied.touched_rows}]
+    %{text: Render.answer(applied, placements), touched: touched}
+  end
+
+  # What the call's lookups came to, for its event: each place given counted
+  # once, by its outcome.
+  defp looked(call, outcomes, lookups, context) do
+    counts = Enum.frequencies_by(outcomes, fn {_index, outcome} -> bucket(outcome) end)
+
+    %{
+      lookups: lookups,
+      placed: Map.get(counts, :placed, 0),
+      offered: Map.get(counts, :offered, 0),
+      not_found: Map.get(counts, :not_found, 0),
+      not_looked_up: Map.get(counts, :not_looked_up, 0),
+      backend: if(Placing.words?(call), do: backend_name(context)),
+      rate_limited: Enum.any?(outcomes, &match?({_index, {:none, :rate_limited}}, &1))
+    }
+  end
+
+  defp bucket({:placed, _place}), do: :placed
+  defp bucket({:offered, _place}), do: :offered
+  defp bucket({:none, why}) when why in [:not_found, :no_location, :unstorable], do: :not_found
+  defp bucket({:none, _why}), do: :not_looked_up
+
+  # The place search the call's words went to, by name; none for a test's.
+  defp backend_name(%{place_lookup: _search}), do: nil
+
+  defp backend_name(context),
+    do: context |> PlaceSearch.resolution() |> Map.fetch!(:name) |> Atom.to_string()
 
   defp plural(1, noun), do: "1 #{noun}"
   defp plural(count, noun), do: "#{count} #{noun}s"
@@ -159,6 +366,36 @@ defmodule FermixCore.Trips.Registry do
 
   defp trip_id(id),
     do: if(Ids.valid?(id, "tr_"), do: :ok, else: {:error, {:invalid_param, :trip_id}})
+
+  @doc """
+  The trip in its shared form, for a device's Share (`trip_share`, M89 §13):
+  whole and plain (`Trips.Render.share/2`), with the rev it shows. Only a
+  connection placed as the owner's asks; a removed trip has none to share.
+  """
+  @spec device_share(String.t(), atom() | nil, keyword()) ::
+          {:ok, %{trip_id: String.t(), rev: non_neg_integer(), text: String.t()}}
+          | {:error, term()}
+  def device_share(trip_id, caller, opts \\ []) when is_binary(trip_id) and is_list(opts) do
+    start = System.monotonic_time(:microsecond)
+    made_via = KeptAccess.device_made_via!(Keyword.get(opts, :made_via, "mac"))
+    context = KeptAccess.device_context()
+
+    result =
+      with :ok <- KeptAccess.device_gate(caller),
+           :ok <- trip_id(trip_id),
+           {:ok, %{trip: trip, rows: rows}} <- store(context, opts, {:trip_by_id, trip_id, false}),
+           :ok <- live_trip(trip) do
+        {:ok, %{trip_id: trip.id, rev: trip.rev, text: Render.share(trip, rows)}}
+      end
+
+    trips = if match?({:ok, _shared}, result), do: 1, else: 0
+    read = %{scope: :share, trips: trips, made_via: made_via}
+    Telemetry.emit_read(%{}, Map.merge(read, outcome_fields(result)), elapsed(start))
+    result
+  end
+
+  defp live_trip(%{removed_at: nil}), do: :ok
+  defp live_trip(%{id: id}), do: {:error, {:no_such_trip, id}}
 
   @doc """
   One edit a device sent (`trip_edit`): `"client_msg_id"`, `"op"` and, for
@@ -239,6 +476,9 @@ defmodule FermixCore.Trips.Registry do
 
   defp request(context, :index), do: {:index, owner_id(context), agent_id(context)}
 
+  defp request(context, {:read_trip, ref}),
+    do: {:read_trip, owner_id(context), agent_id(context), ref}
+
   defp request(context, {:trip_by_id, trip_id, removed?}),
     do: {:trip_by_id, owner_id(context), agent_id(context), trip_id, removed?}
 
@@ -263,57 +503,49 @@ defmodule FermixCore.Trips.Registry do
 
   # --- telemetry -------------------------------------------------------------
 
-  defp emit_edit(context, params, result, start) do
-    {outcome, trips} =
+  defp emit_read(context, read, result, start) do
+    event =
+      read
+      |> Map.put(:made_via, KeptAccess.made_via(context))
+      |> Map.merge(outcome_fields(result))
+
+    Telemetry.emit_read(context, event, elapsed(start))
+  end
+
+  defp emit_edit(context, params, {result, looked}, start) do
+    trips =
       case result do
-        {:ok, %{touched: touched}} -> {:ok, length(touched)}
-        {:error, reason} -> {outcome(reason), 0}
+        {:ok, %{touched: touched}} -> length(touched)
+        {:error, _reason} -> 0
       end
 
     ops = params |> Map.get("ops") |> List.wrap() |> length()
-    edit = edit_event(trips, ops, outcome, KeptAccess.made_via(context), code(result))
+    counts = %{trips: trips, ops: ops, made_via: KeptAccess.made_via(context)}
+    edit = looked |> Map.merge(counts) |> Map.merge(outcome_fields(result))
     Telemetry.emit_edit(context, edit, elapsed(start))
   end
 
+  # A device's op gives a whole place, so it looks nothing up.
   defp emit_device_edit(result, made_via, start) do
-    {outcome, trips} =
+    trips =
       case result do
-        {:ok, %{duplicate: true}} -> {:ok, 0}
-        {:ok, _changed} -> {:ok, 1}
-        {:error, reason} -> {outcome(reason), 0}
+        {:ok, %{duplicate: true}} -> 0
+        {:ok, _changed} -> 1
+        {:error, _reason} -> 0
       end
 
-    Telemetry.emit_edit(
-      %{},
-      edit_event(trips, 1, outcome, made_via, code(result)),
-      elapsed(start)
-    )
+    edit = Map.merge(@no_lookups, %{trips: trips, ops: 1, made_via: made_via})
+    Telemetry.emit_edit(%{}, Map.merge(edit, outcome_fields(result)), elapsed(start))
   end
 
-  # No place lookup runs in this module, so it counts none.
-  defp edit_event(trips, ops, outcome, made_via, error_code) do
-    %{
-      trips: trips,
-      ops: ops,
-      lookups: 0,
-      placed: 0,
-      offered: 0,
-      not_found: 0,
-      not_looked_up: 0,
-      outcome: outcome,
-      made_via: made_via,
-      error_code: error_code,
-      backend: nil,
-      rate_limited: false
-    }
-  end
+  defp outcome_fields({:ok, _answer}), do: %{outcome: :ok, error_code: nil}
+
+  defp outcome_fields({:error, reason}),
+    do: %{outcome: outcome(reason), error_code: error_tag(reason)}
 
   defp outcome(reason) do
     if error_tag(reason) == "storage_failed", do: :failed, else: :refused
   end
-
-  defp code({:ok, _answer}), do: nil
-  defp code({:error, reason}), do: error_tag(reason)
 
   defp elapsed(start), do: max(System.monotonic_time(:microsecond) - start, 0)
 
@@ -350,8 +582,32 @@ defmodule FermixCore.Trips.Registry do
       "other runs cannot read or change the owner's trips."
   end
 
-  def describe_error(:outside_content),
-    do: "That change waits for a turn that read nothing from outside; ask me again."
+  # The owner's trips are named on every owner turn, so a trip a page could
+  # have named waits for the owner (lists refuse it for the same reason): the
+  # sentence tells the model to ask, as the guidance does for a change.
+  def describe_error(:outside_content) do
+    "This turn read something from outside, so it can only add stops to a trip that " <>
+      "already exists; a new trip and every other change wait for the owner's next " <>
+      "message, so say what you would make or change and ask."
+  end
+
+  def describe_error(:unknown_place_link) do
+    "No place search in this conversation returned that link; search again or give the " <>
+      "place's name."
+  end
+
+  def describe_error(:too_many_lookups) do
+    "One call looks up at most #{Lookup.max_lookups()} places; split the rest into another " <>
+      "call."
+  end
+
+  def describe_error(:trip_needed),
+    do: "Name the trip, by its title or id, to read a day of it or to share it."
+
+  def describe_error({:not_a_day_run, _value}),
+    do: ~s(day is a day's number from 1, or a run of days as "2-4".)
+
+  def describe_error({:invalid_param, :as}), do: ~s(as takes only "share".)
 
   def describe_error({:no_trip, ref, titles}) do
     "No trip is named #{quoted(ref)}#{titles_part(titles)}. To make one, start the call with a " <>

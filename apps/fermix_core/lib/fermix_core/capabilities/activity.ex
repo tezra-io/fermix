@@ -92,6 +92,8 @@ defmodule FermixCore.Capabilities.Activity do
     "open_loop_respond" => "Answering a follow-up",
     "checklist_read" => "Looking at your lists",
     "checklist_edit" => "Changing your lists",
+    "trip_read" => "Looking at your trips",
+    "trip_edit" => "Changing your trips",
     "join_meeting" => "Joining a meeting",
     "leave_meeting" => "Leaving a meeting",
     "list_meetings" => "Looking at meetings",

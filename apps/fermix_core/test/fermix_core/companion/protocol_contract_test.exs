@@ -497,7 +497,7 @@ defmodule FermixCore.Companion.ProtocolContractTest do
 
     for def <-
           ~w(mediaRef linkPreviewCard replyBlock placesBlock place checklistsBlock checklistRef
-             eventsBlock eventCard commandDescriptor) do
+             eventsBlock eventCard tripsBlock tripRef commandDescriptor) do
       assert schema["$defs"][def] == mobile["$defs"][def], "#{def} differs between the wires"
     end
 
@@ -777,6 +777,77 @@ defmodule FermixCore.Companion.ProtocolContractTest do
       assert golden_event_blocks([Map.put(old, "type", type)]) == []
       assert :ok = Protocol.validate_server_payload(type, old)
       assert ReplyBlocks.for_session(type, payload, :companion, 8) == payload
+    end
+  end
+
+  # M89 §06: version 8 carries `trips`, the lists' block for the owner's
+  # trips, a kept kind: ids and the title, the rows the turn added or changed,
+  # none for a trip it only read. Goldens of both, each the builder's own.
+  test "a reply's trips are version 8's kept block, with goldens of a change and a read", %{
+    schema: schema,
+    protocol: protocol
+  } do
+    defs = schema["$defs"]
+    assert defs["tripsBlock"]["x-since-versions"] == %{"companion" => 8, "mobile" => 3}
+    assert defs["tripsBlock"]["properties"]["trips"]["maxItems"] == ReplyBlocks.max_trips()
+    assert "trips" in defs["replyBlock"]["properties"]["type"]["enum"]
+
+    blocks = golden_blocks(jsonl(@server_fixtures), "trips")
+    trips = Enum.flat_map(blocks, & &1["trips"])
+
+    for block <- blocks do
+      touches =
+        for trip <- block["trips"],
+            do: {:trip, %{trip_id: trip["trip_id"], title: trip["title"], rows: trip["rows"]}}
+
+      assert ReplyBlocks.trips(touches) == [block]
+    end
+
+    assert Enum.any?(trips, &(&1["rows"] != []))
+    assert Enum.any?(trips, &(&1["rows"] == []))
+
+    [_before, blocks_section] = String.split(protocol, "## Blocks under a reply", parts: 2)
+    assert blocks_section =~ "**Trips, by id** (version 8)"
+    assert blocks_section =~ "(`checklists`, the owner's lists, and `trips`, the owner's trips)"
+  end
+
+  test "a version 7 connection is sent a golden reply without its trips, a version 8 one with" do
+    for frame <- jsonl(@server_fixtures),
+        type = frame["type"],
+        type in ~w(text_done row history_page),
+        payload = Map.delete(frame, "type"),
+        golden_blocks([frame], "trips") != [] do
+      old = ReplyBlocks.for_session(type, payload, :companion, 7)
+      assert golden_blocks([Map.put(old, "type", type)], "trips") == []
+      assert :ok = Protocol.validate_server_payload(type, old)
+      assert ReplyBlocks.for_session(type, payload, :companion, 8) == payload
+    end
+  end
+
+  test "the codec takes a trips block beside the others, and refuses one the export rules out" do
+    done = %{"turn_id" => "t-1", "server_seq" => 7, "text" => "Planned."}
+    trip = %{"trip_id" => "tr_4q8m2x7v1d", "title" => "Varonne", "rows" => ["ti_7h2k9m4p1c"]}
+    trips = %{"type" => "trips", "trips" => [trip]}
+    list = %{"list_id" => "ck_3m9q2x7d1a", "title" => "Fermix", "rows" => []}
+    checklists = %{"type" => "checklists", "lists" => [list]}
+
+    assert :ok =
+             Protocol.validate_server_payload(
+               "text_done",
+               Map.put(done, "blocks", [checklists, trips])
+             )
+
+    for blocks <- [
+          [trips, trips],
+          [%{trips | "trips" => []}],
+          [%{trips | "trips" => List.duplicate(trip, ReplyBlocks.max_trips() + 1)}],
+          [%{trips | "trips" => [%{trip | "rows" => ["Fish market"]}]}],
+          [%{trips | "trips" => [%{trip | "trip_id" => "ck_3m9q2x7d1a"}]}],
+          [%{trips | "trips" => [Map.delete(trip, "title")]}]
+        ] do
+      assert {:error, {:invalid_field, "blocks"}} =
+               Protocol.validate_server_payload("text_done", Map.put(done, "blocks", blocks)),
+             "text_done accepted blocks #{inspect(blocks)}"
     end
   end
 
@@ -1168,10 +1239,12 @@ defmodule FermixCore.Companion.ProtocolContractTest do
   defp fixture_types(path), do: path |> jsonl() |> MapSet.new(& &1["type"])
 
   # Every golden events block, as a reply, a row or a history message carries it.
-  defp golden_event_blocks(frames) do
+  defp golden_event_blocks(frames), do: golden_blocks(frames, "events")
+
+  defp golden_blocks(frames, type) do
     for frame <- frames,
         row <- [frame | Map.get(frame, "messages", [])],
-        %{"type" => "events"} = block <- Map.get(row, "blocks", []),
+        %{"type" => ^type} = block <- Map.get(row, "blocks", []),
         do: block
   end
 

@@ -492,6 +492,93 @@ defmodule FermixCore.ReplyBlocksTest do
     end
   end
 
+  # M89 §06: the trips the turn's trip tools read or changed, as the lists'
+  # block names lists: ids and the title, the rows the turn added or changed.
+  describe "the trips block" do
+    defp trip_touch(n, rows, title \\ nil),
+      do: %{trip_id: "tr_#{n}q8m2x7v1d", title: title || "Trip #{n}", rows: rows}
+
+    test "names each trip once, in first-touch order, its newest title and every row it touched" do
+      {server, _clock} = holder()
+
+      :ok = ReplyBlocks.put_trips(server, @chat, [trip_touch(1, ["ti_3d8f1q6z2x"])])
+      :ok = ReplyBlocks.put_trips(server, @chat, [trip_touch(2, [])])
+
+      :ok =
+        ReplyBlocks.put_trips(server, @chat, [
+          trip_touch(1, ["ti_9a1b5c7d3e", "ti_3d8f1q6z2x"], "Renamed")
+        ])
+
+      assert [%{"type" => "trips", "trips" => [first, second]}] =
+               server |> ReplyBlocks.take(@chat) |> ReplyBlocks.trips()
+
+      assert first == %{
+               "trip_id" => "tr_1q8m2x7v1d",
+               "title" => "Renamed",
+               "rows" => ["ti_3d8f1q6z2x", "ti_9a1b5c7d3e"]
+             }
+
+      assert second == %{"trip_id" => "tr_2q8m2x7v1d", "title" => "Trip 2", "rows" => []}
+    end
+
+    test "names at most four trips, none without a touch, and is kept apart from the places" do
+      trips = for n <- 0..5, do: {:trip, trip_touch(n, [])}
+      assert [%{"trips" => kept}] = ReplyBlocks.trips(trips)
+      assert length(kept) == ReplyBlocks.max_trips()
+      assert ReplyBlocks.trips([record(1)]) == []
+
+      {server, _clock} = holder()
+      :ok = ReplyBlocks.put_trips(server, @chat, [trip_touch(1, [])])
+
+      :ok =
+        ReplyBlocks.put_places(
+          server,
+          @chat,
+          Enum.map(1..(ReplyBlocks.max_records() + 5), &record/1)
+        )
+
+      assert [{:trip, %{trip_id: "tr_1q8m2x7v1d"}} | _places] = ReplyBlocks.take(server, @chat)
+    end
+
+    test "build adds it after the others, and a job's delivery keeps it" do
+      list = {:checklist, %{list_id: "ck_3m9q2x7d1a", title: "Fermix", rows: []}}
+      trip = {:trip, trip_touch(1, [])}
+      records = [trip, list, record(1)]
+
+      assert [%{"type" => "places"}, %{"type" => "checklists"}, %{"type" => "trips"}] =
+               ReplyBlocks.build("https://cafe1.example/", records)
+
+      assert [%{"type" => "checklists"}, %{"type" => "trips"}] = ReplyBlocks.delivered(records)
+    end
+
+    test "a built block is what the exported schema describes" do
+      schema = @schema_path |> File.read!() |> Jason.decode!()
+      [block] = ReplyBlocks.trips([{:trip, trip_touch(4, ["ti_3d8f1q6z2x"])}])
+
+      assert WireSchema.errors(block, WireSchema.ref("replyBlock"), schema) == []
+
+      drifted = put_in(block, ["trips", Access.at(0), "rows"], ["a stop's words"])
+      refute WireSchema.errors(drifted, WireSchema.ref("replyBlock"), schema) == []
+    end
+
+    test "trips are drawn by a session that pulled their index, from companion 8 and mobile 3" do
+      assert ReplyBlocks.drawn_types(:companion, 8, [:lists]) == [
+               "places",
+               "checklists",
+               "events"
+             ]
+
+      assert ReplyBlocks.drawn_types(:companion, 8, [:lists, :trips]) ==
+               ["places", "checklists", "events", "trips"]
+
+      assert ReplyBlocks.drawn_types(:companion, 7, [:trips]) == ["places"]
+      assert ReplyBlocks.drawn_types(:mobile, 3, [:trips]) == ["places", "events", "trips"]
+      assert ReplyBlocks.drawn_types(:mobile, 2, [:trips]) == ["places"]
+      assert "trips" in ReplyBlocks.sent_types(:companion, 8)
+      refute "trips" in ReplyBlocks.sent_types(:mobile, 2)
+    end
+  end
+
   # One answer to which block types a session draws and which it is sent: a
   # snapshot type from the version that brought it, a kept kind once pulled.
   describe "which blocks a session draws and is sent" do
