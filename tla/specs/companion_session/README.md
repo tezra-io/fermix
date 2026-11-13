@@ -229,6 +229,16 @@ against the lists' tables, a write that fails ending the connection as a drop
 does. No seq, cursor, claim, request or turn changed. The line references into
 `connection.ex` moved with the code.
 
+The re-read for the owner's trips (M89 E2 and E3, 2026-11-13) found a reply's
+`trips` block beside the others, and the trip family on companion 8: `trips_pull`,
+`trip_pull`, `trip_edit` and `trip_share` served in the Connection's own step through
+`Companion.Trips`, the second kept kind, and `{:trips_changed, _}` and `:trips_flush`
+in `handle_info`, each with no seq, request or turn, as the lists' are; a phone's list
+channel takes the same events; and a turn stamped `draws_trips` once its connection
+pulled the trips index (`Channels.Companion.message`), which no step reads. No seq,
+cursor, claim, request or turn changed. The line references into `connection.ex`
+moved with the code.
+
 **The Queue is one abstract process.** The runner takes one `.tla` per spec,
 and `turn_queue` proves the Queue's rules against `queue.ex`, so this spec takes
 them as given:
@@ -361,21 +371,21 @@ the checks that show a rule needs it):
   (`request_coordinator.ex:166-173`).
 - `SeqCursor`: the client's cursor rules (`PROTOCOL.md`).
 - `SubscribeBeforePull`: the Connection joins the registry before
-  `server_hello` (`join`, `connection.ex:592-610`).
+  `server_hello` (`join`, `connection.ex:638-656`).
 - `PageWrittenInReadStep`: the Connection writes `history_page` to the socket
-  in the step that read it (`read_opts`, `connection.ex:1323-1327`). `FALSE`
+  in the step that read it (`read_opts`, `connection.ex:1390-1394`). `FALSE`
   sends it through its own mailbox, where a live row sent after the read can
   overtake it.
 - `AnnouncesEveryRow`: every row written outside a turn's completion is
   announced as a `row` as it is written: the user's row (`announce_user_row`,
-  `connection.ex:1311-1312`) and a delivery (`announce_written`,
+  `connection.ex:1378-1379`) and a delivery (`announce_written`,
   `channels/companion.ex:409-410`), both built by `Companion.Output.row` and
   sent through `Companion.Fanout.announce`. `FALSE` announces no user row.
 - `SingleAnswer`: `Confirmations.take` is an `:ets.take`, the sole consumer of
   a token (`confirmations.ex:21-31`).
 - `ResendsPendingApprovals`: the Connection writes every card still waiting
   right after `server_hello`, in the step that joined the registry
-  (`send_pending_approvals`, `connection.ex:672-681`, from
+  (`send_pending_approvals`, `connection.ex:718-727`, from
   `Approvals.pending`). `FALSE`: a card goes out once, live.
 - `DropsCardsAtHello`: when `server_hello` arrives the client drops every card
   it shows and keeps only those sent after it (`PROTOCOL.md` "Approvals").
@@ -407,7 +417,7 @@ the checks that show a rule needs it):
   that sent the request (`settle_inline`, `run_settle`, `turns.ex:371-406`;
   `fail_attempt`, `report_failure`, `requests.ex:383-403`), through the
   transport's `report_failure`, which the connection writes as a failed
-  worker's error (`connection.ex:1299-1306`, `:331-332`). `FALSE` only logs the
+  worker's error (`connection.ex:1366-1373`, `:331-332`). `FALSE` only logs the
   failure: the request stays `running`, and the next boot runs the command
   again.
 - `SeqAssignedOnInsert`: the seq comes from the counter inside the inserting
@@ -655,7 +665,7 @@ of an entity its rules are about. All still hold:
   card's `outside.args` and `outside.reason` are additive and ride every
   version. They are proposal events, left out as above.
 - The peer check at the hand-over (`handle_info(:socket_handover)`,
-  `connection.ex:307-314`). A client the daemon cannot place is sent
+  `connection.ex:334-341`). A client the daemon cannot place is sent
   `error: unidentified_client` and closed before a line is read, which the
   client sees as a drop before `server_hello`. The caller it places rides on
   each turn (`metadata.caller`) and decides only what the turn's tools may do.
@@ -705,7 +715,7 @@ off; open `tla/out/companion_session/<check>.txt` after a run to see the path.
 
 ### COMPANION-2: a connection must join the fan-out before its history is read
 - **Status:** holds in the code (b9248004): `join` registers the Connection
-  before it writes `server_hello` (`connection.ex:592-610`).
+  before it writes `server_hello` (`connection.ex:638-656`).
 - **Checks:** 01 holds; 03 breaks `TimelineConverges` with the join after the
   first page.
 
