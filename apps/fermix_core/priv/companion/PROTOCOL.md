@@ -829,8 +829,8 @@ same `blocks`, and have the key only when the reply has one. The rules:
   | `yearly?` | `true` for a yearly event, absent otherwise. |
   | `status` | `active`, `completed` or `cancelled`. |
   | `change?` | What the reply's turn did: `stored`, `changed`, `cancelled` or `snoozed`. Absent for an event the turn only listed, or found already stored or already snoozed to that time. |
-  | `when` | The engine's sentence for the occurrence, as the tool told the model: `Friday, November 13 at 10:30 AM EST`, or for a yearly event `every November 16 — next on Monday, November 16`. |
-  | `reminds?`, `rings?` | The reminder plan and where it rings, in the engine's words: `1 day and 1 hour before`, `1 week before and on the day, at 9:00 AM`, `at the time`; `on Telegram`, `on this computer`. Both absent when no reminder is left (a cancelled or past event, one stored with none). For a snooze, `reminds` says when it rings next: `again on Thursday, November 12 at 3:40 PM EST`. |
+  | `when` | The engine's sentence for the occurrence, as the tool told the model: `Friday, November 13 at 10:30 AM EST`, or for a yearly event `every November 16, next on Monday, November 16`. |
+  | `reminds?`, `rings?` | The reminder plan and where it rings, in the engine's words: `1 day and 1 hour before`, `1 week before and on the day, at 9:00 AM`, `at the time`; `on Telegram`, `on your computer`. Both absent when no reminder is left (a cancelled or past event, one stored with none). For a snooze, `reminds` says when it rings next: `again on Thursday, November 12 at 3:40 PM EST`. |
 
   The engine writes every sentence about the event; a client draws a date
   tile from `date` and writes none of its own. An event's card is under 400

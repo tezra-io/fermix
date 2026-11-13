@@ -282,7 +282,7 @@ defmodule FermixCore.Tools.EventCardsTest do
       assert card["date"] == stored["next_occurrence_on"]
       assert String.ends_with?(card["date"], "-09-14")
       refute Map.has_key?(card, "time")
-      assert card["when"] =~ ~r/\Aevery September 14 — next on /
+      assert card["when"] =~ ~r/\Aevery September 14, next on /
       assert card["reminds"] == "1 week before and on the day, at 9:00 AM"
     end
 

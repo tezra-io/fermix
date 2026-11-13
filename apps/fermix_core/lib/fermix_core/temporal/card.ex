@@ -40,7 +40,7 @@ defmodule FermixCore.Temporal.Card do
     "signal" => "on Signal",
     "whatsapp" => "on WhatsApp",
     "imessage" => "on iMessage",
-    "computer" => "on this computer"
+    "computer" => "on your computer"
   }
 
   @typedoc "One event as the `events` block carries it, string keyed."

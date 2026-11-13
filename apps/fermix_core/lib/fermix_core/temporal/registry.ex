@@ -475,7 +475,7 @@ defmodule FermixCore.Temporal.Registry do
       Renderer.month_name(event.recurrence_month) <>
       " " <>
       Integer.to_string(event.recurrence_day) <>
-      " — next on " <>
+      ", next on " <>
       Renderer.stated_date!(event.next_occurrence_on, nil, event.timezone, local_now)
   end
 

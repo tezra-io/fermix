@@ -1153,7 +1153,7 @@ defmodule FermixCore.Temporal.RegistryTest do
     test "a created yearly event states its recurrence and its next occurrence", %{repo: repo} do
       assert {:ok, %{stated_as: stated}} = create(repo, birthday_params())
 
-      assert stated == "every September 14 — next on Monday, September 14"
+      assert stated == "every September 14, next on Monday, September 14"
     end
 
     test "an idempotent repeat states the same stored occurrence", %{repo: repo} do
