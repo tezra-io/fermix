@@ -1415,9 +1415,9 @@ The ops, the model's by row id, with `restore`:
 | `op` | Fields | Effect |
 |---|---|---|
 | `create` | `title` | Makes a trip of one day, with no start, held by the sending connection. A live trip with the title, compared without case and however its accents are written (a title is kept in Unicode NFC), is refused. |
-| `add` | `text`; `day_id` or `after_id`; `time?`, `duration?`, `fixed?`, `note?`, `place?` | Adds a stop at the end of that day, or right after that row. |
+| `add` | `text`; `day_id` or `after_id`; `time?`, `duration?`, `fixed?`, `note?`, `place?` | Adds a stop at the end of that day, or right after that row: after a day's own row, it is that day's first stop. |
 | `edit` | `row_id`; `text?`, `time?`, `duration?`, `fixed?`, `note?`, `place?` or `unplace?` (one at least) | Changes the stop; `time: ""`, `note: ""` or `duration: 0` clears it, and `unplace: true` takes its place away. |
-| `move` | `row_id`; `day_id?` or `after_id?` | Moves a stop to the end of that day, or right after that row (one of the two). A day's `row_id` moves the day with its stops before `day_id`'s day, after `after_id`'s day, or first with neither; every day's date follows its new place. |
+| `move` | `row_id`; `day_id?` or `after_id?` | Moves a stop to the end of that day, or right after that row (one of the two), first in a day when the row is that day's own. A day's `row_id` moves the day with its stops before `day_id`'s day, after `after_id`'s day, or first with neither; every day's date follows its new place. |
 | `day` | `row_id?`; `text?`, `after_id?` | With `row_id`, names that day (`text: ""` takes its name away). Without it, adds a day after `after_id`'s day, or at the end. |
 | `remove` | `row_id` | Removes the stop, or the day with its stops; each stays in Recently removed for 30 days. A trip keeps at least one day. |
 | `restore` | `row_id?`; `title?` | With `row_id`, brings that removed row back at its place, a day with the stops removed with it. Without it, brings the removed trip back, under `title` when given, else under its own; a live trip holding that title refuses it ("Another trip is named "…" now, so this one cannot come back under that name; restore it with a new title, or rename the other trip first."). |

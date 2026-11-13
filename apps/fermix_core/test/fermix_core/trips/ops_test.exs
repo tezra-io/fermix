@@ -753,4 +753,25 @@ defmodule FermixCore.Trips.OpsTest do
     {result, _store} = call!(store, "Varonne", [%{"op" => "dates", "starts_on" => ""}])
     assert [%{from: ~D[2031-03-12], to: nil}] = result.dates_moved
   end
+
+  # A device drops a stop on a day's heading: `after_id` names the day's own
+  # row, and the stop lands first in that day, for an add and a stop's move.
+  test "a device's add or move after a day's own row puts the stop first in that day" do
+    store = three_days("2031-03-10")
+    [harbour, old_town, _hills] = day_rows(store, "Varonne")
+    %{id: trip_id} = trip(store, "Varonne")
+
+    add = %{"op" => "add", "text" => "Bell tower", "after_id" => old_town.id}
+    {_result, store} = device!(store, %{"trip_id" => trip_id, "op" => add})
+
+    vineyard = store |> rows("Varonne") |> Enum.find(&(&1.text == "Vineyard"))
+    move = %{"op" => "move", "row_id" => vineyard.id, "after_id" => harbour.id}
+    {_result, store} = device!(store, %{"trip_id" => trip_id, "op" => move})
+
+    assert outline(store, "Varonne") == [
+             {"Harbour", ~D[2031-03-10], ["Vineyard", "Fish market", "Ferry"]},
+             {"Old town", ~D[2031-03-11], ["Bell tower", "Clock tower"]},
+             {"Hills", ~D[2031-03-12], []}
+           ]
+  end
 end
