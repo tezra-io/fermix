@@ -616,3 +616,13 @@ changed; it cites no `application.ex` line the change moved.
 session again, and the computer-history store failing to open never stops
 the tree. No child moved, so nothing the spec models changed, and it cites
 no `application.ex` line the change moved.
+
+## Re-read for the Always On pane's engine half (2026-11-12)
+
+`8e3f586f` staled the `application.ex` pin: `Home.MoveProgress` joins the
+core tree before the computers' registry, and so before the cue tree, which
+is still the tree's last child. On a primary nothing writes to it (a move
+runs on a device, a candidate's tree has none), and its callbacks cannot
+fail; were it to crash, the cue tree restarts after it, which the model
+takes as `FiltersRestart`, as for the children before it. Nothing the spec
+models changed, and it cites no line the change moved.

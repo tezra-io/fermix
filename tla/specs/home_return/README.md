@@ -442,6 +442,21 @@ through `Consent.known/1` and set the recorder through the history line.
 Switches no rule reads; no modelled step changed. The comments' line numbers
 into both files point at the committed code.
 
+Walked again against 8e3f586f (the Always On pane's engine half), which
+staled the `move_worker.ex`, `move_responder.ex`, `always_on.ex` and
+`home_summary.ex` pins. The summary draws one action per screen and moves
+the rest into `detail.alternatives`, which `offered/1` reads with the
+backup's Change (`change_passphrase`, a new act that starts no job); Learn
+more is gone, which the model never offered. Every set `ReturnOffers` and
+`DeviceOffers` name is offered as before: Cancel beside Move now and on the
+screens it stood on, Move back on `on`, Restore here where nothing answers.
+Move now's confirm carries every readiness warning, and `review_offers`
+with no `keep_offers` keeps the switches as they are: no act or offer set
+of the model moves. The progress the worker and the Mac's responder tell
+`Home.MoveProgress` adds no step (`home_move`'s README, the same re-read).
+The comments' line numbers into these files point at the committed code;
+those into `home_summary.ex` had drifted before this change too.
+
 ## Done
 
 Deadlock checking is on. `Done` has these ends:

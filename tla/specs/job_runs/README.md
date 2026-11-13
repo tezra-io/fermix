@@ -763,6 +763,14 @@ computer-history supervisor. No child moved, so nothing the spec models
 changed; the one cited `application.ex` line after them moved by one
 (`:437`).
 
+## Re-read for the Always On pane's engine half (2026-11-12)
+
+`8e3f586f` staled the `application.ex` pin: `Home.MoveProgress` joins the
+core tree after `JobScheduler`, the temporal rail and the computer-history
+supervisor, so its crash reaches none of the job tree. Nothing the spec
+models changed; the cited `application.ex` lines point at the committed
+code.
+
 ## Plan hypotheses
 
 The plan (`docs/design/TLA_PLUS_MODELS.md` §4.3) listed four expected

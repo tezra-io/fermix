@@ -518,6 +518,12 @@ Re-read on 2026-11-11 for the review's fixes (`c6fe1c48`), which staled the
 child moved and no delivery path the spec models changed; the spec cites no
 line the change moved.
 
+Re-read on 2026-11-12 for the Always On pane's engine half (`8e3f586f`),
+which staled the `application.ex` pin: `Home.MoveProgress` joins the core
+tree after the temporal scheduler and its delivery supervisor, so its crash
+reaches neither. No delivery path the spec models changed; the cited
+`application.ex` lines point at the committed code.
+
 ## Code and doc drift
 
 - `delivery_worker.ex:160-163` says a claim past the validity boundary "cannot

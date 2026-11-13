@@ -334,8 +334,8 @@ epoch the home already had under the same token, was enough.
 
 ### HS-5: the D27 upgrade makes a computer that sent no history a contributor (fixed)
 
-Found in the re-read of `101830533` (M97 D27) and fixed after it (not yet
-committed when this was written); no check: it is one rewrite of a machine
+Found in the re-read of `101830533` (M97 D27) and fixed in `4b4564c1`; no
+check: it is one rewrite of a machine
 file at boot, not an interleaving. Before D27 a computer had a
 `history` switch for its server beside its recorder's own setting
 (`[fermix_core.computer_history] enabled`): with the switch off,

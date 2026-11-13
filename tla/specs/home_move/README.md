@@ -37,7 +37,7 @@ Models one move of M75 §7.2 (B5). Three parts take part:
     reason than room), and the worker tries again (`AttemptFails`);
   - an attempt fails at the source before its offer is out in a way another
     would not mend, and the worker aborts the move (`AttemptAborts`,
-    `attempt_failed/2`, `move_worker.ex:238-252`): the secret store refuses
+    `attempt_failed/2`, `move_worker.ex:254-268`): the secret store refuses
     the desktop key, or its item holds another home's key under the same
     profile; the keychain does not give the settings' secrets; or the
     capture has no room;
@@ -56,7 +56,7 @@ Models one move of M75 §7.2 (B5). Three parts take part:
 - `OldRequestsArrive`: a request the worker sent on a rail it has since given
   up on still reaches the candidate. Two rails are two streams, so nothing
   orders one rail's frames against another's. The worker closes a rail it
-  gives up on (`close_rail/1`, `move_worker.ex:226`, `:534`, `:548`), but
+  gives up on (`close_rail/1`, `move_worker.ex:242`, `:566`, `:581`), but
   `Rail.close/1` sends its close frame behind whatever the rail already sent
   (`rail.ex`). Whether the iroh helper still delivers what it holds once the
   socket closes ("the helper ends its stream on its own", `helper.ex`) is
@@ -67,21 +67,21 @@ Models one move of M75 §7.2 (B5). Three parts take part:
   for the move it staged (`commit_move/2`, `candidate.ex:666-697`).
 - `MarkerBeforeCommit`: the worker writes `moved.json` and records
   `committing` before it sends `move_commit` (`commit/4`, then `retired/4`,
-  `move_worker.ex:528-551`).
+  `move_worker.ex:560-584`).
 - `OffersFenced`: the candidate takes an offer only when it is later than the
   move it holds, a later move id or a later attempt of the same move, and
   refuses an earlier or equal one (`move_mismatch`), leaving what it holds
   untouched (`fenced_offer/2`, `later?/2`, `candidate.ex:509-521`).
-  `move_offer` carries the attempt (`send_snapshot/4`, `move_worker.ex:457`),
+  `move_offer` carries the attempt (`send_snapshot/4`, `move_worker.ex:476`),
   which only grows across restarts. Move ids are ordered by when the move
   started (`move_id/1`, `move.ex:550-559`); with one move id, the fence
   orders by attempt.
 - `ReadyAfterStaged`: `move_ready` goes out only after `staged` is written.
   `restored/2` records `staged`, then tells the responder
   (`candidate.ex:624-631`), which answers `move_ready` only then
-  (`move_responder.ex:65-69`).
+  (`move_responder.ex:74-78`).
 - `AwaitPinsRail`: the worker takes an answer only from the rail it waits on
-  (`await_any/3` matches `{:rail, ^rail, _}`, `move_worker.ex:955-968`).
+  (`await_any/3` matches `{:rail, ^rail, _}`, `move_worker.ex:989-1002`).
 - `EndingsAfterRestart`: the worker records `committed` (after `move_done`)
   or `undoing` (after an undo) and then restarts itself (`SelfRestart`,
   `Lifecycle.restart_self/0`); the engine that boots after it records `done`
@@ -101,7 +101,7 @@ in `abort/3` never finds a marker. Every road to `abort/3` starts before
   in `transfer/1` and `attempt_failed/2`, which run only while the marker is
   absent;
 - `commit/4`'s error clause, after the ready epoch or the marker could not
-  be written (`move_worker.ex:532-535`);
+  be written (`move_worker.ex:564-567`);
 - a recorded `aborting`, which `carry_on/3` reaches only when the marker is
   absent.
 
@@ -451,3 +451,24 @@ offers a request names are read through `Consent.known/1`, so a request an
 engine before D27 wrote is read as a surface's is. The switches it writes
 are read by no rule; no modelled step changed. The comments' line numbers
 into `move_worker.ex` point at the committed code.
+
+## Re-read for the Always On pane's engine half (M97, 2026-11-12)
+
+Re-read against 8e3f586f, which staled the `move_worker.ex` and
+`move_responder.ex` pins. Both now tell `Home.MoveProgress` where the move
+is: the worker its step (capture, send at each whole 5% of the bytes it hands
+the rail, staging, commit) and clears it however its carrying on ends; the
+responder the bytes it wrote, at the offer and at each whole 5%, cleared at
+`move_end` or as the session closes. Each is a `GenServer.call` to a store
+that holds one record in an ETS table it owns; its callbacks write that one
+key and cast to the status watch, so they never fail, and the table never
+fills. A call to a store that is not running (a candidate's tree has none)
+answers `:ok` (`move_progress.ex:117-121`). A store that does not answer
+within the call's 5 s, or stops during one, exits its caller, since only
+`:noproc` is caught: the worker is restarted and carries on from its phase
+(before `move_ready` a transport failure, one of its three attempts; after
+the marker a resume), and the responder's session closes, a transport
+failure too. Those are paths the model has, and the store answers in
+microseconds, so no step is added; catching every exit there would keep a
+display from ever ending an attempt. No modelled step changed. The comments'
+line numbers into both files point at the committed code.

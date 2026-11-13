@@ -108,8 +108,7 @@ send (`manager.ex:1261-1267`).
   boot check are calls to the store that, where it does not answer in time,
   is not running or stops during the call, answer
   `{:error, {:store_unavailable, reason}}`, which `Harness.SignIn` logs
-  (`MachineStore.call/2`, `machine_store.ex:287-297`, changed after
-  `2db248ea7`): the Manager goes on, with the other live runs, so a store
+  (`MachineStore.call/2`, `machine_store.ex:287-293`, since `4b4564c1`): the Manager goes on, with the other live runs, so a store
   that does not answer is no longer a cause of the modelled `MgrCrash`,
   whose other causes stay;
 - the worker's backoff clock and its max-age rule, and the lease's length (see

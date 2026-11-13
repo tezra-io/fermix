@@ -63,9 +63,9 @@
 (* or one step of a job's ending.                                          *)
 (***************************************************************************)
 
-\* SOURCE: apps/fermix_core/lib/fermix_core/management/always_on.ex @ 28f93fd173d5
+\* SOURCE: apps/fermix_core/lib/fermix_core/management/always_on.ex @ 8ce194fb4201
 \* SOURCE: apps/fermix_core/lib/fermix_core/management/jobs.ex#start,handle_call,start_job,running?,running_count,complete_task,task_down,finish,begin_ending,ending_done,ending_down,end_closing @ 5095f2e28157
-\* SOURCE: apps/fermix_core/lib/fermix_core/management/home_summary.ex#offered,find_action,device,restoring,restore_running?,restore_offer,readable_or_update @ 0384823a2278
+\* SOURCE: apps/fermix_core/lib/fermix_core/management/home_summary.ex#offered,find_action,device,restoring,restore_running?,restore_offer,readable_or_update @ ff0a67460be1
 \* SOURCE: apps/fermix_core/lib/fermix_core/management/home.ex#restoring? @ 10524f88be3d
 
 EXTENDS Naturals, FiniteSets, TLC
@@ -175,8 +175,8 @@ Press(c) ==
     /\ Goto(c, "queued")
     /\ UNCHANGED <<job_vars, drawn, acts, holder, hist_vars>>
 
-\* The serializer takes the act (act/2, always_on.ex:258-266, handle_call,
-\* :271-273): one at a time.
+\* The serializer takes the act (act/2, always_on.ex:267-275, handle_call,
+\* :280-282): one at a time.
 Take(c) ==
     /\ pc[c] = "queued"
     /\ Serialized => holder = "none"
@@ -184,8 +184,8 @@ Take(c) ==
     /\ Goto(c, "check")
     /\ UNCHANGED <<job_vars, drawn, acts, hist_vars>>
 
-\* run/3 and offered/4 (:277-303): the summary as it is now, and the key
-\* rule; then restore_here/3 (:765-774), whose copy is chosen first (a read).
+\* run/3 and offered/4 (:286-312): the summary as it is now, and the key
+\* rule; then restore_here/3 (:802-811), whose copy is chosen first (a read).
 Check(c) ==
     /\ pc[c] = "check"
     /\ IF KeyRule /\ "restore_here" \notin Offered
@@ -193,7 +193,7 @@ Check(c) ==
           ELSE Goto(c, "request") /\ UNCHANGED changedSeen
     /\ UNCHANGED <<job_vars, drawn, acts, holder, busySeen, crashed>>
 
-\* keep_record/2 of restore_record/3 (:785-788, :697-702): the request in
+\* keep_record/2 of restore_record/3 (:822-825, :734-739): the request in
 \* return.json, before the job.
 Request(c) ==
     /\ pc[c] = "request"
@@ -201,7 +201,7 @@ Request(c) ==
     /\ request' = TRUE
     /\ UNCHANGED <<jobs, drawn, acts, holder, hist_vars>>
 
-\* start_restore/3 (:798-813): Jobs.start/2, refused busy beside a running
+\* start_restore/3 (:835-850): Jobs.start/2, refused busy beside a running
 \* job of the kind (jobs.ex:230-238); else the job runs, its ending kept.
 Start(c) ==
     /\ pc[c] = "start"
@@ -250,8 +250,8 @@ RunCrashes(j) ==
     /\ crashed' = TRUE
     /\ UNCHANGED <<request, caller_vars, changedSeen, busySeen>>
 
-\* The ending (restore_ended/3, always_on.ex:830-854) takes the request back
-\* (request_done/1, :856-864), which tells the watch, then settles a local
+\* The ending (restore_ended/3, always_on.ex:867-891) takes the request back
+\* (request_done/1, :893-901), which tells the watch, then settles a local
 \* candidate a run stopped from outside left (home_return's RhSettle: no
 \* request here); the job still runs until the family hears the ending is
 \* done.
