@@ -110,7 +110,11 @@ defmodule FermixChannels.Mobile.Session do
   never opens one runs none. The channel ends with the session. Once the
   channel has pulled the index (`:list_channel_draws`), each `msg` and
   `command` this session queues says it draws lists, so the phone's turns are
-  told their lists are drawn under the reply.
+  told their lists are drawn under the reply. The `hello_ack` says
+  `caps.trips: true` too (M89 §06): the channel serves the owner's trips from
+  companion 8, and once it has pulled the trips index (`:trip_channel_draws`)
+  a session at mobile 3, the version that sends their block, says it draws
+  trips.
 
   ## Blocks under a reply (mobile 3)
 
@@ -370,6 +374,7 @@ defmodule FermixChannels.Mobile.Session do
     |> Map.put_new(:desktop_peer_ref, nil)
     |> Map.put_new(:phone_families, %{companion: {DesktopCompanion, [kind: :phone]}})
     |> Map.put_new(:draws_lists?, false)
+    |> Map.put_new(:draws_trips?, false)
     |> Map.put_new(:calls, FermixChannels.Mobile.Calls)
     |> Map.put_new(:call_supervisor, FermixChannels.Mobile.CallSupervisor)
     |> Map.put_new(:call_options, [])
@@ -487,6 +492,9 @@ defmodule FermixChannels.Mobile.Session do
   # The phone's list channel pulled the index: its turns from now on say they
   # draw lists (moduledoc).
   def handle_info(:list_channel_draws, state), do: {:ok, %{state | draws_lists?: true}}
+
+  # It pulled the trips index: from mobile 3 its turns say they draw trips.
+  def handle_info(:trip_channel_draws, state), do: {:ok, %{state | draws_trips?: true}}
 
   def handle_info(
         {:mobile_handshake_deadline, token},
@@ -1327,13 +1335,20 @@ defmodule FermixChannels.Mobile.Session do
     }
 
     # Whether this primary serves a call from the phone (M87), and that it
-    # takes the phone's list channel (M85 E4): a phone's alone, since a
-    # desktop's own voice reaches its own computer's socket and its lists
-    # ride its companion tunnel. A computer hears which of its own events
-    # this server takes (M97 §5.3).
+    # takes the phone's list channel (M85 E4) and serves trips on it (M89):
+    # a phone's alone, since a desktop's own voice reaches its own computer's
+    # socket and its lists ride its companion tunnel. A computer hears which
+    # of its own events this server takes (M97 §5.3).
     case session_kind(state) do
-      :phone -> Map.merge(caps, %{"call" => state.call_caps.(state.device_id), "lists" => true})
-      :desktop -> Map.put(caps, "computer", computer_caps(state))
+      :phone ->
+        Map.merge(caps, %{
+          "call" => state.call_caps.(state.device_id),
+          "lists" => true,
+          "trips" => true
+        })
+
+      :desktop ->
+        Map.put(caps, "computer", computer_caps(state))
     end
   end
 
@@ -1635,13 +1650,14 @@ defmodule FermixChannels.Mobile.Session do
   end
 
   # What this phone draws, by the one answer that also decides which blocks
-  # it is sent (`ReplyBlocks.drawn_types/3`): its lists once its list channel
-  # pulled the index, its events from mobile 3.
+  # it is sent (`ReplyBlocks.drawn_types/3`): its lists and its trips once its
+  # list channel pulled each index (trips from mobile 3), its events from
+  # mobile 3.
   defp with_draws(event, state) do
-    pulled = if state.draws_lists?, do: [:lists], else: []
+    pulled = for {kind, true} <- [lists: state.draws_lists?, trips: state.draws_trips?], do: kind
     drawn = ReplyBlocks.drawn_types(:mobile, state.negotiated_version, pulled)
 
-    [draws_lists: "checklists", draws_events: "events"]
+    [draws_lists: "checklists", draws_trips: "trips", draws_events: "events"]
     |> Enum.filter(fn {_key, type} -> type in drawn end)
     |> Enum.reduce(event, fn {key, _type}, event -> Map.put(event, key, true) end)
   end

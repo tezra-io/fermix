@@ -230,8 +230,8 @@ defmodule FermixChannels.Desktop.CompanionPump do
     {:error, reason}
   end
 
-  # A phone's list channel serves the lists alone, its edits made via the
-  # phone, and its session hears when it draws them (moduledoc).
+  # A phone's list channel serves the lists and the trips, its edits made via
+  # the phone, and its session hears when it draws them (moduledoc).
   defp for_kind(connection_opts, %{kind: :phone, session: session}) when is_pid(session),
     do: Keyword.merge(connection_opts, scope: :lists, made_via: "phone", draws_to: session)
 

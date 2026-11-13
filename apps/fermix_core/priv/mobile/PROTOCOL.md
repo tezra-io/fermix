@@ -667,9 +667,11 @@ phone offers notifications only when its own platform's service is in it: an
 iPhone does when `apns` is listed, an Android phone never does. A daemon
 older than the list sends no `push`. A phone's `hello_ack` also carries
 `call`, whether this primary serves a call from the phone now (see *Calls
-from the phone*), and `lists: true`, that it takes the phone's list channel
-(see *Lists on a phone*); a desktop's, and an older primary's, carries
-neither, and a phone opens a list channel only on `lists: true`. A desktop's
+from the phone*), `lists: true`, that it takes the phone's list channel
+(see *Lists on a phone*), and `trips: true`, that the channel serves the
+owner's trips too (see *Trips on a phone*); an older primary's may lack any
+of them, and a phone opens a list channel only on `lists: true` and sends a
+trip event on it only on `trips: true`. A desktop's
 carries `computer` instead, which of a computer's own events the primary
 takes (see *A computer's own record*); a phone's never does. A `hello_ack` with 16 numeric candidates and the whole
 command catalog fits one frame; one whose candidates are long MagicDNS names
@@ -1579,7 +1581,8 @@ does, and one too old is refused `client_too_old`). On the primary it is an
 ordinary companion connection placed as the owner's, the phone's pairing being
 the proof, in the lists scope: it takes `client_hello`, `checklists_pull`,
 `checklist_pull` and `checklist_edit`, and is sent `server_hello`,
-`checklists`, `checklist`, `accepted` (to a `checklist_edit`) and `error`.
+`checklists`, `checklist`, `accepted` (to a `checklist_edit`) and `error`,
+and the trips' events from companion 8 (see *Trips on a phone*).
 Any other client event is refused `error{reason:"unknown_event", event}` on
 the channel, which then closes (`companion_close`); the session stays open.
 It is never sent a row, read state, history, a turn's stream, an approval, a
@@ -1599,6 +1602,33 @@ Once the channel has pulled the index, the phone's turns say they draw lists:
 a reply that read or changed a list carries the `checklists` block (see
 *Timeline shapes*) on its `text_done` and `row`, and the model is told
 the list is drawn under its reply rather than to write it out.
+
+## Trips on a phone
+
+The same channel carries the owner's trips (M89) when the phone's `hello_ack`
+says `caps.trips: true`; an older daemon says nothing, and a phone sends it no
+trip event. A phone that wants trips says hello on the channel at companion 8,
+the version that brought them: the channel then takes `trips_pull`,
+`trip_pull`, `trip_edit` and `trip_share`, and is sent `trips`, `trip`,
+`trip_shared`, `accepted` (to a `trip_edit`) and `error`, line for line as the
+companion wire carries them (`priv/companion/PROTOCOL.md`, *Trips*). A channel
+whose hello said companion 7 is refused each trip event
+`error{reason:"unknown_event", event}` and closes, as any event it does not
+take. Its edits record `made_via: "phone"`, a trip's as a list's. A
+`client_msg_id` names one edit of any kind, a list's or a trip's: a phone
+mints a new one for every edit it sends, and an edit whose id an edit of the
+other kind already used is refused and changes nothing.
+
+A trip holds at most 1,000 days and stops, and its whole `trip` stays within
+768 KiB, so a trip goes as one `companion_line` cut into chunks inside the
+1 MiB line (the fixtures carry a trip of 1,000 rows in four).
+
+Once the channel has pulled the trips index, a phone at protocol 3 says its
+turns draw trips: a reply that read or changed a trip carries the `trips`
+block (see *Timeline shapes*) on its `text_done` and `row`, and the model is
+told the trip is drawn under its reply rather than to write its days out. A
+phone at protocol 2 is sent no `trips` block, so its turns write the days out
+whatever its channel pulled.
 
 ## Enrollment and the move
 

@@ -77,6 +77,7 @@ After a move (see the `home` reference) the desktop the home left becomes a pair
 - An approval card goes only to the chat whose turn raised it (a phone's never shows on the Mac, and the reverse). A card still waiting is sent again when a phone reconnects, with the time it has left.
 - A failed message or command comes back by its client message id with its own code (`store_quota_exceeded`, `media_too_large`, `attachment_unavailable`) or `request_failed`.
 - Uploads are capped by `max_media_bytes` (20 MiB by default), four in flight per phone and sixteen in all, and never evict stored media; an attach id is valid for two days. The phone strips image location data; the host keeps content-addressed media under `mobile/media/` so another phone can fetch attachments from history.
+- The owner's lists and trips reach the phone over one list channel in its own session (the `lists` and `trips` references): the phone reads and changes them there, each change recorded as made from the phone, and once the channel has pulled a kind's index the phone's replies draw what they touched under them instead of writing it out. Trips need a phone app that speaks them.
 
 - A restart answers a message Fermix had not started; one in progress, or anything unfinished after the home moved or was restored, ends as `uncertain_after_restart` (`request_status` reports `failed` with that word), and the owner sends it again as a new message; the original id is a duplicate.
 

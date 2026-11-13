@@ -341,7 +341,9 @@ them from, and sends them to, only a connection on version 8 placed as the
 owner's, and sends a trip event only to a connection that pulled: the index
 to one that pulled the index, a trip to one that holds it. A version 7
 connection that sends one is refused with `error: unknown_event` and closed,
-and is never sent one.
+and is never sent one. A phone carries the trips' events over its list
+channel on the mobile wire, on a channel whose hello says version 8 (see
+*Trips*).
 
 Every version 7 event, field and rule holds unchanged on version 8. Since
 version 8 the window is {7, 8}, so a version 6 client is refused with
@@ -1266,11 +1268,11 @@ and draws every change as it commits, whoever made it.
   protocol's *Lists on a phone*). It is placed as the owner's, the pairing
   being the proof, and speaks these events and nothing else: `client_hello`,
   `checklists_pull`, `checklist_pull` and `checklist_edit` in, `server_hello`,
-  `checklists`, `checklist`, `accepted` and `error` out. Any other client
-  event is refused `error: unknown_event` and the channel closes. Holding,
-  pushes, edits, refusals and bounds are as above; its edits are made via
-  the phone, and a phone turn after its pull of the index is told the app
-  draws lists, as a Mac turn is.
+  `checklists`, `checklist`, `accepted` and `error` out, and on version 8 the
+  trips' events too (see *Trips*). Any other client event is refused `error:
+  unknown_event` and the channel closes. Holding, pushes, edits, refusals and
+  bounds are as above; its edits are made via the phone, and a phone turn
+  after its pull of the index is told the app draws lists, as a Mac turn is.
 
 The ops, the model's by row id without its `replace`, with `clear_done` and
 `restore`:
@@ -1349,7 +1351,8 @@ whoever made it.
   whole `trip` object stays within 768 KiB: an op that would pass it is
   refused, so every push fits a line.
 - **An edit** (`trip_edit`). One `op`, applied in the same transaction as the
-  model's edits, its rows recorded as made from the Mac. `trip_id` names the
+  model's edits, its rows recorded as made from the Mac, or from the phone
+  over a phone's list channel (`made_via: "phone"`). `trip_id` names the
   trip for every op but `create`. It is answered `accepted` (`duplicate:
   false`) once applied, and its change reaches every holder as a push, the
   sender too. An edit sent again with a `client_msg_id` already applied (kept
@@ -1387,8 +1390,19 @@ whoever made it.
   what changed and leaves the days to the trip drawn under it (the reply's
   `trips` block, see *Blocks under a reply*). A turn from a connection that
   never pulled the index writes the days that changed out as text.
-- **A phone.** A phone's list channel does not carry trips yet: its scope is
-  the lists' events alone (see *Lists*).
+- **A phone's list channel.** A paired phone reads, changes and shares the
+  trips over the companion connection that carries its lists (the mobile
+  protocol's *Trips on a phone*), placed as the owner's, the pairing being
+  the proof. Its `hello_ack` says `caps.trips: true` when the daemon serves
+  them there, and a phone that wants them says hello on the channel at
+  version 8: the channel then takes `trips_pull`, `trip_pull`, `trip_edit`
+  and `trip_share` and is sent `trips`, `trip`, `trip_shared`, `accepted` and
+  `error`, beside the lists' events. A channel on version 7 is refused each
+  as `error: unknown_event` and closes. Holding, pushes, edits, shares,
+  refusals and bounds are as above; its edits are made via the phone
+  (`made_via: "phone"`), and a phone turn after its pull of the trips index
+  is told the app draws trips, as a Mac turn is, when the phone's own
+  session sends the `trips` block (mobile protocol 3).
 
 The ops, the model's by row id, with `restore`:
 

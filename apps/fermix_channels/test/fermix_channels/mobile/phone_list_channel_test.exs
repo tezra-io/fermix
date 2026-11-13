@@ -4,8 +4,9 @@ defmodule FermixChannels.Mobile.PhoneListChannelTest do
   `Mobile.Session` through the Noise `IK` handshake and codec, its peer and
   the desktop's companion family with one channel, the pump, and an ordinary
   `Companion.Connection` in the lists scope on the primary, with the owner's
-  lists in a throwaway repo. What is stood in for is the trust store's row
-  and the router a phone's `msg` is handed to.
+  lists and trips (M89 §06, from companion 8) in a throwaway repo. What is
+  stood in for is the trust store's row and the router a phone's `msg` is
+  handed to.
   """
 
   use ExUnit.Case, async: true
@@ -22,6 +23,7 @@ defmodule FermixChannels.Mobile.PhoneListChannelTest do
   alias FermixChannels.Test.SessionDriver, as: Driver
   alias FermixCore.Checklists.Registry, as: ChecklistRegistry
   alias FermixCore.Memory.Repo
+  alias FermixCore.Trips.Registry, as: TripRegistry
 
   @phone_id "2a9b8c7d-6e5f-4a3b-9c2d-1e0f9a8b7c6d"
   @seen ~U[2026-11-09 08:00:00Z]
@@ -182,9 +184,90 @@ defmodule FermixChannels.Mobile.PhoneListChannelTest do
     assert {[{%{"t" => "pong"}, <<>>}], _client} = Driver.client_receive(driver, client)
   end
 
-  test "a phone's hello_ack says it has lists", ctx do
+  test "a phone's hello_ack says it has lists and trips", ctx do
     {_driver, _client, ack} = ready_phone_with_ack!(ctx, hello_ack_builder: nil)
     assert ack["caps"]["lists"] == true
+    assert ack["caps"]["trips"] == true
+  end
+
+  # -- the owner's trips on the same channel (M89 §06) ---------------------------------
+
+  test "the phone pulls the trips index and a trip at companion 8, and edits via the phone",
+       ctx do
+    trip_id = varonne!(ctx)
+    {driver, client} = ready_phone!(ctx)
+    client = open!(driver, client, 1, 2)
+
+    {[server_hello], client} =
+      line!(driver, client, %{"type" => "client_hello", "protocol_version" => 8}, 3)
+
+    assert %{"type" => "server_hello"} = server_hello
+
+    index_pull = %{"type" => "trips_pull", "profile_id" => "main"}
+    {[index], client} = line!(driver, client, index_pull, 4)
+    assert %{"type" => "trips", "trips" => [%{"trip_id" => ^trip_id, "days" => 2}]} = index
+
+    pull = %{"type" => "trip_pull", "profile_id" => "main", "trip_id" => trip_id}
+    {[%{"type" => "trip", "trip" => trip}], client} = line!(driver, client, pull, 5)
+    assert %{"trip_id" => ^trip_id, "rev" => 1, "rows" => rows} = trip
+    [%{"kind" => "day", "row_id" => day_id} | _rows] = rows
+
+    edit = %{
+      "type" => "trip_edit",
+      "client_msg_id" => "phone-trip-1",
+      "profile_id" => "main",
+      "trip_id" => trip_id,
+      "op" => %{"op" => "add", "text" => "Fish market", "day_id" => day_id, "time" => "08:30"}
+    }
+
+    {[accepted], _client} = line!(driver, client, edit, 6)
+
+    assert %{"type" => "accepted", "client_msg_id" => "phone-trip-1", "duplicate" => false} =
+             accepted
+
+    {:ok, %{rows: stored}} =
+      TripRegistry.device_trip(trip_id, false, :independent, ctx.companion.trip_opts)
+
+    assert %{made_via: "phone"} = Enum.find(stored, &(&1.text == "Fish market"))
+    assert %{made_via: "chat"} = Enum.find(stored, &(&1.text == "Boat to the lighthouse"))
+  end
+
+  test "a channel at companion 7 is refused a trip event as unknown, and the session stays open",
+       ctx do
+    {driver, client} = ready_phone!(ctx)
+    client = open!(driver, client, 1, 2)
+
+    {_hello, client} =
+      line!(driver, client, %{"type" => "client_hello", "protocol_version" => 7}, 3)
+
+    pull = Jason.encode!(%{"type" => "trips_pull", "profile_id" => "main"})
+    fields = %{"channel" => 1, "index" => 0, "last" => true}
+    client = Driver.client_send(driver, client, "companion_line", fields, 4, pull)
+
+    {frames, client} = receive_until_close(driver, client)
+    assert [%{"reason" => "unknown_event", "event" => "trips_pull"}] = lines(frames)
+    assert %{"t" => "companion_close", "channel" => 1} = frames |> List.last() |> elem(0)
+
+    client = Driver.client_send(driver, client, "ping", %{}, 5)
+    assert {[{%{"t" => "pong"}, <<>>}], _client} = Driver.client_receive(driver, client)
+  end
+
+  test "a phone's turn says it draws trips once its channel pulled the trips index", ctx do
+    {driver, client} = ready_phone!(ctx)
+    client = send_msg(driver, client, "before-trips", 2)
+    assert_receive {:routed, %{type: "msg"} = before}, 2_000
+    refute Map.get(before, :draws_trips)
+
+    client = open!(driver, client, 1, 3)
+
+    {_hello, client} =
+      line!(driver, client, %{"type" => "client_hello", "protocol_version" => 8}, 4)
+
+    {_index, client} = line!(driver, client, %{"type" => "trips_pull", "profile_id" => "main"}, 5)
+
+    _client = send_msg(driver, client, "after-trips", 6)
+    assert_receive {:routed, %{type: "msg", draws_trips: true} = routed}, 2_000
+    refute Map.get(routed, :draws_lists)
   end
 
   # -- the phone's session ------------------------------------------------------------
@@ -341,6 +424,26 @@ defmodule FermixChannels.Mobile.PhoneListChannelTest do
     list.id
   end
 
+  # Two days the model planned; every title, stop and place here is invented.
+  defp varonne!(ctx) do
+    {:ok, _answer} =
+      TripRegistry.edit(
+        %{
+          "trip" => "Varonne weekend",
+          "ops" => [
+            %{"op" => "create", "starts_on" => "2031-07-05", "days" => 2},
+            %{"op" => "add", "text" => "Torre de Vale Escuro", "day" => 1, "time" => "10:00"},
+            %{"op" => "add", "text" => "Boat to the lighthouse", "day" => 2, "time" => "11:30"}
+          ]
+        },
+        @owner_turn,
+        ctx.companion.trip_opts
+      )
+
+    {:ok, [trip]} = TripRegistry.device_index(:independent, ctx.companion.trip_opts)
+    trip.id
+  end
+
   defp primary_companion!(suffix) do
     # A short root, as DesktopRailHelper.root!/1's: the channel's tunnel socket under
     # it must fit a socket address on macOS (103 bytes under its deep tmp folder).
@@ -391,6 +494,7 @@ defmodule FermixChannels.Mobile.PhoneListChannelTest do
          registry: registry,
          approvals: approvals,
          checklist_opts: checklist_opts,
+         trip_opts: checklist_opts,
          request_opts: [engine_role: %{role: :primary, primary: nil}],
          primary_epoch: fn -> {:ok, 4} end,
          status_watch: nil
@@ -398,6 +502,11 @@ defmodule FermixChannels.Mobile.PhoneListChannelTest do
       id: endpoint
     )
 
-    %{endpoint: endpoint, socket_dir: socket_dir, checklist_opts: checklist_opts}
+    %{
+      endpoint: endpoint,
+      socket_dir: socket_dir,
+      checklist_opts: checklist_opts,
+      trip_opts: checklist_opts
+    }
   end
 end

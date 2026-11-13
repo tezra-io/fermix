@@ -111,7 +111,7 @@ defmodule FermixChannels.Companion.Connection do
   it, or `error: request_failed` with the share's `client_msg_id`. A turn
   this connection carries says it draws trips (`metadata.draws_trips`) once
   it has pulled the trips index. `:trip_opts` are the Registry's options. A
-  phone's list channel serves no trip event.
+  phone's list channel serves them too (below).
 
   ## Blocks under a reply (version 8)
 
@@ -127,8 +127,10 @@ defmodule FermixChannels.Companion.Connection do
 
   A phone's list channel (`Desktop.Companion`) runs this connection in the
   lists scope (`scope: :lists`): it takes `client_hello`, `checklists_pull`,
-  `checklist_pull` and `checklist_edit` and refuses every other client event
-  as `unknown_event`, closing, as an event newer than its version is refused.
+  `checklist_pull` and `checklist_edit`, and on version 8 the trips' four
+  (`trips_pull`, `trip_pull`, `trip_edit` and `trip_share`, M89 §06), and
+  refuses every other client event as `unknown_event`, closing, as an event
+  newer than its version is refused.
   It joins no timeline: it registers under `{:lists, profile}`, which only the
   list notifier reaches, never under the profile its turns' rows, read state
   and streams go to; no waiting approval or proposal follows its hello and it
@@ -136,7 +138,7 @@ defmodule FermixChannels.Companion.Connection do
   (`"phone"`; a connection of the Mac's is `"mac"`), and the process
   `:draws_to` names (the phone's session) is told `:list_channel_draws` once,
   when the channel first pulls the index, so the phone's turns say they draw
-  lists.
+  lists, and `:trip_channel_draws` once, when it first pulls the trips index.
 
   ## Files (version 7)
 
@@ -470,9 +472,10 @@ defmodule FermixChannels.Companion.Connection do
 
   defp attachments_admitted?(_event, _state), do: true
 
-  @list_events ~w(checklists_pull checklist_pull checklist_edit)
+  @list_events ~w(checklists_pull checklist_pull checklist_edit trips_pull trip_pull trip_edit
+                  trip_share)
 
-  # A phone's list channel serves the lists alone (moduledoc).
+  # A phone's list channel serves the lists and the trips alone (moduledoc).
   defp in_scope?(type, %{scope: :lists}), do: type in @list_events
   defp in_scope?(_type, %{scope: :all}), do: true
 

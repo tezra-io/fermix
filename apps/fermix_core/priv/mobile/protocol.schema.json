@@ -310,6 +310,7 @@
         "push": {"$ref": "#/$defs/pushServices"},
         "call": {"$ref": "#/$defs/callCaps"},
         "lists": {"type": "boolean", "description": "true on a phone's hello_ack when this primary takes the phone's list channel (M85 E4: companion_open, companion_line and companion_close carrying the companion wire's list events, one channel, lists only); absent from a desktop's and an older primary's, and a phone opens a list channel only when it is true."},
+        "trips": {"type": "boolean", "description": "true on a phone's hello_ack when this primary serves the owner's trips on the phone's list channel (M89: the companion wire's trip events, from a channel whose client_hello says companion 8); absent from a desktop's and an older primary's, and a phone sends a trip event on its channel only when it is true."},
         "computer": {"$ref": "#/$defs/computerCaps"}
       }
     },

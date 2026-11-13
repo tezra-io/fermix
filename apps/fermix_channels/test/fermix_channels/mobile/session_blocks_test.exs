@@ -102,6 +102,28 @@ defmodule FermixChannels.Mobile.SessionBlocksTest do
         refute Map.get(routed, :draws_lists)
       end
     end
+
+    # M89 §06: trips are a kept kind, drawn once the phone's list channel
+    # pulled their index, and only from mobile 3, the version that sends their
+    # block; the lists' own pull is apart.
+    test "trips once its channel pulled the trips index, from mobile 3 only", ctx do
+      for version <- [2, 3] do
+        {driver, client} = ready_phone!(ctx, version)
+        send(driver, :trip_channel_draws)
+
+        msg = %{
+          "client_msg_id" => "trips-#{version}",
+          "profile_id" => "main",
+          "text" => "What is on the second day?",
+          "attach_ids" => []
+        }
+
+        _client = Driver.client_send_at(driver, client, version, "msg", msg, 2)
+        assert_receive {:routed, %{type: "msg"} = routed}, 10_000
+        assert Map.get(routed, :draws_trips) == (version == 3 || nil)
+        refute Map.get(routed, :draws_lists)
+      end
+    end
   end
 
   # The three exits of a reply, handed to the session as the device registry

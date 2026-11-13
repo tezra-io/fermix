@@ -402,6 +402,13 @@ defmodule FermixCore.Companion.ProtocolContractTest do
 
     [_before, trips] = String.split(protocol, "## Trips\n", parts: 2)
 
+    # A phone's list channel carries the trips too, from version 8 (M89 §06).
+    [section | _after] = String.split(trips, "\n## ", parts: 2)
+    section = String.replace(section, ~r/\s+/, " ")
+    assert flat =~ "A phone carries the trips' events over its list channel on the mobile wire"
+    assert section =~ "**A phone's list channel.**"
+    assert section =~ ~s(made via the phone \(`made_via: "phone"`\))
+
     for op <- TripRegistry.device_ops() do
       assert trips =~ ~r/^\| `#{op}`|, `#{op}` \|/m, "PROTOCOL.md has no row for the #{op} op"
     end

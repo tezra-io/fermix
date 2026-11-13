@@ -1,6 +1,7 @@
 defmodule FermixChannels.Mobile.ProtocolContractTest do
   use ExUnit.Case, async: true
 
+  alias FermixChannels.Companion.Trips, as: CompanionTrips
   alias FermixChannels.Mobile.Attestation
   alias FermixChannels.Mobile.CallAudio
   alias FermixChannels.Mobile.Chunks
@@ -16,6 +17,8 @@ defmodule FermixChannels.Mobile.ProtocolContractTest do
   alias FermixCore.Computers.Origin
   alias FermixCore.Computers.Outcome
   alias FermixCore.ReplyBlocks
+  alias FermixCore.Trips.Ops, as: TripOps
+  alias FermixCore.Trips.Place
   alias FermixTestSupport.WireSchema
 
   @priv_dir Application.app_dir(:fermix_core, "priv/mobile")
@@ -994,6 +997,37 @@ defmodule FermixChannels.Mobile.ProtocolContractTest do
     end
   end
 
+  # M89 §06: a phone sends a trip event on its list channel only when its
+  # hello_ack says this primary serves trips there, and the flag is a boolean.
+  test "caps.trips is a boolean the codec and the schema read alike", %{schema: schema} do
+    [ack] = Enum.filter(server_headers(), &(get_in(&1, ["caps", "trips"]) != nil))
+    assert %{"lists" => true, "trips" => true} = ack["caps"]
+
+    for {flag, taken?} <- [{true, true}, {false, true}, {"yes", false}, {1, false}] do
+      payload = ack |> Map.drop(~w(v t seq)) |> put_in(["caps", "trips"], flag)
+      encoded? = match?({:ok, _frame}, encode_at(ack, "hello_ack", payload))
+      assert encoded? == (server_errors(server_event("hello_ack", payload), schema) == [])
+      assert encoded? == taken?, inspect(flag)
+    end
+  end
+
+  test "documentation tells a phone how its list channel carries trips", %{protocol: protocol} do
+    [_before, section] = String.split(protocol, "## Trips on a phone", parts: 2)
+    [section, _after] = String.split(section, "\n## ", parts: 2)
+    flat = String.replace(section, ~r/\s+/, " ")
+
+    for words <- [
+          "`caps.trips: true`",
+          "companion 8",
+          "`made_via: \"phone\"`",
+          "A `client_msg_id` names one edit of any kind",
+          "pulled the trips index",
+          "1,000"
+        ] do
+      assert flat =~ words, "Trips on a phone does not say #{words}"
+    end
+  end
+
   test "documentation tells a computer how an invocation runs", %{protocol: protocol} do
     [_before, section] = String.split(protocol, "### Invocations", parts: 2)
     [section, _after] = String.split(section, "\n### ", parts: 2)
@@ -1363,6 +1397,93 @@ defmodule FermixChannels.Mobile.ProtocolContractTest do
 
       assert {:done, _payload} = result, "#{type} run does not end at its last frame"
     end
+  end
+
+  # M89 §06: a trip holds at most 1,000 days and stops and its whole `trip`
+  # stays within 768 KiB, so a phone's list channel carries one as one
+  # companion line the daemon cuts into 60 KiB chunks. The golden is that run
+  # at the row cap: its chunks are the daemon's cut, and its line is the trip
+  # the engine draws from those rows, every date and leg its own.
+  test "a trip at the row cap rides a phone's channel as one line in chunks, as the engine sends it" do
+    run = trip_run(jsonl(@server_binary_fixtures))
+
+    pieces =
+      for %{"header" => header, "bytes_b64" => bytes} <- run,
+          do: {header["index"], header["last"], Base.decode64!(bytes)}
+
+    line = pieces |> Enum.map(fn {_index, _last, bytes} -> bytes end) |> IO.iodata_to_binary()
+
+    assert length(pieces) > 1
+    assert Chunks.split(line) == pieces
+    assert run |> Enum.map(& &1["header"]["channel"]) |> Enum.uniq() |> length() == 1
+    {:ok, bound} = Chunks.bound("companion_line")
+    assert byte_size(line) <= bound
+
+    event = Jason.decode!(line)
+    assert %{"type" => "trip", "profile_id" => "main", "trip" => trip} = event
+    assert length(trip["rows"]) == TripOps.max_rows()
+    assert byte_size(Jason.encode!(trip)) <= TripOps.max_wire_bytes()
+
+    {stored, rows} = store_trip(trip)
+
+    assert CompanionTrips.object_payload("main", %{trip: stored, rows: rows}, false, %{}) ==
+             Map.delete(event, "type")
+
+    stops = Enum.filter(trip["rows"], &(&1["kind"] == "stop"))
+    assert Enum.any?(stops, &Map.has_key?(&1, "leg_m"))
+    assert Enum.any?(stops, &(not Map.has_key?(&1, "place")))
+    assert Enum.any?(stops, &(&1["fixed"] == true and is_binary(&1["note"])))
+
+    minted = ~r/\At[ri]_[0-9a-hjkmnp-tv-z]{10}\z/
+
+    for id <- [trip["trip_id"] | Enum.map(trip["rows"], & &1["row_id"])],
+        do: assert(Regex.match?(minted, id), "#{id} is not an id the engine mints")
+
+    for %{"place" => place} <- stops, do: assert(Place.cut(place) == {:ok, place})
+  end
+
+  # The frames of the one golden companion line that is a `trip`.
+  defp trip_run(fixtures) do
+    {_before, rest} = Enum.split_while(fixtures, &(not trip_start?(&1)))
+    {middle, [last | _after]} = Enum.split_while(rest, &(&1["header"]["last"] != true))
+    middle ++ [last]
+  end
+
+  defp trip_start?(%{"header" => %{"t" => "companion_line", "index" => 0}} = fixture),
+    do: String.starts_with?(Base.decode64!(fixture["bytes_b64"]), ~s({"type":"trip",))
+
+  defp trip_start?(_fixture), do: false
+
+  # The store's trip and rows a golden `trip` was drawn from, without what
+  # the engine derives from them: a day's date and a stop's leg.
+  defp store_trip(trip) do
+    stored = %{
+      id: trip["trip_id"],
+      title: trip["title"],
+      rev: trip["rev"],
+      starts_on: trip["starts_on"] && Date.from_iso8601!(trip["starts_on"]),
+      timezone: trip["timezone"],
+      removed_at: nil
+    }
+
+    {stored, Enum.map(trip["rows"], &store_row/1)}
+  end
+
+  defp store_row(%{"kind" => "day"} = row) do
+    %{id: row["row_id"], kind: :day, text: Map.get(row, "text", ""), timezone: row["timezone"]}
+  end
+
+  defp store_row(%{"kind" => "stop"} = row) do
+    %{
+      id: row["row_id"],
+      kind: :stop,
+      text: row["text"],
+      time: row["time"],
+      duration: row["duration"],
+      fixed: row["fixed"] == true,
+      note: row["note"],
+      place: row["place"]
+    }
   end
 
   defp backticked(text),

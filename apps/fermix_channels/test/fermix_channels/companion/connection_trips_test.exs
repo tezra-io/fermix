@@ -666,6 +666,73 @@ defmodule FermixChannels.Companion.ConnectionTripsTest do
            ]
   end
 
+  # --- a phone's list channel (M89 §06) ---------------------------------------------
+
+  # The connection a phone's list channel runs (`Desktop.CompanionPump`): the
+  # lists scope, its edits made via the phone, and the session it serves told
+  # once it draws each kind.
+  defp phone_channel!(ctx),
+    do: restart_endpoint(ctx, scope: :lists, made_via: "phone", draws_to: self())
+
+  # The trips' window's end, delivered to every phone channel of this test.
+  defp flush_phones!(registry) do
+    for {pid, _version} <- Registry.lookup(registry, {:lists, "main"}),
+        do: send(pid, :trips_flush)
+
+    :ok
+  end
+
+  describe "a phone's list channel" do
+    test "pulls the trips index and a trip at version 8, its edits made via the phone", ctx do
+      trip_id = varonne!(ctx)
+      phone_channel!(ctx)
+      phone = hello(ctx.socket_path, 8)
+
+      assert [%{"trip_id" => ^trip_id}] = pull_index(phone)
+      assert [%{"kind" => "day", "row_id" => day} | _rows] = pull(phone, trip_id)["rows"]
+
+      edit(phone, "phone-1", trip_id, %{"op" => "add", "text" => "Fish market", "day_id" => day})
+      accepted!(phone, "phone-1")
+
+      {:ok, %{rows: rows}} = TripRegistry.device_trip(trip_id, false, :independent, ctx.trip_opts)
+      assert %{id: made, made_via: "phone"} = Enum.find(rows, &(&1.text == "Fish market"))
+      assert %{made_via: "chat"} = Enum.find(rows, &(&1.text == "Coffee by the walls"))
+
+      flush_phones!(ctx.registry)
+      assert %{"type" => "trip", "trip" => %{"rev" => 2}, "made" => made_by} = recv(phone)
+      assert made_by == %{"phone-1" => made}
+      assert %{"type" => "trips", "trips" => [%{"rev" => 2}]} = recv(phone)
+    end
+
+    test "says it draws trips once, at its first trips index, apart from the lists", ctx do
+      trip_id = varonne!(ctx)
+      phone_channel!(ctx)
+      phone = hello(ctx.socket_path, 8)
+
+      _ = pull(phone, trip_id)
+      send_line(phone, %{"type" => "checklists_pull", "profile_id" => "main"})
+      assert %{"type" => "checklists"} = recv(phone)
+      assert_receive :list_channel_draws
+      refute_received :trip_channel_draws
+
+      _ = pull_index(phone)
+      assert_receive :trip_channel_draws
+      _ = pull_index(phone)
+      refute_received :trip_channel_draws
+    end
+
+    test "at version 7 is refused every trip event as unknown, and closes", ctx do
+      phone_channel!(ctx)
+
+      for %{"type" => type} = event <- @trip_events do
+        phone = hello(ctx.socket_path, 7)
+        send_line(phone, event)
+        assert %{"type" => "error", "reason" => "unknown_event", "event" => ^type} = recv(phone)
+        assert {:error, :closed} = :gen_tcp.recv(phone, 0, @arrival_ms)
+      end
+    end
+  end
+
   # --- plumbing -------------------------------------------------------------------
 
   defp groceries do

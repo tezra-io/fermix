@@ -310,6 +310,25 @@ defmodule FermixChannels.Channels.MobileTest do
                Mobile.parse_event(event)
     end
 
+    # What the phone draws is read off its session's event, never the payload
+    # (M85 E4, M89 §06): its lists and trips once its channel pulled each
+    # index, its events from mobile 3.
+    test "a message carries what its phone draws into the turn's metadata" do
+      payload = %{
+        "client_msg_id" => "client-3",
+        "profile_id" => "main",
+        "text" => "What is on Saturday?",
+        "attach_ids" => [],
+        "draws_lists" => true
+      }
+
+      event = %{type: "msg", payload: payload, draws_trips: true, draws_events: true}
+
+      assert {:ok, [%Message{metadata: metadata}]} = Mobile.parse_event(event)
+      assert %{draws_trips: true, draws_events: true} = metadata
+      refute Map.has_key?(metadata, :draws_lists)
+    end
+
     test "refuses a raw wire envelope: only decoded protocol events parse" do
       assert {:error, :invalid_event} =
                Mobile.parse_event(%{

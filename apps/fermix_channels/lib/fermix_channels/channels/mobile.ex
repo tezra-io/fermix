@@ -367,11 +367,12 @@ defmodule FermixChannels.Channels.Mobile do
   end
 
   # What the phone draws, read off its session, never the payload, as the
-  # Mac's connection marks its turns: its lists once its list channel pulled
-  # the index (M85 E4), its events from mobile 3 (`ReplyBlocks.drawn_types/3`).
+  # Mac's connection marks its turns: its lists and trips once its list
+  # channel pulled each index (M85 E4, M89 §06), its events from mobile 3
+  # (`ReplyBlocks.drawn_types/3`).
   defp draws(%Message{} = message, event) do
     metadata =
-      [:draws_lists, :draws_events]
+      [:draws_lists, :draws_trips, :draws_events]
       |> Enum.filter(&(Map.get(event, &1) == true))
       |> Enum.reduce(message.metadata, &Map.put(&2, &1, true))
 

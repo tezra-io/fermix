@@ -800,6 +800,7 @@ defmodule FermixChannels.Mobile.Protocol do
          :ok <- nonnegative_u64(payload, "read_up_to_seq"),
          :ok <- map_field(payload, "caps"),
          :ok <- positive_u64(payload, "primary_epoch"),
+         :ok <- optional_trips_caps(payload["caps"]),
          :ok <- optional_call_caps(payload["caps"]),
          :ok <- optional_computer_caps(payload["caps"]) do
       optional_push_services(payload["caps"], "caps.push")
@@ -868,6 +869,14 @@ defmodule FermixChannels.Mobile.Protocol do
   defp call_reason?(true, nil), do: true
   defp call_reason?(false, reason), do: is_binary(reason) and reason != ""
   defp call_reason?(_available?, _reason), do: false
+
+  # Whether the primary serves the owner's trips on the phone's list channel
+  # (M89 §06): a boolean, absent from an older primary and from a desktop's
+  # hello_ack.
+  defp optional_trips_caps(%{"trips" => trips}) when not is_boolean(trips),
+    do: {:error, {:invalid_field, "caps.trips"}}
+
+  defp optional_trips_caps(_caps), do: :ok
 
   # Absent from a daemon older than the list, as every field protocol 2 gained
   # after it shipped may be.
