@@ -91,7 +91,8 @@ defmodule FermixChannels.Desktop.Invoke.Admission do
   retention then, and every hour. Seams: `:timer` (2-arity,
   `Process.send_after/3` to this process), `:send` (3-arity, in place of
   `Relay.send_event/3`), `:link_epoch` (0-arity, in place of reading
-  `device/desktop.json`).
+  `device/desktop.json`), `:reminder_uplink` (the `Desktop.ReminderUplink`
+  a snooze's answer goes to).
   """
 
   use GenServer
@@ -100,6 +101,7 @@ defmodule FermixChannels.Desktop.Invoke.Admission do
 
   alias FermixChannels.Desktop.HistoryUplink
   alias FermixChannels.Desktop.Relay
+  alias FermixChannels.Desktop.ReminderUplink
   alias FermixChannels.Mobile.Chunks
   alias FermixCore.Computers.Capability
   alias FermixCore.Computers.Journal
@@ -150,6 +152,8 @@ defmodule FermixChannels.Desktop.Invoke.Admission do
       relay: Keyword.fetch!(opts, :relay),
       runs: Keyword.fetch!(opts, :runs),
       waiting_table: Keyword.fetch!(opts, :waiting_table),
+      notifications: Keyword.fetch!(opts, :notifications),
+      reminder_uplink: Keyword.get(opts, :reminder_uplink, ReminderUplink),
       timer: Keyword.get(opts, :timer, &Process.send_after(self(), &1, &2)),
       send: Keyword.get(opts, :send, &Relay.send_event/3),
       link_epoch: Keyword.get(opts, :link_epoch, fn -> link_epoch(home) end),
@@ -195,10 +199,11 @@ defmodule FermixChannels.Desktop.Invoke.Admission do
   def handle_cast({:event, "invoke_status", %{"id" => id}, _payload}, state),
     do: {:noreply, status(id, state)}
 
-  # The home's answer to a request this computer sent it (`history.submit`,
-  # M97 §8.1) goes to the process waiting on it.
+  # The home's answer to a request this computer sent it goes to the process
+  # waiting on it, by its id's prefix: `history.submit` (M97 §8.1) and a
+  # reminder's snooze (M99 §10.1).
   def handle_cast({:event, "invoke_result", %{"id" => id} = fields, payload}, state) do
-    if HistoryUplink.answer(id, fields, payload) == :unknown,
+    if uplink_answer(id, fields, payload, state) == :unknown,
       do:
         Logger.warning("invocation #{id}: an answer came for a request this computer never sent")
 
@@ -257,6 +262,14 @@ defmodule FermixChannels.Desktop.Invoke.Admission do
     Logger.debug("the invocations ignored #{inspect(message)}")
     {:noreply, state}
   end
+
+  defp uplink_answer("hist-" <> _rest = id, fields, payload, _state),
+    do: HistoryUplink.answer(id, fields, payload)
+
+  defp uplink_answer("snz-" <> _rest = id, fields, payload, state),
+    do: ReminderUplink.answer(id, fields, payload, state.reminder_uplink)
+
+  defp uplink_answer(_id, _fields, _payload, _state), do: :unknown
 
   # -- start ------------------------------------------------------------------------
 
@@ -1098,6 +1111,7 @@ defmodule FermixChannels.Desktop.Invoke.Admission do
       switches: switches,
       sandbox: state.sandbox.(),
       browser: browser(state),
+      notifications: state.notifications,
       clock: state.clock,
       deadline_ms: entry.deadline_ms
     }

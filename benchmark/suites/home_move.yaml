@@ -324,6 +324,39 @@ scenarios:
           3. Does not tell the owner to delete the old server while the home
              still lives on it, or to copy the Fermix home folder over by
              hand.
+      # M99 §10.1: after a move a reminder set to ring on "this computer"
+      # comes due on the server, which has no notification centre, and the
+      # server asks the owner's computers that are awake to show it. What
+      # rots is the self-knowledge `events_reminders` reference's *This
+      # computer*; general knowledge says a notification needs the app's own
+      # engine on the Mac. The floor names the Mac, which every answer does;
+      # the rubric owns the facts. No route assertion: whether the model
+      # opens the skill is its own call.
+      - id: mac_reminders_after_moving_to_a_server
+        query: >
+          I moved my Fermix to my own Linux server with Always On last week.
+          Before that I had a few reminders set to pop up on my Mac, like the
+          one before my three o'clock call on Thursdays. Will those still
+          show up on my Mac now, or did that stop when Fermix left it?
+        expect:
+          reply_matches: '(?i)\bmac\b'
+          max_cost_usd: 1.2
+          max_duration_ms: 160000
+        rubric: |
+          1. Says the reminders still ring on the Mac: when one comes due the
+             server, which shows no notification itself, asks the owner's
+             computers that are awake to show it, and the Mac shows it as a
+             notification from the Fermix app there, as before, its Snooze 10
+             minutes included.
+          2. Says it needs the Mac awake, with its Fermix linked to the
+             server and its switch "Fermix on your server may use this
+             computer" on, and the notification permission granted; one due
+             while the Mac is asleep or offline is tried again while the
+             reminder is still valid, so it rings if the Mac is back in time.
+          3. Does not say the reminder shows on the server, that the
+             reminders stopped or must be set again, that they must move to a
+             chat channel, or that a separate notifications switch must be
+             turned on.
 
   # Always On setup §8.2: an install with no Fermix app sets Always On up
   # with `fermix always-on` in a terminal, or on the setup page's Always On

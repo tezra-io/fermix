@@ -37,6 +37,7 @@ defmodule FermixChannels.Mobile.Supervisor do
   alias FermixChannels.Mobile.Push.PigeonDispatcher
   alias FermixChannels.Mobile.RequestCoordinator
   alias FermixChannels.Mobile.Session
+  alias FermixChannels.Mobile.WebPush
   alias FermixCore.Home.Candidate
   alias FermixCore.Memory.Config, as: MemoryConfig
   alias FermixCore.Memory.Repo, as: MemoryRepo
@@ -66,6 +67,12 @@ defmodule FermixChannels.Mobile.Supervisor do
   holds, APNs unreachable) never refuse or stop anything: the listener and the
   push dispatcher stay up, degraded, and say why. Push settings that do not
   resolve never refuse it either: the subtree starts without the dispatcher.
+
+  An admitted start makes the home's Web Push key, or reads the one it made
+  before (`WebPush.Key.ensure/1`, beside the identity), and hands its public
+  text to every session (`:web_push_key`), so a `hello_ack` carries it before
+  any phone subscribes (M99 §14). A key that cannot be had never refuses the
+  subtree either: it starts without Web Push, and the log says why.
   """
   @spec start_link(keyword()) :: Supervisor.on_start()
   def start_link(opts \\ []) when is_list(opts) do
@@ -77,9 +84,29 @@ defmodule FermixChannels.Mobile.Supervisor do
     store = names(opts).device_store
 
     case admission_check(opts, root) do
-      :ok -> start_subtree(opts, store)
+      :ok -> start_subtree(Keyword.put(opts, :web_push_key, web_push_key(root)), store)
       {:error, reason} -> refuse(root, store, reason)
     end
+  end
+
+  # At start, not on a phone's first ask: the key is what a phone subscribes
+  # with, so it is in every `hello_ack` from the first. A fresh install and an
+  # upgrade both make it here, with no setting.
+  defp web_push_key(root) do
+    case WebPush.Key.ensure(root: root) do
+      {:ok, key} -> WebPush.Key.public_text(key)
+      {:error, reason} -> without_web_push(reason)
+    end
+  end
+
+  defp without_web_push(reason) do
+    Logger.error(
+      "mobile Web Push has no key (#{inspect(reason)}). " <>
+        "Mobile started WITHOUT Web Push, so no Android phone is notified; " <>
+        "fix what it names and restart."
+    )
+
+    nil
   end
 
   # `:switch` reads the channel's switch at each start. The channels
@@ -312,7 +339,11 @@ defmodule FermixChannels.Mobile.Supervisor do
     ]
 
     push_children = push_children(config, names)
-    opts = Keyword.put(opts, :push_services, push_services(push_children))
+
+    opts =
+      opts
+      |> Keyword.put(:push_services, push_services(push_children))
+      |> Keyword.put(:web_push_key, web_push_key_opt(opts))
 
     children =
       base_children ++
@@ -461,6 +492,15 @@ defmodule FermixChannels.Mobile.Supervisor do
     Enum.map(push_children, fn {PigeonDispatcher, _opts} -> "apns" end)
   end
 
+  # The key's public text `admit/1` made, or none: a subtree started without
+  # it, as a test starts `init/1`, names no Web Push.
+  defp web_push_key_opt(opts) do
+    case Keyword.get(opts, :web_push_key) do
+      key when is_nil(key) or is_binary(key) -> key
+      other -> raise ArgumentError, ":web_push_key must be a string or nil, got #{inspect(other)}"
+    end
+  end
+
   defp media_opts(opts, root, name),
     do: MediaStore.configured(root, Keyword.get(opts, :config, []), name)
 
@@ -474,13 +514,13 @@ defmodule FermixChannels.Mobile.Supervisor do
       bind: listener_bind(opts),
       port: Keyword.get(explicit, :port, Keyword.get(config, :port, 4_031)),
       start_listener?: Keyword.get(opts, :start_listener?, true),
-      router_opts: session_opts(config, names, Keyword.fetch!(opts, :push_services))
+      router_opts: session_opts(config, names, opts)
     ]
   end
 
   # What every carrier's sessions are started with: the WebSocket's through the
   # router, the bridge's directly.
-  defp session_opts(config, names, push_services) do
+  defp session_opts(config, names, opts) do
     [
       device_store: names.device_store,
       device_registry: names.device_registry,
@@ -495,13 +535,14 @@ defmodule FermixChannels.Mobile.Supervisor do
       call_supervisor: names.call_supervisor,
       max_media_bytes: Keyword.get(config, :max_media_bytes, @default_max_media_bytes),
       push_environment: config |> Keyword.get(:push, []) |> Keyword.get(:environment),
-      push_services: push_services
+      push_services: Keyword.fetch!(opts, :push_services),
+      web_push_key: Keyword.fetch!(opts, :web_push_key)
     ]
   end
 
   defp iroh_opts(opts, root, names) do
     config = Keyword.get(opts, :config, [])
-    session = session_opts(config, names, Keyword.fetch!(opts, :push_services))
+    session = session_opts(config, names, opts)
     max_media_bytes = Keyword.fetch!(session, :max_media_bytes)
 
     [

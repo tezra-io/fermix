@@ -290,6 +290,81 @@ defmodule FermixCore.NativeHost.LinkTest do
     assert log =~ "That reminder was not delivered to this computer"
   end
 
+  # M99 §10.1: on a computer whose home is on its server the reminder is the
+  # server's, so the press goes to the link (`Home.Link`'s
+  # `snooze_reminder/2`), never to a registry this engine does not hold. No
+  # uplink runs in this VM, so the link says the press could not be sent.
+  test "on a device the press goes to the server, through the link", ctx do
+    restart_with_link_opts(ctx, role: %{role: :device, primary: "garden server"})
+    app = attach(ctx.socket_path)
+    link = attached_link(ctx.host)
+
+    {_result, log} =
+      with_log(fn ->
+        send_line(app, %{
+          "type" => "notification.action",
+          "reminder_id" => "rem_1",
+          "action" => "snooze_10m"
+        })
+
+        assert {:ok, _status} = round_trip(app, link)
+      end)
+
+    assert log =~
+             "reminder rem_1 was not snoozed from its notification: the press could not be " <>
+               "sent to the server (:not_running)"
+
+    refute log =~ "registry"
+  end
+
+  test "a press handed to the server is no failure, and the link goes on", ctx do
+    test = self()
+
+    snooze = fn reminder_id, minutes, _opts ->
+      send(test, {:handed, reminder_id, minutes})
+      :ok
+    end
+
+    restart_with_link_opts(ctx, snooze: snooze)
+    app = attach(ctx.socket_path)
+    link = attached_link(ctx.host)
+
+    {_result, log} =
+      with_log(fn ->
+        send_line(app, %{
+          "type" => "notification.action",
+          "reminder_id" => "rem_1",
+          "action" => "snooze_10m"
+        })
+
+        assert_receive {:handed, "rem_1", 10}, 2_000
+        assert {:ok, _status} = round_trip(app, link)
+      end)
+
+    refute log =~ "not snoozed"
+  end
+
+  # A Mac that is its own home keeps its reminders: the press is the registry's.
+  test "on a primary the press is still the registry's", ctx do
+    restart_with_link_opts(ctx, role: %{role: :primary, primary: nil})
+    app = attach(ctx.socket_path)
+    link = attached_link(ctx.host)
+
+    {_result, log} =
+      with_log(fn ->
+        send_line(app, %{
+          "type" => "notification.action",
+          "reminder_id" => "rem_link_test_missing",
+          "action" => "snooze_10m"
+        })
+
+        assert {:ok, _status} = round_trip(app, link)
+      end)
+
+    assert log =~ "reminder rem_link_test_missing was not snoozed from its notification"
+    refute log =~ "sent to the server"
+  end
+
   test "protocol violations are answered once and close the connection", ctx do
     bad = attach(ctx.socket_path)
     send_line(bad, %{"type" => "notification.action", "reminder_id" => "rem_1", "action" => "x"})

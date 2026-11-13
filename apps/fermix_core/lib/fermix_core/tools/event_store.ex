@@ -16,8 +16,11 @@ defmodule FermixCore.Tools.EventStore do
   instead of the default target. The schema publishes it, and `when_to_use/1`
   the rule for choosing it, only where the build offers this computer
   (`Native.Notifications.offered?/1`), a fact of the build, so both are stable
-  for the daemon's life. A test names the host as the context's `:host`
-  (`BootProfile.host/0`'s shape), as `place_search` takes it.
+  for the daemon's life. Their words follow where a notification rings
+  (`Native.Notifications.placement/1`, M99 §10.1): on an Always On server,
+  the owner's computers that are awake, never the server. A test names the
+  host as the context's `:host` (`BootProfile.host/0`'s shape), as
+  `place_search` takes it, and the placement as `:placement`.
   """
 
   @behaviour FermixCore.Capabilities.Builtin.Tool
@@ -112,19 +115,23 @@ defmodule FermixCore.Tools.EventStore do
   end
 
   defp delivery_property(context) do
-    if Notifications.offered?(native_opts(context)) do
-      %{
-        delivery: %{
-          type: "string",
-          enum: ["computer"],
-          description:
-            "Ring on this computer instead of the default target. Leave it out to use the " <>
-              "default."
-        }
-      }
+    native = native_opts(context)
+
+    if Notifications.offered?(native) do
+      description = delivery_words(placement(native))
+      %{delivery: %{type: "string", enum: ["computer"], description: description}}
     else
       %{}
     end
+  end
+
+  defp delivery_words(:here),
+    do: "Ring on this computer instead of the default target. Leave it out to use the default."
+
+  # On an Always On server the computer is the owner's own (M99 §10.1).
+  defp delivery_words(:computers) do
+    "Ring on the owner's computers that are awake, never on this server, instead of the " <>
+      "default target. Leave it out to use the default."
   end
 
   @impl true
@@ -133,19 +140,39 @@ defmodule FermixCore.Tools.EventStore do
   @doc "The catalog rule, with the rule for choosing this computer only where it is offered."
   @spec when_to_use(map()) :: String.t()
   def when_to_use(context) when is_map(context) do
+    native = native_opts(context)
+
     "Store a date the owner stated whose only future action is notifying them: a " <>
       "birthday, anniversary, appointment, deadline, or an explicit reminder." <>
-      computer_rule(Notifications.offered?(native_opts(context)))
+      computer_rule(Notifications.offered?(native) and placement(native))
   end
 
-  defp computer_rule(true) do
+  defp computer_rule(:here) do
     " Pass delivery \"computer\" when the owner asks for it to ring on this computer, or " <>
       "for a timer or a reminder minutes or hours away asked from this computer's own chat, " <>
       "a terminal, an editor, or a voice call; from a phone or a chat app, leave it out " <>
       "unless they name this computer."
   end
 
+  # On an Always On server it rings on the owner's computers, never here.
+  defp computer_rule(:computers) do
+    " Pass delivery \"computer\" when the owner asks for it to ring on their computer, or " <>
+      "for a timer or a reminder minutes or hours away asked from one of their computers' " <>
+      "own chat, a terminal, an editor, or a voice call: it rings on each of their " <>
+      "computers that is awake, never on this server; from a phone or a chat app, leave it " <>
+      "out unless they name their computer."
+  end
+
   defp computer_rule(false), do: ""
+
+  # Where it rings; a placement that cannot be read keeps this computer's
+  # words, and storing one refuses in that placement's own sentence.
+  defp placement(native) do
+    case Notifications.placement(native) do
+      {:ok, placement} -> placement
+      {:error, _clause} -> :here
+    end
+  end
 
   @impl true
   def examples do
@@ -241,11 +268,17 @@ defmodule FermixCore.Tools.EventStore do
     }
   end
 
-  # The host a test names; a turn names none, and this build's host decides.
+  # The host and the placement a test names; a turn names neither, and this
+  # build's host and where its home runs decide.
   defp registry_opts(context), do: [native: native_opts(context)]
 
-  defp native_opts(%{host: %{profile: _profile, os: _os} = host}), do: [host: host]
-  defp native_opts(_context), do: []
+  defp native_opts(context), do: host_opts(context) ++ placement_opts(context)
+
+  defp host_opts(%{host: %{profile: _profile, os: _os} = host}), do: [host: host]
+  defp host_opts(_context), do: []
+
+  defp placement_opts(%{placement: placement}), do: [placement: placement]
+  defp placement_opts(_context), do: []
 
   # `similar_events` is the owner's other active events of this kind: a twin
   # stored under a different title is invisible to the dedupe key, so the

@@ -14,6 +14,7 @@
 {"v":2,"t":"media_fetch","seq":12,"ref":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}
 {"v":2,"t":"push_register","seq":13,"apns_token":"0123456789abcdef","environment":"development"}
 {"v":2,"t":"push_unregister","seq":14}
+{"v":3,"t":"push_subscribe","seq":2,"service":"fcm","token":"dK3vQ8pLmX2:APA91bH7xZ_qR4tWv9yN-cE1sJ6uMkT0aLgB5oPiFdShV3nYw","p256dh":"BA-tjEx2wOT1eHWq5MqZhSnLAWPkYti3100PmZD9lbt_6TM7fBWzl6NLxE5ZSS70gcsibTTIqjHkNTQeZP5yKRI","auth":"kG0joyQGxf9iMIqP95PJlw"}
 {"v":2,"t":"ack","seq":14,"server_seq":12}
 {"v":2,"t":"read_state","seq":15,"profile_id":"main","read_up_to_seq":12}
 {"v":2,"t":"request_status","seq":15,"client_msg_ids":["client-1","client-2","client-9"]}

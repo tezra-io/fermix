@@ -36,6 +36,12 @@ defmodule FermixChannels.Desktop.Invoke do
   `FermixCore.Computers.Capabilities.Browser.local/0`, read at each request)
   is what the browser capability serves with; without it that capability
   refuses.
+
+  The notifications capability (M99 §10.1) shows each key once: this
+  supervisor owns that table too (an unnamed ETS table, at most 512 keys,
+  handed to Admission as `:notifications`), so a restart of Admission shows
+  no key twice. `:notifications` is `Native.Notifications`' options for its
+  posts (a test's backend seams; none in production).
   """
 
   use Supervisor
@@ -52,7 +58,8 @@ defmodule FermixChannels.Desktop.Invoke do
     "imessage" => FermixChannels.Channels.IMessage.Capability,
     "browser" => FermixCore.Computers.Capabilities.Browser,
     "computer_use" => FermixCore.Computers.Capabilities.Screen,
-    "history" => FermixCore.ComputerHistory.MachineService
+    "history" => FermixCore.ComputerHistory.MachineService,
+    "notifications" => FermixCore.Computers.Capabilities.Notifications
   }
   @required [:home, :switches, :sandbox, :capabilities, :clock, :relay]
 
@@ -111,13 +118,20 @@ defmodule FermixChannels.Desktop.Invoke do
   def init(opts) do
     name = Keyword.get(opts, :name, __MODULE__)
     runs = runs(name)
-    # Owned by this process, so it outlives a restart of Admission (the moduledoc).
+    # Owned by this process, so they outlive a restart of Admission (the moduledoc).
     waiting = :ets.new(:invoke_waiting, [:set, :public])
+    shown = :ets.new(:notifications_shown, [:set, :public])
+    notifications = %{shown: shown, native: Keyword.get(opts, :notifications, [])}
 
     admission_opts =
       opts
       |> Keyword.delete(:name)
-      |> Keyword.merge(name: admission(name), runs: runs, waiting_table: waiting)
+      |> Keyword.merge(
+        name: admission(name),
+        runs: runs,
+        waiting_table: waiting,
+        notifications: notifications
+      )
 
     children = [
       {Task.Supervisor, name: runs},

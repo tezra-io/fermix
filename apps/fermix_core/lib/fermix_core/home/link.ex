@@ -200,6 +200,15 @@ defmodule FermixCore.Home.Link do
   @callback rename_computer(String.t(), String.t()) ::
               {:ok, computer_row()} | {:error, {:name_taken | :not_found, String.t()} | term()}
 
+  @doc """
+  Device role: hands the server a Snooze of `minutes` pressed on the
+  notification of its reminder `reminder_id` here (M99 §10.1), and returns at
+  once, never waiting on the link; the server's answer is logged where it
+  arrives. An error when nothing here can carry it (this computer is not
+  linked to a server).
+  """
+  @callback snooze_reminder(String.t(), pos_integer()) :: :ok | {:error, term()}
+
   @typedoc "How a request reaches the primary: the rail's `forward/2` on a linked desktop."
   @type forwarding ::
           [primary_forward: (Protocol.request(), keyword() -> Protocol.route_result())] | []

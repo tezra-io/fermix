@@ -168,6 +168,20 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   over the phone's own encrypted connection, so they work wherever Fermix
   runs. A phone app that doesn't draw lists yet keeps showing a reply's list
   as text.
+- **Your Android phone is notified while the app is closed.** Fermix now
+  pushes a paired Android phone through Web Push, straight from your Fermix
+  to Google's push service, so a reply, a reminder or an approval waiting for
+  you reaches the phone with the app closed, sealed so Google cannot read it.
+  There is nothing to set up: no Firebase project, no service account, no
+  setting. Fermix makes its own key the first time the phone channel starts
+  and keeps it with your home, so it moves with it. Each phone is now decided
+  on its own: a phone that is away is notified even while another of your
+  phones is connected, and a message you already read elsewhere still
+  notifies nobody. An iPhone is pushed through APNs as before, and APNs
+  settings that are off or broken no longer stop an Android phone's
+  notifications. Web Push rides version 3 of the phone wire, so a phone app
+  at version 2 is told nothing new. No Android app that subscribes is
+  released yet.
 
 ### Changed
 
@@ -925,6 +939,20 @@ will be part of a future release; nothing in this group is in a release yet.
   undone is said plainly ("studio-server turned the move down, so nothing
   moved."), with the server's own reason where it is one you can act on, such
   as its disk space, and the technical words in the log.
+- **Always On: a reminder for your computer still rings on your computer
+  after the move.** A reminder or timer set to ring on "this computer" came
+  due on the server, which has no notification centre, and went nowhere. The
+  server now asks each of your computers that is awake (up to sixteen) to
+  show it, and each shows it the way it did before the move: the Fermix app
+  on a Mac, with its Snooze 10 minutes, or the desktop's notifications on
+  Linux. A computer shows a reminder once, so a retry never rings twice. A
+  reminder due while no computer is awake is tried again while it is still
+  valid, and one is refused when you set it only if no computer is linked or
+  every awake one says it cannot show it, in that computer's words. Snooze on
+  your Mac now snoozes the reminder on your server. Your computer's switch
+  "Fermix on your server may use this computer" turning off stops it there,
+  with no new switch; Fermix tells you on the server that the reminder rings
+  on your computers, never on the server.
 
 ## [0.18.0] - 2026-11-03
 

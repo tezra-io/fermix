@@ -144,6 +144,14 @@ What reaches the server from a computer (a call, an attached file, a robot,
 a notification) is no offer and has no switch: each follows its own
 feature's setting.
 
+A reminder for "this computer" that comes due on the server rings on the
+computers instead (skill_view(name: "self-knowledge", file:
+"events_reminders")): the server asks each connected one, at most sixteen,
+to show it, and each shows it the way its own home would. That is no offer
+either and has no switch of its own: the master switch alone gates it, with
+the system's own notification permission, and a Snooze pressed there goes
+back to the server, which holds the reminder.
+
 Each offer is in one of three states, in the computer's own words when it is
 not on ("Mac" reads "computer" off a Mac):
 
@@ -215,7 +223,9 @@ is why the move's review warns of it.
 
 The link carries a request from the server to a computer and its answer
 back: each file, command or git call a turn makes on a computer is one
-request (*Files and commands on a computer*).
+request (*Files and commands on a computer*), and so is each reminder the
+server rings there, one request per connected computer, which no turn made
+(its kind is background).
 
 - **The computer decides.** It refuses a request from an older copy of the
   home, anything while its master switch is off, and what its own switch

@@ -3644,6 +3644,9 @@ defmodule FermixCore.Setup.ConfigStoreTest do
       assert Enum.sort(mobile) == [enabled: true, push: [enabled: false]]
       assert log =~ "[warning]"
       assert log =~ "config.toml [fermix_channels.mobile.fcm] is retired"
+      # Android phones are pushed through Web Push now (M99), with no setting.
+      assert log =~ "Android phones are pushed through Web Push with no settings"
+      refute log =~ "no Android push"
       refute_received {:secret_writer_get, _key}
     end
 

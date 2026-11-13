@@ -78,6 +78,163 @@ defmodule FermixChannels.Mobile.DeviceStoreTest do
     assert {:ok, %{push_token: nil}} = DeviceStore.fetch(original.device_id, root: root)
   end
 
+  # M99 §14: a phone's one registration is an APNs token, or a Web Push
+  # subscription whose token sits in `push_token` beside its service, its
+  # public key and its secret. The three are all set or all nil.
+  describe "a Web Push subscription" do
+    test "is stored as base64url, read back, and cleared whole", %{root: root} do
+      assert {:ok, phone} = DeviceStore.add(device_attrs(), root: root)
+
+      assert {:ok, subscribed} =
+               DeviceStore.update(phone.device_id, subscription(), root: root)
+
+      assert %Device{push_service: "fcm", push_token: "fcm-token:A_b-9"} = subscribed
+      assert subscribed.push_p256dh == subscription().push_p256dh
+      assert subscribed.push_auth == subscription().push_auth
+      assert {:ok, ^subscribed} = DeviceStore.fetch(phone.device_id, root: root)
+
+      toml = File.read!(Path.join(root, "mobile/devices.toml"))
+      assert toml =~ ~s(push_service = "fcm")
+
+      assert toml =~
+               ~s(push_p256dh = "#{Base.url_encode64(subscribed.push_p256dh, padding: false)}")
+
+      assert toml =~ ~s(push_auth = "#{Base.url_encode64(subscribed.push_auth, padding: false)}")
+
+      cleared = %{push_token: nil, push_service: nil, push_p256dh: nil, push_auth: nil}
+
+      assert {:ok, %Device{push_token: nil, push_service: nil, push_p256dh: nil, push_auth: nil}} =
+               DeviceStore.update(phone.device_id, cleared, root: root)
+
+      toml = File.read!(Path.join(root, "mobile/devices.toml"))
+      refute toml =~ "push_service"
+      refute toml =~ "push_p256dh"
+      refute toml =~ "push_auth"
+    end
+
+    test "a token up to the Web Push bound is kept, and one beyond it refused", %{root: root} do
+      long = String.duplicate("a", 4_096)
+
+      assert {:ok, phone} =
+               DeviceStore.add(Map.merge(device_attrs(), %{subscription() | push_token: long}),
+                 root: root
+               )
+
+      assert {:ok, %Device{push_token: ^long}} = DeviceStore.fetch(phone.device_id, root: root)
+
+      assert {:error, {:invalid_device, :push_token, :invalid_subscription}} =
+               DeviceStore.add(
+                 Map.merge(device_attrs(), %{subscription() | push_token: long <> "a"}),
+                 root: root
+               )
+    end
+
+    test "a row written before the subscription fields reads with them nil", %{root: root} do
+      path = write_rows(root, ~s(push_token = "0123abcd"\n))
+
+      assert {:ok, [%Device{push_token: "0123abcd"} = legacy]} = DeviceStore.list(root: root)
+      assert {legacy.push_service, legacy.push_p256dh, legacy.push_auth} == {nil, nil, nil}
+
+      assert {:ok, _seen} =
+               DeviceStore.update(legacy.device_id, %{last_seen: ~U[2026-10-11 08:00:00Z]},
+                 root: root
+               )
+
+      refute File.read!(path) =~ "push_service"
+    end
+
+    test "a subscription on disk is read back, and a broken one fails loudly", %{root: root} do
+      p256dh = Base.url_encode64(subscription().push_p256dh, padding: false)
+      auth = Base.url_encode64(subscription().push_auth, padding: false)
+
+      write_rows(root, """
+      push_auth = "#{auth}"
+      push_p256dh = "#{p256dh}"
+      push_service = "fcm"
+      push_token = "fcm-token"
+      """)
+
+      assert {:ok, [%Device{push_service: "fcm", push_token: "fcm-token"} = row]} =
+               DeviceStore.list(root: root)
+
+      assert row.push_p256dh == subscription().push_p256dh
+
+      path = write_rows(root, ~s(push_service = "fcm"\npush_token = "fcm-token"\n))
+
+      assert {:error, {:invalid_device_row, ^path, 0, {:invalid_device, :push_p256dh, _reason}}} =
+               DeviceStore.list(root: root)
+
+      path = write_rows(root, ~s(push_auth = "not base64url!"\n))
+
+      assert {:error, {:invalid_device_row, ^path, 0, {:invalid_device, :push_auth, _reason}}} =
+               DeviceStore.list(root: root)
+    end
+
+    test "every shape but all three or none is refused", %{root: root} do
+      good = subscription()
+
+      refused = [
+        {%{good | push_service: nil}, :push_service, :incomplete_subscription},
+        {%{good | push_p256dh: nil}, :push_p256dh, :incomplete_subscription},
+        {%{good | push_auth: nil}, :push_auth, :incomplete_subscription},
+        {%{good | push_token: nil}, :push_token, :invalid_subscription},
+        {%{good | push_token: ""}, :push_token, :invalid_subscription},
+        {%{good | push_token: "has a space"}, :push_token, :invalid_subscription},
+        {%{good | push_service: "apns"}, :push_service, :invalid_subscription},
+        {%{good | push_p256dh: :binary.copy(<<4>>, 64)}, :push_p256dh, :invalid_subscription},
+        {%{good | push_p256dh: <<5>> <> :binary.copy(<<1>>, 64)}, :push_p256dh,
+         :invalid_subscription},
+        {%{good | push_auth: :binary.copy(<<1>>, 15)}, :push_auth, :invalid_subscription},
+        {%{good | push_auth: :secret}, :push_auth, :invalid_subscription}
+      ]
+
+      for {fields, field, reason} <- refused do
+        assert {:error, {:invalid_device, ^field, ^reason}} =
+                 DeviceStore.add(Map.merge(device_attrs(), fields), root: root)
+      end
+
+      refute File.exists?(Path.join(root, "mobile"))
+    end
+
+    test "an update writes a registration whole", %{root: root} do
+      assert {:ok, phone} = DeviceStore.add(device_attrs(), root: root)
+      assert {:ok, _subscribed} = DeviceStore.update(phone.device_id, subscription(), root: root)
+
+      for partial <- [
+            %{push_token: "0123abcd"},
+            %{push_token: nil},
+            %{push_service: nil, push_p256dh: nil, push_auth: nil},
+            Map.delete(subscription(), :push_auth)
+          ] do
+        assert {:error, {:invalid_device_update, :partial_push_registration}} =
+                 DeviceStore.update(phone.device_id, partial, root: root)
+      end
+
+      assert {:ok, %Device{push_service: "fcm"}} = DeviceStore.fetch(phone.device_id, root: root)
+
+      apns = %{push_token: "0123abcd", push_service: nil, push_p256dh: nil, push_auth: nil}
+
+      assert {:ok, %Device{push_token: "0123abcd", push_service: nil}} =
+               DeviceStore.update(phone.device_id, apns, root: root)
+
+      assert {:ok, %Device{push_token: "fcm-token:A_b-9"}} =
+               DeviceStore.update(phone.device_id, subscription(), root: root)
+    end
+
+    test "a desktop never holds one", %{root: root} do
+      for {field, value} <- Map.delete(subscription(), :push_token) do
+        assert {:error, {:invalid_device, ^field, :desktop_field}} =
+                 DeviceStore.add(Map.put(desktop_attrs(), field, value), root: root)
+      end
+
+      desktop = desktop_attrs()
+      assert {:ok, _desktop} = DeviceStore.add(desktop, root: root)
+
+      assert {:error, {:invalid_device, :push_token, :desktop_field}} =
+               DeviceStore.update(desktop.device_id, subscription(), root: root)
+    end
+  end
+
   test "a device's acknowledged relay list revision is stored, and a malformed one refused",
        %{root: root} do
     assert {:ok, device} = DeviceStore.add(device_attrs(), root: root)
@@ -592,6 +749,17 @@ defmodule FermixChannels.Mobile.DeviceStoreTest do
       created_at: ~U[2026-08-12 18:00:00Z],
       last_seen: nil,
       apns_key_salt: :crypto.strong_rand_bytes(32)
+    }
+  end
+
+  defp subscription do
+    {public, _private} = :crypto.generate_key(:ecdh, :prime256v1, :binary.copy(<<7>>, 32))
+
+    %{
+      push_token: "fcm-token:A_b-9",
+      push_service: "fcm",
+      push_p256dh: public,
+      push_auth: :binary.copy(<<9>>, 16)
     }
   end
 

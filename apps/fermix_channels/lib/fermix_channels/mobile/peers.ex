@@ -38,7 +38,7 @@ defmodule FermixChannels.Mobile.Peers do
 
   @phone_client ~w(
     hello msg attach_begin attach_chunk attach_end command cancel history_pull media_fetch
-    push_register push_unregister ack read_state request_status unpair ping
+    push_register push_unregister push_subscribe ack read_state request_status unpair ping
     call_open call_line call_audio call_frame call_close
     companion_open companion_line companion_close
   )

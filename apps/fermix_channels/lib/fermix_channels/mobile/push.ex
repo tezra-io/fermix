@@ -1,20 +1,42 @@
 defmodule FermixChannels.Mobile.Push do
   @moduledoc """
-  Direct APNs delivery for the owner-operated mobile companion.
+  Tells the owner's phones of a row they have not read, or an approval that
+  waits for them, phone by phone (M99 §6).
 
-  Preview content is encrypted independently for every paired device. Presence
-  and durable read state are checked before device credentials or APNs are
-  touched, preventing double notification when any device already has the
-  profile open or has read the emitted timeline row.
+  **Who is pushed.** Each registered phone (one with a `push_token`) that
+  `DeviceRegistry` does not list as connected for the profile at that moment:
+  a connected phone has the row already, and the phones beside it are still
+  pushed. A row the profile has read (its read frontier covers the row) is
+  pushed to nobody. Presence and read state are settled before any credential
+  is loaded or any push service reached.
 
-  An approval waiting for the owner is announced to an away phone with no
-  content at all: the encrypted preview is null, as for an oversized one, and
-  the alert is a fixed string.
+  **Which way.** One route per phone, by what it registered; never both, and
+  never a second try through the other:
+  - a phone holding a Web Push subscription (`push_service` set) goes through
+    `WebPush`, in `Push.WebPushLeg`: a row's push lives a day at the push
+    service, an approval's as long as the approval waits;
+  - a phone holding only a token, whose platform is `ios` or `nil` (a phone
+    paired before pairing recorded a platform was an iPhone), goes through
+    APNs, its preview encrypted for that phone alone;
+  - any other phone, an Android phone holding an older app's token, is
+    refused by name with a typed reason in the log: it holds no Web Push
+    subscription.
 
-  Only an iPhone is pushed. A phone paired before pairing recorded a platform
-  was an iPhone, the only phone there was, and is pushed through APNs too. Any
-  other phone, an Android one, is refused by name with a typed reason in the
-  log and never sent through APNs: Fermix has no push service for it.
+  **The APNs config is the APNs route's alone.** APNs off: iPhones are not
+  sent, and Web Push phones still are; `:disabled` means APNs is off and no
+  away phone holds a subscription. A config that does not resolve fails each
+  away iPhone with the config's reason, said once in the log, and Web Push
+  phones are still sent; with no away iPhone to send, it changes no answer.
+
+  **An approval** is announced with no content: through APNs the encrypted
+  preview is null, as for an oversized one, and the alert a fixed string;
+  through Web Push the message names its kind and carries neither a row number
+  nor text.
+
+  At most `max_devices/0` registered phones are traversed. Each phone sent to
+  gets one `[:fermix, :channel, :push]` event; `sent` counts the phones of both
+  routes, and any phone that failed makes the answer `{:push_failed, failures}`,
+  each a device id and a typed reason.
   """
 
   require Logger
@@ -25,6 +47,8 @@ defmodule FermixChannels.Mobile.Push do
   alias FermixChannels.Mobile.Identity
   alias FermixChannels.Mobile.Push.Config
   alias FermixChannels.Mobile.Push.PigeonDispatcher
+  alias FermixChannels.Mobile.Push.WebPushLeg
+  alias FermixChannels.Mobile.WebPush
   alias FermixChannels.Telemetry
   alias FermixCore.Companion.Timeline
   alias Pigeon.APNS.Notification
@@ -36,6 +60,15 @@ defmodule FermixChannels.Mobile.Push do
   @max_preview_bytes 1_048_576
   @max_devices 64
   @zero_key <<0::256>>
+  # A row's Web Push lives a day at the push service. An approval's lives as
+  # long as the approval waits, at most a day: the caller's `ttl_s`, or 300 s,
+  # the longest fixed wait (a soul change; a sandbox confirm waits 60 s,
+  # `Companion.Output`), since an alert after the approval expired is noise.
+  @row_ttl_s 86_400
+  @max_ttl_s 86_400
+  @approval_ttl_s 300
+  # Past `WebPush.send/4`'s own worst case, about 75 s.
+  @web_push_timeout_ms 90_000
 
   @type delivery_status ::
           %{
@@ -111,7 +144,10 @@ defmodule FermixChannels.Mobile.Push do
   def build_notification(device, _private, _profile, _preview, _topic, _opts),
     do: {:error, {:invalid_push_device, device}}
 
-  @doc "Return the deterministic profile-level suppression decision."
+  @doc """
+  Return the deterministic suppression decision for one row; `connected?` is
+  whether every phone the row could reach is connected.
+  """
   @spec delivery_decision(boolean(), non_neg_integer(), pos_integer()) ::
           {:ok, :suppress_connected | :suppress_read | :deliver} | {:error, term()}
   def delivery_decision(connected?, read_frontier, server_seq) do
@@ -122,87 +158,180 @@ defmodule FermixChannels.Mobile.Push do
     end
   end
 
-  @doc "Send an unread offline timeline row to every registered paired device."
+  @doc "Send an unread timeline row to every registered phone that is not connected."
   @spec notify(String.t(), pos_integer(), String.t(), keyword()) ::
           {:ok, delivery_status()} | {:error, term()}
   def notify(profile_id, server_seq, preview_text, opts \\ []) when is_list(opts) do
     with :ok <- validate_profile(profile_id),
          :ok <- validate_server_seq(server_seq),
          :ok <- validate_preview(preview_text),
-         {:ok, config} <- opts |> config_input() |> Config.new() do
-      maybe_notify(config, profile_id, server_seq, preview_text, opts)
+         apns = apns_config(opts),
+         {:ok, decision} <- away_decision(apns, profile_id, opts),
+         {:ok, decision} <- read_decision(decision, profile_id, server_seq, opts) do
+      fields = %{
+        kind: :message,
+        profile_id: profile_id,
+        server_seq: server_seq,
+        preview_text: preview_text
+      }
+
+      deliver_decision(decision, apns, %{fields: fields, ttl_s: @row_ttl_s}, opts)
     end
   end
 
   @doc """
-  Tell every registered paired device, with no content, that an approval
-  waits for the owner; nothing is sent while a device has the profile open.
+  Tell every registered phone that is not connected, with no content, that an
+  approval waits for the owner. `ttl_s:` is how long the approval waits, and
+  so how long its Web Push lives: at most a day, 300 s when not given.
   """
   @spec notify_approval(String.t(), keyword()) :: {:ok, delivery_status()} | {:error, term()}
   def notify_approval(profile_id, opts \\ []) when is_list(opts) do
     with :ok <- validate_profile(profile_id),
-         {:ok, config} <- opts |> config_input() |> Config.new() do
-      maybe_notify_approval(config, profile_id, opts)
+         {:ok, ttl_s} <- approval_ttl(opts),
+         apns = apns_config(opts),
+         {:ok, decision} <- away_decision(apns, profile_id, opts) do
+      fields = %{kind: :approval, profile_id: profile_id, server_seq: nil, preview_text: nil}
+      deliver_decision(decision, apns, %{fields: fields, ttl_s: ttl_s}, opts)
     end
   end
 
-  defp maybe_notify_approval(%Config{enabled: false}, _profile, _opts),
-    do: {:ok, %{status: :disabled, sent: 0}}
-
-  defp maybe_notify_approval(config, profile_id, opts) do
-    case profile_connected(profile_id, opts) do
-      {:ok, true} -> {:ok, %{status: :suppressed, reason: :connected, sent: 0}}
-      {:ok, false} -> deliver_decision(:deliver, config, profile_id, :approval, opts)
-      {:ok, other} -> {:error, {:invalid_profile_connected_result, other}}
-      {:error, reason} -> {:error, reason}
+  defp approval_ttl(opts) do
+    case Keyword.get(opts, :ttl_s, @approval_ttl_s) do
+      ttl_s when is_integer(ttl_s) and ttl_s > 0 -> {:ok, min(ttl_s, @max_ttl_s)}
+      other -> {:error, {:invalid_ttl_s, other}}
     end
   end
 
-  defp maybe_notify(%Config{enabled: false}, _profile, _seq, _preview, _opts),
-    do: {:ok, %{status: :disabled, sent: 0}}
+  # Resolved for the APNs route alone, so a config that does not resolve
+  # reaches only the iPhones it would have sent.
+  defp apns_config(opts), do: opts |> config_input() |> Config.new()
 
-  defp maybe_notify(config, profile_id, server_seq, preview_text, opts) do
-    with {:ok, connected?} <- profile_connected(profile_id, opts),
-         {:ok, presence_decision} <- connected_decision(connected?),
-         {:ok, decision} <- read_decision(presence_decision, profile_id, server_seq, opts) do
-      deliver_decision(decision, config, profile_id, preview_text, opts)
+  defp apns_off?({:ok, %Config{enabled: false}}), do: true
+  defp apns_off?(_resolved_or_not), do: false
+
+  # Who would be pushed, before the row's read state: every registered phone
+  # that is not connected for the profile.
+  defp away_decision(apns, profile_id, opts) do
+    with {:ok, connected} <- connected_devices(profile_id, opts),
+         {:ok, devices} <- list_registered_devices(opts),
+         :ok <- validate_device_count(devices) do
+      away = Enum.reject(devices, &(&1.device_id in connected))
+      {:ok, decide_away(apns, away, connected)}
     end
   end
 
-  defp connected_decision(true), do: {:ok, :suppress_connected}
-  defp connected_decision(false), do: {:ok, :needs_read_frontier}
-  defp connected_decision(value), do: {:error, {:invalid_profile_connected_result, value}}
+  defp decide_away(apns, away, connected) do
+    cond do
+      apns_off?(apns) and not Enum.any?(away, &web_push?/1) -> :disabled
+      away == [] and connected != [] -> :suppress_connected
+      true -> {:deliver, away}
+    end
+  end
 
-  defp read_decision(:suppress_connected, _profile, _seq, _opts),
-    do: {:ok, :suppress_connected}
-
-  defp read_decision(:needs_read_frontier, profile_id, server_seq, opts) do
+  defp read_decision({:deliver, away}, profile_id, server_seq, opts) do
     with {:ok, frontier} <- read_frontier(profile_id, opts) do
-      delivery_decision(false, frontier, server_seq)
+      case delivery_decision(false, frontier, server_seq) do
+        {:ok, :deliver} -> {:ok, {:deliver, away}}
+        decided -> decided
+      end
     end
   end
 
-  defp deliver_decision(:suppress_connected, _config, _profile, _preview, _opts),
+  defp read_decision(decision, _profile, _seq, _opts), do: {:ok, decision}
+
+  defp deliver_decision(:disabled, _apns, _push, _opts),
+    do: {:ok, %{status: :disabled, sent: 0}}
+
+  defp deliver_decision(:suppress_connected, _apns, _push, _opts),
     do: {:ok, %{status: :suppressed, reason: :connected, sent: 0}}
 
-  defp deliver_decision(:suppress_read, _config, _profile, _preview, _opts),
+  defp deliver_decision(:suppress_read, _apns, _push, _opts),
     do: {:ok, %{status: :suppressed, reason: :read, sent: 0}}
 
-  defp deliver_decision(:deliver, config, profile_id, preview_text, opts) do
-    with {:ok, devices} <- list_registered_devices(opts),
-         :ok <- validate_device_count(devices) do
-      send_registered(devices, config, profile_id, preview_text, opts)
+  defp deliver_decision({:deliver, []}, _apns, _push, _opts),
+    do: {:ok, %{status: :no_registered_devices, sent: 0}}
+
+  defp deliver_decision({:deliver, away}, apns, push, opts),
+    do: away |> routes(apns) |> send_routes(apns, push, opts)
+
+  # One route per phone, by what it registered: its Web Push subscription, or
+  # an iPhone's APNs token unless APNs is off. Every other phone is refused by
+  # name, its typed reason in the log, and never sent through APNs.
+  defp routes(phones, apns) do
+    {web, tokens} = Enum.split_with(phones, &web_push?/1)
+    {iphones, refused} = Enum.split_with(tokens, &(&1.platform in [nil, "ios"]))
+    Enum.each(refused, &log_refusal/1)
+    %{web: web, apns: if(apns_off?(apns), do: [], else: iphones)}
+  end
+
+  defp web_push?(%Device{push_service: service}), do: is_binary(service)
+
+  defp send_routes(%{web: [], apns: []}, _apns, _push, _opts),
+    do: {:ok, %{status: :unconfigured_platform, sent: 0}}
+
+  defp send_routes(%{web: [], apns: iphones}, apns, push, opts),
+    do: apns_leg(iphones, apns, push.fields, opts)
+
+  defp send_routes(%{web: phones, apns: []}, _apns, push, opts),
+    do: send_web_push(phones, push, opts)
+
+  defp send_routes(%{web: phones, apns: iphones}, apns, push, opts) do
+    apns_result = apns_leg(iphones, apns, push.fields, opts)
+    combine(iphones, apns_result, send_web_push(phones, push, opts))
+  end
+
+  defp apns_leg(iphones, {:ok, config}, fields, opts),
+    do: send_apns(iphones, config, fields.profile_id, apns_preview(fields), opts)
+
+  defp apns_leg(iphones, {:error, reason}, _fields, _opts) do
+    Logger.error(
+      "mobile push could not use its APNs config (#{inspect(reason)}); " <>
+        "#{length(iphones)} iPhone(s) not pushed"
+    )
+
+    {:error, reason}
+  end
+
+  defp apns_preview(%{kind: :approval}), do: :approval
+  defp apns_preview(%{kind: :message, preview_text: preview_text}), do: preview_text
+
+  # Both routes ran: every phone that failed is listed, and an APNs failure
+  # that names no phone (the identity, the dispatcher) is each iPhone's.
+  defp combine(iphones, apns_result, web_result) do
+    {apns_sent, apns_failed} = leg_outcome(apns_result, iphones)
+    {web_sent, web_failed} = leg_outcome(web_result, [])
+
+    case apns_failed ++ web_failed do
+      [] -> {:ok, %{status: :sent, sent: apns_sent + web_sent}}
+      failures -> {:error, {:push_failed, failures}}
     end
   end
 
-  defp send_registered([], _config, _profile, _preview, _opts),
-    do: {:ok, %{status: :no_registered_devices, sent: 0}}
+  defp leg_outcome({:ok, %{sent: sent}}, _phones), do: {sent, []}
+  defp leg_outcome({:error, {:push_failed, failures}}, _phones), do: {0, failures}
 
-  defp send_registered(devices, config, profile_id, preview_text, opts) do
-    case apns_devices(devices) do
-      [] -> {:ok, %{status: :unconfigured_platform, sent: 0}}
-      iphones -> send_apns(iphones, config, profile_id, preview_text, opts)
-    end
+  defp leg_outcome({:error, reason}, phones),
+    do: {0, Enum.map(phones, &%{device_id: &1.device_id, reason: reason})}
+
+  defp send_web_push(phones, push, opts),
+    do: WebPushLeg.deliver(phones, push.fields, push.ttl_s, web_push_deps(opts))
+
+  # Every call the leg makes goes through `call_dependency/3`, in its tasks
+  # too, so a raising sender is a typed failure and never a crash report that
+  # quotes a subscription.
+  defp web_push_deps(opts) do
+    key = Keyword.get(opts, :web_push_key, &WebPush.Key.load/0)
+    sender = Keyword.get(opts, :web_push_send, &WebPush.send/4)
+    update = Keyword.get(opts, :update_device, &DeviceStore.update/2)
+
+    %{
+      key: fn -> call_dependency(:web_push_key, key, []) end,
+      send: fn subscription, plaintext, ttl_s, send_opts ->
+        call_dependency(:web_push_send, sender, [subscription, plaintext, ttl_s, send_opts])
+      end,
+      update_device: fn id, attrs -> call_dependency(:update_device, update, [id, attrs]) end,
+      timeout_ms: Keyword.get(opts, :web_push_timeout_ms, @web_push_timeout_ms)
+    }
   end
 
   defp send_apns(devices, config, profile_id, preview_text, opts) do
@@ -213,14 +342,6 @@ defmodule FermixChannels.Mobile.Push do
     end
   end
 
-  # APNs reaches an iPhone alone; every other phone is refused by name, its
-  # typed reason in the log, and never sent through APNs.
-  defp apns_devices(devices) do
-    {iphones, refused} = Enum.split_with(devices, &(&1.platform in [nil, "ios"]))
-    Enum.each(refused, &log_refusal/1)
-    iphones
-  end
-
   defp log_refusal(%Device{device_id: device_id, platform: platform}) do
     {reason, sentence} = refusal(platform)
 
@@ -229,8 +350,10 @@ defmodule FermixChannels.Mobile.Push do
     )
   end
 
-  defp refusal("android"),
-    do: {{:no_push_service, :android}, "Fermix has no push service for Android phones"}
+  defp refusal("android") do
+    {{:no_web_push_subscription, :android},
+     "an Android phone is pushed through Web Push, and this one holds no subscription"}
+  end
 
   defp refusal(platform),
     do: {{:no_push_service, :unknown_platform}, "its platform #{inspect(platform)} has no push"}
@@ -441,16 +564,24 @@ defmodule FermixChannels.Mobile.Push do
     if size <= @max_payload_bytes, do: :ok, else: {:error, :push_payload_too_large}
   end
 
-  defp profile_connected(profile_id, opts) do
+  # The device ids with a socket open for the profile at this moment.
+  defp connected_devices(profile_id, opts) do
     callback =
-      Keyword.get(opts, :profile_connected, fn profile ->
-        connected =
-          DeviceRegistry.connected(DeviceRegistry, profile)
-
-        {:ok, connected != []}
+      Keyword.get(opts, :connected_devices, fn profile ->
+        {:ok, DeviceRegistry |> DeviceRegistry.connected(profile) |> Enum.map(&elem(&1, 0))}
       end)
 
-    call_dependency(:profile_connected, callback, [profile_id])
+    case call_dependency(:connected_devices, callback, [profile_id]) do
+      {:ok, ids} when is_list(ids) -> connected_ids(ids)
+      {:error, _reason} = error -> error
+      other -> {:error, {:invalid_connected_devices_result, other}}
+    end
+  end
+
+  defp connected_ids(ids) do
+    if Enum.all?(ids, &is_binary/1),
+      do: {:ok, ids},
+      else: {:error, {:invalid_connected_devices_result, ids}}
   end
 
   defp read_frontier(profile_id, opts) do

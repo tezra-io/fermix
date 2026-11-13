@@ -173,7 +173,7 @@ defmodule FermixCore.HostFactsTest do
     end
   end
 
-  describe "render/1" do
+  describe "render/2" do
     # One table over every install M76 §4.2 names: the install, the machine,
     # and whether a reminder can ring on this computer.
     test "names the install, the machine and what can ring here for every host" do
@@ -237,8 +237,43 @@ defmodule FermixCore.HostFactsTest do
       ]
 
       for {facts, expected} <- table do
-        assert HostFacts.render(facts) == String.trim_trailing(expected)
+        assert HostFacts.render(facts, placement: :here) == String.trim_trailing(expected)
       end
+    end
+
+    # M99 §10.1: an Always On server shows no notification itself, so the line
+    # says the owner's computers ring, never the server; a home that never
+    # moved says what it said, and the tools word `delivery` the same way.
+    test "on an Always On server the line names the owner's computers, as the tools do" do
+      server = [
+        role: :primary,
+        always_on: true,
+        home: "/nonexistent/fermix-home",
+        server_primary: fn "/nonexistent/fermix-home" -> :server end
+      ]
+
+      facts = facts(:linux_package_cli, :linux)
+
+      assert [_heading, _install, _machine, line] =
+               String.split(HostFacts.render(facts, server), "\n")
+
+      assert line ==
+               "- This computer: the Always On server, which shows no notification itself. A " <>
+                 "reminder or timer with `delivery: \"computer\"` (`event_store`) rings as a " <>
+                 "notification on each of your computers that is awake, through the Fermix on " <>
+                 "it; one due while none is awake is tried again while it is still valid."
+
+      refute line =~ "can ring here"
+
+      context = %{host: %{profile: :linux_package_cli, os: :linux}, placement: :computers}
+      assert EventStore.when_to_use(context) =~ "never on this server"
+
+      assert EventStore.dynamic_parameters(context).properties.delivery.description =~
+               "never on this server"
+
+      device = Keyword.put(server, :role, :device)
+      assert [_h, _i, _m, here] = String.split(HostFacts.render(facts, device), "\n")
+      assert here =~ "- This computer: a reminder or timer can ring here"
     end
 
     test "an unread version is said plainly, with the machine still named" do
@@ -265,7 +300,7 @@ defmodule FermixCore.HostFactsTest do
         host = %{profile: install, os: os}
 
         assert [_heading, _install, _machine, computer] =
-                 String.split(HostFacts.render(facts), "\n")
+                 String.split(HostFacts.render(facts, placement: :here), "\n")
 
         rings? =
           String.starts_with?(computer, "- This computer: a reminder or timer can ring here")

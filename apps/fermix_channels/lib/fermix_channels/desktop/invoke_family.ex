@@ -22,8 +22,9 @@ defmodule FermixChannels.Desktop.InvokeFamily do
     frames dropped, and the session stays open. Its progress is told every
     #{16} frames, and its bytes once whole.
   - **`invoke_open`** from the computer asks one of the home's services
-    (`:services`: `system`, and `history.submit`, a finished sitting of
-    computer history, M97 §8.1), run in a process of its own, which is told
+    (`:services`: `system`, `history.submit`, a finished sitting of
+    computer history, M97 §8.1, and `reminders.snooze`, a Snooze pressed on
+    a reminder's notification there, M99 §10.1), run in a process of its own, which is told
     the computer that asked, refused `unavailable` for a computer past the
     version window (its session's `standing`, `Computers.Versions.served?/1`),
     and
@@ -31,7 +32,8 @@ defmodule FermixChannels.Desktop.InvokeFamily do
     one are answered as the computer answers its server's.
 
   Options in the context (a test's seams): `:calls` (the `Calls` server),
-  `:services`, `:home` and `:history` (`ComputerHistory.Submission`'s options).
+  `:services`, `:home`, `:history` (`ComputerHistory.Submission`'s options)
+  and `:reminders` (`Temporal.Registry`'s, for a snooze).
   """
 
   @behaviour FermixChannels.Desktop.Family
@@ -47,8 +49,13 @@ defmodule FermixChannels.Desktop.InvokeFamily do
   alias FermixCore.Computers.Telemetry
   alias FermixCore.Computers.Versions
   alias FermixCore.Setup.ConfigStore
+  alias FermixCore.Temporal.NotificationSnooze
 
-  @services %{"system" => SystemCapability, "history" => HistoryService}
+  @services %{
+    "system" => SystemCapability,
+    "history" => HistoryService,
+    "reminders" => NotificationSnooze
+  }
   @max_part_bytes 20 * 1_024 * 1_024
   @max_parts_bytes 64 * 1_024 * 1_024
   @progress_every 16
@@ -66,6 +73,7 @@ defmodule FermixChannels.Desktop.InvokeFamily do
       calls: Keyword.get(options, :calls, Calls),
       services: Keyword.get(options, :services, @services),
       history: Keyword.get(options, :history, []),
+      reminders: Keyword.get(options, :reminders, []),
       home: Keyword.get_lazy(options, :home, &ConfigStore.fermix_home/0),
       parts: %{},
       running: %{}
@@ -237,6 +245,7 @@ defmodule FermixChannels.Desktop.InvokeFamily do
       id: id,
       computer: state.device_id,
       history: state.history,
+      reminders: state.reminders,
       origin: :computer,
       epoch: fields["epoch"],
       turn: nil,

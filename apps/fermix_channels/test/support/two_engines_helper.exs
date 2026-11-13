@@ -184,7 +184,9 @@ defmodule FermixChannels.Test.TwoEngines do
   computer reads its own (`recording`); `:recording` writes it there before
   the computer starts.
   `:history` is the server's computer-history service's options
-  (`ComputerHistory.Submission`'s: its store, summarizer and settings).
+  (`ComputerHistory.Submission`'s: its store, summarizer and settings), and
+  `:reminders` its snooze service's (`Temporal.Registry`'s). `:notifications`
+  is the computer's notification backend's options (`Desktop.Invoke`'s).
   """
   @spec start!(keyword()) :: map()
   def start!(opts \\ []) do
@@ -205,7 +207,7 @@ defmodule FermixChannels.Test.TwoEngines do
           computer: {ComputerFamily, registry: names.registry},
           invoke:
             {InvokeFamily,
-             [calls: names.calls, home: server_home] ++ Keyword.take(opts, [:history])}
+             [calls: names.calls, home: server_home] ++ Keyword.take(opts, [:history, :reminders])}
         }
       )
 
@@ -256,7 +258,7 @@ defmodule FermixChannels.Test.TwoEngines do
          capabilities: capabilities(),
          clock: &DateTime.utc_now/0,
          relay: names.relay
-       ] ++ Keyword.take(opts, [:send, :browser])}
+       ] ++ Keyword.take(opts, [:send, :browser, :notifications])}
     )
 
     start_supervised!(

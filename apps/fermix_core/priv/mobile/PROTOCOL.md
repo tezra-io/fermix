@@ -13,6 +13,7 @@ vendors this directory pinned by checksum; it does not hand-copy event shapes.
 | `fixtures/client_binary_frames.jsonl`, `fixtures/server_binary_frames.jsonl` | frames with a raw tail, as `{header, bytes_b64}`, including one whole `event_part` run and whole chunked runs (see *Chunked payloads*) |
 | `fixtures/pairing_links.jsonl` | a pairing link and its decoded fields, as the daemon builds it |
 | `noise_vectors.json`, `push_vectors.json` | the Noise handshakes and the push encryption, byte for byte |
+| `webpush_vectors.json` | Web Push to an Android phone, byte for byte: the standard's own example, one Fermix message with the phone's private key so an app can decrypt it, and one signed pass (see *Web Push*) |
 | `attestation_roots.json`, `android_signers.json` | the Google attestation roots and the app's signing certificates a pairing is verified against (see *Attestation*); both are built into the daemon when it is compiled, so a change to either takes a new build |
 | `relays.json` | every list of Fermix relays a release has shipped, built into the daemon; a phone takes its relays from the route it is given, never from this file (see *Remote reach*) |
 
@@ -509,8 +510,18 @@ protocol 2 is sent only `places` and `checklists` blocks, wherever a row
 reaches it (its `text_done`, its `row`, a `history_page` message), since a
 protocol 2 phone app refuses a row with more than two blocks; and its turns
 are written for a phone that draws no events. A session at protocol 3 has its
-turns told that their events are drawn under the reply. Nothing else changes:
-every protocol 2 event, field and rule holds unchanged on protocol 3.
+turns told that their events are drawn under the reply. Beside this and Web
+Push, below, nothing changes: every protocol 2 event, field and rule holds
+unchanged on protocol 3.
+
+**Protocol 3: Web Push.** On protocol 3 a `hello_ack`'s `caps.push` and a
+`pair_approved`'s `push` may name `webpush`, after `apns` when both run, and a
+`hello_ack` whose list names it carries `push_key`, the home's key; the phone
+answers with `push_subscribe` (see *Web Push*). A session at protocol 2 is
+told exactly what it was before: its push lists name `apns` alone, its
+`hello_ack` carries no `push_key`, and `push_subscribe` there is the unknown
+event it always was (`unsupported`, close `1002`), since a protocol 2 phone
+app reads the push list as `apns` alone.
 
 **An engine speaks the oldest version it serves** when it is the initiator
 (a computer's desktop session to its server, an enrollment, a move; see
@@ -573,8 +584,9 @@ served.
 | `cancel` | `profile_id`, `client_msg_id` | stops that request's turn, running or waiting, and no other; never answered |
 | `history_pull` | `profile_id`, `limit`, and exactly one of `after_seq` or `before_seq` | limit is 1–200; `after_seq` (≥ 0) pages forward and `before_seq` (≥ 1) backward, each any unsigned 64-bit value |
 | `media_fetch` | `ref` | re-download a content-addressed blob |
-| `push_register` | `apns_token`, `environment` | environment is `development` or `production` |
-| `push_unregister` | — | clears this phone's token: its notifications cannot show, so no push may come. A phone sends it only to a daemon whose `caps` carries `push[]`, which came with it: an older daemon answers it `unsupported` and closes, as it does any unknown event |
+| `push_register` | `apns_token`, `environment` | environment is `development` or `production`; it replaces a Web Push subscription the phone held (see *Push notifications*) |
+| `push_unregister` | — | clears this phone's token or subscription: its notifications cannot show, so no push may come. A phone sends it only to a daemon whose `caps` carries `push[]`, which came with it: an older daemon answers it `unsupported` and closes, as it does any unknown event |
+| `push_subscribe` | `service`, `token`, `p256dh`, `auth` | protocol 3 only: the phone's Web Push subscription, which replaces an APNs token it held (see *Web Push*). `service` is `fcm`, the only one; `token` is what Google Play services returned, 1 to 4,096 letters, digits, `_`, `:` and `-`, within the frame's 4 KiB header; `p256dh` is the phone's P-256 public key, 65 bytes whose first is `0x04` and a point on the curve, and `auth` its 16-byte secret, each in base64url without padding. A field outside its shape is a malformed frame |
 | `ack` | `server_seq` | cumulative socket-delivery cursor |
 | `read_state` | `profile_id`, `read_up_to_seq` | monotonic read frontier |
 | `request_status` | `client_msg_ids[]` | 1 to 32 ids of requests this phone sent; see *Requests after a reconnect* |
@@ -598,7 +610,7 @@ What each is answered with:
 | `attach_begin` | `attach_status{status:"upload"}`, or `attach_status{status:"present"}` when the digest is already stored |
 | `attach_chunk` | nothing; a refused chunk is an `error` |
 | `attach_end` | `attach_status{status:"present"}` once size and digest check out |
-| `cancel`, `ack`, `push_register`, `push_unregister` | nothing; a refused one is an `error` |
+| `cancel`, `ack`, `push_register`, `push_unregister`, `push_subscribe` | nothing; a refused one is an `error` |
 | `read_state` | the frontier as `read_state`, to every client of the profile, this one included |
 | `history_pull` | `history_page` |
 | `request_status` | `request_status_page` |
@@ -612,7 +624,7 @@ A client must not upload chunks after `present`.
 
 | `t` | Required payload | Rules |
 |---|---|---|
-| `hello_ack` | `session_id`, `min_version`, `max_version`, `profiles[]`, `candidates[]`, `history_head_seq`, `read_up_to_seq`, `caps{}`; `primary_epoch?` | completes hello negotiation; `primary_epoch` is the daemon's primary epoch, which this daemon always sends and a daemon older than the epoch leaves out (see *Primary epoch*) |
+| `hello_ack` | `session_id`, `min_version`, `max_version`, `profiles[]`, `candidates[]`, `history_head_seq`, `read_up_to_seq`, `caps{}`; `primary_epoch?`, `push_key?` | completes hello negotiation; `primary_epoch` is the daemon's primary epoch, which this daemon always sends and a daemon older than the epoch leaves out (see *Primary epoch*); `push_key`, protocol 3 only, is the home's Web Push key, present exactly when `caps.push` names `webpush` (see *Web Push*) |
 | `accepted` | `client_msg_id`, `duplicate`; `server_seq?` | durable receipt for a `msg` or `command`; clears the outbox item |
 | `attach_status` | `attach_id`, `status` | status is `upload` or `present` |
 | `turn_started` | `profile_id`, `turn_id`, `in_reply_to` | begins streamed draft |
@@ -662,9 +674,10 @@ palette), `media`, `streaming`, `turn_done` (true: every turn a request opened
 ends with `turn_done` or `turn_error`), `max_media_bytes`, the largest
 attachment the daemon takes, and `push[]`, the push services this daemon sends
 through, each once, empty when it pushes through none: `apns` while its APNs
-push runs, the only service there is. Every phone gets the same list, and a
+push runs, then, on protocol 3, `webpush` while its phone channel holds the
+home's Web Push key (see *Web Push*). Every phone gets the same list, and a
 phone offers notifications only when its own platform's service is in it: an
-iPhone does when `apns` is listed, an Android phone never does. A daemon
+iPhone does when `apns` is listed, an Android phone when `webpush` is. A daemon
 older than the list sends no `push`. A phone's `hello_ack` also carries
 `call`, whether this primary serves a call from the phone now (see *Calls
 from the phone*), `lists: true`, that it takes the phone's list channel
@@ -880,9 +893,8 @@ submitted, never rendered.
   forgets them without resolving them, so a client also drops a card when its
   own `ttl_s` runs out. The daemon keeps at most 64; past that a card still
   goes out live but is not sent again, so a reconnect drops it.
-- A card a phone's turn raises while no phone of the profile is connected also
-  sends each registered phone a push with no content (see *Push
-  notifications*).
+- A card a phone's turn raises also sends each registered phone that is not
+  connected then a push with no content (see *Push notifications*).
 
 ## Attachments
 
@@ -961,10 +973,27 @@ row's history carries it in `link_previews[]`.
   client decodes them under its own bounds. The same icon bytes have the same
   ref, so a site's icon is fetched once.
 
-## Push notifications (APNs)
+## Push notifications
 
 Push is the one payload that leaves the socket, so it carries its own
-end-to-end encryption. The daemon sends nothing readable to Apple: the alert is
+end-to-end encryption. Each phone is decided on its own: a row the daemon
+writes into the chat pushes every phone with a registration that is not
+connected for the profile at that moment, whichever others are, and a row the
+profile has already read pushes nobody. A phone has one registration, the
+last of `push_register` and `push_subscribe` it sent, and is pushed by that
+route alone: an iPhone (an `ios` phone, or one paired before pairing recorded
+a platform, which was an iPhone) through APNs with its token, and an Android
+phone through Web Push with its subscription (see *Web Push*). Neither route
+is ever tried for the other, and one that cannot run stops only its own
+phones: APNs settings that do not resolve leave every Web Push phone pushed,
+and a home with no Web Push key leaves every iPhone pushed. An `android` phone
+holding only a `push_register` token (an app from before Web Push) is pushed
+nothing: the token is kept and never goes to APNs, and each push it would have
+had is logged as refused for that phone.
+
+### APNs
+
+The daemon sends nothing readable to Apple: the alert is
 a fixed string and the real content rides in a separate `fx` object that only
 the paired device can open, inside the Notification Service Extension.
 
@@ -1000,22 +1029,77 @@ bytes; when the encrypted preview would exceed that, the daemon sends
 `preview_text: null` with a title-only alert rather than truncating content, so
 the extension must accept a null preview.
 
-An approval waiting while no phone of the profile is connected sends each
-registered phone a notification with no content at all: the alert is
+An approval waiting for the owner sends each registered iPhone that is not
+connected a notification with no content at all: the alert is
 `{"title": "Fermix", "body": "Approval needed"}` and the encrypted object is
-`{"preview_text": null, "profile_id": …}`. Nothing is pushed while a phone of
-the profile is connected, or when push is off.
-
-Only an `ios` phone is pushed, and a phone paired before pairing recorded a
-platform, which was an iPhone. An `android` phone is pushed nothing: its
-`push_register` is kept and answered with nothing, as any phone's is, but its
-token never goes to APNs, and each push it would have had is logged as refused
-for that phone.
+`{"preview_text": null, "profile_id": …}`. With APNs push off, no iPhone is
+pushed.
 
 `push_vectors.json` pins one complete example — both static keypairs, the salt,
 the shared secret, the derived key, the nonce, the exact inner plaintext, and
 the resulting payload — and is generated by an implementation independent of the
 daemon's. The extension must reproduce it before shipping.
+
+### Web Push
+
+An Android phone is pushed through Google's push service by Web Push (RFC 8030,
+encrypted by RFC 8291 and signed by RFC 8292), with no Firebase project, no
+service account and no setting: the home is its own sender, and Google carries
+a message it cannot read. The first time the phone channel starts, the daemon
+makes the home's signing key pair (`mobile/webpush_key`, beside the pairing
+keys, so it moves with the home), and every start after reads it again. Its
+public half, a P-256 point in base64url without padding (87 characters), is
+`hello_ack.push_key` on every session at protocol 3, which is exactly when
+`caps.push` names `webpush`. A daemon that can neither read nor make the key
+starts the phone channel without Web Push, names no `webpush`, and says why in
+its log.
+
+**Subscribing.** After every `hello_ack` that names `webpush`, while that
+Fermix's notifications are on in the app, the phone asks Google Play services
+for a subscription that only `push_key` may send to, and sends
+`push_subscribe{service, token, p256dh, auth}`: the token it got back, the
+public key of a P-256 key pair it keeps for this Fermix, and a 16-byte secret.
+The daemon stores the four on the phone's row, in place of any APNs token, only
+when they differ from what the row holds, and answers nothing, so a
+subscription that was dropped mends itself at the next connection. A
+`push_subscribe` to a session whose `hello_ack` named no `webpush` is refused
+`webpush_unavailable`, and the session stays open. A phone whose `push_key`
+changed (a home restored without its key) subscribes again. `push_unregister`
+clears the subscription, as it clears an APNs token.
+
+**The request.** One per phone: `POST
+https://fcm.googleapis.com/fcm/send/<token>` with `TTL` (86,400 for a row, a
+day; 300 for an approval, the longest one waits), `Urgency: high`,
+`Content-Encoding: aes128gcm`, `Content-Type: application/octet-stream` and
+`Authorization: vapid t=<JWT>, k=<push_key>`, the JWT signed with the home's
+key (ES256) over `aud` `https://fcm.googleapis.com`, `exp` twelve hours on and
+`sub` `https://fermix.ai`. A 429, a 5xx or a failed connection is tried again,
+at most three times within one minute, waiting as long as `Retry-After` asks or
+else 2 s and then 10 s; any other answer is not. A 404 or 410 (the subscription
+is gone) or a 401 or 403 (Google refuses this home's key for it) drops the
+phone's subscription, and the phone subscribes again at its next connection.
+
+**The body** is always 2,150 bytes, RFC 8291 in one record: an 86-byte header
+(a fresh 16-byte salt, the record size 4,096, and the daemon's 65-byte public
+key made for this message alone), a 2,048-byte padded record sealed with
+AES-128-GCM, and its 16-byte tag, so its length tells Google nothing. The
+plaintext, before its padding, is compact JSON with its keys in this order:
+
+```json
+{"v":1,"kind":"message","profile_id":"main","server_seq":42,"preview_text":"…"}
+```
+
+`kind` is `message`, a row the daemon wrote into the chat, or `approval`, one
+that waits for the owner, whose `server_seq` and `preview_text` are `null`: no
+row number and no text. A preview too long for the record is cut at a
+character and ends with "…". The phone decrypts with its own key and secret,
+shows nothing for a push it cannot decrypt or a row it already notified, and
+otherwise posts the notification itself, "New message" when its previews are
+off.
+
+`webpush_vectors.json` pins the standard's own example, one Fermix message
+with the phone's private key so an app can decrypt it, and one signed pass. An
+app must reproduce it before shipping.
 
 ## Calls from the phone
 
@@ -1475,7 +1559,7 @@ the primary sends `invoke_cancel`, best-effort. A computer never runs an
 `invoke_status` is. The primary holds no answer to a computer's own request
 once sent, so its `invoke_status` for one that ended is answered `unknown`.
 
-**Computer history (M97 §8).** The home's one service a computer asks is
+**Computer history (M97 §8).** One of the home's services a computer asks is
 `history` `submit`: one finished sitting of its computer history, sent with no
 part in the bulk lane, as its cancel and status ask are (`capability`
 `history`, `op` `submit`), origin `computer`. Its arguments: `v` (1),
@@ -1497,6 +1581,51 @@ the sitting's text down. The primary hands a computer the intervals it has not
 applied with its capability `history` `apply` (`{intervals}`, the same five
 fields each), gated by the computer's master switch alone and answered
 `{applied}`, the highest id applied.
+
+**Notifications (M99 §10.1).** An Always On server's primary shows a
+notification on the owner's computers with the computer's capability
+`notifications`, which has no offer of its own: the master switch alone
+gates it. It asks every connected computer, at most 16, each once, origin
+`background` with `turn` `{session_id: "reminder-<reminder id>"}` (or
+`notification-<key>` for one that is no reminder's). `post` shows one
+notification, an effect, deadline 15,000 ms; its arguments are `key`
+(`^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$`, the reminder's own key, the same on
+every retry), `title` (1 to 256 Unicode scalars), `body` (0 to 1,800),
+`sound` (boolean) and `reminder_id?` (1 to 64), and no other field; the
+computer posts it the way its own home would (the Fermix app's native host on
+a Mac, which offers Snooze 10 minutes for a `reminder_id`; the session bus on
+Linux), and its result is at most 1 KiB with no part: `{"shown": "now"}`, or
+`{"shown": "before"}` for a key it already showed in the last 24 hours (it
+keeps at most 512 keys, in memory, so an engine restart between a lost answer
+and the retry can show one twice); a post that did not show is `failed`, its
+`message` the backend's words and its result `{"reason": …}`, one of
+`not_authorized`, `no_server`, `host_unavailable`, `timeout`,
+`backend_missing`, `not_offered` or `failed`, and its key is let go so a
+retry posts again. `ready` takes `{}`, a read, deadline 10,000 ms, recorded in
+no journal, and is answered `{"ready": true}` or `{"ready": false, "sentence":
+…}`, the backend's own clause in at most 300 bytes; it never raises a
+permission prompt on the computer. The primary reads the answers together:
+shown on one computer is delivered; else a computer that could not be reached
+(`refused` `unavailable` with no receipt, made by the primary before anything
+was sent), `busy`, `timed_out`, `unknown`, `cancelled` or a transient
+`reason` (`no_server`, `host_unavailable`, `timeout`) is retried on the
+reminder's own schedule; else the first computer's reason, in name order,
+ends it: `off` or `stopped_here` as `not_authorized`, and a computer's own
+`unavailable` or `stale_epoch` in its words, never retried.
+
+**Reminders (M99 §10.1).** A Snooze pressed on such a notification on a
+computer goes to the home that holds the reminder, as the home's service
+`reminders` `snooze`, origin `computer`, an effect with no part, deadline
+15,000 ms, under an id the computer mints, `snz-` and 24 lowercase hex
+characters, in the interactive lane, as its cancel is. Its arguments are
+`reminder_id` (1 to 64 characters) and `minutes` (an integer, 1 to 1,440),
+and no other field. The home snoozes the reminder as a press on its own
+notification would, the owner's act with no model turn, and answers `{"status":
+"created"}`, or `"existing"` for the same snooze made again; a reminder that
+did not ring on "this computer", or one already gone, is `failed` in the
+home's sentence. A computer keeps at most 16 snoozes waiting on the home,
+drops a press past that, and sends `invoke_cancel` 5 s past the deadline for
+one with no answer.
 
 **On the computer.** A computer admits a request in this order, each step a
 refusal with the computer's sentence:
@@ -1759,7 +1888,7 @@ sent is never sent to it. `FermixChannels.Mobile.Peers` is this table.
 
 | Kind | Sends | Is sent |
 |---|---|---|
-| phone | `hello` `msg` `attach_begin` `attach_chunk` `attach_end` `command` `cancel` `history_pull` `media_fetch` `push_register` `push_unregister` `ack` `read_state` `request_status` `unpair` `ping` `call_open` `call_line` `call_audio` `call_frame` `call_close` `companion_open` `companion_line` `companion_close` | `hello_ack` `accepted` `attach_status` `turn_started` `text_delta` `tool_event` `text_done` `turn_done` `media_begin` `media_chunk` `media_end` `turn_error` `row` `reaction` `approval` `approval_resolved` `link_preview` `read_state` `history_page` `request_status_page` `notice` `error` `pong` `event_part` `call_attached` `call_line` `call_audio` `call_close` `companion_line` `companion_close` |
+| phone | `hello` `msg` `attach_begin` `attach_chunk` `attach_end` `command` `cancel` `history_pull` `media_fetch` `push_register` `push_unregister` `push_subscribe` `ack` `read_state` `request_status` `unpair` `ping` `call_open` `call_line` `call_audio` `call_frame` `call_close` `companion_open` `companion_line` `companion_close` | `hello_ack` `accepted` `attach_status` `turn_started` `text_delta` `tool_event` `text_done` `turn_done` `media_begin` `media_chunk` `media_end` `turn_error` `row` `reaction` `approval` `approval_resolved` `link_preview` `read_state` `history_page` `request_status_page` `notice` `error` `pong` `event_part` `call_attached` `call_line` `call_audio` `call_close` `companion_line` `companion_close` |
 | desktop | `hello` `ping` `media_fetch` `ack` `companion_open` `companion_line` `companion_close` `manage` `loopback_request` `loopback_failed` `snapshot_stored` `snapshot_refused` `offers` `link_path` `invoke_open` `invoke_part` `invoke_cancel` `invoke_result` `invoke_status` `invoke_restarted` | `hello_ack` `error` `pong` `event_part` `media_begin` `media_chunk` `media_end` `companion_line` `companion_close` `manage_result` `loopback_open` `loopback_response` `loopback_close` `snapshot_begin` `snapshot_chunk` `snapshot_end` `invoke_open` `invoke_part` `invoke_cancel` `invoke_result` `invoke_status` |
 | enrollment | `enroll_request` `join_request` `ping` | `enroll_accepted` `join_approved` `join_denied` `error` `pong` |
 | move | `move_offer` `move_chunk` `move_end` `move_commit` `move_resume` `ping` | `move_accept` `move_ready` `move_done` `error` `pong` |
@@ -1840,6 +1969,7 @@ parsed.
 | `store_quota_exceeded`, `media_too_large` | an upload that would pass the media store's quota or the largest blob | — | open |
 | `unexpected_chunk`, `size_exceeded`, `size_mismatch`, `sha256_mismatch`, `announced_hash_mismatch` | an upload whose chunks, size or digest differ from its `attach_begin`, or a zero-byte one announced with another digest | — | open |
 | `push_environment_mismatch` | a token for the other APNs environment | — | open |
+| `webpush_unavailable` | a `push_subscribe` on a session whose `hello_ack` named no `webpush`: this daemon has no Web Push key | — | open |
 
 Every other failure a frame can be refused with is closed `1002` with no
 `error`: malformed JSON or framing, a sequence gap or replay, a frame whose `v`

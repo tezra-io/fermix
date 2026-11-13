@@ -12,7 +12,8 @@ defmodule FermixChannels.Home.Link do
   `enrollment` by the enrollment window, `drop_desktop_row/2` and
   `home_desktops/1` by the device store of the home they name, read from its
   file, `announce_computers/1` by each open session's computer family
-  (`FermixChannels.Desktop.ComputerFamily`), and `start_return/1` and
+  (`FermixChannels.Desktop.ComputerFamily`), `snooze_reminder/2` by the
+  desktop's reminder uplink (`FermixChannels.Desktop.ReminderUplink`), and `start_return/1` and
   `stop_return/0` by the device tree
   (`FermixChannels.Desktop.DeviceSupervisor`), whose candidate subtree
   receives a move back beside the relay.
@@ -32,6 +33,7 @@ defmodule FermixChannels.Home.Link do
   alias FermixChannels.Desktop.DeviceSupervisor
   alias FermixChannels.Desktop.Peer
   alias FermixChannels.Desktop.Relay
+  alias FermixChannels.Desktop.ReminderUplink
   alias FermixChannels.Home.Enrollment
   alias FermixChannels.Mobile.DeviceStore
 
@@ -202,6 +204,12 @@ defmodule FermixChannels.Home.Link do
       {:error, :not_connected} -> nil
     end
   end
+
+  # A cast to the uplink, which sends it and waits on the server's answer.
+  @impl true
+  def snooze_reminder(reminder_id, minutes)
+      when is_binary(reminder_id) and is_integer(minutes) and minutes > 0,
+      do: ReminderUplink.snooze(reminder_id, minutes)
 
   @impl true
   def start_return(home) when is_binary(home) and home != "",

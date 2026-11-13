@@ -18,8 +18,10 @@ defmodule FermixCore.Tools.EventUpdate do
 
   `delivery: "computer"` (M76 §4.6) moves the event's unsent reminders to this
   computer; the schema publishes it only where the build offers this computer
-  (`Native.Notifications.offered?/1`), a fact of the build. A test names the host
-  as the context's `:host`, as `event_store` takes it.
+  (`Native.Notifications.offered?/1`), a fact of the build, in words that follow
+  where a notification rings (`Native.Notifications.placement/1`, M99 §10.1).
+  A test names the host as the context's `:host` and the placement as
+  `:placement`, as `event_store` takes them.
   """
 
   @behaviour FermixCore.Capabilities.Builtin.Tool
@@ -119,19 +121,28 @@ defmodule FermixCore.Tools.EventUpdate do
   end
 
   defp delivery_property(context) do
-    if Notifications.offered?(native_opts(context)) do
-      %{
-        delivery: %{
-          type: "string",
-          enum: ["computer"],
-          description:
-            "Move this event's unsent reminders to ring on this computer. Only on the " <>
-              "owner's request; not together with rebind_delivery_to_default."
-        }
-      }
+    native = native_opts(context)
+
+    if Notifications.offered?(native) do
+      description = delivery_words(Notifications.placement(native))
+      %{delivery: %{type: "string", enum: ["computer"], description: description}}
     else
       %{}
     end
+  end
+
+  # On an Always On server the computer is the owner's own (M99 §10.1); a
+  # placement that cannot be read keeps this computer's words, and the move
+  # refuses in that placement's own sentence.
+  defp delivery_words({:ok, :computers}) do
+    "Move this event's unsent reminders to ring on the owner's computers that are awake, " <>
+      "never on this server. Only on the owner's request; not together with " <>
+      "rebind_delivery_to_default."
+  end
+
+  defp delivery_words(_here_or_unread) do
+    "Move this event's unsent reminders to ring on this computer. Only on the " <>
+      "owner's request; not together with rebind_delivery_to_default."
   end
 
   @impl true
@@ -223,11 +234,17 @@ defmodule FermixCore.Tools.EventUpdate do
     end
   end
 
-  # The host a test names; a turn names none, and this build's host decides.
+  # The host and the placement a test names; a turn names neither, and this
+  # build's host and where its home runs decide.
   defp registry_opts(context), do: [native: native_opts(context)]
 
-  defp native_opts(%{host: %{profile: _profile, os: _os} = host}), do: [host: host]
-  defp native_opts(_context), do: []
+  defp native_opts(context), do: host_opts(context) ++ placement_opts(context)
+
+  defp host_opts(%{host: %{profile: _profile, os: _os} = host}), do: [host: host]
+  defp host_opts(_context), do: []
+
+  defp placement_opts(%{placement: placement}), do: [placement: placement]
+  defp placement_opts(_context), do: []
 
   defp patch(args) do
     Enum.reduce(@patch_keys, %{}, fn {key, field}, acc ->

@@ -42,7 +42,12 @@ defmodule FermixCore.Native.NotificationsTest do
 
   # The D-Bus backend, named, against a scripted busctl.
   defp dbus(answers) do
-    [provider: :dbus, runner: scripted(answers), find_executable: fn "busctl" -> @busctl end]
+    [
+      placement: :here,
+      provider: :dbus,
+      runner: scripted(answers),
+      find_executable: fn "busctl" -> @busctl end
+    ]
   end
 
   defp server(notify_answer),
@@ -63,11 +68,12 @@ defmodule FermixCore.Native.NotificationsTest do
       answer
     end
 
-    [provider: :mac_app, host_availability: record, request: request]
+    [placement: :here, provider: :mac_app, host_availability: record, request: request]
   end
 
   defp nothing_runs do
     [
+      placement: :here,
       runner: fn _busctl, _args -> flunk("busctl ran") end,
       find_executable: fn "busctl" -> flunk("busctl was looked for") end
     ]
@@ -76,14 +82,14 @@ defmodule FermixCore.Native.NotificationsTest do
   describe "resolve/1" do
     test "on every Linux build the host decides D-Bus" do
       for profile <- [:standalone_cli, :linux_package_cli, :source] do
-        assert Notifications.resolve(host: %{profile: profile, os: :linux}) ==
-                 {:ok, %{provider: :dbus, module: DBus, source: :build}}
+        assert Notifications.resolve(host: %{profile: profile, os: :linux}, placement: :here) ==
+                 {:ok, %{provider: :dbus, placement: :here, module: DBus, source: :build}}
       end
     end
 
     test "the Fermix app's own engine on a Mac decides the app" do
-      assert Notifications.resolve(host: @mac_app) ==
-               {:ok, %{provider: :mac_app, module: MacApp, source: :build}}
+      assert Notifications.resolve(host: @mac_app, placement: :here) ==
+               {:ok, %{provider: :mac_app, placement: :here, module: MacApp, source: :build}}
     end
 
     test "every host the provider table accepts resolves without raising" do
@@ -93,7 +99,7 @@ defmodule FermixCore.Native.NotificationsTest do
               do: %{profile: profile, os: :linux}
 
       for host <- hosts do
-        assert {status, _resolution} = Notifications.resolve(host: host)
+        assert {status, _resolution} = Notifications.resolve(host: host, placement: :here)
         assert status in [:ok, :error], inspect(host)
       end
     end
@@ -107,8 +113,8 @@ defmodule FermixCore.Native.NotificationsTest do
     end
 
     test "a named provider decides, and the resolution says so" do
-      assert Notifications.resolve(provider: :dbus, host: @brew_mac) ==
-               {:ok, %{provider: :dbus, module: DBus, source: :given}}
+      assert Notifications.resolve(provider: :dbus, host: @brew_mac, placement: :here) ==
+               {:ok, %{provider: :dbus, placement: :here, module: DBus, source: :given}}
     end
 
     test "a build that offers none refuses, naming the build" do
@@ -165,7 +171,9 @@ defmodule FermixCore.Native.NotificationsTest do
             ],
             do: refusal(dbus(%{"NameHasOwner" => answer}))
 
-      missing = refusal(provider: :dbus, find_executable: fn "busctl" -> nil end)
+      missing =
+        refusal(placement: :here, provider: :dbus, find_executable: fn "busctl" -> nil end)
+
       not_offered ++ dbus ++ [missing] ++ mac_app_refusals()
     end
 
@@ -193,6 +201,7 @@ defmodule FermixCore.Native.NotificationsTest do
       unserved =
         refusal(
           [
+            placement: :here,
             provider: :mac_app,
             host_availability: empty,
             request: fn _l, _t, _p, _ms -> flunk("asked") end
@@ -210,7 +219,11 @@ defmodule FermixCore.Native.NotificationsTest do
       :ok = HostAvailability.listening(record, link)
       :ok = HostAvailability.attached(record, link, 1, "0.6.0")
       request = fn ^link, ^type, _payload, _timeout_ms -> answer end
-      refusal([provider: :mac_app, host_availability: record, request: request], context)
+
+      refusal(
+        [placement: :here, provider: :mac_app, host_availability: record, request: request],
+        context
+      )
     end
 
     defp refusal(opts, context \\ %{}) do
@@ -334,7 +347,7 @@ defmodule FermixCore.Native.NotificationsTest do
       rows = [
         {dbus(%{"NameHasOwner" => no_bus}), {:transport, :connection_refused}},
         {dbus(%{"NameHasOwner" => {:ok, "b false\n"}}), {:transport, :connection_refused}},
-        {[provider: :dbus, find_executable: fn "busctl" -> nil end],
+        {[placement: :here, provider: :dbus, find_executable: fn "busctl" -> nil end],
          {:permanent, :adapter_unavailable}},
         {dbus(%{"NameHasOwner" => {:error, :timeout}}), {:transport, :timeout}},
         {server({:error, {:helper_failed, 1, "Call failed: Invalid argument"}}),
@@ -361,6 +374,214 @@ defmodule FermixCore.Native.NotificationsTest do
     end
   end
 
+  describe "placement/1 (M99 §10.1)" do
+    # The three facts, each a seam that says when it was read.
+    defp facts(role, always_on, check) do
+      test = self()
+
+      [
+        role: role,
+        always_on: always_on,
+        home: "/nonexistent/fermix-home",
+        server_primary: fn "/nonexistent/fermix-home" ->
+          send(test, :device_list_read)
+          check
+        end
+      ]
+    end
+
+    test "an Always On server's primary rings on the owner's computers" do
+      assert Notifications.placement(facts(:primary, true, :server)) == {:ok, :computers}
+    end
+
+    test "a primary that is no server's rings here" do
+      for check <- [{:not_server, :macos}, {:not_server, :no_desktop}] do
+        assert Notifications.placement(facts(:primary, true, check)) == {:ok, :here}
+      end
+    end
+
+    test "without Always On a primary rings here, and its device list is not read" do
+      assert Notifications.placement(facts(:primary, false, :server)) == {:ok, :here}
+      refute_received :device_list_read
+    end
+
+    # A desktop whose home moved keeps its own desktop row in the retired copy,
+    # which would read as a server's: its role decides first.
+    test "a device, a candidate and an engine with no boot ring here, reading nothing" do
+      for role <- [:device, :candidate, nil] do
+        assert Notifications.placement(facts(role, true, :server)) == {:ok, :here}, inspect(role)
+      end
+
+      refute_received :device_list_read
+    end
+
+    test "a device list that cannot be read is an error in a clause, never here" do
+      assert {:error, clause} =
+               Notifications.placement(
+                 facts(:primary, true, {:not_server, {:device_list, :eacces}})
+               )
+
+      assert clause =~ "device list could not be read"
+      refute String.ends_with?(clause, ".")
+      assert String.first(clause) == "t"
+    end
+
+    test "a named placement decides, and one outside the two raises" do
+      assert Notifications.placement(placement: :computers) == {:ok, :computers}
+      assert Notifications.placement(placement: :here) == {:ok, :here}
+      assert_raise ArgumentError, fn -> Notifications.placement(placement: :phone) end
+    end
+  end
+
+  describe "resolve/1 by placement (M99 §10.1)" do
+    test "on the owner's computers, a Linux build resolves the computers' backend" do
+      assert Notifications.resolve(provider: :dbus, placement: :computers) ==
+               {:ok,
+                %{
+                  provider: :dbus,
+                  placement: :computers,
+                  module: Notifications.Computers,
+                  source: :given
+                }}
+    end
+
+    test "a Mac app's engine placed on computers cannot happen, and raises" do
+      assert_raise ArgumentError, fn ->
+        Notifications.resolve(host: @mac_app, placement: :computers)
+      end
+    end
+
+    test "a placement that cannot be read refuses, and a post fails in its words" do
+      unread = [
+        provider: :dbus,
+        role: :primary,
+        always_on: true,
+        server_primary: fn _home -> {:not_server, {:device_list, :eacces}} end,
+        home: "/nonexistent/fermix-home"
+      ]
+
+      assert {:error, clause} = Notifications.resolve(unread)
+      assert Notifications.post(@notification, unread) == {:error, {:failed, clause}}
+
+      assert Notifications.send_message("local", @text, [title: "Tea"] ++ unread) ==
+               {:error, {:permanent, :remote_rejected}}
+    end
+
+    test "a build that offers none refuses before its placement is read" do
+      assert Notifications.resolve(
+               host: @brew_mac,
+               server_primary: fn _home -> flunk("the device list was read") end,
+               role: :primary,
+               always_on: true
+             ) == {:error, @brew_sentence}
+    end
+
+    test "offered?/1 is the build's fact alone: no placement is read" do
+      never = [
+        role: :primary,
+        always_on: true,
+        server_primary: fn _home -> flunk("the device list was read") end
+      ]
+
+      assert Notifications.offered?([host: %{profile: :linux_package_cli, os: :linux}] ++ never)
+      assert Notifications.offered?([host: @mac_app] ++ never)
+      refute Notifications.offered?([host: @brew_mac] ++ never)
+    end
+  end
+
+  describe "a home on this computer never touches the link (M99 §10.1)" do
+    # The facts a Mac primary reads, and a computers' backend that fails the
+    # test if it is ever reached.
+    defp mac_primary do
+      [
+        role: :primary,
+        always_on: true,
+        home: "/nonexistent/fermix-home",
+        server_primary: fn _home -> {:not_server, :macos} end,
+        computers: [rows: fn -> flunk("the home's computers were listed") end],
+        call: fn _c, _m, _o, _a, _ctx, _opts -> flunk("a computer was called") end
+      ]
+    end
+
+    test "a Mac's reminder posts through the app, as it did, its key unsent" do
+      opts = Keyword.delete(mac_app({:ok, %{"notification_id" => "n"}}), :placement)
+      send_opts = [title: "Tea", reminder_id: "rem_1", proactive_key: "temporal:rem_1"]
+
+      assert Notifications.send_message("local", @text, send_opts ++ opts ++ mac_primary()) ==
+               :ok
+
+      assert_received {:posted, payload}
+      assert payload["reminder_id"] == "rem_1"
+      refute Map.has_key?(payload, "key")
+      refute inspect(payload) =~ "temporal:rem_1"
+    end
+
+    test "a Linux desktop's reminder posts on its own bus, its key unsent" do
+      opts = Keyword.delete(server({:ok, "u 9\n"}), :placement)
+
+      linux_primary =
+        Keyword.put(mac_primary(), :server_primary, fn _home -> {:not_server, :no_desktop} end)
+
+      send_opts = [title: "Tea", proactive_key: "temporal:rem_1"]
+
+      assert Notifications.send_message("local", @text, send_opts ++ opts ++ linux_primary) ==
+               :ok
+
+      assert_received {:busctl, _owner}
+      assert_received {:busctl, notify}
+      refute "temporal:rem_1" in notify
+    end
+
+    test "on a server the reminder's key travels to the computers" do
+      test = self()
+
+      call = fn computer, _module, "post", args, _context, _opts ->
+        send(test, {:asked, computer.name, args})
+        {:ok, %FermixCore.Computers.Outcome{status: :ok, result: %{"shown" => "now"}}}
+      end
+
+      row = %{
+        device_id: "dev-1",
+        name: "studio Mac",
+        platform: "macos",
+        last_seen: nil,
+        backups: nil,
+        connected: true,
+        since: ~U[2031-06-08 11:00:00Z]
+      }
+
+      server = [
+        placement: :computers,
+        provider: :dbus,
+        call: call,
+        computers: [
+          role: :primary,
+          rows: fn -> {:ok, [row]} end,
+          live: %{
+            "dev-1" => %{offers: [%{id: "files", state: :on}], path: :direct, standing: :current}
+          },
+          records: %{},
+          version: "0.18.0"
+        ]
+      ]
+
+      send_opts = [title: "Tea", reminder_id: "rem_1", proactive_key: "temporal:rem_1"]
+      assert Notifications.send_message("local", @text, send_opts ++ server) == :ok
+
+      assert_received {:asked, "studio Mac",
+                       %{"key" => "temporal:rem_1", "reminder_id" => "rem_1"}}
+    end
+
+    test "a proactive key that is not one is refused before any call" do
+      for bad <- ["", 7] do
+        opts = [title: "Tea", proactive_key: bad] ++ nothing_runs()
+
+        assert Notifications.send_message("local", @text, opts) ==
+                 {:error, {:permanent, :malformed_request}}
+      end
+    end
+  end
+
   describe "delivery_error/1" do
     # M76 §4.6's table, a row per reason a backend answers, and whether the
     # rail's ladder retries it on the same target.
@@ -368,6 +589,7 @@ defmodule FermixCore.Native.NotificationsTest do
       {:host_unavailable, {:transport, :timeout}, true},
       {:not_authorized, {:permanent, :authorization}, false},
       {:no_server, {:transport, :connection_refused}, true},
+      {:no_computer, {:transport, :connection_refused}, true},
       {:backend_missing, {:permanent, :adapter_unavailable}, false},
       {:not_offered, {:permanent, :adapter_unavailable}, false},
       {:timeout, {:transport, :timeout}, true},

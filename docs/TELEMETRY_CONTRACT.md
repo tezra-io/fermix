@@ -480,6 +480,18 @@ rows. The event tools themselves (`event_store`, `event_list`, `event_update`,
 `event_remove`) are ordinary built-ins riding `[:fermix, :tool, :exec]` with
 `input:` passed explicitly.
 
+A reminder for "this computer" that comes due on an Always On server (M99
+§10.1) keeps this one family on the server: its attempt is one
+`[:fermix, :reminder, :lifecycle]` row with `platform: "computer"`, whatever
+`Native.Notifications.Computers` did to show it, and no new event name. The
+fan-out asks each connected computer with one invocation of the
+`notifications` capability (`post`), each a `Computers.call/6` from the rail's
+own send process: no model call, so no `[:fermix, :tool, :exec]` row on the
+server, and the computer's own trace holds each as a computer-invocation run
+(below), its `parent_session` the reminder's (`reminder-<reminder id>`). A
+retry carries the reminder's `proactive_key`, so a computer that already
+showed it answers `before` and its run closes `:complete`.
+
 ## Open loop check-ins
 
 An open loop (M78, M83) is something in the owner's own life they would want
@@ -1716,6 +1728,21 @@ A call the home refused **before** anything was sent (`Computers.Choice`, M97
 (`Choice.refusals/0`), beside the `computers` pre-execution marker (see "Proving
 a policy denial"). Never the computer's name the call carried, which is the
 model's argument and content. It is in both allowlists with the four.
+
+Two invocations come from no model call (M99 §10.1). A notification the
+server's reminder rail shows on a computer is the `notifications` capability,
+op `post`: on the computer an ordinary `inv_<id>` run with
+`capability: "notifications"`, origin `background` and `parent_session`
+`reminder-<reminder id>` (or `notification-<key>` for one with no reminder),
+its target never the text. Its op `ready`, asked when a reminder for the
+computer is stored, carries the storing turn's origin and session; it is no
+thing Fermix did there, so the journal holds no row for it, while its bookends
+still run. A Snooze pressed on such a notification goes the other
+way, a computer's request of the home's `reminders` service, op `snooze`,
+origin `computer`, under an id `snz-<24 hex>`: the server's
+`Desktop.InvokeFamily` opens and closes its run with the same three bookends,
+`parent_session` absent, as it does for `history.submit`. Neither adds an event
+name, a metadata key or an exporter clause.
 
 ## Content (prompts / responses / tool IO)
 

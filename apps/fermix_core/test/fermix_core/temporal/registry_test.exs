@@ -2198,6 +2198,7 @@ defmodule FermixCore.Temporal.RegistryTest do
     answer = if server?, do: {:ok, "b true\n"}, else: {:ok, "b false\n"}
 
     [
+      placement: :here,
       provider: :dbus,
       find_executable: fn "busctl" -> @busctl end,
       runner: fn @busctl, _args ->
@@ -2208,7 +2209,7 @@ defmodule FermixCore.Temporal.RegistryTest do
   end
 
   # A computer no test may reach: any question asked of it fails the test.
-  defp computer_never_asked(native \\ [provider: :dbus]) do
+  defp computer_never_asked(native \\ [placement: :here, provider: :dbus]) do
     native ++
       [
         find_executable: fn "busctl" -> flunk("this computer was asked") end,

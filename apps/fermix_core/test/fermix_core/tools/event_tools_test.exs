@@ -339,6 +339,30 @@ defmodule FermixCore.Tools.EventToolsTest do
       end
     end
 
+    # M99 §10.1: on an Always On server "computer" rings on the owner's
+    # computers, never on the server, and the words say so; the parameter
+    # itself is the same.
+    test "on an Always On server delivery is worded for the owner's computers" do
+      linux = %{profile: :linux_package_cli, os: :linux}
+
+      for tool <- [EventStore, EventUpdate] do
+        server =
+          tool.dynamic_parameters(%{host: linux, placement: :computers}).properties.delivery
+
+        here = tool.dynamic_parameters(%{host: linux, placement: :here}).properties.delivery
+
+        assert %{type: "string", enum: ["computer"]} = server
+        assert server.description =~ "owner's computers that are awake, never on this server"
+        assert here.description =~ "this computer"
+        refute here.description =~ "server"
+      end
+
+      assert EventStore.when_to_use(%{host: linux, placement: :computers}) =~
+               "it rings on each of their computers that is awake, never on this server"
+
+      refute EventStore.when_to_use(%{host: linux, placement: :here}) =~ "server"
+    end
+
     test "the rule for choosing this computer stands only beside the parameter" do
       for host <- @offering_hosts do
         assert EventStore.when_to_use(%{host: host}) =~ ~s(delivery "computer")

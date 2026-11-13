@@ -125,6 +125,18 @@ defmodule FermixChannels.Mobile.Session do
   and `checklists`. Each `msg` and `command` this session queues says what
   it draws by the same answer (`ReplyBlocks.drawn_types/3`): its lists once
   its list channel pulled the index, its events from mobile 3.
+
+  ## Web Push (mobile 3)
+
+  A session at `Protocol.web_push_version/0` or later, on a daemon whose
+  phone channel holds the home's Web Push key (`:web_push_key`, its public
+  text), names `webpush` in `caps.push` and `pair_approved.push` and sends
+  the key as `hello_ack.push_key`; a session at 2, or one with no key, is
+  told exactly what it was before (M99 §14). A phone has one push
+  registration, written whole: `push_subscribe` stores its subscription,
+  only when it differs from the row this session holds (the one its hello
+  read, kept as each write answers), `push_register` an APNs token with no
+  subscription, and `push_unregister` neither.
   """
 
   require Logger
@@ -219,6 +231,10 @@ defmodule FermixChannels.Mobile.Session do
   # Which of a computer's own events this server takes (M97 §5.3), in a
   # desktop's hello_ack.
   @computer_caps %{"v" => 1, "offers" => true, "link_path" => true, "invoke" => true}
+
+  # A phone's one push registration, written whole (M99 §14): an APNs token
+  # is this with its `push_token` set, a Web Push subscription all four.
+  @no_registration %{push_token: nil, push_service: nil, push_p256dh: nil, push_auth: nil}
 
   @type state :: map()
 
@@ -349,6 +365,7 @@ defmodule FermixChannels.Mobile.Session do
     |> Map.put_new(:max_media_bytes, @default_max_media_bytes)
     |> Map.put_new(:push_environment, nil)
     |> Map.put_new(:push_services, [])
+    |> Map.put_new(:web_push_key, nil)
     |> Map.put_new(:profile_id, @profile_id)
     |> Map.put_new(:device_id, nil)
     |> Map.put_new(:authenticated_device, nil)
@@ -1295,20 +1312,35 @@ defmodule FermixChannels.Mobile.Session do
          {:ok, primary_epoch} <- session_primary_epoch(state) do
       {min_version, max_version} = Protocol.supported_version_range()
 
-      {:ok,
-       %{
-         "session_id" => session_id(),
-         "min_version" => min_version,
-         "max_version" => max_version,
-         "profiles" => profiles(state),
-         "candidates" => hello_candidates(state),
-         "history_head_seq" => history_head,
-         "read_up_to_seq" => read_up_to,
-         "caps" => caps(state),
-         "primary_epoch" => primary_epoch
-       }}
+      payload = %{
+        "session_id" => session_id(),
+        "min_version" => min_version,
+        "max_version" => max_version,
+        "profiles" => profiles(state),
+        "candidates" => hello_candidates(state),
+        "history_head_seq" => history_head,
+        "read_up_to_seq" => read_up_to,
+        "caps" => caps(state),
+        "primary_epoch" => primary_epoch
+      }
+
+      {:ok, put_push_key(payload, state)}
     end
   end
+
+  # The key comes exactly when the push list names `webpush` (M99 §14).
+  defp put_push_key(payload, state) do
+    if web_push?(state), do: Map.put(payload, "push_key", state.web_push_key), else: payload
+  end
+
+  # What a session is told it is pushed through: the services that run, and
+  # `webpush` from the version that carries it, when the home has its key.
+  defp push_services(state) do
+    if web_push?(state), do: state.push_services ++ ["webpush"], else: state.push_services
+  end
+
+  defp web_push?(%{web_push_key: key, negotiated_version: version}),
+    do: is_binary(key) and is_integer(version) and version >= Protocol.web_push_version()
 
   # A desktop's peer is the desktops', and its families know where the
   # computer stands; a phone's runs its list channel alone. The version
@@ -1331,7 +1363,7 @@ defmodule FermixChannels.Mobile.Session do
       "streaming" => true,
       "turn_done" => true,
       "max_media_bytes" => state.max_media_bytes,
-      "push" => state.push_services
+      "push" => push_services(state)
     }
 
     # Whether this primary serves a call from the phone (M87), and that it
@@ -1490,7 +1522,7 @@ defmodule FermixChannels.Mobile.Session do
       "candidates" => current_candidates(state),
       "profiles" => profiles(state),
       "push_salt" => Base.encode64(value(device, :apns_key_salt)),
-      "push" => state.push_services,
+      "push" => push_services(state),
       "primary_epoch" => epoch
     }
 
@@ -1537,16 +1569,32 @@ defmodule FermixChannels.Mobile.Session do
   end
 
   # Kept for every phone: Push sends only an iPhone's, and refuses the rest by
-  # name, so an Android phone's token is never sent through APNs.
+  # name, so an Android phone's token is never sent through APNs. It is the
+  # phone's whole registration, so it replaces a Web Push subscription.
   defp dispatch_event(%{type: "push_register", payload: payload}, state) do
     case validate_push_environment(payload["environment"], state.push_environment) do
-      :ok -> store_push_token(payload["apns_token"], state)
+      :ok -> write_registration(%{@no_registration | push_token: payload["apns_token"]}, state)
       {:error, reason} -> {:error, reason, state}
     end
   end
 
   # The phone's notifications cannot show, so no push may come (M51 §10).
-  defp dispatch_event(%{type: "push_unregister"}, state), do: store_push_token(nil, state)
+  defp dispatch_event(%{type: "push_unregister"}, state),
+    do: write_registration(@no_registration, state)
+
+  # A phone's Web Push subscription (M99 §14), sent after every hello_ack that
+  # names `webpush`: refused by name where this session named none, and
+  # written whole, only when it differs from the phone's row.
+  defp dispatch_event(%{type: "push_subscribe", payload: payload}, state) do
+    with :ok <- web_push_served(state),
+         {:ok, registration} <- subscription(payload) do
+      if registered?(state.authenticated_device, registration),
+        do: {:ok, nil, state},
+        else: write_registration(registration, state)
+    else
+      {:error, reason} -> {:error, reason, state}
+    end
+  end
 
   defp dispatch_event(%{type: "media_fetch", payload: payload}, state) do
     queue_media_fetch(payload["ref"], state)
@@ -2578,12 +2626,34 @@ defmodule FermixChannels.Mobile.Session do
 
   defp error_code(_reason), do: "request_failed"
 
-  defp store_push_token(token, state) do
-    case state.update_device.(state.device_store, state.device_id, %{push_token: token}) do
-      {:ok, _device} -> {:ok, nil, state}
+  # The row the store answers is the one the next `push_subscribe` is held to.
+  defp write_registration(registration, state) do
+    case state.update_device.(state.device_store, state.device_id, registration) do
+      {:ok, device} -> {:ok, nil, %{state | authenticated_device: device}}
       {:error, reason} -> {:error, reason, state}
     end
   end
+
+  defp web_push_served(state),
+    do: if(web_push?(state), do: :ok, else: {:error, :webpush_unavailable})
+
+  # The codec held both keys to canonical base64url of their sizes.
+  defp subscription(%{"service" => service, "token" => token} = payload) do
+    with {:ok, public} <- decoded_key(payload, "p256dh"),
+         {:ok, secret} <- decoded_key(payload, "auth") do
+      {:ok, %{push_token: token, push_service: service, push_p256dh: public, push_auth: secret}}
+    end
+  end
+
+  defp decoded_key(payload, field) do
+    case Base.url_decode64(payload[field], padding: false) do
+      {:ok, bytes} -> {:ok, bytes}
+      :error -> {:error, {:invalid_field, field}}
+    end
+  end
+
+  defp registered?(%{} = device, registration),
+    do: Enum.all?(registration, fn {field, stored} -> value(device, field) == stored end)
 
   defp validate_push_environment(received, configured)
        when received in ["development", "production"] and

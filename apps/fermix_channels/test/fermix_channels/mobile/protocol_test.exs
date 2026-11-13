@@ -13,6 +13,7 @@ defmodule FermixChannels.Mobile.ProtocolTest do
     move_commit move_resume call_open call_line call_audio call_frame call_close
     offers link_path join_request
     invoke_open invoke_part invoke_cancel invoke_result invoke_status invoke_restarted
+    push_subscribe
   )
   @server_events ~w(
     hello_ack accepted attach_status turn_started text_delta tool_event text_done turn_done
@@ -669,6 +670,159 @@ defmodule FermixChannels.Mobile.ProtocolTest do
              Protocol.decode_client_frame(client_frame("push_unregister", 1, %{}))
   end
 
+  # M99 §14: a phone's Web Push subscription, at protocol 3 only.
+  test "push_subscribe is the service, the token and the phone's two keys, from protocol 3" do
+    assert Protocol.web_push_version() == 3
+    fields = push_subscription()
+
+    assert {:ok, %{type: "push_subscribe", version: 3, payload: ^fields}} =
+             Protocol.decode_client_frame(client_frame("push_subscribe", 1, fields, <<>>, 3))
+
+    assert {:ok, _frame} =
+             Protocol.encode_client_frame("push_subscribe", fields, 1, <<>>, version: 3)
+
+    # The token rule takes 4,096 characters, but a frame's header is at most
+    # 4 KiB like every other, so the longest token is what the header leaves.
+    empty =
+      %{"v" => 3, "t" => "push_subscribe", "seq" => 1} |> Map.merge(%{fields | "token" => ""})
+
+    room = Protocol.max_header_bytes() - byte_size(Jason.encode!(empty))
+    longest = %{fields | "token" => String.duplicate("a", room)}
+
+    assert {:ok, _event} =
+             Protocol.decode_client_frame(client_frame("push_subscribe", 1, longest, <<>>, 3))
+
+    over = %{fields | "token" => String.duplicate("a", room + 1)}
+
+    assert {:error, {:header_too_large, _size, 4_096}} =
+             Protocol.decode_client_frame(client_frame("push_subscribe", 1, over, <<>>, 3))
+  end
+
+  # Each field outside its shape is the malformed frame push_register's is.
+  test "push_subscribe refuses each field outside its shape" do
+    fields = push_subscription()
+    point = Base.url_decode64!(fields["p256dh"], padding: false)
+    secret = Base.url_decode64!(fields["auth"], padding: false)
+    <<_first, rest::binary-64>> = point
+
+    refused = [
+      {"service", "apns"},
+      {"service", "FCM"},
+      {"service", 7},
+      {"token", ""},
+      {"token", "token/with/slashes"},
+      {"token", "token with space"},
+      {"p256dh", Base.url_encode64(<<5, rest::binary>>, padding: false)},
+      {"p256dh", Base.url_encode64(binary_part(point, 0, 64), padding: false)},
+      {"p256dh", Base.url_encode64(point, padding: true)},
+      {"p256dh", Base.encode64(point)},
+      {"p256dh", non_canonical(fields["p256dh"])},
+      # 65 bytes, the first 0x04, and no point on P-256.
+      {"p256dh", Base.url_encode64(<<4, 1::256, 1::256>>, padding: false)},
+      {"auth", Base.url_encode64(secret <> <<0>>, padding: false)},
+      {"auth", Base.url_encode64(secret, padding: true)},
+      {"auth", non_canonical(fields["auth"])},
+      {"auth", 16}
+    ]
+
+    for {field, value} <- refused do
+      frame = client_frame("push_subscribe", 1, %{fields | field => value}, <<>>, 3)
+
+      assert {:error, {:invalid_field, ^field}} = Protocol.decode_client_frame(frame),
+             inspect({field, value})
+    end
+
+    for field <- Map.keys(fields) do
+      frame = client_frame("push_subscribe", 1, Map.delete(fields, field), <<>>, 3)
+      assert {:error, {:missing_field, ^field}} = Protocol.decode_client_frame(frame), field
+    end
+  end
+
+  # A phone at protocol 2 never sends it, and an event protocol 2 does not
+  # know is the unknown event it was before, whatever it carries.
+  test "push_subscribe at protocol 2 is the unknown event it always was" do
+    for fields <- [push_subscription(), %{}] do
+      assert {:error, {:unknown_event, "push_subscribe"}} =
+               Protocol.decode_client_frame(client_frame("push_subscribe", 1, fields))
+
+      assert {:error, {:unknown_event, "push_subscribe"}} =
+               Protocol.encode_client_frame("push_subscribe", fields, 1, <<>>, [])
+    end
+  end
+
+  # Web Push rides protocol 3 (M99 §14): at 3 the push list may name
+  # `webpush`, and `push_key` comes exactly with it; at 2 neither ever does.
+  test "hello_ack names webpush with the home's key at protocol 3, and never at 2" do
+    key = push_subscription()["p256dh"]
+    ack = hello_ack_payload()
+
+    for push <- [["webpush"], ["apns", "webpush"]] do
+      with_key = ack |> put_in(["caps", "push"], push) |> Map.put("push_key", key)
+      assert {:ok, _frame} = Protocol.encode_server_frame("hello_ack", with_key, 1, <<>>, [])
+
+      assert {:error, {:invalid_field, "push_key"}} =
+               Protocol.encode_server_frame("hello_ack", put_in(ack, ["caps", "push"], push), 1)
+
+      assert {:error, {:invalid_field, "caps.push"}} =
+               Protocol.encode_server_frame("hello_ack", with_key, 1, <<>>, version: 2)
+    end
+
+    for push <- [[], ["apns"]], version <- [2, 3] do
+      without = put_in(ack, ["caps", "push"], push)
+
+      assert {:ok, _frame} =
+               Protocol.encode_server_frame("hello_ack", without, 1, <<>>, version: version)
+
+      assert {:error, {:invalid_field, "push_key"}} =
+               Protocol.encode_server_frame(
+                 "hello_ack",
+                 Map.put(without, "push_key", key),
+                 1,
+                 <<>>,
+                 version: version
+               )
+    end
+
+    for bad <- [
+          "",
+          String.slice(key, 0, 86),
+          non_canonical(key),
+          "A" <> String.slice(key, 1..-1//1)
+        ] do
+      payload = ack |> put_in(["caps", "push"], ["webpush"]) |> Map.put("push_key", bad)
+
+      assert {:error, {:invalid_field, "push_key"}} =
+               Protocol.encode_server_frame("hello_ack", payload, 1),
+             bad
+    end
+
+    for push <- [["webpush", "webpush"], ["fcm"], ["web"]] do
+      payload = ack |> put_in(["caps", "push"], push) |> Map.put("push_key", key)
+
+      assert {:error, {:invalid_field, "caps.push"}} =
+               Protocol.encode_server_frame("hello_ack", payload, 1),
+             inspect(push)
+    end
+  end
+
+  test "pair_approved names webpush at protocol 3, and never at 2" do
+    approved = %{
+      "device_id" => "device-1",
+      "candidates" => [],
+      "profiles" => [%{"id" => "main", "name" => "Fermix"}],
+      "push_salt" => Base.encode64(:binary.copy(<<7>>, 32)),
+      "primary_epoch" => 3
+    }
+
+    for push <- [["webpush"], ["apns", "webpush"]] do
+      payload = Map.put(approved, "push", push)
+      assert {:ok, _frame} = Protocol.encode_server_frame("pair_approved", payload, 1)
+
+      assert {:error, {:invalid_field, "push"}} =
+               Protocol.encode_server_frame("pair_approved", payload, 1, <<>>, version: 2)
+    end
+  end
+
   test "fails loudly on malformed, oversized, and unknown frames" do
     assert {:error, :truncated_frame} = Protocol.decode_client_frame(<<0, 0, 0>>)
     assert {:error, :invalid_json} = Protocol.decode_client_frame(<<0, 0, 0, 1, ?{>>)
@@ -954,8 +1108,43 @@ defmodule FermixChannels.Mobile.ProtocolTest do
              Protocol.encode_server_frame("pong", %{}, 1, <<>>, version: 1)
   end
 
-  defp client_frame(type, seq, fields, bytes \\ <<>>) do
-    encode_frame(Map.merge(%{"v" => 2, "t" => type, "seq" => seq}, fields), bytes)
+  defp client_frame(type, seq, fields, bytes \\ <<>>, version \\ 2) do
+    encode_frame(Map.merge(%{"v" => version, "t" => type, "seq" => seq}, fields), bytes)
+  end
+
+  # The phone key and secret of webpush_vectors.json's Fermix message, and an
+  # invented token in the shape Play services returns.
+  defp push_subscription do
+    %{
+      "service" => "fcm",
+      "token" => "dK3vQ8pLmX2:APA91bH7xZ_qR4tWv9yN-cE1sJ6uMkT0aLgB5oPiFdShV3nYw",
+      "p256dh" =>
+        "BA-tjEx2wOT1eHWq5MqZhSnLAWPkYti3100PmZD9lbt_6TM7fBWzl6NLxE5ZSS70gcsibTTIqjHkNTQeZP5yKRI",
+      "auth" => "kG0joyQGxf9iMIqP95PJlw"
+    }
+  end
+
+  defp hello_ack_payload do
+    %{
+      "session_id" => "s",
+      "min_version" => 2,
+      "max_version" => 3,
+      "profiles" => [],
+      "candidates" => [],
+      "history_head_seq" => 0,
+      "read_up_to_seq" => 0,
+      "caps" => %{"commands" => [], "max_media_bytes" => 1},
+      "primary_epoch" => 3
+    }
+  end
+
+  # The same bytes with a nonzero bit in the last character's padding, which
+  # a lenient decoder reads as the canonical text.
+  defp non_canonical(text) do
+    {head, last} = String.split_at(text, -1)
+    alphabet = ~c"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
+    index = Enum.find_index(alphabet, &(&1 == hd(String.to_charlist(last))))
+    head <> <<Enum.at(alphabet, index + 1)>>
   end
 
   defp pair_request_fields(cert_lengths) do

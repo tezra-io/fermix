@@ -708,6 +708,7 @@ def test_the_shipped_numbered_rubrics_parse():
                       "linux_package_owner_sets_up_always_on": 3,
                       # open_loops.yaml
                       "grant_overhead": 3, "contractor_choice": 3,
+                      "mac_reminders_after_moving_to_a_server": 3,
                       "fence_paint_route_sanity": 3,
                       "permit_forms_tomorrow_route_sanity": 3, "deadline_question": 2,
                       "colleague_visa": 2, "hypothetical_race": 2,
@@ -773,6 +774,8 @@ def test_the_shipped_numbered_rubrics_parse():
                       "site_and_app": 3,
                       # voice_greeting_goodbye.yaml
                       "greeted_then_asked_if_heard": 4,
+                      # phone_reach.yaml
+                      "closed_app_and_setup": 4, "firebase_premise": 3,
                       "greeted_then_asked_about_the_rota": 3, "okay_thanks_bye": 2,
                       "alright_goodbye_for_now": 2, "say_bye_to_the_van_driver": 2,
                       "dont_hang_up_yet": 2}
