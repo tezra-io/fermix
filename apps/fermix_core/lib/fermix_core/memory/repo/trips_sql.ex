@@ -219,17 +219,19 @@ defmodule FermixCore.Memory.Repo.TripsSql do
 
   # --- the edit ------------------------------------------------------------
 
-  # Loads the owner's trips and the rows of the trip the call names, hands them
-  # to `Ops`, and writes what it changed. Inside `in_transaction/2`, so a
-  # refusal of any op leaves every trip as it was.
+  # Loads the owner's trips and the rows of the trip the call names, live and
+  # removed (a restore brings removed ones back, and the size guard counts the
+  # ones a pull carries), hands them to `Ops`, and writes what it changed.
+  # Inside `in_transaction/2`, so a refusal of any op leaves every trip as it
+  # was.
   defp edit(conn, {owner_id, agent_id}, call, edit) do
     with {:ok, live} <- live_trips(conn, owner_id, agent_id),
          {:ok, gone} <- removed_trip(conn, owner_id, agent_id, Ops.restored_trip(call)),
          trips = live ++ gone,
          id = Ops.referenced(trips, call),
          {:ok, rows} <- rows_of(conn, id, &live_rows/2),
-         {:ok, removed} <- removed_of(conn, id, Ops.restores_rows?(call)),
-         loaded = %{trips: trips, rows: rows, removed: removed},
+         {:ok, removed} <- rows_of(conn, id, &removed_rows/2),
+         loaded = %{trips: trips, rows: rows, removed: removed, kept_from: kept_from(edit.now)},
          {:ok, result} <- Ops.apply(loaded, call, edit),
          :ok <- write(conn, {owner_id, agent_id}, result, edit.now) do
       {:ok, result}
@@ -239,8 +241,9 @@ defmodule FermixCore.Memory.Repo.TripsSql do
   defp rows_of(_conn, nil, _read), do: {:ok, []}
   defp rows_of(conn, id, read), do: read.(conn, id)
 
-  defp removed_of(conn, id, true), do: rows_of(conn, id, &removed_rows/2)
-  defp removed_of(_conn, _id, false), do: {:ok, []}
+  # The first moment a removed row is still kept once a call at `now` is
+  # written: the purge that ends it deletes every row removed before.
+  defp kept_from(now), do: now |> KeptSql.cutoff() |> parse_stamp()
 
   # A device's edit, once (`KeptSql.once/4`): an id already recorded is
   # answered as the duplicate it is, with the trip it changed and what it made,
@@ -254,15 +257,33 @@ defmodule FermixCore.Memory.Repo.TripsSql do
            do: {:ok, result, %{id: result.trip.id, made: result.made}}
     end
 
-    case KeptSql.once(conn, key, edit.now, apply) do
-      {:ok, {:applied, result}} ->
-        {:ok, {:applied, result}}
+    with :ok <- unused_by_another_kind(conn, key) do
+      case KeptSql.once(conn, key, edit.now, apply) do
+        {:ok, {:applied, result}} ->
+          {:ok, {:applied, result}}
 
-      {:ok, {:duplicate, receipt}} ->
-        {:ok, {:duplicate, %{trip_id: receipt.id, made: receipt.made}}}
+        {:ok, {:duplicate, receipt}} ->
+          {:ok, {:duplicate, %{trip_id: receipt.id, made: receipt.made}}}
 
-      {:error, reason} ->
-        {:error, reason}
+        {:error, reason} ->
+          {:error, reason}
+      end
+    end
+  end
+
+  # A client_msg_id names one edit of any kind (companion PROTOCOL.md). One a
+  # list's edit already used is refused before anything runs, with its own
+  # sentence, rather than by the receipt's insert failing after the edit.
+  defp unused_by_another_kind(conn, {kind, owner_id, agent_id, client_msg_id}) do
+    sql = """
+    SELECT 1 FROM checklist_edits
+    WHERE owner_id = ? AND agent_id = ? AND client_msg_id = ? AND kind != ?
+    """
+
+    case KeptSql.query_all(conn, sql, [owner_id, agent_id, client_msg_id, kind]) do
+      {:ok, []} -> :ok
+      {:ok, [_used | _rest]} -> {:error, {:device, :client_msg_id_used}}
+      {:error, reason} -> {:error, reason}
     end
   end
 

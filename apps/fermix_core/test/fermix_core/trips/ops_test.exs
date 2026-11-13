@@ -50,7 +50,8 @@ defmodule FermixCore.Trips.OpsTest do
     loaded = %{
       trips: store.trips,
       rows: Map.get(store.rows, id, []),
-      removed: Map.get(store.removed, id, [])
+      removed: Map.get(store.removed, id, []),
+      kept_from: DateTime.add(edit.now, -30 * 86_400, :second)
     }
 
     case Ops.apply(loaded, shaped, edit) do
@@ -193,6 +194,17 @@ defmodule FermixCore.Trips.OpsTest do
     assert store |> outline("Varonne") |> Enum.map(&elem(&1, 0)) == [
              "Old town",
              "Harbour",
+             "Hills"
+           ]
+
+    # With day_id, before that day (PROTOCOL.md's move row, R2#9).
+    [_old_town, _harbour, hills] = day_rows(store, "Varonne")
+    before_hills = %{"op" => "move", "row_id" => old_town.id, "day_id" => hills.id}
+    {_result, store} = device!(store, %{"trip_id" => trip_id, "op" => before_hills})
+
+    assert store |> outline("Varonne") |> Enum.map(&elem(&1, 0)) == [
+             "Harbour",
+             "Old town",
              "Hills"
            ]
 
@@ -364,6 +376,38 @@ defmodule FermixCore.Trips.OpsTest do
     assert trip(store, "VARONNE")
   end
 
+  # R2#8: "Café" written as é or as e and a combining accent is one title.
+  test "a title is kept in Unicode NFC, so two spellings of one title cannot both live" do
+    nfc = "Café Varonne"
+    nfd = "Café Varonne"
+
+    {result, store} = call!(empty(), nfd, [%{"op" => "create"}])
+    assert result.trip.title == nfc
+
+    assert call(store, nfc, [%{"op" => "create"}]) ==
+             {:error, {:op_failed, 1, {:title_taken, nfc}}}
+
+    {_result, store} = call!(store, "Ostrel", [%{"op" => "create"}])
+
+    assert call(store, "Ostrel", [%{"op" => "rename", "text" => "CAFÉ VARONNE"}]) ==
+             {:error, {:op_failed, 1, {:title_taken, "CAFÉ VARONNE"}}}
+
+    # Named either way, and a title kept before titles were NFC is one too.
+    assert {:ok, %{trip: %{title: ^nfc}}, _store} =
+             call(store, nfd, [%{"op" => "dates", "starts_on" => "2031-05-01"}])
+
+    kept_before = %{
+      store
+      | trips: Enum.map(store.trips, &if(&1.title == nfc, do: %{&1 | title: nfd}, else: &1))
+    }
+
+    assert call(kept_before, nfc, [%{"op" => "create"}]) ==
+             {:error, {:op_failed, 1, {:title_taken, nfc}}}
+
+    {result, _store} = device!(store, %{"op" => %{"op" => "create", "title" => "Sé Nová"}})
+    assert result.trip.title == "Sé Nová"
+  end
+
   test "a refused op anywhere refuses the whole call, naming the op" do
     store = three_days(nil)
 
@@ -407,7 +451,143 @@ defmodule FermixCore.Trips.OpsTest do
 
     assert refusal == {:trip_too_large, "Varonne"}
     assert length(rows(store, "Varonne")) < Ops.max_rows()
-    assert Wire.bytes(trip(store, "Varonne"), rows(store, "Varonne")) <= Ops.max_wire_bytes()
+    assert Wire.bytes(trip(store, "Varonne"), rows(store, "Varonne"), []) <= Ops.max_wire_bytes()
+  end
+
+  # R2#3: a pull with the removed rows carries them for 30 days, so the guard
+  # counts them; rows removed longer ago are swept by the call and do not.
+  test "the 768 KiB guard counts the removed rows a pull carries while they are kept" do
+    # A stop of about 3.7 KB: each character three bytes on the wire.
+    big = fn i ->
+      %{
+        "op" => "add",
+        "text" => "#{i} " <> String.duplicate("€", 190),
+        "note" => String.duplicate("€", 1_000),
+        "day" => 1
+      }
+    end
+
+    add = fn store, from, edit ->
+      call(store, "Varonne", Enum.map(from..(from + 19), big), edit)
+    end
+
+    earlier = %{@edit | now: DateTime.add(@now, -31 * 86_400, :second)}
+
+    for {removed_on, refused?} <- [{@edit, true}, {earlier, false}] do
+      {_result, store} = call!(empty(), "Varonne", [%{"op" => "create"}], removed_on)
+
+      store =
+        Enum.reduce(0..4, store, fn k, acc ->
+          assert {:ok, _result, acc} = add.(acc, k * 20 + 1, removed_on)
+          acc
+        end)
+
+      removes = for n <- 2..101, do: %{"op" => "remove", "n" => n}
+      {_result, store} = call!(store, "Varonne", removes, removed_on)
+      assert [%{kind: :day}] = rows(store, "Varonne")
+
+      # About 370 KB removed: 120 more live stops pass the cap only with them.
+      store =
+        Enum.reduce(0..4, store, fn k, acc ->
+          assert {:ok, _result, acc} = add.(acc, 200 + k * 20, @edit)
+          acc
+        end)
+
+      sixth = add.(store, 300, @edit)
+      assert match?({:error, {:trip_too_large, "Varonne"}}, sixth) == refused?
+
+      # Live rows alone are far inside the cap: the old measure took the call.
+      assert {:ok, _result, _store} = add.(%{store | removed: %{}}, 300, @edit)
+    end
+  end
+
+  # A client reads a line of at most 1 MiB (M89 §06); the engine refuses past
+  # 768 KiB so that what a call that never grows a trip adds stays inside it.
+  @line_bytes 1_048_576
+  # As the store stamps a row, to the microsecond.
+  @stamped_now ~U[2031-06-02 14:00:00.000000Z]
+
+  # A stop of about 900 bytes on the wire.
+  defp big_stop(i),
+    do: %{
+      "op" => "add",
+      "text" => "#{i} " <> String.duplicate("w", 190),
+      "note" => String.duplicate("n", 650),
+      "day" => 2
+    }
+
+  # A trip of two days, its stops on Day 2, filled until one more stop would
+  # pass 768 KiB: a hundred at a time, then ten, then one, each until refused.
+  defp at_cap do
+    edit = %{@edit | now: @stamped_now}
+    {_result, store} = call!(empty(), "Varonne", [%{"op" => "create", "days" => 2}], edit)
+    {store, count} = Enum.reduce([100, 10, 1], {store, 0}, &fill(&2, &1, edit))
+    assert count < Ops.max_rows() - 2
+    {store, count, edit}
+  end
+
+  defp fill({store, count}, size, edit) do
+    ops = for i <- (count + 1)..(count + size), do: big_stop(i)
+
+    case call(store, "Varonne", ops, edit) do
+      {:ok, _result, store} -> fill({store, count + size}, size, edit)
+      {:error, {:trip_too_large, "Varonne"}} -> {store, count}
+    end
+  end
+
+  # The `trip` push of a trip pulled with its removed rows, as a line.
+  defp push_line(store) do
+    trip = trip(store, "Varonne")
+    object = Wire.trip(trip, rows(store, "Varonne"))
+    removed = Wire.removed(Map.fetch!(store.removed, trip.id))
+
+    payload = %{
+      "type" => "trip",
+      "profile_id" => "main",
+      "trip" => Map.put(object, "removed", removed)
+    }
+
+    byte_size(Jason.encode!(payload)) + 1
+  end
+
+  # Follow-up to R2#3: only a call that can grow a trip is measured, so one at
+  # the cap can always shrink.
+  test "a trip at the cap refuses an add, and still takes a remove, a move and its removal" do
+    {store, count, edit} = at_cap()
+
+    assert {:error, {:trip_too_large, "Varonne"}} =
+             call(store, "Varonne", [big_stop(count + 1)], edit)
+
+    removes = for n <- 3..102, do: %{"op" => "remove", "n" => n}
+    {_result, store} = call!(store, "Varonne", removes, edit)
+
+    assert {:error, {:trip_too_large, "Varonne"}} =
+             call(store, "Varonne", [big_stop(count + 1)], edit)
+
+    {_result, store} = call!(store, "Varonne", [%{"op" => "move", "n" => 103, "day" => 1}], edit)
+    {result, _store} = call!(store, "Varonne", [%{"op" => "remove_trip"}], edit)
+    assert result.trip.removed_at == @stamped_now
+  end
+
+  test "removing every stop of a trip at the cap in one call keeps its push inside the line" do
+    {store, count, edit} = at_cap()
+    before = push_line(store)
+
+    {result, store} = call!(store, "Varonne", [%{"op" => "remove", "n" => 2}], edit)
+    assert length(result.removed_rows) == count + 1
+
+    # The removed form's removed_at on every row is all the call added.
+    after_removal = push_line(store)
+    assert after_removal > Ops.max_wire_bytes()
+    assert after_removal < @line_bytes
+    assert after_removal - before < 50 * (count + 1)
+
+    # A device brings the day back, with its stops, at the cap again.
+    %{id: trip_id} = trip(store, "Varonne")
+    day_id = hd(result.removed_rows).id
+    restore = %{"trip_id" => trip_id, "op" => %{"op" => "restore", "row_id" => day_id}}
+    {_result, store} = device!(store, restore)
+    assert length(rows(store, "Varonne")) == count + 2
   end
 
   # --- trust -----------------------------------------------------------------
@@ -417,14 +597,22 @@ defmodule FermixCore.Trips.OpsTest do
     outside = %{@edit | outside?: true}
 
     {result, store} =
-      call!(store, "Varonne", [%{"op" => "add", "text" => "Night market", "day" => 5}], outside)
+      call!(store, "Varonne", [%{"op" => "add", "text" => "Night market", "day" => 3}], outside)
 
     assert %{stamped: true} = stop(store, "Varonne", "Night market")
-
-    assert [false, false, false, false, false] ==
-             Enum.map(day_rows(store, "Varonne"), & &1.stamped)
-
+    assert [false, false, false] == Enum.map(day_rows(store, "Varonne"), & &1.stamped)
     assert result.made == stop(store, "Varonne", "Night market").id
+
+    # R2#4: an add after outside content makes no day, so a page cannot
+    # stretch the trip; one after a row the trip has still lands.
+    assert call(store, "Varonne", [%{"op" => "add", "text" => "Far", "day" => 4}], outside) ==
+             {:error, {:op_failed, 1, :outside_new_day}}
+
+    {_result, store} =
+      call!(store, "Varonne", [%{"op" => "add", "text" => "Late bar", "after" => 4}], outside)
+
+    assert %{stamped: true} = stop(store, "Varonne", "Late bar")
+    assert length(day_rows(store, "Varonne")) == 3
 
     refused = [
       %{"op" => "edit", "n" => 4, "text" => "Fish auction"},

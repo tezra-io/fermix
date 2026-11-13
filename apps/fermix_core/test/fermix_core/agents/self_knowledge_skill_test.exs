@@ -393,6 +393,7 @@ defmodule FermixCore.Agents.SelfKnowledgeSkillTest do
 
     for sentence <- [
           TripRegistry.describe_error(:outside_content),
+          TripRegistry.describe_error(:outside_new_day),
           TripRegistry.describe_error(:too_many_lookups),
           TripRegistry.describe_error(:unknown_place_link),
           TripRegistry.describe_error({:trip_full, "Varonne"}),

@@ -1,8 +1,8 @@
 defmodule FermixCore.Tools.TripToolsTrustInvariantTest do
   # M89 §14, written as the whole-feature invariant the Known Pitfalls
   # section mandates, after the lists' own: no trip tool is advertised or
-  # executed, and no trip line or note is written, on a turn that is not the
-  # owner's private turn or voice call; a job reaches a tool only by naming
+  # executed, and no trip line or note is written, against a store that holds
+  # a trip, on a turn that is not the owner's private turn or voice call; a job reaches a tool only by naming
   # it; and no prompt the turns share names the tools. The family is read from
   # the SEEDER, never spelled out here, so a member added later joins this
   # invariant or fails it.
@@ -11,9 +11,11 @@ defmodule FermixCore.Tools.TripToolsTrustInvariantTest do
   alias FermixCore.Capabilities.Advertisement
   alias FermixCore.Capabilities.Builtin
   alias FermixCore.Capabilities.BuiltinSeeder
+  alias FermixCore.Memory.Repo
   alias FermixCore.Prompt.RuntimeSections
   alias FermixCore.Tools.ScheduleJob
   alias FermixCore.Trips.Note
+  alias FermixCore.Trips.Registry
 
   @family_prefix "trip_"
 
@@ -72,21 +74,38 @@ defmodule FermixCore.Tools.TripToolsTrustInvariantTest do
   defp tools, do: BuiltinSeeder.trip_tool_modules()
   defp capabilities, do: Enum.map(tools(), &Builtin.from_tool_module/1)
 
-  # No store: what is asserted is the gate, which refuses before any read.
-  defp base(context) do
+  # A store that holds a trip (R3#6): with one, a gate that let a turn through
+  # would write the trip line and note, so the "none" below can fail.
+  setup do
+    unique = System.unique_integer([:positive])
+    db_path = Path.join(System.tmp_dir!(), "fermix-trip-trust-#{unique}.db")
+    repo = :"trip_trust_repo_#{unique}"
+    start_supervised!({Repo, name: repo, enabled: true, database_path: db_path}, id: repo)
+
+    on_exit(fn ->
+      Enum.each([db_path, "#{db_path}-wal", "#{db_path}-shm"], &FermixTestSupport.SafeRm.rm/1)
+    end)
+
+    create = %{"trip" => "Varonne", "ops" => [%{"op" => "create", "days" => 2}]}
+    {:ok, _answer} = Registry.edit(create, owner(%{chat_type: "private"}, repo), repo: repo)
+    %{repo: repo}
+  end
+
+  defp base(context, repo) do
     Map.merge(
       %{
         agent_name: "main",
         conversation_key: {"telegram", "40017", :root},
-        memory_repo: nil,
+        memory_repo: repo,
         outside_sources: MapSet.new()
       },
       context
     )
   end
 
-  defp owner(context),
-    do: base(Map.merge(%{source_trust: :operator, computer_use_origin: :interactive}, context))
+  defp owner(context, repo) do
+    base(Map.merge(%{source_trust: :operator, computer_use_origin: :interactive}, context), repo)
+  end
 
   defp advertised(context) do
     capabilities() |> Advertisement.prepare(context) |> Enum.map(& &1.name) |> Enum.sort()
@@ -128,33 +147,42 @@ defmodule FermixCore.Tools.TripToolsTrustInvariantTest do
   end
 
   for {label, context} <- @non_attended do
-    test "no trip tool, line or note on a #{label} turn" do
-      refuses_everything(base(unquote(Macro.escape(context))), unquote(label))
+    test "no trip tool, line or note on a #{label} turn", %{repo: repo} do
+      refuses_everything(base(unquote(Macro.escape(context)), repo), unquote(label))
     end
   end
 
   for {label, context} <- @shared do
-    test "no trip tool, line or note in a #{label}" do
-      refuses_everything(owner(unquote(Macro.escape(context))), unquote(label))
+    test "no trip tool, line or note in a #{label}", %{repo: repo} do
+      refuses_everything(owner(unquote(Macro.escape(context)), repo), unquote(label))
     end
   end
 
+  # The same store, on the owner's own turn: the line and the note are there.
   for {label, context} <- @private do
-    test "the owner's #{label} is offered both tools" do
-      context = owner(unquote(Macro.escape(context)))
+    test "the owner's #{label} is offered both tools, and told of the trip", %{repo: repo} do
+      context = owner(unquote(Macro.escape(context)), repo)
       assert advertised(context) == ["trip_edit", "trip_read"]
+
+      assert %{rules: rules, index: ~s(The owner's trips: "Varonne".)} =
+               Note.lines(context, nil, false)
+
+      assert is_binary(rules)
     end
   end
 
-  test "a job reaches each tool only by naming it, and only at operator trust" do
+  test "a job reaches each tool only by naming it, and only at operator trust", %{repo: repo} do
     job =
-      base(%{
-        agent_name: "scheduled:job_1",
-        conversation_key: {:scheduled_job, "job_1", "run_1"},
-        source_trust: :operator,
-        effective_trust: :operator,
-        effective_allowed_tools: ["trip_read"]
-      })
+      base(
+        %{
+          agent_name: "scheduled:job_1",
+          conversation_key: {:scheduled_job, "job_1", "run_1"},
+          source_trust: :operator,
+          effective_trust: :operator,
+          effective_allowed_tools: ["trip_read"]
+        },
+        repo
+      )
 
     assert advertised(job) == ["trip_read"]
 
@@ -177,7 +205,7 @@ defmodule FermixCore.Tools.TripToolsTrustInvariantTest do
     end
   end
 
-  test "schedule_job gives a job a trip tool only from the owner's private turn" do
+  test "schedule_job gives a job a trip tool only from the owner's private turn", %{repo: repo} do
     args = %{
       "name" => "trip_morning_check",
       "schedule" => "0 7 * * *",
@@ -186,13 +214,16 @@ defmodule FermixCore.Tools.TripToolsTrustInvariantTest do
     }
 
     for context <- [
-          owner(%{chat_type: "group"}),
-          base(%{
-            conversation_key: {:scheduled_job, "job_1", "run_1"},
-            source_trust: :operator,
-            effective_trust: :operator,
-            effective_allowed_tools: ["trip_read"]
-          })
+          owner(%{chat_type: "group"}, repo),
+          base(
+            %{
+              conversation_key: {:scheduled_job, "job_1", "run_1"},
+              source_trust: :operator,
+              effective_trust: :operator,
+              effective_allowed_tools: ["trip_read"]
+            },
+            repo
+          )
         ] do
       {:ok, result} = ScheduleJob.execute(args, context)
       refute result.success

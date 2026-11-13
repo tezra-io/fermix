@@ -145,8 +145,40 @@ defmodule FermixCore.Trips.WireTest do
     assert Enum.all?(object["rows"], &(not Map.has_key?(&1, "date")))
   end
 
-  test "the bytes the guard measures are the object's own, as the encoder writes them" do
+  # A removed row has no place among the days: no date and no leg.
+  test "removed rows as a pull with them carries them, each with its removed_at" do
+    gone = ~U[2031-06-03 09:15:00.000000Z]
+    [day, stop | _rest] = rows()
+    removed = [%{day | removed_at: gone}, %{stop | removed_at: gone, removed_with: day.id}]
+
+    assert Wire.removed(removed) == [
+             %{
+               "row_id" => "ti_7h2k9m4p1c",
+               "kind" => "day",
+               "text" => "Harbour",
+               "removed_at" => "2031-06-03T09:15:00.000000Z"
+             },
+             %{
+               "row_id" => "ti_0r2y8e6v3g",
+               "kind" => "stop",
+               "text" => "Breakfast at the inn",
+               "time" => "08:30",
+               "duration" => 45,
+               "place" => @inn,
+               "removed_at" => "2031-06-03T09:15:00.000000Z"
+             }
+           ]
+  end
+
+  test "the bytes the guard measures are the largest pull's, as the encoder writes them" do
+    gone = ~U[2031-06-03 09:15:00.000000Z]
+    removed = for row <- Enum.take(rows(), 2), do: %{row | removed_at: gone}
     object = Wire.trip(trip(%{}), rows())
-    assert Wire.bytes(trip(%{}), rows()) == byte_size(Jason.encode!(object))
+
+    assert Wire.bytes(trip(%{}), rows(), []) ==
+             byte_size(Jason.encode!(Map.put(object, "removed", [])))
+
+    assert Wire.bytes(trip(%{}), rows(), removed) ==
+             byte_size(Jason.encode!(Map.put(object, "removed", Wire.removed(removed))))
   end
 end

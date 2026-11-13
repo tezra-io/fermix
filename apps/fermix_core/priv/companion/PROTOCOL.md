@@ -1347,9 +1347,14 @@ whoever made it.
   100 ms per connection, in a window of the trips' own: a burst of changes is
   one push of each trip carrying the rev it ended on, then the index. Every
   push is whole state, never a delta; a client drops one whose `rev` is below
-  the one it shows. A connection that never pulled is sent nothing. A trip's
-  whole `trip` object stays within 768 KiB: an op that would pass it is
-  refused, so every push fits a line.
+  the one it shows. A connection that never pulled is sent nothing. An op
+  that can grow a trip (`create`, `add`, `edit`, `day`, `rename`, `dates`)
+  is refused when the trip's whole `trip` object, with the `removed[]` a pull
+  with `removed: true` carries, would pass 768 KiB; a removed row counts for
+  the 30 days it is kept. `remove`, `move`, `restore` and `remove_trip` are
+  never refused for size, so a trip at the bound can always shrink: what they
+  add (a row's `removed_at`, a stop's `leg_m`) is under 70 KB for a trip of
+  1,000 rows, so every push stays inside a client's 1 MiB line.
 - **An edit** (`trip_edit`). One `op`, applied in the same transaction as the
   model's edits, its rows recorded as made from the Mac, or from the phone
   over a phone's list channel (`made_via: "phone"`). `trip_id` names the
@@ -1363,8 +1368,9 @@ whoever made it.
   `trip_id`, an `add`'s or a new day's `row_id`. A client matches the ids it
   sent and ignores the rest. A `client_msg_id` names one edit of any kind, a
   list's or a trip's: a client mints a new one for every edit it sends, and
-  an edit whose id an edit of the other kind already used is refused and
-  changes nothing. There is no rev on an edit: a row another edit removed
+  a trip's edit whose id a list's edit already used is refused ("That
+  client_msg_id already named another edit, so nothing changed; send each
+  edit with an id of its own.") and changes nothing. There is no rev on an edit: a row another edit removed
   refuses the op with its sentence, and the client pulls the trip again.
 - **A share** (`trip_share`, answered `trip_shared`). The trip in its one
   shared form, which the engine writes and a client hands to the pasteboard
@@ -1408,10 +1414,10 @@ The ops, the model's by row id, with `restore`:
 
 | `op` | Fields | Effect |
 |---|---|---|
-| `create` | `title` | Makes a trip of one day, with no start, held by the sending connection. A live trip with the title, compared without case, is refused. |
+| `create` | `title` | Makes a trip of one day, with no start, held by the sending connection. A live trip with the title, compared without case and however its accents are written (a title is kept in Unicode NFC), is refused. |
 | `add` | `text`; `day_id` or `after_id`; `time?`, `duration?`, `fixed?`, `note?`, `place?` | Adds a stop at the end of that day, or right after that row. |
 | `edit` | `row_id`; `text?`, `time?`, `duration?`, `fixed?`, `note?`, `place?` or `unplace?` (one at least) | Changes the stop; `time: ""`, `note: ""` or `duration: 0` clears it, and `unplace: true` takes its place away. |
-| `move` | `row_id`; `day_id?` or `after_id?` | Moves a stop to the end of that day, or right after that row (one of the two). A day's `row_id` moves the day with its stops after `after_id`'s day, or first with neither; every day's date follows its new place. |
+| `move` | `row_id`; `day_id?` or `after_id?` | Moves a stop to the end of that day, or right after that row (one of the two). A day's `row_id` moves the day with its stops before `day_id`'s day, after `after_id`'s day, or first with neither; every day's date follows its new place. |
 | `day` | `row_id?`; `text?`, `after_id?` | With `row_id`, names that day (`text: ""` takes its name away). Without it, adds a day after `after_id`'s day, or at the end. |
 | `remove` | `row_id` | Removes the stop, or the day with its stops; each stays in Recently removed for 30 days. A trip keeps at least one day. |
 | `restore` | `row_id?`; `title?` | With `row_id`, brings that removed row back at its place, a day with the stops removed with it. Without it, brings the removed trip back, under `title` when given, else under its own; a live trip holding that title refuses it ("Another trip is named "…" now, so this one cannot come back under that name; restore it with a new title, or rename the other trip first."). |

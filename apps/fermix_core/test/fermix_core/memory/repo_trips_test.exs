@@ -328,11 +328,12 @@ defmodule FermixCore.Memory.RepoTripsTest do
                )
 
       # The receipts' key is the owner's and the id's, not the kind's (S0), so
-      # the trip's edit is refused whole rather than answered as the list's.
+      # the trip's edit is refused whole rather than answered as the list's,
+      # by its own refusal before anything runs (R3#10).
       assert {:error, reason} =
                device(repo, "mac-7", %{"op" => %{"op" => "create", "title" => "Varonne"}})
 
-      assert Registry.error_tag(reason) == "storage_failed"
+      assert Registry.error_tag(reason) == "client_msg_id_used"
 
       with_raw_conn(db_path, fn conn ->
         assert [] = query!(conn, "SELECT id FROM trips")

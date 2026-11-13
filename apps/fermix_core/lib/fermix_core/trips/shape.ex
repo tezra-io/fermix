@@ -93,10 +93,15 @@ defmodule FermixCore.Trips.Shape do
   defp trip_ref(ref, _ops) when is_binary(ref), do: plain_ref(ref)
   defp trip_ref(_ref, _ops), do: {:error, {:invalid_param, :trip}}
 
+  # A trip named by its title is compared as titles are (`Trips.Ops`), so it
+  # is whole Unicode.
   defp plain_ref(ref) do
     case String.trim(ref) do
-      "" -> {:error, {:invalid_param, :trip}}
-      trimmed -> {:ok, trimmed}
+      "" ->
+        {:error, {:invalid_param, :trip}}
+
+      trimmed ->
+        if String.valid?(trimmed), do: {:ok, trimmed}, else: {:error, {:invalid_param, :trip}}
     end
   end
 
@@ -508,17 +513,28 @@ defmodule FermixCore.Trips.Shape do
   # One line of words: trimmed, never empty, nothing that breaks a line, and
   # within `max` characters as the store counts them (code points).
   defp text(value, field, max) when is_binary(value) do
-    trimmed = String.trim(value)
-
-    cond do
-      trimmed == "" -> {:error, {:missing, field}}
-      Regex.match?(@forbidden, trimmed) -> {:error, {:not_one_line, field}}
-      code_points(trimmed) > max -> {:error, {:too_long, field, max}}
-      true -> {:ok, trimmed}
+    with {:ok, trimmed} <- normalized(String.trim(value), field) do
+      cond do
+        trimmed == "" -> {:error, {:missing, field}}
+        Regex.match?(@forbidden, trimmed) -> {:error, {:not_one_line, field}}
+        code_points(trimmed) > max -> {:error, {:too_long, field, max}}
+        true -> {:ok, trimmed}
+      end
     end
   end
 
   defp text(_value, field, _max), do: {:error, {:invalid_param, field}}
+
+  # A title is kept in Unicode NFC, so one title has one spelling (R2#8);
+  # every other text as it came.
+  defp normalized(text, :title) do
+    case :unicode.characters_to_nfc_binary(text) do
+      nfc when is_binary(nfc) -> {:ok, nfc}
+      _invalid -> {:error, {:invalid_param, :title}}
+    end
+  end
+
+  defp normalized(text, _field), do: {:ok, text}
 
   defp code_points(text), do: text |> String.codepoints() |> length()
 

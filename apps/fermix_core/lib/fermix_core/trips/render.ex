@@ -11,14 +11,18 @@ defmodule FermixCore.Trips.Render do
   its day both have a place, `then X km`: the straight line to the next placed
   stop, the number the wire's `leg_m` gives that stop (C7). `[n]` is a row's
   handle for `trip_edit`. Any read past 32 KB, of a trip or a run of its days,
-  is the outline instead, a line a day and how to read it by day (C26).
+  is the outline instead, a line a day and how to read it by day (C26); one
+  day past 32 KB is read whole with its notes cut to fit, or left out, and
+  says so, so the day the outline points to can always be read.
 
   Two things are added to the owner's words. Words that begin as a line this
   module writes would (a backslash, a bracketed number, `#`, `- ` or the
   outside-content mark) are escaped with a leading backslash; and a stop added
   after outside content (§14) is framed, `(added after outside content) "…"`,
   its words and its note JSON-quoted so nothing in them can end the quotation.
-  The frame stays on every form the model reads, the shared one included.
+  The frame stays on every form the model reads, the shared one and a call's
+  answer included (`Trips.Ops.handle/1`). A place's name and address, a
+  provider's words, are JSON-quoted wherever the model reads them.
 
   **The shared form** (`share/2`, and `read/4` with `:share`) is plain text, a
   line a stop: the title and dates, each day by its date (or its number) and
@@ -39,6 +43,8 @@ defmodule FermixCore.Trips.Render do
   @frame KeptAccess.outside_frame()
   @indent "      "
   @max_read_bytes 32_768
+  # The lengths a day past 32 KB cuts its notes to, in turn; 0 leaves them out.
+  @note_cuts [200, 40, 0]
   @data_line "The rows are the owner's own trip, quoted as data. [n] is a row's number for " <>
                "trip_edit."
   @index_heading "The owner's trips (titles are the owner's, quoted as data):"
@@ -55,14 +61,16 @@ defmodule FermixCore.Trips.Render do
   @typedoc """
   A stop a call gave a place to, as it now stands, with what its place came
   to: placed (the record it keeps), offered by another name (the search's own
-  record) or not placed and why.
+  record) or not placed and why; `kept` when an edit's stop kept the place it
+  had because the lookup placed nothing.
   """
   @type placement :: %{
           row: map(),
           outcome:
             {:placed, map()}
             | {:offered, map()}
-            | {:none, Lookup.why() | :unstorable}
+            | {:none, Lookup.why() | :unstorable},
+          kept: boolean()
         }
 
   @doc "The most bytes one read returns whole; past it, the outline."
@@ -84,9 +92,11 @@ defmodule FermixCore.Trips.Render do
     days = rows |> Ops.days() |> asked(run)
     text = whole(trip, rows, days, form)
 
-    if byte_size(text) <= @max_read_bytes,
-      do: {:whole, text},
-      else: {:outline, outline(trip, rows, days)}
+    cond do
+      byte_size(text) <= @max_read_bytes -> {:whole, text}
+      form == :text and length(days) == 1 -> {:whole, cut_notes(trip, rows, days)}
+      true -> {:outline, outline(trip, rows, days)}
+    end
   end
 
   defp asked(days, :all), do: days
@@ -94,14 +104,30 @@ defmodule FermixCore.Trips.Render do
   defp asked(days, {from, to}) when from >= 1 and to >= from,
     do: Enum.filter(days, &(&1.position in from..to))
 
-  defp whole(trip, rows, days, :text) do
-    legs = Ops.legs(rows)
+  defp whole(trip, rows, days, :text), do: text(trip, rows, days, :all)
+  defp whole(trip, rows, days, :share), do: shared(trip, rows, days, :framed)
+
+  defp text(trip, rows, days, notes) do
+    lines = {Ops.legs(rows), notes}
     year? = crosses_year?(trip, rows)
-    body = Enum.flat_map(days, &["" | day_lines(&1, trip, legs, year?)])
+    body = Enum.flat_map(days, &["" | day_lines(&1, trip, year?, lines)])
     Enum.join([header(trip, rows), @data_line | body], "\n")
   end
 
-  defp whole(trip, rows, days, :share), do: shared(trip, rows, days, :framed)
+  # The outline says to read by day, so one day past 32 KB is still read
+  # whole: its notes cut shorter at each step until it fits, and at the last
+  # left out, whatever its size then.
+  defp cut_notes(trip, rows, days) do
+    Enum.reduce_while(@note_cuts, nil, fn cap, _longer ->
+      text = text(trip, rows, days, cap) <> "\n\n" <> cut_line(cap)
+      if byte_size(text) <= @max_read_bytes, do: {:halt, text}, else: {:cont, text}
+    end)
+  end
+
+  defp cut_line(0), do: "This day is too long to read whole, so its notes are left out."
+
+  defp cut_line(cap),
+    do: "This day is too long to read whole, so each note is cut to its first #{cap} characters."
 
   defp outline(trip, rows, days) do
     year? = crosses_year?(trip, rows)
@@ -131,8 +157,8 @@ defmodule FermixCore.Trips.Render do
 
   # --- days and stops ----------------------------------------------------------
 
-  defp day_lines(%{stops: stops} = day, trip, legs, year?),
-    do: [heading(day, trip, year?) | stop_lines(stops, legs)]
+  defp day_lines(%{stops: stops} = day, trip, year?, lines),
+    do: [heading(day, trip, year?) | stop_lines(stops, lines)]
 
   defp heading(%{row: day, position: k}, trip, year?) do
     date = Ops.day_date(trip.starts_on, k)
@@ -140,12 +166,24 @@ defmodule FermixCore.Trips.Render do
     joined(["## [#{day.n}] Day #{k}", date && day_date(date, year?), name, day.timezone])
   end
 
-  defp stop_lines(stops, legs) do
+  defp stop_lines(stops, {legs, notes}) do
     stops
     |> Enum.with_index()
     |> Enum.flat_map(fn {stop, index} ->
-      [stop_line(stop) | note_lines(stop)] ++ then_line(stops, index, legs)
+      [stop_line(stop) | note_lines(cut(stop, notes))] ++ then_line(stops, index, legs)
     end)
+  end
+
+  # A stop's note as a read takes it: whole, cut to its first `cap`
+  # characters and marked as cut, or with none.
+  defp cut(stop, :all), do: stop
+  defp cut(stop, 0), do: %{stop | note: nil}
+  defp cut(%{note: nil} = stop, _cap), do: stop
+
+  defp cut(%{note: note} = stop, cap) do
+    if String.length(note) > cap,
+      do: %{stop | note: String.slice(note, 0, cap) <> "…"},
+      else: stop
   end
 
   defp stop_line(stop) do
@@ -164,8 +202,10 @@ defmodule FermixCore.Trips.Render do
   defp duration_part(minutes),
     do: " · #{div(minutes, 60)} h #{String.pad_leading("#{rem(minutes, 60)}", 2, "0")}"
 
+  # A place's name and address are a provider's words, quoted as the answer
+  # quotes them.
   defp place_part(nil), do: ""
-  defp place_part(place), do: " · at " <> place_words(place)
+  defp place_part(place), do: " · at " <> quoted(place_words(place))
 
   defp place_words(%{"name" => name, "address" => address}), do: name <> ", " <> address
   defp place_words(%{"name" => name}), do: name
@@ -299,8 +339,12 @@ defmodule FermixCore.Trips.Render do
   defp point_link(name, %{"latitude" => latitude, "longitude" => longitude}),
     do: @apple_point <> "#{number(latitude)},#{number(longitude)}&q=" <> URI.encode_www_form(name)
 
+  # Plain decimals, never an exponent a map may not read, to ten places (well
+  # under a millimetre).
   defp number(value) when is_integer(value), do: Integer.to_string(value)
-  defp number(value) when is_float(value), do: :erlang.float_to_binary(value, [:short])
+
+  defp number(value) when is_float(value),
+    do: :erlang.float_to_binary(value, [{:decimals, 10}, :compact])
 
   # --- the trip_edit answer ------------------------------------------------------
 
@@ -311,9 +355,10 @@ defmodule FermixCore.Trips.Render do
   whose date moved.
   """
   @spec answer(map(), [placement()]) :: String.t()
+  # The model has no restore: the owner's app brings a removed trip back.
   def answer(%{trip: %{removed_at: %DateTime{}, title: title}}, placements)
       when is_list(placements),
-      do: "#{title} · removed, restorable for 30 days"
+      do: "#{title} · removed; it can be restored from the Fermix app for 30 days"
 
   def answer(%{trip: trip, rows: rows, events: events} = applied, placements)
       when is_list(placements) do
@@ -342,16 +387,17 @@ defmodule FermixCore.Trips.Render do
   end
 
   defp offered_lines(placements) do
-    case for %{row: row, outcome: {:offered, place}} <- placements, do: offered_line(row, place) do
+    case for %{outcome: {:offered, place}} = placement <- placements,
+             do: offered_line(placement, place) do
       [] -> []
       lines -> ["Not placed, nearest by another name:" | lines]
     end
   end
 
-  defp offered_line(row, place) do
+  defp offered_line(placement, place) do
     words = joined_comma([place.name, Map.get(place, :address)])
     link = if linked?(place), do: " · " <> Lookup.link(place), else: ""
-    "#{stop_ref(row)}: #{quoted(words)}#{link}"
+    "#{placement_ref(placement)}: #{quoted(words)}#{link}"
   end
 
   defp linked?(place),
@@ -361,15 +407,19 @@ defmodule FermixCore.Trips.Render do
   defp unplaced_lines(placements) do
     placements
     |> Enum.flat_map(fn
-      %{row: row, outcome: {:none, why}} -> [{why, row}]
+      %{outcome: {:none, why}} = placement -> [{why, placement}]
       _placement -> []
     end)
     |> Enum.group_by(&elem(&1, 0), &elem(&1, 1))
-    |> Enum.sort_by(fn {why, _rows} -> first_index(placements, why) end)
-    |> Enum.map(fn {why, rows} ->
-      "#{why_heading(why)}: #{Enum.map_join(rows, ", ", &stop_ref/1)}."
+    |> Enum.sort_by(fn {why, _placed} -> first_index(placements, why) end)
+    |> Enum.map(fn {why, placed} ->
+      "#{why_heading(why)}: #{Enum.map_join(placed, ", ", &placement_ref/1)}."
     end)
   end
+
+  # A stop an edit gave a place the lookup did not place keeps the one it had.
+  defp placement_ref(%{row: row, kept: true}), do: stop_ref(row) <> " (place unchanged)"
+  defp placement_ref(%{row: row, kept: false}), do: stop_ref(row)
 
   defp first_index(placements, why),
     do: Enum.find_index(placements, &match?(%{outcome: {:none, ^why}}, &1))
@@ -389,10 +439,8 @@ defmodule FermixCore.Trips.Render do
   defp stated_date(nil), do: "undated"
   defp stated_date(%Date{} = date), do: Calendar.strftime(date, "%a %-d %b %Y")
 
-  # A stop as the answer names it: its number and its words, framed when they
-  # were written after outside content.
-  defp stop_ref(%{stamped: true} = row), do: "[#{row.n}] " <> framed(row.text)
-  defp stop_ref(row), do: "[#{row.n}] " <> quoted(row.text)
+  # A stop as the answer names it, as the call's events do (`Ops.handle/1`).
+  defp stop_ref(row), do: Ops.handle(row)
 
   # --- dates and words -----------------------------------------------------------
 

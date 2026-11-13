@@ -5,8 +5,11 @@ defmodule FermixCore.Trips.RegistryTest do
   # reach a trip at all. Against a real store in a temp file.
   use ExUnit.Case, async: true
 
+  alias FermixCore.Checklists.Registry, as: ChecklistRegistry
   alias FermixCore.Memory.Repo
+  alias FermixCore.Trips.Ops
   alias FermixCore.Trips.Registry
+  alias FermixCore.Trips.Wire
   alias FermixTestSupport.TelemetryCapture
 
   # Every title, stop, place and id here is invented.
@@ -96,7 +99,7 @@ defmodule FermixCore.Trips.RegistryTest do
       assert made == %{}
 
       assert edit!(repo, "Varonne", [%{"op" => "remove_trip"}]).text ==
-               "Varonne · removed, restorable for 30 days"
+               "Varonne · removed; it can be restored from the Fermix app for 30 days"
     end
 
     test "over 100 ops is refused before the store", %{repo: _repo} do
@@ -152,6 +155,48 @@ defmodule FermixCore.Trips.RegistryTest do
 
       assert {:ok, %{rows: [%{kind: :day}]}} =
                Repo.trips_call({:read_trip, "default", "main", "Ostrel"}, server: repo)
+    end
+
+    # R2#3: the guard measures what a pull with the removed rows sends, so the
+    # store hands it the trip's removed rows, those older than 30 days aside.
+    test "the size guard counts the removed rows a pull carries while the store keeps them", %{
+      repo: repo
+    } do
+      big = fn i ->
+        %{
+          "op" => "add",
+          "text" => "#{i} " <> String.duplicate("€", 190),
+          "note" => String.duplicate("€", 1_000),
+          "day" => 1
+        }
+      end
+
+      call = fn title, ops, now ->
+        Registry.edit(
+          %{"trip" => title, "ops" => ops},
+          @owner,
+          Keyword.put(opts(repo), :now, now)
+        )
+      end
+
+      batch = fn title, from, now -> call.(title, Enum.map(from..(from + 19), big), now) end
+      earlier = DateTime.add(@now, -31 * 86_400, :second)
+
+      for {title, removed_on, refused?} <- [{"Varonne", @now, true}, {"Ostrel", earlier, false}] do
+        assert {:ok, %{touched: [%{trip_id: id}]}} =
+                 call.(title, [%{"op" => "create"}], removed_on)
+
+        for k <- 0..4, do: assert({:ok, _answer} = batch.(title, k * 20 + 1, removed_on))
+        removes = for n <- 2..101, do: %{"op" => "remove", "n" => n}
+        assert {:ok, _answer} = call.(title, removes, removed_on)
+
+        for k <- 0..4, do: assert({:ok, _answer} = batch.(title, 200 + k * 20, @now))
+        sixth = batch.(title, 300, @now)
+        assert match?({:error, {:trip_too_large, ^title}}, sixth) == refused?
+
+        read = read!(repo, id)
+        assert Wire.bytes(read.trip, read.rows, read.removed_rows) <= Ops.max_wire_bytes()
+      end
     end
 
     test "the row cap, the size guard, the only day and an unknown trip each say so", %{
@@ -279,6 +324,25 @@ defmodule FermixCore.Trips.RegistryTest do
       assert %{made_via: "phone"} = Enum.find(read!(repo, trip_id).rows, &(&1.id == stop_id))
     end
 
+    # R3#10: a client_msg_id names one edit of any kind; one a list's edit used
+    # refuses a trip's with its own sentence, never the store's words.
+    test "a client_msg_id a list's edit used refuses the trip's edit with its own sentence", %{
+      repo: repo
+    } do
+      packing = %{"client_msg_id" => "once-1", "op" => %{"op" => "create", "title" => "Packing"}}
+      assert {:ok, _made} = ChecklistRegistry.device_edit(packing, :independent, opts(repo))
+
+      assert {:error, reason} =
+               device(repo, "once-1", %{"op" => %{"op" => "create", "title" => "Varonne"}})
+
+      assert Registry.describe_error(reason) ==
+               "That client_msg_id already named another edit, so nothing changed; send each " <>
+                 "edit with an id of its own."
+
+      assert Registry.error_tag(reason) == "client_msg_id_used"
+      assert {:ok, []} = Registry.device_index(:independent, repo: repo)
+    end
+
     test "a duplicate announces nothing", %{repo: repo} do
       create = %{"op" => %{"op" => "create", "title" => "Kyoto"}}
       assert {:ok, %{duplicate: false}} = device(repo, "mac-1", create)
@@ -379,6 +443,14 @@ defmodule FermixCore.Trips.RegistryTest do
                "This turn read something from outside, so it can only add stops to a trip " <>
                  "that already exists; a new trip and every other change wait for the owner's " <>
                  "next message, so say what you would make or change and ask. " <>
+                 "Nothing in this call was changed (op 1)."
+
+      far = [%{"op" => "add", "text" => "Far market", "day" => 9}]
+
+      assert refusal(edit(repo, "Varonne", far, tainted)) ==
+               "This turn read something from outside, so it can only add stops to a day the " <>
+                 "trip already has; a new day and every other change wait for the owner's next " <>
+                 "message, so say what you would make or change and ask. " <>
                  "Nothing in this call was changed (op 1)."
     end
 

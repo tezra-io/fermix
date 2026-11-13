@@ -14,9 +14,11 @@ defmodule FermixCore.Trips.Lookup do
     search returned refuses the whole call, `{:unknown_place_link, ref}`,
     before any lookup.
   - **Words**, the place's own name: one search of the place search in force
-    around the stop's day. The first result whose name is in the words or
-    holds them, as whole words without case or accents, is placed; results are
-    read in order and one with no usable location is skipped (C6). Failing
+    around the stop's day. The first result whose name holds the words, or
+    whose name the words begin with ("Prado, Lisbon" takes "Prado"), as whole
+    words without case or accents, is placed; a name that is only later words
+    of them ("Dinner at Prado") is not. Results are read in order and one with
+    no usable location is skipped (C6). Failing
     that, the first located result is offered, never applied: the caller names
     it with its link, which a later call gives in the link form.
 
@@ -146,15 +148,16 @@ defmodule FermixCore.Trips.Lookup do
   end
 
   @doc """
-  Whether a result's `name` is the stop's `words` (C6): its words a whole-word
-  run of them, or holding them as one, compared after accents are stripped,
-  case folded and punctuation read as a space.
+  Whether a result's `name` is the stop's `words` (C6): the name holds the
+  words as a whole-word run, or the words begin with the name's words,
+  compared after accents are stripped, case folded and punctuation read as a
+  space.
   """
   @spec words_match?(String.t(), String.t()) :: boolean()
   def words_match?(words, name) when is_binary(words) and is_binary(name) do
     said = fold(words)
     named = fold(name)
-    said != [] and named != [] and (run?(said, named) or run?(named, said))
+    said != [] and named != [] and (run?(named, said) or Enum.take(said, length(named)) == named)
   end
 
   @doc """

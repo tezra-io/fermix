@@ -1619,9 +1619,12 @@ take. Its edits record `made_via: "phone"`, a trip's as a list's. A
 mints a new one for every edit it sends, and an edit whose id an edit of the
 other kind already used is refused and changes nothing.
 
-A trip holds at most 1,000 days and stops, and its whole `trip` stays within
-768 KiB, so a trip goes as one `companion_line` cut into chunks inside the
-1 MiB line (the fixtures carry a trip of 1,000 rows in four).
+A trip holds at most 1,000 days and stops. An op that can grow a trip is
+refused when its whole `trip`, with the `removed[]` a pull with `removed:
+true` carries, would pass 768 KiB; removing, moving and restoring are never
+refused and add under 70 KB, so a trip goes as one `companion_line` cut into
+chunks inside the 1 MiB line (the fixtures carry a trip of 1,000 rows in
+four).
 
 Once the channel has pulled the trips index, a phone at protocol 3 says its
 turns draw trips: a reply that read or changed a trip carries the `trips`

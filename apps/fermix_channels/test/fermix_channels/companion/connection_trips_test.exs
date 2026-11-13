@@ -541,7 +541,10 @@ defmodule FermixChannels.Companion.ConnectionTripsTest do
 
     accepted!(mac, "once-1")
     edit(mac, "once-1", trip_id, %{"op" => "rename", "text" => "Varonne again"})
-    assert refused!(mac, "once-1") =~ "nothing changed"
+
+    assert refused!(mac, "once-1") ==
+             "That client_msg_id already named another edit, so nothing changed; send each " <>
+               "edit with an id of its own."
 
     assert [%{"title" => "Varonne weekend", "rev" => 1}] = pull_index(mac)
   end

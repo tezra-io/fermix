@@ -33,7 +33,8 @@ defmodule FermixCore.Tools.PlaceSearch.AppleMaps do
   `spawn_plan/3` is a deliberate copy of
   `FermixChannels.Mobile.Iroh.Helper.spawn_plan/3`, pinned by its own test.
   Every call is bounded at 15 s and the helper's process
-  group is killed when the call ends, whatever ended it. The helper never
+  group is killed when the call ends, whatever ended it, a kill of the calling
+  process included (a guard process owns the helper until the call ends). The helper never
   creates a `CLLocationManager` and never reads where the Mac is.
 
   ## The record
@@ -200,10 +201,12 @@ defmodule FermixCore.Tools.PlaceSearch.AppleMaps do
   # The port is unlinked and monitored before the request is written: a helper
   # that died before reading closes the port on the write (EPIPE), which then
   # arrives here as a `:DOWN` this call answers, not as an exit signal that
-  # ends the turn running it.
+  # ends the turn running it. A guard owns the helper should the caller go
+  # first (`guard/2`).
   defp run(executable, args, line, timeout_ms) do
     port = Port.open({:spawn_executable, executable}, [:binary, :exit_status, :hide, args: args])
     os_pid = os_pid(port)
+    guard = guard(port, os_pid)
     Process.unlink(port)
     monitor = Port.monitor(port)
     deadline = System.monotonic_time(:millisecond) + timeout_ms
@@ -213,6 +216,7 @@ defmodule FermixCore.Tools.PlaceSearch.AppleMaps do
       collect(port, monitor, deadline, timeout_ms, "")
     after
       teardown(port, monitor, os_pid)
+      send(guard, {:done, self()})
     end
   rescue
     error in [ArgumentError, ErlangError] ->
@@ -278,6 +282,38 @@ defmodule FermixCore.Tools.PlaceSearch.AppleMaps do
     after
       0 -> :ok
     end
+  end
+
+  # A caller can end with no `after` run: a kill (a trip lookup's deadline ends
+  # its task so) or any exit signal it does not trap. The unlinked port then
+  # stays open and the helper runs on, so this process waits for the call to
+  # end, which it always does, by its `after` or by its caller's death, and on
+  # the death kills the helper's group and closes the port.
+  defp guard(port, os_pid) do
+    caller = self()
+
+    spawn(fn ->
+      watch = Process.monitor(caller)
+
+      receive do
+        {:done, ^caller} -> :ok
+        {:DOWN, ^watch, :process, ^caller, _reason} -> release(port, os_pid)
+      end
+    end)
+  end
+
+  defp release(port, os_pid) do
+    if os_pid, do: ProcessGroup.signal(os_pid, :sigkill)
+    close(port)
+  end
+
+  # Any process may close a port. One the killed helper's exit closed first is
+  # already what this asks for.
+  defp close(port) do
+    if Port.info(port), do: Port.close(port)
+    :ok
+  rescue
+    ArgumentError -> :ok
   end
 
   defp finish(0, stdout), do: {:ok, stdout}

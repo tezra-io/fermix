@@ -295,6 +295,40 @@ defmodule FermixCore.Tools.PlaceSearch.AppleMapsTest do
       assert gone_by?(os_pid, deadline), "the helper outlived its call"
     end
 
+    # R2#5: a trip lookup's 45 s deadline ends its task with a kill, which runs
+    # no `after`; the helper and its port go with the call all the same.
+    test "a call whose process is killed leaves no helper and no port behind", ctx do
+      pid_file = Path.join(ctx.dir, "helper.pid")
+      path = Path.join(ctx.dir, "fermix-maps")
+
+      File.write!(
+        path,
+        "#!/bin/sh\necho $$ > '#{pid_file}.part'\nmv '#{pid_file}.part' '#{pid_file}'\n" <>
+          "exec sleep 3600\n"
+      )
+
+      File.chmod!(path, 0o755)
+      caller = spawn(fn -> AppleMaps.search(named(), helper_opts(path)) end)
+      on_exit(fn -> Process.exit(caller, :kill) end)
+
+      deadline = System.monotonic_time(:millisecond) + @process_bound_ms
+      assert written_by?(pid_file, deadline), "the helper never started"
+      os_pid = pid_file |> File.read!() |> String.trim()
+      on_exit(fn -> kill_leftover(os_pid) end)
+
+      port =
+        Enum.find(Port.list(), &(Port.info(&1, :os_pid) == {:os_pid, String.to_integer(os_pid)}))
+
+      assert is_port(port)
+
+      watch = Process.monitor(caller)
+      Process.exit(caller, :kill)
+      assert_receive {:DOWN, ^watch, :process, ^caller, :killed}
+
+      assert gone_by?(os_pid, deadline), "the helper outlived its killed call"
+      assert closed_by?(port, deadline), "the helper's port outlived its killed call"
+    end
+
     test "a missing helper is not ready and refuses every search", ctx do
       missing = Path.join(ctx.dir, "absent/fermix-maps")
 
@@ -368,6 +402,48 @@ defmodule FermixCore.Tools.PlaceSearch.AppleMapsTest do
         # sleep: the interval between two looks at a pid the kernel has not reaped yet
         Process.sleep(25)
         gone_by?(os_pid, deadline)
+    end
+  end
+
+  # The helper writes its pid once it runs. A bounded look, since it starts
+  # on the kernel's schedule.
+  defp written_by?(path, deadline) do
+    cond do
+      File.exists?(path) ->
+        true
+
+      System.monotonic_time(:millisecond) > deadline ->
+        false
+
+      true ->
+        # sleep: the interval between two looks for a file the helper has not written yet
+        Process.sleep(25)
+        written_by?(path, deadline)
+    end
+  end
+
+  # A port closes once its helper is killed or it is closed. A bounded look.
+  defp closed_by?(port, deadline) do
+    cond do
+      Port.info(port) == nil ->
+        true
+
+      System.monotonic_time(:millisecond) > deadline ->
+        false
+
+      true ->
+        # sleep: the interval between two looks at a port the runtime has not closed yet
+        Process.sleep(25)
+        closed_by?(port, deadline)
+    end
+  end
+
+  # A helper a failing run left behind holds the test's stderr open: it goes,
+  # and only while its pid still names the stand-in's sleep.
+  defp kill_leftover(os_pid) do
+    case System.cmd("ps", ["-p", os_pid, "-o", "command="], stderr_to_stdout: true) do
+      {"sleep 3600\n", 0} -> System.cmd("kill", ["-9", os_pid], stderr_to_stdout: true)
+      _gone -> :ok
     end
   end
 

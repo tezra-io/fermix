@@ -138,26 +138,9 @@ defmodule FermixChannels.Companion.Trips do
     }
   end
 
+  # The removed rows' form is the store's, the one its size guard measures.
   defp put_removed(trip, false, _rows), do: trip
-  defp put_removed(trip, true, rows), do: Map.put(trip, "removed", Enum.map(rows, &removed_row/1))
-
-  # A removed row has no place among the days: no date, no leg.
-  defp removed_row(%{kind: :day} = row) do
-    %{"row_id" => row.id, "kind" => "day"}
-    |> put_present("text", if(row.text != "", do: row.text))
-    |> put_present("timezone", row.timezone)
-    |> Map.put("removed_at", stamp(row.removed_at))
-  end
-
-  defp removed_row(%{kind: :stop} = row) do
-    %{"row_id" => row.id, "kind" => "stop", "text" => row.text}
-    |> put_present("time", row.time)
-    |> put_present("duration", row.duration)
-    |> put_present("fixed", if(row.fixed, do: true))
-    |> put_present("note", row.note)
-    |> put_present("place", row.place)
-    |> Map.put("removed_at", stamp(row.removed_at))
-  end
+  defp put_removed(trip, true, rows), do: Map.put(trip, "removed", Wire.removed(rows))
 
   defp stamp(nil), do: nil
   defp stamp(%DateTime{} = at), do: DateTime.to_iso8601(at)

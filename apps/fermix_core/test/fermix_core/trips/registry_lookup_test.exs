@@ -153,10 +153,69 @@ defmodule FermixCore.Trips.RegistryLookupTest do
     assert {:ok, answer} =
              edit(ctx, "Varonne", [%{"op" => "edit", "n" => 4, "place" => "Doca Seca"}], results)
 
-    assert answer.text =~ ~s(No place found: [4] "Quay".)
+    assert answer.text =~ ~s|No place found: [4] "Quay" (place unchanged).|
     assert [%{anchor: {:coordinates, _lat, _lon}, radius_meters: radius}] = searched()
     assert radius >= 2_000
-    assert %{place: nil} = Enum.find(rows!(ctx, "Varonne"), &(&1.n == 4))
+    assert %{place: %{"name" => "Cais Velho"}} = Enum.find(rows!(ctx, "Varonne"), &(&1.n == 4))
+  end
+
+  # R2#1: a lookup that does not place, for whatever reason, never takes a
+  # stop's place away; only an empty place clears it.
+  test "an edit whose lookup does not place keeps the stop's place, and the rest of it lands",
+       ctx do
+    {:ok, _answer} =
+      edit(
+        ctx,
+        "Varonne",
+        [
+          %{"op" => "create"},
+          %{"op" => "add", "text" => "Quay", "day" => 1, "place" => "Cais Velho"}
+        ],
+        %{"Cais Velho" => found([place("Cais Velho", @quay, 2)])}
+      )
+
+    %{place: kept} = Enum.find(rows!(ctx, "Varonne"), &(&1.n == 2))
+    assert %{"name" => "Cais Velho"} = kept
+
+    cases = [
+      {"Cais Velho, Ribeira", {:error, "rate_limited: slow down", %{}},
+       "Not looked up, the place search is rate limited: "},
+      {"Doca Seca", found([]), "No place found: "},
+      {"Ponte Nova", {:error, "network: unreachable", %{}},
+       "Not looked up, the place search failed (network: unreachable): "},
+      {"Check in", found([place("Harbour Rooms", @tower, 9)]),
+       "Not placed, nearest by another name:\n"}
+    ]
+
+    for {{words, result, heading}, i} <- Enum.with_index(cases, 1) do
+      time = "1#{i}:00"
+      op = %{"op" => "edit", "n" => 2, "time" => time, "place" => words}
+      assert {:ok, answer} = edit(ctx, "Varonne", [op], %{words => result})
+
+      assert answer.text =~ heading <> ~s|[2] "Quay" (place unchanged)|, words
+      assert %{place: ^kept, time: ^time} = Enum.find(rows!(ctx, "Varonne"), &(&1.n == 2))
+    end
+
+    # An edit that gave only the place, and kept it, changes nothing at all.
+    {:ok, %{trip: %{rev: rev}}} =
+      Repo.trips_call({:read_trip, "default", "main", "Varonne"}, server: ctx.repo)
+
+    only_place = [%{"op" => "edit", "n" => 2, "place" => "Doca Seca"}]
+    assert {:ok, answer} = edit(ctx, "Varonne", only_place, %{"Doca Seca" => found([])})
+
+    assert answer.text ==
+             "Varonne · rev #{rev} · nothing changed · 1 day, 1 stop · 0 placed\n" <>
+               ~s|No place found: [2] "Quay" (place unchanged).|
+
+    assert [%{rows: []}] = answer.touched
+
+    assert {:ok, %{trip: %{rev: ^rev}}} =
+             Repo.trips_call({:read_trip, "default", "main", "Varonne"}, server: ctx.repo)
+
+    assert {:ok, _answer} =
+             edit(ctx, "Varonne", [%{"op" => "edit", "n" => 2, "place" => ""}], %{})
+
+    assert %{place: nil} = Enum.find(rows!(ctx, "Varonne"), &(&1.n == 2))
   end
 
   test "another name is offered, saved unplaced, and its link places it in the next call", ctx do

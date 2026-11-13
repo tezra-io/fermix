@@ -62,12 +62,18 @@ defmodule FermixCore.Trips.LookupTest do
   end
 
   describe "the name rule" do
-    test "a name is in the words or holds them, as whole words without case or accents" do
-      assert Lookup.words_match?("Lunch at Café Lúmen", "CAFE LUMEN")
+    test "a name holds the words or begins them, as whole words without case or accents" do
       assert Lookup.words_match?("Castelo da Águia", "castelo da aguia")
       assert Lookup.words_match?("Águia", "Castelo da Águia")
       assert Lookup.words_match?("Joe’s Bar", "Joe's Bar!")
+      assert Lookup.words_match?("Castelo de São Jorge, Lisbon", "Castelo de São Jorge")
+      assert Lookup.words_match?("Prado, Lisbon", "Prado")
 
+      # A name that is only some later words of them is another place.
+      refute Lookup.words_match?("Pois Café", "Café")
+      refute Lookup.words_match?("Sé de Lisboa", "Lisboa")
+      refute Lookup.words_match?("Dinner at Prado", "Prado")
+      refute Lookup.words_match?("Lunch at Café Lúmen", "CAFE LUMEN")
       refute Lookup.words_match?("Dinner at Lúmen", "Rio Doce Grill")
       refute Lookup.words_match?("Torre Nacional", "National Tower")
       refute Lookup.words_match?("Lúmen", "Lumens Bakery")
@@ -78,7 +84,7 @@ defmodule FermixCore.Trips.LookupTest do
 
     test "found: the first located result the rule matches is placed, scanned in order" do
       results = %{
-        "Lunch at Café Lúmen" =>
+        "Café Lúmen, Vila Nova" =>
           found([
             place("Lúmen Bakery", @market, 1),
             unlocated("Café Lúmen", 2),
@@ -88,7 +94,11 @@ defmodule FermixCore.Trips.LookupTest do
       }
 
       assert {:ok, %{outcomes: [{7, {:placed, placed}}], records: [placed], lookups: 1}} =
-               resolve([%{ref: 7, place: "Lunch at Café Lúmen", day: 1}], %{}, search_by(results))
+               resolve(
+                 [%{ref: 7, place: "Café Lúmen, Vila Nova", day: 1}],
+                 %{},
+                 search_by(results)
+               )
 
       assert placed.name == "CAFE LUMEN"
     end

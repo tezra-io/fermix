@@ -122,8 +122,11 @@ defmodule FermixCore.Trips.Registry do
 
   defp read_ref(ref) when is_binary(ref) do
     case String.trim(ref) do
-      "" -> {:ok, nil}
-      trimmed -> {:ok, trimmed}
+      "" ->
+        {:ok, nil}
+
+      trimmed ->
+        if String.valid?(trimmed), do: {:ok, trimmed}, else: {:error, {:invalid_param, :trip}}
     end
   end
 
@@ -591,6 +594,14 @@ defmodule FermixCore.Trips.Registry do
       "message, so say what you would make or change and ask."
   end
 
+  # An add after outside content makes no day, so a page cannot stretch the
+  # trip: the sentence says so in the outside sentence's terms.
+  def describe_error(:outside_new_day) do
+    "This turn read something from outside, so it can only add stops to a day the trip " <>
+      "already has; a new day and every other change wait for the owner's next message, so " <>
+      "say what you would make or change and ask."
+  end
+
   def describe_error(:unknown_place_link) do
     "No place search in this conversation returned that link; search again or give the " <>
       "place's name."
@@ -674,6 +685,11 @@ defmodule FermixCore.Trips.Registry do
     do: "A day op names a day by its row_id, or makes one after after_id; give one, not both."
 
   def describe_error({:device, :place_and_unplace}), do: "Give place or unplace, not both."
+
+  def describe_error({:device, :client_msg_id_used}) do
+    "That client_msg_id already named another edit, so nothing changed; send each edit with " <>
+      "an id of its own."
+  end
 
   def describe_error({:unknown_device_op, name}),
     do: "#{inspect(name)} is not an op here; the ops are #{Enum.join(device_ops(), ", ")}."

@@ -16,14 +16,17 @@ defmodule FermixCore.Trips.Placing do
   call replaces, or on a stop the call removes, is not looked up.
 
   **Between.** `placed_call/2` puts each lookup's outcome in its op: a placed
-  record as the stop keeps it (`Trips.Place.from_search/1`), anything else as
-  no place (C28).
+  record as the stop keeps it (`Trips.Place.from_search/1`). Anything else
+  places nothing: an add's stop is saved without a place (C28), and an edit's
+  stop keeps the place it had, since only a place given empty takes one away;
+  the edit's other fields still land.
 
   **After.** `placements/3` names, for the answer, each stop the call gave a
   place to as the store now holds it, by the op that gave it: the `k`th add of
   the call made the `k`th new stop by number (`Ops` numbers rows in the order
   it makes them, and only an add makes a stop), and an edit names its stop by
-  number. A stop given a place twice is named once, with the later.
+  number, `kept` when the stop kept its place. A stop given a place twice is
+  named once, with the later.
   """
 
   alias FermixCore.Trips.Lookup
@@ -94,8 +97,9 @@ defmodule FermixCore.Trips.Placing do
 
   @doc """
   `call` with each place given resolved by `outcomes` (`Lookup.resolve/3`'s,
-  by op): a placed record as a stop keeps it, else no place; and the outcomes
-  as they now stand, a record too large to keep being `{:none, :unstorable}`.
+  by op): a placed record as a stop keeps it, else no place on an add and the
+  place it had on an edit; and the outcomes as they now stand, a record too
+  large to keep being `{:none, :unstorable}`.
   """
   @spec placed_call(map(), [{pos_integer(), Lookup.outcome()}]) :: {map(), outcomes()}
   def placed_call(%{ops: ops} = call, outcomes) when is_list(outcomes) do
@@ -112,9 +116,9 @@ defmodule FermixCore.Trips.Placing do
 
   defp resolved(%{place: {kind, _value}} = op, index, outcome) when kind in [:words, :link] do
     case outcome do
-      nil -> {%{op | place: nil}, nil}
+      nil -> {%{op | place: unplaced(op)}, nil}
       {:placed, record} -> stored(op, index, Place.from_search(record))
-      other -> {%{op | place: nil}, {index, other}}
+      other -> {%{op | place: unplaced(op)}, {index, other}}
     end
   end
 
@@ -123,13 +127,20 @@ defmodule FermixCore.Trips.Placing do
   defp stored(op, index, {:ok, place}), do: {%{op | place: place}, {index, {:placed, place}}}
 
   defp stored(op, index, {:error, {:invalid_place, _field}}),
-    do: {%{op | place: nil}, {index, {:none, :unstorable}}}
+    do: {%{op | place: unplaced(op)}, {index, {:none, :unstorable}}}
+
+  # A place the lookup did not place: an add's stop has none, an edit's stop
+  # keeps the one it had.
+  defp unplaced(%{op: :add}), do: nil
+  defp unplaced(%{op: :edit}), do: :keep
 
   @doc """
   Each stop `call` gave a place to, as `applied` (the store's answer) holds
   it, with what its place came to: `Trips.Render.answer/2`'s placements.
   """
-  @spec placements(map(), map(), outcomes()) :: [%{row: map(), outcome: term()}]
+  @spec placements(map(), map(), outcomes()) :: [
+          %{row: map(), outcome: term(), kept: boolean()}
+        ]
   def placements(%{ops: ops}, %{rows: rows} = applied, outcomes) when is_list(outcomes) do
     made = made_by_add(ops, rows ++ Map.get(applied, :removed_rows, []))
     live = Map.new(rows, &{&1.id, &1})
@@ -137,12 +148,17 @@ defmodule FermixCore.Trips.Placing do
     # A stop removed later in the call, or by another edit since, has no line.
     placed =
       for {index, outcome} <- outcomes,
-          %{id: id} <- [stop_of(Enum.at(ops, index - 1), index, made, rows)],
+          op <- [Enum.at(ops, index - 1)],
+          %{id: id} <- [stop_of(op, index, made, rows)],
           Map.has_key?(live, id),
-          do: %{row: Map.fetch!(live, id), outcome: outcome}
+          do: %{row: Map.fetch!(live, id), outcome: outcome, kept: kept?(op, outcome)}
 
     placed |> Enum.reverse() |> Enum.uniq_by(& &1.row.id) |> Enum.reverse()
   end
+
+  defp kept?(%{op: :edit}, {:placed, _place}), do: false
+  defp kept?(%{op: :edit}, _outcome), do: true
+  defp kept?(%{op: :add}, _outcome), do: false
 
   defp made_by_add(ops, rows) do
     adds = for {%{op: :add}, index} <- Enum.with_index(ops, 1), do: index

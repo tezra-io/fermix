@@ -112,6 +112,10 @@ defmodule FermixCore.Tools.TripEdit do
         description: "a place's link no place search in this conversation returned"
       },
       %{tag: "outside_content", description: "an op other than add after outside content"},
+      %{
+        tag: "outside_new_day",
+        description: "an add to a day the trip lacks after outside content"
+      },
       %{tag: "last_day", description: "a trip keeps at least one day"},
       %{
         tag: "not_permitted",

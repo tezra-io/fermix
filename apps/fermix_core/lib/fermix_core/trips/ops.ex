@@ -8,8 +8,9 @@ defmodule FermixCore.Trips.Ops do
 
   `apply/3` takes the owner's trips (the live ones, and a removed one a
   device's `restore` names), the live rows of the trip the call names
-  (`referenced/2`) and, when a row comes back, its removed rows, with the
-  call as `Trips.Shape` made it, and answers the trip and its rows as they now
+  (`referenced/2`) and its removed rows, with the first moment a removed row
+  is still kept once the call is written (`kept_from`), and the call as
+  `Trips.Shape` made it, and answers the trip and its rows as they now
   stand: the rows to write, the rows removed, what happened in a few words,
   which rows the call added or changed, the id the last create or add made,
   and each fixed stop whose date moved (C14). A trip the call changed moves
@@ -25,8 +26,8 @@ defmodule FermixCore.Trips.Ops do
   it as one run.
 
   After outside content a call may only add (`@outside_ops`): every other op,
-  `create` included, is refused, and the stop it adds is stamped. Days an add
-  makes on the way hold no words and are not stamped.
+  `create` included, is refused, and the stop it adds is stamped. Such an add
+  makes no day: a `day` past the last is refused (`:outside_new_day`).
 
   Removal is soft, as a list's: a removed row keeps its `removed_at`, and the
   stops removed with their day keep the day's id (`removed_with`), so a day a
@@ -37,13 +38,17 @@ defmodule FermixCore.Trips.Ops do
   `made` is the id the last `create` (the trip), `add` (the stop) or a
   device's new `day` made; the days a create or an add makes on the way never
   overwrite it (C19). The caps are 30 live trips, 1,000 live rows a trip, and
-  a trip whose `trip` object (`Trips.Wire`) stays within 768 KiB (C10).
+  a call that can grow a trip (`@growing_ops`) refused when its `trip` object
+  (`Trips.Wire`), with the removed rows a pull carries while the store keeps
+  them, would pass 768 KiB (C10); a remove, move or restore is never refused,
+  so a trip at the cap can always shrink, and every push fits a line.
 
   Refusals are `{:error, {:op_failed, op_index, reason}}`, the op counted from
   1, and a trip no live trip answers to is `{:error, {:no_trip, ref, titles}}`;
   `Trips.Registry.describe_error/1` turns each into a sentence.
   """
 
+  alias FermixCore.Kept.Access, as: KeptAccess
   alias FermixCore.Kept.Ids
   alias FermixCore.Kept.Positions
   alias FermixCore.Trips.Geo
@@ -56,6 +61,14 @@ defmodule FermixCore.Trips.Ops do
   # The only ops a call that read outside content may run (§14): an
   # allow-list, so an op added later is refused there until it is ruled on.
   @outside_ops [:add]
+  # The ops that can grow a trip's wire form, the only ones the size guard
+  # measures (`fits/2`). Remove, move and restore only take a row between its
+  # live and removed forms or move it: the removed form adds a `removed_at`
+  # (42 bytes) and a move at most a `leg_m`, so from the last measured call, at
+  # most 768 KiB, a trip of 1,000 live rows gains under 70 KB however it is
+  # removed, moved or brought back, inside the 1 MiB line; and a trip at the
+  # cap can always shrink.
+  @growing_ops [:create, :add, :edit, :day, :rename, :dates]
   @stop_fields [:time, :duration, :fixed, :note, :place]
 
   @typedoc "One trip as the store holds it, with what this call did to it."
@@ -161,11 +174,6 @@ defmodule FermixCore.Trips.Ops do
   def restored_trip(%{trip: id, ops: [%{op: :restore, row: nil}]}), do: id
   def restored_trip(%{ops: ops}) when is_list(ops), do: nil
 
-  @doc "Whether a call brings back a removed row, so the store loads the trip's removed rows."
-  @spec restores_rows?(map()) :: boolean()
-  def restores_rows?(%{ops: ops}) when is_list(ops),
-    do: Enum.any?(ops, &match?(%{op: :restore, row: {:id, _id}}, &1))
-
   # --- reading a trip --------------------------------------------------------
 
   @doc "The trip's days in order: each day's row, its stops, and its position from 1."
@@ -221,8 +229,9 @@ defmodule FermixCore.Trips.Ops do
   # --- the call --------------------------------------------------------------
 
   @doc """
-  Applies `call` (`%{trip: ref, ops: [op]}`) to `loaded` (`%{trips:, rows:,
-  removed:}`) under `edit` (`now`, `outside?`, `made_via`), all of it or none.
+  Applies `call` (`%{trip: ref, ops: [op]}`) to `loaded` (`%{trips:, rows:}`,
+  and the trip's removed rows as `removed:` with `kept_from:` when the store
+  holds some) under `edit` (`now`, `outside?`, `made_via`), all of it or none.
   """
   @spec apply(map(), %{trip: String.t() | nil, ops: [map()]}, map()) ::
           {:ok, result()} | {:error, term()}
@@ -233,6 +242,7 @@ defmodule FermixCore.Trips.Ops do
       trip: nil,
       rows: rows,
       removed: Map.get(loaded, :removed, []),
+      kept_from: Map.get(loaded, :kept_from),
       removed_rows: [],
       made: nil,
       events: [],
@@ -243,7 +253,7 @@ defmodule FermixCore.Trips.Ops do
 
     with {:ok, state, rest, offset} <- target(initial, ref, ops, edit),
          {:ok, state} <- run_ops(state, rest, offset, edit) do
-      finish(state, before(trips, rows, ops, ref), edit)
+      finish(state, before(trips, rows, ops, ref), edit, ops)
     end
   end
 
@@ -387,7 +397,8 @@ defmodule FermixCore.Trips.Ops do
   # --- adding ----------------------------------------------------------------
 
   defp row_op(state, %{op: :add} = op, edit) do
-    with {:ok, state, made_days} <- ensure_day(state, op.day, edit),
+    with :ok <- outside_day(state.rows, op, edit),
+         {:ok, state, made_days} <- ensure_day(state, op.day, edit),
          {:ok, index} <- add_index(state.rows, op),
          :ok <- room(state, 1) do
       {row, state} = new_row(state, :stop, op, edit)
@@ -401,6 +412,15 @@ defmodule FermixCore.Trips.Ops do
       |> changed()
       |> ok()
     end
+  end
+
+  # An edit left with nothing to give changes nothing: one whose only field was
+  # a place the lookup did not place keeps it (`Trips.Placing`), and the
+  # answer says so by itself.
+  defp row_op(state, %{op: :edit, n: ref, text: nil} = op, _edit)
+       when op.time == :keep and op.duration == :keep and op.fixed == :keep and
+              op.note == :keep and op.place == :keep do
+    with {:ok, _index, _row} <- stop_at(state.rows, ref), do: {:ok, state}
   end
 
   defp row_op(state, %{op: :edit, n: ref} = op, edit) do
@@ -464,6 +484,15 @@ defmodule FermixCore.Trips.Ops do
         if live_row?(state.rows, id), do: {:error, :not_removed}, else: {:error, {:no_row, ref}}
     end
   end
+
+  # After outside content an add makes no day: its stop goes on a day the trip
+  # has, or after a row it has, so no page stretches the trip (§14).
+  defp outside_day(rows, %{day: k}, %{outside?: true}) when is_integer(k) do
+    {count, _stops} = counts(rows)
+    if k > count, do: {:error, :outside_new_day}, else: :ok
+  end
+
+  defp outside_day(_rows, _op, _edit), do: :ok
 
   # A day past the last is made, with every empty day before it.
   defp ensure_day(state, k, edit) when is_integer(k) do
@@ -847,7 +876,17 @@ defmodule FermixCore.Trips.Ops do
     %{state | events: events, added: Map.update!(state.added, kind, &(&1 + count))}
   end
 
-  defp handle(row), do: "[#{row.n}] " <> quoted(row.text)
+  @doc """
+  A stop as a call's answer names it: its number and its words, JSON-quoted,
+  framed when they were written after outside content (§14), as a read frames
+  them, so every answer that repeats them marks the turn as the read does.
+  """
+  @spec handle(row()) :: String.t()
+  def handle(%{n: n, stamped: true, text: text}) when is_integer(n),
+    do: "[#{n}] " <> KeptAccess.outside_frame() <> " " <> quoted(text)
+
+  def handle(%{n: n, stamped: false, text: text}) when is_integer(n),
+    do: "[#{n}] " <> quoted(text)
 
   defp quoted(text), do: Jason.encode!(text)
 
@@ -857,7 +896,13 @@ defmodule FermixCore.Trips.Ops do
   defp live(trips),
     do: trips |> Enum.filter(&is_nil(&1.removed_at)) |> Enum.sort_by(&{&1.position, &1.id})
 
-  defp same_words?(a, b), do: String.downcase(String.trim(a)) == String.downcase(String.trim(b))
+  # Titles compare as one spelling: trimmed, in Unicode NFC (a title kept
+  # before titles were stored so is folded here too) and case-blind. Every
+  # title and ref here is whole Unicode (`Trips.Shape`).
+  defp same_words?(a, b), do: title_key(a) == title_key(b)
+
+  defp title_key(title),
+    do: title |> String.trim() |> :unicode.characters_to_nfc_binary() |> String.downcase()
 
   # --- the end of the call ---------------------------------------------------
 
@@ -879,12 +924,12 @@ defmodule FermixCore.Trips.Ops do
   end
 
   # The trip a call changed moves its rev once and must still fit the wire.
-  defp finish(state, before, edit) do
+  defp finish(state, before, edit, ops) do
     trip = state.trip
     trip = if state.changed?, do: %{trip | rev: trip.rev + 1, updated_at: edit.now}, else: trip
     state = %{state | trip: trip}
 
-    with :ok <- fits(state) do
+    with :ok <- fits(state, ops) do
       {:ok,
        %{
          trip: trip,
@@ -899,14 +944,28 @@ defmodule FermixCore.Trips.Ops do
     end
   end
 
-  defp fits(%{changed?: false}), do: :ok
-  defp fits(%{trip: %{removed_at: %DateTime{}}}), do: :ok
+  defp fits(%{changed?: false}, _ops), do: :ok
+  defp fits(%{trip: %{removed_at: %DateTime{}}}, _ops), do: :ok
 
-  defp fits(%{trip: trip, rows: rows}) do
-    if Wire.bytes(trip, rows) <= @max_wire_bytes,
-      do: :ok,
-      else: {:error, {:trip_too_large, trip.title}}
+  defp fits(%{trip: trip, rows: rows} = state, ops) do
+    cond do
+      not Enum.any?(ops, &(&1.op in @growing_ops)) -> :ok
+      Wire.bytes(trip, rows, kept_removed(state)) <= @max_wire_bytes -> :ok
+      true -> {:error, {:trip_too_large, trip.title}}
+    end
   end
+
+  # The removed rows a pull with them carries once the call is written: those
+  # the store held and the call did not bring back, and those it removed, less
+  # any it also added; each while the store keeps it (`kept_from`, when the
+  # caller names one: the store sweeps every row removed before it).
+  defp kept_removed(state) do
+    stored = Enum.reject(state.removed_rows, &(&1.dirty == :new))
+    Enum.filter(state.removed ++ stored, &kept?(&1, state.kept_from))
+  end
+
+  defp kept?(_row, nil), do: true
+  defp kept?(row, kept_from), do: DateTime.compare(row.removed_at, kept_from) != :lt
 
   defp event_words({:added, :stops}, added), do: plural(added.stops, "stop") <> " added"
   defp event_words({:added, :days}, added), do: plural(added.days, "day") <> " added"

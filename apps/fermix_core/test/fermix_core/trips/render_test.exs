@@ -111,12 +111,12 @@ defmodule FermixCore.Trips.RenderTest do
                 - [2] 16:20 Arrive by train
 
                 ## [8] Day 2 · Fri 9 May · Old town
-                - [9] 10:00 Torre de Vale Escuro · 1 h 30 · at Torre de Vale Escuro, Rua da Torre 4, Varonne
+                - [9] 10:00 Torre de Vale Escuro · 1 h 30 · at "Torre de Vale Escuro, Rua da Torre 4, Varonne"
                       then 0.4 km
                 - [10] 11:30 Coffee somewhere
-                - [11] 11:45 Miradouro do Corvo · 45 min · at Miradouro do Corvo, Largo do Corvo, Varonne
+                - [11] 11:45 Miradouro do Corvo · 45 min · at "Miradouro do Corvo, Largo do Corvo, Varonne"
                       then 0.3 km
-                - [15] 20:00 Dinner at Pedra Negra · 1 h · fixed · at Tasca Pedra Negra
+                - [15] 20:00 Dinner at Pedra Negra · 1 h · fixed · at "Tasca Pedra Negra"
                       Table for two, booked\
                 """}
     end
@@ -198,12 +198,12 @@ defmodule FermixCore.Trips.RenderTest do
       assert {:whole, text} = Render.read(trip(), rows, :all, :text)
 
       assert text =~
-               "- [2] A · at Torre de Vale Escuro, Rua da Torre 4, Varonne\n      then under 0.1 km\n"
+               ~s(- [2] A · at "Torre de Vale Escuro, Rua da Torre 4, Varonne"\n      then under 0.1 km\n)
 
       assert text =~
-               "- [3] B · at Miradouro do Corvo, Largo do Corvo, Varonne\n      then 11 km\n"
+               ~s(- [3] B · at "Miradouro do Corvo, Largo do Corvo, Varonne"\n      then 11 km\n)
 
-      refute text =~ "- [4] C · at Miradouro do Corvo, Largo do Corvo, Varonne\n      then"
+      refute text =~ ~s(- [4] C · at "Miradouro do Corvo, Largo do Corvo, Varonne"\n      then)
     end
 
     test "any read past 32 KB is the outline, a line a day, and says to read by day" do
@@ -230,6 +230,48 @@ defmodule FermixCore.Trips.RenderTest do
       end
 
       assert {:whole, _one_day} = Render.read(trip(), rows, {2, 2}, :text)
+    end
+
+    # R3#9: the outline says to read by day, so a day is always readable.
+    test "one day past 32 KB is read whole with its notes cut to fit, and says so" do
+      note = String.duplicate("n", 1_000)
+
+      rows =
+        [day(1), day(2, "Long day")] ++
+          for(n <- 3..41, do: stop(n, "Stop #{n}", %{note: note})) ++
+          [stop(42, "Tip", %{stamped: true, note: note})]
+
+      assert byte_size(elem(Render.read(trip(), rows, :all, :text), 1)) < 1_000
+
+      assert {:whole, text} = Render.read(trip(), rows, {2, 2}, :text)
+      assert byte_size(text) <= Render.max_read_bytes()
+      assert text =~ "## [2] Day 2 · Fri 9 May · Long day\n- [3] Stop 3\n"
+      assert text =~ "\n      " <> String.duplicate("n", 200) <> "…\n- [4] Stop 4\n"
+      assert text =~ ~s(- [42] #{@frame} "Tip"\n      #{@frame} "#{String.duplicate("n", 200)}…")
+      refute text =~ String.duplicate("n", 201)
+
+      assert String.ends_with?(
+               text,
+               "\n\nThis day is too long to read whole, so each note is cut to its first 200 " <>
+                 "characters."
+             )
+    end
+
+    test "one day past 32 KB with its notes left out is still the day, never the outline" do
+      long = String.duplicate("w", 200)
+      rows = [day(1) | for(n <- 2..201, do: stop(n, long, %{note: "Booking 4417"}))]
+
+      for run <- [{1, 1}, :all] do
+        assert {:whole, text} = Render.read(trip(), rows, run, :text)
+        assert byte_size(text) > Render.max_read_bytes()
+        assert text =~ "\n- [201] " <> long <> "\n"
+        refute text =~ "Booking"
+
+        assert String.ends_with?(
+                 text,
+                 "\n\nThis day is too long to read whole, so its notes are left out."
+               )
+      end
     end
   end
 
@@ -320,7 +362,7 @@ defmodule FermixCore.Trips.RenderTest do
       [_, arrive, _, tower, coffee, lookout, dinner] = rows
 
       placements = [
-        %{row: tower, outcome: {:placed, @tower}},
+        %{row: tower, outcome: {:placed, @tower}, kept: false},
         %{
           row: lookout,
           outcome:
@@ -330,11 +372,12 @@ defmodule FermixCore.Trips.RenderTest do
                address: "Largo do Corvo, 4050 Varonne",
                location: %{latitude: 41.1436, longitude: -8.6113},
                source_url: "https://maps.apple.com/place?place-id=I5W7P"
-             }}
+             }},
+          kept: false
         },
-        %{row: coffee, outcome: {:none, :not_found}},
-        %{row: arrive, outcome: {:none, :rate_limited}},
-        %{row: dinner, outcome: {:none, :rate_limited}}
+        %{row: coffee, outcome: {:none, :not_found}, kept: true},
+        %{row: arrive, outcome: {:none, :rate_limited}, kept: false},
+        %{row: dinner, outcome: {:none, :rate_limited}, kept: false}
       ]
 
       moved = [%{row: dinner, from: ~D[2031-05-09], to: ~D[2031-05-10]}]
@@ -345,7 +388,7 @@ defmodule FermixCore.Trips.RenderTest do
                [9] "Torre de Vale Escuro": "Torre de Vale Escuro, Rua da Torre 4, Varonne"
                Not placed, nearest by another name:
                [11] "Miradouro do Corvo": "Corvo Lookout, Largo do Corvo, 4050 Varonne" · https://maps.apple.com/place?place-id=I5W7P
-               No place found: [10] "Coffee somewhere".
+               No place found: [10] "Coffee somewhere" (place unchanged).
                Not looked up, the place search is rate limited: [2] "Arrive by train", [15] "Dinner at Pedra Negra".
                Dates moved: [15] "Dinner at Pedra Negra" (fixed) is now Sat 10 May 2031.\
                """
@@ -355,14 +398,16 @@ defmodule FermixCore.Trips.RenderTest do
       tour = stop(2, "Tour", %{stamped: true})
 
       assert Render.answer(applied([day(1), tour]), [
-               %{row: tour, outcome: {:none, {:no_backend, "no key"}}}
+               %{row: tour, outcome: {:none, {:no_backend, "no key"}}, kept: false}
              ]) =~
                ~s|Not looked up, no place search is set up here (no key): [2] #{@frame} "Tour".|
     end
 
     test "a removed trip" do
       removed = applied(rows(), %{trip: trip(%{removed_at: @now})})
-      assert Render.answer(removed, []) == "Varonne · removed, restorable for 30 days"
+
+      assert Render.answer(removed, []) ==
+               "Varonne · removed; it can be restored from the Fermix app for 30 days"
     end
   end
 
@@ -372,6 +417,17 @@ defmodule FermixCore.Trips.RenderTest do
 
     assert Render.place_link(%{@tavern | "name" => "Café & Bar"}) ==
              "https://maps.apple.com/?ll=41.1466,-8.6113&q=Caf%C3%A9+%26+Bar"
+
+    # R3#10: near the equator or the prime meridian, never an exponent.
+    near_zero = %{@tavern | "location" => %{"latitude" => 51.5, "longitude" => 5.0e-5}}
+
+    assert Render.place_link(near_zero) ==
+             "https://maps.apple.com/?ll=51.5,0.00005&q=Tasca+Pedra+Negra"
+
+    tiny = %{@tavern | "location" => %{"latitude" => -1.25e-7, "longitude" => 0.0}}
+
+    assert Render.place_link(tiny) ==
+             "https://maps.apple.com/?ll=-0.000000125,0.0&q=Tasca+Pedra+Negra"
   end
 
   test "a trip's dates as the per-turn line gives them" do
