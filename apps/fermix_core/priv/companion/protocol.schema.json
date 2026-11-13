@@ -258,7 +258,7 @@
     },
     "msg": {
       "type": "object",
-      "description": "The mobile wire's msg shape. text must not be blank unless attach_ids names at least one file. Since version 7, attach_ids names files whose attach_file was answered present, and only a version 7 connection placed as the owner's may send a non-empty one; any other is refused with error attachments_unsupported and the connection is closed. A file the daemon no longer holds fails the message after accepted with error request_failed, its sentence and client_msg_id.",
+      "description": "The mobile wire's msg shape. text must not be blank unless attach_ids names at least one file. Since version 7, attach_ids names files whose attach_file was answered present, and only a connection on version 7 or later placed as the owner's may send a non-empty one; any other is refused with error attachments_unsupported and the connection is closed. A file the daemon no longer holds fails the message after accepted with error request_failed, its sentence and client_msg_id.",
       "required": ["type", "client_msg_id", "profile_id", "text", "attach_ids"],
       "properties": {
         "type": { "const": "msg" },
@@ -411,7 +411,7 @@
     },
     "attach_file": {
       "type": "object",
-      "description": "Version 7. Hands the daemon a file the client wrote at <attachments.dir>/<attach_id> (mode 0600) before sending this; there is no path field. The daemon reads it into the media store the phone's uploads use, checking size_bytes and sha256 under the store's limits, removes the file whatever came of it, and answers attach_status (present) or error request_failed with its sentence and attach_id. kind is a hint, as the phone's is. Taken only from a version 7 connection placed as the owner's; any other is refused with request_failed and its file removed unread.",
+      "description": "Version 7. Hands the daemon a file the client wrote at <attachments.dir>/<attach_id> (mode 0600) before sending this; there is no path field. The daemon reads it into the media store the phone's uploads use, checking size_bytes and sha256 under the store's limits, removes the file whatever came of it, and answers attach_status (present) or error request_failed with its sentence and attach_id. kind is a hint, as the phone's is. Taken only from a connection on version 7 or later placed as the owner's; any other is refused with request_failed and its file removed unread.",
       "x-since-version": 7,
       "required": ["type", "attach_id", "kind", "mime", "size_bytes", "sha256"],
       "properties": {
@@ -508,7 +508,7 @@
     },
     "reasoning": {
       "type": "object",
-      "description": "Version 6. The model's summary of one step of its reasoning, as the provider wrote it (markdown, often opening with a bold line naming the step), trimmed and cut on a character. Live-only, like text_delta: no seq, never stored. Sent only to a connection on version 6.",
+      "description": "Version 6. The model's summary of one step of its reasoning, as the provider wrote it (markdown, often opening with a bold line naming the step), trimmed and cut on a character. Live-only, like text_delta: no seq, never stored. Sent only to a connection on version 6 or later.",
       "x-since-version": 6,
       "required": ["type", "turn_id", "text"],
       "properties": {
@@ -548,7 +548,7 @@
     },
     "turn_done": {
       "type": "object",
-      "description": "Version 2. The turn completed and wrote no reply: it ends the turn's draft with nothing kept. Live-only, like turn_error, and sent only to a connection whose hello declared version 2.",
+      "description": "Version 2. The turn completed and wrote no reply: it ends the turn's draft with nothing kept. Live-only, like turn_error, and sent only to a connection whose hello declared version 2 or later.",
       "x-since-version": 2,
       "required": ["type", "turn_id"],
       "properties": {
@@ -587,7 +587,7 @@
     },
     "row_updated": {
       "type": "object",
-      "description": "Version 3. A row already written changed: its text (a voice note's transcript replaced it), its media refs, or its link previews (one was stored). Carries no content: a client that holds the row reads it again from history. Sent only to a connection on version 3.",
+      "description": "Version 3. A row already written changed: its text (a voice note's transcript replaced it), its media refs, or its link previews (one was stored). Carries no content: a client that holds the row reads it again from history. Sent only to a connection on version 3 or later.",
       "x-since-version": 3,
       "required": ["type", "profile_id", "server_seq"],
       "properties": {
@@ -658,7 +658,7 @@
     },
     "media_path": {
       "type": "object",
-      "description": "Version 3. The grant answering media_fetch: path is an absolute managed file, $FERMIX_HOME/companion/media/<ref><ext>, held for this connection until it sends media_release for the ref or closes. kind, mime and size_bytes are the ones the row names for the ref; sha256 equals ref, and the file's bytes were checked against it when it was made. Sent only to a connection on version 3.",
+      "description": "Version 3. The grant answering media_fetch: path is an absolute managed file, $FERMIX_HOME/companion/media/<ref><ext>, held for this connection until it sends media_release for the ref or closes. kind, mime and size_bytes are the ones the row names for the ref; sha256 equals ref, and the file's bytes were checked against it when it was made. Sent only to a connection on version 3 or later.",
       "x-since-version": 3,
       "required": ["type", "ref", "path", "kind", "mime", "size_bytes", "sha256"],
       "properties": {
@@ -673,7 +673,7 @@
     },
     "media_missing": {
       "type": "object",
-      "description": "Version 3. Nothing to grant for ref: no row of the profile names it, the media store no longer holds its bytes, its bytes no longer match the row, or the phone channel whose store keeps them is off. Sent only to a connection on version 3.",
+      "description": "Version 3. Nothing to grant for ref: no row of the profile names it, the media store no longer holds its bytes, its bytes no longer match the row, or the phone channel whose store keeps them is off. Sent only to a connection on version 3 or later.",
       "x-since-version": 3,
       "required": ["type", "ref"],
       "properties": {
@@ -683,7 +683,7 @@
     },
     "proposal": {
       "type": "object",
-      "description": "Version 4. A task under a mandate in approve mode wants to act and waits for the owner: its card. Sent when the proposal is stored, and again after server_hello for every proposal still waiting, oldest first; a client keys cards by proposal_id. Sent only to a connection on version 4 that the daemon placed as the owner's.",
+      "description": "Version 4. A task under a mandate in approve mode wants to act and waits for the owner: its card. Sent when the proposal is stored, and again after server_hello for every proposal still waiting, oldest first; a client keys cards by proposal_id. Sent only to a connection on version 4 or later that the daemon placed as the owner's.",
       "x-since-version": 4,
       "required": ["type", "profile_id", "proposal"],
       "properties": {
@@ -694,7 +694,7 @@
     },
     "proposal_resolved": {
       "type": "object",
-      "description": "Version 4. A proposal left waiting: denied, expired or refused, or confirmed once its call has finished (result_status set), whichever surface decided it. sentence is Fermix's; result_text is outside text, what the tool or the validator answered, at most 2,000 characters. Sent only to a connection on version 4 that the daemon placed as the owner's.",
+      "description": "Version 4. A proposal left waiting: denied, expired or refused, or confirmed once its call has finished (result_status set), whichever surface decided it. sentence is Fermix's; result_text is outside text, what the tool or the validator answered, at most 2,000 characters. Sent only to a connection on version 4 or later that the daemon placed as the owner's.",
       "x-since-version": 4,
       "required": ["type", "profile_id", "proposal_id", "state", "sentence"],
       "properties": {
@@ -709,7 +709,7 @@
     },
     "home_status_changed": {
       "type": "object",
-      "description": "Version 6. Always On's summary (management home.status.summary) changed: its state, its action, its problem kind, or the sentence of a step. Carries no content: the client reads home.status over management for what it is now. Sent once after server_hello unless Always On is off, then at each change, never while it stays off, only to a connection on version 6. After a move, the desktop's engine sends it for its own home.status, never the server's (PROTOCOL.md, When Always On changes).",
+      "description": "Version 6. Always On's summary (management home.status.summary) changed: its state, its action, its problem kind, or the sentence of a step. Carries no content: the client reads home.status over management for what it is now. Sent once after server_hello unless Always On is off, then at each change, never while it stays off, only to a connection on version 6 or later. After a move, the desktop's engine sends it for its own home.status, never the server's (PROTOCOL.md, When Always On changes).",
       "x-since-version": 6,
       "required": ["type"],
       "properties": {
@@ -718,7 +718,7 @@
     },
     "checklists": {
       "type": "object",
-      "description": "Version 6. The index of the owner's lists, every live list in picker order: the answer to checklists_pull, and sent again, whole, to a connection that pulled it after any list changes, at most once per 100 ms. Sent only to a connection on version 6 that the daemon placed as the owner's and that pulled the index.",
+      "description": "Version 6. The index of the owner's lists, every live list in picker order: the answer to checklists_pull, and sent again, whole, to a connection that pulled it after any list changes, at most once per 100 ms. Sent only to a connection on version 6 or later that the daemon placed as the owner's and that pulled the index.",
       "x-since-version": 6,
       "required": ["type", "profile_id", "lists"],
       "properties": {
@@ -729,7 +729,7 @@
     },
     "checklist": {
       "type": "object",
-      "description": "Version 6. One whole list: the answer to checklist_pull, and sent again, whole, to every connection holding it after each committed change to it, whoever made it, at most once per 100 ms per list and carrying the rev it ended on. A client drops one whose rev is below the one it shows. made maps the client_msg_id of each create or add a device sent since the list's last push to the id it made, a create's list_id or an add's row_id; a client matches the ids it sent and ignores the rest. Sent only to a connection on version 6 that the daemon placed as the owner's and that holds the list.",
+      "description": "Version 6. One whole list: the answer to checklist_pull, and sent again, whole, to every connection holding it after each committed change to it, whoever made it, at most once per 100 ms per list and carrying the rev it ended on. A client drops one whose rev is below the one it shows. made maps the client_msg_id of each create or add a device sent since the list's last push to the id it made, a create's list_id or an add's row_id; a client matches the ids it sent and ignores the rest. Sent only to a connection on version 6 or later that the daemon placed as the owner's and that holds the list.",
       "x-since-version": 6,
       "required": ["type", "profile_id", "list"],
       "properties": {
@@ -776,7 +776,7 @@
     },
     "proposalCard": {
       "type": "object",
-      "description": "A proposal as the owner decides it. Fermix's record (ids, the owner's own names, times, where an answer came from, status_sentence) and summary carry no outside text; outside holds everything a model or a stranger wrote, kept apart by structure. A mandate's card names its call (mandate, tool, outside.args_text); since version 5 a watcher's follow-up card names the follow-up instead (follow_up) and carries no call, and only a version 5 connection is sent one. Times are RFC 3339 UTC. An optional field is absent when it does not apply, never null.",
+      "description": "A proposal as the owner decides it. Fermix's record (ids, the owner's own names, times, where an answer came from, status_sentence) and summary carry no outside text; outside holds everything a model or a stranger wrote, kept apart by structure. A mandate's card names its call (mandate, tool, outside.args_text); since version 5 a watcher's follow-up card names the follow-up instead (follow_up) and carries no call, and only a connection on version 5 or later is sent one. Times are RFC 3339 UTC. An optional field is absent when it does not apply, never null.",
       "required": [
         "proposal_id",
         "state",

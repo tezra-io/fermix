@@ -65,7 +65,7 @@ defmodule FermixChannels.Channels.Mobile do
          {:ok, client_id} <- required(payload, "client_msg_id"),
          {:ok, text} <- binary(payload, "text"),
          {:ok, attachments} <- attachments(payload) do
-      {:ok, [message(client_id, profile, text, attachments, "msg") |> draws_lists(event)]}
+      {:ok, [message(client_id, profile, text, attachments, "msg") |> draws(event)]}
     end
   end
 
@@ -73,7 +73,7 @@ defmodule FermixChannels.Channels.Mobile do
     with {:ok, profile} <- profile(payload),
          {:ok, client_id} <- required(payload, "client_msg_id"),
          {:ok, command} <- command_text(payload) do
-      {:ok, [message(client_id, profile, command, [], "command") |> draws_lists(event)]}
+      {:ok, [message(client_id, profile, command, [], "command") |> draws(event)]}
     end
   end
 
@@ -366,12 +366,17 @@ defmodule FermixChannels.Channels.Mobile do
     })
   end
 
-  # Whether the phone's list channel pulled the index (M85 E4): read off its
-  # session, never the payload, as the Mac's connection marks its turns.
-  defp draws_lists(%Message{} = message, %{draws_lists: true}),
-    do: %{message | metadata: Map.put(message.metadata, :draws_lists, true)}
+  # What the phone draws, read off its session, never the payload, as the
+  # Mac's connection marks its turns: its lists once its list channel pulled
+  # the index (M85 E4), its events from mobile 3 (`ReplyBlocks.drawn_types/3`).
+  defp draws(%Message{} = message, event) do
+    metadata =
+      [:draws_lists, :draws_events]
+      |> Enum.filter(&(Map.get(event, &1) == true))
+      |> Enum.reduce(message.metadata, &Map.put(&2, &1, true))
 
-  defp draws_lists(%Message{} = message, _event), do: message
+    %{message | metadata: metadata}
+  end
 
   defp attachments(payload), do: {:ok, Map.get(payload, "attachments", [])}
 

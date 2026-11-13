@@ -15,6 +15,7 @@ defmodule FermixChannels.Mobile.ProtocolContractTest do
   alias FermixCore.Computers.Offers.Files, as: FilesOffer
   alias FermixCore.Computers.Origin
   alias FermixCore.Computers.Outcome
+  alias FermixCore.ReplyBlocks
   alias FermixTestSupport.WireSchema
 
   @priv_dir Application.app_dir(:fermix_core, "priv/mobile")
@@ -251,9 +252,55 @@ defmodule FermixChannels.Mobile.ProtocolContractTest do
       payload = Map.drop(header, ~w(v t seq))
 
       assert type in Protocol.server_events()
-      assert {:ok, encoded} = Protocol.encode_server_frame(type, payload, seq)
+
+      assert {:ok, encoded} =
+               Protocol.encode_server_frame(type, payload, seq, <<>>, version: header["v"])
+
       assert decode_header(encoded) == header
     end
+  end
+
+  # Mobile 3 is the version in which a row may carry any number of block
+  # types (M89 §06): the goldens at 3 carry an events block in each form a
+  # phone decodes, none at 2 does, and a session at 2 is sent each without it.
+  test "the protocol 3 goldens carry a reply's events, which a session at 2 is never sent", %{
+    protocol: protocol
+  } do
+    headers = jsonl(@server_fixtures)
+    {current, older} = Enum.split_with(headers, &(&1["v"] == Protocol.protocol_version()))
+
+    events =
+      for header <- current,
+          header["t"] in ~w(text_done row history_page),
+          row <- [header | Map.get(header, "messages", [])],
+          %{"type" => "events"} = block <- Map.get(row, "blocks", []),
+          do: {header, block}
+
+    assert Enum.any?(events, fn {header, _block} -> header["t"] == "text_done" end)
+    assert Enum.any?(events, fn {header, _block} -> header["t"] == "row" end)
+    assert Enum.any?(events, fn {header, _block} -> header["t"] == "history_page" end)
+
+    cards = for {_header, block} <- events, card <- block["events"], do: card
+    assert Enum.any?(cards, &(&1["yearly"] == true))
+    assert Enum.any?(cards, &(&1["change"] == "cancelled"))
+    assert Enum.any?(cards, &(&1["change"] == "snoozed"))
+
+    for header <- older, row <- [header | Map.get(header, "messages", [])] do
+      refute Enum.any?(Map.get(row, "blocks", []), &(&1["type"] == "events")), inspect(header)
+    end
+
+    for {header, _block} <- events do
+      payload = Map.drop(header, ~w(v t seq))
+      old = ReplyBlocks.for_session(header["t"], payload, :mobile, 2)
+
+      refute old |> Jason.encode!() |> String.contains?(~s("type":"events")),
+             inspect(header["t"])
+
+      assert {:ok, _frame} = Protocol.encode_server_frame(header["t"], old, 1, <<>>, version: 2)
+    end
+
+    assert protocol =~ "**Protocol 3: a row may carry any number of block types.**"
+    assert protocol =~ "**An engine speaks the oldest version it serves**"
   end
 
   test "binary fixture wrappers reconstruct and round-trip exact frames" do
@@ -272,7 +319,8 @@ defmodule FermixChannels.Mobile.ProtocolContractTest do
                  header["t"],
                  Map.drop(header, ~w(v t seq)),
                  header["seq"],
-                 bytes
+                 bytes,
+                 version: header["v"]
                )
 
       assert encoded == frame(header, bytes)
@@ -697,7 +745,7 @@ defmodule FermixChannels.Mobile.ProtocolContractTest do
 
     for computer <- taken ++ refused ++ [[]] do
       payload = ack |> Map.drop(~w(v t seq)) |> put_in(["caps", "computer"], computer)
-      encoded? = match?({:ok, _frame}, Protocol.encode_server_frame("hello_ack", payload, 1))
+      encoded? = match?({:ok, _frame}, encode_at(ack, "hello_ack", payload))
       assert encoded? == (server_errors(server_event("hello_ack", payload), schema) == [])
       assert encoded? == computer in taken, inspect(computer)
     end
@@ -907,7 +955,7 @@ defmodule FermixChannels.Mobile.ProtocolContractTest do
 
     for {flag, taken?} <- [{true, true}, {false, true}, {"yes", false}, {1, false}] do
       payload = ack |> Map.drop(~w(v t seq)) |> put_in(["caps", "computer", "invoke"], flag)
-      encoded? = match?({:ok, _frame}, Protocol.encode_server_frame("hello_ack", payload, 1))
+      encoded? = match?({:ok, _frame}, encode_at(ack, "hello_ack", payload))
       assert encoded? == (server_errors(server_event("hello_ack", payload), schema) == [])
       assert encoded? == taken?, inspect(flag)
     end
@@ -1333,11 +1381,15 @@ defmodule FermixChannels.Mobile.ProtocolContractTest do
     Map.merge(payload, %{"v" => 2, "t" => type, "seq" => 1})
   end
 
+  # A golden's payload, changed, encoded again at the golden's own version.
+  defp encode_at(golden, type, payload),
+    do: Protocol.encode_server_frame(type, payload, 1, <<>>, version: golden["v"])
+
   defp hello_ack_payload do
     %{
       "session_id" => "session",
       "min_version" => 2,
-      "max_version" => 2,
+      "max_version" => 3,
       "profiles" => [%{"id" => "main", "name" => "Fermix"}],
       "candidates" => [],
       "history_head_seq" => 0,

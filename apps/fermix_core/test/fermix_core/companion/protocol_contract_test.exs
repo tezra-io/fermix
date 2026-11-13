@@ -1180,7 +1180,10 @@ defmodule FermixCore.Companion.ProtocolContractTest do
   # dinner and the snoozed call, each the record its tool returns.
   defp engine_cards do
     now = ~U[2026-11-12 15:05:00Z]
-    plan = fn kind, form -> kind |> Defaults.plan_for(form) |> elem(1) |> Defaults.encode_plan() end
+
+    plan = fn kind, form ->
+      kind |> Defaults.plan_for(form) |> elem(1) |> Defaults.encode_plan()
+    end
 
     dentist =
       golden_event("evt_k2m4q7xd3np5rtwa", "Dentist", "appointment", %{

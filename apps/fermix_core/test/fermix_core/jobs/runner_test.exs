@@ -1526,6 +1526,51 @@ defmodule FermixCore.Jobs.RunnerTest do
     assert FermixCore.ReplyBlocks.take({:scheduled_job, job.id, run.id}) == []
   end
 
+  # EVENTS_DRAWN_AS_CARDS §04: a morning brief that read event_list draws its
+  # agenda, so the delivery keeps the events beside the lists.
+  test "delivers the events the run's event tools returned as the message's events block", %{
+    repo: repo,
+    capability_registry: capability_registry,
+    output_base_dir: output_base_dir
+  } do
+    assert {:ok, {job, run}} =
+             create_claimed_job(repo,
+               name: "Morning Brief",
+               schedule: "every 15 minutes",
+               task_prompt: "What is coming up this week?",
+               delivery_mode: "channel",
+               delivery_target: %{"platform" => "telegram", "chat_id" => "123"}
+             )
+
+    card = %{
+      "event_id" => "evt_k2m4q7xd3np5rtwa",
+      "title" => "Dentist",
+      "kind" => "appointment",
+      "date" => "2026-11-13",
+      "time" => "10:30",
+      "timezone" => "America/New_York",
+      "status" => "active",
+      "when" => "Friday, November 13 at 10:30 AM EST"
+    }
+
+    :ok = FermixCore.ReplyBlocks.put_events({:scheduled_job, job.id, run.id}, [card])
+
+    assert_runner_exits_normally(
+      job,
+      run,
+      repo: repo,
+      capability_registry: capability_registry,
+      output_base_dir: output_base_dir,
+      delivery_adapter: RecordingDelivery,
+      delivery_opts: [test_pid: self()],
+      script: [%{content: "The dentist on Friday."}]
+    )
+
+    assert_receive {:delivery_send, "123", "The dentist on Friday.", opts}
+    assert Keyword.fetch!(opts, :blocks) == [%{"type" => "events", "events" => [card]}]
+    assert FermixCore.ReplyBlocks.take({:scheduled_job, job.id, run.id}) == []
+  end
+
   test "skips delivery when the final response is the silent marker", %{
     repo: repo,
     capability_registry: capability_registry,

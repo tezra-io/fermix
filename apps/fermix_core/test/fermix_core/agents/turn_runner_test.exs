@@ -2408,6 +2408,45 @@ defmodule FermixCore.Agents.TurnRunnerTest do
       end
     end
 
+    # EVENTS_DRAWN_AS_CARDS §04: a turn whose connection draws events
+    # (companion 8, mobile 3, stamped by the channel) is told its events are
+    # drawn under the reply, after the list rules and before the date; every
+    # other turn is told nothing new, a guest's included.
+    test "the events line rides only a companion or phone turn whose connection draws events",
+         %{repo: repo} do
+      line = "Events you store, change or list are drawn under your reply"
+
+      for channel <- ["companion", "mobile"] do
+        system_run =
+          %{channel: channel, chat_id: "main", metadata: %{draws_events: true}}
+          |> capture_prompt(memory_repo: repo)
+          |> Enum.take_while(&(&1.role == "system"))
+
+        rules =
+          Enum.find_index(system_run, &(&1.content =~ "lives in a list and never in memory"))
+
+        events = Enum.find_index(system_run, &(&1.content =~ line))
+        date = Enum.find_index(system_run, &(&1.content =~ "Current date:"))
+        assert rules < events and events < date, channel
+      end
+
+      for msg <- [
+            %{channel: "companion", chat_id: "main"},
+            %{channel: "companion", chat_id: "main", metadata: %{draws_lists: true}},
+            %{channel: "mobile", chat_id: "main", metadata: %{draws_events: false}},
+            put_in(private_chat("40041"), [:metadata, :draws_events], true),
+            Map.merge(
+              %{channel: "companion", chat_id: "main", metadata: %{draws_events: true}},
+              %{
+                source_trust: :guest
+              }
+            )
+          ] do
+        messages = capture_prompt(msg, memory_repo: repo)
+        refute Enum.any?(messages, &(&1.content =~ line)), inspect(msg)
+      end
+    end
+
     test "a tick leaves every list line of the prompt byte-identical", %{repo: repo, owner: owner} do
       before = list_lines(capture_prompt(private_chat("40041"), memory_repo: repo))
 

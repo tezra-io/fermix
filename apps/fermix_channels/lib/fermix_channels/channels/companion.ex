@@ -481,7 +481,8 @@ defmodule FermixChannels.Channels.Companion do
       channel: @channel,
       chat_id: profile,
       reply_target: profile,
-      metadata: metadata |> put_caller(event) |> put_draws_lists(event),
+      metadata:
+        metadata |> put_caller(event) |> put_draws_lists(event) |> put_draws_events(event),
       attachments: declared_attachments(event)
     })
   end
@@ -507,6 +508,13 @@ defmodule FermixChannels.Channels.Companion do
   # pulled their index (M85 §07), read off the connection, never the payload.
   defp put_draws_lists(metadata, %{draws_lists: true}), do: Map.put(metadata, :draws_lists, true)
   defp put_draws_lists(metadata, _event), do: metadata
+
+  # Whether it draws the events a reply carries: it negotiated version 8
+  # (`ReplyBlocks.drawn_types/3`), read off the connection, never the payload.
+  defp put_draws_events(metadata, %{draws_events: true}),
+    do: Map.put(metadata, :draws_events, true)
+
+  defp put_draws_events(metadata, _event), do: metadata
 
   @doc "The send options a reply to `message` carries: its turn, request and attempt."
   @spec reply_opts(Message.t()) :: keyword()

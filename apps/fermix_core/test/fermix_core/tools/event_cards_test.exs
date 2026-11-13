@@ -143,7 +143,10 @@ defmodule FermixCore.Tools.EventCardsTest do
       _ = events(holder)
 
       {:ok, result} =
-        EventUpdate.execute(%{"event_id" => stored["event_id"], "title" => "Dentist, Dr Lee"}, context)
+        EventUpdate.execute(
+          %{"event_id" => stored["event_id"], "title" => "Dentist, Dr Lee"},
+          context
+        )
 
       updated = payload(result)
       assert [card] = events(holder)
@@ -199,12 +202,17 @@ defmodule FermixCore.Tools.EventCardsTest do
       snooze = %{"type" => "datetime", "date" => in_days(30), "time" => "15:40:00"}
 
       {:ok, result} =
-        ReminderSnooze.execute(%{"reminder_id" => reminder["reminder_id"], "snooze" => snooze}, context)
+        ReminderSnooze.execute(
+          %{"reminder_id" => reminder["reminder_id"], "snooze" => snooze},
+          context
+        )
 
       assert payload(result)["status"] == "snoozed"
       assert [card] = events(holder)
       assert %{"change" => "snoozed", "rings" => "on Telegram"} = card
-      assert card["reminds"] =~ ~r/\Aagain on [A-Z][a-z]+day, [A-Z][a-z]+ \d{1,2}(, \d{4})? at 3:40 PM E[SD]T\z/
+
+      assert card["reminds"] =~
+               ~r/\Aagain on [A-Z][a-z]+day, [A-Z][a-z]+ \d{1,2}(, \d{4})? at 3:40 PM E[SD]T\z/
     end
   end
 
@@ -216,7 +224,10 @@ defmodule FermixCore.Tools.EventCardsTest do
       stored = dentist(context)
 
       {:ok, %{success: true}} =
-        EventUpdate.execute(%{"event_id" => stored["event_id"], "title" => "Dentist, moved"}, context)
+        EventUpdate.execute(
+          %{"event_id" => stored["event_id"], "title" => "Dentist, moved"},
+          context
+        )
 
       assert [%{"event_id" => id, "change" => "changed", "title" => "Dentist, moved"}] =
                events(holder)
@@ -237,7 +248,14 @@ defmodule FermixCore.Tools.EventCardsTest do
       end
 
       _ = events(holder)
-      late = store!(context, %{"title" => "Late one", "kind" => "deadline", "when" => %{"type" => "date", "date" => in_days(90)}})
+
+      late =
+        store!(context, %{
+          "title" => "Late one",
+          "kind" => "deadline",
+          "when" => %{"type" => "date", "date" => in_days(90)}
+        })
+
       {:ok, %{success: true}} = EventList.execute(%{}, context)
 
       cards = events(holder)
@@ -290,7 +308,8 @@ defmodule FermixCore.Tools.EventCardsTest do
       {:ok, %{success: false}} =
         EventUpdate.execute(%{"event_id" => "evt_aaaaaaaaaaaaaaaa", "title" => "x"}, context)
 
-      {:ok, %{success: false}} = EventList.execute(%{"from" => "2020-01-01", "to" => "2029-01-01"}, context)
+      {:ok, %{success: false}} =
+        EventList.execute(%{"from" => "2020-01-01", "to" => "2029-01-01"}, context)
 
       assert ReplyBlocks.take(holder, @chat) == []
     end

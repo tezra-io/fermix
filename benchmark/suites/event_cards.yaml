@@ -1,0 +1,104 @@
+suite: event_cards
+risk: isolated_mutation
+title: "Event cards — where no card is drawn, the reply states the event"
+description: >
+  EVENTS_DRAWN_AS_CARDS §05 asks two things of a reply about an event: on a
+  connection that draws events (companion 8, mobile 3) it is one sentence,
+  because the card under it carries the event, and on every other channel it
+  still states the event's date. This suite holds the second half, on the two
+  surfaces the runner drives unattended: `fermix ask` (channel `cli`, which,
+  like Telegram, is told nothing about cards) and the Mac chat socket at the
+  eval driver's companion version 7, a connection that does not draw events,
+  is sent no events block and whose turns are told nothing new. The drawn
+  half does not run here: the companion driver (`bin/evallib/companion.py`)
+  speaks version 7 alone and takes no version per case, and no driver speaks
+  the mobile wire. Every ask case removes what it stored; a companion case is
+  one turn by the driver's contract, so it stores a date months out, after any
+  run window.
+defaults:
+  timeout_ms: 180000
+  judge: true
+  expect:
+    status: ok
+    no_tool_errors: true
+
+scenarios:
+  - id: undrawn_reply_states_the_date
+    title: "On a channel that draws no card, a reply about an event states its date"
+    severity: critical
+    tags: [temporal, cards]
+    cases:
+      - id: stored_appointment_by_ask
+        turns:
+          - query: "Remind me about the dentist on December 11 at 10:30 am."
+            expect:
+              tools_any: [event_store]
+              reply_matches: "(?i)\\b(december|dec)\\b"
+          - query: "Thanks. Cancel that dentist reminder now, I booked it somewhere else."
+            expect:
+              tools_any: [event_remove]
+        expect:
+          max_cost_usd: 1.5
+        rubric: >
+          The first reply confirms the stored appointment in words that stand on
+          their own: the absolute date (December 11) and the time (10:30 AM),
+          and when it will remind. Nothing here draws the event as a card, so a
+          reply that only says "Done" or points at a card, a list or something
+          shown elsewhere fails. The second reply confirms the dentist reminder
+          was cancelled, by name.
+      - id: listed_agenda_by_ask
+        turns:
+          - query: "Note that my nephew Ilan's birthday is on October 3."
+            expect:
+              tools_any: [event_store]
+          - query: "What do I have coming up?"
+            expect:
+              tools_any: [event_list]
+              reply_matches: "(?i)\\b(october|oct)\\b"
+          - query: "Take Ilan's birthday off again, I'll keep it in my own calendar."
+            expect:
+              tools_any: [event_remove]
+        expect:
+          max_cost_usd: 2.0
+        rubric: >
+          The second reply lists what is coming up from the stored events, and
+          states Ilan's birthday with its date (October 3) in words, since
+          nothing here draws the agenda as cards; leaving the date out, or
+          referring to a card or list shown elsewhere, fails. The last reply
+          confirms the birthday was removed, by name.
+
+  - id: mac_chat_at_seven_states_the_date
+    title: "The Mac chat on a version that draws no events states the event's date"
+    severity: critical
+    tags: [temporal, cards, companion]
+    cases:
+      - id: haircut_in_the_mac_chat
+        drive: companion
+        query: "I've got a haircut on January 20 at 4pm, can you remind me?"
+        expect:
+          tools_any: [event_store]
+          reply_matches: "(?i)\\b(january|jan)\\b"
+          max_cost_usd: 1.0
+          wire:
+            events_all: [accepted, turn_started, text_done]
+            events_none: [turn_error]
+        rubric: >
+          Confirms the stored haircut reminder in words that stand on their
+          own: the absolute date (January 20) and the time (4:00 PM), and when
+          it will remind. This chat draws no event card on its version, so a
+          reply that leaves the date out or points at a card fails.
+      - id: gym_fee_in_the_mac_chat
+        drive: companion
+        query: "Remind me on February 9 to pay the gym fee."
+        expect:
+          tools_any: [event_store]
+          reply_matches: "(?i)\\b(february|feb)\\b"
+          max_cost_usd: 1.0
+          wire:
+            events_all: [accepted, turn_started, text_done]
+            events_none: [turn_error]
+        rubric: >
+          Stores exactly the requested reminder and confirms it in words that
+          stand on their own, with its absolute date (February 9). This chat
+          draws no event card on its version, so a reply that leaves the date
+          out or points at a card fails.

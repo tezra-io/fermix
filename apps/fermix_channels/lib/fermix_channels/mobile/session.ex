@@ -111,6 +111,16 @@ defmodule FermixChannels.Mobile.Session do
   channel has pulled the index (`:list_channel_draws`), each `msg` and
   `command` this session queues says it draws lists, so the phone's turns are
   told their lists are drawn under the reply.
+
+  ## Blocks under a reply (mobile 3)
+
+  Every frame is encoded after the one filter a reply's blocks leave by
+  (`FermixCore.ReplyBlocks.for_session/4`): a `text_done`, a `row` and each
+  message of a `history_page` keep only the block types this session's
+  negotiated version carries, so a phone at mobile 2 is sent only `places`
+  and `checklists`. Each `msg` and `command` this session queues says what
+  it draws by the same answer (`ReplyBlocks.drawn_types/3`): its lists once
+  its list channel pulled the index, its events from mobile 3.
   """
 
   require Logger
@@ -146,6 +156,7 @@ defmodule FermixChannels.Mobile.Session do
   alias FermixCore.Computers.Store, as: ComputerStore
   alias FermixCore.Computers.Versions
   alias FermixCore.Management.Protocol, as: ManagementProtocol
+  alias FermixCore.ReplyBlocks
   alias FermixCore.Setup.ConfigStore
 
   @max_wire_bytes 65_535
@@ -1613,7 +1624,7 @@ defmodule FermixChannels.Mobile.Session do
     router = state.event_router
     context = ingress_context(state)
     opts = router_opts(state)
-    event = if state.draws_lists?, do: Map.put(event, :draws_lists, true), else: event
+    event = with_draws(event, state)
 
     fn ->
       case router.(event, context, opts) do
@@ -1621,6 +1632,18 @@ defmodule FermixChannels.Mobile.Session do
         {:error, reason} -> report_request_failure(event, context, opts, reason)
       end
     end
+  end
+
+  # What this phone draws, by the one answer that also decides which blocks
+  # it is sent (`ReplyBlocks.drawn_types/3`): its lists once its list channel
+  # pulled the index, its events from mobile 3.
+  defp with_draws(event, state) do
+    pulled = if state.draws_lists?, do: [:lists], else: []
+    drawn = ReplyBlocks.drawn_types(:mobile, state.negotiated_version, pulled)
+
+    [draws_lists: "checklists", draws_events: "events"]
+    |> Enum.filter(fn {_key, type} -> type in drawn end)
+    |> Enum.reduce(event, fn {key, _type}, event -> Map.put(event, key, true) end)
   end
 
   defp report_request_failure(event, context, opts, reason) do
@@ -2176,15 +2199,21 @@ defmodule FermixChannels.Mobile.Session do
     end)
   end
 
+  # Every frame this session writes is encoded here, after the one filter a
+  # reply's blocks leave by: a `text_done`, a `row` and a history page's
+  # messages keep only the block types this session's version carries
+  # (`ReplyBlocks.for_session/4`; mobile 2 is sent no `events`).
   defp encode_plaintexts(event, state) do
+    version = Map.get(state, :negotiated_version)
+
     with {:ok, type, payload, bytes} <- normalize_logical_event(event) do
       call_encoder(
         state.encode_server,
         type,
-        payload,
+        ReplyBlocks.for_session(type, payload, :mobile, version),
         state.server_seq + 1,
         bytes,
-        Map.get(state, :negotiated_version)
+        version
       )
     end
   end

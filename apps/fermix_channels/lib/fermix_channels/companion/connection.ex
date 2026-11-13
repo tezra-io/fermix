@@ -90,6 +90,16 @@ defmodule FermixChannels.Companion.Connection do
   (`metadata.draws_lists`) once it has pulled the index. `:checklist_opts` are
   the Registry's options (a test's repo and notifier).
 
+  ## Blocks under a reply (version 8)
+
+  Every line is encoded after the one filter a reply's blocks leave by
+  (`FermixCore.ReplyBlocks.for_session/4`): a `text_done`, a `row` and each
+  message of a `history_page` keep only the block types this connection's
+  version carries, so a version 7 client is sent no `events` block. A turn
+  this connection carries says what it draws by the same answer
+  (`ReplyBlocks.drawn_types/3`): lists once it pulled their index, events
+  from version 8 (`metadata.draws_events`).
+
   ## A phone's list channel (M85 E4)
 
   A phone's list channel (`Desktop.Companion`) runs this connection in the
@@ -183,6 +193,7 @@ defmodule FermixChannels.Companion.Connection do
   alias FermixCore.Home.Move
   alias FermixCore.Home.Role
   alias FermixCore.Home.StatusWatch
+  alias FermixCore.ReplyBlocks
   alias FermixCore.Setup.ConfigStore
   alias FermixCore.SocketPeer
   alias FermixCore.Text
@@ -665,7 +676,7 @@ defmodule FermixChannels.Companion.Connection do
   # A card this wire has no shape for is a daemon bug, reported and skipped;
   # a socket that cannot be written ends the connection.
   defp write_pending_approval(%{"t" => type} = approval, state) do
-    case Protocol.encode_server_event(type, Map.delete(approval, "t")) do
+    case encode(type, Map.delete(approval, "t"), state) do
       {:ok, line} ->
         :gen_tcp.send(state.socket, line)
 
@@ -1022,18 +1033,26 @@ defmodule FermixChannels.Companion.Connection do
        do: answer({:error, :request_backlog_full}, state)
 
   # The caller rides with the request, outside the client's payload, for
-  # `Channels.Companion` to stamp on the turn (moduledoc).
+  # `Channels.Companion` to stamp on the turn (moduledoc), and what this
+  # connection draws: the one answer that also decides what it is sent
+  # (`ReplyBlocks.drawn_types/3`): its lists once it pulled their index, its
+  # events from version 8.
   defp queue_request(event, state) do
+    drawn = ReplyBlocks.drawn_types(:companion, state.version, pulled_kinds(state))
+
     event =
       event
       |> Map.put(:caller, state.caller)
-      |> Map.put(:draws_lists, Checklists.draws?(state.checklists))
+      |> Map.put(:draws_lists, "checklists" in drawn)
+      |> Map.put(:draws_events, "events" in drawn)
 
     case start_next_request(%{state | pending: state.pending ++ [event]}) do
       {:noreply, state} -> {:cont, state}
       {:stop, _reason, state} -> {:stop, state}
     end
   end
+
+  defp pulled_kinds(state), do: if(Checklists.draws?(state.checklists), do: [:lists], else: [])
 
   defp start_next_request(%{worker: {_ref, _id}} = state), do: {:noreply, state}
   defp start_next_request(%{pending: []} = state), do: {:noreply, state}
@@ -1078,10 +1097,21 @@ defmodule FermixChannels.Companion.Connection do
   end
 
   defp write_event(%{"t" => type} = event, state) do
-    case Protocol.encode_server_event(type, Map.delete(event, "t")) do
+    case encode(type, Map.delete(event, "t"), state) do
       {:ok, line} -> write_in_version(type, event, line, state)
       {:error, reason} -> drop_event(type, reason, state)
     end
+  end
+
+  # Every line this connection writes is encoded here, after the one filter a
+  # reply's blocks leave by: its `text_done`, its `row` and a history page's
+  # messages keep only the block types this connection's version carries
+  # (`ReplyBlocks.for_session/4`; version 7 is sent no `events`).
+  defp encode(type, payload, state) do
+    Protocol.encode_server_event(
+      type,
+      ReplyBlocks.for_session(type, payload, :companion, state.version)
+    )
   end
 
   # An event a later version brought is not this client's to read, nor a
@@ -1151,7 +1181,7 @@ defmodule FermixChannels.Companion.Connection do
   end
 
   defp send_event(type, payload, state) do
-    with {:ok, line} <- Protocol.encode_server_event(type, payload) do
+    with {:ok, line} <- encode(type, payload, state) do
       :gen_tcp.send(state.socket, line)
     end
   end

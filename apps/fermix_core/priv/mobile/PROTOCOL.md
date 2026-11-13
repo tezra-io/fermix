@@ -493,18 +493,38 @@ Every JSON header has these required fields:
 The first encrypted event in a paired session is `hello` and its `seq` is 1.
 `hello.protocol_v` must equal the envelope `v`, and every later frame of the
 session carries the same `v`. The daemon replies with `hello_ack` containing
-`min_version` and `max_version`. This daemon serves protocol 2 alone: protocol 1
-shipped in daemons but no phone app ever spoke it, so the window is the current
-version rather than **N/N-1**, the current protocol and the previous one, which
-it becomes from the next version on. No other event is serviced before hello
-and a second hello is terminal.
+`min_version` and `max_version`, and serves the session at the version its
+hello named. This daemon serves protocols 2 and 3, an **N/N-1** window: the
+current protocol and the previous one. (Protocol 1 shipped in daemons but no
+phone app ever spoke it, so protocol 2's window was protocol 2 alone.) No other
+event is serviced before hello and a second hello is terminal. A client reads
+`hello_ack` against the version it speaks: the window must hold it, whatever
+the daemon's own newest is.
+
+**Protocol 3: a row may carry any number of block types.** On protocol 3 a
+`text_done`, a `row` and a history message may carry any number of block
+types under `blocks`, one block of each, and a phone skips a type it does not
+know. Protocol 3 brings one, `events` (see *Timeline shapes*). A session at
+protocol 2 is sent only `places` and `checklists` blocks, wherever a row
+reaches it (its `text_done`, its `row`, a `history_page` message), since a
+protocol 2 phone app refuses a row with more than two blocks; and its turns
+are written for a phone that draws no events. A session at protocol 3 has its
+turns told that their events are drawn under the reply. Nothing else changes:
+every protocol 2 event, field and rule holds unchanged on protocol 3.
+
+**An engine speaks the oldest version it serves** when it is the initiator
+(a computer's desktop session to its server, an enrollment, a move; see
+*Desktop sessions*). This wire's `hello` names no oldest version the client
+still speaks, so a newer engine speaking its newest would be refused by a
+server one version behind; nothing a later version brought rides an
+engine's own session, so the oldest is the one both sides serve.
 
 A `hello` or `pair_request` whose `v` is outside the window is answered with a
 typed refusal, then close `1002` with the text `unsupported mobile protocol
 version`. The refusal is encoded at the daemon's own version, `seq` 1:
 
 ```json
-{"v":2,"t":"error","seq":1,"code":"unsupported_protocol_version","message":"…","direction":"client_too_old","client_version":1,"min_version":2,"max_version":2}
+{"v":3,"t":"error","seq":1,"code":"unsupported_protocol_version","message":"…","direction":"client_too_old","client_version":1,"min_version":2,"max_version":3}
 ```
 
 `direction` is `client_too_old` (the app must update) or `client_too_new`
@@ -676,11 +696,24 @@ stored before links were kept has none). A row carries at most 4, and has the
 key only when it has one.
 
 `blocks[]` are records a reply carries, such as the places a search found
-that it recommends or the lists its turn read or changed, which the Mac's chat
-draws beside the text, and a phone's turn carries too (*Lists on a phone*): the shape and
-rules are the companion socket's (`priv/companion/PROTOCOL.md`, *Blocks under
-a reply*). A row has the key only when it has one. The text stands alone, so a
-phone may ignore them, and skips a block `type` it does not know.
+that it recommends, the lists its turn read or changed, or the events its
+turn stored, changed or listed, which the Mac's chat draws beside the text,
+and a phone's turn carries too (*Lists on a phone*): the shape and rules are
+the companion socket's (`priv/companion/PROTOCOL.md`, *Blocks under a reply*,
+*Which blocks a client draws*). A row has the key only when it has one. The
+text stands alone, so a phone may ignore them, and skips a block `type` it
+does not know. Which types a session is sent is its protocol's: at protocol
+2, `places` and `checklists`, at most one of each; at protocol 3 any number
+of types, one block of each, `events` among them. A snapshot of tool records
+(`places`, `events`) is drawn from the protocol that brought it; a kept kind
+(`checklists`) by a phone whose list channel pulled its index.
+
+An `events` block is the companion socket's, field for field: every event
+the turn's event tools returned, one to eight, each `{event_id, title, kind,
+date, time?, timezone, yearly?, status, change?, when, reminds?, rings?}`,
+the engine's sentences in `when`, `reminds` and `rings`, and a date a phone
+draws its tile from. A turn on a protocol 3 session is told its events are
+drawn, so its text confirms in a sentence.
 
 A `row` is the same message with `text` in place of `content`, plus
 `profile_id`. It is the companion socket's `row` event, which on that wire
@@ -1166,7 +1199,10 @@ desktops did. A
 desktop authenticates exactly as a paired phone does: `IK` (`0x01`) with its
 own static key, then `hello` with the highest `primary_epoch` it has seen and
 the system its computer runs (`platform`, see *A computer's own record*),
-answered with `hello_ack`. The primary reads the row's kind and admits that
+answered with `hello_ack`. Its `hello` names the oldest protocol its engine
+serves (see *Envelope, ordering, and version negotiation*), so a computer one
+version ahead of its server still connects; it reads the server's
+`hello_ack` window as holding that version, whatever the server's newest. The primary reads the row's kind and admits that
 kind's events alone (see *Who may send what*). The desktop's Mac or Linux app
 speaks only its local sockets; the desktop's engine carries them over this
 session. A desktop's session is meant to stay up: it has no one-hour lifetime
@@ -1531,7 +1567,7 @@ opens it only when its `hello_ack` says `caps.lists: true`; an older daemon
 says nothing and is sent no `companion_open`.
 
 The channel's first line is the phone's `client_hello`, in the companion
-window (`{6, 7}` today; a phone keeps up with companion versions as the Mac
+window (`{7, 8}` today; a phone keeps up with companion versions as the Mac
 does, and one too old is refused `client_too_old`). On the primary it is an
 ordinary companion connection placed as the owner's, the phone's pairing being
 the proof, in the lists scope: it takes `client_hello`, `checklists_pull`,

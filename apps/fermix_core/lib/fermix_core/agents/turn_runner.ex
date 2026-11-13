@@ -59,6 +59,7 @@ defmodule FermixCore.Agents.TurnRunner do
   alias FermixCore.Reply
   alias FermixCore.Setup.SecretPaths
   alias FermixCore.Telemetry
+  alias FermixCore.Temporal.Access, as: TemporalAccess
   alias FermixCore.Tools.HarnessSupport
 
   @auto_compaction_failure_backoff_ms 60_000
@@ -677,6 +678,7 @@ defmodule FermixCore.Agents.TurnRunner do
     messages =
       append_system_note(messages, ChecklistNote.rules(context, msg.channel, draws_lists?(msg)))
 
+    messages = append_system_note(messages, events_note(context, msg))
     messages = inject_current_date(messages)
     messages = append_system_note(messages, ChecklistNote.index(context))
     messages = inject_recent_calls(messages, state, source_trust, voice_call)
@@ -830,6 +832,18 @@ defmodule FermixCore.Agents.TurnRunner do
   # key, never read from a payload.
   defp draws_lists?(%{metadata: %{draws_lists: true}}), do: true
   defp draws_lists?(_msg), do: false
+
+  # The connection that carried the turn draws the events its reply carries
+  # (EVENTS_DRAWN_AS_CARDS §04: companion 8 or mobile 3), stamped by the
+  # companion and mobile channels under an atom key, never read from a
+  # payload. Only a turn that may use the event tools hears it; byte-stable
+  # for the connection, so it sits before the date as the list line does.
+  defp events_note(context, %{metadata: %{draws_events: true}} = msg) do
+    if TemporalAccess.operator_read_turn?(context),
+      do: ChannelPresentation.events_line(msg.channel, true)
+  end
+
+  defp events_note(_context, _msg), do: nil
 
   # Kept in the leading system run (the Anthropic adapter requires system
   # messages to lead) so the date sits with the rest of the system prompt.

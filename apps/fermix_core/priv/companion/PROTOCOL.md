@@ -249,7 +249,7 @@ live beside the chat. It adds:
   change (see *Lists*).
 
 Each of the five names version 6 as its `x-since-version`. The daemon takes
-them from, and sends them to, only a version 6 connection placed as the
+them from, and sends them to, only a connection on version 6 or later placed as the
 owner's, and sends a list event only to a connection that pulled: the index
 to one that pulled the index, a list to one that holds it. A version 5
 connection that sends one is refused with `error: unknown_event` and closed,
@@ -261,7 +261,7 @@ adds one more server event, `home_status_changed`, with no fields: Always
 On's summary (management `home.status`'s `summary`, the one source of its
 words) changed, and the app reads `home.status` again over management for
 what it is now (see *When Always On changes*). It names version 6 as its
-`x-since-version` and reaches version 6 connections only.
+`x-since-version` and reaches connections on version 6 or later only.
 
 Every version 5 event, field and rule holds unchanged on version 6. Since
 version 6 the window is {5, 6}, so a version 4 client is refused with
@@ -284,8 +284,8 @@ crosses by path, never in chunks on this line. It adds:
   in `media_refs`.
 
 Each of the two events names version 7 as its `x-since-version`. The daemon
-takes `attach_file`, and a `msg` that names a file, only from a version 7
-connection placed as the owner's (see *Transport*), and sends `attach_status`
+takes `attach_file`, and a `msg` that names a file, only from a connection
+on version 7 or later placed as the owner's (see *Transport*), and sends `attach_status`
 only to that connection. A version 6 connection that sends `attach_file` is
 refused with `error: unknown_event` and closed; a `msg` that names a file from
 a version 6 connection, or from one not placed as the owner's, is refused with
@@ -428,7 +428,7 @@ in a fixed order:
 | `type` | Fields | Notes |
 |---|---|---|
 | `client_hello` | `protocol_version` (int > 0); `primary_epoch?` (int > 0) | First frame. Opens the handshake. `primary_epoch` is the highest primary epoch the client has seen, absent when it has seen none; see *Primary epoch*. |
-| `msg` | `client_msg_id`, `profile_id`, `text`, `attach_ids[]` | A message to the agent. `text` must not be blank unless `attach_ids` names a file. Version 7: `attach_ids` names files whose `attach_file` was answered `present`, from a version 7 connection placed as the owner's only; on version 6, or from any other connection, a non-empty list is refused with `error: attachments_unsupported`. See *Attachments*. |
+| `msg` | `client_msg_id`, `profile_id`, `text`, `attach_ids[]` | A message to the agent. `text` must not be blank unless `attach_ids` names a file. Version 7: `attach_ids` names files whose `attach_file` was answered `present`, from a connection on version 7 or later placed as the owner's only; on version 6, or from any other connection, a non-empty list is refused with `error: attachments_unsupported`. See *Attachments*. |
 | `command` | `client_msg_id`, `profile_id`, `name`; `args?` | A slash command, `/name args`. An approval's routes are sent this way. |
 | `cancel` | `profile_id`, `client_msg_id`; `task_ref?` | Stops the turn of that request, running or waiting, and no other, whichever client sent the request (the Mac or a phone). Never answered itself; see *Streaming a turn*. Version 2: with `task_ref { call_uuid, task_id, revision }` it stops instead the GPT-Live task those ids name, one that outlived its call, and `client_msg_id` names the cancel itself; see *A Live call's rows*. |
 | `history_pull` | `profile_id`, `limit` (1–200), and exactly one of `after_seq` (≥ 0) or `before_seq` (≥ 1) | `after_seq` pages forward (the catch-up read); `before_seq` pages backward from it (scroll to the top). Either is any unsigned 64-bit value. |
@@ -454,25 +454,25 @@ in a fixed order:
 | `turn_started` | `profile_id`, `turn_id`, `in_reply_to` | A turn began answering `in_reply_to`. |
 | `text_delta` | `turn_id`, `text` | Text to append to the turn's draft, exactly as sent. |
 | `tool_event` | `turn_id`, `tool`, `phase`; `detail?`, `activity?` | `phase` is `start` or `stop`. `detail` is at most 512 bytes. `activity`, on a start, is the engine's sentence for the step, at most 120 bytes; see *Version 6*. |
-| `reasoning` | `turn_id`, `text` | Version 6. The model's summary of one step of its reasoning, at most 4,096 bytes. Live-only, no seq; see *Version 6*. Sent only to a connection on version 6. |
+| `reasoning` | `turn_id`, `text` | Version 6. The model's summary of one step of its reasoning, at most 4,096 bytes. Live-only, no seq; see *Version 6*. Sent only to a connection on version 6 or later. |
 | `text_done` | `turn_id`, `server_seq`, `text`; `ts?`, `blocks[]?` | A reply's canonical text at its timeline row, sent once the turn has completed; replaces the draft. A turn may send more than one, each at its own row. `ts` is the time that row stores, exactly as its `row` and its `history_page` message carry it, so a client shows when the reply was written without reading history; this daemon always sends it and an older daemon leaves it out. `blocks` are the row's, present only when it has one; see *Blocks under a reply*. |
 | `turn_error` | `turn_id`, `code`, `message` | The turn's terminal failure: `code` is `cancelled` after a `cancel`, `interrupted` when the daemon lost the turn, `uncertain_after_restart` when the request may have run before the daemon restarted (see *Delivery and the outbox*). `message` is at most 512 bytes. |
-| `turn_done` | `turn_id` | Version 2. The turn completed and wrote no reply: it ends the turn, and nothing of its draft is kept. Sent only to a connection on version 2; see *Version 2*. |
+| `turn_done` | `turn_id` | Version 2. The turn completed and wrote no reply: it ends the turn, and nothing of its draft is kept. Sent only to a connection on version 2 or later; see *Version 2*. |
 | `row` | `profile_id`, `server_seq`, `role`, `text`, `ts`, `media_refs[]`; `client_msg_id?`, `kind?`, `metadata?`, `link_previews[]?`, `blocks[]?` | A timeline row this socket did not stream, announced to every connection as it is written: the sender's own message (with its `client_msg_id`, to match the outbox), a slash command's answer, a scheduled delivery, a message from a phone, the reply to a phone's turn, and a Live call's row. `kind`, `metadata`, `media_refs`, `link_previews` and `blocks` are the history message's, as a `history_page` carries them (see *Timeline shapes*); a Live call's row carries `metadata.call` (see *A Live call's rows*), and a message a scheduled job's or a cue's run sent carries `metadata.origin` (see *Where a message came from*). |
-| `row_updated` | `profile_id`, `server_seq` | Version 3. A row already written changed: its text, its media refs or its link previews. Carries no content; see *When a row changes*. Sent only to a connection on version 3. |
+| `row_updated` | `profile_id`, `server_seq` | Version 3. A row already written changed: its text, its media refs or its link previews. Carries no content; see *When a row changes*. Sent only to a connection on version 3 or later. |
 | `approval` | `approval_id`, `kind`, `text`, `token`, `ttl_s`, `approve_command`, `deny_command`; `detail?` | An owner-approval card raised by a turn on this socket. The token is submitted, never rendered. Routes are nonempty and at most 1,024 characters. Sent again after `server_hello` while it waits; see *Approvals*. |
 | `approval_resolved` | `approval_id`, `outcome` | `approved` or `denied` when the owner answered, `expired` when its `ttl_s` ran out. |
 | `read_state` | `profile_id`, `read_up_to_seq` | The read frontier, sent to every connection, whichever client (the Mac or a phone) moved it. |
 | `history_page` | `profile_id`, `messages[]`, `history_head_seq`; `next_after_seq?`, `next_before_seq?` | Messages oldest first, at most `limit` and about 60 KiB of them. |
 | `search_results` | `profile_id`, `query`, `hits[]`; `next_before_seq?` | Hits newest first. |
-| `media_path` | `ref`, `path`, `kind`, `mime`, `size_bytes`, `sha256` | Version 3. The grant answering `media_fetch`: an absolute path to a managed file holding the ref's bytes, held for this connection; see *Managed media files*. Sent only to a connection on version 3. |
-| `media_missing` | `ref` | Version 3. Nothing to grant for `ref`; see *Managed media files*. Sent only to a connection on version 3. |
-| `proposal` | `profile_id`, `proposal` (the card) | Version 4. A proposal waiting for the owner: sent when it is stored, and again after `server_hello` for each still waiting, oldest first. Sent only to a connection on version 4 placed as the owner's; see *Proposals*. |
-| `proposal_resolved` | `profile_id`, `proposal_id`, `state`, `sentence`; `result_status?`, `result_text?` | Version 4. A proposal left `waiting`: `denied`, `expired` or `refused`, or `confirmed` once its call has finished, whichever surface decided it. Sent only to a connection on version 4 placed as the owner's; see *Proposals*. |
-| `home_status_changed` | none | Version 6. Always On's summary changed: read `home.status` over management. Carries no content. Sent once after `server_hello` unless Always On is off, then at each change, never while it stays off, only to a connection on version 6; see *When Always On changes*. |
-| `checklists` | `profile_id`, `lists[]` | Version 6. The index: every live list as `{list_id, title, folder?, open, done, rev}`, in picker order. The answer to `checklists_pull`, and pushed again, whole, after any change. Sent only to a version 6 connection placed as the owner's that pulled the index; see *Lists*. |
-| `checklist` | `profile_id`, `list`; `made?` | Version 6. One whole list, `{list_id, title, rev, rows[], removed[]?, removed_at?}`. The answer to `checklist_pull`, and pushed again, whole, after every committed change to it, at most once per 100 ms. Sent only to a version 6 connection placed as the owner's that holds the list; see *Lists*. |
-| `attach_status` | `attach_id`, `status` | Version 7. The answer to an `attach_file` the daemon now holds: `status` is `present`, the only value this wire sends, and a `msg` may name `attach_id` from then on. Sent only to the version 7 owner's connection that sent it; see *Attachments*. |
+| `media_path` | `ref`, `path`, `kind`, `mime`, `size_bytes`, `sha256` | Version 3. The grant answering `media_fetch`: an absolute path to a managed file holding the ref's bytes, held for this connection; see *Managed media files*. Sent only to a connection on version 3 or later. |
+| `media_missing` | `ref` | Version 3. Nothing to grant for `ref`; see *Managed media files*. Sent only to a connection on version 3 or later. |
+| `proposal` | `profile_id`, `proposal` (the card) | Version 4. A proposal waiting for the owner: sent when it is stored, and again after `server_hello` for each still waiting, oldest first. Sent only to a connection on version 4 or later placed as the owner's; see *Proposals*. |
+| `proposal_resolved` | `profile_id`, `proposal_id`, `state`, `sentence`; `result_status?`, `result_text?` | Version 4. A proposal left `waiting`: `denied`, `expired` or `refused`, or `confirmed` once its call has finished, whichever surface decided it. Sent only to a connection on version 4 or later placed as the owner's; see *Proposals*. |
+| `home_status_changed` | none | Version 6. Always On's summary changed: read `home.status` over management. Carries no content. Sent once after `server_hello` unless Always On is off, then at each change, never while it stays off, only to a connection on version 6 or later; see *When Always On changes*. |
+| `checklists` | `profile_id`, `lists[]` | Version 6. The index: every live list as `{list_id, title, folder?, open, done, rev}`, in picker order. The answer to `checklists_pull`, and pushed again, whole, after any change. Sent only to a connection on version 6 or later placed as the owner's that pulled the index; see *Lists*. |
+| `checklist` | `profile_id`, `list`; `made?` | Version 6. One whole list, `{list_id, title, rev, rows[], removed[]?, removed_at?}`. The answer to `checklist_pull`, and pushed again, whole, after every committed change to it, at most once per 100 ms. Sent only to a connection on version 6 or later placed as the owner's that holds the list; see *Lists*. |
+| `attach_status` | `attach_id`, `status` | Version 7. The answer to an `attach_file` the daemon now holds: `status` is `present`, the only value this wire sends, and a `msg` may name `attach_id` from then on. Sent only to the owner's connection on version 7 or later that sent it; see *Attachments*. |
 | `error` | `reason`; `message?`, `field?`, `event?`, `client_msg_id?`, `ref?`, `attach_id?`, `direction?`, `client_version?`, `min_version?`, `max_version?` | A refusal; see *Errors*. |
 
 ### Timeline shapes
@@ -708,7 +708,7 @@ that reconnects reads again the rows it shows.
 `home_status_changed` (version 6) says that Always On's summary changed, and
 carries none of it: the app reads management's `home.status` and draws its
 `summary`, so the words come from one place. The daemon sends it to every
-version 6 connection:
+connection on version 6 or later:
 
 - **once after `server_hello`**, after the approvals and proposals that
   follow it, unless Always On is `off`: an app that connects while Always On
@@ -736,7 +736,7 @@ or expiring, the link to the server going up or down, a backup run
 finishing) and at the next time the summary changes by the clock alone (a
 link down 10 minutes while it is awake, a waiting server's 24 hours, a
 backup's 3 days and its 7), on one timer, armed again at each read; and only
-while a version 6 connection is attached. While Always On is `off` it arms
+while a connection on version 6 or later is attached. While Always On is `off` it arms
 nothing and reads only on what could end `off` (a code, a move).
 
 A notice sent while the app was disconnected is lost, so an app that
@@ -809,7 +809,7 @@ same `blocks`, and have the key only when the reply has one. The rules:
   (at most 80 characters), and `rows` the `ci_` ids of the rows the turn added
   or changed, empty for a list it only read. It holds ids and the title, never
   an item's words: a client that draws it draws each list's rows as they stand
-  now (on version 6, by `checklist_pull`; see *Lists*), and the reply's text
+  now (from version 6, by `checklist_pull`; see *Lists*), and the reply's text
   stays the record of what happened. A scheduled
   job's message carries one the same way.
 - **Events, as the reply left them** (version 8). An `events` block carries
@@ -1158,8 +1158,8 @@ job and the Mac change them through one transaction. Version 6 brings them to
 this socket: the Mac reads the index and whole lists, changes them by row id,
 and draws every change as it commits, whoever made it.
 
-- **Who.** List events go only to version 6 connections the daemon placed as
-  the owner's (see *Transport*). A pull or an edit from any other connection
+- **Who.** List events go only to connections on version 6 or later the
+  daemon placed as the owner's (see *Transport*). A pull or an edit from any other connection
   is refused with `error: request_failed`, `message` "Only the owner's own
   Fermix app can read or change the owner's lists.", and reads or changes
   nothing.

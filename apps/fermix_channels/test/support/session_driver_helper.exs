@@ -38,10 +38,14 @@ defmodule FermixChannels.Test.SessionDriver do
   end
 
   @doc "Sends one client event, encrypted, at `seq`."
-  def client_send(driver, client, type, payload, seq, bytes \\ <<>>) do
+  def client_send(driver, client, type, payload, seq, bytes \\ <<>>),
+    do: client_send_at(driver, client, Protocol.protocol_version(), type, payload, seq, bytes)
+
+  @doc "Sends one client event, encrypted, at `seq`, its envelope at `version`."
+  def client_send_at(driver, client, version, type, payload, seq, bytes \\ <<>>) do
     header =
       payload
-      |> Map.merge(%{"v" => Protocol.protocol_version(), "t" => type, "seq" => seq})
+      |> Map.merge(%{"v" => version, "t" => type, "seq" => seq})
       |> Jason.encode!()
 
     plaintext = <<byte_size(header)::unsigned-big-32, header::binary, bytes::binary>>

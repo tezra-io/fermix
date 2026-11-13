@@ -198,14 +198,15 @@ defmodule FermixChannels.Mobile.Protocol do
   @doc """
   Encode and validate one client plaintext frame, holding it to the rules
   `decode_client_frame/2` holds a client to: the initiator's side of the wire
-  (`Mobile.Rail`).
+  (`Mobile.Rail`), at `:version`, by default the one an initiator speaks
+  (`initiator_version/0`).
   """
   @spec encode_client_frame(String.t(), map(), pos_integer(), binary(), keyword()) ::
           {:ok, binary()} | {:error, term()}
   def encode_client_frame(type, payload, seq, bytes, opts)
       when is_binary(type) and is_map(payload) and is_integer(seq) and is_binary(bytes) and
              is_list(opts) do
-    version = Keyword.get(opts, :version, @protocol_version)
+    version = Keyword.get(opts, :version, @min_supported_version)
     max_media_bytes = Keyword.get(opts, :max_media_bytes, @default_max_media_bytes)
 
     with :ok <- known_type(type, @client_events),

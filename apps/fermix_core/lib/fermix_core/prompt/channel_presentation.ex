@@ -121,6 +121,23 @@ defmodule FermixCore.Prompt.ChannelPresentation do
       do:
         "No list is drawn here: when the owner asks to see a list, write it as a short checklist."
 
+  @doc """
+  The line about the events a reply carries (EVENTS_DRAWN_AS_CARDS §04), for
+  a turn on the Mac's chat or a phone whose connection draws them (`draws?`:
+  it negotiated companion 8 or mobile 3, `FermixCore.ReplyBlocks.drawn_types/3`,
+  the answer that also decides it is sent the `events` block), or nil:
+  everywhere else nothing changes, and the reply states each event as words.
+  """
+  @spec events_line(String.t() | nil, boolean()) :: String.t() | nil
+  def events_line(channel, true) when channel in ["companion", "mobile"] do
+    "Events you store, change or list are drawn under your reply, with their dates and " <>
+      "reminders, so confirm in a sentence and do not write each one out."
+  end
+
+  def events_line(channel, draws?)
+      when (is_binary(channel) or is_nil(channel)) and is_boolean(draws?),
+      do: nil
+
   defp group_line(chat_type) when chat_type in @group_chat_types do
     "- This is a shared chat: answer the person who asked, briefly addressing them, without lecturing the room."
   end

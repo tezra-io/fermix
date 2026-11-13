@@ -26,10 +26,11 @@ defmodule FermixChannels.Mobile.ProtocolTest do
     invoke_open invoke_part invoke_cancel invoke_result invoke_status
   )
 
-  # Protocol 1 never had a client, so the window is protocol 2 alone (M51 D1).
-  test "publishes the protocol 2 window and approved event catalogs" do
-    assert Protocol.protocol_version() == 2
-    assert Protocol.supported_version_range() == {2, 2}
+  # Protocol 1 never had a client, so protocol 2's window was itself alone
+  # (M51 D1); from protocol 3 on the window is N/N-1.
+  test "publishes the protocol 3 window and approved event catalogs" do
+    assert Protocol.protocol_version() == 3
+    assert Protocol.supported_version_range() == {2, 3}
     assert Protocol.client_events() == @client_events
     assert Protocol.server_events() == @server_events
     assert Protocol.max_header_bytes() == 4_096
@@ -40,14 +41,15 @@ defmodule FermixChannels.Mobile.ProtocolTest do
 
   test "negotiates supported, old, and new clients directionally" do
     assert :ok = Protocol.negotiate(2)
+    assert :ok = Protocol.negotiate(3)
     assert {:error, :client_too_old} = Protocol.negotiate(1)
-    assert {:error, :client_too_new} = Protocol.negotiate(3)
+    assert {:error, :client_too_new} = Protocol.negotiate(4)
   end
 
   test "an out-of-window envelope names the direction and the client's version" do
-    assert {:error, {:unsupported_protocol_version, :client_too_new, 3}} =
+    assert {:error, {:unsupported_protocol_version, :client_too_new, 4}} =
              Protocol.decode_client_frame(
-               encode_frame(%{"v" => 3, "t" => "ping", "seq" => 1}, "")
+               encode_frame(%{"v" => 4, "t" => "ping", "seq" => 1}, "")
              )
 
     assert {:error, {:unsupported_protocol_version, :client_too_old, 1}} =
@@ -251,7 +253,7 @@ defmodule FermixChannels.Mobile.ProtocolTest do
     ack = %{
       "session_id" => "s",
       "min_version" => 2,
-      "max_version" => 2,
+      "max_version" => 3,
       "profiles" => [],
       "candidates" => [],
       "history_head_seq" => 0,
@@ -569,7 +571,7 @@ defmodule FermixChannels.Mobile.ProtocolTest do
     ack = %{
       "session_id" => "s",
       "min_version" => 2,
-      "max_version" => 2,
+      "max_version" => 3,
       "profiles" => [],
       "candidates" => [],
       "history_head_seq" => 0,
@@ -593,7 +595,7 @@ defmodule FermixChannels.Mobile.ProtocolTest do
     ack = %{
       "session_id" => "s",
       "min_version" => 2,
-      "max_version" => 2,
+      "max_version" => 3,
       "profiles" => [],
       "candidates" => [],
       "history_head_seq" => 0,
@@ -685,7 +687,7 @@ defmodule FermixChannels.Mobile.ProtocolTest do
                %{
                  "session_id" => "s-1",
                  "min_version" => 2,
-                 "max_version" => 2,
+                 "max_version" => 3,
                  "profiles" => [%{"id" => "main", "name" => "Fermix"}],
                  "candidates" => [],
                  "history_head_seq" => 9,
@@ -698,7 +700,7 @@ defmodule FermixChannels.Mobile.ProtocolTest do
 
     assert {:ok, decoded} = decode_frame(hello)
     assert decoded.header["min_version"] == 2
-    assert decoded.header["max_version"] == 2
+    assert decoded.header["max_version"] == 3
     assert decoded.header["primary_epoch"] == 1
 
     assert {:ok, _accepted} =
@@ -942,8 +944,11 @@ defmodule FermixChannels.Mobile.ProtocolTest do
 
     assert {:ok, %{header: %{"v" => 2}}} = decode_frame(frame)
 
+    assert {:ok, frame} = Protocol.encode_server_frame("pong", %{}, 1, <<>>, version: 3)
+    assert {:ok, %{header: %{"v" => 3}}} = decode_frame(frame)
+
     assert {:error, :client_too_new} =
-             Protocol.encode_server_frame("pong", %{}, 1, <<>>, version: 3)
+             Protocol.encode_server_frame("pong", %{}, 1, <<>>, version: 4)
 
     assert {:error, :client_too_old} =
              Protocol.encode_server_frame("pong", %{}, 1, <<>>, version: 1)

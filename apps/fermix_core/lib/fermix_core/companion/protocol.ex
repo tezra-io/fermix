@@ -89,14 +89,14 @@ defmodule FermixCore.Companion.Protocol do
   reads it again over management, the one source of its words
   (`FermixCore.Home.StatusWatch` decides when). It is sent once after
   `server_hello` unless Always On is off, and at every change after, and
-  reaches a version 6 connection only. The window is now {5, 6}.
+  reaches a connection on version 6 or later only. The window is now {5, 6}.
 
   Version 6 also brings the owner's lists (M85 §07): `checklists_pull` and
   `checklist_pull` ask for the index and one whole list, answered `checklists`
   and `checklist`, and `checklist_edit` changes one by row id, answered
   `accepted` once, by its `client_msg_id`, or `error: request_failed` with
-  the engine's sentence. Every one is taken from, and sent to, only a version
-  6 connection placed as the owner's, and the daemon sends a list event only
+  the engine's sentence. Every one is taken from, and sent to, only a
+  connection on version 6 or later placed as the owner's, and the daemon sends a list event only
   to a connection that pulled: the index to one that pulled it, a list to one
   that holds it. The phone's wire does not carry lists yet.
 
@@ -110,8 +110,8 @@ defmodule FermixCore.Companion.Protocol do
   request_failed` with the engine's sentence and the `attach_id`. A `msg`
   then names those ids in `attach_ids`, and its turn and its row carry them
   as a phone message's do. `attach_file` and a `msg` that names an
-  attachment are taken only from a version 7 connection placed as the
-  owner's: such a `msg` from any other connection is refused
+  attachment are taken only from a connection on version 7 or later placed
+  as the owner's: such a `msg` from any other connection is refused
   `attachments_unsupported`, as every one was before, and an `attach_file`
   from a version 6 connection is an unknown event. `server_hello.commands`,
   the slash commands an app offers in its palette (the list the phone's
@@ -1417,13 +1417,17 @@ defmodule FermixCore.Companion.Protocol do
        when is_binary(id) and is_binary(date) and status in @event_statuses do
     Regex.match?(@event_id, id) and Regex.match?(@event_date, date) and
       Enum.all?(@event_card_strings, &(nonempty(card, &1) == :ok)) and
-      Enum.all?(@event_card_optional, &(optional_nonempty(card, &1) == :ok)) and
-      optional_pattern(card, "time", @event_time) == :ok and
-      Map.get(card, "yearly", true) == true and
-      optional_enum(card, "change", @event_changes) == :ok and not has_null?(card)
+      event_card_extras?(card) and not has_null?(card)
   end
 
   defp event_card?(_card), do: false
+
+  defp event_card_extras?(card) do
+    Enum.all?(@event_card_optional, &(optional_nonempty(card, &1) == :ok)) and
+      optional_pattern(card, "time", @event_time) == :ok and
+      Map.get(card, "yearly", true) == true and
+      optional_enum(card, "change", @event_changes) == :ok
+  end
 
   defp checklist_ref?(%{"list_id" => "ck_" <> _id, "title" => title, "rows" => rows})
        when is_binary(title) and title != "" and is_list(rows),

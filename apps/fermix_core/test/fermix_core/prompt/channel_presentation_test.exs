@@ -108,4 +108,26 @@ defmodule FermixCore.Prompt.ChannelPresentationTest do
       refute note =~ "Current date"
     end
   end
+
+  # EVENTS_DRAWN_AS_CARDS §04: one line where the connection draws events, and
+  # nothing anywhere else.
+  describe "events_line/2" do
+    test "says the events are drawn on a drawing companion or phone turn, else nothing" do
+      for channel <- ["companion", "mobile"] do
+        line = ChannelPresentation.events_line(channel, true)
+        assert line =~ "drawn under your reply"
+        assert line =~ "confirm in a sentence"
+      end
+
+      for {channel, draws?} <- [
+            {"companion", false},
+            {"mobile", false},
+            {"telegram", true},
+            {"telegram", false},
+            {nil, true}
+          ] do
+        assert ChannelPresentation.events_line(channel, draws?) == nil, inspect(channel)
+      end
+    end
+  end
 end

@@ -135,7 +135,7 @@ defmodule FermixChannels.Mobile.PhoneListChannelTest do
     {[{close, <<>>}], client} = Driver.client_receive(driver, client)
 
     assert close == %{
-             "v" => 2,
+             "v" => Protocol.protocol_version(),
              "t" => "companion_close",
              "seq" => close["seq"],
              "channel" => 2,

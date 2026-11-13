@@ -76,6 +76,49 @@ defmodule FermixChannels.Mobile.ProtocolInitiatorTest do
     assert payload == json |> Jason.decode!() |> Map.delete("t")
   end
 
+  # This wire's hello names no oldest version, so an engine speaks the oldest
+  # it serves as the initiator, and reads a server's hello_ack window as
+  # holding that version, whatever the server's newest: a computer one
+  # version ahead of its server still connects, and so does one behind.
+  test "the initiator speaks the oldest version it serves and reads any window that holds it" do
+    {min, _max} = Protocol.supported_version_range()
+    assert Protocol.initiator_version() == min
+
+    hello = %{
+      "device_id" => "d",
+      "app_version" => "1",
+      "last_server_seq" => 0,
+      "protocol_v" => min
+    }
+
+    assert {:ok, _frame} = Protocol.encode_client_frame("hello", hello, 1, <<>>, [])
+
+    ack = %{
+      "v" => min,
+      "t" => "hello_ack",
+      "seq" => 1,
+      "session_id" => "s",
+      "profiles" => [],
+      "candidates" => [],
+      "history_head_seq" => 0,
+      "read_up_to_seq" => 0,
+      "caps" => %{"commands" => [], "max_media_bytes" => 1},
+      "primary_epoch" => 1
+    }
+
+    for {older, newer} <- [{min, min}, {min, min + 1}, {min - 1, min}] do
+      window = Map.merge(ack, %{"min_version" => older, "max_version" => newer})
+      assert {:ok, %{type: "hello_ack"}} = Protocol.decode_server_frame(plaintext(window, <<>>))
+    end
+
+    for {older, newer} <- [{min + 1, min + 2}, {min, min - 1}] do
+      window = Map.merge(ack, %{"min_version" => older, "max_version" => newer})
+
+      assert {:error, {:invalid_field, "version_range"}} =
+               Protocol.decode_server_frame(plaintext(window, <<>>))
+    end
+  end
+
   test "the initiator holds a frame to the codec's rules, both ways" do
     assert {:error, {:unknown_event, "pong"}} =
              Protocol.encode_client_frame("pong", %{}, 1, <<>>, [])

@@ -131,7 +131,7 @@ defmodule FermixChannels.Mobile.RailTest do
       "device_id" => @device_id,
       "app_version" => "1.0.0",
       "last_server_seq" => 0,
-      "protocol_v" => Protocol.protocol_version(),
+      "protocol_v" => Protocol.initiator_version(),
       "primary_epoch" => 1
     }
 
@@ -347,8 +347,13 @@ defmodule FermixChannels.Mobile.RailTest do
     Task.async(fn -> accept_handshake(listen, mode, ctx, psk, test_pid) end)
   end
 
+  # The responder answers at the version the rail speaks (`initiator_version/0`).
   defp server_send(responder, type, payload, seq, bytes \\ <<>>) do
-    {:ok, plaintext} = Protocol.encode_server_frame(type, payload, seq, bytes)
+    {:ok, plaintext} =
+      Protocol.encode_server_frame(type, payload, seq, bytes,
+        version: Protocol.initiator_version()
+      )
+
     {:ok, ciphertext, noise} = Noise.encrypt(responder.noise, plaintext)
     :ok = :gen_tcp.send(responder.socket, Carrier.message(ciphertext))
     %{responder | noise: noise}
@@ -395,7 +400,11 @@ defmodule FermixChannels.Mobile.RailTest do
         assert {:ok, rail} = open_manual(ctx, path, :ik)
         responder = Task.await(task)
 
-        {:ok, plaintext} = Protocol.encode_server_frame("pong", %{}, seq, <<>>)
+        {:ok, plaintext} =
+          Protocol.encode_server_frame("pong", %{}, seq, <<>>,
+            version: Protocol.initiator_version()
+          )
+
         plaintext = if version == 2, do: plaintext, else: at_version(plaintext, version)
         {:ok, ciphertext, _noise} = Noise.encrypt(responder.noise, plaintext)
         :ok = :gen_tcp.send(responder.socket, Carrier.message(ciphertext))

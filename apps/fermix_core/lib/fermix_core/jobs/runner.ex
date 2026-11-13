@@ -1929,14 +1929,16 @@ defmodule FermixCore.Jobs.Runner do
 
   defp send_opts(state), do: state.delivery_opts
 
-  # A job's message carries the lists its run read or changed (M85 §07), as a
-  # turn's reply does, so the evening check-in's row names them too. The run's
-  # list tools kept them under its conversation key in the one holder; a
-  # channel that draws no block ignores the option.
+  # A job's message carries the lists its run read or changed (M85 §07) and
+  # the events its event tools returned (EVENTS_DRAWN_AS_CARDS §04), as a
+  # turn's reply does, so the evening check-in's row names its lists and a
+  # morning brief that read event_list draws its agenda. The run's tools kept
+  # them under its conversation key in the one holder; a channel that draws
+  # no block ignores the option.
   defp reply_delivery_opts(state) do
     key = {:scheduled_job, state.job.id, state.run.id}
 
-    case key |> FermixCore.ReplyBlocks.take() |> FermixCore.ReplyBlocks.checklists() do
+    case key |> FermixCore.ReplyBlocks.take() |> FermixCore.ReplyBlocks.delivered() do
       [] ->
         delivery_opts(state)
 

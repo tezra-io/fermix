@@ -67,6 +67,21 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Events and reminders can be drawn as cards under a reply.** When Fermix
+  stores, changes, cancels, snoozes or lists one of your events, the reply
+  now carries each event as Fermix's own record: its title, when it is in
+  Fermix's words, its time zone, and when and where it reminds you ("1 day
+  and 1 hour before", "on Telegram"), at most eight a reply, the ones the
+  turn changed first. A Mac app or phone that draws events shows them under
+  the reply as a card, and Fermix there confirms in a sentence instead of
+  writing each event out; a morning brief that lists your events carries its
+  agenda the same way. Telegram and every other channel are unchanged: the
+  reply still states each event and its date. The Mac chat socket's protocol
+  is now version 8 (it still serves 7) and the phone's is version 3 (it
+  still serves 2); an app on the older version is sent replies without the
+  events, as before. A computer linked to its server speaks the phone wire's
+  older version, so a computer a version ahead of its server still connects.
+
 - **A voice call says hello, and hangs up on goodbye.** On GPT-Live and
   Grok, the voice now speaks first: when a call connects, from the Mac, the
   phone or an accessory, it greets you by name in one short line, then

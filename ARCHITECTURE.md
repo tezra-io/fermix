@@ -965,6 +965,22 @@ or name. After a turn read outside content it may only add and check, the
 rows it adds stamped and framed when read back; every other change, a new
 list included, is refused.
 
+A reply's events (EVENTS_DRAWN_AS_CARDS) ride the same holder: each event
+tool hands `ReplyBlocks.put_events/3` the card `Temporal.Card` makes of the
+record it returned (the engine's sentences for when it is and when and where
+it reminds), and `ReplyBlocks.events/1` keeps each event once, in its last
+state, at most eight, for the reply's `events` block, a job's delivery
+included. Nothing new is stored; the card is a receipt.
+
+Architecture Invariant: one function decides which block types a session
+draws and which it is sent (`ReplyBlocks.drawn_types/3`): a snapshot of tool
+records (`places`, `events`) from the protocol version that brought it, a
+kept kind (`checklists`) once its index is pulled. Every row leaves by one
+filter on it (`ReplyBlocks.for_session/4`), at `Companion.Connection`'s
+encoder and `Mobile.Session`'s, so a companion 7 or mobile 2 client, which
+refuses a row with a third block type, is never sent `events`, and a turn is
+never told a card is drawn that its connection is not sent.
+
 ### Sandbox and Command Execution
 
 `FermixCore.Sandbox` is an in-process policy gate over paths, working
