@@ -209,6 +209,26 @@ and every rule are as before; the header and `Connect`'s comment now say
 the version is the one the connection is served. The line references into
 `connection.ex` moved with the code.
 
+The re-read for companion protocol 8 (events drawn as cards, 2026-11-13)
+found the window at {7, 8} and a reply's `events` block, built from the
+turn's event tools' records beside its places and lists. Every frame a
+connection writes now passes `ReplyBlocks.for_session/4` in `encode`, which
+keeps only the block types the connection's version carries, and a turn it
+carries is stamped `draws_events` from version 8 beside `draws_lists`. Both
+are a block's contents and a stamp no step here reads: no seq, cursor,
+claim, request or turn changes, and no check's setup or verdict moves. The
+line references into `connection.ex` moved with the code.
+
+The re-read for the lift of the lists' mechanism (M89 S0, 2026-11-13) found the
+connection's pull, edit and flush serving any kept kind through one set of
+functions over a `Companion.KeptKind` module, with the lists' `Companion.Checklists`
+the one kind, and the holding state in `Companion.Kept`. The messages and steps
+the spec names are as before: `{:checklists_changed, _}` and `:checklists_flush` in
+`handle_info`, a pull or a `checklist_edit` served in the Connection's own step
+against the lists' tables, a write that fails ending the connection as a drop
+does. No seq, cursor, claim, request or turn changed. The line references into
+`connection.ex` moved with the code.
+
 **The Queue is one abstract process.** The runner takes one `.tla` per spec,
 and `turn_queue` proves the Queue's rules against `queue.ex`, so this spec takes
 them as given:
@@ -341,21 +361,21 @@ the checks that show a rule needs it):
   (`request_coordinator.ex:166-173`).
 - `SeqCursor`: the client's cursor rules (`PROTOCOL.md`).
 - `SubscribeBeforePull`: the Connection joins the registry before
-  `server_hello` (`join`, `connection.ex:574-592`).
+  `server_hello` (`join`, `connection.ex:592-610`).
 - `PageWrittenInReadStep`: the Connection writes `history_page` to the socket
-  in the step that read it (`read_opts`, `connection.ex:1255-1259`). `FALSE`
+  in the step that read it (`read_opts`, `connection.ex:1323-1327`). `FALSE`
   sends it through its own mailbox, where a live row sent after the read can
   overtake it.
 - `AnnouncesEveryRow`: every row written outside a turn's completion is
   announced as a `row` as it is written: the user's row (`announce_user_row`,
-  `connection.ex:1243-1244`) and a delivery (`announce_written`,
+  `connection.ex:1311-1312`) and a delivery (`announce_written`,
   `channels/companion.ex:409-410`), both built by `Companion.Output.row` and
   sent through `Companion.Fanout.announce`. `FALSE` announces no user row.
 - `SingleAnswer`: `Confirmations.take` is an `:ets.take`, the sole consumer of
   a token (`confirmations.ex:21-31`).
 - `ResendsPendingApprovals`: the Connection writes every card still waiting
   right after `server_hello`, in the step that joined the registry
-  (`send_pending_approvals`, `connection.ex:654-663`, from
+  (`send_pending_approvals`, `connection.ex:672-681`, from
   `Approvals.pending`). `FALSE`: a card goes out once, live.
 - `DropsCardsAtHello`: when `server_hello` arrives the client drops every card
   it shows and keeps only those sent after it (`PROTOCOL.md` "Approvals").
@@ -387,7 +407,7 @@ the checks that show a rule needs it):
   that sent the request (`settle_inline`, `run_settle`, `turns.ex:371-406`;
   `fail_attempt`, `report_failure`, `requests.ex:383-403`), through the
   transport's `report_failure`, which the connection writes as a failed
-  worker's error (`connection.ex:1231-1238`, `:331-332`). `FALSE` only logs the
+  worker's error (`connection.ex:1299-1306`, `:331-332`). `FALSE` only logs the
   failure: the request stays `running`, and the next boot runs the command
   again.
 - `SeqAssignedOnInsert`: the seq comes from the counter inside the inserting
@@ -635,7 +655,7 @@ of an entity its rules are about. All still hold:
   card's `outside.args` and `outside.reason` are additive and ride every
   version. They are proposal events, left out as above.
 - The peer check at the hand-over (`handle_info(:socket_handover)`,
-  `connection.ex:287-294`). A client the daemon cannot place is sent
+  `connection.ex:307-314`). A client the daemon cannot place is sent
   `error: unidentified_client` and closed before a line is read, which the
   client sees as a drop before `server_hello`. The caller it places rides on
   each turn (`metadata.caller`) and decides only what the turn's tools may do.
@@ -685,7 +705,7 @@ off; open `tla/out/companion_session/<check>.txt` after a run to see the path.
 
 ### COMPANION-2: a connection must join the fan-out before its history is read
 - **Status:** holds in the code (b9248004): `join` registers the Connection
-  before it writes `server_hello` (`connection.ex:574-592`).
+  before it writes `server_hello` (`connection.ex:592-610`).
 - **Checks:** 01 holds; 03 breaks `TimelineConverges` with the join after the
   first page.
 
