@@ -767,6 +767,10 @@ def test_the_shipped_numbered_rubrics_parse():
                       "penrask_dinners": 4, "halden_page_route_sanity": 3,
                       "brevany_fish_market": 3,
                       "ostmere_two_days": 3,
+                      "brennholt_two_districts": 4,
+                      "kestrin_two_districts": 4,
+                      "lantern_walk_says_remove_the_trip": 3,
+                      "night_market_says_move_the_dinner": 3,
                       # lists.yaml
                       "batteries": 2, "garden_and_kitchen": 3, "groceries": 2,
                       "hardware": 2, "landing_page": 2, "newsletter": 2,

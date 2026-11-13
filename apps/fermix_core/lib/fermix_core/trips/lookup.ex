@@ -22,17 +22,24 @@ defmodule FermixCore.Trips.Lookup do
     that, the first located result is offered, never applied: the caller names
     it with its link, which a later call gives in the link form.
 
-  ## Around the day (D10)
+  ## Around the day (D10, D11)
 
-  A lookup's anchor, in order (`anchor/2`): the day's placed stops, their
-  middle searched at least 2 km about it and as far as the farthest of them,
-  at most the search's 50 km; else the day's `near`; else the nearest day that
-  has placed stops, the earlier on a tie (C5), the same way; else the trip's
-  `near`. A `near` is a place's name the place search finds by its own named
-  anchor and searches the region of (`{:location, near}`, as `place_search`'s
-  `location`), so nothing here finds a place by name. "Placed" counts the
-  stops this call places: lookups run in waves, the first alone and then four
-  at a time (C4, C11), each wave around what the ones before it placed.
+  A lookup's anchor, in order (`anchor/2`): the day's `near`; else the trip's
+  `near`; else the day's placed stops, their middle searched at least 2 km
+  about it and as far as the farthest of them, at most the search's 50 km;
+  else the nearest day that has placed stops, the earlier on a tie (C5), the
+  same way. A near wins over every placed stop (D11): a city's day spans
+  districts, and searching around the first stop placed put a landmark 7 km
+  off at a business of its name beside that stop. A `near` is a place's name
+  the place search finds by its own named anchor and searches the region of
+  (`{:location, near}`, as `place_search`'s `location`), so nothing here
+  finds a place by name, and no result's distance is read. The near is the
+  model's word for a town or city; nothing bounds its size, so a country given
+  as one searches the whole country, and a near the search finds somewhere
+  else misplaces as any wrong near would. "Placed" counts the stops this call
+  places: lookups run in waves, the first alone and then four at a time (C4,
+  C11), and with no near each wave searches around what the ones before it
+  placed.
 
   With no anchor a lookup never places, whatever the name rule says: a generic
   name searched with nowhere to search lands wherever the search is. Its first
@@ -193,30 +200,36 @@ defmodule FermixCore.Trips.Lookup do
   end
 
   @doc """
-  Where a lookup for `day` searches, given the call's `anchors` (D10): around
-  the day's placed stops, else near the day's `near`, else around the nearest
-  day with placed stops, else near the trip's `near`; nil for nowhere.
+  Where a lookup for `day` searches, given the call's `anchors` (D10, D11):
+  near the day's `near`, else near the trip's `near`, else around the day's
+  placed stops, else around the nearest day with placed stops; nil for
+  nowhere.
   """
   @spec anchor(anchors(), pos_integer()) :: anchor() | nil
   def anchor(%{placed: placed, day_near: day_near, trip_near: trip_near}, day)
       when is_map(placed) and is_map(day_near) and is_integer(day) and day > 0 do
-    case {Map.get(placed, day, []), Map.get(day_near, day)} do
-      {[_ | _] = own, _near} -> around(own)
-      {[], near} when is_binary(near) -> {:location, near}
-      {[], nil} -> nearest_or_trip(placed, day, trip_near)
+    case Map.get(day_near, day, trip_near) do
+      near when is_binary(near) -> {:location, near}
+      nil -> placed_anchor(placed, day)
     end
   end
 
-  defp nearest_or_trip(placed, day, trip_near) do
+  defp placed_anchor(placed, day) do
+    case Map.get(placed, day, []) do
+      [_ | _] = own -> around(own)
+      [] -> nearest(placed, day)
+    end
+  end
+
+  defp nearest(placed, day) do
     nearest =
       placed
       |> Enum.reject(fn {_day, points} -> points == [] end)
       |> Enum.min_by(fn {near, _points} -> {abs(near - day), near} end, fn -> nil end)
 
-    case {nearest, trip_near} do
-      {{_day, points}, _trip_near} -> around(points)
-      {nil, near} when is_binary(near) -> {:location, near}
-      {nil, nil} -> nil
+    case nearest do
+      {_day, points} -> around(points)
+      nil -> nil
     end
   end
 
@@ -377,7 +390,11 @@ defmodule FermixCore.Trips.Lookup do
 
   # The request a lookup sends, and how it is anchored: `:anchored`, `{:near,
   # near}` until the place search answers, `:no_anchor`, or a near this call
-  # already found unknown, whose words are searched alone.
+  # already found unknown, whose words are searched alone. A near's region
+  # bounds its search, never ranks it: the Apple Maps helper geocodes the near
+  # and searches its region as required (`regionPriority = .required`), so no
+  # result outside it comes back, and the first that passes the name rule is
+  # placed, with no distance read here.
   defp plan(%{place: words, day: day}, state) do
     base = %{query: String.trim(words), count: @count}
 

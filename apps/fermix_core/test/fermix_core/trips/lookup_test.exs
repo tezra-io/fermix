@@ -70,6 +70,14 @@ defmodule FermixCore.Trips.LookupTest do
     end
   end
 
+  # A request searched 2 km about one placed stop at `point`.
+  defp assert_around(request, point) do
+    assert {:coordinates, latitude, longitude} = request.anchor
+    assert_in_delta latitude, point.latitude, 1.0e-9
+    assert_in_delta longitude, point.longitude, 1.0e-9
+    assert request.radius_meters == 2_000
+  end
+
   describe "the name rule" do
     test "a name holds the words or begins them, as whole words without case or accents" do
       assert Lookup.words_match?("Castelo da Águia", "castelo da aguia")
@@ -312,32 +320,43 @@ defmodule FermixCore.Trips.LookupTest do
       assert Lookup.anchor(anchors(%{1 => []}), 1) == nil
     end
 
-    # D10: the day's placed stops, else the day's near, else the nearest day
-    # with placed stops, else the trip's near, else none.
-    test "in order: the day's stops, the day's near, the nearest placed day, the trip's near" do
+    # D11: a near wins, the day's, else the trip's; the placed stops anchor
+    # only a trip with neither, the day's own, else the nearest placed day.
+    test "with a near: the day's, else the trip's, over every placed stop" do
       porto = "Porto, Portugal"
       lisbon = "Lisbon, Portugal"
-      tower = Geo.centroid([@tower])
 
-      # The day's own placed stops win over its near and the trip's.
-      assert {:coordinates, latitude, _longitude, 2_000} =
-               Lookup.anchor(anchors(%{3 => [@tower]}, %{3 => porto}, lisbon), 3)
-
-      assert latitude == tower.latitude
-
-      # A day with none searches near its own place, over a placed day beside it.
-      assert Lookup.anchor(anchors(%{2 => [@tower]}, %{3 => porto}, lisbon), 3) ==
+      # The day's near wins over its own placed stops and the trip's near.
+      assert Lookup.anchor(anchors(%{3 => [@tower]}, %{3 => porto}, lisbon), 3) ==
                {:location, porto}
 
-      # A day with neither takes the nearest placed day, over the trip's near.
-      assert {:coordinates, latitude, _longitude, 2_000} =
-               Lookup.anchor(anchors(%{2 => [@tower]}, %{3 => porto}, lisbon), 4)
+      # A day with no near of its own takes the trip's, over its own placed
+      # stops and a placed day beside it.
+      assert Lookup.anchor(anchors(%{3 => [@tower], 2 => [@market]}, %{}, lisbon), 3) ==
+               {:location, lisbon}
 
-      assert latitude == tower.latitude
+      assert Lookup.anchor(anchors(%{2 => [@tower]}, %{3 => porto}, lisbon), 4) ==
+               {:location, lisbon}
 
-      # With no placed stop anywhere, the trip's near; another day's is not this one's.
+      # Another day's near is not this one's.
       assert Lookup.anchor(anchors(%{}, %{3 => porto}, lisbon), 4) == {:location, lisbon}
-      assert Lookup.anchor(anchors(%{}, %{3 => porto}, nil), 4) == nil
+    end
+
+    test "with no near: the day's placed stops, else the nearest placed day, else none" do
+      porto = "Porto, Portugal"
+
+      assert {:coordinates, latitude, _longitude, 2_000} =
+               Lookup.anchor(anchors(%{3 => [@tower], 2 => [@market]}), 3)
+
+      assert latitude == Geo.centroid([@tower]).latitude
+
+      # Another day's near is not this one's: the nearest placed day anchors.
+      assert {:coordinates, latitude, _longitude, 2_000} =
+               Lookup.anchor(anchors(%{2 => [@market]}, %{5 => porto}), 3)
+
+      assert latitude == Geo.centroid([@market]).latitude
+
+      assert Lookup.anchor(anchors(%{}, %{5 => porto}), 3) == nil
     end
 
     test "a lookup asks around the anchor, near a place by its name, and with none the words alone" do
@@ -369,7 +388,8 @@ defmodule FermixCore.Trips.LookupTest do
       assert searched() == [%{query: "Doca", count: 5}]
     end
 
-    test "a creating call anchors later lookups on what it placed, in waves" do
+    # With no near, a stop placed in an earlier wave anchors the later ones.
+    test "a call with no near anchors later lookups on what it placed, in waves" do
       results = %{
         "Torre Alta" => found([place("Torre Alta", @tower, 1)]),
         "Mercado" => found([place("Mercado", @market, 2)]),
@@ -383,19 +403,108 @@ defmodule FermixCore.Trips.LookupTest do
       ]
 
       assert {:ok, %{outcomes: outcomes, lookups: 3}} =
-               resolve(requests, near_town(), search_by(results))
+               resolve(requests, anchors(%{2 => [@quay]}), search_by(results))
 
       assert Enum.all?(outcomes, &match?({_ref, {:placed, _place}}, &1))
 
       [first | later] = searched()
-      assert first == %{query: "Torre Alta", count: 5, anchor: {:location, @town}}
+      assert first.query == "Torre Alta"
+      assert_around(first, @quay)
+      assert_around(Enum.find(later, &(&1.query == "Mercado")), @tower)
+      assert_around(Enum.find(later, &(&1.query == "Harbour Rooms")), @quay)
+    end
 
-      for request <- later do
-        assert {:coordinates, latitude, longitude} = request.anchor
-        assert_in_delta latitude, @tower.latitude, 1.0e-9
-        assert_in_delta longitude, @tower.longitude, 1.0e-9
-        assert request.radius_meters == 2_000
+    # With a near, what an earlier wave placed moves no later lookup's anchor.
+    test "a call with a near searches it in every wave" do
+      results = %{
+        "Torre Alta" => found([place("Torre Alta", @tower, 1)]),
+        "Mercado" => found([place("Mercado", @market, 2)])
+      }
+
+      requests = [%{ref: 1, place: "Torre Alta", day: 1}, %{ref: 2, place: "Mercado", day: 1}]
+
+      assert {:ok, %{outcomes: [{1, {:placed, _tower}}, {2, {:placed, _market}}]}} =
+               resolve(requests, near_town(), search_by(results))
+
+      assert searched() == [
+               %{query: "Torre Alta", count: 5, anchor: {:location, @town}},
+               %{query: "Mercado", count: 5, anchor: {:location, @town}}
+             ]
+    end
+  end
+
+  # D11, from a live run in Lisbon: a day whose first placed stop was in
+  # Alfama searched every later stop within a few km of it, so the tower in
+  # Belém, 7 km off, was placed at a business of its name in Alfama. A near
+  # wins over the placed stops, so a city's stops are each searched in the city.
+  describe "a near wins" do
+    @lisbon "Lisbon, Portugal"
+    @alfama %{latitude: 38.7098, longitude: -9.1332}
+    @alfama_bar %{latitude: 38.7163, longitude: -9.1342}
+    @belem %{latitude: 38.6916, longitude: -9.2160}
+
+    test "a day with a near: its stops in two districts are each searched near it" do
+      cathedral = place("Sé de Lisboa", @alfama, 11)
+      tower = place("Torre de Belém", @belem, 12)
+
+      search =
+        search_by(%{"Sé de Lisboa" => found([cathedral]), "Torre de Belém" => found([tower])})
+
+      requests = [
+        %{ref: 1, place: "Sé de Lisboa", day: 1},
+        %{ref: 2, place: "Torre de Belém", day: 1}
+      ]
+
+      assert {:ok, %{outcomes: [{1, {:placed, ^cathedral}}, {2, {:placed, ^tower}}]}} =
+               resolve(requests, anchors(%{1 => [@alfama]}, %{1 => @lisbon}), search)
+
+      assert searched() == [
+               %{query: "Sé de Lisboa", count: 5, anchor: {:location, @lisbon}},
+               %{query: "Torre de Belém", count: 5, anchor: {:location, @lisbon}}
+             ]
+    end
+
+    test "a business of a landmark's name beside a placed stop does not win: the near is searched" do
+      bar = place("Torre de Belém", @alfama_bar, 13)
+      tower = place("Torre de Belém", @belem, 12)
+      test_pid = self()
+
+      # Around the placed stop the search finds the bar; in the city, the tower.
+      search = fn request ->
+        send(test_pid, {:searched, request})
+
+        case request.anchor do
+          {:coordinates, _latitude, _longitude} -> found([bar])
+          {:location, @lisbon} -> found([tower])
+        end
       end
+
+      assert {:ok, %{outcomes: [{1, {:placed, ^tower}}], records: [^tower]}} =
+               resolve(
+                 [%{ref: 1, place: "Torre de Belém", day: 1}],
+                 anchors(%{1 => [@alfama]}, %{}, @lisbon),
+                 search
+               )
+
+      assert searched() == [%{query: "Torre de Belém", count: 5, anchor: {:location, @lisbon}}]
+    end
+
+    # A near's search stays in the near: the Apple Maps helper geocodes it and
+    # searches its region as required, never as a hint MapKit may leave, so no
+    # result outside it comes back and Lookup checks no distance of its own.
+    test "the place search's named anchor is a required region" do
+      source =
+        "../../../../fermix_nif/swift_src/fermix_maps.swift"
+        |> Path.expand(__DIR__)
+        |> File.read!()
+        |> String.replace(~r/\s+/, " ")
+
+      assert source =~
+               "case .location(let location): " <>
+                 "geocode(location) { region in run(request.query, region: region) }"
+
+      assert source =~
+               "if let region { request.region = region request.regionPriority = .required }"
     end
   end
 

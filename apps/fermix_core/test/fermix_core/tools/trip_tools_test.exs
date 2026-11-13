@@ -193,12 +193,6 @@ defmodule FermixCore.Tools.TripToolsTest do
     assert text =~ ~s(\n## [2] Day 2 · near "Ostrel, Portugal")
   end
 
-  test "trip_edit's description says to give near when making a trip and on a day elsewhere" do
-    assert TripEdit.description() =~
-             "Give near (town, country) when making a trip and on a day spent elsewhere: " <>
-               "places are looked up there."
-  end
-
   # An answer that placed some stops and not others asks the reply to say which,
   # as the answer lists them, before the channel's line; the guidance that says
   # so reaches no turn before a first trip, the answer does.
@@ -227,6 +221,16 @@ defmodule FermixCore.Tools.TripToolsTest do
     refute TripEdit.description() =~ "only adding stops runs"
   end
 
+  # D11: a near wins over the placed stops and has no size bound, so the
+  # description is what keeps it a town: a country searches the whole country.
+  test "trip_edit's description says a near is a town or city and its country, never wider" do
+    description = TripEdit.description()
+    assert description =~ "Give near when making a trip"
+    assert description =~ "a town or city and its country, like Lisbon, Portugal"
+    assert description =~ "never a country, a region, a district or a landmark"
+    assert description =~ "a day in a different town from the trip's gets its own near"
+  end
+
   test "the two tool schemas stay inside their measured budget" do
     encoded =
       [TripRead, TripEdit]
@@ -242,7 +246,9 @@ defmodule FermixCore.Tools.TripToolsTest do
     # 1,852 raised by those 142. D9 took out the clause that a trip is made
     # before any search in the turn: 483 tokens and 1,883 bytes. trip_read's
     # `as` saying the text is sent as is, with no note, measured 5 tokens and
-    # 14 bytes more: 488 tokens and 1,897 bytes, the bound.
-    assert byte_size(encoded) <= 1_897
+    # 14 bytes more: 488 tokens and 1,897 bytes. D11's near guidance (a town
+    # or city and its country, never wider, a day elsewhere its own) measured
+    # 31 tokens and 128 bytes more: 519 tokens and 2,025 bytes, the bound.
+    assert byte_size(encoded) <= 2_025
   end
 end

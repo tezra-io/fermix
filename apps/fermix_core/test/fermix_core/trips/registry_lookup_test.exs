@@ -129,9 +129,44 @@ defmodule FermixCore.Trips.RegistryLookupTest do
            }
   end
 
-  test "a stop placed earlier in the call, or already on its day, anchors the next lookup", ctx do
+  # D11: a near wins over the placed stops, those this call places included.
+  test "with a near, every lookup of the call and of a later one searches it", ctx do
     results = %{
       "Torre de Vale Escuro" => found([place("Torre de Vale Escuro", @tower, 1)]),
+      "Cais Velho" => found([place("Cais Velho", @quay, 2)])
+    }
+
+    {:ok, answer} =
+      edit(
+        ctx,
+        "Varonne",
+        [
+          %{"op" => "create", "days" => 2, "near" => @town},
+          %{"op" => "add", "text" => "Tower", "day" => 1, "place" => "Torre de Vale Escuro"}
+        ],
+        results
+      )
+
+    assert answer.text =~ " · 1 placed"
+    assert searched() == [%{query: "Torre de Vale Escuro", count: 5, anchor: {:location, @town}}]
+
+    assert {:ok, _answer} =
+             edit(
+               ctx,
+               "Varonne",
+               [%{"op" => "add", "text" => "Quay", "day" => 1, "place" => "Cais Velho"}],
+               results
+             )
+
+    assert searched() == [%{query: "Cais Velho", count: 5, anchor: {:location, @town}}]
+  end
+
+  test "with no near, a stop placed earlier in the call, or already on its day, anchors the next lookup",
+       ctx do
+    tower = place("Torre de Vale Escuro", @tower, 1)
+    :ok = ReplyBlocks.put_places(ctx.holder, @conversation, [tower])
+
+    results = %{
       "Cais Velho" => found([place("Cais Velho", @quay, 2)]),
       "Doca Seca" => found([])
     }
@@ -141,17 +176,16 @@ defmodule FermixCore.Trips.RegistryLookupTest do
         ctx,
         "Varonne",
         [
-          %{"op" => "create", "days" => 2, "near" => @town},
-          %{"op" => "add", "text" => "Tower", "day" => 1, "place" => "Torre de Vale Escuro"},
+          %{"op" => "create", "days" => 2},
+          %{"op" => "add", "text" => "Tower", "day" => 1, "place" => tower.source_url},
           %{"op" => "add", "text" => "Quay", "after" => 3, "place" => "Cais Velho"}
         ],
         results
       )
 
-    assert [first, second] = searched()
-    assert first.anchor == {:location, @town}
-    assert {:coordinates, 41.1402, -8.6113} = second.anchor
-    assert second.radius_meters == 2_000
+    assert [only] = searched()
+    assert {:coordinates, 41.1402, -8.6113} = only.anchor
+    assert only.radius_meters == 2_000
 
     # A later call reads the trip first: an edit of a stop on Day 1 is looked
     # up around Day 1's placed stops, and the row it names keeps its number.

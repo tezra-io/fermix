@@ -146,7 +146,8 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **Plan a trip in chat.** Ask for a day trip, a week or three weeks away and
   Fermix keeps it as a trip: days in order, and on each the stops with their
   times, how long each takes, fixed bookings, notes and places. It looks each
-  place up itself, near the rest of that day, and says which it placed, which
+  place up itself, within the town the trip or that day is in, and never
+  places one it has nowhere to search near; it says which it placed, which
   it found under another name (with the link, so you can pick it) and which it
   could not find. Ask what Thursday holds, move the museum to Friday, or have
   the plan sent to someone: the shared text links every place in Apple Maps
