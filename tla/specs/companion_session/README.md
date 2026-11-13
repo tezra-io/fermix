@@ -242,7 +242,8 @@ moved with the code.
 The re-read for the review's fixes (2026-11-13) found `PROTOCOL.md` changed in
 words only: the trips' size bound, a trip edit refused for an id a list's edit
 used, titles kept in Unicode NFC, and a day's move before `day_id`'s day. No event,
-field, step or rule the spec reads changed.
+field, step or rule the spec reads changed. A later change said in words that a device's add or move after a day's own
+row puts the stop first in that day; nothing the spec reads changed.
 
 **The Queue is one abstract process.** The runner takes one `.tla` per spec,
 and `turn_queue` proves the Queue's rules against `queue.ex`, so this spec takes
