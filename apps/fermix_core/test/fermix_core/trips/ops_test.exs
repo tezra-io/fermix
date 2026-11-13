@@ -630,7 +630,46 @@ defmodule FermixCore.Trips.OpsTest do
 
   # --- trust -----------------------------------------------------------------
 
-  test "after outside content only add runs, stamped" do
+  # D9: after outside content every op runs, a new trip and a new day included.
+  test "after outside content every op runs, one call each" do
+    store = three_days(nil)
+    outside = %{@edit | outside?: true}
+
+    {_result, store} = call!(store, "Pellmoor", [%{"op" => "create", "days" => 2}], outside)
+    assert %{title: "Pellmoor"} = trip(store, "Pellmoor")
+
+    # Fish market [4], Ferry [5], Clock tower [6], Vineyard [7]; the add makes
+    # Day 4 [8] and Day 5 [9].
+    store =
+      Enum.reduce(
+        [
+          %{"op" => "add", "text" => "Night market", "day" => 5},
+          %{"op" => "edit", "n" => 4, "text" => "Fish auction"},
+          %{"op" => "move", "n" => 4, "day" => 2},
+          %{"op" => "day", "day" => 1, "text" => "Port"},
+          %{"op" => "remove", "n" => 5},
+          %{"op" => "remove", "n" => 8},
+          %{"op" => "dates", "starts_on" => "2031-05-01"},
+          %{"op" => "rename", "text" => "Varonne coast"}
+        ],
+        store,
+        fn op, acc -> acc |> call!("Varonne", [op], outside) |> elem(1) end
+      )
+
+    assert outline(store, "Varonne coast") == [
+             {"Port", ~D[2031-05-01], []},
+             {"Old town", ~D[2031-05-02], ["Clock tower", "Fish auction"]},
+             {"Hills", ~D[2031-05-03], ["Vineyard"]},
+             {"", ~D[2031-05-04], ["Night market"]}
+           ]
+
+    {result, _store} = call!(store, "Varonne coast", [%{"op" => "remove_trip"}], outside)
+    assert result.trip.removed_at == @now
+  end
+
+  # D9: a stop whose words, note or place come after outside content is
+  # stamped, so a read labels it as data; a time or a length brings no words.
+  test "after outside content an add, or an edit giving words, a note or a place, stamps a stop" do
     store = three_days(nil)
     outside = %{@edit | outside?: true}
 
@@ -638,37 +677,34 @@ defmodule FermixCore.Trips.OpsTest do
       call!(store, "Varonne", [%{"op" => "add", "text" => "Night market", "day" => 3}], outside)
 
     assert %{stamped: true} = stop(store, "Varonne", "Night market")
-    assert [false, false, false] == Enum.map(day_rows(store, "Varonne"), & &1.stamped)
     assert result.made == stop(store, "Varonne", "Night market").id
+    assert [false, false, false] == Enum.map(day_rows(store, "Varonne"), & &1.stamped)
 
-    # R2#4: an add after outside content makes no day, so a page cannot
-    # stretch the trip; one after a row the trip has still lands.
-    assert call(store, "Varonne", [%{"op" => "add", "text" => "Far", "day" => 4}], outside) ==
-             {:error, {:op_failed, 1, :outside_new_day}}
+    # Fish market [4], Ferry [5], Clock tower [6], Vineyard [7].
+    timed = [%{"op" => "edit", "n" => 7, "time" => "18:00", "duration" => 90}]
+    {_result, store} = call!(store, "Varonne", timed, outside)
+    assert %{stamped: false, time: "18:00"} = stop(store, "Varonne", "Vineyard")
 
-    {_result, store} =
-      call!(store, "Varonne", [%{"op" => "add", "text" => "Late bar", "after" => 4}], outside)
-
-    assert %{stamped: true} = stop(store, "Varonne", "Late bar")
-    assert length(day_rows(store, "Varonne")) == 3
-
-    refused = [
+    worded = [
       %{"op" => "edit", "n" => 4, "text" => "Fish auction"},
-      %{"op" => "move", "n" => 4, "day" => 2},
-      %{"op" => "remove", "n" => 4},
-      %{"op" => "day", "day" => 1, "text" => "Port"},
-      %{"op" => "rename", "text" => "Elsewhere"},
-      %{"op" => "dates", "starts_on" => "2031-05-01"},
-      %{"op" => "remove_trip"}
+      %{"op" => "edit", "n" => 5, "note" => "Tickets at the kiosk"}
     ]
 
-    for op <- refused do
-      assert call(store, "Varonne", [op], outside) == {:error, {:op_failed, 1, :outside_content}},
-             inspect(op)
-    end
+    {_result, store} = call!(store, "Varonne", worded, outside)
+    assert %{stamped: true} = stop(store, "Varonne", "Fish auction")
+    assert %{stamped: true, note: "Tickets at the kiosk"} = stop(store, "Varonne", "Ferry")
 
-    assert call(store, "Pellmoor", [%{"op" => "create"}], outside) ==
-             {:error, {:op_failed, 1, :outside_content}}
+    # A place reaches the ops resolved (`Trips.Placing`): the record here.
+    placing = [%{"op" => "edit", "n" => 6, "place" => "Marisco Inn"}]
+    {:ok, %{ops: [op]} = shaped} = Shape.call(%{"trip" => "Varonne", "ops" => placing})
+    {:ok, _result, store} = run(store, %{shaped | ops: [%{op | place: @inn}]}, outside)
+
+    assert %{stamped: true, place: %{"name" => "Marisco Inn"}} =
+             stop(store, "Varonne", "Clock tower")
+
+    # A stamp stays when a turn that read nothing changes the stop again.
+    {_result, store} = call!(store, "Varonne", [%{"op" => "edit", "n" => 4, "text" => "Auction"}])
+    assert %{stamped: true} = stop(store, "Varonne", "Auction")
   end
 
   # --- removal ---------------------------------------------------------------

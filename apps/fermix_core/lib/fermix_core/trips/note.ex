@@ -9,8 +9,8 @@ defmodule FermixCore.Trips.Note do
   it (`Tools.TripRead.channel_line/2`).
 
   `rules` is the guidance (how a stop's place is given, when to search, what
-  is fixed, a day's order, a trip made before a search in its turn, and the
-  flow for a change that depends on a search, C1) and the channel's line
+  is fixed, a day's order, and what a trip sent to anyone holds, C1) and the
+  channel's line
   (`Prompt.ChannelPresentation.trip_line/2`): the
   drawn line when the turn's connection draws trips, else the line that says
   to write the days out. It rides the turn rather than the cached runtime
@@ -43,11 +43,10 @@ defmodule FermixCore.Trips.Note do
            "is the place's own name, never what happens there. Search before recommending a " <>
            "restaurant or anything that may have closed. Mark as fixed only what the owner " <>
            "said is booked or what sells timed entry, and ask before moving a fixed stop. Keep " <>
-           "a day's stops near each other and in walking order. Make a trip and add what you " <>
-           "already know before you search; what the search finds is then added in the same " <>
-           "turn. A change to a stop already in a trip that depends on a search, and a new " <>
-           "trip after one, wait for the owner: say what you found and what you would change, " <>
-           "and make it after their yes, with the place's link from that search."
+           "a day's stops near each other and in walking order. A trip sent or shared with " <>
+           "anyone is the as: \"share\" text exactly as trip_read gives it; a stop's note is " <>
+           "the owner's alone and never goes into what is sent, even when the conversation " <>
+           "shows it."
 
   @doc """
   The rules and the index line for a turn on `channel`, the drawn line when

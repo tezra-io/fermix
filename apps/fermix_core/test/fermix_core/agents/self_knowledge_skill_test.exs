@@ -393,8 +393,6 @@ defmodule FermixCore.Agents.SelfKnowledgeSkillTest do
     assert body =~ ~s{skill_view(name: "self-knowledge", file: "trips")}
 
     for sentence <- [
-          TripRegistry.describe_error(:outside_content),
-          TripRegistry.describe_error(:outside_new_day),
           TripRegistry.describe_error(:too_many_lookups),
           TripRegistry.describe_error(:unknown_place_link),
           TripRegistry.describe_error({:trip_full, "Varonne"}),
@@ -405,6 +403,11 @@ defmodule FermixCore.Agents.SelfKnowledgeSkillTest do
         ] do
       assert reference =~ sentence
     end
+
+    # D9: after outside content every trip op runs, so no refusal or wait is told.
+    refute reference =~ "can only add stops"
+    refute reference =~ "waits for the owner"
+    refute body =~ "rests on a search waits"
   end
 
   test "the events_reminders reference names every reminder platform and the derived order" do

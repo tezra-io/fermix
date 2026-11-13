@@ -64,9 +64,19 @@ defmodule FermixCore.Trips.NoteTest do
     assert rules =~ "read it with trip_read, change it with trip_edit, only as the owner asks"
     assert rules =~ "never what happens there"
     assert rules =~ "ask before moving a fixed stop"
-    assert rules =~ "Make a trip and add what you already know before you search"
-    assert rules =~ "and a new trip after one, wait for the owner"
-    assert rules =~ "after their yes, with the place's link from that search"
+
+    # What is sent is the shared form whole, and a note never goes into it,
+    # wherever the conversation showed one.
+    assert rules =~
+             "A trip sent or shared with anyone is the as: \"share\" text exactly as " <>
+               "trip_read gives it; a stop's note is the owner's alone and never goes into " <>
+               "what is sent, even when the conversation shows it."
+
+    # D9: a search no longer orders the turn, and a change after one is made
+    # in that turn.
+    refute rules =~ "before you search"
+    refute rules =~ "wait for the owner"
+    refute rules =~ "after their yes"
 
     assert String.ends_with?(
              rules,

@@ -42,9 +42,6 @@ defmodule FermixCore.Capabilities.UntrustedContent do
   alias FermixCore.Tools.OpenLoopUpdate
   alias FermixCore.Tools.RecallActivity
   alias FermixCore.Tools.SkillRun
-  alias FermixCore.Tools.TripEdit
-  alias FermixCore.Tools.TripRead
-  alias FermixCore.Trips.Render, as: TripRender
 
   # The open-loop tools whose result can show a loop noted after outside
   # content, framed (`OpenLoops.Registry.result_view/2`): the list, an answer's
@@ -55,14 +52,9 @@ defmodule FermixCore.Capabilities.UntrustedContent do
   # The list tools whose result can show a row added after outside content,
   # framed (`Checklists.Render`): a read, and an edit's answer, which names the
   # rows it touched. Their taint is in what they returned (`outside_source/3`).
+  # The trip tools frame such a stop the same way (`Trips.Render`) and bring
+  # no source: a trip tool's answer is not outside content (M89 D9).
   @checklist_framing_modules [ChecklistRead, ChecklistEdit]
-
-  # The trip tools whose result can show a stop added after outside content,
-  # framed (`Trips.Render`): a read, in either form, and an edit's answer,
-  # which names the stops it placed or whose date it moved (M89 §14). The
-  # names and addresses the engine's own lookups found are quoted as a
-  # provider's words and bring nothing (C1).
-  @trip_framing_modules [TripRead, TripEdit]
 
   @typedoc """
   Where outside content came from: a plugin, one named tool, a cue source (its
@@ -85,7 +77,6 @@ defmodule FermixCore.Capabilities.UntrustedContent do
           | {:message, String.t()}
           | {:open_loop, String.t()}
           | {:checklist, String.t()}
-          | {:trip, String.t()}
 
   # Tool categories whose result relays what a worker read.
   @relaying_categories [:delegation]
@@ -218,14 +209,6 @@ defmodule FermixCore.Capabilities.UntrustedContent do
       else: nil
   end
 
-  # A trip's stop framed as added after outside content, the same mark.
-  def outside_source(%Capability{metadata: %{tool_module: module}}, arguments, output)
-      when module in @trip_framing_modules and is_map(arguments) do
-    if is_binary(output) and String.contains?(output, TripRender.frame()),
-      do: trip_source(),
-      else: nil
-  end
-
   def outside_source(%Capability{} = capability, arguments, _output) when is_map(arguments),
     do: outside_source(capability, arguments)
 
@@ -306,13 +289,6 @@ defmodule FermixCore.Capabilities.UntrustedContent do
   """
   @spec checklist_source() :: outside_source()
   def checklist_source, do: {:checklist, "a list row added after outside content"}
-
-  @doc """
-  The outside source a trip read or edit brings into its turn when it shows a
-  stop added after outside content (M89 §14): its words may be someone else's.
-  """
-  @spec trip_source() :: outside_source()
-  def trip_source, do: {:trip, "a trip row added after outside content"}
 
   @doc """
   The outside source a coding-run continuation turn carries: a finished run

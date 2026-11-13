@@ -428,30 +428,39 @@ defmodule FermixCore.Trips.RegistryTest do
                Repo.trips_call({:read_trip, "default", "main", "Varonne"}, server: repo)
     end
 
-    test "after outside content only an add lands, stamped, and the rest wait", %{repo: repo} do
+    # D9: a turn that read outside content changes a trip as any owner turn
+    # does, through the store; what a stop's words or note then say is stamped.
+    test "after outside content every op lands, a stop added or reworded stamped", %{repo: repo} do
       varonne!(repo)
       tainted = %{@owner | outside_sources: MapSet.new([{:tool, "web_fetch"}])}
 
-      edit!(repo, "Varonne", [%{"op" => "add", "text" => "Night market", "day" => 2}], tainted)
+      edit!(repo, "Pellmoor", [%{"op" => "create", "days" => 2}], tainted)
 
-      assert {:ok, %{rows: rows}} =
-               Repo.trips_call({:read_trip, "default", "main", "Varonne"}, server: repo)
+      # Fish market [3], Dinner at Corvo [4]; Day 3 and Day 4 are made [5] and [6].
+      for op <- [
+            %{"op" => "add", "text" => "Night market", "day" => 4},
+            %{"op" => "edit", "n" => 3, "text" => "Fish auction"},
+            %{"op" => "edit", "n" => 4, "note" => "Table by the window"},
+            %{"op" => "move", "n" => 7, "day" => 1},
+            %{"op" => "day", "day" => 2, "text" => "Old town"},
+            %{"op" => "remove", "n" => 6},
+            %{"op" => "dates", "starts_on" => "2031-08-01"},
+            %{"op" => "rename", "text" => "Varonne coast"}
+          ] do
+        edit!(repo, "Varonne", [op], tainted)
+      end
 
-      assert %{stamped: true} = Enum.find(rows, &(&1.text == "Night market"))
+      assert {:ok, %{trip: trip, rows: rows}} =
+               Repo.trips_call({:read_trip, "default", "main", "Varonne coast"}, server: repo)
 
-      assert refusal(edit(repo, "Varonne", [%{"op" => "rename", "text" => "Elsewhere"}], tainted)) ==
-               "This turn read something from outside, so it can only add stops to a trip " <>
-                 "that already exists; a new trip and every other change wait for the owner's " <>
-                 "next message, so say what you would make or change and ask. " <>
-                 "Nothing in this call was changed (op 1)."
+      assert trip.starts_on == ~D[2031-08-01]
+      assert Enum.map(Ops.days(rows), & &1.row.text) == ["Harbour", "Old town", ""]
 
-      far = [%{"op" => "add", "text" => "Far market", "day" => 9}]
+      assert rows |> Enum.filter(& &1.stamped) |> Enum.map(& &1.text) |> Enum.sort() ==
+               ["Dinner at Corvo", "Fish auction", "Night market"]
 
-      assert refusal(edit(repo, "Varonne", far, tainted)) ==
-               "This turn read something from outside, so it can only add stops to a day the " <>
-                 "trip already has; a new day and every other change wait for the owner's next " <>
-                 "message, so say what you would make or change and ask. " <>
-                 "Nothing in this call was changed (op 1)."
+      edit!(repo, "Varonne coast", [%{"op" => "remove_trip"}], tainted)
+      assert {:ok, [%{title: "Pellmoor"}]} = Registry.names(@owner, repo: repo)
     end
 
     test "an edit's telemetry carries counts and the caller's session, never a title", %{

@@ -29,6 +29,9 @@ defmodule FermixCore.Trips.RegistryLookupTest do
   @tower %{latitude: 41.1402, longitude: -8.6113}
   @quay %{latitude: 41.1408, longitude: -8.6142}
   @town "Varonne, Portugal"
+  # The line an answer ends with when a place given was not placed.
+  @report "Tell the owner which stops were placed, which were offered under another name " <>
+            "with their links, and which were not placed and why, as this answer lists them."
 
   defp place(name, point, id) do
     %{
@@ -207,7 +210,7 @@ defmodule FermixCore.Trips.RegistryLookupTest do
 
     assert answer.text ==
              "Varonne · rev #{rev} · nothing changed · 1 day, 1 stop · 0 placed\n" <>
-               ~s|No place found: [2] "Quay" (place unchanged).|
+               ~s|No place found: [2] "Quay" (place unchanged).\n| <> @report
 
     assert [%{rows: []}] = answer.touched
 
@@ -413,7 +416,7 @@ defmodule FermixCore.Trips.RegistryLookupTest do
                  "first result anywhere: give its day a near (a town and its country) and the " <>
                  "place again, or its link if that is the place meant:\n" <>
                  ~s([2] "Fish market": "Atlanta Fish Market, Pharr Road, Atlanta" · ) <>
-                 "https://maps.apple.com/place?place-id=I77"
+                 "https://maps.apple.com/place?place-id=I77\n" <> @report
 
       assert searched() == [%{query: "fish market", count: 5}]
       assert %{place: nil} = Enum.find(rows!(ctx, "Varonne"), &(&1.n == 2))

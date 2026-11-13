@@ -3,9 +3,9 @@ defmodule FermixCore.Tools.TripToolsTest do
   # model call is one tool event under its name, the place lookups inside a
   # call none of their own; every trip a call read or changed is kept for the
   # reply's block; a turn that was not told how its channel shows a trip has
-  # the channel's line after the answer; a framed stop taints the turn and the
-  # engine's own lookups do not; trip_edit says a trip is made before any
-  # search in the turn; and both schemas stay inside their budget.
+  # the channel's line after the answer; a stop written after outside content
+  # comes back labelled and, as the engine's own lookups, taints nothing (D9);
+  # and both schemas stay inside their budget.
   use ExUnit.Case, async: true
 
   alias FermixCore.Capabilities.Builtin
@@ -122,7 +122,10 @@ defmodule FermixCore.Tools.TripToolsTest do
     refute read.output =~ written
   end
 
-  test "a read that shows a stop added after outside content taints the turn; a lookup does not",
+  # D9: a trip tool's own answer is not outside content. A stop written after
+  # outside content comes back labelled as data, and the read brings the turn
+  # no outside source, as the engine's own lookups bring none.
+  test "a read that shows a stop added after outside content labels it and taints nothing",
        %{context: context} do
     edit = Builtin.from_tool_module(TripEdit)
     read = Builtin.from_tool_module(TripRead)
@@ -130,9 +133,6 @@ defmodule FermixCore.Tools.TripToolsTest do
     offered = create!(context)
     assert offered.output =~ ~s("Harbour Rooms, 9 Rua Inventada, Varonne")
     assert UntrustedContent.outside_source(edit, %{}, offered.output) == nil
-
-    {:ok, clean} = TripRead.execute(%{"trip" => "Varonne"}, context)
-    assert UntrustedContent.outside_source(read, %{}, clean.output) == nil
 
     tainted = %{context | outside_sources: MapSet.new([{:tool, "web_fetch"}])}
     add = [%{"op" => "add", "text" => "Night market", "day" => 2}]
@@ -142,19 +142,16 @@ defmodule FermixCore.Tools.TripToolsTest do
 
     {:ok, framed} = TripRead.execute(%{"trip" => "Varonne"}, context)
     assert framed.output =~ ~s{(added after outside content) "Night market"}
-
-    assert UntrustedContent.outside_source(read, %{}, framed.output) ==
-             UntrustedContent.trip_source()
+    assert UntrustedContent.outside_source(read, %{}, framed.output) == nil
 
     {:ok, shared} = TripRead.execute(%{"trip" => "Varonne", "as" => "share"}, context)
-
-    assert UntrustedContent.outside_source(read, %{}, shared.output) ==
-             UntrustedContent.trip_source()
+    assert shared.output =~ ~s{(added after outside content) "Night market"}
+    assert UntrustedContent.outside_source(read, %{}, shared.output) == nil
   end
 
-  # R2#2: whatever repeats a stamped stop's words frames them, so the turn that
-  # reads them back is marked as a read of them is.
-  test "an edit's answer that repeats a stamped stop's words frames them and taints the turn",
+  # R2#2: whatever repeats a stamped stop's words labels them, and, as a read
+  # of them, brings the turn nothing (D9).
+  test "an edit's answer that repeats a stamped stop's words labels them and taints nothing",
        %{context: context} do
     edit = Builtin.from_tool_module(TripEdit)
     create!(context)
@@ -173,9 +170,7 @@ defmodule FermixCore.Tools.TripToolsTest do
       {:ok, answer} = TripEdit.execute(%{"trip" => "Varonne", "ops" => ops}, context)
       assert answer.success
       assert answer.output =~ "[4] " <> framed, inspect(ops)
-
-      assert UntrustedContent.outside_source(edit, %{}, answer.output) ==
-               UntrustedContent.trip_source()
+      assert UntrustedContent.outside_source(edit, %{}, answer.output) == nil
     end
   end
 
@@ -204,10 +199,32 @@ defmodule FermixCore.Tools.TripToolsTest do
                "places are looked up there."
   end
 
-  test "trip_edit's description says a trip is made before any search in the turn" do
-    assert TripEdit.description() =~
-             "Make a trip with what is known before any search in the turn; after a search, " <>
-               "only adding stops runs."
+  # An answer that placed some stops and not others asks the reply to say which,
+  # as the answer lists them, before the channel's line; the guidance that says
+  # so reaches no turn before a first trip, the answer does.
+  test "an answer with a stop not placed ends by asking the reply to report each as listed",
+       %{context: context} do
+    report =
+      "Tell the owner which stops were placed, which were offered under another name " <>
+        "with their links, and which were not placed and why, as this answer lists them."
+
+    offered = create!(context)
+    assert offered.output =~ ~s("Harbour Rooms, 9 Rua Inventada, Varonne")
+    assert offered.output =~ report <> "\n\nNo trip is drawn here"
+
+    add = [%{"op" => "add", "text" => "Breakfast", "day" => 1}]
+    {:ok, plain} = TripEdit.execute(%{"trip" => "Varonne", "ops" => add}, context)
+    refute plain.output =~ report
+  end
+
+  test "trip_read's share form says it is sent as it is, with no note" do
+    assert TripRead.parameters().properties.as.description == "To send, as is: never add a note."
+  end
+
+  # D9: a search no longer orders the turn, so the description says nothing of it.
+  test "trip_edit's description sets no order between a search and a change" do
+    refute TripEdit.description() =~ "search in the turn"
+    refute TripEdit.description() =~ "only adding stops runs"
   end
 
   test "the two tool schemas stay inside their measured budget" do
@@ -222,7 +239,10 @@ defmodule FermixCore.Tools.TripToolsTest do
     # the old 1,750 raised by that clause's 102 bytes. D10's `near` (its
     # sentence, its two mentions among the ops and its property) measured 35
     # tokens and 142 bytes more, 506 tokens and 1,985 bytes, so the bound is
-    # 1,852 raised by those 142.
-    assert byte_size(encoded) <= 1_994
+    # 1,852 raised by those 142. D9 took out the clause that a trip is made
+    # before any search in the turn: 483 tokens and 1,883 bytes. trip_read's
+    # `as` saying the text is sent as is, with no note, measured 5 tokens and
+    # 14 bytes more: 488 tokens and 1,897 bytes, the bound.
+    assert byte_size(encoded) <= 1_897
   end
 end

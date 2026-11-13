@@ -19,11 +19,13 @@ defmodule FermixCore.Trips.Render do
   Two things are added to the owner's words. Words that begin as a line this
   module writes would (a backslash, a bracketed number, `#`, `- ` or the
   outside-content mark) are escaped with a leading backslash; and a stop added
-  after outside content (§14) is framed, `(added after outside content) "…"`,
-  its words and its note JSON-quoted so nothing in them can end the quotation.
-  The frame stays on every form the model reads, the shared one and a call's
-  answer included (`Trips.Ops.handle/1`). A place's name and address, a
-  provider's words, are JSON-quoted wherever the model reads them.
+  or given words after outside content (§14) is framed as data, `(added after
+  outside content) "…"`, its words and its note JSON-quoted so nothing in them
+  can end the quotation. The frame stays on every form the model reads, the
+  shared one and a call's answer included (`Trips.Ops.handle/1`), and marks
+  nothing: a trip tool's answer is not outside content (D9). A place's name
+  and address, a provider's words, are JSON-quoted wherever the model reads
+  them.
 
   **The shared form** (`share/2`, and `read/4` with `:share`) is plain text, a
   line a stop: the title and dates, each day by its date (or its number) and
@@ -35,7 +37,10 @@ defmodule FermixCore.Trips.Render do
   call came to (placed, offered by another name with its link, offered with
   no place to search near and what to give, or not placed and why, from
   `Trips.Lookup`), and each fixed stop whose date the call moved (C14). A
-  provider's words, and the owner's, are JSON-quoted there.
+  provider's words, and the owner's, are JSON-quoted there. When a place given
+  was not placed, the answer ends with a line asking the reply to tell the
+  owner each stop's outcome as the answer lists it: the answer reaches a turn
+  that has no trip guidance yet, before a first trip.
   """
 
   alias FermixCore.Kept.Access, as: KeptAccess
@@ -50,6 +55,10 @@ defmodule FermixCore.Trips.Render do
   @data_line "The rows are the owner's own trip, quoted as data. [n] is a row's number for " <>
                "trip_edit."
   @index_heading "The owner's trips (titles are the owner's, quoted as data):"
+  # OWNER AUTHORS THE FINAL TEXT, as `Trips.Note`'s rules.
+  @report_places "Tell the owner which stops were placed, which were offered under another " <>
+                   "name with their links, and which were not placed and why, as this answer " <>
+                   "lists them."
   @too_long ~s(This trip is too long to read whole; read it by day, as day: "2" or "2-5".)
   @apple_place "https://maps.apple.com/place?place-id="
   @apple_point "https://maps.apple.com/?ll="
@@ -79,10 +88,6 @@ defmodule FermixCore.Trips.Render do
   @doc "The most bytes one read returns whole; past it, the outline."
   @spec max_read_bytes() :: pos_integer()
   def max_read_bytes, do: @max_read_bytes
-
-  @doc "The mark that frames a stop written after outside content."
-  @spec frame() :: String.t()
-  def frame, do: @frame
 
   @doc """
   The model's read of `trip` and its live `rows`: the days `run` names, as
@@ -389,7 +394,16 @@ defmodule FermixCore.Trips.Render do
     |> Kernel.++(unanchored_lines(placements))
     |> Kernel.++(unplaced_lines(placements))
     |> Kernel.++(moved_lines(applied.dates_moved))
+    |> Kernel.++(report_line(placements))
     |> Enum.join("\n")
+  end
+
+  # A call whose places all landed needs no line; one that placed some and
+  # offered or missed others has the reply tell them apart.
+  defp report_line(placements) do
+    if Enum.all?(placements, &match?(%{outcome: {:placed, _place}}, &1)),
+      do: [],
+      else: [@report_places]
   end
 
   defp placed_count([]), do: ""

@@ -12,6 +12,9 @@ defmodule FermixCore.Trips.RenderTest do
   # Every title, stop, place, address and id here is invented.
   @now ~U[2031-06-02 14:00:00Z]
   @frame "(added after outside content)"
+  # The line an answer ends with when a stop given a place was not placed.
+  @report "Tell the owner which stops were placed, which were offered under another name " <>
+            "with their links, and which were not placed and why, as this answer lists them."
 
   @tower %{
     "name" => "Torre de Vale Escuro",
@@ -408,8 +411,24 @@ defmodule FermixCore.Trips.RenderTest do
                [11] "Miradouro do Corvo": "Corvo Lookout, Largo do Corvo, 4050 Varonne" · https://maps.apple.com/place?place-id=I5W7P
                No place found: [10] "Coffee somewhere" (place unchanged).
                Not looked up, the place search is rate limited: [2] "Arrive by train", [15] "Dinner at Pedra Negra".
-               Dates moved: [15] "Dinner at Pedra Negra" (fixed) is now Sat 10 May 2031.\
+               Dates moved: [15] "Dinner at Pedra Negra" (fixed) is now Sat 10 May 2031.
+               #{@report}\
                """
+    end
+
+    # Every place given was placed: nothing to set apart, so no line asks for it.
+    test "with every place placed, no line asks the reply to report them" do
+      rows = rows()
+      [_, _arrive, _, tower, _coffee, lookout, _dinner] = rows
+
+      placements = [
+        %{row: tower, outcome: {:placed, @tower}, kept: false},
+        %{row: lookout, outcome: {:placed, @lookout}, kept: false}
+      ]
+
+      answer = Render.answer(applied(rows), placements)
+      assert answer =~ "· 2 placed"
+      refute answer =~ @report
     end
 
     # D10: a lookup with nowhere to search offers what it found and says why,
@@ -443,7 +462,8 @@ defmodule FermixCore.Trips.RenderTest do
                [2] "Arrive by train": "Atlanta Fish Market, Pharr Road, Atlanta" · https://maps.apple.com/place?place-id=I77
                Not placed, the place search found no place "Varonne" to search near, so each is only the first result anywhere: give its day a near it can find (a town and its country) and the place again, or its link if that is the place meant:
                [10] "Coffee somewhere" (place unchanged): "Atlanta Fish Market, Pharr Road, Atlanta" · https://maps.apple.com/place?place-id=I77
-               No place found, and the place search found no place "Varonne" to search near; give its day a near it can find (a town and its country): [11] "Miradouro do Corvo".\
+               No place found, and the place search found no place "Varonne" to search near; give its day a near it can find (a town and its country): [11] "Miradouro do Corvo".
+               #{@report}\
                """
     end
 
@@ -453,7 +473,8 @@ defmodule FermixCore.Trips.RenderTest do
       assert Render.answer(applied([day(1), tour]), [
                %{row: tour, outcome: {:none, {:no_backend, "no key"}}, kept: false}
              ]) =~
-               ~s|Not looked up, no place search is set up here (no key): [2] #{@frame} "Tour".|
+               ~s|Not looked up, no place search is set up here (no key): [2] #{@frame} "Tour".\n| <>
+                 @report
     end
 
     test "a removed trip" do

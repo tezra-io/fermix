@@ -9,11 +9,11 @@ defmodule FermixCore.Tools.TripEdit do
   offered by another name or with no place to search near, with its link, or
   not placed and why. The answer is the trip's line, never the whole trip.
 
-  After outside content an add still lands, its stop stamped, and every other
-  op, a create included, is refused (`Trips.Ops`). A stamped stop's words come
-  back framed in the answer, which brings the turn an outside source, as a
-  read does. The engine's own lookups bring none (C1): their names and
-  addresses are quoted as a provider's words.
+  After outside content every op runs (D9), and a stop the call adds or gives
+  words, a note or a place is stamped (`Trips.Ops`). A stamped stop's words
+  come back framed as data in the answer, as a read frames them, and neither
+  brings the turn an outside source, as the engine's own lookups bring none
+  (C1): their names and addresses are quoted as a provider's words.
 
   Offered and run only where `Kept.Access.permitted?/2` admits it. Every trip
   the call touched is recorded for the reply's block with the rows it added
@@ -44,10 +44,9 @@ defmodule FermixCore.Tools.TripEdit do
   @spec description() :: String.t()
   def description do
     "Make and change the owner's trips as the owner asks; a call lands whole or not at " <>
-      "all. Make a trip with what is known before any search in the turn; after a search, " <>
-      "only adding stops runs. place: the place's own name, never the activity, or a link " <>
-      "a search returned. Give near (town, country) when making a trip and on a day spent " <>
-      "elsewhere: places are looked up there."
+      "all. place: the place's own name, never the activity, or a link a search returned. " <>
+      "Give near (town, country) when making a trip and on a day spent elsewhere: places " <>
+      "are looked up there."
   end
 
   @impl true
@@ -113,11 +112,6 @@ defmodule FermixCore.Tools.TripEdit do
       %{
         tag: "unknown_place_link",
         description: "a place's link no place search in this conversation returned"
-      },
-      %{tag: "outside_content", description: "an op other than add after outside content"},
-      %{
-        tag: "outside_new_day",
-        description: "an add to a day the trip lacks after outside content"
       },
       %{tag: "last_day", description: "a trip keeps at least one day"},
       %{

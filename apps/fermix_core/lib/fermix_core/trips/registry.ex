@@ -16,8 +16,9 @@ defmodule FermixCore.Trips.Registry do
       `Trips.Ops` applies it to the rows it loaded and the trip moves its
       `rev` once, or nothing changes; a device's edit is applied once by its
       `client_msg_id`;
-    * **provenance** — after outside content a call may only add, the stop it
-      adds stamped (`Trips.Ops`);
+    * **provenance** — after outside content every op runs, and a stop the
+      call adds or gives words, a note or a place is stamped (`Trips.Ops`),
+      which a read shows as data without marking the turn (D9);
     * **the places** — a model's `place`, words or a link, resolved before the
       store is asked (`Trips.Placing`, `Trips.Lookup`), the lookups' records
       joining the conversation first, so a link the answer offers resolves
@@ -584,23 +585,6 @@ defmodule FermixCore.Trips.Registry do
     "#{tool} is available only on the owner's own turn in a private chat or a voice call, or " <>
       "in a scheduled job set up there that names it; group chats and guest, delegated and " <>
       "other runs cannot read or change the owner's trips."
-  end
-
-  # The owner's trips are named on every owner turn, so a trip a page could
-  # have named waits for the owner (lists refuse it for the same reason): the
-  # sentence tells the model to ask, as the guidance does for a change.
-  def describe_error(:outside_content) do
-    "This turn read something from outside, so it can only add stops to a trip that " <>
-      "already exists; a new trip and every other change wait for the owner's next " <>
-      "message, so say what you would make or change and ask."
-  end
-
-  # An add after outside content makes no day, so a page cannot stretch the
-  # trip: the sentence says so in the outside sentence's terms.
-  def describe_error(:outside_new_day) do
-    "This turn read something from outside, so it can only add stops to a day the trip " <>
-      "already has; a new day and every other change wait for the owner's next message, so " <>
-      "say what you would make or change and ask."
   end
 
   def describe_error(:unknown_place_link) do

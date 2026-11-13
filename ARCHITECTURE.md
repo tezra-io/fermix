@@ -1022,9 +1022,11 @@ no tool call: one model call is one `[:fermix, :tool, :exec]` event.
 
 Architecture Invariant: the trips are the owner's, by the lists' rule
 (`Kept.Access`), and the tools are left out of the cached catalog. After a
-turn read outside content it may only add, the stop stamped and framed when
-read back; the engine's own lookups do not taint the turn, their names and
-addresses quoted as a provider's words.
+turn read outside content every op runs, and a stop it adds or gives words,
+a note or a place is stamped and framed as data when read back; a trip
+tool's answer is not outside content (`UntrustedContent.outside_source/3`
+records nothing for it), and neither do the engine's own lookups taint the
+turn, their names and addresses quoted as a provider's words.
 
 ### Sandbox and Command Execution
 

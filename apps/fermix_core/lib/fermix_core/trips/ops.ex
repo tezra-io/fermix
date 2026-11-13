@@ -30,9 +30,9 @@ defmodule FermixCore.Trips.Ops do
   an empty one, which wins over the trip's for that day. The model's words,
   kept as given; the wire never carries them (`Trips.Wire`).
 
-  After outside content a call may only add (`@outside_ops`): every other op,
-  `create` included, is refused, and the stop it adds is stamped. Such an add
-  makes no day: a `day` past the last is refused (`:outside_new_day`).
+  After outside content every op runs as on any turn (D9): a stop the call
+  adds, and one whose words, note or place an `edit` gives, is stamped, and
+  stays so, which a read shows as data (`Trips.Render`).
 
   Removal is soft, as a list's: a removed row keeps its `removed_at`, and the
   stops removed with their day keep the day's id (`removed_with`), so a day a
@@ -63,9 +63,6 @@ defmodule FermixCore.Trips.Ops do
   @max_trips 30
   @max_rows 1_000
   @max_wire_bytes 768 * 1_024
-  # The only ops a call that read outside content may run (§14): an
-  # allow-list, so an op added later is refused there until it is ruled on.
-  @outside_ops [:add]
   # The ops that can grow a trip's wire form, the only ones the size guard
   # measures (`fits/2`). Remove, move and restore only take a row between its
   # live and removed forms or move it: the removed form adds a `removed_at`
@@ -268,19 +265,15 @@ defmodule FermixCore.Trips.Ops do
   # The trip a call changes: one its first op creates, a removed one a
   # device's `restore` brings back, or an existing live one.
   defp target(state, ref, [%{op: :create} = create | rest], edit) do
-    with :ok <- outside_allows(edit, create),
-         {:ok, state} <- create(state, create.title || ref, create, edit) do
-      {:ok, state, rest, 2}
-    else
+    case create(state, create.title || ref, create, edit) do
+      {:ok, state} -> {:ok, state, rest, 2}
       {:error, reason} -> {:error, {:op_failed, 1, reason}}
     end
   end
 
-  defp target(state, id, [%{op: :restore, row: nil} = restore], edit) do
-    with :ok <- outside_allows(edit, restore),
-         {:ok, state} <- restore_trip(state, id, restore) do
-      {:ok, state, [], 2}
-    else
+  defp target(state, id, [%{op: :restore, row: nil} = restore], _edit) do
+    case restore_trip(state, id, restore) do
+      {:ok, state} -> {:ok, state, [], 2}
       {:error, {:no_trip, _id, _titles} = reason} -> {:error, reason}
       {:error, reason} -> {:error, {:op_failed, 1, reason}}
     end
@@ -301,22 +294,15 @@ defmodule FermixCore.Trips.Ops do
     end)
   end
 
-  # Nothing reaches a trip a call removed, and after outside content nothing
-  # but an add.
+  # Nothing reaches a trip a call removed.
   defp op(state, op, edit) do
     cond do
       op.op == :create -> {:error, :create_not_first}
-      outside_allows(edit, op) != :ok -> {:error, :outside_content}
       state.trip.removed_at -> {:error, :trip_removed}
       op.op in [:rename, :dates, :remove_trip] -> trip_op(state, op, edit)
       true -> row_op(state, op, edit)
     end
   end
-
-  defp outside_allows(%{outside?: true}, %{op: op}) when op not in @outside_ops,
-    do: {:error, :outside_content}
-
-  defp outside_allows(_edit, _op), do: :ok
 
   # --- trips -----------------------------------------------------------------
 
@@ -406,8 +392,7 @@ defmodule FermixCore.Trips.Ops do
   # --- adding ----------------------------------------------------------------
 
   defp row_op(state, %{op: :add} = op, edit) do
-    with :ok <- outside_day(state.rows, op, edit),
-         {:ok, state, made_days} <- ensure_day(state, op.day, edit),
+    with {:ok, state, made_days} <- ensure_day(state, op.day, edit),
          {:ok, index} <- add_index(state.rows, op),
          :ok <- room(state, 1) do
       {row, state} = new_row(state, :stop, op, edit)
@@ -434,7 +419,7 @@ defmodule FermixCore.Trips.Ops do
 
   defp row_op(state, %{op: :edit, n: ref} = op, edit) do
     with {:ok, index, row} <- stop_at(state.rows, ref) do
-      updated = row |> edited(op) |> dirty(edit.now)
+      updated = row |> edited(op) |> stamp(op, edit) |> dirty(edit.now)
 
       state
       |> replace(index, updated)
@@ -493,15 +478,6 @@ defmodule FermixCore.Trips.Ops do
         if live_row?(state.rows, id), do: {:error, :not_removed}, else: {:error, {:no_row, ref}}
     end
   end
-
-  # After outside content an add makes no day: its stop goes on a day the trip
-  # has, or after a row it has, so no page stretches the trip (§14).
-  defp outside_day(rows, %{day: k}, %{outside?: true}) when is_integer(k) do
-    {count, _stops} = counts(rows)
-    if k > count, do: {:error, :outside_new_day}, else: :ok
-  end
-
-  defp outside_day(_rows, _op, _edit), do: :ok
 
   # A day past the last is made, with every empty day before it.
   defp ensure_day(state, k, edit) when is_integer(k) do
@@ -599,6 +575,16 @@ defmodule FermixCore.Trips.Ops do
       end
     end)
   end
+
+  # After outside content an edit that gives a stop words, a note or a place
+  # stamps it, as an add does; a clear, a time or a length brings no words.
+  defp stamp(row, op, %{outside?: true}) do
+    if is_binary(op.text) or is_binary(op.note) or is_map(op.place),
+      do: %{row | stamped: true},
+      else: row
+  end
+
+  defp stamp(row, _op, _edit), do: row
 
   defp move_stop(state, {index, row}, op, edit) do
     rest = List.delete_at(state.rows, index)
@@ -898,8 +884,8 @@ defmodule FermixCore.Trips.Ops do
 
   @doc """
   A stop as a call's answer names it: its number and its words, JSON-quoted,
-  framed when they were written after outside content (§14), as a read frames
-  them, so every answer that repeats them marks the turn as the read does.
+  framed as data when they were written after outside content (§14), as a read
+  frames them; neither brings the turn an outside source (D9).
   """
   @spec handle(row()) :: String.t()
   def handle(%{n: n, stamped: true, text: text}) when is_integer(n),

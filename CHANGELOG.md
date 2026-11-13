@@ -151,8 +151,9 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   could not find. Ask what Thursday holds, move the museum to Friday, or have
   the plan sent to someone: the shared text links every place in Apple Maps
   and leaves your booking notes out. Trips are yours alone, as your lists are:
-  a guest or a group chat sees none, and once a request has read a web page
-  or a search, Fermix only adds to a trip until you ask again. The Mac app
+  a guest or a group chat sees none. A request that read a web page or a
+  search still makes and changes a trip, and a stop it writes is read back as
+  data, never as instructions. The Mac app
   draws your trips: a trip shows under the reply that read or changed it and
   opens in a panel beside the chat, where you move, add, edit, remove,
   restore and share its days and stops, each change showing at once wherever

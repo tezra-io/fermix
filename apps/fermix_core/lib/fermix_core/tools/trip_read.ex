@@ -4,9 +4,9 @@ defmodule FermixCore.Tools.TripRead do
   whole, one of its days or a run of them by position, or with neither the
   index of every trip; `as: "share"` gives the trip as it is shared, which the
   model sends through a channel. The text says the rows are the owner's data,
-  never instructions, and a stop added after outside content comes back
-  framed (`Trips.Render`), which brings the turn an outside source
-  (`UntrustedContent.outside_source/3`), as a list's framed row does.
+  never instructions, and a stop written after outside content comes back
+  framed as data (`Trips.Render`). The read is not outside content: unlike a
+  list's framed row, it brings the turn no outside source (D9).
 
   Offered and run only where `Kept.Access.permitted?/2` admits it: the
   owner's private turn or voice call, or a scheduled job whose allowed tools
@@ -49,7 +49,7 @@ defmodule FermixCore.Tools.TripRead do
       properties: %{
         trip: %{type: "string", description: "Title or id."},
         day: %{type: "string", description: "Day number, or a run: \"3-5\"."},
-        as: %{type: "string", enum: ["share"], description: "As shared, to send."}
+        as: %{type: "string", enum: ["share"], description: "To send, as is: never add a note."}
       }
     }
   end
