@@ -19,9 +19,37 @@ defmodule Fermix.CLI.StdoutPurity do
   `:logger_std_h` refuses an in-place `type` change (its `changing_config/3`
   answers `:illegal_config_change`), so the move is remove-then-add: same
   module, same formatter, stderr.
+
+  The boot chain's move does not reach the verb in a release: the `logger`
+  application starts after the config provider, removes the default handler
+  and installs its own on stdout. So `Fermix.CLI.main/1`, which every verb
+  passes through once `logger` runs, makes the move again before it
+  dispatches. Both ask `wire_stdout?/1`, the one predicate for which argv
+  needs it.
   """
 
+  # The verbs whose stdout is a wire whatever their flags: `acp` speaks
+  # JSON-RPC there, and the `browser-bridge` pump's stdout is the
+  # native-messaging wire, where one stray boot warning is read as a length
+  # header that is not one.
+  @wire_verbs ~w(acp browser-bridge)
+
   @type failure :: {:unmovable_handler, module()} | {:add_handler_failed, term()}
+
+  @doc """
+  Whether `argv`'s stdout is a wire: its verb (the first argument, as
+  `Fermix.CLI.main/1` reads it) is one, or it asks for `--json` anywhere.
+  Asking for machine output is the declaration that stdout is a wire, so the
+  flag is the predicate rather than a second list of verbs to keep in step
+  with the dispatcher.
+  """
+  @spec wire_stdout?([String.t()]) :: boolean()
+  def wire_stdout?(argv) when is_list(argv) do
+    case argv do
+      [verb | _rest] when verb in @wire_verbs -> true
+      _other -> "--json" in argv
+    end
+  end
 
   @doc "Routes the default logger handler to stderr, or says why it could not."
   @spec route_logs_to_stderr() :: :ok | {:error, failure()}

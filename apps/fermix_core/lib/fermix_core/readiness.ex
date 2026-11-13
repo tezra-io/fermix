@@ -14,6 +14,7 @@ defmodule FermixCore.Readiness do
 
   alias FermixCore.Auth.ChatGPT
   alias FermixCore.Config
+  alias FermixCore.Home.Role
   alias FermixCore.IMessage
   alias FermixCore.IMessage.HelperInstaller
   alias FermixCore.Management.Settings.Channels.Inventory
@@ -103,31 +104,51 @@ defmodule FermixCore.Readiness do
   @away_keys ["channel:imessage:away"]
 
   @doc """
-  The readiness of this engine's settings. `opts` names the host and the
-  home for a test (`macos?:`, `imessage_carrier:`): iMessage reads them.
+  The readiness of this engine's settings, judged for the role it runs the
+  home in (`Home.Role`, the role this engine booted in; a process that booted
+  none is judged as the primary). `opts` names the role, the host and the
+  home for a test (`role:`, `macos?:`, `imessage_carrier:`): iMessage reads
+  the last two.
+
+  A computer that joined a home (the device role) runs no turn, calls no
+  provider, starts no channel or voice session and keeps no memory of its
+  own: those rows are the primary's. It runs the home's commands in its own
+  sandbox, so the sandbox's rows are the ones it is judged on (M97 F8).
   """
   @spec report(keyword()) :: report()
   def report(opts \\ []) when is_list(opts) do
-    failures =
-      Enum.reject(
-        [
-          provider_failure(),
-          telegram_failure(),
-          whatsapp_failure(),
-          discord_failure(),
-          slack_failure(),
-          signal_failure(),
-          imessage_failure(opts),
-          realtime_failure(),
-          personalization_failure()
-        ],
-        &is_nil/1
-      ) ++ sandbox_env_failures()
+    failures = failures(Keyword.get_lazy(opts, :role, &booted_role/0), opts)
 
     %{
       status: status_for(failures),
       failures: failures
     }
+  end
+
+  defp failures(:device, _opts), do: sandbox_env_failures()
+
+  defp failures(role, opts) when role in [:primary, :candidate] do
+    Enum.reject(
+      [
+        provider_failure(),
+        telegram_failure(),
+        whatsapp_failure(),
+        discord_failure(),
+        slack_failure(),
+        signal_failure(),
+        imessage_failure(opts),
+        realtime_failure(),
+        personalization_failure()
+      ],
+      &is_nil/1
+    ) ++ sandbox_env_failures()
+  end
+
+  defp booted_role do
+    case Role.booted() do
+      %{role: role} -> role
+      nil -> :primary
+    end
   end
 
   @doc "Every pane slug a readiness failure can name."

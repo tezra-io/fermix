@@ -27,6 +27,7 @@ defmodule FermixCore.Tools.EventUpdate do
   alias FermixCore.Capabilities.Builtin.Tool
   alias FermixCore.Native.Notifications
   alias FermixCore.Temporal.Access
+  alias FermixCore.Temporal.Card
   alias FermixCore.Temporal.Registry
   alias FermixCore.Tools.Telemetry, as: ToolTelemetry
 
@@ -210,10 +211,15 @@ defmodule FermixCore.Tools.EventUpdate do
     end
   end
 
+  # The changed event is handed to the reply's blocks as its card (`Temporal.Card`).
   defp apply_patch(id, args, context) do
     case Registry.update_event(id, patch(args), context, registry_opts(context)) do
-      {:ok, updated} -> {:ok, Tool.success(Jason.encode!(view(updated)))}
-      {:error, reason} -> {:ok, Tool.error(Registry.describe_error(reason))}
+      {:ok, updated} ->
+        :ok = Card.put(context, [Card.changed(updated)])
+        {:ok, Tool.success(Jason.encode!(view(updated)))}
+
+      {:error, reason} ->
+        {:ok, Tool.error(Registry.describe_error(reason))}
     end
   end
 

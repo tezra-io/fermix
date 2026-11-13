@@ -13,6 +13,8 @@ defmodule FermixCore.Computers.OffersTest do
     landlock: :not_asked,
     helpers: %{computer_use: true},
     sandbox_mode: :standard,
+    roots: ["/Users/avery/.fermix/workspace", "/Users/avery/Projects"],
+    home: "/Users/avery",
     recording: true
   ]
   @linux [
@@ -21,6 +23,8 @@ defmodule FermixCore.Computers.OffersTest do
     landlock: :ok,
     helpers: %{computer_use: true},
     sandbox_mode: :strict,
+    roots: ["/home/rowan/.fermix/workspace"],
+    home: "/home/rowan",
     recording: false
   ]
   @all_on Switches.only(Switches.switches())
@@ -127,6 +131,40 @@ defmodule FermixCore.Computers.OffersTest do
       assert {:off, _sentence} = on["browser"]
     end
 
+    # M97 §6.4, finding F5: the server is told which folders files and
+    # commands reach on this computer, so a request for another is answered
+    # by name rather than tried and refused.
+    test "files carries the folders files and commands reach here, while it is on" do
+      [files] = Offers.compute([FermixCore.Computers.Offers.Files], @all_on, Facts.read(@mac))
+      # With the home `~` stands for there, so the server can say the
+      # folders without the account's name.
+      assert %{id: "files", state: :on, roots: roots, home: "/Users/avery"} = files
+      assert roots == @mac[:roots]
+      assert {:ok, payload, _rev} = Offers.encode([files])
+      assert {:ok, [^files]} = Offers.decode(payload)
+
+      off = Offers.compute([FermixCore.Computers.Offers.Files], [], Facts.read(@mac))
+      refute Map.has_key?(hd(off), :roots)
+    end
+
+    # The payload's bounds: a folder the wire cannot carry is left out, and
+    # never stops the rest of what this computer offers.
+    test "a folder the wire cannot carry is left out, and the folders are bounded" do
+      odd = ["relative/folder", "/Users/avery/bad\nname", "/" <> String.duplicate("a", 1024)]
+      many = for n <- 1..40, do: "/Volumes/Shelf#{n}"
+      facts = Facts.read(Keyword.put(@mac, :roots, ["/Users/avery/Projects" | odd] ++ many))
+
+      [files] = Offers.compute([FermixCore.Computers.Offers.Files], @all_on, facts)
+      assert hd(files.roots) == "/Users/avery/Projects"
+      assert length(files.roots) == 32
+      assert Enum.all?(files.roots, &(&1 == "/Users/avery/Projects" or &1 =~ "/Volumes/Shelf"))
+      assert {:ok, _payload, _rev} = Offers.encode([files])
+
+      none = Facts.read(Keyword.put(@mac, :roots, odd))
+      [files] = Offers.compute([FermixCore.Computers.Offers.Files], @all_on, none)
+      refute Map.has_key?(files, :roots)
+    end
+
     # M97 D27: history has no switch here. It is offered while this
     # computer's recorder is on (its own setting, the history section's), the
     # master on and the switches reviewed, and in no other case.
@@ -187,6 +225,13 @@ defmodule FermixCore.Computers.OffersTest do
            "state" => "on",
            "helper" => %{"actions" => many_names(65), "input_methods" => []}
          }), "its helper is not"},
+        {one(%{"id" => "files", "state" => "on", "roots" => []}), "its roots"},
+        {one(%{"id" => "files", "state" => "on", "roots" => ["workspace"]}), "its roots"},
+        {one(%{"id" => "files", "state" => "on", "roots" => ["/a\nb"]}), "its roots"},
+        {one(%{"id" => "files", "state" => "on", "roots" => many_roots(33)}), "its roots"},
+        {one(%{"id" => "files", "state" => "on", "roots" => "/Users"}), "its roots"},
+        {one(%{"id" => "files", "state" => "on", "home" => "Users/avery"}), "its home"},
+        {one(%{"id" => "files", "state" => "on", "home" => ["/Users/avery"]}), "its home"},
         {~s({"v":1,"offers":[1]}), "not an object"},
         {~s({"v":1,"offers":[{"id":"files","state":"on"},{"id":"files","state":"on"}]}),
          "files is named more than once"}
@@ -213,6 +258,8 @@ defmodule FermixCore.Computers.OffersTest do
   end
 
   defp one(offer), do: Jason.encode!(%{"v" => 1, "offers" => [offer]})
+
+  defp many_roots(n), do: for(i <- 1..n, do: "/Volumes/Shelf#{i}")
 
   defp many(count) do
     offers = for index <- 1..count, do: %{"id" => "offer_#{index}", "state" => "on"}

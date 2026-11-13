@@ -53,7 +53,8 @@ defmodule FermixCore.Home.Archive do
   **What does not travel as consent or history.** A restore moves a
   keyring-mode home to the file store on a host
   whose keyring did not answer `available` (`FermixCore.Home.Archive.RestoredConfig`;
-  a probe that timed out counts as not answering, logged once), and names the installed plugins
+  a probe that timed out counts as not answering, logged once), or whose engine
+  keeps its secrets in files, which asks no keyring, and names the installed plugins
   built for another OS or architecture (the manifest's `host`). Sandbox grants
   and the machine file (`machine.toml`, `FermixCore.Setup.MachineFile`) are
   device-local and never in the archive, and a home an earlier engine wrote,
@@ -167,8 +168,10 @@ defmodule FermixCore.Home.Archive do
 
   `opts` replace this host's facts in tests: `:host` (the plugin installer's
   target name, such as `linux-x86_64`), `:keyring_usable?` (a 0-arity
-  function) and `:probe_timeout_ms` (the bound on each question the keyring
-  probe asks, when `:keyring_usable?` is not given).
+  function), `:secret_store` (the store this engine keeps its secrets in,
+  `SecretWriter.store/1`'s; with `:file` no keyring is asked) and
+  `:probe_timeout_ms` (the bound on each question the keyring probe asks,
+  when `:keyring_usable?` is not given).
 
   Refuses, by name: a passphrase under twelve bytes, a root that is not empty
   (`:root_not_empty`), an archive that does not open (`:archive_rejected`), a
@@ -755,10 +758,21 @@ defmodule FermixCore.Home.Archive do
     end
   end
 
+  # Only the store this engine is set to use is asked (`SecretWriter.store/1`,
+  # `:secret_store` in its place): an engine that keeps its secrets in files,
+  # as a headless Always On server does, has no keyring for the home to keep
+  # them in, so the home keeps files and no keyring is probed (M97 F9).
+  defp keyring_usable?(opts) do
+    case SecretWriter.store(store: Keyword.get(opts, :secret_store)) do
+      :file -> false
+      :keyring -> keyring_answers?(opts)
+    end
+  end
+
   # Only a keyring that answered keeps keyring mode: on a server with no
   # session bus, a probe that timed out (`unknown`) would otherwise move in a
   # home whose secrets the new primary cannot read.
-  defp keyring_usable?(opts) do
+  defp keyring_answers?(opts) do
     probe_opts = [store: :keyring] ++ Keyword.take(opts, [:probe_timeout_ms])
 
     case SecretWriter.probe(probe_opts) do

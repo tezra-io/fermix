@@ -113,7 +113,8 @@ defmodule FermixCore.Management.Copy do
     telegram: "Messages sent to Telegram while it moves wait until it is done."
   ]
   @summary_keys ~w(off connect connecting ready ready_waits moving waiting on on_backup
-                   on_no_backup undone retired retired_back candidate_waiting
+                   on_no_backup undone undone_refused undone_unmarked move_marker_unread
+                   retired retired_back candidate_waiting
                    candidate_receiving primary cannot_reach cannot_reach_note
                    server_not_set_up server_waited_too_long update server_older
                    server_older_note update_settings_only server_ahead disk_full
@@ -378,6 +379,31 @@ defmodule FermixCore.Management.Copy do
 
   defp word?(text, word), do: Regex.match?(~r/\b#{Regex.escape(word)}\b/, text)
 
+  @doc """
+  Why the server `to` turned a move down, for the undone screen's note
+  (`FermixChannels.Home.MoveWorker`), from what it `said`: its own sentence
+  after the plain one where that sentence is words an owner reads, breaking
+  no copy rule and no summary rule and carrying no code (no brace, bracket
+  or angle bracket: a server says so of its disk, or of a home in a newer
+  form than it reads), and `:undone_refused`'s words where it is not (a
+  protocol's words, a file's error), which the worker logs.
+  """
+  @spec move_refused(String.t(), String.t()) :: String.t()
+  def move_refused(to, said) when is_binary(to) and is_binary(said) do
+    said = String.trim(said)
+
+    if owner_words?(said, to),
+      do: turned_down(to) <> " " <> said,
+      else: summary_sentence(:undone_refused, %{to: to})
+  end
+
+  defp owner_words?(said, to),
+    do:
+      said != "" and not String.match?(said, ~r/[{}\[\]<>]/) and
+        violations(said, :prose, [to]) == [] and summary_violations(said) == []
+
+  defp turned_down(to), do: "#{to} turned the move down, so nothing moved."
+
   @doc "Every key `summary_sentence/2` takes, so the copy gate walks them all."
   @spec summary_keys() :: [atom()]
   def summary_keys, do: @summary_keys
@@ -444,6 +470,22 @@ defmodule FermixCore.Management.Copy do
 
   def summary_sentence(:undone, %{machine: machine}),
     do: "The move was undone. Fermix still runs on this #{machine}."
+
+  # Why a move was undone, as the move worker records it for the undone
+  # screen's note (`FermixChannels.Home.MoveWorker`, `move_refused/2`): the
+  # server's own code and message, and the reason a file could not be
+  # written, go to the log.
+  def summary_sentence(:undone_refused, %{to: to}) when is_binary(to),
+    do: turned_down(to) <> " Fermix's log says why."
+
+  def summary_sentence(:undone_unmarked, _values),
+    do: "Fermix could not record that this home moved, so nothing moved. Its log says why."
+
+  # A move whose marker cannot be read: whether this home moved is not known.
+  def summary_sentence(:move_marker_unread, _values),
+    do:
+      "Fermix cannot read the file that says whether this home moved. Its log names it; fix " <>
+        "it, then restart Fermix."
 
   def summary_sentence(:retired, %{machine: machine}),
     do: "Fermix moved to your server, and this #{machine} is no longer connected to it."

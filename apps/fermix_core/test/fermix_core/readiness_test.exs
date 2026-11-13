@@ -141,6 +141,43 @@ defmodule FermixCore.ReadinessTest do
     end
   end
 
+  # M97 F8: a computer that joined a home runs the device role (`Home.Role`):
+  # no turn, no provider call, no channel, no voice session and no memory of
+  # its own, so none of their rows is its to judge. The role is handed in; the
+  # host's is never read.
+  describe "a computer that joined a home (the device role)" do
+    setup do
+      # A fresh Linux box that joined: nothing but the shipped defaults.
+      Application.put_env(:fermix_core, :providers, [])
+      Application.put_env(:fermix_core, :personalization, [])
+      Application.put_env(:fermix_channels, :telegram, enabled: true)
+      Application.put_env(:fermix_core, :realtime, enabled: true, provider: "openai")
+      :ok
+    end
+
+    test "is ready with no provider, channel, voice or personality row" do
+      device = Readiness.report(role: :device)
+
+      assert device.status == :ready
+      assert Enum.reject(device.failures, &(&1.pane == "sandbox")) == []
+    end
+
+    test "the primary with the same settings is judged on every row, as before" do
+      primary = Readiness.report(role: :primary)
+      keys = Enum.map(primary.failures, & &1.detail_key)
+
+      assert primary.status == :setup_required
+      assert Enum.any?(primary.failures, &(&1.pane == "providers" and &1.gating))
+      assert "channel:telegram" in keys
+      assert "personalization" in keys
+      assert "realtime:openai" in keys
+    end
+
+    test "with no role named, a report is the one of the role this engine booted in" do
+      assert Readiness.report() == Readiness.report(role: :primary)
+    end
+  end
+
   describe "the channel table" do
     test "publishes the six channels readiness knows about" do
       assert Readiness.channels() == [:telegram, :whatsapp, :discord, :slack, :signal, :imessage]
@@ -1088,6 +1125,18 @@ defmodule FermixCore.ReadinessTest do
       allow_names([])
 
       refute Enum.any?(Readiness.report().failures, &(&1.pane == "sandbox"))
+    end
+
+    # M97 F8: a computer runs the home's commands in its own sandbox, so the
+    # variables it cannot read are its own to say, as on the primary.
+    test "a computer that joined a home still names a variable it cannot read" do
+      record_missing(["FERMIX_TEST_ABSENT"])
+
+      report = Readiness.report(role: :device)
+
+      assert report.status == :ready
+      assert [%{detail_key: "sandbox:env_missing"} = failure] = report.failures
+      assert failure.action =~ "`FERMIX_TEST_ABSENT`"
     end
 
     test "both causes are published for the copy gate, and the pane is routable" do

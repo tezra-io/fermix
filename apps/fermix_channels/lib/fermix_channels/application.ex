@@ -24,12 +24,13 @@ defmodule FermixChannels.Application do
 
   @compiled_env Mix.env()
   @held_key {__MODULE__, :held_at_boot}
+  @started_key {__MODULE__, :started}
 
   @impl true
   def start(_type, _args) do
-    readiness = Readiness.report()
-    log_missing_ingress_authorization(readiness)
-    log_missing_helpers(readiness)
+    role = Role.current()
+    readiness = Readiness.report(role: role)
+    log_refusals(readiness, role)
 
     # Fail fast on a misconfigured command list: a duplicate name/alias would
     # silently shadow a command via the registry's first-match lookup.
@@ -129,15 +130,50 @@ defmodule FermixChannels.Application do
     # for the same reason, so it is present iff this application runs.
     Application.put_env(:fermix_core, :transport_restart_provider, __MODULE__)
 
-    plan = boot_plan(readiness, request_boot_epoch(), Role.current())
+    plan = boot_plan(readiness, request_boot_epoch(), role)
 
     # What this boot holds is decided here, once, and read from this record
     # rather than from the supervisor, which a read must never wait on.
     :persistent_term.put(@held_key, plan.held)
 
     opts = [strategy: :one_for_one, name: FermixChannels.Supervisor]
-    Supervisor.start_link(plan.children, opts)
+
+    with {:ok, _pid} = started <- Supervisor.start_link(plan.children, opts) do
+      :persistent_term.put(@started_key, true)
+      started
+    end
   end
+
+  @doc """
+  Whether this engine's channels tree has started: false until every child
+  of its boot has started, and in a process whose channels never start (a
+  verb with no engine tree). The home's link (`FermixChannels.Home.Link`)
+  reads it to tell a computer list asked for at boot, before the tree that
+  holds it is up, from one whose rail stopped (M97 F9). Read from this record
+  rather than from the supervisor, which a child starting under it must
+  never wait on.
+  """
+  @spec started?() :: boolean()
+  def started?, do: :persistent_term.get(@started_key, false)
+
+  @doc """
+  Says, at boot, which transports this boot refuses and why (an ingress with
+  no owner, a helper not on disk). Only the primary starts transports
+  (`FermixCore.Home.Role.children/2`), so only the primary says which it
+  refuses: a computer that joined a home, whose readiness judges no channel,
+  says none (M97 F8). `opts` go to `log_missing_helpers/2`.
+  """
+  @spec log_refusals(Readiness.report(), Role.role(), keyword()) :: :ok
+  def log_refusals(readiness, role, opts \\ [])
+
+  def log_refusals(readiness, :primary, opts) when is_map(readiness) and is_list(opts) do
+    :ok = log_missing_ingress_authorization(readiness)
+    log_missing_helpers(readiness, opts)
+  end
+
+  def log_refusals(readiness, role, opts)
+      when is_map(readiness) and role in [:device, :candidate] and is_list(opts),
+      do: :ok
 
   @doc """
   What a boot with this readiness starts and holds in the engine `role`, under

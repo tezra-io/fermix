@@ -32,30 +32,22 @@ raw_argv =
 # before looking; anything else in argv is the verb's own business.
 cli_argv = Enum.reject(raw_argv, &(&1 == "--"))
 
-wire_verb? =
-  case cli_argv do
-    ["acp" | _rest] -> true
-    # The browser-bridge pump's stdout IS the native-messaging wire: one stray
-    # boot warning on it and the browser reads a length header that is not one.
-    ["browser-bridge" | _rest] -> true
-    _other -> false
-  end
-
-# Asking for machine output IS the declaration that stdout is a wire, so the
-# flag is the predicate rather than a second list of verbs to keep in step with
-# the dispatcher.
-wire_stdout? = wire_verb? or "--json" in cli_argv
-
-if wire_stdout? and Code.ensure_loaded?(Fermix.CLI.StdoutPurity) and
-     function_exported?(Fermix.CLI.StdoutPurity, :route_logs_to_stderr, 0) do
+# Which argv has a wire on stdout is `StdoutPurity.wire_stdout?/1`, the one
+# predicate `Fermix.CLI.main/1` asks too: the `logger` application starts after
+# this file and installs its own handler on stdout, so main makes the move
+# again before it dispatches.
+if Code.ensure_loaded?(Fermix.CLI.StdoutPurity) and
+     function_exported?(Fermix.CLI.StdoutPurity, :wire_stdout?, 1) and
+     function_exported?(Fermix.CLI.StdoutPurity, :route_logs_to_stderr, 0) and
+     Fermix.CLI.StdoutPurity.wire_stdout?(cli_argv) do
   case Fermix.CLI.StdoutPurity.route_logs_to_stderr() do
     :ok ->
       :ok
 
     {:error, reason} ->
-      # Not fatal here: the verb runs and its own reader decides what to do with
-      # what it gets. Say what boot could not do, on the channel that is not the
-      # wire.
+      # Not fatal here: `Fermix.CLI.main/1` makes the move again before the
+      # verb runs, and refuses the verb if it still cannot. Say what boot could
+      # not do, on the channel that is not the wire.
       IO.puts(
         :standard_error,
         "fermix: boot logging stayed on stdout — " <>

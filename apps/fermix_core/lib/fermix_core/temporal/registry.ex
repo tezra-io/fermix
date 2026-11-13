@@ -457,8 +457,14 @@ defmodule FermixCore.Temporal.Registry do
   # Read from the stored row, so it can only ever state what was written, and
   # shifted through the event's own zone, so the year rule compares against the
   # owner's calendar rather than UTC's.
-  defp stated_as(event, now) do
-    stated_text(event, DateTime.shift_zone!(now, event.timezone))
+  @doc """
+  The occurrence a stored `event` row names, stated absolutely at `now`, its
+  weekday included: what every write's acknowledgement says (`stated_as`),
+  and what a reply's card of the event says (`Temporal.Card`).
+  """
+  @spec stated_as(map(), DateTime.t()) :: String.t()
+  def stated_as(%{timezone: zone} = event, %DateTime{} = now) when is_binary(zone) do
+    stated_text(event, DateTime.shift_zone!(now, zone))
   end
 
   # A yearly event stores no year, so its statement carries both halves: the

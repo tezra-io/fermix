@@ -233,7 +233,11 @@ defmodule FermixCore.Temporal.Renderer do
     end
   end
 
-  defp clock_text(%Time{hour: hour, minute: minute}) do
+  @doc false
+  # Shared with `Temporal.Card`, which says a reminder plan's wall time the
+  # way a reminder states its event's: `9:00 AM`.
+  @spec clock_text(Time.t()) :: String.t()
+  def clock_text(%Time{hour: hour, minute: minute}) do
     Integer.to_string(twelve_hour(hour)) <>
       ":" <> String.pad_leading(Integer.to_string(minute), 2, "0") <> " " <> meridiem(hour)
   end

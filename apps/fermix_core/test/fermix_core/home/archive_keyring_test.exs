@@ -80,8 +80,51 @@ defmodule FermixCore.Home.ArchiveKeyringTest do
     refute log =~ "keeps its secrets in files"
   end
 
-  defp restore(ctx),
-    do: Archive.restore(ctx.archive, @passphrase, ctx.into, host: "linux-x86_64", now_ms: @now)
+  # M97 F9: a headless Always On server keeps its secrets in files
+  # (`[fermix_core] secret_store = "file"`), so it has no keyring to ask: a
+  # Mac's home it takes in keeps its secrets in files there too, and nothing
+  # says a keyring did not answer.
+  test "an engine whose secrets are files asks no keyring, and the home keeps files", ctx do
+    :ok =
+      SecretWriterStub.set_verdict(%{
+        store: :keyring,
+        state: :tool_absent,
+        sentence: "this machine has no keyring client"
+      })
+
+    log =
+      capture_log(fn ->
+        assert {:ok, %{secret_store_switched: true}} = restore(ctx, secret_store: :file)
+      end)
+
+    assert File.read!(Path.join(ctx.into, "config.toml")) =~ ~s(secret_store = "file")
+    refute log =~ "the keyring answered"
+  end
+
+  test "an engine whose secrets are in its keyring still asks it", ctx do
+    :ok =
+      SecretWriterStub.set_verdict(%{
+        store: :keyring,
+        state: :tool_absent,
+        sentence: "this machine has no keyring client"
+      })
+
+    log =
+      capture_log(fn ->
+        assert {:ok, %{secret_store_switched: true}} = restore(ctx, secret_store: :keyring)
+      end)
+
+    assert log =~ "restore: the keyring answered tool_absent"
+  end
+
+  defp restore(ctx, opts \\ []),
+    do:
+      Archive.restore(
+        ctx.archive,
+        @passphrase,
+        ctx.into,
+        [host: "linux-x86_64", now_ms: @now] ++ opts
+      )
 
   # The verdict the real probe gives when its last question times out.
   defp timed_out do

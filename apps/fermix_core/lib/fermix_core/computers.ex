@@ -70,13 +70,20 @@ defmodule FermixCore.Computers do
 
   @doc """
   `fetch/1` for a turn: a list that cannot be read is said in the log and
-  reaches no computer.
+  reaches no computer. One asked for before the link's tree has started in
+  this engine (`:not_started`, as at a primary's boot, when its readiness and
+  its iMessage helper ask before the channels tree is up) reaches none and is
+  not said: it is the boot, not a fault (M97 F9). `fetch/1` still answers it
+  as the error it is.
   """
   @spec list(keyword()) :: [Computer.t()]
   def list(opts \\ []) when is_list(opts) do
     case fetch(opts) do
       {:ok, computers} ->
         computers
+
+      {:error, :not_started} ->
+        []
 
       {:error, reason} ->
         Logger.warning("the home's computers could not be listed: #{inspect(reason)}")

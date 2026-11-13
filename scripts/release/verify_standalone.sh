@@ -374,14 +374,22 @@ grep -Fq "delete-generic-password -a fermix -s fermix:$profile:FERMIX_PLUGIN_DIS
   fail "plugins auth clear never ran the stand-in keychain helper, so this stage proved nothing"
 
 # ── computer join, run tree-less from this artifact ─────────────────────────
-# `fermix computer join CODE` joins this computer to a Fermix that already
-# runs. It runs with Fermix stopped and no supervision tree, and it makes this
+# `fermix computer join` joins this computer to a Fermix that already runs.
+# It runs with Fermix stopped and no supervision tree, and it makes this
 # computer's key in the secret store, so every keychain helper it runs has to
 # run inline: a verb that asks for a command host dies on every install, as
 # `plugins auth clear` once did. A join is part of Always On, so a release
 # refuses it in a home whose settings do not turn Always On on. It runs
 # before the migrate-to-app stage because that stage ends the script on a
 # Linux target.
+#
+# The code comes on stdin, never in argv, where every process can read it:
+# here from a file holding it, the first line of a stdin that is not a
+# terminal (a file rather than a pipe, so a verb that exits before it reads
+# cannot fail the writer). Run with nothing on stdin in a home that offers
+# Always On, the verb must refuse because no code was read, before it asks
+# the keychain anything: one that joins anyway takes its code from
+# somewhere else.
 #
 # No keychain is touched. Two stand-in `security` helpers, each first on PATH
 # for its run, record what the verb asks (never the key it stores). One
@@ -436,16 +444,19 @@ chmod +x "$join_bin/security" "$join_refusing_bin/security"
 
 join_json='{"v":2,"purpose":"computer","secret":"WlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlo=","gateway_pk":"PDw8PDw8PDw8PDw8PDw8PDw8PDw8PDw8PDw8PDw8PDw=","node_id":"4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f","relays":[{"url":"https://eu1.relay.invalid/","quic_port":7842}],"relays_rev":"0123456789abcdef","name":"verify-server","expires_at":"2099-01-01T00:00:00Z"}'
 join_code="fxenroll1.$(printf '%s' "$join_json" | base64 | tr -d '\n=' | tr '+/' '-_')"
+join_code_file="$runtime_root/join-code"
+(umask 077; printf '%s\n' "$join_code" > "$join_code_file")
 
 # Runs the verb in the home $1 with the keychain stand-in directory $2 first
-# on PATH; its output lands in $join_out and its exit status in $join_status.
+# on PATH and stdin from $3 (the code file unless named); its output lands
+# in $join_out and its exit status in $join_status.
 run_join() {
   join_status=0
   env -u FERMIX_OPIK_ENABLED \
     HOME="$home" \
     FERMIX_HOME="$1" \
     PATH="$2:/usr/bin:/bin:/usr/sbin:/sbin" \
-    "$artifact" computer join "$join_code" < /dev/null > "$join_out" 2>&1 || join_status=$?
+    "$artifact" computer join < "${3:-$join_code_file}" > "$join_out" 2>&1 || join_status=$?
   cat "$join_out"
   # Named before any other verdict, so the message is precise when this
   # class comes back.
@@ -474,6 +485,17 @@ join_switch='
 [fermix_core.always_on]
 enabled = true
 '
+
+# Nothing on stdin: refused because no code was read, before the keychain.
+join_codeless_home="$runtime_root/join-codeless-home"
+join_settings "$join_codeless_home" "$join_switch"
+run_join "$join_codeless_home" "$join_bin" /dev/null
+[ "$join_status" -eq 1 ] ||
+  fail "computer join with no code on stdin must exit 1, got $join_status"
+grep -Fq "fermix computer join: No code was read." "$join_out" ||
+  fail "computer join with no code on stdin did not say that no code was read"
+[ ! -e "$join_log" ] && [ ! -e "$join_codeless_home/device" ] ||
+  fail "computer join with no code on stdin reached the keychain or wrote a join"
 
 # A keychain that will not answer: refused by name, and nothing is left.
 join_refused_home="$runtime_root/join-refused-home"
@@ -830,6 +852,42 @@ for field in '"ok":true' '"role":"primary"' '"update_ceiling":'; do
   grep -Fq "$field" "$status_out" ||
     fail "fermix home status --json with the switch must answer the home's role and update ceiling ($field), got: $(cat "$status_out")"
 done
+
+# Under `--json` stdout is one JSON document and nothing else, and nothing the
+# verb logs lands there. `config/runtime.exs` moves the default logger handler
+# off stdout, but a release starts the `logger` application after it, which
+# installs its own handler on stdout, so `Fermix.CLI.main/1` moves it again
+# before the verb runs; only the packaged binary boots in that order. The home
+# never started and its settings only turn Always On on, with no daemon: home
+# status reads it from its files and logs that the home's computers could not
+# be listed (no engine runs to list them), on stderr. The whole of stdout is
+# parsed, as a caller reads it.
+one_ok_json_document() {
+  uv run --no-project python -c '
+import json, sys
+with open(sys.argv[1], encoding="utf-8") as stream:
+    text = stream.read()
+try:
+    document = json.loads(text)
+except ValueError as error:
+    sys.exit(f"stdout is not one JSON document: {error}")
+if not isinstance(document, dict) or document.get("ok") is not True:
+    sys.exit("stdout is not an envelope that is ok")
+' "$1"
+}
+
+status_fresh_home="$runtime_root/home-status-fresh"
+mkdir -m 700 "$status_fresh_home"
+printf '[fermix_core.always_on]\nenabled = true\n' > "$status_fresh_home/config.toml"
+chmod 600 "$status_fresh_home/config.toml"
+home_status=0
+env -u FERMIX_OPIK_ENABLED HOME="$home" FERMIX_HOME="$status_fresh_home" \
+  "$artifact" home status --json < /dev/null > "$status_out" 2> "$status_err" || home_status=$?
+printf '%s\n' "$(cat "$status_err")"
+[ "$home_status" -eq 0 ] ||
+  fail "fermix home status --json in a home that never started must exit 0, got $home_status: $(cat "$status_out")"
+one_ok_json_document "$status_out" ||
+  fail "fermix home status --json in a home that never started must print exactly one JSON document on stdout, got: $(cat "$status_out")"
 
 moved_out="$runtime_root/home-moved.out"
 moved_err="$runtime_root/home-moved.err"

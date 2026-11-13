@@ -71,6 +71,52 @@ defmodule FermixCore.Computers.RemoteTest do
                "studio Mac can allow the folder; it cannot be allowed from here."
   end
 
+  # M97 §6.4, finding F5: the refusal names the folders that computer's files
+  # and commands reach, from what it offers.
+  test "a path outside the sandbox names the folders that computer allows" do
+    roots = ["/Users/pat/.fermix/workspace", "/Users/pat/Projects"]
+
+    files = %{
+      id: "files",
+      state: :on,
+      sentence: nil,
+      detail: nil,
+      roots: roots,
+      home: "/Users/pat"
+    }
+
+    studio = %{@studio | offers: [files]}
+
+    outcome =
+      Outcome.refused(
+        :outside_sandbox,
+        "/Users/pat/Downloads is outside this computer's sandbox."
+      )
+
+    assert %{success: false, error: error} = Remote.result(outcome, studio)
+
+    assert error ==
+             "On studio Mac: /Users/pat/Downloads is outside this computer's sandbox. Files and " <>
+               "shell on studio Mac reach only ~/.fermix/workspace and ~/Projects (~ is studio " <>
+               "Mac's home). Someone at studio Mac can allow the folder; it cannot be allowed " <>
+               "from here."
+  end
+
+  # A computer that sent its folders but not its home (an engine between the
+  # two) has them said whole.
+  test "folders with no home to say them from are said whole" do
+    files = %{id: "files", state: :on, sentence: nil, detail: nil, roots: ["/Users/pat/Projects"]}
+
+    outcome =
+      Outcome.refused(
+        :outside_sandbox,
+        "/Users/pat/Downloads is outside this computer's sandbox."
+      )
+
+    assert %{error: error} = Remote.result(outcome, %{@studio | offers: [files]})
+    assert error =~ "Files and shell on studio Mac reach only /Users/pat/Projects. Someone"
+  end
+
   test "every other ending is the outcome's own sentence, naming the computer" do
     for outcome <- [
           %Outcome{status: :unknown, target: "make release"},

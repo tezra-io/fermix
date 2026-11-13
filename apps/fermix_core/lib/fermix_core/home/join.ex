@@ -10,7 +10,7 @@ defmodule FermixCore.Home.Join do
        "secret": "<32 bytes>", "expires_at": "2031-05-04T10:30:00Z",
        "sas": null, "sentence": null}
 
-  `start/3` (`computer.join.start`, `fermix computer join <code>`) refuses a
+  `start/3` (`computer.join.start`; `fermix computer join`, the code on stdin) refuses a
   computer that has a home of its own (`own_home/2`), then decodes the code,
   which must be a computer's (`EnrollmentCode`, version 2) and not expired,
   then makes this computer's key in the secret store (`ComputerKey.create/2`),
@@ -34,10 +34,22 @@ defmodule FermixCore.Home.Join do
   wherever it stands: the key and the file go, the engine is the primary of
   its own home again, and it restarts.
 
-  **A home of its own** (M97 §17): a home that holds any message, memory or
-  scheduled job, a paired phone or computer, the moved marker, or a link to
-  a server. The files a first start writes and nothing uses are left as
-  they are: nothing is deleted to make a home empty.
+  **A home of its own** (M97 §17): a home that holds any message, memory,
+  scheduled job or computer history note, a paired phone or computer, the
+  moved marker, or a link to a server. A memory that only repeats the home's
+  settings is not one: every save of the settings, and the first start's own
+  seed (`Setup.HomeSeeder`), writes the owner's name, time zone and
+  communication style and the agent's name into memory as well
+  (`Prompt.SetupSeeder.setting_memories/2`), so a row that still says
+  exactly that, with no source, session or run and not archived, is a
+  setting; one a conversation saved or changed says something else and
+  counts. The files a first start writes and nothing
+  uses, those rows among them, are left as they are: nothing is deleted to
+  make a home empty. A device opens no `memory.db` (`Home.Role`), the
+  server never reads one (it is a protected path in every sandbox mode), a
+  move back never lands on a computer that joined (it has no moved marker),
+  and after a disconnect the computer is the primary of this home again,
+  whose settings they are.
 
   `opts`: `:now` (a `DateTime`), `:restart` (0-arity, in place of
   `Management.Lifecycle.restart_self/0`; a CLI passes one that does
@@ -55,6 +67,7 @@ defmodule FermixCore.Home.Join do
   alias FermixCore.Home.EnrollmentCode
   alias FermixCore.Home.Moved
   alias FermixCore.Management.Lifecycle
+  alias FermixCore.Prompt.SetupSeeder
   alias FermixCore.Setup.ConfigStore
   alias FermixCore.Setup.SecretWriter
 
@@ -64,8 +77,14 @@ defmodule FermixCore.Home.Join do
   @file_mode 0o600
   @dir_mode 0o700
   @phases ~w(dialing awaiting_approval denied)
-  # What a home holds in memory.db that makes it a home of its own.
-  @own_tables [messages: "messages", memories: "memories", scheduled_jobs: "scheduled jobs"]
+  # What a home holds in memory.db that makes it a home of its own: any row,
+  # but of its memories only those that do not repeat its settings.
+  @own_tables [
+    messages: "messages",
+    memories: "memories",
+    scheduled_jobs: "scheduled jobs",
+    computer_history_memories: "computer history"
+  ]
 
   @type phase :: String.t()
   @type state :: %{required(String.t()) => term()}
@@ -117,8 +136,9 @@ defmodule FermixCore.Home.Join do
   def own_home(home) when is_binary(home) and home != "" do
     with :ok <- not_moved(home),
          :ok <- not_linked(home),
-         :ok <- no_devices(home) do
-      no_memory(Path.join(home, "memory.db"))
+         :ok <- no_devices(home),
+         {:ok, settings} <- setting_memories(home) do
+      no_memory(Path.join(home, "memory.db"), settings)
     end
   end
 
@@ -386,12 +406,24 @@ defmodule FermixCore.Home.Join do
   defp paired({:ok, _none}, _file), do: :ok
   defp paired({:error, _reason}, file), do: {:error, {:file, file, :invalid_devices}}
 
+  # The memory rows the home's settings make (see the moduledoc), from its
+  # settings file, read as an engine would read it.
+  defp setting_memories(home) do
+    case ConfigStore.personalization_config(home) do
+      {:ok, %{personalization: personalization, agent_name: agent_name}} ->
+        {:ok, SetupSeeder.setting_memories(personalization, agent_name)}
+
+      {:error, reason} ->
+        {:error, {:config, reason}}
+    end
+  end
+
   # Read-only: an engine running in this home keeps its own connection, and
   # a reader sees what it committed (the WAL included).
-  defp no_memory(db) do
+  defp no_memory(db, settings) do
     if File.regular?(db) do
       case Sqlite3.open(db, mode: :readonly) do
-        {:ok, conn} -> close_after(conn, first_rows(conn))
+        {:ok, conn} -> close_after(conn, first_rows(conn, settings))
         {:error, reason} -> {:error, {:file, db, reason}}
       end
     else
@@ -404,9 +436,9 @@ defmodule FermixCore.Home.Join do
     result
   end
 
-  defp first_rows(conn) do
+  defp first_rows(conn, settings) do
     Enum.reduce_while(@own_tables, :ok, fn {table, words}, :ok ->
-      case rows?(conn, table) do
+      case rows?(conn, table, settings) do
         {:ok, false} -> {:cont, :ok}
         {:ok, true} -> {:halt, {:error, {:home_of_its_own, words}}}
         {:error, _reason} = error -> {:halt, error}
@@ -415,18 +447,45 @@ defmodule FermixCore.Home.Join do
   end
 
   # A table a first start has not created holds nothing.
-  defp rows?(conn, table) do
+  defp rows?(conn, table, settings) do
     with {:ok, [[present]]} <-
            query(conn, "SELECT count(*) FROM sqlite_master WHERE name = ?1", [
              Atom.to_string(table)
            ]) do
-      if present == 0, do: {:ok, false}, else: any_row(conn, table)
+      cond do
+        present == 0 -> {:ok, false}
+        table == :memories -> own_memories(conn, settings)
+        true -> any_row(conn, table)
+      end
     end
   end
 
   defp any_row(conn, table) do
     with {:ok, [[found]]} <- query(conn, "SELECT EXISTS (SELECT 1 FROM #{table})", []),
          do: {:ok, found == 1}
+  end
+
+  # Any memory row but one that repeats a setting exactly: in a setting's
+  # scope (the owner's id for the owner's, the agent's for the agent's),
+  # category, key, value and prompt file, with no source, session or run, and
+  # not archived. A column that is null where a setting has a value is not
+  # that setting (`COALESCE`), so it counts.
+  defp own_memories(conn, settings) do
+    rows = Enum.map_join(settings, ", ", fn _setting -> "(?, ?, ?, ?, ?)" end)
+
+    sql = """
+    SELECT EXISTS (SELECT 1 FROM memories WHERE COALESCE(
+      source_message_id IS NULL AND source_id IS NULL AND source_type IS NULL
+      AND source_name IS NULL AND source_description IS NULL AND session_id IS NULL
+      AND run_id IS NULL AND archived_at IS NULL
+      AND scope_id = CASE scope_type WHEN 'owner' THEN owner_id WHEN 'agent' THEN agent_id END
+      AND (scope_type, category, key, value, promote_target) IN (VALUES #{rows}), 0) = 0)
+    """
+
+    args =
+      Enum.flat_map(settings, &[&1.scope_type, &1.category, &1.key, &1.value, &1.promote_target])
+
+    with {:ok, [[found]]} <- query(conn, sql, args), do: {:ok, found == 1}
   end
 
   defp query(conn, sql, args) do

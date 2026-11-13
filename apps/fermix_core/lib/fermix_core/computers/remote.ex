@@ -26,6 +26,7 @@ defmodule FermixCore.Computers.Remote do
   alias FermixCore.Capabilities.Builtin.Tool
   alias FermixCore.Computers
   alias FermixCore.Computers.Computer
+  alias FermixCore.Computers.Offers.Files
   alias FermixCore.Computers.Outcome
   alias FermixCore.Computers.ToolResult
   alias FermixCore.Tools.Telemetry, as: ToolTelemetry
@@ -91,11 +92,13 @@ defmodule FermixCore.Computers.Remote do
   def result(%Outcome{status: :failed, result: %{"success" => _said}} = outcome, %Computer{} = c),
     do: tool_result(outcome, false, c)
 
+  # The folders that computer's files and commands reach, from what it
+  # offers, so the model asks for one of them (M97 §6.4, finding F5).
   def result(%Outcome{status: :refused, refusal: :outside_sandbox} = outcome, %Computer{} = c),
     do:
       Tool.error(
-        "On #{c.name}: #{outcome.message} Someone at #{c.name} can allow the folder; it " <>
-          "cannot be allowed from here."
+        "On #{c.name}: #{outcome.message}#{reach(Files.reach(c.offers, c.name))} Someone at #{c.name} " <>
+          "can allow the folder; it cannot be allowed from here."
       )
 
   def result(%Outcome{} = outcome, %Computer{name: name}),
@@ -138,6 +141,9 @@ defmodule FermixCore.Computers.Remote do
     do: Map.put(metadata, :error_summary, String.slice(error, 0, @max_error_summary))
 
   defp put_error(metadata, _result), do: metadata
+
+  defp reach(nil), do: ""
+  defp reach(reach), do: " #{reach}."
 
   defp deadline_ms(module, op, args) do
     if Code.ensure_loaded?(module) and function_exported?(module, :deadline_ms, 2),

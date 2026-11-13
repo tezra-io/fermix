@@ -571,6 +571,11 @@ defmodule FermixCore.Management.Home do
     end
   end
 
+  # Asked before this engine's channels tree is up (its boot, or a verb with
+  # no engine tree reading a stopped Fermix): not a fault, so not said, and
+  # still not none (M97 F9).
+  defp unlisted(:not_started), do: {:error, :not_started}
+
   defp unlisted(reason) do
     Logger.warning("home status: the home's computers could not be listed: #{inspect(reason)}")
     {:error, reason}

@@ -157,6 +157,20 @@ defmodule FermixChannels.Desktop.TwoEnginesHistoryTest do
 
   defp at(ctx, minute), do: DateTime.from_unix!(ctx.t0 + minute * @minute, :millisecond)
 
+  # A fixed-offset zone in which `t0` falls at 01:xx local, so the notes and the
+  # `now` an hour after them are on one local day whatever the hour the suite
+  # runs: "today" in UTC split them across midnight between 02:00 and 03:00 UTC.
+  # Etc/GMT names invert the sign: "Etc/GMT-5" is five hours ahead of UTC.
+  defp one_day_zone(ctx) do
+    offset = Integer.mod(1 - at(ctx, 0).hour + 12, 24) - 12
+
+    cond do
+      offset > 0 -> "Etc/GMT-#{offset}"
+      offset < 0 -> "Etc/GMT+#{-offset}"
+      true -> "Etc/UTC"
+    end
+  end
+
   defp raw_events(ctx) do
     {:ok, events} = Spool.events_after(0, 100, server: ctx.spool)
     events
@@ -367,7 +381,7 @@ defmodule FermixChannels.Desktop.TwoEnginesHistoryTest do
              )
 
     machines = %{ctx.e.device_id => "studio Mac", "loft-91c2" => "loft Linux"}
-    opts = [repo: ctx.repo, machines: machines, now: at(ctx, 60), timezone: "Etc/UTC"]
+    opts = [repo: ctx.repo, machines: machines, now: at(ctx, 60), timezone: one_day_zone(ctx)]
 
     assert {:ok, studio} = Recall.query("today", [computer: ctx.e.device_id] ++ opts)
     assert studio =~ "[studio Mac, "

@@ -18,6 +18,7 @@ defmodule FermixCore.Tools.EventList do
 
   alias FermixCore.Capabilities.Builtin.Tool
   alias FermixCore.Temporal.Access
+  alias FermixCore.Temporal.Card
   alias FermixCore.Temporal.Registry
   alias FermixCore.Tools.Telemetry, as: ToolTelemetry
 
@@ -130,10 +131,17 @@ defmodule FermixCore.Tools.EventList do
     end
   end
 
+  # Each listed event is handed to the reply's blocks as its card
+  # (`Temporal.Card`), so a reply, and a morning brief, draws the agenda.
   defp list(args, context) do
     case Registry.list_events(filter(args), context) do
-      {:ok, page} -> {:ok, Tool.success(Jason.encode!(view(page)))}
-      {:error, reason} -> {:ok, Tool.error(Registry.describe_error(reason))}
+      {:ok, %{events: events} = page} ->
+        now = Card.now(context)
+        :ok = Card.put(context, Enum.map(events, &Card.listed(&1, now)))
+        {:ok, Tool.success(Jason.encode!(view(page)))}
+
+      {:error, reason} ->
+        {:ok, Tool.error(Registry.describe_error(reason))}
     end
   end
 

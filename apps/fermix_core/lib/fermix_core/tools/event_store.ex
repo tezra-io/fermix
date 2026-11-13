@@ -25,6 +25,7 @@ defmodule FermixCore.Tools.EventStore do
   alias FermixCore.Capabilities.Builtin.Tool
   alias FermixCore.Native.Notifications
   alias FermixCore.Temporal.Access
+  alias FermixCore.Temporal.Card
   alias FermixCore.Temporal.Registry
   alias FermixCore.Tools.Telemetry, as: ToolTelemetry
 
@@ -214,10 +215,15 @@ defmodule FermixCore.Tools.EventStore do
     end
   end
 
+  # The stored event is handed to the reply's blocks as its card (`Temporal.Card`).
   defp store(args, context) do
     case Registry.create_event(params(args), context, registry_opts(context)) do
-      {:ok, stored} -> {:ok, Tool.success(Jason.encode!(view(stored)))}
-      {:error, reason} -> {:ok, Tool.error(Registry.describe_error(reason))}
+      {:ok, stored} ->
+        :ok = Card.put(context, [Card.stored(stored)])
+        {:ok, Tool.success(Jason.encode!(view(stored)))}
+
+      {:error, reason} ->
+        {:ok, Tool.error(Registry.describe_error(reason))}
     end
   end
 

@@ -286,8 +286,11 @@ exit 1
 # with a session. Each is a desktop row in the paired-device store (`DeviceStore`:
 # lowercase uuid, name and model 1..255 bytes, a unique 32-byte Noise key, ISO
 # 8601 UTC times, no phone field) and a record of what it last said about itself.
-# `model` is the string the move writes for each system. Every value is invented,
-# and fixed, so every seed writes the same bytes.
+# `model` is the string the move writes for each system. Each files offer names
+# the folders files and commands reach on that computer (`roots`, M97 F5) and
+# the home `~` stands for there (`home`): the studio Mac its workspace and
+# Projects (standard), loft Linux its workspace (strict), never Downloads. Every value is invented, and fixed, so every seed
+# writes the same bytes.
 COMPUTERS_MANIFEST = os.path.join("eval-fixtures", "computers.json")
 HISTORY_MANIFEST = os.path.join("eval-fixtures", "computer_history.json")
 DEVICES_FILE = os.path.join("mobile", "devices.toml")
@@ -297,7 +300,9 @@ COMPUTERS = (
      "model": "macOS desktop", "platform": "macos", "backups": True,
      "created_at": "2026-10-02T09:00:00Z", "last_seen": "2026-11-09T22:40:00Z",
      "engine_version": "0.19.0", "offers_rev": "3a7c19e04b2d58f6",
-     "offers": [{"id": "files", "state": "on"},
+     "offers": [{"id": "files", "state": "on",
+                 "roots": ["/Users/avery/.fermix/workspace", "/Users/avery/Projects"],
+                 "home": "/Users/avery"},
                 {"id": "shell", "state": "on", "detail": "standard"},
                 {"id": "browser", "state": "on"},
                 {"id": "computer_use", "state": "on"},
@@ -307,7 +312,8 @@ COMPUTERS = (
      "model": "Linux desktop", "platform": "linux", "backups": False,
      "created_at": "2026-10-19T16:30:00Z", "last_seen": "2026-11-06T14:05:00Z",
      "engine_version": "0.19.0", "offers_rev": "c81e5f2a90d7b346",
-     "offers": [{"id": "files", "state": "on"},
+     "offers": [{"id": "files", "state": "on", "roots": ["/home/rowan/.fermix/workspace"],
+                 "home": "/home/rowan"},
                 {"id": "shell", "state": "on", "detail": "strict"},
                 {"id": "browser", "state": "on"},
                 {"id": "imessage", "state": "unavailable",

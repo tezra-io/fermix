@@ -56,7 +56,8 @@ no memory of its own.
 2. **Enter it on the new computer.** In the app's first-run screen, the
    choice to connect to a Fermix that already runs (management
    `computer.join.start`). With no app: stop Fermix there, run `fermix
-   computer join CODE`, then start Fermix.
+   computer join` and paste the code when it asks (or pipe it in; it is never
+   an argument), then start Fermix.
 3. **Type six digits.** Only the new computer shows them: "Type 482 913 on
    <server>, where it asks you to add this Mac." The Always On screen of the
    server and of every linked computer says "A computer named loft-linux
@@ -80,12 +81,18 @@ no memory of its own.
   computer named loft-linux joined your Fermix." It starts with every offer
   off (switched on at that computer, below), keeps no copies of the home's
   backups, and has no Move back or Restore here: those belong to the
-  computer the home moved from.
+  computer the home moved from. Its readiness judges only its sandbox: the
+  server runs the turns, providers and channels.
 - A computer that already has a Fermix of its own is refused by name, and
   nothing is deleted to make room: "This computer already has a Fermix of
   its own (it holds <what>), so it cannot join another. Two homes cannot be
-  merged." What counts: any message, memory or scheduled job, a paired phone
-  or computer, a home that moved to a server, or a link to one. A code for
+  merged." What counts: any message, memory, scheduled job or computer
+  history note, a paired phone or computer, a home that moved to a server, or
+  a link to one. Memories that only repeat its settings (the owner's name,
+  time zone and style and the assistant's name, which its first start and
+  every settings save write) do not count, so a computer whose Fermix has
+  started, or whose owner finished setting it up, can still join; they stay
+  where they are, and nothing reads them while it is a computer. A code for
   the owner's own server ("That code sets up a server of your own, so a
   computer cannot join with it."), an expired one and a second join while
   one runs are refused too.
@@ -318,9 +325,14 @@ computer."
 - **That computer's sandbox, not the server's.** The call runs the same tool
   code there, held by that computer's own sandbox mode, folders, blocked
   folders and allowed variables, and its kernel sandbox for commands
-  (Seatbelt on a Mac, Landlock on Linux). A path outside its folders is
-  refused: "<path> is outside this computer's sandbox. Someone at <name> can
-  allow the folder; it cannot be allowed from here." `request_directory_access`
+  (Seatbelt on a Mac, Landlock on Linux). `## Computers` names the folders
+  each computer's files and commands reach ("Files and shell on <name> reach
+  only ~/Projects … (~ is <name>'s home)"; a path's `~` there is that
+  computer's home): ask for one of them, or say plainly that another must be
+  allowed at that computer. A path outside them is refused: "<path> is
+  outside this computer's sandbox. Files and shell on <name> reach only
+  <folders>. Someone at <name> can allow the folder; it cannot be allowed
+  from here." `request_directory_access`
   naming a computer asks for nothing: "Folders on <name> are allowed only at
   <name>: someone there adds the folder to its sandbox. Fermix cannot ask for
   it from here." Its settings, secrets, key and journal stay refused, as

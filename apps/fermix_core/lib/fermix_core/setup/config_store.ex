@@ -474,6 +474,36 @@ defmodule FermixCore.Setup.ConfigStore do
   end
 
   @doc """
+  What the settings file under `home` says of the owner and the agent, which
+  a seed repeats in memory (`Prompt.SetupSeeder.setting_memories/2`): the
+  `[fermix_core.personalization]` section as a map (`user_name`, `timezone`,
+  `communication_style`) and `[fermix_core.agent] name`, each decoded and
+  normalised alone, as `engine_config/1` reads the engine section; none of
+  either when the file does not exist. For `FermixCore.Home.Join`, which may
+  run with no engine.
+  """
+  @spec personalization_config(Path.t()) ::
+          {:ok, %{personalization: map(), agent_name: String.t() | nil}}
+          | {:error, {:config, Path.t(), term()}}
+  def personalization_config(home) when is_binary(home) and home != "" do
+    file = Path.join(home, "config.toml")
+
+    case File.read(file) do
+      {:ok, contents} -> decode_personalization(contents, file)
+      {:error, :enoent} -> {:ok, %{personalization: %{}, agent_name: nil}}
+      {:error, reason} -> {:error, {:config, file, reason}}
+    end
+  end
+
+  defp decode_personalization(contents, file) do
+    with {:ok, personalization} <-
+           decode_section(contents, file, "personalization", &normalize_personalization/1),
+         {:ok, agent} <- decode_section(contents, file, "agent", &normalize_agent/1) do
+      {:ok, %{personalization: Map.new(personalization), agent_name: Keyword.get(agent, :name)}}
+    end
+  end
+
+  @doc """
   One table of `home`'s `machine.toml` (`MachineFile`), decoded with the
   file's own decoder and not normalized: the table's string-keyed map, nil
   when the file or the table is absent, `{:config, path, reason}` when the

@@ -254,6 +254,12 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   start no daemon write none. The standalone and Linux package binaries still
   unpack their runtime under `~/.local` before Fermix starts, as their
   wrapper always has.
+- **A `--json` command prints only its JSON on a packaged Fermix.** With
+  Fermix stopped, `fermix home status --json` printed a log warning on stdout
+  ahead of its JSON, so whatever read the JSON failed: the packaged engine
+  started its logging on stdout again after Fermix had moved it. Every
+  `--json` command now moves logging to stderr before it runs, and one whose
+  logging cannot be moved does not run and says why.
 - **`fermix doctor` no longer fails a computer in the device role for what
   that role never starts.** A computer whose home moved to another host runs
   no phone channel and no ACP listener, yet its `mobile companion` and `acp
@@ -672,7 +678,9 @@ will be part of a future release; nothing in this group is in a release yet.
   already in your Fermix, or on the server (`fermix always-on add-computer`),
   Always On's Add a computer opens a code that works once, for 30 minutes.
   On the new computer you connect to a Fermix that already runs with that
-  code (`fermix computer join CODE` where there is no app). It shows six
+  code (`fermix computer join` where there is no app: it asks for the code
+  without showing it, or reads it piped in, and never takes it as an
+  argument, where other programs could read it). It shows six
   digits taken from its encrypted connection, and you add it by typing them
   where you approve it; that side is never shown them, so someone who merely
   saw the code cannot join. Until you add it, it has no access; not adding
@@ -858,6 +866,33 @@ will be part of a future release; nothing in this group is in a release yet.
   switches under This computer, where they are set, rather than ticking the
   same switches twice. The setup page and `fermix always-on` show the same,
   and `fermix always-on change-passphrase` sets a new recovery passphrase.
+- **A computer whose Fermix has started can join your Fermix.** A first
+  start, and every save of the settings, write your name, time zone and style
+  and the assistant's name into memory as well, and those counted as a Fermix
+  of its own, so a computer that had ever started, a Mac at its first-run
+  screen included, was refused. Memories that only repeat its settings no
+  longer count, and stay where they are: nothing reads them while it is a
+  computer. Any other memory, a conversation, a scheduled job, a computer
+  history note, a paired device, a home that moved or a link still refuse it.
+  A computer that joined judges its readiness only on its sandbox, since your
+  server runs the turns, providers and channels, `fermix doctor` there judges
+  it the same way, and it logs no channel it does not start.
+- **Fermix knows which folders it may use on each computer.** Each computer
+  tells your server the folders its files and commands reach there, and
+  Fermix is told them for each computer, so asking for a file in another
+  folder, such as Downloads on a Mac in the standard sandbox, is answered by
+  name: that folder has to be allowed at that computer. A refusal of a path
+  outside them names the folders that computer allows. A folder in that
+  computer's home is named from `~` (`~/Projects`), which its tools read
+  there, so your account's name stays out of what the model reads.
+- **Quieter starts and plainer words on your server.** A server's first start
+  as your home no longer warns that its computers could not be listed while
+  its channels are still starting, nor does `fermix home status` with Fermix
+  stopped; moving or restoring a home onto a server that keeps its secrets in
+  files no longer asks a keyring and warns that none answered. Why a move was
+  undone is said plainly ("studio-server turned the move down, so nothing
+  moved."), with the server's own reason where it is one you can act on, such
+  as its disk space, and the technical words in the log.
 
 ## [0.18.0] - 2026-11-03
 

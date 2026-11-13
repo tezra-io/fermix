@@ -46,7 +46,7 @@ defmodule FermixCore.Computers.Offers.ComputerUse do
   defp access(%{sandbox_mode: mode}), do: Atom.to_string(mode)
 
   defp with_helper({:on, detail}, %{screen: %{actions: [_ | _]} = screen}),
-    do: {:on, detail, Map.take(screen, [:actions, :input_methods])}
+    do: {:on, detail, %{helper: Map.take(screen, [:actions, :input_methods])}}
 
   defp with_helper(state, _facts), do: state
 

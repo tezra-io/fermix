@@ -25,6 +25,7 @@ defmodule FermixCore.Tools.EventRemove do
 
   alias FermixCore.Capabilities.Builtin.Tool
   alias FermixCore.Temporal.Access
+  alias FermixCore.Temporal.Card
   alias FermixCore.Temporal.Registry
   alias FermixCore.Tools.Telemetry, as: ToolTelemetry
 
@@ -127,10 +128,16 @@ defmodule FermixCore.Tools.EventRemove do
     Registry.describe_error({:invalid_param, "event_id=#{inspect(value)}"})
   end
 
+  # The cancelled event is handed to the reply's blocks as its card
+  # (`Temporal.Card`), either way it was named.
   defp cancel(id, context) do
     case Registry.cancel_event(id, context) do
-      {:ok, event} -> {:ok, Tool.success(Jason.encode!(view(event)))}
-      {:error, reason} -> {:ok, Tool.error(Registry.describe_error(reason))}
+      {:ok, event} ->
+        :ok = Card.put(context, [Card.cancelled(event, Card.now(context))])
+        {:ok, Tool.success(Jason.encode!(view(event)))}
+
+      {:error, reason} ->
+        {:ok, Tool.error(Registry.describe_error(reason))}
     end
   end
 
@@ -138,8 +145,12 @@ defmodule FermixCore.Tools.EventRemove do
   # reply has to be able to say which reminder that was.
   defp cancel_referent(context) do
     case Registry.cancel_referent(context) do
-      {:ok, %{event: event, source: source}} -> {:ok, Tool.success(anchored(event, source))}
-      {:error, reason} -> {:ok, Tool.error(Registry.describe_error(reason))}
+      {:ok, %{event: event, source: source}} ->
+        :ok = Card.put(context, [Card.cancelled(event, Card.now(context))])
+        {:ok, Tool.success(anchored(event, source))}
+
+      {:error, reason} ->
+        {:ok, Tool.error(Registry.describe_error(reason))}
     end
   end
 

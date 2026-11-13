@@ -12,11 +12,13 @@ defmodule FermixCore.Computers.Offer do
   works out.
 
   A state is `{:on, detail}` (a short word or nil, such as the sandbox mode
-  of the shell), `{:on, detail, helper}` for an offer that also says what its
-  helper offers (`computer_use`'s actions and input methods, M97 §6.4),
-  `{:off, sentence}` (switched off on this computer, or never switched on) or
-  `{:unavailable, sentence}` (it cannot work here, in the engine's words).
-  Every sentence obeys `Management.Copy`'s rules.
+  of the shell), `{:on, detail, more}` for an offer that also carries what
+  the server's tool for it follows (`more`: `computer_use`'s `helper`, its
+  actions and input methods; `files`' `roots`, the folders files and
+  commands reach here, M97 §6.4), `{:off, sentence}` (switched off on this
+  computer, or never switched on) or `{:unavailable, sentence}` (it cannot
+  work here, in the engine's words). Every sentence obeys
+  `Management.Copy`'s rules.
   """
 
   alias FermixCore.Computers.Facts
@@ -25,8 +27,14 @@ defmodule FermixCore.Computers.Offer do
   @typedoc "An offer's state on this computer."
   @type state ::
           {:on, String.t() | nil}
-          | {:on, String.t() | nil, %{actions: [String.t()], input_methods: [String.t()]}}
+          | {:on, String.t() | nil, more()}
           | {:off | :unavailable, String.t()}
+
+  @typedoc "What an offer that is on carries beyond its detail."
+  @type more :: %{
+          optional(:helper) => %{actions: [String.t()], input_methods: [String.t()]},
+          optional(:roots) => [String.t(), ...]
+        }
 
   @doc "The offer's id."
   @callback id() :: Switches.offer()

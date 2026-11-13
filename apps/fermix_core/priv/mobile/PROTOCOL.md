@@ -1285,7 +1285,7 @@ computer's record; a phone sends none of it.
 (see *Chunked payloads*), a UTF-8 JSON object:
 
 ```json
-{"v":1,"offers":[{"id":"files","state":"on"},{"id":"shell","state":"on","detail":"standard"},{"id":"imessage","state":"off","sentence":"Switched off on this Mac. Only someone at this Mac can switch it on."}]}
+{"v":1,"offers":[{"id":"files","state":"on","roots":["/Users/avery/.fermix/workspace","/Users/avery/Projects"],"home":"/Users/avery"},{"id":"shell","state":"on","detail":"standard"},{"id":"imessage","state":"off","sentence":"Switched off on this Mac. Only someone at this Mac can switch it on."}]}
 ```
 
 | Field | Rule |
@@ -1297,6 +1297,8 @@ computer's record; a phone sends none of it.
 | `sentence?` | why the offer is not on, for the owner to read: required unless `state` is `on`, 1 to 300 bytes of UTF-8 with no control character |
 | `detail?` | a short note on the offer, such as the sandbox mode `shell` runs commands in, or the access level `computer_use` gives (its sandbox mode: `strict` looks only): 1 to 64 bytes of UTF-8 with no control character |
 | `helper?` | what the offer's helper offers, which the primary's tool for it follows (`computer_use`: what this computer's screen helper says it does): `{actions, input_methods}`, 1 to 64 action names and 0 to 8 input methods, each `^[a-z][a-z0-9_]{0,31}$`; absent while the helper has said nothing, and from a computer older than it, which the primary reads as the actions every helper has |
+| `roots?` | the folders files and commands reach on this computer (`files`, while on: its sandbox's roots in its mode, the workspace and the folders allowed there), which the primary tells the model and names when it refuses a path outside them: 1 to 32 absolute paths, each 1 to 1,024 bytes of UTF-8 with no control character; a folder the wire cannot carry is left out by the computer, and only the first 32 are sent; absent from a computer older than it, which the primary reads as folders it was not told |
+| `home?` | beside `roots`, the folder a path's `~` stands for on this computer (its account's home, which every file and command tool resolves `~` and `~/…` against there): one absolute path, as a root is; the primary says a folder under it from `~`, with the computer's name, so the account's name stays out of what the model reads; absent from a computer older than it, whose folders are said whole |
 
 The header's `rev` is the payload's revision, the first 8 bytes of its
 SHA-256 as 16 lowercase hex digits, and the payload's chunk key. A desktop

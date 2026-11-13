@@ -3,6 +3,7 @@ defmodule FermixCore.Prompt.SetupSeederTest do
 
   import ExUnit.CaptureLog
 
+  alias FermixCore.Home.Join
   alias FermixCore.Memory.PromptFiles
   alias FermixCore.Memory.Repo, as: MemoryRepo
   alias FermixCore.Prompt.BootstrapPaths
@@ -191,6 +192,55 @@ defmodule FermixCore.Prompt.SetupSeederTest do
       user_content = File.read!(PromptFiles.user_path(agent_id))
       assert user_content =~ "timezone: not set"
       refute user_content =~ "timezone: UTC"
+    end
+  end
+
+  # M97 §3.1, finding F1: every seed writes the settings into memory too, so a
+  # home that holds nothing but those rows may still join another as a
+  # computer; a row that no longer says what the settings say is a memory.
+  describe "seed/2 and a computer that joins a home" do
+    test "the rows it writes are the settings, so they are no home of its own" do
+      home = FermixTestSupport.SafeRm.make_tmp_dir!("setup_seeder_join")
+      on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(home) end)
+      repo = :"setup_seeder_join_#{System.unique_integer([:positive])}"
+      database = Path.join(home, "memory.db")
+
+      start_supervised!(
+        Supervisor.child_spec({MemoryRepo, name: repo, enabled: true, database_path: database},
+          id: repo
+        )
+      )
+
+      Application.put_env(:fermix_core, :agent, name: "Juno")
+
+      personalization = %{
+        user_name: "Avery Quinn",
+        timezone: "America/Chicago",
+        communication_style: "Brief, and longer when it matters."
+      }
+
+      assert {:ok, _files} = SetupSeeder.seed(personalization, repo: repo)
+      :ok = stop_supervised!(repo)
+
+      settings = """
+      [fermix_core.personalization]
+      user_name = "Avery Quinn"
+      timezone = "America/Chicago"
+      communication_style = "Brief, and longer when it matters."
+
+      [fermix_core.agent]
+      name = "Juno"
+      """
+
+      File.write!(Path.join(home, "config.toml"), settings)
+      assert Join.own_home(home) == :ok
+
+      File.write!(
+        Path.join(home, "config.toml"),
+        String.replace(settings, "Avery Quinn", "Avery Q.")
+      )
+
+      assert Join.own_home(home) == {:error, {:home_of_its_own, "memories"}}
     end
   end
 

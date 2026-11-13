@@ -319,8 +319,37 @@ class VerifyStandaloneTest(unittest.TestCase):
 
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("fermix computer join: Always On is not in this release", result.stdout)
+        self.assertIn("fermix computer join: No code was read.", result.stdout)
         self.assertIn("the keychain refused the request.", result.stdout)
         self.assertIn("This computer joins your Fermix on verify-server", result.stdout)
+
+    # The code once came as an argument, where every process could read it.
+    def test_rejects_a_join_that_takes_the_code_as_an_argument(self):
+        self._write_artifact(create_disclaim=True, computer_join="takes_argument")
+
+        result = self._run("macos_aarch64")
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("in a home without Always On must exit 1, got 64", result.stderr)
+
+    def test_rejects_a_join_that_does_not_read_its_code_from_stdin(self):
+        self._write_artifact(create_disclaim=True, computer_join="ignores_stdin")
+
+        result = self._run("macos_aarch64")
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("computer join with no code on stdin must exit 1, got 0", result.stderr)
+
+    def test_rejects_a_join_that_asks_the_keychain_before_it_has_a_code(self):
+        self._write_artifact(create_disclaim=True, computer_join="reads_code_late")
+
+        result = self._run("macos_aarch64")
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(
+            "computer join with no code on stdin reached the keychain or wrote a join",
+            result.stderr,
+        )
 
     def test_rejects_a_join_that_asks_for_a_command_host(self):
         self._write_artifact(create_disclaim=True, computer_join="needs_command_host")
@@ -742,6 +771,20 @@ class VerifyStandaloneTest(unittest.TestCase):
 
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("must answer the home's role and update ceiling", result.stderr)
+
+    # The Linux package's first find: with Fermix stopped, the warning that the
+    # home's computers could not be listed reached stdout ahead of the JSON.
+    def test_rejects_home_status_json_with_a_log_line_on_stdout(self):
+        self._write_artifact(create_disclaim=True, home="status_logs_on_stdout")
+
+        result = self._run("macos_aarch64")
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(
+            "in a home that never started must print exactly one JSON document on stdout",
+            result.stderr,
+        )
+        self.assertIn("stdout is not one JSON document", result.stderr)
 
     def test_rejects_a_home_status_that_refuses_with_another_code(self):
         self._write_artifact(create_disclaim=True, home="status_other_refusal")
@@ -1572,10 +1615,17 @@ class VerifyStandaloneTest(unittest.TestCase):
             '    printf \'{"error":{"code":"always_on_unavailable","sentence":"Always On is not in '
             'this release of Fermix yet."},"ok":false,"schema_version":1}\\n\'\n'
         )
+        # A home that never started has no epoch yet.
         answers = (
-            '    epoch="$(cat "$FERMIX_HOME/mobile/primary_epoch")"\n'
+            '    epoch="$(cat "$FERMIX_HOME/mobile/primary_epoch" 2>/dev/null || printf null)"\n'
             '    printf \'{"ok":true,"result":{"epoch":%s,"role":"primary","update_ceiling":null}}\\n\' "$epoch"\n'
             "    exit 0\n"
+        )
+        # What a release whose logger handler stayed on stdout prints.
+        logs_on_stdout = (
+            "    printf '01:53:12.322 [warning] home status: the home'\"'\"'s computers could not"
+            " be listed: :not_running\\n'\n"
+            + answers
         )
         no_ceiling = (
             '    epoch="$(cat "$FERMIX_HOME/mobile/primary_epoch")"\n'
@@ -1589,6 +1639,7 @@ class VerifyStandaloneTest(unittest.TestCase):
         switched_body = {
             "status_ignores_switch": refusal + "    exit 1\n",
             "status_without_ceiling": no_ceiling,
+            "status_logs_on_stdout": logs_on_stdout,
         }.get(home, answers)
         if home == "status_answers":
             status_body = answers
@@ -1621,6 +1672,7 @@ class VerifyStandaloneTest(unittest.TestCase):
             "status_other_refusal",
             "status_ignores_switch",
             "status_without_ceiling",
+            "status_logs_on_stdout",
             "enroll_accepts",
             "enroll_leaves_home",
             "enroll_writes_role",
@@ -1702,16 +1754,26 @@ class VerifyStandaloneTest(unittest.TestCase):
             )
         raise ValueError(f"unknown plugins clear behaviour: {plugins_clear}")
 
-    # The real verb's shape: refused where the home's settings do not turn
-    # Always On on; else it asks the keychain for this computer's key, takes
-    # "no such item" (exit 44) as a key to make, stores one, reads it back,
-    # writes the join at mode 0600 and makes the engine a device. A keychain
-    # that answers anything else is refused in the verb's own sentence.
+    # The real verb's shape: it takes no argument; refused where the home's
+    # settings do not turn Always On on; else it reads the code from the first
+    # line of stdin, refused when there is none, then asks the keychain for
+    # this computer's key, takes "no such item" (exit 44) as a key to make,
+    # stores one, reads it back, writes the join at mode 0600 and makes the
+    # engine a device. A keychain that answers anything else is refused in the
+    # verb's own sentence.
     def _computer_join_behaviour(self, computer_join):
-        argv = '  [ "$1 $2" = "computer join" ] && [ "$#" -eq 3 ] || exit 64\n'
+        argv = '  [ "$*" = "computer join" ] || exit 64\n'
         gate = (
             '  if ! grep -Fq \'enabled = true\' "$FERMIX_HOME/config.toml" 2>/dev/null; then\n'
             "    printf 'fermix computer join: Always On is not in this release of Fermix yet.\\n' >&2\n"
+            "    exit 1\n"
+            "  fi\n"
+        )
+        read_code = (
+            '  IFS= read -r code || code=""\n'
+            '  if [ -z "$code" ]; then\n'
+            "    printf 'fermix computer join: No code was read. Paste the code from Add a"
+            " computer when this asks for it, or pipe it in.\\n' >&2\n"
             "    exit 1\n"
             "  fi\n"
         )
@@ -1750,8 +1812,9 @@ class VerifyStandaloneTest(unittest.TestCase):
             " digits show there.\\n'\n"
             "  exit 0\n"
         )
+        coded = argv + gate + read_code
         if computer_join == "joins":
-            return argv + gate + service + find + refused + store + join + role + joined
+            return coded + service + find + refused + store + join + role + joined
         if computer_join == "needs_command_host":
             return (
                 "  printf 'fermix: unexpected error — CommandRunner: command host supervisor"
@@ -1759,23 +1822,31 @@ class VerifyStandaloneTest(unittest.TestCase):
                 "  exit 1\n"
             )
         if computer_join == "ignores_switch":
-            return argv + service + find + refused + store + join + role + joined
+            return argv + read_code + service + find + refused + store + join + role + joined
+        # The form the code once had: an argument, readable by every process.
+        if computer_join == "takes_argument":
+            old_argv = '  [ "$1 $2" = "computer join" ] && [ "$#" -eq 3 ] || exit 64\n'
+            return old_argv + gate + service + find + refused + store + join + role + joined
+        if computer_join == "ignores_stdin":
+            return argv + gate + service + find + refused + store + join + role + joined
+        if computer_join == "reads_code_late":
+            return argv + gate + service + find + read_code + refused + store + join + role + joined
         # The defect this stage caught: a keychain that holds no item yet read
         # as one that refused, so no computer's first key could be made.
         if computer_join == "absent_is_refusal":
-            return argv + gate + service + find + refusal + "  exit 1\n"
+            return coded + service + find + refusal + "  exit 1\n"
         if computer_join == "refuses_unasked":
-            return argv + gate + refusal + "  exit 1\n"
+            return coded + refusal + "  exit 1\n"
         if computer_join == "leaves_join":
             kept = '  if [ "$find_status" -ne 44 ]; then\n' + join + refusal + "    exit 1\n  fi\n"
-            return argv + gate + service + find + kept + store + join + role + joined
+            return coded + service + find + kept + store + join + role + joined
         if computer_join == "no_helper":
-            return argv + gate + service + find + refused + join + role + joined
+            return coded + service + find + refused + join + role + joined
         if computer_join == "open_join":
             opened = join + '  chmod 644 "$FERMIX_HOME/device/join.json"\n'
-            return argv + gate + service + find + refused + store + opened + role + joined
+            return coded + service + find + refused + store + opened + role + joined
         if computer_join == "keeps_role":
-            return argv + gate + service + find + refused + store + join + joined
+            return coded + service + find + refused + store + join + joined
         raise ValueError(f"unknown computer join behaviour: {computer_join}")
 
     # The real verb's shape: the seeded ChatGPT sign-in's tokens leave auth.json

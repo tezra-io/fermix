@@ -22,6 +22,16 @@ defmodule FermixChannels.Home.LinkDesktopRowTest do
     assert Link.computer_rows() == {:error, :not_running}
   end
 
+  # M97 F9: at a primary's start the computers are asked for before the
+  # channels tree that holds the link is up, which is the boot and not a
+  # rail that stopped; neither is ever none.
+  test "before the channels tree has started, the computer rows are not started yet" do
+    refute Process.whereis(FermixChannels.Desktop.Peers)
+    assert FermixChannels.Application.started?()
+    assert Link.computer_rows(false) == {:error, :not_started}
+    assert Link.computer_rows(true) == {:error, :not_running}
+  end
+
   test "drops the row of that key and keeps every other", %{staging: staging} do
     mac = row(:desktop, "orchard-mac")
     other = row(:desktop, "studio-mac")

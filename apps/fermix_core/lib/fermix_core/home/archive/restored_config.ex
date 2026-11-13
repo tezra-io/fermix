@@ -19,7 +19,8 @@ defmodule FermixCore.Home.Archive.RestoredConfig do
       that is not macOS and whose keyring cannot be used (`keyring_usable?`,
       true only when the keyring answered `available`: a probe that timed
       out or could not tell keeps nothing in a keyring the new host may not
-      read) gets `secret_store = "file"`. On macOS the keyring is kept;
+      read, and an engine that keeps its secrets in files asks no keyring)
+      gets `secret_store = "file"`. On macOS the keyring is kept;
     * an Always On server's own S3 bucket, signed with its instance role
       (`s3_credentials = "instance_role"`), restored on macOS is left out
       (`Archive.InstanceRole`): a Mac keeps no S3 snapshots. Elsewhere it is

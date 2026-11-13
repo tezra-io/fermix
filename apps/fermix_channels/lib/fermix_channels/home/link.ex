@@ -113,10 +113,28 @@ defmodule FermixChannels.Home.Link do
   # where the store or the peers are not running they are not known, which
   # is never read as none.
   @impl true
-  def computer_rows do
-    if Process.whereis(DeviceStore) && Process.whereis(FermixChannels.Desktop.Peers),
-      do: computer_rows(DeviceStore.list()),
-      else: {:error, :not_running}
+  def computer_rows, do: computer_rows(FermixChannels.Application.started?())
+
+  @doc """
+  `computer_rows/0` where `started?` says whether this engine's channels tree
+  has started (`FermixChannels.Application.started?/0`): before it has, the
+  store and the peers are not up yet, as at a primary's boot, which is
+  `{:error, :not_started}`; after, `{:error, :not_running}` (M97 F9). Neither
+  is ever none.
+  """
+  @spec computer_rows(boolean()) ::
+          {:ok, [FermixCore.Home.Link.computer_row()]} | {:error, term()}
+  def computer_rows(started?) when is_boolean(started?) do
+    cond do
+      Process.whereis(DeviceStore) && Process.whereis(FermixChannels.Desktop.Peers) ->
+        listed_rows(DeviceStore.list())
+
+      started? ->
+        {:error, :not_running}
+
+      true ->
+        {:error, :not_started}
+    end
   end
 
   # A live view that started asks every open session's family to say its
@@ -128,14 +146,14 @@ defmodule FermixChannels.Home.Link do
       else: :ok
   end
 
-  defp computer_rows({:ok, devices}) do
+  defp listed_rows({:ok, devices}) do
     connected = Map.new(Peer.connected(), &{&1.device_id, &1.connected_since})
 
     {:ok,
      for(%{kind: :desktop} = row <- devices, do: computer_row(row, connected[row.device_id]))}
   end
 
-  defp computer_rows({:error, _reason} = error), do: error
+  defp listed_rows({:error, _reason} = error), do: error
 
   defp computer_row(row, since) do
     %{

@@ -4,8 +4,8 @@ defmodule FermixCore.Companion.ProtocolTest do
   alias FermixCore.Companion.Protocol
 
   test "publishes the version window, the line cap and the ordered catalogs" do
-    assert Protocol.protocol_version() == 7
-    assert Protocol.supported_version_range() == {6, 7}
+    assert Protocol.protocol_version() == 8
+    assert Protocol.supported_version_range() == {7, 8}
     assert Protocol.max_line_bytes() == 65_536
 
     assert Protocol.client_events() ==
@@ -254,11 +254,11 @@ defmodule FermixCore.Companion.ProtocolTest do
     assert "row" in Protocol.shared_server_events()
   end
 
-  test "negotiates directionally, version 6 and version 7 both accepted, version 5 too old" do
-    assert {:ok, 6} = Protocol.negotiate(6)
+  test "negotiates directionally, version 7 and version 8 both accepted, version 6 too old" do
     assert {:ok, 7} = Protocol.negotiate(7)
-    assert {:error, :client_too_old} = Protocol.negotiate(5)
-    assert {:error, :client_too_new} = Protocol.negotiate(8)
+    assert {:ok, 8} = Protocol.negotiate(8)
+    assert {:error, :client_too_old} = Protocol.negotiate(6)
+    assert {:error, :client_too_new} = Protocol.negotiate(9)
   end
 
   # M97 §3.4: the window runs both ways. A newer client that still speaks
@@ -266,12 +266,12 @@ defmodule FermixCore.Companion.ProtocolTest do
   # what it still speaks, is refused as before; an older one is never
   # served up, whatever it says.
   test "a newer client that still speaks the daemon's newest is served it" do
-    assert {:ok, 7} = Protocol.negotiate(9, 7)
-    assert {:ok, 7} = Protocol.negotiate(8, 3)
-    assert {:ok, 6} = Protocol.negotiate(6, 6)
-    assert {:error, :client_too_new} = Protocol.negotiate(9, 8)
-    assert {:error, :client_too_new} = Protocol.negotiate(9, nil)
-    assert {:error, :client_too_old} = Protocol.negotiate(5, 5)
+    assert {:ok, 8} = Protocol.negotiate(10, 8)
+    assert {:ok, 8} = Protocol.negotiate(9, 3)
+    assert {:ok, 7} = Protocol.negotiate(7, 7)
+    assert {:error, :client_too_new} = Protocol.negotiate(10, 9)
+    assert {:error, :client_too_new} = Protocol.negotiate(10, nil)
+    assert {:error, :client_too_old} = Protocol.negotiate(6, 6)
   end
 
   test "client_hello takes the oldest version it speaks only at most its own" do
@@ -291,17 +291,17 @@ defmodule FermixCore.Companion.ProtocolTest do
 
     assert {:ok, _line} =
              Protocol.encode_server_event("server_hello", %{
-               "min_version" => 6,
-               "max_version" => 7,
-               "protocol_version" => 7,
+               "min_version" => 7,
+               "max_version" => 8,
+               "protocol_version" => 8,
                "role" => "primary"
              })
 
     assert {:error, {:invalid_field, "protocol_version"}} =
              Protocol.encode_server_event("server_hello", %{
-               "min_version" => 6,
-               "max_version" => 7,
-               "protocol_version" => 6,
+               "min_version" => 7,
+               "max_version" => 8,
+               "protocol_version" => 7,
                "role" => "primary"
              })
   end
@@ -332,7 +332,7 @@ defmodule FermixCore.Companion.ProtocolTest do
              inspect(bad)
     end
 
-    hello = %{"min_version" => 6, "max_version" => 7, "role" => "primary"}
+    hello = %{"min_version" => 7, "max_version" => 8, "role" => "primary"}
 
     assert {:ok, line} =
              Protocol.encode_server_event("server_hello", Map.put(hello, "primary_epoch", 2))
@@ -451,8 +451,8 @@ defmodule FermixCore.Companion.ProtocolTest do
   test "the encoder writes one newline-terminated object with its type" do
     assert {:ok, line} =
              Protocol.encode_server_event("server_hello", %{
-               min_version: 6,
-               max_version: 7,
+               min_version: 7,
+               max_version: 8,
                role: "primary"
              })
 
@@ -460,15 +460,15 @@ defmodule FermixCore.Companion.ProtocolTest do
 
     assert Jason.decode!(line) == %{
              "type" => "server_hello",
-             "min_version" => 6,
-             "max_version" => 7,
+             "min_version" => 7,
+             "max_version" => 8,
              "role" => "primary"
            }
 
     assert {:error, {:invalid_field, "version_range"}} =
              Protocol.encode_server_event("server_hello", %{
-               min_version: 5,
-               max_version: 7,
+               min_version: 6,
+               max_version: 8,
                role: "primary"
              })
   end
@@ -476,7 +476,7 @@ defmodule FermixCore.Companion.ProtocolTest do
   # M75: the engine names its role on every hello, so a desktop app never
   # compares a device-role engine's epoch against the primary's.
   test "server_hello names the engine's role, primary or device" do
-    hello = %{"min_version" => 6, "max_version" => 7}
+    hello = %{"min_version" => 7, "max_version" => 8}
 
     for role <- ~w(primary device) do
       assert {:ok, line} =
@@ -761,7 +761,7 @@ defmodule FermixCore.Companion.ProtocolTest do
     end
 
     test "server_hello may carry the command palette and the inbox, each in its own shape" do
-      hello = %{"min_version" => 6, "max_version" => 7, "role" => "primary"}
+      hello = %{"min_version" => 7, "max_version" => 8, "role" => "primary"}
       command = %{"name" => "new", "aliases" => ["clear"], "description" => "Start afresh."}
       offer = %{"dir" => "/Users/me/.fermix/companion/inbox", "max_bytes" => 20_971_520}
       full = Map.merge(hello, %{"commands" => [command], "attachments" => offer})

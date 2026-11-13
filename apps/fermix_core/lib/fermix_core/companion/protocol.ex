@@ -124,6 +124,18 @@ defmodule FermixCore.Companion.Protocol do
   daemon always sends it and an older one in the same window does not, so it
   is additive and optional, on every version and on the phone's wire too.
 
+  Version 8 lets a reply carry a block type beyond `places` and `checklists`:
+  `blocks` holds at most one block of each type (`ReplyBlocks.types/0`), and
+  a client skips a type it does not know. It brings the first, `events`
+  (EVENTS_DRAWN_AS_CARDS §04): every event the turn's event tools returned,
+  one to eight, each as its card (`FermixCore.Temporal.Card`). A connection on
+  version 7 is sent only `places` and `checklists`, wherever a row leaves for
+  it (`ReplyBlocks.for_session/4`: its `text_done`, its `row`, its history),
+  and a turn it carries is not told its events are drawn; a turn from a
+  version 8 connection is (`ReplyBlocks.drawn_types/3`). No event or field
+  of its own names the version: a block's type does. The window is now
+  {7, 8}.
+
   The window runs both ways (M97 §3.4: the server leads). A client newer
   than the daemon names the oldest version it still speaks
   (`client_hello.min_protocol_version`, at most its own); when that is at
@@ -150,7 +162,7 @@ defmodule FermixCore.Companion.Protocol do
 
   # Bumped in lockstep with any wire-shape change. The supported range is an
   # N/N-1 window derived from this single constant.
-  @protocol_version 7
+  @protocol_version 8
   @min_supported_version max(1, @protocol_version - 1)
 
   # The inbound line cap, the same as the Realtime socket's.
@@ -203,6 +215,15 @@ defmodule FermixCore.Companion.Protocol do
   @attach_id ~r/\A[0-9A-Za-z_-]{1,64}\z/
   @attach_kinds ~w(image animation video audio voice document file)
   @max_attach_field_bytes 255
+  # A reply's events (version 8): each card as `Temporal.Card` makes it, its
+  # id as the store mints it and its dates and times in the event's own zone.
+  @event_id ~r/\Aevt_[a-z2-7]{16}\z/
+  @event_date ~r/\A\d{4}-\d{2}-\d{2}\z/
+  @event_time ~r/\A([01]\d|2[0-3]):[0-5]\d\z/
+  @event_statuses ~w(active completed cancelled)
+  @event_changes ~w(stored changed cancelled snoozed)
+  @event_card_strings ~w(title kind timezone when)
+  @event_card_optional ~w(reminds rings)
 
   @client_events ~w(
     client_hello msg command cancel history_pull history_search read_state media_fetch
@@ -1354,8 +1375,9 @@ defmodule FermixCore.Companion.Protocol do
   defp link_previews?(_previews), do: false
 
   # A reply has the key only when it carries a block, at most one of each
-  # type: a `places` block holds one to ten places, and a `checklists` block one
-  # to eight lists, each its id, title and row ids.
+  # type: a `places` block holds one to ten places, a `checklists` block one
+  # to eight lists, each its id, title and row ids, and an `events` block
+  # (version 8) one to eight events, each its card.
   defp optional_blocks(%{"blocks" => blocks}) do
     if blocks?(blocks), do: :ok, else: {:error, {:invalid_field, "blocks"}}
   end
@@ -1381,7 +1403,27 @@ defmodule FermixCore.Companion.Protocol do
       Enum.all?(lists, &checklist_ref?/1)
   end
 
+  defp block?(%{"type" => "events", "events" => events}) when is_list(events) do
+    events != [] and length(events) <= ReplyBlocks.max_events() and
+      Enum.all?(events, &event_card?/1)
+  end
+
   defp block?(_block), do: false
+
+  # One event as its card: its id, date and zone, status and the engine's
+  # sentence always; its time, yearly mark, change and reminder words only
+  # when it has them, and no null anywhere.
+  defp event_card?(%{"event_id" => id, "date" => date, "status" => status} = card)
+       when is_binary(id) and is_binary(date) and status in @event_statuses do
+    Regex.match?(@event_id, id) and Regex.match?(@event_date, date) and
+      Enum.all?(@event_card_strings, &(nonempty(card, &1) == :ok)) and
+      Enum.all?(@event_card_optional, &(optional_nonempty(card, &1) == :ok)) and
+      optional_pattern(card, "time", @event_time) == :ok and
+      Map.get(card, "yearly", true) == true and
+      optional_enum(card, "change", @event_changes) == :ok and not has_null?(card)
+  end
+
+  defp event_card?(_card), do: false
 
   defp checklist_ref?(%{"list_id" => "ck_" <> _id, "title" => title, "rows" => rows})
        when is_binary(title) and title != "" and is_list(rows),

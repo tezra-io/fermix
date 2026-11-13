@@ -204,6 +204,15 @@ defmodule FermixCore.Sandbox.PathPolicy do
     end
   end
 
+  @doc """
+  The folder a path's leading `~` stands for here: this process's home, which
+  every path a tool is given is resolved against (`~` and `~/…`), so a
+  computer that says its folders from `~` says them as its tools read them
+  (M97 §6.4, `Computers.Facts`).
+  """
+  @spec tilde_home() :: String.t()
+  def tilde_home, do: System.user_home!()
+
   @spec allowed_path?(String.t(), Config.t()) :: :ok | {:error, term()}
   def allowed_path?(path, config) when is_binary(path) do
     allowed_path?(path, config, protected_paths(config))
@@ -352,8 +361,8 @@ defmodule FermixCore.Sandbox.PathPolicy do
     |> resolve_components(64, &real_case/2)
   end
 
-  defp expand_path("~", _base), do: System.user_home!()
-  defp expand_path("~/" <> rest, _base), do: Path.join(System.user_home!(), rest)
+  defp expand_path("~", _base), do: tilde_home()
+  defp expand_path("~/" <> rest, _base), do: Path.join(tilde_home(), rest)
   defp expand_path("/" <> _rest = path, _base), do: Path.expand(path)
   defp expand_path(path, base), do: Path.expand(path, base)
 

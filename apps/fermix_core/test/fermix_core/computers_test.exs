@@ -273,6 +273,34 @@ defmodule FermixCore.ComputersTest do
       refute section =~ @loft
     end
 
+    # M97 §6.4, finding F5: a path outside a computer's folders is refused
+    # there, so the model is told which folders its files and commands reach,
+    # and that any other is allowed only at that computer.
+    test "names the folders a computer's files and commands reach, and where others are allowed" do
+      rows = [row(@studio, "studio Mac", "macos", connected: true, since: @since)]
+      roots = ["/Users/avery/.fermix/workspace", "/Users/avery/Projects", "/Volumes/Garden"]
+      # The account's name stays off the prompt: a folder in that computer's
+      # home is said from `~`, which it expands there, and one outside it whole.
+      files = Map.merge(@files, %{roots: roots, home: "/Users/avery"})
+
+      live = %{
+        @studio => %{offers: [files, @shell], path: :direct, since: @since, standing: :current}
+      }
+
+      section =
+        Computers.prompt_section(
+          opts(rows, live: live, always_on: true, host_facts: @host) ++ @zone
+        )
+
+      assert section =~
+               "- studio Mac (macOS, connected): files, shell (strict). Files and shell on " <>
+                 "studio Mac reach only ~/.fermix/workspace, ~/Projects and /Volumes/Garden " <>
+                 "(~ is studio Mac's home); another folder is allowed only by someone at " <>
+                 "studio Mac."
+
+      refute section =~ "/Users/avery"
+    end
+
     test "says nothing on a guest's turn, without Always On, off the primary, or with no computer" do
       rows = [row(@loft, "loft Linux", "linux")]
       base = opts(rows, always_on: true, host_facts: @host)

@@ -246,7 +246,7 @@ defmodule FermixChannels.Mobile.Rail do
       opts: opts,
       socket: nil,
       noise: nil,
-      version: Protocol.protocol_version(),
+      version: Protocol.initiator_version(),
       paths?: Keyword.get(opts, :paths, false) == true,
       path: nil,
       client_seq: 0,

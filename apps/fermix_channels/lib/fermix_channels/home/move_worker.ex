@@ -120,6 +120,7 @@ defmodule FermixChannels.Home.MoveWorker do
   alias FermixCore.Home.MoveTelemetry
   alias FermixCore.Home.Snapshot
   alias FermixCore.Home.Snapshot.Run
+  alias FermixCore.Management.Copy
   alias FermixCore.Management.Lifecycle
   alias FermixCore.Management.Settings
   alias FermixCore.Setup.ConfigStore
@@ -135,8 +136,31 @@ defmodule FermixChannels.Home.MoveWorker do
   @resume_for_ms 24 * 3_600_000
   @compiled_env Mix.env()
 
+  @unreadable_sentence "The move's own files could not be read; nothing was sent or undone, " <>
+                         "and Fermix looks again when it restarts."
+
   @spec start_link(keyword()) :: {:ok, pid()}
   def start_link(opts) when is_list(opts), do: Task.start_link(__MODULE__, :run, [opts])
+
+  @doc """
+  Every sentence this worker records for a move's screens in its own words,
+  with `to` as the server's name, for the copy gate: those it takes from
+  `Management.Copy` and its own. A server's refusal is said as
+  `Management.Copy.move_refused/2` says it; the words `Home.MoveSecrets`,
+  `Snapshot.Run` and `ComputerKey` give are their own modules'.
+  """
+  @spec sentences(String.t()) :: [String.t()]
+  def sentences(to) when is_binary(to) do
+    [
+      attempts_spent_sentence(to),
+      Copy.summary_sentence(:undone_refused, %{to: to}),
+      Copy.summary_sentence(:undone_unmarked, %{}),
+      Copy.summary_sentence(:move_marker_unread, %{}),
+      @unreadable_sentence,
+      link_unwritten_sentence(to),
+      key_sentence({:in_use, :keyring})
+    ]
+  end
 
   @doc "Carries the pending move of `opts[:home]` on from its recorded phase."
   @spec run(keyword()) :: :ok
@@ -180,7 +204,7 @@ defmodule FermixChannels.Home.MoveWorker do
         {_phase, {:ok, _marker}} -> resume(ctx)
         {"aborting", :absent} -> abort(ctx, :recorded_abort, phase["sentence"])
         {_before_commit, :absent} -> transfer(ctx)
-        {phase_name, {:error, reason}} -> unconfirmed(ctx, phase_name, marker_sentence(reason))
+        {phase_name, {:error, reason}} -> marker_unread(ctx, phase_name, reason)
       end
     after
       :ok = MoveProgress.clear(ctx.progress, request["move_id"])
@@ -222,7 +246,7 @@ defmodule FermixChannels.Home.MoveWorker do
     attempt = (phase["attempts"] || 0) + 1
 
     if attempt > Move.max_attempts() do
-      abort(ctx, :attempts_spent, "The move to #{name(ctx)} failed #{Move.max_attempts()} times.")
+      abort(ctx, :attempts_spent, attempts_spent_sentence(name(ctx)))
     else
       :ok = record(ctx, "streaming", %{"attempts" => attempt, "sentence" => nil})
       attempt_transfer(Map.put(ctx, :attempt, attempt))
@@ -247,8 +271,12 @@ defmodule FermixChannels.Home.MoveWorker do
     end
   end
 
-  defp attempt_failed(ctx, {:refused, code, message}),
-    do: abort(ctx, {:refused, code}, "#{name(ctx)} refused the move (#{code}: #{message}).")
+  # The server's code and words go to the log; the note says it in words an
+  # owner reads (`Management.Copy.move_refused/2`).
+  defp attempt_failed(ctx, {:refused, code, message}) do
+    Logger.warning("move: #{name(ctx)} refused the move (#{code}: #{message})")
+    abort(ctx, {:refused, code}, Copy.move_refused(name(ctx), message))
+  end
 
   # Neither comes right on another attempt: the owner acts first.
   defp attempt_failed(ctx, {:secrets, sentence}), do: abort(ctx, :secrets, sentence)
@@ -260,12 +288,7 @@ defmodule FermixChannels.Home.MoveWorker do
     do: abort(ctx, {:capture, :free_space_unknown}, Run.capture_sentence(reason))
 
   defp attempt_failed(ctx, {:computer_key, reason}),
-    do:
-      abort(
-        ctx,
-        :computer_key,
-        "#{ComputerKey.error_sentence(reason)} Nothing moved; start the move again."
-      )
+    do: abort(ctx, :computer_key, key_sentence(reason))
 
   defp attempt_failed(ctx, reason) do
     Logger.warning(
@@ -564,7 +587,8 @@ defmodule FermixChannels.Home.MoveWorker do
     else
       {:error, reason} ->
         close_rail(rail)
-        abort(ctx, {:retire, reason}, "This home could not be marked moved (#{inspect(reason)}).")
+        Logger.error("move: this home could not be marked moved: #{inspect(reason)}")
+        abort(ctx, {:retire, reason}, Copy.summary_sentence(:undone_unmarked, %{}))
     end
   end
 
@@ -679,7 +703,7 @@ defmodule FermixChannels.Home.MoveWorker do
 
       {:error, reason} ->
         Logger.error("move: the desktop link could not be written: #{inspect(reason)}")
-        unconfirmed(ctx, "committing", "The desktop link to #{name(ctx)} could not be written.")
+        unconfirmed(ctx, "committing", link_unwritten_sentence(name(ctx)))
     end
   end
 
@@ -833,23 +857,22 @@ defmodule FermixChannels.Home.MoveWorker do
       "device_id" => device_id,
       "app_version" => BuildInfo.product_version(),
       "last_server_seq" => 0,
-      "protocol_v" => Protocol.protocol_version(),
+      "protocol_v" => Protocol.initiator_version(),
       "primary_epoch" => epoch
     }
   end
 
   # Whether this home retired cannot be told, so it neither sends nor undoes
-  # anything until the marker is readable again.
-  defp marker_sentence(reason),
-    do: "The moved marker could not be read (#{inspect(reason)}); fix it and restart Fermix."
+  # anything until the marker is readable again; why goes to the log.
+  defp marker_unread(ctx, phase, reason) do
+    Logger.error("move: the moved marker could not be read: #{inspect(reason)}")
+    unconfirmed(ctx, phase, Copy.summary_sentence(:move_marker_unread, %{}))
+  end
 
   # A request or phase file this worker cannot read: nothing is sent or undone
   # until it can be, and the phase says why.
   defp unreadable(ctx, reason) do
-    sentence =
-      "The move's own files could not be read; nothing was sent or undone, and Fermix " <>
-        "looks again when it restarts."
-
+    sentence = @unreadable_sentence
     Logger.error("move: #{sentence} (#{inspect(reason)})")
 
     case Move.read_phase(ctx.home) do
@@ -866,6 +889,12 @@ defmodule FermixChannels.Home.MoveWorker do
     Logger.error("move: #{sentence}")
     :ok
   end
+
+  defp attempts_spent_sentence(to), do: "The move to #{to} failed #{Move.max_attempts()} times."
+  defp link_unwritten_sentence(to), do: "The desktop link to #{to} could not be written."
+
+  defp key_sentence(reason),
+    do: "#{ComputerKey.error_sentence(reason)} Nothing moved; start the move again."
 
   # -- endings ----------------------------------------------------------------
 

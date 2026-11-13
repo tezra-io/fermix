@@ -6820,7 +6820,7 @@
     },
     "computer_join_start_params": {
       "type": "object",
-      "description": "The code Add a computer opened on the home this computer joins. A code Fermix did not open, one that sets up a server instead, and one that expired are refused on code; a computer that has a home of its own (any message, memory, scheduled job, paired device, moved marker or link), and one already joining, are unavailable with their sentence.",
+      "description": "The code Add a computer opened on the home this computer joins. A code Fermix did not open, one that sets up a server instead, and one that expired are refused on code; a computer that has a home of its own (any message, memory, scheduled job, computer history note, paired device, moved marker or link; not a memory that only repeats the home's settings), and one already joining, are unavailable with their sentence.",
       "required": ["code"],
       "additionalProperties": false,
       "properties": { "code": { "type": "string", "minLength": 1, "maxLength": 4096 } }

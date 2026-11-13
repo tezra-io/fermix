@@ -866,7 +866,7 @@ defmodule FermixChannels.Desktop.Relay do
       "device_id" => state.link.device_id,
       "app_version" => BuildInfo.product_version(),
       "last_server_seq" => 0,
-      "protocol_v" => Protocol.protocol_version(),
+      "protocol_v" => Protocol.initiator_version(),
       "relay_list_rev" => state.link.primary.relays_rev,
       "primary_epoch" => state.link.epoch,
       "platform" => platform()

@@ -26,7 +26,15 @@ defmodule FermixCore.Computers.Offers do
     * `helper`, when present (the `computer_use` offer, M97 §6.4: what this
       computer's screen helper offers, which the server's `computer_use` tool
       follows), `{actions, input_methods}`: 1 to #{64} action names and 0 to
-      #{8} input methods, each `^[a-z][a-z0-9_]{0,31}$`.
+      #{8} input methods, each `^[a-z][a-z0-9_]{0,31}$`;
+    * `roots`, when present (the `files` offer, M97 §6.4: the folders files
+      and commands reach on this computer), 1 to #{32} absolute paths, each
+      1 to #{1024} bytes of printable UTF-8. A computer sends only the
+      folders the wire can carry (`wire_roots/1`): any other is left out,
+      and the first #{32} are sent, so one odd folder never stops the rest
+      of what it offers;
+    * `home`, when present beside `roots`, the folder a path's `~` stands
+      for on this computer, one absolute path as a root is.
 
   An id this engine has no module for is kept as it came: a newer computer
   may offer more, and the home lists only what it was told.
@@ -43,6 +51,8 @@ defmodule FermixCore.Computers.Offers do
   @controls ~r/[\x{0000}-\x{001F}\x{007F}-\x{009F}]/u
   @max_helper_actions 64
   @max_input_methods 8
+  @max_roots 32
+  @max_root_bytes 1024
   @states %{"on" => :on, "off" => :off, "unavailable" => :unavailable}
   # Every offer a computer makes, in the order it lists them. What reaches
   # the server from a computer (calls, attachments, a robot, notifications)
@@ -63,7 +73,9 @@ defmodule FermixCore.Computers.Offers do
           required(:state) => :on | :off | :unavailable,
           required(:sentence) => String.t() | nil,
           required(:detail) => String.t() | nil,
-          optional(:helper) => %{actions: [String.t()], input_methods: [String.t()]}
+          optional(:helper) => %{actions: [String.t()], input_methods: [String.t()]},
+          optional(:roots) => [String.t(), ...],
+          optional(:home) => String.t()
         }
 
   @doc "The most offers one computer sends."
@@ -108,8 +120,8 @@ defmodule FermixCore.Computers.Offers do
         {:on, detail} ->
           offer(module.id(), :on, nil, detail)
 
-        {:on, detail, helper} ->
-          module.id() |> offer(:on, nil, detail) |> Map.put(:helper, helper)
+        {:on, detail, more} ->
+          module.id() |> offer(:on, nil, detail) |> Map.merge(more)
 
         {state, sentence} when state in [:off, :unavailable] ->
           offer(module.id(), state, sentence)
@@ -170,6 +182,20 @@ defmodule FermixCore.Computers.Offers do
     with {:ok, _offers} <- decode(payload), do: {:ok, payload, rev(payload)}
   end
 
+  @doc """
+  The folders of `roots` the wire carries (the moduledoc), in their order:
+  each an absolute path of 1 to #{@max_root_bytes} bytes of printable text,
+  the first #{@max_roots} of them.
+  """
+  @spec wire_roots([String.t()]) :: [String.t()]
+  def wire_roots(roots) when is_list(roots),
+    do: roots |> Enum.filter(&wire_root?/1) |> Enum.uniq() |> Enum.take(@max_roots)
+
+  @doc "Whether the wire carries `path` as a folder: an absolute path of printable text."
+  @spec wire_root?(term()) :: boolean()
+  def wire_root?(path),
+    do: printable?(path, @max_root_bytes) and String.starts_with?(path, "/")
+
   @doc "The revision of a payload: the first 8 bytes of its SHA-256, lowercase hex."
   @spec rev(binary()) :: String.t()
   def rev(payload) when is_binary(payload),
@@ -214,6 +240,8 @@ defmodule FermixCore.Computers.Offers do
     |> put_some("sentence", Map.get(offer, :sentence))
     |> put_some("detail", Map.get(offer, :detail))
     |> put_some("helper", helper_wire(Map.get(offer, :helper)))
+    |> put_some("roots", Map.get(offer, :roots))
+    |> put_some("home", Map.get(offer, :home))
   end
 
   defp helper_wire(%{actions: actions, input_methods: methods}),
@@ -261,16 +289,18 @@ defmodule FermixCore.Computers.Offers do
          {:ok, state} <- state(state),
          {:ok, sentence} <- sentence(Map.get(item, "sentence"), state),
          {:ok, detail} <- detail(Map.get(item, "detail")),
-         {:ok, helper} <- helper(Map.get(item, "helper")) do
-      {:ok, put_helper(%{id: id, state: state, sentence: sentence, detail: detail}, helper)}
+         {:ok, helper} <- helper(Map.get(item, "helper")),
+         {:ok, roots} <- roots(Map.get(item, "roots")),
+         {:ok, home} <- home(Map.get(item, "home")) do
+      offer = %{id: id, state: state, sentence: sentence, detail: detail}
+
+      {:ok,
+       offer |> put_some(:helper, helper) |> put_some(:roots, roots) |> put_some(:home, home)}
     end
   end
 
   defp one(%{}), do: {:error, "it names no id or no state"}
   defp one(_item), do: {:error, "it is not an object"}
-
-  defp put_helper(offer, nil), do: offer
-  defp put_helper(offer, helper), do: Map.put(offer, :helper, helper)
 
   defp helper(nil), do: {:ok, nil}
 
@@ -284,6 +314,27 @@ defmodule FermixCore.Computers.Offers do
   end
 
   defp helper(_other), do: {:error, "its helper names no actions or no input methods"}
+
+  defp roots(nil), do: {:ok, nil}
+
+  defp roots(roots) do
+    if is_list(roots) and length(roots) in 1..@max_roots and Enum.all?(roots, &wire_root?/1),
+      do: {:ok, roots},
+      else:
+        {:error,
+         "its roots are not 1 to #{@max_roots} absolute paths, each 1 to " <>
+           "#{@max_root_bytes} bytes of printable text"}
+  end
+
+  defp home(nil), do: {:ok, nil}
+
+  defp home(home) do
+    if wire_root?(home),
+      do: {:ok, home},
+      else:
+        {:error,
+         "its home is not an absolute path of 1 to #{@max_root_bytes} bytes of printable text"}
+  end
 
   defp names?(list, min, max) when is_list(list),
     do:

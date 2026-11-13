@@ -201,7 +201,8 @@ defmodule FermixChannels.Home.ReturnTest do
     assert {:ok, %{"phase" => "undoing", "sentence" => sentence}} =
              Move.read_phase(ctx.server.root)
 
-    assert sentence =~ "studio-mac refused the move (move_failed: This Mac needs about"
+    # The Mac's own words for its disk are an owner's to read, after the plain ones.
+    assert sentence =~ "studio-mac turned the move down, so nothing moved. This Mac needs about"
     assert sentence =~ "make room on its disk, then move back again"
     assert Moved.read(ctx.server.root) == :absent
     assert :ok = Move.finish_at_boot(ctx.server.root, :primary)

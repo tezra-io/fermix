@@ -12,6 +12,7 @@ defmodule FermixChannels.Mobile.ProtocolContractTest do
   alias FermixChannels.Mobile.Router
   alias FermixChannels.Mobile.Session
   alias FermixCore.Computers.Offers
+  alias FermixCore.Computers.Offers.Files, as: FilesOffer
   alias FermixCore.Computers.Origin
   alias FermixCore.Computers.Outcome
   alias FermixTestSupport.WireSchema
@@ -651,7 +652,8 @@ defmodule FermixChannels.Mobile.ProtocolContractTest do
   # which of a computer's own events the server takes, and its offers travel
   # as one chunked payload whose rev is its own. The schema reads each as the
   # codec does.
-  test "the schema publishes a computer's own record as the codec reads it", %{schema: schema} do
+  test "the schema publishes a computer's own record as the codec reads it",
+       %{schema: schema, protocol: protocol} do
     [hello] = Enum.filter(client_headers(), &(&1["t"] == "hello" and &1["platform"]))
     refute "platform" in schema["$defs"]["hello"]["required"]
 
@@ -704,8 +706,13 @@ defmodule FermixChannels.Mobile.ProtocolContractTest do
       Enum.filter(jsonl(@client_binary_fixtures), &(&1["header"]["t"] == "offers"))
 
     payload = Base.decode64!(tail)
-    assert {:ok, [_offer | _more]} = Offers.decode(payload)
+    assert {:ok, [_offer | _more] = offers} = Offers.decode(payload)
     assert Offers.rev(payload) == header["rev"]
+    # The folders files and commands reach there, as the documented row says.
+    assert [_root | _more] = FilesOffer.roots(offers)
+    assert protocol =~ "| `roots?` |"
+    assert %{home: "/" <> _home} = Enum.find(offers, &(&1.id == "files"))
+    assert protocol =~ "| `home?` |"
 
     for rev <- ["0F1E2D3C4B5A6978", "0f1e2d3c", "0f1e2d3c4b5a69780"] do
       drifted = Map.put(header, "rev", rev)

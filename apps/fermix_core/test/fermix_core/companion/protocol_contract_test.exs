@@ -15,6 +15,9 @@ defmodule FermixCore.Companion.ProtocolContractTest do
   alias FermixCore.Companion.Protocol
   alias FermixCore.Cues.ProposalView
   alias FermixCore.ReplyBlocks
+  alias FermixCore.Temporal.Card
+  alias FermixCore.Temporal.Defaults
+  alias FermixCore.Temporal.Registry
 
   @priv_dir Application.app_dir(:fermix_core, "priv/companion")
   @schema_path Path.join(@priv_dir, "protocol.schema.json")
@@ -285,8 +288,6 @@ defmodule FermixCore.Companion.ProtocolContractTest do
     protocol: protocol
   } do
     defs = schema["$defs"]
-    assert Protocol.protocol_version() == 7
-    assert Protocol.supported_version_range() == {6, 7}
 
     for type <- @version_7_client_events do
       assert Protocol.client_event_version(type) == 7, "#{type} is not a version 7 event"
@@ -496,7 +497,7 @@ defmodule FermixCore.Companion.ProtocolContractTest do
 
     for def <-
           ~w(mediaRef linkPreviewCard replyBlock placesBlock place checklistsBlock checklistRef
-             commandDescriptor) do
+             eventsBlock eventCard commandDescriptor) do
       assert schema["$defs"][def] == mobile["$defs"][def], "#{def} differs between the wires"
     end
 
@@ -713,6 +714,70 @@ defmodule FermixCore.Companion.ProtocolContractTest do
 
     [_before, section] = String.split(protocol, "## Blocks under a reply", parts: 2)
     assert section =~ "`apple_place_id`"
+  end
+
+  # EVENTS_DRAWN_AS_CARDS §04: version 8 is the version in which a row may
+  # carry a block type beyond places and checklists; it brings `events`, one
+  # card an event, and a golden of each form a client decodes: one stored
+  # event with reminders, an agenda with a yearly event and one with no
+  # time, a cancelled one and a snoozed one, each the card the engine makes.
+  test "a reply's events are version 8's block, with a golden of each form", %{
+    schema: schema,
+    protocol: protocol
+  } do
+    assert Protocol.protocol_version() == 8
+    assert Protocol.supported_version_range() == {7, 8}
+
+    defs = schema["$defs"]
+    assert defs["eventsBlock"]["x-since-versions"] == %{"companion" => 8, "mobile" => 3}
+    assert defs["eventsBlock"]["properties"]["events"]["maxItems"] == ReplyBlocks.max_events()
+    assert "events" in defs["replyBlock"]["properties"]["type"]["enum"]
+
+    blocks = golden_event_blocks(jsonl(@server_fixtures))
+    cards = Enum.flat_map(blocks, & &1["events"])
+
+    for block <- blocks do
+      assert ReplyBlocks.events(Enum.map(block["events"], &{:event, &1})) == [block]
+    end
+
+    for card <- cards, do: assert(byte_size(Jason.encode!(card)) < 400, card["title"])
+    assert Enum.sort(Enum.uniq(cards)) == Enum.sort(Enum.uniq(engine_cards()))
+
+    assert Enum.any?(cards, &match?(%{"change" => "stored", "reminds" => _, "rings" => _}, &1))
+    assert Enum.any?(blocks, &(length(&1["events"]) > 2))
+    assert Enum.any?(cards, &(&1["yearly"] == true and not Map.has_key?(&1, "time")))
+    assert Enum.any?(cards, &(&1["kind"] == "deadline" and not Map.has_key?(&1, "time")))
+
+    assert Enum.any?(
+             cards,
+             &(&1["change"] == "cancelled" and not Map.has_key?(&1, "reminds"))
+           )
+
+    assert Enum.any?(cards, &(&1["change"] == "snoozed" and &1["reminds"] =~ ~r/\Aagain on /))
+
+    [_before, section] = String.split(protocol, "### Version 8", parts: 2)
+    assert section =~ "{7, 8}"
+    [_before, blocks_section] = String.split(protocol, "## Blocks under a reply", parts: 2)
+    assert blocks_section =~ "### Which blocks a client draws"
+    assert blocks_section =~ "drawn from the"
+    assert blocks_section =~ "that pulled its index"
+  end
+
+  # One filter where rows leave: a connection on version 7 is sent only the
+  # types its version carries, so the goldens' events reach it without them.
+  test "a version 7 connection is sent a golden reply without its events, a version 8 one with" do
+    server = jsonl(@server_fixtures)
+
+    for frame <- server,
+        type = frame["type"],
+        type in ~w(text_done row history_page),
+        payload = Map.delete(frame, "type"),
+        golden_event_blocks([frame]) != [] do
+      old = ReplyBlocks.for_session(type, payload, :companion, 7)
+      assert golden_event_blocks([Map.put(old, "type", type)]) == []
+      assert :ok = Protocol.validate_server_payload(type, old)
+      assert ReplyBlocks.for_session(type, payload, :companion, 8) == payload
+    end
   end
 
   # M85 §07: a reply's lists ride beside its places, by id, on every version.
@@ -1101,6 +1166,107 @@ defmodule FermixCore.Companion.ProtocolContractTest do
   end
 
   defp fixture_types(path), do: path |> jsonl() |> MapSet.new(& &1["type"])
+
+  # Every golden events block, as a reply, a row or a history message carries it.
+  defp golden_event_blocks(frames) do
+    for frame <- frames,
+        row <- [frame | Map.get(frame, "messages", [])],
+        %{"type" => "events"} = block <- Map.get(row, "blocks", []),
+        do: block
+  end
+
+  # The cards the engine makes of the goldens' events, stated on 2026-11-12 at
+  # 10:05 in New York: the stored dentist, the agenda of four, the cancelled
+  # dinner and the snoozed call, each the record its tool returns.
+  defp engine_cards do
+    now = ~U[2026-11-12 15:05:00Z]
+    plan = fn kind, form -> kind |> Defaults.plan_for(form) |> elem(1) |> Defaults.encode_plan() end
+
+    dentist =
+      golden_event("evt_k2m4q7xd3np5rtwa", "Dentist", "appointment", %{
+        local_date: ~D[2026-11-13],
+        local_time: ~T[10:30:00],
+        next_occurrence_on: ~D[2026-11-13],
+        reminder_plan: plan.("appointment", "datetime")
+      })
+
+    birthday =
+      golden_event("evt_b7c3n5q2w4e6r2ta", "Mum's birthday", "birthday", %{
+        recurrence_kind: "yearly",
+        recurrence_month: 11,
+        recurrence_day: 16,
+        next_occurrence_on: ~D[2026-11-16],
+        reminder_plan: plan.("birthday", "date")
+      })
+
+    car =
+      golden_event("evt_c4r5e6g7a2b3d4fh", "Car registration due", "deadline", %{
+        local_date: ~D[2026-11-19],
+        next_occurrence_on: ~D[2026-11-19],
+        reminder_plan: plan.("deadline", "date")
+      })
+
+    dinner =
+      golden_event("evt_d2n3r4s5m6w7q2xz", "Dinner with Sam", "appointment", %{
+        local_date: ~D[2026-11-24],
+        local_time: ~T[18:30:00],
+        next_occurrence_on: ~D[2026-11-24],
+        reminder_plan: plan.("appointment", "datetime")
+      })
+
+    bank =
+      golden_event("evt_m3k4l5n6p7q2r3sa", "Call the bank", "explicit_reminder", %{
+        local_date: ~D[2026-11-12],
+        local_time: ~T[15:00:00],
+        next_occurrence_on: ~D[2026-11-12],
+        reminder_plan: plan.("explicit_reminder", "datetime")
+      })
+
+    snooze = %{
+      status: :created,
+      reminder: %{scheduled_for: ~U[2026-11-12 20:40:00Z], delivery_platform: "telegram"},
+      event: bank,
+      timezone: "America/New_York",
+      source: %{},
+      superseded: []
+    }
+
+    stored = %{
+      status: :created,
+      event: dentist,
+      reminders: [%{}],
+      stated_as: Registry.stated_as(dentist, now)
+    }
+
+    [
+      Card.stored(stored),
+      Card.cancelled(%{dinner | status: "cancelled"}, now),
+      Card.snoozed(snooze, now)
+      | Enum.map([dentist, birthday, car, dinner], &Card.listed(&1, now))
+    ]
+    |> Enum.map(fn {:ok, card} -> card end)
+  end
+
+  defp golden_event(id, title, kind, attrs) do
+    Map.merge(
+      %{
+        id: id,
+        title: title,
+        kind: kind,
+        status: "active",
+        timezone: "America/New_York",
+        recurrence_kind: "once",
+        recurrence_month: nil,
+        recurrence_day: nil,
+        local_date: nil,
+        local_time: nil,
+        next_occurrence_on: nil,
+        delivery_platform: "telegram",
+        next_reminder_at: ~U[2026-11-12 16:00:00Z]
+      },
+      attrs
+    )
+  end
 
   defp fixture_lines(path), do: path |> File.read!() |> String.split("\n", trim: true)
 

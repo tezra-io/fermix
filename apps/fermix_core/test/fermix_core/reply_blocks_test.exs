@@ -328,6 +328,121 @@ defmodule FermixCore.ReplyBlocksTest do
     end
   end
 
+  # EVENTS_DRAWN_AS_CARDS §04: the events a turn's event tools returned, each
+  # once in its last state, the changed ones first, the rest by date.
+  describe "the events block" do
+    defp card(n, overrides \\ %{}) do
+      Map.merge(
+        %{
+          "event_id" => "evt_#{String.duplicate("a", 15)}#{<<?a + n>>}",
+          "title" => "Event #{n}",
+          "kind" => "appointment",
+          "date" => "2026-12-#{String.pad_leading(Integer.to_string(n), 2, "0")}",
+          "timezone" => "America/New_York",
+          "status" => "active",
+          "when" => "Some day"
+        },
+        overrides
+      )
+    end
+
+    defp ids([%{"type" => "events", "events" => events}]), do: Enum.map(events, & &1["title"])
+
+    test "the changed ones first in the order first changed, the rest by date then time" do
+      records = [
+        {:event, card(5)},
+        {:event, card(3, %{"change" => "stored"})},
+        {:event, card(2, %{"time" => "18:30"})},
+        {:event, card(4, %{"date" => "2026-12-02"})},
+        {:event, card(5, %{"change" => "changed"})}
+      ]
+
+      assert ids(ReplyBlocks.events(records)) == ["Event 3", "Event 5", "Event 4", "Event 2"]
+    end
+
+    test "an event returned twice is carried once, its last state with the turn's latest change" do
+      records = [
+        {:event, card(1, %{"change" => "stored", "title" => "First"})},
+        {:event, card(1, %{"change" => "changed", "title" => "Moved"})},
+        {:event, card(1, %{"title" => "Listed after"})}
+      ]
+
+      assert [%{"events" => [only]}] = ReplyBlocks.events(records)
+      assert %{"title" => "Listed after", "change" => "changed"} = only
+    end
+
+    test "carries at most eight, none without an event, and build adds it after the lists" do
+      records = for n <- 1..12, do: {:event, card(n)}
+      assert [%{"events" => kept}] = ReplyBlocks.events(records)
+      assert length(kept) == ReplyBlocks.max_events()
+      assert ReplyBlocks.events([record(1)]) == []
+
+      touch = {:checklist, %{list_id: "ck_3m9q2x7d1a", title: "Fermix", rows: []}}
+
+      assert [%{"type" => "places"}, %{"type" => "checklists"}, %{"type" => "events"}] =
+               ReplyBlocks.build("https://cafe1.example/", [{:event, card(1)}, touch, record(1)])
+
+      assert [%{"type" => "checklists"}, %{"type" => "events"}] =
+               ReplyBlocks.delivered([{:event, card(1)}, touch, record(1)])
+    end
+  end
+
+  # One answer to which block types a session draws and which it is sent: a
+  # snapshot type from the version that brought it, a kept kind once pulled.
+  describe "which blocks a session draws and is sent" do
+    test "events are drawn from companion 8 and mobile 3, lists once their index is pulled" do
+      assert ReplyBlocks.drawn_types(:companion, 7, []) == ["places"]
+      assert ReplyBlocks.drawn_types(:companion, 7, [:lists]) == ["places", "checklists"]
+      assert ReplyBlocks.drawn_types(:companion, 8, []) == ["places", "events"]
+
+      assert ReplyBlocks.drawn_types(:companion, 8, [:lists]) ==
+               ["places", "checklists", "events"]
+
+      assert ReplyBlocks.drawn_types(:mobile, 2, [:lists]) == ["places", "checklists"]
+      assert ReplyBlocks.drawn_types(:mobile, 3, []) == ["places", "events"]
+    end
+
+    test "a session is sent every type it would draw with every kept kind pulled" do
+      assert ReplyBlocks.sent_types(:companion, 7) == ["places", "checklists"]
+      assert ReplyBlocks.sent_types(:companion, 8) == ReplyBlocks.types()
+      assert ReplyBlocks.sent_types(:mobile, 2) == ["places", "checklists"]
+      assert ReplyBlocks.sent_types(:mobile, 3) == ReplyBlocks.types()
+
+      for wire <- [:companion, :mobile], version <- 1..9, pulled <- [[], [:lists]] do
+        drawn = ReplyBlocks.drawn_types(wire, version, pulled)
+        assert drawn -- ReplyBlocks.sent_types(wire, version) == [], "#{wire} #{version}"
+      end
+    end
+
+    test "a row leaves with only the blocks its session is sent, and none left is no key" do
+      places = %{"type" => "places", "places" => []}
+      lists = %{"type" => "checklists", "lists" => []}
+      events = %{"type" => "events", "events" => [card(1)]}
+      done = %{"turn_id" => "t", "server_seq" => 1, "text" => "x", "blocks" => [places, events]}
+
+      assert ReplyBlocks.for_session("text_done", done, :mobile, 2)["blocks"] == [places]
+      assert ReplyBlocks.for_session("text_done", done, :mobile, 3) == done
+
+      only_events = %{done | "blocks" => [events]}
+      refute Map.has_key?(ReplyBlocks.for_session("row", only_events, :companion, 7), "blocks")
+
+      page = %{
+        "profile_id" => "main",
+        "messages" => [%{"server_seq" => 1, "blocks" => [lists, events]}, %{"server_seq" => 2}]
+      }
+
+      assert %{"messages" => [%{"blocks" => [^lists]}, %{"server_seq" => 2}]} =
+               ReplyBlocks.for_session("history_page", page, :companion, 7)
+
+      assert ReplyBlocks.for_session("accepted", %{"client_msg_id" => "m"}, :mobile, nil) ==
+               %{"client_msg_id" => "m"}
+
+      assert_raise FunctionClauseError, fn ->
+        ReplyBlocks.for_session("text_done", done, :companion, nil)
+      end
+    end
+  end
+
   describe "the links a reply's previews are made from" do
     test "every link the text names, in order and once each, bold and bare ones read whole" do
       text =

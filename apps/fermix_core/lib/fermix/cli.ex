@@ -37,6 +37,7 @@ defmodule Fermix.CLI do
   alias Fermix.CLI.SkillsCommand
   alias Fermix.CLI.StartCommand
   alias Fermix.CLI.StatusCommand
+  alias Fermix.CLI.StdoutPurity
   alias Fermix.CLI.StopCommand
   alias Fermix.CLI.UninstallCommand
   alias Fermix.CLI.UpgradeCommand
@@ -56,10 +57,32 @@ defmodule Fermix.CLI do
 
   @spec main([String.t()]) :: non_neg_integer()
   def main(argv) when is_list(argv) do
-    case argv do
-      [] -> usage(2)
-      [cmd | rest] -> dispatch(cmd, rest)
+    case pure_stdout(argv) do
+      :ok -> dispatch_argv(argv)
+      {:error, reason} -> impure_stdout(reason)
     end
+  end
+
+  defp dispatch_argv([]), do: usage(2)
+  defp dispatch_argv([cmd | rest]), do: dispatch(cmd, rest)
+
+  # `config/runtime.exs` moves logging off a wire's stdout before boot logs,
+  # but in a release the `logger` application starts after it and installs
+  # its own handler on stdout. Every verb passes here once `logger` runs, so
+  # the move is made again before any verb can log.
+  defp pure_stdout(argv) do
+    if StdoutPurity.wire_stdout?(argv), do: StdoutPurity.route_logs_to_stderr(), else: :ok
+  end
+
+  # A wire that would carry log lines is refused before the verb runs, as
+  # `fermix acp` refuses one.
+  defp impure_stdout(reason) do
+    IO.puts(
+      :stderr,
+      "fermix: " <> StdoutPurity.message(reason) <> ", so the command did not run."
+    )
+
+    1
   end
 
   defp dispatch(cmd, _rest) when cmd in @help_flags, do: usage(0)
@@ -168,7 +191,7 @@ defmodule Fermix.CLI do
       fermix always-on [--json]                    Show Always On; on a terminal, take each step
       fermix always-on ACTION [--recovery-passphrase-file PATH] [--yes] [--wait] [--json]
                                                    Take one Always On step (own-server, move-now, ...)
-      fermix computer join CODE                    Join this computer to a Fermix that already runs
+      fermix computer join                         Join this computer to a Fermix that already runs (asks for the code)
       fermix logs   [-f] [-n LINES]                Show daemon log file
       fermix upgrade [--check]                     Self-update from signed releases
       fermix uninstall                             Remove a Fermix.app-managed installation

@@ -72,9 +72,9 @@ previous one (or the same value while only one version exists).
 
 | Field | Value |
 |---|---|
-| `protocol_version` (companion declares) | `7` |
-| daemon `min_version` | `6` |
-| daemon `max_version` | `7` |
+| `protocol_version` (companion declares) | `8` |
+| daemon `min_version` | `7` |
+| daemon `max_version` | `8` |
 
 **The window runs both ways** (M97: the server leads). After a move a
 computer's chat is carried to its server, which updates on its own and may
@@ -301,6 +301,29 @@ attachments only when its hello carried `attachments`.
 
 Every version 6 event, field and rule holds unchanged on version 7. Since
 version 7 the window is {6, 7}, so a version 5 client is refused with
+`error: unsupported_protocol_version` (`client_too_old`).
+
+### Version 8: a reply's events, and blocks that can grow
+
+Version 8 is the version in which a reply may carry a block type beyond
+`places` and `checklists`: `blocks` holds at most one block of each type, in
+no fixed number, and a client skips a type it does not know. It brings one
+type, `events`: the events the reply's turn stored, changed, cancelled,
+snoozed or listed, each as the engine's card of it, which a client draws
+under the reply as a calendar shows an event (see *Blocks under a reply*).
+
+It adds no event and no field: a block's `type` names what it needs. The
+daemon sends a connection on version 7 only `places` and `checklists`
+blocks, wherever a reply reaches it (its `text_done`, its `row`, and a
+`history_page` message), so a reply stored with an `events` block reaches a
+version 7 client without it, and a turn a version 7 connection carries is
+written for a client that draws no events. A turn a version 8 connection
+carries is told its events are drawn under the reply, so its text confirms
+in a sentence and does not write each event out (see *Blocks under a
+reply*, *Which blocks a client draws*).
+
+Every version 7 event, field and rule holds unchanged on version 8. Since
+version 8 the window is {7, 8}, so a version 6 client is refused with
 `error: unsupported_protocol_version` (`client_too_old`).
 
 ## Handshake state machine
@@ -740,10 +763,15 @@ same `blocks`, and have the key only when the reply has one. The rules:
   recommends linked by name. A block adds to the text and never replaces it,
   so a client that draws no blocks, every other channel and the transcript
   search lose nothing.
-- **A client skips a block `type` it does not know.** The types are `places`
-  and `checklists`, and `blocks` holds at most one block of each type.
-- **Additive, so no version bump.** An older client ignores the key (*Absent
-  is absent*, under *Transport*).
+- **A client skips a block `type` it does not know.** The types are
+  `places`, `checklists` and (version 8) `events`, and `blocks` holds at most
+  one block of each type, in no fixed number.
+- **Additive within a type, so no version bump.** An older client ignores the
+  key (*Absent is absent*, under *Transport*). A new block type is not: it
+  comes with the version that brought it, since a client before version 8
+  refused a row with more than two blocks, and a connection below that
+  version is sent only the types its version carries. `places` and
+  `checklists` ride every version; `events` came with version 8.
 - **Places, in first-link order.** A `places` block holds the places a
   `place_search` in the same conversation found in the last 30 minutes that
   the reply's text links, one to ten, in the order the text first links them,
@@ -784,9 +812,48 @@ same `blocks`, and have the key only when the reply has one. The rules:
   now (on version 6, by `checklist_pull`; see *Lists*), and the reply's text
   stays the record of what happened. A scheduled
   job's message carries one the same way.
+- **Events, as the reply left them** (version 8). An `events` block carries
+  every event the turn's event tools (`event_store`, `event_update`,
+  `event_remove`, `event_list`, `reminder_snooze`) returned, one to eight,
+  each once in its last state: the ones the turn changed first, in the order
+  it first changed them, then the rest by date, an event with no time first
+  on its day. A list of more says so in the reply's text. A turn that stores
+  an event and then changes it carries it once, as changed. It is a receipt,
+  never pulled again: a later reply that moves the event carries its own.
+  Each event is the card the engine made of the tool's record:
+
+  | Field | What |
+  |---|---|
+  | `event_id`, `title`, `kind` | As stored. The engine's kinds are `birthday`, `anniversary`, `appointment`, `deadline`, `event`, `follow_up` and `explicit_reminder`; a kind a client does not know draws as a plain event. |
+  | `date`, `time?`, `timezone` | The occurrence the reply is about, in the event's own zone: for a yearly event, the next one. `date` is `YYYY-MM-DD`; `time` is `HH:MM`, only for an event with a time. |
+  | `yearly?` | `true` for a yearly event, absent otherwise. |
+  | `status` | `active`, `completed` or `cancelled`. |
+  | `change?` | What the reply's turn did: `stored`, `changed`, `cancelled` or `snoozed`. Absent for an event the turn only listed, or found already stored or already snoozed to that time. |
+  | `when` | The engine's sentence for the occurrence, as the tool told the model: `Friday, November 13 at 10:30 AM EST`, or for a yearly event `every November 16 — next on Monday, November 16`. |
+  | `reminds?`, `rings?` | The reminder plan and where it rings, in the engine's words: `1 day and 1 hour before`, `1 week before and on the day, at 9:00 AM`, `at the time`; `on Telegram`, `on this computer`. Both absent when no reminder is left (a cancelled or past event, one stored with none). For a snooze, `reminds` says when it rings next: `again on Thursday, November 12 at 3:40 PM EST`. |
+
+  The engine writes every sentence about the event; a client draws a date
+  tile from `date` and writes none of its own. An event's card is under 400
+  bytes for an ordinary title (a title holds at most 240 bytes).
+
+### Which blocks a client draws
+
+A block is drawn by one of two rules, and the daemon tells the model a block
+is drawn only where its rule holds, so it never says a card is drawn that a
+client is not sent:
+
+- **A snapshot of tool records** (`places`, `events`) is drawn from the
+  protocol version that brought it: `places` on every version, `events` from
+  version 8. A turn a version 8 connection carries is told its events are
+  drawn under the reply.
+- **A kept kind** (`checklists`, the owner's lists) is drawn by a connection
+  that pulled its index (`checklists_pull`, see *Lists*), and is sent to every
+  connection whose version carries its block, since its block names the ids
+  a client pulls to draw it.
 
 The phones' `row` carries the history message whole, so it carries `blocks`
-too, and a phone app may ignore them.
+too, under the same rules by the phone session's own version (the mobile
+protocol's *Timeline shapes*); a phone app may ignore them.
 
 ## After a move: the desktop's tunnel
 

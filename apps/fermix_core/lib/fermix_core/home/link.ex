@@ -175,7 +175,9 @@ defmodule FermixCore.Home.Link do
   @doc """
   Primary role: every computer's device row (M97 §3.2), with whether its
   session is up. Where the device store or the desktop peers are not
-  running, the rows are not known: `{:error, :not_running}`, never none.
+  running, the rows are not known: `{:error, :not_running}`, never none, and
+  `{:error, :not_started}` before the tree that holds them has started in
+  this engine, as at its boot.
   """
   @callback computer_rows() :: {:ok, [computer_row()]} | {:error, term()}
 

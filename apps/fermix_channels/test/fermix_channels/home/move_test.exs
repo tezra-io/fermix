@@ -237,7 +237,9 @@ defmodule FermixChannels.Home.MoveTest do
     assert Moved.read(source) == :absent
     assert {:ok, %{role: :primary}} = Role.configured(source)
     assert {:ok, %{"phase" => "undoing", "sentence" => sentence}} = Move.read_phase(source)
-    assert sentence =~ "north-box refused the move (move_mismatch"
+    # The server's words are a protocol's, so the note says it plainly and
+    # the log keeps them.
+    assert sentence == "north-box turned the move down, so nothing moved. Fermix's log says why."
     assert :ok = Move.finish_at_boot(source, :primary)
     assert {:ok, %{"phase" => "aborted", "sentence" => ^sentence}} = Move.read_phase(source)
     refute File.exists?(request_file)

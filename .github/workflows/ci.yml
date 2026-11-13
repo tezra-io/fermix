@@ -301,6 +301,8 @@ jobs:
         run: for t in scripts/release/test_*.py; do echo "== $t =="; uv run "$t" || exit 1; done
       - name: Run hermetic CI script tests
         run: for t in scripts/ci/test_*.py; do echo "== $t =="; uv run "$t" || exit 1; done
+      - name: Run hermetic dev script tests
+        run: for t in scripts/dev/test_*.py; do echo "== $t =="; uv run "$t" || exit 1; done
 
   disclaim-shim:
     # The macOS disclaim exec shim ships inside release payloads, cross-compiled

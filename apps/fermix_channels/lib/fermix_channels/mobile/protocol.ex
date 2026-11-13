@@ -32,10 +32,10 @@ defmodule FermixChannels.Mobile.Protocol do
   alias FermixCore.Companion.Protocol, as: ChatProtocol
   alias FermixCore.Text
 
-  @protocol_version 2
-  # Protocol 1 shipped in daemons but never had a client, so the window is the
-  # current version alone (M51 D1), not N/N-1.
-  @min_supported_version 2
+  @protocol_version 3
+  # Protocol 1 shipped in daemons but never had a client, so protocol 2's
+  # window was itself alone (M51 D1); from protocol 3 on it is N/N-1.
+  @min_supported_version @protocol_version - 1
   @max_header_bytes 4_096
   @max_raw_chunk_bytes 60 * 1_024
   @max_plaintext_bytes 65_535 - 16
@@ -123,6 +123,19 @@ defmodule FermixChannels.Mobile.Protocol do
   @doc "Inclusive `{min, max}` protocol versions accepted by this daemon."
   @spec supported_version_range() :: {pos_integer(), pos_integer()}
   def supported_version_range, do: {@min_supported_version, @protocol_version}
+
+  @doc """
+  The version this engine speaks as the initiator (`Mobile.Rail`: a
+  computer's session to its server, an enrollment, a move): the oldest this
+  engine serves. Nothing a later version brought rides an engine's own
+  session (protocol 3's blocks reach a phone's rows, and a desktop is sent
+  no row), so the oldest is the one an older server still serves: a newer
+  computer reaches a server one version behind it, as the server's own
+  window lets an older computer reach it. This wire names no oldest version
+  in its hello, so the initiator speaks that one.
+  """
+  @spec initiator_version() :: pos_integer()
+  def initiator_version, do: @min_supported_version
 
   @doc "Ordered client event catalog."
   @spec client_events() :: [String.t()]
@@ -218,7 +231,7 @@ defmodule FermixChannels.Mobile.Protocol do
   def decode_server_frame(frame) when is_binary(frame) do
     with {:ok, header, bytes} <- split_frame(frame),
          {:ok, envelope} <- decode_envelope(header, @server_events),
-         :ok <- validate_server_event(envelope.type, envelope.payload),
+         :ok <- validate_server_event(envelope.type, envelope.payload, envelope.version),
          :ok <- validate_binary(:server, envelope.type, bytes, @raw_server_events) do
       {:ok, Map.put(envelope, :bytes, bytes)}
     end
@@ -243,7 +256,7 @@ defmodule FermixChannels.Mobile.Protocol do
          :ok <- valid_seq(seq),
          payload = Map.delete(decoded, "t"),
          :ok <- reject_reserved(payload),
-         :ok <- validate_server_event(type, payload),
+         :ok <- validate_server_event(type, payload, version),
          :ok <- validate_binary(:server, type, <<>>, @raw_server_events) do
       {:ok, %{version: version, type: type, seq: seq, payload: payload, bytes: <<>>}}
     end
@@ -297,7 +310,7 @@ defmodule FermixChannels.Mobile.Protocol do
          :ok <- valid_seq(seq),
          {:ok, payload} <- stringify_top_level(payload),
          :ok <- reject_reserved(payload),
-         :ok <- validate_server_event(type, payload),
+         :ok <- validate_server_event(type, payload, version),
          :ok <- validate_binary(:server, type, bytes, @raw_server_events) do
       {:ok, payload}
     end
@@ -322,7 +335,9 @@ defmodule FermixChannels.Mobile.Protocol do
     end
   end
 
-  defp validate_server_event(type, payload) do
+  # A `hello_ack` is read against the version its frame carries, which the
+  # window it names must hold: the initiator reads a server's own window.
+  defp validate_server_event(type, payload, version) do
     cond do
       type in ChatProtocol.shared_server_events() ->
         ChatProtocol.validate_server_payload(type, payload)
@@ -331,11 +346,21 @@ defmodule FermixChannels.Mobile.Protocol do
         PeerEvents.validate(:server, type, payload)
 
       true ->
-        with :ok <- require_fields(type, payload, @server_required) do
-          validate_server_payload(type, payload)
+        with :ok <- require_fields(type, payload, @server_required),
+             :ok <- validate_server_payload(type, payload) do
+          window_holds(type, payload, version)
         end
     end
   end
+
+  defp window_holds("hello_ack", %{"min_version" => min, "max_version" => max}, version)
+       when min <= version and version <= max,
+       do: :ok
+
+  defp window_holds("hello_ack", _payload, _version),
+    do: {:error, {:invalid_field, "version_range"}}
+
+  defp window_holds(_type, _payload, _version), do: :ok
 
   defp split_frame(frame) when byte_size(frame) > @max_plaintext_bytes,
     do: {:error, {:frame_too_large, byte_size(frame), @max_plaintext_bytes}}
@@ -857,11 +882,10 @@ defmodule FermixChannels.Mobile.Protocol do
 
   defp push_services(_services, field), do: {:error, {:invalid_field, field}}
 
-  defp valid_version_range(%{
-         "min_version" => @min_supported_version,
-         "max_version" => @protocol_version
-       }),
-       do: :ok
+  # A server's window, whichever server: the frame's version must lie in it
+  # (`window_holds/3`), so an initiator reads an older or newer server's.
+  defp valid_version_range(%{"min_version" => min, "max_version" => max}) when min <= max,
+    do: :ok
 
   defp valid_version_range(_payload), do: {:error, {:invalid_field, "version_range"}}
 

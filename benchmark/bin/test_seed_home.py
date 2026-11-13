@@ -648,7 +648,9 @@ def _assert_record(record, row):
     ids = [offer["id"] for offer in record["offers"]]
     assert len(ids) == len(set(ids)) and set(ids) <= _OFFER_IDS
     for offer in record["offers"]:
-        assert set(offer) <= {"id", "state", "sentence", "detail"}
+        assert set(offer) <= {"id", "state", "sentence", "detail", "roots", "home"}
+        assert ("roots" not in offer) or (offer["id"] == "files" and offer["state"] == "on"
+                                          and all(r.startswith("/") for r in offer["roots"]))
         assert offer["state"] in _OFFER_STATES
         assert ("sentence" in offer) == (offer["state"] != "on"), offer
         assert offer.get("sentence", "x") and offer.get("detail", "x")
@@ -700,11 +702,15 @@ def test_the_computers_fixture_writes_two_away_computers_the_store_reads(tmp_pat
     assert {oid for oid, offer in mac.items() if offer["state"] == "on"} == {
         "files", "shell", "browser", "computer_use", "imessage", "history"}
     assert mac["shell"]["detail"] == "standard"
+    # The folders files and commands reach there (M97 F5): never Downloads.
+    assert mac["files"]["roots"] == ["/Users/avery/.fermix/workspace", "/Users/avery/Projects"]
+    assert mac["files"]["home"] == "/Users/avery"
     # loft Linux: files, a strict shell and the browser; Messages and history cannot run.
     linux = _offers(records["loft Linux"])
     assert {oid for oid, offer in linux.items() if offer["state"] == "on"} == {
         "files", "shell", "browser"}
     assert linux["shell"]["detail"] == "strict"
+    assert linux["files"]["roots"] == ["/home/rowan/.fermix/workspace"]
     assert linux["imessage"] == {"id": "imessage", "state": "unavailable",
                                  "sentence": "Messages runs only on a Mac."}
     assert linux["history"] == {"id": "history", "state": "unavailable",

@@ -60,17 +60,21 @@ never parses the sentence.
 `fermix service run` is the systemd vendor unit's launch entry point. It is not
 a machine-mode verb: it becomes the daemon and never returns an envelope.
 
-`fermix computer join CODE` joins this computer to a Fermix that already
-runs, with the code Add a computer opened there. It is not a machine-mode
-verb either: it runs with Fermix stopped here and no engine tree, writes
-this computer's key to the secret store and its join to the home, and
-prints one sentence. The next start of Fermix dials the server and shows six
-digits, and the owner adds this computer on the server only if the same
-digits show there. Exit `0` done; `1` refused, with one sentence on stderr
-after `fermix computer join: ` (a build without Always On, as `fermix
-always-on` refuses; Fermix runs here; a home of its own; a code that is not
-a computer's or expired; a secret store that cannot keep the key), and
-nothing is left behind; `2` a usage error.
+`fermix computer join` joins this computer to a Fermix that already runs,
+with the code Add a computer opened there. It is not a machine-mode verb
+either: it runs with Fermix stopped here and no engine tree, writes this
+computer's key to the secret store and its join to the home, and prints one
+sentence. The code is read from stdin, never from argv: on a terminal it is
+asked for with echo off (the prompt on stderr), and from a pipe or a file it
+is the first line. It is asked for only once the verb found Always On
+offered and Fermix stopped. The next start of Fermix dials the server and
+shows six digits, and the owner adds this computer on the server only if the
+same digits show there. Exit `0` done; `1` refused, with one sentence on
+stderr after `fermix computer join: ` (a build without Always On, as `fermix
+always-on` refuses; Fermix runs here; no code read; a home of its own; a
+code that is not a computer's or expired; a secret store that cannot keep
+the key), and nothing is left behind; `2` a usage error, a code given as an
+argument among them.
 
 ## The action result
 

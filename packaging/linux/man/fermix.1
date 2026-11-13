@@ -181,10 +181,12 @@ argument. It needs Fermix running. A release build has no Always
 On yet: there it says "Always On is not in this release of Fermix yet."
 .TP
 .B fermix computer
-.RI "join " CODE
+.B join
 Join this computer to a Fermix that already runs, with the code Add a
 computer opened there (\fBfermix always\-on add\-computer\fR on the
-server). Nothing moves to this computer. Run it with Fermix stopped here,
+server). It asks for the code without showing it, or reads the first line
+piped in; the code is never an argument, where other programs could read
+it. Nothing moves to this computer. Run it with Fermix stopped here,
 then start Fermix: it shows six digits, and you add this computer on a
 computer already in your Fermix only if the same digits show there. A
 computer that already has a Fermix of its own is refused, and nothing is

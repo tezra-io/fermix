@@ -93,9 +93,24 @@ defmodule Fermix.CLI.Doctor.Checks do
   @harness_run_tools [{"codex", "codex_run"}, {"claude", "claude_code_run"}]
   @bytes_per_gb 1_073_741_824
 
-  @spec readiness() :: result()
-  def readiness do
-    report = FermixCore.Readiness.report()
+  @doc """
+  Readiness as the engine judges it for the role this home is configured
+  for (`Home.Role.configured/1`): doctor runs with no engine tree, so on a
+  computer that joined a home it judges only what a device needs, as that
+  computer's own `setup.state` does (M97 F8). A home whose role cannot be
+  read fails the row with why. `:home` is the tests' seam.
+  """
+  @spec readiness(keyword()) :: result()
+  def readiness(opts \\ []) when is_list(opts) do
+    home = Keyword.get_lazy(opts, :home, &ConfigStore.fermix_home/0)
+
+    case Role.configured(home) do
+      {:ok, %{role: role}} -> readiness_row(FermixCore.Readiness.report(role: role))
+      {:error, reason} -> fail("readiness", Role.error_sentence(reason))
+    end
+  end
+
+  defp readiness_row(report) do
     gating = FermixCore.Readiness.gating_failures(report.failures)
     advisory = report.failures -- gating
 

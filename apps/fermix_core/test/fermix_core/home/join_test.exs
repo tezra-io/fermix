@@ -14,11 +14,13 @@ defmodule FermixCore.Home.JoinTest do
   alias FermixCore.Home.Leave
   alias FermixCore.Home.Moved
   alias FermixCore.Home.Role
+  alias FermixCore.Memory.Repo
   alias FermixCore.Setup.ConfigStore
   alias FermixTestSupport.SafeRm
 
   @now ~U[2031-05-04 10:00:00Z]
   @gateway :binary.copy(<<0x3C>>, 32)
+  @style "Answer in a few sentences, and go longer when the question needs it."
 
   setup do
     tmp = SafeRm.make_tmp_dir!("home_join")
@@ -58,9 +60,12 @@ defmodule FermixCore.Home.JoinTest do
     # "A home of its own": anything a person made here refuses it by name.
     test "a computer with a home of its own is refused by name, and nothing is written", ctx do
       cases = [
-        {"messages", &memory!(&1, "messages")},
-        {"memories", &memory!(&1, "memories")},
-        {"scheduled jobs", &memory!(&1, "scheduled_jobs")},
+        {"messages", &memory!(&1, :message)},
+        {"memories", &memory!(&1, :fact)},
+        {"memories", &memory!(&1, :renamed)},
+        {"memories", &memory!(&1, :forgotten)},
+        {"scheduled jobs", &memory!(&1, :job)},
+        {"computer history", &memory!(&1, :note)},
         {"a paired phone or computer", &paired!/1},
         {"a home that moved to a server", &moved!/1},
         {"a link to a server", &linked!/1}
@@ -90,6 +95,32 @@ defmodule FermixCore.Home.JoinTest do
       assert :ok = Join.start(ctx.home, code(), ctx.opts)
       assert File.regular?(Path.join(ctx.home, "memory.db"))
       assert File.regular?(Path.join(ctx.home, "mobile_epoch_note"))
+    end
+
+    # M97 §3.1: a first start, and every save of the settings, writes the
+    # owner's name, time zone and style and the agent's name into memory as
+    # well. Memories that only repeat the settings are no home of their own:
+    # a first start on a headless box (its name from the account), a Mac
+    # whose owner answered About you, and a machine that gave no name.
+    test "memories that only repeat the settings are no home of its own, and stay", ctx do
+      first_start =
+        {%{user_name: "Rowan Vale", timezone: "Etc/UTC", communication_style: @style}, nil}
+
+      about_you =
+        {%{user_name: "Avery Quinn", timezone: "America/Chicago", communication_style: "Brief."},
+         "Juno"}
+
+      no_name = {%{timezone: "Europe/Lisbon", communication_style: @style}, nil}
+
+      for {{personalization, agent_name}, n} <-
+            Enum.with_index([first_start, about_you, no_name]) do
+        home = home!(ctx.tmp, "settings-#{n}")
+        settings!(home, personalization, agent_name)
+        memory!(home, nil, setting_rows(personalization, agent_name))
+
+        assert :ok = Join.start(home, code(), ctx.opts), inspect(personalization)
+        assert memory_count(home) == 4
+      end
     end
 
     test "a code that is not a computer's, or expired, is refused before anything is made", ctx do
@@ -396,21 +427,138 @@ defmodule FermixCore.Home.JoinTest do
     }
   end
 
-  # A memory.db with the three tables, and a row in `table` (none when nil).
-  defp memory!(home, table) do
-    {:ok, conn} = Sqlite3.open(Path.join(home, "memory.db"))
+  # A memory.db as the engine makes it (its own repo migrates it, then
+  # stops), holding the memories a first start's seed writes from settings
+  # that name nothing (`settings`, when given, in their place), plus one
+  # thing a person made here (none when nil).
+  defp memory!(home, made, settings \\ nil) do
+    db = Path.join(home, "memory.db")
+    name = :"join_repo_#{System.unique_integer([:positive])}"
+    start_supervised!({Repo, name: name, enabled: true, database_path: db}, id: name)
+    :ok = stop_supervised!(name)
+    seeded = settings || setting_rows(%{}, nil)
 
-    :ok =
-      Sqlite3.execute(conn, """
-      CREATE TABLE messages (id INTEGER PRIMARY KEY, content TEXT);
-      CREATE TABLE memories (id INTEGER PRIMARY KEY, value TEXT);
-      CREATE TABLE scheduled_jobs (id TEXT PRIMARY KEY, name TEXT);
-      """)
-
-    if table,
-      do: :ok = Sqlite3.execute(conn, "INSERT INTO #{table} VALUES ('1', 'an invented day')")
-
+    {:ok, conn} = Sqlite3.open(db)
+    for row <- seeded, do: :ok = insert!(conn, "memories", row)
+    if made, do: :ok = made!(conn, made)
     :ok = Sqlite3.close(conn)
+  end
+
+  # The four rows `Prompt.SetupSeeder` writes for these settings, as the
+  # first start on the test box wrote them (M97 finding F1).
+  defp setting_rows(personalization, agent_name) do
+    [
+      {"owner", "identity", "name", Map.get(personalization, :user_name, "there"), "user_md"},
+      {"owner", "identity", "timezone", Map.get(personalization, :timezone, "not set"),
+       "user_md"},
+      {"owner", "preference", "communication style",
+       Map.get(personalization, :communication_style, "neutral and direct"), "user_md"},
+      {"agent", "identity", "agent name", agent_name || "fermix", "memory_md"}
+    ]
+    |> Enum.map(fn {scope, category, key, value, target} ->
+      %{
+        "scope_type" => scope,
+        "scope_id" => if(scope == "owner", do: "default", else: "main"),
+        "category" => category,
+        "key" => key,
+        "value" => value,
+        "promote_target" => target
+      }
+    end)
+  end
+
+  defp made!(conn, :message),
+    do:
+      insert!(conn, "messages", %{
+        "channel" => "telegram",
+        "chat_id" => "4107",
+        "sender" => "owner",
+        "role" => "user",
+        "content" => "Is the allotment gate open on Sundays?"
+      })
+
+  # A fact a conversation saved beside the settings' rows.
+  defp made!(conn, :fact),
+    do:
+      insert!(conn, "memories", %{
+        "scope_type" => "owner",
+        "scope_id" => "default",
+        "category" => "fact",
+        "key" => "allotment gate code",
+        "value" => "4417",
+        "promote_target" => "user_md"
+      })
+
+  # A conversation saved the owner's name over the one the settings hold.
+  defp made!(conn, :renamed),
+    do:
+      Sqlite3.execute(
+        conn,
+        "UPDATE memories SET value = 'Ro' WHERE scope_type = 'owner' AND key = 'name'"
+      )
+
+  # A conversation archived one of them.
+  defp made!(conn, :forgotten),
+    do:
+      Sqlite3.execute(
+        conn,
+        "UPDATE memories SET archived_at = '2031-05-03T09:00:00Z' WHERE key = 'timezone'"
+      )
+
+  defp made!(conn, :job),
+    do:
+      insert!(conn, "scheduled_jobs", %{
+        "id" => "job-seed-order",
+        "name" => "Seed order",
+        "schedule_kind" => "cron",
+        "schedule_expr" => "0 9 * * 1",
+        "timezone" => "America/Chicago",
+        "task_prompt" => "Remind me to order the tomato seeds.",
+        "memory_source_id" => "source-seed-order",
+        "created_by_trust" => "operator"
+      })
+
+  defp made!(conn, :note),
+    do:
+      insert!(conn, "computer_history_memories", %{
+        "created_at" => 1_946_000_000,
+        "provenance_from_ts" => 1_945_990_000,
+        "provenance_to_ts" => 1_945_994_000,
+        "summary" => "Drafted the reply to the Juniper Street lease renewal.",
+        "model" => "local"
+      })
+
+  defp insert!(conn, table, row) do
+    {columns, values} = Enum.unzip(row)
+    marks = Enum.map_join(values, ", ", fn _value -> "?" end)
+    sql = "INSERT INTO #{table} (#{Enum.join(columns, ", ")}) VALUES (#{marks})"
+    {:ok, statement} = Sqlite3.prepare(conn, sql)
+    :ok = Sqlite3.bind(statement, values)
+    :done = Sqlite3.step(conn, statement)
+    :ok = Sqlite3.release(conn, statement)
+  end
+
+  defp memory_count(home) do
+    {:ok, conn} = Sqlite3.open(Path.join(home, "memory.db"), mode: :readonly)
+    {:ok, statement} = Sqlite3.prepare(conn, "SELECT count(*) FROM memories")
+    {:row, [count]} = Sqlite3.step(conn, statement)
+    :ok = Sqlite3.release(conn, statement)
+    :ok = Sqlite3.close(conn)
+    count
+  end
+
+  # The settings the seed's rows repeat, as the settings file holds them.
+  defp settings!(home, personalization, agent_name) do
+    lines =
+      for {key, value} <- personalization, do: ~s(#{key} = "#{value}"\n)
+
+    agent = if agent_name, do: ~s(\n[fermix_core.agent]\nname = "#{agent_name}"\n), else: ""
+
+    File.write!(
+      Path.join(home, "config.toml"),
+      "\n[fermix_core.personalization]\n#{lines}#{agent}",
+      [:append]
+    )
   end
 
   defp paired!(home) do

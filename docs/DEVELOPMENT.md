@@ -91,7 +91,11 @@ builds always carry `standalone`, so nothing needs reverting. The management wir
 contract (frames, methods, fixtures) is `apps/fermix_core/priv/management/`.
 
 To exercise the management plane without the macOS app, `scripts/dev/management_request.py`
-sends one v1 request and prints the reply:
+negotiates the protocol version as the apps do, each request on its own connection: a
+`hello` at version 1 learns the daemon's window (from `result.protocol`, or from a
+`client_too_old` refusal's `details`), and the request goes at the window's
+`maximum_version`, so a method whose minimum version is 2 is served. It prints only the
+reply to that request:
 
 ```bash
 FERMIX_HOME=$HOME/.fermix-apptest uv run scripts/dev/management_request.py hello
