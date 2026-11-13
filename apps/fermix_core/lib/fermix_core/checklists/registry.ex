@@ -6,8 +6,8 @@ defmodule FermixCore.Checklists.Registry do
 
   It owns:
 
-    * **the gate** — `Checklists.Access`: the owner's private turn or voice
-      call, or a scheduled job whose allowed tools name the tool;
+    * **the gate** — `Kept.Access`: the owner's private turn or voice call,
+      or a scheduled job whose allowed tools name the tool;
     * **the shape of a call** — every change and op is checked here, in the
       caller, before the store is asked: at most 8 lists and 100 ops a call,
       each text within its bound and on one line, a `replace`'s markdown read
@@ -33,7 +33,9 @@ defmodule FermixCore.Checklists.Registry do
   alias FermixCore.Checklists.Parse
   alias FermixCore.Checklists.Render
   alias FermixCore.Checklists.Telemetry
-  alias FermixCore.Memory.Config, as: MemoryConfig
+  alias FermixCore.Kept.Access, as: KeptAccess
+  alias FermixCore.Kept.Ids
+  alias FermixCore.Kept.Notify, as: KeptNotify
   alias FermixCore.Memory.Repo
 
   @max_changes 8
@@ -48,8 +50,9 @@ defmodule FermixCore.Checklists.Registry do
   # `clear_done` and `restore`.
   @device_ops ~w(create add check uncheck edit move section remove folder rename remove_list
                  clear_done restore)
-  @list_id ~r/\Ack_[0-9a-z]{10}\z/
-  @row_id ~r/\Aci_[0-9a-z]{10}\z/
+  # The ids a device names, by their prefix (`Kept.Ids`).
+  @list_prefix "ck_"
+  @row_prefix "ci_"
   # The id fields a device's op carries, by the name each is refused under.
   @id_fields %{
     "list_id" => :list_id,
@@ -160,7 +163,11 @@ defmodule FermixCore.Checklists.Registry do
   end
 
   defp edit_context(context, opts) do
-    %{now: now(opts), outside?: Access.read_outside?(context), made_via: Access.made_via(context)}
+    %{
+      now: now(opts),
+      outside?: KeptAccess.read_outside?(context),
+      made_via: KeptAccess.made_via(context)
+    }
   end
 
   defp edit_answer(summary) do
@@ -183,7 +190,8 @@ defmodule FermixCore.Checklists.Registry do
   """
   @spec device_index(atom() | nil, keyword()) :: {:ok, [map()]} | {:error, term()}
   def device_index(caller, opts \\ []) when is_list(opts) do
-    with :ok <- device_gate(caller), do: store(device_context(), opts, :index)
+    with :ok <- KeptAccess.device_gate(caller),
+         do: store(KeptAccess.device_context(), opts, :index)
   end
 
   @doc """
@@ -195,9 +203,9 @@ defmodule FermixCore.Checklists.Registry do
           {:ok, map()} | {:error, term()}
   def device_list(list_id, removed?, caller, opts \\ [])
       when is_binary(list_id) and is_boolean(removed?) and is_list(opts) do
-    with :ok <- device_gate(caller),
-         :ok <- matches(list_id, @list_id, :list_id),
-         do: store(device_context(), opts, {:list_by_id, list_id, removed?})
+    with :ok <- KeptAccess.device_gate(caller),
+         :ok <- matches(list_id, @list_prefix, :list_id),
+         do: store(KeptAccess.device_context(), opts, {:list_by_id, list_id, removed?})
   end
 
   @doc """
@@ -215,12 +223,12 @@ defmodule FermixCore.Checklists.Registry do
   def device_edit(%{"client_msg_id" => client_msg_id} = params, caller, opts \\ [])
       when is_binary(client_msg_id) and is_list(opts) do
     start = System.monotonic_time(:microsecond)
-    context = device_context()
-    made_via = device_made_via!(Keyword.get(opts, :made_via, "mac"))
+    context = KeptAccess.device_context()
+    made_via = KeptAccess.device_made_via!(Keyword.get(opts, :made_via, "mac"))
     edit = %{now: now(opts), outside?: false, made_via: made_via}
 
     result =
-      with :ok <- device_gate(caller),
+      with :ok <- KeptAccess.device_gate(caller),
            {:ok, change} <- device_change(params),
            {:ok, outcome} <- store(context, opts, {:device_edit, client_msg_id, [change], edit}) do
         device_outcome(outcome, context, {client_msg_id, opts})
@@ -230,8 +238,6 @@ defmodule FermixCore.Checklists.Registry do
     emit_device_edit(result, made_via, start)
     result
   end
-
-  defp device_made_via!(made_via) when made_via in ["mac", "phone"], do: made_via
 
   # A device sends one op, so its refusal is the op's own sentence, without
   # the place in a call the model is told, and names the fields a device
@@ -258,13 +264,6 @@ defmodule FermixCore.Checklists.Registry do
   defp device_outcome({:duplicate, record}, _context, _id_and_opts),
     do: {:ok, Map.put(record, :duplicate, true)}
 
-  defp device_gate(caller) do
-    if Access.device_owner?(caller), do: :ok, else: {:error, :not_owner}
-  end
-
-  defp device_context,
-    do: %{memory_owner_id: MemoryConfig.owner_id(), memory_agent_id: MemoryConfig.agent_id()}
-
   # A device's op, as `Checklists.Ops` takes it: rows named `{:id, row_id}`.
   defp device_change(%{"op" => %{"op" => "create"} = op}) do
     with {:ok, title} <- required_text(op, "title", :title, @title_max),
@@ -273,7 +272,7 @@ defmodule FermixCore.Checklists.Registry do
   end
 
   defp device_change(%{"op" => %{"op" => name} = op} = params) when name in @device_ops do
-    with {:ok, list_id} <- required_id(params, "list_id", @list_id),
+    with {:ok, list_id} <- required_id(params, "list_id", @list_prefix),
          {:ok, normalized} <- device_op(String.to_existing_atom(name), op),
          do: {:ok, %{list: list_id, ops: [normalized]}}
   end
@@ -289,11 +288,12 @@ defmodule FermixCore.Checklists.Registry do
   end
 
   defp device_op(row_op, op) when row_op in [:check, :uncheck, :remove] do
-    with {:ok, row} <- required_id(op, "row_id", @row_id), do: {:ok, %{op: row_op, n: {:id, row}}}
+    with {:ok, row} <- required_id(op, "row_id", @row_prefix),
+         do: {:ok, %{op: row_op, n: {:id, row}}}
   end
 
   defp device_op(:edit, op) do
-    with {:ok, row} <- required_id(op, "row_id", @row_id),
+    with {:ok, row} <- required_id(op, "row_id", @row_prefix),
          {:ok, text} <- optional_text(op, "text", :text, @text_max),
          {:ok, note} <- note(op, :absent_is_keep),
          :ok <- something_to_edit(text, note),
@@ -301,20 +301,20 @@ defmodule FermixCore.Checklists.Registry do
   end
 
   defp device_op(:move, op) do
-    with {:ok, row} <- required_id(op, "row_id", @row_id),
+    with {:ok, row} <- required_id(op, "row_id", @row_prefix),
          {:ok, place} <- device_place(op),
-         {:ok, to_list} <- optional_id(op, "to_list_id", @list_id),
+         {:ok, to_list} <- optional_id(op, "to_list_id", @list_prefix),
          do: {:ok, Map.merge(%{op: :move, n: {:id, row}, to_list: to_list}, place)}
   end
 
   defp device_op(:section, op) do
     with {:ok, text} <- required_text(op, "text", :text, @text_max),
-         {:ok, after_row} <- optional_id(op, "after_id", @row_id),
+         {:ok, after_row} <- optional_id(op, "after_id", @row_prefix),
          do: {:ok, %{op: :section, text: text, after: row_ref(after_row)}}
   end
 
   defp device_op(:restore, op) do
-    with {:ok, row} <- optional_id(op, "row_id", @row_id),
+    with {:ok, row} <- optional_id(op, "row_id", @row_prefix),
          {:ok, title} <- optional_text(op, "title", :title, @title_max),
          do: {:ok, %{op: :restore, row: row_ref(row), title: title}}
   end
@@ -326,8 +326,8 @@ defmodule FermixCore.Checklists.Registry do
   defp device_op(name, op) when name in [:folder, :rename], do: op_fields(name, op, false)
 
   defp device_place(op) do
-    with {:ok, section} <- optional_id(op, "section_id", @row_id),
-         {:ok, after_row} <- optional_id(op, "after_id", @row_id) do
+    with {:ok, section} <- optional_id(op, "section_id", @row_prefix),
+         {:ok, after_row} <- optional_id(op, "after_id", @row_prefix) do
       if section && after_row,
         do: {:error, :place_conflict},
         else: {:ok, %{section: row_ref(section), after: row_ref(after_row)}}
@@ -337,50 +337,33 @@ defmodule FermixCore.Checklists.Registry do
   defp row_ref(nil), do: nil
   defp row_ref(id), do: {:id, id}
 
-  defp required_id(map, key, pattern) do
+  defp required_id(map, key, prefix) do
     case Map.get(map, key) do
       nil -> {:error, {:missing, Map.fetch!(@id_fields, key)}}
-      id -> with :ok <- matches(id, pattern, Map.fetch!(@id_fields, key)), do: {:ok, id}
+      id -> with :ok <- matches(id, prefix, Map.fetch!(@id_fields, key)), do: {:ok, id}
     end
   end
 
-  defp optional_id(map, key, pattern) do
+  defp optional_id(map, key, prefix) do
     case Map.get(map, key) do
       nil -> {:ok, nil}
-      id -> with :ok <- matches(id, pattern, Map.fetch!(@id_fields, key)), do: {:ok, id}
+      id -> with :ok <- matches(id, prefix, Map.fetch!(@id_fields, key)), do: {:ok, id}
     end
   end
 
-  defp matches(id, pattern, field) when is_binary(id) do
-    if Regex.match?(pattern, id), do: :ok, else: {:error, {:invalid_param, field}}
+  defp matches(id, prefix, field) do
+    if Ids.valid?(id, prefix), do: :ok, else: {:error, {:invalid_param, field}}
   end
 
-  defp matches(_id, _pattern, field), do: {:error, {:invalid_param, field}}
-
-  # Every committed change reaches the owner's devices through the notifier
-  # the channels app registers (`:checklists_notifier`), right after the store
-  # committed it, whoever made it: the lists it changed with their revs, and
-  # what a device's add or create made. With none registered nobody listens.
-  # `opts[:notifier]` is a test's own.
+  # Every committed change reaches the owner's devices right after the store
+  # committed it, whoever made it (`Kept.Notify`): the lists it changed with
+  # their revs, and what a device's add or create made.
   defp announce(context, applied, made, opts) do
     lists =
       for %{changed?: true} = entry <- applied.summary,
-          do: %{list_id: entry.list_id, rev: entry.rev, made: Map.get(made, entry.list_id, %{})}
+          do: %{id: entry.list_id, rev: entry.rev, made: Map.get(made, entry.list_id, %{})}
 
-    case {lists, notifier(opts)} do
-      {[], _notifier} -> :ok
-      {_lists, nil} -> :ok
-      {lists, notifier} -> notifier.(%{owner_id: owner_id(context), lists: lists})
-    end
-  end
-
-  defp notifier(opts) do
-    Keyword.get_lazy(opts, :notifier, fn ->
-      case Application.get_env(:fermix_core, :checklists_notifier) do
-        nil -> nil
-        module -> &module.changed/1
-      end
-    end)
+    KeptNotify.announce(:lists, owner_id(context), lists, opts)
   end
 
   @doc """
@@ -427,7 +410,7 @@ defmodule FermixCore.Checklists.Registry do
   end
 
   defp gate(context, tool) do
-    if Access.permitted?(context, tool), do: :ok, else: {:error, {:not_permitted, tool}}
+    if KeptAccess.permitted?(context, tool), do: :ok, else: {:error, {:not_permitted, tool}}
   end
 
   # --- the shape of a call ---------------------------------------------------
@@ -741,7 +724,7 @@ defmodule FermixCore.Checklists.Registry do
         scope: telemetry_scope(scope),
         lists: lists,
         outcome: outcome,
-        made_via: Access.made_via(context),
+        made_via: KeptAccess.made_via(context),
         error_code: code(result)
       },
       elapsed(start)
@@ -764,7 +747,7 @@ defmodule FermixCore.Checklists.Registry do
         lists: lists,
         ops: params |> Map.get("changes") |> List.wrap() |> op_count(),
         outcome: outcome,
-        made_via: Access.made_via(context),
+        made_via: KeptAccess.made_via(context),
         error_code: code(result)
       },
       elapsed(start)

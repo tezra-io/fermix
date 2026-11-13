@@ -945,19 +945,30 @@ lists a turn touched for its reply's `checklists` block.
 The Mac reads and changes the lists over its chat socket (companion version
 6, M85 §07): `Registry.device_index/2`, `device_list/4` and `device_edit/3`,
 a device's op by row id through the same transaction, deduplicated by its
-`client_msg_id` (`checklist_edits`, migration 57). After every commit, the
-model's, a job's or a device's, the Registry calls the notifier the channels
-app registers in core's app env (`:checklists_notifier`,
+`client_msg_id` (`checklist_edits`, migration 57, its `kind` from 62). After
+every commit, the model's, a job's or a device's, the Registry calls the
+notifier the channels app registers in core's app env (`:checklists_notifier`,
 `Companion.ChecklistNotifier`), which only sends each connection the lists
 that changed; each `Companion.Connection` keeps what it holds
-(`Companion.Checklists`, at most 16 lists) and pushes them whole at the end
-of its own 100 ms window, so lists add no process, timer service or poll.
+(`Companion.Kept`, at most 16 lists) and pushes them whole at the end of its
+own 100 ms window, so lists add no process, timer service or poll.
+
+What is mechanism and not list (M89 §07) is shared by every kind of thing
+Fermix keeps: in core `Kept.Ids` (ids), `Kept.Positions` (position gaps),
+`Kept.Access` (who may call, by tool prefix, and the outside-content frame),
+`Kept.Notify` (the notifier) and `Memory.Repo.KeptSql` (the transaction, the
+30-day cutoff and a device edit's receipt, applied once by its kind and
+`client_msg_id`); in channels `Companion.Kept` (what a connection holds and
+owes of a kind) and the connection's one pull, edit and flush plumbing over a
+`Companion.KeptKind` module, which `Companion.Checklists` is for the lists.
+A kind's ops and their sentences, its SQL, rendering, tools and wire shapes
+stay its own.
 
 Architecture Invariant: one `checklist_edit` call is one transaction: every
 change lands or none does, each list it changed moves its `rev` once, and a
 row's `n` is never reused within its list.
 
-Architecture Invariant: the lists are the owner's. `Checklists.Access` admits
+Architecture Invariant: the lists are the owner's. `Kept.Access` admits
 only the owner's private turn or voice call, and a scheduled job whose allowed
 tools name the tool; the tools are left out of the cached capability catalog,
 which an owner's group chat shares, so a shared turn sees no list tool, line

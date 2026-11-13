@@ -58,7 +58,7 @@ defmodule FermixCore.Capabilities.BuiltinSeeder do
   # reason: `checklist_tools_trust_invariant_test.exs` loops over it and asserts
   # both directions of its membership for every `checklist_*` built-in. Seeded
   # always; every member's `advertise?/1` and `execute/2` ask
-  # `Checklists.Access`, so only the owner's private turn or voice call, or a
+  # `Kept.Access`, so only the owner's private turn or voice call, or a
   # job whose allowed tools name it, is offered one.
   @checklist_tool_modules [
     FermixCore.Tools.ChecklistRead,

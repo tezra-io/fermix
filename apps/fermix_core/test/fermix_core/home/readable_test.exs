@@ -83,7 +83,7 @@ defmodule FermixCore.Home.ReadableTest do
   # add it to the lists below.
   describe "what the current home format was decided for" do
     @decided_format 1
-    @migrations Enum.to_list(1..39) ++ [41, 42, 43] ++ Enum.to_list(45..61)
+    @migrations Enum.to_list(1..39) ++ [41, 42, 43] ++ Enum.to_list(45..62)
     @manifest_keys ~w(created_at engine_version files format home_format home_root host links
                       primary_epoch)
     @entry_keys ~w(bytes mode path sha256)

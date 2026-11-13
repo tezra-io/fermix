@@ -14,12 +14,12 @@ defmodule FermixCore.Memory.Repo.ChecklistsSql do
   # its `removed_at`: rows removed more than 30 days ago are deleted in the
   # same transaction as the next edit of their list, and lists by the boot
   # sweep (`purge_removed_lists/2`). Rows are selected by column name and
-  # decoded by name.
+  # decoded by name. The transaction, the statement helpers, the 30-day cutoff
+  # and a device edit's receipt are what every kept kind shares
+  # (`Memory.Repo.KeptSql`).
 
-  require Logger
-
-  alias Exqlite.Sqlite3
   alias FermixCore.Checklists.Ops
+  alias FermixCore.Memory.Repo.KeptSql
   alias FermixCore.Memory.Repo.TemporalSql
 
   @list_columns ~w(id owner_id agent_id title folder position rev next_n created_at updated_at
@@ -30,7 +30,6 @@ defmodule FermixCore.Memory.Repo.ChecklistsSql do
   @item_select Enum.map_join(@item_columns, ", ", &Atom.to_string/1)
   @item_placeholders Enum.map_join(@item_columns, ", ", fn _column -> "?" end)
   @list_placeholders Enum.map_join(@list_columns, ", ", fn _column -> "?" end)
-  @retention_seconds 30 * 86_400
 
   @schema_sql """
   CREATE TABLE IF NOT EXISTS checklists (
@@ -80,6 +79,7 @@ defmodule FermixCore.Memory.Repo.ChecklistsSql do
   # so one sent again (a reconnect, an outbox's replay) is answered as a
   # duplicate and changes nothing. Kept 30 days, deleted with a later device
   # edit, and naming the list it changed and the id an add or create made.
+  # Frozen as 57 made it: 62 adds the receipt's kind (`KeptSql`).
   @edits_schema_sql """
   CREATE TABLE IF NOT EXISTS checklist_edits (
     owner_id TEXT NOT NULL,
@@ -101,10 +101,6 @@ defmodule FermixCore.Memory.Repo.ChecklistsSql do
   @spec edits_schema_sql() :: String.t()
   def edits_schema_sql, do: @edits_schema_sql
 
-  @doc "How long a removed row or list is kept before it is deleted, in seconds."
-  @spec retention_seconds() :: pos_integer()
-  def retention_seconds, do: @retention_seconds
-
   # --- requests (single-writer process) ------------------------------------
 
   @spec handle(term(), tuple()) :: {:ok, term()} | {:error, term()}
@@ -119,19 +115,19 @@ defmodule FermixCore.Memory.Repo.ChecklistsSql do
     do: read_folder(conn, owner_id, agent_id, folder)
 
   def handle(conn, {:edit, owner_id, agent_id, changes, edit}),
-    do: in_transaction(conn, fn -> edit(conn, owner_id, agent_id, changes, edit) end)
+    do: KeptSql.in_transaction(conn, fn -> edit(conn, owner_id, agent_id, changes, edit) end)
 
   def handle(conn, {:list_by_id, owner_id, agent_id, list_id, removed?}),
     do: list_by_id(conn, owner_id, agent_id, list_id, removed?)
 
   def handle(conn, {:device_edit, owner_id, agent_id, client_msg_id, changes, edit}) do
-    in_transaction(conn, fn ->
+    KeptSql.in_transaction(conn, fn ->
       device_edit(conn, {owner_id, agent_id, client_msg_id}, changes, edit)
     end)
   end
 
   def handle(conn, {:purge_removed_lists, %DateTime{} = now}),
-    do: in_transaction(conn, fn -> purge_removed_lists(conn, now) end)
+    do: KeptSql.in_transaction(conn, fn -> purge_removed_lists(conn, now) end)
 
   def handle(_conn, request), do: {:error, {:unknown_request, request}}
 
@@ -150,7 +146,7 @@ defmodule FermixCore.Memory.Repo.ChecklistsSql do
     ORDER BY c.position, c.id
     """
 
-    with {:ok, rows} <- query_all(conn, sql, [owner_id, agent_id]) do
+    with {:ok, rows} <- KeptSql.query_all(conn, sql, [owner_id, agent_id]) do
       {:ok, Enum.map(rows, &counted_list/1)}
     end
   end
@@ -183,7 +179,7 @@ defmodule FermixCore.Memory.Repo.ChecklistsSql do
     SELECT #{@list_select} FROM checklists WHERE owner_id = ? AND agent_id = ? AND id = ?
     """
 
-    with {:ok, [values]} <- query_all(conn, sql, [owner_id, agent_id, list_id]),
+    with {:ok, [values]} <- KeptSql.query_all(conn, sql, [owner_id, agent_id, list_id]),
          list = decode_list(values),
          {:ok, rows} <- live_rows(conn, list.id),
          {:ok, gone} <- if(removed?, do: removed_rows(conn, list.id), else: {:ok, []}) do
@@ -201,7 +197,7 @@ defmodule FermixCore.Memory.Repo.ChecklistsSql do
     ORDER BY removed_at DESC, n
     """
 
-    with {:ok, rows} <- query_all(conn, sql, [list_id]) do
+    with {:ok, rows} <- KeptSql.query_all(conn, sql, [list_id]) do
       {:ok, Enum.map(rows, &decode_item/1)}
     end
   end
@@ -216,7 +212,7 @@ defmodule FermixCore.Memory.Repo.ChecklistsSql do
     WHERE owner_id = ? AND agent_id = ? AND removed_at IS NOT NULL AND id IN (#{marks})
     """
 
-    with {:ok, rows} <- query_all(conn, sql, [owner_id, agent_id | ids]) do
+    with {:ok, rows} <- KeptSql.query_all(conn, sql, [owner_id, agent_id | ids]) do
       {:ok, Enum.map(rows, &decode_list/1)}
     end
   end
@@ -228,7 +224,7 @@ defmodule FermixCore.Memory.Repo.ChecklistsSql do
     ORDER BY position, id
     """
 
-    with {:ok, rows} <- query_all(conn, sql, [owner_id, agent_id]) do
+    with {:ok, rows} <- KeptSql.query_all(conn, sql, [owner_id, agent_id]) do
       {:ok, Enum.map(rows, &decode_list/1)}
     end
   end
@@ -240,7 +236,7 @@ defmodule FermixCore.Memory.Repo.ChecklistsSql do
     ORDER BY position, n
     """
 
-    with {:ok, rows} <- query_all(conn, sql, [list_id]) do
+    with {:ok, rows} <- KeptSql.query_all(conn, sql, [list_id]) do
       {:ok, Enum.map(rows, &decode_item/1)}
     end
   end
@@ -267,60 +263,31 @@ defmodule FermixCore.Memory.Repo.ChecklistsSql do
   defp removed_of(_conn, _ids, false), do: {:ok, %{}}
   defp removed_of(conn, ids, true), do: rows_of(conn, ids, &removed_rows/2)
 
-  # A device's edit, once: an id already recorded is answered as the duplicate
-  # it is, and changes nothing; a new one is applied and recorded in the same
-  # transaction, and records older than the retention go with it.
-  defp device_edit(conn, key, changes, edit) do
-    case edit_record(conn, key) do
-      {:ok, nil} -> applied_device_edit(conn, key, changes, edit)
-      {:ok, record} -> {:ok, {:duplicate, record}}
-      {:error, reason} -> {:error, reason}
+  # A device's edit, once (`KeptSql.once/4`): an id already recorded is
+  # answered as the duplicate it is, with the list it changed and what it made,
+  # and changes nothing; a new one is applied and recorded in the same
+  # transaction.
+  defp device_edit(conn, {owner_id, agent_id, client_msg_id}, changes, edit) do
+    key = {"checklist", owner_id, agent_id, client_msg_id}
+    apply = fn -> applied_device_edit(conn, owner_id, agent_id, changes, edit) end
+
+    case KeptSql.once(conn, key, edit.now, apply) do
+      {:ok, {:applied, result}} ->
+        {:ok, {:applied, result}}
+
+      {:ok, {:duplicate, receipt}} ->
+        {:ok, {:duplicate, %{list_id: receipt.id, made: receipt.made}}}
+
+      {:error, reason} ->
+        {:error, reason}
     end
   end
 
-  defp applied_device_edit(conn, {owner_id, agent_id, client_msg_id}, changes, edit) do
-    with {:ok, result} <- edit(conn, owner_id, agent_id, changes, edit),
-         [%{list_id: list_id} | _rest] = result.summary,
-         record = %{list_id: list_id, made: result.made},
-         :ok <- insert_edit_record(conn, {owner_id, agent_id, client_msg_id}, record, edit.now),
-         :ok <- purge_edit_records(conn, edit.now) do
-      {:ok, {:applied, result}}
+  defp applied_device_edit(conn, owner_id, agent_id, changes, edit) do
+    with {:ok, result} <- edit(conn, owner_id, agent_id, changes, edit) do
+      [%{list_id: list_id} | _rest] = result.summary
+      {:ok, result, %{id: list_id, made: result.made}}
     end
-  end
-
-  defp edit_record(conn, {owner_id, agent_id, client_msg_id}) do
-    sql = """
-    SELECT checklist_id, made_id FROM checklist_edits
-    WHERE owner_id = ? AND agent_id = ? AND client_msg_id = ?
-    """
-
-    case query_all(conn, sql, [owner_id, agent_id, client_msg_id]) do
-      {:ok, []} -> {:ok, nil}
-      {:ok, [[list_id, made]]} -> {:ok, %{list_id: list_id, made: made}}
-      {:error, reason} -> {:error, reason}
-    end
-  end
-
-  defp insert_edit_record(conn, {owner_id, agent_id, client_msg_id}, record, now) do
-    sql = """
-    INSERT INTO checklist_edits (owner_id, agent_id, client_msg_id, checklist_id, made_id,
-      created_at)
-    VALUES (?, ?, ?, ?, ?, ?)
-    """
-
-    execute(conn, sql, [
-      owner_id,
-      agent_id,
-      client_msg_id,
-      record.list_id,
-      record.made,
-      stamp(now)
-    ])
-  end
-
-  defp purge_edit_records(conn, now) do
-    cutoff = now |> DateTime.add(-@retention_seconds, :second) |> stamp()
-    execute(conn, "DELETE FROM checklist_edits WHERE created_at < ?", [cutoff])
   end
 
   defp rows_of(conn, list_ids, read) do
@@ -374,7 +341,7 @@ defmodule FermixCore.Memory.Repo.ChecklistsSql do
   defp insert_list(conn, owner_id, agent_id, list) do
     values = list |> Map.merge(%{owner_id: owner_id, agent_id: agent_id}) |> list_values()
     sql = "INSERT INTO checklists (#{@list_select}) VALUES (#{@list_placeholders})"
-    execute(conn, sql, values)
+    KeptSql.execute(conn, sql, values)
   end
 
   # A list a call brings back is the one row this update finds removed.
@@ -402,7 +369,7 @@ defmodule FermixCore.Memory.Repo.ChecklistsSql do
 
   defp write_row(conn, %{dirty: :new} = row) do
     sql = "INSERT INTO checklist_items (#{@item_select}) VALUES (#{@item_placeholders})"
-    execute(conn, sql, item_values(row))
+    KeptSql.execute(conn, sql, item_values(row))
   end
 
   defp write_row(conn, row) do
@@ -435,13 +402,11 @@ defmodule FermixCore.Memory.Repo.ChecklistsSql do
   # Rows of `list_id` removed more than the retention ago, deleted with the
   # edit that touches their list (§06): no timer ever purges them.
   defp purge_rows(conn, list_id, now) do
-    cutoff = now |> DateTime.add(-@retention_seconds, :second) |> stamp()
-
-    execute(
+    KeptSql.execute(
       conn,
       "DELETE FROM checklist_items WHERE checklist_id = ? AND removed_at IS NOT NULL " <>
         "AND removed_at < ?",
-      [list_id, cutoff]
+      [list_id, KeptSql.cutoff(now)]
     )
   end
 
@@ -449,14 +414,14 @@ defmodule FermixCore.Memory.Repo.ChecklistsSql do
   # (the foreign key cascades), answering how many lists went. The Repo runs it
   # once when it opens the store: the one sweep lists have, and no timer.
   defp purge_removed_lists(conn, %DateTime{} = now) do
-    cutoff = now |> DateTime.add(-@retention_seconds, :second) |> stamp()
     sql = "DELETE FROM checklists WHERE removed_at IS NOT NULL AND removed_at < ? RETURNING 1"
 
-    with {:ok, rows} <- query_all(conn, sql, [cutoff]), do: {:ok, length(rows)}
+    with {:ok, rows} <- KeptSql.query_all(conn, sql, [KeptSql.cutoff(now)]),
+         do: {:ok, length(rows)}
   end
 
   defp expect_one(conn, sql, params, gone) do
-    case execute_changes(conn, sql, params) do
+    case KeptSql.execute_changes(conn, sql, params) do
       {:ok, 1} -> :ok
       {:ok, _other} -> {:error, gone}
       {:error, reason} -> {:error, reason}
@@ -565,78 +530,4 @@ defmodule FermixCore.Memory.Repo.ChecklistsSql do
 
   defp optional_parse(nil), do: nil
   defp optional_parse(value), do: parse_stamp(value)
-
-  # --- sqlite plumbing -----------------------------------------------------
-
-  # A failed BEGIN leaves no open transaction, so it is the only path that
-  # returns without ROLLBACK; every failure after it rolls back, or the single
-  # writer's one connection is left inside an open BEGIN IMMEDIATE.
-  defp in_transaction(conn, fun) do
-    case execute(conn, "BEGIN IMMEDIATE", []) do
-      :ok -> settle_transaction(conn, fun.())
-      {:error, reason} -> {:error, reason}
-    end
-  end
-
-  defp settle_transaction(conn, {:ok, _value} = result) do
-    case execute(conn, "COMMIT", []) do
-      :ok -> result
-      {:error, reason} -> rollback(conn, reason)
-    end
-  end
-
-  defp settle_transaction(conn, {:error, reason}), do: rollback(conn, reason)
-
-  defp rollback(conn, reason) do
-    case execute(conn, "ROLLBACK", []) do
-      :ok ->
-        {:error, reason}
-
-      {:error, rollback_error} ->
-        Logger.error(
-          "Checklist transaction rollback failed: #{inspect(rollback_error)} " <>
-            "(original error: #{inspect(reason)})"
-        )
-
-        {:error, reason}
-    end
-  end
-
-  defp query_all(conn, sql, params) do
-    with_statement(conn, sql, fn stmt ->
-      with :ok <- bind(stmt, params), do: Sqlite3.fetch_all(conn, stmt)
-    end)
-  end
-
-  defp execute(conn, sql, params) do
-    with_statement(conn, sql, fn stmt ->
-      with :ok <- bind(stmt, params), do: step_result(Sqlite3.step(conn, stmt))
-    end)
-  end
-
-  defp execute_changes(conn, sql, params) do
-    with :ok <- execute(conn, sql, params), do: Sqlite3.changes(conn)
-  end
-
-  defp bind(_stmt, []), do: :ok
-  defp bind(stmt, params), do: Sqlite3.bind(stmt, params)
-
-  defp step_result(:done), do: :ok
-  defp step_result(:busy), do: {:error, :busy}
-  defp step_result({:row, _row}), do: :ok
-  defp step_result({:error, reason}), do: {:error, reason}
-
-  defp with_statement(conn, sql, fun) do
-    case Sqlite3.prepare(conn, sql) do
-      {:ok, stmt} -> release_after(conn, stmt, fun.(stmt))
-      {:error, reason} -> {:error, reason}
-    end
-  end
-
-  defp release_after(conn, stmt, result) do
-    case Sqlite3.release(conn, stmt) do
-      :ok -> result
-      {:error, reason} -> {:error, reason}
-    end
-  end
 end

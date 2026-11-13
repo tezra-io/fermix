@@ -75,7 +75,7 @@ defmodule FermixChannels.Companion.Connection do
   this connection hears every change as the index again; `checklist_pull` is
   answered `checklist`, the whole list (with the rows removed in the last 30
   days when it says `removed`), and the connection holds the list, at most 16
-  (`Companion.Checklists`). A `checklist_edit` runs in the step that read it,
+  (`Companion.Kept`). A `checklist_edit` runs in the step that read it,
   through the same transaction as the model's, answered `accepted` (a
   `client_msg_id` already applied is `duplicate: true` and changes nothing) or
   `error: request_failed` with the engine's sentence; a `create` holds the
@@ -89,6 +89,11 @@ defmodule FermixChannels.Companion.Connection do
   pull. A turn this connection carries says it draws lists
   (`metadata.draws_lists`) once it has pulled the index. `:checklist_opts` are
   the Registry's options (a test's repo and notifier).
+
+  The pull, edit and flush plumbing is one for every kind of thing Fermix
+  keeps (M89 §07): what the connection holds of a kind is `Companion.Kept`,
+  and what the kind is on the wire, its store calls, events and shapes, is
+  its `Companion.KeptKind` module (`Companion.Checklists` for the lists).
 
   ## Blocks under a reply (version 8)
 
@@ -180,6 +185,7 @@ defmodule FermixChannels.Companion.Connection do
   alias FermixChannels.Companion.Checklists
   alias FermixChannels.Companion.Fanout
   alias FermixChannels.Companion.Inbox
+  alias FermixChannels.Companion.Kept
   alias FermixChannels.Companion.MediaGrants
   alias FermixChannels.Companion.Output
   alias FermixChannels.Companion.Proposals
@@ -187,7 +193,6 @@ defmodule FermixChannels.Companion.Connection do
   alias FermixChannels.Companion.Turns
   alias FermixChannels.Gateway.Commands.Registry, as: CommandRegistry
   alias FermixChannels.Mobile.Identity
-  alias FermixCore.Checklists.Registry, as: ChecklistRegistry
   alias FermixCore.Companion.Protocol
   alias FermixCore.Companion.Timeline
   alias FermixCore.Home.Move
@@ -271,11 +276,15 @@ defmodule FermixChannels.Companion.Connection do
       proposal_opts: Keyword.get(opts, :proposal_opts, []),
       # The Always On watch a version 6 connection subscribes to.
       status_watch: Keyword.get(opts, :status_watch, StatusWatch),
-      # The owner's lists (moduledoc): what this connection holds, the
-      # Registry's options, and how long a change waits to go out.
-      checklists: Checklists.new(),
-      checklist_opts: Keyword.get(opts, :checklist_opts, []),
-      checklist_window_ms: Keyword.get(opts, :checklist_window_ms, @checklist_window_ms),
+      # What Fermix keeps (moduledoc), by kind: what this connection holds of
+      # each, the kind's store options, and how long a change waits to go out.
+      kept: %{
+        Checklists =>
+          Kept.new(
+            Keyword.get(opts, :checklist_opts, []),
+            Keyword.get(opts, :checklist_window_ms, @checklist_window_ms)
+          )
+      },
       # A phone's list channel (moduledoc): the scope it serves, who its edits
       # are made via, and the session told when it draws lists.
       scope: scope!(Keyword.get(opts, :scope, :all)),
@@ -332,12 +341,10 @@ defmodule FermixChannels.Companion.Connection do
   def handle_info(:home_status_changed, state),
     do: write_event(%{"t" => "home_status_changed"}, state)
 
-  def handle_info({:checklists_changed, changes}, state) do
-    {lists, pending?} = Checklists.changed(state.checklists, changes)
-    {:noreply, arm_checklists(%{state | checklists: lists}, pending?)}
-  end
+  def handle_info({:checklists_changed, changes}, state),
+    do: {:noreply, kept_changed(Checklists, changes, state)}
 
-  def handle_info(:checklists_flush, state), do: flush_checklists(state)
+  def handle_info(:checklists_flush, state), do: flush_kept(Checklists, state)
 
   def handle_info({:companion_request_failed, client_msg_id, reason}, state),
     do: write_request_error(while_moving(reason, state), client_msg_id, state)
@@ -526,13 +533,13 @@ defmodule FermixChannels.Companion.Connection do
     do: proposal_answer(payload, state)
 
   defp serve(%{type: "checklists_pull", payload: payload}, state),
-    do: checklists_pull(payload, state)
+    do: pull_index(Checklists, payload, state)
 
   defp serve(%{type: "checklist_pull", payload: payload}, state),
-    do: checklist_pull(payload, state)
+    do: pull_one(Checklists, payload, state)
 
   defp serve(%{type: "checklist_edit", payload: payload}, state),
-    do: checklist_edit(payload, state)
+    do: kept_edit(Checklists, payload, state)
 
   defp serve(%{type: "attach_file", payload: payload}, state), do: attach_file(payload, state)
 
@@ -816,99 +823,105 @@ defmodule FermixChannels.Companion.Connection do
      %{"reason" => "request_failed", "message" => Inbox.describe_error(reason), "attach_id" => id}}
   end
 
-  # --- lists (moduledoc) ----------------------------------------------------------
+  # --- kept things: the lists (moduledoc) ---------------------------------------------
 
-  defp checklists_pull(%{"profile_id" => @profile}, state) do
-    case ChecklistRegistry.device_index(state.caller, state.checklist_opts) do
-      {:ok, lists} ->
-        :ok = tell_draws(state)
-        state = %{state | checklists: Checklists.index_pulled(state.checklists)}
-        written(send_event("checklists", Checklists.index_payload(@profile, lists), state), state)
+  # The index, answered in the step that read it; from then on the connection
+  # hears every change of the kind as the index again.
+  defp pull_index(kind, %{"profile_id" => @profile}, state) do
+    kept = kept(state, kind)
+
+    case kind.index(state.caller, kept.opts) do
+      {:ok, entries} ->
+        :ok = tell_draws(kind, state)
+        state = put_kept(state, kind, Kept.index_pulled(kept))
+
+        written(
+          send_event(kind.index_event(), kind.index_payload(@profile, entries), state),
+          state
+        )
 
       {:error, reason} ->
-        list_refusal(reason, nil, state)
+        kept_refusal(kind, reason, nil, state)
     end
   end
 
-  defp checklists_pull(_payload, state), do: answer({:error, :unsupported_profile}, state)
+  defp pull_index(_kind, _payload, state), do: answer({:error, :unsupported_profile}, state)
 
-  # The session a phone's list channel serves hears it draws lists once, at
+  # The session a phone's list channel serves hears it draws the kind once, at
   # the first index this connection pulls (moduledoc).
-  defp tell_draws(%{draws_to: pid} = state) when is_pid(pid) do
-    unless Checklists.draws?(state.checklists), do: send(pid, :list_channel_draws)
+  defp tell_draws(kind, %{draws_to: pid} = state) when is_pid(pid) do
+    unless Kept.draws?(kept(state, kind)), do: send(pid, kind.draws_message())
     :ok
   end
 
-  defp tell_draws(_state), do: :ok
+  defp tell_draws(_kind, _state), do: :ok
 
-  defp checklist_pull(%{"profile_id" => @profile, "list_id" => list_id} = payload, state) do
-    removed? = payload["removed"] == true
+  defp pull_one(kind, %{"profile_id" => @profile} = payload, state) do
+    case Map.fetch(payload, kind.id_field()) do
+      {:ok, id} -> pull_held(kind, id, payload["removed"] == true, state)
+      :error -> answer({:error, :unsupported_profile}, state)
+    end
+  end
 
-    case ChecklistRegistry.device_list(list_id, removed?, state.caller, state.checklist_opts) do
+  defp pull_one(_kind, _payload, state), do: answer({:error, :unsupported_profile}, state)
+
+  # One thing, whole, answered in the step that read it; the connection holds it.
+  defp pull_held(kind, id, removed?, state) do
+    kept = kept(state, kind)
+
+    case kind.object(id, removed?, state.caller, kept.opts) do
       {:ok, snapshot} ->
-        state = %{state | checklists: Checklists.hold(state.checklists, list_id, removed?)}
-        event = Checklists.list_payload(@profile, snapshot, removed?, %{})
-        written(send_event("checklist", event, state), state)
+        state = put_kept(state, kind, Kept.hold(kept, id, removed?))
+        event = kind.object_payload(@profile, snapshot, removed?, %{})
+        written(send_event(kind.object_event(), event, state), state)
 
       {:error, reason} ->
-        list_refusal(reason, nil, state)
+        kept_refusal(kind, reason, nil, state)
     end
   end
 
-  defp checklist_pull(_payload, state), do: answer({:error, :unsupported_profile}, state)
+  defp kept_edit(kind, %{"profile_id" => @profile, "client_msg_id" => id} = payload, state) do
+    opts = Keyword.put(kept(state, kind).opts, :made_via, state.made_via)
 
-  defp checklist_edit(%{"profile_id" => @profile, "client_msg_id" => id} = payload, state) do
-    opts = Keyword.put(state.checklist_opts, :made_via, state.made_via)
-
-    case ChecklistRegistry.device_edit(payload, state.caller, opts) do
-      {:ok, %{duplicate: false} = done} ->
-        state = hold_made_list(payload, done, state)
-
-        written(
-          send_event("accepted", %{"client_msg_id" => id, "duplicate" => false}, state),
-          state
-        )
-
-      {:ok, %{duplicate: true} = done} ->
-        state = redeliver(done, id, state)
-
-        written(
-          send_event("accepted", %{"client_msg_id" => id, "duplicate" => true}, state),
-          state
-        )
+    case kind.edit(payload, state.caller, opts) do
+      {:ok, %{duplicate: duplicate?} = done} ->
+        state = edited(kind, payload, done, state)
+        accepted = %{"client_msg_id" => id, "duplicate" => duplicate?}
+        written(send_event("accepted", accepted, state), state)
 
       {:error, reason} ->
-        list_refusal(reason, id, state)
+        kept_refusal(kind, reason, id, state)
     end
   end
 
-  defp checklist_edit(%{"client_msg_id" => id}, state) do
+  defp kept_edit(_kind, %{"client_msg_id" => id}, state) do
     case send_event("error", error_payload(:unsupported_profile, id), state) do
       :ok -> {:cont, state}
       {:error, _reason} -> {:stop, state}
     end
   end
 
-  # A list a device made is one it is drawing.
-  defp hold_made_list(%{"op" => %{"op" => "create"}}, %{list_id: list_id}, state),
-    do: %{state | checklists: Checklists.hold(state.checklists, list_id, false)}
+  # A thing a device made is one it is drawing. A duplicate changed nothing, so
+  # nobody else hears of it; the device that sent it again gets the thing once
+  # more, with what its add had made.
+  defp edited(kind, %{"op" => %{"op" => "create"}}, %{duplicate: false, id: id}, state),
+    do: put_kept(state, kind, Kept.hold(kept(state, kind), id, false))
 
-  defp hold_made_list(_payload, _done, state), do: state
+  defp edited(_kind, _payload, %{duplicate: false}, state), do: state
 
-  # A duplicate changed nothing, so nobody else hears of it; the device that
-  # sent it again gets the list once more, with what its add had made.
-  defp redeliver(%{list_id: list_id, made: made}, id, state) do
-    if list_id in state.checklists.held do
-      {lists, pending?} = Checklists.redeliver(state.checklists, list_id, id, made)
-      arm_checklists(%{state | checklists: lists}, pending?)
+  defp edited(kind, payload, %{duplicate: true, id: id, made: made}, state) do
+    kept = kept(state, kind)
+
+    if Kept.held?(kept, id) do
+      {kept, pending?} = Kept.redeliver(kept, id, payload["client_msg_id"], made)
+      arm_window(kind, kept, pending?, state)
     else
       state
     end
   end
 
-  defp list_refusal(reason, client_msg_id, state) do
-    message =
-      reason |> ChecklistRegistry.describe_error() |> Text.truncate_utf8(@max_error_message_bytes)
+  defp kept_refusal(kind, reason, client_msg_id, state) do
+    message = reason |> kind.describe_error() |> Text.truncate_utf8(@max_error_message_bytes)
 
     payload =
       maybe_put(
@@ -923,73 +936,91 @@ defmodule FermixChannels.Companion.Connection do
   defp written(:ok, state), do: {:cont, state}
   defp written({:error, _reason}, state), do: {:stop, state}
 
-  defp arm_checklists(%{checklists: %{timer: nil} = lists} = state, true) do
-    timer = Process.send_after(self(), :checklists_flush, state.checklist_window_ms)
-    %{state | checklists: %{lists | timer: timer}}
+  # Every committed change, whoever made it: what this connection holds is
+  # marked pending, and the window armed.
+  defp kept_changed(kind, changes, state) do
+    {kept, pending?} = Kept.changed(kept(state, kind), changes)
+    arm_window(kind, kept, pending?, state)
   end
 
-  defp arm_checklists(state, _pending?), do: state
+  defp arm_window(kind, %{timer: nil} = kept, true, state) do
+    timer = Process.send_after(self(), kind.flush_message(), kept.window_ms)
+    put_kept(state, kind, Kept.armed(kept, timer))
+  end
 
-  # The window ended: each pending list once, whole, then the index.
-  defp flush_checklists(state) do
-    if state.checklists.timer, do: Process.cancel_timer(state.checklists.timer)
-    {due, index?, lists} = Checklists.take_due(state.checklists)
-    state = %{state | checklists: lists}
+  defp arm_window(kind, kept, _pending?, state), do: put_kept(state, kind, kept)
 
-    with {:ok, state} <- push_lists(due, state),
-         {:ok, state} <- push_index(index?, state) do
+  # The window ended: each pending thing once, whole, then the index.
+  defp flush_kept(kind, state) do
+    kept = kept(state, kind)
+    if kept.timer, do: Process.cancel_timer(kept.timer)
+    {due, index?, kept} = Kept.take_due(kept)
+    state = put_kept(state, kind, kept)
+
+    with {:ok, state} <- push_due(kind, due, state),
+         {:ok, state} <- push_index(kind, index?, state) do
       {:noreply, state}
     else
       {:stop, state} -> {:stop, :normal, state}
     end
   end
 
-  defp push_lists(due, state) do
-    Enum.reduce_while(due, {:ok, state}, fn {list_id, removed?, made}, {:ok, state} ->
-      case push_list(list_id, removed?, made, state) do
+  defp push_due(kind, due, state) do
+    Enum.reduce_while(due, {:ok, state}, fn object, {:ok, state} ->
+      case push_object(kind, object, state) do
         {:ok, state} -> {:cont, {:ok, state}}
         {:stop, state} -> {:halt, {:stop, state}}
       end
     end)
   end
 
-  defp push_list(list_id, removed?, made, state) do
-    case ChecklistRegistry.device_list(list_id, removed?, state.caller, state.checklist_opts) do
+  defp push_object(kind, {id, removed?, made}, state) do
+    case kind.object(id, removed?, state.caller, kept(state, kind).opts) do
       {:ok, snapshot} ->
-        pushed(
-          send_event(
-            "checklist",
-            Checklists.list_payload(@profile, snapshot, removed?, made),
-            state
-          ),
-          state
-        )
-
-      # Swept away since it was pulled: nothing is left to hold.
-      {:error, {:no_such_list, _id}} ->
-        {:ok, %{state | checklists: Checklists.let_go(state.checklists, list_id)}}
+        event = kind.object_payload(@profile, snapshot, removed?, made)
+        pushed(send_event(kind.object_event(), event, state), state)
 
       {:error, reason} ->
-        Logger.warning("companion connection could not push list #{list_id}: #{inspect(reason)}")
-        {:ok, state}
+        unpushed(kind, id, reason, state)
     end
   end
 
-  defp push_index(false, state), do: {:ok, state}
+  # Gone for good since it was pulled: nothing is left to hold.
+  defp unpushed(kind, id, reason, state) do
+    if kind.gone?(reason) do
+      {:ok, put_kept(state, kind, Kept.let_go(kept(state, kind), id))}
+    else
+      Logger.warning(
+        "companion connection could not push #{kind.object_event()} #{id}: #{inspect(reason)}"
+      )
 
-  defp push_index(true, state) do
-    case ChecklistRegistry.device_index(state.caller, state.checklist_opts) do
-      {:ok, lists} ->
-        pushed(send_event("checklists", Checklists.index_payload(@profile, lists), state), state)
+      {:ok, state}
+    end
+  end
+
+  defp push_index(_kind, false, state), do: {:ok, state}
+
+  defp push_index(kind, true, state) do
+    case kind.index(state.caller, kept(state, kind).opts) do
+      {:ok, entries} ->
+        event = kind.index_payload(@profile, entries)
+        pushed(send_event(kind.index_event(), event, state), state)
 
       {:error, reason} ->
-        Logger.warning("companion connection could not push the list index: #{inspect(reason)}")
+        Logger.warning(
+          "companion connection could not push the #{kind.index_event()} index: " <>
+            inspect(reason)
+        )
+
         {:ok, state}
     end
   end
 
   defp pushed(:ok, state), do: {:ok, state}
   defp pushed({:error, _reason}, state), do: {:stop, state}
+
+  defp kept(state, kind), do: Map.fetch!(state.kept, kind)
+  defp put_kept(state, kind, kept), do: %{state | kept: Map.put(state.kept, kind, kept)}
 
   defp grant_media(ref, state) do
     with {:ok, descriptor} <- media_descriptor(ref, state),
@@ -1035,15 +1066,15 @@ defmodule FermixChannels.Companion.Connection do
   # The caller rides with the request, outside the client's payload, for
   # `Channels.Companion` to stamp on the turn (moduledoc), and what this
   # connection draws: the one answer that also decides what it is sent
-  # (`ReplyBlocks.drawn_types/3`): its lists once it pulled their index, its
-  # events from version 8.
+  # (`ReplyBlocks.drawn_types/3`): each kept kind once it pulled its index
+  # (its lists, `draws_lists`), its events from version 8.
   defp queue_request(event, state) do
     drawn = ReplyBlocks.drawn_types(:companion, state.version, pulled_kinds(state))
 
     event =
       event
       |> Map.put(:caller, state.caller)
-      |> Map.put(:draws_lists, "checklists" in drawn)
+      |> put_draws(drawn, state)
       |> Map.put(:draws_events, "events" in drawn)
 
     case start_next_request(%{state | pending: state.pending ++ [event]}) do
@@ -1052,7 +1083,14 @@ defmodule FermixChannels.Companion.Connection do
     end
   end
 
-  defp pulled_kinds(state), do: if(Checklists.draws?(state.checklists), do: [:lists], else: [])
+  defp pulled_kinds(state),
+    do: for({kind, kept} <- state.kept, Kept.draws?(kept), do: kind.drawn_kind())
+
+  defp put_draws(event, drawn, state) do
+    Enum.reduce(Map.keys(state.kept), event, fn kind, event ->
+      Map.put(event, kind.draws_key(), kind.block_type() in drawn)
+    end)
+  end
 
   defp start_next_request(%{worker: {_ref, _id}} = state), do: {:noreply, state}
   defp start_next_request(%{pending: []} = state), do: {:noreply, state}

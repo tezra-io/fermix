@@ -24,6 +24,7 @@ defmodule FermixCore.Memory.Repo do
   alias FermixCore.Memory.Repo.CuesWatchersSql
   alias FermixCore.Memory.Repo.FtsMatch
   alias FermixCore.Memory.Repo.InboundEventsSql
+  alias FermixCore.Memory.Repo.KeptSql
   alias FermixCore.Memory.Repo.MeetingsSql
   alias FermixCore.Memory.Repo.MobileSql
   alias FermixCore.Memory.Repo.OpenLoopReactionsSql
@@ -94,6 +95,7 @@ defmodule FermixCore.Memory.Repo do
   @computer_history_machines_migration_version 59
   @computer_history_reports_migration_version 60
   @computer_history_home_migration_version 61
+  @checklist_edit_kinds_migration_version 62
   @sqlite_open_intent :readwritecreate
 
   # The home's requests about notes from every machine (M97 §8), all served by
@@ -5110,8 +5112,34 @@ defmodule FermixCore.Memory.Repo do
          :ok <- apply_follow_up_always_allow_migration(conn, versions),
          :ok <- apply_computer_history_machines_migration(conn, versions, carry),
          :ok <- apply_computer_history_reports_migration(conn, versions),
-         :ok <- apply_computer_history_home_migration(conn, versions) do
+         :ok <- apply_computer_history_home_migration(conn, versions),
+         :ok <- apply_checklist_edit_kinds_migration(conn, versions) do
       :ok
+    end
+  end
+
+  # M89 §07: a device edit's receipt names the kind of kept thing it changed,
+  # the lists' for every receipt from before, with the version in one
+  # transaction. It runs after 57, which made the table. Reapplying it changes
+  # nothing: the column is added only while the table holds 57's columns, and
+  # a table that holds neither set is refused.
+  defp apply_checklist_edit_kinds_migration(conn, versions) do
+    if Enum.member?(versions, @checklist_edit_kinds_migration_version) do
+      :ok
+    else
+      with :ok <- Sqlite3.execute(conn, "BEGIN;") do
+        conn |> edit_kinds_step() |> commit_migration(conn)
+      end
+    end
+  end
+
+  defp edit_kinds_step(conn) do
+    with :ok <- add_columns(conn, "checklist_edits", KeptSql.receipt_kinds_columns()) do
+      Sqlite3.execute(
+        conn,
+        "INSERT INTO schema_migrations(version) " <>
+          "VALUES (#{@checklist_edit_kinds_migration_version});"
+      )
     end
   end
 

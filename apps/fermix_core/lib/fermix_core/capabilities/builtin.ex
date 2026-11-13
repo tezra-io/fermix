@@ -208,7 +208,7 @@ defmodule FermixCore.Capabilities.Builtin do
       owner_only?: true
     },
     # The owner's lists (MILESTONE_85 §11). Owner-only because every row is the
-    # owner's; the advertise?/execute gates (`Checklists.Access`) are the hard
+    # owner's; the advertise?/execute gates (`Kept.Access`) are the hard
     # barrier, and these registry fields do not replace it.
     "checklist_read" => %{policy_class: :read_only, hidden_from_agent?: false, owner_only?: true},
     "checklist_edit" => %{policy_class: :read_write, hidden_from_agent?: false, owner_only?: true},

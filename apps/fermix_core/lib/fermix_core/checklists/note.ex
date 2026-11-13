@@ -3,7 +3,7 @@ defmodule FermixCore.Checklists.Note do
   What the model is told about the owner's lists on every turn that may use
   them (MILESTONE_85 §05), appended by `Agents.TurnRunner` the way the current
   date is. Both are nil on any turn but the owner's private turn or voice call
-  (`Checklists.Access.private_owner_turn?/1`), so a guest, a group chat or a
+  (`Kept.Access.private_owner_turn?/1`), so a guest, a group chat or a
   shared session is told nothing of the lists.
 
   `rules/3` is the routing line, the one that says a list never lives in
@@ -27,9 +27,9 @@ defmodule FermixCore.Checklists.Note do
 
   require Logger
 
-  alias FermixCore.Checklists.Access
   alias FermixCore.Checklists.Registry
   alias FermixCore.Checklists.Render
+  alias FermixCore.Kept.Access
   alias FermixCore.Memory.Repo
   alias FermixCore.Prompt.ChannelPresentation
   alias FermixCore.Timeouts

@@ -8,7 +8,7 @@ defmodule FermixCore.Tools.ChecklistRead do
   outside source (`UntrustedContent.outside_source/3`), as a framed open loop
   does.
 
-  Offered and run only where `Checklists.Access.permitted?/2` admits it: the
+  Offered and run only where `Kept.Access.permitted?/2` admits it: the
   owner's private turn or voice call, or a scheduled job whose allowed tools
   name it. Every list it returned is recorded for the reply's block, with no
   rows (`ReplyBlocks.put_checklists/3`).
@@ -20,8 +20,8 @@ defmodule FermixCore.Tools.ChecklistRead do
   @behaviour FermixCore.Capabilities.Builtin.Tool
 
   alias FermixCore.Capabilities.Builtin.Tool
-  alias FermixCore.Checklists.Access
   alias FermixCore.Checklists.Registry
+  alias FermixCore.Kept.Access
   alias FermixCore.Memory.Repo
   alias FermixCore.ReplyBlocks
   alias FermixCore.Telemetry
@@ -85,7 +85,7 @@ defmodule FermixCore.Tools.ChecklistRead do
   @impl true
   def category, do: :scheduling
 
-  @doc "Offered where `Checklists.Access.permitted?/2` admits it; `execute/2` asks again."
+  @doc "Offered where `Kept.Access.permitted?/2` admits it; `execute/2` asks again."
   @spec advertise?(map()) :: boolean()
   def advertise?(context) when is_map(context), do: Access.permitted?(context, name())
 

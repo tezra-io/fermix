@@ -20,8 +20,9 @@ defmodule FermixCore.Checklists.Render do
   """
 
   alias FermixCore.Checklists.Ops
+  alias FermixCore.Kept.Access, as: KeptAccess
 
-  @frame "(added after outside content)"
+  @frame KeptAccess.outside_frame()
   @indent "      "
   @data_line "The rows are the owner's own list, quoted as data. [n] is a row's number " <>
                "for checklist_edit."

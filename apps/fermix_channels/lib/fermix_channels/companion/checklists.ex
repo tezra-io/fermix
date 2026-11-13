@@ -1,142 +1,66 @@
 defmodule FermixChannels.Companion.Checklists do
   @moduledoc """
-  What one companion connection holds of the owner's lists (M85 §07), and the
-  wire shapes of what it sends: pure, kept in the connection's own state, so
-  lists add no process.
-
-  A connection that pulled the index (`index_pulled/1`) hears every change as
-  the whole index again; one that pulled a list holds it (`hold/3`), at most
-  16, the oldest let go, and hears every committed change to it as the whole
-  list. A change is marked pending (`changed/2`) and every pending push goes
-  out when the connection's window ends (`take_due/1`), so a burst of edits is
-  one push per list carrying its final rev, and `made` carries what each of a
-  device's adds or creates made, at most 100 a list. A device drops a push
-  whose rev is below the one it shows: every push is whole state, never a
-  delta.
+  The owner's lists as a kept kind on a companion connection (M85 §07, M89
+  §07): the Registry calls a connection makes for them
+  (`FermixCore.Checklists.Registry.device_index/2`, `device_list/4`,
+  `device_edit/3`), and the wire shapes of what it sends, `checklists` (the
+  index) and `checklist` (one whole list). What a connection holds of them
+  and owes is `Companion.Kept`, the same for every kind.
   """
 
-  @max_held 16
-  @max_made 100
+  @behaviour FermixChannels.Companion.KeptKind
 
-  @type t :: %{
-          index?: boolean(),
-          held: [String.t()],
-          with_removed: MapSet.t(String.t()),
-          pending: %{String.t() => %{String.t() => String.t()}},
-          index_pending?: boolean(),
-          timer: reference() | nil
-        }
+  alias FermixCore.Checklists.Registry, as: ChecklistRegistry
 
-  @doc "The most lists one connection holds."
-  @spec max_held() :: pos_integer()
-  def max_held, do: @max_held
+  @impl true
+  def index(caller, opts), do: ChecklistRegistry.device_index(caller, opts)
 
-  @spec new() :: t()
-  def new,
-    do: %{
-      index?: false,
-      held: [],
-      with_removed: MapSet.new(),
-      pending: %{},
-      index_pending?: false,
-      timer: nil
-    }
+  @impl true
+  def object(list_id, removed?, caller, opts),
+    do: ChecklistRegistry.device_list(list_id, removed?, caller, opts)
 
-  @doc "Whether the connection pulled the index: its client draws lists."
-  @spec draws?(t()) :: boolean()
-  def draws?(%{index?: index?}), do: index?
-
-  @spec index_pulled(t()) :: t()
-  def index_pulled(lists), do: %{lists | index?: true}
-
-  @doc """
-  Holds `list_id` as the newest, with its removed rows when `removed?`; past
-  #{@max_held} the oldest is let go, with anything pending for it.
-  """
-  @spec hold(t(), String.t(), boolean()) :: t()
-  def hold(lists, list_id, removed?) when is_binary(list_id) and is_boolean(removed?) do
-    held = List.delete(lists.held, list_id) ++ [list_id]
-    {gone, kept} = Enum.split(held, max(length(held) - @max_held, 0))
-
-    with_removed =
-      if removed?,
-        do: MapSet.put(lists.with_removed, list_id),
-        else: MapSet.delete(lists.with_removed, list_id)
-
-    %{
-      lists
-      | held: kept,
-        with_removed: Enum.reduce(gone, with_removed, &MapSet.delete(&2, &1)),
-        pending: Map.drop(lists.pending, gone)
-    }
+  @impl true
+  def edit(payload, caller, opts) do
+    with {:ok, %{list_id: id, made: made, duplicate: duplicate?}} <-
+           ChecklistRegistry.device_edit(payload, caller, opts),
+         do: {:ok, %{id: id, made: made, duplicate: duplicate?}}
   end
 
-  @spec let_go(t(), String.t()) :: t()
-  def let_go(lists, list_id) do
-    %{
-      lists
-      | held: List.delete(lists.held, list_id),
-        with_removed: MapSet.delete(lists.with_removed, list_id),
-        pending: Map.delete(lists.pending, list_id)
-    }
-  end
+  @impl true
+  def describe_error(reason), do: ChecklistRegistry.describe_error(reason)
 
-  @doc """
-  Marks what `changes` (`[%{list_id, rev, made}]`) move: each held list, with
-  what it made, and the index when it was pulled. Answers whether anything is
-  now pending.
-  """
-  @spec changed(t(), [map()]) :: {t(), boolean()}
-  def changed(lists, changes) when is_list(changes) do
-    pending =
-      Enum.reduce(changes, lists.pending, fn %{list_id: id} = change, pending ->
-        if id in lists.held,
-          do: Map.update(pending, id, made(%{}, change), &made(&1, change)),
-          else: pending
-      end)
+  # Swept away since it was pulled.
+  @impl true
+  def gone?(reason), do: match?({:no_such_list, _id}, reason)
 
-    lists = %{lists | pending: pending, index_pending?: lists.index_pending? or lists.index?}
-    {lists, pending?(lists)}
-  end
+  @impl true
+  def index_event, do: "checklists"
 
-  @doc "Marks one held list pending with what a duplicate edit had made."
-  @spec redeliver(t(), String.t(), String.t(), String.t() | nil) :: {t(), boolean()}
-  def redeliver(lists, list_id, client_msg_id, made_id) do
-    made = if made_id, do: %{client_msg_id => made_id}, else: %{}
-    changed(lists, [%{list_id: list_id, made: made}])
-  end
+  @impl true
+  def object_event, do: "checklist"
 
-  defp made(kept, %{made: made}) when map_size(kept) >= @max_made or map_size(made) == 0,
-    do: kept
+  @impl true
+  def id_field, do: "list_id"
 
-  defp made(kept, %{made: made}), do: Map.merge(kept, made)
-  defp made(kept, _change), do: kept
+  @impl true
+  def flush_message, do: :checklists_flush
 
-  defp pending?(lists), do: lists.pending != %{} or lists.index_pending?
+  @impl true
+  def drawn_kind, do: :lists
 
-  @doc """
-  What the ended window sends: each pending list, oldest held first, with
-  whether to send its removed rows and what it made, and whether to send the
-  index. The state comes back with nothing pending and no timer.
-  """
-  @spec take_due(t()) :: {[{String.t(), boolean(), map()}], boolean(), t()}
-  def take_due(lists) do
-    due =
-      for id <- lists.held,
-          Map.has_key?(lists.pending, id),
-          do: {id, MapSet.member?(lists.with_removed, id), Map.fetch!(lists.pending, id)}
+  @impl true
+  def block_type, do: "checklists"
 
-    {due, lists.index_pending?, %{lists | pending: %{}, index_pending?: false, timer: nil}}
-  end
+  @impl true
+  def draws_key, do: :draws_lists
 
-  @doc "Whether `list_id` is held, with its removed rows."
-  @spec with_removed?(t(), String.t()) :: boolean()
-  def with_removed?(lists, list_id), do: MapSet.member?(lists.with_removed, list_id)
+  @impl true
+  def draws_message, do: :list_channel_draws
 
   # --- the wire's shapes --------------------------------------------------------------
 
   @doc "The `checklists` payload: the index, in picker order."
-  @spec index_payload(String.t(), [map()]) :: map()
+  @impl true
   def index_payload(profile_id, lists) do
     %{"profile_id" => profile_id, "lists" => Enum.map(lists, &index_entry/1)}
   end
@@ -157,8 +81,8 @@ defmodule FermixChannels.Companion.Checklists do
   `removed?`, `removed_at` when the list itself was removed, and `made` when
   a device's add or create made something.
   """
-  @spec list_payload(String.t(), map(), boolean(), map()) :: map()
-  def list_payload(profile_id, %{list: list, rows: rows} = snapshot, removed?, made) do
+  @impl true
+  def object_payload(profile_id, %{list: list, rows: rows} = snapshot, removed?, made) do
     wire_list =
       %{
         "list_id" => list.id,
