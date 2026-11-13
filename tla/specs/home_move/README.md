@@ -37,7 +37,7 @@ Models one move of M75 §7.2 (B5). Three parts take part:
     reason than room), and the worker tries again (`AttemptFails`);
   - an attempt fails at the source before its offer is out in a way another
     would not mend, and the worker aborts the move (`AttemptAborts`,
-    `attempt_failed/2`, `move_worker.ex:254-268`): the secret store refuses
+    `attempt_failed/2`, `move_worker.ex:276-292`): the secret store refuses
     the desktop key, or its item holds another home's key under the same
     profile; the keychain does not give the settings' secrets; or the
     capture has no room;
@@ -56,7 +56,7 @@ Models one move of M75 §7.2 (B5). Three parts take part:
 - `OldRequestsArrive`: a request the worker sent on a rail it has since given
   up on still reaches the candidate. Two rails are two streams, so nothing
   orders one rail's frames against another's. The worker closes a rail it
-  gives up on (`close_rail/1`, `move_worker.ex:242`, `:566`, `:581`), but
+  gives up on (`close_rail/1`, `move_worker.ex:266`, `:589`, `:605`), but
   `Rail.close/1` sends its close frame behind whatever the rail already sent
   (`rail.ex`). Whether the iroh helper still delivers what it holds once the
   socket closes ("the helper ends its stream on its own", `helper.ex`) is
@@ -67,12 +67,12 @@ Models one move of M75 §7.2 (B5). Three parts take part:
   for the move it staged (`commit_move/2`, `candidate.ex:666-697`).
 - `MarkerBeforeCommit`: the worker writes `moved.json` and records
   `committing` before it sends `move_commit` (`commit/4`, then `retired/4`,
-  `move_worker.ex:560-584`).
+  `move_worker.ex:583-608`).
 - `OffersFenced`: the candidate takes an offer only when it is later than the
   move it holds, a later move id or a later attempt of the same move, and
   refuses an earlier or equal one (`move_mismatch`), leaving what it holds
   untouched (`fenced_offer/2`, `later?/2`, `candidate.ex:509-521`).
-  `move_offer` carries the attempt (`send_snapshot/4`, `move_worker.ex:476`),
+  `move_offer` carries the attempt (`send_snapshot/4`, `move_worker.ex:499`),
   which only grows across restarts. Move ids are ordered by when the move
   started (`move_id/1`, `move.ex:550-559`); with one move id, the fence
   orders by attempt.
@@ -81,7 +81,7 @@ Models one move of M75 §7.2 (B5). Three parts take part:
   (`candidate.ex:624-631`), which answers `move_ready` only then
   (`move_responder.ex:74-78`).
 - `AwaitPinsRail`: the worker takes an answer only from the rail it waits on
-  (`await_any/3` matches `{:rail, ^rail, _}`, `move_worker.ex:989-1002`).
+  (`await_any/3` matches `{:rail, ^rail, _}`, `move_worker.ex:1018-1031`).
 - `EndingsAfterRestart`: the worker records `committed` (after `move_done`)
   or `undoing` (after an undo) and then restarts itself (`SelfRestart`,
   `Lifecycle.restart_self/0`); the engine that boots after it records `done`
@@ -101,7 +101,7 @@ in `abort/3` never finds a marker. Every road to `abort/3` starts before
   in `transfer/1` and `attempt_failed/2`, which run only while the marker is
   absent;
 - `commit/4`'s error clause, after the ready epoch or the marker could not
-  be written (`move_worker.ex:564-567`);
+  be written (`move_worker.ex:586-592`);
 - a recorded `aborting`, which `carry_on/3` reaches only when the marker is
   absent.
 
@@ -472,3 +472,12 @@ failure too. Those are paths the model has, and the store answers in
 microseconds, so no step is added; catching every exit there would keep a
 display from ever ending an attempt. No modelled step changed. The comments'
 line numbers into both files point at the committed code.
+
+## Re-read for the real-machine fixes (M97, 2026-11-12)
+
+Re-read against ae8ea336, which staled the `move_worker.ex` pin: the
+sentences the worker records are an owner's words (`Management.Copy`), the
+causes go to the log, and its probe of the moved identity names the
+initiator's protocol version. The same steps write the same files in the
+same order, so no modelled step changed. The comments' line numbers into
+`move_worker.ex` point at the committed code.

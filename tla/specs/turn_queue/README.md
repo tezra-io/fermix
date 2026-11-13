@@ -44,7 +44,7 @@ the checks that show a property needs it):
   fires `{:failed, _}` (`queue.ex:920-928`).
 - `TurnsShareQueueFate`: turn tasks run under a `Task.Supervisor` that
   `QueueSupervisor` (`:one_for_all`) terminates before it restarts the Queue
-  (`queue_supervisor.ex:46-51`, `application.ex:176`).
+  (`queue_supervisor.ex:46-51`, `application.ex:212`).
 - `CrashClosesUserMessage`: a crashed turn's `:DOWN` writes the stopped marker
   before the next message starts (`queue.ex:879`, `:893-899`).
 - `StopSparesClaimedTurn`: a stop leaves a turn that has claimed its outcome
@@ -249,7 +249,7 @@ counterexample, run `make -C tla check SPECS=turn_queue` and open
     while the new Queue's turn ran, and nobody could stop it.
 - **Fix:** `FermixChannels.Gateway.QueueSupervisor` (`queue_supervisor.ex`)
   runs `{Task.Supervisor, name: FermixChannels.Gateway.TurnTasks}` and the
-  Queue, in that order, `:one_for_all`; `application.ex:176` starts it in the
+  Queue, in that order, `:one_for_all`; `application.ex:212` starts it in the
   Queue's slot. `:task_supervisor` is a required Queue option
   (`queue.ex:199`), so no Queue runs turns under a supervisor that outlives
   it. When the Queue dies, the supervisor terminates the task supervisor, and
@@ -515,3 +515,13 @@ counterexample, run `make -C tla check SPECS=turn_queue` and open
   exception crashes the turn; that would still hold for the turn's work, but
   no longer for delivering its outcome. Recommendation: accept the residual
   now and revisit if helper crashes show up in traces.
+
+## Re-read for the real-machine fixes (2026-11-12)
+
+`ae8ea336` staled the channels `application.ex` pin: the boot reads the
+engine's role once, says which transports it refuses only on the primary,
+and records that the channels tree has started (`started?/0`, a
+`:persistent_term` the home's link reads to tell a boot from a stopped
+rail). The children, their order and the strategy are as before, so
+`QueueSupervisor`, its `TurnTasks` and the Queue run as the spec says; the
+one cited `application.ex` line moved (`:212`).

@@ -44,7 +44,7 @@
 \* SOURCE: apps/fermix_core/lib/fermix_core/delivery/error.ex @ 2f1ce6530e0b
 \* SOURCE: apps/fermix_core/lib/fermix_core/memory/repo/mobile_sql.ex @ 20b02d329b95
 \* SOURCE: apps/fermix_core/lib/fermix_core/application.ex#start_supervision_tree,supervision_children,temporal_scheduler_opts @ 42ea67d2db24
-\* SOURCE: apps/fermix_core/lib/fermix_core/temporal/registry.ex @ 26a90999cd1c
+\* SOURCE: apps/fermix_core/lib/fermix_core/temporal/registry.ex @ 155514ea7e4f
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/channels/mobile.ex @ c60a5fda0ed7
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/companion/output.ex @ 71be1c83368c
 EXTENDS Naturals, FiniteSets
@@ -702,9 +702,9 @@ OneSendAtATime == Cardinality({w \in Workers : sender[w] /= "idle"}) <= 1
 \* reminder from landing after its superseding rule is due".
 SendEndsBeforeBoundary == ~valid => \A w \in Workers : sender[w] = "idle"
 
-\* registry.ex:676-679, the refusal the owner gets: "A reminder for this
+\* registry.ex:682-685, the refusal the owner gets: "A reminder for this
 \* event is being sent right now and a send cannot be recalled. Wait for the
-\* attempt to finish and try again." M30 design (:1490): "Event mutation
+\* attempt to finish and try again." M30 design (:1496): "Event mutation
 \* while a send is in flight | Fail with delivery_in_progress". Read as: an
 \* edit or cancel is accepted only when no send process for the reminder is
 \* running, that is, once the bounded attempt has finished. (That the

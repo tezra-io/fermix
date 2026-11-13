@@ -107,15 +107,15 @@ least one check):
   - A scheduler restart leaves no send running (M30 §6.3 :339,
     `channel_send.ex:98-105`; the unlink-to-kill residual below is under the
     spec's step granularity). This rests on `SendsDieWithWorker` (check 24).
-  - No edit or cancel is accepted while a send process runs (`registry.ex:676-679`,
-    M30 §16 :1490). This rests on `RefusesWhileDelivering` (check 29) and
+  - No edit or cancel is accepted while a send process runs (`registry.ex:682-685`,
+    M30 §16 :1496). This rests on `RefusesWhileDelivering` (check 29) and
     `SendsDieWithWorker` (check 26: unlinked, the boot sweep sets the row back
     to `pending` while the orphan still sends, and the edit is accepted).
 
   Before the REMIND-2 fix the same check covered 57,661 states: most of them
   were orphaned sends.
 - Check 06, **hypothetical**: no reminder platform reads `proactive_key`
-  (`registry.ex:48`, enforced at `:1442` and `:1487`). With every fault on and a
+  (`registry.ex:48`, enforced at `:1448` and `:1493`). With every fault on and a
   platform that deduplicates, the user sees the reminder at most once (5,223
   states). This rests on `StableKey` (check 07).
 - Check 08, with no faults and a platform that answers inside the watchdog, 268
@@ -159,10 +159,10 @@ cancel is refused while the row reads `delivering`", to be dropped as a
 property. The refusal and the write are one Repo call
 (`temporal_sql.ex:587-599`, `:631-639`), so the property held by construction.
 That single-call fact belongs in ExUnit. The spec checks what the refusal is
-for instead. `registry.ex:676-679` tells the owner "Wait for the attempt to
-finish", and M30's failure table (`:1490`) says the owner "retries after the
+for instead. `registry.ex:682-685` tells the owner "Wait for the attempt to
+finish", and M30's failure table (`:1496`) says the owner "retries after the
 bounded attempt", so the claimed rule is `NoChangeWhileSendRunning`: no change
-is accepted while a send process runs. M30 §7.3 (`:609-614`) scopes the refusal
+is accepted while a send process runs. M30 §7.3 (`:615-620`) scopes the refusal
 to that bounded attempt and disclaims recall, so the stronger
 `NoChangeWhileRequestAtPlatform`, which also counts a request the attempt
 abandoned at the platform, is a proposed rule (REMIND-3).
@@ -523,6 +523,12 @@ which staled the `application.ex` pin: `Home.MoveProgress` joins the core
 tree after the temporal scheduler and its delivery supervisor, so its crash
 reaches neither. No delivery path the spec models changed; the cited
 `application.ex` lines point at the committed code.
+
+Re-read on 2026-11-12 for the real-machine fixes (`ae8ea336`), which staled
+the `registry.ex` pin: `stated_as/2`, the sentence a write's acknowledgement
+states an occurrence in, is public for the reply's event card
+(`Temporal.Card`). No delivery path changed; the cited `registry.ex` lines
+point at the committed code.
 
 ## Code and doc drift
 

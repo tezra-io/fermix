@@ -457,6 +457,14 @@ of the model moves. The progress the worker and the Mac's responder tell
 The comments' line numbers into these files point at the committed code;
 those into `home_summary.ex` had drifted before this change too.
 
+Walked again against ae8ea336 (the real-machine fixes), which staled the
+`move_worker.ex` pin: its recorded sentences and logs changed, its steps
+did not. `Home.Link.computer_rows/0` now answers `:not_started` before the
+channels tree is up and `Home.Join`'s guard lets a home that holds only the
+memories Fermix seeds join; neither is pinned here, and neither is a step a
+rule reads. The comments' line numbers into `move_worker.ex` point at the
+committed code.
+
 ## Done
 
 Deadlock checking is on. `Done` has these ends:
