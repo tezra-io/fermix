@@ -81,7 +81,8 @@ Not modelled, each covered elsewhere:
   that answers without acting;
 - a request its capability says is no thing done here
   (`Capability.recorded?/3`, read once as it arrives: the screen hold's
-  `keep`, which the server renews every 30 s while its session exists). It
+  `keep`, which the server renews every 30 s while its session exists, and
+  `notifications.ready`). It
   gets no journal record, started or finished, by design, so it is outside
   `ActedIsJournaled` and `NoRecordIsFinal`; it is a read, so one whose
   answer is lost is asked again, which renews the hold once more;
@@ -129,11 +130,13 @@ Not modelled, each covered elsewhere:
 - a link file that cannot be written: the relay does not use the newer
   copy's session (`connected`, `keep_epoch`), so it is no `MoveOn`, and the
   relay and Admission read one epoch, the file's;
-- a computer's own request to its server (`history.submit`, M97 §8.1):
-  `Desktop.HistoryUplink` opens it, waits on it and cancels it in the
+- a computer's own request to its server (`history.submit`, M97 §8.1, and
+  a reminder's `reminders.snooze`, M99 §10.1): `Desktop.HistoryUplink` or
+  `Desktop.ReminderUplink` opens it, waits on it and cancels it in the
   process that sends it, under an id of its own, outside Admission's
   journal, epoch check and runs; Admission only hands its `invoke_result`
-  on. Why no rule here depends on it is in the last re-read below;
+  on, by the id's prefix. Why no rule here depends on it is in the
+  re-reads of `826ba83a` and `81b3fc25` below;
 - the switch going back on, a second computer, and a restart of the
   server's `Calls`, whose waiters time out;
 - a journal that cannot be written: a `started` record that fails runs
@@ -571,6 +574,76 @@ pins. Each change, and what it does to the model:
 
 Every `admission.ex`, `invoke.ex`, `invocation.ex` and `invoke_family.ex`
 line the `.tla` cites was moved to the commit.
+
+## Re-read (M99, `81b3fc25`: notifications on a computer and a reminder's snooze, 2026-11-13)
+
+Read against `81b3fc25`, which staled the `invoke.ex`, `admission.ex`,
+`invoke_family.ex` and `lanes.ex` pins. No modelled step changed. Each
+change, and what it does to the model:
+- `invoke.ex` (whole): a capability `notifications`
+  (`Computers.Capabilities.Notifications`, ops `post` and `ready`) whose
+  offer is `nil`, so the master switch alone gates it (`switched_on/2`,
+  `offer_on?(nil, _)`, `admission.ex:465`), as it gates `history.apply`:
+  `OffAlwaysWins` covers it as it covers every request, at admission, when
+  a request that waited starts, and once Admission hears. Its `post` is an
+  effect with a started record, run in the run's task like any other, the
+  post to this computer's own backend its one moment of acting (`Act`); its
+  `ready` is a read with no record, as the screen hold's `keep` (Not
+  modelled). `init/1` creates a second table beside the waiting one
+  (`:notifications_shown`, at most 512 keys, each kept a day) and hands it
+  to Admission in `:notifications` with the optional `Native.Notifications`
+  options: the keys a `post` showed, so a key shows once across a restart
+  of Admission. That is the capability's own rule, as its origin rules are,
+  and no variable here holds it. Admission and the runs are still
+  `:one_for_all` (`invoke.ex:118-141`).
+- `admission.ex` (whole): `init/1` takes `:notifications` (required;
+  `Desktop.Invoke` always passes it) and an optional `:reminder_uplink`,
+  and a run's context carries `notifications`: data the run reads, no step.
+  The `invoke_result` clause (`:205-211`) hands the answer to a request this
+  computer sent by its id's prefix (`uplink_answer/4`, `:266-272`): `hist-`
+  to `HistoryUplink.answer`, `snz-` to `ReminderUplink.answer`, any other to
+  the warning it gave before. Each is a lookup and a send, so Admission
+  waits on nothing, runs, journals and holds nothing for it, and no
+  variable here moves. Every cited line past the moduledoc moved, by up to
+  thirteen, and is moved here.
+- `invoke_family.ex#init,handle_event,reconcile`: `init/1` keeps a
+  `reminders` option for the home's new service `reminders` (op `snooze`,
+  `Temporal.NotificationSnooze`), which serves the computer's own request.
+  The three functions do what they did: `handle_event "invoke_result"`
+  hands to `Calls` (`:87`), and `init/1` (`:66`) and `"invoke_restarted"`
+  reconcile (`:119`).
+- `lanes.ex` (whole): `push_subscribe`, a phone's event, joins the
+  interactive lane. An `invoke_status` or `invoke_cancel` rides its
+  request's lane as before, so `AfterItsOpen` stands.
+- The bounds: none here moves. The scene is still two calls, two ids each
+  and the drops each check names; Admission's own bound (8 running, 32
+  waiting) is unchanged and not modelled, and a `post` holds a running slot
+  for at most its 15 s deadline as any request does.
+
+**The computer's own requests, a second kind.** `Desktop.ReminderUplink`
+sends one `reminders.snooze` for each press of Snooze on a reminder's
+notification, at most 16 in flight, under `snz-…` ids, waits on it in its
+own process (a 15 s deadline on the server, a timer 5 s past it here) and
+then sends its own `invoke_cancel`, naming the capability and op so it
+rides the same lane. What the `826ba83a` re-read above says of
+`history.submit` holds for it: its ids cannot meet the server's `inv-…`;
+Admission's `open`, `cancel` and `status` never see it; it never enters the
+journal, the epoch check or the runs; and a lost answer is a warning in the
+computer's log, never a resend. It does not read the switches: a snooze is
+the person at the computer pressing a button, not work the server runs
+there, so `OffAlwaysWins`, which is about what the computer runs, does not
+reach it.
+
+**Seen while reading, not a rule here.** The server asks a reminder's
+`notifications.post` of every connected computer
+(`Native.Notifications.Computers`), and the reminder's rail asks again after
+an answer that is not known (it reads as `:timeout`), under a new call and a
+new id: an effect asked twice by a caller above `Computers.Invocation`,
+which `EffectAtMostOnce`, a rule about one call's ids, does not cover. The
+computer shows a key once from the table above, which outlives a restart of
+Admission but not one of `Desktop.Invoke` itself or of the engine. The
+capability's moduledoc names the engine's restart; between a lost answer
+and the retry, either restart can show one reminder twice.
 
 ## Findings
 

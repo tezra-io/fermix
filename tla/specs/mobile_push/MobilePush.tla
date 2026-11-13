@@ -37,9 +37,17 @@
 (*    deduplicates them by id in the same notified set. What is theirs     *)
 (*    alone (no retry past expires_at, a late approval shown as expired)   *)
 (*    is a single-call rule;                                               *)
-(*  - push_unregister, UNREGISTERED / NOT_FOUND (terminal before any       *)
-(*    retry) and a device with no token: a device is registered            *)
+(*  - registration: push_register, push_subscribe and push_unregister,     *)
+(*    each a phone's whole registration; UNREGISTERED / NOT_FOUND and a    *)
+(*    Web Push service's gone or refused key, terminal before any retry,   *)
+(*    the last two clearing the phone's registration until it next         *)
+(*    connects; and a device with no token: a device is registered         *)
 (*    throughout;                                                          *)
+(*  - a phone's route (Web Push for a phone holding a subscription, APNs   *)
+(*    for an iPhone holding a token, a refusal by name for any other): the *)
+(*    push platform is whichever service the route reaches. Push turned    *)
+(*    off, and the APNs config, which stops the APNs route alone, are      *)
+(*    outside;                                                             *)
 (*  - the push TTL (24 h) and the boot check's "younger than the TTL";     *)
 (*  - the plaintext, its padding and the encryption (single-call rules,    *)
 (*    pinned by push_vectors.json);                                        *)
@@ -52,11 +60,13 @@
 (* at the push platform, or one thing the app, the owner or the            *)
 (* environment does. Three steps fold calls together; each says why.       *)
 (***************************************************************************)
-\* SOURCE: apps/fermix_channels/lib/fermix_channels/mobile/push.ex @ 7909c61eeee1
+\* SOURCE: apps/fermix_channels/lib/fermix_channels/mobile/push.ex @ 4245cf3363eb
+\* SOURCE: apps/fermix_channels/lib/fermix_channels/mobile/push_web_push_leg.ex#deliver,send_all @ 84efb0e665cf
+\* SOURCE: apps/fermix_channels/lib/fermix_channels/mobile/web_push.ex#send,deliver,classify,settle,next_step,@max_attempts,@budget_ms @ 7729fa864baa
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/channels/mobile.ex#schedule_push,launch_push,default_push_launcher,notify_timeline_row,push_notify,maybe_schedule_proactive_push,deliver_persisted_text,delivered_text,deliver_persisted_media,delivered_effects,build_turn_result,schedule_request_push,broadcast,emit,emit_after_commit @ 9ecc1e30c9e2
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/mobile/event_router.ex#after_settle,end_phone_turn,schedule_settled_push @ d42cb71bf67e
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/mobile/device_registry.ex @ b04ce0cb18e9
-\* SOURCE: apps/fermix_channels/lib/fermix_channels/mobile/session.ex#dispatch_event,terminate,idle_timeout_ms,@idle_grace_ms @ 989c7462563b
+\* SOURCE: apps/fermix_channels/lib/fermix_channels/mobile/session.ex#dispatch_event,terminate,idle_timeout_ms,@idle_grace_ms @ c00e883abc8b
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/mobile/router.ex#socket_options @ c961dba4f2d3
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/mobile/iroh/bridge_connection.ex#handle_info,arm_idle,stop_session,finish,terminate @ a04ac00c19ea
 EXTENDS Naturals, FiniteSets
@@ -78,9 +88,10 @@ CONSTANTS
     \* Mechanism switches: what the design does about it. TRUE is the design
     \* (M51 section 10); each is switched off by at least one check.
     DecidesOnEvidence,    \* D20: the decision reads the read frontier and each
-                          \* device's acked cursor. FALSE is today's code: any
-                          \* registered socket of the profile suppresses the
-                          \* push for every device (push.ex:172, :444-454)
+                          \* device's acked cursor. FALSE is today's code: a
+                          \* phone whose socket is registered is not pushed,
+                          \* and the phones beside it are (away_decision,
+                          \* push.ex:212-229; connected_devices, :567-579)
     AcksAfterAnnounce,    \* the app acks a row once it has announced it (shown
                           \* it on screen or posted its notification), never
                           \* on persisting it alone
@@ -89,8 +100,10 @@ CONSTANTS
     NotifiedSet,          \* D22: the app announces an id once, whichever path
                           \* brought it
     RetriesTransient,     \* D21: a transient dispatcher error is retried.
-                          \* FALSE is today's code: one attempt, its failure
-                          \* logged (notify_timeline_row, channels/mobile.ex:596-603)
+                          \* FALSE is today's code for an iPhone: one APNs
+                          \* attempt, its failure logged (notify_timeline_row,
+                          \* channels/mobile.ex:602-609). A Web Push phone's
+                          \* one send retries (AfterFailure)
     AttemptCap,           \* D21: at most three attempts per device
     BootCheck,            \* D21: the boot step that reads push_attempted_seq.
                           \* FALSE is today's code: nothing runs at boot
@@ -195,15 +208,15 @@ AckTarget(d) ==
 (* The writer and the push task (Channels.Mobile, Mobile.Push) *)
 
 \* deliver_persisted_text / deliver_persisted_media for a row nobody asked
-\* for (channels/mobile.ex:484-509), and for a request's reply its
+\* for (channels/mobile.ex:490-515), and for a request's reply its
 \* settlement: build_turn_result when it became a turn (:190-196,
-\* :858-868), Mobile.EventRouter.after_settle -> schedule_settled_push when
-\* it did not (event_router.ex:149-175), after the turn_done that ends the
-\* request's turn on the phones (end_phone_turn, :155-160; not a row). The
+\* :864-874), Mobile.EventRouter.after_settle -> schedule_settled_push when
+\* it did not (event_router.ex:191-217), after the turn_done that ends the
+\* request's turn on the phones (end_phone_turn, :197-202; not a row). The
 \* row's Repo write, then emit_after_commit -> DeviceRegistry.broadcast
-\* (:559-564, :742-757), then schedule_push -> Task.Supervisor.start_child
-\* (:345-350, :579-594). A row nobody asked for reaches the sockets as a
-\* `row`, a reply as its turn's `text_done` (delivered_text, :496-501): either
+\* (:565-570, :748-763), then schedule_push -> Task.Supervisor.start_child
+\* (:345-350, :585-600). A row nobody asked for reaches the sockets as a
+\* `row`, a reply as its turn's `text_done` (delivered_text, :502-507): either
 \* way the phone takes the row.
 \* Three calls folded into one step: a crash between them leaves what a crash
 \* right after them leaves, a durable row with no task, because the registry
@@ -217,29 +230,35 @@ WriteRow ==
     /\ UNCHANGED <<readUpTo, cursor, daemon, reg, acked, ob, tries, platform, app,
                    have, unannounced, noted, observers, budgets>>
 
-AnySocket == \E d \in Devices : reg[d] = "open"
+EverySocket == \A d \in Devices : reg[d] = "open"
 
 \* The design, M51 section 10 Trigger: "no push at all if the profile's
 \* read_up_to_seq covers the row ...; else a push to every registered device
 \* whose acked cursor has not reached the row, which includes a device with
 \* no socket and one whose socket closed or froze meanwhile."
-\* Today's code, push.ex:161-196 and :553-555: presence first, then the
-\* frontier.
+\* Today's code, push.ex:212-240: presence first, phone by phone. The phones
+\* with a registered socket are left out (away_decision, :212-221); with
+\* none left nobody is pushed (decide_away, :226); else the frontier decides
+\* for every phone (read_decision, :231-240); else each phone left out is
+\* pushed, and a phone with a socket silences only itself.
 Decision(r, d) ==
     IF DecidesOnEvidence
     THEN IF readUpTo >= r THEN "read"
          ELSE IF reg[d] = "open" /\ acked[d] >= r THEN "acked"
          ELSE "pending"
-    ELSE IF AnySocket THEN "presence"
+    ELSE IF EverySocket THEN "presence"
          ELSE IF readUpTo >= r THEN "read"
+         ELSE IF reg[d] = "open" THEN "presence"
          ELSE "pending"
 
-\* Mobile.Push.notify after the task's one wait (today: maybe_notify,
-\* push.ex:161-169). It reads the frontier (one Repo call, :456-459) and the
-\* registry (one GenServer call, :444-454). The two reads are folded into one
-\* step: both values only grow while a socket lives, a socket that goes takes
-\* its acked cursor with it and is then pushed, and a read that lands after
-\* the decision is the race Witness_AlertAfterRead keeps in view.
+\* Mobile.Push.notify after the task's one wait (push.ex:161-180). Today it
+\* reads the registry (one GenServer call, connected_devices, :567-579), the
+\* registered phones (list_registered_devices, :592-599; registration is not
+\* modelled) and then the frontier (one Repo call, :587-590). The reads are
+\* folded into one step: both values only grow while a socket lives, a socket
+\* that goes takes its acked cursor with it and is then pushed, and a read
+\* that lands after the decision is the race Witness_AlertAfterRead keeps in
+\* view.
 Decide(r) ==
     /\ daemon = "up" /\ task[r] = "wait"
     /\ task' = [task EXCEPT ![r] = "run"]
@@ -249,15 +268,24 @@ Decide(r) ==
                    noted, observers, budgets>>
 
 \* What a failed attempt numbered n leaves. M51 section 10, Retries: "at
-\* most three attempts"; today's code makes one (push.ex:262-292).
+\* most three attempts". Today an iPhone gets one (dispatch/3 and
+\* handle_dispatch_result, push.ex:385-415). A Web Push phone's one send
+\* tries a 429, a 5xx or a transport error again, at most three attempts
+\* within a minute of its first (WebPush.send/4, web_push.ex:194-258): this
+\* rule and AttemptCap, inside one call. It stops sooner when a Retry-After
+\* would pass that minute, which GivesUpOnlyAfterThree does not allow; the
+\* spec has no clock, and does not model that bound.
 AfterFailure(n) ==
     IF RetriesTransient /\ (n < Cap \/ ~AttemptCap) THEN "pending" ELSE "failed"
 
-\* One dispatcher call for one device (today: dispatch/3, push.ex:262-268,
-\* which sends every device's notification in one call). The platform takes
-\* the push and says so, or the call fails, or the platform takes the push
-\* and the daemon sees a timeout. The spec stops at a fourth attempt: that is
-\* the attempt the rule forbids.
+\* One attempt at the push platform for one device. Today an iPhone's is one
+\* dispatcher call that carries every away iPhone's notification (dispatch/3,
+\* push.ex:385-391); a Web Push phone's is one POST of its own send, the
+\* phones sent beside one another (send_web_push, :316-317;
+\* Push.WebPushLeg.send_all, push_web_push_leg.ex:108-118). The platform
+\* takes the push and says so, or the call fails, or the platform takes the
+\* push and the daemon sees a timeout. The spec stops at a fourth attempt:
+\* that is the attempt the rule forbids.
 Attempt(r, d) ==
     /\ daemon = "up" /\ task[r] = "run" /\ ob[r][d] = "pending"
     /\ tries[r][d] <= Cap
@@ -346,10 +374,10 @@ Boot ==
 (* A socket, seen from the daemon *)
 
 \* Either carrier's idle timeout closes a socket nothing was read from for
-\* 150 s (Session.idle_timeout_ms, session.ex:208): the WebSocket's through
+\* 150 s (Session.idle_timeout_ms, session.ex:281): the WebSocket's through
 \* Bandit's timeout (router.ex:53-60), the iroh bridge connection's through
-\* its own timer (bridge_connection.ex:102, :199-206). Session.terminate
-\* (session.ex:486-496), which both carriers call, and the registry's :DOWN
+\* its own timer (bridge_connection.ex:108, :233-241). Session.terminate
+\* (session.ex:564-574), which both carriers call, and the registry's :DOWN
 \* (device_registry.ex:239) drop the entry. Only a frozen app leaves its
 \* socket to this timeout.
 IdleTimeout(d) ==
@@ -360,7 +388,7 @@ IdleTimeout(d) ==
     /\ UNCHANGED <<durable, daemon, pushTask, platform, app, have, unannounced,
                    noted, observers, budgets>>
 
-\* dispatch_event "ack" (session.ex:1410-1412) and, in the design, the
+\* dispatch_event "ack" (session.ex:1603-1605) and, in the design, the
 \* registry entry's acked_seq (M51 section 11.4). The app's send and the
 \* daemon's handling are one step: an ack lost on the way is an ack sent
 \* late, and the app may ack at any moment here.
@@ -375,7 +403,7 @@ AckArrives(d) ==
 (* The phone's app (another repository; M51 sections 8.2, 10 and 12.5) *)
 
 \* The app's reconnect loop: hello, hello_ack, then the rows it lacks.
-\* Attaching replaces any older entry (device_registry.ex:143-153, :296-308).
+\* Attaching replaces any older entry (device_registry.ex:143-153, :308-320).
 Connect(d) ==
     /\ Running(d) /\ reg[d] = "none" /\ daemon = "up"
     /\ reg' = [reg EXCEPT ![d] = "open"]
