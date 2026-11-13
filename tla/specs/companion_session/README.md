@@ -239,6 +239,11 @@ pulled the trips index (`Channels.Companion.message`), which no step reads. No s
 cursor, claim, request or turn changed. The line references into `connection.ex`
 moved with the code.
 
+The re-read for the review's fixes (2026-11-13) found `PROTOCOL.md` changed in
+words only: the trips' size bound, a trip edit refused for an id a list's edit
+used, titles kept in Unicode NFC, and a day's move before `day_id`'s day. No event,
+field, step or rule the spec reads changed.
+
 **The Queue is one abstract process.** The runner takes one `.tla` per spec,
 and `turn_queue` proves the Queue's rules against `queue.ex`, so this spec takes
 them as given:
