@@ -236,7 +236,9 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   so under the agents, and a watcher follow-up that would start it waits,
   until a run of it works or its sign-in file changes when you sign in
   again. On the setup page and in `fermix doctor` a sign-in file that is
-  there now reads "sign-in found" rather than "authenticated".
+  there now reads "sign-in found" rather than "authenticated". Keeping that
+  mark never costs a run: a machine's store of marks that does not answer in
+  time is logged and skipped, where it stopped every coding run in progress.
 - **A Grok call no longer goes quiet about a finished task after you speak
   as a reply starts.** Grok could drop a reply it had just begun when you
   spoke, without ever closing it, and the call then waited on that reply for
@@ -798,8 +800,11 @@ will be part of a future release; nothing in this group is in a release yet.
   here: a computer gives your server its history while its own Computer
   history switch is on, with everything on there, so a computer whose
   recording is off never counts as sending history, and `/history off studio
-  Mac` turns that computer's recording off. Where the old history switch and
-  the recording disagreed, the recording decides, and the log says so once.
+  Mac` turns that computer's recording off. A computer whose server did not
+  take its history before the update has its recording switched off by it,
+  so nothing it kept from the server is sent, and the log says once to turn
+  Computer history on at that computer to share it; a Mac that is its own
+  home keeps recording as it was.
   The move's review still has a line for your computer history, which now
   turns recording on or off on that computer once the move goes through; the
   review of a computer that moved before shows it ticked where recording is

@@ -172,7 +172,9 @@ listed as it came.
   Fermix from starting, naming the key. A section an earlier Fermix wrote
   (a switch each for `files`, `shell` and `history`, and four for what
   reaches the server) is rewritten once at start: files and commands stay on
-  only where both were, and the recorder's own setting decides history.
+  only where both were, and on a computer linked to its server whose old
+  history switch was off its recorder goes off too, so nothing the server did
+  not have is sent (turn Computer history on at that computer to share it).
 - In the app it is the **This computer** settings section of the Always On
   pane, on that computer: **Fermix on your server may use this computer**
   (the master: "Off stops everything Fermix on your server does here, from

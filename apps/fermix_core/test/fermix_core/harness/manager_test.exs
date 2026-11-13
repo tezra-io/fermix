@@ -918,6 +918,46 @@ defmodule FermixCore.Harness.ManagerTest do
     end
   end
 
+  # A store that does not answer in time (AGENTS.md "Cascade roots"): the
+  # sign-in mark after a hand-off and the check at boot each answer
+  # unavailable, and the Manager, with every run it holds, goes on.
+  describe "a coding store that does not answer" do
+    test "leaves the Manager and another run alive", ctx do
+      mute = start_supervised!(%{id: :mute_store, start: {Task, :start_link, [&never_answer/0]}})
+      sign_in = [store: mute, timeout: 0, vendor_opts: [codex_home: ctx.home]]
+      manager = start_manager(ctx, timer_enabled: true, sign_in: sign_in)
+      pid = Process.whereis(manager)
+      ref = Process.monitor(pid)
+
+      {:ok, other} =
+        Manager.start_run(
+          chat_request(ctx, hanging_stub(ctx), cwd: sibling_workspace(ctx, "b")),
+          manager
+        )
+
+      assert await_active(ctx.repo, other)
+
+      stub =
+        FakeVendorCli.write!(ctx.stub_dir,
+          lines: fixture_lines("codex_0_166_0_refresh_failed.jsonl"),
+          exit_code: 1
+        )
+
+      {:ok, signed_out} = Manager.start_run(chat_request(ctx, stub), manager)
+      assert %{reason: "signed_out"} = await_status(ctx.repo, signed_out, "failed")
+      assert_receive {:delivered, "123", _text}, @arrival_ms
+
+      _barrier = :sys.get_state(manager)
+      refute_received {:DOWN, ^ref, :process, ^pid, _reason}
+      assert Process.whereis(manager) == pid
+      assert {:ok, %{status: status}} = Ledger.get(other, server: ctx.repo)
+      assert status in ["starting", "running"]
+
+      assert %{cancelled: 1} = Manager.stop_all(manager)
+      assert await_status(ctx.repo, other, "cancelled")
+    end
+  end
+
   describe "boot reconciliation" do
     test "finalizes interrupted with resume guidance and delivers", ctx do
       run_id = seed_active_run(ctx.repo, ctx.workspace)
@@ -1505,4 +1545,10 @@ defmodule FermixCore.Harness.ManagerTest do
 
   defp restore(:harness, nil), do: Application.delete_env(:fermix_core, :harness)
   defp restore(:harness, value), do: Application.put_env(:fermix_core, :harness, value)
+
+  defp never_answer do
+    receive do
+      :never -> :ok
+    end
+  end
 end

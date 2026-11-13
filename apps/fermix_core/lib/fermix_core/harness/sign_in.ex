@@ -24,7 +24,12 @@ defmodule FermixCore.Harness.SignIn do
   asked), `:not_verified` (the agent's folder only, a Mac's Keychain),
   `:not_signed_in` and `:signed_out` (a run failed to sign in).
 
-  Options: `:store` (the store process, `MachineStore` by default) for the
+  A store that does not answer in time answers unavailable, which is logged
+  here once, and the caller (the `Harness.Manager`, after a hand-off and at
+  boot) goes on: a sign-in mark is never worth a run.
+
+  Options: `:store` (the store process, `MachineStore` by default) and
+  `:timeout` (its calls', `MachineStore`'s default) for the
   rail's own writes, `:path` (the store's file) for reads and the owner's
   clear on any machine, `:vendor_opts` (`Vendors.sign_in_file/2`'s), `:stat`
   (a file's stat, a test's seam), `:now`, and `:machine`, `:macos?`,
@@ -164,7 +169,7 @@ defmodule FermixCore.Harness.SignIn do
   """
   @spec check_all(keyword()) :: :ok
   def check_all(opts) when is_list(opts) do
-    case MachineStore.marks(server: store(opts)) do
+    case MachineStore.marks(store(opts)) do
       {:ok, marks} ->
         for {vendor, mark} <- marks, not current?(mark, opts), do: unmark(vendor, "checked", opts)
         :ok
@@ -191,11 +196,11 @@ defmodule FermixCore.Harness.SignIn do
       file_stat: file_stat(file, opts)
     }
 
-    vendor |> MachineStore.put_mark(mark, server: store(opts)) |> logged(vendor, "kept")
+    vendor |> MachineStore.put_mark(mark, store(opts)) |> logged(vendor, "kept")
   end
 
   defp unmark(vendor, done, opts),
-    do: vendor |> MachineStore.delete_mark(server: store(opts)) |> logged(vendor, done)
+    do: vendor |> MachineStore.delete_mark(store(opts)) |> logged(vendor, done)
 
   defp logged(:ok, _vendor, _done), do: :ok
 
@@ -227,7 +232,9 @@ defmodule FermixCore.Harness.SignIn do
          do: {:ok, %{"size" => size, "mtime" => mtime, "inode" => inode}}
   end
 
-  defp store(opts), do: Keyword.get(opts, :store, MachineStore)
+  # The store process's call options: the process and, where given, its timeout.
+  defp store(opts),
+    do: [server: Keyword.get(opts, :store, MachineStore)] ++ Keyword.take(opts, [:timeout])
 
   defp store_path(opts),
     do: Keyword.get_lazy(opts, :path, fn -> MachineStore.path(ConfigStore.fermix_home()) end)

@@ -332,10 +332,11 @@ it is back, while the home's delivery waits for its scheduler's tick.
 Restoring the same backup twice, or a backup whose epoch plus one is an
 epoch the home already had under the same token, was enough.
 
-### HS-5: the D27 upgrade makes a computer that sent no history a contributor (open)
+### HS-5: the D27 upgrade makes a computer that sent no history a contributor (fixed)
 
-Found in the re-read of `101830533` (M97 D27); no check: it is one rewrite
-of a machine file at boot, not an interleaving. Before D27 a computer had a
+Found in the re-read of `101830533` (M97 D27) and fixed after it (not yet
+committed when this was written); no check: it is one rewrite of a machine
+file at boot, not an interleaving. Before D27 a computer had a
 `history` switch for its server beside its recorder's own setting
 (`[fermix_core.computer_history] enabled`): with the switch off,
 `HistoryUplink` sent nothing and the home took nothing, while the recorder
@@ -354,9 +355,20 @@ it reads files and commands conservatively (on only where both were). So:
    48 hours that the owner had kept from the server, and the home summarizes
    each with its provider.
 
-Nobody at the computer agreed to that. A fix keeps the conservative reading
-for history too: where the old switch was off, the migration switches the
-recorder off (or keeps its record local) rather than letting it decide.
+Nobody at the computer agreed to that. The fix keeps the conservative
+reading for history too (`Switches.upgrade/2`, `history_switch/2`,
+`with_recorder/3`): on a computer linked to its server (its link file
+present), where the old switch was off (`false`, or absent while the
+switches are reviewed) and the recorder is on, the same atomic write that
+drops the switch sets the recorder's `enabled = false`, and the log says
+once, as a warning, that nothing it recorded is sent and to turn Computer
+history on at that computer to share it. So step 3 no longer happens: the
+recorder is off, `history_on?/2` is false, and the home never counts it. A
+recorder that was off stays off; an absent switch while the review still
+waits is left to that review, whose history line shows the recorder as it
+is and is the owner's decision; and a Mac that is its own home (no link)
+keeps its recorder as it was. No modelled step changed: the spec models no
+boot migration.
 
 ## Seen while reading, not modelled
 
@@ -490,5 +502,5 @@ history offer now follows its recorder (`Switches.history_on?/2`: master on,
 reviewed, recorder on), which is what the home counts as contributing. An
 off machine is still left out (Out of scope), and its sittings are refused
 `off` after the purge check, so no modelled step changed. HS-5 above is the
-upgrade's own defect; the sitting on its way during an off is under Seen
-while reading.
+upgrade's own defect, now fixed; the sitting on its way during an off is
+under Seen while reading.

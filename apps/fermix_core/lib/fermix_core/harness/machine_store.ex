@@ -32,7 +32,11 @@ defmodule FermixCore.Harness.MachineStore do
   closed for that one write; SQLite serializes it with the process's writes.
   Options: `:path` (the file), `:name` (nil for none, a test's seam),
   `:open?` (whether an agent can run here). A caller passes `server:` and may
-  pass `timeout:`.
+  pass `timeout:`. A sign-in mark is never worth a run: a store process that
+  does not answer in time, or is not running, answers the call
+  `{:error, {:store_unavailable, :timeout | :not_running | reason}}`, which
+  the caller logs (`Harness.SignIn`), never an exit that would end the caller,
+  the `Harness.Manager` and every run after it under `:rest_for_one`.
   """
 
   use GenServer
@@ -57,6 +61,7 @@ defmodule FermixCore.Harness.MachineStore do
           file_stat: map() | nil
         }
   @type status :: :absent | :open | {:unavailable, Path.t(), term()}
+  @type unanswered :: {:error, {:store_unavailable, term()}}
 
   @doc "The coding store under `home`."
   @spec path(Path.t()) :: Path.t()
@@ -74,9 +79,9 @@ defmodule FermixCore.Harness.MachineStore do
   @doc """
   Whether this machine's store is in use: `:open`, `:absent` (no agent can
   run here, so there is no file), or `{:unavailable, file, reason}` when it
-  did not open.
+  did not open; a store process that does not answer is `unanswered()`.
   """
-  @spec status(keyword()) :: status()
+  @spec status(keyword()) :: status() | unanswered()
   def status(opts \\ []) when is_list(opts), do: call(:status, opts)
 
   @doc "Every sign-in mark, keyed by agent (`codex`, `claude`)."
@@ -276,8 +281,18 @@ defmodule FermixCore.Harness.MachineStore do
 
   defp stat_shape?(_other), do: false
 
+  # Every call to the store process is made here: one that does not answer in
+  # time, is not running, or stops during the call is answered unavailable,
+  # never an exit (the moduledoc).
   defp call(request, opts) do
     server = Keyword.get(opts, :server, __MODULE__)
     GenServer.call(server, request, Keyword.get(opts, :timeout, Timeouts.repo_call()))
+  catch
+    :exit, {reason, {GenServer, :call, _args}} ->
+      {:error, {:store_unavailable, unanswered(reason)}}
   end
+
+  defp unanswered(:timeout), do: :timeout
+  defp unanswered(:noproc), do: :not_running
+  defp unanswered(reason), do: reason
 end

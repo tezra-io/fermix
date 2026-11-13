@@ -136,7 +136,7 @@ defmodule FermixCore.Computers.SwitchesTest do
         end
 
         assert ConfigText.value(machine, "fermix_core.computer", "browser") == {:ok, "true"}
-        assert Switches.upgrade(machine) == %{machine: nil, notice: nil}
+        assert Switches.upgrade(machine, true) == %{machine: nil, notice: nil}
       end
     end
 
@@ -156,20 +156,45 @@ defmodule FermixCore.Computers.SwitchesTest do
                Switches.read(other)
     end
 
-    test "history's old switch goes, its recorder deciding, and a disagreement is said once" do
-      off_on = computer_table(["files = true", "shell = true", "history = false"], true)
-      {_merged, machine, notice} = upgraded(off_on)
-      assert ConfigText.value(machine, "fermix_core.computer", "history") == :absent
-      assert ConfigText.value(machine, "fermix_core.computer_history", "enabled") == {:ok, "true"}
-      assert notice =~ "its recorder is on"
+    # HS-5: before D27 a linked computer's server took its history only with
+    # its `history` switch on, whatever its recorder did. The upgrade keeps
+    # that, as it keeps files and commands: where the old switch was off (or,
+    # the switches reviewed, absent) and the recorder is on, the recorder goes
+    # off in the same write, said once in words the owner can act on. A
+    # review that still waits decides an absent one itself; a recorder that
+    # was off stays off; and a Mac that is its own home keeps recording.
+    test "on a linked computer, history the server did not take stays out of its reach" do
+      recorder = fn machine ->
+        ConfigText.value(machine, "fermix_core.computer_history", "enabled")
+      end
 
-      on_off = computer_table(["history = true"], :absent)
-      {_merged, _machine, notice} = upgraded(on_off)
-      assert notice =~ "its recorder is off"
+      for {lines, recorded, stays} <- [
+            {["history = false"], true, "false"},
+            {["files = true", "shell = true"], true, "false"},
+            {["reviewed = true", "files = true"], true, "false"},
+            {["reviewed = false", "history = false"], true, "false"},
+            {["reviewed = false", "files = true"], true, "true"},
+            {["history = true"], true, "true"},
+            {["history = true"], false, "false"}
+          ] do
+        {_merged, machine, notice} = upgraded(computer_table(lines, recorded))
+        seen = inspect({lines, recorded})
+        assert ConfigText.value(machine, "fermix_core.computer", "history") == :absent, seen
+        assert recorder.(machine) == {:ok, stays}, seen
 
-      agreed = computer_table(["history = true"], true)
-      {_merged, _machine, notice} = upgraded(agreed)
-      refute notice =~ "recorder is"
+        if recorded and stays == "false",
+          do: assert(notice =~ "Turn Computer history on at this computer", seen)
+      end
+
+      {_merged, _machine, notice} = upgraded(computer_table(["history = true"], true))
+      refute notice =~ "Computer history"
+
+      # Only a linked computer: a Mac that is its own home keeps recording.
+      for lines <- [["history = false"], ["files = true", "shell = true"]] do
+        {_merged, machine, notice} = upgraded(computer_table(lines, true), false)
+        assert recorder.(machine) == {:ok, "true"}
+        refute notice =~ "Computer history"
+      end
     end
 
     test "a section that names the merged switch keeps it, and loses what sits beside it" do
@@ -187,16 +212,18 @@ defmodule FermixCore.Computers.SwitchesTest do
     end
 
     test "nothing to upgrade, no file, or a value that is no boolean" do
-      assert Switches.upgrade(:absent) == %{machine: nil, notice: nil}
+      assert Switches.upgrade(:absent, true) == %{machine: nil, notice: nil}
 
-      assert Switches.upgrade(computer_table(["files_and_shell = true"], :absent)) == %{
+      assert Switches.upgrade(computer_table(["files_and_shell = true"], :absent), true) == %{
                machine: nil,
                notice: nil
              }
 
-      assert Switches.upgrade(MachineFile.header() <> "\n") == %{machine: nil, notice: nil}
+      assert Switches.upgrade(MachineFile.header() <> "\n", true) == %{machine: nil, notice: nil}
 
-      assert {:error, sentence} = Switches.upgrade(computer_table(["files = \"maybe\""], :absent))
+      assert {:error, sentence} =
+               Switches.upgrade(computer_table(["files = \"maybe\""], :absent), true)
+
       assert sentence =~ "files takes true or false"
     end
   end
@@ -309,8 +336,8 @@ defmodule FermixCore.Computers.SwitchesTest do
       "\n\n" <> history <> "[fermix_core.computer]\n" <> Enum.join(lines, "\n") <> "\n"
   end
 
-  defp upgraded(text) do
-    assert %{machine: machine, notice: {level, notice}} = Switches.upgrade(text)
+  defp upgraded(text, linked? \\ true) do
+    assert %{machine: machine, notice: {level, notice}} = Switches.upgrade(text, linked?)
     assert is_binary(machine) and is_binary(notice) and level in [:info, :warning]
     {ConfigText.value(machine, "fermix_core.computer", "files_and_shell"), machine, notice}
   end

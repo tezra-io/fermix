@@ -166,4 +166,34 @@ defmodule FermixCore.Harness.MachineStoreTest do
     :ok = Sqlite3.close(conn)
     List.flatten(rows)
   end
+
+  # A sign-in mark is never worth a run: a store that does not answer in time,
+  # or is not there, answers its caller (the Manager, after a hand-off and at
+  # boot) as unavailable, and the caller goes on.
+  describe "a store that does not answer" do
+    test "every call answers unavailable, and the caller is not stopped" do
+      mute = start_supervised!(%{id: :mute_store, start: {Task, :start_link, [&never_answer/0]}})
+      opts = [server: mute, timeout: 0]
+
+      assert MachineStore.status(opts) == {:error, {:store_unavailable, :timeout}}
+      assert MachineStore.marks(opts) == {:error, {:store_unavailable, :timeout}}
+
+      assert MachineStore.put_mark("codex", mark("hr_0a1b2c3d4e5f"), opts) ==
+               {:error, {:store_unavailable, :timeout}}
+
+      assert MachineStore.delete_mark("codex", opts) == {:error, {:store_unavailable, :timeout}}
+      assert Process.alive?(mute)
+    end
+
+    test "a store that is not running answers unavailable too" do
+      gone = :"harness_machine_store_gone_#{System.unique_integer([:positive])}"
+      assert MachineStore.marks(server: gone) == {:error, {:store_unavailable, :not_running}}
+    end
+  end
+
+  defp never_answer do
+    receive do
+      :never -> :ok
+    end
+  end
 end

@@ -24,6 +24,7 @@ defmodule FermixCore.Setup.ConfigStore do
   alias FermixCore.Home.AlwaysOnRelease
   alias FermixCore.Home.Archive.ConfigText
   alias FermixCore.Home.Candidate
+  alias FermixCore.Home.DesktopLink
   alias FermixCore.Home.Role
   alias FermixCore.Home.ServerSandbox
   alias FermixCore.Home.Snapshot.Config, as: SnapshotConfig
@@ -260,7 +261,7 @@ defmodule FermixCore.Setup.ConfigStore do
   daemon and every CLI verb alike), so a boot stopped between the writes is
   finished by the next. A home that is not there yet has nothing to move.
   The machine file's write also rewrites this computer's switches where an
-  engine before M97 D27 wrote them (`Computers.Switches.upgrade/1`), once,
+  engine before M97 D27 wrote them (`Computers.Switches.upgrade/2`), once,
   and logs it once; an old key whose value is not a boolean stops the boot
   by name, with nothing written.
 
@@ -343,9 +344,11 @@ defmodule FermixCore.Setup.ConfigStore do
   end
 
   # This computer's switches as an engine before M97 D27 wrote them,
-  # rewritten in the machine file's one write (`Computers.Switches.upgrade/1`).
+  # rewritten in the machine file's one write (`Computers.Switches.upgrade/2`),
+  # which treats a computer linked to its server (its link file present)
+  # apart from one that is its own home.
   defp upgraded_switches(home, machine) do
-    case ComputerSwitches.upgrade(machine) do
+    case ComputerSwitches.upgrade(machine, File.regular?(DesktopLink.path(home))) do
       {:error, sentence} -> {:error, {:config, MachineFile.path(home), sentence}}
       plan -> {:ok, plan}
     end

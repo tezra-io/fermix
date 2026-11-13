@@ -105,12 +105,13 @@ send (`manager.ex:1261-1267`).
   a ledger row, a send or the lease. The store never raises on its input or its
   I/O; its own crash restarts the Manager, RunSupervisor and DeliveryWorker
   after it, in the order of the modelled Manager crash; the mark write and the
-  boot check are calls to the store that exit after their timeout
-  (`MachineStore.call/2`, `machine_store.ex:279-282`), so a store that does
-  not answer in time crashes the Manager after the hand-off: the modelled
-  `MgrCrash` at that point, which neither loses nor repeats a delivery beyond
-  HARNESS-1; it ends the other live runs with it (`:rest_for_one`), a
-  robustness cost, not a delivery rule;
+  boot check are calls to the store that, where it does not answer in time,
+  is not running or stops during the call, answer
+  `{:error, {:store_unavailable, reason}}`, which `Harness.SignIn` logs
+  (`MachineStore.call/2`, `machine_store.ex:287-297`, changed after
+  `2db248ea7`): the Manager goes on, with the other live runs, so a store
+  that does not answer is no longer a cause of the modelled `MgrCrash`,
+  whose other causes stay;
 - the worker's backoff clock and its max-age rule, and the lease's length (see
   above);
 - a failed delivery mark, one that returns an error other than a Repo

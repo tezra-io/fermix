@@ -39,11 +39,18 @@ defmodule FermixCore.Computers.Switches do
   **A section an earlier engine wrote.** An engine before D27 wrote a switch
   for `files` and one for `shell`, one for `history`, and four for offers that
   never came (`voice`, `attachments`, `accessory`, `notifications`).
-  `upgrade/1` rewrites such a section once, in the boot's machine-file
+  `upgrade/2` rewrites such a section once, in the boot's machine-file
   migration (`ConfigStore.migrate_machine_file/2`), the only reader of those
-  keys: `files_and_shell` is on only where both `files` and `shell` were (the
-  conservative reading); `history` goes and the recorder's setting decides,
-  which the log says once where the two disagreed; the four go; `enabled` and
+  keys, conservatively: nothing the server could not have before is shared
+  after. `files_and_shell` is on only where both `files` and `shell` were.
+  `history` goes; on a computer linked to its server, where that switch was
+  off (`false`, or absent while the switches are reviewed) and the recorder
+  is on, the recorder goes off in the same write, since the server never took
+  that history (HS-5), and the log says once to turn Computer history on at
+  this computer to share it; a recorder that was off stays off; an absent
+  `history` while the review still waits is left to that review, which shows
+  the history line as the recorder has it; and a computer that is its own
+  home (no link) keeps its recorder as it was. The four go; `enabled` and
   `reviewed` stay as they were. A section that already names
   `files_and_shell` keeps it and loses the old keys beside it. Any other load
   that meets an old key refuses it by name.
@@ -91,9 +98,10 @@ defmodule FermixCore.Computers.Switches do
   @flags [:enabled, :reviewed]
   @keys @flags ++ @switches
   @key_names Map.new(@keys, &{Atom.to_string(&1), &1})
-  # The keys an engine before D27 wrote that this one has not (`upgrade/1`).
+  # The keys an engine before D27 wrote that this one has not (`upgrade/2`).
   @retired ~w(files shell history voice attachments accessory notifications)
   @history_table "fermix_core.computer_history"
+  @share_history "Turn Computer history on at this computer to share it with your server."
   @listener :fermix_computer_offers
   @invoke_listener :fermix_computer_invoke
   @screen_listener :fermix_computer_screen
@@ -300,30 +308,31 @@ defmodule FermixCore.Computers.Switches do
   @doc """
   What the boot's machine-file migration does with a section an engine
   before D27 wrote (the moduledoc), given the machine file's `text`
-  (`:absent` when there is none): `%{machine: new_text, notice: {level,
-  sentence}}`, or both nil when there is nothing to rewrite, or `{:error,
-  sentence}` for an old key whose value is not a boolean, as a load refuses
-  one. The notice is a warning where the rewrite turned something off that
-  was on (one of files and commands) or changed whether history is offered
-  (its old switch and its recorder disagreed), else information. Pure: the
-  migration writes `machine`, atomically, and logs `notice` once.
+  (`:absent` when there is none) and whether this computer is linked to its
+  server (`linked?`, its link file present): `%{machine: new_text, notice:
+  {level, sentence}}`, or both nil when there is nothing to rewrite, or
+  `{:error, sentence}` for an old key whose value is not a boolean, as a load
+  refuses one. The notice is a warning where the rewrite turned something off
+  that was on (one of files and commands, or the recorder) or changed whether
+  history is offered, else information. Pure: the migration writes
+  `machine`, atomically, and logs `notice` once.
   """
-  @spec upgrade(String.t() | :absent) ::
+  @spec upgrade(String.t() | :absent, boolean()) ::
           %{machine: String.t() | nil, notice: {:info | :warning, String.t()} | nil}
           | {:error, String.t()}
-  def upgrade(:absent), do: %{machine: nil, notice: nil}
+  def upgrade(:absent, linked?) when is_boolean(linked?), do: %{machine: nil, notice: nil}
 
-  def upgrade(text) when is_binary(text) do
+  def upgrade(text, linked?) when is_binary(text) and is_boolean(linked?) do
     old = for key <- @retired, {:ok, raw} <- [ConfigText.value(text, @table, key)], do: {key, raw}
 
     case Enum.find(old, fn {_key, raw} -> raw not in ["true", "false"] end) do
       nil when old == [] -> %{machine: nil, notice: nil}
-      nil -> upgraded(text, Map.new(old))
+      nil -> upgraded(text, Map.new(old), linked?)
       {key, raw} -> {:error, "#{@section} #{key} takes true or false, and #{raw} is not."}
     end
   end
 
-  defp upgraded(text, old) do
+  defp upgraded(text, old, linked?) do
     merged =
       case ConfigText.value(text, @table, "files_and_shell") do
         {:ok, raw} -> {:kept, raw}
@@ -332,17 +341,35 @@ defmodule FermixCore.Computers.Switches do
 
     without = Enum.reduce(Map.keys(old), text, &elem(ConfigText.drop(&2, @table, &1), 0))
     recorder = ConfigText.value(text, @history_table, "enabled") == {:ok, "true"}
-    history = if old["history"], do: old["history"] == "true"
+    history = if linked?, do: history_switch(old["history"], text), else: :own_home
 
     halved? = merged == {:merged, "false"} and "true" in [old["files"], old["shell"]]
     said = history_sentence(history, recorder)
     level = if halved? or said != [], do: :warning, else: :info
 
     %{
-      machine: with_merged(without, merged),
+      machine: without |> with_merged(merged) |> with_recorder(history, recorder),
       notice: {level, Enum.join([merged_sentence(merged) | said], " ")}
     }
   end
+
+  # What the old `history` switch said on a linked computer: on, off, or
+  # absent while its review waits, which that review decides. Absent was off
+  # (an absent offer was off) once the switches were reviewed.
+  defp history_switch("true", _text), do: :on
+  defp history_switch("false", _text), do: :off
+
+  defp history_switch(nil, text) do
+    if ConfigText.value(text, @table, "reviewed") == {:ok, "false"},
+      do: :review_decides,
+      else: :off
+  end
+
+  # History the server never took stays out of its reach (HS-5).
+  defp with_recorder(text, :off, true),
+    do: ConfigText.put(text, @history_table, "enabled", "false")
+
+  defp with_recorder(text, _history, _recorder), do: text
 
   defp with_merged(text, {:kept, _raw}), do: text
   defp with_merged(text, {:merged, raw}), do: ConfigText.put(text, @table, "files_and_shell", raw)
@@ -354,21 +381,21 @@ defmodule FermixCore.Computers.Switches do
       ", and history, voice, attachments, accessory and notifications are no switches here."
   end
 
-  # The history switch is gone: the recorder's own setting decides, which is
-  # said where the two disagreed.
-  defp history_sentence(nil, _recorder), do: []
-  defp history_sentence(same, same), do: []
-
-  defp history_sentence(switch, recorder) do
-    [
-      "Computer history's old switch was #{on_off(switch)} while its recorder is " <>
-        "#{on_off(recorder)}: the recorder's setting decides, so this computer " <>
-        if(recorder, do: "offers its history to the server.", else: "offers no history.")
+  # What the rewrite did to computer history, where it changed anything the
+  # server can have, in words the owner can act on.
+  defp history_sentence(:off, true),
+    do: [
+      "Computer history was not shared with your server before this update, so it is " <>
+        "switched off on this computer now and nothing it recorded is sent. " <> @share_history
     ]
-  end
 
-  defp on_off(true), do: "on"
-  defp on_off(false), do: "off"
+  defp history_sentence(:on, false),
+    do: [
+      "Computer history was shared with your server before this update but was not " <>
+        "recording on this computer, and it stays off. " <> @share_history
+    ]
+
+  defp history_sentence(_history, _recorder), do: []
 
   # The offers reporter re-sends what this computer offers, the invocations
   # read the master switch again, the screen lets go of the server and the

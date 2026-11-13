@@ -11,6 +11,7 @@ defmodule FermixCore.Setup.ConfigStoreMachineTest do
   alias FermixCore.Harness.Config, as: HarnessConfig
   alias FermixCore.Home.Archive.ConfigText
   alias FermixCore.Home.Candidate
+  alias FermixCore.Home.DesktopLink
   alias FermixCore.Sandbox.Config, as: SandboxConfig
   alias FermixCore.Setup.ConfigStore
   alias FermixCore.Setup.MachineFile
@@ -396,7 +397,8 @@ defmodule FermixCore.Setup.ConfigStoreMachineTest do
     notifications = false
     """
 
-    test "are rewritten once: files and commands on only where both were, the recorder deciding",
+    # A Mac that is its own home again (no link) keeps its recorder as it was.
+    test "are rewritten once: files and commands on only where both were, the recorder kept",
          ctx do
       File.write!(MachineFile.path(ctx.home), MachineFile.header() <> "\n\n" <> @old_switches)
 
@@ -406,7 +408,7 @@ defmodule FermixCore.Setup.ConfigStoreMachineTest do
         end)
 
       assert log =~ "files_and_shell = false"
-      assert log =~ "its recorder is on"
+      refute log =~ "Computer history"
       machine = File.read!(MachineFile.path(ctx.home))
 
       for gone <- ~w(files shell history voice attachments accessory notifications),
@@ -429,6 +431,36 @@ defmodule FermixCore.Setup.ConfigStoreMachineTest do
       refute capture_log(fn ->
                assert :ok = ConfigStore.migrate_machine_file(ctx.home, server?: false)
              end) =~ "files_and_shell"
+
+      assert File.read!(MachineFile.path(ctx.home)) == machine
+    end
+
+    # HS-5: on a computer linked to its server, history its old switch kept
+    # from the server stays out of its reach: the recorder goes off in the
+    # same write, and the log says what to do about it, once.
+    test "on a linked computer, an old history switch that was off turns its recorder off",
+         ctx do
+      File.mkdir_p!(Path.dirname(DesktopLink.path(ctx.home)))
+      File.write!(DesktopLink.path(ctx.home), "{}")
+      File.write!(MachineFile.path(ctx.home), MachineFile.header() <> "\n\n" <> @old_switches)
+
+      log =
+        capture_log(fn ->
+          assert :ok = ConfigStore.migrate_machine_file(ctx.home, server?: false)
+        end)
+
+      assert log =~ "Turn Computer history on at this computer to share it with your server."
+      machine = File.read!(MachineFile.path(ctx.home))
+
+      assert ConfigText.value(machine, "fermix_core.computer_history", "enabled") ==
+               {:ok, "false"}
+
+      assert {:ok, loaded} = ConfigStore.load_runtime_config(resolve_secrets: false, macos?: true)
+      assert Keyword.fetch!(loaded.fermix_core, :computer_history)[:enabled] == false
+
+      refute capture_log(fn ->
+               assert :ok = ConfigStore.migrate_machine_file(ctx.home, server?: false)
+             end) =~ "Computer history"
 
       assert File.read!(MachineFile.path(ctx.home)) == machine
     end
