@@ -223,13 +223,146 @@ defmodule FermixCore.ReplyBlocksTest do
 
     test "keeps a conversation's newest places, never more than the bound" do
       {server, _clock} = holder()
-      bound = ReplyBlocks.max_records()
+      bound = ReplyBlocks.max_indexed()
 
       :ok = ReplyBlocks.put_places(server, @chat, Enum.map(1..(bound + 2), &record/1))
 
       assert ReplyBlocks.place_by_url(server, @chat, "https://cafe2.example/") == :error
       assert {:ok, _place} = ReplyBlocks.place_by_url(server, @chat, "https://cafe3.example/")
       assert length(:sys.get_state(server).places[@chat]) == bound
+    end
+
+    # M89 §04 promises a link a lookup offered resolves for 30 minutes: a trip
+    # made over several calls offers in one call and applies two calls later,
+    # with a full call of 40 lookups and the searches between in the way.
+    test "two calls of 40 lookups and four searches between keep the first call's links" do
+      {server, _clock} = holder()
+
+      :ok = ReplyBlocks.put_places(server, @chat, Enum.map(1..40, &record/1))
+
+      for search <- 0..3 do
+        :ok =
+          ReplyBlocks.put_places(server, @chat, Enum.map(1..10, &record(100 + 10 * search + &1)))
+      end
+
+      :ok = ReplyBlocks.put_places(server, @chat, Enum.map(201..240, &record/1))
+
+      for n <- [1, 40] do
+        assert {:ok, %{name: name}} =
+                 ReplyBlocks.place_by_url(server, @chat, "https://cafe#{n}.example/")
+
+        assert name == "Cafe #{n}"
+      end
+    end
+  end
+
+  # Each kind a reply draws is bounded on its own (the places, the events,
+  # the lists' touches and the trips'), so no kind evicts another and a turn's
+  # own changes are never lost to a long agenda read in the same turn.
+  describe "each kind's own bound" do
+    defp agenda_card(n, overrides \\ %{}) do
+      Map.merge(
+        %{
+          "event_id" => "evt_agenda#{String.pad_leading(Integer.to_string(n), 9, "0")}",
+          "title" => "Agenda #{n}",
+          "kind" => "event",
+          "date" => Date.to_iso8601(Date.add(~D[2027-01-01], n)),
+          "timezone" => "America/New_York",
+          "status" => "active",
+          "when" => "Some day"
+        },
+        overrides
+      )
+    end
+
+    defp block_types(blocks), do: Enum.map(blocks, & &1["type"])
+
+    test "a long agenda evicts no place, no touch and none of the turn's changes" do
+      {server, _clock} = holder()
+      stored = agenda_card(90, %{"change" => "stored"})
+      list = %{list_id: "ck_3m9q2x7d1a", title: "Errands", rows: ["ci_7k2m9d0q4a"]}
+      trip = %{trip_id: "tr_1q8m2x7v1d", title: "Varonne", rows: ["ti_3d8f1q6z2x"]}
+
+      :ok = ReplyBlocks.put_places(server, @chat, [record(1)])
+      :ok = ReplyBlocks.put_events(server, @chat, [stored])
+      :ok = ReplyBlocks.put_checklists(server, @chat, [list])
+      :ok = ReplyBlocks.put_trips(server, @chat, [trip])
+      :ok = ReplyBlocks.put_events(server, @chat, Enum.map(1..60, &agenda_card/1))
+      :ok = ReplyBlocks.put_events(server, @chat, Enum.map(61..85, &agenda_card/1))
+
+      blocks =
+        ReplyBlocks.build("[Cafe 1](https://cafe1.example/)", ReplyBlocks.take(server, @chat))
+
+      assert block_types(blocks) == ["places", "checklists", "events", "trips"]
+
+      [%{"events" => events}] = Enum.filter(blocks, &(&1["type"] == "events"))
+      assert length(events) == ReplyBlocks.max_events()
+      assert hd(events) == stored
+      assert Enum.map(tl(events), & &1["title"]) == Enum.map(1..7, &"Agenda #{&1}")
+    end
+
+    test "an event is kept once, and a conversation holds no more listed ones than a block draws" do
+      {server, _clock} = holder()
+
+      :ok = ReplyBlocks.put_events(server, @chat, Enum.map(1..100, &agenda_card/1))
+      :ok = ReplyBlocks.put_events(server, @chat, Enum.map(1..100, &agenda_card/1))
+      assert length(:sys.get_state(server).conversations[@chat]) == ReplyBlocks.max_events()
+
+      # An event listed past the eight a block draws, and then changed, is
+      # carried first as changed, the earliest listed ones after it.
+      :ok = ReplyBlocks.put_events(server, @chat, [agenda_card(70, %{"change" => "changed"})])
+
+      assert [%{"events" => [changed | listed]}] =
+               server |> ReplyBlocks.take(@chat) |> ReplyBlocks.events()
+
+      assert changed == agenda_card(70, %{"change" => "changed"})
+      assert Enum.map(listed, & &1["title"]) == Enum.map(1..7, &"Agenda #{&1}")
+    end
+
+    test "a change listed again later keeps its change and its place among the changes" do
+      {server, _clock} = holder()
+
+      :ok = ReplyBlocks.put_events(server, @chat, [agenda_card(5, %{"change" => "stored"})])
+      :ok = ReplyBlocks.put_events(server, @chat, [agenda_card(3, %{"change" => "cancelled"})])
+      :ok = ReplyBlocks.put_events(server, @chat, Enum.map(1..40, &agenda_card/1))
+
+      assert [%{"events" => [first, second | _listed]}] =
+               server |> ReplyBlocks.take(@chat) |> ReplyBlocks.events()
+
+      assert {first["title"], first["change"]} == {"Agenda 5", "stored"}
+      assert {second["title"], second["change"]} == {"Agenda 3", "cancelled"}
+    end
+
+    test "the lists' touches and the trips' are bounded apart: a flood of one keeps the other" do
+      {server, _clock} = holder()
+      bound = ReplyBlocks.max_touches()
+      list = %{list_id: "ck_3m9q2x7d1a", title: "Errands", rows: []}
+      trip = %{trip_id: "tr_1q8m2x7v1d", title: "Varonne", rows: []}
+
+      :ok = ReplyBlocks.put_checklists(server, @chat, [list])
+
+      :ok =
+        ReplyBlocks.put_trips(
+          server,
+          @chat,
+          Enum.map(1..(bound + 3), &%{trip_id: "tr_#{&1}", title: "Trip #{&1}", rows: []})
+        )
+
+      assert [{:checklist, ^list} | trips] = ReplyBlocks.take(server, @chat)
+      assert length(trips) == bound
+      assert hd(trips) == {:trip, %{trip_id: "tr_4", title: "Trip 4", rows: []}}
+
+      :ok = ReplyBlocks.put_trips(server, @chat, [trip])
+
+      :ok =
+        ReplyBlocks.put_checklists(
+          server,
+          @chat,
+          Enum.map(1..(bound + 3), &%{list_id: "ck_#{&1}", title: "List #{&1}", rows: []})
+        )
+
+      assert [{:trip, ^trip} | lists] = ReplyBlocks.take(server, @chat)
+      assert length(lists) == bound
     end
   end
 

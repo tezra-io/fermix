@@ -14,7 +14,11 @@ description: >
   speaks version 7 alone and takes no version per case, and no driver speaks
   the mobile wire. Every ask case removes what it stored; a companion case is
   one turn by the driver's contract, so it stores a date months out, after any
-  run window.
+  run window. GATES: a reply that states a date may write it in any form
+  (December 11, 11 Dec, 2026-12-11), so the floor is the day's number, which
+  every form carries (never a clock time such as the 9:00 AM a date-only
+  reminder rings at), and `reply_not_matches` refuses the one wrong posture a
+  word can show, pointing at a card; the rubric reads the date and time whole.
 defaults:
   timeout_ms: 180000
   judge: true
@@ -33,7 +37,8 @@ scenarios:
           - query: "Remind me about the dentist on December 11 at 10:30 am."
             expect:
               tools_any: [event_store]
-              reply_matches: "(?i)\\b(december|dec)\\b"
+              reply_matches: "\\b11(th)?\\b"
+              reply_not_matches: "(?i)\\bcards?\\b"
           - query: "Thanks. Cancel that dentist reminder now, I booked it somewhere else."
             expect:
               tools_any: [event_remove]
@@ -54,7 +59,8 @@ scenarios:
           - query: "What do I have coming up?"
             expect:
               tools_any: [event_list]
-              reply_matches: "(?i)\\b(october|oct)\\b"
+              reply_matches: "(?is)\\bilan\\b.*\\b0?3(rd)?\\b|\\b0?3(rd)?\\b.*\\bilan\\b"
+              reply_not_matches: "(?i)\\bcards?\\b"
           - query: "Take Ilan's birthday off again, I'll keep it in my own calendar."
             expect:
               tools_any: [event_remove]
@@ -77,7 +83,8 @@ scenarios:
         query: "I've got a haircut on January 20 at 4pm, can you remind me?"
         expect:
           tools_any: [event_store]
-          reply_matches: "(?i)\\b(january|jan)\\b"
+          reply_matches: "\\b20(th)?\\b"
+          reply_not_matches: "(?i)\\bcards?\\b"
           max_cost_usd: 1.0
           wire:
             events_all: [accepted, turn_started, text_done]
@@ -92,7 +99,8 @@ scenarios:
         query: "Remind me on February 9 to pay the gym fee."
         expect:
           tools_any: [event_store]
-          reply_matches: "(?i)\\b(february|feb)\\b"
+          reply_matches: "(?i)\\b0?9(th)?\\b(?!\\s*(?::|\\.\\d|[ap]\\.?m\\b))"
+          reply_not_matches: "(?i)\\bcards?\\b"
           max_cost_usd: 1.0
           wire:
             events_all: [accepted, turn_started, text_done]

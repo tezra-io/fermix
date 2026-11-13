@@ -57,6 +57,7 @@ defmodule FermixCore.Agents.TurnRunner do
   alias FermixCore.Providers.RouteResolver
   alias FermixCore.Realtime.RecentCalls
   alias FermixCore.Reply
+  alias FermixCore.ReplyBlocks
   alias FermixCore.Setup.SecretPaths
   alias FermixCore.Telemetry
   alias FermixCore.Temporal.Access, as: TemporalAccess
@@ -493,6 +494,7 @@ defmodule FermixCore.Agents.TurnRunner do
     owner_text = UntrustedContent.owner_text(msg)
     {msg, parts} = with_attachments(msg, state, session_id, voice_call)
     conversation_key = ConversationKey.from(msg)
+    :ok = drop_earlier_records(state, conversation_key)
     %RuntimeContext{} = ctx = state.runtime_context
     cache_status = Map.get(msg, :__runtime_context_cache_status, :hit)
     source_trust = Map.get(msg, :source_trust)
@@ -808,6 +810,28 @@ defmodule FermixCore.Agents.TurnRunner do
 
   defp session_id({:ok, %{turn_session_id: turn_session_id}}), do: turn_session_id
   defp session_id(:none), do: "main-#{System.unique_integer([:positive, :monotonic])}"
+
+  # A reply draws only what its own turn's tools put (`FermixCore.ReplyBlocks`):
+  # what an earlier turn in the conversation put and no reply took (a Live
+  # call's hand-off in the chat, a turn that ended with no reply, failed or was
+  # stopped) is dropped as this turn begins, before any tool of it runs. The
+  # conversation's turns run one at a time, and a reply takes its turn's
+  # records before that turn ends, so none a reply is owed is here. The place
+  # index stays (`ReplyBlocks.place_by_url/3`). A holder that cannot answer is
+  # the operator's to read: the turn runs, and a reply stands as its text.
+  # `:reply_blocks` is a test's own holder.
+  defp drop_earlier_records(state, conversation_key) do
+    _left = state |> Map.get(:reply_blocks, ReplyBlocks) |> ReplyBlocks.take(conversation_key)
+    :ok
+  catch
+    :exit, reason ->
+      Logger.error(
+        "an earlier turn's reply records in #{inspect(conversation_key)} were not dropped: " <>
+          inspect(reason)
+      )
+
+      :ok
+  end
 
   defp parent_session({:ok, %{call_id: call_id}}), do: call_id
   defp parent_session(:none), do: nil

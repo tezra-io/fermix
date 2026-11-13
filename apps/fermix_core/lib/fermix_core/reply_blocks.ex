@@ -7,14 +7,25 @@ defmodule FermixCore.ReplyBlocks do
   The holder keeps, per conversation key, the places `place_search` handed the
   model (`put_places/3`), the lists `checklist_read` and `checklist_edit`
   read or changed (`put_checklists/3`, M85 §07) and the trips `trip_read` and
-  `trip_edit` read or changed (`put_trips/3`, M89 §06), until the companion turn
-  writer takes them for the reply it writes (`take/2`). It is bounded whichever channel ran the search:
-  a record expires 30 minutes after it was put, a conversation keeps its newest
-  50 places and events and, apart from them, its newest 100 list and trip
-  touches (a trip's lookups put a place each, up to 40 a call, and must not
-  evict what the turn touched, M89 C3), and expired records of every conversation
-  are dropped on each call, so a conversation that never takes holds nothing
-  past the window.
+  `trip_edit` read or changed (`put_trips/3`, M89 §06), and the events the
+  event tools returned (`put_events/3`), until the companion turn writer takes
+  them for the reply it writes (`take/2`). A turn starts with none of them:
+  what an earlier turn put and no reply took (a Live call's hand-off in the
+  chat, a turn that ended with no reply, failed or was stopped) is dropped as
+  the next turn in the conversation begins (`FermixCore.Agents.TurnRunner`), so a
+  reply draws only its own turn's records.
+
+  It is bounded whichever channel ran the search, each kind on its own so
+  that no kind evicts another: a record expires 30 minutes after it was put,
+  and a conversation keeps its newest 50 places, its newest 100 list touches
+  and, apart from them, its newest 100 trip touches (a trip's lookups put a
+  place each, up to 40 a call, and must not evict what the turn touched, M89
+  C3). Its events are kept once each, in their last state with the turn's
+  latest change, and only as far as a block can draw them: every event the
+  turn changed (at most 50) and the eight listed ones a block would draw
+  first, so a long agenda never evicts the turn's own changes. Expired
+  records of every conversation are dropped on each call, so a conversation
+  that never takes holds nothing past the window.
 
   `build/2` is pure. The link is the reference: it reads the links in a reply's
   text in order (a markdown link's target or a bare URL) and keeps the places
@@ -66,7 +77,9 @@ defmodule FermixCore.ReplyBlocks do
   ## The place index
 
   Every place put is also indexed under its conversation for the same 30
-  minutes, newest 50, and `take/2` leaves the index alone: a trip's `place`
+  minutes, newest 120: two `trip_edit` calls of 40 lookups each and four
+  searches of ten between them, so a link one call offered still resolves two
+  calls later. `take/2` leaves the index alone: a trip's `place`
   given as a link a search in this conversation returned resolves through
   `place_by_url/3` a turn after the reply that showed it (M89 §04, C2), on a
   channel whose replies take the records as on one whose replies do not. The
@@ -99,9 +112,10 @@ defmodule FermixCore.ReplyBlocks do
   @max_categories 5
   @max_records 50
   @max_touches 100
-  # The records that name a kept object a tool touched, bounded apart from the
-  # places and events.
-  @touch_kinds [:checklist, :trip]
+  # Far past the eight a block draws: a turn's own changes are kept whole.
+  @max_changed_events 50
+  # Two trip_edit calls of 40 lookups and four searches of ten between them.
+  @max_indexed 120
   @ttl_ms 30 * 60 * 1_000
 
   # A link a reader clicks: a markdown link's target (the text between its
@@ -245,9 +259,13 @@ defmodule FermixCore.ReplyBlocks do
   @spec max_records() :: pos_integer()
   def max_records, do: @max_records
 
-  @doc "The most list and trip touches a conversation keeps apart from its places, newest kept."
+  @doc "The most touches of one kept kind (lists, trips) a conversation keeps, newest kept."
   @spec max_touches() :: pos_integer()
   def max_touches, do: @max_touches
+
+  @doc "The most places the place index keeps for a conversation, newest kept."
+  @spec max_indexed() :: pos_integer()
+  def max_indexed, do: @max_indexed
 
   @doc "How long a place record is kept after it was put, in milliseconds."
   @spec ttl_ms() :: pos_integer()
@@ -306,8 +324,9 @@ defmodule FermixCore.ReplyBlocks do
        do: {:event, card}
 
   @doc """
-  The conversation's live records, oldest first, which the holder then
-  forgets.
+  The conversation's live records, oldest first and its events once each after
+  the rest, which the holder then forgets. A turn begins by taking what an
+  earlier turn left (moduledoc).
   """
   @spec take(GenServer.server(), conversation_key()) :: [record()]
   def take(server \\ __MODULE__, conversation_key)
@@ -372,35 +391,43 @@ defmodule FermixCore.ReplyBlocks do
     {changed, listed} =
       records
       |> Enum.flat_map(fn
-        {:event, card} -> [card]
+        {:event, card} -> [{nil, card}]
         _other -> []
       end)
-      |> Enum.reduce([], &merge_event/2)
-      |> Enum.reverse()
-      |> Enum.split_with(&Map.has_key?(&1, "change"))
+      |> fold_events()
+      |> Enum.map(&elem(&1, 1))
+      |> Enum.split_with(&changed?/1)
 
-    (changed ++ Enum.sort_by(listed, &{&1["date"], Map.get(&1, "time", ""), &1["event_id"]}))
+    (changed ++ Enum.sort_by(listed, &event_order/1))
     |> Enum.take(@max_events)
     |> events_block()
   end
 
-  # Newest first while folding: an event returned again keeps its place and
-  # takes its newest state, and the latest change the turn made to it. An
-  # event first only listed and changed later moves to where it was changed.
-  defp merge_event(card, merged) do
-    case Enum.find_index(merged, &(&1["event_id"] == card["event_id"])) do
+  # Each event once, oldest first, each with what it was put with (the holder's
+  # put time, or nothing): an event returned again keeps its place and takes
+  # its newest state, and the latest change the turn made to it. An event
+  # first only listed and changed later moves to where it was changed.
+  defp fold_events(pairs), do: pairs |> Enum.reduce([], &merge_event/2) |> Enum.reverse()
+
+  # Newest first while folding.
+  defp merge_event({put_at, card}, merged) do
+    case Enum.find_index(merged, fn {_at, kept} -> kept["event_id"] == card["event_id"] end) do
       nil ->
-        [card | merged]
+        [{put_at, card} | merged]
 
       index ->
-        kept = Enum.at(merged, index)
+        {_at, kept} = Enum.at(merged, index)
         newest = keep_change(card, kept)
 
-        if Map.has_key?(kept, "change") or not Map.has_key?(newest, "change"),
-          do: List.replace_at(merged, index, newest),
-          else: [newest | List.delete_at(merged, index)]
+        if changed?(kept) or not changed?(newest),
+          do: List.replace_at(merged, index, {put_at, newest}),
+          else: [{put_at, newest} | List.delete_at(merged, index)]
     end
   end
+
+  defp changed?(card), do: Map.has_key?(card, "change")
+
+  defp event_order(card), do: {card["date"], Map.get(card, "time", ""), card["event_id"]}
 
   defp keep_change(%{"change" => _change} = card, _kept), do: card
 
@@ -558,12 +585,35 @@ defmodule FermixCore.ReplyBlocks do
     end
   end
 
-  # A conversation's touches and its other records are bounded apart, each
-  # newest kept, and every record stays where it was put among the rest.
+  # Each kind is bounded on its own: the places, the lists' touches and the
+  # trips', each newest kept and where it was put among the rest, then the
+  # events, once each and only as far as a block can draw them.
   defp bounded(records) do
-    records
-    |> keep_newest(&touch_record?/1, @max_touches)
-    |> keep_newest(&(not touch_record?(&1)), @max_records)
+    {events, others} = Enum.split_with(records, &event_record?/1)
+
+    others
+    |> keep_newest(&place_record?/1, @max_records)
+    |> keep_newest(&record_of?(&1, :checklist), @max_touches)
+    |> keep_newest(&record_of?(&1, :trip), @max_touches)
+    |> Kernel.++(kept_events(events))
+  end
+
+  # Every event the turn changed, in the order it first changed them, and the
+  # listed ones a block would draw first (by date): a listed one changed later
+  # moves among the changes, and the next listed one by date is kept already.
+  defp kept_events(records) do
+    {changed, listed} =
+      records
+      |> Enum.map(fn {put_at, {:event, card}} -> {put_at, card} end)
+      |> fold_events()
+      |> Enum.split_with(fn {_put_at, card} -> changed?(card) end)
+
+    listed = listed |> Enum.sort_by(&event_order(elem(&1, 1))) |> Enum.take(@max_events)
+
+    changed
+    |> Enum.take(@max_changed_events)
+    |> Kernel.++(listed)
+    |> Enum.map(fn {put_at, card} -> {put_at, {:event, card}} end)
   end
 
   defp keep_newest(records, member?, max) do
@@ -577,15 +627,17 @@ defmodule FermixCore.ReplyBlocks do
     kept
   end
 
-  defp touch_record?({_put_at, {kind, _touch}}), do: kind in @touch_kinds
-  defp touch_record?({_put_at, _record}), do: false
+  defp record_of?({_put_at, {kind, _record}}, kind), do: true
+  defp record_of?({_put_at, _record}, _kind), do: false
+
+  defp event_record?(stamped), do: record_of?(stamped, :event)
 
   defp place_record?({_put_at, record}), do: is_map(record)
 
   defp index(places, _key, []), do: places
 
   defp index(places, key, stamped),
-    do: Map.put(places, key, Enum.take(Map.get(places, key, []) ++ stamped, -@max_records))
+    do: Map.put(places, key, Enum.take(Map.get(places, key, []) ++ stamped, -@max_indexed))
 
   defp sweep(conversations, now) do
     conversations

@@ -129,5 +129,18 @@ defmodule FermixCore.Prompt.ChannelPresentationTest do
         assert ChannelPresentation.events_line(channel, draws?) == nil, inspect(channel)
       end
     end
+
+    # A block carries at most `ReplyBlocks.max_events/0` events, so the line
+    # says no more are drawn and has the reply say how many more there are:
+    # the rest are in neither the card nor the text otherwise.
+    test "says how many a reply draws at most, and to say how many more there are" do
+      most = Integer.to_string(FermixCore.ReplyBlocks.max_events())
+
+      for channel <- ["companion", "mobile"] do
+        line = ChannelPresentation.events_line(channel, true)
+        assert line =~ "at most #{most}"
+        assert line =~ "more than #{most}, say how many more"
+      end
+    end
   end
 end

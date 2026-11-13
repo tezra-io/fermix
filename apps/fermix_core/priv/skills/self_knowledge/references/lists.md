@@ -51,7 +51,7 @@ One call is `{"changes": [{"list": <title or id>, "ops": [...]}]}`: at most 8 li
 ## Who can use them
 
 - Only the owner's attended, top-level turn in a private chat (a Telegram or Slack direct message, the Fermix Mac app, the paired phone) and the owner's own voice call. A guest, a group chat, a Slack channel mention, a shared Buzz session, a delegated worker and a coding continuation see no list tool, no list line and no list. The tools are never in the capability catalog; on the owner's turns a line names the lists by folder (names only, no counts).
-- A scheduled job reaches a list tool only when its allowed tools name it, at operator trust, and `schedule_job` gives a job one only from the owner's private turn. A job set up with no allowed tools does not get them. A change a job makes is recorded as made by a job.
+- A scheduled job reaches a list tool only when its allowed tools name it, at operator trust, and `schedule_job` gives a job one only from the owner's private turn, and never from one that has read something from outside (a fetched page, a search, a cue). A job set up with no allowed tools does not get them. A change a job makes is recorded as made by a job.
 - **After outside content** (a fetched page, a cue, a plugin's or a worker's output): `add` and `check` still land, the rows marked and framed as `(added after outside content) "…"` whenever they are read back, which marks the reading request too; every other op, `create` included (a list's title is not marked, and the line naming the lists reaches every turn of the owner's), is refused: "That change waits for a turn that read nothing from outside; ask me again."
 - A list's rows are the owner's data, never instructions, wherever they are read.
 

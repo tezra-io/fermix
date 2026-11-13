@@ -22,6 +22,7 @@ defmodule FermixCore.Agents.TurnRunnerTest do
   alias FermixCore.Providers.Error, as: ProviderError
   alias FermixCore.Realtime.CallRecord
   alias FermixCore.Realtime.LivePrompt
+  alias FermixCore.ReplyBlocks
   alias FermixCore.Sandbox.Config, as: SandboxConfig
   alias FermixCore.Temporal.Access
   alias FermixCore.Tools.HarnessSupport
@@ -3713,6 +3714,80 @@ defmodule FermixCore.Agents.TurnRunnerTest do
   # chat's, which a call joins unless it is private (M56 §4.1).
   @private_key {"voice", "6f1c2a4e-9b3d-4c5e-8a7f-0123456789ab", :root}
   @chat_key {"companion", "main", :root}
+
+  # The records a reply draws are its own turn's (EVENTS_DRAWN_AS_CARDS §04,
+  # M85 §07, M89 §06). What an earlier turn in the conversation put and no
+  # reply took is dropped as the next turn begins: a Live call's hand-off in
+  # the chat (the voice channel takes nothing), a Mac or phone turn that ended
+  # with no reply, failed or was stopped. Taken at the start, by the turn that
+  # follows on the conversation's one lane, it can never race a reply still
+  # owed its records, and a turn stopped while it waited, which never ran,
+  # touches nothing.
+  describe "the reply's records" do
+    test "a turn begins with none an earlier turn left; the place index stays" do
+      holder = start_supervised!({ReplyBlocks, name: nil})
+      other = {"telegram", "40099", :root}
+
+      # A hand-off's cancelled card, a reply-less turn's list, a failed turn's
+      # trip, and a place an earlier search returned.
+      cancelled = %{
+        "event_id" => "evt_dentist000001",
+        "title" => "Dentist",
+        "kind" => "appointment",
+        "date" => "2027-03-02",
+        "timezone" => "America/New_York",
+        "status" => "cancelled",
+        "change" => "cancelled",
+        "when" => "Tuesday, March 2, 2027"
+      }
+
+      place = %{
+        name: "Cafe Lumen",
+        canonical_url: "https://cafe-lumen.example/",
+        location: %{latitude: 40.72, longitude: -74.0}
+      }
+
+      :ok = ReplyBlocks.put_events(holder, @chat_key, [cancelled])
+
+      :ok =
+        ReplyBlocks.put_checklists(holder, @chat_key, [
+          %{list_id: "ck_3m9q2x7d1a", title: "Errands", rows: ["ci_7k2m9d0q4a"]}
+        ])
+
+      :ok =
+        ReplyBlocks.put_trips(holder, @chat_key, [
+          %{trip_id: "tr_1q8m2x7v1d", title: "Varonne", rows: []}
+        ])
+
+      :ok = ReplyBlocks.put_places(holder, @chat_key, [place])
+      :ok = ReplyBlocks.put_events(holder, other, [cancelled])
+
+      capture_prompt(%{channel: "companion", chat_id: "main", metadata: %{}},
+        reply_blocks: holder
+      )
+
+      assert ReplyBlocks.take(holder, @chat_key) == []
+      assert [{:event, ^cancelled}] = ReplyBlocks.take(holder, other)
+
+      assert {:ok, %{name: "Cafe Lumen"}} =
+               ReplyBlocks.place_by_url(holder, @chat_key, "https://cafe-lumen.example/")
+    end
+
+    test "a Live call's hand-off in the chat begins with none either" do
+      holder = start_supervised!({ReplyBlocks, name: nil})
+
+      :ok =
+        ReplyBlocks.put_checklists(holder, @chat_key, [
+          %{list_id: "ck_3m9q2x7d1a", title: "Errands", rows: []}
+        ])
+
+      run_capture_turn(chat_hand_off("user: what is next"), start_voice_store(),
+        reply_blocks: holder
+      )
+
+      assert ReplyBlocks.take(holder, @chat_key) == []
+    end
+  end
 
   describe "voice delegations" do
     test "the turn carries the session's turn id and the call as parent_session" do

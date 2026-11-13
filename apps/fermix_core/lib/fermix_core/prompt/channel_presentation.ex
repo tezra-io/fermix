@@ -147,11 +147,18 @@ defmodule FermixCore.Prompt.ChannelPresentation do
   it negotiated companion 8 or mobile 3, `FermixCore.ReplyBlocks.drawn_types/3`,
   the answer that also decides it is sent the `events` block), or nil:
   everywhere else nothing changes, and the reply states each event as words.
+  A block carries at most `FermixCore.ReplyBlocks.max_events/0` events, the
+  changed ones first, so the line says so, and has the reply say how many
+  more there are: the rest are in neither the card nor the text otherwise.
   """
   @spec events_line(String.t() | nil, boolean()) :: String.t() | nil
   def events_line(channel, true) when channel in ["companion", "mobile"] do
-    "Events you store, change or list are drawn under your reply, with their dates and " <>
-      "reminders, so confirm in a sentence and do not write each one out."
+    most = Integer.to_string(FermixCore.ReplyBlocks.max_events())
+
+    "Events you store, change or list are drawn under your reply with their dates and " <>
+      "reminders, at most #{most}, the ones you changed first and then the earliest: " <>
+      "confirm in a sentence and do not write those out, and when there are more than " <>
+      "#{most}, say how many more there are."
   end
 
   def events_line(channel, draws?)

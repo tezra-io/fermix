@@ -12,7 +12,8 @@ defmodule FermixCore.Kept.Access do
   coding continuation see none of them. The one other caller is a scheduled
   job whose allowed tools name the tool (`job_run?/2`): its run is at operator
   trust, and `schedule_job` gives a job a kept kind's tools only from the
-  owner's private turn (`check_job_tools/2`). A device reads and changes them
+  owner's private turn, and only one that has read nothing from outside
+  (`check_job_tools/2`). A device reads and changes them
   only over a connection the daemon placed as the owner's (`device_gate/1`).
 
   What the turn had read is the other fact (`read_outside?/1`, the access
@@ -102,22 +103,35 @@ defmodule FermixCore.Kept.Access do
   @doc """
   For `schedule_job`: a job may name a kept kind's tool only when it is set up
   on the owner's own private turn, the one place the tools are offered to a
-  person.
+  person, and only from one that has read nothing from outside: a job's run is
+  at operator trust and reads nothing, so every op runs there, and what a
+  page asked for would land through it whole.
   """
   @spec check_job_tools([String.t()], map()) :: :ok | {:error, String.t()}
   def check_job_tools(names, context) when is_list(names) and is_map(context) do
     case Enum.find(names, &tool_name?/1) do
-      nil ->
-        :ok
+      nil -> :ok
+      name -> job_turn(name, context)
+    end
+  end
 
-      name ->
-        if private_owner_turn?(context), do: :ok, else: {:error, job_refusal(name)}
+  defp job_turn(name, context) do
+    cond do
+      not private_owner_turn?(context) -> {:error, job_refusal(name)}
+      read_outside?(context) -> {:error, outside_job_refusal(name)}
+      true -> :ok
     end
   end
 
   defp job_refusal(name) do
     "#{name} can be given to a job only from the owner's own private chat or their voice " <>
       "call, so this job was not set up; ask the owner to set it up there."
+  end
+
+  defp outside_job_refusal(name) do
+    "#{name} can't be given to a job from a turn that has read something from outside, " <>
+      "since the job would change the owner's things without them; this job was not set " <>
+      "up, so say what it would do and ask the owner to set it up in their next message."
   end
 
   @doc "The mark that frames what was written after outside content, when it is read back."

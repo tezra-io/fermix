@@ -12,6 +12,7 @@ defmodule FermixCore.Tools.UpdateJob do
   alias FermixCore.Cues.Pins
   alias FermixCore.Jobs.DeliveryDefaults
   alias FermixCore.Jobs.Registry
+  alias FermixCore.Kept.Access, as: KeptAccess
   alias FermixCore.Tools.JobRegistrySupport, as: Support
 
   @impl true
@@ -151,6 +152,7 @@ defmodule FermixCore.Tools.UpdateJob do
          {:ok, attrs} <-
            update_attrs(args, skill_name(skill), delivery, route_pin, clear_route_pin?),
          {:ok, job} <- Support.check_job_access(job_id, context),
+         :ok <- KeptAccess.check_job_tools(Map.get(job, :allowed_tools) || [], context),
          :ok <- Support.check_change_trust(job, context),
          :ok <- Support.check_cue_skill(job, skill, context),
          :ok <- Support.check_skill_tools(job, skill, context),
