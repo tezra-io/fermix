@@ -3,10 +3,11 @@ defmodule FermixCore.Trips.Render do
   The owner's trips as the model reads them, as they are shared, and the
   answer to a `trip_edit` call (M89 §04, §13): text, never rows. Pure.
 
-  **A read** (`read/4`) is a header line (the title, id, dates, zone, rev and
-  counts), the line that says the rows are the owner's data, then each day
-  asked: `## [n] Day k` with its date, its name and the zone it names of its
-  own, and a line a stop, `- [n]` with its time, words, length, `fixed` and
+  **A read** (`read/4`) is a header line (the title, id, dates, zone, the
+  trip's `near`, rev and counts), the line that says the rows are the owner's
+  data, then each day asked: `## [n] Day k` with its date, its name, the zone
+  and the `near` it names of its own (D10, JSON-quoted as the model's words
+  are), and a line a stop, `- [n]` with its time, words, length, `fixed` and
   place. Under a stop come its note's lines and, when it and a later stop of
   its day both have a place, `then X km`: the straight line to the next placed
   stop, the number the wire's `leg_m` gives that stop (C7). `[n]` is a row's
@@ -31,9 +32,10 @@ defmodule FermixCore.Trips.Render do
   booking reference is the owner's, not the reader's.
 
   **The answer** (`answer/2`) is the trip's line, what each place given in the
-  call came to (placed, offered by another name with its link, or not placed
-  and why, from `Trips.Lookup`), and each fixed stop whose date the call moved
-  (C14). A provider's words, and the owner's, are JSON-quoted there.
+  call came to (placed, offered by another name with its link, offered with
+  no place to search near and what to give, or not placed and why, from
+  `Trips.Lookup`), and each fixed stop whose date the call moved (C14). A
+  provider's words, and the owner's, are JSON-quoted there.
   """
 
   alias FermixCore.Kept.Access, as: KeptAccess
@@ -60,15 +62,16 @@ defmodule FermixCore.Trips.Render do
 
   @typedoc """
   A stop a call gave a place to, as it now stands, with what its place came
-  to: placed (the record it keeps), offered by another name (the search's own
-  record) or not placed and why; `kept` when an edit's stop kept the place it
-  had because the lookup placed nothing.
+  to: placed (the record it keeps), offered by another name or with no place
+  to search near (the search's own record) or not placed and why; `kept` when
+  an edit's stop kept the place it had because the lookup placed nothing.
   """
   @type placement :: %{
           row: map(),
           outcome:
             {:placed, map()}
             | {:offered, map()}
+            | {:offered, map(), Lookup.unanchored()}
             | {:none, Lookup.why() | :unstorable},
           kept: boolean()
         }
@@ -139,8 +142,8 @@ defmodule FermixCore.Trips.Render do
   end
 
   @doc """
-  A trip's header line: `Trip "Title" (tr_…)`, its dates and zone when it has
-  them, then `rev N · D days, S stops`.
+  A trip's header line: `Trip "Title" (tr_…)`, its dates, zone and `near`
+  when it has them, then `rev N · D days, S stops`.
   """
   @spec header(map(), [map()]) :: String.t()
   def header(trip, rows) when is_map(trip) and is_list(rows) do
@@ -150,6 +153,7 @@ defmodule FermixCore.Trips.Render do
       "Trip #{quoted(trip.title)} (#{trip.id})",
       span(trip.starts_on, max(days, 1), true),
       trip.timezone,
+      near_part(trip.near),
       "rev #{trip.rev}",
       "#{plural(days, "day")}, #{plural(stops, "stop")}"
     ])
@@ -163,8 +167,19 @@ defmodule FermixCore.Trips.Render do
   defp heading(%{row: day, position: k}, trip, year?) do
     date = Ops.day_date(trip.starts_on, k)
     name = if day.text != "", do: escape(day.text)
-    joined(["## [#{day.n}] Day #{k}", date && day_date(date, year?), name, day.timezone])
+
+    joined([
+      "## [#{day.n}] Day #{k}",
+      date && day_date(date, year?),
+      name,
+      day.timezone,
+      near_part(day.near)
+    ])
   end
+
+  # Where a trip or a day is searched near, the model's words, quoted.
+  defp near_part(nil), do: nil
+  defp near_part(near), do: "near " <> quoted(near)
 
   defp stop_lines(stops, {legs, notes}) do
     stops
@@ -371,6 +386,7 @@ defmodule FermixCore.Trips.Render do
     [line <> placed_count(placements)]
     |> Kernel.++(placed_lines(placements))
     |> Kernel.++(offered_lines(placements))
+    |> Kernel.++(unanchored_lines(placements))
     |> Kernel.++(unplaced_lines(placements))
     |> Kernel.++(moved_lines(applied.dates_moved))
     |> Enum.join("\n")
@@ -402,6 +418,22 @@ defmodule FermixCore.Trips.Render do
 
   defp linked?(place),
     do: Enum.any?([:source_url, :canonical_url], &(Map.get(place, &1) not in [nil, ""]))
+
+  # Offered with no place to search near (D10), by why, in the order each
+  # first comes up.
+  defp unanchored_lines(placements) do
+    placements
+    |> Enum.flat_map(fn
+      %{outcome: {:offered, place, why}} = placement -> [{why, offered_line(placement, place)}]
+      _placement -> []
+    end)
+    |> Enum.group_by(&elem(&1, 0), &elem(&1, 1))
+    |> Enum.sort_by(fn {why, _lines} -> unanchored_index(placements, why) end)
+    |> Enum.flat_map(fn {why, lines} -> [Lookup.offered_heading(why) <> ":" | lines] end)
+  end
+
+  defp unanchored_index(placements, why),
+    do: Enum.find_index(placements, &match?(%{outcome: {:offered, _place, ^why}}, &1))
 
   # Not placed, by why, in the order each first comes up.
   defp unplaced_lines(placements) do

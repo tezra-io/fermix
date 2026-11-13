@@ -25,6 +25,11 @@ defmodule FermixCore.Trips.Ops do
   and `day`) makes the empty days up to it. A day moved takes its stops with
   it as one run.
 
+  `near` (D10) is a place's name the place lookup searches near: the trip's,
+  given on its `create`, and a day's, given on its `day` and cleared there by
+  an empty one, which wins over the trip's for that day. The model's words,
+  kept as given; the wire never carries them (`Trips.Wire`).
+
   After outside content a call may only add (`@outside_ops`): every other op,
   `create` included, is refused, and the stop it adds is stamped. Such an add
   makes no day: a `day` past the last is refused (`:outside_new_day`).
@@ -77,6 +82,7 @@ defmodule FermixCore.Trips.Ops do
           required(:title) => String.t(),
           required(:starts_on) => Date.t() | nil,
           required(:timezone) => String.t() | nil,
+          required(:near) => String.t() | nil,
           required(:position) => integer(),
           required(:rev) => non_neg_integer(),
           required(:next_n) => pos_integer(),
@@ -86,8 +92,9 @@ defmodule FermixCore.Trips.Ops do
 
   @typedoc """
   One day or stop (`Memory.Repo.TripsSql.decode_row/1`). A day's `text` is
-  its name or "", and it carries only a `timezone`; a stop's `place` is a
-  `Trips.Place` record or nil. `dirty` is what this call did to the row.
+  its name or "", and it carries only a `timezone` and a `near`; a stop's
+  `place` is a `Trips.Place` record or nil. `dirty` is what this call did to
+  the row.
   """
   @type row :: %{
           required(:id) => String.t(),
@@ -100,6 +107,7 @@ defmodule FermixCore.Trips.Ops do
           required(:duration) => pos_integer() | nil,
           required(:fixed) => boolean(),
           required(:timezone) => String.t() | nil,
+          required(:near) => String.t() | nil,
           required(:place) => Place.t() | nil,
           required(:position) => integer(),
           required(:stamped) => boolean(),
@@ -328,6 +336,7 @@ defmodule FermixCore.Trips.Ops do
       title: title,
       starts_on: op.starts_on,
       timezone: op.timezone,
+      near: op.near,
       position: Positions.after_last(Enum.map(state.trips, & &1.position)),
       rev: 0,
       next_n: 1,
@@ -547,6 +556,7 @@ defmodule FermixCore.Trips.Ops do
           duration: nil,
           fixed: false,
           timezone: nil,
+          near: nil,
           place: nil,
           position: 0,
           stamped: kind == :stop and edit.outside?,
@@ -663,12 +673,19 @@ defmodule FermixCore.Trips.Ops do
   defp not_self(day, ref),
     do: if(names_row?(day, ref), do: {:error, {:after_self, ref}}, else: :ok)
 
-  # A day's name and zone as the op gives them; a day just made is counted
-  # among the days added, so it needs no words of its own.
+  # A day's name, zone and near as the op gives them; a day just made is
+  # counted among the days added, so it needs no words of its own.
   defp name_day(state, day_id, op, edit) do
     index = Enum.find_index(state.rows, &(&1.id == day_id))
     day = Enum.at(state.rows, index)
-    named = %{day | text: keep(op.text, day.text), timezone: keep(op.timezone, day.timezone)}
+
+    named = %{
+      day
+      | text: keep(op.text, day.text),
+        timezone: keep(op.timezone, day.timezone),
+        near: keep(op.near, day.near)
+    }
+
     k = day_of(state.rows, day_id)
 
     cond do
@@ -694,7 +711,8 @@ defmodule FermixCore.Trips.Ops do
   defp day_words(k, day, named) do
     [
       if(named.text != day.text, do: name_words(k, named.text)),
-      if(named.timezone != day.timezone, do: zone_words(k, named.timezone))
+      if(named.timezone != day.timezone, do: zone_words(k, named.timezone)),
+      if(named.near != day.near, do: near_words(k, named.near))
     ]
     |> Enum.reject(&is_nil/1)
     |> Enum.join("; ")
@@ -704,6 +722,8 @@ defmodule FermixCore.Trips.Ops do
   defp name_words(k, text), do: "named Day #{k} " <> quoted(text)
   defp zone_words(k, nil), do: "Day #{k} in the trip's zone"
   defp zone_words(k, zone), do: "Day #{k} in #{zone}"
+  defp near_words(k, nil), do: "Day #{k} has no near of its own"
+  defp near_words(k, near), do: "Day #{k} near " <> quoted(near)
 
   # --- removing and restoring ------------------------------------------------
 

@@ -4,8 +4,9 @@ defmodule FermixCore.Tools.TripEdit do
   by row number, and `Trips.Registry` applies the whole call in one
   transaction, at most 100 ops, or none of it. A stop's `place` is its own
   name or a link a place search in this conversation returned; Fermix looks a
-  name up itself, at most 40 a call, around the stop's day, and the answer
-  says what each came to: placed, offered by another name with its link, or
+  name up itself, at most 40 a call, around the stop's day or near the day's
+  or the trip's `near` (D10), and the answer says what each came to: placed,
+  offered by another name or with no place to search near, with its link, or
   not placed and why. The answer is the trip's line, never the whole trip.
 
   After outside content an add still lands, its stop stamped, and every other
@@ -45,7 +46,8 @@ defmodule FermixCore.Tools.TripEdit do
     "Make and change the owner's trips as the owner asks; a call lands whole or not at " <>
       "all. Make a trip with what is known before any search in the turn; after a search, " <>
       "only adding stops runs. place: the place's own name, never the activity, or a link " <>
-      "a search returned."
+      "a search returned. Give near (town, country) when making a trip and on a day spent " <>
+      "elsewhere: places are looked up there."
   end
 
   @impl true
@@ -70,10 +72,10 @@ defmodule FermixCore.Tools.TripEdit do
           type: "string",
           enum: Registry.ops(),
           description:
-            "create (title?, starts_on?, days?, timezone?) first. add (text; day or after; " <>
-              "time?, duration?, fixed?, note?, place?). edit (n; any of those; \"\" or 0 " <>
-              "clears). move (n; day or after; a day's n moves the day). day (day; text?, " <>
-              "timezone?). remove (n). rename (text). dates (starts_on or \"\")."
+            "create (title?, starts_on?, days?, timezone?, near?) first. add (text; day or " <>
+              "after; time?, duration?, fixed?, note?, place?). edit (n; any of those; \"\" or " <>
+              "0 clears). move (n; day or after; a day's n moves the day). day (day; text?, " <>
+              "timezone?, near?). remove (n). rename (text). dates (starts_on or \"\")."
         },
         n: %{type: "integer"},
         day: %{type: "integer"},
@@ -84,6 +86,7 @@ defmodule FermixCore.Tools.TripEdit do
         fixed: %{type: "boolean"},
         note: %{type: "string"},
         place: %{type: "string"},
+        near: %{type: "string"},
         title: %{type: "string"},
         starts_on: %{type: "string", description: "YYYY-MM-DD"},
         days: %{type: "integer"},

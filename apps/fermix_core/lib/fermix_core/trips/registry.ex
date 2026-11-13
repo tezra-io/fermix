@@ -256,8 +256,8 @@ defmodule FermixCore.Trips.Registry do
   # before the store is asked.
   defp look_up(call, edit, context, opts) do
     with {:ok, loaded} <- load(call, context, opts),
-         {:ok, requests, placed} <- Placing.requests(loaded, call, edit),
-         {:ok, found} <- resolve(requests, placed, context, opts) do
+         {:ok, requests, anchors} <- Placing.requests(loaded, call, edit),
+         {:ok, found} <- resolve(requests, anchors, context, opts) do
       :ok = join_conversation(found.records, context, opts)
       {placed_call, outcomes} = Placing.placed_call(call, found.outcomes)
       {:ok, placed_call, outcomes, looked(call, outcomes, found.lookups, context)}
@@ -275,14 +275,14 @@ defmodule FermixCore.Trips.Registry do
          do: {:ok, %{trips: [trip], rows: rows}}
   end
 
-  defp resolve(requests, placed, context, opts) do
+  defp resolve(requests, anchors, context, opts) do
     lookup_opts = [
       backend: Lookup.backend(context),
       conversation_key: Map.fetch!(context, :conversation_key),
       reply_blocks: reply_blocks(opts)
     ]
 
-    case Lookup.resolve(requests, placed, lookup_opts) do
+    case Lookup.resolve(requests, anchors, lookup_opts) do
       {:ok, found} -> {:ok, found}
       {:error, {:unknown_place_link, index}} -> {:error, {:op_failed, index, :unknown_place_link}}
       {:error, :too_many_lookups} -> {:error, :too_many_lookups}
@@ -328,6 +328,7 @@ defmodule FermixCore.Trips.Registry do
 
   defp bucket({:placed, _place}), do: :placed
   defp bucket({:offered, _place}), do: :offered
+  defp bucket({:offered, _place, _unanchored}), do: :offered
   defp bucket({:none, why}) when why in [:not_found, :no_location, :unstorable], do: :not_found
   defp bucket({:none, _why}), do: :not_looked_up
 

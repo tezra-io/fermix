@@ -12,6 +12,7 @@ defmodule FermixCore.Trips.LookupTest do
   @tower %{latitude: 41.1402, longitude: -8.6113}
   @market %{latitude: 41.1446, longitude: -8.6071}
   @quay %{latitude: 41.1408, longitude: -8.6142}
+  @town "Vila Nova, Portugal"
 
   defp place(name, point, id) do
     %{
@@ -24,6 +25,14 @@ defmodule FermixCore.Trips.LookupTest do
   end
 
   defp unlocated(name, id), do: name |> place(@tower, id) |> Map.delete(:location)
+
+  # Where a call's lookups search (`Lookup.anchors()`): the trip's placed stops
+  # by day, each day's own `near` and the trip's.
+  defp anchors(placed \\ %{}, day_near \\ %{}, trip_near \\ nil),
+    do: %{placed: placed, day_near: day_near, trip_near: trip_near}
+
+  # A trip whose `near` is the invented town, so a lookup has somewhere to search.
+  defp near_town, do: anchors(%{}, %{}, @town)
 
   defp holder do
     start_supervised!(Supervisor.child_spec({ReplyBlocks, name: nil}, id: make_ref()))
@@ -42,10 +51,10 @@ defmodule FermixCore.Trips.LookupTest do
 
   defp found(places), do: {:ok, places, %{backend: "apple_maps"}}
 
-  defp resolve(requests, placed, search, opts \\ []) do
+  defp resolve(requests, anchors, search, opts \\ []) do
     Lookup.resolve(
       requests,
-      placed,
+      anchors,
       Keyword.merge(
         [backend: {:ok, search}, reply_blocks: holder(), conversation_key: @conversation],
         opts
@@ -96,7 +105,7 @@ defmodule FermixCore.Trips.LookupTest do
       assert {:ok, %{outcomes: [{7, {:placed, placed}}], records: [placed], lookups: 1}} =
                resolve(
                  [%{ref: 7, place: "Café Lúmen, Vila Nova", day: 1}],
-                 %{},
+                 near_town(),
                  search_by(results)
                )
 
@@ -112,7 +121,7 @@ defmodule FermixCore.Trips.LookupTest do
       assert {:ok, %{outcomes: outcomes, records: records}} =
                resolve(
                  [%{ref: 1, place: "Torre Alta", day: 1}, %{ref: 2, place: "Doca", day: 1}],
-                 %{},
+                 near_town(),
                  search_by(results)
                )
 
@@ -129,7 +138,7 @@ defmodule FermixCore.Trips.LookupTest do
       opts = [reply_blocks: server]
 
       assert {:ok, %{outcomes: [{3, {:offered, ^offered}}], records: [^offered]}} =
-               resolve([%{ref: 3, place: "Check in", day: 2}], %{}, search, opts)
+               resolve([%{ref: 3, place: "Check in", day: 2}], near_town(), search, opts)
 
       :ok = ReplyBlocks.put_places(server, @conversation, [offered])
       _taken = ReplyBlocks.take(server, @conversation)
@@ -139,7 +148,7 @@ defmodule FermixCore.Trips.LookupTest do
       assert link == "https://maps.apple.com/place?place-id=I9"
 
       assert {:ok, %{outcomes: [{3, {:placed, ^offered}}], records: [], lookups: 0}} =
-               resolve([%{ref: 3, place: link, day: 2}], %{}, search, opts)
+               resolve([%{ref: 3, place: link, day: 2}], anchors(), search, opts)
 
       assert searched() == []
     end
@@ -148,7 +157,7 @@ defmodule FermixCore.Trips.LookupTest do
       search = search_by(%{"Doca Velha" => found([])})
 
       assert {:ok, %{outcomes: [{5, {:none, :not_found}}], records: [], lookups: 1}} =
-               resolve([%{ref: 5, place: "Doca Velha", day: 1}], %{}, search)
+               resolve([%{ref: 5, place: "Doca Velha", day: 1}], near_town(), search)
     end
 
     test "a failed lookup is named in the place search's own words, and the rest go on" do
@@ -160,7 +169,7 @@ defmodule FermixCore.Trips.LookupTest do
       assert {:ok, %{outcomes: outcomes, lookups: 2}} =
                resolve(
                  [%{ref: 1, place: "Torre Alta", day: 1}, %{ref: 2, place: "Mercado", day: 1}],
-                 %{},
+                 near_town(),
                  search_by(results)
                )
 
@@ -179,7 +188,7 @@ defmodule FermixCore.Trips.LookupTest do
       requests = Enum.map(1..9, &%{ref: &1, place: "Spot #{&1}", day: 1})
 
       assert {:ok, %{outcomes: outcomes, records: records, lookups: 5}} =
-               resolve(requests, %{}, search_by(results))
+               resolve(requests, near_town(), search_by(results))
 
       assert Enum.map(outcomes, fn {ref, {kind, detail}} ->
                {ref, if(kind == :none, do: detail, else: kind)}
@@ -210,7 +219,7 @@ defmodule FermixCore.Trips.LookupTest do
       ]
 
       assert {:ok, %{outcomes: outcomes, records: [], lookups: 0}} =
-               Lookup.resolve(requests, %{},
+               Lookup.resolve(requests, near_town(),
                  backend: {:error, @not_ready},
                  reply_blocks: server,
                  conversation_key: @conversation
@@ -231,7 +240,7 @@ defmodule FermixCore.Trips.LookupTest do
       assert {:ok, %{outcomes: [{2, {:placed, ^kept}}], records: [], lookups: 0}} =
                resolve(
                  [%{ref: 2, place: " HTTPS://Maps.Apple.com/place?place-id=I4 ", day: 1}],
-                 %{},
+                 anchors(),
                  search,
                  reply_blocks: server
                )
@@ -245,7 +254,7 @@ defmodule FermixCore.Trips.LookupTest do
         %{ref: 2, place: "https://maps.apple.com/place?place-id=I404", day: 1}
       ]
 
-      assert resolve(requests, %{}, search) == {:error, {:unknown_place_link, 2}}
+      assert resolve(requests, near_town(), search) == {:error, {:unknown_place_link, 2}}
       assert searched() == []
     end
 
@@ -255,7 +264,7 @@ defmodule FermixCore.Trips.LookupTest do
       :ok = ReplyBlocks.put_places(server, @conversation, [kept])
 
       assert {:ok, %{outcomes: [{4, {:none, :no_location}}]}} =
-               resolve([%{ref: 4, place: kept.source_url, day: 1}], %{}, search_by(%{}),
+               resolve([%{ref: 4, place: kept.source_url, day: 1}], anchors(), search_by(%{}),
                  reply_blocks: server
                )
     end
@@ -266,7 +275,7 @@ defmodule FermixCore.Trips.LookupTest do
       middle = Geo.centroid([@tower, @market])
 
       assert {:coordinates, latitude, longitude, 2_000} =
-               Lookup.anchor(%{2 => [@tower, @market]}, 2)
+               Lookup.anchor(anchors(%{2 => [@tower, @market]}), 2)
 
       assert {latitude, longitude} == {middle.latitude, middle.longitude}
     end
@@ -278,14 +287,17 @@ defmodule FermixCore.Trips.LookupTest do
       spread = Geo.spread_m(middle, points)
       assert spread > 2_000
 
-      assert {:coordinates, _latitude, _longitude, ^spread} = Lookup.anchor(%{1 => points}, 1)
+      assert {:coordinates, _latitude, _longitude, ^spread} =
+               Lookup.anchor(anchors(%{1 => points}), 1)
 
       across = [@tower, %{latitude: 38.7139, longitude: -9.1335}]
-      assert {:coordinates, _latitude, _longitude, 50_000} = Lookup.anchor(%{1 => across}, 1)
+
+      assert {:coordinates, _latitude, _longitude, 50_000} =
+               Lookup.anchor(anchors(%{1 => across}), 1)
     end
 
     test "a day with none anchors on the nearest day with some, the earlier on a tie, else none" do
-      placed = %{2 => [@tower], 6 => [@market], 3 => []}
+      placed = anchors(%{2 => [@tower], 6 => [@market], 3 => []})
 
       assert {:coordinates, latitude, _longitude, 2_000} = Lookup.anchor(placed, 5)
       assert latitude == Geo.centroid([@market]).latitude
@@ -296,17 +308,45 @@ defmodule FermixCore.Trips.LookupTest do
       assert {:coordinates, latitude, _longitude, 2_000} = Lookup.anchor(placed, 3)
       assert latitude == Geo.centroid([@tower]).latitude
 
-      assert Lookup.anchor(%{}, 1) == nil
-      assert Lookup.anchor(%{1 => []}, 1) == nil
+      assert Lookup.anchor(anchors(), 1) == nil
+      assert Lookup.anchor(anchors(%{1 => []}), 1) == nil
     end
 
-    test "a lookup asks around the anchor, and with none asks the words alone" do
+    # D10: the day's placed stops, else the day's near, else the nearest day
+    # with placed stops, else the trip's near, else none.
+    test "in order: the day's stops, the day's near, the nearest placed day, the trip's near" do
+      porto = "Porto, Portugal"
+      lisbon = "Lisbon, Portugal"
+      tower = Geo.centroid([@tower])
+
+      # The day's own placed stops win over its near and the trip's.
+      assert {:coordinates, latitude, _longitude, 2_000} =
+               Lookup.anchor(anchors(%{3 => [@tower]}, %{3 => porto}, lisbon), 3)
+
+      assert latitude == tower.latitude
+
+      # A day with none searches near its own place, over a placed day beside it.
+      assert Lookup.anchor(anchors(%{2 => [@tower]}, %{3 => porto}, lisbon), 3) ==
+               {:location, porto}
+
+      # A day with neither takes the nearest placed day, over the trip's near.
+      assert {:coordinates, latitude, _longitude, 2_000} =
+               Lookup.anchor(anchors(%{2 => [@tower]}, %{3 => porto}, lisbon), 4)
+
+      assert latitude == tower.latitude
+
+      # With no placed stop anywhere, the trip's near; another day's is not this one's.
+      assert Lookup.anchor(anchors(%{}, %{3 => porto}, lisbon), 4) == {:location, lisbon}
+      assert Lookup.anchor(anchors(%{}, %{3 => porto}, nil), 4) == nil
+    end
+
+    test "a lookup asks around the anchor, near a place by its name, and with none the words alone" do
       search = search_by(%{"Mercado" => found([]), "Doca" => found([])})
 
       {:ok, _result} =
         resolve(
           [%{ref: 1, place: "Mercado", day: 2}],
-          %{2 => [@tower, @market]},
+          anchors(%{2 => [@tower, @market]}),
           search
         )
 
@@ -320,7 +360,12 @@ defmodule FermixCore.Trips.LookupTest do
              ] =
                searched()
 
-      {:ok, _result} = resolve([%{ref: 1, place: "  Doca ", day: 1}], %{}, search)
+      # A near is the place search's own named anchor: it finds the place and
+      # searches its region, so the request names no radius.
+      {:ok, _result} = resolve([%{ref: 1, place: "Mercado", day: 2}], near_town(), search)
+      assert searched() == [%{query: "Mercado", count: 5, anchor: {:location, @town}}]
+
+      {:ok, _result} = resolve([%{ref: 1, place: "  Doca ", day: 1}], anchors(), search)
       assert searched() == [%{query: "Doca", count: 5}]
     end
 
@@ -337,11 +382,13 @@ defmodule FermixCore.Trips.LookupTest do
         %{ref: 3, place: "Harbour Rooms", day: 2}
       ]
 
-      assert {:ok, %{outcomes: outcomes, lookups: 3}} = resolve(requests, %{}, search_by(results))
+      assert {:ok, %{outcomes: outcomes, lookups: 3}} =
+               resolve(requests, near_town(), search_by(results))
+
       assert Enum.all?(outcomes, &match?({_ref, {:placed, _place}}, &1))
 
       [first | later] = searched()
-      assert first == %{query: "Torre Alta", count: 5}
+      assert first == %{query: "Torre Alta", count: 5, anchor: {:location, @town}}
 
       for request <- later do
         assert {:coordinates, latitude, longitude} = request.anchor
@@ -349,6 +396,82 @@ defmodule FermixCore.Trips.LookupTest do
         assert_in_delta longitude, @tower.longitude, 1.0e-9
         assert request.radius_meters == 2_000
       end
+    end
+  end
+
+  # D10: a generic name with nowhere to search lands wherever the search is
+  # (a "fish market" for a trip to Varonne found in another country), so a
+  # lookup with no anchor never places.
+  describe "no anchor" do
+    @far_market %{latitude: 33.8404, longitude: -84.3797}
+
+    test "a lookup with nowhere to search offers its first located result and places nothing" do
+      far = place("Atlanta Fish Market", @far_market, 7)
+      search = search_by(%{"fish market" => found([unlocated("Fish Market", 6), far])})
+
+      assert {:ok, %{outcomes: [{1, {:offered, ^far, :no_anchor}}], records: [^far]}} =
+               resolve([%{ref: 1, place: "fish market", day: 1}], anchors(), search)
+
+      assert searched() == [%{query: "fish market", count: 5}]
+
+      search = search_by(%{"fish market" => found([unlocated("Fish Market", 6)])})
+
+      assert {:ok, %{outcomes: [{1, {:none, :not_found}}], records: []}} =
+               resolve([%{ref: 1, place: "fish market", day: 1}], anchors(), search)
+    end
+
+    test "a two-city trip: a day's near wins over the trip's, and its lookup places there" do
+      sinos = place("Torre dos Sinos", @tower, 3)
+      search = search_by(%{"Torre dos Sinos" => found([sinos])})
+      two_cities = anchors(%{1 => [@market]}, %{3 => "Porto, Portugal"}, "Lisbon, Portugal")
+
+      assert {:ok, %{outcomes: [{1, {:placed, ^sinos}}]}} =
+               resolve([%{ref: 1, place: "Torre dos Sinos", day: 3}], two_cities, search)
+
+      assert searched() == [
+               %{query: "Torre dos Sinos", count: 5, anchor: {:location, "Porto, Portugal"}}
+             ]
+    end
+
+    # The place search's named anchor answers invalid_location for a name it
+    # finds no place by; that near is no anchor, looked up once a call.
+    test "a near that does not geocode is no anchor: offered, never placed, and said" do
+      far = place("Fish market", @far_market, 7)
+      test_pid = self()
+
+      search = fn request ->
+        send(test_pid, {:searched, request})
+
+        case request do
+          %{anchor: {:location, "Varonne"}} ->
+            {:error, "invalid_location: Apple Maps found no place by that name", %{}}
+
+          %{query: "Fish market"} ->
+            found([far])
+
+          %{query: "Ferry"} ->
+            found([])
+        end
+      end
+
+      requests = [
+        %{ref: 1, place: "Fish market", day: 1},
+        %{ref: 2, place: "Ferry", day: 1}
+      ]
+
+      assert {:ok, %{outcomes: outcomes, records: [^far], lookups: 2}} =
+               resolve(requests, anchors(%{}, %{}, "Varonne"), search)
+
+      assert outcomes == [
+               {1, {:offered, far, {:unknown_near, "Varonne"}}},
+               {2, {:none, {:unknown_near, "Varonne"}}}
+             ]
+
+      assert searched() == [
+               %{query: "Fish market", count: 5, anchor: {:location, "Varonne"}},
+               %{query: "Fish market", count: 5},
+               %{query: "Ferry", count: 5}
+             ]
     end
   end
 
@@ -360,7 +483,7 @@ defmodule FermixCore.Trips.LookupTest do
       repeats = [%{ref: 41, place: "SPOT 1", day: 1}, %{ref: 42, place: "Spot 2!", day: 1}]
 
       assert {:ok, %{outcomes: outcomes, records: records, lookups: 40}} =
-               resolve(unique ++ repeats, %{}, search)
+               resolve(unique ++ repeats, near_town(), search)
 
       assert length(outcomes) == 42
       assert length(records) == 40
@@ -368,11 +491,11 @@ defmodule FermixCore.Trips.LookupTest do
       assert {42, {:placed, %{name: "Spot 2"}}} = Enum.at(outcomes, 41)
 
       another_day = [%{ref: 43, place: "Spot 1", day: 2}]
-      assert resolve(unique ++ another_day, %{}, search) == {:error, :too_many_lookups}
+      assert resolve(unique ++ another_day, near_town(), search) == {:error, :too_many_lookups}
 
       test_pid = self()
       refusing = fn _request -> send(test_pid, :unexpected_lookup) end
-      assert resolve(unique ++ another_day, %{}, refusing) == {:error, :too_many_lookups}
+      assert resolve(unique ++ another_day, near_town(), refusing) == {:error, :too_many_lookups}
       refute_received :unexpected_lookup
       assert Lookup.max_lookups() == 40
     end
@@ -386,7 +509,7 @@ defmodule FermixCore.Trips.LookupTest do
       link = %{ref: 41, place: kept.source_url, day: 1}
 
       assert {:ok, %{lookups: 40}} =
-               resolve(requests ++ [link], %{}, search, reply_blocks: server)
+               resolve(requests ++ [link], near_town(), search, reply_blocks: server)
     end
 
     test "four at a time: the first alone, then waves of four" do
@@ -413,7 +536,7 @@ defmodule FermixCore.Trips.LookupTest do
 
       task =
         Task.async(fn ->
-          Lookup.resolve(requests, %{},
+          Lookup.resolve(requests, near_town(),
             backend: {:ok, search},
             reply_blocks: server,
             conversation_key: @conversation
@@ -446,7 +569,7 @@ defmodule FermixCore.Trips.LookupTest do
       requests = Enum.map(1..3, &%{ref: &1, place: "Spot #{&1}", day: 1})
 
       assert {:ok, %{outcomes: outcomes, lookups: 1}} =
-               resolve(requests, %{}, search, now_ms: fn -> Agent.get(clock, & &1) end)
+               resolve(requests, near_town(), search, now_ms: fn -> Agent.get(clock, & &1) end)
 
       assert [{1, {:placed, _place}}, {2, {:none, :deadline}}, {3, {:none, :deadline}}] = outcomes
       assert Lookup.deadline_ms() == 45_000
@@ -462,7 +585,7 @@ defmodule FermixCore.Trips.LookupTest do
       requests = [%{ref: 1, place: "Spot 1", day: 1}, %{ref: 2, place: "Spot 2", day: 1}]
 
       assert {:ok, %{outcomes: outcomes, records: [], lookups: 1}} =
-               resolve(requests, %{}, search, deadline_ms: 50)
+               resolve(requests, near_town(), search, deadline_ms: 50)
 
       assert outcomes == [{1, {:none, :deadline}}, {2, {:none, :deadline}}]
     end
@@ -471,15 +594,15 @@ defmodule FermixCore.Trips.LookupTest do
       search = search_by(%{})
 
       assert_raise FunctionClauseError, fn ->
-        resolve([%{ref: 1, place: "", day: 1}], %{}, search)
+        resolve([%{ref: 1, place: "", day: 1}], anchors(), search)
       end
 
       assert_raise FunctionClauseError, fn ->
-        resolve([%{ref: 1, place: "Doca", day: 0}], %{}, search)
+        resolve([%{ref: 1, place: "Doca", day: 0}], anchors(), search)
       end
 
       assert_raise KeyError, fn ->
-        Lookup.resolve([], %{}, conversation_key: @conversation)
+        Lookup.resolve([], anchors(), conversation_key: @conversation)
       end
     end
   end
@@ -501,6 +624,23 @@ defmodule FermixCore.Trips.LookupTest do
 
       assert Lookup.heading({:no_backend, @not_ready}) ==
                "Not looked up, no place search is set up here (#{@not_ready})"
+
+      assert Lookup.heading({:unknown_near, "Varonne"}) ==
+               ~s(No place found, and the place search found no place "Varonne" to search ) <>
+                 "near; give its day a near it can find (a town and its country)"
+    end
+
+    test "a heading for what a lookup with no anchor offered, saying to give near" do
+      assert Lookup.offered_heading(:no_anchor) ==
+               "Not placed, this trip has no place to search near, so each is only the first " <>
+                 "result anywhere: give its day a near (a town and its country) and the place " <>
+                 "again, or its link if that is the place meant"
+
+      assert Lookup.offered_heading({:unknown_near, "Varonne"}) ==
+               ~s(Not placed, the place search found no place "Varonne" to search near, so ) <>
+                 "each is only the first result anywhere: give its day a near it can find (a " <>
+                 "town and its country) and the place again, or its link if that is the place " <>
+                 "meant"
     end
 
     test "a place's link is the search's page for it, else the place's own site" do

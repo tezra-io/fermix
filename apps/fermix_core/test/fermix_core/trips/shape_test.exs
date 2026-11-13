@@ -174,6 +174,30 @@ defmodule FermixCore.Trips.ShapeTest do
       assert one(%{"op" => "replace"}) == {:error, {:invalid_op, 1, {:unknown_op, "replace"}}}
       assert one(%{"text" => "x"}) == {:error, {:invalid_op, 1, {:missing, :op}}}
     end
+
+    # D10: near names where a trip, or one of its days, is; the model's words.
+    test "near is a place's name on create and on day; on day empty clears it, absent keeps it" do
+      assert %{op: :create, near: "Lisbon, Portugal"} =
+               shaped!(%{"op" => "create", "near" => " Lisbon, Portugal "})
+
+      assert %{op: :create, near: nil} = shaped!(%{"op" => "create"})
+      assert %{op: :create, near: nil} = shaped!(%{"op" => "create", "near" => ""})
+
+      assert %{op: :day, day: 8, near: "Porto, Portugal", text: :keep} =
+               shaped!(%{"op" => "day", "day" => 8, "near" => "Porto, Portugal"})
+
+      assert %{op: :day, near: nil} = shaped!(%{"op" => "day", "day" => 8, "near" => ""})
+      assert %{op: :day, near: :keep} = shaped!(%{"op" => "day", "day" => 8, "text" => "Ribeira"})
+
+      assert one(%{"op" => "day", "day" => 8, "near" => String.duplicate("p", 201)}) ==
+               {:error, {:invalid_op, 1, {:too_long, :near, 200}}}
+
+      assert one(%{"op" => "create", "near" => "Porto\nPortugal"}) ==
+               {:error, {:invalid_op, 1, {:not_one_line, :near}}}
+
+      assert one(%{"op" => "day", "day" => 8, "near" => 8}) ==
+               {:error, {:invalid_op, 1, {:invalid_param, :near}}}
+    end
   end
 
   describe "a device's op" do
@@ -213,6 +237,15 @@ defmodule FermixCore.Trips.ShapeTest do
 
       assert device(%{"op" => "replace"}) == {:error, {:unknown_device_op, "replace"}}
       assert Shape.device_change(%{"trip_id" => @trip_id}) == {:error, {:missing, :op}}
+    end
+
+    # D10: near is the model's alone; no device wire carries it.
+    test "a device's create and day take no near" do
+      assert {:ok, %{ops: [%{op: :create, near: nil}]}} =
+               device(%{"op" => "create", "title" => "Kyoto Hills", "near" => "Kyoto"}, nil)
+
+      assert {:ok, %{ops: [%{op: :day, near: :keep}]}} =
+               device(%{"op" => "day", "row_id" => @day_id, "near" => "Kyoto"})
     end
 
     test "a device's place is a whole record, cut; unplace takes it away" do

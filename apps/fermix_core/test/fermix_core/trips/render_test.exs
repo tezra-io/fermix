@@ -41,6 +41,7 @@ defmodule FermixCore.Trips.RenderTest do
         title: "Varonne",
         starts_on: ~D[2031-05-08],
         timezone: "Europe/Lisbon",
+        near: nil,
         position: 1_024,
         rev: 12,
         next_n: 40,
@@ -63,6 +64,7 @@ defmodule FermixCore.Trips.RenderTest do
         duration: nil,
         fixed: false,
         timezone: nil,
+        near: nil,
         place: nil,
         position: n * 1_024,
         stamped: false,
@@ -136,6 +138,22 @@ defmodule FermixCore.Trips.RenderTest do
 
       assert text =~ ~s|Trip "Varonne" (tr_4q8m2x7v1d) · rev 12 · 1 day, 1 stop\n|
       assert text =~ "## [1] Day 1 · Asia/Tokyo\n- [2] Shrine walk"
+    end
+
+    # D10: where the trip is, and where a day is instead, quoted as the
+    # owner's words are.
+    test "the trip's near on its header, a day's on its heading, quoted" do
+      rows = [day(1), day(2, "Ribeira", %{near: "Porto, \"Ribeira\""}), stop(3, "Bookshop")]
+
+      assert {:whole, text} =
+               Render.read(trip(%{near: "Lisbon, Portugal"}), rows, :all, :text)
+
+      assert text =~
+               ~s|Trip "Varonne" (tr_4q8m2x7v1d) · Thu 8 to Fri 9 May 2031 · Europe/Lisbon · | <>
+                 ~s|near "Lisbon, Portugal" · rev 12 · 2 days, 1 stop\n|
+
+      assert text =~ "## [1] Day 1 · Thu 8 May\n"
+      assert text =~ ~s|## [2] Day 2 · Fri 9 May · Ribeira · near "Porto, \\"Ribeira\\""\n|
     end
 
     test "a trip across a year dates each day with its year" do
@@ -391,6 +409,41 @@ defmodule FermixCore.Trips.RenderTest do
                No place found: [10] "Coffee somewhere" (place unchanged).
                Not looked up, the place search is rate limited: [2] "Arrive by train", [15] "Dinner at Pedra Negra".
                Dates moved: [15] "Dinner at Pedra Negra" (fixed) is now Sat 10 May 2031.\
+               """
+    end
+
+    # D10: a lookup with nowhere to search offers what it found and says why,
+    # apart from a result by another name.
+    test "an offer with no place to search near, or a near not found, says to give near" do
+      rows = rows()
+      [_, arrive, _, tower, coffee, lookout, _dinner] = rows
+
+      far = %{
+        name: "Atlanta Fish Market",
+        address: "Pharr Road, Atlanta",
+        location: %{latitude: 33.8404, longitude: -84.3797},
+        source_url: "https://maps.apple.com/place?place-id=I77"
+      }
+
+      other = %{far | name: "Corvo Lookout", address: "Largo do Corvo"}
+
+      placements = [
+        %{row: arrive, outcome: {:offered, far, :no_anchor}, kept: false},
+        %{row: tower, outcome: {:offered, other}, kept: false},
+        %{row: coffee, outcome: {:offered, far, {:unknown_near, "Varonne"}}, kept: true},
+        %{row: lookout, outcome: {:none, {:unknown_near, "Varonne"}}, kept: false}
+      ]
+
+      assert Render.answer(applied(rows), placements) ==
+               """
+               Varonne · rev 3 · created; 5 stops added · 2 days, 5 stops · 0 placed
+               Not placed, nearest by another name:
+               [9] "Torre de Vale Escuro": "Corvo Lookout, Largo do Corvo" · https://maps.apple.com/place?place-id=I77
+               Not placed, this trip has no place to search near, so each is only the first result anywhere: give its day a near (a town and its country) and the place again, or its link if that is the place meant:
+               [2] "Arrive by train": "Atlanta Fish Market, Pharr Road, Atlanta" · https://maps.apple.com/place?place-id=I77
+               Not placed, the place search found no place "Varonne" to search near, so each is only the first result anywhere: give its day a near it can find (a town and its country) and the place again, or its link if that is the place meant:
+               [10] "Coffee somewhere" (place unchanged): "Atlanta Fish Market, Pharr Road, Atlanta" · https://maps.apple.com/place?place-id=I77
+               No place found, and the place search found no place "Varonne" to search near; give its day a near it can find (a town and its country): [11] "Miradouro do Corvo".\
                """
     end
 

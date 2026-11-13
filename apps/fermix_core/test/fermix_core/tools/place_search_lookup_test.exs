@@ -143,7 +143,9 @@ defmodule FermixCore.Tools.PlaceSearchLookupTest do
       requests = Enum.map(1..6, &%{ref: &1, place: "Spot #{&1}", day: 1})
 
       assert {:ok, %{outcomes: outcomes, lookups: 6}} =
-               Lookup.resolve(requests, %{},
+               Lookup.resolve(
+                 requests,
+                 %{placed: %{}, day_near: %{}, trip_near: "Lisbon, Portugal"},
                  backend: Lookup.backend(context),
                  reply_blocks: holder,
                  conversation_key: @conversation

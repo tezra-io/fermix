@@ -11,6 +11,8 @@ defmodule FermixCore.Memory.RepoTripsTest do
   alias FermixCore.Trips.Registry
 
   @version 63
+  # D10: where a trip, or one of its days, is: a column on each table.
+  @near_version 64
   # Every title, stop and id here is invented.
   @now ~U[2031-06-02 14:00:00Z]
   @owner %{
@@ -144,7 +146,7 @@ defmodule FermixCore.Memory.RepoTripsTest do
       with_raw_conn(db_path, fn conn ->
         :ok = Sqlite3.execute(conn, "DROP TABLE trip_rows")
         :ok = Sqlite3.execute(conn, "DROP TABLE trips")
-        :ok = Sqlite3.execute(conn, "DELETE FROM schema_migrations WHERE version = #{@version}")
+        :ok = Sqlite3.execute(conn, "DELETE FROM schema_migrations WHERE version >= #{@version}")
         assert [[62]] = query!(conn, "SELECT MAX(version) FROM schema_migrations")
         assert objects(conn) == []
       end)
@@ -167,6 +169,67 @@ defmodule FermixCore.Memory.RepoTripsTest do
       assert {:ok, versions} = Repo.migration_versions(server: repo)
       assert Enum.count(versions, &(&1 == @version)) == 1
       assert %{trip: ^trip} = trip!(repo, "Varonne")
+    end
+
+    test "64 gives a trip and a day row a near, once; a store at 63 gains it with its rows kept",
+         %{repo: repo, db_path: db_path} do
+      edit!(repo, "Two cities", [
+        %{"op" => "create", "days" => 2, "near" => "Lisbon, Portugal"},
+        %{"op" => "day", "day" => 2, "near" => "Porto, Portugal"}
+      ])
+
+      with_raw_conn(db_path, fn conn ->
+        assert [["Lisbon, Portugal"]] = query!(conn, "SELECT near FROM trips")
+
+        assert [[nil], ["Porto, Portugal"]] =
+                 query!(conn, "SELECT near FROM trip_rows ORDER BY position")
+      end)
+
+      assert :ok = Repo.migrate(server: repo)
+      assert {:ok, versions} = Repo.migration_versions(server: repo)
+      assert Enum.count(versions, &(&1 == @near_version)) == 1
+      assert %{trip: %{near: "Lisbon, Portugal"} = trip, rows: rows} = trip!(repo, "Two cities")
+
+      # A store from before 64: both columns gone, as 63 made the tables.
+      :ok = stop_supervised(repo)
+
+      with_raw_conn(db_path, fn conn ->
+        for table <- ["trips", "trip_rows"],
+            do: :ok = Sqlite3.execute(conn, "ALTER TABLE #{table} DROP COLUMN near")
+
+        :ok = Sqlite3.execute(conn, "DELETE FROM schema_migrations WHERE version = 64")
+      end)
+
+      reopened = :"#{repo}_at_63"
+      start_supervised!({Repo, name: reopened, enabled: true, database_path: db_path})
+      assert {:ok, versions} = Repo.migration_versions(server: reopened)
+      assert Enum.count(versions, &(&1 == @near_version)) == 1
+
+      assert %{trip: %{near: nil, title: "Two cities", rev: rev}, rows: kept} =
+               trip!(reopened, "Two cities")
+
+      assert rev == trip.rev
+      assert Enum.map(kept, & &1.id) == Enum.map(rows, & &1.id)
+      assert Enum.all?(kept, &is_nil(&1.near))
+    end
+
+    test "a near belongs on a trip or a day: the store refuses one on a stop", %{
+      repo: repo,
+      db_path: db_path
+    } do
+      varonne!(repo)
+
+      with_raw_conn(db_path, fn conn ->
+        assert {:error, message} =
+                 Sqlite3.execute(conn, "UPDATE trip_rows SET near = 'Ostrel' WHERE kind = 'stop'")
+
+        assert message =~ "CHECK"
+
+        assert :ok =
+                 Sqlite3.execute(conn, "UPDATE trip_rows SET near = 'Ostrel' WHERE kind = 'day'")
+
+        assert {:error, _empty} = Sqlite3.execute(conn, "UPDATE trips SET near = ''")
+      end)
     end
 
     test "the live-title index refuses a second live title, case-blind; a removed one does not count",

@@ -5,12 +5,14 @@ defmodule FermixCore.Trips.Placing do
   after it. Pure; the lookup itself is `Trips.Lookup`.
 
   **Before.** A model's `place` is words or a link (`Trips.Shape`), and the
-  lookup needs the day each stop lands in and the trip's placed stops by day
-  (`Lookup.anchor/2`). `requests/3` learns both by running the call over the
+  lookup needs the day each stop lands in and where the call searches
+  (`Lookup.anchors()`): the trip's placed stops by day, each day's `near` and
+  the trip's (D10). `requests/3` learns them by running the call over the
   trip as it was read (`Trips.Ops.apply/3`, which is pure), each place given
   replaced by a mark naming its op: the day of a stop an `after` puts in a
-  day, a stop the call adds to a day it makes, and a stop an earlier op moved
-  are all where the call puts them. A call `Ops` refuses there is refused
+  day, a stop the call adds to a day it makes, a stop an earlier op moved,
+  and a `near` the call gives a trip or a day are all where the call puts
+  them. A call `Ops` refuses there is refused
   before any lookup is spent (the store would refuse it the same way: it sees
   the same rows, and every trip where this saw one). A place a later op of the
   call replaces, or on a stop the call removes, is not looked up.
@@ -57,16 +59,17 @@ defmodule FermixCore.Trips.Placing do
   @doc """
   The lookups `call` needs over `loaded` (`%{trips:, rows:}`, as `Ops.apply/3`
   takes it) under `edit`: one request a place given, with the day its stop
-  lands in, and the placed stops by day that anchor them.
+  lands in, and the anchors they search around (`Lookup.anchors()`).
   """
   @spec requests(map(), map(), map()) ::
-          {:ok, [Lookup.request()], Lookup.placed()} | {:error, term()}
+          {:ok, [Lookup.request()], Lookup.anchors()} | {:error, term()}
   def requests(loaded, %{ops: ops} = call, edit) when is_map(loaded) and is_map(edit) do
     marked = %{call | ops: ops |> Enum.with_index(1) |> Enum.map(&marked/1)}
 
-    with {:ok, %{rows: rows}} <- Ops.apply(loaded, marked, edit) do
+    with {:ok, %{trip: trip, rows: rows}} <- Ops.apply(loaded, marked, edit) do
       days = Ops.days(rows)
-      {:ok, Enum.sort_by(Enum.flat_map(days, &day_requests(&1, ops)), & &1.ref), placed(days)}
+      requests = Enum.sort_by(Enum.flat_map(days, &day_requests(&1, ops)), & &1.ref)
+      {:ok, requests, %{placed: placed(days), day_near: day_near(days), trip_near: trip.near}}
     end
   end
 
@@ -89,6 +92,10 @@ defmodule FermixCore.Trips.Placing do
         points != [],
         into: %{},
         do: {k, points}
+  end
+
+  defp day_near(days) do
+    for %{row: %{near: near}, position: k} <- days, is_binary(near), into: %{}, do: {k, near}
   end
 
   defp marked?(nil), do: true

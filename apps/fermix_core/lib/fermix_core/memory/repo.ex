@@ -98,6 +98,7 @@ defmodule FermixCore.Memory.Repo do
   @computer_history_home_migration_version 61
   @checklist_edit_kinds_migration_version 62
   @trips_migration_version 63
+  @trip_near_migration_version 64
   @sqlite_open_intent :readwritecreate
 
   # The home's requests about notes from every machine (M97 §8), all served by
@@ -5130,8 +5131,41 @@ defmodule FermixCore.Memory.Repo do
          :ok <- apply_computer_history_reports_migration(conn, versions),
          :ok <- apply_computer_history_home_migration(conn, versions),
          :ok <- apply_checklist_edit_kinds_migration(conn, versions),
-         :ok <- apply_trips_migration(conn, versions) do
+         :ok <- apply_trips_migration(conn, versions),
+         :ok <- apply_trip_near_migration(conn, versions) do
       :ok
+    end
+  end
+
+  # M89 D10: where a trip, or one of its days, is searched near, a nullable
+  # column on each trip table, with the version in one transaction, after 63,
+  # which made the tables. Nothing is rewritten: a trip from before has none.
+  # Reapplying it changes nothing: a column is added only while its table holds
+  # 63's columns, and a table that holds neither set is refused.
+  defp apply_trip_near_migration(conn, versions) do
+    if Enum.member?(versions, @trip_near_migration_version) do
+      :ok
+    else
+      with :ok <- Sqlite3.execute(conn, "BEGIN;") do
+        conn |> trip_near_step() |> commit_migration(conn)
+      end
+    end
+  end
+
+  defp trip_near_step(conn) do
+    added =
+      Enum.reduce_while(TripsSql.near_columns(), :ok, fn {table, columns}, :ok ->
+        case add_columns(conn, table, columns) do
+          :ok -> {:cont, :ok}
+          {:error, reason} -> {:halt, {:error, reason}}
+        end
+      end)
+
+    with :ok <- added do
+      Sqlite3.execute(
+        conn,
+        "INSERT INTO schema_migrations(version) VALUES (#{@trip_near_migration_version});"
+      )
     end
   end
 

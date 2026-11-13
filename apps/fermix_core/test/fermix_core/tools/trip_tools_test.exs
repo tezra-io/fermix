@@ -179,6 +179,31 @@ defmodule FermixCore.Tools.TripToolsTest do
     end
   end
 
+  # D10: where a trip is, and where a day is instead, are read back with it.
+  test "trip_read shows the trip's near on its header and a day's on its heading", %{
+    context: context
+  } do
+    ops = [
+      %{"op" => "create", "days" => 2, "near" => "Varonne, Portugal"},
+      %{"op" => "day", "day" => 2, "near" => "Ostrel, Portugal"}
+    ]
+
+    {:ok, %{success: true}} = TripEdit.execute(%{"trip" => "Two towns", "ops" => ops}, context)
+    {:ok, %{success: true, output: text}} = TripRead.execute(%{"trip" => "Two towns"}, context)
+
+    assert text =~
+             ~r/^Trip "Two towns" \(tr_\w+\) · near "Varonne, Portugal" · rev 1 · 2 days, 0 stops$/m
+
+    assert text =~ "\n## [1] Day 1\n"
+    assert text =~ ~s(\n## [2] Day 2 · near "Ostrel, Portugal")
+  end
+
+  test "trip_edit's description says to give near when making a trip and on a day elsewhere" do
+    assert TripEdit.description() =~
+             "Give near (town, country) when making a trip and on a day spent elsewhere: " <>
+               "places are looked up there."
+  end
+
   test "trip_edit's description says a trip is made before any search in the turn" do
     assert TripEdit.description() =~
              "Make a trip with what is known before any search in the turn; after a search, " <>
@@ -193,8 +218,11 @@ defmodule FermixCore.Tools.TripToolsTest do
 
     # Measured at 471 tokens with o200k_base (M89 §15, C9), 1,843 bytes: 448
     # tokens and 1,741 bytes, plus 23 tokens and 102 bytes for trip_edit's
-    # clause that a trip is made before any search in the turn. The bound is
-    # the old 1,750 raised by that clause's 102 bytes.
-    assert byte_size(encoded) <= 1_852
+    # clause that a trip is made before any search in the turn. The bound was
+    # the old 1,750 raised by that clause's 102 bytes. D10's `near` (its
+    # sentence, its two mentions among the ops and its property) measured 35
+    # tokens and 142 bytes more, 506 tokens and 1,985 bytes, so the bound is
+    # 1,852 raised by those 142.
+    assert byte_size(encoded) <= 1_994
   end
 end

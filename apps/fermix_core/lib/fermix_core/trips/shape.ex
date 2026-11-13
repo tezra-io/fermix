@@ -17,6 +17,12 @@ defmodule FermixCore.Trips.Shape do
   a place's own name (`{:link, url}`, `{:words, words}`), which the place
   lookup resolves before the store; a device's is a whole record
   (`Trips.Place.cut/1`).
+
+  `near` (D10) is a place's name the place lookup searches near, one line of
+  at most 200 characters as the place search takes a location: the trip's on
+  a model's `create`, a day's on its `day`, where an empty one clears it. It
+  is the model's alone: a device's ops take none, a create's `near` nil and a
+  day's `:keep`.
   """
 
   alias FermixCore.Clock
@@ -29,6 +35,7 @@ defmodule FermixCore.Trips.Shape do
   @day_max 80
   @text_max 200
   @note_max 1_000
+  @near_max 200
   @minutes 1..1440
   @ops ~w(create add edit move day remove rename dates remove_trip)
   @device_ops ~w(create add edit move day remove restore rename dates remove_trip)
@@ -118,8 +125,10 @@ defmodule FermixCore.Trips.Shape do
     with {:ok, title} <- optional_text(op, "title", :title, @title_max),
          {:ok, starts_on} <- date(op, :absent_is_nil),
          {:ok, days} <- days(op),
-         {:ok, zone} <- zone(op, :absent_is_nil) do
-      {:ok, %{op: :create, title: title, starts_on: starts_on, days: days, timezone: zone}}
+         {:ok, zone} <- zone(op, :absent_is_nil),
+         {:ok, near} <- near(op, :absent_is_nil) do
+      {:ok,
+       %{op: :create, title: title, starts_on: starts_on, days: days, timezone: zone, near: near}}
     end
   end
 
@@ -158,7 +167,8 @@ defmodule FermixCore.Trips.Shape do
     with {:ok, day} <- row_number(op, "day"),
          {:ok, text} <- day_text(op),
          {:ok, zone} <- zone(op, :absent_is_keep),
-         do: {:ok, %{op: :day, day: day, text: text, timezone: zone}}
+         {:ok, near} <- near(op, :absent_is_keep),
+         do: {:ok, %{op: :day, day: day, text: text, timezone: zone, near: near}}
   end
 
   defp op_fields(:remove, op) do
@@ -222,7 +232,7 @@ defmodule FermixCore.Trips.Shape do
           {:ok, %{trip: String.t() | nil, ops: [map()]}} | {:error, term()}
   def device_change(%{"op" => %{"op" => "create"} = op}) do
     with {:ok, title} <- required_text(op, "title", :title, @title_max) do
-      create = %{op: :create, title: title, starts_on: nil, days: 1, timezone: nil}
+      create = %{op: :create, title: title, starts_on: nil, days: 1, timezone: nil, near: nil}
       {:ok, %{trip: nil, ops: [create]}}
     end
   end
@@ -279,10 +289,11 @@ defmodule FermixCore.Trips.Shape do
          {:ok, text} <- day_text(op) do
       case {row, after_row} do
         {nil, after_row} ->
-          {:ok, %{op: :day, day: {:new, row_ref(after_row)}, text: text, timezone: :keep}}
+          {:ok,
+           %{op: :day, day: {:new, row_ref(after_row)}, text: text, timezone: :keep, near: :keep}}
 
         {row, nil} ->
-          {:ok, %{op: :day, day: {:id, row}, text: text, timezone: :keep}}
+          {:ok, %{op: :day, day: {:id, row}, text: text, timezone: :keep, near: :keep}}
 
         _both ->
           {:error, {:device, :day_conflict}}
@@ -412,6 +423,21 @@ defmodule FermixCore.Trips.Shape do
   end
 
   defp note_text(_value), do: {:error, {:invalid_param, :note}}
+
+  # A place's name to search near: absent is nil on a create and keeps a day's;
+  # empty, or nil, is none.
+  defp near(op, absent) do
+    case {Map.fetch(op, "near"), absent} do
+      {:error, :absent_is_keep} -> {:ok, :keep}
+      {:error, :absent_is_nil} -> {:ok, nil}
+      {{:ok, nil}, _absent} -> {:ok, nil}
+      {{:ok, value}, _absent} when is_binary(value) -> near_text(String.trim(value))
+      {{:ok, _value}, _absent} -> {:error, {:invalid_param, :near}}
+    end
+  end
+
+  defp near_text(""), do: {:ok, nil}
+  defp near_text(value), do: text(value, :near, @near_max)
 
   # A day's name: absent keeps it, empty takes it away (stored "", C27).
   defp day_text(op) do

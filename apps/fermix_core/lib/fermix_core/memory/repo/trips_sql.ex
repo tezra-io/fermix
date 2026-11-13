@@ -21,6 +21,9 @@ defmodule FermixCore.Memory.Repo.TripsSql do
 
   Rows are selected by column name and decoded by name (`decode_row/1`) into
   the map `Trips.Ops` names `row`.
+
+  Migration 64 (D10) adds `near` to both tables (`near_columns/0`): the
+  place's name a trip, or one of its days, is searched near; a stop has none.
   """
 
   alias FermixCore.Memory.Repo.KeptSql
@@ -28,10 +31,10 @@ defmodule FermixCore.Memory.Repo.TripsSql do
   alias FermixCore.Trips.Ops
 
   @trip_columns ~w(id owner_id agent_id title starts_on timezone position rev next_n created_at
-                   updated_at removed_at)a
+                   updated_at removed_at near)a
   @row_columns ~w(id trip_id n kind text note local_time duration_min fixed timezone place_json
                   position added_after_outside_content made_via created_at updated_at removed_at
-                  removed_with)a
+                  removed_with near)a
   @trip_select Enum.map_join(@trip_columns, ", ", &Atom.to_string/1)
   @row_select Enum.map_join(@row_columns, ", ", &Atom.to_string/1)
   @trip_placeholders Enum.map_join(@trip_columns, ", ", fn _column -> "?" end)
@@ -92,6 +95,38 @@ defmodule FermixCore.Memory.Repo.TripsSql do
   @doc "The two tables and their indexes, as migration 63 creates them."
   @spec schema_sql() :: String.t()
   def schema_sql, do: @schema_sql
+
+  @doc """
+  What migration 64 adds, a table at a time: `near` on a trip, and on a day
+  row only, each at most 200 characters, as `Memory.Repo`'s column adder takes
+  it (the columns before and after, and the statement that adds it).
+  """
+  @spec near_columns() :: [
+          {String.t(), %{before: [String.t()], after: [String.t()], sql: String.t()}}
+        ]
+  def near_columns do
+    trips = Enum.map(@trip_columns -- [:near], &Atom.to_string/1)
+    rows = Enum.map(@row_columns -- [:near], &Atom.to_string/1)
+
+    [
+      {"trips",
+       %{
+         before: trips,
+         after: trips ++ ["near"],
+         sql:
+           "ALTER TABLE trips ADD COLUMN near TEXT " <>
+             "CHECK (near IS NULL OR length(near) BETWEEN 1 AND 200);"
+       }},
+      {"trip_rows",
+       %{
+         before: rows,
+         after: rows ++ ["near"],
+         sql:
+           "ALTER TABLE trip_rows ADD COLUMN near TEXT " <>
+             "CHECK (near IS NULL OR (kind = 'day' AND length(near) BETWEEN 1 AND 200));"
+       }}
+    ]
+  end
 
   # --- requests (single-writer process) ------------------------------------
 
@@ -350,7 +385,7 @@ defmodule FermixCore.Memory.Repo.TripsSql do
     sql = """
     UPDATE trip_rows SET text = ?, note = ?, local_time = ?, duration_min = ?, fixed = ?,
       timezone = ?, place_json = ?, position = ?, added_after_outside_content = ?,
-      updated_at = ?, removed_at = ?, removed_with = ?
+      updated_at = ?, removed_at = ?, removed_with = ?, near = ?
     WHERE id = ? AND removed_at #{live}
     """
 
@@ -367,6 +402,7 @@ defmodule FermixCore.Memory.Repo.TripsSql do
       stamp(row.updated_at),
       optional_stamp(row.removed_at),
       row.removed_with,
+      row.near,
       row.id
     ]
 
@@ -425,7 +461,8 @@ defmodule FermixCore.Memory.Repo.TripsSql do
       trip.next_n,
       stamp(trip.created_at),
       stamp(trip.updated_at),
-      optional_stamp(trip.removed_at)
+      optional_stamp(trip.removed_at),
+      trip.near
     ]
   end
 
@@ -448,7 +485,8 @@ defmodule FermixCore.Memory.Repo.TripsSql do
       stamp(row.created_at),
       stamp(row.updated_at),
       optional_stamp(row.removed_at),
-      row.removed_with
+      row.removed_with,
+      row.near
     ]
   end
 
@@ -469,7 +507,7 @@ defmodule FermixCore.Memory.Repo.TripsSql do
   One `trip_rows` row, its values in the order of the store's columns, as
   `Trips.Ops` names a `row`: `time` and `duration` for `local_time` and
   `duration_min`, `place` for `place_json` decoded, `stamped` for
-  `added_after_outside_content`, and `dirty` nil.
+  `added_after_outside_content`, `near` as it is, and `dirty` nil.
   """
   @spec decode_row([term()]) :: Ops.row()
   def decode_row(values) when is_list(values) and length(values) == length(@row_columns) do
@@ -494,6 +532,7 @@ defmodule FermixCore.Memory.Repo.TripsSql do
       updated_at: parse_stamp(raw.updated_at),
       removed_at: optional_parse(raw.removed_at),
       removed_with: raw.removed_with,
+      near: raw.near,
       dirty: nil
     }
   end

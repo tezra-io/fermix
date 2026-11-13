@@ -289,6 +289,44 @@ defmodule FermixCore.Trips.OpsTest do
     assert %{time: "09:15"} = stop(store, "Varonne", "Whale watching")
   end
 
+  # D10: where a trip is, and where one of its days is instead; a device's
+  # ops never carry it, and the wire never shows it.
+  test "near: the trip's on create, a day's on day, an empty one clears the day's" do
+    {result, store} =
+      call!(empty(), "Two cities", [
+        %{"op" => "create", "days" => 3, "near" => "Lisbon, Portugal"},
+        %{"op" => "day", "day" => 3, "near" => "Porto, Portugal", "text" => "Ribeira"}
+      ])
+
+    assert result.events == ["created", ~s(named Day 3 "Ribeira"; Day 3 near "Porto, Portugal")]
+    assert trip(store, "Two cities").near == "Lisbon, Portugal"
+    assert [nil, nil, "Porto, Portugal"] = store |> day_rows("Two cities") |> Enum.map(& &1.near)
+    wire = Jason.encode!(Wire.trip(trip(store, "Two cities"), rows(store, "Two cities")))
+    refute wire =~ "Porto"
+    refute wire =~ "Lisbon"
+
+    {result, store} =
+      call!(store, "Two cities", [%{"op" => "day", "day" => 3, "near" => "Porto, Portugal"}])
+
+    assert result.events == ["Day 3 unchanged"]
+
+    {result, store} = call!(store, "Two cities", [%{"op" => "day", "day" => 3, "near" => ""}])
+    assert result.events == ["Day 3 has no near of its own"]
+    assert [nil, nil, nil] = store |> day_rows("Two cities") |> Enum.map(& &1.near)
+    assert trip(store, "Two cities").near == "Lisbon, Portugal"
+
+    %{id: trip_id} = trip(store, "Two cities")
+    %{id: day_id} = hd(day_rows(store, "Two cities"))
+
+    {_result, store} =
+      device!(store, %{
+        "trip_id" => trip_id,
+        "op" => %{"op" => "day", "row_id" => day_id, "text" => "Alfama"}
+      })
+
+    assert %{near: nil, text: "Alfama"} = hd(day_rows(store, "Two cities"))
+  end
+
   test "numbers only go up" do
     {_result, store} =
       call!(empty(), "Varonne", [

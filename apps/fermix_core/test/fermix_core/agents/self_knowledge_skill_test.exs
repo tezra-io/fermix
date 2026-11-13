@@ -9,6 +9,7 @@ defmodule FermixCore.Agents.SelfKnowledgeSkillTest do
   alias FermixCore.Plugins.Registry, as: PluginRegistry
   alias FermixCore.Temporal.Registry, as: TemporalRegistry
   alias FermixCore.Trace
+  alias FermixCore.Trips.Lookup, as: TripLookup
   alias FermixCore.Trips.Registry, as: TripRegistry
 
   test "bundled self-knowledge skill loads as a core skill with no tools" do
@@ -399,6 +400,7 @@ defmodule FermixCore.Agents.SelfKnowledgeSkillTest do
           TripRegistry.describe_error({:trip_full, "Varonne"}),
           TripRegistry.describe_error({:last_day, "Varonne"}),
           TripRegistry.describe_error(:too_many_ops),
+          TripLookup.offered_heading(:no_anchor),
           PluginRegistry.reserved_name_sentence("trip")
         ] do
       assert reference =~ sentence

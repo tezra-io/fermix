@@ -85,7 +85,10 @@ defmodule FermixCore.Home.ReadableTest do
     @decided_format 1
     # 63 (M89 §05, the owner's trips) adds two tables an engine at this format
     # never reads and changes nothing it does, so the format stays.
-    @migrations Enum.to_list(1..39) ++ [41, 42, 43] ++ Enum.to_list(45..63)
+    # 64 (M89 D10, where a trip or a day is) adds a nullable `near` to both trip
+    # tables: an engine at this format selects and writes them by column name
+    # and never names it, so it reads past it, and a row it makes has none.
+    @migrations Enum.to_list(1..39) ++ [41, 42, 43] ++ Enum.to_list(45..64)
     @manifest_keys ~w(created_at engine_version files format home_format home_root host links
                       primary_epoch)
     @entry_keys ~w(bytes mode path sha256)

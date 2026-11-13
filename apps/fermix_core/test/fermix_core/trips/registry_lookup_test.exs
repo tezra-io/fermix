@@ -28,6 +28,7 @@ defmodule FermixCore.Trips.RegistryLookupTest do
 
   @tower %{latitude: 41.1402, longitude: -8.6113}
   @quay %{latitude: 41.1408, longitude: -8.6142}
+  @town "Varonne, Portugal"
 
   defp place(name, point, id) do
     %{
@@ -95,7 +96,7 @@ defmodule FermixCore.Trips.RegistryLookupTest do
                ctx,
                "Varonne",
                [
-                 %{"op" => "create", "days" => 2},
+                 %{"op" => "create", "days" => 2, "near" => @town},
                  %{
                    "op" => "add",
                    "text" => "Morning at the tower",
@@ -110,8 +111,9 @@ defmodule FermixCore.Trips.RegistryLookupTest do
              "Varonne · rev 1 · created; 1 stop added · 2 days, 1 stop · 1 placed\n" <>
                ~s([3] "Morning at the tower": "Torre de Vale Escuro, 1 Rua Inventada, Varonne")
 
-    assert [%{query: "Torre de Vale Escuro", count: 5} = request] = searched()
-    refute Map.has_key?(request, :anchor)
+    assert searched() == [
+             %{query: "Torre de Vale Escuro", count: 5, anchor: {:location, @town}}
+           ]
 
     assert %{place: place} = Enum.find(rows!(ctx, "Varonne"), &(&1.n == 3))
 
@@ -136,7 +138,7 @@ defmodule FermixCore.Trips.RegistryLookupTest do
         ctx,
         "Varonne",
         [
-          %{"op" => "create", "days" => 2},
+          %{"op" => "create", "days" => 2, "near" => @town},
           %{"op" => "add", "text" => "Tower", "day" => 1, "place" => "Torre de Vale Escuro"},
           %{"op" => "add", "text" => "Quay", "after" => 3, "place" => "Cais Velho"}
         ],
@@ -144,7 +146,7 @@ defmodule FermixCore.Trips.RegistryLookupTest do
       )
 
     assert [first, second] = searched()
-    refute Map.has_key?(first, :anchor)
+    assert first.anchor == {:location, @town}
     assert {:coordinates, 41.1402, -8.6113} = second.anchor
     assert second.radius_meters == 2_000
 
@@ -168,7 +170,7 @@ defmodule FermixCore.Trips.RegistryLookupTest do
         ctx,
         "Varonne",
         [
-          %{"op" => "create"},
+          %{"op" => "create", "near" => @town},
           %{"op" => "add", "text" => "Quay", "day" => 1, "place" => "Cais Velho"}
         ],
         %{"Cais Velho" => found([place("Cais Velho", @quay, 2)])}
@@ -226,7 +228,7 @@ defmodule FermixCore.Trips.RegistryLookupTest do
                ctx,
                "Varonne",
                [
-                 %{"op" => "create"},
+                 %{"op" => "create", "near" => @town},
                  %{"op" => "add", "text" => "Check in", "day" => 1, "place" => "Check in"}
                ],
                %{"Check in" => found([offered])}
@@ -346,7 +348,7 @@ defmodule FermixCore.Trips.RegistryLookupTest do
     }
 
     ops =
-      [%{"op" => "create"}] ++
+      [%{"op" => "create", "near" => @town}] ++
         for {text, place} <- [
               {"Tower", "Torre de Vale Escuro"},
               {"Quay", "Cais Velho"},
@@ -366,5 +368,137 @@ defmodule FermixCore.Trips.RegistryLookupTest do
     assert %{lookups: lookups, placed: 1, offered: 0, not_looked_up: not_looked_up} = measurements
     assert lookups >= 2 and measurements.not_found + not_looked_up == 3
     assert %{rate_limited: true, backend: nil, outcome: :ok} = metadata
+  end
+
+  # D10, from a live run: "Plan Saturday in Varonne: the fish market at 8:30"
+  # made a trip with nowhere to search, and the fish market was placed in
+  # another country. A lookup with no anchor offers, never places.
+  describe "near" do
+    @far %{
+      name: "Atlanta Fish Market",
+      location: %{latitude: 33.8404, longitude: -84.3797},
+      address: "Pharr Road, Atlanta",
+      apple_place_id: "I77",
+      source_url: "https://maps.apple.com/place?place-id=I77"
+    }
+
+    test "a new trip with no near offers a far same-name place, places nothing, and says to give near",
+         ctx do
+      session = "main-#{System.unique_integer([:positive])}"
+      TelemetryCapture.attach([[:fermix, :trip, :edit]], session_id: session)
+
+      ops = [
+        %{"op" => "create", "starts_on" => "2031-06-07"},
+        %{
+          "op" => "add",
+          "text" => "Fish market",
+          "day" => 1,
+          "time" => "08:30",
+          "place" => "fish market"
+        }
+      ]
+
+      context =
+        Map.merge(@owner, %{
+          place_lookup: searching(%{"fish market" => found([@far])}),
+          session_id: session
+        })
+
+      opts = [repo: ctx.repo, now: @now, reply_blocks: ctx.holder, notifier: fn _c -> :ok end]
+      assert {:ok, answer} = Registry.edit(%{"trip" => "Varonne", "ops" => ops}, context, opts)
+
+      assert answer.text ==
+               "Varonne · rev 1 · created; 1 stop added · 1 day, 1 stop · 0 placed\n" <>
+                 "Not placed, this trip has no place to search near, so each is only the " <>
+                 "first result anywhere: give its day a near (a town and its country) and the " <>
+                 "place again, or its link if that is the place meant:\n" <>
+                 ~s([2] "Fish market": "Atlanta Fish Market, Pharr Road, Atlanta" · ) <>
+                 "https://maps.apple.com/place?place-id=I77"
+
+      assert searched() == [%{query: "fish market", count: 5}]
+      assert %{place: nil} = Enum.find(rows!(ctx, "Varonne"), &(&1.n == 2))
+
+      assert {:ok, %{name: "Atlanta Fish Market"}} =
+               ReplyBlocks.place_by_url(ctx.holder, @conversation, @far.source_url)
+
+      assert_receive {:telemetry, [:fermix, :trip, :edit], %{placed: 0, offered: 1}, _metadata}
+    end
+
+    test "a two-city trip: a day's near wins over the trip's, so its stop is looked up and placed there",
+         ctx do
+      lisbon = "Lisbon, Portugal"
+      porto = "Porto, Portugal"
+      lift = place("Elevador do Largo", @quay, 4)
+      bookshop = place("Livraria das Pedras", @tower, 5)
+
+      ops = [
+        %{"op" => "create", "days" => 3, "near" => lisbon},
+        %{"op" => "day", "day" => 3, "near" => porto},
+        %{"op" => "add", "text" => "Lift", "day" => 1, "place" => "Elevador do Largo"},
+        %{"op" => "add", "text" => "Bookshop", "day" => 3, "place" => "Livraria das Pedras"}
+      ]
+
+      results = %{
+        "Elevador do Largo" => found([lift]),
+        "Livraria das Pedras" => found([bookshop])
+      }
+
+      assert {:ok, answer} = edit(ctx, "Two cities", ops, results)
+      assert answer.text =~ " · 2 placed\n"
+
+      assert searched() == [
+               %{query: "Elevador do Largo", count: 5, anchor: {:location, lisbon}},
+               %{query: "Livraria das Pedras", count: 5, anchor: {:location, porto}}
+             ]
+
+      assert {:ok, %{trip: trip, rows: rows}} =
+               Repo.trips_call({:read_trip, "default", "main", "Two cities"}, server: ctx.repo)
+
+      assert trip.near == lisbon
+      assert [nil, nil, ^porto] = for(%{kind: :day} = day <- rows, do: day.near)
+
+      assert %{place: %{"name" => "Livraria das Pedras"}} =
+               Enum.find(rows, &(&1.text == "Bookshop"))
+    end
+
+    test "a near the place search does not find is no anchor: offered, not placed, and said",
+         ctx do
+      test = self()
+
+      search = fn request ->
+        send(test, {:searched, request})
+
+        case request do
+          %{anchor: {:location, "Varonne"}} ->
+            {:error, "invalid_location: Apple Maps found no place by that name", %{}}
+
+          %{query: "fish market"} ->
+            found([@far])
+        end
+      end
+
+      ops = [
+        %{"op" => "create", "near" => "Varonne"},
+        %{"op" => "add", "text" => "Fish market", "day" => 1, "place" => "fish market"}
+      ]
+
+      context = Map.put(@owner, :place_lookup, search)
+      opts = [repo: ctx.repo, now: @now, reply_blocks: ctx.holder, notifier: fn _c -> :ok end]
+      assert {:ok, answer} = Registry.edit(%{"trip" => "Varonne", "ops" => ops}, context, opts)
+
+      assert answer.text =~
+               ~s(Not placed, the place search found no place "Varonne" to search near, so ) <>
+                 "each is only the first result anywhere: give its day a near it can find (a " <>
+                 "town and its country) and the place again, or its link if that is the place " <>
+                 "meant:\n" <>
+                 ~s([2] "Fish market": "Atlanta Fish Market, Pharr Road, Atlanta" · )
+
+      assert searched() == [
+               %{query: "fish market", count: 5, anchor: {:location, "Varonne"}},
+               %{query: "fish market", count: 5}
+             ]
+
+      assert %{place: nil} = Enum.find(rows!(ctx, "Varonne"), &(&1.n == 2))
+    end
   end
 end

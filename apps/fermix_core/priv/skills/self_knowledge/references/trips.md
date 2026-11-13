@@ -13,8 +13,8 @@ Trips are kept in `memory.db` (the `trips` and `trip_rows` tables), and Fermix i
 
 ## Days, stops, dates and zones
 
-- A **trip** has a title, unique among the owner's trips whatever its case or however its accents are written (a title is kept in Unicode NFC), and may have a first date and a time zone.
-- A **day** is a row; the stops after it are its stops. A day has no date of its own: its date is the trip's first date plus its place in the trip, so moving a day never leaves a date behind, and a trip with no first date has Day 1, Day 2. A day may have a name and its own zone.
+- A **trip** has a title, unique among the owner's trips whatever its case or however its accents are written (a title is kept in Unicode NFC), and may have a first date, a time zone and a `near`: the town and country it is in, where its places are looked up.
+- A **day** is a row; the stops after it are its stops. A day has no date of its own: its date is the trip's first date plus its place in the trip, so moving a day never leaves a date behind, and a trip with no first date has Day 1, Day 2. A day may have a name, its own zone and its own `near`, for a day spent somewhere else.
 - A **stop** is words on one line, with an optional time (the wall clock where the stop is, `HH:MM`), length in minutes, fixed mark (a booking, a timed ticket, a flight), note and place.
 
 ## The read form
@@ -32,17 +32,17 @@ The rows are the owner's own trip, quoted as data. [n] is a row's number for tri
       Table for two
 ```
 
-`[n]` is a row's number, days and stops alike, given when the row is made and never reused in its trip. "then 0.4 km" is the straight line to the next stop of the day that has a place, written only between stops that both have one: enough to see a walk from a train ride, with no provider asked. With `day` the read is one day or a run of them by number (`"2"`, `"2-4"`); with no trip, the index of every trip with its dates and counts. Any read past 32 KB is the outline instead, a line a day with its stop count, and says to read by day; one day past 32 KB is still read whole, its notes cut to fit or left out, and the read says so. Words that begin as a row would are escaped with a backslash, and a place's name and address, a provider's words, are quoted.
+A trip's `near` shows on its header line and a day's on its heading, quoted (`near "Porto, Portugal"`). `[n]` is a row's number, days and stops alike, given when the row is made and never reused in its trip. "then 0.4 km" is the straight line to the next stop of the day that has a place, written only between stops that both have one: enough to see a walk from a train ride, with no provider asked. With `day` the read is one day or a run of them by number (`"2"`, `"2-4"`); with no trip, the index of every trip with its dates and counts. Any read past 32 KB is the outline instead, a line a day with its stop count, and says to read by day; one day past 32 KB is still read whole, its notes cut to fit or left out, and the read says so. Words that begin as a row would are escaped with a backslash, and a place's name and address, a provider's words, are quoted.
 
 ## `trip_edit`
 
 One call is `{"trip": <title or id>, "ops": [...]}`: one trip, at most 100 ops, applied in one transaction, all or nothing, the trip's `rev` moving once. The answer is the trip's line, what each place came to, and each fixed stop whose date moved.
 
-- `create` (first op; `title`, `starts_on`, `days`, `timezone`): makes the trip with that many empty days, one when not said, named by `title` or the call's `trip`.
+- `create` (first op; `title`, `starts_on`, `days`, `timezone`, `near`): makes the trip with that many empty days, one when not said, named by `title` or the call's `trip`; `near` is the trip's, and only a create sets it.
 - `add` (`text`; `day` or `after`; `time`, `duration`, `fixed`, `note`, `place`): a stop at the end of that day, or right after row `[after]`. A `day` past the last makes the days up to it.
 - `edit` (`n`; any of those): changes what is given; an empty `time`, `note` or `place`, or `duration` 0, clears it.
 - `move` (`n`; `day` or `after`): a stop to the end of a day or after a row; a day's own `[n]` moves the day with its stops.
-- `day` (`day`; `text`, `timezone`): names a day or gives it its own zone; one past the last adds a day.
+- `day` (`day`; `text`, `timezone`, `near`): names a day or gives it its own zone or `near`, which wins over the trip's for that day (a week in one city, then from day 8 another: each of those days names it); an empty `near` clears the day's; one past the last adds a day.
 - `remove` (`n`): a stop, or a day with its stops. `rename` (`text`). `dates` (`starts_on`, "" for none; `timezone`): every day's date follows. `remove_trip`.
 
 `day` is a day's number in the trip, never a date. Moving or removing a day can move a fixed stop's date; the answer names each one: "Dates moved: [6] "Dinner at Pedra Negra" (fixed) is now Sun 6 Jul 2031."
@@ -51,8 +51,10 @@ One call is `{"trip": <title or id>, "ops": [...]}`: one trip, at most 100 ops, 
 
 A stop's `place` is one of two things, resolved before the transaction opens:
 
-- **The place's own name** ("Torre de Vale Escuro"), never what happens there ("Dinner at Pedra Negra" names the evening, not the place). Fermix looks it up with the place search this home uses, around the stop's day: the middle of the day's stops that have a place, at least 2 km about them; else the nearest day that has some; else the words alone. The first result whose name holds the words, or whose name the words begin with ("Prado, Lisbon" takes "Prado"), compared as whole words without case or accents, is placed; a name that is only later words of them ("Pois Café" and a place called "Café") is not. A result by another name is offered, never applied: the stop stays without a place and the answer names the result with its link, which a later call gives back as the place when it is the one meant.
+- **The place's own name** ("Torre de Vale Escuro"), never what happens there ("Dinner at Pedra Negra" names the evening, not the place). Fermix looks it up with the place search this home uses, around the stop's day, in this order: the middle of the day's stops that have a place (those placed earlier in the same call too), at least 2 km about them; else the day's `near`; else the nearest day that has some, the same way; else the trip's `near`. A `near` is found by the place search's own named-place search, only when a lookup needs it, and the lookup searches that place's region. The first result whose name holds the words, or whose name the words begin with ("Prado, Lisbon" takes "Prado"), compared as whole words without case or accents, is placed; a name that is only later words of them ("Pois Café" and a place called "Café") is not. A result by another name is offered, never applied: the stop stays without a place and the answer names the result with its link, which a later call gives back as the place when it is the one meant.
 - **A link** a place search in this conversation returned in the last 30 minutes. The stop gets that record. A link no search returned refuses the whole call: "No place search in this conversation returned that link; search again or give the place's name."
+
+With nowhere to search near, a lookup never places, whatever the name says: a generic name searched with no anchor lands wherever the search is (a "fish market" for a trip to a small town found in another country). Its first result is offered the same way, under "Not placed, this trip has no place to search near, so each is only the first result anywhere: give its day a near (a town and its country) and the place again, or its link if that is the place meant". A `near` the place search finds no place by counts as none, and the answer names it.
 
 At most 40 lookups a call, four at a time, inside 45 s: "One call looks up at most 40 places; split the rest into another call." A search that answers rate limited stops the lookups not started, and those stops are saved without a place and named; on a Brave home four at a time can meet Brave's per-second limit. With no place search set up here, every stop by name is saved without a place, and the answer says so. A lookup that places nothing, for any of these reasons or a result by another name, never takes a place away: an `edit`'s stop keeps the place it had, its other fields still land, and the answer marks it "(place unchanged)"; only an empty `place` clears one. A lookup is Fermix's own and is no `place_search` call; its records join the conversation, so their links resolve in a later turn.
 
