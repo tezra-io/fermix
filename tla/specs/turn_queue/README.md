@@ -164,7 +164,7 @@ watch was added to the model).
 
 - The LLM and tools (one "loop" step), streaming drafts, and typing.
 - The access gate's parked confirmation. `run_message_loop` hands AgentLoop
-  the owner-inbox closure and the Live call id (`turn_runner.ex:606`,
+  the owner-inbox closure and the Live call id (`turn_runner.ex:607`,
   `:608`). A parked call is a held tool result inside the one loop step, and
   the owner's confirm later runs it on a task outside the Queue, not as a
   new turn.
@@ -189,7 +189,7 @@ watch was added to the model).
 - What a turn does with its attachments before its loop (M67).
   `run_message_loop` composes their manifest into the user text that
   `persist_user_message` stores and, on the owner's chat turn, first saves
-  them to the workspace (`with_attachments`, `turn_runner.ex:479`). These are
+  them to the workspace (`with_attachments`, `turn_runner.ex:480`). These are
   file writes inside the turn's own steps, before its user message is
   persisted, and move no Queue state: a stop or crash during them is one at
   the turn's start, with nothing of the turn in history yet.
@@ -265,7 +265,7 @@ counterexample, run `make -C tla check SPECS=turn_queue` and open
 - **Check:** 10 (6 states).
 - **Counterexample:** the reply is delivered (`deliver_final`, `queue.ex:547`).
   `/stop` then arrives before `runner.commit` persists it (`:551` →
-  `turn_runner.ex:159`).
+  `turn_runner.ex:160`).
 - **Code:**
   - `stop_active_turn` kills the task and writes the stopped marker
     (`queue.ex:1101-1106`, `:1151-1164`).
@@ -290,7 +290,7 @@ counterexample, run `make -C tla check SPECS=turn_queue` and open
 - **Counterexample:** the reply is delivered, then `/stop` arrives before the
   task claims its result.
 - **Code:** `commit/4` runs auto-compaction synchronously (`queue.ex:551` →
-  `turn_runner.ex:196`). The claim happens only after that returns
+  `turn_runner.ex:197`). The claim happens only after that returns
   (`finish_turn`, `queue.ex:519`), so the window also covers post-delivery
   auto-compaction: seconds to tens of seconds when it runs. The kill aborts
   that compaction (safely: `replace_history` is one atomic call) and skips
@@ -525,3 +525,11 @@ and records that the channels tree has started (`started?/0`, a
 rail). The children, their order and the strategy are as before, so
 `QueueSupervisor`, its `TurnTasks` and the Queue run as the spec says; the
 one cited `application.ex` line moved (`:212`).
+
+## Re-read for events drawn as cards (2026-11-13)
+
+`run_message_loop` now also reads `draws_events`, a stamp the Mac's connection
+(from companion 8) and a phone's session (from mobile 3) put on a turn, for the
+one line it appends at the turn's start beside the lists' line, with no Queue
+state. No claim, start, stop, result or answer the spec models changed, and the
+line references into `turn_runner.ex` moved with the code.
