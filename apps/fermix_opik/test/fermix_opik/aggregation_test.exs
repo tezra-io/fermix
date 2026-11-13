@@ -351,6 +351,78 @@ defmodule FermixOpik.AggregationTest do
     end
   end
 
+  describe "the owner's trips (M89)" do
+    test "the reporter subscribes to the read and the edit" do
+      assert [:fermix, :trip, :read] in FermixOpik.Reporter.events()
+      assert [:fermix, :trip, :edit] in FermixOpik.Reporter.events()
+    end
+
+    test "an edit nests as a point span under the turn with its lookups, and a refused read is errored" do
+      {_state, closed} =
+        run([
+          {[:fermix, :trip, :edit],
+           %{
+             duration_us: 4_000,
+             trips: 1,
+             ops: 6,
+             lookups: 3,
+             placed: 2,
+             offered: 1,
+             not_found: 0,
+             not_looked_up: 0
+           },
+           %{
+             component: "trips",
+             made_via: "chat",
+             outcome: :ok,
+             error_code: nil,
+             backend: "apple_maps",
+             rate_limited: false,
+             session_id: "main-1"
+           }},
+          {[:fermix, :trip, :read], %{duration_us: 600, trips: 0},
+           %{
+             component: "trips",
+             made_via: "chat",
+             outcome: :refused,
+             error_code: "no_trip",
+             scope: :days,
+             session_id: "main-1"
+           }},
+          {[:fermix, :provider, :call], %{duration_ms: 1_000},
+           %{provider: :openai, model: "gpt-5.5", status: :ok, session_id: "main-1"}},
+          {[:fermix, :agent, :message], %{iterations: 1, total_tokens: 10},
+           %{channel: :telegram, chat_id: "c1", sender: "u1", session_id: "main-1", agent: "main"}}
+        ])
+
+      assert [%{spans: spans}] = closed
+      wrapper = span_named(spans, "agent:main")
+      edit = span_named(spans, "trip_edit")
+      read = span_named(spans, "trip_read")
+
+      assert edit.parent_span_id == wrapper.id
+
+      assert edit.metadata == %{
+               trips: 1,
+               ops: 6,
+               lookups: 3,
+               placed: 2,
+               offered: 1,
+               not_found: 0,
+               not_looked_up: 0,
+               duration_us: 4_000,
+               made_via: "chat",
+               outcome: "ok",
+               backend: "apple_maps",
+               rate_limited: false
+             }
+
+      refute Map.has_key?(edit, :error_info)
+      assert read.metadata.scope == "days"
+      assert read.error_info == %{exception_type: "TripRefused", message: "no_trip"}
+    end
+  end
+
   @compaction_event [:fermix, :agent_loop, :context_compaction]
   @recovery_event [:fermix, :agent_loop, :context_recovery]
 

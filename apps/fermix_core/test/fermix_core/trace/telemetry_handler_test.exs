@@ -11,6 +11,7 @@ defmodule FermixCore.Trace.TelemetryHandlerTest do
   alias FermixCore.Tools.Telemetry, as: ToolTelemetry
   alias FermixCore.Trace
   alias FermixCore.Trace.TelemetryHandler
+  alias FermixCore.Trips.Telemetry, as: TripTelemetry
 
   # The day Trace files under, handed in so a run across UTC midnight writes
   # and reads the same folder.
@@ -469,6 +470,56 @@ defmodule FermixCore.Trace.TelemetryHandlerTest do
     assert attach["phase"] == "proving"
     assert fault["agent"] == "crc_mismatch" and fault["stage"] == "receive"
     assert call["session_id"] == "voice_live:9" and call["mic_frames"] == 50
+  end
+
+  # M89: a trip's read and edit are agent events keyed on their component,
+  # counts and Fermix's own words only.
+  test "a trip read and a trip edit become trip_read and trip_edit agent_event rows", %{
+    dir: dir,
+    server: server
+  } do
+    context = %{session_id: "main-trips-1"}
+
+    TripTelemetry.emit_read(
+      context,
+      %{scope: :days, trips: 1, outcome: :ok, made_via: "chat", error_code: nil},
+      700
+    )
+
+    TripTelemetry.emit_edit(
+      context,
+      %{
+        trips: 1,
+        ops: 3,
+        lookups: 2,
+        placed: 1,
+        offered: 1,
+        not_found: 0,
+        not_looked_up: 0,
+        outcome: :refused,
+        made_via: "chat",
+        error_code: "title_taken",
+        backend: "apple_maps",
+        rate_limited: false
+      },
+      2_500
+    )
+
+    sync(server)
+
+    rows =
+      dir
+      |> read_entries(:agent_event)
+      |> Enum.filter(&String.starts_with?(&1["event"] || "", "trip_"))
+
+    assert Enum.map(rows, & &1["event"]) ==
+             Enum.map(TripTelemetry.trace_event_definitions(), & &1.trace_event)
+
+    [read, edit] = rows
+    assert read["agent"] == "trips" and read["scope"] == "days" and read["trips"] == 1
+    assert read["session_id"] == "main-trips-1"
+    assert edit["ops"] == 3 and edit["placed"] == 1 and edit["backend"] == "apple_maps"
+    assert edit["outcome"] == "refused" and edit["error_code"] == "title_taken"
   end
 
   test "an attachment ingest becomes an attachment_ingest agent_event row, never its bytes", %{

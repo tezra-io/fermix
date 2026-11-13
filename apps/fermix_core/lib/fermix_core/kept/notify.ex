@@ -10,7 +10,7 @@ defmodule FermixCore.Kept.Notify do
   """
 
   # The kinds a notifier hears of, by the key their changes ride under.
-  @kinds [:lists]
+  @kinds [:lists, :trips]
 
   @typedoc "One thing a commit changed: its id, its new rev, and what each device edit made."
   @type change :: %{id: String.t(), rev: non_neg_integer(), made: %{String.t() => String.t()}}

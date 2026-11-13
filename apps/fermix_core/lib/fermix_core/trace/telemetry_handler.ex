@@ -31,6 +31,7 @@ defmodule FermixCore.Trace.TelemetryHandler do
   alias FermixCore.SoulCuration.Telemetry, as: SoulTelemetry
   alias FermixCore.Temporal.Telemetry, as: TemporalTelemetry
   alias FermixCore.Trace
+  alias FermixCore.Trips.Telemetry, as: TripTelemetry
 
   @core_events [
     %{event: [:fermix, :provider, :call], trace_type: :llm_call, agent_field: :agent},
@@ -297,6 +298,7 @@ defmodule FermixCore.Trace.TelemetryHandler do
       ComputerInvocationTelemetry.trace_event_definitions() ++
       AttachmentTelemetry.trace_event_definitions() ++
       ChecklistTelemetry.trace_event_definitions() ++
+      TripTelemetry.trace_event_definitions() ++
       CueTelemetry.trace_event_definitions() ++
       CueFilterTelemetry.trace_event_definitions() ++
       AccessoryTelemetry.trace_event_definitions()

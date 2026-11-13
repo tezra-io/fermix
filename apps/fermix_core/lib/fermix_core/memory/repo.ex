@@ -30,6 +30,7 @@ defmodule FermixCore.Memory.Repo do
   alias FermixCore.Memory.Repo.OpenLoopReactionsSql
   alias FermixCore.Memory.Repo.OpenLoopsSql
   alias FermixCore.Memory.Repo.TemporalSql
+  alias FermixCore.Memory.Repo.TripsSql
   alias FermixCore.Memory.Repo.VoiceCallsSql
   alias FermixCore.Memory.Scope
   alias FermixCore.Setup.ConfigStore
@@ -96,6 +97,7 @@ defmodule FermixCore.Memory.Repo do
   @computer_history_reports_migration_version 60
   @computer_history_home_migration_version 61
   @checklist_edit_kinds_migration_version 62
+  @trips_migration_version 63
   @sqlite_open_intent :readwritecreate
 
   # The home's requests about notes from every machine (M97 §8), all served by
@@ -3750,6 +3752,15 @@ defmodule FermixCore.Memory.Repo do
     do: call({:checklists, request}, opts)
 
   @doc """
+  Serves one request about the owner's trips (M89) with
+  `Memory.Repo.TripsSql`, a `handle(conn, request)` with one head per request
+  tuple. Only `FermixCore.Trips.Registry` calls it.
+  """
+  @spec trips_call(tuple(), keyword()) :: term()
+  def trips_call(request, opts \\ []) when is_tuple(request) and is_list(opts),
+    do: call({:trips, request}, opts)
+
+  @doc """
   The base schema as SQL, for a test that seeds a store an older release wrote.
 
   Every statement is `IF NOT EXISTS`, so a fixture can lay the base tables down
@@ -4937,6 +4948,10 @@ defmodule FermixCore.Memory.Repo do
     {:reply, with_connection(state, &ChecklistsSql.handle(&1, request)), state}
   end
 
+  def handle_call({:trips, request}, _from, state) do
+    {:reply, with_connection(state, &TripsSql.handle(&1, request)), state}
+  end
+
   # Every request is served in order by this one process, so a call waits
   # behind every request ahead of it. A timed-out call exits its caller unless
   # the caller passed `on_timeout: :error` (`periodic_opts/2`).
@@ -5024,6 +5039,7 @@ defmodule FermixCore.Memory.Repo do
          :ok <- configure_connection(conn),
          :ok <- run_migrations(conn, carry) do
       :ok = sweep_removed_checklists(conn)
+      :ok = sweep_removed_trips(conn)
       {:ok, conn}
     end
   end
@@ -5113,8 +5129,28 @@ defmodule FermixCore.Memory.Repo do
          :ok <- apply_computer_history_machines_migration(conn, versions, carry),
          :ok <- apply_computer_history_reports_migration(conn, versions),
          :ok <- apply_computer_history_home_migration(conn, versions),
-         :ok <- apply_checklist_edit_kinds_migration(conn, versions) do
+         :ok <- apply_checklist_edit_kinds_migration(conn, versions),
+         :ok <- apply_trips_migration(conn, versions) do
       :ok
+    end
+  end
+
+  # The owner's trips (M89 §05), their two tables and version in one
+  # transaction, after 62. Nothing is rewritten: a store from before has no
+  # trips.
+  defp apply_trips_migration(conn, versions) do
+    if Enum.member?(versions, @trips_migration_version) do
+      :ok
+    else
+      Sqlite3.execute(
+        conn,
+        """
+        BEGIN;
+        #{TripsSql.schema_sql()}
+        INSERT INTO schema_migrations(version) VALUES (#{@trips_migration_version});
+        COMMIT;
+        """
+      )
     end
   end
 
@@ -5328,6 +5364,19 @@ defmodule FermixCore.Memory.Repo do
 
       {:error, reason} ->
         Logger.error("memory: removed lists could not be swept: #{inspect(reason)}")
+    end
+  end
+
+  # Trips removed more than 30 days ago go when the store opens, beside the
+  # lists' sweep and as it does: a sweep that fails is logged and the store
+  # opens, and what it would have deleted waits for the next.
+  defp sweep_removed_trips(conn) do
+    case TripsSql.handle(conn, {:purge_removed_trips, DateTime.utc_now()}) do
+      {:ok, _deleted} ->
+        :ok
+
+      {:error, reason} ->
+        Logger.error("memory: removed trips could not be swept: #{inspect(reason)}")
     end
   end
 

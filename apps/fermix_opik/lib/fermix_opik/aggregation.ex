@@ -881,6 +881,14 @@ defmodule FermixOpik.Aggregation do
     add_child_span(state, meta, at, &Mapper.checklist_span(kind, meta, meas, &1))
   end
 
+  # A read or an edit of the owner's trips ([:fermix, :trip, :read | :edit],
+  # M89): a point span under the turn or job run that made it, via the shared
+  # session_id, lasting the store's transaction. Counts and words of Fermix's
+  # own only. session_id nil → place_under no-ops.
+  def apply_event(state, [:fermix, :trip, kind], meas, meta, at) when kind in [:read, :edit] do
+    add_child_span(state, meta, at, &Mapper.trip_span(kind, meta, meas, &1))
+  end
+
   # In-loop context compaction ([:fermix, :agent_loop, :context_compaction]) and
   # the recovery rounds after a provider refused a request as too large
   # ([:fermix, :agent_loop, :context_recovery]): point spans under the run that

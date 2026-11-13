@@ -2,11 +2,12 @@ defmodule FermixCore.Kept.Ids do
   @moduledoc """
   The ids of the things Fermix keeps for the owner (M89 §07): a kind's prefix
   and ten lowercase base32 characters, `ck_` for a list and `ci_` for one of
-  its rows. Shared by every kept kind, so a second kind adds its prefixes here
-  and mints and checks its ids the lists' way. Pure.
+  its rows, `tr_` for a trip and `ti_` for one of its days or stops. Shared
+  by every kept kind, so a second kind adds its prefixes here and mints and
+  checks its ids the lists' way. Pure.
   """
 
-  @prefixes ["ck_", "ci_"]
+  @prefixes ["ck_", "ci_", "tr_", "ti_"]
   @alphabet ~c"0123456789abcdefghjkmnpqrstvwxyz"
   @suffix ~r/\A[0-9a-z]{10}\z/
 

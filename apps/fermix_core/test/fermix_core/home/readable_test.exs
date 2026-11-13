@@ -83,7 +83,9 @@ defmodule FermixCore.Home.ReadableTest do
   # add it to the lists below.
   describe "what the current home format was decided for" do
     @decided_format 1
-    @migrations Enum.to_list(1..39) ++ [41, 42, 43] ++ Enum.to_list(45..62)
+    # 63 (M89 §05, the owner's trips) adds two tables an engine at this format
+    # never reads and changes nothing it does, so the format stays.
+    @migrations Enum.to_list(1..39) ++ [41, 42, 43] ++ Enum.to_list(45..63)
     @manifest_keys ~w(created_at engine_version files format home_format home_root host links
                       primary_epoch)
     @entry_keys ~w(bytes mode path sha256)

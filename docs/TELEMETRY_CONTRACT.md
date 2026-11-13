@@ -1404,6 +1404,31 @@ exporter places each under its turn's or job run's trace as a point span
 `failed`). The edit's `duration_us` is the budget's measure (M85 §12: under
 5 ms at p95 for a call that changes three lists).
 
+## The owner's trips (M89)
+
+A trip is the lists' second kind on the same mechanism, and its events are the
+lists' again. `Trips.Registry` emits **one point event per read and per edit**
+through `FermixCore.Trips.Telemetry`, an edit a device sends included
+(`made_via: "mac" | "phone"`, one op, no session): `[:fermix, :trip, :read]`
+with measurements `duration_us` (the store's read) and `trips` (how many it
+returned), and `[:fermix, :trip, :edit]` with `duration_us` (the call's one
+transaction), `trips` (the trips it touched), `ops`, and what the call's place
+lookups did: `lookups`, `placed`, `offered`, `not_found`, `not_looked_up` (all
+0 for a device's edit, which carries a whole place). Metadata on both:
+`component: "trips"`, `made_via` (`chat | job | mac | phone`), `outcome` (`ok |
+refused | failed`), `error_code` (the refusal's tag,
+`Trips.Registry.error_tag/1`, else nil), and the caller's `session_id` when it
+has one; `scope` on a read (`index | trip | days | outline | share`); `backend`
+(the place search the lookups used, else nil) and `rate_limited` on an edit.
+Neither event ever carries a title, a stop's words, a place or a coordinate. A
+lookup inside an edit is no tool call and emits no `[:fermix, :tool, :exec]`
+row of its own. `Trace.TelemetryHandler` records them as `trip_read` and
+`trip_edit` `agent_event` rows keyed on `component`, and the Opik exporter
+places each under its turn's or job run's trace as a point span
+(`FermixOpik.Mapper.trip_span/4`: the counts, `scope`, `made_via`, `outcome`,
+`backend` and `rate_limited`, flagged errored with the tag when the outcome is
+`refused` or `failed`).
+
 ## Computer-history summarizer (a headless run with no bookends)
 
 The summarizer is **one bounded provider call per sitting**, not an agent loop,

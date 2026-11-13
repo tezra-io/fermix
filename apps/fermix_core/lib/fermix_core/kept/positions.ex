@@ -43,6 +43,36 @@ defmodule FermixCore.Kept.Positions do
   defp next_position(nil, previous), do: previous + 2 * @gap
   defp next_position(row, _previous), do: row.position
 
+  @doc """
+  `rows` with the rows of `run` put at `index` in their order (a trip's day
+  with its stops, M89 §05): evenly between their neighbours when the gap holds
+  them all, a gap apart after the last row at the end, or with every row
+  numbered again when the gap is too small.
+  """
+  @spec insert_run([row()], non_neg_integer(), [row(), ...], DateTime.t()) :: [row()]
+  def insert_run(rows, index, [_ | _] = run, %DateTime{} = now)
+      when is_list(rows) and is_integer(index) and index >= 0 do
+    count = length(run)
+    previous = if index == 0, do: 0, else: Enum.at(rows, index - 1).position
+    next = run_end(Enum.at(rows, index), previous, count)
+    step = div(next - previous, count + 1)
+    {before, rest} = Enum.split(rows, index)
+
+    if step >= 1 do
+      placed =
+        run |> Enum.with_index(1) |> Enum.map(fn {row, i} -> placed(row, previous, i, step) end)
+
+      before ++ placed ++ rest
+    else
+      renumber(before ++ run ++ rest, now)
+    end
+  end
+
+  defp run_end(nil, previous, count), do: previous + (count + 1) * @gap
+  defp run_end(row, _previous, _count), do: row.position
+
+  defp placed(row, previous, i, step), do: %{row | position: previous + i * step}
+
   @doc "`rows` numbered again in their order, `gap/0` apart, the ones that moved marked changed."
   @spec renumber([row()], DateTime.t()) :: [row()]
   def renumber(rows, %DateTime{} = now) when is_list(rows) do
