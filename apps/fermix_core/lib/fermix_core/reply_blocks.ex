@@ -9,8 +9,11 @@ defmodule FermixCore.ReplyBlocks do
   read or changed (`put_checklists/3`, M85 §07), until the companion turn
   writer takes them for the reply it writes (`take/2`). It is bounded whichever channel ran the search:
   a record expires 30 minutes after it was put, a conversation keeps its newest
-  50, and expired records of every conversation are dropped on each call, so a
-  conversation that never takes holds nothing past the window.
+  50 places and events and, apart from them, its newest 100 list touches (a
+  trip's lookups put a place each, up to 40 a call, and must not evict the
+  lists the turn touched, M89 C3), and expired records of every conversation
+  are dropped on each call, so a conversation that never takes holds nothing
+  past the window.
 
   `build/2` is pure. The link is the reference: it reads the links in a reply's
   text in order (a markdown link's target or a bare URL) and keeps the places
@@ -51,6 +54,16 @@ defmodule FermixCore.ReplyBlocks do
   told a type is drawn that it is not sent. `for_session/4` is the filter
   every row leaves by: a `text_done`, a `row` and each message of a
   `history_page` keep only the blocks their session is sent.
+
+  ## The place index
+
+  Every place put is also indexed under its conversation for the same 30
+  minutes, newest 50, and `take/2` leaves the index alone: a trip's `place`
+  given as a link a search in this conversation returned resolves through
+  `place_by_url/3` a turn after the reply that showed it (M89 §04, C2), on a
+  channel whose replies take the records as on one whose replies do not. The
+  link is compared as `build/2` compares a reply's links, and the newest
+  search names a link two searches returned.
   """
 
   use GenServer
@@ -74,6 +87,10 @@ defmodule FermixCore.ReplyBlocks do
   @max_events 8
   @max_categories 5
   @max_records 50
+  @max_touches 100
+  # The records that name a kept object a tool touched, bounded apart from the
+  # places and events.
+  @touch_kinds [:checklist]
   @ttl_ms 30 * 60 * 1_000
 
   # A link a reader clicks: a markdown link's target (the text between its
@@ -203,6 +220,10 @@ defmodule FermixCore.ReplyBlocks do
   @spec max_records() :: pos_integer()
   def max_records, do: @max_records
 
+  @doc "The most list touches a conversation keeps apart from its places, newest kept."
+  @spec max_touches() :: pos_integer()
+  def max_touches, do: @max_touches
+
   @doc "How long a place record is kept after it was put, in milliseconds."
   @spec ttl_ms() :: pos_integer()
   def ttl_ms, do: @ttl_ms
@@ -253,6 +274,17 @@ defmodule FermixCore.ReplyBlocks do
   def take(server \\ __MODULE__, conversation_key)
       when is_tuple(conversation_key) and tuple_size(conversation_key) == 3 do
     GenServer.call(server, {:take, conversation_key})
+  end
+
+  @doc """
+  The newest place a search in the conversation put in the last 30 minutes
+  whose `canonical_url` or `source_url` is `url`, compared as `build/2`
+  compares a reply's links, or `:error`. A take leaves it (moduledoc).
+  """
+  @spec place_by_url(GenServer.server(), conversation_key(), String.t()) :: {:ok, map()} | :error
+  def place_by_url(server \\ __MODULE__, conversation_key, url)
+      when is_tuple(conversation_key) and tuple_size(conversation_key) == 3 and is_binary(url) do
+    GenServer.call(server, {:place_by_url, conversation_key, url})
   end
 
   @doc """
@@ -400,24 +432,74 @@ defmodule FermixCore.ReplyBlocks do
   @impl true
   def init(opts) do
     case Keyword.get(opts, :clock, &monotonic_ms/0) do
-      clock when is_function(clock, 0) -> {:ok, %{clock: clock, conversations: %{}}}
+      clock when is_function(clock, 0) -> {:ok, %{clock: clock, conversations: %{}, places: %{}}}
       other -> {:stop, {:invalid_clock, other}}
     end
   end
 
   @impl true
-  def handle_call({:put, key, places}, _from, state) do
+  def handle_call({:put, key, records}, _from, state) do
     now = state.clock.()
-    stamped = Enum.map(places, &{now, &1})
+    stamped = Enum.map(records, &{now, &1})
     conversations = sweep(state.conversations, now)
-    kept = Enum.take(Map.get(conversations, key, []) ++ stamped, -@max_records)
-    {:reply, :ok, %{state | conversations: Map.put(conversations, key, kept)}}
+    kept = bounded(Map.get(conversations, key, []) ++ stamped)
+    places = index(sweep(state.places, now), key, Enum.filter(stamped, &place_record?/1))
+
+    {:reply, :ok, %{state | conversations: Map.put(conversations, key, kept), places: places}}
   end
 
   def handle_call({:take, key}, _from, state) do
-    {records, conversations} = Map.pop(sweep(state.conversations, state.clock.()), key, [])
-    {:reply, Enum.map(records, &elem(&1, 1)), %{state | conversations: conversations}}
+    now = state.clock.()
+    {records, conversations} = Map.pop(sweep(state.conversations, now), key, [])
+
+    {:reply, Enum.map(records, &elem(&1, 1)),
+     %{state | conversations: conversations, places: sweep(state.places, now)}}
   end
+
+  def handle_call({:place_by_url, key, url}, _from, state) do
+    places = sweep(state.places, state.clock.())
+
+    found =
+      places
+      |> Map.get(key, [])
+      |> Enum.map(&elem(&1, 1))
+      |> url_index()
+      |> linked_record(url)
+
+    case found do
+      [place] -> {:reply, {:ok, place}, %{state | places: places}}
+      [] -> {:reply, :error, %{state | places: places}}
+    end
+  end
+
+  # A conversation's touches and its other records are bounded apart, each
+  # newest kept, and every record stays where it was put among the rest.
+  defp bounded(records) do
+    records
+    |> keep_newest(&touch_record?/1, @max_touches)
+    |> keep_newest(&(not touch_record?(&1)), @max_records)
+  end
+
+  defp keep_newest(records, member?, max) do
+    excess = Enum.count(records, member?) - max
+
+    {kept, _left} =
+      Enum.flat_map_reduce(records, excess, fn record, left ->
+        if left > 0 and member?.(record), do: {[], left - 1}, else: {[record], left}
+      end)
+
+    kept
+  end
+
+  defp touch_record?({_put_at, {kind, _touch}}), do: kind in @touch_kinds
+  defp touch_record?({_put_at, _record}), do: false
+
+  defp place_record?({_put_at, record}), do: is_map(record)
+
+  defp index(places, _key, []), do: places
+
+  defp index(places, key, stamped),
+    do: Map.put(places, key, Enum.take(Map.get(places, key, []) ++ stamped, -@max_records))
 
   defp sweep(conversations, now) do
     conversations

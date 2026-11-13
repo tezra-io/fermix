@@ -128,6 +128,111 @@ defmodule FermixCore.ReplyBlocksTest do
     end
   end
 
+  # M89 C3: a trip's lookups put a record each, up to 40 a call, so the bound
+  # on places must never evict the lists the turn touched.
+  describe "the bound on places" do
+    test "keeps the lists a tool touched outside it, in the order they were put" do
+      {server, _clock} = holder()
+      bound = ReplyBlocks.max_records()
+      touch = %{list_id: "ck_3m9q2x7d1a", title: "Fermix", rows: []}
+
+      :ok = ReplyBlocks.put_places(server, @chat, [record(0)])
+      :ok = ReplyBlocks.put_checklists(server, @chat, [touch])
+      :ok = ReplyBlocks.put_places(server, @chat, Enum.map(1..(bound + 9), &record/1))
+
+      taken = ReplyBlocks.take(server, @chat)
+      assert [{:checklist, ^touch} | places] = taken
+      assert length(places) == bound
+      assert hd(places).name == "Cafe 10"
+      assert List.last(places).name == "Cafe #{bound + 9}"
+
+      assert [%{"type" => "checklists", "lists" => [%{"list_id" => "ck_3m9q2x7d1a"}]}] =
+               ReplyBlocks.checklists(taken)
+    end
+
+    test "the touches have a bound of their own, newest kept" do
+      {server, _clock} = holder()
+      bound = ReplyBlocks.max_touches()
+      touches = Enum.map(1..(bound + 3), &%{list_id: "ck_#{&1}", title: "List #{&1}", rows: []})
+
+      :ok = ReplyBlocks.put_places(server, @chat, [record(1)])
+      :ok = ReplyBlocks.put_checklists(server, @chat, touches)
+
+      assert [%{name: "Cafe 1"} | kept] = ReplyBlocks.take(server, @chat)
+      assert length(kept) == bound
+      assert hd(kept) == {:checklist, Enum.at(touches, 3)}
+      assert List.last(kept) == {:checklist, List.last(touches)}
+    end
+  end
+
+  # M89 C2: a link a search returned is a place the owner can choose a turn
+  # later, so the link form reads an index of places that `take/2` leaves.
+  describe "the place index the link form reads" do
+    test "finds a place by either link, compared as a block compares them, after a take" do
+      {server, _clock} = holder()
+
+      :ok = ReplyBlocks.put_places(server, @chat, [record(1), record(2)])
+      assert length(ReplyBlocks.take(server, @chat)) == 2
+
+      assert {:ok, %{name: "Cafe 1"}} =
+               ReplyBlocks.place_by_url(server, @chat, "HTTPS://Cafe1.Example#menu")
+
+      assert {:ok, %{name: "Cafe 2"}} =
+               ReplyBlocks.place_by_url(server, @chat, "https://search.brave.com/local/place/2/")
+
+      assert ReplyBlocks.place_by_url(server, @chat, "https://cafe9.example/") == :error
+      assert ReplyBlocks.place_by_url(server, @other, "https://cafe1.example/") == :error
+      assert ReplyBlocks.place_by_url(server, @chat, "not a link") == :error
+    end
+
+    test "the newer search names a link two searches returned" do
+      {server, _clock} = holder()
+
+      :ok = ReplyBlocks.put_places(server, @chat, [record(1)])
+      :ok = ReplyBlocks.put_places(server, @chat, [record(1, %{name: "Cafe One"})])
+
+      assert {:ok, %{name: "Cafe One"}} =
+               ReplyBlocks.place_by_url(server, @chat, "https://cafe1.example/")
+    end
+
+    test "holds only places: a touch or an event is never found by a link" do
+      {server, _clock} = holder()
+      touch = %{list_id: "ck_3m9q2x7d1a", title: "Fermix", rows: []}
+
+      :ok = ReplyBlocks.put_checklists(server, @chat, [touch])
+
+      :ok =
+        ReplyBlocks.put_events(server, @chat, [%{"event_id" => "ev_1", "date" => "2027-05-09"}])
+
+      assert ReplyBlocks.place_by_url(server, @chat, "https://cafe1.example/") == :error
+      assert :sys.get_state(server).places == %{}
+    end
+
+    test "forgets a place once the window has passed since it was put" do
+      {server, clock} = holder(1_000)
+      window = ReplyBlocks.ttl_ms()
+
+      :ok = ReplyBlocks.put_places(server, @chat, [record(1)])
+      advance_to(clock, 1_000 + window - 1)
+      assert {:ok, _place} = ReplyBlocks.place_by_url(server, @chat, "https://cafe1.example/")
+
+      advance_to(clock, 1_000 + window)
+      assert ReplyBlocks.place_by_url(server, @chat, "https://cafe1.example/") == :error
+      assert :sys.get_state(server).places == %{}
+    end
+
+    test "keeps a conversation's newest places, never more than the bound" do
+      {server, _clock} = holder()
+      bound = ReplyBlocks.max_records()
+
+      :ok = ReplyBlocks.put_places(server, @chat, Enum.map(1..(bound + 2), &record/1))
+
+      assert ReplyBlocks.place_by_url(server, @chat, "https://cafe2.example/") == :error
+      assert {:ok, _place} = ReplyBlocks.place_by_url(server, @chat, "https://cafe3.example/")
+      assert length(:sys.get_state(server).places[@chat]) == bound
+    end
+  end
+
   describe "building a reply's block" do
     test "keeps the places the text links, as the wire carries them" do
       text =

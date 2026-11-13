@@ -287,6 +287,33 @@ defmodule FermixCore.Tools.PlaceSearch do
     Support.run(name(), Map.delete(context, :tool_trace), fn -> run(args, context) end)
   end
 
+  @doc """
+  One search on the backend in force for a caller that is not this tool: a
+  trip's place lookup inside `trip_edit` (M89 §04, C12). The backend is
+  resolved and its readiness checked as a call of the tool's is, and the
+  request goes to it as given (`Backend.request()`; the backend checks its
+  fields). Unlike `execute/2` it emits no tool event, since the model's one
+  call is the `trip_edit` that runs it, and keeps nothing for a reply: what
+  joins the conversation is the caller's to choose. The trace carries the
+  backend's name.
+  """
+  @spec lookup(Backend.request(), map()) ::
+          {:ok, [Backend.place()], Backend.trace_metadata()}
+          | {:error, String.t(), Backend.trace_metadata()}
+  def lookup(%{query: query} = request, context) when is_binary(query) and is_map(context) do
+    resolution = resolution(context)
+    opts = backend_opts(resolution, context)
+    backend = %{backend: Atom.to_string(resolution.name)}
+
+    with :ok <- Backend.ready(resolution, opts),
+         {:ok, places, trace} <- resolution.module.search(request, opts) do
+      {:ok, places, Map.merge(trace, backend)}
+    else
+      {:error, reason} -> {:error, reason, backend}
+      {:error, reason, trace} -> {:error, reason, Map.merge(trace, backend)}
+    end
+  end
+
   # The backend is resolved and its readiness re-checked on every call:
   # advertisement can never be the only readiness/security barrier (§14.1).
   defp run(args, context) do
