@@ -137,14 +137,16 @@ defmodule FermixChannels.Gateway.OwnerInboxApprovalTest do
   end
 
   # MILESTONE_54 §7.5: an iMessage conversation is keyed by the counterpart's
-  # handle, so the owner's DM chat id is the owner id, as on Telegram.
+  # handle, so the owner's DM chat id is the owner id, as on Telegram. iMessage
+  # on this Mac: where it runs is injected, never read from this host.
   test "an iMessage owner inbox qualifies: its DM chat id is the owner's handle" do
     owner = "+15551234567"
 
     opts =
       telegram_owner(
         jobs_config: [default_delivery_target: %{channel: "imessage", chat_id: owner}],
-        configured_owners: %{"imessage" => owner}
+        configured_owners: %{"imessage" => owner},
+        imessage_carrier: :here
       )
 
     assert {:ok, token, :new} = OwnerInboxApproval.request(request(), opts)
@@ -156,6 +158,33 @@ defmodule FermixChannels.Gateway.OwnerInboxApprovalTest do
     assert {:ok, record} = Confirmations.peek(token)
     assert record.channel == "imessage"
     assert record.chat_id == owner
+  end
+
+  # M97 §6.4, §14: off a Mac (Linux), iMessage is an owner inbox only while the
+  # one Mac that carries it is connected; with none, or that Mac away, the
+  # prompt is refused and nothing is sent.
+  test "off a Mac, an iMessage owner inbox qualifies only while a connected Mac carries it" do
+    owner = "+15551234567"
+    studio = %FermixCore.Computers.Computer{device_id: "d-7", name: "studio", connected: true}
+
+    opts = fn carrier ->
+      telegram_owner(
+        jobs_config: [default_delivery_target: %{channel: "imessage", chat_id: owner}],
+        configured_owners: %{"imessage" => owner},
+        imessage_carrier: carrier
+      )
+    end
+
+    for carrier <- [:none, :mac_only, {:computer, %{studio | connected: false}}] do
+      assert {:error, :no_owner_inbox} = OwnerInboxApproval.request(request(), opts.(carrier))
+    end
+
+    refute_received {:stub_adapter, _}
+
+    assert {:ok, token, :new} = OwnerInboxApproval.request(request(), opts.({:computer, studio}))
+    assert_received {:stub_adapter, {:approval, message, _text, ^token}}
+    assert message.channel == "imessage"
+    assert message.reply_target == owner
   end
 
   test "no owner inbox, or one on a platform whose DM is not the owner id, is refused" do

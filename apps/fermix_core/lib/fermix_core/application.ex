@@ -653,9 +653,13 @@ defmodule FermixCore.Application do
   # work is tick-gated; the timer is disabled in `:test` (the scheduler
   # precedent), never by omission. Its machine store failing to open never
   # stops it or a child after it: the store stays up saying why and the
-  # recorder stays off (`ComputerHistory.Spool`).
-  defp maybe_computer_history_supervisor(role) do
-    if role == :primary or ComputerHistory.recorder?() do
+  # recorder stays off (`ComputerHistory.Spool`). Public (@doc false) with the
+  # platform's fact injectable, so the gating test names the system it means.
+  @doc false
+  @spec maybe_computer_history_supervisor(Role.role(), boolean()) :: [Role.child()]
+  def maybe_computer_history_supervisor(role, recorder? \\ ComputerHistory.recorder?())
+      when role in [:primary, :device, :candidate] and is_boolean(recorder?) do
+    if role == :primary or recorder? do
       [{ComputerHistorySupervisor, timer_enabled: @compiled_env != :test}]
     else
       []

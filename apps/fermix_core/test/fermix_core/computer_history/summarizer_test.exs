@@ -15,6 +15,7 @@ defmodule FermixCore.ComputerHistory.SummarizerTest do
 
   import ExUnit.CaptureLog
 
+  alias FermixCore.ComputerHistory
   alias FermixCore.ComputerHistory.Ingest
   alias FermixCore.ComputerHistory.Locality
   alias FermixCore.ComputerHistory.Purge
@@ -179,12 +180,29 @@ defmodule FermixCore.ComputerHistory.SummarizerTest do
   # The cycle's clock is a day after the newest event the case recorded,
   # unless the case says otherwise: within the retention window, which a cycle
   # sweeps before it sends (M97 §8.1), and long after any sitting closed.
+  # Whether this machine contributes is the home's one rule
+  # (`ComputerHistory.contributors/1`), asked of a home with no computer and of
+  # the platform the case names (`:recorder?`): a Mac's unless it says
+  # otherwise, so the answer never reads this host's.
   defp run_cycle(opts) do
     {repo, opts} = Keyword.pop!(opts, :repo)
+    {recorder?, opts} = Keyword.pop(opts, :recorder?, true)
     spool = Keyword.get(opts, :spool, spool_of(repo))
     opts = Keyword.put_new_lazy(opts, :now, fn -> a_day_after_newest(spool) end)
     now = Keyword.fetch!(opts, :now)
-    home = [repo: repo, adapter: FakeAdapter, now: now] ++ Keyword.take(opts, [:route_opts])
+
+    contributors = fn ->
+      ComputerHistory.contributors(
+        repo: repo,
+        recording?: recorder? and ComputerHistory.enabled?(),
+        computers: []
+      )
+    end
+
+    home =
+      [repo: repo, adapter: FakeAdapter, now: now, contributors: contributors] ++
+        Keyword.take(opts, [:route_opts])
+
     uplink = fn payload -> {:ok, Submission.accept("", payload, home)} end
 
     machine =
@@ -371,6 +389,29 @@ defmodule FermixCore.ComputerHistory.SummarizerTest do
 
     {:ok, state} = Spool.state(server: spool_of(repo))
     assert state.paused_reason == "summarizer_unavailable"
+    assert state.last_summarized_id == 0
+  end
+
+  # M97 §8.3: a system with no recorder (Linux) records nothing of its own, so
+  # the home takes no sitting from this machine: refused off before any provider
+  # is asked, and held here.
+  test "a home with no recorder holds this machine's sitting off, with no call", %{repo: repo} do
+    enable(summarizer: :anthropic)
+    insert(repo, [event(1, 1_000, "some text")])
+
+    opts = [
+      repo: repo,
+      recorder?: false,
+      adapter: FakeAdapter,
+      route_opts: [model: "claude-x", api_key: "k"]
+    ]
+
+    assert {:held, "off"} = run_cycle(opts)
+    assert calls() == []
+    assert {:ok, 0} = Repo.computer_history_count_memories(server: repo)
+
+    {:ok, state} = Spool.state(server: spool_of(repo))
+    assert state.paused_reason == "off"
     assert state.last_summarized_id == 0
   end
 

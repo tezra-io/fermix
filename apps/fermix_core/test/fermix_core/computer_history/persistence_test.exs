@@ -62,14 +62,16 @@ defmodule FermixCore.ComputerHistory.PersistenceTest do
       raw_rows(path, "SELECT from_ts, to_ts, issued_at FROM computer_history_purges ORDER BY id")
 
   # A store opened the way a boot opens it, carrying any raw spool into this
-  # test's own machine store, never the suite's home.
-  defp upgraded_opts(name, db_path, ctx) do
+  # test's own machine store, never the suite's home, on a system with a
+  # recorder (a Mac) unless the case names one without.
+  defp upgraded_opts(name, db_path, ctx, recorder? \\ true) do
     [
       name: name,
       enabled: true,
       database_path: db_path,
       history_spool_path: ctx.spool_path,
-      history_server?: false
+      history_server?: false,
+      history_recorder?: recorder?
     ]
   end
 
@@ -465,14 +467,14 @@ defmodule FermixCore.ComputerHistory.PersistenceTest do
       :ok = Sqlite3.close(conn)
     end
 
-    defp start_seeded_repo!(ctx, label, watermark) do
+    defp start_seeded_repo!(ctx, label, watermark, recorder? \\ true) do
       db_path = Path.join(ctx.dir, "#{label}.db")
       seed_v27_database!(db_path)
       if watermark, do: seed_watermark!(db_path, watermark)
       repo_name = :"ch_purges_repo_#{System.unique_integer([:positive])}"
 
       before = System.system_time(:millisecond)
-      start_supervised!({Repo, upgraded_opts(repo_name, db_path, ctx)}, id: :seeded)
+      start_supervised!({Repo, upgraded_opts(repo_name, db_path, ctx, recorder?)}, id: :seeded)
       {repo_name, db_path, before, System.system_time(:millisecond)}
     end
 
@@ -519,6 +521,24 @@ defmodule FermixCore.ComputerHistory.PersistenceTest do
       assert home_intervals(db_path) == []
       assert machine_intervals(ctx.spool_path) == []
       assert {:ok, 0} = Repo.computer_history_purge_mark(server: repo)
+    end
+
+    # A system with no recorder (Linux) keeps no store of raw history, so the
+    # watermark is dropped with the raw rows it fenced (M97 §8.3): it lands in
+    # neither store, and the old column is kept as on a Mac.
+    test "on a system with no recorder a stored watermark is carried nowhere", ctx do
+      {repo, db_path, _before, _later} = start_seeded_repo!(ctx, "wm_linux", 2_000, false)
+
+      assert {:ok, versions} = Repo.migration_versions(server: repo)
+      assert 59 in versions
+      assert home_intervals(db_path) == []
+      assert machine_intervals(ctx.spool_path) == []
+
+      assert [[2_000]] =
+               raw_rows(
+                 db_path,
+                 "SELECT purge_watermark_ts FROM computer_history_state WHERE id = 1"
+               )
     end
   end
 

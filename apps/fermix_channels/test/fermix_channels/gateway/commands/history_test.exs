@@ -721,7 +721,7 @@ defmodule FermixChannels.Gateway.Commands.HistoryTest do
     events = [%{boot_id: "b1", source_seq: 1, ts: 1_000, type: "app.activated"}]
     {:ok, 1} = Spool.insert_events(events, server: spool)
 
-    assert :ok = History.execute(message("purge all"), reply_fn(self()), ctx)
+    assert :ok = History.execute(message("purge all"), reply_fn(self()), macos_ctx(ctx))
     assert_receive {:reply, text}
     assert text =~ "Purged"
     assert text =~ "cannot reach"
@@ -736,6 +736,24 @@ defmodule FermixChannels.Gateway.Commands.HistoryTest do
     refute text =~ "rebuilt at the next roll-up from what remains"
 
     assert {:ok, 0} = Spool.count_events(server: spool)
+  end
+
+  # A system with no recorder (Linux) keeps no raw record of its own (M97 §8.3):
+  # the purge stands on the home, and no machine store is touched.
+  test "a purge on a system with no recorder reaches the home alone", %{
+    ctx: ctx,
+    repo: repo,
+    spool: spool
+  } do
+    events = [%{boot_id: "b1", source_seq: 1, ts: 1_000, type: "app.activated"}]
+    {:ok, 1} = Spool.insert_events(events, server: spool)
+    ctx = Map.put(ctx, :computer_history_recorder?, false)
+
+    assert :ok = History.execute(message("purge all"), reply_fn(self()), ctx)
+    assert_receive {:reply, text}
+    assert text =~ "Purged 0 event(s) and 0 activity memory(ies)."
+    assert {:ok, 1} = Repo.computer_history_purge_mark(server: repo)
+    assert {:ok, 1} = Spool.count_events(server: spool)
   end
 
   test "purge with a bad window shows usage", %{ctx: ctx} do
