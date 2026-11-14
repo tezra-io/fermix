@@ -151,8 +151,11 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   makes the trip anyway and asks you); it says which it placed, which
   it found under another name (with the link, so you can pick it) and which it
   could not find. Ask what Thursday holds, move the museum to Friday, or have
-  the plan sent to someone: the shared text links every place in Apple Maps
-  and leaves your booking notes out. Trips are yours alone, as your lists are:
+  the plan sent to someone. Move a booked dinner by name and Fermix moves it,
+  keeps it marked booked and reminds you the booking itself is yours to
+  change; rearranging a day leaves a booked stop where it is. The shared text
+  links every place in Apple Maps and leaves your booking notes out. Trips are
+  yours alone, as your lists are:
   a guest or a group chat sees none. A request that read a web page or a
   search still makes and changes a trip, and a stop it writes is read back as
   data, never as instructions. The Mac app

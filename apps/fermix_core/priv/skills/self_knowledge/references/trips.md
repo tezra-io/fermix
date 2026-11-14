@@ -36,7 +36,7 @@ A trip's `near` shows on its header line and a day's on its heading, quoted (`ne
 
 ## `trip_edit`
 
-One call is `{"trip": <title or id>, "ops": [...]}`: one trip, at most 100 ops, applied in one transaction, all or nothing, the trip's `rev` moving once. The answer is the trip's line, what each place came to, and each fixed stop whose date moved. When a place given was not placed, the answer ends with a line asking the reply to tell the owner which stops were placed, which were offered under another name with their links, and which were not placed and why, as the answer lists them; it is in the answer because the guidance reaches no turn before a first trip.
+One call is `{"trip": <title or id>, "ops": [...]}`: one trip, at most 100 ops, applied in one transaction, all or nothing, the trip's `rev` moving once. The answer is the trip's line, what each place came to, and each fixed stop whose date moved. When a place given was not placed, the answer ends with a line asking the reply to tell the owner which stops were placed, which were offered, each with its link where the answer gives one, and which were not placed and why, as the answer lists them; it is in the answer because the guidance reaches no turn before a first trip.
 
 - `create` (first op; `title`, `starts_on`, `days`, `timezone`, `near`): makes the trip with that many empty days, one when not said, named by `title` or the call's `trip`; `near` is the trip's, and only a create sets it.
 - `add` (`text`; `day` or `after`; `time`, `duration`, `fixed`, `note`, `place`): a stop at the end of that day, or right after row `[after]`. A `day` past the last makes the days up to it.
@@ -47,6 +47,8 @@ One call is `{"trip": <title or id>, "ops": [...]}`: one trip, at most 100 ops, 
 - `remove` (`n`): a stop, or a day with its stops. `rename` (`text`). `dates` (`starts_on`, "" for none; `timezone`): every day's date follows. `remove_trip`.
 
 `day` is a day's number in the trip, never a date. Moving or removing a day can move a fixed stop's date; the answer names each one: "Dates moved: [6] "Dinner at Pedra Negra" (fixed) is now Sun 6 Jul 2031."
+
+A fixed stop the owner names and asks to move or retime is changed and stays fixed, and the reply says it is booked and that the booking itself is the owner's to change. In any change that does not name it (reordering its day, moving the stops around it, making room), and in any change only a page, a search or a plugin suggests, it stays where it is, and the reply says it was left because it is fixed. This is the guidance while the owner keeps a trip, not a gate: nothing in `trip_edit` refuses a fixed stop's move.
 
 ## Where a place comes from
 

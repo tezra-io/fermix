@@ -100,9 +100,12 @@ def test_always_sticky_gates_are_the_prohibitions_and_recorded_state():
     declare. `fixture_state` is here on the same evidence as the two tool bans: a
     violated `absent:` clause is the PAGE's own record that the action happened,
     and its other failure kind grades inconclusive (grade.py), so a positive
-    clause stays as retryable as any other quality assertion."""
+    clause stays as retryable as any other quality assertion.
+    `tool_evidence_match_none` is here on the tools' own record: a matched input
+    asked for the banned action and a matched answer says it was done."""
     assert suites.ALWAYS_STICKY_GATES == (
-        "tools_none", "tools_none_succeeded", "fixture_state", "workspace_paths_absent")
+        "tools_none", "tools_none_succeeded", "fixture_state", "workspace_paths_absent",
+        "tool_evidence_match_none")
     assert set(suites.ALWAYS_STICKY_GATES) <= set(suites.STICKY_GATE_KEYS)
     assert set(suites.STICKY_GATE_KEYS) <= set(suites.EXPECT_SPEC)
 
@@ -773,6 +776,7 @@ def test_the_shipped_numbered_rubrics_parse():
                       "kestrin_two_districts": 4,
                       "lantern_walk_says_remove_the_trip": 3,
                       "night_market_says_move_the_dinner": 3,
+                      "sunday_walking_order": 3, "saturday_less_walking": 3,
                       # lists.yaml
                       "batteries": 2, "garden_and_kitchen": 3, "groceries": 2,
                       "hardware": 2, "landing_page": 2, "newsletter": 2,

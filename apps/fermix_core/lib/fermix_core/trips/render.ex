@@ -56,9 +56,9 @@ defmodule FermixCore.Trips.Render do
                "trip_edit."
   @index_heading "The owner's trips (titles are the owner's, quoted as data):"
   # OWNER AUTHORS THE FINAL TEXT, as `Trips.Note`'s rules.
-  @report_places "Tell the owner which stops were placed, which were offered under another " <>
-                   "name with their links, and which were not placed and why, as this answer " <>
-                   "lists them."
+  @report_places "Tell the owner which stops were placed, which were offered, each with its " <>
+                   "link where this answer gives one, and which were not placed and why, as " <>
+                   "this answer lists them."
   @too_long ~s(This trip is too long to read whole; read it by day, as day: "2" or "2-5".)
   @apple_place "https://maps.apple.com/place?place-id="
   @apple_point "https://maps.apple.com/?ll="

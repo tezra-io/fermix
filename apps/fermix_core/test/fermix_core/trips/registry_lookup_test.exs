@@ -30,8 +30,9 @@ defmodule FermixCore.Trips.RegistryLookupTest do
   @quay %{latitude: 41.1408, longitude: -8.6142}
   @town "Varonne, Portugal"
   # The line an answer ends with when a place given was not placed.
-  @report "Tell the owner which stops were placed, which were offered under another name " <>
-            "with their links, and which were not placed and why, as this answer lists them."
+  @report "Tell the owner which stops were placed, which were offered, each with its link " <>
+            "where this answer gives one, and which were not placed and why, as this " <>
+            "answer lists them."
 
   defp place(name, point, id) do
     %{

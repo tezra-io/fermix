@@ -56,6 +56,11 @@ EXPECT_SPEC: dict[str, tuple] = {
     "tools_none_succeeded": (list,),
     "tools_in_order": (list,),
     "tool_inputs_match_all": (list,),
+    # A ban on an action, read from the tools' own record: no regex may match any
+    # tool span's input (the call asked for it) or output (the tool says it did
+    # it). Always sticky, as `tools_none` is, for a ban no tool-name list can
+    # express, such as one stop of a trip left alone while the others move.
+    "tool_evidence_match_none": (list,),
     "min_tool_calls": (int,),
     "max_tool_calls": (int,),
     "min_subagent_spawns": (int,),
@@ -247,7 +252,7 @@ def _validate_expect(expect, where: str, problems: list[str]) -> None:
         if key in ("tools_any", "tools_all", "tools_none", "tools_none_succeeded", "tools_in_order"):
             if not all(isinstance(t, str) for t in val):
                 problems.append(f"{where}: expect `{key}` must be a list of tool-name strings")
-        if key == "tool_inputs_match_all":
+        if key in ("tool_inputs_match_all", "tool_evidence_match_none"):
             if not all(isinstance(pattern, str) for pattern in val):
                 problems.append(f"{where}: expect `{key}` must be a list of regex strings")
                 continue
@@ -281,14 +286,17 @@ def _validate_expect(expect, where: str, problems: list[str]) -> None:
 # forbidden tool and thereby dropped the eight-tool write guard the defaults set,
 # so the profile-boundary assertion those cases appeared to make was not running.
 _PROHIBITION_KEYS = ("tools_none", "tools_none_succeeded")
+# Every ban list accumulates across defaults, case and turn: the tool bans and
+# `tool_evidence_match_none`, a ban read from the tools' own record.
+_BAN_LIST_KEYS = (*_PROHIBITION_KEYS, "tool_evidence_match_none")
 
 
 def _final_turn_conflicts(case_declared: dict, turn_declared: dict, cloc: str) -> list[str]:
     """The case's expect is graded on the final turn beside that turn's own, so a
     key both declare with different values is two gates for one trace: refused,
-    never resolved silently. Prohibition lists accumulate instead."""
+    never resolved silently. Ban lists accumulate instead."""
     conflicts = sorted(key for key in turn_declared
-                       if key not in _PROHIBITION_KEYS and key in case_declared
+                       if key not in _BAN_LIST_KEYS and key in case_declared
                        and case_declared[key] != turn_declared[key])
     if not conflicts:
         return []
@@ -299,7 +307,7 @@ def _final_turn_conflicts(case_declared: dict, turn_declared: dict, cloc: str) -
 def _merge_expect(base: dict, override: dict) -> dict:
     out = dict(base or {})
     out.update(override or {})
-    for key in _PROHIBITION_KEYS:
+    for key in _BAN_LIST_KEYS:
         merged = list(dict.fromkeys([*(base or {}).get(key, []),
                                      *(override or {}).get(key, [])]))
         if merged:
@@ -316,8 +324,11 @@ def _merge_expect(base: dict, override: dict) -> dict:
 # without typed pre-execution evidence" half of `tools_none_succeeded`.
 # `workspace_paths_absent` joins on the same terms: a path the turn created is on
 # the disk whatever a retry does, while one that was there before the turn
-# proves nothing about it and grades inconclusive.
-ALWAYS_STICKY_GATES = (*_PROHIBITION_KEYS, "fixture_state", "workspace_paths_absent")
+# proves nothing about it and grades inconclusive. `tool_evidence_match_none`
+# joins on the tools' own record: a matched input asked for the banned action and
+# a matched answer says it was done, which no retry unmakes.
+ALWAYS_STICKY_GATES = (*_PROHIBITION_KEYS, "fixture_state", "workspace_paths_absent",
+                       "tool_evidence_match_none")
 # The negative gates grade.py implements: each one asserts that something did NOT
 # happen. Only these may be declared `sticky_gates:` — a positive gate is a
 # quality assertion a later attempt can legitimately satisfy, while a disclosed

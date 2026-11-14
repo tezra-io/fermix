@@ -13,8 +13,9 @@ defmodule FermixCore.Trips.RenderTest do
   @now ~U[2031-06-02 14:00:00Z]
   @frame "(added after outside content)"
   # The line an answer ends with when a stop given a place was not placed.
-  @report "Tell the owner which stops were placed, which were offered under another name " <>
-            "with their links, and which were not placed and why, as this answer lists them."
+  @report "Tell the owner which stops were placed, which were offered, each with its link " <>
+            "where this answer gives one, and which were not placed and why, as this " <>
+            "answer lists them."
 
   @tower %{
     "name" => "Torre de Vale Escuro",

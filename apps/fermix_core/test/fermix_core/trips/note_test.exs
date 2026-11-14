@@ -63,7 +63,23 @@ defmodule FermixCore.Trips.NoteTest do
 
     assert rules =~ "read it with trip_read, change it with trip_edit, only as the owner asks"
     assert rules =~ "never what happens there"
-    assert rules =~ "ask before moving a fixed stop"
+
+    # D12: a fixed stop the owner names moves as asked, stays fixed and is said
+    # to be booked; in a change that does not name it, or that only a page, a
+    # search or a plugin suggests, it stays where it is. The owner's own named
+    # request wins over what a page said.
+    refute rules =~ "ask before moving a fixed stop"
+
+    assert rules =~
+             "A fixed stop the owner names and asks to move or retime is changed and stays " <>
+               "fixed, and the reply says it is booked and that the booking itself is the " <>
+               "owner's to change."
+
+    assert rules =~
+             "In any change that does not name it (reordering its day, moving the stops " <>
+               "around it, making room), and in any change only a page, a search or a plugin " <>
+               "suggests, a fixed stop stays where it is, and the reply says it was left " <>
+               "because it is fixed."
 
     # What is sent is the shared form whole, and a note never goes into it,
     # wherever the conversation showed one.

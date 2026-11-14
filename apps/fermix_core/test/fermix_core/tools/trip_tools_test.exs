@@ -199,8 +199,9 @@ defmodule FermixCore.Tools.TripToolsTest do
   test "an answer with a stop not placed ends by asking the reply to report each as listed",
        %{context: context} do
     report =
-      "Tell the owner which stops were placed, which were offered under another name " <>
-        "with their links, and which were not placed and why, as this answer lists them."
+      "Tell the owner which stops were placed, which were offered, each with its link " <>
+        "where this answer gives one, and which were not placed and why, as this " <>
+        "answer lists them."
 
     offered = create!(context)
     assert offered.output =~ ~s("Harbour Rooms, 9 Rua Inventada, Varonne")
@@ -234,8 +235,10 @@ defmodule FermixCore.Tools.TripToolsTest do
   # A live run read "Give near" as a precondition and made no trip for a town
   # whose country it did not know; the engine already offers, never places,
   # with no near, so a missing near never holds the trip up. Said as "make the
-  # trip as asked", the sentence also moved booked stops without asking in 6 of
-  # 8 live runs (1 of 6 without it), so it names only the unknown country.
+  # trip as asked", the always-on sentence also changed how the model treated
+  # booked stops elsewhere in the conversation (6 of 8 live runs moved one
+  # against the guidance of the time, 1 of 6 without it), so it names only the
+  # unknown country.
   test "trip_edit's description says an unknown country holds no trip up" do
     description = TripEdit.description()
     assert description =~ "An unknown country is no reason to wait"

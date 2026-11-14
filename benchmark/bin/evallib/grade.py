@@ -382,6 +382,13 @@ def _tool_inputs_text(view: TurnView) -> str:
     return json.dumps(inputs, ensure_ascii=False, sort_keys=True, default=str)
 
 
+def _tool_evidence_text(view: TurnView) -> str:
+    """Every tool span's input and output, serialized the way the inputs are, so
+    one pattern style reads both (quotes inside a recorded text come out `\\"`)."""
+    evidence = [{"i": span.get("input"), "o": span.get("output")} for span in view.tool_spans]
+    return json.dumps(evidence, ensure_ascii=False, sort_keys=True, default=str)
+
+
 def grade(trace: dict, spans: list[dict], expect: dict,
           elapsed_ms: float | None = None,
           require_duration: bool = True,
@@ -453,6 +460,15 @@ def grade(trace: dict, spans: list[dict], expect: dict,
         missing = [pattern for pattern in patterns if re.search(pattern, inputs_text) is None]
         add("tool_inputs_match_all", not missing,
             f"all input patterns present; missing={missing or 'none'}")
+
+    if "tool_evidence_match_none" in expect:
+        # A ban on an action, read from the tools' own record of it: an input that
+        # asked for it or an answer that says it was done. Conclusive, so sticky.
+        patterns = expect["tool_evidence_match_none"]
+        evidence_text = _tool_evidence_text(v)
+        matched = [pattern for pattern in patterns if re.search(pattern, evidence_text)]
+        add("tool_evidence_match_none", not matched,
+            f"no tool input or output matches; matched={matched or 'none'}")
 
     if "min_subagent_spawns" in expect:
         n = expect["min_subagent_spawns"]

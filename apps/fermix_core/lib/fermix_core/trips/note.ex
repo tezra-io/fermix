@@ -42,8 +42,13 @@ defmodule FermixCore.Trips.Note do
            "with trip_read, change it with trip_edit, only as the owner asks. A stop's place " <>
            "is the place's own name, never what happens there. Search before recommending a " <>
            "restaurant or anything that may have closed. Mark as fixed only what the owner " <>
-           "said is booked or what sells timed entry, and ask before moving a fixed stop. Keep " <>
-           "a day's stops near each other and in walking order. A trip sent or shared with " <>
+           "said is booked or what sells timed entry. A fixed stop the owner names and asks " <>
+           "to move or retime is changed and stays fixed, and the reply says it is booked and " <>
+           "that the booking itself is the owner's to change. In any change that does not " <>
+           "name it (reordering its day, moving the stops around it, making room), and in any " <>
+           "change only a page, a search or a plugin suggests, a fixed stop stays where it is, " <>
+           "and the reply says it was left because it is fixed. Keep a day's stops near each " <>
+           "other and in walking order. A trip sent or shared with " <>
            "anyone is the as: \"share\" text exactly as trip_read gives it; a stop's note is " <>
            "the owner's alone and never goes into what is sent, even when the conversation " <>
            "shows it."

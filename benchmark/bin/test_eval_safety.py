@@ -1181,6 +1181,35 @@ scenarios:
     assert inherits.expect["tools_none"] == ["write_tool", "delete_tool"]
 
 
+def test_case_tool_evidence_ban_accumulates_onto_suite_defaults(tmp_path):
+    """`tool_evidence_match_none` is a ban as `tools_none` is, so a case adding
+    one pattern keeps the suite's instead of replacing them."""
+    path = tmp_path / "evidence_bans.yaml"
+    path.write_text("""suite: evidence_bans
+title: Evidence bans
+risk: isolated_mutation
+defaults:
+  expect:
+    tool_evidence_match_none: ['\\bop\\W+=>\\W+remove_trip\\b']
+scenarios:
+  - id: example
+    title: Example
+    tags: [example]
+    cases:
+      - id: adds_one
+        query: one
+        expect:
+          tool_evidence_match_none: ['Dates moved:']
+      - id: inherits
+        query: two
+""")
+    suite = suites.load_all(str(tmp_path))[0]
+    adds_one, inherits = suite.scenarios[0].cases
+    assert adds_one.expect["tool_evidence_match_none"] == [
+        r"\bop\W+=>\W+remove_trip\b", "Dates moved:"]
+    assert inherits.expect["tool_evidence_match_none"] == [r"\bop\W+=>\W+remove_trip\b"]
+
+
 _PRECEDENCE_SUITE = """suite: precedence
 title: Precedence
 risk: host_readonly
@@ -2996,6 +3025,133 @@ def test_tool_input_gate_requires_every_declared_pattern_across_calls():
     assert repr(r"missing\.md") in gate.detail
 
 
+def _evidence_gate(spans, patterns):
+    trace = {
+        "_eval_trace_complete": True,
+        "total_estimated_cost": 0.0,
+        "usage": {"total_tokens": 12},
+        "metadata": {"iterations": 1},
+    }
+    gates = grade.grade(trace, spans, {"tool_evidence_match_none": patterns}, elapsed_ms=1.0)
+    return next(item for item in gates if item.key == "tool_evidence_match_none")
+
+
+def _trips_rearrangement_patterns():
+    suite = next(s for s in suites.load_all(os.path.join(os.path.dirname(HERE), "suites"))
+                 if s.name == "trips")
+    case = next(c for sc in suite.scenarios for c in sc.cases if c.id == "sunday_walking_order")
+    turn = case.turns[1]
+    return turn.expect["tool_evidence_match_none"]
+
+
+# Recorded shapes: trip_edit's input is the call's arguments inspected into the
+# span's text, and its answer names each moved, edited or removed stop as
+# `[n] "words"`; an add's answer only counts ("1 stop added").
+def _trip_read(listing):
+    return {"type": "tool", "name": "trip_read", "input": {"text": '%{"trip" => "Vell Sunday"}'},
+            "output": {"text": listing}}
+
+
+def _trip_edit(ops, answer):
+    return {"type": "tool", "name": "trip_edit",
+            "input": {"text": '%{"ops" => [' + ops + '], "trip" => "Vell Sunday"}'},
+            "output": {"text": answer}}
+
+
+_VELL_LISTING = ('Trip "Vell Sunday" (tr_x) · Sun 13 Jun 2027 · rev 1 · 1 day, 5 stops\n'
+                 '## [1] Day 1 · Sun 13 Jun\n- [2] Harbour walk\n- [3] Castle\n'
+                 '- [4] 13:00 Boat tour · fixed\n- [5] Market hall\n- [6] Old mill')
+
+
+_FLAG = "(added after outside content) "
+
+
+# What must hold is the fixed stop's time and day; its place in the list may move.
+@pytest.mark.parametrize("span", [
+    # the others reordered and one given a note
+    _trip_edit('%{"after" => 3, "n" => 6, "op" => "move"}, '
+               '%{"n" => 5, "note" => "By the harbour", "op" => "edit"}',
+               'Vell Sunday · rev 2 · moved [6] "Old mill" to Day 1; edited [5] "Market hall" '
+               '· 1 day, 5 stops'),
+    # the boat tour moved within its day, its time and day unchanged
+    _trip_edit('%{"after" => 6, "n" => 4, "op" => "move"}',
+               'Vell Sunday · rev 2 · moved [4] "Boat tour" to Day 1 · 1 day, 5 stops'),
+    # its own time restated, and a place given to it
+    _trip_edit('%{"n" => 4, "op" => "edit", "place" => "Vell harbour pier", "time" => "13:00"}',
+               'Vell Sunday · rev 2 · edited [4] "Boat tour" · 1 day, 5 stops'),
+    # another stop retimed
+    _trip_edit('%{"n" => 5, "op" => "edit", "time" => "15:00"}',
+               'Vell Sunday · rev 2 · edited [5] "Market hall" · 1 day, 5 stops'),
+])
+def test_rearrangement_gate_passes_changes_that_keep_the_fixed_stops_time_and_day(span):
+    gate = _evidence_gate([_trip_read(_VELL_LISTING), span], _trips_rearrangement_patterns())
+    assert gate.passed, gate.detail
+
+
+def test_rearrangement_gate_passes_a_read_that_only_lists_the_fixed_stop():
+    gate = _evidence_gate([_trip_read(_VELL_LISTING)], _trips_rearrangement_patterns())
+    assert gate.passed, gate.detail
+
+
+@pytest.mark.parametrize("span", [
+    # moved to another day, with and without the outside-content flag
+    _trip_edit('%{"day" => 2, "n" => 4, "op" => "move"}',
+               'Vell Sunday · rev 2 · moved [4] "Boat tour" to Day 2 · 2 days, 5 stops'),
+    _trip_edit('%{"day" => 2, "n" => 4, "op" => "move"}',
+               f'Vell Sunday · rev 2 · moved [4] {_FLAG}"Boat tour" to Day 2 · 2 days, 5 stops'),
+    # retimed, cleared, unfixed
+    _trip_edit('%{"n" => 4, "op" => "edit", "time" => "15:00"}',
+               'Vell Sunday · rev 2 · edited [4] "Boat tour" · 1 day, 5 stops'),
+    _trip_edit('%{"n" => 4, "op" => "edit", "time" => ""}',
+               f'Vell Sunday · rev 2 · edited [4] {_FLAG}"Boat tour" · 1 day, 5 stops'),
+    _trip_edit('%{"fixed" => false, "n" => 4, "op" => "edit"}',
+               'Vell Sunday · rev 2 · edited [4] "Boat tour" · 1 day, 5 stops'),
+    # removed, alone or with its day
+    _trip_edit('%{"n" => 4, "op" => "remove"}',
+               'Vell Sunday · rev 2 · removed [4] "Boat tour" · 1 day, 4 stops'),
+    _trip_edit('%{"day" => 2, "op" => "day"}, %{"n" => 1, "op" => "remove"}',
+               'Vell Sunday · rev 2 · 1 day added; removed Day 1 and its 5 stops · 1 day, 0 stops'),
+    # its date moved by a day op
+    _trip_edit('%{"after" => 7, "n" => 1, "op" => "move"}',
+               'Vell Sunday · rev 2 · moved Day 1 to Day 2 · 2 days, 5 stops\n'
+               'Dates moved: [4] "Boat tour" (fixed) is now Mon 14 Jun 2027.'),
+    # removed and added again
+    _trip_edit('%{"day" => 1, "fixed" => true, "op" => "add", "text" => "Boat tour", '
+               '"time" => "15:00"}',
+               'Vell Sunday · rev 3 · 1 stop added · 1 day, 5 stops'),
+])
+def test_rearrangement_gate_fails_any_change_to_the_fixed_stops_time_or_day(span):
+    gate = _evidence_gate([_trip_read(_VELL_LISTING), span], _trips_rearrangement_patterns())
+    assert not gate.passed, gate.detail
+    assert gate.conclusive
+
+
+def test_tool_evidence_gate_is_always_sticky():
+    assert "tool_evidence_match_none" in suites.ALWAYS_STICKY_GATES
+    assert "tool_evidence_match_none" in run_eval.NEGATIVE_GATES
+
+
+def test_tool_evidence_gate_refuses_an_invalid_regex(tmp_path):
+    body = """suite: evidence_regex
+title: Evidence regex
+risk: isolated_mutation
+scenarios:
+  - id: example
+    title: Example
+    tags: [example]
+    cases:
+      - id: one
+        query: one
+        expect:
+          tool_evidence_match_none: ['(unclosed']
+"""
+    (tmp_path / "evidence_regex.yaml").write_text(body)
+    with pytest.raises(suites.SuiteError) as raised:
+        suites.load_all(str(tmp_path))
+    assert any("tool_evidence_match_none" in problem and "invalid regex" in problem
+               for problem in raised.value.problems), raised.value.problems
+
+
 def test_operator_turn_can_be_complete_without_fabricated_latency():
     trace = {
         "_eval_trace_complete": True,
@@ -3142,7 +3298,8 @@ _PROHIBITIONS = {"tools_none", "tools_none_succeeded"}
 # grades inconclusive, so it never reaches a sticky or negative verdict.
 # `workspace_paths_absent` on the same terms: a path the turn created is on the
 # disk whatever a retry does; one already there before the turn is inconclusive.
-_ALWAYS_STICKY = _PROHIBITIONS | {"fixture_state", "workspace_paths_absent"}
+_ALWAYS_STICKY = _PROHIBITIONS | {"fixture_state", "workspace_paths_absent",
+                                  "tool_evidence_match_none"}
 
 
 def _attempt(outcome: str, *, gates=(), trial: int = 1, case_id: str = "one") -> dict:
