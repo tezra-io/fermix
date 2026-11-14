@@ -193,3 +193,15 @@ of its own jobs; the id is opaque to the model. The serializer, the key
 rule, Restore here's request, its job, the busy refusal and the ending are
 as before, so no modelled step changed. The comments' line numbers into
 `always_on.ex` point at the committed code.
+
+## Re-read for the review's fixes (M97, 2026-11-14)
+
+Re-read against f2d5efc5 and efcfa64f, which staled the `always_on.ex` and
+`jobs.ex` pins. `restart_server` answers a server reply it does not read as
+`unavailable` with a sentence of its own, never as a restart under way; a
+job names what an install installs (`target`, stored at `start/2`, required
+of `capability_install` and `browser_install` and refused for every other
+kind, Restore here's `home_restore` among them, which names none). Neither
+is a step of the model: the serializer, the key rule, Restore here's
+request, its job, the busy refusal and the ending are as before. The
+comments' line numbers into both files point at the committed code.
