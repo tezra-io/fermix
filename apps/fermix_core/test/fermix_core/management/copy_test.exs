@@ -813,9 +813,16 @@ defmodule FermixCore.Management.CopyTest do
         returning: nil
       }
 
-      for {free, version, bytes, restarts?} <- [
-            {1_000, "0.16.0", 6_442_450_944, false},
-            {1_099_511_627_776, "0.9.0", 10, true}
+      # M97 §9.5: the meeting the notetaker is in blocks, by its title, its
+      # platform, or neither.
+      meetings = [
+        {:ok, %{id: "mtg_00000000001", platform: "zoom", title: "Quarter planning"}},
+        {:ok, %{id: "mtg_00000000001", platform: "meet", title: nil}}
+      ]
+
+      for {free, version, bytes, restarts?, meeting} <- [
+            {1_000, "0.16.0", 6_442_450_944, false, Enum.at(meetings, 0)},
+            {1_099_511_627_776, "0.9.0", 10, true, Enum.at(meetings, 1)}
           ] do
         report =
           MoveReadiness.report(home, candidate,
@@ -823,13 +830,14 @@ defmodule FermixCore.Management.CopyTest do
             version: version,
             host: "macos-aarch64",
             home_bytes: bytes,
-            restarts_itself: restarts?
+            restarts_itself: restarts?,
+            meeting_holder: fn -> meeting end
           )
 
         # The summary shows a block as its sentence and each warning in
         # Details, so each item is a summary word too.
         for item <- report.items do
-          assert_clean(item.sentence, :prose, ["invented-notes"], item.id)
+          assert_clean(item.sentence, :prose, ["invented-notes", "Quarter planning"], item.id)
           assert Copy.summary_violations(item.sentence) == [], "#{item.id}: #{item.sentence}"
           refute_command(item.sentence, item.id)
         end

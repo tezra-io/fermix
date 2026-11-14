@@ -94,6 +94,10 @@ defmodule FermixCore.Tools.JoinMeeting do
         tag: "meet_browser_not_installed",
         description: "the Google Meet notetaker has no browser to drive"
       },
+      %{
+        tag: "meet_unavailable_on_server",
+        description: "Google Meet on an Always On server, which cannot sign the notetaker in"
+      },
       %{tag: "zoom_rtms_not_configured", description: "the Zoom RTMS credentials are incomplete"},
       %{tag: "max_concurrent", description: "the notetaker is already in another meeting"},
       %{tag: "not_attended", description: "the turn is not an attended top-level owner turn"}
@@ -152,6 +156,9 @@ defmodule FermixCore.Tools.JoinMeeting do
     "The Google Meet notetaker is installed but has no browser to drive, so it cannot join " <>
       "a Meet call yet. Open fermix setup (web) → Meetings and it installs the browser."
   end
+
+  # M97 D24: the one sentence every surface says, naming what does work.
+  def describe_error(:meet_unavailable_on_server), do: Meetings.meet_unavailable_sentence()
 
   def describe_error(:zoom_rtms_not_configured) do
     "Zoom meetings use Zoom RTMS, which isn't configured. RTMS works for meetings hosted " <>

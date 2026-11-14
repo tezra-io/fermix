@@ -194,6 +194,23 @@ defmodule FermixCore.Meetings.SidecarInstaller do
     end
   end
 
+  @doc """
+  Whether anything of the notetaker is kept in this home: a binary of any
+  release, its markers or its browser profile under `plugins/meetbot/`,
+  which stays with this computer through a move and back
+  (`FermixCore.Home.DeviceLocal`). Never reads inside the profile. A folder
+  that is there but cannot be listed holds something: the caller then asks
+  whether this Fermix can drive it (`installed?/0`), which it cannot.
+  """
+  @spec kept?() :: boolean()
+  def kept? do
+    case File.ls(meetbot_root()) do
+      {:ok, entries} -> entries != []
+      {:error, :enoent} -> false
+      {:error, _unlistable} -> true
+    end
+  end
+
   defp profile_present? do
     case File.ls(profile_dir()) do
       {:ok, [_ | _]} -> true

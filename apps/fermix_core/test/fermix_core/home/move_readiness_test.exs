@@ -116,9 +116,12 @@ defmodule FermixCore.Home.MoveReadinessTest do
              "north-box runs a Fermix that reads this home, and this computer could read it back."
 
     # Only what this home uses of what runs here alone is named. iMessage is
-    # not: after the move this Mac carries it for north-box (M97 §6.4).
+    # not: after the move this Mac carries it for north-box (M97 §6.4). Of
+    # meetings only Google Meet stays: north-box joins Zoom, but cannot sign
+    # the notetaker in to Google (M97 D24), and this home sets no Zoom up.
     assert sentence.("stays_here") ==
-             "Meetings stop after the move: neither this Mac nor north-box runs them."
+             "Google Meet meetings stop after the move: neither this Mac nor north-box runs " <>
+               "them."
 
     # The server reaches the internet for WhatsApp only through a Funnel
     # mount, whose command Always On shows once Fermix runs there, and Meta
@@ -225,6 +228,27 @@ defmodule FermixCore.Home.MoveReadinessTest do
              {:ok,
               ~s([fermix_core.harness]\napproved = true\n\n[fermix_channels.telegram]\nenabled = false\nbot_token = "@keyring"\n)}
            ) == []
+  end
+
+  # M97 §9.5: after a move back this Mac runs meetings again, and Google
+  # Meet needs the notetaker it kept; one this Fermix can no longer drive is
+  # a cost the confirm names, only where the settings turn meetings on.
+  test "a kept notetaker this Fermix cannot drive is a cost of the move back" do
+    on = {:ok, "[fermix_core.meetings]\nenabled = true\n"}
+    assert MoveReadiness.costs(on, meet_notetaker: fn -> true end) == [:meet_notetaker]
+    assert MoveReadiness.costs(on, meet_notetaker: fn -> false end) == []
+
+    off = {:ok, "[fermix_core.meetings]\nenabled = false\n"}
+    unread = fn -> flunk("the notetaker is not looked at while meetings are off") end
+    assert MoveReadiness.costs(off, meet_notetaker: unread) == []
+
+    telegram =
+      {:ok,
+       "[fermix_core.meetings]\nenabled = true\n\n" <>
+         ~s([fermix_channels.telegram]\nbot_token = "invented"\n)}
+
+    assert MoveReadiness.costs(telegram, meet_notetaker: fn -> true end) ==
+             [:telegram, :meet_notetaker]
   end
 
   # The approval is read from this computer's machine file alone: a copy
@@ -491,6 +515,79 @@ defmodule FermixCore.Home.MoveReadinessTest do
     opts = Keyword.put(opts(ctx), :call_holder, fn -> :none end)
     assert %{items: items} = MoveReadiness.report(ctx.home, ctx.candidate, opts)
     refute item_in(items, "call_in_progress")
+  end
+
+  # M97 §9.5: a move restarts this engine, which would end the meeting the
+  # notetaker is in before its notes are written, so the review names it
+  # and blocks, on a move and on a move back alike, until it ends.
+  test "a meeting the notetaker is in blocks the move, named, either way", ctx do
+    back = Map.merge(candidate_attrs(), %{name: "studio-box", returning: @desktop_id})
+    {:ok, desktop} = Candidates.add(ctx.home, back, @now)
+
+    for {holder, said} <- [
+          {%{id: "mtg_00000000002", platform: "zoom", title: "Quarter planning"},
+           "The notetaker is in Quarter planning on Zoom now"},
+          {%{id: "mtg_00000000002", platform: "meet", title: nil},
+           "The notetaker is in a Google Meet meeting now"},
+          {%{id: "mtg_00000000002", platform: nil, title: nil},
+           "The notetaker is in a meeting now"}
+        ],
+        candidate <- [ctx.candidate, desktop] do
+      opts = Keyword.put(opts(ctx), :meeting_holder, fn -> {:ok, holder} end)
+
+      assert %{ready: false, items: [first | _rest]} =
+               MoveReadiness.report(ctx.home, candidate, opts)
+
+      assert first == %{
+               id: "meeting_in_progress",
+               status: :block,
+               sentence:
+                 said <>
+                   ", and the move would end it before its notes are written: ask Fermix to " <>
+                   "leave the meeting, or wait until it ends, then check again."
+             }
+
+      assert MoveReadiness.meeting_in_progress(opts) == [first]
+    end
+
+    assert %{items: items} = MoveReadiness.report(ctx.home, ctx.candidate, opts(ctx))
+    refute item_in(items, "meeting_in_progress")
+    assert MoveReadiness.meeting_in_progress(opts(ctx)) == []
+  end
+
+  # M97 §9.5, D24: the server joins Zoom meetings, so a home with Zoom set up
+  # hears that they carry on there; only Google Meet stops. A move back
+  # brings meetings back here, Zoom's and Google Meet's alike.
+  test "Zoom set up carries on at the server, and only Google Meet stops", ctx do
+    File.write!(Path.join(ctx.home, "config.toml"), """
+    [fermix_core.meetings]
+    enabled = true
+    zoom_account_id = "acct-invented"
+    zoom_client_id = "client-invented"
+    zoom_client_secret = "@keyring"
+    zoom_ws_subscription_id = "sub-invented"
+    """)
+
+    File.write!(MachineFile.path(ctx.home), "")
+
+    assert %{items: items} = MoveReadiness.report(ctx.home, ctx.candidate, opts(ctx))
+
+    assert %{status: :warn, sentence: sentence} = item_in(items, "stays_here")
+
+    assert sentence ==
+             "Google Meet meetings stop after the move: neither this Mac nor north-box runs " <>
+               "them. Zoom meetings carry on at north-box."
+
+    # Half a Zoom app is no Zoom: the server could not join with it either.
+    File.write!(Path.join(ctx.home, "config.toml"), """
+    [fermix_core.meetings]
+    enabled = true
+    zoom_account_id = "acct-invented"
+    zoom_client_id = ""
+    """)
+
+    assert %{items: items} = MoveReadiness.report(ctx.home, ctx.candidate, opts(ctx))
+    refute item_in(items, "stays_here").sentence =~ "Zoom"
   end
 
   # M91 D7, D13: a home moved to a server carries the StackChan's pairing but
@@ -823,7 +920,10 @@ defmodule FermixCore.Home.MoveReadinessTest do
       version: "0.17.0",
       host: "macos-aarch64",
       index_opts: [seed_path: ctx.index],
-      restarts_itself: true
+      restarts_itself: true,
+      # No meeting is in progress unless a test says so, whatever the
+      # application's meetings registry holds.
+      meeting_holder: fn -> :none end
     ]
 
   defp item_in(items, id), do: Enum.find(items, &(&1.id == id))

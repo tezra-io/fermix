@@ -10,6 +10,11 @@ defmodule FermixCore.Home.MoveReadiness do
       (`Realtime.CallLease`; `:call_holder` in a test), warns, naming whom
       the call is with: the move restarts this engine, which ends the call
       before the move's capture starts;
+    * `meeting_in_progress`, next and only while the notetaker is in a
+      meeting (`Meetings.in_progress/1`; `:meeting_holder` in a test),
+      blocks, naming the meeting: the restart would end it before its notes
+      are written (M97 §9.5). On a move and on a move back alike, and
+      `Move.start/5` asks again whatever review it is given;
     * `keychain_secrets`: the secrets this computer keeps in its keychain
       move with the home, into the server's secret files
       (`FermixCore.Home.MoveSecrets`); one Fermix cannot read, or a
@@ -54,13 +59,16 @@ defmodule FermixCore.Home.MoveReadiness do
       (`FermixCore.Home.DeviceLocal`), so the server runs none of them, and
       the walk never blocks on them;
     * `stays_here`: what the home has turned on that runs only on this
-      computer (voice calls, meetings, StackChan on a Mac; `stays_here/2`;
-      iMessage is not among them: the Mac carries it for the server, M97
-      §6.4, as the move's keep-on block shows)
+      computer (voice calls, Google Meet meetings, StackChan on a Mac;
+      `stays_here/2`; iMessage is not among them: the Mac carries it for the
+      server, M97 §6.4, as the move's keep-on block shows)
       stops after the move, each named; with none of them on it is `ok`.
       Voice is this computer's own (its socket): calls from the phone carry
       on at the server when Talk to Fermix is on there and its key is in the
-      server's secret store (M87 §07). On
+      server's secret store (M87 §07). Meetings are the home's and run on
+      the server, Zoom's with no browser, so with Zoom set up they carry on
+      there; Google Meet's stop, since the server cannot sign the notetaker
+      in to Google (M97 §9.5, D24). On
       a move back, what the server's settings turn on of them runs there
       again, named, and is `ok`;
     * `whatsapp`: WhatsApp turned on warns: it stops after the move until
@@ -101,7 +109,8 @@ defmodule FermixCore.Home.MoveReadiness do
   target, `Archive.host/1`), `:home_bytes` (the home's size, in place of
   walking it), `:index_opts` (`Plugins.Dist.Index.load/1`'s, the catalog),
   `:restarts_itself` (a boolean, in place of
-  `Management.Lifecycle.restarts_itself?/0`). `summary_items/4` also reads
+  `Management.Lifecycle.restarts_itself?/0`), `:meeting_holder` (in place of
+  `Meetings.in_progress/1`). `summary_items/4` also reads
   `:returning` (a boolean, `report/3` gives the candidate's), which tells a
   move back from a move.
   """
@@ -119,6 +128,7 @@ defmodule FermixCore.Home.MoveReadiness do
   alias FermixCore.Management.Copy
   alias FermixCore.Management.Lifecycle
   alias FermixCore.Management.Settings
+  alias FermixCore.Meetings
   alias FermixCore.Plugins.Dist.Index
   alias FermixCore.Realtime.CallLease
   alias FermixCore.Setup.MachineFile
@@ -129,8 +139,13 @@ defmodule FermixCore.Home.MoveReadiness do
   @unreadable_settings "The settings file could not be read; Fermix's log says why."
   # Every id a review can say, in its order: no item is made with another.
   # The management schema and PROTOCOL.md name exactly these.
-  @ids ~w(call_in_progress keychain_secrets engine_version disk s3_size plugins dev_plugins
-          stays_here whatsapp slack coding_agents settings cutover_gap serves_nothing service)
+  @ids ~w(call_in_progress meeting_in_progress keychain_secrets engine_version disk s3_size
+          plugins dev_plugins stays_here whatsapp slack coding_agents settings cutover_gap
+          serves_nothing service)
+  # A Zoom app the server can join with (M97 §9.5): all four of its values.
+  @zoom_keys ~w(zoom_account_id zoom_client_id zoom_client_secret zoom_ws_subscription_id)
+  # A meeting's platform, as its row and the owner name it.
+  @platform_names %{"zoom" => "Zoom", "meet" => "Google Meet"}
 
   @type status :: :ok | :warn | :block
   @type item :: %{id: String.t(), status: status(), sentence: String.t()}
@@ -153,6 +168,7 @@ defmodule FermixCore.Home.MoveReadiness do
 
     items =
       call_in_progress(Keyword.get(opts, :call_holder, &call_holder/0)) ++
+        meeting_in_progress(opts) ++
         [
           keychain(config, opts),
           version(candidate, this_engine(opts), {system(macos?), opts}),
@@ -246,14 +262,42 @@ defmodule FermixCore.Home.MoveReadiness do
 
   @doc """
   What a move costs that this home's settings (`settings/2`'s answer) turn
-  on: `:telegram` (set up, so its messages wait while the move runs). None
-  when the settings could not be read. Coding agents cost a move back
-  nothing: this computer kept its own approval (M98 D5).
+  on: `:telegram` (set up, so its messages wait while the move runs), then
+  `:meet_notetaker` (meetings on, and Google Meet needs the notetaker
+  installed again on this computer, `Meetings.meet_reinstall_needed?/0`;
+  `opts`' `:meet_notetaker` in its place, asked only while meetings are on:
+  M97 §9.5). None when the settings could not be read. Coding agents cost a
+  move back nothing: this computer kept its own approval (M98 D5).
   """
-  @spec costs({:ok, String.t()} | {:error, String.t()}) :: [:telegram]
-  def costs({:ok, text}), do: if(telegram?(text), do: [:telegram], else: [])
+  @spec costs({:ok, String.t()} | {:error, String.t()}, keyword()) ::
+          [:telegram | :meet_notetaker]
+  def costs(settings, opts \\ [])
 
-  def costs({:error, _sentence}), do: []
+  def costs({:ok, text}, opts) when is_list(opts) do
+    reinstall? = Keyword.get(opts, :meet_notetaker, &Meetings.meet_reinstall_needed?/0)
+    telegram = if telegram?(text), do: [:telegram], else: []
+    meetings? = on?(text, "fermix_core.meetings", "enabled")
+    notetaker = if meetings? and reinstall?.(), do: [:meet_notetaker], else: []
+    telegram ++ notetaker
+  end
+
+  def costs({:error, _sentence}, opts) when is_list(opts), do: []
+
+  @doc """
+  The `meeting_in_progress` item, while the notetaker is in a meeting
+  (`Meetings.in_progress/1`, `opts`' `:meeting_holder` in its place): it
+  blocks, naming the meeting, since the move restarts this engine, which
+  would end the meeting before its notes are written. None otherwise.
+  `Move.start/5` asks it again whatever review it is given, since a meeting
+  can start after the review.
+  """
+  @spec meeting_in_progress(keyword()) :: [item()]
+  def meeting_in_progress(opts) when is_list(opts) do
+    case Keyword.get(opts, :meeting_holder, &Meetings.in_progress/0).() do
+      {:ok, meeting} -> [item("meeting_in_progress", :block, in_meeting(meeting))]
+      :none -> []
+    end
+  end
 
   @doc "Every id a review's item can carry, in the review's order."
   @spec ids() :: [String.t()]
@@ -634,10 +678,32 @@ defmodule FermixCore.Home.MoveReadiness do
     if Process.whereis(CallLease), do: CallLease.holder(CallLease), else: :none
   end
 
+  # M97 §9.5: the meeting by its title and its platform, as far as its row
+  # says them.
+  defp in_meeting(meeting) do
+    "The notetaker is in #{meeting_named(meeting)} now, and the move would end it before " <>
+      "its notes are written: ask Fermix to leave the meeting, or wait until it ends, then " <>
+      "check again."
+  end
+
+  defp meeting_named(%{title: title, platform: platform}) when is_binary(title) and title != "" do
+    case Map.fetch(@platform_names, platform) do
+      {:ok, platform_name} -> "#{title} on #{platform_name}"
+      :error -> title
+    end
+  end
+
+  defp meeting_named(%{platform: platform}) do
+    case Map.fetch(@platform_names, platform) do
+      {:ok, platform_name} -> "a #{platform_name} meeting"
+      :error -> "a meeting"
+    end
+  end
+
   defp stays_here_item({:ok, text}, macos?, name, returning?) do
     case {features(text, macos?), returning?} do
       {[], _returning?} -> item("stays_here", :ok, none_on(macos?))
-      {features, false} -> item("stays_here", :warn, stops(features, macos?, name))
+      {features, false} -> item("stays_here", :warn, stops(features, text, macos?, name))
       {features, true} -> item("stays_here", :ok, "#{Copy.runs_again(features, name)}.")
     end
   end
@@ -645,12 +711,40 @@ defmodule FermixCore.Home.MoveReadiness do
   defp stays_here_item({:error, sentence}, _macos?, _name, _returning?),
     do: item("stays_here", :warn, sentence)
 
-  defp stops(features, macos?, name) do
+  defp stops(features, text, macos?, name) do
     machine = if macos?, do: "Mac", else: "computer"
 
-    [stays_behind(features -- [:voice], machine, name), voice_moves(features, machine, name)]
+    [
+      stays_behind(leaving(features) -- [:voice], machine, name),
+      zoom_moves(features, text, name),
+      voice_moves(features, machine, name)
+    ]
     |> Enum.reject(&(&1 == ""))
     |> Enum.join(" ")
+  end
+
+  # M97 §9.5, D24: meetings are the home's and run on the server, which joins
+  # Zoom's with no browser but cannot sign the notetaker in to Google, so of
+  # them only Google Meet's stop with this computer.
+  defp leaving(features),
+    do:
+      Enum.map(features, fn feature ->
+        if feature == :meetings, do: :google_meet, else: feature
+      end)
+
+  defp zoom_moves(features, text, name) do
+    if :meetings in features and zoom?(text), do: "#{Copy.zoom_after_move(name)}.", else: ""
+  end
+
+  # All four of the Zoom app's values, the secret as the reference the move
+  # carries (`MoveSecrets`): half an app could not join there either.
+  defp zoom?(text) do
+    Enum.all?(@zoom_keys, fn key ->
+      case ConfigText.value(text, "fermix_core.meetings", key) do
+        {:ok, raw} -> ConfigText.string(raw) not in [:error, {:ok, ""}]
+        :absent -> false
+      end
+    end)
   end
 
   defp stays_behind([], _machine, _name), do: ""

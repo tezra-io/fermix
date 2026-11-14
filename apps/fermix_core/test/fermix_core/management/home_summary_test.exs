@@ -1295,6 +1295,25 @@ defmodule FermixCore.Management.HomeSummaryTest do
                  "here again.\nMessages sent to Telegram while it moves wait until it is " <>
                  "done.\nYour server stays until you delete it."
 
+      # M97 §9.5: meetings run on this Mac again after the move back, and
+      # Google Meet needs the notetaker this Mac kept; one this Fermix can no
+      # longer drive is named, so it is installed again before a meeting.
+      notetaker =
+        HomeSummary.summary(returning(back("enrolled"), return_costs: [:meet_notetaker]))
+
+      assert notetaker["action"]["confirm"] ==
+               "Move Fermix back to this Mac now?\nVoice calls, meetings and StackChan run " <>
+                 "here again.\nGoogle Meet needs the notetaker installed on this Mac again: " <>
+                 "install it in Settings, Meetings, once Fermix is back here.\nYour server " <>
+                 "stays until you delete it."
+
+      assert Copy.summary_violations(notetaker["action"]["confirm"]) == []
+
+      assert [_question, _again, line, _stays] =
+               String.split(notetaker["action"]["confirm"], "\n")
+
+      assert Copy.violations(line, :prose) == []
+
       assert summary["notice"] == %{
                "id" => "ready:" <> @back_cand,
                "sentence" =>

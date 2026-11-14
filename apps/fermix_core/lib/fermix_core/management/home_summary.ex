@@ -313,7 +313,7 @@ defmodule FermixCore.Management.HomeSummary do
           required(:primary_too_old) => boolean(),
           required(:copies_bytes) => non_neg_integer() | nil,
           required(:stays_here) => [:voice | :meetings | :accessories],
-          required(:return_costs) => [:telegram],
+          required(:return_costs) => [:telegram | :meet_notetaker],
           required(:zone) => String.t(),
           required(:return) => map() | nil,
           required(:returning) => map() | :unreadable | nil,
@@ -495,7 +495,8 @@ defmodule FermixCore.Management.HomeSummary do
   `MoveReadiness.summary_items/4` is given `opts` as they are. Reads the
   last readiness review, on a desktop what this home's settings turn on that
   runs only on this computer, and so here again after a move back, and what
-  of a move back's costs they turn on (`MoveReadiness.costs/1`),
+  of a move back's costs they turn on (`MoveReadiness.costs/2`, `opts`'
+  `:meet_notetaker` in place of this computer's notetaker),
   on the primary the review's items they decide, the record of a move back
   (`Home.Return`), and, on a desktop, its candidate for a move back
   (`Home.Candidate`'s state) and its stored copies, newest first, by the
@@ -538,7 +539,7 @@ defmodule FermixCore.Management.HomeSummary do
       primary_too_old: Map.get(status, :primary_too_old, false),
       copies_bytes: copies_bytes(home, role, reads),
       stays_here: stays_here(home, role, host_os, reads),
-      return_costs: return_costs(home, role, reads),
+      return_costs: return_costs(home, role, reads, opts),
       zone: Clock.shown_zone(Keyword.take(opts, [:personalization])),
       return: return,
       returning: returning_state(home, role, reads),
@@ -2189,10 +2190,14 @@ defmodule FermixCore.Management.HomeSummary do
 
   # What a move back costs that this desktop's settings turn on, which its
   # confirm names: the settings of the home it left, the facts it holds.
-  defp return_costs(home, :device, reads),
-    do: home |> MoveReadiness.settings(reads) |> MoveReadiness.costs()
+  # The notetaker this desktop kept is its own (`:meet_notetaker` in a test).
+  defp return_costs(home, :device, reads, opts),
+    do:
+      home
+      |> MoveReadiness.settings(reads)
+      |> MoveReadiness.costs(Keyword.take(opts, [:meet_notetaker]))
 
-  defp return_costs(_home, _role, _reads), do: []
+  defp return_costs(_home, _role, _reads, _opts), do: []
 
   # The review's items this home's settings decide, for the server a move
   # would go to, which Move now's confirm names: only the computer that sets

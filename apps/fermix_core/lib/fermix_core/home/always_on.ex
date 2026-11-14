@@ -32,6 +32,7 @@ defmodule FermixCore.Home.AlwaysOn do
   alias FermixCore.Home.Epoch
   alias FermixCore.Home.Role
   alias FermixCore.HostFacts
+  alias FermixCore.Setup.ConfigStore
 
   @type facts :: %{
           role: Role.role(),
@@ -60,6 +61,19 @@ defmodule FermixCore.Home.AlwaysOn do
 
   defp moved_or_restored?(epoch) when is_integer(epoch) and epoch >= 1, do: epoch > 1
   defp moved_or_restored?(nil), do: false
+
+  @doc """
+  Whether this engine is an Always On server: `server?/1` of the facts its
+  boot recorded (`Role.booted/0`, `HostFacts`) and this home's epoch. A
+  process that booted no engine is none.
+  """
+  @spec here?() :: boolean()
+  def here? do
+    case {Role.booted(), Application.get_env(:fermix_core, :host_facts)} do
+      {%{} = record, %{} = host} -> ConfigStore.fermix_home() |> facts(record, host) |> server?()
+      {_no_engine, _no_facts} -> false
+    end
+  end
 
   @doc """
   The facts for `home` under the boot's role `record` and `host` facts. Only

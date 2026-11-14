@@ -4,9 +4,9 @@
     "sentence": "Always On changed since this was shown, so look at it again.",
     "summary": {
       "action": {
-        "confirm": "Move Fermix to your server now? You can move it back to this Mac any time.\nThese plugins have no build for fermix-general-a3f9, so they stop working after the move: invented-notes.\nMeetings stop after the move: neither this Mac nor fermix-general-a3f9 runs them.\nA recurring job more than an hour late while the move runs is skipped.\nThis computer serves nothing while the move runs: no chat, channels or jobs until fermix-general-a3f9 takes over.",
+        "confirm": "Move Fermix to your server now? You can move it back to this Mac any time.\nThese plugins have no build for fermix-general-a3f9, so they stop working after the move: invented-notes.\nGoogle Meet meetings stop after the move: neither this Mac nor fermix-general-a3f9 runs them.\nA recurring job more than an hour late while the move runs is skipped.\nThis computer serves nothing while the move runs: no chat, channels or jobs until fermix-general-a3f9 takes over.",
         "id": "move_now",
-        "key": "oQOLzOncsWKubyRn4pdI4Q",
+        "key": "UKQjwjqoeExfsSB72Pq9Bg",
         "label": "Move now",
         "needs": [
           "recovery_passphrase"
@@ -63,7 +63,7 @@
         "waits_until": "2031-05-05T11:00:00Z"
       },
       "help": "https://fermix.ai/docs/always-on/#the-move",
-      "key": "R6F5vakfkSN5mOCUduzpTQ",
+      "key": "dBKAG_DT7dUvjw-eWkmJGg",
       "notice": {
         "id": "ready:cand-5e2a9c1f7b3d4086",
         "sentence": "Your server is ready for the move."

@@ -138,6 +138,35 @@ defmodule FermixCore.MeetingsTest do
       assert Meetings.meet_lane_ready?()
     end
 
+    # M97 D24: an Always On server has no screen to sign the notetaker in to
+    # Google on, and is never given a profile signed in elsewhere, so Google
+    # Meet is refused there by its own reason, ahead of the install checks
+    # (a server's browser install puts the notetaker's binary there anyway).
+    # Zoom needs neither, and joins.
+    test "4c. on an Always On server Google Meet is unavailable, and Zoom is not", %{
+      repo: repo,
+      dev_local: dev_local
+    } do
+      server = [always_on_server: true]
+      put_meetings(enabled: true, zoom: :configured)
+
+      assert {:error, :sidecar_not_installed} =
+               join(@meet_url, repo, @operator, always_on_server: false)
+
+      assert {:error, :meet_unavailable_on_server} = join(@meet_url, repo, @operator, server)
+
+      install_fake_sidecar(dev_local)
+      install_fake_browser()
+      assert Meetings.meet_lane_ready?()
+      assert {:error, :meet_unavailable_on_server} = join(@meet_url, repo, @operator, server)
+      assert Meetings.meet_here(server) == {:error, :meet_unavailable_on_server}
+      assert Meetings.meet_here(always_on_server: false) == :ok
+
+      assert {:ok, %{id: id}} = join(@zoom_url, repo, @operator, server)
+      {:ok, session} = lookup(id)
+      stop_session(session)
+    end
+
     test "5. refuses a second meeting while one is running", %{repo: repo} do
       put_meetings(enabled: true, zoom: :configured)
       hold_registry_slot("mtg_00000000009")
@@ -286,6 +315,110 @@ defmodule FermixCore.MeetingsTest do
 
       put_meetings(enabled: false)
       refute Meetings.ready?()
+    end
+
+    # M97 D24: on an Always On server only Zoom makes the notetaker usable, so
+    # a server with the notetaker's binary and browser but no Zoom offers no
+    # meeting tool.
+    test "on an Always On server, only the Zoom lane counts", %{dev_local: dev_local} do
+      put_meetings(enabled: true)
+      install_fake_sidecar(dev_local)
+      install_fake_browser()
+
+      assert Meetings.ready?(always_on_server: false)
+      refute Meetings.ready?(always_on_server: true)
+
+      put_meetings(enabled: true, zoom: :configured)
+      assert Meetings.ready?(always_on_server: true)
+    end
+  end
+
+  # M97 §9.5: a move back keeps this computer's notetaker (`plugins/meetbot`)
+  # while the home is away, and the engine that comes back with an app update
+  # may pin a newer one, so the move back asks whether Google Meet needs it
+  # installed again: something of it is here, and this Fermix cannot drive it.
+  describe "meet_reinstall_needed?/0" do
+    test "only a notetaker kept here that this Fermix cannot drive", %{dev_local: dev_local} do
+      refute Meetings.meet_reinstall_needed?()
+
+      older = Path.join(System.get_env("FERMIX_HOME"), "plugins/meetbot/bin/v0.0.1")
+      File.mkdir_p!(older)
+      File.write!(Path.join(older, "fermix-meetbot"), "#!/bin/sh\nexit 0\n")
+      assert Meetings.meet_reinstall_needed?()
+
+      install_fake_sidecar(dev_local)
+      assert Meetings.meet_reinstall_needed?()
+
+      install_fake_browser()
+      refute Meetings.meet_reinstall_needed?()
+    end
+  end
+
+  # M97 §9.5: a move restarts the engine, which would end a meeting before
+  # its notes are written, so the move's review asks which meeting the
+  # notetaker is in now.
+  describe "in_progress/1" do
+    test "names the meeting with a live session, as its row has it", %{repo: repo} do
+      assert Meetings.in_progress(store_opts: [server: repo]) == :none
+
+      {:ok, _meeting} =
+        Store.insert(
+          %{
+            id: "mtg_00000000007",
+            platform: "zoom",
+            url: @zoom_url,
+            title: "Quarter planning",
+            requested_by: "operator",
+            origin_session_id: nil,
+            created_at: @created_at
+          },
+          server: repo
+        )
+
+      hold_registry_slot("mtg_00000000007")
+
+      assert Meetings.in_progress(store_opts: [server: repo]) ==
+               {:ok, %{id: "mtg_00000000007", platform: "zoom", title: "Quarter planning"}}
+    end
+
+    # A session whose row cannot be read is still a meeting in progress: the
+    # move must not start over it, so it is named without its details.
+    test "names a live session whose row is missing without its details", %{repo: repo} do
+      hold_registry_slot("mtg_00000000006")
+
+      assert Meetings.in_progress(store_opts: [server: repo]) ==
+               {:ok, %{id: "mtg_00000000006", platform: nil, title: nil}}
+    end
+  end
+
+  # M97 §9.5: a meeting's notes are home data and move with the home, under
+  # its workspace; the row was written with the path of the computer that
+  # held the meeting, so the row is read with this home's own.
+  describe "the artifact folder" do
+    test "is read under this home's workspace, wherever the meeting was held", %{repo: repo} do
+      seed(repo, "mtg_00000000005", "delivered", ~U[2026-08-17 11:00:00Z])
+
+      {:ok, _row} =
+        Store.update_status(
+          "mtg_00000000005",
+          "delivered",
+          %{artifact_dir: "/Users/invented/.fermix/workspace/meetings/mtg_00000000005"},
+          server: repo
+        )
+
+      seed(repo, "mtg_00000000004", "failed", ~U[2026-08-17 10:00:00Z])
+      here = "/srv/invented/.fermix/workspace"
+      opts = [store_opts: [server: repo], workspace: here]
+
+      assert {:ok, %{artifact_dir: dir}} = Meetings.get("mtg_00000000005", opts)
+      assert dir == Path.join(here, "meetings/mtg_00000000005")
+
+      assert {:ok, rows} = Meetings.list(opts)
+
+      assert Enum.map(rows, &{&1.id, &1.artifact_dir}) == [
+               {"mtg_00000000005", Path.join(here, "meetings/mtg_00000000005")},
+               {"mtg_00000000004", nil}
+             ]
     end
   end
 

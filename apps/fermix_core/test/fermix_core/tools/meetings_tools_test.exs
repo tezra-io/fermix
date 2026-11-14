@@ -217,6 +217,16 @@ defmodule FermixCore.Tools.MeetingsToolsTest do
                  "I join one meeting at a time."
     end
 
+    # M97 D24: only reachable on an Always On server, so the copy is asserted
+    # against the renderer directly. It says what does work there.
+    test "Google Meet on an Always On server says it is unavailable, and that Zoom works" do
+      assert JoinMeeting.describe_error(:meet_unavailable_on_server) ==
+               "Google Meet is not available on your server yet: the notetaker needs a " <>
+                 "Google sign-in on a computer with a screen. Zoom meetings work on your server."
+
+      assert Enum.any?(JoinMeeting.failure_modes(), &(&1.tag == "meet_unavailable_on_server"))
+    end
+
     test "an unknown refusal is reported, never swallowed" do
       assert JoinMeeting.describe_error(:database_locked) =~ ":database_locked"
     end

@@ -102,13 +102,16 @@ defmodule FermixCore.Management.Copy do
   @stays_here [
     voice: "voice calls",
     meetings: "meetings",
+    # What a move to a server stops of meetings (M97 §9.5, D24): the server
+    # joins Zoom's, and cannot sign the notetaker in to Google.
+    google_meet: "Google Meet meetings",
     accessories: "StackChan"
   ]
   # The features named alone in the singular.
   @singular_features [[:accessories]]
   # What reaches the server through Funnel, as the webhooks' sentence starts.
   @reached [whatsapp: "WhatsApp", cues: "your webhook sources"]
-  # What a move back costs, each where the home has it.
+  # What a move back costs, each where the home has it (`return_cost/2`).
   @return_costs [
     telegram: "Messages sent to Telegram while it moves wait until it is done."
   ]
@@ -269,7 +272,10 @@ defmodule FermixCore.Management.Copy do
     "Add webhook",
     "Payload URL",
     "Webhooks",
-    "Settings"
+    "Settings",
+    # The apps' pane of the meeting notetaker, where a move back says to
+    # install it again (M97 §9.5).
+    "Meetings"
   ]
 
   @doc """
@@ -743,7 +749,7 @@ defmodule FermixCore.Management.Copy do
         lines(
           ["Move Fermix back to this #{machine} now?"] ++
             runs_here_line(features) ++
-            Enum.map(costs, &Keyword.fetch!(@return_costs, &1)) ++
+            Enum.map(costs, &return_cost(&1, machine)) ++
             ["Your server stays until you delete it."]
         )
 
@@ -775,10 +781,11 @@ defmodule FermixCore.Management.Copy do
 
   @doc """
   What a move stops among `features` (`:voice`, `:meetings`,
-  `:accessories`), as a sentence starts: "Voice calls and meetings stop
-  after the move", "StackChan stops after the move".
+  `:google_meet`, `:accessories`), as a sentence starts: "Voice calls and
+  meetings stop after the move", "StackChan stops after the move".
   """
-  @spec stops_after_move([:voice | :meetings | :accessories, ...]) :: String.t()
+  @spec stops_after_move([:voice | :meetings | :google_meet | :accessories, ...]) ::
+          String.t()
   def stops_after_move([_ | _] = features) do
     names = for {feature, name} <- @stays_here, feature in features, do: name
     true = length(names) == length(Enum.uniq(features))
@@ -799,6 +806,13 @@ defmodule FermixCore.Management.Copy do
   end
 
   @doc """
+  What a move does to Zoom meetings, as a sentence without its full stop:
+  they carry on at `server`, which joins them with no browser (M97 §9.5).
+  """
+  @spec zoom_after_move(String.t()) :: String.t()
+  def zoom_after_move(server) when is_binary(server), do: "Zoom meetings carry on at #{server}"
+
+  @doc """
   What a move back brings back among `features` (`:voice`, `:meetings`,
   `:accessories`) on the computer `name` it returns to, as a sentence starts:
   "Voice calls and meetings run on studio-mac again after the move".
@@ -811,6 +825,15 @@ defmodule FermixCore.Management.Copy do
 
     "#{names |> join_names() |> capitalised()} #{verb} on #{name} again after the move"
   end
+
+  # M97 §9.5: meetings run on this computer again, and Google Meet with the
+  # notetaker it kept, which this Fermix can no longer drive.
+  defp return_cost(:meet_notetaker, machine),
+    do:
+      "Google Meet needs the notetaker installed on this #{machine} again: install it in " <>
+        "Settings, Meetings, once Fermix is back here."
+
+  defp return_cost(cost, _machine), do: Keyword.fetch!(@return_costs, cost)
 
   defp runs_here_line([]), do: []
 

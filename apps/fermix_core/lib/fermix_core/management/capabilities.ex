@@ -15,7 +15,11 @@ defmodule FermixCore.Management.Capabilities do
   check over a pane that says there is no browser.
 
   Refusals are the installer's own words. A target with no pinned release for
-  this machine says so; it never downloads something unpinned.
+  this machine says so; it never downloads something unpinned. The
+  notetaker's install, which lands on the server after a move, downloads
+  nothing on an Always On server, where Google Meet is unavailable and Zoom
+  needs no binary (M97 D24, `FermixCore.Meetings.meet_here/1`, whose
+  `:always_on_server` seam `opts` carries).
   """
 
   alias FermixCore.Auth.Redaction
@@ -23,6 +27,7 @@ defmodule FermixCore.Management.Capabilities do
   alias FermixCore.ComputerUse.SidecarInstaller, as: ComputerUseInstaller
   alias FermixCore.IMessage.HelperInstaller, as: IMessageHelper
   alias FermixCore.Management.Jobs
+  alias FermixCore.Meetings
   alias FermixCore.Meetings.BrowserInstall
   alias FermixCore.Meetings.SidecarInstaller, as: MeetbotInstaller
   alias FermixCore.Transcription.Local, as: LocalTranscription
@@ -159,13 +164,10 @@ defmodule FermixCore.Management.Capabilities do
     install = Keyword.get(opts, :install, &MeetbotInstaller.install/0)
     install_browser = Keyword.get(opts, :install_browser, &BrowserInstall.run/0)
 
-    fn _job_id, report ->
-      report.({:phase, "sidecar_downloading"})
+    here = Meetings.meet_here(opts)
 
-      case install.() do
-        {:ok, _path} -> install_meetbot_browser(install_browser, report)
-        {:error, reason} -> {:error, {:unavailable, meetbot_sentence(reason)}}
-      end
+    fn _job_id, report ->
+      with :ok <- meet_here_sentence(here), do: install_meetbot(install, install_browser, report)
     end
   end
 
@@ -199,6 +201,20 @@ defmodule FermixCore.Management.Capabilities do
       end
     end
   end
+
+  defp install_meetbot(install, install_browser, report) do
+    report.({:phase, "sidecar_downloading"})
+
+    case install.() do
+      {:ok, _path} -> install_meetbot_browser(install_browser, report)
+      {:error, reason} -> {:error, {:unavailable, meetbot_sentence(reason)}}
+    end
+  end
+
+  defp meet_here_sentence(:ok), do: :ok
+
+  defp meet_here_sentence({:error, :meet_unavailable_on_server}),
+    do: {:error, {:unavailable, Meetings.meet_unavailable_sentence()}}
 
   defp install_meetbot_browser(install_browser, report) do
     report.({:phase, "downloading"})

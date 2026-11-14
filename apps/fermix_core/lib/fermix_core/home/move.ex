@@ -49,6 +49,10 @@ defmodule FermixCore.Home.Move do
   most 15 minutes ago (`review/3`), so the keychain is not read again before
   the move's capture reads it. A start with no such review makes the report
   itself. Writing the request replaces `.move/`, so a review serves one start.
+  Whatever review it takes, the start asks again whether the notetaker is in
+  a meeting (`MoveReadiness.meeting_in_progress/1`), which can start after
+  the review and which the restart would end before its notes are written
+  (M97 §9.5): on a move, and on a server's move back alike.
 
   The worker starts while the phase is pending (`pending?/1`).
   """
@@ -559,16 +563,25 @@ defmodule FermixCore.Home.Move do
   end
 
   # The review the owner was just shown is the gate as it was shown, so the
-  # keychain is not read again before the capture reads it.
+  # keychain is not read again before the capture reads it. A meeting the
+  # notetaker joined after it is asked about now (M97 §9.5): the restart
+  # would end it before its notes are written.
   defp ready(home, candidate, opts) do
-    report =
-      Keyword.get_lazy(opts, :readiness, fn -> MoveReadiness.report(home, candidate, opts) end)
+    blocks =
+      case Keyword.fetch(opts, :readiness) do
+        {:ok, report} -> MoveReadiness.blocks(report) ++ meeting_blocks(opts)
+        :error -> MoveReadiness.blocks(MoveReadiness.report(home, candidate, opts))
+      end
 
-    case MoveReadiness.blocks(report) do
+    case blocks do
       [] -> :ok
       sentences -> {:error, {:not_ready, sentences}}
     end
   end
+
+  defp meeting_blocks(opts),
+    do:
+      for(%{status: :block} = item <- MoveReadiness.meeting_in_progress(opts), do: item.sentence)
 
   defp primary(%{role: :primary}), do: :ok
   defp primary(%{role: role}), do: {:error, {:not_primary, role}}

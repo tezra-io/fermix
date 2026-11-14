@@ -450,7 +450,7 @@ defmodule FermixCore.Management.HomeMove do
   defp primary(_record), do: {:error, {:unavailable, @capability, @not_primary}}
 
   defp readiness_opts(opts),
-    do: Keyword.take(opts, [:free_bytes, :version, :host, :restarts_itself])
+    do: Keyword.take(opts, [:free_bytes, :version, :host, :restarts_itself, :meeting_holder])
 
   defp home(opts), do: Keyword.get_lazy(opts, :home, &ConfigStore.fermix_home/0)
   defp role(opts), do: Keyword.get_lazy(opts, :engine_role, &Role.recorded/0)

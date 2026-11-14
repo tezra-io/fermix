@@ -122,9 +122,10 @@ it, never a second writer.
   enter again, coding-agent consent to give here, the settings that
   still hold absolute paths outside the old home, and the installed plugins
   built for the old OS to install again.
-- After a stage-one move iMessage, ACP, voice and meetings stop on both
-  machines: the device role starts none of them and the VM has no Mac to
-  reach. Slack and WhatsApp keep working once their webhook points at the new
+- After a stage-one move iMessage, ACP, voice and Google Meet meetings stop
+  on both machines: the device role starts none of them and the VM has no
+  Mac to reach, nor a screen to sign the notetaker in to Google on. Zoom
+  meetings run on the VM (`meetings`). Slack and WhatsApp keep working once their webhook points at the new
   host; Telegram and Discord resume on their own. After a move by hand the
   desktop app cannot reach the new host (it has no link to it, below); phones
   can.
@@ -374,7 +375,10 @@ it, never a second writer.
   id, name, system, version, and the snapshot bucket it was told.
 - **The readiness report.** Before the move, the review (`home.act`'s Move
   now and Check again; `home.move.readiness` is rail-only) answers each fact
-  as `ok`, `warn` or `block`: the secrets this computer keeps in its keychain, which move with
+  as `ok`, `warn` or `block`: a meeting the notetaker is in (blocks, named:
+  the move would end it before its notes are written, so leave it or wait
+  for it to end; the same on a move back, and Move now asks again); the
+  secrets this computer keeps in its keychain, which move with
   the home (one the keychain will not give blocks, named as its settings row
   labels it, "your Anthropic key", one no row shows counted, never by its id
   or its value); the server's Fermix (one that cannot read this home's format
@@ -388,8 +392,9 @@ it, never a second writer.
   working; the server installs every other one again itself); a dev plugin
   folder (warns: it stays here); what this
   home has turned on that runs only here stopping after the move, each named
-  (voice calls, meetings; nothing to warn of when none is
-  on); WhatsApp
+  (voice calls, Google Meet meetings; nothing to warn of when none is
+  on; Zoom meetings carry on at the server, said where a Zoom app is set
+  up); WhatsApp
   turned on (warns: it stops until you run the Tailscale Funnel command
   Always On shows for the server and point Meta at its address);
   Slack turned on without Socket Mode (warns: it stops

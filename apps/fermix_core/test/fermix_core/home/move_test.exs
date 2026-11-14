@@ -119,6 +119,51 @@ defmodule FermixCore.Home.MoveTest do
     refute File.read!(Path.join(ctx.home, "config.toml")) =~ "role ="
   end
 
+  # M97 §9.5: the move restarts this engine, which would end a meeting the
+  # notetaker is in before its notes are written. The review the owner was
+  # shown may be up to 15 minutes old, and a meeting can start after it, so
+  # the start asks again whatever review it is given: on a move to a server,
+  # and on a server's move back to the Mac the home left.
+  test "start refuses while the notetaker is in a meeting, even after a ready review", ctx do
+    id = ctx.candidate.candidate_id
+    meeting = {:ok, %{id: "mtg_00000000003", platform: "zoom", title: "Quarter planning"}}
+    ready = %{ready: true, items: []}
+
+    for keep_as_desktop <- [true, false] do
+      in_meeting =
+        opts(
+          meeting_holder: fn -> meeting end,
+          readiness: ready,
+          keep_as_desktop: keep_as_desktop
+        )
+
+      assert {:error, {:not_ready, [sentence]}} =
+               Move.start(ctx.home, @primary, id, ctx.recipient, in_meeting)
+
+      assert sentence =~ "Quarter planning"
+      refute File.exists?(Move.dir(ctx.home))
+      refute File.read!(Path.join(ctx.home, "config.toml")) =~ "role ="
+    end
+
+    # Once it ended, the same review starts the move. A server moving the home
+    # back serves nothing after it: it restarts as a device, which starts no
+    # meetings tree and no scheduler, so nothing it had in hand or on a
+    # schedule for the home stays there.
+    over = opts(meeting_holder: fn -> :none end, readiness: ready, keep_as_desktop: false)
+    assert {:ok, _started} = Move.start(ctx.home, @primary, id, ctx.recipient, over)
+    assert {:ok, %{role: :device}} = Role.configured(ctx.home)
+
+    on_a_schedule = [
+      FermixCore.Meetings.Supervisor,
+      FermixCore.Jobs.Scheduler,
+      FermixCore.Temporal.Scheduler,
+      FermixCore.OpenLoops.Scheduler,
+      FermixCore.Cues.Supervisor
+    ]
+
+    assert Role.children(on_a_schedule, :device) == []
+  end
+
   test "an ending is published by the engine that survives the restart", ctx do
     id = ctx.candidate.candidate_id
     {:ok, _started} = Move.start(ctx.home, @primary, id, ctx.recipient, opts())
@@ -169,7 +214,10 @@ defmodule FermixCore.Home.MoveTest do
         now: @now,
         free_bytes: fn _dir -> {:ok, 1_099_511_627_776} end,
         version: "9.9.9",
-        host: "macos-aarch64"
+        host: "macos-aarch64",
+        # No meeting is in progress unless a test says so, whatever the
+        # application's meetings registry holds.
+        meeting_holder: fn -> :none end
       ],
       extra
     )

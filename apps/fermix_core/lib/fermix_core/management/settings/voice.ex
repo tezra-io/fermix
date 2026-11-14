@@ -19,6 +19,7 @@ defmodule FermixCore.Management.Settings.Voice do
 
   alias FermixCore.Management.Settings.Row
   alias FermixCore.Management.Settings.Source
+  alias FermixCore.Meetings
   alias FermixCore.Meetings.Config, as: MeetingsConfig
   alias FermixCore.Providers.Descriptor
   alias FermixCore.Providers.ModelCatalog
@@ -94,7 +95,9 @@ defmodule FermixCore.Management.Settings.Voice do
   The rows of one owned section.
 
   `opts` reach `FermixCore.Transcription.Local.available?/1`, whose `releases:`
-  seam stands for the machine's pin. The settings methods pass none.
+  seam stands for the machine's pin, and `FermixCore.Meetings.meet_here/1`,
+  whose `:always_on_server` seam stands for whether this is an Always On
+  server. The settings methods pass none.
   """
   @spec rows(String.t(), Source.snapshot(), keyword()) :: [Row.t()]
   def rows(section, snapshot, opts \\ [])
@@ -125,7 +128,7 @@ defmodule FermixCore.Management.Settings.Voice do
     restart = Row.restart?(:meetings)
     options = backend_options(transcription, in_force, opts)
 
-    meetings_bot_rows(block, restart) ++
+    meetings_bot_rows(block, restart, opts) ++
       meetings_zoom_rows(block, snapshot, restart) ++
       [meetings_backend_row(block, options, restart)]
   end
@@ -298,12 +301,11 @@ defmodule FermixCore.Management.Settings.Voice do
   defp transcription_key_footer(backend),
     do: "Overrides the #{backend_label(backend)} key for voice notes."
 
-  defp meetings_bot_rows(block, restart) do
+  defp meetings_bot_rows(block, restart, opts) do
     [
       Row.new("meetings_enabled", :toggle, "Meeting notetaker",
         footer:
-          "Enable meeting notes for Google Meet and Zoom. " <>
-            "Google Meet needs the notetaker and browser installed; Zoom uses its RTMS credentials.",
+          "Enable meeting notes for Google Meet and Zoom. " <> lanes(Meetings.meet_here(opts)),
         value: Source.boolean(block, :enabled, false),
         restart: restart
       ),
@@ -322,6 +324,13 @@ defmodule FermixCore.Management.Settings.Voice do
       )
     ]
   end
+
+  # After a move every app's Meetings pane is the server's, where Google Meet
+  # is unavailable (M97 D24), so the switch says so there.
+  defp lanes(:ok),
+    do: "Google Meet needs the notetaker and browser installed; Zoom uses its RTMS credentials."
+
+  defp lanes({:error, :meet_unavailable_on_server}), do: Meetings.meet_unavailable_sentence()
 
   defp meetings_zoom_rows(block, snapshot, restart) do
     [

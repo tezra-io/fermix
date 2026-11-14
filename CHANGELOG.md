@@ -1075,6 +1075,19 @@ will be part of a future release; nothing in this group is in a release yet.
   version ahead of its server or a version behind it links, and one two
   versions apart is told which side to update. A computer on an earlier
   Fermix links to a current server too, and phones see no change.
+- **The meeting notetaker works on your server.** Once Fermix runs on your
+  server it joins your Zoom meetings there, awake whenever a meeting
+  starts, with the Zoom settings and secret that moved with it. Google Meet
+  is not available on the server yet, since its notetaker needs a Google
+  sign-in on a computer with a screen: a Meet link, the notetaker's install
+  and its sign-in each say so there, and the Meetings pane says it too. The
+  move's review now says Google Meet meetings stop and Zoom meetings carry
+  on at your server, where it said all meetings stop. A move either way is
+  refused while the notetaker is in a meeting, naming it, since the move
+  would end it before its notes are written. Each meeting's notes move with
+  your home, and Fermix reads them where your home keeps them now. After a
+  move back your Mac runs meetings again, and Move now's confirm says when
+  the notetaker your Mac kept needs installing again.
 
 ## [0.18.0] - 2026-11-03
 
