@@ -391,6 +391,9 @@ defmodule FermixChannels.Test.HomeMove do
           :ok
         end,
         snapshot_opts: [host: "macos-aarch64"],
+        # The source is a Mac, as its snapshot says, on every host (Apple Maps
+        # is a Mac's line, written at its default where there is none).
+        consent_opts: [os: :macos],
         resume_for_ms: 0
       ],
       overrides

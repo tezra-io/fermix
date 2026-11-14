@@ -225,6 +225,9 @@ defmodule FermixChannels.Home.MoveWorker do
       resume_for_ms: Keyword.get(opts, :resume_for_ms, @resume_for_ms),
       awake: Keyword.get(opts, :awake, default_awake()),
       key_opts: Keyword.get(opts, :key_opts, []),
+      # This computer's system for the keep block's lines (`Consent`'s `:os`),
+      # the host's unless a case names it.
+      consent_opts: Keyword.get(opts, :consent_opts, []),
       progress: Keyword.get(opts, :progress, MoveProgress)
     }
   end
@@ -725,15 +728,15 @@ defmodule FermixChannels.Home.MoveWorker do
   end
 
   defp accept_offers(ctx) do
-    case Consent.accept(ctx.home, kept_offers(ctx.request)) do
+    case Consent.accept(ctx.home, kept_offers(ctx), ctx.consent_opts) do
       :ok -> :ok
       {:error, reason} -> {:error, {:switches, reason}}
     end
   end
 
-  defp kept_offers(request) do
-    case Move.keep_offers(request) do
-      nil -> Consent.default_keep()
+  defp kept_offers(ctx) do
+    case Move.keep_offers(ctx.request) do
+      nil -> Consent.default_keep(ctx.consent_opts)
       offers -> known_offers(offers)
     end
   end

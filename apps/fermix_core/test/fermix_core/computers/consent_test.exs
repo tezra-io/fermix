@@ -118,14 +118,14 @@ defmodule FermixCore.Computers.ConsentTest do
        %{home: home} do
     File.write!(MachineFile.path(home), "[fermix_core.computer_history]\nenabled = true\n")
 
-    assert :ok = Consent.accept(home, [:files_and_shell])
+    assert :ok = Consent.accept(home, [:files_and_shell], os: :macos)
     assert {:ok, switches} = Switches.read(home)
     assert Switches.on?(switches, :files) and Switches.on?(switches, :shell)
     refute Switches.on?(switches, :browser)
     assert Switches.reviewed?(switches)
     assert recorder(home) == {:ok, "false"}
 
-    assert :ok = Consent.accept(home, [:browser, :history])
+    assert :ok = Consent.accept(home, [:browser, :history], os: :macos)
     assert recorder(home) == {:ok, "true"}
     assert {:ok, switches} = Switches.read(home)
     assert Switches.switched_on(switches) == [:browser]
@@ -181,11 +181,11 @@ defmodule FermixCore.Computers.ConsentTest do
     # A Linux computer's block has no such line (above).
     assert {:ok, [:places]} = Consent.cast(["places"])
 
-    assert :ok = Consent.accept(home, [:files_and_shell])
+    assert :ok = Consent.accept(home, [:files_and_shell], os: :macos)
     assert {:ok, switches} = Switches.read(home)
     refute Switches.on?(switches, :places)
 
-    assert :ok = Consent.none(home)
+    assert :ok = Consent.none(home, os: :macos)
     assert {:ok, joined} = Switches.read(home)
     assert Switches.on?(joined, :places)
     assert Switches.switched_on(joined) == [:places]
