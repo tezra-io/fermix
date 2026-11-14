@@ -363,6 +363,25 @@ computer."
   updates on its own; its browser settings are the home's there, shown and
   changed as before.
 
+## What Always On does not do yet
+
+The apps list, under "Not with Always On yet", one short sentence for each thing that does not work, or takes a
+terminal on the server, while the home runs there, and only what applies
+to this home (`summary.detail.not_yet`, `{id, sentence}` each): Google
+Meet meetings while meetings are on (the server joins only Zoom's: the
+notetaker needs a Google sign-in on a computer with a screen); installing
+and signing in Codex or Claude Code on the server, a terminal there, while
+coding agents are approved; WhatsApp while it is on (it needs a public
+address, the Tailscale Funnel command the linked computer's screen shows);
+Slack on without Socket Mode; StackChan while it is on, on a Mac (it works
+only while Fermix runs on the Mac it is plugged into); a dev plugin folder
+this computer's settings name (they stay here); and computer history on a
+computer with no history recorder (a Mac records it). The computer that
+sets Always On up shows it on every screen before a move but the first,
+from its own settings; the server's own screen shows the home's; a linked
+computer shows its server's (but WhatsApp's while its Funnel commands are
+shown) and then its own. Information only: no button, no notification.
+
 ## Files and commands on a computer
 
 - **Naming the computer.** On an owner's turn, each tool a computer can run

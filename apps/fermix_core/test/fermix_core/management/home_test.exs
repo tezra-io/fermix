@@ -542,6 +542,65 @@ defmodule FermixCore.Management.HomeTest do
       assert sentence == "Keep Fermix running when this Mac sleeps. It moves to a server you own."
     end
 
+    # M97: what Always On does not do yet, from this home's settings and
+    # whether this computer records its history (`ComputerHistory.recorder?/0`,
+    # given here as `:recorder?` so the suite holds on any host).
+    test "a screen before a move lists what the settings and this computer's recorder say",
+         %{home: home} do
+      File.write!(Path.join(home, "config.toml"), "[fermix_core.meetings]\nenabled = true\n")
+
+      listed = fn recorder? ->
+        seams = [host_os: :linux, link_status: link(enrollment: manual(:open, nil))]
+
+        assert {:ok, %{"summary" => %{"state" => "connect", "detail" => detail}}} =
+                 route("home.status", %{}, opts(home, [recorder?: recorder?] ++ seams))
+
+        Enum.map(detail["not_yet"], & &1["id"])
+      end
+
+      assert listed.(false) == ["google_meet", "computer_history_linux"]
+      assert listed.(true) == ["google_meet"]
+    end
+
+    # A linked computer's `on` lists its server's entries as the server's own
+    # screen says them, then what this computer's own settings say.
+    test "a linked desktop lists its server's entries, then its own", %{home: home} do
+      :ok = DesktopLink.write(home, desktop_link())
+      :ok = Moved.write(home, %{epoch: 4, moved_at: @at, to: "invented-vm"})
+      File.write!(MachineFile.path(home), "[fermix_channels.accessories]\nenabled = true\n")
+      said = %{"id" => "google_meet", "sentence" => "The server's own words."}
+
+      server_part = %{
+        "role" => "primary",
+        "version" => "9.9.8",
+        "snapshots" => %{
+          "targets" => [
+            %{"label" => "your desktop", "last_verified" => %{"at" => "2031-05-04T11:00:00Z"}}
+          ]
+        },
+        "summary" => %{"state" => "primary", "detail" => %{"not_yet" => [said]}}
+      }
+
+      forward = fn _request, _opts -> {:ok, server_part} end
+      seams = [engine_role: @device, link_status: link(primary: primary(nil)), recorder?: true]
+
+      assert {:ok, %{"summary" => %{"state" => "on", "detail" => detail}}} =
+               route(
+                 "home.status",
+                 %{},
+                 opts(home, [host_os: :macos] ++ seams) |> Keyword.put(:primary_forward, forward)
+               )
+
+      assert detail["not_yet"] == [
+               said,
+               %{
+                 "id" => "stackchan",
+                 "sentence" =>
+                   "StackChan works only while Fermix runs on the Mac it is plugged into."
+               }
+             ]
+    end
+
     test "a server held with its code makes ready, the last review's warnings in Move now's confirm",
          %{home: home} do
       {:ok, held} = Candidates.add(home, candidate_attrs(), @at)

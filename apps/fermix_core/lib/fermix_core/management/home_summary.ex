@@ -187,6 +187,18 @@ defmodule FermixCore.Management.HomeSummary do
   (This computer): its `on` says so in its note, and its action is
   `review_offers` (Keep these switches), which takes them as they are.
 
+  **What Always On does not do yet** (M97). `detail.not_yet` lists what
+  does not work, or takes a terminal on the server, while the home runs
+  there, each `{id, sentence}` in `Copy.not_yet_ids/0`'s order and only
+  where it applies to this home: on the computer that sets Always On up, on
+  every screen before a move but `off` (the pane's D1), from its own
+  settings and recorder; on the server's own `primary`, what the home's
+  settings and its own turn on (`@server_not_yet`); on a linked computer's
+  `on`, its server's entries as the server's screen says them (but
+  WhatsApp's where the Funnel mounts already say it), then its own
+  (`@computer_not_yet`). Absent where nothing applies, on a problem and on
+  every other screen: a detail, never a notice.
+
   `notice` is the occurrence the apps raise as a system notification, or
   nil: the server ready (`ready:<candidate>`), the move done
   (`moved:<epoch>`, until the first backup after it), the server out of
@@ -232,6 +244,7 @@ defmodule FermixCore.Management.HomeSummary do
   """
 
   alias FermixCore.Clock
+  alias FermixCore.ComputerHistory
   alias FermixCore.Computers.Consent
   alias FermixCore.Computers.Switches
   alias FermixCore.Computers.Versions
@@ -263,6 +276,12 @@ defmodule FermixCore.Management.HomeSummary do
               change_passphrase restart_server)
   @needs ~w(recovery_passphrase new_recovery_passphrase sas)
   @step_states ~w(done active yours pending)
+  # What Always On does not do yet (M97) by where its fact lives: the home's
+  # settings and the server's own, which the server's screen lists and its
+  # computers read from it, and one computer's own, which only that
+  # computer's screen lists (`Copy.not_yet_ids/0` holds every one).
+  @server_not_yet ~w(google_meet coding_signin whatsapp slack)a
+  @computer_not_yet ~w(stackchan dev_plugins computer_history_linux)a
 
   @unreachable_ms 10 * 60_000
   @backup_old_s 3 * 86_400
@@ -327,7 +346,8 @@ defmodule FermixCore.Management.HomeSummary do
           optional(:readable) => :ok | {:error, term()} | nil,
           optional(:offers_review) => boolean(),
           optional(:move_progress) => MoveProgress.t() | nil,
-          optional(:computer_changes) => [ChangedFromComputer.change()]
+          optional(:computer_changes) => [ChangedFromComputer.change()],
+          optional(:not_yet) => [atom()]
         }
   @type summary :: %{String.t() => term()}
 
@@ -510,9 +530,12 @@ defmodule FermixCore.Management.HomeSummary do
   record that cannot be read is logged once while it stays so), and whether
   this engine starts again by itself (`restarts_itself`, a move back's need;
   on a desktop only, `opts`' `:restarts_itself` in place of
-  `Lifecycle.restarts_itself?/0`); and what the move in hand on this
+  `Lifecycle.restarts_itself?/0`); what the move in hand on this
   computer counted (`move_progress`, `Home.MoveProgress.read/0`, or `opts`'
-  `:move_progress`).
+  `:move_progress`); and, but on a candidate, what this engine's settings and
+  recorder turn on of what Always On does not do yet (`not_yet`,
+  `MoveReadiness.not_yet/2`, then `ComputerHistory.recorder?/0` or `opts`'
+  `:recorder?`).
   """
   @spec gather(Path.t(), map(), map(), map(), keyword()) :: facts()
   def gather(home, %{role: role} = record, link, status, opts)
@@ -557,13 +580,22 @@ defmodule FermixCore.Management.HomeSummary do
       screen: Map.get(status, :screen),
       server_sandbox: server_sandbox(home, role, reads),
       computer_changes: computer_changes(role, status),
-      move_progress: Keyword.get_lazy(opts, :move_progress, &MoveProgress.read/0)
+      move_progress: Keyword.get_lazy(opts, :move_progress, &MoveProgress.read/0),
+      not_yet: not_yet(home, role, host_os, {reads, opts})
     }
   end
 
   # -- the computer that sets Always On up ---------------------------------------
 
-  defp setup(facts), do: undone(facts) || own_server(facts) || off(facts)
+  defp setup(facts), do: before_move(undone(facts) || own_server(facts), facts) || off(facts)
+
+  # Every screen before a move but the first lists what Always On does not
+  # do yet from this computer's own facts (the pane's D1: `off` names nothing
+  # of what a move changes), the dev plugins naming the server held.
+  defp before_move(nil, _facts), do: nil
+
+  defp before_move(view, facts),
+    do: not_yet_listed(view, not_yet_entries(facts, Copy.not_yet_ids(), target(facts)["name"]))
 
   # A move undone while its server is still held: Try again, or Forget this
   # server once the undoing is over; why, in the move's own words, where its
@@ -1019,6 +1051,7 @@ defmodule FermixCore.Management.HomeSummary do
       detail
       |> webhooks(get_in(facts, [:primary_home, "webhooks"]))
       |> put_some("backup", backup(snapshots))
+      |> put_some("not_yet", linked_not_yet(facts))
     )
     |> reviewing(facts)
   end
@@ -1371,7 +1404,8 @@ defmodule FermixCore.Management.HomeSummary do
       asking(
         view("primary", sentence(:primary, facts), nil, %{
           "alternatives" => [action(:add_computer)]
-        }),
+        })
+        |> not_yet_listed(not_yet_entries(facts, @server_not_yet, nil)),
         facts
       )
   end
@@ -1426,6 +1460,45 @@ defmodule FermixCore.Management.HomeSummary do
 
   defp port_of("whatsapp"), do: :whatsapp
   defp port_of("cue"), do: :cues
+
+  # -- what Always On does not do yet (M97) -----------------------------------------
+
+  defp not_yet_listed(view, entries),
+    do: update_in(view, ["detail"], &put_some(&1, "not_yet", entries))
+
+  # The ids among `place`'s that this engine's own facts turn on (`gather/5`'s
+  # `not_yet`), each `{id, sentence}` in the list's order, the dev plugins
+  # naming the server `name` (nil: "your server").
+  defp not_yet_entries(facts, place, name) do
+    own = Map.get(facts, :not_yet, [])
+    values = %{machine: machine(facts.host_os), to: name}
+
+    for id <- Copy.not_yet_ids(),
+        id in own and id in place,
+        do: %{"id" => Atom.to_string(id), "sentence" => Copy.not_yet(id, values)}
+  end
+
+  # On a linked computer: its server's entries, as the server's own screen
+  # says them (the home's settings and the server's), then this computer's
+  # own, its dev plugins naming its server.
+  defp linked_not_yet(facts) do
+    (served_not_yet(facts) ++ not_yet_entries(facts, @computer_not_yet, link_name(facts)))
+    |> Enum.uniq_by(& &1["id"])
+  end
+
+  # The server's entries from its own `home.status` summary, but one this
+  # screen's Funnel mounts already say (`detail.webhooks` starts with
+  # WhatsApp's sentence); none from a server that sends none.
+  defp served_not_yet(%{primary_home: %{"summary" => %{"detail" => %{"not_yet" => said}}} = home})
+       when is_list(said) do
+    mounted = for %{"kind" => "whatsapp"} <- home["webhooks"] || [], do: "whatsapp"
+
+    for %{"id" => id, "sentence" => sentence} <- said,
+        is_binary(id) and is_binary(sentence) and id not in mounted,
+        do: %{"id" => id, "sentence" => sentence}
+  end
+
+  defp served_not_yet(_facts), do: []
 
   # -- the server before its move ------------------------------------------------
 
@@ -2187,6 +2260,19 @@ defmodule FermixCore.Management.HomeSummary do
   end
 
   defp stays_here(_home, _role, _host_os, _reads), do: []
+
+  # What this engine's own facts turn on of what Always On does not do yet
+  # (M97): its settings (`MoveReadiness.not_yet/2`), then whether this
+  # computer records its history (`ComputerHistory.recorder?/0`, `opts`'
+  # `:recorder?` in a test). The summary lists each where it applies.
+  defp not_yet(_home, :candidate, _host_os, _reads_opts), do: []
+
+  defp not_yet(home, _role, host_os, {reads, opts}) do
+    settings = MoveReadiness.settings(home, reads)
+    recorder? = Keyword.get_lazy(opts, :recorder?, &ComputerHistory.recorder?/0)
+    history = if recorder?, do: [], else: [:computer_history_linux]
+    MoveReadiness.not_yet(settings, host_os == :macos) ++ history
+  end
 
   # What a move back costs that this desktop's settings turn on, which its
   # confirm names: the settings of the home it left, the facts it holds.

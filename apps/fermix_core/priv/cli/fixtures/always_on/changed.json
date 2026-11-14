@@ -36,6 +36,12 @@
             "value": "1.2.3"
           }
         ],
+        "not_yet": [
+          {
+            "id": "google_meet",
+            "sentence": "Google Meet needs the notetaker signed in on a computer with a screen, so your server joins only Zoom meetings."
+          }
+        ],
         "note": "fermix-general-a3f9 waits for the move until Monday, May 5, 2031 at 1:00 PM CEST.",
         "server": {
           "name": "fermix-general-a3f9",
@@ -63,7 +69,7 @@
         "waits_until": "2031-05-05T11:00:00Z"
       },
       "help": "https://fermix.ai/docs/always-on/#the-move",
-      "key": "dBKAG_DT7dUvjw-eWkmJGg",
+      "key": "wdoqlqqUGTNfK6gEdHeyaQ",
       "notice": {
         "id": "ready:cand-5e2a9c1f7b3d4086",
         "sentence": "Your server is ready for the move."

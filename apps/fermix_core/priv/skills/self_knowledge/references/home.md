@@ -764,6 +764,9 @@ it, never a second writer.
   last backup and the S3 bucket, the space this computer's copies take and
   the server's disk, in the owner's time zone as dates and times, never as
   ages. Background and caveats are the Always On docs.
+- **What Always On does not do yet**: the apps' "Not with Always On yet" list
+  (`summary.detail.not_yet`); what it names and where is in the `computers`
+  reference, "What Always On does not do yet".
 - **Webhooks on the server.** Slack (Socket Mode), Telegram and Discord need
   nothing inbound. WhatsApp (Meta's Cloud API) and cue webhook sources do,
   and the server opens no public port: they reach it through Tailscale
@@ -887,6 +890,7 @@ it, never a second writer.
 | Take a snapshot now (`home.act` `back_up_now`) | **Back up now**, offered once snapshots have somewhere to go | `fermix always-on back-up-now` |
 | An enrollment code for the server (`home.act` `own_server`) | **Use my own Linux server**: the code shown once with **Copy** and when it expires, beside the command for the server, which carries no code, and the optional `--tailscale` one; **Cancel the code** closes it | `fermix always-on own-server`, the code printed once under both commands; `cancel` closes it |
 | On a linked desktop: the Tailscale Funnel mounts the server's webhooks need (`summary.detail.webhooks`, from the server's `webhooks`) | Each command with **Copy**, its policy step and caveats | `fermix always-on`, each command on a line of its own |
+| What Always On does not do yet for this home (`summary.detail.not_yet`) | Not with Always On yet, a short list | `fermix home status --json` only; the setup page does not show it |
 | The servers waiting for the move | Servers waiting for the move | `fermix home candidates` |
 | Review the move: each item ready, a note or a block | Move now reviews at the press; **Check again** on a block | The same; `fermix always-on check-again` |
 | Start the move (`home.act` `move_now`, `try_again`) | **Move now**, the recovery passphrase asked first | `fermix always-on move-now`, `try-again`: the passphrase asked without echo, or `--recovery-passphrase-file` |

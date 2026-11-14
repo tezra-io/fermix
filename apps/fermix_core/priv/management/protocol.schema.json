@@ -6341,7 +6341,7 @@
     },
     "homeSummaryDetail": {
       "type": "object",
-      "description": "What the state draws, a field only where it has something: note, the one secondary sentence, on any state (the wait, why a move was undone, what to check or do, a failure's own words); alternatives, every step but the main one (on on Back up now, Add a computer and Move back; on primary Add a computer; while a computer asks to join, deny_computer first, then the step the screen led with before); on ready server, waits_until and alternatives (Forget this server), and, on the computer that sets Always On up, keeps_on; on undone alternatives (Forget this server); on on server, backups, copies_bytes and disk_used; on problem kind, note, seen_at and alternatives, readiness on not_ready only, its blocks only; lines, facts only, on ready, on and problem wherever there are any; progress while a move, a move back, a restore or a backup runs; steps on each screen of the move and the move back, route while either moves and transfer only while its bytes move; backup on a linked desktop's on and the server's primary; webhooks on a linked desktop's on only, where its server serves any (never on the server's own primary, whose summary rides inside each desktop's home.status under max_json_depth).",
+      "description": "What the state draws, a field only where it has something: note, the one secondary sentence, on any state (the wait, why a move was undone, what to check or do, a failure's own words); alternatives, every step but the main one (on on Back up now, Add a computer and Move back; on primary Add a computer; while a computer asks to join, deny_computer first, then the step the screen led with before); on ready server, waits_until and alternatives (Forget this server), and, on the computer that sets Always On up, keeps_on; on undone alternatives (Forget this server); on on server, backups, copies_bytes and disk_used; on problem kind, note, seen_at and alternatives, readiness on not_ready only, its blocks only; lines, facts only, on ready, on and problem wherever there are any; progress while a move, a move back, a restore or a backup runs; steps on each screen of the move and the move back, route while either moves and transfer only while its bytes move; backup on a linked desktop's on and the server's primary; webhooks on a linked desktop's on only, where its server serves any (never on the server's own primary, whose summary rides inside each desktop's home.status under max_json_depth); not_yet, what Always On does not do yet, on every screen before a move but off, on primary and on a linked desktop's on, wherever any applies.",
       "additionalProperties": false,
       "properties": {
         "lines": {
@@ -6381,6 +6381,21 @@
         "note": { "type": ["string", "null"] },
         "seen_at": { "type": ["string", "null"] },
         "keeps_on": { "$ref": "#/$defs/computerKeepBlock" },
+        "not_yet": {
+          "description": "What Always On does not do yet (M97): what does not work, or takes a terminal on the server, while the home runs there, each one short sentence only where it applies to this home, in this order: google_meet (meetings on), coding_signin (coding agents approved), whatsapp (WhatsApp on), slack (Slack on without Socket Mode), stackchan (StackChan on a Mac), dev_plugins (a dev plugin folder named) and computer_history_linux (a computer with no history recorder). On every screen before a move but off, on the server's own primary (the home's and the server's own) and on a linked computer's on (its server's, but WhatsApp's where webhooks already says it, then its own); absent where none applies and on every other screen. A client draws it as a short list under its own heading, never as a notice; a client that does not know an id shows its sentence as it is.",
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 16,
+          "items": {
+            "type": "object",
+            "required": ["id", "sentence"],
+            "additionalProperties": false,
+            "properties": {
+              "id": { "type": "string", "minLength": 1 },
+              "sentence": { "type": "string", "minLength": 1 }
+            }
+          }
+        },
         "steps": {
           "description": "A flow's steps in order, one line that never wraps: the move's Connect your server, Move now, Send your home, Switch over, or the move back's Get this Mac ready (this computer off a Mac), Move now, Receive your home, Put Fermix in place; state done, active (it runs), yours (the owner takes it: the screen's action) or pending.",
           "type": "array",

@@ -2294,6 +2294,124 @@ defmodule FermixCore.Management.HomeSummaryTest do
     end
   end
 
+  # M97: what Always On does not do yet, from facts the engine already has,
+  # where the owner decides (every screen before a move but the first, the
+  # pane's D1) and where the owner lives with it (a linked computer's `on`
+  # and the server's own screen): a detail, never a notice.
+  describe "what Always On does not do yet" do
+    @own ~w(google_meet coding_signin whatsapp slack stackchan dev_plugins computer_history_linux)a
+
+    test "each screen before a move lists what this computer's facts turn on, but the first" do
+      screens = [
+        {"connect", facts(not_yet: @own, link: link(enrollment: manual(:open)))},
+        {"creating", facts(not_yet: @own, link: link(enrollment: manual(:used)))},
+        {"ready", ready_facts(not_yet: @own)},
+        {"problem", ready_facts(not_yet: @own, review: review([block()]))},
+        {"undone", ready_facts(not_yet: @own, move: move("aborted"))}
+      ]
+
+      for {state, facts} <- screens do
+        summary = HomeSummary.summary(facts)
+        assert summary["state"] == state
+        assert ids(summary["detail"]["not_yet"]) == Enum.map(@own, &Atom.to_string/1), state
+      end
+
+      off = HomeSummary.summary(facts(not_yet: @own))
+      assert off["state"] == "off"
+      refute Map.has_key?(off["detail"], "not_yet")
+    end
+
+    test "each entry is the sentence Copy holds, the dev plugins naming the server held" do
+      ready = HomeSummary.summary(ready_facts(not_yet: [:whatsapp, :dev_plugins]))
+
+      assert ready["detail"]["not_yet"] == [
+               %{
+                 "id" => "whatsapp",
+                 "sentence" => "WhatsApp needs a public address to reach your server."
+               },
+               %{
+                 "id" => "dev_plugins",
+                 "sentence" =>
+                   "Dev plugins stay on this Mac: fermix-general-a3f9 runs none of them."
+               }
+             ]
+
+      connect =
+        HomeSummary.summary(
+          facts(not_yet: [:dev_plugins], host_os: :linux, link: link(enrollment: manual(:open)))
+        )
+
+      assert connect["detail"]["not_yet"] == [
+               %{
+                 "id" => "dev_plugins",
+                 "sentence" => "Dev plugins stay on this computer: your server runs none of them."
+               }
+             ]
+    end
+
+    test "the server's own screen lists the home's and its own, never a computer's" do
+      summary = HomeSummary.summary(server(not_yet: @own))
+
+      assert summary["state"] == "primary"
+      assert ids(summary["detail"]["not_yet"]) == ~w(google_meet coding_signin whatsapp slack)
+      assert summary["notice"] == nil
+    end
+
+    test "a linked computer lists its server's as the server says them, then its own" do
+      said = [
+        %{"id" => "google_meet", "sentence" => "The server's own words for Google Meet."},
+        %{"id" => "slack", "sentence" => "The server's own words for Slack."}
+      ]
+
+      home = Map.put(server_home([]), "summary", %{"detail" => %{"not_yet" => said}})
+      summary = HomeSummary.summary(desktop(primary_home: home, not_yet: @own))
+
+      assert summary["state"] == "on"
+      assert Enum.take(summary["detail"]["not_yet"], 2) == said
+
+      assert ids(summary["detail"]["not_yet"]) ==
+               ~w(google_meet slack stackchan dev_plugins computer_history_linux)
+
+      assert %{
+               "sentence" =>
+                 "Dev plugins stay on this Mac: fermix-general-a3f9 runs none of them."
+             } =
+               Enum.find(summary["detail"]["not_yet"], &(&1["id"] == "dev_plugins"))
+    end
+
+    test "a linked computer leaves out WhatsApp where its Funnel mounts already say it" do
+      said = [%{"id" => "whatsapp", "sentence" => Copy.not_yet(:whatsapp, %{})}]
+
+      saying = fn served ->
+        Map.put(server_home(webhooks: served), "summary", %{"detail" => %{"not_yet" => said}})
+      end
+
+      mounted = HomeSummary.summary(desktop(primary_home: saying.([whatsapp(4030)])))
+      assert mounted["detail"]["webhooks"]["sentence"] =~ Copy.not_yet(:whatsapp, %{})
+      refute Map.has_key?(mounted["detail"], "not_yet")
+
+      unmounted = HomeSummary.summary(desktop(primary_home: saying.([cue("gh-hooks", 4032)])))
+      assert unmounted["detail"]["not_yet"] == said
+    end
+
+    test "nothing to list is no field, and a problem or a waiting server lists nothing" do
+      refute Map.has_key?(HomeSummary.summary(ready_facts([]))["detail"], "not_yet")
+      refute Map.has_key?(HomeSummary.summary(desktop([]))["detail"], "not_yet")
+
+      silent = desktop(not_yet: @own, link_primary: primary(:unreachable, 11 * @minute))
+      assert %{"state" => "problem", "detail" => detail} = HomeSummary.summary(silent)
+      refute Map.has_key?(detail, "not_yet")
+
+      waiting = Map.put(candidate_role("enrolled"), :not_yet, @own)
+      assert HomeSummary.summary(waiting)["detail"] == %{}
+    end
+
+    test "the list moves the screen's key" do
+      refute HomeSummary.summary(ready_facts([]))["key"] ==
+               HomeSummary.summary(ready_facts(not_yet: [:google_meet]))["key"]
+    end
+  end
+
   # -- facts --------------------------------------------------------------------
 
   defp facts(overrides) do

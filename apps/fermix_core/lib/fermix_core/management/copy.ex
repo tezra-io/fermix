@@ -66,11 +66,14 @@ defmodule FermixCore.Management.Copy do
   `own_server_tailscale`'s sentence and `tailscale_label/0`); the systems,
   architectures and kernel the server's first boot takes, which the code's
   sentence names and the copy rules are given as data
-  (`own_server_names/0`); and the words around the Tailscale Funnel mounts
-  a server needs (`webhooks*`, `mount_label/1`).
+  (`own_server_names/0`); the words around the Tailscale Funnel mounts
+  a server needs (`webhooks*`, `mount_label/1`); and each entry of what
+  Always On does not do yet (M97, `not_yet/2`, every id in
+  `not_yet_ids/0`).
 
   A screen's own words are short (the pane's rule R1): every summary key a
-  screen draws as its sentence, its note, its progress or its webhooks says
+  screen draws as its sentence, its note, its progress or its webhooks, and
+  every entry of what Always On does not do yet, says
   at most 20 words (`word_bound/0`), except the keys `unbounded_keys/0`
   names: a confirm, which says each warning in its own words; a notice, which
   is a system notification; the code's sentence, which names a date; the
@@ -114,6 +117,11 @@ defmodule FermixCore.Management.Copy do
   @return_costs [
     telegram: "Messages sent to Telegram while it moves wait until it is done."
   ]
+  # What Always On does not do yet (M97), in the order the list names them:
+  # what the home's settings and the server's own turn on, then what one
+  # computer's do (`not_yet/2`).
+  @not_yet ~w(google_meet coding_signin whatsapp slack stackchan dev_plugins
+              computer_history_linux)a
   @summary_keys ~w(off connect connecting ready ready_waits moving waiting on on_backup
                    on_no_backup undone undone_refused undone_unmarked move_marker_unread
                    retired retired_back candidate_waiting
@@ -754,14 +762,8 @@ defmodule FermixCore.Management.Copy do
             ["Your server stays until you delete it."]
         )
 
-  def summary_sentence(:webhooks, %{carried: [_ | _] = carried}) do
-    names = for {kind, name} <- @reached, kind in carried, do: name
-    true = length(names) == length(Enum.uniq(carried))
-    verb = if carried == [:whatsapp], do: "needs", else: "need"
-
-    "#{names |> join_names() |> capitalised()} #{verb} a public address to reach your " <>
-      "server. Run each command once, on the server."
-  end
+  def summary_sentence(:webhooks, %{carried: [_ | _] = carried}),
+    do: reach_sentence(carried) <> " Run each command once, on the server."
 
   def summary_sentence(:webhooks_whatsapp, _values),
     do: "Then set the address it prints as Meta's Callback URL, with your verify token."
@@ -813,6 +815,66 @@ defmodule FermixCore.Management.Copy do
     verb = if features in @singular_features, do: "runs", else: "run"
 
     "#{names |> join_names() |> capitalised()} #{verb} on #{name} again after the move"
+  end
+
+  @doc """
+  Every id of what Always On does not do yet (M97), in the order the list
+  names them: what the home's settings and the server's own turn on, then
+  what one computer's do.
+  """
+  @spec not_yet_ids() :: [atom(), ...]
+  def not_yet_ids, do: @not_yet
+
+  @doc """
+  One entry of what Always On does not do yet (M97), by its id
+  (`not_yet_ids/0`): one short sentence a screen lists, with the values it
+  names: `machine` ("Mac" or "computer") and `to`, the server's name, nil
+  where none is known. An entry another sentence already says is said in
+  that sentence's words: WhatsApp's starts the webhooks' sentence, and the
+  dev plugins' is the move review's own item (`dev_plugins_stay/2`).
+  """
+  @spec not_yet(atom(), map()) :: String.t()
+  def not_yet(:google_meet, values) when is_map(values),
+    do:
+      "Google Meet needs the notetaker signed in on a computer with a screen, so your " <>
+        "server joins only Zoom meetings."
+
+  def not_yet(:coding_signin, values) when is_map(values),
+    do: "Installing and signing in Codex or Claude Code on your server takes a terminal there."
+
+  def not_yet(:whatsapp, values) when is_map(values), do: reach_sentence([:whatsapp])
+
+  def not_yet(:slack, values) when is_map(values),
+    do: "Slack works on your server only in Socket Mode."
+
+  def not_yet(:stackchan, values) when is_map(values),
+    do: "StackChan works only while Fermix runs on the Mac it is plugged into."
+
+  def not_yet(:dev_plugins, %{machine: machine} = values),
+    do: dev_plugins_stay(machine, Map.get(values, :to) || "your server")
+
+  def not_yet(:computer_history_linux, values) when is_map(values),
+    do: "Computer history records only on a Mac for now."
+
+  @doc """
+  What a dev plugin folder this computer's settings name means for a move:
+  its plugins stay on this `machine` and the server `name` runs none of
+  them. The move review's item says it, and so does what Always On does not
+  do yet.
+  """
+  @spec dev_plugins_stay(String.t(), String.t()) :: String.t()
+  def dev_plugins_stay(machine, name) when is_binary(machine) and is_binary(name),
+    do: "Dev plugins stay on this #{machine}: #{name} runs none of them."
+
+  # What reaches the server through Funnel among `carried`, as one sentence
+  # that says it needs a public address: the webhooks' sentence starts with
+  # it, and WhatsApp's entry of what Always On does not do yet is it.
+  defp reach_sentence(carried) do
+    names = for {kind, name} <- @reached, kind in carried, do: name
+    true = length(names) == length(Enum.uniq(carried))
+    verb = if carried == [:whatsapp], do: "needs", else: "need"
+
+    "#{names |> join_names() |> capitalised()} #{verb} a public address to reach your server."
   end
 
   # M97 §9.5: meetings run on this computer again, and Google Meet with the

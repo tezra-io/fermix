@@ -925,6 +925,68 @@ defmodule FermixCore.Home.MoveReadinessTest do
     end
   end
 
+  # M97: what Always On does not do yet is read from the facts the review's
+  # own items read, so the list and the review never disagree about a home.
+  describe "what Always On does not do yet" do
+    test "is what the review's own items warn of, in the list's order", ctx do
+      settings = MoveReadiness.settings(ctx.home, unreadable_files: nil)
+      items = MoveReadiness.summary_items(settings, true, "north-box", opts(ctx))
+
+      for id <- ~w(stays_here whatsapp slack coding_agents),
+          do: assert(%{status: :warn} = item_in(items, id), id)
+
+      assert MoveReadiness.not_yet(settings, true) == [
+               :google_meet,
+               :coding_signin,
+               :whatsapp,
+               :slack
+             ]
+    end
+
+    test "names StackChan only on a Mac, and the dev plugins this computer's settings name" do
+      settings =
+        {:ok,
+         """
+         [fermix_channels.accessories]
+         enabled = true
+
+         [fermix_core.plugins]
+         dev_local = "/invented/dev-plugins"
+         """}
+
+      assert MoveReadiness.not_yet(settings, true) == [:stackchan, :dev_plugins]
+      assert MoveReadiness.not_yet(settings, false) == [:dev_plugins]
+    end
+
+    test "names nothing that is off, Slack in Socket Mode or settings it cannot read" do
+      settings =
+        {:ok,
+         """
+         [fermix_core.meetings]
+         enabled = false
+
+         [fermix_channels.whatsapp]
+         enabled = false
+
+         [fermix_channels.slack]
+         enabled = true
+         mode = "socket"
+
+         [fermix_core.harness]
+         approved = false
+
+         [fermix_core.plugins]
+         dev_local = ""
+         """}
+
+      assert MoveReadiness.not_yet(settings, true) == []
+      assert MoveReadiness.not_yet({:ok, ""}, true) == []
+
+      assert MoveReadiness.not_yet({:error, "The settings file could not be read."}, true) ==
+               []
+    end
+  end
+
   # A release table that pins 0.17.0 and 0.18.0, with `rows` after.
   defp release_table(rows) do
     digests =

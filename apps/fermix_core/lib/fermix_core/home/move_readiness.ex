@@ -105,6 +105,9 @@ defmodule FermixCore.Home.MoveReadiness do
   settings alone, needing neither the keychain nor a walk of the home, so
   `home.status`'s summary builds Move now's confirm from them before any
   review (`Management.HomeSummary`), in the words the review says them.
+  What Always On does not do yet (M97, `not_yet/2`) reads the same facts as
+  the `stays_here`, `whatsapp`, `slack`, `coding_agents` and `dev_plugins`
+  items, so the summary's list and the review never disagree.
 
   `opts`: `:free_bytes` (a 1-arity reader of free space), `:supervised` (for
   `CommandRunner` and the keychain read from a tree-less verb), `:version`
@@ -288,6 +291,35 @@ defmodule FermixCore.Home.MoveReadiness do
   end
 
   def costs({:error, _sentence}, opts) when is_list(opts), do: []
+
+  @doc """
+  What of what Always On does not do yet (M97, `Management.Copy.not_yet_ids/0`)
+  this home's settings (`settings/2`'s answer) turn on, by the facts the
+  review's own items read, in the list's order: `:google_meet` while
+  meetings are on (`stays_here`), `:coding_signin` while coding agents are
+  approved here (`coding_agents`), `:whatsapp` while WhatsApp is on
+  (`whatsapp`), `:slack` while Slack is on without Socket Mode (`slack`),
+  `:stackchan` while StackChan is on a Mac (`stays_here`, when `macos?`) and
+  `:dev_plugins` while a dev plugin folder is named (`dev_plugins`). None
+  when the settings could not be read, which `settings/2` logged.
+  """
+  @spec not_yet({:ok, String.t()} | {:error, String.t()}, boolean()) :: [atom()]
+  def not_yet({:ok, text}, macos?) when is_binary(text) and is_boolean(macos?) do
+    features = features(text, macos?)
+
+    for {id, true} <- [
+          google_meet: :meetings in features,
+          coding_signin: coding_approved?(text),
+          whatsapp: whatsapp?(text),
+          slack: slack_stops?(text),
+          stackchan: :accessories in features,
+          dev_plugins: dev_folder?(text)
+        ],
+        do: id
+  end
+
+  def not_yet({:error, sentence}, macos?) when is_binary(sentence) and is_boolean(macos?),
+    do: []
 
   @doc """
   The `meeting_in_progress` item, while the notetaker is in a meeting
@@ -638,13 +670,7 @@ defmodule FermixCore.Home.MoveReadiness do
     machine = if macos?, do: "Mac", else: "computer"
 
     if dev_folder?(text),
-      do: [
-        item(
-          "dev_plugins",
-          :warn,
-          "Dev plugins stay on this #{machine}: #{name} runs none of them."
-        )
-      ],
+      do: [item("dev_plugins", :warn, Copy.dev_plugins_stay(machine, name))],
       else: []
   end
 
@@ -803,7 +829,7 @@ defmodule FermixCore.Home.MoveReadiness do
   # shows after the move, gives it one, and Meta posts to the old address
   # until it is pointed at that one.
   defp whatsapp({:ok, text}, name) do
-    if on?(text, "fermix_channels.whatsapp", "enabled"),
+    if whatsapp?(text),
       do:
         item(
           "whatsapp",
@@ -819,19 +845,19 @@ defmodule FermixCore.Home.MoveReadiness do
   # Slack's Events API needs the same inbound address; Socket Mode dials out.
   defp slack({:ok, text}, name) do
     cond do
-      not on?(text, "fermix_channels.slack", "enabled") ->
-        item("slack", :ok, "Slack is not turned on.")
-
-      slack_mode(text) == {:ok, "socket"} ->
-        item("slack", :ok, "Slack uses Socket Mode and keeps working on #{name}.")
-
-      true ->
+      slack_stops?(text) ->
         item(
           "slack",
           :warn,
           "Slack stops after the move unless it uses Socket Mode, which you turn on in " <>
             "your Slack app's settings and then in Fermix's Slack settings."
         )
+
+      slack?(text) ->
+        item("slack", :ok, "Slack uses Socket Mode and keeps working on #{name}.")
+
+      true ->
+        item("slack", :ok, "Slack is not turned on.")
     end
   end
 
@@ -842,7 +868,7 @@ defmodule FermixCore.Home.MoveReadiness do
   defp coding_agents({:ok, text}, macos?, name) do
     machine = if macos?, do: "Mac", else: "computer"
 
-    if on?(text, "fermix_core.harness", "approved"),
+    if coding_approved?(text),
       do:
         item(
           "coding_agents",
@@ -879,6 +905,12 @@ defmodule FermixCore.Home.MoveReadiness do
   end
 
   defp on?(text, section, key), do: ConfigText.value(text, section, key) == {:ok, "true"}
+
+  # The facts a review's item and what Always On does not do yet both read.
+  defp whatsapp?(text), do: on?(text, "fermix_channels.whatsapp", "enabled")
+  defp slack?(text), do: on?(text, "fermix_channels.slack", "enabled")
+  defp slack_stops?(text), do: slack?(text) and slack_mode(text) != {:ok, "socket"}
+  defp coding_approved?(text), do: on?(text, "fermix_core.harness", "approved")
 
   # Telegram runs once it has a bot token, unless turned off: it ships on.
   defp telegram?(text) do

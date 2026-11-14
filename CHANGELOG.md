@@ -1143,6 +1143,12 @@ will be part of a future release; nothing in this group is in a release yet.
   Apple Maps on studio Mac: [3]."), and the
   Place search setting shows **Apple Maps on your Mac** as the choice in
   force.
+- **Always On lists what it does not do yet.** Before Move now, on your
+  server and on each computer linked to it, the Always On screen lists, in
+  one short sentence each, what does not work or takes a terminal on the
+  server and applies to your home: Google Meet meetings, installing and
+  signing in Codex or Claude Code, WhatsApp's public address, Slack without
+  Socket Mode, StackChan, dev plugins, and computer history off a Mac.
 
 ## [0.18.0] - 2026-11-03
 

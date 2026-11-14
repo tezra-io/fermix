@@ -25,6 +25,16 @@ defmodule FermixTestSupport.HomeSummaryGoldens do
   @now ~U[2031-05-04 12:00:00Z]
   @cand "cand-5e2a9c1f7b3d4086"
   @server_name "fermix-general-a3f9"
+  # The settings of the Mac that sets Always On up (meetings on), of the
+  # server the home moved to (meetings and WhatsApp on) and of the linked
+  # Mac's own machine file (StackChan on): what Always On does not do yet is
+  # read from them (`MoveReadiness.not_yet/2`), as `HomeSummary.gather/5`
+  # reads it, this Mac recording its history.
+  @ready_settings {:ok, "[fermix_core.meetings]\nenabled = true\n"}
+  @server_settings {:ok,
+                    "[fermix_core.meetings]\nenabled = true\n\n" <>
+                      "[fermix_channels.whatsapp]\nenabled = true\n"}
+  @desktop_settings {:ok, "[fermix_channels.accessories]\nenabled = true\n"}
 
   @doc "Each golden's name and the `home.status` result it holds."
   @spec rows() :: [{String.t(), map()}]
@@ -97,8 +107,9 @@ defmodule FermixTestSupport.HomeSummaryGoldens do
   """
   @spec ready_review() :: {map(), [MoveReadiness.item()]}
   def ready_review do
-    settings = {:ok, "[fermix_core.meetings]\nenabled = true\n"}
-    items = MoveReadiness.summary_items(settings, true, @server_name, restarts_itself: true)
+    items =
+      MoveReadiness.summary_items(@ready_settings, true, @server_name, restarts_itself: true)
+
     stays_here = Enum.find(items, &(&1.id == "stays_here"))
 
     review = %{
@@ -222,6 +233,7 @@ defmodule FermixTestSupport.HomeSummaryGoldens do
       candidates: [candidate_view()],
       review: review,
       move_items: items,
+      not_yet: MoveReadiness.not_yet(@ready_settings, true),
       enrollment: %{
         "state" => "used",
         "expires_at" => "2031-05-04T11:15:00Z",
@@ -261,7 +273,8 @@ defmodule FermixTestSupport.HomeSummaryGoldens do
         link:
           link(
             desktops: [Map.merge(desktop, %{connected: true, since: ~U[2031-05-04 09:00:00Z]})]
-          )
+          ),
+        not_yet: MoveReadiness.not_yet(@server_settings, false)
       }
     )
   end
@@ -283,7 +296,8 @@ defmodule FermixTestSupport.HomeSummaryGoldens do
       primary_missing:
         if(primary_home, do: nil, else: "The server #{@server_name} is unreachable."),
       copies_bytes: 3 * 48_211,
-      copies: copies()
+      copies: copies(),
+      not_yet: MoveReadiness.not_yet(@desktop_settings, true)
     })
   end
 
@@ -342,7 +356,8 @@ defmodule FermixTestSupport.HomeSummaryGoldens do
         moved_back: false,
         primary_behind: false,
         # The app engine, which starts again by itself after a move back.
-        restarts_itself: true
+        restarts_itself: true,
+        not_yet: Map.get(extra, :not_yet, [])
       })
 
     Home.picture(Map.put(facts, :summary, summary))

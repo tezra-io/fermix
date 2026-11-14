@@ -38,6 +38,7 @@ defmodule FermixCore.Management.ProtocolContractTest do
   alias FermixCore.Jobs.Registry, as: JobsRegistry
   alias FermixCore.Management.AlwaysOn
   alias FermixCore.Management.Capabilities
+  alias FermixCore.Management.Copy
   alias FermixCore.Management.Cues.MandateRow, as: CueMandateRow
   alias FermixCore.Management.Cues.SourceRow, as: CueSourceRow
   alias FermixCore.Management.Cues.WatcherRow, as: CueWatcherRow
@@ -727,6 +728,12 @@ defmodule FermixCore.Management.ProtocolContractTest do
     assert defs["homeSummary"]["properties"]["state"]["enum"] == HomeSummary.states()
     assert defs["homeSummaryDetail"]["properties"]["kind"]["enum"] == HomeSummary.problems()
     assert defs["homeSummaryAction"]["properties"]["id"]["enum"] == HomeSummary.actions()
+
+    # M97: what Always On does not do yet names every id Copy holds.
+    not_yet = defs["homeSummaryDetail"]["properties"]["not_yet"]
+
+    for id <- Copy.not_yet_ids(),
+        do: assert(not_yet["description"] =~ Atom.to_string(id), "not_yet #{id}")
 
     result = defs["home_status_result"]["properties"]
     assert Enum.all?(~w(summary disk version), &Map.has_key?(result, &1))
@@ -1967,6 +1974,9 @@ defmodule FermixCore.Management.ProtocolContractTest do
           save_recipient: fn _recipient -> {:ok, %{}} end,
           now: ~U[2026-10-27 09:30:00Z],
           host_os: :macos,
+          # This Mac records its history (`ComputerHistory.recorder?/0`),
+          # whatever host the suite runs on (M97).
+          recorder?: true,
           version: "1.2.3",
           # The app engine, which starts again by itself after a move.
           restarts_itself: true,
@@ -2047,6 +2057,7 @@ defmodule FermixCore.Management.ProtocolContractTest do
       profile: "general",
       now: ~U[2026-10-30 09:00:00Z],
       host_os: :macos,
+      recorder?: true,
       config: [],
       scheduler: nil,
       disk_usage: fn _home -> {:ok, %{used: 0.42, nearly_full: false}} end,
@@ -2182,6 +2193,7 @@ defmodule FermixCore.Management.ProtocolContractTest do
       profile: "general",
       now: @golden_now,
       host_os: :macos,
+      recorder?: true,
       version: "1.2.3",
       config: [],
       scheduler: nil,
@@ -2247,6 +2259,7 @@ defmodule FermixCore.Management.ProtocolContractTest do
       profile: "general",
       now: ~U[2026-10-30 09:00:00Z],
       host_os: :macos,
+      recorder?: true,
       config: [],
       scheduler: nil,
       version: "1.2.3",

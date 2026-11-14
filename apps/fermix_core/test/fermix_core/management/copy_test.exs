@@ -1498,6 +1498,38 @@ defmodule FermixCore.Management.CopyTest do
                "Restart garden-server"
     end
 
+    # M97: what Always On does not do yet, one short sentence each in the
+    # owner's words, for a Mac and a Linux computer, with the server named
+    # and not.
+    test "every entry of what Always On does not do yet is short and in the owner's words" do
+      assert Copy.not_yet_ids() ==
+               ~w(google_meet coding_signin whatsapp slack stackchan dev_plugins
+                  computer_history_linux)a
+
+      for id <- Copy.not_yet_ids(),
+          machine <- ["Mac", "computer"],
+          to <- [nil, "garden-server"] do
+        said = Copy.not_yet(id, %{machine: machine, to: to})
+        assert_owner_words(said, :prose, ["garden-server"], "not yet #{id}")
+        words = said |> String.split(~r/\s+/, trim: true) |> length()
+        assert words <= Copy.word_bound(), "not yet #{id}: #{words} words in #{inspect(said)}"
+      end
+    end
+
+    # Never two wordings of one fact: WhatsApp's entry is the sentence the
+    # webhooks' Funnel mounts start with, and the dev plugins' the review's
+    # own item.
+    test "an entry another sentence already says is said in that sentence's words" do
+      assert Copy.summary_sentence(:webhooks, %{carried: [:whatsapp]}) ==
+               Copy.not_yet(:whatsapp, %{}) <> " Run each command once, on the server."
+
+      assert Copy.not_yet(:dev_plugins, %{machine: "Mac", to: "north-box"}) ==
+               "Dev plugins stay on this Mac: north-box runs none of them."
+
+      assert Copy.not_yet(:dev_plugins, %{machine: "computer", to: nil}) ==
+               "Dev plugins stay on this computer: your server runs none of them."
+    end
+
     test "every key and every action answers its words" do
       assert length(Copy.summary_keys()) >= 38
       assert length(HomeSummary.actions()) == length(Enum.uniq(HomeSummary.actions()))
