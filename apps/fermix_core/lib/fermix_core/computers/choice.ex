@@ -30,6 +30,21 @@ defmodule FermixCore.Computers.Choice do
   the tool result the model reads. These refusals are the home's own, so they
   are not in `Computers.Outcome`'s wire set.
 
+  ## An exception: where a place search runs (M89 D13)
+
+  A place search on a home whose backend is a Mac of the home
+  (`PlaceSearch.Backend`'s `computer`) is no tool a computer runs: the model
+  names no computer for it and is never asked which. `places_computer/1`
+  chooses, and the rules above do not apply to it: of the computers
+  connected now whose latest offers list `places` on, the one seen most
+  recently (its latest `hello`), the first by name on a tie. Several such
+  computers is never `ambiguous`, and one that is away is never chosen and
+  never waited for: with none, the search is refused at once
+  (`PlaceSearch.Computer`). A computer whose latest offers no longer list
+  `places` on, a stored offer an engine since dropped included, is never
+  chosen. The computer a turn came from is no fact a turn carries, so it is
+  no rule here.
+
   The home's computers are the ones the turn can see
   (`Argument.computers/1`, by `Computers.visible?/1`), read only when a call
   names a computer or the host lacks the capability: a turn that cannot see
@@ -42,6 +57,7 @@ defmodule FermixCore.Computers.Choice do
   alias FermixCore.Capabilities.Capability
   alias FermixCore.Clock
   alias FermixCore.Computers.Argument
+  alias FermixCore.Computers.Capabilities.Places
   alias FermixCore.Computers.Computer
   alias FermixCore.Computers.Offers
   alias FermixCore.Tools.Telemetry, as: ToolTelemetry
@@ -68,6 +84,28 @@ defmodule FermixCore.Computers.Choice do
 
   def resolve(%Capability{}, args, context) when is_map(args) and is_map(context),
     do: {:ok, args, context}
+
+  @doc """
+  The computer a place search of the home runs on (the moduledoc's
+  exception), from the home's computers (`Computers.list/1`'s): `{:ok,
+  computer}`, or `:none` when no computer connected now offers places.
+  """
+  @spec places_computer([Computer.t()]) :: {:ok, Computer.t()} | :none
+  def places_computer(computers) when is_list(computers) do
+    offering =
+      computers
+      |> Enum.filter(&(&1.connected and Argument.offers?(&1, Places)))
+      |> Enum.sort_by(&String.downcase(&1.name))
+
+    # The first of the most recently seen: a tie keeps the first by name.
+    case Enum.max_by(offering, &seen_us/1, &>=/2, fn -> nil end) do
+      nil -> :none
+      computer -> {:ok, computer}
+    end
+  end
+
+  defp seen_us(%Computer{last_seen: %DateTime{} = at}), do: DateTime.to_unix(at, :microsecond)
+  defp seen_us(%Computer{last_seen: nil}), do: -1
 
   @doc """
   The refused call's tool result, after its one exec event: the executor

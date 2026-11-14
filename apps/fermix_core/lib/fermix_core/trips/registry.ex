@@ -213,7 +213,8 @@ defmodule FermixCore.Trips.Registry do
   over it to learn each stop's day (`Trips.Placing`), the lookups run
   (`Trips.Lookup`), and their records join the conversation
   (`ReplyBlocks.put_places/3`) before the store is asked. The answer is the
-  trip's line and what each place came to (`Trips.Render.answer/2`), and
+  trip's line, what each place came to and what placed them
+  (`Trips.Render.answer/3`), and
   `touched` names the trip with the live rows the call added or changed.
   """
   @spec edit(map(), map(), keyword()) :: {:ok, answer()} | {:error, term()}
@@ -246,11 +247,11 @@ defmodule FermixCore.Trips.Registry do
 
     if Placing.needed?(call) do
       case look_up(call, edit, context, opts) do
-        {:ok, placed, outcomes, looked} -> {commit(placed, edit, context, opts, outcomes), looked}
+        {:ok, placed, placings, looked} -> {commit(placed, edit, context, opts, placings), looked}
         {:error, reason, looked} -> {{:error, reason}, looked}
       end
     else
-      {commit(call, edit, context, opts, []), @no_lookups}
+      {commit(call, edit, context, opts, {[], %{}}), @no_lookups}
     end
   end
 
@@ -263,7 +264,7 @@ defmodule FermixCore.Trips.Registry do
          {:ok, found} <- resolve(requests, anchors, context, opts) do
       :ok = join_conversation(found.records, context, opts)
       {placed_call, outcomes} = Placing.placed_call(call, found.outcomes)
-      {:ok, placed_call, outcomes, looked(call, outcomes, found, context)}
+      {:ok, placed_call, {outcomes, found.placed_by}, looked(call, outcomes, found)}
     else
       {:error, reason} -> {:error, reason, @no_lookups}
     end
@@ -278,15 +279,19 @@ defmodule FermixCore.Trips.Registry do
          do: {:ok, %{trips: [trip], rows: rows}}
   end
 
+  # The call's place search is resolved once: its lookups search it, and its
+  # event names it.
   defp resolve(requests, anchors, context, opts) do
+    {backend, name} = call_backend(context)
+
     lookup_opts = [
-      backend: Lookup.backend(context),
+      backend: backend,
       conversation_key: Map.fetch!(context, :conversation_key),
       reply_blocks: reply_blocks(opts)
     ]
 
     case Lookup.resolve(requests, anchors, lookup_opts) do
-      {:ok, found} -> {:ok, found}
+      {:ok, found} -> {:ok, Map.put(found, :backend, name)}
       {:error, {:unknown_place_link, index}} -> {:error, {:op_failed, index, :unknown_place_link}}
       {:error, :too_many_lookups} -> {:error, :too_many_lookups}
     end
@@ -300,22 +305,24 @@ defmodule FermixCore.Trips.Registry do
 
   defp reply_blocks(opts), do: Keyword.get(opts, :reply_blocks, ReplyBlocks)
 
-  defp commit(call, edit, context, opts, outcomes) do
+  # `placings`: what each place came to, and what searched each one a lookup
+  # placed.
+  defp commit(call, edit, context, opts, {outcomes, placed_by}) do
     with {:ok, applied} <- store(context, opts, {:edit, call, edit}) do
       :ok = announce(context, applied, %{}, opts)
-      {:ok, edit_answer(applied, Placing.placements(call, applied, outcomes))}
+      {:ok, edit_answer(applied, Placing.placements(call, applied, outcomes), placed_by)}
     end
   end
 
-  defp edit_answer(applied, placements) do
+  defp edit_answer(applied, placements, placed_by) do
     trip = applied.trip
     touched = [%{trip_id: trip.id, title: trip.title, rows: applied.touched_rows}]
-    %{text: Render.answer(applied, placements), touched: touched}
+    %{text: Render.answer(applied, placements, placed_by), touched: touched}
   end
 
   # What the call's lookups came to, for its event: each place given counted
   # once, by its outcome, and what stopped them, with the place search's code.
-  defp looked(call, outcomes, found, context) do
+  defp looked(call, outcomes, found) do
     counts = Enum.frequencies_by(outcomes, fn {_index, outcome} -> bucket(outcome) end)
 
     %{
@@ -326,7 +333,7 @@ defmodule FermixCore.Trips.Registry do
       offered: Map.get(counts, :offered, 0),
       not_found: Map.get(counts, :not_found, 0),
       not_looked_up: Map.get(counts, :not_looked_up, 0),
-      backend: if(Placing.words?(call), do: backend_name(context)),
+      backend: if(Placing.words?(call), do: found.backend),
       rate_limited: Enum.any?(outcomes, &match?({_index, {:none, :rate_limited}}, &1))
     }
   end
@@ -337,11 +344,13 @@ defmodule FermixCore.Trips.Registry do
   defp bucket({:none, why}) when why in [:not_found, :no_location, :unstorable], do: :not_found
   defp bucket({:none, _why}), do: :not_looked_up
 
-  # The place search the call's words went to, by name; none for a test's.
-  defp backend_name(%{place_lookup: _search}), do: nil
+  # The place search the call's words go to, and its name; none for a test's.
+  defp call_backend(%{place_lookup: _search} = context), do: {Lookup.backend(context), nil}
 
-  defp backend_name(context),
-    do: context |> PlaceSearch.resolution() |> Map.fetch!(:name) |> Atom.to_string()
+  defp call_backend(context) do
+    resolution = PlaceSearch.resolution(context)
+    {Lookup.backend(context, resolution), Atom.to_string(resolution.name)}
+  end
 
   defp plural(1, noun), do: "1 #{noun}"
   defp plural(count, noun), do: "#{count} #{noun}s"

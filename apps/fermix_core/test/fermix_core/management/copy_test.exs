@@ -22,6 +22,7 @@ defmodule FermixCore.Management.CopyTest do
   alias FermixCore.Computers.Facts, as: ComputerFacts
   alias FermixCore.Computers.Offers
   alias FermixCore.Computers.Offers.ComputerUse, as: ComputerUseOffer
+  alias FermixCore.Computers.Offers.Places, as: PlacesOffer
   alias FermixCore.Computers.Switches
   alias FermixCore.Cues.Config, as: CuesConfig
   alias FermixCore.Cues.Filter.Decision
@@ -1164,7 +1165,9 @@ defmodule FermixCore.Management.CopyTest do
             ],
             do: say.(machine)
 
-      wanted = [Offers.no_system_sentence() | switched] ++ ComputerUseOffer.sentences()
+      wanted =
+        [Offers.no_system_sentence(), PlacesOffer.needs_mac_app_sentence() | switched] ++
+          ComputerUseOffer.sentences()
 
       assert Enum.reject(wanted, &MapSet.member?(reached, &1)) == []
       assert MapSet.size(reached) >= length(wanted) + 3

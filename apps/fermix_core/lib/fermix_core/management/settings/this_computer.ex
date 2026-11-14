@@ -3,10 +3,11 @@ defmodule FermixCore.Management.Settings.ThisComputer do
   The `computer` section (M97 §7.2, §7.4, D27): what Fermix on the server may
   use on this computer, `[fermix_core.computer]` in its `machine.toml`
   (`Computers.Switches`), under the `always_on` pane, titled "This
-  computer". Five rows on a Mac: the switch that turns everything off, then
+  computer". Six rows on a Mac: the switch that turns everything off, then
   one per switch this system can have (files and commands as one, the
-  browser, the screen, Messages, only where Messages runs). Nothing else is a
-  row: the review is this computer's state, computer history's consent is
+  browser, the screen, Messages and Apple Maps, each of the last two only on
+  a Mac), each showing its switch as stored, else its default
+  (`Switches.value/2`: Apple Maps on). Nothing else is a row: the review is this computer's state, computer history's consent is
   its recorder in the Computer history section, and what reaches the server
   from this computer has no switch.
 
@@ -41,7 +42,8 @@ defmodule FermixCore.Management.Settings.ThisComputer do
     files_and_shell: "Files and commands",
     browser: "The browser",
     computer_use: "Your screen",
-    imessage: "Messages"
+    imessage: "Messages",
+    places: "Apple Maps"
   ]
 
   if Keyword.keys(@labels) != Switches.switches() do
@@ -83,7 +85,7 @@ defmodule FermixCore.Management.Settings.ThisComputer do
     ] ++
       for {switch, label} <- @labels, here?(switch, os) do
         Row.new("computer_#{switch}", :toggle, label,
-          value: Keyword.get(switches, switch, false),
+          value: Switches.value(switches, switch),
           restart: false
         )
       end

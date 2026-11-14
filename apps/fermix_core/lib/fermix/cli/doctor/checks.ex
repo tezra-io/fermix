@@ -903,7 +903,7 @@ defmodule Fermix.CLI.Doctor.Checks do
   @spec place_search(keyword()) :: result()
   def place_search(opts \\ []) when is_list(opts) do
     opts
-    |> Keyword.take([:host, :apple_maps])
+    |> Keyword.take([:host, :apple_maps, :computers_opts])
     |> ProviderProbe.place_search_report()
     |> format_place_search()
   end
@@ -922,6 +922,23 @@ defmodule Fermix.CLI.Doctor.Checks do
     warn(
       "place search",
       "Apple Maps (#{place_why(report)}) is not ready — place_search hidden: #{reason}"
+    )
+  end
+
+  defp format_place_search(%{backend: :computer, ready: :ok} = report) do
+    ok(
+      "place search",
+      "Apple Maps on your Mac (#{place_why(report)}), with no key; place_search advertised. " <>
+        "While no such Mac is online there is no place search; set " <>
+        "[fermix_core.tools.place_search] backend = \"brave\" to search Brave instead."
+    )
+  end
+
+  defp format_place_search(%{backend: :computer, ready: {:error, reason}} = report) do
+    warn(
+      "place search",
+      "Apple Maps on your Mac (#{place_why(report)}) is not ready — place_search hidden: " <>
+        reason
     )
   end
 
@@ -957,6 +974,12 @@ defmodule Fermix.CLI.Doctor.Checks do
   defp place_why(%{backend_source: :configured}), do: "set in [fermix_core.tools.place_search]"
   defp place_why(%{backend_source: :build_default}), do: "the default in this build"
 
+  defp place_why(%{backend_source: :linked_computer}),
+    do: "a linked Mac offers it, and this build carries no Apple Maps helper"
+
+  defp place_why(%{backend_source: :computers_unknown}),
+    do: "this home's computers could not be read, so Brave is not assumed"
+
   @doc """
   One live search on the place backend in force (M31 §14.3), for `--full` only:
   metered on Brave, free on Apple Maps.
@@ -988,6 +1011,13 @@ defmodule Fermix.CLI.Doctor.Checks do
 
   defp format_place_probe(%{backend: :brave}) do
     ok("place probe", "skipped — no Brave key configured, so no metered call was made")
+  end
+
+  defp format_place_probe(%{backend: :computer}) do
+    ok(
+      "place probe",
+      "skipped — place search runs on your Mac, which a probe never asks"
+    )
   end
 
   defp format_place_probe(_report) do

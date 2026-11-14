@@ -6,9 +6,10 @@ defmodule FermixCore.Management.Settings.Tools do
   Search and images publish the key row of the backend in force rather than
   every backend's slot: asking an operator to store six keys to use one is how
   the browser door's search tab reads today. The search section also carries
-  place search's backend (M72 §14.1), offered as this build can run it (Brave
-  alone where the build carries no Apple Maps helper), and the Brave key row
-  stands whenever web or place search uses Brave.
+  place search's backend (M72 §14.1), offered as this build can run it (a Mac
+  of the home and Brave where the build carries no Apple Maps helper, M89
+  D13), its value the one in force, and the Brave key row stands whenever web
+  or place search uses Brave.
 
   `harness` is the home's coding settings, the preferred tool; whether coding
   agents may run is each machine's own (M98 D5, `Settings.CodingMachine`).
@@ -73,7 +74,11 @@ defmodule FermixCore.Management.Settings.Tools do
     "firecrawl" => :firecrawl_api_key
   }
 
-  @place_labels %{"apple_maps" => "Apple Maps", "brave" => "Brave"}
+  @place_labels %{
+    "apple_maps" => "Apple Maps",
+    "computer" => "Apple Maps on your Mac",
+    "brave" => "Brave"
+  }
 
   @image_labels %{
     "openai" => "OpenAI",
@@ -127,8 +132,10 @@ defmodule FermixCore.Management.Settings.Tools do
 
   @doc """
   The rows of one owned section. `host:` (`BootProfile.host/0`'s shape) names
-  the build for a test; the search section's place search options are the ones
-  this build can run. `promise:` holds `ComputerHistory.Promise.facts/2`'s
+  the build for a test, and `computers_opts:` the home's computers
+  (`PlaceSearch.Backend.resolve/2`'s `records:` and `version:`); the search
+  section's place search options are the ones this build can run, its value
+  the backend in force. `promise:` holds `ComputerHistory.Promise.facts/2`'s
   seams for the history switch's footer.
   """
   @spec rows(String.t(), Source.snapshot(), keyword()) :: [Row.t()]
@@ -191,7 +198,7 @@ defmodule FermixCore.Management.Settings.Tools do
     block = Source.tool(snapshot, :web_search)
     backend = Source.string(block, :backend, "duckduckgo")
     host = PlaceBackend.host(opts)
-    place = place_backend(snapshot, host)
+    place = place_backend(snapshot, [host: host] ++ Keyword.get(opts, :computers_opts, []))
     restart = Row.restart?(:tools)
 
     [
@@ -347,12 +354,12 @@ defmodule FermixCore.Management.Settings.Tools do
   defp search_hint(_name), do: nil
 
   # The value in force, from the one resolver: the configured backend, or the
-  # build's default when none is set.
-  defp place_backend(snapshot, host) do
+  # home's default when none is set.
+  defp place_backend(snapshot, resolve_opts) do
     snapshot
     |> Source.tool(:place_search)
     |> PlaceConfig.normalize()
-    |> PlaceBackend.resolve(host: host)
+    |> PlaceBackend.resolve(resolve_opts)
     |> Map.fetch!(:name)
     |> Atom.to_string()
   end
@@ -363,6 +370,7 @@ defmodule FermixCore.Management.Settings.Tools do
   end
 
   defp place_hint(:apple_maps), do: "Needs no key"
+  defp place_hint(:computer), do: "Needs a Mac with the Fermix app"
   defp place_hint(:brave), do: nil
 
   # The selected web backend's key, plus Brave's while place search runs on

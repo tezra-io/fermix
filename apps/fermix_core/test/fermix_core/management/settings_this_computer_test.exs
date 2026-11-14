@@ -42,18 +42,18 @@ defmodule FermixCore.Management.SettingsThisComputerTest do
     assert {:error, {:unknown_section, "computer"}} = Settings.get("computer", computer?: false)
   end
 
-  # M97 D27: five rows on a Mac, the master and one switch for each thing the
+  # M97 D27, M89 D13: six rows on a Mac, the master and one switch for each thing the
   # owner decides; Messages only where it runs. The review is this computer's
   # state, history is its recorder's own section, and what reaches the server
   # from the computer has no switch here.
-  test "its rows are the master and four switches on a Mac, Messages left out on Linux" do
+  test "its rows are the master and five switches on a Mac, Messages and Apple Maps left out on Linux" do
     Application.put_env(:fermix_core, :computer, Switches.only([:files_and_shell]))
     snapshot = ConfigStore.current_snapshot()
 
     for {macos?, keys} <- [
           {true,
            ~w(computer_enabled computer_files_and_shell computer_browser computer_computer_use
-              computer_imessage)},
+              computer_imessage computer_places)},
           {false,
            ~w(computer_enabled computer_files_and_shell computer_browser computer_computer_use)}
         ] do
@@ -70,7 +70,8 @@ defmodule FermixCore.Management.SettingsThisComputerTest do
                    "Files and commands",
                    "The browser",
                    "Your screen",
-                   "Messages"
+                   "Messages",
+                   "Apple Maps"
                  ],
                  length(keys)
                )
@@ -78,6 +79,44 @@ defmodule FermixCore.Management.SettingsThisComputerTest do
       assert %{"value" => true} = Enum.find(rows, &(&1["key"] == "computer_files_and_shell"))
       assert %{"value" => false} = Enum.find(rows, &(&1["key"] == "computer_browser"))
     end
+  end
+
+  # M89 D13: Apple Maps is switched off, and on again, for this computer
+  # here; with nothing stored for it, its row shows its default, on.
+  test "Apple Maps' row shows its default where nothing is stored, and turns off and on", ctx do
+    Application.put_env(:fermix_core, :computer, enabled: true, reviewed: true)
+
+    assert %{"value" => true} = places_row()
+
+    for value <- [false, true] do
+      assert {:ok, %{"applied" => ["computer_places"]}} =
+               Settings.apply("computer", %{"computer_places" => value},
+                 computer?: true,
+                 macos?: true
+               )
+
+      assert {:ok, saved} = Switches.read(ctx.home)
+      assert Keyword.fetch!(saved, :places) == value
+      assert Switches.on?(Switches.current(), :places) == value
+      assert %{"value" => ^value} = places_row()
+    end
+
+    assert {:error, {:invalid_params, "computer_places", _sentence}} =
+             Settings.apply("computer", %{"computer_places" => true},
+               computer?: true,
+               macos?: false
+             )
+  end
+
+  defp places_row do
+    {:ok, %{"rows" => rows}} =
+      Settings.get("computer",
+        computer?: true,
+        macos?: true,
+        snapshot: ConfigStore.current_snapshot()
+      )
+
+    Enum.find(rows, &(&1["key"] == "computer_places"))
   end
 
   test "a review in wait is said under the master, and any change here is the review" do

@@ -9,6 +9,9 @@ defmodule FermixCore.Computers.ChoiceTest do
   alias FermixCore.Computers.Capabilities.Files
   alias FermixCore.Computers.Choice
   alias FermixCore.Computers.Computer
+  alias FermixCore.Computers.Facts
+  alias FermixCore.Computers.Offers
+  alias FermixCore.Computers.Switches
   alias FermixCore.Management.Copy
   alias FermixCore.Tools.FileRead
   alias FermixCore.Tools.Telemetry, as: ToolTelemetry
@@ -298,6 +301,85 @@ defmodule FermixCore.Computers.ChoiceTest do
 
       assert_received {:executed, args, %{computer: %Computer{name: "studio Mac"}}}
       assert args == %{}
+    end
+  end
+
+  # M89 D13: a place search of the home runs on a Mac the home chooses, never
+  # on one the model names and never by asking which.
+  describe "where a place search runs" do
+    defp mac(id, name, connected, seen, offers) do
+      %Computer{
+        device_id: id,
+        name: name,
+        platform: :macos,
+        connected: connected,
+        last_seen: seen,
+        offers: offers
+      }
+    end
+
+    test "the connected Mac that offers places, the one seen last of several" do
+      places = [offer("files", :on), offer("places", :on)]
+      studio = mac("a1", "studio Mac", true, ~U[2031-06-02 09:00:00Z], places)
+      attic = mac("c3", "attic Mac", true, ~U[2031-06-02 11:00:00Z], places)
+      loft = mac("b2", "loft Mac", true, ~U[2031-06-02 12:00:00Z], [offer("files", :on)])
+
+      assert Choice.places_computer([studio]) == {:ok, studio}
+      # Several is never ambiguous: the one seen last, whatever the order.
+      assert Choice.places_computer([studio, attic, loft]) == {:ok, attic}
+      assert Choice.places_computer([loft, attic, studio]) == {:ok, attic}
+
+      # A tie keeps the first by name.
+      twin = %{attic | device_id: "d4", name: "Atelier Mac"}
+      assert Choice.places_computer([attic, twin]) == {:ok, twin}
+    end
+
+    # Each Mac's offers as it works them out: one whose owner switched Apple
+    # Maps off there reports it off, and is skipped for the other.
+    test "a Mac whose Apple Maps is switched off is skipped, and chosen once it is on again" do
+      facts =
+        Facts.read(
+          os: :macos,
+          arch: "arm64",
+          landlock: :not_asked,
+          helpers: %{computer_use: false, apple_maps: true},
+          permissions: %{},
+          sandbox_mode: :standard,
+          roots: [],
+          home: "/Users/avery",
+          recording: false,
+          screen: %{actions: [], input_methods: []}
+        )
+
+      reported = fn switches ->
+        Offers.compute(
+          Offers.modules(),
+          switches,
+          facts
+        )
+      end
+
+      off = Switches.only([:files_and_shell])
+      on = Switches.only([:files_and_shell, :places])
+      studio = mac("a1", "studio Mac", true, ~U[2031-06-02 12:00:00Z], reported.(off))
+      attic = mac("c3", "attic Mac", true, ~U[2031-06-02 09:00:00Z], reported.(on))
+
+      assert Choice.places_computer([studio, attic]) == {:ok, attic}
+      assert Choice.places_computer([studio]) == :none
+
+      studio = %{studio | offers: reported.(on)}
+      assert Choice.places_computer([studio, attic]) == {:ok, studio}
+    end
+
+    test "a Mac that is away, or whose latest offers no longer list places on, is never chosen" do
+      seen = ~U[2031-06-02 09:00:00Z]
+      away = mac("a1", "studio Mac", false, seen, [offer("places", :on)])
+      off = mac("b2", "loft Mac", true, seen, [offer("places", :off, "Switched off.")])
+      dropped = mac("c3", "attic Mac", true, seen, [offer("files", :on)])
+      unknown = mac("d4", "spare Mac", true, nil, [])
+
+      assert Choice.places_computer([away, off, dropped, unknown]) == :none
+      assert Choice.places_computer([]) == :none
     end
   end
 

@@ -225,9 +225,10 @@ defmodule FermixCore.Home.JoinTest do
     assert link.primary.addrs == ["100.101.102.103:4033"]
     assert ComputerKey.read(ctx.home) == {:ok, keypair}
 
-    # A computer that joins starts with every offer off, reviewed (M97 §7.3).
+    # A computer that joins starts with every offer off, reviewed (M97 §7.3),
+    # but Apple Maps, whose switch is on by default (M89 D13).
     assert {:ok, switches} = Switches.read(ctx.home)
-    assert Switches.switched_on(switches) == []
+    assert Switches.switched_on(switches) == [:places]
     assert Switches.reviewed?(switches) and Switches.enabled?(switches)
 
     assert {:ok, %{"enabled" => false}} =

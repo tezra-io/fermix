@@ -12,19 +12,26 @@ defmodule FermixCore.Computers.Switches do
       browser = false
       computer_use = false      # the screen
       imessage = false          # Messages
+      places = true             # Apple Maps, for the server's place search (M89 D13)
 
-  Every value is a boolean. An absent switch is off, an absent `enabled` and
-  `reviewed` are on, so a computer with no section offers nothing a switch
-  decides (every linked computer has one: a join, a move and the first start
-  after a move before M97 write it). An unknown key or a value that is not a boolean refuses the load by name
-  (`normalize/1`), as every section does; `to_keyword/1` is its inverse, the
-  shape the settings file holds (the config round-trip rule).
+  Every value is a boolean. An absent switch is its default (`default/1`):
+  off, but for `places`, whose default is on (`@places_on_by_default`, the one
+  line that decides it). An absent `enabled` and `reviewed` are on, so a
+  computer with no section offers nothing a switch decides but Apple Maps
+  (every linked computer has one: a join, a move and the first start after a
+  move before M97 write it; one written before `places` existed has no
+  `places` key, so Apple Maps is on there, and a write that names no
+  `places` writes its default). An unknown key or a value that is not a
+  boolean refuses the load by name (`normalize/1`), as every section does;
+  `to_keyword/1` is its inverse, the shape the settings file holds (the
+  config round-trip rule).
 
   **One rule.** A switch decides the offers it names (`decides/1`):
   `files_and_shell` both `files` and `shell`, since a command reads the same
   files under the same sandbox, and each other switch the offer of its name.
   An offer is on only while the master is on, the switches were reviewed and
-  its switch is on (`on?/2`). Computer history has no switch here: its
+  its switch is on (`on?/2`), as stored, else its default. Computer history
+  has no switch here: its
   consent is its recorder's own setting (`[fermix_core.computer_history]
   enabled`, the Computer history section's), and it is offered only while that
   is on, the master on and the switches reviewed (`history_on?/2`). Every
@@ -91,7 +98,8 @@ defmodule FermixCore.Computers.Switches do
     files_and_shell: [:files, :shell],
     browser: [:browser],
     computer_use: [:computer_use],
-    imessage: [:imessage]
+    imessage: [:imessage],
+    places: [:places]
   ]
   @switches Keyword.keys(@decides)
   @switch_of for {switch, offers} <- @decides, offer <- offers, into: %{}, do: {offer, switch}
@@ -106,15 +114,21 @@ defmodule FermixCore.Computers.Switches do
   @invoke_listener :fermix_computer_invoke
   @screen_listener :fermix_computer_screen
   @browser_listener :fermix_computer_browser
+  # Whether a computer offers its server Apple Maps (`places`, M89 D13) where
+  # nothing is stored for its switch: a section written before it existed, and
+  # a computer that joins or moves unless the owner unticks it (`Consent`).
+  @places_on_by_default true
+  # Each switch's value where nothing is stored; any other's is off.
+  @defaults %{places: @places_on_by_default}
 
   @typedoc "The normalized section: a keyword of booleans, each key at most once."
   @type t :: [{atom(), boolean()}]
 
   @typedoc "One switch of the section, besides the master and the review."
-  @type switch :: :files_and_shell | :browser | :computer_use | :imessage
+  @type switch :: :files_and_shell | :browser | :computer_use | :imessage | :places
 
   @typedoc "One thing a computer may offer its server (`Computers.Offer`)."
-  @type offer :: :files | :shell | :browser | :computer_use | :imessage | :history
+  @type offer :: :files | :shell | :browser | :computer_use | :imessage | :history | :places
 
   @doc "Every switch besides the master and the review, in the order the section lists them."
   @spec switches() :: [switch()]
@@ -179,13 +193,22 @@ defmodule FermixCore.Computers.Switches do
   def to_keyword(section) when is_map(section) or is_list(section) or is_nil(section),
     do: normalize(section)
 
+  @doc "A switch's value where nothing is stored (the moduledoc): off, but for `places`."
+  @spec default(switch()) :: boolean()
+  def default(switch) when switch in @switches, do: Map.get(@defaults, switch, false)
+
   @doc """
   Whether this computer offers `offer`, one a switch decides: the master on,
-  reviewed, and that switch on.
+  reviewed, and that switch on, as stored, else its default (`default/1`).
   """
   @spec on?(t(), offer()) :: boolean()
   def on?(switches, offer) when is_list(switches) and is_map_key(@switch_of, offer),
-    do: open?(switches) and Keyword.get(switches, Map.fetch!(@switch_of, offer), false)
+    do: open?(switches) and value(switches, Map.fetch!(@switch_of, offer))
+
+  @doc "`switch` as `switches` holds it, else its default, whatever the master and the review say."
+  @spec value(t(), switch()) :: boolean()
+  def value(switches, switch) when is_list(switches) and switch in @switches,
+    do: Keyword.get(switches, switch, default(switch))
 
   @doc """
   Whether this computer offers its history: its recorder switched on
@@ -219,10 +242,17 @@ defmodule FermixCore.Computers.Switches do
       for(switch <- @switches, do: {switch, switch in on})
   end
 
-  @doc "The switches `switches` has on, whatever the master and the review say."
+  @doc """
+  The switches `switches` has on, as stored or by default, whatever the
+  master and the review say.
+  """
   @spec switched_on(t()) :: [switch()]
   def switched_on(switches) when is_list(switches),
-    do: for(switch <- @switches, Keyword.get(switches, switch, false), do: switch)
+    do: for(switch <- @switches, value(switches, switch), do: switch)
+
+  @doc "The switches on where nothing is stored (`default/1`), in the section's order."
+  @spec on_by_default() :: [switch()]
+  def on_by_default, do: for(switch <- @switches, default(switch), do: switch)
 
   @doc "The switches of the running engine, from application environment."
   @spec current() :: t()
@@ -243,11 +273,12 @@ defmodule FermixCore.Computers.Switches do
 
   @doc """
   Sets the whole section in `home`'s `machine.toml` (the moduledoc's
-  *Writers*): every key written, every other line of the file kept.
+  *Writers*): every key written, a switch `switches` does not name at its
+  default (`default/1`), every other line of the file kept.
   """
   @spec write(Path.t(), t()) :: :ok | {:error, term()}
   def write(home, switches) when is_binary(home) and home != "" and is_list(switches) do
-    whole = normalize(Keyword.merge(only([]), normalize(switches)))
+    whole = normalize(Keyword.merge(only(on_by_default()), normalize(switches)))
     pairs = for {key, value} <- whole, do: {Atom.to_string(key), to_string(value)}
 
     with :ok <- ConfigStore.put_machine_table(home, @table, pairs) do

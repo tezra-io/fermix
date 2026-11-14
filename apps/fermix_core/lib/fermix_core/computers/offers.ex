@@ -8,7 +8,8 @@ defmodule FermixCore.Computers.Offers do
   them the same way (`switched/4`): an offer is off while the switches wait
   for the owner's review (a computer that moved before M97), while the
   master is off, or while its own consent is off: the switch that decides it
-  (`Switches.on?/2`), and for history its recorder's setting
+  (`Switches.on?/2`, as stored, else its default), and for history its
+  recorder's setting
   (`Switches.history_on?/2`, M97 D27).
 
   On the wire (`offers`, the mobile protocol's *Desktop sessions*) the list
@@ -63,7 +64,8 @@ defmodule FermixCore.Computers.Offers do
     FermixCore.Computers.Offers.Browser,
     FermixCore.Computers.Offers.ComputerUse,
     FermixCore.Computers.Offers.IMessage,
-    FermixCore.Computers.Offers.History
+    FermixCore.Computers.Offers.History,
+    FermixCore.Computers.Offers.Places
   ]
   @no_system_sentence "Fermix offers this only on a Mac or a Linux computer."
 

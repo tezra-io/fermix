@@ -2,7 +2,9 @@ defmodule FermixCore.Computers.Facts do
   @moduledoc """
   The facts of this machine an offer's state rests on (M97 §3.2): its
   system and processor, whether the kernel holds commands to the sandbox
-  (Landlock, on Linux), which helpers are installed, the permissions known
+  (Landlock, on Linux), which helpers are installed (the computer use
+  helper) or carried (`apple_maps`, the Apple Maps helper, a fact of the
+  build: `PlaceSearch.Backend.carries_helper?/1`), the permissions known
   to be missing, the sandbox mode its commands run in, the folders its
   files and commands reach (`roots`, the sandbox's effective roots,
   `Sandbox.Mode.effective_roots/1`: what the files and shell capabilities
@@ -28,6 +30,7 @@ defmodule FermixCore.Computers.Facts do
   `computer_use` offer carries to the server (M97 §6.4); `screen:` names it.
   """
 
+  alias FermixCore.BootProfile
   alias FermixCore.BuildInfo
   alias FermixCore.ComputerHistory
   alias FermixCore.ComputerUse.Reach
@@ -36,13 +39,17 @@ defmodule FermixCore.Computers.Facts do
   alias FermixCore.Sandbox.Landlock
   alias FermixCore.Sandbox.Mode
   alias FermixCore.Sandbox.PathPolicy
+  alias FermixCore.Tools.PlaceSearch.Backend, as: PlaceBackend
 
   @typedoc "The facts of one machine."
   @type t :: %{
           required(:os) => :macos | :linux | :other,
           required(:arch) => String.t(),
           required(:landlock) => :ok | :not_asked | {:error, String.t()},
-          required(:helpers) => %{optional(:computer_use) => boolean()},
+          required(:helpers) => %{
+            optional(:computer_use) => boolean(),
+            optional(:apple_maps) => boolean()
+          },
           required(:permissions) => %{optional(:screen) => boolean()},
           required(:sandbox_mode) => :strict | :standard | :open,
           required(:roots) => [String.t()],
@@ -94,5 +101,9 @@ defmodule FermixCore.Computers.Facts do
 
   defp landlock(_os), do: :not_asked
 
-  defp helpers, do: %{computer_use: SidecarInstaller.installed?()}
+  defp helpers,
+    do: %{
+      computer_use: SidecarInstaller.installed?(),
+      apple_maps: PlaceBackend.carries_helper?(BootProfile.host())
+    }
 end

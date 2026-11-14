@@ -56,7 +56,8 @@ defmodule FermixCore.Tools.PlaceSearch.Brave do
   `Trips.Lookup` passes): an answer that is `rate_limited` or
   `plan_excludes_place_search` sets it before its turn ends, and a search of
   the same call reads it before it asks for a turn and again once given one,
-  so the lookups queued behind that answer send nothing.
+  so the lookups queued behind that answer send nothing. Any other stop the
+  call holds leaves a search unsent with that stop's tag, never a raise.
 
   One of the two `PlaceSearch.Backend`s (M72 §14.1): it runs when
   `[fermix_core.tools.place_search] backend` is `brave`, or unset on a build
@@ -91,8 +92,6 @@ defmodule FermixCore.Tools.PlaceSearch.Brave do
   @send_within_ms 30_000
   @max_send_within_ms Pacer.max_within_ms()
   @max_attempts 2
-  # What stops the other searches of a call (`:stop`).
-  @stops [:rate_limited, :plan_excludes_place_search]
 
   @max_query_chars 400
   @max_radius_meters 50_000
@@ -354,7 +353,7 @@ defmodule FermixCore.Tools.PlaceSearch.Brave do
       held(request_options, pacer, terms, {turn, delay_ms})
     else
       {:error, refusal} -> unsent({:error, refused(refusal)})
-      why when why in @stops -> unsent({:error, halted(why)})
+      why when is_atom(why) -> unsent({:error, halted(why)})
     end
   end
 
@@ -365,7 +364,7 @@ defmodule FermixCore.Tools.PlaceSearch.Brave do
   defp held(request_options, pacer, terms, {turn, delay_ms}) do
     case terms.stopped.() do
       nil -> stopping(terms, sends(request_options, pacer, turn, {delay_ms, 1}))
-      why when why in @stops -> unsent({:error, halted(why)})
+      why when is_atom(why) -> unsent({:error, halted(why)})
     end
   after
     Pacer.done(pacer.server, turn)
@@ -429,6 +428,11 @@ defmodule FermixCore.Tools.PlaceSearch.Brave do
         "this one was not sent"
 
   defp halted(:plan_excludes_place_search), do: @plan_excludes
+
+  # A stop this backend never sets (another's, or the call's own): its tag
+  # leaves the search unsent, and nothing raises.
+  defp halted(why),
+    do: "#{why}: an earlier search of the same call stopped it, so this one was not sent"
 
   defp spent(spent_ms, answer) do
     "rate_limited: the Brave Search API key's quota is spent for #{span(spent_ms)}, until " <>

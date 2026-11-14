@@ -5,14 +5,16 @@ defmodule FermixCore.Computers.Consent do
   **The lines.** A move's review and the review of a computer that moved
   before M97 show the same block, one line for each switch this system can
   have (`Computers.Switches`: files and commands as one line, the browser,
-  the screen, Messages) and, on a Mac, one for computer history, whose
-  consent is its recorder's own setting (`decided/0`).
+  the screen, Messages and, on a Mac, Apple Maps) and, on a Mac, one for
+  computer history, whose consent is its recorder's own setting
+  (`decided/0`).
 
   **A move.** The computer the home moves from keeps what it had: files and
   commands, in this computer's own sandbox ("files and commands, in this
   Mac's sandbox (Standard)", M97 §19.8); the browser; and the screen,
   Messages and computer history when they were on here before the move
-  (their own settings). The move's review shows it as its own block
+  (their own settings), and Apple Maps by its switch's default
+  (`Switches.default/1`, on). The move's review shows it as its own block
   (`keep_on_block/2`): the sentence, one line each with whether it stays
   on, and the plain warning of §7.1 where files and commands stay on while
   the sandbox is open. The owner may untick any line before starting; the
@@ -29,7 +31,8 @@ defmodule FermixCore.Computers.Consent do
   only when both are named, one alone keeping it off, the reading the
   file's own upgrade makes (`known/1`).
 
-  **A computer that joins later** starts with every switch off and its
+  **A computer that joins later** starts with every switch off but those on
+  by default (`Switches.on_by_default/0`: Apple Maps, M89 D13) and its
   recorder off (M97 §3.1, `none/2`): a recorder switched on while the
   computer was its own home kept its history there, and from the join it
   would go to the server, so it is switched on again at the computer, where
@@ -171,13 +174,13 @@ defmodule FermixCore.Computers.Consent do
     do: write_keep(home, keep, opts)
 
   @doc """
-  What a computer that joins a home starts with (the moduledoc): nothing on,
-  its recorder off, its switches off and reviewed, written as a move's
-  decision is (`accept/3`).
+  What a computer that joins a home starts with (the moduledoc): its
+  recorder off, its switches off but those on by default, and reviewed,
+  written as a move's decision is (`accept/3`).
   """
   @spec none(Path.t(), keyword()) :: :ok | {:error, term()}
   def none(home, opts \\ []) when is_binary(home) and is_list(opts),
-    do: write_keep(home, [], opts)
+    do: write_keep(home, Switches.on_by_default(), opts)
 
   @doc """
   At the first start of a computer that moved before M97 (a link, and no
@@ -286,9 +289,13 @@ defmodule FermixCore.Computers.Consent do
         do: raise(ArgumentError, "#{inspect(line)} is no line")
 
     with :ok <- recorder(home, :history in keep, opts) do
-      Switches.write(home, Switches.only(keep -- [:history]))
+      Switches.write(home, Switches.only((keep -- [:history]) ++ unshown_defaults(opts)))
     end
   end
+
+  # A switch this system shows no line for (Apple Maps off a Mac) is written
+  # at its default, never turned off by a block that could not show it.
+  defp unshown_defaults(opts), do: Switches.on_by_default() -- lines(os(opts))
 
   defp recorder(home, on?, opts) do
     case ConfigStore.machine_table(home, @history_table) do
@@ -355,8 +362,10 @@ defmodule FermixCore.Computers.Consent do
   defp warning(false, _machine), do: nil
 
   # Files and commands and the browser are what every computer had; the
-  # screen, Messages and history stay on where their own settings had them on.
+  # screen, Messages and history stay on where their own settings had them on,
+  # and Apple Maps by its switch's default.
   defp kept?(decision, _snapshot) when decision in [:files_and_shell, :browser], do: true
+  defp kept?(:places, _snapshot), do: Switches.default(:places)
   defp kept?(:computer_use, snapshot), do: enabled?(core(snapshot, :computer_use))
   defp kept?(:history, snapshot), do: enabled?(core(snapshot, :computer_history))
   defp kept?(:imessage, snapshot), do: enabled?(channel(snapshot, :imessage))

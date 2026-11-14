@@ -139,6 +139,7 @@ log says why).
 | Your screen (`computer_use`) | seeing and controlling its screen | Apple silicon Mac or Linux x86_64, with the Computer Use helper installed and not refused the permission to see and control the screen |
 | Messages (`imessage`) | the iMessage channel, through that Mac's Messages | Mac only |
 | Your computer history (`history`) | recording activity there for computer history | Mac only for now |
+| Apple Maps (`places`) | looking places up in Apple Maps for the server's place search (the `web` reference) | Mac with the Fermix app, whose engine carries the Apple Maps helper |
 
 What reaches the server from a computer (a call, an attached file, a robot,
 a notification) is no offer and has no switch: each follows its own
@@ -167,7 +168,8 @@ not on ("Mac" reads "computer" off a Mac):
   ("Waiting for you to review what Fermix on your server may use on this
   Mac.", below);
 - **unavailable**, and what is missing: "Messages runs only on a Mac.",
-  "Fermix records computer history only on a Mac for now.", "The Fermix
+  "Fermix records computer history only on a Mac for now.", "Looking places
+  up in Apple Maps needs the Fermix app on a Mac.", "The Fermix
   Computer Use helper is not installed on this Mac.", "This Mac has not
   allowed Fermix Computer Use to see and control the screen.", "Fermix cannot
   see or control the screen on this kind of processor.", "Commands need the
@@ -182,13 +184,15 @@ listed as it came.
   choice: the `[fermix_core.computer]` section of its `machine.toml` (the
   `config` reference): `enabled`, the master switch; `reviewed`; and
   `files_and_shell` (files and commands together: a command reads the same
-  files in the same sandbox), `browser`, `computer_use` and `imessage`. An
-  offer is on only while the master is on, its switch is on and the
-  switches are reviewed. Computer history has no switch here: its history
+  files in the same sandbox), `browser`, `computer_use`, `imessage` and
+  `places` (Apple Maps, for the server's place search). An offer is on only
+  while the master is on, its switch is on and the switches are reviewed.
+  Computer history has no switch here: its history
   offer is on while its recorder is on (the Computer history section, the
   `computer_history` reference) with the master on, and only then does the
-  server take its sittings. An absent switch is off; an absent `enabled` or
-  `reviewed` is on. Each value is `true` or `false`; anything else keeps
+  server take its sittings. An absent switch is off, but an absent `places`
+  is on; an absent `enabled` or `reviewed` is on. A computer that joins or
+  moves starts with Apple Maps on unless the owner unticks it. Each value is `true` or `false`; anything else keeps
   Fermix from starting, naming the key. A section an earlier Fermix wrote
   (a switch each for `files`, `shell` and `history`, and four for what
   reaches the server) is rewritten once at start: files and commands stay on
@@ -199,7 +203,7 @@ listed as it came.
   pane, on that computer: **Fermix on your server may use this computer**
   (the master: "Off stops everything Fermix on your server does here, from
   its next request."), **Files and commands**, **The browser**, **Your
-  screen**, and on a Mac **Messages**. While a review waits, the master's
+  screen**, and on a Mac **Messages** and **Apple Maps**. While a review waits, the master's
   footer says so, and changing any switch is the review. It shows only on a
   computer linked to its server where Always On is offered: a computer that
   never moved has none, and the server has none. On a Linux computer without

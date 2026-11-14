@@ -59,7 +59,8 @@ defmodule FermixChannels.Desktop.Invoke do
     "browser" => FermixCore.Computers.Capabilities.Browser,
     "computer_use" => FermixCore.Computers.Capabilities.Screen,
     "history" => FermixCore.ComputerHistory.MachineService,
-    "notifications" => FermixCore.Computers.Capabilities.Notifications
+    "notifications" => FermixCore.Computers.Capabilities.Notifications,
+    "places" => FermixCore.Computers.Capabilities.Places
   }
   @required [:home, :switches, :sandbox, :capabilities, :clock, :relay]
 

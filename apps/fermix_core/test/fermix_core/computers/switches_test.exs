@@ -60,8 +60,14 @@ defmodule FermixCore.Computers.SwitchesTest do
     # recorder's own setting) and none for what reaches the server from the
     # computer. A key an earlier engine wrote is read once, by the boot's
     # upgrade, and nowhere else.
-    test "the switches are the master, the review and four, and nothing else loads" do
-      assert Switches.switches() == [:files_and_shell, :browser, :computer_use, :imessage]
+    test "the switches are the master, the review and five, and nothing else loads" do
+      assert Switches.switches() == [
+               :files_and_shell,
+               :browser,
+               :computer_use,
+               :imessage,
+               :places
+             ]
 
       for gone <- ~w(files shell history voice attachments accessory notifications camera) do
         assert_raise ArgumentError, ~r/unknown key\(s\): #{gone}/, fn ->
@@ -101,6 +107,41 @@ defmodule FermixCore.Computers.SwitchesTest do
       refute Switches.history_on?(Switches.only([:files_and_shell], enabled: false), true)
       refute Switches.history_on?(Switches.only([:files_and_shell], reviewed: false), true)
       assert_raise FunctionClauseError, fn -> Switches.on?(Switches.only([]), :history) end
+    end
+
+    # M89 D13: Apple Maps (`places`) has a switch of its own, like the
+    # browser's, decided at each computer. Where nothing is stored it is on,
+    # the one default line; the master off or a review in wait keeps it off.
+    test "Apple Maps has its own switch, on where nothing is stored, under the master and the review" do
+      assert Switches.decides(:places) == [:places]
+      assert Switches.default(:places)
+      refute Switches.default(:browser)
+
+      # Nothing stored: a section with no `places` key, and no section at all.
+      assert Switches.on?([], :places)
+      assert Switches.on?([enabled: true, reviewed: true, files_and_shell: true], :places)
+      assert :places in Switches.switched_on([])
+
+      # Its own key, off and on again, deciding Apple Maps alone.
+      off = Keyword.put(Switches.only(Switches.switches()), :places, false)
+      refute Switches.on?(off, :places)
+      assert Switches.on?(off, :browser)
+      assert Switches.on?(Keyword.put(off, :places, true), :places)
+      refute Switches.on?(Switches.only([]), :places)
+      assert Switches.on?(Switches.only([:places]), :places)
+      refute Switches.on?(Switches.only([:places]), :browser)
+
+      # The master off, or a review in wait, is off, stored or not.
+      for flags <- [[enabled: false], [reviewed: false]] do
+        refute Switches.on?(flags, :places)
+        refute Switches.on?(Switches.only([:places], flags), :places)
+      end
+
+      assert Switches.normalize(%{"places" => false}) == [places: false]
+
+      assert_raise ArgumentError, ~r/places takes true or false/, fn ->
+        Switches.normalize(%{"places" => "on"})
+      end
     end
 
     test "only names switches, never an offer" do
@@ -298,6 +339,52 @@ defmodule FermixCore.Computers.SwitchesTest do
       assert File.read!(MachineFile.path(other)) =~ MachineFile.header()
       assert {:ok, read} = Switches.read(other)
       assert Switches.on?(read, :shell)
+    end
+
+    # M89 D13: the owner switches Apple Maps off, and on again, for this
+    # computer alone, at this computer; nothing else changes.
+    test "the settings door switches Apple Maps off and on again for this computer", ctx do
+      Application.put_env(:fermix_core, :computer, Switches.only([:files_and_shell, :places]))
+      server = :"restart_state_absent_#{System.unique_integer([:positive])}"
+      other = Path.join(ctx.tmp, "other-computer")
+      File.mkdir!(other)
+      :ok = Switches.write(other, Switches.only([:places]))
+
+      assert {:ok, %{}} = Switches.save([places: false], home: ctx.home, restart_state: server)
+      assert {:ok, saved} = Switches.read(ctx.home)
+      refute Switches.on?(saved, :places)
+      assert Switches.on?(saved, :files)
+      refute Switches.on?(Switches.current(), :places)
+
+      assert {:ok, %{}} = Switches.save([places: true], home: ctx.home, restart_state: server)
+      assert {:ok, saved} = Switches.read(ctx.home)
+      assert Switches.on?(saved, :places)
+      assert Switches.on?(saved, :files)
+
+      # Another computer's switch is its own.
+      assert {:ok, theirs} = Switches.read(other)
+      assert Switches.on?(theirs, :places)
+    end
+
+    # A section written before Apple Maps had a switch has no `places` key; a
+    # save of another switch writes it at its default, never off.
+    test "saving another switch on a section with no places key writes it at its default", ctx do
+      File.write!(
+        MachineFile.path(ctx.home),
+        MachineFile.header() <>
+          "\n\n[fermix_core.computer]\nenabled = true\nreviewed = true\nfiles_and_shell = true\n"
+      )
+
+      {:ok, stored} = Switches.read(ctx.home)
+      refute Keyword.has_key?(stored, :places)
+      Application.put_env(:fermix_core, :computer, stored)
+      server = :"restart_state_absent_#{System.unique_integer([:positive])}"
+
+      assert {:ok, %{}} = Switches.save([browser: true], home: ctx.home, restart_state: server)
+      assert {:ok, saved} = Switches.read(ctx.home)
+      assert Keyword.fetch!(saved, :places) == Switches.default(:places)
+      assert Switches.on?(saved, :places)
+      assert Switches.on?(saved, :browser) and Switches.on?(saved, :files)
     end
 
     test "a write to the running home is applied at once and tells the reporter", ctx do

@@ -1836,7 +1836,7 @@ defmodule FermixWebWeb.SetupLive.Components do
           Brave API docs
         </a>
       </p>
-      <p :if={@search_form.place_backend == :apple_maps} class="pt-1 text-xs">
+      <p :if={@search_form.place_backend in [:apple_maps, :computer]} class="pt-1 text-xs">
         Apple Maps searches are not metered. Place results are transient; only the final answer
         persists, as ordinary chat history.
       </p>
@@ -1862,6 +1862,17 @@ defmodule FermixWebWeb.SetupLive.Components do
     do:
       "place_search is set to Apple Maps, which this build cannot run (Doctor says why). Set " <>
         "[fermix_core.tools.place_search] backend = \"brave\" and save a Brave key to search Brave."
+
+  defp place_search_status(:computer, true),
+    do:
+      "place_search is ready; it searches Apple Maps on a Mac of yours while one is online, " <>
+        "and needs no key."
+
+  defp place_search_status(:computer, false),
+    do:
+      "place_search is set to Apple Maps on a Mac, and no Mac linked to this home offers it " <>
+        "yet (Doctor says why). Set [fermix_core.tools.place_search] backend = \"brave\" and " <>
+        "save a Brave key to search Brave."
 
   defp media_pane(assigns) do
     ~H"""

@@ -192,6 +192,8 @@ defmodule FermixCore.Management.Copy do
     # The display server the Linux computer-use rows name.
     "Wayland",
     "Apple ID",
+    # Where a Mac of the home looks places up for its server (M89 D13).
+    "Apple Maps",
     "Apple",
     "Full Disk Access",
     "Automation",

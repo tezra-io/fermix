@@ -27,7 +27,8 @@ defmodule FermixCore.Computers.ConsentTest do
   test "a move keeps files and commands, the browser, and what was on before", %{home: home} do
     opts = [snapshot: @mac_snapshot, os: :macos]
 
-    assert Consent.default_keep(opts) == [:files_and_shell, :browser, :computer_use, :imessage]
+    assert Consent.default_keep(opts) ==
+             [:files_and_shell, :browser, :computer_use, :imessage, :places]
 
     block = Consent.keep_on_block(home, opts)
 
@@ -45,6 +46,7 @@ defmodule FermixCore.Computers.ConsentTest do
              {:browser, "the browser", true},
              {:computer_use, "your screen", true},
              {:imessage, "Messages", true},
+             {:places, "Apple Maps", true},
              {:history, "your computer history", false}
            ]
   end
@@ -138,12 +140,13 @@ defmodule FermixCore.Computers.ConsentTest do
              files_and_shell: true,
              browser: true,
              computer_use: true,
-             imessage: true
+             imessage: true,
+             places: true
            ]
 
     # History is the recorder's own: proposed where it records, never written.
     assert Consent.proposed(switches, opts) ==
-             [:files_and_shell, :browser, :computer_use, :imessage]
+             [:files_and_shell, :browser, :computer_use, :imessage, :places]
 
     recording = put_in(@mac_snapshot, [:fermix_core, :computer_history], enabled: true)
     assert :history in Consent.proposed(switches, snapshot: recording, os: :macos)
@@ -159,6 +162,40 @@ defmodule FermixCore.Computers.ConsentTest do
     assert Switches.on?(reviewed, :browser)
     refute Switches.on?(reviewed, :shell)
     assert Consent.derive_moved(home, opts) == :unchanged
+  end
+
+  # M89 D13: Apple Maps is a line of its own on a Mac, ticked unless the
+  # owner unticks it; a computer that joins starts with it at its default.
+  test "Apple Maps is a Mac's line, kept by default, and a joining computer starts with it on",
+       %{home: home} do
+    # A Linux computer's block has no such line (above).
+    assert {:ok, [:places]} = Consent.cast(["places"])
+
+    assert :ok = Consent.accept(home, [:files_and_shell])
+    assert {:ok, switches} = Switches.read(home)
+    refute Switches.on?(switches, :places)
+
+    assert :ok = Consent.none(home)
+    assert {:ok, joined} = Switches.read(home)
+    assert Switches.on?(joined, :places)
+    assert Switches.switched_on(joined) == [:places]
+  end
+
+  # A Linux computer's block has no Apple Maps line, so its move or review
+  # writes its default, never off; a Mac's block decides it.
+  test "a move or review off a Mac writes Apple Maps at its default, a Mac's as ticked",
+       %{home: home} do
+    assert :ok = Consent.accept(home, [:files_and_shell], os: :linux)
+    assert {:ok, linux} = Switches.read(home)
+    assert Keyword.fetch!(linux, :places) == Switches.default(:places)
+
+    assert :ok = Consent.review(home, [:browser], os: :linux)
+    assert {:ok, reviewed} = Switches.read(home)
+    assert Keyword.fetch!(reviewed, :places) == Switches.default(:places)
+
+    assert :ok = Consent.accept(home, [:files_and_shell], os: :macos)
+    assert {:ok, mac} = Switches.read(home)
+    refute Keyword.fetch!(mac, :places)
   end
 
   test "the block's words are a wire map" do

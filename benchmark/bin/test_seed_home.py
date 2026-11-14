@@ -649,8 +649,8 @@ _ROW_OPTIONAL = {"kind", "apns_key_salt", "push_token", "last_seen", "platform",
 _PHONE_ONLY = {"apns_key_salt", "push_token", "signer_role", "version_code", "boot_state",
                "device_locked"}
 # The computer record (M97 §3.2): offer ids, states, and a sentence unless on.
-_OFFER_IDS = {"files", "shell", "browser", "computer_use", "imessage", "history", "voice",
-              "attachments", "accessory", "notifications"}
+_OFFER_IDS = {"files", "shell", "browser", "computer_use", "imessage", "history", "places",
+              "voice", "attachments", "accessory", "notifications"}
 _OFFER_STATES = {"on", "off", "unavailable"}
 
 
@@ -732,10 +732,10 @@ def test_the_computers_fixture_writes_two_away_computers_the_store_reads(tmp_pat
     assert sorted(p.name for p in (home / "device" / "computers").iterdir()) == sorted(
         f"{row['device_id']}.json" for row in rows)
 
-    # studio Mac: every usual offer on, its shell standard.
+    # studio Mac: every usual offer on, its shell standard, Apple Maps lookups (D13).
     mac = _offers(records["studio Mac"])
     assert {oid for oid, offer in mac.items() if offer["state"] == "on"} == {
-        "files", "shell", "browser", "computer_use", "imessage", "history"}
+        "files", "shell", "browser", "computer_use", "imessage", "history", "places"}
     assert mac["shell"]["detail"] == "standard"
     # The folders files and commands reach there (M97 F5): never Downloads.
     assert mac["files"]["roots"] == ["/Users/avery/.fermix/workspace", "/Users/avery/Projects"]
@@ -750,6 +750,8 @@ def test_the_computers_fixture_writes_two_away_computers_the_store_reads(tmp_pat
                                  "sentence": "Messages runs only on a Mac."}
     assert linux["history"] == {"id": "history", "state": "unavailable",
                                 "sentence": "Fermix records computer history only on a Mac for now."}
+    assert linux["places"] == {"id": "places", "state": "unavailable",
+                               "sentence": "Looking places up in Apple Maps needs the Fermix app on a Mac."}
     assert {row["platform"] for row in rows} == {"macos", "linux"}
 
     manifest = json.loads((home / seed.COMPUTERS_MANIFEST).read_text())
@@ -772,12 +774,16 @@ def test_computers_turn_always_on_on_and_a_seed_without_them_takes_them_away(
     home = tmp_path / "x-eval"
     on = _seed_main(monkeypatch, home, "--computers")
     assert on["fermix_core"]["always_on"] == {"enabled": True}
+    # A Mac dev daemon carries the Apple helper and would search Apple Maps
+    # itself; the computers world looks places up on the studio Mac (D13).
+    assert on["fermix_core"]["tools"]["place_search"] == {"backend": "computer"}
     assert "computers: studio Mac and loft Linux linked, both away" in capsys.readouterr().out
     written = seed.computer_paths(str(home))
     assert all(os.path.isfile(path) for path in written)
 
     off = _seed_main(monkeypatch, home)
     assert "always_on" not in off["fermix_core"]
+    assert "place_search" not in off["fermix_core"].get("tools", {})
     assert not any(os.path.exists(path) for path in written)
 
 

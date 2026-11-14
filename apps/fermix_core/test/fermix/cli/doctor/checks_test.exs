@@ -1796,7 +1796,7 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
         web_search: [backend: :duckduckgo, brave_api_key: "brave-secret"]
       )
 
-      result = Checks.place_search(host: @linux)
+      result = Checks.place_search(host: @linux, computers_opts: [records: %{}])
 
       assert result.name == "place search"
       assert result.status == :ok
@@ -1810,7 +1810,7 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
     test "reports a missing key as hidden and optional, not a warning" do
       Application.put_env(:fermix_core, :tools, web_search: [backend: :duckduckgo])
 
-      result = Checks.place_search(host: @linux)
+      result = Checks.place_search(host: @linux, computers_opts: [records: %{}])
 
       assert result.status == :ok
       assert result.detail =~ "hidden"
@@ -1866,7 +1866,12 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
     test "Homebrew on a Mac with no key is ok, Brave the build's default and the tool hidden" do
       Application.put_env(:fermix_core, :tools, web_search: [backend: :duckduckgo])
 
-      result = Checks.place_search(host: @brew_mac, apple_maps: [helper_path: "/bin/sh"])
+      result =
+        Checks.place_search(
+          host: @brew_mac,
+          apple_maps: [helper_path: "/bin/sh"],
+          computers_opts: [records: %{}]
+        )
 
       assert result.status == :ok
       assert result.detail =~ "Brave (the default in this build): no Brave key"
@@ -1876,10 +1881,61 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
     test "the default check reports no probe outcome" do
       Application.put_env(:fermix_core, :tools, web_search: [brave_api_key: "brave-secret"])
 
-      result = Checks.place_search(host: @linux)
+      result = Checks.place_search(host: @linux, computers_opts: [records: %{}])
 
       refute result.detail =~ "probe"
     end
+
+    # M89 D13: a server's home whose Mac offers Apple Maps searches there.
+    test "reports Apple Maps on a Mac of the home, why, and a choice no Mac offers" do
+      Application.put_env(:fermix_core, :tools, web_search: [backend: :duckduckgo])
+
+      result = Checks.place_search(host: @linux, computers_opts: mac_offers_places())
+
+      assert result.status == :ok
+
+      assert result.detail ==
+               "Apple Maps on your Mac (a linked Mac offers it, and this build carries no Apple " <>
+                 "Maps helper), with no key; place_search advertised. While no such Mac is " <>
+                 "online there is no place search; set [fermix_core.tools.place_search] " <>
+                 ~s(backend = "brave" to search Brave instead.)
+
+      Application.put_env(:fermix_core, :tools,
+        web_search: [backend: :duckduckgo],
+        place_search: [backend: "computer"]
+      )
+
+      none = Checks.place_search(host: @linux, computers_opts: [records: %{}, version: "1.2.3"])
+
+      assert none.status == :warn
+      assert none.detail =~ "(set in [fermix_core.tools.place_search]) is not ready"
+      assert none.detail =~ "no computer of this home offers Apple Maps"
+    end
+  end
+
+  # A primary whose link lists one Mac, away, whose latest offers list
+  # Apple Maps on.
+  defp mac_offers_places do
+    id = "6f1e2d3c-4b5a-4968-8778-695a4b3c2d1e"
+    offers = [%{id: "places", state: :on, sentence: nil, detail: nil}]
+
+    row = %{
+      device_id: id,
+      name: "studio Mac",
+      platform: "macos",
+      last_seen: ~U[2031-06-02 09:00:00Z],
+      backups: true,
+      connected: false,
+      since: nil
+    }
+
+    [
+      role: :primary,
+      rows: fn -> {:ok, [row]} end,
+      live: %{},
+      records: %{id => %{engine_version: "1.2.3", offers: offers}},
+      version: "1.2.3"
+    ]
   end
 
   describe "place_probe/1 (M31 §14.3)" do
@@ -1918,6 +1974,19 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
 
       assert result.status == :ok
       assert result.detail =~ "skipped"
+      refute_received {:place_probe_request, _query}
+    end
+
+    test "never asks a Mac of the home, nor Brave in its place" do
+      Application.put_env(:fermix_core, :tools, web_search: [brave_api_key: "brave-secret"])
+
+      opts =
+        Keyword.put(place_probe_opts(place_ok_plug(self())), :computers_opts, mac_offers_places())
+
+      result = Checks.place_probe(opts)
+
+      assert result.status == :ok
+      assert result.detail =~ "skipped — place search runs on your Mac"
       refute_received {:place_probe_request, _query}
     end
   end
@@ -4243,6 +4312,7 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
   defp place_probe_opts(id) do
     [
       host: @linux,
+      computers_opts: [records: %{}],
       req_options: [plug: {Req.Test, id}],
       net_resolver: fn "api.search.brave.com" -> {:ok, [{93, 184, 216, 34}]} end
     ]

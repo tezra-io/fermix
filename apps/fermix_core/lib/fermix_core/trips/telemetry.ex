@@ -15,8 +15,13 @@ defmodule FermixCore.Trips.Telemetry do
   it has one; `scope` on a read (`index | trip | days | outline | share`);
   `backend` (the place search's, else nil), `rate_limited`, and what stopped
   the lookups on an edit: `stop_reason` (`rate_limited |
-  plan_excludes_place_search | deadline`, else nil) and `stop_code`, the place
-  search's own code for it (Brave's `OPTION_NOT_IN_PLAN`), else nil.
+  plan_excludes_place_search | computer_away | computer_off | computer_refused
+  | computer_timed_out | deadline`, else nil) and `stop_code`, the place
+  search's own code for it (Brave's `OPTION_NOT_IN_PLAN`; for a Mac of the
+  home, how its invocation ended: `timed_out`, or its refusal such as `off`,
+  `unavailable` or `stale_epoch`, nil when no Mac was online to ask), else
+  nil. `backend` is `brave`, `apple_maps` or
+  `computer`.
   `lookups` counts the lookups that reached the place search.
 
   `Trace.TelemetryHandler` records them as `trip_read` and `trip_edit` agent
@@ -32,7 +37,16 @@ defmodule FermixCore.Trips.Telemetry do
   @scopes [:index, :trip, :days, :outline, :share]
   @made_via ["chat", "job", "mac", "phone"]
   @lookup_counts [:lookups, :placed, :offered, :not_found, :not_looked_up]
-  @stop_reasons [nil, :rate_limited, :plan_excludes_place_search, :deadline]
+  @stop_reasons [
+    nil,
+    :rate_limited,
+    :plan_excludes_place_search,
+    :computer_away,
+    :computer_off,
+    :computer_refused,
+    :computer_timed_out,
+    :deadline
+  ]
 
   @trace_event_definitions [
     %{

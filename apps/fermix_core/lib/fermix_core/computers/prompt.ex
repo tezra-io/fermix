@@ -13,7 +13,7 @@ defmodule FermixCore.Computers.Prompt do
 
       ## Computers
       - This server: Debian 13. Files, shell and a headless browser run here by default.
-      - studio Mac (macOS, connected): files, shell (standard), browser, screen, Messages, history. Files and shell on studio Mac reach only ~/.fermix/workspace and ~/Projects (~ is studio Mac's home); another folder is allowed only by someone at studio Mac.
+      - studio Mac (macOS, connected): files, shell (standard), browser, screen, Messages, history, Apple Maps. Files and shell on studio Mac reach only ~/.fermix/workspace and ~/Projects (~ is studio Mac's home); another folder is allowed only by someone at studio Mac.
       - loft Linux (Linux, last seen Sunday, November 8, 2026 at 10:14 PM EST): files, shell (strict), browser.
   """
 
@@ -30,7 +30,8 @@ defmodule FermixCore.Computers.Prompt do
     "browser" => "browser",
     "computer_use" => "screen",
     "imessage" => "Messages",
-    "history" => "history"
+    "history" => "history",
+    "places" => "Apple Maps"
   }
 
   @doc """

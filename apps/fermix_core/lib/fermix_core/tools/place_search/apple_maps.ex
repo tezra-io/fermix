@@ -112,13 +112,27 @@ defmodule FermixCore.Tools.PlaceSearch.AppleMaps do
           {:ok, [Backend.place()], Backend.trace_metadata()}
           | {:error, String.t(), Backend.trace_metadata()}
   def search(%{query: query} = request, opts) when is_binary(query) and is_list(opts) do
-    with {:ok, {executable, args}} <- plan(opts),
-         {:ok, stdout} <- run(executable, args, request_line(request), timeout(opts)),
-         {:ok, raw} <- decode(stdout),
+    with {:ok, raw} <- raw_search(request, opts),
          {:ok, places} <- places(raw, request) do
       {:ok, places, %{}}
     else
       {:error, reason} -> {:error, reason, %{}}
+    end
+  end
+
+  @doc """
+  One helper search's raw places, as `fermix-maps` printed them, or its
+  tagged reason: `search/2` without the record, which `places/2` makes. A Mac
+  of the home answers its server with these
+  (`Computers.Capabilities.Places`), and the server normalizes them with
+  `places/2`, so a place from a Mac passes the checks a place found here
+  does. `opts` as `search/2`'s.
+  """
+  @spec raw_search(Backend.request(), keyword()) :: {:ok, [term()]} | {:error, String.t()}
+  def raw_search(%{query: query} = request, opts) when is_binary(query) and is_list(opts) do
+    with {:ok, {executable, args}} <- plan(opts),
+         {:ok, stdout} <- run(executable, args, request_line(request), timeout(opts)) do
+      decode(stdout)
     end
   end
 

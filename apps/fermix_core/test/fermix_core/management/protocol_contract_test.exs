@@ -1091,6 +1091,45 @@ defmodule FermixCore.Management.ProtocolContractTest do
     assert named_fixture_result("settings_get_computer") == json(view)
   end
 
+  # M89 D13: a server whose build has no Apple Maps helper and whose Mac
+  # offers places shows that place search runs there; the golden is the
+  # section the code answers for that home.
+  test "the golden server web search section is the one the code publishes" do
+    snapshot =
+      Map.update(ConfigStore.current_snapshot(), :fermix_core, [], fn core ->
+        Keyword.put(core, :tools, web_search: [backend: :duckduckgo], place_search: [])
+      end)
+
+    places = %{id: "places", state: :on, sentence: nil, detail: nil}
+
+    row = %{
+      device_id: @desktop_id,
+      name: "studio-mac",
+      platform: "macos",
+      last_seen: ~U[2031-05-04 11:58:00Z],
+      backups: true,
+      connected: false,
+      since: nil
+    }
+
+    computers = [
+      role: :primary,
+      rows: fn -> {:ok, [row]} end,
+      live: %{},
+      records: %{@desktop_id => %{engine_version: "1.2.3", offers: [places]}},
+      version: "1.2.3"
+    ]
+
+    assert {:ok, view} =
+             Settings.get("web_search",
+               snapshot: snapshot,
+               host: %{profile: :linux_package_cli, os: :linux},
+               computers_opts: computers
+             )
+
+    assert named_fixture_result("settings_get_web_search_computer") == json(view)
+  end
+
   # M97 D28: a computer linked to its server lists the server's jobs, then the
   # ones it started itself, whose ids name it (`computer.job:<id>`) as
   # job.get takes them; the golden is that composed list.
@@ -2413,21 +2452,22 @@ defmodule FermixCore.Management.ProtocolContractTest do
   end
 
   # Each offer's state as the engine works it out: a Mac without the computer
-  # use helper, Messages switched off; a Linux computer whose kernel holds
-  # commands to the sandbox, its screen switched off.
+  # use helper whose Fermix app carries Apple Maps, Messages switched off; a
+  # Linux computer whose kernel holds commands to the sandbox, its screen
+  # switched off, and no Apple Maps.
   defp mac_offers do
     facts =
       ComputerFacts.read(
         os: :macos,
         arch: "arm64",
         landlock: :not_asked,
-        helpers: %{computer_use: false},
+        helpers: %{computer_use: false, apple_maps: true},
         permissions: %{},
         sandbox_mode: :standard,
         recording: true
       )
 
-    Offers.compute(Offers.modules(), Switches.only(~w(files_and_shell browser)a), facts)
+    Offers.compute(Offers.modules(), Switches.only(~w(files_and_shell browser places)a), facts)
   end
 
   defp linux_offers do
@@ -2436,7 +2476,7 @@ defmodule FermixCore.Management.ProtocolContractTest do
         os: :linux,
         arch: "x86_64",
         landlock: :ok,
-        helpers: %{computer_use: true},
+        helpers: %{computer_use: true, apple_maps: false},
         permissions: %{},
         sandbox_mode: :strict,
         recording: false

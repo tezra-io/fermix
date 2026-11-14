@@ -378,7 +378,8 @@ defmodule FermixCore.Management.HomeMoveTest do
 
       assert {:ok, _started} = HomeMove.move_start(record.candidate_id, @passphrase, seams)
       assert {:ok, request} = Move.read_request(ctx.home)
-      assert Move.keep_offers(request) == ~w(files_and_shell browser computer_use)
+      # Apple Maps by its switch's default, on (M89 D13).
+      assert Move.keep_offers(request) == ~w(files_and_shell browser computer_use places)
     end
   end
 

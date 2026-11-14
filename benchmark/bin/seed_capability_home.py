@@ -80,7 +80,10 @@ version and when it was last seen), with `[fermix_core.always_on]` turned on so
 a release build serves the `## Computers` section too (a dev build serves it
 regardless). It is off by default: the section joins every owner turn, which
 would move the measured prompt of every unrelated suite. No session ever
-exists in an eval, so both computers are listed as away. The seed records what
+exists in an eval, so both computers are listed as away. The studio Mac offers
+`places` (D13) and the home's place search is set to `backend = "computer"`,
+so the home looks places up on that Mac, as a server does, and finds it away:
+a dev build on a Mac would otherwise search Apple Maps itself. The seed records what
 it wrote in `eval-fixtures/computers.json`; a seed without `--computers`
 removes all of it, and a seed with it refuses a devices file it did not write.
 
@@ -317,7 +320,8 @@ COMPUTERS = (
                 {"id": "browser", "state": "on"},
                 {"id": "computer_use", "state": "on"},
                 {"id": "imessage", "state": "on"},
-                {"id": "history", "state": "on"}]},
+                {"id": "history", "state": "on"},
+                {"id": "places", "state": "on"}]},
     {"device_id": "b47e0d93-5a1c-4f68-8e2b-7c9d1a3f6e05", "name": "loft Linux",
      "model": "Linux desktop", "platform": "linux", "backups": False,
      "created_at": "2026-10-19T16:30:00Z", "last_seen": "2026-11-06T14:05:00Z",
@@ -329,7 +333,9 @@ COMPUTERS = (
                 {"id": "imessage", "state": "unavailable",
                  "sentence": "Messages runs only on a Mac."},
                 {"id": "history", "state": "unavailable",
-                 "sentence": "Fermix records computer history only on a Mac for now."}]},
+                 "sentence": "Fermix records computer history only on a Mac for now."},
+                {"id": "places", "state": "unavailable",
+                 "sentence": "Looking places up in Apple Maps needs the Fermix app on a Mac."}]},
 )
 _ENV_KEY_PROVIDERS = {
     "openai": "OPENAI_API_KEY",
@@ -484,6 +490,9 @@ def render_config(
     if computers:
         lines += ["# Always On for the computers suite (--computers).",
                   "[fermix_core.always_on]", "enabled = true", ""]
+        # Places are looked up on the studio Mac, as a server's are (D13): a Mac
+        # dev daemon carries the Apple helper and would search Apple Maps itself.
+        lines += ["[fermix_core.tools.place_search]", 'backend = "computer"', ""]
     return "\n".join(lines)
 
 

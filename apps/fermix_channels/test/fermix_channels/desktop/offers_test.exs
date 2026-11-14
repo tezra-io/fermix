@@ -109,9 +109,10 @@ defmodule FermixChannels.Desktop.OffersTest do
   # M97 D27: a computer offers what its server may reach in to use; what
   # reaches the server from the computer (calls, attachments, a robot,
   # notifications) follows its own feature's setting and is no offer.
-  test "it offers files, commands, the browser, the screen, Messages and history", ctx do
+  test "it offers files, commands, the browser, the screen, Messages, history and Apple Maps",
+       ctx do
     assert Enum.map(Offers.current(ctx.name), & &1.id) ==
-             ~w(files shell browser computer_use imessage history)
+             ~w(files shell browser computer_use imessage history places)
   end
 
   test "a computer that moved before M97 starts waiting for its review" do

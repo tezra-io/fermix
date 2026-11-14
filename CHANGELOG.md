@@ -1108,16 +1108,21 @@ will be part of a future release; nothing in this group is in a release yet.
   place search and a trip's place lookups used Brave alone, so a home with no
   Brave key, or one whose plan has no place search, left a trip's stops
   without a place. A Mac running the Fermix app now offers its server Apple
-  Maps (on by default; its master switch still turns it off), and a server
-  whose build has no Apple Maps of its own searches there whenever a linked
-  Mac offers it, with no key: the connected Mac seen most recently answers,
-  each search bounded at 15 seconds. With no such Mac online the search is
-  refused at once, never sent to Brave, and a trip's lookups stop and save
-  the stops without a place, saying to ask again once the Mac is online.
-  Every trip answer that placed stops now says what placed them ("Placed
-  with Apple Maps on studio Mac."), the Place search setting shows **Apple
-  Maps on your Mac** as the choice in force, and
-  `[fermix_core.tools.place_search] backend = "computer"` picks it on purpose.
+  Maps (on by default, and switched off or on again for each Mac in its This
+  computer settings, **Apple Maps**), and a server whose build has no Apple
+  Maps of its own searches there whenever a linked Mac offers it, with no
+  key: the connected Mac seen most recently answers, each search bounded at
+  15 seconds. This changes what a server already searches with: one whose
+  Brave place search works today moves to your Mac with this update, and
+  while no such Mac is online it has no place search at all, the search
+  refused at once and never sent to Brave, unless
+  `[fermix_core.tools.place_search] backend = "brave"` keeps it on Brave. A
+  trip's lookups stop when the Mac is away, switched off, refusing or not
+  answering, and save the stops without a place, saying which and why; a
+  busy Mac stops nothing. Every trip answer now says what placed the stops
+  its lookups placed ("Placed with Apple Maps on studio Mac: [3]."), and the
+  Place search setting shows **Apple Maps on your Mac** as the choice in
+  force.
 
 ## [0.18.0] - 2026-11-03
 

@@ -1447,11 +1447,24 @@ place). Metadata on both:
 refused | failed`), `error_code` (the refusal's tag,
 `Trips.Registry.error_tag/1`, else nil), and the caller's `session_id` when it
 has one; `scope` on a read (`index | trip | days | outline | share`); `backend`
-(the place search the lookups used, else nil), `rate_limited`, and why the
-lookups stopped on an edit: `stop_reason` (`rate_limited |
-plan_excludes_place_search | deadline`, else nil) and `stop_code`, the place
-search's own code for it (Brave's `OPTION_NOT_IN_PLAN` or `RATE_LIMITED`, else
-nil), so a key without place search never traces like a deadline.
+(the place search the lookups used: `brave`, `apple_maps` or `computer`, Apple
+Maps on a Mac of the home; else nil), `rate_limited`, and why the lookups
+stopped on an edit: `stop_reason` (`rate_limited | plan_excludes_place_search
+| computer_away | computer_off | computer_refused | computer_timed_out |
+deadline`, else nil; a busy Mac stops nothing) and `stop_code`, the place
+search's own code for it (Brave's `OPTION_NOT_IN_PLAN` or `RATE_LIMITED`; for a
+Mac of the home how its invocation ended, `timed_out` or its refusal such as
+`off`, `unavailable` or `stale_epoch`, nil when no Mac was online to ask; else
+nil), so a key without place search, or a Mac that is away, never traces like
+a deadline. One call's lookups use the place search resolved once for the
+call, so `backend` is the one each of them ran. A lookup on
+a Mac of the home is one invocation of that computer's `places` capability
+(`Computers.call/6`), which emits nothing on the server: the trip's event
+under the turn's `session_id` is its trace, and the invocation's own run is
+on the computer's trace. The `place_search` tool's one exec event on such a
+home carries `backend: "computer"` and the invocation's `computer`,
+`invocation`, `invoke_status` and `refusal` (`Outcome.exec_metadata/1`),
+never the computer's name.
 Neither event ever carries a title, a stop's words, a place or a coordinate. A
 lookup inside an edit is no tool call and emits no `[:fermix, :tool, :exec]`
 row of its own. `Trace.TelemetryHandler` records them as `trip_read` and

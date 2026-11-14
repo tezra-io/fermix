@@ -11,7 +11,7 @@ defmodule FermixCore.Computers.OffersTest do
     os: :macos,
     arch: "arm64",
     landlock: :not_asked,
-    helpers: %{computer_use: true},
+    helpers: %{computer_use: true, apple_maps: true},
     sandbox_mode: :standard,
     roots: ["/Users/avery/.fermix/workspace", "/Users/avery/Projects"],
     home: "/Users/avery",
@@ -21,7 +21,7 @@ defmodule FermixCore.Computers.OffersTest do
     os: :linux,
     arch: "x86_64",
     landlock: :ok,
-    helpers: %{computer_use: true},
+    helpers: %{computer_use: true, apple_maps: false},
     sandbox_mode: :strict,
     roots: ["/home/rowan/.fermix/workspace"],
     home: "/home/rowan",
@@ -43,7 +43,8 @@ defmodule FermixCore.Computers.OffersTest do
                "browser" => {:on, nil},
                "computer_use" => {:on, "standard"},
                "imessage" => {:on, nil},
-               "history" => {:on, nil}
+               "history" => {:on, nil},
+               "places" => {:on, nil}
              }
     end
 
@@ -118,9 +119,44 @@ defmodule FermixCore.Computers.OffersTest do
 
     test "a computer with no section offers nothing a switch decides" do
       states = states(@mac, [])
-      for {id, {state, _said}} <- states, id != "history", do: assert(state == :off, id)
-      # Its history follows its recorder alone (M97 D27).
+
+      for {id, {state, _said}} <- states,
+          id not in ["history", "places"],
+          do: assert(state == :off, id)
+
+      # Its history follows its recorder alone (M97 D27), and Apple Maps'
+      # switch is on where nothing is stored (M89 D13).
       assert states["history"] == {:on, nil}
+      assert states["places"] == {:on, nil}
+    end
+
+    # M89 D13: looking places up in Apple Maps needs a Mac whose Fermix
+    # carries the helper (the app's engine); its own switch decides it, on
+    # where nothing is stored, under the master and the review.
+    test "Apple Maps is a Mac's with the helper, by its own switch, on where nothing is stored" do
+      assert states(@mac)["places"] == {:on, nil}
+      # Nothing stored for it is on: the default.
+      assert states(@mac, enabled: true, reviewed: true)["places"] == {:on, nil}
+
+      # Its own switch, off and on again.
+      assert states(@mac, Switches.only([:files_and_shell]))["places"] ==
+               {:off, "Switched off on this Mac. Only someone at this Mac can switch it on."}
+
+      assert states(@mac, Switches.only([:places]))["places"] == {:on, nil}
+
+      unavailable =
+        {:unavailable, "Looking places up in Apple Maps needs the Fermix app on a Mac."}
+
+      assert states(@linux)["places"] == unavailable
+      # The standalone Homebrew formula on a Mac carries no helper; the app does,
+      # however installed.
+      assert states(Keyword.put(@mac, :helpers, %{computer_use: true}))["places"] == unavailable
+
+      assert {:off, "Everything Fermix on your server may use" <> _rest} =
+               states(@mac, Keyword.put(@all_on, :enabled, false))["places"]
+
+      assert {:off, "Waiting for you to review" <> _rest} =
+               states(@mac, Keyword.put(@all_on, :reviewed, false))["places"]
     end
 
     # M97 D27: one switch decides files and commands together.

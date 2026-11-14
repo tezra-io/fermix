@@ -699,6 +699,64 @@ defmodule FermixCore.Trips.LookupTest do
       assert outcomes == [{1, {:none, :deadline}}, {2, {:none, :deadline}}]
     end
 
+    # M89 D13: a home that looks places up on a Mac stops the call's lookups
+    # on the first answer that no such Mac is online, as on a rate limit.
+    # M89 D13: on a Mac of the home, what cannot heal within the call stops
+    # the lookups not started, each by its own kind; a busy Mac stops nothing.
+    test "a Mac away, switched off, refusing or not answering stops the call; busy does not" do
+      for why <- [:computer_away, :computer_off, :computer_refused, :computer_timed_out] do
+        stop = {:error, "#{why}: words", %{attempt: 1, provider_code: "code"}}
+        search = search_by(%{"Spot 1" => stop, "Spot 2" => found([]), "Spot 3" => found([])})
+        requests = Enum.map(1..3, &%{ref: &1, place: "Spot #{&1}", day: &1})
+
+        assert {:ok, %{outcomes: outcomes, stop_reason: ^why, stop_code: "code"}} =
+                 resolve(requests, near_town(), search)
+
+        assert Enum.map(outcomes, &elem(&1, 1)) == List.duplicate({:none, why}, 3)
+        assert [%{query: "Spot 1"}] = searched()
+      end
+
+      busy = {:error, "computer_busy: words", %{attempt: 1}}
+      search = search_by(%{"Spot 1" => busy, "Spot 2" => found([])})
+      requests = Enum.map(1..2, &%{ref: &1, place: "Spot #{&1}", day: &1})
+
+      assert {:ok, %{outcomes: [{1, {:none, :computer_busy}}, {2, {:none, :not_found}}]} = result} =
+               resolve(requests, near_town(), search)
+
+      assert result.stop_reason == nil
+    end
+
+    # Only a stop a lookup placed is credited to what searched; one its link
+    # placed is no lookup's.
+    test "what placed each stop a lookup placed is kept by its ref, never a link's" do
+      server = holder()
+      kept = place("Mercado", @market, 4)
+      :ok = ReplyBlocks.put_places(server, @conversation, [kept])
+
+      mac = fn %{query: query} ->
+        {:ok, [place(query, @tower, 1)], %{searched_with: "Apple Maps on studio Mac"}}
+      end
+
+      requests = [
+        %{ref: 1, place: "Spot 1", day: 1},
+        %{ref: 2, place: kept.source_url, day: 1},
+        %{ref: 3, place: "Spot 1", day: 1}
+      ]
+
+      assert {:ok, %{placed_by: placed_by, outcomes: outcomes}} =
+               resolve(requests, near_town(), mac, reply_blocks: server)
+
+      assert [{1, {:placed, _}}, {2, {:placed, ^kept}}, {3, {:placed, _}}] = outcomes
+      assert placed_by == %{1 => "Apple Maps on studio Mac", 3 => "Apple Maps on studio Mac"}
+
+      # A result by another name, offered, placed nothing.
+      offered = fn _request ->
+        {:ok, [place("Elsewhere", @tower, 1)], %{searched_with: "Brave"}}
+      end
+
+      assert {:ok, %{placed_by: %{}}} = resolve(Enum.take(requests, 1), near_town(), offered)
+    end
+
     test "a request that is not a stop's place and day is refused loudly" do
       search = search_by(%{})
 
@@ -727,6 +785,26 @@ defmodule FermixCore.Trips.LookupTest do
 
       assert Lookup.heading(:deadline) ==
                "Not looked up, the call's 45 s for place lookups ran out"
+
+      assert Lookup.heading(:computer_away) ==
+               "Not looked up, no Mac that looks places up in Apple Maps is online, so these " <>
+                 "stops are saved without a place; ask again once it is online"
+
+      assert Lookup.heading(:computer_off) ==
+               "Not looked up, Apple Maps is switched off on the Mac that looks places up, so " <>
+                 "these stops are saved without a place; only someone at that Mac can switch it on"
+
+      assert Lookup.heading(:computer_refused) ==
+               "Not looked up, the Mac that looks places up in Apple Maps refused the search, so " <>
+                 "these stops are saved without a place"
+
+      assert Lookup.heading(:computer_timed_out) ==
+               "Not looked up, the Mac that looks places up in Apple Maps did not answer in " <>
+                 "time, so these stops are saved without a place; ask again in a moment"
+
+      assert Lookup.heading(:computer_busy) ==
+               "Not looked up, the Mac that looks places up in Apple Maps was busy; ask again " <>
+                 "in a moment"
 
       assert Lookup.heading({:failed, "network: Apple Maps could not be reached"}) ==
                "Not looked up, the place search failed (network: Apple Maps could not be reached)"

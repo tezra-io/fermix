@@ -18,6 +18,9 @@ defmodule FermixCore.Tools.PlaceSearchTest do
   @linux %{profile: :linux_package_cli, os: :linux}
   @brew_mac %{profile: :standalone_cli, os: :darwin}
   @conversation {"test", "place-search", :root}
+  # A home with no computer, named so that nothing reads the suite home's
+  # computer records (`PlaceSearch.Computer.computers/1`).
+  @no_computers [records: %{}]
 
   # This suite drives the one global config section `place_search` reads — the
   # backend choice and the Brave credential — so it establishes it in `setup`
@@ -73,6 +76,11 @@ defmodule FermixCore.Tools.PlaceSearchTest do
 
       assert Enum.sort(tags) == [
                "auth_failed",
+               "computer_away",
+               "computer_busy",
+               "computer_off",
+               "computer_refused",
+               "computer_timed_out",
                "deadline",
                "invalid_location",
                "invalid_query",
@@ -727,7 +735,7 @@ defmodule FermixCore.Tools.PlaceSearchTest do
             send(test_pid, :brave_request)
             json(conn, %{"results" => []})
           end,
-          %{host: @linux, apple_maps: [helper_path: helper]}
+          %{host: @linux, apple_maps: [helper_path: helper], computers_opts: @no_computers}
         )
 
       assert_received :brave_request
@@ -762,7 +770,7 @@ defmodule FermixCore.Tools.PlaceSearchTest do
       helper = fake_maps(dir, %{"places" => []}, 0)
 
       for {host, build} <- [{@linux, "the Linux package"}, {@brew_mac, "Homebrew"}] do
-        context = %{host: host, apple_maps: [helper_path: helper]}
+        context = %{host: host, apple_maps: [helper_path: helper], computers_opts: @no_computers}
 
         refute PlaceSearch.advertise?(context)
         assert {:error, reason} = PlaceSearch.readiness(context)
@@ -789,7 +797,7 @@ defmodule FermixCore.Tools.PlaceSearchTest do
             send(test_pid, :brave_request)
             json(conn, %{"results" => []})
           end,
-          %{host: @brew_mac, apple_maps: [helper_path: helper]}
+          %{host: @brew_mac, apple_maps: [helper_path: helper], computers_opts: @no_computers}
         )
 
       assert_received :brave_request
@@ -818,7 +826,7 @@ defmodule FermixCore.Tools.PlaceSearchTest do
     test "the schema publishes country and language only under Brave" do
       put_tools(nil, nil)
       apple = PlaceSearch.dynamic_parameters(%{host: @mac_app})
-      brave = PlaceSearch.dynamic_parameters(%{host: @linux})
+      brave = PlaceSearch.dynamic_parameters(%{host: @linux, computers_opts: @no_computers})
 
       refute Map.has_key?(apple.properties, :country)
       refute Map.has_key?(apple.properties, :language)

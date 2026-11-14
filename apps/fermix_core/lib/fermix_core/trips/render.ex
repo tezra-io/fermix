@@ -76,13 +76,14 @@ defmodule FermixCore.Trips.Render do
   an edit's stop kept the place it had because the lookup placed nothing.
   """
   @type placement :: %{
-          row: map(),
-          outcome:
+          required(:row) => map(),
+          required(:outcome) =>
             {:placed, map()}
             | {:offered, map()}
             | {:offered, map(), Lookup.unanchored()}
             | {:none, Lookup.why() | :unstorable},
-          kept: boolean()
+          required(:kept) => boolean(),
+          optional(:ref) => pos_integer()
         }
 
   @doc "The most bytes one read returns whole; past it, the outline."
@@ -371,17 +372,22 @@ defmodule FermixCore.Trips.Render do
   @doc """
   The answer to a `trip_edit` call that `applied` (`Trips.Ops.apply/3`'s
   result): the trip's line, ` · P placed` when the call gave places, then what
-  each place came to (`placements`, in the call's order) and the fixed stops
-  whose date moved.
+  each place came to (`placements`, in the call's order), what placed the
+  stops a lookup placed (`placed_by`, `Trips.Lookup`'s, by each placement's
+  `ref`: "Placed with Apple Maps on studio Mac: [9], [11]."; a stop its link
+  placed is no lookup's, and is not named), and the fixed stops whose date
+  moved.
   """
-  @spec answer(map(), [placement()]) :: String.t()
+  @spec answer(map(), [placement()], %{optional(term()) => String.t()}) :: String.t()
+  def answer(applied, placements, placed_by \\ %{})
+
   # The model has no restore: the owner's app brings a removed trip back.
-  def answer(%{trip: %{removed_at: %DateTime{}, title: title}}, placements)
-      when is_list(placements),
+  def answer(%{trip: %{removed_at: %DateTime{}, title: title}}, placements, placed_by)
+      when is_list(placements) and is_map(placed_by),
       do: "#{title} · removed; it can be restored from the Fermix app for 30 days"
 
-  def answer(%{trip: trip, rows: rows, events: events} = applied, placements)
-      when is_list(placements) do
+  def answer(%{trip: trip, rows: rows, events: events} = applied, placements, placed_by)
+      when is_list(placements) and is_map(placed_by) do
     {days, stops} = Ops.counts(rows)
     words = if events == [], do: "nothing changed", else: Enum.join(events, "; ")
 
@@ -390,6 +396,7 @@ defmodule FermixCore.Trips.Render do
 
     [line <> placed_count(placements)]
     |> Kernel.++(placed_lines(placements))
+    |> Kernel.++(placed_by_lines(placements, placed_by))
     |> Kernel.++(offered_lines(placements))
     |> Kernel.++(unanchored_lines(placements))
     |> Kernel.++(unplaced_lines(placements))
@@ -415,6 +422,28 @@ defmodule FermixCore.Trips.Render do
     for %{row: row, outcome: {:placed, place}} <- placements,
         do: "#{stop_ref(row)}: #{quoted(place_words(place))}"
   end
+
+  # What searched each stop a lookup placed, by what searched, in the order
+  # each first comes up; a stop its link placed is named by none.
+  defp placed_by_lines(placements, placed_by) do
+    placements
+    |> Enum.flat_map(fn
+      %{outcome: {:placed, _place}, row: row} = placement ->
+        case Map.fetch(placed_by, Map.get(placement, :ref)) do
+          {:ok, words} -> [{words, "[#{row.n}]"}]
+          :error -> []
+        end
+
+      _placement ->
+        []
+    end)
+    |> Enum.group_by(&elem(&1, 0), &elem(&1, 1))
+    |> Enum.sort_by(fn {words, _refs} -> first_placed_by(placements, placed_by, words) end)
+    |> Enum.map(fn {words, refs} -> "Placed with #{words}: #{Enum.join(refs, ", ")}." end)
+  end
+
+  defp first_placed_by(placements, placed_by, words),
+    do: Enum.find_index(placements, &(Map.get(placed_by, Map.get(&1, :ref)) == words))
 
   defp offered_lines(placements) do
     case for %{outcome: {:offered, place}} = placement <- placements,

@@ -611,7 +611,7 @@ defmodule FermixCore.Management.Settings do
   # This machine's coding approval and This computer's rows follow the host
   # (`macos?:`), which a test names.
   defp family_rows(Tools, section, snapshot, opts),
-    do: Tools.rows(section, snapshot, Keyword.take(opts, [:host, :promise]))
+    do: Tools.rows(section, snapshot, Keyword.take(opts, [:host, :promise, :computers_opts]))
 
   defp family_rows(CodingMachine, section, snapshot, opts),
     do: CodingMachine.rows(section, snapshot, Keyword.take(opts, [:macos?, :server_primary?]))

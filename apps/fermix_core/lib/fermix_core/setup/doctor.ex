@@ -92,8 +92,8 @@ defmodule FermixCore.Setup.Doctor do
           optional(:result_count) => non_neg_integer()
         }
   @type place_search_report :: %{
-          :backend => :apple_maps | :brave,
-          :backend_source => :configured | :build_default,
+          :backend => :apple_maps | :computer | :brave,
+          :backend_source => :configured | :build_default | :linked_computer | :computers_unknown,
           :web_backend => atom(),
           :credential_present? => boolean(),
           :ready => :ok | {:error, String.t()},
@@ -627,7 +627,8 @@ defmodule FermixCore.Setup.Doctor do
   `full: true` and a ready backend it runs **one** live search on that backend
   (fixed query, `count: 1`, result discarded): metered on Brave, free on Apple
   Maps. It adds `:probe_result` / `:probe_error` / `:result_count`. Each §10.4
-  failure kind keeps its own tag, and no probe ever switches backend.
+  failure kind keeps its own tag, and no probe ever switches backend. A Mac of
+  the home is never asked (M89 D13): nothing is added for it.
   `host:` names the build and `apple_maps:` the helper's options for a test;
   `req_options`/`net_resolver` stub the Brave probe.
 
@@ -640,7 +641,7 @@ defmodule FermixCore.Setup.Doctor do
   def place_search_report(opts \\ []) do
     config = WebSearch.config()
     {web_backend, _module} = WebSearch.active_backend(config)
-    context = opts |> Keyword.take([:host, :apple_maps]) |> Map.new()
+    context = opts |> Keyword.take([:host, :apple_maps, :computers_opts]) |> Map.new()
     resolution = PlaceSearch.resolution(context)
     ready = PlaceSearch.readiness(context)
 
@@ -678,6 +679,9 @@ defmodule FermixCore.Setup.Doctor do
 
   defp place_search_probe(:apple_maps, _config, opts),
     do: place_probe(PlaceAppleMaps, Keyword.get(opts, :apple_maps, []))
+
+  # A health check sends nothing to the owner's Mac.
+  defp place_search_probe(:computer, _config, _opts), do: %{}
 
   defp place_probe(backend, backend_opts) do
     request = %{query: @place_probe_query, count: 1}

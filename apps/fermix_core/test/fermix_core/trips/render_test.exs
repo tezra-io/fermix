@@ -432,6 +432,40 @@ defmodule FermixCore.Trips.RenderTest do
       refute answer =~ @report
     end
 
+    # M89 D13: an answer names what searched each stop a lookup placed, by
+    # its ref; a stop its link placed is credited to none.
+    test "what placed the stops a lookup placed, never a link's" do
+      rows = rows()
+      [_, arrive, _, tower, coffee, lookout, _dinner] = rows
+
+      placements = [
+        %{row: tower, outcome: {:placed, @tower}, kept: false, ref: 2},
+        %{row: lookout, outcome: {:placed, @lookout}, kept: false, ref: 3},
+        %{row: coffee, outcome: {:placed, @lookout}, kept: false, ref: 4},
+        %{row: arrive, outcome: {:none, :computer_away}, kept: false, ref: 5}
+      ]
+
+      # Ref 4 was placed by its link.
+      placed_by = %{2 => "Apple Maps on studio Mac", 3 => "Apple Maps on studio Mac", 5 => "x"}
+      lines = applied(rows) |> Render.answer(placements, placed_by) |> String.split("\n")
+
+      assert "Placed with Apple Maps on studio Mac: [#{tower.n}], [#{lookout.n}]." in lines
+      refute Enum.any?(lines, &(&1 =~ "[#{coffee.n}]," or &1 =~ "x:"))
+
+      assert ("Not looked up, no Mac that looks places up in Apple Maps is online, so these " <>
+                ~s(stops are saved without a place; ask again once it is online: [2] "Arrive by train".)) in lines
+
+      two = %{2 => "Apple Maps on studio Mac", 3 => "Apple Maps on attic Mac"}
+      answer = Render.answer(applied(rows), placements, two)
+      assert answer =~ "\nPlaced with Apple Maps on studio Mac: [#{tower.n}].\n"
+      assert answer =~ "\nPlaced with Apple Maps on attic Mac: [#{lookout.n}].\n"
+
+      refute Render.answer(applied(rows), placements) =~ "Placed with"
+
+      assert Render.answer(applied(rows), placements) ==
+               Render.answer(applied(rows), placements, %{})
+    end
+
     # D10: a lookup with nowhere to search offers what it found and says why,
     # apart from a result by another name.
     test "an offer with no place to search near, or a near not found, says to give near" do

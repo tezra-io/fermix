@@ -143,10 +143,11 @@ defmodule FermixCore.Trips.Placing do
 
   @doc """
   Each stop `call` gave a place to, as `applied` (the store's answer) holds
-  it, with what its place came to: `Trips.Render.answer/2`'s placements.
+  it, with what its place came to and its op's position (`ref`, the lookup's
+  request ref): `Trips.Render.answer/3`'s placements.
   """
   @spec placements(map(), map(), outcomes()) :: [
-          %{row: map(), outcome: term(), kept: boolean()}
+          %{row: map(), outcome: term(), kept: boolean(), ref: pos_integer()}
         ]
   def placements(%{ops: ops}, %{rows: rows} = applied, outcomes) when is_list(outcomes) do
     made = made_by_add(ops, rows ++ Map.get(applied, :removed_rows, []))
@@ -158,7 +159,7 @@ defmodule FermixCore.Trips.Placing do
           op <- [Enum.at(ops, index - 1)],
           %{id: id} <- [stop_of(op, index, made, rows)],
           Map.has_key?(live, id),
-          do: %{row: Map.fetch!(live, id), outcome: outcome, kept: kept?(op, outcome)}
+          do: %{row: Map.fetch!(live, id), outcome: outcome, kept: kept?(op, outcome), ref: index}
 
     placed |> Enum.reverse() |> Enum.uniq_by(& &1.row.id) |> Enum.reverse()
   end

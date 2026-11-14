@@ -28,7 +28,13 @@ defmodule FermixCore.Tools.PlaceSearchLookupTest do
     %{session_id: session_id}
   end
 
-  describe "PlaceSearch.lookup/3" do
+  # The call's search, its backend resolved once (`PlaceSearch.searcher/2`).
+  defp lookup(request, context) do
+    {:ok, search} = PlaceSearch.searcher(context, PlaceSearch.resolution(context))
+    search.(request, @send)
+  end
+
+  describe "PlaceSearch.searcher/2" do
     test "searches the backend in force with the request as given", %{session_id: session_id} do
       test_pid = self()
 
@@ -45,7 +51,7 @@ defmodule FermixCore.Tools.PlaceSearchLookupTest do
         radius_meters: 2_000
       }
 
-      assert {:ok, [place], trace} = PlaceSearch.lookup(request, context, @send)
+      assert {:ok, [place], trace} = lookup(request, context)
       assert place.name == "Prado"
       assert place.location == %{latitude: 38.7101, longitude: -9.1335}
       assert trace.backend == "brave"
@@ -76,11 +82,7 @@ defmodule FermixCore.Tools.PlaceSearchLookupTest do
       quiet = start_supervised!(Supervisor.child_spec({ReplyBlocks, name: nil}, id: make_ref()))
 
       assert {:ok, [%{name: "Prado"}], _trace} =
-               PlaceSearch.lookup(
-                 %{query: "Prado", count: 5},
-                 %{context | reply_blocks: quiet},
-                 @send
-               )
+               lookup(%{query: "Prado", count: 5}, %{context | reply_blocks: quiet})
 
       refute_received {:telemetry, [:fermix, :tool, :exec], _measurements, _metadata}
       assert ReplyBlocks.take(quiet, @conversation) == []
@@ -98,8 +100,8 @@ defmodule FermixCore.Tools.PlaceSearchLookupTest do
           json(conn, %{"results" => []})
         end)
 
-      assert {:error, "auth_failed: missing Brave API key", %{backend: "brave"}} =
-               PlaceSearch.lookup(%{query: "Prado", count: 5}, context, @send)
+      assert {:error, "auth_failed: missing Brave API key"} =
+               PlaceSearch.searcher(context, PlaceSearch.resolution(context))
 
       refute_received :unexpected_request
     end
@@ -108,7 +110,7 @@ defmodule FermixCore.Tools.PlaceSearchLookupTest do
       context = stub(session_id, fn conn -> Plug.Conn.resp(conn, 429, "") end)
 
       assert {:error, "rate_limited: HTTP 429" <> _rest, %{backend: "brave"}} =
-               PlaceSearch.lookup(%{query: "Prado", count: 5}, context, @send)
+               lookup(%{query: "Prado", count: 5}, context)
     end
   end
 
