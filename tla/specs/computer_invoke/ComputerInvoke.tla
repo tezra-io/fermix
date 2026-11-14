@@ -111,11 +111,11 @@
 \* SOURCE: apps/fermix_core/lib/fermix_core/computers/calls.ex @ 86e5a3bd8884
 \* SOURCE: apps/fermix_core/lib/fermix_core/computers/journal.ex#append_started,append_finished,lookup,interrupted,close_all,closed_entry,append,write_line,entries,entry @ a6fec2dd5ee7
 \* SOURCE: apps/fermix_core/lib/fermix_core/computers.ex#call @ 1db7ef7e8b31
-\* SOURCE: apps/fermix_channels/lib/fermix_channels/desktop/invoke.ex @ 51813b51e699
+\* SOURCE: apps/fermix_channels/lib/fermix_channels/desktop/invoke.ex @ a5e7a51256cc
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/desktop/invoke/admission.ex @ e1b6205d644c
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/desktop/invoke_family.ex#init,handle_event,reconcile @ aafda1185bd7
-\* SOURCE: apps/fermix_channels/lib/fermix_channels/desktop/device_supervisor.ex#children,invoke_spec @ f6ac6a300a5b
-\* SOURCE: apps/fermix_core/lib/fermix_core/computers/switches.ex#write,forget,notify @ f0032711fcb1
+\* SOURCE: apps/fermix_channels/lib/fermix_channels/desktop/device_supervisor.ex#children,invoke_spec @ 62d59181f365
+\* SOURCE: apps/fermix_core/lib/fermix_core/computers/switches.ex#write,forget,notify @ bc1e22104814
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/desktop/relay.ex#hello_ack,connected,keep_epoch,invocation @ 2b7075eee2d1
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/mobile/lanes.ex @ 2c6c6a6d807e
 \* SOURCE: apps/fermix_core/lib/fermix_core/computers/capabilities/browser.ex#run @ bcd156a3a978
@@ -592,7 +592,7 @@ Expire(id) ==
                    linkEpoch, stopped, heldWork, hist_vars>>
 
 \* Admission stops and starts again (Desktop.Invoke is :one_for_all,
-\* invoke.ex:118-141): its runs end with it, what it held and what waited in
+\* invoke.ex:119-142): its runs end with it, what it held and what waited in
 \* its mailbox are gone, and at start it closes what the crash left started
 \* as unknown, interrupted (init/1, admission.ex:141; recover/1, :279;
 \* Journal.interrupted/2, journal.ex:176) and reads the switches anew. Once
@@ -602,7 +602,7 @@ Expire(id) ==
 \* refused before it ran (handle_continue, admission.ex:177-187;
 \* waited_before/2, :314-326; receipt_answer/1, :860), where the session is up; the server
 \* asks after one that is not. What waited is read from a table
-\* Desktop.Invoke owns (invoke.ex:121-134), so it outlives Admission (keep).
+\* Desktop.Invoke owns (invoke.ex:122-135), so it outlives Admission (keep).
 \* The stop may instead be a restart of Desktop.Invoke itself, which follows
 \* more than three of Admission's in five seconds, or of the engine, which
 \* takes the table with it (~keep): what waited is forgotten, as what was in

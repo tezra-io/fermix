@@ -326,7 +326,7 @@ invocation's fixes above), which staled every pin but the journal's and
 - `invoke.ex`: the capabilities `files`, `shell`, `imessage`, `browser`
   and `computer_use` beside `system`, and the `:sandbox` and `:browser`
   readers. Admission and its runs are still `:one_for_all`
-  (`invoke.ex:102-112`).
+  (`invoke.ex:103-113`).
 - `device_supervisor.ex#invoke_spec`: hands `Desktop.Invoke` those two
   readers; it is still beside the dial subtree.
 - `switches.ex#notify`: a third listener, this computer's screen while its
@@ -389,7 +389,7 @@ the model:
   `link/1` (`:224`) fails with `noproc` for a task already gone, and the
   request is dropped unanswered. The held process does not trap exits, so
   `stop_task/2`'s `terminate_child` (`admission.ex:626-634`) and a restart
-  of `Desktop.Invoke`'s `:one_for_all` (`invoke.ex:103-113`) end the
+  of `Desktop.Invoke`'s `:one_for_all` (`invoke.ex:104-114`) end the
   request it runs. `Cancel`, `HearSwitch` and `Stop` leave `heldWork` alone
   under `HeldEndsWithRun`, which is that. One abstraction: the exit signal
   is sent as the task ends, before `terminate_child` returns and Admission
@@ -595,7 +595,7 @@ change, and what it does to the model:
   options: the keys a `post` showed, so a key shows once across a restart
   of Admission. That is the capability's own rule, as its origin rules are,
   and no variable here holds it. Admission and the runs are still
-  `:one_for_all` (`invoke.ex:118-141`).
+  `:one_for_all` (`invoke.ex:119-142`).
 - `admission.ex` (whole): `init/1` takes `:notifications` (required;
   `Desktop.Invoke` always passes it) and an optional `:reminder_uplink`,
   and a run's context carries `notifications`: data the run reads, no step.
@@ -644,6 +644,34 @@ computer shows a key once from the table above, which outlives a restart of
 Admission but not one of `Desktop.Invoke` itself or of the engine. The
 capability's moduledoc names the engine's restart; between a lost answer
 and the retry, either restart can show one reminder twice.
+
+## Re-read (M89 D13, `0666781a`: Apple Maps for the server's place search; M97, `4c58837a`: the app's voice socket, 2026-11-14)
+
+Read against `0666781a`, which staled the `invoke.ex` and `switches.ex`
+pins, and `4c58837a`, which staled the `device_supervisor.ex` pin. No
+modelled step changed. Each change, and what it does to the model:
+- `invoke.ex` (whole): a capability `places`
+  (`Computers.Capabilities.Places`, op `search`, no effect), the server's
+  place search run through this computer's Apple Maps, whose offer is
+  `places` and whose switch is its own. Admission admits it as every other
+  request: the master switch, a review that waits and its switch decide
+  (`switched_on/2`), so `OffAlwaysWins` covers it at admission, when a
+  request that waited starts, and once Admission hears; its `search` is a
+  read with no started record, as the screen hold's `keep` (Not modelled).
+  One line more in the capability map moves every cited line past it by
+  one, here moved.
+- `switches.ex#write,forget,notify`: a switch's value where nothing is
+  stored is its default, off but for `places`, which is on; `write` writes
+  a switch it is not given at that default. It is still one write of the
+  file and then the same `notify` of every listener, Admission first: the
+  master switch's write is still the one `SwitchOff` models and
+  `HearSwitch` hears, and an offer's own switch, `places` among them, is
+  not modelled, as before; `forget` is unchanged.
+- `device_supervisor.ex#children,invoke_spec`: `children` gains the app's
+  bridged voice socket on a linked computer whose boot serves the realtime
+  socket, a sibling of `Desktop.Invoke` and the dial subtree under the same
+  `:one_for_one`, so none takes another down; `Desktop.Invoke` is still
+  beside the dial subtree, never inside it, and `invoke_spec` is as it was.
 
 ## Findings
 
