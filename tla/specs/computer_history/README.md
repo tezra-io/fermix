@@ -54,7 +54,7 @@ everything else left out.
   restarts it.
 - `ReconcileCanTimeOut`: `/history off`'s reconcile call gives up after its
   15 s timeout (`controller.ex:55`, `:63-64`). The timer starts at
-  `computer_history.ex:310`.
+  `computer_history.ex:306`.
 - `ReconcileCanStall`: that timeout can fire before the DynamicSupervisor has
   sent the Capturer `:shutdown`. Setting it `FALSE` is a timing assumption:
   the work before the `:shutdown` is app-env reads, `File.regular?` stats in
@@ -76,15 +76,15 @@ everything else left out.
   gate is the flush-time rule of 693970b7.
 - `StopBeforeReply`: `/history off` replies only after its reconcile call
   returns, and that call returns only after the Capturer has exited
-  (`computer_history.ex:239`, `:247-251`, `:310`, `controller.ex:63-64`,
+  (`computer_history.ex:235`, `:243-247`, `:306`, `controller.ex:63-64`,
   `:202`).
 - `SaveBeforeReply`: `/history off` writes `machine.toml` before it replies
-  (`computer_history.ex:238-241` before `history.ex:747-748`).
+  (`computer_history.ex:234-237` before `history.ex:747-748`).
 - `BootReconciles`: a started or restarted Controller reconciles in
   `handle_continue` (`controller.ex:67-89`).
 - `OffConfirmsStop`: an exit of the reconcile call (no Controller, a crash
   mid-call, a timeout) comes back as `{:error, {:reconcile_failed, _}}`
-  (`computer_history.ex:308-315`), and `/history off` then says the stop could
+  (`computer_history.ex:304-311`), and `/history off` then says the stop could
   not be confirmed instead of "nothing new is captured" (`history.ex:827-832`).
   Off, the exit reads as a confirmed stop (the code at 693970b7).
 - `InitChecksEnabled`: every Capturer start, a DynamicSupervisor restart
@@ -261,12 +261,12 @@ Controller's split lookup and crashes at any point) both held: 01 with
 - **`/history off`: env flip, then terminate the Capturer, then save
   config: confirmed.** The order is (`ComputerHistory.switch_off/1`, from
   `disable/1`, `history.ex:859-864`):
-  1. flip (`computer_history.ex:228-234`);
-  2. a synchronous reconcile (`:239`, `:247-251`), which returns after
+  1. flip (`computer_history.ex:224-230`);
+  2. a synchronous reconcile (`:235`, `:243-247`), which returns after
      `DynamicSupervisor.terminate_child` returns, which waits for
      `terminate/2`; since the CH-3 fix an exit of the call comes back as an
      error, not `:ok`;
-  3. save to `machine.toml` (`:240`), whatever the reconcile returned;
+  3. save to `machine.toml` (`:236`), whatever the reconcile returned;
   4. reply (`history.ex:812-843`), chosen by both outcomes.
 - **Events captured during a pause but flushed after it ends are stored:
   confirmed → CH-1 (fixed).**
@@ -643,7 +643,7 @@ the fixed code.
   pause the home names in a refusal or a delivery, written beside a pause from
   chat, can no longer lower it (it was a read and a write until 18710c89).
 - `/history off`'s env flip is a `get_env` (`Config.current/0`) and a
-  `put_env` (`computer_history.ex:228-234`), folded into one step: no other
+  `put_env` (`computer_history.ex:224-230`), folded into one step: no other
   writer of that key is in scope.
 - The Controller's start of a Capturer (`ensure_started`) is folded with the
   DynamicSupervisor's `start_child` and the Capturer's `init` read of the
@@ -656,7 +656,7 @@ the fixed code.
   or the `init` read sees the flip.
 - The model's host has a recorder (a Mac, or since 8240551b a Linux computer
   whose paired helper records there). On a host with none, `/history
-  off` makes no reconcile call (`reconcile_here/2`, `computer_history.ex:247-253`),
+  off` makes no reconcile call (`reconcile_here/2`, `computer_history.ex:243-249`),
   and since 18710c89 the rail's supervisor runs there only on a home that a
   computer can contribute to or that holds notes, with no store and no
   recorder to stop (`supervisor.ex:60-67`); elsewhere its `init/1` answers
@@ -853,3 +853,14 @@ listed apps that recorded nothing in 48 hours (`recorded_apps/2`, a read);
 the replies name the machine. The singleton lock's Linux path is not
 modelled. No modelled step changed; the line numbers in the spec and in
 this README's current-code sections point at the committed files.
+
+## Re-read for the review fixes of stages A, C and 4 (2026-11-14)
+
+`4fdc1bcd` staled the `computer_history.ex` pin: `recorder?/1` decides
+"an Always On server" by `Home.AlwaysOn.here?/1`, the rule Google Meet asks
+too, which reads the booted record or, for a tree-less verb, the home's,
+and fails closed: an engine whose facts cannot be read is taken for a
+server and records nothing. The scene's host is a computer that records,
+for which the answer is as before; no modelled step changed, and the line
+numbers into `computer_history.ex` point at the committed file.
+

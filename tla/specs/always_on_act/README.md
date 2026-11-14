@@ -210,8 +210,18 @@ comments' line numbers into both files point at the committed code.
 
 Re-read against 4c58837a, which staled the `always_on.ex` pin: Move now on a
 move back ends the app's call bridged to the server and drops its uploads
-before `home.move.start` leaves (`end_for_return/0`), a step of the move back
-this spec does not model (`home_return` does). The serializer, the key rule,
+(`end_for_return/0`; since 4fdc1bcd only once the server answered with the
+move's id), a step of the move back this spec does not model (`home_return`
+does). The serializer, the key rule,
 Restore here's request, its job, the busy refusal and the ending are as
 before. The comments' line numbers into `always_on.ex` point at the
 committed code.
+
+## Re-read for the review fixes of stages A, C and 4 (M97, 2026-11-14)
+
+Re-read against 4fdc1bcd, which staled the `always_on.ex` pin: the move
+back's hang-up moved after the server's answer (only on a move id). The
+serializer, the key rule, Restore here's request, its job, the busy refusal
+and the ending are as before; no modelled step changed, and the comments'
+line numbers into `always_on.ex` point at the committed code.
+

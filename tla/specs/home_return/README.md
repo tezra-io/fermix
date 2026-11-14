@@ -487,18 +487,22 @@ numbers into `always_on.ex` point at the committed code.
 
 Walked again against 03df6995, f2d5efc5, f3e63d17 and 4c58837a, which
 staled the `move_worker.ex`, `device_supervisor.ex` and `always_on.ex` pins:
-- **Move now on a move back hangs up first.** After the start is kept
-  (`return_start_ahead/2`, `MnMark`) and before `home.move.start` leaves,
-  `forwarded_move/4` ends the app's call bridged to the server and drops its
-  uploads (`Home.Link.end_for_return/0`: `Relay.end_calls/3`, bounded, and
-  `Uploads.drop_all/2`, each answering `:ok` where its process is gone).
-  Calls and uploads are no state here, so the step between `MnMark` and the
-  forward only takes longer. A call that does not end in time is logged and
-  the server's restart into the move ends it. A caller that exits there
-  instead (a call past its own bound) leaves the start kept and nothing
-  sent, the state a Mac stop between `MnMark` and the forward leaves, which
-  the model has: the server, answering as the primary with no move, has the
-  screen draw undone with Cancel (`UndoneInAnyPhase`).
+- **Move now on a move back hangs up once the server took it** (as of
+  `4fdc1bcd`; at `4c58837a` it hung up before the request left). The start
+  is kept (`return_start_ahead/2`, `MnMark`), `home.move.start` is
+  forwarded, its answer settles the kept start (`return_answered/3`), and
+  only an answer with the move's id then ends the app's call bridged to the
+  server and drops its uploads (`Home.Link.end_for_return/0`); the relay and
+  `Uploads` then refuse new calls and attaches until a session is up again.
+  A refusal, a server that does not answer and an unconfirmed answer leave
+  the call and the uploads as they were; the server's restart into an
+  unconfirmed move ends the call on the server (`tunnel_down/2`,
+  `call_close` `bridge_down`). Calls and uploads are no state here, so the
+  hang-up is folded into the step that takes the answer and needs no step of
+  its own: it writes nothing a rule reads, and the record is settled before
+  it. A hang-up whose call exits there (it matches `:ok`) leaves the start
+  kept with the move's id and the move under way, as a Mac stop right after
+  the settle does, which the model has.
 - **A meeting holds the move back.** `MoveReadiness` blocks while a meeting
   is in progress, and `Move.start` asks the review it is given again, so the
   server refuses `home.move.start`; the answer is a refusal, which takes the
