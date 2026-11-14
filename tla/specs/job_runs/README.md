@@ -1126,6 +1126,14 @@ shortest and can change between runs.
   exits normally"; the watchdog tests, which kill a linked loop and still
   expect the runner to exit `:normal`).
 
+## Re-read for events drawn as cards (2026-11-13)
+
+`reply_delivery_opts` now keeps the run's events and trips blocks beside its lists (M89): it
+takes the run's records from the in-memory `ReplyBlocks` holder once, as
+before, and passes the kept blocks as the send's `blocks`, which a channel that
+draws none ignores. No modelled row, helper, delivery or report changed, and
+the change sits below every line the spec cites, so no reference moved.
+
 ## Assumptions
 
 - Every Repo call completes, or its caller dies, or, for the Scheduler, it

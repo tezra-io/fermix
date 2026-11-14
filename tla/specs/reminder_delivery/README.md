@@ -530,6 +530,15 @@ states an occurrence in, is public for the reply's event card
 (`Temporal.Card`). No delivery path changed; the cited `registry.ex` lines
 point at the committed code.
 
+Re-read on 2026-11-13 for events drawn as cards, which staled the `mobile.ex`
+pin: a phone's message now also says it draws events when its session
+negotiated mobile 3, and trips once its list channel pulled the trips index, by the
+same answer that decides which blocks it is sent; `registry.ex`'s yearly `stated_as`
+reads with a comma where it had an em dash, a word of the text it sends.
+A reminder is delivered with no `turn_id`, so it takes no records and carries
+no block; its row, proactive dedupe and push are as before. The spec cites no
+`mobile.ex` line. No delivery path the spec models changed.
+
 ## Code and doc drift
 
 - `delivery_worker.ex:160-163` says a claim past the validity boundary "cannot
