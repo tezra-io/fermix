@@ -979,7 +979,11 @@ names `endpoint`, who the call runs for: `desktop` (the Mac app's socket) or
 Fermix itself; `computer:<id>`, a linked computer's app whose engine bridges
 its socket to its server, M97 §9.2, the phone call's run type); the Realtime
 engine's `[:fermix, :realtime, :call_start]`
-carries it too, and the exporter puts it on both kinds of call root. A phone's
+carries it too, and the exporter puts it on both kinds of call root. That
+engine's `[:fermix, :realtime, :session_updated]` adds `kept_lines` (`left_out`,
+or `previous` on a refresh) and `kept_lines_reason` when the owner's lists and
+trips could not be read for that `session.update`, so a trace shows the call
+ran without their lines; the exporter keeps both on its span. A phone's
 call (M87), and a linked computer's (M97 §9.2), outlives a closed session for
 its 20 s window: `phone_detached`
 marks the device's session closing mid-call, and `phone_resumed` its return,

@@ -2,9 +2,10 @@ defmodule FermixCore.Checklists.Note do
   @moduledoc """
   What the model is told about the owner's lists on every turn that may use
   them (MILESTONE_85 §05), appended by `Agents.TurnRunner` the way the current
-  date is. Both are nil on any turn but the owner's private turn or voice call
-  (`Kept.Access.private_owner_turn?/1`), so a guest, a group chat or a
-  shared session is told nothing of the lists.
+  date is, and to an OpenAI Realtime call's instructions by
+  `Realtime.SessionServer`. Both are nil on any turn but the owner's private
+  turn or voice call (`Kept.Access.private_owner_turn?/1`), so a guest, a
+  group chat or a shared session is told nothing of the lists.
 
   `rules/3` is the routing line, the one that says a list never lives in
   memory, and the channel line (`Prompt.ChannelPresentation.checklist_line/2`):

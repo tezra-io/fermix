@@ -66,6 +66,18 @@
       "sha256": "e2e953c6334725352ee7ad56ea9e5bd67f0fc1dddd5cd1844584c97d136e30e0",
       "text": "Hi there. Can you hear me all right?"
     },
+    "list_make_packing": {
+      "duration_ms": 5008,
+      "file": "list_make_packing.wav",
+      "sha256": "a3e10c755f4dbec09c91fcb43fba9a4325fd033346239aced453ab01b95daba7",
+      "text": "Make me a packing list for the weekend with a toothbrush, warm socks and a phone charger."
+    },
+    "list_remove_packing": {
+      "duration_ms": 3218,
+      "file": "list_remove_packing.wav",
+      "sha256": "70a67016848bb10ac0863120202bc8fed7f42680c25a8d89440998402cd4d794",
+      "text": "Thanks. Now remove that packing list, please."
+    },
     "rota_intake_13": {
       "duration_ms": 8861,
       "file": "rota_intake_13.wav",
@@ -89,6 +101,18 @@
       "file": "stocktake_20_rice.wav",
       "sha256": "9032ee052de0175bdb46fc2b4b706d699dc3f1c19d0ed0bd4684f6c96a6f4163",
       "text": "Could you run the pantry stocktake script from the voice fixtures folder in my workspace for the twentieth of March, twenty twenty-seven? I want to know which shelf the rice is on."
+    },
+    "trip_plan_vell_19": {
+      "duration_ms": 8810,
+      "file": "trip_plan_vell_19.wav",
+      "sha256": "2694ac219b13f617e8cf586f4c9efb538afd03927783cf94514d8ac682dcb628",
+      "text": "Plan Saturday the nineteenth of June, twenty twenty-seven, in Vell, in Kaldria, for me: the castle at ten and lunch at the harbour market at one."
+    },
+    "trip_remove_vell": {
+      "duration_ms": 2998,
+      "file": "trip_remove_vell.wav",
+      "sha256": "ae7b8b7a86095e48ab4487c8aa17e69bde7acd6e31e9fb1a7f7f28249e7bab70",
+      "text": "Thanks. Now remove that Vell trip, please."
     }
   },
   "format": {

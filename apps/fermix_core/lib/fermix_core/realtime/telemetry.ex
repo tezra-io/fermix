@@ -17,10 +17,14 @@ defmodule FermixCore.Realtime.Telemetry do
 
   @typedoc """
   The call's correlation fields. `endpoint` (`desktop`, `<kind>:<device_id>`)
-  is who the call runs for; only `call_start` carries it.
+  is who the call runs for; only `call_start` carries it. `kept_lines` and
+  `kept_lines_reason` ride only `session_updated`, and only when the owner's
+  lists and trips could not be read for that `session.update`.
   """
   @type meta :: %{
           optional(:endpoint) => String.t(),
+          optional(:kept_lines) => String.t(),
+          optional(:kept_lines_reason) => String.t(),
           session_id: String.t(),
           device_id: String.t(),
           model: String.t(),
@@ -35,8 +39,16 @@ defmodule FermixCore.Realtime.Telemetry do
   @spec session_created(meta()) :: :ok
   def session_created(meta) when is_map(meta), do: emit(:session_created, %{}, base(meta))
 
+  @doc """
+  OpenAI took the call's instructions. When the owner's lists and trips
+  could not be read for them (`SessionServer`'s one budget for those reads),
+  `kept_lines` says whether their lines were `left_out` or kept from the
+  `previous` update, and `kept_lines_reason` why, so a trace shows the call
+  ran without them.
+  """
   @spec session_updated(meta()) :: :ok
-  def session_updated(meta) when is_map(meta), do: emit(:session_updated, %{}, base(meta))
+  def session_updated(meta) when is_map(meta),
+    do: emit(:session_updated, %{}, meta |> base() |> with_kept_lines(meta))
 
   @spec reconnect(meta(), non_neg_integer()) :: :ok
   def reconnect(meta, attempt) when is_map(meta) and is_integer(attempt) and attempt >= 0 do
@@ -119,6 +131,12 @@ defmodule FermixCore.Realtime.Telemetry do
     do: Map.put(metadata, :endpoint, endpoint)
 
   defp with_endpoint(metadata, _meta), do: metadata
+
+  defp with_kept_lines(metadata, %{kept_lines: lines, kept_lines_reason: reason})
+       when lines in ["left_out", "previous"] and is_binary(reason),
+       do: Map.merge(metadata, %{kept_lines: lines, kept_lines_reason: Telemetry.preview(reason)})
+
+  defp with_kept_lines(metadata, _meta), do: metadata
 
   defp emit(name, measurements, metadata) do
     :telemetry.execute([:fermix, :realtime, name], measurements, metadata)

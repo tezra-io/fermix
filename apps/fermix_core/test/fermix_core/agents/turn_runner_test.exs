@@ -2571,6 +2571,43 @@ defmodule FermixCore.Agents.TurnRunnerTest do
       end
     end
 
+    # A Live or Grok call hands its task to a turn on the voice channel. In a
+    # private call the reply is only said: it is told what a call says of a
+    # list or a trip, never a screen's lines (write the list, link each stop),
+    # which would be read aloud.
+    test "a private call's hand-off is told the call's lines, never a screen's",
+         %{repo: repo, owner: owner} do
+      create_trip!(repo, owner)
+
+      {messages, _opts} =
+        run_capture_turn(voice_msg("what is left on the trip"), start_voice_store(),
+          memory_repo: repo
+        )
+
+      assert rules_line(messages) =~ "\nOn a call, say what changed in a list"
+      refute rules_line(messages) =~ "No list is drawn here"
+      assert trip_rules_line(messages) =~ "\nOn a call, say what changed in a trip"
+      refute trip_rules_line(messages) =~ "No trip is drawn here"
+    end
+
+    # In a call in the chat, what the hand-off cannot say is shown as text in
+    # the owner's chat (`LivePrompt.backend_addendum/1`), so it keeps the
+    # lines that write the list and the days out for that part.
+    test "a chat call's hand-off keeps the lines that write a list and a trip out",
+         %{repo: repo, owner: owner} do
+      create_trip!(repo, owner)
+
+      {messages, _opts} =
+        run_capture_turn(chat_hand_off("what is left on the trip"), start_voice_store(),
+          memory_repo: repo
+        )
+
+      assert rules_line(messages) =~ "\nNo list is drawn here"
+      refute rules_line(messages) =~ "On a call"
+      assert trip_rules_line(messages) =~ "\nNo trip is drawn here"
+      refute trip_rules_line(messages) =~ "On a call"
+    end
+
     test "a shared chat's turn and a guest's carry no trip line", %{repo: repo, owner: owner} do
       create_trip!(repo, owner)
 

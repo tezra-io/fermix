@@ -200,6 +200,16 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **On a voice call, Fermix says what changed in a list or a trip.** A
+  request said on a call that makes or changes a list or a trip gets a
+  sentence about what changed. The items or the days are read out only when
+  you ask, and a link is never read aloud. An OpenAI Realtime call now knows
+  your lists and trips as a chat does. If they can't be read in time, the call
+  starts without them.
+- **Fermix names what a plan depends on that you didn't mention.** When
+  something you didn't say would change the outcome, such as where you stay
+  on a weekend away, the reply says so in a line. It doesn't invent the
+  missing part or act on it, and a simple request gets nothing added.
 - **One voice call at a time, on every voice model.** A second call now
   waits for the first whichever model runs it: OpenAI Realtime too, not
   only GPT-Live and Grok, so two calls can no longer bill side by side.

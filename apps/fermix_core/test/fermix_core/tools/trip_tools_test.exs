@@ -122,6 +122,44 @@ defmodule FermixCore.Tools.TripToolsTest do
     refute read.output =~ written
   end
 
+  # A call is known by the voice-call fact: the OpenAI Realtime call's tool
+  # context names no channel, and a Live or Grok hand-off's is the voice
+  # channel's. Either one that was not told hears the call's line.
+  test "a call that was not told how a call shows a trip has the call's line after the answer",
+       %{context: context} do
+    spoken = "\n\nOn a call, say what changed in a trip; read its days aloud only when asked"
+    written = "No trip is drawn here"
+
+    realtime =
+      context |> Map.drop([:channel, :chat_type]) |> Map.put(:computer_use_origin, :voice)
+
+    hand_off =
+      Map.merge(context, %{
+        channel: "voice",
+        computer_use_origin: :voice,
+        voice_conversation: "private"
+      })
+
+    assert create!(realtime).output =~ spoken
+
+    for call <- [realtime, hand_off] do
+      {:ok, read} = TripRead.execute(%{"trip" => "Varonne"}, call)
+      assert read.output =~ spoken, inspect(call.computer_use_origin)
+      refute read.output =~ written
+
+      {:ok, read} = TripRead.execute(%{"trip" => "Varonne"}, Map.put(call, :trips_told, true))
+      refute read.output =~ spoken
+    end
+
+    # A chat call's hand-off shows what it cannot say in the owner's chat, so
+    # its answer keeps the line that writes the days out.
+    {:ok, read} =
+      TripRead.execute(%{"trip" => "Varonne"}, %{hand_off | voice_conversation: "chat"})
+
+    assert read.output =~ "\n\n" <> written
+    refute read.output =~ spoken
+  end
+
   # D9: a trip tool's own answer is not outside content. A stop written after
   # outside content comes back labelled as data, and the read brings the turn
   # no outside source, as the engine's own lookups bring none.

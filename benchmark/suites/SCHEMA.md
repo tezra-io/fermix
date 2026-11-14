@@ -648,8 +648,11 @@ The case's `voice:` map is the call:
   would barge in and cut it. `after: task_running` (not on the first clip) also waits for a `task`
   frame saying `running` since the previous clip began, so "while that runs",
   "cancel that" and "I meant the twentieth" are said while the task is in
-  flight; a clip whose `after` does not hold within 30 s is abandoned with the
-  clips after it, and the call goes on.
+  flight; `after: task_settled` waits until a task ended since the previous clip
+  began, none is in flight and the voice has been quiet 1 s, so a next request
+  is said after the answer to the last. A clip whose `after` does not hold
+  within 30 s (150 s for `task_settled`) is abandoned with the clips after it,
+  and the call goes on.
 - `quiet_ms` (1000–20000, default 5000) — the call has settled once every clip
   was said, every task's newest revision ended (`completed`, `failed`,
   `cancelled`), the speaker has played everything, and no `audio_delta`,

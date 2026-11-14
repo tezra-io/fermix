@@ -360,6 +360,23 @@ defmodule FermixOpik.MapperTest do
     assert span.metadata.model == "gpt-realtime-2"
   end
 
+  # A call whose session.update went without the owner's lists' and trips'
+  # index lines says so on its span, with why the store could not be read.
+  test "realtime_span keeps whether a session.update went without its kept lines" do
+    span =
+      Mapper.realtime_span(
+        %{model: "gpt-realtime-2", kept_lines: "left_out", kept_lines_reason: "timeout"},
+        %{},
+        trace_id: "trace-1",
+        project_name: "fermix",
+        ended: @ended,
+        phase: :session_updated
+      )
+
+    assert span.metadata.kept_lines == "left_out"
+    assert span.metadata.kept_lines_reason == "timeout"
+  end
+
   # The outbound MCP server identity is already stamped on every MCP tool exec by
   # `MCP.Capability.invoke/6`; before this key was allowlisted it was dropped from
   # every Opik tool span (each builder hard-codes its own key set — there is no

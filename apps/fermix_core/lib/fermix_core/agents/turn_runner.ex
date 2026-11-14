@@ -624,6 +624,10 @@ defmodule FermixCore.Agents.TurnRunner do
       # parks on that call and the owner's spoken yes can answer it. `nil` on
       # every non-voice turn (a forged `voice_call` never clears `VoiceCall`).
       voice_call_id: voice_call_id(voice_call),
+      # The call's mode (`"chat"` or `"private"`, M56 §5), nil off a call: in a
+      # chat call what the reply cannot say is shown in the owner's chat, so
+      # `ChannelPresentation.channel_of/1` tells it a screen's lines.
+      voice_conversation: voice_conversation(voice_call),
       channel: msg.channel,
       # Chat context (private DM vs shared group), from the inbound message
       # metadata. `request_directory_access` reads it to keep the tap-to-copy
@@ -678,13 +682,18 @@ defmodule FermixCore.Agents.TurnRunner do
     # date note's once-a-day churn the only churn in this prompt region.
     messages = inject_channel_presentation(messages, msg)
 
+    # The lists' and trips' lines are the channel's whose reply this is
+    # (`ChannelPresentation.channel_of/1`): the turn's own, but a call's on a
+    # hand-off whose reply is only said.
+    presented = ChannelPresentation.channel_of(context)
+
     messages =
-      append_system_note(messages, ChecklistNote.rules(context, msg.channel, draws_lists?(msg)))
+      append_system_note(messages, ChecklistNote.rules(context, presented, draws_lists?(msg)))
 
     # The owner's trips (M89 §04) beside the lists, only while a trip exists
     # (C8); a trip tool tells a turn that was not told how its channel shows
     # a trip (`trips_told`).
-    trips = TripNote.lines(context, msg.channel, draws_trips?(msg))
+    trips = TripNote.lines(context, presented, draws_trips?(msg))
 
     context =
       Map.merge(context, %{trips_told: trips.rules != nil, draws_trips: draws_trips?(msg)})
@@ -838,6 +847,9 @@ defmodule FermixCore.Agents.TurnRunner do
 
   defp voice_call_id({:ok, %{call_id: call_id}}), do: call_id
   defp voice_call_id(:none), do: nil
+
+  defp voice_conversation({:ok, %{conversation: conversation}}), do: conversation
+  defp voice_conversation(:none), do: nil
 
   defp request_cwd_for(:operator, msg), do: Map.get(msg, :request_cwd)
   defp request_cwd_for(_trust, _msg), do: nil

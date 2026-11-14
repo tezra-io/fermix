@@ -5,6 +5,7 @@ defmodule FermixCore.Realtime.SessionServerTest do
   alias FermixCore.Capabilities.Builtin
   alias FermixCore.Capabilities.Capability
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
+  alias FermixCore.Checklists.Note, as: ChecklistNote
   alias FermixCore.Computers.Computer
   alias FermixCore.HostFacts
   alias FermixCore.Jobs.Registry
@@ -183,6 +184,15 @@ defmodule FermixCore.Realtime.SessionServerTest do
         safety_identifier: "safe-id",
         capabilities: [capability],
         task_supervisor: task_supervisor,
+        # The call's own tool context, with no store: what it is told of the
+        # owner's lists and trips never rests on the suite's global Repo.
+        context: %{
+          agent_name: "realtime",
+          conversation_key: ConversationRecorder.conversation_key("unknown"),
+          memory_repo: nil,
+          realtime?: true,
+          source_trust: :operator
+        },
         prompt_loader: fn _opts ->
           {:ok, %{messages: [%{role: "system", content: "prompt"}], parts: [], accounting: []}}
         end
@@ -200,7 +210,11 @@ defmodule FermixCore.Realtime.SessionServerTest do
     [event] = FakeOpenAIClient.events(openai)
 
     assert event.type == "session.update"
-    assert event.session.instructions == "prompt"
+    # The owner's call has no store, so keeps no list or trip: after the
+    # prompt, the lists' rules alone, with the call's line (`Checklists.Note`).
+    owner_call = %{source_trust: :operator, computer_use_origin: :voice}
+    list_rules = ChecklistNote.rules(owner_call, "voice", false)
+    assert event.session.instructions == "prompt\n\n" <> list_rules
     assert [%{name: "echo"}] = event.session.tools
   end
 

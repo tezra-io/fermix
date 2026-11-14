@@ -1,0 +1,86 @@
+# Lists and trips on a call: what the voice says when a request said aloud
+# changes a list or a trip. A task-engine call (Grok Voice by default, GPT-Live
+# with --voice-engine openai_live) hands each request to a Fermix turn on the
+# `voice` channel, which keeps the owner's lists and trips as a private turn
+# does; nothing is drawn on a call, so the turn is told to say in a sentence
+# what changed and never to read a link aloud.
+#
+# `drive: voice` (bin/evallib/voice.py) streams fixture audio into the call
+# (the clips live in bin/make_voice_fixtures.py). It needs a home seeded for
+# voice (`bin/seed_capability_home.py --voice`, XAI_API_KEY on the daemon; or
+# `--voice --voice-engine openai_live` with OPENAI_API_KEY). Each case says two
+# things in one call: make the trip or the list, then, once the voice has said
+# what it made (`after: task_settled`), remove it, so nothing is left in the
+# eval home; each writes memory.db, so the scenario is
+# isolated_mutation.
+#
+# GATES. The wire's floor: the call ends in no error and both tasks complete.
+# `caption_not_matches` reads what the voice said aloud: no link, map address
+# or place id, which a reply written for a screen would carry. The rubric
+# holds the substance. No route gate: the hand-off is the call's own, and the
+# turn's tools are graded by what the voice reports.
+suite: voice_lists_and_trips
+risk: isolated_mutation
+title: "Lists and trips on a call: the voice says what changed, never a link"
+description: >
+  Real calls on the voice socket: a request said aloud makes a trip or a
+  packing list through a Fermix task, and a second removes it. The voice says
+  in a sentence or two what changed and reads out no link, address or place id.
+defaults:
+  timeout_ms: 240000
+  judge: true
+  expect:
+    status: ok
+
+scenarios:
+  - id: a_list_or_a_trip_changed_on_a_call
+    risk: isolated_mutation
+    title: "A trip or a list changed on a call is said back in a sentence, with no link"
+    severity: normal
+    tags: [voice, trips, lists]
+    cases:
+      - id: a_vell_trip_on_a_call
+        drive: voice
+        voice:
+          clips:
+            - say: trip_plan_vell_19
+            - say: trip_remove_vell
+              after: task_settled
+        expect:
+          wire:
+            engine: [xai_realtime, openai_live]
+            events_all: [call_ready, caption, audio_delta, task]
+            events_none: [error]
+            task_statuses_all: [completed]
+            task_statuses_none: [failed]
+            max_tasks: 2
+            caption_not_matches: '(?i)https?://|www\.|maps\.apple|place[-_ ]?id|\.com\b'
+        rubric: |
+          1. After the first request, the voice says a trip was made for Saturday 19 June
+             2027 in Vell with the castle at 10:00 and lunch at the harbour market at
+             13:00, in a sentence or two.
+          2. The voice reads out no link, web address, map address or place id.
+          3. After the second request, the voice says the trip was removed.
+          Not required: whether the stops were placed on a map.
+      - id: a_packing_list_on_a_call
+        drive: voice
+        voice:
+          clips:
+            - say: list_make_packing
+            - say: list_remove_packing
+              after: task_settled
+        expect:
+          wire:
+            engine: [xai_realtime, openai_live]
+            events_all: [call_ready, caption, audio_delta, task]
+            events_none: [error]
+            task_statuses_all: [completed]
+            task_statuses_none: [failed]
+            max_tasks: 2
+            caption_not_matches: '(?i)https?://|www\.|place[-_ ]?id|\.com\b'
+        rubric: |
+          1. After the first request, the voice says a packing list was made, in a
+             sentence or two; naming the toothbrush, the socks and the charger the
+             owner gave is fine.
+          2. The voice reads out no link or web address.
+          3. After the second request, the voice says the list was removed.

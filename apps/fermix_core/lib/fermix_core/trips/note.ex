@@ -2,7 +2,8 @@ defmodule FermixCore.Trips.Note do
   @moduledoc """
   What the model is told of the owner's trips on a turn that may use them
   (M89 §04), appended by `Agents.TurnRunner` beside the lists' lines
-  (`Checklists.Note`). Both are nil on any turn but the owner's private turn
+  (`Checklists.Note`), and by `Realtime.SessionServer` to a call's
+  instructions. Both are nil on any turn but the owner's private turn
   or voice call (`Kept.Access.private_owner_turn?/1`), and while the owner
   keeps no trip (C8): a home with no trip pays the two tool schemas only, and
   a trip tool's answer carries the channel's line to a turn that was not told

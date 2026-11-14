@@ -544,7 +544,9 @@ defmodule FermixOpik.TraceFile do
       :voice,
       :session_scope,
       :reason,
-      :attempt
+      :attempt,
+      :kept_lines,
+      :kept_lines_reason
     ])
   end
 

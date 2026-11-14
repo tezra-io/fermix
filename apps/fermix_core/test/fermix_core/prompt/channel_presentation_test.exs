@@ -143,4 +143,55 @@ defmodule FermixCore.Prompt.ChannelPresentationTest do
       end
     end
   end
+
+  # A call that is only said hears what changed in a list or a trip: the
+  # OpenAI Realtime call, whose tool context names no channel and is known by
+  # the voice-call fact, and a Live or Grok call's hand-off in a private call.
+  # Nothing is drawn on a call, and a screen's lines (write the list, link
+  # each stop) would be read aloud. A hand-off in a chat call shows what it
+  # cannot say in the owner's chat, as text, so it keeps those lines.
+  describe "a call's lines" do
+    test "the voice channel says what changed, never a screen's lines" do
+      list = ChannelPresentation.checklist_line("voice", false)
+      trip = ChannelPresentation.trip_line("voice", false)
+
+      assert list ==
+               "On a call, say what changed in a list; read its items aloud only when asked."
+
+      assert trip ==
+               "On a call, say what changed in a trip; read its days aloud only when asked, " <>
+                 "and never read a link aloud."
+
+      assert ChannelPresentation.checklist_line("voice", true) == list
+      assert ChannelPresentation.trip_line("voice", true) == trip
+      refute ChannelPresentation.checklist_line("telegram", false) == list
+      refute ChannelPresentation.trip_line("telegram", false) == trip
+    end
+
+    test "a call that is only said is the voice channel's; every other context is its own" do
+      assert ChannelPresentation.channel_of(%{computer_use_origin: :voice}) == "voice"
+
+      assert ChannelPresentation.channel_of(%{channel: "voice", computer_use_origin: :voice}) ==
+               "voice"
+
+      private = %{channel: "voice", computer_use_origin: :voice, voice_conversation: "private"}
+      assert ChannelPresentation.channel_of(private) == "voice"
+
+      # A chat call's hand-off: its shown part is text in the owner's chat,
+      # which draws nothing, so it is told the lines of no drawing surface.
+      chat = %{private | voice_conversation: "chat"}
+      assert ChannelPresentation.channel_of(chat) == nil
+
+      assert ChannelPresentation.checklist_line(ChannelPresentation.channel_of(chat), false) ==
+               ChannelPresentation.checklist_line("telegram", false)
+
+      assert ChannelPresentation.channel_of(%{
+               channel: "telegram",
+               computer_use_origin: :interactive
+             }) == "telegram"
+
+      assert ChannelPresentation.channel_of(%{channel: "companion"}) == "companion"
+      assert ChannelPresentation.channel_of(%{computer_use_origin: :unattended}) == nil
+    end
+  end
 end

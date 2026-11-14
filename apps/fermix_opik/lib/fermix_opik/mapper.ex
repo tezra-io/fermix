@@ -341,7 +341,11 @@ defmodule FermixOpik.Mapper do
           model: Map.get(metadata, :model),
           voice: Map.get(metadata, :voice),
           reason: Map.get(metadata, :reason),
-          attempt: Map.get(metadata, :attempt)
+          attempt: Map.get(metadata, :attempt),
+          # A `session_updated` whose instructions went without the owner's
+          # lists' and trips' lines, or kept the last ones, and why.
+          kept_lines: Map.get(metadata, :kept_lines),
+          kept_lines_reason: Map.get(metadata, :kept_lines_reason)
         })
     }
     |> drop_nil()

@@ -690,6 +690,7 @@ class FakeVoiceDaemon:
         self.received: list[dict] = []
         self.utterances: list[int] = []         # chunk index each utterance began at
         self.running_sent_at: int | None = None
+        self.settled_sent_at: int | None = None
         self.greeted_at: int | None = None      # chunks heard when the greeting had played
         self.client_closed = False
         self.server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -746,6 +747,8 @@ class FakeVoiceDaemon:
                    "status": status})
         if status == "running" and self.running_sent_at is None:
             self.running_sent_at = self.chunks
+        if status in voice.TERMINAL_STATUSES and self.settled_sent_at is None:
+            self.settled_sent_at = self.chunks
 
     def _on(self, frame):
         kind = frame["type"]
@@ -1025,6 +1028,20 @@ def test_a_clip_after_task_running_waits_for_the_running_frame(daemon):
     gates = voice.wire_gates(evidence, {"spoke_while_task_running": True,
                                         "task_statuses_all": ["completed"]})
     assert all(g.passed for g in gates), [g.detail for g in gates]
+
+
+def test_a_clip_after_task_settled_waits_for_the_answer_and_the_voice(daemon):
+    # The first request's task completes some chunks after it starts and the
+    # voice then says its answer; the second clip begins only after both.
+    fake = daemon(mode="answer", complete_after=12)
+
+    evidence = voice.drive(fake.home, _plan("task_settled"), timeout_s=30)
+
+    assert evidence.ok, evidence.error
+    assert len(fake.utterances) == 2, fake.utterances
+    assert fake.settled_sent_at is not None and fake.utterances[1] > fake.settled_sent_at
+    assert evidence.spoken().endswith("Shelf Kestrel.")
+    assert evidence.abandoned == []
 
 
 def test_a_microphone_running_late_still_ends_each_clip_when_its_audio_ends(daemon, monkeypatch):

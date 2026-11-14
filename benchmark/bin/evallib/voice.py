@@ -15,8 +15,11 @@ A case is one call (the `voice:` map of the case):
   named by their key in `suites/fixtures/voice/manifest.json`. Each clip waits
   `gap_ms` of silence first; a later clip with `after: task_running` waits for a
   task frame saying `running` before its gap starts, so "while that runs" and
-  "cancel that" are said while the task is in flight. A clip whose `after`
-  never holds is abandoned, with the clips after it, and the call goes on.
+  "cancel that" are said while the task is in flight, and one with `after:
+  task_settled` waits until a task ended since the clip before began, none is in
+  flight and the voice has been quiet a second, so a next request follows the
+  answer to the last. A clip whose `after` never holds is abandoned, with the
+  clips after it, and the call goes on.
 - `quiet_ms` — the call has settled once every clip was said, every task's
   newest revision ended, everything the voice sent has played, and nothing new
   arrived for this long. Then the runner ends the call.
@@ -93,7 +96,7 @@ TERMINAL_STATUSES = ("completed", "failed", "cancelled")
 # What a task revision ENDED as: its last status, except that a cancelled
 # revision a newer revision of the same task replaced reads `superseded`.
 ENDED_STATUSES = (*TASK_STATUSES, "superseded")
-AFTER_CONDITIONS = ("task_running",)
+AFTER_CONDITIONS = ("task_running", "task_settled")
 SPEC_KEYS = {"clips", "quiet_ms"}
 CLIP_KEYS = {"say", "gap_ms", "after"}
 WIRE_KEYS = {"engine", "events_all", "events_none", "task_statuses_all", "task_statuses_none",
@@ -107,6 +110,7 @@ DEFAULT_QUIET_MS = 5_000
 MIN_QUIET_MS = 1_000
 MAX_QUIET_MS = 20_000
 AFTER_WAIT_MS = 30_000                  # how long a clip waits for its `after`
+SETTLED_WAIT_MS = 150_000               # ...for `task_settled`: a task may take this long
 OPENING_WAIT_MS = 4_000                 # call_ready -> the voice begins its greeting
 OPENING_QUIET_MS = 1_000                # the voice is done once quiet this long
 OPENING_MAX_MS = 20_000                 # call_ready -> the opening is over, whatever it does
@@ -737,9 +741,9 @@ class _Mic:
             return
         since = self._since if self._since is not None else call.ready_at_ms
         if self._ready_at is None:
-            held_at = self._condition_held_at(clip, call)
+            held_at = self._condition_held_at(clip, call, now_ms)
             if held_at is None:
-                if now_ms - since > AFTER_WAIT_MS:
+                if now_ms - since > _after_wait_ms(clip):
                     self.abandoned.extend(c.say for c in self._clips[self._index:])
                     self._index = len(self._clips)
                 return
@@ -752,13 +756,31 @@ class _Mic:
         self.played.append({"say": clip.say, "start_ms": round(now_ms, 1),
                             "end_ms": round(now_ms, 1)})
 
-    def _condition_held_at(self, clip: Clip, call: "_Call") -> float | None:
+    def _condition_held_at(self, clip: Clip, call: "_Call", now_ms: float) -> float | None:
         """When the clip's `after` first held: `task_running` is a task frame
-        saying `running` since the previous clip began."""
+        saying `running` since the previous clip began; `task_settled` is a task
+        that ended since then, with none in flight and the voice quiet
+        OPENING_QUIET_MS, so its answer was said before the next clip."""
         if clip.after is None:
             return 0.0
         begun = self.played[-1]["start_ms"] if self.played else call.ready_at_ms
-        return next((t for t in call.running_at if t >= begun), None)
+        if clip.after == "task_running":
+            return next((t for t in call.running_at if t >= begun), None)
+        return _settled_at(call, begun, now_ms)
+
+
+def _after_wait_ms(clip: Clip) -> int:
+    return SETTLED_WAIT_MS if clip.after == "task_settled" else AFTER_WAIT_MS
+
+
+def _settled_at(call: "_Call", begun: float, now_ms: float) -> float | None:
+    """When the call settled after a task that ended since `begun`, or None
+    while one is in flight, the voice speaks, or it has not been quiet long."""
+    ended = next((t for t in call.ended_at if t >= begun), None)
+    if ended is None or call.in_flight() or call.state == "speaking":
+        return None
+    quiet_from = max(ended, call.voice_last_ms)
+    return quiet_from + OPENING_QUIET_MS if now_ms >= quiet_from + OPENING_QUIET_MS else None
 
 
 def _opening_end(call: "_Call", now_ms: float) -> float | None:
@@ -796,6 +818,7 @@ class _Call:
         self.ready_at_ms: float | None = None
         self.listening = False
         self.running_at: list[float] = []
+        self.ended_at: list[float] = []     # task frames with a terminal status
         self.last_activity_ms = 0.0
         self.tasks: dict[str, tuple[int, str]] = {}     # id -> newest (revision, status)
         self.final_usage = False
@@ -836,6 +859,8 @@ class _Call:
             return
         if status == "running":
             self.running_at.append(t_ms)
+        elif status in TERMINAL_STATUSES:
+            self.ended_at.append(t_ms)
         if pid not in self.tasks or rev >= self.tasks[pid][0]:
             self.tasks[pid] = (rev, status)
 

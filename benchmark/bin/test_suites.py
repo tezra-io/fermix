@@ -687,6 +687,11 @@ def test_the_shipped_numbered_rubrics_parse():
                       "can_you_still_text_me_on_imessage": 4,
                       "a_text_while_the_mac_sleeps": 3,
                       "a_ramen_place_in_vell": 2, "a_cafe_by_the_castle": 2,
+                      # voice_lists_and_trips.yaml
+                      "a_vell_trip_on_a_call": 3, "a_packing_list_on_a_call": 3,
+                      # what_a_plan_depends_on.yaml
+                      "a_weekend_away": 4, "a_dinner_for_eight": 4,
+                      "oat_milk_on_the_list": 3, "rename_a_list": 3,
                       "a_vell_saturday_trip": 3, "a_vell_sunday_trip": 3,
                       # coding_agent_models.yaml
                       "lantern_gray_notes": 3, "harbor_mist_todo_scan": 3,

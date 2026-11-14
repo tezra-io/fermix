@@ -28,6 +28,8 @@ defmodule FermixCore.Prompt.ChannelPresentation do
   model writes one house style and is told what kind of surface will carry it.
   """
 
+  alias FermixCore.OpenLoops.Access, as: OpenLoopsAccess
+
   # OWNER AUTHORS THE FINAL TEXT. Per design §9.6, S3 ships these principles as
   # a reviewed DRAFT placement: the seam, the keying, and the byte-stability are
   # the engineering; the wording is expected to be rewritten by the operator
@@ -103,18 +105,41 @@ defmodule FermixCore.Prompt.ChannelPresentation do
   end
 
   @doc """
+  The channel whose lines a turn's `context` is told. On a voice call
+  (`OpenLoops.Access.voice_call?/1`, since the OpenAI Realtime call's tool
+  context names no channel and a channel key there would move the gates that
+  read it): `"voice"` where the reply is only said, an OpenAI Realtime call or
+  a Live or Grok hand-off in a private call; nil for a hand-off in a chat call
+  (`:voice_conversation` `"chat"`), whose part that cannot be said is shown in
+  the owner's chat as text, which draws nothing, so it is told the lines that
+  write a list or a trip out. Else the turn's own `:channel`.
+  """
+  @spec channel_of(map()) :: String.t() | nil
+  def channel_of(context) when is_map(context) do
+    cond do
+      not OpenLoopsAccess.voice_call?(context) -> Map.get(context, :channel)
+      Map.get(context, :voice_conversation) == "chat" -> nil
+      true -> "voice"
+    end
+  end
+
+  @doc """
   The line about the owner's lists (MILESTONE_85 §05), which
   `Checklists.Note.rules/3` carries on the owner's private turns only. The
   card's line goes to a turn on the Mac's chat whose connection draws lists
   (`draws?`: it pulled their index), never to a version alone, since a Mac
   app on the version may not draw them, and to a phone's turn whose list
-  channel pulled it (M85 E4); every other turn is told to write the list.
+  channel pulled it (M85 E4); a call, which draws nothing and is said, is
+  told to say what changed; every other turn is told to write the list.
   """
   @spec checklist_line(String.t() | nil, boolean()) :: String.t()
   def checklist_line(channel, true) when channel in ["companion", "mobile"] do
     "A list you read or change is drawn under your reply, live: say in a sentence what " <>
       "changed and never repeat its items."
   end
+
+  def checklist_line("voice", draws?) when is_boolean(draws?),
+    do: "On a call, say what changed in a list; read its items aloud only when asked."
 
   def checklist_line(channel, draws?)
       when (is_binary(channel) or is_nil(channel)) and is_boolean(draws?),
@@ -126,13 +151,19 @@ defmodule FermixCore.Prompt.ChannelPresentation do
   carries on the owner's private turns while a trip exists, and the trip
   tools' answers on a turn that was not told it (C8). The drawn line goes to a
   turn on the Mac's chat or a phone whose connection draws trips (`draws?`: it
-  pulled their index, `FermixCore.ReplyBlocks.drawn_types/3`); every other
-  turn is told to write the days out, each placed stop linked.
+  pulled their index, `FermixCore.ReplyBlocks.drawn_types/3`); a call is told
+  to say what changed and never to read a link; every other turn is told to
+  write the days out, each placed stop linked.
   """
   @spec trip_line(String.t() | nil, boolean()) :: String.t()
   def trip_line(channel, true) when channel in ["companion", "mobile"] do
     "A trip you read or change is drawn under your reply, live: say in a sentence or two " <>
       "what changed and do not write its days out."
+  end
+
+  def trip_line("voice", draws?) when is_boolean(draws?) do
+    "On a call, say what changed in a trip; read its days aloud only when asked, and never " <>
+      "read a link aloud."
   end
 
   def trip_line(channel, draws?)

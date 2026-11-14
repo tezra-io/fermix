@@ -128,6 +128,7 @@ defmodule FermixCore.Tools.TripRead do
   The channel's line about trips (`ChannelPresentation.trip_line/2`), on its
   own line after a trip's text, for a turn that was not told it
   (`context.trips_told`); "" for a turn that was, or an answer about no trip.
+  A voice call's is the call's (`ChannelPresentation.channel_of/1`).
   `trip_edit` adds it the same way.
   """
   @spec channel_line(map(), [map()]) :: String.t()
@@ -136,7 +137,7 @@ defmodule FermixCore.Tools.TripRead do
 
   def channel_line(context, [_ | _]) when is_map(context) do
     draws? = Map.get(context, :draws_trips) == true
-    "\n\n" <> ChannelPresentation.trip_line(Map.get(context, :channel), draws?)
+    "\n\n" <> ChannelPresentation.trip_line(ChannelPresentation.channel_of(context), draws?)
   end
 
   # A refusal is traced as the error it is: its tag, and the sentence the model
