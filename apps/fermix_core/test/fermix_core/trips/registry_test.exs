@@ -226,6 +226,31 @@ defmodule FermixCore.Trips.RegistryTest do
                  "Nothing in this call was changed (op 2)."
     end
 
+    # D14: the refusal lists the trips as every list of them is, so a trip that
+    # is over is last and says so, and the model is not led to retry with it.
+    test "a trip no title names is refused with the trips in picker order, past marked", %{
+      repo: repo
+    } do
+      clock = [personalization: [timezone: "Etc/UTC"]]
+      edit!(repo, "Spring in Salvé", [%{"op" => "create", "starts_on" => "2031-04-11"}])
+      edit!(repo, "Kell", [%{"op" => "create"}])
+      varonne!(repo)
+
+      for result <- [
+            Registry.edit(
+              %{"trip" => "Nowhere", "ops" => [%{"op" => "remove_trip"}]},
+              @owner,
+              opts(repo, clock)
+            ),
+            Registry.read(%{"trip" => "Nowhere"}, @owner, opts(repo, clock))
+          ] do
+        assert refusal(result) ==
+                 ~s(No trip is named "Nowhere"; the trips are "Varonne", "Kell", ) <>
+                   ~s|"Spring in Salvé" (past). To make one, start the call with a create op, | <>
+                   "and only when the owner names a new trip."
+      end
+    end
+
     test "a move whose day and after disagree says where after is and changes nothing", %{
       repo: repo
     } do
@@ -409,6 +434,44 @@ defmodule FermixCore.Trips.RegistryTest do
                  :started,
                  opts(repo)
                )
+    end
+
+    # D14: one order on every surface, judged at `now` in the home's zone (the
+    # seam's, never the host's): happening now, then to come, then undated
+    # newest made first, then over, most recently ended first; made in another
+    # order. `past` is true only on the trip that is over.
+    test "the index, the names and trip_read's index are in picker order, past where over", %{
+      repo: repo
+    } do
+      clock = [personalization: [timezone: "Etc/UTC"]]
+      varonne!(repo)
+      edit!(repo, "Orvenne", [%{"op" => "create"}])
+
+      edit!(repo, "Spring in Salvé", [
+        %{"op" => "create", "days" => 3, "starts_on" => "2031-04-11"}
+      ])
+
+      edit!(repo, "Brask", [%{"op" => "create", "days" => 3, "starts_on" => "2031-06-01"}])
+      edit!(repo, "Kell", [%{"op" => "create"}])
+
+      picker = ["Brask", "Varonne", "Kell", "Orvenne", "Spring in Salvé"]
+
+      assert {:ok, index} = Registry.device_index(:independent, opts(repo, clock))
+      assert Enum.map(index, & &1.title) == picker
+      assert for(%{past: true, title: title} <- index, do: title) == ["Spring in Salvé"]
+
+      assert {:ok, names} = Registry.names(@owner, opts(repo, clock))
+      assert Enum.map(names, & &1.title) == picker
+
+      assert {:ok, %{text: text}} = Registry.read(%{}, @owner, opts(repo, clock))
+
+      assert [_heading, brask, varonne, kell, orvenne, salve] = String.split(text, "\n")
+      assert brask =~ ~s(- "Brask" (tr_)
+      assert varonne =~ ~s(- "Varonne" (tr_)
+      assert kell =~ ~s(- "Kell" (tr_)
+      assert orvenne =~ ~s(- "Orvenne" (tr_)
+      assert salve =~ " · Fri 11 to Sun 13 Apr 2031 · past · 3 days, 0 stops · rev 1"
+      refute Enum.any?([brask, varonne, kell, orvenne], &(&1 =~ "past"))
     end
 
     test "a device's edit says so in its telemetry", %{repo: repo} do

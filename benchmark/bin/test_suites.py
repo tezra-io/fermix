@@ -786,6 +786,7 @@ def test_the_shipped_numbered_rubrics_parse():
                       "lantern_walk_says_remove_the_trip": 3,
                       "night_market_says_move_the_dinner": 3,
                       "sunday_walking_order": 3, "saturday_less_walking": 3,
+                      "museum_on_vessmark_day_one": 4, "museum_on_brisa_day_one": 4,
                       # lists.yaml
                       "batteries": 2, "garden_and_kitchen": 3, "groceries": 2,
                       "hardware": 2, "landing_page": 2, "newsletter": 2,

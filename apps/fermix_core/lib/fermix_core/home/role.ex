@@ -141,7 +141,10 @@ defmodule FermixCore.Home.Role do
     {FermixCore.Computers.Calls,
      "waits on what the server asked of its computers; only the primary asks them"},
     {FermixCore.Trips.Placer,
-     "places the stops a trip keeps waiting in memory.db, which a device does not open"}
+     "places the stops a trip keeps waiting in memory.db, which a device does not open"},
+    {FermixCore.Trips.DayTurn,
+     "sends the trips index again when a day's turn moves it, read from memory.db, which a " <>
+       "device does not open"}
   ]
 
   @primary_only_modules Enum.map(@primary_only, &elem(&1, 0))

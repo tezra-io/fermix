@@ -1015,6 +1015,15 @@ joins the conversation first, so an offered link resolves in a later call.
 `Trips.Note` is the rules line and the line naming the trips, only while one
 exists, and `ReplyBlocks` keeps the trips a turn touched for its reply's
 `trips` block (a kept kind: drawn once a connection pulls the trips index).
+Every list of the trips (a device's index, that line, `trip_read`'s index) is
+in one order, `Trips.Picker`'s, pure: now, to come, undated, then over, judged
+against today in the trip's zone or the home's (`Clock.shown_zone/1`), a trip
+that is over marked `past`. The date alone moves it, so `Trips.DayTurn`, a
+primary-only process with one timer armed for the next local midnight a trip
+starts or ends at, never more than 10 min ahead (the BEAM's monotonic clock
+stops while a Mac sleeps), sends the index again by the path any change takes
+(`Kept.Notify.index_moved/3`) when the order or a `past` moved, and once at
+its boot, so a restart never swallows a turn.
 
 Architecture Invariant: one `trip_edit` call is one transaction: every op
 lands or none does, the trip's `rev` moves once, and a row's `n` is never

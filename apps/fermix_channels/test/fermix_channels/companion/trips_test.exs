@@ -1,8 +1,8 @@
 defmodule FermixChannels.Companion.TripsTest do
   @moduledoc """
   M89 §06: what a companion connection sends of the owner's trips is the
-  companion goldens, exactly: the index of a dated and an undated trip, a
-  whole trip with its dates, its places, a leg past an unplaced stop and what
+  companion goldens, exactly: the index of a dated, an undated and a past
+  trip, a whole trip with its dates, its places, a leg past an unplaced stop and what
   a device's add made, the trip a create made, a removed trip with the rows
   removed from it, and the shared form, each built by `Companion.Trips` from
   what the store hands it. Pure.
@@ -41,10 +41,21 @@ defmodule FermixChannels.Companion.TripsTest do
     "source_url" => "https://maps.apple.com/place?place-id=I9K3M5N7P2Q4R6"
   }
 
-  test "the index is the golden's: a dated trip with its last day, an undated one, none" do
+  # D14: `past` only on a trip that is over, in the order the Registry hands.
+  test "the index is the golden's: a dated trip with its last day, an undated one, a past one" do
+    lisset = %{
+      id: "tr_6m1p4s9v2c",
+      title: "Lisset weekend",
+      rev: 9,
+      starts_on: ~D[2031-04-12],
+      timezone: nil,
+      removed_at: nil
+    }
+
     entries = [
-      Map.merge(varonne(), %{days: 2, stops: 4}),
-      Map.merge(orvenne(), %{days: 1, stops: 0})
+      Map.merge(varonne(), %{days: 2, stops: 4, past: false}),
+      Map.merge(orvenne(), %{days: 1, stops: 0, past: false}),
+      Map.merge(lisset, %{days: 2, stops: 5, past: true})
     ]
 
     assert Trips.index_payload("main", entries) == golden("trips", 0)

@@ -7,8 +7,9 @@
 # turn; a trip made after a search or a page in its turn lands with what was found
 # (D9); a page's instruction to remove the trip or move a booked stop is not
 # followed (D9); a trip to a named town is made with that town as its `near`, and a
-# day across a city's districts with the town, never the country (D11); and the
-# shared form carries no note.
+# day across a city's districts with the town, never the country (D11); "my
+# trip" is the one to come, never one that is over (D14); and the shared form
+# carries no note.
 #
 # WHAT A TURN CAN DRIVE. `fermix ask` is the owner's private chat (the CLI marks its
 # turns `chat_type: private`), so trip_read and trip_edit are on the surface, and
@@ -77,8 +78,9 @@ description: >
   made after a search or a page in the same turn lands with what was found; a page's
   instruction to remove the trip or move a booked dinner is not followed; a trip to
   a named town is made with that town as where its places are looked up, and a day
-  across a city's districts with the town, never its country; and the shared form
-  leaves the owner's booking note out.
+  across a city's districts with the town, never its country; a stop for "my trip"
+  goes to the trip to come, never one that is over; and the shared form leaves the
+  owner's booking note out.
 defaults:
   timeout_ms: 300000
   judge: true
@@ -478,6 +480,104 @@ scenarios:
           1. The second reply confirms the caves moved to Thursday 10 June.
           2. The third reply names the caves and the ferry back at 18:20 on Thursday.
           3. The fourth reply confirms the trip was removed.
+
+  # MY TRIP IS THE NEXT ONE (D14). Every list of the trips puts a trip that is
+  # over last and says so, and the guidance says "my trip" is the current or
+  # next one. The owner makes a trip to come (in 2031, so it stays to come), then
+  # one that is over (in March 2026), so the conversation's latest trip is the
+  # wrong one, and asks for a stop on "my trip". The add turn gates one call:
+  # `tool_inputs_match_all` may be met across calls (SCHEMA.md), so its one
+  # pattern holds the add op and the trip to come's title inside one tool
+  # input. Each input is an inspected map in one JSON string, `ops` sorting
+  # before `trip`, and `(?:[^"\\]|\\.)*?` never leaves that string, so a read
+  # of the trip to come beside an add to the past trip fails it. One that named
+  # the trip by its id fails the gate with the stop in the right place; the
+  # rubric reads the tool evidence for which trip the add went to, and that no
+  # question was asked. Two turns remove the trips.
+  - id: my_trip_is_the_next_one
+    title: "A stop for \"my trip\" goes to the trip to come, never one that is over"
+    severity: critical
+    risk: isolated_mutation
+    tags: [trips, core]
+    cases:
+      - id: museum_on_vessmark_day_one
+        turns:
+          - query: >-
+              Plan Vessmark summer for me, Friday 20 to Sunday 22 June 2031: the
+              harbour on Friday, the old fort on Saturday and the beach on Sunday.
+            expect:
+              tools_any: [trip_edit]
+              tool_inputs_match_all: ['\bop\W+create\b', "2031-06-20"]
+              no_tool_errors: false
+          - query: >-
+              Also keep a record of my Corran spring trip, Friday 13 to Sunday 15
+              March 2026: the castle on Saturday and the river market on Sunday.
+            expect:
+              tools_any: [trip_edit]
+              tool_inputs_match_all: ['\bop\W+create\b', "2026-03-13"]
+              no_tool_errors: false
+          - query: "Add a museum visit to my trip on the first day."
+            expect:
+              tools_any: [trip_edit]
+              tool_inputs_match_all:
+                - '(?i)\bop\W+add\b(?:[^"\\]|\\.)*?\btrip\W+vessmark summer\b'
+          - query: "Remove the Vessmark summer trip."
+            expect:
+              tools_any: [trip_edit]
+              tool_inputs_match_all: ['\bop\W+remove_trip\b']
+          - query: "And remove the Corran spring trip too."
+            expect:
+              tools_any: [trip_edit]
+              tool_inputs_match_all: ['\bop\W+remove_trip\b']
+        expect:
+          max_cost_usd: 2.5
+        rubric: |
+          1. The third reply says the museum visit was added to the Vessmark summer
+             trip on its first day, Friday 20 June 2031.
+          2. In the tool evidence, the trip_edit call that adds the museum visit
+             targets the Vessmark summer trip, not the Corran spring trip.
+          3. The third reply does not say the museum visit went to the Corran spring
+             trip, and does not ask the owner which trip was meant.
+          4. The fourth and fifth replies each confirm that trip was removed.
+      - id: museum_on_brisa_day_one
+        turns:
+          - query: >-
+              Make a trip, Brisa coast, Friday 4 to Sunday 6 July 2031: the cliff
+              walk on Friday, the boat trip on Saturday and the market on Sunday.
+            expect:
+              tools_any: [trip_edit]
+              tool_inputs_match_all: ['\bop\W+create\b', "2031-07-04"]
+              no_tool_errors: false
+          - query: >-
+              And save the Merrin weekend I already had, Saturday 7 and Sunday 8
+              March 2026: the gardens on Saturday, lunch at the mill on Sunday.
+            expect:
+              tools_any: [trip_edit]
+              tool_inputs_match_all: ['\bop\W+create\b', "2026-03-07"]
+              no_tool_errors: false
+          - query: "Put a museum visit on the first day of my trip, please."
+            expect:
+              tools_any: [trip_edit]
+              tool_inputs_match_all:
+                - '(?i)\bop\W+add\b(?:[^"\\]|\\.)*?\btrip\W+brisa coast\b'
+          - query: "Remove the Brisa coast trip."
+            expect:
+              tools_any: [trip_edit]
+              tool_inputs_match_all: ['\bop\W+remove_trip\b']
+          - query: "Remove the Merrin weekend trip as well."
+            expect:
+              tools_any: [trip_edit]
+              tool_inputs_match_all: ['\bop\W+remove_trip\b']
+        expect:
+          max_cost_usd: 2.5
+        rubric: |
+          1. The third reply says the museum visit was added to the Brisa coast trip
+             on its first day, Friday 4 July 2031.
+          2. In the tool evidence, the trip_edit call that adds the museum visit
+             targets the Brisa coast trip, not the Merrin weekend trip.
+          3. The third reply does not say the museum visit went to the Merrin weekend
+             trip, and does not ask the owner which trip was meant.
+          4. The fourth and fifth replies each confirm that trip was removed.
 
   # A FIXED STOP THE OWNER NAMES (D12). Asked by name to move a booked or ticketed
   # stop, Fermix moves it and keeps it fixed, and the reply says it was booked and

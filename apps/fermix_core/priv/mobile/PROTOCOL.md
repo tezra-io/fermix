@@ -1736,6 +1736,12 @@ take. Its edits record `made_via: "phone"`, a trip's as a list's. A
 mints a new one for every edit it sends, and an edit whose id an edit of the
 other kind already used is refused and changes nothing.
 
+The `trips` index is the companion wire's too: in the engine's picker order,
+a trip happening now first and the trips that are over last. Only a trip that
+is over carries `past: true`; every other trip has no `past`. A channel that
+pulled the index is sent it again within minutes of a local midnight that
+starts or ends a trip, when that moves the order.
+
 A trip holds at most 1,000 days and stops. An op that can grow a trip is
 refused when its whole `trip`, with the `removed[]` a pull with `removed:
 true` carries, would pass 768 KiB; removing, moving and restoring are never

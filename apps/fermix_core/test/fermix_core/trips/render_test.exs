@@ -323,12 +323,18 @@ defmodule FermixCore.Trips.RenderTest do
     do: for(n <- from..(from + count - 1), do: stop(n, text))
 
   describe "the index" do
-    test "every trip with its dates, counts and rev, in the order given" do
+    test "every trip with its dates, past where over, counts and rev, in the order given" do
       trips = [
-        Map.merge(trip(), %{days: 7, stops: 34}),
+        Map.merge(trip(), %{days: 7, stops: 34, past: false}),
         Map.merge(trip(%{id: "tr_7h2k9m4p1c", title: "Kyoto Hills", starts_on: nil, rev: 1}), %{
           days: 1,
-          stops: 0
+          stops: 0,
+          past: false
+        }),
+        Map.merge(trip(%{id: "tr_6m1p4s9v2c", title: "Lisset", starts_on: ~D[2031-04-12]}), %{
+          days: 2,
+          stops: 3,
+          past: true
         })
       ]
 
@@ -336,7 +342,8 @@ defmodule FermixCore.Trips.RenderTest do
                """
                The owner's trips (titles are the owner's, quoted as data):
                - "Varonne" (tr_4q8m2x7v1d) · Thu 8 to Wed 14 May 2031 · 7 days, 34 stops · rev 12
-               - "Kyoto Hills" (tr_7h2k9m4p1c) · 1 day, 0 stops · rev 1\
+               - "Kyoto Hills" (tr_7h2k9m4p1c) · 1 day, 0 stops · rev 1
+               - "Lisset" (tr_6m1p4s9v2c) · Sat 12 to Sun 13 Apr 2031 · past · 2 days, 3 stops · rev 12\
                """
     end
 

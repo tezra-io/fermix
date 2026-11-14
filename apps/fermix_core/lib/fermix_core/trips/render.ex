@@ -283,8 +283,9 @@ defmodule FermixCore.Trips.Render do
   # --- the index -----------------------------------------------------------------
 
   @doc """
-  The index: every live trip with its dates, day and stop counts and rev, in
-  the order given (the picker's).
+  The index: every live trip with its dates, `past` on one that is over, its
+  day and stop counts and rev, in the order given (the picker's,
+  `Trips.Picker`).
   """
   @spec index([map()]) :: String.t()
   def index([]), do: "The owner keeps no trips yet."
@@ -292,10 +293,11 @@ defmodule FermixCore.Trips.Render do
   def index(trips) when is_list(trips),
     do: Enum.join([@index_heading | Enum.map(trips, &index_line/1)], "\n")
 
-  defp index_line(trip) do
+  defp index_line(%{past: past?} = trip) when is_boolean(past?) do
     joined([
       "- #{quoted(trip.title)} (#{trip.id})",
       span(trip.starts_on, max(trip.days, 1), true),
+      if(past?, do: "past"),
       "#{plural(trip.days, "day")}, #{plural(trip.stops, "stop")}",
       "rev #{trip.rev}"
     ])

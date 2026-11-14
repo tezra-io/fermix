@@ -2734,7 +2734,10 @@ defmodule FermixCore.Management.ProtocolContractTest do
     }
 
     keep =
-      Consent.block(~w(files_and_shell browser computer_use)a, os: :macos, sandbox_mode: :open)
+      Consent.block(~w(files_and_shell browser computer_use places)a,
+        os: :macos,
+        sandbox_mode: :open
+      )
 
     summary =
       golden_summary(

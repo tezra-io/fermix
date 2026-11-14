@@ -24,7 +24,8 @@ defmodule FermixCore.Home.RoleChildrenTest do
     FermixCore.Companion.OriginBackfill,
     FermixCore.Memory.Repo,
     FermixCore.Prompt.TemplateReconciler,
-    FermixCore.Trips.Placer
+    FermixCore.Trips.Placer,
+    FermixCore.Trips.DayTurn
   ]
 
   @kept_here [

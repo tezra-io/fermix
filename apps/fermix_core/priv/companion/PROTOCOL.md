@@ -500,7 +500,7 @@ in a fixed order:
 | `checklists` | `profile_id`, `lists[]` | Version 6. The index: every live list as `{list_id, title, folder?, open, done, rev}`, in picker order. The answer to `checklists_pull`, and pushed again, whole, after any change. Sent only to a connection on version 6 or later placed as the owner's that pulled the index; see *Lists*. |
 | `checklist` | `profile_id`, `list`; `made?` | Version 6. One whole list, `{list_id, title, rev, rows[], removed[]?, removed_at?}`. The answer to `checklist_pull`, and pushed again, whole, after every committed change to it, at most once per 100 ms. Sent only to a connection on version 6 or later placed as the owner's that holds the list; see *Lists*. |
 | `attach_status` | `attach_id`, `status` | Version 7. The answer to an `attach_file` the daemon now holds: `status` is `present`, the only value this wire sends, and a `msg` may name `attach_id` from then on. Sent only to the owner's connection on version 7 or later that sent it; see *Attachments*. |
-| `trips` | `profile_id`, `trips[]` | Version 8. The index: every live trip as `{trip_id, title, days, stops, rev, starts_on?, ends_on?}`, in picker order. The answer to `trips_pull`, and pushed again, whole, after any change. Sent only to a connection on version 8 placed as the owner's that pulled the index; see *Trips*. |
+| `trips` | `profile_id`, `trips[]` | Version 8. The index: every live trip as `{trip_id, title, days, stops, rev, starts_on?, ends_on?, past?}`, in picker order. The answer to `trips_pull`, and pushed again, whole, after any change and within minutes of a local midnight that starts or ends a trip. Sent only to a connection on version 8 placed as the owner's that pulled the index; see *Trips*. |
 | `trip` | `profile_id`, `trip`; `made?` | Version 8. One whole trip, `{trip_id, title, rev, starts_on?, timezone?, rows[], removed[]?, removed_at?}`. The answer to `trip_pull`, and pushed again, whole, after every committed change to it, at most once per 100 ms. Sent only to a connection on version 8 placed as the owner's that holds the trip; see *Trips*. |
 | `trip_shared` | `profile_id`, `client_msg_id`, `trip_id`, `rev`, `text` | Version 8. The answer to `trip_share`: the trip in its shared form, as plain text the engine writes, at the `rev` it shows. Sent only to the owner's connection that asked; see *Trips*. |
 | `error` | `reason`; `message?`, `field?`, `event?`, `client_msg_id?`, `ref?`, `attach_id?`, `direction?`, `client_version?`, `min_version?`, `max_version?` | A refusal; see *Errors*. |
@@ -1323,11 +1323,24 @@ whoever made it.
   changes nothing. An engine in the device role refuses each with its
   sentence, an edit's and a share's with its `client_msg_id`.
 - **The index** (`trips_pull`, answered `trips`). Every live trip in picker
-  order, each `{trip_id, title, days, stops, rev, starts_on?, ends_on?}`:
-  `days` and `stops` count its rows, `rev` moves with every change to it, and
-  `starts_on` and `ends_on`, its first and last days' dates, are there only
-  when it has a start. Once a connection has pulled the index it is sent the
-  index again, whole, after any change to any trip.
+  order, each `{trip_id, title, days, stops, rev, starts_on?, ends_on?,
+  past?}`: `days` and `stops` count its rows, `rev` moves with every change
+  to it, `starts_on` and `ends_on`, its first and last days' dates, are there
+  only when it has a start, and `past` is there, `true`, only on a trip that
+  is over. Picker order is the engine's, and a client draws it as sent: a
+  trip happening now first; then the trips to come, by first day, soonest
+  first; then the trips with no dates, newest made first; then the trips that
+  are over, most recently ended first; a tie goes to the trip made first. A
+  trip is happening now from its first day through its last, and over once
+  its last day has ended, each judged against today in the trip's own time
+  zone, or in the home's when it names none; a trip with no dates is never
+  either. A past trip stays until it is removed, and opens and changes as any
+  other. Once a connection has pulled the index it is sent the index again,
+  whole, after any change to any trip, and within minutes of a local midnight
+  that starts or ends a trip, when the date alone moves the order or a trip's
+  `past` (a Mac that slept through the midnight sends it within minutes of
+  waking). It may also be sent once unchanged after the engine restarts the
+  part of it that watches the date; a client draws it as any push.
 - **A trip** (`trip_pull`, answered `trip`). `trip` is `{trip_id, title, rev,
   starts_on?, timezone?, rows[]}`, the rows in order: each day, then its
   stops. A day is `{row_id, kind: "day", text?, date?, timezone?}`: `text`

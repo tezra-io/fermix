@@ -336,7 +336,7 @@ defmodule FermixCore.Companion.ProtocolTest do
                Protocol.encode_server_event("trip", Map.put(event, "made", %{}))
     end
 
-    test "the index lists each trip by id with its days, stops, rev and dates" do
+    test "the index lists each trip by id with its days, stops, rev, dates and past" do
       entry = %{
         "trip_id" => @trip_id,
         "title" => "Varonne weekend",
@@ -351,12 +351,16 @@ defmodule FermixCore.Companion.ProtocolTest do
       assert {:ok, _line} = index.([entry])
       assert {:ok, _line} = index.([Map.drop(entry, ~w(starts_on ends_on))])
       assert {:ok, _line} = index.([])
+      # D14: a trip that is over says so, and only that way.
+      assert {:ok, _line} = index.([Map.put(entry, "past", true)])
 
       for bad <- [
             Map.delete(entry, "rev"),
             %{entry | "days" => 0},
             %{entry | "ends_on" => "6 July"},
-            Map.put(entry, "starts_on", nil)
+            Map.put(entry, "starts_on", nil),
+            Map.put(entry, "past", false),
+            Map.put(entry, "past", "yes")
           ] do
         assert {:error, {:invalid_field, "trips"}} = index.([bad])
       end

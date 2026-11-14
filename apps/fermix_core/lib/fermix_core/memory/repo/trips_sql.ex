@@ -210,7 +210,8 @@ defmodule FermixCore.Memory.Repo.TripsSql do
 
   # --- reads ---------------------------------------------------------------
 
-  # Every live trip with its day and stop counts, in picker order.
+  # Every live trip with its day and stop counts, in the order made: the
+  # picker's order is `Trips.Picker`'s, which judges it by the date.
   defp index(conn, owner_id, agent_id) do
     sql = """
     SELECT #{prefixed("t", @trip_columns)},

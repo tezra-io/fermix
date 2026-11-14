@@ -22,6 +22,7 @@ defmodule FermixChannels.Companion.ConnectionTripsTest do
   alias FermixChannels.Mobile.RequestCoordinator
   alias FermixCore.Checklists.Registry, as: ChecklistRegistry
   alias FermixCore.Memory.Repo
+  alias FermixCore.Trips.DayTurn
   alias FermixCore.Trips.Geo
   alias FermixCore.Trips.Registry, as: TripRegistry
   alias FermixTestSupport.ParentProcess
@@ -392,6 +393,68 @@ defmodule FermixChannels.Companion.ConnectionTripsTest do
     assert Enum.any?(rows, &(&1["text"] == "Fish market"))
     refute Map.has_key?(pushed, "made")
     assert %{"type" => "trips", "trips" => [%{"stops" => 5, "rev" => 2}]} = recv(mac)
+  end
+
+  # D14: within minutes of the midnight Varonne's last day ends, the day-turn
+  # process sends the index again, by the path any change takes, to the
+  # connection that pulled it; nothing to one that did not, no trip a
+  # connection holds, and nothing at a wake when nothing moved. Its boot sends
+  # the index once too, so a restart never swallows a turn. The connections
+  # read at the midnight's far side; the day-turn's clock and timer are the
+  # test's.
+  test "a day's turn sends the index again to a connection that pulled it, only when it moved",
+       ctx do
+    trip_id = varonne!(ctx)
+    clock_opts = [personalization: [timezone: "Etc/UTC"]]
+
+    restart_endpoint(ctx,
+      trip_opts: ctx.trip_opts ++ [now: ~U[2031-07-07 00:00:01Z]] ++ clock_opts
+    )
+
+    mac = hello(ctx.socket_path, 8)
+    other = hello(ctx.socket_path, 8)
+    assert [%{"trip_id" => ^trip_id, "past" => true}] = pulled = pull_index(mac)
+    _ = pull(mac, trip_id)
+
+    clock = start_supervised!({Agent, fn -> ~U[2031-07-06 23:55:00Z] end})
+
+    day_turn =
+      start_supervised!(
+        {DayTurn,
+         [
+           name: nil,
+           repo: ctx.trip_opts[:repo],
+           clock: fn -> Agent.get(clock, & &1) end,
+           notifier: &ChecklistNotifier.changed(&1, ctx.registry),
+           timer: fn _message, _delay -> make_ref() end
+         ] ++ clock_opts}
+      )
+
+    # Its boot sends the index once; the wake is armed for a second past the
+    # midnight after Varonne's last day, five minutes on, delivered by hand.
+    assert %{wake: %{token: token, delay_ms: 301_000}} = :sys.get_state(day_turn)
+    flush!(ctx.registry)
+    assert %{"type" => "trips", "trips" => ^pulled} = recv(mac)
+
+    Agent.update(clock, fn _now -> ~U[2031-07-07 00:00:01Z] end)
+    send(day_turn, {:wake, token})
+    assert %{wake: %{token: next}} = :sys.get_state(day_turn)
+    flush!(ctx.registry)
+
+    # The index alone: the trip the connection holds did not change.
+    assert %{"type" => "trips", "trips" => ^pulled} = recv(mac)
+
+    # Ten minutes on nothing moved: the wake sends nothing.
+    Agent.update(clock, fn _now -> ~U[2031-07-07 00:10:01Z] end)
+    send(day_turn, {:wake, next})
+    assert %{wake: %{token: _later}} = :sys.get_state(day_turn)
+    flush!(ctx.registry)
+
+    # Nothing came first on either: the next line answers the next request.
+    for client <- [mac, other] do
+      send_line(client, %{"type" => "checklists_pull", "profile_id" => "main"})
+      assert %{"type" => "checklists", "lists" => []} = recv(client)
+    end
   end
 
   test "the real window pushes a trip change once it ends", ctx do

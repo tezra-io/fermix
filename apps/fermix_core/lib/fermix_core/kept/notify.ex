@@ -7,6 +7,10 @@ defmodule FermixCore.Kept.Notify do
   channels app registers in core's app env (`:checklists_notifier`,
   `Companion.ChecklistNotifier`) with `%{owner_id:, <kind>: changes}`. With
   none registered nobody listens; `opts[:notifier]` is a test's own.
+
+  The trips' index also moves with the date alone (M89 D14, `Trips.DayTurn`):
+  `index_moved/3` hands the notifier the kind with no change, which sends the
+  index again to every connection that pulled it and nothing it holds.
   """
 
   # The kinds a notifier hears of, by the key their changes ride under.
@@ -23,6 +27,18 @@ defmodule FermixCore.Kept.Notify do
       {[], _notifier} -> :ok
       {_changes, nil} -> :ok
       {changes, notifier} -> notifier.(%{:owner_id => owner_id, kind => changes})
+    end
+  end
+
+  @doc """
+  Tells the notifier that the trips' index moved while no trip changed: a
+  day's turn started or ended one (`%{owner_id:, trips: []}`).
+  """
+  @spec index_moved(:trips, String.t(), keyword()) :: :ok
+  def index_moved(:trips, owner_id, opts) when is_binary(owner_id) and is_list(opts) do
+    case notifier(opts) do
+      nil -> :ok
+      notifier -> notifier.(%{owner_id: owner_id, trips: []})
     end
   end
 

@@ -440,6 +440,14 @@ defmodule FermixCore.Application do
         # raises on nothing it is sent, so it restarts nothing after it. Its
         # runs stay dark under `mix test`.
         {FermixCore.Trips.Placer, enabled: @compiled_env != :test},
+        # The trips index again at a day's turn (M89 D14), primary-only: within
+        # minutes of a local midnight that starts or ends a trip, the index goes
+        # again to the devices that pulled it, and once at its boot, so a
+        # restart of it never swallows a turn. After the Repo it reads; it
+        # serves no call, arms one timer and raises on nothing it is sent, so it
+        # restarts nothing after it. Dark under `mix test`, whose tests start
+        # their own with an injected clock and timer.
+        {FermixCore.Trips.DayTurn, enabled: @compiled_env != :test},
         # The release table an Always On server's update chooses from (M97
         # §3.4), primary-only and fetching only on a server where Always On
         # is offered. It never raises on a fetch or a table: each fails into

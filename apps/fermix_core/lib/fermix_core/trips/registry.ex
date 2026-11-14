@@ -28,7 +28,11 @@ defmodule FermixCore.Trips.Registry do
       the shared form a device's Share hands on, and one sentence for every
       refusal (`describe_error/1`);
     * **what devices hear** — every committed change, whoever made it, with
-      what a device's create, add or new day made (`Kept.Notify`);
+      what a device's create, add or new day made (`Kept.Notify`), and the
+      trips' day-turn process is told (`Trips.DayTurn.trips_changed/0`);
+    * **the order** — every list of the trips, a device's index, the line
+      naming them and `trip_read`'s index, in picker order at `:now` in the
+      home's zone (`Trips.Picker`), each trip with `past`;
     * **the stops that wait** (D13 B) — a call's stop whose lookup could not
       run for a reason that heals by waiting keeps its words in the same
       transaction (`Trips.Waiting`), and the trip placer is told
@@ -40,20 +44,25 @@ defmodule FermixCore.Trips.Registry do
   Every read and edit emits its event (`Trips.Telemetry`).
 
   Seams (`opts`): `:repo` (the Repo server; nil when the turn has none),
-  `:now`, `:notifier`, `:reply_blocks` (the holder a lookup's records join),
-  `:placer` (0-arity, in place of telling the trip placer) and, for a device,
-  `:made_via`. The place search is the one in force for the turn
-  (`Lookup.backend/1`; a context's `:place_lookup` stands in for it).
+  `:now`, `:personalization` (the home's zone, as `FermixCore.Clock` reads
+  it), `:notifier`, `:reply_blocks` (the holder a lookup's records join),
+  `:placer` and `:day_turn` (0-arity, in place of telling the trip placer or
+  the day-turn process) and, for a device, `:made_via`. The place search is
+  the one in force for the turn (`Lookup.backend/1`; a context's
+  `:place_lookup` stands in for it).
   """
 
+  alias FermixCore.Clock
   alias FermixCore.Kept.Access, as: KeptAccess
   alias FermixCore.Kept.Ids
   alias FermixCore.Kept.Notify, as: KeptNotify
   alias FermixCore.Memory.Repo
   alias FermixCore.ReplyBlocks
   alias FermixCore.Tools.PlaceSearch
+  alias FermixCore.Trips.DayTurn
   alias FermixCore.Trips.Lookup
   alias FermixCore.Trips.Ops
+  alias FermixCore.Trips.Picker
   alias FermixCore.Trips.Placer
   alias FermixCore.Trips.Placing
   alias FermixCore.Trips.Render
@@ -168,7 +177,7 @@ defmodule FermixCore.Trips.Registry do
   defp read_form(_value), do: {:error, {:invalid_param, :as}}
 
   defp do_read(:index, context, opts) do
-    case store(context, opts, :index) do
+    case index(context, opts) do
       {:ok, trips} ->
         {{:ok, %{text: Render.index(trips), touched: []}}, %{scope: :index, trips: length(trips)}}
 
@@ -379,13 +388,13 @@ defmodule FermixCore.Trips.Registry do
 
   @doc """
   The index a device draws (`trips`): every live trip with its day and stop
-  counts and rev, in picker order. Only a connection placed as the owner's
-  (`caller` `:independent`) reads it.
+  counts and rev, in picker order, each with `past` (`Trips.Picker`). Only a
+  connection placed as the owner's (`caller` `:independent`) reads it.
   """
   @spec device_index(atom() | nil, keyword()) :: {:ok, [map()]} | {:error, term()}
   def device_index(caller, opts \\ []) when is_list(opts) do
     with :ok <- KeptAccess.device_gate(caller),
-         do: store(KeptAccess.device_context(), opts, :index)
+         do: index(KeptAccess.device_context(), opts)
   end
 
   @doc """
@@ -487,10 +496,13 @@ defmodule FermixCore.Trips.Registry do
 
   # Every committed change reaches the owner's devices right after the store
   # committed it, whoever made it (`Kept.Notify`): the trip with its rev, and
-  # what a device's create, add or new day made.
+  # what a device's create, add or new day made. The day-turn process then
+  # reads the new order and arms for its next turn (a cast).
   defp announce(context, %{changed?: true, trip: trip}, made, opts) do
     change = %{id: trip.id, rev: trip.rev, made: made}
-    KeptNotify.announce(:trips, owner_id(context), [change], opts)
+
+    with :ok <- KeptNotify.announce(:trips, owner_id(context), [change], opts),
+         do: Keyword.get(opts, :day_turn, &DayTurn.trips_changed/0).()
   end
 
   defp announce(_context, %{changed?: false}, _made, _opts), do: :ok
@@ -550,20 +562,43 @@ defmodule FermixCore.Trips.Registry do
 
   @doc """
   The live trips, for the per-turn line naming them: each with its title,
-  start and day count, in picker order.
+  start, day count and `past`, in picker order.
   """
   @spec names(map(), keyword()) :: {:ok, [map()]} | {:error, term()}
   def names(context, opts \\ []) when is_map(context) and is_list(opts),
-    do: store(context, opts, :index)
+    do: index(context, opts)
 
   # --- the store -------------------------------------------------------------
 
-  defp store(context, opts, request) do
-    case Keyword.get(opts, :repo, Repo) do
-      nil -> {:error, :disabled}
-      repo -> Repo.trips_call(request(context, request), repo_opts(repo, opts))
+  # The live trips in picker order at `:now`, in the home's zone.
+  defp index(context, opts) do
+    with {:ok, trips} <- store(context, opts, :index) do
+      zone = Clock.shown_zone(Keyword.take(opts, [:personalization]))
+      {:ok, Picker.order(trips, now(opts), zone)}
     end
   end
+
+  defp store(context, opts, request) do
+    case Keyword.get(opts, :repo, Repo) do
+      nil ->
+        {:error, :disabled}
+
+      repo ->
+        request(context, request)
+        |> Repo.trips_call(repo_opts(repo, opts))
+        |> listed_titles(context, opts)
+    end
+  end
+
+  # A refusal that names no trip lists the trips as every list of them is:
+  # read again as the index, outside the store's transaction, in picker order
+  # with each trip's `past` (`describe_error/1` marks it).
+  defp listed_titles({:error, {:no_trip, ref, _titles}}, context, opts) do
+    with {:ok, trips} <- index(context, opts),
+         do: {:error, {:no_trip, ref, Enum.map(trips, &{&1.title, &1.past})}}
+  end
+
+  defp listed_titles(result, _context, _opts), do: result
 
   defp request(context, :index), do: {:index, owner_id(context), agent_id(context)}
 
@@ -871,7 +906,11 @@ defmodule FermixCore.Trips.Registry do
   defp subject(n), do: "[#{n}]"
 
   defp titles_part([]), do: "; the owner keeps no trips yet"
-  defp titles_part(titles), do: "; the trips are " <> Enum.map_join(titles, ", ", &quoted/1)
+  defp titles_part(titles), do: "; the trips are " <> Enum.map_join(titles, ", ", &listed/1)
+
+  # A trip as a refusal lists it: its title, and `(past)` when it is over.
+  defp listed({title, false}), do: quoted(title)
+  defp listed({title, true}), do: quoted(title) <> " (past)"
 
   # Words the owner or the model wrote, JSON-quoted, as anything else the
   # model sent where words belong: every such value came as JSON.

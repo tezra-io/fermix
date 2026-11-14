@@ -14,7 +14,8 @@ defmodule FermixChannels.Companion.Trips do
   and with `removed?` the rows removed in the last 30 days, each with its
   `removed_at` and no `date` or `leg_m`, since it has no place among the
   days. An index entry's `ends_on` is its last day's date, from `starts_on`
-  and `days`.
+  and `days`, and `past` is there, true, only on a trip that is over: the
+  index comes in picker order with each trip's `past` (`Trips.Picker`).
   """
 
   @behaviour FermixChannels.Companion.KeptKind
@@ -78,13 +79,13 @@ defmodule FermixChannels.Companion.Trips do
 
   # --- the wire's shapes --------------------------------------------------------------
 
-  @doc "The `trips` payload: the index, in picker order."
+  @doc "The `trips` payload: the index, in picker order, `past` only where true."
   @impl true
   def index_payload(profile_id, trips) do
     %{"profile_id" => profile_id, "trips" => Enum.map(trips, &index_entry/1)}
   end
 
-  defp index_entry(trip) do
+  defp index_entry(%{past: past?} = trip) when is_boolean(past?) do
     %{
       "trip_id" => trip.id,
       "title" => trip.title,
@@ -93,6 +94,7 @@ defmodule FermixChannels.Companion.Trips do
       "rev" => trip.rev
     }
     |> put_dates(trip.starts_on, trip.days)
+    |> put_present("past", if(past?, do: true))
   end
 
   # A trip keeps at least one day, so a trip with a start has a last day.

@@ -839,7 +839,7 @@
     },
     "trips": {
       "type": "object",
-      "description": "Version 8. The index of the owner's trips, every live trip in picker order: the answer to trips_pull, and sent again, whole, to a connection that pulled it after any trip changes, at most once per 100 ms. Sent only to a connection on version 8 that the daemon placed as the owner's and that pulled the index.",
+      "description": "Version 8. The index of the owner's trips, every live trip in picker order: a trip happening now first, then the trips to come, soonest first, then those with no dates, newest made first, then the trips that are over, most recently ended first, each judged by the trip's own days against today in its time zone, else the home's. The answer to trips_pull, and sent again, whole, to a connection that pulled it after any trip changes, at most once per 100 ms, and within minutes of a local midnight that starts or ends a trip, which moves the order (possibly once unchanged after the engine restarts). Sent only to a connection on version 8 that the daemon placed as the owner's and that pulled the index.",
       "x-since-version": 8,
       "required": ["type", "profile_id", "trips"],
       "properties": {
@@ -1264,7 +1264,7 @@
     },
     "tripsEntry": {
       "type": "object",
-      "description": "One trip in the index: its id, title, how many days and stops it holds, and its rev, which moves with every change to the trip; starts_on and ends_on, its first and last days' dates, only when it has a start.",
+      "description": "One trip in the index: its id, title, how many days and stops it holds, and its rev, which moves with every change to the trip; starts_on and ends_on, its first and last days' dates, only when it has a start; past, true only on a trip whose last day is over, absent on every other. A past trip stays until removed, opens and changes as any other.",
       "required": ["trip_id", "title", "days", "stops", "rev"],
       "properties": {
         "trip_id": { "type": "string", "pattern": "^tr_[0-9a-z]{10}$" },
@@ -1273,7 +1273,8 @@
         "stops": { "type": "integer", "minimum": 0 },
         "rev": { "type": "integer", "minimum": 0 },
         "starts_on": { "type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$" },
-        "ends_on": { "type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$" }
+        "ends_on": { "type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$" },
+        "past": { "const": true }
       }
     },
     "tripObject": {

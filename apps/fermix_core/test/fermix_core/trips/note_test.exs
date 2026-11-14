@@ -124,6 +124,29 @@ defmodule FermixCore.Trips.NoteTest do
     assert Note.lines(context, "telegram", false).index =~ ~s("Varonne coast")
   end
 
+  # D14: the picker's order, judged by the turn's clock (`now_fn`), and a trip
+  # that is over says so in a word, last; the rules say "my trip" is the
+  # current or next one.
+  test "the line is in picker order, a past trip last and saying so", %{
+    repo: repo,
+    context: context
+  } do
+    edit!(repo, "Spring in Salvé", [%{"op" => "create", "days" => 2, "starts_on" => "2031-04-11"}])
+
+    edit!(repo, "Varonne", [%{"op" => "create", "days" => 2, "starts_on" => "2031-07-04"}])
+    edit!(repo, "Kell", [%{"op" => "create"}])
+    edit!(repo, "Brask", [%{"op" => "create", "days" => 3, "starts_on" => "2031-06-01"}])
+
+    context = Map.put(context, :now_fn, fn -> ~U[2031-06-02 12:00:00Z] end)
+    %{rules: rules, index: index} = Note.lines(context, "telegram", false)
+
+    assert index ==
+             ~s|The owner's trips: "Brask" (1 to 3 Jun 2031); "Varonne" (4 to 5 Jul 2031); | <>
+               ~s|"Kell"; "Spring in Salvé" (11 to 12 Apr 2031, past).|
+
+    assert rules =~ "\"My trip\" is the current or next one, never a past one unless named."
+  end
+
   test "a group chat's turn, a guest's and a job's are told nothing", %{
     repo: repo,
     context: context
@@ -148,7 +171,7 @@ defmodule FermixCore.Trips.NoteTest do
   test "the line stays small with thirty trips" do
     trips =
       for n <- 1..30,
-          do: %{title: "Trip number #{n}", starts_on: ~D[2031-07-04], days: 7}
+          do: %{title: "Trip number #{n}", starts_on: ~D[2031-07-04], days: 7, past: false}
 
     line = Note.index_line(trips)
     assert line =~ ~s|"Trip number 30" (4 to 10 Jul 2031).|

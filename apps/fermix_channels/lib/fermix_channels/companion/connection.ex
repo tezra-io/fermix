@@ -106,12 +106,13 @@ defmodule FermixChannels.Companion.Connection do
   most 16 trips apart from its lists, and their changes,
   `{:trips_changed, trips}` from the same notifier, wait in a window of their
   own (`:trip_window_ms`, 100 ms) before each pending trip goes out whole,
-  with `made`, then the index. A `trip_share` is neither a pull nor an edit:
-  it is answered `trip_shared`, the trip's shared form, in the step that read
-  it, or `error: request_failed` with the share's `client_msg_id`. A turn
-  this connection carries says it draws trips (`metadata.draws_trips`) once
-  it has pulled the trips index. `:trip_opts` are the Registry's options. A
-  phone's list channel serves them too (below).
+  with `made`, then the index; a day's turn that moves the index (D14,
+  `{:trips_changed, []}`) sends the index alone. A `trip_share` is neither a
+  pull nor an edit: it is answered `trip_shared`, the trip's shared form, in
+  the step that read it, or `error: request_failed` with the share's
+  `client_msg_id`. A turn this connection carries says it draws trips
+  (`metadata.draws_trips`) once it has pulled the trips index. `:trip_opts`
+  are the Registry's options. A phone's list channel serves them too (below).
 
   ## Blocks under a reply (version 8)
 

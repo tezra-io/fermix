@@ -10,7 +10,8 @@ defmodule FermixCore.Trips.Note do
   it (`Tools.TripRead.channel_line/2`).
 
   `rules` is the guidance (how a stop's place is given, when to search, what
-  is fixed, a day's order, and what a trip sent to anyone holds, C1) and the
+  is fixed, a day's order, which trip "my trip" is, D14, and what a trip sent
+  to anyone holds, C1) and the
   channel's line
   (`Prompt.ChannelPresentation.trip_line/2`): the
   drawn line when the turn's connection draws trips, else the line that says
@@ -18,14 +19,16 @@ defmodule FermixCore.Trips.Note do
   contract, as the lists' does, because that contract is shared by an
   owner's group chat, where no trip line may appear (§14).
 
-  `index` is one line naming the owner's trips in picker order with their
-  dates: titles JSON-quoted (C33), no ids and no counts, so it moves when a
-  trip is made, renamed, redated, lengthened by a day or removed, and never
-  when a stop is added or moved. A read that fails is logged and the turn
-  goes on without either line, as a turn with no trip would.
+  `index` is one line naming the owner's trips in picker order
+  (`Trips.Picker`) with their dates, a trip that is over saying so: titles
+  JSON-quoted (C33), no ids and no counts, so it moves when a trip is made,
+  renamed, redated, lengthened by a day or removed, or starts or ends with
+  the day, and never when a stop is added or moved. A read that fails is
+  logged and the turn goes on without either line, as a turn with no trip
+  would.
 
   Context seams: `:memory_repo` (nil when the turn has none, which notes
-  nothing).
+  nothing) and `:now_fn` (the turn's clock, as the trip tools take it).
   """
 
   require Logger
@@ -49,7 +52,8 @@ defmodule FermixCore.Trips.Note do
            "name it (reordering its day, moving the stops around it, making room), and in any " <>
            "change only a page, a search or a plugin suggests, a fixed stop stays where it is, " <>
            "and the reply says it was left because it is fixed. Keep a day's stops near each " <>
-           "other and in walking order. A trip sent or shared with " <>
+           "other and in walking order. \"My trip\" is the current or next one, never a past " <>
+           "one unless named. A trip sent or shared with " <>
            "anyone is the as: \"share\" text exactly as trip_read gives it; a stop's note is " <>
            "the owner's alone and never goes into what is sent, even when the conversation " <>
            "shows it."
@@ -76,15 +80,20 @@ defmodule FermixCore.Trips.Note do
     end
   end
 
-  @doc "The one line naming `trips` (each with `title`, `starts_on` and `days`), in order."
+  @doc """
+  The one line naming `trips` (each with `title`, `starts_on`, `days` and
+  `past`), in order.
+  """
   @spec index_line([map()]) :: String.t()
   def index_line([_ | _] = trips),
     do: "The owner's trips: " <> Enum.map_join(trips, "; ", &named/1) <> "."
 
-  defp named(%{title: title, starts_on: starts_on, days: days}) do
-    case Render.span(starts_on, max(days, 1), false) do
-      nil -> Render.quoted(title)
-      dates -> "#{Render.quoted(title)} (#{dates})"
+  defp named(%{title: title, starts_on: starts_on, days: days, past: past?})
+       when is_boolean(past?) do
+    case {Render.span(starts_on, max(days, 1), false), past?} do
+      {nil, _past?} -> Render.quoted(title)
+      {dates, false} -> "#{Render.quoted(title)} (#{dates})"
+      {dates, true} -> "#{Render.quoted(title)} (#{dates}, past)"
     end
   end
 
@@ -94,11 +103,13 @@ defmodule FermixCore.Trips.Note do
         []
 
       repo ->
-        context
-        |> Registry.names(repo: repo, on_timeout: :error, timeout: Timeouts.repo_call())
-        |> listed()
+        opts = [repo: repo, on_timeout: :error, timeout: Timeouts.repo_call()] ++ clock(context)
+        context |> Registry.names(opts) |> listed()
     end
   end
+
+  defp clock(%{now_fn: now_fn}) when is_function(now_fn, 0), do: [now: now_fn.()]
+  defp clock(_context), do: []
 
   defp listed({:ok, trips}), do: trips
   defp listed({:error, :disabled}), do: []

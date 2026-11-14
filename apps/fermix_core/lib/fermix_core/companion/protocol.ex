@@ -1146,15 +1146,15 @@ defmodule FermixCore.Companion.Protocol do
 
   defp checklist_row?(_row, _removed?), do: false
 
-  # A trip in the index: its id, title, day and stop counts and rev, and its
-  # first and last dates when it has a start.
+  # A trip in the index: its id, title, day and stop counts and rev, its
+  # first and last dates when it has a start, and `past` only when true.
   defp trip_entry?(%{"trip_id" => id, "title" => title} = entry)
        when is_binary(id) and is_binary(title) do
     Regex.match?(@trip_id, id) and title != "" and
       integer_range(entry, "days", 1, @max_u64) == :ok and
       Enum.all?(~w(stops rev), &(nonnegative_u64(entry, &1) == :ok)) and
       Enum.all?(~w(starts_on ends_on), &(optional_pattern(entry, &1, @trip_date) == :ok)) and
-      not has_null?(entry)
+      Map.get(entry, "past", true) == true and not has_null?(entry)
   end
 
   defp trip_entry?(_entry), do: false

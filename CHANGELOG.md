@@ -186,7 +186,10 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   opens in a panel beside the chat, where you move, add, edit, remove,
   restore and share its days and stops, each change showing at once wherever
   the trip is open; Share and Copy itinerary hand on the same text Fermix
-  sends from the chat. On a paired phone, until its app draws trips, and on
+  sends from the chat. A trip happening now or coming next is listed first,
+  and a trip that is over is listed last under its own heading, still there to
+  open and change until you remove it; "my trip" means the current or next
+  one. On a paired phone, until its app draws trips, and on
   every other channel, a reply writes out the days that changed, each place
   linked.
 - **Your lists on your phone, live.** A paired phone now reads and changes
