@@ -158,8 +158,8 @@ defmodule FermixCore.CommandHost do
     # before the receive loop can process any exit (race-free os_pid discovery).
     subscriber_mon = Process.monitor(stream_to)
 
-    port =
-      Port.open({:spawn_executable, executable}, CommandRunner.build_stream_port_opts(args, opts))
+    {spawn_target, port_opts} = CommandRunner.stream_spawn(executable, args, opts)
+    port = Port.open({:spawn_executable, spawn_target}, port_opts)
 
     os_pid = read_os_pid(port)
     send(caller, {:command_host_started, ref, os_pid})

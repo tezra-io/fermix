@@ -287,6 +287,13 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Coding runs no longer hang when Fermix was started from a terminal or a
+  pipe.** Codex and Claude Code, and every other command Fermix streams, were
+  handed Fermix's own input instead of an empty one, so with Fermix started
+  from a pipe they waited on it until the run's timeout, and from a terminal
+  they could read it or be stopped. Each now starts with an empty input
+  (`/dev/null`), on macOS and Linux. The Mac app's engine and an installed
+  service, whose input was already empty, behave as before.
 - **Place search on Brave keeps to Brave's rate limit.** A trip's place
   lookups ran the first alone and then four at a time, so on a Brave plan
   that allows one search a second most of a long trip's stops were left

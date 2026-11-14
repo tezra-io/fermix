@@ -81,6 +81,8 @@ defmodule FermixCore.CommandRunner do
   @input_script ~s(exec "$@" <"$0")
   # The same, with the child's standard error sent nowhere (`stderr: :discard`).
   @input_script_quiet ~s(exec "$@" <"$0" 2>/dev/null)
+  # The file a streamed child reads as its standard input (`stream_spawn/3`).
+  @null_input "/dev/null"
   @max_input_bytes 1_048_576
 
   @doc """
@@ -222,6 +224,11 @@ defmodule FermixCore.CommandRunner do
 
   Stream opts extend the shared opts with `stream_to:` (default `self()`),
   `ack_window:` (default 64), and `pending_bytes_max:` (default 8 MB).
+
+  The child's standard input is `/dev/null`, whatever the daemon's own is, so a
+  child that reads it gets end of file at once. It runs through `/bin/sh`'s
+  `exec` to get it, as `:input` does for `run/3`, so a POSIX shell may add its
+  own bookkeeping variables (`PWD`, `SHLVL`, `_`) to a replaced environment.
   """
   @spec start_stream(String.t(), [String.t()], stream_opts()) ::
           {:ok, stream_result()} | {:error, reason()}
@@ -263,15 +270,21 @@ defmodule FermixCore.CommandRunner do
     |> put_env(env_mode!(opts), Keyword.get(opts, :env, []))
   end
 
-  # Streaming-mode port opts = the shared buffered opts plus `:in`. A default
-  # spawn_executable port holds the child's stdin open forever; `codex exec`
-  # reads non-TTY stdin to EOF and would block indefinitely. `:in` gives the
-  # child immediate stdin EOF while stdout capture and `:exit_status` keep
-  # working. Buffered mode never uses this — it stays byte-for-byte unchanged.
+  # A streamed child's stdin is /dev/null, so it reads end of file at once:
+  # `codex exec` and `claude` read a stdin that is not a terminal to its end. A
+  # port cannot arrange that. A default port holds a pipe to the child's stdin
+  # open until it closes, and cannot close that alone; an `:in` port gives the
+  # child the emulator's own fd 0, which is /dev/null only under launchd or
+  # systemd: from a terminal the child reads it or is stopped by SIGTTIN, and
+  # from a pipe it blocks until its timeout. So the child runs through the
+  # `:input` shell with /dev/null as its file, on every OS: the shell opens it
+  # onto fd 0 and replaces itself with the executable, which keeps the port's
+  # process and group. The port options are the buffered path's own.
   @doc false
-  @spec build_stream_port_opts([String.t()], stream_opts()) :: keyword()
-  def build_stream_port_opts(args, opts) when is_list(args) and is_list(opts) do
-    [:in | build_port_opts(args, opts)]
+  @spec stream_spawn(String.t(), [String.t()], stream_opts()) :: {String.t(), keyword()}
+  def stream_spawn(executable, args, opts)
+      when is_binary(executable) and is_list(args) and is_list(opts) do
+    {@input_shell, build_port_opts(["-c", @input_script, @null_input, executable | args], opts)}
   end
 
   # Daemon path: start a supervised host (fail loud if the supervisor is absent —

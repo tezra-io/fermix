@@ -7,10 +7,50 @@ defmodule FermixCore.CommandHostStreamTest do
   alias FermixCore.CommandHost
   alias FermixCore.CommandRunner
 
-  # Bounded liveness polling: death is asserted by polling `kill -0` until it
-  # fails, never a fixed sleep (mirrors CommandHostTest).
-  @poll_max 50
+  # The bound on every wait for the host's messages or exit: a hang guard
+  # (AGENTS.md, "Tests under load"), never how a test waits, since a satisfied
+  # wait returns the moment its message lands.
+  @arrival_ms 10_000
+
+  # A grandchild is no BEAM process, so nothing reports its reaping: once the
+  # event that sends its SIGKILL has been seen, `kill -0` is polled until it
+  # fails, for at least @reap_bound_ms.
+  @reap_bound_ms 10_000
   @poll_ms 100
+
+  # The bound on the probe emulator's run: its boot, then a stream that its own
+  # 10 s timeout ends when the child blocks.
+  @probe_ms 30_000
+
+  # Evaluated in the probe emulator: one streamed child that reads its stdin to
+  # end of file, then says whether that stdin is /dev/null; prints what the
+  # child wrote and how it ended.
+  @held_stdin_probe """
+  {:ok, sup} = DynamicSupervisor.start_link(strategy: :one_for_one)
+
+  {:ok, %{ref: ref}} =
+    FermixCore.CommandRunner.start_stream(
+      "/bin/sh",
+      ["-c", "cat >/dev/null; [ /dev/stdin -ef /dev/null ] && echo dev-null"],
+      dynamic_supervisor: sup,
+      timeout_ms: 10_000
+    )
+
+  collect = fn collect, acc ->
+    receive do
+      {:command_host_data, ^ref, chunk} -> collect.(collect, acc <> chunk)
+      {:command_host_exit, ^ref, result} -> {acc, result}
+    end
+  end
+
+  {out, result} = collect.(collect, "")
+  ending = with {:ok, %{exit: code}} <- result, do: {:ok, code}
+  IO.puts(inspect({out, ending}))
+  System.halt(0)
+  """
+  @probe_boot ~s|Probe = lists:last(init:get_plain_arguments()), | <>
+                ~s|{ok, _} = application:ensure_all_started(elixir), | <>
+                ~s|'Elixir.Code':eval_string(unicode:characters_to_binary(Probe)).|
 
   setup do
     sh = System.find_executable("sh") || "/bin/sh"
@@ -60,7 +100,7 @@ defmodule FermixCore.CommandHostStreamTest do
     assert is_integer(os_pid)
     on_exit(fn -> cleanup_os_pid(os_pid) end)
 
-    assert_receive {:command_host_exit, ^ref, {:error, {:timeout, 300}}}, 5_000
+    assert_receive {:command_host_exit, ^ref, {:error, {:timeout, 300}}}, @arrival_ms
     refute_received {:command_host_data, ^ref, _}
   end
 
@@ -85,7 +125,7 @@ defmodule FermixCore.CommandHostStreamTest do
     assert :ok = CommandHost.cancel(host, ref)
     assert :ok = CommandHost.cancel(host, ref)
 
-    assert_receive {:command_host_exit, ^ref, {:error, :cancelled}}, 5_000
+    assert_receive {:command_host_exit, ^ref, {:error, :cancelled}}, @arrival_ms
   end
 
   test "cancel after the terminal exit has been received is still :ok (noproc race)", %{sh: sh} do
@@ -121,50 +161,60 @@ defmodule FermixCore.CommandHostStreamTest do
     assert {:ok, %{exit: 124, truncated?: true}} = result
   end
 
-  test "subscriber death sweeps a trapping grandchild", %{sh: sh, dir: dir} do
+  test "subscriber death sweeps a trapping grandchild", %{sh: sh} do
     sup = start_host_sup()
-    pidfile = Path.join(dir, "grandchild.pid")
     test = self()
 
     # The subscriber owns the stream (default stream_to = self()); its death must
-    # fire the host's subscriber monitor and group-SIGKILL the grandchild.
+    # fire the host's subscriber monitor and group-SIGKILL the grandchild. It
+    # relays the grandchild's pid announcement, then waits to be killed.
     subscriber =
       spawn(fn ->
-        {:ok, %{host: host}} =
-          CommandRunner.start_stream(sh, trapping_grandchild_cmd(pidfile),
+        {:ok, %{host: host, ref: ref}} =
+          CommandRunner.start_stream(sh, trapping_grandchild_cmd(),
             dynamic_supervisor: sup,
             timeout_ms: 30_000
           )
 
-        send(test, {:host, host})
+        send(test, {:stream, host, ref})
+
+        receive do
+          {:command_host_data, ^ref, _chunk} = announcement -> send(test, announcement)
+        end
 
         receive do
           :never -> :ok
         end
       end)
 
-    _host = await_message(:host) || flunk("subscriber never started the stream")
-    grandchild = await_pidfile(pidfile)
+    assert_receive {:stream, host, ref}, @arrival_ms
+    assert_receive {:command_host_data, ^ref, announcement}, @arrival_ms
+    grandchild = announced_pid(announcement)
     on_exit(fn -> liveness_gated_kill(grandchild) end)
 
+    host_mon = Process.monitor(host)
     Process.exit(subscriber, :kill)
 
+    # The host sweeps the group before it stops, so its :DOWN means the SIGKILL
+    # was sent; only the grandchild's reaping is left to poll.
+    assert_receive {:DOWN, ^host_mon, :process, ^host, _reason}, @arrival_ms
     assert await_death(grandchild) == :dead
   end
 
-  test "supervisor shutdown sweeps an in-flight streaming command", %{sh: sh, dir: dir} do
+  test "supervisor shutdown sweeps an in-flight streaming command", %{sh: sh} do
     sup = start_host_sup()
-    pidfile = Path.join(dir, "grandchild.pid")
 
-    {:ok, %{host: _host}} =
-      CommandRunner.start_stream(sh, trapping_grandchild_cmd(pidfile),
+    {:ok, %{host: _host, ref: ref}} =
+      CommandRunner.start_stream(sh, trapping_grandchild_cmd(),
         dynamic_supervisor: sup,
         timeout_ms: 30_000
       )
 
-    grandchild = await_pidfile(pidfile)
+    assert_receive {:command_host_data, ^ref, announcement}, @arrival_ms
+    grandchild = announced_pid(announcement)
     on_exit(fn -> liveness_gated_kill(grandchild) end)
 
+    # Synchronous: it returns once the host's terminate/2 has swept the group.
     :ok = DynamicSupervisor.stop(sup)
 
     assert await_death(grandchild) == :dead
@@ -187,7 +237,7 @@ defmodule FermixCore.CommandHostStreamTest do
 
     on_exit(fn -> cleanup_os_pid(os_pid) end)
 
-    assert_receive {:command_host_exit, ^ref, {:error, {:subscriber_stalled, n}}}, 5_000
+    assert_receive {:command_host_exit, ^ref, {:error, {:subscriber_stalled, n}}}, @arrival_ms
     assert n > 4_096
   end
 
@@ -213,20 +263,19 @@ defmodule FermixCore.CommandHostStreamTest do
     assert {:ok, %{exit: 0, truncated?: false, forwarded_bytes: 11_000}} = result
   end
 
-  test ":in gives the child immediate stdin EOF", %{sh: sh} do
-    sup = start_host_sup()
+  # A port child that is given no stdin of its own shares the emulator's fd 0,
+  # and this suite runs with that at /dev/null, where any child reads end of
+  # file. So the stream runs in a second emulator whose stdin is a pipe this test
+  # holds open and never writes, as a daemon started from a pipe has: a child
+  # sharing it blocks in `cat` until its timeout.
+  test "a streamed child's stdin is /dev/null, though the daemon's stays open", %{dir: dir} do
+    port = start_held_stdin_emulator(dir)
+    {:os_pid, os_pid} = Port.info(port, :os_pid)
+    on_exit(fn -> liveness_gated_kill(os_pid) end)
 
-    # Without the :in port option the child's stdin stays open and `cat` blocks
-    # forever; with it, `cat` reads EOF immediately and the command completes.
-    {:ok, %{host: host, ref: ref}} =
-      CommandRunner.start_stream(sh, ["-c", "cat >/dev/null; echo done"],
-        dynamic_supervisor: sup,
-        timeout_ms: 10_000
-      )
-
-    {out, result} = collect_until_exit(host, ref)
-    assert out == "done\n"
-    assert {:ok, %{exit: 0, truncated?: false}} = result
+    {output, status} = probe_result(port, "")
+    assert status == 0, "the probe emulator exited #{status}: #{output}"
+    assert output == ~s({"dev-null\\n", {:ok, 0}}\n)
   end
 
   test "buffered mode is unaffected by streaming support", %{sh: sh} do
@@ -236,7 +285,7 @@ defmodule FermixCore.CommandHostStreamTest do
              CommandRunner.run(sh, ["-c", "echo hi"],
                supervised: true,
                dynamic_supervisor: sup,
-               timeout_ms: 5_000
+               timeout_ms: 30_000
              )
   end
 
@@ -258,8 +307,8 @@ defmodule FermixCore.CommandHostStreamTest do
   end
 
   # Collects forwarded chunks (acking each) until the terminal exit, returning the
-  # reassembled output and the terminal result. Bounded by the per-receive 5s
-  # timeout and by the command's own bounded output.
+  # reassembled output and the terminal result. Bounded by the per-receive
+  # @arrival_ms hang guard and by the command's own bounded output.
   defp collect_until_exit(host, ref, acc \\ "") do
     receive do
       {:command_host_data, ^ref, chunk} ->
@@ -269,17 +318,50 @@ defmodule FermixCore.CommandHostStreamTest do
       {:command_host_exit, ^ref, result} ->
         {acc, result}
     after
-      5_000 -> flunk("no {:command_host_exit, #{inspect(ref)}, _} within 5s")
+      @arrival_ms ->
+        flunk("no {:command_host_exit, #{inspect(ref)}, _} within #{@arrival_ms} ms")
     end
   end
 
-  # A trapping, fd-closing grandchild: writes its own pid, ignores SIGTERM, closes
-  # fds (so it never holds the port open), then loops. Only SIGKILL reaps it.
-  defp trapping_grandchild_cmd(pidfile) do
-    inner =
-      ~s(trap "" TERM; echo $$ > #{pidfile}; exec 0<&- 1>&- 2>&-; while true; do sleep 1; done)
+  # This suite's own emulator and code path, so the probe runs the code under
+  # test. The port is opened without :in, so it holds the probe's stdin pipe
+  # open and never writes to it. No crash dump: a failed boot writes none here.
+  defp start_held_stdin_emulator(dir) do
+    erl = Path.join([:code.root_dir(), "bin", "erl"])
+    code_path = Enum.flat_map(:code.get_path(), &["-pa", List.to_string(&1)])
 
+    Port.open({:spawn_executable, erl}, [
+      :binary,
+      :exit_status,
+      :stderr_to_stdout,
+      cd: dir,
+      env: [{~c"ERL_CRASH_DUMP_SECONDS", ~c"0"}],
+      args: ["-noinput" | code_path] ++ ["-eval", @probe_boot, "-extra", @held_stdin_probe]
+    ])
+  end
+
+  # The probe emulator's whole output and its exit status.
+  defp probe_result(port, acc) do
+    receive do
+      {^port, {:data, chunk}} -> probe_result(port, acc <> chunk)
+      {^port, {:exit_status, status}} -> {acc, status}
+    after
+      @probe_ms -> flunk("the probe emulator did not exit within #{@probe_ms} ms: #{acc}")
+    end
+  end
+
+  # A trapping, fd-closing grandchild: ignores SIGTERM, announces its own pid as
+  # the stream's only output, closes fds (so it never holds the port open), then
+  # loops. Only SIGKILL reaps it.
+  defp trapping_grandchild_cmd do
+    inner = ~s(trap "" TERM; echo $$; exec 0<&- 1>&- 2>&-; while true; do sleep 1; done)
     ["-c", ~s(sh -c '#{inner}' & wait)]
+  end
+
+  # The announcement is one write far below PIPE_BUF, so it is one chunk.
+  defp announced_pid(chunk) do
+    {pid, "\n"} = Integer.parse(chunk)
+    pid
   end
 
   # ExUnit owns the supervisor's lifecycle. A hand-rolled `start_link` + `on_exit`
@@ -306,37 +388,7 @@ defmodule FermixCore.CommandHostStreamTest do
     receive do
       {:DOWN, ^mon, :process, ^pid, _reason} -> :ok
     after
-      5_000 -> flunk("process #{inspect(pid)} did not stop within 5s")
-    end
-  end
-
-  defp await_message(tag) do
-    receive do
-      {^tag, value} -> value
-    after
-      5_000 -> nil
-    end
-  end
-
-  defp await_pidfile(path) do
-    Enum.reduce_while(1..@poll_max, nil, fn _attempt, _acc ->
-      case read_pid(path) do
-        {:ok, pid} ->
-          {:halt, pid}
-
-        :error ->
-          Process.sleep(@poll_ms)
-          {:cont, nil}
-      end
-    end) || flunk("pidfile never appeared: #{path}")
-  end
-
-  defp read_pid(path) do
-    with {:ok, content} <- File.read(path),
-         {pid, _rest} <- Integer.parse(String.trim(content)) do
-      {:ok, pid}
-    else
-      _absent_or_empty -> :error
+      @arrival_ms -> flunk("process #{inspect(pid)} did not stop within #{@arrival_ms} ms")
     end
   end
 
@@ -348,7 +400,7 @@ defmodule FermixCore.CommandHostStreamTest do
   end
 
   defp await_death(os_pid) do
-    Enum.reduce_while(1..@poll_max, :alive, fn _attempt, _acc ->
+    Enum.reduce_while(1..div(@reap_bound_ms, @poll_ms), :alive, fn _attempt, _acc ->
       if alive?(os_pid) do
         Process.sleep(@poll_ms)
         {:cont, :alive}
