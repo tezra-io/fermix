@@ -76,7 +76,7 @@
 \* SOURCE: apps/fermix_core/lib/fermix_core/home/moved.ex#write,exclusive_write,read @ f1fa82381547
 \* SOURCE: apps/fermix_core/lib/fermix_core/home/candidate.ex#put_state,write_private @ 622ba87194f2
 \* SOURCE: apps/fermix_core/lib/fermix_core/management/home_move.ex#move_start,move_view @ 425cb35fdbcf
-\* SOURCE: apps/fermix_channels/lib/fermix_channels/desktop/device_supervisor.ex#children,dial_children @ 4f4129b772b7
+\* SOURCE: apps/fermix_channels/lib/fermix_channels/desktop/device_supervisor.ex#children,dial_children @ 0b16474e7a80
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/mobile/rail.ex#@moduledoc @ f5a0b477d0cf
 \* SOURCE: apps/fermix_core/lib/fermix_core/application.ex#prepare_home,finish_activation,finish_move,left_to_status @ 832168565d5f
 EXTENDS Naturals, FiniteSets
@@ -242,7 +242,7 @@ OldRequest ==
 
 \* The source boots from its files r, m, p (its service manager, after
 \* the deliberate self-restart, Lifecycle.restart_self/0, or a crash). DeviceSupervisor.dial_children/1 starts the
-\* worker only on a device boot while a move is pending (device_supervisor.ex:96-112,
+\* worker only on a device boot while a move is pending (device_supervisor.ex:113-129,
 \* Move.pending?/1, move.ex:358-363). Its rails end with it: an owner that exits
 \* takes its session down (rail.ex moduledoc). A request already sent may still
 \* arrive; an answer reaches no one.

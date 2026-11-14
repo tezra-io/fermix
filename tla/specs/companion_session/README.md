@@ -901,3 +901,13 @@ off; open `tla/out/companion_session/<check>.txt` after a run to see the path.
   (not modelled: one approval here). A confirmed grant resumes its request as
   a new turn even if the turn that asked for it was cancelled: the token
   outlives the turn. That breaks no rule here.
+
+## Re-read for attachments from a computer (M97 stage A, 2026-11-14)
+
+`4c58837a` staled the `PROTOCOL.md` pin: on a desktop whose home moved, the
+desktop's engine keeps an inbox of its own at the same path, adds it to the
+primary's `server_hello` while the primary takes a computer's uploads, and
+answers each `attach_file` itself, uploading the file to the primary over
+its link before `attach_status`. Attachments are outside this spec (Not
+modelled: protocol 7's files), and the `msg` that names one is the
+primary's, served as before. No modelled step changed.

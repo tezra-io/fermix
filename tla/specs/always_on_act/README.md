@@ -205,3 +205,13 @@ kind, Restore here's `home_restore` among them, which names none). Neither
 is a step of the model: the serializer, the key rule, Restore here's
 request, its job, the busy refusal and the ending are as before. The
 comments' line numbers into both files point at the committed code.
+
+## Re-read for voice and attachments from a computer (M97 stage A, 2026-11-14)
+
+Re-read against 4c58837a, which staled the `always_on.ex` pin: Move now on a
+move back ends the app's call bridged to the server and drops its uploads
+before `home.move.start` leaves (`end_for_return/0`), a step of the move back
+this spec does not model (`home_return` does). The serializer, the key rule,
+Restore here's request, its job, the busy refusal and the ending are as
+before. The comments' line numbers into `always_on.ex` point at the
+committed code.

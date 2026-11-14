@@ -494,3 +494,14 @@ own rail (`:ik_move`) sends no hello, so its frames go at the version they
 did; the probe answers, or does not, as before. What the moduledoc says of
 a close frame behind a request is unchanged. No modelled step changed; the
 comments' line numbers into `move_worker.ex` point at the committed code.
+
+## Re-read for voice and attachments from a computer (M97 stage A, 2026-11-14)
+
+Re-read against 4c58837a, which staled the `device_supervisor.ex` pin of
+`children` and `dial_children`. A linked computer's tree serves the app's
+voice socket, its calls bridged to the server (`Desktop.CallBridge` behind
+`LocalVoiceSocket`), as a sibling between `Desktop.Invoke` and the dial
+subtree under the same `:one_for_one`, so its crash or restart touches
+neither, and the dial subtree, where the move worker runs, is as before. No
+modelled step changed; the comments' line numbers into `device_supervisor.ex`
+point at the committed code.

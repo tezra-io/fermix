@@ -48,7 +48,7 @@ shows up as a broken `ChatAccounted` instead.
 
 | Switch | When `TRUE` |
 |---|---|
-| `SocketsCanFreeze` | The OS suspends an app with no clean close. The daemon keeps its socket registered until the 150 s idle timeout (`Session.idle_timeout_ms`, `session.ex:281`), which the WebSocket (`router.ex:53-60`) and the iroh bridge connection (`bridge_connection.ex:233-241`) both apply. |
+| `SocketsCanFreeze` | The OS suspends an app with no clean close. The daemon keeps its socket registered until the 150 s idle timeout (`Session.idle_timeout_ms`, `session.ex:297`), which the WebSocket (`router.ex:53-60`) and the iroh bridge connection (`bridge_connection.ex:233-241`) both apply. |
 | `DispatchCanFail` | A dispatcher call returns a transient error. |
 | `AnswerCanBeLost` | The platform accepted a push and the daemon saw a timeout instead. |
 | `DaemonCanCrash` | The daemon dies with push tasks in flight, and boots again. |
@@ -421,3 +421,14 @@ connects. The paths below are the short ones.
   doing. A push the platform never delivers is one that stays there.
 - **A phone knows the read frontier only while it has a socket.** Away from
   it, a push for a row read elsewhere alerts (witness 16).
+
+## Re-read for voice from a computer (M97 stage A, 2026-11-14)
+
+`4c58837a` staled the `session.ex` pin of `dispatch_event`: a session opens
+its call at an endpoint it builds (`call_endpoint/1`: the phone's device, or
+`computer:<id>` for a linked computer's desktop session), where it passed the
+device id. A desktop session now carries the app's calls bridged to the
+server; a call is no state this spec reads, and the acked cursor, the read
+frontier, the push decision, its retries and the boot step are as before. No
+modelled step changed; the cited `session.ex` lines point at the committed
+code.
