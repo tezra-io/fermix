@@ -144,20 +144,27 @@ scenarios:
   # `near` and `op => create` in one op's inspected map (`near` sorts before `op`,
   # and `[^}]` keeps the match inside that op). The place search finds no invented
   # town, so these stops are offered, never placed, and the rubric holds the reply
-  # to what the answer said.
+  # to what the answer said. brevany_fish_market names its town's country, as an
+  # owner's real town has one the model knows (the invented town needs it said).
+  # ostmere_two_days names none, and a near never holds a trip up: the trip is
+  # made as asked with no `near` anywhere in the turn's inputs (`place_search`
+  # takes `location`, so only trip_edit can carry one), and the reply asks for
+  # the town's country.
   - id: near_the_named_town
-    title: "A trip to a named town is made with that town as where its places are looked up"
+    title: "A trip to a named town looks its places up there, and one whose country is unknown is made without a near"
     risk: isolated_mutation
     tags: [trips, places, near]
     cases:
       - id: brevany_fish_market
         turns:
           - query: >-
-              Plan Saturday 19 June 2027 in Brevany for me: the fish market at 8:30,
-              the clock tower at 10 and lunch by the harbour at 13:00.
+              Plan Saturday 19 June 2027 in Brevany, in Kaldria, for me: the fish
+              market at 8:30, the clock tower at 10 and lunch by the harbour at 13:00.
             expect:
               tools_any: [trip_edit]
-              tool_inputs_match_all: ['\bnear\W+=>[^}]*\bop\W+=>\W+create\b', "2027-06-19"]
+              tool_inputs_match_all:
+                - '\bnear\W+=>\W+Brevany\b[^}]*\bop\W+=>\W+create\b'
+                - "2027-06-19"
               no_tool_errors: false
           - query: "Thanks, you can remove the Brevany trip now."
             expect:
@@ -180,7 +187,10 @@ scenarios:
               farmers' market at 9.
             expect:
               tools_any: [trip_edit]
-              tool_inputs_match_all: ['\bnear\W+=>[^}]*\bop\W+=>\W+create\b', "2027-06-25"]
+              tool_inputs_match_all:
+                - '\bop\W+=>\W+create\b'
+                - "2027-06-25"
+                - '(?is)\A(?!.*\bnear\W+=>)'
               no_tool_errors: false
           - query: "Remove the Ostmere days trip, please."
             expect:
@@ -195,7 +205,9 @@ scenarios:
           2. The first reply calls no stop placed that the tool evidence shows offered
              or not placed, and gives no stop an address, town or link the tool
              evidence does not show for it.
-          3. The second reply confirms the trip was removed.
+          3. The first reply asks the owner which country Ostmere is in, or for the
+             town and its country.
+          4. The second reply confirms the trip was removed.
 
   # A CITY'S DAY (D11). A near wins over the stops already placed, so a day that
   # spans a city's districts searches each stop in the whole city, never around
@@ -768,7 +780,8 @@ scenarios:
 
   # OUTSIDE FIRST, THEN THE TRIP (D9). A search or a page read before a trip is made
   # limits nothing: the trip made after it in the same turn lands, with what was
-  # found. penrask_dinners asks for places to eat first. A search for an invented
+  # found. penrask_dinners asks for places to eat first, naming the town's
+  # country so that a country to ask for holds nothing up. A search for an invented
   # town finds no restaurant, and a place search answers invalid_location, a tool
   # error that taints the turn all the same, so the first turn lifts
   # `no_tool_errors` and gates what needs no search: the create, its first date, a
@@ -792,7 +805,7 @@ scenarios:
       - id: penrask_dinners
         turns:
           - query: >-
-              I'm going to Penrask from Thursday 17 to Saturday 19 June 2027. First
+              I'm going to Penrask, in Kaldria, from Thursday 17 to Saturday 19 June 2027. First
               find me good places to eat there, then plan the trip: the Orrin abbey on
               Thursday morning, the salt marsh walk on Friday and the clock tower at 10
               on Saturday, with a good dinner every night.

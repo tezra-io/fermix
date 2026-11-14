@@ -49,9 +49,9 @@ defmodule FermixCore.Tools.TripEdit do
       "a link a search returned; a stop without one is never looked up. Give near when " <>
       "making a trip: a town or city and its country, like Lisbon, Portugal, never a " <>
       "country, a region, a district or a landmark; a day in a different town from the " <>
-      "trip's gets its own near. Places are looked up within it. A near never holds a trip " <>
-      "up: if the town's country is unknown, make the trip as asked without one, and ask the " <>
-      "owner for the town and its country."
+      "trip's gets its own near. Places are looked up within it. An unknown country is no " <>
+      "reason to wait: make the trip without a near, and ask the owner for the town and its " <>
+      "country."
   end
 
   @impl true

@@ -233,12 +233,15 @@ defmodule FermixCore.Tools.TripToolsTest do
 
   # A live run read "Give near" as a precondition and made no trip for a town
   # whose country it did not know; the engine already offers, never places,
-  # with no near, so a missing near never holds the trip up.
-  test "trip_edit's description says a near never holds a trip up" do
+  # with no near, so a missing near never holds the trip up. Said as "make the
+  # trip as asked", the sentence also moved booked stops without asking in 6 of
+  # 8 live runs (1 of 6 without it), so it names only the unknown country.
+  test "trip_edit's description says an unknown country holds no trip up" do
     description = TripEdit.description()
-    assert description =~ "A near never holds a trip up"
-    assert description =~ "if the town's country is unknown, make the trip as asked without one"
+    assert description =~ "An unknown country is no reason to wait"
+    assert description =~ "make the trip without a near"
     assert description =~ "ask the owner for the town and its country"
+    refute description =~ "as asked without"
   end
 
   # A live run named real places only in a stop's words, and only a given
@@ -268,8 +271,9 @@ defmodule FermixCore.Tools.TripToolsTest do
     # or city and its country, never wider, a day elsewhere its own) measured
     # 31 tokens and 128 bytes more: 519 tokens and 2,025 bytes. That every
     # stop at a place gives its place, and that a near never holds a trip up,
-    # measured 50 tokens and 215 bytes more: 569 tokens and 2,240 bytes, the
-    # bound.
-    assert byte_size(encoded) <= 2_240
+    # measured 50 tokens and 215 bytes more: 569 tokens and 2,240 bytes. That
+    # sentence said as an unknown country being no reason to wait measured 8
+    # tokens and 29 bytes less: 561 tokens and 2,211 bytes, the bound.
+    assert byte_size(encoded) <= 2_211
   end
 end

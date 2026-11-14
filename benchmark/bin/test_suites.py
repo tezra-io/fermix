@@ -768,7 +768,7 @@ def test_the_shipped_numbered_rubrics_parse():
                       "ostrel_route_sanity": 2, "corvelo_plan": 2,
                       "penrask_dinners": 4, "halden_page_route_sanity": 3,
                       "brevany_fish_market": 3,
-                      "ostmere_two_days": 3,
+                      "ostmere_two_days": 4,
                       "brennholt_two_districts": 4,
                       "kestrin_two_districts": 4,
                       "lantern_walk_says_remove_the_trip": 3,
