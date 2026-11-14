@@ -114,7 +114,8 @@ defmodule FermixChannels.Accessories.Supervisor do
 
   defp not_a_mac do
     Logger.warning(
-      "accessories are on in machine.toml, but an accessory needs a local Mac primary; " <>
+      "accessories are on in machine.toml, but an accessory works only on a Mac that is " <>
+        "its own home; " <>
         "no accessory port is watched on this engine"
     )
 

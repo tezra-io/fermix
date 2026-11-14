@@ -64,23 +64,32 @@ defmodule FermixCore.Management.AccessoriesTest do
       assert sentence == "StackChan is off."
     end
 
-    test "a device-role engine and a computer that is not a Mac need a local Mac primary" do
-      for opts <- [
-            Goldens.base(engine_role: %{role: :device, primary: "studio-mac"}),
-            Goldens.base(engine_role: %{role: :candidate}),
-            Goldens.base(os_type: {:unix, :linux})
-          ] do
-        status = status!(opts)
-        assert status["state"] == "needs_local_primary"
-        assert status["sentence"] == "StackChan setup needs a local Mac primary."
+    # The owner's decision: StackChan is not part of Always On. Off a Mac that
+    # is its own home the state, the refusals and the empty actions stand, and
+    # each says why in the owner's words, the status and every refusal alike.
+    test "off a Mac that is its own home, the status and every refusal say why" do
+      robot = Goldens.record()
 
-        assert {:error, :unavailable,
-                %{"sentence" => "StackChan setup needs a local Mac primary."}} =
-                 route(
-                   "accessories.forget",
-                   %{"accessory_id" => Goldens.record().accessory_id},
-                   opts
-                 )
+      for {opts, sentence} <- [
+            {Goldens.base(engine_role: %{role: :device, primary: "studio-mac"}),
+             "StackChan works again once Fermix is back on this Mac."},
+            {Goldens.base(engine_role: %{role: :candidate, primary: nil}),
+             "StackChan works once Fermix has moved to this Mac."},
+            {Goldens.base(os_type: {:unix, :linux}), "StackChan works only on a Mac."},
+            {Goldens.base(
+               os_type: {:unix, :linux},
+               engine_role: %{role: :device, primary: "garden-server"}
+             ), "StackChan works only on a Mac."}
+          ] do
+        status = status!(Keyword.put(opts, :records, {:ok, [robot]}))
+        assert status["state"] == "needs_local_primary"
+        assert status["sentence"] == sentence
+        assert [%{"sentence" => ^sentence, "actions" => []}] = status["accessories"]
+
+        assert {:error, :unavailable, %{"capability" => "accessories", "sentence" => ^sentence}} =
+                 route("accessories.forget", %{"accessory_id" => robot.accessory_id}, opts)
+
+        assert {:error, ^sentence} = Accessories.apply_enabled(true, opts)
       end
     end
 
@@ -991,7 +1000,7 @@ defmodule FermixCore.Management.AccessoriesTest do
       assert {:error, "StackChan is on but could not start. See the daemon log."} =
                Accessories.apply_enabled(true, not_started)
 
-      assert {:error, "StackChan setup needs a local Mac primary."} =
+      assert {:error, "StackChan works only on a Mac."} =
                Accessories.apply_enabled(true, Goldens.base(os_type: {:unix, :linux}))
     end
   end

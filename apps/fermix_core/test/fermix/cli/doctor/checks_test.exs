@@ -132,13 +132,13 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
       assert not_executable =~ "not executable"
     end
 
-    test "on, but on a computer that is not a local Mac primary, it warns",
+    test "on, but on a computer that is not a Mac that is its own home, it warns",
          %{helper: helper} do
       for overrides <- [[os_type: {:unix, :linux}], [role: :device], [role: :candidate]] do
         assert %{status: :warn, detail: detail} =
                  accessories([helper_path: helper] ++ overrides)
 
-        assert detail =~ "local Mac primary"
+        assert detail =~ "works only on a Mac that is its own home"
       end
     end
 

@@ -1021,6 +1021,12 @@
       "why": "The meetbot row publishes its Google sign-in as a boolean beside the sentence it also carries, null while the notetaker is absent. A client that hides the sign-in control once the account is in place switches on this fact rather than on the words of the sentence it renders, which the app's rules forbid. The draft predates the row; the app adds the field when it re-vendors."
     },
     {
+      "method": "setup.detect",
+      "field": "results[].available",
+      "kind": "engine_only",
+      "why": "The meetbot row says whether Google Meet can run on the machine that answers: false on an Always On server (M97 D24), whose detail is then the sentence every surface says. The Meetings pane draws Google Meet as unavailable before anything is pressed, where before it learned it only from a refused job whose code it shares with a notetaker not installed. The draft predates the row; the app adds the field when it re-vendors."
+    },
+    {
       "method": "overview.get",
       "field": "realtime.engine",
       "kind": "engine_only",

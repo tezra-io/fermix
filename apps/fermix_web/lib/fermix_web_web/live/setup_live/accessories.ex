@@ -319,8 +319,9 @@ defmodule FermixWebWeb.SetupLive.Accessories do
 
   defp refusal_sentence({:config_unreadable, sentence}), do: sentence
 
+  # The section exists only on a Mac, so the status says the same there.
   defp refusal_sentence({:unknown_section, _section}),
-    do: "StackChan setup needs a local Mac primary."
+    do: ManagementAccessories.not_here_sentence(:not_mac)
 
   defp notice(socket, sentence), do: put(socket, :notice, sentence)
 

@@ -626,6 +626,28 @@ defmodule FermixCore.Management.RouterTest do
       end
     end
 
+    # The owner's decision: StackChan is not part of Always On, so a linked
+    # Mac publishes no StackChan of its own and refuses a write to it, in the
+    # StackChan screens' words, before anything is written.
+    test "this Mac's StackChan is refused while the home is on a server, saying why" do
+      nothing = fn _section, _values, _opts -> flunk("StackChan's switch was written") end
+      unread = fn _section, _opts -> flunk("StackChan's section was read") end
+      opts = [computer?: true, macos?: true, settings_writer: nothing, settings_reader: unread]
+      values = %{"accessories_enabled" => true}
+
+      for {method, params} <- [
+            {"settings.apply", %{"section" => "computer.accessories", "values" => values}},
+            {"settings.get", %{"section" => "computer.accessories"}}
+          ] do
+        assert {:error, :invalid_params,
+                %{
+                  "field" => "section",
+                  "sentence" => "StackChan works again once Fermix is back on this Mac."
+                }} = Router.route(v2(method, params), opts),
+               method
+      end
+    end
+
     # The refusal of a sandbox value of this computer's own names this
     # computer's sandbox, so the reload a surface sends is answered here.
     test "an outside edit refusing this computer's sandbox value names this computer's section" do

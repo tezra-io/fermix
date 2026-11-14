@@ -7607,7 +7607,7 @@ defmodule FermixWebWeb.SetupLiveTest do
       {:ok, view, _html} = accessories_page(conn, opts)
 
       assert view |> element("#accessories-sentence") |> render() =~
-               "StackChan setup needs a local Mac primary."
+               "StackChan works again once Fermix is back on this Mac."
 
       refute has_element?(view, "#accessories-switch")
       refute has_element?(view, "#accessories-setup-link")
@@ -7634,6 +7634,21 @@ defmodule FermixWebWeb.SetupLiveTest do
       view |> element("#accessories-switch") |> render_submit()
 
       assert view |> element("#accessories-notice") |> render() =~ sentence
+    end
+
+    # A switch this computer cannot take (it is not a Mac) writes nothing and
+    # says why in the words the StackChan status says there.
+    test "a switch this computer cannot take says why, in the status's words", %{conn: conn} do
+      before = Application.get_env(:fermix_channels, :accessories)
+      opts = AccessoryGoldens.base(enabled?: false)
+      {:ok, view, _html} = accessories_page(conn, opts, macos?: false)
+
+      view |> element("#accessories-switch") |> render_submit()
+
+      assert view |> element("#accessories-notice") |> render() =~
+               "StackChan works only on a Mac."
+
+      assert Application.get_env(:fermix_channels, :accessories) == before
     end
   end
 
@@ -7821,7 +7836,7 @@ defmodule FermixWebWeb.SetupLiveTest do
       view = manage_page(conn, ctx, facts, overrides)
 
       assert view |> element("#accessories-sentence") |> render() =~
-               "StackChan setup needs a local Mac primary."
+               "StackChan works again once Fermix is back on this Mac."
 
       refute has_element?(view, "#accessories-manage")
       refute has_element?(view, "#accessories-robots")

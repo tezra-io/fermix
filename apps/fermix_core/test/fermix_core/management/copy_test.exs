@@ -338,6 +338,21 @@ defmodule FermixCore.Management.CopyTest do
       end
     end
 
+    # The owner's decision (StackChan is not part of Always On): why StackChan
+    # is off on this engine is said in the owner's words, never the engine's
+    # for a role, and This Mac's refusal of its StackChan says the same.
+    test "why StackChan is off here is said in the owner's words" do
+      for place <- [:device, :candidate, :not_mac] do
+        sentence = Accessories.not_here_sentence(place)
+        assert sentence in Accessories.sentences()
+        assert_owner_words(sentence, :prose, [], "accessories off here, #{place}")
+      end
+
+      for sentence <- Accessories.sentences() do
+        refute sentence =~ ~r/\b(?:primary|candidate)\b/i, "accessories: #{inspect(sentence)}"
+      end
+    end
+
     test "every plugin verb obeys the rules" do
       for verb <- PluginRow.verbs(), do: assert_clean(verb, :name, [], "plugin verb")
     end

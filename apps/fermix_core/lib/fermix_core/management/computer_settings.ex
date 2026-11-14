@@ -15,7 +15,11 @@ defmodule FermixCore.Management.ComputerSettings do
   sends comes back to this computer. A Linux computer publishes no
   `computer.computer_history` before its recorder exists (§19.2), and none
   publishes `harness_machine`: its own approval is the Coding agents switch
-  in `computer` (M98 D4).
+  in `computer` (M98 D4). Nor does any publish `computer.accessories`:
+  StackChan is not part of Always On (the owner's decision), so while the
+  home is on a server a request for it is refused in the words the StackChan
+  screens say (`Management.Accessories.not_here_sentence/1`), and the
+  machine file keeps the robot's setting as it is for a move back.
 
   The server's list (`server_sections/2`) keeps what
   `Placement.listed_from_server?/2` lists: never a `computer` or
@@ -30,16 +34,19 @@ defmodule FermixCore.Management.ComputerSettings do
   server as the link knows it.
   """
 
+  alias FermixCore.Management.Accessories
   alias FermixCore.Management.Placement
   alias FermixCore.Management.Settings.ThisComputer
 
   @pane "always_on"
   # This Mac's order (§19.5): what the server may use here, then this
   # machine's own limits and devices.
-  @order ~w(computer sandbox browser computer_use computer_history accessories)
+  @order ~w(computer sandbox browser computer_use computer_history)
   # Linux has no screen recorder before stage 4 (§19.2), and its app hides
   # the plain id by name, never the new one.
   @mac_only ~w(computer_history)
+  # StackChan, which a computer whose home is on a server never runs.
+  @accessories "computer.accessories"
 
   @typedoc "A section as `settings.sections` lists it."
   @type row :: %{String.t() => String.t()}
@@ -56,8 +63,8 @@ defmodule FermixCore.Management.ComputerSettings do
   @doc """
   This computer's own sections, from this engine's inventory `rows` (as the
   wire lists them), in This Mac's order: `computer`, then each machine
-  section it has as `computer.<id>` (its sandbox, browser, screen, history,
-  StackChan); none where it has no This computer area.
+  section it has as `computer.<id>` (its sandbox, browser, screen, history;
+  never its StackChan); none where it has no This computer area.
   """
   @spec own_sections([row()], keyword()) :: [row()]
   def own_sections(rows, opts) when is_list(rows) and is_list(opts) do
@@ -76,15 +83,19 @@ defmodule FermixCore.Management.ComputerSettings do
   @doc """
   The plain section a requested `section` names on this engine: itself for a
   plain id or `computer`, the section `computer.<id>` names where this
-  computer publishes it, or `:none`.
+  computer publishes it, `{:refused, sentence}` for its StackChan where it
+  has a This computer area, or `:none`.
   """
-  @spec plain(String.t(), keyword()) :: {:ok, String.t()} | :none
+  @spec plain(String.t(), keyword()) :: {:ok, String.t()} | {:refused, String.t()} | :none
   def plain("computer" = section, _opts), do: {:ok, section}
 
   def plain(section, opts) when is_binary(section) and is_list(opts) do
     cond do
       not Placement.computer_id?(section) ->
         {:ok, section}
+
+      area?(opts) and section == @accessories ->
+        {:refused, Accessories.not_here_sentence(if(macos?(opts), do: :device, else: :not_mac))}
 
       area?(opts) and own_machine?(Placement.plain_id(section), opts) ->
         {:ok, Placement.plain_id(section)}
@@ -208,9 +219,9 @@ defmodule FermixCore.Management.ComputerSettings do
   defp own?(id, opts), do: own_machine?(id, opts)
 
   # A machine section this computer publishes as `computer.<id>`: never the
-  # coding approval, and its history only on a Mac.
+  # coding approval nor StackChan, and its history only on a Mac.
   defp own_machine?(id, opts) do
-    Placement.machine_section?(id) and id != "harness_machine" and
+    Placement.machine_section?(id) and id not in ["harness_machine", "accessories"] and
       (macos?(opts) or id not in @mac_only)
   end
 

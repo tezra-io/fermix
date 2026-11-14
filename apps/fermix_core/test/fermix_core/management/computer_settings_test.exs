@@ -37,13 +37,33 @@ defmodule FermixCore.Management.ComputerSettingsTest do
                "id" => "computer.computer_history",
                "pane" => "always_on",
                "title" => "Computer history on this Mac"
-             },
-             %{
-               "id" => "computer.accessories",
-               "pane" => "always_on",
-               "title" => "StackChan on this Mac"
              }
            ]
+  end
+
+  # The owner's decision: StackChan is not part of Always On. While the home
+  # is on a server This Mac shows no StackChan switch, and a request for it
+  # is refused in the words the StackChan screens say; the machine file keeps
+  # the robot's setting for a move back.
+  test "StackChan is not published while the home is on a server, and says why" do
+    for macos? <- [true, false] do
+      ids =
+        @inventory
+        |> ComputerSettings.own_sections(macos?: macos?, computer?: true)
+        |> Enum.map(& &1["id"])
+
+      refute "computer.accessories" in ids
+    end
+
+    assert ComputerSettings.plain("computer.accessories", macos?: true, computer?: true) ==
+             {:refused, "StackChan works again once Fermix is back on this Mac."}
+
+    assert ComputerSettings.plain("computer.accessories", macos?: false, computer?: true) ==
+             {:refused, "StackChan works only on a Mac."}
+
+    # An engine with no This computer area publishes no computer id at all.
+    assert ComputerSettings.plain("computer.accessories", macos?: true, computer?: false) ==
+             :none
   end
 
   test "a Linux computer publishes no history of its own yet, and an engine with no area none" do

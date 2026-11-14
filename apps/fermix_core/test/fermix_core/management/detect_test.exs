@@ -21,7 +21,8 @@ defmodule FermixCore.Management.DetectTest do
     [
       meetbot_installed: fn -> installed? end,
       meetbot_browser_installed: fn -> browser? end,
-      meetbot_signed_in: fn -> signed_in? end
+      meetbot_signed_in: fn -> signed_in? end,
+      meet_here: fn -> :ok end
     ]
   end
 
@@ -49,12 +50,14 @@ defmodule FermixCore.Management.DetectTest do
 
     for row <- results do
       # The per-target extras beside the three fields every row carries: the
-      # harness row's vendors and guidance, the notetaker row's sign-in fact.
-      assert row |> Map.drop(~w(vendors guidance signed_in)) |> Map.keys() |> Enum.sort() ==
-               ~w(detail present target)
+      # harness row's vendors and guidance, the notetaker row's sign-in and
+      # whether Google Meet can run here.
+      extras = ~w(vendors guidance signed_in available)
+      assert row |> Map.drop(extras) |> Map.keys() |> Enum.sort() == ~w(detail present target)
 
       assert is_boolean(row["present"])
       assert is_nil(row["detail"]) or is_binary(row["detail"])
+      assert Map.has_key?(row, "available") == (row["target"] == "meetbot")
     end
   end
 
@@ -288,7 +291,8 @@ defmodule FermixCore.Management.DetectTest do
                "target" => "meetbot",
                "present" => true,
                "detail" => "Signed in to Google",
-               "signed_in" => true
+               "signed_in" => true,
+               "available" => true
              }
     end
 
@@ -301,7 +305,8 @@ defmodule FermixCore.Management.DetectTest do
                "target" => "meetbot",
                "present" => true,
                "detail" => "Not signed in to Google",
-               "signed_in" => false
+               "signed_in" => false,
+               "available" => true
              }
     end
 
@@ -322,7 +327,8 @@ defmodule FermixCore.Management.DetectTest do
                "target" => "meetbot",
                "present" => false,
                "detail" => nil,
-               "signed_in" => nil
+               "signed_in" => nil,
+               "available" => true
              }
     end
 
@@ -341,8 +347,37 @@ defmodule FermixCore.Management.DetectTest do
                "target" => "meetbot",
                "present" => false,
                "detail" => nil,
-               "signed_in" => nil
+               "signed_in" => nil,
+               "available" => true
              }
+    end
+
+    # M97 D24: an Always On server has no screen to sign the notetaker in to
+    # Google on, so the row says Google Meet cannot run there before the
+    # Meetings pane offers anything, in the sentence every surface says. What
+    # is installed and signed in is still read as it is.
+    test "on an Always On server Google Meet is unavailable, in the D24 sentence" do
+      for {installed?, signed_in?} <- [{true, true}, {false, nil}] do
+        probes =
+          probes()
+          |> Keyword.merge(meetbot_probes(installed?, installed?, signed_in?))
+          |> Keyword.merge(meet_here: fn -> {:error, :meet_unavailable_on_server} end)
+
+        assert %{"results" => [row]} = Detect.run(["meetbot"], probes: probes)
+
+        assert row == %{
+                 "target" => "meetbot",
+                 "present" => installed?,
+                 "detail" =>
+                   "Google Meet is not available on your server yet: the notetaker needs a " <>
+                     "Google sign-in on a computer with a screen. Zoom meetings work on your " <>
+                     "server.",
+                 "signed_in" => signed_in?,
+                 "available" => false
+               }
+
+        assert row["detail"] == FermixCore.Meetings.meet_unavailable_sentence()
+      end
     end
   end
 

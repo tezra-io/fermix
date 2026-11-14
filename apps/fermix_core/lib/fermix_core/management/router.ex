@@ -1286,6 +1286,7 @@ defmodule FermixCore.Management.Router do
   defp here(section, opts) do
     case ComputerSettings.plain(section, settings_opts(opts)) do
       {:ok, plain} -> {:ok, plain}
+      {:refused, sentence} -> invalid_params("section", sentence)
       :none -> invalid_params("section")
     end
   end

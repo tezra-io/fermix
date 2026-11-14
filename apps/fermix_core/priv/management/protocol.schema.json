@@ -2407,7 +2407,7 @@
       "additionalProperties": false,
       "properties": {
         "sections": {
-          "description": "On a linked computer (M97 §19, D28): the server's sections, its own machine sections titled with its name, its sandbox and harness_machine where its hello_ack says it applies the rule (caps.computer.machine_settings) and left out where it does not, its browser either way (a server without the rule serves it as the home's), never its own computer_use, computer_history or accessories (each computer's own) and never a computer or computer.<id> it names; then this computer's own, under the always_on pane: computer, and computer.<id> for each machine section it has (computer.sandbox, computer.browser, computer.computer_use, computer.computer_history on a Mac, computer.accessories on a Mac), titled for this machine. On any other engine, its own.",
+          "description": "On a linked computer (M97 §19, D28): the server's sections, its own machine sections titled with its name, its sandbox and harness_machine where its hello_ack says it applies the rule (caps.computer.machine_settings) and left out where it does not, its browser either way (a server without the rule serves it as the home's), never its own computer_use, computer_history or accessories (each computer's own) and never a computer or computer.<id> it names; then this computer's own, under the always_on pane: computer, and computer.<id> for each machine section it has (computer.sandbox, computer.browser, computer.computer_use, computer.computer_history on a Mac; never computer.accessories, since StackChan does not run while the home is on a server), titled for this machine. On any other engine, its own.",
           "type": "array",
           "maxItems": 64,
           "items": { "$ref": "#/$defs/settingsSection" }
@@ -2638,6 +2638,7 @@
         "present": { "type": "boolean" },
         "detail": { "type": ["string", "null"] },
         "signed_in": { "type": ["boolean", "null"] },
+        "available": { "type": "boolean" },
         "vendors": {
           "type": "array",
           "maxItems": 2,
@@ -2653,6 +2654,10 @@
       "allOf": [{
         "if": { "properties": { "target": { "const": "harness_vendors" } } },
         "else": { "not": { "anyOf": [{ "required": ["vendors"] }, { "required": ["guidance"] }] } }
+      }, {
+        "if": { "properties": { "target": { "const": "meetbot" } } },
+        "then": { "required": ["available"] },
+        "else": { "not": { "required": ["available"] } }
       }]
     },
     "setup_detect_params": {

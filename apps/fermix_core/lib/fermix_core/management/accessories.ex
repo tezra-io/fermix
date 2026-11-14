@@ -15,10 +15,12 @@ defmodule FermixCore.Management.Accessories do
   voice), turns the provider's atom-keyed facts into the string-keyed wire,
   and owns every sentence and every action a row offers.
 
-  Accessories run only on a local Mac primary (M91 D13): elsewhere the status
-  answers `needs_local_primary` and every other method is refused with its
-  sentence. Every success answers the whole status, so the app redraws from
-  the daemon's own picture after each action.
+  Accessories run only on a local Mac primary (M91 D13), and not as part of
+  Always On (the owner's decision): elsewhere the status answers
+  `needs_local_primary` and every other method is refused with one sentence
+  that says why in the owner's words (`not_here_sentence/1`). Every success
+  answers the whole status, so the app redraws from the daemon's own picture
+  after each action.
   """
 
   alias FermixCore.Accessories.Attach
@@ -69,7 +71,13 @@ defmodule FermixCore.Management.Accessories do
   # -- sentences -------------------------------------------------------------------
 
   @off_sentence "StackChan is off."
-  @needs_primary_sentence "StackChan setup needs a local Mac primary."
+  # Why StackChan does not run on this engine, by where it runs: a Mac whose
+  # home is on its server, a Mac waiting for a move to it, any other computer.
+  @not_here_sentences %{
+    device: "StackChan works again once Fermix is back on this Mac.",
+    candidate: "StackChan works once Fermix has moved to this Mac.",
+    not_mac: "StackChan works only on a Mac."
+  }
   @not_running_sentence "StackChan is on but has not started. Restart Fermix to start it."
   @connect_sentence "Connect a StackChan."
   @on_sentence "StackChan is on."
@@ -212,12 +220,22 @@ defmodule FermixCore.Management.Accessories do
   @spec efuse_sentence() :: String.t()
   def efuse_sentence, do: @efuse_sentence
 
+  @doc """
+  Why StackChan does not run on this engine, in the owner's words: on a Mac
+  whose home is on its server (`:device`), on a Mac waiting for a move to it
+  (`:candidate`), on any computer that is not a Mac (`:not_mac`). The status
+  says it and every refusal for that reason, This computer's refusal of its
+  StackChan section (`Management.ComputerSettings`) among them.
+  """
+  @spec not_here_sentence(:device | :candidate | :not_mac) :: String.t()
+  def not_here_sentence(place) when is_map_key(@not_here_sentences, place),
+    do: Map.fetch!(@not_here_sentences, place)
+
   @doc "Every operator-facing sentence this module can put on the wire."
   @spec sentences() :: [String.t()]
   def sentences do
     [
       @off_sentence,
-      @needs_primary_sentence,
       @not_running_sentence,
       @connect_sentence,
       @on_sentence,
@@ -250,6 +268,7 @@ defmodule FermixCore.Management.Accessories do
       @set_nothing_sentence
     ] ++
       VoiceDevice.sentences() ++
+      Map.values(@not_here_sentences) ++
       Map.values(@voice_sentences) ++
       Map.values(@port_sentences) ++
       [@paired_elsewhere_sentence] ++
@@ -319,13 +338,14 @@ defmodule FermixCore.Management.Accessories do
   Starts or stops the accessory link while the daemon runs, once settings
   have written its switch. `:ok` when it followed; otherwise the sentence the
   settings write publishes as a side effect. Off a local Mac primary nothing
-  is called: the link never runs there.
+  is called: the link never runs there, and the sentence says why.
   """
   @spec apply_enabled(boolean(), keyword()) :: :ok | {:error, String.t()}
   def apply_enabled(on?, opts \\ []) when is_boolean(on?) and is_list(opts) do
-    if local_mac_primary?(opts),
-      do: switched(on?, provider_call(opts, :apply_enabled, [on?])),
-      else: {:error, @needs_primary_sentence}
+    case place(opts) do
+      :local -> switched(on?, provider_call(opts, :apply_enabled, [on?]))
+      elsewhere -> {:error, not_here_sentence(elsewhere)}
+    end
   end
 
   defp switched(_on?, {:ok, {:ok, state}}) when state in [:started, :stopped], do: :ok
@@ -644,7 +664,7 @@ defmodule FermixCore.Management.Accessories do
     facts = facts(opts)
 
     cond do
-      facts.place != :local -> unavailable(@needs_primary_sentence)
+      facts.place != :local -> unavailable(not_here_sentence(facts.place))
       record_only?(action) -> :ok
       not facts.enabled -> unavailable(@off_sentence)
       not running?(facts) -> unavailable(@not_running_sentence)
@@ -842,7 +862,7 @@ defmodule FermixCore.Management.Accessories do
     home = home(opts)
 
     %{
-      place: if(local_mac_primary?(opts), do: :local, else: :elsewhere),
+      place: place(opts),
       enabled: Keyword.get_lazy(opts, :enabled?, &Config.enabled?/0),
       provider: provider_status(opts),
       voice: Keyword.get_lazy(opts, :readiness, &Readiness.voice/0),
@@ -854,10 +874,18 @@ defmodule FermixCore.Management.Accessories do
     }
   end
 
-  defp local_mac_primary?(opts) do
+  # Where this engine runs, for StackChan: `:local` on a Mac primary, else why
+  # not (`not_here_sentence/1`). A computer that is not a Mac never runs it,
+  # whatever its role.
+  defp place(opts) do
     role = Keyword.get_lazy(opts, :engine_role, &Role.recorded/0)
     os = Keyword.get_lazy(opts, :os_type, &:os.type/0)
-    role.role == :primary and os == {:unix, :darwin}
+
+    case {os, role.role} do
+      {{:unix, :darwin}, :primary} -> :local
+      {{:unix, :darwin}, mac_role} when mac_role in [:device, :candidate] -> mac_role
+      {_not_mac, role} when role in [:primary, :device, :candidate] -> :not_mac
+    end
   end
 
   defp home(opts), do: Keyword.get_lazy(opts, :home, &ConfigStore.fermix_home/0)
@@ -922,11 +950,11 @@ defmodule FermixCore.Management.Accessories do
     Map.put(view, "key", Base.encode16(binary_part(digest, 0, 8), case: :lower))
   end
 
-  defp state(%{place: :elsewhere}), do: :needs_local_primary
+  defp state(%{place: place}) when place != :local, do: :needs_local_primary
   defp state(%{enabled: false}), do: :off
   defp state(facts), do: if(running?(facts), do: :on, else: :not_running)
 
-  defp top_sentence(:needs_local_primary, _facts), do: @needs_primary_sentence
+  defp top_sentence(:needs_local_primary, facts), do: not_here_sentence(facts.place)
   # A robot left chosen when accessories were turned off stays chosen, and is
   # said: the Mac's own call is refused for it until the owner chooses again.
   defp top_sentence(:off, %{voice_device: {:ok, {:accessory, _id}}}),
@@ -1156,7 +1184,7 @@ defmodule FermixCore.Management.Accessories do
       "diag" => diag_view(link),
       "check" => check_view(link),
       "selected" => selected?,
-      "sentence" => accessory_sentence(connection, entry, link, state),
+      "sentence" => accessory_sentence(connection, entry, link, state, facts.place),
       "actions" => accessory_actions(connection, link, selected?, state, facts),
       "last_call" => last_call_view(Map.get(facts.provider.last_calls, record.accessory_id))
     }
@@ -1230,16 +1258,20 @@ defmodule FermixCore.Management.Accessories do
 
   defp check_view(_link), do: nil
 
-  defp accessory_sentence(:off, _entry, _link, state), do: top_sentence(state, nil)
-  defp accessory_sentence(:attached, _entry, link, _state), do: attached_sentence(link)
+  # Off this engine a paired robot's row says why, as the status does.
+  defp accessory_sentence(:off, _entry, _link, :needs_local_primary, place),
+    do: not_here_sentence(place)
 
-  defp accessory_sentence(connection, entry, _link, _state)
+  defp accessory_sentence(:off, _entry, _link, state, _place), do: top_sentence(state, nil)
+  defp accessory_sentence(:attached, _entry, link, _state, _place), do: attached_sentence(link)
+
+  defp accessory_sentence(connection, entry, _link, _state, _place)
        when connection in [:busy, :incompatible, :released, :not_paired] do
     {status, update} = port_status(entry)
     port_sentence(port_status_for(connection, status), update, entry.link || %{})
   end
 
-  defp accessory_sentence(connection, _entry, _link, _state),
+  defp accessory_sentence(connection, _entry, _link, _state, _place),
     do: Map.fetch!(@connection_sentences, connection)
 
   defp port_status_for(:not_paired, _status), do: :not_paired

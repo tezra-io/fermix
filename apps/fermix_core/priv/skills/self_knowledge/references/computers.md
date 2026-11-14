@@ -329,9 +329,12 @@ computer."
   signing it in still take a terminal on the server.
 - What belongs to one computer alone sits in one place on it, **This Mac**
   (**This computer** on Linux): what Fermix on the server may use there,
-  then its own sandbox, browser (with its Install), screen, history (Mac)
-  and StackChan (Mac). It changes only at that computer: neither the server
-  nor another computer writes it. Removing a computer and `/history off
+  then its own sandbox, browser (with its Install), screen and history
+  (Mac). It changes only at that computer: neither the server
+  nor another computer writes it. StackChan is not part of Always On: while
+  the home is on the server This Mac shows no StackChan switch, and
+  StackChan says "StackChan works again once Fermix is back on this Mac.";
+  its setting stays on the Mac as it was for a move back. Removing a computer and `/history off
   <name>` still work from anywhere. The server can be `open` while a Mac
   stays `strict`: each machine's commands run under its own sandbox.
 - A stored sandbox variable belongs to the sandbox it is typed in: the

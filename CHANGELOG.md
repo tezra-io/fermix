@@ -1005,7 +1005,7 @@ will be part of a future release; nothing in this group is in a release yet.
   where before the Sandbox pane showed that computer's own and a stored
   sandbox variable typed there landed on the server without a word. What
   belongs to one computer alone (what the server may use there, and that
-  computer's own sandbox, browser, screen, history and StackChan) is listed
+  computer's own sandbox, browser, screen and history) is listed
   apart, under This Mac (This computer on Linux), and changes only at that
   computer: the server, and every other computer, can no longer write it.
   So the server can stay Open while a Mac stays Strict. A Mac that took the
@@ -1036,6 +1036,9 @@ will be part of a future release; nothing in this group is in a release yet.
   computer's own settings, which a refused stored variable of its sandbox
   now names; and `fermix settings set` says which machine it changed
   ("Saved Sandbox on garden server (sandbox): sandbox_mode").
+- **StackChan says why it is off while Fermix is on your server.** Pet and
+  the setup page say "StackChan works again once Fermix is back on this
+  Mac.", and This Mac shows no StackChan switch until then.
 - **An install a linked computer runs itself is found again when its pane
   reopens.** On a computer linked to your server, the list of running work
   the apps read now holds that computer's own installs (its browser, the

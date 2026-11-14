@@ -1190,8 +1190,8 @@ defmodule Fermix.CLI.Doctor.Checks do
       os != {:unix, :darwin} or role not in [:primary, nil] ->
         warn(
           "accessories",
-          "on in config.toml, but StackChan needs a local Mac primary; this computer " <>
-            "watches no USB port"
+          "on in machine.toml, but StackChan works only on a Mac that is its own home; " <>
+            "this computer watches no USB port"
         )
 
       true ->

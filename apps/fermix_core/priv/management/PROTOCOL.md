@@ -170,17 +170,23 @@ primary's, exactly as its own socket would give it.
   decides by the id before it asks the server anything. This computer
   publishes its own under the `always_on` pane, titled for itself:
   `computer` (what Fermix on the server may use here, "This computer"), then
-  `computer.sandbox`, `computer.browser`, `computer.computer_use`,
-  `computer.computer_history` (on a Mac only, until a Linux computer records)
-  and `computer.accessories` (on a Mac), each titled "<the section's title>
-  on this Mac" ("on this computer" elsewhere), and each answered by the
-  plain section's own rows. Its answer carries the prefix: the section's
+  `computer.sandbox`, `computer.browser`, `computer.computer_use` and
+  `computer.computer_history` (on a Mac only, until a Linux computer
+  records), each titled "<the section's title> on this Mac" ("on this
+  computer" elsewhere), and each answered by the plain section's own rows.
+  Its answer carries the prefix: the section's
   `id`, and each secret row's `key` (`computer.env:LEDGER_TOKEN`), so the
   `secret.set` a row sends comes back here; a refusal's `section`, `field`
   or `id` names it the same way, so `settings.reload` with that `section`
   clears an outside edit of this computer's own files here. A
   `computer.<id>` that is no section this computer publishes is
-  `invalid_params` on `section`; a `computer.` secret that is not a sandbox
+  `invalid_params` on `section`. StackChan is not part of Always On, so
+  this computer publishes no `computer.accessories`, and its
+  `invalid_params` on `section` carries the sentence *Accessories* answers
+  here ("StackChan works again once Fermix is back on this Mac.", or
+  "StackChan works only on a Mac." off a Mac); the robot's setting stays in
+  this computer's `machine.toml` as it was, for a move back. A
+  `computer.` secret that is not a sandbox
   value is `invalid_params` on `id` (`This computer keeps only its sandbox's
   values: computer.env:<NAME>.`). The server refuses every `computer` and
   `computer.<id>` a computer forwards (`device_class_method`). A screen, a
@@ -1009,7 +1015,7 @@ daemon onto anything else.
 | `settings.reload` | `section` (optional: the section an outside edit was refused for) | Re-reads the settings file, pushes it into the running configuration, and re-records the baseline. The one action behind `Reload settings from disk`. On a linked computer, a `section` of `computer` or `computer.<id>` reloads this computer's own; any other, or none, the server's (sent without its `section` to a server without the rule, *One set of settings*). Minimum version `2`. |
 | `secret.set` | `id`, `value` | Stores one secret and answers with its presence, never its value, and the environment variable that overrides it, if any. On a linked computer, `computer.env:<NAME>` is a sandbox value of this computer's own, every other id the server's; a sandbox value is an owner decision. Minimum version `2`. |
 | `secret.clear` | `id` | Forgets one secret: the keyring item, the reference that reads it, and the value in force. Answers with the environment variable still in use, if any. Placed as `secret.set`. Minimum version `2`. |
-| `setup.detect` | `targets` | One row per target asked for: whether this Mac already has it, and a short detail where there is one. The harness target also reports vendor installation, version and sign-in state (`auth`, and `signed_out` once a run there failed to sign in), with guidance. The `meetbot` target reports whether both halves of the meeting notetaker are installed, its detail carries the state of the notetaker's Google sign-in as a sentence, and `signed_in` carries the same state as a boolean, null while the notetaker is absent. Never a credential value. On a linked computer a request whose every target is the home's (`existing_primary`, `claude_code`, `codex_cli`, `ollama`, `harness_vendors`, `meetbot`) is the server's, any other this computer's (*After a move*). Minimum version `2`. |
+| `setup.detect` | `targets` | One row per target asked for: whether this Mac already has it, and a short detail where there is one. The harness target also reports vendor installation, version and sign-in state (`auth`, and `signed_out` once a run there failed to sign in), with guidance. The `meetbot` target reports whether both halves of the meeting notetaker are installed, its detail carries the state of the notetaker's Google sign-in as a sentence, and `signed_in` carries the same state as a boolean, null while the notetaker is absent. Only the `meetbot` row carries `available`, always: false where Google Meet cannot run on the machine that answers (an Always On server, M97 D24), its `detail` then "Google Meet is not available on your server yet: the notetaker needs a Google sign-in on a computer with a screen. Zoom meetings work on your server." in place of the sign-in's, and true everywhere else; `present` and `signed_in` are read as they are either way (`setup_detect_server`). Never a credential value. On a linked computer a request whose every target is the home's (`existing_primary`, `claude_code`, `codex_cli`, `ollama`, `harness_vendors`, `meetbot`) is the server's, any other this computer's (*After a move*). Minimum version `2`. |
 | `coding_agents.check` | `vendors` (optional: a list naming `codex` and `claude`, each at most once; both when absent) | Check again for this computer's coding agents: the owner's word that they signed in again. The sign-in marks of the agents it names (an agent whose last run here failed to sign in, `signed_out` in `setup.detect`) are cleared on this computer, and the answer is `{results}` with the one `harness_vendors` row `setup.detect` answers, read again. A client calls it only when `hello` lists it, and `setup.detect` otherwise. Refusals: a parameter it does not take, or `vendors` that is not such a list, is `invalid_params` with `field`; sign-in marks this computer cannot read are `unavailable` {`capability`: `coding_agents`, `sentence`: "Fermix could not read the coding agents' sign-in marks here, so none was cleared."}, and nothing is cleared. On a linked computer it is the server's (M97 §19, D28: the coding agents the server runs, *After a move*); this computer's own coding facts are not drawn there. Minimum version `2`. |
 | `providers.set_primary` | `provider` | Makes one configured provider the primary and answers with the restart state and any change the operator did not type. Minimum version `2`. |
 | `providers.models.list` | `provider`, `live`, `query`, `cursor`, `limit` | One page of models, from the catalog this build ships or from the provider's own live listing, with the cursor for the next page. Minimum version `2`. |
@@ -2302,12 +2308,18 @@ copy of its own.
 
 **Where it answers.** Every method is device-class (*After a move*): the
 engine that receives it answers it. Accessories run only on a local Mac
-primary, so on a device-role or candidate engine, or off macOS,
-`accessories.status` answers `state` `needs_local_primary` and every other
-method `unavailable` {`capability`: `accessories`, `sentence`: "StackChan setup
-needs a local Mac primary."}. With accessories off, the status answers `off`
-and the other methods `unavailable` with "StackChan is off."; Forget and Revoke
-still erase a record then.
+primary, and are not part of Always On, so on a device-role or candidate
+engine, or off macOS, `accessories.status` answers `state`
+`needs_local_primary`, offers no action, and every other method is
+`unavailable` {`capability`: `accessories`}, the status's `sentence`, each
+paired robot's `sentence` and the refusal's all saying why: "StackChan works
+again once Fermix is back on this Mac." on a Mac whose home is on its server
+(device role), "StackChan works once Fermix has moved to this Mac." on a Mac
+waiting for a move to it (candidate), and "StackChan works only on a Mac."
+off macOS, whatever the role. A linked computer publishes no
+`computer.accessories` then (*One set of settings*). With accessories off,
+the status answers `off` and the other methods `unavailable` with
+"StackChan is off."; Forget and Revoke still erase a record then.
 
 **The switch.** `[fermix_channels.accessories] enabled` is the `accessories`
 settings section's one row, `accessories_enabled` (pane `voice`, a Mac only).
@@ -2610,6 +2622,8 @@ own client tests against the same golden frames the daemon is tested against.
   `settings.sections` also a linked computer's composed inventory
   (`settings_sections_computer`), for `job.list` also a linked computer's
   composed list, the server's job then its own (`job_list_computer`), for
+  `setup.detect` also an Always On server's notetaker row, Google Meet
+  unavailable (`setup_detect_server`), for
   `mobile.pair.get` one per session state, for `job.get` a browser download
   both completed and failed, for `computer_use.permissions.get` a Mac
   answer and a Linux one, for `home.status` one per family of the Always On
@@ -2621,7 +2635,7 @@ own client tests against the same golden frames the daemon is tested against.
   screen, with the mark's `screen`, `home_status_on_screen`, where every
   other golden has no `screen`, which a client reads as null),
   for `accessories.status` one per family of the setup and
-  call states (off, needs a local Mac primary, a port with no Fermix answer,
+  call states (off, a Mac whose home is on its server, a port with no Fermix answer,
   incompatible firmware, pairing with its code, a pairing just done, a paired
   robot in a call, that call settling, StackChan off with the robot still
   chosen, and a voice device choice that cannot be read), and for `home.act` a cancelled code, `own_server`'s

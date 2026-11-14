@@ -132,11 +132,12 @@ defmodule FermixChannels.Desktop.TwoEnginesSettingsTest do
     assert titles["computer.browser"] == {"always_on", "Browser on this Mac"}
     assert titles["computer.computer_use"] == {"always_on", "Computer use on this Mac"}
     assert titles["computer.computer_history"] == {"always_on", "Computer history on this Mac"}
-    assert titles["computer.accessories"] == {"always_on", "StackChan on this Mac"}
     assert titles["computer"] == {"always_on", "This computer"}
 
     # Nobody sits at the server: it lists no screen of its own, and the
-    # computer lists no plain screen section beside its own.
+    # computer lists no plain screen section beside its own. StackChan is
+    # not part of Always On, so This Mac shows none while the home is here.
+    refute Map.has_key?(titles, "computer.accessories")
     refute Map.has_key?(titles, "computer_use")
     refute Map.has_key?(titles, "computer_history")
     refute Map.has_key?(titles, "computer.harness_machine")

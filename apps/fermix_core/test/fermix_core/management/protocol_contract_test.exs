@@ -1069,7 +1069,7 @@ defmodule FermixCore.Management.ProtocolContractTest do
 
     assert Enum.drop_while(fixture_rest, &(&1 != "computer")) ==
              ~w(computer computer.sandbox computer.browser computer.computer_use
-                computer.computer_history computer.accessories)
+                computer.computer_history)
 
     assert Enum.reject(golden["sections"], &provider_section?(&1["id"])) ==
              Enum.reject(composed["sections"], &provider_section?(&1["id"]))
@@ -1128,6 +1128,28 @@ defmodule FermixCore.Management.ProtocolContractTest do
              )
 
     assert named_fixture_result("settings_get_web_search_computer") == json(view)
+  end
+
+  # M97 D24: the notetaker row an Always On server answers says Google Meet
+  # cannot run there before the Meetings pane offers anything; the golden is
+  # the server's own row for a notetaker it never installed.
+  test "the golden server notetaker row is the one the server answers" do
+    request = %{
+      request_id: "req-1",
+      protocol_version: 2,
+      method: "setup.detect",
+      params: %{"targets" => ["meetbot"]}
+    }
+
+    probes = [
+      meetbot_installed: fn -> false end,
+      meetbot_browser_installed: fn -> flunk("the browser was read with no sidecar") end,
+      meetbot_signed_in: fn -> flunk("the sign-in was read with no sidecar") end,
+      meet_here: fn -> {:error, :meet_unavailable_on_server} end
+    ]
+
+    assert {:ok, result} = Router.route(request, operation_opts: [probes: probes])
+    assert named_fixture_result("setup_detect_server") == json(result)
   end
 
   # M97 D28: a computer linked to its server lists the server's jobs, then the
@@ -3358,7 +3380,8 @@ defmodule FermixCore.Management.ProtocolContractTest do
         end,
         meetbot_installed: fn -> true end,
         meetbot_browser_installed: fn -> true end,
-        meetbot_signed_in: fn -> true end
+        meetbot_signed_in: fn -> true end,
+        meet_here: fn -> :ok end
       ]
     ]
   end
