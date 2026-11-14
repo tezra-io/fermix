@@ -53,7 +53,8 @@ db = os.path.join(home, "memory.db")
 seen = open(db).read() if os.path.exists(db) else None
 with open(os.path.join(home, "fake-daemon.log"), "a") as log:
     log.write(json.dumps({"pid": os.getpid(), "memory_db": seen,
-                          "path": os.environ.get("PATH", "")}) + "\n")
+                          "path": os.environ.get("PATH", ""),
+                          "fixture_origin": os.environ.get("FERMIX_EVAL_FIXTURE_ORIGIN")}) + "\n")
 with open(db, "a") as fh:
     fh.write("+written-by-the-daemon")
 path = os.path.join(home, "daemon.sock")
@@ -313,6 +314,52 @@ def test_up_puts_the_eval_bin_first_on_the_daemons_path_only_for_a_stub(
         [start] = _starts(home)
         eval_bin = str(home / seed.CUE_BIN_DIR)
         assert (start["path"].split(os.pathsep)[0] == eval_bin) is leads
+    finally:
+        _down(home, stray_daemons)
+
+
+def test_up_hands_the_daemon_the_fixture_origin_its_seed_recorded(
+        scratch, fake_mix, stray_daemons):
+    # The one origin the daemon's web_fetch may read is the port the runners bind,
+    # whatever the caller's own environment says.
+    home = scratch / "cap-eval"
+    up = _script("up", home, FERMIX_CAP_SEED_ARGS="--provider ollama --model brindle-7b",
+                 FERMIX_EVAL_FIXTURE_ORIGIN="http://127.0.0.1:1")
+    try:
+        assert up.returncode == 0, up.stderr
+        port = json.loads((home / seed.FIXTURE_MANIFEST).read_text())["port"]
+        [start] = _starts(home)
+        assert start["fixture_origin"] == f"http://127.0.0.1:{port}"
+    finally:
+        _down(home, stray_daemons)
+
+
+def test_a_home_without_the_fixture_manifest_starts_the_daemon_without_the_origin(
+        scratch, fake_mix, stray_daemons):
+    # A home seeded before the manifest existed: its daemon's web_fetch refuses
+    # loopback as every Fermix does, even when the caller's environment carries
+    # the variable.
+    home = _seeded_home(scratch)
+    assert not (home / seed.FIXTURE_MANIFEST).exists()
+    assert _script("snapshot", home).returncode == 0
+    try:
+        reset = _script("reset", home, FERMIX_EVAL_FIXTURE_ORIGIN="http://127.0.0.1:4173")
+        assert reset.returncode == 0, reset.stderr
+        [start] = _starts(home)
+        assert start["fixture_origin"] is None
+    finally:
+        _down(home, stray_daemons)
+
+
+def test_a_fixture_manifest_it_cannot_read_stops_the_start(scratch, fake_mix, stray_daemons):
+    home = _seeded_home(scratch)
+    _write_tree(home, {seed.FIXTURE_MANIFEST: '{"port": "4173"}'})
+    assert _script("snapshot", home).returncode == 0
+    try:
+        reset = _script("reset", home)
+        assert reset.returncode != 0
+        assert "fixture manifest" in reset.stderr
+        assert _starts(home) == []
     finally:
         _down(home, stray_daemons)
 

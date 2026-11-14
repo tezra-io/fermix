@@ -1612,7 +1612,7 @@ def test_a_private_fixture_server_serves_the_harness_helper(tmp_path):
     pages.mkdir(parents=True)
     (pages / "profile.html").write_text("<p>profile</p>")
     case = SimpleNamespace(turns=[SimpleNamespace(query="open __EVAL_FIXTURE_URL__/profile.html")])
-    server = rc._start_fixture_server([(None, None, case)], str(pages))
+    server = rc._start_fixture_server([(None, None, case)], str(tmp_path / "x-eval"), str(pages))
     try:
         assert server.documents == ("fixture.js", "profile.html")
     finally:

@@ -41,7 +41,7 @@ from evallib import companion, cue_drive, voice
 from evallib import config as cfgmod
 from evallib import driver, grade, judge, report
 from evallib.fixture_server import (FIXTURE_URL_PLACEHOLDER, FixtureServer,
-                                    ServerError, case_uses_fixture)
+                                    ServerError, case_uses_fixture, home_port)
 from evallib.opik import OpikClient, OpikError, parse_ts, valid_run_id
 from evallib.session_ids import sess
 from evallib.suites import (ALWAYS_STICKY_GATES, RISK_LEVELS, STICKY_GATE_KEYS,
@@ -2509,7 +2509,7 @@ def _run_selected(cfg, args, chosen, profiles, judge_on: bool,
     run_id = new_run_id()
     started = now_utc()
     try:
-        fixtures = _start_fixture_server(jobs)
+        fixtures = _start_fixture_server(jobs, cfg.daemon.fermix_home)
     except ServerError as exc:
         # A precondition, and the one failure mode that would otherwise reach
         # every selected case as a connection refused that reads as the model.
@@ -2528,18 +2528,23 @@ def _run_selected(cfg, args, chosen, profiles, judge_on: bool,
         skipped_required, aborted, platform_skips)
 
 
-def _start_fixture_server(jobs) -> FixtureServer | None:
-    """Start the fixture server if and only if a selected case addresses it.
+def _start_fixture_server(jobs, home: str) -> FixtureServer | None:
+    """Start the fixture server if and only if a selected case addresses it, on
+    the port `home`'s fixture manifest names (the origin its daemon's web_fetch
+    reads), or an ephemeral one for a home with none (fixture_server.home_port).
 
     Before anything is driven: a run whose pages cannot be served must fail on
     the server, not case by case on a connection refused that reads as the model
     failing to open a page."""
     if not any(case_uses_fixture(case) for _suite, _scenario, case, _trial in jobs):
         return None
+    wanted = home_port(home)
     fixtures = FixtureServer(FIXTURE_PAGES_DIR)
-    port = fixtures.start()
-    print(f"fixture server: 127.0.0.1:{port} "
-          f"({len(fixtures.documents)} document(s), one token per case attempt)")
+    port = fixtures.start(wanted)
+    reach = ("the home's fixture port: web_fetch and browser" if wanted
+             else "ephemeral: browser only")
+    print(f"fixture server: 127.0.0.1:{port} ({reach}; "
+          f"{len(fixtures.documents)} document(s), one token per case attempt)")
     return fixtures
 
 

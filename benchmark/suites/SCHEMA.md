@@ -281,7 +281,18 @@ the `query` shorthand; multi-turn uses `turns`.
     token per case attempt (so a `--repeat` trial and a `--fail-retries` attempt
     each read their own page), and stop it on every exit path. `--dry-run`
     validates the placeholder and starts nothing. There is no port to start by
-    hand and no literal address in any suite.
+    hand and no literal address in any suite. The port is the eval home's:
+    every seed (`seed_capability_home.py`) records a free one in
+    `eval-fixtures/fixture_server.json`, `capability-daemon.sh` starts that
+    home's daemon with `FERMIX_EVAL_FIXTURE_ORIGIN=http://127.0.0.1:<port>`
+    (the one origin a development build's `web_fetch` reads past its
+    private-address guard, and only while the running home's manifest records
+    that port; a release build never does), and both runners bind
+    exactly that port, so a page is readable by `web_fetch` as well as the
+    browser. A port something else holds fails the run before spending
+    anything, naming it (one run per eval home serves pages at a time). A home
+    with no manifest, such as `~/.fermix-dev`, binds an ephemeral port only the
+    browser can read, and its daemon runs without the variable.
 
   Rendering them into `expect` is what lets a **read-back gate pin the run that
   wrote the artifact**. A suite whose every run leaves something permanent must

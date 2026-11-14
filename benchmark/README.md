@@ -782,9 +782,14 @@ which no reply gate can give. Both come from one place: the pages under
 
 **Nothing is started by hand.** A suite writes `__EVAL_FIXTURE_URL__` where a URL
 would go (`__EVAL_FIXTURE_URL__/form.html`). `run_eval.py` and
-`run_capability.py` each start ONE server, on an ephemeral 127.0.0.1 port, if and
-only if a selected case uses that placeholder, before anything is driven, and
-stop it on every exit path. Each case attempt gets its own token
+`run_capability.py` each start ONE server on 127.0.0.1, if and only if a
+selected case uses that placeholder, before anything is driven, and stop it on
+every exit path. Its port is the one the eval home's seed recorded in
+`eval-fixtures/fixture_server.json`, which `capability-daemon.sh` also hands the
+daemon as `FERMIX_EVAL_FIXTURE_ORIGIN`, so a dev build's `web_fetch` can read the
+pages as well as the browser; a port something else holds fails the run before
+anything is driven. A home with no manifest (`~/.fermix-dev`) gets an ephemeral
+port only the browser can read. Each case attempt gets its own token
 (`/s/<token>/…`), so a `--repeat` trial, a `--fail-retries` attempt and a
 capability trial each read the page state they produced themselves. `--dry-run`
 validates the placeholder and starts nothing; it prints how many case trials

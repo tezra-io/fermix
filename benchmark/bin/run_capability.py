@@ -67,7 +67,8 @@ from evallib import (aggregate, checker, config as cfgmod, cue_drive, driver, gr
                      uplift)
 from evallib.experiments import ExperimentWriter, OpikWriteError, stable_id
 from evallib.fixture_server import (FIXTURE_URL_PLACEHOLDER, PAGE_READY_PATH, FixtureServer,
-                                    ServerError, case_uses_fixture, check_state, read_path)
+                                    ServerError, case_uses_fixture, check_state, home_port,
+                                    read_path)
 from evallib.opik import OpikClient, OpikError
 from evallib.session_ids import sess
 from evallib.suites import UNCLASSIFIED_RISK, SuiteError, load_all
@@ -2193,7 +2194,7 @@ def _sweep(cfg, args, lb_path, cases, want_judge, not_evaluated=(),
     print(f"capability eval · {len(cases)} task(s) × {run.trials} trial(s) · "
           f"judge={'on' if want_judge else 'off'} · axis={args.axis}")
     try:
-        fixtures = _start_fixture_server(cases, _pages_dir(tasks_root))
+        fixtures = _start_fixture_server(cases, cfg.daemon.fermix_home, _pages_dir(tasks_root))
     except ServerError as exc:
         # A precondition, not a measurement: without the pages every trial would
         # score 0 on a connection refused, which reads as the model failing.
@@ -2235,19 +2236,25 @@ def _pages_dir(tasks_root: str | None) -> str:
     return os.path.join(tasks_root, "fixtures", "pages")
 
 
-def _start_fixture_server(cases, pages_dir: str | None = None) -> FixtureServer | None:
+def _start_fixture_server(cases, home: str,
+                          pages_dir: str | None = None) -> FixtureServer | None:
     """Start the fixture server if and only if a selected task addresses it, and
     before any spend: a sweep whose pages cannot be served must fail on the
     server, not trial by trial on a connection refused that scores as the model
-    failing to open a page."""
+    failing to open a page. It binds the port `home`'s fixture manifest names
+    (the origin its daemon's web_fetch reads), or an ephemeral one for a home
+    with none (fixture_server.home_port)."""
     if not any(case_uses_fixture(case) for _s, _scn, case in cases):
         return None
+    wanted = home_port(home)
     pages_dir = pages_dir or FIXTURE_PAGES_DIR
     helper = None if pages_dir == FIXTURE_PAGES_DIR else FIXTURE_HELPER
     fixtures = FixtureServer(pages_dir, helper=helper)
-    port = fixtures.start()
-    print(f"  fixture server: 127.0.0.1:{port} "
-          f"({len(fixtures.documents)} document(s), one token per trial)")
+    port = fixtures.start(wanted)
+    reach = ("the home's fixture port: web_fetch and browser" if wanted
+             else "ephemeral: browser only")
+    print(f"  fixture server: 127.0.0.1:{port} ({reach}; "
+          f"{len(fixtures.documents)} document(s), one token per trial)")
     return fixtures
 
 

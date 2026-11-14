@@ -603,6 +603,41 @@ def test_the_door_port_is_free_and_not_the_default():
     assert 1024 < port < 65536 and port != 4032
 
 
+# --- the fixture server's port ------------------------------------------------------
+
+def _fixture_manifest(home):
+    return json.loads((home / seed.FIXTURE_MANIFEST).read_text())
+
+
+@pytest.mark.parametrize("flags", [[], ["--cues"]])
+def test_every_seed_records_a_fresh_fixture_port_that_is_not_the_door(
+        tmp_path, monkeypatch, flags):
+    # The runners bind it and capability-daemon.sh hands it to the daemon's
+    # web_fetch, so every seed writes it, private, and a reseed picks again.
+    home = tmp_path / "x-eval"
+    cfg = _seed_main(monkeypatch, home, *flags)
+    manifest = _fixture_manifest(home)
+    assert set(manifest) == {"port"}
+    assert isinstance(manifest["port"], int) and 1024 < manifest["port"] < 65536
+    assert (home / seed.FIXTURE_MANIFEST).stat().st_mode & 0o777 == 0o600
+    if flags:
+        assert manifest["port"] != cfg["fermix_core"]["cues"]["door_port"]
+    # The manifest is the seed's setup, not sweep state: no reset removes it.
+    assert "eval-fixtures" not in seed.STATE_DIRS
+
+
+def test_the_fixture_port_is_never_the_doors(monkeypatch):
+    answers = iter([4301, 4301, 4302])
+    monkeypatch.setattr(seed, "free_door_port", lambda: next(answers))
+    assert seed.free_fixture_port(4301) == 4302
+
+
+def test_a_fixture_port_probe_that_only_finds_the_door_is_refused(monkeypatch):
+    monkeypatch.setattr(seed, "free_door_port", lambda: 4301)
+    with pytest.raises(SystemExit):
+        seed.free_fixture_port(4301)
+
+
 # --- computers (M97) ---------------------------------------------------------------
 
 # The rules `FermixChannels.Mobile.DeviceStore` reads a row by (decode_device/1,

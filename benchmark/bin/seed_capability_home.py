@@ -84,6 +84,15 @@ exists in an eval, so both computers are listed as away. The seed records what
 it wrote in `eval-fixtures/computers.json`; a seed without `--computers`
 removes all of it, and a seed with it refuses a devices file it did not write.
 
+Every seed picks a free loopback port for the runners' fixture server and
+records it in `eval-fixtures/fixture_server.json` (`{"port": N}`), picked at
+seed time like the cue door's (and never the door's own). `capability-daemon.sh`
+starts the daemon with `FERMIX_EVAL_FIXTURE_ORIGIN=http://127.0.0.1:N` from it,
+the one origin a development build's `web_fetch` reads past its private-address
+guard, and both runners bind exactly that port (`evallib.fixture_server`), so a
+fixture page is readable by `web_fetch` as well as the browser. A home without
+the manifest (one seeded before it existed) gets neither.
+
 `--coding-signed-out` (M98 D10) gives coding_harness's signed-out case a Claude
 Code that fails every run as signed out: a stub `claude` in `<home>/eval-bin`
 (`capability-daemon.sh` puts that folder first on the daemon's PATH) that
@@ -113,6 +122,7 @@ import tomllib
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from evallib import safe_rm  # noqa: E402
+from evallib.fixture_server import FIXTURE_MANIFEST  # noqa: E402
 
 DEV_HOME = os.path.expanduser("~/.fermix-dev")
 # This computer's own settings, beside config.toml (M97 §4): the engine reads
@@ -586,6 +596,31 @@ def free_door_port() -> int:
         return probe.getsockname()[1]
     finally:
         probe.close()
+
+
+# Bound on the probes for a fixture port that is not the door's: two probes in a
+# row rarely answer the same port, and eight never should.
+FIXTURE_PORT_PROBES = 8
+
+
+def free_fixture_port(door_port: int | None) -> int:
+    """A port nothing listens on now and that is not this home's door, for the
+    runners' fixture server (`FIXTURE_MANIFEST`). Something taking it before a run
+    starts fails that run's fixture server loudly, naming the port."""
+    for _probe in range(FIXTURE_PORT_PROBES):
+        port = free_door_port()
+        if port != door_port:
+            return port
+    die(f"no free fixture port other than the door's {door_port} "
+        f"in {FIXTURE_PORT_PROBES} probes")
+
+
+def write_fixture_manifest(home: str, door_port: int | None) -> int:
+    """Record this seed's fixture port, rewritten on every seed: the port both runners
+    bind and the origin capability-daemon.sh hands the daemon's web_fetch."""
+    port = free_fixture_port(door_port)
+    write_private(os.path.join(home, FIXTURE_MANIFEST), json.dumps({"port": port}) + "\n")
+    return port
 
 
 def cue_filter_route(value: str | None, pid: str, blk: dict) -> tuple[str, str]:
@@ -1147,6 +1182,7 @@ def main() -> None:
         write_signed_out_claude(home)
     else:
         clear_signed_out_claude(home)
+    fixture_port = write_fixture_manifest(home, cues["door_port"] if cues else None)
     config = render_config(home, pid, blk, profile, explicit=bool(args.provider),
                            voice=voice_engine, cues=cues, computers=args.computers)
     if args.extra_config:
@@ -1165,6 +1201,7 @@ def main() -> None:
         copy_oauth_token(home, pid)
         auth = "oauth (token copied from dev store)"
     print(f"seeded {home}: scoring {pid}/{blk['default_model']} (auth={auth})")
+    print(f"fixture server: 127.0.0.1:{fixture_port}, the origin the daemon's web_fetch reads")
     if cues:
         print(f"cues: door on 127.0.0.1:{cues['door_port']}, filter "
               f"{'/'.join(cues['filter'])}, mandates {'on' if cues['mandates'] else 'off'}; "

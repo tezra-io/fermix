@@ -23,6 +23,13 @@
 # passes extra flags to seed_capability_home.py (e.g. the explicit --provider/
 # --model CI mode, or --cues for the cue suites); FERMIX_CAP_OPIK=0 starts the daemon without the Opik
 # exporter (macOS smoke boxes have no Opik).
+#
+# The seed records the runners' fixture-server port in
+# eval-fixtures/fixture_server.json, and the daemon starts with
+# FERMIX_EVAL_FIXTURE_ORIGIN=http://127.0.0.1:<that port>, the one origin a dev
+# build's web_fetch reads past its private-address guard. A home without that
+# manifest starts the daemon with the variable removed, inherited or not, so its
+# web_fetch refuses loopback as every other Fermix does.
 set -euo pipefail
 
 HOME_DIR="${FERMIX_CAP_HOME:-$HOME/.fermix-capability-eval}"
@@ -33,6 +40,8 @@ REPO_ROOT="$(cd "$BENCH/.." && pwd)"                          # umbrella root
 PIDFILE="$HOME_DIR/daemon.pid"
 LOGFILE="$HOME_DIR/daemon.log"
 READY_TIMEOUT="${READY_TIMEOUT:-90}"
+
+FIXTURE_MANIFEST="$HOME_DIR/eval-fixtures/fixture_server.json"
 
 log() { printf '\033[36m[cap-daemon]\033[0m %s\n' "$*" >&2; }
 
@@ -78,6 +87,20 @@ up() {
   start_daemon
 }
 
+# The origin the manifest names, read by the runners' own reader of it
+# (evallib.fixture_server.home_port), so the daemon and the runners never
+# disagree on the port; a manifest it refuses stops the start.
+fixture_origin() {
+  ( cd "$BIN_DIR" && uv run --no-project python -c '
+import sys
+from evallib.fixture_server import ServerError, home_port
+try:
+    print(f"http://127.0.0.1:{home_port(sys.argv[1])}")
+except ServerError as exc:
+    sys.exit(f"capability-daemon: {exc}")
+' "$HOME_DIR" )
+}
+
 start_daemon() {
   # Keep channels running (--no-web/--no-realtime only): the CLI-ask turn queue
   # is FermixChannels.Gateway.Queue, so --no-channels would break every turn. No
@@ -85,6 +108,15 @@ start_daemon() {
   log "starting disposable daemon (no web/realtime); log: $LOGFILE"
   local -a opik_env=(FERMIX_OPIK_ENABLED=1 FERMIX_OPIK_PROJECT="$PROJECT")
   if [ "${FERMIX_CAP_OPIK:-1}" = "0" ]; then opik_env=(); fi
+  # The fixture origin only from this home's manifest; never one the caller's
+  # environment carries (`env -u` below drops it first).
+  local -a fixture_env=()
+  if [ -f "$FIXTURE_MANIFEST" ]; then
+    local origin
+    origin="$(fixture_origin)" || return 1
+    fixture_env=(FERMIX_EVAL_FIXTURE_ORIGIN="$origin")
+    log "web_fetch may read the fixture origin $origin"
+  fi
   # With --cues the seeder leaves a stub `codex` in eval-bin for the follow-up
   # cases, and with --coding-signed-out a stub `claude` that fails every run as
   # signed out; first on the daemon's PATH, each is the CLI the daemon finds at boot.
@@ -92,11 +124,12 @@ start_daemon() {
   if [ -x "$HOME_DIR/eval-bin/codex" ] || [ -x "$HOME_DIR/eval-bin/claude" ]; then
     daemon_path="$HOME_DIR/eval-bin:$PATH"
   fi
-  ( cd "$REPO_ROOT" && exec env \
+  ( cd "$REPO_ROOT" && exec env -u FERMIX_EVAL_FIXTURE_ORIGIN \
       PATH="$daemon_path" \
       FERMIX_HOME="$HOME_DIR" \
       ${opik_env[@]+"${opik_env[@]}"} \
       FERMIX_BROWSER_HEADLESS=1 \
+      ${fixture_env[@]+"${fixture_env[@]}"} \
       mix fermix.dev --no-web --no-realtime ) >"$LOGFILE" 2>&1 &
   echo $! >"$PIDFILE"
   disown %% 2>/dev/null || true   # survive this shell exiting (up leaves it running)

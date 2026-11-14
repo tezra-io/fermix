@@ -12,6 +12,17 @@ defmodule FermixCore.Net.Guard do
   name's answers. A name is looked up the way every other program on the
   owner's machine looks it up, through the operating system's resolver, so
   the hosts file, `localhost` and mDNS `.local` names resolve as they do there.
+
+  One origin is read past this guard, by `web_fetch` alone, and only in a
+  development or test build: the eval runners' loopback fixture server, named
+  in `FERMIX_EVAL_FIXTURE_ORIGIN` (exactly `http://127.0.0.1:<port>`), which
+  only the eval daemon script (`benchmark/bin/capability-daemon.sh`) sets, and
+  honoured only while the running home's `eval-fixtures/fixture_server.json`
+  records that same port (set anywhere else, it fails every `web_fetch` call).
+  `Tools.WebFetch.EvalFixture` holds that rule: any other URL, and any
+  redirect off that origin, comes here as ever. A release build is compiled
+  for `:prod`, never reads the variable and cannot honour it, and this
+  module's policy is the same for every caller in every build.
   """
 
   import Bitwise
