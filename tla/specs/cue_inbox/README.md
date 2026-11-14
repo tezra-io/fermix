@@ -635,3 +635,13 @@ subtree, which keeps its place after `Jobs.Scheduler` and the temporal rail.
 Were the pacer to crash, the cue tree restarts after it, which the model takes
 as `FiltersRestart`, as for the children before it. Nothing the spec models
 changed, and it cites no `application.ex` line.
+
+## Re-read for the trip placer (2026-11-14)
+
+`supervision_children` gains `Trips.Placer` after `Computers.Calls` and
+before `Home.ReleaseTable` (M89 D13 B, `d4f5e1f3`), primary-only: it places
+the trip stops that wait for their place, runs each pass in a task linked to
+it, and raises on nothing it is sent, so a crash of it restarts only the
+children after it, the cue tree among them, which the model takes as
+`FiltersRestart`. The cue tree is still last. Nothing the spec models changed,
+and it cites no `application.ex` line.

@@ -1147,6 +1147,18 @@ nothing their guarded callers hand them. The order of `JobRunnerSupervisor`,
 delivery or report changed; the six lines move every citation past
 `ReplyBlocks`, now `application.ex:292-376`, `:377-384` and `:399`.
 
+## Re-read for the trip placer (2026-11-14)
+
+`supervision_children` gains `Trips.Placer` after `Computers.Calls` and
+before `Home.ReleaseTable` (M89 D13 B, `d4f5e1f3`), primary-only: it places
+the trip stops that wait for their place, runs each pass in a task linked to
+it, and raises on nothing it is sent, so a crash of it restarts only the
+children after it, the cue tree among them, which the model already takes
+as a `:rest_for_one` restart. The job rail and its order are unchanged. No modelled row,
+helper, delivery or report changed; the cue tree's citation, which the
+pacer's six lines had already moved, is now the call itself,
+`application.ex:457`.
+
 ## Assumptions
 
 - Every Repo call completes, or its caller dies, or, for the Scheduler, it
