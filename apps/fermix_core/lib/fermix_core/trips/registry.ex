@@ -59,7 +59,9 @@ defmodule FermixCore.Trips.Registry do
     not_found: 0,
     not_looked_up: 0,
     backend: nil,
-    rate_limited: false
+    rate_limited: false,
+    stop_reason: nil,
+    stop_code: nil
   }
   # A read's `day`: a day's position, or a run of them (C13).
   @run ~r/\A([0-9]{1,4})(?:\s*[-–]\s*([0-9]{1,4}))?\z/u
@@ -261,7 +263,7 @@ defmodule FermixCore.Trips.Registry do
          {:ok, found} <- resolve(requests, anchors, context, opts) do
       :ok = join_conversation(found.records, context, opts)
       {placed_call, outcomes} = Placing.placed_call(call, found.outcomes)
-      {:ok, placed_call, outcomes, looked(call, outcomes, found.lookups, context)}
+      {:ok, placed_call, outcomes, looked(call, outcomes, found, context)}
     else
       {:error, reason} -> {:error, reason, @no_lookups}
     end
@@ -312,12 +314,14 @@ defmodule FermixCore.Trips.Registry do
   end
 
   # What the call's lookups came to, for its event: each place given counted
-  # once, by its outcome.
-  defp looked(call, outcomes, lookups, context) do
+  # once, by its outcome, and what stopped them, with the place search's code.
+  defp looked(call, outcomes, found, context) do
     counts = Enum.frequencies_by(outcomes, fn {_index, outcome} -> bucket(outcome) end)
 
     %{
-      lookups: lookups,
+      lookups: found.lookups,
+      stop_reason: found.stop_reason,
+      stop_code: found.stop_code,
       placed: Map.get(counts, :placed, 0),
       offered: Map.get(counts, :offered, 0),
       not_found: Map.get(counts, :not_found, 0),

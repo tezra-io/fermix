@@ -367,6 +367,12 @@ defmodule FermixCore.Application do
         # reply that links them (M72). Before every process that dispatches a
         # tool; a restart forgets them, and a reply then carries its text alone.
         FermixCore.ReplyBlocks,
+        # The home's one door to Brave's place search (`PlaceSearch.Brave.Pacer`):
+        # its requests one at a time, paced by Brave's rate headers. Before every
+        # process that dispatches a tool; it holds only who waits and when the
+        # next may send, so a restart forgets that, and it raises on nothing its
+        # guarded callers hand it.
+        FermixCore.Tools.PlaceSearch.Brave.Pacer,
         AgentSupervisor,
         MainAgent,
         JobRunnerSupervisor,

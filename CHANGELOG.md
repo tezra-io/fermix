@@ -279,6 +279,17 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Place search on Brave keeps to Brave's rate limit.** A trip's place
+  lookups ran the first alone and then four at a time, so on a Brave plan
+  that allows one search a second most of a long trip's stops were left
+  without a place, as rate limited. Every place search on a Brave home now
+  goes to Brave one at a time, waiting when Brave's last answer says its
+  window is spent, and a search Brave refuses as rate limited is sent once
+  more after that wait. When the key's quota is spent for longer, such as for
+  the month, nothing more is sent until it resets, and Fermix says how long.
+  A Brave Search API key whose plan does not include place search is now
+  named as that, in the trip's answer and to the agent, which stops
+  searching.
 - **A Fermix too busy to answer is no longer taken for one that is stopped.**
   When its control socket did not accept a connection within 3 seconds, the
   command line read Fermix as not running, so on a busy machine `fermix home

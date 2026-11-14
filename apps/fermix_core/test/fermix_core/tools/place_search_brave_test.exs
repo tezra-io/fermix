@@ -2,6 +2,7 @@ defmodule FermixCore.Tools.PlaceSearch.BraveTest do
   use ExUnit.Case, async: true
 
   alias FermixCore.Tools.PlaceSearch.Brave
+  alias FermixCore.Tools.PlaceSearch.Brave.Pacer
 
   @key "brave-secret"
 
@@ -388,7 +389,7 @@ defmodule FermixCore.Tools.PlaceSearch.BraveTest do
       assert_status_error(403, "auth_failed")
     end
 
-    test "429 is rate_limited" do
+    test "429 is rate_limited once its one retry is refused too" do
       assert_status_error(429, "rate_limited")
     end
 
@@ -434,11 +435,36 @@ defmodule FermixCore.Tools.PlaceSearch.BraveTest do
       detail = "<script>x</script>" <> String.duplicate("word ", 200)
 
       assert {:error, reason, _meta} =
-               search(%{query: "coffee"}, brave_error(400, "OPTION_NOT_IN_PLAN", detail))
+               search(%{query: "coffee"}, brave_error(400, "VALIDATION", detail))
 
-      assert reason =~ "provider_error: HTTP 400 OPTION_NOT_IN_PLAN: "
+      assert reason =~ "provider_error: HTTP 400 VALIDATION: "
       refute reason =~ "<script>"
       assert byte_size(reason) <= 300
+    end
+
+    test "a key whose plan has no place search is its own kind, named by Brave's code" do
+      detail = "The option is not included in the plan."
+
+      for status <- [400, 403] do
+        assert {:error, reason, _meta} =
+                 search(%{query: "coffee"}, brave_error(status, "OPTION_NOT_IN_PLAN", detail))
+
+        assert reason ==
+                 "plan_excludes_place_search: the Brave Search API key's plan does not include " <>
+                   "place search, so searching again cannot find a place; tell the owner to " <>
+                   "add place search to that key's plan, and take a place's link only from " <>
+                   "the owner or a web search, never a made-up one " <>
+                   "(HTTP #{status} OPTION_NOT_IN_PLAN: #{detail})"
+      end
+    end
+
+    test "a 400 with any other code stays provider_error" do
+      for code <- ["VALIDATION", "OPTION_NOT_IN_PLAN_V2", "PLAN"] do
+        assert {:error, "provider_error: HTTP 400 " <> rest, _meta} =
+                 search(%{query: "coffee"}, brave_error(400, code, "Refused."))
+
+        assert rest == code <> ": Refused."
+      end
     end
 
     test "an error body that is not Brave's says only its status" do
@@ -543,10 +569,18 @@ defmodule FermixCore.Tools.PlaceSearch.BraveTest do
     end
   end
 
+  # Each search goes through a pacer of the test's own, on a clock that never
+  # moves, and its waits are never slept: this suite asserts what comes back,
+  # and `BravePacingTest` asserts the pacing.
   defp context(test_id, extra_options) do
     %{
       req_options: [plug: {Req.Test, test_id}] ++ extra_options,
-      net_resolver: public_resolver()
+      net_resolver: public_resolver(),
+      place_search_pacer:
+        start_supervised!(
+          Supervisor.child_spec({Pacer, name: nil, now_ms: fn -> 0 end}, id: make_ref())
+        ),
+      place_search_sleep: fn _ms -> :ok end
     }
   end
 

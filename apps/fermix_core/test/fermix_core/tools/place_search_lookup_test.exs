@@ -10,11 +10,15 @@ defmodule FermixCore.Tools.PlaceSearchLookupTest do
 
   alias FermixCore.ReplyBlocks
   alias FermixCore.Tools.PlaceSearch
+  alias FermixCore.Tools.PlaceSearch.Brave.Pacer
   alias FermixCore.Trips.Lookup
   alias FermixTestSupport.TelemetryCapture
 
   @key "brave-secret"
   @conversation {"test", "place-lookup", :root}
+  # What a search is told as it sends: a trip's lookup passes what its call
+  # has left, here the whole of it.
+  @send [send_within_ms: 45_000]
 
   setup do
     tools = Application.get_env(:fermix_core, :tools)
@@ -24,7 +28,7 @@ defmodule FermixCore.Tools.PlaceSearchLookupTest do
     %{session_id: session_id}
   end
 
-  describe "PlaceSearch.lookup/2" do
+  describe "PlaceSearch.lookup/3" do
     test "searches the backend in force with the request as given", %{session_id: session_id} do
       test_pid = self()
 
@@ -41,7 +45,7 @@ defmodule FermixCore.Tools.PlaceSearchLookupTest do
         radius_meters: 2_000
       }
 
-      assert {:ok, [place], trace} = PlaceSearch.lookup(request, context)
+      assert {:ok, [place], trace} = PlaceSearch.lookup(request, context, @send)
       assert place.name == "Prado"
       assert place.location == %{latitude: 38.7101, longitude: -9.1335}
       assert trace.backend == "brave"
@@ -72,7 +76,11 @@ defmodule FermixCore.Tools.PlaceSearchLookupTest do
       quiet = start_supervised!(Supervisor.child_spec({ReplyBlocks, name: nil}, id: make_ref()))
 
       assert {:ok, [%{name: "Prado"}], _trace} =
-               PlaceSearch.lookup(%{query: "Prado", count: 5}, %{context | reply_blocks: quiet})
+               PlaceSearch.lookup(
+                 %{query: "Prado", count: 5},
+                 %{context | reply_blocks: quiet},
+                 @send
+               )
 
       refute_received {:telemetry, [:fermix, :tool, :exec], _measurements, _metadata}
       assert ReplyBlocks.take(quiet, @conversation) == []
@@ -91,7 +99,7 @@ defmodule FermixCore.Tools.PlaceSearchLookupTest do
         end)
 
       assert {:error, "auth_failed: missing Brave API key", %{backend: "brave"}} =
-               PlaceSearch.lookup(%{query: "Prado", count: 5}, context)
+               PlaceSearch.lookup(%{query: "Prado", count: 5}, context, @send)
 
       refute_received :unexpected_request
     end
@@ -100,7 +108,7 @@ defmodule FermixCore.Tools.PlaceSearchLookupTest do
       context = stub(session_id, fn conn -> Plug.Conn.resp(conn, 429, "") end)
 
       assert {:error, "rate_limited: HTTP 429" <> _rest, %{backend: "brave"}} =
-               PlaceSearch.lookup(%{query: "Prado", count: 5}, context)
+               PlaceSearch.lookup(%{query: "Prado", count: 5}, context, @send)
     end
   end
 
@@ -112,7 +120,9 @@ defmodule FermixCore.Tools.PlaceSearchLookupTest do
         end)
 
       assert {:ok, search} = Lookup.backend(context)
-      assert {:ok, [%{name: "Prado"}], %{backend: "brave"}} = search.(%{query: "Prado", count: 5})
+
+      assert {:ok, [%{name: "Prado"}], %{backend: "brave"}} =
+               search.(%{query: "Prado", count: 5}, @send)
     end
 
     test "says why when no place search is set up here", %{session_id: session_id} do
@@ -127,6 +137,15 @@ defmodule FermixCore.Tools.PlaceSearchLookupTest do
       search = fn _request -> {:ok, [], %{}} end
 
       assert Lookup.backend(%{place_lookup: search}) == {:ok, search}
+    end
+
+    test "a stand-in that takes more than the request is refused, never passed over" do
+      put_tools(nil)
+      timed = fn _request, _send -> {:ok, [], %{}} end
+
+      assert_raise ArgumentError, ~r/place_lookup/, fn ->
+        Lookup.backend(%{place_lookup: timed})
+      end
     end
 
     test "a trip's lookups through the place search emit no tool event",
@@ -162,12 +181,19 @@ defmodule FermixCore.Tools.PlaceSearchLookupTest do
     test_id = :"place_lookup_#{System.unique_integer([:positive])}"
     Req.Test.stub(test_id, handler)
 
+    # A pacer of the test's own, on a clock that never moves, whose waits are
+    # never slept (`BravePacingTest` asserts the pacing).
     %{
       agent_name: "test_agent",
       session_id: session_id,
       conversation_key: @conversation,
       req_options: [plug: {Req.Test, test_id}],
-      net_resolver: fn "api.search.brave.com" -> {:ok, [{93, 184, 216, 34}]} end
+      net_resolver: fn "api.search.brave.com" -> {:ok, [{93, 184, 216, 34}]} end,
+      place_search_pacer:
+        start_supervised!(
+          Supervisor.child_spec({Pacer, name: nil, now_ms: fn -> 0 end}, id: make_ref())
+        ),
+      place_search_sleep: fn _ms -> :ok end
     }
   end
 

@@ -54,10 +54,18 @@ defmodule FermixCore.Trips.Lookup do
   At most 40 lookups a call, a place repeated on one day looked up once; a
   call that would need one more is refused before any lookup runs (C30). A
   link is no lookup. One rate limited answer stops every lookup not started
-  (C11); the call's lookups have 45 s, and one not started or still running
-  when they pass is stopped (C31). With no place search set up here, every
-  stop by words is left unplaced and the outcome says why (C28). A lookup
-  emits no tool event of its own (`PlaceSearch.lookup/2`, C12).
+  (C11), and so does one saying the Brave Search API key's plan does not
+  include place search; the call's lookups have 45 s, and one not started or
+  still running when they pass is stopped (C31). The place search in force is
+  told how each may send (`PlaceSearch.lookup/3`): the time the call has
+  left, and the call's one stop. On Brave a call's lookups queue for the
+  home's one door to it: one whose turn would come after the 45 s sends
+  nothing, and once an answer stops the call, the lookups queued behind it in
+  its wave send nothing either. A lookup that sent nothing is not counted in
+  `lookups`; the result says what stopped the call (`stop_reason`) and the
+  place search's own code for it (`stop_code`). With no place search set up
+  here, every stop by words is left unplaced and the outcome says why (C28).
+  A lookup emits no tool event of its own (`PlaceSearch.lookup/3`, C12).
 
   ## What comes back
 
@@ -110,17 +118,26 @@ defmodule FermixCore.Trips.Lookup do
   @typedoc "Why a lookup had no anchor: none at all, or a near the place search finds no place by."
   @type unanchored :: :no_anchor | {:unknown_near, String.t()}
 
-  @typedoc "One search of the place search in force (`PlaceSearch.lookup/2`)."
-  @type search ::
-          (Backend.request() ->
-             {:ok, [Backend.place()], Backend.trace_metadata()}
-             | {:error, String.t(), Backend.trace_metadata()})
+  @typedoc """
+  One search of the place search in force (`PlaceSearch.lookup/3`), told how
+  it may send; a context's `:place_lookup` stand-in takes the request alone.
+  """
+  @type search :: (Backend.request(), keyword() -> answer()) | (Backend.request() -> answer())
+
+  @typedoc "What stopped a call's lookups, and so the ones after it."
+  @type stop_reason :: :rate_limited | :plan_excludes_place_search | :deadline
+
+  @typedoc "What one search answers."
+  @type answer ::
+          {:ok, [Backend.place()], Backend.trace_metadata()}
+          | {:error, String.t(), Backend.trace_metadata()}
 
   @typedoc "Why a stop was not placed."
   @type why ::
           :not_found
           | :no_location
           | :rate_limited
+          | :plan_excludes_place_search
           | :deadline
           | {:failed, String.t()}
           | {:no_backend, String.t()}
@@ -135,7 +152,9 @@ defmodule FermixCore.Trips.Lookup do
   @type result :: %{
           outcomes: [{term(), outcome()}],
           records: [Backend.place()],
-          lookups: non_neg_integer()
+          lookups: non_neg_integer(),
+          stop_reason: stop_reason() | nil,
+          stop_code: String.t() | nil
         }
 
   @doc "The most lookups one call runs."
@@ -148,15 +167,22 @@ defmodule FermixCore.Trips.Lookup do
 
   @doc """
   The place search a call's lookups run, for a tool `context`: the backend
-  in force while it is ready, or why no place search is set up here. A
-  context's `:place_lookup` (a one-argument function) stands in for it.
+  in force while it is ready, told how each may send, or why no place search
+  is set up here. A context's `:place_lookup` (a one-argument function)
+  stands in for it, and any other `:place_lookup` raises.
   """
   @spec backend(map()) :: {:ok, search()} | {:error, String.t()}
   def backend(%{place_lookup: search}) when is_function(search, 1), do: {:ok, search}
 
+  def backend(%{place_lookup: other}) do
+    raise ArgumentError,
+          "a context's :place_lookup takes the request alone (one argument), got: " <>
+            inspect(other)
+  end
+
   def backend(context) when is_map(context) do
     case PlaceSearch.readiness(context) do
-      :ok -> {:ok, &PlaceSearch.lookup(&1, context)}
+      :ok -> {:ok, &PlaceSearch.lookup(&1, context, &2)}
       {:error, reason} -> {:error, reason}
     end
   end
@@ -238,6 +264,12 @@ defmodule FermixCore.Trips.Lookup do
   def heading(:not_found), do: "No place found"
   def heading(:no_location), do: "Not placed, the search gave that place no location"
   def heading(:rate_limited), do: "Not looked up, the place search is rate limited"
+
+  def heading(:plan_excludes_place_search) do
+    "Not looked up, the Brave Search API key's plan does not include place search; add " <>
+      "place search to that key's plan, or give each stop its link from the owner or a web " <>
+      "search, never a made-up one"
+  end
 
   def heading(:deadline),
     do: "Not looked up, the call's #{div(@deadline_ms, 1_000)} s for place lookups ran out"
@@ -326,7 +358,13 @@ defmodule FermixCore.Trips.Lookup do
          Map.get_lazy(linked, index, fn -> Map.fetch!(state.found, lookup_key(request)) end)}
       end)
 
-    %{outcomes: outcomes, records: Enum.reverse(state.records), lookups: state.started}
+    %{
+      outcomes: outcomes,
+      records: Enum.reverse(state.records),
+      lookups: state.sent,
+      stop_reason: state.stopped,
+      stop_code: state.stop_code
+    }
   end
 
   # -- the lookups ---------------------------------------------------------------
@@ -334,23 +372,51 @@ defmodule FermixCore.Trips.Lookup do
   defp run(lookups, anchors, {:error, reason}, _opts) when is_binary(reason),
     do: stop_all(lookups, initial(anchors), {:no_backend, reason})
 
-  defp run(lookups, anchors, {:ok, search}, opts) when is_function(search, 1) do
+  defp run(lookups, anchors, {:ok, search}, opts)
+       when is_function(search, 1) or is_function(search, 2) do
     now_ms = Keyword.get(opts, :now_ms, &monotonic_ms/0)
     deadline = now_ms.() + Keyword.get(opts, :deadline_ms, @deadline_ms)
     {first, rest} = Enum.split(lookups, 1)
     waves = Enum.reject([first | Enum.chunk_every(rest, @wave)], &(&1 == []))
-    run_waves(waves, initial(anchors), search, fn -> deadline - now_ms.() end)
+    remaining = fn -> deadline - now_ms.() end
+    run_waves(waves, initial(anchors), {search, send_terms(remaining)}, remaining)
   end
 
-  # `unknown` holds the nears the place search found no place by in this call.
+  # How a lookup may send, asked as it sends: the call's time left, and the
+  # call's one stop. The place search sets the stop when an answer stops the
+  # call, before its turn ends, and reads it before sending (C11); the first
+  # to set it wins. It lives as long as the call's lookups.
+  defp send_terms(remaining) do
+    cell = :atomics.new(1, signed: false)
+    stopped = fn -> stop_reason(:atomics.get(cell, 1)) end
+
+    stop = fn why ->
+      # 0 is no stop yet; a later stop leaves the first standing.
+      _first = :atomics.compare_exchange(cell, 1, 0, stop_index(why))
+      :ok
+    end
+
+    fn -> [send_within_ms: max(remaining.(), 0), stopped: stopped, stop: stop] end
+  end
+
+  defp stop_index(:rate_limited), do: 1
+  defp stop_index(:plan_excludes_place_search), do: 2
+
+  defp stop_reason(0), do: nil
+  defp stop_reason(1), do: :rate_limited
+  defp stop_reason(2), do: :plan_excludes_place_search
+
+  # `unknown` holds the nears the place search found no place by in this call,
+  # and `sent` the lookups that reached the place search.
   defp initial(anchors) do
     %{
       anchors: anchors,
       unknown: MapSet.new(),
       found: %{},
       records: [],
-      started: 0,
-      stopped: nil
+      sent: 0,
+      stopped: nil,
+      stop_code: nil
     }
   end
 
@@ -367,19 +433,19 @@ defmodule FermixCore.Trips.Lookup do
         settled =
           wave
           |> run_wave(state, search, left)
-          |> Enum.reduce(%{state | started: state.started + length(wave)}, &settle/2)
+          |> Enum.reduce(state, &settle/2)
 
         run_waves(rest, settled, search, remaining)
 
       _passed ->
-        run_waves([wave | rest], %{state | stopped: :deadline}, search, remaining)
+        run_waves([wave | rest], first_stop(state, :deadline, nil), search, remaining)
     end
   end
 
-  defp run_wave(wave, state, search, timeout_ms) do
+  defp run_wave(wave, state, timed_search, timeout_ms) do
     wave
     |> Enum.map(&plan(&1, state))
-    |> Task.async_stream(&searched(&1, search),
+    |> Task.async_stream(&searched(&1, timed_search),
       max_concurrency: @wave,
       timeout: timeout_ms,
       on_timeout: :kill_task,
@@ -414,22 +480,35 @@ defmodule FermixCore.Trips.Lookup do
 
   # A near the place search finds no place by is no anchor: its words are
   # searched alone, once, and what they find is only offered.
-  defp searched({request, {:near, near}}, search) do
-    case search.(request) do
+  defp searched({request, {:near, near}}, timed_search) do
+    case call(timed_search, request) do
       {:error, "invalid_location" <> _rest, _trace} ->
-        {{:unknown_near, near}, search.(Map.delete(request, :anchor))}
+        {{:unknown_near, near}, call(timed_search, Map.delete(request, :anchor))}
 
       answer ->
         {:anchored, answer}
     end
   end
 
-  defp searched({request, mode}, search), do: {mode, search.(request)}
+  defp searched({request, mode}, timed_search), do: {mode, call(timed_search, request)}
+
+  # The place search in force is told how it may send, as it sends.
+  defp call({search, terms}, request) when is_function(search, 2),
+    do: search.(request, terms.())
+
+  defp call({search, _terms}, request) when is_function(search, 1), do: search.(request)
 
   defp judged({:ok, {mode, answer}}, lookup),
-    do: {lookup, outcome(answer, lookup.place, mode), mode}
+    do: {lookup, outcome(answer, lookup.place, mode), mode, facts(answer)}
 
-  defp judged({:exit, :timeout}, lookup), do: {lookup, {:none, :deadline}, nil}
+  # Stopped while it ran, it may have sent.
+  defp judged({:exit, :timeout}, lookup),
+    do: {lookup, {:none, :deadline}, nil, %{sent?: true, code: nil}}
+
+  # Whether the answer's search reached the place search (one that says it
+  # sent nothing, `attempt: 0`, did not), and the place search's own code.
+  defp facts({_ok_or_error, _answer, trace}) when is_map(trace),
+    do: %{sent?: Map.get(trace, :attempt) != 0, code: Map.get(trace, :provider_code)}
 
   defp outcome({:ok, places, _trace}, words, mode) when is_list(places),
     do: places |> Enum.filter(&located?/1) |> choose(words, mode)
@@ -438,6 +517,8 @@ defmodule FermixCore.Trips.Lookup do
     do: {:none, failure(reason)}
 
   defp failure("rate_limited" <> _rest), do: :rate_limited
+  defp failure("plan_excludes_place_search:" <> _rest), do: :plan_excludes_place_search
+  defp failure("deadline:" <> _rest), do: :deadline
   defp failure(reason), do: {:failed, reason}
 
   defp choose(located, words, :anchored) do
@@ -457,11 +538,17 @@ defmodule FermixCore.Trips.Lookup do
   defp offer([first | _rest]), do: {:offered, first}
 
   # A lookup's outcome is kept, a placed stop anchors the waves after it, a
-  # near found unknown is not asked again, and a rate limited answer or the
-  # deadline stops the rest.
-  defp settle({lookup, outcome, mode}, state) do
+  # near found unknown is not asked again, and a rate limited answer, a key
+  # whose plan has no place search or the deadline stops the rest.
+  defp settle({lookup, outcome, mode, facts}, state) do
     found = Map.put(state.found, lookup_key(lookup), outcome)
-    state = %{state | found: found, unknown: learned(state.unknown, mode)}
+
+    state = %{
+      state
+      | found: found,
+        unknown: learned(state.unknown, mode),
+        sent: state.sent + if(facts.sent?, do: 1, else: 0)
+    }
 
     case outcome do
       {:placed, place} ->
@@ -477,13 +564,24 @@ defmodule FermixCore.Trips.Lookup do
       {:offered, place, _why} ->
         %{state | records: [place | state.records]}
 
-      {:none, why} when why in [:rate_limited, :deadline] ->
-        %{state | stopped: state.stopped || why}
+      {:none, why} when why in [:rate_limited, :plan_excludes_place_search, :deadline] ->
+        first_stop(state, why, facts.code)
 
       {:none, _why} ->
         state
     end
   end
+
+  # The first stop stands, with the place search's code for it. Outcomes
+  # settle in request order, so a lookup the stop left unsent (no code) may
+  # come before the one whose answer stopped the call: that one's code fills in.
+  defp first_stop(%{stopped: nil} = state, why, code),
+    do: %{state | stopped: why, stop_code: code}
+
+  defp first_stop(%{stopped: why, stop_code: nil} = state, why, code),
+    do: %{state | stop_code: code}
+
+  defp first_stop(state, _why, _code), do: state
 
   defp learned(unknown, {:unknown_near, near}), do: MapSet.put(unknown, near)
   defp learned(unknown, _mode), do: unknown

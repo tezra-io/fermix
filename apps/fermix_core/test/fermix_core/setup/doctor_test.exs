@@ -1577,6 +1577,26 @@ defmodule FermixCore.Setup.DoctorTest do
       put_web_search(brave_api_key: "brave-secret")
 
       assert %{probe_result: :rate_limited} = full_place_report(id)
+      assert_received {:probe_slept, 1_000}
+    end
+
+    test "--full names a key whose plan has no place search" do
+      id = :"place_probe_plan_#{System.unique_integer([:positive])}"
+
+      Req.Test.stub(id, fn conn ->
+        place_json(conn, 400, %{
+          "type" => "ErrorResponse",
+          "error" => %{
+            "code" => "OPTION_NOT_IN_PLAN",
+            "detail" => "The option is not included in the plan.",
+            "status" => 400
+          }
+        })
+      end)
+
+      put_web_search(brave_api_key: "brave-secret")
+
+      assert %{probe_result: :plan_excludes_place_search} = full_place_report(id)
     end
 
     test "--full names a schema change independently" do
@@ -2052,12 +2072,20 @@ defmodule FermixCore.Setup.DoctorTest do
     end
   end
 
+  # A 429's one retry waits out Brave's window: the probe's waits are told to
+  # the test, never slept.
   defp full_place_report(id) do
+    test_pid = self()
+
     Doctor.place_search_report(
       full: true,
       host: @linux,
       req_options: [plug: {Req.Test, id}],
-      net_resolver: place_resolver()
+      net_resolver: place_resolver(),
+      place_search_sleep: fn ms ->
+        send(test_pid, {:probe_slept, ms})
+        :ok
+      end
     )
   end
 

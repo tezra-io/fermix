@@ -406,6 +406,38 @@ defmodule FermixCore.Trips.RegistryLookupTest do
     assert %{lookups: lookups, placed: 1, offered: 0, not_looked_up: not_looked_up} = measurements
     assert lookups >= 2 and measurements.not_found + not_looked_up == 3
     assert %{rate_limited: true, backend: nil, outcome: :ok} = metadata
+    assert %{stop_reason: :rate_limited, stop_code: nil} = metadata
+  end
+
+  test "a key without place search stops the lookups, and the event says so with its code",
+       ctx do
+    session = "main-#{System.unique_integer([:positive])}"
+    TelemetryCapture.attach([[:fermix, :trip, :edit]], session_id: session)
+
+    refusal =
+      {:error, "plan_excludes_place_search: the Brave Search API key's plan does not include it",
+       %{backend: "brave", attempt: 1, provider_code: "OPTION_NOT_IN_PLAN"}}
+
+    results = %{"Torre de Vale Escuro" => refusal, "Cais Velho" => found([])}
+
+    ops =
+      [%{"op" => "create", "near" => @town}] ++
+        for {text, place} <- [{"Tower", "Torre de Vale Escuro"}, {"Quay", "Cais Velho"}],
+            do: %{"op" => "add", "text" => text, "day" => 1, "place" => place}
+
+    context = Map.merge(@owner, %{place_lookup: searching(results), session_id: session})
+    opts = [repo: ctx.repo, now: @now, reply_blocks: ctx.holder, notifier: fn _c -> :ok end]
+
+    assert {:ok, _answer} = Registry.edit(%{"trip" => "Varonne", "ops" => ops}, context, opts)
+
+    assert_receive {:telemetry, [:fermix, :trip, :edit], %{lookups: 1, not_looked_up: 2},
+                    metadata}
+
+    assert %{
+             rate_limited: false,
+             stop_reason: :plan_excludes_place_search,
+             stop_code: "OPTION_NOT_IN_PLAN"
+           } = metadata
   end
 
   # D10, from a live run: "Plan Saturday in Varonne: the fish market at 8:30"

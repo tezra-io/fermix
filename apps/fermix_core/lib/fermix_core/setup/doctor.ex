@@ -41,6 +41,7 @@ defmodule FermixCore.Setup.Doctor do
   alias FermixCore.Tools.PlaceSearch
   alias FermixCore.Tools.PlaceSearch.AppleMaps, as: PlaceAppleMaps
   alias FermixCore.Tools.PlaceSearch.Brave, as: PlaceBrave
+  alias FermixCore.Tools.PlaceSearch.Brave.Pacer, as: PlacePacer
   alias FermixCore.Tools.SearchCredential
   alias FermixCore.Tools.WebSearch
   alias FermixCore.Transcription
@@ -170,6 +171,7 @@ defmodule FermixCore.Setup.Doctor do
   @place_probe_tags [
     {"auth_failed", :auth_failed},
     {"rate_limited", :rate_limited},
+    {"plan_excludes_place_search", :plan_excludes_place_search},
     {"provider_error", :provider_error},
     {"parser_changed", :parser_changed},
     {"response_too_large", :response_too_large},
@@ -597,7 +599,7 @@ defmodule FermixCore.Setup.Doctor do
   end
 
   defp probe_context(opts) do
-    Enum.reduce([:req_options, :net_resolver], %{}, fn key, acc ->
+    Enum.reduce([:req_options, :net_resolver, :place_search_sleep], %{}, fn key, acc ->
       case Keyword.get(opts, key) do
         nil -> acc
         value -> Map.put(acc, key, value)
@@ -658,8 +660,21 @@ defmodule FermixCore.Setup.Doctor do
     end
   end
 
-  defp place_search_probe(:brave, config, opts),
-    do: place_probe(PlaceBrave, Keyword.put(config, :context, probe_context(opts)))
+  # The probe runs in `fermix doctor --full`, a command that starts no engine
+  # tree, so no home pacer is registered where it runs: its one request goes
+  # through a pacer of its own, the way every Brave place search goes (one
+  # turn, and once more after a 429), which stops with the probe.
+  defp place_search_probe(:brave, config, opts) do
+    context = probe_context(opts)
+    {:ok, pacer} = PlacePacer.start_link(name: nil)
+    probe_opts = Keyword.put(config, :context, Map.put(context, :place_search_pacer, pacer))
+
+    try do
+      place_probe(PlaceBrave, probe_opts)
+    after
+      GenServer.stop(pacer)
+    end
+  end
 
   defp place_search_probe(:apple_maps, _config, opts),
     do: place_probe(PlaceAppleMaps, Keyword.get(opts, :apple_maps, []))

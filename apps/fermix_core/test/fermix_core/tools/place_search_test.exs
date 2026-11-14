@@ -9,6 +9,7 @@ defmodule FermixCore.Tools.PlaceSearchTest do
   alias FermixCore.Prompt.RuntimeSections
   alias FermixCore.ReplyBlocks
   alias FermixCore.Tools.PlaceSearch
+  alias FermixCore.Tools.PlaceSearch.Brave.Pacer
 
   alias FermixTestSupport.SafeRm
 
@@ -72,11 +73,13 @@ defmodule FermixCore.Tools.PlaceSearchTest do
 
       assert Enum.sort(tags) == [
                "auth_failed",
+               "deadline",
                "invalid_location",
                "invalid_query",
                "location_required",
                "network",
                "parser_changed",
+               "plan_excludes_place_search",
                "provider_error",
                "rate_limited",
                "response_too_large"
@@ -937,13 +940,20 @@ defmodule FermixCore.Tools.PlaceSearchTest do
     mode
   end
 
+  # A Brave search goes through a pacer of the test's own, on a clock that
+  # never moves, and its waits are never slept (`BravePacingTest` asserts them).
   defp context(test_id, overrides) do
     %{
       agent_name: "test_agent",
       conversation_key: @conversation,
       reply_blocks: Map.get_lazy(overrides, :reply_blocks, &reply_blocks/0),
       req_options: [plug: {Req.Test, test_id}],
-      net_resolver: public_resolver()
+      net_resolver: public_resolver(),
+      place_search_pacer:
+        start_supervised!(
+          Supervisor.child_spec({Pacer, name: nil, now_ms: fn -> 0 end}, id: make_ref())
+        ),
+      place_search_sleep: fn _ms -> :ok end
     }
     |> Map.merge(overrides)
   end

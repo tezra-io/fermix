@@ -1007,8 +1007,9 @@ in the caller and `Trips.Ops`, pure, applies in the Repo's one transaction. A
 stop's `place` is a place's own name or a link a search in the conversation
 returned: before the transaction opens, `Trips.Placing` runs the call over the
 trip as read to learn each stop's day, and `Trips.Lookup` resolves the words
-with the configured place search around that day (`PlaceSearch.lookup/2`, at
-most 40 a call, four at a time, 45 s) and the links from the conversation's
+with the configured place search around that day (`PlaceSearch.lookup/3`, at
+most 40 a call, four at a time, 45 s; on Brave they queue for the home's one
+pacer, `PlaceSearch.Brave.Pacer`) and the links from the conversation's
 30-minute place index (`ReplyBlocks.place_by_url/3`); every lookup's record
 joins the conversation first, so an offered link resolves in a later call.
 `Trips.Note` is the rules line and the line naming the trips, only while one

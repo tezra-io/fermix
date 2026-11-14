@@ -421,6 +421,44 @@ defmodule FermixOpik.AggregationTest do
       assert read.metadata.scope == "days"
       assert read.error_info == %{exception_type: "TripRefused", message: "no_trip"}
     end
+
+    test "an edit whose lookups were stopped says why, with the place search's own code" do
+      {_state, closed} =
+        run([
+          {[:fermix, :trip, :edit],
+           %{
+             duration_us: 4_000,
+             trips: 1,
+             ops: 3,
+             lookups: 1,
+             placed: 0,
+             offered: 0,
+             not_found: 0,
+             not_looked_up: 2
+           },
+           %{
+             component: "trips",
+             made_via: "chat",
+             outcome: :ok,
+             error_code: nil,
+             backend: "brave",
+             rate_limited: false,
+             stop_reason: :plan_excludes_place_search,
+             stop_code: "OPTION_NOT_IN_PLAN",
+             session_id: "main-1"
+           }},
+          {[:fermix, :agent, :message], %{iterations: 1, total_tokens: 10},
+           %{channel: :telegram, chat_id: "c1", sender: "u1", session_id: "main-1", agent: "main"}}
+        ])
+
+      assert [%{spans: spans}] = closed
+      edit = span_named(spans, "trip_edit")
+
+      assert %{stop_reason: "plan_excludes_place_search", stop_code: "OPTION_NOT_IN_PLAN"} =
+               edit.metadata
+
+      refute Map.has_key?(edit, :error_info)
+    end
   end
 
   @compaction_event [:fermix, :agent_loop, :context_compaction]

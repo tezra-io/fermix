@@ -220,7 +220,22 @@ defmodule FermixCore.Tools.PlaceSearch do
         description: "the query is anchored to the user's own position and no anchor is available"
       },
       %{tag: "auth_failed", description: "the Brave API key is missing or rejected"},
-      %{tag: "rate_limited", description: "the place provider returned a rate limit"},
+      %{
+        tag: "rate_limited",
+        description:
+          "the place provider returned a rate limit, or the Brave Search API key's quota is " <>
+            "spent until the reset the error names"
+      },
+      %{
+        tag: "plan_excludes_place_search",
+        description:
+          "the Brave Search API key's plan does not include place search, so no search with " <>
+            "it can succeed; do not search again"
+      },
+      %{
+        tag: "deadline",
+        description: "the place search is busy with this home's other searches; try again shortly"
+      },
       %{
         tag: "provider_error",
         description:
@@ -292,17 +307,22 @@ defmodule FermixCore.Tools.PlaceSearch do
   trip's place lookup inside `trip_edit` (M89 §04, C12). The backend is
   resolved and its readiness checked as a call of the tool's is, and the
   request goes to it as given (`Backend.request()`; the backend checks its
-  fields). Unlike `execute/2` it emits no tool event, since the model's one
-  call is the `trip_edit` that runs it, and keeps nothing for a reply: what
-  joins the conversation is the caller's to choose. The trace carries the
-  backend's name.
+  fields), with `send`, how it may send: `:send_within_ms`, the most it may
+  wait for its turn (the lookup's time left), and the call's shared stop,
+  `:stopped` and `:stop` (`PlaceSearch.Brave`; Apple Maps queues nothing and
+  reads neither). Unlike `execute/2` it emits no tool event, since the
+  model's one call is the `trip_edit` that runs it, and keeps nothing for a
+  reply: what joins the conversation is the caller's to choose. The trace
+  carries the backend's name.
   """
-  @spec lookup(Backend.request(), map()) ::
+  @spec lookup(Backend.request(), map(), keyword()) ::
           {:ok, [Backend.place()], Backend.trace_metadata()}
           | {:error, String.t(), Backend.trace_metadata()}
-  def lookup(%{query: query} = request, context) when is_binary(query) and is_map(context) do
+  def lookup(%{query: query} = request, context, send)
+      when is_binary(query) and is_map(context) and is_list(send) do
     resolution = resolution(context)
-    opts = backend_opts(resolution, context)
+    send = Keyword.validate!(send, [:send_within_ms, :stopped, :stop])
+    opts = send ++ backend_opts(resolution, context)
     backend = %{backend: Atom.to_string(resolution.name)}
 
     with :ok <- Backend.ready(resolution, opts),

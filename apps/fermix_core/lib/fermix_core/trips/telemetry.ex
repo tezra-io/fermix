@@ -13,7 +13,11 @@ defmodule FermixCore.Trips.Telemetry do
   (`ok | refused | failed`), `error_code` (the refusal's tag,
   `Trips.Registry.error_tag/1`, else nil) and the caller's `session_id` when
   it has one; `scope` on a read (`index | trip | days | outline | share`);
-  `backend` (the place search's, else nil) and `rate_limited` on an edit.
+  `backend` (the place search's, else nil), `rate_limited`, and what stopped
+  the lookups on an edit: `stop_reason` (`rate_limited |
+  plan_excludes_place_search | deadline`, else nil) and `stop_code`, the place
+  search's own code for it (Brave's `OPTION_NOT_IN_PLAN`), else nil.
+  `lookups` counts the lookups that reached the place search.
 
   `Trace.TelemetryHandler` records them as `trip_read` and `trip_edit` agent
   events keyed on `component`, and the Opik exporter places each under its
@@ -28,6 +32,7 @@ defmodule FermixCore.Trips.Telemetry do
   @scopes [:index, :trip, :days, :outline, :share]
   @made_via ["chat", "job", "mac", "phone"]
   @lookup_counts [:lookups, :placed, :offered, :not_found, :not_looked_up]
+  @stop_reasons [nil, :rate_limited, :plan_excludes_place_search, :deadline]
 
   @trace_event_definitions [
     %{
@@ -77,8 +82,13 @@ defmodule FermixCore.Trips.Telemetry do
       context
       |> metadata(edit)
       |> Map.merge(%{backend: backend(edit), rate_limited: Map.fetch!(edit, :rate_limited)})
+      |> Map.merge(stop(edit))
     )
   end
+
+  defp stop(%{stop_reason: reason, stop_code: code})
+       when reason in @stop_reasons and (is_nil(code) or is_binary(code)),
+       do: %{stop_reason: reason, stop_code: code}
 
   defp lookup_count(edit, key) do
     case Map.fetch!(edit, key) do

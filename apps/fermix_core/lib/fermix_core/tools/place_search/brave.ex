@@ -9,7 +9,8 @@ defmodule FermixCore.Tools.PlaceSearch.Brave do
   Transport rules, all of them deliberate:
 
     * `Net.HttpClient` on the shared `FermixCore.Finch` pool, so the family's
-      single stale-socket retry is the *only* retry — Req-level retry is off;
+      single stale-socket retry is the only transport retry — Req-level retry
+      is off, and the one other repeat is the paced 429 retry below;
     * `redirect: false`, forced after the caller's test options merge: a 3xx is
       an error, never a hop that carries `x-subscription-token` somewhere else;
     * the response is byte-capped **while streaming** into an `:into` collector
@@ -25,12 +26,37 @@ defmodule FermixCore.Tools.PlaceSearch.Brave do
     * the key travels only as `x-subscription-token`, redacted in trace
       metadata.
 
-  One invocation is one provider call. There is no `/local/pois` or
+  One invocation is one query. There is no `/local/pois` or
   `/local/descriptions` follow-up, and no fallback to any other provider, tool,
-  or cached shape: every failure is returned as a tagged reason (§10.4). The
-  only repeat that can occur is `Net.HttpClient` re-issuing *the same* call once
-  when a pooled socket was already dead — the family's stale-socket retry, not a
-  second query.
+  or cached shape: every failure is returned as a tagged reason (§10.4).
+
+  Every request goes through the home's pacer (`Brave.Pacer`): one at a time,
+  each sent when Brave's last answer allows it, the caller waiting its turn in
+  its own process for at most `:send_within_ms` (a trip's lookup passes what
+  its call has left; 30 s when a caller names none). The turn ends however
+  the search ends, a raise included. A turn that would send after that wait
+  sends nothing and is `deadline`; one asked while Brave's last answer said
+  a window is spent past a short reset (a month's quota most of all) sends
+  nothing and is `rate_limited`, naming how long the key's quota is spent.
+
+  Two bounded recoveries repeat *the same* request, and no others exist:
+  `Net.HttpClient` re-issues it once when a pooled socket was already dead
+  (the family's stale-socket retry), and a 429 is sent once more, within the
+  same turn, after the window's reset its headers give (1 s to 2 s). A 429
+  whose reset comes later is not sent again, nor is one with no time left to
+  wait: both are `rate_limited`, as is a second 429. The trace's `attempt` is
+  how many requests were sent (0 when none was), and `provider_code` Brave's
+  own code for a refusal.
+
+  A key whose plan does not include place search is refused with Brave's
+  `OPTION_NOT_IN_PLAN`, whatever the status: `plan_excludes_place_search`,
+  whose words say that searching again cannot help.
+
+  The searches of one trip call share a stop (`:stopped` and `:stop`, which
+  `Trips.Lookup` passes): an answer that is `rate_limited` or
+  `plan_excludes_place_search` sets it before its turn ends, and a search of
+  the same call reads it before it asks for a turn and again once given one,
+  so the lookups queued behind that answer send nothing.
 
   One of the two `PlaceSearch.Backend`s (M72 §14.1): it runs when
   `[fermix_core.tools.place_search] backend` is `brave`, or unset on a build
@@ -47,6 +73,7 @@ defmodule FermixCore.Tools.PlaceSearch.Brave do
 
   alias FermixCore.Net.Guard
   alias FermixCore.Net.HttpClient
+  alias FermixCore.Tools.PlaceSearch.Brave.Pacer
   alias FermixCore.Tools.SearchCredential
   alias FermixCore.Tools.SnippetSanitizer
 
@@ -58,6 +85,14 @@ defmodule FermixCore.Tools.PlaceSearch.Brave do
   # what a hostile or broken provider can make the daemon hold.
   @max_body_bytes 1_048_576
   @receive_timeout_ms 15_000
+  # The most a search waits for its turn to send when its caller names no
+  # bound (the `place_search` tool, Doctor's probe), the most any caller may
+  # name, and the most requests one search sends: the second only after a 429.
+  @send_within_ms 30_000
+  @max_send_within_ms Pacer.max_within_ms()
+  @max_attempts 2
+  # What stops the other searches of a call (`:stop`).
+  @stops [:rate_limited, :plan_excludes_place_search]
 
   @max_query_chars 400
   @max_radius_meters 50_000
@@ -74,6 +109,13 @@ defmodule FermixCore.Tools.PlaceSearch.Brave do
   @max_refusal_code_chars 64
   @max_refusal_detail_chars 200
   @max_refusal_fields 5
+
+  @plan_excludes "plan_excludes_place_search: the Brave Search API key's plan does not " <>
+                   "include place search, so searching again cannot find a place; tell the " <>
+                   "owner to add place search to that key's plan, and take a place's link " <>
+                   "only from the owner or a web search, never a made-up one"
+  @turn_deadline "deadline: the place search is busy with this home's other searches; try " <>
+                   "again shortly"
 
   @type anchor :: {:location, String.t()} | {:coordinates, number(), number()}
 
@@ -107,20 +149,29 @@ defmodule FermixCore.Tools.PlaceSearch.Brave do
   Returns the normalized places (at most #{@max_places}) with the trace
   metadata for the tool event, or a tagged reason string from §10.4:
   `invalid_query`, `invalid_location`, `auth_failed`, `rate_limited`,
-  `provider_error`, `parser_changed`, `response_too_large`, `network`.
+  `plan_excludes_place_search`, `provider_error`, `parser_changed`,
+  `response_too_large`, `network`, `deadline`.
+
+  `opts` may name `:send_within_ms`, the most the search waits for its turn
+  to send, and a call's shared stop, `:stopped` (what stopped the call, or
+  nil) and `:stop` (stops it), as moduledoc says. The context names the pacer
+  as `:place_search_pacer` and the wait as `:place_search_sleep` only when
+  they are not the application's and `Process.sleep/1`.
   """
   @impl true
   @spec search(request(), keyword()) ::
           {:ok, [place()], trace_metadata()} | {:error, String.t(), trace_metadata()}
   def search(request, opts) when is_map(request) and is_list(opts) do
     context = Keyword.get(opts, :context, %{})
+    terms = send_terms!(opts)
 
     with {:ok, params} <- params(request),
          {:ok, api_key} <- SearchCredential.brave(opts) do
       request_options = request_options(context, params, api_key)
-      trace_metadata = trace_metadata(request_options)
+      sent = run(request_options, context, terms)
+      trace_metadata = request_options |> trace_metadata() |> put_sent(sent)
 
-      case run(request_options, context) do
+      case sent.result do
         {:ok, places} -> {:ok, places, trace_metadata}
         {:error, reason} -> {:error, error_string(reason), trace_metadata}
       end
@@ -128,6 +179,23 @@ defmodule FermixCore.Tools.PlaceSearch.Brave do
       {:error, reason} -> {:error, reason, %{}}
     end
   end
+
+  defp send_terms!(opts) do
+    checked_terms(%{
+      within_ms: Keyword.get(opts, :send_within_ms, @send_within_ms),
+      stopped: Keyword.get(opts, :stopped, &never_stopped/0),
+      stop: Keyword.get(opts, :stop, &stop_nothing/1)
+    })
+  end
+
+  defp checked_terms(%{within_ms: within_ms, stopped: stopped, stop: stop} = terms)
+       when is_integer(within_ms) and within_ms >= 0 and within_ms <= @max_send_within_ms and
+              is_function(stopped, 0) and is_function(stop, 1),
+       do: terms
+
+  # A search that is no trip call's shares no stop.
+  defp never_stopped, do: nil
+  defp stop_nothing(_why), do: :ok
 
   # -- request ---------------------------------------------------------------
 
@@ -252,15 +320,163 @@ defmodule FermixCore.Tools.PlaceSearch.Brave do
     %{request_headers: request_headers}
   end
 
+  # How many requests were sent, and Brave's code for a refusal.
+  defp put_sent(trace_metadata, %{attempt: attempt, code: nil}),
+    do: Map.put(trace_metadata, :attempt, attempt)
+
+  defp put_sent(trace_metadata, %{attempt: attempt, code: code}),
+    do: Map.merge(trace_metadata, %{attempt: attempt, provider_code: code})
+
   # -- transport -------------------------------------------------------------
 
-  defp run(request_options, context) do
-    with :ok <- Guard.validate(@endpoint, resolver: resolver(context)),
-         {:ok, response} <- request(request_options),
-         {:ok, body} <- response_json(response) do
-      parse(body)
+  # The search's result, how many requests were sent for it and Brave's code.
+  defp run(request_options, context, terms) do
+    case Guard.validate(@endpoint, resolver: resolver(context)) do
+      :ok -> paced(request_options, pacer(context), terms)
+      {:error, reason} -> unsent({:error, reason})
     end
   end
+
+  defp unsent(result), do: %{result: result, attempt: 0, code: nil}
+
+  defp pacer(context) do
+    %{
+      server: Map.get(context, :place_search_pacer, Pacer),
+      sleep: Map.get(context, :place_search_sleep, &Process.sleep/1)
+    }
+  end
+
+  # Nothing is asked of the pacer once another search of the same call has
+  # stopped it.
+  defp paced(request_options, pacer, terms) do
+    with nil <- terms.stopped.(),
+         {:ok, turn, delay_ms} <- Pacer.turn(pacer.server, terms.within_ms) do
+      held(request_options, pacer, terms, {turn, delay_ms})
+    else
+      {:error, refusal} -> unsent({:error, refused(refusal)})
+      why when why in @stops -> unsent({:error, halted(why)})
+    end
+  end
+
+  # The turn ends however its sends end, a raise included, so the door is
+  # never left held. A search of the same call that stopped it while this one
+  # was queued for its turn leaves this one unsent; an answer that stops the
+  # call says so before the turn ends, so no search queued behind it sends.
+  defp held(request_options, pacer, terms, {turn, delay_ms}) do
+    case terms.stopped.() do
+      nil -> stopping(terms, sends(request_options, pacer, turn, {delay_ms, 1}))
+      why when why in @stops -> unsent({:error, halted(why)})
+    end
+  after
+    Pacer.done(pacer.server, turn)
+  end
+
+  # One request in the turn, after its wait, and a 429 sent again once
+  # (@max_attempts) when the pacer says it may.
+  defp sends(request_options, pacer, turn, {delay_ms, attempt}) do
+    wait(pacer.sleep, delay_ms)
+    answer = request(request_options)
+    pacing = pacing(answer)
+    Pacer.answered(pacer.server, turn, pacing)
+
+    if again?(answer, attempt),
+      do: resend(request_options, pacer, turn, {answer, attempt}),
+      else: sent(answer, pacing, attempt)
+  end
+
+  # A 429 whose window resets too late spends the key, and says until when;
+  # with no time left to wait it out, or the turn taken back, the 429 stands.
+  defp resend(request_options, pacer, turn, {answer, attempt}) do
+    case Pacer.again(pacer.server, turn) do
+      {:ok, delay_ms} -> sends(request_options, pacer, turn, {delay_ms, attempt + 1})
+      {:error, {:spent, spent_ms}} -> sent(answer, {:spent_ms, spent_ms}, attempt)
+      {:error, refusal} when refusal in [:deadline, :not_holder] -> sent(answer, nil, attempt)
+    end
+  end
+
+  defp again?({:ok, %{status: 429}}, attempt), do: attempt < @max_attempts
+  defp again?(_answer, _attempt), do: false
+
+  defp sent({:ok, %{status: 429}} = answer, {:spent_ms, spent_ms}, attempt),
+    do: %{result: {:error, spent(spent_ms, answer)}, attempt: attempt, code: code(answer)}
+
+  defp sent(answer, _pacing, attempt),
+    do: %{result: places(answer), attempt: attempt, code: code(answer)}
+
+  defp stopping(terms, %{result: {:error, reason}} = sent) do
+    case stop_why(reason) do
+      nil ->
+        sent
+
+      why ->
+        terms.stop.(why)
+        sent
+    end
+  end
+
+  defp stopping(_terms, sent), do: sent
+
+  defp stop_why("rate_limited" <> _rest), do: :rate_limited
+  defp stop_why("plan_excludes_place_search:" <> _rest), do: :plan_excludes_place_search
+  defp stop_why(_reason), do: nil
+
+  defp refused(:deadline), do: @turn_deadline
+  defp refused({:spent, spent_ms}), do: spent(spent_ms, nil)
+
+  defp halted(:rate_limited),
+    do:
+      "rate_limited: an earlier search of the same call was refused as rate limited, so " <>
+        "this one was not sent"
+
+  defp halted(:plan_excludes_place_search), do: @plan_excludes
+
+  defp spent(spent_ms, answer) do
+    "rate_limited: the Brave Search API key's quota is spent for #{span(spent_ms)}, until " <>
+      "Brave resets it; place search cannot run until then, so do not search again" <>
+      http_words(answer)
+  end
+
+  defp http_words(nil), do: ""
+
+  defp http_words({:ok, %{status: status} = response}),
+    do: " (HTTP #{status}#{refusal_words(brave_refusal(response.body))})"
+
+  # Rounded up, so a wait is never told shorter than it is.
+  defp span(ms) do
+    seconds = ceil_div(ms, 1_000)
+
+    cond do
+      seconds < 120 -> "#{seconds} s"
+      seconds < 7_200 -> "#{ceil_div(seconds, 60)} min"
+      seconds < 172_800 -> "#{ceil_div(seconds, 3_600)} h"
+      true -> "#{ceil_div(seconds, 86_400)} days"
+    end
+  end
+
+  defp ceil_div(value, by), do: div(value + by - 1, by)
+
+  # Brave's own code for a refusal, cut as its words are.
+  defp code({:ok, %{status: status} = response}) when status not in 200..299 do
+    case brave_refusal(response.body) do
+      %{code: code} -> refusal_text(code, @max_refusal_code_chars)
+      nil -> nil
+    end
+  end
+
+  defp code(_answer), do: nil
+
+  defp wait(_sleep, 0), do: :ok
+  defp wait(sleep, delay_ms) when delay_ms > 0, do: sleep.(delay_ms)
+
+  # A request that got no answer says nothing of Brave's windows.
+  defp pacing({:ok, %{status: status, headers: headers}}), do: Pacer.pacing(status, headers)
+  defp pacing({:error, _reason}), do: {:hold_ms, 0}
+
+  defp places({:ok, response}) do
+    with {:ok, body} <- response_json(response), do: parse(body)
+  end
+
+  defp places({:error, reason}), do: {:error, reason}
 
   defp request(request_options) do
     req = Req.new([method: :get, url: @endpoint] ++ request_options)
@@ -298,8 +514,16 @@ defmodule FermixCore.Tools.PlaceSearch.Brave do
 
   defp response_json(%{status: status} = response) do
     refusal = brave_refusal(response.body)
-    {:error, "#{refusal_tag(status, refusal)}: HTTP #{status}#{refusal_words(refusal)}"}
+    {:error, refusal_reason(status, refusal)}
   end
+
+  # A plan without place search leads with what to do about it, since no
+  # search with that key can succeed, then Brave's own words.
+  defp refusal_reason(status, %{code: "OPTION_NOT_IN_PLAN"} = refusal),
+    do: "#{@plan_excludes} (HTTP #{status}#{refusal_words(refusal)})"
+
+  defp refusal_reason(status, refusal),
+    do: "#{refusal_tag(status, refusal)}: HTTP #{status}#{refusal_words(refusal)}"
 
   defp refusal_tag(_status, %{code: "SUBSCRIPTION_TOKEN_INVALID"}), do: "auth_failed"
   defp refusal_tag(status, _refusal) when status in [401, 403], do: "auth_failed"

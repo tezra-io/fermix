@@ -500,7 +500,9 @@ defmodule FermixCore.Trace.TelemetryHandlerTest do
         made_via: "chat",
         error_code: "title_taken",
         backend: "apple_maps",
-        rate_limited: false
+        rate_limited: false,
+        stop_reason: :deadline,
+        stop_code: nil
       },
       2_500
     )
@@ -520,6 +522,7 @@ defmodule FermixCore.Trace.TelemetryHandlerTest do
     assert read["session_id"] == "main-trips-1"
     assert edit["ops"] == 3 and edit["placed"] == 1 and edit["backend"] == "apple_maps"
     assert edit["outcome"] == "refused" and edit["error_code"] == "title_taken"
+    assert edit["stop_reason"] == "deadline" and Map.has_key?(edit, "stop_code")
   end
 
   test "an attachment ingest becomes an attachment_ingest agent_event row, never its bytes", %{

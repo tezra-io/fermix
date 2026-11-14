@@ -716,8 +716,10 @@ defmodule FermixOpik.Mapper do
   @doc """
   Build a point span from a `[:fermix, :trip, :read | :edit]` event — one
   read or one edit of the owner's trips (M89), lasting the store's
-  transaction, with what the edit's place lookups did. Counts and Fermix's own
-  words only: a title, a stop's words, a place and a coordinate never ride. A
+  transaction, with what the edit's place lookups did and what stopped them
+  (`stop_reason`, and `stop_code`, the place search's own code). Counts,
+  Fermix's own words and the provider's codes only: a title, a stop's words, a
+  place and a coordinate never ride. A
   refused or failed call is flagged errored with its tag. `session_id` places
   the span and is not repeated in its metadata.
   """
@@ -752,7 +754,9 @@ defmodule FermixOpik.Mapper do
           made_via: stringify(Map.get(metadata, :made_via)),
           outcome: stringify(Map.get(metadata, :outcome)),
           backend: Map.get(metadata, :backend),
-          rate_limited: Map.get(metadata, :rate_limited)
+          rate_limited: Map.get(metadata, :rate_limited),
+          stop_reason: stringify(Map.get(metadata, :stop_reason)),
+          stop_code: Map.get(metadata, :stop_code)
         })
         |> drop_nil()
     }
