@@ -521,6 +521,13 @@ action, no offer set and no other pinned function changed, so `DeviceOffers`
 and `ReturnOffers` are as before and no modelled step changed. The comments'
 line numbers into `home_summary.ex` point at the committed code.
 
+Walked again against 2b8d4211, which staled the `move_worker.ex` pin: its
+context gains `consent_opts`, the system the keep block's lines are drawn for
+when a move's switches are written (`Consent.accept/3`, `default_keep/1`),
+the host's unless a test names it. The switches a move writes are as before,
+and a move back writes none, so no modelled step changed. The comments' line
+numbers into `move_worker.ex` point at the committed code.
+
 ## Done
 
 Deadlock checking is on. `Done` has these ends:

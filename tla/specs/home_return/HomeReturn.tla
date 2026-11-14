@@ -97,7 +97,7 @@
 (* server's worker ends, one job ending, one boot, or the owner deleting   *)
 (* the server.                                                             *)
 (***************************************************************************)
-\* SOURCE: apps/fermix_channels/lib/fermix_channels/home/move_worker.ex @ ac35230d11e0
+\* SOURCE: apps/fermix_channels/lib/fermix_channels/home/move_worker.ex @ b07d6b9515a7
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/home/candidate.ex @ 433d4ef550e0
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/home/move_responder.ex @ 834af9c6f6cb
 \* SOURCE: apps/fermix_core/lib/fermix_core/home/candidate/activation.ex @ 5a71862e2f64
@@ -121,7 +121,7 @@ EXTENDS Naturals
 CONSTANTS
     \* Environment switches: what may happen around the return.
     MessagesCanBeLost,  \* a rail loses a request or an answer, an answer comes only after
-                        \* the worker stopped waiting (await_any/3, move_worker.ex:1021-1034),
+                        \* the worker stopped waiting (await_any/3, move_worker.ex:1024-1037),
                         \* or the forwarded home.move.start is lost, before or after the
                         \* server had it (both unconfirmed, placement.ex:375-390): at
                         \* most MaxLosses times in all
@@ -141,7 +141,7 @@ CONSTANTS
     \* the real order.
     MarkerBeforeCommit,  \* the server writes its moved.json and records committing before
                          \* it sends move_commit (commit/4, retired/4,
-                         \* move_worker.ex:583-608)
+                         \* move_worker.ex:586-611)
     MarkerBeforeConfig,  \* the Mac's activation removes its moved.json (step e) before it
                          \* renames the staged config.toml into place (step f)
                          \* (activate/3, activation.ex:249-263)
@@ -342,9 +342,9 @@ Coming == req # "none" \/ restore = "cur" \/ aTo = "cur"
 NothingComing == ~Coming /\ rep = "none"
 
 \* Where a failed wait goes: another attempt before move_ready
-\* (attempt_failed/2, move_worker.ex:293-300), the resume after the commit
-\* (retired/4, :603-606), the next round of the resume loop (resume_loop/4,
-\* :775-792).
+\* (attempt_failed/2, move_worker.ex:296-303), the resume after the commit
+\* (retired/4, :606-609), the next round of the resume loop (resume_loop/4,
+\* :778-795).
 AfterAwait(w) == CASE w \in {"await_accept", "await_ready"} -> "transfer"
                    [] w = "await_done" -> "resume"
                    [] OTHER -> "resume_dial"
@@ -385,9 +385,9 @@ Run ==
     /\ wpc = "run"
     /\ WGoto(IF sMoved THEN "resume" ELSE IF sPhase = "aborting" THEN "abort" ELSE "transfer")
 
-\* transfer/1 (move_worker.ex:244-254): counts the attempt, or aborts once
+\* transfer/1 (move_worker.ex:247-257): counts the attempt, or aborts once
 \* MaxAttempts were made, across restarts. The rail a failed attempt closed
-\* (close_rail/1, :266) is closed here, the worker's next step.
+\* (close_rail/1, :269) is closed here, the worker's next step.
 Transfer ==
     /\ wpc = "transfer"
     /\ IF sAttempts >= MaxAttempts
@@ -396,11 +396,11 @@ Transfer ==
     /\ CloseRail
     /\ UNCHANGED <<sRole, sMoved, sBoot, sAlive, macFiles, macHold, budgets, hist>>
 
-\* attempt_transfer/1 (move_worker.ex:256-272): the capture (no desktop key
+\* attempt_transfer/1 (move_worker.ex:259-275): the capture (no desktop key
 \* or row for a source not kept as a desktop, so none of the key failures
 \* that abort a move from a computer kept as one), open_candidate/1
-\* (:987-1002) to the Mac's candidate, and move_offer (send_snapshot/4,
-\* :488-509).
+\* (:990-1005) to the Mac's candidate, and move_offer (send_snapshot/4,
+\* :491-512).
 SendOffer ==
     /\ wpc = "offer" /\ Listening
     /\ wpc' = "await_accept"
@@ -409,7 +409,7 @@ SendOffer ==
 
 \* No candidate answers the dial (the Mac's engine is not a device running
 \* its candidate, or the network is down): attempt_failed/2 sleeps and tries
-\* again (move_worker.ex:270, :293-300).
+\* again (move_worker.ex:273, :296-303).
 DialFails ==
     /\ wpc = "offer" /\ ~Listening
     /\ wpc' = "transfer"
@@ -417,7 +417,7 @@ DialFails ==
     /\ UNCHANGED <<srvFiles, sBoot, sAlive, macFiles, macHold, budgets, hist>>
 
 \* await(rail, "move_accept"), then the chunks and move_end (send_snapshot/4,
-\* move_worker.ex:504-507): one "stream" request stands for them all.
+\* move_worker.ex:507-510): one "stream" request stands for them all.
 TakeAccept ==
     /\ wpc = "await_accept" /\ rep = "accept"
     /\ rep' = "none"
@@ -425,16 +425,16 @@ TakeAccept ==
     /\ wpc' = "await_ready"
     /\ UNCHANGED <<srvFiles, sBoot, sAlive, railUp, macFiles, macRun, budgets, hist>>
 
-\* await(rail, "move_ready") (stream/4, move_worker.ex:481), then commit/4.
+\* await(rail, "move_ready") (stream/4, move_worker.ex:484), then commit/4.
 TakeReady ==
     /\ wpc = "await_ready" /\ rep = "ready"
     /\ rep' = "none"
     /\ wpc' = IF MarkerBeforeCommit THEN "retire" ELSE "send_commit"
     /\ UNCHANGED <<srvFiles, sBoot, sAlive, railUp, req, macFiles, macRun, budgets, hist>>
 
-\* An error event is a refusal (await_any/3, move_worker.ex:1023-1024): before
-\* move_ready it aborts the move (attempt_failed/2, :276-280); after it,
-\* retired/4 resumes (:603-606) and the resume loop goes round again.
+\* An error event is a refusal (await_any/3, move_worker.ex:1026-1027): before
+\* move_ready it aborts the move (attempt_failed/2, :279-283); after it,
+\* retired/4 resumes (:606-609) and the resume loop goes round again.
 TakeRefusal ==
     /\ wpc \in Awaiting /\ rep = "error"
     /\ rep' = "none"
@@ -442,14 +442,14 @@ TakeRefusal ==
     /\ UNCHANGED <<srvFiles, sBoot, sAlive, railUp, req, macFiles, macRun, budgets, hist>>
 
 \* The wait's timeout, or the rail's {:closed, _} (await_any/3,
-\* move_worker.ex:1029-1032), when nothing can arrive any more.
+\* move_worker.ex:1032-1035), when nothing can arrive any more.
 GiveUp ==
     /\ wpc \in Awaiting /\ NothingComing
     /\ WGoto(AfterAwait(wpc))
 
-\* commit/4 (move_worker.ex:583-593): the ready epoch (a file no rule reads),
-\* then retire/1 writes moved.json (:623-635); retired/4 records committing
-\* (:598; its link/3 and keep_offers/1 write nothing for a source not kept as
+\* commit/4 (move_worker.ex:586-596): the ready epoch (a file no rule reads),
+\* then retire/1 writes moved.json (:626-638); retired/4 records committing
+\* (:601; its link/3 and keep_offers/1 write nothing for a source not kept as
 \* a desktop), one step here: a crash anywhere among them boots a device that
 \* resumes once the marker exists, and transfers again before. Without
 \* MarkerBeforeCommit, move_commit goes first.
@@ -460,22 +460,22 @@ Retire ==
     /\ wpc' = IF MarkerBeforeCommit THEN "send_commit" ELSE "await_done"
     /\ UNCHANGED <<sRole, sAttempts, sBoot, sAlive, rail, macFiles, macRun, budgets, hist>>
 
-\* move_commit on the same rail (retired/4, move_worker.ex:600-601;
-\* send_commit/2, :611), then await move_done (:612).
+\* move_commit on the same rail (retired/4, move_worker.ex:603-604;
+\* send_commit/2, :614), then await move_done (:615).
 SendCommit ==
     /\ wpc = "send_commit"
     /\ req' = IF railUp THEN "commit" ELSE "none"
     /\ wpc' = IF MarkerBeforeCommit THEN "await_done" ELSE "retire"
     /\ UNCHANGED <<srvFiles, sBoot, sAlive, railUp, rep, macFiles, macRun, budgets, hist>>
 
-\* move_done (retired/4 :600-601; resumed/3 :811-817).
+\* move_done (retired/4 :603-604; resumed/3 :814-820).
 TakeDone ==
     /\ wpc \in {"await_done", "await_resume", "await_done_r"} /\ rep = "done"
     /\ rep' = "none"
     /\ wpc' = "finish"
     /\ UNCHANGED <<srvFiles, sBoot, sAlive, railUp, req, macFiles, macRun, budgets, hist>>
 
-\* done/2 (move_worker.ex:904-918): record committed, then restart, after
+\* done/2 (move_worker.ex:907-921): record committed, then restart, after
 \* which the server boots as a device with no link and serves nothing.
 Finish ==
     /\ wpc = "finish"
@@ -488,9 +488,9 @@ SelfRestart ==
     /\ ServerBoots
     /\ UNCHANGED <<sRole, sMoved, sAttempts, sAlive, macFiles, macHold, budgets, hist>>
 
-\* resume/1 (move_worker.ex:683-708): record committing, then the loop
+\* resume/1 (move_worker.ex:686-711): record committing, then the loop
 \* (ensure_link/3 and ensure_offers/1 write nothing for a source not kept as
-\* a desktop). A failed commit closed its rail first (retired/4, :605):
+\* a desktop). A failed commit closed its rail first (retired/4, :608):
 \* folded in here.
 Resume ==
     /\ wpc = "resume"
@@ -499,9 +499,9 @@ Resume ==
     /\ CloseRail
     /\ UNCHANGED <<sRole, sMoved, sAttempts, sBoot, sAlive, macFiles, macHold, budgets, hist>>
 
-\* resume_once/2 (move_worker.ex:794-799): open_candidate/1, then
-\* move_resume (resume_on/2, :801-808). with_rail/2 closed the previous
-\* round's rail (:842-846): folded in here.
+\* resume_once/2 (move_worker.ex:797-802): open_candidate/1, then
+\* move_resume (resume_on/2, :804-811). with_rail/2 closed the previous
+\* round's rail (:845-849): folded in here.
 ResumeDial ==
     /\ wpc = "resume_dial" /\ Listening
     /\ wpc' = "await_resume"
@@ -509,7 +509,7 @@ ResumeDial ==
     /\ UNCHANGED <<srvFiles, sBoot, sAlive, macFiles, macHold, budgets, hist>>
 
 \* No candidate answers. A source not kept as a desktop has no desktop key
-\* to probe the moved identity with (probe_primary/2, :821-832, finds no
+\* to probe the moved identity with (probe_primary/2, :824-835, finds no
 \* link), so the loop sleeps and dials again, for 24 hours (a bound not
 \* modelled: it then records a sentence and stops, changing no file a rule
 \* reads).
@@ -519,7 +519,7 @@ ResumeDialFails ==
     /\ UNCHANGED <<srvFiles, srvRun, macFiles, macHold, budgets, hist>>
 
 \* move_ready answers move_resume: still staged, so commit now (resumed/3,
-\* move_worker.ex:813-817).
+\* move_worker.ex:816-820).
 TakeResumeReady ==
     /\ wpc = "await_resume" /\ rep = "ready"
     /\ rep' = "none"
@@ -527,7 +527,7 @@ TakeResumeReady ==
     /\ wpc' = "await_done_r"
     /\ UNCHANGED <<srvFiles, sBoot, sAlive, railUp, macFiles, macRun, budgets, hist>>
 
-\* abort/3 (move_worker.ex:922-928): reads the marker again; with it,
+\* abort/3 (move_worker.ex:925-931): reads the marker again; with it,
 \* resume. A refused attempt or a failed commit closed its rail first.
 Abort ==
     /\ wpc = "abort"
@@ -535,7 +535,7 @@ Abort ==
     /\ CloseRail
     /\ UNCHANGED <<srvFiles, sBoot, sAlive, macFiles, macHold, budgets, hist>>
 
-\* undo/3 (move_worker.ex:930-949): record aborting; then role primary, the
+\* undo/3 (move_worker.ex:933-952): record aborting; then role primary, the
 \* request removed and undoing recorded, one step here (a crash between the
 \* role and undoing boots the primary, which records aborted either way), and
 \* the restart.
@@ -1185,7 +1185,7 @@ RestoreFails ==
 
 \* The ready epoch or the marker cannot be written (Moved.write/2 fails
 \* before the file exists): commit/4 closes the rail and aborts
-\* (move_worker.ex:586-592).
+\* (move_worker.ex:589-595).
 RetireFails == TransferCanFail /\ wpc = "retire" /\ WGoto("abort")
 
 \* The server's engine dies while its worker runs, and boots again.

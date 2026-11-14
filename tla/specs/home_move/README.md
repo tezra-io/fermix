@@ -37,7 +37,7 @@ Models one move of M75 §7.2 (B5). Three parts take part:
     reason than room), and the worker tries again (`AttemptFails`);
   - an attempt fails at the source before its offer is out in a way another
     would not mend, and the worker aborts the move (`AttemptAborts`,
-    `attempt_failed/2`, `move_worker.ex:276-292`): the secret store refuses
+    `attempt_failed/2`, `move_worker.ex:279-295`): the secret store refuses
     the desktop key, or its item holds another home's key under the same
     profile; the keychain does not give the settings' secrets; or the
     capture has no room;
@@ -56,7 +56,7 @@ Models one move of M75 §7.2 (B5). Three parts take part:
 - `OldRequestsArrive`: a request the worker sent on a rail it has since given
   up on still reaches the candidate. Two rails are two streams, so nothing
   orders one rail's frames against another's. The worker closes a rail it
-  gives up on (`close_rail/1`, `move_worker.ex:266`, `:589`, `:605`), but
+  gives up on (`close_rail/1`, `move_worker.ex:269`, `:589`, `:605`), but
   `Rail.close/1` sends its close frame behind whatever the rail already sent
   (`rail.ex`). Whether the iroh helper still delivers what it holds once the
   socket closes ("the helper ends its stream on its own", `helper.ex`) is
@@ -67,12 +67,12 @@ Models one move of M75 §7.2 (B5). Three parts take part:
   for the move it staged (`commit_move/2`, `candidate.ex:666-697`).
 - `MarkerBeforeCommit`: the worker writes `moved.json` and records
   `committing` before it sends `move_commit` (`commit/4`, then `retired/4`,
-  `move_worker.ex:583-608`).
+  `move_worker.ex:586-611`).
 - `OffersFenced`: the candidate takes an offer only when it is later than the
   move it holds, a later move id or a later attempt of the same move, and
   refuses an earlier or equal one (`move_mismatch`), leaving what it holds
   untouched (`fenced_offer/2`, `later?/2`, `candidate.ex:509-521`).
-  `move_offer` carries the attempt (`send_snapshot/4`, `move_worker.ex:499`),
+  `move_offer` carries the attempt (`send_snapshot/4`, `move_worker.ex:502`),
   which only grows across restarts. Move ids are ordered by when the move
   started (`move_id/1`, `move.ex:550-559`); with one move id, the fence
   orders by attempt.
@@ -81,7 +81,7 @@ Models one move of M75 §7.2 (B5). Three parts take part:
   (`candidate.ex:624-631`), which answers `move_ready` only then
   (`move_responder.ex:74-78`).
 - `AwaitPinsRail`: the worker takes an answer only from the rail it waits on
-  (`await_any/3` matches `{:rail, ^rail, _}`, `move_worker.ex:1021-1034`).
+  (`await_any/3` matches `{:rail, ^rail, _}`, `move_worker.ex:1024-1037`).
 - `EndingsAfterRestart`: the worker records `committed` (after `move_done`)
   or `undoing` (after an undo) and then restarts itself (`SelfRestart`,
   `Lifecycle.restart_self/0`); the engine that boots after it records `done`
@@ -101,7 +101,7 @@ in `abort/3` never finds a marker. Every road to `abort/3` starts before
   in `transfer/1` and `attempt_failed/2`, which run only while the marker is
   absent;
 - `commit/4`'s error clause, after the ready epoch or the marker could not
-  be written (`move_worker.ex:586-592`);
+  be written (`move_worker.ex:589-595`);
 - a recorded `aborting`, which `carry_on/3` reaches only when the marker is
   absent.
 
@@ -328,7 +328,7 @@ This was noticed while reading the code. TLC does not show it.
   exclusively, then writes it (`moved.ex:45-59`). If the write or the close
   fails (a full disk), the file may be left unreadable. `commit/4` then
   aborts, and `abort/3` raises on the unreadable marker
-  (`move_worker.ex:845-851`). The worker's restart reaches `carry_on/3`'s
+  (`move_worker.ex:848-854`). The worker's restart reaches `carry_on/3`'s
   clause for an unreadable marker (`:169`), which records a sentence asking for the
   marker to be fixed and does nothing else. The source stays a device and
   the candidate stays staged: safe, never two primaries, and stopped until a
@@ -505,3 +505,12 @@ subtree under the same `:one_for_one`, so its crash or restart touches
 neither, and the dial subtree, where the move worker runs, is as before. No
 modelled step changed; the comments' line numbers into `device_supervisor.ex`
 point at the committed code.
+
+## Re-read for the Apple Maps switch's tests (M89 D13, 2026-11-14)
+
+Re-read against 2b8d4211, which staled the `move_worker.ex` pin: the worker's
+context gains `consent_opts`, the system the keep block's lines are drawn for
+(`Consent.accept/3` and `default_keep/1`), the host's unless a test names it,
+so a move's switches are written as before on every computer. It is one more
+key in a context no step reads, and no modelled step changed. The comments'
+line numbers into `move_worker.ex` point at the committed code.
