@@ -558,6 +558,16 @@ model already takes as a `:rest_for_one` restart. `TemporalScheduler` still
 starts before `TemporalDeliverySupervisor`, both before the placer. No
 delivery path the spec models changed, and no citation moved.
 
+Re-read on 2026-11-14 for the trips' day turn (`fad8eeea`), which staled the
+`application.ex` pin. `supervision_children` gains `Trips.DayTurn` right
+after `Trips.Placer` (M89 D14), primary-only: it sends the trips index again
+at a day's turn, serves no call, arms one timer and raises on nothing it is
+sent, so a crash of it restarts only the children after it, the cue tree
+among them, which the model already takes as a `:rest_for_one` restart.
+`TemporalScheduler` still starts before `TemporalDeliverySupervisor`, both
+before the day turn. No delivery path the spec models changed, and no
+citation moved.
+
 ## Code and doc drift
 
 - `delivery_worker.ex:160-163` says a claim past the validity boundary "cannot

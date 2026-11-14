@@ -1159,6 +1159,17 @@ helper, delivery or report changed; the cue tree's citation, which the
 pacer's six lines had already moved, is now the call itself,
 `application.ex:457`.
 
+## Re-read for the trips' day turn (2026-11-14)
+
+`supervision_children` gains `Trips.DayTurn` right after `Trips.Placer` and
+before `Home.ReleaseTable` (M89 D14, `fad8eeea`), primary-only: it sends the
+trips index again at a day's turn, serves no call, arms one timer and raises
+on nothing it is sent, so a crash of it restarts only the children after it,
+the cue tree among them, which the model already takes as a `:rest_for_one`
+restart. The job rail and its order are unchanged. No modelled row, helper,
+delivery or report changed; its seven lines move the cue tree's citation to
+`application.ex:465`.
+
 ## Assumptions
 
 - Every Repo call completes, or its caller dies, or, for the Scheduler, it

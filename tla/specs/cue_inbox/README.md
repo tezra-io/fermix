@@ -645,3 +645,12 @@ it, and raises on nothing it is sent, so a crash of it restarts only the
 children after it, the cue tree among them, which the model takes as
 `FiltersRestart`. The cue tree is still last. Nothing the spec models changed,
 and it cites no `application.ex` line.
+
+## Re-read for the trips' day turn (2026-11-14)
+
+`supervision_children` gains `Trips.DayTurn` right after `Trips.Placer`
+(M89 D14, `fad8eeea`), primary-only: it sends the trips index again at a
+day's turn, serves no call, arms one timer and raises on nothing it is sent,
+so a crash of it restarts only the children after it, the cue tree among
+them, which the model takes as `FiltersRestart`. The cue tree is still last.
+Nothing the spec models changed, and it cites no `application.ex` line.

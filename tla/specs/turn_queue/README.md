@@ -549,3 +549,13 @@ and the line references into `turn_runner.ex` moved with the code.
 own turn's cards and touches. It is one call into the holder with no Queue state; no
 claim, start, stop, result or answer the spec models changed, and the line references
 into `turn_runner.ex` moved with the code.
+
+## Re-read for the call's lists and trips (2026-11-14)
+
+`run_message_loop` now puts the call's mode in the turn's context
+(`voice_conversation`, nil off a call) and takes the lists' and trips' lines for
+the channel whose reply this is (`ChannelPresentation.channel_of/1`: the voice's on
+a private call's hand-off, the screen's on a call in the chat), `08e03f95`. It is a
+context key and a pure choice with no Queue state; no claim, start, stop, result
+or answer the spec models changed, and the line references into `turn_runner.ex`
+moved with the code.

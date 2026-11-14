@@ -911,3 +911,14 @@ answers each `attach_file` itself, uploading the file to the primary over
 its link before `attach_status`. Attachments are outside this spec (Not
 modelled: protocol 7's files), and the `msg` that names one is the
 primary's, served as before. No modelled step changed.
+
+## Re-read for past trips (M89 D14, 2026-11-14)
+
+`fad8eeea` staled the `PROTOCOL.md` pin: the `trips` index lists the owner's trips
+in one order the engine owns (now, to come, undated, past) with `past: true` on a
+trip that is over, and a connection that pulled the index is sent it again
+within minutes of a local midnight that starts or ends a trip, by the same
+`{:trips_changed, _}` then `:trips_flush` steps any trips change takes, and once
+after a restart of the process that sends it. The trip family is outside this
+spec (Not modelled: protocol 8's trips), and the push carries no seq, request or
+turn. No modelled step changed.
