@@ -514,6 +514,13 @@ staled the `move_worker.ex`, `device_supervisor.ex` and `always_on.ex` pins:
 No modelled step changed. The comments' line numbers into these three files
 point at the committed code.
 
+Walked again against fa21aac6, which staled the `home_summary.ex` pin:
+`on/1` adds `detail.not_yet`, the list of what Always On does not do yet on
+a linked computer (`linked_not_yet/1`), a field of the screen's detail. No
+action, no offer set and no other pinned function changed, so `DeviceOffers`
+and `ReturnOffers` are as before and no modelled step changed. The comments'
+line numbers into `home_summary.ex` point at the committed code.
+
 ## Done
 
 Deadlock checking is on. `Done` has these ends:
