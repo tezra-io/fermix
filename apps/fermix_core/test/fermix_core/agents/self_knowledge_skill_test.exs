@@ -398,6 +398,8 @@ defmodule FermixCore.Agents.SelfKnowledgeSkillTest do
           TripRegistry.describe_error({:trip_full, "Varonne"}),
           TripRegistry.describe_error({:last_day, "Varonne"}),
           TripRegistry.describe_error(:too_many_ops),
+          TripRegistry.describe_error({:place_conflict, 7, 2, 3}),
+          TripRegistry.describe_error(:day_move_conflict),
           TripLookup.offered_heading(:no_anchor),
           PluginRegistry.reserved_name_sentence("trip")
         ] do

@@ -687,7 +687,14 @@ defmodule FermixCore.Trips.Registry do
 
   def describe_error(:add_needs_place), do: "An add needs a day or an after."
   def describe_error(:move_needs_place), do: "A move needs a day or an after."
-  def describe_error(:place_conflict), do: "Give day or after, not both."
+
+  def describe_error({:place_conflict, ref, on, k}) do
+    "The op gives day #{k} and after #{subject(ref)}, which is on Day #{on}, not Day #{k}; " <>
+      "give one of them."
+  end
+
+  def describe_error(:day_move_conflict),
+    do: "A day moves by day or by after, not both; give one of them."
 
   def describe_error(:nothing_to_edit),
     do: "An edit needs at least one of text, time, duration, fixed, note or place."

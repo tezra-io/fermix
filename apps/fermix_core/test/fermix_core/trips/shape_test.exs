@@ -162,9 +162,20 @@ defmodule FermixCore.Trips.ShapeTest do
       assert %{place: nil} = shaped!(%{"op" => "add", "text" => "Lunch", "day" => 1})
     end
 
-    test "an add and a move name one place to go, and an unknown op is refused" do
-      assert one(%{"op" => "add", "text" => "Ferry", "day" => 1, "after" => 3}) ==
-               {:error, {:invalid_op, 1, :place_conflict}}
+    # Both a day and an after pass here: only the trip's rows say whether they
+    # name one day, so `Trips.Ops` holds them to it.
+    test "an add and a move name where to go, by day, after or both, and an unknown op is refused" do
+      assert %{op: :add, day: 1, after: 3} =
+               shaped!(%{"op" => "add", "text" => "Ferry", "day" => 1, "after" => 3})
+
+      assert %{op: :move, n: 4, day: 3, after: 7} =
+               shaped!(%{"op" => "move", "n" => 4, "day" => 3, "after" => 7})
+
+      assert %{op: :move, n: 4, day: nil, after: 7} =
+               shaped!(%{"op" => "move", "n" => 4, "after" => 7})
+
+      assert one(%{"op" => "add", "text" => "Ferry", "day" => 1, "after" => 0}) ==
+               {:error, {:invalid_op, 1, {:not_a_number, :after}}}
 
       assert one(%{"op" => "add", "text" => "Ferry"}) ==
                {:error, {:invalid_op, 1, :add_needs_place}}
@@ -237,6 +248,17 @@ defmodule FermixCore.Trips.ShapeTest do
 
       assert device(%{"op" => "replace"}) == {:error, {:unknown_device_op, "replace"}}
       assert Shape.device_change(%{"trip_id" => @trip_id}) == {:error, {:missing, :op}}
+    end
+
+    # The Mac's drafts follow this rule, so a device still names one place to go.
+    test "a device's add or move gives day_id or after_id, not both" do
+      both = %{"day_id" => @day_id, "after_id" => @stop_id}
+
+      assert device(Map.merge(%{"op" => "add", "text" => "Ferry"}, both)) ==
+               {:error, :place_conflict}
+
+      assert device(Map.merge(%{"op" => "move", "row_id" => @stop_id}, both)) ==
+               {:error, {:device, :place_conflict}}
     end
 
     # D10: near is the model's alone; no device wire carries it.

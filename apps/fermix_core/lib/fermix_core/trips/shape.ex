@@ -9,6 +9,8 @@ defmodule FermixCore.Trips.Shape do
   number (`n`, `after`) from the model or `{:id, row_id}` from a device, a day
   by its position (`day: 2`) or a device's `{:id, day_row_id}`. A field an
   edit does not give is `:keep`; one given empty (or `duration: 0`) clears it.
+  A model's add or move may give both `day` and `after`, which `Trips.Ops`
+  holds to one day; a device's gives one.
 
   Bounds: a title 1..80, a day's name 0..80, a stop's words 1..200, a note at
   most 1,000 code points, each on one line (a note's lines each one); a time
@@ -134,7 +136,9 @@ defmodule FermixCore.Trips.Shape do
 
   defp op_fields(:add, op) do
     with {:ok, text} <- required_text(op, "text", :text, @text_max),
-         {:ok, where} <- add_place(number(op, "day"), number(op, "after")),
+         {:ok, day} <- number(op, "day"),
+         {:ok, after_n} <- number(op, "after"),
+         {:ok, where} <- model_where(day, after_n, :add_needs_place),
          {:ok, stop} <- stop_fields(op, :absent_is_nil),
          {:ok, place} <- model_place(op, :absent_is_nil) do
       {:ok, %{op: :add, text: text, place: place} |> Map.merge(where) |> Map.merge(stop)}
@@ -153,14 +157,9 @@ defmodule FermixCore.Trips.Shape do
   defp op_fields(:move, op) do
     with {:ok, n} <- row_number(op, "n"),
          {:ok, day} <- number(op, "day"),
-         {:ok, after_n} <- number(op, "after") do
-      case {day, after_n} do
-        {nil, nil} -> {:error, :move_needs_place}
-        {day, nil} -> {:ok, %{op: :move, n: n, day: day, after: nil}}
-        {nil, after_n} -> {:ok, %{op: :move, n: n, day: nil, after: after_n}}
-        _both -> {:error, :place_conflict}
-      end
-    end
+         {:ok, after_n} <- number(op, "after"),
+         {:ok, where} <- model_where(day, after_n, :move_needs_place),
+         do: {:ok, Map.merge(%{op: :move, n: n}, where)}
   end
 
   defp op_fields(:day, op) do
@@ -188,12 +187,16 @@ defmodule FermixCore.Trips.Shape do
 
   defp op_fields(:remove_trip, _op), do: {:ok, %{op: :remove_trip}}
 
+  # A model's add or move names a day, a row to go after, or both, which
+  # `Trips.Ops` holds to one day: only the trip's rows can say where after is.
+  defp model_where(nil, nil, reason), do: {:error, reason}
+  defp model_where(day, after_n, _reason), do: {:ok, %{day: day, after: after_n}}
+
+  # A device's add names one place to go: the Mac's drafts follow this rule.
   defp add_place({:ok, nil}, {:ok, nil}), do: {:error, :add_needs_place}
   defp add_place({:ok, day}, {:ok, nil}), do: {:ok, %{day: day, after: nil}}
   defp add_place({:ok, nil}, {:ok, after_n}), do: {:ok, %{day: nil, after: after_n}}
   defp add_place({:ok, _day}, {:ok, _after}), do: {:error, :place_conflict}
-  defp add_place({:error, reason}, _after), do: {:error, reason}
-  defp add_place(_day, {:error, reason}), do: {:error, reason}
 
   defp something_to_edit(%{text: nil} = edit) do
     if Enum.all?([:time, :duration, :fixed, :note, :place], &(Map.fetch!(edit, &1) == :keep)),

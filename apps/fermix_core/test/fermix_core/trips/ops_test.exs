@@ -241,6 +241,69 @@ defmodule FermixCore.Trips.OpsTest do
     assert n == ferry.n
   end
 
+  # A live run sent a move with a day and an after on that day, and was
+  # refused; both name one place, so it lands as the after alone does.
+  test "a model's stop move or add giving a day and an after on that day lands as the after alone" do
+    store = three_days("2031-03-10")
+    ferry = stop(store, "Varonne", "Ferry")
+    tower = stop(store, "Varonne", "Clock tower")
+    vineyard = stop(store, "Varonne", "Vineyard")
+    [_harbour, _old_town, hills] = day_rows(store, "Varonne")
+
+    for {day, after_n} <- [{3, vineyard.n}, {3, hills.n}] do
+      move = %{"op" => "move", "n" => ferry.n, "after" => after_n}
+      assert call(store, "Varonne", [Map.put(move, "day", day)]) == call(store, "Varonne", [move])
+    end
+
+    add = %{"op" => "add", "text" => "Night market", "after" => tower.n}
+    {_result, by_after} = call!(store, "Varonne", [add])
+    {_result, by_both} = call!(store, "Varonne", [Map.put(add, "day", 2)])
+    assert outline(by_both, "Varonne") == outline(by_after, "Varonne")
+
+    assert {"Old town", _date, ["Clock tower", "Night market"]} =
+             Enum.at(outline(by_both, "Varonne"), 1)
+  end
+
+  test "a model's move or add whose day and after disagree is refused, naming after's day" do
+    store = three_days("2031-03-10")
+    ferry = stop(store, "Varonne", "Ferry")
+    tower = stop(store, "Varonne", "Clock tower")
+    vineyard = stop(store, "Varonne", "Vineyard")
+
+    assert call(store, "Varonne", [
+             %{"op" => "move", "n" => ferry.n, "day" => 2, "after" => vineyard.n}
+           ]) == {:error, {:op_failed, 1, {:place_conflict, vineyard.n, 3, 2}}}
+
+    assert call(store, "Varonne", [
+             %{"op" => "add", "text" => "Night market", "day" => 1, "after" => tower.n}
+           ]) == {:error, {:op_failed, 1, {:place_conflict, tower.n, 2, 1}}}
+
+    # A day past the last is not made when the after is elsewhere.
+    assert call(store, "Varonne", [
+             %{"op" => "add", "text" => "Night market", "day" => 5, "after" => tower.n}
+           ]) == {:error, {:op_failed, 1, {:place_conflict, tower.n, 2, 5}}}
+
+    # An after that names no row is refused as it is alone.
+    assert call(store, "Varonne", [
+             %{"op" => "add", "text" => "Night market", "day" => 2, "after" => 99}
+           ]) == {:error, {:op_failed, 1, {:no_row, 99}}}
+  end
+
+  # A day's own row moved by day becomes that day, and by after goes after that
+  # day: the two never name one place, so a day's move takes one, even when the
+  # after is on that day.
+  test "a model's move of a day's own row giving both a day and an after is refused" do
+    store = three_days("2031-03-10")
+    [_harbour, old_town, hills] = day_rows(store, "Varonne")
+    vineyard = stop(store, "Varonne", "Vineyard")
+
+    for after_n <- [hills.n, vineyard.n] do
+      assert call(store, "Varonne", [
+               %{"op" => "move", "n" => old_town.n, "day" => 3, "after" => after_n}
+             ]) == {:error, {:op_failed, 1, :day_move_conflict}}
+    end
+  end
+
   test "dates follow position across 31 Jan to 1 Feb, 28 Feb to 1 Mar in a leap year, and 31 Dec to 1 Jan" do
     cases = [
       {"2031-01-31", 2, [~D[2031-01-31], ~D[2031-02-01]]},

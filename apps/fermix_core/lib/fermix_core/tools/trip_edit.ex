@@ -45,10 +45,13 @@ defmodule FermixCore.Tools.TripEdit do
   @spec description() :: String.t()
   def description do
     "Make and change the owner's trips as the owner asks; a call lands whole or not at " <>
-      "all. place: the place's own name, never the activity, or a link a search returned. " <>
-      "Give near when making a trip: a town or city and its country, like Lisbon, Portugal, " <>
-      "never a country, a region, a district or a landmark; a day in a different town from " <>
-      "the trip's gets its own near. Places are looked up within it."
+      "all. Every stop at a place gives place: the place's own name, never the activity, or " <>
+      "a link a search returned; a stop without one is never looked up. Give near when " <>
+      "making a trip: a town or city and its country, like Lisbon, Portugal, never a " <>
+      "country, a region, a district or a landmark; a day in a different town from the " <>
+      "trip's gets its own near. Places are looked up within it. A near never holds a trip " <>
+      "up: if the town's country is unknown, make the trip as asked without one, and ask the " <>
+      "owner for the town and its country."
   end
 
   @impl true

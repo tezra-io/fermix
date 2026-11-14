@@ -226,6 +226,39 @@ defmodule FermixCore.Trips.RegistryTest do
                  "Nothing in this call was changed (op 2)."
     end
 
+    test "a move whose day and after disagree says where after is and changes nothing", %{
+      repo: repo
+    } do
+      varonne!(repo)
+
+      assert refusal(
+               edit(repo, "Varonne", [
+                 %{"op" => "rename", "text" => "Ostrel"},
+                 %{"op" => "move", "n" => 3, "day" => 1, "after" => 4}
+               ])
+             ) ==
+               "The op gives day 1 and after [4], which is on Day 2, not Day 1; give one of " <>
+                 "them. Nothing in this call was changed (op 2)."
+
+      assert {:ok, %{trip: %{title: "Varonne", rev: 1}, rows: rows}} =
+               Repo.trips_call({:read_trip, "default", "main", "Varonne"}, server: repo)
+
+      assert Enum.map(rows, & &1.n) == [1, 3, 2, 4]
+
+      assert refusal(
+               edit(repo, "Varonne", [%{"op" => "move", "n" => 1, "day" => 2, "after" => 2}])
+             ) ==
+               "A day moves by day or by after, not both; give one of them. " <>
+                 "Nothing in this call was changed (op 1)."
+
+      edit!(repo, "Varonne", [%{"op" => "move", "n" => 3, "day" => 2, "after" => 4}])
+
+      assert {:ok, %{trip: %{rev: 2}, rows: rows}} =
+               Repo.trips_call({:read_trip, "default", "main", "Varonne"}, server: repo)
+
+      assert Enum.map(rows, & &1.n) == [1, 2, 4, 3]
+    end
+
     test "a fixed stop whose date moved is named in the answer", %{repo: repo} do
       varonne!(repo)
 

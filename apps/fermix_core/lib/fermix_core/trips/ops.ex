@@ -392,7 +392,8 @@ defmodule FermixCore.Trips.Ops do
   # --- adding ----------------------------------------------------------------
 
   defp row_op(state, %{op: :add} = op, edit) do
-    with {:ok, state, made_days} <- ensure_day(state, op.day, edit),
+    with {:ok, op} <- one_place(state.rows, op, :stop),
+         {:ok, state, made_days} <- ensure_day(state, op.day, edit),
          {:ok, index} <- add_index(state.rows, op),
          :ok <- room(state, 1) do
       {row, state} = new_row(state, :stop, op, edit)
@@ -431,7 +432,8 @@ defmodule FermixCore.Trips.Ops do
   end
 
   defp row_op(state, %{op: :move, n: ref} = op, edit) do
-    with {:ok, index, row} <- find(state.rows, ref) do
+    with {:ok, index, row} <- find(state.rows, ref),
+         {:ok, op} <- one_place(state.rows, op, row.kind) do
       if row.kind == :day,
         do: move_day(state, {index, row}, op, edit),
         else: move_stop(state, {index, row}, op, edit)
@@ -478,6 +480,26 @@ defmodule FermixCore.Trips.Ops do
         if live_row?(state.rows, id), do: {:error, :not_removed}, else: {:error, {:no_row, ref}}
     end
   end
+
+  # A model's add, or a stop's move, that gives both a day and an after is the
+  # after alone when the after's row, a stop or a day's own, is on that day, as
+  # the trip stands before the op; else it is refused, naming the after's day.
+  # A day's own row moved by day becomes that day and by after goes after it,
+  # so the two never name one place and a day's move takes one.
+  defp one_place(_rows, %{day: k, after: ref}, :day) when is_integer(k) and is_integer(ref),
+    do: {:error, :day_move_conflict}
+
+  defp one_place(rows, %{day: k, after: ref} = op, :stop)
+       when is_integer(k) and is_integer(ref) do
+    with {:ok, _index, row} <- find(rows, ref) do
+      case day_of(rows, row.id) do
+        ^k -> {:ok, %{op | day: nil}}
+        on -> {:error, {:place_conflict, ref, on, k}}
+      end
+    end
+  end
+
+  defp one_place(_rows, op, _kind), do: {:ok, op}
 
   # A day past the last is made, with every empty day before it.
   defp ensure_day(state, k, edit) when is_integer(k) do

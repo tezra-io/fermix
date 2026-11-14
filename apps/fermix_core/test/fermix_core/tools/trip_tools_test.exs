@@ -231,6 +231,24 @@ defmodule FermixCore.Tools.TripToolsTest do
     assert description =~ "a day in a different town from the trip's gets its own near"
   end
 
+  # A live run read "Give near" as a precondition and made no trip for a town
+  # whose country it did not know; the engine already offers, never places,
+  # with no near, so a missing near never holds the trip up.
+  test "trip_edit's description says a near never holds a trip up" do
+    description = TripEdit.description()
+    assert description =~ "A near never holds a trip up"
+    assert description =~ "if the town's country is unknown, make the trip as asked without one"
+    assert description =~ "ask the owner for the town and its country"
+  end
+
+  # A live run named real places only in a stop's words, and only a given
+  # place is looked up, so those stops stayed unplaced.
+  test "trip_edit's description says every stop at a place gives its place" do
+    description = TripEdit.description()
+    assert description =~ "Every stop at a place gives place"
+    assert description =~ "a stop without one is never looked up"
+  end
+
   test "the two tool schemas stay inside their measured budget" do
     encoded =
       [TripRead, TripEdit]
@@ -248,7 +266,10 @@ defmodule FermixCore.Tools.TripToolsTest do
     # `as` saying the text is sent as is, with no note, measured 5 tokens and
     # 14 bytes more: 488 tokens and 1,897 bytes. D11's near guidance (a town
     # or city and its country, never wider, a day elsewhere its own) measured
-    # 31 tokens and 128 bytes more: 519 tokens and 2,025 bytes, the bound.
-    assert byte_size(encoded) <= 2_025
+    # 31 tokens and 128 bytes more: 519 tokens and 2,025 bytes. That every
+    # stop at a place gives its place, and that a near never holds a trip up,
+    # measured 50 tokens and 215 bytes more: 569 tokens and 2,240 bytes, the
+    # bound.
+    assert byte_size(encoded) <= 2_240
   end
 end
