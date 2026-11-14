@@ -212,6 +212,14 @@ defmodule FermixCore.Tools.TripToolsTest do
     refute plain.output =~ report
   end
 
+  # Live runs read "Day number" as a weekday's (Thursday as Day 4 of a trip
+  # that starts on a Wednesday), four times in one batch.
+  test "trip_read's day counts from the trip's first day, never a weekday" do
+    assert TripRead.parameters().properties.day.description ==
+             "Day in this trip, from 1 on its first day, never a weekday's number; or a " <>
+               "run: \"3-5\"."
+  end
+
   test "trip_read's share form says it is sent as it is, with no note" do
     assert TripRead.parameters().properties.as.description == "To send, as is: never add a note."
   end
@@ -276,7 +284,9 @@ defmodule FermixCore.Tools.TripToolsTest do
     # stop at a place gives its place, and that a near never holds a trip up,
     # measured 50 tokens and 215 bytes more: 569 tokens and 2,240 bytes. That
     # sentence said as an unknown country being no reason to wait measured 8
-    # tokens and 29 bytes less: 561 tokens and 2,211 bytes, the bound.
-    assert byte_size(encoded) <= 2_211
+    # tokens and 29 bytes less: 561 tokens and 2,211 bytes. trip_read's `day`
+    # saying it counts from the trip's first day, never a weekday, measured 16
+    # tokens and 57 bytes more: 577 tokens and 2,268 bytes, the bound.
+    assert byte_size(encoded) <= 2_268
   end
 end

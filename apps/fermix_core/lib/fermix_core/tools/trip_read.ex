@@ -48,7 +48,12 @@ defmodule FermixCore.Tools.TripRead do
       type: "object",
       properties: %{
         trip: %{type: "string", description: "Title or id."},
-        day: %{type: "string", description: "Day number, or a run: \"3-5\"."},
+        day: %{
+          type: "string",
+          description:
+            "Day in this trip, from 1 on its first day, never a weekday's number; or a " <>
+              "run: \"3-5\"."
+        },
         as: %{type: "string", enum: ["share"], description: "To send, as is: never add a note."}
       }
     }
