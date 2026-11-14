@@ -16,7 +16,7 @@ then has the profile's manager forget its tokens and stops it (plugin logout,
 anthropic and xai, `management/auth.ex:219-226`, `:519-523`). A logout from a
 tree-less CLI VM deletes the entry the same way, then has a running daemon let
 go of the profile over the control socket (`auth_forget`,
-`cli/daemon.ex:1135-1165` → `TokenSupervisor.forget_signed_out`).
+`cli/daemon.ex:1248-1278` → `TokenSupervisor.forget_signed_out`).
 
 OpenAI Codex signs in with ChatGPT, under the `chatgpt` profile
 (`store.ex:259-269`). That registration outlives a sign-out, so the sign-out
@@ -154,9 +154,9 @@ least one check):
 - `CliLogoutReachesDaemon`: after its delete, or ChatGPT's write, a CLI logout
   sends a running daemon `auth_forget` for the profile (`plugins_command.ex:278`,
   `:520-545`; `auth_command.ex:328-354`, `:361-379`, `:405-420`;
-  `cli/daemon/client.ex:60-74`). The daemon has the profile's manager forget
+  `cli/daemon/client.ex:64-78`). The daemon has the profile's manager forget
   its tokens, which also deletes its plugin child's token file, then stops it
-  (`cli/daemon.ex:892`, `:1135-1165`; `token_supervisor.ex:143-165`). Off, the
+  (`cli/daemon.ex:1005`, `:1248-1278`; `token_supervisor.ex:143-165`). Off, the
   CLI logout reaches no manager. That is also the state a daemon leaves when
   it answers the notice with an error, which the CLI reports by exiting
   non-zero; checks 14 and 26 model that case.
@@ -588,7 +588,7 @@ the Codex CLI's session and then Fermix's, closed when that import was retired
   refresh in flight, so `forget` normally finds the manager idle. It can still
   meet a manager that is itself waiting up to 10 s for the profile lock (held
   by a CLI refresh, say); the management caller then exits first, the socket
-  turns that into `internal_error` (`cli/daemon.ex:599-612`), and
+  turns that into `internal_error` (`cli/daemon.ex:651-725`), and
   `revert_route` (`management/auth.ex:223`) never runs. The in-daemon plugin
   logout's forget (`forget_signed_out`, `plugins/auth.ex:73`) and ChatGPT's
   sign-out's (`chatgpt/logout.ex:46`) are the same call and can meet the same
@@ -696,3 +696,18 @@ the Codex CLI's session and then Fermix's, closed when that import was retired
 - A refresh may start at any time. Expiry, the proactive timer and the
   10-second due window are not modelled. They decide how often the overlaps in
   TOKEN-1 and TOKEN-2 would happen, but not whether they can.
+
+## Re-read for a daemon too busy to answer (2026-11-13)
+
+`95c98746` and `5c958aee` staled the `cli/daemon.ex` and
+`cli/daemon/client.ex` pins. `Client.classify/1` now takes only a socket no
+daemon can be listening on (`:enoent`, `:econnrefused`, `:eaddrnotavail`,
+`:badarg`) for not running; a connect that times out is `{:error,
+:timeout}`, "could not tell". For a CLI logout that is a notice the daemon
+did not answer "ok": the CLI exits non-zero and nothing reaches the manager,
+the case `CliLogoutReachesDaemon` off and check 14 already describe. Before,
+a busy daemon's connect timeout read as not running, and the logout ended
+zero while that daemon kept the tokens. The daemon gains the `:machine`
+owner family and its forwarding of a computer's requests (M97 D28), which
+no step here reads. No modelled step changed; the line numbers into both
+files point at the committed code.

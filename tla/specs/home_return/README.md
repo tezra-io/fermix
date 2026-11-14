@@ -475,7 +475,13 @@ restart is `unconfirmed` too, with a sentence of its own
 (`unconfirmed/2`). The model's `unconfirmed` is `home.move.start`'s alone,
 the only forwarded call a move back sends that can be lost that way:
 `MessagesCanBeLost`, `UnconfirmedKept` and `StartKeptFirst` read only it,
-and no restart is a step of a move back, so no modelled step changed. Move
+and no restart is a step of a move back, so no modelled step changed. The
+server refuses `home.restart` while a move is under way, a move back's
+included, and a move that starts while a restart waits ends the wait
+(`Home.ServerRestart`); a restart that slips in between its last read of the
+hold and the stop is a server restart mid-move, which the model has
+(`ServerCanCrash`), and the move request on disk boots the server back into
+it. Move
 back, Move now, Cancel and Restore here are as before. The comments' line
 numbers into `always_on.ex` point at the committed code.
 

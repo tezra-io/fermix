@@ -63,8 +63,8 @@
 (* or one step of a job's ending.                                          *)
 (***************************************************************************)
 
-\* SOURCE: apps/fermix_core/lib/fermix_core/management/always_on.ex @ 8ce194fb4201
-\* SOURCE: apps/fermix_core/lib/fermix_core/management/jobs.ex#start,handle_call,start_job,running?,running_count,complete_task,task_down,finish,begin_ending,ending_done,ending_down,end_closing @ 5095f2e28157
+\* SOURCE: apps/fermix_core/lib/fermix_core/management/always_on.ex @ 013c9c46254f
+\* SOURCE: apps/fermix_core/lib/fermix_core/management/jobs.ex#start,handle_call,start_job,running?,running_count,complete_task,task_down,finish,begin_ending,ending_done,ending_down,end_closing @ 0061e7895996
 \* SOURCE: apps/fermix_core/lib/fermix_core/management/home_summary.ex#offered,find_action,device,restoring,restore_running?,restore_offer,readable_or_update @ ff0a67460be1
 \* SOURCE: apps/fermix_core/lib/fermix_core/management/home.ex#restoring? @ 10524f88be3d
 
@@ -175,8 +175,8 @@ Press(c) ==
     /\ Goto(c, "queued")
     /\ UNCHANGED <<job_vars, drawn, acts, holder, hist_vars>>
 
-\* The serializer takes the act (act/2, always_on.ex:267-275, handle_call,
-\* :280-282): one at a time.
+\* The serializer takes the act (act/2, always_on.ex:274-282, handle_call,
+\* :287-289): one at a time.
 Take(c) ==
     /\ pc[c] = "queued"
     /\ Serialized => holder = "none"
@@ -184,8 +184,8 @@ Take(c) ==
     /\ Goto(c, "check")
     /\ UNCHANGED <<job_vars, drawn, acts, hist_vars>>
 
-\* run/3 and offered/4 (:286-312): the summary as it is now, and the key
-\* rule; then restore_here/3 (:802-811), whose copy is chosen first (a read).
+\* run/3 and offered/4 (:293-319): the summary as it is now, and the key
+\* rule; then restore_here/3 (:826-835), whose copy is chosen first (a read).
 Check(c) ==
     /\ pc[c] = "check"
     /\ IF KeyRule /\ "restore_here" \notin Offered
@@ -193,7 +193,7 @@ Check(c) ==
           ELSE Goto(c, "request") /\ UNCHANGED changedSeen
     /\ UNCHANGED <<job_vars, drawn, acts, holder, busySeen, crashed>>
 
-\* keep_record/2 of restore_record/3 (:822-825, :734-739): the request in
+\* keep_record/2 of restore_record/3 (:846-849, :758-763): the request in
 \* return.json, before the job.
 Request(c) ==
     /\ pc[c] = "request"
@@ -201,8 +201,8 @@ Request(c) ==
     /\ request' = TRUE
     /\ UNCHANGED <<jobs, drawn, acts, holder, hist_vars>>
 
-\* start_restore/3 (:835-850): Jobs.start/2, refused busy beside a running
-\* job of the kind (jobs.ex:230-238); else the job runs, its ending kept.
+\* start_restore/3 (:859-874): Jobs.start/2, refused busy beside a running
+\* job of the kind (jobs.ex:237-245); else the job runs, its ending kept.
 Start(c) ==
     /\ pc[c] = "start"
     /\ IF JobsBusy /\ Running # {}
@@ -214,8 +214,8 @@ Start(c) ==
                /\ UNCHANGED busySeen
     /\ UNCHANGED <<request, drawn, acts, holder, changedSeen, crashed>>
 
-\* The refused start takes the request back (request_done/1, :844-852); the
-\* refusal names a restore only when one runs (busy_with/1, :805-809).
+\* The refused start takes the request back (request_done/1, always_on.ex:917-925); the
+\* refusal names a restore only when one runs (busy_with/1, :878-882).
 Unstart(c) ==
     /\ pc[c] = "unstart"
     /\ Goto(c, "done")
@@ -233,15 +233,15 @@ Finish(c) ==
 -----------------------------------------------------------------------------
 (* The job: its run and its ending (Management.Jobs)                       *)
 
-\* The run answers (complete_task/3, jobs.ex:484-494): a restore, or a
-\* refusal; finish/4 (:531-537) starts its ending (begin_ending/4,
-\* :539-546), the job still running.
+\* The run answers (complete_task/3, jobs.ex:491-501): a restore, or a
+\* refusal; finish/4 (:538-544) starts its ending (begin_ending/4,
+\* :546-553), the job still running.
 RunAnswers(j) ==
     /\ jobs[j] = "run"
     /\ jobs' = [jobs EXCEPT ![j] = "ending"]
     /\ UNCHANGED <<request, caller_vars, hist_vars>>
 
-\* The run raises, exits or is killed (task_down/3, :496-506). With
+\* The run raises, exits or is killed (task_down/3, :503-513). With
 \* OwnerEnds the family ends it as any other (finish/4); without, the job
 \* closes with no ending.
 RunCrashes(j) ==
@@ -250,8 +250,8 @@ RunCrashes(j) ==
     /\ crashed' = TRUE
     /\ UNCHANGED <<request, caller_vars, changedSeen, busySeen>>
 
-\* The ending (restore_ended/3, always_on.ex:867-891) takes the request back
-\* (request_done/1, :893-901), which tells the watch, then settles a local
+\* The ending (restore_ended/3, always_on.ex:891-915) takes the request back
+\* (request_done/1, :917-925), which tells the watch, then settles a local
 \* candidate a run stopped from outside left (home_return's RhSettle: no
 \* request here); the job still runs until the family hears the ending is
 \* done.
@@ -261,7 +261,7 @@ EndingWrites(j) ==
     /\ request' = IF ClearOnEnd THEN FALSE ELSE request
     /\ UNCHANGED <<caller_vars, hist_vars>>
 
-\* ending_done/2 or ending_down/3, then end_closing/2 (jobs.ex:548-577): the
+\* ending_done/2 or ending_down/3, then end_closing/2 (jobs.ex:555-584): the
 \* job leaves running.
 Close(j) ==
     /\ jobs[j] = "closing"

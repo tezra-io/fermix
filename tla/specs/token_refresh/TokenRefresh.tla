@@ -95,8 +95,8 @@
 \* SOURCE: apps/fermix_core/lib/fermix_core/auth/chatgpt/registration.ex#read,signed_out,@profile @ 8a05570f216c
 \* SOURCE: apps/fermix_core/lib/fermix/cli/plugins_command.ex @ be9afb0398a5
 \* SOURCE: apps/fermix_core/lib/fermix/cli/auth_command.ex @ 248ca48a51fc
-\* SOURCE: apps/fermix_core/lib/fermix/cli/daemon.ex @ 163ec4e1b900
-\* SOURCE: apps/fermix_core/lib/fermix/cli/daemon/client.ex @ fd0cff9607dc
+\* SOURCE: apps/fermix_core/lib/fermix/cli/daemon.ex @ 04d6f2979c9e
+\* SOURCE: apps/fermix_core/lib/fermix/cli/daemon/client.ex @ db09872734c1
 EXTENDS Naturals, FiniteSets
 
 CONSTANTS
@@ -123,7 +123,7 @@ CONSTANTS
     StoreLock,              \* auth.json.lock around every Store.write and delete_provider (store.ex:179-185, :195-203)
     ProfileLock,            \* the profile's lock over one refresh, read to write, and over a delete (store.ex:220-226)
     RefusesMissingEntry,    \* a manager whose entry is gone drops its tokens (token_manager.ex:320-328, :381-405)
-    CliLogoutReachesDaemon  \* a CLI logout then has a running daemon let go of the profile (auth_command.ex:405-420, plugins_command.ex:520-545, cli/daemon.ex:1135-1165)
+    CliLogoutReachesDaemon  \* a CLI logout then has a running daemon let go of the profile (auth_command.ex:405-420, plugins_command.ex:520-545, cli/daemon.ex:1248-1278)
 
 ASSUME /\ CliProfile \in Profiles /\ LogoutProfile \in Profiles
        /\ MaxAttempts \in Nat \ {0} /\ Rounds \in Nat
@@ -523,8 +523,8 @@ Freed(h) == IF h \in Actors /\ Killed(h) THEN None ELSE h
 \*      or its write, every CLI logout tells a running daemon to let go of
 \*      the profile (plugins_command.ex:278, :520-545; auth_command.ex:
 \*      321-354, :361-379, :405-420): an `auth_forget` request on the
-\*      control socket (cli/daemon/client.ex:60-74), answered by
-\*      forget_signed_out (cli/daemon.ex:892, :1135-1165). Without
+\*      control socket (cli/daemon/client.ex:64-78), answered by
+\*      forget_signed_out (cli/daemon.ex:1005, :1248-1278). Without
 \*      CliLogoutReachesDaemon, or when the daemon does not answer "ok"
 \*      (the CLI then exits non-zero), nothing reaches the manager.
 \*    - The in-daemon plugin logout calls it right after its delete
