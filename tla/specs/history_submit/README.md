@@ -504,3 +504,18 @@ off machine is still left out (Out of scope), and its sittings are refused
 `off` after the purge check, so no modelled step changed. HS-5 above is the
 upgrade's own defect, now fixed; the sitting on its way during an off is
 under Seen while reading.
+
+## Re-read for a Linux computer's recorder (M97 stage 4, 2026-11-14)
+
+`8240551b` staled the `history.ex` pin of `pause_everywhere`, `apply_here`
+and `run_purge`: their replies name the machine (Mac or computer); the
+apply here, and which home applies it (`run_purge`'s `recorder?`), are as
+before. A Linux computer now records, so it is one more of the scene's
+computers: it keeps its own store, sends its sittings with its mark and
+store, is refused by the same check, and applies what a refusal or a
+delivery names in the same order, its fences before its mark; a Linux
+machine that is its own home applies its own intervals as `ApplyHere`
+does. An Always On server still records nothing. The latent gap the first
+re-read saw for a machine with no store (a delivery answered a mark it did
+not record) closed with HS-2: `Spool.apply_at/4` answers the store's own
+mark, 0 where there is none. No modelled step changed.
