@@ -93,8 +93,11 @@ defmodule Fermix.CLI.AlwaysOnCommand do
   ACTION is one of the steps Always On offers now:
     cancel move-now try-again update back-up-now check-again own-server move-back
     restore-here add-computer approve-computer deny-computer change-passphrase
+    restart-server
 
   approve-computer takes the six digits the new computer shows (--sas, or asked).
+  restart-server, on a computer linked to its server, restarts the server while a
+  change waits for it, after the work it runs on a computer (ten minutes at most).
   """
 
   @type context :: map()

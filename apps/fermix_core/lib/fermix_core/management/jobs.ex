@@ -8,7 +8,9 @@ defmodule FermixCore.Management.Jobs do
   sign-in, a computer-use grant, a browser download and an MCP server check
   all take longer than a management request may be held open, so each is a
   *job*: the starting method mints an id and returns at once, `job.get`
-  reports progress, and `job.cancel` stops it. One shape covers every family,
+  reports progress, and `job.cancel` stops it; on a computer linked to its
+  server the id names it (`computer.job:<id>`), so those two are answered on
+  the engine that started the job (`Management.Placement`). One shape covers every family,
   so a client writes one poller, one progress row and one failure sentence
   rather than one per operation.
 
@@ -48,7 +50,11 @@ defmodule FermixCore.Management.Jobs do
 
   use GenServer
 
+  alias FermixCore.Home.DesktopLink
+  alias FermixCore.Home.Role
+  alias FermixCore.Management.Placement
   alias FermixCore.Management.Telemetry
+  alias FermixCore.Setup.ConfigStore
 
   require Logger
 
@@ -222,7 +228,8 @@ defmodule FermixCore.Management.Jobs do
        shutting_down: %{},
        task_supervisor: Keyword.get(opts, :task_supervisor, FermixCore.TaskSupervisor),
        cancel_grace_ms: Keyword.get(opts, :cancel_grace_ms, @cancel_grace_ms),
-       clock: Keyword.get(opts, :clock, &monotonic_ms/0)
+       clock: Keyword.get(opts, :clock, &monotonic_ms/0),
+       computer?: Keyword.get_lazy(opts, :computer?, &linked_computer?/0) == true
      }}
   end
 
@@ -294,7 +301,7 @@ defmodule FermixCore.Management.Jobs do
   def handle_info(_message, state), do: {:noreply, state}
 
   defp start_job(state, kind, name, opts, from) do
-    job_id = mint_job_id()
+    job_id = mint_job_id(state.computer?)
     budget_ms = Keyword.get(opts, :budget_ms, budget_ms(kind))
     task = spawn_run(state, job_id, Keyword.fetch!(opts, :run))
 
@@ -721,8 +728,22 @@ defmodule FermixCore.Management.Jobs do
   defp scalar?(nil), do: true
   defp scalar?(_value), do: false
 
-  defp mint_job_id do
-    "job:" <> Base.url_encode64(:crypto.strong_rand_bytes(@job_id_bytes), padding: false)
+  # A job is answered by the engine that started it (M97 §19.3's rule): on a
+  # computer linked to its server every id names this computer
+  # (`computer.job:<id>`), so its app's `job.get` and `job.cancel` are
+  # answered here and never sent to the server.
+  defp mint_job_id(computer?) do
+    id = "job:" <> Base.url_encode64(:crypto.strong_rand_bytes(@job_id_bytes), padding: false)
+    if computer?, do: Placement.computer_id(id), else: id
+  end
+
+  # A device-role engine holding its desktop link, decided once at start as
+  # the daemon's forwarding is; a process that booted no engine is none.
+  defp linked_computer? do
+    case Role.booted() do
+      nil -> false
+      record -> DesktopLink.linked?(record, ConfigStore.fermix_home())
+    end
   end
 
   # A job whose reply is deferred until the run mints a value still answers

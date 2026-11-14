@@ -6,8 +6,8 @@ defmodule FermixCore.Home.Archive.RestoredConfig do
 
     * the archived machine's own settings (`FermixCore.Setup.MachineFile`:
       its sandbox, computer use, screen history, Messages, accessory link, dev
-      plugin folder, and whether coding agents may run there and where they
-      keep their sign-ins) are left out, on any host. An engine keeps them in
+      plugin folder, its browser's settings, and whether coding agents may run
+      there and where they keep their sign-ins) are left out, on any host. An engine keeps them in
       its `machine.toml`, which no archive carries, so only a home an earlier
       engine wrote has them in `config.toml`; the restored engine takes its
       own machine file, or the shipped defaults. So coding-agent consent,

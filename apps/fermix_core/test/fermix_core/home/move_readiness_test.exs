@@ -93,6 +93,7 @@ defmodule FermixCore.Home.MoveReadinessTest do
              {"whatsapp", :warn},
              {"slack", :warn},
              {"coding_agents", :warn},
+             {"settings", :ok},
              {"cutover_gap", :warn},
              {"serves_nothing", :warn},
              {"service", :ok}
@@ -134,7 +135,14 @@ defmodule FermixCore.Home.MoveReadinessTest do
     # decides there.
     assert sentence.("coding_agents") ==
              "Coding agents stop on this Mac after the move. They run on north-box only " <>
-               "with your approval there."
+               "with your approval there. To run them on north-box too, allow them there in " <>
+               "Settings, Coding agents, after the move."
+
+    # M97 D28 (§19.8): after the move the apps' Settings change the server.
+    assert sentence.("settings") ==
+             "After the move, Settings in this app change Fermix on north-box, its sandbox and " <>
+               "coding agents included. A new server's sandbox starts Open. What north-box may " <>
+               "use on this Mac, and this Mac's own sandbox, are under This Mac."
 
     # This home sets up no Telegram, so the gap names only the jobs (EC2 test
     # finding 7).
@@ -243,7 +251,18 @@ defmodule FermixCore.Home.MoveReadinessTest do
 
     assert sentence ==
              "Coding agents stop on this computer after the move. They run on north-box only " <>
-               "with your approval there."
+               "with your approval there. To run them on north-box too, allow them there in " <>
+               "Settings, Coding agents, after the move."
+
+    assert %{status: :ok, sentence: said} =
+             item_in(
+               MoveReadiness.summary_items(settings, false, "north-box", opts(ctx)),
+               "settings"
+             )
+
+    assert said =~
+             "What north-box may use on this computer, and this computer's own sandbox, " <>
+               "are under This computer."
   end
 
   test "plugins with a build for the server are installed again there, and say so", ctx do
@@ -401,6 +420,10 @@ defmodule FermixCore.Home.MoveReadinessTest do
 
     assert %{status: :ok, sentence: "studio-box runs a Fermix that reads this home."} =
              item_in(items, "engine_version")
+
+    # A move back makes the desktop its own home again: no app's Settings
+    # change the server after it (M97 D28, §19.8).
+    assert item_in(items, "settings") == nil
 
     # An engine before home formats reads by its version, so an older one
     # blocks; an older one that reads the server's home format does not
@@ -684,13 +707,13 @@ defmodule FermixCore.Home.MoveReadinessTest do
       items = settings_items(ctx, seams)
 
       assert Enum.map(items, & &1.id) ==
-               ~w(stays_here whatsapp slack coding_agents cutover_gap serves_nothing service)
+               ~w(stays_here whatsapp slack coding_agents settings cutover_gap serves_nothing service)
 
       full = MoveReadiness.report(ctx.home, ctx.candidate, seams).items
       assert items == Enum.filter(full, &(&1.id in Enum.map(items, fn item -> item.id end)))
     end
 
-    assert Enum.take(report.items, -7) == settings_items(ctx, opts(ctx))
+    assert Enum.take(report.items, -8) == settings_items(ctx, opts(ctx))
   end
 
   test "the items that read the settings alone say an unreadable file", ctx do
@@ -767,7 +790,7 @@ defmodule FermixCore.Home.MoveReadinessTest do
       summary = MoveReadiness.summary_items(settings, true, "north-box", opts(ctx))
 
       assert Enum.map(summary, & &1.id) ==
-               ~w(stays_here whatsapp slack coding_agents cutover_gap serves_nothing service)
+               ~w(stays_here whatsapp slack coding_agents settings cutover_gap serves_nothing service)
 
       assert Enum.take(items, -length(summary)) == summary
     end

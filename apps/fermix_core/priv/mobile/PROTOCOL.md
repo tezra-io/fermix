@@ -1381,13 +1381,25 @@ computer's record; a phone sends none of it.
   writes it on the desktop's row when the row names no platform or another
   one; a phone's `hello` never moves its row's platform.
 - **What the primary takes.** A desktop's `hello_ack` carries
-  `caps.computer`, with `{"v":1,"offers":true,"link_path":true,"invoke":true}`
+  `caps.computer`, with
+  `{"v":1,"offers":true,"link_path":true,"invoke":true,"machine_settings":true}`
   among its keys from this primary: `v` is a positive integer, and `offers`,
   `link_path` and `invoke` (the five events of *Invocations*, and
   `invoke_restarted`), each a
   boolean when present, say whether the primary takes that event. A later
   primary may add keys, which a desktop ignores. A phone's `hello_ack`, and a
   primary's older than the record, carry no `computer`.
+- **One set of settings** (M97 §19, D28). `caps.computer.machine_settings:
+  true` in a desktop's `hello_ack` says the primary applies the rule that a
+  management setting's id names its machine (`computer` and `computer.<id>`
+  the computer's own, every other id the home's, the primary's own sandbox,
+  browser and coding approval included; the management protocol's *One set
+  of settings*), and the same key in a desktop's `hello`
+  (`hello.caps.computer.machine_settings: true`, absent from a phone's and
+  from an older desktop) says the desktop does. A desktop sends a primary
+  whose `hello_ack` does not say it none of the primary's machine settings,
+  and a primary refuses a sandbox value from a desktop whose `hello` did not
+  say it.
 - **Where it stands.** The primary leads: it updates on its own, and serves
   a computer up to two minor versions behind it. `caps.computer.standing`
   says where this computer stands, by the `app_version` its `hello` named,

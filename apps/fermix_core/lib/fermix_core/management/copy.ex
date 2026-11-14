@@ -131,14 +131,16 @@ defmodule FermixCore.Management.Copy do
                    webhooks_whatsapp webhooks_cue webhooks_tailnet own_server
                    own_server_tailscale review_note notice_computer_review
                    notice_server_sandbox computer_asks join_dialing join_waiting
-                   notice_computer_joined)a
+                   notice_computer_joined notice_computer_change)a
+  # The sandbox's modes a change from a computer can name (`Sandbox.Config`).
+  @sandbox_modes ~w(strict standard open)
   # The keys a screen does not draw as its own short words (the moduledoc).
   @unbounded_keys ~w(confirm_restore_here confirm_return_move confirm_forget
                      confirm_change_passphrase notice_ready notice_moved notice_backup_week
                      notice_server_backup_week notice_server_lapsed notice_restored
                      notice_return_ready notice_back notice_computer_review
-                     notice_server_sandbox notice_computer_joined own_server
-                     backup_failed_note backup_push)a
+                     notice_server_sandbox notice_computer_joined notice_computer_change
+                     own_server backup_failed_note backup_push)a
   # The most words a screen's own sentence says (R1).
   @word_bound 20
   # Each Details line's label, by its key.
@@ -250,6 +252,13 @@ defmodule FermixCore.Management.Copy do
     # The Always On pane's section of this computer's switches, as it is
     # titled.
     "This computer",
+    # The sandbox's modes and the coding pane's section, named as their
+    # settings show them (M97 D28: what a change from a computer set, and
+    # where the move's review says to allow coding agents on the server).
+    "Strict",
+    "Standard",
+    "Open",
+    "Coding agents",
     # GitHub's webhook form, named as GitHub labels it.
     "Add webhook",
     "Payload URL",
@@ -608,6 +617,13 @@ defmodule FermixCore.Management.Copy do
 
   def summary_sentence(:notice_computer_joined, %{name: name}),
     do: "A computer named #{name} joined your Fermix."
+
+  # The server's sandbox or coding approval changed from the computer `name`
+  # (M97 §19.5): `server` is `:this` on the server itself, `:yours` on a
+  # computer that knows no name for it, else the name it knows it by.
+  def summary_sentence(:notice_computer_change, %{name: name, change: change, server: server})
+      when is_binary(name),
+      do: computer_change(change, server, name)
 
   def summary_sentence(:notice_server_lapsed, _values),
     do:
@@ -1013,11 +1029,33 @@ defmodule FermixCore.Management.Copy do
   def summary_label(:deny_computer, _values), do: "Do not add it"
   def summary_label(:change_passphrase, _values), do: "Change"
 
+  def summary_label(:restart_server, %{name: name}) when is_binary(name) and name != "",
+    do: "Restart #{name}"
+
   def summary_label(:own_server, %{renew: true}), do: "Replace the code"
 
   def summary_label(:own_server, _values), do: "Use my own Linux server"
   def summary_label(:move_back, %{machine: machine}), do: "Move back to this #{machine}"
   def summary_label(:restore_here, %{machine: machine}), do: "Restore on this #{machine}"
+
+  # A change from a computer, in the words the sandbox's settings row and the
+  # coding pane use: the mode's own title, and whether agents may run there.
+  defp computer_change({:sandbox_mode, mode}, server, name) when mode in @sandbox_modes,
+    do: "#{possessive(server)} sandbox was set to #{String.capitalize(mode)} from #{name}."
+
+  defp computer_change({:harness_approved, true}, server, name),
+    do: "Coding agents were allowed to run on #{named(server)} from #{name}."
+
+  defp computer_change({:harness_approved, false}, server, name),
+    do: "Coding agents were turned off on #{named(server)} from #{name}."
+
+  defp possessive(:this), do: "This server's"
+  defp possessive(:yours), do: "Your server's"
+  defp possessive(name) when is_binary(name), do: name <> "'s"
+
+  defp named(:this), do: "this server"
+  defp named(:yours), do: "your server"
+  defp named(name) when is_binary(name), do: name
 
   # Six digits as a person reads them aloud: two groups of three.
   defp digits(<<first::binary-size(3), rest::binary-size(3)>>), do: first <> " " <> rest

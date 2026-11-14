@@ -3530,6 +3530,24 @@
     },
     {
       "method": "(schema)",
+      "field": "methods:home.restart",
+      "kind": "engine_only",
+      "why": "M97 D28c: home.restart is a linked computer's Restart <server>, which the server takes after its restart hold. It postdates the draft and is published under minimum version 2 with no protocol bump, rail-only and behind the Always On gate."
+    },
+    {
+      "method": "(schema)",
+      "field": "minimum_versions:home.restart=2",
+      "kind": "engine_only",
+      "why": "M97 D28c: home.restart is published with minimum version 2 in the whole-table minimum versions, as every v2 method is. The draft predates it; the addition is additive and needs no protocol bump."
+    },
+    {
+      "method": "hello",
+      "field": "capabilities.minimum_versions.home.restart",
+      "kind": "engine_only",
+      "why": "M97 D28c: hello publishes every method this daemon serves with its minimum version, home.restart included where Always On is offered. The draft predates it; a client ignores a method it does not know."
+    },
+    {
+      "method": "(schema)",
       "field": "methods:computer.join.start",
       "kind": "engine_only",
       "why": "M97 §3.1: computer.join.start joins this computer to a home that already runs, with the code Add a computer opened there. It postdates the draft and is published under minimum version 2 with no protocol bump, behind the Always On gate."

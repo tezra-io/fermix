@@ -154,6 +154,31 @@ defmodule FermixChannels.Mobile.DesktopSessionTest do
     assert_receive {:phone_standing, nil}
   end
 
+  # M97 §19.3: whether a desktop's hello says it applies the rule that a
+  # setting's id names its machine reaches its peer, which hands it to each
+  # forwarded call; a hello that says nothing is a desktop without it.
+  test "a desktop's hello says whether it applies the settings rule, and its peer is told",
+       ctx do
+    test = self()
+    supervisor = ctx.peer_supervisor
+
+    for {hello, rule?} <- [
+          {%{"caps" => %{"computer" => %{"machine_settings" => true}}}, true},
+          {%{}, false}
+        ] do
+      {_driver, _client} =
+        ready_desktop!(ctx, %{},
+          hello: hello,
+          start_desktop_peer: fn opts ->
+            send(test, {:peer_rule, Keyword.fetch!(opts, :machine_settings)})
+            Peer.start(supervisor, Keyword.put(opts, :families, %{}))
+          end
+        )
+
+      assert_receive {:peer_rule, ^rule?}
+    end
+  end
+
   # M97 §3.2: a computer names its system in its hello, kept on its row; a
   # phone's row keeps the platform its attestation proved.
   test "a desktop's hello names its system on its row; a phone's moves nothing", ctx do

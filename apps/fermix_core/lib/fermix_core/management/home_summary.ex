@@ -198,8 +198,20 @@ defmodule FermixCore.Management.HomeSummary do
   server whose 24 hours ran out,
   which must be set up again with a new code (`server_lapsed:<candidate>`,
   on the screen it leaves, while the code that enrolled it still names it;
-  never a desktop's candidate for a move back).
+  never a desktop's candidate for a move back), and the server's sandbox or
+  coding approval changed from one of its computers (M97 §19.5,
+  `computer_change:<at>`, for a week after, on the server and on every
+  linked computer, which reads it from its server's `home.status`).
   An app posts when the id changes.
+
+  **Restarting the server** (M97 D28c). A change made from a linked
+  computer to the server's settings waits for the server's next start, so
+  while the server's own `home.status` says its restart is required
+  (`primary_home.restart.required`), every screen of a linked computer's
+  `desktop` (its `on` and the problems of a server that answers) offers
+  `restart_server` first in `detail.alternatives`, labelled with the name
+  this computer knows its server by (`restart_server_action/1`); none where
+  it knows no name.
 
   `outcome` is what a surface that follows a step reads (review R6), so none
   keeps its own table of states: `running` while Always On is at something
@@ -227,6 +239,7 @@ defmodule FermixCore.Management.HomeSummary do
   alias FermixCore.Funnel
   alias FermixCore.Home.Candidate
   alias FermixCore.Home.Candidates
+  alias FermixCore.Home.ChangedFromComputer
   alias FermixCore.Home.DesktopLink
   alias FermixCore.Home.Join
   alias FermixCore.Home.Move
@@ -247,7 +260,7 @@ defmodule FermixCore.Management.HomeSummary do
                disk_full backup_old backup_failed not_ready return_failed)
   @actions ~w(cancel move_now try_again update back_up_now check_again own_server move_back
               restore_here review_offers add_computer approve_computer deny_computer
-              change_passphrase)
+              change_passphrase restart_server)
   @needs ~w(recovery_passphrase new_recovery_passphrase sas)
   @step_states ~w(done active yours pending)
 
@@ -258,6 +271,9 @@ defmodule FermixCore.Management.HomeSummary do
   @backup_week_s 7 * @day_s
   # A server tells that it left out its inherited settings this long after.
   @server_sandbox_s 7 * @day_s
+  # A change from a computer to the server's sandbox or coding approval is
+  # told this long after (M97 §19.5).
+  @computer_change_s 7 * @day_s
   # The states whose sentence `key/1` leaves out: on `on` and `problem` it
   # carries a figure that moves with the clock (a backup's age, a count of
   # days, how full a disk is), and their state, action and kind say every
@@ -310,7 +326,8 @@ defmodule FermixCore.Management.HomeSummary do
           optional(:standing) => FermixCore.Computers.Versions.standing() | nil,
           optional(:readable) => :ok | {:error, term()} | nil,
           optional(:offers_review) => boolean(),
-          optional(:move_progress) => MoveProgress.t() | nil
+          optional(:move_progress) => MoveProgress.t() | nil,
+          optional(:computer_change) => ChangedFromComputer.change() | nil
         }
   @type summary :: %{String.t() => term()}
 
@@ -380,6 +397,20 @@ defmodule FermixCore.Management.HomeSummary do
   def action_key(id, label, confirm, needs, target)
       when id in @actions and is_binary(label) and is_list(needs),
       do: digest([id, label, confirm, needs, target])
+
+  @doc """
+  The action record a linked computer's summary offers for its server's
+  restart (M97 D28c): `restart_server`, labelled "Restart <server_name>",
+  `server_name` the name this computer knows its server by
+  (`Home.Link.status/0`'s `primary.name`), with no needs, no confirm and its
+  `key` (`action_key/5`, acting on nothing else). The summary offers exactly
+  this record, first in `detail.alternatives`, while the server's own
+  `home.status` says its restart is required; a surface that draws the same
+  step elsewhere (Settings) presses it as `home.act` with this key.
+  """
+  @spec restart_server_action(String.t()) :: map()
+  def restart_server_action(server_name) when is_binary(server_name) and server_name != "",
+    do: record(action(:restart_server, %{name: server_name}), %{})
 
   @doc """
   Every action record `summary` offers, wherever it sits: its action, then
@@ -524,6 +555,7 @@ defmodule FermixCore.Management.HomeSummary do
       join: if(role == :device, do: Join.view(home)),
       screen: Map.get(status, :screen),
       server_sandbox: server_sandbox(home, role, reads),
+      computer_change: computer_change(role, status),
       move_progress: Keyword.get_lazy(opts, :move_progress, &MoveProgress.read/0)
     }
   end
@@ -863,8 +895,30 @@ defmodule FermixCore.Management.HomeSummary do
       &desktop_backup/1
     ]
 
-    Enum.find_value(checks, & &1.(facts)) || on(facts)
+    (Enum.find_value(checks, & &1.(facts)) || on(facts)) |> restartable(facts)
   end
+
+  # The server's restart a change from this computer waits for (M97 D28c):
+  # first beside whatever this screen offers, while the server's own
+  # `home.status` says its restart is required, under the name this computer
+  # knows it by; Settings offers the same step (`restart_server_action/1`).
+  defp restartable(view, %{primary_home: %{"restart" => %{"required" => true}}} = facts) do
+    case get_in(facts, [:link, :primary, :name]) do
+      name when is_binary(name) and name != "" ->
+        restart = action(:restart_server, %{name: name})
+
+        update_in(
+          view,
+          ["detail"],
+          &Map.update(&1, "alternatives", [restart], fn more -> [restart | more] end)
+        )
+
+      _no_name ->
+        view
+    end
+  end
+
+  defp restartable(view, _facts), do: view
 
   # No session with the server for ten minutes while this computer is awake:
   # what to check, and, where this computer can take the home back from its
@@ -1762,8 +1816,8 @@ defmodule FermixCore.Management.HomeSummary do
 
   defp occurrence(view, %{role: :primary, link: %{desktops: [_ | _]}} = facts),
     do:
-      week_occurrence(facts, :notice_server_backup_week) || sandbox_occurrence(facts) ||
-        joined_occurrence(view, facts)
+      week_occurrence(facts, :notice_server_backup_week) || change_occurrence(view, facts) ||
+        sandbox_occurrence(facts) || joined_occurrence(view, facts)
 
   defp occurrence(view, %{role: role} = facts) when role in [:primary, :device] do
     Enum.find_value(
@@ -1773,6 +1827,7 @@ defmodule FermixCore.Management.HomeSummary do
         &ready_occurrence/2,
         fn _view, facts -> week_occurrence(facts, :notice_backup_week) end,
         &moved_occurrence/2,
+        &change_occurrence/2,
         &restored_occurrence/2,
         &back_occurrence/2,
         &lapsed_occurrence/2,
@@ -1822,6 +1877,25 @@ defmodule FermixCore.Management.HomeSummary do
   end
 
   defp sandbox_occurrence(_facts), do: nil
+
+  # The server's sandbox or coding approval changed from a computer (M97
+  # §19.5): told for a week, once, on the server and on every linked
+  # computer, which names the server as it knows it.
+  defp change_occurrence(_view, %{computer_change: %{at: %DateTime{} = at} = change} = facts) do
+    if DateTime.diff(facts.now, at, :second) < @computer_change_s do
+      values = %{name: change.computer, change: {change.what, change.value}}
+
+      {"computer_change:" <> iso(at),
+       sentence(:notice_computer_change, facts, changed_on(values, facts))}
+    end
+  end
+
+  defp change_occurrence(_view, _facts), do: nil
+
+  # The server's words for itself; a linked computer's for its server, by
+  # its name where it knows one.
+  defp changed_on(values, %{role: :primary}), do: Map.put(values, :server, :this)
+  defp changed_on(values, facts), do: Map.put(values, :server, link_name(facts) || :yours)
 
   defp ready_occurrence(%{"state" => "ready"}, facts),
     do: {"ready:" <> target(facts)["candidate_id"], sentence(ready_notice(facts), facts)}
@@ -1945,12 +2019,23 @@ defmodule FermixCore.Management.HomeSummary do
   defp deadlines(%{role: :device} = facts) do
     since = backup_since(facts)
 
-    [link_deadline(facts), backup_deadline(since, facts), week_deadline(since, facts)]
+    [
+      link_deadline(facts),
+      backup_deadline(since, facts),
+      week_deadline(since, facts),
+      change_deadline(facts)
+    ]
   end
 
   defp deadlines(%{role: :primary, link: %{desktops: [_ | _]}} = facts) do
     since = backup_since(facts)
-    [backup_deadline(since, facts), week_deadline(since, facts), sandbox_deadline(facts)]
+
+    [
+      backup_deadline(since, facts),
+      week_deadline(since, facts),
+      sandbox_deadline(facts),
+      change_deadline(facts)
+    ]
   end
 
   defp deadlines(%{role: :primary} = facts), do: expiries(facts.candidates, facts)
@@ -1959,6 +2044,11 @@ defmodule FermixCore.Management.HomeSummary do
     do: ms_until(DateTime.add(at, @server_sandbox_s, :second), facts)
 
   defp sandbox_deadline(_facts), do: nil
+
+  defp change_deadline(%{computer_change: %{at: %DateTime{} = at}} = facts),
+    do: ms_until(DateTime.add(at, @computer_change_s, :second), facts)
+
+  defp change_deadline(_facts), do: nil
 
   # A held server is dropped at its expiry (`Home.Candidates`).
   defp expiries(candidates, facts),
@@ -2031,6 +2121,21 @@ defmodule FermixCore.Management.HomeSummary do
   end
 
   defp server_sandbox(_home, _role, _reads), do: nil
+
+  # The newest change from a computer to the server's sandbox or coding
+  # approval (M97 §19.5): on the server, what its `home.status` read
+  # (`Management.Home`); on a linked computer, its server's `home.status`,
+  # where a change this engine does not know is none.
+  defp computer_change(:primary, status), do: Map.get(status, :computer_change)
+
+  defp computer_change(:device, %{primary_home: %{"computer_change" => view}}) do
+    case ChangedFromComputer.from_view(view) do
+      {:ok, change} -> change
+      :error -> nil
+    end
+  end
+
+  defp computer_change(_role, _status), do: nil
 
   # The last review of the move, whatever its age: on the computer that moves.
   # One that cannot be read is logged once while it stays so.

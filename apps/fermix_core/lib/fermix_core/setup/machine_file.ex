@@ -3,9 +3,9 @@ defmodule FermixCore.Setup.MachineFile do
   `machine.toml`, beside `config.toml` in every home (M97 §4): the settings
   that describe the computer an engine runs on rather than the home. They are
   the sections only this machine configures
-  (`Management.Placement.device_sections/0`: its sandbox, computer use, the
-  accessory link, and what Fermix on its server may use on it,
-  `Computers.Switches`, whose `imessage` switch says this Mac carries
+  (`Management.Placement.machine_sections/0`, and `computer`: its sandbox,
+  computer use, the accessory link, and what Fermix on its server may use on
+  it, `Computers.Switches`, whose `imessage` switch says this Mac carries
   Messages), whole, and some keys of a home table: `[fermix_core.plugins]
   dev_local`, the dev plugin folder, which names this machine's own
   checkouts, and of `[fermix_core.computer_history]`, whose screen history
@@ -57,6 +57,18 @@ defmodule FermixCore.Setup.MachineFile do
   holds. A machine file without the table and a `config.toml` without the
   keys are left as they are.
 
+  **The browser's keys (M97 D28d).** Every key a person sets in
+  `[fermix_core.browser]` (`Browser.Config.config_keys/0`: the private hosts
+  it may open, how tasks run, the most open tabs, whether it may open the
+  app) is this machine's, so a server's browser and a computer's are each set
+  on their own machine, and no move or backup carries them. They move as the
+  coding agents' keys did, with `default_profile` as the table's marker,
+  written even at its default, `"fermix"`, which is how tasks run with no
+  setting at all (`Browser.Config.to_keyword/1`). A server with no machine
+  file starts from its default, its browser at the shipped defaults, and
+  leaves out the computer's; one whose machine file exists takes the keys in
+  force there, as it takes a sign-in folder.
+
   **Back to the home.** An engine of this milestone's stage 0 wrote
   `[fermix_channels.imessage]`, and the whole `[fermix_core.computer_history]`,
   into `machine.toml`. `homeward/2` says what one boot does about that,
@@ -70,6 +82,7 @@ defmodule FermixCore.Setup.MachineFile do
   nothing in `config.toml`.
   """
 
+  alias FermixCore.Browser.Config, as: BrowserConfig
   alias FermixCore.Harness.Config, as: HarnessConfig
   alias FermixCore.Home.Archive.ConfigText
 
@@ -81,7 +94,8 @@ defmodule FermixCore.Setup.MachineFile do
     "computer_history" => "fermix_core.computer_history",
     "accessories" => "fermix_channels.accessories",
     "computer" => "fermix_core.computer",
-    "harness_machine" => "fermix_core.harness"
+    "harness_machine" => "fermix_core.harness",
+    "browser" => "fermix_core.browser"
   }
   @tables ~w(sandbox fermix_core.computer_use fermix_channels.accessories fermix_core.computer)
   # Tables an earlier engine kept here that are the home's (`homeward/2`).
@@ -89,18 +103,26 @@ defmodule FermixCore.Setup.MachineFile do
   # The coding agents' keys that are this machine's (`Harness.Config`).
   @harness_keys for key <- HarnessConfig.machine_keys(),
                     do: {"fermix_core.harness", Atom.to_string(key)}
+  # Every settable browser key is this machine's (`Browser.Config`, D28d).
+  @browser_keys for key <- BrowserConfig.config_keys(),
+                    do: {"fermix_core.browser", Atom.to_string(key)}
   # The keys of a home table that are this machine's, as table and key.
   @keys [
     {"fermix_core.plugins", "dev_local"},
     {"fermix_core.computer_history", "enabled"},
     {"fermix_core.computer_history", "apps"}
-    | @harness_keys
+    | @harness_keys ++ @browser_keys
   ]
   # The tables whose machine keys an earlier machine file never held, each
   # with the key every machine file this engine writes sets there and that
   # key's value when nothing gives one: a machine file without the table was
-  # written before those keys were this machine's (`migration/3`).
-  @markers [{"fermix_core.harness", "approved", "false"}]
+  # written before those keys were this machine's (`migration/3`). Each
+  # value is what the engine does with the key unset, so writing it changes
+  # nothing (`Browser.Config.to_keyword/1` writes the browser's the same).
+  @markers [
+    {"fermix_core.harness", "approved", "false"},
+    {"fermix_core.browser", "default_profile", ~s("fermix")}
+  ]
   # A key of a home table that is this machine's own only with one value,
   # which is then both: copied here, never taken out of config.toml.
   @local_summarizer {"fermix_core.computer_history", "summarizer", "local"}
@@ -123,8 +145,9 @@ defmodule FermixCore.Setup.MachineFile do
   as it is), the new `config.toml` (nil likewise), the dotted names it removed
   from `config.toml`, those it copied into the new machine file and left in
   `config.toml` (`copied/1`), those it took from `config.toml` into a machine
-  file that exists (`generated`, the moduledoc's coding agents' keys), and
-  whether the machine file is an Always On server's own default.
+  file that exists (`generated`, the moduledoc's coding agents' and
+  browser's keys), and whether the machine file is an Always On server's own
+  default.
   """
   @type plan :: %{
           machine: String.t() | nil,
@@ -147,7 +170,10 @@ defmodule FermixCore.Setup.MachineFile do
   @spec server_sandbox_mode() :: :open
   def server_sandbox_mode, do: @server_sandbox_mode
 
-  @doc "The text of an Always On server's new machine file, coding agents not approved."
+  @doc """
+  The text of an Always On server's new machine file: coding agents not
+  approved, and its browser at the shipped defaults.
+  """
   @spec server_default() :: String.t()
   def server_default,
     do: with_markers(@header <> "\n\n[sandbox]\nmode = \"#{@server_sandbox_mode}\"\n")
@@ -261,8 +287,8 @@ defmodule FermixCore.Setup.MachineFile do
   @doc """
   The machine settings `config.toml`'s `text` holds, as a machine file, as
   written (comments included), with a local summarizer copied (`copied/1`)
-  and each marker table (the moduledoc's coding agents' keys); `""` when it
-  holds none. Keys of one table are one table here.
+  and each marker table (the moduledoc's coding agents' and browser's keys);
+  `""` when it holds none. Keys of one table are one table here.
   """
   @spec extract(String.t()) :: String.t()
   def extract(text) when is_binary(text) do

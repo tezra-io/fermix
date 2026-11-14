@@ -229,8 +229,15 @@ defmodule FermixChannels.Mobile.Session do
   )a
 
   # Which of a computer's own events this server takes (M97 §5.3), in a
-  # desktop's hello_ack.
-  @computer_caps %{"v" => 1, "offers" => true, "link_path" => true, "invoke" => true}
+  # desktop's hello_ack, and that it applies M97 §19.3's rule: a management
+  # setting's id names its machine, so it answers its own machine sections.
+  @computer_caps %{
+    "v" => 1,
+    "offers" => true,
+    "link_path" => true,
+    "invoke" => true,
+    "machine_settings" => true
+  }
 
   # A phone's one push registration, written whole (M99 §14): an APNs token
   # is this with its `push_token` set, a Web Push subscription all four.
@@ -1343,11 +1350,16 @@ defmodule FermixChannels.Mobile.Session do
     do: is_binary(key) and is_integer(version) and version >= Protocol.web_push_version()
 
   # A desktop's peer is the desktops', and its families know where the
-  # computer stands; a phone's runs its list channel alone. The version
+  # computer stands and whether its hello said it applies M97 §19.3's rule;
+  # a phone's runs its list channel alone. The version
   # window is a computer's (`Computers.Versions`): a phone, which its own
   # protocol versions govern, is served as one that stands current.
   defp peer_place(:desktop, state),
-    do: [registry: state.desktop_peers, standing: state.computer_standing]
+    do: [
+      registry: state.desktop_peers,
+      standing: state.computer_standing,
+      machine_settings: Map.get(state, :computer_machine_settings, false)
+    ]
 
   defp peer_place(:phone, state),
     do: [
@@ -1403,12 +1415,17 @@ defmodule FermixChannels.Mobile.Session do
 
   # Where a desktop's engine stands against this one, by the version its
   # hello names (`Computers.Versions`): its chat is refused past the window,
-  # by its peer's companion family. A phone has none.
+  # by its peer's companion family. A phone has none. Whether its hello says
+  # it applies M97 §19.3's rule rides beside it to its peer.
   defp put_standing(state, %{payload: payload}) do
     case session_kind(state) do
       :desktop ->
         standing = Versions.standing(payload["app_version"], server_engine_version(state))
-        Map.put(state, :computer_standing, standing)
+        rule? = get_in(payload, ["caps", "computer", "machine_settings"]) == true
+
+        state
+        |> Map.put(:computer_standing, standing)
+        |> Map.put(:computer_machine_settings, rule?)
 
       :phone ->
         state

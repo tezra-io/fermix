@@ -38,6 +38,7 @@ defmodule FermixCore.Application do
   alias FermixCore.Home.Move
   alias FermixCore.Home.Return
   alias FermixCore.Home.Role
+  alias FermixCore.Home.ServerRestart
   alias FermixCore.Home.Snapshot.Scheduler, as: SnapshotScheduler
   alias FermixCore.HostFacts
   alias FermixCore.Jobs.RunnerSupervisor, as: JobRunnerSupervisor
@@ -582,6 +583,9 @@ defmodule FermixCore.Application do
         # job family they start and before the socket and the setup page that
         # ask for them.
         ManagementAlwaysOn,
+        # The server's restart a linked computer asks for (`home.restart`,
+        # M97 D28c), which waits out work in progress there first.
+        ServerRestart,
         # Beside the job family it serves: a workspace discovery is a job, and
         # what it found is republished on the plugin row rather than in the job.
         ManagementPluginDiscovery,

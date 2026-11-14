@@ -179,3 +179,17 @@ server), run after the key rule like the others and starting no job, and
 Restore here's request, its job, the busy refusal and the ending are as
 before, so no modelled step changed. The comments' line numbers into both
 files point at the committed code.
+
+## Re-read for one set of settings after a move (M97 D28, 2026-11-13)
+
+Re-read for M97 D28, which stales the `always_on.ex` and `jobs.ex` pins.
+The act gains `restart_server` (Restart <server> on a linked computer),
+which sends the rail-only `home.restart` to the server, runs after the key
+rule like the others and starts no job; an answer lost to the server's own
+restart is `unconfirmed`, as a move's start is. In `jobs.ex`, `start_job`
+mints an id that names the computer on a computer linked to its server
+(`computer.job:<id>`), so that computer answers `job.get` and `job.cancel`
+of its own jobs; the id is opaque to the model. The serializer, the key
+rule, Restore here's request, its job, the busy refusal and the ending are
+as before, so no modelled step changed. The comments' line numbers into
+`always_on.ex` point at the committed code.

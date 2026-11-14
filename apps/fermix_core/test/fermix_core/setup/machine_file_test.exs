@@ -44,7 +44,8 @@ defmodule FermixCore.Setup.MachineFileTest do
               fermix_core.computer_history.apps)
 
   test "the machine sections are exactly the ones only this machine configures" do
-    assert Enum.sort(Map.keys(MachineFile.sections())) == Enum.sort(Placement.device_sections())
+    assert Enum.sort(Map.keys(MachineFile.sections())) ==
+             Enum.sort(["computer" | Placement.machine_sections()])
   end
 
   describe "strip/1 and extract/1" do
@@ -84,11 +85,15 @@ defmodule FermixCore.Setup.MachineFileTest do
 
       refute machine =~ "invented-notes"
       refute machine =~ "telegram"
-      # And the coding agents' table every machine file holds (M98 D5).
+      # And the coding agents' table every machine file holds (M98 D5), and
+      # the browser's (D28d).
       assert ConfigText.value(machine, "fermix_core.harness", "approved") == {:ok, "false"}
 
+      assert ConfigText.value(machine, "fermix_core.browser", "default_profile") ==
+               {:ok, ~s("fermix")}
+
       assert machine |> MachineFile.strip() |> elem(1) ==
-               @removed ++ ["fermix_core.harness.approved"]
+               @removed ++ ["fermix_core.harness.approved", "fermix_core.browser.default_profile"]
     end
 
     test "a file with no machine settings is left as it is and gives no machine file" do
@@ -697,6 +702,211 @@ defmodule FermixCore.Setup.MachineFileTest do
       assert plan.removed == @harness_removed
       assert plan.generated == []
       assert MachineFile.notice(plan) == {:info, @moved_sentence}
+    end
+  end
+
+  # M97 D28d: the browser's settings are this computer's own, every settable
+  # key of `[fermix_core.browser]`, so a server's browser and a computer's
+  # are each set on their own machine.
+  describe "the browser's keys" do
+    @browser_config """
+    [fermix_core.agent]
+    name = "Orchard"
+
+    [fermix_core.browser]
+    allowed_hosts = ["printer.invented"] # the printer on this desk
+    default_profile = "fermix_headless"
+    max_tabs = 4
+    launch_app = false
+    """
+
+    @browser_removed ~w(fermix_core.browser.allowed_hosts fermix_core.browser.default_profile
+                        fermix_core.browser.max_tabs fermix_core.browser.launch_app)
+
+    @browser_moved "This computer's own settings moved to machine.toml: " <>
+                     "fermix_core.browser.allowed_hosts, fermix_core.browser.default_profile, " <>
+                     "fermix_core.browser.max_tabs, fermix_core.browser.launch_app."
+
+    # An earlier engine of M97 wrote a machine file without the table.
+    @earlier_machine MachineFile.header() <>
+                       "\n\n[sandbox]\nmode = \"standard\"\n\n[fermix_core.harness]\napproved = false\n"
+
+    test "every key is this computer's: config.toml loses the table, the machine file takes it" do
+      {home, removed} = MachineFile.strip(@browser_config)
+
+      assert removed == @browser_removed
+      refute home =~ "[fermix_core.browser]"
+      refute home =~ "printer.invented"
+      assert ConfigText.value(home, "fermix_core.agent", "name") == {:ok, ~s("Orchard")}
+
+      machine = MachineFile.extract(@browser_config)
+
+      # Taken key by key, as the coding agents' keys are: each value as
+      # written, without its comment.
+      assert ConfigText.value(machine, "fermix_core.browser", "allowed_hosts") ==
+               {:ok, ~s(["printer.invented"])}
+
+      assert ConfigText.value(machine, "fermix_core.browser", "default_profile") ==
+               {:ok, ~s("fermix_headless")}
+
+      assert ConfigText.value(machine, "fermix_core.browser", "max_tabs") == {:ok, "4"}
+      assert ConfigText.value(machine, "fermix_core.browser", "launch_app") == {:ok, "false"}
+      assert length(String.split(machine, "[fermix_core.browser]")) == 2
+      refute machine =~ "Orchard"
+    end
+
+    # The marker: every machine file this engine writes holds the table, how
+    # tasks run written even at its default, which is what the browser does
+    # with no setting at all.
+    test "every machine file it writes holds the table, how tasks run at its default unless set" do
+      for text <- [MachineFile.extract(@old_config), MachineFile.server_default()] do
+        assert ConfigText.value(text, "fermix_core.browser", "default_profile") ==
+                 {:ok, ~s("fermix")}
+      end
+
+      assert %FermixCore.Browser.Config{}.default_profile == "fermix"
+
+      machine = MachineFile.extract(~s([fermix_core.browser]\nmax_tabs = 3\n))
+      assert ConfigText.value(machine, "fermix_core.browser", "max_tabs") == {:ok, "3"}
+
+      assert ConfigText.value(machine, "fermix_core.browser", "default_profile") ==
+               {:ok, ~s("fermix")}
+
+      assert length(String.split(machine, "[fermix_core.browser]")) == 2
+    end
+
+    test "an Always On server's default machine file holds the browser at its defaults" do
+      default = MachineFile.server_default()
+
+      assert ConfigText.value(default, "sandbox", "mode") == {:ok, ~s("open")}
+      assert ConfigText.value(default, "fermix_core.harness", "approved") == {:ok, "false"}
+
+      assert ConfigText.value(default, "fermix_core.browser", "default_profile") ==
+               {:ok, ~s("fermix")}
+
+      for key <- ~w(allowed_hosts max_tabs launch_app),
+          do: assert(ConfigText.value(default, "fermix_core.browser", key) == :absent)
+
+      # A boot of the server reads it as written: nothing more to move.
+      assert MachineFile.migration("", default, true).machine == nil
+    end
+
+    # Every home at its first start of this engine: its machine file has no
+    # browser table, and config.toml holds the keys in force.
+    test "a machine file without the table takes them from config.toml, written first" do
+      plan = MachineFile.migration(@browser_config, @earlier_machine, false)
+
+      assert plan.machine =~ ~s([sandbox]\nmode = "standard")
+      assert ConfigText.value(plan.machine, "fermix_core.harness", "approved") == {:ok, "false"}
+
+      assert ConfigText.value(plan.machine, "fermix_core.browser", "allowed_hosts") ==
+               {:ok, ~s(["printer.invented"])}
+
+      assert ConfigText.value(plan.machine, "fermix_core.browser", "default_profile") ==
+               {:ok, ~s("fermix_headless")}
+
+      assert ConfigText.value(plan.machine, "fermix_core.browser", "max_tabs") == {:ok, "4"}
+      assert ConfigText.value(plan.machine, "fermix_core.browser", "launch_app") == {:ok, "false"}
+      assert plan.config == elem(MachineFile.strip(@browser_config), 0)
+      assert plan.removed == @browser_removed
+      assert plan.generated == @browser_removed
+      refute plan.server_default?
+      assert MachineFile.notice(plan) == {:info, @browser_moved}
+    end
+
+    test "a computer with no machine file takes them, with the rest of its own settings" do
+      plan = MachineFile.migration(@browser_config, :absent, false)
+
+      assert ConfigText.value(plan.machine, "fermix_core.browser", "max_tabs") == {:ok, "4"}
+      assert ConfigText.value(plan.machine, "fermix_core.harness", "approved") == {:ok, "false"}
+      assert plan.config == elem(MachineFile.strip(@browser_config), 0)
+      assert plan.removed == @browser_removed
+      assert plan.generated == []
+      assert MachineFile.notice(plan) == {:info, @browser_moved}
+    end
+
+    # Stopped after the machine file was written and before config.toml was:
+    # the machine file holds the table now, so the next boot finishes the
+    # removal and keeps what the first one took.
+    test "a boot stopped after its first write is finished by the next, losing nothing" do
+      first = MachineFile.migration(@browser_config, @earlier_machine, false)
+      again = MachineFile.migration(@browser_config, first.machine, false)
+
+      assert again.machine == nil
+      assert again.generated == []
+      assert again.config == first.config
+      assert {:warning, sentence} = MachineFile.notice(again)
+      assert sentence =~ "so they were removed from it: fermix_core.browser.allowed_hosts"
+      assert MachineFile.migration(again.config, first.machine, false).config == nil
+    end
+
+    # After the move, a copy written into config.toml by hand is read by
+    # nothing: the machine file holds the table and wins.
+    test "a copy written into config.toml after the move is dropped and named, never taken" do
+      moved = MachineFile.migration(@browser_config, @earlier_machine, false)
+      edited = moved.config <> "\n[fermix_core.browser]\nmax_tabs = 9\n"
+
+      assert {_home, ["fermix_core.browser.max_tabs"]} = MachineFile.strip(edited)
+
+      plan = MachineFile.migration(edited, moved.machine, false)
+
+      assert plan.machine == nil
+      assert plan.generated == []
+      refute plan.config =~ "max_tabs"
+      refute plan.config =~ "[fermix_core.browser]"
+      assert ConfigText.value(plan.config, "fermix_core.agent", "name") == {:ok, ~s("Orchard")}
+
+      assert MachineFile.notice(plan) ==
+               MachineFile.dropped_notice(["fermix_core.browser.max_tabs"])
+    end
+
+    test "a machine file without the table, and none of the keys in config.toml, changes nothing" do
+      plan =
+        MachineFile.migration(
+          ~s([fermix_core.agent]\nname = "Orchard"\n),
+          @earlier_machine,
+          false
+        )
+
+      assert plan.machine == nil
+      assert plan.config == nil
+      assert plan.generated == []
+      assert MachineFile.notice(plan) == nil
+    end
+
+    # A server keeps the browser that was in force on it, as it keeps a
+    # sign-in folder: its machine file exists, so the keys are taken.
+    test "a server whose machine file has no table takes the keys in force there" do
+      plan = MachineFile.migration(@browser_config, @earlier_machine, true)
+
+      assert ConfigText.value(plan.machine, "fermix_core.browser", "max_tabs") == {:ok, "4"}
+      assert plan.generated == @browser_removed
+      refute plan.server_default?
+    end
+
+    # A server with no machine file takes none of the computer's settings,
+    # its browser's among them, and says so.
+    test "a server with no machine file starts from its default and names what it left out" do
+      plan = MachineFile.migration(@browser_config, :absent, true)
+
+      assert plan.machine == MachineFile.server_default()
+      assert plan.removed == @browser_removed
+      assert {:warning, sentence} = MachineFile.notice(plan)
+      assert sentence =~ "left out: fermix_core.browser.allowed_hosts"
+    end
+
+    test "join/2 takes every browser key from the machine file and none from config.toml" do
+      config = %{"fermix_core" => %{"browser" => %{"max_tabs" => 9, "allowed_hosts" => ["a"]}}}
+      machine = %{"fermix_core" => %{"browser" => %{"default_profile" => "fermix_visible"}}}
+
+      assert MachineFile.join(config, machine) == %{
+               "fermix_core" => %{"browser" => %{"default_profile" => "fermix_visible"}}
+             }
+
+      # A key that is not settable stays where it is written, for the loader
+      # to refuse by name.
+      config = %{"fermix_core" => %{"browser" => %{"action_timeout_ms" => 5}}}
+      assert MachineFile.join(config, %{}) == config
     end
   end
 end

@@ -609,22 +609,19 @@ it, never a second writer.
   is fetched from the primary and handed to the app as a file on this
   computer.
 - Settings and other Fermix-wide requests from the app go to the primary
-  too, recovery, enrollment and move included (snapshots, an enrollment
-  code, waiting servers, the move's readiness and start): after the move
-  the server holds them. What configures this computer is answered here:
-  Fermix's own status and lifecycle, its logs, diagnostics and Doctor, the
-  setup page, computer use, iMessage, the browser and capability
-  installers, and the settings sections sandbox, computer use, computer
-  history, accessories and This computer; iMessage's owner and guests:
-  the primary's.
+  too, recovery, enrollment and move included: after the move the server
+  holds them, its own sandbox, browser and coding agents included. Answered
+  here: Fermix's own status and lifecycle, its logs, diagnostics and Doctor,
+  the setup page, computer use, iMessage, its browser's installer, and its
+  own settings under This Mac (the `computers` reference, "Settings after a
+  move"); iMessage's owner and guests are the primary's.
 - Two answers are put together here: the home's status is this computer's
-  own (its role, its link to the primary, where the move went) with the
-  primary's own picture added (its recovery, its enrollment and candidates,
-  its move), and the list of settings sections is this computer's own with the
-  primary's others. The primary's part is asked within 5 seconds; without
-  it, this computer's part is still shown and a sentence says why. This
-  computer's own old snapshot status is a
-  retired copy and is not shown as the home's recovery.
+  own (its role, its link, where the move went) with the primary's own
+  picture added (its recovery, enrollment, candidates and move), and the
+  settings list is the primary's with this computer's own after it. The
+  primary's part is asked within 5 seconds; without it, this computer's
+  part is still shown and a sentence says why. This computer's own old
+  snapshot status is a retired copy, not the home's recovery.
 - Signing in (a provider, a plugin, an MCP server) from the app on this
   desktop runs on the primary, where the tokens live, and the browser page
   opens here. While it waits, this desktop listens on the same `127.0.0.1`

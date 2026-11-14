@@ -23,11 +23,14 @@ defmodule FermixCore.Management.ProtocolContractTest do
   alias FermixCore.ComputerUse.Seat
   alias FermixCore.Cues.Config, as: CuesConfig
   alias FermixCore.Home.Candidates, as: HomeCandidates
+  alias FermixCore.Home.ChangedFromComputer
   alias FermixCore.Home.DesktopLink
   alias FermixCore.Home.EnrollmentCode
   alias FermixCore.Home.Epoch
   alias FermixCore.Home.Join, as: HomeJoin
   alias FermixCore.Home.Move, as: HomeMove
+  alias FermixCore.Home.Moved
+  alias FermixCore.Home.ServerRestart
   alias FermixCore.Home.Snapshot
   alias FermixCore.Home.Snapshot.Recipient, as: SnapshotRecipient
   alias FermixCore.Home.Snapshot.Scheduler, as: SnapshotScheduler
@@ -63,6 +66,7 @@ defmodule FermixCore.Management.ProtocolContractTest do
   alias FermixCore.Memory.Repo.CuesSql
   alias FermixCore.Readiness
   alias FermixCore.Setup.ConfigStore
+  alias FermixCore.Setup.RestartState
   alias FermixTestSupport.AccessoryGoldens
   alias FermixTestSupport.CueFixtures
   alias FermixTestSupport.HomeSummaryGoldens
@@ -811,6 +815,21 @@ defmodule FermixCore.Management.ProtocolContractTest do
     assert named_fixture_result("home_act_own_server") == json(answer)
   end
 
+  # M97 D28c: the server's answer to a linked Mac's Restart <server>, and the
+  # Mac's answer to the step its screen offers, are the router's own.
+  test "the golden Restart <server> answers are the router's own" do
+    {"home.restart", params, opts} = restart_case()
+    assert {:ok, answer} = Router.route(request("home.restart", params), opts)
+    assert named_fixture_result("home_restart") == json(answer)
+
+    {params, opts} = restart_server_act_case()
+    assert {:ok, answer} = Router.route(request("home.act", params), opts)
+    assert named_fixture_result("home_act_restart_server") == json(answer)
+
+    restart = HomeSummary.restart_server_action(@golden_server)
+    assert hd(answer["summary"]["detail"]["alternatives"]) == restart
+  end
+
   # M97 §3.1, §7.5: Add a computer's code and the computer added are the
   # router's own answers, each to the step as the screen before it offers it.
   test "the golden Add a computer answers are the engine's own" do
@@ -1011,8 +1030,16 @@ defmodule FermixCore.Management.ProtocolContractTest do
       params: %{}
     }
 
+    # M97 §19: the server says it applies the rule, so its machine sections
+    # are listed under its name, and this computer's own follow as
+    # `computer` and `computer.<id>`.
     assert {:ok, composed} =
-             Router.route(sections, macos?: true, computer?: true, primary_forward: server)
+             Router.route(sections,
+               macos?: true,
+               computer?: true,
+               primary_forward: server,
+               linked_server: %{name: "garden-server", machine_settings: true}
+             )
 
     golden = named_fixture_result("settings_sections_computer")
     ids = fn result -> Enum.map(result["sections"], & &1["id"]) end
@@ -1021,7 +1048,14 @@ defmodule FermixCore.Management.ProtocolContractTest do
 
     assert fixture_rest == published_rest
     assert fixture_providers -- published_providers == []
-    assert List.last(fixture_rest) == "computer"
+
+    assert Enum.drop_while(fixture_rest, &(&1 != "computer")) ==
+             ~w(computer computer.sandbox computer.browser computer.computer_use
+                computer.computer_history computer.accessories)
+
+    assert Enum.reject(golden["sections"], &provider_section?(&1["id"])) ==
+             Enum.reject(composed["sections"], &provider_section?(&1["id"]))
+
     assert golden["primary_missing"] == composed["primary_missing"]
 
     snapshot =
@@ -1708,7 +1742,7 @@ defmodule FermixCore.Management.ProtocolContractTest do
       cues_cases() ++
       home_cases() ++
       accessories_cases() ++
-      [act_case(), computers_case()] ++
+      [act_case(), computers_case(), restart_case()] ++
       join_cases()
   end
 
@@ -1829,6 +1863,9 @@ defmodule FermixCore.Management.ProtocolContractTest do
           version: "1.2.3",
           # The app engine, which starts again by itself after a move.
           restarts_itself: true,
+          # This engine's own restart (M97 D28), in place of the suite's
+          # daemon-wide `RestartState`, which other tests move.
+          engine_restart: fn -> %{"required" => false, "reasons" => []} end,
           disk_usage: fn _home -> {:ok, %{used: 0.42, nearly_full: false}} end,
           link_status: fn ->
             %{
@@ -1988,6 +2025,89 @@ defmodule FermixCore.Management.ProtocolContractTest do
     end
 
     [{"home_act_add_computer", add}, {"home_act_approve_computer", approve}]
+  end
+
+  # M97 D28c: the server's `home.restart` from a linked Mac's forward, with
+  # nothing holding it; the stopper stands in.
+  defp restart_case do
+    name = :"contract_server_restart_#{System.unique_integer([:positive])}"
+    start_supervised!({ServerRestart, name: name, timer: fn _m, _d -> make_ref() end}, id: name)
+
+    seams = [
+      server_restart: name,
+      restart_hold: fn -> nil end,
+      restarts_itself: true,
+      restart: fn -> :ok end
+    ]
+
+    {"home.restart", %{}, [actor: {:desktop, @desktop_id}, operation_opts: [home: seams]]}
+  end
+
+  # The linked Mac of the `home_status_on_restart` golden pressing Restart
+  # <server>, which its server answers with the work it waits for.
+  defp restart_server_act_case do
+    home = SafeRm.make_tmp_dir!("contract_restart_server")
+    on_exit(fn -> SafeRm.rm_rf!(home) end)
+    :ok = Epoch.write(home, 4)
+    :ok = DesktopLink.write(home, golden_desktop_link())
+    :ok = Moved.write(home, %{epoch: 4, moved_at: ~U[2031-05-01 09:00:00Z], to: @golden_server})
+    unique = System.unique_integer([:positive])
+    serializer = :"contract_restart_server_#{unique}"
+    start_supervised!({AlwaysOn, name: serializer}, id: serializer)
+    server = server_changed()
+
+    waits = %{
+      "when" => "after_work",
+      "wait_s" => 540,
+      "sentence" =>
+        "Fermix on your server restarts once the work it runs on a computer ends, or in " <>
+          "ten minutes at most."
+    }
+
+    forward = fn
+      %{method: "home.status"}, _opts -> {:ok, server}
+      %{method: "home.restart", params: %{}}, _opts -> {:ok, waits}
+    end
+
+    seams = [
+      home: home,
+      engine_role: %{role: :device, primary: @golden_server},
+      profile: "general",
+      now: @golden_now,
+      host_os: :macos,
+      version: "1.2.3",
+      config: [],
+      scheduler: nil,
+      link_status: fn -> %{primary: connected_server(), desktops: [], enrollment: nil} end,
+      engine_restart: fn -> %{"required" => false, "reasons" => []} end,
+      restarts_itself: true,
+      move_progress: nil,
+      computer_switches: Switches.only([:files_and_shell], reviewed: true),
+      screen: fn -> nil end,
+      jobs: jobs(),
+      serializer: serializer,
+      primary_forward: forward
+    ]
+
+    summary = seams |> ManagementHome.summary_facts() |> HomeSummary.summary()
+    %{"key" => key} = Enum.find(HomeSummary.offered(summary), &(&1["id"] == "restart_server"))
+    {%{"action" => "restart_server", "key" => key}, [operation_opts: [always_on: seams]]}
+  end
+
+  # The link of the Mac the `on` goldens draw, to the golden server.
+  defp golden_desktop_link do
+    %{
+      device_id: @desktop_id,
+      key: :keyring,
+      primary: %{
+        name: @golden_server,
+        gateway_pk: :binary.copy(<<3>>, 32),
+        node_id: String.duplicate("c4", 32),
+        relays: [%{"url" => "https://eu1.relay.invalid/", "quic_port" => 7842}],
+        relays_rev: String.duplicate("a1", 8)
+      },
+      epoch: 5
+    }
   end
 
   # Use my own Linux server pressed on the first screen: the window it opens
@@ -2295,7 +2415,86 @@ defmodule FermixCore.Management.ProtocolContractTest do
       {"home_status_on_review", on_review(server_computers(@desktop_id))},
       {"home_status_ready_keeps_on", ready_keeps_on()},
       {"home_status_on_screen", Map.put(golden_row("home_status_on"), "screen", held_screen())}
-    ]
+    ] ++ restart_status_goldens()
+  end
+
+  # M97 D28 (§19.5, §19.6): the server whose sandbox a computer set to Open,
+  # its restart waiting for its next start, and the linked Mac of the `on`
+  # golden reading it, with its own restart and profile: Restart <server>
+  # first beside its steps, and the change told, naming the server.
+  defp restart_status_goldens do
+    server = server_changed()
+    [{"home_status_server_changed", server}, {"home_status_on_restart", on_restart(server)}]
+  end
+
+  defp golden_change,
+    do: %{
+      at: ~U[2031-05-04 11:30:00Z],
+      computer: "loft-linux",
+      what: :sandbox_mode,
+      value: "open"
+    }
+
+  # The restart a sandbox mode set from a computer waits for, in the
+  # engine's own words for the section.
+  defp sandbox_restart do
+    {:sandbox, said} = List.keyfind(RestartState.boot_bound_sections(), :sandbox, 0)
+    %{"required" => true, "reasons" => [%{"section" => "sandbox", "sentence" => said}]}
+  end
+
+  defp server_changed do
+    server = server_computers(@desktop_id)
+    desktops = server["desktops"] |> Enum.map(&desktop_fact/1)
+
+    summary =
+      golden_summary(
+        link: %{primary: nil, desktops: desktops, enrollment: nil},
+        snapshots: server["snapshots"],
+        disk: server["disk"],
+        computer_change: golden_change()
+      )
+
+    %{server | "summary" => summary}
+    |> Map.merge(%{
+      "restart" => sandbox_restart(),
+      "profile" => "general",
+      "computer_change" => ChangedFromComputer.view(golden_change())
+    })
+  end
+
+  defp desktop_fact(%{"device_id" => id, "name" => name, "connected" => connected}),
+    do: %{device_id: id, name: name, connected: connected}
+
+  defp on_restart(server) do
+    on = golden_row("home_status_on")
+    moved = %{to: @golden_server, moved_at: ~U[2031-05-01 09:00:00Z], epoch: 4}
+
+    summary =
+      golden_summary(
+        role: :device,
+        linked: true,
+        moved: moved,
+        link: %{primary: connected_server(), desktops: [], enrollment: nil},
+        snapshots: on["snapshots"],
+        primary_home: server,
+        copies_bytes: 3 * 48_211,
+        copies: desktop_copies(),
+        computer_change: golden_change()
+      )
+
+    ManagementHome.picture(%{
+      role: :device,
+      epoch: 4,
+      moved: moved,
+      snapshots: on["snapshots"],
+      summary: summary,
+      version: "1.2.3",
+      primary: connected_server(),
+      primary_home: server,
+      restart: %{"required" => false, "reasons" => []},
+      profile: "general",
+      computer_change: nil
+    })
   end
 
   # M97 §7.4: the linked Mac of the `on` golden while Fermix on its server

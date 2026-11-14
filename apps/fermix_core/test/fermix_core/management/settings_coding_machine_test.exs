@@ -12,6 +12,7 @@ defmodule FermixCore.Management.SettingsCodingMachineTest do
   alias FermixCore.Management.Placement
   alias FermixCore.Management.Router
   alias FermixCore.Management.Settings
+  alias FermixCore.Management.Settings.CodingMachine
   alias FermixCore.Setup.ConfigStore
   alias FermixCore.Setup.MachineFile
   alias FermixCore.Setup.RestartState
@@ -103,18 +104,31 @@ defmodule FermixCore.Management.SettingsCodingMachineTest do
     refute File.read!(Path.join(ctx.home, "config.toml")) =~ "approved"
   end
 
-  test "the section is this machine's: answered here, and refused when forwarded" do
+  # M97 §19.9 (D28, revising M98 D5): after a move the approval is the
+  # server's, a plain id a linked computer sends to it; the server's own
+  # words name it "this server".
+  test "the section is the server's after a move: sent to it, and served there" do
     params = %{"section" => "harness_machine", "values" => %{"harness_approved" => true}}
 
-    assert Placement.place("settings.get", %{"section" => "harness_machine"}) == :device
-    assert Placement.place("settings.apply", params) == :device
-    refute Placement.served_forwarded?("settings.apply", params)
+    assert Placement.place("settings.get", %{"section" => "harness_machine"}) == :primary
+    assert Placement.place("settings.apply", params) == :primary
+    assert Placement.served_forwarded?("settings.apply", params)
+    assert Placement.machine_write?("settings.apply", params)
+
+    assert [%{id: "harness_machine", title: "This server"}] =
+             CodingMachine.sections(macos?: false, computer?: false, server_primary?: true)
+
+    assert [%{"label" => "Allow coding agents to run on this server"}] =
+             CodingMachine.rows("harness_machine", %{}, macos?: false, server_primary?: true)
   end
 
-  # G1a, end to end through the composed inventory: the server's section is
-  # its own machine's, so the linked Mac leaves it out, and publishes none.
-  test "a linked computer's inventory holds no coding approval, its own or its server's" do
-    server = fn request, _opts -> Router.route(request, macos?: false, computer?: false) end
+  # End to end through the composed inventory: the server's approval is
+  # listed under its name where it applies the rule, and left out where it
+  # does not; the linked Mac publishes none of its own.
+  test "a linked computer lists its server's coding approval, and none of its own" do
+    server = fn request, _opts ->
+      Router.route(request, macos?: false, computer?: false, server_primary?: true)
+    end
 
     request = %{
       request_id: "req-1",
@@ -126,12 +140,28 @@ defmodule FermixCore.Management.SettingsCodingMachineTest do
     assert {:ok, %{"sections" => served}} = server.(request, [])
     assert Enum.any?(served, &(&1["id"] == "harness_machine"))
 
-    assert {:ok, %{"sections" => composed}} =
-             Router.route(request, macos?: true, computer?: true, primary_forward: server)
+    for takes? <- [true, false] do
+      assert {:ok, %{"sections" => composed}} =
+               Router.route(request,
+                 macos?: true,
+                 computer?: true,
+                 primary_forward: server,
+                 linked_server: %{name: "garden server", machine_settings: takes?}
+               )
 
-    ids = Enum.map(composed, & &1["id"])
-    refute "harness_machine" in ids
-    assert "harness" in ids
+      coding = Enum.filter(composed, &(&1["pane"] == "coding"))
+
+      assert coding ==
+               if(takes?,
+                 do: [
+                   %{"id" => "harness_machine", "pane" => "coding", "title" => "garden server"},
+                   %{"id" => "harness", "pane" => "coding", "title" => "Coding agents"}
+                 ],
+                 else: [%{"id" => "harness", "pane" => "coding", "title" => "Coding agents"}]
+               )
+
+      refute Enum.any?(composed, &(&1["id"] == "computer.harness_machine"))
+    end
   end
 
   defp with_harness(harness),

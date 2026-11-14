@@ -1015,8 +1015,20 @@ defmodule Fermix.CLI.DaemonTest do
     ]
     @other_writes [
       {"secret.set", %{"id" => "openai_api_key", "value" => "sk-Larch-0412"}, :secret_set},
-      {"secret.set", %{"id" => "env:HERON_TOKEN", "value" => "Heron-9081"}, :secret_set},
       {"settings.apply", %{"section" => "assistant", "values" => %{"agent_name" => "Wren"}},
+       :settings_apply}
+    ]
+    # A machine's own settings, the server's or this computer's, and a
+    # sandbox value of either (M97 §19.3).
+    @machine_writes [
+      {"secret.set", %{"id" => "env:HERON_TOKEN", "value" => "Heron-9081"}, :secret_set},
+      {"secret.clear", %{"id" => "env:HERON_TOKEN"}, :secret_clear},
+      {"settings.apply", %{"section" => "sandbox", "values" => %{"sandbox_mode" => "open"}},
+       :settings_apply},
+      {"settings.apply",
+       %{"section" => "harness_machine", "values" => %{"harness_approved" => true}},
+       :settings_apply},
+      {"settings.apply", %{"section" => "browser", "values" => %{"browser_max_tabs" => 4}},
        :settings_apply}
     ]
 
@@ -1078,6 +1090,40 @@ defmodule Fermix.CLI.DaemonTest do
       refute_received {:written, _write, _target}
       assert golden["capability"] == "home"
       refute golden["sentence"] =~ "passphrase"
+    end
+
+    # M97 §19.3, §19.11: a process the daemon started (the server's own
+    # commands run on this computer among them) never asks this engine to
+    # change a machine's own settings, so it never widens the server from
+    # here; the owner's own app still does.
+    test "a machine's own settings and sandbox values are refused to a process the daemon " <>
+           "started" do
+      golden = golden_error_details("unavailable_machine_owner_decision")
+
+      socket_path =
+        start_peer_daemon(
+          management_opts: recording_writers(),
+          daemon_os_pid: ParentProcess.os_pid()
+        )
+
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          for {method, params, _write} <- @machine_writes do
+            assert {:error, {:management_error, "unavailable", _message, ^golden}} =
+                     Client.request_v1(method, params,
+                       socket_path: socket_path,
+                       timeout: @reply_ms
+                     ),
+                   inspect({method, params})
+          end
+        end)
+
+      assert log =~ "only the owner may"
+      refute_received {:written, _write, _target}
+      assert golden["capability"] == "settings"
+
+      owner = start_peer_daemon(management_opts: recording_writers())
+      assert_writes_reached(owner, @machine_writes)
     end
 
     test "every other secret and section stays open to a process the daemon started" do
@@ -1385,7 +1431,7 @@ defmodule Fermix.CLI.DaemonTest do
   # socket refuses each by name whoever asks, before any owner placement.
   describe "the rail-only steps" do
     @rail_only ~w(home.move.readiness home.move.start home.enroll.open home.enroll.withdraw
-                  home.snapshots.run)
+                  home.snapshots.run home.restart)
 
     test "a rail-only step is refused on the socket by name, the owner's peer included", %{
       socket_path: socket_path

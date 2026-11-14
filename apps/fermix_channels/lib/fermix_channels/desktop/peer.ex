@@ -74,7 +74,8 @@ defmodule FermixChannels.Desktop.Peer do
   @typedoc """
   What a family is told about the desktop it serves: `standing` is where the
   computer stands against this server (`FermixCore.Computers.Versions`, M97
-  §3.4), as its session's hello found it.
+  §3.4), as its session's hello found it, and `machine_settings` whether that
+  hello said the computer applies §19.3's rule (`caps.computer`).
   """
   @type context :: %{
           device_id: String.t(),
@@ -82,6 +83,7 @@ defmodule FermixChannels.Desktop.Peer do
           peer: pid(),
           registry: GenServer.server(),
           standing: FermixCore.Computers.Versions.standing(),
+          machine_settings: boolean(),
           options: keyword()
         }
 
@@ -108,7 +110,8 @@ defmodule FermixChannels.Desktop.Peer do
   Starts the peer of a desktop session under `supervisor`. `opts`:
   `:device_id`, `:session` (the session's process), `:standing` (where the
   desktop stands, `Computers.Versions`: required, never assumed), and
-  optionally `:registry` and `:families` (a test's own map of families, each a module or
+  optionally `:machine_settings` (whether its hello said it applies M97
+  §19.3's rule; false when not said), `:registry` and `:families` (a test's own map of families, each a module or
   `{module, options}`, the options reaching the family's `init/1` as the
   context's `options`).
   """
@@ -251,6 +254,7 @@ defmodule FermixChannels.Desktop.Peer do
       registry: Keyword.get(opts, :registry, @registry),
       open_bytes_budget: Keyword.get(opts, :open_bytes_budget, @open_bytes_budget),
       standing: standing!(opts),
+      machine_settings: Keyword.get(opts, :machine_settings, false) == true,
       families: %{},
       open: %{}
     }
@@ -285,11 +289,16 @@ defmodule FermixChannels.Desktop.Peer do
     end
   end
 
+  # The older peer may end by itself while it is stopped: its session ended
+  # as this newer one replaced it, so it stops `:normal` first. Gone either
+  # way, as a stop finds it gone; only a stop that ran out of time leaves it
+  # running, and that still fails the newer peer's start.
   defp stop_older(older) do
     GenServer.stop(older, :replaced, @replace_timeout_ms)
   catch
     :exit, :noproc -> :ok
     :exit, {:noproc, _call} -> :ok
+    :exit, {reason, {GenServer, :stop, _args}} when reason != :timeout -> :ok
   end
 
   defp init_families(families, state) do
@@ -298,7 +307,8 @@ defmodule FermixChannels.Desktop.Peer do
       session: state.session,
       peer: self(),
       registry: state.registry,
-      standing: state.standing
+      standing: state.standing,
+      machine_settings: state.machine_settings
     }
 
     Enum.reduce_while(families, {:ok, %{}}, fn {family, entry}, {:ok, acc} ->

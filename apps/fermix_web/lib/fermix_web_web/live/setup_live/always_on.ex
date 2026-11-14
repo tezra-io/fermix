@@ -175,6 +175,8 @@ defmodule FermixWebWeb.SetupLive.AlwaysOn do
   # Each tab of the page by the management request its controls make, so the
   # one placement table (`Management.Placement`) decides which engine serves
   # it. A tab missing here fails loud rather than being served by default.
+  # The page's sandbox is this computer's own (M97 §19.7: the page sends
+  # nothing to the server), so it names this computer's id for it.
   @tab_requests %{
     "provider" => {"settings.apply", "providers.openai"},
     "realtime" => {"settings.apply", "realtime"},
@@ -183,7 +185,7 @@ defmodule FermixWebWeb.SetupLive.AlwaysOn do
     "plugins" => {"plugins.list", nil},
     "search" => {"settings.apply", "web_search"},
     "media" => {"settings.apply", "generate_image"},
-    "sandbox" => {"settings.apply", "sandbox"},
+    "sandbox" => {"settings.apply", "computer.sandbox"},
     "coding" => {"settings.apply", "harness"},
     "memory" => {"settings.apply", "memory"},
     "personalization" => {"settings.apply", "personalization"},
@@ -209,8 +211,10 @@ defmodule FermixWebWeb.SetupLive.AlwaysOn do
   defp place({method, nil}), do: Placement.place(method, %{})
   defp place({method, section}), do: Placement.place(method, %{"section" => section})
 
-  # An owner may have no Fermix app (a Homebrew or Linux install), so neither
-  # names one; the server's own setup page is out of reach on most servers.
+  # An owner may have no Fermix app on this computer (a Homebrew or Linux
+  # install), so the notice names none; a tab of the server's says where its
+  # settings change, any computer's app (M97 §19.7): the server's own setup
+  # page is out of reach on most servers.
   @doc "The notice a device-role page leads with, or nil off the device role."
   @spec device_notice(Role.record()) :: String.t() | nil
   def device_notice(%{role: :device} = record) do
@@ -223,7 +227,9 @@ defmodule FermixWebWeb.SetupLive.AlwaysOn do
   @doc "The sentence a tab the primary serves shows in the device role."
   @spec unavailable_sentence(Role.record()) :: String.t()
   def unavailable_sentence(%{role: :device} = record),
-    do: "These settings are Fermix-wide, so they live on #{server_words(record)}."
+    do:
+      "These settings are Fermix-wide, so they live on #{server_words(record)}. Change them " <>
+        "in the Fermix app on any of your computers."
 
   defp server_words(%{primary: name}) when is_binary(name) and name != "",
     do: "your server, #{name}"

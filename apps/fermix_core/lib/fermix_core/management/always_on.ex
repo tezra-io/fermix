@@ -10,7 +10,8 @@ defmodule FermixCore.Management.AlwaysOn do
   shown with (the systems it takes and until when it works, in the owner's
   zone), and `tailscale` the optional step that also joins the server to the
   owner's tailnet, `{label, sentence, command, url}`, folded under `label`
-  with its docs page; `move_now` and `try_again`: `{move_id}`; otherwise
+  with its docs page; `move_now` and `try_again`: `{move_id}`;
+  `restart_server`: the server's `{when, wait_s, sentence}`; otherwise
   null).
 
   **One rule for "the owner saw this".** Acts run one at a time per engine,
@@ -93,6 +94,11 @@ defmodule FermixCore.Management.AlwaysOn do
       not its own deny it, and the code is spent.
     * `cancel` on a computer joining a home (M97 §3.1): the join ends and
       this computer is its own home again (`Home.Join.cancel/2`).
+    * `restart_server` (M97 D28c), offered on a linked computer while its
+      server's restart is required: sent as the rail-only `home.restart`,
+      which the server takes after its restart hold
+      (`Home.ServerRestart`); `result` is its answer, `{when, wait_s,
+      sentence}`.
     * `restore_here` (design §8), offered once the server went silent and
       pressed once the owner confirmed they deleted or stopped it: the
       newest copy of the server's snapshots this desktop keeps that the
@@ -162,7 +168,8 @@ defmodule FermixCore.Management.AlwaysOn do
 
   @capability "home"
   @acts ~w(cancel move_now try_again back_up_now check_again own_server move_back restore_here
-           review_offers add_computer approve_computer deny_computer change_passphrase)
+           review_offers add_computer approve_computer deny_computer change_passphrase
+           restart_server)
   @opened ~w(update)
   # Every client allows `home.act` this long: a review sent to the server
   # takes up to 60 s.
@@ -344,6 +351,8 @@ defmodule FermixCore.Management.AlwaysOn do
   defp step(%{action: "back_up_now"}, _seen, opts),
     do: on_server("home.snapshots.run", %{}, fn -> Home.snapshots_run(opts) end, opts)
 
+  defp step(%{action: "restart_server"}, _seen, opts), do: restart_server(opts)
+
   defp step(%{action: "check_again"}, seen, opts) do
     id = candidate_id(HomeSummary.target(seen.facts))
 
@@ -460,6 +469,21 @@ defmodule FermixCore.Management.AlwaysOn do
     case Keyword.fetch(opts, :primary_forward) do
       {:ok, forward} -> forward.(server_request(method, params), [])
       :error -> local.()
+    end
+  end
+
+  # Restart <server> (M97 D28c): only a linked computer's summary offers it,
+  # so the step is always sent over the link, and the server's answer (now,
+  # or once its computers' work ends) is the result.
+  defp restart_server(opts) do
+    forward = Keyword.fetch!(opts, :primary_forward)
+
+    case forward.(server_request("home.restart", %{}), []) do
+      {:ok, %{"when" => _when, "sentence" => _said} = answer} ->
+        {:ok, Map.take(answer, ["when", "wait_s", "sentence"])}
+
+      {:error, _code, _details} = refused ->
+        refused
     end
   end
 

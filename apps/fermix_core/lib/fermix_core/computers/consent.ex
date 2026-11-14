@@ -9,7 +9,8 @@ defmodule FermixCore.Computers.Consent do
   consent is its recorder's own setting (`decided/0`).
 
   **A move.** The computer the home moves from keeps what it had: files and
-  commands, in the sandbox mode it already has; the browser; and the screen,
+  commands, in this computer's own sandbox ("files and commands, in this
+  Mac's sandbox (Standard)", M97 §19.8); the browser; and the screen,
   Messages and computer history when they were on here before the move
   (their own settings). The move's review shows it as its own block
   (`keep_on_block/2`): the sentence, one line each with whether it stays
@@ -111,7 +112,7 @@ defmodule FermixCore.Computers.Consent do
     os = os(opts)
     mode = sandbox_mode(opts)
     machine = machine(os)
-    lines = for decision <- lines(os), do: line(decision, decision in keep, mode)
+    lines = for decision <- lines(os), do: line(decision, decision in keep, {mode, machine})
 
     %{
       sentence:
@@ -264,14 +265,17 @@ defmodule FermixCore.Computers.Consent do
   end
 
   # Its offers' own words: "files and commands", "the browser"; files and
-  # commands with the sandbox mode they run in.
-  defp line(decision, on, mode),
-    do: %{offer: decision, label: label(decision, offers_label(decision), mode), on: on}
+  # commands with the sandbox they run in, this machine's own (M97 §19.8).
+  defp line(decision, on, sandbox),
+    do: %{offer: decision, label: label(decision, offers_label(decision), sandbox), on: on}
 
   defp offers_label(decision), do: Enum.map_join(offers(decision), " and ", & &1.label())
 
-  defp label(:files_and_shell, label, mode), do: "#{label} (#{mode})"
-  defp label(_decision, label, _mode), do: label
+  defp label(:files_and_shell, label, {mode, machine}),
+    do:
+      "#{label}, in this #{machine}'s sandbox (#{mode |> Atom.to_string() |> String.capitalize()})"
+
+  defp label(_decision, label, _sandbox), do: label
 
   # The history line sets the recorder first; the switches, written after,
   # mark the decision written (`FermixChannels.Home.MoveWorker` resumes on

@@ -5,6 +5,7 @@ defmodule FermixCore.Management.HomeTest do
   alias FermixCore.Cues.Config, as: CuesConfig
   alias FermixCore.Home.Candidate
   alias FermixCore.Home.Candidates
+  alias FermixCore.Home.ChangedFromComputer
   alias FermixCore.Home.DesktopLink
   alias FermixCore.Home.EnrollmentCode
   alias FermixCore.Home.Epoch
@@ -12,7 +13,9 @@ defmodule FermixCore.Management.HomeTest do
   alias FermixCore.Home.Moved
   alias FermixCore.Home.Readable
   alias FermixCore.Home.Releases
+  alias FermixCore.Home.RestartHold
   alias FermixCore.Home.Return
+  alias FermixCore.Home.ServerRestart
   alias FermixCore.Home.Snapshot.Capture
   alias FermixCore.Home.Snapshot.Recipient
   alias FermixCore.Home.Snapshot.Scheduler
@@ -903,6 +906,173 @@ defmodule FermixCore.Management.HomeTest do
     end
   end
 
+  # M97 D28 (§19.5, §19.6): every engine says its own restart and keychain
+  # profile, so a linked computer's top-level ones are its own and its
+  # server's sit in `primary_home`; the server says a change from a computer,
+  # which each linked computer's summary tells naming the server.
+  describe "home.status after one set of settings" do
+    @required %{
+      "required" => true,
+      "reasons" => [
+        %{"section" => "sandbox", "sentence" => "The sandbox changes at the next start."}
+      ]
+    }
+    @clear %{"required" => false, "reasons" => []}
+
+    test "every engine says its own restart and its keychain profile", %{home: home} do
+      :ok = Moved.write(home, %{epoch: 4, moved_at: @at, to: "invented-vm"})
+
+      assert {:ok, %{"restart" => @required, "profile" => "invented-work"}} =
+               route(
+                 "home.status",
+                 %{},
+                 opts(home, engine_restart: fn -> @required end, profile: "invented-work")
+               )
+
+      server_part = %{
+        "role" => "primary",
+        "version" => "9.9.9",
+        "snapshots" => %{"targets" => []},
+        "restart" => @required,
+        "profile" => "general"
+      }
+
+      :ok = DesktopLink.write(home, desktop_link())
+
+      assert {:ok, status} =
+               route(
+                 "home.status",
+                 %{},
+                 opts(home,
+                   engine_role: @device,
+                   link_status: link(primary: primary(nil)),
+                   engine_restart: fn -> @clear end,
+                   profile: "invented-mac"
+                 )
+                 |> Keyword.put(:primary_forward, fn _request, _opts -> {:ok, server_part} end)
+               )
+
+      assert {status["restart"], status["profile"]} == {@clear, "invented-mac"}
+      assert status["primary_home"]["restart"] == @required
+
+      assert %{"id" => "restart_server"} =
+               Enum.find(HomeSummary.offered(status["summary"]), &(&1["id"] == "restart_server"))
+    end
+
+    test "the server says a change from a computer, and each linked computer tells it",
+         %{home: home} do
+      assert {:ok, %{"computer_change" => nil}} = route("home.status", %{}, opts(home))
+
+      change = %{
+        at: ~U[2031-05-04 11:30:00Z],
+        computer: "loft-linux",
+        what: :sandbox_mode,
+        value: "open"
+      }
+
+      :ok = ChangedFromComputer.record(home, change, status_changed: fn -> :ok end)
+
+      assert {:ok, status} =
+               route(
+                 "home.status",
+                 %{},
+                 opts(home, link_status: link(desktops: [desktop_row()]))
+               )
+
+      assert status["computer_change"] == ChangedFromComputer.view(change)
+
+      assert status["summary"]["notice"] == %{
+               "id" => "computer_change:2031-05-04T11:30:00Z",
+               "sentence" => "This server's sandbox was set to Open from loft-linux."
+             }
+
+      # A backup since the move, so the move itself is told no more.
+      backed_up = %{"label" => "S3", "last_verified" => %{"at" => "2031-05-04T11:00:00Z"}}
+
+      server_part = %{
+        "role" => "primary",
+        "version" => "9.9.9",
+        "snapshots" => %{"targets" => [backed_up]},
+        "computer_change" => status["computer_change"]
+      }
+
+      :ok = DesktopLink.write(home, desktop_link())
+      :ok = Moved.write(home, %{epoch: 4, moved_at: ~U[2031-05-01 09:00:00Z], to: "invented-vm"})
+
+      assert {:ok, linked} =
+               route(
+                 "home.status",
+                 %{},
+                 opts(home, engine_role: @device, link_status: link(primary: primary(nil)))
+                 |> Keyword.put(:primary_forward, fn _request, _opts -> {:ok, server_part} end)
+               )
+
+      assert linked["computer_change"] == nil
+
+      assert linked["summary"]["notice"]["sentence"] ==
+               "invented-vm's sandbox was set to Open from loft-linux."
+    end
+  end
+
+  # M97 D28c (§19.6): a linked computer's Restart <server> reaches the server
+  # as the rail-only `home.restart`, which restarts after its hold.
+  describe "home.restart" do
+    setup %{home: home} do
+      test = self()
+      name = :"home_restart_#{System.unique_integer([:positive])}"
+      start_supervised!({ServerRestart, name: name, timer: fn _message, _delay -> make_ref() end})
+
+      seams = [
+        server_restart: name,
+        restart_hold: fn -> nil end,
+        restarts_itself: true,
+        restart: fn ->
+          send(test, :restarted)
+          :ok
+        end
+      ]
+
+      %{seams: seams, opts: opts(home, seams)}
+    end
+
+    test "answers a desktop's forward and restarts after answering", ctx do
+      assert {:ok, %{"when" => "now", "wait_s" => 0, "sentence" => _said}} =
+               route("home.restart", %{}, forwarded(ctx.opts))
+
+      assert_received :restarted
+    end
+
+    test "is refused on daemon.sock by name, and takes no params", ctx do
+      assert {:error, :unavailable, %{"method" => "home.restart", "capability" => "home"}} =
+               route("home.restart", %{}, ctx.opts)
+
+      assert {:error, :invalid_params, %{"field" => "now"}} =
+               route("home.restart", %{"now" => true}, forwarded(ctx.opts))
+
+      refute_received :restarted
+    end
+
+    test "refuses during a move, and waits for the work on a computer", ctx do
+      moving = fn -> RestartHold.view("streaming", [], @at) end
+
+      assert {:error, :unavailable, %{"sentence" => "A move is under way" <> _rest}} =
+               route(
+                 "home.restart",
+                 %{},
+                 forwarded(opts(ctx.home, Keyword.put(ctx.seams, :restart_hold, moving)))
+               )
+
+      # The hold as `home.status` reads it: a command still running there.
+      work = fn -> [%{started_at: DateTime.add(@at, -60, :second)}] end
+      waiting = opts(ctx.home, Keyword.delete(ctx.seams, :restart_hold) ++ [computer_work: work])
+
+      assert {:ok, %{"when" => "after_work", "wait_s" => 540}} =
+               route("home.restart", %{}, forwarded(waiting))
+
+      refute_received :restarted
+    end
+  end
+
   describe "home.snapshots.run" do
     test "starts one, and a second while it runs is busy", %{home: home, recipient: recipient} do
       config = [recipient: recipient, s3_bucket: "invented-bucket"]
@@ -1200,6 +1370,10 @@ defmodule FermixCore.Management.HomeTest do
   end
 
   defp disk(used), do: fn _home -> {:ok, %{used: used, nearly_full: used >= 0.85}} end
+
+  # A desktop of the server, as the rail lists it.
+  defp desktop_row,
+    do: %{device_id: "6f1e2d3c-4b5a-4968-8778-695a4b3c2d1e", name: "studio-mac", connected: true}
 
   # The rail's facts, as the `link_status` seam answers them.
   defp link(overrides) do

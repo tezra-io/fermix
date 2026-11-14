@@ -5,10 +5,31 @@ defmodule FermixCore.Management.Placement do
   After its home moved, a desktop's engine runs in the device role and its
   app keeps speaking only the local `daemon.sock`. A request about this
   machine is **device-class** and answered here: the daemon's own handshake,
-  its lifecycle, logs, diagnostics and Doctor, the setup page's session and
-  detection, computer use, iMessage, an accessory wired to it (M91), the
-  browser and capability installers, and `settings.get` or `settings.apply`
-  for a section that configures only this machine. Everything else is **primary-class**: it configures or reads
+  its lifecycle, logs, diagnostics and Doctor, the setup page's session,
+  computer use, iMessage, an accessory wired to it (M91), the browser's
+  installer and the installer of a capability that runs here (computer use's
+  helper, Messages'), detection of what is this machine's, and every
+  settings section and secret of this computer's own.
+
+  **One rule for settings (M97 §19.3, D28).** The id names the machine: a
+  section or secret whose id is `computer` or begins `computer.` is this
+  computer's (`computer_id?/1`) and answered here, `settings.get`,
+  `settings.apply`, `settings.reload` (by its `section`), `secret.set` and
+  `secret.clear` alike; every other id is the home's, which after a move is
+  the server, its own machine sections (`machine_sections/0`: its sandbox,
+  browser and coding agents) included. One id names one machine, for the read
+  and for the write, and the computer decides by the id before it asks the
+  server anything. A server that does not say it applies the rule
+  (`caps.computer.machine_settings` in its `hello_ack`) is asked for none of
+  its machine settings (`server_machine_request?/2`, `older_server/1`), and a
+  server refuses a sandbox value from a computer whose `hello` did not say
+  it (`older_computer/0`). After a move the notetaker, the local
+  speech-to-text and the coding agents run on the server, so their installers
+  and detection are the server's too. A job is answered by the engine that
+  started it: a linked computer's job ids begin `computer.`, so `job.get` and
+  `job.cancel` of one are answered here.
+
+  Everything else is **primary-class**: it configures or reads
   the Fermix that lives on the primary, so a linked device
   (`FermixCore.Home.DesktopLink.linked?/2`) forwards it over the rail
   (`FermixCore.Home.Link`), and a device with no link refuses it as stage 1
@@ -31,8 +52,8 @@ defmodule FermixCore.Management.Placement do
   **Rail-only** (`rail_only?/1`, Always On setup §3.5): the server's steps a
   linked desktop's `home.act` sends (`home.move.readiness`,
   `home.move.start`, `home.enroll.open`, `home.enroll.withdraw`,
-  `home.enroll.approve`, `home.enroll.deny`, `home.snapshots.run`) are
-  served only to a desktop's forward (actor
+  `home.enroll.approve`, `home.enroll.deny`, `home.snapshots.run`,
+  `home.restart`) are served only to a desktop's forward (actor
   `{:desktop, _}`) and
   refused on `daemon.sock` by name (`rail_only_refusal/1`): there, `home.act`
   takes the step.
@@ -41,7 +62,10 @@ defmodule FermixCore.Management.Placement do
   `settings.sections`. A linked device answers them itself and adds the
   primary's own answer, asked within `composed_deadline_ms/0`, or the
   sentence that says why it is missing; the primary answers a forwarded one as
-  its own. The one table is this module's; the daemon's dispatch and the
+  its own. Two are **decorated** (`decorated?/1`): `setup.state.get` and
+  `overview.get` are the server's and forwarded, and a linked device adds the
+  step that restarts the server to the restart state they report. The one
+  table is this module's; the daemon's dispatch and the
   primary's refusal of a forwarded device-class request both read it.
 
   The primary answers a forwarded request as `daemon.sock` would, with the
@@ -57,16 +81,17 @@ defmodule FermixCore.Management.Placement do
   stand though its answer was lost (`home.move.start`: the primary restarts
   into the move right after answering) is answered `unconfirmed` when the
   answer does not arrive (`unconfirmed/2`), never as a failure: the caller
-  reads what happened from `home.status`.
+  reads what happened from `home.status`. `home.restart` (Restart <server>,
+  M97 D28c) is the other: the server restarts right after it answers.
   """
 
   alias FermixCore.Management.Copy
   alias FermixCore.Management.Protocol
 
-  # `coding_agents.check`: the sign-in marks of this machine's own agents (M98).
+  # The browser's installer installs on this machine, whose browser the
+  # server's requests drive here (D28d).
   @device_methods ~w(
-    hello diagnostics.build logs.query setup.session.create setup.detect coding_agents.check
-    browser.install.start capabilities.install.start
+    hello diagnostics.build logs.query setup.session.create browser.install.start
     home.status settings.sections home.act
     computer.join.start computer.join.cancel computer.disconnect
   )
@@ -78,7 +103,7 @@ defmodule FermixCore.Management.Placement do
   # a device never opens: one with no link refuses them as retired.
   @database_families ~w(cues.)
   @rail_only_methods ~w(home.move.readiness home.move.start home.enroll.open home.enroll.withdraw
-                        home.enroll.approve home.enroll.deny home.snapshots.run)
+                        home.enroll.approve home.enroll.deny home.snapshots.run home.restart)
   @rail_only_sentence "Always On takes this step itself: send home.act with the action the " <>
                         "summary offers."
   # Answered on this machine with the primary's own answer added (M75: a
@@ -89,19 +114,44 @@ defmodule FermixCore.Management.Placement do
   # arrives.
   @composed_deadline_ms 5_000
 
-  # The settings sections that configure only this machine: the sandbox its
-  # commands run in, computer use of this screen, this machine's part of its
-  # screen history (whether it records, which apps, whether it makes its own
-  # notes; the home's summarizer route and grants stay in the home's
-  # config.toml with no row, M97 §4), the accessory link to this Mac's USB
-  # ports, and what Fermix on its server may use on it (M97 §7.2), which the
-  # server can never write. iMessage's owner and guests are the home's (M97
-  # §4); who Fermix may write to is confirmed on the Mac that carries Messages
-  # (`imessage.policy.confirm`). Whether coding agents may run on this machine
-  # is its own too (M98 D5, `harness_machine`), published only where the coding
-  # rail runs: a linked computer shows neither its own nor its server's.
-  @device_sections ~w(sandbox computer_use computer_history accessories computer harness_machine)
-  @section_methods ~w(settings.get settings.apply)
+  # The one rule for settings and secrets (M97 §19.3, D28): the id names the
+  # machine. A section or a secret whose id is `computer` or begins
+  # `computer.` is this computer's, answered here; every other id is the
+  # home's, which after a move is the server, its own machine sections
+  # included. A dot, since `computer_use` and `computer_history` are plain ids
+  # that already begin `computer_`. `settings.reload` names the section an
+  # outside edit was refused for, so a computer clears its own here.
+  @computer_id "computer"
+  @computer_prefix "computer."
+  @section_methods ~w(settings.get settings.apply settings.reload)
+  @secret_methods ~w(secret.set secret.clear)
+  # A job is answered by the engine that started it: a linked computer's own
+  # ids name it (`computer.job:<id>`, `Management.Jobs`).
+  @job_methods ~w(job.get job.cancel)
+  # The sections that describe a machine rather than the home: the sandbox its
+  # commands run in, its browser (D28d), whether coding agents may run on it
+  # (M98 D5), computer use of its screen, its part of the screen history (M97
+  # §4), the accessory link to a Mac's USB ports. They name the machine in
+  # their titles, and a write of one is an owner decision. `computer` (what
+  # Fermix on the server may use on this computer, §7.2) is this computer's
+  # by the rule itself.
+  @machine_sections ~w(sandbox browser harness_machine computer_use computer_history accessories)
+  # A sandbox value, the server's (`env:`) or this computer's (`computer.env:`).
+  @env_prefix "env:"
+  # An installer installs on the machine that runs its feature: after a move
+  # the notetaker and the local speech-to-text run on the server; computer
+  # use's helper and Messages' run on this computer.
+  @home_install_targets ~w(meetbot local_stt)
+  # What `setup.detect` probes for the home (the coding agents the server runs,
+  # the provider sign-ins it imports, a local model server, the notetaker); a
+  # request for only these is the server's, any other is this machine's.
+  @home_detect_targets ~w(claude_code codex_cli ollama harness_vendors meetbot)
+  # Forwarded, and answered with the step that restarts the server added
+  # (`Fermix.CLI.Daemon`): the restart state they report is the server's.
+  @decorated_methods ~w(setup.state.get overview.get)
+  @older_server_sentence " runs an older Fermix, which takes its own sandbox and coding " <>
+                           "settings only on the server. It updates on its own."
+  @older_computer_sentence "Update Fermix on this computer to change its sandbox values."
 
   @device_class_sentence "This request configures the computer it came from, so the " <>
                            "server does not answer it."
@@ -125,8 +175,9 @@ defmodule FermixCore.Management.Placement do
     "home.move.start" => @home_walk_deadline_ms
   }
   # Requests whose effect may stand though their answer was lost: the move's
-  # start restarts the primary into the move right after it answers.
-  @unconfirmed_methods ~w(home.move.start)
+  # start restarts the primary into the move right after it answers, and
+  # Restart <server> (M97 D28c) restarts it right after it answers too.
+  @unconfirmed_methods ~w(home.move.start home.restart)
 
   @typedoc "Which engine answers a request."
   @type place :: :device | :primary
@@ -137,10 +188,127 @@ defmodule FermixCore.Management.Placement do
     cond do
       method in @device_methods -> :device
       Enum.any?(@device_families, &String.starts_with?(method, &1)) -> :device
-      method in @section_methods and params["section"] in @device_sections -> :device
-      true -> :primary
+      true -> by_params(method, params)
     end
   end
+
+  # The methods placed by what they name: a section, a secret or a job by its
+  # id, an install by its target, a detection by its targets.
+  defp by_params(method, params) when method in @section_methods, do: by_id(params["section"])
+  defp by_params(method, params) when method in @secret_methods, do: by_id(params["id"])
+  defp by_params(method, params) when method in @job_methods, do: by_id(params["job_id"])
+  defp by_params("capabilities.install.start", params), do: by_install(params["target"])
+  defp by_params("setup.detect", params), do: by_detect(params["targets"])
+  defp by_params(_method, _params), do: :primary
+
+  defp by_id(id), do: if(computer_id?(id), do: :device, else: :primary)
+  defp by_install(target), do: if(target in @home_install_targets, do: :primary, else: :device)
+
+  defp by_detect([_ | _] = targets),
+    do: if(Enum.all?(targets, &(&1 in @home_detect_targets)), do: :primary, else: :device)
+
+  defp by_detect(_targets), do: :device
+
+  @doc """
+  Whether a settings section or secret `id` is this computer's: `computer`,
+  or one that begins `computer.` (§19.3).
+  """
+  @spec computer_id?(term()) :: boolean()
+  def computer_id?(@computer_id), do: true
+  def computer_id?(@computer_prefix <> rest), do: rest != ""
+  def computer_id?(_id), do: false
+
+  @doc """
+  The plain id a computer's own id names here: `computer.sandbox` is this
+  computer's `sandbox`, `computer.env:LEDGER_TOKEN` its `env:LEDGER_TOKEN`;
+  `computer` is itself.
+  """
+  @spec plain_id(String.t()) :: String.t()
+  def plain_id(@computer_id), do: @computer_id
+  def plain_id(@computer_prefix <> rest) when rest != "", do: rest
+
+  @doc "The id this computer publishes its own `plain` id under: `plain_id/1`'s inverse."
+  @spec computer_id(String.t()) :: String.t()
+  def computer_id(@computer_id), do: @computer_id
+  def computer_id(plain) when is_binary(plain) and plain != "", do: @computer_prefix <> plain
+
+  @doc "The sections that describe a machine rather than the home."
+  @spec machine_sections() :: [String.t()]
+  def machine_sections, do: @machine_sections
+
+  @doc "Whether the plain section `id` describes a machine."
+  @spec machine_section?(term()) :: boolean()
+  def machine_section?(id), do: id in @machine_sections
+
+  @doc """
+  Whether `method` with `params` writes a machine's own settings, the
+  server's or this computer's: a write of a machine section or of
+  `computer` and `computer.<id>`, or a sandbox value set or cleared
+  (`env:<NAME>`, `computer.env:<NAME>`). On `daemon.sock` each is an owner
+  decision (`Fermix.CLI.Daemon`).
+  """
+  @spec machine_write?(String.t(), map()) :: boolean()
+  def machine_write?("settings.apply", %{"section" => section}) when is_binary(section),
+    do: computer_id?(section) or machine_section?(section)
+
+  def machine_write?(method, %{"id" => id}) when method in @secret_methods and is_binary(id),
+    do: sandbox_value?(id)
+
+  def machine_write?(_method, _params), do: false
+
+  defp sandbox_value?(@env_prefix <> _name), do: true
+  defp sandbox_value?(@computer_prefix <> @env_prefix <> _name), do: true
+  defp sandbox_value?(_id), do: false
+
+  @doc """
+  Whether the server answers `method` with `params` only where it applies
+  §19.3's rule (`caps.computer.machine_settings`): a plain machine section,
+  read or written, or a sandbox value of the server's (`env:`). A server
+  without the rule refuses them; a computer asks it for none
+  (`older_server/1`).
+  """
+  @spec server_machine_request?(String.t(), map()) :: boolean()
+  def server_machine_request?(method, %{"section" => section}) when method in @section_methods,
+    do: machine_section?(section)
+
+  def server_machine_request?(method, %{"id" => @env_prefix <> _name})
+      when method in @secret_methods,
+      do: true
+
+  def server_machine_request?(_method, _params), do: false
+
+  @doc """
+  A linked computer's answer to a request for its server's machine settings
+  while the server runs a Fermix without §19.3's rule: `unavailable`, naming
+  the server when its name is known.
+  """
+  @spec older_server(String.t() | nil) :: Protocol.route_result()
+  def older_server(name) when is_binary(name) or is_nil(name),
+    do:
+      {:error, :unavailable,
+       %{
+         "capability" => "settings",
+         "sentence" => (name || "Your server") <> @older_server_sentence
+       }}
+
+  @doc """
+  The server's refusal of a sandbox value (`env:`) a computer without §19.3's
+  rule sent: such a computer answers its own machine sections itself, so the
+  one it sends is a value typed in its own Sandbox pane, which is not the
+  server's.
+  """
+  @spec older_computer() :: Protocol.route_result()
+  def older_computer,
+    do:
+      {:error, :unavailable,
+       %{"capability" => "settings", "sentence" => @older_computer_sentence}}
+
+  @doc """
+  Whether a linked computer forwards `method` and adds to the server's answer
+  the step that restarts the server (`setup.state.get`, `overview.get`).
+  """
+  @spec decorated?(String.t()) :: boolean()
+  def decorated?(method) when is_binary(method), do: method in @decorated_methods
 
   @doc """
   Whether `method` is composed: answered on this machine, which adds the
@@ -232,6 +400,11 @@ defmodule FermixCore.Management.Placement do
       "once the server answers again, and starting it again never starts a second move."
   end
 
+  defp unconfirmed_sentence("home.restart", name) do
+    "#{server(name)} was asked to restart and did not confirm it in time. Always On shows " <>
+      "how it stands once the server is back."
+  end
+
   defp server(name) when is_binary(name), do: "The server #{name}"
   defp server(nil), do: "The server"
 
@@ -261,10 +434,6 @@ defmodule FermixCore.Management.Placement do
   @spec device_methods() :: [String.t()]
   def device_methods,
     do: Enum.filter(Protocol.methods(), &(place(&1, %{}) == :device))
-
-  @doc "The settings sections that configure only this machine."
-  @spec device_sections() :: [String.t()]
-  def device_sections, do: @device_sections
 
   @doc """
   The sentence a person is shown while the primary cannot be reached,

@@ -835,6 +835,24 @@ defmodule FermixChannels.Mobile.ProtocolContractTest do
       assert decoded? == platform in ~w(macos linux), platform
     end
 
+    # M97 §19.3: a desktop's hello says it applies the rule that a setting's
+    # id names its machine; a later desktop may name more, which is ignored.
+    assert hello["caps"]["computer"]["machine_settings"] == true
+
+    for {caps, taken?} <- [
+          {%{"computer" => %{"machine_settings" => true}}, true},
+          {%{"computer" => %{"machine_settings" => false, "later" => 1}}, true},
+          {%{}, true},
+          {%{"computer" => %{"machine_settings" => "yes"}}, false},
+          {%{"computer" => "yes"}, false},
+          {"yes", false}
+        ] do
+      header = Map.put(hello, "caps", caps)
+      decoded? = match?({:ok, _event}, Protocol.decode_client_frame(frame(header)))
+      assert decoded? == (client_errors(header, schema) == []), inspect(caps)
+      assert decoded? == taken?, inspect(caps)
+    end
+
     [ack] = Enum.filter(server_headers(), &get_in(&1, ["caps", "computer"]))
 
     assert ack["caps"]["computer"] == %{
@@ -842,6 +860,7 @@ defmodule FermixChannels.Mobile.ProtocolContractTest do
              "offers" => true,
              "link_path" => true,
              "invoke" => true,
+             "machine_settings" => true,
              "standing" => "behind",
              "versions" => %{"engine" => "4.12.3", "companion" => [6, 7], "management" => [1, 2]}
            }
@@ -860,6 +879,7 @@ defmodule FermixChannels.Mobile.ProtocolContractTest do
       %{"v" => "1"},
       %{"offers" => true},
       %{"v" => 1, "link_path" => "on"},
+      %{"v" => 1, "machine_settings" => "on"},
       %{"v" => 1, "standing" => "stale"},
       %{"v" => 1, "versions" => Map.delete(versions, "engine")},
       %{"v" => 1, "versions" => %{versions | "companion" => [7]}},

@@ -33,7 +33,7 @@ defmodule Fermix.CLI.SettingsCommand.Args do
           | {:secret_set, String.t(), flags()}
           | {:secret_clear, String.t(), flags()}
           | {:primary, String.t() | nil, flags()}
-          | {:reload, flags()}
+          | {:reload, String.t() | nil, flags()}
           | {:usage, String.t()}
           | {:secret_in_argv, :set | :secret_set, String.t()}
 
@@ -142,7 +142,13 @@ defmodule Fermix.CLI.SettingsCommand.Args do
   defp command(["primary", provider], flags, []) when provider != "",
     do: {:primary, provider, flags}
 
-  defp command(["reload"], flags, []), do: {:reload, flags}
+  defp command(["reload"], flags, []), do: {:reload, nil, flags}
+
+  # The section an outside edit was refused for names the machine whose files
+  # are read again (M97 §19.3): `computer.sandbox` is this computer's.
+  defp command(["reload", section], flags, []) when section != "",
+    do: {:reload, section, flags}
+
   defp command(_positionals, _flags, []), do: {:usage, "unknown or incomplete subcommand"}
 
   defp restrict_flags({:usage, _reason} = usage), do: usage

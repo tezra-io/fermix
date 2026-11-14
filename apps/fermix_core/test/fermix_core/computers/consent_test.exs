@@ -41,7 +41,7 @@ defmodule FermixCore.Computers.ConsentTest do
     assert block.warning =~ "sandbox open, a server that is taken over can read and change"
 
     assert Enum.map(block.lines, &{&1.offer, &1.label, &1.on}) == [
-             {:files_and_shell, "files and commands (open)", true},
+             {:files_and_shell, "files and commands, in this Mac's sandbox (Open)", true},
              {:browser, "the browser", true},
              {:computer_use, "your screen", true},
              {:imessage, "Messages", true},
@@ -58,7 +58,7 @@ defmodule FermixCore.Computers.ConsentTest do
     assert block.sentence ==
              "Tick what Fermix on your server may still use on this computer after the move."
 
-    assert hd(block.lines).label == "files and commands (strict)"
+    assert hd(block.lines).label == "files and commands, in this computer's sandbox (Strict)"
   end
 
   # M97 §8.2: a Mac's block, which has a history line, says where a ticked

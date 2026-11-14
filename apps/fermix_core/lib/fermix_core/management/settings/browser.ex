@@ -15,6 +15,12 @@ defmodule FermixCore.Management.Settings.Browser do
   keeps (`max_tabs`), and the private hosts it may open (`allowed_hosts`).
   None is boot-bound: a call reads the section when it runs, and a browser
   already running keeps its tab cap until it next starts.
+
+  The section describes a machine (`Management.Placement`'s machine
+  sections, M97 D28d): its keys are this machine's own, in `machine.toml`,
+  so after a move `browser` is the server's browser, for the server's own
+  tasks, and a linked computer publishes its own as `computer.browser`, the
+  one the server's requests drive there.
   """
 
   alias FermixCore.Browser.ChromeLauncher

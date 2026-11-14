@@ -767,9 +767,14 @@ defmodule FermixCore.Setup.ConfigStoreTest do
 
       assert :ok = ConfigStore.save_snapshot(loaded)
       assert {:ok, reloaded} = ConfigStore.load_runtime_config(resolve_secrets: false)
-      # A save writes this computer's coding approval as it is, off (M98 D5).
+      # A save writes this computer's coding approval as it is, off (M98 D5),
+      # and its browser's marker key at its default (M97 D28d).
       assert loaded.fermix_core[:harness] == []
-      assert reloaded == put_in(loaded, [:fermix_core, :harness], approved: false)
+
+      assert reloaded ==
+               loaded
+               |> put_in([:fermix_core, :harness], approved: false)
+               |> put_in([:fermix_core, :browser], default_profile: "fermix")
     end
   end
 
@@ -2626,7 +2631,7 @@ defmodule FermixCore.Setup.ConfigStoreTest do
 
     assert :ok = ConfigStore.save_snapshot(snapshot)
 
-    contents = File.read!(Path.join(tmp_home, "config.toml"))
+    contents = File.read!(Path.join(tmp_home, "machine.toml"))
     assert contents =~ "[fermix_core.browser]"
     assert contents =~ ~s(allowed_hosts = ["printer.local", "build.internal"])
 
@@ -2655,7 +2660,7 @@ defmodule FermixCore.Setup.ConfigStoreTest do
 
     assert :ok = ConfigStore.save_snapshot(snapshot)
 
-    contents = File.read!(Path.join(tmp_home, "config.toml"))
+    contents = File.read!(Path.join(tmp_home, "machine.toml"))
     assert contents =~ "launch_app = false"
 
     assert {:ok, loaded} = ConfigStore.load_runtime_config()
@@ -2680,7 +2685,7 @@ defmodule FermixCore.Setup.ConfigStoreTest do
 
     assert :ok = ConfigStore.save_snapshot(snapshot)
 
-    contents = File.read!(Path.join(tmp_home, "config.toml"))
+    contents = File.read!(Path.join(tmp_home, "machine.toml"))
     assert contents =~ ~s(default_profile = "fermix_headless")
     assert contents =~ "max_tabs = 4"
 

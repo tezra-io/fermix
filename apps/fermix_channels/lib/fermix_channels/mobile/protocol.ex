@@ -685,10 +685,31 @@ defmodule FermixChannels.Mobile.Protocol do
          :ok <- nonnegative_u64(payload, "last_server_seq"),
          :ok <- positive_integer(payload, "protocol_v"),
          :ok <- optional_positive_u64(payload, "primary_epoch"),
-         :ok <- optional_computer_platform(payload) do
+         :ok <- optional_computer_platform(payload),
+         :ok <- optional_hello_caps(payload) do
       optional_relay_list_rev(payload)
     end
   end
+
+  # What a desktop says of itself (M97 §19.3): `caps.computer.machine_settings`,
+  # that it applies the rule that a management setting's id names its
+  # machine. Absent from a phone's hello and from an older desktop's; present,
+  # objects down to a boolean flag, so the session reads it with nothing left
+  # to check. A later desktop may name more, which is ignored.
+  defp optional_hello_caps(%{"caps" => %{} = caps}) do
+    case Map.get(caps, "computer", %{}) do
+      %{} = computer ->
+        if is_boolean(Map.get(computer, "machine_settings", false)),
+          do: :ok,
+          else: {:error, {:invalid_field, "caps.computer"}}
+
+      _other ->
+        {:error, {:invalid_field, "caps.computer"}}
+    end
+  end
+
+  defp optional_hello_caps(%{"caps" => _other}), do: {:error, {:invalid_field, "caps"}}
+  defp optional_hello_caps(_payload), do: :ok
 
   # The system a computer runs (M97 §3.2), named by a desktop's hello; absent
   # from a phone's and from an engine older than the computer record.
@@ -913,11 +934,12 @@ defmodule FermixChannels.Mobile.Protocol do
   # Which of a computer's own events the server takes (M97 §5.3): absent from
   # a server older than the computer record and from a phone's hello_ack, and
   # a computer sends none of them then. Each flag a boolean; a later server
-  # may name more. Where the computer stands against the server and what the
+  # may name more. `machine_settings` says the server applies M97 §19.3's
+  # rule. Where the computer stands against the server and what the
   # server speaks (§3.4) are optional: absent from a server before them.
   defp optional_computer_caps(%{"computer" => %{"v" => version} = computer})
        when is_integer(version) and version > 0 do
-    flags = Map.take(computer, ~w(offers link_path invoke))
+    flags = Map.take(computer, ~w(offers link_path invoke machine_settings))
 
     if Enum.all?(flags, fn {_flag, value} -> is_boolean(value) end) and
          computer_standing?(computer) and computer_versions?(computer),

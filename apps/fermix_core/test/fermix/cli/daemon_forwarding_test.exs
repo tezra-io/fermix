@@ -19,10 +19,13 @@ defmodule Fermix.CLI.DaemonForwardingTest do
   alias Fermix.CLI.Daemon.Client
   alias FermixCore.Management.Doctor
   alias FermixCore.Management.Doctor.Descriptor
+  alias FermixCore.Management.HomeSummary
   alias FermixTestSupport.ParentProcess
   alias FermixTestSupport.SafeRm
 
   @reply_ms 10_000
+  # The computer that forwards, its hello saying it applies M97 §19.3's rule.
+  @desk %{device_id: "desk-1", machine_settings: true}
   @device %{role: :device, primary: "fermix-vm"}
   @this_machines_sections [
     %{id: "sandbox", pane: "safety", title: "Sandbox"},
@@ -68,8 +71,8 @@ defmodule Fermix.CLI.DaemonForwardingTest do
   test "a linked device answers a device-class request itself, and forwards nothing", ctx do
     socket = start_daemon!(ctx, engine_role: @device, desktop_link?: true)
 
-    assert {:ok, %{"engine" => "this machine", "section" => "sandbox"}} =
-             Client.request_v1("settings.get", %{"section" => "sandbox"},
+    assert {:ok, %{"engine" => "this machine", "section" => "computer"}} =
+             Client.request_v1("settings.get", %{"section" => "computer"},
                socket_path: socket,
                timeout: @reply_ms
              )
@@ -219,6 +222,60 @@ defmodule Fermix.CLI.DaemonForwardingTest do
              Client.request_v1("cues.status", %{}, socket_path: failing, timeout: @reply_ms)
   end
 
+  # M97 §19.6 (D28c): setup.state.get and overview.get are the server's, so
+  # the restart they report is the server's, and a linked computer adds the
+  # step that restarts it, the record its summary offers: the app presses
+  # that one step from every pane, never this computer's own restart.
+  test "the server's restart state carries the step that restarts the server", ctx do
+    socket = start_daemon!(ctx, engine_role: @device, desktop_link?: true)
+    step = HomeSummary.restart_server_action("fermix-vm")
+
+    assert %{"id" => "restart_server", "label" => "Restart fermix-vm"} = step
+
+    assert {:ok, %{"restart" => %{"required" => true}, "restart_step" => ^step}} =
+             Client.request_v1("setup.state.get", %{}, socket_path: socket, timeout: @reply_ms)
+
+    assert {:ok, %{"health" => %{"restart_required" => true, "restart_step" => ^step}}} =
+             Client.request_v1("overview.get", %{}, socket_path: socket, timeout: @reply_ms)
+
+    assert_receive {:forwarded, %{method: "setup.state.get"}, []}
+    assert_receive {:forwarded, %{method: "overview.get"}, []}
+
+    # A forwarded machine section is titled with the server's name.
+    assert {:ok, %{"title" => "Sandbox on fermix-vm"}} =
+             Client.request_v1("settings.get", %{"section" => "sandbox"},
+               socket_path: socket,
+               timeout: @reply_ms
+             )
+
+    settled =
+      start_daemon!(ctx,
+        engine_role: @device,
+        desktop_link?: true,
+        forward: fn _request, _opts ->
+          {:ok, %{"restart" => %{"required" => false, "reasons" => []}}}
+        end
+      )
+
+    assert {:ok, %{"restart_step" => nil}} =
+             Client.request_v1("setup.state.get", %{}, socket_path: settled, timeout: @reply_ms)
+
+    unlinked =
+      start_daemon!(ctx,
+        engine_role: %{role: :primary, primary: nil},
+        management: [
+          setup_state_reporter: fn _opts ->
+            %{"restart" => %{"required" => true, "reasons" => []}}
+          end
+        ]
+      )
+
+    assert {:ok, answer} =
+             Client.request_v1("setup.state.get", %{}, socket_path: unlinked, timeout: @reply_ms)
+
+    refute Map.has_key?(answer, "restart_step")
+  end
+
   # Doctor's `server link` row: the link as this computer's own engine holds
   # it, its path included, read with no round trip to the server.
   test "the link Doctor reads is this machine's own, and asks the server nothing", ctx do
@@ -328,7 +385,12 @@ defmodule Fermix.CLI.DaemonForwardingTest do
       end
 
       socket =
-        start_daemon!(ctx, engine_role: @device, desktop_link?: true, forward: unreachable)
+        start_daemon!(ctx,
+          engine_role: @device,
+          desktop_link?: true,
+          forward: unreachable,
+          management: [computer?: true, macos?: true]
+        )
 
       assert {:ok, status} =
                Client.request_v1("home.status", %{}, socket_path: socket, timeout: @reply_ms)
@@ -343,12 +405,20 @@ defmodule Fermix.CLI.DaemonForwardingTest do
                  timeout: @reply_ms
                )
 
-      assert Enum.map(sections, & &1["id"]) == ["sandbox", "computer_use"]
+      assert Enum.map(sections, & &1["id"]) == ["computer.sandbox", "computer.computer_use"]
       assert missing =~ "The server fermix-vm is unreachable."
     end
 
-    test "settings.sections lists this machine's own sections and the primary's others", ctx do
-      socket = start_daemon!(ctx, engine_role: @device, desktop_link?: true)
+    # M97 §19: the server's sections, its machine sections only where its
+    # hello_ack says it applies the rule (this link says nothing, so its
+    # sandbox is left out), then this computer's own as computer.<id>.
+    test "settings.sections lists the primary's sections, then this machine's own", ctx do
+      socket =
+        start_daemon!(ctx,
+          engine_role: @device,
+          desktop_link?: true,
+          management: [computer?: true, macos?: true]
+        )
 
       assert {:ok, %{"sections" => sections, "primary_missing" => nil}} =
                Client.request_v1("settings.sections", %{},
@@ -359,11 +429,13 @@ defmodule Fermix.CLI.DaemonForwardingTest do
       assert Enum.map(sections, & &1["id"]) == [
                "providers.openai",
                "routing",
-               "sandbox",
-               "computer_use"
+               "computer.sandbox",
+               "computer.computer_use"
              ]
 
-      assert %{"title" => "Sandbox"} = Enum.find(sections, &(&1["id"] == "sandbox"))
+      assert %{"title" => "Sandbox on this Mac", "pane" => "always_on"} =
+               Enum.find(sections, &(&1["id"] == "computer.sandbox"))
+
       assert_receive {:forwarded, %{method: "settings.sections"}, [deadline_ms: 5_000]}
     end
 
@@ -407,7 +479,8 @@ defmodule Fermix.CLI.DaemonForwardingTest do
             {"home.move.readiness", %{"candidate_id" => "cand-new"}},
             {"home.enroll.open", %{}},
             {"home.enroll.withdraw", %{}},
-            {"home.snapshots.run", %{}}
+            {"home.snapshots.run", %{}},
+            {"home.restart", %{}}
           ] do
         assert {:error,
                 {:management_error, "unavailable", _message,
@@ -424,10 +497,10 @@ defmodule Fermix.CLI.DaemonForwardingTest do
       daemon = start_daemon!(ctx, [engine_role: %{role: :primary, primary: nil}], :name)
 
       assert %{"request_id" => "call-5", "result" => %{"role" => "primary"}} =
-               Daemon.serve_forwarded(frame("call-5", "home.status", %{}), "desk-1", daemon)
+               Daemon.serve_forwarded(frame("call-5", "home.status", %{}), @desk, daemon)
 
       assert %{"result" => %{"sections" => [_one, _two, _three], "primary_missing" => nil}} =
-               Daemon.serve_forwarded(frame("call-6", "settings.sections", %{}), "desk-1", daemon)
+               Daemon.serve_forwarded(frame("call-6", "settings.sections", %{}), @desk, daemon)
     end
 
     test "answers a desktop's request as the socket would", ctx do
@@ -436,7 +509,7 @@ defmodule Fermix.CLI.DaemonForwardingTest do
       assert %{"request_id" => "call-1", "result" => %{"engine" => "this machine"}} =
                Daemon.serve_forwarded(
                  frame("call-1", "settings.get", %{"section" => "routing"}),
-                 "desk-1",
+                 @desk,
                  daemon
                )
     end
@@ -453,7 +526,7 @@ defmodule Fermix.CLI.DaemonForwardingTest do
         frame("call-2", "mobile.pair.decide", %{"session_id" => "pair-9", "approved" => false})
 
       assert %{"request_id" => "call-2", "error" => %{"code" => "unknown_pairing_session"}} =
-               Daemon.serve_forwarded(decide, "desk-1", daemon)
+               Daemon.serve_forwarded(decide, @desk, daemon)
 
       assert_receive {:pair_decided, "pair-9", false}
     end
@@ -467,7 +540,7 @@ defmodule Fermix.CLI.DaemonForwardingTest do
              } =
                Daemon.serve_forwarded(
                  frame("call-7", "home.snapshots.run", %{}),
-                 "desk-1",
+                 @desk,
                  daemon
                )
 
@@ -479,7 +552,7 @@ defmodule Fermix.CLI.DaemonForwardingTest do
              } =
                Daemon.serve_forwarded(
                  frame("call-8", "home.act", %{"action" => "cancel", "key" => "k"}),
-                 "desk-1",
+                 @desk,
                  daemon
                )
     end
@@ -496,13 +569,13 @@ defmodule Fermix.CLI.DaemonForwardingTest do
                }
              } =
                Daemon.serve_forwarded(
-                 frame("call-3", "settings.get", %{"section" => "sandbox"}),
-                 "desk-1",
+                 frame("call-3", "settings.get", %{"section" => "computer.sandbox"}),
+                 @desk,
                  daemon
                )
 
       assert %{"error" => %{"code" => "invalid_request"}} =
-               Daemon.serve_forwarded("not json", "desk-1", daemon)
+               Daemon.serve_forwarded("not json", @desk, daemon)
     end
   end
 
@@ -583,6 +656,15 @@ defmodule Fermix.CLI.DaemonForwardingTest do
        ]
      }}
   end
+
+  defp primary_answer(%{method: "setup.state.get"}),
+    do: {:ok, %{"restart" => %{"required" => true, "reasons" => []}, "answered_by" => "primary"}}
+
+  defp primary_answer(%{method: "overview.get"}),
+    do: {:ok, %{"health" => %{"restart_required" => true}, "answered_by" => "primary"}}
+
+  defp primary_answer(%{method: "settings.get", params: %{"section" => "sandbox"}}),
+    do: {:ok, %{"id" => "sandbox", "title" => "Sandbox", "rows" => []}}
 
   defp primary_answer(_request), do: {:ok, %{"answered_by" => "primary"}}
 

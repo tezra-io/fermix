@@ -216,6 +216,12 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `fermix` command from another install refuses to start there until the app
   has. As with `config.toml`, no command or file tool the agent
   runs can read or change `machine.toml`.
+- **The browser's settings belong to each computer.** The private hosts the
+  browser may open, how its tasks run, the most open tabs and whether it may
+  open the Fermix app now live in each computer's `machine.toml`, so a
+  server's browser and a Mac's are set apart and no move, backup or restore
+  carries them. The first start of this version moves any that `config.toml`
+  held into `machine.toml`, once.
 - **Whether coding agents may run, and where they keep their sign-ins,
   belong to each computer.** The approval ("Allow coding agents to run on
   this Mac") and the folders Codex and Claude Code sign in from
@@ -950,6 +956,52 @@ will be part of a future release; nothing in this group is in a release yet.
   undone is said plainly ("studio-server turned the move down, so nothing
   moved."), with the server's own reason where it is one you can act on, such
   as its disk space, and the technical words in the log.
+- **One set of settings after a move.** Once Fermix runs on your server,
+  every Fermix app shows the server's settings, every pane: changing the
+  sandbox, the coding agents' approval or the browser in a linked computer's
+  Settings now changes them on the server ("Sandbox on garden server"),
+  where before the Sandbox pane showed that computer's own and a stored
+  sandbox variable typed there landed on the server without a word. What
+  belongs to one computer alone (what the server may use there, and that
+  computer's own sandbox, browser, screen, history and StackChan) is listed
+  apart, under This Mac (This computer on Linux), and changes only at that
+  computer: the server, and every other computer, can no longer write it.
+  So the server can stay Open while a Mac stays Strict. A change to the
+  server's sandbox or coding approval from a computer is said once on every
+  Always On screen, naming the computer. A process Fermix started can no
+  longer change a computer's own settings or a sandbox's stored variables
+  through the app's socket, the server's commands on that computer among
+  them. After a move, the meeting notetaker's and on-device speech's
+  installers, and the coding agents' check, are the server's, which runs
+  them. On a linked computer the setup page changes This computer and that
+  computer's sandbox, and its other tabs say to change them in the Fermix
+  app on any computer. A server or a computer on an older Fermix is never
+  written to by mistake: the computer then shows the server's sandbox and
+  coding settings nowhere and says the server updates on its own, and the
+  server refuses a sandbox variable from an older computer ("Update Fermix
+  on this computer to change its sandbox values."). An install a linked
+  computer runs itself (its browser, the computer use helper, the Messages
+  helper) is now followed and cancelled on that computer, where before its
+  progress was asked of the server, which did not know it; and `fermix
+  settings reload computer.sandbox` clears an outside edit of that
+  computer's own settings.
+- **Restart your server from any of your computers.** A sandbox mode, a
+  key or a coding approval set from an app is stored on the server at once
+  and used from its next start, so while one waits, Always On and Settings
+  on a linked computer offer Restart <server> (in the server's own
+  words in every pane that shows its restart, where before the button
+  restarted that computer's Fermix and not the server's). The server
+  restarts at once, or once the work it runs on a computer ends, ten minutes
+  at most, and refuses while a move is under way; an answer lost to the
+  server's own restart is said as asked, not as the server being out of
+  reach. `fermix always-on restart-server` takes the same step from a
+  terminal. The move's review
+  says that after the move the apps' Settings change Fermix on the server,
+  its sandbox and coding agents included, names this Mac's own sandbox in
+  what stays on ("files and commands, in this Mac's sandbox (Standard)"),
+  and, with coding agents approved here, says to allow them on the server
+  too. `home.status` says each engine's own restart state and keychain
+  profile.
 - **Always On: a reminder for your computer still rings on your computer
   after the move.** A reminder or timer set to ring on "this computer" came
   due on the server, which has no notification centre, and went nowhere. The

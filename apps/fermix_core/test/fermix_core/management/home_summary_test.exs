@@ -90,6 +90,10 @@ defmodule FermixCore.Management.HomeSummaryTest do
       # may use here offers nothing until the owner reviews it: its one step.
       {"a desktop whose switches wait for the review", desktop(offers_review: true), "on",
        "Fermix runs on your server. Last backup 2 hours ago.", "review_offers"},
+      # M97 D28c: a change from this computer waits for the server's restart,
+      # which its screen offers beside the others.
+      {"a desktop whose server waits for its restart", desktop(primary_home: restart_home(true)),
+       "on", "Fermix runs on your server. Last backup 2 hours ago.", nil},
       {"a desktop whose server's part did not arrive", desktop(primary_home: nil), "on",
        "Fermix runs on your server.", nil},
       {"a desktop while Fermix is stopped", desktop(link_primary: nil, primary_home: nil), "on",
@@ -2123,6 +2127,119 @@ defmodule FermixCore.Management.HomeSummaryTest do
     end
   end
 
+  # M97 D28c (§19.6): a sandbox mode, a key or a coding approval set from a
+  # computer waits for the server's next start, so while the server says its
+  # restart is required every linked computer's screen offers to restart it,
+  # under the name this computer knows its server by.
+  describe "restarting the server" do
+    @server "fermix-general-a3f9"
+
+    test "a linked computer offers Restart <server> while its server's restart is required" do
+      summary = HomeSummary.summary(desktop(primary_home: restart_home(true)))
+
+      assert summary["state"] == "on"
+      assert [restart | _others] = summary["detail"]["alternatives"]
+      assert restart == HomeSummary.restart_server_action(@server)
+
+      assert %{"id" => "restart_server", "label" => "Restart #{@server}", "needs" => []} = restart
+      assert restart["confirm"] == nil
+      assert {:ok, ^restart} = HomeSummary.find_action(summary, "restart_server", restart["key"])
+
+      # On a problem screen of a server that answers too: Settings offers the
+      # same step whatever Always On shows.
+      old = server_home(backups: [{"desktop", ~U[2031-04-29 11:00:00Z]}])
+      required = restart_home(true)["restart"]
+      problem = HomeSummary.summary(desktop(primary_home: Map.put(old, "restart", required)))
+      assert problem["detail"]["kind"] == "backup_old"
+      assert hd(problem["detail"]["alternatives"]) == restart
+    end
+
+    test "and never while it is not, from an older server, or anywhere else" do
+      for facts <- [
+            desktop(primary_home: restart_home(false)),
+            # An older server says nothing of its restart.
+            desktop([]),
+            desktop(primary_home: nil),
+            # A computer that has no name for its server cannot label the step.
+            desktop(link_primary: nil, primary_home: restart_home(true)),
+            server([]),
+            facts([]),
+            ready_facts([])
+          ] do
+        summary = HomeSummary.summary(facts)
+        refute Enum.any?(HomeSummary.offered(summary), &(&1["id"] == "restart_server"))
+      end
+    end
+  end
+
+  # M97 §19.5 (D28): the server's sandbox or coding approval changed from a
+  # computer is said once, on the server and on every linked computer, naming
+  # the computer, for a week after.
+  describe "a change from a computer" do
+    @changed_at ~U[2031-05-04 11:30:00Z]
+
+    test "is the server's notice, in its own words" do
+      change = %{at: @changed_at, computer: "loft-linux", what: :sandbox_mode, value: "open"}
+
+      assert HomeSummary.summary(server(computer_change: change))["notice"] == %{
+               "id" => "computer_change:2031-05-04T11:30:00Z",
+               "sentence" => "This server's sandbox was set to Open from loft-linux."
+             }
+
+      approved = %{change | what: :harness_approved, value: true}
+
+      assert HomeSummary.summary(server(computer_change: approved))["notice"]["sentence"] ==
+               "Coding agents were allowed to run on this server from loft-linux."
+
+      refused = %{change | what: :harness_approved, value: false}
+
+      assert HomeSummary.summary(server(computer_change: refused))["notice"]["sentence"] ==
+               "Coding agents were turned off on this server from loft-linux."
+    end
+
+    test "is each linked computer's, naming its server" do
+      change = %{at: @changed_at, computer: "loft-linux", what: :sandbox_mode, value: "strict"}
+
+      assert HomeSummary.summary(desktop(computer_change: change))["notice"] == %{
+               "id" => "computer_change:2031-05-04T11:30:00Z",
+               "sentence" => "fermix-general-a3f9's sandbox was set to Strict from loft-linux."
+             }
+
+      approved = %{change | what: :harness_approved, value: true}
+
+      assert HomeSummary.summary(desktop(computer_change: approved))["notice"]["sentence"] ==
+               "Coding agents were allowed to run on fermix-general-a3f9 from loft-linux."
+    end
+
+    test "is told for a week, and the watch wakes when it ends" do
+      change = %{at: @changed_at, computer: "loft-linux", what: :sandbox_mode, value: "open"}
+
+      # With no backup to count from, the week's end is the next change.
+      week_left =
+        DateTime.diff(DateTime.add(@changed_at, 7 * 86_400, :second), @now, :millisecond)
+
+      quiet = server(snapshots: snapshots([]))
+      assert HomeSummary.watch(quiet).next_change_ms == nil
+
+      assert HomeSummary.watch(Map.put(quiet, :computer_change, change)).next_change_ms ==
+               week_left
+
+      desk = HomeSummary.watch(desktop(computer_change: change))
+      assert desk.next_change_ms <= week_left
+
+      later = DateTime.add(@changed_at, 8 * 86_400, :second)
+
+      for facts <- [
+            server(computer_change: change, now: later),
+            desktop(computer_change: change, now: later)
+          ],
+          do:
+            refute(
+              match?(%{"id" => "computer_change:" <> _}, HomeSummary.summary(facts)["notice"])
+            )
+    end
+  end
+
   # -- facts --------------------------------------------------------------------
 
   defp facts(overrides) do
@@ -2350,6 +2467,17 @@ defmodule FermixCore.Management.HomeSummaryTest do
       "disk" => %{"used" => used, "nearly_full" => used >= 0.85},
       "webhooks" => Keyword.get(overrides, :webhooks, [])
     }
+  end
+
+  # The server's home saying whether its restart is required (M97 D28c), as
+  # `Management.Settings.restart/0` answers it there.
+  defp restart_home(required?) do
+    reasons =
+      if required?,
+        do: [%{"section" => "sandbox", "sentence" => "The sandbox changes at the next start."}],
+        else: []
+
+    Map.put(server_home([]), "restart", %{"required" => required?, "reasons" => reasons})
   end
 
   # A webhook the server serves on loopback, as its `home.status` names it.

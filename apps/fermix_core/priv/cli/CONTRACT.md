@@ -350,8 +350,11 @@ and answers the step result:
   server to the owner's tailnet); for `move-now` and `try-again`, `move_id`;
   for `add-computer`, `code` (the code a new computer joins with, answered
   this once) and `expires_at`; for `approve-computer`, `device_id` and
-  `name` (the computer as the home added it); null for every other step,
-  `update` among them, which sends nothing.
+  `name` (the computer as the home added it); for `restart-server` (on a
+  computer linked to its server, while the server's restart is required),
+  the server's answer: `when` (`now`, or `after_work` while it runs work on
+  a computer), `wait_s` (at most 600) and `sentence`, which the verb prints;
+  null for every other step, `update` among them, which sends nothing.
 
 Golden: `always_on/step.json`.
 

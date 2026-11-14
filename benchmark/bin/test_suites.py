@@ -678,6 +678,8 @@ def test_the_shipped_numbered_rubrics_parse():
                       "hiring_decision": 5,
                       # computers.yaml
                       "how_do_i_connect_my_linux_laptop": 5,
+                      "open_up_the_server_sandbox_from_my_mac": 5,
+                      "stricter_mac_open_server": 5,
                       "second_mac_without_moving_anything": 5,
                       "can_you_still_text_me_on_imessage": 4,
                       "a_text_while_the_mac_sleeps": 3,

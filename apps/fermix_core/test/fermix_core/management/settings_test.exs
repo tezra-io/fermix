@@ -1941,9 +1941,11 @@ defmodule FermixCore.Management.SettingsTest do
         assert row("browser", key)["value"] == value
       end
 
-      contents = File.read!(Path.join(home, "config.toml"))
+      # This machine's own (M97 D28d): the keys are in its machine file.
+      contents = File.read!(Path.join(home, "machine.toml"))
       assert contents =~ ~s(default_profile = "fermix_headless")
       assert contents =~ "max_tabs = 4"
+      refute File.read!(Path.join(home, "config.toml")) =~ "max_tabs"
     end
 
     test "a value the browser would refuse at launch is refused in its own words" do

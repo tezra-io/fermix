@@ -72,7 +72,13 @@ defmodule FermixCore.Home.MoveReadiness do
     * `coding_agents`: coding agents approved here warn that they stop on
       this computer after the move: the approval is this computer's own
       (M98 D5, its `machine.toml`), which stays here, and the server runs
-      them only with its own;
+      them only with its own, which the apps' Settings allow after the move
+      (M97 D28);
+    * `settings`, always `ok` on a move (none on a move back): after the
+      move the apps' Settings change Fermix on the server, its sandbox and
+      coding agents included, a new server's sandbox starts open, and what
+      the server may use on this computer and this computer's own sandbox
+      are under This Mac (This computer on Linux), M97 §19.8;
     * `cutover_gap`: a recurring job more than an hour late is skipped, and
       while Telegram is set up (a bot token, and not turned off), its
       messages sent during the move wait until it is done (Telegram keeps
@@ -83,7 +89,7 @@ defmodule FermixCore.Home.MoveReadiness do
       (`Management.Lifecycle.restarts_itself?/1`): it has to be started again
       to finish the move.
 
-  The last seven are `summary_items/4`: what a review reads from this home's
+  The last eight (seven on a move back) are `summary_items/4`: what a review reads from this home's
   settings alone, needing neither the keychain nor a walk of the home, so
   `home.status`'s summary builds Move now's confirm from them before any
   review (`Management.HomeSummary`), in the words the review says them.
@@ -124,7 +130,7 @@ defmodule FermixCore.Home.MoveReadiness do
   # Every id a review can say, in its order: no item is made with another.
   # The management schema and PROTOCOL.md name exactly these.
   @ids ~w(call_in_progress keychain_secrets engine_version disk s3_size plugins dev_plugins
-          stays_here whatsapp slack coding_agents cutover_gap serves_nothing service)
+          stays_here whatsapp slack coding_agents settings cutover_gap serves_nothing service)
 
   @type status :: :ok | :warn | :block
   @type item :: %{id: String.t(), status: status(), sentence: String.t()}
@@ -164,8 +170,8 @@ defmodule FermixCore.Home.MoveReadiness do
   The items of a review of the move to the server `name` that read nothing
   but `config` (this home's settings, as `settings/2` reads them) and this
   engine, in the review's order and words: `stays_here` (StackChan only when
-  `macos?`), `whatsapp`, `slack`, `coding_agents`, `cutover_gap`,
-  `serves_nothing`, `service`. `report/3` ends with them, and `home.status`'s
+  `macos?`), `whatsapp`, `slack`, `coding_agents`, `settings` (not on a
+  move back), `cutover_gap`, `serves_nothing`, `service`. `report/3` ends with them, and `home.status`'s
   summary builds Move now's confirm from them before any review. `opts` are
   `report/3`'s.
   """
@@ -173,20 +179,25 @@ defmodule FermixCore.Home.MoveReadiness do
           [item()]
   def summary_items(config, macos?, name, opts)
       when is_boolean(macos?) and is_binary(name) and is_list(opts) do
+    returning? = Keyword.get(opts, :returning, false)
+
     [
-      stays_here_item(config, macos?, name, Keyword.get(opts, :returning, false)),
+      stays_here_item(config, macos?, name, returning?),
       whatsapp(config, name),
       slack(config, name),
-      coding_agents(config, macos?, name),
-      item("cutover_gap", :warn, cutover_sentence(config)),
-      item(
-        "serves_nothing",
-        :warn,
-        "This computer serves nothing while the move runs: no chat, channels or jobs " <>
-          "until #{name} takes over."
-      ),
-      service(Keyword.get_lazy(opts, :restarts_itself, &Lifecycle.restarts_itself?/0))
-    ]
+      coding_agents(config, macos?, name)
+    ] ++
+      settings_item(macos?, name, returning?) ++
+      [
+        item("cutover_gap", :warn, cutover_sentence(config)),
+        item(
+          "serves_nothing",
+          :warn,
+          "This computer serves nothing while the move runs: no chat, channels or jobs " <>
+            "until #{name} takes over."
+        ),
+        service(Keyword.get_lazy(opts, :restarts_itself, &Lifecycle.restarts_itself?/0))
+      ]
   end
 
   @doc """
@@ -720,13 +731,35 @@ defmodule FermixCore.Home.MoveReadiness do
           "coding_agents",
           :warn,
           "Coding agents stop on this #{machine} after the move. They run on #{name} only " <>
-            "with your approval there."
+            "with your approval there. To run them on #{name} too, allow them there in " <>
+            "Settings, Coding agents, after the move."
         ),
       else: item("coding_agents", :ok, "No coding agent has your approval on this computer.")
   end
 
   defp coding_agents({:error, sentence}, _macos?, _name),
     do: item("coding_agents", :warn, sentence)
+
+  # M97 D28 (§19.8): after the move, every app's Settings are the server's,
+  # its own machine settings included; what the server may use on this
+  # computer, and this computer's own sandbox, are under This Mac (This
+  # computer on Linux). A move back makes this computer its own home again,
+  # so it says nothing of the kind.
+  defp settings_item(_macos?, _name, true = _returning?), do: []
+
+  defp settings_item(macos?, name, false) do
+    machine = if macos?, do: "Mac", else: "computer"
+
+    [
+      item(
+        "settings",
+        :ok,
+        "After the move, Settings in this app change Fermix on #{name}, its sandbox and " <>
+          "coding agents included. A new server's sandbox starts Open. What #{name} may use " <>
+          "on this #{machine}, and this #{machine}'s own sandbox, are under This #{machine}."
+      )
+    ]
+  end
 
   defp on?(text, section, key), do: ConfigText.value(text, section, key) == {:ok, "true"}
 

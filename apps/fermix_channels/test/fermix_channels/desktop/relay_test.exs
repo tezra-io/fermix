@@ -865,6 +865,26 @@ defmodule FermixChannels.Desktop.RelayTest do
     end
   end
 
+  # M97 D28c: the server restarts right after it answers Restart <server>,
+  # so an answer lost to its own restart is unconfirmed, never a failure.
+  test "a restart whose answer is lost is unconfirmed" do
+    primary = DesktopRail.primary!(families: %{manage: {CaptureFamily, test: self()}})
+    root = DesktopRail.desktop_home!(primary)
+    relay = DesktopRail.start_relay!(root, primary)
+    DesktopRail.await_connected(relay)
+    restart = %{request_id: "r-1", protocol_version: 2, method: "home.restart", params: %{}}
+
+    call = Task.async(fn -> Relay.forward(relay, restart) end)
+    assert_receive {:primary_got, "manage", %{"method" => "home.restart"}, _params}, 10_000
+    :ok = drop_sessions(primary)
+
+    assert {:error, :unconfirmed,
+            %{"method" => "home.restart", "primary" => "fermix-vm", "sentence" => sentence}} =
+             Task.await(call, 10_000)
+
+    assert sentence =~ "was asked to restart"
+  end
+
   describe "a primary that ends every session normally" do
     test "is renewed quietly once, then redialed with the backoff, and the posture says so" do
       primary = DesktopRail.primary!()

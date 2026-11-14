@@ -139,6 +139,7 @@ defmodule FermixCore.Management.Protocol do
     {"home.candidates.list", 2},
     {"home.move.readiness", 2},
     {"home.move.start", 2},
+    {"home.restart", 2},
     {"home.act", 2},
     {"computers.rename", 2},
     {"computer.join.start", 2},

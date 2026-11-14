@@ -162,6 +162,7 @@ defmodule FermixCore.Management.ProtocolTest do
              "home.candidates.list",
              "home.move.readiness",
              "home.move.start",
+             "home.restart",
              "home.act",
              "computers.rename",
              "computer.join.start",

@@ -107,7 +107,8 @@ defmodule Fermix.CLI.AlwaysOnCommand.Render do
   @doc """
   What a step answered beyond its screen: the own-server code, shown this
   once, under the engine's sentence for it and the command, then the
-  optional Tailscale step under its label; nothing for a step that answers
+  optional Tailscale step under its label; the server's sentence for Restart
+  <server>; nothing for a step that answers
   none (null, or a move's `{move_id}`). `own_server`'s is matched whole, the
   code's five fields and then its Tailscale step's four on their own, and any
   other shape raises: the code is answered once, so it is never dropped in
@@ -146,6 +147,13 @@ defmodule Fermix.CLI.AlwaysOnCommand.Render do
   def result(%{"device_id" => id, "name" => name} = result)
       when is_binary(id) and is_binary(name) and map_size(result) == 2,
       do: ["#{name} is now a computer of your Fermix."]
+
+  # The server's answer to Restart <server> (M97 D28c): now, or once its
+  # computers' work ends, in its own sentence.
+  def result(%{"when" => moment, "wait_s" => wait_s, "sentence" => sentence} = result)
+      when moment in ["now", "after_work"] and is_integer(wait_s) and is_binary(sentence) and
+             map_size(result) == 3,
+      do: [sentence]
 
   def result(result), do: raise(ArgumentError, "home.act answered #{shape(result)}")
 

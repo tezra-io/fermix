@@ -36,6 +36,7 @@ defmodule FermixCore.Management.AlwaysOnTest do
   @passphrase "invented-lighthouse-meridian"
   @manual_code "fxenroll1.eyJ2IjoxLCJuYW1lIjoib3duLXNlcnZlciJ9"
   @back_cand "cand-7a3e1c9b5d2f4086"
+  @changed "Always On changed since this was shown, so look at it again."
 
   setup ctx do
     home = SafeRm.make_tmp_dir!("always_on")
@@ -592,6 +593,64 @@ defmodule FermixCore.Management.AlwaysOnTest do
       assert {:ok, %{"summary" => summary}} = press(ctx, "back_up_now")
       assert {summary["state"], summary["outcome"]} == {"on", "running"}
       assert summary["detail"]["progress"] == "Backing up now…"
+    end
+
+    # M97 D28c (§19.6): while the server says its restart is required, Restart
+    # <server> sends the rail-only `home.restart` and nothing else; the server
+    # answers whether it restarts now or once its computers' work ends.
+    test "Restart <server> sends home.restart to the server, and nothing else", ctx do
+      waits = %{
+        "when" => "after_work",
+        "wait_s" => 540,
+        "sentence" =>
+          "Fermix on your server restarts once the work it runs on a computer ends, or in " <>
+            "ten minutes at most."
+      }
+
+      Agent.update(ctx.script, &restart_waits(&1, {:ok, waits}))
+
+      assert %{"label" => "Restart fermix-general-a3f9"} =
+               offered!(summary(ctx.opts), "restart_server")
+
+      flush_forwarded()
+      assert {:ok, %{"result" => ^waits}} = press(ctx, "restart_server")
+
+      sent =
+        for {:forwarded, method, params} <- flushed(),
+            method != "home.status",
+            do: {method, params}
+
+      assert sent == [{"home.restart", %{}}]
+    end
+
+    test "the server's refusal, and the server away, are answered as the server answered", ctx do
+      moving = %{
+        "capability" => "home",
+        "sentence" => "A move is under way, so Fermix on your server restarts once it is done."
+      }
+
+      away = %{
+        "primary" => "fermix-general-a3f9",
+        "sentence" => "The server fermix-general-a3f9 is unreachable."
+      }
+
+      for {code, details} <- [{:unavailable, moving}, {:primary_unreachable, away}] do
+        Agent.update(ctx.script, fn _on ->
+          restart_waits(server_part(:on), {:error, code, details})
+        end)
+
+        assert {:error, ^code, ^details} = press(ctx, "restart_server")
+      end
+    end
+
+    test "Restart <server> not offered answers changed and sends nothing", ctx do
+      flush_forwarded()
+      key = HomeSummary.restart_server_action("fermix-general-a3f9")["key"]
+
+      assert {:error, :changed, %{"sentence" => @changed}} =
+               AlwaysOn.act(%{action: "restart_server", key: key, input: %Input{}}, ctx.opts)
+
+      refute Enum.any?(flushed(), &match?({:forwarded, "home.restart", _params}, &1))
     end
   end
 
@@ -1406,6 +1465,40 @@ defmodule FermixCore.Management.AlwaysOnTest do
   end
 
   defp joiner, do: %{"name" => "loft-linux", "platform" => "linux"}
+
+  # The server's part while its restart is required (M97 D28c), answering
+  # `home.restart` with `answer`.
+  defp restart_waits(script, answer) do
+    required = %{
+      "required" => true,
+      "reasons" => [
+        %{"section" => "sandbox", "sentence" => "The sandbox changes at the next start."}
+      ]
+    }
+
+    fn
+      "home.status", params ->
+        {:ok, part} = script.("home.status", params)
+        {:ok, Map.put(part, "restart", required)}
+
+      "home.restart", %{} ->
+        answer
+
+      method, params ->
+        script.(method, params)
+    end
+  end
+
+  # Every forwarded request this test was told of so far, in order, taken.
+  defp flushed do
+    receive do
+      {:forwarded, _method, _params} = sent -> [sent | flushed()]
+    after
+      0 -> []
+    end
+  end
+
+  defp flush_forwarded, do: _flushed = flushed()
 
   # The server's part while its backup runs.
   defp backing_up(script) do

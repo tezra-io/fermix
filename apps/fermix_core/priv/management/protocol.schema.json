@@ -240,6 +240,7 @@
     "home.candidates.list": 2,
     "home.move.readiness": 2,
     "home.move.start": 2,
+    "home.restart": 2,
     "home.act": 2,
     "computers.rename": 2,
     "computer.join.start": 2,
@@ -380,6 +381,7 @@
             "home.candidates.list",
             "home.move.readiness",
             "home.move.start",
+            "home.restart",
             "home.act",
             "computers.rename",
             "computer.join.start",
@@ -1106,6 +1108,13 @@
         {
           "if": {
             "required": ["method"],
+            "properties": { "method": { "const": "home.restart" } }
+          },
+          "then": { "properties": { "params": { "$ref": "#/$defs/home_restart_params" } } }
+        },
+        {
+          "if": {
+            "required": ["method"],
             "properties": { "method": { "const": "home.act" } }
           },
           "then": { "properties": { "params": { "$ref": "#/$defs/home_act_params" } } }
@@ -1459,6 +1468,7 @@
         { "$ref": "#/$defs/home_candidates_list_result" },
         { "$ref": "#/$defs/home_move_readiness_result" },
         { "$ref": "#/$defs/home_move_start_result" },
+        { "$ref": "#/$defs/home_restart_result" },
         { "$ref": "#/$defs/home_act_result" },
         { "$ref": "#/$defs/computers_rename_result" },
         { "$ref": "#/$defs/computer_join_start_result" },
@@ -1548,6 +1558,10 @@
               "type": "array",
               "maxItems": 500,
               "items": { "type": "string" }
+            },
+            "restart_step": {
+              "description": "On a linked computer only (M97 §19.6, D28c): the server's restart is what restart_required reports, and this is the step that restarts it, the same record home.status's summary offers (restart_server); null while no restart is required. Absent from any other engine and from an older one.",
+              "oneOf": [{ "$ref": "#/$defs/homeSummaryAction" }, { "type": "null" }]
             },
             "providers": {
               "type": "array",
@@ -2237,6 +2251,10 @@
       ],
       "additionalProperties": false,
       "properties": {
+        "restart_step": {
+          "description": "On a linked computer only (M97 §19.6, D28c): setup.state.get is the server's, restart is the server's restart, and this is the step that restarts the server, the same record home.status's summary offers (restart_server); null while no restart is required. Absent from any other engine and from an older one. This computer's own restart is home.status's restart.",
+          "oneOf": [{ "$ref": "#/$defs/homeSummaryAction" }, { "type": "null" }]
+        },
         "readiness": {
           "type": "object",
           "required": ["status", "failures"],
@@ -2389,7 +2407,7 @@
       "additionalProperties": false,
       "properties": {
         "sections": {
-          "description": "On a linked desktop, the sections that configure this computer (sandbox, computer_use, computer_history, channels.imessage, accessories) and the primary's others; on any other engine, its own.",
+          "description": "On a linked computer (M97 §19, D28): the server's sections, its own machine sections (sandbox, browser, harness_machine) titled with its name where its hello_ack says it applies the rule (caps.computer.machine_settings) and left out where it does not, never a computer or computer.<id> it names; then this computer's own, under the always_on pane: computer, and computer.<id> for each machine section it has (computer.sandbox, computer.browser, computer.computer_use, computer.computer_history on a Mac, computer.accessories on a Mac), titled for this machine. On any other engine, its own.",
           "type": "array",
           "maxItems": 64,
           "items": { "$ref": "#/$defs/settingsSection" }
@@ -2447,8 +2465,15 @@
     },
     "settings_reload_params": {
       "type": "object",
-      "maxProperties": 0,
-      "additionalProperties": false
+      "additionalProperties": false,
+      "properties": {
+        "section": {
+          "description": "Optional (M97 §19.3): the section an outside edit was refused for, which names the machine whose settings are read again; computer or computer.<id> is this computer's, any other the home's. Absent, the home's.",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        }
+      }
     },
     "settings_reload_result": {
       "type": "object",
@@ -6144,6 +6169,33 @@
             { "type": "null" }
           ]
         },
+        "restart": {
+          "description": "This engine's own restart state, as every settings write carries it: on a linked computer this computer's, and primary_home.restart its server's, which a linked computer's summary offers to restart (restart_server). Absent from an engine older than it, which a client reads as no restart required.",
+          "$ref": "#/$defs/restartState"
+        },
+        "profile": {
+          "description": "This engine's own keychain profile, under which its keychain items are named; on a linked computer this computer's, where setup.state.get's profile is its server's. Absent from an engine older than it.",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "computer_change": {
+          "description": "On the primary, the newest change one of its computers made to its sandbox or coding approval: at (an RFC 3339 instant), computer (its name), what (sandbox_mode, with value the mode it was set to: strict, standard or open; or harness_approved, with value whether coding agents may run there) and value; null when none and on every other engine. The summary's notice computer_change:<at> says it for a week, there and on each linked computer, which reads it from primary_home. Absent from an engine older than it.",
+          "oneOf": [
+            {
+              "type": "object",
+              "required": ["at", "computer", "what", "value"],
+              "additionalProperties": false,
+              "properties": {
+                "at": { "type": "string", "minLength": 1 },
+                "computer": { "type": "string", "minLength": 1, "maxLength": 256 },
+                "what": { "enum": ["sandbox_mode", "harness_approved"] },
+                "value": { "oneOf": [{ "enum": ["strict", "standard", "open"] }, { "type": "boolean" }] }
+              }
+            },
+            { "type": "null" }
+          ]
+        },
         "restart_hold": {
           "description": "What holds the engine's restart after an update, which the server's update reads: reason move (a move under way, for as long as it runs) or computer_work (work in progress on a computer, at most ten minutes from the oldest one's start), count (the work in progress, 0 for a move), wait_s (the seconds the restart still waits, 0 to 600; 0 once the ten minutes are over) and the sentence; null when nothing holds it. Absent from an engine older than it.",
           "oneOf": [
@@ -6230,7 +6282,7 @@
               "required": ["id", "sentence"],
               "additionalProperties": false,
               "properties": {
-                "id": { "type": "string", "pattern": "^((ready|moved|cannot_reach|backup_week|back|restored|server_lapsed|server_sandbox|computer_joined):.+|computer_review)$" },
+                "id": { "type": "string", "pattern": "^((ready|moved|cannot_reach|backup_week|back|restored|server_lapsed|server_sandbox|computer_joined|computer_change):.+|computer_review)$" },
                 "sentence": { "type": "string", "minLength": 1 }
               }
             },
@@ -6254,7 +6306,7 @@
       "required": ["id", "label", "needs", "confirm", "key"],
       "additionalProperties": false,
       "properties": {
-        "id": { "enum": ["cancel", "move_now", "try_again", "update", "back_up_now", "check_again", "own_server", "move_back", "restore_here", "review_offers", "add_computer", "approve_computer", "deny_computer", "change_passphrase"] },
+        "id": { "enum": ["cancel", "move_now", "try_again", "update", "back_up_now", "check_again", "own_server", "move_back", "restore_here", "review_offers", "add_computer", "approve_computer", "deny_computer", "change_passphrase", "restart_server"] },
         "label": { "type": "string", "minLength": 1 },
         "needs": { "type": "array", "maxItems": 1, "uniqueItems": true, "items": { "enum": ["recovery_passphrase", "new_recovery_passphrase", "sas"] } },
         "confirm": { "type": ["string", "null"], "minLength": 1 },
@@ -6664,7 +6716,7 @@
     },
     "homeReadinessItem": {
       "type": "object",
-      "description": "One fact about the move. id is call_in_progress, keychain_secrets, engine_version, disk, s3_size, plugins, dev_plugins, stays_here, whatsapp, slack, coding_agents, cutover_gap, serves_nothing or service; a client that does not know an id shows its sentence as it is.",
+      "description": "One fact about the move. id is call_in_progress, keychain_secrets, engine_version, disk, s3_size, plugins, dev_plugins, stays_here, whatsapp, slack, coding_agents, settings, cutover_gap, serves_nothing or service; a client that does not know an id shows its sentence as it is.",
       "required": ["id", "status", "sentence"],
       "additionalProperties": false,
       "properties": {
@@ -6700,6 +6752,18 @@
         "sentence": { "type": "string", "minLength": 1 }
       }
     },
+    "home_restart_params": { "type": "object", "maxProperties": 0, "additionalProperties": false },
+    "home_restart_result": {
+      "description": "The server's answer to a linked computer's Restart <server> (M97 D28c): when now, it restarts right after answering; when after_work, it waits for the work it runs on a computer and restarts once that ends, or after wait_s seconds at most (never more than 600, and a second request while it waits answers the same wait); the sentence says which.",
+      "type": "object",
+      "required": ["when", "wait_s", "sentence"],
+      "additionalProperties": false,
+      "properties": {
+        "when": { "enum": ["now", "after_work"] },
+        "wait_s": { "type": "integer", "minimum": 0, "maximum": 600 },
+        "sentence": { "type": "string", "minLength": 1 }
+      }
+    },
     "home_act_params": {
       "type": "object",
       "description": "One Always On step: an action the summary offers (its action, an alternative or the backup settings' change) and the key it was drawn with, with what the action's needs asked for. update is the app's own and refused here on action. The key is checked against the summary as it is now: one that does not offer the action under it answers changed with details {sentence} alone, nothing is done, and the surface reads home.status again.",
@@ -6720,7 +6784,8 @@
             "add_computer",
             "approve_computer",
             "deny_computer",
-            "change_passphrase"
+            "change_passphrase",
+            "restart_server"
           ]
         },
         "key": { "type": "string", "minLength": 1, "maxLength": 64 },
@@ -6750,7 +6815,7 @@
     },
     "home_act_result": {
       "type": "object",
-      "description": "The summary after the step, and the step's own result: own_server's code (answered once, never again) with the command for the server, which carries no code, the sentence the code is shown with (the systems the server takes and until when the code works, in the owner's zone), and the optional step that also joins the server to the owner's tailnet (tailscale: the label it is folded under, its sentence, its command and its docs page, the same command with --tailscale, after which the server asks for the code and the Tailscale auth key at the terminal without echo, so the key is on no command line); move_now's and try_again's move id; add_computer's code for the computer that joins (answered once, never again); approve_computer's computer, as the home added it; null for every other step.",
+      "description": "The summary after the step, and the step's own result: own_server's code (answered once, never again) with the command for the server, which carries no code, the sentence the code is shown with (the systems the server takes and until when the code works, in the owner's zone), and the optional step that also joins the server to the owner's tailnet (tailscale: the label it is folded under, its sentence, its command and its docs page, the same command with --tailscale, after which the server asks for the code and the Tailscale auth key at the terminal without echo, so the key is on no command line); move_now's and try_again's move id; add_computer's code for the computer that joins (answered once, never again); approve_computer's computer, as the home added it; restart_server's answer from the server (home.restart's); null for every other step.",
       "required": ["summary", "result"],
       "additionalProperties": false,
       "properties": {
@@ -6803,6 +6868,7 @@
                 "name": { "type": "string", "minLength": 1 }
               }
             },
+            { "$ref": "#/$defs/home_restart_result" },
             { "type": "null" }
           ]
         }

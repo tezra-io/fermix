@@ -79,8 +79,8 @@ defmodule FermixChannels.Desktop.ManageTest do
   end
 
   test "a device-class request is answered here, and never reaches the primary", ctx do
-    assert {:ok, %{"engine" => "device", "section" => "sandbox"}} =
-             request(ctx, "settings.get", %{"section" => "sandbox"})
+    assert {:ok, %{"engine" => "device", "section" => "computer"}} =
+             request(ctx, "settings.get", %{"section" => "computer"})
 
     assert {:ok, %{"protocol" => %{"current_version" => 2}}} = request(ctx, "hello", %{})
     refute_received {:served, _method, _task}

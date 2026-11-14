@@ -159,6 +159,15 @@ defmodule FermixChannels.Desktop.Relay do
   refused `{:error, {:not_taken, type}}`, since an older server closes the
   session on an event it does not know.
 
+  One set of settings (M97 §19.3, D28): the `hello` says this engine applies
+  the rule that a setting's id names its machine (`caps.computer.
+  machine_settings`), and a server whose `hello_ack` says the same answers
+  its own machine sections (`status/1`'s `machine_settings`). To one whose
+  `hello_ack` does not, no request for its machine settings is sent
+  (`Placement.server_machine_request?/2`): it is answered here, `unavailable`
+  with the sentence that the server takes them only on itself
+  (`Placement.older_server/1`).
+
   ## Bounds
 
   At most 4 channels at once, numbered round the 64 the wire allows so a
@@ -308,7 +317,8 @@ defmodule FermixChannels.Desktop.Relay do
           sentence: String.t(),
           down_ms: non_neg_integer() | nil,
           down_at: DateTime.t() | nil,
-          path: :direct | :relay | nil
+          path: :direct | :relay | nil,
+          machine_settings: boolean()
         }
 
   @spec start_link(keyword()) :: GenServer.on_start()
@@ -502,6 +512,7 @@ defmodule FermixChannels.Desktop.Relay do
       record_epoch: Keyword.get(opts, :record_epoch, &DesktopLink.record_epoch/3),
       offers: Keyword.get(opts, :offers, ComputerSwitches.listener()),
       computer_caps: %{},
+      machine_settings: false,
       link: nil,
       keypair: nil,
       phase: :connecting,
@@ -693,7 +704,16 @@ defmodule FermixChannels.Desktop.Relay do
     route = route(state)
     opts = rail_opts(state)
     {:ok, connector} = Task.start_link(fn -> run_connector(relay, route, opts) end)
-    %{state | connector: connector, rail: nil, path: nil, phase: :connecting, computer_caps: %{}}
+
+    %{
+      state
+      | connector: connector,
+        rail: nil,
+        path: nil,
+        phase: :connecting,
+        computer_caps: %{},
+        machine_settings: false
+    }
   end
 
   defp route(%{link: %{primary: primary}}),
@@ -869,7 +889,10 @@ defmodule FermixChannels.Desktop.Relay do
       "protocol_v" => Protocol.initiator_version(),
       "relay_list_rev" => state.link.primary.relays_rev,
       "primary_epoch" => state.link.epoch,
-      "platform" => platform()
+      "platform" => platform(),
+      # This engine applies M97 §19.3's rule: the id of a setting names its
+      # machine, so a server may answer its own machine sections.
+      "caps" => %{"computer" => %{"machine_settings" => true}}
     }
   end
 
@@ -928,6 +951,7 @@ defmodule FermixChannels.Desktop.Relay do
       state
       | link: link,
         computer_caps: computer_caps(caps),
+        machine_settings: get_in(caps, ["computer", "machine_settings"]) == true,
         phase: :connected,
         word: :connected,
         since: state.clock.(),
@@ -1544,10 +1568,18 @@ defmodule FermixChannels.Desktop.Relay do
        when phase != :connected,
        do: {:reply, unreachable(state), state}
 
+  # A server whose hello_ack did not say it applies M97 §19.3's rule takes
+  # its own machine settings only on itself, so none is sent (`Placement`).
+  defp forward_call(%{method: method, params: params} = request, deadline_ms, from, state) do
+    if not state.machine_settings and Placement.server_machine_request?(method, params),
+      do: {:reply, Placement.older_server(name(state)), state},
+      else: queue_call(request, deadline_ms, from, state)
+  end
+
   # Each call gets its id and its deadline as it arrives: the deadline covers
   # its wait and its flight, so the caller is answered within it whatever the
   # primary does.
-  defp forward_call(request, deadline_ms, from, state) do
+  defp queue_call(request, deadline_ms, from, state) do
     call_id = "m#{state.call_seq + 1}"
     state = %{state | call_seq: state.call_seq + 1}
 
@@ -2068,7 +2100,8 @@ defmodule FermixChannels.Desktop.Relay do
       sentence: state.sentence,
       down_ms: down_ms(state),
       down_at: state.down_at,
-      path: nil
+      path: nil,
+      machine_settings: false
     }
   end
 
@@ -2084,7 +2117,8 @@ defmodule FermixChannels.Desktop.Relay do
       sentence: state.sentence,
       down_ms: down_ms(state),
       down_at: state.down_at,
-      path: if(connected?, do: state.path)
+      path: if(connected?, do: state.path),
+      machine_settings: connected? and state.machine_settings
     }
   end
 

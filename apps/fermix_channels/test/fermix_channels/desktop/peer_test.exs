@@ -1,9 +1,11 @@
 defmodule FermixChannels.Desktop.PeerTest do
   use ExUnit.Case, async: true
 
+  alias FermixChannels.Desktop.Manage
   alias FermixChannels.Desktop.Peer
   alias FermixChannels.Desktop.Supervisor, as: DesktopSupervisor
   alias FermixChannels.Mobile.Chunks
+  alias FermixCore.Management.Protocol
 
   @device "6f1e2d3c-4b5a-4968-8778-695a4b3c2d1e"
   @since ~U[2026-10-21 08:00:00Z]
@@ -43,6 +45,54 @@ defmodule FermixChannels.Desktop.PeerTest do
     manage: RecordingFamily,
     loopback: RecordingFamily
   }
+
+  # Holds its peer inside a family call until the test says go, so whatever
+  # reaches the peer meanwhile waits in its mailbox, in order.
+  defmodule HoldingFamily do
+    @moduledoc false
+    @behaviour FermixChannels.Desktop.Family
+
+    @impl true
+    def init(context), do: {:ok, context}
+
+    @impl true
+    def handle_event(_type, _fields, _payload, context), do: {:ok, context}
+
+    @impl true
+    def handle_info({:hold, test}, context) do
+      send(test, {:holding, self()})
+
+      receive do
+        :go -> {:ok, context}
+      after
+        10_000 -> {:ok, context}
+      end
+    end
+
+    @impl true
+    def terminate(_reason, _context), do: :ok
+  end
+
+  # Tells the session the context it was started with.
+  defmodule ContextFamily do
+    @moduledoc false
+    @behaviour FermixChannels.Desktop.Family
+
+    @impl true
+    def init(context) do
+      send(context.session, {:family_context, context})
+      {:ok, context}
+    end
+
+    @impl true
+    def handle_event(_type, _fields, _payload, context), do: {:ok, context}
+
+    @impl true
+    def handle_info(_message, context), do: {:ok, context}
+
+    @impl true
+    def terminate(_reason, _context), do: :ok
+  end
 
   setup do
     suffix = System.unique_integer([:positive])
@@ -244,6 +294,51 @@ defmodule FermixChannels.Desktop.PeerTest do
     assert [%{connected_since: ~U[2026-10-21 09:30:00Z]}] = Peer.connected(ctx.registry)
   end
 
+  # A desktop that reconnects: its newer session's peer stops the older one,
+  # whose own session ended at the same moment (the registry replaced it), so
+  # the older peer ends by itself, `:normal`, while it is being stopped. The
+  # newer peer starts all the same: the older is gone either way. Ordered by
+  # hand: the older's session ends while the older is held, then the newer's
+  # stop reaches it behind that ending.
+  test "a newer peer starts when the older one ends by itself as it is stopped", ctx do
+    older_session =
+      spawn(fn ->
+        receive do
+          :end -> :ok
+        end
+      end)
+
+    older = start_peer!(ctx, older_session, families: %{companion: HoldingFamily})
+    ref = Process.monitor(older)
+    :ok = Peer.tell(@device, :companion, {:hold, self()}, registry: ctx.registry)
+    assert_receive {:holding, ^older}
+
+    send(older_session, :end)
+
+    await(fn ->
+      Enum.any?(mailbox(older), &match?({:DOWN, _ref, :process, ^older_session, _}, &1))
+    end)
+
+    {:monitored_by, watchers} = Process.info(older, :monitored_by)
+
+    opts = [
+      device_id: @device,
+      session: forwarder(),
+      registry: ctx.registry,
+      standing: :current,
+      connected_since: ~U[2026-10-21 09:30:00Z],
+      families: %{companion: RecordingFamily}
+    ]
+
+    start = Task.async(fn -> Peer.start(ctx.supervisor, opts) end)
+    await(fn -> elem(Process.info(older, :monitored_by), 1) -- watchers != [] end)
+    send(older, :go)
+
+    assert {:ok, newer} = Task.await(start, 10_000)
+    assert_receive {:DOWN, ^ref, :process, ^older, :normal}
+    assert {:ok, ^newer, _value} = Peer.lookup(ctx.registry, @device)
+  end
+
   test "every desktop-family event names one of the families" do
     for {type, family} <- Peer.event_families() do
       assert family in Peer.family_names(), type
@@ -252,6 +347,37 @@ defmodule FermixChannels.Desktop.PeerTest do
 
     refute Peer.family_event?("hello")
     refute Peer.family_event?("msg")
+  end
+
+  # M97 §19.3: whether the desktop's hello said it applies the rule reaches
+  # every family, and the forwarded management family hands it to the call
+  # it serves, so the primary refuses a sandbox value from one that did not.
+  test "whether the desktop applies the settings rule reaches its families and each call", ctx do
+    for {said, expected} <- [{[machine_settings: true], true}, {[], false}] do
+      start_peer!(ctx, forwarder(), [families: %{companion: ContextFamily}] ++ said)
+      assert_receive {:family_context, %{machine_settings: ^expected}}
+    end
+
+    test = self()
+    tasks = start_supervised!(Task.Supervisor)
+
+    serve = fn frame, computer ->
+      send(test, {:served, computer})
+      {:ok, response} = Protocol.respond(Jason.decode!(frame)["request_id"], {:ok, %{}})
+      response
+    end
+
+    peer =
+      start_peer!(ctx, forwarder(),
+        machine_settings: true,
+        families: %{manage: {Manage, serve: serve, task_supervisor: tasks}}
+      )
+
+    header = %{"call_id" => "m1", "method" => "settings.get", "protocol_version" => 2}
+    fields = Map.merge(header, %{"index" => 0, "last" => true})
+
+    assert :ok = Peer.deliver(peer, event("manage", fields, ~s({"section":"sandbox"})))
+    assert_receive {:served, %{device_id: @device, machine_settings: true}}
   end
 
   defp start_peer!(ctx, session, opts \\ []) do
@@ -273,6 +399,28 @@ defmodule FermixChannels.Desktop.PeerTest do
   end
 
   # A stand-in for the desktop's session: whatever reaches it reaches the test.
+  defp mailbox(pid) do
+    {:messages, messages} = Process.info(pid, :messages)
+    messages
+  end
+
+  # Waits until `ready?` holds, within 10 s: it reads another process's state,
+  # which tells nobody when it moves.
+  defp await(ready?, attempts \\ 1_000) do
+    cond do
+      ready?.() ->
+        :ok
+
+      attempts == 0 ->
+        flunk("the peer never reached the state this test waits for")
+
+      true ->
+        # sleep: polls another process's mailbox and monitors, which notify nobody
+        Process.sleep(10)
+        await(ready?, attempts - 1)
+    end
+  end
+
   defp forwarder do
     test = self()
     spawn_link(fn -> forward(test) end)

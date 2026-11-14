@@ -373,6 +373,38 @@ defmodule Fermix.CLI.SettingsCommandTest do
       assert opts[:timeout] == 30_000
     end
 
+    # M97 §19.3: a section names the machine whose files are read again, so
+    # on a linked computer `reload computer.sandbox` clears an outside edit
+    # of this computer's own files; it is passed through as the app sends it.
+    test "a section names the machine that reads its settings again" do
+      reply =
+        {:ok,
+         %{
+           "reloaded" => true,
+           "restart" => @restart,
+           "readiness" => @ready,
+           "config_state" => "clear"
+         }}
+
+      {0, stdout, ""} = run(["reload", "computer.sandbox"], client(%{"settings.reload" => reply}))
+
+      assert stdout =~ "Reloaded settings from disk.\n"
+      assert [{"settings.reload", %{"section" => "computer.sandbox"}, _opts}] = calls()
+    end
+
+    test "an outside edit of this computer's own settings names its reload" do
+      replies = %{
+        "settings.get" => {:ok, @memory},
+        "settings.apply" => mgmt("external_change", %{"section" => "computer.sandbox"})
+      }
+
+      assert run(["set", "memory", "review_interval_hours=12"], client(replies)) ==
+               {1, "",
+                "fermix settings: config.toml or machine.toml changed outside Fermix, so " <>
+                  "nothing was saved.\nLoad them with `fermix settings reload computer.sandbox`, " <>
+                  "then retry.\n"}
+    end
+
     test "an unreadable config prints the daemon's sentence" do
       reply = mgmt("config_unreadable", %{"sentence" => "config.toml line 3 is not TOML."})
 

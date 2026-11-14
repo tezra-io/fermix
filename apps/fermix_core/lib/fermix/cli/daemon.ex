@@ -65,9 +65,11 @@ defmodule Fermix.CLI.Daemon do
   alias FermixCore.Introspection.Capabilities
   alias FermixCore.Introspection.Wire
   alias FermixCore.Management.Accessories, as: ManagementAccessories
+  alias FermixCore.Management.ComputerSettings
   alias FermixCore.Management.Cues, as: ManagementCues
   alias FermixCore.Management.Home, as: ManagementHome
   alias FermixCore.Management.HomeMove, as: ManagementHomeMove
+  alias FermixCore.Management.HomeSummary
   alias FermixCore.Management.Lifecycle
   alias FermixCore.Management.Mobile, as: ManagementMobile
   alias FermixCore.Management.Placement
@@ -130,6 +132,11 @@ defmodule Fermix.CLI.Daemon do
   # On step, so a sentence of its own, under the Always On capability.
   @computer_owner_sentence "Only the person at this computer can change what Fermix on your " <>
                              "server may use on it: use the Fermix app or the setup page."
+  # A machine's own settings (M97 §19.3, D28): its sandbox, browser, coding
+  # agents' approval, screen, history and accessory link, the server's or
+  # this computer's, and a sandbox value of either.
+  @machine_owner_sentence "Only the owner can change a computer's own settings, its sandbox " <>
+                            "among them: use the Fermix app or the setup page."
   @owner_decisions_v0 ~w(mobile_pair_begin mobile_pair_decide mobile_pair_cancel
                          mobile_device_revoke)
   # The cue writes that widen what reaches a task or what a task may do, the
@@ -168,17 +175,26 @@ defmodule Fermix.CLI.Daemon do
   answer is the response this socket would send. It runs in the caller with
   the options this daemon passes its router, and the actor
   `{:desktop, device_id}`. The desktop's engine placed its own caller before
-  forwarding, so an owner decision is served; a device-class request is
-  refused with `device_class_method`.
+  forwarding, so an owner decision is served; a device-class request (a
+  `computer` or `computer.<id>` setting among them, M97 §19.3) is refused with
+  `device_class_method`. `computer` is who sent it: its device id, and
+  whether its `hello` said it applies §19.3's rule (`machine_settings`); a
+  sandbox value from one that did not is refused (`Placement.older_computer/0`).
   """
-  @spec serve_forwarded(binary(), String.t(), GenServer.server()) :: map()
-  def serve_forwarded(frame, device_id, server \\ __MODULE__)
-      when is_binary(frame) and is_binary(device_id) and device_id != "" do
+  @spec serve_forwarded(
+          binary(),
+          %{device_id: String.t(), machine_settings: boolean()},
+          GenServer.server()
+        ) :: map()
+  def serve_forwarded(frame, computer, server \\ __MODULE__)
+
+  def serve_forwarded(frame, %{device_id: device_id, machine_settings: takes?} = computer, server)
+      when is_binary(frame) and is_binary(device_id) and device_id != "" and is_boolean(takes?) do
     opts = GenServer.call(server, :management_opts)
 
     case ManagementProtocol.decode_request(frame) do
       {:ok, {:v1, request}} ->
-        management_response(request.request_id, forwarded_result(request, device_id, opts))
+        management_response(request.request_id, forwarded_result(request, computer, opts))
 
       {:error, {:v1, response}} ->
         response
@@ -191,10 +207,27 @@ defmodule Fermix.CLI.Daemon do
     end
   end
 
-  defp forwarded_result(request, device_id, opts) do
-    if Placement.served_forwarded?(request.method, request.params),
-      do: route_management_request(request, Keyword.put(opts, :actor, {:desktop, device_id})),
-      else: Placement.device_class_refusal(request.method)
+  defp forwarded_result(request, computer, opts) do
+    cond do
+      not Placement.served_forwarded?(request.method, request.params) ->
+        Placement.device_class_refusal(request.method)
+
+      older_computer?(request, computer) ->
+        Placement.older_computer()
+
+      true ->
+        route_management_request(
+          request,
+          Keyword.put(opts, :actor, {:desktop, computer.device_id})
+        )
+    end
+  end
+
+  # A computer without §19.3's rule answers its own sandbox itself, so a
+  # sandbox value it sends was typed in its own Sandbox pane.
+  defp older_computer?(request, %{machine_settings: takes?}) do
+    not takes? and request.method in @secret_writes and
+      Placement.server_machine_request?(request.method, request.params)
   end
 
   @impl true
@@ -497,10 +530,23 @@ defmodule Fermix.CLI.Daemon do
   # own work run on this computer among them.
   defp owner_family("settings.apply", %{"section" => "computer"}), do: :computer
 
-  defp owner_family("settings.apply", %{"section" => section}) when is_binary(section),
-    do: if(SettingsCues.owns?(section), do: :cues)
+  # A machine's own settings, the server's or this computer's, and a sandbox
+  # value of either (M97 §19.3, `Placement.machine_write?/2`): a process the
+  # daemon started never asks this computer's engine to widen the server.
+  defp owner_family(method, params) when method in ["settings.apply" | @secret_writes] do
+    cond do
+      Placement.machine_write?(method, params) -> :machine
+      method == "settings.apply" and cue_section?(params) -> :cues
+      true -> nil
+    end
+  end
 
   defp owner_family(_method, _params), do: nil
+
+  defp cue_section?(%{"section" => section}) when is_binary(section),
+    do: SettingsCues.owns?(section)
+
+  defp cue_section?(_params), do: false
 
   # v0 carries the phone's decisions alone.
   defp owner_family_v0(method) when method in @owner_decisions_v0, do: :mobile
@@ -535,6 +581,10 @@ defmodule Fermix.CLI.Daemon do
     {:error, :unavailable,
      %{"capability" => ManagementHomeMove.capability(), "sentence" => @computer_owner_sentence}}
   end
+
+  defp owner_decision_refusal(:machine),
+    do:
+      {:error, :unavailable, %{"capability" => "settings", "sentence" => @machine_owner_sentence}}
 
   defp owner_decision_refusal(:cues) do
     {:error, :unavailable,
@@ -584,7 +634,9 @@ defmodule Fermix.CLI.Daemon do
         route_management_request(request, opts)
 
       :primary ->
-        guarded(request.method, fn -> forward.(request, []) end)
+        guarded(request.method, fn ->
+          request |> forward.([]) |> server_answer(request, state)
+        end)
     end
   end
 
@@ -598,6 +650,67 @@ defmodule Fermix.CLI.Daemon do
 
   defp route_management_request(request, opts),
     do: guarded(request.method, fn -> ManagementRouter.route(request, opts) end)
+
+  # What a linked computer adds to the server's answer (M97 §19): a machine
+  # section's title names the server (`ComputerSettings.server_title/3`), as
+  # the composed list does, and the restart state the server reports carries
+  # the step that restarts it (`Placement.decorated?/1`, D28c): the record
+  # this computer's summary offers, so the app presses one step everywhere.
+  defp server_answer(
+         {:ok, %{"id" => id, "title" => title} = view},
+         %{method: "settings.get"},
+         state
+       )
+       when is_binary(id) and is_binary(title) do
+    if Placement.machine_section?(id),
+      do:
+        {:ok, %{view | "title" => ComputerSettings.server_title(id, title, server_name(state))}},
+      else: {:ok, view}
+  end
+
+  defp server_answer({:ok, %{} = answer}, %{method: method}, state) do
+    if Placement.decorated?(method),
+      do: {:ok, with_restart_step(method, answer, server_name(state))},
+      else: {:ok, answer}
+  end
+
+  defp server_answer(result, _request, _state), do: result
+
+  defp with_restart_step("setup.state.get", answer, name),
+    do:
+      Map.put(answer, "restart_step", restart_step(get_in(answer, ["restart", "required"]), name))
+
+  defp with_restart_step("overview.get", %{"health" => %{} = health} = answer, name) do
+    step = restart_step(health["restart_required"], name)
+    %{answer | "health" => Map.put(health, "restart_step", step)}
+  end
+
+  defp with_restart_step(_method, answer, _name), do: answer
+
+  defp restart_step(true, name) when is_binary(name) and name != "",
+    do: HomeSummary.restart_server_action(name)
+
+  defp restart_step(_required, _name), do: nil
+
+  # The server's name as this computer's link knows it, nil when it says none.
+  defp server_name(state) do
+    case home_link_status(state) do
+      %{primary: %{name: name}} when is_binary(name) -> name
+      _no_name -> nil
+    end
+  end
+
+  defp home_link_status(state) do
+    state.management_opts
+    |> Keyword.get(:operation_opts, [])
+    |> Keyword.get(:home, [])
+    |> Keyword.get(:link_status, fn -> HomeLink.impl().status() end)
+    |> safe_daemon_call()
+    |> case do
+      {:ok, status} -> status
+      {:error, reason} -> Logger.warning("the link's status did not answer: #{inspect(reason)}")
+    end
+  end
 
   defp guarded(method, answer) do
     answer.()

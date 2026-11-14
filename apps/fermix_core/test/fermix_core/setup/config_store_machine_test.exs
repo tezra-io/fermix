@@ -6,6 +6,7 @@ defmodule FermixCore.Setup.ConfigStoreMachineTest do
 
   import ExUnit.CaptureLog
 
+  alias FermixCore.Browser.Config, as: BrowserConfig
   alias FermixCore.ComputerHistory.Config, as: ComputerHistoryConfig
   alias FermixCore.ComputerUse.Config, as: ComputerUseConfig
   alias FermixCore.Harness.Config, as: HarnessConfig
@@ -1136,6 +1137,343 @@ defmodule FermixCore.Setup.ConfigStoreMachineTest do
       assert :ok = ConfigStore.migrate_machine_file(ctx.home, server?: false, app_engine?: false)
       assert File.read!(MachineFile.path(ctx.home)) == @m97_machine
     end
+  end
+
+  # M97 D28d: every settable key of `[fermix_core.browser]` is this
+  # computer's own, read only from its machine.toml and written only there,
+  # so a server's browser and a computer's are each their own.
+  describe "the browser's keys" do
+    # A home an engine before this change wrote: the browser in config.toml.
+    @released_browser """
+    [fermix_core.agent]
+    name = "Orchard"
+
+    [fermix_core.browser]
+    allowed_hosts = ["printer.invented"]
+    max_tabs = 4
+    """
+
+    # The machine file an earlier engine of M97 wrote: no browser table.
+    @earlier_machine MachineFile.header() <>
+                       "\n\n[sandbox]\nmode = \"standard\"\n\n[fermix_core.harness]\napproved = false\n"
+
+    # The Config round-trips rule: seeded with the shapes application
+    # environment holds, which is what setup saves.
+    test "save then load: every key through machine.toml only, none through config.toml", ctx do
+      browser =
+        BrowserConfig.normalize(
+          allowed_hosts: ["printer.invented", "10.20.30.40"],
+          default_profile: "fermix_headless",
+          max_tabs: 4,
+          launch_app: false
+        )
+
+      snapshot = %{
+        fermix_core: [agent: [name: "Orchard"], browser: browser],
+        fermix_channels: [],
+        fermix_web: []
+      }
+
+      assert :ok = ConfigStore.save_snapshot(snapshot)
+
+      config = File.read!(Path.join(ctx.home, "config.toml"))
+      machine = File.read!(MachineFile.path(ctx.home))
+
+      refute config =~ "[fermix_core.browser]"
+      refute config =~ "printer.invented"
+      assert MachineFile.strip(config) == {config, []}
+
+      assert ConfigText.value(machine, "fermix_core.browser", "allowed_hosts") ==
+               {:ok, ~s(["printer.invented", "10.20.30.40"])}
+
+      assert ConfigText.value(machine, "fermix_core.browser", "default_profile") ==
+               {:ok, ~s("fermix_headless")}
+
+      assert ConfigText.value(machine, "fermix_core.browser", "max_tabs") == {:ok, "4"}
+      assert ConfigText.value(machine, "fermix_core.browser", "launch_app") == {:ok, "false"}
+
+      assert {:ok, loaded} = ConfigStore.load_runtime_config(resolve_secrets: false)
+      assert Enum.sort(Keyword.fetch!(loaded.fermix_core, :browser)) == Enum.sort(browser)
+
+      assert {:ok, _config} =
+               BrowserConfig.current(loaded.fermix_core[:browser], engine_web_port: 4031)
+
+      # And again: a save of what was loaded writes the same two files.
+      assert :ok = ConfigStore.save_snapshot(loaded)
+      assert File.read!(MachineFile.path(ctx.home)) == machine
+      assert File.read!(Path.join(ctx.home, "config.toml")) == config
+    end
+
+    # The marker: a save with no browser setting writes how tasks run at its
+    # default, which is what the browser does with none.
+    test "a save with no browser setting writes the table at its default, and it loads so", ctx do
+      snapshot = %{fermix_core: [agent: [name: "Orchard"]], fermix_channels: [], fermix_web: []}
+
+      assert :ok = ConfigStore.save_snapshot(snapshot)
+
+      machine = File.read!(MachineFile.path(ctx.home))
+
+      assert ConfigText.value(machine, "fermix_core.browser", "default_profile") ==
+               {:ok, ~s("fermix")}
+
+      assert {:ok, loaded} = ConfigStore.load_runtime_config(resolve_secrets: false)
+      assert Keyword.fetch!(loaded.fermix_core, :browser) == [default_profile: "fermix"]
+
+      assert {:ok, with_marker} = BrowserConfig.current(loaded_browser(), engine_web_port: 4031)
+      assert {:ok, without} = BrowserConfig.current([], engine_web_port: 4031)
+      assert with_marker == without
+    end
+
+    # Every home at its first start of this engine: config.toml holds the
+    # browser in force, and its machine file has no table for it.
+    test "the boot moves them into a machine file that has no table, once", ctx do
+      File.write!(Path.join(ctx.home, "config.toml"), @released_browser)
+      File.write!(MachineFile.path(ctx.home), @earlier_machine)
+
+      # Its notice is an info line (`MachineFile.notice/1`, pinned there).
+      assert :ok = ConfigStore.migrate_machine_file(ctx.home, server?: false)
+
+      machine = File.read!(MachineFile.path(ctx.home))
+      config = File.read!(Path.join(ctx.home, "config.toml"))
+
+      assert machine =~ ~s([sandbox]\nmode = "standard")
+      assert ConfigText.value(machine, "fermix_core.browser", "max_tabs") == {:ok, "4"}
+      refute config =~ "[fermix_core.browser]"
+      assert ConfigText.value(config, "fermix_core.agent", "name") == {:ok, ~s("Orchard")}
+      assert loaded_browser()[:allowed_hosts] == ["printer.invented"]
+      assert loaded_browser()[:max_tabs] == 4
+
+      assert :ok = ConfigStore.migrate_machine_file(ctx.home, server?: false)
+      assert File.read!(MachineFile.path(ctx.home)) == machine
+      assert File.read!(Path.join(ctx.home, "config.toml")) == config
+    end
+
+    test "the boot moves them with the rest where there is no machine file", ctx do
+      File.write!(Path.join(ctx.home, "config.toml"), @released_browser)
+
+      assert :ok = ConfigStore.migrate_machine_file(ctx.home, server?: false)
+
+      machine = File.read!(MachineFile.path(ctx.home))
+      assert machine == MachineFile.extract(@released_browser)
+      assert ConfigText.value(machine, "fermix_core.browser", "max_tabs") == {:ok, "4"}
+      refute File.read!(Path.join(ctx.home, "config.toml")) =~ "max_tabs"
+      assert loaded_browser()[:max_tabs] == 4
+    end
+
+    # Stopped inside the first write: the old machine file and a temporary
+    # one are there, so the step runs again and loses nothing.
+    test "a boot stopped while writing the machine file takes them again", ctx do
+      File.write!(Path.join(ctx.home, "config.toml"), @released_browser)
+      File.write!(MachineFile.path(ctx.home), @earlier_machine)
+      File.write!(MachineFile.path(ctx.home) <> ".tmp", "[fermix_core.browser]\nmax_t")
+
+      assert :ok = ConfigStore.migrate_machine_file(ctx.home, server?: false)
+
+      refute File.exists?(MachineFile.path(ctx.home) <> ".tmp")
+
+      assert File.read!(MachineFile.path(ctx.home)) ==
+               MachineFile.migration(@released_browser, @earlier_machine, false).machine
+
+      assert loaded_browser()[:max_tabs] == 4
+    end
+
+    # Stopped after the machine file was written and before config.toml was:
+    # the machine file holds the table and wins, and the next boot finishes
+    # the removal.
+    test "a boot stopped between the two writes is finished by the next, the machine file winning",
+         ctx do
+      plan = MachineFile.migration(@released_browser, @earlier_machine, false)
+      File.write!(Path.join(ctx.home, "config.toml"), @released_browser)
+      File.write!(MachineFile.path(ctx.home), plan.machine)
+
+      log =
+        capture_log(fn ->
+          assert :ok = ConfigStore.migrate_machine_file(ctx.home, server?: false)
+        end)
+
+      assert log =~ "so they were removed from it: fermix_core.browser.allowed_hosts"
+      assert File.read!(MachineFile.path(ctx.home)) == plan.machine
+      assert File.read!(Path.join(ctx.home, "config.toml")) == plan.config
+      assert loaded_browser()[:max_tabs] == 4
+    end
+
+    # Stopped inside the second write: config.toml as it was, and its
+    # temporary file, which is written again.
+    test "a boot stopped while writing config.toml finishes it", ctx do
+      plan = MachineFile.migration(@released_browser, @earlier_machine, false)
+      File.write!(Path.join(ctx.home, "config.toml"), @released_browser)
+      File.write!(MachineFile.path(ctx.home), plan.machine)
+      File.write!(Path.join(ctx.home, "config.toml.tmp"), "[fermix_core.agent]\nna")
+
+      assert :ok = ConfigStore.migrate_machine_file(ctx.home, server?: false)
+
+      refute File.exists?(Path.join(ctx.home, "config.toml.tmp"))
+      assert File.read!(Path.join(ctx.home, "config.toml")) == plan.config
+      assert File.read!(MachineFile.path(ctx.home)) == plan.machine
+    end
+
+    # After the move, a copy written into config.toml by hand is read by
+    # nothing, a reload names it, and the next start removes it.
+    test "a copy written into config.toml after the move is ignored, named and then removed",
+         ctx do
+      File.write!(Path.join(ctx.home, "config.toml"), @released_browser)
+      assert :ok = ConfigStore.migrate_machine_file(ctx.home, server?: false)
+      moved = File.read!(Path.join(ctx.home, "config.toml"))
+
+      File.write!(
+        Path.join(ctx.home, "config.toml"),
+        moved <> "\n[fermix_core.browser]\nmax_tabs = 9\nlaunch_app = true\n"
+      )
+
+      assert loaded_browser()[:max_tabs] == 4
+      refute Keyword.has_key?(loaded_browser(), :launch_app)
+
+      assert ConfigStore.misplaced_machine_settings(ctx.home) ==
+               {:ok, ~w(fermix_core.browser.max_tabs fermix_core.browser.launch_app)}
+
+      log =
+        capture_log(fn ->
+          assert :ok = ConfigStore.migrate_machine_file(ctx.home, server?: false)
+        end)
+
+      assert log =~
+               "so they were removed from it: fermix_core.browser.max_tabs, " <>
+                 "fermix_core.browser.launch_app."
+
+      assert ConfigStore.misplaced_machine_settings(ctx.home) == {:ok, []}
+      assert loaded_browser()[:max_tabs] == 4
+    end
+
+    test "a machine file whose table names a key that is not settable refuses the load", ctx do
+      File.write!(
+        MachineFile.path(ctx.home),
+        "[fermix_core.browser]\nmax_tabs = 4\naction_timeout_ms = 60000\n"
+      )
+
+      error =
+        assert_raise ArgumentError, fn ->
+          ConfigStore.load_runtime_config(resolve_secrets: false)
+        end
+
+      assert error.message =~
+               "machine.toml [fermix_core.browser] has unknown key(s): action_timeout_ms."
+
+      assert error.message =~ "allowed_hosts, default_profile, max_tabs, launch_app"
+    end
+
+    # M97 §4: a server's new machine file is its own default, its browser's
+    # among it; what config.toml held of the computer's is left out.
+    test "an Always On server's default machine file holds the browser at its defaults", ctx do
+      File.write!(Path.join(ctx.home, "config.toml"), @released_browser)
+
+      log =
+        capture_log(fn ->
+          assert :ok = ConfigStore.migrate_machine_file(ctx.home, server?: true)
+        end)
+
+      assert log =~ "left out: fermix_core.browser.allowed_hosts, fermix_core.browser.max_tabs."
+      machine = File.read!(MachineFile.path(ctx.home))
+      assert machine == MachineFile.server_default()
+
+      assert ConfigText.value(machine, "fermix_core.browser", "default_profile") ==
+               {:ok, ~s("fermix")}
+
+      refute File.read!(Path.join(ctx.home, "config.toml")) =~ "printer.invented"
+      assert loaded_browser() == [default_profile: "fermix"]
+    end
+
+    # M97 §3.1: a computer that joined is a linked computer from its first
+    # start, and its home may have no machine file yet. It takes the shipped
+    # defaults and writes nothing; its switches, which the join writes, make
+    # the file; its own browser, from before it joined, stays its own.
+    test "a computer that just joined, with no machine file", ctx do
+      File.mkdir_p!(Path.dirname(DesktopLink.path(ctx.home)))
+      File.write!(DesktopLink.path(ctx.home), "{}")
+      device = ~s([fermix_core.engine]\nrole = "device"\n)
+      File.write!(Path.join(ctx.home, "config.toml"), device)
+
+      assert :ok = ConfigStore.migrate_machine_file(ctx.home, server?: false)
+      refute File.exists?(MachineFile.path(ctx.home))
+      assert File.read!(Path.join(ctx.home, "config.toml")) == device
+      assert loaded_browser() == []
+
+      # The join writes its switches through the one writer of a machine
+      # table (`Computers.Switches.write/2`): a machine file with no browser
+      # table, which a boot leaves as it is while config.toml holds none.
+      assert :ok =
+               ConfigStore.put_machine_table(ctx.home, "fermix_core.computer", [
+                 {"enabled", "true"},
+                 {"reviewed", "true"}
+               ])
+
+      switched = File.read!(MachineFile.path(ctx.home))
+      assert :ok = ConfigStore.migrate_machine_file(ctx.home, server?: false)
+      assert File.read!(MachineFile.path(ctx.home)) == switched
+      assert loaded_browser() == []
+
+      # Its first save of the settings writes the table there, not in config.toml.
+      {:ok, loaded} = ConfigStore.load_runtime_config(resolve_secrets: false)
+      assert :ok = ConfigStore.save_snapshot(loaded)
+
+      assert ConfigText.value(
+               File.read!(MachineFile.path(ctx.home)),
+               "fermix_core.browser",
+               "default_profile"
+             ) ==
+               {:ok, ~s("fermix")}
+
+      refute File.read!(Path.join(ctx.home, "config.toml")) =~ "[fermix_core.browser]"
+    end
+
+    test "a computer that joined keeps the browser its config.toml held before", ctx do
+      File.mkdir_p!(Path.dirname(DesktopLink.path(ctx.home)))
+      File.write!(DesktopLink.path(ctx.home), "{}")
+
+      File.write!(
+        Path.join(ctx.home, "config.toml"),
+        ~s([fermix_core.engine]\nrole = "device"\n\n) <> @released_browser
+      )
+
+      assert :ok = ConfigStore.migrate_machine_file(ctx.home, server?: false)
+
+      assert ConfigText.value(
+               File.read!(MachineFile.path(ctx.home)),
+               "fermix_core.browser",
+               "max_tabs"
+             ) == {:ok, "4"}
+
+      refute File.read!(Path.join(ctx.home, "config.toml")) =~ "max_tabs"
+      assert loaded_browser()[:max_tabs] == 4
+    end
+
+    # M97 §7.2: a setup page left open while the browser was changed
+    # elsewhere saves another tab: the browser it never changed is the
+    # file's at the save.
+    test "a stale setup page never takes back a browser setting changed elsewhere" do
+      base = %{fermix_core: [browser: [max_tabs: 4]], fermix_channels: [], fermix_web: []}
+
+      assert :ok = ConfigStore.save_snapshot(base)
+      {:ok, base} = ConfigStore.load_runtime_config(resolve_secrets: false)
+
+      # Elsewhere, since: the app sets how many tabs the browser keeps.
+      assert :ok = ConfigStore.save_snapshot(put_in(base, [:fermix_core, :browser, :max_tabs], 7))
+
+      # The stale page changes the agent's name only, and its block names
+      # no default, as a form that leaves the choice alone does.
+      stale =
+        base
+        |> put_in([:fermix_core, :agent], name: "Orchard")
+        |> update_in([:fermix_core, :browser], &Keyword.delete(&1, :default_profile))
+
+      assert {:ok, written} = ConfigStore.save_changes(stale, base, supervised: false)
+      assert Keyword.fetch!(written.fermix_core, :browser)[:max_tabs] == 7
+      assert loaded_browser()[:max_tabs] == 7
+    end
+  end
+
+  defp loaded_browser do
+    assert {:ok, loaded} = ConfigStore.load_runtime_config(resolve_secrets: false)
+    Keyword.fetch!(loaded.fermix_core, :browser)
   end
 
   defp loaded_harness do

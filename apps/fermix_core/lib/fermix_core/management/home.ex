@@ -131,6 +131,17 @@ defmodule FermixCore.Management.Home do
   for at most ten minutes, `{reason, count, wait_s, sentence}`; null when
   nothing does.
 
+  **One set of settings after a move** (M97 D28). `restart` is this engine's
+  own restart state (`Management.Settings.restart/0`, `{required, reasons}`)
+  and `profile` its own keychain profile, on every engine, so on a linked
+  computer the top-level ones are the computer's and `primary_home`'s are the
+  server's. `computer_change` is, on the primary, the newest change one of
+  its computers made to its sandbox or coding approval
+  (`Home.ChangedFromComputer`, `{at, computer, what, value}`), null when
+  none and on every other engine; its notice is in the summary.
+  `home.restart` is the server's restart a linked computer asks for
+  (`restart/1`), rail-only.
+
   `home.snapshots.run` starts a snapshot now (`busy` while one runs);
   `home.snapshots.passphrase` derives a new recovery key from
   `recovery_passphrase` and keeps only its public half in
@@ -154,6 +165,7 @@ defmodule FermixCore.Management.Home do
   `:version`, `:now`, `:host_os`, `:always_on_server` (a boolean),
   `:release_table` (in place of `Home.ReleaseTable.current/0`),
   `:computer_work` (0-arity, the work in progress on the computers),
+  `:engine_restart` (0-arity, in place of `Management.Settings.restart/0`),
   `:return_boot` (in place of
   `Home.Return.boot_done/0`) and `:stop_return` (in place of the rail's,
   which a desktop's move back the home went past is stopped with); `:jobs`
@@ -176,6 +188,7 @@ defmodule FermixCore.Management.Home do
   alias FermixCore.Cues.Config, as: CuesConfig
   alias FermixCore.Home.AlwaysOn
   alias FermixCore.Home.Candidate
+  alias FermixCore.Home.ChangedFromComputer
   alias FermixCore.Home.Disk
   alias FermixCore.Home.Epoch
   alias FermixCore.Home.Join
@@ -189,6 +202,7 @@ defmodule FermixCore.Management.Home do
   alias FermixCore.Home.Return
   alias FermixCore.Home.Role
   alias FermixCore.Home.ServerPrimary
+  alias FermixCore.Home.ServerRestart
   alias FermixCore.Home.Snapshot.Recipient
   alias FermixCore.Home.Snapshot.Recovery
   alias FermixCore.Home.Snapshot.Scheduler
@@ -198,7 +212,9 @@ defmodule FermixCore.Management.Home do
   alias FermixCore.Management.HomeMove
   alias FermixCore.Management.HomeSummary
   alias FermixCore.Management.Jobs
+  alias FermixCore.Management.Lifecycle
   alias FermixCore.Management.Placement
+  alias FermixCore.Management.Settings
   alias FermixCore.Setup.ConfigStore
   alias FermixCore.Setup.Endpoint
 
@@ -337,7 +353,10 @@ defmodule FermixCore.Management.Home do
       asking: asking(opts),
       join: joining(home, role),
       screen: screen(role, opts),
-      restart_hold: restart_hold(move.move, opts)
+      restart_hold: restart_hold(move.move, opts),
+      restart: Keyword.get(opts, :engine_restart, &Settings.restart/0).(),
+      profile: profile(opts),
+      computer_change: computer_change(home, role, opts)
     }
 
     facts = put_update(facts, role, listed, opts)
@@ -541,11 +560,61 @@ defmodule FermixCore.Management.Home do
 
   # What holds the restart after an update: a move under way, or work in
   # progress on a computer (`Home.RestartHold`).
-  defp restart_hold(move, opts) do
+  defp restart_hold(move, opts), do: move |> hold(opts) |> RestartHold.to_map()
+
+  defp hold(move, opts) do
     phase = if is_map(move), do: move["phase"]
     now = Keyword.get_lazy(opts, :now, &DateTime.utc_now/0)
-    phase |> RestartHold.view(computer_work(opts), now) |> RestartHold.to_map()
+    RestartHold.view(phase, computer_work(opts), now)
   end
+
+  @doc """
+  What holds this engine's restart now (`Home.RestartHold`), read as
+  `home.status`'s `restart_hold` reads it, for `restart/1`'s waiter: the
+  move's phase this home records, and the work in progress on its computers
+  (`:computer_work`).
+  """
+  @spec current_restart_hold(keyword()) :: RestartHold.hold() | nil
+  def current_restart_hold(opts \\ []) when is_list(opts),
+    do: hold(HomeMove.facts(home(opts), role(opts), %{}, opts).move, opts)
+
+  @doc """
+  `home.restart` (M97 D28c): a linked computer's Restart <server>, which the
+  server takes as `fermix restart` would there, after its restart hold
+  (`Home.ServerRestart`, the waiter `:server_restart` names). Its world:
+  the hold now (`:restart_hold`, 0-arity, by default
+  `current_restart_hold/1`), the restart (`:restart`, by default
+  `Lifecycle.restart_self/0`) and whether something starts this engine
+  again (`:restarts_itself`, by default `Lifecycle.restarts_itself?/0`).
+  """
+  @spec restart(keyword()) :: ServerRestart.answer()
+  def restart(opts \\ []) when is_list(opts) do
+    ServerRestart.request(Keyword.get(opts, :server_restart, ServerRestart), %{
+      hold: Keyword.get(opts, :restart_hold, fn -> current_restart_hold(opts) end),
+      restart: Keyword.get(opts, :restart, &Lifecycle.restart_self/0),
+      restarts_itself: Keyword.get_lazy(opts, :restarts_itself, &Lifecycle.restarts_itself?/0)
+    })
+  end
+
+  # A change from a computer to this server's sandbox or coding approval
+  # (M97 §19.5), on the primary; one that cannot be read is none, logged once
+  # while it stays so.
+  defp computer_change(home, %{role: :primary}, opts) do
+    read = ChangedFromComputer.read(home)
+    memory = Keyword.get(opts, :unreadable_files, UnreadableFiles)
+    result = if read == :absent, do: :ok, else: unread(read)
+    :ok = UnreadableFiles.log_read(ChangedFromComputer.path(home), "home status", result, memory)
+
+    case read do
+      {:ok, change} -> change
+      _absent_or_unreadable -> nil
+    end
+  end
+
+  defp computer_change(_home, _record, _opts), do: nil
+
+  defp unread({:ok, _change}), do: :ok
+  defp unread(error), do: error
 
   # The work in progress on the home's computers: the invocations that
   # change something and are still waited on (M97 §6,
@@ -691,7 +760,10 @@ defmodule FermixCore.Management.Home do
           optional(:computers) => [Computer.t()],
           optional(:asking) => String.t() | nil,
           optional(:join) => map() | nil,
-          optional(:screen) => map() | nil | :absent
+          optional(:screen) => map() | nil | :absent,
+          optional(:restart) => map(),
+          optional(:profile) => String.t(),
+          optional(:computer_change) => ChangedFromComputer.change() | nil
         }) :: map()
   def picture(
         %{
@@ -730,6 +802,25 @@ defmodule FermixCore.Management.Home do
     }
     |> put_join(Map.get(facts, :join))
     |> put_screen(Map.get(facts, :screen, :absent))
+    |> put_settings(facts)
+  end
+
+  # M97 D28: this engine's own restart and keychain profile, and on the
+  # server the newest change a computer made to its sandbox or coding
+  # approval; every engine's `status/1` carries them, and a record built
+  # from facts without them (the goldens before D28) leaves them out.
+  defp put_settings(record, facts) do
+    record
+    |> put_given(facts, :restart, "restart", & &1)
+    |> put_given(facts, :profile, "profile", & &1)
+    |> put_given(facts, :computer_change, "computer_change", &ChangedFromComputer.view/1)
+  end
+
+  defp put_given(record, facts, key, field, view) do
+    case Map.fetch(facts, key) do
+      {:ok, value} -> Map.put(record, field, view.(value))
+      :error -> record
+    end
   end
 
   # Only on a linked computer: absent everywhere else.

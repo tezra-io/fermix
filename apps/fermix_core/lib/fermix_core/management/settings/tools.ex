@@ -19,16 +19,21 @@ defmodule FermixCore.Management.Settings.Tools do
   and grants are in the home's `config.toml` and have no row, so a write here
   never reaches them. The switch's footer is the history promise
   (`ComputerHistory.Promise`), true on this machine: with or without a server.
+  An Always On server publishes neither `computer_use` nor `computer_history`:
+  nobody sits at it (M97 §19.2).
   """
 
   alias FermixCore.ComputerHistory.Config, as: ComputerHistoryConfig
   alias FermixCore.ComputerHistory.Promise
   alias FermixCore.Harness.Vendors
+  alias FermixCore.Home.Role
+  alias FermixCore.Home.ServerPrimary
   alias FermixCore.Management.Secrets
   alias FermixCore.Management.Settings.Row
   alias FermixCore.Management.Settings.Source
   alias FermixCore.Sandbox.Config, as: SandboxConfig
   alias FermixCore.Sandbox.ExternalEnv
+  alias FermixCore.Setup.ConfigStore
   alias FermixCore.Tools.Media.Registry, as: MediaRegistry
   alias FermixCore.Tools.PlaceSearch.Backend, as: PlaceBackend
   alias FermixCore.Tools.PlaceSearch.Config, as: PlaceConfig
@@ -99,13 +104,26 @@ defmodule FermixCore.Management.Settings.Tools do
   @env_unstorable_footer "Fermix cannot store a value under this name. " <>
                            "Commands get it from the environment Fermix was started with."
 
-  @doc "Every section this module owns, in publication order."
-  @spec sections() :: [%{id: String.t(), pane: String.t(), title: String.t()}]
-  def sections, do: @sections
+  # Nobody sits at an Always On server, so it publishes neither its screen's
+  # nor its history's (M97 §19.2).
+  @screen_sections ~w(computer_use computer_history)
 
-  @doc "Whether this module owns the named section."
-  @spec owns?(String.t()) :: boolean()
-  def owns?(section) when is_binary(section), do: Enum.any?(@sections, &(&1.id == section))
+  @doc """
+  Every section this module owns here, in publication order: on an Always On
+  server's primary, none of the screen's (`server_primary?:` says which for
+  a test).
+  """
+  @spec sections(keyword()) :: [%{id: String.t(), pane: String.t(), title: String.t()}]
+  def sections(opts \\ []) when is_list(opts) do
+    if server_primary?(opts),
+      do: Enum.reject(@sections, &(&1.id in @screen_sections)),
+      else: @sections
+  end
+
+  @doc "Whether this module owns the named section here (`sections/1`'s options)."
+  @spec owns?(String.t(), keyword()) :: boolean()
+  def owns?(section, opts \\ []) when is_binary(section) and is_list(opts),
+    do: Enum.any?(sections(opts), &(&1.id == section))
 
   @doc """
   The rows of one owned section. `host:` (`BootProfile.host/0`'s shape) names
@@ -397,6 +415,15 @@ defmodule FermixCore.Management.Settings.Tools do
 
   defp mode_option(mode),
     do: Row.option(word(mode), title(mode), hint: Map.fetch!(@sandbox_mode_hints, mode))
+
+  # An Always On server's primary (`Home.ServerPrimary`); an engine in any
+  # other role, or one that booted none, is not.
+  defp server_primary?(opts) do
+    Keyword.get_lazy(opts, :server_primary?, fn ->
+      match?(%{role: :primary}, Role.booted()) and
+        ServerPrimary.check(ConfigStore.fermix_home(), Keyword.take(opts, [:macos?])) == :server
+    end)
+  end
 
   defp word(value) when is_atom(value), do: Atom.to_string(value)
   defp title(value) when is_atom(value), do: value |> Atom.to_string() |> String.capitalize()

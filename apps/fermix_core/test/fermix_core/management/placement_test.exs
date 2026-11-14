@@ -8,10 +8,10 @@ defmodule FermixCore.Management.PlacementTest do
 
   @device ~w(
     hello lifecycle.prepare lifecycle.commit lifecycle.cancel diagnostics.build logs.query
-    doctor.start doctor.get doctor.cancel setup.session.create setup.detect coding_agents.check
+    doctor.start doctor.get doctor.cancel setup.session.create
     computer_use.grant.start computer_use.permissions.get imessage.permissions.get
     imessage.grant.start imessage.policy.confirm browser.install.start
-    capabilities.install.start home.status settings.sections home.act
+    home.status settings.sections home.act
   )
 
   test "the device-class methods are this machine's, whatever their parameters" do
@@ -45,7 +45,7 @@ defmodule FermixCore.Management.PlacementTest do
   # code, are served only to a desktop's forward and refused on `daemon.sock`.
   test "the server's Always On steps are the rail's alone, refused elsewhere by name" do
     rail = ~w(home.move.readiness home.move.start home.enroll.open home.enroll.withdraw
-              home.enroll.approve home.enroll.deny home.snapshots.run)
+              home.enroll.approve home.enroll.deny home.snapshots.run home.restart)
 
     assert Enum.sort(Placement.rail_only_methods()) == Enum.sort(rail)
 
@@ -69,24 +69,120 @@ defmodule FermixCore.Management.PlacementTest do
     refute Placement.served_forwarded?("home.act", %{})
   end
 
-  test "settings are placed by section: this machine's own, else the primary's" do
-    for section <- ~w(sandbox computer_use computer_history accessories computer) do
-      assert Placement.place("settings.get", %{"section" => section}) == :device
+  # M97 §19.3 (D28): the id names the machine. `computer` and every
+  # `computer.<id>` are this computer's, for every settings method and every
+  # secret; every other id is the home's, the server's machine sections
+  # included, and `computer_use` and `computer_history` are plain ids.
+  test "settings and secrets are placed by their id: computer and computer.<id> here" do
+    for section <- ~w(computer computer.sandbox computer.browser computer.computer_use
+                      computer.computer_history computer.accessories),
+        method <- ~w(settings.get settings.apply settings.reload) do
+      assert Placement.place(method, %{"section" => section}) == :device,
+             inspect({method, section})
 
-      assert Placement.place("settings.apply", %{"section" => section, "values" => %{}}) ==
-               :device
+      refute Placement.served_forwarded?(method, %{"section" => section}),
+             inspect({method, section})
+    end
+
+    for id <- ~w(computer.env:LEDGER_TOKEN), method <- ~w(secret.set secret.clear) do
+      assert Placement.place(method, %{"id" => id}) == :device
+      refute Placement.served_forwarded?(method, %{"id" => id})
     end
 
     # iMessage's owner and guests are the home's (M97 §4): a linked Mac asks
     # its server, and confirms who Fermix may write to itself.
-    for section <- ~w(providers.openai routing memory browser channels.telegram
-                      channels.imessage snapshots) do
-      assert Placement.place("settings.get", %{"section" => section}) == :primary
+    for section <- ~w(sandbox browser harness_machine computer_use computer_history accessories
+                      providers.openai routing memory channels.telegram channels.imessage
+                      snapshots computer_ computer.),
+        method <- ~w(settings.get settings.apply settings.reload) do
+      assert Placement.place(method, %{"section" => section}) == :primary,
+             inspect({method, section})
+
+      assert Placement.served_forwarded?(method, %{"section" => section}),
+             inspect({method, section})
+    end
+
+    for id <- ~w(env:GARDEN_TOKEN anthropic_api_key computer_api_key), method <- ~w(secret.set) do
+      assert Placement.place(method, %{"id" => id}) == :primary, id
     end
 
     assert Placement.place("imessage.policy.confirm", %{}) == :device
-
     assert Placement.place("settings.get", %{}) == :primary
+    assert Placement.place("settings.reload", %{}) == :primary
+  end
+
+  test "the machine sections, and the writes that are an owner decision" do
+    assert Enum.sort(Placement.machine_sections()) ==
+             ~w(accessories browser computer_history computer_use harness_machine sandbox)
+
+    for section <- ["computer", "computer.sandbox" | Placement.machine_sections()] do
+      assert Placement.machine_write?("settings.apply", %{"section" => section}), section
+    end
+
+    for id <- ~w(env:GARDEN_TOKEN computer.env:LEDGER_TOKEN),
+        method <- ~w(secret.set secret.clear) do
+      assert Placement.machine_write?(method, %{"id" => id}), id
+    end
+
+    refute Placement.machine_write?("settings.apply", %{"section" => "routing"})
+    refute Placement.machine_write?("settings.get", %{"section" => "sandbox"})
+    refute Placement.machine_write?("secret.set", %{"id" => "anthropic_api_key"})
+  end
+
+  test "a server without the rule is asked for none of its machine settings" do
+    for {method, params} <- [
+          {"settings.get", %{"section" => "sandbox"}},
+          {"settings.apply", %{"section" => "harness_machine"}},
+          {"settings.reload", %{"section" => "browser"}},
+          {"secret.set", %{"id" => "env:GARDEN_TOKEN"}},
+          {"secret.clear", %{"id" => "env:GARDEN_TOKEN"}}
+        ] do
+      assert Placement.server_machine_request?(method, params), method
+    end
+
+    refute Placement.server_machine_request?("settings.get", %{"section" => "routing"})
+    refute Placement.server_machine_request?("secret.set", %{"id" => "anthropic_api_key"})
+    refute Placement.server_machine_request?("settings.reload", %{})
+
+    assert {:error, :unavailable, %{"capability" => "settings", "sentence" => sentence}} =
+             Placement.older_server("garden server")
+
+    assert sentence ==
+             "garden server runs an older Fermix, which takes its own sandbox and coding " <>
+               "settings only on the server. It updates on its own."
+
+    assert {:error, :unavailable, %{"sentence" => "Update Fermix on this computer" <> _rest}} =
+             Placement.older_computer()
+  end
+
+  # After a move the notetaker, the local speech-to-text and the coding
+  # agents run on the server; computer use's helper and Messages' here.
+  test "installers and detection are placed by what they are for" do
+    for target <- ~w(meetbot local_stt),
+        do:
+          assert(Placement.place("capabilities.install.start", %{"target" => target}) == :primary)
+
+    for target <- ~w(computer_use_sidecar imessage_helper),
+        do:
+          assert(Placement.place("capabilities.install.start", %{"target" => target}) == :device)
+
+    assert Placement.place("coding_agents.check", %{}) == :primary
+    assert Placement.place("setup.detect", %{"targets" => ["harness_vendors"]}) == :primary
+    assert Placement.place("setup.detect", %{"targets" => ["meetbot", "ollama"]}) == :primary
+    assert Placement.place("setup.detect", %{"targets" => ["existing_primary"]}) == :device
+
+    assert Placement.place("setup.detect", %{"targets" => ["existing_primary", "codex_cli"]}) ==
+             :device
+
+    # A job is answered by the engine that started it.
+    for method <- ~w(job.get job.cancel) do
+      assert Placement.place(method, %{"job_id" => "computer.job:Q2x9"}) == :device
+      refute Placement.served_forwarded?(method, %{"job_id" => "computer.job:Q2x9"})
+      assert Placement.place(method, %{"job_id" => "job:Q2x9"}) == :primary
+    end
+
+    for method <- ~w(setup.state.get overview.get), do: assert(Placement.decorated?(method))
+    refute Placement.decorated?("settings.get")
   end
 
   test "home.status and settings.sections are composed: answered here, served when forwarded" do
@@ -97,7 +193,8 @@ defmodule FermixCore.Management.PlacementTest do
     end
 
     refute Placement.composed?("home.snapshots.status")
-    refute Placement.served_forwarded?("settings.get", %{"section" => "sandbox"})
+    refute Placement.served_forwarded?("settings.get", %{"section" => "computer.sandbox"})
+    assert Placement.served_forwarded?("settings.get", %{"section" => "sandbox"})
     assert Placement.served_forwarded?("settings.get", %{"section" => "routing"})
     assert Placement.composed_deadline_ms() < 10_000
   end
@@ -160,8 +257,25 @@ defmodule FermixCore.Management.PlacementTest do
     assert doc =~ "| every other forwarded method | 8 s | the usual 10 s |"
   end
 
-  test "only a move's start whose answer was lost is unconfirmed, a published code" do
+  test "only a move's start or a restart whose answer was lost is unconfirmed, a published code" do
     assert Placement.unconfirmed_on_loss?("home.move.start")
+
+    # M97 D28c: the server restarts right after it answers Restart <server>,
+    # so a lost answer is no failure either.
+    assert Placement.unconfirmed_on_loss?("home.restart")
+
+    assert Placement.unconfirmed("north-box", "home.restart") ==
+             {:error, :unconfirmed,
+              %{
+                "method" => "home.restart",
+                "primary" => "north-box",
+                "sentence" =>
+                  "The server north-box was asked to restart and did not confirm it in time. " <>
+                    "Always On shows how it stands once the server is back."
+              }}
+
+    assert {:error, :unconfirmed, %{"sentence" => "The server was asked" <> _rest}} =
+             Placement.unconfirmed(nil, "home.restart")
 
     for method <- ~w(home.move.readiness home.snapshots.run settings.apply cues.status),
         do: refute(Placement.unconfirmed_on_loss?(method), method)
@@ -187,13 +301,13 @@ defmodule FermixCore.Management.PlacementTest do
   # This computer's section (M97 §7.2) is served on a linked computer only,
   # and whether coding agents may run here (M98 D5) only where the coding
   # rail runs, never on a computer whose home is on its server.
-  test "every device-class section is one this daemon serves, on a computer or on its own" do
+  test "every machine section is one this daemon serves, on a computer or on its own" do
     served =
       for computer? <- [true, false],
-          section <- Settings.sections(macos?: true, computer?: computer?),
+          section <- Settings.sections(macos?: true, computer?: computer?, server_primary?: false),
           do: section.id
 
-    assert Placement.device_sections() -- served == []
+    assert ["computer" | Placement.machine_sections()] -- served == []
 
     refute "harness_machine" in for(
              section <- Settings.sections(macos?: true, computer?: true),

@@ -39,6 +39,7 @@ defmodule FermixCore.Management.CopyTest do
   alias FermixCore.Home.ReleaseTable
   alias FermixCore.Home.RestartHold
   alias FermixCore.Home.ServerPrimary
+  alias FermixCore.Home.ServerRestart
   alias FermixCore.Home.Snapshot.Recipient, as: SnapshotRecipient
   alias FermixCore.Home.Snapshot.Recovery
   alias FermixCore.Home.Snapshot.Run, as: SnapshotRun
@@ -49,6 +50,7 @@ defmodule FermixCore.Management.CopyTest do
   alias FermixCore.Management.AlwaysOn.Input, as: AlwaysOnInput
   alias FermixCore.Management.Computer, as: ComputerJournal
   alias FermixCore.Management.ComputerLink
+  alias FermixCore.Management.ComputerSettings
   alias FermixCore.Management.ComputerUse
   alias FermixCore.Management.Copy
   alias FermixCore.Management.Cues, as: ManagementCues
@@ -914,7 +916,10 @@ defmodule FermixCore.Management.CopyTest do
       {:error, :unconfirmed, %{"sentence" => unconfirmed}} =
         Placement.unconfirmed("north-box", "home.move.start")
 
-      device = [{"move unconfirmed", unconfirmed}]
+      {:error, :unconfirmed, %{"sentence" => restart_unconfirmed}} =
+        Placement.unconfirmed("north-box", "home.restart")
+
+      device = [{"move unconfirmed", unconfirmed}, {"restart unconfirmed", restart_unconfirmed}]
 
       for {where, text} <-
             section_rows ++
@@ -942,6 +947,7 @@ defmodule FermixCore.Management.CopyTest do
         end
 
       Enum.map(AlwaysOn.sentences(), &{"home.act", &1}) ++
+        Enum.map(ServerRestart.sentences(), &{"home.restart", &1}) ++
         [{"rail-only step", rail_only} | inputs]
     end
 
@@ -1107,15 +1113,17 @@ defmodule FermixCore.Management.CopyTest do
     end
 
     # M98 D5: the coding approval's section is named for the machine that
-    # answers, so both hosts' words are held to the rules, whichever this is.
+    # answers, so every host's words are held to the rules, whichever this
+    # is: a Mac, another computer, and an Always On server (M97 §19.9).
     test "this machine's coding section obeys the rules on a Mac and elsewhere" do
-      for macos? <- [true, false],
-          section <- CodingMachine.sections(macos?: macos?, computer?: false),
-          row <- CodingMachine.rows(section.id, %{}, macos?: macos?),
+      for {macos?, server?} <- [{true, false}, {false, false}, {false, true}],
+          opts = [macos?: macos?, computer?: false, server_primary?: server?],
+          section <- CodingMachine.sections(opts),
+          row <- CodingMachine.rows(section.id, %{}, opts),
           {field, text} <- [title: section.title, label: row["label"], footer: row["footer"]],
-          do: assert_owner_words(text, :prose, [], "harness_machine #{field} macos?=#{macos?}")
+          do: assert_owner_words(text, :prose, [], "harness_machine #{field} #{inspect(opts)}")
 
-      assert length(CodingMachine.sentences()) == 5
+      assert length(CodingMachine.sentences()) == 7
 
       for text <- CodingMachine.sentences(),
           do: assert_owner_words(text, :prose, [], "harness_machine")
@@ -1418,6 +1426,30 @@ defmodule FermixCore.Management.CopyTest do
       assert Copy.mount_label({:cue, "gh-hooks"}) == "Webhook source gh-hooks"
     end
 
+    # M97 §19.5: every change a computer can make to the server's sandbox or
+    # coding approval, said on the server and on a computer.
+    test "a change from a computer is said in plain words, everywhere it is told" do
+      changes =
+        Enum.map(~w(strict standard open), &{:sandbox_mode, &1}) ++
+          [{:harness_approved, true}, {:harness_approved, false}]
+
+      for change <- changes, server <- [:this, :yours, "garden-server"] do
+        said =
+          Copy.summary_sentence(:notice_computer_change, %{
+            name: "loft-linux",
+            change: change,
+            server: server
+          })
+
+        assert Copy.violations(said, :prose, ["loft-linux", "garden-server"]) == [], said
+        assert Copy.summary_violations(said) == [], said
+        assert said =~ "from loft-linux."
+      end
+
+      assert Copy.summary_label(:restart_server, %{name: "garden-server"}) ==
+               "Restart garden-server"
+    end
+
     test "every key and every action answers its words" do
       assert length(Copy.summary_keys()) >= 38
       assert length(HomeSummary.actions()) == length(Enum.uniq(HomeSummary.actions()))
@@ -1449,7 +1481,9 @@ defmodule FermixCore.Management.CopyTest do
       place: "your desktop",
       at: ~U[2031-05-04 10:00:00Z],
       zone: "Etc/UTC",
-      error: "the snapshot could not be read to send it"
+      error: "the snapshot could not be read to send it",
+      change: {:sandbox_mode, "open"},
+      server: "garden-server"
     }
 
     sentences =
@@ -1466,7 +1500,7 @@ defmodule FermixCore.Management.CopyTest do
       for id <- HomeSummary.actions(),
           extra <- [%{}, %{code: true}, %{forget: true}, %{renew: true}, %{first: true}],
           machine <- ["Mac", "computer"],
-          values = Map.put(extra, :machine, machine),
+          values = Map.merge(extra, %{machine: machine, name: "garden-server"}),
           do: {"action #{id}", Copy.summary_label(String.to_existing_atom(id), values), :name}
 
     {:too_old, too_old} =
@@ -2472,5 +2506,41 @@ defmodule FermixCore.Management.CopyTest do
   defp assert_clean(text, kind, names, where) when is_binary(text) do
     assert Copy.violations(text, kind, names) == [],
            "#{where}: #{inspect(text)} breaks #{inspect(Copy.violations(text, kind, names))}"
+  end
+
+  # M97 §19 (D28): the words of one set of settings after a move, the
+  # refusals a computer and a server give, the owner decision's, and the
+  # titles a linked computer draws for its own sections and its server's.
+  describe "one set of settings" do
+    test "its refusals and titles obey the rules" do
+      {:error, :unavailable, %{"sentence" => older_server}} =
+        Placement.older_server("garden server")
+
+      {:error, :unavailable, %{"sentence" => older_computer}} = Placement.older_computer()
+      machine_owner = golden_owner_sentence("unavailable_machine_owner_decision")
+
+      for {where, text} <- [
+            {"older server", older_server},
+            {"older computer", older_computer},
+            {"machine owner", machine_owner}
+          ],
+          do: assert_owner_words(text, :prose, ["garden server"], where)
+
+      rows = for section <- Settings.sections(macos?: true, computer?: true), do: row(section)
+
+      titles =
+        Enum.map(
+          ComputerSettings.own_sections(rows, macos?: true, computer?: true),
+          & &1["title"]
+        ) ++
+          for id <- ~w(sandbox browser harness_machine),
+              do: ComputerSettings.server_title(id, "Sandbox", "garden server")
+
+      assert "Sandbox on this Mac" in titles
+      assert "garden server" in titles
+      for title <- titles, do: assert_clean(title, :name, ["garden server", "Mac"], "title")
+    end
+
+    defp row(section), do: %{"id" => section.id, "pane" => section.pane, "title" => section.title}
   end
 end

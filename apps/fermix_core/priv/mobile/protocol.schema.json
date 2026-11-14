@@ -169,7 +169,8 @@
         "protocol_v": {"type": "integer", "minimum": 1},
         "relay_list_rev": {"type": "string", "pattern": "^[0-9a-f]{16}$", "description": "The revision of the relay list this phone has stored (M62); absent means none."},
         "primary_epoch": {"type": "integer", "minimum": 1, "maximum": 18446744073709551615, "description": "The highest primary epoch this phone has seen from this pairing (M75); absent when it has seen none. A daemon at a lower epoch refuses the hello with stale_primary."},
-        "platform": {"enum": ["macos", "linux"], "description": "The system a desktop engine's computer runs (M97): a desktop always sends it, a phone never does, and an engine older than the computer record leaves it out. Any other value is a malformed frame."}
+        "platform": {"enum": ["macos", "linux"], "description": "The system a desktop engine's computer runs (M97): a desktop always sends it, a phone never does, and an engine older than the computer record leaves it out. Any other value is a malformed frame."},
+        "caps": {"type": "object", "description": "What a desktop engine says of itself (M97 §19, D28): computer.machine_settings true where it applies the rule that a management setting's id names its machine. Absent from a phone's hello and from an older desktop's.", "properties": {"computer": {"type": "object", "properties": {"machine_settings": {"type": "boolean"}}}}}
       }
     },
     "msg": {
@@ -346,6 +347,7 @@
         "offers": {"type": "boolean"},
         "link_path": {"type": "boolean"},
         "invoke": {"type": "boolean", "description": "true when this server takes the invocation's five events (invoke_open, invoke_part, invoke_cancel, invoke_result, invoke_status) and invoke_restarted from the computer; a computer sends none of them otherwise."},
+        "machine_settings": {"type": "boolean", "description": "true when this server applies the rule that a management setting's id names its machine (M97 §19, D28): it answers its own machine sections (sandbox, browser, harness_machine) and a sandbox value env:<NAME> that a computer sends, and refuses every computer and computer.<id>. A computer sends a server without it none of the server's machine settings."},
         "standing": {"enum": ["current", "behind", "ahead", "settings_only"]},
         "versions": {
           "type": "object", "required": ["engine", "companion", "management"],

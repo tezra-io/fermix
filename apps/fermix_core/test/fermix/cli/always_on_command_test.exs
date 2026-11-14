@@ -17,6 +17,7 @@ defmodule Fermix.CLI.AlwaysOnCommandTest do
 
   alias Fermix.CLI.AlwaysOnCommand
   alias Fermix.CLI.AlwaysOnCommand.Render
+  alias FermixCore.Management.HomeSummary
   alias FermixTestSupport.HomeSummaryGoldens
   alias FermixTestSupport.PipedTerminal
   alias FermixTestSupport.SafeRm
@@ -489,6 +490,45 @@ defmodule Fermix.CLI.AlwaysOnCommandTest do
 
       assert err =~ "The six digits the new computer shows: "
       assert out =~ "loft-linux is now a computer of your Fermix."
+    end
+  end
+
+  # M97 D28c (§19.7): on a linked computer, `fermix always-on restart-server`
+  # is Restart <server> from a terminal, the step the screen offers.
+  describe "restarting the server" do
+    test "restart-server sends the step the screen offers and prints the server's answer", ctx do
+      restart = HomeSummary.restart_server_action("fermix-general-a3f9")
+
+      on =
+        update_in(golden_summary("home_status_on"), ["detail", "alternatives"], &[restart | &1])
+
+      waits = %{
+        "when" => "after_work",
+        "wait_s" => 540,
+        "sentence" =>
+          "Fermix on your server restarts once the work it runs on a computer ends, or in " <>
+            "ten minutes at most."
+      }
+
+      act = fn params ->
+        assert params == %{"action" => "restart_server", "key" => restart["key"]}
+        {:ok, %{"summary" => on, "result" => waits}}
+      end
+
+      client = script([hello(), {"home.status", {:ok, status(on)}}, {"home.act", act}])
+      assert {0, out, _err} = run(["restart-server"], ctx, client)
+      assert out =~ waits["sentence"] <> "\n"
+
+      assert Render.result(%{waits | "when" => "now", "wait_s" => 0}) == [waits["sentence"]]
+    end
+
+    test "restart-server where the screen does not offer it sends nothing", ctx do
+      on = golden_summary("home_status_on")
+      client = script([hello(), {"home.status", {:ok, status(on)}}])
+
+      assert {1, _out, err} = run(["restart-server"], ctx, client)
+      assert err =~ "restart-server"
+      refute_act()
     end
   end
 

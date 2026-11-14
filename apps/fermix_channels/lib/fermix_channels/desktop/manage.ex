@@ -11,7 +11,10 @@ defmodule FermixChannels.Desktop.Manage do
   with the authority of the owner's app, since the desktop placed its own
   caller before forwarding (an owner decision such as `mobile.pair.decide`
   included, D16). A device-class request is refused with
-  `device_class_method`: it belongs to the desktop. The response goes back as
+  `device_class_method`: it belongs to the desktop. Whether the desktop's
+  hello said it applies M97 §19.3's rule (`Desktop.Peer`'s context,
+  `machine_settings`) goes with each call, since the primary refuses a
+  sandbox value from one that did not. The response goes back as
   `manage_result`, the envelope exactly as `daemon.sock` writes it.
 
   Each call runs in a task of its own (`:task_supervisor`), never in the
@@ -21,8 +24,8 @@ defmodule FermixChannels.Desktop.Manage do
 
   A test names its seams as the family's options (`Desktop.Peer`'s
   `{module, options}`): `:serve` (in place of the daemon's
-  `serve_forwarded/3`, a function of the request frame and the device id) and
-  `:task_supervisor`.
+  `serve_forwarded/3`, a function of the request frame and the computer that
+  sent it, `%{device_id, machine_settings}`) and `:task_supervisor`.
   """
 
   @behaviour FermixChannels.Desktop.Family
@@ -46,6 +49,7 @@ defmodule FermixChannels.Desktop.Manage do
     {:ok,
      %{
        device_id: device_id,
+       machine_settings: Map.get(context, :machine_settings, false) == true,
        registry: registry,
        serve: Keyword.get(opts, :serve, &serve_with_daemon/2),
        task_supervisor: Keyword.get(opts, :task_supervisor, FermixCore.TaskSupervisor),
@@ -84,10 +88,11 @@ defmodule FermixChannels.Desktop.Manage do
 
   defp start_call(call_id, fields, params, state) do
     %{device_id: device_id, registry: registry, serve: serve} = state
+    computer = %{device_id: device_id, machine_settings: state.machine_settings}
 
     job = fn ->
       try do
-        answer(state, call_id, call(call_id, fields, params, device_id, serve))
+        answer(state, call_id, call(call_id, fields, params, computer, serve))
       after
         Peer.tell(device_id, :manage, {:call_done, call_id}, registry: registry)
       end
@@ -109,7 +114,7 @@ defmodule FermixChannels.Desktop.Manage do
          call_id,
          %{"method" => method, "protocol_version" => version},
          params,
-         device_id,
+         computer,
          serve
        ) do
     case Jason.decode(params) do
@@ -122,15 +127,15 @@ defmodule FermixChannels.Desktop.Manage do
             "params" => decoded
           })
 
-        serve.(frame, device_id)
+        serve.(frame, computer)
 
       _not_an_object ->
         refusal(call_id, :invalid_params, %{"field" => "params"})
     end
   end
 
-  defp serve_with_daemon(frame, device_id) do
-    Daemon.serve_forwarded(frame, device_id)
+  defp serve_with_daemon(frame, computer) do
+    Daemon.serve_forwarded(frame, computer)
   catch
     :exit, reason ->
       Logger.error(

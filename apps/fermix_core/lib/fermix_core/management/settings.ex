@@ -583,9 +583,10 @@ defmodule FermixCore.Management.Settings do
 
   # Channels and Accessories have sections that exist on one platform only,
   # This computer's exists on a linked computer only, Backup settings on an
-  # Always On server's primary only, and this machine's coding approval only
-  # off one (named for the host), so they are handed the options that name
-  # the host; every other family is the same everywhere.
+  # Always On server's primary only, the screen's sections off one, and this
+  # machine's coding approval only off a computer (named for the host), so
+  # they are handed the options that name the host; every other family is the
+  # same everywhere.
   defp family(section, opts), do: Enum.find(@families, &family_owns?(&1, section, opts))
 
   defp family_owns?(Channels, section, opts), do: Channels.owns?(section, opts)
@@ -593,6 +594,7 @@ defmodule FermixCore.Management.Settings do
   defp family_owns?(ThisComputer, section, opts), do: ThisComputer.owns?(section, opts)
   defp family_owns?(CodingMachine, section, opts), do: CodingMachine.owns?(section, opts)
   defp family_owns?(Snapshots, section, opts), do: Snapshots.owns?(section, opts)
+  defp family_owns?(Tools, section, opts), do: Tools.owns?(section, opts)
   defp family_owns?(module, section, _opts), do: module.owns?(section)
 
   defp family_sections(Channels, opts), do: Channels.sections(opts)
@@ -600,6 +602,7 @@ defmodule FermixCore.Management.Settings do
   defp family_sections(ThisComputer, opts), do: ThisComputer.sections(opts)
   defp family_sections(CodingMachine, opts), do: CodingMachine.sections(opts)
   defp family_sections(Snapshots, opts), do: Snapshots.sections(opts)
+  defp family_sections(Tools, opts), do: Tools.sections(opts)
   defp family_sections(module, _opts), do: module.sections()
 
   # The search section offers place search's backends as this build can run
@@ -611,7 +614,7 @@ defmodule FermixCore.Management.Settings do
     do: Tools.rows(section, snapshot, Keyword.take(opts, [:host, :promise]))
 
   defp family_rows(CodingMachine, section, snapshot, opts),
-    do: CodingMachine.rows(section, snapshot, Keyword.take(opts, [:macos?]))
+    do: CodingMachine.rows(section, snapshot, Keyword.take(opts, [:macos?, :server_primary?]))
 
   defp family_rows(ThisComputer, section, snapshot, opts),
     do: ThisComputer.rows(section, snapshot, Keyword.take(opts, [:macos?]))

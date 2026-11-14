@@ -2,11 +2,19 @@ defmodule FermixCore.Browser.Config do
   @moduledoc """
   Single source of truth for every browser timeout, interval, and bound.
 
-  All durations are milliseconds. Three fields are a person's to set in
+  All durations are milliseconds. Four fields are a person's to set in
   `[fermix_core.browser]` (`config_keys/0`); the rest are system tunables
   overridable only through `config :fermix_core, :browser, ...`. Keeping them
   here (instead of as literals scattered across the runtime) makes every
   browser timeout greppable, documentable, and adjustable in one place.
+
+  ## This computer's own
+
+  The settable keys describe the browser of the machine an engine runs on,
+  so they are that machine's own, in its `machine.toml` (`Setup.MachineFile`,
+  M97 D28d), which no move or backup carries: a server's browser and a
+  computer's are each set on their own machine. `to_keyword/1` is the block
+  as that file holds it, and `machine_file!/1` checks the file's table.
 
   ## Capacity
 
@@ -142,6 +150,9 @@ defmodule FermixCore.Browser.Config do
   # `action_timeout_ms` is told it is not settable instead of editing a line that
   # silently does nothing.
   @config_keys [:allowed_hosts, :default_profile, :max_tabs, :launch_app]
+  # How tasks run when nothing is set, and the key `machine.toml` always
+  # holds (`to_keyword/1`).
+  @default_profile "fermix"
   # `selected_tab` is the tab the person grants with the browser extension
   # (M42 slice 7). It is built in rather than configured because there is
   # nothing to configure: the grant names the tab, and the person makes it.
@@ -210,7 +221,7 @@ defmodule FermixCore.Browser.Config do
           profiles: %{String.t() => profile()}
         }
 
-  defstruct default_profile: "fermix",
+  defstruct default_profile: @default_profile,
             allow_private_network: false,
             allowed_hosts: @default_allowed_hosts,
             # Resolved by `current/2`; `nil` only until then.
@@ -412,6 +423,47 @@ defmodule FermixCore.Browser.Config do
     case Keyword.fetch(config, key) do
       {:ok, value} -> {:ok, value}
       :error -> :error
+    end
+  end
+
+  @doc """
+  The block (`normalize/1`'s shape) as this computer's `machine.toml` holds
+  it, the shape `Setup.ConfigStore` writes and compares: each settable key
+  the block sets, in `config_keys/0`'s order, and `default_profile` always,
+  `"fermix"` where the block names none, which is how tasks run with no
+  setting at all. That key marks the file as one that holds the browser's
+  keys (`Setup.MachineFile`). The values are the file's own spellings (a
+  string, an integer, a boolean, a list of strings), so `normalize/1` reads
+  back exactly what this wrote.
+  """
+  @spec to_keyword(nil | map() | keyword()) :: keyword()
+  def to_keyword(block) when is_nil(block) or is_map(block) or is_list(block) do
+    marked = Keyword.put_new(normalize(block), :default_profile, @default_profile)
+    for key <- @config_keys, Keyword.has_key?(marked, key), do: {key, Keyword.fetch!(marked, key)}
+  end
+
+  @doc """
+  Checks the machine file's own `[fermix_core.browser]` (`table`, decoded, nil
+  when absent): it holds only settable keys. Raises `ArgumentError` naming
+  `machine.toml` for any other, which nothing would read there. Its values
+  are read with the rest of the settings (`Setup.MachineFile.join/2`).
+  """
+  @spec machine_file!(nil | map()) :: :ok
+  def machine_file!(nil), do: :ok
+
+  def machine_file!(table) when is_map(table) do
+    allowed = Enum.map(@config_keys, &Atom.to_string/1)
+
+    case table |> Map.keys() |> Enum.map(&to_string/1) |> Enum.reject(&(&1 in allowed)) do
+      [] ->
+        :ok
+
+      unknown ->
+        raise ArgumentError,
+              "machine.toml [fermix_core.browser] has unknown key(s): " <>
+                "#{unknown |> Enum.sort() |> Enum.join(", ")}. Allowed keys: " <>
+                "#{Enum.join(allowed, ", ")}. Browser timeouts, buffer sizes and the other " <>
+                "caps are internal constants, not config."
     end
   end
 

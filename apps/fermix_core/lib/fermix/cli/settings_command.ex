@@ -111,13 +111,19 @@ defmodule Fermix.CLI.SettingsCommand do
     |> emit(&Render.primary(&1, provider), flags, ctx, deps)
   end
 
-  defp exec({:reload, flags}, deps) do
-    ctx = context("fermix settings", :change, @write_ms, check: "fermix settings reload")
+  defp exec({:reload, section, flags}, deps) do
+    ctx = context("fermix settings", :change, @write_ms, check: reload_command(section))
 
     deps
-    |> call("settings.reload", %{}, @write_ms)
+    |> call("settings.reload", reload_params(section), @write_ms)
     |> emit(&Render.reload/1, flags, ctx, deps)
   end
+
+  defp reload_params(nil), do: %{}
+  defp reload_params(section), do: %{"section" => section}
+
+  defp reload_command(nil), do: "fermix settings reload"
+  defp reload_command(section), do: "fermix settings reload #{section}"
 
   # The rows decide each literal's JSON type, and a secret row's key is refused
   # here before anything is applied: its value is never sent.

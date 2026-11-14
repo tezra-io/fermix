@@ -483,8 +483,10 @@ defmodule FermixWebWeb.SetupLiveTest do
         })
 
       assert html =~ "id=\"primary-only-pane\""
-      assert html =~ "These settings are Fermix-wide, so they live on your server, aws i-0f3b1c."
-      refute html =~ "Fermix app"
+
+      assert html =~
+               "These settings are Fermix-wide, so they live on your server, aws i-0f3b1c. " <>
+                 "Change them in the Fermix app on any of your computers."
     end
   end
 

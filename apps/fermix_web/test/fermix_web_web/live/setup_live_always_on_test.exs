@@ -586,9 +586,9 @@ defmodule FermixWebWeb.SetupLiveAlwaysOnTest do
         assert html =~ ~s(id="primary-only-pane"), "#{tab} offers the primary's settings"
 
         assert text(html, "#primary-only-pane p") ==
-                 "These settings are Fermix-wide, so they live on your server, invented-vm."
+                 "These settings are Fermix-wide, so they live on your server, invented-vm. " <>
+                   "Change them in the Fermix app on any of your computers."
 
-        refute html =~ "Fermix app"
         refute html =~ ~s(phx-submit="save_provider")
         refute html =~ ~s(phx-submit="save_channels")
         GenServer.stop(view.pid)

@@ -775,3 +775,69 @@ scenarios:
              welcome but not required.
           3. Does not promise to hold the message, to send it when the Mac
              wakes, or to have sent anything.
+
+  # One set of settings after a move (M97 §19, D28): the owner changes the
+  # server's own sandbox from the app on a computer, under Settings, where the
+  # Sandbox pane is the server's and carries its name, and the server uses it
+  # from its next start, which the app offers (Restart <server>); the
+  # computer's own sandbox is apart, under This Mac, and stays as it is. The
+  # failure this guards is the plausible wrong road: logging in to the server
+  # to edit a file, or changing the Mac's own sandbox and calling it the
+  # server's. Settings are not reached by the model, so nothing here acts; no
+  # wording floor and no route assertion: every phrasing of the road is right.
+  - id: loosening_the_servers_sandbox
+    title: "Loosening the server's sandbox from the Mac app"
+    severity: normal
+    risk: host_readonly
+    tags: [computers, always-on, settings, sandbox]
+    cases:
+      - id: open_up_the_server_sandbox_from_my_mac
+        query: >
+          I want Fermix on my server to have a looser sandbox than my Mac.
+          Can I change that from the Fermix app on my studio Mac, or do I
+          have to log in to the server?
+        expect:
+          max_cost_usd: 1.2
+          max_duration_ms: 160000
+        rubric: |
+          1. Says the owner can do it from the Fermix app on the studio Mac:
+             its Settings are the server's after the move, and the Sandbox
+             pane there sets the server's own sandbox (it names the server).
+             Logging in to the server is not needed.
+          2. Says the server uses the new sandbox from its next start, and
+             that the app offers to restart the server (Restart and the
+             server's name; `fermix always-on restart-server` names the same
+             step), or that the change waits for the server's restart.
+          3. Says or implies the studio Mac's own sandbox is apart (under
+             This Mac) and stays as it is, so the two can differ.
+          4. Does not tell the owner to edit config.toml or machine.toml by
+             hand, or to log in to the server, as the way to do it.
+          5. Does not claim to have changed, loosened or restarted anything
+             itself.
+          Not required: the mode names (strict, standard, open), that a new
+          server's sandbox starts open, or that a change from a computer is
+          said on the owner's other screens.
+      - id: stricter_mac_open_server
+        query: >
+          I'd like the server to be fairly open but keep my Mac locked down.
+          Where do I set each one?
+        expect:
+          max_cost_usd: 1.2
+          max_duration_ms: 160000
+        rubric: |
+          1. Says the server's sandbox is set in the Fermix app's Settings
+             (its Sandbox pane is the server's after the move, named for the
+             server), from the Mac or any linked computer, with no need to
+             log in to the server.
+          2. Says the Mac's own sandbox is set apart, under This Mac in the
+             app on that Mac (or that Mac's setup page), and that only that
+             Mac changes it.
+          3. Says or implies the two are independent, so the server can be
+             open while the Mac stays strict.
+          4. Says the server's change takes effect at its next start, with
+             the app's Restart for the server (or `fermix always-on
+             restart-server`), or says it waits for the server's restart.
+          5. Does not tell the owner to edit config.toml or machine.toml by
+             hand as the way, and does not claim to have changed anything.
+          Not required: the mode names beyond open and strict, or what each
+          mode allows.

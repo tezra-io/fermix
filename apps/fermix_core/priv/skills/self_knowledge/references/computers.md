@@ -278,8 +278,9 @@ server rings there, one request per connected computer, which no turn made
   the screen, Messages and computer history where their own settings had
   them on (Messages and history on a Mac only). Move now's review shows it as
   a block of its own: a sentence ("After the move, Fermix on your server can
-  still use this Mac for: files and commands (standard), the browser, your
-  screen. Change this here."), one line each (files and commands are one),
+  still use this Mac for: files and commands, in this Mac's sandbox
+  (Standard), the browser, your screen. Change this here."), one line each
+  (files and commands are one),
   and, where files and commands stay on while the sandbox is `open`, the
   warning "With files and commands on and this Mac's sandbox open, a server
   that is taken over can read and change this account's files on this Mac."
@@ -308,6 +309,40 @@ computer its home came from uses its own sandbox setting, `open`, and its
 Always On summary says so once, for a week: "This server now uses its own
 sandbox setting: open. The settings it had from your computer stay on that
 computer."
+
+## Settings after a move
+
+- After a move every Fermix app shows one set of settings, the server's:
+  Settings, every pane, changes Fermix on the server, its own sandbox
+  (**Sandbox on <server>**), its coding agents (**Allow coding agents to run
+  on this server**, under the server's name) and its browser included. A
+  new server's sandbox starts `open`. Installing a coding agent there and
+  signing it in still take a terminal on the server.
+- What belongs to one computer alone sits in one place on it, **This Mac**
+  (**This computer** on Linux): what Fermix on the server may use there,
+  then its own sandbox, browser (with its Install), screen, history (Mac)
+  and StackChan (Mac). It changes only at that computer: neither the server
+  nor another computer writes it. Removing a computer and `/history off
+  <name>` still work from anywhere. The server can be `open` while a Mac
+  stays `strict`: each machine's commands run under its own sandbox.
+- A stored sandbox variable belongs to the sandbox it is typed in: the
+  server's in Settings, the computer's under This Mac.
+- A sandbox mode, a provider key, a channel token or a coding approval set
+  from an app is stored on the server at once and used from its next start:
+  the app offers **Restart <server>** (on a computer, `fermix always-on
+  restart-server`), which waits up to ten minutes for work the server runs
+  on a computer to end. A computer's own settings take that computer's own
+  restart, from its app.
+- When the server's sandbox or coding approval is changed from a computer,
+  every Always On screen says so once, naming the computer. A command
+  Fermix runs can never change a machine's own settings through the app.
+- On a linked computer the setup page changes Always On, This computer and
+  that computer's sandbox; its other tabs point to the app on any computer.
+  `fermix settings show sandbox` there reads the server's, `fermix settings
+  show computer.sandbox` its own.
+- While the server runs an older Fermix, a computer shows the server's
+  sandbox and coding settings nowhere and says the server updates on its
+  own.
 
 ## Files and commands on a computer
 

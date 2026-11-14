@@ -465,6 +465,20 @@ memories Fermix seeds join; neither is pinned here, and neither is a step a
 rule reads. The comments' line numbers into `move_worker.ex` point at the
 committed code.
 
+Walked again for M97 D28 (one set of settings after a move), which stales
+the `always_on.ex` pin and the `placement.ex` pin of `@unconfirmed_methods`.
+The act gains `restart_server` (Restart <server> on a linked computer),
+which sends the rail-only `home.restart` and writes nothing of a move back.
+`@unconfirmed_methods` now lists `home.restart` beside `home.move.start`:
+the server restarts right after it answers, so an answer lost to that
+restart is `unconfirmed` too, with a sentence of its own
+(`unconfirmed/2`). The model's `unconfirmed` is `home.move.start`'s alone,
+the only forwarded call a move back sends that can be lost that way:
+`MessagesCanBeLost`, `UnconfirmedKept` and `StartKeptFirst` read only it,
+and no restart is a step of a move back, so no modelled step changed. Move
+back, Move now, Cancel and Restore here are as before. The comments' line
+numbers into `always_on.ex` point at the committed code.
+
 ## Done
 
 Deadlock checking is on. `Done` has these ends:
