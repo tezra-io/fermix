@@ -22,8 +22,7 @@
 
 The SOURCE pins name the code the design replaces: `Mobile.Push`, the push
 scheduling in `Channels.Mobile`, the `DeviceRegistry`, the socket's `ack`
-handler, the transport's idle timeout, and the attempts of a Web Push
-phone's send (`Push.WebPushLeg`, `WebPush.send/4`). When stage D2 of M51 lands, those
+handler and the transport's idle timeout. When stage D2 of M51 lands, those
 files change, the spec goes STALE, and it is re-read against the
 implementation. The phone app lives in another repository and has no pin. Its
 rules are M51 §7, §8.2, §10 and §12.5.
@@ -48,7 +47,7 @@ shows up as a broken `ChatAccounted` instead.
 
 | Switch | When `TRUE` |
 |---|---|
-| `SocketsCanFreeze` | The OS suspends an app with no clean close. The daemon keeps its socket registered until the 150 s idle timeout (`Session.idle_timeout_ms`, `session.ex:297`), which the WebSocket (`router.ex:53-60`) and the iroh bridge connection (`bridge_connection.ex:233-241`) both apply. |
+| `SocketsCanFreeze` | The OS suspends an app with no clean close. The daemon keeps its socket registered until the 150 s idle timeout (`Session.idle_timeout_ms`, `session.ex:281`), which the WebSocket (`router.ex:53-60`) and the iroh bridge connection (`bridge_connection.ex:233-241`) both apply. |
 | `DispatchCanFail` | A dispatcher call returns a transient error. |
 | `AnswerCanBeLost` | The platform accepted a push and the daemon saw a timeout instead. |
 | `DaemonCanCrash` | The daemon dies with push tasks in flight, and boots again. |
@@ -59,11 +58,11 @@ one check):
 
 | Switch | The design | Switched off |
 |---|---|---|
-| `DecidesOnEvidence` | D20: the decision reads the read frontier and each device's acked cursor. | **Today's code:** a phone whose socket is registered is not pushed, and the phones beside it are (`away_decision`, `push.ex:212-229`; `connected_devices`, `:567-579`). |
+| `DecidesOnEvidence` | D20: the decision reads the read frontier and each device's acked cursor. | **Today's code:** one registered socket of the profile suppresses the push for every device (`push.ex:172`, `:444-454`). |
 | `AcksAfterAnnounce` | The app acks a row once it has announced it: shown it on screen, or posted its notification. | The design's first draft: the app acks as soon as the row is persisted (PUSH-2). |
 | `LocalNotify` | The app posts the notification itself for a row that arrives while its chat is off screen. | The row is only listed. |
 | `NotifiedSet` | D22: the app announces an id once, whichever path brought it. | Every arrival alerts. |
-| `RetriesTransient` | D21: a transient dispatcher error is retried. | **Today's code for an iPhone:** one APNs attempt, its failure logged (`notify_timeline_row`, `channels/mobile.ex:602-609`). A Web Push phone's send retries; see "What today's code does". |
+| `RetriesTransient` | D21: a transient dispatcher error is retried. | **Today's code:** one attempt, its failure logged (`notify_timeline_row`, `channels/mobile.ex:602-609`). |
 | `AttemptCap` | D21: at most three attempts per device. | The retry has no bound. |
 | `BootCheck` | D21: a boot step reads `push_attempted_seq` and decides once for the newest unread row above it. | **Today's code:** nothing runs at boot. |
 
@@ -88,10 +87,8 @@ one check):
 - Check 06, with every fault on, 194,363 states: a reply the owner has not
   read is in the end announced on every phone, held by the push platform for
   it, or given up with a logged failure (`ChatAccounted`). This rests on:
-  - `DecidesOnEvidence` (check 07). With presence, a phone frozen before it
-    announced the reply, its socket still registered when the decision
-    runs, silences its own push, and nothing tells its owner until the app
-    is opened.
+  - `DecidesOnEvidence` (check 07). With presence, the phone in the owner's
+    hand silences the push to the idle phone.
   - `AcksAfterAnnounce` (check 08). See PUSH-2.
   - `LocalNotify` (check 09). A phone with the app open on another screen
     acks the row, so the daemon skips it. Only the app can tell its owner.
@@ -141,18 +138,11 @@ not run.
 
 Three mechanism switches are today's code when switched off. Their checks are
 therefore also the statement of what today's code gets wrong:
-- **Presence** (`DecidesOnEvidence`, checks 05 and 07). A phone whose socket
-  is registered when the decision runs is not pushed, though it may not have
-  announced the reply: frozen before it did, or gone before it took the row
-  off its socket (M51 R18). Since `81b3fc25` the phone silences only
-  itself, and the phones beside it are pushed.
-- **One attempt** (`RetriesTransient`, check 04), for an iPhone. A transient
-  APNs error ends the push (M51 R19). A Web Push phone's one send
-  (`WebPush.send/4`) tries a 429, a 5xx or a transport error again, at most
-  three attempts within a minute of its first: the retry and the cap of
-  D21, inside one call. A `Retry-After` that would pass the minute ends it
-  sooner, which `GivesUpOnlyAfterThree` does not allow; the spec has no
-  clock, and does not model that bound.
+- **Presence** (`DecidesOnEvidence`, checks 05 and 07). A phone with a socket,
+  frozen or on another screen, silences the push to every device of the
+  profile (M51 R18).
+- **One attempt** (`RetriesTransient`, check 04). A transient dispatcher error
+  ends the push (M51 R19).
 - **Nothing at boot** (`BootCheck`, checks 10 and 12). A crash inside the
   task's wait or between attempts loses the push (M51 R19).
 
@@ -236,53 +226,6 @@ before its row is written, as a Mac turn's does. The row, its event, the
 sockets it reaches and the push decisions after it are as before, so nothing
 the spec models changed. The comments' `mobile.ex` and `session.ex` numbers,
 which had drifted since the phone's call, now point at the committed files.
-
-Re-read on 2026-11-13 for phone-by-phone push and Web Push (M99,
-`81b3fc25`), which staled the `push.ex` and `session.ex` pins. What it
-changed, and what that does to the model:
-- **The decision is per phone.** `Mobile.Push.notify` (`push.ex:161-180`)
-  leaves out each phone `DeviceRegistry` lists as connected for the profile
-  (`away_decision`, `:212-221`); with none left nobody is pushed
-  (`decide_away`, `:226`), else the read frontier decides for every phone
-  (`read_decision`, `:231-240`), else each phone left out is pushed. Before,
-  one socket of the profile silenced every phone. That is the step
-  `Decision` takes with `DecidesOnEvidence` off, and it now says so. The
-  design's branch is unchanged, so every `holds` check, witness and PUSH-1
-  keep their verdicts and state counts, and no expectation moved. Checks 05
-  and 07 still break their rules, 05 at the decision itself (5 states: the
-  phone in the owner's hand marked `presence`, the idle phone `pending`),
-  07 by another path. The idle phone is now pushed, and the reply is lost
-  instead on the phone in the owner's hand: it took the row as it connected
-  and froze before it announced it, its socket still registered when the
-  decision ran, so it was left out, and nothing tells its owner until the
-  app is opened. That is M51 R18 narrowed to the phone itself, not a new
-  finding.
-- **Two routes, one platform.** Each phone left out has one route, by what
-  it registered: Web Push for a phone holding a subscription
-  (`Push.WebPushLeg`, one `WebPush.send/4` each, the phones sent beside one
-  another), APNs for an iPhone holding only a token, and a refusal by name
-  for any other; the APNs config, off or broken, stops the APNs route
-  alone. The spec does not model a phone's route: the push platform is
-  whichever service the route reaches, and it holds what it accepted
-  (`atPlatform`), a row's push for a day (the TTL, not modelled). An iPhone
-  still gets one attempt. A Web Push phone's send retries (What today's code
-  does): `RetriesTransient` and `AttemptCap` for that route, inside one
-  call, lost with the daemon as any task is (`BootCheck` off). Its
-  one-minute bound is a clock the spec does not have.
-- **Registration.** `dispatch_event`'s `push_register` and `push_unregister`
-  now write a phone's whole registration, and the new `push_subscribe`
-  writes a Web Push subscription; a Web Push service that calls a
-  subscription gone, or refuses this home's key, has it cleared until the
-  phone next connects. The spec models no registration: a device is
-  registered throughout. The `ack` clause, `terminate` and `idle_timeout_ms`
-  are unchanged.
-- **The pins** gain `push_web_push_leg.ex#deliver,send_all` and
-  `web_push.ex#send,deliver,classify,settle,next_step,@max_attempts,@budget_ms`,
-  the attempts the switch tables now cite for a Web Push phone. The
-  comments' `push.ex` and `session.ex` numbers point at the commit, and so
-  do the `mobile.ex`, `event_router.ex`, `device_registry.ex` and
-  `bridge_connection.ex` ones, which no longer pointed at the code they
-  name.
 
 ## What the spec changed in the design
 
@@ -381,15 +324,8 @@ connects. The paths below are the short ones.
   deduplicates them by id in the same notified set. What is theirs alone (no
   retry past `expires_at`, a late approval shown as expired) is a single-call
   rule.
-- **Registration:** `push_register`, `push_subscribe` and `push_unregister`,
-  each a phone's whole registration; `UNREGISTERED` / `NOT_FOUND` and a Web
-  Push service's gone or refused key, terminal before any retry, the last
-  two clearing the phone's registration until it next connects; and a
-  device with no token. A device is registered throughout.
-- **A phone's route:** Web Push for a phone holding a subscription, APNs
-  for an iPhone holding a token, a refusal by name for any other. The push
-  platform is whichever service the route reaches. Push turned off, and the
-  APNs config, which stops the APNs route alone, are outside the spec.
+- **`push_unregister`, `UNREGISTERED` / `NOT_FOUND` and a device with no
+  token.** A device is registered throughout.
 - **The push TTL (24 h)** and the boot check's "younger than the TTL".
 - **The plaintext, its padding and the encryption.** These are single-call
   rules, pinned by `push_vectors.json`.

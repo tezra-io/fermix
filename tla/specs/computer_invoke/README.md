@@ -612,9 +612,10 @@ change, and what it does to the model:
   The three functions do what they did: `handle_event "invoke_result"`
   hands to `Calls` (`:87`), and `init/1` (`:66`) and `"invoke_restarted"`
   reconcile (`:119`).
-- `lanes.ex` (whole): `push_subscribe`, a phone's event, joins the
-  interactive lane. An `invoke_status` or `invoke_cancel` rides its
-  request's lane as before, so `AfterItsOpen` stands.
+- `lanes.ex` (whole): `push_subscribe`, a phone's event, joined the
+  interactive lane with the direct Web Push route and left it when that
+  route was removed (`c31c1804d`). An `invoke_status` or `invoke_cancel`
+  rides its request's lane as before, so `AfterItsOpen` stands.
 - The bounds: none here moves. The scene is still two calls, two ids each
   and the drops each check names; Admission's own bound (8 running, 32
   waiting) is unchanged and not modelled, and a `post` holds a running slot
