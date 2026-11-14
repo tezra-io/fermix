@@ -67,7 +67,7 @@
 (* callback (the responder's frame and the call it makes), one dial, or   *)
 (* one wait the worker ends.                                               *)
 (***************************************************************************)
-\* SOURCE: apps/fermix_channels/lib/fermix_channels/home/move_worker.ex @ 7fc4b0d53c5b
+\* SOURCE: apps/fermix_channels/lib/fermix_channels/home/move_worker.ex @ ac35230d11e0
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/home/candidate.ex @ 433d4ef550e0
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/home/move_responder.ex @ 834af9c6f6cb
 \* SOURCE: apps/fermix_core/lib/fermix_core/home/candidate/activation.ex @ 5a71862e2f64
@@ -77,7 +77,7 @@
 \* SOURCE: apps/fermix_core/lib/fermix_core/home/candidate.ex#put_state,write_private @ 622ba87194f2
 \* SOURCE: apps/fermix_core/lib/fermix_core/management/home_move.ex#move_start,move_view @ 425cb35fdbcf
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/desktop/device_supervisor.ex#children,dial_children @ 4f4129b772b7
-\* SOURCE: apps/fermix_channels/lib/fermix_channels/mobile/rail.ex#@moduledoc @ 3b29a7fbc7f2
+\* SOURCE: apps/fermix_channels/lib/fermix_channels/mobile/rail.ex#@moduledoc @ f5a0b477d0cf
 \* SOURCE: apps/fermix_core/lib/fermix_core/application.ex#prepare_home,finish_activation,finish_move,left_to_status @ 832168565d5f
 EXTENDS Naturals, FiniteSets
 
@@ -85,7 +85,7 @@ CONSTANTS
     \* Environment switches: what may happen around the move.
     MessagesCanBeLost,  \* the rail loses a request or an answer, or an answer comes only
                         \* after the worker stopped waiting (await_any/3's timeout,
-                        \* move_worker.ex:1018-1031): at most MaxLosses times in all
+                        \* move_worker.ex:1021-1034): at most MaxLosses times in all
     MaxLosses,
     SourceCanCrash,     \* the source engine dies and its service manager boots it again
     CandidateCanCrash,  \* the candidate engine dies and boots again
@@ -124,7 +124,7 @@ CONSTANTS
                              \* (move_responder.ex:74-78)
     AwaitPinsRail,           \* the worker takes an answer only from the rail it waits on
                              \* (await_any/3 matches {:rail, ^rail, _},
-                             \* move_worker.ex:1018-1031)
+                             \* move_worker.ex:1021-1034)
     EndingsAfterRestart,     \* the worker records committed or undoing before its restart,
                              \* and the engine that boots after it records done or aborted
                              \* (done/2, undo/3, Move.finish_at_boot/2): an ending is never
@@ -261,7 +261,7 @@ SourceBoots(r, m, p) ==
 \* The worker closes the rail it holds, if any (close_rail/1: Rail.close/1
 \* sends its close frame behind whatever the rail already sent), then opens a
 \* new one and sends newReq (Rail.open/3 through open_candidate/1,
-\* move_worker.ex:984-999), or opens none (newReq = "none", up = FALSE). A
+\* move_worker.ex:987-1002), or opens none (newReq = "none", up = FALSE). A
 \* request on the closed rail may still arrive; an answer already in the
 \* mailbox stays there, where only a worker that does not pin its rail would
 \* read it; any later answer is lost.
@@ -365,7 +365,7 @@ Transfer ==
     /\ UNCHANGED <<role, moved, boot, unsaid, cand, candUp, held, Budgets, Hist>>
 
 \* attempt_transfer/1 (move_worker.ex:256-272): the desktop key and row and
-\* the capture (writes no rule reads), open_candidate/1 (:984-999) and
+\* the capture (writes no rule reads), open_candidate/1 (:987-1002) and
 \* move_offer (send_snapshot/4, :503). The dial reaches the candidate's own
 \* key only while it runs in the candidate role.
 SendOffer ==
@@ -402,7 +402,7 @@ TakeReady ==
     /\ UNCHANGED <<SrcFiles, boot, unsaid, CandAll, railUp, req, oldReq, oldOffers, Budgets, Hist>>
 
 \* An error event is a refusal ({:refused, _, _}, await_any/3,
-\* move_worker.ex:1020-1021): before move_ready it aborts the move
+\* move_worker.ex:1023-1024): before move_ready it aborts the move
 \* (attempt_failed/2, :276-280); after it, retired/4 resumes (:603-606) and
 \* the resume loop goes round again (:780-790).
 TakeRefusal ==
@@ -412,7 +412,7 @@ TakeRefusal ==
     /\ UNCHANGED <<SrcFiles, boot, unsaid, CandAll, railUp, req, oldReq, oldOffers, oldReady, Budgets, Hist>>
 
 \* The wait's own timeout, or the rail's {:closed, _} (await_any/3,
-\* move_worker.ex:1026-1029), when nothing can arrive any more: the worker's own
+\* move_worker.ex:1029-1032), when nothing can arrive any more: the worker's own
 \* timer.
 GiveUp ==
     /\ wpc \in Awaiting /\ NothingComing
@@ -552,7 +552,7 @@ Probe ==
     /\ wpc = "probe"
     /\ Goto(IF candUp = "primary" THEN "finish" ELSE "resume_dial")
 
-\* abort/3 (move_worker.ex:919-925): reads the marker again; with it, resume.
+\* abort/3 (move_worker.ex:922-928): reads the marker again; with it, resume.
 \* A refused attempt or a failed commit closed its rail first (:266, :589):
 \* folded in here.
 Abort ==
@@ -561,12 +561,12 @@ Abort ==
     /\ CloseRail
     /\ UNCHANGED <<SrcFiles, boot, unsaid, cand, candUp, held, Budgets, Hist>>
 
-\* undo/3 (move_worker.ex:927-946), one file write per step: record aborting
-\* (:929); the desktop row, the key the phase recorded (deleted only while the
+\* undo/3 (move_worker.ex:930-949), one file write per step: record aborting
+\* (:932); the desktop row, the key the phase recorded (deleted only while the
 \* store still holds that key; one the store will not delete is logged and
-\* left, remove_desktop/2, :951-965) and the snapshot go (nothing a rule
-\* reads); role = "primary" (:932); remove the request and record undoing
-\* (:933-934); restart (:945).
+\* left, remove_desktop/2, :954-968) and the snapshot go (nothing a rule
+\* reads); role = "primary" (:935); remove the request and record undoing
+\* (:936-937); restart (:948).
 Undo ==
     /\ wpc = "undo"
     /\ phase' = "aborting"

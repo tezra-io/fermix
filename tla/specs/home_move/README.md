@@ -81,7 +81,7 @@ Models one move of M75 §7.2 (B5). Three parts take part:
   (`candidate.ex:624-631`), which answers `move_ready` only then
   (`move_responder.ex:74-78`).
 - `AwaitPinsRail`: the worker takes an answer only from the rail it waits on
-  (`await_any/3` matches `{:rail, ^rail, _}`, `move_worker.ex:1018-1031`).
+  (`await_any/3` matches `{:rail, ^rail, _}`, `move_worker.ex:1021-1034`).
 - `EndingsAfterRestart`: the worker records `committed` (after `move_done`)
   or `undoing` (after an undo) and then restarts itself (`SelfRestart`,
   `Lifecycle.restart_self/0`); the engine that boots after it records `done`
@@ -481,3 +481,16 @@ causes go to the log, and its probe of the moved identity names the
 initiator's protocol version. The same steps write the same files in the
 same order, so no modelled step changed. The comments' line numbers into
 `move_worker.ex` point at the committed code.
+
+## Re-read for the phone-wire version rule (M97, 2026-11-13)
+
+Re-read against 03df6995, which staled the `move_worker.ex` and the
+`rail.ex` `@moduledoc` pins. The worker's probe of the moved identity names
+its versions as a computer's hello does (`Protocol.hello_versions/0`: its
+newest and its oldest), and the server answers at the newest both hold; the
+rail sends a hello at the version it names and speaks the version of the
+server's first frame after it, refusing a later frame at another. A move's
+own rail (`:ik_move`) sends no hello, so its frames go at the version they
+did; the probe answers, or does not, as before. What the moduledoc says of
+a close frame behind a request is unchanged. No modelled step changed; the
+comments' line numbers into `move_worker.ex` point at the committed code.
