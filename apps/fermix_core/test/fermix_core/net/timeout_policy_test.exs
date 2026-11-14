@@ -52,12 +52,6 @@ defmodule FermixCore.Net.TimeoutPolicyTest do
       assert TimeoutPolicy.receive_timeout_for(:decision) == 15_000
     end
 
-    # One Web Push attempt waits this long for the push service's answer; its
-    # three attempts and two waits must fit the one-minute retry budget.
-    test "a Web Push attempt has one centralized bounded timeout" do
-      assert TimeoutPolicy.receive_timeout_for(:web_push) == 15_000
-    end
-
     test "an unknown request kind fails loud — no silent default (Rule #12)" do
       # apply/3 keeps the kind opaque to the typechecker; a bare literal call here
       # is a provable type violation (zero overlap with the 3 known kinds) and

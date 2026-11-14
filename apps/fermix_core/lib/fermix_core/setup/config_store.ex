@@ -3947,9 +3947,8 @@ defmodule FermixCore.Setup.ConfigStore do
 
   defp warn_retired_mobile_fcm(_fcm) do
     Logger.warning(
-      "config.toml [fermix_channels.mobile.fcm] is retired: Android phones are pushed " <>
-        "through Web Push with no settings, so the table is ignored, and the next settings " <>
-        "save writes the file without it."
+      "config.toml [fermix_channels.mobile.fcm] is retired: this build has no Android push, " <>
+        "so the table is ignored, and the next settings save writes the file without it."
     )
   end
 

@@ -182,20 +182,6 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   over the phone's own encrypted connection, so they work wherever Fermix
   runs. A phone app that doesn't draw lists yet keeps showing a reply's list
   as text.
-- **Your Android phone is notified while the app is closed.** Fermix now
-  pushes a paired Android phone through Web Push, straight from your Fermix
-  to Google's push service, so a reply, a reminder or an approval waiting for
-  you reaches the phone with the app closed, sealed so Google cannot read it.
-  There is nothing to set up: no Firebase project, no service account, no
-  setting. Fermix makes its own key the first time the phone channel starts
-  and keeps it with your home, so it moves with it. Each phone is now decided
-  on its own: a phone that is away is notified even while another of your
-  phones is connected, and a message you already read elsewhere still
-  notifies nobody. An iPhone is pushed through APNs as before, and APNs
-  settings that are off or broken no longer stop an Android phone's
-  notifications. Web Push rides version 3 of the phone wire, so a phone app
-  at version 2 is told nothing new. No Android app that subscribes is
-  released yet.
 
 ### Changed
 

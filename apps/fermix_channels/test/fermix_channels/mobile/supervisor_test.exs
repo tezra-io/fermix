@@ -12,7 +12,6 @@ defmodule FermixChannels.Mobile.SupervisorTest do
   alias FermixChannels.Mobile.Management
   alias FermixChannels.Mobile.RequestCoordinator
   alias FermixChannels.Mobile.Supervisor, as: MobileSupervisor
-  alias FermixChannels.Mobile.WebPush
   alias FermixCore.Home.Candidate
   alias FermixCore.Setup.SecretWriter
   alias FermixTestSupport.SafeRm
@@ -408,50 +407,6 @@ defmodule FermixChannels.Mobile.SupervisorTest do
     assert log =~ "Mobile started WITHOUT push"
   end
 
-  # M99 §14: the home's Web Push key is made the first time the channel
-  # starts, read at every start after, and every session on either carrier
-  # is handed its public text, so a hello_ack carries it before any phone
-  # can subscribe.
-  test "the channel's start makes the home's Web Push key once and hands it to every session" do
-    opts = switch_opts(names(), fn -> true end)
-    root = Keyword.fetch!(opts, :root)
-
-    assert {:ok, supervisor} = MobileSupervisor.start_link(opts)
-    assert {:ok, key} = WebPush.Key.load(root: root)
-    text = WebPush.Key.public_text(key)
-    assert session_key(supervisor) == {text, text}
-
-    :ok = Supervisor.stop(supervisor)
-    again = Keyword.put(opts, :names, names())
-
-    assert {:ok, supervisor} = MobileSupervisor.start_link(again)
-    on_exit(fn -> if Process.alive?(supervisor), do: Process.exit(supervisor, :shutdown) end)
-    assert session_key(supervisor) == {text, text}
-  end
-
-  # As APNs settings that do not resolve (M51 §10): the channel starts
-  # without what it cannot have, and the log names the fault once.
-  test "a Web Push key that cannot be had starts the channel without it, and says why once" do
-    instance_names = names()
-    opts = switch_opts(instance_names, fn -> true end)
-    mobile = Path.join(Keyword.fetch!(opts, :root), "mobile")
-    File.mkdir_p!(mobile)
-    File.chmod!(mobile, 0o700)
-    # Something that is not a key stands where the key goes.
-    File.mkdir_p!(Path.join(mobile, "webpush_key"))
-
-    {result, log} = with_log(fn -> MobileSupervisor.start_link(opts) end)
-
-    assert {:ok, supervisor} = result
-    on_exit(fn -> if Process.alive?(supervisor), do: Process.exit(supervisor, :shutdown) end)
-    assert session_key(supervisor) == {nil, nil}
-    assert is_pid(Process.whereis(instance_names.device_store))
-    assert log =~ "[error]"
-    assert log =~ ":unsafe_file_type"
-    assert length(String.split(log, "Mobile started WITHOUT Web Push")) == 2
-    assert MobileSupervisor.refusal(instance_names.device_store) == :none
-  end
-
   test "defaults a cryptographically random epoch for the request coordinator" do
     instance_names = names()
 
@@ -741,17 +696,6 @@ defmodule FermixChannels.Mobile.SupervisorTest do
   # What the listener's sessions and the rail's are started with.
   defp router_opts(children), do: child_opts(children, Listener)[:router_opts]
   defp iroh_session_opts(children), do: child_opts(children, Iroh)[:session_opts]
-
-  # The Web Push key a running subtree's two carriers hand their sessions.
-  defp session_key(supervisor) do
-    children =
-      for id <- [Listener, Iroh] do
-        {:ok, spec} = :supervisor.get_childspec(supervisor, id)
-        spec
-      end
-
-    {router_opts(children)[:web_push_key], iroh_session_opts(children)[:web_push_key]}
-  end
 
   defp switch_opts(instance_names, switch) do
     root =

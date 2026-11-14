@@ -17,8 +17,6 @@ defmodule FermixChannels.Mobile.DeviceStore do
 
   require Logger
 
-  alias FermixChannels.Mobile.WebPush
-
   defmodule Device do
     @moduledoc """
     A paired device authenticated by its Noise static public key.
@@ -40,13 +38,6 @@ defmodule FermixChannels.Mobile.DeviceStore do
     before attestation was verified has them `nil`.
     `relay_list_rev` is the relay list revision the device last acknowledged
     in its `hello` (M62 §3.1), `nil` until it names one.
-
-    A phone has one push registration (M99 §14), its address in
-    `push_token`: an APNs token while `push_service`, `push_p256dh` and
-    `push_auth` are `nil`, or a Web Push subscription's token when all three
-    are set: the service it is at (one of `WebPush.services/0`), the phone's
-    65-byte uncompressed P-256 public key and its 16-byte auth secret. The
-    three are never set apart, and a registration is written whole.
     """
 
     @enforce_keys [:device_id, :name, :model, :noise_pk, :created_at]
@@ -55,9 +46,6 @@ defmodule FermixChannels.Mobile.DeviceStore do
                   kind: :phone,
                   apns_key_salt: nil,
                   push_token: nil,
-                  push_service: nil,
-                  push_p256dh: nil,
-                  push_auth: nil,
                   last_seen: nil,
                   platform: nil,
                   signer_role: nil,
@@ -75,9 +63,6 @@ defmodule FermixChannels.Mobile.DeviceStore do
             noise_pk: <<_::256>>,
             kind: :phone | :desktop,
             push_token: String.t() | nil,
-            push_service: String.t() | nil,
-            push_p256dh: <<_::520>> | nil,
-            push_auth: <<_::128>> | nil,
             created_at: DateTime.t(),
             last_seen: DateTime.t() | nil,
             apns_key_salt: <<_::256>> | nil,
@@ -101,9 +86,6 @@ defmodule FermixChannels.Mobile.DeviceStore do
     :kind,
     :apns_key_salt,
     :push_token,
-    :push_service,
-    :push_p256dh,
-    :push_auth,
     :last_seen,
     :platform,
     :signer_role,
@@ -123,14 +105,11 @@ defmodule FermixChannels.Mobile.DeviceStore do
   @model_platforms %{"macOS desktop" => "macos", "Linux desktop" => "linux"}
   @signer_roles %{"development" => :development, "release" => :release}
   @kinds %{"phone" => :phone, "desktop" => :desktop}
-  # What only a phone has: its push salt and registration, and what its
-  # attestation proved. A desktop row carries none of them.
+  # What only a phone has: its push salt and token, and what its attestation
+  # proved. A desktop row carries none of them.
   @phone_only_fields [
     :apns_key_salt,
     :push_token,
-    :push_service,
-    :push_p256dh,
-    :push_auth,
     :signer_role,
     :version_code,
     :boot_state,
@@ -138,11 +117,7 @@ defmodule FermixChannels.Mobile.DeviceStore do
   ]
   # What only a computer has: whether it keeps the home's backup copies.
   @desktop_only_fields [:backups]
-  # A Web Push subscription beside its token in `push_token` (M99 §14): all
-  # three set, or none.
-  @subscription_fields [:push_service, :push_p256dh, :push_auth]
-  @registration_fields [:push_token | @subscription_fields]
-  @update_fields [:name, :model, :last_seen, :relay_list_rev, :platform | @registration_fields]
+  @update_fields [:name, :model, :push_token, :last_seen, :relay_list_rev, :platform]
   @relay_list_rev_regex ~r/\A[0-9a-f]{16}\z/
   # last_seen is informational, and every hello records it: a newer value
   # inside this window is not worth a durable, fsync'd rewrite of the store.
@@ -547,9 +522,6 @@ defmodule FermixChannels.Mobile.DeviceStore do
       noise_pk: decode_base64(row["noise_pk"]),
       kind: decode_kind(row["kind"]),
       push_token: row["push_token"],
-      push_service: row["push_service"],
-      push_p256dh: decode_optional_base64url(row["push_p256dh"]),
-      push_auth: decode_optional_base64url(row["push_auth"]),
       created_at: decode_datetime(row["created_at"]),
       last_seen: decode_optional_datetime(row["last_seen"]),
       apns_key_salt: decode_optional_base64(row["apns_key_salt"]),
@@ -584,19 +556,6 @@ defmodule FermixChannels.Mobile.DeviceStore do
   defp decode_base64(value), do: {:decode_error, {:invalid_base64_value, value}}
   defp decode_optional_base64(nil), do: nil
   defp decode_optional_base64(value), do: decode_base64(value)
-
-  # A subscription's key and secret are written as the phone sent them:
-  # base64url with no padding.
-  defp decode_optional_base64url(nil), do: nil
-
-  defp decode_optional_base64url(value) when is_binary(value) do
-    case Base.url_decode64(value, padding: false) do
-      {:ok, decoded} -> decoded
-      :error -> {:decode_error, :invalid_base64url}
-    end
-  end
-
-  defp decode_optional_base64url(value), do: {:decode_error, {:invalid_base64url_value, value}}
 
   # A row that names no kind was written before M75, when every device was a
   # phone.
@@ -634,6 +593,7 @@ defmodule FermixChannels.Mobile.DeviceStore do
          :ok <- validate_text(:name, attrs[:name]),
          :ok <- validate_text(:model, attrs[:model]),
          :ok <- validate_binary32(:noise_pk, attrs[:noise_pk]),
+         :ok <- validate_optional_text(:push_token, attrs[:push_token]),
          :ok <- validate_datetime(:created_at, attrs[:created_at]),
          :ok <- validate_optional_datetime(:last_seen, attrs[:last_seen]),
          :ok <- validate_relay_list_rev(:relay_list_rev, attrs[:relay_list_rev]),
@@ -642,8 +602,8 @@ defmodule FermixChannels.Mobile.DeviceStore do
     end
   end
 
-  # Each kind's own fields: a phone has its push salt and one registration; a
-  # desktop has none of a phone's fields.
+  # Each kind's own fields: a phone has its push salt; a desktop has none of a
+  # phone's fields.
   defp validate_kind_fields(attrs) do
     case Map.get(attrs, :kind, :phone) do
       :phone -> validate_phone(attrs)
@@ -654,47 +614,10 @@ defmodule FermixChannels.Mobile.DeviceStore do
 
   defp validate_phone(attrs) do
     with :ok <- validate_binary32(:apns_key_salt, attrs[:apns_key_salt]),
-         :ok <- validate_registration(attrs),
          :ok <- absent_fields(attrs, @desktop_only_fields, :phone_field) do
       validate_attestation_facts(attrs)
     end
   end
-
-  # An APNs token is bounded as every short text field is; a Web Push token
-  # is what `WebPush` can address, at a service it knows.
-  defp validate_registration(attrs) do
-    case Enum.split_with(@subscription_fields, &is_nil(attrs[&1])) do
-      {[], _all_set} -> validate_subscription(attrs)
-      {_all_missing, []} -> validate_optional_text(:push_token, attrs[:push_token])
-      {[missing | _rest], _set} -> {:error, {:invalid_device, missing, :incomplete_subscription}}
-    end
-  end
-
-  defp validate_subscription(attrs) do
-    cond do
-      attrs[:push_service] not in WebPush.services() ->
-        invalid_subscription(:push_service)
-
-      not web_push_token?(attrs[:push_service], attrs[:push_token]) ->
-        invalid_subscription(:push_token)
-
-      not match?(<<4, _point::binary-64>>, attrs[:push_p256dh]) ->
-        invalid_subscription(:push_p256dh)
-
-      not match?(<<_auth::binary-16>>, attrs[:push_auth]) ->
-        invalid_subscription(:push_auth)
-
-      true ->
-        :ok
-    end
-  end
-
-  defp web_push_token?(service, token) when is_binary(token),
-    do: match?({:ok, _address}, WebPush.endpoint(service, token))
-
-  defp web_push_token?(_service, _token), do: false
-
-  defp invalid_subscription(field), do: {:error, {:invalid_device, field, :invalid_subscription}}
 
   defp validate_desktop(attrs) do
     with :ok <- absent_fields(attrs, @phone_only_fields, :desktop_field) do
@@ -740,6 +663,7 @@ defmodule FermixChannels.Mobile.DeviceStore do
          true <- unknown == [] or {:error, {:invalid_device_update_fields, unknown}},
          :ok <- validate_present(attrs, :name, &validate_text/2),
          :ok <- validate_present(attrs, :model, &validate_text/2),
+         :ok <- validate_present(attrs, :push_token, &validate_optional_text/2),
          :ok <- validate_present(attrs, :last_seen, &validate_optional_datetime/2),
          :ok <- validate_present(attrs, :relay_list_rev, &validate_relay_list_rev/2) do
       {:ok, attrs}
@@ -803,26 +727,13 @@ defmodule FermixChannels.Mobile.DeviceStore do
     updates = settle_last_seen(device.last_seen, updates)
     updated = struct!(device, updates)
 
-    with :ok <- validate_registration_update(device, updates),
-         :ok <- validate_text(:name, updated.name),
+    with :ok <- validate_text(:name, updated.name),
          :ok <- validate_text(:model, updated.model),
+         :ok <- validate_optional_text(:push_token, updated.push_token),
          :ok <- validate_optional_datetime(:last_seen, updated.last_seen),
          :ok <- validate_relay_list_rev(:relay_list_rev, updated.relay_list_rev),
          :ok <- validate_kind_fields(Map.from_struct(updated)) do
       {:ok, updated}
-    end
-  end
-
-  # One registration per phone, the last written winning, so a registration is
-  # written whole: an update names all four of its fields, or the token alone
-  # on a phone that holds no subscription (an APNs `push_register` or
-  # `push_unregister`). A token alone never re-points a subscription.
-  defp validate_registration_update(device, updates) do
-    case Enum.filter(@registration_fields, &Map.has_key?(updates, &1)) do
-      [] -> :ok
-      @registration_fields -> :ok
-      [:push_token] when is_nil(device.push_service) -> :ok
-      _partial -> {:error, {:invalid_device_update, :partial_push_registration}}
     end
   end
 
@@ -930,9 +841,6 @@ defmodule FermixChannels.Mobile.DeviceStore do
     |> maybe_put("kind", encode_kind(device.kind))
     |> maybe_put("apns_key_salt", encode_optional_base64(device.apns_key_salt))
     |> maybe_put("push_token", device.push_token)
-    |> maybe_put("push_service", device.push_service)
-    |> maybe_put("push_p256dh", encode_optional_base64url(device.push_p256dh))
-    |> maybe_put("push_auth", encode_optional_base64url(device.push_auth))
     |> maybe_put("last_seen", encode_datetime(device.last_seen))
     |> maybe_put("platform", device.platform)
     |> maybe_put("signer_role", encode_atom(device.signer_role))
@@ -949,8 +857,6 @@ defmodule FermixChannels.Mobile.DeviceStore do
   defp encode_kind(:desktop), do: "desktop"
   defp encode_optional_base64(nil), do: nil
   defp encode_optional_base64(value), do: Base.encode64(value)
-  defp encode_optional_base64url(nil), do: nil
-  defp encode_optional_base64url(value), do: Base.url_encode64(value, padding: false)
 
   defp encode_atom(nil), do: nil
   defp encode_atom(value) when is_atom(value), do: Atom.to_string(value)

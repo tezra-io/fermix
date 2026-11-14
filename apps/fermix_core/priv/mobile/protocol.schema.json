@@ -35,7 +35,7 @@
           "call_open", "call_line", "call_audio", "call_frame", "call_close",
           "offers", "link_path", "join_request",
           "invoke_open", "invoke_part", "invoke_cancel", "invoke_result", "invoke_status",
-          "invoke_restarted", "push_subscribe"
+          "invoke_restarted"
         ]}
       },
       "allOf": [
@@ -50,7 +50,6 @@
         {"if": {"properties": {"t": {"const": "media_fetch"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/media_fetch"}},
         {"if": {"properties": {"t": {"const": "push_register"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/push_register"}},
         {"if": {"properties": {"t": {"const": "push_unregister"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/push_unregister"}},
-        {"if": {"properties": {"t": {"const": "push_subscribe"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/push_subscribe"}},
         {"if": {"properties": {"t": {"const": "ack"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/ack"}},
         {"if": {"properties": {"t": {"const": "read_state"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/read_state"}},
         {"if": {"properties": {"t": {"const": "request_status"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/request_status"}},
@@ -229,21 +228,6 @@
       "properties": {"t": {"const": "push_register"}, "apns_token": {"type": "string", "minLength": 1}, "environment": {"enum": ["development", "production"]}}
     },
     "push_unregister": {"allOf": [{"$ref": "#/$defs/envelope"}], "required": ["v", "t", "seq"], "properties": {"t": {"const": "push_unregister"}}},
-    "push_subscribe": {
-      "allOf": [{"$ref": "#/$defs/envelope"}], "required": ["v", "t", "seq", "service", "token", "p256dh", "auth"],
-      "description": "A phone's Web Push subscription (M99), protocol 3 only: at protocol 2 it is an unknown event. Sent after every hello_ack whose caps.push names webpush. service is the push service; token is what Google Play services returned for push_key, its letters, digits, _, : and -, within the frame's 4 KiB header; p256dh is the phone's P-256 public key, 65 bytes whose first is 0x04 and a point on the curve (which the daemon checks and this pattern cannot), and auth its 16-byte secret, each in base64url without padding. It replaces an APNs token, as push_register replaces a subscription.",
-      "properties": {
-        "v": {"type": "integer", "minimum": 3}, "t": {"const": "push_subscribe"},
-        "service": {"enum": ["fcm"]},
-        "token": {"type": "string", "pattern": "^[A-Za-z0-9_:-]{1,4096}$"},
-        "p256dh": {"$ref": "#/$defs/p256Point"},
-        "auth": {"type": "string", "pattern": "^[A-Za-z0-9_-]{21}[AQgw]$"}
-      }
-    },
-    "p256Point": {
-      "type": "string", "pattern": "^B[A-Za-z0-9_-]{85}[AEIMQUYcgkosw048]$",
-      "description": "An uncompressed P-256 public point, 65 bytes whose first is 0x04, in canonical base64url without padding: 87 characters."
-    },
     "ack": {
       "allOf": [{"$ref": "#/$defs/envelope"}], "required": ["v", "t", "seq", "server_seq"],
       "properties": {"t": {"const": "ack"}, "server_seq": {"type": "integer", "minimum": 0, "maximum": 18446744073709551615}}
@@ -277,7 +261,7 @@
     "unpair": {"allOf": [{"$ref": "#/$defs/envelope"}], "required": ["v", "t", "seq"], "properties": {"t": {"const": "unpair"}}},
     "ping": {"allOf": [{"$ref": "#/$defs/envelope"}], "required": ["v", "t", "seq"], "properties": {"t": {"const": "ping"}}},
     "hello_ack": {
-      "allOf": [{"$ref": "#/$defs/envelope"}, {"$ref": "#/$defs/pushByVersion"}],
+      "allOf": [{"$ref": "#/$defs/envelope"}],
       "required": ["v", "t", "seq", "session_id", "min_version", "max_version", "profiles", "candidates", "history_head_seq", "read_up_to_seq", "caps"],
       "properties": {
         "t": {"const": "hello_ack"}, "session_id": {"type": "string", "minLength": 1},
@@ -286,16 +270,8 @@
         "candidates": {"type": "array", "maxItems": 16, "items": {"$ref": "#/$defs/candidate"}},
         "history_head_seq": {"type": "integer", "minimum": 0}, "read_up_to_seq": {"type": "integer", "minimum": 0},
         "caps": {"$ref": "#/$defs/caps"},
-        "primary_epoch": {"type": "integer", "minimum": 1, "maximum": 18446744073709551615, "description": "The daemon's primary epoch (M75): how many times its home has become the primary engine, 1 from its first boot as the primary. This daemon always sends it; a daemon older than the epoch leaves it out."},
-        "push_key": {"$ref": "#/$defs/p256Point", "description": "The home's Web Push public key (M99), protocol 3 only: present exactly when caps.push names webpush, and the very text a phone hands to Google Play services when it subscribes."}
+        "primary_epoch": {"type": "integer", "minimum": 1, "maximum": 18446744073709551615, "description": "The daemon's primary epoch (M75): how many times its home has become the primary engine, 1 from its first boot as the primary. This daemon always sends it; a daemon older than the epoch leaves it out."}
       }
-    },
-    "pushByVersion": {
-      "description": "Web Push rides protocol 3 (M99): before it a push list names apns alone and a hello_ack carries no push_key, since a phone app at protocol 2 reads the list as apns alone.",
-      "allOf": [
-        {"if": {"properties": {"v": {"maximum": 2}}, "required": ["v"]}, "then": {"properties": {"caps": {"properties": {"push": {"maxItems": 1, "items": {"enum": ["apns"]}}}}, "push": {"maxItems": 1, "items": {"enum": ["apns"]}}}}},
-        {"if": {"required": ["push_key"]}, "then": {"properties": {"v": {"minimum": 3}}}}
-      ]
     },
     "profile": {
       "type": "object", "required": ["id", "name"],
@@ -380,8 +356,8 @@
       }
     },
     "pushServices": {
-      "type": "array", "maxItems": 2, "items": {"enum": ["apns", "webpush"]},
-      "description": "The push services this daemon sends through, each once: apns while its APNs push runs, then webpush (protocol 3 only, with hello_ack.push_key) while its phone channel holds the home's Web Push key. An iPhone offers notifications when apns is listed, an Android phone when webpush is."
+      "type": "array", "maxItems": 1, "items": {"enum": ["apns"]},
+      "description": "The push services this daemon sends through, each once; an iPhone offers notifications only when apns is listed, and an Android phone has none."
     },
     "commandDescriptor": {
       "type": "object", "required": ["name", "aliases", "description"],
@@ -556,7 +532,7 @@
       "properties": {"t": {"const": "notice"}, "kind": {"type": "string", "minLength": 1}, "text": {"type": "string", "minLength": 1}}
     },
     "pair_approved": {
-      "allOf": [{"$ref": "#/$defs/envelope"}, {"$ref": "#/$defs/pushByVersion"}], "required": ["v", "t", "seq", "device_id", "candidates", "profiles", "push_salt"],
+      "allOf": [{"$ref": "#/$defs/envelope"}], "required": ["v", "t", "seq", "device_id", "candidates", "profiles", "push_salt"],
       "description": "push_salt is the device's 32-byte push salt (apns_key_salt), standard base64 with padding; push lists the push services this daemon sends through, and is absent from a daemon older than the list. primary_epoch is the daemon's primary epoch (M75), the value a newly paired phone starts its highest-seen epoch from; this daemon always sends it, a daemon older than the epoch leaves it out.",
       "properties": {"t": {"const": "pair_approved"}, "device_id": {"type": "string", "minLength": 1}, "candidates": {"type": "array", "maxItems": 16, "items": {"$ref": "#/$defs/candidate"}}, "profiles": {"type": "array", "items": {"$ref": "#/$defs/profile"}}, "push_salt": {"type": "string", "pattern": "^[A-Za-z0-9+/]{43}=$"}, "push": {"$ref": "#/$defs/pushServices"}, "primary_epoch": {"type": "integer", "minimum": 1, "maximum": 18446744073709551615}}
     },

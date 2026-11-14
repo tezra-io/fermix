@@ -73,7 +73,7 @@ defmodule FermixChannels.Mobile.Lanes do
   @interactive ~w(
     hello hello_ack ping pong error ack
     msg command cancel history_pull history_page read_state request_status request_status_page
-    push_register push_subscribe push_unregister unpair pair_request pair_approved pair_denied
+    push_register push_unregister unpair pair_request pair_approved pair_denied
     accepted turn_started text_delta tool_event text_done turn_done turn_error row reaction
     approval approval_resolved link_preview notice
     companion_open companion_line companion_close manage manage_result

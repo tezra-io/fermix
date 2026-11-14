@@ -29,8 +29,6 @@ defmodule FermixChannels.Mobile.Protocol do
   """
 
   alias FermixChannels.Mobile.PeerEvents
-  alias FermixChannels.Mobile.WebPush
-  alias FermixChannels.Mobile.WebPush.Encryption
   alias FermixCore.Companion.Protocol, as: ChatProtocol
   alias FermixCore.Text
 
@@ -38,9 +36,6 @@ defmodule FermixChannels.Mobile.Protocol do
   # Protocol 1 shipped in daemons but never had a client, so protocol 2's
   # window was itself alone (M51 D1); from protocol 3 on it is N/N-1.
   @min_supported_version @protocol_version - 1
-  # Web Push came with protocol 3 (M99 §14): a phone app at 2 reads the push
-  # list as `apns` alone, so nothing of Web Push reaches a session at 2.
-  @web_push_version 3
   @max_header_bytes 4_096
   @max_raw_chunk_bytes 60 * 1_024
   @max_plaintext_bytes 65_535 - 16
@@ -52,13 +47,8 @@ defmodule FermixChannels.Mobile.Protocol do
   @computer_platforms ~w(macos linux)
   # Where a computer stands against its server (M97 §3.4, `Computers.Versions`).
   @computer_standings ~w(current behind ahead settings_only)
-  # The services a push list may name, each once: `webpush` from protocol 3
-  # (`@web_push_version`), with `hello_ack.push_key`.
-  @push_services ~w(apns webpush)
-  @protocol_2_push_services ~w(apns)
-  # A P-256 public point, 65 bytes, the first 0x04; a Web Push auth secret.
-  @p256_point_bytes 65
-  @push_auth_bytes 16
+  # This daemon pushes through APNs alone, so it is the wire's whole catalog.
+  @push_services ~w(apns)
   @attestation_kinds ~w(android_keymint apple_app_attest)
   @max_attestation_certs 6
   @max_attestation_chain_bytes 16 * 1_024
@@ -76,11 +66,7 @@ defmodule FermixChannels.Mobile.Protocol do
     link_preview read_state history_page request_status_page notice pair_approved pair_denied
     error pong event_part
   )
-  # The client events a later protocol brought, each with the version that
-  # brought it: at an older version each is the unknown event it was there.
-  @later_client_events [{"push_subscribe", @web_push_version}]
-  @client_events @shipped_client_events ++
-                   PeerEvents.client_events() ++ Enum.map(@later_client_events, &elem(&1, 0))
+  @client_events @shipped_client_events ++ PeerEvents.client_events()
   @server_events @shipped_server_events ++ PeerEvents.server_events()
   @raw_client_events ~w(attach_chunk pair_request)
   @raw_server_events ~w(media_chunk event_part)
@@ -94,7 +80,6 @@ defmodule FermixChannels.Mobile.Protocol do
     "media_fetch" => ~w(ref),
     "push_register" => ~w(apns_token environment),
     "push_unregister" => [],
-    "push_subscribe" => ~w(service token p256dh auth),
     "ack" => ~w(server_seq),
     "request_status" => ~w(client_msg_ids),
     "pair_request" => ~w(device_name model app_version platform attestation),
@@ -184,14 +169,6 @@ defmodule FermixChannels.Mobile.Protocol do
     end
   end
 
-  @doc """
-  The first version that carries Web Push (M99 §14): `webpush` in a push
-  list, `hello_ack.push_key` and the client's `push_subscribe`. A session at
-  an older version is told and sent none of it.
-  """
-  @spec web_push_version() :: pos_integer()
-  def web_push_version, do: @web_push_version
-
   @doc "Ordered client event catalog."
   @spec client_events() :: [String.t()]
   def client_events, do: @client_events
@@ -240,7 +217,6 @@ defmodule FermixChannels.Mobile.Protocol do
     with :ok <- validate_media_cap(max_media_bytes),
          {:ok, header, bytes} <- split_frame(frame),
          {:ok, envelope} <- decode_envelope(header, :client),
-         :ok <- carried(envelope),
          :ok <- validate_client_event(envelope, max_media_bytes),
          :ok <- validate_binary(:client, envelope.type, bytes, @raw_client_events),
          :ok <- validate_attestation_chain(envelope, bytes) do
@@ -271,7 +247,6 @@ defmodule FermixChannels.Mobile.Protocol do
          {:ok, payload} <- stringify_top_level(payload),
          :ok <- reject_reserved(payload),
          envelope = %{version: version, type: type, seq: seq, payload: payload},
-         :ok <- carried(envelope),
          :ok <- validate_client_event(envelope, max_media_bytes),
          :ok <- validate_binary(:client, type, bytes, @raw_client_events),
          :ok <- validate_attestation_chain(envelope, bytes) do
@@ -377,15 +352,6 @@ defmodule FermixChannels.Mobile.Protocol do
   defp logical_type("event_part"), do: {:error, :nested_event_part}
   defp logical_type(_type), do: :ok
 
-  # A client event a later version brought is, at an older one, the unknown
-  # event it was there, whatever it carries.
-  defp carried(%{type: type, version: version}) do
-    case List.keyfind(@later_client_events, type, 0) do
-      {^type, since} when version < since -> {:error, {:unknown_event, type}}
-      _carried -> :ok
-    end
-  end
-
   defp validate_client_event(%{type: type, payload: payload, version: version}, max_media_bytes) do
     cond do
       type in ChatProtocol.shared_client_events() ->
@@ -414,37 +380,11 @@ defmodule FermixChannels.Mobile.Protocol do
 
       true ->
         with :ok <- require_fields(type, payload, @server_required),
-             :ok <- validate_server_payload(type, payload),
-             :ok <- push_at_version(type, payload, version) do
+             :ok <- validate_server_payload(type, payload) do
           window_holds(type, payload, version)
         end
     end
   end
-
-  # What a push list may name at the frame's version (`@web_push_version`),
-  # and `hello_ack.push_key` exactly when its list names `webpush`.
-  defp push_at_version("hello_ack", %{"caps" => caps} = payload, version) do
-    services = Map.get(caps, "push", [])
-
-    with :ok <- services_at_version(services, "caps.push", version) do
-      if "webpush" in services == Map.has_key?(payload, "push_key"),
-        do: :ok,
-        else: {:error, {:invalid_field, "push_key"}}
-    end
-  end
-
-  defp push_at_version("pair_approved", payload, version),
-    do: services_at_version(Map.get(payload, "push", []), "push", version)
-
-  defp push_at_version(_type, _payload, _version), do: :ok
-
-  defp services_at_version(services, field, version) when version < @web_push_version do
-    if services -- @protocol_2_push_services == [],
-      do: :ok,
-      else: {:error, {:invalid_field, field}}
-  end
-
-  defp services_at_version(_services, _field, _version), do: :ok
 
   defp window_holds("hello_ack", %{"min_version" => min, "max_version" => max}, version)
        when min <= version and version <= max,
@@ -729,10 +669,6 @@ defmodule FermixChannels.Mobile.Protocol do
   defp validate_client_payload("history_pull", payload, _max), do: validate_history_pull(payload)
   defp validate_client_payload("media_fetch", payload, _max), do: nonempty(payload, "ref")
   defp validate_client_payload("push_register", payload, _max), do: validate_push(payload)
-
-  defp validate_client_payload("push_subscribe", payload, _max),
-    do: validate_push_subscribe(payload)
-
   defp validate_client_payload("ack", payload, _max), do: nonnegative_u64(payload, "server_seq")
 
   defp validate_client_payload("request_status", payload, _max),
@@ -863,37 +799,6 @@ defmodule FermixChannels.Mobile.Protocol do
     end
   end
 
-  # A Web Push subscription (M99 §14): a service `WebPush` knows, the token
-  # it can address there, and the phone's P-256 public key and auth secret,
-  # each in canonical base64url without padding. The session decodes it.
-  defp validate_push_subscribe(payload) do
-    with :ok <- enum(payload, "service", WebPush.services()),
-         :ok <- push_token(payload),
-         :ok <- base64url_bytes(payload, "p256dh", @p256_point_bytes, <<4>>),
-         :ok <- p256_point(payload["p256dh"]) do
-      base64url_bytes(payload, "auth", @push_auth_bytes, <<>>)
-    end
-  end
-
-  # Read as the sender reads it (`Encryption.valid_point?/1`), so a key no
-  # push can be sealed to is refused when the phone sends it, not at every
-  # later send. Its text was held to 65 bytes of base64url just before.
-  defp p256_point(text) do
-    if Encryption.valid_point?(Base.url_decode64!(text, padding: false)),
-      do: :ok,
-      else: {:error, {:invalid_field, "p256dh"}}
-  end
-
-  # The service was read first, so a refusal here is the token's.
-  defp push_token(%{"service" => service, "token" => token}) when is_binary(token) do
-    case WebPush.endpoint(service, token) do
-      {:ok, _address} -> :ok
-      {:error, _reason} -> {:error, {:invalid_field, "token"}}
-    end
-  end
-
-  defp push_token(_payload), do: {:error, {:invalid_field, "token"}}
-
   defp validate_pair_request(payload) do
     with :ok <- nonempty(payload, "device_name"),
          :ok <- nonempty(payload, "model"),
@@ -984,18 +889,10 @@ defmodule FermixChannels.Mobile.Protocol do
          :ok <- positive_u64(payload, "primary_epoch"),
          :ok <- optional_trips_caps(payload["caps"]),
          :ok <- optional_call_caps(payload["caps"]),
-         :ok <- optional_computer_caps(payload["caps"]),
-         :ok <- optional_push_key(payload) do
+         :ok <- optional_computer_caps(payload["caps"]) do
       optional_push_services(payload["caps"], "caps.push")
     end
   end
-
-  # The home's Web Push public key (M99 §14), the very text a phone hands to
-  # Play services: a P-256 point in base64url without padding, 87 characters.
-  defp optional_push_key(%{"push_key" => _key} = payload),
-    do: base64url_bytes(payload, "push_key", @p256_point_bytes, <<4>>)
-
-  defp optional_push_key(_payload), do: :ok
 
   # Which of a computer's own events the server takes (M97 §5.3): absent from
   # a server older than the computer record and from a phone's hello_ack, and
@@ -1301,21 +1198,6 @@ defmodule FermixChannels.Mobile.Protocol do
   defp base64_bytes(payload, field, size) do
     with value when is_binary(value) <- Map.get(payload, field),
          {:ok, decoded} when byte_size(decoded) == size <- Base.decode64(value) do
-      :ok
-    else
-      _invalid -> {:error, {:invalid_field, field}}
-    end
-  end
-
-  # Canonical base64url without padding of `size` bytes starting with
-  # `prefix`: the decoder reads padding and stray trailing bits, so the text
-  # must also be what the bytes encode to.
-  defp base64url_bytes(payload, field, size, prefix) do
-    with value when is_binary(value) <- Map.get(payload, field),
-         {:ok, decoded} <- Base.url_decode64(value, padding: false),
-         true <- byte_size(decoded) == size,
-         true <- binary_part(decoded, 0, byte_size(prefix)) == prefix,
-         ^value <- Base.url_encode64(decoded, padding: false) do
       :ok
     else
       _invalid -> {:error, {:invalid_field, field}}

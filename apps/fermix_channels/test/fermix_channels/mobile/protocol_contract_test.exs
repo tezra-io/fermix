@@ -12,7 +12,6 @@ defmodule FermixChannels.Mobile.ProtocolContractTest do
   alias FermixChannels.Mobile.Protocol
   alias FermixChannels.Mobile.Router
   alias FermixChannels.Mobile.Session
-  alias FermixChannels.Mobile.WebPush
   alias FermixCore.Computers.Offers
   alias FermixCore.Computers.Offers.Files, as: FilesOffer
   alias FermixCore.Computers.Origin
@@ -519,108 +518,22 @@ defmodule FermixChannels.Mobile.ProtocolContractTest do
     end
   end
 
-  # The daemon pushes through APNs and, from protocol 3, Web Push (M99 §14):
-  # no exported push list, and no golden frame, names any other service, and
-  # none at protocol 2 names webpush, which a phone app at 2 cannot read.
-  test "the push catalog is apns, and webpush from protocol 3, in the schema and every golden",
-       %{schema: schema} do
-    assert schema["$defs"]["pushServices"]["items"]["enum"] == ["apns", "webpush"]
+  # The daemon pushes through APNs alone: no exported push list, and no
+  # golden frame, names any other service.
+  test "the push catalog is apns alone, in the schema and every golden frame", %{schema: schema} do
+    assert schema["$defs"]["pushServices"]["items"]["enum"] == ["apns"]
 
     for header <- client_headers() ++ server_headers() do
-      allowed =
-        if header["v"] >= Protocol.web_push_version(), do: ~w(apns webpush), else: ~w(apns)
-
       for push <- [get_in(header, ["caps", "push"]), header["push"]], push != nil do
-        assert push -- allowed == [], "#{header["t"]} at #{header["v"]} lists #{inspect(push)}"
+        assert push -- ["apns"] == [], "#{header["t"]} lists #{inspect(push)}"
       end
     end
 
-    approved = Enum.find(server_headers(), &(&1["t"] == "pair_approved" and &1["v"] == 2))
+    approved = Enum.find(server_headers(), &(&1["t"] == "pair_approved"))
 
-    for push <- [["fcm"], ["apns", "fcm"], ["apns", "apns"], ["webpush"], ["apns", "webpush"]] do
+    for push <- [["fcm"], ["apns", "fcm"], ["apns", "apns"]] do
       refute server_errors(Map.put(approved, "push", push), schema) == [], inspect(push)
-      assert {:error, _reason} = encode_at(approved, "pair_approved", payload(approved, push))
     end
-
-    approved = Enum.find(server_headers(), &(&1["t"] == "pair_approved" and &1["v"] == 3))
-
-    for push <- [["webpush"], ["apns", "webpush"], ["apns"], []] do
-      assert server_errors(Map.put(approved, "push", push), schema) == [], inspect(push)
-      assert {:ok, _frame} = encode_at(approved, "pair_approved", payload(approved, push))
-    end
-  end
-
-  # M99 §14: hello_ack.push_key is the home's key, sent exactly when the push
-  # list names webpush, and never at protocol 2, read alike by the codec and
-  # the schema where the schema can say it.
-  test "the schema publishes hello_ack.push_key as the codec reads it", %{schema: schema} do
-    golden =
-      Enum.find(server_headers(), &(&1["t"] == "hello_ack" and Map.has_key?(&1, "push_key")))
-
-    assert golden["v"] == Protocol.web_push_version()
-    assert golden["caps"]["push"] == ["apns", "webpush"]
-    key = golden["push_key"]
-    assert {:ok, <<4, _point::binary-64>>} = Base.url_decode64(key, padding: false)
-
-    older = %{golden | "v" => 2}
-    refute server_errors(older, schema) == []
-    assert {:error, _reason} = encode_at(older, "hello_ack", Map.drop(older, ~w(v t seq)))
-
-    for bad <- ["A" <> String.slice(key, 1..-1//1), String.slice(key, 0, 86), key <> "A"] do
-      refute server_errors(%{golden | "push_key" => bad}, schema) == [], bad
-      assert {:error, _reason} = encode_at(golden, "hello_ack", payload(golden, bad, "push_key"))
-    end
-
-    # The codec alone holds the key to the list: the schema cannot say "exactly
-    # when the list names webpush" in the vocabulary a phone vendors.
-    keyless = Map.delete(golden, "push_key")
-
-    assert {:error, {:invalid_field, "push_key"}} =
-             encode_at(keyless, "hello_ack", payload(keyless))
-  end
-
-  # M99 §14: push_subscribe at protocol 3, the codec and the schema alike.
-  test "the schema publishes push_subscribe as the codec reads it", %{schema: schema} do
-    golden = Enum.find(client_headers(), &(&1["t"] == "push_subscribe"))
-    assert golden["v"] == Protocol.web_push_version()
-    assert golden["service"] in WebPush.services()
-    assert schema["$defs"]["push_subscribe"]["properties"]["service"]["enum"] == ["fcm"]
-
-    for field <- ~w(service token p256dh auth) do
-      assert field in schema["$defs"]["push_subscribe"]["required"], field
-    end
-
-    older = %{golden | "v" => 2}
-    refute client_errors(older, schema) == []
-
-    assert {:error, {:unknown_event, "push_subscribe"}} =
-             Protocol.decode_client_frame(frame(older))
-
-    point = golden["p256dh"]
-    secret = golden["auth"]
-
-    for {field, value} <- [
-          {"service", "apns"},
-          {"token", "with space"},
-          {"token", ""},
-          {"p256dh", "A" <> String.slice(point, 1..-1//1)},
-          {"p256dh", secret},
-          {"auth", point},
-          {"auth", String.slice(secret, 0, 21) <> "B"}
-        ] do
-      drifted = %{golden | field => value}
-      refute client_errors(drifted, schema) == [], inspect({field, value})
-
-      assert {:error, {:invalid_field, ^field}} = Protocol.decode_client_frame(frame(drifted)),
-             inspect({field, value})
-    end
-
-    # A key off the curve has the shape the schema can say, and the codec
-    # alone refuses it, as the schema's description tells a phone.
-    off_curve = %{golden | "p256dh" => Base.url_encode64(<<4, 1::256, 1::256>>, padding: false)}
-    assert client_errors(off_curve, schema) == []
-    assert {:error, {:invalid_field, "p256dh"}} = Protocol.decode_client_frame(frame(off_curve))
-    assert schema["$defs"]["push_subscribe"]["description"] =~ "a point on the curve"
   end
 
   # Every field protocol 2 gained after it shipped is optional, so a daemon
@@ -1431,32 +1344,6 @@ defmodule FermixChannels.Mobile.ProtocolContractTest do
     assert File.exists?(Path.join(@priv_dir, "push_vectors.json"))
   end
 
-  # M99 §14: what an Android app needs to receive a Web Push, in the words it
-  # vendors, beside the vectors it is held to.
-  test "documentation records the Web Push an Android app has to receive", %{protocol: protocol} do
-    [_before, section] = String.split(protocol, "## Push notifications\n", parts: 2)
-    [section, _after] = String.split(section, "\n## ", parts: 2)
-
-    assert protocol =~ "**Protocol 3: Web Push.**"
-    assert protocol =~ "| `webpush_unavailable` |"
-
-    for words <- [
-          "### Web Push",
-          "https://fcm.googleapis.com/fcm/send/<token>",
-          "2,150 bytes",
-          ~s({"v":1,"kind":"message","profile_id":"main","server_seq":42,"preview_text":"…"}),
-          "`push_subscribe`",
-          "`push_key`",
-          "webpush_vectors.json"
-        ] do
-      assert section =~ words, words
-    end
-
-    refute section =~ "Only an `ios` phone is pushed"
-    refute section =~ "An `android` phone is pushed nothing"
-    assert File.exists?(Path.join(@priv_dir, "webpush_vectors.json"))
-  end
-
   # M75 §5.3: the table a phone, a desktop and wave-two responders read is the
   # one the session enforces.
   test "documentation's table of who may send what is Mobile.Peers'", %{protocol: protocol} do
@@ -1715,10 +1602,6 @@ defmodule FermixChannels.Mobile.ProtocolContractTest do
   # A golden's payload, changed, encoded again at the golden's own version.
   defp encode_at(golden, type, payload),
     do: Protocol.encode_server_frame(type, payload, 1, <<>>, version: golden["v"])
-
-  # A golden's payload, one field set.
-  defp payload(golden), do: Map.drop(golden, ~w(v t seq))
-  defp payload(golden, value, field \\ "push"), do: golden |> payload() |> Map.put(field, value)
 
   defp hello_ack_payload do
     %{
