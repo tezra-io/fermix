@@ -171,9 +171,10 @@ primary's, exactly as its own socket would give it.
   publishes its own under the `always_on` pane, titled for itself:
   `computer` (what Fermix on the server may use here, "This computer"), then
   `computer.sandbox`, `computer.browser`, `computer.computer_use` and
-  `computer.computer_history` (on a Mac only, until a Linux computer
-  records), each titled "<the section's title> on this Mac" ("on this
-  computer" elsewhere), and each answered by the plain section's own rows.
+  `computer.computer_history` (where this computer has a recorder: a Mac,
+  and a Linux computer), each titled "<the section's title> on this Mac"
+  ("on this computer" elsewhere), and each answered by the plain section's
+  own rows.
   Its answer carries the prefix: the section's
   `id`, and each secret row's `key` (`computer.env:LEDGER_TOKEN`), so the
   `secret.set` a row sends comes back here; a refusal's `section`, `field`
@@ -746,8 +747,8 @@ your server only in Socket Mode."), `stackchan` while StackChan is on a Mac
 `dev_plugins` while this computer's settings name a dev plugin folder (the
 move review's own item, naming the server, "your server" before one is
 held: "Dev plugins stay on this Mac: north-box runs none of them.") and
-`computer_history_linux` on a computer that has no history recorder
-("Computer history records only on a Mac for now."). Where it shows:
+`computer_history` on a computer that has no history recorder
+("This computer has no recorder for computer history."). Where it shows:
 
 - on the computer that sets Always On up, on every screen before a move
   but `off` (`connect`, `creating`, `ready`, the `not_ready` problem and
@@ -759,7 +760,7 @@ held: "Dev plugins stay on this Mac: north-box runs none of them.") and
   them (`primary_home.summary.detail.not_yet`), but `whatsapp` where this
   screen's `webhooks` already says it, then what this computer's own
   settings and recorder turn on (`stackchan`, `dev_plugins`,
-  `computer_history_linux`).
+  `computer_history`).
 
 None where nothing applies, on a problem, and on every other screen. It is
 information only: no action, no confirm, no notice; a change of it moves

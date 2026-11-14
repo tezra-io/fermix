@@ -2740,21 +2740,23 @@ defmodule Fermix.CLI.Doctor.Checks do
 
   @doc """
   Computer history (MILESTONE_32 §15.3): this machine's opt-in row, where it
-  has a recorder (M97 §8.3: a Mac, until a Linux recorder ships). Tree-less —
+  has a recorder (M97 §8.3, `ComputerHistory.recorder?/1`: a Mac, and a Linux
+  computer, whose row also says which applications its recorder cannot see,
+  M97 stage 4 D3). Tree-less —
   reports config-level state (availability, on/off, summarizer posture, allowlist
   sizes) plus the chain posture (§9.4): an enabled rail whose primary is not
   granted for history captures and summarizes but never appears in a reply, which
   is a **warn** here, with the grant that would fix it named. Runtime detail
   (spool size, pause) integrates with the capturer stage over the control socket.
-  `:recorder?`/`:config`/`:routes` are injectable so the row is hermetic on any
-  CI; `:routes` takes `Selection.ordered_routes/0`'s own shape.
+  `:recorder?`/`:system`/`:config`/`:routes` are injectable so the row is
+  hermetic on any CI; `:routes` takes `Selection.ordered_routes/0`'s own shape.
   """
   @spec computer_history(keyword()) :: result()
   def computer_history(opts \\ []) when is_list(opts) do
     if Keyword.get_lazy(opts, :recorder?, &ComputerHistory.recorder?/0) do
       computer_history_result(opts)
     else
-      ok("computer history", "no recorder on this system; a Mac records")
+      ok("computer history", "no recorder on this system; a Mac or a Linux computer records")
     end
   end
 
@@ -2780,10 +2782,26 @@ defmodule Fermix.CLI.Doctor.Checks do
     detail =
       "on; summarizer #{summarizer_label(ComputerHistoryConfig.summarizer(config))}; " <>
         "#{length(ComputerHistoryConfig.apps(config))} app(s) allowlisted. " <>
-        ComputerHistoryGate.chain_posture_sentence(posture)
+        ComputerHistoryGate.chain_posture_sentence(posture) <>
+        unseen_apps_sentence(Keyword.get_lazy(opts, :system, &history_system/0))
 
     history_row(posture.state, detail)
   end
+
+  # compux never switches an application's accessibility on (M86 R8), so a Linux
+  # recorder sees only what the person's session already publishes. The row is
+  # tree-less and reads no store, so it says which applications that is, and
+  # `/history status`, which reads this computer's store, names them.
+  defp unseen_apps_sentence(:linux),
+    do:
+      " On Linux an application records only while it publishes its controls on the " <>
+        "accessibility bus: Chromium, Electron and Qt applications do so only while " <>
+        "accessibility is on in your session; /history status names the allowlisted " <>
+        "applications that recorded nothing."
+
+  defp unseen_apps_sentence(_system), do: ""
+
+  defp history_system, do: if(ComputerHistory.macos?(), do: :macos, else: :linux)
 
   # Only "unsurfaceable" is this row's own warning: capture is working and the
   # operator has one config line to add. A broken provider chain is reported here

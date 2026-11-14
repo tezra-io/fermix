@@ -121,7 +121,7 @@ defmodule FermixCore.Management.Copy do
   # what the home's settings and the server's own turn on, then what one
   # computer's do (`not_yet/2`).
   @not_yet ~w(google_meet coding_signin whatsapp slack stackchan dev_plugins
-              computer_history_linux)a
+              computer_history)a
   @summary_keys ~w(off connect connecting ready ready_waits moving waiting on on_backup
                    on_no_backup undone undone_refused undone_unmarked move_marker_unread
                    retired retired_back candidate_waiting
@@ -853,8 +853,8 @@ defmodule FermixCore.Management.Copy do
   def not_yet(:dev_plugins, %{machine: machine} = values),
     do: dev_plugins_stay(machine, Map.get(values, :to) || "your server")
 
-  def not_yet(:computer_history_linux, values) when is_map(values),
-    do: "Computer history records only on a Mac for now."
+  def not_yet(:computer_history, values) when is_map(values),
+    do: "This computer has no recorder for computer history."
 
   @doc """
   What a dev plugin folder this computer's settings name means for a move:

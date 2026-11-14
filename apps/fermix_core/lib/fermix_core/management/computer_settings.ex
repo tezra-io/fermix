@@ -12,9 +12,10 @@ defmodule FermixCore.Management.ComputerSettings do
   answered by the plain section's own code here (`plain/2`), and its answer
   carries the prefix again (`own_view/3`, `own_result/2`): its id, and the key
   of each secret row (`computer.env:LEDGER_TOKEN`), so the `secret.set` a row
-  sends comes back to this computer. A Linux computer publishes no
-  `computer.computer_history` before its recorder exists (§19.2), and none
-  publishes `harness_machine`: its own approval is the Coding agents switch
+  sends comes back to this computer. A computer publishes
+  `computer.computer_history` only where it has a recorder
+  (`ComputerHistory.recorder?/1`: a Mac, and a Linux computer from M97
+  stage 4, §19.2), and none publishes `harness_machine`: its own approval is the Coding agents switch
   in `computer` (M98 D4). Nor does any publish `computer.accessories`:
   StackChan is not part of Always On (the owner's decision), so while the
   home is on a server a request for it is refused in the words the StackChan
@@ -30,10 +31,11 @@ defmodule FermixCore.Management.ComputerSettings do
   rule serves it as the home's. Its machine sections are titled with its name
   ("Sandbox on garden server", "garden server" in the coding pane).
 
-  Pure: the callers pass the inventories, the host (`macos?:`) and the
-  server as the link knows it.
+  Pure: the callers pass the inventories, the host (`macos?:`, `recorder?:`)
+  and the server as the link knows it.
   """
 
+  alias FermixCore.ComputerHistory
   alias FermixCore.Management.Accessories
   alias FermixCore.Management.Placement
   alias FermixCore.Management.Settings.ThisComputer
@@ -42,9 +44,8 @@ defmodule FermixCore.Management.ComputerSettings do
   # This Mac's order (§19.5): what the server may use here, then this
   # machine's own limits and devices.
   @order ~w(computer sandbox browser computer_use computer_history)
-  # Linux has no screen recorder before stage 4 (§19.2), and its app hides
-  # the plain id by name, never the new one.
-  @mac_only ~w(computer_history)
+  # The sections a computer publishes only where it has a recorder (§19.2).
+  @recorder_only ~w(computer_history)
   # StackChan, which a computer whose home is on a server never runs.
   @accessories "computer.accessories"
 
@@ -219,11 +220,13 @@ defmodule FermixCore.Management.ComputerSettings do
   defp own?(id, opts), do: own_machine?(id, opts)
 
   # A machine section this computer publishes as `computer.<id>`: never the
-  # coding approval nor StackChan, and its history only on a Mac.
+  # coding approval nor StackChan, and its history only where it records.
   defp own_machine?(id, opts) do
     Placement.machine_section?(id) and id not in ["harness_machine", "accessories"] and
-      (macos?(opts) or id not in @mac_only)
+      (id not in @recorder_only or recorder?(opts))
   end
+
+  defp recorder?(opts), do: Keyword.get_lazy(opts, :recorder?, &ComputerHistory.recorder?/0)
 
   defp own_row(%{"id" => "computer"} = row, _machine), do: row
 

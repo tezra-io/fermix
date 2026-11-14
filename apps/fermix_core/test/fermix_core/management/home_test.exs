@@ -558,7 +558,7 @@ defmodule FermixCore.Management.HomeTest do
         Enum.map(detail["not_yet"], & &1["id"])
       end
 
-      assert listed.(false) == ["google_meet", "computer_history_linux"]
+      assert listed.(false) == ["google_meet", "computer_history"]
       assert listed.(true) == ["google_meet"]
     end
 

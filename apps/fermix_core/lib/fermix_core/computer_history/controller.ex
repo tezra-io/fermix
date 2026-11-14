@@ -16,7 +16,8 @@ defmodule FermixCore.ComputerHistory.Controller do
   from `/history off` (an enable takes effect at the next boot), and it is
   idempotent: a process already in the desired state is left untouched.
 
-  "Operative" is `ComputerHistory.operative?/0` (enabled ∧ macOS) AND the sidecar
+  "Operative" is `ComputerHistory.operative?/0` (enabled ∧ this system has a
+  recorder, `ComputerHistory.recorder?/1`) AND the sidecar
   binary being installed — capture cannot run without the compux sidecar, so a
   missing binary keeps the children absent (fail-closed) rather than crash-looping
   a `Capturer` that can never resolve its Port — AND this machine's store having

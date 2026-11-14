@@ -78,9 +78,83 @@ defmodule FermixChannels.Gateway.Commands.HistoryTest do
     assert is_binary(text) and text != ""
   end
 
-  # This system's recorder is injected, so the status body is asserted on every
-  # host (the recorder fact itself is covered by ComputerHistory).
-  defp macos_ctx(ctx), do: Map.put(ctx, :computer_history_recorder?, true)
+  # This system's recorder and its system are injected, so the status body is
+  # asserted on every host (the recorder fact itself is covered by
+  # ComputerHistory).
+  defp macos_ctx(ctx),
+    do: Map.merge(ctx, %{computer_history_recorder?: true, computer_history_system: :macos})
+
+  defp linux_ctx(ctx),
+    do: Map.merge(ctx, %{computer_history_recorder?: true, computer_history_system: :linux})
+
+  defp linux_status(ctx) do
+    assert :ok = History.execute(message("status"), reply_fn(self()), linux_ctx(ctx))
+    assert_receive {:reply, text}
+    text
+  end
+
+  defp seen(spool, app, type, extra \\ %{}) do
+    event =
+      Map.merge(
+        %{boot_id: "b-#{app}", source_seq: 1, ts: now_ms(), type: type, bundle_id: app},
+        extra
+      )
+
+    {:ok, _written} = Spool.insert_events([event], server: spool)
+  end
+
+  defp now_ms, do: System.system_time(:millisecond)
+
+  # M97 stage 4, D3: an application records on Linux only while it publishes its
+  # controls on the accessibility bus, and compux never switches that on, so the
+  # status names the allowlisted applications that recorded nothing.
+  test "on Linux status names the allowlisted apps that recorded nothing, and why", %{
+    ctx: ctx,
+    spool: spool
+  } do
+    Application.put_env(:fermix_core, :computer_history,
+      enabled: true,
+      apps: ["Firefox", "Code", "Terminal"]
+    )
+
+    seen(spool, "Firefox", "window.focused")
+
+    text = linux_status(ctx)
+
+    assert text =~
+             "Recorded nothing in the last 48 hours from Code, Terminal. On Linux an " <>
+               "application records only while it publishes its controls on the accessibility " <>
+               "bus: Chromium, Electron and Qt applications do so only while accessibility is " <>
+               "on in your session."
+
+    refute status_reply(ctx) =~ "Recorded nothing"
+  end
+
+  test "on Linux status names this computer, never a Mac", %{ctx: ctx, spool: spool} do
+    seen(spool, "Firefox", "observer.gap", %{
+      gap_reason: "private_unknown",
+      gap_from_ts: now_ms(),
+      gap_to_ts: now_ms()
+    })
+
+    text = linux_status(ctx)
+
+    assert text =~ "private-window state unknown for Firefox (typed text is not recorded there)"
+    assert text =~ "leaves this computer"
+    refute text =~ "Mac"
+  end
+
+  test "on a Mac status keeps its own words", %{ctx: ctx, spool: spool} do
+    seen(spool, "com.apple.Safari", "observer.gap", %{
+      gap_reason: "private_unknown",
+      gap_from_ts: now_ms(),
+      gap_to_ts: now_ms()
+    })
+
+    assert status_reply(ctx) =~
+             "private-window state unknown for com.apple.Safari " <>
+               "(page URLs are recorded there; typed text is not)"
+  end
 
   # Stand-in for the capture rail: the status line reads the live `Capturer` by
   # its module name, and these are the two dead ends an operator has to be told

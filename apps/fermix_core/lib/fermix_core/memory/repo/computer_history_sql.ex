@@ -970,6 +970,22 @@ defmodule FermixCore.Memory.Repo.ComputerHistorySql do
   end
 
   @doc """
+  The apps any event was recorded for since `since_ts`, gaps included, in
+  order: what `/history status` sets against the app list to name the ones that
+  recorded nothing (M97 stage 4).
+  """
+  @spec recorded_apps(term(), integer()) :: {:ok, [String.t()]} | {:error, term()}
+  def recorded_apps(conn, since_ts) when is_integer(since_ts) do
+    sql =
+      "SELECT DISTINCT bundle_id FROM computer_history_events " <>
+        "WHERE ts >= ? AND bundle_id IS NOT NULL ORDER BY bundle_id ASC"
+
+    with {:ok, rows} <- query_all(conn, sql, [since_ts]) do
+      {:ok, Enum.map(rows, fn [bundle_id] -> bundle_id end)}
+    end
+  end
+
+  @doc """
   Per-app coverage states inside the window (§8.4a): the distinct
   `{bundle_id, gap_reason}` pairs of `observer.gap` rows that name an app AND a
   coverage reason (`title_only`, `private_unknown`, `ax_refused:<notifications>`),

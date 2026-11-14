@@ -67,6 +67,21 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **A Linux computer records computer history.** With Computer history
+  switched on there and its apps listed by the names the desktop's
+  accessibility bus gives them (`Firefox`, `Text Editor`), Fermix records the
+  active listed app's window titles, the field you are in and what you typed
+  there once it settles, and nothing from an app that is not on the list. It
+  never reads a password field, a terminal or a browser: a field there that
+  changed keeps only how many characters it holds. A browser is known by its
+  name, its program or its web engine, so every Firefox and Chromium fork,
+  Thunderbird and every Electron app count as one, and a field inside a web
+  page counts as a browser's in any app. No page address is recorded on Linux.
+  Fermix never turns accessibility on for you, so a Chromium, Electron or Qt
+  app records only while accessibility is on in your session, and `/history
+  status` names the listed apps that recorded nothing. Sittings go where a
+  Mac's do, and an Always On server still records nothing.
+
 - **Events and reminders can be drawn as cards under a reply.** When Fermix
   stores, changes, cancels, snoozes or lists one of your events, the reply
   now carries each event as Fermix's own record: its title, when it is in
@@ -888,8 +903,7 @@ will be part of a future release; nothing in this group is in a release yet.
   did on a computer's screen or in its browser is no longer reported as
   yours. Your notes travel with your home when it moves, and the notes a Mac
   made as its own home are named for that Mac on your server once it moves
-  and stays linked, and are "this computer" again after a move back. A
-  Linux computer does not record yet.
+  and stays linked, and are "this computer" again after a move back.
 - **This computer's settings are five switches.** What Fermix on your server
   may use on a computer is now: everything (the switch that turns it all off),
   Files and commands, The browser, Your screen and, on a Mac, Messages. Files

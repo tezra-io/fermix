@@ -281,7 +281,7 @@ defmodule FermixCore.Management.HomeSummary do
   # computers read from it, and one computer's own, which only that
   # computer's screen lists (`Copy.not_yet_ids/0` holds every one).
   @server_not_yet ~w(google_meet coding_signin whatsapp slack)a
-  @computer_not_yet ~w(stackchan dev_plugins computer_history_linux)a
+  @computer_not_yet ~w(stackchan dev_plugins computer_history)a
 
   @unreachable_ms 10 * 60_000
   @backup_old_s 3 * 86_400
@@ -2270,7 +2270,7 @@ defmodule FermixCore.Management.HomeSummary do
   defp not_yet(home, _role, host_os, {reads, opts}) do
     settings = MoveReadiness.settings(home, reads)
     recorder? = Keyword.get_lazy(opts, :recorder?, &ComputerHistory.recorder?/0)
-    history = if recorder?, do: [], else: [:computer_history_linux]
+    history = if recorder?, do: [], else: [:computer_history]
     MoveReadiness.not_yet(settings, host_os == :macos) ++ history
   end
 

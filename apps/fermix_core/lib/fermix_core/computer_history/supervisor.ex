@@ -2,10 +2,12 @@ defmodule FermixCore.ComputerHistory.Supervisor do
   @moduledoc """
   The inert owner of the Computer History rail (MILESTONE_32 §6.3; M97 §8.1),
   regardless of `enabled?()`, wherever something here uses it: on any engine
-  whose system has a recorder (a Mac), and on a home where computer history
+  whose system has a recorder (`ComputerHistory.recorder?/1`: a Mac, and a Linux
+  computer), and on a home where computer history
   can arrive (Always On is offered, so a computer can contribute) or already
-  holds notes. Anywhere else (a Linux install with no notes and no Always On)
-  its `init/1` answers `:ignore`: no process runs and no store is created. It
+  holds notes. Anywhere else (a system with no recorder, no notes and no
+  Always On) its `init/1` answers `:ignore`: no process runs and no store is
+  created. It
   owns four things:
 
     * **`Spool`**, this machine's own store of raw history

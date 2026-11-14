@@ -66,14 +66,31 @@ defmodule FermixCore.Management.ComputerSettingsTest do
              :none
   end
 
-  test "a Linux computer publishes no history of its own yet, and an engine with no area none" do
-    ids =
+  # M97 stage 4: a computer publishes its own history wherever it has a
+  # recorder (`ComputerHistory.recorder?/1`), a Linux one included, and none
+  # where it has none.
+  test "a computer publishes its history where it has a recorder, and an engine with no area none" do
+    ids = fn opts ->
       @inventory
-      |> ComputerSettings.own_sections(macos?: false, computer?: true)
+      |> ComputerSettings.own_sections([computer?: true] ++ opts)
       |> Enum.map(& &1["id"])
+    end
 
-    refute "computer.computer_history" in ids
-    assert "computer.sandbox" in ids
+    assert "computer.computer_history" in ids.(macos?: false, recorder?: true)
+    refute "computer.computer_history" in ids.(macos?: false, recorder?: false)
+    assert "computer.sandbox" in ids.(macos?: false, recorder?: false)
+
+    assert ComputerSettings.plain("computer.computer_history",
+             macos?: false,
+             computer?: true,
+             recorder?: true
+           ) == {:ok, "computer_history"}
+
+    assert ComputerSettings.plain("computer.computer_history",
+             macos?: false,
+             computer?: true,
+             recorder?: false
+           ) == :none
 
     assert ComputerSettings.own_sections(@inventory, macos?: true, computer?: false) == []
   end

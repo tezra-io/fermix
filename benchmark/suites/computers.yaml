@@ -24,8 +24,9 @@
 # away (an eval has no session): studio Mac (macOS; files, shell (standard),
 # browser, screen, Messages, history, Apple Maps; last seen 2026-11-09T22:40Z, Monday,
 # November 9, 2026 at 5:40 PM in the home's America/New_York) and loft Linux
-# (Linux; files, shell (strict), browser; Messages, history and Apple Maps
-# unavailable there; last seen 2026-11-06T14:05Z, Friday, November 6, 2026 at
+# (Linux; files, shell (strict), browser, history (a Linux computer records, M97
+# stage 4); Messages and Apple Maps unavailable there; last seen
+# 2026-11-06T14:05Z, Friday, November 6, 2026 at
 # 9:05 AM), turns Always On on, and has the home look places up on the studio Mac
 # (`backend = "computer"`). Each files offer names the folders files and commands reach on
 # that computer (M97 F5), said from that computer's home: the studio Mac
@@ -105,10 +106,10 @@ scenarios:
           day that agrees with the current date is fine, and a time may be left
           out. Says what each offers, in line with this: the studio Mac has
           files, a shell, the browser, its screen, Messages and computer
-          history; loft Linux has files, a shell and the browser, and no
-          Messages or computer history. It need not list every offer, but it
-          credits neither computer with something it does not offer (Messages,
-          the screen or history on loft Linux). Saying that the server Fermix
+          history; loft Linux has files, a shell, the browser and computer
+          history, and no Messages or screen. It need not list every offer, but
+          it credits neither computer with something it does not offer
+          (Messages or the screen on loft Linux). Saying that the server Fermix
           runs on is reachable, with its own files, shell and browser, is
           correct. It does not say either computer is connected or that Fermix
           can work on it now, names no other computer, and gives no network
@@ -129,8 +130,8 @@ scenarios:
           9:05 AM Eastern (14:05 UTC); a relative day that agrees with the
           current date is fine, and a time may be left out. Says what each one
           offers once it is back: the studio Mac files, a shell, the browser,
-          its screen, Messages and computer history; loft Linux files, a shell
-          and the browser, without Messages or computer history. It need not
+          its screen, Messages and computer history; loft Linux files, a shell,
+          the browser and computer history, without Messages or a screen. It need not
           list every offer, but credits neither with something it does not
           offer. Saying the server Fermix runs on is connected, with its own
           files, shell and browser, is correct. It does not claim either
@@ -147,11 +148,12 @@ scenarios:
   # that answers honestly is the measurement.
   # M97 §8.4: computer history from every computer is one memory on the home.
   # `seed_history.exs` (run by `capability-daemon.sh up` on a --computers home)
-  # writes three notes as the home keeps them: the studio Mac this morning
+  # writes four notes as the home keeps them: the studio Mac this morning
   # 08:30-09:40 Eastern (the Juniper Street lease reply), the studio Mac
-  # yesterday 14:00-15:10 (the tomato seed order), and the home's own machine
-  # yesterday 16:00-16:45 (the electricity bill). loft Linux records no
-  # history. The notes are the home's, so recall answers while both computers
+  # yesterday 14:00-15:10 (the tomato seed order), loft Linux yesterday
+  # 10:15-11:05 (the garden shed's build list, M97 stage 4: a Linux computer
+  # records) and the home's own machine yesterday 16:00-16:45 (the electricity
+  # bill). The notes are the home's, so recall answers while both computers
   # are away. A note written by the seed is invented, never anyone's activity,
   # so this reads only the eval home's own fixture: host_readonly. No route
   # assertion: which window or filter the model asks for is its own call; the
@@ -185,15 +187,34 @@ scenarios:
           max_cost_usd: 1.2
           max_duration_ms: 160000
         rubric: >
-          Covers both pieces of yesterday's recorded activity and says which
-          machine each happened on: the tomato seed order built in Numbers on
-          the studio Mac in the afternoon (twelve varieties trimmed to a
-          sixty-dollar budget, not yet ordered), and the electricity bill paid
-          on the utility's website on the home's own computer (this computer,
-          or this server) later that afternoon. It does not attribute either to
-          loft Linux, which records no history, does not present this
-          morning's lease reply as yesterday's, and invents nothing else. A
-          note that loft Linux keeps no history is welcome but not required.
+          Covers the three pieces of yesterday's recorded activity and says
+          which machine each happened on: the garden shed's build list written
+          in Text Editor on loft Linux in the morning (cedar boards, roofing
+          felt and two hinges, the lumber yard's quote still to come), the
+          tomato seed order built in Numbers on the studio Mac in the afternoon
+          (twelve varieties trimmed to a sixty-dollar budget, not yet ordered),
+          and the electricity bill paid on the utility's website on the home's
+          own computer (this computer, or this server) later that afternoon. It
+          attributes none of them to the wrong machine, does not present this
+          morning's lease reply as yesterday's, and invents nothing else.
+      # M97 stage 4: a Linux computer's history is one memory with the rest. The
+      # floor is the one word every correct answer carries; the rubric owns the
+      # machine and the rest.
+      - id: loft_linux_yesterday
+        query: What did I get done on the loft Linux box yesterday?
+        expect:
+          reply_matches: '(?i)shed'
+          max_cost_usd: 1.2
+          max_duration_ms: 160000
+        rubric: >
+          Says that yesterday morning on loft Linux the owner wrote the build
+          list for the garden shed in Text Editor (cedar boards, roofing felt
+          and two hinges, with the lumber yard's quote still to come), naming
+          loft Linux as where it happened. It does not present the tomato seed
+          order, the electricity bill or the lease reply as work done on loft
+          Linux, does not say loft Linux had to be awake or reached to answer,
+          and does not invent other activity. Saying loft Linux is currently
+          away is fine.
 
   - id: a_file_on_an_away_computer
     title: "A file on the studio Mac while it is asleep or offline"

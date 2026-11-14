@@ -99,6 +99,11 @@ defmodule FermixCore.ComputerHistory.Spool do
   def coverage_gaps(since_ts, opts \\ []) when is_integer(since_ts),
     do: call({:sql, :coverage_gaps, [since_ts]}, opts)
 
+  @doc "The apps with any event since `since_ts`; see `ComputerHistorySql.recorded_apps/2`."
+  @spec recorded_apps(integer(), keyword()) :: {:ok, [String.t()]} | {:error, term()}
+  def recorded_apps(since_ts, opts \\ []) when is_integer(since_ts),
+    do: call({:sql, :recorded_apps, [since_ts]}, opts)
+
   @doc "The text of the newest `limit` events that carry any (a local summary's guard)."
   @spec recent_texts(pos_integer(), keyword()) :: {:ok, [String.t()]} | {:error, term()}
   def recent_texts(limit, opts \\ []) when is_integer(limit) and limit > 0,

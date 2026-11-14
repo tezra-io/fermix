@@ -2299,7 +2299,7 @@ defmodule FermixCore.Management.HomeSummaryTest do
   # pane's D1) and where the owner lives with it (a linked computer's `on`
   # and the server's own screen): a detail, never a notice.
   describe "what Always On does not do yet" do
-    @own ~w(google_meet coding_signin whatsapp slack stackchan dev_plugins computer_history_linux)a
+    @own ~w(google_meet coding_signin whatsapp slack stackchan dev_plugins computer_history)a
 
     test "each screen before a move lists what this computer's facts turn on, but the first" do
       screens = [
@@ -2370,7 +2370,7 @@ defmodule FermixCore.Management.HomeSummaryTest do
       assert Enum.take(summary["detail"]["not_yet"], 2) == said
 
       assert ids(summary["detail"]["not_yet"]) ==
-               ~w(google_meet slack stackchan dev_plugins computer_history_linux)
+               ~w(google_meet slack stackchan dev_plugins computer_history)
 
       assert %{
                "sentence" =>

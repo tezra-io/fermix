@@ -740,16 +740,15 @@ def test_the_computers_fixture_writes_two_away_computers_the_store_reads(tmp_pat
     # The folders files and commands reach there (M97 F5): never Downloads.
     assert mac["files"]["roots"] == ["/Users/avery/.fermix/workspace", "/Users/avery/Projects"]
     assert mac["files"]["home"] == "/Users/avery"
-    # loft Linux: files, a strict shell and the browser; Messages and history cannot run.
+    # loft Linux: files, a strict shell, the browser and its computer history (M97
+    # stage 4: a Linux computer records); Messages cannot run there.
     linux = _offers(records["loft Linux"])
     assert {oid for oid, offer in linux.items() if offer["state"] == "on"} == {
-        "files", "shell", "browser"}
+        "files", "shell", "browser", "history"}
     assert linux["shell"]["detail"] == "strict"
     assert linux["files"]["roots"] == ["/home/rowan/.fermix/workspace"]
     assert linux["imessage"] == {"id": "imessage", "state": "unavailable",
                                  "sentence": "Messages runs only on a Mac."}
-    assert linux["history"] == {"id": "history", "state": "unavailable",
-                                "sentence": "Fermix records computer history only on a Mac for now."}
     assert linux["places"] == {"id": "places", "state": "unavailable",
                                "sentence": "Looking places up in Apple Maps needs the Fermix app on a Mac."}
     assert {row["platform"] for row in rows} == {"macos", "linux"}

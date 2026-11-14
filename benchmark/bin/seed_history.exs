@@ -12,10 +12,10 @@
 #   * studio Mac, this morning 08:30-09:40 in the home's zone: the reply to the
 #     Juniper Street lease renewal, drafted in Mail and Pages
 #   * studio Mac, yesterday 14:00-15:10: the tomato seed order spreadsheet
+#   * loft Linux, yesterday 10:15-11:05: the garden shed's build list, written
+#     in Text Editor (a Linux computer records, M97 stage 4)
 #   * this computer (the home's own machine), yesterday 16:00-16:45: the
 #     electricity bill paid on the utility's site
-#
-# loft Linux records no history (it says so in its offers), so it has none.
 # Times are the seed day's, in America/New_York, so "this morning" and
 # "yesterday" name them; an eval run before 09:40 there sees the morning note
 # still open-ended. It writes `eval-fixtures/computer_history.json` last. Every
@@ -28,6 +28,7 @@ defmodule SeedHistory do
   @computers_manifest "eval-fixtures/computers.json"
   @manifest "eval-fixtures/computer_history.json"
   @studio "6f1c2a9e-3b7d-4c21-9a8e-1d2f3a4b5c6d"
+  @loft "b47e0d93-5a1c-4f68-8e2b-7c9d1a3f6e05"
   @zone "America/New_York"
 
   def main([]) do
@@ -48,13 +49,17 @@ defmodule SeedHistory do
         "Built the tomato seed order in Numbers: twelve varieties, trimmed to a budget of " <>
           "sixty dollars, order not yet placed.",
         ["com.apple.iWork.Numbers"], ["Seed order 2027"]),
+      note(@loft, yesterday, {~T[10:15:00], ~T[11:05:00]},
+        "Wrote the build list for the garden shed: cedar boards, roofing felt and two hinges, " <>
+          "with the lumber yard's quote still to come.",
+        ["Text Editor"], ["shed-build-list.txt"]),
       note("", yesterday, {~T[16:00:00], ~T[16:45:00]},
         "Paid the electricity bill on the utility's website and saved the receipt.",
         ["com.google.Chrome"], ["Pay your bill — Riverbend Power"])
     ]
 
     ids = Enum.map(notes, &insert!/1)
-    write_manifest!(home, %{notes: length(ids), studio_mac: @studio})
+    write_manifest!(home, %{notes: length(ids), studio_mac: @studio, loft_linux: @loft})
     IO.puts("seeded #{length(ids)} computer-history notes")
   end
 
@@ -109,9 +114,11 @@ defmodule SeedHistory do
   end
 
   defp linked!(home) do
-    unless File.regular?(Path.join(home, @computers_manifest)) and
-             File.regular?(Path.join([home, "device", "computers", "#{@studio}.json"])) do
-      raise "the eval home has no studio Mac: seed it with --computers first"
+    linked? = fn id -> File.regular?(Path.join([home, "device", "computers", "#{id}.json"])) end
+
+    unless File.regular?(Path.join(home, @computers_manifest)) and linked?.(@studio) and
+             linked?.(@loft) do
+      raise "the eval home has no studio Mac and loft Linux: seed it with --computers first"
     end
   end
 

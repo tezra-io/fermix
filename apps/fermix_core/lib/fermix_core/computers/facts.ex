@@ -9,15 +9,17 @@ defmodule FermixCore.Computers.Facts do
   files and commands reach (`roots`, the sandbox's effective roots,
   `Sandbox.Mode.effective_roots/1`: what the files and shell capabilities
   hold a path to here, M97 §6.4), the folder a path's `~` stands for here
-  (`home`, `Sandbox.PathPolicy.tilde_home/0`), and whether its recorder is switched on
+  (`home`, `Sandbox.PathPolicy.tilde_home/0`), whether it has a recorder
+  (`recorder`, `ComputerHistory.recorder?/1` for its system: its paired
+  helper records there) and whether that recorder is switched on
   (`recording`, the Computer history section's own setting, which the
   history offer follows, M97 D27). The sandbox is the one the capabilities
   run under (`Sandbox.Config.current/0`).
 
   `read/1` reads each through the module that owns it, and takes each as an
   option instead (`os:`, `arch:`, `landlock:`, `helpers:`, `permissions:`,
-  `sandbox_mode:`, `roots:`, `home:`, `recording:`), so a test names the machine it
-  means and never reads the one it runs on.
+  `sandbox_mode:`, `roots:`, `home:`, `recorder:`, `recording:`), so a test names the
+  machine it means and never reads the one it runs on.
 
   Permissions are what is known to be missing: only the computer use helper
   itself can say whether the screen may be seen and controlled, and asking
@@ -54,6 +56,7 @@ defmodule FermixCore.Computers.Facts do
           required(:sandbox_mode) => :strict | :standard | :open,
           required(:roots) => [String.t()],
           required(:home) => String.t(),
+          required(:recorder) => boolean(),
           required(:recording) => boolean(),
           optional(:screen) => %{actions: [String.t()], input_methods: [String.t()]}
         }
@@ -73,6 +76,8 @@ defmodule FermixCore.Computers.Facts do
       roots:
         Keyword.get_lazy(opts, :roots, fn -> Mode.effective_roots(SandboxConfig.current()) end),
       home: Keyword.get_lazy(opts, :home, &PathPolicy.tilde_home/0),
+      recorder:
+        Keyword.get_lazy(opts, :recorder, fn -> ComputerHistory.recorder?(system: os) end),
       recording: Keyword.get_lazy(opts, :recording, &ComputerHistory.enabled?/0),
       screen: Keyword.get_lazy(opts, :screen, &Reach.offered_helper/0)
     }

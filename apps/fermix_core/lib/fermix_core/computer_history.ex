@@ -12,9 +12,9 @@ defmodule FermixCore.ComputerHistory do
   recorder (`recorder?/0`) and records (`operative?/0`); on the home, whether
   history can surface at all (`surfaces?/1`).
 
-  The capture layer is macOS today (Accessibility TCC, NSWorkspace,
-  AXObserver); a Linux recorder comes with a paired compux release (§8.8), and
-  until then a Linux machine records nothing, while a Linux server still keeps
+  The capture layer is the compux helper's: macOS's Accessibility observer,
+  and on Linux the accessibility bus (§8.8, the paired compux release). An
+  Always On server records nothing, since nobody sits at it, and still keeps
   and recalls the notes of the computers that do.
   """
 
@@ -25,6 +25,8 @@ defmodule FermixCore.ComputerHistory do
   alias FermixCore.ComputerHistory.Spool
   alias FermixCore.Computers
   alias FermixCore.Computers.Switches
+  alias FermixCore.Home.Role
+  alias FermixCore.Home.ServerPrimary
   alias FermixCore.Memory.Repo
   alias FermixCore.Setup.ConfigStore
 
@@ -33,20 +35,46 @@ defmodule FermixCore.ComputerHistory do
   def enabled?, do: Config.enabled?()
 
   @doc """
-  Whether this host is macOS: the fact `recorder?/0` reads. Tests inject the
-  facts the gates read (`:recording?`, `:recorder?`, `:surfaces?`) rather than
-  mutate this, so the suite stays hermetic on Linux CI (Code Rule 5).
+  Whether this host is macOS. Tests inject the facts the gates read
+  (`:recording?`, `:recorder?`, `:surfaces?`) rather than mutate this, so the
+  suite stays hermetic on Linux CI (Code Rule 5).
   """
   @spec macos?() :: boolean()
   def macos?, do: :os.type() == {:unix, :darwin}
 
   @doc """
-  Whether this system has a recorder (M97 §8.3, §8.8): a Mac, in this release;
-  a Linux recorder comes with a paired compux release. The fact a computer's
-  recording is decided by, never whether the home can surface history.
+  Whether this system has a recorder (M97 §8.3, §8.8): the compux helper this
+  release pairs with records on this system (`Compux.Protocol.history_systems/0`:
+  a Mac, and a Linux computer through its accessibility bus), and this engine is
+  not an Always On server's, at which nobody sits (§19.2). Never this host's
+  platform alone. The fact a computer's recording is decided by, never whether
+  the home can surface history.
+
+  `opts` (a test's seams): `:system` (`:macos`, `:linux` or `:other`),
+  `:history_systems` (the helper's systems), `:server?`.
   """
-  @spec recorder?() :: boolean()
-  def recorder?, do: macos?()
+  @spec recorder?(keyword()) :: boolean()
+  def recorder?(opts \\ []) when is_list(opts) do
+    systems = Keyword.get_lazy(opts, :history_systems, &Compux.Protocol.history_systems/0)
+
+    Keyword.get_lazy(opts, :system, &system/0) in systems and
+      not Keyword.get_lazy(opts, :server?, &server?/0)
+  end
+
+  defp system do
+    case :os.type() do
+      {:unix, :darwin} -> :macos
+      {:unix, :linux} -> :linux
+      _other -> :other
+    end
+  end
+
+  # An Always On server's primary (`Home.ServerPrimary`, the rule the settings
+  # sections use): a process that booted no engine is none.
+  defp server? do
+    match?(%{role: :primary}, Role.booted()) and
+      ServerPrimary.check(ConfigStore.fermix_home()) == :server
+  end
 
   @doc """
   Whether history records here (M97 §8.3): this system has a recorder *and* it

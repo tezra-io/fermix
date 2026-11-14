@@ -61,6 +61,7 @@ defmodule FermixChannels.Gateway.Commands.History do
       repo: repo(context),
       spool: Map.get(context, :computer_history_spool, Spool),
       recorder?: Map.get_lazy(context, :computer_history_recorder?, &ComputerHistory.recorder?/0),
+      system: Map.get_lazy(context, :computer_history_system, &system/0),
       computers: Map.get_lazy(context, :computer_history_computers, &Computers.list/0),
       deliver: Map.get(context, :computer_history_deliver, &Delivery.deliver/1),
       switch_off: Map.get(context, :computer_history_switch_off, &Delivery.switch_off/2),
@@ -71,7 +72,8 @@ defmodule FermixChannels.Gateway.Commands.History do
   end
 
   # `:computer_history_repo` / `:computer_history_spool` /
-  # `:computer_history_recorder?` / `:computer_history_computers` /
+  # `:computer_history_recorder?` / `:computer_history_system` /
+  # `:computer_history_computers` /
   # `:computer_history_deliver` / `:computer_history_switch_off` /
   # `:computer_history_controller` in context are test-only injection seams;
   # production dispatch runs in the daemon against the home's single-writer
@@ -80,6 +82,12 @@ defmodule FermixChannels.Gateway.Commands.History do
   defp repo(context), do: Map.get(context, :computer_history_repo, Repo)
 
   defp controller(context), do: Map.get(context, :computer_history_controller, Controller)
+
+  defp system, do: if(ComputerHistory.macos?(), do: :macos, else: :linux)
+
+  # What a person calls this machine in a sentence.
+  defp machine(%{system: :macos}), do: "Mac"
+  defp machine(_host), do: "computer"
 
   defp args(message), do: String.split(message.content, ~r/\s+/, trim: true)
 
@@ -117,17 +125,19 @@ defmodule FermixChannels.Gateway.Commands.History do
   defp store(%{recorder?: false}), do: :none
   defp store(%{spool: spool}), do: Spool.status(server: spool)
 
-  defp machine_lines(%{recorder?: true, spool: spool, store: store}),
+  defp machine_lines(%{recorder?: true, spool: spool, store: store} = host),
     do: [
       enabled_line(),
-      capture_line(),
+      capture_line(host),
       allowlist_line(),
-      store_line(store, spool),
-      summarizer_line()
+      store_line(store, spool, host),
+      summarizer_line(host)
     ]
 
   defp machine_lines(%{recorder?: false, computers: []}),
-    do: "Computer history: no computer of this home records it yet; a Mac records."
+    do:
+      "Computer history: no computer of this home records it yet; a Mac or a Linux " <>
+        "computer records."
 
   defp machine_lines(%{recorder?: false}),
     do: "Computer history: kept on this home for its computers. #{home_summarizer_line()}"
@@ -138,10 +148,12 @@ defmodule FermixChannels.Gateway.Commands.History do
   defp home_lines(repo, _host),
     do: [chain_line(), memory_line(repo, nil), access_line(repo)]
 
-  defp store_line(:open, spool), do: coverage_line(spool)
+  defp store_line(:open, spool, host),
+    do: [coverage_line(spool, host), unrecorded_line(spool, host)]
 
-  defp store_line({:unavailable, path, reason}, _spool) do
-    "Store: this Mac's history store at #{path} did not open (#{inspect(reason)}), so nothing " <>
+  defp store_line({:unavailable, path, reason}, _spool, host) do
+    "Store: this #{machine(host)}'s history store at #{path} did not open " <>
+      "(#{inspect(reason)}), so nothing " <>
       "is recorded. Fermix opens it again when it restarts."
   end
 
@@ -151,22 +163,24 @@ defmodule FermixChannels.Gateway.Commands.History do
 
   # The capturer's live runtime mode — the one place a *degraded* rail becomes
   # visible to the operator (a mismatch/refusal is otherwise only in the log).
-  defp capture_line, do: "Capture: #{capture_phrase(Capturer.status())}."
+  defp capture_line(host), do: "Capture: #{capture_phrase(Capturer.status(), host)}."
 
-  defp capture_phrase(%{mode: :capturing}), do: "running"
-  defp capture_phrase(%{mode: :handshaking}), do: "starting the recorder"
-  defp capture_phrase(%{mode: :restarting}), do: "restarting the recorder"
+  defp capture_phrase(%{mode: :capturing}, _host), do: "running"
+  defp capture_phrase(%{mode: :handshaking}, _host), do: "starting the recorder"
+  defp capture_phrase(%{mode: :restarting}, _host), do: "restarting the recorder"
 
-  defp capture_phrase(%{mode: :standing_down}),
-    do: "standing down (another daemon on this Mac holds it)"
+  defp capture_phrase(%{mode: :standing_down}, host),
+    do: "standing down (another daemon on this #{machine(host)} holds it)"
 
-  defp capture_phrase(%{mode: :not_running}), do: "not running"
-  defp capture_phrase(%{mode: :not_answering}), do: "not answering (it may still be running)"
+  defp capture_phrase(%{mode: :not_running}, _host), do: "not running"
 
-  defp capture_phrase(%{mode: :degraded, reason: reason}),
+  defp capture_phrase(%{mode: :not_answering}, _host),
+    do: "not answering (it may still be running)"
+
+  defp capture_phrase(%{mode: :degraded, reason: reason}, _host),
     do: "degraded — #{degrade_phrase(reason)}"
 
-  defp capture_phrase(%{mode: mode}), do: to_string(mode)
+  defp capture_phrase(%{mode: mode}, _host), do: to_string(mode)
 
   # A pre-v6 recorder has no observe_start verb at all — it answers with a
   # positional frame rather than a version — so there is no number to name.
@@ -196,13 +210,13 @@ defmodule FermixChannels.Gateway.Commands.History do
   # an app it can only read titles in observes no typed text at all, which changes
   # what history can answer about that app — and it is otherwise visible only as a
   # gap row nobody reads. Omitted entirely when there is nothing to report.
-  defp coverage_line(spool) do
+  defp coverage_line(spool, host) do
     case Spool.coverage_gaps(coverage_since(), server: spool) do
       {:ok, []} ->
         nil
 
       {:ok, pairs} ->
-        "Coverage: #{coverage_clauses(pairs)}"
+        "Coverage: #{coverage_clauses(pairs, host)}"
 
       {:error, reason} ->
         Logger.warning("computer_history coverage gaps unavailable: #{inspect(reason)}")
@@ -217,12 +231,12 @@ defmodule FermixChannels.Gateway.Commands.History do
   # input to absorb: it RAISES rather than landing in whichever clause happens to
   # be last (an unbucketed reason silently rendering as "AX refused" would tell
   # the owner the wrong thing about their own coverage).
-  defp coverage_clauses(pairs) do
+  defp coverage_clauses(pairs, host) do
     buckets = Enum.group_by(pairs, &bucket!/1, fn {app, _reason} -> app end)
 
     [
       title_only_clause(apps(buckets, :title_only)),
-      private_unknown_clause(apps(buckets, :private_unknown)),
+      private_unknown_clause(apps(buckets, :private_unknown), host),
       ax_refused_clause(apps(buckets, :ax_refused))
     ]
     |> Enum.reject(&is_nil/1)
@@ -250,40 +264,73 @@ defmodule FermixChannels.Gateway.Commands.History do
   # Browsers whose private-window state the recorder cannot positively classify:
   # consent is per app so page addresses still flow, but typed text needs a
   # positive not-private signal and there is none, so it is withheld (inv. 26).
-  defp private_unknown_clause([]), do: nil
+  defp private_unknown_clause([], _host), do: nil
 
-  defp private_unknown_clause(apps),
+  # The Linux recorder records no page address at all (M97 stage 4, D2).
+  defp private_unknown_clause(apps, %{system: :linux}),
+    do:
+      "private-window state unknown for #{Enum.join(apps, ", ")} " <>
+        "(typed text is not recorded there)"
+
+  defp private_unknown_clause(apps, _host),
     do:
       "private-window state unknown for #{Enum.join(apps, ", ")} " <>
         "(page URLs are recorded there; typed text is not)"
+
+  # M97 stage 4, D3: on Linux an application records only while its toolkit
+  # publishes its controls on the accessibility bus, which compux never switches
+  # on, so the allowlisted applications that recorded nothing in the window are
+  # named. A Mac's recorder switches a Chromium or Electron tree on itself.
+  defp unrecorded_line(spool, %{system: :linux}) do
+    case Spool.recorded_apps(coverage_since(), server: spool) do
+      {:ok, recorded} -> unrecorded_sentence(Config.apps() -- recorded)
+      {:error, reason} -> unrecorded_unknown(reason)
+    end
+  end
+
+  defp unrecorded_line(_spool, _host), do: nil
+
+  defp unrecorded_sentence([]), do: nil
+
+  defp unrecorded_sentence(apps) do
+    "Recorded nothing in the last 48 hours from #{Enum.join(apps, ", ")}. On Linux an " <>
+      "application records only while it publishes its controls on the accessibility bus: " <>
+      "Chromium, Electron and Qt applications do so only while accessibility is on in your " <>
+      "session."
+  end
+
+  defp unrecorded_unknown(reason) do
+    Logger.warning("computer_history recorded apps unavailable: #{inspect(reason)}")
+    nil
+  end
 
   defp ax_refused_clause([]), do: nil
 
   defp ax_refused_clause(apps),
     do: "AX refused for #{Enum.join(apps, ", ")} (the app declined to report changes)"
 
-  # A local summarizer in this Mac's machine file decides over a different one
-  # in config.toml (M97 §4), and the line says which file decides.
-  defp summarizer_line do
+  # A local summarizer in this machine's machine file decides over a different
+  # one in config.toml (M97 §4), and the line says which file decides.
+  defp summarizer_line(host) do
     case Config.shadowed_route() do
-      nil -> summarizer_phrase(Config.summarizer())
-      route -> shadowed_phrase(route)
+      nil -> summarizer_phrase(Config.summarizer(), machine(host))
+      route -> shadowed_phrase(route, machine(host))
     end
   end
 
-  defp shadowed_phrase(route) do
-    ~s|Summarizer: on-device (local), set by summarizer = "local" in this Mac's machine.toml; | <>
-      "the summarizer in config.toml (#{Config.route_word(route)}) is not used while that " <>
-      "line is there."
+  defp shadowed_phrase(route, machine) do
+    ~s|Summarizer: on-device (local), set by summarizer = "local" in this #{machine}'s | <>
+      "machine.toml; the summarizer in config.toml (#{Config.route_word(route)}) is not used " <>
+      "while that line is there."
   end
 
-  defp summarizer_phrase(:local), do: "Summarizer: on-device (local)."
+  defp summarizer_phrase(:local, _machine), do: "Summarizer: on-device (local)."
 
-  defp summarizer_phrase(:default_provider),
-    do: "Summarizer: #{default_provider_label()} (raw activity leaves this Mac)."
+  defp summarizer_phrase(:default_provider, machine),
+    do: "Summarizer: #{default_provider_label()} (raw activity leaves this #{machine})."
 
-  defp summarizer_phrase({:provider, provider}),
-    do: "Summarizer: #{provider} (raw activity leaves this Mac)."
+  defp summarizer_phrase({:provider, provider}, machine),
+    do: "Summarizer: #{provider} (raw activity leaves this #{machine})."
 
   # Whether recall can surface in chat at all, and on which providers (§9.4). The
   # chain rule can deny every owner turn — a configured, capturing, summarizing
@@ -583,7 +630,7 @@ defmodule FermixChannels.Gateway.Commands.History do
 
     case Repo.computer_history_home(:pause_window, [now, until_ms, now, :all], server: host.repo) do
       {:ok, _id} ->
-        pause_text(apply_here(now, host), until) <> told(host)
+        pause_text(apply_here(now, host), until, machine(host)) <> told(host)
 
       {:error, reason} ->
         Logger.error("computer_history pause persist failed: #{inspect(reason)}")
@@ -593,14 +640,14 @@ defmodule FermixChannels.Gateway.Commands.History do
     end
   end
 
-  defp pause_text(here, until) when here in [:ok, :none],
+  defp pause_text(here, until, _machine) when here in [:ok, :none],
     do: "Computer-history capture paused until #{until}. It resumes automatically then."
 
-  defp pause_text({:failed, reason}, until) do
+  defp pause_text({:failed, reason}, until, machine) do
     "The pause is recorded on this home until #{until}: nothing stamped inside it is " <>
-      "summarized from any computer. This Mac's recorder could not be paused yet " <>
-      "(#{inspect(reason)}). Fermix tries again every five minutes, and deletes what this Mac " <>
-      "recorded inside the pause once it does."
+      "summarized from any computer. This #{machine}'s recorder could not be paused yet " <>
+      "(#{inspect(reason)}). Fermix tries again every five minutes, and deletes what this " <>
+      "#{machine} recorded inside the pause once it does."
   end
 
   # This machine's own pending intervals, the new one among them (M97 §8.5,
@@ -640,14 +687,15 @@ defmodule FermixChannels.Gateway.Commands.History do
 
     case Purge.purge(window, repo: host.repo, spool: spool) do
       {:ok, result} ->
-        purged_text(result) <>
+        purged_text(result, machine(host)) <>
           " Threads that drew on that window were removed too; the next roll-up rewrites the " <>
           "thread list from the surviving threads and the session notes written since the last " <>
           "roll-up." <>
           told(host) <>
           " This cannot reach: replies already delivered, any summaries already sent to a " <>
           "remote provider, backups (yours, and your Fermix server's if you have one), or " <>
-          "another daemon's store on the same Mac. Purge is logical deletion — rows leave every " <>
+          "another daemon's store on the same #{machine(host)}. Purge is logical deletion — rows " <>
+          "leave every " <>
           "query, but raw bytes may linger in the database until overwritten."
 
       {:error, reason} ->
@@ -656,14 +704,14 @@ defmodule FermixChannels.Gateway.Commands.History do
     end
   end
 
-  defp purged_text(%{here: {:failed, reason}, memories: memories}) do
+  defp purged_text(%{here: {:failed, reason}, memories: memories}, machine) do
     "Deleted #{memories} activity memory(ies) on this home, and the purge stands: nothing " <>
-      "from that window is summarized from any computer. This Mac's raw record in that window " <>
-      "could not be deleted yet (#{inspect(reason)}); Fermix tries again every five minutes " <>
-      "until it is."
+      "from that window is summarized from any computer. This #{machine}'s raw record in that " <>
+      "window could not be deleted yet (#{inspect(reason)}); Fermix tries again every five " <>
+      "minutes until it is."
   end
 
-  defp purged_text(%{events: events, memories: memories}),
+  defp purged_text(%{events: events, memories: memories}, _machine),
     do: "Purged #{events} event(s) and #{memories} activity memory(ies)."
 
   # What the home's computers were told (M97 §8.5): a computer that is away is

@@ -6,7 +6,8 @@ defmodule FermixCore.ComputerHistory.SingletonLock do
   a capturer and both attach AXObservers to the same apps — double-recording,
   and a race to write two spools of the same activity. So the lock lives at a
   path **independent of `FERMIX_HOME`** (`~/Library/Application Support/Fermix/
-  observer.lock`); the second capturer detects it and **stands down loudly**,
+  observer.lock` on a Mac, `~/.local/state/fermix/observer.lock` on Linux); the
+  second capturer detects it and **stands down loudly**,
   then re-checks on a bounded tick so that when the holder exits the standee
   re-acquires and resumes — rather than leaving capture dead on both.
 
@@ -33,11 +34,22 @@ defmodule FermixCore.ComputerHistory.SingletonLock do
   # @stale_after_ms is assumed abandoned by a crashed holder and is broken once.
   @stale_after_ms 30_000
 
-  @doc "The default machine-wide (not FERMIX_HOME-scoped) lock path."
-  @spec default_path() :: String.t()
-  def default_path do
-    Path.join([System.user_home!(), "Library", "Application Support", "Fermix", "observer.lock"])
+  @doc """
+  The default machine-wide (not FERMIX_HOME-scoped) lock path: the account's,
+  on a Mac in Application Support and elsewhere in the XDG state folder.
+  `opts` (a test's seams): `:system` (`:macos` or another), `:home`.
+  """
+  @spec default_path(keyword()) :: String.t()
+  def default_path(opts \\ []) when is_list(opts) do
+    home = Keyword.get_lazy(opts, :home, &System.user_home!/0)
+
+    case Keyword.get_lazy(opts, :system, &system/0) do
+      :macos -> Path.join([home, "Library", "Application Support", "Fermix", "observer.lock"])
+      _other -> Path.join([home, ".local", "state", "fermix", "observer.lock"])
+    end
   end
+
+  defp system, do: if(:os.type() == {:unix, :darwin}, do: :macos, else: :other)
 
   @doc "Heartbeat interval — refresh the mtime well inside the stale window."
   @spec heartbeat_interval_ms() :: pos_integer()

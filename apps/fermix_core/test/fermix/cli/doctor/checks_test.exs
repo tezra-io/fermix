@@ -3887,7 +3887,35 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
       result = Checks.computer_history(recorder?: false)
       assert result.name == "computer history"
       assert result.status == :ok
-      assert result.detail =~ "no recorder on this system"
+      assert result.detail =~ "no recorder on this system; a Mac or a Linux computer records"
+    end
+
+    # M97 stage 4, D3: compux never switches an application's accessibility on, so
+    # on Linux the row says which applications that leaves out, and where they
+    # are named.
+    test "on Linux an enabled recorder says which applications record only with accessibility on" do
+      result =
+        Checks.computer_history(
+          recorder?: true,
+          system: :linux,
+          config: [enabled: true, apps: ["Firefox", "Code"], summarizer: :local],
+          routes: {:ok, [loopback_route()]}
+        )
+
+      assert result.detail =~ "2 app(s) allowlisted"
+
+      assert result.detail =~
+               "On Linux an application records only while it publishes its controls on the " <>
+                 "accessibility bus: Chromium, Electron and Qt applications do so only while " <>
+                 "accessibility is on in your session; /history status names the allowlisted " <>
+                 "applications that recorded nothing."
+
+      refute Checks.computer_history(
+               recorder?: true,
+               system: :macos,
+               config: [enabled: true, apps: ["com.apple.Safari"], summarizer: :local],
+               routes: {:ok, [loopback_route()]}
+             ).detail =~ "On Linux"
     end
 
     test "macOS + disabled config reports off" do

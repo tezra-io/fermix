@@ -1504,7 +1504,7 @@ defmodule FermixCore.Management.CopyTest do
     test "every entry of what Always On does not do yet is short and in the owner's words" do
       assert Copy.not_yet_ids() ==
                ~w(google_meet coding_signin whatsapp slack stackchan dev_plugins
-                  computer_history_linux)a
+                  computer_history)a
 
       for id <- Copy.not_yet_ids(),
           machine <- ["Mac", "computer"],

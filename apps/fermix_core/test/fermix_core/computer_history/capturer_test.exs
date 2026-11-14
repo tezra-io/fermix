@@ -305,6 +305,73 @@ defmodule FermixCore.ComputerHistory.CapturerTest do
       assert by_seq[4].bundle_id == "com.apple.Safari"
     end
 
+    # M97 stage 4, through the real Port: the frames a Linux helper sends name
+    # an app by its name on the accessibility bus, and land under that app list
+    # like a Mac's; a password field's and a terminal's text never land, a
+    # browser's withheld count keeps its row, and an app not on the list lands
+    # nothing, whatever its frame carries.
+    test "a Linux recorder's frames land under its app list, gated", ctx do
+      linux = fn seq, app, extra ->
+        app_event(
+          seq,
+          Map.merge(%{"app" => %{"bundle_id" => app, "name" => app, "pid" => 4711}}, extra)
+        )
+      end
+
+      frames = [
+        linux.(1, "Text Editor", %{"kind" => "window.focused", "window_title" => "notes.txt"}),
+        linux.(2, "Text Editor", %{
+          "kind" => "field.value",
+          "role" => "entry",
+          "field_label" => "Search",
+          "text" => "groceries",
+          "char_len" => 9,
+          "content_withheld" => false
+        }),
+        linux.(3, "Text Editor", %{
+          "kind" => "field.value",
+          "role" => "password text",
+          "text" => "hunter2",
+          "char_len" => 7
+        }),
+        linux.(4, "Terminal", %{
+          "kind" => "field.value",
+          "role" => "terminal",
+          "text" => "[sudo] password: hunter2",
+          "char_len" => 24
+        }),
+        linux.(5, "Firefox", %{
+          "kind" => "field.value",
+          "role" => "entry",
+          "browser_id" => "Firefox",
+          "private_state" => "unknown",
+          "content_withheld" => true,
+          "char_len" => 14
+        }),
+        linux.(6, "Mail", %{"kind" => "field.value", "role" => "entry", "text" => "not listed"})
+      ]
+
+      events = events_file(ctx, frames)
+
+      start_capturer(ctx,
+        apps: ["Text Editor", "Terminal", "Firefox"],
+        sidecar_env: [{~c"FAKE_EVENTS_FILE", String.to_charlist(events)}]
+      )
+
+      rows =
+        eventually(fn ->
+          if length(stored(ctx.spool)) >= 5, do: {:ok, stored(ctx.spool)}, else: :retry
+        end)
+
+      by_seq = Map.new(rows, &{&1.source_seq, &1})
+      assert Map.keys(by_seq) |> Enum.sort() == [1, 2, 3, 4, 5]
+      assert by_seq[2].text == "groceries"
+      assert by_seq[3].text == nil
+      assert by_seq[4].text == nil
+      assert by_seq[5].text == nil and by_seq[5].char_len == 14
+      refute Enum.any?(rows, &(&1.bundle_id == "Mail"))
+    end
+
     test "frames arriving before the ack are buffered, then flushed after the handshake", ctx do
       pre = events_file(ctx, [app_event(1)])
       post = events_file(ctx, [app_event(2)])

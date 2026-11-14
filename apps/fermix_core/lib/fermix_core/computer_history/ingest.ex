@@ -82,9 +82,10 @@ defmodule FermixCore.ComputerHistory.Ingest do
   # and hosts are not natural-language and are excluded.
   @scan_columns [:window_title, :page_title, :field_label, :text]
 
-  # AX secure roles whose text is suppressed regardless — defense in depth
-  # behind the capturer's own secure-role suppression (§13.1).
-  @secure_roles ["AXSecureTextField"]
+  # Roles whose text is suppressed regardless — defense in depth behind the
+  # recorder's own (§13.1): macOS's secure field, and on Linux a password field
+  # and a terminal, whose prompts' passwords no role marks (M97 stage 4).
+  @secure_roles ["AXSecureTextField", "password text", "terminal"]
 
   # The §8.4 event kinds that are metadata about the machine, not about an app,
   # and so legitimately carry no bundle id. This list is the single source of

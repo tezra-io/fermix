@@ -138,7 +138,7 @@ log says why).
 | The browser (`browser`) | that computer's browser profiles, pane and granted tabs | Mac, Linux |
 | Your screen (`computer_use`) | seeing and controlling its screen | Apple silicon Mac or Linux x86_64, with the Computer Use helper installed and not refused the permission to see and control the screen |
 | Messages (`imessage`) | the iMessage channel, through that Mac's Messages | Mac only |
-| Your computer history (`history`) | recording activity there for computer history | Mac only for now |
+| Your computer history (`history`) | recording activity there for computer history | Mac, Linux (where its paired helper records) |
 | Apple Maps (`places`) | looking places up in Apple Maps for the server's place search (the `web` reference) | Mac with the Fermix app, whose engine carries the Apple Maps helper |
 
 What reaches the server from a computer (a call, an attached file, a robot,
@@ -168,7 +168,7 @@ not on ("Mac" reads "computer" off a Mac):
   ("Waiting for you to review what Fermix on your server may use on this
   Mac.", below);
 - **unavailable**, and what is missing: "Messages runs only on a Mac.",
-  "Fermix records computer history only on a Mac for now.", "Looking places
+  "This computer has no recorder for computer history.", "Looking places
   up in Apple Maps needs the Fermix app on a Mac.", "The Fermix
   Computer Use helper is not installed on this Mac.", "This Mac has not
   allowed Fermix Computer Use to see and control the screen.", "Fermix cannot
@@ -285,7 +285,7 @@ server rings there, one request per connected computer, which no turn made
 - When the home moves to a server, the computer it leaves keeps what it had:
   files and commands (in the sandbox mode it already has), the browser, and
   the screen, Messages and computer history where their own settings had
-  them on (Messages and history on a Mac only). Move now's review shows it as
+  them on (Messages on a Mac only). Move now's review shows it as
   a block of its own: a sentence ("After the move, Fermix on your server can
   still use this Mac for: files and commands, in this Mac's sandbox
   (Standard), the browser, your screen. Change this here."), one line each
@@ -376,7 +376,8 @@ address, the Tailscale Funnel command the linked computer's screen shows);
 Slack on without Socket Mode; StackChan while it is on, on a Mac (it works
 only while Fermix runs on the Mac it is plugged into); a dev plugin folder
 this computer's settings name (they stay here); and computer history on a
-computer with no history recorder (a Mac records it). The computer that
+computer with no history recorder (a Mac records it, and so does a Linux
+computer whose helper carries the recorder). The computer that
 sets Always On up shows it on every screen before a move but the first,
 from its own settings; the server's own screen shows the home's; a linked
 computer shows its server's (but WhatsApp's while its Funnel commands are

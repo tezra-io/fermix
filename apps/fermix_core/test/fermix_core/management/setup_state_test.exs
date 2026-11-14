@@ -265,6 +265,26 @@ defmodule FermixCore.Management.SetupStateTest do
            }
   end
 
+  # M97 stage 4: ready needs a recorder on this system (its paired helper's
+  # word, `ComputerHistory.recorder?/1`), not a Mac: a Linux computer records.
+  test "computer history is ready exactly where this system has a recorder" do
+    Application.put_env(:fermix_core, :computer_history, enabled: true)
+
+    ready = fn recorder? ->
+      sources()
+      |> Keyword.merge(
+        sidecar_installed?: fn -> true end,
+        history_store_open?: fn -> true end,
+        history_recorder?: fn -> recorder? end
+      )
+      |> SetupState.report()
+      |> get_in(["features", "computer_history", "ready"])
+    end
+
+    assert ready.(true)
+    refute ready.(false)
+  end
+
   test "coexistence carries the unit scope and the config state word" do
     report = SetupState.report(sources())
 

@@ -48,14 +48,24 @@ defmodule FermixCore.Computers.OffersTest do
              }
     end
 
-    test "a Linux computer has no Messages and no history yet" do
-      states = states(@linux)
+    test "a Linux computer has no Messages, and its history follows its recorder" do
+      states = states(Keyword.put(@linux, :recorder, true))
 
       assert states["shell"] == {:on, "strict"}
       assert {:unavailable, "Messages runs only on a Mac."} = states["imessage"]
+      assert {:off, _said} = states["history"]
 
-      assert {:unavailable, "Fermix records computer history only on a Mac for now."} =
-               states["history"]
+      assert states(Keyword.merge(@linux, recorder: true, recording: true))["history"] ==
+               {:on, nil}
+    end
+
+    # M97 §8.8: whether a computer has a recorder is its paired helper's word
+    # (`ComputerHistory.recorder?/1`), never its system alone.
+    test "a computer whose helper records nothing there offers no history, and says so" do
+      for facts <- [@mac, @linux] do
+        assert {:unavailable, "This computer has no recorder for computer history."} =
+                 states(Keyword.merge(facts, recorder: false, recording: true))["history"]
+      end
     end
 
     test "a Linux kernel that does not hold commands leaves the shell unavailable" do

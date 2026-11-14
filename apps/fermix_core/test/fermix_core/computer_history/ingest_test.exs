@@ -603,6 +603,20 @@ defmodule FermixCore.ComputerHistory.IngestTest do
       [row] = stored(spool)
       assert row.text == nil
     end
+
+    # M97 stage 4: the Linux recorder reads neither a password field's text nor a
+    # terminal's (a prompt's password is marked by no role); were either ever to
+    # arrive, it is not stored.
+    test "a Linux password field's or terminal's text is suppressed", %{spool: spool} do
+      events = [
+        base(1, %{bundle_id: "Terminal", role: "password text", text: "hunter2password"}),
+        base(2, %{bundle_id: "Terminal", role: "terminal", text: "[sudo] password: hunter2"})
+      ]
+
+      assert {:ok, %{written: 2}} = Ingest.ingest(events, spool: spool, apps: ["Terminal"])
+
+      assert Enum.map(stored(spool), & &1.text) == [nil, nil]
+    end
   end
 
   # The native driver reports per-app coverage states as `observer.gap` frames that

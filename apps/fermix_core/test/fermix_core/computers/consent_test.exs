@@ -51,14 +51,24 @@ defmodule FermixCore.Computers.ConsentTest do
            ]
   end
 
-  test "a Linux computer's block has no Messages and no history, and no warning when strict" do
+  # M97 stage 4: a Linux computer records, so its block has a history line, as
+  # a Mac's does.
+  test "a Linux computer's block has no Messages, a history line, and no warning when strict" do
     block = Consent.block([:files_and_shell], os: :linux, sandbox_mode: :strict)
 
-    assert Enum.map(block.lines, & &1.offer) == [:files_and_shell, :browser, :computer_use]
+    assert Enum.map(block.lines, & &1.offer) == [
+             :files_and_shell,
+             :browser,
+             :computer_use,
+             :history
+           ]
+
     assert block.warning == nil
 
     assert block.sentence ==
-             "Tick what Fermix on your server may still use on this computer after the move."
+             "Tick what Fermix on your server may still use on this computer after the move. " <>
+               "Ticked, each sitting of your computer history goes to your server, which keeps " <>
+               "its summary."
 
     assert hd(block.lines).label == "files and commands, in this computer's sandbox (Strict)"
   end
