@@ -626,3 +626,12 @@ runs on a device, a candidate's tree has none), and its callbacks cannot
 fail; were it to crash, the cue tree restarts after it, which the model
 takes as `FiltersRestart`, as for the children before it. Nothing the spec
 models changed, and it cites no line the change moved.
+
+## Re-read for the place-search pacer (2026-11-14)
+
+`supervision_children` gains `PlaceSearch.Brave.Pacer` right after
+`ReplyBlocks` (M89 D13, `eb5fc530`), early in the tree and long before the cue
+subtree, which keeps its place after `Jobs.Scheduler` and the temporal rail.
+Were the pacer to crash, the cue tree restarts after it, which the model takes
+as `FiltersRestart`, as for the children before it. Nothing the spec models
+changed, and it cites no `application.ex` line.

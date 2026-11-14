@@ -42,7 +42,7 @@ attempt like every platform's, so nothing here models it separately.
   (`delivery_worker.ex:197-200`, `:66`).
 - `SchedulerCanRestart`: the scheduler crashes while the BEAM stays up. Any
   earlier child of the flat `:rest_for_one` list (`Repo`, `MainAgent`,
-  `JobScheduler`, …; `application.ex:292-378`) restarts it too. A scheduler
+  `JobScheduler`, …; `application.ex:292-384`) restarts it too. A scheduler
   Repo call that times out no longer does: it returns an error (see
   `RepoCanFail`).
 - `DaemonCanCrash`: the whole daemon dies and boots again.
@@ -71,7 +71,7 @@ least one check):
   (`:1033`) repeat it inside the same Repo callback (`repo.ex:3134-3137`), where
   no other writer can interleave, so removing only them would change nothing.
 - `WorkersDieWithScheduler`: `DeliverySupervisor` starts after the scheduler
-  under `:rest_for_one` (`application.ex:386-387`, `:187`).
+  under `:rest_for_one` (`application.ex:392-393`, `:187`).
 - `SendsDieWithWorker`: a worker's send process is spawned linked to it
   (`Process.spawn(fun, [:link, :monitor])`, `channel_send.ex:219-224`), so a
   worker killed mid-send takes its send with it. Off, it is the code before the
@@ -97,7 +97,7 @@ least one check):
   - No sixth attempt (`scheduler.ex:332-335`). This rests on `AttemptCap`
     (check 02).
   - Never two workers for the row (`delivery_supervisor.ex:5-10`,
-    `application.ex:379-387`). This rests on `ClaimRequiresPending` (check 03),
+    `application.ex:385-393`). This rests on `ClaimRequiresPending` (check 03),
     `WorkersDieWithScheduler` (check 04) and `ResetSkipsMonitored` (check 05),
     and on the timing fact `DownHandledBeforeRetryDue` (check 20).
   - Never two sends for the row either (the premise of M30 §19.10's no-lease
@@ -538,6 +538,15 @@ reads with a comma where it had an em dash, a word of the text it sends.
 A reminder is delivered with no `turn_id`, so it takes no records and carries
 no block; its row, proactive dedupe and push are as before. The spec cites no
 `mobile.ex` line. No delivery path the spec models changed.
+
+Re-read on 2026-11-14 for the place-search pacer (`eb5fc530`), which staled
+the `application.ex` pin: `supervision_children` gains
+`PlaceSearch.Brave.Pacer` right after `ReplyBlocks`, before `AgentSupervisor`,
+so it is one more early child whose crash restarts every later one, the
+temporal rail included, as the model already allows. `TemporalScheduler`
+still starts before `TemporalDeliverySupervisor`, the order the spec rests on.
+No delivery path the spec models changed; the six lines move its citations to
+`application.ex:292-384`, `:385-393` and `:392-393`.
 
 ## Code and doc drift
 

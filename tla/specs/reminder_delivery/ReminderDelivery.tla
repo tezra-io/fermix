@@ -43,7 +43,7 @@
 \* SOURCE: apps/fermix_core/lib/fermix_core/delivery/channel_send.ex @ 9b06289e25ae
 \* SOURCE: apps/fermix_core/lib/fermix_core/delivery/error.ex @ 2f1ce6530e0b
 \* SOURCE: apps/fermix_core/lib/fermix_core/memory/repo/mobile_sql.ex @ 20b02d329b95
-\* SOURCE: apps/fermix_core/lib/fermix_core/application.ex#start_supervision_tree,supervision_children,temporal_scheduler_opts @ 42ea67d2db24
+\* SOURCE: apps/fermix_core/lib/fermix_core/application.ex#start_supervision_tree,supervision_children,temporal_scheduler_opts @ 86d1047161ab
 \* SOURCE: apps/fermix_core/lib/fermix_core/temporal/registry.ex @ 55032cca8ccb
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/channels/mobile.ex @ 118d025b7f6e
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/companion/output.ex @ 71be1c83368c
@@ -87,7 +87,7 @@ CONSTANTS
                              \* (:1033) repeat it inside the same Repo call
                              \* (repo.ex:3203-3206), so they add nothing here.
     WorkersDieWithScheduler, \* DeliverySupervisor starts after the scheduler under
-                             \* :rest_for_one (application.ex:386-387, :187)
+                             \* :rest_for_one (application.ex:392-393, :187)
     SendsDieWithWorker,      \* a worker's send process is spawned linked to it
                              \* (Process.spawn [:link, :monitor], channel_send.ex:219-224),
                              \* so a worker killed mid-send takes its send with it
@@ -677,7 +677,7 @@ Spec == Init /\ [][Next]_vars /\ Fairness
 \* never attempt six."
 NeverAttemptSix == attempts <= 5
 
-\* delivery_supervisor.ex:5-10 and application.ex:379-387: "no delivery
+\* delivery_supervisor.ex:5-10 and application.ex:385-393: "no delivery
 \* worker can outlive the scheduler", which is "what lets claims be
 \* serialized in one process"; M30 design §6.3 (:335-337): "two workers for
 \* the same row cannot exist".

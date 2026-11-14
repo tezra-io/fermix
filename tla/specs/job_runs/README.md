@@ -29,7 +29,7 @@ what is left out and every step folded into another.
   what the platform took survive. This also covers a crash of any core child
   started before the `RunnerSupervisor` (`CommandHostSupervisor` through
   `MainAgent`, `Memory.Repo`, `Trace` and `Finch` among them,
-  `application.ex:292-370`) or of the `RunnerSupervisor` itself, since
+  `application.ex:292-376`) or of the `RunnerSupervisor` itself, since
   `:rest_for_one` restarts every job process in each case (`:187`). A
   runner's send helper and its AgentLoop are linked to it, so none outlives
   the restart; `LoopDiesWithRunner` off lets the loop outlive it (JOB-8).
@@ -37,7 +37,7 @@ what is left out and every step folded into another.
   of any callback, including its own init. A Repo timeout no longer kills it
   (`SchedulerTimeouts`); another cause still does, such as `:rest_for_one`
   restarting it when `MeetingsSupervisor`, started between the
-  `RunnerSupervisor` and the Scheduler, dies (`application.ex:371-378`).
+  `RunnerSupervisor` and the Scheduler, dies (`application.ex:377-384`).
   Runners keep running. When it dies waiting on the reaper's write, that write
   may still land (see late writes).
 - `SchedulerTimeouts`: how many of the Scheduler's Repo calls may time out.
@@ -452,7 +452,7 @@ every pin but `runner_supervisor.ex`, `delivery.ex`, `channel_send.ex` and
   `tools_started_at` and `cue_delivery_id`, two columns the spec does not
   model), the registry's pause, resume and edit (an extra refusal for cue
   tasks only), and the core tree (the cue subtree is its LAST child,
-  `application.ex:393`, after `JobRunnerSupervisor`, `MeetingsSupervisor` and
+  `application.ex:399`, after `JobRunnerSupervisor`, `MeetingsSupervisor` and
   `JobScheduler`, which keep their order). The `:clock` option and the
   session-id suffix change nothing modelled. Checks 01 to 35 set the new
   constants off and reproduce their earlier verdicts and state counts.
@@ -1133,6 +1133,19 @@ takes the run's records from the in-memory `ReplyBlocks` holder once, as
 before, and passes the kept blocks as the send's `blocks`, which a channel that
 draws none ignores. No modelled row, helper, delivery or report changed, and
 the change sits below every line the spec cites, so no reference moved.
+
+## Re-read for the place-search pacer (2026-11-14)
+
+`supervision_children` gains `PlaceSearch.Brave.Pacer` right after
+`ReplyBlocks` (M89 D13, `eb5fc530`): the home's one door to Brave's place
+search, holding only who waits and when the next request may send. It starts
+before `AgentSupervisor`, so under `:rest_for_one` a pacer crash restarts the
+job rail with every later child, which the model already takes as a
+`:rest_for_one` restart of the scheduler and its runs; its callbacks raise on
+nothing their guarded callers hand them. The order of `JobRunnerSupervisor`,
+`JobScheduler` and the cue subtree is unchanged. No modelled row, helper,
+delivery or report changed; the six lines move every citation past
+`ReplyBlocks`, now `application.ex:292-376`, `:377-384` and `:399`.
 
 ## Assumptions
 
