@@ -99,6 +99,7 @@ defmodule FermixCore.Memory.Repo do
   @checklist_edit_kinds_migration_version 62
   @trips_migration_version 63
   @trip_near_migration_version 64
+  @trip_waits_migration_version 65
   @sqlite_open_intent :readwritecreate
 
   # The home's requests about notes from every machine (M97 §8), all served by
@@ -5132,8 +5133,28 @@ defmodule FermixCore.Memory.Repo do
          :ok <- apply_computer_history_home_migration(conn, versions),
          :ok <- apply_checklist_edit_kinds_migration(conn, versions),
          :ok <- apply_trips_migration(conn, versions),
-         :ok <- apply_trip_near_migration(conn, versions) do
+         :ok <- apply_trip_near_migration(conn, versions),
+         :ok <- apply_trip_waits_migration(conn, versions) do
       :ok
+    end
+  end
+
+  # M89 D13 B: the place words a stop waits to be looked up by, beside it in
+  # a table of their own, with the version in one transaction, after 64.
+  # Nothing is rewritten: a stop from before waits for nothing.
+  defp apply_trip_waits_migration(conn, versions) do
+    if Enum.member?(versions, @trip_waits_migration_version) do
+      :ok
+    else
+      Sqlite3.execute(
+        conn,
+        """
+        BEGIN;
+        #{TripsSql.waits_schema_sql()}
+        INSERT INTO schema_migrations(version) VALUES (#{@trip_waits_migration_version});
+        COMMIT;
+        """
+      )
     end
   end
 

@@ -115,6 +115,25 @@ defmodule FermixCore.Tools.PlaceSearch.Brave.PacerTest do
       assert {:ok, _turn, 0} = Pacer.turn(pacer, @within_ms)
     end
 
+    # M89 D13 B: the trip placer wakes at the reset the pacer last read.
+    test "how long the key stays spent, asked without a turn: none once it resets", ctx do
+      %{pacer: pacer, clock: clock} = ctx
+      assert Pacer.spent_ms(pacer) == nil
+
+      {:ok, turn, 0} = Pacer.turn(pacer, @within_ms)
+      finish(pacer, turn, {:spent_ms, 60_000})
+      assert Pacer.spent_ms(pacer) == 60_000
+      advance(clock, 45_000)
+      assert Pacer.spent_ms(pacer) == 15_000
+      advance(clock, 15_000)
+      assert Pacer.spent_ms(pacer) == nil
+
+      # A short hold spends nothing.
+      {:ok, turn, 0} = Pacer.turn(pacer, @within_ms)
+      finish(pacer, turn, {:hold_ms, 1_000})
+      assert Pacer.spent_ms(pacer) == nil
+    end
+
     test "a turn that would send after its caller's wait ends is refused and holds nothing",
          %{pacer: pacer} do
       {:ok, turn, 0} = Pacer.turn(pacer, @within_ms)

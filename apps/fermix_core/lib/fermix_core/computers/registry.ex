@@ -32,22 +32,29 @@ defmodule FermixCore.Computers.Registry do
   link and each computer's last offers and version from the records.
 
   Each change tells the Always On watch (`Home.StatusWatch`, `:computers`).
+  Offers that list Apple Maps (`places`) on also tell the trip placer which
+  computer (`Trips.Placer.places_offered/2`), so the stops a trip keeps
+  waiting for a Mac are placed once one is online (M89 D13 B).
 
   Seams: `:name`, `:home`, `:clock` (0-arity, the wall clock),
-  `:status_changed` (0-arity, in place of telling the watch) and `:announce`
-  (1-arity, told this registry's name, in place of asking the link).
+  `:status_changed` (0-arity, in place of telling the watch),
+  `:places_offered` (1-arity, told the device id, in place of telling the
+  trip placer) and `:announce` (1-arity, told this registry's name, in place
+  of asking the link).
   """
 
   use GenServer
 
   require Logger
 
+  alias FermixCore.Computers.Capabilities.Places
   alias FermixCore.Computers.Offers
   alias FermixCore.Computers.Store
   alias FermixCore.Computers.Versions
   alias FermixCore.Home.Link
   alias FermixCore.Home.StatusWatch
   alias FermixCore.Setup.ConfigStore
+  alias FermixCore.Trips.Placer
 
   @typedoc "One connected computer's live facts."
   @type live :: %{
@@ -127,6 +134,7 @@ defmodule FermixCore.Computers.Registry do
        clock: Keyword.get(opts, :clock, &DateTime.utc_now/0),
        status_changed:
          Keyword.get(opts, :status_changed, fn -> StatusWatch.changed(:computers) end),
+       places_offered: Keyword.get(opts, :places_offered, &Placer.places_offered/1),
        announce:
          Keyword.get(opts, :announce, fn name -> Link.impl().announce_computers(name) end),
        monitors: %{}
@@ -180,6 +188,7 @@ defmodule FermixCore.Computers.Registry do
       {:ok, live} ->
         true = :ets.insert(state.table, {device_id, %{live | offers: offers, offers_rev: rev}})
         :ok = keep(state, device_id, %{offers: offers, offers_rev: rev})
+        :ok = tell_places(state, device_id, offers)
         changed(state)
 
       :stale ->
@@ -244,6 +253,16 @@ defmodule FermixCore.Computers.Registry do
   defp changed(state) do
     :ok = state.status_changed.()
     state
+  end
+
+  # The trip placer decides itself whether a Mac it can ask is online; this
+  # only says one says it offers Apple Maps.
+  defp tell_places(state, device_id, offers) do
+    wanted = Atom.to_string(Places.offer())
+
+    if Enum.any?(offers, &(&1.id == wanted and &1.state == :on)),
+      do: state.places_offered.(device_id),
+      else: :ok
   end
 
   defp table(name), do: :"#{name}.Live"

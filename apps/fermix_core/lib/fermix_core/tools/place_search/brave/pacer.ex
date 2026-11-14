@@ -47,6 +47,9 @@ defmodule FermixCore.Tools.PlaceSearch.Brave.Pacer do
   search the engine sends goes through it, the `place_search` tool's and a
   trip's lookups. A caller names another only for a test, or in `fermix
   doctor --full`, whose probe runs in a command that starts no engine.
+
+  How long the key stays spent is read without a turn (`spent_ms/1`), so the
+  trip placer can wake at the reset rather than ask Brave again before it.
   """
 
   use GenServer
@@ -134,6 +137,14 @@ defmodule FermixCore.Tools.PlaceSearch.Brave.Pacer do
   def done(pacer, turn) when is_reference(turn), do: GenServer.call(pacer, {:done, turn})
 
   @doc """
+  How long Brave's last answer spends the key from now, in milliseconds, or
+  nil while it is not spent (a short hold spends nothing). Answered at once,
+  holding no turn: the trip placer wakes at this reset (`Trips.Placer`).
+  """
+  @spec spent_ms(GenServer.server()) :: pos_integer() | nil
+  def spent_ms(pacer), do: GenServer.call(pacer, :spent_ms)
+
+  @doc """
   What an answer with `status` and `headers` says of the next request
   (moduledoc). Pure.
   """
@@ -180,6 +191,8 @@ defmodule FermixCore.Tools.PlaceSearch.Brave.Pacer do
 
   def handle_call({:done, turn}, _from, %{holder: %{ref: turn}} = state),
     do: {:reply, :ok, release(state, state.now_ms.())}
+
+  def handle_call(:spent_ms, _from, state), do: {:reply, spent_for(state, state.now_ms.()), state}
 
   def handle_call({:again, _turn}, _from, state), do: {:reply, {:error, :not_holder}, state}
 
@@ -354,6 +367,11 @@ defmodule FermixCore.Tools.PlaceSearch.Brave.Pacer do
 
     %{state | send_after: nil, spent_until: nil, unread_said?: true}
   end
+
+  defp spent_for(%{spent_until: until}, now) when is_integer(until) and until > now,
+    do: until - now
+
+  defp spent_for(_state, _now), do: nil
 
   defp delay_ms(%{send_after: nil}, _now), do: 0
   defp delay_ms(%{send_after: send_after}, now), do: max(send_after - now, 0)

@@ -432,6 +432,14 @@ defmodule FermixCore.Application do
         # The invocations the server waits on (M97 §6.1), primary-only: a
         # crash loses only its waiters' routing, and they time out.
         FermixCore.Computers.Calls,
+        # The trip placer (M89 D13 B), primary-only: places the stops a trip
+        # keeps waiting for a place search that could not run, when a Mac
+        # that offers places connects (told by the registry above), at
+        # Brave's reset and at boot. After the Repo, the pacer, the registry
+        # and the calls it reads; each run is a task of its own, and it
+        # raises on nothing it is sent, so it restarts nothing after it. Its
+        # runs stay dark under `mix test`.
+        {FermixCore.Trips.Placer, enabled: @compiled_env != :test},
         # The release table an Always On server's update chooses from (M97
         # §3.4), primary-only and fetching only on a server where Always On
         # is offered. It never raises on a fetch or a table: each fails into

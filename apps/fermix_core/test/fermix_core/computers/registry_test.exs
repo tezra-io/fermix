@@ -23,6 +23,7 @@ defmodule FermixCore.Computers.RegistryTest do
        home: home,
        clock: fn -> @ended end,
        status_changed: fn -> send(test, :computers_changed) && :ok end,
+       places_offered: fn device_id -> send(test, {:places_offered, device_id}) && :ok end,
        announce: fn registry -> send(test, {:announce, registry}) && :ok end}
     )
 
@@ -72,6 +73,35 @@ defmodule FermixCore.Computers.RegistryTest do
 
     assert %{@studio => %{offers: []}} = Registry.live(name)
     assert {:ok, %{@studio => %{offers: [], offers_rev: nil}}} = Store.read_all(home)
+  end
+
+  # M89 D13 B: a computer saying it offers Apple Maps is what wakes the trip
+  # placer, so stops that waited for a Mac are placed once one is online.
+  test "offers that list places on tell the trip placer which computer; others do not",
+       %{name: name} do
+    session = session()
+
+    :ok =
+      Registry.connected(name, @studio, %{since: @since, session: session, standing: :current})
+
+    :ok = Registry.offers(name, @studio, session, @offers, "0123456789abcdef")
+    settled(name)
+    refute_received {:places_offered, _device_id}
+
+    off = [%{id: "places", state: :off, sentence: nil, detail: nil}]
+    :ok = Registry.offers(name, @studio, session, off, "1123456789abcdef")
+    settled(name)
+    refute_received {:places_offered, _device_id}
+
+    on = [%{id: "places", state: :on, sentence: nil, detail: nil} | @offers]
+    :ok = Registry.offers(name, @studio, session, on, "2123456789abcdef")
+    settled(name)
+    assert_received {:places_offered, @studio}
+
+    # A word from a session that is no longer the computer's tells nothing.
+    :ok = Registry.offers(name, @studio, session(), on, "3123456789abcdef")
+    settled(name)
+    refute_received {:places_offered, _device_id}
   end
 
   test "an older session's word is not the computer's", %{name: name} do

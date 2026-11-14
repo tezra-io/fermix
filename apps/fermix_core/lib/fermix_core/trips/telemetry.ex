@@ -9,7 +9,8 @@ defmodule FermixCore.Trips.Telemetry do
   the one transaction it is. Measurements: `duration_us`, `trips` (the trips
   it touched), `ops`, and what the place lookup did for it: `lookups`,
   `placed`, `offered`, `not_found`, `not_looked_up`. Metadata on both:
-  `component: "trips"`, `made_via` (`chat | job | mac | phone`), `outcome`
+  `component: "trips"`, `made_via` (`chat | job | mac | phone`, and
+  `trip_place` for the trip placer's write), `outcome`
   (`ok | refused | failed`), `error_code` (the refusal's tag,
   `Trips.Registry.error_tag/1`, else nil) and the caller's `session_id` when
   it has one; `scope` on a read (`index | trip | days | outline | share`);
@@ -27,15 +28,55 @@ defmodule FermixCore.Trips.Telemetry do
   `Trace.TelemetryHandler` records them as `trip_read` and `trip_edit` agent
   events keyed on `component`, and the Opik exporter places each under its
   turn's trace as a point span (`FermixOpik.Mapper.trip_span/4`).
+
+  **The trip placer's run** (D13 B, `Trips.Placer.Run`) is a run kind of its
+  own: one session a run, `trip_place:<16 hex>` (`place_session_id/0`), a
+  root with no `parent_session`, bracketed by
+  `[:fermix, :trip_place, :run_start]` (measurements `waiting`, the stops
+  waiting when it began, and `expired`, the ones the age cap ended then;
+  metadata `trigger`: `boot | computer | timer`) and one closer:
+  `[:fermix, :trip_place, :run_complete]` (measurements `duration_us`,
+  `placed`, `waiting` (still waiting when it ended), `stopped_waiting` (ended
+  unplaced, for any reason), `expired` (of those, by the tries or the age
+  cap), `superseded` (a newer change ended them first), `lookups`, `trips`
+  (whose rev moved) and `failed` (a trip it could not read or write);
+  metadata `trigger`, `backend`, `skipped` (`no_mac | brave_spent |
+  no_backend | computers_unread` when the place search could not run, so it
+  looked nothing up, else nil), `stop_reason` and `stop_code`, as an edit's)
+  or `[:fermix, :trip_place, :run_error]` (`duration_us`; `error_code`: the
+  store's refusal when the run could not read the waits, or `crashed` or
+  `overran` when `Trips.Placer` closes a run that raised or was stopped at
+  its 120 s bound, under the session it named for the run before starting
+  it; `reason`, the kind of what ended it, never its words). Each trip it writes is
+  one `[:fermix, :trip, :edit]` under its `session_id`, `made_via:
+  "trip_place"`. All carry `component: "trips"`, and no words, place or
+  coordinate; the Opik exporter opens and closes the run's root
+  (`FermixOpik.Aggregation`, kind `:trip_place`) and nests the edits under it.
   """
 
   alias FermixCore.Telemetry
 
   @read_event [:fermix, :trip, :read]
   @edit_event [:fermix, :trip, :edit]
+  @place_start [:fermix, :trip_place, :run_start]
+  @place_complete [:fermix, :trip_place, :run_complete]
+  @place_error [:fermix, :trip_place, :run_error]
+  @place_prefix "trip_place:"
   @outcomes [:ok, :refused, :failed]
   @scopes [:index, :trip, :days, :outline, :share]
-  @made_via ["chat", "job", "mac", "phone"]
+  @made_via ["chat", "job", "mac", "phone", "trip_place"]
+  @triggers [:boot, :computer, :timer]
+  @skips [nil, :no_mac, :brave_spent, :no_backend, :computers_unread]
+  @place_counts [
+    :placed,
+    :waiting,
+    :stopped_waiting,
+    :expired,
+    :superseded,
+    :lookups,
+    :trips,
+    :failed
+  ]
   @lookup_counts [:lookups, :placed, :offered, :not_found, :not_looked_up]
   @stop_reasons [
     nil,
@@ -60,6 +101,24 @@ defmodule FermixCore.Trips.Telemetry do
       trace_type: :agent_event,
       agent_field: :component,
       trace_event: "trip_edit"
+    },
+    %{
+      event: @place_start,
+      trace_type: :agent_event,
+      agent_field: :component,
+      trace_event: "trip_place_run_start"
+    },
+    %{
+      event: @place_complete,
+      trace_type: :agent_event,
+      agent_field: :component,
+      trace_event: "trip_place_run_complete"
+    },
+    %{
+      event: @place_error,
+      trace_type: :agent_event,
+      agent_field: :component,
+      trace_event: "trip_place_run_error"
     }
   ]
 
@@ -70,6 +129,60 @@ defmodule FermixCore.Trips.Telemetry do
   @doc "The read events and the edit events, in that order."
   @spec events() :: [[atom()]]
   def events, do: [@read_event, @edit_event]
+
+  @doc "The trip placer's run bookends: its start, its end and its failure."
+  @spec place_events() :: [[atom()]]
+  def place_events, do: [@place_start, @place_complete, @place_error]
+
+  @doc "A new trip placer run's own session id, `trip_place:<16 hex>`."
+  @spec place_session_id() :: String.t()
+  def place_session_id,
+    do: @place_prefix <> Base.encode16(:crypto.strong_rand_bytes(8), case: :lower)
+
+  @doc "Opens a placer run: its trigger, the stops waiting and those the age cap ended."
+  @spec emit_place_start(map(), %{waiting: non_neg_integer(), expired: non_neg_integer()}) ::
+          :ok
+  def emit_place_start(run, %{waiting: waiting, expired: expired})
+      when is_integer(waiting) and waiting >= 0 and is_integer(expired) and expired >= 0 do
+    :telemetry.execute(@place_start, %{waiting: waiting, expired: expired}, place_meta(run))
+  end
+
+  @doc "Closes a placer run with what it placed, what still waits and what stopped waiting."
+  @spec emit_place_complete(map(), map(), non_neg_integer()) :: :ok
+  def emit_place_complete(run, %{skipped: skipped} = summary, duration_us)
+      when skipped in @skips and is_integer(duration_us) and duration_us >= 0 do
+    counts = Map.new(@place_counts, &{&1, lookup_count(summary, &1)})
+
+    :telemetry.execute(
+      @place_complete,
+      Map.put(counts, :duration_us, duration_us),
+      run
+      |> place_meta()
+      |> Map.merge(%{backend: backend(summary), skipped: skipped})
+      |> Map.merge(stop(summary))
+    )
+  end
+
+  @doc """
+  Closes a placer run that did not finish: `error_code` is the store's
+  refusal when it could not read the waits, `crashed` or `overran` when the
+  placer closes a run that raised or passed its bound; `reason` is the kind
+  of what ended it (an exception's module, an exit's word), never its words.
+  """
+  @spec emit_place_error(map(), String.t(), String.t() | nil, non_neg_integer()) :: :ok
+  def emit_place_error(run, error_code, reason, duration_us)
+      when is_binary(error_code) and (is_binary(reason) or is_nil(reason)) and
+             is_integer(duration_us) and duration_us >= 0 do
+    :telemetry.execute(
+      @place_error,
+      %{duration_us: duration_us},
+      Map.merge(place_meta(run), %{error_code: error_code, reason: reason})
+    )
+  end
+
+  defp place_meta(%{session_id: @place_prefix <> _hex = session_id, trigger: trigger})
+       when trigger in @triggers,
+       do: %{session_id: session_id, component: "trips", trigger: trigger}
 
   @doc "One read: its `scope`, how many `trips` it returned, its outcome and caller."
   @spec emit_read(map(), map(), non_neg_integer()) :: :ok

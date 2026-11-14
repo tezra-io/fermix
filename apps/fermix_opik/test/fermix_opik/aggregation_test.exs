@@ -459,6 +459,116 @@ defmodule FermixOpik.AggregationTest do
 
       refute Map.has_key?(edit, :error_info)
     end
+
+    # M89 D13 B: placing the stops a trip keeps waiting is a run of its own,
+    # minted `trip_place:<hex>` by the engine: a root, its trip writes nested
+    # under it by the shared session id, closed with what it placed.
+    @place_session "trip_place:0123456789abcdef"
+
+    test "the reporter subscribes to every trip_place event" do
+      for run <- [:run_start, :run_complete, :run_error] do
+        assert [:fermix, :trip_place, run] in FermixOpik.Reporter.events(),
+               "#{run} is not subscribed, so the run is invisible to Opik"
+      end
+    end
+
+    test "a placer run is one root nesting its trip write, closed with its counts" do
+      meta = %{component: "trips", session_id: @place_session, trigger: :computer}
+
+      {_state, closed} =
+        run([
+          {[:fermix, :trip_place, :run_start], %{waiting: 2, expired: 0}, meta},
+          {[:fermix, :trip, :edit],
+           %{
+             duration_us: 3_000,
+             trips: 1,
+             ops: 1,
+             lookups: 2,
+             placed: 1,
+             offered: 0,
+             not_found: 0,
+             not_looked_up: 1
+           },
+           %{
+             component: "trips",
+             made_via: "trip_place",
+             outcome: :ok,
+             error_code: nil,
+             backend: "computer",
+             rate_limited: false,
+             stop_reason: :computer_away,
+             stop_code: nil,
+             session_id: @place_session
+           }},
+          {[:fermix, :trip_place, :run_complete],
+           %{
+             duration_us: 9_000,
+             placed: 1,
+             waiting: 1,
+             stopped_waiting: 0,
+             expired: 0,
+             superseded: 0,
+             lookups: 2,
+             trips: 1,
+             failed: 0
+           },
+           Map.merge(meta, %{
+             backend: "computer",
+             skipped: nil,
+             stop_reason: :computer_away,
+             stop_code: nil
+           })}
+        ])
+
+      assert [%{trace: trace, spans: spans}] = closed
+      assert trace.name == @place_session
+      assert trace.tags == ["trip_place"]
+
+      assert %{trigger: "computer", placed: 1, waiting: 1, backend: "computer"} = trace.metadata
+      assert trace.metadata.stop_reason == "computer_away"
+
+      wrapper = span_named(spans, @place_session)
+      edit = span_named(spans, "trip_edit")
+      refute Map.has_key?(wrapper, :parent_span_id)
+      assert edit.parent_span_id == wrapper.id
+      assert edit.metadata.made_via == "trip_place"
+    end
+
+    test "a placer run that failed with no opener still closes as a trip_place root, errored" do
+      {_state, closed} =
+        run([
+          {[:fermix, :trip_place, :run_error], %{duration_us: 50},
+           %{
+             component: "trips",
+             session_id: @place_session,
+             trigger: :boot,
+             error_code: "repo_timeout",
+             reason: nil
+           }}
+        ])
+
+      assert [%{trace: trace}] = closed
+      assert trace.tags == ["trip_place"]
+      assert trace.error_info.message == "repo_timeout"
+    end
+
+    # The placer closes a run that crashed or was stopped at its bound, so
+    # its root never waits for the sweep.
+    test "a placer run the placer closed after it crashed is errored with the kind" do
+      meta = %{component: "trips", session_id: @place_session, trigger: :computer}
+
+      {_state, closed} =
+        run([
+          {[:fermix, :trip_place, :run_start], %{waiting: 1, expired: 0}, meta},
+          {[:fermix, :trip_place, :run_error], %{duration_us: 7_000},
+           Map.merge(meta, %{error_code: "crashed", reason: "RuntimeError"})}
+        ])
+
+      assert [%{trace: trace}] = closed
+      assert trace.error_info.message == "crashed"
+      assert trace.metadata.reason == "RuntimeError"
+      assert trace.metadata.duration_us == 7_000
+    end
   end
 
   @compaction_event [:fermix, :agent_loop, :context_compaction]

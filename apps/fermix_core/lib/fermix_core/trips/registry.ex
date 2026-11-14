@@ -28,14 +28,22 @@ defmodule FermixCore.Trips.Registry do
       the shared form a device's Share hands on, and one sentence for every
       refusal (`describe_error/1`);
     * **what devices hear** — every committed change, whoever made it, with
-      what a device's create, add or new day made (`Kept.Notify`).
+      what a device's create, add or new day made (`Kept.Notify`);
+    * **the stops that wait** (D13 B) — a call's stop whose lookup could not
+      run for a reason that heals by waiting keeps its words in the same
+      transaction (`Trips.Waiting`), and the trip placer is told
+      (`Trips.Placer.waits_saved/0`); the placer takes the waits and writes
+      what it found through this module too (`take_waits/3`,
+      `waiting_trip/2`, `place_waiting/4`), one transaction a trip, told to
+      the devices as any change is, said in no chat.
 
   Every read and edit emits its event (`Trips.Telemetry`).
 
   Seams (`opts`): `:repo` (the Repo server; nil when the turn has none),
-  `:now`, `:notifier`, `:reply_blocks` (the holder a lookup's records join)
-  and, for a device, `:made_via`. The place search is the one in force for
-  the turn (`Lookup.backend/1`; a context's `:place_lookup` stands in for it).
+  `:now`, `:notifier`, `:reply_blocks` (the holder a lookup's records join),
+  `:placer` (0-arity, in place of telling the trip placer) and, for a device,
+  `:made_via`. The place search is the one in force for the turn
+  (`Lookup.backend/1`; a context's `:place_lookup` stands in for it).
   """
 
   alias FermixCore.Kept.Access, as: KeptAccess
@@ -46,10 +54,12 @@ defmodule FermixCore.Trips.Registry do
   alias FermixCore.Tools.PlaceSearch
   alias FermixCore.Trips.Lookup
   alias FermixCore.Trips.Ops
+  alias FermixCore.Trips.Placer
   alias FermixCore.Trips.Placing
   alias FermixCore.Trips.Render
   alias FermixCore.Trips.Shape
   alias FermixCore.Trips.Telemetry
+  alias FermixCore.Trips.Waiting
 
   # An edit that gave no place to look up.
   @no_lookups %{
@@ -168,9 +178,9 @@ defmodule FermixCore.Trips.Registry do
   end
 
   defp do_read({ref, run, form}, context, opts) do
-    with {:ok, %{trip: trip, rows: rows}} <- store(context, opts, {:read_trip, ref}),
+    with {:ok, %{trip: trip, rows: rows} = read} <- store(context, opts, {:read_trip, ref}),
          :ok <- within_days(rows, run) do
-      {shape, text} = Render.read(trip, rows, run, form)
+      {shape, text} = Render.read(trip, rows, run, form, Map.get(read, :waiting, MapSet.new()))
       touched = [%{trip_id: trip.id, title: trip.title, rows: []}]
       {{:ok, %{text: text, touched: touched}}, %{scope: read_scope(shape, run, form), trips: 1}}
     else
@@ -242,8 +252,11 @@ defmodule FermixCore.Trips.Registry do
     }
   end
 
+  # The ops that gave a place by words or a link, read before any lookup
+  # turns one that placed nothing into keeping the place it had: each ends
+  # its stop's wait in the store (`Trips.Waiting.given/1`).
   defp edit_call(call, context, opts) do
-    edit = edit_context(context, opts)
+    edit = context |> edit_context(opts) |> Map.put(:places_given, Waiting.given(call))
 
     if Placing.needed?(call) do
       case look_up(call, edit, context, opts) do
@@ -251,20 +264,21 @@ defmodule FermixCore.Trips.Registry do
         {:error, reason, looked} -> {{:error, reason}, looked}
       end
     else
-      {commit(call, edit, context, opts, {[], %{}}), @no_lookups}
+      {commit(call, edit, context, opts, {[], %{}, []}), @no_lookups}
     end
   end
 
   # The trip as it stands and the call run over it, which may refuse it before
   # any lookup is spent; then the lookups, whose records join the conversation
-  # before the store is asked.
+  # before the store is asked, and the stops they leave waiting.
   defp look_up(call, edit, context, opts) do
     with {:ok, loaded} <- load(call, context, opts),
          {:ok, requests, anchors} <- Placing.requests(loaded, call, edit),
          {:ok, found} <- resolve(requests, anchors, context, opts) do
       :ok = join_conversation(found.records, context, opts)
       {placed_call, outcomes} = Placing.placed_call(call, found.outcomes)
-      {:ok, placed_call, {outcomes, found.placed_by}, looked(call, outcomes, found)}
+      waits = Waiting.asked(requests, found.outcomes)
+      {:ok, placed_call, {outcomes, found.placed_by, waits}, looked(call, outcomes, found)}
     else
       {:error, reason} -> {:error, reason, @no_lookups}
     end
@@ -305,14 +319,20 @@ defmodule FermixCore.Trips.Registry do
 
   defp reply_blocks(opts), do: Keyword.get(opts, :reply_blocks, ReplyBlocks)
 
-  # `placings`: what each place came to, and what searched each one a lookup
-  # placed.
-  defp commit(call, edit, context, opts, {outcomes, placed_by}) do
-    with {:ok, applied} <- store(context, opts, {:edit, call, edit}) do
+  # `placings`: what each place came to, what searched each one a lookup
+  # placed, and the stops left waiting, which the store keeps with the call.
+  defp commit(call, edit, context, opts, {outcomes, placed_by, waits}) do
+    with {:ok, applied} <- store(context, opts, {:edit, call, Map.put(edit, :waits, waits)}) do
       :ok = announce(context, applied, %{}, opts)
+      :ok = tell_placer(waits, opts)
       {:ok, edit_answer(applied, Placing.placements(call, applied, outcomes), placed_by)}
     end
   end
+
+  # The placer arms its next look once a call leaves a stop waiting; it
+  # never blocks the call (`Trips.Placer.waits_saved/0` is a cast).
+  defp tell_placer([], _opts), do: :ok
+  defp tell_placer(_waits, opts), do: Keyword.get(opts, :placer, &Placer.waits_saved/0).()
 
   defp edit_answer(applied, placements, placed_by) do
     trip = applied.trip
@@ -475,6 +495,59 @@ defmodule FermixCore.Trips.Registry do
 
   defp announce(_context, %{changed?: false}, _made, _opts), do: :ok
 
+  # --- the trip placer (D13 B) -----------------------------------------------
+
+  @doc """
+  The trip placer's take at `now` (`Trips.Placer`): every wait 7 days old
+  ends unlooked-up, and the oldest `limit` of those due come back, of every
+  owner, with how many wait in all, how many are due and when the next not
+  yet due comes due: `%{expired:, waits:, total:, due:, next_due_at:}`.
+  """
+  @spec take_waits(DateTime.t(), pos_integer(), keyword()) :: {:ok, map()} | {:error, term()}
+  def take_waits(%DateTime{} = now, limit, opts \\ [])
+      when is_integer(limit) and limit > 0 and is_list(opts),
+      do: store(%{}, opts, {:take_waits, now, limit})
+
+  @doc "One trip of waiting stops as it now stands, live (`%{trip:, rows:}`), for the placer."
+  @spec waiting_trip(map(), keyword()) :: {:ok, map()} | {:error, term()}
+  def waiting_trip(%{owner_id: owner_id, agent_id: agent_id, trip_id: trip_id}, opts \\ [])
+      when is_binary(trip_id) and is_list(opts) do
+    context = %{memory_owner_id: owner_id, memory_agent_id: agent_id}
+    store(context, opts, {:trip_by_id, trip_id, false})
+  end
+
+  @doc """
+  What the placer's lookups found for one trip's waiting stops (`results`,
+  `Trips.Waiting.settle/2`'s), in one transaction: the stops placed as one
+  call of edits, made via `trip_place`, each keeping its stamp, the trip's
+  rev moving once and its devices told (`Kept.Notify`); the rest waiting
+  again or ending; any wait a newer change replaced left as that change left
+  it (`superseded`). Said in no chat. `looked` is the lookups' `found`
+  (`Lookup.resolve/3`'s) and the backend's name, for the trip's edit event,
+  emitted under `opts[:session_id]`, the placer's run.
+  """
+  @spec place_waiting(map(), [Waiting.result()], map(), keyword()) ::
+          {:ok, map()} | {:error, term()}
+  def place_waiting(
+        %{owner_id: owner_id, agent_id: agent_id, trip_id: trip_id},
+        results,
+        %{found: found, backend: backend},
+        opts
+      )
+      when is_binary(trip_id) and is_list(results) and is_list(opts) do
+    start = System.monotonic_time(:microsecond)
+    context = %{memory_owner_id: owner_id, memory_agent_id: agent_id}
+    edit = %{now: now(opts), outside?: false, made_via: "trip_place"}
+
+    result =
+      with {:ok, done} <- store(context, opts, {:place_waiting, trip_id, results, edit}),
+           :ok <- announce(context, done.applied || %{changed?: false}, %{}, opts),
+           do: {:ok, Map.delete(done, :applied)}
+
+    emit_placed(Keyword.get(opts, :session_id), {result, found, backend}, start)
+    result
+  end
+
   @doc """
   The live trips, for the per-turn line naming them: each with its title,
   start and day count, in picker order.
@@ -505,6 +578,11 @@ defmodule FermixCore.Trips.Registry do
 
   defp request(context, {:device_edit, client_msg_id, call, edit}),
     do: {:device_edit, owner_id(context), agent_id(context), client_msg_id, call, edit}
+
+  defp request(_context, {:take_waits, now, limit}), do: {:take_waits, now, limit}
+
+  defp request(context, {:place_waiting, trip_id, results, edit}),
+    do: {:place_waiting, owner_id(context), agent_id(context), trip_id, results, edit}
 
   defp repo_opts(repo, opts), do: [server: repo] ++ Keyword.take(opts, [:on_timeout, :timeout])
 
@@ -555,6 +633,45 @@ defmodule FermixCore.Trips.Registry do
     edit = Map.merge(@no_lookups, %{trips: trips, ops: 1, made_via: made_via})
     Telemetry.emit_edit(%{}, Map.merge(edit, outcome_fields(result)), elapsed(start))
   end
+
+  # The placer's write for one trip, under its run: what that trip's lookups
+  # did, and the stops it placed as the call's ops. A wait it acted on
+  # without a lookup changes no count.
+  defp emit_placed(session_id, {result, found, backend}, start) do
+    {trips, ops} =
+      case result do
+        {:ok, %{changed?: changed?, placed: placed}} ->
+          {if(changed?, do: 1, else: 0), length(placed)}
+
+        {:error, _reason} ->
+          {0, 0}
+      end
+
+    counts = Enum.frequencies_by(found.outcomes, fn {_ref, outcome} -> bucket(outcome) end)
+
+    edit = %{
+      trips: trips,
+      ops: ops,
+      made_via: "trip_place",
+      lookups: found.lookups,
+      placed: Map.get(counts, :placed, 0),
+      offered: Map.get(counts, :offered, 0),
+      not_found: Map.get(counts, :not_found, 0),
+      not_looked_up: Map.get(counts, :not_looked_up, 0),
+      backend: backend,
+      rate_limited: Enum.any?(found.outcomes, &match?({_ref, {:none, :rate_limited}}, &1)),
+      stop_reason: found.stop_reason,
+      stop_code: found.stop_code
+    }
+
+    context = if session_id, do: %{session_id: session_id}, else: %{}
+    Telemetry.emit_edit(context, Map.merge(edit, placed_fields(result)), elapsed(start))
+  end
+
+  # A write the store refused names its reason as any refusal does.
+  defp placed_fields({:ok, %{refused: nil}}), do: outcome_fields({:ok, nil})
+  defp placed_fields({:ok, %{refused: reason}}), do: outcome_fields({:error, reason})
+  defp placed_fields({:error, _reason} = error), do: outcome_fields(error)
 
   defp outcome_fields({:ok, _answer}), do: %{outcome: :ok, error_code: nil}
 

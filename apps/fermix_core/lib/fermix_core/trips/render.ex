@@ -1,7 +1,10 @@
 defmodule FermixCore.Trips.Render do
   @moduledoc """
   The owner's trips as the model reads them, as they are shared, and the
-  answer to a `trip_edit` call (M89 §04, §13): text, never rows. Pure.
+  answer to a `trip_edit` call (M89 §04, §13): text, never rows. Pure. A
+  stop that waits for its place (D13 B, `Trips.Waiting`) ends its line in a
+  read with `(place waiting)`; the shared form and a device's wire never
+  say so.
 
   **A read** (`read/4`) is a header line (the title, id, dates, zone, the
   trip's `near`, rev and counts), the line that says the rows are the owner's
@@ -95,15 +98,17 @@ defmodule FermixCore.Trips.Render do
   text (`:text`) or in the shared form (`:share`), `{:whole, text}`, or
   `{:outline, text}` when that would pass 32 KB.
   """
-  @spec read(map(), [map()], run(), :text | :share) :: {:whole | :outline, String.t()}
-  def read(trip, rows, run, form)
-      when is_map(trip) and is_list(rows) and form in [:text, :share] do
+  @spec read(map(), [map()], run(), :text | :share, MapSet.t(String.t())) ::
+          {:whole | :outline, String.t()}
+  def read(trip, rows, run, form, waiting \\ MapSet.new())
+      when is_map(trip) and is_list(rows) and form in [:text, :share] and
+             is_struct(waiting, MapSet) do
     days = rows |> Ops.days() |> asked(run)
-    text = whole(trip, rows, days, form)
+    text = whole(trip, {rows, waiting}, days, form)
 
     cond do
       byte_size(text) <= @max_read_bytes -> {:whole, text}
-      form == :text and length(days) == 1 -> {:whole, cut_notes(trip, rows, days)}
+      form == :text and length(days) == 1 -> {:whole, cut_notes(trip, {rows, waiting}, days)}
       true -> {:outline, outline(trip, rows, days)}
     end
   end
@@ -113,11 +118,11 @@ defmodule FermixCore.Trips.Render do
   defp asked(days, {from, to}) when from >= 1 and to >= from,
     do: Enum.filter(days, &(&1.position in from..to))
 
-  defp whole(trip, rows, days, :text), do: text(trip, rows, days, :all)
-  defp whole(trip, rows, days, :share), do: shared(trip, rows, days, :framed)
+  defp whole(trip, rows_waiting, days, :text), do: text(trip, rows_waiting, days, :all)
+  defp whole(trip, {rows, _waiting}, days, :share), do: shared(trip, rows, days, :framed)
 
-  defp text(trip, rows, days, notes) do
-    lines = {Ops.legs(rows), notes}
+  defp text(trip, {rows, waiting}, days, notes) do
+    lines = {Ops.legs(rows), notes, waiting}
     year? = crosses_year?(trip, rows)
     body = Enum.flat_map(days, &["" | day_lines(&1, trip, year?, lines)])
     Enum.join([header(trip, rows), @data_line | body], "\n")
@@ -126,9 +131,9 @@ defmodule FermixCore.Trips.Render do
   # The outline says to read by day, so one day past 32 KB is still read
   # whole: its notes cut shorter at each step until it fits, and at the last
   # left out, whatever its size then.
-  defp cut_notes(trip, rows, days) do
+  defp cut_notes(trip, rows_waiting, days) do
     Enum.reduce_while(@note_cuts, nil, fn cap, _longer ->
-      text = text(trip, rows, days, cap) <> "\n\n" <> cut_line(cap)
+      text = text(trip, rows_waiting, days, cap) <> "\n\n" <> cut_line(cap)
       if byte_size(text) <= @max_read_bytes, do: {:halt, text}, else: {:cont, text}
     end)
   end
@@ -187,13 +192,19 @@ defmodule FermixCore.Trips.Render do
   defp near_part(nil), do: nil
   defp near_part(near), do: "near " <> quoted(near)
 
-  defp stop_lines(stops, {legs, notes}) do
+  defp stop_lines(stops, {legs, notes, waiting}) do
     stops
     |> Enum.with_index()
     |> Enum.flat_map(fn {stop, index} ->
-      [stop_line(stop) | note_lines(cut(stop, notes))] ++ then_line(stops, index, legs)
+      [stop_line(stop) <> waiting_part(stop, waiting) | note_lines(cut(stop, notes))] ++
+        then_line(stops, index, legs)
     end)
   end
+
+  # A stop whose place words wait to be looked up (`Trips.Waiting`), so a
+  # later turn knows it will be placed.
+  defp waiting_part(%{id: id}, waiting),
+    do: if(MapSet.member?(waiting, id), do: " (place waiting)", else: "")
 
   # A stop's note as a read takes it: whole, cut to its first `cap`
   # characters and marked as cut, or with none.

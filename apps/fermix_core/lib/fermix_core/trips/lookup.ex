@@ -73,6 +73,14 @@ defmodule FermixCore.Trips.Lookup do
   place search's own code for it (`stop_code`). With no place search set up
   here, every stop by words is left unplaced and the outcome says why (C28).
   A lookup emits no tool event of its own (`PlaceSearch.lookup/3`, C12).
+  A stop whose lookup could not run for a reason that heals by waiting is
+  saved with its words, and the trip placer runs this same function for it
+  later (`Trips.Waiting`, `Trips.Placer`), so its heading says it will be
+  placed if that clears within the week a stop waits. `sent` names the
+  requests whose lookup reached the place search (one that said it sent
+  nothing, `attempt: 0`, or that a stop left unsent did not); one stopped
+  at the deadline while it ran counts, since it may have sent. Only such a
+  lookup spends one of the placer's tries.
 
   ## What comes back
 
@@ -186,7 +194,8 @@ defmodule FermixCore.Trips.Lookup do
           lookups: non_neg_integer(),
           stop_reason: stop_reason() | nil,
           stop_code: String.t() | nil,
-          placed_by: %{optional(term()) => String.t()}
+          placed_by: %{optional(term()) => String.t()},
+          sent: [term()]
         }
 
   @doc "The most lookups one call runs."
@@ -300,7 +309,12 @@ defmodule FermixCore.Trips.Lookup do
   @spec heading(why()) :: String.t()
   def heading(:not_found), do: "No place found"
   def heading(:no_location), do: "Not placed, the search gave that place no location"
-  def heading(:rate_limited), do: "Not looked up, the place search is rate limited"
+  # A reason that heals by waiting saves the stop's words, and the trip placer
+  # places it later (`Trips.Waiting`, `Trips.Placer`): its heading says so.
+  def heading(:rate_limited) do
+    "Not looked up yet, the place search is rate limited; these stops are saved and will be " <>
+      "placed if it allows more searches within a week"
+  end
 
   def heading(:plan_excludes_place_search) do
     "Not looked up, the Brave Search API key's plan does not include place search; add " <>
@@ -309,8 +323,8 @@ defmodule FermixCore.Trips.Lookup do
   end
 
   def heading(:computer_away) do
-    "Not looked up, no Mac that looks places up in Apple Maps is online, so these stops are " <>
-      "saved without a place; ask again once it is online"
+    "Not looked up yet, no Mac that looks places up in Apple Maps is online; these stops are " <>
+      "saved and will be placed if one comes online within a week"
   end
 
   def heading(:computer_off) do
@@ -324,16 +338,19 @@ defmodule FermixCore.Trips.Lookup do
   end
 
   def heading(:computer_timed_out) do
-    "Not looked up, the Mac that looks places up in Apple Maps did not answer in time, so " <>
-      "these stops are saved without a place; ask again in a moment"
+    "Not looked up yet, the Mac that looks places up in Apple Maps did not answer in time; " <>
+      "these stops are saved and will be placed if it answers within a week"
   end
 
   def heading(:computer_busy) do
-    "Not looked up, the Mac that looks places up in Apple Maps was busy; ask again in a moment"
+    "Not looked up yet, the Mac that looks places up in Apple Maps was busy; these stops are " <>
+      "saved and will be placed if it frees up within a week"
   end
 
-  def heading(:deadline),
-    do: "Not looked up, the call's #{div(@deadline_ms, 1_000)} s for place lookups ran out"
+  def heading(:deadline) do
+    "Not looked up yet, the call's #{div(@deadline_ms, 1_000)} s for place lookups ran out; " <>
+      "these stops are saved and will be placed if they can be looked up within a week"
+  end
 
   def heading({:failed, reason}) when is_binary(reason),
     do: "Not looked up, the place search failed (#{reason})"
@@ -425,9 +442,14 @@ defmodule FermixCore.Trips.Lookup do
       lookups: state.sent,
       stop_reason: state.stopped,
       stop_code: state.stop_code,
-      placed_by: placed_by(indexed, linked, state.searched)
+      placed_by: placed_by(indexed, linked, state.searched),
+      sent:
+        for({request, index} <- indexed, sent?(request, index, linked, state), do: request.ref)
     }
   end
+
+  defp sent?(request, index, linked, state),
+    do: not Map.has_key?(linked, index) and MapSet.member?(state.sent_keys, lookup_key(request))
 
   # What searched each stop a lookup placed, by its request's ref.
   defp placed_by(indexed, linked, searched) do
@@ -495,6 +517,7 @@ defmodule FermixCore.Trips.Lookup do
       found: %{},
       records: [],
       sent: 0,
+      sent_keys: MapSet.new(),
       stopped: nil,
       stop_code: nil,
       searched: %{}
@@ -633,13 +656,16 @@ defmodule FermixCore.Trips.Lookup do
   # whose plan has no place search, no Mac online to search on or the
   # deadline stops the rest.
   defp settle({lookup, outcome, mode, facts}, state) do
-    found = Map.put(state.found, lookup_key(lookup), outcome)
+    found_key = lookup_key(lookup)
+    found = Map.put(state.found, found_key, outcome)
 
     state = %{
       state
       | found: found,
         unknown: learned(state.unknown, mode),
-        sent: state.sent + if(facts.sent?, do: 1, else: 0)
+        sent: state.sent + if(facts.sent?, do: 1, else: 0),
+        sent_keys:
+          if(facts.sent?, do: MapSet.put(state.sent_keys, found_key), else: state.sent_keys)
     }
 
     case outcome do

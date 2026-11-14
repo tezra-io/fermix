@@ -889,6 +889,67 @@ defmodule FermixOpik.Aggregation do
     add_child_span(state, meta, at, &Mapper.trip_span(kind, meta, meas, &1))
   end
 
+  # The trip placer's run (M89 D13 B) places the stops a trip keeps waiting,
+  # minted `trip_place:<hex>` by the engine, which no turn asked for: always a
+  # root. run_start opens it, each trip it writes nests as that trip's
+  # trip_edit span via the shared session id, and one closer ends it:
+  # run_complete with what it placed, what still waits and what stopped
+  # waiting, or run_error, from the run (the store's refusal) or from the
+  # placer when the run raised or passed its bound (`crashed`, `overran`,
+  # with the kind as `reason`). Counts and Fermix's own
+  # words only: no stop's words or place ride.
+  def apply_event(state, [:fermix, :trip_place, :run_start], meas, meta, at) do
+    case Map.get(meta, :session_id) do
+      nil ->
+        {state, []}
+
+      session_id ->
+        ctx = %{
+          parent_session: nil,
+          kind: :trip_place,
+          name: nil,
+          input: nil,
+          trace_metadata:
+            compact(%{
+              trigger: stringify(Map.get(meta, :trigger)),
+              waiting_at_start: Map.get(meas, :waiting)
+            }),
+          at: at.at,
+          mono: at.mono
+        }
+
+        {state, _ref} = ensure_session(state, session_id, ctx)
+        {state, []}
+    end
+  end
+
+  # Counts only: this compact map is the run's metadata allowlist.
+  def apply_event(state, [:fermix, :trip_place, run], meas, meta, at)
+      when run in [:run_complete, :run_error] do
+    close_root(state, meta, at, %{
+      status: if(run == :run_error, do: "error", else: "ok"),
+      error_info: trip_place_error_info(run, meta),
+      metadata:
+        compact(%{
+          trigger: stringify(Map.get(meta, :trigger)),
+          reason: Map.get(meta, :reason),
+          backend: Map.get(meta, :backend),
+          skipped: stringify(Map.get(meta, :skipped)),
+          stop_reason: stringify(Map.get(meta, :stop_reason)),
+          stop_code: Map.get(meta, :stop_code),
+          placed: Map.get(meas, :placed),
+          waiting: Map.get(meas, :waiting),
+          stopped_waiting: Map.get(meas, :stopped_waiting),
+          expired: Map.get(meas, :expired),
+          superseded: Map.get(meas, :superseded),
+          lookups: Map.get(meas, :lookups),
+          trips: Map.get(meas, :trips),
+          failed: Map.get(meas, :failed),
+          duration_us: Map.get(meas, :duration_us)
+        })
+    })
+  end
+
   # In-loop context compaction ([:fermix, :agent_loop, :context_compaction]) and
   # the recovery rounds after a provider refused a request as too large
   # ([:fermix, :agent_loop, :context_recovery]): point spans under the run that
@@ -1801,6 +1862,9 @@ defmodule FermixOpik.Aggregation do
   defp infer_kind("harness_" <> _), do: :harness
   defp infer_kind("session:" <> _), do: :realtime
   defp infer_kind("skill_curation:" <> _), do: :skill_curation
+  # The trip placer's run, minted in `Trips.Telemetry.place_session_id/0`: its
+  # own root, whichever of its bookends arrives first.
+  defp infer_kind("trip_place:" <> _), do: :trip_place
   defp infer_kind("soul_curation:" <> _), do: :soul_curation
   defp infer_kind("memory_review:" <> _), do: :memory_review
   # An open-loop check-in, minted in `OpenLoops.Telemetry.correlation/2`.
@@ -1863,6 +1927,8 @@ defmodule FermixOpik.Aggregation do
   defp wrapper_name(:voice_delegation, _name, session), do: session
   # "voice_gist:<call_uuid>" already says what it is and which call.
   defp wrapper_name(:voice_gist, _name, session), do: session
+  # "trip_place:<hex>" already says what it is; the run has no agent name.
+  defp wrapper_name(:trip_place, _name, session), do: session
   # "cue_filter_<watcher>_<ts>_<hex>" already says what it is and for which
   # watcher; the agent name ("cue_filter") would only repeat the kind.
   defp wrapper_name(:cue_filter, _name, session), do: session
@@ -2154,6 +2220,11 @@ defmodule FermixOpik.Aggregation do
     do: error_info("VoiceGistError", stringify(Map.get(metadata, :error)))
 
   defp voice_gist_error_info(_run, _metadata), do: nil
+
+  defp trip_place_error_info(:run_error, metadata),
+    do: error_info("TripPlaceError", stringify(Map.get(metadata, :error_code)))
+
+  defp trip_place_error_info(_run, _metadata), do: nil
 
   defp cue_filter_metadata(metadata) do
     compact(%{

@@ -139,7 +139,9 @@ defmodule FermixCore.Home.Role do
      "keeps what the home's computers offer and how they connect; only the primary serves " <>
        "them"},
     {FermixCore.Computers.Calls,
-     "waits on what the server asked of its computers; only the primary asks them"}
+     "waits on what the server asked of its computers; only the primary asks them"},
+    {FermixCore.Trips.Placer,
+     "places the stops a trip keeps waiting in memory.db, which a device does not open"}
   ]
 
   @primary_only_modules Enum.map(@primary_only, &elem(&1, 0))

@@ -726,6 +726,31 @@ defmodule FermixCore.Trips.LookupTest do
       assert result.stop_reason == nil
     end
 
+    # M89 D13 B: the trip placer spends a try only on a lookup that reached
+    # the place search; one a stop left unsent, or one that said it sent
+    # nothing, is not among them.
+    test "the refs whose lookup was sent: never one a stop left unsent or one that sent nothing" do
+      limited = {:error, "rate_limited: slow down", %{attempt: 1}}
+      away = {:error, "computer_away: words", %{attempt: 0}}
+
+      search =
+        search_by(%{"Spot 1" => limited, "Spot 2" => found([]), "Spot 3" => found([])})
+
+      requests = Enum.map(1..3, &%{ref: &1, place: "Spot #{&1}", day: &1})
+
+      assert {:ok, %{sent: [1], stop_reason: :rate_limited}} =
+               resolve(requests, near_town(), search)
+
+      search = search_by(%{"Spot 1" => away, "Spot 2" => found([])})
+      requests = Enum.map(1..2, &%{ref: &1, place: "Spot #{&1}", day: &1})
+      assert {:ok, %{sent: []}} = resolve(requests, near_town(), search)
+
+      # Two stops by the same words on one day are one lookup, sent for both.
+      search = search_by(%{"Spot 1" => found([])})
+      twice = [%{ref: 1, place: "Spot 1", day: 1}, %{ref: 2, place: "Spot 1", day: 1}]
+      assert {:ok, %{sent: [1, 2]}} = resolve(twice, near_town(), search)
+    end
+
     # Only a stop a lookup placed is credited to what searched; one its link
     # placed is no lookup's.
     test "what placed each stop a lookup placed is kept by its ref, never a link's" do
@@ -781,14 +806,19 @@ defmodule FermixCore.Trips.LookupTest do
       assert Lookup.heading(:no_location) ==
                "Not placed, the search gave that place no location"
 
-      assert Lookup.heading(:rate_limited) == "Not looked up, the place search is rate limited"
+      # M89 D13 B: what heals by waiting is saved and placed later, if its
+      # condition clears within the week a stop waits.
+      assert Lookup.heading(:rate_limited) ==
+               "Not looked up yet, the place search is rate limited; these stops are saved " <>
+                 "and will be placed if it allows more searches within a week"
 
       assert Lookup.heading(:deadline) ==
-               "Not looked up, the call's 45 s for place lookups ran out"
+               "Not looked up yet, the call's 45 s for place lookups ran out; these stops are " <>
+                 "saved and will be placed if they can be looked up within a week"
 
       assert Lookup.heading(:computer_away) ==
-               "Not looked up, no Mac that looks places up in Apple Maps is online, so these " <>
-                 "stops are saved without a place; ask again once it is online"
+               "Not looked up yet, no Mac that looks places up in Apple Maps is online; these " <>
+                 "stops are saved and will be placed if one comes online within a week"
 
       assert Lookup.heading(:computer_off) ==
                "Not looked up, Apple Maps is switched off on the Mac that looks places up, so " <>
@@ -799,12 +829,17 @@ defmodule FermixCore.Trips.LookupTest do
                  "these stops are saved without a place"
 
       assert Lookup.heading(:computer_timed_out) ==
-               "Not looked up, the Mac that looks places up in Apple Maps did not answer in " <>
-                 "time, so these stops are saved without a place; ask again in a moment"
+               "Not looked up yet, the Mac that looks places up in Apple Maps did not answer " <>
+                 "in time; these stops are saved and will be placed if it answers within a week"
 
       assert Lookup.heading(:computer_busy) ==
-               "Not looked up, the Mac that looks places up in Apple Maps was busy; ask again " <>
-                 "in a moment"
+               "Not looked up yet, the Mac that looks places up in Apple Maps was busy; these " <>
+                 "stops are saved and will be placed if it frees up within a week"
+
+      # No heading of a reason that cannot heal by waiting says to ask again.
+      for why <- [:computer_off, :computer_refused, :plan_excludes_place_search] do
+        refute Lookup.heading(why) =~ "ask again"
+      end
 
       assert Lookup.heading({:failed, "network: Apple Maps could not be reached"}) ==
                "Not looked up, the place search failed (network: Apple Maps could not be reached)"

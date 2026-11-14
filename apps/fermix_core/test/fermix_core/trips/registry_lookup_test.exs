@@ -73,7 +73,15 @@ defmodule FermixCore.Trips.RegistryLookupTest do
 
   defp edit(ctx, trip, ops, results) do
     context = Map.put(@owner, :place_lookup, searching(results))
-    opts = [repo: ctx.repo, now: @now, reply_blocks: ctx.holder, notifier: fn _c -> :ok end]
+
+    opts = [
+      repo: ctx.repo,
+      now: @now,
+      reply_blocks: ctx.holder,
+      notifier: fn _c -> :ok end,
+      placer: fn -> :ok end
+    ]
+
     Registry.edit(%{"trip" => trip, "ops" => ops}, context, opts)
   end
 
@@ -219,7 +227,8 @@ defmodule FermixCore.Trips.RegistryLookupTest do
 
     cases = [
       {"Cais Velho, Ribeira", {:error, "rate_limited: slow down", %{}},
-       "Not looked up, the place search is rate limited: "},
+       "Not looked up yet, the place search is rate limited; these stops are saved and will " <>
+         "be placed if it allows more searches within a week: "},
       {"Doca Seca", found([]), "No place found: "},
       {"Ponte Nova", {:error, "network: unreachable", %{}},
        "Not looked up, the place search failed (network: unreachable): "},
@@ -396,11 +405,21 @@ defmodule FermixCore.Trips.RegistryLookupTest do
             do: %{"op" => "add", "text" => text, "day" => 1, "place" => place}
 
     context = Map.merge(@owner, %{place_lookup: searching(results), session_id: session})
-    opts = [repo: ctx.repo, now: @now, reply_blocks: ctx.holder, notifier: fn _c -> :ok end]
+
+    opts = [
+      repo: ctx.repo,
+      now: @now,
+      reply_blocks: ctx.holder,
+      notifier: fn _c -> :ok end,
+      placer: fn -> :ok end
+    ]
 
     assert {:ok, answer} = Registry.edit(%{"trip" => "Varonne", "ops" => ops}, context, opts)
     assert answer.text =~ " · 1 placed\n"
-    assert answer.text =~ "Not looked up, the place search is rate limited: [3] \"Quay\""
+
+    assert answer.text =~
+             "Not looked up yet, the place search is rate limited; these stops are saved and " <>
+               "will be placed if it allows more searches within a week: [3] \"Quay\""
 
     assert_receive {:telemetry, [:fermix, :trip, :edit], measurements, metadata}
     assert %{lookups: lookups, placed: 1, offered: 0, not_looked_up: not_looked_up} = measurements
@@ -426,7 +445,14 @@ defmodule FermixCore.Trips.RegistryLookupTest do
             do: %{"op" => "add", "text" => text, "day" => 1, "place" => place}
 
     context = Map.merge(@owner, %{place_lookup: searching(results), session_id: session})
-    opts = [repo: ctx.repo, now: @now, reply_blocks: ctx.holder, notifier: fn _c -> :ok end]
+
+    opts = [
+      repo: ctx.repo,
+      now: @now,
+      reply_blocks: ctx.holder,
+      notifier: fn _c -> :ok end,
+      placer: fn -> :ok end
+    ]
 
     assert {:ok, _answer} = Registry.edit(%{"trip" => "Varonne", "ops" => ops}, context, opts)
 
@@ -474,7 +500,14 @@ defmodule FermixCore.Trips.RegistryLookupTest do
           session_id: session
         })
 
-      opts = [repo: ctx.repo, now: @now, reply_blocks: ctx.holder, notifier: fn _c -> :ok end]
+      opts = [
+        repo: ctx.repo,
+        now: @now,
+        reply_blocks: ctx.holder,
+        notifier: fn _c -> :ok end,
+        placer: fn -> :ok end
+      ]
+
       assert {:ok, answer} = Registry.edit(%{"trip" => "Varonne", "ops" => ops}, context, opts)
 
       assert answer.text ==
@@ -553,7 +586,15 @@ defmodule FermixCore.Trips.RegistryLookupTest do
       ]
 
       context = Map.put(@owner, :place_lookup, search)
-      opts = [repo: ctx.repo, now: @now, reply_blocks: ctx.holder, notifier: fn _c -> :ok end]
+
+      opts = [
+        repo: ctx.repo,
+        now: @now,
+        reply_blocks: ctx.holder,
+        notifier: fn _c -> :ok end,
+        placer: fn -> :ok end
+      ]
+
       assert {:ok, answer} = Registry.edit(%{"trip" => "Varonne", "ops" => ops}, context, opts)
 
       assert answer.text =~

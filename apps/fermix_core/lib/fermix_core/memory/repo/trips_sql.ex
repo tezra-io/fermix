@@ -24,11 +24,27 @@ defmodule FermixCore.Memory.Repo.TripsSql do
 
   Migration 64 (D10) adds `near` to both tables (`near_columns/0`): the
   place's name a trip, or one of its days, is searched near; a stop has none.
+
+  Migration 65 (D13 B) adds `trip_waits` (`waits_schema_sql/0`): beside a
+  stop, the place words a call could not look up for a reason that heals by
+  waiting, when it began waiting, its reason, how many times the trip
+  placer tried it, when it is next due (`due_at`, nil for now; a try that
+  reached the place search pushes it back) and whether its call had read
+  outside content (`outside`, so the stop is marked when it is placed, D9),
+  never on a device's wire (`Trips.Waiting`); a model's read of the trip
+  marks each waiting stop (`{:read_trip, ...}`'s `waiting`). Every edit
+  keeps them in its own transaction, whoever makes it: it ends the waits its
+  ops end and saves the ones its lookups left (`keep_waits/5`). The placer
+  takes the oldest that are due (`{:take_waits, now, limit}`, ending those
+  past the age cap first) and writes what its lookups found for one trip in one transaction
+  (`{:place_waiting, ...}`), each wait first checked to stand as it was read,
+  so a newer choice is never overwritten.
   """
 
   alias FermixCore.Memory.Repo.KeptSql
   alias FermixCore.Memory.Repo.TemporalSql
   alias FermixCore.Trips.Ops
+  alias FermixCore.Trips.Waiting
 
   @trip_columns ~w(id owner_id agent_id title starts_on timezone position rev next_n created_at
                    updated_at removed_at near)a
@@ -92,9 +108,36 @@ defmodule FermixCore.Memory.Repo.TripsSql do
   CREATE INDEX IF NOT EXISTS idx_trip_rows_trip ON trip_rows(trip_id, removed_at, position);
   """
 
+  @waits_schema_sql """
+  CREATE TABLE IF NOT EXISTS trip_waits (
+    row_id TEXT PRIMARY KEY REFERENCES trip_rows(id) ON DELETE CASCADE,
+    trip_id TEXT NOT NULL REFERENCES trips(id) ON DELETE CASCADE,
+    words TEXT NOT NULL CHECK (length(words) BETWEEN 1 AND 200),
+    reason TEXT NOT NULL CHECK (
+      reason IN ('computer_away', 'computer_timed_out', 'computer_busy', 'rate_limited', 'deadline')
+    ),
+    since TEXT NOT NULL,
+    tries INTEGER NOT NULL DEFAULT 0 CHECK (tries >= 0),
+    outside INTEGER NOT NULL DEFAULT 0 CHECK (outside IN (0, 1)),
+    due_at TEXT
+  );
+  CREATE INDEX IF NOT EXISTS idx_trip_waits_since ON trip_waits(since, row_id);
+  CREATE INDEX IF NOT EXISTS idx_trip_waits_trip ON trip_waits(trip_id);
+  """
+
+  @wait_select """
+  SELECT w.row_id, w.trip_id, t.owner_id, t.agent_id, w.words, w.reason, w.since, w.tries,
+    w.outside, w.due_at
+  FROM trip_waits AS w JOIN trips AS t ON t.id = w.trip_id
+  """
+
   @doc "The two tables and their indexes, as migration 63 creates them."
   @spec schema_sql() :: String.t()
   def schema_sql, do: @schema_sql
+
+  @doc "The waiting stops' table and its indexes, as migration 65 creates them."
+  @spec waits_schema_sql() :: String.t()
+  def waits_schema_sql, do: @waits_schema_sql
 
   @doc """
   What migration 64 adds, a table at a time: `near` on a trip, and on a day
@@ -152,6 +195,17 @@ defmodule FermixCore.Memory.Repo.TripsSql do
   def handle(conn, {:purge_removed_trips, %DateTime{} = now}),
     do: KeptSql.in_transaction(conn, fn -> purge_removed_trips(conn, now) end)
 
+  def handle(conn, {:take_waits, %DateTime{} = now, limit})
+      when is_integer(limit) and limit > 0,
+      do: KeptSql.in_transaction(conn, fn -> take_waits(conn, now, limit) end)
+
+  def handle(conn, {:place_waiting, owner_id, agent_id, trip_id, results, edit})
+      when is_binary(trip_id) and is_list(results) do
+    KeptSql.in_transaction(conn, fn ->
+      place_waiting(conn, {owner_id, agent_id}, trip_id, results, edit)
+    end)
+  end
+
   def handle(_conn, request), do: {:error, {:unknown_request, request}}
 
   # --- reads ---------------------------------------------------------------
@@ -179,11 +233,14 @@ defmodule FermixCore.Memory.Repo.TripsSql do
     trip_values |> decode_trip() |> Map.merge(%{days: days, stops: stops})
   end
 
+  # The trip, its live rows, and the ids of its stops that wait for their
+  # place, which only the model's read marks.
   defp read_trip(conn, owner_id, agent_id, ref) do
     with {:ok, trips} <- live_trips(conn, owner_id, agent_id),
          {:ok, trip} <- Ops.resolve(trips, ref),
-         {:ok, rows} <- live_rows(conn, trip.id) do
-      {:ok, %{trip: trip, rows: rows}}
+         {:ok, rows} <- live_rows(conn, trip.id),
+         {:ok, waiting} <- waits_of(conn, trip.id) do
+      {:ok, %{trip: trip, rows: rows, waiting: MapSet.new(Map.keys(waiting))}}
     end
   end
 
@@ -259,17 +316,23 @@ defmodule FermixCore.Memory.Repo.TripsSql do
   # ones a pull carries), hands them to `Ops`, and writes what it changed.
   # Inside `in_transaction/2`, so a refusal of any op leaves every trip as it
   # was.
-  defp edit(conn, {owner_id, agent_id}, call, edit) do
+  defp edit(conn, owner, call, edit) do
+    with {:ok, loaded} <- load(conn, owner, call, edit.now),
+         {:ok, result} <- Ops.apply(loaded, call, edit),
+         :ok <- write(conn, owner, result, edit.now),
+         :ok <- keep_waits(conn, call, loaded.rows, result, edit) do
+      {:ok, result}
+    end
+  end
+
+  defp load(conn, {owner_id, agent_id}, call, now) do
     with {:ok, live} <- live_trips(conn, owner_id, agent_id),
          {:ok, gone} <- removed_trip(conn, owner_id, agent_id, Ops.restored_trip(call)),
          trips = live ++ gone,
          id = Ops.referenced(trips, call),
          {:ok, rows} <- rows_of(conn, id, &live_rows/2),
-         {:ok, removed} <- rows_of(conn, id, &removed_rows/2),
-         loaded = %{trips: trips, rows: rows, removed: removed, kept_from: kept_from(edit.now)},
-         {:ok, result} <- Ops.apply(loaded, call, edit),
-         :ok <- write(conn, {owner_id, agent_id}, result, edit.now) do
-      {:ok, result}
+         {:ok, removed} <- rows_of(conn, id, &removed_rows/2) do
+      {:ok, %{trips: trips, rows: rows, removed: removed, kept_from: kept_from(now)}}
     end
   end
 
@@ -408,6 +471,201 @@ defmodule FermixCore.Memory.Repo.TripsSql do
 
     expect_one(conn, sql, params, {:row_gone, row.id})
   end
+
+  # --- waiting stops (D13 B) -----------------------------------------------
+
+  # Whatever changed, the call's waits: those its ops end go (a trip it
+  # removed takes all of its own), then those its lookups left are saved,
+  # each from now with no try and with whether the call had read outside
+  # content, in place of any the stop had. A call that changed nothing but
+  # leaves a stop waiting saves its wait all the same.
+  defp keep_waits(conn, call, before, %{trip: trip} = result, edit) do
+    given = Map.get(edit, :places_given, [])
+
+    with {:ok, waiting} <- waits_of(conn, trip.id),
+         :ok <- end_waits(conn, trip.id, Waiting.cleared(call, before, result, given), waiting) do
+      saved = Waiting.saved(call, result, Map.get(edit, :waits, []))
+      each(saved, &save_wait(conn, trip.id, &1, edit))
+    end
+  end
+
+  defp end_waits(_conn, _trip_id, _ended, waiting) when map_size(waiting) == 0, do: :ok
+
+  defp end_waits(conn, trip_id, :all, _waiting),
+    do: KeptSql.execute(conn, "DELETE FROM trip_waits WHERE trip_id = ?", [trip_id])
+
+  defp end_waits(conn, _trip_id, ended, waiting),
+    do: each(Enum.filter(ended, &Map.has_key?(waiting, &1)), &delete_wait(conn, &1))
+
+  defp save_wait(conn, trip_id, %{row_id: row_id, words: words, reason: reason}, edit) do
+    sql = """
+    INSERT INTO trip_waits (row_id, trip_id, words, reason, since, tries, outside)
+    VALUES (?, ?, ?, ?, ?, 0, ?)
+    ON CONFLICT(row_id) DO UPDATE SET words = excluded.words, reason = excluded.reason,
+      since = excluded.since, tries = 0, outside = excluded.outside, due_at = NULL
+    """
+
+    params = [row_id, trip_id, words, Atom.to_string(reason), stamp(edit.now), bit(edit.outside?)]
+    KeptSql.execute(conn, sql, params)
+  end
+
+  defp delete_wait(conn, row_id),
+    do: KeptSql.execute(conn, "DELETE FROM trip_waits WHERE row_id = ?", [row_id])
+
+  # A trip's waits by row id.
+  defp waits_of(conn, trip_id) do
+    with {:ok, rows} <- KeptSql.query_all(conn, @wait_select <> "WHERE w.trip_id = ?", [trip_id]),
+         do: {:ok, Map.new(rows, &{hd(&1), decode_wait(&1)})}
+  end
+
+  # The placer's take at `now`: every wait 7 days old ends, unlooked-up;
+  # then the oldest `limit` of those due, how many wait in all and how many
+  # are due, and when the next one not yet due comes due.
+  defp take_waits(conn, now, limit) do
+    expire = "DELETE FROM trip_waits WHERE since < ? RETURNING row_id"
+
+    due =
+      @wait_select <> "WHERE w.due_at IS NULL OR w.due_at <= ? ORDER BY w.since, w.row_id LIMIT ?"
+
+    counts = """
+    SELECT COUNT(*), COALESCE(SUM(CASE WHEN due_at IS NULL OR due_at <= ?1 THEN 1 ELSE 0 END), 0),
+      MIN(CASE WHEN due_at > ?1 THEN due_at END)
+    FROM trip_waits
+    """
+
+    with {:ok, expired} <- KeptSql.query_all(conn, expire, [stamp(Waiting.cutoff(now))]),
+         {:ok, rows} <- KeptSql.query_all(conn, due, [stamp(now), limit]),
+         {:ok, [[total, due_count, next]]} <- KeptSql.query_all(conn, counts, [stamp(now)]) do
+      {:ok,
+       %{
+         expired: length(expired),
+         waits: Enum.map(rows, &decode_wait/1),
+         total: total,
+         due: due_count,
+         next_due_at: optional_parse(next)
+       }}
+    end
+  end
+
+  # What the placer's lookups found for one trip, written once: only the
+  # waits that still stand as they were read (the same words since the same
+  # moment) are acted on. The ones a lookup placed become one call of edits,
+  # applied as any other (`Ops`, its rev once), each stop stamped as its
+  # call would have stamped it: marked when that call had read outside
+  # content, else as it was; a refusal of it (the trip too large, a row gone) ends their waits. The rest
+  # wait again, counted, or end.
+  defp place_waiting(conn, owner, trip_id, results, edit) do
+    with {:ok, current} <- waits_of(conn, trip_id) do
+      standing = Enum.filter(results, &stands?(&1, current))
+      {placing, rest} = Enum.split_with(standing, &match?(%{action: {:place, _place}}, &1))
+
+      with {:ok, applied, refused} <- place_stops(conn, owner, {trip_id, current}, placing, edit),
+           :ok <- each(rest, &settle_wait(conn, &1)),
+           :ok <- end_refused(conn, placing, refused) do
+        {:ok,
+         waiting_summary(applied, refused, placing, rest, length(results) - length(standing))}
+      end
+    end
+  end
+
+  defp stands?(%{row_id: id, words: words, since: since}, current) do
+    case Map.fetch(current, id) do
+      {:ok, %{words: ^words, since: kept}} -> DateTime.compare(kept, since) == :eq
+      _other -> false
+    end
+  end
+
+  defp place_stops(_conn, _owner, _trip, [], _edit), do: {:ok, nil, nil}
+
+  defp place_stops(conn, owner, {trip_id, current}, placing, edit) do
+    call = %{trip: trip_id, ops: Enum.map(placing, &place_op(&1, Map.fetch!(current, &1.row_id)))}
+
+    with {:ok, loaded} <- load(conn, owner, call, edit.now) do
+      case Ops.apply(loaded, call, edit) do
+        {:ok, result} -> written(conn, owner, {call, loaded, result}, edit)
+        {:error, reason} -> {:ok, nil, reason}
+      end
+    end
+  end
+
+  defp written(conn, owner, {call, loaded, result}, edit) do
+    with :ok <- write(conn, owner, result, edit.now),
+         :ok <- keep_waits(conn, call, loaded.rows, result, edit),
+         do: {:ok, result, nil}
+  end
+
+  # The placer's edit gives a stop its place alone, by its id, marking it
+  # when the call that gave the words had read outside content (`Ops`).
+  defp place_op(%{row_id: id, action: {:place, place}}, %{outside: outside?}) do
+    %{
+      op: :edit,
+      n: {:id, id},
+      text: nil,
+      time: :keep,
+      duration: :keep,
+      fixed: :keep,
+      note: :keep,
+      place: place,
+      after_outside: outside?
+    }
+  end
+
+  defp settle_wait(conn, %{row_id: id, action: {:wait, reason, tries, due_at}}) do
+    sql = "UPDATE trip_waits SET reason = ?, tries = ?, due_at = ? WHERE row_id = ?"
+    KeptSql.execute(conn, sql, [Atom.to_string(reason), tries, optional_stamp(due_at), id])
+  end
+
+  defp settle_wait(conn, %{row_id: id, action: {:stop, _why}}), do: delete_wait(conn, id)
+
+  defp end_refused(_conn, _placing, nil), do: :ok
+  defp end_refused(conn, placing, _refused), do: each(placing, &delete_wait(conn, &1.row_id))
+
+  defp waiting_summary(applied, refused, placing, rest, superseded) do
+    placed = if applied, do: Enum.map(placing, & &1.row_id), else: []
+    refused_ids = if refused, do: Enum.map(placing, & &1.row_id), else: []
+
+    %{
+      applied: applied,
+      changed?: match?(%{changed?: true}, applied),
+      refused: refused,
+      placed: placed,
+      waiting: for(%{action: {:wait, _r, _t, _due}, row_id: id} <- rest, do: id),
+      stopped: refused_ids ++ for(%{action: {:stop, _w}, row_id: id} <- rest, do: id),
+      superseded: superseded
+    }
+  end
+
+  defp decode_wait([
+         row_id,
+         trip_id,
+         owner_id,
+         agent_id,
+         words,
+         reason,
+         since,
+         tries,
+         outside,
+         due_at
+       ]) do
+    %{
+      row_id: row_id,
+      trip_id: trip_id,
+      owner_id: owner_id,
+      agent_id: agent_id,
+      words: words,
+      reason: wait_reason(reason),
+      since: parse_stamp(since),
+      tries: tries,
+      outside: outside == 1,
+      due_at: optional_parse(due_at)
+    }
+  end
+
+  defp wait_reason("computer_away"), do: :computer_away
+  defp wait_reason("computer_timed_out"), do: :computer_timed_out
+  defp wait_reason("computer_busy"), do: :computer_busy
+  defp wait_reason("rate_limited"), do: :rate_limited
+  defp wait_reason("deadline"), do: :deadline
 
   # Rows of `trip_id` removed more than the retention ago, deleted with the
   # edit that touches their trip: no timer ever purges them.

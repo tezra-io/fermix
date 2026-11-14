@@ -96,7 +96,10 @@ defmodule FermixOpik.Reporter do
     [:fermix, :checklist, :read],
     [:fermix, :checklist, :edit],
     [:fermix, :trip, :read],
-    [:fermix, :trip, :edit]
+    [:fermix, :trip, :edit],
+    [:fermix, :trip_place, :run_start],
+    [:fermix, :trip_place, :run_complete],
+    [:fermix, :trip_place, :run_error]
   ]
 
   @handler_id "fermix-opik-reporter"

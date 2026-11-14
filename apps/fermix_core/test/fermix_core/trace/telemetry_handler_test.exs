@@ -507,6 +507,32 @@ defmodule FermixCore.Trace.TelemetryHandlerTest do
       2_500
     )
 
+    # M89 D13 B: the trip placer's run bookends route the same way.
+    run = %{session_id: "trip_place:0123456789abcdef", trigger: :computer}
+    :ok = TripTelemetry.emit_place_start(run, %{waiting: 2, expired: 0})
+
+    :ok =
+      TripTelemetry.emit_place_complete(
+        run,
+        %{
+          backend: "computer",
+          skipped: nil,
+          stop_reason: nil,
+          stop_code: nil,
+          placed: 2,
+          waiting: 0,
+          stopped_waiting: 0,
+          expired: 0,
+          superseded: 0,
+          lookups: 2,
+          trips: 1,
+          failed: 0
+        },
+        9_000
+      )
+
+    :ok = TripTelemetry.emit_place_error(run, "crashed", "RuntimeError", 40)
+
     sync(server)
 
     rows =
@@ -517,12 +543,21 @@ defmodule FermixCore.Trace.TelemetryHandlerTest do
     assert Enum.map(rows, & &1["event"]) ==
              Enum.map(TripTelemetry.trace_event_definitions(), & &1.trace_event)
 
-    [read, edit] = rows
+    [read, edit, started, completed, failed] = rows
     assert read["agent"] == "trips" and read["scope"] == "days" and read["trips"] == 1
     assert read["session_id"] == "main-trips-1"
     assert edit["ops"] == 3 and edit["placed"] == 1 and edit["backend"] == "apple_maps"
     assert edit["outcome"] == "refused" and edit["error_code"] == "title_taken"
     assert edit["stop_reason"] == "deadline" and Map.has_key?(edit, "stop_code")
+
+    for row <- [started, completed, failed] do
+      assert row["agent"] == "trips" and row["session_id"] == "trip_place:0123456789abcdef"
+      assert row["trigger"] == "computer"
+    end
+
+    assert started["waiting"] == 2
+    assert completed["placed"] == 2 and completed["backend"] == "computer"
+    assert failed["error_code"] == "crashed" and failed["reason"] == "RuntimeError"
   end
 
   test "an attachment ingest becomes an attachment_ingest agent_event row, never its bytes", %{

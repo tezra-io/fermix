@@ -1443,7 +1443,8 @@ lookups did: `lookups` (the lookups that reached the place search, so not one
 the Brave pacer refused or a stopped call left unsent), `placed`, `offered`,
 `not_found`, `not_looked_up` (all 0 for a device's edit, which carries a whole
 place). Metadata on both:
-`component: "trips"`, `made_via` (`chat | job | mac | phone`), `outcome` (`ok |
+`component: "trips"`, `made_via` (`chat | job | mac | phone`, and `trip_place`
+for the trip placer's write below), `outcome` (`ok |
 refused | failed`), `error_code` (the refusal's tag,
 `Trips.Registry.error_tag/1`, else nil), and the caller's `session_id` when it
 has one; `scope` on a read (`index | trip | days | outline | share`); `backend`
@@ -1473,6 +1474,61 @@ places each under its turn's or job run's trace as a point span
 (`FermixOpik.Mapper.trip_span/4`: the counts, `scope`, `made_via`, `outcome`,
 `backend`, `rate_limited`, `stop_reason` and `stop_code`, flagged errored with
 the tag when the outcome is `refused` or `failed`).
+
+### The trip placer (a run kind with no model call)
+
+A stop a `trip_edit` call could not look up for a reason that heals by
+waiting (no Mac that looks places up online, that Mac timed out or busy, the
+place search rate limited, the call's deadline) keeps its words in memory.db,
+and the trip placer (`Trips.Placer`) looks it up again later: when a Mac that
+offers places connects, at the reset Brave's pacer last read, and at boot.
+Each of its runs (`Trips.Placer.Run`) is a run kind of its own, with no model
+call and no agent loop: `Trips.Placer` mints its `session_id =
+"trip_place:<16 hex>"` (`Trips.Telemetry.place_session_id/0`) before it starts
+the run's task, with **no** `parent_session` (no turn asked for it: always a
+root), and the bookends go through `FermixCore.Trips.Telemetry`, never
+hand-rolled:
+
+- `[:fermix, :trip_place, :run_start]`: measurements `waiting` (the stops
+  waiting when it began) and `expired` (those the 7-day cap ended then);
+  metadata `trigger` (`boot | computer | timer`).
+- `[:fermix, :trip_place, :run_complete]`: measurements `duration_us`,
+  `placed`, `waiting` (still waiting when it ended), `stopped_waiting` (ended
+  unplaced, for any reason: a result by another name, none found, a refusal
+  that cannot heal, the 3-try cap, the 7-day cap), `expired` (of those, the
+  two caps'), `superseded` (a newer change ended them first, so the run wrote
+  nothing for them), `lookups`, `trips` (whose rev moved) and `failed` (a trip
+  it could not read or write); metadata `trigger`, `backend`, `skipped`
+  (`no_mac | brave_spent | no_backend | computers_unread` when the place
+  search could not run, so it looked nothing up and spent no try; else nil),
+  `stop_reason` and `stop_code` as an edit's.
+- `[:fermix, :trip_place, :run_error]`: measurements `duration_us` (the run's
+  own, from when it began); metadata `trigger`, `error_code` and `reason`.
+  The run emits it when it could not read the waits at all (`error_code`,
+  `Trips.Registry.error_tag/1` of the store's refusal; `reason` nil). The
+  placer emits it, under the session it named for the run, when the run's
+  task ends without answering: `error_code: "crashed"` with `reason`, the
+  kind of what ended it (an exception's module such as `RuntimeError`, an
+  exit's word), never its words; or `error_code: "overran"` (`reason:
+  "killed"`) when the placer killed it at its 120 s bound. So every run that
+  emitted `run_start` is closed by exactly one closer: `run_complete`, or
+  `run_error` from the run or from the placer.
+
+A run with nothing due and nothing the age cap ended emits nothing. All three carry `component:
+"trips"` and no stop's words, place or coordinate. Each trip the run writes is
+one ordinary `[:fermix, :trip, :edit]` under the run's `session_id`, with
+`made_via: "trip_place"` and the lookups' counts and stop for that trip. Its
+lookups go through `PlaceSearch.lookup/3` as a call's do (no `place_search`
+row), and on a Mac of the home each is one `places` invocation whose turn is
+the run (`origin: background`, the run's `session_id`).
+`Trace.TelemetryHandler` records the bookends as `trip_place_run_start`,
+`trip_place_run_complete` and `trip_place_run_error` `agent_event` rows keyed
+on `component`. The Opik exporter subscribes to all three: `run_start` opens
+the root (kind `:trip_place`, also inferred from the id prefix, so a closer
+that arrives without its opener still roots as one), each trip edit nests
+under it as its `trip_edit` span, and the closer ends it with the counts above
+as the trace's metadata allowlist (`reason` among them), errored with
+`error_code` on `run_error`.
 
 ## Computer-history summarizer (a headless run with no bookends)
 

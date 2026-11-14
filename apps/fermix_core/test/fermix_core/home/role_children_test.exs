@@ -23,7 +23,8 @@ defmodule FermixCore.Home.RoleChildrenTest do
     FermixCore.Plugins.Dist.Reinstall,
     FermixCore.Companion.OriginBackfill,
     FermixCore.Memory.Repo,
-    FermixCore.Prompt.TemplateReconciler
+    FermixCore.Prompt.TemplateReconciler,
+    FermixCore.Trips.Placer
   ]
 
   @kept_here [

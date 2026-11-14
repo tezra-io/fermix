@@ -88,7 +88,12 @@ defmodule FermixCore.Home.ReadableTest do
     # 64 (M89 D10, where a trip or a day is) adds a nullable `near` to both trip
     # tables: an engine at this format selects and writes them by column name
     # and never names it, so it reads past it, and a row it makes has none.
-    @migrations Enum.to_list(1..39) ++ [41, 42, 43] ++ Enum.to_list(45..64)
+    # 65 (M89 D13 B, the place words a stop waits on) adds one table an engine at
+    # this format never reads; its rows go with their trip row by cascade. An
+    # engine at this format that edits a waiting stop's place does not clear its
+    # wait, so a newer engine's placer may later place it: an edge between two
+    # engines on one home, not a home either cannot read, so the format stays.
+    @migrations Enum.to_list(1..39) ++ [41, 42, 43] ++ Enum.to_list(45..65)
     @manifest_keys ~w(created_at engine_version files format home_format home_root host links
                       primary_epoch)
     @entry_keys ~w(bytes mode path sha256)

@@ -127,6 +127,28 @@ defmodule FermixCore.Trips.RenderTest do
                 """}
     end
 
+    # M89 D13 B: a stop whose place words wait to be looked up says so on its
+    # line, so a later turn can tell; the shared form says nothing of it.
+    test "a stop that waits for its place is marked on its line; the shared form is not" do
+      rows = rows()
+      waiting = MapSet.new(for(%{n: n, id: id} <- rows, n in [2, 9], do: id))
+
+      assert {:whole, text} = Render.read(trip(), rows, :all, :text, waiting)
+      lines = String.split(text, "\n")
+      assert "- [2] 16:20 Arrive by train (place waiting)" in lines
+
+      assert (~S|- [9] 10:00 Torre de Vale Escuro · 1 h 30 · at "Torre de Vale Escuro, Rua da | <>
+                ~S|Torre 4, Varonne" (place waiting)|) in lines
+
+      assert "- [10] 11:30 Coffee somewhere" in lines
+
+      assert Render.read(trip(), rows, :all, :text, MapSet.new()) ==
+               Render.read(trip(), rows, :all, :text)
+
+      assert {:whole, shared} = Render.read(trip(), rows, :all, :share, waiting)
+      refute shared =~ "waiting"
+    end
+
     test "a run of days is its days alone, under the trip's own header" do
       assert {:whole, text} = Render.read(trip(), rows(), {2, 2}, :text)
       assert text =~ "· 2 days, 5 stops\n"
@@ -411,7 +433,7 @@ defmodule FermixCore.Trips.RenderTest do
                Not placed, nearest by another name:
                [11] "Miradouro do Corvo": "Corvo Lookout, Largo do Corvo, 4050 Varonne" · https://maps.apple.com/place?place-id=I5W7P
                No place found: [10] "Coffee somewhere" (place unchanged).
-               Not looked up, the place search is rate limited: [2] "Arrive by train", [15] "Dinner at Pedra Negra".
+               Not looked up yet, the place search is rate limited; these stops are saved and will be placed if it allows more searches within a week: [2] "Arrive by train", [15] "Dinner at Pedra Negra".
                Dates moved: [15] "Dinner at Pedra Negra" (fixed) is now Sat 10 May 2031.
                #{@report}\
                """
@@ -452,8 +474,9 @@ defmodule FermixCore.Trips.RenderTest do
       assert "Placed with Apple Maps on studio Mac: [#{tower.n}], [#{lookout.n}]." in lines
       refute Enum.any?(lines, &(&1 =~ "[#{coffee.n}]," or &1 =~ "x:"))
 
-      assert ("Not looked up, no Mac that looks places up in Apple Maps is online, so these " <>
-                ~s(stops are saved without a place; ask again once it is online: [2] "Arrive by train".)) in lines
+      assert ("Not looked up yet, no Mac that looks places up in Apple Maps is online; these " <>
+                "stops are saved and will be placed if one comes online within a week: " <>
+                ~s([2] "Arrive by train".)) in lines
 
       two = %{2 => "Apple Maps on studio Mac", 3 => "Apple Maps on attic Mac"}
       answer = Render.answer(applied(rows), placements, two)

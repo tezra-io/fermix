@@ -892,7 +892,10 @@ scenarios:
              tool evidence shows refused.
 
   # The same away Mac when a trip is made: the trip lands with its stops
-  # unplaced under the away heading, and is removed. The create turn gates that
+  # unplaced under the away heading, which says they are kept and will be
+  # placed if a Mac comes online within a week (D13 stage 2: the trip placer places them when
+  # one connects, which no eval can show, since no session ever exists here),
+  # and is removed. The create turn gates that
   # the stops were given places (`place =>` in the call), so the lookup ran and
   # met the away Mac, that every URL in the reply is the tools', and that no
   # Apple Maps place link appears. It writes the eval home's memory.db, so it
@@ -927,9 +930,11 @@ scenarios:
         rubric: |
           1. The first reply confirms a trip on Saturday 19 June 2027 with the
              castle at 10:00 and lunch at the harbour market at 13:00.
-          2. The first reply says the stops were not placed on a map because
-             no Mac that looks places up in Apple Maps is online, and does not
-             call any stop placed or give a stop an address or link.
+          2. The first reply says the stops are not placed on a map yet because
+             no Mac that looks places up in Apple Maps is online, and that they
+             are saved and will be placed if one comes online (within a week),
+             without the owner asking again; it does not call any stop placed
+             or give a stop an address or link.
           3. The second reply confirms the trip was removed.
       - id: a_vell_sunday_trip
         turns:
@@ -952,7 +957,9 @@ scenarios:
         rubric: |
           1. The first reply confirms a trip on Sunday 20 June 2027 with the old
              mill at 11:00 and the harbour walk at 15:00.
-          2. The first reply says the stops were not placed on a map because
-             no Mac that looks places up in Apple Maps is online, and does not
-             call any stop placed or give a stop an address or link.
+          2. The first reply says the stops are not placed on a map yet because
+             no Mac that looks places up in Apple Maps is online, and that they
+             are saved and will be placed if one comes online (within a week),
+             without the owner asking again; it does not call any stop placed
+             or give a stop an address or link.
           3. The second reply confirms the trip was removed.

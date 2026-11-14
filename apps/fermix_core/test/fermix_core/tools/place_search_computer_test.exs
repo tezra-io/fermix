@@ -21,6 +21,7 @@ defmodule FermixCore.Tools.PlaceSearch.ComputerTest do
   alias FermixCore.Tools.PlaceSearch.AppleMaps
   alias FermixCore.Tools.PlaceSearch.Computer
   alias FermixCore.Trips.Lookup
+  alias FermixCore.Trips.Placer.Run
   alias FermixCore.Trips.Registry
   alias FermixTestSupport.TelemetryCapture
 
@@ -454,8 +455,8 @@ defmodule FermixCore.Tools.PlaceSearch.ComputerTest do
       refute_received {:opened, _device, _header, _payload, _part}
 
       assert Lookup.heading(:computer_away) ==
-               "Not looked up, no Mac that looks places up in Apple Maps is online, so these " <>
-                 "stops are saved without a place; ask again once it is online"
+               "Not looked up yet, no Mac that looks places up in Apple Maps is online; these " <>
+                 "stops are saved and will be placed if one comes online within a week"
     end
 
     test "a Mac that does not answer the first lookup in time stops the rest", ctx do
@@ -604,7 +605,7 @@ defmodule FermixCore.Tools.PlaceSearch.ComputerTest do
 
     defp edit(ctx, context, ops, holder) do
       opts = [repo: ctx.repo, now: ~U[2031-06-02 14:00:00Z], reply_blocks: holder]
-      opts = Keyword.put(opts, :notifier, fn _change -> :ok end)
+      opts = Keyword.merge(opts, notifier: fn _change -> :ok end, placer: fn -> :ok end)
       Registry.edit(%{"trip" => "Varonne", "ops" => ops}, context, opts)
     end
 
@@ -643,8 +644,9 @@ defmodule FermixCore.Tools.PlaceSearch.ComputerTest do
       assert {:ok, %{text: text}} = edit(ctx, context, ops(), holder())
 
       assert text =~
-               "Not looked up, no Mac that looks places up in Apple Maps is online, so these " <>
-                 ~s(stops are saved without a place; ask again once it is online: [3] "Lunch".)
+               "Not looked up yet, no Mac that looks places up in Apple Maps is online; these " <>
+                 "stops are saved and will be placed if one comes online within a week: " <>
+                 ~s([3] "Lunch".)
 
       refute text =~ "Placed with"
       refute_received {:opened, _device, _header, _payload, _part}
@@ -653,6 +655,47 @@ defmodule FermixCore.Tools.PlaceSearch.ComputerTest do
                       metadata}
 
       assert %{backend: "computer", stop_reason: :computer_away, stop_code: nil} = metadata
+    end
+
+    # M89 D13 B: a stop saved while the Mac was away waits, and the trip
+    # placer places it once a Mac that offers places is online, through the
+    # home's own backend and the Mac's own search: one write, the devices'
+    # push, and the stop's place from the Mac's answer.
+    test "a stop that waited for the Mac is placed by the trip placer once the Mac is online",
+         ctx do
+      away = context(ctx, [studio(false)], %{chat_type: "private", outside_sources: MapSet.new()})
+      assert {:ok, _answer} = edit(ctx, away, ops(), holder())
+      test = self()
+
+      # What the run reads of the home: its computers, how to call them, and the build.
+      home = Map.take(context(ctx, [studio(true)]), [:host, :computers_opts, :computer_call_opts])
+
+      run_opts = [
+        repo: ctx.repo,
+        now: fn -> ~U[2031-06-02 15:00:00Z] end,
+        context: home,
+        notifier: fn changes -> send(test, {:notified, changes}) && :ok end
+      ]
+
+      task = async(fn -> Run.run(:computer, run_opts) end)
+
+      assert_receive {:opened, @studio, %{"id" => id} = header, payload, nil}
+      assert %{"origin" => "background", "turn" => %{"session_id" => "trip_place:" <> _}} = header
+
+      assert Jason.decode!(payload) == %{
+               "query" => "Prado",
+               "count" => 5,
+               "near" => "Varonne, Portugal"
+             }
+
+      :ok = places_answer(ctx, id, [@prado_raw])
+      assert %{next_ms: nil} = Task.await(task)
+      assert_receive {:notified, %{trips: [%{rev: 2}]}}
+
+      assert {:ok, %{rows: rows}} =
+               Repo.trips_call({:read_trip, "default", "main", "Varonne"}, server: ctx.repo)
+
+      assert %{place: %{"name" => "Prado"}} = Enum.find(rows, &(&1.n == 3))
     end
   end
 

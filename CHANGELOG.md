@@ -150,8 +150,16 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   places one it has nowhere to search near (unsure of a town's country, it
   makes the trip anyway and asks you); it says which it placed, which
   it found under another name (with the link, so you can pick it) and which it
-  could not find. Ask what Thursday holds, move the museum to Friday, or have
-  the plan sent to someone. Move a booked dinner by name and Fermix moves it,
+  could not find. A stop it could not look up yet, because the Mac that looks
+  places up for your server was away, slow or busy, the place search was rate
+  limited or the lookups ran out of time, is saved with its place's name and
+  placed on its own once it can be (when that Mac is back, when the rate
+  limit resets), with no need to ask again and nothing said in chat; an open
+  trip shows it land. It looks a stop up again at most three times, further
+  apart each time, and gives up after a week; anything you change about that
+  stop's place or words first wins. Ask what Thursday
+  holds, move the museum to Friday, or have the plan sent to someone. Move a
+  booked dinner by name and Fermix moves it,
   keeps it marked booked and reminds you the booking itself is yours to
   change; rearranging a day leaves a booked stop where it is. The shared text
   links every place in Apple Maps and leaves your booking notes out. Trips are
@@ -1119,8 +1127,10 @@ will be part of a future release; nothing in this group is in a release yet.
   `[fermix_core.tools.place_search] backend = "brave"` keeps it on Brave. A
   trip's lookups stop when the Mac is away, switched off, refusing or not
   answering, and save the stops without a place, saying which and why; a
-  busy Mac stops nothing. Every trip answer now says what placed the stops
-  its lookups placed ("Placed with Apple Maps on studio Mac: [3]."), and the
+  busy Mac stops nothing. A stop left unplaced because the Mac was away, slow
+  or busy is placed by your server once that Mac is online again. Every trip
+  answer now says what placed the stops its lookups placed ("Placed with
+  Apple Maps on studio Mac: [3]."), and the
   Place search setting shows **Apple Maps on your Mac** as the choice in
   force.
 

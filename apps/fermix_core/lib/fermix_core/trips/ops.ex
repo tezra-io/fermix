@@ -32,7 +32,9 @@ defmodule FermixCore.Trips.Ops do
 
   After outside content every op runs as on any turn (D9): a stop the call
   adds, and one whose words, note or place an `edit` gives, is stamped, and
-  stays so, which a read shows as data (`Trips.Render`).
+  stays so, which a read shows as data (`Trips.Render`). A place given by
+  words then that waited (`Trips.Waiting`) stamps its stop when the trip
+  placer's edit places it (`after_outside`), as if it had landed in the call.
 
   Removal is soft, as a list's: a removed row keeps its `removed_at`, and the
   stops removed with their day keep the day's id (`removed_with`), so a day a
@@ -597,6 +599,11 @@ defmodule FermixCore.Trips.Ops do
       end
     end)
   end
+
+  # The trip placer's edit places words a call gave after outside content
+  # (`Trips.Waiting`): it stamps the stop as that call would have, had the
+  # place landed then.
+  defp stamp(row, %{after_outside: true}, _edit), do: %{row | stamped: true}
 
   # After outside content an edit that gives a stop words, a note or a place
   # stamps it, as an add does; a clear, a time or a length brings no words.
