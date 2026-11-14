@@ -2,8 +2,11 @@
 # changes a list or a trip. A task-engine call (Grok Voice by default, GPT-Live
 # with --voice-engine openai_live) hands each request to a Fermix turn on the
 # `voice` channel, which keeps the owner's lists and trips as a private turn
-# does; nothing is drawn on a call, so the turn is told to say in a sentence
-# what changed and never to read a link aloud.
+# does. Nothing is drawn on a call. A private call's turn is told to say in a
+# sentence what changed and never to read a link aloud; a call in the chat's
+# turn writes the change for the chat and the voice says one short line. Run
+# it on both: a home seeded with `--voice` (calls join the chat, the product
+# default) and one seeded with `--voice --voice-conversation private`.
 #
 # `drive: voice` (bin/evallib/voice.py) streams fixture audio into the call
 # (the clips live in bin/make_voice_fixtures.py). It needs a home seeded for
@@ -56,9 +59,9 @@ scenarios:
             max_tasks: 2
             caption_not_matches: '(?i)https?://|www\.|maps\.apple|place[-_ ]?id|\.com\b'
         rubric: |
-          1. After the first request, the voice says a trip was made for Saturday 19 June
-             2027 in Vell with the castle at 10:00 and lunch at the harbour market at
-             13:00, in a sentence or two.
+          1. After the first request, the voice says in a sentence or two that a trip
+             was made for Saturday 19 June 2027 in Vell; naming the castle at 10:00
+             and lunch at the harbour market at 13:00 is fine.
           2. The voice reads out no link, web address, map address or place id.
           3. After the second request, the voice says the trip was removed.
           Not required: whether the stops were placed on a map.

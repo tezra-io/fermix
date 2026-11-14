@@ -17,8 +17,8 @@ A case is one call (the `voice:` map of the case):
   task frame saying `running` before its gap starts, so "while that runs" and
   "cancel that" are said while the task is in flight, and one with `after:
   task_settled` waits until a task ended since the clip before began, none is in
-  flight and the voice has been quiet a second, so a next request follows the
-  answer to the last. A clip whose `after` never holds is abandoned, with the
+  flight, the speaker has played all it was sent and the voice has been quiet a
+  second, so a next request follows the answer to the last. A clip whose `after` never holds is abandoned, with the
   clips after it, and the call goes on.
 - `quiet_ms` — the call has settled once every clip was said, every task's
   newest revision ended, everything the voice sent has played, and nothing new
@@ -322,6 +322,7 @@ class PlaybackSink:
         self._ids: dict[str, dict] = {}
         self._clock = now_ms
         self._carry = 0.0
+        self.quiet_since = now_ms               # when it last had nothing left to play
 
     def idle(self) -> bool:
         return not self._queue
@@ -348,6 +349,8 @@ class PlaybackSink:
             self._carry = 0.0
             return []
         played = self._play(elapsed * BYTES_PER_MS + self._carry)
+        if not self._queue:
+            self.quiet_since = now_ms
         return [report for pid in played if (report := self._due(pid, now_ms)) is not None]
 
     def stop(self, now_ms: float) -> list[dict]:
@@ -357,6 +360,7 @@ class PlaybackSink:
         cut = list(dict.fromkeys(pid for pid, _left in self._queue))
         self._queue.clear()
         self._carry = 0.0
+        self.quiet_since = now_ms
         for pid in cut:
             entry = self._ids[pid]
             reports.append(self._report(pid, now_ms, drained=False))
@@ -637,6 +641,7 @@ class Connection:
     def __init__(self, path: str, timeout_s: float):
         self._sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         self._sock.settimeout(timeout_s)
+        self._timeout_s = timeout_s             # a send's bound; a read sets its own
         self._buffer = b""
         try:
             self._sock.connect(path)
@@ -646,6 +651,7 @@ class Connection:
 
     def send(self, event: dict) -> None:
         try:
+            self._sock.settimeout(self._timeout_s)
             self._sock.sendall(json.dumps(event).encode("utf-8") + b"\n")
         except OSError as exc:
             raise VoiceError(f"send failed: {exc}") from exc
@@ -710,13 +716,13 @@ class _Mic:
         begun = self._index + (1 if self._offset is not None else 0)
         return [clip.say for clip in self._clips[begun:]]
 
-    def chunk(self, at_ms: float, call: "_Call") -> bytes:
+    def chunk(self, at_ms: float, call: "_Call", speaker: PlaybackSink) -> bytes:
         """The next chunk. `at_ms` is when it is due on the microphone's own
         schedule, not when it is sent, so a clip ends when its audio does: a
         loop that wakes late and catches up cannot send the silence after a
         clip before the clip's recorded end."""
         if self._offset is None and not self.done():
-            self._maybe_start(at_ms, call)
+            self._maybe_start(at_ms, call, speaker)
         if self._offset is None:
             return bytes(CHUNK_BYTES)
         clip = self._clips[self._index]
@@ -728,7 +734,7 @@ class _Mic:
             self._index += 1
         return piece + bytes(CHUNK_BYTES - len(piece))
 
-    def _maybe_start(self, now_ms: float, call: "_Call") -> None:
+    def _maybe_start(self, now_ms: float, call: "_Call", speaker: PlaybackSink) -> None:
         if call.ready_at_ms is None:
             return
         clip = self._clips[self._index]
@@ -741,7 +747,7 @@ class _Mic:
             return
         since = self._since if self._since is not None else call.ready_at_ms
         if self._ready_at is None:
-            held_at = self._condition_held_at(clip, call, now_ms)
+            held_at = self._condition_held_at(clip, call, now_ms, speaker)
             if held_at is None:
                 if now_ms - since > _after_wait_ms(clip):
                     self.abandoned.extend(c.say for c in self._clips[self._index:])
@@ -756,30 +762,35 @@ class _Mic:
         self.played.append({"say": clip.say, "start_ms": round(now_ms, 1),
                             "end_ms": round(now_ms, 1)})
 
-    def _condition_held_at(self, clip: Clip, call: "_Call", now_ms: float) -> float | None:
+    def _condition_held_at(self, clip: Clip, call: "_Call", now_ms: float,
+                           speaker: PlaybackSink) -> float | None:
         """When the clip's `after` first held: `task_running` is a task frame
         saying `running` since the previous clip began; `task_settled` is a task
-        that ended since then, with none in flight and the voice quiet
-        OPENING_QUIET_MS, so its answer was said before the next clip."""
+        that ended since then, with none in flight, the speaker drained and the
+        voice quiet OPENING_QUIET_MS, so its answer was said before the next clip."""
         if clip.after is None:
             return 0.0
         begun = self.played[-1]["start_ms"] if self.played else call.ready_at_ms
         if clip.after == "task_running":
             return next((t for t in call.running_at if t >= begun), None)
-        return _settled_at(call, begun, now_ms)
+        return _settled_at(call, begun, now_ms, speaker)
 
 
 def _after_wait_ms(clip: Clip) -> int:
     return SETTLED_WAIT_MS if clip.after == "task_settled" else AFTER_WAIT_MS
 
 
-def _settled_at(call: "_Call", begun: float, now_ms: float) -> float | None:
+def _settled_at(call: "_Call", begun: float, now_ms: float,
+                speaker: PlaybackSink) -> float | None:
     """When the call settled after a task that ended since `begun`, or None
-    while one is in flight, the voice speaks, or it has not been quiet long."""
+    while one is in flight, the voice speaks, the speaker still has audio to
+    play, or it has not been quiet long. A voice's audio can arrive faster than
+    it plays, with no `speaking` state around it, so the frames' last arrival
+    is not when the owner stopped hearing it."""
     ended = next((t for t in call.ended_at if t >= begun), None)
-    if ended is None or call.in_flight() or call.state == "speaking":
+    if ended is None or call.in_flight() or call.state == "speaking" or not speaker.idle():
         return None
-    quiet_from = max(ended, call.voice_last_ms)
+    quiet_from = max(ended, call.voice_last_ms, speaker.quiet_since)
     return quiet_from + OPENING_QUIET_MS if now_ms >= quiet_from + OPENING_QUIET_MS else None
 
 
@@ -934,7 +945,7 @@ def _converse(conn: Connection, plan: Plan, call: _Call, mic: _Mic, sink: Playba
         for _ in range(_MAX_CATCH_UP):
             if now < next_chunk:
                 break
-            pcm = mic.chunk((next_chunk - origin) * 1000.0, call)
+            pcm = mic.chunk((next_chunk - origin) * 1000.0, call, sink)
             conn.send({"type": "audio_chunk", "audio": base64.b64encode(pcm).decode("ascii")})
             next_chunk += CHUNK_MS / 1000.0
         _send_reports(conn, sink.tick(_ms(origin)), evidence)

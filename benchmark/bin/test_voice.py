@@ -681,17 +681,19 @@ class FakeVoiceDaemon:
     `goodbye` mode it answers the first utterance with a goodbye and, once that
     has drained, ends the call itself (`call_ended`) and keeps the connection."""
 
-    def __init__(self, mode="answer", complete_after=8, greet=False):
+    def __init__(self, mode="answer", complete_after=8, greet=False, answer_ms=200):
         self.home = tempfile.mkdtemp(prefix="vx")
         self.path = voice.socket_path(self.home)
         self.mode = mode
         self.complete_after = complete_after
         self.greet = greet
+        self.answer_ms = answer_ms
         self.received: list[dict] = []
         self.utterances: list[int] = []         # chunk index each utterance began at
         self.running_sent_at: int | None = None
         self.settled_sent_at: int | None = None
         self.greeted_at: int | None = None      # chunks heard when the greeting had played
+        self.answered_at: int | None = None     # chunks heard when the answer had played
         self.client_closed = False
         self.server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         self.server.bind(self.path)
@@ -794,6 +796,8 @@ class FakeVoiceDaemon:
         return None
 
     def _drained(self, pid):
+        if pid == "p3" and self.answered_at is None:
+            self.answered_at = self.chunks
         if pid == "p0" and self.greeted_at is None:
             self.greeted_at = self.chunks
             self.send({"type": "caption", "speaker": "assistant", "delta": "Hi there."})
@@ -826,7 +830,7 @@ class FakeVoiceDaemon:
     def _complete(self):
         revision = 2 if self.mode == "correct" else 1
         self.task("completed", revision=revision)
-        self.audio("p3", 200)
+        self.audio("p3", self.answer_ms)
         self.send({"type": "caption", "speaker": "assistant", "delta": " Shelf Kestrel."})
 
 
@@ -1044,6 +1048,20 @@ def test_a_clip_after_task_settled_waits_for_the_answer_and_the_voice(daemon):
     assert evidence.abandoned == []
 
 
+def test_a_clip_after_task_settled_waits_until_the_answer_has_played(daemon):
+    # The answer's audio arrives at once and plays for 1.5 s, with no `speaking`
+    # state, as Grok's can: the second clip waits until the speaker has played
+    # it, not only until frames stop arriving.
+    fake = daemon(mode="answer", complete_after=4, answer_ms=1_500)
+
+    evidence = voice.drive(fake.home, _plan("task_settled"), timeout_s=30)
+
+    assert evidence.ok, evidence.error
+    assert len(fake.utterances) == 2, fake.utterances
+    assert fake.answered_at is not None and fake.utterances[1] > fake.answered_at
+    assert fake.sent("playback_progress")[-1]["drained"] is True
+
+
 def test_a_microphone_running_late_still_ends_each_clip_when_its_audio_ends(daemon, monkeypatch):
     # The loop wakes 150 ms late before the last clip's final chunk, as on a
     # busy runner, then catches up; the silence that ends the clip still goes
@@ -1051,8 +1069,8 @@ def test_a_microphone_running_late_still_ends_each_clip_when_its_audio_ends(daem
     real_chunk = voice._Mic.chunk
     stalled = []
 
-    def chunk(mic, at_ms, call):
-        pcm = real_chunk(mic, at_ms, call)
+    def chunk(mic, at_ms, call, speaker):
+        pcm = real_chunk(mic, at_ms, call, speaker)
         last = len(mic._clips) - 1
         if (not stalled and mic._index == last and mic._offset is not None
                 and len(mic._clips[last].pcm) - mic._offset <= voice.CHUNK_BYTES):
@@ -1085,6 +1103,25 @@ def test_a_refused_call_start_is_evidence_naming_the_reason(daemon):
 
     assert not evidence.ok
     assert "call_in_progress" in evidence.error
+
+
+def test_a_send_after_a_short_read_keeps_the_connections_own_bound():
+    # A read near its deadline leaves the socket a timeout of a millisecond or
+    # so; a send right after must not inherit it, or a busy runner reads a
+    # slow peer as `send failed: timed out`.
+    home = tempfile.mkdtemp(prefix="vx")
+    server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        server.bind(voice.socket_path(home))
+        server.listen(1)
+        conn = voice.Connection(voice.socket_path(home), timeout_s=5.0)
+        assert conn.recv(time.monotonic() + 0.001) is None
+        conn.send({"type": "ping"})
+        assert conn._sock.gettimeout() == 5.0
+        conn.close()
+    finally:
+        server.close()
+        shutil.rmtree(home, ignore_errors=True)
 
 
 def test_a_daemon_that_closes_mid_call_is_evidence_not_an_exception(daemon):

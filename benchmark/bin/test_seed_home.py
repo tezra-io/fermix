@@ -435,6 +435,27 @@ def test_a_voice_engine_needs_voice(tmp_path, monkeypatch):
         _seed_main(monkeypatch, tmp_path / "x-eval", "--voice", "--voice-engine", "grok")
 
 
+def test_voice_calls_can_be_private_and_stay_the_chat_by_default(tmp_path, monkeypatch, capsys):
+    # The product default (calls join the chat) writes nothing; a private-call
+    # home is the one setting, so a suite can reach what a private call says.
+    doc = _seed_main(monkeypatch, tmp_path / "chat-eval", "--voice")
+    assert "conversation" not in doc["fermix_core"]["realtime"]
+
+    doc = _seed_main(monkeypatch, tmp_path / "private-eval", "--voice",
+                     "--voice-conversation", "private")
+    assert doc["fermix_core"]["realtime"]["conversation"] == "private"
+    assert "voice calls: private" in capsys.readouterr().out
+
+
+def test_a_voice_conversation_needs_voice_and_a_known_mode(tmp_path, monkeypatch):
+    with pytest.raises(SystemExit):
+        _seed_main(monkeypatch, tmp_path / "x-eval", "--voice-conversation", "private")
+    with pytest.raises(SystemExit):
+        _seed_main(monkeypatch, tmp_path / "x-eval", "--voice", "--voice-conversation", "group")
+    with pytest.raises(ValueError, match="voice conversation must be one of"):
+        seed.voice_lines("xai_realtime", "group")
+
+
 def test_without_voice_the_eval_home_has_no_realtime_section():
     cfg = seed.render_config(
         "/tmp/x-eval", "openai", {"default_model": "gpt-5.6-luna"}, None)

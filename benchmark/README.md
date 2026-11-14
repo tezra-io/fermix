@@ -1084,6 +1084,11 @@ FERMIX_EVAL_HOME="$VOICE_HOME" OPIK_PROJECT=fermix-voice-eval uv run bin/run_eva
   --confirm-isolated-env
 ```
 
+`suites/voice_lists_and_trips.yaml` runs once on a home whose calls join the chat
+(the default above) and once on one whose calls are private, where each task's
+answer is only said: stop the daemon, reseed with `--voice --voice-conversation
+private`, restart it and run the suite again.
+
 `--judge` needs the judge's credential as in §1 (`ANTHROPIC_API_KEY`, else an
 `ant auth login` profile, for the configured `anthropic` judge). Before a run, the
 runner checks the home is a disposable

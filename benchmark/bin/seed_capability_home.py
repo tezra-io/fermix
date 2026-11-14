@@ -66,7 +66,10 @@ for every home (`harness_lines`); it and both folders are machine.toml keys.
 voice_greeting_goodbye.yaml): `[fermix_core.realtime]` enabled with one task
 engine and its one model. `--voice-engine` picks it: `xai_realtime` (Grok Voice,
 `grok-voice-3.0`, the default) or `openai_live` (GPT-Live, `gpt-live-1`), so a
-suite that covers both engines runs once per engine. The voice key is the
+suite that covers both engines runs once per engine. `--voice-conversation
+private` keeps each call apart from the chat, as **Voice calls join the chat:
+No** does, so a suite reaches what a private call's tasks say; the default is
+the chat, which writes nothing. The voice key is the
 engine's provider api_key slot, filled at daemon boot from `XAI_API_KEY` or
 `OPENAI_API_KEY` (config/runtime.exs) and never written here; the realtime
 socket starts only in a daemon run with realtime on (`mix fermix.dev`, not
@@ -217,6 +220,9 @@ VOICE_ENGINES = {
     "openai_live": ("gpt-live-1", "OPENAI_API_KEY"),
 }
 DEFAULT_VOICE_ENGINE = "xai_realtime"
+# Where a task engine's call runs its tasks: `chat`, the product default,
+# writes nothing; `private` keeps each call apart, its answers only said.
+VOICE_CONVERSATIONS = ("chat", "private")
 # A spend bound for a disposable home: a voice case's call lasts a few minutes
 # at most, and the daemon ends one that outlives this whatever its client does.
 VOICE_MAX_SESSION_MINUTES = 5
@@ -381,7 +387,7 @@ def dev_provider(dev: dict, pid: str) -> tuple[str, dict, str | None]:
 def render_config(
     home: str, pid: str, blk: dict, profile: str | None,
     explicit: bool = False, voice: str | None = None, cues: dict | None = None,
-    computers: bool = False,
+    computers: bool = False, voice_conversation: str = "chat",
 ) -> str:
     uses_key = "api_key" in blk
     if explicit:
@@ -480,7 +486,7 @@ def render_config(
     lines += ["[fermix_core.personalization]", 'user_name = "Eval Operator"',
               'timezone = "America/New_York"', 'communication_style = "concise"', ""]
     if voice:
-        lines += voice_lines(voice)
+        lines += voice_lines(voice, voice_conversation)
     if cues:
         lines += cue_lines(home, cues)
     # With --computers: the home serves Always On, which the `## Computers`
@@ -818,22 +824,27 @@ def clear_computer_fixtures(home: str) -> None:
             os.remove(safe_rm.check(path, home, min_below=1))
 
 
-def voice_lines(engine: str) -> list[str]:
+def voice_lines(engine: str, conversation: str = "chat") -> list[str]:
     """Voice on with one task engine, for the `drive: voice` suites. Turning
     voice on is the one human decision a voice case needs, on either engine:
     neither has a consent of its own (`screen_share` is read only by the
     Realtime engine, `camera_share` only by a phone's call). The call's
-    conversation stays the product default (the chat), so the cases see what an
-    owner's call does. No other gate is granted: computer history stays off
-    (above), so nothing it guards can reach the voice provider."""
+    conversation is the product default (the chat), so the cases see what an
+    owner's call does, unless `conversation` is `private`. No other gate is
+    granted: computer history stays off (above), so nothing it guards can reach
+    the voice provider."""
     if engine not in VOICE_ENGINES:
         raise ValueError(f"voice engine must be one of {sorted(VOICE_ENGINES)}, got {engine!r}")
+    if conversation not in VOICE_CONVERSATIONS:
+        raise ValueError(f"voice conversation must be one of {list(VOICE_CONVERSATIONS)}, "
+                         f"got {conversation!r}")
     model, key_env = VOICE_ENGINES[engine]
+    private = ['conversation = "private"'] if conversation == "private" else []
     return [f"# Voice for drive: voice ({engine}). The key is {key_env} on the daemon",
             "# process, read at boot; the socket needs a daemon run with realtime on.",
             "[fermix_core.realtime]", "enabled = true", f'engine = "{engine}"',
             f'model = "{model}"', f"max_session_minutes = {VOICE_MAX_SESSION_MINUTES}",
-            ""]
+            *private, ""]
 
 
 _TABLE_HEADER_RE = re.compile(r"^\s*\[\[?\s*([^\[\]]+?)\s*\]\]?\s*$")
@@ -1093,6 +1104,10 @@ def parse_args() -> argparse.Namespace:
                         help=f"with --voice: the task engine (default {DEFAULT_VOICE_ENGINE}; "
                              + ", ".join(f"{engine} needs {key}" for engine, (_model, key)
                                          in sorted(VOICE_ENGINES.items())) + ")")
+    parser.add_argument("--voice-conversation", dest="voice_conversation",
+                        choices=VOICE_CONVERSATIONS,
+                        help="with --voice: where a call's tasks run (default chat, the "
+                             "product default; private keeps each call apart)")
     parser.add_argument("--cues", action="store_true",
                         help="turn cues on for the cue suites (door, sources, default filter "
                              "model; seed_cues.exs then makes the watchers); off by default")
@@ -1151,6 +1166,9 @@ def main() -> None:
         die("--cue-mandates and --cue-filter-model need --cues")
     if args.voice_engine and not args.voice:
         die("--voice-engine needs --voice")
+    if args.voice_conversation and not args.voice:
+        die("--voice-conversation needs --voice")
+    voice_conversation = args.voice_conversation or "chat"
     voice_engine = (args.voice_engine or DEFAULT_VOICE_ENGINE) if args.voice else None
     allowed_roots = tuple(
         os.path.abspath(os.path.expanduser(p)) for p in args.allow_roots)
@@ -1192,7 +1210,8 @@ def main() -> None:
         clear_signed_out_claude(home)
     fixture_port = write_fixture_manifest(home, cues["door_port"] if cues else None)
     config = render_config(home, pid, blk, profile, explicit=bool(args.provider),
-                           voice=voice_engine, cues=cues, computers=args.computers)
+                           voice=voice_engine, cues=cues, computers=args.computers,
+                           voice_conversation=voice_conversation)
     if args.extra_config:
         config += read_extra_config(config, args.extra_config)
     with open(os.path.join(home, "config.toml"), "w", encoding="utf-8") as fh:
@@ -1218,6 +1237,8 @@ def main() -> None:
         model, key_env = VOICE_ENGINES[voice_engine]
         print(f"voice: {voice_engine} ({model}) on; {key_env} must be set on the daemon "
               "process, started with realtime on (mix fermix.dev, not --no-realtime)")
+        if voice_conversation == "private":
+            print("voice calls: private (each call apart from the chat, its answers only said)")
     if args.computers:
         names = " and ".join(c["name"] for c in COMPUTERS)
         print(f"computers: {names} linked, both away; Always On on")
