@@ -492,15 +492,24 @@ Every JSON header has these required fields:
   optional fields do not require a version bump.
 
 The first encrypted event in a paired session is `hello` and its `seq` is 1.
-`hello.protocol_v` must equal the envelope `v`, and every later frame of the
-session carries the same `v`. The daemon replies with `hello_ack` containing
-`min_version` and `max_version`, and serves the session at the version its
-hello named. This daemon serves protocols 2 and 3, an **N/N-1** window: the
-current protocol and the previous one. (Protocol 1 shipped in daemons but no
-phone app ever spoke it, so protocol 2's window was protocol 2 alone.) No other
-event is serviced before hello and a second hello is terminal. A client reads
-`hello_ack` against the version it speaks: the window must hold it, whatever
-the daemon's own newest is.
+`hello.protocol_v` must equal the envelope `v`: it is the newest version the
+client speaks. A hello may also name the oldest it speaks, `min_protocol_v`
+(at least 1 and at most `protocol_v`); one that names none speaks
+`protocol_v` alone, as a phone's does. The daemon serves the newest version
+both windows hold: the hello's own when its window holds it, and its own
+newest for a hello newer than its window whose `min_protocol_v` the window
+holds. It replies with `hello_ack` at the version it serves, so the
+`hello_ack`'s `v` says which, and every later frame of the session, both
+ways, carries that `v`. The `hello_ack`'s `min_version` and `max_version` are
+a window holding that version: to a phone the daemon's own, to a desktop the
+versions both engines speak (see *Desktop sessions*). This daemon serves
+protocols 2 and 3, an **N/N-1** window: the current protocol and the previous
+one. (Protocol 1 shipped in daemons but no phone app ever spoke it, so
+protocol 2's window was protocol 2 alone.) No other event is serviced before
+hello and a second hello is terminal. A client reads `hello_ack` at the
+version its `v` names, one the client speaks, and the window it names must
+hold that version, whatever the daemon's own newest is. A hello that names no
+oldest is served exactly as before `min_protocol_v` existed.
 
 **Protocol 3: a row may carry any number of block types.** On protocol 3 a
 `text_done`, a `row` and a history message may carry any number of block
@@ -523,16 +532,22 @@ told exactly what it was before: its push lists name `apns` alone, its
 event it always was (`unsupported`, close `1002`), since a protocol 2 phone
 app reads the push list as `apns` alone.
 
-**An engine speaks the oldest version it serves** when it is the initiator
-(a computer's desktop session to its server, an enrollment, a move; see
-*Desktop sessions*). This wire's `hello` names no oldest version the client
-still speaks, so a newer engine speaking its newest would be refused by a
-server one version behind; nothing a later version brought rides an
-engine's own session, so the oldest is the one both sides serve.
+**An engine's hello names its window** when it is the initiator (a
+computer's desktop session to its server, a move's check of its new server;
+see *Desktop sessions*): it says `hello` at its newest version and names its
+oldest as `min_protocol_v`, then speaks the version the `hello_ack`'s `v`
+chose. A server frame at a version the engine does not speak is refused,
+naming the server's side (`server_too_old` or `server_too_new`), and the
+session closes `1002`. So a computer a version ahead of its server links, as
+does one a version behind, which the server's own window serves; two apart,
+the server refuses the hello naming the side that must update. A session
+that says no `hello` (an enrollment, a move's copy) speaks the oldest version
+its engine serves and is served the version of its first frame.
 
-A `hello` or `pair_request` whose `v` is outside the window is answered with a
-typed refusal, then close `1002` with the text `unsupported mobile protocol
-version`. The refusal is encoded at the daemon's own version, `seq` 1:
+A `pair_request` whose `v` is outside the window, or a `hello` with no
+version in common with it, is answered with a typed refusal, then close
+`1002` with the text `unsupported mobile protocol version`. The refusal is
+encoded at the daemon's own version, `seq` 1:
 
 ```json
 {"v":3,"t":"error","seq":1,"code":"unsupported_protocol_version","message":"…","direction":"client_too_old","client_version":1,"min_version":2,"max_version":3}
@@ -575,7 +590,7 @@ served.
 
 | `t` | Required payload | Rules |
 |---|---|---|
-| `hello` | `device_id`, `app_version`, `last_server_seq`, `protocol_v`; `relay_list_rev?`, `primary_epoch?`, `platform?` | first paired-session event; `relay_list_rev` is the revision of the relay list the phone holds (see *Remote reach*), 16 lowercase hex digits; `primary_epoch` is the highest primary epoch the phone has seen, absent when it has seen none (see *Primary epoch*); `platform` is a desktop's alone, the system its computer runs, and a phone never sends it (see *A computer's own record*) |
+| `hello` | `device_id`, `app_version`, `last_server_seq`, `protocol_v`; `min_protocol_v?`, `relay_list_rev?`, `primary_epoch?`, `platform?` | first paired-session event; `protocol_v` is the newest version the client speaks and `min_protocol_v` the oldest, at most `protocol_v`, absent when it speaks `protocol_v` alone (see *Envelope, ordering, and version negotiation*); `relay_list_rev` is the revision of the relay list the phone holds (see *Remote reach*), 16 lowercase hex digits; `primary_epoch` is the highest primary epoch the phone has seen, absent when it has seen none (see *Primary epoch*); `platform` is a desktop's alone, the system its computer runs, and a phone never sends it (see *A computer's own record*) |
 | `msg` | `client_msg_id`, `profile_id`, `text`, `attach_ids[]` | text or at least one attachment is required |
 | `attach_begin` | `attach_id`, `kind`, `mime`, `size_bytes`, `sha256`; `name?`, `poster_of?` | SHA-256 is announced before transfer so the host can deduplicate. `kind` is one of `image`, `animation`, `video`, `audio`, `voice`, `document`, `file`; the daemon names the kind from the bytes itself and reads `kind` as a hint. `voice` is a recording the owner made in the app: the daemon treats it as the owner's own words, while `audio` (an audio file attached or forwarded) is treated as content someone else could have written. The row's `media_refs` and every media event name a `voice` upload `audio`. A daemon older than `voice` reads it as no hint and handles the recording as an audio file, so a phone sends `voice` without checking the daemon's version. A still sent with `poster_of` set to a video's `attach_id` is that video's poster frame, not an attachment of its own |
 | `attach_chunk` | `attach_id`, `index` + raw bytes | contiguous zero-based indexes; raw bytes ≤60 KiB |
@@ -624,7 +639,7 @@ A client must not upload chunks after `present`.
 
 | `t` | Required payload | Rules |
 |---|---|---|
-| `hello_ack` | `session_id`, `min_version`, `max_version`, `profiles[]`, `candidates[]`, `history_head_seq`, `read_up_to_seq`, `caps{}`; `primary_epoch?`, `push_key?` | completes hello negotiation; `primary_epoch` is the daemon's primary epoch, which this daemon always sends and a daemon older than the epoch leaves out (see *Primary epoch*); `push_key`, protocol 3 only, is the home's Web Push key, present exactly when `caps.push` names `webpush` (see *Web Push*) |
+| `hello_ack` | `session_id`, `min_version`, `max_version`, `profiles[]`, `candidates[]`, `history_head_seq`, `read_up_to_seq`, `caps{}`; `primary_epoch?`, `push_key?` | completes hello negotiation; its `v` is the version the session is served, which `min_version` to `max_version` holds: the daemon's window to a phone, the versions both engines speak to a desktop; `primary_epoch` is the daemon's primary epoch, which this daemon always sends and a daemon older than the epoch leaves out (see *Primary epoch*); `push_key`, protocol 3 only, is the home's Web Push key, present exactly when `caps.push` names `webpush` (see *Web Push*) |
 | `accepted` | `client_msg_id`, `duplicate`; `server_seq?` | durable receipt for a `msg` or `command`; clears the outbox item |
 | `attach_status` | `attach_id`, `status` | status is `upload` or `present` |
 | `turn_started` | `profile_id`, `turn_id`, `in_reply_to` | begins streamed draft |
@@ -1292,10 +1307,15 @@ desktops did. A
 desktop authenticates exactly as a paired phone does: `IK` (`0x01`) with its
 own static key, then `hello` with the highest `primary_epoch` it has seen and
 the system its computer runs (`platform`, see *A computer's own record*),
-answered with `hello_ack`. Its `hello` names the oldest protocol its engine
-serves (see *Envelope, ordering, and version negotiation*), so a computer one
-version ahead of its server still connects; it reads the server's
-`hello_ack` window as holding that version, whatever the server's newest. The primary reads the row's kind and admits that
+answered with `hello_ack`. Its `hello` is sent at its engine's newest
+protocol and names its oldest (`min_protocol_v`, see *Envelope, ordering, and
+version negotiation*), so a computer a version ahead of its server, or a
+version behind it, connects, and the session speaks the version the
+`hello_ack`'s `v` names. A desktop's `hello_ack` names as `min_version` and
+`max_version` the versions both engines speak, so a desktop engine from
+before `min_protocol_v`, whose hello names none and which reads that window as
+its own, is told its own version alone (`{2, 2}` for a protocol 2 engine);
+a phone's names the daemon's own window. The primary reads the row's kind and admits that
 kind's events alone (see *Who may send what*). The desktop's Mac or Linux app
 speaks only its local sockets; the desktop's engine carries them over this
 session. A desktop's session is meant to stay up: it has no one-hour lifetime
@@ -1965,7 +1985,7 @@ parsed.
 |---|---|---|---|
 | `unsupported` | an unknown `t` once paired, `event_part` from a client included | — | closed `1002` |
 | `repeated_hello` | a second `hello` | — | closed `1002` |
-| `unsupported_protocol_version` | a `hello` or `pair_request` outside the version window | `direction`, `client_version`, `min_version`, `max_version` | closed `1002` |
+| `unsupported_protocol_version` | a `pair_request` outside the version window, or a `hello` with no version in common with it | `direction`, `client_version`, `min_version`, `max_version` | closed `1002` |
 | `stale_primary` | a `hello` whose `primary_epoch` is greater than this daemon's (see *Primary epoch*) | — | closed `1002` |
 | `request_failed`, `client_message_conflict`, `unsupported_profile` | a request refused or failed after `accepted`, or any refusal with no word of its own | `client_msg_id` for a `msg` or `command` | open |
 | `attachment_unavailable` | a `msg` naming an `attach_id` the daemon no longer holds | `client_msg_id` | open |

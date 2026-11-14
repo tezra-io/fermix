@@ -79,8 +79,8 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   reply still states each event and its date. The Mac chat socket's protocol
   is now version 8 (it still serves 7) and the phone's is version 3 (it
   still serves 2); an app on the older version is sent replies without the
-  events, as before. A computer linked to its server speaks the phone wire's
-  older version, so a computer a version ahead of its server still connects.
+  events, as before. A computer linked to its server speaks the newest phone
+  version the two share, so one a version ahead of its server still connects.
 
 - **A voice call says hello, and hangs up on goodbye.** On GPT-Live and
   Grok, the voice now speaks first: when a call connects, from the Mac, the
@@ -1017,6 +1017,15 @@ will be part of a future release; nothing in this group is in a release yet.
   "Fermix on your server may use this computer" turning off stops it there,
   with no new switch; Fermix tells you on the server that the reminder rings
   on your computers, never on the server.
+- **A computer and its server speak the newest phone version both know.** A
+  computer linked to your server now says which versions of the phone wire
+  its Fermix speaks, newest and oldest, and the server speaks the newest the
+  two share, as the Mac chat socket already did. Before, a computer always
+  spoke its oldest, so once the wire moved on a server would have turned away
+  a computer one version behind it, with no link at all. Now a computer a
+  version ahead of its server or a version behind it links, and one two
+  versions apart is told which side to update. A computer on an earlier
+  Fermix links to a current server too, and phones see no change.
 
 ## [0.18.0] - 2026-11-03
 

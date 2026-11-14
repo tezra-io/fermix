@@ -8,6 +8,17 @@ defmodule FermixChannels.Mobile.ProtocolInitiatorTest do
   alias FermixChannels.Mobile.Protocol
 
   @fixtures Application.app_dir(:fermix_core, "priv/mobile/fixtures")
+  @ack %{
+    "t" => "hello_ack",
+    "seq" => 1,
+    "session_id" => "s",
+    "profiles" => [],
+    "candidates" => [],
+    "history_head_seq" => 0,
+    "read_up_to_seq" => 0,
+    "caps" => %{"commands" => [], "max_media_bytes" => 1},
+    "primary_epoch" => 1
+  }
 
   defp lines(name) do
     @fixtures |> Path.join(name) |> File.read!() |> String.split("\n", trim: true)
@@ -76,46 +87,64 @@ defmodule FermixChannels.Mobile.ProtocolInitiatorTest do
     assert payload == json |> Jason.decode!() |> Map.delete("t")
   end
 
-  # This wire's hello names no oldest version, so an engine speaks the oldest
-  # it serves as the initiator, and reads a server's hello_ack window as
-  # holding that version, whatever the server's newest: a computer one
-  # version ahead of its server still connects, and so does one behind.
-  test "the initiator speaks the oldest version it serves and reads any window that holds it" do
-    {min, _max} = Protocol.supported_version_range()
-    assert Protocol.initiator_version() == min
+  # The hello's window runs both ways (M97 §3.4, the server leads): an engine
+  # says hello at its newest version and names its oldest, the server serves
+  # the newest version both windows hold and its hello_ack's `v` says which,
+  # and the initiator reads that hello_ack at that version, the server's own
+  # window or the shared one. So a computer one version ahead of its server
+  # links, and so does one a version behind; two apart, the server refuses
+  # the hello naming the side that must update, and a hello_ack at a version
+  # this engine does not speak is refused naming the server's side.
+  test "an initiator one version from its server links either way; two apart is refused" do
+    {oldest, newest} = Protocol.supported_version_range()
+    assert Protocol.hello_versions() == %{"protocol_v" => newest, "min_protocol_v" => oldest}
 
-    hello = %{
-      "device_id" => "d",
-      "app_version" => "1",
-      "last_server_seq" => 0,
-      "protocol_v" => min
-    }
+    hello =
+      Map.merge(
+        %{"device_id" => "d", "app_version" => "1", "last_server_seq" => 0},
+        Protocol.hello_versions()
+      )
 
-    assert {:ok, _frame} = Protocol.encode_client_frame("hello", hello, 1, <<>>, [])
+    assert {:ok, frame} = Protocol.encode_client_frame("hello", hello, 1, <<>>, version: newest)
+    assert {:ok, %{version: ^newest, payload: ^hello}} = Protocol.decode_client_frame(frame)
 
-    ack = %{
-      "v" => min,
-      "t" => "hello_ack",
-      "seq" => 1,
-      "session_id" => "s",
-      "profiles" => [],
-      "candidates" => [],
-      "history_head_seq" => 0,
-      "read_up_to_seq" => 0,
-      "caps" => %{"commands" => [], "max_media_bytes" => 1},
-      "primary_epoch" => 1
-    }
+    for shift <- [-1, 0, 1] do
+      server = {oldest + shift, newest + shift}
 
-    for {older, newer} <- [{min, min}, {min, min + 1}, {min - 1, min}] do
-      window = Map.merge(ack, %{"min_version" => older, "max_version" => newer})
-      assert {:ok, %{type: "hello_ack"}} = Protocol.decode_server_frame(plaintext(window, <<>>))
+      assert {:ok, {shared_oldest, served} = shared} =
+               Protocol.negotiate_hello(newest, oldest, server)
+
+      assert served == min(newest, newest + shift)
+      assert shared_oldest == max(oldest, oldest + shift)
+
+      for {older, newer} <- [server, shared] do
+        ack = Map.merge(@ack, %{"v" => served, "min_version" => older, "max_version" => newer})
+
+        assert {:ok, %{type: "hello_ack", version: ^served}} =
+                 Protocol.decode_server_frame(plaintext(ack, <<>>)),
+               inspect({shift, older, newer})
+      end
     end
 
-    for {older, newer} <- [{min + 1, min + 2}, {min, min - 1}] do
-      window = Map.merge(ack, %{"min_version" => older, "max_version" => newer})
+    assert {:error, :client_too_old} =
+             Protocol.negotiate_hello(newest, oldest, {oldest + 2, newest + 2})
+
+    assert {:error, :client_too_new} =
+             Protocol.negotiate_hello(newest, oldest, {oldest - 2, newest - 2})
+
+    for {version, side} <- [{newest + 1, :server_too_new}, {oldest - 1, :server_too_old}] do
+      ack = Map.merge(@ack, %{"v" => version, "min_version" => version, "max_version" => version})
+
+      assert {:error, {:unsupported_protocol_version, ^side, ^version}} =
+               Protocol.decode_server_frame(plaintext(ack, <<>>))
+    end
+
+    # The window a hello_ack names holds the version its frame carries.
+    for {older, newer} <- [{oldest + 1, newest + 1}, {oldest, oldest - 1}] do
+      ack = Map.merge(@ack, %{"v" => oldest, "min_version" => older, "max_version" => newer})
 
       assert {:error, {:invalid_field, "version_range"}} =
-               Protocol.decode_server_frame(plaintext(window, <<>>))
+               Protocol.decode_server_frame(plaintext(ack, <<>>))
     end
   end
 

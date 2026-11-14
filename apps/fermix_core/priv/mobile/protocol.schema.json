@@ -166,7 +166,8 @@
         "t": {"const": "hello"}, "device_id": {"type": "string", "minLength": 1},
         "app_version": {"type": "string", "minLength": 1},
         "last_server_seq": {"type": "integer", "minimum": 0, "maximum": 18446744073709551615},
-        "protocol_v": {"type": "integer", "minimum": 1},
+        "protocol_v": {"type": "integer", "minimum": 1, "description": "The newest version the sender speaks, equal to the envelope v."},
+        "min_protocol_v": {"type": "integer", "minimum": 1, "description": "The oldest version the sender speaks, at most protocol_v (M97); absent, it speaks protocol_v alone. The daemon serves the newest version both windows hold, so a hello newer than the daemon's window is served the daemon's newest when this names a version the window holds, and the hello_ack's v says which."},
         "relay_list_rev": {"type": "string", "pattern": "^[0-9a-f]{16}$", "description": "The revision of the relay list this phone has stored (M62); absent means none."},
         "primary_epoch": {"type": "integer", "minimum": 1, "maximum": 18446744073709551615, "description": "The highest primary epoch this phone has seen from this pairing (M75); absent when it has seen none. A daemon at a lower epoch refuses the hello with stale_primary."},
         "platform": {"enum": ["macos", "linux"], "description": "The system a desktop engine's computer runs (M97): a desktop always sends it, a phone never does, and an engine older than the computer record leaves it out. Any other value is a malformed frame."},
@@ -280,7 +281,7 @@
       "required": ["v", "t", "seq", "session_id", "min_version", "max_version", "profiles", "candidates", "history_head_seq", "read_up_to_seq", "caps"],
       "properties": {
         "t": {"const": "hello_ack"}, "session_id": {"type": "string", "minLength": 1},
-        "min_version": {"type": "integer", "minimum": 1}, "max_version": {"type": "integer", "minimum": 1},
+        "min_version": {"type": "integer", "minimum": 1, "description": "With max_version, an inclusive window holding the version this frame's v names, the one the session is served: to a phone the daemon's own window, to a desktop the versions both engines speak (M97)."}, "max_version": {"type": "integer", "minimum": 1},
         "profiles": {"type": "array", "items": {"$ref": "#/$defs/profile"}},
         "candidates": {"type": "array", "maxItems": 16, "items": {"$ref": "#/$defs/candidate"}},
         "history_head_seq": {"type": "integer", "minimum": 0}, "read_up_to_seq": {"type": "integer", "minimum": 0},

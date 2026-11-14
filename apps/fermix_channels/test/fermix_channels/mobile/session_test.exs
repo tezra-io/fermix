@@ -5,6 +5,7 @@ defmodule FermixChannels.Mobile.SessionTest do
   use ExUnit.Case, async: true
 
   alias FermixChannels.Mobile.Identity
+  alias FermixChannels.Mobile.Protocol
   alias FermixChannels.Mobile.Session
   alias FermixCore.Home.Epoch
   alias FermixTestSupport.SafeRm
@@ -223,6 +224,60 @@ defmodule FermixChannels.Mobile.SessionTest do
     refute Map.has_key?(header(ack)["caps"], "call")
   end
 
+  # M97 §3.4: the hello's window runs both ways. A hello that names the oldest
+  # version its sender speaks is served the newest version both windows hold:
+  # its hello_ack's `v` says which, and every later frame carries it.
+  test "a hello naming its oldest is served the newest both windows hold, from then on" do
+    {_oldest, newest} = Protocol.supported_version_range()
+    ahead = newest + 1
+
+    for state <- [desktop_hello_state(), hello_state(primary_epoch: 3)] do
+      hello = hello_frame(%{"v" => ahead, "protocol_v" => ahead, "min_protocol_v" => newest})
+
+      assert {:push, [ack], ready} = Session.handle_frame(hello, ready_socket(state))
+      assert %{"t" => "hello_ack", "v" => ^newest} = header(ack)
+      assert ready.negotiated_version == newest
+
+      assert {:ok, ready} = Session.handle_frame(frame(newest, "ping", 2), ready)
+      assert_received {:device_event_sent, %{"t" => "pong"} = pong}
+      assert {:push, [pong], ready} = Session.handle_info({:mobile_event, pong}, ready)
+      assert %{"t" => "pong", "v" => ^newest, "seq" => 2} = header(pong)
+
+      assert {:stop, {:unsupported_protocol_version, :client_too_new, ^ahead},
+              {1002, "mobile protocol error"}, _stopped} =
+               Session.handle_frame(frame(ahead, "ping", 3), ready)
+    end
+  end
+
+  # An engine whose hello names no oldest version (one from before the rule)
+  # reads its hello_ack's window as its own window: a computer is told the
+  # versions both engines speak, so such an engine is told its own alone. A
+  # phone reads the window as the versions it may speak, and is told this
+  # server's whatever its hello names.
+  test "a computer's hello_ack names the versions both engines speak; a phone's this server's" do
+    {oldest, newest} = Protocol.supported_version_range()
+
+    for {fields, served, shared} <- [
+          {%{"v" => oldest, "protocol_v" => oldest}, oldest, {oldest, oldest}},
+          {%{"v" => newest, "protocol_v" => newest}, newest, {newest, newest}},
+          {%{"v" => newest, "protocol_v" => newest, "min_protocol_v" => oldest}, newest,
+           {oldest, newest}},
+          {%{"v" => newest + 1, "protocol_v" => newest + 1, "min_protocol_v" => newest}, newest,
+           {newest, newest}}
+        ] do
+      assert {:push, [ack], _ready} =
+               Session.handle_frame(hello_frame(fields), desktop_hello_state())
+
+      assert %{"v" => ^served} = header(ack)
+      assert {header(ack)["min_version"], header(ack)["max_version"]} == shared, inspect(fields)
+
+      assert {:push, [ack], _ready} =
+               Session.handle_frame(hello_frame(fields), hello_state(primary_epoch: 3))
+
+      assert %{"v" => ^served, "min_version" => ^oldest, "max_version" => ^newest} = header(ack)
+    end
+  end
+
   # A copy of the home the phone has seen move on holds a call it cannot
   # resume: it ends at once.
   test "a stale primary ends the phone's call here" do
@@ -420,6 +475,36 @@ defmodule FermixChannels.Mobile.SessionTest do
       |> Map.merge(fields)
       |> Jason.encode!()
 
+    <<byte_size(json)::32, json::binary>>
+  end
+
+  # A desktop's session at `hello`, its peer stood in for.
+  defp desktop_hello_state do
+    hello_state(
+      primary_epoch: 3,
+      peer_kind: :desktop,
+      start_desktop_peer: fn _opts -> {:ok, spawn(fn -> :ok end)} end,
+      record_engine_version: fn _id, _version, _at -> :ok end
+    )
+  end
+
+  # A ready session's socket stays the device's own, and what the registry
+  # would push to it is reported.
+  defp ready_socket(state) do
+    test_pid = self()
+
+    %{
+      state
+      | authorize_socket: fn :registry, "paired-device", _pid -> :ok end,
+        send_device_event: fn :registry, "paired-device", event ->
+          send(test_pid, {:device_event_sent, event})
+          :ok
+        end
+    }
+  end
+
+  defp frame(version, type, seq) do
+    json = Jason.encode!(%{"v" => version, "t" => type, "seq" => seq})
     <<byte_size(json)::32, json::binary>>
   end
 

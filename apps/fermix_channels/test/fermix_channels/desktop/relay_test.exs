@@ -13,6 +13,7 @@ defmodule FermixChannels.Desktop.RelayTest do
   alias FermixChannels.Desktop.Relay
   alias FermixChannels.Mobile.DeviceRegistry
   alias FermixChannels.Mobile.Protocol
+  alias FermixChannels.Mobile.Rail
   alias FermixChannels.Test.DesktopRail
   alias FermixCore.Home.ComputerKey
   alias FermixCore.Home.DesktopLink
@@ -113,6 +114,37 @@ defmodule FermixChannels.Desktop.RelayTest do
     assert status.sentence == "Fermix is connected to the server fermix-vm."
     assert {:ok, %{epoch: 5}} = DesktopLink.read(root)
     refute_received {:relay_emit, _status, _failures, _class}
+  end
+
+  # M97 §3.4: a computer says hello at its engine's newest phone-wire version
+  # and names its oldest, so a server a version either side serves it; this
+  # server serves the newest, as its own window holds it.
+  test "hello names this engine's newest version and its oldest, and the newest is served" do
+    test = self()
+
+    primary =
+      DesktopRail.primary!(
+        hello_ack_builder: fn state ->
+          send(test, {:served, state.negotiated_version})
+          {:ok, ack(3)}
+        end
+      )
+
+    write = fn rail, type, fields, bytes ->
+      send(test, {:relay_wrote, type, fields})
+      Rail.send_event(rail, type, fields, bytes)
+    end
+
+    root = DesktopRail.desktop_home!(primary)
+    relay = DesktopRail.start_relay!(root, primary, write: write)
+    {oldest, newest} = Protocol.supported_version_range()
+
+    assert_receive {:relay_wrote, "hello",
+                    %{"protocol_v" => ^newest, "min_protocol_v" => ^oldest}},
+                   10_000
+
+    assert_receive {:served, ^newest}, 10_000
+    assert %{connected: true} = DesktopRail.await_connected(relay)
   end
 
   # A hello_ack that names no epoch never reaches the relay: the rail's codec

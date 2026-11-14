@@ -1079,9 +1079,9 @@ defmodule FermixChannels.Mobile.Session do
     end
   end
 
-  defp bind_protocol_version(%{version: version}, state) when is_integer(version) do
+  defp bind_protocol_version(%{version: version} = event, state) when is_integer(version) do
     case Map.get(state, :negotiated_version) do
-      nil -> {:ok, Map.put(state, :negotiated_version, version)}
+      nil -> bind_first(event, state)
       ^version -> {:ok, state}
       _different -> {:error, :protocol_version_mismatch, state}
     end
@@ -1089,6 +1089,22 @@ defmodule FermixChannels.Mobile.Session do
 
   defp bind_protocol_version(_event, state),
     do: {:error, :protocol_version_mismatch, state}
+
+  # The first event binds the session's version: a hello's is the newest
+  # both windows hold (`Protocol.negotiate_hello/3`), which its hello_ack's
+  # `v` says, so a newer client that names an oldest this window holds is
+  # served this window's newest; any other first event's is its own.
+  defp bind_first(%{type: "hello", version: version, payload: payload}, state) do
+    window = Protocol.supported_version_range()
+
+    case Protocol.negotiate_hello(version, payload["min_protocol_v"], window) do
+      {:ok, {_oldest, served}} -> {:ok, Map.put(state, :negotiated_version, served)}
+      {:error, direction} -> {:error, {:unsupported_protocol_version, direction, version}, state}
+    end
+  end
+
+  defp bind_first(%{version: version}, state),
+    do: {:ok, Map.put(state, :negotiated_version, version)}
 
   defp accept_hello(%{type: "hello", payload: payload} = event, state) do
     authenticated_id = value(state.authenticated_device, :device_id)
@@ -1243,7 +1259,7 @@ defmodule FermixChannels.Mobile.Session do
   defp hello_ack(state, event) do
     state = put_standing(state, event)
 
-    with {:ok, payload} <- build_hello_ack(state),
+    with {:ok, payload} <- build_hello_ack(state, ack_window(state, event)),
          {:ok, frames, state} <- encode_event("hello_ack", payload, <<>>, state) do
       {:ok, frames, state}
     end
@@ -1309,16 +1325,34 @@ defmodule FermixChannels.Mobile.Session do
     end
   end
 
-  defp build_hello_ack(%{hello_ack_builder: builder} = state) when is_function(builder, 1) do
+  # The window a hello_ack names. A phone reads it as the versions it may
+  # speak and is told this server's, whatever its hello names. A computer is
+  # told the versions both engines speak (`Protocol.negotiate_hello/3`), so
+  # an engine whose hello names no oldest version, one from before that rule
+  # that reads the window as its own, is told its own version alone. The
+  # hello was served, so the two windows meet.
+  defp ack_window(state, %{version: version, payload: payload}) do
+    window = Protocol.supported_version_range()
+
+    case session_kind(state) do
+      :phone ->
+        window
+
+      :desktop ->
+        {:ok, shared} = Protocol.negotiate_hello(version, payload["min_protocol_v"], window)
+        shared
+    end
+  end
+
+  defp build_hello_ack(%{hello_ack_builder: builder} = state, _window)
+       when is_function(builder, 1) do
     builder.(state)
   end
 
-  defp build_hello_ack(state) do
+  defp build_hello_ack(state, {min_version, max_version}) do
     with {:ok, history_head} <- history_head(state.profile_id, state),
          {:ok, read_up_to} <- read_frontier(state.profile_id, state),
          {:ok, primary_epoch} <- session_primary_epoch(state) do
-      {min_version, max_version} = Protocol.supported_version_range()
-
       payload = %{
         "session_id" => session_id(),
         "min_version" => min_version,

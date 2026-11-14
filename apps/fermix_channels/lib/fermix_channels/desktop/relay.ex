@@ -881,19 +881,23 @@ defmodule FermixChannels.Desktop.Relay do
 
   defp ending(reason, _state), do: reason
 
+  # The hello names this engine's newest phone-wire version and its oldest
+  # (`Protocol.hello_versions/0`), and the server serves the newest both hold.
   defp hello(state) do
-    %{
-      "device_id" => state.link.device_id,
-      "app_version" => BuildInfo.product_version(),
-      "last_server_seq" => 0,
-      "protocol_v" => Protocol.initiator_version(),
-      "relay_list_rev" => state.link.primary.relays_rev,
-      "primary_epoch" => state.link.epoch,
-      "platform" => platform(),
-      # This engine applies M97 §19.3's rule: the id of a setting names its
-      # machine, so a server may answer its own machine sections.
-      "caps" => %{"computer" => %{"machine_settings" => true}}
-    }
+    Map.merge(
+      %{
+        "device_id" => state.link.device_id,
+        "app_version" => BuildInfo.product_version(),
+        "last_server_seq" => 0,
+        "relay_list_rev" => state.link.primary.relays_rev,
+        "primary_epoch" => state.link.epoch,
+        "platform" => platform(),
+        # This engine applies M97 §19.3's rule: the id of a setting names its
+        # machine, so a server may answer its own machine sections.
+        "caps" => %{"computer" => %{"machine_settings" => true}}
+      },
+      Protocol.hello_versions()
+    )
   end
 
   # The system this computer runs (M97 §3.2), which its hello names.
@@ -1180,7 +1184,7 @@ defmodule FermixChannels.Desktop.Relay do
         else: [{fields, payload}]
 
     Enum.reduce_while(pieces, {:ok, []}, fn {fields, bytes}, {:ok, frames} ->
-      case Protocol.encode_client_frame(type, fields, 1, bytes, []) do
+      case Protocol.encode_client_frame(type, fields, 1, bytes, version: checked_at(type, fields)) do
         {:ok, _plaintext} -> {:cont, {:ok, [{type, fields, bytes} | frames]}}
         {:error, reason} -> {:halt, {:error, {:invalid_event, type, reason}}}
       end
@@ -1190,6 +1194,12 @@ defmodule FermixChannels.Desktop.Relay do
       {:error, _reason} = error -> error
     end)
   end
+
+  # Each frame is checked at the version the rail sends it at: a hello at
+  # the one it names, any other at the one a session speaks before its
+  # hello_ack, a desktop's events being the same at every version.
+  defp checked_at("hello", %{"protocol_v" => version}), do: version
+  defp checked_at(_type, _fields), do: Protocol.initiator_version()
 
   # One frame at a time: the next, by lane, once the writer said the last
   # one went.

@@ -954,15 +954,20 @@ defmodule FermixChannels.Channels.MobileTest do
 
   # A socket past its Noise handshake, about to read the phone's hello.
   defp phone_hello_state(overrides) do
+    # A phone speaks a version this engine serves: the session negotiates a
+    # hello's version itself (`Protocol.negotiate_hello/3`), so a stubbed
+    # decode below the window is refused as a real one is.
+    {_oldest, newest} = FermixChannels.Mobile.Protocol.supported_version_range()
+
     hello = %{
-      version: 1,
+      version: newest,
       type: "hello",
       seq: 1,
       payload: %{
         "device_id" => "paired-device",
         "app_version" => "1.0",
         "last_server_seq" => 0,
-        "protocol_v" => 1
+        "protocol_v" => newest
       },
       bytes: <<>>
     }

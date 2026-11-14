@@ -852,14 +852,17 @@ defmodule FermixChannels.Home.MoveWorker do
     :exit, {reason, _call} when reason in [:noproc, :normal] -> :ok
   end
 
+  # Named as a computer's hello names them (`Protocol.hello_versions/0`).
   defp hello(device_id, epoch) do
-    %{
-      "device_id" => device_id,
-      "app_version" => BuildInfo.product_version(),
-      "last_server_seq" => 0,
-      "protocol_v" => Protocol.initiator_version(),
-      "primary_epoch" => epoch
-    }
+    Map.merge(
+      %{
+        "device_id" => device_id,
+        "app_version" => BuildInfo.product_version(),
+        "last_server_seq" => 0,
+        "primary_epoch" => epoch
+      },
+      Protocol.hello_versions()
+    )
   end
 
   # Whether this home retired cannot be told, so it neither sends nor undoes

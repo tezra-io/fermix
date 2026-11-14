@@ -304,7 +304,7 @@ defmodule FermixChannels.Mobile.ProtocolContractTest do
     end
 
     assert protocol =~ "**Protocol 3: a row may carry any number of block types.**"
-    assert protocol =~ "**An engine speaks the oldest version it serves**"
+    assert protocol =~ "**An engine's hello names its window**"
   end
 
   # M89 §06: protocol 3 carries `trips` too, the lists' block for the owner's
@@ -817,6 +817,50 @@ defmodule FermixChannels.Mobile.ProtocolContractTest do
 
     assert %{"type" => "integer", "minimum" => 0} = frame["properties"]["captured_ms"]
     assert defs["callCaps"]["description"] =~ "camera_share"
+  end
+
+  # M97 §3.4: a hello may name the oldest version its sender speaks, and the
+  # server serves the newest version both windows hold. The goldens carry a
+  # computer's hello that names its oldest and the hello_ack that answers it,
+  # whose window is the versions both engines speak; the schema reads
+  # `min_protocol_v` as the codec does, beyond what a schema can compare.
+  test "the schema and goldens publish a hello's oldest version and the hello_ack it is served",
+       %{schema: schema, protocol: protocol} do
+    hello_def = schema["$defs"]["hello"]
+    refute "min_protocol_v" in hello_def["required"]
+    assert %{"type" => "integer", "minimum" => 1} = hello_def["properties"]["min_protocol_v"]
+    assert hello_def["properties"]["min_protocol_v"]["description"] =~ "at most protocol_v"
+
+    [hello] = Enum.filter(client_headers(), &Map.has_key?(&1, "min_protocol_v"))
+    assert hello["platform"] in ~w(macos linux)
+    assert hello["v"] == Protocol.protocol_version()
+
+    assert {:ok, {oldest, served}} =
+             Protocol.negotiate_hello(
+               hello["protocol_v"],
+               hello["min_protocol_v"],
+               Protocol.supported_version_range()
+             )
+
+    [ack] = Enum.filter(server_headers(), &get_in(&1, ["caps", "computer"]))
+    assert {ack["v"], ack["min_version"], ack["max_version"]} == {served, oldest, served}
+
+    for {named, taken?} <- [{1, true}, {hello["protocol_v"], true}, {0, false}, {"2", false}] do
+      header = Map.put(hello, "min_protocol_v", named)
+      decoded? = match?({:ok, _event}, Protocol.decode_client_frame(frame(header)))
+      assert decoded? == taken?, inspect(named)
+      assert decoded? == (client_errors(header, schema) == []), inspect(named)
+    end
+
+    # An oldest newer than the hello's own is the codec's to refuse.
+    newer = Map.put(hello, "min_protocol_v", hello["protocol_v"] + 1)
+
+    assert {:error, {:invalid_field, "min_protocol_v"}} =
+             Protocol.decode_client_frame(frame(newer))
+
+    assert protocol =~ "**An engine's hello names its window**"
+    assert protocol =~ "`min_protocol_v`"
+    assert protocol =~ "the versions both engines speak"
   end
 
   # M97 §3.2, §5.3: a desktop names its system on hello, its hello_ack says

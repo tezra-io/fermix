@@ -140,17 +140,49 @@ defmodule FermixChannels.Mobile.Protocol do
   def supported_version_range, do: {@min_supported_version, @protocol_version}
 
   @doc """
-  The version this engine speaks as the initiator (`Mobile.Rail`: a
-  computer's session to its server, an enrollment, a move): the oldest this
-  engine serves. Nothing a later version brought rides an engine's own
-  session (protocol 3's blocks reach a phone's rows, and a desktop is sent
-  no row), so the oldest is the one an older server still serves: a newer
-  computer reaches a server one version behind it, as the server's own
-  window lets an older computer reach it. This wire names no oldest version
-  in its hello, so the initiator speaks that one.
+  The version an engine's session speaks as the initiator (`Mobile.Rail`)
+  before any hello: an enrollment's and a move's, which say no hello and are
+  served the version of their first frame, the oldest this engine serves. A
+  session that says hello names its own window instead (`hello_versions/0`)
+  and speaks the version its hello_ack chose.
   """
   @spec initiator_version() :: pos_integer()
   def initiator_version, do: @min_supported_version
+
+  @doc """
+  What an engine's hello names as the initiator (a computer's session to its
+  server, a move's probe of the new one, M97 §3.4): its newest version as
+  `protocol_v`, which the hello is sent at, and its oldest as
+  `min_protocol_v`. The server serves the newest version both windows hold
+  (`negotiate_hello/3`) and its hello_ack's `v` says which, so a computer a
+  version ahead of its server or a version behind it links.
+  """
+  @spec hello_versions() :: %{String.t() => pos_integer()}
+  def hello_versions,
+    do: %{"protocol_v" => @protocol_version, "min_protocol_v" => @min_supported_version}
+
+  @doc """
+  Negotiate a hello against a server's inclusive `window`: its `protocol_v`,
+  the newest version its sender speaks, and `min_protocol_v`, the oldest, or
+  nil for a hello that names none, which speaks its own version alone (a
+  phone, an engine from before the rule). `{:ok, {oldest, served}}` is the
+  versions both windows hold; the session is served `served`, the newest of
+  them. Otherwise `{:error, :client_too_old}` means the client must update,
+  and `{:error, :client_too_new}` that the server must.
+  """
+  @spec negotiate_hello(integer(), integer() | nil, {integer(), integer()}) ::
+          {:ok, {pos_integer(), pos_integer()}} | {:error, :client_too_old | :client_too_new}
+  def negotiate_hello(version, nil, window), do: negotiate_hello(version, version, window)
+
+  def negotiate_hello(version, oldest, {server_min, server_max})
+      when is_integer(version) and is_integer(oldest) and oldest <= version and
+             is_integer(server_min) and is_integer(server_max) do
+    cond do
+      version < server_min -> {:error, :client_too_old}
+      oldest > server_max -> {:error, :client_too_new}
+      true -> {:ok, {max(oldest, server_min), min(version, server_max)}}
+    end
+  end
 
   @doc """
   The first version that carries Web Push (M99 §14): `webpush` in a push
@@ -207,7 +239,7 @@ defmodule FermixChannels.Mobile.Protocol do
 
     with :ok <- validate_media_cap(max_media_bytes),
          {:ok, header, bytes} <- split_frame(frame),
-         {:ok, envelope} <- decode_envelope(header, @client_events),
+         {:ok, envelope} <- decode_envelope(header, :client),
          :ok <- carried(envelope),
          :ok <- validate_client_event(envelope, max_media_bytes),
          :ok <- validate_binary(:client, envelope.type, bytes, @raw_client_events),
@@ -256,7 +288,7 @@ defmodule FermixChannels.Mobile.Protocol do
   @spec decode_server_frame(binary()) :: {:ok, decoded_event()} | {:error, term()}
   def decode_server_frame(frame) when is_binary(frame) do
     with {:ok, header, bytes} <- split_frame(frame),
-         {:ok, envelope} <- decode_envelope(header, @server_events),
+         {:ok, envelope} <- decode_envelope(header, :server),
          :ok <- validate_server_event(envelope.type, envelope.payload, envelope.version),
          :ok <- validate_binary(:server, envelope.type, bytes, @raw_server_events) do
       {:ok, Map.put(envelope, :bytes, bytes)}
@@ -442,12 +474,12 @@ defmodule FermixChannels.Mobile.Protocol do
 
   defp split_frame(_frame), do: {:error, :truncated_frame}
 
-  defp decode_envelope(header, known_events) do
+  defp decode_envelope(header, side) do
     with {:ok, decoded} <- decode_json_object(header),
          {:ok, version} <- fetch_integer(decoded, "v"),
-         :ok <- supported_version(version),
+         :ok <- supported_version(side, version, decoded),
          {:ok, type} <- fetch_nonempty(decoded, "t"),
-         :ok <- known_type(type, known_events),
+         :ok <- known_type(type, known_events(side)),
          {:ok, seq} <- fetch_integer(decoded, "seq"),
          :ok <- valid_seq(seq) do
       {:ok,
@@ -460,14 +492,47 @@ defmodule FermixChannels.Mobile.Protocol do
     end
   end
 
+  defp known_events(:client), do: @client_events
+  defp known_events(:server), do: @server_events
+
   # A client outside the window must learn which side has to update, so the
-  # refusal carries the direction and the version it sent.
-  defp supported_version(version) do
-    case negotiate(version) do
-      :ok -> :ok
-      {:error, direction} -> {:error, {:unsupported_protocol_version, direction, version}}
+  # refusal carries the direction and the version it sent. A hello above the
+  # window is still served when the oldest version it names is one the
+  # window holds (`negotiate_hello/3`). A server frame outside it is the
+  # initiator's to refuse, naming the server's side.
+  defp supported_version(:client, version, %{"t" => "hello"} = header) do
+    with {:ok, oldest} <- hello_oldest(header, version) do
+      case negotiate_hello(version, oldest, supported_version_range()) do
+        {:ok, _window} -> :ok
+        {:error, direction} -> {:error, {:unsupported_protocol_version, direction, version}}
+      end
     end
   end
+
+  defp supported_version(side, version, _header) do
+    case negotiate(version) do
+      :ok ->
+        :ok
+
+      {:error, direction} ->
+        {:error, {:unsupported_protocol_version, side(side, direction), version}}
+    end
+  end
+
+  defp side(:client, direction), do: direction
+  defp side(:server, :client_too_old), do: :server_too_old
+  defp side(:server, :client_too_new), do: :server_too_new
+
+  # The oldest version a hello names (`min_protocol_v`): none, or a version
+  # no newer than the hello's own.
+  defp hello_oldest(%{"min_protocol_v" => oldest}, version)
+       when is_integer(oldest) and oldest >= 1 and oldest <= version,
+       do: {:ok, oldest}
+
+  defp hello_oldest(%{"min_protocol_v" => _other}, _version),
+    do: {:error, {:invalid_field, "min_protocol_v"}}
+
+  defp hello_oldest(_payload, _version), do: {:ok, nil}
 
   defp decode_json_object(header) do
     case Jason.decode(header) do
@@ -684,6 +749,7 @@ defmodule FermixChannels.Mobile.Protocol do
          :ok <- nonempty(payload, "app_version"),
          :ok <- nonnegative_u64(payload, "last_server_seq"),
          :ok <- positive_integer(payload, "protocol_v"),
+         {:ok, _oldest} <- hello_oldest(payload, payload["protocol_v"]),
          :ok <- optional_positive_u64(payload, "primary_epoch"),
          :ok <- optional_computer_platform(payload),
          :ok <- optional_hello_caps(payload) do

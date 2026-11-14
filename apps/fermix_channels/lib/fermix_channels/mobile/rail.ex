@@ -18,6 +18,9 @@ defmodule FermixChannels.Mobile.Rail do
     responder holds each side to;
   - client `seq` from 1, and every server frame's `seq` exactly one past the
     last, at the session's `v`;
+  - a `hello` sent at the version it names, its owner's newest
+    (`Protocol.hello_versions/0`), and the server's first frame after it at
+    the version the server chose, which the session speaks from then on;
   - a server `event_part` run reassembled into the event it carries;
   - `ping` every 60 s once the owner has sent its first event (the responder
     takes nothing before `hello`, or a mode's own first event), a session with
@@ -247,6 +250,7 @@ defmodule FermixChannels.Mobile.Rail do
       socket: nil,
       noise: nil,
       version: Protocol.initiator_version(),
+      choosing?: false,
       paths?: Keyword.get(opts, :paths, false) == true,
       path: nil,
       client_seq: 0,
@@ -443,12 +447,26 @@ defmodule FermixChannels.Mobile.Rail do
 
   defp send_frame(type, payload, bytes, state) do
     seq = state.client_seq + 1
+    version = sending_version(type, payload, state)
 
-    case Protocol.encode_client_frame(type, payload, seq, bytes, version: state.version) do
-      {:ok, plaintext} -> seal_and_send(plaintext, %{state | client_seq: seq})
-      {:error, reason} -> {:refused, reason}
+    case Protocol.encode_client_frame(type, payload, seq, bytes, version: version) do
+      {:ok, plaintext} ->
+        seal_and_send(plaintext, sent(type, version, %{state | client_seq: seq}))
+
+      {:error, reason} ->
+        {:refused, reason}
     end
   end
+
+  # A hello is sent at the version it names, and the server then chooses the
+  # session's (`in_sequence/2`); every other frame goes at the session's.
+  defp sending_version("hello", %{"protocol_v" => version}, _state) when is_integer(version),
+    do: version
+
+  defp sending_version(_type, _payload, state), do: state.version
+
+  defp sent("hello", version, state), do: %{state | version: version, choosing?: true}
+  defp sent(_type, _version, state), do: state
 
   defp seal_and_send(plaintext, state) do
     with {:ok, noise} <- rekey_due(state.noise, :send),
@@ -478,18 +496,21 @@ defmodule FermixChannels.Mobile.Rail do
     with {:ok, noise} <- rekey_due(state.noise, :receive),
          {:ok, plaintext, noise} <- Noise.decrypt(noise, ciphertext),
          {:ok, event} <- Protocol.decode_server_frame(plaintext),
-         :ok <- in_sequence(event, state) do
-      take_event(event, %{state | noise: noise, server_seq: event.seq})
+         {:ok, sequenced} <- in_sequence(event, state) do
+      take_event(event, %{sequenced | noise: noise, server_seq: event.seq})
     else
       {:error, reason} -> protocol_error(reason, state)
     end
   end
 
+  # The server's first frame after a hello carries the version it chose for
+  # the session, one this engine speaks (the codec refuses any other, naming
+  # the server's side), and every frame after it carries that version.
   defp in_sequence(%{version: version, seq: seq}, state) do
     cond do
-      version != state.version -> {:error, {:version, version}}
+      version != state.version and not state.choosing? -> {:error, {:version, version}}
       seq != state.server_seq + 1 -> {:error, {:seq, seq, state.server_seq + 1}}
-      true -> :ok
+      true -> {:ok, %{state | version: version, choosing?: false}}
     end
   end
 

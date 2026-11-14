@@ -47,6 +47,74 @@ defmodule FermixChannels.Mobile.ProtocolTest do
     assert {:error, :client_too_new} = Protocol.negotiate(4)
   end
 
+  # M97 §3.4: the hello's window runs both ways, as the companion's does. A
+  # hello names the newest version its sender speaks (`protocol_v`) and may
+  # name the oldest (`min_protocol_v`); one that names none speaks its own
+  # alone. The answer is the versions both windows hold, the newest of which
+  # the session is served.
+  test "negotiates a hello's window against a server's, both ways" do
+    window = Protocol.supported_version_range()
+
+    assert {:ok, {2, 3}} = Protocol.negotiate_hello(3, 2, window)
+    assert {:ok, {2, 2}} = Protocol.negotiate_hello(2, nil, window)
+    assert {:ok, {3, 3}} = Protocol.negotiate_hello(3, nil, window)
+    assert {:ok, {3, 3}} = Protocol.negotiate_hello(4, 3, window)
+    assert {:ok, {2, 2}} = Protocol.negotiate_hello(2, 1, window)
+    assert {:ok, {3, 3}} = Protocol.negotiate_hello(3, 2, {3, 4})
+    assert {:error, :client_too_new} = Protocol.negotiate_hello(4, nil, window)
+    assert {:error, :client_too_new} = Protocol.negotiate_hello(5, 4, window)
+    assert {:error, :client_too_old} = Protocol.negotiate_hello(1, nil, window)
+    assert {:error, :client_too_old} = Protocol.negotiate_hello(3, 2, {4, 5})
+  end
+
+  test "a hello above the window decodes when the oldest it names is one the window holds" do
+    fields = %{"device_id" => "device-1", "app_version" => "1.0.0", "last_server_seq" => 0}
+
+    hello = fn version, extra ->
+      fields = fields |> Map.put("protocol_v", version) |> Map.merge(extra)
+      Protocol.decode_client_frame(client_frame("hello", 1, fields, <<>>, version))
+    end
+
+    assert {:ok, %{type: "hello", version: 4, payload: %{"min_protocol_v" => 3}}} =
+             hello.(4, %{"min_protocol_v" => 3})
+
+    assert {:ok, %{type: "hello", version: 3}} = hello.(3, %{"min_protocol_v" => 2})
+    assert {:ok, %{type: "hello", version: 2}} = hello.(2, %{})
+
+    assert {:error, {:unsupported_protocol_version, :client_too_new, 4}} = hello.(4, %{})
+
+    assert {:error, {:unsupported_protocol_version, :client_too_new, 5}} =
+             hello.(5, %{"min_protocol_v" => 4})
+
+    assert {:error, {:unsupported_protocol_version, :client_too_old, 1}} =
+             hello.(1, %{"min_protocol_v" => 1})
+
+    # The oldest is a version no newer than the hello's own (the encoder
+    # refuses any null field before it reads one).
+    assert {:error, {:invalid_field, "min_protocol_v"}} = hello.(3, %{"min_protocol_v" => nil})
+
+    for bad <- [0, -1, "2", 2.5, 4] do
+      assert {:error, {:invalid_field, "min_protocol_v"}} = hello.(3, %{"min_protocol_v" => bad}),
+             inspect(bad)
+
+      assert {:error, {:invalid_field, "min_protocol_v"}} =
+               Protocol.encode_client_frame(
+                 "hello",
+                 Map.merge(fields, %{"protocol_v" => 3, "min_protocol_v" => bad}),
+                 1,
+                 <<>>,
+                 version: 3
+               ),
+             inspect(bad)
+    end
+
+    # Only a hello names a window: any other frame above it is too new.
+    assert {:error, {:unsupported_protocol_version, :client_too_new, 4}} =
+             Protocol.decode_client_frame(
+               client_frame("ping", 1, %{"min_protocol_v" => 3}, <<>>, 4)
+             )
+  end
+
   test "an out-of-window envelope names the direction and the client's version" do
     assert {:error, {:unsupported_protocol_version, :client_too_new, 4}} =
              Protocol.decode_client_frame(
