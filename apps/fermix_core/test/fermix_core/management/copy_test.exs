@@ -1433,7 +1433,13 @@ defmodule FermixCore.Management.CopyTest do
     test "a change from a computer is said in plain words, everywhere it is told" do
       changes =
         Enum.map(~w(strict standard open), &{:sandbox_mode, &1}) ++
-          [{:harness_approved, true}, {:harness_approved, false}]
+          Enum.map(~w(bare assistant extended), &{:sandbox_profile, &1}) ++
+          [
+            {:sandbox_env_allow, ["LEDGER_TOKEN"]},
+            {:sandbox_env_allow, []},
+            {:harness_approved, true},
+            {:harness_approved, false}
+          ]
 
       for change <- changes, server <- [:this, :yours, "garden-server"] do
         said =
@@ -1447,6 +1453,20 @@ defmodule FermixCore.Management.CopyTest do
         assert Copy.summary_violations(said) == [], said
         assert said =~ "from loft-linux."
       end
+
+      said = fn change ->
+        Copy.summary_sentence(:notice_computer_change, %{
+          name: "loft-linux",
+          change: change,
+          server: "garden-server"
+        })
+      end
+
+      assert said.({:sandbox_profile, "extended"}) ==
+               "garden-server's command profile was set to Extended from loft-linux."
+
+      assert said.({:sandbox_env_allow, ["LEDGER_TOKEN"]}) ==
+               "garden-server's allowed environment variables were changed from loft-linux."
 
       assert Copy.summary_label(:restart_server, %{name: "garden-server"}) ==
                "Restart garden-server"
@@ -2518,11 +2538,18 @@ defmodule FermixCore.Management.CopyTest do
       {:error, :unavailable, %{"sentence" => older_server}} =
         Placement.older_server("garden server")
 
+      {:answer, {:error, :unavailable, %{"sentence" => older_server_does}}} =
+        Placement.to_older_server(
+          %{request_id: "r-1", method: "coding_agents.check", params: %{}},
+          "garden server"
+        )
+
       {:error, :unavailable, %{"sentence" => older_computer}} = Placement.older_computer()
       machine_owner = golden_owner_sentence("unavailable_machine_owner_decision")
 
       for {where, text} <- [
             {"older server", older_server},
+            {"older server, no setting", older_server_does},
             {"older computer", older_computer},
             {"machine owner", machine_owner}
           ],

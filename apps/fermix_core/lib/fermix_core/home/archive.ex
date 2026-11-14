@@ -128,7 +128,8 @@ defmodule FermixCore.Home.Archive do
   home is read: a retired copy restored elsewhere would mint the live
   primary's own epoch under the same identity, a running engine
   (`:daemon_running`, read through the control socket's `hello`, the probe
-  `fermix status` uses; `opts[:hello]` replaces it in tests), a probe that
+  `fermix status` uses; `opts[:hello]` replaces it in tests and
+  `opts[:hello_timeout]` bounds its reply), a probe that
   cannot tell (`{:daemon_probe_failed, reason}`), a home with no primary epoch
   (`:epoch_absent`), and a home beyond the manifest's bounds.
   """
@@ -293,7 +294,8 @@ defmodule FermixCore.Home.Archive do
     end
   end
 
-  defp daemon_stopped(opts, root), do: DaemonProbe.stopped(root, Keyword.take(opts, [:hello]))
+  defp daemon_stopped(opts, root),
+    do: DaemonProbe.stopped(root, Keyword.take(opts, [:hello, :hello_timeout]))
 
   defp primary_epoch(root) do
     case Epoch.read(root) do

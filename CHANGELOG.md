@@ -288,6 +288,18 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   means Fermix could not tell, and those commands refuse and say to make sure
   it is stopped first, while `fermix status` and the other reports say they
   could not tell.
+- **A Fermix on a Mac too busy to take a connection is no longer taken for
+  one that is stopped either.** macOS turns a connection away at once when
+  Fermix is behind on taking connections, exactly as it does when no Fermix
+  runs, so those same commands could still act on a home whose engine was
+  running, and a second Fermix started on that home took the running one's
+  socket from it. A running Fermix now holds a lock beside its socket for as
+  long as it runs, which the system lets go of when it stops, however it
+  stops: a connection turned away while the lock is held means Fermix could
+  not tell, and a second Fermix does not start. Fermix also lets up to 128
+  connections wait where 5 did, so a busy one turns far fewer away. On a
+  Linux package, `fermix restart` and `fermix service status` say in the log
+  when they could not tell.
 - **Codex signed in with an API key reads as signed in.** Fermix looked only
   for a ChatGPT sign-in in Codex's `auth.json`, so after `codex login
   --with-api-key` the Coding agents pane, the setup page and `fermix doctor`
@@ -970,25 +982,34 @@ will be part of a future release; nothing in this group is in a release yet.
   computer's own sandbox, browser, screen, history and StackChan) is listed
   apart, under This Mac (This computer on Linux), and changes only at that
   computer: the server, and every other computer, can no longer write it.
-  So the server can stay Open while a Mac stays Strict. A change to the
-  server's sandbox or coding approval from a computer is said once on every
-  Always On screen, naming the computer. A process Fermix started can no
-  longer change a computer's own settings or a sandbox's stored variables
-  through the app's socket, the server's commands on that computer among
-  them. After a move, the meeting notetaker's and on-device speech's
-  installers, and the coding agents' check, are the server's, which runs
-  them. On a linked computer the setup page changes This computer and that
-  computer's sandbox, and its other tabs say to change them in the Fermix
-  app on any computer. A server or a computer on an older Fermix is never
-  written to by mistake: the computer then shows the server's sandbox and
-  coding settings nowhere and says the server updates on its own, and the
-  server refuses a sandbox variable from an older computer ("Update Fermix
-  on this computer to change its sandbox values."). An install a linked
+  So the server can stay Open while a Mac stays Strict. A Mac that took the
+  home back keeps its own screen, history and StackChan to itself: a
+  computer still linked to it neither lists nor changes them. A change to
+  the server's sandbox (its mode, command profile or allowed variables) or
+  coding approval from a computer is said once on every Always On screen,
+  naming the computer, each change under its own notice; a write that
+  changed nothing is not said. A process Fermix started can no longer
+  change a computer's own settings or a sandbox's stored variables through
+  the app's socket, the server's commands on that computer among them.
+  After a move, the meeting notetaker's and on-device speech's installers,
+  the coding agents' check and the Providers pane's detection are the
+  server's, which runs them. On a linked computer the setup page changes
+  This computer and that computer's sandbox, and its other tabs say to
+  change them in the Fermix app on any computer. A server or a computer on
+  an older Fermix is never written to by mistake: the computer then shows
+  the server's sandbox and coding settings nowhere and says the server
+  updates on its own, its coding agents' check, those installers and that
+  detection say the server does them only on itself, and the server's
+  browser settings stay listed and changeable as before; the server
+  refuses a sandbox variable from an older computer ("Update Fermix on
+  this computer to change its sandbox values."). An install a linked
   computer runs itself (its browser, the computer use helper, the Messages
   helper) is now followed and cancelled on that computer, where before its
-  progress was asked of the server, which did not know it; and `fermix
+  progress was asked of the server, which did not know it; `fermix
   settings reload computer.sandbox` clears an outside edit of that
-  computer's own settings.
+  computer's own settings, which a refused stored variable of its sandbox
+  now names; and `fermix settings set` says which machine it changed
+  ("Saved Sandbox on garden server (sandbox): sandbox_mode").
 - **An install a linked computer runs itself is found again when its pane
   reopens.** On a computer linked to your server, the list of running work
   the apps read now holds that computer's own installs (its browser, the
@@ -1005,9 +1026,14 @@ will be part of a future release; nothing in this group is in a release yet.
   words in every pane that shows its restart, where before the button
   restarted that computer's Fermix and not the server's). The server
   restarts at once, or once the work it runs on a computer ends, ten minutes
-  at most, and refuses while a move is under way; an answer lost to the
-  server's own restart is said as asked, not as the server being out of
-  reach. `fermix always-on restart-server` takes the same step from a
+  at most from when you asked, work that starts meanwhile included, and
+  refuses while a move is under way; asking again while it waits says how
+  long the work still holds it, or restarts it at once once nothing does. It
+  keeps waiting, and restarts at the end of the ten minutes, when it cannot
+  read what holds it, and a Restart <server> is offered only where the
+  server can take it, so a server on an older Fermix shows none. An answer
+  lost to the server's own restart is said as asked, not as the server being
+  out of reach. `fermix always-on restart-server` takes the same step from a
   terminal. The move's review
   says that after the move the apps' Settings change Fermix on the server,
   its sandbox and coding agents included, names this Mac's own sandbox in

@@ -163,10 +163,11 @@ defmodule FermixChannels.Desktop.Relay do
   the rule that a setting's id names its machine (`caps.computer.
   machine_settings`), and a server whose `hello_ack` says the same answers
   its own machine sections (`status/1`'s `machine_settings`). To one whose
-  `hello_ack` does not, no request for its machine settings is sent
+  `hello_ack` does not, nothing the rule moved to the server is sent
   (`Placement.server_machine_request?/2`): it is answered here, `unavailable`
-  with the sentence that the server takes them only on itself
-  (`Placement.older_server/1`).
+  with the sentence that the server does it only on itself; every other
+  request goes as it went before the rule, a reload without its section
+  (`Placement.to_older_server/2`).
 
   ## Bounds
 
@@ -1578,12 +1579,17 @@ defmodule FermixChannels.Desktop.Relay do
        when phase != :connected,
        do: {:reply, unreachable(state), state}
 
-  # A server whose hello_ack did not say it applies M97 §19.3's rule takes
-  # its own machine settings only on itself, so none is sent (`Placement`).
-  defp forward_call(%{method: method, params: params} = request, deadline_ms, from, state) do
-    if not state.machine_settings and Placement.server_machine_request?(method, params),
-      do: {:reply, Placement.older_server(name(state)), state},
-      else: queue_call(request, deadline_ms, from, state)
+  defp forward_call(request, deadline_ms, from, %{machine_settings: true} = state),
+    do: queue_call(request, deadline_ms, from, state)
+
+  # A server whose hello_ack did not say it applies M97 §19.3's rule is
+  # asked for none of what the rule moved to it, and sent every other
+  # request as before the rule (`Placement.to_older_server/2`).
+  defp forward_call(request, deadline_ms, from, state) do
+    case Placement.to_older_server(request, name(state)) do
+      {:send, request} -> queue_call(request, deadline_ms, from, state)
+      {:answer, refusal} -> {:reply, refusal, state}
+    end
   end
 
   # Each call gets its id and its deadline as it arrives: the deadline covers

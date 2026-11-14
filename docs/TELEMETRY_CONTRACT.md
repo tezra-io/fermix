@@ -1423,7 +1423,7 @@ exporter places each under its turn's or job run's trace as a point span
 call, under the name the model used, and a refused call's event carries
 `error_code` (`Trips.Registry.error_tag/1`) and `error_summary`, the sentence
 the model received. The place lookups inside a `trip_edit` call are the
-engine's, not the model's: they go through `PlaceSearch.lookup/2`, which emits
+engine's, not the model's: they go through `PlaceSearch.lookup/3`, which emits
 no `place_search` row, and are counted on the call's `[:fermix, :trip, :edit]`
 event below.
 
@@ -1493,7 +1493,9 @@ clause for it.
 ## Management socket runs (Doctor sessions and management jobs)
 
 The management wire has two **run kinds** and no others. A Doctor session mints
-`session_id = "doctor:<rand>"`; a management job mints `"job:<rand>"`. Both go
+`session_id = "doctor:<rand>"`; a management job mints `"job:<rand>"`, and on a
+computer linked to its server, whose own jobs' ids name it, `"computer.job:<rand>"`
+(the exporter reads both prefixes as a management job). Both go
 through `FermixCore.Management.Telemetry` — never hand-rolled. Bookends are
 `[:fermix, :doctor, :session_start | :session_complete | :session_error]` and
 `[:fermix, :management_job, :start | :complete]`, with `agent: "doctor"` /

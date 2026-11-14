@@ -10,14 +10,20 @@ defmodule Fermix.CLI.Daemon.Client do
   answer.
 
   Returns `{:error, :not_running}` when the socket is missing or refuses the
-  connection: no daemon listens there, and callers treat that as the
-  authoritative "not running" signal, not a degraded path. A socket that does
-  not answer in time, at the connect as at the reply, is `{:error, :timeout}`:
-  a daemon may be there on a machine too busy to answer, so Fermix could not
-  tell whether it runs, and a verb that must not act on a running home
-  refuses on it (`describe_error/1` says so).
+  connection and no daemon holds the socket's lock (`Fermix.CLI.Daemon.Lock`):
+  no daemon lives there, and callers treat that as the authoritative "not
+  running" signal, not a degraded path. A refusal alone is not enough, since
+  on macOS a daemon too busy to accept refuses the next connect at once once
+  its backlog is full, so a socket that turns the connection away while the
+  lock is held is `{:error, :not_accepting}`, and a lock that cannot be read
+  `{:error, {:lock_unreadable, path, reason}}`. A socket that does not answer
+  in time, at the connect as at the reply, is `{:error, :timeout}`. In each of
+  the three a daemon may be there on a machine too busy to answer, so Fermix
+  could not tell whether it runs, and a verb that must not act on a running
+  home refuses on it (`describe_error/1` says so).
   """
 
+  alias Fermix.CLI.Daemon.Lock
   alias FermixCore.Management.Protocol
 
   @default_timeout_ms 3_000
@@ -86,7 +92,7 @@ defmodule Fermix.CLI.Daemon.Client do
 
     case connect(opts).(socket_path, timeout) do
       {:ok, conn} -> run_connected(conn, callback)
-      {:error, reason} -> classify(reason)
+      {:error, reason} -> classify(reason, socket_path)
     end
   end
 
@@ -115,7 +121,7 @@ defmodule Fermix.CLI.Daemon.Client do
 
     case connect(opts).(socket_path, timeout) do
       {:ok, conn} -> run_v1_exchange(conn, request, request_id, timeout)
-      {:error, reason} -> classify(reason)
+      {:error, reason} -> classify(reason, socket_path)
     end
   end
 
@@ -136,6 +142,16 @@ defmodule Fermix.CLI.Daemon.Client do
 
   def describe_error(:timeout),
     do: "Fermix could not tell whether it is running: its control socket did not answer in time"
+
+  def describe_error(:not_accepting),
+    do:
+      "Fermix could not tell whether it is running: its control socket turned the connection " <>
+        "away while Fermix holds its lock, as a Fermix too busy to answer does"
+
+  def describe_error({:lock_unreadable, path, reason}),
+    do:
+      "Fermix could not tell whether it is running: its lock #{path} could not be read " <>
+        "(#{inspect(reason)})"
 
   def describe_error(reason), do: inspect(reason)
 
@@ -312,13 +328,20 @@ defmodule Fermix.CLI.Daemon.Client do
     end
   end
 
-  # Only a socket no daemon can be listening on is not running. A connect that
-  # timed out is `:timeout`, as a reply that did: "could not tell".
-  defp classify(reason)
-       when reason in [:enoent, :econnrefused, :eaddrnotavail, :badarg],
-       do: {:error, :not_running}
+  # Only a socket no daemon can be listening on, whose lock no daemon holds, is
+  # not running: a busy daemon's full backlog refuses a connect as a stale
+  # socket does. A connect that timed out is `:timeout`, as a reply that did:
+  # "could not tell".
+  defp classify(reason, socket_path)
+       when reason in [:enoent, :econnrefused, :eaddrnotavail, :badarg] do
+    case Lock.held(socket_path) do
+      {:ok, false} -> {:error, :not_running}
+      {:ok, true} -> {:error, :not_accepting}
+      {:error, unreadable} -> {:error, unreadable}
+    end
+  end
 
-  defp classify(reason), do: {:error, reason}
+  defp classify(reason, _socket_path), do: {:error, reason}
 
   defp default_socket_path do
     fermix_home = System.get_env("FERMIX_HOME") || Path.join(System.user_home!(), ".fermix")

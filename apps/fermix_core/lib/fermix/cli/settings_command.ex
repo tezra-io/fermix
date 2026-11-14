@@ -126,27 +126,28 @@ defmodule Fermix.CLI.SettingsCommand do
   defp reload_command(section), do: "fermix settings reload #{section}"
 
   # The rows decide each literal's JSON type, and a secret row's key is refused
-  # here before anything is applied: its value is never sent.
+  # here before anything is applied: its value is never sent. The section's
+  # title, which `Render.rows/1` checked, names the machine in the saved line.
   defp set_flow(section, pairs, flags, deps) do
     ctx = context("fermix settings", :read, @read_ms, section: section)
 
     with {:ok, view} <- call(deps, "settings.get", %{"section" => section}, @read_ms),
          {:ok, rows} <- Render.rows(view),
          [] <- Args.secret_keys(pairs, rows) do
-      apply_values(section, Args.values(pairs, rows), flags, deps)
+      apply_values({section, view["title"]}, Args.values(pairs, rows), flags, deps)
     else
       [key | _more] -> secret_in_argv(:set, key, flags.json, deps)
       {:error, reason} -> refuse(reason, flags.json, ctx, deps)
     end
   end
 
-  defp apply_values(section, values, flags, deps) do
+  defp apply_values({section, title}, values, flags, deps) do
     check = "fermix settings show #{section}"
     ctx = context("fermix settings", :change, @write_ms, section: section, check: check)
 
     deps
     |> call("settings.apply", %{"section" => section, "values" => values}, @write_ms)
-    |> emit(&Render.applied(&1, section, Map.keys(values)), flags, ctx, deps)
+    |> emit(&Render.applied(&1, section, title, Map.keys(values)), flags, ctx, deps)
   end
 
   # The preflight proves a daemon that speaks `settings.*` is reachable before

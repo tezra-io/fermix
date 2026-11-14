@@ -199,6 +199,8 @@ defmodule FermixCore.Management.AlwaysOn do
                         "working by itself within half an hour."
   @keep_sentence "Name only what this computer may keep on for your server."
   @review_kept_sentence "Your review could not be saved. See the daemon log."
+  @restart_unread_sentence "Your server answered the restart in a form this computer does not " <>
+                             "read, so whether it restarts is not known. See the daemon log."
   # Restore here's job.
   @restore_kind :home_restore
   # A move the server reports, from its request to its undoing.
@@ -240,7 +242,8 @@ defmodule FermixCore.Management.AlwaysOn do
       @no_copy_sentence,
       @code_left_sentence,
       @keep_sentence,
-      @review_kept_sentence
+      @review_kept_sentence,
+      @restart_unread_sentence
     ]
   end
 
@@ -474,18 +477,32 @@ defmodule FermixCore.Management.AlwaysOn do
 
   # Restart <server> (M97 D28c): only a linked computer's summary offers it,
   # so the step is always sent over the link, and the server's answer (now,
-  # or once its computers' work ends) is the result.
+  # or once its computers' work ends) is the result. An answer of any other
+  # shape is refused with a sentence, its keys in the log.
   defp restart_server(opts) do
     forward = Keyword.fetch!(opts, :primary_forward)
 
     case forward.(server_request("home.restart", %{}), []) do
-      {:ok, %{"when" => _when, "sentence" => _said} = answer} ->
-        {:ok, Map.take(answer, ["when", "wait_s", "sentence"])}
+      {:ok, %{"when" => moment, "wait_s" => wait_s, "sentence" => said}}
+      when moment in ["now", "after_work"] and is_integer(wait_s) and wait_s >= 0 and
+             is_binary(said) ->
+        {:ok, %{"when" => moment, "wait_s" => wait_s, "sentence" => said}}
+
+      {:ok, unread} ->
+        Logger.error(
+          "always on: the server answered home.restart in a form this computer does not " <>
+            "read: #{answer_shape(unread)}"
+        )
+
+        unavailable(@restart_unread_sentence)
 
       {:error, _code, _details} = refused ->
         refused
     end
   end
+
+  defp answer_shape(answer) when is_map(answer), do: inspect(answer |> Map.keys() |> Enum.sort())
+  defp answer_shape(_answer), do: "not an object"
 
   # Add a computer (M97 §3.1): the server's code for a computer that joins,
   # answered once.

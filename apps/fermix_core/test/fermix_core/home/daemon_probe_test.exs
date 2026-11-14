@@ -1,8 +1,13 @@
 defmodule FermixCore.Home.DaemonProbeTest do
   use ExUnit.Case, async: true
 
+  alias Fermix.CLI.Daemon.Lock
   alias FermixCore.Home.DaemonProbe
   alias FermixTestSupport.SafeRm
+
+  # The probe's reply bound over a real socket: an answer returns at once, so
+  # only a failing run waits it out (the client's own 3 s raced a busy runner).
+  @hello_ms 10_000
 
   test "the three answers an injected hello can give" do
     assert DaemonProbe.stopped("/invented/home", hello: fn -> {:error, :not_running} end) == :ok
@@ -17,9 +22,8 @@ defmodule FermixCore.Home.DaemonProbeTest do
   # The probe over a real socket, against a listener that answers `hello` as
   # soon as the frame arrives. Not the engine's daemon: its answer runs the
   # management router through several processes and reads this VM's global
-  # settings, so on a busy machine it can miss the client's own deadline
-  # (`Daemon.Client`'s, the product's), and the probe then reads "could not
-  # tell". What this asserts is the probe's answer to a socket that answers.
+  # settings. What this asserts is the probe's answer to a socket that
+  # answers, within a bound the test names rather than the client's own.
   test "a home with no socket is stopped, and a home whose daemon answers is running" do
     home = short_home!()
     assert DaemonProbe.stopped(home) == :ok
@@ -28,8 +32,27 @@ defmodule FermixCore.Home.DaemonProbeTest do
     test = self()
     start_supervised!({Task, fn -> answer_hello(listen, test) end})
 
-    assert DaemonProbe.stopped(home) == {:error, :daemon_running}
+    assert DaemonProbe.stopped(home, hello_timeout: @hello_ms) == {:error, :daemon_running}
     assert_receive {:asked, "hello"}
+  end
+
+  # A daemon that crashed left its socket and its lock file, and holds
+  # neither: stopped. One that holds its lock but turns the connection away
+  # is too busy to answer: could not tell.
+  test "a stale socket is stopped, and one whose daemon holds the lock could not tell" do
+    home = short_home!()
+    socket = Path.join(home, "daemon.sock")
+    {:ok, listen} = :gen_tcp.listen(0, [:binary, active: false, ifaddr: {:local, socket}])
+    :ok = :gen_tcp.close(listen)
+    {:ok, left} = Lock.acquire(socket)
+    :ok = Lock.release(left)
+
+    assert DaemonProbe.stopped(home) == :ok
+
+    {:ok, lock} = Lock.acquire(socket)
+    on_exit(fn -> Lock.release(lock) end)
+
+    assert DaemonProbe.stopped(home) == {:error, {:daemon_probe_failed, :not_accepting}}
   end
 
   # Listening before the probe dials: `listen/2` returns once the socket is

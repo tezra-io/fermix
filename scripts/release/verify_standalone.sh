@@ -931,6 +931,123 @@ holds_only_boot_key "$enroll_home" ||
   fail "fermix home enroll left more than the boot's secret_key_base at $enroll_home: $(ls -A "$enroll_home")"
 [ -f "$enroll_code" ] || fail "fermix home enroll removed the code file it refused"
 
+# ── fermix status and the daemon's lock, run from this artifact ────────────
+# Whether Fermix runs is read from its control socket and, when the socket
+# turns the connection away, from the lock a running daemon holds beside it
+# for its whole life (`daemon.sock.lock`, a SQLite file it keeps locked in
+# exclusive mode): on macOS a daemon too busy to accept is turned away
+# exactly as a stopped one is. That read opens SQLite through the Exqlite
+# NIF in the tree-less command line, which no other stage here does, and
+# only where a lock file exists, which no other throwaway home holds. It runs
+# before the migrate-to-app stage because that stage ends the script on a
+# Linux target.
+#
+# Two homes hold what a daemon that crashed leaves: its socket, bound and
+# closed with no one listening, and its lock, written and let go of. In the
+# first nothing holds the lock, so `fermix status` must say not running and
+# exit 3. In the second a stand-in daemon holds it, a SQLite connection in
+# exclusive locking mode as the daemon's is, so the socket turning the
+# connection away is a Fermix too busy to answer: it must say it could not
+# tell and exit 1. Once the stand-in is stopped by its PID, which drops its
+# lock as a crash would, that home must read not running again. The stand-in
+# also ends by itself once this run's directory is gone, so a failed stage
+# leaves no process behind. The homes sit directly under the run's directory
+# so the socket's address stays within macOS's 104 bytes, and the CLI's
+# connect is refused as a stale socket's is; the socket is bound by its name
+# inside the home, so a longer temporary directory still lays it out.
+lock_free_home="$runtime_root/st-free"
+lock_held_home="$runtime_root/st-held"
+lock_holder_ready="$runtime_root/lock-holder.pid"
+lock_out="$runtime_root/lock-status.out"
+lock_err="$runtime_root/lock-status.err"
+mkdir -m 700 "$lock_free_home" "$lock_held_home"
+
+# The two files a daemon that crashed leaves in the home $1.
+stale_daemon_files() {
+  uv run --no-project python -c '
+import os, socket, sqlite3, sys
+os.chdir(sys.argv[1])
+listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+listener.bind("daemon.sock")
+listener.close()
+lock = sqlite3.connect("daemon.sock.lock")
+lock.execute("CREATE TABLE holder (os_pid INTEGER)")
+lock.commit()
+lock.close()
+' "$1"
+}
+
+# Holds the lock $1 as a running daemon does and, once it holds it, writes
+# its PID to $2; it lets go when stopped or when the run's directory is gone,
+# and after two minutes at most.
+hold_daemon_lock() {
+  uv run --no-project python -c '
+import os, sqlite3, sys, time
+lock_path, ready = sys.argv[1], sys.argv[2]
+lock = sqlite3.connect(lock_path, timeout=0, isolation_level=None)
+lock.execute("PRAGMA locking_mode=EXCLUSIVE")
+lock.execute("BEGIN EXCLUSIVE")
+lock.execute("INSERT INTO holder (os_pid) VALUES (?)", (os.getpid(),))
+lock.execute("COMMIT")
+with open(ready + ".partial", "w") as stream:
+    stream.write(str(os.getpid()))
+os.rename(ready + ".partial", ready)
+for _ in range(1200):
+    if not os.path.isdir(os.path.dirname(ready)):
+        break
+    time.sleep(0.1)
+lock.close()
+' "$1" "$2"
+}
+
+# Runs `fermix status` in the home $1; its stderr lands in $lock_err and its
+# exit status in $lock_status.
+run_lock_status() {
+  lock_status=0
+  env -u FERMIX_OPIK_ENABLED HOME="$home" FERMIX_HOME="$1" \
+    "$artifact" status < /dev/null > "$lock_out" 2> "$lock_err" || lock_status=$?
+  printf '%s\n' "$(cat "$lock_err")"
+}
+
+stale_daemon_files "$lock_free_home" || fail "cannot lay out a crashed daemon's socket and lock (the reason is above)"
+stale_daemon_files "$lock_held_home" || fail "cannot lay out a crashed daemon's socket and lock (the reason is above)"
+
+run_lock_status "$lock_free_home"
+[ "$lock_status" -eq 3 ] ||
+  fail "fermix status beside a stale socket and a lock nothing holds must exit 3, got $lock_status"
+grep -Fxq "fermix: not running" "$lock_err" ||
+  fail "fermix status beside a stale socket and a lock nothing holds did not say Fermix is not running"
+
+hold_daemon_lock "$lock_held_home/daemon.sock.lock" "$lock_holder_ready" &
+lock_holder_job=$!
+for _ in $(seq 1 100); do
+  [ -s "$lock_holder_ready" ] && break
+  sleep 0.1
+done
+[ -s "$lock_holder_ready" ] ||
+  fail "the stand-in daemon never took its lock, so this stage would prove nothing"
+lock_holder_pid="$(cat "$lock_holder_ready")"
+kill -0 "$lock_holder_pid" 2>/dev/null ||
+  fail "the stand-in daemon is not running, so this stage would prove nothing"
+
+run_lock_status "$lock_held_home"
+[ "$lock_status" -eq 1 ] ||
+  fail "fermix status beside a stale socket whose lock another process holds must exit 1, got $lock_status"
+grep -Fq "fermix status: Fermix could not tell whether it is running: its control socket turned the connection away while Fermix holds its lock" "$lock_err" ||
+  fail "fermix status beside a stale socket whose lock another process holds did not say it could not tell"
+
+kill "$lock_holder_pid"
+lock_holder_status=0
+wait "$lock_holder_job" || lock_holder_status=$?
+! kill -0 "$lock_holder_pid" 2>/dev/null ||
+  fail "the stand-in daemon did not stop (exit $lock_holder_status), so its lock would still be held"
+
+run_lock_status "$lock_held_home"
+[ "$lock_status" -eq 3 ] ||
+  fail "fermix status once the process holding its lock is gone must exit 3, got $lock_status"
+grep -Fxq "fermix: not running" "$lock_err" ||
+  fail "fermix status once the process holding its lock is gone did not say Fermix is not running"
+
 # ── migrate-to-app preflight, run from this artifact ────────────────────────
 # `fermix migrate-to-app` with no `--yes` is a plan: it inspects the account
 # and mutates nothing. It is also the one verb that reads PATH, the process

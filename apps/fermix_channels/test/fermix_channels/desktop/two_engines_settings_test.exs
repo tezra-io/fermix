@@ -10,16 +10,31 @@ defmodule FermixChannels.Desktop.TwoEnginesSettingsTest do
   Each daemon reads its own settings (`:snapshot`) and stores through its
   own writers, which tell the test which engine wrote what, so neither
   engine touches this VM's configuration and nothing is written to disk.
+  What it proves is which engine's writer each request reached, and that
+  the other's was never called: two engines' real `machine.toml` files
+  cannot share one VM's configuration, so where a section's write lands on
+  disk is `FermixCore.Setup.ConfigStoreMachineTest`'s.
   Both engines say §19.3's rule as they do: the real session's `hello_ack`
   says `caps.computer.machine_settings`, the real relay's `hello` says it,
   and the primary's peer hands the hello's word to the `manage` family. An
   older engine is stood in for by a tag: `server_rule: false` answers the
   computer with an older server's `hello_ack`, and `computer_rule: false`
   serves the forwarded calls as for a computer whose hello said nothing
-  (the session reading a hello without the flag is `DesktopSessionTest`'s).
+  (the session reading a hello without the flag is `DesktopSessionTest`'s);
+  `mac_primary: true` makes the primary a Mac that took the home back,
+  which publishes its own screen and history.
+
+  No product clock decides a result here: the relay's timers are the
+  test's (`DesktopRail.start_relay!/3`) and never fire, and a composed
+  part is asked with the method's own forward deadline rather than the
+  composed one, so a slow runner only makes a call slower. What still
+  bounds a call is `Relay.forward/3`'s wait for the relay (its deadline
+  and a second), and the client's `@reply_ms`.
   """
 
-  use ExUnit.Case, async: true
+  # Two real daemons, a relay and a session per test: run alone, so a busy
+  # runner's other modules never share the cores the forwarded calls need.
+  use ExUnit.Case, async: false
 
   alias Fermix.CLI.Daemon
   alias Fermix.CLI.Daemon.Client
@@ -34,6 +49,8 @@ defmodule FermixChannels.Desktop.TwoEnginesSettingsTest do
   @reply_ms 15_000
   @older_server "garden server runs an older Fermix, which takes its own sandbox and coding " <>
                   "settings only on the server. It updates on its own."
+  @older_server_does "garden server runs an older Fermix, which does this only on the " <>
+                       "server itself. It updates on its own."
   @behind "The server runs an older Fermix than this computer. It updates on its own once " <>
             "the app for each computer that keeps your backups carries the newer one."
 
@@ -46,12 +63,15 @@ defmodule FermixChannels.Desktop.TwoEnginesSettingsTest do
       computer: start_jobs!(:computer, task_supervisor)
     }
 
-    server = start_daemon!(:server, task_supervisor, %{jobs: jobs.server}, [])
+    server_seams = %{jobs: jobs.server, mac_primary: Map.get(ctx, :mac_primary, false)}
+    server = start_daemon!(:server, task_supervisor, server_seams, [])
     older_computer? = Map.get(ctx, :computer_rule, true) == false
     behind? = Map.get(ctx, :server_behind, false)
 
     serve = fn frame, computer ->
-      send(test, {:served, Jason.decode!(frame)["method"]})
+      %{"method" => method, "params" => params} = Jason.decode!(frame)
+      send(test, {:served, method})
+      send(test, {:forwarded, method, params})
       send(test, {:computer_rule, computer.machine_settings})
       computer = if older_computer?, do: %{computer | machine_settings: false}, else: computer
       if behind?, do: behind_answer(frame), else: Daemon.serve_forwarded(frame, computer, server)
@@ -67,9 +87,13 @@ defmodule FermixChannels.Desktop.TwoEnginesSettingsTest do
     relay = DesktopRail.start_relay!(root, primary)
     DesktopRail.await_connected(relay)
 
+    # A composed part waits as long as its method's forward (the moduledoc):
+    # the composed deadline is Placement's, tested there.
+    forward = fn request, _opts -> Relay.forward(relay, request, []) end
+
     computer =
       start_daemon!(:computer, task_supervisor, %{jobs: jobs.computer, relay: relay},
-        forwarding: [primary_forward: &Relay.forward(relay, &1, &2)]
+        forwarding: [primary_forward: forward]
       )
 
     %{socket: computer, relay: relay}
@@ -119,6 +143,16 @@ defmodule FermixChannels.Desktop.TwoEnginesSettingsTest do
   end
 
   test "each machine section sent to the server is written there, and only there", ctx do
+    # The server's own mode sent again changes nothing, so nothing is said:
+    # a write that moved no value never takes the place of one that did.
+    open = %{"sandbox_mode" => "open"}
+
+    assert {:ok, _applied} =
+             request(ctx, "settings.apply", %{"section" => "sandbox", "values" => open})
+
+    assert_receive {:applied, :server, "sandbox", ^open}
+    refute_received {:said, _change}
+
     writes = [
       {"sandbox", %{"sandbox_mode" => "standard"}},
       {"harness_machine", %{"harness_approved" => true}},
@@ -149,6 +183,47 @@ defmodule FermixChannels.Desktop.TwoEnginesSettingsTest do
              request(ctx, "settings.get", %{"section" => "sandbox"})
 
     assert Enum.any?(rows, &(&1["key"] == "env:GARDEN_TOKEN"))
+  end
+
+  # The review's failure: a primary that is a Mac, which took the home back
+  # beside a second linked computer, served that computer's write of its own
+  # screen or history, and the computer listed them as the server's.
+  @tag mac_primary: true
+  test "a primary that is a Mac keeps its own screen and history to itself", ctx do
+    assert {:ok, %{"sections" => sections, "primary_missing" => nil}} =
+             request(ctx, "settings.sections", %{})
+
+    ids = Enum.map(sections, & &1["id"])
+    for id <- ~w(computer_use computer_history accessories), do: refute(id in ids, id)
+    assert "computer.computer_use" in ids
+    assert "sandbox" in ids
+
+    for {section, values} <- [
+          {"computer_use", %{"computer_use_enabled" => true}},
+          {"computer_history", %{"computer_history_enabled" => true}}
+        ] do
+      assert {:error, {:management_error, "device_class_method", _message, details}} =
+               request(ctx, "settings.apply", %{"section" => section, "values" => values})
+
+      assert details["method"] == "settings.apply"
+      assert_receive {:served, "settings.apply"}
+    end
+
+    refute_received {:applied, _engine, _section, _values}
+  end
+
+  # The Providers pane asks for both in one call: the provider the home's
+  # settings chose is the server's, so the whole call is, as auth.import is.
+  test "the Providers pane's detection is answered by the server", ctx do
+    assert {:ok, %{"results" => results}} =
+             request(ctx, "setup.detect", %{"targets" => ["claude_code", "existing_primary"]})
+
+    assert_receive {:served, "setup.detect"}
+
+    assert [
+             %{"target" => "claude_code", "present" => false},
+             %{"target" => "existing_primary", "present" => true, "detail" => "anthropic"}
+           ] = results
   end
 
   test "each of this computer's own sections is written here, and only here", ctx do
@@ -192,6 +267,17 @@ defmodule FermixChannels.Desktop.TwoEnginesSettingsTest do
              })
 
     assert details == %{"section" => "computer.sandbox"}
+
+    # A sandbox value of this computer's own refused the same way names this
+    # computer's sandbox too, never the plain one, which is the server's.
+    assert {:error, {:management_error, "external_change", _message, details}} =
+             request(ctx, "secret.set", %{
+               "id" => "computer.env:STALE_TOKEN",
+               "value" => "stale-02be"
+             })
+
+    assert details == %{"section" => "computer.sandbox"}
+    refute_received {:stored, _engine, _id}
 
     for {params, engine} <- [
           {%{"section" => "computer.sandbox"}, :computer},
@@ -270,7 +356,13 @@ defmodule FermixChannels.Desktop.TwoEnginesSettingsTest do
   end
 
   test "an id that is no section of this computer's is refused here, and nothing is sent", ctx do
-    for section <- ["computer.providers.openai", "computer.harness_machine", "computer."] do
+    # `computer` is published as itself: `computer.computer` names nothing.
+    for section <- [
+          "computer.providers.openai",
+          "computer.harness_machine",
+          "computer.",
+          "computer.computer"
+        ] do
       assert {:error, {:management_error, "invalid_params", _message, %{"field" => "section"}}} =
                request(ctx, "settings.get", %{"section" => section}),
              section
@@ -283,31 +375,62 @@ defmodule FermixChannels.Desktop.TwoEnginesSettingsTest do
   end
 
   @tag server_rule: false
-  test "a server without the rule is asked for none of its machine settings", ctx do
+  test "a server without the rule is asked for none of what the rule moved to it", ctx do
     assert {:ok, %{"sections" => sections}} = request(ctx, "settings.sections", %{})
-    ids = Enum.map(sections, & &1["id"])
+    titles = Map.new(sections, &{&1["id"], &1["title"]})
 
-    refute "sandbox" in ids
-    refute "harness_machine" in ids
-    refute "browser" in ids
-    assert "computer.sandbox" in ids
+    refute Map.has_key?(titles, "sandbox")
+    refute Map.has_key?(titles, "harness_machine")
+    assert Map.has_key?(titles, "computer.sandbox")
 
-    for {method, params} <- [
-          {"settings.get", %{"section" => "sandbox"}},
+    for {method, params, sentence} <- [
+          {"settings.get", %{"section" => "sandbox"}, @older_server},
           {"settings.apply",
-           %{"section" => "harness_machine", "values" => %{"harness_approved" => true}}},
-          {"secret.set", %{"id" => "env:GARDEN_TOKEN", "value" => "garden-19aa"}}
+           %{"section" => "harness_machine", "values" => %{"harness_approved" => true}},
+           @older_server},
+          {"secret.set", %{"id" => "env:GARDEN_TOKEN", "value" => "garden-19aa"}, @older_server},
+          {"coding_agents.check", %{}, @older_server_does},
+          {"capabilities.install.start", %{"target" => "meetbot"}, @older_server_does},
+          {"setup.detect", %{"targets" => ["claude_code", "existing_primary"]},
+           @older_server_does}
         ] do
       assert {:error, {:management_error, "unavailable", _message, details}} =
                request(ctx, method, params)
 
-      assert details == %{"capability" => "settings", "sentence" => @older_server}
+      assert details == %{"capability" => "settings", "sentence" => sentence}
+      refute_received {:served, ^method}
     end
 
     refute_received {:applied, _engine, _section, _values}
     refute_received {:stored, _engine, _id}
+    refute_received {:installing, _engine}
 
     assert %{machine_settings: false, connected: true} = Relay.status(ctx.relay)
+  end
+
+  # The review's failure: the Browser pane went away until the server
+  # updated, though such a server serves its browser as the home's, and a
+  # reload naming a section reached a server that takes none.
+  @tag server_rule: false
+  test "a server without the rule is sent the rest as before the rule", ctx do
+    assert {:ok, %{"sections" => sections}} = request(ctx, "settings.sections", %{})
+
+    assert %{"title" => "Browser on garden server"} =
+             Enum.find(sections, &(&1["id"] == "browser"))
+
+    values = %{"browser_max_tabs" => 6}
+
+    assert {:ok, _applied} =
+             request(ctx, "settings.apply", %{"section" => "browser", "values" => values})
+
+    assert_receive {:applied, :server, "browser", ^values}
+
+    assert {:ok, %{"reloaded" => true}} =
+             request(ctx, "settings.reload", %{"section" => "channels.telegram"})
+
+    assert_receive {:forwarded, "settings.reload", params}
+    assert params == %{}
+    assert_receive {:reloaded, :server}
   end
 
   # A server on an older protocol than this computer's refuses each of its
@@ -449,15 +572,18 @@ defmodule FermixChannels.Desktop.TwoEnginesSettingsTest do
     if engine == :server, do: name, else: socket_path
   end
 
+  # The server is an Always On server's primary, or with `mac_primary` a Mac
+  # that took the home back, which publishes its own screen and history.
   defp management_opts(engine, seams) do
     test = self()
+    mac_primary? = Map.get(seams, :mac_primary, false)
 
     [
       engine_role: role(engine),
       snapshot: snapshot(engine),
       computer?: engine == :computer,
-      server_primary?: engine == :server,
-      macos?: engine == :computer,
+      server_primary?: engine == :server and not mac_primary?,
+      macos?: engine == :computer or mac_primary?,
       settings_writer: fn
         section, %{"sandbox_profile" => _profile}, _opts ->
           {:error, {:external_change, [section]}}
@@ -470,9 +596,13 @@ defmodule FermixChannels.Desktop.TwoEnginesSettingsTest do
         send(test, {:reloaded, engine})
         {:ok, %{"reloaded" => true, "restart" => restart()}}
       end,
-      secret_writer: fn id, _value ->
-        send(test, {:stored, engine, id})
-        {:ok, %{"id" => id, "present" => true, "restart" => restart()}}
+      secret_writer: fn
+        "env:STALE_TOKEN", _value ->
+          {:error, {:external_change, ["sandbox"]}}
+
+        id, _value ->
+          send(test, {:stored, engine, id})
+          {:ok, %{"id" => id, "present" => true, "restart" => restart()}}
       end,
       secret_clearer: fn id ->
         send(test, {:cleared, engine, id})
@@ -504,8 +634,18 @@ defmodule FermixChannels.Desktop.TwoEnginesSettingsTest do
       end
     end
 
-    [jobs: [server: seams.jobs], install: install] ++ link(engine, seams)
+    [jobs: [server: seams.jobs], install: install, probes: probes(engine)] ++
+      link(engine, seams)
   end
+
+  # What each engine's setup.detect finds, told apart: the provider its
+  # settings chose, and whether Claude Code's sign-in is there. Nothing on
+  # this machine is asked.
+  defp probes(:server),
+    do: [existing_primary: fn -> {:ok, :anthropic} end, claude_code: fn -> false end]
+
+  defp probes(:computer),
+    do: [existing_primary: fn -> {:ok, nil} end, claude_code: fn -> true end]
 
   defp link(:computer, %{relay: relay}),
     do: [home: [link_status: fn -> %{primary: Relay.status(relay)} end]]

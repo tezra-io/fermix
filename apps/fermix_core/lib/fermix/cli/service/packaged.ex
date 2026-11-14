@@ -41,6 +41,8 @@ defmodule Fermix.CLI.Service.Packaged do
   alias FermixCore.Setup.ConfigStore
   alias FermixCore.Setup.WebListener
 
+  require Logger
+
   @unit "fermix.service"
   @drop_in_name "fermix-observability.conf"
   @engine_manifest "/usr/share/fermix/engine.json"
@@ -392,12 +394,25 @@ defmodule Fermix.CLI.Service.Packaged do
   end
 
   # The generation being replaced, and the admission lease taken from it. A
-  # daemon that does not answer has neither, and that is the recovery case
-  # rather than a refusal.
+  # daemon that is not running has neither, and that is the recovery case
+  # rather than a refusal. One Fermix could not tell from a stopped one (too
+  # busy to answer, `Client.describe_error/1`) gives neither either, and is
+  # restarted the same way, since the restart is the way out of that; the log
+  # says so, because nothing holds new work back before it.
   defp previous_generation(home, opts) do
     case hello(home, opts) do
-      {:ok, hello} -> prepared_generation(engine_pid(hello), opts)
-      {:error, _not_running} -> {:ok, %{pid: nil, lease: nil}}
+      {:ok, hello} ->
+        prepared_generation(engine_pid(hello), opts)
+
+      {:error, :not_running} ->
+        {:ok, %{pid: nil, lease: nil}}
+
+      {:error, reason} ->
+        Logger.warning(
+          "fermix restart: #{Client.describe_error(reason)}, so it restarts it without a lease"
+        )
+
+        {:ok, %{pid: nil, lease: nil}}
     end
   end
 
@@ -508,10 +523,19 @@ defmodule Fermix.CLI.Service.Packaged do
     with {:ok, contents} <- File.read(path), do: Jason.decode(contents)
   end
 
+  # The published status names an engine that answered, and has no word for
+  # one too busy to: that one is said in the log, never taken for a stop.
   defp bound_hello({:ok, %{home: home}}, opts) do
     case hello(home, opts) do
-      {:ok, hello} -> hello
-      {:error, _not_running} -> nil
+      {:ok, hello} ->
+        hello
+
+      {:error, :not_running} ->
+        nil
+
+      {:error, reason} ->
+        Logger.warning("fermix service status: #{Client.describe_error(reason)}")
+        nil
     end
   end
 

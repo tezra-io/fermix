@@ -2,6 +2,7 @@ defmodule FermixCore.Management.RouterTest do
   use ExUnit.Case, async: true
 
   alias FermixCore.BuildInfo
+  alias FermixCore.Computers.Computer
   alias FermixCore.Harness.MachineStore
   alias FermixCore.Management.Doctor
   alias FermixCore.Management.Jobs
@@ -521,6 +522,122 @@ defmodule FermixCore.Management.RouterTest do
 
       assert {:error, :config_unreadable, %{"sentence" => "line 14."}} =
                Router.route(v2("settings.apply", params), settings_writer: unreadable)
+    end
+
+    # M97 §19.5: a change to the server's sandbox or coding approval sent by
+    # one of its computers is recorded once it stood, and only where a value
+    # moved, so a write that changed nothing never displaces what was told.
+    test "a change from a computer is recorded for each of the server's limits it moved" do
+      test = self()
+
+      before = %{
+        "sandbox_mode" => "open",
+        "sandbox_profile" => "bare",
+        "harness_approved" => false
+      }
+
+      reader = fn
+        "sandbox", _opts ->
+          {:ok,
+           %{
+             "id" => "sandbox",
+             "title" => "Sandbox",
+             "rows" => [
+               %{"key" => "sandbox_mode", "value" => before["sandbox_mode"]},
+               %{"key" => "sandbox_profile", "value" => before["sandbox_profile"]},
+               %{"key" => "sandbox_env_allow", "value" => ["GARDEN_TOKEN"]}
+             ]
+           }}
+
+        "harness_machine", _opts ->
+          {:ok,
+           %{
+             "id" => "harness_machine",
+             "title" => "This server",
+             "rows" => [%{"key" => "harness_approved", "value" => before["harness_approved"]}]
+           }}
+      end
+
+      opts = [
+        actor: {:desktop, "dev-1"},
+        settings_reader: reader,
+        settings_writer: fn _section, values, _opts -> {:ok, %{"applied" => Map.keys(values)}} end,
+        record_change: fn _home, change -> send(test, {:said, change}) && :ok end,
+        computer_lookup: fn "dev-1" ->
+          {:ok, %Computer{device_id: "dev-1", name: "loft Linux"}}
+        end
+      ]
+
+      apply = fn section, values, opts ->
+        Router.route(v2("settings.apply", %{"section" => section, "values" => values}), opts)
+      end
+
+      # Nothing moved: nothing is said.
+      assert {:ok, _applied} = apply.("sandbox", %{"sandbox_mode" => "open"}, opts)
+      assert {:ok, _applied} = apply.("harness_machine", %{"harness_approved" => false}, opts)
+      refute_received {:said, _change}
+
+      assert {:ok, _applied} =
+               apply.(
+                 "sandbox",
+                 %{
+                   "sandbox_mode" => "open",
+                   "sandbox_profile" => "extended",
+                   "sandbox_env_allow" => ["GARDEN_TOKEN", "LEDGER_TOKEN"]
+                 },
+                 opts
+               )
+
+      assert_received {:said,
+                       %{what: :sandbox_profile, value: "extended", computer: "loft Linux"}}
+
+      assert_received {:said,
+                       %{
+                         what: :sandbox_env_allow,
+                         value: ["GARDEN_TOKEN", "LEDGER_TOKEN"],
+                         computer: "loft Linux"
+                       }}
+
+      refute_received {:said, _change}
+
+      assert {:ok, _applied} = apply.("harness_machine", %{"harness_approved" => true}, opts)
+      assert_received {:said, %{what: :harness_approved, value: true}}
+
+      # The owner's own socket, and a write that did not stand, say nothing.
+      assert {:ok, _applied} =
+               apply.("sandbox", %{"sandbox_mode" => "strict"}, Keyword.delete(opts, :actor))
+
+      refused = Keyword.put(opts, :settings_writer, fn _s, _v, _o -> {:error, {:busy, "x"}} end)
+      assert {:error, :busy, _details} = apply.("sandbox", %{"sandbox_mode" => "strict"}, refused)
+      refute_received {:said, _change}
+    end
+
+    # M97 §19.3: `computer` is published as itself, and no other id names it.
+    test "this computer's own section answers only under the id it is published as" do
+      opts = [computer?: true, macos?: true]
+
+      for method <- ~w(settings.get settings.apply) do
+        params = %{"section" => "computer.computer", "values" => %{"computer_enabled" => true}}
+        params = if method == "settings.get", do: Map.delete(params, "values"), else: params
+
+        assert {:error, :invalid_params, %{"field" => "section"}} =
+                 Router.route(v2(method, params), opts),
+               method
+      end
+    end
+
+    # The refusal of a sandbox value of this computer's own names this
+    # computer's sandbox, so the reload a surface sends is answered here.
+    test "an outside edit refusing this computer's sandbox value names this computer's section" do
+      changed = fn "env:LEDGER_TOKEN", _value -> {:error, {:external_change, ["sandbox"]}} end
+      params = %{"id" => "computer.env:LEDGER_TOKEN", "value" => "ledger-7c41"}
+
+      assert {:error, :external_change, %{"section" => "computer.sandbox"}} =
+               Router.route(v2("secret.set", params),
+                 computer?: true,
+                 macos?: true,
+                 secret_writer: changed
+               )
     end
 
     test "a reload answers the state it left behind" do

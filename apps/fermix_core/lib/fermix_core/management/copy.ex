@@ -132,8 +132,10 @@ defmodule FermixCore.Management.Copy do
                    own_server_tailscale review_note notice_computer_review
                    notice_server_sandbox computer_asks join_dialing join_waiting
                    notice_computer_joined notice_computer_change)a
-  # The sandbox's modes a change from a computer can name (`Sandbox.Config`).
+  # The sandbox's modes and command profiles a change from a computer can
+  # name (`Sandbox.Config`).
   @sandbox_modes ~w(strict standard open)
+  @command_profiles ~w(bare assistant extended)
   # The keys a screen does not draw as its own short words (the moduledoc).
   @unbounded_keys ~w(confirm_restore_here confirm_return_move confirm_forget
                      confirm_change_passphrase notice_ready notice_moved notice_backup_week
@@ -252,12 +254,16 @@ defmodule FermixCore.Management.Copy do
     # The Always On pane's section of this computer's switches, as it is
     # titled.
     "This computer",
-    # The sandbox's modes and the coding pane's section, named as their
-    # settings show them (M97 D28: what a change from a computer set, and
-    # where the move's review says to allow coding agents on the server).
+    # The sandbox's modes and command profiles and the coding pane's section,
+    # named as their settings show them (M97 D28: what a change from a
+    # computer set, and where the move's review says to allow coding agents
+    # on the server).
     "Strict",
     "Standard",
     "Open",
+    "Bare",
+    "Assistant",
+    "Extended",
     "Coding agents",
     # GitHub's webhook form, named as GitHub labels it.
     "Add webhook",
@@ -1038,10 +1044,21 @@ defmodule FermixCore.Management.Copy do
   def summary_label(:move_back, %{machine: machine}), do: "Move back to this #{machine}"
   def summary_label(:restore_here, %{machine: machine}), do: "Restore on this #{machine}"
 
-  # A change from a computer, in the words the sandbox's settings row and the
-  # coding pane use: the mode's own title, and whether agents may run there.
+  # A change from a computer, in the words the sandbox's settings rows and the
+  # coding pane use: the mode's and the profile's own titles, the allowed
+  # names' row by its label (the names are not said), and whether agents may
+  # run there.
   defp computer_change({:sandbox_mode, mode}, server, name) when mode in @sandbox_modes,
     do: "#{possessive(server)} sandbox was set to #{String.capitalize(mode)} from #{name}."
+
+  defp computer_change({:sandbox_profile, profile}, server, name)
+       when profile in @command_profiles,
+       do:
+         "#{possessive(server)} command profile was set to #{String.capitalize(profile)} " <>
+           "from #{name}."
+
+  defp computer_change({:sandbox_env_allow, names}, server, name) when is_list(names),
+    do: "#{possessive(server)} allowed environment variables were changed from #{name}."
 
   defp computer_change({:harness_approved, true}, server, name),
     do: "Coding agents were allowed to run on #{named(server)} from #{name}."

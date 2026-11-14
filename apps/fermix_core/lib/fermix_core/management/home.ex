@@ -135,10 +135,12 @@ defmodule FermixCore.Management.Home do
   own restart state (`Management.Settings.restart/0`, `{required, reasons}`)
   and `profile` its own keychain profile, on every engine, so on a linked
   computer the top-level ones are the computer's and `primary_home`'s are the
-  server's. `computer_change` is, on the primary, the newest change one of
-  its computers made to its sandbox or coding approval
-  (`Home.ChangedFromComputer`, `{at, computer, what, value}`), null when
-  none and on every other engine; its notice is in the summary.
+  server's. `computer_changes` is, on the primary, the newest change its
+  computers made to each of its limits, its sandbox's mode, command profile
+  and allowed environment names and its coding approval
+  (`Home.ChangedFromComputer`, `{at, computer, what, value}` each), newest
+  first; empty when none and on every other engine. The newest one's notice
+  is in the summary.
   `home.restart` is the server's restart a linked computer asks for
   (`restart/1`), rail-only.
 
@@ -356,7 +358,7 @@ defmodule FermixCore.Management.Home do
       restart_hold: restart_hold(move.move, opts),
       restart: Keyword.get(opts, :engine_restart, &Settings.restart/0).(),
       profile: profile(opts),
-      computer_change: computer_change(home, role, opts)
+      computer_changes: computer_changes(home, role, opts)
     }
 
     facts = put_update(facts, role, listed, opts)
@@ -596,22 +598,30 @@ defmodule FermixCore.Management.Home do
     })
   end
 
-  # A change from a computer to this server's sandbox or coding approval
-  # (M97 §19.5), on the primary; one that cannot be read is none, logged once
+  # The changes from a computer to this server's limits (M97 §19.5), on the
+  # primary, newest first; a record that cannot be read is none, logged once
   # while it stays so.
-  defp computer_change(home, %{role: :primary}, opts) do
-    read = ChangedFromComputer.read(home)
+  defp computer_changes(home, %{role: :primary}, opts) do
     memory = Keyword.get(opts, :unreadable_files, UnreadableFiles)
-    result = if read == :absent, do: :ok, else: unread(read)
-    :ok = UnreadableFiles.log_read(ChangedFromComputer.path(home), "home status", result, memory)
 
-    case read do
-      {:ok, change} -> change
-      _absent_or_unreadable -> nil
-    end
+    ChangedFromComputer.whats()
+    |> Enum.flat_map(&computer_change(home, &1, memory))
+    |> ChangedFromComputer.newest_first()
   end
 
-  defp computer_change(_home, _record, _opts), do: nil
+  defp computer_changes(_home, _record, _opts), do: []
+
+  defp computer_change(home, what, memory) do
+    read = ChangedFromComputer.read(home, what)
+    result = if read == :absent, do: :ok, else: unread(read)
+    file = ChangedFromComputer.path(home, what)
+    :ok = UnreadableFiles.log_read(file, "home status", result, memory)
+
+    case read do
+      {:ok, change} -> [change]
+      _absent_or_unreadable -> []
+    end
+  end
 
   defp unread({:ok, _change}), do: :ok
   defp unread(error), do: error
@@ -763,7 +773,7 @@ defmodule FermixCore.Management.Home do
           optional(:screen) => map() | nil | :absent,
           optional(:restart) => map(),
           optional(:profile) => String.t(),
-          optional(:computer_change) => ChangedFromComputer.change() | nil
+          optional(:computer_changes) => [ChangedFromComputer.change()]
         }) :: map()
   def picture(
         %{
@@ -806,15 +816,17 @@ defmodule FermixCore.Management.Home do
   end
 
   # M97 D28: this engine's own restart and keychain profile, and on the
-  # server the newest change a computer made to its sandbox or coding
-  # approval; every engine's `status/1` carries them, and a record built
-  # from facts without them (the goldens before D28) leaves them out.
+  # server the changes its computers made to its limits; every engine's
+  # `status/1` carries them, and a record built from facts without them (the
+  # goldens before D28) leaves them out.
   defp put_settings(record, facts) do
     record
     |> put_given(facts, :restart, "restart", & &1)
     |> put_given(facts, :profile, "profile", & &1)
-    |> put_given(facts, :computer_change, "computer_change", &ChangedFromComputer.view/1)
+    |> put_given(facts, :computer_changes, "computer_changes", &changes_view/1)
   end
+
+  defp changes_view(changes), do: Enum.map(changes, &ChangedFromComputer.view/1)
 
   defp put_given(record, facts, key, field, view) do
     case Map.fetch(facts, key) do

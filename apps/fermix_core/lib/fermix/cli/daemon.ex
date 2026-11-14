@@ -48,11 +48,15 @@ defmodule Fermix.CLI.Daemon do
   Started only inside `fermix run` (the supervision tree branches on
   `:fermix_core, :daemon_socket_enabled`). Stale sockets from prior
   crashes are removed on boot; double-binding fails fast on
-  EADDRINUSE rather than silently overwriting.
+  EADDRINUSE rather than silently overwriting. The daemon holds the lock
+  beside its socket for its life (`Fermix.CLI.Daemon.Lock`), which a client
+  asks when the socket turns it away: a second daemon that finds it held
+  does not start, and never removes the socket of one too busy to accept.
   """
 
   use GenServer
 
+  alias Fermix.CLI.Daemon.Lock
   alias FermixCore.Agents.MainAgent
   alias FermixCore.Agents.SkillRegistry
   alias FermixCore.Auth.TokenSupervisor
@@ -88,6 +92,10 @@ defmodule Fermix.CLI.Daemon do
 
   @recv_timeout_ms 5_000
   @accept_retry_ms 1_000
+  # The connections the kernel queues while the acceptor is at another:
+  # macOS's cap (`kern.ipc.somaxconn`). macOS refuses a connect beyond it at
+  # once, and its default of 5 did so on a busy daemon.
+  @listen_backlog 128
   @skill_name_pattern ~r/^[A-Za-z0-9_-]{1,64}$/
   @skill_view_max_bytes 65_536
   @mobile_pair_wait_ms 120_000
@@ -259,19 +267,41 @@ defmodule Fermix.CLI.Daemon do
     end
   end
 
+  # The lock first (`Fermix.CLI.Daemon.Lock`): a daemon that holds it lives,
+  # however busy, so its socket is never taken, whatever a connect to it
+  # answers. Held from here until `terminate/2`, and let go of on every path
+  # that does not start.
   defp bind(socket_path, opts) do
     File.mkdir_p!(Path.dirname(socket_path))
 
-    case clear_stale_socket(socket_path) do
-      :ok -> do_listen(socket_path, opts)
+    case Lock.acquire(socket_path) do
+      {:ok, lock} -> bind_locked(socket_path, lock, opts)
+      {:error, :held} -> {:stop, {:another_daemon_running, socket_path}}
       {:error, reason} -> {:stop, reason}
     end
   end
 
-  defp do_listen(socket_path, opts) do
+  defp bind_locked(socket_path, lock, opts) do
+    case clear_stale_socket(socket_path) do
+      :ok -> do_listen(socket_path, lock, opts)
+      {:error, reason} -> stop_unlocked(lock, reason)
+    end
+  end
+
+  defp stop_unlocked(lock, reason) do
+    case Lock.release(lock) do
+      :ok -> :ok
+      {:error, failed} -> Logger.error("Daemon lock not released: #{inspect(failed)}")
+    end
+
+    {:stop, reason}
+  end
+
+  defp do_listen(socket_path, lock, opts) do
     listen_opts = [
       :binary,
       {:active, false},
+      {:backlog, @listen_backlog},
       {:ifaddr, {:local, socket_path}},
       {:packet, 4},
       {:packet_size, @max_frame_bytes},
@@ -287,6 +317,7 @@ defmodule Fermix.CLI.Daemon do
          %{
            listen_socket: listen_socket,
            socket_path: socket_path,
+           lock: lock,
            task_supervisor: Keyword.get(opts, :task_supervisor, FermixCore.TaskSupervisor),
            plugins_runtime: Keyword.get(opts, :plugins_runtime, PluginsRuntime),
            token_supervisor: Keyword.get(opts, :token_supervisor, TokenSupervisor),
@@ -310,14 +341,15 @@ defmodule Fermix.CLI.Daemon do
          }, {:continue, :accept}}
 
       {:error, reason} ->
-        {:stop, {:listen_failed, reason, socket_path}}
+        stop_unlocked(lock, {:listen_failed, reason, socket_path})
     end
   end
 
-  # If the socket file exists, probe it before deleting. A live daemon
-  # answers; a stale socket from a previous crash refuses or errors.
-  # Unlinking a live socket would let us bind the same path while the
-  # original daemon stays running but unreachable via status/stop.
+  # Once this daemon holds the lock, no daemon that holds one lives, so a
+  # socket file here is one that crashed left, or one a daemon from before
+  # the lock listens on, which answers. Probe it before deleting: unlinking a
+  # live socket would let us bind the same path while the original daemon
+  # stays running but unreachable via status/stop.
   defp clear_stale_socket(socket_path) do
     cond do
       not File.exists?(socket_path) -> :ok
@@ -359,10 +391,12 @@ defmodule Fermix.CLI.Daemon do
   # daemon takes a call the moment it comes (`serve_forwarded/3` asks it for
   # its options on every forwarded request), never once an accept's wait
   # ends. The acceptor serves each connection with the state init left,
-  # which nothing changes after.
+  # which nothing changes after, but the lock: only the daemon holds it, so
+  # no handler outlives the daemon with it.
   @impl true
   def handle_continue(:accept, state) do
-    acceptor = spawn_link(fn -> accept_loop(state) end)
+    served = Map.delete(state, :lock)
+    acceptor = spawn_link(fn -> accept_loop(served) end)
     {:noreply, Map.put(state, :acceptor, acceptor)}
   end
 
@@ -372,11 +406,14 @@ defmodule Fermix.CLI.Daemon do
   def handle_info({:EXIT, acceptor, reason}, %{acceptor: acceptor} = state),
     do: {:stop, reason, state}
 
+  # The lock goes last: while the socket may still answer, it says the
+  # daemon lives.
   @impl true
-  def terminate(_reason, %{listen_socket: socket, socket_path: path}) do
+  def terminate(_reason, %{listen_socket: socket, socket_path: path, lock: lock}) do
     close_result = :gen_tcp.close(socket)
     unlink_result = unlink_socket(path)
-    report_cleanup(close_result, unlink_result)
+    release_result = Lock.release(lock)
+    report_cleanup(close_result, unlink_result, release_result)
   end
 
   defp unlink_socket(path) do
@@ -387,12 +424,13 @@ defmodule Fermix.CLI.Daemon do
     end
   end
 
-  defp report_cleanup(:ok, :ok), do: :ok
+  defp report_cleanup(:ok, :ok, :ok), do: :ok
 
-  defp report_cleanup(close_result, unlink_result) do
+  defp report_cleanup(close_result, unlink_result, release_result) do
     Logger.error(
       "Daemon socket cleanup failed: " <>
-        "listener_close=#{inspect(close_result)} socket_unlink=#{inspect(unlink_result)}"
+        "listener_close=#{inspect(close_result)} socket_unlink=#{inspect(unlink_result)} " <>
+        "lock_release=#{inspect(release_result)}"
     )
 
     :ok
@@ -670,27 +708,55 @@ defmodule Fermix.CLI.Daemon do
 
   defp server_answer({:ok, %{} = answer}, %{method: method}, state) do
     if Placement.decorated?(method),
-      do: {:ok, with_restart_step(method, answer, server_name(state))},
+      do: {:ok, with_restart_step(method, answer, fn -> offered_restart(state) end)},
       else: {:ok, answer}
   end
 
   defp server_answer(result, _request, _state), do: result
 
-  defp with_restart_step("setup.state.get", answer, name),
+  defp with_restart_step("setup.state.get", answer, offered),
     do:
-      Map.put(answer, "restart_step", restart_step(get_in(answer, ["restart", "required"]), name))
+      Map.put(
+        answer,
+        "restart_step",
+        restart_step(get_in(answer, ["restart", "required"]), offered)
+      )
 
-  defp with_restart_step("overview.get", %{"health" => %{} = health} = answer, name) do
-    step = restart_step(health["restart_required"], name)
+  defp with_restart_step("overview.get", %{"health" => %{} = health} = answer, offered) do
+    step = restart_step(health["restart_required"], offered)
     %{answer | "health" => Map.put(health, "restart_step", step)}
   end
 
-  defp with_restart_step(_method, answer, _name), do: answer
+  defp with_restart_step(_method, answer, _offered), do: answer
 
-  defp restart_step(true, name) when is_binary(name) and name != "",
-    do: HomeSummary.restart_server_action(name)
+  # The summary is read only while the server says its restart is required.
+  defp restart_step(true, offered), do: offered.()
+  defp restart_step(_required, _offered), do: nil
 
-  defp restart_step(_required, _name), do: nil
+  # The `restart_server` record this computer's Always On summary offers now,
+  # read from the `home.status` it composes as the apps draw it, or nil where
+  # it offers none: a server whose own home.status says no restart (one
+  # before D28), one whose part is missing, a server this computer knows no
+  # name for. `home.act` takes the step only where the summary offers it.
+  defp offered_restart(%{forwarding: [primary_forward: forward]} = state) do
+    request = %{
+      request_id: "restart-step",
+      protocol_version: ManagementProtocol.protocol_version(),
+      method: "home.status",
+      params: %{}
+    }
+
+    opts = Keyword.put(management_opts(state), :primary_forward, forward)
+
+    case ManagementRouter.route(request, opts) do
+      {:ok, %{"summary" => %{"detail" => detail} = summary}} when is_map(detail) ->
+        summary |> HomeSummary.offered() |> Enum.find(&match?(%{"id" => "restart_server"}, &1))
+
+      other ->
+        Logger.warning("the summary's Restart <server> could not be read: #{inspect(other)}")
+        nil
+    end
+  end
 
   # The server's name as this computer's link knows it, nil when it says none.
   defp server_name(state) do

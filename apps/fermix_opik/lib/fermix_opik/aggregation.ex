@@ -1231,7 +1231,8 @@ defmodule FermixOpik.Aggregation do
   end
 
   # A management job (M34 native setup §7.3) is a bounded background run minted
-  # with its own `job:<rand>` session before its body executes. Like a Doctor
+  # with its own `job:<rand>` session before its body executes
+  # (`computer.job:<rand>` on a computer linked to its server). Like a Doctor
   # run it is always a root: the app asks the daemon directly, so there is no
   # originating turn to nest under. A provider call made inside the run carries
   # the same session id and lands as its child.
@@ -1835,6 +1836,9 @@ defmodule FermixOpik.Aggregation do
   defp infer_kind("inv_" <> _), do: :computer_invocation
   defp infer_kind("doctor:" <> _), do: :doctor
   defp infer_kind("job:" <> _), do: :management_job
+  # A job a computer linked to its server started itself, whose id names it
+  # (`Management.Jobs`, `Placement.computer_id/1`): a management job too.
+  defp infer_kind("computer.job:" <> _), do: :management_job
   defp infer_kind(_other), do: :subagent
 
   defp kind_from_role(role) when role in [:skill, "skill"], do: :skill

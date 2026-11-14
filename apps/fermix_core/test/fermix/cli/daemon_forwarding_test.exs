@@ -17,6 +17,7 @@ defmodule Fermix.CLI.DaemonForwardingTest do
 
   alias Fermix.CLI.Daemon
   alias Fermix.CLI.Daemon.Client
+  alias FermixCore.Home.DesktopLink
   alias FermixCore.Management.Doctor
   alias FermixCore.Management.Doctor.Descriptor
   alias FermixCore.Management.HomeSummary
@@ -228,7 +229,14 @@ defmodule Fermix.CLI.DaemonForwardingTest do
   # step that restarts it, the record its summary offers: the app presses
   # that one step from every pane, never this computer's own restart.
   test "the server's restart state carries the step that restarts the server", ctx do
-    socket = start_daemon!(ctx, engine_role: @device, desktop_link?: true)
+    socket =
+      start_daemon!(ctx,
+        engine_role: @device,
+        desktop_link?: true,
+        forward: restart_required(primary_answer(%{method: "home.status"}))
+      )
+
+    :ok = linked_home!(socket)
     step = HomeSummary.restart_server_action("fermix-vm")
 
     assert %{"id" => "restart_server", "label" => "Restart fermix-vm"} = step
@@ -275,6 +283,34 @@ defmodule Fermix.CLI.DaemonForwardingTest do
              Client.request_v1("setup.state.get", %{}, socket_path: unlinked, timeout: @reply_ms)
 
     refute Map.has_key?(answer, "restart_step")
+  end
+
+  # The step is the summary's own Restart <server>, so it is there exactly
+  # when `home.act` takes it: against a server whose home.status says nothing
+  # of its restart (one before D28) or while the server's part is missing, a
+  # required restart carries no step, where every press answered `changed`.
+  test "no step where the summary offers no Restart <server>", ctx do
+    missing =
+      {:error, :primary_unreachable,
+       %{"primary" => "fermix-vm", "sentence" => "The server fermix-vm is unreachable."}}
+
+    for home_status <- [primary_answer(%{method: "home.status"}), missing] do
+      forward = fn
+        %{method: "home.status"}, _opts -> home_status
+        request, _opts -> primary_answer(request)
+      end
+
+      socket = start_daemon!(ctx, engine_role: @device, desktop_link?: true, forward: forward)
+      :ok = linked_home!(socket)
+
+      assert {:ok, %{"restart" => %{"required" => true}, "restart_step" => nil}} =
+               Client.request_v1("setup.state.get", %{}, socket_path: socket, timeout: @reply_ms),
+             inspect(home_status)
+
+      assert {:ok, %{"health" => %{"restart_required" => true, "restart_step" => nil}}} =
+               Client.request_v1("overview.get", %{}, socket_path: socket, timeout: @reply_ms),
+             inspect(home_status)
+    end
   end
 
   # Doctor's `server link` row: the link as this computer's own engine holds
@@ -681,6 +717,42 @@ defmodule Fermix.CLI.DaemonForwardingTest do
     case answer do
       :name -> name
       :socket -> socket_path
+    end
+  end
+
+  # The home of a computer linked to its server: its link's record, which its
+  # summary reads (`DesktopLink.linked?/2`), in the home the socket sits in.
+  defp linked_home!(socket) do
+    DesktopLink.write(Path.dirname(socket), %{
+      device_id: "6f1e2d3c-4b5a-4968-8778-695a4b3c2d1e",
+      key: :keyring,
+      primary: %{
+        name: "fermix-vm",
+        gateway_pk: :binary.copy(<<3>>, 32),
+        node_id: String.duplicate("c4", 32),
+        relays: [%{"url" => "https://eu1.relay.invalid/", "quic_port" => 7842}],
+        relays_rev: String.duplicate("a1", 8)
+      },
+      epoch: 5
+    })
+  end
+
+  # A server whose own home.status (`part`, before this) says its restart is
+  # required, as one from D28 on says it; every other request answered as
+  # `primary_answer/1` answers it.
+  defp restart_required({:ok, part}) do
+    test = self()
+
+    fn request, opts ->
+      send(test, {:forwarded, request, opts})
+
+      case request do
+        %{method: "home.status"} ->
+          {:ok, Map.put(part, "restart", %{"required" => true, "reasons" => []})}
+
+        other ->
+          primary_answer(other)
+      end
     end
   end
 

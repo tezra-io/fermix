@@ -290,8 +290,11 @@ defmodule Fermix.CLI.SettingsCommand.RenderTest do
 
       assert {:ok, _text} = Render.sections(goldens["settings_sections"])
       assert {:ok, _text} = Render.providers(goldens["setup_state_get"])
-      assert {:ok, _text} = Render.applied(goldens["settings_apply"], "realtime", [])
-      assert {:ok, _text} = Render.applied(goldens["settings_apply_browser"], "browser", [])
+      assert {:ok, _text} = Render.applied(goldens["settings_apply"], "realtime", "Voice", [])
+
+      assert {:ok, _text} =
+               Render.applied(goldens["settings_apply_browser"], "browser", "Browser", [])
+
       assert {:ok, _text} = Render.reload(goldens["settings_reload"])
       assert {:ok, _text} = Render.primary(goldens["providers_set_primary"], "openai")
 
@@ -322,8 +325,8 @@ defmodule Fermix.CLI.SettingsCommand.RenderTest do
         "side_effects" => ["The engine changed to GPT-Live."]
       }
 
-      assert text(Render.applied(result, "realtime", ["realtime_model"])) ==
-               "Saved realtime: realtime_model, realtime_engine\n" <>
+      assert text(Render.applied(result, "realtime", "Voice", ["realtime_model"])) ==
+               "Saved Voice (realtime): realtime_model, realtime_engine\n" <>
                  "The engine changed to GPT-Live.\n" <>
                  "Restart to apply:\n" <>
                  "  - Voice settings changed since Fermix started.\n" <>
@@ -338,8 +341,8 @@ defmodule Fermix.CLI.SettingsCommand.RenderTest do
         "side_effects" => []
       }
 
-      assert text(Render.applied(result, "browser", ["browser_allowed_hosts"])) ==
-               "Saved browser: browser_allowed_hosts\n"
+      assert text(Render.applied(result, "browser", "Browser", ["browser_allowed_hosts"])) ==
+               "Saved Browser (browser): browser_allowed_hosts\n"
     end
 
     test "names readiness only when it is not ready" do
@@ -350,12 +353,13 @@ defmodule Fermix.CLI.SettingsCommand.RenderTest do
         "side_effects" => []
       }
 
-      assert text(Render.applied(result, "personalization", ["bot_name"])) =~
+      assert text(Render.applied(result, "personalization", "Personality", ["bot_name"])) =~
                "Readiness is setup_required (2 failing); `fermix doctor` says why.\n"
     end
 
     test "a reply missing a key the renderer reads is invalid" do
-      assert Render.applied(%{"applied" => []}, "memory", []) == {:error, :invalid_reply}
+      assert Render.applied(%{"applied" => []}, "memory", "Memory", []) ==
+               {:error, :invalid_reply}
     end
   end
 

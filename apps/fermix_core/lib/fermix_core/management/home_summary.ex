@@ -199,9 +199,9 @@ defmodule FermixCore.Management.HomeSummary do
   which must be set up again with a new code (`server_lapsed:<candidate>`,
   on the screen it leaves, while the code that enrolled it still names it;
   never a desktop's candidate for a move back), and the server's sandbox or
-  coding approval changed from one of its computers (M97 §19.5,
-  `computer_change:<at>`, for a week after, on the server and on every
-  linked computer, which reads it from its server's `home.status`).
+  coding approval changed from one of its computers (M97 §19.5, the newest
+  change, `computer_change:<what>:<at>`, for a week after, on the server and
+  on every linked computer, which reads it from its server's `home.status`).
   An app posts when the id changes.
 
   **Restarting the server** (M97 D28c). A change made from a linked
@@ -327,7 +327,7 @@ defmodule FermixCore.Management.HomeSummary do
           optional(:readable) => :ok | {:error, term()} | nil,
           optional(:offers_review) => boolean(),
           optional(:move_progress) => MoveProgress.t() | nil,
-          optional(:computer_change) => ChangedFromComputer.change() | nil
+          optional(:computer_changes) => [ChangedFromComputer.change()]
         }
   @type summary :: %{String.t() => term()}
 
@@ -555,7 +555,7 @@ defmodule FermixCore.Management.HomeSummary do
       join: if(role == :device, do: Join.view(home)),
       screen: Map.get(status, :screen),
       server_sandbox: server_sandbox(home, role, reads),
-      computer_change: computer_change(role, status),
+      computer_changes: computer_changes(role, status),
       move_progress: Keyword.get_lazy(opts, :move_progress, &MoveProgress.read/0)
     }
   end
@@ -1879,13 +1879,18 @@ defmodule FermixCore.Management.HomeSummary do
   defp sandbox_occurrence(_facts), do: nil
 
   # The server's sandbox or coding approval changed from a computer (M97
-  # §19.5): told for a week, once, on the server and on every linked
-  # computer, which names the server as it knows it.
-  defp change_occurrence(_view, %{computer_change: %{at: %DateTime{} = at} = change} = facts) do
+  # §19.5): the newest change told for a week, once, on the server and on
+  # every linked computer, which names the server as it knows it. Its id is
+  # its own: what it changed, and when to the millisecond.
+  defp change_occurrence(
+         _view,
+         %{computer_changes: [%{at: %DateTime{} = at} = change | _]} = facts
+       ) do
     if DateTime.diff(facts.now, at, :second) < @computer_change_s do
       values = %{name: change.computer, change: {change.what, change.value}}
+      %{"what" => what, "at" => said_at} = ChangedFromComputer.view(change)
 
-      {"computer_change:" <> iso(at),
+      {"computer_change:#{what}:#{said_at}",
        sentence(:notice_computer_change, facts, changed_on(values, facts))}
     end
   end
@@ -2045,7 +2050,7 @@ defmodule FermixCore.Management.HomeSummary do
 
   defp sandbox_deadline(_facts), do: nil
 
-  defp change_deadline(%{computer_change: %{at: %DateTime{} = at}} = facts),
+  defp change_deadline(%{computer_changes: [%{at: %DateTime{} = at} | _]} = facts),
     do: ms_until(DateTime.add(at, @computer_change_s, :second), facts)
 
   defp change_deadline(_facts), do: nil
@@ -2122,20 +2127,25 @@ defmodule FermixCore.Management.HomeSummary do
 
   defp server_sandbox(_home, _role, _reads), do: nil
 
-  # The newest change from a computer to the server's sandbox or coding
-  # approval (M97 §19.5): on the server, what its `home.status` read
-  # (`Management.Home`); on a linked computer, its server's `home.status`,
-  # where a change this engine does not know is none.
-  defp computer_change(:primary, status), do: Map.get(status, :computer_change)
+  # The changes from a computer to the server's limits (M97 §19.5), newest
+  # first: on the server, what its `home.status` read (`Management.Home`); on
+  # a linked computer, its server's `home.status`, where a change this engine
+  # does not know is left out.
+  defp computer_changes(:primary, status), do: Map.get(status, :computer_changes, [])
 
-  defp computer_change(:device, %{primary_home: %{"computer_change" => view}}) do
-    case ChangedFromComputer.from_view(view) do
-      {:ok, change} -> change
-      :error -> nil
-    end
+  defp computer_changes(:device, %{primary_home: %{"computer_changes" => views}})
+       when is_list(views) do
+    views
+    |> Enum.flat_map(fn view ->
+      case ChangedFromComputer.from_view(view) do
+        {:ok, change} -> [change]
+        :error -> []
+      end
+    end)
+    |> ChangedFromComputer.newest_first()
   end
 
-  defp computer_change(_role, _status), do: nil
+  defp computer_changes(_role, _status), do: []
 
   # The last review of the move, whatever its age: on the computer that moves.
   # One that cannot be read is logged once while it stays so.

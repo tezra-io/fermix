@@ -204,7 +204,7 @@ defmodule Fermix.CLI.SettingsCommandTest do
       assert stderr == ""
 
       assert stdout ==
-               "Saved memory: compaction_threshold, review_interval_hours\n" <>
+               "Saved Memory (memory): compaction_threshold, review_interval_hours\n" <>
                  "Restart to apply:\n" <>
                  "  - Memory settings changed since Fermix started.\n" <>
                  "Restart it with `fermix restart`.\n"
@@ -245,9 +245,36 @@ defmodule Fermix.CLI.SettingsCommandTest do
           client(%{"settings.get" => {:ok, realtime}, "settings.apply" => apply_reply})
         )
 
-      assert stdout =~ "Saved realtime: realtime_model, realtime_engine\n"
+      assert stdout =~ "Saved Voice (realtime): realtime_model, realtime_engine\n"
       assert stdout =~ "The engine changed to GPT-Live.\n"
       assert stdout =~ "run `fermix settings show realtime` to see them"
+    end
+
+    # M97 D28: on a linked computer `sandbox` is the server's, so the line
+    # says which machine the write changed, in the title the read gave.
+    test "the saved line names the machine the section's title names" do
+      sandbox = %{
+        "id" => "sandbox",
+        "title" => "Sandbox on garden server",
+        "rows" => [%{"key" => "sandbox_mode", "kind" => "choice", "label" => "Sandbox"}]
+      }
+
+      apply_reply =
+        {:ok,
+         %{
+           "applied" => ["sandbox_mode"],
+           "restart" => %{"required" => false, "reasons" => []},
+           "readiness" => @ready,
+           "side_effects" => []
+         }}
+
+      {0, stdout, ""} =
+        run(
+          ["set", "sandbox", "sandbox_mode=standard"],
+          client(%{"settings.get" => {:ok, sandbox}, "settings.apply" => apply_reply})
+        )
+
+      assert stdout == "Saved Sandbox on garden server (sandbox): sandbox_mode\n"
     end
 
     test "the daemon's refusal is printed as key: sentence" do

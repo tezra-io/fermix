@@ -1,13 +1,13 @@
 defmodule FermixCore.Home.ChangedFromComputerTest do
   # M97 §19.5 (D28): a change to the server's sandbox or coding approval made
-  # from one of its computers is recorded on the server, newest only, so its
-  # summary and every linked computer's say it once.
+  # from one of its computers is recorded on the server, one record for each
+  # limit, so its summary and every linked computer's say it once.
   use ExUnit.Case, async: true
 
   alias FermixCore.Home.ChangedFromComputer
   alias FermixTestSupport.SafeRm
 
-  @at ~U[2031-05-04 11:30:00Z]
+  @at ~U[2031-05-04 11:30:00.250Z]
 
   setup do
     home = SafeRm.make_tmp_dir!("changed_from_computer")
@@ -23,47 +23,68 @@ defmodule FermixCore.Home.ChangedFromComputerTest do
   end
 
   test "a change is kept on the server, 0600, and the watch is told", ctx do
-    assert ChangedFromComputer.read(ctx.home) == :absent
+    assert ChangedFromComputer.read(ctx.home, :sandbox_mode) == :absent
 
     change = %{at: @at, computer: "loft-linux", what: :sandbox_mode, value: "open"}
     assert :ok = ChangedFromComputer.record(ctx.home, change, status_changed: ctx.told)
     assert_received :status_changed
 
-    assert {:ok, ^change} = ChangedFromComputer.read(ctx.home)
-    assert Bitwise.band(File.stat!(ChangedFromComputer.path(ctx.home)).mode, 0o777) == 0o600
-
-    assert Bitwise.band(File.stat!(Path.dirname(ChangedFromComputer.path(ctx.home))).mode, 0o777) ==
-             0o700
+    assert {:ok, ^change} = ChangedFromComputer.read(ctx.home, :sandbox_mode)
+    file = ChangedFromComputer.path(ctx.home, :sandbox_mode)
+    assert Bitwise.band(File.stat!(file).mode, 0o777) == 0o600
+    assert Bitwise.band(File.stat!(Path.dirname(file)).mode, 0o777) == 0o700
+    assert Bitwise.band(File.stat!(Path.dirname(Path.dirname(file))).mode, 0o777) == 0o700
   end
 
-  test "the newest change replaces the one before", ctx do
-    first = %{at: @at, computer: "loft-linux", what: :sandbox_mode, value: "open"}
+  # The review's failure: a later change of another limit took the place of
+  # the one before, so what the sandbox was set to was no longer said.
+  test "each limit keeps its own newest change, and the newest of all comes first", ctx do
+    mode = %{at: @at, computer: "loft-linux", what: :sandbox_mode, value: "open"}
+    profile = %{mode | what: :sandbox_profile, value: "extended"}
 
-    later = %{
+    approved = %{
       at: DateTime.add(@at, 600),
       computer: "studio-mac",
       what: :harness_approved,
       value: true
     }
 
-    :ok = ChangedFromComputer.record(ctx.home, first, status_changed: ctx.told)
-    :ok = ChangedFromComputer.record(ctx.home, later, status_changed: ctx.told)
+    stricter = %{mode | at: DateTime.add(@at, 900), value: "strict"}
 
-    assert {:ok, ^later} = ChangedFromComputer.read(ctx.home)
+    for change <- [mode, profile, approved, stricter],
+        do: :ok = ChangedFromComputer.record(ctx.home, change, status_changed: ctx.told)
+
+    assert {:ok, ^stricter} = ChangedFromComputer.read(ctx.home, :sandbox_mode)
+    assert {:ok, ^profile} = ChangedFromComputer.read(ctx.home, :sandbox_profile)
+    assert {:ok, ^approved} = ChangedFromComputer.read(ctx.home, :harness_approved)
+    assert ChangedFromComputer.read(ctx.home, :sandbox_env_allow) == :absent
+
+    # Newest first; one write's changes, sharing a time, in the sandbox's
+    # own row order.
+    allowed = %{profile | what: :sandbox_env_allow, value: ["LEDGER_TOKEN"]}
+
+    assert ChangedFromComputer.newest_first([allowed, profile, approved, stricter]) ==
+             [stricter, approved, profile, allowed]
   end
 
   test "the record as home.status carries it, read back on a computer" do
     change = %{at: @at, computer: "loft-linux", what: :harness_approved, value: false}
 
     assert ChangedFromComputer.view(change) == %{
-             "at" => "2031-05-04T11:30:00Z",
+             "at" => "2031-05-04T11:30:00.250Z",
              "computer" => "loft-linux",
              "what" => "harness_approved",
              "value" => false
            }
 
-    assert ChangedFromComputer.from_view(ChangedFromComputer.view(change)) == {:ok, change}
-    assert ChangedFromComputer.view(nil) == nil
+    for change <- [
+          change,
+          %{change | what: :sandbox_profile, value: "assistant"},
+          %{change | what: :sandbox_env_allow, value: ["LEDGER_TOKEN", "GARDEN_TOKEN"]},
+          %{change | what: :sandbox_mode, value: "standard"}
+        ],
+        do:
+          assert(ChangedFromComputer.from_view(ChangedFromComputer.view(change)) == {:ok, change})
 
     # A change a newer server names, or a value this engine does not know, is
     # not drawn.
@@ -75,6 +96,12 @@ defmodule FermixCore.Home.ChangedFromComputerTest do
             "what" => "sandbox_mode",
             "value" => "wide"
           },
+          %{
+            "at" => "2031-05-04T11:30:00Z",
+            "computer" => "x",
+            "what" => "sandbox_env_allow",
+            "value" => [1]
+          },
           %{"at" => "later", "computer" => "x", "what" => "sandbox_mode", "value" => "open"},
           nil
         ],
@@ -85,6 +112,8 @@ defmodule FermixCore.Home.ChangedFromComputerTest do
     for bad <- [
           %{at: @at, computer: "loft-linux", what: :browser, value: "open"},
           %{at: @at, computer: "loft-linux", what: :sandbox_mode, value: "wide"},
+          %{at: @at, computer: "loft-linux", what: :sandbox_profile, value: "open"},
+          %{at: @at, computer: "loft-linux", what: :sandbox_env_allow, value: "LEDGER_TOKEN"},
           %{at: @at, computer: "loft-linux", what: :harness_approved, value: "yes"},
           %{at: @at, computer: "", what: :sandbox_mode, value: "open"}
         ] do
@@ -94,13 +123,25 @@ defmodule FermixCore.Home.ChangedFromComputerTest do
     end
 
     refute_received :status_changed
-    assert ChangedFromComputer.read(ctx.home) == :absent
+
+    for what <- ChangedFromComputer.whats(),
+        do: assert(ChangedFromComputer.read(ctx.home, what) == :absent)
   end
 
   test "a record Fermix did not write is named", ctx do
-    File.mkdir_p!(Path.dirname(ChangedFromComputer.path(ctx.home)))
-    File.write!(ChangedFromComputer.path(ctx.home), ~s({"v": 9}))
+    file = ChangedFromComputer.path(ctx.home, :sandbox_profile)
+    File.mkdir_p!(Path.dirname(file))
+    File.write!(file, ~s({"v": 9}))
 
-    assert {:error, {:invalid_record, _file}} = ChangedFromComputer.read(ctx.home)
+    assert {:error, {:invalid_record, ^file}} =
+             ChangedFromComputer.read(ctx.home, :sandbox_profile)
+
+    # A record under another limit's name is not that limit's.
+    other = %{at: @at, computer: "loft-linux", what: :sandbox_mode, value: "open"}
+    :ok = ChangedFromComputer.record(ctx.home, other, status_changed: ctx.told)
+    File.cp!(ChangedFromComputer.path(ctx.home, :sandbox_mode), file)
+
+    assert {:error, {:invalid_record, ^file}} =
+             ChangedFromComputer.read(ctx.home, :sandbox_profile)
   end
 end

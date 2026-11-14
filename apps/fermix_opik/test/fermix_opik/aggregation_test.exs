@@ -3645,6 +3645,57 @@ defmodule FermixOpik.AggregationTest do
     end
   end
 
+  @job_start [:fermix, :management_job, :start]
+  @job_complete [:fermix, :management_job, :complete]
+
+  # The emitter's metadata (`FermixCore.Management.Telemetry`): a job's
+  # session is its job id, which a computer linked to its server mints as
+  # `computer.job:<id>` (`Management.Jobs`).
+  defp job_meta(session_id, extra),
+    do:
+      Map.merge(
+        %{
+          session_id: session_id,
+          agent: "management_job",
+          kind: :browser_install,
+          budget_ms: 900_000
+        },
+        extra
+      )
+
+  describe "management jobs" do
+    test "a job's bookends make one management_job root, on a server and on a linked computer" do
+      for session_id <- ["job:Qm9yZWFsLWZpbmNo", "computer.job:Qm9yZWFsLWZpbmNo"] do
+        {state, closed} =
+          run([
+            {@job_start, %{count: 1}, job_meta(session_id, %{})},
+            {@job_complete, %{count: 1, duration_ms: 40},
+             job_meta(session_id, %{status: "completed"})}
+          ])
+
+        assert state.traces == %{}
+        assert [%{trace: trace}] = closed
+        assert trace.tags == ["management_job"], session_id
+        assert trace.metadata.kind == "browser_install"
+      end
+    end
+
+    # Without the prefix clause a bookend whose opener was missed (a restart
+    # between the two) mints a root `infer_kind/1` reads as `:subagent`.
+    test "a bookend with no opener still closes as a management_job root, a computer's included" do
+      for session_id <- ["job:Qm9yZWFsLWZpbmNo", "computer.job:Qm9yZWFsLWZpbmNo"] do
+        {_state, closed} =
+          run([
+            {@job_complete, %{count: 1, duration_ms: 40},
+             job_meta(session_id, %{status: "failed"})}
+          ])
+
+        assert [%{trace: trace}] = closed
+        assert trace.tags == ["management_job"], session_id
+      end
+    end
+  end
+
   @inv_start [:fermix, :computer_invocation, :start]
   @inv_complete [:fermix, :computer_invocation, :complete]
   @inv_error [:fermix, :computer_invocation, :error]

@@ -97,9 +97,28 @@ defmodule FermixCore.Management.PlacementTest do
         method <- ~w(settings.get settings.apply settings.reload) do
       assert Placement.place(method, %{"section" => section}) == :primary,
              inspect({method, section})
+    end
 
+    # A primary serves a forward the home's sections and its own sandbox,
+    # browser and coding approval; a screen, a history and an accessory are
+    # each computer's own, so a primary that is a Mac refuses another
+    # computer's write of its own (device_class_method), as before the rule.
+    for section <- ~w(sandbox browser harness_machine providers.openai routing memory
+                      channels.imessage computer_ computer.),
+        method <- ~w(settings.get settings.apply settings.reload) do
       assert Placement.served_forwarded?(method, %{"section" => section}),
              inspect({method, section})
+    end
+
+    for section <- ~w(computer_use computer_history accessories) do
+      for method <- ~w(settings.get settings.apply) do
+        refute Placement.served_forwarded?(method, %{"section" => section}),
+               inspect({method, section})
+      end
+
+      # A reload configures nothing: it reads all of the primary's settings
+      # again, whatever section an outside edit there was refused for.
+      assert Placement.served_forwarded?("settings.reload", %{"section" => section}), section
     end
 
     for id <- ~w(env:GARDEN_TOKEN anthropic_api_key computer_api_key), method <- ~w(secret.set) do
@@ -129,20 +148,36 @@ defmodule FermixCore.Management.PlacementTest do
     refute Placement.machine_write?("secret.set", %{"id" => "anthropic_api_key"})
   end
 
-  test "a server without the rule is asked for none of its machine settings" do
+  # What D28 moved to the server, which a server without the rule refuses:
+  # its sandbox and coding approval, its sandbox values, the coding agents'
+  # check, the notetaker's and on-device speech's installers and the home's
+  # detection. Its browser was the home's before the rule, and such a server
+  # still serves it so.
+  test "a server without the rule is asked for none of what the rule moved to it" do
     for {method, params} <- [
           {"settings.get", %{"section" => "sandbox"}},
           {"settings.apply", %{"section" => "harness_machine"}},
-          {"settings.reload", %{"section" => "browser"}},
           {"secret.set", %{"id" => "env:GARDEN_TOKEN"}},
-          {"secret.clear", %{"id" => "env:GARDEN_TOKEN"}}
+          {"secret.clear", %{"id" => "env:GARDEN_TOKEN"}},
+          {"coding_agents.check", %{}},
+          {"capabilities.install.start", %{"target" => "meetbot"}},
+          {"capabilities.install.start", %{"target" => "local_stt"}},
+          {"setup.detect", %{"targets" => ["claude_code", "existing_primary"]}}
         ] do
-      assert Placement.server_machine_request?(method, params), method
+      assert Placement.server_machine_request?(method, params), inspect({method, params})
     end
 
-    refute Placement.server_machine_request?("settings.get", %{"section" => "routing"})
-    refute Placement.server_machine_request?("secret.set", %{"id" => "anthropic_api_key"})
-    refute Placement.server_machine_request?("settings.reload", %{})
+    for {method, params} <- [
+          {"settings.get", %{"section" => "routing"}},
+          {"settings.get", %{"section" => "browser"}},
+          {"settings.apply", %{"section" => "browser"}},
+          {"settings.reload", %{"section" => "sandbox"}},
+          {"settings.reload", %{}},
+          {"secret.set", %{"id" => "anthropic_api_key"}},
+          {"capabilities.install.start", %{"target" => "computer_use_sidecar"}}
+        ] do
+      refute Placement.server_machine_request?(method, params), inspect({method, params})
+    end
 
     assert {:error, :unavailable, %{"capability" => "settings", "sentence" => sentence}} =
              Placement.older_server("garden server")
@@ -153,6 +188,66 @@ defmodule FermixCore.Management.PlacementTest do
 
     assert {:error, :unavailable, %{"sentence" => "Update Fermix on this computer" <> _rest}} =
              Placement.older_computer()
+  end
+
+  test "a request for a server without the rule is sent as before the rule, or answered here" do
+    sent = fn method, params ->
+      Placement.to_older_server(%{request_id: "r-1", method: method, params: params}, "garden")
+    end
+
+    # The browser is the home's on such a server, and its reload takes no
+    # section: an outside edit is cleared by reloading the whole server.
+    assert {:send, %{params: %{"section" => "browser"}}} =
+             sent.("settings.get", %{"section" => "browser"})
+
+    assert {:send, %{method: "settings.reload", params: %{}}} =
+             sent.("settings.reload", %{"section" => "channels.telegram"})
+
+    assert {:send, %{params: %{}}} = sent.("settings.reload", %{})
+
+    assert {:answer, refusal} = sent.("settings.apply", %{"section" => "sandbox"})
+    assert refusal == Placement.older_server("garden")
+
+    for {method, params} <- [
+          {"coding_agents.check", %{}},
+          {"capabilities.install.start", %{"target" => "meetbot"}},
+          {"setup.detect", %{"targets" => ["harness_vendors"]}}
+        ] do
+      assert {:answer, {:error, :unavailable, details}} = sent.(method, params)
+
+      assert details == %{
+               "capability" => "settings",
+               "sentence" =>
+                 "garden runs an older Fermix, which does this only on the server itself. " <>
+                   "It updates on its own."
+             }
+    end
+
+    assert {:answer, {:error, :unavailable, %{"sentence" => "Your server runs" <> _rest}}} =
+             Placement.to_older_server(
+               %{request_id: "r-2", method: "coding_agents.check", params: %{}},
+               nil
+             )
+  end
+
+  # A linked computer lists the server's sections as the server serves them
+  # to it: never a computer id, never a screen, history or accessory of the
+  # server's, and its sandbox and coding approval only where it says the rule.
+  test "the server's sections a linked computer lists" do
+    for rule? <- [true, false] do
+      for id <- ~w(routing providers.openai browser) do
+        assert Placement.listed_from_server?(id, rule?), inspect({id, rule?})
+      end
+
+      for id <- ~w(computer computer.sandbox computer_use computer_history accessories) do
+        refute Placement.listed_from_server?(id, rule?), inspect({id, rule?})
+      end
+    end
+
+    for id <- ~w(sandbox harness_machine) do
+      assert Placement.listed_from_server?(id, true)
+      refute Placement.listed_from_server?(id, false)
+    end
   end
 
   # After a move the notetaker, the local speech-to-text and the coding
@@ -169,10 +264,22 @@ defmodule FermixCore.Management.PlacementTest do
     assert Placement.place("coding_agents.check", %{}) == :primary
     assert Placement.place("setup.detect", %{"targets" => ["harness_vendors"]}) == :primary
     assert Placement.place("setup.detect", %{"targets" => ["meetbot", "ollama"]}) == :primary
-    assert Placement.place("setup.detect", %{"targets" => ["existing_primary"]}) == :device
+
+    # The home's chosen provider is read from the home's settings, so the
+    # Providers pane's whole detection is the server's, as auth.import is.
+    assert Placement.place("setup.detect", %{"targets" => ["existing_primary"]}) == :primary
+
+    assert Placement.place("setup.detect", %{"targets" => ["claude_code", "existing_primary"]}) ==
+             :primary
 
     assert Placement.place("setup.detect", %{"targets" => ["existing_primary", "codex_cli"]}) ==
+             :primary
+
+    # One this engine does not know is refused here, never sent.
+    assert Placement.place("setup.detect", %{"targets" => ["existing_primary", "kettle"]}) ==
              :device
+
+    assert Placement.place("setup.detect", %{"targets" => []}) == :device
 
     # A job is answered by the engine that started it.
     for method <- ~w(job.get job.cancel) do

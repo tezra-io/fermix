@@ -331,8 +331,9 @@ defmodule FermixCore.Home.ArchiveTest do
 
     # The probe reads the home's real socket. The listener answers `hello` as
     # soon as the frame arrives: the engine's own daemon answers through the
-    # management router and this VM's global settings, which a busy machine
-    # can make miss the client's own 3 s deadline (read as "could not tell").
+    # management router and this VM's global settings. The reply bound is the
+    # test's own: an answer returns at once, and the client's 3 s raced a busy
+    # runner (read as "could not tell").
     test "through the daemon socket the CLI's own probe reads" do
       root = short_root!()
       seed_home!(root)
@@ -343,7 +344,9 @@ defmodule FermixCore.Home.ArchiveTest do
       test = self()
       start_supervised!({Task, fn -> answer_hello(listen, test) end})
 
-      assert Archive.create(root, @passphrase, to: archive) == {:error, :daemon_running}
+      assert Archive.create(root, @passphrase, to: archive, hello_timeout: 10_000) ==
+               {:error, :daemon_running}
+
       assert_receive {:asked, "hello"}
       refute File.exists?(archive)
     end

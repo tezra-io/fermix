@@ -333,16 +333,23 @@ computer."
   restart-server`), which waits up to ten minutes for work the server runs
   on a computer to end. A computer's own settings take that computer's own
   restart, from its app.
-- When the server's sandbox or coding approval is changed from a computer,
-  every Always On screen says so once, naming the computer. A command
-  Fermix runs can never change a machine's own settings through the app.
+- When the server's sandbox (its mode, command profile or allowed
+  variables) or coding approval is changed from a computer, every Always On
+  screen says so once, naming the computer; a write that changes nothing
+  says nothing. A command Fermix runs can never change a machine's own
+  settings through the app.
+- A Mac that took the home back keeps its own screen, history and StackChan
+  to itself: a computer still linked to it neither lists nor changes them.
 - On a linked computer the setup page changes Always On, This computer and
   that computer's sandbox; its other tabs point to the app on any computer.
   `fermix settings show sandbox` there reads the server's, `fermix settings
   show computer.sandbox` its own.
 - While the server runs an older Fermix, a computer shows the server's
-  sandbox and coding settings nowhere and says the server updates on its
-  own.
+  sandbox and coding settings nowhere, and its coding agents' check, the
+  notetaker's and on-device speech's installers and the Providers pane's
+  detection say the server does them only on itself, until the server
+  updates on its own; its browser settings are the home's there, shown and
+  changed as before.
 
 ## Files and commands on a computer
 

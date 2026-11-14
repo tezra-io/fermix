@@ -16,16 +16,20 @@ defmodule FermixCore.Management.Placement do
   computer's (`computer_id?/1`) and answered here, `settings.get`,
   `settings.apply`, `settings.reload` (by its `section`), `secret.set` and
   `secret.clear` alike; every other id is the home's, which after a move is
-  the server, its own machine sections (`machine_sections/0`: its sandbox,
-  browser and coding agents) included. One id names one machine, for the read
-  and for the write, and the computer decides by the id before it asks the
-  server anything. A server that does not say it applies the rule
+  the server, its own sandbox, browser and coding agents included. A screen,
+  a history and an accessory are each computer's own (`machine_sections/0`
+  names all six): a primary serves no other computer's request for its own
+  (`served_forwarded?/2`), so a linked computer lists none of them from it
+  (`listed_from_server?/2`). One id names one machine, for the read and for
+  the write, and the computer decides by the id before it asks the server
+  anything. After a move the notetaker, the local speech-to-text and the
+  coding agents run on the server, so their installers and detection are the
+  server's too. A server that does not say it applies the rule
   (`caps.computer.machine_settings` in its `hello_ack`) is asked for none of
-  its machine settings (`server_machine_request?/2`, `older_server/1`), and a
-  server refuses a sandbox value from a computer whose `hello` did not say
-  it (`older_computer/0`). After a move the notetaker, the local
-  speech-to-text and the coding agents run on the server, so their installers
-  and detection are the server's too. A job is answered by the engine that
+  what the rule moved to it (`server_machine_request?/2`), and is sent every
+  other request as before the rule (`to_older_server/2`); a server refuses a
+  sandbox value from a computer whose `hello` did not say it
+  (`older_computer/0`). A job is answered by the engine that
   started it: a linked computer's job ids begin `computer.`, so `job.get` and
   `job.cancel` of one are answered here, and `job.list` is composed (below).
 
@@ -138,21 +142,36 @@ defmodule FermixCore.Management.Placement do
   # Fermix on the server may use on this computer, §7.2) is this computer's
   # by the rule itself.
   @machine_sections ~w(sandbox browser harness_machine computer_use computer_history accessories)
+  # The machine sections a primary serves another computer's request for
+  # (§19.2): its sandbox, its browser and whether coding agents may run on it.
+  # The rest are each computer's own, answered only there.
+  @server_sections ~w(sandbox browser harness_machine)
+  # The server's machine sections the rule moved to it, which a server
+  # without the rule refuses another computer's request for. Its browser was
+  # the home's section before the rule, and such a server serves it so.
+  @rule_sections ~w(sandbox harness_machine)
+  @rule_section_methods ~w(settings.get settings.apply)
   # A sandbox value, the server's (`env:`) or this computer's (`computer.env:`).
   @env_prefix "env:"
   # An installer installs on the machine that runs its feature: after a move
   # the notetaker and the local speech-to-text run on the server; computer
   # use's helper and Messages' run on this computer.
   @home_install_targets ~w(meetbot local_stt)
-  # What `setup.detect` probes for the home (the coding agents the server runs,
-  # the provider sign-ins it imports, a local model server, the notetaker); a
-  # request for only these is the server's, any other is this machine's.
-  @home_detect_targets ~w(claude_code codex_cli ollama harness_vendors meetbot)
+  # What `setup.detect` probes for the home (the provider the home's settings
+  # chose, the coding agents the server runs, the provider sign-ins it
+  # imports, a local model server, the notetaker); a request for only these
+  # is the server's, any other is this machine's.
+  @home_detect_targets ~w(existing_primary claude_code codex_cli ollama harness_vendors meetbot)
+  # The requests besides settings and secrets the rule moved to the server
+  # (`server_machine_request?/2`).
+  @rule_methods ~w(coding_agents.check capabilities.install.start setup.detect)
   # Forwarded, and answered with the step that restarts the server added
   # (`Fermix.CLI.Daemon`): the restart state they report is the server's.
   @decorated_methods ~w(setup.state.get overview.get)
   @older_server_sentence " runs an older Fermix, which takes its own sandbox and coding " <>
                            "settings only on the server. It updates on its own."
+  @older_server_does_sentence " runs an older Fermix, which does this only on the server " <>
+                                "itself. It updates on its own."
   @older_computer_sentence "Update Fermix on this computer to change its sandbox values."
 
   @device_class_sentence "This request configures the computer it came from, so the " <>
@@ -243,6 +262,24 @@ defmodule FermixCore.Management.Placement do
   def machine_section?(id), do: id in @machine_sections
 
   @doc """
+  Whether a linked computer lists its server's section `id`, the server
+  applying §19.3's rule (`rule?`) or not: never a `computer` or
+  `computer.<id>`, nor a screen, history or accessory of the server's (each
+  computer's own); the server's sandbox and coding approval only where it
+  applies the rule; every other section, its browser among them, as the
+  server lists it.
+  """
+  @spec listed_from_server?(String.t(), boolean()) :: boolean()
+  def listed_from_server?(id, rule?) when is_binary(id) and is_boolean(rule?) do
+    cond do
+      computer_id?(id) -> false
+      id in @rule_sections -> rule?
+      machine_section?(id) -> id in @server_sections
+      true -> true
+    end
+  end
+
+  @doc """
   Whether `method` with `params` writes a machine's own settings, the
   server's or this computer's: a write of a machine section or of
   `computer` and `computer.<id>`, or a sandbox value set or cleared
@@ -264,34 +301,67 @@ defmodule FermixCore.Management.Placement do
 
   @doc """
   Whether the server answers `method` with `params` only where it applies
-  §19.3's rule (`caps.computer.machine_settings`): a plain machine section,
-  read or written, or a sandbox value of the server's (`env:`). A server
-  without the rule refuses them; a computer asks it for none
-  (`older_server/1`).
+  §19.3's rule (`caps.computer.machine_settings`): exactly what the rule
+  moved from a computer to its server. That is a read or write of the
+  server's sandbox or coding approval, a sandbox value of the server's
+  (`env:`), the coding agents' check, and an installer or a detection that
+  is the home's (`place/2`). A server without the rule refuses each of them
+  (`device_class_method`, or a sandbox value from a computer that had none,
+  `older_computer/0`), so a computer asks it for none (`to_older_server/2`).
   """
   @spec server_machine_request?(String.t(), map()) :: boolean()
-  def server_machine_request?(method, %{"section" => section}) when method in @section_methods,
-    do: machine_section?(section)
+  def server_machine_request?(method, %{"section" => section})
+      when method in @rule_section_methods,
+      do: section in @rule_sections
 
   def server_machine_request?(method, %{"id" => @env_prefix <> _name})
       when method in @secret_methods,
       do: true
 
+  def server_machine_request?(method, params) when method in @rule_methods and is_map(params),
+    do: place(method, params) == :primary
+
   def server_machine_request?(_method, _params), do: false
 
   @doc """
-  A linked computer's answer to a request for its server's machine settings
-  while the server runs a Fermix without §19.3's rule: `unavailable`, naming
-  the server when its name is known.
+  What a linked computer does with `request`, placed on its server, while the
+  server (named `name` when known) runs a Fermix without §19.3's rule:
+  `{:answer, refusal}` for what only a server with the rule answers
+  (`server_machine_request?/2`), else `{:send, request}` as it was sent
+  before the rule. A `settings.reload` goes without its `section`, which such
+  a server does not take: it reloads all of its settings.
+  """
+  @spec to_older_server(Protocol.request(), String.t() | nil) ::
+          {:send, Protocol.request()} | {:answer, Protocol.route_result()}
+  def to_older_server(%{method: method, params: params} = request, name)
+      when is_binary(method) and is_map(params) and (is_binary(name) or is_nil(name)) do
+    cond do
+      server_machine_request?(method, params) -> {:answer, older_answer(method, name)}
+      method == "settings.reload" -> {:send, %{request | params: Map.delete(params, "section")}}
+      true -> {:send, request}
+    end
+  end
+
+  # A setting or a sandbox value says which settings; the coding agents'
+  # check, an installer and a detection say only where they are done.
+  defp older_answer(method, name) when method in @rule_methods,
+    do: refusal_of_older(name, @older_server_does_sentence)
+
+  defp older_answer(_method, name), do: older_server(name)
+
+  @doc """
+  A linked computer's answer to a request for its server's sandbox or
+  coding settings while the server runs a Fermix without §19.3's rule:
+  `unavailable`, naming the server when its name is known.
   """
   @spec older_server(String.t() | nil) :: Protocol.route_result()
   def older_server(name) when is_binary(name) or is_nil(name),
+    do: refusal_of_older(name, @older_server_sentence)
+
+  defp refusal_of_older(name, sentence),
     do:
       {:error, :unavailable,
-       %{
-         "capability" => "settings",
-         "sentence" => (name || "Your server") <> @older_server_sentence
-       }}
+       %{"capability" => "settings", "sentence" => (name || "Your server") <> sentence}}
 
   @doc """
   The server's refusal of a sandbox value (`env:`) a computer without §19.3's
@@ -326,11 +396,22 @@ defmodule FermixCore.Management.Placement do
 
   @doc """
   Whether the primary serves `method` with `params` when a desktop forwards
-  it: every primary-class request, and the composed ones.
+  it: every primary-class request but a screen, history or accessory
+  section of its own (each computer's own, which a primary that is a Mac
+  keeps to itself), and the composed ones.
   """
   @spec served_forwarded?(String.t(), map()) :: boolean()
   def served_forwarded?(method, params) when is_binary(method) and is_map(params),
-    do: place(method, params) == :primary or composed?(method)
+    do:
+      (place(method, params) == :primary and not computers_own?(method, params)) or
+        composed?(method)
+
+  # A read or a write; a reload reads all of the server's own settings again,
+  # whatever section an outside edit was refused for, and configures nothing.
+  defp computers_own?(method, %{"section" => section}) when method in @rule_section_methods,
+    do: machine_section?(section) and section not in @server_sections
+
+  defp computers_own?(_method, _params), do: false
 
   @doc """
   Asks the primary for its part of a composed answer (`method`, no params)

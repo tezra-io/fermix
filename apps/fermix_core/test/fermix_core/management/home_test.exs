@@ -961,16 +961,25 @@ defmodule FermixCore.Management.HomeTest do
 
     test "the server says a change from a computer, and each linked computer tells it",
          %{home: home} do
-      assert {:ok, %{"computer_change" => nil}} = route("home.status", %{}, opts(home))
+      assert {:ok, %{"computer_changes" => []}} = route("home.status", %{}, opts(home))
 
       change = %{
-        at: ~U[2031-05-04 11:30:00Z],
+        at: ~U[2031-05-04 11:30:00.000Z],
         computer: "loft-linux",
         what: :sandbox_mode,
         value: "open"
       }
 
-      :ok = ChangedFromComputer.record(home, change, status_changed: fn -> :ok end)
+      # An earlier change of another of its limits is kept beside it.
+      approved = %{
+        change
+        | at: ~U[2031-05-04 11:00:00.000Z],
+          what: :harness_approved,
+          value: true
+      }
+
+      for recorded <- [approved, change],
+          do: :ok = ChangedFromComputer.record(home, recorded, status_changed: fn -> :ok end)
 
       assert {:ok, status} =
                route(
@@ -979,10 +988,13 @@ defmodule FermixCore.Management.HomeTest do
                  opts(home, link_status: link(desktops: [desktop_row()]))
                )
 
-      assert status["computer_change"] == ChangedFromComputer.view(change)
+      assert status["computer_changes"] == [
+               ChangedFromComputer.view(change),
+               ChangedFromComputer.view(approved)
+             ]
 
       assert status["summary"]["notice"] == %{
-               "id" => "computer_change:2031-05-04T11:30:00Z",
+               "id" => "computer_change:sandbox_mode:2031-05-04T11:30:00.000Z",
                "sentence" => "This server's sandbox was set to Open from loft-linux."
              }
 
@@ -993,7 +1005,7 @@ defmodule FermixCore.Management.HomeTest do
         "role" => "primary",
         "version" => "9.9.9",
         "snapshots" => %{"targets" => [backed_up]},
-        "computer_change" => status["computer_change"]
+        "computer_changes" => status["computer_changes"]
       }
 
       :ok = DesktopLink.write(home, desktop_link())
@@ -1007,7 +1019,7 @@ defmodule FermixCore.Management.HomeTest do
                  |> Keyword.put(:primary_forward, fn _request, _opts -> {:ok, server_part} end)
                )
 
-      assert linked["computer_change"] == nil
+      assert linked["computer_changes"] == []
 
       assert linked["summary"]["notice"]["sentence"] ==
                "invented-vm's sandbox was set to Open from loft-linux."

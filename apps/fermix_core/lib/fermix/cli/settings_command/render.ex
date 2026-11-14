@@ -95,19 +95,33 @@ defmodule Fermix.CLI.SettingsCommand.Render do
     end
   end
 
-  @doc "A settings.apply result: saved keys, side effects, restart, readiness."
-  @spec applied(map(), String.t(), [String.t()]) :: rendered()
+  @doc """
+  A settings.apply result: saved keys, side effects, restart, readiness. The
+  saved line names the section by the `title` its read gave, and its id, so
+  on a linked computer it says which machine changed ("Sandbox on garden
+  server (sandbox)").
+  """
+  @spec applied(map(), String.t(), String.t(), [String.t()]) :: rendered()
   def applied(
         %{"applied" => applied, "restart" => restart, "readiness" => readiness} = result,
         section,
+        title,
         sent
       )
-      when is_list(applied) and is_binary(section) and is_list(sent) do
+      when is_list(applied) and is_binary(section) and is_binary(title) and is_list(sent) do
     with effects when is_list(effects) <- result["side_effects"],
          true <- strings?(applied) and strings?(effects),
          {:ok, restart_lines} <- restart(restart),
          {:ok, readiness_lines} <- readiness(readiness) do
-      saved = ["Saved ", safe(section), ": ", Enum.map_join(applied, ", ", &safe/1), "\n"]
+      saved = [
+        "Saved ",
+        safe(title),
+        " (",
+        safe(section),
+        "): ",
+        Enum.map_join(applied, ", ", &safe/1),
+        "\n"
+      ]
 
       {:ok,
        [saved, lines(effects), restart_lines, readiness_lines, derived(applied, sent, section)]}
@@ -116,7 +130,7 @@ defmodule Fermix.CLI.SettingsCommand.Render do
     end
   end
 
-  def applied(_result, _section, _sent), do: invalid()
+  def applied(_result, _section, _title, _sent), do: invalid()
 
   @doc """
   A secret.set or secret.clear result, and the environment variable the daemon

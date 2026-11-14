@@ -17,12 +17,14 @@ defmodule FermixCore.Management.ComputerSettings do
   publishes `harness_machine`: its own approval is the Coding agents switch
   in `computer` (M98 D4).
 
-  The server's list (`server_sections/2`) loses any `computer` or
+  The server's list (`server_sections/2`) keeps what
+  `Placement.listed_from_server?/2` lists: never a `computer` or
   `computer.<id>` it names (a server never publishes one, and one that does
-  is not believed), and its machine sections are titled with its name
-  ("Sandbox on garden server", "garden server" in the coding pane), where
-  the server says it applies the rule; where it does not, they are left out,
-  as before.
+  is not believed), nor its own screen, history or accessories, which are
+  that machine's alone; its sandbox and coding approval where the server says
+  it applies the rule, and its browser either way, as a server without the
+  rule serves it as the home's. Its machine sections are titled with its name
+  ("Sandbox on garden server", "garden server" in the coding pane).
 
   Pure: the callers pass the inventories, the host (`macos?:`) and the
   server as the link knows it.
@@ -84,7 +86,7 @@ defmodule FermixCore.Management.ComputerSettings do
       not Placement.computer_id?(section) ->
         {:ok, section}
 
-      area?(opts) and own?(Placement.plain_id(section), opts) ->
+      area?(opts) and own_machine?(Placement.plain_id(section), opts) ->
         {:ok, Placement.plain_id(section)}
 
       true ->
@@ -134,8 +136,9 @@ defmodule FermixCore.Management.ComputerSettings do
   @doc """
   A route result for this computer's `id` answered under its plain id: the
   plain id becomes `id` again wherever the answer or its refusal names it
-  (`id`, `section`, `field`), so a surface that sends it back reaches this
-  computer.
+  (`id`, `section`, `field`), and a refusal's `section` is always this
+  computer's (`computer.sandbox` for a sandbox value's outside edit), so a
+  surface that sends it back reaches this computer.
   """
   @spec own_result(term(), String.t()) :: term()
   def own_result(result, id) when is_binary(id) do
@@ -148,9 +151,20 @@ defmodule FermixCore.Management.ComputerSettings do
   defp renamed({:ok, %{} = answer}, plain, id), do: {:ok, rename(answer, plain, id)}
 
   defp renamed({:error, code, %{} = details}, plain, id),
-    do: {:error, code, rename(details, plain, id)}
+    do: {:error, code, details |> rename(plain, id) |> own_section()}
 
   defp renamed(result, _plain, _id), do: result
+
+  # A refusal of this computer's own write is about this computer's files,
+  # whatever section it names, so a reload of that section is this computer's.
+  defp own_section(%{"section" => section} = details) when is_binary(section) and section != "",
+    do: %{details | "section" => own_id(section)}
+
+  defp own_section(details), do: details
+
+  defp own_id(section) do
+    if Placement.computer_id?(section), do: section, else: Placement.computer_id(section)
+  end
 
   defp rename(map, plain, id) do
     Enum.reduce(~w(id section field), map, fn key, acc ->
@@ -160,15 +174,14 @@ defmodule FermixCore.Management.ComputerSettings do
 
   @doc """
   The server's sections as this computer lists them (`server`, as its link
-  knows it): never a `computer` or `computer.<id>`; its machine sections
-  titled with its name where it applies the rule, else left out.
+  knows it), those `Placement.listed_from_server?/2` lists, its machine
+  sections titled with its name.
   """
   @spec server_sections([row()], server()) :: [row()]
   def server_sections(rows, %{machine_settings: takes?} = server)
       when is_list(rows) and is_boolean(takes?) do
     for %{"id" => id} = row <- rows,
-        not Placement.computer_id?(id),
-        takes? or not Placement.machine_section?(id),
+        Placement.listed_from_server?(id, takes?),
         do: server_row(row, server)
   end
 
@@ -189,11 +202,14 @@ defmodule FermixCore.Management.ComputerSettings do
   defp server_name(name) when is_binary(name) and name != "", do: name
   defp server_name(_name), do: "your server"
 
-  # A machine section this computer publishes for itself: never the coding
-  # approval, and its history only on a Mac.
+  # What this computer publishes for itself: `computer` as it is, and each
+  # machine section it has as `computer.<id>`.
   defp own?("computer", _opts), do: true
+  defp own?(id, opts), do: own_machine?(id, opts)
 
-  defp own?(id, opts) do
+  # A machine section this computer publishes as `computer.<id>`: never the
+  # coding approval, and its history only on a Mac.
+  defp own_machine?(id, opts) do
     Placement.machine_section?(id) and id != "harness_machine" and
       (macos?(opts) or id not in @mac_only)
   end

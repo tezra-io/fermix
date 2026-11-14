@@ -2181,33 +2181,68 @@ defmodule FermixCore.Management.HomeSummaryTest do
     test "is the server's notice, in its own words" do
       change = %{at: @changed_at, computer: "loft-linux", what: :sandbox_mode, value: "open"}
 
-      assert HomeSummary.summary(server(computer_change: change))["notice"] == %{
-               "id" => "computer_change:2031-05-04T11:30:00Z",
+      assert HomeSummary.summary(server(computer_changes: [change]))["notice"] == %{
+               "id" => "computer_change:sandbox_mode:2031-05-04T11:30:00.000Z",
                "sentence" => "This server's sandbox was set to Open from loft-linux."
              }
 
       approved = %{change | what: :harness_approved, value: true}
 
-      assert HomeSummary.summary(server(computer_change: approved))["notice"]["sentence"] ==
+      assert HomeSummary.summary(server(computer_changes: [approved]))["notice"]["sentence"] ==
                "Coding agents were allowed to run on this server from loft-linux."
 
       refused = %{change | what: :harness_approved, value: false}
 
-      assert HomeSummary.summary(server(computer_change: refused))["notice"]["sentence"] ==
+      assert HomeSummary.summary(server(computer_changes: [refused]))["notice"]["sentence"] ==
                "Coding agents were turned off on this server from loft-linux."
+
+      profile = %{change | what: :sandbox_profile, value: "extended"}
+
+      assert HomeSummary.summary(server(computer_changes: [profile]))["notice"]["sentence"] ==
+               "This server's command profile was set to Extended from loft-linux."
+
+      names = %{change | what: :sandbox_env_allow, value: ["LEDGER_TOKEN"]}
+
+      assert HomeSummary.summary(server(computer_changes: [names]))["notice"]["sentence"] ==
+               "This server's allowed environment variables were changed from loft-linux."
+    end
+
+    # The review's failure: two changes within a second shared one id, so a
+    # surface that posts when the id moves never posted the second.
+    test "each change is told under its own id" do
+      mode = %{at: @changed_at, computer: "loft-linux", what: :sandbox_mode, value: "open"}
+
+      approved = %{
+        mode
+        | at: DateTime.add(@changed_at, 400, :millisecond),
+          what: :harness_approved,
+          value: true
+      }
+
+      strict = %{mode | at: DateTime.add(@changed_at, 800, :millisecond), value: "strict"}
+
+      ids =
+        for changes <- [[mode], [approved, mode], [strict, approved]],
+            do: HomeSummary.summary(server(computer_changes: changes))["notice"]["id"]
+
+      assert ids == [
+               "computer_change:sandbox_mode:2031-05-04T11:30:00.000Z",
+               "computer_change:harness_approved:2031-05-04T11:30:00.400Z",
+               "computer_change:sandbox_mode:2031-05-04T11:30:00.800Z"
+             ]
     end
 
     test "is each linked computer's, naming its server" do
       change = %{at: @changed_at, computer: "loft-linux", what: :sandbox_mode, value: "strict"}
 
-      assert HomeSummary.summary(desktop(computer_change: change))["notice"] == %{
-               "id" => "computer_change:2031-05-04T11:30:00Z",
+      assert HomeSummary.summary(desktop(computer_changes: [change]))["notice"] == %{
+               "id" => "computer_change:sandbox_mode:2031-05-04T11:30:00.000Z",
                "sentence" => "fermix-general-a3f9's sandbox was set to Strict from loft-linux."
              }
 
       approved = %{change | what: :harness_approved, value: true}
 
-      assert HomeSummary.summary(desktop(computer_change: approved))["notice"]["sentence"] ==
+      assert HomeSummary.summary(desktop(computer_changes: [approved]))["notice"]["sentence"] ==
                "Coding agents were allowed to run on fermix-general-a3f9 from loft-linux."
     end
 
@@ -2221,17 +2256,17 @@ defmodule FermixCore.Management.HomeSummaryTest do
       quiet = server(snapshots: snapshots([]))
       assert HomeSummary.watch(quiet).next_change_ms == nil
 
-      assert HomeSummary.watch(Map.put(quiet, :computer_change, change)).next_change_ms ==
+      assert HomeSummary.watch(Map.put(quiet, :computer_changes, [change])).next_change_ms ==
                week_left
 
-      desk = HomeSummary.watch(desktop(computer_change: change))
+      desk = HomeSummary.watch(desktop(computer_changes: [change]))
       assert desk.next_change_ms <= week_left
 
       later = DateTime.add(@changed_at, 8 * 86_400, :second)
 
       for facts <- [
-            server(computer_change: change, now: later),
-            desktop(computer_change: change, now: later)
+            server(computer_changes: [change], now: later),
+            desktop(computer_changes: [change], now: later)
           ],
           do:
             refute(

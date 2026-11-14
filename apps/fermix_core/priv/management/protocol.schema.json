@@ -2407,7 +2407,7 @@
       "additionalProperties": false,
       "properties": {
         "sections": {
-          "description": "On a linked computer (M97 §19, D28): the server's sections, its own machine sections (sandbox, browser, harness_machine) titled with its name where its hello_ack says it applies the rule (caps.computer.machine_settings) and left out where it does not, never a computer or computer.<id> it names; then this computer's own, under the always_on pane: computer, and computer.<id> for each machine section it has (computer.sandbox, computer.browser, computer.computer_use, computer.computer_history on a Mac, computer.accessories on a Mac), titled for this machine. On any other engine, its own.",
+          "description": "On a linked computer (M97 §19, D28): the server's sections, its own machine sections titled with its name, its sandbox and harness_machine where its hello_ack says it applies the rule (caps.computer.machine_settings) and left out where it does not, its browser either way (a server without the rule serves it as the home's), never its own computer_use, computer_history or accessories (each computer's own) and never a computer or computer.<id> it names; then this computer's own, under the always_on pane: computer, and computer.<id> for each machine section it has (computer.sandbox, computer.browser, computer.computer_use, computer.computer_history on a Mac, computer.accessories on a Mac), titled for this machine. On any other engine, its own.",
           "type": "array",
           "maxItems": 64,
           "items": { "$ref": "#/$defs/settingsSection" }
@@ -6195,22 +6195,27 @@
           "minLength": 1,
           "maxLength": 256
         },
-        "computer_change": {
-          "description": "On the primary, the newest change one of its computers made to its sandbox or coding approval: at (an RFC 3339 instant), computer (its name), what (sandbox_mode, with value the mode it was set to: strict, standard or open; or harness_approved, with value whether coding agents may run there) and value; null when none and on every other engine. The summary's notice computer_change:<at> says it for a week, there and on each linked computer, which reads it from primary_home. Absent from an engine older than it.",
-          "oneOf": [
-            {
-              "type": "object",
-              "required": ["at", "computer", "what", "value"],
-              "additionalProperties": false,
-              "properties": {
-                "at": { "type": "string", "minLength": 1 },
-                "computer": { "type": "string", "minLength": 1, "maxLength": 256 },
-                "what": { "enum": ["sandbox_mode", "harness_approved"] },
-                "value": { "oneOf": [{ "enum": ["strict", "standard", "open"] }, { "type": "boolean" }] }
+        "computer_changes": {
+          "description": "On the primary, the newest change its computers made to each of its limits, newest first (one write's changes, which share at, in this order of what): at (an RFC 3339 instant, to the millisecond), computer (its name), what and value: sandbox_mode with the mode it was set to (strict, standard or open), sandbox_profile with the command profile (bare, assistant or extended), sandbox_env_allow with the names of the environment variables commands may get, or harness_approved with whether coding agents may run there. A write that changed nothing is none. Empty when none and on every other engine. The summary's notice computer_change:<what>:<at> says the newest for a week, there and on each linked computer, which reads them from primary_home. Absent from an engine older than it, which a client reads as none.",
+          "type": "array",
+          "maxItems": 4,
+          "items": {
+            "type": "object",
+            "required": ["at", "computer", "what", "value"],
+            "additionalProperties": false,
+            "properties": {
+              "at": { "type": "string", "minLength": 1 },
+              "computer": { "type": "string", "minLength": 1, "maxLength": 256 },
+              "what": { "enum": ["sandbox_mode", "sandbox_profile", "sandbox_env_allow", "harness_approved"] },
+              "value": {
+                "oneOf": [
+                  { "enum": ["strict", "standard", "open", "bare", "assistant", "extended"] },
+                  { "type": "boolean" },
+                  { "type": "array", "maxItems": 200, "items": { "type": "string" } }
+                ]
               }
-            },
-            { "type": "null" }
-          ]
+            }
+          }
         },
         "restart_hold": {
           "description": "What holds the engine's restart after an update, which the server's update reads: reason move (a move under way, for as long as it runs) or computer_work (work in progress on a computer, at most ten minutes from the oldest one's start), count (the work in progress, 0 for a move), wait_s (the seconds the restart still waits, 0 to 600; 0 once the ten minutes are over) and the sentence; null when nothing holds it. Absent from an engine older than it.",

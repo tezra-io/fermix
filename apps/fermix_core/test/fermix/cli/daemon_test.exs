@@ -3,6 +3,7 @@ defmodule Fermix.CLI.DaemonTest do
 
   alias Fermix.CLI.Daemon
   alias Fermix.CLI.Daemon.Client
+  alias Fermix.CLI.Daemon.Lock
   alias FermixCore.Auth.Store
   alias FermixCore.Auth.TokenSupervisor
   alias FermixCore.Capabilities.MCP.RuntimeStatus
@@ -780,6 +781,94 @@ defmodule Fermix.CLI.DaemonTest do
     assert {:ok, %{"engine" => _engine}} = hello(socket_path)
   end
 
+  # A daemon too busy to accept turns a connection away as a stale socket
+  # does (on macOS its full backlog refuses the connect at once), so a second
+  # start decides from the lock only a live daemon holds, never from the
+  # connect: the busy daemon keeps its socket.
+  test "a second daemon leaves the socket of one that holds the lock but does not accept" do
+    socket_dir = mkdir!()
+    socket_path = Path.join(socket_dir, "busy.sock")
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf(socket_dir) end)
+    File.touch!(socket_path)
+    {:ok, busy} = Lock.acquire(socket_path)
+    on_exit(fn -> Lock.release(busy) end)
+    Process.flag(:trap_exit, true)
+
+    assert {:error, {:another_daemon_running, ^socket_path}} =
+             Daemon.start_link(
+               name: unique_name(:busy_second_daemon),
+               socket_path: socket_path,
+               task_supervisor: __MODULE__.TaskSup
+             )
+
+    assert File.exists?(socket_path)
+    assert Lock.held(socket_path) == {:ok, true}
+  end
+
+  test "a daemon holds its lock while it runs and lets go of it when it stops" do
+    socket_dir = mkdir!()
+    socket_path = Path.join(socket_dir, "held.sock")
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf(socket_dir) end)
+
+    {:ok, daemon} =
+      Daemon.start_link(
+        name: unique_name(:lock_daemon),
+        socket_path: socket_path,
+        task_supervisor: __MODULE__.TaskSup,
+        management_opts: management_opts()
+      )
+
+    assert Lock.held(socket_path) == {:ok, true}
+    assert {:ok, %{"engine" => _engine}} = hello(socket_path)
+
+    :ok = GenServer.stop(daemon, :normal, @reply_ms)
+
+    refute File.exists?(socket_path)
+    assert Lock.held(socket_path) == {:ok, false}
+    assert Client.request_v1("hello", %{}, socket_path: socket_path) == {:error, :not_running}
+  end
+
+  # While the daemon is at one connection, the ones behind it wait in the
+  # listen backlog. macOS's default of 5 refused the sixth at once, which a
+  # client read as no daemon at all; the daemon asks for macOS's cap.
+  test "connections that wait behind a busy accept are queued, not refused" do
+    socket_dir = mkdir!()
+    socket_path = Path.join(socket_dir, "queue.sock")
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf(socket_dir) end)
+    test = self()
+
+    gate = fn _conn ->
+      send(test, {:at_gate, self()})
+
+      receive do
+        :admit -> {:error, :test_over}
+      end
+    end
+
+    {:ok, daemon} =
+      Daemon.start_link(
+        name: unique_name(:queue_daemon),
+        socket_path: socket_path,
+        task_supervisor: __MODULE__.TaskSup,
+        management_opts: management_opts(),
+        peer_gate: gate
+      )
+
+    {:ok, first} = connect_waiting(socket_path)
+    assert_receive {:at_gate, acceptor}
+
+    for _waiting <- 1..20 do
+      assert {:ok, conn} = connect_waiting(socket_path)
+      :gen_tcp.close(conn)
+    end
+
+    # Each queued connection reaches the gate in turn: one admit apiece frees
+    # the acceptor to see the listener close.
+    :gen_tcp.close(first)
+    for _connection <- 0..20, do: send(acceptor, :admit)
+    GenServer.stop(daemon, :normal, @reply_ms)
+  end
+
   test "agent_message routes the prompt through the configured CLI bridge", %{
     socket_path: socket_path
   } do
@@ -1124,6 +1213,53 @@ defmodule Fermix.CLI.DaemonTest do
 
       owner = start_peer_daemon(management_opts: recording_writers())
       assert_writes_reached(owner, @machine_writes)
+    end
+
+    # A computer's own settings and sandbox values by the ids its app writes
+    # them with (`computer.<id>`, `computer.env:<NAME>`, M97 §19.3): refused
+    # to a process the daemon started, and the owner's reach this computer's
+    # own writers under their plain ids.
+    @own_machine_writes [
+      {"settings.apply",
+       %{"section" => "computer.sandbox", "values" => %{"sandbox_mode" => "open"}},
+       {:settings_apply, "sandbox"}},
+      {"secret.set", %{"id" => "computer.env:HERON_TOKEN", "value" => "Heron-9081"},
+       {:secret_set, "env:HERON_TOKEN"}},
+      {"secret.clear", %{"id" => "computer.env:HERON_TOKEN"}, {:secret_clear, "env:HERON_TOKEN"}}
+    ]
+
+    test "this computer's own settings and sandbox values are refused to a process the " <>
+           "daemon started, and the owner's are served" do
+      golden = golden_error_details("unavailable_machine_owner_decision")
+      own = recording_writers() ++ [computer?: true]
+
+      socket_path =
+        start_peer_daemon(management_opts: own, daemon_os_pid: ParentProcess.os_pid())
+
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          for {method, params, _written} <- @own_machine_writes do
+            assert {:error, {:management_error, "unavailable", _message, ^golden}} =
+                     Client.request_v1(method, params,
+                       socket_path: socket_path,
+                       timeout: @reply_ms
+                     ),
+                   inspect({method, params})
+          end
+        end)
+
+      assert log =~ "only the owner may"
+      refute_received {:written, _write, _target}
+
+      owner = start_peer_daemon(management_opts: own)
+
+      for {method, params, {write, target}} <- @own_machine_writes do
+        assert {:ok, _result} =
+                 Client.request_v1(method, params, socket_path: owner, timeout: @reply_ms),
+               inspect({method, params})
+
+        assert_received {:written, ^write, ^target}
+      end
     end
 
     test "every other secret and section stays open to a process the daemon started" do
@@ -2153,6 +2289,12 @@ defmodule Fermix.CLI.DaemonTest do
 
   defp hello(socket_path) do
     Client.request_v1("hello", %{}, socket_path: socket_path, timeout: @reply_ms)
+  end
+
+  # A connection the kernel queues answers the connect at once; only a refused
+  # or blocked one reaches the bound.
+  defp connect_waiting(socket_path) do
+    :gen_tcp.connect({:local, to_charlist(socket_path)}, 0, [active: false], @reply_ms)
   end
 
   defp unique_name(prefix) do

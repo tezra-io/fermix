@@ -643,6 +643,30 @@ defmodule FermixCore.Management.AlwaysOnTest do
       end
     end
 
+    # An answer of another shape (a server with another idea of `home.restart`)
+    # is refused with a sentence, never raised inside the act's serializer.
+    test "a server's answer this computer does not read is refused with a sentence", ctx do
+      unread = [
+        %{"accepted" => true},
+        %{"when" => "now", "sentence" => "Restarting."},
+        %{"when" => "soon", "wait_s" => 3, "sentence" => "Restarting soon."}
+      ]
+
+      for answer <- unread do
+        Agent.update(ctx.script, fn _on -> restart_waits(server_part(:on), {:ok, answer}) end)
+
+        assert {:error, :unavailable, %{"capability" => "home", "sentence" => sentence}} =
+                 press(ctx, "restart_server"),
+               inspect(answer)
+
+        assert sentence in AlwaysOn.sentences()
+        assert sentence =~ "does not read"
+      end
+
+      # The act's serializer still runs every step.
+      assert %{"state" => "on"} = summary(ctx.opts)
+    end
+
     test "Restart <server> not offered answers changed and sends nothing", ctx do
       flush_forwarded()
       key = HomeSummary.restart_server_action("fermix-general-a3f9")["key"]

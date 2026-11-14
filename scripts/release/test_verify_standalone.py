@@ -11,6 +11,7 @@ import os
 import struct
 import subprocess
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -603,6 +604,69 @@ class VerifyStandaloneTest(unittest.TestCase):
 
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("must exit 3, got 1", result.stderr)
+
+    # ── the fermix status and lock stage ──────────────────────────────────
+
+    def test_status_reads_the_daemons_lock_beside_a_stale_socket(self):
+        self._write_artifact(create_disclaim=True)
+
+        result = self._run("macos_aarch64")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("fermix: not running", result.stdout)
+        self.assertIn("could not tell whether it is running: its control socket", result.stdout)
+
+    # The class this stage exists for: a refused socket read as stopped while a
+    # daemon holds its lock. The stand-in it started ends with the run's
+    # directory, though the stage failed while it ran.
+    def test_rejects_a_status_that_ignores_the_lock_and_leaves_no_stand_in(self):
+        self._write_artifact(create_disclaim=True, status="ignores_lock")
+
+        result = self._run("macos_aarch64")
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("whose lock another process holds must exit 1, got 3", result.stderr)
+        holder = int((self.base / "holder.pid").read_text(encoding="utf-8"))
+        self.assertTrue(self._ends(holder), f"the stand-in daemon {holder} outlived the run")
+
+    # The NIF the read needs, missing from the packaged runtime: every lock is
+    # unreadable, so even a crashed daemon's home reads as could not tell.
+    def test_rejects_a_status_whose_lock_read_fails(self):
+        self._write_artifact(create_disclaim=True, status="lock_unreadable")
+
+        result = self._run("macos_aarch64")
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("a lock nothing holds must exit 3, got 1", result.stderr)
+
+    def test_rejects_an_artifact_without_the_status_verb(self):
+        self._write_artifact(create_disclaim=True, status="unknown_verb")
+
+        result = self._run("macos_aarch64")
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("a lock nothing holds must exit 3, got 2", result.stderr)
+
+    # The stage runs before migrate-to-app, which ends the script on Linux.
+    def test_linux_artifact_runs_the_status_lock_stage_too(self):
+        self.artifact = self.base / "fermix_linux_x86_64"
+        self._write_artifact(create_disclaim=False, migrate="refused:not_macos", status="ignores_lock")
+
+        result = self._run("linux_x86_64")
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("whose lock another process holds must exit 1, got 3", result.stderr)
+
+    # Whether `pid` has ended, looked at every 0.1 s for 10 s at most.
+    @staticmethod
+    def _ends(pid):
+        for _ in range(100):
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                return True
+            time.sleep(0.1)
+        return False
 
     # ── the fermix always-on no-daemon stage ──────────────────────────────
 
@@ -1316,6 +1380,7 @@ class VerifyStandaloneTest(unittest.TestCase):
         upgrade="checks",
         always_on="refuses",
         home="carries",
+        status="reads_lock",
         iroh_helper="pinned",
         iroh_notices="pinned",
         maintenance="answers",
@@ -1370,6 +1435,9 @@ class VerifyStandaloneTest(unittest.TestCase):
             "fi\n"
             'if [ "${1:-}" = "home" ]; then\n'
             f"{self._home_behaviour(home)}"
+            "fi\n"
+            'if [ "${1:-}" = "status" ]; then\n'
+            f"{self._status_behaviour(status)}"
             "fi\n"
             f"printf 'fermix {version}\\n'\n",
             encoding="utf-8",
@@ -1571,6 +1639,63 @@ class VerifyStandaloneTest(unittest.TestCase):
             + '"},"ok":false,"schema_version":1}\\n\'\n'
         )
         return envelope, f"  printf 'fermix always-on: {sentence}\\n' >&2\n"
+
+    # The real verb's shape beside a socket no daemon listens on: the lock is
+    # read for real, a SQLite read refused while the stage's stand-in daemon
+    # holds it, so a stand-in that holds nothing fails the stage. Not running
+    # is exit 3, could not tell exit 1, as `StatusCommand` answers. The
+    # broken shapes are the client before the lock (a refused socket is always
+    # not running) and one whose lock read fails (always could not tell); the
+    # first leaves the stand-in's PID beside the test, which checks it ends.
+    def _status_behaviour(self, status):
+        if status == "unknown_verb":
+            return "  printf 'fermix: unknown command: status\\n' >&2\n  exit 2\n"
+        not_running = "    printf 'fermix: not running\\n' >&2\n    exit 3\n"
+        could_not_tell = (
+            "    printf 'fermix status: Fermix could not tell whether it is running: its control socket "
+            "turned the connection away while Fermix holds its lock, as a Fermix too busy to answer "
+            "does\\n' >&2\n    exit 1\n"
+        )
+        start = (
+            '  [ "$*" = "status" ] || exit 64\n'
+            '  [ -S "$FERMIX_HOME/daemon.sock" ] || { printf \'no stale socket\\n\' >&2; exit 70; }\n'
+        )
+        if status == "ignores_lock":
+            keep_pid = f"  cp \"$(dirname \"$FERMIX_HOME\")/lock-holder.pid\" '{self.base}/holder.pid' 2>/dev/null || :\n"
+            return start + keep_pid + not_running
+        if status == "lock_unreadable":
+            return (
+                start
+                + "  printf 'fermix status: Fermix could not tell whether it is running: its lock "
+                "%s could not be read (:nif_not_loaded)\\n' \"$FERMIX_HOME/daemon.sock.lock\" >&2\n"
+                + "  exit 1\n"
+            )
+        if status != "reads_lock":
+            raise ValueError(f"unknown status behaviour: {status}")
+        probe = (
+            '  lock="$(uv run --no-project python - "$FERMIX_HOME/daemon.sock.lock" <<\'PY\'\n'
+            "import sqlite3, sys\n"
+            "try:\n"
+            "    lock = sqlite3.connect(sys.argv[1], timeout=0)\n"
+            "    lock.execute('SELECT count(*) FROM sqlite_master').fetchall()\n"
+            "    lock.close()\n"
+            "    print('free')\n"
+            "except sqlite3.OperationalError as error:\n"
+            "    print('held' if 'locked' in str(error) else 'unreadable')\n"
+            "PY\n"
+            ')"\n'
+        )
+        return (
+            start
+            + probe
+            + '  if [ "$lock" = held ]; then\n'
+            + could_not_tell
+            + "  fi\n"
+            + '  if [ "$lock" = free ]; then\n'
+            + not_running
+            + "  fi\n"
+            + "  printf 'fermix status: the lock could not be read\\n' >&2\n  exit 1\n"
+        )
 
     # The real verbs' shapes in the throwaway world: export seals the home the
     # environment names, import makes the next primary with the home's own path

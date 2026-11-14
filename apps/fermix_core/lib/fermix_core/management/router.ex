@@ -1160,8 +1160,9 @@ defmodule FermixCore.Management.Router do
          {:ok, section} <- fetch_section(params, @settings_apply_params),
          {:ok, plain} <- here(section, opts),
          {:ok, values} <- fetch_values(params) do
+      moving = moving_from_computer(section, values, opts)
       result = writer.(plain, values, settings_opts(opts))
-      :ok = said_from_computer(result, section, values, opts)
+      :ok = said_from_computer(result, moving, opts)
 
       result
       |> operation_result()
@@ -1169,31 +1170,64 @@ defmodule FermixCore.Management.Router do
     end
   end
 
-  # The server's sandbox or coding approval changed from one of its computers
-  # (M97 §19.5): recorded once the write stood, so the server's summary and
-  # every computer's say it, naming the computer. A record that cannot be
-  # kept is logged; the write stands.
-  @said_from_computer %{"sandbox" => "sandbox_mode", "harness_machine" => "harness_approved"}
+  # The server's limits one of its computers can change (M97 §19.5): its
+  # sandbox's mode, command profile and allowed environment names, and
+  # whether coding agents may run on it. Each key a computer's write moved is
+  # recorded once the write stood, so the server's summary and every
+  # computer's say it, naming the computer; a key sent with the value it
+  # already had is not. A record that cannot be kept is logged; the write
+  # stands.
+  @said_from_computer %{
+    "sandbox" => ~w(sandbox_mode sandbox_profile sandbox_env_allow)a,
+    "harness_machine" => ~w(harness_approved)a
+  }
 
-  defp said_from_computer({:ok, _applied}, section, values, opts) do
+  # Which computer sent the write, and what of the said keys it changes from
+  # the value the section holds before it; nil from the owner's own socket and
+  # for every other section.
+  defp moving_from_computer(section, values, opts) do
     with {:desktop, device_id} <- Keyword.get(opts, :actor),
-         {:ok, key} <- Map.fetch(@said_from_computer, section),
-         {:ok, value} <- Map.fetch(values, key) do
-      change = %{
-        at: DateTime.utc_now(),
-        computer: computer_name(device_id, opts),
-        what: String.to_existing_atom(key),
-        value: value
-      }
+         {:ok, whats} <- Map.fetch(@said_from_computer, section) do
+      held = held_values(section, opts)
 
-      record = Keyword.get(opts, :record_change, &ChangedFromComputer.record/2)
-      record_said(record.(ConfigStore.fermix_home(), change), section)
+      moved =
+        for what <- whats,
+            key = Atom.to_string(what),
+            Map.has_key?(values, key),
+            values[key] != Map.get(held, key),
+            do: {what, values[key]}
+
+      {device_id, section, moved}
     else
-      _not_from_a_computer -> :ok
+      _not_from_a_computer -> nil
     end
   end
 
-  defp said_from_computer(_refused, _section, _values, _opts), do: :ok
+  # The section's values as `settings.get` reads them. A section this engine
+  # does not publish holds none, and the write that follows refuses it.
+  defp held_values(section, opts) do
+    reader = Keyword.get(opts, :settings_reader, &Settings.get/2)
+
+    case reader.(section, settings_opts(opts)) do
+      {:ok, %{"rows" => rows}} -> Map.new(rows, &{&1["key"], &1["value"]})
+      {:error, {:unknown_section, _section}} -> %{}
+    end
+  end
+
+  defp said_from_computer({:ok, _applied}, {device_id, section, [_ | _] = moved}, opts) do
+    at = DateTime.utc_now()
+    computer = computer_name(device_id, opts)
+    record = Keyword.get(opts, :record_change, &ChangedFromComputer.record/2)
+
+    for {what, value} <- moved do
+      change = %{at: at, computer: computer, what: what, value: value}
+      :ok = record_said(record.(ConfigStore.fermix_home(), change), section)
+    end
+
+    :ok
+  end
+
+  defp said_from_computer(_result, _moving, _opts), do: :ok
 
   defp record_said(:ok, _section), do: :ok
 

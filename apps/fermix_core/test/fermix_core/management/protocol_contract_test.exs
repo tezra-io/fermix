@@ -2497,14 +2497,14 @@ defmodule FermixCore.Management.ProtocolContractTest do
         link: %{primary: nil, desktops: desktops, enrollment: nil},
         snapshots: server["snapshots"],
         disk: server["disk"],
-        computer_change: golden_change()
+        computer_changes: [golden_change()]
       )
 
     %{server | "summary" => summary}
     |> Map.merge(%{
       "restart" => sandbox_restart(),
       "profile" => "general",
-      "computer_change" => ChangedFromComputer.view(golden_change())
+      "computer_changes" => [ChangedFromComputer.view(golden_change())]
     })
   end
 
@@ -2525,7 +2525,7 @@ defmodule FermixCore.Management.ProtocolContractTest do
         primary_home: server,
         copies_bytes: 3 * 48_211,
         copies: desktop_copies(),
-        computer_change: golden_change()
+        computer_changes: [golden_change()]
       )
 
     ManagementHome.picture(%{
@@ -2539,7 +2539,7 @@ defmodule FermixCore.Management.ProtocolContractTest do
       primary_home: server,
       restart: %{"required" => false, "reasons" => []},
       profile: "general",
-      computer_change: nil
+      computer_changes: []
     })
   end
 
