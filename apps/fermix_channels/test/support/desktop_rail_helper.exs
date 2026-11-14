@@ -125,8 +125,10 @@ defmodule FermixChannels.Test.DesktopRail do
   `:families` (the desktop peer's families, or a function of the primary's
   names, `%{tunnels, socket_dir, peers}`, answering them), `:revoked` (an Agent of whether
   the desktop's row is gone), `:hello_ack_builder`, `:media_descriptor` and
-  `:media_store` (the session's media seams), and `:iroh_candidate` and
-  `:iroh_hints` (its rail's route and address hints).
+  `:media_store` (the session's media seams), `:calls`, `:call_supervisor`,
+  `:call_options` and `:call_caps` (its calls' registry, supervisor, each
+  call's options and what its hello_ack says of calls, M97 §9.2), and
+  `:iroh_candidate` and `:iroh_hints` (its rail's route and address hints).
   """
   def primary!(opts \\ []) do
     root = root!("fx-dp")
@@ -250,6 +252,10 @@ defmodule FermixChannels.Test.DesktopRail do
         :hello_ack_builder,
         :media_descriptor,
         :media_store,
+        :calls,
+        :call_supervisor,
+        :call_options,
+        :call_caps,
         :iroh_candidate,
         :iroh_hints
       ])

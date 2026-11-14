@@ -1121,9 +1121,9 @@ app must reproduce it before shipping.
 A phone talks to Fermix by voice over its own session. A call is a Realtime
 protocol conversation (`priv/realtime/PROTOCOL.md`), the one the Mac's voice
 companion speaks over its local socket, carried in four events each way
-beside the chat, and a fifth from the phone for its camera's stills. A desktop's session carries none: a desktop's voice reaches its own
-computer's socket, and a call event from a desktop is answered
-`error{code:"unsupported_event"}`, the session staying open.
+beside the chat, and a fifth from the phone for its camera's stills. A
+computer whose home moved calls its server the same way (M97 §9.2; see *A
+computer's call*, below).
 
 `hello_ack.caps.call` says whether this primary serves a call now:
 `{available, reason?, min_version, max_version, camera}`. When `available` is
@@ -1291,6 +1291,32 @@ once it is 8 s old, and on Camera off, a detach and the call's end; the
 primary keeps none longer, never logs its bytes, and cannot take back a still
 a task already carried to a provider.
 
+**A computer's call** (M97 §9.2). A desktop engine whose home moved carries
+its app's calls to its server on its own desktop session: its app keeps the
+Mac's or Linux's local socket and audio stack, and the engine bridges each
+call to this channel. The primary admits it as the endpoint
+`computer:<device_id>` (its device row's id), under the home's one call, so
+a phone's `call_start` while a computer holds the call is refused `held_by:
+"computer:<device_id>"`, and the reverse. A desktop sends a call's events
+only to a primary whose `hello_ack` says `caps.computer.call: true`, which
+also carries `caps.call` for the computer: `available` and `reason` as a
+phone's (`engine_not_for_phones` never: a computer's call runs on the
+configured engine, any of the three), the Realtime window, and `camera`
+always false. Everything above holds, with three differences:
+
+- no camera: a desktop sends no `call_frame` (`unsupported_event`), and a
+  `camera` line ends its call as `unsupported_by_endpoint`;
+- no screen: the call's voice is offered no screen share, whatever the
+  primary's setting;
+- a silent session ends the call alone: a desktop's session carries its
+  chat and settings too, so no call frame from it for 1.5 s while the
+  computer holds audio it reports on ends the call with the error line
+  `link_too_slow`, then the session's last lines and
+  `call_close{reason:"link_too_slow"}`, and the session stays open.
+
+A desktop's session that closes leaves the call held for 20 s, as a phone's
+does, and its next session resumes it with `call_open{resume: true}`.
+
 **Revocation.** A phone revoked mid-call is sent the error line `revoked`
 first; then it is muted, the hand-offs its call started that have not settled
 are cancelled, the session's last lines follow, and the call ends with
@@ -1357,9 +1383,22 @@ The invocation's five events (`invoke_open`, `invoke_part`, `invoke_cancel`,
 desktop sending them, and `invoke_restarted`, only when `hello_ack` says
 `caps.computer.invoke: true` (see *Invocations*).
 
+A desktop also sends the phone's call events but its camera (`call_open`,
+`call_line`, `call_audio`, `call_close`; see *A computer's call*) only when
+`hello_ack` says `caps.computer.call: true`, and the phone's upload
+(`attach_begin`, `attach_chunk`, `attach_end`; see *Attachments*) only when it
+says `caps.computer.attach: true` (M97 §9.3): its engine takes the files its
+app attaches into an inbox of its own and uploads each one so, one at a time,
+in the bulk lane, and the app's `msg` that names it, which its chat tunnel
+carries, finds it in the primary's store. The primary answers an upload as it
+answers a phone's (`attach_status`, or an `error` naming no upload, which is
+why a desktop sends one at a time).
+
 The primary sends a desktop `hello_ack`, `pong`, `error`, `event_part`,
 `media_begin`, `media_chunk` and `media_end`, `companion_line` and
-`companion_close` (above), the invocation's events, and these:
+`companion_close` (above), the invocation's events, a call's events
+(`call_attached`, `call_line`, `call_audio`, `call_close`), `attach_status`,
+and these:
 
 | `t` | Required payload | Rules |
 |---|---|---|
@@ -1402,10 +1441,11 @@ computer's record; a phone sends none of it.
   one; a phone's `hello` never moves its row's platform.
 - **What the primary takes.** A desktop's `hello_ack` carries
   `caps.computer`, with
-  `{"v":1,"offers":true,"link_path":true,"invoke":true,"machine_settings":true}`
+  `{"v":1,"offers":true,"link_path":true,"invoke":true,"machine_settings":true,"call":true,"attach":true}`
   among its keys from this primary: `v` is a positive integer, and `offers`,
-  `link_path` and `invoke` (the five events of *Invocations*, and
-  `invoke_restarted`), each a
+  `link_path`, `invoke` (the five events of *Invocations*, and
+  `invoke_restarted`), `call` (a call's four events, *A computer's call*) and
+  `attach` (the upload's three), each a
   boolean when present, say whether the primary takes that event. A later
   primary may add keys, which a desktop ignores. A phone's `hello_ack`, and a
   primary's older than the record, carry no `computer`.
@@ -1453,7 +1493,7 @@ computer's record; a phone sends none of it.
 |---|---|
 | `v` | `1` |
 | `offers` | 0 to 32 offers, each `id` named once |
-| `id` | `^[a-z][a-z0-9_]{0,31}$`: `files`, `shell`, `browser`, `computer_use`, `imessage`, `history`, `voice`, `attachments`, `accessory` and `notifications` today; the primary keeps an id it does not know as it came, since a newer computer may offer more |
+| `id` | `^[a-z][a-z0-9_]{0,31}$`: `files`, `shell`, `browser`, `computer_use`, `imessage`, `history`, `places`, `voice`, `attachments`, `accessory` and `notifications` today; the primary keeps an id it does not know as it came, since a newer computer may offer more |
 | `state` | `on`, `off` or `unavailable` |
 | `sentence?` | why the offer is not on, for the owner to read: required unless `state` is `on`, 1 to 300 bytes of UTF-8 with no control character |
 | `detail?` | a short note on the offer, such as the sandbox mode `shell` runs commands in, or the access level `computer_use` gives (its sandbox mode: `strict` looks only): 1 to 64 bytes of UTF-8 with no control character |
@@ -1921,7 +1961,7 @@ sent is never sent to it. `FermixChannels.Mobile.Peers` is this table.
 | Kind | Sends | Is sent |
 |---|---|---|
 | phone | `hello` `msg` `attach_begin` `attach_chunk` `attach_end` `command` `cancel` `history_pull` `media_fetch` `push_register` `push_unregister` `push_subscribe` `ack` `read_state` `request_status` `unpair` `ping` `call_open` `call_line` `call_audio` `call_frame` `call_close` `companion_open` `companion_line` `companion_close` | `hello_ack` `accepted` `attach_status` `turn_started` `text_delta` `tool_event` `text_done` `turn_done` `media_begin` `media_chunk` `media_end` `turn_error` `row` `reaction` `approval` `approval_resolved` `link_preview` `read_state` `history_page` `request_status_page` `notice` `error` `pong` `event_part` `call_attached` `call_line` `call_audio` `call_close` `companion_line` `companion_close` |
-| desktop | `hello` `ping` `media_fetch` `ack` `companion_open` `companion_line` `companion_close` `manage` `loopback_request` `loopback_failed` `snapshot_stored` `snapshot_refused` `offers` `link_path` `invoke_open` `invoke_part` `invoke_cancel` `invoke_result` `invoke_status` `invoke_restarted` | `hello_ack` `error` `pong` `event_part` `media_begin` `media_chunk` `media_end` `companion_line` `companion_close` `manage_result` `loopback_open` `loopback_response` `loopback_close` `snapshot_begin` `snapshot_chunk` `snapshot_end` `invoke_open` `invoke_part` `invoke_cancel` `invoke_result` `invoke_status` |
+| desktop | `hello` `ping` `media_fetch` `ack` `companion_open` `companion_line` `companion_close` `manage` `loopback_request` `loopback_failed` `snapshot_stored` `snapshot_refused` `offers` `link_path` `invoke_open` `invoke_part` `invoke_cancel` `invoke_result` `invoke_status` `invoke_restarted` `call_open` `call_line` `call_audio` `call_close` `attach_begin` `attach_chunk` `attach_end` | `hello_ack` `error` `pong` `event_part` `media_begin` `media_chunk` `media_end` `companion_line` `companion_close` `manage_result` `loopback_open` `loopback_response` `loopback_close` `snapshot_begin` `snapshot_chunk` `snapshot_end` `invoke_open` `invoke_part` `invoke_cancel` `invoke_result` `invoke_status` `call_attached` `call_line` `call_audio` `call_close` `attach_status` |
 | enrollment | `enroll_request` `join_request` `ping` | `enroll_accepted` `join_approved` `join_denied` `error` `pong` |
 | move | `move_offer` `move_chunk` `move_end` `move_commit` `move_resume` `ping` | `move_accept` `move_ready` `move_done` `error` `pong` |
 

@@ -9,7 +9,10 @@ defmodule FermixCore.Home.MoveReadiness do
     * `call_in_progress`, first and only while a voice call is in progress
       (`Realtime.CallLease`; `:call_holder` in a test), warns, naming whom
       the call is with: the move restarts this engine, which ends the call
-      before the move's capture starts;
+      before the move's capture starts. A computer's call, bridged from its
+      app (M97 §9.2), is named by the computer's name (D18; `:computer_names`
+      in a test): on a move back it is the computer the home moves to, which
+      ends its call cleanly before it asks for the move;
     * `meeting_in_progress`, next and only while the notetaker is in a
       meeting (`Meetings.in_progress/1`; `:meeting_holder` in a test),
       blocks, naming the meeting: the restart would end it before its notes
@@ -59,13 +62,14 @@ defmodule FermixCore.Home.MoveReadiness do
       (`FermixCore.Home.DeviceLocal`), so the server runs none of them, and
       the walk never blocks on them;
     * `stays_here`: what the home has turned on that runs only on this
-      computer (voice calls, Google Meet meetings, StackChan on a Mac;
+      computer (Google Meet meetings, StackChan on a Mac;
       `stays_here/2`; iMessage is not among them: the Mac carries it for the
       server, M97 §6.4, as the move's keep-on block shows)
       stops after the move, each named; with none of them on it is `ok`.
-      Voice is this computer's own (its socket): calls from the phone carry
-      on at the server when Talk to Fermix is on there and its key is in the
-      server's secret store (M87 §07). Meetings are the home's and run on
+      Voice calls are not among them either: after the move this computer's
+      app calls the server through its engine (M97 §9.2), and the phone's
+      calls carry on there (M87 §07), on the server's Talk to Fermix and its
+      key, which moves into the server's secret store. Meetings are the home's and run on
       the server, Zoom's with no browser, so with Zoom set up they carry on
       there; Google Meet's stop, since the server cannot sign the notetaker
       in to Google (M97 §9.5, D24). On
@@ -119,6 +123,7 @@ defmodule FermixCore.Home.MoveReadiness do
   alias FermixCore.Home.Archive
   alias FermixCore.Home.Archive.ConfigText
   alias FermixCore.Home.Disk
+  alias FermixCore.Home.Link
   alias FermixCore.Home.MoveSecrets
   alias FermixCore.Home.Readable
   alias FermixCore.Home.Releases
@@ -167,7 +172,7 @@ defmodule FermixCore.Home.MoveReadiness do
     macos? = String.starts_with?(host, "macos-")
 
     items =
-      call_in_progress(Keyword.get(opts, :call_holder, &call_holder/0)) ++
+      call_in_progress(Keyword.get(opts, :call_holder, &call_holder/0), opts) ++
         meeting_in_progress(opts) ++
         [
           keychain(config, opts),
@@ -244,17 +249,18 @@ defmodule FermixCore.Home.MoveReadiness do
 
   @doc """
   What the home at `home` has turned on that runs only on this computer and
-  stops after a move, read from its settings: voice calls and meetings, in
-  that order; or the sentence that says the settings could not be read.
-  StackChan (`:accessories`, M91) is named last, on a Mac only. iMessage is
-  never named: after the move this Mac carries it for the server (M97
-  §6.4). `home.status` reads it on every poll, so an
+  stops after a move, read from its settings: meetings; or the sentence that
+  says the settings could not be read. StackChan (`:accessories`, M91) is
+  named last, on a Mac only. Neither iMessage nor voice calls are ever
+  named: after the move this Mac carries iMessage for the server (M97 §6.4),
+  and this computer's app calls the server through its engine (§9.2).
+  `home.status` reads it on every poll, so an
   unreadable file is logged once when it stops being readable and once when
   it reads again (`Home.UnreadableFiles`, `opts`' `:unreadable_files`: that
   memory, or nil for none).
   """
   @spec stays_here(Path.t(), boolean(), keyword()) ::
-          {:ok, [:voice | :meetings | :accessories]} | {:error, String.t()}
+          {:ok, [:meetings | :accessories]} | {:error, String.t()}
   def stays_here(home, macos?, opts \\ [])
       when is_binary(home) and is_boolean(macos?) and is_list(opts) do
     with {:ok, text} <- settings(home, opts), do: {:ok, features(text, macos?)}
@@ -653,14 +659,15 @@ defmodule FermixCore.Home.MoveReadiness do
 
   # M87: a move restarts this engine, and the restart ends a voice call in
   # progress before the move's capture starts; the review names it first.
-  defp call_in_progress(holder) do
+  defp call_in_progress(holder, opts) do
     case holder.() do
       {:ok, %{endpoint: endpoint}} ->
         [
           item(
             "call_in_progress",
             :warn,
-            "A voice call #{call_with(endpoint)} is in progress: the move ends it before it starts."
+            "A voice call #{call_with(endpoint, opts)} is in progress: the move ends it " <>
+              "before it starts."
           )
         ]
 
@@ -669,9 +676,32 @@ defmodule FermixCore.Home.MoveReadiness do
     end
   end
 
-  defp call_with("desktop"), do: "on this computer"
-  defp call_with("phone:" <> _device_id), do: "from your phone"
-  defp call_with("accessory:" <> _device_id), do: "from an accessory"
+  defp call_with("desktop", _opts), do: "on this computer"
+  defp call_with("phone:" <> _device_id, _opts), do: "from your phone"
+  defp call_with("accessory:" <> _device_id, _opts), do: "from an accessory"
+
+  # M97 D18: a computer's call, read "on <its name>".
+  defp call_with("computer:" <> device_id, opts) do
+    names = Keyword.get(opts, :computer_names, &computer_names/0).()
+
+    case Map.fetch(names, device_id) do
+      {:ok, name} -> "on #{name}"
+      :error -> "on one of your computers"
+    end
+  end
+
+  # The home's computers by their device ids, as their rows name them; rows
+  # that cannot be read name none, and the review says so without a name.
+  defp computer_names do
+    case Link.impl().computer_rows() do
+      {:ok, rows} ->
+        Map.new(rows, &{&1.device_id, &1.name})
+
+      {:error, reason} ->
+        Logger.warning("move review: the computers' names could not be read: #{inspect(reason)}")
+        %{}
+    end
+  end
 
   # Voice's tree runs only where Talk to Fermix is on: no lease, no call.
   defp call_holder do
@@ -715,9 +745,8 @@ defmodule FermixCore.Home.MoveReadiness do
     machine = if macos?, do: "Mac", else: "computer"
 
     [
-      stays_behind(leaving(features) -- [:voice], machine, name),
-      zoom_moves(features, text, name),
-      voice_moves(features, machine, name)
+      stays_behind(leaving(features), machine, name),
+      zoom_moves(features, text, name)
     ]
     |> Enum.reject(&(&1 == ""))
     |> Enum.join(" ")
@@ -754,19 +783,13 @@ defmodule FermixCore.Home.MoveReadiness do
     "#{Copy.stops_after_move(features)}: neither this #{machine} nor #{name} runs #{them}."
   end
 
-  # M87 §07: this computer's own voice reaches only its socket, so it stops;
-  # a phone's calls ride its session to wherever the home runs.
-  defp voice_moves(features, machine, name) do
-    if :voice in features, do: "#{Copy.voice_after_move(machine, name)}.", else: ""
-  end
-
-  defp none_on(_macos?), do: "Voice calls and meetings are not turned on."
+  defp none_on(_macos?), do: "Meetings are not turned on."
 
   # iMessage is not here: after a move the Mac carries it for the server
-  # (M97 §6.4), and the move's keep-on block names it.
+  # (M97 §6.4), and the move's keep-on block names it. Nor is voice: this
+  # computer's app calls the server through its engine (§9.2).
   defp features(text, macos?) do
     [
-      voice: on?(text, "fermix_core.realtime", "enabled"),
       meetings: on?(text, "fermix_core.meetings", "enabled"),
       # M91 D7, D13: a server carries the pairing and starts no accessory link.
       accessories: macos? and on?(text, "fermix_channels.accessories", "enabled")

@@ -129,6 +129,65 @@ scenarios:
              again on the server.
           5. Does not tell the owner to install every plugin again by hand.
 
+  # M97 §9.2, §9.3 (stage A): after a move the Mac's app still calls Fermix
+  # and still attaches files in its chat. The call rides this Mac's Fermix
+  # to the server, which runs the voice session on its own Talk to Fermix
+  # and key; a file goes to the server's store the same way. What rots is
+  # the self-knowledge `voice` and `companion` references, which said until
+  # this stage that the Mac's voice stops and its chat attaches nothing;
+  # general knowledge has no answer at all. No route assertion: the answer
+  # is advice, and the floor is the voice the owner asked about, which every
+  # correct answer names; the one not-matches is the old claim in words no
+  # correct answer uses in either polarity; the rubric owns the facts.
+  - id: voice_and_files_from_a_moved_mac
+    title: "Talking to Fermix and attaching files from the Mac after a move"
+    severity: normal
+    risk: host_readonly
+    tags: [home, always-on, voice, attachments, self-knowledge]
+    cases:
+      - id: voice_and_attachments_after_the_move
+        query: >
+          Last week I moved my Fermix onto my own Linux server with Always On.
+          Can I still press the call button in the Fermix app on my Mac and
+          talk to it, and can I still attach a PDF in the Mac's chat, or did
+          both stop when it moved?
+        expect:
+          reply_matches: '(?i)\b(?:voice|call)'
+          reply_not_matches: '(?i)\b(?:voice|calls?)\b[^.]{0,40}\bonly\s+(?:from|on)\s+(?:your|the)\s+phone\b|\breaches\s+only\s+its\s+own\s+(?:computer|socket)\b'
+          max_cost_usd: 1.2
+          max_duration_ms: 160000
+        rubric: |
+          1. Says voice calls from the Mac's app still work after the move:
+             this Mac's Fermix carries the call to the server, which runs it.
+          2. Says the call uses the server's voice settings: Talk to Fermix
+             turned on there, with its voice key in the server's secret store
+             (a key the Mac kept in its keychain moved there with the home).
+          3. Says attaching a file such as a PDF in the Mac's chat still
+             works: the Mac's Fermix sends the file to the server, and the
+             turn reads it as it would on the Mac.
+          4. Does not say the Mac's voice calls or its attachments stopped
+             with the move, and does not send the owner to the phone or to
+             the server's own screen to do either.
+      # The move back with a call up: the review names the call, and Move now
+      # hangs it up cleanly before the move starts (M97 §9.2).
+      - id: a_call_up_when_moving_back
+        query: >
+          My Fermix lives on my own server now and I talk to it from my Mac.
+          If I'm in the middle of a voice call with it and press Move now to
+          bring Fermix back onto the Mac, what happens to the call?
+        expect:
+          reply_matches: '(?i)\bcall'
+          max_cost_usd: 1.2
+          max_duration_ms: 160000
+        rubric: |
+          1. Says the call ends before the move back starts: the move's
+             review warns of the call in progress, and Move now hangs it up,
+             so the owner calls again once the move is done.
+          2. Says that after the move back the Mac is its own home again and
+             its voice calls run on it, as before the move.
+          3. Does not say the call carries on through the move, and does not
+             say the move waits for the call to end by itself.
+
   # How an Always On server keeps itself current, from the skill's `home`
   # reference: Fermix's package comes from release files, so general knowledge
   # ("apt upgrade", or `fermix upgrade`) is wrong there. The floor is how soon
@@ -267,10 +326,9 @@ scenarios:
           3. Says the server is the owner's to turn off or delete after the
              move back, once the Mac runs Fermix again, not as part of the
              move or before it; Fermix deletes no server.
-          4. Says what comes back on the Mac, at least one of: iMessage,
-             voice calls or meetings running there again as before the
-             move; the Mac's own files and keychain kept; the phones
-             following.
+          4. Says what comes back on the Mac, at least one of: iMessage or
+             meetings running there again as before the move; the Mac's own
+             files and keychain kept; the phones following.
           5. Does not say the server should be deleted first, does not send
              the owner to export and import the home by hand, and does not
              say Fermix cannot be moved back.

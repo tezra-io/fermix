@@ -131,16 +131,27 @@ defmodule FermixChannels.Companion.Inbox do
   defp size_words(bytes) when rem(bytes, 1_024) == 0, do: "#{div(bytes, 1_024)} KB"
   defp size_words(bytes), do: "#{bytes} bytes"
 
+  @doc """
+  Makes `dir` an inbox: created at `0700` and emptied of the files a crash
+  or an earlier run left (regular files and symlinks only, never
+  recursively), as this process does when it starts. A device's inbox
+  (`FermixChannels.Desktop.Uploads`, M97 §9.3) is prepared the same way.
+  """
+  @spec prepare_dir(Path.t()) :: :ok | {:error, term()}
+  def prepare_dir(dir) do
+    with :ok <- valid_dir(dir),
+         :ok <- prepare(dir) do
+      empty(dir)
+    end
+  end
+
   @impl true
   def init(opts) do
     dir = Keyword.get_lazy(opts, :dir, &default_dir/0)
     store = Keyword.get(opts, :store, MediaStore)
 
-    with :ok <- valid_dir(dir),
-         :ok <- prepare(dir),
-         :ok <- empty(dir) do
-      {:ok, %{dir: dir, store: store}}
-    else
+    case prepare_dir(dir) do
+      :ok -> {:ok, %{dir: dir, store: store}}
       {:error, reason} -> {:stop, reason}
     end
   end

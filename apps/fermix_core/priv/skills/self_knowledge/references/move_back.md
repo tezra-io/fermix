@@ -38,7 +38,7 @@ The move to a server, the roles and the epoch: skill_view(name:
   holds it: "Fermix still runs on your server. It moves back to this Mac
   when you press Move now.", with until when this Mac waits, **Move now**,
   which asks for the server's recovery passphrase, and a confirm from this
-  computer's settings: what runs here again (iMessage, voice calls,
+  computer's settings: what runs here again (iMessage,
   meetings) and that Telegram messages wait, each only where those settings
   have it (not Telegram set up on the server after the move), that Google
   Meet needs the notetaker installed on this Mac again where the Fermix
@@ -50,7 +50,11 @@ The move to a server, the roles and the epoch: skill_view(name:
   server undid the move or answers with no move at all, never while it
   moves: it stops receiving, closes the code on the server and forgets the
   move back.
-- **The move itself.** Move now sends the move to the server, which moves
+- **The move itself.** Move now first ends what this computer carries to the
+  server: a voice call from this computer's app is hung up, so the server
+  settles it, and the app says the move back ended it; a file the chat is
+  still uploading is dropped, the chat naming it. The review names a call in
+  progress here. Then Move now sends the move to the server, which moves
   the home here as it would to any server and then serves nothing. While
   it runs: "Moving Fermix back to this Mac. Messages wait until it is done."
   (receiving, waiting for the server to hand over, putting Fermix in place).

@@ -115,7 +115,9 @@ defmodule FermixChannels.Desktop.Relay do
   which decodes it in its own process; the media frames to
   `Desktop.MediaFetches`; the loopback's to `Desktop.Loopback`; the snapshot
   copies' to `Desktop.SnapshotStore`; the invocations' (`invoke_*`, M97
-  §6.2) to `Desktop.Invoke` (`:families` names the last four).
+  §6.2) to `Desktop.Invoke`; an upload's answers (`attach_status`, M97 §9.3)
+  to `Desktop.Uploads` (`:families` names the last five); and a call's frames
+  (`call_*`, M97 §9.2) to the bridge that opened the call (below).
   Each hand-off is bounded by what waits in the process taking it, and what
   happens at the bound is the family's:
 
@@ -127,6 +129,8 @@ defmodule FermixChannels.Desktop.Relay do
   | loopback | 64 events | the event is dropped |
   | snapshots | 256 frames | the copy is refused (`write_failed`), its later frames dropped |
   | invocations | 512 events in `Desktop.Invoke`'s Admission | the event is dropped, unanswered: the server waits out its deadline, or asks at the next session |
+  | uploads | 64 events in `Desktop.Uploads` | the event is dropped: the upload waits out its own deadline and says so |
+  | a call's audio | 64 messages in the call's bridge | the frame is dropped: audio that waited is late, never queued |
 
   A family whose process is not running has its events dropped until it
   runs again; a media fetch's waiters are told so. Each run of drops is
@@ -158,6 +162,36 @@ defmodule FermixChannels.Desktop.Relay do
   whose `hello_ack` takes them (`caps.computer`): any other send of one is
   refused `{:error, {:not_taken, type}}`, since an older server closes the
   session on an event it does not know.
+
+  ## A call from this computer's app (M97 §9.2)
+
+  The app's `realtime.sock` is served here by `Desktop.CallBridge`, which
+  carries each call to the server on the phone's call channel. A bridge
+  opens a call with `open_call/2`, which registers it as the call's owner
+  (at most 4 at once, one a connection) while a session is up that takes a
+  computer's call (`caps.computer.call`), and answers the server's
+  `caps.call` and name: the Realtime window the call's lines may speak.
+  From then on the call's frames from the server (`call_attached`,
+  `call_line`, `call_audio`, `call_close`) go to it as `{:relay_call, type,
+  fields, tail}`, and each session that comes up or ends is told it as
+  `{:relay_call_link, :up | :down | :revoked, sentence}`, so it resumes the
+  call on the next session within the 20 s the server holds it. Its frames
+  go up with `send_call/5`, which never waits: they ride the live lane,
+  written ahead of everything else; a microphone frame that would find
+  more than 300 ms of audio already waiting in it is dropped, since it
+  would arrive late (M97 §9.2: audio is dropped when late, never queued),
+  and a control the lane cannot take tells the bridge `{:relay_call_busy,
+  call_id}`, which ends the call. The bridge closes the call with
+  `close_call/2`, or by exiting. Before a move back to this computer,
+  `end_calls/3` asks every bridge to hang its call up and answers once none
+  is left (`FermixChannels.Home.Link`'s `end_for_return/0`).
+
+  An upload of a file the app attached (M97 §9.3, `Desktop.Uploads`) is the
+  phone's (`attach_*`, bulk), sent with `send_event/3` only to a server
+  whose `hello_ack` takes it (`caps.computer.attach`), its bound read with
+  `upload_bound/1`. The server's refusal of an upload names none, so every
+  refusal of the kinds an upload is refused with goes to the uploads, which
+  run one at a time.
 
   One set of settings (M97 §19.3, D28): the `hello` says this engine applies
   the rule that a setting's id names its machine (`caps.computer.
@@ -210,6 +244,7 @@ defmodule FermixChannels.Desktop.Relay do
   alias FermixChannels.Desktop.Offers, as: DesktopOffers
   alias FermixChannels.Desktop.Relay.Outbox
   alias FermixChannels.Desktop.SnapshotStore
+  alias FermixChannels.Desktop.Uploads
   alias FermixChannels.Mobile.Chunks
   alias FermixChannels.Mobile.Iroh.Helper
   alias FermixChannels.Mobile.Lanes
@@ -263,7 +298,14 @@ defmodule FermixChannels.Desktop.Relay do
     "invoke_cancel" => "invoke",
     "invoke_result" => "invoke",
     "invoke_status" => "invoke",
-    "invoke_restarted" => "invoke"
+    "invoke_restarted" => "invoke",
+    "call_open" => "call",
+    "call_line" => "call",
+    "call_audio" => "call",
+    "call_close" => "call",
+    "attach_begin" => "attach",
+    "attach_chunk" => "attach",
+    "attach_end" => "attach"
   }
 
   # Every event the primary sends a desktop, and the family that serves it
@@ -290,7 +332,12 @@ defmodule FermixChannels.Desktop.Relay do
     "invoke_part" => :invoke,
     "invoke_cancel" => :invoke,
     "invoke_result" => :invoke,
-    "invoke_status" => :invoke
+    "invoke_status" => :invoke,
+    "attach_status" => :attach,
+    "call_attached" => :voice,
+    "call_line" => :voice,
+    "call_audio" => :voice,
+    "call_close" => :voice
   }
 
   # The families served by a process of their own, by its registered name.
@@ -298,12 +345,30 @@ defmodule FermixChannels.Desktop.Relay do
     media: MediaFetches,
     loopback: Loopback,
     snapshots: SnapshotStore,
-    invoke: ComputerSwitches.invoke_listener()
+    invoke: ComputerSwitches.invoke_listener(),
+    attach: Uploads
   }
   # What may wait in each family's process before the family's rule applies
   # (moduledoc); a channel's tunnel holds at most @max_tunnel_lines.
-  @family_bounds %{media: 256, loopback: 64, snapshots: 256, invoke: 512}
+  @family_bounds %{media: 256, loopback: 64, snapshots: 256, invoke: 512, attach: 64}
   @max_tunnel_lines 256
+  # The calls this computer's app may have open at once: one a connection of
+  # its realtime socket, which takes four.
+  @max_voice_calls 4
+  # A call's audio from the server waits at most this many messages in its
+  # bridge; past it the frame is late, and dropped.
+  @max_bridge_backlog 64
+  # 300 ms of the microphone (24 kHz mono PCM16): a frame that would wait
+  # behind more audio than this in the live lane arrives late, so it is
+  # dropped (M97 §9.2).
+  @max_waiting_audio_bytes 14_400
+  # The server's refusals of an upload, which name no upload: this computer
+  # sends one at a time (`Desktop.Uploads`), so they are its.
+  @upload_refusals ~w(
+    store_quota_exceeded media_too_large sha256_mismatch announced_hash_mismatch size_mismatch
+    size_exceeded unexpected_chunk upload_limit_reached store_upload_limit_reached upload_exists
+    attachment_exists unknown_upload invalid_field missing_field request_failed
+  )
 
   @typedoc "The link's state in one word (the moduledoc says what each means)."
   @type word :: :connected | :renewing | :unreachable | :revoked | :stale
@@ -470,6 +535,72 @@ defmodule FermixChannels.Desktop.Relay do
       {:error, :timeout}
   end
 
+  @doc """
+  Opens a call of this computer's app (M97 §9.2) for the calling bridge,
+  which owns `call_id` from now on (moduledoc): the server's `caps.call` and
+  its name, or why not: `{:unreachable, sentence}` while no session is up,
+  `{:revoked, sentence}` once the server no longer knows this computer,
+  `:not_taken` from a server whose `hello_ack` takes no computer's call, and
+  `:busy` with four calls open.
+  """
+  @spec open_call(GenServer.server(), String.t()) ::
+          {:ok, %{caps: map(), name: String.t()}}
+          | {:error, {:unreachable | :revoked, String.t()} | :not_taken | :busy}
+  def open_call(server \\ __MODULE__, call_id) when is_binary(call_id) do
+    GenServer.call(server, {:open_call, call_id}, @status_wait_ms)
+  catch
+    :exit, {reason, _call} when reason in [:noproc, :normal, :shutdown, :timeout] ->
+      {:error, {:unreachable, Placement.unreachable_sentence(nil)}}
+  end
+
+  @doc """
+  One frame of the calling bridge's call `call_id` (`call_open`, `call_line`,
+  `call_audio` or `call_close`; `call_id` is put in its header): queued in the
+  live lane, never waited on (moduledoc). A frame of a call the caller does
+  not own, or sent while no session is up, is dropped.
+  """
+  @spec send_call(GenServer.server(), String.t(), String.t(), map(), binary()) :: :ok
+  def send_call(server \\ __MODULE__, call_id, type, fields, bytes)
+      when is_binary(call_id) and type in ~w(call_open call_line call_audio call_close) and
+             is_map(fields) and is_binary(bytes),
+      do: GenServer.cast(server, {:call_frame, call_id, self(), type, fields, bytes})
+
+  @doc """
+  The largest file the server takes from this computer's uploads (M97 §9.3):
+  its `caps.max_media_bytes`, clamped to this desktop's own bound, while a
+  session is up whose server takes a computer's uploads
+  (`caps.computer.attach`); `:not_taken` from any other server, and the
+  relay's sentence while no session is up.
+  """
+  @spec upload_bound(GenServer.server()) ::
+          {:ok, pos_integer()} | {:error, :not_taken | {:unreachable | :revoked, String.t()}}
+  def upload_bound(server \\ __MODULE__) do
+    GenServer.call(server, :upload_bound, @status_wait_ms)
+  catch
+    :exit, {reason, _call} when reason in [:noproc, :normal, :shutdown, :timeout] ->
+      {:error, {:unreachable, Placement.unreachable_sentence(nil)}}
+  end
+
+  @doc """
+  Ends every call this computer's app has on the server, before a move back
+  to it (M97 §9.2): each bridge hangs the call up, so the server ends it
+  cleanly and settles it, then tells its app `why`. Answers `:ok` once no
+  call is left, at once when there was none, and `{:error, :timed_out}` past
+  `timeout_ms`; no relay running holds no call.
+  """
+  @spec end_calls(GenServer.server(), String.t(), pos_integer()) :: :ok | {:error, :timed_out}
+  def end_calls(server \\ __MODULE__, why, timeout_ms \\ 5_000)
+      when is_binary(why) and is_integer(timeout_ms) and timeout_ms > 0 do
+    GenServer.call(server, {:end_calls, why, timeout_ms}, timeout_ms + @forward_wait_margin_ms)
+  catch
+    :exit, {reason, _call} when reason in [:noproc, :normal, :shutdown] -> :ok
+  end
+
+  @doc "The calling bridge is done with its call `call_id`: nothing more of it comes here."
+  @spec close_call(GenServer.server(), String.t()) :: :ok
+  def close_call(server \\ __MODULE__, call_id) when is_binary(call_id),
+    do: GenServer.cast(server, {:close_call, call_id, self()})
+
   # -- the process -----------------------------------------------------------
 
   @impl true
@@ -513,6 +644,9 @@ defmodule FermixChannels.Desktop.Relay do
       record_epoch: Keyword.get(opts, :record_epoch, &DesktopLink.record_epoch/3),
       offers: Keyword.get(opts, :offers, ComputerSwitches.listener()),
       computer_caps: %{},
+      call_caps: nil,
+      voice: %{},
+      voice_waiters: [],
       machine_settings: false,
       link: nil,
       keypair: nil,
@@ -626,6 +760,12 @@ defmodule FermixChannels.Desktop.Relay do
     do: forward_call(request, deadline_ms, from, state)
 
   def handle_call(:open_channel, {tunnel, _tag}, state), do: open(tunnel, state)
+
+  def handle_call({:open_call, call_id}, {bridge, _tag}, state),
+    do: open_voice(call_id, bridge, state)
+
+  def handle_call(:upload_bound, _from, state), do: {:reply, upload_bound_now(state), state}
+  def handle_call({:end_calls, why, ms}, from, state), do: end_voice(why, ms, from, state)
   def handle_call({:fetch_media, ref}, {tunnel, _tag}, state), do: fetch(ref, tunnel, state)
 
   # Answered once its last frame is written (`written/3`). A computer's own
@@ -654,6 +794,19 @@ defmodule FermixChannels.Desktop.Relay do
 
   def handle_cast({:close_channel, channel, tunnel}, state),
     do: {:noreply, end_channel(channel, tunnel, state)}
+
+  def handle_cast({:call_frame, call_id, bridge, type, fields, bytes}, state) do
+    case Map.fetch(state.voice, call_id) do
+      {:ok, %{pid: ^bridge}} ->
+        {:noreply, call_frame(call_id, bridge, type, fields, bytes, state)}
+
+      _other ->
+        {:noreply, state}
+    end
+  end
+
+  def handle_cast({:close_call, call_id, bridge}, state),
+    do: {:noreply, forget_voice(state, &(&1 == call_id and &2 == bridge))}
 
   @impl true
   def handle_info({:relay_connector, connector, message}, %{connector: connector} = state),
@@ -929,6 +1082,8 @@ defmodule FermixChannels.Desktop.Relay do
 
   defp take(:media, type, fields, tail, state), do: media(type, fields, tail, state)
   defp take(:snapshots, type, fields, tail, state), do: snapshot(type, fields, tail, state)
+  defp take(:attach, type, fields, _tail, state), do: upload_answer(type, fields, state)
+  defp take(:voice, type, fields, tail, state), do: voice_frame(type, fields, tail, state)
 
   defp hello_ack(fields, %{link: link} = state) do
     case fields["primary_epoch"] do
@@ -956,6 +1111,7 @@ defmodule FermixChannels.Desktop.Relay do
       state
       | link: link,
         computer_caps: computer_caps(caps),
+        call_caps: call_caps(caps),
         machine_settings: get_in(caps, ["computer", "machine_settings"]) == true,
         phase: :connected,
         word: :connected,
@@ -968,7 +1124,13 @@ defmodule FermixChannels.Desktop.Relay do
         sentence: "Fermix is connected to the server #{link.primary.name}."
     }
     |> send_link_path()
+    |> tell_calls(:up, nil)
   end
+
+  # The Realtime window and the availability of a computer's call, from a
+  # server that takes one; none from any other.
+  defp call_caps(%{"call" => %{} = call, "computer" => %{"call" => true}}), do: call
+  defp call_caps(_caps), do: nil
 
   # The computer's own events the server's hello_ack takes (M97 §5.3), by
   # event: none from a server older than the computer record.
@@ -1098,6 +1260,11 @@ defmodule FermixChannels.Desktop.Relay do
   # it is itself a retired copy.
   defp primary_error(%{"code" => "stale_primary"}, state),
     do: drop_session({:stale_primary, state.link.epoch, :refused}, state)
+
+  # A refusal of an upload names none, and this computer sends one at a time:
+  # it is the upload's (`Desktop.Uploads`).
+  defp primary_error(%{"code" => code} = fields, state) when code in @upload_refusals,
+    do: upload_answer("error", fields, state)
 
   defp primary_error(fields, state) do
     Logger.warning(
@@ -1339,6 +1506,9 @@ defmodule FermixChannels.Desktop.Relay do
   defp family_words(:media), do: "media frames are"
   defp family_words(:loopback), do: "sign-in forwards are"
   defp family_words(:invoke), do: "the server's requests are"
+  defp family_words(:attach), do: "the server's answers to uploads are"
+  defp family_words(:voice_up), do: "a call's microphone frames are"
+  defp family_words(:voice_down), do: "a call's audio frames are"
 
   defp not_running(family),
     do:
@@ -1426,6 +1596,189 @@ defmodule FermixChannels.Desktop.Relay do
       :down ->
         drop(state, :invoke, :all, not_running(:invoke))
     end
+  end
+
+  # -- uploads (M97 §9.3) -------------------------------------------------------------
+
+  defp upload_bound_now(%{phase: :connected} = state) do
+    if Map.has_key?(state.computer_caps, "attach_begin"),
+      do: {:ok, state.max_media_bytes},
+      else: {:error, :not_taken}
+  end
+
+  defp upload_bound_now(%{phase: :revoked} = state), do: {:error, {:revoked, state.sentence}}
+  defp upload_bound_now(state), do: {:error, {:unreachable, unreachable_sentence(state)}}
+
+  # An upload's status, or the server's refusal of it, as it came. One that
+  # cannot be handed is dropped: the upload waits out its own deadline.
+  defp upload_answer(type, fields, state) do
+    case hand_off(state, :attach, &Uploads.handle(&1, type, fields)) do
+      :handed -> handed(state, :attach)
+      :full -> drop(state, :attach, :all, "uploads are behind: the server's answers are dropped")
+      :down -> drop(state, :attach, :all, not_running(:attach))
+    end
+  end
+
+  # -- a call from this computer's app (M97 §9.2) ----------------------------------
+
+  defp open_voice(call_id, bridge, %{phase: :connected} = state) do
+    cond do
+      state.call_caps == nil or not Map.has_key?(state.computer_caps, "call_open") ->
+        {:reply, {:error, :not_taken}, state}
+
+      not Map.has_key?(state.voice, call_id) and map_size(state.voice) >= @max_voice_calls ->
+        {:reply, {:error, :busy}, state}
+
+      true ->
+        answer = %{caps: state.call_caps, name: name(state)}
+        {:reply, {:ok, answer}, own_voice(call_id, bridge, state)}
+    end
+  end
+
+  defp open_voice(_call_id, _bridge, %{phase: :revoked} = state),
+    do: {:reply, {:error, {:revoked, state.sentence}}, state}
+
+  defp open_voice(_call_id, _bridge, state),
+    do: {:reply, {:error, {:unreachable, call_unreachable_sentence(state)}}, state}
+
+  # A call is no message that waits for the server: it says so its own way,
+  # but for a link this computer refused to use, whose sentence says why.
+  defp call_unreachable_sentence(%{phase: :refused, sentence: sentence}), do: sentence
+
+  defp call_unreachable_sentence(%{link: %{primary: %{name: name}}}),
+    do:
+      "Fermix cannot reach the server #{name}, so the call cannot start. Try again once it is back."
+
+  defp call_unreachable_sentence(_state),
+    do: "Fermix cannot reach its server, so the call cannot start. Try again once it is back."
+
+  defp own_voice(call_id, bridge, state) do
+    case Map.fetch(state.voice, call_id) do
+      {:ok, %{pid: ^bridge}} ->
+        state
+
+      _new ->
+        entry = %{pid: bridge, monitor: Process.monitor(bridge)}
+        %{state | voice: Map.put(state.voice, call_id, entry)}
+    end
+  end
+
+  # The calls `gone?(call_id, bridge)` names: nothing more of them comes here.
+  # Whoever waits for every call to end hears so once none is left.
+  defp forget_voice(state, gone?) do
+    {gone, kept} = Enum.split_with(state.voice, fn {id, %{pid: pid}} -> gone?.(id, pid) end)
+    for {_id, %{monitor: monitor}} <- gone, do: Process.demonitor(monitor, [:flush])
+    voice_ended(%{state | voice: Map.new(kept)})
+  end
+
+  defp end_voice(_why, _ms, _from, %{voice: voice} = state) when map_size(voice) == 0,
+    do: {:reply, :ok, state}
+
+  defp end_voice(why, ms, from, state) do
+    for {_id, %{pid: bridge}} <- state.voice, do: send(bridge, {:call_bridge_end, why})
+    {_ref, token, _kind} = timer = arm(state, :calls_ended, ms)
+    {:noreply, %{state | voice_waiters: [{from, token, timer} | state.voice_waiters]}}
+  end
+
+  defp voice_ended(%{voice: voice, voice_waiters: waiters} = state)
+       when map_size(voice) == 0 and waiters != [] do
+    for {from, _token, timer} <- waiters do
+      cancel(state, timer)
+      GenServer.reply(from, :ok)
+    end
+
+    %{state | voice_waiters: []}
+  end
+
+  defp voice_ended(state), do: state
+
+  defp voice_timed_out(token, state) do
+    {late, waiting} = Enum.split_with(state.voice_waiters, &match?({_from, ^token, _}, &1))
+    for {from, _token, _timer} <- late, do: GenServer.reply(from, {:error, :timed_out})
+    %{state | voice_waiters: waiting}
+  end
+
+  defp call_word(:relay_down), do: :down
+  defp call_word(:relay_revoked), do: :revoked
+
+  defp tell_calls(state, word, sentence) do
+    for {_id, %{pid: bridge}} <- state.voice, do: send(bridge, {:relay_call_link, word, sentence})
+    state
+  end
+
+  # Up the live lane, with no session or past a lane that is full: a late
+  # microphone frame is dropped, a control the lane refused ends its call.
+  defp call_frame(_call_id, _bridge, _type, _fields, _bytes, %{phase: phase} = state)
+       when phase != :connected,
+       do: state
+
+  # A server whose hello_ack takes no computer's call (one this session
+  # reached after a rollback) is sent none of its frames (M97 §5.3); the
+  # bridge's window ends the call.
+  defp call_frame(_call_id, _bridge, type, _fields, _bytes, state)
+       when not is_map_key(state.computer_caps, type),
+       do: state
+
+  defp call_frame(call_id, bridge, "call_audio", fields, pcm, state) do
+    if Outbox.bytes(state.outbox, :live) + byte_size(pcm) > @max_waiting_audio_bytes,
+      do: drop(state, :voice_up, :all, "the link is behind: #{family_words(:voice_up)} dropped"),
+      else: enqueue_call(call_id, bridge, "call_audio", fields, pcm, state)
+  end
+
+  defp call_frame(call_id, bridge, type, fields, bytes, state),
+    do: enqueue_call(call_id, bridge, type, fields, bytes, state)
+
+  defp enqueue_call(call_id, bridge, type, fields, bytes, state) do
+    case enqueue(state, type, Map.put(fields, "call_id", call_id), bytes, nil) do
+      {:ok, state} ->
+        handed(state, :voice_up)
+
+      {:error, reason, state} ->
+        Logger.warning(
+          "desktop relay: call #{call_id}'s #{type} was not sent: #{inspect(reason)}"
+        )
+
+        if type != "call_audio", do: send(bridge, {:relay_call_busy, call_id})
+        state
+    end
+  end
+
+  # A call's frames go to its bridge as they came; its audio only while the
+  # bridge keeps up, since audio that waits is late.
+  defp voice_frame(type, %{"call_id" => call_id} = fields, tail, state) do
+    case Map.fetch(state.voice, call_id) do
+      {:ok, %{pid: bridge}} ->
+        hand_voice(bridge, type, fields, tail, state)
+
+      :error ->
+        Logger.debug("desktop relay: the server sent #{type} for call #{call_id}, open nowhere")
+        state
+    end
+  end
+
+  defp hand_voice(bridge, "call_audio", fields, tail, state) do
+    case Process.info(bridge, :message_queue_len) do
+      {:message_queue_len, waiting} when waiting < @max_bridge_backlog ->
+        send(bridge, {:relay_call, "call_audio", fields, tail})
+        handed(state, :voice_down)
+
+      {:message_queue_len, _waiting} ->
+        drop(
+          state,
+          :voice_down,
+          :all,
+          "a call's bridge is behind: #{family_words(:voice_down)} dropped"
+        )
+
+      # Gone: its `:DOWN` forgets the call.
+      nil ->
+        state
+    end
+  end
+
+  defp hand_voice(bridge, type, fields, tail, state) do
+    send(bridge, {:relay_call, type, fields, tail})
+    state
   end
 
   # -- the companion channels ------------------------------------------------------
@@ -1523,7 +1876,7 @@ defmodule FermixChannels.Desktop.Relay do
         nil -> state
       end
 
-    forget_fetcher(pid, state)
+    pid |> forget_fetcher(state) |> forget_voice(fn _call_id, bridge -> bridge == pid end)
   end
 
   # The channel's tunnel writes each line to the app in its own time; one
@@ -1998,6 +2351,9 @@ defmodule FermixChannels.Desktop.Relay do
         tunnel <- waiters,
         do: send(tunnel, {:relay_media, ref, {:error, {:unreachable, sentence}}})
 
+    :ok = to_family(state, :attach, &Uploads.link_down(&1, sentence))
+    state = tell_calls(state, call_word(tunnel_word), sentence)
+
     %{
       state
       | channels: %{},
@@ -2102,6 +2458,7 @@ defmodule FermixChannels.Desktop.Relay do
 
   # A call's id is used once, so its timer firing is never stale.
   defp timer({:call, call_id}, _token, state), do: {:noreply, call_timed_out(call_id, state)}
+  defp timer(:calls_ended, token, state), do: {:noreply, voice_timed_out(token, state)}
   defp timer(_kind, _token, state), do: {:noreply, state}
 
   # -- answers -----------------------------------------------------------------------

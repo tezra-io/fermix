@@ -1233,9 +1233,15 @@ Unix adapter for the Mac app's calls: it owns the listener, framing and
 handshake, and hands each connection's call to a `CallClient`, the
 transport-independent half every voice adapter shares (the engine's version
 floor, starting the session, the command verbs, teardown, and a deadline on
-the verbs that wait without one of their own). `Endpoint` is the
+the verbs that wait without one of their own). On a computer whose home
+moved the same socket is bridged (`:bridge`, `Realtime.SocketBridge`, M97
+§9.2): after the handshake each connection's calls go to
+`FermixChannels.Desktop.CallBridge`, which carries them over the desktop
+relay to the server's call channel, and no session starts there; the device
+tree starts it (`Desktop.DeviceSupervisor`). `Endpoint` is the
 policy that differs by who a call is for (`desktop`,
-`accessory:<accessory_id>` or `phone:<device_id>`): screen sharing is the
+`accessory:<accessory_id>`, `phone:<device_id>` or `computer:<device_id>`,
+a linked computer's bridged call, any engine): screen sharing is the
 desktop's alone, a phone takes only the task engines (`CallClient` refuses
 `openai_realtime` with `engine_not_for_phones` before any session), and the
 safety identifier an OpenAI Realtime call sends comes from the endpoint (the
@@ -1247,7 +1253,9 @@ lines word for word in `call_line` frames and the audio as raw PCM16 in
 credit, 5 s behind ends the call), holds the call for 20 s across a closed
 session, and ends it on revocation, an unknown device, a moved primary or
 the window's end; the session writes its frames ahead of everything else
-and holds the phone's media while it is attached. Every engine session takes the
+and holds the phone's media while it is attached. A computer's call
+(`computer:<device_id>`) is the same process on its desktop session, without
+the camera, and a session gone silent ends that call alone (M97 D20). Every engine session takes the
 home's one `CallLease` from its `init/1`, so one owner-voice call runs at a
 time across engines and endpoints, and `SessionGuard` starts each session
 for the adapter that owns it and tears it down when that adapter exits, even
@@ -1638,7 +1646,11 @@ Current channels:
   the candidate subtree (`Home.CandidateSupervisor`, `:temporary`, started
   with the tree when `candidate/` exists and on a running one through
   `Home.Link`'s `start_return/1`, stopped by `stop_return/0`; one that
-  cannot start or gives up is logged and never takes the relay down). The relay reads
+  cannot start or gives up is logged and never takes the relay down). Beside
+  the dial subtree, when the home is linked and the boot serves the realtime
+  socket, the app's `realtime.sock` runs bridged to the server
+  (`LocalVoiceSocket` with `Desktop.CallBridge`, M97 §9.2), so a relay
+  restart closes no app connection and a call resumes on the next session. The relay reads
   `FermixCore.Home.DesktopLink` (`device/desktop.json` and the 0600
   `device/desktop_key`, refused by name otherwise), opens one `IK` session
   through `Mobile.Rail` from a linked connector process (the rail's owner, so
@@ -1664,7 +1676,9 @@ Current channels:
   payloads. It is
   the session's one writer, and `@inbound` is its one map of who serves each
   event the primary sends: the companion channels, the forwarded calls'
-  `manage_result`, and the media fetches. In tunnel mode (the application
+  `manage_result`, and the media fetches; a call's frames go to the bridge
+  that opened it, ahead of everything else in the live lane, and an upload's
+  answers to `Desktop.Uploads` (M97 §9.3). In tunnel mode (the application
   decides at boot, `DesktopLink.linked?/2`) `Companion.Endpoint` hands each accepted
   `companion.sock` connection to a `Desktop.Tunnel` instead of a
   `Connection`: it places the client with `SocketPeer` and carries only the
@@ -1674,7 +1688,11 @@ Current channels:
   `Companion.MediaGrants` grants it), answers Always On locally on a version 6
   connection (it subscribes to this engine's `Home.StatusWatch` when the
   primary's `server_hello` comes back and writes its notices; the primary's
-  own `home_status_changed` is dropped and tells the watch `:server`), and
+  own `home_status_changed` is dropped and tells the watch `:server`),
+  answers `attach_file` locally on a version 7 connection (it adds this
+  computer's inbox to the primary's `server_hello`, and `Desktop.Uploads`,
+  started in place of `Companion.Inbox`, uploads each file with the phone's
+  chunked upload, one at a time), and
   ends with `primary_unreachable`, naming the primary, when the session is
   down. On the primary,
   `Desktop.Companion` (the `companion` family) runs one

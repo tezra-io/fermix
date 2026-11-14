@@ -16,9 +16,13 @@ defmodule FermixChannels.Mobile.Peers do
   A server event a kind may not receive is never sent to it: a session drops
   it as an event it cannot encode is dropped.
 
-  A phone's call channel (M87, `call_*`) is a phone's alone: a call is the
-  owner's voice on the phone, and a desktop's own voice reaches its own
-  computer's socket.
+  A phone's call channel (M87, `call_*`) is the owner's voice on the phone,
+  and a computer's whose home moved (M97 §9.2): its app's voice reaches its
+  own computer's socket, and its engine carries the call to the server on the
+  same channel, without the camera (`call_frame`), which a computer's call
+  never takes (D21). So is the phone's upload (`attach_*`), which a computer
+  drives for the files its app attaches (§9.3, D22). A computer sends either
+  only to a server whose `hello_ack` takes it (`caps.computer`).
 
   A computer's own record (M97 §3.2) is a desktop's alone: what it offers
   (`offers`) and the path its session runs (`link_path`), each sent only to
@@ -46,6 +50,7 @@ defmodule FermixChannels.Mobile.Peers do
     hello ping media_fetch ack companion_open companion_line companion_close manage
     loopback_request loopback_failed snapshot_stored snapshot_refused offers link_path
     invoke_open invoke_part invoke_cancel invoke_result invoke_status invoke_restarted
+    call_open call_line call_audio call_close attach_begin attach_chunk attach_end
   )
   @phone_server ~w(
     hello_ack accepted attach_status turn_started text_delta tool_event text_done turn_done
@@ -58,6 +63,7 @@ defmodule FermixChannels.Mobile.Peers do
     companion_close manage_result loopback_open loopback_response loopback_close
     snapshot_begin snapshot_chunk snapshot_end
     invoke_open invoke_part invoke_cancel invoke_result invoke_status
+    call_attached call_line call_audio call_close attach_status
   )
 
   @client %{

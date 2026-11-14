@@ -23,7 +23,7 @@ defmodule FermixChannels.Mobile.CallCapsTest do
     put_openai_key()
     live = Config.normalize(enabled: true, engine: "openai_live", model: "gpt-live-1")
 
-    assert Call.caps(live, true, @phone) == %{
+    assert Call.caps(live, true, {:phone, @phone}) == %{
              "available" => true,
              "min_version" => 2,
              "max_version" => 5,
@@ -45,9 +45,11 @@ defmodule FermixChannels.Mobile.CallCapsTest do
         camera_share: false
       )
 
-    assert %{"camera" => true} = Call.caps(grok, true, @phone)
-    assert %{"camera" => false} = Call.caps(no_camera, true, @phone)
-    assert %{"camera" => false} = Call.caps(Config.normalize(enabled: true), true, @phone)
+    assert %{"camera" => true} = Call.caps(grok, true, {:phone, @phone})
+    assert %{"camera" => false} = Call.caps(no_camera, true, {:phone, @phone})
+
+    assert %{"camera" => false} =
+             Call.caps(Config.normalize(enabled: true), true, {:phone, @phone})
   end
 
   test "each reason a call is not served is said, the window still published" do
@@ -57,20 +59,21 @@ defmodule FermixChannels.Mobile.CallCapsTest do
     realtime = Config.normalize(enabled: true)
 
     assert %{"available" => false, "reason" => "voice_off", "min_version" => 2} =
-             Call.caps(off, true, @phone)
+             Call.caps(off, true, {:phone, @phone})
 
     # Turned on, waiting for the restart that starts its runtime.
-    assert %{"available" => false, "reason" => "voice_off"} = Call.caps(live, false, @phone)
+    assert %{"available" => false, "reason" => "voice_off"} =
+             Call.caps(live, false, {:phone, @phone})
 
     assert %{"available" => false, "reason" => "engine_not_for_phones", "min_version" => 1} =
-             Call.caps(realtime, true, @phone)
+             Call.caps(realtime, true, {:phone, @phone})
   end
 
   # A key kept in the Mac's Keychain moves to a server only as a reference.
   test "a voice key the primary does not hold is no_key" do
     live = Config.normalize(enabled: true, engine: "openai_live", model: "gpt-live-1")
 
-    assert %{"available" => false, "reason" => "no_key"} = Call.caps(live, true, @phone)
+    assert %{"available" => false, "reason" => "no_key"} = Call.caps(live, true, {:phone, @phone})
     assert Call.readiness(live, true) == {:error, :no_key}
   end
 
@@ -81,6 +84,28 @@ defmodule FermixChannels.Mobile.CallCapsTest do
     assert Call.readiness(realtime, true) == :ok
     assert Call.readiness(Config.normalize(enabled: false), true) == {:error, :voice_off}
     assert Call.readiness(realtime, false) == {:error, :voice_off}
+  end
+
+  # M97 §9.2: a computer's call runs on the server's voice setting, any engine
+  # (D19), and takes no camera (D21); its availability is the phone's.
+  test "a computer is served a call on every engine, never with a camera" do
+    put_openai_key()
+    computer = {:computer, "6f1e2d3c-4b5a-4968-8778-695a4b3c2d1e"}
+    live = Config.normalize(enabled: true, engine: "openai_live", model: "gpt-live-1")
+    realtime = Config.normalize(enabled: true)
+    off = Config.normalize(enabled: false, engine: "openai_live", model: "gpt-live-1")
+
+    assert Call.caps(live, true, computer) == %{
+             "available" => true,
+             "min_version" => 2,
+             "max_version" => 5,
+             "camera" => false
+           }
+
+    assert %{"available" => true, "min_version" => 1, "camera" => false} =
+             Call.caps(realtime, true, computer)
+
+    assert %{"available" => false, "reason" => "voice_off"} = Call.caps(off, true, computer)
   end
 
   defp put_openai_key do

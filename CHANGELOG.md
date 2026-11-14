@@ -1088,6 +1088,36 @@ will be part of a future release; nothing in this group is in a release yet.
   your home, and Fermix reads them where your home keeps them now. After a
   move back your Mac runs meetings again, and Move now's confirm says when
   the notetaker your Mac kept needs installing again.
+- **After a move, your computer's Fermix app still calls Fermix and still
+  attaches files.** Begin voice call in the Mac's (or a linked Linux
+  computer's) app now reaches your server, which runs the call on its own
+  Talk to Fermix, key, tools and memory, as it runs a call from your phone;
+  the app keeps its microphone, speaker and echo cancellation. One call at
+  a time still covers your whole home: a call from your phone while the
+  Mac's is up is refused, saying the call is on that computer, and the
+  reverse. A dropped link is held 20 seconds and the call picks up where it
+  was; a link too slow or gone silent ends the call alone, never the chat.
+  The call cannot look at your screen. The attach button in the Mac's chat
+  works again: this computer's Fermix checks each file you attach, sends it
+  to your server (never a file the server already has) and says once the
+  server has it, or why not. The move's review no longer lists your
+  computer's voice calls as stopping. Moving back, the review names a call
+  in progress on that computer, and Move now hangs it up cleanly and drops
+  a file still sending, each with a sentence, before the move starts.
+- **Your server looks places up in Apple Maps on your Mac.** A server's
+  place search and a trip's place lookups used Brave alone, so a home with no
+  Brave key, or one whose plan has no place search, left a trip's stops
+  without a place. A Mac running the Fermix app now offers its server Apple
+  Maps (on by default; its master switch still turns it off), and a server
+  whose build has no Apple Maps of its own searches there whenever a linked
+  Mac offers it, with no key: the connected Mac seen most recently answers,
+  each search bounded at 15 seconds. With no such Mac online the search is
+  refused at once, never sent to Brave, and a trip's lookups stop and save
+  the stops without a place, saying to ask again once the Mac is online.
+  Every trip answer that placed stops now says what placed them ("Placed
+  with Apple Maps on studio Mac."), the Place search setting shows **Apple
+  Maps on your Mac** as the choice in force, and
+  `[fermix_core.tools.place_search] backend = "computer"` picks it on purpose.
 
 ## [0.18.0] - 2026-11-03
 

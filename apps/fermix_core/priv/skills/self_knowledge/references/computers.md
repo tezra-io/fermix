@@ -142,7 +142,12 @@ log says why).
 
 What reaches the server from a computer (a call, an attached file, a robot,
 a notification) is no offer and has no switch: each follows its own
-feature's setting.
+feature's setting. A voice call from a computer's app runs on the server,
+on its Talk to Fermix, as a phone's does, held as `computer:<device id>`
+(skill_view(name: "self-knowledge", file: "voice")); a file attached in a
+computer's chat is uploaded to the server by that computer's Fermix and
+reaches the turn as a phone's does (skill_view(name: "self-knowledge",
+file: "companion")).
 
 A reminder for "this computer" that comes due on the server rings on the
 computers instead (skill_view(name: "self-knowledge", file:

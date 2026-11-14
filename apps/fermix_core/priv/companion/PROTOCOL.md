@@ -675,8 +675,10 @@ reads it, on the same machine (version 7):
    takes: the media store's bound, the same `max_media_bytes` setting the
    phone's `caps.max_media_bytes` comes from, 20 MiB by default. A hello
    without `attachments` (a connection not placed as the owner's, the media
-   store not running, a desktop whose home moved) means no file can be handed
-   over, and the app offers none.
+   store not running, a desktop whose server takes no file from it) means no
+   file can be handed over, and the app offers none. A desktop whose home
+   moved offers its own inbox, at the same path, and the server's bound (see
+   *After a move: the desktop's tunnel*).
 2. **Write, then announce.** The client picks an `attach_id`, 1 to 64 ASCII
    letters, digits, `_` or `-`, new for each file it attaches (it is the
    file's name: an `attach_id` the daemon already took is refused), writes
@@ -923,10 +925,23 @@ refuses a client that has seen a later primary.
   it against its ref and grants the managed file under its own home, as
   *Managed media files* says, once the connection's `client_hello` declared a
   version that has it. `media_release` is answered by nothing, as always.
-- **No files to attach.** The app writes a file on the desktop, which the
-  primary's inbox is not on, so the primary's `server_hello` carries no
-  `attachments` there and the app offers none; an `attach_file` sent anyway
-  is refused with `error: request_failed` and its sentence.
+- **Files are taken here** (M97 §9.3). The app writes a file on the
+  desktop, which the primary's inbox is not on, so the desktop's engine
+  keeps an inbox of its own, at the same path on the desktop, and adds it
+  to the primary's `server_hello` on a version 7 connection (`attachments {
+  dir, max_bytes }`, `max_bytes` the primary's bound), while its primary
+  takes a computer's uploads. The app attaches exactly as above. The
+  desktop's engine answers each `attach_file` itself: it reads the file
+  with the same checks, removes it, uploads it to the primary over its link
+  (the phone's upload, its SHA-256 first, so a file the primary holds is not
+  sent again), and answers `attach_status { status: "present" }` once the
+  primary holds it, or `error: request_failed` with its sentence and the
+  `attach_id` (the sentences above, the link's own when it is down, or
+  that a move back to this computer dropped it, naming the file). The
+  `msg` that names it is the primary's, which finds the file in its store.
+  A primary that takes no upload from a computer gets no `attachments` in
+  its hello, and an `attach_file` sent anyway is refused there with `error:
+  request_failed` and its sentence.
 - **Always On is the desktop's.** The app's Always On pane reads this
   computer's `home.status`, so on a connection whose `client_hello` declared
   version 6 the desktop's engine sends its own `home_status_changed` after

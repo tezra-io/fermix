@@ -101,6 +101,10 @@ defmodule FermixChannels.Desktop.Relay.Outbox do
     {:ok, frame, tag, lane, Map.put(outbox, lane, held)}
   end
 
+  @doc "The raw tails' bytes waiting in `lane`."
+  @spec bytes(t(), Lanes.lane()) :: non_neg_integer()
+  def bytes(outbox, lane) when is_map_key(outbox, lane), do: Map.fetch!(outbox, lane).bytes
+
   @doc "How many puts `lane` refused since it last drained."
   @spec refused(t(), Lanes.lane()) :: non_neg_integer()
   def refused(outbox, lane) when is_map_key(outbox, lane), do: Map.fetch!(outbox, lane).refused

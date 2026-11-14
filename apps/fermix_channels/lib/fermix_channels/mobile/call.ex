@@ -12,7 +12,21 @@ defmodule FermixChannels.Mobile.Call do
   nowhere else. It is the `CallClient`'s adapter process, so the voice session's
   companion: the session's frames arrive in this mailbox as `{:realtime,
   event}`, and the verbs are called from here. The call's endpoint is
-  `{:phone, device_id}`.
+  `{:phone, device_id}`, or `{:computer, device_id}` for a linked computer
+  whose engine bridges its app's `realtime.sock` to this channel over its
+  desktop session (M97 §9.2, D18): the same process, lease and bounds, with
+  the two differences below.
+
+  ## A computer's call
+
+  A computer's session carries its chat and its settings as well as the
+  call, so a session gone silent mid-call ends the call, never the session
+  (D20): the call ends `link_too_slow`, with that error line first, as a link
+  too slow for audio does, and the session stays up. A computer's call takes
+  no camera (`Endpoint.camera?/1`) and no screen (D21), and runs on whatever
+  engine the server's voice setting names (D19). Everything else, the 20 s
+  window across a session that closed, the numbered controls, the playback
+  credit, the lease and its `held_by`, is the phone's.
 
   ## The call belongs to the device, not to a session
 
@@ -130,9 +144,14 @@ defmodule FermixChannels.Mobile.Call do
   @frame_drop_log_every 20
   # What a client may give a call besides the device, the call and its session.
   @client_opts [:session_module, :session_starter, :session_supervisor, :session_guard]
+  # The endpoints whose calls ride a mobile session.
+  @endpoint_kinds [:phone, :computer]
 
-  @typedoc "Where a call's frames go: a phone's mobile session."
+  @typedoc "Where a call's frames go: a phone's or a computer's mobile session."
   @type session :: pid()
+
+  @typedoc "Whose call it is: a phone's, or a linked computer's (M97 D18)."
+  @type endpoint :: {:phone, String.t()} | {:computer, String.t()}
 
   @typedoc "Why a call channel ended, as `call_close.reason` says it."
   @type ending :: String.t()
@@ -140,27 +159,30 @@ defmodule FermixChannels.Mobile.Call do
   # -- the mobile session's side ------------------------------------------------
 
   @doc """
-  What a phone's `hello_ack` says of calls (`caps.call`): whether this primary
-  serves one, why not when it does not, the Realtime version window a call
-  needs (`min_version` is the configured engine's floor), and whether it takes
-  the phone's camera: on a task engine while the owner's `camera_share` is on.
+  What a device's `hello_ack` says of calls (`caps.call`), for its endpoint
+  (`{:phone, id}`, or `{:computer, id}` on a computer's desktop session):
+  whether this primary serves one, why not when it does not, the Realtime
+  version window a call needs (`min_version` is the configured engine's
+  floor), and whether it takes the camera: a phone's, on a task engine while
+  the owner's `camera_share` is on; a computer's, never.
   """
-  @spec caps(String.t()) :: map()
-  def caps(device_id) when is_binary(device_id),
-    do: caps(Config.current(), voice_running?(SessionGuard), device_id)
+  @spec caps(endpoint()) :: map()
+  def caps({kind, _id} = endpoint) when kind in @endpoint_kinds,
+    do: caps(Config.current(), voice_running?(SessionGuard), endpoint)
 
   @doc "`caps/1` for a given config and runtime, pure."
-  @spec caps(Config.t(), boolean(), String.t()) :: map()
-  def caps(%Config{} = config, running?, device_id)
-      when is_boolean(running?) and is_binary(device_id) do
+  @spec caps(Config.t(), boolean(), endpoint()) :: map()
+  def caps(%Config{} = config, running?, {kind, _id} = endpoint)
+      when is_boolean(running?) and kind in @endpoint_kinds do
     base = %{
       "min_version" => CallClient.engine_min_protocol_version(config),
       "max_version" => Protocol.protocol_version(),
-      "camera" => Config.hands_off_tasks?(config) and config.camera_share?
+      "camera" =>
+        Endpoint.camera?(endpoint) and Config.hands_off_tasks?(config) and config.camera_share?
     }
 
     with :ok <- readiness(config, running?),
-         :ok <- Endpoint.admit_engine({:phone, device_id}, config.engine) do
+         :ok <- Endpoint.admit_engine(endpoint, config.engine) do
       Map.put(base, "available", true)
     else
       {:error, reason} -> Map.merge(base, %{"available" => false, "reason" => to_string(reason)})
@@ -183,22 +205,23 @@ defmodule FermixChannels.Mobile.Call do
   end
 
   @doc """
-  A phone's `call_open`. A new call always goes to the supervisor, which
-  starts it, or hands the open to the device's call already running (which
-  refuses a second call, and re-attaches its own). A resume goes to the
-  device's call; one of a call this primary does not hold (it restarted, or
-  the window ran out) is answered `{:close, "unknown_call"}` for the session
-  to write. `opts`: `:calls` and `:call_supervisor` (the registry and the
-  supervisor), and `:call_options` given each new call.
+  A device's `call_open`, for its endpoint (`{:phone, id}` or `{:computer,
+  id}`; the call is registered by the id). A new call always goes to the
+  supervisor, which starts it, or hands the open to the device's call
+  already running (which refuses a second call, and re-attaches its own). A
+  resume goes to the device's call; one of a call this primary does not hold
+  (it restarted, or the window ran out) is answered `{:close, "unknown_call"}`
+  for the session to write. `opts`: `:calls` and `:call_supervisor` (the
+  registry and the supervisor), and `:call_options` given each new call.
   """
-  @spec open(String.t(), session(), String.t(), boolean(), keyword()) ::
+  @spec open(endpoint(), session(), String.t(), boolean(), keyword()) ::
           :ok | {:close, ending()}
-  def open(device_id, session, call_id, resume?, opts)
-      when is_binary(device_id) and is_pid(session) and is_binary(call_id) and
-             is_boolean(resume?) and is_list(opts) do
+  def open({kind, device_id} = endpoint, session, call_id, resume?, opts)
+      when kind in @endpoint_kinds and is_binary(device_id) and is_pid(session) and
+             is_binary(call_id) and is_boolean(resume?) and is_list(opts) do
     if resume?,
       do: resume(calls(opts), device_id, session, call_id),
-      else: start(device_id, session, call_id, opts)
+      else: start(endpoint, session, call_id, opts)
   end
 
   @doc """
@@ -240,12 +263,13 @@ defmodule FermixChannels.Mobile.Call do
     GenServer.start_link(__MODULE__, opts, name: name)
   end
 
-  defp start(device_id, session, call_id, opts) do
+  defp start({_kind, device_id} = endpoint, session, call_id, opts) do
     spec =
       {__MODULE__,
        Keyword.merge(Keyword.get(opts, :call_options, []),
          calls: calls(opts),
          device_id: device_id,
+         endpoint: endpoint,
          call_id: call_id
        )}
 
@@ -255,7 +279,7 @@ defmodule FermixChannels.Mobile.Call do
          ) do
       {:ok, call} -> tell(call, {:call_open, session, call_id, false})
       {:error, {:already_started, call}} -> tell(call, {:call_open, session, call_id, false})
-      {:error, reason} -> refused_start(device_id, reason)
+      {:error, reason} -> refused_start(endpoint, reason)
     end
   end
 
@@ -266,8 +290,11 @@ defmodule FermixChannels.Mobile.Call do
     end
   end
 
-  defp refused_start(device_id, reason) do
-    Logger.error("voice: a call from phone #{device_id} could not start: #{inspect(reason)}")
+  defp refused_start(endpoint, reason) do
+    Logger.error(
+      "voice: a call from #{Endpoint.format(endpoint)} could not start: #{inspect(reason)}"
+    )
+
     {:close, "ended"}
   end
 
@@ -296,13 +323,14 @@ defmodule FermixChannels.Mobile.Call do
 
   @impl true
   def init(opts) do
-    device_id = Keyword.fetch!(opts, :device_id)
+    {kind, device_id} = endpoint = Keyword.fetch!(opts, :endpoint)
+    true = kind in @endpoint_kinds and device_id == Keyword.fetch!(opts, :device_id)
 
     {:ok,
      %{
        device_id: device_id,
        call_id: Keyword.fetch!(opts, :call_id),
-       endpoint: {:phone, device_id},
+       endpoint: endpoint,
        config: nil,
        client: nil,
        attached: nil,
@@ -362,7 +390,7 @@ defmodule FermixChannels.Mobile.Call do
   def handle_info({:call_end_now, ending}, state), do: finish(state, ending)
 
   def handle_info({:call_end, reason}, state) do
-    Logger.info("voice: phone #{state.device_id}'s call ended: #{inspect(reason)}")
+    Logger.info("voice: #{who(state)}'s call ended: #{inspect(reason)}")
     finish(state, "ended")
   end
 
@@ -490,10 +518,22 @@ defmodule FermixChannels.Mobile.Call do
   # link that died without closing (a relay stream left half open): the call
   # lets it go as a `:DOWN` would, and tells it to close, so a phone whose
   # link is in fact alive reconnects and resumes rather than talking on to a
-  # call that no longer hears it.
+  # call that no longer hears it. A computer's session also carries its chat
+  # and its settings, so there the call alone ends, as a link too slow for a
+  # call (M97 D20); pumping happens inside handlers that go on, so the end is
+  # a message to self.
+  defp quiet_detach(%{endpoint: {:computer, _id}} = state, quiet_ms) do
+    Logger.info(
+      "voice: #{who(state)}'s session was silent #{quiet_ms} ms mid-call; the call ends " <>
+        "and the session stays up"
+    )
+
+    link_too_slow(cancel_link_watch(state))
+  end
+
   defp quiet_detach(%{attached: %{session: session}} = state, quiet_ms) do
     Logger.info(
-      "voice: phone #{state.device_id}'s session was silent #{quiet_ms} ms mid-call; " <>
+      "voice: #{who(state)}'s session was silent #{quiet_ms} ms mid-call; " <>
         "its call waits to resume"
     )
 
@@ -540,7 +580,7 @@ defmodule FermixChannels.Mobile.Call do
 
   defp report_resume(%{detached_at: at} = state) when is_integer(at) do
     gap_ms = max(state.clock.() - at, 0)
-    Logger.info("voice: phone #{state.device_id}'s call resumed after #{gap_ms} ms away")
+    Logger.info("voice: #{who(state)}'s call resumed after #{gap_ms} ms away")
     trace_gap(state, &LiveTelemetry.phone_resumed(&1, gap_ms))
   end
 
@@ -574,7 +614,7 @@ defmodule FermixChannels.Mobile.Call do
   defp attached_session?(_state, _session), do: false
 
   defp down(ref, _reason, %{attached: %{ref: ref}} = state) do
-    Logger.info("voice: phone #{state.device_id}'s session closed; its call waits to resume")
+    Logger.info("voice: #{who(state)}'s session closed; its call waits to resume")
     {:noreply, detach(state)}
   end
 
@@ -653,7 +693,7 @@ defmodule FermixChannels.Mobile.Call do
   defp log_drop(state, reason, count) do
     if rem(count, @frame_drop_log_every) == 1 do
       Logger.info(
-        "voice: phone #{state.device_id}'s call dropped a camera frame (#{reason}); " <>
+        "voice: #{who(state)}'s call dropped a camera frame (#{reason}); " <>
           "#{count} so far"
       )
     end
@@ -811,7 +851,7 @@ defmodule FermixChannels.Mobile.Call do
       pump(%{state | audio: queued})
     else
       _invalid ->
-        Logger.warning("voice: phone #{state.device_id}'s call dropped audio that was not PCM16")
+        Logger.warning("voice: #{who(state)}'s call dropped audio that was not PCM16")
         state
     end
   end
@@ -845,7 +885,7 @@ defmodule FermixChannels.Mobile.Call do
 
   defp unsent_line(state, event, reason) do
     Logger.error(
-      "voice: phone #{state.device_id}'s call could not carry a #{inspect(event[:type])} " <>
+      "voice: #{who(state)}'s call could not carry a #{inspect(event[:type])} " <>
         "frame: #{inspect(reason)}"
     )
 
@@ -938,7 +978,7 @@ defmodule FermixChannels.Mobile.Call do
   end
 
   defp revoke(state) do
-    Logger.info("voice: phone #{state.device_id} was removed; its call ends")
+    Logger.info("voice: #{who(state)} was removed; its call ends")
 
     state
     |> send_line(CallClient.error_frame("revoked"))
@@ -1014,6 +1054,9 @@ defmodule FermixChannels.Mobile.Call do
   end
 
   defp voice_running?(guard), do: not is_nil(GenServer.whereis(guard))
+
+  # Who the call is for, as the lease and the trace name it.
+  defp who(state), do: Endpoint.format(state.endpoint)
 
   defp monotonic_ms, do: System.monotonic_time(:millisecond)
 end

@@ -1000,6 +1000,31 @@ defmodule FermixCore.Management.AlwaysOnTest do
       refute Map.has_key?(sent, :move_id)
     end
 
+    # M97 §9.2, §9.3: what this computer carries to the server that the
+    # server's restart into the move would cut (its app's call, its files
+    # still uploading) ends cleanly before the move is sent.
+    test "Move now ends this computer's call and uploads before it sends the move", ctx do
+      enrolled!(ctx)
+      seen = start_supervised!({Agent, fn -> [] end}, id: :seen)
+
+      Agent.update(ctx.script, fn script ->
+        fn
+          "home.move.start", _params ->
+            Agent.update(seen, &[:move_sent | &1])
+            {:ok, %{"move_id" => "mv-0004"}}
+
+          method, params ->
+            script.(method, params)
+        end
+      end)
+
+      ending = fn -> Agent.update(seen, &[:ended_for_return | &1]) end
+      ctx = %{ctx | opts: Keyword.put(ctx.opts, :end_for_return, ending)}
+      assert {:ok, _answer} = press(ctx, "move_now", %Input{recovery_passphrase: @passphrase})
+
+      assert Agent.get(seen, &Enum.reverse/1) == [:ended_for_return, :move_sent]
+    end
+
     test "a move the server refused, or that never left, forgets its start; one unconfirmed " <>
            "keeps it",
          ctx do

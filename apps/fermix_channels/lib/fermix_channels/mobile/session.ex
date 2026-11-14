@@ -69,7 +69,9 @@ defmodule FermixChannels.Mobile.Session do
 
   A phone's call channel (M87; `call_open`, `call_line`, `call_audio`,
   `call_frame`, the camera's picture, and `call_close`) belongs to the
-  device's `Mobile.Call`, which this session
+  device's `Mobile.Call`, and so does a computer's call, the same channel
+  without the camera, which its engine bridges from its app's `realtime.sock`
+  (M97 §9.2: endpoint `computer:<id>`); this session
   hands every call event to and never waits on. The call's frames come back
   as `{:mobile_call, call, :control | :stop | :audio, event}` and are written
   ahead of everything else queued here, controls first, then audio, so a large
@@ -81,8 +83,11 @@ defmodule FermixChannels.Mobile.Session do
   and goes after the call; text still flows. A call that ends without its
   `call_close` (it crashed) is closed `ended` here. A session its call found
   silent mid-stream (`{:mobile_call_silent, call}`) closes `1000`, so a phone
-  whose link is alive reconnects and resumes. A phone's `hello_ack` says
-  whether this primary serves calls (`caps.call`).
+  whose link is alive reconnects and resumes; a computer's call that finds
+  its session silent ends alone, the session staying up (M97 D20). A phone's
+  `hello_ack`, and a desktop's, says whether this primary serves calls
+  (`caps.call`), and a desktop's says it takes the call channel and the
+  phone's upload from a computer (`caps.computer.call`, `caps.computer.attach`).
 
   ## Lanes
 
@@ -231,12 +236,16 @@ defmodule FermixChannels.Mobile.Session do
   # Which of a computer's own events this server takes (M97 §5.3), in a
   # desktop's hello_ack, and that it applies M97 §19.3's rule: a management
   # setting's id names its machine, so it answers its own machine sections.
+  # `call` and `attach` (M97 §9.2, §9.3) are the phone's call channel and its
+  # upload, which a computer drives for its app.
   @computer_caps %{
     "v" => 1,
     "offers" => true,
     "link_path" => true,
     "invoke" => true,
-    "machine_settings" => true
+    "machine_settings" => true,
+    "call" => true,
+    "attach" => true
   }
 
   # A phone's one push registration, written whole (M99 §14): an APNs token
@@ -621,8 +630,8 @@ defmodule FermixChannels.Mobile.Session do
     |> put_call_dependencies()
   end
 
-  # A phone's call: the device's `Mobile.Call`, found in the session's
-  # registry of calls.
+  # A device's call: its `Mobile.Call`, found in the session's registry of
+  # calls by the device's id, for the endpoint the session's kind names.
   defp put_call_dependencies(state) do
     call_opts = [
       calls: state.calls,
@@ -1032,6 +1041,15 @@ defmodule FermixChannels.Mobile.Session do
   # names no kind is a phone's, as is every device a pairing approves.
   defp session_kind(state), do: Map.get(state, :peer_kind, :phone)
 
+  # Whose call a call event is (`Realtime.Endpoint`): a phone's, or a linked
+  # computer's, which its engine bridges from its app (M97 §9.2, D18).
+  defp call_endpoint(state) do
+    case session_kind(state) do
+      :phone -> {:phone, state.device_id}
+      :desktop -> {:computer, state.device_id}
+    end
+  end
+
   defp device_kind(device) do
     case value(device, :kind) do
       :desktop -> :desktop
@@ -1412,21 +1430,24 @@ defmodule FermixChannels.Mobile.Session do
       "push" => push_services(state)
     }
 
-    # Whether this primary serves a call from the phone (M87), and that it
-    # takes the phone's list channel (M85 E4) and serves trips on it (M89):
-    # a phone's alone, since a desktop's own voice reaches its own computer's
-    # socket and its lists ride its companion tunnel. A computer hears which
-    # of its own events this server takes (M97 §5.3).
+    # Whether this primary serves a call from the device (M87; a computer's,
+    # M97 §9.2), and that it takes the phone's list channel (M85 E4) and
+    # serves trips on it (M89): a phone's alone, since a desktop's lists ride
+    # its companion tunnel. A computer hears which of its own events this
+    # server takes (M97 §5.3).
     case session_kind(state) do
       :phone ->
         Map.merge(caps, %{
-          "call" => state.call_caps.(state.device_id),
+          "call" => state.call_caps.(call_endpoint(state)),
           "lists" => true,
           "trips" => true
         })
 
       :desktop ->
-        Map.put(caps, "computer", computer_caps(state))
+        Map.merge(caps, %{
+          "call" => state.call_caps.(call_endpoint(state)),
+          "computer" => computer_caps(state)
+        })
     end
   end
 
@@ -1672,7 +1693,8 @@ defmodule FermixChannels.Mobile.Session do
   # call this primary does not hold is answered here.
   defp dispatch_event(%{type: "call_open", payload: payload}, state) do
     %{"call_id" => call_id, "resume" => resume?} = payload
-    call_answer(state.open_call.(state.device_id, self(), call_id, resume?), call_id, state)
+    answer = state.open_call.(call_endpoint(state), self(), call_id, resume?)
+    call_answer(answer, call_id, state)
   end
 
   defp dispatch_event(%{type: type, payload: payload, bytes: bytes}, state)

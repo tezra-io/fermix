@@ -478,3 +478,69 @@ which writes the choice whole. `voice_device` and `sentence` are additive
 optional fields that only these refusals carry, so an older client renders
 them as any other `error`. An accessory's call started from the Mac and a
 phone's are not refused for the choice.
+
+## After a move: the socket bridged to the server
+
+On a computer whose home moved to an Always On server (M97 §9.2), the
+socket is the same, at the same path, and so is its handshake, answered by
+this computer's engine at its own window. Every call after it runs on the
+server: the computer's engine carries it over its link to the server, which
+runs the voice session with its own key, tools, memory and voice setting,
+and holds it as the endpoint `computer:<device_id>` under the home's one
+call. An app speaks to it exactly as above, but for these:
+
+- **Playback ids on every engine.** Every `audio_delta` of a bridged call
+  carries a `playback_id`, on every engine, not only on Grok, and the
+  server keeps at most about 1 s of audio unreported. A client reports
+  `playback_progress` against every `playback_id` it is given, as in
+  *Playback feedback*, whatever the engine: a client that reports nothing
+  on an OpenAI call hears about a second of each reply, then the call ends
+  `link_too_slow`. A client below version 3, which has no
+  `playback_progress`, is refused at `call_start`:
+
+  ```json
+  {"type":"error","reason":"unsupported_protocol_version","kind":"update_required",
+   "direction":"client_too_old","client_version":2,"min_version":3,"max_version":5,
+   "sentence":"Update the Fermix app on this computer to call your server from it."}
+  ```
+
+- **The versions.** The call speaks the app's version, or the server's
+  newest when the app is newer than the server.
+- **One call at a time** covers the server's whole home: a `call_start`
+  while a phone, or another computer, holds the call is refused
+  `call_in_progress` with `held_by` `phone:<device_id>` or
+  `computer:<device_id>`; a phone is refused the same way, `held_by`
+  naming this computer, while it holds the call.
+- **No screen and no camera.** A bridged call's voice is offered no screen
+  share, whatever the server's `screen_share`, and a `camera` is refused
+  `unsupported_by_endpoint`, which ends the call.
+- **A link too slow, or silent.** Audio that waited 300 ms is dropped on
+  either side. A link that keeps the server's audio waiting 5 s, or that
+  carries nothing from this computer for 1.5 s while the server holds audio
+  it waits to hear reported, ends the call with
+  `{"type":"error","reason":"link_too_slow"}`, and the connection closes.
+- **A dropped link** is held for 20 s: frames arrive late or not at all
+  meanwhile, and the call carries on once the link is back, its state as
+  the server holds it; the app's controls sent meanwhile are applied then.
+- **Refusals of the engine's own**, each an `error` whose `sentence` a
+  client shows as it is, after which the connection closes:
+
+  | `reason` | When |
+  |---|---|
+  | `server_unreachable` | `call_start` while the computer has no link to its server |
+  | `desktop_revoked` | `call_start` once the server no longer knows this computer |
+  | `server_too_old` | `call_start` on a server whose Fermix takes no call from a computer |
+  | `busy` | `call_start` while this computer carries as many calls as it can |
+  | `call_ended` | the engine ended a call itself: the link did not come back within 20 s, the link was lost, the server no longer held the call, or a move back to this computer is starting (its `sentence` says which) |
+
+  Every other `error` is the server's, as above. Talk to Fermix off on the
+  server, or its key missing there, is `error{reason: "voice_off" | "no_key"}`
+  at `call_start`.
+- **Ends.** A call that ends normally (`call_stop`, the server's
+  `call_ended`, an end the server started with no `error`) keeps the
+  connection for a fresh `call_start`, as above; one that ends after an
+  `error` closes it.
+
+After a move back the computer is the home again and its own sessions
+serve the socket, as everything above describes; nothing of the bridge
+carries over.

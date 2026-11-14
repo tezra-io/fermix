@@ -707,6 +707,8 @@ def test_the_shipped_numbered_rubrics_parse():
                       "own_server_for_always_on": 4,
                       "deleting_the_server_the_home_moved_to": 3,
                       "moving_back_to_the_mac": 5,
+                      "voice_and_attachments_after_the_move": 4,
+                      "a_call_up_when_moving_back": 3,
                       "what_the_always_on_pane_says": 4,
                       "swapping_for_a_bigger_server": 3,
                       "homebrew_owner_keeps_fermix_running": 3,

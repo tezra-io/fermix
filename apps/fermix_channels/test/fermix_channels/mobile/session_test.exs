@@ -199,9 +199,17 @@ defmodule FermixChannels.Mobile.SessionTest do
 
   # M87: a phone's hello_ack says whether this primary serves its calls; a
   # desktop's voice is its own computer's, so its hello_ack says nothing.
-  test "a phone's hello_ack carries caps.call; a desktop's does not" do
+  # M97 §9.2: a computer calls its server on the phone's channel, so its
+  # hello_ack says whether the server serves its call, for its endpoint, and
+  # that it takes the call channel and the upload from a computer.
+  test "a phone's hello_ack and a desktop's carry caps.call, each for its endpoint" do
     served = %{"available" => true, "min_version" => 2, "max_version" => 3, "camera" => false}
-    caps = fn "paired-device" -> served end
+    computer = Map.put(served, "camera", false)
+
+    caps = fn
+      {:phone, "paired-device"} -> served
+      {:computer, "paired-device"} -> computer
+    end
 
     assert {:push, [ack], _ready} =
              Session.handle_frame(
@@ -221,7 +229,8 @@ defmodule FermixChannels.Mobile.SessionTest do
       )
 
     assert {:push, [ack], _ready} = Session.handle_frame(hello_frame(%{}), desktop)
-    refute Map.has_key?(header(ack)["caps"], "call")
+    assert header(ack)["caps"]["call"] == computer
+    assert %{"call" => true, "attach" => true} = header(ack)["caps"]["computer"]
   end
 
   # M97 §3.4: the hello's window runs both ways. A hello that names the oldest

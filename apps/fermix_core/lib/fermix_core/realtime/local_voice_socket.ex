@@ -11,6 +11,15 @@ defmodule FermixCore.Realtime.LocalVoiceSocket do
   verbs, the flush before a refusal, teardown): decode, `CallClient`, encode.
   A connection's session is started by `SessionGuard` for the connection's
   handler, which tears it down on any exit of that handler, even mid-start.
+
+  **Bridged** (`:bridge`, `{module, opts}`, M97 §9.2). On a computer whose
+  home moved to a server the socket is the same, at the same path, and only
+  its call half differs: after the handshake each connection's events go to
+  a `FermixCore.Realtime.SocketBridge`, which carries its calls to the
+  server, and no session starts here. Every other message the connection's
+  handler receives is the bridge's. The device role starts it so
+  (`FermixChannels.Desktop.DeviceSupervisor`); a primary's socket has no
+  bridge, so after a move back the same path is served by sessions again.
   """
 
   use GenServer
@@ -66,6 +75,8 @@ defmodule FermixCore.Realtime.LocalVoiceSocket do
              Keyword.take(opts, @client_opts),
          # Whether this socket answers a peer at all (`SocketPeer.admit/2`).
          peer_gate: Keyword.get(opts, :peer_gate, &SocketPeer.admit/1),
+         # A device's bridge (`SocketBridge`), or nil for a primary's sessions.
+         bridge: bridge_opt(Keyword.get(opts, :bridge)),
          max_clients: positive_int_opt(opts, :max_clients, @default_max_clients),
          # handler pid -> its monitor. The map's size is the client count: a
          # handler's :DOWN drops its entry. The accepted socket is handed to the
@@ -259,9 +270,11 @@ defmodule FermixCore.Realtime.LocalVoiceSocket do
       conn: conn,
       config: Config.current(),
       client_opts: state.client_opts,
+      bridge: state.bridge,
       buffer: "",
-      # The connection's `CallClient`, built when the handshake lands; every
-      # event but `client_hello` is gated on it.
+      # The connection's `CallClient`, or `{:bridge, module, bridge}` on a
+      # bridged socket, built when the handshake lands; every event but
+      # `client_hello` is gated on it.
       client: nil
     }
 
@@ -296,6 +309,12 @@ defmodule FermixCore.Realtime.LocalVoiceSocket do
         state
     end
   end
+
+  defp bridge_opt(nil), do: nil
+  defp bridge_opt({module, opts} = bridge) when is_atom(module) and is_list(opts), do: bridge
+
+  defp bridge_opt(other),
+    do: raise(ArgumentError, ":bridge must be nil or {module, opts}, got: #{inspect(other)}")
 
   defp positive_int_opt(opts, key, default) do
     case Keyword.get(opts, key, default) do
@@ -342,6 +361,23 @@ defmodule FermixCore.Realtime.LocalVoiceSocket do
   # teardown) before the handler exits, closing the owned socket (peer EOF) and
   # firing the listener's monitor, which decrements the count. Only a handler
   # CRASH leaves the session to `SessionGuard`.
+  defp client_loop(%{client: {:bridge, _module, _bridge}} = state) do
+    receive do
+      {:tcp, conn, bytes} when conn == state.conn ->
+        handle_tcp_bytes(bytes, state)
+
+      {:tcp_closed, conn} when conn == state.conn ->
+        stop_and_exit(state)
+
+      {:tcp_error, conn, reason} when conn == state.conn ->
+        Logger.warning("Realtime voice socket client recv error: #{inspect(reason)}")
+        stop_and_exit(state)
+
+      message ->
+        bridge_info(message, state)
+    end
+  end
+
   defp client_loop(state) do
     session_ref = session_ref(state.client)
 
@@ -391,7 +427,9 @@ defmodule FermixCore.Realtime.LocalVoiceSocket do
   # session before exiting: a live (billed) provider socket must never outlive
   # the connection, even when the guard could no longer react to this
   # handler's exit. A handler CRASH cannot run this; that path is the guard's.
+  # A bridged connection tells its bridge, which ends the call it carries.
   defp stop_and_exit(%{client: nil}), do: :ok
+  defp stop_and_exit(%{client: {:bridge, module, bridge}}), do: :ok = module.close(bridge)
 
   defp stop_and_exit(%{client: client}) do
     _client = CallClient.teardown(client)
@@ -457,14 +495,26 @@ defmodule FermixCore.Realtime.LocalVoiceSocket do
     send_error_and_stop(:handshake_required, state)
   end
 
+  defp dispatch_event(event, %{client: {:bridge, module, bridge}} = state) do
+    {verdict, bridge} = module.event(bridge, event)
+    {verdict, %{state | client: {:bridge, module, bridge}}}
+  end
+
   defp dispatch_event(event, state) do
     {verdict, client} = CallClient.event(state.client, event)
     {verdict, %{state | client: client}}
   end
 
+  defp bridge_info(message, %{client: {:bridge, module, bridge}} = state) do
+    case module.info(bridge, message) do
+      {:cont, bridge} -> client_loop(%{state | client: {:bridge, module, bridge}})
+      {:stop, bridge} -> stop_and_exit(%{state | client: {:bridge, module, bridge}})
+    end
+  end
+
   # A repeat hello is a protocol violation — the handshake is a one-shot
   # transition. Fail loud rather than silently re-negotiating.
-  defp handle_client_hello(_payload, %{client: %CallClient{}} = state) do
+  defp handle_client_hello(_payload, %{client: client} = state) when client != nil do
     send_error_and_stop(:unexpected_client_hello, state)
   end
 
@@ -484,6 +534,24 @@ defmodule FermixCore.Realtime.LocalVoiceSocket do
         _ = send_event(state.conn, refusal)
         {:stop, state}
     end
+  end
+
+  # A bridged socket's calls are the bridge's to carry, at the version the
+  # handshake negotiated (`SocketBridge`).
+  defp new_client(%{bridge: {module, bridge_opts}} = state, version) do
+    conn = state.conn
+
+    bridge =
+      bridge_opts
+      |> Keyword.merge(
+        protocol_version: version,
+        config: state.config,
+        write: fn json -> :gen_tcp.send(conn, [json, "\n"]) end,
+        emit: fn event -> send_event(conn, event) end
+      )
+      |> module.open()
+
+    {:bridge, module, bridge}
   end
 
   # Every call on this socket is the Mac app's: the `desktop` endpoint, at the

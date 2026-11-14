@@ -392,9 +392,10 @@ it, never a second writer.
   working; the server installs every other one again itself); a dev plugin
   folder (warns: it stays here); what this
   home has turned on that runs only here stopping after the move, each named
-  (voice calls, Google Meet meetings; nothing to warn of when none is
+  (Google Meet meetings; nothing to warn of when none is
   on; Zoom meetings carry on at the server, said where a Zoom app is set
-  up); WhatsApp
+  up; voice calls are never named: after the move the app's calls run on
+  the server through this computer's Fermix); WhatsApp
   turned on (warns: it stops until you run the Tailscale Funnel command
   Always On shows for the server and point Meta at its address);
   Slack turned on without Socket Mode (warns: it stops

@@ -156,6 +156,17 @@ defmodule FermixCore.Home.Link do
   """
   @callback stop_return() :: :ok
 
+  @doc """
+  Device role, as a move back to this computer starts (M97 §9.2, §9.3): ends
+  what this computer carries to its server that the move would cut. The call
+  its app has on the server is hung up, so the server ends it cleanly and
+  settles it, and the app is told why; every file its chat is still
+  uploading is dropped, the chat told why, naming the file. Answers once
+  both are done; one the link does not end within its bound is logged, and
+  the server's restart into the move ends it there. Nothing to end is `:ok`.
+  """
+  @callback end_for_return() :: :ok
+
   @typedoc """
   One computer's device row as the primary holds it (M97 §3.2): its id, the
   name the owner calls it, its system (`"macos"`, `"linux"`, or nil before

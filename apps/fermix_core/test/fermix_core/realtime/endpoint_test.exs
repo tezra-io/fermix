@@ -7,6 +7,7 @@ defmodule FermixCore.Realtime.EndpointTest do
   @owner "owner-1"
   @mac "3f2b8c1e-5a4d-4e6f-9b8a-7c6d5e4f3a2b"
   @phone "0d7f6a52-91c3-4b8e-a1f0-5e2d9c4b7a13"
+  @computer "6f1e2d3c-4b5a-4968-8778-695a4b3c2d1e"
 
   describe "the endpoint's string form" do
     test "desktop, an accessory and a phone round-trip" do
@@ -18,6 +19,12 @@ defmodule FermixCore.Realtime.EndpointTest do
 
       assert Endpoint.parse("phone:" <> @phone) == {:ok, {:phone, @phone}}
       assert Endpoint.format({:phone, @phone}) == "phone:" <> @phone
+    end
+
+    # M97 D18: a linked computer's call on its server, by its device row's id.
+    test "a computer round-trips" do
+      assert Endpoint.parse("computer:" <> @computer) == {:ok, {:computer, @computer}}
+      assert Endpoint.format({:computer, @computer}) == "computer:" <> @computer
     end
 
     # A paired phone's device id is the trust store's lowercase UUID, which the
@@ -41,7 +48,11 @@ defmodule FermixCore.Realtime.EndpointTest do
             "phone:",
             "phone:a b",
             "phone:a:b",
-            "phone:" <> String.duplicate("a", 65)
+            "phone:" <> String.duplicate("a", 65),
+            "computer",
+            "computer:",
+            "computer:a:b",
+            "device:" <> @computer
           ] do
         assert Endpoint.parse(given) == {:error, {:invalid_endpoint, given}}
       end
@@ -56,6 +67,10 @@ defmodule FermixCore.Realtime.EndpointTest do
         Endpoint.format({:phone, "a:b"})
       end
 
+      assert_raise ArgumentError, ~r/invalid voice endpoint/, fn ->
+        Endpoint.format({:computer, "a b"})
+      end
+
       assert_raise FunctionClauseError, fn -> apply(Endpoint, :format, [:phone]) end
       assert_raise FunctionClauseError, fn -> apply(Endpoint, :parse, [:desktop]) end
     end
@@ -66,6 +81,8 @@ defmodule FermixCore.Realtime.EndpointTest do
       assert Endpoint.screen_share?(:desktop)
       refute Endpoint.screen_share?({:accessory, "desk-robot"})
       refute Endpoint.screen_share?({:phone, @phone})
+      # M97 D21: a computer's call looks at no screen.
+      refute Endpoint.screen_share?({:computer, @computer})
     end
 
     # M87 Phase 2: the camera is the phone's, whose frames ride its own
@@ -74,6 +91,7 @@ defmodule FermixCore.Realtime.EndpointTest do
       assert Endpoint.camera?({:phone, @phone})
       refute Endpoint.camera?(:desktop)
       refute Endpoint.camera?({:accessory, "desk-robot"})
+      refute Endpoint.camera?({:computer, @computer})
     end
 
     # The Realtime engine runs no chat and leaves no gist, and its screen_share
@@ -85,7 +103,9 @@ defmodule FermixCore.Realtime.EndpointTest do
       assert Endpoint.admit_engine({:phone, @phone}, "openai_live") == :ok
       assert Endpoint.admit_engine({:phone, @phone}, "xai_realtime") == :ok
 
-      for endpoint <- [:desktop, {:accessory, "desk-robot"}],
+      # M97 D19: a computer's call runs on the server's voice setting, any
+      # engine, as a call on a Mac primary does.
+      for endpoint <- [:desktop, {:accessory, "desk-robot"}, {:computer, @computer}],
           engine <- ["openai_realtime", "openai_live", "xai_realtime"] do
         assert Endpoint.admit_engine(endpoint, engine) == :ok
       end
@@ -95,6 +115,8 @@ defmodule FermixCore.Realtime.EndpointTest do
     # of seconds would pile a fast reply up behind it until it aged out.
     test "a phone's Grok audio is paced in a short window; the others keep the default" do
       assert Endpoint.grok_playback_opts({:phone, @phone}) == [window_ms: 300]
+      # A computer's call rides the phone's call channel, and its credit.
+      assert Endpoint.grok_playback_opts({:computer, @computer}) == [window_ms: 300]
       assert Endpoint.grok_playback_opts(:desktop) == []
       assert Endpoint.grok_playback_opts({:accessory, "desk-robot"}) == []
       assert_raise ArgumentError, fn -> Endpoint.grok_playback_opts({:phone, "a:b"}) end
@@ -117,6 +139,10 @@ defmodule FermixCore.Realtime.EndpointTest do
       assert phone == DeviceIdentity.safety_identifier(@owner, "phone:" <> @phone)
       refute phone == desktop
       assert Endpoint.safety_identifier({:phone, @phone}, @owner, "another-mac") == phone
+
+      computer = Endpoint.safety_identifier({:computer, @computer}, @owner, @mac)
+      assert computer == DeviceIdentity.safety_identifier(@owner, "computer:" <> @computer)
+      refute computer == desktop
     end
   end
 end

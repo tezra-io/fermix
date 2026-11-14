@@ -43,6 +43,32 @@ defmodule FermixChannels.Desktop.DeviceSupervisorTest do
            ] = DeviceSupervisor.children(root)
   end
 
+  # M97 §9.2: where the boot serves the realtime socket (a daemon run's boot
+  # profile), a linked computer serves its app's `realtime.sock` bridged to
+  # its server, beside the dial subtree; an unlinked home, or a boot that
+  # serves no realtime socket (`mix test`'s), serves none.
+  test "a linked computer whose boot serves the realtime socket bridges it to its server",
+       %{root: root} do
+    assert DeviceSupervisor.children(root, true) == []
+
+    linked!(root)
+    assert [%{id: Invoke}, %{id: :dial}] = DeviceSupervisor.children(root, false)
+
+    assert [
+             %{id: Invoke},
+             %{id: :voice_bridge, start: {socket, :start_link, [opts]}},
+             %{id: :dial}
+           ] =
+             DeviceSupervisor.children(root, true)
+
+    assert socket == FermixCore.Realtime.LocalVoiceSocket
+    assert opts[:socket_path] == Path.join(root, "realtime.sock")
+    assert opts[:bridge] == {FermixChannels.Desktop.CallBridge, relay: Relay}
+
+    # The test VM's own boot serves no realtime socket.
+    assert [%{id: Invoke}, %{id: :dial}] = DeviceSupervisor.children(root)
+  end
+
   test "a boot of a desktop that holds a move back runs the relay and the candidate side by side",
        %{root: root} do
     linked!(root)

@@ -180,8 +180,7 @@ defmodule FermixCore.Home.MoveReadinessTest do
     assert %{status: :ok, sentence: "No coding agent has your approval on this computer."} =
              item.("coding_agents")
 
-    assert %{status: :ok, sentence: "Voice calls and meetings are not turned on."} =
-             item.("stays_here")
+    assert %{status: :ok, sentence: "Meetings are not turned on."} = item.("stays_here")
 
     File.write!(Path.join(ctx.home, "config.toml"), "")
     assert %{items: items} = MoveReadiness.report(ctx.home, ctx.candidate, opts(ctx))
@@ -436,10 +435,9 @@ defmodule FermixCore.Home.MoveReadinessTest do
 
     assert %{items: items} = MoveReadiness.report(ctx.home, newer, server)
 
-    assert %{
-             status: :ok,
-             sentence: "Voice calls and meetings run on studio-box again after the move."
-           } =
+    # Voice calls are not named: the computer's app called the server through
+    # its engine all along (M97 §9.2), and calls its own sessions after.
+    assert %{status: :ok, sentence: "Meetings run on studio-box again after the move."} =
              item_in(items, "stays_here")
 
     assert %{status: :ok, sentence: "studio-box runs a Fermix that reads this home."} =
@@ -472,7 +470,7 @@ defmodule FermixCore.Home.MoveReadinessTest do
     File.write!(Path.join(ctx.home, "config.toml"), "")
     assert %{items: items} = MoveReadiness.report(ctx.home, newer, server)
 
-    assert %{status: :ok, sentence: "Voice calls and meetings are not turned on."} =
+    assert %{status: :ok, sentence: "Meetings are not turned on."} =
              item_in(items, "stays_here")
   end
 
@@ -515,6 +513,32 @@ defmodule FermixCore.Home.MoveReadinessTest do
     opts = Keyword.put(opts(ctx), :call_holder, fn -> :none end)
     assert %{items: items} = MoveReadiness.report(ctx.home, ctx.candidate, opts)
     refute item_in(items, "call_in_progress")
+  end
+
+  # M97 §9.2, D18: on a move back the server's review can find the call the
+  # computer it moves to bridged from its app, read "on <its name>"; a
+  # computer whose row cannot be read is still said, without a name.
+  test "a computer's call in progress is named by the computer", ctx do
+    device_id = "6f1e2d3c-4b5a-4968-8778-695a4b3c2d1e"
+    holder = %{endpoint: "computer:" <> device_id, engine: "openai_live", started_at: @now}
+
+    for {names, who} <- [
+          {%{device_id => "studio Mac"}, "on studio Mac"},
+          {%{}, "on one of your computers"}
+        ] do
+      opts =
+        opts(ctx)
+        |> Keyword.put(:call_holder, fn -> {:ok, holder} end)
+        |> Keyword.put(:computer_names, fn -> names end)
+
+      assert %{items: [first | _rest]} = MoveReadiness.report(ctx.home, ctx.candidate, opts)
+
+      assert first == %{
+               id: "call_in_progress",
+               status: :warn,
+               sentence: "A voice call #{who} is in progress: the move ends it before it starts."
+             }
+    end
   end
 
   # M97 §9.5: a move restarts this engine, which would end the meeting the
@@ -626,34 +650,30 @@ defmodule FermixCore.Home.MoveReadinessTest do
 
     assert %{items: items} = MoveReadiness.report(ctx.home, ctx.candidate, opts(ctx))
 
-    assert %{status: :ok, sentence: "Voice calls and meetings are not turned on."} =
+    assert %{status: :ok, sentence: "Meetings are not turned on."} =
              item_in(items, "stays_here")
 
     assert MoveReadiness.stays_here(ctx.home, true, unreadable_files: nil) == {:ok, []}
   end
 
-  test "on a Linux computer, voice calls on are named, and iMessage never is", ctx do
+  # M97 §9.2: after the move the computer's app calls the server through its
+  # engine, as the phone does, so voice calls stop on neither machine.
+  test "voice calls on are never named as stopping, on a Mac or Linux, nor is iMessage", ctx do
     File.write!(Path.join(ctx.home, "config.toml"), """
     [fermix_core.realtime]
     enabled = true
     """)
 
-    linux = Keyword.put(opts(ctx), :host, "linux-x86_64")
-    assert %{items: items} = MoveReadiness.report(ctx.home, ctx.candidate, linux)
+    for host <- ["linux-x86_64", "macos-aarch64"] do
+      opts = Keyword.put(opts(ctx), :host, host)
+      assert %{items: items} = MoveReadiness.report(ctx.home, ctx.candidate, opts)
 
-    assert %{status: :warn, sentence: sentence} = item_in(items, "stays_here")
+      assert %{status: :ok, sentence: "Meetings are not turned on."} =
+               item_in(items, "stays_here")
 
-    # M87 §07: the computer's own voice stops; the phone's calls follow the home.
-    assert sentence ==
-             "This computer's voice calls stop after the move; calls from your phone " <>
-               "carry on at north-box when Talk to Fermix is on there and its key is in " <>
-               "north-box's secret store."
-
-    File.write!(Path.join(ctx.home, "config.toml"), "")
-    assert %{items: items} = MoveReadiness.report(ctx.home, ctx.candidate, linux)
-
-    assert %{status: :ok, sentence: "Voice calls and meetings are not turned on."} =
-             item_in(items, "stays_here")
+      assert MoveReadiness.stays_here(ctx.home, host == "macos-aarch64", unreadable_files: nil) ==
+               {:ok, []}
+    end
   end
 
   test "a home over one S3 upload warns where the server keeps snapshots in S3", ctx do

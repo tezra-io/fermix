@@ -100,7 +100,6 @@ defmodule FermixCore.Management.Copy do
   @internal_words ~r/\b(?:epochs?|primar(?:y|ies)|candidates?|relays?|rails?|phases?|ledgers?|daemons?|(?<!access )key ids?)\b/i
   # What runs only on the computer a move leaves, in the order it is named.
   @stays_here [
-    voice: "voice calls",
     meetings: "meetings",
     # What a move to a server stops of meetings (M97 §9.5, D24): the server
     # joins Zoom's, and cannot sign the notetaker in to Google.
@@ -780,29 +779,17 @@ defmodule FermixCore.Management.Copy do
         "pre-approved Tailscale auth key tagged tag:fermix-server."
 
   @doc """
-  What a move stops among `features` (`:voice`, `:meetings`,
-  `:google_meet`, `:accessories`), as a sentence starts: "Voice calls and
-  meetings stop after the move", "StackChan stops after the move".
+  What a move stops among `features` (`:meetings`, `:google_meet`,
+  `:accessories`), as a sentence starts: "Google Meet meetings and StackChan
+  stop after the move", "StackChan stops after the move".
   """
-  @spec stops_after_move([:voice | :meetings | :google_meet | :accessories, ...]) ::
-          String.t()
+  @spec stops_after_move([:meetings | :google_meet | :accessories, ...]) :: String.t()
   def stops_after_move([_ | _] = features) do
     names = for {feature, name} <- @stays_here, feature in features, do: name
     true = length(names) == length(Enum.uniq(features))
     verb = if features in @singular_features, do: "stops", else: "stop"
 
     "#{names |> join_names() |> capitalised()} #{verb} after the move"
-  end
-
-  @doc """
-  What a move does to voice calls, as a sentence without its full stop: this
-  `machine`'s own calls stop, since they reach only its socket, and the
-  phone's carry on at `server`, where its session goes (M87 §07).
-  """
-  @spec voice_after_move(String.t(), String.t()) :: String.t()
-  def voice_after_move(machine, server) when is_binary(machine) and is_binary(server) do
-    "This #{machine}'s voice calls stop after the move; calls from your phone carry on at " <>
-      "#{server} when Talk to Fermix is on there and its key is in #{server}'s secret store"
   end
 
   @doc """
@@ -813,11 +800,11 @@ defmodule FermixCore.Management.Copy do
   def zoom_after_move(server) when is_binary(server), do: "Zoom meetings carry on at #{server}"
 
   @doc """
-  What a move back brings back among `features` (`:voice`, `:meetings`,
+  What a move back brings back among `features` (`:meetings`,
   `:accessories`) on the computer `name` it returns to, as a sentence starts:
-  "Voice calls and meetings run on studio-mac again after the move".
+  "Meetings and StackChan run on studio-mac again after the move".
   """
-  @spec runs_again([:voice | :meetings | :accessories, ...], String.t()) :: String.t()
+  @spec runs_again([:meetings | :accessories, ...], String.t()) :: String.t()
   def runs_again([_ | _] = features, name) when is_binary(name) do
     names = for {feature, label} <- @stays_here, feature in features, do: label
     true = length(names) == length(Enum.uniq(features))

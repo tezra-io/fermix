@@ -312,7 +312,7 @@ defmodule FermixCore.Management.HomeSummary do
           required(:primary_home) => map() | nil,
           required(:primary_too_old) => boolean(),
           required(:copies_bytes) => non_neg_integer() | nil,
-          required(:stays_here) => [:voice | :meetings | :accessories],
+          required(:stays_here) => [:meetings | :accessories],
           required(:return_costs) => [:telegram | :meet_notetaker],
           required(:zone) => String.t(),
           required(:return) => map() | nil,

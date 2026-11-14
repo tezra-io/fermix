@@ -52,7 +52,9 @@ defmodule FermixCore.Management.AlwaysOn do
       restarts the engine. On a linked desktop moving back, the server it
       goes to is this desktop's own candidate: `home.move.start` is sent with
       `keep_as_desktop` false, refused only by the server's own blocks, and
-      the start is recorded in the return's record (`Home.Return`).
+      the start is recorded in the return's record (`Home.Return`); before
+      it is sent, the app's call on the server and its uploads end, each
+      told why (`Home.Link`'s `end_for_return/0`, M97 §9.2, §9.3).
     * `move_back` (Always On's move back, its design §9): on a linked
       desktop, every check of this computer first
       (`Home.Candidate.returnable/3`, refused as it refuses: an engine that
@@ -137,7 +139,8 @@ defmodule FermixCore.Management.AlwaysOn do
   rail's), `:forget_candidate` (a 1-arity stand-in for the rail's, given the
   held server's id) and the review's; for a move back,
   `Home.Candidate.prepare_return/3`'s `:role` and `:restarts_itself?`,
-  `:start_return` and `:stop_return` (in place of the rail's), and
+  `:start_return`, `:stop_return` and `:end_for_return` (in place of the
+  rail's), and
   `:local_return` (a 2-arity stand-in for `Home.LocalReturn.restore/3`,
   given the home and the copy); and `:serializer` (the name of this
   process), `:actor` and `:primary_forward`.
@@ -638,7 +641,9 @@ defmodule FermixCore.Management.AlwaysOn do
   # A move back: the server checks the passphrase against its own key and
   # refuses on its own blocks. Its start is kept before the request leaves
   # (`return_start_ahead/2`), since the server restarts into the move as it
-  # answers, and settled by the answer (`return_answered/3`).
+  # answers, and settled by the answer (`return_answered/3`). Before it
+  # leaves, what this computer carries to the server that the restart would
+  # cut ends cleanly (M97 §9.2, §9.3): the app's call and its uploads.
   defp forwarded_move(candidate_id, input, forward, opts) do
     params = %{
       "candidate_id" => candidate_id,
@@ -646,7 +651,8 @@ defmodule FermixCore.Management.AlwaysOn do
       "keep_as_desktop" => false
     }
 
-    with :ok <- return_start_ahead(candidate_id, opts) do
+    with :ok <- return_start_ahead(candidate_id, opts),
+         :ok <- Keyword.get(opts, :end_for_return, fn -> Link.impl().end_for_return() end).() do
       answer = forward.(server_request("home.move.start", params), [])
       _kept = return_answered(answer, home(opts), opts)
 

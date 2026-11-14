@@ -13,10 +13,12 @@ defmodule FermixChannels.Home.Link do
   `home_desktops/1` by the device store of the home they name, read from its
   file, `announce_computers/1` by each open session's computer family
   (`FermixChannels.Desktop.ComputerFamily`), `snooze_reminder/2` by the
-  desktop's reminder uplink (`FermixChannels.Desktop.ReminderUplink`), and `start_return/1` and
+  desktop's reminder uplink (`FermixChannels.Desktop.ReminderUplink`), `start_return/1` and
   `stop_return/0` by the device tree
   (`FermixChannels.Desktop.DeviceSupervisor`), whose candidate subtree
-  receives a move back beside the relay.
+  receives a move back beside the relay, and `end_for_return/0` by the
+  relay's bridged calls (`FermixChannels.Desktop.CallBridge`) and this
+  computer's uploads (`FermixChannels.Desktop.Uploads`).
 
   The desktop relay (`FermixChannels.Desktop.Relay`) runs only in a device
   role whose home holds its desktop link, which is also the only engine whose
@@ -34,6 +36,7 @@ defmodule FermixChannels.Home.Link do
   alias FermixChannels.Desktop.Peer
   alias FermixChannels.Desktop.Relay
   alias FermixChannels.Desktop.ReminderUplink
+  alias FermixChannels.Desktop.Uploads
   alias FermixChannels.Home.Enrollment
   alias FermixChannels.Mobile.DeviceStore
 
@@ -217,6 +220,27 @@ defmodule FermixChannels.Home.Link do
 
   @impl true
   def stop_return, do: DeviceSupervisor.stop_candidate()
+
+  # The call first, then the files: both are this computer's to end before
+  # the server restarts into the move back.
+  @impl true
+  def end_for_return do
+    machine = if match?({:unix, :darwin}, :os.type()), do: "Mac", else: "computer"
+    moving = "Fermix is moving back to this #{machine}."
+
+    case Relay.end_calls(Relay, "This call ended: #{moving} Call again once the move is done.") do
+      :ok ->
+        :ok
+
+      {:error, :timed_out} ->
+        Logger.warning(
+          "the move back starts with a call still on the server: it did not end in time, " <>
+            "and the server's restart into the move ends it"
+        )
+    end
+
+    Uploads.drop_all(Uploads, "#{moving} Attach it again once the move is done.")
+  end
 
   # Every desktop row the primary holds, with whether its session is up now.
   # A store or registry that is not running (any role but the primary) holds

@@ -11,6 +11,15 @@ defmodule FermixChannels.Desktop.DeviceSupervisor do
     `device/desktop.json` exists: what its server asks of it, a sibling of
     the dial subtree so a helper or relay restart ends no running one.
 
+  - **The app's voice socket** (M97 §9.2) when `device/desktop.json` exists
+    and this boot serves the realtime socket (a daemon run's boot profile,
+    never `mix test`): `realtime.sock` at its usual path, its calls carried
+    to the server by `Desktop.CallBridge` (`LocalVoiceSocket`'s bridged
+    configuration), a sibling of the dial subtree too, so a relay restart
+    closes no app connection and a call resumes on the next session. No
+    session runs here; on the primary, after a move back, the same path is
+    served by the primary's own sessions (`FermixCore.Realtime.Supervisor`).
+
   - **The dial subtree** (`children/1`'s `:dial`, `:rest_for_one`): one list,
     in start order, each with the condition under which this boot starts it
     (`dial_children/1`), and before them the dial-only `Iroh.Helper` (helper
@@ -37,6 +46,7 @@ defmodule FermixChannels.Desktop.DeviceSupervisor do
 
   require Logger
 
+  alias FermixChannels.Desktop.CallBridge
   alias FermixChannels.Desktop.Invoke
   alias FermixChannels.Desktop.Relay
   alias FermixChannels.Home.CandidateSupervisor
@@ -46,6 +56,8 @@ defmodule FermixChannels.Desktop.DeviceSupervisor do
   alias FermixCore.Home.DesktopLink
   alias FermixCore.Home.Join
   alias FermixCore.Home.Move
+  alias FermixCore.Realtime.Config, as: RealtimeConfig
+  alias FermixCore.Realtime.LocalVoiceSocket
   alias FermixCore.Sandbox.Config, as: SandboxConfig
   alias FermixCore.Setup.ConfigStore
 
@@ -68,12 +80,15 @@ defmodule FermixChannels.Desktop.DeviceSupervisor do
 
   @doc """
   This boot's subtrees for the home at `root`: this computer's invocations
-  (`Desktop.Invoke`) and the dial subtree when the home is linked, the dial
-  subtree alone while a move this home started is pending, the candidate
-  subtree when the home holds a candidate; none at all when it needs none.
+  (`Desktop.Invoke`), the app's bridged voice socket when `voice?` (this
+  boot serves the realtime socket) and the dial subtree when the home is
+  linked, the dial subtree alone while a move this home started is pending,
+  the candidate subtree when the home holds a candidate; none at all when it
+  needs none.
   """
-  @spec children(Path.t()) :: [Supervisor.child_spec()]
-  def children(root) when is_binary(root) and root != "" do
+  @spec children(Path.t(), boolean()) :: [Supervisor.child_spec()]
+  def children(root, voice? \\ realtime_socket?())
+      when is_binary(root) and root != "" and is_boolean(voice?) do
     dial =
       case dial_children(root) do
         [] -> []
@@ -83,8 +98,10 @@ defmodule FermixChannels.Desktop.DeviceSupervisor do
     # Beside the dial subtree, never inside it: a helper or relay restart
     # ends no running invocation (M97 §5.2). Started first, so it takes the
     # server's requests from the session's first frame.
-    invoke = if File.regular?(DesktopLink.path(root)), do: [invoke_spec(root)], else: []
-    serving = invoke ++ dial
+    linked? = File.regular?(DesktopLink.path(root))
+    invoke = if linked?, do: [invoke_spec(root)], else: []
+    voice = if linked? and voice?, do: [voice_spec(root)], else: []
+    serving = invoke ++ voice ++ dial
 
     if Candidate.present?(root), do: serving ++ [candidate_spec(root)], else: serving
   end
@@ -190,6 +207,23 @@ defmodule FermixChannels.Desktop.DeviceSupervisor do
          clock: &DateTime.utc_now/0,
          relay: Relay},
         []
+      )
+
+  # The boot profile of a daemon run turns the realtime socket on
+  # (`FermixCore.BootProfile.prepare/2`); `mix test` and a tree-less verb
+  # serve none.
+  defp realtime_socket?,
+    do: Application.get_env(:fermix_core, :realtime_socket_enabled, false) == true
+
+  # The app's `realtime.sock`, its calls bridged to the server (M97 §9.2).
+  defp voice_spec(root),
+    do:
+      Supervisor.child_spec(
+        {LocalVoiceSocket,
+         socket_path: RealtimeConfig.socket_path(root),
+         name: LocalVoiceSocket,
+         bridge: {CallBridge, relay: Relay}},
+        id: :voice_bridge
       )
 
   defp candidate_spec(root),

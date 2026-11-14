@@ -38,7 +38,7 @@ defmodule FermixCore.Management.HomeSummaryTest do
        "Keep Fermix running when this Mac sleeps. It moves to a server you own.", "own_server"},
       # The pane's D1: what stops after the move is said at Move now, never on
       # the first screen.
-      {"a home that uses all three", facts(stays_here: [:voice, :meetings, :accessories]), "off",
+      {"a home that uses both", facts(stays_here: [:meetings, :accessories]), "off",
        "Keep Fermix running when this Mac sleeps. It moves to a server you own.", "own_server"},
       {"a Linux home with nothing", facts(host_os: :linux), "off",
        "Keep Fermix running when this computer sleeps. It moves to a server you own.",
@@ -1258,7 +1258,7 @@ defmodule FermixCore.Management.HomeSummaryTest do
       assert %{"id" => "move_now", "needs" => ["recovery_passphrase"]} = summary["action"]
 
       assert summary["action"]["confirm"] ==
-               "Move Fermix back to this Mac now?\nVoice calls, meetings and StackChan run " <>
+               "Move Fermix back to this Mac now?\nMeetings and StackChan run " <>
                  "here again.\nYour server stays until you delete it."
 
       assert [%{"id" => "cancel", "confirm" => nil, "label" => "Cancel"}] =
@@ -1291,7 +1291,7 @@ defmodule FermixCore.Management.HomeSummaryTest do
       telegram = HomeSummary.summary(returning(back("enrolled"), return_costs: [:telegram]))
 
       assert telegram["action"]["confirm"] ==
-               "Move Fermix back to this Mac now?\nVoice calls, meetings and StackChan run " <>
+               "Move Fermix back to this Mac now?\nMeetings and StackChan run " <>
                  "here again.\nMessages sent to Telegram while it moves wait until it is " <>
                  "done.\nYour server stays until you delete it."
 
@@ -1302,7 +1302,7 @@ defmodule FermixCore.Management.HomeSummaryTest do
         HomeSummary.summary(returning(back("enrolled"), return_costs: [:meet_notetaker]))
 
       assert notetaker["action"]["confirm"] ==
-               "Move Fermix back to this Mac now?\nVoice calls, meetings and StackChan run " <>
+               "Move Fermix back to this Mac now?\nMeetings and StackChan run " <>
                  "here again.\nGoogle Meet needs the notetaker installed on this Mac again: " <>
                  "install it in Settings, Meetings, once Fermix is back here.\nYour server " <>
                  "stays until you delete it."
@@ -1609,7 +1609,7 @@ defmodule FermixCore.Management.HomeSummaryTest do
 
       # The line naming what stops after the move is read when the pane
       # opens, never told: an app forgets Always On while it is off.
-      assert HomeSummary.watch(facts(stays_here: [:accessories, :voice])).key ==
+      assert HomeSummary.watch(facts(stays_here: [:accessories, :meetings])).key ==
                HomeSummary.watch(facts([])).key
 
       refute HomeSummary.watch(ready_facts([])).off
@@ -2359,7 +2359,7 @@ defmodule FermixCore.Management.HomeSummaryTest do
         returning: state,
         return: if(record?, do: record),
         primary_home: home,
-        stays_here: [:voice, :meetings, :accessories]
+        stays_here: [:meetings, :accessories]
       ] ++ overrides
     )
   end
@@ -2600,7 +2600,7 @@ defmodule FermixCore.Management.HomeSummaryTest do
   # them (the summary carries no copy of its own for them).
   defp move_items do
     [
-      %{id: "stays_here", status: :ok, sentence: "Voice calls and meetings are not turned on."},
+      %{id: "stays_here", status: :ok, sentence: "Meetings are not turned on."},
       %{id: "whatsapp", status: :warn, sentence: warn()["sentence"]},
       %{
         id: "serves_nothing",

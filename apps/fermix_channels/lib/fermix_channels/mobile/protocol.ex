@@ -1001,11 +1001,13 @@ defmodule FermixChannels.Mobile.Protocol do
   # a server older than the computer record and from a phone's hello_ack, and
   # a computer sends none of them then. Each flag a boolean; a later server
   # may name more. `machine_settings` says the server applies M97 §19.3's
-  # rule. Where the computer stands against the server and what the
-  # server speaks (§3.4) are optional: absent from a server before them.
+  # rule; `call` and `attach` that it takes the call channel and the phone's
+  # upload from a computer (§9.2, §9.3). Where the computer stands against
+  # the server and what the server speaks (§3.4) are optional: absent from a
+  # server before them.
   defp optional_computer_caps(%{"computer" => %{"v" => version} = computer})
        when is_integer(version) and version > 0 do
-    flags = Map.take(computer, ~w(offers link_path invoke machine_settings))
+    flags = Map.take(computer, ~w(offers link_path invoke machine_settings call attach))
 
     if Enum.all?(flags, fn {_flag, value} -> is_boolean(value) end) and
          computer_standing?(computer) and computer_versions?(computer),

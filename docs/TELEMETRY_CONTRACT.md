@@ -976,14 +976,19 @@ call quotes that context at the end of its instructions instead (M96), and
 `instructions_bytes` counts them without it. It
 names `endpoint`, who the call runs for: `desktop` (the Mac app's socket) or
 `<kind>:<device_id>` (`accessory:<id>`, `phone:<id>`, a device that calls
-Fermix itself); the Realtime engine's `[:fermix, :realtime, :call_start]`
+Fermix itself; `computer:<id>`, a linked computer's app whose engine bridges
+its socket to its server, M97 §9.2, the phone call's run type); the Realtime
+engine's `[:fermix, :realtime, :call_start]`
 carries it too, and the exporter puts it on both kinds of call root. A phone's
-call (M87) outlives a closed session for its 20 s window: `phone_detached`
-marks the phone's session closing mid-call, and `phone_resumed` its return,
+call (M87), and a linked computer's (M97 §9.2), outlives a closed session for
+its 20 s window: `phone_detached`
+marks the device's session closing mid-call, and `phone_resumed` its return,
 with the gap as its `duration_ms` measurement, so the exporter's span for it
-is as long as the phone was away. Both name `endpoint`, and both come from
+is as long as the device was away. Both name `endpoint` (`phone:<id>` or
+`computer:<id>`), and both come from
 `FermixChannels.Mobile.Call` once the call's voice session has named its call
-id (`call_ready`); a gap before that is a log line only. A call the window
+id (`call_ready`); a gap before that is a log line only. A computer's session
+gone silent mid-call ends the call instead of detaching it (M97 D20). A call the window
 ran out on ends with `call_stop`, as any other. The delegation events carry
 `delegation_id`, `revision` and `turn_session_id`, and `delegation_stop` adds
 the terminal word `status` (`completed | failed | cancelled`, and `timed_out`

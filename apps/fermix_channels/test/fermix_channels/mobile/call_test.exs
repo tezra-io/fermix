@@ -339,14 +339,48 @@ defmodule FermixChannels.Mobile.CallTest do
       assert {[{%{"t" => "pong"}, <<>>}], _client} = Driver.client_receive(driver, client)
     end
 
-    test "a desktop's session is refused every call event, open", ctx do
-      {driver, client} = ready!(ctx, ctx.desktop, @desktop_id, [])
-      client = Driver.client_send(driver, client, "call_open", open(false), 2)
+    # M97 §9.2: a computer whose home moved calls its server on the phone's
+    # channel, as `computer:<id>` (D18), under the same lease; a phone is
+    # refused while it holds the call, told where.
+    test "a desktop's session opens a computer's call, which the home's one call covers", ctx do
+      {driver, client} =
+        ready!(ctx, ctx.desktop, @desktop_id, call_options: call_options(ctx, []))
+
+      {client, voice} = call_up!(driver, client, 2, {:computer, @desktop_id})
+      assert {:ok, %{endpoint: "computer:" <> @desktop_id}} = CallLease.holder(ctx.lease)
+
+      client = Driver.client_send(driver, client, "call_audio", %{"call_id" => @call}, 5, @pcm)
+      assert_receive {:voice, ^voice, {:audio, @pcm}}
+
+      send(voice, {:push, %{type: "audio_delta", audio: Base.encode64(@pcm)}})
+      {[audio], client} = Driver.client_receive(driver, client)
+      assert {%{"t" => "call_audio", "playback_id" => "m1"}, @pcm} = audio
+
+      lease = ctx.lease
+      task = Task.async(fn -> CallLease.acquire(lease, {:phone, @phone_id}, "openai_live") end)
+      assert Task.await(task) == {:error, {:call_in_progress, "computer:" <> @desktop_id}}
+
+      hang_up!(driver, client, voice, 6)
+    end
+
+    # A computer's call takes no camera (M97 D21): its session cannot send a
+    # still, and a `camera` line ends the call as the endpoint's refusal.
+    test "a computer's call is refused a camera", ctx do
+      {driver, client} =
+        ready!(ctx, ctx.desktop, @desktop_id, call_options: call_options(ctx, []))
+
+      {client, _voice} = call_up!(driver, client, 2, {:computer, @desktop_id})
+
+      frame = %{"call_id" => @call, "width" => 1, "height" => 1, "captured_ms" => 0}
+      client = Driver.client_send(driver, client, "call_frame", frame, 5, @jpeg)
       {[{refusal, <<>>}], client} = Driver.client_receive(driver, client)
       assert %{"t" => "error", "code" => "unsupported_event"} = refusal
 
-      client = Driver.client_send(driver, client, "ping", %{}, 3)
-      assert {[{%{"t" => "pong"}, <<>>}], _client} = Driver.client_receive(driver, client)
+      client = send_line(driver, client, %{type: "camera", on: true}, 6, 2)
+      {events, _client} = receive_until_close(driver, client)
+      lines = for {%{"t" => "call_line"}, json} <- events, do: Jason.decode!(json)
+      assert %{"type" => "error", "reason" => "unsupported_by_endpoint"} in lines
+      assert {%{"t" => "call_close", "reason" => "ended"}, <<>>} = List.last(events)
     end
 
     test "frames from a session the call is not attached to are dropped", ctx do
@@ -403,7 +437,7 @@ defmodule FermixChannels.Mobile.CallTest do
 
       relay = spawn_link(fn -> relay(test) end)
 
-      assert Call.open(@phone_id, relay, @call, true, calls: ctx.calls) ==
+      assert Call.open({:phone, @phone_id}, relay, @call, true, calls: ctx.calls) ==
                {:close, "unknown_call"}
 
       assert Call.deliver(@phone_id, relay, "call_close", %{"call_id" => @call}, <<>>,
@@ -412,7 +446,7 @@ defmodule FermixChannels.Mobile.CallTest do
 
       opts = call_options(ctx, [])
       call_opts = [calls: ctx.calls, call_supervisor: ctx.call_supervisor, call_options: opts]
-      assert Call.open(@phone_id, relay, @call, false, call_opts) == :ok
+      assert Call.open({:phone, @phone_id}, relay, @call, false, call_opts) == :ok
       assert_receive {:from_call, :control, %{"t" => "call_attached", "resumed" => false}}
       :ok = :sys.resume(partition)
     end
@@ -628,11 +662,39 @@ defmodule FermixChannels.Mobile.CallTest do
 
       test = self()
       relay = spawn_link(fn -> relay(test) end)
-      :ok = Call.open(@phone_id, relay, @call, true, calls: ctx.calls)
+      :ok = Call.open({:phone, @phone_id}, relay, @call, true, calls: ctx.calls)
       assert_receive {:from_call, :control, %{"t" => "call_attached", "resumed" => true}}
 
       push_audio(voice, 3)
       assert [%{"playback_id" => "m1"}, _second, _third] = audio_frames(3)
+    end
+
+    # M97 D20: a computer's session carries its chat and settings too, so a
+    # silent one ends the call alone, as a link too slow, and is never told
+    # to close.
+    test "a computer's session gone quiet mid-call ends the call link_too_slow, the session kept",
+         ctx do
+      %{call: call, voice: voice, clock: clock} =
+        call_alone!(ctx, "openai_live", quiet_ms: 200, endpoint: {:computer, @desktop_id})
+
+      call_ref = Process.monitor(call)
+      push_audio(voice, @credit_frames)
+      assert length(audio_frames(@credit_frames)) == @credit_frames
+
+      # The bound, on the call's clock; the watch's token is delivered by hand.
+      %{link_watch: %{token: token}} = :sys.get_state(call)
+      Agent.update(clock, &(&1 + 200))
+      send(call, {:link_quiet, token})
+
+      assert_receive {:voice, ^voice, :call_stop}
+      assert_receive {:from_call, :control, %{"t" => "call_line", "bytes" => why}}
+      assert Jason.decode!(why) == %{"type" => "error", "reason" => "link_too_slow"}
+
+      assert_receive {:from_call, :control,
+                      %{"t" => "call_close", "call_id" => @call, "reason" => "link_too_slow"}}
+
+      assert_receive {:DOWN, ^call_ref, :process, ^call, :normal}
+      refute_received {:call_silent, _call}
     end
 
     # Under Grok's 2 s unreported-audio stall, so the reply is cut where it was
@@ -762,7 +824,7 @@ defmodule FermixChannels.Mobile.CallTest do
       await(call, &(&1.attached == nil))
       test = self()
       relay = spawn_link(fn -> relay(test) end)
-      :ok = Call.open(@phone_id, relay, @call, true, calls: ctx.calls)
+      :ok = Call.open({:phone, @phone_id}, relay, @call, true, calls: ctx.calls)
       assert_receive {:from_call, :control, %{"t" => "call_attached", "resumed" => true}}
 
       push_audio(voice, 3)
@@ -855,7 +917,7 @@ defmodule FermixChannels.Mobile.CallTest do
       relay = spawn_link(fn -> relay(test) end)
       opts = call_options(ctx, [])
       call_opts = [calls: ctx.calls, call_supervisor: ctx.call_supervisor, call_options: opts]
-      :ok = Call.open(@phone_id, relay, @call, false, call_opts)
+      :ok = Call.open({:phone, @phone_id}, relay, @call, false, call_opts)
       assert_receive {:from_call, :control, %{"t" => "call_attached", "resumed" => false}}
       call = call_pid!(ctx)
 
@@ -863,7 +925,7 @@ defmodule FermixChannels.Mobile.CallTest do
       Process.exit(relay, :kill)
       await(call, &(&1.attached == nil))
       relay = spawn_link(fn -> relay(test) end)
-      :ok = Call.open(@phone_id, relay, @call, true, calls: ctx.calls)
+      :ok = Call.open({:phone, @phone_id}, relay, @call, true, calls: ctx.calls)
       assert_receive {:from_call, :control, %{"t" => "call_attached", "resumed" => true}}
 
       send(call, line_frame(relay, %{type: "client_hello", protocol_version: 3}, nil, 0))
@@ -890,7 +952,7 @@ defmodule FermixChannels.Mobile.CallTest do
       Agent.update(clock, &(&1 + 1_250))
       test = self()
       relay = spawn_link(fn -> relay(test) end)
-      :ok = Call.open(@phone_id, relay, @call, true, calls: ctx.calls)
+      :ok = Call.open({:phone, @phone_id}, relay, @call, true, calls: ctx.calls)
       assert_receive {:from_call, :control, %{"t" => "call_attached", "resumed" => true}}
 
       assert_receive {:telemetry, [:fermix, :voice_live, :phone_resumed], %{duration_ms: 1_250},
@@ -995,7 +1057,7 @@ defmodule FermixChannels.Mobile.CallTest do
 
       test = self()
       relay = spawn_link(fn -> relay(test) end)
-      :ok = Call.open(@phone_id, relay, @call, true, calls: ctx.calls)
+      :ok = Call.open({:phone, @phone_id}, relay, @call, true, calls: ctx.calls)
       assert_receive {:from_call, :control, %{"t" => "call_attached", "camera" => true}}
 
       # The same picture after the resume is the session's again.
@@ -1121,6 +1183,8 @@ defmodule FermixChannels.Mobile.CallTest do
     {hello, overrides} =
       Keyword.pop(overrides, :hello, %{type: "client_hello", protocol_version: 3})
 
+    {endpoint, overrides} = Keyword.pop(overrides, :endpoint, {:phone, @phone_id})
+
     opts =
       call_options(
         %{ctx | engine: engine},
@@ -1134,9 +1198,9 @@ defmodule FermixChannels.Mobile.CallTest do
       )
 
     call_opts = [calls: ctx.calls, call_supervisor: ctx.call_supervisor, call_options: opts]
-    :ok = Call.open(@phone_id, relay, @call, false, call_opts)
+    :ok = Call.open(endpoint, relay, @call, false, call_opts)
     assert_receive {:from_call, :control, %{"t" => "call_attached"}}
-    call = call_pid!(ctx)
+    call = call_pid!(ctx, elem(endpoint, 1))
 
     send(call, line_frame(relay, hello, nil, 0))
     assert_receive {:from_call, :control, %{"t" => "call_line"}}
@@ -1218,7 +1282,7 @@ defmodule FermixChannels.Mobile.CallTest do
   defp open(resume?), do: %{"call_id" => @call, "resume" => resume?}
 
   # A new call through the handshake and its start; the voice session is up.
-  defp call_up!(driver, client, seq) do
+  defp call_up!(driver, client, seq, endpoint \\ {:phone, @phone_id}) do
     client = open_new!(driver, client, seq)
     client = send_line(driver, client, %{type: "client_hello", protocol_version: 3}, seq + 1, nil)
     {[{%{"t" => "call_line"}, hello}], client} = Driver.client_receive(driver, client)
@@ -1226,7 +1290,7 @@ defmodule FermixChannels.Mobile.CallTest do
 
     client = send_line(driver, client, %{type: "call_start"}, seq + 2, 1)
     assert_receive {:voice_started, voice, opts}
-    assert Keyword.fetch!(opts, :endpoint) == {:phone, @phone_id}
+    assert Keyword.fetch!(opts, :endpoint) == endpoint
     {[{%{"t" => "call_line"}, listening}], client} = Driver.client_receive(driver, client)
     assert Jason.decode!(listening) == %{"type" => "state", "state" => "listening"}
     {client, voice}
@@ -1298,8 +1362,8 @@ defmodule FermixChannels.Mobile.CallTest do
     assert_receive {:DOWN, ^ref, :process, ^driver, _reason}
   end
 
-  defp call_pid!(ctx) do
-    assert [{call, _value}] = Registry.lookup(ctx.calls, @phone_id)
+  defp call_pid!(ctx, device_id \\ @phone_id) do
+    assert [{call, _value}] = Registry.lookup(ctx.calls, device_id)
     call
   end
 
