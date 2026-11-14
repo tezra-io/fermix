@@ -442,10 +442,10 @@ desktop relay reads it, and `DesktopLink.linked?/2` decides once per boot
 whether the daemon forwards primary-class management requests
 (`Management.Placement`, the one table of device-class methods and settings
 sections; the home's recovery, enrollment and move are primary-class) through
-`Home.Link` and whether the companion socket tunnels. `home.status` and
-`settings.sections` are composed (`Placement.composed?/1`): the device answers
-its own part and the router adds the primary's through the daemon's
-`:primary_forward` (`Placement.primary_part/2`, within 5 s), or the sentence
+`Home.Link` and whether the companion socket tunnels. `home.status`,
+`settings.sections` and `job.list` are composed (`Placement.composed?/1`):
+the device answers its own part and the router adds the primary's through
+the daemon's `:primary_forward` (`Placement.primary_part/2`, within 5 s), or the sentence
 in `primary_missing` while it is missing; the primary answers a forwarded one
 as its own. `Placement.forward_deadline_ms/1` is the one table of how long a
 desktop waits for a forwarded answer (8 s; 60 s for `home.move.readiness` and

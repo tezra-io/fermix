@@ -11,7 +11,7 @@ defmodule FermixCore.Management.PlacementTest do
     doctor.start doctor.get doctor.cancel setup.session.create
     computer_use.grant.start computer_use.permissions.get imessage.permissions.get
     imessage.grant.start imessage.policy.confirm browser.install.start
-    home.status settings.sections home.act
+    home.status settings.sections job.list home.act
   )
 
   test "the device-class methods are this machine's, whatever their parameters" do
@@ -185,8 +185,10 @@ defmodule FermixCore.Management.PlacementTest do
     refute Placement.decorated?("settings.get")
   end
 
-  test "home.status and settings.sections are composed: answered here, served when forwarded" do
-    for method <- ~w(home.status settings.sections) do
+  # M97 D28: job.list too, so a linked computer lists the jobs it started
+  # itself (`computer.job:<id>`) beside the server's.
+  test "home.status, settings.sections and job.list are composed: answered here, served when forwarded" do
+    for method <- ~w(home.status settings.sections job.list) do
       assert Placement.composed?(method)
       assert Placement.place(method, %{}) == :device
       assert Placement.served_forwarded?(method, %{})
@@ -209,6 +211,9 @@ defmodule FermixCore.Management.PlacementTest do
 
     assert {:ok, %{"role" => "primary"}} = Placement.primary_part(answered, "home.status")
     assert_received {:asked, %{method: "home.status", params: %{}}, [deadline_ms: 5_000]}
+
+    assert {:ok, %{"role" => "primary"}} = Placement.primary_part(answered, "job.list")
+    assert_received {:asked, %{method: "job.list", params: %{}}, [deadline_ms: 5_000]}
 
     unreachable = fn _request, _opts ->
       Placement.unreachable("fermix-vm", Placement.unreachable_sentence("fermix-vm"))

@@ -37,6 +37,7 @@ defmodule FermixCore.Management.ProtocolContractTest do
   alias FermixCore.Home.Snapshot.Status, as: SnapshotStatus
   alias FermixCore.Jobs.Registry, as: JobsRegistry
   alias FermixCore.Management.AlwaysOn
+  alias FermixCore.Management.Capabilities
   alias FermixCore.Management.Cues.MandateRow, as: CueMandateRow
   alias FermixCore.Management.Cues.SourceRow, as: CueSourceRow
   alias FermixCore.Management.Cues.WatcherRow, as: CueWatcherRow
@@ -198,6 +199,22 @@ defmodule FermixCore.Management.ProtocolContractTest do
 
     assert version["minimum"] == minimum
     assert version["maximum"] == maximum
+  end
+
+  # A job view's target is what an install installs: one of the targets
+  # capabilities.install.start takes, or the browser. A client matches a
+  # running job to its row by it, so the two vocabularies are one.
+  test "the job view's targets are the install targets and the browser", %{schema: schema} do
+    defs = schema["$defs"]
+    install_targets = defs["capabilities_install_start_params"]["properties"]["target"]["enum"]
+
+    assert install_targets == Capabilities.targets()
+
+    assert defs["jobView"]["properties"]["target"]["enum"] ==
+             Capabilities.targets() ++ ["browser", nil]
+
+    params = named_request("capabilities_install_start")["frame"]["params"]
+    assert named_fixture_result("capabilities_install_start")["target"] == params["target"]
   end
 
   test "the schema's error enum matches the protocol module", %{schema: schema} do
@@ -547,6 +564,7 @@ defmodule FermixCore.Management.ProtocolContractTest do
 
       assert finished["status"] == status
       assert finished["kind"] == expected["kind"]
+      assert finished["target"] == expected["target"]
       assert shape(finished) == shape(expected)
     end
   end
@@ -1071,6 +1089,34 @@ defmodule FermixCore.Management.ProtocolContractTest do
 
     assert {:ok, view} = Router.route(get, macos?: true, computer?: true, snapshot: snapshot)
     assert named_fixture_result("settings_get_computer") == json(view)
+  end
+
+  # M97 D28: a computer linked to its server lists the server's jobs, then the
+  # ones it started itself, whose ids name it (`computer.job:<id>`) as
+  # job.get takes them; the golden is that composed list.
+  test "the golden linked computer's job list is the one it composes" do
+    server_jobs = jobs()
+    _theirs = probe_job(server_jobs, blocking_probe())
+    server = fn request, _opts -> Router.route(request, operation_opts: [jobs: server_jobs]) end
+
+    own = [server: jobs_server(computer?: true)]
+    _mine = probe_job(own, blocking_probe())
+
+    request = %{request_id: "req-1", protocol_version: 2, method: "job.list", params: %{}}
+
+    assert {:ok, composed} =
+             Router.route(request, primary_forward: server, operation_opts: [jobs: own])
+
+    golden = named_fixture_result("job_list_computer")
+
+    owners = fn result ->
+      Enum.map(result["jobs"], &(&1["job_id"] |> String.split(":") |> hd()))
+    end
+
+    assert shape(json(composed)) == shape(golden)
+    assert owners.(golden) == ["job", "computer.job"]
+    assert owners.(json(composed)) == owners.(golden)
+    assert golden["primary_missing"] == composed["primary_missing"]
   end
 
   test "the schema's row vocabulary matches the settings module", %{schema: schema} do
@@ -3368,11 +3414,13 @@ defmodule FermixCore.Management.ProtocolContractTest do
     ]
   end
 
-  defp jobs_server do
+  # `computer?: true` is a linked computer's job family, its ids naming it.
+  defp jobs_server(opts \\ []) do
     tasks = :"contract_jobs_tasks_#{unique()}"
     start_supervised!({Task.Supervisor, name: tasks}, id: tasks)
 
-    start_supervised!({Jobs, name: :"contract_jobs_#{unique()}", task_supervisor: tasks},
+    start_supervised!(
+      {Jobs, [name: :"contract_jobs_#{unique()}", task_supervisor: tasks] ++ opts},
       id: :"jobs_#{unique()}"
     )
   end

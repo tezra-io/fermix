@@ -41,6 +41,14 @@ defmodule FermixCore.Management.Jobs do
   only its ending reads `note`. An ending that fails is logged, and the job
   ends as its run did.
 
+  **The target.** An install's job names what it installs (`target`): a
+  `capability_install` the target its start was given, a `browser_install`
+  `browser`. It is stored when the job starts and kept in every view, so a
+  client matches a running job to the row that started it by more than its
+  kind (two rows start a `capability_install`, and a linked computer's
+  `job.list` adds its own installs to the server's). Every other kind names
+  none.
+
   `phase` is a closed per-kind vocabulary, published here and in the export. It
   is display copy the client turns into a sentence, never a state a client
   switches on — `status` is the state. A run that reports a phase outside its
@@ -94,6 +102,9 @@ defmodule FermixCore.Management.Jobs do
     home_restore: %{budget_ms: 900_000, phases: []}
   ]
   @kind_names Keyword.keys(@kinds)
+  # The kinds whose job names what it installs (the moduledoc's target).
+  @targeted_kinds [:capability_install, :browser_install]
+  @browser_target "browser"
   # The closed failure vocabulary a run may answer with. `timed_out` and
   # `internal_error` are minted here; the other two come from the operation.
   @operation_failures [:unavailable, :refused]
@@ -189,10 +200,13 @@ defmodule FermixCore.Management.Jobs do
   holds the reply until the run reports `{:ready, extra}`, which is how
   `auth.start` hands back an authorize url the run mints and no later read
   repeats. `:ending` is the run's ending (the moduledoc), a 1-arity function
-  given `t:ended/0`.
+  given `t:ended/0`. `:target` is what an install installs (the moduledoc's
+  target): required of a `capability_install` (its start's target) and a
+  `browser_install` (`browser`), refused for every other kind.
   """
   @spec start(kind(), keyword()) :: {:ok, view()} | {:error, :busy | :await_timeout}
   def start(kind, opts) when kind in @kind_names and is_list(opts) do
+    :ok = check_target(kind, Keyword.get(opts, :target))
     GenServer.call(server(opts), {:start, kind, opts}, start_timeout(opts))
   end
 
@@ -309,6 +323,7 @@ defmodule FermixCore.Management.Jobs do
       job_id: job_id,
       kind: kind,
       name: name,
+      target: Keyword.get(opts, :target),
       status: :running,
       phase: nil,
       progress: nil,
@@ -695,6 +710,7 @@ defmodule FermixCore.Management.Jobs do
     %{
       "job_id" => job.job_id,
       "kind" => Atom.to_string(job.kind),
+      "target" => job.target,
       "status" => Atom.to_string(job.status),
       "phase" => job.phase,
       "progress" => job.progress,
@@ -753,6 +769,16 @@ defmodule FermixCore.Management.Jobs do
     Keyword.get(opts, :await_timeout_ms, @await_timeout_ms) + @cancel_grace_ms + @ending_ms +
       @stop_answer_margin_ms
   end
+
+  defp check_target(:browser_install, @browser_target), do: :ok
+
+  defp check_target(:capability_install, target) when is_binary(target) and target != "",
+    do: :ok
+
+  defp check_target(kind, nil) when kind not in @targeted_kinds, do: :ok
+
+  defp check_target(kind, target),
+    do: raise(ArgumentError, "a #{kind} job cannot name the target #{inspect(target)}")
 
   defp descriptor(kind), do: Keyword.fetch!(@kinds, kind)
   defp monotonic_ms, do: System.monotonic_time(:millisecond)

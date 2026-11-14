@@ -2707,6 +2707,90 @@
       "why": "M75: on a linked desktop the section list composes this computer's own sections with the primary's, and this sentence says why the primary's part is missing while it cannot be reached; null on every other engine, so a client built against the draft reads the same list."
     },
     {
+      "method": "job.list",
+      "field": "primary_missing",
+      "kind": "engine_only",
+      "why": "M97 D28: on a linked computer the job list composes the server's jobs with the ones this computer started itself, and this sentence says why the server's part is missing while it cannot be reached; null on every other engine, so a client built against the draft reads the same list."
+    },
+    {
+      "method": "auth.import.start",
+      "field": "target",
+      "kind": "engine_only",
+      "why": "The job view names what an install installs, stored when it starts: a capability_install's target as capabilities.install.start was given it, browser for a browser_install, null for every other kind. Two app rows start a capability_install, and a linked computer's job.list adds its own installs to the server's, so a client finds its own row's job by kind and target. Always present; a client built against the draft ignores it."
+    },
+    {
+      "method": "auth.start",
+      "field": "target",
+      "kind": "engine_only",
+      "why": "The job view names what an install installs, stored when it starts: a capability_install's target as capabilities.install.start was given it, browser for a browser_install, null for every other kind. Two app rows start a capability_install, and a linked computer's job.list adds its own installs to the server's, so a client finds its own row's job by kind and target. Always present; a client built against the draft ignores it."
+    },
+    {
+      "method": "capabilities.install.start",
+      "field": "target",
+      "kind": "engine_only",
+      "why": "The job view names what an install installs, stored when it starts: a capability_install's target as capabilities.install.start was given it, browser for a browser_install, null for every other kind. Two app rows start a capability_install, and a linked computer's job.list adds its own installs to the server's, so a client finds its own row's job by kind and target. Always present; a client built against the draft ignores it."
+    },
+    {
+      "method": "computer_use.grant.start",
+      "field": "target",
+      "kind": "engine_only",
+      "why": "The job view names what an install installs, stored when it starts: a capability_install's target as capabilities.install.start was given it, browser for a browser_install, null for every other kind. Two app rows start a capability_install, and a linked computer's job.list adds its own installs to the server's, so a client finds its own row's job by kind and target. Always present; a client built against the draft ignores it."
+    },
+    {
+      "method": "job.cancel",
+      "field": "target",
+      "kind": "engine_only",
+      "why": "The job view names what an install installs, stored when it starts: a capability_install's target as capabilities.install.start was given it, browser for a browser_install, null for every other kind. Two app rows start a capability_install, and a linked computer's job.list adds its own installs to the server's, so a client finds its own row's job by kind and target. Always present; a client built against the draft ignores it."
+    },
+    {
+      "method": "job.get",
+      "field": "target",
+      "kind": "engine_only",
+      "why": "The job view names what an install installs, stored when it starts: a capability_install's target as capabilities.install.start was given it, browser for a browser_install, null for every other kind. Two app rows start a capability_install, and a linked computer's job.list adds its own installs to the server's, so a client finds its own row's job by kind and target. Always present; a client built against the draft ignores it."
+    },
+    {
+      "method": "job.list",
+      "field": "jobs[].target",
+      "kind": "engine_only",
+      "why": "The job view names what an install installs, stored when it starts: a capability_install's target as capabilities.install.start was given it, browser for a browser_install, null for every other kind. Two app rows start a capability_install, and a linked computer's job.list adds its own installs to the server's, so a client finds its own row's job by kind and target. Always present; a client built against the draft ignores it."
+    },
+    {
+      "method": "meetings.signin.start",
+      "field": "target",
+      "kind": "engine_only",
+      "why": "The job view names what an install installs, stored when it starts: a capability_install's target as capabilities.install.start was given it, browser for a browser_install, null for every other kind. Two app rows start a capability_install, and a linked computer's job.list adds its own installs to the server's, so a client finds its own row's job by kind and target. Always present; a client built against the draft ignores it."
+    },
+    {
+      "method": "plugins.check.start",
+      "field": "target",
+      "kind": "engine_only",
+      "why": "The job view names what an install installs, stored when it starts: a capability_install's target as capabilities.install.start was given it, browser for a browser_install, null for every other kind. Two app rows start a capability_install, and a linked computer's job.list adds its own installs to the server's, so a client finds its own row's job by kind and target. Always present; a client built against the draft ignores it."
+    },
+    {
+      "method": "plugins.install.start",
+      "field": "target",
+      "kind": "engine_only",
+      "why": "The job view names what an install installs, stored when it starts: a capability_install's target as capabilities.install.start was given it, browser for a browser_install, null for every other kind. Two app rows start a capability_install, and a linked computer's job.list adds its own installs to the server's, so a client finds its own row's job by kind and target. Always present; a client built against the draft ignores it."
+    },
+    {
+      "method": "plugins.workspace.select.start",
+      "field": "target",
+      "kind": "engine_only",
+      "why": "The job view names what an install installs, stored when it starts: a capability_install's target as capabilities.install.start was given it, browser for a browser_install, null for every other kind. Two app rows start a capability_install, and a linked computer's job.list adds its own installs to the server's, so a client finds its own row's job by kind and target. Always present; a client built against the draft ignores it."
+    },
+    {
+      "method": "plugins.workspaces.discover.start",
+      "field": "target",
+      "kind": "engine_only",
+      "why": "The job view names what an install installs, stored when it starts: a capability_install's target as capabilities.install.start was given it, browser for a browser_install, null for every other kind. Two app rows start a capability_install, and a linked computer's job.list adds its own installs to the server's, so a client finds its own row's job by kind and target. Always present; a client built against the draft ignores it."
+    },
+    {
+      "method": "providers.probe.start",
+      "field": "target",
+      "kind": "engine_only",
+      "why": "The job view names what an install installs, stored when it starts: a capability_install's target as capabilities.install.start was given it, browser for a browser_install, null for every other kind. Two app rows start a capability_install, and a linked computer's job.list adds its own installs to the server's, so a client finds its own row's job by kind and target. Always present; a client built against the draft ignores it."
+    },
+    {
       "method": "(errors)",
       "field": "unconfirmed:method,primary,sentence",
       "kind": "engine_only",

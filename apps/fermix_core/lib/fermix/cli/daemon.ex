@@ -39,7 +39,7 @@ defmodule Fermix.CLI.Daemon do
   Always On steps (`Placement.rail_only?/1`) are
   refused here by name in every role: a linked desktop's own `home.act`
   sends them over the link, and keeps a move back's start in its record itself.
-  A composed request (`home.status`, `settings.sections`) is
+  A composed request (`home.status`, `settings.sections`, `job.list`) is
   answered here, and the router asks the primary for its part through the
   same link (`:primary_forward`). On the primary, `serve_forwarded/3` answers a
   request a desktop forwarded exactly as this socket would, with the router's

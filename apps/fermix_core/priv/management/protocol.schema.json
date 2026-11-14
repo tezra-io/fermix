@@ -2413,7 +2413,7 @@
           "items": { "$ref": "#/$defs/settingsSection" }
         },
         "primary_missing": {
-          "description": "On a linked desktop whose primary did not answer within 5 s, the sentence a person is shown for why the primary's sections are missing (this computer's own are still listed); null otherwise.",
+          "description": "On a linked desktop whose primary's sections are missing, the sentence a person is shown for why (this computer's own are still listed): the server is unreachable, did not answer within 5 s, runs a newer Fermix than this computer can talk to, runs an older Fermix than this computer (it updates on its own), or listed its sections in a form this computer does not read; null otherwise.",
           "type": ["string", "null"]
         }
       }
@@ -2581,6 +2581,7 @@
       "required": [
         "job_id",
         "kind",
+        "target",
         "status",
         "phase",
         "progress",
@@ -2594,6 +2595,10 @@
       "properties": {
         "job_id": { "type": "string" },
         "kind": { "$ref": "#/$defs/jobKind" },
+        "target": {
+          "description": "What an install installs, stored when it starts: a capability_install's target as capabilities.install.start was given it, browser for a browser_install; null for every other kind. A client finds the job its own row started by kind and target, since two rows start a capability_install. An engine before it sent none, which a client reads as null.",
+          "enum": ["computer_use_sidecar", "meetbot", "local_stt", "imessage_helper", "browser", null]
+        },
         "status": { "$ref": "#/$defs/jobStatus" },
         "phase": { "type": ["string", "null"] },
         "progress": { "oneOf": [{ "$ref": "#/$defs/jobProgress" }, { "type": "null" }] },
@@ -2764,10 +2769,19 @@
     "job_list_params": { "type": "object", "required": [], "additionalProperties": false },
     "job_list_result": {
       "type": "object",
-      "required": ["jobs"],
+      "required": ["jobs", "primary_missing"],
       "additionalProperties": false,
       "properties": {
-        "jobs": { "type": "array", "maxItems": 16, "items": { "$ref": "#/$defs/jobView" } }
+        "jobs": {
+          "description": "Every job this engine retains, oldest first: at most 4 running and 16 finished. On a linked computer (M97 D28): the server's jobs, oldest first, then the ones this computer started itself, oldest first, whose ids begin computer. as job.get and job.cancel take them.",
+          "type": "array",
+          "maxItems": 40,
+          "items": { "$ref": "#/$defs/jobView" }
+        },
+        "primary_missing": {
+          "description": "On a linked computer whose server's jobs are missing, the sentence a person is shown for why (this computer's own are still listed): the server is unreachable, did not answer within 5 s, runs a newer Fermix than this computer can talk to, runs an older Fermix than this computer (it updates on its own), or listed its jobs in a form this computer does not read; null otherwise. An engine before it sent none, which a client reads as null.",
+          "type": ["string", "null"]
+        }
       }
     },
     "auth_start_params": {
@@ -2783,6 +2797,7 @@
       "required": [
         "job_id",
         "kind",
+        "target",
         "status",
         "phase",
         "progress",
@@ -2796,6 +2811,7 @@
       "properties": {
         "job_id": { "type": "string" },
         "kind": { "$ref": "#/$defs/jobKind" },
+        "target": { "description": "A sign-in installs nothing: jobView's target, always null.", "type": "null" },
         "status": { "$ref": "#/$defs/jobStatus" },
         "phase": { "type": ["string", "null"] },
         "progress": { "oneOf": [{ "$ref": "#/$defs/jobProgress" }, { "type": "null" }] },

@@ -5,9 +5,9 @@ defmodule Fermix.CLI.DaemonForwardingTest do
   sends every primary-class one to the primary, after its own owner
   placement; without the link nothing changes. On the primary,
   `serve_forwarded/3` answers a desktop's request as the socket would. A
-  composed request (`home.status`, `settings.sections`) is answered on the
-  device with the primary's own part, asked within 5 s, or the sentence that
-  says why it is missing.
+  composed request (`home.status`, `settings.sections`, `job.list`) is
+  answered on the device with the primary's own part, asked within 5 s, or
+  the sentence that says why it is missing.
 
   The rail is stood in for by the daemon's `:forwarding` (its own tests run it
   for real).
@@ -20,6 +20,7 @@ defmodule Fermix.CLI.DaemonForwardingTest do
   alias FermixCore.Management.Doctor
   alias FermixCore.Management.Doctor.Descriptor
   alias FermixCore.Management.HomeSummary
+  alias FermixCore.Management.Jobs
   alias FermixTestSupport.ParentProcess
   alias FermixTestSupport.SafeRm
 
@@ -409,6 +410,35 @@ defmodule Fermix.CLI.DaemonForwardingTest do
       assert missing =~ "The server fermix-vm is unreachable."
     end
 
+    # M97 D28: the jobs this computer started itself are still listed while
+    # the server's cannot be asked for, and the sentence says why.
+    test "while the primary cannot answer, job.list lists this computer's own jobs", ctx do
+      unreachable = fn _request, _opts ->
+        {:error, :primary_unreachable,
+         %{
+           "primary" => "fermix-vm",
+           "sentence" =>
+             "The server fermix-vm is unreachable. Fermix keeps your message until it is back."
+         }}
+      end
+
+      jobs = start_jobs!(ctx, computer?: true)
+      {:ok, %{"job_id" => "computer.job:" <> _rest = mine}} = blocked_job(jobs)
+
+      socket =
+        start_daemon!(ctx,
+          engine_role: @device,
+          desktop_link?: true,
+          forward: unreachable,
+          jobs: jobs
+        )
+
+      assert {:ok, %{"jobs" => [%{"job_id" => ^mine}], "primary_missing" => missing}} =
+               Client.request_v1("job.list", %{}, socket_path: socket, timeout: @reply_ms)
+
+      assert missing =~ "The server fermix-vm is unreachable."
+    end
+
     # M97 §19: the server's sections, its machine sections only where its
     # hello_ack says it applies the rule (this link says nothing, so its
     # sandbox is left out), then this computer's own as computer.<id>.
@@ -501,6 +531,17 @@ defmodule Fermix.CLI.DaemonForwardingTest do
 
       assert %{"result" => %{"sections" => [_one, _two, _three], "primary_missing" => nil}} =
                Daemon.serve_forwarded(frame("call-6", "settings.sections", %{}), @desk, daemon)
+    end
+
+    test "answers a forwarded job.list with its own jobs, missing nothing", ctx do
+      jobs = start_jobs!(ctx, computer?: false)
+      {:ok, %{"job_id" => "job:" <> _rest = theirs}} = blocked_job(jobs)
+
+      daemon =
+        start_daemon!(ctx, [engine_role: %{role: :primary, primary: nil}, jobs: jobs], :name)
+
+      assert %{"result" => %{"jobs" => [%{"job_id" => ^theirs}], "primary_missing" => nil}} =
+               Daemon.serve_forwarded(frame("call-7", "job.list", %{}), @desk, daemon)
     end
 
     test "answers a desktop's request as the socket would", ctx do
@@ -606,6 +647,7 @@ defmodule Fermix.CLI.DaemonForwardingTest do
     {forward, opts} = Keyword.pop(opts, :forward, recorded)
     {link, opts} = Keyword.pop(opts, :link_status, &link_status/0)
     {management, opts} = Keyword.pop(opts, :management, [])
+    {jobs, opts} = Keyword.pop(opts, :jobs)
     # As `Home.Link.forwarding/0` answers it for a linked desktop, or any other engine.
     forwarding = if linked?, do: [primary_forward: forward], else: []
 
@@ -625,10 +667,11 @@ defmodule Fermix.CLI.DaemonForwardingTest do
              identity_provider: fn -> {:ok, identity()} end,
              settings_sections: fn -> @this_machines_sections end,
              endpoint_opts: [port: 4041],
-             operation_opts: [
-               mobile: [provider: PairProvider, test: test],
-               home: [home: root, scheduler: nil, link_status: link]
-             ]
+             operation_opts:
+               [
+                 mobile: [provider: PairProvider, test: test],
+                 home: [home: root, scheduler: nil, link_status: link]
+               ] ++ if(jobs, do: [jobs: [server: jobs]], else: [])
            ] ++ management
        ]
        |> Keyword.merge(opts)},
@@ -667,6 +710,24 @@ defmodule Fermix.CLI.DaemonForwardingTest do
     do: {:ok, %{"id" => "sandbox", "title" => "Sandbox", "rows" => []}}
 
   defp primary_answer(_request), do: {:ok, %{"answered_by" => "primary"}}
+
+  # A job family of the test's own, a linked computer's (`computer?: true`)
+  # minting ids that name it, so no job of the application's is touched.
+  defp start_jobs!(ctx, opts) do
+    name = :"daemon_forwarding_jobs_#{System.unique_integer([:positive])}"
+    start_supervised!({Jobs, [name: name, task_supervisor: ctx.tasks] ++ opts}, id: name)
+  end
+
+  # A browser download that runs until the test ends.
+  defp blocked_job(jobs) do
+    run = fn _job_id, _report ->
+      receive do
+        :never_sent -> {:ok, %{}}
+      end
+    end
+
+    Jobs.start(:browser_install, server: jobs, name: "browser", target: "browser", run: run)
+  end
 
   # A Doctor of the test's own, with its own task supervisor, so no session of
   # the application's Doctor is touched.

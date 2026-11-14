@@ -986,6 +986,15 @@ will be part of a future release; nothing in this group is in a release yet.
   progress was asked of the server, which did not know it; and `fermix
   settings reload computer.sandbox` clears an outside edit of that
   computer's own settings.
+- **An install a linked computer runs itself is found again when its pane
+  reopens.** On a computer linked to your server, the list of running work
+  the apps read now holds that computer's own installs (its browser, the
+  computer use helper, the Messages helper) after the server's, where before
+  it held only the server's, so a reopened pane lost the install it started.
+  While the server is out of reach, that computer's own are still listed.
+  And a server on an older Fermix no longer breaks Settings' section list on
+  a linked computer: it lists that computer's own sections and says the
+  server updates on its own.
 - **Restart your server from any of your computers.** A sandbox mode, a
   key or a coding approval set from an app is stored on the server at once
   and used from its next start, so while one waits, Always On and Settings

@@ -7,6 +7,7 @@ defmodule FermixCore.Management.RouterTest do
   alias FermixCore.Management.Jobs
   alias FermixCore.Management.Lifecycle
   alias FermixCore.Management.McpServers.DraftValues
+  alias FermixCore.Management.Placement
   alias FermixCore.Management.Protocol
   alias FermixCore.Management.Router
 
@@ -430,6 +431,35 @@ defmodule FermixCore.Management.RouterTest do
       assert section == %{"id" => "memory", "pane" => "memory", "title" => "Memory"}
     end
 
+    # A server on an older protocol than this computer's answers
+    # daemon_too_old until its update takes this one: the computer still
+    # lists its own sections, and says the server is behind, as home.status
+    # and job.list do.
+    test "on a linked computer whose server is behind, settings.sections lists its own" do
+      inventory = fn ->
+        [
+          %{id: "sandbox", pane: "safety", title: "Sandbox"},
+          %{id: "routing", pane: "agent", title: "Routing"}
+        ]
+      end
+
+      behind = fn _request, _opts -> {:error, :daemon_too_old, %{"maximum_version" => 1}} end
+
+      assert {:ok, %{"sections" => sections, "primary_missing" => missing}} =
+               Router.route(v2("settings.sections"),
+                 settings_sections: inventory,
+                 computer?: true,
+                 macos?: true,
+                 primary_forward: behind
+               )
+
+      assert Enum.map(sections, & &1["id"]) == ["computer.sandbox"]
+
+      assert missing ==
+               "The server runs an older Fermix than this computer. It updates on its own " <>
+                 "once the app for each computer that keeps your backups carries the newer one."
+    end
+
     test "a section read serves the view, and an unknown section is invalid_params" do
       view = fn "memory", _opts ->
         {:ok, %{"id" => "memory", "title" => "Memory", "rows" => []}}
@@ -584,15 +614,71 @@ defmodule FermixCore.Management.RouterTest do
       assert view["kind"] == "provider_probe"
 
       assert Enum.sort(Map.keys(view)) ==
-               ~w(budget_ms failure finished_at job_id kind phase progress result started_at status)
+               ~w(budget_ms failure finished_at job_id kind phase progress result started_at
+                  status target)
 
-      assert {:ok, %{"jobs" => [listed]}} = Router.route(v2("job.list"), operation_opts: opts)
+      # An engine with no link to a server lists its own, missing nothing.
+      assert {:ok, %{"jobs" => [listed], "primary_missing" => nil}} =
+               Router.route(v2("job.list"), operation_opts: opts)
+
       assert listed["job_id"] == view["job_id"]
 
       assert {:ok, polled} =
                Router.route(v2("job.get", %{"job_id" => view["job_id"]}), operation_opts: opts)
 
       assert polled["job_id"] == view["job_id"]
+    end
+
+    # M97 D28: a linked computer's job list is composed, as its sections are:
+    # the server's jobs, asked within the composed deadline, then the ones this
+    # computer started itself, whose ids name it as job.get takes them.
+    test "on a linked computer job.list lists the server's jobs, then this computer's own",
+         context do
+      own = computer_jobs!(context)
+      {:ok, %{"job_id" => "computer.job:" <> _rest = mine}} = blocked_job(own)
+      theirs = server_job()
+      test = self()
+
+      forward = fn request, forward_opts ->
+        send(test, {:asked, request, forward_opts})
+        {:ok, %{"jobs" => [theirs], "primary_missing" => nil}}
+      end
+
+      assert {:ok, %{"jobs" => [^theirs, %{"job_id" => ^mine}], "primary_missing" => nil}} =
+               Router.route(v2("job.list"),
+                 primary_forward: forward,
+                 operation_opts: [jobs: [server: own]]
+               )
+
+      assert_received {:asked, %{method: "job.list", params: %{}}, [deadline_ms: 5_000]}
+    end
+
+    test "while the server's jobs are missing, this computer's own are listed and why is said",
+         context do
+      own = computer_jobs!(context)
+      {:ok, %{"job_id" => mine}} = blocked_job(own)
+
+      unreachable = fn _request, _opts ->
+        Placement.unreachable("garden-server", Placement.unreachable_sentence("garden-server"))
+      end
+
+      older = fn _request, _opts -> {:error, :daemon_too_old, %{"maximum_version" => 2}} end
+      unread = fn _request, _opts -> {:ok, %{"sections" => []}} end
+
+      for {forward, missing} <- [
+            {unreachable,
+             "The server garden-server is unreachable. Fermix keeps your message until it is back."},
+            {older,
+             "The server runs an older Fermix than this computer. It updates on its own once " <>
+               "the app for each computer that keeps your backups carries the newer one."},
+            {unread, "The server listed its jobs in a form this computer does not read."}
+          ] do
+        assert {:ok, %{"jobs" => [%{"job_id" => ^mine}], "primary_missing" => ^missing}} =
+                 Router.route(v2("job.list"),
+                   primary_forward: forward,
+                   operation_opts: [jobs: [server: own]]
+                 )
+      end
     end
 
     test "a job this daemon does not retain answers unknown_job", %{operation_opts: opts} do
@@ -853,6 +939,42 @@ defmodule FermixCore.Management.RouterTest do
                Router.route(v2("imessage.grant.start", %{"service" => "contacts"}),
                  operation_opts: [macos?: true]
                )
+    end
+
+    # A linked computer's own job family: its ids name it (`computer.job:<id>`).
+    defp computer_jobs!(context) do
+      name = :"router_computer_jobs_#{:erlang.phash2(context.test)}"
+      tasks = :"router_tasks_#{:erlang.phash2(context.test)}"
+
+      start_supervised!({Jobs, name: name, task_supervisor: tasks, computer?: true}, id: name)
+    end
+
+    # A browser download that runs until the test ends.
+    defp blocked_job(jobs) do
+      run = fn _job_id, _report ->
+        receive do
+          :never_sent -> {:ok, %{}}
+        end
+      end
+
+      Jobs.start(:browser_install, server: jobs, name: "browser", target: "browser", run: run)
+    end
+
+    # A job the server answers about, as its own job.list lists it.
+    defp server_job do
+      %{
+        "job_id" => "job:2Kd9mQ",
+        "kind" => "capability_install",
+        "target" => "meetbot",
+        "status" => "running",
+        "phase" => "downloading",
+        "progress" => nil,
+        "budget_ms" => 900_000,
+        "started_at" => "2031-05-03T09:00:00.000000Z",
+        "finished_at" => nil,
+        "result" => nil,
+        "failure" => nil
+      }
     end
 
     test "a no-parameter method refuses parameters rather than ignoring them" do

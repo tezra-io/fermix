@@ -58,6 +58,7 @@ defmodule FermixCore.Management.Capabilities do
         :capability_install,
         Keyword.merge(Keyword.get(opts, :jobs, []),
           name: target,
+          target: target,
           run: install_run(target, opts)
         )
       )
@@ -80,7 +81,11 @@ defmodule FermixCore.Management.Capabilities do
     started =
       Jobs.start(
         :browser_install,
-        Keyword.merge(Keyword.get(opts, :jobs, []), name: "browser", run: browser_run(opts))
+        Keyword.merge(Keyword.get(opts, :jobs, []),
+          name: "browser",
+          target: "browser",
+          run: browser_run(opts)
+        )
       )
 
     case started do

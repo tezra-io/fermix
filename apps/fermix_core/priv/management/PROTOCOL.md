@@ -215,10 +215,27 @@ primary's, exactly as its own socket would give it.
   machine sections titled with its name, "Sandbox on garden server",
   "Browser on garden server", and "garden server" for `harness_machine`,
   where it says the rule, and never a `computer` or `computer.<id>` it
-  names), then this computer's own. The primary's part is asked within 5 s;
-  while it is missing (unreachable, or no answer in time) this computer's
-  part is still answered and `primary_missing` holds the sentence that says
-  why. The primary answers a composed request a desktop forwards as its own.
+  names), then this computer's own; `job.list` lists the primary's jobs, then
+  the ones this computer started itself (their ids begin `computer.`, as
+  `job.get` and `job.cancel` take them), each part oldest first. The
+  primary's part is asked within 5 s;
+  while it is missing this computer's part is still answered and
+  `primary_missing` holds the sentence that says why: while the server is
+  unreachable or has not answered within 5 s, "The server <name> is
+  unreachable. Fermix keeps your message until it is back." ("Fermix cannot
+  reach its server. Fermix keeps your message until it is back." while its
+  name is unknown); while it runs a newer Fermix than this computer can talk
+  to (`client_too_old`), "The server runs a newer Fermix than this computer
+  can talk to, so update Fermix on this computer."; while it runs an older
+  one (`daemon_too_old`), until its update takes this computer's, "The
+  server runs an older Fermix than this computer. It updates on its own once
+  the app for each computer that keeps your backups carries the newer one.";
+  any other refusal in the server's own sentence, or "The server did not
+  answer this (<code>)." where it gives none; and a list in a form this
+  computer does not read, "The server listed its settings in a form this
+  computer does not read." (`settings.sections`) or "The server listed its
+  jobs in a form this computer does not read." (`job.list`). The primary
+  answers a composed request a desktop forwards as its own.
 - **Decorated** (the primary's, with the step that restarts it added):
   `setup.state.get` and `overview.get` are sent to the primary and answered
   as it answered, and a linked computer adds the step that restarts the
@@ -962,7 +979,7 @@ daemon onto anything else.
 | `providers.probe.start` | `provider` | Starts a metered call against the provider. A job; the result carries the model and the latency. Minimum version `2`. |
 | `job.get` | `job_id` | One job's uniform view. A job is answered by the engine that started it: on a computer linked to its server, the jobs it starts itself (its browser's install, computer use's or Messages' helper, Restore here) have ids that begin `computer.` (`computer.job:<id>`) and are answered there; every other id is the server's (*After a move*). Minimum version `2`. |
 | `job.cancel` | `job_id` | Stops a running job and answers its terminal view once its run has stopped: the run is signalled to stop and killed if it is still running 5 s later, so the answer can take that long, and a step started after it never runs beside the run it cancelled. Cancelling a finished job is a no-op, not an error. Placed by its `job_id` as `job.get` is. Minimum version `2`. |
-| `job.list` | none | Every job this daemon retains, oldest first. What lets a reopened surface find a run it started rather than starting a second one. Minimum version `2`. |
+| `job.list` | none | Every job this daemon retains, oldest first, as `{jobs, primary_missing}`. What lets a reopened surface find a run it started rather than starting a second one. On a computer linked to its server it is composed (see *After a move*): the server's jobs, oldest first, then the ones this computer started itself, oldest first, whose ids begin `computer.` (`computer.job:<id>`), so a pane reopened over this computer's own install finds it; at most 40, and `primary_missing` the sentence while the server's are missing; null everywhere else. `primary_missing` came after the method: a client reads a missing one as null. Minimum version `2`. |
 | `auth.start` | `provider` | Starts a browser sign-in and answers with the job plus the authorize url and its lifetime, returned once. `openai_codex` signs in with ChatGPT: a sign-in that leaves ChatGPT plan usage off fails the job with its sentence, and a completed one first makes sure the default model is one the account lists. When that check cannot be made (the account's model list could not be read, or the model could not be saved), the sign-in still completes and its result carries `model_warning`, the daemon's sentence saying the default model was not checked and why, beside `account_label`. The field is optional: absent means the check was made, and a client that does not know it shows the sign-in as completed. `mcp:<name>` signs in one MCP server the owner added, a remote one whose `auth` is `auto`, and is refused with `invalid_params` on `provider` and a sentence for a name no server has, a server on this Mac, one that sends a key and one set to need no sign-in. Minimum version `2`. |
 | `auth.import.start` | `source` | Adopts a sign-in this Mac already has, from Claude Code. A job, because reading the keychain can prompt. `codex_cli` is still accepted as a source and refused with `invalid_params` and a sentence: a Codex CLI sign-in is no longer adopted, and `openai_codex` signs in with ChatGPT through `auth.start`. Minimum version `2`. |
 | `auth.logout` | `provider` | Forgets one provider's local session and reverts the route it fed. Nothing is revoked upstream, except for `openai_codex`: its sign-out revokes the ChatGPT session and keeps the registration, so the next sign-in reuses it. `mcp:<name>` forgets one MCP server's sign-in, revokes nothing upstream, and starts the server again without it; a client its sign-in registered is kept for the next one. Minimum version `2`. |
@@ -1095,6 +1112,16 @@ Notes that the shapes alone do not carry:
   however it ended, before it finishes: its request in the move back's record
   is taken back then (at most 35 s more), so a job read as finished never
   left a restore said to run.
+- **`target` names what an install installs.** A `capability_install`'s
+  view carries the target its `capabilities.install.start` was given
+  (`computer_use_sidecar`, `meetbot`, `local_stt` or `imessage_helper`), a
+  `browser_install`'s `browser`, and every other kind's is null. It is stored
+  when the job starts and kept in every later view (`job.get`, `job.list`,
+  `job.cancel`), so a client finds the job its own row started by kind and
+  target: Voice's on-device speech model and Meetings' notetaker both start
+  a `capability_install`, and a linked computer's `job.list` adds its own
+  installs to the server's. `target` came after the job view: a client reads
+  a missing one as null.
 - **`phase` is display copy, never a state.** It names the current step from a
   closed per-kind vocabulary — `provider_probe`: `calling`; `auth`: `binding`,
   `discovering`, `registering`, `awaiting_browser`, `verifying` (an MCP server's
@@ -2536,7 +2563,8 @@ own client tests against the same golden frames the daemon is tested against.
   it), because a section with no golden result is a
   pane whose row keys nothing on the far side is held to, for
   `settings.sections` also a linked computer's composed inventory
-  (`settings_sections_computer`), for
+  (`settings_sections_computer`), for `job.list` also a linked computer's
+  composed list, the server's job then its own (`job_list_computer`), for
   `mobile.pair.get` one per session state, for `job.get` a browser download
   both completed and failed, for `computer_use.permissions.get` a Mac
   answer and a Linux one, for `home.status` one per family of the Always On

@@ -27,7 +27,7 @@ defmodule FermixCore.Management.Placement do
   speech-to-text and the coding agents run on the server, so their installers
   and detection are the server's too. A job is answered by the engine that
   started it: a linked computer's job ids begin `computer.`, so `job.get` and
-  `job.cancel` of one are answered here.
+  `job.cancel` of one are answered here, and `job.list` is composed (below).
 
   Everything else is **primary-class**: it configures or reads
   the Fermix that lives on the primary, so a linked device
@@ -58,8 +58,9 @@ defmodule FermixCore.Management.Placement do
   refused on `daemon.sock` by name (`rail_only_refusal/1`): there, `home.act`
   takes the step.
 
-  Two methods are **composed** (`composed?/1`): `home.status` and
-  `settings.sections`. A linked device answers them itself and adds the
+  Three methods are **composed** (`composed?/1`): `home.status`,
+  `settings.sections` and `job.list` (the server's jobs, then the ones this
+  computer started itself). A linked device answers them itself and adds the
   primary's own answer, asked within `composed_deadline_ms/0`, or the
   sentence that says why it is missing; the primary answers a forwarded one as
   its own. Two are **decorated** (`decorated?/1`): `setup.state.get` and
@@ -92,7 +93,7 @@ defmodule FermixCore.Management.Placement do
   # server's requests drive here (D28d).
   @device_methods ~w(
     hello diagnostics.build logs.query setup.session.create browser.install.start
-    home.status settings.sections home.act
+    home.status settings.sections job.list home.act
     computer.join.start computer.join.cancel computer.disconnect
   )
   # `accessories.`: an accessory is wired to the computer that answers (M91).
@@ -107,8 +108,9 @@ defmodule FermixCore.Management.Placement do
   @rail_only_sentence "Always On takes this step itself: send home.act with the action the " <>
                         "summary offers."
   # Answered on this machine with the primary's own answer added (M75: a
-  # desktop draws its own facts beside the server's).
-  @composed_methods ~w(home.status settings.sections)
+  # desktop draws its own facts beside the server's; M97 D28: and lists the
+  # jobs it started itself beside the server's).
+  @composed_methods ~w(home.status settings.sections job.list)
   # How long a composed answer waits for the primary's part: well inside the
   # apps' 10 s management call timeout, so the device's own part always
   # arrives.

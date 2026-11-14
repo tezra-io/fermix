@@ -59,10 +59,12 @@ defmodule FermixCore.Management.JobsTest do
                )
 
       assert Map.keys(view) |> Enum.sort() ==
-               ~w(budget_ms failure finished_at job_id kind phase progress result started_at status)
+               ~w(budget_ms failure finished_at job_id kind phase progress result started_at
+                  status target)
 
       assert String.starts_with?(view["job_id"], "job:")
       assert view["kind"] == "provider_probe"
+      assert view["target"] == nil
       assert view["status"] == "running"
       assert view["phase"] == nil
       assert view["progress"] == nil
@@ -74,6 +76,45 @@ defmodule FermixCore.Management.JobsTest do
 
       assert_receive {:running, pid}
       send(pid, {:finish, {:ok, %{}}})
+    end
+
+    # An install's job names what it installs, from its start, so a client
+    # matches a running job to the row that started it by more than its kind:
+    # two rows start a capability_install.
+    test "an install's job names its target, and every later view keeps it", %{server: server} do
+      owner = self()
+
+      for {kind, target} <- [{:capability_install, "local_stt"}, {:browser_install, "browser"}] do
+        assert {:ok, %{"target" => ^target} = view} =
+                 Jobs.start(
+                   kind,
+                   opts(server, name: target, target: target, run: blocking_run(owner))
+                 )
+
+        assert {:ok, %{"target" => ^target}} = Jobs.get(view["job_id"], opts(server))
+        assert {:ok, listed} = Jobs.list(opts(server))
+        assert %{"target" => ^target} = Enum.find(listed, &(&1["job_id"] == view["job_id"]))
+
+        assert_receive {:running, pid}
+        send(pid, {:finish, {:ok, %{}}})
+      end
+    end
+
+    test "only an install names a target, and an install always names one", %{server: server} do
+      run = blocking_run(self())
+
+      for {kind, target} <- [
+            {:provider_probe, "anthropic"},
+            {:capability_install, nil},
+            {:capability_install, ""},
+            {:browser_install, "meetbot"}
+          ] do
+        assert_raise ArgumentError, fn ->
+          Jobs.start(kind, opts(server, name: "named", target: target, run: run))
+        end
+      end
+
+      assert {:ok, []} = Jobs.list(opts(server))
     end
 
     test "a completed job carries its result and drops its phase", %{server: server} do
@@ -115,7 +156,10 @@ defmodule FermixCore.Management.JobsTest do
       end
 
       assert {:ok, started} =
-               Jobs.start(:capability_install, opts(server, name: "meetbot", run: run))
+               Jobs.start(
+                 :capability_install,
+                 opts(server, name: "meetbot", target: "meetbot", run: run)
+               )
 
       assert {:ok, failed} = eventually_terminal(server, started["job_id"])
 
@@ -142,7 +186,10 @@ defmodule FermixCore.Management.JobsTest do
       end
 
       assert {:ok, started} =
-               Jobs.start(:capability_install, opts(server, name: "meetbot", run: run))
+               Jobs.start(
+                 :capability_install,
+                 opts(server, name: "meetbot", target: "meetbot", run: run)
+               )
 
       assert_receive {:reported, pid}
 

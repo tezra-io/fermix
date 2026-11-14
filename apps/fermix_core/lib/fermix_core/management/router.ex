@@ -125,6 +125,7 @@ defmodule FermixCore.Management.Router do
   @cue_decisions %{"confirm" => :confirm, "deny" => :deny}
   @primary_sections_unread "The server listed its settings in a form this computer does " <>
                              "not read."
+  @primary_jobs_unread "The server listed its jobs in a form this computer does not read."
   @own_secret_sentence "This computer keeps only its sandbox's values here: " <>
                          "`computer.env:<NAME>`."
   # A published name, an opaque workspace id and a display label are all bounded
@@ -647,10 +648,39 @@ defmodule FermixCore.Management.Router do
     end
   end
 
+  # Composed on a linked computer (M97 D28), as its sections are: the
+  # server's jobs, then the ones this computer started itself, whose ids name
+  # it (`computer.job:<id>`) as job.get takes them; each part oldest first, so
+  # no two machines' clocks are compared. The server's part is asked within
+  # the composed deadline; while it is missing, `primary_missing` says why.
+  # Every other engine lists its own and nothing is missing.
   defp job_list(opts) do
     {:ok, jobs} = Jobs.list(jobs_opts(opts))
 
-    {:ok, %{"jobs" => jobs}}
+    case Keyword.fetch(opts, :primary_forward) do
+      {:ok, forward} -> composed_jobs(jobs, forward)
+      :error -> {:ok, %{"jobs" => jobs, "primary_missing" => nil}}
+    end
+  end
+
+  defp composed_jobs(own, forward) do
+    case primary_list(forward, "job.list", "jobs", @primary_jobs_unread) do
+      {:ok, theirs} -> {:ok, %{"jobs" => theirs ++ own, "primary_missing" => nil}}
+      {:missing, sentence} -> {:ok, %{"jobs" => own, "primary_missing" => sentence}}
+    end
+  end
+
+  # The primary's part of a composed list, the list under `key` in its answer
+  # to `method`, or the sentence for why it is missing: unreachable or late,
+  # on a protocol this engine is too old for or one older than its own
+  # (behind, until its update takes this one), or answered in a form this
+  # engine does not read (`unread`).
+  defp primary_list(forward, method, key, unread) do
+    case Placement.primary_part(forward, method) do
+      {:ok, %{^key => theirs}} when is_list(theirs) -> {:ok, theirs}
+      {:ok, _malformed} -> {:missing, unread}
+      {gap, sentence} when gap in [:missing, :too_old, :behind] -> {:missing, sentence}
+    end
   end
 
   # A sign-in started by a desktop over the rail (`:actor`, M75 D17) is
@@ -1081,15 +1111,12 @@ defmodule FermixCore.Management.Router do
   defp composed_sections(sections, forward, opts) do
     own = ComputerSettings.own_sections(sections, settings_opts(opts))
 
-    case Placement.primary_part(forward, "settings.sections") do
-      {:ok, %{"sections" => primary}} when is_list(primary) ->
+    case primary_list(forward, "settings.sections", "sections", @primary_sections_unread) do
+      {:ok, primary} ->
         theirs = ComputerSettings.server_sections(primary, linked_server(opts))
         {:ok, %{"sections" => theirs ++ own, "primary_missing" => nil}}
 
-      {:ok, _malformed} ->
-        {:ok, %{"sections" => own, "primary_missing" => @primary_sections_unread}}
-
-      {missing, sentence} when missing in [:missing, :too_old] ->
+      {:missing, sentence} ->
         {:ok, %{"sections" => own, "primary_missing" => sentence}}
     end
   end

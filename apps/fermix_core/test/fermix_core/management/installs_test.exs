@@ -266,6 +266,29 @@ defmodule FermixCore.Management.InstallsTest do
                Capabilities.install_start("computer_use_sidecar", jobs: jobs, install: install)
     end
 
+    # Two rows start a capability_install (Voice's speech model, Meetings'
+    # notetaker), and a linked computer's own helpers join them in job.list:
+    # each job names its target from the start, so a row finds its own. Each
+    # install here refuses at once, so nothing is downloaded.
+    test "each install's job names its target, from its start on", %{jobs: jobs} do
+      refuse = fn -> {:error, :no_pinned_release} end
+
+      for target <- Capabilities.targets() do
+        assert {:ok, %{"target" => ^target, "job_id" => job_id}} =
+                 Capabilities.install_start(target, jobs: jobs, install: refuse, offered?: false)
+
+        assert {:ok, %{"status" => "failed", "target" => ^target}} = terminal(jobs, job_id)
+      end
+
+      assert {:ok, %{"target" => "browser", "job_id" => job_id}} =
+               Capabilities.browser_install_start(
+                 jobs: jobs,
+                 install: fn -> {:error, :no_pinned_release} end
+               )
+
+      assert {:ok, %{"target" => "browser"}} = terminal(jobs, job_id)
+    end
+
     test "the published target catalog is closed" do
       assert Capabilities.targets() == ~w(computer_use_sidecar meetbot local_stt imessage_helper)
     end

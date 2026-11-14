@@ -29,10 +29,13 @@ defmodule FermixChannels.Desktop.TwoEnginesSettingsTest do
   alias FermixChannels.Test.DesktopRail
   alias FermixCore.Computers.Computer
   alias FermixCore.Management.Jobs
+  alias FermixCore.Management.Protocol, as: ManagementProtocol
 
   @reply_ms 15_000
   @older_server "garden server runs an older Fermix, which takes its own sandbox and coding " <>
                   "settings only on the server. It updates on its own."
+  @behind "The server runs an older Fermix than this computer. It updates on its own once " <>
+            "the app for each computer that keeps your backups carries the newer one."
 
   setup ctx do
     test = self()
@@ -45,12 +48,13 @@ defmodule FermixChannels.Desktop.TwoEnginesSettingsTest do
 
     server = start_daemon!(:server, task_supervisor, %{jobs: jobs.server}, [])
     older_computer? = Map.get(ctx, :computer_rule, true) == false
+    behind? = Map.get(ctx, :server_behind, false)
 
     serve = fn frame, computer ->
       send(test, {:served, Jason.decode!(frame)["method"]})
       send(test, {:computer_rule, computer.machine_settings})
       computer = if older_computer?, do: %{computer | machine_settings: false}, else: computer
-      Daemon.serve_forwarded(frame, computer, server)
+      if behind?, do: behind_answer(frame), else: Daemon.serve_forwarded(frame, computer, server)
     end
 
     primary =
@@ -235,6 +239,36 @@ defmodule FermixChannels.Desktop.TwoEnginesSettingsTest do
     assert_receive {:served, "job.cancel"}
   end
 
+  # The failure first seen: job.list was the server's alone, so a pane
+  # reopened over an install this computer runs itself never found it again.
+  # It is composed now: the server's jobs, then this computer's own, each id
+  # as job.get takes it.
+  test "the job list is the server's jobs, then this computer's own", ctx do
+    assert {:ok, %{"job_id" => "job:" <> _rest = theirs}} =
+             request(ctx, "capabilities.install.start", %{"target" => "meetbot"})
+
+    assert_receive {:installing, :server}, 10_000
+
+    assert {:ok, %{"job_id" => "computer.job:" <> _rest = mine}} =
+             request(ctx, "capabilities.install.start", %{"target" => "computer_use_sidecar"})
+
+    assert_receive {:installing, :computer}, 10_000
+
+    assert {:ok, %{"jobs" => jobs, "primary_missing" => nil}} = request(ctx, "job.list", %{})
+
+    assert Enum.map(jobs, &{&1["job_id"], &1["status"]}) == [
+             {theirs, "running"},
+             {mine, "running"}
+           ]
+
+    assert_receive {:served, "job.list"}
+
+    assert {:ok, %{"job_id" => ^mine, "status" => "cancelled"}} =
+             request(ctx, "job.cancel", %{"job_id" => mine})
+
+    refute_received {:served, "job.cancel"}
+  end
+
   test "an id that is no section of this computer's is refused here, and nothing is sent", ctx do
     for section <- ["computer.providers.openai", "computer.harness_machine", "computer."] do
       assert {:error, {:management_error, "invalid_params", _message, %{"field" => "section"}}} =
@@ -274,6 +308,28 @@ defmodule FermixChannels.Desktop.TwoEnginesSettingsTest do
     refute_received {:stored, _engine, _id}
 
     assert %{machine_settings: false, connected: true} = Relay.status(ctx.relay)
+  end
+
+  # A server on an older protocol than this computer's refuses each of its
+  # requests (daemon_too_old) until its update takes this one: the lists this
+  # computer composes still hold its own, and say the server is behind.
+  @tag server_behind: true
+  test "a server that is behind leaves this computer's own sections and jobs listed", ctx do
+    assert {:ok, %{"sections" => sections, "primary_missing" => @behind}} =
+             request(ctx, "settings.sections", %{})
+
+    assert_receive {:served, "settings.sections"}
+    ids = Enum.map(sections, & &1["id"])
+    assert "computer.sandbox" in ids
+    refute "sandbox" in ids
+
+    assert {:ok, %{"job_id" => "computer.job:" <> _rest = mine}} =
+             request(ctx, "capabilities.install.start", %{"target" => "computer_use_sidecar"})
+
+    assert_receive {:installing, :computer}, 10_000
+
+    assert {:ok, %{"jobs" => [%{"job_id" => ^mine}], "primary_missing" => @behind}} =
+             request(ctx, "job.list", %{})
   end
 
   @tag computer_rule: false
@@ -316,6 +372,20 @@ defmodule FermixChannels.Desktop.TwoEnginesSettingsTest do
   defp env_key!(view, name) do
     %{"key" => key} = Enum.find(view["rows"], &(&1["label"] == name and &1["kind"] == "secret"))
     key
+  end
+
+  # What a server on an older protocol answers a newer computer's request:
+  # daemon_too_old, as its own decode of the request refuses it.
+  defp behind_answer(frame) do
+    details = %{"minimum_version" => 1, "maximum_version" => 1}
+
+    {:ok, response} =
+      ManagementProtocol.respond(
+        Jason.decode!(frame)["request_id"],
+        {:error, :daemon_too_old, details}
+      )
+
+    response
   end
 
   # The real session's hello_ack, or an older server's, which says nothing of

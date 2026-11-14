@@ -63,12 +63,14 @@ defmodule FermixCore.Management.CopyTest do
   alias FermixCore.Management.Home, as: ManagementHome
   alias FermixCore.Management.HomeMove, as: ManagementHomeMove
   alias FermixCore.Management.HomeSummary
+  alias FermixCore.Management.Jobs
   alias FermixCore.Management.McpServers.Row, as: McpRow
   alias FermixCore.Management.Mobile
   alias FermixCore.Management.Placement
   alias FermixCore.Management.Plugins
   alias FermixCore.Management.Plugins.Row, as: PluginRow
   alias FermixCore.Management.Protocol
+  alias FermixCore.Management.Router
   alias FermixCore.Management.Settings
   alias FermixCore.Management.Settings.CodingMachine
   alias FermixCore.Management.Settings.ThisComputer
@@ -2539,6 +2541,24 @@ defmodule FermixCore.Management.CopyTest do
       assert "Sandbox on this Mac" in titles
       assert "garden server" in titles
       for title <- titles, do: assert_clean(title, :name, ["garden server", "Mac"], "title")
+    end
+
+    # A linked computer's job list whose server answered in a form it does not
+    # read: its own jobs are listed, and `primary_missing` says why the
+    # server's are not.
+    test "the words for a server's jobs it cannot read obey the rules" do
+      tasks = start_supervised!(Task.Supervisor)
+      name = :"copy_jobs_#{System.unique_integer([:positive])}"
+      start_supervised!({Jobs, name: name, task_supervisor: tasks, computer?: true})
+      request = %{request_id: "req-1", protocol_version: 2, method: "job.list", params: %{}}
+
+      {:ok, %{"primary_missing" => unread}} =
+        Router.route(request,
+          primary_forward: fn _request, _opts -> {:ok, %{}} end,
+          operation_opts: [jobs: [server: name]]
+        )
+
+      assert_owner_words(unread, :prose, [], "jobs unread")
     end
 
     defp row(section), do: %{"id" => section.id, "pane" => section.pane, "title" => section.title}
