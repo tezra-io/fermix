@@ -136,6 +136,18 @@ defmodule Fermix.CLI.HomeCommandTest do
     assert status == 1
     assert err =~ "The engine that owns this home is running"
 
+    # A probe that could not tell (a connect that timed out) refuses too.
+    {status, _out, err} =
+      run(["export", ctx.archive, "--passphrase-file", ctx.passphrase_file],
+        home: ctx.home,
+        hello: fn -> {:error, :timeout} end
+      )
+
+    assert status == 1
+    assert err =~ "Fermix could not tell whether the engine that owns this home is running"
+    assert err =~ "Make sure it is stopped, then export again."
+    refute File.exists?(ctx.archive)
+
     File.write!(ctx.passphrase_file, "short\n")
 
     {status, _out, err} =

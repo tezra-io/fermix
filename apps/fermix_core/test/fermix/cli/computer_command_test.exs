@@ -137,6 +137,21 @@ defmodule Fermix.CLI.ComputerCommandTest do
     assert {:ok, %{role: :primary}} = Role.configured(ctx.home)
   end
 
+  # A probe whose connect timed out cannot tell whether Fermix runs here (a
+  # starved machine's daemon may be there), so the join refuses and says so.
+  test "refuses when it cannot tell whether Fermix runs here, and asks no code", ctx do
+    {stdin, deps} = piped(code())
+    unknown = [home: ctx.home, hello: fn -> {:error, :timeout} end, now: @now] ++ deps
+
+    error =
+      capture_io(:stderr, fn -> assert ComputerCommand.run(["join"], unknown) == 1 end)
+
+    assert error =~ "fermix computer join: Fermix could not tell whether it is running here"
+    assert error =~ "Make sure it is stopped, then run this again."
+    assert {"fxenroll1." <> _rest, ""} = StringIO.contents(stdin)
+    refute Join.present?(ctx.home)
+  end
+
   test "refuses while Fermix runs here, and a code that is not a computer's, by name", ctx do
     {stdin, deps} = piped(code())
     running = [home: ctx.home, hello: fn -> {:ok, %{}} end, now: @now] ++ deps

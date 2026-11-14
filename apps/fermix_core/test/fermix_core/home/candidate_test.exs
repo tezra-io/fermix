@@ -185,6 +185,26 @@ defmodule FermixCore.Home.CandidateTest do
                  "again with the new code."
     end
 
+    # Replacing a held candidate asks whether its engine runs; a probe whose
+    # connect timed out could not tell, so nothing is replaced, and the
+    # sentence says what to do.
+    test "a candidate Fermix cannot tell is stopped is not replaced", ctx do
+      {:ok, second} = EnrollmentCode.encode(%{@facts | secret: :binary.copy(<<0x6B>>, 32)})
+      {:ok, _first} = Candidate.enroll(ctx.home, ctx.code, now: @now, hello: stopped())
+      {:ok, state} = Candidate.read_state(ctx.home)
+      :ok = Candidate.put_state(ctx.home, Map.put(state, "phase", "expired"), @now)
+      before = tree(ctx.home)
+
+      assert Candidate.enroll(ctx.home, second, now: @now, hello: fn -> {:error, :timeout} end) ==
+               {:error, {:daemon_probe_failed, :timeout}}
+
+      assert tree(ctx.home) == before
+
+      assert Candidate.error_sentence({:daemon_probe_failed, :timeout}) ==
+               "Fermix could not tell whether it runs in this home (:timeout), so it enrolled " <>
+                 "nothing. Make sure it is stopped (fermix stop), then enroll again."
+    end
+
     # Always On re-check: the server's command run again with the code it
     # enrolled with, inside its thirty minutes, would replace the held server
     # under new keys, which its primary then refuses as used; one still

@@ -269,6 +269,15 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **A Fermix too busy to answer is no longer taken for one that is stopped.**
+  When its control socket did not accept a connection within 3 seconds, the
+  command line read Fermix as not running, so on a busy machine `fermix home
+  export`, `fermix home mark-moved`, `fermix home enroll` and `fermix computer
+  join` could act on a home whose engine was running. Only a missing socket or
+  a refused connection now means not running; one that does not answer in time
+  means Fermix could not tell, and those commands refuse and say to make sure
+  it is stopped first, while `fermix status` and the other reports say they
+  could not tell.
 - **Codex signed in with an API key reads as signed in.** Fermix looked only
   for a ChatGPT sign-in in Codex's `auth.json`, so after `codex login
   --with-api-key` the Coding agents pane, the setup page and `fermix doctor`

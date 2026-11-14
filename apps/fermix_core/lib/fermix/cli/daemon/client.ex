@@ -9,9 +9,13 @@ defmodule Fermix.CLI.Daemon.Client do
   (`plugins_apply`, `auth_forget`) still use; a caller never has both for one
   answer.
 
-  Returns `{:error, :not_running}` when the socket is missing or
-  unreachable — callers treat that as the authoritative "not
-  running" signal, not a degraded path.
+  Returns `{:error, :not_running}` when the socket is missing or refuses the
+  connection: no daemon listens there, and callers treat that as the
+  authoritative "not running" signal, not a degraded path. A socket that does
+  not answer in time, at the connect as at the reply, is `{:error, :timeout}`:
+  a daemon may be there on a machine too busy to answer, so Fermix could not
+  tell whether it runs, and a verb that must not act on a running home
+  refuses on it (`describe_error/1` says so).
   """
 
   alias FermixCore.Management.Protocol
@@ -80,7 +84,7 @@ defmodule Fermix.CLI.Daemon.Client do
     socket_path = Keyword.get(opts, :socket_path, default_socket_path())
     timeout = Keyword.get(opts, :timeout, @default_timeout_ms)
 
-    case connect(socket_path, timeout) do
+    case connect(opts).(socket_path, timeout) do
       {:ok, conn} -> run_connected(conn, callback)
       {:error, reason} -> classify(reason)
     end
@@ -109,7 +113,7 @@ defmodule Fermix.CLI.Daemon.Client do
     version = Keyword.get(opts, :protocol_version, Protocol.protocol_version())
     request = v1_request(request_id, version, method, params)
 
-    case connect(socket_path, timeout) do
+    case connect(opts).(socket_path, timeout) do
       {:ok, conn} -> run_v1_exchange(conn, request, request_id, timeout)
       {:error, reason} -> classify(reason)
     end
@@ -130,7 +134,15 @@ defmodule Fermix.CLI.Daemon.Client do
   def describe_error(:invalid_management_response),
     do: "the daemon did not answer management protocol v1; restart it with `fermix restart`"
 
+  def describe_error(:timeout),
+    do: "Fermix could not tell whether it is running: its control socket did not answer in time"
+
   def describe_error(reason), do: inspect(reason)
+
+  # `opts[:connect]`, a 2-arity function answering as `:gen_tcp.connect/4`
+  # does for `(socket_path, timeout)`, stands for the socket in a test, which
+  # can then give an answer a real socket gives only under load.
+  defp connect(opts), do: Keyword.get(opts, :connect, &connect/2)
 
   defp connect(socket_path, timeout) do
     :gen_tcp.connect(
@@ -300,8 +312,10 @@ defmodule Fermix.CLI.Daemon.Client do
     end
   end
 
+  # Only a socket no daemon can be listening on is not running. A connect that
+  # timed out is `:timeout`, as a reply that did: "could not tell".
   defp classify(reason)
-       when reason in [:enoent, :econnrefused, :timeout, :eaddrnotavail, :badarg],
+       when reason in [:enoent, :econnrefused, :eaddrnotavail, :badarg],
        do: {:error, :not_running}
 
   defp classify(reason), do: {:error, reason}

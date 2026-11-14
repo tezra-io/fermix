@@ -329,15 +329,22 @@ defmodule FermixCore.Home.ArchiveTest do
       refute File.exists?(archive)
     end
 
+    # The probe reads the home's real socket. The listener answers `hello` as
+    # soon as the frame arrives: the engine's own daemon answers through the
+    # management router and this VM's global settings, which a busy machine
+    # can make miss the client's own 3 s deadline (read as "could not tell").
     test "through the daemon socket the CLI's own probe reads" do
       root = short_root!()
       seed_home!(root)
       out = SafeRm.make_tmp_dir!("home_archive_out")
       on_exit(fn -> SafeRm.rm_rf!(out) end)
       archive = Path.join(out, "home.fxhome")
-      start_daemon!(Path.join(root, "daemon.sock"))
+      listen = listening!(Path.join(root, "daemon.sock"))
+      test = self()
+      start_supervised!({Task, fn -> answer_hello(listen, test) end})
 
       assert Archive.create(root, @passphrase, to: archive) == {:error, :daemon_running}
+      assert_receive {:asked, "hello"}
       refute File.exists?(archive)
     end
 
@@ -697,16 +704,29 @@ defmodule FermixCore.Home.ArchiveTest do
     root
   end
 
-  defp start_daemon!(socket_path) do
-    sup = :"archive_test_tasks_#{System.unique_integer([:positive, :monotonic])}"
-    start_supervised!({Task.Supervisor, name: sup})
+  # Listening before the probe dials: `listen/2` returns once the socket is
+  # bound and accepting connections into its backlog. The seeded home holds a
+  # stale `daemon.sock` (an entry the archive leaves out), which goes first,
+  # as the daemon's own start clears it.
+  defp listening!(path) do
+    SafeRm.rm!(path)
 
-    start_supervised!(
-      {Fermix.CLI.Daemon,
-       name: :"archive_test_daemon_#{System.unique_integer([:positive, :monotonic])}",
-       socket_path: socket_path,
-       task_supervisor: sup}
-    )
+    {:ok, listen} =
+      :gen_tcp.listen(0, [:binary, active: false, packet: 4, ifaddr: {:local, path}])
+
+    on_exit(fn -> :gen_tcp.close(listen) end)
+    listen
+  end
+
+  # One connection, one v1 answer: the request's own id and an empty result,
+  # sent the moment the frame is read. Each wait ends on the socket's event.
+  defp answer_hello(listen, test) do
+    {:ok, conn} = :gen_tcp.accept(listen)
+    {:ok, frame} = :gen_tcp.recv(conn, 0)
+    %{"request_id" => id, "method" => method} = Jason.decode!(frame)
+    send(test, {:asked, method})
+    :ok = :gen_tcp.send(conn, Jason.encode!(%{"request_id" => id, "result" => %{}}))
+    :gen_tcp.close(conn)
   end
 
   defp token(db) do

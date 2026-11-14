@@ -348,7 +348,8 @@ defmodule FermixCore.Home.Candidate do
 
   def error_sentence({:daemon_probe_failed, reason}),
     do:
-      "Fermix could not tell whether it runs in this home (#{inspect(reason)}), so it enrolled nothing."
+      "Fermix could not tell whether it runs in this home (#{inspect(reason)}), so it enrolled " <>
+        "nothing. Make sure it is stopped (fermix stop), then enroll again."
 
   def error_sentence({:not_fresh, entry}),
     do:

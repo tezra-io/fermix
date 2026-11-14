@@ -93,7 +93,7 @@ defmodule Fermix.CLI.HomeMovedCommandTest do
 
     assert sentence ==
              "Fermix could not mark this home moved. It said: could not tell whether Fermix " <>
-               "is running (timeout)"
+               "is running (timeout); make sure it is stopped, then mark it moved again"
 
     assert Moved.read(home) == :absent
   end

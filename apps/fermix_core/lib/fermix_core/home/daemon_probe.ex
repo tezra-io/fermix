@@ -5,9 +5,11 @@ defmodule FermixCore.Home.DaemonProbe do
   `fermix home mark-moved`).
 
   It asks the home's control socket for `hello`, the probe `fermix status`
-  uses (`Fermix.CLI.Daemon.Client.request_v1/3`): no listener is a stopped
-  home, an answer is a running one, and anything else is reported as a probe
-  that could not tell, which callers refuse like a running engine.
+  uses (`Fermix.CLI.Daemon.Client.request_v1/3`): no listener (a missing
+  socket, a refused connection) is a stopped home, an answer is a running
+  one, and anything else is reported as a probe that could not tell, which
+  callers refuse with what to do: a connect or a reply that timed out among
+  them, since a daemon may be there on a machine too busy to answer.
   """
 
   alias Fermix.CLI.Daemon.Client

@@ -41,6 +41,8 @@ defmodule Fermix.CLI.ComputerCommand do
   @code_label "Code from Add a computer"
   @running_sentence "Fermix is running here. Join from the Fermix app, or stop Fermix and run " <>
                       "this again."
+  @unknown_sentence "Fermix could not tell whether it is running here. Make sure it is " <>
+                      "stopped, then run this again."
   @argument_sentence "the code is not taken on the command line, where other programs here " <>
                        "can read it. Run fermix computer join and paste the code when it asks, " <>
                        "or pipe it in."
@@ -96,7 +98,7 @@ defmodule Fermix.CLI.ComputerCommand do
         refused(@running_sentence)
 
       {:error, {:daemon_probe_failed, _reason}} ->
-        refused(@running_sentence)
+        refused(@unknown_sentence)
 
       {:error, reason} ->
         refused(Join.error_sentence(reason))
