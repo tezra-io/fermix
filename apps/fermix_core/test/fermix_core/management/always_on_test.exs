@@ -1002,8 +1002,8 @@ defmodule FermixCore.Management.AlwaysOnTest do
 
     # M97 §9.2, §9.3: what this computer carries to the server that the
     # server's restart into the move would cut (its app's call, its files
-    # still uploading) ends cleanly before the move is sent.
-    test "Move now ends this computer's call and uploads before it sends the move", ctx do
+    # still uploading) ends once the server took the move, never before.
+    test "Move now ends this computer's call and uploads once the server took the move", ctx do
       enrolled!(ctx)
       seen = start_supervised!({Agent, fn -> [] end}, id: :seen)
 
@@ -1022,7 +1022,46 @@ defmodule FermixCore.Management.AlwaysOnTest do
       ctx = %{ctx | opts: Keyword.put(ctx.opts, :end_for_return, ending)}
       assert {:ok, _answer} = press(ctx, "move_now", %Input{recovery_passphrase: @passphrase})
 
-      assert Agent.get(seen, &Enum.reverse/1) == [:ended_for_return, :move_sent]
+      assert Agent.get(seen, &Enum.reverse/1) == [:move_sent, :ended_for_return]
+    end
+
+    # A move the server refused (a mistyped passphrase, a block of its own),
+    # one that never left, and one whose answer was lost leave the call up
+    # and the files uploading: only a move the server took cuts them.
+    test "a move the server did not take ends no call and drops no upload", ctx do
+      enrolled!(ctx)
+      test = self()
+
+      ending = fn ->
+        send(test, :ended_for_return)
+        :ok
+      end
+
+      ctx = %{ctx | opts: Keyword.put(ctx.opts, :end_for_return, ending)}
+
+      refusal = %{
+        "capability" => "home",
+        "sentence" => "That is not the recovery passphrase you set."
+      }
+
+      for answer <- [
+            {:error, :invalid_params, refusal},
+            {:error, :unavailable, %{"sentence" => "A meeting is in progress on the server."}},
+            {:error, :primary_unreachable, %{"sentence" => "The server is unreachable."}},
+            {:error, :unconfirmed, %{"method" => "home.move.start", "sentence" => "."}}
+          ] do
+        Agent.update(ctx.script, fn _script ->
+          fn
+            "home.move.start", _params -> answer
+            method, params -> server_part(:on).(method, params)
+          end
+        end)
+
+        assert {:error, _code, _details} =
+                 press(ctx, "move_now", %Input{recovery_passphrase: @passphrase})
+
+        refute_received :ended_for_return, inspect(answer)
+      end
     end
 
     test "a move the server refused, or that never left, forgets its start; one unconfirmed " <>

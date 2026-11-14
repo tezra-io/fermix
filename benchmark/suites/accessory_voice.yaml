@@ -128,3 +128,58 @@ scenarios:
           Fermix), and for the robot: Release for firmware update frees the USB
           port, the firmware's install guide is followed to install a compatible
           release, then Reconnect. Does not run or name a flashing command.
+
+  # StackChan is not part of Always On (the owner's decision). What rots is
+  # the voice reference's accessory section and the computers reference: on
+  # any Mac whose home is on the server, Pet and setup say "StackChan works
+  # only while Fermix runs on this Mac." and offer nothing to do; its setting
+  # waits on the Mac, so on the Mac the home moved from it works again after
+  # a move back. General knowledge would walk the owner through pairing it
+  # again or pointing it at the server. The floor is the Mac, which any
+  # answer names; the flashing tools stay forbidden in either polarity; the
+  # rubric owns the rest, stated as requirements a judge cannot invert.
+  - id: stackchan_while_the_home_is_on_a_server
+    title: "StackChan while Fermix runs on an Always On server"
+    severity: normal
+    risk: host_readonly
+    tags: [accessory, stackchan, always-on, self-knowledge]
+    cases:
+      - id: stackchan_after_the_move
+        query: >
+          I moved Fermix to my own server with Always On last week. Now Pet on
+          my Mac just says "StackChan works only while Fermix runs on this
+          Mac." and the StackChan switch is gone. How do I set my StackChan up
+          so it talks to Fermix on the server?
+        expect:
+          reply_matches: '(?i)\bmac\b'
+          reply_not_matches: '(?i)\b(esptool|idf\.py\s+flash|m5burner|espefuse)\b'
+          max_cost_usd: 1.2
+          max_duration_ms: 160000
+        rubric: |
+          1. Says StackChan does not work while Fermix runs on the server:
+             it is not part of Always On, and the robot works only while
+             Fermix runs on the Mac it is plugged into.
+          2. Says it works again after a move back to this Mac, its setting
+             and pairing having stayed on the Mac as they were.
+          3. Offers no setup for StackChan with the server: no pairing,
+             switch, port, cable or firmware step that would make it work
+             while the home stays on the server.
+      - id: stackchan_on_a_mac_that_joined
+        query: >
+          My Fermix lives on an Always On server and I added my second Mac to
+          it. I plugged my StackChan into that Mac, but Pet only says
+          "StackChan works only while Fermix runs on this Mac." Is there a
+          way to get it working there?
+        expect:
+          reply_matches: '(?i)\bmac\b'
+          reply_not_matches: '(?i)\b(esptool|idf\.py\s+flash|m5burner|espefuse)\b'
+          max_cost_usd: 1.2
+          max_duration_ms: 160000
+        rubric: |
+          1. Says StackChan does not work while the home runs on the server,
+             on this Mac or any other, since StackChan is not part of Always
+             On: it works only while Fermix runs on the Mac itself, as the
+             home's own computer.
+          2. Offers no setup for StackChan with the server: no pairing,
+             switch, port, cable or firmware step that would make it work
+             while the home stays on the server.

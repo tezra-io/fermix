@@ -642,7 +642,7 @@ defmodule FermixCore.Management.RouterTest do
         assert {:error, :invalid_params,
                 %{
                   "field" => "section",
-                  "sentence" => "StackChan works again once Fermix is back on this Mac."
+                  "sentence" => "StackChan works only while Fermix runs on this Mac."
                 }} = Router.route(v2(method, params), opts),
                method
       end

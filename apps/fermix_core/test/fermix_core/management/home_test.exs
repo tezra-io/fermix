@@ -595,8 +595,7 @@ defmodule FermixCore.Management.HomeTest do
                said,
                %{
                  "id" => "stackchan",
-                 "sentence" =>
-                   "StackChan works only while Fermix runs on the Mac it is plugged into."
+                 "sentence" => "StackChan works only while Fermix runs on this Mac."
                }
              ]
     end

@@ -10,14 +10,18 @@ defmodule FermixCore.Meetings do
 
     1. the subsystem is enabled;
     2. the caller is the owner on an attended, top-level turn;
-    3. the URL is a meeting URL this daemon can place;
-    4. the lane that URL needs is actually installed or configured, and
+    3. no move of this home is under way (`Home.Move.pending?/1`): the move
+       restarts this engine, which would end the meeting before its notes
+       are written, and it asks about a meeting only before it writes its
+       request;
+    4. the URL is a meeting URL this daemon can place;
+    5. the lane that URL needs is actually installed or configured, and
        Google Meet's is not on an Always On server (`meet_here/1`);
-    5. no other meeting is running (`@max_concurrent` is 1 — the notetaker has
+    6. no other meeting is running (`@max_concurrent` is 1 — the notetaker has
        one pair of ears);
-    6. only then is a row written and a Session started.
+    7. only then is a row written and a Session started.
 
-  Gate 5 is a read, so it cannot be the whole answer: the Session claims the one
+  Gate 6 is a read, so it cannot be the whole answer: the Session claims the one
   capacity slot in its own `init/1`, and a join that loses that race is refused
   with the same `{:max_concurrent, id}` this gate returns.
 
@@ -36,8 +40,8 @@ defmodule FermixCore.Meetings do
   meeting starts. Zoom needs no browser and joins there. Google Meet needs the
   notetaker signed in to Google, which needs a screen, and a profile signed in
   on another computer is never carried over (D24), so on an Always On server
-  Google Meet is unavailable, in one sentence (`meet_unavailable_sentence/0`)
-  every surface says. A meeting's rows and its folder under the workspace are
+  Google Meet is unavailable, in one sentence (`meet_unavailable_sentence/1`)
+  every surface says, which says Zoom works there only where Zoom is set up. A meeting's rows and its folder under the workspace are
   home data and move with the home, so its folder is read where this home
   keeps it (`list/1`, `get/2`). A move refuses to start while the notetaker
   is in a meeting (`in_progress/1`, `Home.MoveReadiness`).
@@ -46,6 +50,7 @@ defmodule FermixCore.Meetings do
   require Logger
 
   alias FermixCore.Home.AlwaysOn
+  alias FermixCore.Home.Move
   alias FermixCore.Meetings.Config
   alias FermixCore.Meetings.Link
   alias FermixCore.Meetings.RtmsSource
@@ -65,10 +70,14 @@ defmodule FermixCore.Meetings do
 
   @id_bytes 8
 
-  # M97 D24: what Google Meet says on an Always On server, on every surface.
-  @meet_unavailable_sentence "Google Meet is not available on your server yet: the notetaker " <>
-                               "needs a Google sign-in on a computer with a screen. Zoom " <>
-                               "meetings work on your server."
+  # M97 D24: what Google Meet says on an Always On server, on every surface,
+  # then what Zoom does there: it joins once its app is set up.
+  @meet_unavailable "Google Meet is not available on your server yet: the notetaker " <>
+                      "needs a Google sign-in on a computer with a screen."
+  @zoom_on_server %{
+    true => "Zoom meetings work on your server.",
+    false => "Zoom meetings work on your server once Zoom is set up."
+  }
 
   @type meeting :: Store.meeting()
 
@@ -79,6 +88,7 @@ defmodule FermixCore.Meetings do
           | :sidecar_not_installed
           | :meet_browser_not_installed
           | :meet_unavailable_on_server
+          | :move_under_way
           | :zoom_rtms_not_configured
           | {:max_concurrent, String.t()}
           | term()
@@ -111,9 +121,15 @@ defmodule FermixCore.Meetings do
       else: :ok
   end
 
-  @doc "What Google Meet says on an Always On server, on every surface that offers it."
-  @spec meet_unavailable_sentence() :: String.t()
-  def meet_unavailable_sentence, do: @meet_unavailable_sentence
+  @doc """
+  What Google Meet says on an Always On server, on every surface that offers
+  it, ending with what Zoom does there: `zoom?` is whether the Zoom app is
+  set up (`Config.rtms_configured?/0`, this engine's meetings settings, by
+  default).
+  """
+  @spec meet_unavailable_sentence(boolean()) :: String.t()
+  def meet_unavailable_sentence(zoom? \\ Config.rtms_configured?()) when is_boolean(zoom?),
+    do: @meet_unavailable <> " " <> Map.fetch!(@zoom_on_server, zoom?)
 
   @doc """
   Whether Google Meet needs the notetaker installed again on this computer:
@@ -152,6 +168,7 @@ defmodule FermixCore.Meetings do
 
     with :ok <- check_enabled(config),
          :ok <- check_operator(context),
+         :ok <- check_no_move(),
          {:ok, link} <- Link.parse(url),
          :ok <- check_lane(link.platform, config, opts),
          :ok <- check_capacity(),
@@ -273,6 +290,10 @@ defmodule FermixCore.Meetings do
 
   defp check_operator(context) do
     if Access.attended_operator_turn?(context), do: :ok, else: {:error, :operator_only}
+  end
+
+  defp check_no_move do
+    if Move.pending?(ConfigStore.fermix_home()), do: {:error, :move_under_way}, else: :ok
   end
 
   # Two halves, two reasons. The sidecar is the binary; the browser is what it

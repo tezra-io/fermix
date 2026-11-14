@@ -1962,6 +1962,45 @@ defmodule FermixCore.Setup.DoctorTest do
 
       assert %{browser_installed?: true, browser_note: nil} = Doctor.meetings_report()
     end
+
+    # M97 D24: an Always On server cannot run Google Meet, so it is never told
+    # to install the notetaker, its browser, or to sign the bot in: it is told
+    # Google Meet's sentence, which says what Zoom does there.
+    test "on an Always On server with no Zoom it names Google Meet's sentence, not a setup step" do
+      Application.put_env(:fermix_core, :meetings, enabled: true)
+      server = [always_on_server: true]
+      sentence = FermixCore.Meetings.meet_unavailable_sentence(false)
+
+      assert %{ready?: false, remedy: ^sentence, profile_note: ^sentence, browser_note: nil} =
+               Doctor.meetings_report(server)
+
+      refute sentence =~ "Zoom meetings work on your server."
+    end
+
+    test "on an Always On server a half-installed notetaker asks for nothing", ctx do
+      Application.put_env(:fermix_core, :meetings, enabled: true)
+      install_fake_meetbot_sidecar(ctx.home)
+      sentence = FermixCore.Meetings.meet_unavailable_sentence(false)
+
+      assert %{remedy: ^sentence, browser_note: nil, profile_note: ^sentence} =
+               Doctor.meetings_report(always_on_server: true)
+    end
+
+    test "on an Always On server with Zoom it is ready, and Google Meet says it works there" do
+      Application.put_env(:fermix_core, :meetings,
+        enabled: true,
+        zoom_account_id: "acct",
+        zoom_client_id: "client",
+        zoom_client_secret: "secret",
+        zoom_ws_subscription_id: "sub"
+      )
+
+      sentence = FermixCore.Meetings.meet_unavailable_sentence(true)
+      assert sentence =~ "Zoom meetings work on your server."
+
+      assert %{ready?: true, remedy: nil, profile_note: ^sentence} =
+               Doctor.meetings_report(always_on_server: true)
+    end
   end
 
   defp install_fake_stt_sidecar(home) do

@@ -809,38 +809,58 @@ defmodule FermixCore.Setup.Doctor do
   a Playwright browser to answer a doctor row is not a diagnostic, and the
   sidecar offers no cheaper identity call — so this reports installed state, not
   a live handshake.
+
+  On an Always On server (`Meetings.meet_here/1`, whose `:always_on_server`
+  seam `opts` may carry) Google Meet cannot run, so nothing tells it to
+  install the notetaker, its browser or to sign the bot in: the sign-in's
+  note, and the remedy where Zoom is not set up, are Google Meet's sentence
+  there (`Meetings.meet_unavailable_sentence/1`), with no browser note.
   """
   @spec meetings_report(keyword()) :: meetings_report()
-  def meetings_report(_opts \\ []) do
+  def meetings_report(opts \\ []) when is_list(opts) do
     config = MeetingsConfig.load()
 
     if config.enabled do
-      enabled_meetings_report(config)
+      enabled_meetings_report(config, Keyword.take(opts, [:always_on_server]))
     else
       %{status: :disabled}
     end
   end
 
-  defp enabled_meetings_report(config) do
+  defp enabled_meetings_report(config, here_opts) do
     installed? = MeetbotInstaller.installed?()
     browser_installed? = MeetbotInstaller.browser_installed?()
     rtms_configured? = MeetingsConfig.rtms_configured?(config)
     profile = meet_profile_state()
-    browser_note = meet_browser_note(installed?, browser_installed?)
+    lane = {installed?, browser_installed?, profile}
+    meet = meet_notes(Meetings.meet_here(here_opts), lane, rtms_configured?)
 
     %{
       status: :enabled,
-      ready?: Meetings.ready?(),
+      ready?: Meetings.ready?(here_opts),
       sidecar_installed?: installed?,
       browser_installed?: browser_installed?,
-      browser_note: browser_note,
+      browser_note: meet.browser,
       pinned_tag: MeetbotInstaller.pinned_tag(),
       profile: profile,
-      profile_note: meet_profile_note(profile),
+      profile_note: meet.profile,
       rtms_configured?: rtms_configured?,
-      remedy: meetings_remedy(browser_note, rtms_configured?)
+      remedy: meetings_remedy(meet, rtms_configured?)
     }
   end
+
+  # Where Google Meet runs, the notes say how far its lane got; on an Always On
+  # server, Google Meet's sentence (what Zoom does there, by whether it is set
+  # up) is the one note, and no step that cannot work is named.
+  defp meet_notes(:ok, {installed?, browser_installed?, profile}, _zoom?),
+    do: %{
+      here: true,
+      browser: meet_browser_note(installed?, browser_installed?),
+      profile: meet_profile_note(profile)
+    }
+
+  defp meet_notes({:error, :meet_unavailable_on_server}, _lane, zoom?),
+    do: %{here: false, browser: nil, profile: Meetings.meet_unavailable_sentence(zoom?)}
 
   # Only meaningful once the binary is present: the browser installs right after
   # it, so a missing browser on an installed sidecar is the state to name.
@@ -865,10 +885,13 @@ defmodule FermixCore.Setup.Doctor do
   # A meetbot release is pinned in this build, so the "no release at all" state is
   # unreachable; a host with no pinned artifact for its target surfaces the
   # installer's own error at enable time.
-  defp meetings_remedy(_browser_note, true), do: nil
-  defp meetings_remedy(browser_note, false) when is_binary(browser_note), do: browser_note
+  defp meetings_remedy(_meet, true), do: nil
+  defp meetings_remedy(%{here: false, profile: sentence}, false), do: sentence
 
-  defp meetings_remedy(nil, false) do
+  defp meetings_remedy(%{browser: browser_note}, false) when is_binary(browser_note),
+    do: browser_note
+
+  defp meetings_remedy(%{browser: nil}, false) do
     if Meetings.meet_lane_ready?(), do: nil, else: @meetings_no_lane
   end
 

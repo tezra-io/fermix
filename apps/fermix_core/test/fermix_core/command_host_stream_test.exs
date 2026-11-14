@@ -294,6 +294,41 @@ defmodule FermixCore.CommandHostStreamTest do
     assert {:error, {:executable_not_found, ^path}} = CommandRunner.start_stream(path, [])
   end
 
+  # The child is spawned through `/bin/sh`'s exec, which would start a run
+  # for any path that exists and then stream the shell's "Permission denied"
+  # and exit 126: a path that is not a file this user can run is refused as
+  # the stream starts, as a missing one is, and nothing is spawned.
+  test "start_stream refuses a file it cannot run, and a directory, before any spawn",
+       %{dir: dir} do
+    sup = start_host_sup()
+    plain = Path.join(dir, "not-executable")
+    File.write!(plain, "#!/bin/sh\necho ran\n")
+    File.chmod!(plain, 0o644)
+
+    assert {:error, {:executable_not_found, ^plain}} =
+             CommandRunner.start_stream(plain, [], dynamic_supervisor: sup)
+
+    assert {:error, {:executable_not_found, ^dir}} =
+             CommandRunner.start_stream(dir, [], dynamic_supervisor: sup)
+
+    assert DynamicSupervisor.which_children(sup) == []
+    refute_received {:command_host_data, _ref, _chunk}
+  end
+
+  test "start_stream runs an executable reached through a link", %{dir: dir} do
+    sup = start_host_sup()
+    script = Path.join(dir, "says-hi")
+    File.write!(script, "#!/bin/sh\necho hi\n")
+    File.chmod!(script, 0o755)
+    link = Path.join(dir, "says-hi-link")
+    File.ln_s!(script, link)
+
+    assert {:ok, %{host: host, ref: ref}} =
+             CommandRunner.start_stream(link, [], dynamic_supervisor: sup, timeout_ms: 30_000)
+
+    assert {"hi\n", {:ok, %{exit: 0}}} = collect_until_exit(host, ref)
+  end
+
   test "start_stream with an absent supervisor raises before any spawn", %{sh: sh, dir: dir} do
     marker = Path.join(dir, "spawned.marker")
 

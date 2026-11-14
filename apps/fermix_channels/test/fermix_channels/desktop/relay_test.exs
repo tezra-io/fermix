@@ -63,6 +63,28 @@ defmodule FermixChannels.Desktop.RelayTest do
     def command_source(key, opts \\ []), do: SecretWriterStub.command_source(key, opts)
   end
 
+  # A family of the primary that refuses each event it is handed with the
+  # next reason its Agent holds, which the session answers as `error{code}`.
+  defmodule RefusingFamily do
+    @moduledoc false
+    @behaviour FermixChannels.Desktop.Family
+
+    @impl true
+    def init(context), do: {:ok, Keyword.fetch!(context.options, :refusals)}
+
+    @impl true
+    def handle_event(_type, _fields, _payload, refusals) do
+      reason = Agent.get_and_update(refusals, fn [next | rest] -> {next, rest} end)
+      {:error, reason, refusals}
+    end
+
+    @impl true
+    def handle_info(_message, refusals), do: {:ok, refusals}
+
+    @impl true
+    def terminate(_reason, _refusals), do: :ok
+  end
+
   # A family of the primary, reporting each event the desktop sends it.
   defmodule CaptureFamily do
     @moduledoc false
@@ -831,6 +853,29 @@ defmodule FermixChannels.Desktop.RelayTest do
     relay = DesktopRail.start_relay!(root, primary)
     DesktopRail.await_connected(relay)
     assert :sys.get_state(relay).max_media_bytes == 67_108_864
+  end
+
+  # M97 §9.3: the server's refusal of an upload names no upload, so the ones
+  # only an upload is refused with go to this computer's uploads, which send
+  # one at a time; a refusal any event can draw (`invalid_field`,
+  # `missing_field`, `request_failed`) is never taken for the upload's.
+  test "only the refusals an upload alone draws go to the uploads" do
+    refusals =
+      start_supervised!(
+        {Agent,
+         fn -> [{:invalid_field, :path}, :missing_field, {:no_word, :here}, :unknown_upload] end}
+      )
+
+    primary = DesktopRail.primary!(families: %{computer: {RefusingFamily, refusals: refusals}})
+    root = DesktopRail.desktop_home!(primary)
+    relay = DesktopRail.start_relay!(root, primary, families: %{attach: self()})
+    DesktopRail.await_connected(relay)
+
+    for _refused <- 1..4,
+        do: :ok = Relay.send_event(relay, %{"t" => "link_path", "path" => "direct"})
+
+    assert_receive {:"$gen_cast", {:answer, "error", %{"code" => "unknown_upload"}}}, 10_000
+    refute_received {:"$gen_cast", {:answer, "error", %{"code" => _other}}}
   end
 
   describe "the move's forwarded calls" do

@@ -322,6 +322,17 @@ defmodule FermixCore.Home.MoveReadiness do
     do: []
 
   @doc """
+  Whether this home's settings (`settings/2`'s answer) set up the Zoom app a
+  server joins Zoom meetings with: all four of its values, the secret as the
+  reference the move carries, as the review's own item reads it. What Google
+  Meet's entry in what Always On does not do yet says the server joins
+  instead. False when the settings could not be read.
+  """
+  @spec zoom?({:ok, String.t()} | {:error, String.t()}) :: boolean()
+  def zoom?({:ok, text}) when is_binary(text), do: zoom_app?(text)
+  def zoom?({:error, sentence}) when is_binary(sentence), do: false
+
+  @doc """
   The `meeting_in_progress` item, while the notetaker is in a meeting
   (`Meetings.in_progress/1`, `opts`' `:meeting_holder` in its place): it
   blocks, naming the meeting, since the move restarts this engine, which
@@ -788,12 +799,12 @@ defmodule FermixCore.Home.MoveReadiness do
       end)
 
   defp zoom_moves(features, text, name) do
-    if :meetings in features and zoom?(text), do: "#{Copy.zoom_after_move(name)}.", else: ""
+    if :meetings in features and zoom_app?(text), do: "#{Copy.zoom_after_move(name)}.", else: ""
   end
 
   # All four of the Zoom app's values, the secret as the reference the move
   # carries (`MoveSecrets`): half an app could not join there either.
-  defp zoom?(text) do
+  defp zoom_app?(text) do
     Enum.all?(@zoom_keys, fn key ->
       case ConfigText.value(text, "fermix_core.meetings", key) do
         {:ok, raw} -> ConfigText.string(raw) not in [:error, {:ok, ""}]

@@ -43,9 +43,9 @@ A Meet link never takes the Zoom path and a Zoom link never takes the sidecar; a
 ## After a move to a server (Always On)
 
 - Meetings are the home's, so once Fermix moved to an Always On server the server runs them, awake whenever a meeting starts. The settings, the Zoom values (its secret included) and every meeting's notes move with the home; the Mac's own notetaker and its Google sign-in stay on the Mac.
-- **Zoom** keeps working on the server: RTMS needs no browser.
-- **Google Meet is not available on the server yet.** The notetaker needs a Google sign-in in a browser window, a server has no screen, and a sign-in made on the Mac is not carried over. A Meet link asked of the server, the notetaker's install there and its sign-in there each say so. A Linux computer with its own screen runs Google Meet as a Mac does.
-- The move's review names a meeting the notetaker is in and blocks until it ends or the owner asks Fermix to leave it, since the move would end it before its notes are written; a move back does the same.
+- **Zoom** keeps working on the server where its four values are set: RTMS needs no browser. A home with no Zoom app joins no meeting on the server until one is set up, and every sentence about Google Meet there says which.
+- **Google Meet is not available on the server yet.** The notetaker needs a Google sign-in in a browser window, a server has no screen, and a sign-in made on the Mac is not carried over. A Meet link asked of the server, the notetaker's install there, its sign-in there (the server's own setup page downloads nothing and opens no browser) and `fermix doctor` there each say so. A Linux computer with its own screen runs Google Meet as a Mac does.
+- The move's review names a meeting the notetaker is in and blocks until it ends or the owner asks Fermix to leave it, since the move would end it before its notes are written; a move back does the same. Once a move or a move back is under way, a meeting asked for is refused until it is done.
 - After a move back the Mac runs meetings again, Google Meet included, with the notetaker it kept. When the Fermix that comes back can no longer drive it, Move now's confirm says to install it again in Settings > Meetings.
 - `list_meetings` gives each meeting's folder where the home keeps it now, whichever computer held the meeting.
 
@@ -53,7 +53,8 @@ A Meet link never takes the Zoom path and a Zoom link never takes the sidecar; a
 
 | Refusal or notice | Fix |
 |---|---|
-| Google Meet is not available on your server yet | use Zoom there, or move Fermix back to the Mac for Google Meet |
+| Google Meet is not available on your server yet | use Zoom there (set its four values first where they are not), or move Fermix back to the Mac for Google Meet |
+| Fermix is moving to another computer right now | ask again once the move is done |
 | The notetaker is turned off | turn on **Meeting notetaker** (Mac) or enable the card |
 | The Meet sidecar is not installed | enabling installs it (Settings > Meetings, or the card's **Enable**) |
 | Installed but no browser to drive | run the install again from Settings > Meetings, or open the card's **Configure**, which installs the browser |

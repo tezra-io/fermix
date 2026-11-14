@@ -104,6 +104,21 @@ defmodule FermixChannels.Desktop.UploadsTest do
       assert MediaStore.attachment(ctx.store, "mac-att-big") == {:error, :unknown_attachment}
     end
 
+    # The server's store holds a file under the id already: its refusal names
+    # no upload, and reaches the one running.
+    test "a file under an id the server already holds is refused by the server", ctx do
+      first = attach!(ctx.inbox, "mac-att-dup", :binary.copy("a", 50_000), "one.pdf")
+      :ok = Uploads.take(ctx.uploads, first, self())
+      assert_receive {:upload_done, "mac-att-dup", :present}, @arrival_ms
+
+      second = attach!(ctx.inbox, "mac-att-dup", :binary.copy("b", 50_000), "two.pdf")
+      :ok = Uploads.take(ctx.uploads, second, self())
+      assert_receive {:upload_done, "mac-att-dup", {:error, sentence}}, @arrival_ms
+      assert sentence == "Fermix already has a file under this name. Attach it again."
+      assert {:ok, %{ref: ref}} = MediaStore.attachment(ctx.store, "mac-att-dup")
+      assert ref == sha256(:binary.copy("a", 50_000))
+    end
+
     test "a file that changed after the app announced it is refused before it is sent", ctx do
       attachment = %{
         attach!(ctx.inbox, "mac-att-3", @bytes, "notes.txt")
@@ -140,6 +155,43 @@ defmodule FermixChannels.Desktop.UploadsTest do
     refute_received {:sent, "attach_begin", %{"attach_id" => "mac-att-5"}}
   end
 
+  # Between the move back's drop and the server's restart into the move the
+  # link is still up: a file attached then is refused with the move's
+  # sentence and never sent, until a session comes up again.
+  test "after a move back drops the uploads, a new file is refused with its sentence until the " <>
+         "next session",
+       ctx do
+    relay = start_supervised!({QuietRelay, self()})
+    uploads = start_uploads!(ctx.inbox, relay)
+    why = "Fermix is moving back to this Mac. Attach it again once the move is done."
+    assert Uploads.drop_all(uploads, why) == :ok
+
+    :ok = Uploads.take(uploads, attach!(ctx.inbox, "mac-att-8", @bytes, "plan.pdf"), self())
+    assert_receive {:upload_done, "mac-att-8", {:error, sentence}}, @arrival_ms
+    assert sentence == "plan.pdf was not sent: " <> why
+    refute File.exists?(Path.join(ctx.inbox, "mac-att-8"))
+    _ = :sys.get_state(relay)
+    refute_received {:sent, _type, _fields}
+
+    :ok = Uploads.link_up(uploads)
+    :ok = Uploads.take(uploads, attach!(ctx.inbox, "mac-att-9", @bytes, "plan.pdf"), self())
+    assert_receive {:sent, "attach_begin", %{"attach_id" => "mac-att-9"}}, @arrival_ms
+  end
+
+  # The upload runs in a process linked to this one: it never outlives a
+  # restart or a shutdown of the uploads, so it cannot run beside the next.
+  test "an upload under way ends with the uploads' process", ctx do
+    relay = start_supervised!({QuietRelay, self()})
+    uploads = start_uploads!(ctx.inbox, relay, answer_ms: 60_000)
+    :ok = Uploads.take(uploads, attach!(ctx.inbox, "mac-att-10", @bytes, "c.pdf"), self())
+    assert_receive {:sent, "attach_begin", _fields}, @arrival_ms
+
+    %{running: %{pid: upload}} = :sys.get_state(uploads)
+    upload_ref = Process.monitor(upload)
+    :ok = stop_supervised(:uploads)
+    assert_receive {:DOWN, ^upload_ref, :process, ^upload, _reason}, @arrival_ms
+  end
+
   test "the session ending under an upload says the relay's sentence", ctx do
     relay = start_supervised!({QuietRelay, self()})
     uploads = start_uploads!(ctx.inbox, relay)
@@ -153,8 +205,8 @@ defmodule FermixChannels.Desktop.UploadsTest do
 
   # -- helpers ----------------------------------------------------------------------
 
-  defp start_uploads!(inbox, relay),
-    do: start_supervised!({Uploads, name: nil, dir: inbox, relay: relay}, id: :uploads)
+  defp start_uploads!(inbox, relay, more \\ []),
+    do: start_supervised!({Uploads, [name: nil, dir: inbox, relay: relay] ++ more}, id: :uploads)
 
   defp attach!(inbox, attach_id, bytes, name) do
     path = Path.join(inbox, attach_id)

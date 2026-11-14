@@ -83,6 +83,7 @@ defmodule FermixCore.Management.Copy do
   alias FermixCore.BuildInfo
   alias FermixCore.Clock
   alias FermixCore.Home.Disk
+  alias FermixCore.Management.Accessories
   alias FermixCore.Providers.Descriptor
   alias FermixCore.Setup.SecretPaths
 
@@ -828,16 +829,25 @@ defmodule FermixCore.Management.Copy do
   @doc """
   One entry of what Always On does not do yet (M97), by its id
   (`not_yet_ids/0`): one short sentence a screen lists, with the values it
-  names: `machine` ("Mac" or "computer") and `to`, the server's name, nil
-  where none is known. An entry another sentence already says is said in
-  that sentence's words: WhatsApp's starts the webhooks' sentence, and the
-  dev plugins' is the move review's own item (`dev_plugins_stay/2`).
+  names: `machine` ("Mac" or "computer"), `to`, the server's name, nil
+  where none is known, and `zoom`, whether the home's settings set up the
+  Zoom app the server joins with (Google Meet's entry then says the server
+  joins Zoom's meetings, and otherwise none until Zoom is set up). An entry
+  another sentence already says is said in that sentence's words:
+  WhatsApp's starts the webhooks' sentence, the dev plugins' is the move
+  review's own item (`dev_plugins_stay/2`), and StackChan's is what a Mac in
+  the device role says of it (`Management.Accessories.not_here_sentence/1`).
   """
   @spec not_yet(atom(), map()) :: String.t()
-  def not_yet(:google_meet, values) when is_map(values),
+  def not_yet(:google_meet, %{zoom: true}),
     do:
       "Google Meet needs the notetaker signed in on a computer with a screen, so your " <>
         "server joins only Zoom meetings."
+
+  def not_yet(:google_meet, values) when is_map(values),
+    do:
+      "Google Meet needs a computer with a screen, so your server joins no meetings until " <>
+        "Zoom is set up."
 
   def not_yet(:coding_signin, values) when is_map(values),
     do: "Installing and signing in Codex or Claude Code on your server takes a terminal there."
@@ -847,8 +857,7 @@ defmodule FermixCore.Management.Copy do
   def not_yet(:slack, values) when is_map(values),
     do: "Slack works on your server only in Socket Mode."
 
-  def not_yet(:stackchan, values) when is_map(values),
-    do: "StackChan works only while Fermix runs on the Mac it is plugged into."
+  def not_yet(:stackchan, values) when is_map(values), do: Accessories.not_here_sentence(:device)
 
   def not_yet(:dev_plugins, %{machine: machine} = values),
     do: dev_plugins_stay(machine, Map.get(values, :to) || "your server")

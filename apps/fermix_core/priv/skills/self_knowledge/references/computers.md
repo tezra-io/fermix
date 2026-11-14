@@ -333,8 +333,9 @@ computer."
   (Mac). It changes only at that computer: neither the server
   nor another computer writes it. StackChan is not part of Always On: while
   the home is on the server This Mac shows no StackChan switch, and
-  StackChan says "StackChan works again once Fermix is back on this Mac.";
-  its setting stays on the Mac as it was for a move back. Removing a computer and `/history off
+  StackChan says "StackChan works only while Fermix runs on this Mac." (on
+  a Mac that joined the home too); its setting stays on the Mac as it was,
+  so on the Mac the home moved from it works again after a move back. Removing a computer and `/history off
   <name>` still work from anywhere. The server can be `open` while a Mac
   stays `strict`: each machine's commands run under its own sandbox.
 - A stored sandbox variable belongs to the sandbox it is typed in: the
@@ -368,13 +369,14 @@ computer."
 The apps list, under "Not with Always On yet", one short sentence for each thing that does not work, or takes a
 terminal on the server, while the home runs there, and only what applies
 to this home (`summary.detail.not_yet`, `{id, sentence}` each): Google
-Meet meetings while meetings are on (the server joins only Zoom's: the
-notetaker needs a Google sign-in on a computer with a screen); installing
+Meet meetings while meetings are on (the notetaker needs a Google sign-in
+on a computer with a screen; the server joins only Zoom's where the home's
+Zoom app is set up, and no meeting until it is); installing
 and signing in Codex or Claude Code on the server, a terminal there, while
 coding agents are approved; WhatsApp while it is on (it needs a public
 address, the Tailscale Funnel command the linked computer's screen shows);
 Slack on without Socket Mode; StackChan while it is on, on a Mac (it works
-only while Fermix runs on the Mac it is plugged into); a dev plugin folder
+only while Fermix runs on this Mac); a dev plugin folder
 this computer's settings name (they stay here); and computer history on a
 computer with no history recorder (a Mac records it, and so does a Linux
 computer whose helper carries the recorder). The computer that

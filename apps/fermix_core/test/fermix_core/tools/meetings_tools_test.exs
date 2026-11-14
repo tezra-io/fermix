@@ -218,13 +218,34 @@ defmodule FermixCore.Tools.MeetingsToolsTest do
     end
 
     # M97 D24: only reachable on an Always On server, so the copy is asserted
-    # against the renderer directly. It says what does work there.
-    test "Google Meet on an Always On server says it is unavailable, and that Zoom works" do
+    # against the renderer directly. It says what does work there: Zoom, once
+    # its app is set up.
+    test "Google Meet on an Always On server says it is unavailable, and what Zoom does" do
+      meetings([enabled: true] ++ @rtms_credentials)
+
       assert JoinMeeting.describe_error(:meet_unavailable_on_server) ==
                "Google Meet is not available on your server yet: the notetaker needs a " <>
                  "Google sign-in on a computer with a screen. Zoom meetings work on your server."
 
+      meetings(enabled: true)
+
+      assert JoinMeeting.describe_error(:meet_unavailable_on_server) ==
+               "Google Meet is not available on your server yet: the notetaker needs a " <>
+                 "Google sign-in on a computer with a screen. Zoom meetings work on your " <>
+                 "server once Zoom is set up."
+
       assert Enum.any?(JoinMeeting.failure_modes(), &(&1.tag == "meet_unavailable_on_server"))
+    end
+
+    # A move restarts Fermix, which would end the meeting before its notes are
+    # written: the refusal says so and when to ask again.
+    test "a join while a move is under way says why and when to ask again" do
+      assert JoinMeeting.describe_error(:move_under_way) ==
+               "Fermix is moving to another computer right now, and the move restarts it, " <>
+                 "which would end the meeting before its notes are written. Ask me again " <>
+                 "once the move is done."
+
+      assert Enum.any?(JoinMeeting.failure_modes(), &(&1.tag == "move_under_way"))
     end
 
     test "an unknown refusal is reported, never swallowed" do

@@ -25,8 +25,7 @@ defmodule FermixCore.ComputerHistory do
   alias FermixCore.ComputerHistory.Spool
   alias FermixCore.Computers
   alias FermixCore.Computers.Switches
-  alias FermixCore.Home.Role
-  alias FermixCore.Home.ServerPrimary
+  alias FermixCore.Home.AlwaysOn
   alias FermixCore.Memory.Repo
   alias FermixCore.Setup.ConfigStore
 
@@ -46,34 +45,31 @@ defmodule FermixCore.ComputerHistory do
   Whether this system has a recorder (M97 §8.3, §8.8): the compux helper this
   release pairs with records on this system (`Compux.Protocol.history_systems/0`:
   a Mac, and a Linux computer through its accessibility bus), and this engine is
-  not an Always On server's, at which nobody sits (§19.2). Never this host's
-  platform alone. The fact a computer's recording is decided by, never whether
-  the home can surface history.
+  not an Always On server, at which nobody sits (§19.2), by the one rule
+  Google Meet asks too (`Home.AlwaysOn.here?/1`, which a tree-less verb reads
+  for its home and which fails closed: a server whose facts cannot be read
+  records nothing). Never this host's platform alone. The fact a computer's
+  recording is decided by, never whether the home can surface history.
 
-  `opts` (a test's seams): `:system` (`:macos`, `:linux` or `:other`),
-  `:history_systems` (the helper's systems), `:server?`.
+  `opts` (a test's seams): `:system` (`system/0`), `:history_systems` (the
+  helper's systems) and `:always_on` (`Home.AlwaysOn.here?/1`'s own seams).
   """
   @spec recorder?(keyword()) :: boolean()
   def recorder?(opts \\ []) when is_list(opts) do
     systems = Keyword.get_lazy(opts, :history_systems, &Compux.Protocol.history_systems/0)
 
     Keyword.get_lazy(opts, :system, &system/0) in systems and
-      not Keyword.get_lazy(opts, :server?, &server?/0)
+      not AlwaysOn.here?(Keyword.get(opts, :always_on, []))
   end
 
-  defp system do
+  @doc "This host's system as the recorder names it: `:macos`, `:linux` or `:other`."
+  @spec system() :: :macos | :linux | :other
+  def system do
     case :os.type() do
       {:unix, :darwin} -> :macos
       {:unix, :linux} -> :linux
       _other -> :other
     end
-  end
-
-  # An Always On server's primary (`Home.ServerPrimary`, the rule the settings
-  # sections use): a process that booted no engine is none.
-  defp server? do
-    match?(%{role: :primary}, Role.booted()) and
-      ServerPrimary.check(ConfigStore.fermix_home()) == :server
   end
 
   @doc """

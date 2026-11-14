@@ -129,6 +129,61 @@ scenarios:
              again on the server.
           5. Does not tell the owner to install every plugin again by hand.
 
+  # M97: the Always On screen lists what Always On does not do yet, only what
+  # applies to this home, in one sentence each (`summary.detail.not_yet`).
+  # What rots is the `computers` reference's list: Google Meet (the server
+  # joins only Zoom's where the home's Zoom app is set up, and none until
+  # it is) and StackChan on a Mac, beside Codex or Claude Code sign-ins,
+  # WhatsApp, Slack without Socket Mode, dev plugins and computer history
+  # with no recorder. General knowledge invents limits the list does not
+  # have. Each owner names their home, so the floor is the Google Meet they
+  # named; the rubric holds what the list says and that nothing outside it
+  # is added, stated so a judge cannot invert it.
+  - id: what_always_on_does_not_do_yet
+    title: "What Always On does not do yet, for the home the owner describes"
+    severity: normal
+    risk: host_readonly
+    tags: [home, always-on, self-knowledge]
+    cases:
+      - id: not_yet_with_zoom_set_up
+        query: >
+          Before I press Move now: Fermix's notetaker joins my Google Meet and
+          Zoom calls (the Zoom app is set up in Meetings), I talk to it on
+          Telegram and on Slack in Socket Mode, and my StackChan sits on my
+          Mac. What of that won't work with Always On yet?
+        expect:
+          reply_matches: '(?i)google\s*meet'
+          max_cost_usd: 1.2
+          max_duration_ms: 160000
+        rubric: |
+          1. Says Google Meet meetings do not work on the server, since the
+             notetaker needs a Google sign-in on a computer with a screen.
+          2. Says Zoom meetings carry on at the server, its Zoom app being
+             set up.
+          3. Says StackChan works only while Fermix runs on the Mac, so not
+             while the home is on the server.
+          4. Says Telegram and Slack in Socket Mode keep working on the
+             server.
+          5. Names no other limit as applying to this home: it does not say
+             reminders, memory, Telegram, Slack in Socket Mode or Zoom stop
+             on the server.
+      - id: not_yet_without_zoom
+        query: >
+          I only use Fermix's notetaker for Google Meet; I never set Zoom up.
+          If I move Fermix to my own server with Always On, will it still sit
+          in on my meetings?
+        expect:
+          reply_matches: '(?i)google\s*meet'
+          max_cost_usd: 1.2
+          max_duration_ms: 160000
+        rubric: |
+          1. Says the server does not join Google Meet meetings, since the
+             notetaker needs a Google sign-in on a computer with a screen.
+          2. Says the server joins no meetings at all until a Zoom app is
+             set up, and then only Zoom's.
+          3. Does not say the server joins the owner's Google Meet meetings,
+             or that the Mac's notetaker sign-in carries over to the server.
+
   # M97 §9.2, §9.3 (stage A): after a move the Mac's app still calls Fermix
   # and still attaches files in its chat. The call rides this Mac's Fermix
   # to the server, which runs the voice session on its own Talk to Fermix

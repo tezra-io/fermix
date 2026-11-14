@@ -111,6 +111,9 @@ defmodule FermixCore.CommandRunner do
   child's stdin open, as before. With it the child runs through `/bin/sh`'s
   `exec`, so a POSIX shell may add its own bookkeeping variables (`PWD`,
   `SHLVL`, `_`) to a replaced environment; it adds no value of the daemon's.
+  On every path, with `:input` or without, an executable that is no regular
+  file with an execute bit is refused as a missing one is,
+  `{:executable_not_found, path}`, before any spawn.
 
   `:stderr` is `:stdout` (the default: standard error is captured with standard
   output, as one stream) or `:discard` (standard error goes nowhere, so the
@@ -146,7 +149,7 @@ defmodule FermixCore.CommandRunner do
 
   defp run_command(executable, args, opts, limits) do
     cond do
-      not File.exists?(executable) ->
+      not runnable?(executable) ->
         {:error, {:executable_not_found, executable}}
 
       Keyword.get(opts, :supervised, true) ->
@@ -157,12 +160,13 @@ defmodule FermixCore.CommandRunner do
     end
   end
 
-  # The executable is checked before anything is written, so a missing one
-  # leaves no file behind and reports its own path, never the shell's.
+  # The executable is checked before anything is written, so a missing one,
+  # or one that cannot run, leaves no file behind and reports its own path,
+  # never the shell's (`runnable?/1`).
   defp run_with_input(executable, args, input, stderr, opts, limits) do
     script = if stderr == :discard, do: @input_script_quiet, else: @input_script
 
-    if File.exists?(executable) do
+    if runnable?(executable) do
       with_input_file(input, fn path ->
         run_command(@input_shell, ["-c", script, path, executable | args], opts, limits)
       end)
@@ -220,7 +224,10 @@ defmodule FermixCore.CommandRunner do
   Streaming is a second consumption configuration of the SAME supervised host,
   like `supervised:` is for `run/3`; all ownership/sweep semantics are inherited
   unchanged. Supervised-only: a missing supervisor **raises before any OS process
-  spawns** (like `run/3`). A missing executable is refused the same way as `run/3`.
+  spawns** (like `run/3`). A missing executable is refused the same way as `run/3`,
+  and so is one that is no regular file with an execute bit (a directory, a file
+  that may not run), since the shell below would otherwise start a run for it
+  that ends in its own "Permission denied": `{:executable_not_found, path}`.
 
   Stream opts extend the shared opts with `stream_to:` (default `self()`),
   `ack_window:` (default 64), and `pending_bytes_max:` (default 8 MB).
@@ -236,10 +243,25 @@ defmodule FermixCore.CommandRunner do
       when is_binary(executable) and is_list(args) and is_list(opts) do
     _mode = env_mode!(opts)
 
-    if File.exists?(executable) do
+    if runnable?(executable) do
       start_stream_supervised(executable, args, opts)
     else
       {:error, {:executable_not_found, executable}}
+    end
+  end
+
+  # The one check of an executable on every path (`run_command/4`, `:input`'s
+  # `run_with_input/6` and `start_stream/3`): a regular file with an execute
+  # bit, a link followed, what `Port.open/2` would spawn directly. Without it a
+  # path that exists but cannot run crashes a direct spawn, and starts the
+  # `/bin/sh` exec shell only to end in its own "Permission denied". One that
+  # goes after this check is the shell's exit 127, as any command that
+  # vanishes mid-run.
+  defp runnable?(executable) do
+    case File.stat(executable) do
+      {:ok, %File.Stat{type: :regular, mode: mode}} -> Bitwise.band(mode, 0o111) != 0
+      {:ok, %File.Stat{}} -> false
+      {:error, _absent_or_unreadable} -> false
     end
   end
 

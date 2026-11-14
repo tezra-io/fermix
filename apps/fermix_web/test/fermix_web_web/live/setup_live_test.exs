@@ -2648,6 +2648,14 @@ defmodule FermixWebWeb.SetupLiveTest do
     :ok = FermixCore.Meetings.SidecarInstaller.mark_browser_installed()
   end
 
+  # The page as it is served on an Always On server: Google Meet cannot run
+  # there (the `:meet_here` seam, `Meetings.meet_here/0`'s answer on one).
+  defp on_server do
+    previous = Application.get_env(:fermix_web, :meet_here)
+    on_exit(fn -> restore_env(:fermix_web, :meet_here, previous) end)
+    Application.put_env(:fermix_web, :meet_here, fn -> {:error, :meet_unavailable_on_server} end)
+  end
+
   describe "Meetings form (M21 phase 3)" do
     # A release is pinned, so enabling would download the meetbot binary; these
     # tests drive the UI, so default the seam to the fail-loud refusal (tests that
@@ -2840,6 +2848,59 @@ defmodule FermixWebWeb.SetupLiveTest do
 
       assert render(view) =~ "Meetings saved."
       refute_received :meetbot_install_ran
+    end
+
+    # M97 D24: the server's own setup page. Google Meet cannot run on an
+    # Always On server, so enabling meetings there downloads neither the
+    # notetaker nor its browser, and Sign in opens no browser on a machine
+    # with no screen: each says Google Meet's sentence instead.
+    test "on an Always On server enabling meetings installs nothing and says why",
+         %{conn: conn} do
+      parent = self()
+      on_server()
+
+      Application.put_env(:fermix_web, :meetbot_installer, fn ->
+        send(parent, :meetbot_install_ran)
+        {:ok, "/tmp/fermix-meetbot"}
+      end)
+
+      browser_installer = Application.get_env(:fermix_web, :meetbot_browser_installer)
+      on_exit(fn -> restore_env(:fermix_web, :meetbot_browser_installer, browser_installer) end)
+
+      Application.put_env(:fermix_web, :meetbot_browser_installer, fn ->
+        send(parent, :meetbot_browser_ran)
+        {:ok, :installed}
+      end)
+
+      {:ok, view, _html} = live(conn, "/setup")
+      open_meetings_config(view)
+
+      view
+      |> form("form[phx-submit=\"save_meetings\"]", meetings_form: %{enabled: "true"})
+      |> render_submit()
+
+      html = render(view)
+      assert html =~ escaped(FermixCore.Meetings.meet_unavailable_sentence(false))
+      refute_received :meetbot_install_ran
+      refute_received :meetbot_browser_ran
+    end
+
+    test "on an Always On server Sign in opens no browser and says why", %{conn: conn} do
+      parent = self()
+      on_server()
+      install_dev_local_meetbot(System.get_env("FERMIX_HOME"))
+
+      Application.put_env(:fermix_web, :meetbot_signin_runner, fn ->
+        send(parent, :meetbot_signin_ran)
+        {:ok, :signed_in}
+      end)
+
+      {:ok, view, _html} = live(conn, "/setup")
+      open_meetings_config(view)
+
+      html = render_click(view, "meetbot_signin", %{})
+      assert html =~ escaped(FermixCore.Meetings.meet_unavailable_sentence(false))
+      refute_received :meetbot_signin_ran
     end
 
     # The meetings tools are seeded at boot from `Meetings.ready?/0`, so a save
@@ -7607,7 +7668,7 @@ defmodule FermixWebWeb.SetupLiveTest do
       {:ok, view, _html} = accessories_page(conn, opts)
 
       assert view |> element("#accessories-sentence") |> render() =~
-               "StackChan works again once Fermix is back on this Mac."
+               "StackChan works only while Fermix runs on this Mac."
 
       refute has_element?(view, "#accessories-switch")
       refute has_element?(view, "#accessories-setup-link")
@@ -7836,7 +7897,7 @@ defmodule FermixWebWeb.SetupLiveTest do
       view = manage_page(conn, ctx, facts, overrides)
 
       assert view |> element("#accessories-sentence") |> render() =~
-               "StackChan works again once Fermix is back on this Mac."
+               "StackChan works only while Fermix runs on this Mac."
 
       refute has_element?(view, "#accessories-manage")
       refute has_element?(view, "#accessories-robots")

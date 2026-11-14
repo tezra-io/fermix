@@ -52,8 +52,8 @@ defmodule FermixCore.Management.AlwaysOn do
       restarts the engine. On a linked desktop moving back, the server it
       goes to is this desktop's own candidate: `home.move.start` is sent with
       `keep_as_desktop` false, refused only by the server's own blocks, and
-      the start is recorded in the return's record (`Home.Return`); before
-      it is sent, the app's call on the server and its uploads end, each
+      the start is recorded in the return's record (`Home.Return`); once the
+      server took it, the app's call on the server and its uploads end, each
       told why (`Home.Link`'s `end_for_return/0`, M97 §9.2, §9.3).
     * `move_back` (Always On's move back, its design §9): on a linked
       desktop, every check of this computer first
@@ -641,9 +641,10 @@ defmodule FermixCore.Management.AlwaysOn do
   # A move back: the server checks the passphrase against its own key and
   # refuses on its own blocks. Its start is kept before the request leaves
   # (`return_start_ahead/2`), since the server restarts into the move as it
-  # answers, and settled by the answer (`return_answered/3`). Before it
-  # leaves, what this computer carries to the server that the restart would
-  # cut ends cleanly (M97 §9.2, §9.3): the app's call and its uploads.
+  # answers, and settled by the answer (`return_answered/3`). Once the server
+  # took it, what this computer carries to the server that the restart cuts
+  # ends (M97 §9.2, §9.3): the app's call and its uploads. A move refused,
+  # never sent or unconfirmed leaves both as they were.
   defp forwarded_move(candidate_id, input, forward, opts) do
     params = %{
       "candidate_id" => candidate_id,
@@ -651,14 +652,17 @@ defmodule FermixCore.Management.AlwaysOn do
       "keep_as_desktop" => false
     }
 
-    with :ok <- return_start_ahead(candidate_id, opts),
-         :ok <- Keyword.get(opts, :end_for_return, fn -> Link.impl().end_for_return() end).() do
+    with :ok <- return_start_ahead(candidate_id, opts) do
       answer = forward.(server_request("home.move.start", params), [])
       _kept = return_answered(answer, home(opts), opts)
 
       case answer do
-        {:ok, %{"move_id" => move_id}} -> {:ok, %{"move_id" => move_id}}
-        {:error, _code, _details} = refused -> refused
+        {:ok, %{"move_id" => move_id}} ->
+          :ok = Keyword.get(opts, :end_for_return, fn -> Link.impl().end_for_return() end).()
+          {:ok, %{"move_id" => move_id}}
+
+        {:error, _code, _details} = refused ->
+          refused
       end
     end
   end

@@ -16,7 +16,10 @@ defmodule FermixCore.Management.Settings.Tools do
 
   `computer_history` is this machine's part of the history settings (M97 §4,
   a machine section in `Management.Placement`): whether it records, which
-  apps, and how its own sittings are summarized (read-only). The home's route
+  apps (on a Linux recorder, the row's info says an entry is the app's name
+  on the accessibility bus, matched exactly; `opts`' `:history_system` names
+  the recorder's system in a test), and how its own sittings are summarized
+  (read-only). The home's route
   and grants are in the home's `config.toml` and have no row, so a write here
   never reaches them. The switch's footer is the history promise
   (`ComputerHistory.Promise`), true on this machine: with or without a server.
@@ -24,17 +27,16 @@ defmodule FermixCore.Management.Settings.Tools do
   nobody sits at it (M97 §19.2).
   """
 
+  alias FermixCore.ComputerHistory
   alias FermixCore.ComputerHistory.Config, as: ComputerHistoryConfig
   alias FermixCore.ComputerHistory.Promise
   alias FermixCore.Harness.Vendors
-  alias FermixCore.Home.Role
-  alias FermixCore.Home.ServerPrimary
+  alias FermixCore.Home.AlwaysOn
   alias FermixCore.Management.Secrets
   alias FermixCore.Management.Settings.Row
   alias FermixCore.Management.Settings.Source
   alias FermixCore.Sandbox.Config, as: SandboxConfig
   alias FermixCore.Sandbox.ExternalEnv
-  alias FermixCore.Setup.ConfigStore
   alias FermixCore.Tools.Media.Registry, as: MediaRegistry
   alias FermixCore.Tools.PlaceSearch.Backend, as: PlaceBackend
   alias FermixCore.Tools.PlaceSearch.Config, as: PlaceConfig
@@ -115,8 +117,8 @@ defmodule FermixCore.Management.Settings.Tools do
 
   @doc """
   Every section this module owns here, in publication order: on an Always On
-  server's primary, none of the screen's (`server_primary?:` says which for
-  a test).
+  server (`Home.AlwaysOn.here?/1`), none of the screen's (`server_primary?:`
+  says which for a test, or `:always_on` hands that rule its facts).
   """
   @spec sections(keyword()) :: [%{id: String.t(), pane: String.t(), title: String.t()}]
   def sections(opts \\ []) when is_list(opts) do
@@ -175,6 +177,7 @@ defmodule FermixCore.Management.Settings.Tools do
       ),
       Row.new("computer_history_apps", :list, "Apps",
         footer: "Only these apps are watched.",
+        info: apps_info(Keyword.get_lazy(opts, :history_system, &ComputerHistory.system/0)),
         value: Source.strings(block, :apps),
         restart: restart
       ),
@@ -421,15 +424,26 @@ defmodule FermixCore.Management.Settings.Tools do
 
   defp image_label(backend), do: Map.get(@image_labels, backend, backend)
 
+  # On Linux an entry is the app's name on the accessibility bus, matched
+  # exactly (M97 stage 4, D1), which an app need not show anywhere; a Mac's
+  # entries are its bundle ids, which its app picks for the owner.
+  defp apps_info(:linux),
+    do:
+      "Each entry is an app's name on the accessibility bus, matched exactly, which can " <>
+        "differ from the name the app shows. /history status names the listed apps that " <>
+        "recorded nothing."
+
+  defp apps_info(system) when system in [:macos, :other], do: nil
+
   defp mode_option(mode),
     do: Row.option(word(mode), title(mode), hint: Map.fetch!(@sandbox_mode_hints, mode))
 
-  # An Always On server's primary (`Home.ServerPrimary`); an engine in any
-  # other role, or one that booted none, is not.
+  # An Always On server, by the rule computer history's recorder and Google
+  # Meet ask (`Home.AlwaysOn.here?/1`, `opts`' `:always_on` its seams), so a
+  # Linux computer that took the home back keeps its screen and history.
   defp server_primary?(opts) do
     Keyword.get_lazy(opts, :server_primary?, fn ->
-      match?(%{role: :primary}, Role.booted()) and
-        ServerPrimary.check(ConfigStore.fermix_home(), Keyword.take(opts, [:macos?])) == :server
+      AlwaysOn.here?(Keyword.get(opts, :always_on, []))
     end)
   end
 

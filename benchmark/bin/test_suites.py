@@ -723,6 +723,9 @@ def test_the_shipped_numbered_rubrics_parse():
                       # open_loops.yaml
                       "grant_overhead": 3, "contractor_choice": 3,
                       "mac_reminders_after_moving_to_a_server": 3,
+                      "not_yet_with_zoom_set_up": 5, "not_yet_without_zoom": 3,
+                      # accessory_voice.yaml
+                      "stackchan_after_the_move": 3, "stackchan_on_a_mac_that_joined": 2,
                       "fence_paint_route_sanity": 3,
                       "permit_forms_tomorrow_route_sanity": 3, "deadline_question": 2,
                       "colleague_visa": 2, "hypothetical_race": 2,

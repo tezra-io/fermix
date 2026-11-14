@@ -357,11 +357,18 @@ defmodule FermixCore.Management.DetectTest do
     # Meetings pane offers anything, in the sentence every surface says. What
     # is installed and signed in is still read as it is.
     test "on an Always On server Google Meet is unavailable, in the D24 sentence" do
-      for {installed?, signed_in?} <- [{true, true}, {false, nil}] do
+      for {installed?, signed_in?} <- [{true, true}, {false, nil}],
+          {zoom?, zoom_words} <- [
+            {true, "Zoom meetings work on your server."},
+            {false, "Zoom meetings work on your server once Zoom is set up."}
+          ] do
         probes =
           probes()
           |> Keyword.merge(meetbot_probes(installed?, installed?, signed_in?))
-          |> Keyword.merge(meet_here: fn -> {:error, :meet_unavailable_on_server} end)
+          |> Keyword.merge(
+            meet_here: fn -> {:error, :meet_unavailable_on_server} end,
+            meet_zoom: fn -> zoom? end
+          )
 
         assert %{"results" => [row]} = Detect.run(["meetbot"], probes: probes)
 
@@ -370,13 +377,12 @@ defmodule FermixCore.Management.DetectTest do
                  "present" => installed?,
                  "detail" =>
                    "Google Meet is not available on your server yet: the notetaker needs a " <>
-                     "Google sign-in on a computer with a screen. Zoom meetings work on your " <>
-                     "server.",
+                     "Google sign-in on a computer with a screen. " <> zoom_words,
                  "signed_in" => signed_in?,
                  "available" => false
                }
 
-        assert row["detail"] == FermixCore.Meetings.meet_unavailable_sentence()
+        assert row["detail"] == FermixCore.Meetings.meet_unavailable_sentence(zoom?)
       end
     end
   end

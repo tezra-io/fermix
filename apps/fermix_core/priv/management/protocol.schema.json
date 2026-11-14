@@ -2656,7 +2656,6 @@
         "else": { "not": { "anyOf": [{ "required": ["vendors"] }, { "required": ["guidance"] }] } }
       }, {
         "if": { "properties": { "target": { "const": "meetbot" } } },
-        "then": { "required": ["available"] },
         "else": { "not": { "required": ["available"] } }
       }]
     },

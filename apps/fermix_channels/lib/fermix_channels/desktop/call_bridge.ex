@@ -45,9 +45,23 @@ defmodule FermixChannels.Desktop.CallBridge do
   the resume), and the next session sends `call_open{resume: true}`, then
   the call's `client_hello` again if the server never answered it, then the
   controls past the one the server applied (`call_attached.control_seq`).
-  Past the 20 s, or once the server no longer knows this computer, the call
-  ends with a sentence and the connection closes. A server that finds the
-  link silent ends the call alone (D20), `link_too_slow`.
+  The 20 s run from the first drop until the server takes the call back: a
+  session that ends again before its `call_attached` keeps that window, so
+  a link that drops every few seconds cannot hold a call open. Past the
+  20 s, or once the server no longer knows this computer, the call ends with
+  a sentence and the connection closes. The window covers only a session
+  that closed: a server that finds the link silent ends the call alone
+  (D20), `link_too_slow`.
+
+  ## A move back
+
+  Once the server has taken a move back to this computer (`Relay.end_calls/3`)
+  the call is hung up (`call_stop`), so the server ends it cleanly and
+  settles it, and once its last frames are through the app hears
+  `This call ended: <why>`. The server restarts into the move as it answers
+  it, so a link that drops before the server's close ends the call at once
+  in those words; one already away ends it so too, and the server's window
+  ends it there.
 
   ## Bounds
 
@@ -128,16 +142,15 @@ defmodule FermixChannels.Desktop.CallBridge do
   def info(%__MODULE__{call: %{}} = bridge, {:relay_call_link, word, sentence}),
     do: link(bridge, word, sentence)
 
-  # A move back to this computer is starting (`Relay.end_calls/3`): the call
-  # is hung up, so the server ends it cleanly and settles it, and once its
-  # last frames are through the app hears why. With the link away the
+  # The server took a move back to this computer (`Relay.end_calls/3`): the
+  # call is hung up (moduledoc, *A move back*). With the link away the
   # server's window ends it there.
   def info(%__MODULE__{call: %{phase: :away}} = bridge, {:call_bridge_end, why}),
-    do: say_ended(bridge, why)
+    do: say_ended(bridge, move_ended(why))
 
   def info(%__MODULE__{call: %{}} = bridge, {:call_bridge_end, why}) do
     bridge = control(bridge, line("call_stop", %{}))
-    {:cont, %{bridge | call: %{bridge.call | ended_for: why}}}
+    {:cont, %{bridge | call: %{bridge.call | ended_for: move_ended(why)}}}
   end
 
   def info(%__MODULE__{call: %{id: id}} = bridge, {:relay_call_busy, id}) do
@@ -247,6 +260,10 @@ defmodule FermixChannels.Desktop.CallBridge do
       reason: "busy",
       sentence: "This computer already carries as many calls to your server as it can."
     }
+
+  # The server took a move back to this computer and restarts into it.
+  defp refusal({:returning, sentence}),
+    do: %{type: "error", reason: "server_unreachable", sentence: sentence}
 
   # -- up -----------------------------------------------------------------------
 
@@ -375,7 +392,17 @@ defmodule FermixChannels.Desktop.CallBridge do
 
   # -- the link -----------------------------------------------------------------
 
+  # A call hung up for a move back: the server restarts into the move as it
+  # answers it, so the link's drop is the call's end, in the move's words.
+  defp link(%{call: %{ended_for: why}} = bridge, :down, _sentence) when is_binary(why),
+    do: say_ended(bridge, why)
+
   defp link(%{call: %{phase: :away}} = bridge, :down, _sentence), do: {:cont, bridge}
+
+  # A drop before the server took the call back keeps the first drop's
+  # window: the server's runs from the session that closed.
+  defp link(%{call: %{window: token} = call} = bridge, :down, _sentence) when token != nil,
+    do: {:cont, %{bridge | call: %{call | phase: :away}}}
 
   defp link(%{call: call} = bridge, :down, _sentence) do
     token = make_ref()
@@ -406,6 +433,8 @@ defmodule FermixChannels.Desktop.CallBridge do
   end
 
   defp ended_error(sentence), do: %{type: "error", reason: "call_ended", sentence: sentence}
+
+  defp move_ended(why), do: "This call ended: " <> why
 
   defp forget(%{call: call} = bridge) do
     :ok = Relay.close_call(bridge.relay, call.id)

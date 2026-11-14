@@ -3887,7 +3887,10 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
       result = Checks.computer_history(recorder?: false)
       assert result.name == "computer history"
       assert result.status == :ok
-      assert result.detail =~ "no recorder on this system; a Mac or a Linux computer records"
+
+      assert result.detail ==
+               "no recorder on this computer: a Mac or a Linux computer records, and an " <>
+                 "Always On server records none"
     end
 
     # M97 stage 4, D3: compux never switches an application's accessibility on, so

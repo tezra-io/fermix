@@ -527,11 +527,11 @@ call. An app speaks to it exactly as above, but for these:
 
   | `reason` | When |
   |---|---|
-  | `server_unreachable` | `call_start` while the computer has no link to its server |
+  | `server_unreachable` | `call_start` while the computer has no link to its server, or once its server has taken a move back to this computer, until a session to it comes up again (its `sentence` says which) |
   | `desktop_revoked` | `call_start` once the server no longer knows this computer |
   | `server_too_old` | `call_start` on a server whose Fermix takes no call from a computer |
   | `busy` | `call_start` while this computer carries as many calls as it can |
-  | `call_ended` | the engine ended a call itself: the link did not come back within 20 s, the link was lost, the server no longer held the call, or a move back to this computer is starting (its `sentence` says which) |
+  | `call_ended` | the engine ended a call itself: the link did not come back within 20 s of its first drop, the link was lost, the server no longer held the call, the server's frames waited too long for the app, or the server has taken a move back to this computer (its `sentence` says which) |
 
   Every other `error` is the server's, as above. Talk to Fermix off on the
   server, or its key missing there, is `error{reason: "voice_off" | "no_key"}`

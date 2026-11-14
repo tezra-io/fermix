@@ -149,6 +149,25 @@ defmodule FermixCore.CommandRunnerTest do
       assert {:error, {:executable_not_found, ^path}} = CommandRunner.run(path, [], input: "x")
     end
 
+    # The child runs through `/bin/sh`'s exec, which would run for any path
+    # that exists and answer the shell's "Permission denied" with exit 126:
+    # a path that is not a file this user can run is refused by its own path,
+    # as a missing one is, before any input file is written.
+    test "a file it cannot run, and a directory, are refused by their own paths" do
+      dir = FermixTestSupport.SafeRm.make_tmp_dir!("command-runner-not-runnable")
+      on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(dir) end)
+      plain = Path.join(dir, "not-executable")
+      File.write!(plain, "#!/bin/sh\necho ran\n")
+      File.chmod!(plain, 0o644)
+
+      assert {:error, {:executable_not_found, ^plain}} = CommandRunner.run(plain, [], input: "x")
+      assert {:error, {:executable_not_found, ^dir}} = CommandRunner.run(dir, [], input: "x")
+
+      # The plain path, with no input, keeps the same rule: one check for all.
+      assert {:error, {:executable_not_found, ^plain}} = CommandRunner.run(plain, [])
+      assert {:error, {:executable_not_found, ^dir}} = CommandRunner.run(dir, [])
+    end
+
     test "a child that never reads still times out and is killed", %{sh: sh} do
       assert {:error, {:timeout, 300}} =
                CommandRunner.run(sh, ["-c", "sleep 5"], input: "ignored", timeout_ms: 300)

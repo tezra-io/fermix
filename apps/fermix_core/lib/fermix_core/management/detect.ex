@@ -22,7 +22,8 @@ defmodule FermixCore.Management.Detect do
   reads inside the notetaker's browser profile. Its row also says whether
   Google Meet can run on the machine that answers (`available`,
   `Meetings.meet_here/1`): not on an Always On server (M97 D24), whose row's
-  `detail` is then the sentence every surface says.
+  `detail` is then the sentence every surface says, with what Zoom does
+  there by whether its app is set up.
   """
 
   require Logger
@@ -32,6 +33,7 @@ defmodule FermixCore.Management.Detect do
   alias FermixCore.Harness.Vendors
   alias FermixCore.Home.Role
   alias FermixCore.Meetings
+  alias FermixCore.Meetings.Config, as: MeetingsConfig
   alias FermixCore.Meetings.SidecarInstaller
   alias FermixCore.Providers.ModelListing
   alias FermixCore.Providers.PrimaryConfig
@@ -121,7 +123,7 @@ defmodule FermixCore.Management.Detect do
     %{
       "target" => "meetbot",
       "present" => present?,
-      "detail" => meetbot_detail(available?, signed_in?),
+      "detail" => meetbot_detail(available?, signed_in?, opts),
       "signed_in" => signed_in?,
       "available" => available?
     }
@@ -273,11 +275,17 @@ defmodule FermixCore.Management.Detect do
   defp meet_available?(:ok), do: true
   defp meet_available?({:error, :meet_unavailable_on_server}), do: false
 
-  # Where Google Meet cannot run, the detail says so rather than the sign-in.
-  defp meetbot_detail(false, _signed_in?), do: Meetings.meet_unavailable_sentence()
-  defp meetbot_detail(true, nil), do: nil
-  defp meetbot_detail(true, true), do: "Signed in to Google"
-  defp meetbot_detail(true, false), do: "Not signed in to Google"
+  # Where Google Meet cannot run, the detail says so rather than the sign-in,
+  # with what Zoom does there by whether its app is set up (`:meet_zoom`).
+  defp meetbot_detail(false, _signed_in?, opts),
+    do:
+      Meetings.meet_unavailable_sentence(
+        source(opts, :meet_zoom, &MeetingsConfig.rtms_configured?/0)
+      )
+
+  defp meetbot_detail(true, nil, _opts), do: nil
+  defp meetbot_detail(true, true, _opts), do: "Signed in to Google"
+  defp meetbot_detail(true, false, _opts), do: "Not signed in to Google"
 
   defp source(opts, key, default) when is_atom(key) do
     opts |> Keyword.get(:probes, []) |> Keyword.get(key, default) |> then(& &1.())

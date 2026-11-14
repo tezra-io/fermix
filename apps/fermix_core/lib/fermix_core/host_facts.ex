@@ -3,7 +3,8 @@ defmodule FermixCore.HostFacts do
   Which Fermix this is and the machine it runs on, read once as the daemon's
   supervision tree starts (M76 §4.1) for the owner's `## This Fermix` prompt
   section, so "how do I…" is answered for the install the person has rather
-  than guessed. A CLI verb that starts no tree never reads it.
+  than guessed. A CLI verb that starts no tree reads them only where it asks
+  whether this is an Always On server (`read_here/0`).
 
   It re-derives nothing another module owns: the install is the profile boot
   selected (`BootProfile.current/0`), the operating system is
@@ -78,10 +79,18 @@ defmodule FermixCore.HostFacts do
   as the supervision tree starts, after `BootProfile.remember/1`.
   """
   @spec remember() :: :ok
-  def remember do
+  def remember, do: Application.put_env(:fermix_core, :host_facts, read_here())
+
+  @doc """
+  Reads this host's facts now, through the configured reader, as `remember/0`
+  does at boot: for a process that booted no engine and so recorded none (a
+  tree-less verb asking `Home.AlwaysOn.here?/1`). Needs the boot profile,
+  which every start of the application records first.
+  """
+  @spec read_here() :: t()
+  def read_here do
     reader = Application.get_env(:fermix_core, :host_facts_reader, __MODULE__)
-    facts = reader.read(BootProfile.host(), BuildInfo.identity().architecture)
-    Application.put_env(:fermix_core, :host_facts, facts)
+    reader.read(BootProfile.host(), BuildInfo.identity().architecture)
   end
 
   @doc """

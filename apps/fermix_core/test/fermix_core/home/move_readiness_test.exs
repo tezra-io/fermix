@@ -943,6 +943,29 @@ defmodule FermixCore.Home.MoveReadinessTest do
              ]
     end
 
+    # Google Meet's entry says what the server joins instead, so it reads the
+    # Zoom app the review's own item reads: all four of its values.
+    test "says whether the settings set up the Zoom app the server joins with" do
+      zoom =
+        {:ok,
+         """
+         [fermix_core.meetings]
+         enabled = true
+         zoom_account_id = "acct-invented"
+         zoom_client_id = "client-invented"
+         zoom_client_secret = "@keyring"
+         zoom_ws_subscription_id = "sub-invented"
+         """}
+
+      half =
+        {:ok, "[fermix_core.meetings]\nenabled = true\nzoom_account_id = \"acct-invented\"\n"}
+
+      assert MoveReadiness.zoom?(zoom)
+      refute MoveReadiness.zoom?(half)
+      refute MoveReadiness.zoom?({:ok, ""})
+      refute MoveReadiness.zoom?({:error, "The settings file could not be read."})
+    end
+
     test "names StackChan only on a Mac, and the dev plugins this computer's settings name" do
       settings =
         {:ok,

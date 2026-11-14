@@ -119,7 +119,7 @@ defmodule FermixChannels.Desktop.TwoEnginesVoiceTest do
       id: :voice_bridge
     )
 
-    Map.merge(server, %{primary: primary, relay: relay, socket: socket})
+    Map.merge(server, %{primary: primary, relay: relay, socket: socket, tasks: tasks})
   end
 
   test "a call from the app runs on the server as computer:<id>, its audio both ways, and " <>
@@ -195,17 +195,23 @@ defmodule FermixChannels.Desktop.TwoEnginesVoiceTest do
   # M97 §9.2, the move back: the call bridged at that moment ends cleanly
   # before the role switch, hung up so the server settles it, the app told
   # why, and the lease free for the home the computer becomes.
-  test "a move back ends the bridged call cleanly before it starts", ctx do
+  test "a move back ends the bridged call cleanly before the role switch", ctx do
     app = hello!(ctx.socket)
     {voice, _opts} = call_up!(app)
     voice_ref = Process.monitor(voice)
-    why = "This call ended: Fermix is moving back to this Mac. Call again once the move is done."
+    why = "Fermix is moving back to this Mac. Call again once the move is done."
 
     ending = Task.async(fn -> Relay.end_calls(ctx.relay, why) end)
 
     assert_receive {:voice, ^voice, :call_stop}, @arrival_ms
     assert recv!(app) == %{"type" => "state", "state" => "idle"}
-    assert recv!(app) == %{"type" => "error", "reason" => "call_ended", "sentence" => why}
+
+    assert recv!(app) == %{
+             "type" => "error",
+             "reason" => "call_ended",
+             "sentence" => "This call ended: " <> why
+           }
+
     assert {:error, :closed} = :gen_tcp.recv(app, 0, @arrival_ms)
 
     assert Task.await(ending, @arrival_ms) == :ok
@@ -214,6 +220,70 @@ defmodule FermixChannels.Desktop.TwoEnginesVoiceTest do
 
     # With no call left, a second ask answers at once.
     assert Relay.end_calls(ctx.relay, why) == :ok
+  end
+
+  # Between the hang-up and the server's restart into the move the link is
+  # still up: a call started then is refused with the move's sentence, until
+  # a session to a server that serves this computer comes up again.
+  test "after a move back hangs up, a new call is refused with its sentence until the next " <>
+         "session",
+       ctx do
+    why = "Fermix is moving back to this Mac. Call again once the move is done."
+    assert Relay.end_calls(ctx.relay, why) == :ok
+
+    app = hello!(ctx.socket)
+    send_line(app, %{type: "call_start"})
+    assert recv!(app) == %{"type" => "error", "reason" => "server_unreachable", "sentence" => why}
+    assert {:error, :closed} = :gen_tcp.recv(app, 0, @arrival_ms)
+    refute_received {:voice_started, _voice, _opts}
+
+    :ok = drop_session!(ctx.primary)
+    :ok = reconnect!(ctx.relay)
+    assert {_voice, _opts} = call_up!(hello!(ctx.socket))
+  end
+
+  # A bridge that dies (a crash or a kill, so `close/1` never runs) while the
+  # link and the server's session stay up: its call ends on the server as the
+  # app's hang-up would, so no billed session outlives it, and the home's
+  # call is free for the next.
+  test "a bridge that dies mid-call ends its call on the server, and the next call is taken",
+       ctx do
+    app = hello!(ctx.socket)
+    {voice, _opts} = call_up!(app)
+    voice_ref = Process.monitor(voice)
+
+    [handler] = Task.Supervisor.children(ctx.tasks)
+    handler_ref = Process.monitor(handler)
+    Process.exit(handler, :kill)
+    assert_receive {:DOWN, ^handler_ref, :process, ^handler, _reason}, @arrival_ms
+
+    assert_receive {:voice, ^voice, :call_stop}, @arrival_ms
+    assert_receive {:DOWN, ^voice_ref, :process, ^voice, _reason}, @arrival_ms
+    assert CallLease.holder(ctx.lease) == :none
+
+    {second, _opts} = call_up!(hello!(ctx.socket))
+    refute second == voice
+  end
+
+  # The server's lines wait in a call's bridge as its audio does, at most 64
+  # messages: a bridge that leaves more unread ends its call, its close sent
+  # to the server, and is told the link is too busy for it.
+  test "a bridge that leaves 64 of the server's frames unread ends its call there", ctx do
+    test = self()
+    stalled = start_supervised!({Task, fn -> stalled_bridge(ctx.relay, test) end}, id: :stalled)
+    assert_receive {:voice_started, voice, _opts}, @arrival_ms
+    voice_ref = Process.monitor(voice)
+
+    for _line <- 1..80, do: send(voice, {:push, %{type: "state", state: "thinking"}})
+
+    assert_receive {:voice, ^voice, :call_stop}, @arrival_ms
+    assert_receive {:DOWN, ^voice_ref, :process, ^voice, _reason}, @arrival_ms
+    assert CallLease.holder(ctx.lease) == :none
+
+    send(stalled, :release)
+    assert_receive {:stalled_mailbox, mailbox}, @arrival_ms
+    assert {:relay_call_busy, "call-stalled"} in mailbox
+    assert Enum.count(mailbox, &match?({:relay_call, _type, _fields, _tail}, &1)) <= 64
   end
 
   # -- the server's call path --------------------------------------------------------
@@ -282,6 +352,31 @@ defmodule FermixChannels.Desktop.TwoEnginesVoiceTest do
     send(Process.whereis(relay), Process.delete({__MODULE__, :reconnect}))
     DesktopRail.await_connected(relay)
     :ok
+  end
+
+  # A bridge that opens its call on the server as `CallBridge` does, then
+  # reads nothing more until it is released, when it hands the test all it
+  # was sent.
+  defp stalled_bridge(relay, test) do
+    call_id = "call-stalled"
+    {:ok, _window} = Relay.open_call(relay, call_id)
+    hello = Jason.encode!(%{"type" => "client_hello", "protocol_version" => 3})
+    start = Jason.encode!(%{"type" => "call_start"})
+    :ok = Relay.send_call(relay, call_id, "call_open", %{"resume" => false}, <<>>)
+    :ok = Relay.send_call(relay, call_id, "call_line", %{}, hello)
+    :ok = Relay.send_call(relay, call_id, "call_line", %{"control_seq" => 1}, start)
+
+    receive do
+      :release -> send(test, {:stalled_mailbox, drain([])})
+    end
+  end
+
+  defp drain(seen) do
+    receive do
+      message -> drain([message | seen])
+    after
+      0 -> Enum.reverse(seen)
+    end
   end
 
   # -- the app -----------------------------------------------------------------------

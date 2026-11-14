@@ -1139,7 +1139,8 @@ defmodule FermixCore.Management.ProtocolContractTest do
 
   # M97 D24: the notetaker row an Always On server answers says Google Meet
   # cannot run there before the Meetings pane offers anything; the golden is
-  # the server's own row for a notetaker it never installed.
+  # the server's own row for a notetaker it never installed, its Zoom app set
+  # up.
   test "the golden server notetaker row is the one the server answers" do
     request = %{
       request_id: "req-1",
@@ -1152,11 +1153,32 @@ defmodule FermixCore.Management.ProtocolContractTest do
       meetbot_installed: fn -> false end,
       meetbot_browser_installed: fn -> flunk("the browser was read with no sidecar") end,
       meetbot_signed_in: fn -> flunk("the sign-in was read with no sidecar") end,
-      meet_here: fn -> {:error, :meet_unavailable_on_server} end
+      meet_here: fn -> {:error, :meet_unavailable_on_server} end,
+      meet_zoom: fn -> true end
     ]
 
     assert {:ok, result} = Router.route(request, operation_opts: [probes: probes])
     assert named_fixture_result("setup_detect_server") == json(result)
+  end
+
+  # `available` came after setup.detect, with no method minimum of its own:
+  # an older engine's notetaker row has none, which a newer app reads as
+  # available. So the schema lets the notetaker's row leave it out, and still
+  # keeps it off every other row.
+  test "a notetaker row may leave available out, and no other row carries it", %{
+    schema: schema
+  } do
+    result = schema["$defs"]["detectResult"]
+    refute "available" in result["required"]
+
+    meetbot =
+      Enum.find(
+        result["allOf"],
+        &(get_in(&1, ["if", "properties", "target", "const"]) == "meetbot")
+      )
+
+    refute "available" in (get_in(meetbot, ["then", "required"]) || [])
+    assert meetbot["else"] == %{"not" => %{"required" => ["available"]}}
   end
 
   # M97 D28: a computer linked to its server lists the server's jobs, then the

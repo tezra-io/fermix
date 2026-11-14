@@ -1508,12 +1508,27 @@ defmodule FermixCore.Management.CopyTest do
 
       for id <- Copy.not_yet_ids(),
           machine <- ["Mac", "computer"],
-          to <- [nil, "garden-server"] do
-        said = Copy.not_yet(id, %{machine: machine, to: to})
+          to <- [nil, "garden-server"],
+          zoom <- [true, false] do
+        said = Copy.not_yet(id, %{machine: machine, to: to, zoom: zoom})
         assert_owner_words(said, :prose, ["garden-server"], "not yet #{id}")
         words = said |> String.split(~r/\s+/, trim: true) |> length()
         assert words <= Copy.word_bound(), "not yet #{id}: #{words} words in #{inspect(said)}"
       end
+    end
+
+    # Google Meet's entry says what the server joins instead, true of this
+    # home: Zoom's meetings only where a Zoom app is set up, else none.
+    test "Google Meet's entry says the server joins Zoom's meetings only where Zoom is set up" do
+      assert Copy.not_yet(:google_meet, %{zoom: true}) ==
+               "Google Meet needs the notetaker signed in on a computer with a screen, so your " <>
+                 "server joins only Zoom meetings."
+
+      assert Copy.not_yet(:google_meet, %{zoom: false}) ==
+               "Google Meet needs a computer with a screen, so your server joins no meetings " <>
+                 "until Zoom is set up."
+
+      assert Copy.not_yet(:google_meet, %{}) == Copy.not_yet(:google_meet, %{zoom: false})
     end
 
     # Never two wordings of one fact: WhatsApp's entry is the sentence the
@@ -1528,6 +1543,14 @@ defmodule FermixCore.Management.CopyTest do
 
       assert Copy.not_yet(:dev_plugins, %{machine: "computer", to: nil}) ==
                "Dev plugins stay on this computer: your server runs none of them."
+
+      # StackChan's is the sentence every Mac in the device role is told,
+      # one that never held the home included.
+      assert Copy.not_yet(:stackchan, %{machine: "Mac", to: nil}) ==
+               Accessories.not_here_sentence(:device)
+
+      assert Accessories.not_here_sentence(:device) ==
+               "StackChan works only while Fermix runs on this Mac."
     end
 
     test "every key and every action answers its words" do

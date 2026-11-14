@@ -157,7 +157,10 @@ defmodule FermixChannels.Desktop.CallBridgeTest do
             {{:error, {:revoked, "The server garden server does not know this computer."}},
              "desktop_revoked"},
             {{:error, :not_taken}, "server_too_old"},
-            {{:error, :busy}, "busy"}
+            {{:error, :busy}, "busy"},
+            {{:error,
+              {:returning, "Fermix is moving back to this Mac. Call again once the move is done."}},
+             "server_unreachable"}
           ] do
         relay = start_relay!(answer)
         assert {:stop, _bridge} = CallBridge.event(open!(relay, 3), event("call_start"))
@@ -226,6 +229,27 @@ defmodule FermixChannels.Desktop.CallBridgeTest do
       assert {:cont, _bridge} = CallBridge.info(bridge, {:call_bridge_window, make_ref()})
     end
 
+    # The server's window runs from the session that closed: a link that
+    # flaps before the server took the call back keeps the first drop's
+    # window, so a link that drops under 20 s each time cannot hold a call
+    # open for ever.
+    test "a drop before the server took the call back keeps the first drop's window", ctx do
+      bridge = call_up!(ctx.relay, schedule: fn message, _ms -> send(self(), message) end)
+      {:cont, bridge} = CallBridge.info(bridge, {:relay_call_link, :down, "gone"})
+      assert_received {:call_bridge_window, token} = window
+      assert bridge.call.window == token
+
+      {:cont, bridge} = CallBridge.info(bridge, {:relay_call_link, :up, nil})
+      assert_receive {:up, "call_open", %{"resume" => true}, <<>>}
+      {:cont, bridge} = CallBridge.info(bridge, {:relay_call_link, :down, "gone again"})
+
+      refute_received {:call_bridge_window, _token}
+      assert %{phase: :away, window: ^token} = bridge.call
+      assert {:stop, _bridge} = CallBridge.info(bridge, window)
+      assert_received {:app_event, %{type: "error", reason: "call_ended", sentence: sentence}}
+      assert sentence =~ "garden server"
+    end
+
     test "past the server's window the call ends with a sentence", ctx do
       bridge = call_up!(ctx.relay, schedule: fn message, _ms -> send(self(), message) end)
       {:cont, bridge} = CallBridge.info(bridge, {:relay_call_link, :down, "gone"})
@@ -245,11 +269,11 @@ defmodule FermixChannels.Desktop.CallBridgeTest do
     end
   end
 
-  # M97 §9.2: before a move back to this computer the call ends cleanly: it
-  # is hung up, so the server settles it, and the app hears why.
+  # M97 §9.2: once the server took a move back to this computer the call ends
+  # cleanly: it is hung up, so the server settles it, and the app hears why.
   test "a move back hangs the call up, then tells the app why", ctx do
     bridge = call_up!(ctx.relay)
-    why = "This call ended: Fermix is moving back to this Mac. Call again once the move is done."
+    why = "Fermix is moving back to this Mac. Call again once the move is done."
     {:cont, bridge} = CallBridge.info(bridge, {:call_bridge_end, why})
     assert_receive {:up, "call_line", %{"control_seq" => 2}, stop}
     assert Jason.decode!(stop) == %{"type" => "call_stop"}
@@ -257,7 +281,25 @@ defmodule FermixChannels.Desktop.CallBridgeTest do
     {:cont, bridge} = down(bridge, "call_line", ~s({"type":"state","state":"idle"}))
     assert_received {:app, ~s({"type":"state","state":"idle"})}
     assert {:stop, _bridge} = down(bridge, "call_close", <<>>, %{"reason" => "ended"})
-    assert_received {:app_event, %{type: "error", reason: "call_ended", sentence: ^why}}
+    said = "This call ended: " <> why
+    assert_received {:app_event, %{type: "error", reason: "call_ended", sentence: ^said}}
+  end
+
+  # The server restarts into the move as it answers it, so the hang-up may
+  # find no server: the link's drop ends the call at once, in the move's
+  # words, never after the window in the words of a lost link.
+  test "a move back whose link drops before the server's close says the move's sentence at once",
+       ctx do
+    bridge = call_up!(ctx.relay, schedule: fn message, _ms -> send(self(), message) end)
+    why = "Fermix is moving back to this Mac. Call again once the move is done."
+    {:cont, bridge} = CallBridge.info(bridge, {:call_bridge_end, why})
+    assert_receive {:up, "call_line", %{"control_seq" => 2}, _stop}
+
+    assert {:stop, _bridge} = CallBridge.info(bridge, {:relay_call_link, :down, "gone"})
+    said = "This call ended: " <> why
+    assert_received {:app_event, %{type: "error", reason: "call_ended", sentence: ^said}}
+    assert_receive {:closed, "call-1"}
+    refute_received {:call_bridge_window, _token}
   end
 
   # -- helpers ----------------------------------------------------------------------

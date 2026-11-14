@@ -71,10 +71,12 @@ defmodule FermixCore.Management.Accessories do
   # -- sentences -------------------------------------------------------------------
 
   @off_sentence "StackChan is off."
-  # Why StackChan does not run on this engine, by where it runs: a Mac whose
-  # home is on its server, a Mac waiting for a move to it, any other computer.
+  # Why StackChan does not run on this engine, by where it runs: a Mac in the
+  # device role (whose home is on its server, whether or not it ever held the
+  # home, which is also what Always On does not do yet says), a Mac waiting
+  # for a move to it, any other computer.
   @not_here_sentences %{
-    device: "StackChan works again once Fermix is back on this Mac.",
+    device: "StackChan works only while Fermix runs on this Mac.",
     candidate: "StackChan works once Fermix has moved to this Mac.",
     not_mac: "StackChan works only on a Mac."
   }
@@ -222,7 +224,9 @@ defmodule FermixCore.Management.Accessories do
 
   @doc """
   Why StackChan does not run on this engine, in the owner's words: on a Mac
-  whose home is on its server (`:device`), on a Mac waiting for a move to it
+  whose home is on its server (`:device`, true of one that never held the
+  home too, and the words of StackChan's entry in what Always On does not do
+  yet, `Management.Copy.not_yet/2`), on a Mac waiting for a move to it
   (`:candidate`), on any computer that is not a Mac (`:not_mac`). The status
   says it and every refusal for that reason, This computer's refusal of its
   StackChan section (`Management.ComputerSettings`) among them.

@@ -40,6 +40,7 @@ defmodule FermixCore.MeetingsTest do
   # process-wide meetings registry.
   use ExUnit.Case, async: false
 
+  alias FermixCore.Home.Move
   alias FermixCore.Meetings
   alias FermixCore.Meetings.Session
   alias FermixCore.Meetings.SidecarInstaller
@@ -111,6 +112,26 @@ defmodule FermixCore.MeetingsTest do
                join(@zoom_url, repo, %{source_trust: :operator, computer_use_origin: :unattended})
     end
 
+    # M97: a move restarts this engine, which would end a meeting before its
+    # notes are written, and the move asks about a meeting only before it
+    # writes its request: a join that lands after it is refused here.
+    test "2b. refuses while a move of the home is under way", %{repo: repo} do
+      put_meetings(enabled: true, zoom: :configured)
+      home = System.get_env("FERMIX_HOME")
+      File.mkdir_p!(Move.dir(home))
+
+      :ok = Move.put_phase(home, "requested", %{}, @created_at)
+      assert {:error, :move_under_way} = join(@zoom_url, repo)
+
+      :ok = Move.put_phase(home, "streaming", %{}, @created_at)
+      assert {:error, :move_under_way} = join(@zoom_url, repo)
+
+      :ok = Move.put_phase(home, "aborted", %{"sentence" => "It was undone."}, @created_at)
+      assert {:ok, %{id: id}} = join(@zoom_url, repo)
+      {:ok, session} = lookup(id)
+      stop_session(session)
+    end
+
     test "3. refuses a URL it cannot place", %{repo: repo} do
       assert {:error, :unrecognized_meeting_url} = join("https://example.com/standup", repo)
 
@@ -165,6 +186,21 @@ defmodule FermixCore.MeetingsTest do
       assert {:ok, %{id: id}} = join(@zoom_url, repo, @operator, server)
       {:ok, session} = lookup(id)
       stop_session(session)
+    end
+
+    # What Google Meet's sentence says Zoom does on the server is true of this
+    # home: Zoom joins there only once its app is set up.
+    test "4d. Google Meet's sentence on a server says Zoom works there only where it is set up" do
+      put_meetings(enabled: true, zoom: :configured)
+      with_zoom = Meetings.meet_unavailable_sentence()
+      assert with_zoom == Meetings.meet_unavailable_sentence(true)
+      assert with_zoom =~ "Zoom meetings work on your server."
+
+      put_meetings(enabled: true)
+      without = Meetings.meet_unavailable_sentence()
+      assert without == Meetings.meet_unavailable_sentence(false)
+      refute without =~ "Zoom meetings work on your server."
+      assert without =~ "once Zoom is set up"
     end
 
     test "5. refuses a second meeting while one is running", %{repo: repo} do

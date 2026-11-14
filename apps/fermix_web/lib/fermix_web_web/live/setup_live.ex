@@ -755,11 +755,16 @@ defmodule FermixWebWeb.SetupLive do
 
   # Opens the meetbot's headed browser so the operator signs the bot's Google
   # account in. A no-op while one is already running or if the sidecar isn't
-  # installed yet (the button is disabled in that case — this is belt).
+  # installed yet (the button is disabled in that case — this is belt). On an
+  # Always On server, which has no screen and cannot run Google Meet (M97
+  # D24), no browser opens: the banner says Google Meet's sentence.
   def handle_event("meetbot_signin", _params, socket) do
     cond do
       installing?(socket.assigns.meetbot_signin) ->
         {:noreply, socket}
+
+      meet_here() != :ok ->
+        {:noreply, assign(socket, :meetbot_signin, failed(Meetings.meet_unavailable_sentence()))}
 
       not MeetbotInstaller.installed?() ->
         {:noreply, socket}
@@ -2433,16 +2438,30 @@ defmodule FermixWebWeb.SetupLive do
   end
 
   # Enabling meetings is what fetches the Meet notetaker binary — the Zoom RTMS
-  # lane needs no sidecar, so a refusal here never blocks the save.
+  # lane needs no sidecar, so a refusal here never blocks the save. On an
+  # Always On server Google Meet cannot run (M97 D24), so neither the notetaker
+  # nor its browser downloads there: the banner says Google Meet's sentence.
   defp maybe_install_meetbot(socket, false), do: socket
 
   defp maybe_install_meetbot(socket, true) do
     cond do
-      installing?(socket.assigns.meetbot_install) -> socket
-      not MeetbotInstaller.installed?() -> start_meetbot_install(socket)
-      true -> continue_meetbot_setup(socket)
+      installing?(socket.assigns.meetbot_install) ->
+        socket
+
+      meet_here() != :ok ->
+        assign(socket, :meetbot_install, failed(Meetings.meet_unavailable_sentence()))
+
+      not MeetbotInstaller.installed?() ->
+        start_meetbot_install(socket)
+
+      true ->
+        continue_meetbot_setup(socket)
     end
   end
+
+  # Whether Google Meet can run on the engine serving this page; injectable so
+  # a LiveView test names the server it means (`Meetings.meet_here/0`).
+  defp meet_here, do: Application.get_env(:fermix_web, :meet_here, &Meetings.meet_here/0).()
 
   defp start_meetbot_install(socket) do
     install = meetbot_installer()

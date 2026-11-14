@@ -2742,7 +2742,8 @@ defmodule Fermix.CLI.Doctor.Checks do
   Computer history (MILESTONE_32 §15.3): this machine's opt-in row, where it
   has a recorder (M97 §8.3, `ComputerHistory.recorder?/1`: a Mac, and a Linux
   computer, whose row also says which applications its recorder cannot see,
-  M97 stage 4 D3). Tree-less —
+  M97 stage 4 D3; never an Always On server, which this tree-less verb tells
+  by its home and host, `Home.AlwaysOn.here?/1`). Tree-less —
   reports config-level state (availability, on/off, summarizer posture, allowlist
   sizes) plus the chain posture (§9.4): an enabled rail whose primary is not
   granted for history captures and summarizes but never appears in a reply, which
@@ -2756,7 +2757,11 @@ defmodule Fermix.CLI.Doctor.Checks do
     if Keyword.get_lazy(opts, :recorder?, &ComputerHistory.recorder?/0) do
       computer_history_result(opts)
     else
-      ok("computer history", "no recorder on this system; a Mac or a Linux computer records")
+      ok(
+        "computer history",
+        "no recorder on this computer: a Mac or a Linux computer records, and an " <>
+          "Always On server records none"
+      )
     end
   end
 

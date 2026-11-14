@@ -72,7 +72,7 @@ defmodule FermixCore.Management.AccessoriesTest do
 
       for {opts, sentence} <- [
             {Goldens.base(engine_role: %{role: :device, primary: "studio-mac"}),
-             "StackChan works again once Fermix is back on this Mac."},
+             "StackChan works only while Fermix runs on this Mac."},
             {Goldens.base(engine_role: %{role: :candidate, primary: nil}),
              "StackChan works once Fermix has moved to this Mac."},
             {Goldens.base(os_type: {:unix, :linux}), "StackChan works only on a Mac."},

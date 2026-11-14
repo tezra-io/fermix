@@ -2357,6 +2357,22 @@ defmodule FermixCore.Management.HomeSummaryTest do
       assert summary["notice"] == nil
     end
 
+    # Google Meet's entry says the server joins Zoom's meetings only where the
+    # home's settings set up its Zoom app (`zoom`), and none otherwise.
+    test "Google Meet's entry says what the server joins, by whether Zoom is set up" do
+      for {facts, zoom} <- [
+            {server(not_yet: [:google_meet], zoom: true), true},
+            {server(not_yet: [:google_meet], zoom: false), false},
+            {server(not_yet: [:google_meet]), false},
+            {ready_facts(not_yet: [:google_meet], zoom: true), true}
+          ] do
+        assert [%{"id" => "google_meet", "sentence" => sentence}] =
+                 HomeSummary.summary(facts)["detail"]["not_yet"]
+
+        assert sentence == Copy.not_yet(:google_meet, %{zoom: zoom})
+      end
+    end
+
     test "a linked computer lists its server's as the server says them, then its own" do
       said = [
         %{"id" => "google_meet", "sentence" => "The server's own words for Google Meet."},

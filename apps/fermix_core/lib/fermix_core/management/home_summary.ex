@@ -347,7 +347,8 @@ defmodule FermixCore.Management.HomeSummary do
           optional(:offers_review) => boolean(),
           optional(:move_progress) => MoveProgress.t() | nil,
           optional(:computer_changes) => [ChangedFromComputer.change()],
-          optional(:not_yet) => [atom()]
+          optional(:not_yet) => [atom()],
+          optional(:zoom) => boolean()
         }
   @type summary :: %{String.t() => term()}
 
@@ -535,7 +536,9 @@ defmodule FermixCore.Management.HomeSummary do
   `:move_progress`); and, but on a candidate, what this engine's settings and
   recorder turn on of what Always On does not do yet (`not_yet`,
   `MoveReadiness.not_yet/2`, then `ComputerHistory.recorder?/0` or `opts`'
-  `:recorder?`).
+  `:recorder?`), and whether those settings set up the Zoom app the server
+  joins with (`zoom`, `MoveReadiness.zoom?/1`), which Google Meet's entry
+  says.
   """
   @spec gather(Path.t(), map(), map(), map(), keyword()) :: facts()
   def gather(home, %{role: role} = record, link, status, opts)
@@ -544,6 +547,7 @@ defmodule FermixCore.Management.HomeSummary do
     reads = Keyword.take(opts, [:unreadable_files])
     now = Keyword.get_lazy(opts, :now, &DateTime.utc_now/0)
     return = return_record(home, reads)
+    {not_yet, zoom} = not_yet(home, role, host_os, {reads, opts})
 
     %{
       role: role,
@@ -581,7 +585,8 @@ defmodule FermixCore.Management.HomeSummary do
       server_sandbox: server_sandbox(home, role, reads),
       computer_changes: computer_changes(role, status),
       move_progress: Keyword.get_lazy(opts, :move_progress, &MoveProgress.read/0),
-      not_yet: not_yet(home, role, host_os, {reads, opts})
+      not_yet: not_yet,
+      zoom: zoom
     }
   end
 
@@ -1471,7 +1476,7 @@ defmodule FermixCore.Management.HomeSummary do
   # naming the server `name` (nil: "your server").
   defp not_yet_entries(facts, place, name) do
     own = Map.get(facts, :not_yet, [])
-    values = %{machine: machine(facts.host_os), to: name}
+    values = %{machine: machine(facts.host_os), to: name, zoom: Map.get(facts, :zoom, false)}
 
     for id <- Copy.not_yet_ids(),
         id in own and id in place,
@@ -2264,14 +2269,16 @@ defmodule FermixCore.Management.HomeSummary do
   # What this engine's own facts turn on of what Always On does not do yet
   # (M97): its settings (`MoveReadiness.not_yet/2`), then whether this
   # computer records its history (`ComputerHistory.recorder?/0`, `opts`'
-  # `:recorder?` in a test). The summary lists each where it applies.
-  defp not_yet(_home, :candidate, _host_os, _reads_opts), do: []
+  # `:recorder?` in a test). The summary lists each where it applies. With
+  # them, whether the same settings set up the Zoom app Google Meet's entry
+  # says the server joins with (`MoveReadiness.zoom?/1`).
+  defp not_yet(_home, :candidate, _host_os, _reads_opts), do: {[], false}
 
   defp not_yet(home, _role, host_os, {reads, opts}) do
     settings = MoveReadiness.settings(home, reads)
     recorder? = Keyword.get_lazy(opts, :recorder?, &ComputerHistory.recorder?/0)
     history = if recorder?, do: [], else: [:computer_history]
-    MoveReadiness.not_yet(settings, host_os == :macos) ++ history
+    {MoveReadiness.not_yet(settings, host_os == :macos) ++ history, MoveReadiness.zoom?(settings)}
   end
 
   # What a move back costs that this desktop's settings turn on, which its

@@ -221,14 +221,14 @@ defmodule FermixChannels.Home.Link do
   @impl true
   def stop_return, do: DeviceSupervisor.stop_candidate()
 
-  # The call first, then the files: both are this computer's to end before
-  # the server restarts into the move back.
+  # The call first, then the files: both are this computer's to end once the
+  # server took the move back, which it restarts into as it answers.
   @impl true
   def end_for_return do
     machine = if match?({:unix, :darwin}, :os.type()), do: "Mac", else: "computer"
     moving = "Fermix is moving back to this #{machine}."
 
-    case Relay.end_calls(Relay, "This call ended: #{moving} Call again once the move is done.") do
+    case Relay.end_calls(Relay, "#{moving} Call again once the move is done.") do
       :ok ->
         :ok
 

@@ -56,7 +56,7 @@ defmodule FermixCore.Management.ComputerSettingsTest do
     end
 
     assert ComputerSettings.plain("computer.accessories", macos?: true, computer?: true) ==
-             {:refused, "StackChan works again once Fermix is back on this Mac."}
+             {:refused, "StackChan works only while Fermix runs on this Mac."}
 
     assert ComputerSettings.plain("computer.accessories", macos?: false, computer?: true) ==
              {:refused, "StackChan works only on a Mac."}

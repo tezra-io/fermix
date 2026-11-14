@@ -184,7 +184,7 @@ primary's, exactly as its own socket would give it.
   `invalid_params` on `section`. StackChan is not part of Always On, so
   this computer publishes no `computer.accessories`, and its
   `invalid_params` on `section` carries the sentence *Accessories* answers
-  here ("StackChan works again once Fermix is back on this Mac.", or
+  here ("StackChan works only while Fermix runs on this Mac.", or
   "StackChan works only on a Mac." off a Mac); the robot's setting stays in
   this computer's `machine.toml` as it was, for a move back. A
   `computer.` secret that is not a sandbox
@@ -232,14 +232,17 @@ primary's, exactly as its own socket would give it.
   `coding_agents.check`, and `setup.detect` whose every target is the
   home's (`existing_primary`, the provider the home's settings chose,
   `claude_code`, `codex_cli`, `ollama`, `harness_vendors`, `meetbot`) are
-  the server's. Meetings run there too: the server joins Zoom meetings, and
-  on an Always On server Google Meet is unavailable (M97 D24), so there the
-  notetaker's install (`capabilities.install.start` for `meetbot`) and
-  `meetings.signin.start` download and open nothing and fail in their jobs
-  with `Google Meet is not available on your server yet: the notetaker needs
-  a Google sign-in on a computer with a screen. Zoom meetings work on your
-  server.`, which the `meetings` section's `meetings_enabled` footer says
-  after `Enable meeting notes for Google Meet and Zoom.`
+  the server's. Meetings run there too: the server joins Zoom meetings where
+  its Zoom app is set up, and on an Always On server Google Meet is
+  unavailable (M97 D24), so there the notetaker's install
+  (`capabilities.install.start` for `meetbot`) and `meetings.signin.start`
+  download and open nothing and fail in their jobs with `Google Meet is not
+  available on your server yet: the notetaker needs a Google sign-in on a
+  computer with a screen. Zoom meetings work on your server.` (`Zoom
+  meetings work on your server once Zoom is set up.` in place of the last
+  sentence where its Zoom app is not), which the `meetings` section's
+  `meetings_enabled` footer says after `Enable meeting notes for Google Meet
+  and Zoom.`
 - **Composed** (answered here, with the primary's own part): `home.status`
   answers this computer's facts and adds `primary_home`, the primary's own
   `home.status`; `settings.sections` lists the primary's sections (its
@@ -737,13 +740,17 @@ says which, and only those that apply to this home: a list of `{id,
 sentence}`, each sentence short (within the screen's word bound) and in the
 owner's words, in this order: `google_meet` while meetings are on ("Google
 Meet needs the notetaker signed in on a computer with a screen, so your
-server joins only Zoom meetings."), `coding_signin` while coding agents are
+server joins only Zoom meetings." where the home's settings set up its Zoom
+app, all four of its values, and otherwise "Google Meet needs a computer
+with a screen, so your server joins no meetings until Zoom is set up."),
+`coding_signin` while coding agents are
 approved ("Installing and signing in Codex or Claude Code on your server
 takes a terminal there."), `whatsapp` while WhatsApp is on (the sentence
 `webhooks`' own starts with: "WhatsApp needs a public address to reach your
 server."), `slack` while Slack is on without Socket Mode ("Slack works on
 your server only in Socket Mode."), `stackchan` while StackChan is on a Mac
-("StackChan works only while Fermix runs on the Mac it is plugged into."),
+("StackChan works only while Fermix runs on this Mac.", what *Accessories*
+says on a Mac whose home is on its server),
 `dev_plugins` while this computer's settings name a dev plugin folder (the
 move review's own item, naming the server, "your server" before one is
 held: "Dev plugins stay on this Mac: north-box runs none of them.") and
@@ -1057,7 +1064,7 @@ daemon onto anything else.
 | `settings.reload` | `section` (optional: the section an outside edit was refused for) | Re-reads the settings file, pushes it into the running configuration, and re-records the baseline. The one action behind `Reload settings from disk`. On a linked computer, a `section` of `computer` or `computer.<id>` reloads this computer's own; any other, or none, the server's (sent without its `section` to a server without the rule, *One set of settings*). Minimum version `2`. |
 | `secret.set` | `id`, `value` | Stores one secret and answers with its presence, never its value, and the environment variable that overrides it, if any. On a linked computer, `computer.env:<NAME>` is a sandbox value of this computer's own, every other id the server's; a sandbox value is an owner decision. Minimum version `2`. |
 | `secret.clear` | `id` | Forgets one secret: the keyring item, the reference that reads it, and the value in force. Answers with the environment variable still in use, if any. Placed as `secret.set`. Minimum version `2`. |
-| `setup.detect` | `targets` | One row per target asked for: whether this Mac already has it, and a short detail where there is one. The harness target also reports vendor installation, version and sign-in state (`auth`, and `signed_out` once a run there failed to sign in), with guidance. The `meetbot` target reports whether both halves of the meeting notetaker are installed, its detail carries the state of the notetaker's Google sign-in as a sentence, and `signed_in` carries the same state as a boolean, null while the notetaker is absent. Only the `meetbot` row carries `available`, always: false where Google Meet cannot run on the machine that answers (an Always On server, M97 D24), its `detail` then "Google Meet is not available on your server yet: the notetaker needs a Google sign-in on a computer with a screen. Zoom meetings work on your server." in place of the sign-in's, and true everywhere else; `present` and `signed_in` are read as they are either way (`setup_detect_server`). Never a credential value. On a linked computer a request whose every target is the home's (`existing_primary`, `claude_code`, `codex_cli`, `ollama`, `harness_vendors`, `meetbot`) is the server's, any other this computer's (*After a move*). Minimum version `2`. |
+| `setup.detect` | `targets` | One row per target asked for: whether this Mac already has it, and a short detail where there is one. The harness target also reports vendor installation, version and sign-in state (`auth`, and `signed_out` once a run there failed to sign in), with guidance. The `meetbot` target reports whether both halves of the meeting notetaker are installed, its detail carries the state of the notetaker's Google sign-in as a sentence, and `signed_in` carries the same state as a boolean, null while the notetaker is absent. Only the `meetbot` row carries `available`: false where Google Meet cannot run on the machine that answers (an Always On server, M97 D24), its `detail` then Google Meet's sentence there in place of the sign-in's ("Google Meet is not available on your server yet: the notetaker needs a Google sign-in on a computer with a screen.", then "Zoom meetings work on your server." where the server's Zoom app is set up, else "Zoom meetings work on your server once Zoom is set up."), and true everywhere else; `present` and `signed_in` are read as they are either way (`setup_detect_server`). `available` came after the method, so an older engine's row has none, which a client reads as true. Never a credential value. On a linked computer a request whose every target is the home's (`existing_primary`, `claude_code`, `codex_cli`, `ollama`, `harness_vendors`, `meetbot`) is the server's, any other this computer's (*After a move*). Minimum version `2`. |
 | `coding_agents.check` | `vendors` (optional: a list naming `codex` and `claude`, each at most once; both when absent) | Check again for this computer's coding agents: the owner's word that they signed in again. The sign-in marks of the agents it names (an agent whose last run here failed to sign in, `signed_out` in `setup.detect`) are cleared on this computer, and the answer is `{results}` with the one `harness_vendors` row `setup.detect` answers, read again. A client calls it only when `hello` lists it, and `setup.detect` otherwise. Refusals: a parameter it does not take, or `vendors` that is not such a list, is `invalid_params` with `field`; sign-in marks this computer cannot read are `unavailable` {`capability`: `coding_agents`, `sentence`: "Fermix could not read the coding agents' sign-in marks here, so none was cleared."}, and nothing is cleared. On a linked computer it is the server's (M97 §19, D28: the coding agents the server runs, *After a move*); this computer's own coding facts are not drawn there. Minimum version `2`. |
 | `providers.set_primary` | `provider` | Makes one configured provider the primary and answers with the restart state and any change the operator did not type. Minimum version `2`. |
 | `providers.models.list` | `provider`, `live`, `query`, `cursor`, `limit` | One page of models, from the catalog this build ships or from the provider's own live listing, with the cursor for the next page. Minimum version `2`. |
@@ -2290,7 +2297,9 @@ Notes that the shapes alone do not carry:
   it is saved.
 - **`computer_history` is this computer's part of computer history** (M97),
   answered on this computer (*After a move*): `computer_history_enabled`
-  (whether it records), `computer_history_apps` (which apps), both in
+  (whether it records), `computer_history_apps` (which apps; on a computer
+  whose recorder is Linux its `info` says an entry is the app's name on the
+  accessibility bus, matched exactly, and a Mac's has none), both in
   `[fermix_core.computer_history]` of this computer's `machine.toml`, and
   `computer_history_summarizer` (read-only), what this computer's own
   sittings are summarized with: `local` where its `machine.toml` says
@@ -2355,8 +2364,8 @@ engine, or off macOS, `accessories.status` answers `state`
 `needs_local_primary`, offers no action, and every other method is
 `unavailable` {`capability`: `accessories`}, the status's `sentence`, each
 paired robot's `sentence` and the refusal's all saying why: "StackChan works
-again once Fermix is back on this Mac." on a Mac whose home is on its server
-(device role), "StackChan works once Fermix has moved to this Mac." on a Mac
+only while Fermix runs on this Mac." on a Mac whose home is on its server
+(device role, one that joined the home and never held it included), "StackChan works once Fermix has moved to this Mac." on a Mac
 waiting for a move to it (candidate), and "StackChan works only on a Mac."
 off macOS, whatever the role. A linked computer publishes no
 `computer.accessories` then (*One set of settings*). With accessories off,

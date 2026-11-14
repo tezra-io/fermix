@@ -25,16 +25,21 @@ defmodule FermixChannels.Desktop.Uploads do
        attach_id, {:error, sentence}}`, in `Companion.Inbox`'s words where
        the reason is the same as on a primary.
 
-  One upload runs at a time, in a process of its own, so this server keeps
-  answering while a file streams: the server's answers to an upload name no
-  upload when they refuse one, so one at a time is what makes them its. At
-  most 8 wait behind it; past that a file is refused as a primary refuses
-  one past its upload bound. Each answer is waited for 30 s.
+  One upload runs at a time, in a process of its own linked to this one
+  (which traps exits), so this server keeps answering while a file streams,
+  and an upload never outlives a restart or a shutdown of this process to
+  run beside the next: the server's answers to an upload name no upload
+  when they refuse one, so one at a time is what makes them its. At most 8
+  wait behind it; past that a file is refused as a primary refuses one past
+  its upload bound. Each answer is waited for 30 s.
 
-  The relay hands this process the server's answers (`handle/3`) and the
+  The relay hands this process the server's answers (`handle/3`), the
   session's end (`link_down/2`), which fails the running upload with the
-  relay's sentence. A move back to this computer drops every upload waiting
-  or running (`drop_all/2`), each told why with its file's name.
+  relay's sentence, and each session that comes up (`link_up/1`). A move
+  back to this computer the server took drops every upload waiting or
+  running (`drop_all/2`), each told why with its file's name, and refuses
+  every file attached after it in the same words until a session comes up
+  again, since the server restarts into the move.
   """
 
   use GenServer
@@ -100,9 +105,17 @@ defmodule FermixChannels.Desktop.Uploads do
     do: GenServer.cast(server, {:link_down, sentence})
 
   @doc """
+  A session came up: a server that serves this computer again holds no move
+  back to it, so files `drop_all/2` refused are taken again.
+  """
+  @spec link_up(GenServer.server()) :: :ok
+  def link_up(server), do: GenServer.cast(server, :link_up)
+
+  @doc """
   Drops every upload waiting or running, each tunnel told `"<file> was not
-  sent: <why>"`, `why` the caller's sentence (a move back to this computer).
-  Answers once each was told.
+  sent: <why>"`, `why` the caller's sentence (a move back to this computer
+  the server took), and refuses every file taken after it in the same words
+  until the next session comes up (`link_up/1`). Answers once each was told.
   """
   @spec drop_all(GenServer.server(), String.t()) :: :ok
   def drop_all(server \\ __MODULE__, why) when is_binary(why) do
@@ -115,6 +128,9 @@ defmodule FermixChannels.Desktop.Uploads do
 
   @impl true
   def init(opts) do
+    # The running upload is linked: its exit is an answer here, and this
+    # process's ends it.
+    Process.flag(:trap_exit, true)
     dir = Keyword.get_lazy(opts, :dir, &Inbox.default_dir/0)
 
     case Inbox.prepare_dir(dir) do
@@ -125,7 +141,8 @@ defmodule FermixChannels.Desktop.Uploads do
            relay: Keyword.get(opts, :relay, Relay),
            answer_ms: Keyword.get(opts, :answer_ms, @answer_ms),
            waiting: :queue.new(),
-           running: nil
+           running: nil,
+           returning: nil
          }}
 
       {:error, reason} ->
@@ -149,10 +166,18 @@ defmodule FermixChannels.Desktop.Uploads do
       done(reply_to, attachment, {:error, not_sent(attachment, why)})
     end
 
-    {:reply, :ok, %{state | waiting: :queue.new()}}
+    {:reply, :ok, %{state | waiting: :queue.new(), returning: why}}
   end
 
+  # The server took a move back and restarts into it: no file goes to it.
   @impl true
+  def handle_cast({:take, attachment, reply_to}, %{returning: why} = state)
+      when is_binary(why) do
+    :ok = remove(state.dir, attachment["attach_id"])
+    done(reply_to, attachment, {:error, not_sent(attachment, why)})
+    {:noreply, state}
+  end
+
   def handle_cast({:take, attachment, reply_to}, state) do
     if :queue.len(state.waiting) >= @max_waiting do
       :ok = remove(state.dir, attachment["attach_id"])
@@ -181,21 +206,22 @@ defmodule FermixChannels.Desktop.Uploads do
   def handle_cast({:link_down, sentence}, state),
     do: {:noreply, to_running(state, {:upload_link_down, sentence})}
 
+  def handle_cast(:link_up, state), do: {:noreply, %{state | returning: nil}}
+
   @impl true
   def handle_info({:upload_result, pid, outcome}, %{running: %{pid: pid} = running} = state) do
-    Process.demonitor(running.monitor, [:flush])
     done(running.reply_to, running.attachment, outcome)
     {:noreply, next(%{state | running: nil})}
   end
 
-  def handle_info(
-        {:DOWN, monitor, :process, _pid, reason},
-        %{running: %{monitor: monitor}} = state
-      ) do
+  def handle_info({:EXIT, pid, reason}, %{running: %{pid: pid}} = state) do
     Logger.error("desktop uploads: an upload ended without an answer: #{inspect(reason)}")
     done(state.running.reply_to, state.running.attachment, {:error, @failed_sentence})
     {:noreply, next(%{state | running: nil})}
   end
+
+  # The exit of an upload already answered (a dropped one is unlinked first).
+  def handle_info({:EXIT, _pid, :normal}, state), do: {:noreply, state}
 
   def handle_info(message, state) do
     Logger.debug("desktop uploads ignored #{inspect(message, limit: 5)}")
@@ -220,10 +246,10 @@ defmodule FermixChannels.Desktop.Uploads do
     server = self()
     context = Map.take(state, [:dir, :relay, :answer_ms])
 
-    {pid, monitor} =
-      spawn_monitor(fn -> send(server, {:upload_result, self(), upload(attachment, context)}) end)
+    pid =
+      spawn_link(fn -> send(server, {:upload_result, self(), upload(attachment, context)}) end)
 
-    %{state | running: %{pid: pid, monitor: monitor, attachment: attachment, reply_to: reply_to}}
+    %{state | running: %{pid: pid, attachment: attachment, reply_to: reply_to}}
   end
 
   defp to_running(%{running: %{pid: pid}} = state, message) do
@@ -237,7 +263,7 @@ defmodule FermixChannels.Desktop.Uploads do
   defp take_running(%{running: nil} = state), do: {[], state}
 
   defp take_running(%{running: running} = state) do
-    Process.demonitor(running.monitor, [:flush])
+    Process.unlink(running.pid)
     Process.exit(running.pid, :kill)
     {[{running.attachment, running.reply_to}], %{state | running: nil}}
   end

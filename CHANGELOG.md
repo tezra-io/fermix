@@ -69,7 +69,8 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - **A Linux computer records computer history.** With Computer history
   switched on there and its apps listed by the names the desktop's
-  accessibility bus gives them (`Firefox`, `Text Editor`), Fermix records the
+  accessibility bus gives them, matched exactly (which can differ from the
+  name an app shows, as the Apps setting's info says), Fermix records the
   active listed app's window titles, the field you are in and what you typed
   there once it settles, and nothing from an app that is not on the list. It
   never reads a password field, a terminal or a browser: a field there that
@@ -1050,8 +1051,9 @@ will be part of a future release; nothing in this group is in a release yet.
   now names; and `fermix settings set` says which machine it changed
   ("Saved Sandbox on garden server (sandbox): sandbox_mode").
 - **StackChan says why it is off while Fermix is on your server.** Pet and
-  the setup page say "StackChan works again once Fermix is back on this
-  Mac.", and This Mac shows no StackChan switch until then.
+  the setup page say "StackChan works only while Fermix runs on this Mac.",
+  on a Mac that joined your home as much as on the one it moved from, and
+  This Mac shows no StackChan switch while the home is on the server.
 - **An install a linked computer runs itself is found again when its pane
   reopens.** On a computer linked to your server, the list of running work
   the apps read now holds that computer's own installs (its browser, the
@@ -1111,11 +1113,15 @@ will be part of a future release; nothing in this group is in a release yet.
   starts, with the Zoom settings and secret that moved with it. Google Meet
   is not available on the server yet, since its notetaker needs a Google
   sign-in on a computer with a screen: a Meet link, the notetaker's install
-  and its sign-in each say so there, and the Meetings pane says it too. The
-  move's review now says Google Meet meetings stop and Zoom meetings carry
-  on at your server, where it said all meetings stop. A move either way is
-  refused while the notetaker is in a meeting, naming it, since the move
-  would end it before its notes are written. Each meeting's notes move with
+  and its sign-in each say so there, and the Meetings pane, the server's own
+  setup page (which downloads nothing and opens no browser) and `fermix
+  doctor` say it too, adding that Zoom meetings work there once Zoom is set
+  up where it is not. The move's review now says Google Meet meetings stop
+  and Zoom meetings carry on at your server, where it said all meetings
+  stop. A move either way is refused while the notetaker is in a meeting,
+  naming it, since the move would end it before its notes are written, and
+  once a move is under way the notetaker joins no meeting until it is done.
+  Each meeting's notes move with
   your home, and Fermix reads them where your home keeps them now. After a
   move back your Mac runs meetings again, and Move now's confirm says when
   the notetaker your Mac kept needs installing again.
@@ -1133,8 +1139,10 @@ will be part of a future release; nothing in this group is in a release yet.
   to your server (never a file the server already has) and says once the
   server has it, or why not. The move's review no longer lists your
   computer's voice calls as stopping. Moving back, the review names a call
-  in progress on that computer, and Move now hangs it up cleanly and drops
-  a file still sending, each with a sentence, before the move starts.
+  in progress on that computer, and once your server takes Move now the
+  call is hung up cleanly and a file still sending is dropped, each with a
+  sentence; a Move now the server refuses, such as for a mistyped recovery
+  passphrase, leaves both as they were.
 - **Your server looks places up in Apple Maps on your Mac.** A server's
   place search and a trip's place lookups used Brave alone, so a home with no
   Brave key, or one whose plan has no place search, left a trip's stops
@@ -1159,9 +1167,11 @@ will be part of a future release; nothing in this group is in a release yet.
 - **Always On lists what it does not do yet.** Before Move now, on your
   server and on each computer linked to it, the Always On screen lists, in
   one short sentence each, what does not work or takes a terminal on the
-  server and applies to your home: Google Meet meetings, installing and
-  signing in Codex or Claude Code, WhatsApp's public address, Slack without
-  Socket Mode, StackChan, dev plugins, and computer history off a Mac.
+  server and applies to your home: Google Meet meetings (saying the server
+  joins only Zoom's where your Zoom app is set up, and none until it is),
+  installing and signing in Codex or Claude Code, WhatsApp's public address,
+  Slack without Socket Mode, StackChan, dev plugins, and computer history on
+  a computer with no recorder.
 
 ## [0.18.0] - 2026-11-03
 
