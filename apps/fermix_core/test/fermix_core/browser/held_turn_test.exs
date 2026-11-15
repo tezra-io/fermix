@@ -57,6 +57,29 @@ defmodule FermixCore.Browser.HeldTurnTest do
     refute again == held
   end
 
+  # The registry drops a process's key only once it has read that process's
+  # exit, so for a moment after a turn's process ends a lookup still names
+  # it. The registry's partitions are held still here, so that moment lasts
+  # for the whole request.
+  test "a request while the registry still names its ended process starts a fresh one",
+       %{seams: seams} do
+    held = HeldTurn.run(seams, turn("main-47"), fn -> self() end)
+    ref = Process.monitor(held)
+    partitions = registry_partitions(seams.registry)
+    Enum.each(partitions, &:sys.suspend/1)
+    on_exit(fn -> Enum.each(partitions, &resume_if_alive/1) end)
+
+    :ok = HeldTurn.finish(seams, "main-47", "ended")
+    assert_receive {:DOWN, ^ref, :process, ^held, :normal}
+    assert held in Registry.select(seams.registry, [{{:_, :"$1", :_}, [], [:"$1"]}])
+
+    again = HeldTurn.run(seams, turn("main-47"), fn -> self() end)
+    refute again == held
+    assert Process.alive?(again)
+
+    Enum.each(partitions, &:sys.resume/1)
+  end
+
   # INVOKE-1: the run that made a request is the request's life. When the
   # computer ends that run (the master or browser switch off, a cancel, a
   # deadline, a restart of its invocations), the request the held turn runs
@@ -159,6 +182,12 @@ defmodule FermixCore.Browser.HeldTurnTest do
     refute HeldTurn.session?("main 41")
     refute HeldTurn.session?(nil)
   end
+
+  defp registry_partitions(registry) do
+    for {_id, pid, :worker, _modules} <- Supervisor.which_children(registry), do: pid
+  end
+
+  defp resume_if_alive(pid), do: if(Process.alive?(pid), do: :sys.resume(pid), else: :ok)
 
   defp turn(session, conversation \\ "owner-YWxsb3RtZW50"),
     do: %{session: session, conversation: conversation, worker?: false}

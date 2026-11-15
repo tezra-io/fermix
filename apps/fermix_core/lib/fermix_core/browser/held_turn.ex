@@ -195,13 +195,24 @@ defmodule FermixCore.Browser.HeldTurn do
   end
 
   defp ensure(seams, turn) do
-    case Registry.lookup(seams.registry, key(turn)) do
-      [{pid, _worker?}] ->
+    case holder(seams.registry, key(turn)) do
+      {:ok, pid} ->
         pid
 
-      [] ->
+      :none ->
         :ok = supersede(seams, turn)
         start(seams, turn)
+    end
+  end
+
+  # The registry drops a process's key only once it has read that process's
+  # exit, so a lookup just after a turn's process ended can still name it.
+  # Nothing holds that turn: a fresh process is started, and its registration
+  # replaces the dead one's.
+  defp holder(registry, key) do
+    case Registry.lookup(registry, key) do
+      [{pid, _worker?}] -> if Process.alive?(pid), do: {:ok, pid}, else: :none
+      [] -> :none
     end
   end
 

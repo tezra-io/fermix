@@ -6,6 +6,15 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **A request to a computer's browser just after the last one ended no longer
+  fails.** When Fermix on your server used a computer's browser, a request
+  that reached the computer just as the turn holding that browser there had
+  ended (its turn finished, or it sat idle long enough to close) could be
+  refused with "the browser turn … could not be held here". It now starts a
+  fresh one, as any later request does.
+
 ## [0.20.0] - 2026-11-15
 
 ### Security
