@@ -523,11 +523,41 @@ defmodule FermixCore.Trips.RenderTest do
                Varonne · rev 3 · created; 5 stops added · 2 days, 5 stops · 0 placed
                Not placed, nearest by another name:
                [9] "Torre de Vale Escuro": "Corvo Lookout, Largo do Corvo" · https://maps.apple.com/place?place-id=I77
-               Not placed, this trip has no place to search near, so each is only the first result anywhere: give its day a near (a town and its country) and the place again, or its link if that is the place meant:
+               Not placed, this trip has no place to search near, so each is only the first result anywhere: give its day a near (a town or city with its region and country) and the place again, or its link if that is the place meant:
                [2] "Arrive by train": "Atlanta Fish Market, Pharr Road, Atlanta" · https://maps.apple.com/place?place-id=I77
-               Not placed, the place search found no place "Varonne" to search near, so each is only the first result anywhere: give its day a near it can find (a town and its country) and the place again, or its link if that is the place meant:
+               Not placed, the place search found no place "Varonne" to search near, so each is only the first result anywhere: give its day a near it can find (a town or city with its region and country) and the place again, or its link if that is the place meant:
                [10] "Coffee somewhere" (place unchanged): "Atlanta Fish Market, Pharr Road, Atlanta" · https://maps.apple.com/place?place-id=I77
-               No place found, and the place search found no place "Varonne" to search near; give its day a near it can find (a town and its country): [11] "Miradouro do Corvo".
+               No place found, and the place search found no place "Varonne" to search near; give its day a near it can find (a town or city with its region and country): [11] "Miradouro do Corvo".
+               #{@report}\
+               """
+    end
+
+    # A near whose search found nothing by the name: a place by that name
+    # found anywhere is offered under its own heading, and none is said.
+    test "a near that found nothing by the name offers one found anywhere, or says none" do
+      rows = rows()
+      [_, arrive, _, tower, coffee, _lookout, _dinner] = rows
+
+      cape = %{
+        name: "Cabo Escuro",
+        address: "Estrada do Cabo, Vila Alta",
+        location: %{latitude: 41.2002, longitude: -8.7013},
+        source_url: "https://maps.apple.com/place?place-id=I88"
+      }
+
+      placements = [
+        %{row: tower, outcome: {:placed, @tower}, kept: false},
+        %{row: coffee, outcome: {:offered, cape, {:not_near, "Varonne, Kaldria"}}, kept: false},
+        %{row: arrive, outcome: {:none, {:not_near, "Varonne, Kaldria"}}, kept: false}
+      ]
+
+      assert Render.answer(applied(rows), placements) ==
+               """
+               Varonne · rev 3 · created; 5 stops added · 2 days, 5 stops · 1 placed
+               [9] "Torre de Vale Escuro": "Torre de Vale Escuro, Rua da Torre 4, Varonne"
+               Not placed, nothing by that name was found near "Varonne, Kaldria", so each is only the first place by that name anywhere: give its link if that is the place meant, else give its day a near it lies in (a town or city with its region and country) and the place again:
+               [10] "Coffee somewhere": "Cabo Escuro, Estrada do Cabo, Vila Alta" · https://maps.apple.com/place?place-id=I88
+               No place by that name found near "Varonne, Kaldria" or anywhere; check the place's name, or give its day a near it lies in (a town or city with its region and country): [2] "Arrive by train".
                #{@report}\
                """
     end

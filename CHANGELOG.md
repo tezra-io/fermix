@@ -1058,6 +1058,17 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   nothing more is sent until it resets, and Fermix says how long. A Brave
   Search API key whose plan does not include place search is now named as
   that, in the trip's answer and to the agent, which stops searching.
+- **A trip's stop at a place outside its town's centre is now placed.** A stop
+  at a cape, a mountain station or a lighthouse on a day in a town was left
+  without a place ("No place found"), or offered as a place by another name
+  such as a hotel, because Apple Maps searched only the town's centre. Apple
+  Maps now searches at least 25 km around a named town, for a trip and for a
+  place search, and weighs nearness to the town's centre, so the town's own
+  place usually still comes first. When nothing by the place's name is found
+  near the day's town, the reply offers the place of that name found
+  elsewhere, with its link, instead of "No place found". A day's town now
+  names its region as well as its country, so a town that shares its name with
+  one elsewhere is searched in the right one.
 - **A Fermix too busy to answer is no longer taken for one that is stopped.**
   When its control socket did not accept a connection within 3 seconds, the
   command line read Fermix as not running, so on a busy machine `fermix home

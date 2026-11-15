@@ -23,7 +23,8 @@ defmodule FermixCore.Trips.WaitingTest do
     :no_location,
     {:no_backend, "auth_failed: missing Brave API key"},
     {:failed, "network: unreachable"},
-    {:unknown_near, "Varonne"}
+    {:unknown_near, "Varonne"},
+    {:not_near, "Varonne"}
   ]
 
   defp stop(id, n, fields \\ %{}) do

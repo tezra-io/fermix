@@ -12,15 +12,22 @@
 //   {"query": "coffee", "anchor": {"kind": "coordinates", "latitude": 40.72,
 //                                  "longitude": -74.0, "radius_meters": 5000}}
 //
-// A named location is geocoded once with CLGeocoder and its placemark's region
-// sizes the search; coordinates are a region `radius_meters` either side of
-// them. Either region is required, not a hint: MapKit treats a hinted region as
-// optional and, for some sizes, answers from around this Mac instead, so a
-// search for coffee in SoHo returned the cafes near the Mac. A query with no
-// anchor goes to MapKit as written, which ranks it around this Mac's own rough
-// position. Nothing here creates a CLLocationManager or reads where this Mac
-// is: that would raise a Location prompt under this helper's own name, and the
-// person's position is never an input (M31 §13.2).
+// A named location is geocoded once with CLGeocoder and searched within its
+// placemark's region, never under 25 km in radius about the placemark's centre:
+// a traveller's day around a town reaches past its centre, and the geocoder's
+// region for a town can cover its centre alone, with a cape 10 km off outside
+// it. MapKit weighs nearness to the region's centre as well as the words, so
+// the town's own place by a name usually comes before one of that name farther
+// out; it does not sort by distance. Coordinates are a region `radius_meters`
+// either side of them. Either region is required, not a hint: MapKit treats a
+// hinted region as optional and, for some sizes, answers from around this Mac
+// instead, so a search for coffee in SoHo returned the cafes near the Mac; an
+// anchored search never answers from around this Mac. Each request is one
+// search, never retried or widened. A query with no anchor goes to MapKit as
+// written, which ranks it around this Mac's own rough position. Nothing here
+// creates a CLLocationManager or reads where this Mac is: that would raise a
+// Location prompt under this helper's own name, and the person's position is
+// never an input (M31 §13.2).
 //
 // Success: exit 0 and {"places": [...]}, each place MapKit's raw fields, every
 // one but `name` present only when MapKit gave it: name, latitude, longitude,
@@ -87,6 +94,7 @@ struct ErrorReply: Encodable {
 let maxRequestBytes = 65_536
 let deadlineSeconds = 12.0
 let maxRadiusMeters = 50_000.0
+let minLocationRadiusMeters = 25_000.0
 let maxErrorChainDepth = 4
 // GEOErrorDomain -3 is the geocoder's and MapKit's throttle; CLGeocoder reports
 // it as kCLErrorNetwork with this as its underlying error.
@@ -205,9 +213,9 @@ func region(_ center: CLLocationCoordinate2D, _ radius: CLLocationDistance) -> M
   MKCoordinateRegion(center: center, latitudinalMeters: radius * 2, longitudinalMeters: radius * 2)
 }
 
-// The placemark's own region sizes the search. A placemark with a position and
-// no circular region is searched within the coordinates' default radius, the
-// one the engine sends for coordinates; one with no position found nothing.
+// The placemark's own region sizes the search, never under 25 km in radius
+// about its centre. A placemark with a position and no circular region is
+// searched within 25 km of it; one with no position found nothing.
 func geocode(_ location: String, then: @escaping (MKCoordinateRegion) -> Void) {
   CLGeocoder().geocodeAddressString(location) { placemarks, error in
     if let error, (placemarks ?? []).isEmpty { geocodeFailed(error) }
@@ -217,9 +225,9 @@ func geocode(_ location: String, then: @escaping (MKCoordinateRegion) -> Void) {
     }
 
     if let circle = placemark.region as? CLCircularRegion {
-      then(region(circle.center, circle.radius))
+      then(region(circle.center, max(circle.radius, minLocationRadiusMeters)))
     } else {
-      then(region(position.coordinate, 5_000))
+      then(region(position.coordinate, minLocationRadiusMeters))
     }
   }
 }

@@ -270,12 +270,16 @@ defmodule FermixCore.Tools.TripToolsTest do
 
   # D11: a near wins over the placed stops and has no size bound, so the
   # description is what keeps it a town: a country searches the whole country.
-  test "trip_edit's description says a near is a town or city and its country, never wider" do
+  # A town named with its country alone was searched as a same-named town in
+  # another state ("Portland, United States" is Oregon's), so the near names
+  # the town's region too. A principle, never an example.
+  test "trip_edit's description says a near is a town or city with its region and country" do
     description = TripEdit.description()
     assert description =~ "Give near when making a trip"
-    assert description =~ "a town or city and its country, like Lisbon, Portugal"
-    assert description =~ "never a country, a region, a district or a landmark"
+    assert description =~ "a town or city with its region and country"
+    assert description =~ "never a country, a region, a district or a landmark alone"
     assert description =~ "a day in a different town from the trip's gets its own near"
+    refute description =~ "like Lisbon"
   end
 
   # A live run read "Give near" as a precondition and made no trip for a town

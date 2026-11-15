@@ -457,8 +457,10 @@ defmodule FermixCore.Tools.PlaceSearch.BravePacingTest do
 
       Enum.each(siblings, &send(&1, :go))
 
-      assert {:ok, %{outcomes: [{1, {:none, :not_found}} | rest], lookups: 2} = found} =
-               Task.await(task, 10_000)
+      # The first found nothing near the town, nor anywhere by its words alone.
+      assert {:ok,
+              %{outcomes: [{1, {:none, {:not_near, "Lisbon, Portugal"}}} | rest], lookups: 2} =
+                found} = Task.await(task, 10_000)
 
       assert Enum.map(rest, &elem(&1, 1)) ==
                List.duplicate({:none, :plan_excludes_place_search}, 4)

@@ -133,7 +133,9 @@ defmodule FermixCore.Trips.LookupTest do
                  search_by(results)
                )
 
-      assert [{1, {:offered, %{name: "Harbour Rooms"}}}, {2, {:none, :not_found}}] = outcomes
+      assert [{1, {:offered, %{name: "Harbour Rooms"}}}, {2, {:none, {:not_near, @town}}}] =
+               outcomes
+
       assert Enum.map(records, & &1.name) == ["Harbour Rooms"]
     end
   end
@@ -161,11 +163,15 @@ defmodule FermixCore.Trips.LookupTest do
       assert searched() == []
     end
 
-    test "not found is none, with no record" do
+    test "not found around the day's stops is none, with no record" do
       search = search_by(%{"Doca Velha" => found([])})
 
       assert {:ok, %{outcomes: [{5, {:none, :not_found}}], records: [], lookups: 1}} =
-               resolve([%{ref: 5, place: "Doca Velha", day: 1}], near_town(), search)
+               resolve(
+                 [%{ref: 5, place: "Doca Velha", day: 1}],
+                 anchors(%{1 => [@tower]}),
+                 search
+               )
     end
 
     test "a failed lookup is named in the place search's own words, and the rest go on" do
@@ -360,7 +366,8 @@ defmodule FermixCore.Trips.LookupTest do
     end
 
     test "a lookup asks around the anchor, near a place by its name, and with none the words alone" do
-      search = search_by(%{"Mercado" => found([]), "Doca" => found([])})
+      search =
+        search_by(%{"Mercado" => found([place("Mercado", @market, 2)]), "Doca" => found([])})
 
       {:ok, _result} =
         resolve(
@@ -505,6 +512,154 @@ defmodule FermixCore.Trips.LookupTest do
 
       assert source =~
                "if let region { request.region = region request.regionPriority = .required }"
+    end
+  end
+
+  # A near the geocoder reads as a same-named place elsewhere, or a place the
+  # near's search does not reach, finds nothing by the stop's name near it: the
+  # words are searched alone once, and a place by that name found anywhere is
+  # offered, never placed. The near stays known and the day's anchor.
+  describe "nothing by the name near the near" do
+    @cape %{latitude: 41.2002, longitude: -8.7013}
+
+    # Answers a near's search from `near` and the words alone from `anywhere`,
+    # by query, telling the test every request it was asked.
+    defp search_near(near, anywhere) do
+      test_pid = self()
+
+      fn %{query: query} = request ->
+        send(test_pid, {:searched, request})
+
+        case request do
+          %{anchor: {:location, _near}} -> Map.fetch!(near, query)
+          _alone -> Map.fetch!(anywhere, query)
+        end
+      end
+    end
+
+    test "an empty near search searches the words alone and offers the first by that name" do
+      cape = place("Cabo Escuro", @cape, 21)
+      tours = place("Escuro Tours", @quay, 22)
+
+      search =
+        search_near(%{"Cabo Escuro" => found([])}, %{"Cabo Escuro" => found([tours, cape])})
+
+      assert {:ok, result} =
+               resolve([%{ref: 1, place: "Cabo Escuro", day: 1}], near_town(), search)
+
+      assert %{
+               outcomes: [{1, {:offered, ^cape, {:not_near, @town}}}],
+               records: [^cape],
+               lookups: 1,
+               sent: [1],
+               placed_by: placed_by
+             } = result
+
+      assert placed_by == %{}
+
+      assert searched() == [
+               %{query: "Cabo Escuro", count: 5, anchor: {:location, @town}},
+               %{query: "Cabo Escuro", count: 5}
+             ]
+    end
+
+    test "nothing by that name near it or anywhere is none, saying so" do
+      tours = place("Escuro Tours", @quay, 22)
+
+      for anywhere <- [found([]), found([tours])] do
+        search = search_near(%{"Cabo Escuro" => found([])}, %{"Cabo Escuro" => anywhere})
+
+        assert {:ok, %{outcomes: [{1, {:none, {:not_near, @town}}}], records: [], sent: [1]}} =
+                 resolve([%{ref: 1, place: "Cabo Escuro", day: 1}], near_town(), search)
+
+        assert length(searched()) == 2
+      end
+    end
+
+    test "a near search by another name searches the words alone: a match there is offered, else its nearest" do
+      cape = place("Cabo Escuro", @cape, 21)
+      rooms = place("Harbour Rooms", @quay, 9)
+      tours = place("Escuro Tours", @quay, 22)
+      near = %{"Cabo Escuro" => found([rooms])}
+
+      assert {:ok, %{outcomes: [{1, {:offered, ^cape, {:not_near, @town}}}], records: [^cape]}} =
+               resolve(
+                 [%{ref: 1, place: "Cabo Escuro", day: 1}],
+                 near_town(),
+                 search_near(near, %{"Cabo Escuro" => found([tours, cape])})
+               )
+
+      assert length(searched()) == 2
+
+      assert {:ok, %{outcomes: [{1, {:offered, ^rooms}}], records: [^rooms]}} =
+               resolve(
+                 [%{ref: 1, place: "Cabo Escuro", day: 1}],
+                 near_town(),
+                 search_near(near, %{"Cabo Escuro" => found([tours])})
+               )
+
+      assert length(searched()) == 2
+    end
+
+    test "a near that found nothing by one name stays the day's anchor for the next" do
+      market = place("Mercado", @market, 2)
+
+      search =
+        search_near(
+          %{"Cabo Escuro" => found([]), "Mercado" => found([market])},
+          %{"Cabo Escuro" => found([])}
+        )
+
+      requests = [%{ref: 1, place: "Cabo Escuro", day: 1}, %{ref: 2, place: "Mercado", day: 1}]
+
+      assert {:ok, %{outcomes: outcomes, lookups: 2}} = resolve(requests, near_town(), search)
+      assert outcomes == [{1, {:none, {:not_near, @town}}}, {2, {:placed, market}}]
+
+      assert searched() == [
+               %{query: "Cabo Escuro", count: 5, anchor: {:location, @town}},
+               %{query: "Cabo Escuro", count: 5},
+               %{query: "Mercado", count: 5, anchor: {:location, @town}}
+             ]
+    end
+
+    # The near's search reached the place search, so the lookup was sent
+    # whatever stopped the words alone; what stopped it names the stop.
+    test "a lookup whose words-alone search was stopped unsent still counts as sent" do
+      limited = {:error, "rate_limited: slow down", %{attempt: 0, provider_code: "429"}}
+
+      search =
+        search_near(%{"Cabo Escuro" => {:ok, [], %{attempt: 1}}}, %{"Cabo Escuro" => limited})
+
+      assert {:ok,
+              %{
+                outcomes: [{1, {:none, :rate_limited}}],
+                sent: [1],
+                lookups: 1,
+                stop_reason: :rate_limited,
+                stop_code: "429"
+              }} = resolve([%{ref: 1, place: "Cabo Escuro", day: 1}], near_town(), search)
+
+      # So is one whose near the place search found no place by.
+      test_pid = self()
+
+      unknown = fn request ->
+        send(test_pid, {:searched, request})
+
+        case request do
+          %{anchor: {:location, "Varonne"}} ->
+            {:error, "invalid_location: Apple Maps found no place by that name", %{attempt: 1}}
+
+          _alone ->
+            limited
+        end
+      end
+
+      assert {:ok, %{outcomes: [{1, {:none, :rate_limited}}], sent: [1]}} =
+               resolve(
+                 [%{ref: 1, place: "Fish market", day: 1}],
+                 anchors(%{}, %{}, "Varonne"),
+                 unknown
+               )
     end
   end
 
@@ -720,8 +875,9 @@ defmodule FermixCore.Trips.LookupTest do
       search = search_by(%{"Spot 1" => busy, "Spot 2" => found([])})
       requests = Enum.map(1..2, &%{ref: &1, place: "Spot #{&1}", day: &1})
 
-      assert {:ok, %{outcomes: [{1, {:none, :computer_busy}}, {2, {:none, :not_found}}]} = result} =
-               resolve(requests, near_town(), search)
+      assert {:ok,
+              %{outcomes: [{1, {:none, :computer_busy}}, {2, {:none, {:not_near, @town}}}]} =
+                result} = resolve(requests, near_town(), search)
 
       assert result.stop_reason == nil
     end
@@ -849,20 +1005,34 @@ defmodule FermixCore.Trips.LookupTest do
 
       assert Lookup.heading({:unknown_near, "Varonne"}) ==
                ~s(No place found, and the place search found no place "Varonne" to search ) <>
-                 "near; give its day a near it can find (a town and its country)"
+                 "near; give its day a near it can find (a town or city with its region and " <>
+                 "country)"
+
+      assert Lookup.heading({:not_near, "Varonne, Kaldria"}) ==
+               ~s(No place by that name found near "Varonne, Kaldria" or anywhere; check the ) <>
+                 "place's name, or give its day a near it lies in (a town or city with its " <>
+                 "region and country)"
     end
 
     test "a heading for what a lookup with no anchor offered, saying to give near" do
       assert Lookup.offered_heading(:no_anchor) ==
                "Not placed, this trip has no place to search near, so each is only the first " <>
-                 "result anywhere: give its day a near (a town and its country) and the place " <>
-                 "again, or its link if that is the place meant"
+                 "result anywhere: give its day a near (a town or city with its region and " <>
+                 "country) and the place again, or its link if that is the place meant"
 
       assert Lookup.offered_heading({:unknown_near, "Varonne"}) ==
                ~s(Not placed, the place search found no place "Varonne" to search near, so ) <>
                  "each is only the first result anywhere: give its day a near it can find (a " <>
-                 "town and its country) and the place again, or its link if that is the place " <>
-                 "meant"
+                 "town or city with its region and country) and the place again, or its link " <>
+                 "if that is the place meant"
+    end
+
+    test "a heading for what a near that found nothing by the name offered from anywhere" do
+      assert Lookup.offered_heading({:not_near, "Varonne, Kaldria"}) ==
+               ~s(Not placed, nothing by that name was found near "Varonne, Kaldria", so each ) <>
+                 "is only the first place by that name anywhere: give its link if that is the " <>
+                 "place meant, else give its day a near it lies in (a town or city with its " <>
+                 "region and country) and the place again"
     end
 
     test "a place's link is the search's page for it, else the place's own site" do

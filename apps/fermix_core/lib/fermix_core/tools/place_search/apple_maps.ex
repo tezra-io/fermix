@@ -16,6 +16,13 @@ defmodule FermixCore.Tools.PlaceSearch.AppleMaps do
                          < {"query": ..., "anchor": {"kind": "coordinates", "latitude": ...,
                                                      "longitude": ..., "radius_meters": ...}}
 
+  A named location is geocoded and searched within its region, never under
+  25 km in radius about its centre; MapKit weighs nearness to the centre, so
+  the town's own place usually comes first, though it does not sort by
+  distance. Coordinates are searched `radius_meters` about them, 5 km unless
+  the request names one. Either region is required, so no result comes from
+  around the Mac.
+
   One request line goes in on stdin, never on the command line, where every
   process on the Mac could read the place being searched. Exit 0 prints
   `{"places": [...]}`; a failure prints `{"error": {"message": ...}}` in the

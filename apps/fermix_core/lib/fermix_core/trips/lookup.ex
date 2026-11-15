@@ -19,8 +19,8 @@ defmodule FermixCore.Trips.Lookup do
     words without case or accents, is placed; a name that is only later words
     of them ("Dinner at Prado") is not. Results are read in order and one with
     no usable location is skipped (C6). Failing
-    that, the first located result is offered, never applied: the caller names
-    it with its link, which a later call gives in the link form.
+    that, a result is offered, never applied (below): the caller names it with
+    its link, which a later call gives in the link form.
 
   ## Around the day (D10, D11)
 
@@ -32,14 +32,27 @@ defmodule FermixCore.Trips.Lookup do
   districts, and searching around the first stop placed put a landmark 7 km
   off at a business of its name beside that stop. A `near` is a place's name
   the place search finds by its own named anchor and searches the region of
-  (`{:location, near}`, as `place_search`'s `location`), so nothing here
-  finds a place by name, and no result's distance is read. The near is the
-  model's word for a town or city; nothing bounds its size, so a country given
-  as one searches the whole country, and a near the search finds somewhere
-  else misplaces as any wrong near would. "Placed" counts the stops this call
-  places: lookups run in waves, the first alone and then four at a time (C4,
-  C11), and with no near each wave searches around what the ones before it
-  placed.
+  (`{:location, near}`, as `place_search`'s `location`; on Apple Maps never
+  under 25 km about its centre, so a day reaches past the town's centre, and
+  MapKit weighs nearness to the centre, so the town's own place by a name
+  usually comes first), so nothing here finds a place by name, and no
+  result's distance is read. The near is the model's word for a town or city with its region and
+  country; nothing bounds its size, so a country given as one searches the
+  whole country, and a near the search finds somewhere else misplaces a place
+  of a name both have as any wrong near would. "Placed" counts the stops this
+  call places: lookups run in waves, the first alone and then four at a time
+  (C4, C11), and with no near each wave searches around what the ones before
+  it placed.
+
+  A near's search with no located result the name rule takes (the place lies
+  outside the near's region, or the place search read the near as a
+  same-named town elsewhere) searches the words alone once more. The first
+  located result there that the name rule takes is offered, never placed,
+  with why (`{:not_near, near}`); failing that, the near's first located
+  result is offered by another name as above; with neither, the stop is
+  `{:none, {:not_near, near}}`. A result found anywhere by another name is
+  never offered: it is noise. The near stays the day's anchor, since the
+  day's other stops may lie in it.
 
   With no anchor a lookup never places, whatever the name rule says: a generic
   name searched with nowhere to search lands wherever the search is. Its first
@@ -47,17 +60,20 @@ defmodule FermixCore.Trips.Lookup do
   (`:no_anchor`). A `near` the place search finds no place by
   (`invalid_location`) is no anchor either: the lookup searches its words
   alone once more and offers the same way (`{:unknown_near, near}`), and that
-  near is not asked again in the call.
+  near is not asked again in the call. Both offer their first located result
+  whatever its name.
 
   ## Bounds
 
   At most 40 lookups a call, a place repeated on one day looked up once; a
   call that would need one more is refused before any lookup runs (C30). A
-  link is no lookup. One rate limited answer stops every lookup not started
-  (C11), and so does one saying the Brave Search API key's plan does not
-  include place search, and, on a Mac of the home (M89 D13), one that cannot
-  heal within the call: no such Mac online (`computer_away`), Apple Maps
-  switched off there (`computer_off`), that Mac refusing it otherwise
+  link is no lookup. A lookup is one search, or two around a near (its own,
+  then the words alone), and either sending sends it (`sent`). One rate
+  limited answer stops every lookup not started (C11), and so does one saying
+  the Brave Search API key's plan does not include place search, and, on a
+  Mac of the home (M89 D13), one that cannot heal within the call: no such
+  Mac online (`computer_away`), Apple Maps switched off there
+  (`computer_off`), that Mac refusing it otherwise
   (`computer_refused`) or not answering in time (`computer_timed_out`); a
   busy Mac (`computer_busy`) stops nothing. The
   call's lookups have 45 s, and one not started or still running when they
@@ -66,11 +82,13 @@ defmodule FermixCore.Trips.Lookup do
   stop. On Brave a call's lookups queue for the home's one door to it: one
   whose turn would come after the 45 s sends nothing, and once an answer
   stops the call, the lookups queued behind it in its wave send nothing
-  either. On a Mac of the home each lookup is one invocation bounded well
-  inside the time left (`PlaceSearch.Computer`), so a Mac asleep with its
-  session up spends one bound, not the call. A lookup that sent nothing is not counted in
-  `lookups`; the result says what stopped the call (`stop_reason`) and the
-  place search's own code for it (`stop_code`). With no place search set up
+  either. On a Mac of the home each search is one invocation bounded well
+  inside the time left (`PlaceSearch.Computer`), and a lookup around a near
+  is one or two of them, the second only once the first has answered, so a
+  Mac asleep with its session up spends one bound, not the call. A lookup
+  that sent nothing is not counted in `lookups`; the result says what
+  stopped the call (`stop_reason`) and the place search's own code for it
+  (`stop_code`). With no place search set up
   here, every stop by words is left unplaced and the outcome says why (C28).
   A lookup emits no tool event of its own (`PlaceSearch.lookup/3`, C12).
   A stop whose lookup could not run for a reason that heals by waiting is
@@ -142,8 +160,12 @@ defmodule FermixCore.Trips.Lookup do
   @typedoc "Where one lookup searches: around a point, or near a place by its name."
   @type anchor :: {:coordinates, float(), float(), pos_integer()} | {:location, String.t()}
 
-  @typedoc "Why a lookup had no anchor: none at all, or a near the place search finds no place by."
-  @type unanchored :: :no_anchor | {:unknown_near, String.t()}
+  @typedoc """
+  Why a lookup offers a place it found anywhere: no anchor at all, a near the
+  place search finds no place by, or a near whose search found nothing by the
+  words' name.
+  """
+  @type unanchored :: :no_anchor | {:unknown_near, String.t()} | {:not_near, String.t()}
 
   @typedoc """
   One search of the place search in force (`PlaceSearch.lookup/3`), told how
@@ -181,6 +203,7 @@ defmodule FermixCore.Trips.Lookup do
           | {:failed, String.t()}
           | {:no_backend, String.t()}
           | {:unknown_near, String.t()}
+          | {:not_near, String.t()}
 
   @type outcome ::
           {:placed, Backend.place()}
@@ -360,25 +383,40 @@ defmodule FermixCore.Trips.Lookup do
 
   def heading({:unknown_near, near}) when is_binary(near) do
     "No place found, and the place search found no place #{Jason.encode!(near)} to search " <>
-      "near; give its day a near it can find (a town and its country)"
+      "near; give its day a near it can find (a town or city with its region and country)"
+  end
+
+  def heading({:not_near, near}) when is_binary(near) do
+    "No place by that name found near #{Jason.encode!(near)} or anywhere; check the place's " <>
+      "name, or give its day a near it lies in (a town or city with its region and country)"
   end
 
   @doc """
-  The answer's words before the stops a lookup with no anchor offered a
-  result for (D10): that the result is only the first anywhere, and to give
-  the stop's day a `near`.
+  The answer's words before the stops a lookup offered a place found anywhere
+  for (D10): with no anchor or a near the place search finds no place by,
+  that the result is only the first anywhere; with nothing by the name near
+  the near, that it is only the first by that name anywhere. Each says what a
+  `near` is.
   """
   @spec offered_heading(unanchored()) :: String.t()
   def offered_heading(:no_anchor) do
     "Not placed, this trip has no place to search near, so each is only the first result " <>
-      "anywhere: give its day a near (a town and its country) and the place again, or its " <>
-      "link if that is the place meant"
+      "anywhere: give its day a near (a town or city with its region and country) and the " <>
+      "place again, or its link if that is the place meant"
   end
 
   def offered_heading({:unknown_near, near}) when is_binary(near) do
     "Not placed, the place search found no place #{Jason.encode!(near)} to search near, so " <>
-      "each is only the first result anywhere: give its day a near it can find (a town and " <>
-      "its country) and the place again, or its link if that is the place meant"
+      "each is only the first result anywhere: give its day a near it can find (a town or " <>
+      "city with its region and country) and the place again, or its link if that is the " <>
+      "place meant"
+  end
+
+  def offered_heading({:not_near, near}) when is_binary(near) do
+    "Not placed, nothing by that name was found near #{Jason.encode!(near)}, so each is only " <>
+      "the first place by that name anywhere: give its link if that is the place meant, else " <>
+      "give its day a near it lies in (a town or city with its region and country) and the " <>
+      "place again"
   end
 
   @doc """
@@ -561,10 +599,10 @@ defmodule FermixCore.Trips.Lookup do
   # The request a lookup sends, and how it is anchored: `:anchored`, `{:near,
   # near}` until the place search answers, `:no_anchor`, or a near this call
   # already found unknown, whose words are searched alone. A near's region
-  # bounds its search, never ranks it: the Apple Maps helper geocodes the near
-  # and searches its region as required (`regionPriority = .required`), so no
-  # result outside it comes back, and the first that passes the name rule is
-  # placed, with no distance read here.
+  # bounds its search: the Apple Maps helper geocodes the near and searches at
+  # least 25 km about it as required (`regionPriority = .required`), so no
+  # result outside it comes back, MapKit weighs nearness to its centre, and the
+  # first that passes the name rule is placed, with no distance read here.
   defp plan(%{place: words, day: day}, state) do
     base = %{query: String.trim(words), count: @count}
 
@@ -582,19 +620,31 @@ defmodule FermixCore.Trips.Lookup do
     end
   end
 
-  # A near the place search finds no place by is no anchor: its words are
-  # searched alone, once, and what they find is only offered.
+  # A near's search places by the name rule. With no place by the words' name
+  # in it, the words are searched alone once (`{:not_near, near}`), and a near
+  # the place search finds no place by is no anchor: its words are searched
+  # alone, once (`{:unknown_near, near}`). Either way what they find is only
+  # offered, and the near's own answer rides along: it sent the lookup whatever
+  # the second search did, and a near's results hold its nearest by another
+  # name.
   defp searched({request, {:near, near}}, timed_search) do
     case call(timed_search, request) do
-      {:error, "invalid_location" <> _rest, _trace} ->
-        {{:unknown_near, near}, call(timed_search, Map.delete(request, :anchor))}
+      {:error, "invalid_location" <> _rest, _trace} = unknown ->
+        {{:unknown_near, near}, alone(timed_search, request), unknown}
+
+      {:ok, places, _trace} = answer when is_list(places) ->
+        if Enum.any?(located(places), &words_match?(request.query, &1.name)),
+          do: {:anchored, answer, nil},
+          else: {{:not_near, near}, alone(timed_search, request), answer}
 
       answer ->
-        {:anchored, answer}
+        {:anchored, answer, nil}
     end
   end
 
-  defp searched({request, mode}, timed_search), do: {mode, call(timed_search, request)}
+  defp searched({request, mode}, timed_search), do: {mode, call(timed_search, request), nil}
+
+  defp alone(timed_search, request), do: call(timed_search, Map.delete(request, :anchor))
 
   # The place search in force is told how it may send, as it sends.
   defp call({search, terms}, request) when is_function(search, 2),
@@ -602,28 +652,49 @@ defmodule FermixCore.Trips.Lookup do
 
   defp call({search, _terms}, request) when is_function(search, 1), do: search.(request)
 
-  defp judged({:ok, {mode, answer}}, lookup),
-    do: {lookup, outcome(answer, lookup.place, mode), mode, facts(answer)}
+  defp judged({:ok, {mode, answer, near_answer}}, lookup) do
+    {outcome, read} = outcome(answer, near_answer, lookup.place, mode)
+    {lookup, outcome, mode, facts(read, Enum.reject([answer, near_answer], &is_nil/1))}
+  end
 
   # Stopped while it ran, it may have sent.
   defp judged({:exit, :timeout}, lookup),
     do: {lookup, {:none, :deadline}, nil, %{sent?: true, code: nil, searched_with: nil}}
 
-  # Whether the answer's search reached the place search (one that says it
-  # sent nothing, `attempt: 0`, did not), the place search's own code, and
-  # what searched, in the owner's words.
-  defp facts({_ok_or_error, _answer, trace}) when is_map(trace),
+  # Whether the lookup reached the place search: one of its searches did (one
+  # that says it sent nothing, `attempt: 0`, did not). The place search's own
+  # code, and what searched in the owner's words, come from the answer the
+  # outcome was read from.
+  defp facts({_ok_or_error, _value, trace}, answers) when is_map(trace),
     do: %{
-      sent?: Map.get(trace, :attempt) != 0,
+      sent?: Enum.any?(answers, &reached?/1),
       code: Map.get(trace, :provider_code),
       searched_with: Map.get(trace, :searched_with)
     }
 
-  defp outcome({:ok, places, _trace}, words, mode) when is_list(places),
-    do: places |> Enum.filter(&located?/1) |> choose(words, mode)
+  defp reached?({_ok_or_error, _value, trace}) when is_map(trace),
+    do: Map.get(trace, :attempt) != 0
 
-  defp outcome({:error, reason, _trace}, _words, _mode) when is_binary(reason),
-    do: {:none, failure(reason)}
+  # What a lookup came to, and the answer it was read from. With nothing by
+  # the name near the near, the words alone offer the first place by that
+  # name, else the near's nearest by another name is offered as it would be.
+  defp outcome({:ok, places, _trace} = answer, near_answer, words, {:not_near, _near} = why)
+       when is_list(places) do
+    {:ok, near_places, _near_trace} = near_answer
+
+    case {Enum.find(located(places), &words_match?(words, &1.name)), located(near_places)} do
+      {%{} = place, _near_located} -> {{:offered, place, why}, answer}
+      {nil, [nearest | _rest]} -> {{:offered, nearest}, near_answer}
+      {nil, []} -> {{:none, why}, answer}
+    end
+  end
+
+  defp outcome({:ok, places, _trace} = answer, _near_answer, words, mode) when is_list(places),
+    do: {places |> located() |> choose(words, mode), answer}
+
+  defp outcome({:error, reason, _trace} = answer, _near_answer, _words, _mode)
+       when is_binary(reason),
+       do: {{:none, failure(reason)}, answer}
 
   defp failure("rate_limited" <> _rest), do: :rate_limited
   defp failure("plan_excludes_place_search:" <> _rest), do: :plan_excludes_place_search
@@ -720,6 +791,8 @@ defmodule FermixCore.Trips.Lookup do
     radius = middle |> Geo.spread_m(points) |> max(@min_radius_m) |> min(@max_radius_m)
     {:coordinates, middle.latitude, middle.longitude, radius}
   end
+
+  defp located(places), do: Enum.filter(places, &located?/1)
 
   defp located?(%{name: name, location: %{latitude: latitude, longitude: longitude}})
        when is_binary(name) and name != "" and is_number(latitude) and latitude >= -90 and

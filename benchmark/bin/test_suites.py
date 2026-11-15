@@ -790,6 +790,7 @@ def test_the_shipped_numbered_rubrics_parse():
                       "night_market_says_move_the_dinner": 3,
                       "sunday_walking_order": 3, "saturday_less_walking": 3,
                       "museum_on_vessmark_day_one": 4, "museum_on_brisa_day_one": 4,
+                      "sintra_cape": 3, "interlaken_jungfraujoch": 3, "portland_head_light": 3,
                       # lists.yaml
                       "batteries": 2, "garden_and_kitchen": 3, "groceries": 2,
                       "hardware": 2, "landing_page": 2, "newsletter": 2,

@@ -29,6 +29,9 @@ defmodule FermixCore.Trips.RegistryLookupTest do
   @tower %{latitude: 41.1402, longitude: -8.6113}
   @quay %{latitude: 41.1408, longitude: -8.6142}
   @town "Varonne, Portugal"
+  @not_near ~s(No place by that name found near "Varonne, Portugal" or anywhere; check the ) <>
+              "place's name, or give its day a near it lies in (a town or city with its " <>
+              "region and country)"
   # The line an answer ends with when a place given was not placed.
   @report "Tell the owner which stops were placed, which were offered, each with its link " <>
             "where this answer gives one, and which were not placed and why, as this " <>
@@ -229,7 +232,7 @@ defmodule FermixCore.Trips.RegistryLookupTest do
       {"Cais Velho, Ribeira", {:error, "rate_limited: slow down", %{}},
        "Not looked up yet, the place search is rate limited; these stops are saved and will " <>
          "be placed if it allows more searches within a week: "},
-      {"Doca Seca", found([]), "No place found: "},
+      {"Doca Seca", found([]), @not_near <> ": "},
       {"Ponte Nova", {:error, "network: unreachable", %{}},
        "Not looked up, the place search failed (network: unreachable): "},
       {"Check in", found([place("Harbour Rooms", @tower, 9)]),
@@ -254,7 +257,7 @@ defmodule FermixCore.Trips.RegistryLookupTest do
 
     assert answer.text ==
              "Varonne · rev #{rev} · nothing changed · 1 day, 1 stop · 0 placed\n" <>
-               ~s|No place found: [2] "Quay" (place unchanged).\n| <> @report
+               @not_near <> ~s|: [2] "Quay" (place unchanged).\n| <> @report
 
     assert [%{rows: []}] = answer.touched
 
@@ -287,7 +290,10 @@ defmodule FermixCore.Trips.RegistryLookupTest do
                "https://maps.apple.com/place?place-id=I9"
 
     assert %{place: nil} = Enum.find(rows!(ctx, "Varonne"), &(&1.n == 2))
-    assert [%{query: "Check in"}] = searched()
+
+    # Nothing by the name near the town: the words alone were searched once too.
+    assert [%{query: "Check in", anchor: {:location, @town}}, alone] = searched()
+    assert alone == %{query: "Check in", count: 5}
 
     assert {:ok, linked} =
              edit(
@@ -428,6 +434,38 @@ defmodule FermixCore.Trips.RegistryLookupTest do
     assert %{stop_reason: :rate_limited, stop_code: nil} = metadata
   end
 
+  # Nothing by the name near the town nor anywhere was looked up and not
+  # found: the event counts it so, never as a stop that was not looked up.
+  test "a near that finds nothing by the name, nor anywhere, counts as not found", ctx do
+    session = "main-#{System.unique_integer([:positive])}"
+    TelemetryCapture.attach([[:fermix, :trip, :edit]], session_id: session)
+
+    ops = [
+      %{"op" => "create", "near" => @town},
+      %{"op" => "add", "text" => "Dock", "day" => 1, "place" => "Doca Seca"}
+    ]
+
+    context =
+      Map.merge(@owner, %{
+        place_lookup: searching(%{"Doca Seca" => found([])}),
+        session_id: session
+      })
+
+    opts = [
+      repo: ctx.repo,
+      now: @now,
+      reply_blocks: ctx.holder,
+      notifier: fn _c -> :ok end,
+      placer: fn -> :ok end
+    ]
+
+    assert {:ok, answer} = Registry.edit(%{"trip" => "Varonne", "ops" => ops}, context, opts)
+    assert answer.text =~ @not_near <> ~s(: [2] "Dock".)
+
+    assert_receive {:telemetry, [:fermix, :trip, :edit], measurements, _metadata}
+    assert %{lookups: 1, placed: 0, offered: 0, not_found: 1, not_looked_up: 0} = measurements
+  end
+
   test "a key without place search stops the lookups, and the event says so with its code",
        ctx do
     session = "main-#{System.unique_integer([:positive])}"
@@ -513,8 +551,8 @@ defmodule FermixCore.Trips.RegistryLookupTest do
       assert answer.text ==
                "Varonne · rev 1 · created; 1 stop added · 1 day, 1 stop · 0 placed\n" <>
                  "Not placed, this trip has no place to search near, so each is only the " <>
-                 "first result anywhere: give its day a near (a town and its country) and the " <>
-                 "place again, or its link if that is the place meant:\n" <>
+                 "first result anywhere: give its day a near (a town or city with its region " <>
+                 "and country) and the place again, or its link if that is the place meant:\n" <>
                  ~s([2] "Fish market": "Atlanta Fish Market, Pharr Road, Atlanta" · ) <>
                  "https://maps.apple.com/place?place-id=I77\n" <> @report
 
@@ -600,8 +638,8 @@ defmodule FermixCore.Trips.RegistryLookupTest do
       assert answer.text =~
                ~s(Not placed, the place search found no place "Varonne" to search near, so ) <>
                  "each is only the first result anywhere: give its day a near it can find (a " <>
-                 "town and its country) and the place again, or its link if that is the place " <>
-                 "meant:\n" <>
+                 "town or city with its region and country) and the place again, or its link " <>
+                 "if that is the place meant:\n" <>
                  ~s([2] "Fish market": "Atlanta Fish Market, Pharr Road, Atlanta" · )
 
       assert searched() == [

@@ -6,8 +6,8 @@ defmodule FermixCore.Tools.TripEdit do
   name or a link a place search in this conversation returned; Fermix looks a
   name up itself, at most 40 a call, near the day's or the trip's `near`,
   else around the stop's day (D10, D11), and the answer says what each came
-  to: placed, offered by another name or with no place to search near, with
-  its link, or not placed and why. The answer is the trip's line, never the
+  to: placed, offered by another name, with no place to search near or by
+  its name found away from the near, with its link, or not placed and why. The answer is the trip's line, never the
   whole trip.
 
   After outside content every op runs (D9), and a stop the call adds or gives
@@ -47,8 +47,8 @@ defmodule FermixCore.Tools.TripEdit do
     "Make and change the owner's trips as the owner asks; a call lands whole or not at " <>
       "all. Every stop at a place gives place: the place's own name, never the activity, or " <>
       "a link a search returned; a stop without one is never looked up. Give near when " <>
-      "making a trip: a town or city and its country, like Lisbon, Portugal, never a " <>
-      "country, a region, a district or a landmark; a day in a different town from the " <>
+      "making a trip: a town or city with its region and country, never a country, a " <>
+      "region, a district or a landmark alone; a day in a different town from the " <>
       "trip's gets its own near. Places are looked up within it. An unknown country is no " <>
       "reason to wait: make the trip without a near, and ask the owner for the town and its " <>
       "country."

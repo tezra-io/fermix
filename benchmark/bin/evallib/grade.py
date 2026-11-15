@@ -382,6 +382,11 @@ def _tool_inputs_text(view: TurnView) -> str:
     return json.dumps(inputs, ensure_ascii=False, sort_keys=True, default=str)
 
 
+def _tool_outputs_text(view: TurnView) -> str:
+    outputs = [span.get("output") for span in view.tool_spans]
+    return json.dumps(outputs, ensure_ascii=False, sort_keys=True, default=str)
+
+
 def _tool_evidence_text(view: TurnView) -> str:
     """Every tool span's input and output, serialized the way the inputs are, so
     one pattern style reads both (quotes inside a recorded text come out `\\"`)."""
@@ -460,6 +465,16 @@ def grade(trace: dict, spans: list[dict], expect: dict,
         missing = [pattern for pattern in patterns if re.search(pattern, inputs_text) is None]
         add("tool_inputs_match_all", not missing,
             f"all input patterns present; missing={missing or 'none'}")
+
+    if "tool_outputs_match_all" in expect:
+        # What the tools themselves said came of the turn's calls, such as a
+        # trip's answer naming a stop placed: a positive floor on the outputs
+        # alone, so a call that only asked for it never passes.
+        patterns = expect["tool_outputs_match_all"]
+        outputs_text = _tool_outputs_text(v)
+        missing = [pattern for pattern in patterns if re.search(pattern, outputs_text) is None]
+        add("tool_outputs_match_all", not missing,
+            f"all output patterns present; missing={missing or 'none'}")
 
     if "tool_evidence_match_none" in expect:
         # A ban on an action, read from the tools' own record of it: an input that

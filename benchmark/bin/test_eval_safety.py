@@ -3126,6 +3126,154 @@ def test_rearrangement_gate_fails_any_change_to_the_fixed_stops_time_or_day(span
     assert gate.conclusive
 
 
+def _outputs_gate(spans, patterns):
+    trace = {
+        "_eval_trace_complete": True,
+        "total_estimated_cost": 0.0,
+        "usage": {"total_tokens": 12},
+        "metadata": {"iterations": 1},
+    }
+    gates = grade.grade(trace, spans, {"tool_outputs_match_all": patterns}, elapsed_ms=1.0)
+    return next(item for item in gates if item.key == "tool_outputs_match_all")
+
+
+def _landmark_floor(case_id):
+    suite = next(s for s in suites.load_all(os.path.join(os.path.dirname(HERE), "suites"))
+                 if s.name == "trips")
+    case = next(c for sc in suite.scenarios for c in sc.cases if c.id == case_id)
+    return case.turns[0].expect["tool_outputs_match_all"]
+
+
+def _landmark_edit(words, answer):
+    return {"type": "tool", "name": "trip_edit",
+            "input": {"text": '%{"ops" => [%{"day" => 1, "op" => "add", "place" => "'
+                      + words + '", "text" => "' + words + '"}], "trip" => "Day out"}'},
+            "output": {"text": answer}}
+
+
+_LANDMARKS = [("sintra_cape", "Cabo da Roca", "Estrada do Cabo da Roca s/n, Colares"),
+              ("interlaken_jungfraujoch", "Jungfraujoch", "Jungfraujoch, Switzerland"),
+              ("portland_head_light", "Portland Head Light", "1000 Shore Rd, Cape Elizabeth")]
+_DAY_LINE = "Day out · rev 1 · created; 2 stops added · 1 day, 2 stops"
+_LINK = "https://maps.apple.com/place?place-id=I9"
+
+
+# Recorded shapes of trip_edit's answer (Trips.Render.answer/3): a placed stop's
+# line is `[n] "words": "name, address"` and ends there, and a stop a lookup
+# placed is named again in a `Placed with <what searched>: [n], [m].` line; a
+# stop its link placed is in none. An offer goes on with its link; a stop not
+# placed is named under its heading with no place.
+def _placed_answers(words, address):
+    return [
+        f'{_DAY_LINE} · 1 placed\n[3] "{words}": "{words}, {address}"\n'
+        'Placed with Apple Maps: [3].\nNot placed, nearest by another name:\n'
+        f'[2] "Old town walk": "Old Town Tours" · {_LINK}',
+        f'{_DAY_LINE} · 2 placed\n[2] "Old town walk": "Old Town, Main Street"\n'
+        f'[3] "Afternoon at {words}": "{words}, {address}"\nPlaced with Brave: [2], [3].',
+        f'{_DAY_LINE} · 1 placed\n[3] {_FLAG}"{words}": "{words}, {address}"\n'
+        'Placed with Apple Maps on studio Mac: [3].',
+        f'{_DAY_LINE} · 2 placed\n[3] "{words}": "{words}, {address}"\n'
+        '[13] "Old town walk": "Old Town, Main Street"\n'
+        'Placed with Apple Maps on studio Mac: [13].\nPlaced with Apple Maps: [3].',
+    ]
+
+
+# Placed by its link, so no lookup placed it: the fix under test may be absent.
+def _link_placed_answers(words, address):
+    return [
+        f'{_DAY_LINE} · 1 placed\n[3] "{words}": "{words}, {address}"',
+        f'{_DAY_LINE} · 2 placed\n[2] "Old town walk": "Old Town, Main Street"\n'
+        f'[3] "{words}": "{words}, {address}"\nPlaced with Apple Maps: [2].',
+        f'{_DAY_LINE} · 2 placed\n[3] "{words}": "{words}, {address}"\n'
+        '[13] "Old town walk": "Old Town, Main Street"\nPlaced with Apple Maps: [13].',
+    ]
+
+
+def _unplaced_answers(words, address):
+    return [
+        f'{_DAY_LINE} · 0 placed\nNot placed, nearest by another name:\n'
+        f'[3] "{words}": "Hotel Restaurant Alpen, {address}" · {_LINK}',
+        f'{_DAY_LINE} · 0 placed\nNot placed, nothing by that name was found near '
+        '"Old Town, Region, Country", so each is only the first place by that name '
+        'anywhere: give its link if that is the place meant, else give its day a near it '
+        'lies in (a town or city with its region and country) and the place again:\n'
+        f'[3] "{words}": "{words}, {address}" · {_LINK}',
+        f'Day out · rev 2 · edited [3] "{words}" · 1 day, 2 stops · 0 placed\n'
+        'Not placed, nearest by another name:\n'
+        f'[3] "{words}" (place unchanged): "{words}, {address}" · {_LINK}',
+        f'{_DAY_LINE} · 0 placed\nNo place found: [3] "{words}".',
+        f'{_DAY_LINE} · 0 placed\nNo place by that name found near "Old Town, Region, '
+        f'Country" or anywhere; check the place\'s name, or give its day a near it lies in '
+        f'(a town or city with its region and country): [3] "{words}".',
+    ]
+
+
+@pytest.mark.parametrize("case_id,words,address", _LANDMARKS)
+def test_landmark_floor_passes_the_landmark_placed_by_its_line(case_id, words, address):
+    floor = _landmark_floor(case_id)
+    for answer in _placed_answers(words, address):
+        gate = _outputs_gate([_landmark_edit(words, answer)], floor)
+        assert gate.passed, (answer, gate.detail)
+
+
+@pytest.mark.parametrize("case_id,words,address", _LANDMARKS)
+def test_landmark_floor_fails_an_offer_a_stop_not_placed_or_one_its_link_placed(
+        case_id, words, address):
+    floor = _landmark_floor(case_id)
+    search = {"type": "tool", "name": "place_search",
+              "input": {"text": f'%{{"query" => "{words}"}}'},
+              "output": {"text": f'{{"places":[{{"address":"{address}","name":"{words}"}}],'
+                                 f'"query":"{words}"}}'}}
+    for answer in _unplaced_answers(words, address) + _link_placed_answers(words, address):
+        gate = _outputs_gate([search, _landmark_edit(words, answer)], floor)
+        assert not gate.passed, (answer, gate.detail)
+
+
+# The old engine said "No place found"; a model could then search and give the
+# link, which places the stop with no lookup. That turn must not pass the floor.
+@pytest.mark.parametrize("case_id,words,address", _LANDMARKS)
+def test_landmark_floor_fails_a_stop_placed_by_its_link_after_no_place_found(
+        case_id, words, address):
+    floor = _landmark_floor(case_id)
+    missed = _landmark_edit(words, f'{_DAY_LINE} · 0 placed\nNo place found: [3] "{words}".')
+    linked = _landmark_edit(_LINK, f'Day out · rev 2 · edited [3] "{words}" · 1 day, 2 stops · '
+                                   f'1 placed\n[3] "{words}": "{words}, {address}"')
+    gate = _outputs_gate([missed, linked], floor)
+    assert not gate.passed, gate.detail
+
+
+def test_tool_outputs_gate_reads_the_outputs_alone_and_is_never_sticky():
+    asked = {"type": "tool", "name": "trip_edit", "input": {"text": "Cabo da Roca"},
+             "output": {"text": "0 placed"}}
+    told = {"type": "tool", "name": "trip_edit", "input": {"text": "add"},
+            "output": {"text": "Cabo da Roca placed"}}
+    assert not _outputs_gate([asked], [r"Cabo da Roca"]).passed
+    assert _outputs_gate([asked, told], [r"Cabo da Roca", r"\bplaced\b"]).passed
+    assert "tool_outputs_match_all" not in suites.ALWAYS_STICKY_GATES
+    assert "tool_outputs_match_all" not in suites.STICKY_GATE_KEYS
+
+
+def test_tool_outputs_gate_refuses_an_invalid_regex(tmp_path):
+    body = """suite: outputs_regex
+title: Outputs regex
+risk: isolated_mutation
+scenarios:
+  - id: example
+    title: Example
+    tags: [example]
+    cases:
+      - id: one
+        query: one
+        expect:
+          tool_outputs_match_all: ['(unclosed']
+"""
+    (tmp_path / "outputs_regex.yaml").write_text(body)
+    with pytest.raises(suites.SuiteError) as raised:
+        suites.load_all(str(tmp_path))
+    assert any("tool_outputs_match_all" in problem and "invalid regex" in problem
+               for problem in raised.value.problems), raised.value.problems
+
+
 def test_tool_evidence_gate_is_always_sticky():
     assert "tool_evidence_match_none" in suites.ALWAYS_STICKY_GATES
     assert "tool_evidence_match_none" in run_eval.NEGATIVE_GATES

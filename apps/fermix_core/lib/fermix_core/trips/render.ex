@@ -74,9 +74,10 @@ defmodule FermixCore.Trips.Render do
 
   @typedoc """
   A stop a call gave a place to, as it now stands, with what its place came
-  to: placed (the record it keeps), offered by another name or with no place
-  to search near (the search's own record) or not placed and why; `kept` when
-  an edit's stop kept the place it had because the lookup placed nothing.
+  to: placed (the record it keeps), offered by another name, with no place to
+  search near or by its name found away from the near (the search's own
+  record), or not placed and why; `kept` when an edit's stop kept the place
+  it had because the lookup placed nothing.
   """
   @type placement :: %{
           required(:row) => map(),
@@ -475,8 +476,8 @@ defmodule FermixCore.Trips.Render do
   defp linked?(place),
     do: Enum.any?([:source_url, :canonical_url], &(Map.get(place, &1) not in [nil, ""]))
 
-  # Offered with no place to search near (D10), by why, in the order each
-  # first comes up.
+  # Offered from anywhere, by why, in the order each first comes up: with no
+  # place to search near (D10), or by its name found away from the near.
   defp unanchored_lines(placements) do
     placements
     |> Enum.flat_map(fn

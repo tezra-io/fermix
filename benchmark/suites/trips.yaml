@@ -8,8 +8,8 @@
 # (D9); a page's instruction to remove the trip or move a booked stop is not
 # followed (D9); a trip to a named town is made with that town as its `near`, and a
 # day across a city's districts with the town, never the country (D11); "my
-# trip" is the one to come, never one that is over (D14); and the shared form
-# carries no note.
+# trip" is the one to come, never one that is over (D14); a landmark outside a
+# day's town centre is placed; and the shared form carries no note.
 #
 # WHAT A TURN CAN DRIVE. `fermix ask` is the owner's private chat (the CLI marks its
 # turns `chat_type: private`), so trip_read and trip_edit are on the surface, and
@@ -20,10 +20,14 @@
 # `bin/evallib/companion.py` cannot do yet (no `trips_pull`, no block gate): no case
 # here pretends to.
 #
-# PLACES. Every place here is invented, so a lookup finds nothing or offers another
-# name, and the stops are saved without a place; a town given as a trip's `near` is
-# found by no place search either, so its lookups only offer (D10). The gates never
-# depend on placing, only the rubrics read what the answer said about each place.
+# PLACES. Every place here is invented, so a lookup finds nothing, offers another
+# name, or offers the same name found away from the trip's town, and the stops are
+# saved without a place; a town given as a trip's `near` is found by no place
+# search either, so its lookups only offer (D10). The gates never depend on
+# placing, only the rubrics read what the answer said about each place. The one
+# exception is landmark_outside_the_town: its places are real and public, since
+# it tests the place search's own region around a real town, and its floor is
+# that a lookup placed the landmark.
 # city_day_across_districts names common landmarks (a church, a museum) in invented
 # towns, so its lookups offer one found elsewhere, by its link, which its floor
 # reads: that case needs a place search ready.
@@ -57,7 +61,7 @@
 # every case ends with a turn in which the owner removes the trip it made. A case
 # that fails before that turn leaves its trip behind; a later run's create is then
 # refused as a title in use, so reseed the home when a run reports title_taken. Every
-# name, place and date is invented.
+# name, place and date is invented, but landmark_outside_the_town's places (PLACES).
 #
 # PRECONDITIONS. Trips need no switch and no consent gate, only the memory store,
 # which an eval home has. The outside-content cases may read the page with
@@ -299,6 +303,107 @@ scenarios:
           3. The second reply names the Igreja de São Roque and the Botanical Garden
              with their times.
           4. The third reply confirms the trip was removed.
+
+  # A LANDMARK OUTSIDE THE TOWN'S CENTRE. The one scenario of real public places,
+  # since what it tests is the place search's own region around a real town: a
+  # day's near is searched at least 25 km about it on Apple Maps, so a cape, a
+  # mountain station or a lighthouse a day reaches is found. Before, the near's
+  # region was the geocoder's own, the town's centre alone: Cabo da Roca near
+  # Sintra found nothing, and the Jungfraujoch near Interlaken only a hotel by
+  # another name. portland_head_light names no state: the lighthouse is in Maine,
+  # "Portland, United States" is Oregon's, and trip_edit's guidance gives a near
+  # its region; the model named Maine on the old guidance too, so this case guards
+  # the wording and proves nothing about it. The floor is the engine's own answer
+  # that a lookup placed the landmark stop: trip_edit's placed line,
+  # `[n] "words": "<place's name and address>"`, ending its line (an offer goes on
+  # with ` · <link>`, and a stop not placed is named under its heading with no
+  # place), and its `[n]` again in the same answer's `Placed with <what
+  # searched>: [n], [m].` line, which names only the stops a lookup placed
+  # (`tool_outputs_match_all`, the outputs alone, the `[n]` matched by a
+  # backreference within that one answer's text). A stop its link placed is in no
+  # such line, so a model that searched and gave the link after the old engine's
+  # "No place found" does not pass. The other stop's outcome is the rubric's.
+  # These need a place search ready, as city_day_across_districts does.
+  - id: landmark_outside_the_town
+    title: "A day in a town with a landmark outside its centre: the landmark is placed"
+    risk: isolated_mutation
+    tags: [trips, places, near]
+    cases:
+      - id: sintra_cape
+        turns:
+          - query: >-
+              Plan Tuesday 14 September 2027 in Sintra, Portugal for me: Pena Palace
+              at 10 in the morning, then Cabo da Roca at 16:00.
+            expect:
+              tools_any: [trip_edit]
+              tool_inputs_match_all: ['\bop\W+=>\W+create\b', "2027-09-14"]
+              tool_outputs_match_all:
+                - '\[(\d+)\] (?:\(added after outside content\) )?\\"[^"\\]*\\": \\"[^"\\]*(?i:\bcabo da roca\b)[^"\\]*\\"\\n(?:(?:[^"\\]|\\.)*?\\n)?Placed with [^"\\]*: (?:\[\d+\], )*\[\1\][,.]'
+              no_tool_errors: false
+          - query: "Thanks, you can remove the Sintra trip now."
+            expect:
+              tools_any: [trip_edit]
+              tool_inputs_match_all: ['\bop\W+remove_trip\b']
+        expect:
+          max_cost_usd: 1.5
+        rubric: |
+          1. The first reply confirms a one-day trip on Tuesday 14 September 2027 in
+             Sintra with Pena Palace at 10:00 and Cabo da Roca at 16:00.
+          2. The first reply calls no stop placed that the tool evidence shows offered
+             or not placed, and gives no stop an address, town or link the tool
+             evidence does not show for it.
+          3. The second reply confirms the trip was removed.
+      - id: interlaken_jungfraujoch
+        turns:
+          - query: >-
+              Set up Thursday 7 October 2027 in Interlaken, Switzerland for me: a
+              picnic on the Höhematte at noon, then the train up to the Jungfraujoch
+              at 14:00.
+            expect:
+              tools_any: [trip_edit]
+              tool_inputs_match_all: ['\bop\W+=>\W+create\b', "2027-10-07"]
+              tool_outputs_match_all:
+                - '\[(\d+)\] (?:\(added after outside content\) )?\\"[^"\\]*\\": \\"[^"\\]*(?i:\bjungfraujoch\b)[^"\\]*\\"\\n(?:(?:[^"\\]|\\.)*?\\n)?Placed with [^"\\]*: (?:\[\d+\], )*\[\1\][,.]'
+              no_tool_errors: false
+          - query: "Remove the Interlaken trip, please."
+            expect:
+              tools_any: [trip_edit]
+              tool_inputs_match_all: ['\bop\W+remove_trip\b']
+        expect:
+          max_cost_usd: 1.5
+        rubric: |
+          1. The first reply confirms a one-day trip on Thursday 7 October 2027 in
+             Interlaken with the picnic on the Höhematte at 12:00 and the Jungfraujoch
+             at 14:00.
+          2. The first reply calls no stop placed that the tool evidence shows offered
+             or not placed, and gives no stop an address, town or link the tool
+             evidence does not show for it.
+          3. The second reply confirms the trip was removed.
+      - id: portland_head_light
+        turns:
+          - query: >-
+              Make me a plan for Saturday 18 September 2027 in Portland: the Old Port
+              in the morning and Portland Head Light in the afternoon.
+            expect:
+              tools_any: [trip_edit]
+              tool_inputs_match_all: ['\bop\W+=>\W+create\b', "2027-09-18"]
+              tool_outputs_match_all:
+                - '\[(\d+)\] (?:\(added after outside content\) )?\\"[^"\\]*\\": \\"[^"\\]*(?i:\bportland head light\b)[^"\\]*\\"\\n(?:(?:[^"\\]|\\.)*?\\n)?Placed with [^"\\]*: (?:\[\d+\], )*\[\1\][,.]'
+              no_tool_errors: false
+          - query: "Thanks, you can remove the Portland trip."
+            expect:
+              tools_any: [trip_edit]
+              tool_inputs_match_all: ['\bop\W+remove_trip\b']
+        expect:
+          max_cost_usd: 1.5
+        rubric: |
+          1. The first reply confirms a one-day trip on Saturday 18 September 2027 in
+             Portland with the Old Port in the morning and Portland Head Light in the
+             afternoon, and never puts the day in Portland, Oregon.
+          2. The first reply calls no stop placed that the tool evidence shows offered
+             or not placed, and gives no stop an address, town or link the tool
+             evidence does not show for it.
+          3. The second reply confirms the trip was removed.
 
   - id: week_and_one_day
     title: "A week from one sentence, then one day of it read on its own"

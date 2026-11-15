@@ -56,6 +56,10 @@ EXPECT_SPEC: dict[str, tuple] = {
     "tools_none_succeeded": (list,),
     "tools_in_order": (list,),
     "tool_inputs_match_all": (list,),
+    # What the tools' own answers said, read from their outputs alone: every
+    # regex must match one, as `tool_inputs_match_all` reads the inputs. A
+    # positive floor (an outcome a later attempt may still reach), never sticky.
+    "tool_outputs_match_all": (list,),
     # A ban on an action, read from the tools' own record: no regex may match any
     # tool span's input (the call asked for it) or output (the tool says it did
     # it). Always sticky, as `tools_none` is, for a ban no tool-name list can
@@ -252,7 +256,7 @@ def _validate_expect(expect, where: str, problems: list[str]) -> None:
         if key in ("tools_any", "tools_all", "tools_none", "tools_none_succeeded", "tools_in_order"):
             if not all(isinstance(t, str) for t in val):
                 problems.append(f"{where}: expect `{key}` must be a list of tool-name strings")
-        if key in ("tool_inputs_match_all", "tool_evidence_match_none"):
+        if key in ("tool_inputs_match_all", "tool_outputs_match_all", "tool_evidence_match_none"):
             if not all(isinstance(pattern, str) for pattern in val):
                 problems.append(f"{where}: expect `{key}` must be a list of regex strings")
                 continue

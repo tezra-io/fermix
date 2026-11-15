@@ -371,6 +371,7 @@ defmodule FermixCore.Trips.Registry do
   defp bucket({:offered, _place}), do: :offered
   defp bucket({:offered, _place, _unanchored}), do: :offered
   defp bucket({:none, why}) when why in [:not_found, :no_location, :unstorable], do: :not_found
+  defp bucket({:none, {:not_near, _near}}), do: :not_found
   defp bucket({:none, _why}), do: :not_looked_up
 
   # The place search the call's words go to, and its name; none for a test's.
