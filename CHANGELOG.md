@@ -408,18 +408,24 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   readiness and `fermix doctor` judge only its sandbox, and it logs no channel
   it does not start. One that already has a Fermix of its own (a message, a
   memory, a scheduled job, a computer history note, a paired device, a home
-  that moved or a link) is refused, and nothing is deleted to make room; the
-  memories its first start and every settings save write (your name, time zone
-  and style and the assistant's name) do not count, and stay unread. A phone
-  cannot add a computer yet.
+  that moved or a link to a server that still knows it) is refused, and
+  nothing is deleted to make room; the memories its first start and every
+  settings save write (your name, time zone and style and the assistant's
+  name) do not count, and stay unread. A phone cannot add a computer yet.
 - **Remove, disconnect or rename a computer.** Remove a computer from your
   devices (the apps' device list, or `fermix devices revoke` on the server)
-  and its link ends: it joins again only with a new code, and the one that
-  keeps the only copies of your server's backups asks first ("<name> keeps the
-  only copies of your server's backups. Remove it anyway?", `--yes` at a
-  terminal). Disconnect this computer does the same from the computer itself
-  and deletes its key: a computer that joined is its own Fermix again, and the
-  one your home moved from stays retired with its copies of the backups. One
+  and its link ends; the one that keeps the only copies of your server's
+  backups asks first ("<name> keeps the only copies of your server's backups.
+  Remove it anyway?", `--yes` at a terminal). A computer that joined and was
+  removed, or that your server no longer knows because it was restored from a
+  backup taken before the computer joined, says "Your server no longer knows
+  this Mac. To join your Fermix again, enter a new code from Add a computer."
+  ("this computer" off a Mac), and a new code joins it again. One removed
+  while its Fermix was stopped can join again once Fermix has started there.
+  Disconnect this computer does the same from the computer itself and deletes
+  its key: a computer that joined says "This Mac is not connected to a
+  Fermix." and is its own Fermix again once it restarts, and the one your home
+  moved from stays retired with its copies of the backups. One
   that fails part-way leaves the computer connected, and asking again finishes
   it. A computer can be renamed (`computers.rename`) to one line of at most 64
   bytes that your other computers and your server do not use, and Fermix and
@@ -999,8 +1005,8 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Removed
 
 - **The Always On test switch.** `[fermix_core.always_on] enabled` is gone: a
-  home that still carries it boots as before, and the next settings save drops
-  it.
+  home that still carries it boots as before, Fermix names the table as
+  retired once when it starts, and the next settings save drops it.
 - **Always On's "not in this release" refusals.** The CLI error code
   `always_on_unavailable` and the management refusal `unavailable` with
   `capability: always_on` are gone from both published contracts, so the apps
@@ -1024,6 +1030,17 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   flag" bar under the toolbar in that window; it can be closed. On a Linux
   machine with no display Chrome still runs headless and still names itself
   `HeadlessChrome`, which some sites refuse on its own.
+- **A setting Fermix no longer uses is named once each time it starts.** With
+  the app or the setup page open, Fermix wrote the same notice to its log
+  about once a second for each such setting in your settings files until the
+  next settings save, and without end on a server where nobody saves settings.
+  The settings involved are a provider's retired keys, a retired plugin or its
+  stored-secret mapping, the retired image backend,
+  `[fermix_channels.mobile.fcm]` and computer history's `sites`. Each is
+  still ignored as before. Fermix now names it once when it starts, and each
+  `fermix` command names it once. `[mcp.inbound]`, named before at each start
+  and again at every change to an MCP server, is now named once per start
+  too.
 - **Coding runs no longer hang when Fermix was started from a terminal or a
   pipe.** Codex and Claude Code, and every other command Fermix streams, were
   handed Fermix's own input instead of an empty one, so with Fermix started
