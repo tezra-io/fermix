@@ -41,7 +41,11 @@ defmodule FermixCore.Management.HomeSummary do
       the server's confirmation, is that Fermix keeps trying), `undone` while
       it restarts as it was, `on`, `retired` (no link, or the server forgot
       this computer; a server's own copy that a move back left serving
-      nothing names where Fermix moved back to, the marker's `to`);
+      nothing names where Fermix moved back to, the marker's `to`); a
+      computer that joined is `retired` too once its server forgot it, which
+      says so and that a new code from Add a computer joins it again, or
+      while it restarts with no link, which says it is not connected; its
+      help is Add a computer's;
     * the server: `candidate` while it waits for its move, `primary` after;
     * `problem`, with its `kind` (`problems/0`) in `detail` and the one action
       that fixes it, or none where no step of the owner's does (its note says
@@ -826,7 +830,8 @@ defmodule FermixCore.Management.HomeSummary do
 
   defp anchor(%{"state" => "creating"}, %{role: :primary}), do: "set-up-your-server"
   defp anchor(%{"state" => state}, _facts) when state in ~w(on primary), do: "on-your-server"
-  defp anchor(%{"state" => "retired"}, _facts), do: "when-the-server-is-gone"
+  defp anchor(%{"state" => "retired"}, %{moved: %{}}), do: "when-the-server-is-gone"
+  defp anchor(%{"state" => "retired"}, _facts), do: "add-a-computer"
   defp anchor(_view, %{role: :primary}), do: flow_anchor(:move)
   defp anchor(_view, facts), do: flow_anchor(device_flow(facts))
 
@@ -915,11 +920,16 @@ defmodule FermixCore.Management.HomeSummary do
   defp retired(facts), do: view("retired", retired_sentence(facts), nil, %{}) |> restorable(facts)
 
   # A server's own copy that a move back left serving nothing names where
-  # Fermix moved back to; any other retired computer, its server.
+  # Fermix moved back to; any other computer the home moved from, its
+  # server. Fermix never moved from a computer that joined (no moved
+  # marker): its server forgot it, and a new code joins it again
+  # (`Home.Join`), or its link is gone while it restarts as its own Fermix.
   defp retired_sentence(%{moved_back: true, moved: %{to: to}} = facts),
     do: sentence(:retired_back, facts, %{to: to})
 
-  defp retired_sentence(facts), do: sentence(:retired, facts)
+  defp retired_sentence(%{moved: %{}} = facts), do: sentence(:retired, facts)
+  defp retired_sentence(%{linked: true} = facts), do: sentence(:removed, facts)
+  defp retired_sentence(facts), do: sentence(:unlinked, facts)
 
   defp desktop(facts) do
     checks = [

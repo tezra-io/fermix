@@ -110,6 +110,19 @@ no memory of its own.
   computer that keeps the only copies of the server's backups asks first:
   "<name> keeps the only copies of your server's backups. Remove it anyway?"
   (`--yes` on the terminal).
+- **Joining again.** Its next connection ends as revoked, and it keeps that
+  in its link; its Always On then says "Your server no longer knows this
+  Mac. To join your Fermix again, enter a new code from Add a computer." A
+  new code joins it as the first one did (`fermix computer join` with
+  Fermix stopped, or `computer.join.start`): it first lets go of the old
+  link here, as Disconnect does (its key, what the server may use there,
+  the link), and a code it cannot join with leaves that link as it is. It
+  takes that word from the server: a computer removed while its Fermix was
+  stopped is refused ("it holds a link to a server") until Fermix has
+  started there once. The same holds for a server restored from a snapshot
+  taken before the computer joined. The computer the home moved from is
+  still refused: it keeps its link, its moved marker and its own copies of
+  the backups.
 - **From the computer.** **Disconnect this computer** (management
   `computer.disconnect`) tells the server, then deletes that computer's key,
   its link and what the server may use on it. A computer that joined is its

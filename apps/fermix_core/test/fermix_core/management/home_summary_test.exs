@@ -78,6 +78,20 @@ defmodule FermixCore.Management.HomeSummaryTest do
        "Fermix moved to your server, and this Mac is no longer connected to it.", nil},
       {"a desktop the server forgot", desktop(link_primary: primary(:revoked)), "retired",
        "Fermix moved to your server, and this Mac is no longer connected to it.", nil},
+      # M97 §3.3: Fermix never moved from a computer that joined (it has no
+      # moved marker): its server removed it, and a new code joins it again.
+      {"a computer that joined, which its server removed",
+       desktop(moved: nil, link_primary: primary(:revoked)), "retired",
+       "Your server no longer knows this Mac. To join your Fermix again, enter a new code " <>
+         "from Add a computer.", nil},
+      {"a Linux computer that joined, which its server removed",
+       desktop(moved: nil, link_primary: primary(:revoked), host_os: :linux), "retired",
+       "Your server no longer knows this computer. To join your Fermix again, enter a new " <>
+         "code from Add a computer.", nil},
+      # Its link gone (a disconnect, or a join cancelled) while it restarts as
+      # its own Fermix.
+      {"a computer with no marker and no link", device(linked: false, moved: nil), "retired",
+       "This Mac is not connected to a Fermix.", nil},
       {"a computer asking to join the home", desktop(primary_home: asking_home()), "on",
        "A computer named loft-linux (Linux) asks to join your Fermix. To add it, type the six " <>
          "digits it shows.", "approve_computer"},
@@ -1954,6 +1968,14 @@ defmodule FermixCore.Management.HomeSummaryTest do
 
       assert help.(desktop(link_primary: primary(:unreachable, 11 * @minute))) ==
                page.("when-the-server-is-gone")
+
+      # A retired computer: the one the home moved from, and one that joined.
+      assert help.(desktop(link_primary: primary(:revoked))) == page.("when-the-server-is-gone")
+
+      assert help.(desktop(moved: nil, link_primary: primary(:revoked))) ==
+               page.("add-a-computer")
+
+      assert help.(device(linked: false, moved: nil)) == page.("add-a-computer")
 
       assert help.(desktop(primary_home: server_home(disk: 0.9))) == page.("server-disk")
       assert help.(desktop(primary_behind: true, primary_home: nil)) == page.("updates")

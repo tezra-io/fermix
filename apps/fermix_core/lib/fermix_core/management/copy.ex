@@ -125,7 +125,7 @@ defmodule FermixCore.Management.Copy do
               computer_history)a
   @summary_keys ~w(off connect connecting ready ready_waits moving waiting on on_backup
                    on_no_backup undone undone_refused undone_unmarked move_marker_unread
-                   retired retired_back candidate_waiting
+                   retired retired_back removed unlinked candidate_waiting
                    candidate_receiving primary cannot_reach cannot_reach_note
                    server_not_set_up server_waited_too_long update server_older
                    server_older_note update_settings_only server_ahead disk_full
@@ -523,6 +523,19 @@ defmodule FermixCore.Management.Copy do
 
   def summary_sentence(:retired_back, %{to: to}) when is_binary(to),
     do: "This copy is retired: Fermix moved back to #{to}."
+
+  # A computer that joined, which its server no longer knows (the owner
+  # removed it, or the server was restored from before it joined): a new code
+  # joins it again (M97 §3.3).
+  def summary_sentence(:removed, %{machine: machine}),
+    do:
+      "Your server no longer knows this #{machine}. To join your Fermix again, enter a new " <>
+        "code from Add a computer."
+
+  # A computer that joined, with no link: it left, or its join was cancelled,
+  # and it restarts as its own Fermix.
+  def summary_sentence(:unlinked, %{machine: machine}),
+    do: "This #{machine} is not connected to a Fermix."
 
   def summary_sentence(:candidate_waiting, _values), do: "This server is waiting for its move."
   def summary_sentence(:candidate_receiving, _values), do: "Your home is moving to this server."

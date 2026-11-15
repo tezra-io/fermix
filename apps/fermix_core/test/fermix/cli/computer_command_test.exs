@@ -12,6 +12,7 @@ defmodule Fermix.CLI.ComputerCommandTest do
 
   alias Fermix.CLI.ComputerCommand
   alias FermixCore.Home.ComputerKey
+  alias FermixCore.Home.DesktopLink
   alias FermixCore.Home.EnrollmentCode
   alias FermixCore.Home.Join
   alias FermixCore.Home.Role
@@ -193,6 +194,29 @@ defmodule Fermix.CLI.ComputerCommandTest do
     assert {:ok, %{role: :primary}} = Role.configured(ctx.home)
   end
 
+  # PROTOCOL.md's `mobile.devices.revoke`: a computer its server removed
+  # joins again from a terminal, with Fermix stopped, as it joined at first.
+  # The relay kept the server's word in the link (`revoked`).
+  test "a computer its server removed joins again with a new code", ctx do
+    :ok = Join.start(ctx.home, code(), now: @now, restart: fn -> :ok end)
+    :ok = Join.finish(ctx.home, approved(), restart: fn -> :ok end)
+    link = DesktopLink.path(ctx.home)
+    revoked = link |> File.read!() |> Jason.decode!() |> Map.put("revoked", true)
+    File.write!(link, Jason.encode!(revoked))
+    {stdin, deps} = piped(code())
+
+    output =
+      capture_io(fn ->
+        assert ComputerCommand.run(["join"], [home: ctx.home] ++ deps ++ stopped()) == 0
+      end)
+
+    assert output =~ "This computer joins your Fermix on studio-mac when Fermix starts here."
+    assert {"", _prompt} = StringIO.contents(stdin)
+    refute File.exists?(link)
+    assert Join.present?(ctx.home)
+    assert {:ok, %{role: :device}} = Role.configured(ctx.home)
+  end
+
   test "anything else is a usage error" do
     capture_io(:stderr, fn ->
       assert ComputerCommand.run([], stopped()) == 2
@@ -226,5 +250,20 @@ defmodule Fermix.CLI.ComputerCommandTest do
 
     {:ok, code} = EnrollmentCode.encode(facts)
     code
+  end
+
+  # The server's word once the owner added this computer.
+  defp approved do
+    %{
+      "device_id" => "7e1f0c2a-3b4d-4e5f-8a6b-7c8d9e0f1a2b",
+      "name" => "loft-linux",
+      "primary_epoch" => 6,
+      "primary" => %{
+        "name" => "studio-mac",
+        "node_id" => String.duplicate("4f", 32),
+        "relays" => [%{"url" => "https://eu1.relay.invalid/", "quic_port" => 7842}],
+        "relays_rev" => "0123456789abcdef"
+      }
+    }
   end
 end

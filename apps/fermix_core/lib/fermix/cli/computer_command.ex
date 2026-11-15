@@ -13,7 +13,9 @@ defmodule Fermix.CLI.ComputerCommand do
   owns this home would otherwise keep running as its own home. The code is
   asked for only once both of those hold. It joins through
   `FermixCore.Home.Join.start/3`: refused by name when this computer has a
-  home of its own, when the code is not a computer's or expired, and when
+  home of its own (a link its server revoked is none: a computer the owner
+  removed lets go of it, then joins again), when the code is not a
+  computer's or expired, and when
   the secret store cannot keep this computer's key (each secret store call
   runs inline, with no command host to own it). Nothing is left behind by a
   refusal. Once it is done, the next start of Fermix here dials the server,

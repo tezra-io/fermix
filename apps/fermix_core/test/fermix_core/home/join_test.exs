@@ -366,7 +366,88 @@ defmodule FermixCore.Home.JoinTest do
     end
   end
 
+  # PROTOCOL.md's `mobile.devices.revoke`: a computer the owner removed joins
+  # again with a code. Its link reaches nothing once its server said it no
+  # longer knows this computer, which the relay keeps in the link (`revoked`),
+  # so the join lets go of it here as a disconnect does, then joins.
+  describe "a computer its server removed" do
+    setup ctx do
+      :ok = Join.start(ctx.home, code(), ctx.opts)
+      :ok = Join.finish(ctx.home, approved(), ctx.opts)
+      flush_restarts()
+      {:ok, %{public: old}} = ComputerKey.read(ctx.home, store: :keyring)
+      %{old: old}
+    end
+
+    test "joins again with a code, letting go of its old link first", ctx do
+      revoked!(ctx.home)
+      spool = marked_spool!(ctx.home)
+
+      assert :ok = Join.start(ctx.home, code(), ctx.opts)
+      assert_received :restarted
+
+      refute File.exists?(DesktopLink.path(ctx.home))
+      assert {:ok, %{"phase" => "dialing", "public" => public}} = Join.read(ctx.home)
+      assert {:ok, %{public: new}} = ComputerKey.read(ctx.home, store: :keyring)
+      assert public == Base.encode64(new)
+      refute new == ctx.old
+      assert Switches.read(ctx.home) == {:ok, []}
+      assert {:ok, %{home_mark: 0, home: nil}} = Spool.link(server: spool)
+      assert {:ok, %{role: :device}} = Role.configured(ctx.home)
+    end
+
+    test "a code it cannot join with leaves its old link as it is", ctx do
+      revoked!(ctx.home)
+
+      assert Join.start(ctx.home, code(expires_at: ~U[2031-05-04 09:59:59Z]), ctx.opts) ==
+               {:error, :code_expired}
+
+      assert Join.start(ctx.home, code(purpose: :candidate), ctx.opts) ==
+               {:error, {:code_purpose, :candidate}}
+
+      assert {:ok, %{device_id: "7e1f0c2a-3b4d-4e5f-8a6b-7c8d9e0f1a2b"}} =
+               DesktopLink.read(ctx.home)
+
+      assert {:ok, %{public: kept}} = ComputerKey.read(ctx.home, store: :keyring)
+      assert kept == ctx.old
+      refute Join.present?(ctx.home)
+      refute_received :restarted
+    end
+
+    test "a link its server still knows is a home of its own", ctx do
+      assert Join.start(ctx.home, code(), ctx.opts) ==
+               {:error, {:home_of_its_own, "a link to a server"}}
+
+      assert File.exists?(DesktopLink.path(ctx.home))
+      assert {:ok, %{public: kept}} = ComputerKey.read(ctx.home, store: :keyring)
+      assert kept == ctx.old
+    end
+
+    # It keeps its own copies of the server's backups and the marker that
+    # says the home moved from it: no code takes its link.
+    test "the computer a home moved from still has a home of its own", ctx do
+      :ok = Moved.write(ctx.home, %{to: "studio-mac", moved_at: @now, epoch: 5})
+      revoked!(ctx.home)
+
+      assert Join.start(ctx.home, code(), ctx.opts) ==
+               {:error, {:home_of_its_own, "a home that moved to a server"}}
+
+      assert File.exists?(DesktopLink.path(ctx.home))
+      assert {:ok, %{public: kept}} = ComputerKey.read(ctx.home, store: :keyring)
+      assert kept == ctx.old
+      refute Join.present?(ctx.home)
+    end
+  end
+
   # -- facts ----------------------------------------------------------------------
+
+  # The link as the relay leaves it once the server ended a session as no
+  # longer knowing this computer (`DesktopLink`'s `revoked`).
+  defp revoked!(home) do
+    path = DesktopLink.path(home)
+    link = path |> File.read!() |> Jason.decode!()
+    File.write!(path, Jason.encode!(Map.put(link, "revoked", true)))
+  end
 
   # This machine's history store, holding the mark 7 of an earlier home.
   defp marked_spool!(home) do

@@ -18,7 +18,8 @@ defmodule FermixCore.Home.DesktopLinkTest do
       relays_rev: "0123456789abcdef",
       addrs: ["100.101.102.103:4033", "[fd7a:115c:a1e0::9]:4033"]
     },
-    epoch: 4
+    epoch: 4,
+    revoked: false
   }
 
   setup do
@@ -63,7 +64,8 @@ defmodule FermixCore.Home.DesktopLinkTest do
           {:addrs, put_in(good, ["primary", "addrs"], ["fd7a:115c:a1e0::9:4033"])},
           {:addrs, put_in(good, ["primary", "addrs"], ["fermix-vm.ts.net:4033"])},
           {:addrs, put_in(good, ["primary", "addrs"], List.duplicate("100.64.0.1:4033", 9))},
-          {:addrs, put_in(good, ["primary", "addrs"], nil)}
+          {:addrs, put_in(good, ["primary", "addrs"], nil)},
+          {:revoked, Map.put(good, "revoked", "yes")}
         ] do
       File.write!(path, Jason.encode!(broken))
       assert {:error, {:invalid_link, ^path, ^field}} = DesktopLink.read(home)
@@ -101,6 +103,30 @@ defmodule FermixCore.Home.DesktopLinkTest do
              DesktopLink.record_route(home, routed, {relays, "fedcba9876543210", []})
 
     assert {:ok, %{primary: %{addrs: []}}} = DesktopLink.read(home)
+  end
+
+  # The relay keeps the server's word that it no longer knows this computer,
+  # so a join with a new code reads it with Fermix stopped (`Home.Join`).
+  test "a link the server revoked says so until a session comes up again", %{home: home} do
+    assert :ok = DesktopLink.write(home, Map.delete(@link, :revoked))
+    assert {:ok, %{revoked: false} = link} = DesktopLink.read(home)
+
+    assert {:ok, %{revoked: true} = revoked} = DesktopLink.record_revoked(home, link, true)
+    assert {:ok, ^revoked} = DesktopLink.read(home)
+    assert (home |> DesktopLink.path() |> File.read!() |> Jason.decode!())["revoked"] == true
+
+    # What the link holds already changes nothing; the epoch keeps the mark.
+    assert {:ok, ^revoked} = DesktopLink.record_revoked(home, revoked, true)
+    assert {:ok, %{revoked: true, epoch: 5} = raised} = DesktopLink.record_epoch(home, revoked, 5)
+
+    assert {:ok, %{revoked: false}} = DesktopLink.record_revoked(home, raised, false)
+    assert {:ok, %{revoked: false, epoch: 5}} = DesktopLink.read(home)
+
+    # One from before the mark was kept was never revoked.
+    path = DesktopLink.path(home)
+    older = path |> File.read!() |> Jason.decode!() |> Map.delete("revoked")
+    File.write!(path, Jason.encode!(older))
+    assert {:ok, %{revoked: false}} = DesktopLink.read(home)
   end
 
   test "a link written without hints holds none", %{home: home} do

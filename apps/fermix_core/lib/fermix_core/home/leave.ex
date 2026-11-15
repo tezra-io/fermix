@@ -25,6 +25,8 @@ defmodule FermixCore.Home.Leave do
   keeps its moved marker and the device role, retired, and its own copies
   of the server's backups. Then the computer history mark that home left is
   forgotten (`Home.Join.forget_history_mark/1`), and the engine restarts.
+  That half is `let_go/4`, which a join with a new code also runs on a link
+  its server revoked (`Home.Join.start/3`): there is no server to tell.
 
   The link is the record that a disconnect is unfinished: it goes last, and
   every step before it is safe to repeat, so one that fails part-way leaves
@@ -70,13 +72,28 @@ defmodule FermixCore.Home.Leave do
     with {:ok, link} <- linked(home),
          {:ok, role} <- role_after(home),
          {:ok, told?} <- tell(forward, link, opts),
-         :ok <- forget_key(home, link, Keyword.get(opts, :key_opts, [])),
+         :ok <- let_go(home, link, role, Keyword.get(opts, :key_opts, [])) do
+      :ok = Keyword.get(opts, :restart, &Lifecycle.restart_self/0).()
+      {:ok, told?}
+    end
+  end
+
+  @doc """
+  Lets go, on this computer alone, of everything that links `home` to its
+  server (see the moduledoc): the key `link` names the store of, what the
+  server may use here, the role (`:primary` for a computer that joined,
+  `:device` for the one a home moved from), the link last, then the history
+  mark. Each step is safe to repeat. `key_opts` are handed to `ComputerKey`.
+  """
+  @spec let_go(Path.t(), DesktopLink.t(), :primary | :device, keyword()) ::
+          :ok | {:error, error()}
+  def let_go(home, %{device_id: _id} = link, role, key_opts)
+      when is_binary(home) and home != "" and role in [:primary, :device] and is_list(key_opts) do
+    with :ok <- forget_key(home, link, key_opts),
          :ok <- config(Switches.forget(home)),
          :ok <- put_role(home, role),
          :ok <- remove_link(home) do
-      :ok = Join.forget_history_mark(home)
-      :ok = Keyword.get(opts, :restart, &Lifecycle.restart_self/0).()
-      {:ok, told?}
+      Join.forget_history_mark(home)
     end
   end
 

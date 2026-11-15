@@ -737,6 +737,12 @@ it, never a second writer.
     set, with **Change**, and that the server keeps an S3 copy where it
     does); no longer connected to it (**Restore on this Mac** where it holds
     a copy, its confirm naming the backup's date); moving back (below);
+  - on a computer that joined (no home moved from it): the same while
+    linked, without Move back or Restore here; once its server no longer
+    knows it, "Your server no longer knows this Mac. To join your Fermix
+    again, enter a new code from Add a computer." (the `computers`
+    reference, "Removing a computer"); with no link, while it restarts as
+    its own Fermix, "This Mac is not connected to a Fermix.";
   - on the server: waiting for its move, then "Fermix runs here."; after a
     move back, its retired copy says "This copy is retired: Fermix moved
     back to <the computer>.";

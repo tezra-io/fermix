@@ -474,6 +474,8 @@ defmodule FermixChannels.Desktop.RelayTest do
              {:error, :primary_unreachable, %{"primary" => "fermix-vm", "sentence" => revoked}}
 
     assert {:error, {:revoked, ^revoked}} = Relay.open_channel(relay)
+    # Kept in the link, so a new code joins again with Fermix stopped here.
+    assert {:ok, %{revoked: true}} = DesktopLink.read(root)
   end
 
   test "a desktop the primary does not know at the handshake is not tried again" do
@@ -486,6 +488,30 @@ defmodule FermixChannels.Desktop.RelayTest do
     refute_receive {:scheduled, {:relay_timer, :reconnect, _token}, _delay}, 200
     assert %{status: :revoked, sentence: sentence} = Relay.status(relay)
     assert sentence =~ "does not know this computer"
+    assert {:ok, %{revoked: true}} = DesktopLink.read(root)
+  end
+
+  # A server that knows this computer again (one restored from a newer
+  # snapshot) answers its next start: the link is no longer revoked, so no
+  # code takes it.
+  test "a session that comes up again clears what the link kept of a revocation" do
+    primary = DesktopRail.primary!()
+    root = DesktopRail.desktop_home!(primary)
+    {:ok, link} = DesktopLink.read(root)
+    path = DesktopLink.path(root)
+
+    File.write!(
+      path,
+      path |> File.read!() |> Jason.decode!() |> Map.put("revoked", true) |> Jason.encode!()
+    )
+
+    assert {:ok, %{revoked: true}} = DesktopLink.read(root)
+
+    relay = DesktopRail.start_relay!(root, primary)
+    DesktopRail.await_connected(relay)
+
+    assert {:ok, %{revoked: false, device_id: device_id}} = DesktopLink.read(root)
+    assert device_id == link.device_id
   end
 
   test "a forwarded call is answered within 8 s, or within the deadline its caller asks" do

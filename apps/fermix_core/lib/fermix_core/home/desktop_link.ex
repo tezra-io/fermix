@@ -8,9 +8,9 @@ defmodule FermixCore.Home.DesktopLink do
 
   The move worker writes it on the source of a move (`write/2`); the
   desktop relay (`FermixChannels.Desktop.Relay`) reads it and raises what the
-  file remembers as it learns more (`record_epoch/3`, `record_route/3`). One
-  engine boot decides whether the home is linked (`linked?/2`): the device
-  role with `desktop.json` present.
+  file remembers as it learns more (`record_epoch/3`, `record_route/3`,
+  `record_revoked/3`). One engine boot decides whether the home is linked
+  (`linked?/2`): the device role with `desktop.json` present.
 
   ## `device/desktop.json`
 
@@ -29,7 +29,8 @@ defmodule FermixCore.Home.DesktopLink do
           "relays_rev": "<16 lowercase hex digits>",
           "addrs": ["100.101.102.103:4033"]
         },
-        "primary_epoch": 5
+        "primary_epoch": 5,
+        "revoked": false
       }
 
   - `device_id` is the desktop's row in the primary's `devices.toml` (a UUID).
@@ -50,6 +51,13 @@ defmodule FermixCore.Home.DesktopLink do
     without them.
   - `primary_epoch` is the highest primary epoch this desktop has seen. It
     never goes down.
+  - `revoked` is true once the primary ended a session, or refused the
+    handshake, as one that no longer knows this computer (`4003`: removed
+    from its devices, or restored from a snapshot taken before this computer
+    joined it), and false again once a session comes up. It is the one record
+    of that word with Fermix stopped: a join with a new code takes a link its
+    server revoked as no home of its own (`Home.Join`). A file without it was
+    never revoked.
   """
 
   alias FermixCore.Home.Role
@@ -74,9 +82,11 @@ defmodule FermixCore.Home.DesktopLink do
 
   @typedoc """
   What `desktop.json` holds. `key` is nil only in a link read from a version
-  1 file; a write needs a store.
+  1 file; a write needs a store. A read always says `revoked`; a write
+  without it writes false.
   """
   @type t :: %{
+          optional(:revoked) => boolean(),
           device_id: String.t(),
           key: SecretWriter.store() | nil,
           primary: %{
@@ -187,6 +197,19 @@ defmodule FermixCore.Home.DesktopLink do
 
   defp port?(text), do: String.to_integer(text) in 1..65_535
 
+  @doc """
+  Records whether the primary no longer knows this computer (`revoked`, see
+  the moduledoc): true at its `4003`, false once a session comes up. What
+  the file holds already changes nothing.
+  """
+  @spec record_revoked(Path.t(), t(), boolean()) :: {:ok, t()} | {:error, error()}
+  def record_revoked(home, link, revoked?)
+      when is_binary(home) and home != "" and is_map(link) and is_boolean(revoked?) do
+    if Map.get(link, :revoked, false) == revoked?,
+      do: {:ok, link},
+      else: rewrite(home, Map.put(link, :revoked, revoked?))
+  end
+
   defp rewrite(home, link) do
     with :ok <- write(home, link), do: {:ok, link}
   end
@@ -236,9 +259,17 @@ defmodule FermixCore.Home.DesktopLink do
   defp decode_link(decoded, file) do
     with {:ok, device_id} <- field(decoded, :device_id, &uuid?/1, file),
          {:ok, primary} <- primary(decoded["primary"], file),
-         {:ok, epoch} <- field(decoded, :primary_epoch, &epoch?/1, file) do
-      {:ok, %{device_id: device_id, primary: primary, epoch: epoch}}
+         {:ok, epoch} <- field(decoded, :primary_epoch, &epoch?/1, file),
+         {:ok, revoked?} <- revoked(decoded, file) do
+      {:ok, %{device_id: device_id, primary: primary, epoch: epoch, revoked: revoked?}}
     end
+  end
+
+  # Absent is false: a link from before the mark was kept was never revoked.
+  defp revoked(decoded, file) do
+    if Map.has_key?(decoded, "revoked"),
+      do: field(decoded, :revoked, &is_boolean/1, file),
+      else: {:ok, false}
   end
 
   defp primary(%{} = primary, file) do
@@ -328,7 +359,8 @@ defmodule FermixCore.Home.DesktopLink do
         "relays_rev" => primary.relays_rev,
         "addrs" => Map.get(primary, :addrs, [])
       },
-      "primary_epoch" => epoch
+      "primary_epoch" => epoch,
+      "revoked" => Map.get(link, :revoked, false)
     }
 
     # What is written must read back: the same checks hold both ways.

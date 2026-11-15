@@ -73,7 +73,10 @@ defmodule FermixChannels.Desktop.Relay do
   a primary that ends every session is never redialed every second unseen.
   A primary that no longer knows this computer (`4003`: revoked, or an
   unknown key at the handshake) is not retried: the relay says so and stays
-  down until the engine restarts.
+  down until the engine restarts. It also keeps that word in the link
+  (`DesktopLink.record_revoked/3`), and the next session that comes up
+  clears it: a join with a new code reads it there with Fermix stopped
+  (`Home.Join`).
 
   A session that comes up and every ending tell this engine's Always On watch
   (`FermixCore.Home.StatusWatch`, `:link`): the summary an app draws reads
@@ -1108,8 +1111,14 @@ defmodule FermixChannels.Desktop.Relay do
 
   defp connected(epoch, fields, state) do
     case keep_epoch(state.link, epoch, state) do
-      {:ok, link} -> session_up(keep_route(link, fields, state.root), fields, state)
-      {:error, reason} -> drop_session({:epoch_not_kept, epoch, reason}, state)
+      {:ok, link} ->
+        link
+        |> keep_route(fields, state.root)
+        |> keep_revoked(false, state.root)
+        |> session_up(fields, state)
+
+      {:error, reason} ->
+        drop_session({:epoch_not_kept, epoch, reason}, state)
     end
   end
 
@@ -1259,6 +1268,24 @@ defmodule FermixChannels.Desktop.Relay do
 
       {:error, reason} ->
         Logger.error("desktop relay: the primary's route was not kept: #{inspect(reason)}")
+        link
+    end
+  end
+
+  # The server's word that it no longer knows this computer, kept in the
+  # link (true at its `4003`, false once a session is up), so a join with a
+  # new code reads it with Fermix stopped. One that cannot be written is said
+  # here; the link stands as it was.
+  defp keep_revoked(link, revoked?, root) do
+    case DesktopLink.record_revoked(root, link, revoked?) do
+      {:ok, link} ->
+        link
+
+      {:error, reason} ->
+        Logger.error(
+          "desktop relay: the link's revoked mark was not set to #{revoked?}: #{inspect(reason)}"
+        )
+
         link
     end
   end
@@ -2348,11 +2375,13 @@ defmodule FermixChannels.Desktop.Relay do
         "joined it. Fermix stopped reaching it."
 
     Logger.error("desktop relay: #{sentence} (#{inspect(reason, limit: 20)})")
+    link = keep_revoked(state.link, true, state.root)
     unless state.degraded?, do: state.emit.(:degraded, state.failures + 1, :revoked)
 
     %{
       fail_everyone(state, sentence, :relay_revoked)
-      | phase: :revoked,
+      | link: link,
+        phase: :revoked,
         word: :revoked,
         since: nil,
         down_since_ms: down_since(state),

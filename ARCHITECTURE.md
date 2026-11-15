@@ -1667,7 +1667,8 @@ Current channels:
   primary ends normally (`1000`) is renewed quietly after the first step,
   once in a row (a renewed session ended normally again within a minute is
   an outage, `renewed_again`, on the ordinary backoff), and a revoked desktop
-  (`4003`) stops dialing until the engine restarts. Its posture is
+  (`4003`) stops dialing until the engine restarts, keeping that word in the
+  link (`revoked`, cleared by the next session up). Its posture is
   `emit_transport(:desktop_relay, …)` and `home.status`'s `primary`, whose
   `status` word (`connected`, `renewing`, `unreachable`, `revoked`, `stale`;
   set at each transition, so a redial during an outage keeps `unreachable`)
@@ -1759,7 +1760,9 @@ Current channels:
   its platform, `backups: false`), denies, cancels, the session ends or the
   window runs out; every ending but approval writes nothing, and the code is
   spent either way. The computer's side is `FermixCore.Home.Join`, the one
-  writer of `device/join.json` (refused for a home of its own; its key made
+  writer of `device/join.json` (refused for a home of its own, which a link
+  its server revoked is not: once the code is good that link goes first, as
+  a disconnect lets go of it here, `Home.Leave.let_go/4`; its key made
   in the secret store first), and `Desktop.Join`, a worker in the device
   tree's dial subtree while that file is here and no link is; approval
   writes the link with every offer off (`Join.finish/3`) and restarts.
