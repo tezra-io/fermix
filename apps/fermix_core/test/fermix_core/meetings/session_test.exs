@@ -304,6 +304,12 @@ defmodule FermixCore.Meetings.SessionTest do
   @meet_url "https://meet.google.com/abc-defg-hij"
   @zoom_url "https://zoom.us/j/123456789"
 
+  # A wait that spans the tail pipeline: the phase rows written, the transcript
+  # finalized to disk, the summarizer's task and summary.md, then the delivery.
+  # That is several hops, not one arrival, and on a contended runner it outran
+  # the suite's 2 s default, so it gets the named 10 s arrival bound.
+  @arrival_ms 10_000
+
   @events [
     [:fermix, :meeting, :run_start],
     [:fermix, :meeting, :run_complete],
@@ -755,7 +761,7 @@ defmodule FermixCore.Meetings.SessionTest do
       send(meeting.pid, {:transcript_segment, stream, segment(2_000, 4_000, "one last thing")})
       send(meeting.pid, {:transcript_stream_closed, stream, %{segments: 2, dropped: 0}})
 
-      assert_receive {:summarize, summarized, transcript_md, opts}, 2_000
+      assert_receive {:summarize, summarized, transcript_md, opts}, @arrival_ms
       assert transcript_md =~ "one last thing"
       assert summarized.title == "Weekly sync"
       assert opts[:session_id] =~ "meeting_#{meeting.id}_"
@@ -780,7 +786,7 @@ defmodule FermixCore.Meetings.SessionTest do
       send(meeting.pid, {:meeting_ended, :meeting_closed})
       send(meeting.pid, {:transcript_stream_closed, stream, %{segments: 0, dropped: 0}})
 
-      assert_receive {:deliver, _meeting, text, _opts}, 2_000
+      assert_receive {:deliver, _meeting, text, _opts}, @arrival_ms
       assert text =~ "No speech was captured"
       refute_received {:summarize, _meeting, _md, _opts}
 
@@ -798,7 +804,7 @@ defmodule FermixCore.Meetings.SessionTest do
       # The stream never closes; the watchdog releases it and the notes are
       # written from what already landed.
       assert_receive {:stt_stop, ^stream}, 2_000
-      assert_receive {:summarize, _meeting, transcript_md, _opts}, 2_000
+      assert_receive {:summarize, _meeting, transcript_md, _opts}, @arrival_ms
       assert transcript_md =~ "morning all"
 
       await_stop(meeting, 2_000)
@@ -812,7 +818,7 @@ defmodule FermixCore.Meetings.SessionTest do
       send(meeting.pid, {:meeting_ended, :meeting_closed})
       send(meeting.pid, {:transcript_stream_closed, stream, %{segments: 1, dropped: 3}})
 
-      assert_receive {:deliver, delivered, _text, _opts}, 2_000
+      assert_receive {:deliver, delivered, _text, _opts}, @arrival_ms
       assert delivered.end_reason == :stt_stream_failed
 
       await_stop(meeting, 2_000)
@@ -831,7 +837,7 @@ defmodule FermixCore.Meetings.SessionTest do
       # the drain exists to protect — may be lost.
       send(meeting.pid, {:transcript_stream_error, stream, {:timeout, :drain, 10_000}})
 
-      assert_receive {:deliver, delivered, _text, _opts}, 2_000
+      assert_receive {:deliver, delivered, _text, _opts}, @arrival_ms
       assert delivered.end_reason == :stt_stream_failed
 
       await_stop(meeting, 2_000)
@@ -863,7 +869,7 @@ defmodule FermixCore.Meetings.SessionTest do
       # the tail pipeline on a transcript that is already finalized.
       send(meeting.pid, {:transcript_stream_closed, stream, %{segments: 1, dropped: 0}})
 
-      assert_receive {:deliver, _meeting, _text, _opts}, 2_000
+      assert_receive {:deliver, _meeting, _text, _opts}, @arrival_ms
       await_stop(meeting, 2_000)
       assert %{status: "delivered", error: nil} = row(ctx, meeting.id)
     end
@@ -880,7 +886,7 @@ defmodule FermixCore.Meetings.SessionTest do
       assert_receive {:stt_stop, ^stream}, 2_000
       send(meeting.pid, {:transcript_stream_closed, stream, %{segments: 1, dropped: 0}})
 
-      assert_receive {:deliver, _meeting, _text, _opts}, 2_000
+      assert_receive {:deliver, _meeting, _text, _opts}, @arrival_ms
       await_stop(meeting, 2_000)
       assert %{status: "delivered", error: nil} = row(ctx, meeting.id)
     end
@@ -901,7 +907,7 @@ defmodule FermixCore.Meetings.SessionTest do
       send(meeting.pid, {:meeting_ended, :meeting_closed})
       send(meeting.pid, {:transcript_stream_closed, stream, %{segments: 1, dropped: 0}})
 
-      assert_receive {:summarize_called, summarizer}, 2_000
+      assert_receive {:summarize_called, summarizer}, @arrival_ms
       summarizer_ref = Process.monitor(summarizer)
       %{phase_timer: watchdog} = :sys.get_state(meeting.pid)
       assert Process.read_timer(watchdog) > 30_000
@@ -918,7 +924,7 @@ defmodule FermixCore.Meetings.SessionTest do
       send(meeting.pid, {:meeting_ended, :meeting_closed})
       send(meeting.pid, {:transcript_stream_closed, stream, %{segments: 1, dropped: 0}})
 
-      await_stop(meeting, 2_000)
+      await_stop(meeting, @arrival_ms)
       assert %{status: "failed", error: error} = row(ctx, meeting.id)
       assert error =~ "summarize_failed"
       assert error =~ "provider_unavailable"
@@ -932,7 +938,7 @@ defmodule FermixCore.Meetings.SessionTest do
       send(meeting.pid, {:meeting_ended, :meeting_closed})
       send(meeting.pid, {:transcript_stream_closed, stream, %{segments: 1, dropped: 0}})
 
-      await_stop(meeting, 2_000)
+      await_stop(meeting, @arrival_ms)
       assert %{status: "failed", error: error} = row(ctx, meeting.id)
       assert error == "delivery_unresolvable: summary saved at #{artifact_dir(ctx, meeting.id)}"
       assert File.regular?(Path.join(artifact_dir(ctx, meeting.id), "summary.md"))
@@ -944,7 +950,7 @@ defmodule FermixCore.Meetings.SessionTest do
       send(meeting.pid, {:meeting_ended, :meeting_closed})
       send(meeting.pid, {:transcript_stream_closed, stream, %{segments: 1, dropped: 0}})
 
-      await_stop(meeting, 2_000)
+      await_stop(meeting, @arrival_ms)
       assert %{status: "failed", error: error} = row(ctx, meeting.id)
       assert error =~ "delivery_failed"
     end
@@ -959,7 +965,7 @@ defmodule FermixCore.Meetings.SessionTest do
       assert_receive {:stt_finish, ^stream}, 2_000
       send(meeting.pid, {:transcript_stream_closed, stream, %{segments: 1, dropped: 0}})
 
-      assert_receive {:deliver, delivered, _text, _opts}, 2_000
+      assert_receive {:deliver, delivered, _text, _opts}, @arrival_ms
       assert delivered.end_reason == :sidecar_crashed
 
       await_stop(meeting, 2_000)
@@ -978,7 +984,7 @@ defmodule FermixCore.Meetings.SessionTest do
       assert_receive {:stt_finish, ^stream}, 2_000
       send(meeting.pid, {:transcript_stream_closed, stream, %{segments: 1, dropped: 0}})
 
-      assert_receive {:deliver, delivered, _text, _opts}, 2_000
+      assert_receive {:deliver, delivered, _text, _opts}, @arrival_ms
       assert delivered.end_reason == :rtms_stream_lost
 
       await_stop(meeting, 2_000)
@@ -1001,7 +1007,7 @@ defmodule FermixCore.Meetings.SessionTest do
 
       send(meeting.pid, {:transcript_stream_error, stream, {:reconnect_exhausted, 500}})
 
-      assert_receive {:deliver, delivered, _text, _opts}, 2_000
+      assert_receive {:deliver, delivered, _text, _opts}, @arrival_ms
       assert delivered.end_reason == :stt_stream_failed
 
       await_stop(meeting, 2_000)
