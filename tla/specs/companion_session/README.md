@@ -922,3 +922,13 @@ within minutes of a local midnight that starts or ends a trip, by the same
 after a restart of the process that sends it. The trip family is outside this
 spec (Not modelled: protocol 8's trips), and the push carries no seq, request or
 turn. No modelled step changed.
+
+## Re-read for each day's town (M89, 2026-11-15)
+
+`21267798` staled the `PROTOCOL.md` pin: a live day row in a trip gains an
+optional `town` (the town in force for that day, found once by the place
+search), a town found after the call that set its near pushes the trip again by
+the same `{:trips_changed, _}` then `:trips_flush` steps any trips change takes,
+and the size guard counts a town on every day. The trip family is outside this
+spec (Not modelled: protocol 8's trips), and the push carries no seq, request or
+turn. No modelled step changed.
