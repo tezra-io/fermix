@@ -1170,6 +1170,18 @@ restart. The job rail and its order are unchanged. No modelled row, helper,
 delivery or report changed; its seven lines move the cue tree's citation to
 `application.ex:465`.
 
+## Re-read for Always On in every build (2026-11-15)
+
+`d195aa17` staled the `application.ex` pin. Every build now serves Always
+On: the boot drops the release gate's alias, and `Home.ReleaseTable` fetches
+on an Always On server's primary with no build check, its child comment
+reworded in place. No child moved or changed order. The job rail and its order
+are unchanged, so no modelled row, helper, delivery or report changed. The
+removed alias moves every later line by one: the spec's citations point at
+the committed file, the cue tree at `application.ex:464` and
+JobRunnerSupervisor before JobScheduler at `:377` and `:384`, which an
+earlier change had left at `:371` and `:378`.
+
 ## Assumptions
 
 - Every Repo call completes, or its caller dies, or, for the Scheduler, it

@@ -33,7 +33,7 @@
 (*    window (purge.ex:130); more than one purge or pause (the owner sends *)
 (*    each once; the insert checks every interval, computer_history_sql.ex:*)
 (*    641, :1162-1173); the Setup UI disable path; a crash of the Spool,   *)
-(*    which restarts the rail after it (supervisor.ex:119-134) like a      *)
+(*    which restarts the rail after it (supervisor.ex:87-102) like a       *)
 (*    Controller crash with the Capturer's; a store that does not open,    *)
 (*    which leaves the Spool up answering store_unavailable and the        *)
 (*    recorder off (Controller) until the engine starts again: single-call *)
@@ -81,7 +81,7 @@
 \* SOURCE: apps/fermix_core/lib/fermix_core/computer_history/wire.ex @ 35da392f4930
 \* SOURCE: apps/fermix_core/lib/fermix_core/computer_history/ingest.ex @ b4e50b7a0b86
 \* SOURCE: apps/fermix_core/lib/fermix_core/computer_history/controller.ex @ 9a21d4338131
-\* SOURCE: apps/fermix_core/lib/fermix_core/computer_history/supervisor.ex @ c68a3e139d47
+\* SOURCE: apps/fermix_core/lib/fermix_core/computer_history/supervisor.ex @ 7112c742c8a7
 \* SOURCE: apps/fermix_core/lib/fermix_core/computer_history.ex @ d1e9b50a4dc5
 \* SOURCE: apps/fermix_core/lib/fermix_core/computer_history/purge.ex @ a066c0ea7e38
 \* SOURCE: apps/fermix_core/lib/fermix_core/computer_history/delivery.ex#apply_here @ fb5801d6ac6d
@@ -456,7 +456,7 @@ CapturerCrash ==
 CapturerStep == FlushCheck \/ FlushInsert \/ TermCheck \/ TermInsert \/ TermStop
 
 -----------------------------------------------------------------------------
-(* The DynamicSupervisor that owns the Capturer (supervisor.ex:127).       *)
+(* The DynamicSupervisor that owns the Capturer (supervisor.ex:95).        *)
 (* OTP semantics: it handles its mailbox in order; a child is :permanent   *)
 (* (the use GenServer default), so an EXIT it did not ask for restarts    *)
 (* it in the same message; terminate_child/2 monitors and unlinks the      *)
@@ -531,7 +531,7 @@ DynSupStep == DsRestart \/ DsTerminate \/ DsReaped
 -----------------------------------------------------------------------------
 (* The Controller (controller.ex), a middle child of the :rest_for_one    *)
 (* ComputerHistory.Supervisor: Spool, DynamicSupervisor, Controller,       *)
-(* Retention (supervisor.ex:125-134).                                      *)
+(* Retention (supervisor.ex:93-102).                                       *)
 
 CtrlUnchanged ==
     UNCHANGED <<clock, where, ts, exitQueued, dsBusy, dsFor, ctrl, ctrlGen, env, config,
@@ -605,7 +605,7 @@ ControllerCrash ==
                    ctrlGen, env, config, pauseUntil, pausePc, purges, pauseWin>>
     /\ GhostsUnchanged
 
-\* ComputerHistory.Supervisor (:rest_for_one, supervisor.ex:132-134) restarts the
+\* ComputerHistory.Supervisor (:rest_for_one, supervisor.ex:100-102) restarts the
 \* Controller (and Retention after it); init continues to :reconcile.
 ControllerRestart ==
     /\ ctrl = "down"

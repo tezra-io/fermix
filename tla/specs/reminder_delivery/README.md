@@ -568,6 +568,14 @@ among them, which the model already takes as a `:rest_for_one` restart.
 before the day turn. No delivery path the spec models changed, and no
 citation moved.
 
+Re-read on 2026-11-15 for Always On in every build (`d195aa17`), which
+staled the `application.ex` pin. The boot drops the release gate's alias,
+and `Home.ReleaseTable` fetches on an Always On server's primary with no
+build check, its child comment reworded in place. No child moved or changed
+order, and `TemporalScheduler` still starts before
+`TemporalDeliverySupervisor`. No delivery path the spec models changed, and
+the spec cites no `application.ex` line.
+
 ## Code and doc drift
 
 - `delivery_worker.ex:160-163` says a claim past the validity boundary "cannot

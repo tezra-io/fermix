@@ -654,3 +654,11 @@ day's turn, serves no call, arms one timer and raises on nothing it is sent,
 so a crash of it restarts only the children after it, the cue tree among
 them, which the model takes as `FiltersRestart`. The cue tree is still last.
 Nothing the spec models changed, and it cites no `application.ex` line.
+
+## Re-read for Always On in every build (2026-11-15)
+
+`d195aa17` staled the `application.ex` pin. Every build now serves Always
+On: the boot drops the release gate's alias, and `Home.ReleaseTable` fetches
+on an Always On server's primary with no build check, its child comment
+reworded in place. No child moved or changed order. The cue tree is still last.
+Nothing the spec models changed, and it cites no `application.ex` line.

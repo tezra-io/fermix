@@ -657,10 +657,9 @@ the fixed code.
 - The model's host has a recorder (a Mac, or since 8240551b a Linux computer
   whose paired helper records there). On a host with none, `/history
   off` makes no reconcile call (`reconcile_here/2`, `computer_history.ex:243-249`),
-  and since 18710c89 the rail's supervisor runs there only on a home that a
-  computer can contribute to or that holds notes, with no store and no
-  recorder to stop (`supervisor.ex:60-67`); elsewhere its `init/1` answers
-  `:ignore`.
+  and the rail's supervisor runs there only as the home's primary, with no
+  store and no recorder to stop (`supervisor.ex:59-66`); on a device its
+  `init/1` answers `:ignore`.
 - Two `/history` commands from different channels can run at once (each runs
   in its ingress process, `gateway.ex:377`), so each command is its own actor.
 
@@ -875,3 +874,15 @@ the split, on events already kept, and calls no store. A longer comment
 above the secure roles moves every line the spec cites by four. No
 modelled step changed; the line numbers in the spec and in this README's
 current-code sections point at the committed file.
+
+## Re-read for Always On in every build (d195aa17, 2026-11-15)
+
+`d195aa17` staled the `supervisor.ex` pin. Every build now serves Always
+On, so the rail's start rule loses its Always On and holds-notes probes:
+`init/1` starts the rail where this system has a recorder or the engine is
+the primary, and answers `:ignore` on a device with no recorder. The model's
+host has a recorder, so the rail runs there under either rule, and its
+children, their order and `:rest_for_one` are unchanged. No modelled step
+changed; the moduledoc and the removed probe move the lines the spec cites
+by 32, and the spec and this README's Assumptions point at the committed
+file.
