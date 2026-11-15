@@ -554,18 +554,18 @@ defmodule FermixCore.ComputerHistory.IngestTest do
     test "typed text outside a browser is untouched by the gate", %{spool: spool} do
       events = [
         base(1, %{
-          bundle_id: "com.apple.Terminal",
+          bundle_id: "com.apple.TextEdit",
           type: "field.value",
-          text: "a shell command",
-          char_len: 15
+          text: "a note to self",
+          char_len: 14
         })
       ]
 
       assert {:ok, %{written: 1, dropped: 0}} =
-               Ingest.ingest(events, spool: spool, apps: ["com.apple.Terminal"])
+               Ingest.ingest(events, spool: spool, apps: ["com.apple.TextEdit"])
 
       assert [row] = stored(spool)
-      assert row.text == "a shell command"
+      assert row.text == "a note to self"
     end
   end
 
@@ -575,14 +575,14 @@ defmodule FermixCore.ComputerHistory.IngestTest do
 
       events = [
         base(1, %{
-          bundle_id: "com.apple.Terminal",
-          field_label: "cmd",
+          bundle_id: "com.apple.TextEdit",
+          field_label: "Notes",
           text: "export KEY=#{secret}"
         })
       ]
 
       assert {:ok, %{written: 1}} =
-               Ingest.ingest(events, spool: spool, apps: ["com.apple.Terminal"])
+               Ingest.ingest(events, spool: spool, apps: ["com.apple.TextEdit"])
 
       [row] = stored(spool)
       refute String.contains?(row.text, secret)
@@ -616,6 +616,31 @@ defmodule FermixCore.ComputerHistory.IngestTest do
       assert {:ok, %{written: 2}} = Ingest.ingest(events, spool: spool, apps: ["Terminal"])
 
       assert Enum.map(stored(spool), & &1.text) == [nil, nil]
+    end
+
+    # The helper decides what a field may send on facts no frame carries (a Mac
+    # password field's subrole, a terminal emulator's bundle id or pseudo-terminal,
+    # a GTK 4 version) and marks what it withheld; a withheld frame that still
+    # carried text is a helper bug, and that text is not stored.
+    test "a frame the helper marked withheld keeps no text", %{spool: spool} do
+      events = [
+        base(1, %{
+          bundle_id: "com.apple.Terminal",
+          type: "field.value",
+          role: "AXTextArea",
+          content_withheld: true,
+          text: "[sudo] password: hunter2",
+          char_len: 24
+        })
+      ]
+
+      assert {:ok, %{written: 1}} =
+               Ingest.ingest(events, spool: spool, apps: ["com.apple.Terminal"])
+
+      assert [row] = stored(spool)
+      assert row.text == nil
+      assert row.content_withheld == 1
+      assert row.char_len == 24
     end
   end
 

@@ -5,7 +5,7 @@ defmodule FermixCore.ComputerHistory.Ingest do
   fixed pipeline before it touches disk:
 
       default-deny allowlist  ▸  private gate + URL normalization  ▸  title
-        normalization  ▸  secure-role suppression  ▸  secret scrubber  ▸
+        normalization  ▸  secure-text suppression  ▸  secret scrubber  ▸
         injection-scan tagging  ▸  consecutive-repeat collapse  ▸  batched write
 
   **Default-deny (§14 inv. 11):** consent is **per app**. An event whose bundle id
@@ -82,9 +82,13 @@ defmodule FermixCore.ComputerHistory.Ingest do
   # and hosts are not natural-language and are excluded.
   @scan_columns [:window_title, :page_title, :field_label, :text]
 
-  # Roles whose text is suppressed regardless — defense in depth behind the
-  # recorder's own (§13.1): macOS's secure field, and on Linux a password field
-  # and a terminal, whose prompts' passwords no role marks (M97 stage 4).
+  # Defense in depth behind the recorder's own rules (§13.1), which compux decides
+  # on facts no frame carries: a Mac password field's subrole, a terminal
+  # emulator's bundle id or pseudo-terminal, a GTK 4 version. A frame the helper
+  # marked `content_withheld` keeps no text, whatever came with it, and so does a
+  # field whose role says it holds a secret: a role spelled `AXSecureTextField`,
+  # and on Linux a password field and a terminal, whose prompts' passwords no role
+  # marks (M97 stage 4).
   @secure_roles ["AXSecureTextField", "password text", "terminal"]
 
   # The §8.4 event kinds that are metadata about the machine, not about an app,
@@ -459,6 +463,8 @@ defmodule FermixCore.ComputerHistory.Ingest do
   defp repeated_title?(_event, _previous), do: false
 
   defp title_identity(event), do: {Map.get(event, :bundle_id), Map.get(event, :window_title)}
+
+  defp suppress_secure_text(%{content_withheld: true} = event), do: Map.put(event, :text, nil)
 
   defp suppress_secure_text(%{role: role} = event) when role in @secure_roles,
     do: Map.put(event, :text, nil)

@@ -64,6 +64,14 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the trace and to Opik like any other call's. That call's content is now
   never kept, whatever the setting says; its provider, model, tokens and
   timing still are.
+- **Computer history on a Mac no longer keeps what you type in a terminal.**
+  In Terminal, iTerm2, Warp, kitty, Alacritty, Ghostty, WezTerm, Hyper or any
+  other app that runs a shell, a field that changed now keeps only how many
+  characters it holds, as on Linux, because a `sudo` or `ssh` password prompt
+  is not marked as a password field. A password field is now known by the mark
+  macOS gives it, so its value is never read. In a browser, what has the focus
+  is named only when it is a field, by its label, so an address bar's
+  suggestion, which repeats what you typed, is no longer kept.
 
 ### Added
 
@@ -73,8 +81,10 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   name an app shows, as the Apps setting's info says), Fermix records the
   active listed app's window titles, the field you are in and what you typed
   there once it settles, and nothing from an app that is not on the list. It
-  never reads a password field, a terminal or a browser: a field there that
-  changed keeps only how many characters it holds. A browser is known by its
+  never reads a password field, a terminal or a browser, nor a one-line field
+  in a GTK 4 app before GTK 4.20, which does not mark a hidden entry as a
+  password field: a field there that changed keeps only how many characters it
+  holds. A browser is known by its
   name, its program or its web engine, so every Firefox and Chromium fork,
   Thunderbird and every Electron app count as one, and a field inside a web
   page counts as a browser's in any app. No page address is recorded on Linux.
