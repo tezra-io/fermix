@@ -385,8 +385,9 @@ defmodule FermixCore.ComputerHistory.ConfigTest do
 
   # v1.1 decision 1: every site visited in an allowlisted browser is recorded, so
   # there is no per-site filter left to configure. A key an operator already has
-  # on disk must never refuse boot (the poisoned-config incident) — it is accepted,
-  # named once, and dropped.
+  # on disk must never refuse boot (the poisoned-config incident) — it is accepted
+  # and dropped here, naming nothing, and the engine process names it once
+  # (`Setup.RetiredSettings`).
   describe "the retired `sites` key" do
     test "retired_keys/0 names it and config_keys/0 does not" do
       assert Config.retired_keys() == [:sites]
@@ -405,20 +406,15 @@ defmodule FermixCore.ComputerHistory.ConfigTest do
         end)
 
       assert normalized == Config.normalize(%{"enabled" => true, "apps" => ["com.apple.Safari"]})
-      assert log =~ "computer_history.sites is retired"
+      refute log =~ "retired"
     end
 
-    test "the deprecation is logged exactly once, and names the repair" do
-      log =
-        capture_log(fn ->
-          Config.normalize(%{"sites" => ["github.com", "example.com"]})
-        end)
+    test "this computer's machine.toml table accepts it too, naming nothing" do
+      {own, log} =
+        with_log(fn -> Config.machine_file(%{"enabled" => true, "sites" => ["github.com"]}) end)
 
-      assert [_one] = Regex.scan(~r/computer_history\.sites is retired/, log)
-
-      assert log =~
-               "every site in an allowlisted browser is recorded; remove the key from the " <>
-                 "file that holds it"
+      assert own == []
+      refute log =~ "retired"
     end
 
     test "to_keyword never emits it" do

@@ -3514,7 +3514,7 @@
       "method": "(schema)",
       "field": "methods:computers.rename",
       "kind": "engine_only",
-      "why": "M97 §3.2: computers.rename names a computer of the home, unique in it and not the server's own name, and answers the computer as home.status lists it. It postdates the draft and is published under minimum version 2 with no protocol bump, gated with Always On like home.act, so a client that has not re-vendored never calls it."
+      "why": "M97 §3.2: computers.rename names a computer of the home, unique in it and not the server's own name, and answers the computer as home.status lists it. It postdates the draft and is published under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls it."
     },
     {
       "method": "(schema)",
@@ -3526,7 +3526,7 @@
       "method": "hello",
       "field": "capabilities.minimum_versions.computers.rename",
       "kind": "engine_only",
-      "why": "M97 §3.2: hello publishes every method this daemon serves with its minimum version, computers.rename included where Always On is offered. The draft predates it; a client ignores a method it does not know."
+      "why": "M97 §3.2: hello publishes every method this daemon serves with its minimum version, computers.rename included. The draft predates it; a client ignores a method it does not know."
     },
     {
       "method": "computers.rename",
@@ -3544,7 +3544,7 @@
       "method": "(schema)",
       "field": "methods:computer.journal.list",
       "kind": "engine_only",
-      "why": "M97 §6.3: computer.journal.list is the owner's read of this computer's own journal of what its server did here. It postdates the draft and is published under minimum version 2 with no protocol bump, gated with Always On like home.act, so a client that has not re-vendored never calls it."
+      "why": "M97 §6.3: computer.journal.list is the owner's read of this computer's own journal of what its server did here. It postdates the draft and is published under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls it."
     },
     {
       "method": "(schema)",
@@ -3556,7 +3556,7 @@
       "method": "hello",
       "field": "capabilities.minimum_versions.computer.journal.list",
       "kind": "engine_only",
-      "why": "M97 §6.3: hello publishes every method this daemon serves with its minimum version, computer.journal.list included where Always On is offered. The draft predates it; a client ignores a method it does not know."
+      "why": "M97 §6.3: hello publishes every method this daemon serves with its minimum version, computer.journal.list included. The draft predates it; a client ignores a method it does not know."
     },
     {
       "method": "computer.journal.list",
@@ -3568,7 +3568,7 @@
       "method": "(schema)",
       "field": "methods:computer.screen.stop",
       "kind": "engine_only",
-      "why": "M97 §7.4: computer.screen.stop is the Stop beside the mark a linked computer's app draws while Fermix on its server controls its screen. It postdates the draft and is published under minimum version 2 with no protocol bump, gated with Always On like home.act, so a client that has not re-vendored never calls it."
+      "why": "M97 §7.4: computer.screen.stop is the Stop beside the mark a linked computer's app draws while Fermix on its server controls its screen. It postdates the draft and is published under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls it."
     },
     {
       "method": "(schema)",
@@ -3580,13 +3580,13 @@
       "method": "hello",
       "field": "capabilities.minimum_versions.computer.screen.stop",
       "kind": "engine_only",
-      "why": "M97 §7.4: hello publishes every method this daemon serves with its minimum version, computer.screen.stop included where Always On is offered. The draft predates it; a client ignores a method it does not know."
+      "why": "M97 §7.4: hello publishes every method this daemon serves with its minimum version, computer.screen.stop included. The draft predates it; a client ignores a method it does not know."
     },
     {
       "method": "(schema)",
       "field": "methods:home.enroll.approve",
       "kind": "engine_only",
-      "why": "M97 §7.5: home.enroll.approve is the owner's approval of the computer that waits to join, with the six digits it shows. It postdates the draft and is published under minimum version 2 with no protocol bump, behind the Always On gate."
+      "why": "M97 §7.5: home.enroll.approve is the owner's approval of the computer that waits to join, with the six digits it shows. It postdates the draft and is published under minimum version 2 with no protocol bump, as part of Always On."
     },
     {
       "method": "(schema)",
@@ -3598,13 +3598,13 @@
       "method": "hello",
       "field": "capabilities.minimum_versions.home.enroll.approve",
       "kind": "engine_only",
-      "why": "M97 §7.5: hello publishes every method this daemon serves with its minimum version, home.enroll.approve included where Always On is offered. The draft predates it; a client ignores a method it does not know."
+      "why": "M97 §7.5: hello publishes every method this daemon serves with its minimum version, home.enroll.approve included. The draft predates it; a client ignores a method it does not know."
     },
     {
       "method": "(schema)",
       "field": "methods:home.enroll.deny",
       "kind": "engine_only",
-      "why": "M97 §7.5: home.enroll.deny is the owner's refusal of the computer that waits to join. It postdates the draft and is published under minimum version 2 with no protocol bump, behind the Always On gate."
+      "why": "M97 §7.5: home.enroll.deny is the owner's refusal of the computer that waits to join. It postdates the draft and is published under minimum version 2 with no protocol bump, as part of Always On."
     },
     {
       "method": "(schema)",
@@ -3616,13 +3616,13 @@
       "method": "hello",
       "field": "capabilities.minimum_versions.home.enroll.deny",
       "kind": "engine_only",
-      "why": "M97 §7.5: hello publishes every method this daemon serves with its minimum version, home.enroll.deny included where Always On is offered. The draft predates it; a client ignores a method it does not know."
+      "why": "M97 §7.5: hello publishes every method this daemon serves with its minimum version, home.enroll.deny included. The draft predates it; a client ignores a method it does not know."
     },
     {
       "method": "(schema)",
       "field": "methods:home.restart",
       "kind": "engine_only",
-      "why": "M97 D28c: home.restart is a linked computer's Restart <server>, which the server takes after its restart hold. It postdates the draft and is published under minimum version 2 with no protocol bump, rail-only and behind the Always On gate."
+      "why": "M97 D28c: home.restart is a linked computer's Restart <server>, which the server takes after its restart hold. It postdates the draft and is published under minimum version 2 with no protocol bump, rail-only, as part of Always On."
     },
     {
       "method": "(schema)",
@@ -3634,13 +3634,13 @@
       "method": "hello",
       "field": "capabilities.minimum_versions.home.restart",
       "kind": "engine_only",
-      "why": "M97 D28c: hello publishes every method this daemon serves with its minimum version, home.restart included where Always On is offered. The draft predates it; a client ignores a method it does not know."
+      "why": "M97 D28c: hello publishes every method this daemon serves with its minimum version, home.restart included. The draft predates it; a client ignores a method it does not know."
     },
     {
       "method": "(schema)",
       "field": "methods:computer.join.start",
       "kind": "engine_only",
-      "why": "M97 §3.1: computer.join.start joins this computer to a home that already runs, with the code Add a computer opened there. It postdates the draft and is published under minimum version 2 with no protocol bump, behind the Always On gate."
+      "why": "M97 §3.1: computer.join.start joins this computer to a home that already runs, with the code Add a computer opened there. It postdates the draft and is published under minimum version 2 with no protocol bump, as part of Always On."
     },
     {
       "method": "(schema)",
@@ -3652,13 +3652,13 @@
       "method": "hello",
       "field": "capabilities.minimum_versions.computer.join.start",
       "kind": "engine_only",
-      "why": "M97 §3.1: hello publishes every method this daemon serves with its minimum version, computer.join.start included where Always On is offered. The draft predates it; a client ignores a method it does not know."
+      "why": "M97 §3.1: hello publishes every method this daemon serves with its minimum version, computer.join.start included. The draft predates it; a client ignores a method it does not know."
     },
     {
       "method": "(schema)",
       "field": "methods:computer.join.cancel",
       "kind": "engine_only",
-      "why": "M97 §3.1: computer.join.cancel ends this computer's join wherever it stands. It postdates the draft and is published under minimum version 2 with no protocol bump, behind the Always On gate."
+      "why": "M97 §3.1: computer.join.cancel ends this computer's join wherever it stands. It postdates the draft and is published under minimum version 2 with no protocol bump, as part of Always On."
     },
     {
       "method": "(schema)",
@@ -3670,13 +3670,13 @@
       "method": "hello",
       "field": "capabilities.minimum_versions.computer.join.cancel",
       "kind": "engine_only",
-      "why": "M97 §3.1: hello publishes every method this daemon serves with its minimum version, computer.join.cancel included where Always On is offered. The draft predates it; a client ignores a method it does not know."
+      "why": "M97 §3.1: hello publishes every method this daemon serves with its minimum version, computer.join.cancel included. The draft predates it; a client ignores a method it does not know."
     },
     {
       "method": "(schema)",
       "field": "methods:computer.disconnect",
       "kind": "engine_only",
-      "why": "M97 §3.3: computer.disconnect takes this computer out of the home it is linked to. It postdates the draft and is published under minimum version 2 with no protocol bump, behind the Always On gate."
+      "why": "M97 §3.3: computer.disconnect takes this computer out of the home it is linked to. It postdates the draft and is published under minimum version 2 with no protocol bump, as part of Always On."
     },
     {
       "method": "(schema)",
@@ -3688,7 +3688,7 @@
       "method": "hello",
       "field": "capabilities.minimum_versions.computer.disconnect",
       "kind": "engine_only",
-      "why": "M97 §3.3: hello publishes every method this daemon serves with its minimum version, computer.disconnect included where Always On is offered. The draft predates it; a client ignores a method it does not know."
+      "why": "M97 §3.3: hello publishes every method this daemon serves with its minimum version, computer.disconnect included. The draft predates it; a client ignores a method it does not know."
     },
     {
       "method": "computer.join.start",

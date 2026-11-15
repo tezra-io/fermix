@@ -100,7 +100,7 @@ defmodule FermixCore.Application do
 
   defp start_profile(:app_engine) do
     :ok = BootProfile.prepare(:app_engine, ConfigStore.fermix_home())
-    start_supervision_tree()
+    start_tree_naming_retired_settings()
   end
 
   defp start_profile(:standalone_cli), do: cli_dispatch(:standalone_cli, BurritoArgs.argv())
@@ -119,7 +119,20 @@ defmodule FermixCore.Application do
   # plain release. `mix fermix.dev` sets the existing gates before starting
   # the application; only the immutable app-engine profile opens all daemon
   # surfaces here without going through the CLI.
-  defp start_profile(:source), do: start_supervision_tree()
+  defp start_profile(:source), do: start_tree_naming_retired_settings()
+
+  # An app engine and a source boot pass no `Fermix.CLI.main/1`, which names
+  # them for every process of a packaged binary, so their process names the
+  # retired settings its files carry here, once, into the log file its tree
+  # attached (`ConfigStore.say_retired_settings/0`). The boot's read in
+  # `config/runtime.exs` is too early: its only handler is the kernel's on
+  # stdout, which the app's launch agent sends nowhere.
+  defp start_tree_naming_retired_settings do
+    with {:ok, pid} <- start_supervision_tree(),
+         :ok <- ConfigStore.say_retired_settings() do
+      {:ok, pid}
+    end
+  end
 
   # `run`: enable the endpoint server now (before OTP proceeds to start
   # fermix_web), build the supervision tree, then spawn `Fermix.CLI.Run`

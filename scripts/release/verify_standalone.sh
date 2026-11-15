@@ -825,6 +825,34 @@ printf '%s\n' "$(cat "$status_err")"
 one_ok_json_document "$status_out" ||
   fail "fermix home status --json in a home that never started must print exactly one JSON document on stdout, got: $(cat "$status_out")"
 
+# A settings file an earlier release wrote can carry a table this one retired,
+# Always On's test switch `[fermix_core.always_on]` above all, which every
+# home that tried Always On before it shipped still has. It must boot: the
+# table is accepted and ignored, and the process names it once at warning
+# (`FermixCore.Setup.RetiredSettings`), never once per settings load, which
+# the boot, the verb and every poll of a daemon repeat. Under `--json` the
+# notice is on stderr, and the file is left as it was: only a settings save
+# drops the table.
+retired_home="$runtime_root/home-status-retired"
+retired_settings='[fermix_core.always_on]
+enabled = true'
+mkdir -m 700 "$retired_home"
+printf '%s\n' "$retired_settings" > "$retired_home/config.toml"
+chmod 600 "$retired_home/config.toml"
+home_status=0
+env -u FERMIX_OPIK_ENABLED HOME="$home" FERMIX_HOME="$retired_home" \
+  "$artifact" home status --json < /dev/null > "$status_out" 2> "$status_err" || home_status=$?
+printf '%s\n' "$(cat "$status_err")"
+[ "$home_status" -eq 0 ] ||
+  fail "fermix home status --json in a home whose settings carry a retired table must exit 0, got $home_status: $(cat "$status_out")"
+one_ok_json_document "$status_out" ||
+  fail "fermix home status --json in a home whose settings carry a retired table must print exactly one JSON document on stdout, got: $(cat "$status_out")"
+retired_named="$(grep -Fc "config.toml [fermix_core.always_on] is retired" "$status_err" || :)"
+[ "$retired_named" -eq 1 ] ||
+  fail "fermix home status must name the retired [fermix_core.always_on] table exactly once on stderr, named it $retired_named times: $(cat "$status_err")"
+[ "$(cat "$retired_home/config.toml")" = "$retired_settings" ] ||
+  fail "fermix home status changed the settings of $retired_home: $(cat "$retired_home/config.toml")"
+
 moved_out="$runtime_root/home-moved.out"
 moved_err="$runtime_root/home-moved.err"
 home_status=0

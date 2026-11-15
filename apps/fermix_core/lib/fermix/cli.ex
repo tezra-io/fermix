@@ -44,6 +44,7 @@ defmodule Fermix.CLI do
   alias Fermix.CLI.Version
   alias Fermix.CLI.VoiceCommand
   alias FermixCore.Providers.ModelCatalog
+  alias FermixCore.Setup.ConfigStore
 
   @doc """
   Dispatch entry point.
@@ -58,8 +59,25 @@ defmodule Fermix.CLI do
   @spec main([String.t()]) :: non_neg_integer()
   def main(argv) when is_list(argv) do
     case pure_stdout(argv) do
-      :ok -> dispatch_argv(argv)
+      :ok -> retired_settings_named(argv)
       {:error, reason} -> impure_stdout(reason)
+    end
+  end
+
+  # Every process of a packaged binary passes here once, its logging in place:
+  # on stderr where stdout is a wire, and in the log file once a verb's tree has
+  # started (`run`, `setup`, `memory`). So the process names the retired
+  # settings its files carry here, once (`ConfigStore.say_retired_settings/0`),
+  # and no settings load names them again. Settings that cannot be read stop the
+  # verb by name, as the boot's read of them does.
+  defp retired_settings_named(argv) do
+    case ConfigStore.say_retired_settings() do
+      :ok ->
+        dispatch_argv(argv)
+
+      {:error, reason} ->
+        IO.puts(:stderr, "fermix: " <> ConfigStore.load_error_sentence(reason))
+        1
     end
   end
 

@@ -1,7 +1,7 @@
 defmodule FermixCore.Computers.ArgumentTest do
-  # M97 §6.5: the `computer` argument appears on an owner's turn, where Always On
-  # is offered and the home has a computer, on each tool whose capability some
-  # computer offers, and lists the names of the computers that offer it.
+  # M97 §6.5: the `computer` argument appears on an owner's turn, where the home
+  # has a computer, on each tool whose capability some computer offers, and
+  # lists the names of the computers that offer it.
   use ExUnit.Case, async: true
 
   alias FermixCore.Capabilities.Advertisement

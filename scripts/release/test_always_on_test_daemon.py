@@ -645,7 +645,8 @@ class AlwaysOnTestDaemonTest(unittest.TestCase):
         self.assertIn("service uninstall --user\n", self.log("fermix"))
 
     # `choose` is v0.18.0's screen for a provider token that created nothing
-    # yet: the script installs a published release, so it still meets it.
+    # yet: `up` no longer installs v0.18.0, but an earlier version of the
+    # script did, so `down` can still meet it.
     def test_down_proceeds_where_always_on_holds_nothing(self):
         for state in ("off", "connect", "choose"):
             with self.subTest(state=state):
@@ -657,19 +658,6 @@ class AlwaysOnTestDaemonTest(unittest.TestCase):
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertIn(f"Always On holds no server here ({state}).", result.stdout)
                 self.assertFalse(self.root.exists())
-
-    def test_down_proceeds_where_the_build_serves_no_always_on(self):
-        self.up()
-        self.screen_envelope(
-            {"schema_version": 1, "ok": False, "error": {"code": "always_on_unavailable", "sentence": "Always On is not in this release of Fermix yet."}},
-            1,
-        )
-
-        result = self.run_script("down")
-
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn(f"Fermix {VERSION} serves no Always On here, so it holds no server.", result.stdout)
-        self.assertFalse(self.root.exists())
 
     def test_down_finishes_what_a_failed_up_left(self):
         failed = self.run_script("up", "--release", VERSION, extra_env={"FAKE_HEALTH_VERSION": "0.0.1"})

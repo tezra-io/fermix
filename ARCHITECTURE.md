@@ -408,6 +408,15 @@ cross-VM lockfile from its read to its write, and the `[mcp.servers.*]` blocks
 are read, edited and checked by `Capabilities.MCP.Config` and rendered back by
 the same renderer, so no save drops an operator's servers.
 
+Architecture Invariant: a settings load never logs a retired setting. A table
+or key a build retired (`[fermix_core.always_on]`, a provider's retired key,
+`[mcp.inbound]` and the rest in `Setup.RetiredSettings`) is accepted and
+dropped by every load, so the next save writes the file without it, and each
+engine process names it once at warning where its logging is in place: an app
+engine or a source boot once its tree has started, every packaged process in
+`Fermix.CLI.main/1`. The setup state, model routing and doctor load the
+settings on every poll, so a notice there repeats once a second.
+
 `Setup.Wizard` is the shared setup engine. `fermix setup` and `mix fermix.setup`
 (through `Setup.Runtime`), the setup LiveView, and the management protocol's
 `settings.*` methods all persist through it. `Readiness` reports which required

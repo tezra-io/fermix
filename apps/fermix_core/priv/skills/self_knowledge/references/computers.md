@@ -205,8 +205,8 @@ listed as it came.
   its next request."), **Files and commands**, **The browser**, **Your
   screen**, and on a Mac **Messages** and **Apple Maps**. While a review waits, the master's
   footer says so, and changing any switch is the review. It shows only on a
-  computer linked to its server where Always On is offered: a computer that
-  never moved has none, and the server has none. On a Linux computer without
+  computer linked to its server: a computer that never moved has none, and
+  the server has none. On a Linux computer without
   the app, `fermix settings set computer computer_files_and_shell=false`
   (each key is `computer_` and the switch) changes it from that computer.
 - Every switch is live: no restart, and the computer sends its offers again
@@ -393,9 +393,9 @@ shown) and then its own. Information only: no button, no notification.
   `file_edit`, `glob_search`, `content_search`, `view_image` and
   `send_attachment` under Files; `shell`, `git_read` and `git_write` under
   Commands. A guest's turn, a worker a skill or a sub-agent runs (a plugin
-  skill's above all), a build without Always On and a home with no computer
-  offering it never show it, and such a turn naming one is refused as no
-  such computer. The owner's scheduled jobs and cues do see it.
+  skill's above all) and a home with no computer offering it never show it,
+  and such a turn naming one is refused as no such computer. The owner's
+  scheduled jobs and cues do see it.
 - **Where a call runs, never silently:** with no `computer`, on the server
   (it has files and commands of its own); with a name, on that computer.
   A computer that is away is refused at once with when it was last seen
@@ -444,8 +444,8 @@ shown) and then its own. Information only: no button, no notification.
 ## `## Computers` on the owner's turn
 
 - On the server, an owner's turn carries a `## Computers` section right
-  after `## This Fermix`, where Always On is offered and the home has at
-  least one computer; a guest's turn never does:
+  after `## This Fermix`, where the home has at least one computer; a guest's
+  turn never does:
 
   ```
   ## Computers

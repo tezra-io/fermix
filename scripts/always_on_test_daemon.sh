@@ -474,8 +474,8 @@ cmd_status() {
 
 # The states in which Always On holds no server and no move: nothing set up, a
 # code for the owner's server that no server used yet, or (`choose`, in
-# v0.18.0, which this script may install) a provider token that created
-# nothing yet.
+# v0.18.0, which `up` no longer installs but an earlier version of this script
+# did, so `down` can still meet it) a provider token that created nothing yet.
 holds_nothing() {
   case "$1" in
     off | connect | choose) return 0 ;;
@@ -483,19 +483,15 @@ holds_nothing() {
   esac
 }
 
-# A build without Always On holds no server: one that refuses it by name, or
-# one older than it, which has no `home` verb at all. Anything else this cannot
-# read keeps the home.
+# A release with no `home` verb at all, from before Always On, holds no
+# server: `up` installs none, but an earlier version of this script could.
+# Any refusal, and anything else this cannot read, keeps the home.
 refuse_held_server() {
   local out="$work/home.json" err="$work/home.err" code=0
   engine home status --json >"$out" 2>"$err" || code=$?
   case "$code" in
     0) check_screen "$out" ;;
-    1)
-      [ "$(screen_field "$out" error code)" = always_on_unavailable ] ||
-        fail "fermix home status refused: $(screen_field "$out" error sentence)"
-      say "Fermix $(state_get version) serves no Always On here, so it holds no server."
-      ;;
+    1) fail "fermix home status refused: $(screen_field "$out" error sentence)" ;;
     2)
       [ "$(head -n 1 "$err")" = "fermix: unknown command: home" ] ||
         { cat "$err" >&2; fail "fermix home status did not answer"; }

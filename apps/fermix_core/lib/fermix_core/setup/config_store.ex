@@ -42,6 +42,7 @@ defmodule FermixCore.Setup.ConfigStore do
   alias FermixCore.Setup.EngineOwner
   alias FermixCore.Setup.MachineFile
   alias FermixCore.Setup.RestartState
+  alias FermixCore.Setup.RetiredSettings
   alias FermixCore.Setup.SecretStore
   alias FermixCore.Setup.SecretWriter
   alias FermixCore.Setup.WebListener
@@ -201,6 +202,28 @@ defmodule FermixCore.Setup.ConfigStore do
     with {:ok, config} <- read_named(path()),
          {:ok, machine} <- read_named(MachineFile.path(fermix_home())) do
       loaded(config, machine, opts)
+    end
+  end
+
+  @doc """
+  Names, once each at warning, the settings this build retired that the
+  settings files still carry (`Setup.RetiredSettings.notices/3`); a load
+  accepts and drops them and names none. Each engine process calls it once,
+  where its logging is in place: an app engine or a source boot once its tree
+  has started (`FermixCore.Application`), and every process of a packaged
+  binary in `Fermix.CLI.main/1`, after a verb's tree where it starts one. A
+  file that cannot be read is named as a load names it.
+  """
+  @spec say_retired_settings() :: :ok | {:error, {:config, Path.t(), term()}}
+  def say_retired_settings do
+    with {:ok, config} <- read_named(path()),
+         {:ok, machine} <- read_named(MachineFile.path(fermix_home())) do
+      machine = decode_document(text(machine))
+      document = MachineFile.join(decode_document(text(config)), machine)
+
+      document
+      |> RetiredSettings.notices(machine, text(config))
+      |> Enum.each(&Logger.warning/1)
     end
   end
 
@@ -932,7 +955,6 @@ defmodule FermixCore.Setup.ConfigStore do
   def apply_mcp_config do
     case File.read(path()) do
       {:ok, contents} ->
-        warn_retired_mcp_sections(contents)
         servers = McpConfig.from_toml(contents)
         Application.put_env(:fermix_core, :mcp_servers, servers)
         warn_unread_mcp_keys(contents)
@@ -948,23 +970,10 @@ defmodule FermixCore.Setup.ConfigStore do
     end
   end
 
-  # The inbound MCP server was retired before it was ever started (M73), so a
-  # `[mcp.inbound*]` block has no reader. It is said once per load, and
-  # `mcp_document/1` leaves it out, so the next settings save drops it.
-  defp warn_retired_mcp_sections(contents) do
-    if McpConfig.retired_sections(contents) != [] do
-      Logger.warning(
-        "config.toml [mcp.inbound] is retired: this build has no inbound MCP server, so the " <>
-          "section is ignored, and the next settings save writes the file without it."
-      )
-    end
-
-    :ok
-  end
-
-  # A key the reader does not read stays in the file and is said once per load,
-  # never a refusal: refusing would turn a hand-written server that carries one
-  # into a daemon that does not boot (M74 E2).
+  # A key the reader does not read stays in the file and is said each time the
+  # servers are applied (the boot, an MCP write, a plugin apply), never a
+  # refusal: refusing would turn a hand-written server that carries one into a
+  # daemon that does not boot (M74 E2).
   defp warn_unread_mcp_keys(contents) do
     case McpConfig.unread_keys(contents) do
       [] ->
@@ -2265,8 +2274,9 @@ defmodule FermixCore.Setup.ConfigStore do
   # The `[mcp.*]` blocks of a settings file, by the reader that owns them:
   # `Capabilities.MCP.Config` reads `[mcp.servers.*]`. Every key it stored is
   # here, the ones it ignores today included, because none of it is this
-  # module's to drop. A retired `[mcp.inbound*]` block is not read, so it is not
-  # written back (`warn_retired_mcp_sections/1`).
+  # module's to drop. A retired `[mcp.inbound*]` block, the inbound server
+  # retired before it was ever started (M73), is not read, so it is not written
+  # back; the engine process names it once (`Setup.RetiredSettings`).
   defp mcp_document(contents) do
     %{servers: McpConfig.document(contents)}
   end
@@ -2375,16 +2385,17 @@ defmodule FermixCore.Setup.ConfigStore do
     |> elem(1)
   end
 
+  # A table a build retired, `[fermix_core.always_on]` among them, is read by
+  # no normalizer here, so it is accepted and dropped, and the next settings
+  # save writes the file without it. A load names none of them: the engine
+  # process does, once (`say_retired_settings/0`, `Setup.RetiredSettings`).
   defp normalize_document(document) do
-    warn_retired_always_on(get_in(document, ["fermix_core", "always_on"]))
-
     %{
       fermix_core: [
         providers:
           Enum.map(Descriptor.all(), fn descriptor ->
             raw = get_in(document, ["fermix_core", "providers", Atom.to_string(descriptor.id)])
             validate_provider_section_keys!(raw, descriptor)
-            warn_retired_provider_keys(raw, descriptor)
             {descriptor.id, normalize_provider_block(raw, descriptor)}
           end),
         personalization:
@@ -2433,20 +2444,6 @@ defmodule FermixCore.Setup.ConfigStore do
       ],
       fermix_web: normalize_web(get_in(document, ["fermix_web"]))
     }
-  end
-
-  # Always On's test switch was retired when every build came to serve
-  # Always On. A config.toml that still carries its table must keep booting:
-  # the table is accepted, named once at warning, and dropped, so the next
-  # settings save writes the file without it (the retired FCM table's
-  # precedent).
-  defp warn_retired_always_on(nil), do: :ok
-
-  defp warn_retired_always_on(_switch) do
-    Logger.warning(
-      "config.toml [fermix_core.always_on] is retired: every build of Fermix serves Always " <>
-        "On, so the table is ignored, and the next settings save writes the file without it."
-    )
   end
 
   defp put_value(document, [], key, value), do: Map.put(document, key, value)
@@ -2559,9 +2556,10 @@ defmodule FermixCore.Setup.ConfigStore do
   # the parse boundary — a typo'd key must never be silently dropped
   # (M12 §4; Code Rule 6). The legacy `provider = ...` key keeps its more
   # specific migration message. A key the descriptor retired is accepted here
-  # (an existing config.toml must keep booting), named once by
-  # `warn_retired_provider_keys/2`, and dropped by `normalize_provider_block/2`,
-  # which reads only the live keys, so the next save writes the block without it.
+  # (an existing config.toml must keep booting) and dropped by
+  # `normalize_provider_block/2`, which reads only the live keys, so the next
+  # save writes the block without it; the engine process names it once
+  # (`Setup.RetiredSettings`).
   defp validate_provider_section_keys!(nil, _descriptor), do: :ok
 
   defp validate_provider_section_keys!(config, descriptor) when is_map(config) do
@@ -2588,26 +2586,6 @@ defmodule FermixCore.Setup.ConfigStore do
       """
     end
   end
-
-  defp warn_retired_provider_keys(nil, _descriptor), do: :ok
-
-  defp warn_retired_provider_keys(config, descriptor) when is_map(config) do
-    present = Enum.filter(descriptor.retired_config_keys, &present_key?(config, &1))
-
-    if present != [] do
-      Logger.warning(
-        "config.toml [fermix_core.providers.#{descriptor.id}] key(s) " <>
-          "#{Enum.map_join(present, ", ", &Atom.to_string/1)} are retired: this build no " <>
-          "longer reads them, so they are ignored, and the next settings save writes the " <>
-          "file without them."
-      )
-    end
-
-    :ok
-  end
-
-  defp present_key?(config, key),
-    do: Map.has_key?(config, Atom.to_string(key)) or Map.has_key?(config, key)
 
   defp normalize_realtime(config) do
     config
@@ -2951,8 +2929,6 @@ defmodule FermixCore.Setup.ConfigStore do
     retired =
       Enum.filter(Enum.uniq(List.wrap(enabled) ++ Map.keys(entries)), &Retired.retired?/1)
 
-    warn_retired_plugins(retired)
-
     []
     |> put_if_present(:enabled, drop_retired_names(enabled))
     |> put_if_present(:dev_local, dev_local)
@@ -2961,23 +2937,13 @@ defmodule FermixCore.Setup.ConfigStore do
 
   defp normalize_plugins(_config), do: []
 
-  # Named at the read boundary, so the one message reaches every caller that
-  # loads config, and the operator learns the plugin is gone rather than broken.
+  # Dropped where the settings are read, so no caller starts a retired plugin;
+  # the engine process names it once (`Setup.RetiredSettings`), so the operator
+  # learns the plugin is gone rather than broken.
   defp drop_retired_names(nil), do: nil
 
   defp drop_retired_names(names) when is_list(names),
     do: Enum.reject(names, &Retired.retired?/1)
-
-  defp warn_retired_plugins([]), do: :ok
-
-  defp warn_retired_plugins(names) do
-    Logger.warning(
-      "retired plugin(s) #{inspect(Enum.sort(names))} dropped from [fermix_core.plugins]: " <>
-        "this build no longer offers them, so they are not started and the next config save " <>
-        "writes the file without them. Any credential you stored for them is left exactly as " <>
-        "it is — revoke it at the source if you have not already."
-    )
-  end
 
   defp normalize_oauth(nil), do: %{}
 
@@ -2998,22 +2964,10 @@ defmodule FermixCore.Setup.ConfigStore do
   defp normalize_plugin_secrets(_secrets), do: %{}
 
   # The mapping goes with the plugin; the secret it points at does not. Deleting
-  # a stored credential is the operator's call, so this names the plugin and
-  # leaves the value where it is.
-  defp drop_retired_secrets(secrets) do
-    case Enum.filter(Map.keys(secrets), &Retired.retired?/1) do
-      [] ->
-        secrets
-
-      names ->
-        Logger.warning(
-          "retired plugin(s) #{inspect(Enum.sort(names))} dropped from " <>
-            "[fermix_core.plugin_secrets]: the stored value itself is untouched."
-        )
-
-        Map.drop(secrets, names)
-    end
-  end
+  # a stored credential is the operator's call, so this leaves the value where
+  # it is, and the engine process names the plugin (`Setup.RetiredSettings`).
+  defp drop_retired_secrets(secrets),
+    do: Map.drop(secrets, Enum.filter(Map.keys(secrets), &Retired.retired?/1))
 
   defp normalize_named_sections(nil, _ignored_keys), do: %{}
 
@@ -3167,14 +3121,13 @@ defmodule FermixCore.Setup.ConfigStore do
   # `normalize_web_search_backend/1`'s silent-nil because a mistyped media
   # backend has no keyless fallback to limp along on.
   #
-  # A backend this build retired is not a typo: an existing config.toml that
-  # names it must keep booting. It is accepted, named once at warning with the
-  # backends that replace it, and dropped, which leaves the image tool with no
-  # backend (it refuses until one is chosen) and the next save writes the file
-  # without it (the `ComputerHistory.Config.retired_keys/0` precedent). The
-  # live set is the media registry's, never a second list maintained here.
-  @retired_image_backends ~w(openai_codex)
-
+  # A backend this build retired (`RetiredSettings.image_backend?/1`) is not a
+  # typo: an existing config.toml that names it must keep booting. It is
+  # accepted and dropped, which leaves the image tool with no backend (it
+  # refuses until one is chosen) and the next save writes the file without it
+  # (the `ComputerHistory.Config.retired_keys/0` precedent); the engine process
+  # names it once, with the backends that replace it. The live set is the media
+  # registry's, never a second list maintained here.
   defp normalize_image_backend(nil), do: nil
 
   defp normalize_image_backend(value) when is_atom(value),
@@ -3187,8 +3140,8 @@ defmodule FermixCore.Setup.ConfigStore do
       backend in image_backend_names() ->
         backend
 
-      backend in @retired_image_backends ->
-        warn_retired_image_backend(backend)
+      RetiredSettings.image_backend?(backend) ->
+        nil
 
       true ->
         raise ArgumentError, """
@@ -3201,17 +3154,6 @@ defmodule FermixCore.Setup.ConfigStore do
   end
 
   defp image_backend_names, do: :image |> MediaRegistry.providers() |> Enum.sort()
-
-  defp warn_retired_image_backend(backend) do
-    Logger.warning(
-      "config.toml [fermix_core.tools.generate_image] backend #{inspect(backend)} is retired: " <>
-        "this build no longer has it, so image generation stays off until you choose " <>
-        "#{Enum.join(image_backend_names(), ", ")} in setup, and the next settings save " <>
-        "writes the file without it."
-    )
-
-    nil
-  end
 
   # Canonical enum + per-provider mapping live in ReasoningEffort.
   # Returns the atom on success, or nil on unknown input — consistent
@@ -3865,9 +3807,13 @@ defmodule FermixCore.Setup.ConfigStore do
 
   defp normalize_mobile(nil), do: []
 
+  # Android push straight through FCM was retired before any release shipped
+  # it. A config.toml that still carries its `fcm` table is not a typo and must
+  # keep booting: the table is accepted and dropped, so its keychain sentinel is
+  # never read and the next save writes the file without it; the engine process
+  # names it once (`Setup.RetiredSettings`).
   defp normalize_mobile(config) when is_map(config) or is_list(config) do
     validate_mobile_keys!(config, ["fcm" | @mobile_keys], "mobile")
-    warn_retired_mobile_fcm(lookup(config, "fcm", :fcm))
     push = lookup(config, "push", :push)
 
     []
@@ -3915,21 +3861,6 @@ defmodule FermixCore.Setup.ConfigStore do
 
   defp put_mobile_push(_fields, push) do
     raise ArgumentError, "invalid mobile.push #{inspect(push)}; expected a table"
-  end
-
-  # Android push straight through FCM was retired before any release shipped
-  # it. A config.toml that still carries its table is not a typo and must keep
-  # booting: the table is accepted, named once at warning, and dropped, so its
-  # keychain sentinel is never read and the next save writes the file without
-  # it (the `@retired_image_backends` precedent).
-  defp warn_retired_mobile_fcm(nil), do: :ok
-
-  defp warn_retired_mobile_fcm(_fcm) do
-    Logger.warning(
-      "config.toml [fermix_channels.mobile.fcm] is retired: Android phones are pushed " <>
-        "through Fermix's push relay with no settings, so the table is ignored, and the next " <>
-        "settings save writes the file without it."
-    )
   end
 
   defp validate_mobile_keys!(config, allowed, label) do

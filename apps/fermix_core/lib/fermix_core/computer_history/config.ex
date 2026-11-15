@@ -50,9 +50,9 @@ defmodule FermixCore.ComputerHistory.Config do
 
   `sites` is **retired** (v1.1 decision 1: every site visited in an allowlisted
   browser is recorded, so there is no per-site filter to configure). It stays in
-  `@retired_keys` so a `config.toml` that still carries it is accepted, named once
-  at warning, and dropped — a retired key must never refuse boot, and `to_keyword/1`
-  never writes it back.
+  `@retired_keys` so a `config.toml` that still carries it is accepted and dropped
+  — a retired key must never refuse boot, and `to_keyword/1` never writes it back
+  — and the engine process names it once at warning (`Setup.RetiredSettings`).
   """
 
   require Logger
@@ -99,7 +99,8 @@ defmodule FermixCore.ComputerHistory.Config do
 
   @doc """
   Keys this section no longer honors but still accepts from an existing
-  `config.toml`. `normalize/1` names each one at warning and drops it.
+  `config.toml` or `machine.toml`. `normalize/1` drops each one, and the engine
+  process names it once (`Setup.RetiredSettings`).
   """
   @spec retired_keys() :: [atom()]
   def retired_keys, do: @retired_keys
@@ -149,7 +150,6 @@ defmodule FermixCore.ComputerHistory.Config do
   def machine_file(nil), do: []
 
   def machine_file(table) when is_map(table) or is_list(table) do
-    warn_retired_keys(table)
     machine_file_keys!(table)
 
     case lookup(table, :summarizer) do
@@ -386,35 +386,12 @@ defmodule FermixCore.ComputerHistory.Config do
   def normalize(nil), do: []
 
   def normalize(config) when is_map(config) or is_list(config) do
-    warn_retired_keys(config)
-
     Enum.reduce(@env_keys, [], fn key, acc ->
       case lookup(config, key) do
         @absent -> acc
         value -> Keyword.put(acc, key, normalize_value(key, value))
       end
     end)
-  end
-
-  # One line per retired key actually present, never a refusal: the operator's
-  # existing config.toml must keep booting. Because normalize DROPS the key, the
-  # second pass over its own output is silent (idempotence, config_test).
-  # Expect the line TWICE on the first setup save and never again: the save reads
-  # the still-on-disk file (one line) and then re-parses the snapshot it is about
-  # to write (a second). The saved file no longer has the key, so every later boot
-  # is silent. That is the retirement working, not a double-warn bug.
-  defp warn_retired_keys(config) do
-    Enum.each(@retired_keys, fn key ->
-      case lookup(config, key) do
-        @absent -> :ok
-        _present -> Logger.warning(retired_message(key))
-      end
-    end)
-  end
-
-  defp retired_message(:sites) do
-    "computer_history.sites is retired: every site in an allowlisted browser is " <>
-      "recorded; remove the key from the file that holds it"
   end
 
   # --- per-key validators -------------------------------------------------

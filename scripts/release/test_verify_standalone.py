@@ -815,6 +815,63 @@ class VerifyStandaloneTest(unittest.TestCase):
 
     # The class the enroll stage exists for: the packaged binary taking a code
     # file that holds no enrollment code and making the home a candidate anyway.
+    # A settings file an earlier release wrote still carries a table this one
+    # retired, Always On's test switch above all: the release boots on it,
+    # names it once on stderr, and leaves the file as it is.
+    def test_a_retired_settings_table_boots_and_is_named_once_on_stderr(self):
+        self._write_artifact(create_disclaim=True)
+
+        result = self._run("macos_aarch64")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.count(self._RETIRED_ALWAYS_ON), 1, result.stdout)
+
+    def test_rejects_a_release_that_refuses_a_retired_settings_table(self):
+        self._write_artifact(create_disclaim=True, home="status_retired_refuses")
+
+        result = self._run("macos_aarch64")
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("whose settings carry a retired table must exit 0, got 1", result.stderr)
+
+    # The class this stage exists for: a notice said by every settings load,
+    # which a verb, the setup page and the app repeat.
+    def test_rejects_a_release_that_names_a_retired_table_on_every_load(self):
+        self._write_artifact(create_disclaim=True, home="status_retired_twice")
+
+        result = self._run("macos_aarch64")
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("exactly once on stderr, named it 2 times", result.stderr)
+
+    def test_rejects_a_release_that_never_names_a_retired_table(self):
+        self._write_artifact(create_disclaim=True, home="status_retired_silent")
+
+        result = self._run("macos_aarch64")
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("exactly once on stderr, named it 0 times", result.stderr)
+
+    def test_rejects_a_release_that_names_a_retired_table_on_stdout(self):
+        self._write_artifact(create_disclaim=True, home="status_retired_on_stdout")
+
+        result = self._run("macos_aarch64")
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(
+            "whose settings carry a retired table must print exactly one JSON document",
+            result.stderr,
+        )
+
+    # Only a settings save drops a retired table; a read leaves the file alone.
+    def test_rejects_a_release_whose_home_status_rewrites_the_settings(self):
+        self._write_artifact(create_disclaim=True, home="status_retired_rewrites")
+
+        result = self._run("macos_aarch64")
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("fermix home status changed the settings of", result.stderr)
+
     def test_rejects_an_enroll_that_accepts_an_invalid_code(self):
         self._write_artifact(create_disclaim=True, home="enroll_accepts")
 
@@ -1706,6 +1763,7 @@ class VerifyStandaloneTest(unittest.TestCase):
         status = (
             '  if [ "$2" = "status" ]; then\n'
             '    [ "$3" = "--json" ] || exit 64\n'
+            + self._retired_table_behaviour(home)
             + status_body
             + "  fi\n"
         )
@@ -1724,6 +1782,11 @@ class VerifyStandaloneTest(unittest.TestCase):
             "status_other_refusal",
             "status_without_ceiling",
             "status_logs_on_stdout",
+            "status_retired_refuses",
+            "status_retired_twice",
+            "status_retired_silent",
+            "status_retired_on_stdout",
+            "status_retired_rewrites",
             "enroll_accepts",
             "enroll_leaves_home",
             "enroll_writes_role",
@@ -1731,6 +1794,39 @@ class VerifyStandaloneTest(unittest.TestCase):
         ):
             return export + restored + status + enroll + marked
         raise ValueError(f"unknown home behaviour: {home}")
+
+    # The retired Always On table's notice, as a release logs it.
+    _RETIRED_ALWAYS_ON = "config.toml [fermix_core.always_on] is retired"
+
+    # What the real release does with a settings file that still carries the
+    # retired `[fermix_core.always_on]` table: it boots on it and names it once,
+    # at warning, on stderr under `--json`, and leaves the file as it is. Each
+    # other shape is one way a release could get that wrong.
+    def _retired_table_behaviour(self, home):
+        notice = (
+            "printf '07:04:22.349 [warning] " + self._RETIRED_ALWAYS_ON + ": every build of "
+            "Fermix serves Always On, so the table is ignored, and the next settings save writes "
+            "the file without it.\\n'"
+        )
+        effect = {
+            "status_retired_refuses": (
+                '      printf \'{"error":{"code":"config_invalid","sentence":"config.toml has an '
+                'unknown table."},"ok":false,"schema_version":1}\\n\'\n'
+                "      exit 1\n"
+            ),
+            "status_retired_twice": f"      {notice} >&2\n      {notice} >&2\n",
+            "status_retired_silent": "",
+            "status_retired_on_stdout": f"      {notice}\n",
+            "status_retired_rewrites": (
+                '      printf \'[fermix_core]\\n\' > "$FERMIX_HOME/config.toml"\n'
+                f"      {notice} >&2\n"
+            ),
+        }.get(home, f"      {notice} >&2\n")
+        return (
+            "    if grep -Fqx '[fermix_core.always_on]' \"$FERMIX_HOME/config.toml\" 2>/dev/null; then\n"
+            + (effect or "      :\n")
+            + "    fi\n"
+        )
 
     # The real verb refuses a code file that holds no enrollment code: one
     # sentence on stderr, exit 1, and the home and the code file as it found

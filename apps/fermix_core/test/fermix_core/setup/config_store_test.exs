@@ -657,8 +657,9 @@ defmodule FermixCore.Setup.ConfigStoreTest do
 
   # Fast mode and the Codex image backend are retired, and the owner's dev and
   # prod config.toml carry exactly this today: it must keep booting. Each is
-  # accepted at parse, named once at warning, and dropped, and the next save
-  # writes the file without it.
+  # accepted at parse and dropped, the engine process names each once
+  # (`ConfigStore.say_retired_settings/0`), and the next save writes the file
+  # without it.
   @retired_toml """
   [fermix_core.providers.openai_codex]
   default_model = "gpt-5.5"
@@ -681,7 +682,8 @@ defmodule FermixCore.Setup.ConfigStoreTest do
       %{config_path: Path.join(tmp_home, "config.toml")}
     end
 
-    test "load accepts both, names each at warning, and drops them", %{config_path: path} do
+    test "load accepts and drops both, and the process boundary names each",
+         %{config_path: path} do
       File.write!(path, @retired_toml)
 
       {result, log} =
@@ -693,7 +695,10 @@ defmodule FermixCore.Setup.ConfigStoreTest do
                Enum.sort(default_model: "gpt-5.5", reasoning_effort: :high, primary: true)
 
       assert Keyword.get(loaded.fermix_core[:tools], :generate_image) == []
+      refute log =~ "retired"
 
+      log = capture_log(fn -> assert :ok = ConfigStore.say_retired_settings() end)
+      assert log =~ "[warning]"
       assert log =~ "[fermix_core.providers.openai_codex] key(s) fast are retired"
       assert log =~ ~s(backend "openai_codex" is retired)
       assert log =~ "google, openai, xai"
@@ -723,6 +728,7 @@ defmodule FermixCore.Setup.ConfigStoreTest do
       assert reloaded.fermix_core[:providers] == loaded.fermix_core[:providers]
       assert Keyword.get(reloaded.fermix_core[:tools], :generate_image, []) == []
       refute log =~ "retired"
+      refute capture_log(fn -> assert :ok = ConfigStore.say_retired_settings() end) =~ "retired"
     end
 
     test "the retired backend leaves the model in place, with no backend",
@@ -2204,7 +2210,7 @@ defmodule FermixCore.Setup.ConfigStoreTest do
   # stored key. Nothing downstream may start it, and the operator has to be told
   # by name — a retired remote-MCP plugin whose upstream moved on otherwise logs
   # a discovery failure on every boot forever, which reads as "broken", not "gone".
-  test "a retired plugin is dropped from enabled, from its section and from its stored-key mapping, and named once" do
+  test "a retired plugin is dropped from enabled, from its section and from its stored-key mapping, and named" do
     tmp_home =
       Path.join(System.tmp_dir!(), "fermix-config-retired-#{System.unique_integer([:positive])}")
 
@@ -2240,10 +2246,13 @@ defmodule FermixCore.Setup.ConfigStoreTest do
     assert Map.has_key?(entries, "github")
     refute Map.has_key?(entries, "eden")
     refute Map.has_key?(Keyword.get(loaded.fermix_core, :plugin_secrets, %{}), "eden")
+    refute log =~ "retired"
 
-    # Named, so the operator can revoke the credential this does not touch.
-    assert log =~ "eden"
-    assert log =~ "retired"
+    # Named once by the engine process, so the operator can revoke the
+    # credential this does not touch.
+    log = capture_log(fn -> assert :ok = ConfigStore.say_retired_settings() end)
+    assert log =~ ~s{retired plugin(s) ["eden"] dropped from [fermix_core.plugins]}
+    assert log =~ ~s{retired plugin(s) ["eden"] dropped from [fermix_core.plugin_secrets]}
   end
 
   test "the next save writes the file without the retired plugin" do
@@ -3606,11 +3615,6 @@ defmodule FermixCore.Setup.ConfigStoreTest do
     assert Keyword.get(mobile, :push)[:environment] == "development"
   end
 
-  # Android push straight through FCM was retired before any release shipped
-  # it, and the owner's dev home carries exactly this table today: it must keep
-  # booting. It is accepted at parse, named once at warning, its keychain
-  # sentinel never read, and dropped, so the next save writes the file without
-  # it.
   # Always On's test switch, from before every build served Always On: a
   # home that turned it on to test a move carries it, and so does every
   # server such a move reached.
@@ -3630,7 +3634,8 @@ defmodule FermixCore.Setup.ConfigStoreTest do
       %{config_path: Path.join(tmp_home, "config.toml")}
     end
 
-    test "load accepts it, names it at warning, and keeps no switch", %{config_path: path} do
+    test "load accepts it and keeps no switch, and the process boundary names it",
+         %{config_path: path} do
       File.write!(path, @retired_always_on_toml)
 
       {result, log} =
@@ -3639,11 +3644,14 @@ defmodule FermixCore.Setup.ConfigStoreTest do
       assert {:ok, loaded} = result
       refute Keyword.has_key?(loaded.fermix_core, :always_on)
       assert Keyword.fetch!(loaded.fermix_core, :agent)[:name] == "Orchard"
+      refute log =~ "retired"
+
+      log = capture_log(fn -> assert :ok = ConfigStore.say_retired_settings() end)
       assert log =~ "[warning]"
       assert log =~ "config.toml [fermix_core.always_on] is retired"
     end
 
-    test "a save after the load writes the file without it, and the next load is silent",
+    test "a save after the load writes the file without it, and nothing names it again",
          %{config_path: path} do
       File.write!(path, @retired_always_on_toml)
 
@@ -3661,9 +3669,15 @@ defmodule FermixCore.Setup.ConfigStoreTest do
 
       assert {:ok, _reloaded} = result
       refute log =~ "retired"
+      refute capture_log(fn -> assert :ok = ConfigStore.say_retired_settings() end) =~ "retired"
     end
   end
 
+  # Android push straight through FCM was retired before any release shipped
+  # it, and the owner's dev home carries exactly this table today: it must keep
+  # booting. It is accepted at parse, its keychain sentinel never read, and
+  # dropped, so the next save writes the file without it; the engine process
+  # names it once.
   @retired_fcm_toml """
   [fermix_channels.mobile]
   enabled = true
@@ -3685,7 +3699,7 @@ defmodule FermixCore.Setup.ConfigStoreTest do
       %{config_path: Path.join(tmp_home, "config.toml")}
     end
 
-    test "load accepts it, names it at warning, reads no secret for it, and drops it",
+    test "load accepts it, reads no secret for it, and drops it, and the boundary names it",
          %{config_path: path} do
       File.write!(path, @retired_fcm_toml)
       Application.put_env(:fermix_core, :secret_writer, FermixTestSupport.CountingSecretWriter)
@@ -3697,6 +3711,9 @@ defmodule FermixCore.Setup.ConfigStoreTest do
       assert {:ok, loaded} = result
       mobile = Keyword.fetch!(loaded.fermix_channels, :mobile)
       assert Enum.sort(mobile) == [enabled: true, push: [enabled: false]]
+      refute log =~ "retired"
+
+      log = capture_log(fn -> assert :ok = ConfigStore.say_retired_settings() end)
       assert log =~ "[warning]"
       assert log =~ "config.toml [fermix_channels.mobile.fcm] is retired"
       # Android phones are pushed through Fermix's push relay now (M99), with no
@@ -3728,10 +3745,12 @@ defmodule FermixCore.Setup.ConfigStoreTest do
       assert {:ok, reloaded} = result
       assert reloaded.fermix_channels[:mobile] == loaded.fermix_channels[:mobile]
       refute log =~ "retired"
+      refute capture_log(fn -> assert :ok = ConfigStore.say_retired_settings() end) =~ "retired"
     end
 
     # The running app env of a daemon that hydrated the table before it was
-    # retired holds it in its normalized shape; a save from it drops it too.
+    # retired holds it in its normalized shape; a save from it drops it too,
+    # naming nothing.
     test "a snapshot holding the normalized table saves without it" do
       snapshot = %{
         fermix_core: [],
@@ -3748,7 +3767,7 @@ defmodule FermixCore.Setup.ConfigStoreTest do
       {result, log} = with_log(fn -> ConfigStore.save_snapshot(snapshot) end)
 
       assert :ok = result
-      assert log =~ "config.toml [fermix_channels.mobile.fcm] is retired"
+      refute log =~ "retired"
       contents = File.read!(ConfigStore.path())
       refute contents =~ "[fermix_channels.mobile.fcm]"
       refute contents =~ "project_id"
@@ -3759,6 +3778,139 @@ defmodule FermixCore.Setup.ConfigStoreTest do
                [enabled: true, push: [enabled: false]]
     end
   end
+
+  # Every setting a build retired, as the files an earlier engine wrote still
+  # carry them. A load accepts each and drops it, and names none: the setup
+  # state, the model routing and the doctor load the settings over and over, so
+  # a notice said there repeated about once a second for as long as the app was
+  # open. The engine process's boundary names each once
+  # (`ConfigStore.say_retired_settings/0`).
+  @retired_config_toml """
+  [fermix_core.always_on]
+  enabled = true
+
+  [fermix_core.providers.openai_codex]
+  default_model = "gpt-5.5"
+  fast = true
+  primary = true
+
+  [fermix_core.tools.generate_image]
+  backend = "openai_codex"
+
+  [fermix_core.computer_history]
+  sites = ["example.org"]
+
+  [fermix_core.plugins]
+  enabled = ["github", "eden"]
+
+  [fermix_core.plugins.eden]
+  auth_profile = "eden:primary"
+
+  [fermix_core.plugin_secrets]
+  eden = "@keyring"
+
+  [fermix_channels.mobile]
+  enabled = true
+
+  [fermix_channels.mobile.fcm]
+  enabled = true
+  project_id = "fermix-owner-123"
+
+  [mcp.inbound]
+  enabled = false
+  transport = "stdio"
+  """
+
+  @retired_machine_toml """
+  [fermix_core.computer_history]
+  enabled = true
+  sites = ["example.org"]
+  """
+
+  @retired_notices [
+    "config.toml [fermix_core.always_on] is retired",
+    "config.toml [fermix_core.providers.openai_codex] key(s) fast are retired",
+    ~s(config.toml [fermix_core.tools.generate_image] backend "openai_codex" is retired),
+    "computer_history.sites is retired",
+    ~s{retired plugin(s) ["eden"] dropped from [fermix_core.plugins]},
+    ~s{retired plugin(s) ["eden"] dropped from [fermix_core.plugin_secrets]},
+    "config.toml [fermix_channels.mobile.fcm] is retired",
+    "config.toml [mcp.inbound] is retired"
+  ]
+
+  describe "retired settings" do
+    setup do
+      tmp_home = FermixTestSupport.SafeRm.make_tmp_dir!("config-store-retired-settings")
+      on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
+      System.put_env("FERMIX_HOME", tmp_home)
+      File.write!(Path.join(tmp_home, "config.toml"), @retired_config_toml)
+      File.write!(Path.join(tmp_home, "machine.toml"), @retired_machine_toml)
+      %{home: tmp_home}
+    end
+
+    test "loads accept and drop every one and name none, however often they run" do
+      {_result, log} =
+        with_log(fn ->
+          for _load <- 1..3 do
+            assert {:ok, loaded} = ConfigStore.load_runtime_config(resolve_secrets: false)
+            refute Keyword.has_key?(loaded.fermix_core, :always_on)
+            refute Keyword.has_key?(loaded.fermix_core[:providers][:openai_codex], :fast)
+            assert loaded.fermix_core[:plugins][:enabled] == ["github"]
+            refute Keyword.has_key?(loaded.fermix_channels[:mobile], :fcm)
+            refute Keyword.has_key?(loaded.fermix_core[:computer_history], :sites)
+            assert :ok = ConfigStore.apply_mcp_config()
+          end
+        end)
+
+      for notice <- @retired_notices do
+        assert occurrences(log, notice) == 0, "a load named #{inspect(notice)}:\n#{log}"
+      end
+    end
+
+    test "the process boundary names each one once, at warning" do
+      log = capture_log(fn -> assert :ok = ConfigStore.say_retired_settings() end)
+
+      for notice <- @retired_notices do
+        assert occurrences(log, notice) == 1, "#{inspect(notice)} not named once:\n#{log}"
+      end
+
+      assert occurrences(log, "[warning]") == length(@retired_notices)
+      assert log =~ "the next settings save writes the file without it"
+    end
+
+    test "a save writes both files without any of them, and the boundary then names none",
+         %{home: home} do
+      {{:ok, loaded}, _log} =
+        with_log(fn -> ConfigStore.load_runtime_config(resolve_secrets: false) end)
+
+      assert :ok = ConfigStore.save_snapshot(loaded)
+
+      config = File.read!(Path.join(home, "config.toml"))
+      machine = File.read!(Path.join(home, "machine.toml"))
+
+      for gone <- ["always_on", "fast =", "openai_codex\"", "eden", "fcm", "mcp.inbound"] do
+        refute config =~ gone, "config.toml still carries #{gone}:\n#{config}"
+      end
+
+      refute config =~ "sites"
+      refute machine =~ "sites"
+      assert config =~ ~s(enabled = ["github"])
+
+      log = capture_log(fn -> assert :ok = ConfigStore.say_retired_settings() end)
+      refute log =~ "retired"
+    end
+
+    test "a home with no settings files names nothing" do
+      empty_home = FermixTestSupport.SafeRm.make_tmp_dir!("config-store-retired-empty")
+      on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(empty_home) end)
+      System.put_env("FERMIX_HOME", empty_home)
+
+      log = capture_log(fn -> assert :ok = ConfigStore.say_retired_settings() end)
+      refute log =~ "retired"
+    end
+  end
+
+  defp occurrences(text, fragment), do: length(String.split(text, fragment)) - 1
 
   test "mobile config rejects unsafe ports, modes, media caps, and push environments" do
     invalid_configs = [
