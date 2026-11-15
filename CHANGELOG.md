@@ -6,38 +6,752 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Behind a feature flag
+
+Always On is built but switched off in release builds: there `fermix
+always-on` and `fermix home status` say "Always On is not in this release of
+Fermix yet.", and the setup page and the Fermix app show no Always On. It will
+be part of a future release; nothing in this group can be used in a release
+yet. The Linux installer's `--always-on` and the server script it runs are
+published with each release, but a server they set up can enroll only with a
+code from a Fermix that has Always On, which no release has.
+
+- **Always On: Fermix can move to a server you control.** Your home (its
+  settings, memory, secrets, skills and workspace) can now move from your
+  computer to a Linux server, so Fermix keeps working with your Mac closed.
+  With Reach from anywhere on, Always On on your primary gives an enrollment
+  code, good once for thirty minutes (the first after a start waits a moment
+  for Reach from anywhere to start, rather than asking you to try again); a
+  server enrolled with it waits for the move (each side names the other by its
+  hostname, or a Mac by the computer name in its Sharing settings), and you
+  review the move. The review lists the secrets that travel, the server's
+  Fermix (which must read this home, and whose home this computer must be able
+  to read back, now or once its update is published), free disk and the
+  plugins with no build for the server. It names what stops, each only where
+  you use it: Google Meet meetings (Zoom's carry on at the server), StackChan,
+  WhatsApp until it has its public address, and Slack unless it uses Socket
+  Mode. Calls from your phone and from this computer's app carry on at the
+  server when Talk to Fermix is on there and its key is in the server's secret
+  store, coding agents ask for your approval again on the server, Telegram's
+  messages wait out the move, and a Fermix you started from a terminal stops
+  when the move starts and needs starting again. You start the move from the
+  app with a recovery passphrase: the first move sets it if you have not, and
+  every move after checks that it is the one you set ("That is not the
+  recovery passphrase you set."), so a typo never becomes the key your
+  server's snapshots are encrypted to, and a move never makes a second key. A
+  home the move cannot carry, such as one with a link out of it, blocks the
+  review, which names the path and what to do in the words `fermix home
+  export` uses. A dev plugin folder, its links to checkouts and the setting
+  that names it stay on the computer that set them up: no move or restore
+  carries them, so a server never looks for a Mac's checkouts, the review
+  warns once that they stay, and a move back keeps them. Your Mac (or Linux
+  computer) stays awake while the move runs, and only then. Each side logs one
+  line per phase of the move (capture, send, staging and commit on your
+  computer; receive, staging and activation on the server) with when it
+  started and ended, how long it took and the bytes it captured, sent or
+  received, so the log tells the transfer from the archiving. The computer the
+  home left stays a desktop of the server: the app's chat and Fermix-wide
+  settings go to the server through it, a settings call costing one round trip
+  to the server, and paired phones see a reconnect. It records no computer
+  history from then on and opens no copy of your memory: what it still holds
+  of them is a retired copy. Doctor there checks that computer, its scope
+  named or not; only its network checks, which would call a provider with the
+  retired credentials, are refused. The server will not remove that desktop
+  from its devices, since this version cannot link it again and it keeps
+  copies of the server's backups. Right after the move the server installs
+  your plugins again for itself, checked as any install is; one it could not
+  install says so in Plugins, with Install…. A server announces nothing over
+  mDNS, whatever the settings it took from your computer say: it is no host on
+  your local network. Your server keeps itself up to date and your computers
+  follow it. Use my own Linux server's command names the release it starts on,
+  and every five minutes the server installs the newest release whose home a
+  published app for each computer keeping its backups reads, by fermix.ai's
+  release table (`update` in `fermix home status --json`: the release it runs,
+  the one it may install, and a newer one still waiting for an app), never
+  back down, and nothing while it cannot read the table or list its computers.
+  A computer that has not installed an update never holds the server back: one
+  up to two minor versions behind the server works as before, and one further
+  behind, or one whose version is not known, keeps its settings and says to
+  update Fermix on it: its chat, the server's work on it and its computer
+  history all wait until it does. A computer ahead of its server speaks the
+  server's version of the chat protocol. A home is read by its format, never
+  by which Fermix wrote it: a release changes the format only when it writes
+  something an older Fermix cannot read, so most releases need no new app, and
+  a restore, Restore on this Mac, a move and a move back all take a newer
+  Fermix's home of the same format. A home in a newer format is refused before
+  anything is written, saying to update Fermix on that computer first, and
+  Move back and Restore on this Mac say "Update Fermix on this Mac first" in
+  their place. On the server, `sudo fermix-update --release X` updates by hand
+  behind the same rule: it refuses an older release, one fermix.ai does not
+  list, and one whose home no published app reads yet unless `--ahead-of-apps`
+  is added, after which each computer that keeps backups says the server runs
+  a newer Fermix than it can restore. After an update the restart waits for a
+  move, and for a command, screen session or message send running on a
+  computer, ten minutes at most; each update also replaces the server's update
+  script with the new release's own. Once a recovery passphrase is set, your
+  server keeps encrypted snapshots of itself on your desktop, every six hours
+  by default (the first as soon as your desktop connects), and in an S3 bucket
+  where the server's own setup names one, and a lost server is restored from
+  the newest one. A server built with fermix-server-aws gets its bucket from
+  `enable_s3_backups` and signs with its instance role, through a root helper
+  that hands Fermix a one-hour session which can only add snapshots to that
+  bucket: no keys anywhere. Another S3 service is set on the server itself. No
+  app shows any S3 setting. A bucket the server's own setup named stays with
+  that server: a move back, a move to a server whose setup named none, and
+  Restore on this Mac leave it behind, while a bucket set by hand with access
+  keys moves with your home as it was. A move or restore onto a Linux server
+  keeps your secrets in its keyring only when the keyring answers, and
+  otherwise in Fermix's own secret files. The app, the setup page's Always On
+  tab and `fermix home status` all lead with the same one sentence for where
+  Always On stands and, when something is wrong, the one action that fixes it:
+  a server silent for ten minutes while your Mac is awake (with Restore on
+  this Mac where your Mac keeps a copy), a Mac too old for its server
+  (Update), a review that blocks the move (Check again), the server's disk 85%
+  full, or a last backup over three days old, or a backup that failed (where
+  it went, its error and when it was tried), until one there succeeds (Back up
+  now). Back up now's screen shows the backup running until it ends, and
+  `fermix always-on back-up-now --wait` returns then, exiting 1 when it
+  failed. Details says what lives on the server (conversations and memories,
+  secrets, the browser, traces) and that whoever hosts it can technically read
+  its disk, and the server tells your phones once when its newest backup is a
+  week old. Fermix tells the app when that sentence changes and when the last
+  backup turns a week old, so the app need not check Always On on a timer and
+  says so on time, and while Always On is off nothing runs for it. `fermix
+  home status` prints the same screen at a terminal, and `export`, `import`
+  and `mark-moved` move a home by hand. And you can move back whenever you
+  want: Move back to this Mac (in Always On's details on the computer your
+  home left, or `fermix always-on move-back`) gets this computer ready in
+  seconds, and Move now with your recovery passphrase brings Fermix back in
+  place. Where this computer's Fermix runs from a terminal, Move back is not
+  offered, since nothing would start Fermix here again after the move, and
+  Details say why instead; a move back this computer refuses leaves nothing
+  open on your server. Your Mac's own files (logs, browser profiles, iMessage,
+  the helper apps, models, coding runs) stay where they were, your secrets go
+  back into its keychain, iMessage, voice calls and meetings run there again
+  as they did before, and your phones follow. Cancel stops it until the server
+  starts the move. Once your Mac runs Fermix again, it reminds you once that
+  your server still runs its retired copy, for you to turn off or delete. To
+  change servers, move back, then set up the new one from Always On. When your
+  server is gone or cannot be reached, Restore on this Mac takes Fermix back
+  from the copy of its backups your Mac keeps, once you confirm you deleted
+  the server, or stopped it for good: one that runs again would answer the
+  same channels beside it. Fermix deletes no server. The server's hosting
+  provider can technically read its disk, so Fermix keeps less there: the
+  prompts, replies, tool input and output and shell commands in its traces are
+  kept about a day (through the previous UTC day), and the rest of each trace
+  14 days; snapshots and every link stay encrypted end to end.
+- **Set up Always On from the setup page, with no app.** On a Homebrew or
+  Linux install, `fermix setup` opens the setup page, and its Always On tab
+  now takes every step the Fermix app's pane takes: open a code for your Linux
+  server, shown once with its command, Copy and until when; back up now; Move
+  now with your recovery passphrase, typed twice the first time; and Move back
+  and Restore on this computer. Each button is one step Fermix runs, after the
+  sentence you accept before anything moves or restores, and if Always On
+  changed meanwhile nothing runs and the tab says so and shows it again. The
+  tab follows Always On as it changes with no Refresh, and after Move now the
+  page waits for Fermix to start again and opens on Always On. On a computer
+  your home left, the setup page sets up this computer and Always On and no
+  longer points to the Fermix app for Fermix-wide settings, which live on your
+  server. Inside the Mac app the page has no Always On tab: the app's own pane
+  is there.
+- **A server gets ready for Always On from one command.** On a Debian 12,
+  Debian 13 or Ubuntu 24.04 server (arm64 or x86_64) running Linux 6.2 or
+  later with Landlock enabled (Debian 13 and Ubuntu 24.04 do by default), the
+  Linux installer's `curl -fsSL https://fermix.ai/install | sudo sh -s --
+  --always-on` checks the release's Always On server script against the sha256
+  fermix.ai lists for it, as it checks a package, and runs it; the script asks
+  for the enrollment code without showing it, or cloud-init user data passes
+  it in `FERMIX_ENROLL_CODE`. It blocks the cloud's instance metadata
+  addresses for every account but root, except DNS and time, which some clouds
+  serve from the same address, gives a server with no swap 2 GB of it,
+  installs Fermix and a `fermix` account to run it, enrolls the server with
+  your primary, starts its service, installs Chromium on Debian (on Ubuntu,
+  install a browser yourself) and waits for your primary to accept the server.
+  The server then keeps itself up to date: Debian's security updates install
+  every day, and every five minutes Fermix's installer runs again when a newer
+  release is eligible for the server and restarts Fermix unless a move is
+  under way; reboots wait for 04:00 UTC, when the nightly run reboots if an
+  update asks for it (a move holds that off two nights at most). The two never
+  install at once, and a run that fails leaves Fermix running and says why in
+  the journal. A server whose kernel cannot sandbox commands is refused before
+  anything is installed. `--snapshot-bucket` and `--snapshot-region` name
+  where the server will keep its snapshots, and `--restore` prepares a server
+  to restore your home from a snapshot instead. A server whose setup did not
+  finish, that waited 24 hours for its move, or that waits for a move your
+  computer gave up on is set up again by running the same command with a new
+  code (the server's own `fermix home status` says so when its setup did not
+  finish or its wait ran out); the code it enrolled with is refused while it
+  enrolls or waits, and a run whose enrollment is refused keeps the server
+  running with the enrollment it had. On a server that is set up, the command
+  keeps it running (or, given a code, refuses) and says what the server is and
+  the commands that remove its home, and on one whose home Fermix cannot read,
+  the command that shows why. It never removes a home itself.
+- **An Always On server says only what it did.** Its setup prints its own
+  steps, not the progress of every package Debian installs (Chromium alone
+  brings about 150), and an install that fails still shows apt-get's own
+  message. The five-minute update writes nothing to the journal when nothing
+  is due: no session lines for the `fermix` account and no start and finish
+  lines from systemd. Each command the setup gives you to run on the server
+  works from the directory you log in to.
+- **Your server can join your tailnet as it is set up.** Add `--tailscale` to
+  the server's command and it asks for a Tailscale auth key without showing it
+  (cloud-init user data passes it in `TS_AUTHKEY` instead), installs Tailscale
+  from Tailscale's own signed package repository, checking its signing key
+  first, and joins your tailnet before the server enrolls. Declare
+  `tag:fermix-server` in your tailnet policy, create the key with that tag,
+  and let only your own devices reach the server's UDP port 4033 there; the
+  server's setup opens no firewall port for it, so reaching UDP 4033 is your
+  tailnet policy's to allow. The key is never shown, logged or put on a
+  command line, and is removed from the server as soon as Tailscale has read
+  it; never pass it on sudo's command line, which sudo logs. A key that is not
+  one, an OAuth client secret among them, is refused before anything is
+  installed. A server already on a tailnet is left on it and the command names
+  the tailnet; given a key there, or on a server whose Tailscale is logged in
+  but down, it stops and says what to run. Without `--tailscale` nothing of
+  Tailscale is installed.
+- **Always On from a terminal: `fermix always-on`.** On a Homebrew or Linux
+  install without the Fermix app you can now set up Always On on your own
+  Linux server from the terminal. `fermix always-on` shows where Always On
+  stands and walks you through each step: it prints the command for your
+  server and, once, the code the server asks for, asks before anything moves
+  or restores (No unless you say yes), asks for your recovery passphrase
+  without showing it (twice the first time), and waits until each step is done
+  before offering the next. `fermix always-on STEP` takes one step
+  (`own-server`, `move-now`, `move-back`, `restore-here`, and the rest), and
+  scripts can run it with no terminal: `--recovery-passphrase-file`, `--yes`
+  to accept what a step asks first, `--wait` to wait, and `--json` for one
+  machine-readable answer. A passphrase typed as an argument is refused, so it
+  never lands in your shell history. On a Mac whose Fermix the app manages, it
+  points you to the app's Always On pane, and `fermix home status` now says
+  where the next step is taken.
+- **Always On's screen comes whole from Fermix, so every surface draws the
+  same one.** Each action now says what it needs you to give (your recovery
+  passphrase), the sentence you accept before Fermix moves or restores, and
+  the page it opens, and Move now asks once, naming what stops or waits after
+  the move from your settings. The moment a step starts the screen says so
+  (your server connecting, the move, a move back, a restore), and every way a
+  step ends stays on screen afterwards. Details are finished for you: the
+  server, its system and version, until when it waits, each backup, the space
+  your computer's copies take and the server's disk, with dates and times in
+  your own time zone. The apps get the occurrence to raise as a notification
+  (the server ready, the move done, the server out of reach, the last backup a
+  week old, Fermix back on your computer after a move back), once each, and
+  `home.status` can wait for the screen to change instead of being asked again
+  and again.
+- **Fermix runs every Always On step itself, so each surface only draws the
+  screen and sends the button you pressed.** A code for your server, a backup
+  now, checking the move again, Move now, Move back and Restore on this Mac
+  are each one request with the screen it was pressed on; if Always On changed
+  meanwhile (another window pressed first, the server moved on), Fermix does
+  nothing and says so, and the screen is read again, so a confirm you accepted
+  on an older screen never runs. Cancel the code closes the code for your
+  server. Move now looks the move over again as you press it, refuses with
+  every reason it cannot start, and shows you any warning you have not seen
+  before going ahead; it asks for your recovery passphrase twice when none is
+  set yet and once when one is, and checks it. On a computer your home left,
+  its own Always On sends the server's steps over the link itself. The command
+  for your server now carries no code: the server asks for it without showing
+  it, so it never lands in a shell history.
+- **Always On never leaves you without a next step.** Every problem on the
+  screen comes with the one action that fixes it, or a link to the Always On
+  docs where none does: a move back that stopped offers Move back again, and a
+  restore that stopped before its copy was in place is offered again. A
+  `fermix always-on` step that waits now exits 1 when it ends on a problem
+  (`step_failed`) or is still running after 45 minutes (`step_unfinished`),
+  each with the screen where it stands, instead of reporting success; reading
+  the screen alone still succeeds whatever it shows. Every surface reads
+  whether Always On is still at it from the screen itself (its `outcome`). A
+  server waiting for its move, whose review blocks it, or whose move was
+  undone can be dropped with Forget this server (after a confirm); Try again
+  after an undone move keeps on for your server only what you left ticked when
+  you started it, never the defaults; Connecting your server can be cancelled,
+  and a code whose half hour ran out with no server recorded leaves that
+  screen; beside an open code, Replace the code opens a new one and ends the
+  old. The code's command names the systems the server's first boot takes
+  (Debian 12 or 13, or Ubuntu 24.04) and until when the code works. A server
+  your computer held for 24 hours with no move is told once, as one to set up
+  again; a finished Restore on this Mac is told once, naming the day of the
+  backup it restored; a computer that updated first and finds its server on an
+  older Fermix says the server updates on its own once the app for each
+  computer that keeps your backups carries the newer one, rather than look all
+  well; and a server's own copy retired by a move back says where Fermix moved
+  back to.
+- **WhatsApp and webhook sources reach Fermix on your Always On server.** Once
+  Fermix runs on your server, Always On on your computer shows the Tailscale
+  Funnel command for each to run on the server with `sudo`, each with Copy:
+  WhatsApp's while WhatsApp is on, with where to set the address it prints as
+  Meta's Callback URL (WhatsApp stops at the move until you do), and each
+  webhook source's, which carries none of its URL's secret, with the host to
+  give its sender, on the server's own ports. Beside them is the one step your
+  tailnet takes once (let `tag:fermix-server` use Funnel, and turn on MagicDNS
+  and HTTPS certificates) and a link to the rest in the Always On docs. Use my
+  own Linux server now also shows the command that joins the server to your
+  tailnet as it is set up (`--tailscale`), which asks without showing it for a
+  one-off, pre-approved Tailscale auth key tagged `tag:fermix-server`. Slack,
+  Telegram and Discord need none of this.
+- **A command Fermix started cannot take an Always On step, and no local
+  caller can take the server's own.** Every Always On step is the owner's
+  decision, refused to a command Fermix runs in words that name the Fermix
+  app, the setup page or your own terminal. The steps a server takes for the
+  computer its home left (opening a code, reviewing or starting a move, a
+  backup now) answer only that computer's request over their encrypted link,
+  and are refused by name on the local socket. Your recovery passphrase never
+  reaches a log line, a crash report or a trace on the way, and the setup
+  page's request logs hide any field named for a passphrase.
+- **Your computer reaches your Always On server directly on your tailnet, and
+  Always On says how it is connected.** The server's Fermix now listens on one
+  fixed UDP port, 4033, and tells your computer its Tailscale addresses when
+  it enrolls and each time your computer connects. Your computer tries them
+  beside Fermix's relay, so on the same tailnet it reaches the server even
+  while the relay is down. A server without Tailscale gives none and connects
+  through the relay as before. While the link is up, Always On's Details end
+  with Connection, Direct or Through Fermix's network, `fermix doctor` has a
+  server link line saying the same, and `home.status` names the path
+  (`primary.path`, `direct` or `relay`). If something else on the server holds
+  port 4033, Doctor's remote reach line names the port, and Fermix tries again
+  on its backoff, saying so in the log when it starts failing and again at the
+  10th, 100th and later tries in a row, not at every try; still held a day
+  later, it stops and its log and Doctor say to free the port and restart
+  Fermix, and a server still enrolling names the port in `fermix home status`
+  once its code expires. Tailscale in userspace-networking mode gives the
+  server no tailnet address, so that link runs through the relay.
+- **Add another computer to your Fermix with a code and six digits.** A
+  computer no longer has to be the one your Fermix moved from. On a computer
+  already in your Fermix, or on the server (`fermix always-on add-computer`),
+  Always On's Add a computer opens a code that works once, for 30 minutes. On
+  the new computer you connect to a Fermix that already runs with that code
+  (`fermix computer join` where there is no app: it asks for the code without
+  showing it, or reads it piped in, and never takes it as an argument, where
+  other programs could read it). It shows six digits taken from its encrypted
+  connection, and you add it by typing them where you approve it; that side is
+  never shown them, so someone who merely saw the code cannot join. Until you
+  add it, it has no access; not adding it, wrong digits or the code running
+  out add nothing. A connection that drops while it waits spends nothing: the
+  computer connects again and shows new digits, the ones to type. A join that
+  fails as it starts leaves no key behind, so the next one is not refused. A
+  computer that joins moves nothing, starts with everything Fermix on your
+  server may use switched off, its computer history too, keeps no backups, and
+  offers no Move back. One that already has a Fermix of its own is refused,
+  and nothing is deleted to make room. You can remove a computer from your
+  devices (`fermix devices revoke`), after which it joins again only with a
+  new code; the one that keeps the only copies of your server's backups asks
+  first. Disconnect this computer does the same from the computer itself and
+  deletes its key; one that fails part-way leaves the computer connected, and
+  asking again finishes it. A phone cannot add a computer yet.
+- **Fermix on your Always On server can work with files and commands on your
+  computers.** Ask for a file on your studio Mac, or to run something there,
+  and Fermix reads, writes, edits and searches files, looks at pictures, runs
+  commands and git, and sends you a file from that computer, inside that
+  computer's own sandbox: its mode, its folders and its allowed variables,
+  with Seatbelt or Landlock holding each command. It works only with what that
+  computer offers, which is switched on at that computer (Files and commands
+  in its This computer settings). Every answer names the computer it came
+  from, so a path on your server is never taken for one on your Mac. A
+  computer that is asleep or offline is refused at once with when it was last
+  seen, and nothing waits for it to wake; a folder outside that computer's
+  sandbox can be allowed only at that computer. After Fermix read something
+  from outside, a command on a Mac still runs, held by its sandbox, and a
+  command on a Linux computer waits for your confirm in the chat, which names
+  the computer. A command or a write whose answer is lost is never run twice:
+  Fermix says whether it happened is not known, and one that ran but whose
+  output was lost on the way says it ran and is not run again. Each request is
+  in that computer's own record of what Fermix did there, and a command that
+  failed is recorded as failed, while Fermix still reads its whole output.
+  Only your own turns can name a computer, your scheduled jobs among them: a
+  guest's turn, and a worker a skill or a sub-agent runs (a plugin skill's
+  above all), is offered none and refused if it names one.
+- **Fermix on your server can use your computer's browser, where you are
+  signed in.** Ask for something on a site you are signed in to on your studio
+  Mac and Fermix drives that Mac's browser: the Fermix app's own browser when
+  the app is open there, else its Chrome, or a tab you granted with the
+  extension, with that computer's own settings and network checks. Your
+  website logins keep every rule: the password stays in that Mac's keychain
+  and the app there types it, after you approve in the chat, and never for a
+  scheduled run, a cue, a worker, a voice call or a shared channel, which your
+  server refuses and your Mac refuses again. Your server's own browser stays
+  the default, and a task that began in your Mac's browser stays there: if the
+  Mac goes to sleep mid-task, Fermix says so rather than carry on somewhere
+  else; on a voice call a task stays on your Mac across the call. Screenshots,
+  PDFs and downloads come back to your server, and your Mac keeps its own copy
+  for a day, so a download whose bytes were lost on the way is still there and
+  Fermix names where; a file you upload goes to your Mac, up to 20 MiB. It
+  works only while The browser is switched on in that computer's This computer
+  settings, and each step is in that computer's record of what Fermix did
+  there.
+- **Fermix on your server can see and control your computer's screen.** Ask
+  for something on your studio Mac's screen and Fermix on your server, which
+  has no screen of its own, looks at it and acts on it there, one step at a
+  time, with the actions that Mac's own helper offers. It works only while
+  Your screen is switched on in that computer's This computer settings, only
+  from your own chat or call (never a scheduled run, a cue, a worker or a
+  shared channel, which your server refuses and your Mac refuses again), and
+  under that Mac's own rules: its sandbox mode sets what Fermix may do there
+  (strict only looks), and an action waits or steps aside while you are typing
+  at it. While your server holds the screen your Mac's app shows a mark,
+  "Fermix on your server is controlling this screen.", with Stop; Stop, or
+  switching Your screen or everything off there, ends it at once, and Fermix
+  is told the person at the Mac stopped it; the mark and Stop work while the
+  screen's helper is still starting. Your server holds the screen for as long
+  as its session lasts, paused included, so a pause holds until you resume and
+  a long gap between steps starts nothing over; your Mac lets go of a server
+  it has not heard from for two minutes. One conversation holds a screen at a
+  time, and each step is in that computer's record of what Fermix did there.
+  Screen sharing on a voice call stays your server's own.
+- **iMessage keeps working after your home moves to your server.** Your Mac's
+  Messages carry it: you text the same Apple ID as before, your server reads
+  and answers, and the helper, its macOS permissions and the list of who
+  Fermix may message stay on that Mac, which only someone at the Mac can
+  change. It works while Messages is switched on in that Mac's This computer
+  settings; one Mac carries it, and a second one that offers it is refused by
+  name. While that Mac is asleep or offline iMessage is away: a message to you
+  fails at once, saying so, and nothing is kept to send later, and a question
+  that waits on you (an approval) goes to a channel on your server instead.
+  When the Mac is back, Fermix reads what came in meanwhile, up to 500
+  messages from the last day, and tells you once if it missed more. Photos and
+  files go both ways, up to 20 MiB. Each message names the kind of turn that
+  sent it, so your Mac refuses one a delegated worker sends and its record
+  says who asked. Your iMessage owner and guests are now kept with your home,
+  so your server knows them. The move's review no longer lists iMessage among
+  what stops.
+- **Computer history from every computer becomes one memory on your home.**
+  Each computer with history switched on (its own Computer history switch,
+  with everything Fermix on your server may use there on) records into its own
+  store, and the raw record stays there and is deleted after 48 hours; each
+  finished sitting goes to your home, which has its summarizer summarize it
+  and keeps the note, marked with that computer. "What was I working on on the
+  studio Mac this morning?" and "what did I do across my computers yesterday?"
+  both have an answer: each result names the machine, `recall_activity`'s
+  `computer` ("this computer", or a computer's name) takes one machine's notes
+  alone, the daily roll-up runs once across the computers still recording, and
+  work that moved from one computer to another is one thread. The sitting's
+  text is never written on your server. A computer set to summarize on its own
+  model sends only the note. `/history purge` and `/history pause` from chat
+  reach every computer, one that is asleep when it is next connected, and
+  until then your home takes nothing from it inside that window; a purged
+  window never gains a note. `/history off studio Mac` switches that
+  computer's history off from anywhere: your home takes nothing more from it
+  at once, and the computer turns its recorder off when told, or once it is
+  back; only someone at it switches it on again. `/history status` shows one
+  block per computer, with what it last reported of its recorder (its state,
+  what it has not sent and its coverage, with the report's age). What Fermix
+  on your server did on a computer's screen or in its browser is no longer
+  reported as yours. Your notes travel with your home when it moves, and the
+  notes a Mac made as its own home are named for that Mac on your server once
+  it moves and stays linked, and are "this computer" again after a move back.
+- **This computer's settings are a few switches.** What Fermix on your server
+  may use on a computer is now: everything (the switch that turns it all off),
+  Files and commands, The browser, Your screen and, on a Mac, Messages and
+  Apple Maps. Files and commands are one switch, since a command reads the
+  same files under the same sandbox; a computer that had only one of them on
+  has both off after the update, and the log says so once. Computer history is
+  no longer switched here: a computer gives your server its history while its
+  own Computer history switch is on, with everything on there, so a computer
+  whose recording is off never counts as sending history, and `/history off
+  studio Mac` turns that computer's recording off. A computer whose server did
+  not take its history before the update has its recording switched off by it,
+  so nothing it kept from the server is sent, and the log says once to turn
+  Computer history on at that computer to share it; a Mac that is its own home
+  keeps recording as it was. The move's review still has a line for your
+  computer history, which now turns recording on or off on that computer once
+  the move goes through; the review of a computer that moved before shows it
+  ticked where recording is on, and sets it the same way. Calls, attachments,
+  the robot and notifications reaching your server from a computer are no
+  longer listed as switches or offers: each will follow its own setting. An
+  app or a move from before this change that names files and commands
+  separately keeps them on only together.
+- **What a computer's switches end is answered as switched off.** Switching
+  off one thing at a computer (the browser, the screen, Messages, or files and
+  commands) with the master switch on now ends at once what Fermix on your
+  server was running or had waiting there for it, each answered "studio Mac
+  has the browser switched off. Only someone at studio Mac can switch it on.",
+  where the browser said it had failed and other work went on; work using the
+  computer's other offers goes on. Requests waiting for a turn when the
+  computer's request handler restarts are answered at once as not run, where a
+  queued Messages or screen watch used to wait until the link dropped, and the
+  restart tells your server, which asks again about whatever it still waits on
+  there, so a request the restart lost is never waited on for ever. A folder
+  that does not answer, or a stop that hangs, holds up only its own request.
+  Your server rebuilds its view of each computer when that view restarts, and
+  an away computer keeps the screen actions it last offered. On your server,
+  iMessage shows away while the Mac that carries Messages is asleep or
+  offline, and asks for setup only when setup is owed; the engine gives the
+  apps its own sentence for each iMessage readiness problem, naming that Mac;
+  and "What Fermix did on this computer" names each entry in plain words
+  ("commands", "run a command") beside its ids.
+- **Always On says less, and only what you need now.** Each screen has one
+  short sentence, at most one more under it (what to check or do, until when
+  your server waits, why a move was undone, a failure's own words), one main
+  button or none, and every other step beside it as a button; Details hold
+  facts only, and one help link opens the Always On docs at that screen's
+  section in place of Learn more. The first screen no longer lists what stops
+  after the move and the code's screen no longer lists kernels: Move now's
+  confirm names every warning of the review, one per line, before anything
+  moves, and the ready screens say Fermix has not moved yet ("Your server is
+  ready. Fermix moves to it when you press Move now."; the move back's "Fermix
+  still runs on your server. It moves back to this Mac when you press Move
+  now.", its notification the same). Each screen of the move and of the move
+  back shows its four steps with yours marked, and while it moves the route to
+  your server, what it is doing, and how much it sent or received, from what
+  Fermix counted. On a computer linked to your server, Back up now, Add a
+  computer and Move back are buttons on the screen, the backup settings show
+  whether the recovery passphrase is set with Change, and that your server
+  keeps an S3 copy where it does; a Mac that never moved shows no backup
+  settings. The webhooks your server needs say what they are for in one
+  sentence, each command folded under its name, with the one tailnet step and
+  a link to the rest; the code's Tailscale step folds under "Also join your
+  tailnet (optional)". Restore on this Mac's confirm names the backup's date.
+  A computer that moved before asks you to keep or change the switches under
+  This computer, where they are set, rather than ticking the same switches
+  twice. The setup page and `fermix always-on` show the same, and `fermix
+  always-on change-passphrase` sets a new recovery passphrase.
+- **A computer whose Fermix has started can join your Fermix.** A first start,
+  and every save of the settings, write your name, time zone and style and the
+  assistant's name into memory as well, and those counted as a Fermix of its
+  own, so a computer that had ever started, a Mac at its first-run screen
+  included, was refused. Memories that only repeat its settings no longer
+  count, and stay where they are: nothing reads them while it is a computer.
+  Any other memory, a conversation, a scheduled job, a computer history note,
+  a paired device, a home that moved or a link still refuse it. A computer
+  that joined judges its readiness only on its sandbox, since your server runs
+  the turns, providers and channels, `fermix doctor` there judges it the same
+  way, and it logs no channel it does not start.
+- **Coding agents ask for your approval on your server.** After a move to your
+  server, coding agents run there only once you approve them there, and your
+  Mac keeps its own approval for a move back: the move's review says coding
+  agents stop on this Mac and run on the server only with your approval there,
+  and moving back no longer says they ask for approval again. A Mac whose home
+  is on its server shows its own agents in the Coding agents pane and no
+  switch: before, it showed one labelled for the Mac that approved them on the
+  server. A server that took your home before this version starts with coding
+  agents off; approve them there again.
+- **Your server sets its own sandbox.** After a move, Fermix on your server
+  starts in the Open sandbox (free inside the server's account, with its
+  secrets still unreadable) rather than in the mode your Mac had, and says so
+  once in its log: "This server uses its own sandbox setting: open." Change it
+  from any of your computers' Settings.
+- **Each computer has a name of its own, and its key leaves the home folder.**
+  A computer of your Fermix can be renamed (one line, at most 64 bytes, unused
+  by your other computers and your server), and Fermix and the model call it
+  by that name. The key a computer links to your server with is kept in the
+  keychain or keyring, never in the home folder, so no backup, move or copy of
+  the home carries it.
+- **Fermix knows which folders it may use on each computer.** Each computer
+  tells your server the folders its files and commands reach there, and Fermix
+  is told them for each computer, so asking for a file in another folder, such
+  as Downloads on a Mac in the standard sandbox, is answered by name: that
+  folder has to be allowed at that computer. A refusal of a path outside them
+  names the folders that computer allows. A folder in that computer's home is
+  named from `~` (`~/Projects`), which its tools read there, so your account's
+  name stays out of what the model reads.
+- **Quieter starts and plainer words on your server.** A server's first start
+  as your home no longer warns that its computers could not be listed while
+  its channels are still starting, nor does `fermix home status` with Fermix
+  stopped; moving or restoring a home onto a server that keeps its secrets in
+  files no longer asks a keyring and warns that none answered. Why a move was
+  undone is said plainly ("studio-server turned the move down, so nothing
+  moved."), with the server's own reason where it is one you can act on, such
+  as its disk space, and the technical words in the log.
+- **One set of settings after a move.** Once Fermix runs on your server, every
+  Fermix app shows the server's settings, every pane: changing the sandbox,
+  the coding agents' approval or the browser in a linked computer's Settings
+  now changes them on the server ("Sandbox on garden server"), where before
+  the Sandbox pane showed that computer's own and a stored sandbox variable
+  typed there landed on the server without a word. What belongs to one
+  computer alone (what the server may use there, and that computer's own
+  sandbox, browser, screen and history) is listed apart, under This Mac (This
+  computer on Linux), and changes only at that computer: the server, and every
+  other computer, can no longer write it. So the server can stay Open while a
+  Mac stays Strict. A Mac that took the home back keeps its own screen,
+  history and StackChan to itself: a computer still linked to it neither lists
+  nor changes them. A change to the server's sandbox (its mode, command
+  profile or allowed variables) or coding approval from a computer is said
+  once on every Always On screen, naming the computer, each change under its
+  own notice; a write that changed nothing is not said. A process Fermix
+  started can no longer change a computer's own settings or a sandbox's stored
+  variables through the app's socket, the server's commands on that computer
+  among them. After a move, the meeting notetaker's and on-device speech's
+  installers, the coding agents' check and the Providers pane's detection are
+  the server's, which runs them. On a linked computer the setup page changes
+  This computer and that computer's sandbox, and its other tabs say to change
+  them in the Fermix app on any computer. A server or a computer on an older
+  Fermix is never written to by mistake: the computer then shows the server's
+  sandbox and coding settings nowhere and says the server updates on its own,
+  its coding agents' check, those installers and that detection say the server
+  does them only on itself, and the server's browser settings stay listed and
+  changeable as before; the server refuses a sandbox variable from an older
+  computer ("Update Fermix on this computer to change its sandbox values.").
+  An install a linked computer runs itself (its browser, the computer use
+  helper, the Messages helper) is now followed and cancelled on that computer,
+  where before its progress was asked of the server, which did not know it;
+  `fermix settings reload computer.sandbox` clears an outside edit of that
+  computer's own settings, which a refused stored variable of its sandbox now
+  names; and `fermix settings set` says which machine it changed ("Saved
+  Sandbox on garden server (sandbox): sandbox_mode").
+- **StackChan says why it is off while Fermix is on your server.** Pet and the
+  setup page say "StackChan works only while Fermix runs on this Mac.", on a
+  Mac that joined your home as much as on the one it moved from, and This Mac
+  shows no StackChan switch while the home is on the server.
+- **An install a linked computer runs itself is found again when its pane
+  reopens.** On a computer linked to your server, the list of running work the
+  apps read now holds that computer's own installs (its browser, the computer
+  use helper, the Messages helper) after the server's, where before it held
+  only the server's, so a reopened pane lost the install it started. While the
+  server is out of reach, that computer's own are still listed. And a server
+  on an older Fermix no longer breaks Settings' section list on a linked
+  computer: it lists that computer's own sections and says the server updates
+  on its own.
+- **Restart your server from any of your computers.** A sandbox mode, a key or
+  a coding approval set from an app is stored on the server at once and used
+  from its next start, so while one waits, Always On and Settings on a linked
+  computer offer Restart <server> (in the server's own words in every pane
+  that shows its restart, where before the button restarted that computer's
+  Fermix and not the server's). The server restarts at once, or once the work
+  it runs on a computer ends, ten minutes at most from when you asked, work
+  that starts meanwhile included, and refuses while a move is under way;
+  asking again while it waits says how long the work still holds it, or
+  restarts it at once once nothing does. It keeps waiting, and restarts at the
+  end of the ten minutes, when it cannot read what holds it, and a Restart
+  <server> is offered only where the server can take it, so a server on an
+  older Fermix shows none. An answer lost to the server's own restart is said
+  as asked, not as the server being out of reach. `fermix always-on
+  restart-server` takes the same step from a terminal. The move's review says
+  that after the move the apps' Settings change Fermix on the server, its
+  sandbox and coding agents included, names this Mac's own sandbox in what
+  stays on ("files and commands, in this Mac's sandbox (Standard)"), and, with
+  coding agents approved here, says to allow them on the server too.
+  `home.status` says each engine's own restart state and keychain profile.
+- **Always On: a reminder for your computer still rings on your computer after
+  the move.** A reminder or timer set to ring on "this computer" came due on
+  the server, which has no notification centre, and went nowhere. The server
+  now asks each of your computers that is awake (up to sixteen) to show it,
+  and each shows it the way it did before the move: the Fermix app on a Mac,
+  with its Snooze 10 minutes, or the desktop's notifications on Linux. A
+  computer shows a reminder once, so a retry never rings twice. A reminder due
+  while no computer is awake is tried again while it is still valid, and one
+  is refused when you set it only if no computer is linked or every awake one
+  says it cannot show it, in that computer's words. Snooze on your Mac now
+  snoozes the reminder on your server. Your computer's switch "Fermix on your
+  server may use this computer" turning off stops it there, with no new
+  switch; Fermix tells you on the server that the reminder rings on your
+  computers, never on the server.
+- **A computer and its server speak the newest phone version both know.** A
+  computer linked to your server now says which versions of the phone wire its
+  Fermix speaks, newest and oldest, and the server speaks the newest the two
+  share, as the Mac chat socket already did. Before, a computer always spoke
+  its oldest, so once the wire moved on a server would have turned away a
+  computer one version behind it, with no link at all. Now a computer a
+  version ahead of its server or a version behind it links, and one two
+  versions apart is told which side to update. A computer on an earlier Fermix
+  links to a current server too, and phones see no change.
+- **The meeting notetaker works on your server.** Once Fermix runs on your
+  server it joins your Zoom meetings there, awake whenever a meeting starts,
+  with the Zoom settings and secret that moved with it. Google Meet is not
+  available on the server yet, since its notetaker needs a Google sign-in on a
+  computer with a screen: a Meet link, the notetaker's install and its sign-in
+  each say so there, and the Meetings pane, the server's own setup page (which
+  downloads nothing and opens no browser) and `fermix doctor` say it too,
+  adding that Zoom meetings work there once Zoom is set up where it is not.
+  The move's review now says Google Meet meetings stop and Zoom meetings carry
+  on at your server, where it said all meetings stop. A move either way is
+  refused while the notetaker is in a meeting, naming it, since the move would
+  end it before its notes are written, and once a move is under way the
+  notetaker joins no meeting until it is done. Each meeting's notes move with
+  your home, and Fermix reads them where your home keeps them now. After a
+  move back your Mac runs meetings again, and Move now's confirm says when the
+  notetaker your Mac kept needs installing again.
+- **After a move, your computer's Fermix app still calls Fermix and still
+  attaches files.** Begin voice call in the Mac's (or a linked Linux
+  computer's) app now reaches your server, which runs the call on its own Talk
+  to Fermix, key, tools and memory, as it runs a call from your phone; the app
+  keeps its microphone, speaker and echo cancellation. One call at a time
+  still covers your whole home: a call from your phone while the Mac's is up
+  is refused, saying the call is on that computer, and the reverse. A dropped
+  link is held 20 seconds and the call picks up where it was; a link too slow
+  or gone silent ends the call alone, never the chat. The call cannot look at
+  your screen. The attach button in the Mac's chat works again: this
+  computer's Fermix checks each file you attach, sends it to your server
+  (never a file the server already has) and says once the server has it, or
+  why not. The move's review no longer lists your computer's voice calls as
+  stopping. Moving back, the review names a call in progress on that computer,
+  and once your server takes Move now the call is hung up cleanly and a file
+  still sending is dropped, each with a sentence; a Move now the server
+  refuses, such as for a mistyped recovery passphrase, leaves both as they
+  were.
+- **Your server looks places up in Apple Maps on your Mac.** A server's place
+  search and a trip's place lookups used Brave alone, so a home with no Brave
+  key, or one whose plan has no place search, left a trip's stops without a
+  place. A Mac running the Fermix app now offers its server Apple Maps (on by
+  default, and switched off or on again for each Mac in its This computer
+  settings, **Apple Maps**), and a server whose build has no Apple Maps of its
+  own searches there whenever a linked Mac offers it, with no key: the
+  connected Mac seen most recently answers, each search bounded at 15 seconds.
+  This changes what a server already searches with: one whose Brave place
+  search works today moves to your Mac with this update, and while no such Mac
+  is online it has no place search at all, the search refused at once and
+  never sent to Brave, unless `[fermix_core.tools.place_search] backend =
+  "brave"` keeps it on Brave. A trip's lookups stop when the Mac is away,
+  switched off, refusing or not answering, and save the stops without a place,
+  saying which and why; a busy Mac stops nothing. A stop left unplaced because
+  the Mac was away, slow or busy is placed by your server once that Mac is
+  online again. Every trip answer now says what placed the stops its lookups
+  placed ("Placed with Apple Maps on studio Mac: [3]."), and the Place search
+  setting shows **Apple Maps on your Mac** as the choice in force.
+- **Always On lists what it does not do yet.** Before Move now, on your server
+  and on each computer linked to it, the Always On screen lists, in one short
+  sentence each, what does not work or takes a terminal on the server and
+  applies to your home: Google Meet meetings (saying the server joins only
+  Zoom's where your Zoom app is set up, and none until it is), installing and
+  signing in Codex or Claude Code, WhatsApp's public address, Slack without
+  Socket Mode, StackChan, dev plugins, and computer history on a computer with
+  no recorder.
+
 ### Security
 
 - **Someone on your network can no longer pose as the servers Fermix talks
   to.** The Erlang runtime under Fermix could finish a TLS connection without
   checking the server's certificate (CVE-2026-55953 over TLS 1.2,
   CVE-2026-89422 over TLS 1.3), so an attacker on the same network could have
-  read a provider key and forged the model's replies. Every build now runs
-  TLS code fixed for both: the Mac app, Homebrew, the standalone binaries and
-  the Linux packages. The same update stops a server's crafted certificate
-  from tying up the CPU while Fermix checks it (CVE-2026-65634).
+  read a provider key and forged the model's replies. Every build now runs TLS
+  code fixed for both: the Mac app, Homebrew, the standalone binaries and the
+  Linux packages. The same update stops a server's crafted certificate from
+  tying up the CPU while Fermix checks it (CVE-2026-65634).
 - **Fermix's web server and HTTP client are patched.** Fixes in Bandit, Plug
   and Phoenix stop a request to the setup page or a webhook from using up
   memory or CPU, fixes in Mint stop a page or server Fermix fetches from doing
-  the same with its reply, and Elixir's bound how much work a URL's port
-  takes to read. The phone listener keeps its ten-second limit on a TLS
-  handshake under the new web server.
+  the same with its reply, and Elixir's own fix bounds the work of reading a
+  URL's port. The phone listener keeps its ten-second limit on a TLS handshake
+  under the new web server.
 - **An email Fermix sends has only the recipients you were shown.** A
   recipient, subject or reply reference with a line break in it could add
   headers of its own to a Gmail message, such as a hidden Bcc. Sending,
-  replying and drafting now refuse such a value before Gmail is called, with
-  "to must be one line", and the agent can try again with the address alone.
-- **The Linux installer installs only what fermix.ai vouches for.**
-  `curl -fsSL https://fermix.ai/install | sh` took each file's sha256 from the
-  same GitHub release it downloaded the file from, and checked a cosign
-  signature only when `cosign` happened to be installed, so whoever could
-  change the release could change the checksum with it. It now checks every
-  download against the sha256 fermix.ai lists at
-  https://fermix.ai/install/releases, which the site writes only after the
-  release's cosign signatures verify, and refuses a file the list doesn't name
-  or doesn't match before anything is installed or run with `sudo`. No local
-  `cosign` is needed. A new release reaches the installer once fermix.ai lists
-  it.
+  replying and drafting now refuse such a value before Gmail is called, naming
+  the field ("to must be one line", "subject must be one line"), and the agent
+  can try again with the value on one line.
+- **The Linux installer installs only what fermix.ai vouches for.** `curl
+  -fsSL https://fermix.ai/install | sh` took each file's sha256 from the same
+  GitHub release it downloaded the file from, and checked a cosign signature
+  only when `cosign` happened to be installed, so whoever could change the
+  release could change the checksum with it. It now checks every download
+  against the sha256 fermix.ai lists at https://fermix.ai/install/releases,
+  which the site writes only after the release's cosign signatures verify, and
+  refuses a file the list doesn't name or doesn't match before anything is
+  installed or run with `sudo`. No local `cosign` is needed. A new release
+  reaches the installer once fermix.ai lists it.
+- **A page Fermix reads can no longer set up a job that changes your lists or
+  trips.** After a request read a web page, a search result or other outside
+  content, Fermix could still set up or change a scheduled job allowed to use
+  your lists, and that job later ran with every list change open to it, so
+  what the page asked for could land whole. A job whose tools include your
+  lists' or your trips' is now refused from such a request: Fermix says what
+  the job would do and asks you to set it up in your next message.
+- **A command Fermix runs can no longer change this computer's own settings.**
+  A command the agent ran could call `fermix settings set` on the sandbox, the
+  browser, the coding agents' approval, computer use, computer history or
+  StackChan, or `fermix secret set` on a sandbox variable, and the running
+  Fermix applied it. Each of these is now refused to a process Fermix started,
+  with "Only the owner can change a computer's own settings, its sandbox among
+  them: use the Fermix app or the setup page.", and nothing is saved. The same
+  commands from your own terminal work as before.
 - **The agent's browser can no longer open Fermix's own setup page.** A tab of
   your own browser that you hand over can hold the setup page's sign-in, and
   with it the agent could have changed every setting the setup page does. The
@@ -48,13 +762,13 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   it. Other local ports, such as a development server, open as before.
 - **The Obsidian plugin can no longer reach a file outside your vault.** It
   checked a note's path only as written, so a symlink (a link to another file)
-  planted in the vault let it read any file you can, such as an SSH key, or add
-  to one, such as a shell profile, and creating a note at a broken link made a
-  file outside the vault. Every path must now resolve, links followed, inside
-  the vault's real folder, or the call fails with "path escapes the vault", and
-  notes in a folder linked in from elsewhere on disk can no longer be read,
-  listed or added to. Links that stay inside the vault keep working. The
-  catalog offers Obsidian 1.0.5 with the fix: a new install gets it, an
+  planted in the vault let it read any file you can, such as an SSH key, or
+  add to one, such as a shell profile, and creating a note at a broken link
+  made a file outside the vault. Every path must now resolve, links followed,
+  inside the vault's real folder, or the call fails with "path escapes the
+  vault", and notes in a folder linked in from elsewhere on disk can no longer
+  be read, listed or added to. Links that stay inside the vault keep working.
+  The catalog offers Obsidian 1.0.5 with the fix: a new install gets it, an
   installed copy moves with `fermix plugins upgrade obsidian`, and the Mac app
   has no plugin update yet.
 - **What computer history records no longer reaches a trace or Opik.** The
@@ -84,86 +798,82 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   never reads a password field, a terminal or a browser, nor a one-line field
   in a GTK 4 app before GTK 4.20, which does not mark a hidden entry as a
   password field: a field there that changed keeps only how many characters it
-  holds. A browser is known by its
-  name, its program or its web engine, so every Firefox and Chromium fork,
-  Thunderbird and every Electron app count as one, and a field inside a web
-  page counts as a browser's in any app. No page address is recorded on Linux.
-  Fermix never turns accessibility on for you, so a Chromium, Electron or Qt
-  app records only while accessibility is on in your session, and `/history
-  status` names the listed apps that recorded nothing. Sittings go where a
-  Mac's do, and an Always On server still records nothing.
+  holds. A browser is known by its name, its program or its web engine, so
+  every Firefox and Chromium fork, Thunderbird and every Electron app count as
+  one, and a field inside a web page counts as a browser's in any app. No page
+  address is recorded on Linux. Fermix never turns accessibility on for you,
+  so a Chromium, Electron or Qt app records only while accessibility is on in
+  your session, and `/history status` names the listed apps that recorded
+  nothing. Sittings go where a Mac's do, and an Always On server still records
+  nothing.
 
 - **Events and reminders can be drawn as cards under a reply.** When Fermix
-  stores, changes, cancels, snoozes or lists one of your events, the reply
-  now carries each event as Fermix's own record: its title, when it is in
-  Fermix's words, its time zone, and when and where it reminds you ("1 day
-  and 1 hour before", "on Telegram"), at most eight a reply, the ones the
-  turn changed first. A Mac app or phone that draws events shows them under
-  the reply as a card, and Fermix there confirms in a sentence instead of
-  writing each event out; a morning brief that lists your events carries its
-  agenda the same way. Telegram and every other channel are unchanged: the
-  reply still states each event and its date. The Mac chat socket's protocol
-  is now version 8 (it still serves 7) and the phone's is version 3 (it
-  still serves 2); an app on the older version is sent replies without the
-  events, as before. A computer linked to its server speaks the newest phone
-  version the two share, so one a version ahead of its server still connects.
+  stores, changes, cancels, snoozes or lists one of your events, the reply now
+  carries each event as Fermix's own record: its title, when it is in Fermix's
+  words, its time zone, and when and where it reminds you ("1 day and 1 hour
+  before", "on Telegram"), at most eight a reply, the ones the turn changed
+  first. A Mac app or phone that draws events shows them under the reply as a
+  card, and Fermix there confirms in a sentence instead of writing each event
+  out; a morning brief that lists your events carries its agenda the same way.
+  Telegram and every other channel are unchanged: the reply still states each
+  event and its date. The Mac chat socket's protocol is now version 8 (it
+  still serves 7) and the phone's is version 3 (it still serves 2); an app on
+  the older version is sent replies without the events, as before.
 
-- **A voice call says hello, and hangs up on goodbye.** On GPT-Live and
-  Grok, the voice now speaks first: when a call connects, from the Mac, the
-  phone or an accessory, it greets you by name in one short line, then
-  listens, and after the greeting says your name only once in a while. Say "bye" or "goodbye" ("okay, thanks, bye") and the voice says
-  goodbye back, then the call ends by itself, with no button: work you handed
-  off still finishes into the chat, as when you hang up. A goodbye inside a
-  request ("remind me to say bye to Sam at five") keeps the call up, as does
-  talking over the voice's goodbye, and only English "bye" and "goodbye" end
-  a call for now. An accessory such as StackChan ends calls this way at once;
-  the Mac app does once it is updated for it, and until then keeps its End
-  button.
-- **Call Fermix from your phone.** Fermix now takes a voice call from a
-  paired phone over the phone's own encrypted connection, on GPT-Live or
-  Grok, wherever Fermix runs, an Always On server included. A dropped
-  connection is not a hang-up, even one that dies without closing, such as
-  Wi-Fi turned off mid-call: the call waits 20 seconds for the phone to
-  come back and picks up where it was. The phone and the Mac share the one
-  call at a time, removing a phone ends its call at once along with the tasks
-  it started, and a move ends a call in progress, after its review says so.
-  After a move, your phone calls Fermix on the server when Talk to Fermix is
-  on there and its key is in the server's secret store, while the Mac's own
-  voice calls stop. No phone app with calls is released yet.
+- **A voice call says hello, and hangs up on goodbye.** On GPT-Live and Grok,
+  the voice now speaks first: when a call connects, from the Mac, the phone or
+  an accessory, it greets you by name in one short line, then listens, and
+  after the greeting says your name only once in a while. Say "bye" or
+  "goodbye" ("okay, thanks, bye") and the voice says goodbye back, then the
+  call ends by itself, with no button: work you handed off still finishes into
+  the chat, as when you hang up. A goodbye inside a request ("remind me to say
+  bye to Sam at five") keeps the call up, as does talking over the voice's
+  goodbye, and only English "bye" and "goodbye" end a call for now. A goodbye
+  ends a call only on version 5 of the voice wire, which this release brings:
+  a call on an accessory such as StackChan already ends this way, a call from
+  the Mac app or the phone app does once that app is updated for it, and until
+  then a goodbye leaves the call up for you to end.
+- **Call Fermix from your phone.** Fermix now takes a voice call from a paired
+  phone over the phone's own encrypted connection, on GPT-Live or Grok. A
+  dropped connection is not a hang-up, even one that dies without closing,
+  such as Wi-Fi turned off mid-call: the call waits 20 seconds for the phone
+  to come back and picks up where it was. The phone and the Mac share the one
+  call at a time, and removing a phone ends its call at once along with the
+  tasks it started. No phone app with calls is released yet.
 - **Show Fermix things with your phone's camera during a call.** Turn the
   camera on in a call from the phone and ask about what it sees: the voice
-  hands the question to your Fermix agent, which is given the camera's
-  newest picture, at most eight seconds old. The voice itself sees nothing,
-  says so rather than pretend, and with no current picture your agent says
-  it cannot see it right now. The phone sends a picture at most once a second
-  and at least every six seconds, and no picture is kept. **Share the phone's camera** in Settings > Voice turns
-  it off (`[fermix_core.realtime] camera_share`, on by default, GPT-Live and
-  Grok only). The voice wire is now version 4; the Mac app and older phone
-  apps keep working on version 3. No phone app with the camera is released
-  yet.
-- **A StackChan robot can be Fermix's voice on your Mac.** Wired to one of
-  the Mac's USB-C ports and running the Fermix firmware, the M5Stack
-  StackChan is a call's microphone and speaker: tap its screen or swipe its
-  head to talk, on any voice model, with your usual voice settings, keys and
-  limits. It is off until you allow it under the setup page's Realtime tab,
-  where the switch applies at once. Pairing happens over the cable with you
-  at the robot: it asks on its screen, both screens show the same six-digit
-  code, and you confirm on both. The robot only replaces this Mac's voice
-  once you choose it; while it is chosen, a call at the Mac itself is refused
-  and the Mac's microphone stays off, and a tap on a robot you did not choose
-  is refused.
+  hands the question to your Fermix agent, which is given the camera's newest
+  picture, at most eight seconds old. The voice itself sees nothing, says so
+  rather than pretend, and with no current picture your agent says it cannot
+  see it right now. The phone sends a picture at most once a second and at
+  least every six seconds, and no picture is saved or logged: only the newest
+  is held, for at most eight seconds. **Share the phone's camera** in Settings
+  > Voice turns it off (`[fermix_core.realtime] camera_share`, on by default,
+  GPT-Live and Grok only). The camera needs version 4 of the voice wire or
+  later (this release speaks 5); the Mac app and older phone apps keep working
+  on the version they speak. No phone app with the camera is released yet.
+- **A StackChan robot can be Fermix's voice on your Mac.** Wired to one of the
+  Mac's USB-C ports and running the Fermix firmware, the M5Stack StackChan is
+  a call's microphone and speaker: tap its screen or swipe its head to talk,
+  on any voice model, with your usual voice settings, keys and limits. It is
+  off until you allow it under the setup page's Realtime tab, where the switch
+  applies at once. Pairing happens over the cable with you at the robot: it
+  asks on its screen, both screens show the same six-digit code, and you
+  confirm on both. The robot only replaces this Mac's voice once you choose
+  it; while it is chosen, a call at the Mac itself is refused and the Mac's
+  microphone stays off, and a tap on a robot you did not choose is refused.
   When the robot needs the Fermix firmware, or firmware this Fermix can talk
   to, Fermix says so and links its install guide; Fermix never flashes it.
   Release for firmware update frees the port for the installer until you
   choose Reconnect. The Mac shows the robot's call (its voice, what was said
   and its tasks) and can end, mute or interrupt it without opening the Mac's
-  own microphone, and the call carries on with the app closed. StackChan
-  needs Fermix running on the Mac itself, not on an Always On server. Pairing
-  and the robot's controls in the Mac app's Pet come with an app update.
-- **StackChan pairs from the setup page too.** With StackChan on, the
-  Realtime tab's StackChan section lists the USB devices, pairs a robot you
-  name with the code to compare and Matches or Doesn't match, and shows each
-  paired robot's connection, battery, power and diagnostics, with a test call,
+  own microphone, and the call carries on with the app closed. StackChan needs
+  Fermix running on the Mac itself, not on an Always On server. Pairing and
+  the robot's controls in the Mac app's Pet come with an app update.
+- **StackChan pairs from the setup page too.** With StackChan on, the Realtime
+  tab's StackChan section lists the USB devices, pairs a robot you name with
+  the code to compare and Matches or Doesn't match, and shows each paired
+  robot's connection, battery, power and diagnostics, with a test call,
   Release for firmware update, Reconnect, Forget, Revoke and the choice of
   voice device. Before you confirm the code it says that confirming on the
   robot burns one key on its chip for good, and that returning to stock still
@@ -174,43 +884,40 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   times, how long each takes, fixed bookings, notes and places. It looks each
   place up itself, within the town the trip or that day is in, and never
   places one it has nowhere to search near (unsure of a town's country, it
-  makes the trip anyway and asks you); it says which it placed, which
-  it found under another name (with the link, so you can pick it) and which it
-  could not find. A stop it could not look up yet, because the Mac that looks
-  places up for your server was away, slow or busy, the place search was rate
+  makes the trip anyway and asks you); it says which it placed, which it found
+  under another name (with the link, so you can pick it) and which it could
+  not find. A stop it could not look up yet, because the place search was rate
   limited or the lookups ran out of time, is saved with its place's name and
-  placed on its own once it can be (when that Mac is back, when the rate
-  limit resets), with no need to ask again and nothing said in chat; an open
-  trip shows it land. It looks a stop up again at most three times, further
-  apart each time, and gives up after a week; anything you change about that
-  stop's place or words first wins. Ask what Thursday
-  holds, move the museum to Friday, or have the plan sent to someone. Move a
-  booked dinner by name and Fermix moves it,
+  placed on its own once it can be (for a rate limit, once it resets), with no
+  need to ask again and nothing said in chat; an open trip shows it land. It
+  looks a stop up again at most three times, further apart each time, and
+  gives up after a week; anything you change about that stop's place or words
+  first wins. Ask what Thursday holds, move the museum to Friday, or have the
+  plan sent to someone. Move a booked dinner by name and Fermix moves it,
   keeps it marked booked and reminds you the booking itself is yours to
   change; rearranging a day leaves a booked stop where it is. The shared text
-  links every place in Apple Maps and leaves your booking notes out. Trips are
-  yours alone, as your lists are:
-  a guest or a group chat sees none. A request that read a web page or a
-  search still makes and changes a trip, and a stop it writes is read back as
-  data, never as instructions. The Mac app
-  draws your trips: a trip shows under the reply that read or changed it and
-  opens in a panel beside the chat, where you move, add, edit, remove,
-  restore and share its days and stops, each change showing at once wherever
-  the trip is open; Share and Copy itinerary hand on the same text Fermix
-  sends from the chat. A trip happening now or coming next is listed first,
-  and a trip that is over is listed last under its own heading, still there to
-  open and change until you remove it; "my trip" means the current or next
-  one. On a paired phone, until its app draws trips, and on
-  every other channel, a reply writes out the days that changed, each place
-  linked.
+  links every place in Apple Maps and leaves out every stop's notes and which
+  stops are booked. Trips are yours alone, as your lists are: a guest or a
+  group chat sees none. A request that read a web page or a search still makes
+  and changes a trip, and a stop it writes is read back as data, never as
+  instructions. The Mac app draws your trips: a trip shows under the reply
+  that read or changed it and opens in a panel beside the chat, where you
+  move, add, edit, remove, restore and share its days and stops, each change
+  showing at once wherever the trip is open; Share and Copy itinerary hand on
+  the same text Fermix sends from the chat. A trip happening now or coming
+  next is listed first, and a trip that is over is listed last under its own
+  heading, still there to open and change until you remove it; "my trip" means
+  the current or next one. A paired phone reads and changes your trips over
+  its own encrypted connection, as it does your lists. On a phone whose app
+  does not draw trips yet, and on every other channel, a reply writes out the
+  days that changed, each place linked.
 - **Your lists on your phone, live.** A paired phone now reads and changes
   your lists as the Mac app does. A reply that read or changed a list shows
   the list under it, and you tick, add, edit, move and restore items there.
-  Each change lands at once everywhere, and a change from a reply, a
-  scheduled job or the Mac shows on the phone as it happens. The lists travel
-  over the phone's own encrypted connection, so they work wherever Fermix
-  runs. A phone app that doesn't draw lists yet keeps showing a reply's list
-  as text.
+  Each change lands at once everywhere, and a change from a reply, a scheduled
+  job or the Mac shows on the phone as it happens. The lists travel over the
+  phone's own encrypted connection, so they work wherever Fermix runs. A phone
+  app that doesn't draw lists yet keeps showing a reply's list as text.
 - **Claude Fable 5.2 on the Anthropic provider and through OpenRouter.**
   `claude-fable-5-2` (`anthropic/claude-fable-5.2` on OpenRouter) joins the
   model catalog with a 1M context window and a 128k output ceiling, and is
@@ -226,113 +933,117 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Perplexity Decider Flash** beside **OpenRouter · Jev**, on your OpenRouter
   key, each following Perplexity's newest Decider. Automatic is unchanged and
   still uses Jev on OpenRouter.
-- **Your Android phone is notified while the app is closed.** Fermix now
-  sends a paired Android phone its notifications through Fermix's push relay
-  at push.fermix.ai, which hands them to Google to deliver, so a reply, a
+- **Your Android phone is notified while the app is closed.** Fermix now sends
+  a paired Android phone its notifications through Fermix's push relay at
+  push.fermix.ai, which hands them to Google to deliver, so a reply, a
   reminder or an approval waiting for you reaches the phone with the app
   closed. Each one is sealed to that phone before it leaves your Fermix, so
-  neither the relay nor Google can read it, and the relay keeps nothing.
-  There is nothing to set up: no Firebase project, no service account, no
-  key, no setting. Each phone is now decided on its own: a phone that is away
-  is notified even while another of your phones is connected, and a message
-  you already read elsewhere still notifies nobody. When the relay cannot be
-  reached, the message waits in the chat for when you open the app, and
-  `fermix doctor` says the push service cannot be reached until a later
-  notification gets through. An iPhone is pushed through APNs as before, and
-  APNs settings that are off or broken no longer stop an Android phone's
-  notifications. This rides version 3 of the phone wire, so a phone app at
-  version 2 is told nothing new. No Android app with this is released yet.
+  neither the relay nor Google can read it, and the relay keeps nothing. There
+  is nothing to set up: no Firebase project, no service account, no key, no
+  setting. Fermix now decides for each phone on its own whether to notify it:
+  a phone that is away is notified even while another of your phones is
+  connected, and a message you already read elsewhere still notifies nobody.
+  When the relay cannot be reached, the message waits in the chat for when you
+  open the app, and `fermix doctor` says the push service cannot be reached
+  until a later notification gets through. An iPhone is pushed through APNs as
+  before, and APNs settings that are off or broken do not stop an Android
+  phone's notifications. This rides version 3 of the phone wire, so a phone
+  app at version 2 is told nothing new. No Android app with this is released
+  yet.
 
 ### Changed
 
-- **On a voice call, Fermix says what changed in a list or a trip.** A
-  request said on a call that makes or changes a list or a trip gets a
-  sentence about what changed. The items or the days are read out only when
-  you ask, and a link is never read aloud. An OpenAI Realtime call now knows
-  your lists and trips as a chat does. If they can't be read in time, the call
+- **On a voice call, Fermix says what changed in a list or a trip.** On an
+  OpenAI Realtime call, or a GPT-Live or Grok call kept out of the chat, a
+  request that makes or changes a list or a trip gets a sentence about what
+  changed. The items or the days are read out only when you ask, and a link is
+  never read aloud. On a call that joins the chat, the list or the days that
+  changed are written in the chat. An OpenAI Realtime call now knows your
+  lists and trips as a chat does. If they can't be read in time, the call
   starts without them.
 - **Fermix names what a plan depends on that you didn't mention.** When
-  something you didn't say would change the outcome, such as where you stay
-  on a weekend away, the reply says so in a line. It doesn't invent the
-  missing part or act on it, and a simple request gets nothing added.
-- **One voice call at a time, on every voice model.** A second call now
-  waits for the first whichever model runs it: OpenAI Realtime too, not
-  only GPT-Live and Grok, so two calls can no longer bill side by side.
-  The refusal says where the call in progress is. A call that has just
-  ended holds its place for the second or so it takes to close, and a fault
-  in what keeps the one call now ends the call in progress rather than
-  letting a second one start beside it.
+  something you didn't say would change the outcome, such as where you stay on
+  a weekend away, the reply says so in a line. It doesn't invent the missing
+  part or act on it, and a simple request gets nothing added.
+- **One voice call at a time, on every voice model.** A second call now waits
+  for the first whichever model runs it: OpenAI Realtime too, not only
+  GPT-Live and Grok, so two calls can no longer bill side by side. The refusal
+  says where the call in progress is. A call that has just ended holds its
+  place for the second or so it takes to close, and a fault in what keeps the
+  one call now ends the call in progress rather than letting a second one
+  start beside it.
 - **This computer's own settings now live in `machine.toml`.** The sandbox,
   computer use, whether computer history records here and which apps it
-  watches, and the dev plugin folder describe the computer Fermix runs on,
-  not your home, so the first start of this version moves them from
-  `config.toml` into `machine.toml` beside it, once, and every save writes
-  them there. What your home summarizes computer history with (`summarizer`)
-  and the providers that may see the summaries (`remote_summaries`) stay in
-  `config.toml`; `summarizer = "local"` is also written to `machine.toml`,
-  where it keeps this computer's history on its own model, the daily roll-up
-  included. While that line is there it decides over the summarizer
-  `config.toml` names: `/history status` and the settings row say so, the log
-  says it once at start, and deleting the line from `machine.toml` hands the
-  choice back to `config.toml`. A save from the setup page writes only the
-  machine settings it changed and takes the rest from the file as it is
-  then, so a page left open in another tab never switches back on what you
-  switched off since. To change one by hand, edit
-  `machine.toml`: one added to `config.toml` is not read there, reloading the
-  settings says so in the log, and the next save or start takes it out of
-  `config.toml`. In a home the Mac app manages only the app moves them: a
-  `fermix` command from another install refuses to start there until the app
-  has. As with `config.toml`, no command or file tool the agent
-  runs can read or change `machine.toml`.
+  watches, and the dev plugin folder describe the computer Fermix runs on, not
+  your home, so the first start of this version moves them from `config.toml`
+  into `machine.toml` beside it, once, and every save writes them there. What
+  your home summarizes computer history with (`summarizer`) and the providers
+  that may see the summaries (`remote_summaries`) stay in `config.toml`;
+  `summarizer = "local"` is also written to `machine.toml`, where it keeps
+  this computer's history on its own model, the daily roll-up included. While
+  that line is there it decides over the summarizer `config.toml` names:
+  `/history status` and the settings row say so, the log says it once at
+  start, and deleting the line from `machine.toml` hands the choice back to
+  `config.toml`. A save from the setup page writes only the machine settings
+  it changed and takes the rest from the file as it is then, so a page left
+  open in another tab never switches back on what you switched off since. To
+  change one by hand, edit `machine.toml`: one added to `config.toml` is not
+  read there, reloading the settings says so in the log, and the next save or
+  start takes it out of `config.toml`. In a home the Mac app manages only the
+  app moves them: a `fermix` command from another install refuses to start
+  there until the app has. As with `config.toml`, no command or file tool the
+  agent runs can read or change `machine.toml`.
 - **The browser's settings belong to each computer.** The private hosts the
   browser may open, how its tasks run, the most open tabs and whether it may
   open the Fermix app now live in each computer's `machine.toml`, so a
   server's browser and a Mac's are set apart and no move, backup or restore
   carries them. The first start of this version moves any that `config.toml`
   held into `machine.toml`, once.
-- **Whether coding agents may run, and where they keep their sign-ins,
-  belong to each computer.** The approval ("Allow coding agents to run on
-  this Mac") and the folders Codex and Claude Code sign in from
-  (`codex_home`, `claude_config_dir`) now live in `machine.toml`, so the
-  first start of this version moves them out of `config.toml`, once, and no
-  move, backup or restore carries them; the preferred tool stays your
-  home's. After a move to your server, coding agents run there only once you
-  approve them there, and your Mac keeps its own approval for a move back:
-  the move's review now says coding agents stop on this Mac and run on the
-  server only with your approval there, and moving back no longer says they
-  ask for approval again. The switch has its own part of the Coding agents
-  pane, This Mac (This computer on Linux and on a server), labelled for the
-  machine it approves. A Mac whose home is on its server shows its own
-  agents there and no switch: before, it showed one labelled for the Mac
-  that approved them on the server. A server that took your home before
-  this version starts with coding agents off; approve them there again.
+- **Whether coding agents may run, and where they keep their sign-ins, belong
+  to each computer.** The approval ("Allow coding agents to run on this Mac")
+  and the folders Codex and Claude Code sign in from (`codex_home`,
+  `claude_config_dir`) now live in `machine.toml`, so the first start of this
+  version moves them out of `config.toml`, once, and no move, backup or
+  restore carries them; the preferred tool stays your home's. The switch has
+  its own part of the Coding agents pane, This Mac (This computer on Linux),
+  labelled for the machine it approves.
 - **The Computer history switch says what turning it on agrees to.** Its
   footer in settings now reads "Fermix records what you do in the apps you
   choose on this Mac. The raw record stays on this Mac for 48 hours; each
   finished sitting is summarized by Anthropic, and Fermix keeps the summary."
   with the provider your history is summarized by, or "on this Mac" for a
   local summarizer.
-- **Computer history's raw record has a store of its own.** On a Mac, what
-  the recorder captures (kept 48 hours) moves out of `memory.db` at the first
-  start of this version into `device/history.db` in your Fermix home, a file
-  only your account can read that no backup, snapshot or move carries; the
-  notes made from it stay in `memory.db`. A Linux install, which has no
-  recorder, keeps no such store and runs no part of computer history unless
-  its home holds notes, and a home restored there from a Mac's backup drops
-  the raw rows instead of keeping them where nothing would delete them. A
-  store that cannot be opened (a full disk, a damaged file) no longer stops
-  Fermix from starting: the recorder stays off, the rest runs, and `/history
-  status` and the settings say why. Nothing older than the 48 hours is ever
-  summarized: the computer deletes it before it sends, and the home refuses
-  a sitting that starts before them.
+- **Computer history's raw record has a store of its own.** On a Mac or a
+  Linux computer, what the recorder captures (kept 48 hours) moves out of
+  `memory.db` at the first start of this version into `device/history.db` in
+  your Fermix home, a file only your account can read that no backup, snapshot
+  or move carries; the notes made from it stay in `memory.db`. A computer with
+  no recorder keeps no such store and runs no part of computer history unless
+  its home holds notes. A store that cannot be opened (a full disk, a damaged
+  file) does not stop Fermix from starting: the recorder stays off, the rest
+  runs, and `/history status` and the settings say why. Nothing older than the
+  48 hours is ever summarized: the computer deletes it before it sends, and
+  the home refuses a sitting that starts before them.
 - **Restoring your home keeps your computer history notes.** A restore from a
   snapshot deleted every note, as if they could not leave the Mac they were
   made on. Notes are your home's and now come back with it; the raw record
   never travels.
-- **`recall_activity` can be asked about one machine.** Each result names
-  where it happened once your home has more than one computer, and
-  `computer` ("this computer", or a computer's name) takes one machine's
-  notes alone.
+- **Encrypted S3 snapshots are kept only by an Always On server.** A home on a
+  Mac or a Linux computer no longer writes snapshots to an S3 bucket, even
+  when `[fermix_core.snapshots]` in `config.toml` names one, and the bucket,
+  region, keys and recovery key are no longer settings in any app or in
+  `fermix settings`. `fermix home snapshots status` says "Snapshots are kept
+  only by an Always On server, and this computer is not one.", and while
+  `config.toml` still names a bucket, `fermix doctor` warns that S3 backups
+  stopped and says to remove `s3_bucket` from `[fermix_core.snapshots]`.
+  `fermix home export` and `fermix home import` move a home by hand as before.
+- **A copy from a newer Fermix restores when it is in the same format.**
+  `fermix home import` refused any copy a newer Fermix had written. It now
+  reads a home by its format, never by which Fermix wrote it, and refuses only
+  a home in a newer format, with "A newer Fermix wrote this home in a form
+  this one cannot read. Update Fermix on this computer first, then try again.
+  Nothing was written." A copy whose memory database cannot be opened is
+  refused as possibly damaged, also with nothing written.
 - **A source checkout no longer falls back to your installed home.** A `mix`
   command run in a Fermix checkout with no `FERMIX_HOME` read and could
   rewrite `~/.fermix`, the home of the app you have installed, whose engine
@@ -351,16 +1062,15 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   (`/dev/null`), on macOS and Linux. The Mac app's engine and an installed
   service, whose input was already empty, behave as before.
 - **Place search on Brave keeps to Brave's rate limit.** A trip's place
-  lookups ran the first alone and then four at a time, so on a Brave plan
-  that allows one search a second most of a long trip's stops were left
-  without a place, as rate limited. Every place search on a Brave home now
-  goes to Brave one at a time, waiting when Brave's last answer says its
-  window is spent, and a search Brave refuses as rate limited is sent once
-  more after that wait. When the key's quota is spent for longer, such as for
-  the month, nothing more is sent until it resets, and Fermix says how long.
-  A Brave Search API key whose plan does not include place search is now
-  named as that, in the trip's answer and to the agent, which stops
-  searching.
+  lookups ran the first alone and then four at a time, so on a Brave plan that
+  allows one search a second most of a long trip's stops were left without a
+  place, as rate limited. Every place search on a Brave home now goes to Brave
+  one at a time, waiting when Brave's last answer says its window is spent,
+  and a search Brave refuses as rate limited is sent once more after that
+  wait. When the key's quota is spent for longer, such as for the month,
+  nothing more is sent until it resets, and Fermix says how long. A Brave
+  Search API key whose plan does not include place search is now named as
+  that, in the trip's answer and to the agent, which stops searching.
 - **A Fermix too busy to answer is no longer taken for one that is stopped.**
   When its control socket did not accept a connection within 3 seconds, the
   command line read Fermix as not running, so on a busy machine `fermix home
@@ -370,42 +1080,42 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   means Fermix could not tell, and those commands refuse and say to make sure
   it is stopped first, while `fermix status` and the other reports say they
   could not tell.
-- **A Fermix on a Mac too busy to take a connection is no longer taken for
-  one that is stopped either.** macOS turns a connection away at once when
-  Fermix is behind on taking connections, exactly as it does when no Fermix
-  runs, so those same commands could still act on a home whose engine was
-  running, and a second Fermix started on that home took the running one's
-  socket from it. A running Fermix now holds a lock beside its socket for as
-  long as it runs, which the system lets go of when it stops, however it
-  stops: a connection turned away while the lock is held means Fermix could
-  not tell, and a second Fermix does not start. Fermix also lets up to 128
-  connections wait where 5 did, so a busy one turns far fewer away. On a
-  Linux package, `fermix restart` and `fermix service status` say in the log
-  when they could not tell.
+- **A Fermix on a Mac too busy to take a connection is no longer taken for one
+  that is stopped either.** macOS turns a connection away at once when Fermix
+  is behind on taking connections, exactly as it does when no Fermix runs, so
+  those same commands could still act on a home whose engine was running, and
+  a second Fermix started on that home took the running one's socket from it.
+  A running Fermix now holds a lock beside its socket for as long as it runs,
+  which the system lets go of when it stops, however it stops: a connection
+  turned away while the lock is held means Fermix could not tell, and a second
+  Fermix does not start. Fermix also lets up to 128 connections wait where 5
+  did, so a busy one turns far fewer away. On a Linux package, `fermix
+  restart` and `fermix service status` say in the log when they could not
+  tell.
 - **Codex signed in with an API key reads as signed in.** Fermix looked only
   for a ChatGPT sign-in in Codex's `auth.json`, so after `codex login
   --with-api-key` the Coding agents pane, the setup page and `fermix doctor`
   said Codex was not signed in. Both forms Codex writes now count. Fermix
   still only checks that the sign-in is there and never reads the key out.
-- **A coding agent whose sign-in stopped working no longer reads as signed
-  in once a run fails on it.** Fermix only sees that Codex's or Claude Code's
+- **A coding agent whose sign-in stopped working no longer reads as signed in
+  once a run fails on it.** Fermix only sees that Codex's or Claude Code's
   sign-in file is there, so an expired sign-in read "Signed in" while every
   run failed. Now a run that fails because the agent could not sign in gives
-  the agent's own words, then says which agent is signed out on which
-  machine and that the run stopped. The agent then reads signed out on the
-  setup page and in `fermix doctor`, the Mac app's Coding agents pane says
-  so under the agents, and a watcher follow-up that would start it waits,
-  until a run of it works or its sign-in file changes when you sign in
-  again. On the setup page and in `fermix doctor` a sign-in file that is
-  there now reads "sign-in found" rather than "authenticated". Keeping that
-  mark never costs a run: a machine's store of marks that does not answer in
-  time is logged and skipped, where it stopped every coding run in progress.
-- **A Grok call no longer goes quiet about a finished task after you speak
-  as a reply starts.** Grok could drop a reply it had just begun when you
-  spoke, without ever closing it, and the call then waited on that reply for
-  good: a task that finished later was never answered aloud, only in the
-  chat, and a spoken "bye" did not end the call. A reply Grok starts now ends
-  any it left open.
+  the agent's own words, then says which agent is signed out on which machine
+  and that the run stopped. The agent then reads signed out on the setup page
+  and in `fermix doctor`, the Mac app's Coding agents pane says so under the
+  agents, and a watcher follow-up that would start it waits, until a run of it
+  works or its sign-in file changes when you sign in again. On the setup page
+  and in `fermix doctor` a sign-in file that is there now reads "sign-in
+  found" rather than "authenticated". Keeping that mark never costs a run: a
+  machine's store of marks that does not answer in time is logged and skipped,
+  where it stopped every coding run in progress.
+- **A Grok call no longer goes quiet about a finished task after you speak as
+  a reply starts.** Grok could drop a reply it had just begun when you spoke,
+  without ever closing it, and the call then waited on that reply for good: a
+  task that finished later was never answered aloud, only in the chat, and a
+  spoken "bye" did not end the call. A reply Grok starts now ends any it left
+  open.
 - **`fermix --version` no longer creates a Fermix home.** Every command wrote
   the web listener's signing key, `secret_key_base`, into the account's home
   as it started, making `~/.fermix` where there was none, so `fermix
@@ -413,806 +1123,117 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   serves the web listener (the daemon, the Mac app's engine) makes that key
   now, and `fermix --version`, `fermix version` and the other commands that
   start no daemon write none. The standalone and Linux package binaries still
-  unpack their runtime under `~/.local` before Fermix starts, as their
-  wrapper always has.
+  unpack their runtime under `~/.local` before Fermix starts, as their wrapper
+  always has.
 - **A `--json` command prints only its JSON on a packaged Fermix.** With
-  Fermix stopped, `fermix home status --json` printed a log warning on stdout
-  ahead of its JSON, so whatever read the JSON failed: the packaged engine
-  started its logging on stdout again after Fermix had moved it. Every
-  `--json` command now moves logging to stderr before it runs, and one whose
-  logging cannot be moved does not run and says why.
+  Fermix stopped, a `--json` command could print a log warning on stdout ahead
+  of its JSON, so whatever read the JSON failed: the packaged engine started
+  its logging on stdout again after Fermix had moved it. Every `--json`
+  command now moves logging to stderr before it runs, and one whose logging
+  cannot be moved does not run and says why.
 - **`fermix doctor` no longer fails a computer in the device role for what
   that role never starts.** A computer whose home moved to another host runs
   no phone channel and no ACP listener, yet its `mobile companion` and `acp
   surface` rows failed, sent you to restart the daemon or read its logs, and
   made doctor exit 1. In the device role both rows now pass and say the role
-  starts neither, and phones reach the primary; a real fault, such as
-  identity files with the wrong permissions, still fails.
+  starts neither, and phones reach the primary; a real fault, such as identity
+  files with the wrong permissions, still fails.
 - **Saving settings no longer writes an OpenAI section you never set.** Every
   save wrote `[fermix_core.providers.openai]` with `default_model =
-  "gpt-5.4-mini"` into `config.toml`, a value Fermix itself shipped, even on
-  a home that never used OpenAI, and the file's header named
-  `~/.fermix/skills` whatever home it belonged to and `mix fermix.setup`,
-  which no release has, as what manages it. A save now writes only the
-  provider sections you set, and the header names the skills folder beside
-  the file and what rewrites it (the app, the setup page, `fermix setup` and
-  `fermix settings`). A home with an OpenAI key that never picked a model now
-  runs on the catalog's default, GPT-6 Astra, as a fresh install was meant
-  to: the model catalog is the one place that default comes from. A file
-  that already carries that line keeps its model until you choose another.
+  "gpt-5.4-mini"` into `config.toml`, a value Fermix itself shipped, even on a
+  home that never used OpenAI, and the file's header named `~/.fermix/skills`
+  whatever home it belonged to and `mix fermix.setup`, which no release has,
+  as what manages it. A save now writes only the provider sections you set,
+  and the header names the skills folder beside the file and what rewrites it
+  (the app, the setup page, `fermix setup` and `fermix settings`). A home with
+  an OpenAI key that never picked a model now runs on the catalog's default,
+  GPT-6 Astra, as a fresh install was meant to: the model catalog is the one
+  place that default comes from. A file that already carries that line keeps
+  its model until you choose another.
 - **`fermix service status` says what it covers on a Mac or a standalone
   install.** There it said "This Fermix was not installed from a Linux
-  package, so there is no packaged background service for it to manage."
-  even with the launch agent `fermix service install` set up running. It now
-  says it reports only a Linux package's service and points to the `service
-  unit` row of `fermix doctor`, which reports that install's own unit. A
-  Linux package's status is unchanged.
+  package, so there is no packaged background service for it to manage." even
+  with the launch agent `fermix service install` set up running. It now says
+  it reports only a Linux package's service and points to the `service unit`
+  row of `fermix doctor`, which reports that install's own unit. A Linux
+  package's status is unchanged.
 - **A job bound to a plugin's skill can use that plugin again.** Since a job
   bound to a plugin skill started running at guest trust, it got none of the
   plugin's own tools, so a GitHub issue monitor ran with no GitHub tool at
   all, said the tools weren't connected, and later replied with made-up tool
-  calls. A plugin skill now reaches its own plugin's tools, and still no
-  other plugin's and none of your files, within what the job or the turn
-  that starts it grants; `skill_run` of a plugin skill gets the same.
-- **A scheduled job that can't use a tool it names fails and says why.** A
-  run whose job names a tool its trust or skill leaves out, or one Fermix
-  doesn't have right now (a plugin that is off), used to run without it and
-  report `ok`. It now fails before the model is asked, naming the tools and
-  what to change, and `schedule_job` and `update_job` refuse to bind a skill
-  that would leave one of the job's own tools out.
-- **`fermix` says why it won't start in a directory it can't open.** Run
-  from a directory the account running it cannot open (another account's
-  home, under `sudo -u`), the standalone binary and the Linux package's
-  `fermix` stopped with a crash dump before printing anything. They now say
-  in one sentence to run the command from a directory that account can
-  open, before they unpack or start anything.
+  calls. A plugin skill now reaches its own plugin's tools, and still no other
+  plugin's and none of your files, within what the job or the turn that starts
+  it grants; `skill_run` of a plugin skill gets the same.
+- **A scheduled job that can't use a tool it names fails and says why.** A run
+  whose job names a tool its trust or skill leaves out, or one Fermix doesn't
+  have right now (a plugin that is off), used to run without it and report
+  `ok`. It now fails before the model is asked, naming the tools and what to
+  change, and `schedule_job` and `update_job` refuse to bind a skill that
+  would leave one of the job's own tools out.
+- **`fermix home export` takes a home with a dev plugin folder.** The dev
+  plugin folder's links to your plugin checkouts made export refuse the whole
+  home. The folder and the setting that names it now stay on the computer that
+  set them up, and the archive carries the rest. Each refusal of export names
+  the path and what to change, then to try again, and a named pipe or a device
+  in the home is called a special file or a device file.
+- **`fermix` says why it won't start in a directory it can't open.** Run from
+  a directory the account running it cannot open (another account's home,
+  under `sudo -u`), the standalone binary and the Linux package's `fermix`
+  stopped with a crash dump before printing anything. They now say in one
+  sentence to run the command from a directory that account can open, before
+  they unpack or start anything.
 - **An X accounts source no longer asks you to sign in to X while X is
   connected.** About every two hours, while Fermix renewed the X sign-in, the
   source sent "needs your X sign-in: connect X under Plugins" and waited.
   Renewing could stall on a connection that had died while idle, and the
   source read the wait as a missing sign-in. A renewal now starts on a fresh
   connection. A source that finds the sign-in busy retries on its usual
-  backoff and tells you nothing. A sign-in that is really gone still tells
-  you once.
+  backoff and tells you nothing. A sign-in that is really gone still tells you
+  once.
 - **A plugin tool call no longer stalls after a quiet spell.** The first X,
-  GitHub or Google call after a few idle minutes could reuse a connection
-  the service had already closed. It then waited out the 15-second timeout:
-  a lookup took about 20 seconds, and a post failed. Plugin calls now drop a
+  GitHub or Google call after a few idle minutes could reuse a connection the
+  service had already closed. It then waited out the 15-second timeout: a
+  lookup took about 20 seconds, and a post failed. Plugin calls now drop a
   connection that has sat idle for 15 seconds and open a fresh one.
 - **iMessage restarts its helper when the helper stops reading.** A helper
-  that closed its input, as one that is exiting does, left the channel up
-  but unable to reach it: the next request waited out its timeout, every one
-  after it failed, and the helper was never restarted. Fermix now takes that
-  as the helper stopping and restarts it with the usual backoff. A helper
-  that stops as it starts now fails at once, as having exited during
-  startup, instead of after a 10-second wait reported as a timeout.
-- **`/history off` means no more provider calls for your history.** After
-  it, the daily roll-up still ran once more over the notes made since the
-  last one. Now nothing more is sent anywhere for a machine whose history is
-  off: the roll-up reads only the notes of machines still recording, and
-  leaves out every thread that cites a note of one that is off, and on a Mac
-  that is its own home, with no other computer contributing, it makes no
-  call at all. The notes stay, and recall still reads them.
+  that closed its input, as one that is exiting does, left the channel up but
+  unable to reach it: the next request waited out its timeout, every one after
+  it failed, and the helper was never restarted. Fermix now takes that as the
+  helper stopping and restarts it with the usual backoff. A helper that stops
+  as it starts now fails at once, as having exited during startup, instead of
+  after a 10-second wait reported as a timeout.
+- **`/history off` means no more provider calls for your history.** After it,
+  the daily roll-up still ran once more over the notes made since the last
+  one. Now nothing more is sent anywhere for a machine whose history is off:
+  the roll-up reads only the notes of machines still recording, and leaves out
+  every thread that cites a note of one that is off, and on a computer that is
+  its own home, with no other computer contributing, it makes no call at all.
+  The notes stay, and recall still reads them.
 - **A pause also keeps out what arrives late.** `/history pause` dropped
   events while it lasted, but one stamped inside the paused time that reached
-  this Mac's raw record after the pause ended, such as a flush that came
+  this computer's raw record after the pause ended, such as a flush that came
   late, was kept. The paused time is now fenced in the raw record as a purge
   is, so nothing stamped inside it is kept, whenever it arrives.
-- **A pause never shortens a longer one.** Two pauses set close together
-  could leave the earlier end in force, ending a long pause early. A pause
-  now only ever moves the end later.
-- **A purge or pause that ran beside another is never skipped on this Mac.**
-  Two `/history purge` or `/history pause` commands at once, or one whose own
-  step on this Mac failed, could leave this Mac counting the earlier one as
-  done when it was not, and a later summary could then include activity from
-  the purged window. This Mac now applies every purge and pause it has not
-  applied, oldest first, each time, and its five-minute tick retries one that
-  failed.
+- **A pause never shortens a longer one.** Two pauses set close together could
+  leave the earlier end in force, ending a long pause early. A pause now only
+  ever moves the end later.
+- **A purge or pause that ran beside another is never skipped on this
+  computer.** Two `/history purge` or `/history pause` commands at once, or
+  one whose own step on this computer failed, could leave this computer
+  counting the earlier one as done when it was not, and a later summary could
+  then include activity from the purged window. This computer now applies
+  every purge and pause it has not applied, oldest first, each time, and its
+  five-minute tick retries one that failed.
 - **A purge or pause that half fails says exactly what happened.** The two
-  steps live in separate databases: the reply said "Purge failed" or
-  "capture is NOT paused" when only this Mac's step had failed, though the
-  purge or pause stood and no summary was being made from that window. The
-  reply now says what stands, what did not happen yet and that Fermix tries
-  again every five minutes; when nothing changed, it says that.
-
-### Behind a feature flag
-
-Always On is built but switched off in release builds: there `fermix
-always-on` and `fermix home status` say "Always On is not in this release of
-Fermix yet.", and the setup page and the Fermix app show no Always On. It
-will be part of a future release; nothing in this group is in a release yet.
-
-- **Always On: Fermix can move to a server you control.** Your home (its
-  settings, memory, secrets, skills and workspace) can now move from your
-  computer to a Linux server, so Fermix keeps working with your Mac closed.
-  With Reach from anywhere on, Always On on your primary gives an enrollment
-  code, good once for thirty minutes (the first after a start waits a moment
-  for Reach from anywhere to start, rather than asking you to try again); a
-  server enrolled with it waits for the move (each side names the other by
-  its hostname, or a Mac by the computer name in its Sharing settings), and
-  you review the move (the secrets that travel, the server's Fermix,
-  which must read this home, and whose home this computer must be able to
-  read back, now or once its update is published, free disk, the plugins with no build for the server, and what stops: those
-  of this computer's own voice calls and meetings you use, WhatsApp,
-  and Slack unless it uses Socket Mode; calls from your phone carry on at the
-  server when Talk to Fermix is on there and its key is in the server's
-  secret store; coding agents ask for your approval again on the server,
-  and Telegram's messages wait out the move, each only where you use it;
-  a Fermix you started from a terminal stops when the move starts and needs
-  starting again) and start it from the app with a recovery passphrase: the
-  first move sets it if you have not, and every move after checks that it is
-  the one you set ("That is not the recovery passphrase you set."), so a typo
-  never becomes the key your server's snapshots are encrypted to, and a move
-  never makes a second key. A home the move cannot carry, such as one with a
-  link out of it, blocks the review, which names the path and what to do in
-  the words `fermix home export` uses. A dev plugin folder, its links to
-  checkouts and the setting that names it stay on the computer that set them
-  up: no move or restore carries them, so a server never looks for a Mac's
-  checkouts, the review warns once that they stay, and a move back keeps
-  them. Your Mac (or Linux
-  computer) stays awake while the move runs, and only then. Each side logs one
-  line per phase of the move (capture, send, staging and commit on your
-  computer; receive, staging and activation on the server) with when it
-  started and ended, how long it took and the bytes it captured, sent or
-  received, so the log tells the transfer from the archiving. The computer the
-  home left stays a desktop of the server: the app's chat and Fermix-wide
-  settings go to the server through it, a settings call costing one round
-  trip to the server, and paired phones see a reconnect. It
-  records no computer history from then on and opens no copy of your memory:
-  what it still holds of them is a retired copy. Doctor there checks that
-  computer, its scope named or not; only its network checks, which would call
-  a provider with the retired credentials, are refused. The
-  server will not remove that desktop from its devices, since this version
-  cannot link it again and it keeps copies of the server's backups. Right
-  after the move the server installs your plugins again for itself, checked as
-  any install is; one it could not install says so in Plugins, with Install….
-  A server announces nothing over mDNS, whatever the settings it took from
-  your computer say: it is no host on your local network.
-  Your server keeps itself up to date and your computers follow it. Use my
-  own Linux server's command names the release it starts on, and every five
-  minutes the server installs the newest release whose home a published app
-  for each computer keeping its backups reads, by fermix.ai's release table
-  (`update` in `fermix home status --json`: the release it runs, the
-  one it may install, and a newer one still waiting for an app), never back
-  down, and nothing while it cannot read the table or list its computers. A
-  computer that has not installed an update never holds the server back: one
-  up to two minor versions behind the server works as before, and one further
-  behind, or one whose version is not known, keeps its settings and says to
-  update Fermix on it: its chat, the server's work on it and its computer
-  history all wait until it does. A computer ahead of its
-  server speaks the server's version of the chat protocol. A home is read by
-  its format, never by which Fermix wrote it: a release changes the format
-  only when it writes something an older Fermix cannot read, so most
-  releases need no new app, and a restore, Restore here, a move and a move
-  back all take a newer Fermix's home of the same format. A home in a newer
-  format is refused before anything is written, saying to update Fermix on
-  that computer first, and Move back and Restore here say "Update Fermix on
-  this Mac first" in their place. On the server, `sudo fermix-update
-  --release X` updates by hand behind the same rule: it refuses an older
-  release, one fermix.ai does not list, and one whose home no published app
-  reads yet unless `--ahead-of-apps` is added, after
-  which each computer that keeps backups says the server runs a newer Fermix
-  than it can restore. After an update the restart waits for a move, and
-  for a command, screen session or message send running on a computer, ten
-  minutes at most; each update also replaces the server's update script
-  with the new release's own.
-  Once a recovery passphrase is set, your server keeps encrypted snapshots of
-  itself on your desktop, every six hours by default (the first as soon as
-  your desktop connects), and in an S3 bucket where the server's own setup
-  names one, and a lost server is restored from the newest one. A server
-  built with fermix-server-aws gets its bucket from `enable_s3_backups` and
-  signs with its instance role, through a root helper that hands Fermix a
-  one-hour session which can only add snapshots to that bucket: no keys
-  anywhere. Another S3 service is set on the server itself. No app shows any
-  S3 setting, and a Mac on its own keeps no S3 snapshots; one whose settings
-  still name a bucket is told so by `fermix doctor`. A move or
-  restore onto a Linux server keeps your secrets in its keyring only when the
-  keyring answers, and otherwise in Fermix's own secret files. The app,
-  the setup page's Always On tab and `fermix home status` all lead with the
-  same one sentence for where Always On stands and, when something is wrong,
-  the one action that fixes it: a server silent for ten minutes while your
-  Mac is awake (Learn more, and Restore on this Mac where your Mac keeps a
-  copy), a Mac too old for its server (Update), a review that blocks the move
-  (Check again), the server's disk 85% full (Learn more), or a last backup
-  over three days old, or a backup that failed, in its own words, where it
-  went and when, until one is stored there (Back up now). Back up now's
-  screen shows the backup running until it ends, and `fermix always-on
-  back-up-now --wait` returns then, exiting 1 when it failed. Details says
-  what lives on the server
-  (conversations and memories, secrets, the browser, traces) and that
-  whoever hosts it can technically read its disk, and the server tells your
-  phones once when its newest backup is a week old. Fermix tells the app
-  when that sentence changes and when the last backup turns a week old, so
-  the app need not check Always On on a timer and says so on time, and while
-  Always On is off nothing runs for it. `fermix home status` prints the same
-  screen at a terminal, and `export`, `import` and `mark-moved` move a home
-  by hand.
-  And you can move back whenever you want: Move back to this Mac (in Always
-  On's details on the computer your home left, or `fermix always-on
-  move-back`) gets this computer ready in seconds, and Move now with your
-  recovery passphrase brings Fermix back in place. Where Fermix runs from a
-  terminal, which could not start it again afterwards, Details say so in
-  place of the button, and a move back this computer refuses leaves nothing
-  open on your server. Your Mac's own files
-  (logs, browser profiles, iMessage, the helper apps, models, coding runs)
-  stay where they were, your secrets go back into its keychain, iMessage,
-  voice calls and meetings run there again as they did before, and your
-  phones follow. Cancel stops it until the server starts the move. Once
-  your Mac runs Fermix again, it reminds you once that your server still
-  runs its retired copy, for you to turn off or delete. To change servers,
-  move back, then set up the new one from Always On. When your server is
-  gone or cannot be reached, Restore on this Mac takes Fermix back from the
-  copy of its backups your Mac keeps, once you confirm you deleted the
-  server, or stopped it for good: one that runs again would answer the same
-  channels beside it.
-  Fermix deletes no server.
-  The server's hosting provider can technically read its disk, so Fermix
-  keeps less there: the prompts, replies, tool input and output and shell
-  commands in its traces are kept about a day (through the previous UTC
-  day), and the rest of each trace 14 days; snapshots and every link stay
-  encrypted end to end.
-- **Set up Always On from the setup page, with no app.** On a Homebrew or
-  Linux install, `fermix setup` opens the setup page, and its Always On tab
-  now takes every step the Fermix app's pane takes: open a code for your
-  Linux server, shown once with its command, Copy and until when; back up
-  now; Move now with your recovery passphrase, typed twice the first time;
-  and Move back and Restore on this computer. Each button is one step Fermix
-  runs, after the sentence you accept before anything moves or restores, and
-  if Always On changed meanwhile nothing runs and the tab says so and shows
-  it again. The tab follows
-  Always On as it changes with no Refresh, and after Move now the page waits
-  for Fermix to start again and opens on Always On. On a computer your home
-  left, the setup page sets up this computer and Always On and no longer
-  points to the Fermix app for Fermix-wide settings, which live on your
-  server. Inside the Mac app the page has no Always On tab: the app's own
-  pane is there.
-- **A server gets ready for Always On from one command.** On a Debian 12,
-  Debian 13 or Ubuntu 24.04 server (arm64 or x86_64) running Linux 6.2 or
-  later with Landlock enabled (Debian 13 and Ubuntu 24.04 do by default),
-  the Linux installer's `curl -fsSL https://fermix.ai/install | sudo sh -s --
-  --always-on` checks the release's Always On server script against the
-  sha256 fermix.ai lists for it, as it checks a package, and runs it; the
-  script asks for the enrollment code without showing it, or cloud-init user
-  data passes it in `FERMIX_ENROLL_CODE`. It blocks the cloud's instance metadata addresses
-  for every account but root, except DNS and time, which some clouds serve
-  from the same address, gives a server with no swap 2 GB of it,
-  installs Fermix and a `fermix` account to run it, enrolls the server with
-  your primary, starts its service, installs Chromium on Debian (on Ubuntu,
-  install a browser yourself) and waits for your primary to accept the
-  server. The server then keeps itself up to date: Debian's security updates
-  install every day, and every five minutes Fermix's installer runs again
-  when a newer release is eligible for the server and restarts Fermix unless
-  a move is under way; reboots wait for 04:00 UTC, when the nightly run reboots if
-  an update asks for it (a move holds that off two nights at most). The two
-  never install at once, and a run that fails leaves Fermix running and says
-  why in the journal. A server whose kernel cannot sandbox commands is refused before
-  anything is installed. `--snapshot-bucket` and `--snapshot-region` name
-  where the server will keep its snapshots, and `--restore` prepares a server
-  to restore your home from a snapshot instead. A server whose setup did not
-  finish, that waited 24 hours for its move, or that waits for a move your
-  computer gave up on is set up again by running the same command with a
-  new code, which the status of one that did not finish or ran out says;
-  the code it enrolled with is refused while it enrolls or waits, and a run
-  whose enrollment is refused keeps the server running with the enrollment
-  it had. On a server that is set up, the command keeps it running (or,
-  given a code, refuses) and says what the server is and the commands that
-  remove its home, and on one whose home Fermix cannot read, the command
-  that shows why. It never removes a home itself.
-- **An Always On server says only what it did.** Its setup prints its own
-  steps, not the progress of every package Debian installs (Chromium alone
-  brings about 150), and an install that fails still shows apt-get's own
-  message. The five-minute update writes nothing to the journal when nothing
-  is due: no session lines for the `fermix` account and no start and finish
-  lines from systemd. Each command the setup gives you to run on the server
-  works from the directory you log in to.
-- **Your server can join your tailnet as it is set up.** Add `--tailscale`
-  to the server's command and it asks for a Tailscale auth key without
-  showing it (cloud-init user data passes it in `TS_AUTHKEY` instead),
-  installs Tailscale from Tailscale's own signed package repository, checking
-  its signing key first, and joins your tailnet before the server enrolls.
-  Declare `tag:fermix-server` in your tailnet policy, create the key with
-  that tag, and let only your own devices reach the server's UDP port 4033
-  there; the server opens no port itself. The key is never shown, logged or
-  put on a command line, and is removed from the server as soon as Tailscale
-  has read it;
-  never pass it on sudo's command line, which sudo logs. A key that is not
-  one, an OAuth client secret among them, is refused before anything is
-  installed. A server already on a tailnet is left on it and the command
-  names the tailnet; given a key there, or on a server whose Tailscale is
-  logged in but down, it stops and says what to run. Without `--tailscale`
-  nothing of Tailscale is installed.
-- **Always On from a terminal: `fermix always-on`.** On a Homebrew or Linux
-  install without the Fermix app you can now set up Always On on your own
-  Linux server from the terminal. `fermix always-on` shows where Always On
-  stands and walks you through each step: it prints the command for your
-  server and, once, the code the server asks for, asks before anything moves
-  or restores (No unless you say yes), asks for your recovery passphrase
-  without showing it (twice the first time), and waits until each step is
-  done before offering the next.
-  `fermix always-on STEP` takes one step (`own-server`, `move-now`,
-  `move-back`, `restore-here`, and the rest), and scripts can run it with no
-  terminal: `--recovery-passphrase-file`, `--yes` to accept what a step asks
-  first, `--wait` to wait, and `--json` for one machine-readable answer. A
-  passphrase typed as an argument is refused, so it never lands in your
-  shell history. On a Mac whose Fermix the app manages, it points you to the
-  app's Always On pane, and `fermix home status` now says where the next
-  step is taken.
-- **Always On's screen comes whole from Fermix, so every surface draws the
-  same one.** Each action now says what it needs you to give (your recovery
-  passphrase), the sentence you accept before Fermix moves or restores, and
-  the page it opens, and Move now asks once, naming what stops or waits after
-  the move from your settings. The moment a step starts the screen says so
-  (your server connecting, the move, a move back, a restore), and every way a
-  step ends stays on screen afterwards. Details are finished for you: the
-  server, its system and version, until when it waits, each backup, the space
-  your computer's copies take and the server's disk, with dates and times in
-  your own time zone. The apps get the occurrence to raise as a notification
-  (the server ready, the move done, the server out of reach, the last backup
-  a week old, Fermix back on your computer after a move back), once each, and
-  `home.status` can wait for the screen to change instead of being asked
-  again and again.
-- **Fermix runs every Always On step itself, so each surface only draws the
-  screen and sends the button you pressed.** A code for your server, a backup
-  now, checking the move again, Move now, Move back and Restore here are each
-  one request with the screen it was pressed on; if Always On
-  changed meanwhile (another window pressed first, the server moved on), Fermix
-  does nothing and says so, and the screen is read again, so a confirm you
-  accepted on an older screen never runs. Cancel the code closes the code for
-  your server. Move now looks the move over again as you press it, refuses with
-  every reason it cannot start, and shows you any warning you have not seen
-  before going ahead; it asks for your recovery passphrase twice when none is
-  set yet and once when one is, and checks it. On a computer your home left,
-  its own Always On sends the server's steps over the link itself. The
-  command for your server now carries no code: the server asks for it without
-  showing it, so it never lands in a shell history.
-- **Always On never leaves you without a next step.** Every problem on the
-  screen comes with the one action that fixes it, or Learn more where none
-  does: a move back that stopped offers Move back again, and a restore that
-  stopped before its copy was in place is offered again. A `fermix always-on`
-  step that waits now exits 1 when it ends on a problem (`step_failed`) or
-  is still running after 45 minutes (`step_unfinished`), each with the
-  screen where it stands, instead of reporting success; reading the screen
-  alone still succeeds whatever it shows. Every surface reads whether
-  Always On is still at it from the screen itself (its `outcome`).
-  A server waiting for its move, whose review blocks it, or whose move was
-  undone can be dropped with Forget this server (after a confirm); Try again
-  after an undone move keeps on for your server only what you left ticked
-  when you started it, never the defaults; Connecting
-  your server can be cancelled, and a code whose half hour ran out with no
-  server recorded leaves that screen; and a new code beside an open one says
-  the current one stops working. Waiting for your server names the systems the
-  server's first boot takes (Debian 12, Debian 13 or Ubuntu 24.04 on arm64 or
-  x86_64, with Linux 6.2 or later) and that the code works for 30 minutes. A
-  server your computer held for 24 hours with no move is told once, as one to
-  set up again; Restore here finished is told once, naming the day of the
-  backup it restored; a computer that updated first and finds its server on an
-  older Fermix says the server updates on its own once the app for each
-  computer that keeps your backups carries the newer one, rather than look
-  all well; and a
-  server's own copy retired by a move back says where Fermix moved back to.
-- **WhatsApp and webhook sources reach Fermix on your Always On server.**
-  Once Fermix runs on your server, Always On on your computer shows the
-  Tailscale Funnel command for each to run on the server with `sudo`, each
-  with Copy: WhatsApp's while WhatsApp is on, with where to set the address
-  it prints as Meta's Callback URL (WhatsApp stops at the move until you
-  do), and each webhook source's, which carries none of its URL's secret,
-  with the host to give its sender, on the server's own ports. Beside them
-  are the one-time steps in your tailnet policy (the funnel node attribute
-  for `tag:fermix-server`, MagicDNS and HTTPS certificates on, and a new
-  address can take about ten minutes to resolve) and what to know first:
-  Funnel publishes everything on the server's port 443, so put only these
-  paths there; the traffic comes in through Tailscale's servers; and without
-  Tailscale, Cloudflare Tunnel to the same ports does the same. Use my own
-  Linux server now also shows the command that joins the server to your
-  tailnet as it is set up (`--tailscale`), which asks for a Tailscale auth
-  key without showing it, and says to declare `tag:fermix-server` under
-  `tagOwners` first. Slack, Telegram and Discord need none of this.
-- **A command Fermix started cannot take an Always On step, and no local
-  caller can take the server's own.** Every Always On step is the
-  owner's decision, refused to a command Fermix runs in words that name the
-  Fermix app, the setup page or your own terminal. The steps a server takes
-  for the computer its home left (opening a code, reviewing or starting a
-  move, a backup now) answer only that computer's request over their
-  encrypted link, and are refused by name on the local socket. Your recovery
-  passphrase never reaches a log line, a crash report or a trace
-  on the way, and the setup page's request logs hide any field named for a
-  passphrase.
-- **Your computer reaches your Always On server directly on your tailnet,
-  and Always On says how it is connected.** The server's Fermix now listens
-  on one fixed UDP port, 4033, and tells your computer its Tailscale
-  addresses when it enrolls and each time your computer connects. Your
-  computer tries them beside Fermix's relay, so on the same tailnet it
-  reaches the server even while the relay is down. A server without
-  Tailscale gives none and connects through the relay as before. While the
-  link is up, Always On's Details end with Connection, Direct or Through
-  Fermix's network, `fermix doctor` has a server link line saying the same,
-  and `home.status` names the path (`primary.path`, `direct` or `relay`). If
-  something else on the server holds port 4033, Doctor's remote reach line
-  names the port, and Fermix tries again on its backoff, saying so once in
-  the log instead of at every try; still held a day later, it stops and its
-  log and Doctor say to free the port and restart Fermix, and a server still
-  enrolling names the port in `fermix home status` once its code expires.
-  Tailscale in userspace-networking mode gives the server no tailnet
-  address, so that link runs through the relay.
-- **Add another computer to your Fermix with a code and six digits.** A
-  computer no longer has to be the one your Fermix moved from. On a computer
-  already in your Fermix, or on the server (`fermix always-on add-computer`),
-  Always On's Add a computer opens a code that works once, for 30 minutes.
-  On the new computer you connect to a Fermix that already runs with that
-  code (`fermix computer join` where there is no app: it asks for the code
-  without showing it, or reads it piped in, and never takes it as an
-  argument, where other programs could read it). It shows six
-  digits taken from its encrypted connection, and you add it by typing them
-  where you approve it; that side is never shown them, so someone who merely
-  saw the code cannot join. Until you add it, it has no access; not adding
-  it, wrong digits or the code running out add nothing. A connection that
-  drops while it waits spends nothing: the computer connects again and shows
-  new digits, the ones to type. A join that fails as it starts leaves no key
-  behind, so the next one is not refused. A computer that joins moves
-  nothing, starts with everything Fermix on your server may use switched
-  off, its computer history too, keeps no backups, and offers no Move back.
-  One that already has a Fermix of its own is refused, and nothing is
-  deleted to make room. You can
-  remove a computer from your devices (`fermix devices revoke`), after which
-  it joins again only with a new code; the one that keeps the only copies of
-  your server's backups asks first. Disconnect this computer does the same
-  from the computer itself and deletes its key; one that fails part-way
-  leaves the computer connected, and asking again finishes it. A phone
-  cannot add a computer yet.
-- **Fermix on your Always On server can work with files and commands on your
-  computers.** Ask for a file on your studio Mac, or to run something there,
-  and Fermix reads, writes, edits and searches files, looks at pictures,
-  runs commands and git, and sends you a file from that computer, inside
-  that computer's own sandbox: its mode, its folders and its allowed
-  variables, with Seatbelt or Landlock holding each command. It works only
-  with what that computer offers, which is switched on at that computer
-  (Files and commands in its This computer settings). Every answer names the
-  computer it came from, so a path on your server is never taken for one on
-  your Mac. A computer that is asleep or offline is refused at once with when
-  it was last seen, and nothing waits for it to wake; a folder outside that
-  computer's sandbox can be allowed only at that computer. After Fermix read
-  something from outside, a command on a Mac still runs, held by its
-  sandbox, and a command on a Linux computer waits for your confirm in the
-  chat, which names the computer. A command or a write whose answer is lost
-  is never run twice: Fermix says whether it happened is not known, and one
-  that ran but whose output was lost on the way says it ran and is not run
-  again. Each
-  request is in that computer's own record of what Fermix did there, and a
-  command that failed is recorded as failed, while Fermix still reads its
-  whole output. Only your own turns can name a computer, your scheduled
-  jobs among them: a guest's turn, and a worker a skill or a sub-agent runs
-  (a plugin skill's above all), is offered none and refused if it names one.
-- **Fermix on your server can use your computer's browser, where you are
-  signed in.** Ask for something on a site you are signed in to on your
-  studio Mac and Fermix drives that Mac's browser: the Fermix app's own
-  browser when the app is open there, else its Chrome, or a tab you granted
-  with the extension, with that computer's own settings and network checks.
-  Your website logins keep every rule: the password stays in that Mac's
-  keychain and the app there types it, after you approve in the chat, and
-  never for a scheduled run, a cue, a worker, a voice call or a shared
-  channel, which your server refuses and your Mac refuses again. Your
-  server's own browser stays the default, and a task that began in your
-  Mac's browser stays there: if the Mac goes to sleep mid-task, Fermix says
-  so rather than carry on somewhere else; on a voice call a task stays on
-  your Mac across the call. Screenshots, PDFs and downloads come back to
-  your server, and your Mac keeps its own copy for a day, so a download whose
-  bytes were lost on the way is still there and Fermix names where; a file
-  you upload goes to your Mac, up to 20 MiB. It works only while The browser is switched on in that computer's
-  This computer settings, and each step is in that computer's record of what
-  Fermix did there.
-- **Fermix on your server can see and control your computer's screen.** Ask
-  for something on your studio Mac's screen and Fermix on your server, which
-  has no screen of its own, looks at it and acts on it there, one step at a
-  time, with the actions that Mac's own helper offers. It works only while
-  Your screen is switched on in that computer's This computer settings, only
-  from your own chat or call (never a scheduled run, a cue, a worker or a
-  shared channel, which your server refuses and your Mac refuses again), and
-  under that Mac's own rules: its sandbox mode sets what Fermix may do there
-  (strict only looks), and an action waits or steps aside while you are
-  typing at it. While your server holds the screen your Mac's app shows a
-  mark, "Fermix on your server is controlling this screen.", with Stop; Stop,
-  or switching Your screen or everything off there, ends it at once, and
-  Fermix is told the person at the Mac stopped it; the mark and Stop work
-  while the screen's helper is still starting. Your server holds the screen
-  for as long as its session lasts, paused included, so a pause holds until
-  you resume and a long gap between steps starts nothing over; your Mac lets
-  go of a server it has not heard from for two minutes. One conversation
-  holds a screen at a time, and each step is in that computer's record of
-  what Fermix did there. Screen sharing on a voice call stays your server's own.
-- **iMessage keeps working after your home moves to your server.** Your Mac's
-  Messages carry it: you text the same Apple ID as before, your server reads
-  and answers, and the helper, its macOS permissions and the list of who
-  Fermix may message stay on that Mac, which only someone at the Mac can
-  change. It works while Messages is switched on in that Mac's This computer
-  settings; one Mac carries it, and a second one that offers it is refused by
-  name. While that Mac is asleep or offline iMessage is away: a message to you
-  fails at once, saying so, and nothing is kept to send later, and a question
-  that waits on you (an approval) goes to a channel on your server instead.
-  When the Mac is back, Fermix reads what came in meanwhile, up to 500
-  messages from the last day, and tells you once if it missed more. Photos
-  and files go both ways, up to 20 MiB. Each message names the kind of turn
-  that sent it, so your Mac refuses one a delegated worker sends and its
-  record says who asked. Your iMessage owner and guests are
-  now kept with your home, so your server knows them. The move's review no
-  longer lists iMessage among what stops.
-- **Computer history from every computer becomes one memory on your home.**
-  Each computer with history switched on (its own Computer history switch,
-  with everything Fermix on your server may use there on) records into its
-  own store, and the raw record stays there and is deleted after 48 hours; each finished sitting
-  goes to your home, which has its summarizer summarize it and keeps the note,
-  marked with that computer. "What was I working on on the studio Mac this
-  morning?" and "what did I do across my computers yesterday?" both have an
-  answer: each result names the machine, the daily roll-up runs once across
-  the computers still recording, and work that moved from one computer to
-  another is one thread. The sitting's text is never written on your server.
-  A computer set to summarize on its own model sends only the note.
-  `/history purge` and `/history pause` from chat reach every computer, one
-  that is asleep when it is next connected, and until then your home takes
-  nothing from it inside that window; a purged window never gains a note.
-  `/history off studio Mac` switches that computer's history off from
-  anywhere: your home takes nothing more from it at once, and the computer
-  turns its recorder off when told, or once it is back; only someone at it
-  switches it on again. `/history status` shows one block per computer,
-  with what it last reported of its recorder (its state, what it has not
-  sent and its coverage, with the report's age). What Fermix on your server
-  did on a computer's screen or in its browser is no longer reported as
-  yours. Your notes travel with your home when it moves, and the notes a Mac
-  made as its own home are named for that Mac on your server once it moves
-  and stays linked, and are "this computer" again after a move back.
-- **This computer's settings are five switches.** What Fermix on your server
-  may use on a computer is now: everything (the switch that turns it all off),
-  Files and commands, The browser, Your screen and, on a Mac, Messages. Files
-  and commands are one switch, since a command reads the same files under the
-  same sandbox; a computer that had only one of them on has both off after the
-  update, and the log says so once. Computer history is no longer switched
-  here: a computer gives your server its history while its own Computer
-  history switch is on, with everything on there, so a computer whose
-  recording is off never counts as sending history, and `/history off studio
-  Mac` turns that computer's recording off. A computer whose server did not
-  take its history before the update has its recording switched off by it,
-  so nothing it kept from the server is sent, and the log says once to turn
-  Computer history on at that computer to share it; a Mac that is its own
-  home keeps recording as it was.
-  The move's review still has a line for your computer history, which now
-  turns recording on or off on that computer once the move goes through; the
-  review of a computer that moved before shows it ticked where recording is
-  on, and sets it the same way. Calls, attachments, the robot and
-  notifications reaching your server from a computer are no longer listed as
-  switches or offers: each will follow its own setting. An app or a move from
-  before this change that names files and commands separately keeps them on
-  only together.
-- **What a computer's switches end is answered as switched off.** Switching
-  off one thing at a computer (the browser, the screen, Messages, or files
-  and commands) with the master switch on now ends at once what Fermix on your
-  server was running or had waiting there for it, each answered "studio Mac
-  has the browser switched off. Only someone at studio Mac can switch it
-  on.", where the browser said it had failed and other work went on; work
-  using the computer's other offers goes on. Requests waiting for a turn when
-  the computer's request handler restarts are answered at once as not run,
-  where a queued Messages or screen watch used to wait until the link
-  dropped, and the restart tells your server, which asks again about
-  whatever it still waits on there, so a request the restart lost is never
-  waited on for ever. A folder that does not answer, or a stop that hangs,
-  holds up only its own request. Your server rebuilds its view of each
-  computer when that view restarts, and an away computer keeps the screen
-  actions it last offered. On your server, iMessage shows away while the Mac that carries
-  Messages is asleep or offline, and asks for setup only when setup is owed;
-  the engine gives the apps its own sentence for each iMessage readiness
-  problem, naming that Mac; and "What Fermix did on this computer" names
-  each entry in plain words ("commands", "run a command") beside its ids.
-- **Always On says less, and only what you need now.** Each screen has one
-  short sentence, at most one more under it (what to check or do, until when
-  your server waits, why a move was undone, a failure's own words), one main
-  button or none, and every other step beside it as a button; Details hold
-  facts only, and one help link opens the Always On docs at that screen's
-  section in place of Learn more. The first screen no longer lists what stops
-  after the move and the code's screen no longer lists kernels: Move now's
-  confirm names every warning of the review, one per line, before anything
-  moves, and the ready screens say Fermix has not moved yet ("Your server is
-  ready. Fermix moves to it when you press Move now."; the move back's "Fermix
-  still runs on your server. It moves back to this Mac when you press Move
-  now.", its notification the same). Each screen of the move and of the move
-  back shows its four steps with yours marked, and while it moves the route
-  to your server, what it is doing, and how much it sent or received, from
-  what Fermix counted. On a computer linked to your server, Back up now, Add
-  a computer and Move back are buttons on the screen, the backup settings
-  show whether the recovery passphrase is set with Change, and that your
-  server keeps an S3 copy where it does; a Mac that never moved shows no
-  backup settings. The webhooks your server needs say what they are for in
-  one sentence, each command folded under its name, with the one tailnet
-  step and a link to the rest; the code's Tailscale step folds under "Also
-  join your tailnet (optional)". Restore on this Mac's confirm names the
-  backup's date. A computer that moved before asks you to keep or change the
-  switches under This computer, where they are set, rather than ticking the
-  same switches twice. The setup page and `fermix always-on` show the same,
-  and `fermix always-on change-passphrase` sets a new recovery passphrase.
-- **A computer whose Fermix has started can join your Fermix.** A first
-  start, and every save of the settings, write your name, time zone and style
-  and the assistant's name into memory as well, and those counted as a Fermix
-  of its own, so a computer that had ever started, a Mac at its first-run
-  screen included, was refused. Memories that only repeat its settings no
-  longer count, and stay where they are: nothing reads them while it is a
-  computer. Any other memory, a conversation, a scheduled job, a computer
-  history note, a paired device, a home that moved or a link still refuse it.
-  A computer that joined judges its readiness only on its sandbox, since your
-  server runs the turns, providers and channels, `fermix doctor` there judges
-  it the same way, and it logs no channel it does not start.
-- **Fermix knows which folders it may use on each computer.** Each computer
-  tells your server the folders its files and commands reach there, and
-  Fermix is told them for each computer, so asking for a file in another
-  folder, such as Downloads on a Mac in the standard sandbox, is answered by
-  name: that folder has to be allowed at that computer. A refusal of a path
-  outside them names the folders that computer allows. A folder in that
-  computer's home is named from `~` (`~/Projects`), which its tools read
-  there, so your account's name stays out of what the model reads.
-- **Quieter starts and plainer words on your server.** A server's first start
-  as your home no longer warns that its computers could not be listed while
-  its channels are still starting, nor does `fermix home status` with Fermix
-  stopped; moving or restoring a home onto a server that keeps its secrets in
-  files no longer asks a keyring and warns that none answered. Why a move was
-  undone is said plainly ("studio-server turned the move down, so nothing
-  moved."), with the server's own reason where it is one you can act on, such
-  as its disk space, and the technical words in the log.
-- **One set of settings after a move.** Once Fermix runs on your server,
-  every Fermix app shows the server's settings, every pane: changing the
-  sandbox, the coding agents' approval or the browser in a linked computer's
-  Settings now changes them on the server ("Sandbox on garden server"),
-  where before the Sandbox pane showed that computer's own and a stored
-  sandbox variable typed there landed on the server without a word. What
-  belongs to one computer alone (what the server may use there, and that
-  computer's own sandbox, browser, screen and history) is listed
-  apart, under This Mac (This computer on Linux), and changes only at that
-  computer: the server, and every other computer, can no longer write it.
-  So the server can stay Open while a Mac stays Strict. A Mac that took the
-  home back keeps its own screen, history and StackChan to itself: a
-  computer still linked to it neither lists nor changes them. A change to
-  the server's sandbox (its mode, command profile or allowed variables) or
-  coding approval from a computer is said once on every Always On screen,
-  naming the computer, each change under its own notice; a write that
-  changed nothing is not said. A process Fermix started can no longer
-  change a computer's own settings or a sandbox's stored variables through
-  the app's socket, the server's commands on that computer among them.
-  After a move, the meeting notetaker's and on-device speech's installers,
-  the coding agents' check and the Providers pane's detection are the
-  server's, which runs them. On a linked computer the setup page changes
-  This computer and that computer's sandbox, and its other tabs say to
-  change them in the Fermix app on any computer. A server or a computer on
-  an older Fermix is never written to by mistake: the computer then shows
-  the server's sandbox and coding settings nowhere and says the server
-  updates on its own, its coding agents' check, those installers and that
-  detection say the server does them only on itself, and the server's
-  browser settings stay listed and changeable as before; the server
-  refuses a sandbox variable from an older computer ("Update Fermix on
-  this computer to change its sandbox values."). An install a linked
-  computer runs itself (its browser, the computer use helper, the Messages
-  helper) is now followed and cancelled on that computer, where before its
-  progress was asked of the server, which did not know it; `fermix
-  settings reload computer.sandbox` clears an outside edit of that
-  computer's own settings, which a refused stored variable of its sandbox
-  now names; and `fermix settings set` says which machine it changed
-  ("Saved Sandbox on garden server (sandbox): sandbox_mode").
-- **StackChan says why it is off while Fermix is on your server.** Pet and
-  the setup page say "StackChan works only while Fermix runs on this Mac.",
-  on a Mac that joined your home as much as on the one it moved from, and
-  This Mac shows no StackChan switch while the home is on the server.
-- **An install a linked computer runs itself is found again when its pane
-  reopens.** On a computer linked to your server, the list of running work
-  the apps read now holds that computer's own installs (its browser, the
-  computer use helper, the Messages helper) after the server's, where before
-  it held only the server's, so a reopened pane lost the install it started.
-  While the server is out of reach, that computer's own are still listed.
-  And a server on an older Fermix no longer breaks Settings' section list on
-  a linked computer: it lists that computer's own sections and says the
-  server updates on its own.
-- **Restart your server from any of your computers.** A sandbox mode, a
-  key or a coding approval set from an app is stored on the server at once
-  and used from its next start, so while one waits, Always On and Settings
-  on a linked computer offer Restart <server> (in the server's own
-  words in every pane that shows its restart, where before the button
-  restarted that computer's Fermix and not the server's). The server
-  restarts at once, or once the work it runs on a computer ends, ten minutes
-  at most from when you asked, work that starts meanwhile included, and
-  refuses while a move is under way; asking again while it waits says how
-  long the work still holds it, or restarts it at once once nothing does. It
-  keeps waiting, and restarts at the end of the ten minutes, when it cannot
-  read what holds it, and a Restart <server> is offered only where the
-  server can take it, so a server on an older Fermix shows none. An answer
-  lost to the server's own restart is said as asked, not as the server being
-  out of reach. `fermix always-on restart-server` takes the same step from a
-  terminal. The move's review
-  says that after the move the apps' Settings change Fermix on the server,
-  its sandbox and coding agents included, names this Mac's own sandbox in
-  what stays on ("files and commands, in this Mac's sandbox (Standard)"),
-  and, with coding agents approved here, says to allow them on the server
-  too. `home.status` says each engine's own restart state and keychain
-  profile.
-- **Always On: a reminder for your computer still rings on your computer
-  after the move.** A reminder or timer set to ring on "this computer" came
-  due on the server, which has no notification centre, and went nowhere. The
-  server now asks each of your computers that is awake (up to sixteen) to
-  show it, and each shows it the way it did before the move: the Fermix app
-  on a Mac, with its Snooze 10 minutes, or the desktop's notifications on
-  Linux. A computer shows a reminder once, so a retry never rings twice. A
-  reminder due while no computer is awake is tried again while it is still
-  valid, and one is refused when you set it only if no computer is linked or
-  every awake one says it cannot show it, in that computer's words. Snooze on
-  your Mac now snoozes the reminder on your server. Your computer's switch
-  "Fermix on your server may use this computer" turning off stops it there,
-  with no new switch; Fermix tells you on the server that the reminder rings
-  on your computers, never on the server.
-- **A computer and its server speak the newest phone version both know.** A
-  computer linked to your server now says which versions of the phone wire
-  its Fermix speaks, newest and oldest, and the server speaks the newest the
-  two share, as the Mac chat socket already did. Before, a computer always
-  spoke its oldest, so once the wire moved on a server would have turned away
-  a computer one version behind it, with no link at all. Now a computer a
-  version ahead of its server or a version behind it links, and one two
-  versions apart is told which side to update. A computer on an earlier
-  Fermix links to a current server too, and phones see no change.
-- **The meeting notetaker works on your server.** Once Fermix runs on your
-  server it joins your Zoom meetings there, awake whenever a meeting
-  starts, with the Zoom settings and secret that moved with it. Google Meet
-  is not available on the server yet, since its notetaker needs a Google
-  sign-in on a computer with a screen: a Meet link, the notetaker's install
-  and its sign-in each say so there, and the Meetings pane, the server's own
-  setup page (which downloads nothing and opens no browser) and `fermix
-  doctor` say it too, adding that Zoom meetings work there once Zoom is set
-  up where it is not. The move's review now says Google Meet meetings stop
-  and Zoom meetings carry on at your server, where it said all meetings
-  stop. A move either way is refused while the notetaker is in a meeting,
-  naming it, since the move would end it before its notes are written, and
-  once a move is under way the notetaker joins no meeting until it is done.
-  Each meeting's notes move with
-  your home, and Fermix reads them where your home keeps them now. After a
-  move back your Mac runs meetings again, and Move now's confirm says when
-  the notetaker your Mac kept needs installing again.
-- **After a move, your computer's Fermix app still calls Fermix and still
-  attaches files.** Begin voice call in the Mac's (or a linked Linux
-  computer's) app now reaches your server, which runs the call on its own
-  Talk to Fermix, key, tools and memory, as it runs a call from your phone;
-  the app keeps its microphone, speaker and echo cancellation. One call at
-  a time still covers your whole home: a call from your phone while the
-  Mac's is up is refused, saying the call is on that computer, and the
-  reverse. A dropped link is held 20 seconds and the call picks up where it
-  was; a link too slow or gone silent ends the call alone, never the chat.
-  The call cannot look at your screen. The attach button in the Mac's chat
-  works again: this computer's Fermix checks each file you attach, sends it
-  to your server (never a file the server already has) and says once the
-  server has it, or why not. The move's review no longer lists your
-  computer's voice calls as stopping. Moving back, the review names a call
-  in progress on that computer, and once your server takes Move now the
-  call is hung up cleanly and a file still sending is dropped, each with a
-  sentence; a Move now the server refuses, such as for a mistyped recovery
-  passphrase, leaves both as they were.
-- **Your server looks places up in Apple Maps on your Mac.** A server's
-  place search and a trip's place lookups used Brave alone, so a home with no
-  Brave key, or one whose plan has no place search, left a trip's stops
-  without a place. A Mac running the Fermix app now offers its server Apple
-  Maps (on by default, and switched off or on again for each Mac in its This
-  computer settings, **Apple Maps**), and a server whose build has no Apple
-  Maps of its own searches there whenever a linked Mac offers it, with no
-  key: the connected Mac seen most recently answers, each search bounded at
-  15 seconds. This changes what a server already searches with: one whose
-  Brave place search works today moves to your Mac with this update, and
-  while no such Mac is online it has no place search at all, the search
-  refused at once and never sent to Brave, unless
-  `[fermix_core.tools.place_search] backend = "brave"` keeps it on Brave. A
-  trip's lookups stop when the Mac is away, switched off, refusing or not
-  answering, and save the stops without a place, saying which and why; a
-  busy Mac stops nothing. A stop left unplaced because the Mac was away, slow
-  or busy is placed by your server once that Mac is online again. Every trip
-  answer now says what placed the stops its lookups placed ("Placed with
-  Apple Maps on studio Mac: [3]."), and the
-  Place search setting shows **Apple Maps on your Mac** as the choice in
-  force.
-- **Always On lists what it does not do yet.** Before Move now, on your
-  server and on each computer linked to it, the Always On screen lists, in
-  one short sentence each, what does not work or takes a terminal on the
-  server and applies to your home: Google Meet meetings (saying the server
-  joins only Zoom's where your Zoom app is set up, and none until it is),
-  installing and signing in Codex or Claude Code, WhatsApp's public address,
-  Slack without Socket Mode, StackChan, dev plugins, and computer history on
-  a computer with no recorder.
+  steps live in separate databases: the reply said "Purge failed" or "capture
+  is NOT paused" when only this computer's step had failed, though the purge
+  or pause stood and no summary was being made from that window. The reply now
+  says what stands, what did not happen yet and that Fermix tries again every
+  five minutes; when nothing changed, it says that.
+- **A list from an earlier request no longer shows under a later reply.** A
+  list that a voice call's task, or a request that ended with no reply, read
+  or changed could appear as a card under the next reply in the Mac app. Each
+  reply now shows only what its own request touched.
 
 ## [0.18.0] - 2026-11-03
 

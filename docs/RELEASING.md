@@ -88,7 +88,7 @@ attaches the packages to the draft.
 is what `https://fermix.ai/install` serves. On Linux with apt, dnf or zypper it
 installs the package; everywhere else, and with `--standalone`, it installs the
 standalone binary. With `--always-on` it runs the release's Always On server
-script instead (`fermix_always_on.sh`, which every release from 0.19.0 on
+script instead (`fermix_always_on.sh`, which every release from 0.20.0 on
 publishes and signs as a byte copy of `packaging/cloud/first-boot.sh`), with
 `--version` naming that release and every other argument passed on unread.
 It trusts one document: the digest table fermix.ai serves at

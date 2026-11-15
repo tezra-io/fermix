@@ -33,7 +33,7 @@
 #   curl -fsSL https://fermix.ai/install | sh -s -- --no-setup
 #   curl -fsSL https://fermix.ai/install | sh -s -- --standalone --prefix /opt/fermix/bin
 #   curl -fsSL https://fermix.ai/install | sh -s -- --version 0.17.0
-#   curl -fsSL https://fermix.ai/install | sudo sh -s -- --always-on --version 0.19.0
+#   curl -fsSL https://fermix.ai/install | sudo sh -s -- --always-on --version 0.20.0
 #
 # Hard-fails on any unsupported (os, arch) pair, missing tooling, a digest
 # table it cannot read or that lists no row for this machine's file, or a
