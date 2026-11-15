@@ -175,7 +175,7 @@ defmodule FermixChannels.Gateway.OwnerInboxApprovalTest do
       )
     end
 
-    for carrier <- [:none, :mac_only, {:computer, %{studio | connected: false}}] do
+    for carrier <- [:none, {:computer, %{studio | connected: false}}] do
       assert {:error, :no_owner_inbox} = OwnerInboxApproval.request(request(), opts.(carrier))
     end
 

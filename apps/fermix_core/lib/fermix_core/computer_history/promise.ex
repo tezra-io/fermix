@@ -7,11 +7,10 @@ defmodule FermixCore.ComputerHistory.Promise do
   function that decides it, from four facts:
 
     * whether this computer's history goes to a server (`on_server?/1`):
-      Always On is offered (`Home.AlwaysOnRelease`) and this engine is a
-      computer linked to its server (`Home.DesktopLink.linked?/2`, the
-      device role with its link) or the server itself
-      (`Home.Candidate.server?/1`). A Mac that never moved, or moved back,
-      has none;
+      this engine is a computer linked to its server
+      (`Home.DesktopLink.linked?/2`, the device role with its link) or the
+      server itself (`Home.Candidate.server?/1`). A Mac that never moved, or
+      moved back, has none;
     * whether this computer makes its own notes (`ComputerHistory.Config`'s
       summarizer in force is `:local`);
     * the provider that summarizes, where there is no server: the one the
@@ -26,7 +25,6 @@ defmodule FermixCore.ComputerHistory.Promise do
   """
 
   alias FermixCore.ComputerHistory.Config
-  alias FermixCore.Home.AlwaysOnRelease
   alias FermixCore.Home.Candidate
   alias FermixCore.Home.DesktopLink
   alias FermixCore.Home.Role
@@ -89,7 +87,7 @@ defmodule FermixCore.ComputerHistory.Promise do
   @doc """
   The facts for `config` (this machine's history settings as its engine
   holds them, `Config.current/0`'s shape). `opts`: `:on_server?` in place of
-  `on_server?/1` (or its own seams, `:home`, `:record`, `:always_on?`), and
+  `on_server?/1` (or its own seams, `:home` and `:record`), and
   `:os` (`:macos` or `:linux`) in place of this host's.
   """
   @spec facts(keyword(), keyword()) :: facts()
@@ -123,17 +121,14 @@ defmodule FermixCore.ComputerHistory.Promise do
   end
 
   @doc """
-  Whether this computer's history goes to a server (the moduledoc): Always
-  On is offered, and this engine is a computer linked to its server or the
-  server itself. `opts` (seams): `:home`, `:record` (`Role.booted/0`'s),
-  `:always_on?`.
+  Whether this computer's history goes to a server (the moduledoc): this
+  engine is a computer linked to its server or the server itself. `opts`
+  (seams): `:home`, `:record` (`Role.booted/0`'s).
   """
   @spec on_server?(keyword()) :: boolean()
   def on_server?(opts \\ []) when is_list(opts) do
     home = Keyword.get_lazy(opts, :home, &ConfigStore.fermix_home/0)
-
-    Keyword.get_lazy(opts, :always_on?, &AlwaysOnRelease.available?/0) and
-      (linked?(Keyword.get_lazy(opts, :record, &Role.booted/0), home) or Candidate.server?(home))
+    linked?(Keyword.get_lazy(opts, :record, &Role.booted/0), home) or Candidate.server?(home)
   end
 
   # A process that booted no engine is no computer of a server.

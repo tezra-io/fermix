@@ -72,10 +72,8 @@ defmodule FermixCore.Home.Candidate.ReturnSettleTest do
     refute config =~ "SERVER_ONLY"
     refute File.exists?(MachineFile.path(staging))
     assert File.read!(MachineFile.path(ctx.mac)) == @mac_machine
-    # Everything else is the server's: Always On's switch, which this
-    # computer's own settings no longer carry, comes back with the home.
+    # Everything else is the server's, and comes back with the home.
     assert value(config, "fermix_core.memory", "enabled") == "true"
-    assert value(config, "fermix_core.always_on", "enabled") == "true"
     assert value(config, "fermix_core.agent", "name") == ~s("Orchard")
     # Whether coding agents may run is this computer's own (M98 D5): the
     # server's approval stays on the server, and this computer's own file says.
@@ -272,9 +270,6 @@ defmodule FermixCore.Home.Candidate.ReturnSettleTest do
     approved = true
 
     [fermix_core.memory]
-    enabled = true
-
-    [fermix_core.always_on]
     enabled = true
 
     [fermix_core.providers.anthropic]

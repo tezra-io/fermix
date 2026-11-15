@@ -9,10 +9,6 @@ defmodule Fermix.CLI.ComputerCommand do
   (`Fermix.CLI.SecretInput.read_answer/2`). The verb takes no argument, and
   a code given as one is a usage error naming this form.
 
-  A join is part of Always On, so where this build offers none in the home
-  (`Home.AlwaysOnRelease.available_in/1`, read from the home's own settings
-  file) it refuses in that one sentence before anything else is read.
-
   It runs with no engine tree, against a stopped Fermix: the engine that
   owns this home would otherwise keep running as its own home. The code is
   asked for only once both of those hold. It joins through
@@ -29,7 +25,6 @@ defmodule Fermix.CLI.ComputerCommand do
   """
 
   alias Fermix.CLI.SecretInput
-  alias FermixCore.Home.AlwaysOnRelease
   alias FermixCore.Home.DaemonProbe
   alias FermixCore.Home.Join
   alias FermixCore.Setup.ConfigStore
@@ -56,10 +51,8 @@ defmodule Fermix.CLI.ComputerCommand do
   @doc """
   Runs `fermix computer` with injected dependencies: `:home`, `:hello` (the
   daemon probe, `DaemonProbe.stopped/2`'s seam), `:now` (a `DateTime`),
-  `:key_opts` (handed to `ComputerKey`, beside `supervised: false`),
-  `:always_on` (a boolean standing for the answer of
-  `Home.AlwaysOnRelease.available_in/1` for the home), and `:terminal` and
-  `:device` (handed to `SecretInput`, which reads the code).
+  `:key_opts` (handed to `ComputerKey`, beside `supervised: false`), and
+  `:terminal` and `:device` (handed to `SecretInput`, which reads the code).
   """
   @spec run([String.t()], keyword()) :: non_neg_integer()
   def run(argv, deps) when is_list(argv) and is_list(deps) do
@@ -73,16 +66,12 @@ defmodule Fermix.CLI.ComputerCommand do
   defp join(deps) do
     home = Keyword.get_lazy(deps, :home, &ConfigStore.fermix_home/0)
 
-    with :ok <- offered(home, deps),
-         :ok <- stopped(home, deps),
+    with :ok <- stopped(home, deps),
          {:ok, code} <- read_code(deps),
          :ok <- Join.start(home, code, join_opts(deps)) do
       {:ok, state} = Join.read(home)
       joined(state["server"]["name"])
     else
-      {:error, :always_on_unavailable} ->
-        refused(AlwaysOnRelease.sentence())
-
       {:error, {:code_unread, :no_input}} ->
         refused(@no_code_sentence)
 
@@ -90,9 +79,6 @@ defmodule Fermix.CLI.ComputerCommand do
       # out of every error it answers.
       {:error, {:code_unread, reason}} ->
         refused("The code could not be read (#{inspect(reason)}).")
-
-      {:error, {:config, _path, _reason} = unread} ->
-        refused(AlwaysOnRelease.unreadable_sentence(unread))
 
       {:error, :daemon_running} ->
         refused(@running_sentence)
@@ -102,15 +88,6 @@ defmodule Fermix.CLI.ComputerCommand do
 
       {:error, reason} ->
         refused(Join.error_sentence(reason))
-    end
-  end
-
-  # Whether this build offers Always On in the home, of which a join is part.
-  defp offered(home, deps) do
-    case Keyword.get_lazy(deps, :always_on, fn -> AlwaysOnRelease.available_in(home) end) do
-      available? when available? in [true, {:ok, true}] -> :ok
-      unavailable when unavailable in [false, {:ok, false}] -> {:error, :always_on_unavailable}
-      {:error, {:config, _path, _reason}} = error -> error
     end
   end
 

@@ -143,7 +143,6 @@ defmodule FermixCore.Computers.ChoiceTest do
       for context <- [
             %{context(sid, [studio()]) | source_trust: :guest},
             Map.delete(context(sid, [studio()]), :source_trust),
-            Map.put(context(sid, [studio()]), :always_on, false),
             # A plugin skill's worker: its parent's context, at guest.
             context(sid, [studio()])
             |> Map.put(:skill_depth, 1)

@@ -432,6 +432,20 @@ class AlwaysOnTestDaemonTest(unittest.TestCase):
         self.assertIn(f"cosign did not verify {ARTIFACT} as signed by release.yml on refs/tags/v{VERSION}", result.stderr)
         self.assert_nothing_installed()
 
+    # Always On came to every build in 0.20.0; an older release refuses each
+    # step, so up refuses it before it downloads anything.
+    def test_up_refuses_a_release_from_before_always_on(self):
+        for release in ("0.18.0", "0.19.9"):
+            result = self.run_script("up", "--release", release)
+
+            self.assertEqual(result.returncode, 1, release)
+            self.assertIn(
+                f"Fermix {release} serves no Always On; every release from 0.20.0 on does",
+                result.stderr,
+            )
+            self.assertNotIn("could not download", result.stderr)
+            self.assert_nothing_installed()
+
     def test_up_refuses_a_release_that_was_not_published(self):
         result = self.run_script("up", "--release", "9.9.7")
 
@@ -464,9 +478,10 @@ class AlwaysOnTestDaemonTest(unittest.TestCase):
             "[fermix_core.cues]\ndoor_port = 4742\n",
             "[fermix_channels.mobile]\nport = 4741\n",
             "[fermix_web]\nport = 4740\n",
-            "[fermix_core.always_on]\nenabled = true\n",
         ):
             self.assertIn(line, config)
+        # Every release this installs serves Always On, so the home needs no switch.
+        self.assertNotIn("[fermix_core.always_on]", config)
         state = (self.root / "state").read_text(encoding="utf-8")
         self.assertIn(f"version={VERSION}\nport=4740\nruntime={self.runtime}\n", state)
         self.assertEqual(self.log("open"), "http://127.0.0.1:4740/setup?t=launch-token\n")

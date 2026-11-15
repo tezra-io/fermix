@@ -21,12 +21,8 @@ defmodule FermixCore.Home.Candidate do
       the code opens: a digest of its secret (SHA-256, base64url without
       padding), which reveals nothing of it and stays once the code is gone;
 
-  and `config.toml` with `[fermix_core.engine] role = "candidate"` and
-  `[fermix_core.always_on] enabled = true`: a candidate exists only for an
-  Always On move, and a release build offers Always On only where the home
-  turns it on (`FermixCore.Home.AlwaysOnRelease`), so its server's first boot
-  can read `fermix home status` while it waits. Activation replaces that
-  file with the home's own.
+  and `config.toml` with `[fermix_core.engine] role = "candidate"`, which
+  activation replaces with the home's own.
 
   It also marks the machine an Always On server (`device/server.json`,
   `server?/1`): device-local, so no archive carries it and activation, which
@@ -96,9 +92,6 @@ defmodule FermixCore.Home.Candidate do
   @config_text """
   [fermix_core.engine]
   role = "candidate"
-
-  [fermix_core.always_on]
-  enabled = true
   """
   @builder_prefix ".candidate-"
   @ended ~w(failed expired)

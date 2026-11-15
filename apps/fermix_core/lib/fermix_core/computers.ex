@@ -22,17 +22,17 @@ defmodule FermixCore.Computers do
   Off the primary there are none: a computer's own list lives on its server.
 
   `visible?/1` is the one rule for whether a turn can see the computers (an
-  owner's turn, where Always On is offered, on the primary), decided before
-  the link is asked. `prompt_section/1` is the `## Computers` section (§6.5)
-  on such a turn, when the home has a computer.
+  owner's turn on the primary), decided before the link is asked.
+  `prompt_section/1` is the `## Computers` section (§6.5) on such a turn,
+  when the home has a computer.
   `rename/3` is `computers.rename`: names are unique in the home, compared
   without case, and differ from the server's own.
 
   Seams in `opts`: `:role` (the engine role, `Home.Role.booted/0`'s), `:rows`
   (0-arity, in place of the link's), `:live` (the Registry's live map),
   `:home`, `:records` (the records map), `:server_name`, `:link` (the link
-  module), `:always_on` (boolean), `:host_facts`, `:personalization`,
-  `:version` (this engine's, `BuildInfo.product_version/0`).
+  module), `:host_facts`, `:personalization`, `:version` (this engine's,
+  `BuildInfo.product_version/0`).
   """
 
   require Logger
@@ -45,7 +45,6 @@ defmodule FermixCore.Computers do
   alias FermixCore.Computers.Registry
   alias FermixCore.Computers.Store
   alias FermixCore.Computers.Versions
-  alias FermixCore.Home.AlwaysOnRelease
   alias FermixCore.Home.ComputerName
   alias FermixCore.Home.Link
   alias FermixCore.Home.Role
@@ -130,16 +129,15 @@ defmodule FermixCore.Computers do
 
   @doc """
   Whether a turn can see the home's computers (M97 §6.5): an owner's turn
-  (`:trust`, `:operator` when not given; a run's is `turn_trust/1`), where
-  Always On is offered, on an engine booted as the primary. Every check is
-  this engine's own, made before the link is asked, so a turn that cannot see
-  computers never reaches it. The one rule for `prompt_section/1`, the
-  `computer` argument (`Computers.Argument`) and where a call runs
-  (`Computers.Choice`).
+  (`:trust`, `:operator` when not given; a run's is `turn_trust/1`), on an
+  engine booted as the primary. Every check is this engine's own, made before
+  the link is asked, so a turn that cannot see computers never reaches it.
+  The one rule for `prompt_section/1`, the `computer` argument
+  (`Computers.Argument`) and where a call runs (`Computers.Choice`).
   """
   @spec visible?(keyword()) :: boolean()
   def visible?(opts) when is_list(opts),
-    do: Keyword.get(opts, :trust, :operator) == :operator and always_on?(opts) and primary?(opts)
+    do: Keyword.get(opts, :trust, :operator) == :operator and primary?(opts)
 
   @doc """
   The trust `visible?/1` reads for the run whose loop context is `context`:
@@ -293,8 +291,6 @@ defmodule FermixCore.Computers do
       nil -> nil
     end
   end
-
-  defp always_on?(opts), do: Keyword.get_lazy(opts, :always_on, &AlwaysOnRelease.available?/0)
 
   defp link(opts), do: Keyword.get_lazy(opts, :link, &Link.impl/0)
 

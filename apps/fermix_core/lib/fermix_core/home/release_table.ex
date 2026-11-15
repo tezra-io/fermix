@@ -3,9 +3,8 @@ defmodule FermixCore.Home.ReleaseTable do
   The release table an Always On server reads to choose the release it may
   install (M97 §3.4, D14: the server leads), kept by the primary.
 
-  On an Always On server's primary where this build offers Always On
-  (`Home.AlwaysOn.server?/1` and `Home.AlwaysOnRelease.available?/0`, both
-  decided once at boot by `FermixCore.Application`), it fetches
+  On an Always On server's primary (`Home.AlwaysOn.server?/1`, decided once
+  at boot by `FermixCore.Application`), it fetches
   `https://fermix.ai/install/releases` at start and every five minutes after,
   each fetch in a task of its own so a call is never held behind one: a
   10 second timeout, a 1 MiB body at most, no redirect followed, and the text
@@ -13,8 +12,8 @@ defmodule FermixCore.Home.ReleaseTable do
   fails keeps it and is said in one sentence beside it, and with no table
   read yet the answer is that sentence alone, so `home.status` names no
   eligible release and the server's update installs nothing: it fails
-  closed. Anywhere else (a computer, a candidate, a server that never moved,
-  any engine where Always On is off) it fetches nothing and answers why.
+  closed. Anywhere else (a computer, a candidate, a server that never moved)
+  it fetches nothing and answers why.
 
   `current/1` is the one read (`Management.Home`'s `update`); `fetch/1` is
   one fetch with no process, for a move's review on the computer that moves

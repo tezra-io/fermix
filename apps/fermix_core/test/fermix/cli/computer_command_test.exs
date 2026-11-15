@@ -175,21 +175,6 @@ defmodule Fermix.CLI.ComputerCommandTest do
     assert {:ok, %{role: :primary}} = Role.configured(ctx.home)
   end
 
-  # A release build serves no Always On until its home turns it on
-  # (`Home.AlwaysOnRelease`), and a join is part of it.
-  test "in a build without Always On it refuses in one sentence and reads nothing", ctx do
-    {stdin, stdin_deps} = piped(code())
-    deps = [home: ctx.home, always_on: false] ++ stdin_deps ++ stopped()
-
-    error =
-      capture_io(:stderr, fn -> assert ComputerCommand.run(["join"], deps) == 1 end)
-
-    assert error == "fermix computer join: Always On is not in this release of Fermix yet.\n"
-    assert {"fxenroll1." <> _rest, ""} = StringIO.contents(stdin)
-    refute Join.present?(ctx.home)
-    assert {:error, {:missing, :keyring}} = ComputerKey.read(ctx.home, store: :keyring)
-  end
-
   # No engine tree runs, so no command host owns a keychain helper: a store
   # that cannot be used is refused in its own sentence, and nothing is left.
   test "a secret store it cannot reach is refused by name, leaving nothing behind", ctx do

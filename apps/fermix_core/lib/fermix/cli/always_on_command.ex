@@ -36,11 +36,6 @@ defmodule Fermix.CLI.AlwaysOnCommand do
   On a home the Fermix app manages (`HomeOwner.app_managed?/1`, given this
   verb's own `hello`) it refuses `app_managed`, naming the app's Always On
   pane. With Fermix stopped it refuses `engine_stopped` and writes nothing.
-  Where this build offers no Always On in the home
-  (`Home.AlwaysOnRelease.available_in/1`, read from the home's own settings
-  file, the one its engine boots from) every use refuses
-  `always_on_unavailable` before anything else is read, and a switch it
-  cannot read is `home_status_unavailable` naming the file.
 
   **A step that waits reports how it ended**, from the screen's `outcome`,
   the engine's word: `failed` (the step ended on a problem) is
@@ -55,9 +50,7 @@ defmodule Fermix.CLI.AlwaysOnCommand do
   Dependencies: `:home`, `:client` (a 3-arity management call, as
   `Client.request_v1/3`), `:terminal` (the `SecretInput` terminal), `:stdin`,
   `:stdout`, `:stderr`, `:app_managed?` (as `HomeOwner.app_managed?/1`),
-  `:now_ms` (a 0-arity monotonic clock), `:sleep` and `:always_on` (a
-  boolean standing for the answer of `Home.AlwaysOnRelease.available_in/1`
-  for the home).
+  `:now_ms` (a 0-arity monotonic clock) and `:sleep`.
   """
 
   alias Fermix.CLI.AlwaysOnCommand.Render
@@ -67,7 +60,6 @@ defmodule Fermix.CLI.AlwaysOnCommand do
   alias Fermix.CLI.HomeOwner
   alias Fermix.CLI.MachineOutput
   alias Fermix.CLI.SecretInput
-  alias FermixCore.Home.AlwaysOnRelease
   alias FermixCore.Management.HomeSummary
   alias FermixCore.Setup.ConfigStore
   alias FermixCore.Setup.EngineOwner
@@ -105,43 +97,10 @@ defmodule Fermix.CLI.AlwaysOnCommand do
   @doc "Runs `fermix always-on ARGS` with the dependencies the moduledoc names."
   @spec run([String.t()], keyword()) :: non_neg_integer()
   def run(argv, deps \\ []) when is_list(argv) and is_list(deps) do
-    case always_on(deps) do
-      {:ok, true} ->
-        parsed(argv, deps)
-
-      {:ok, false} ->
-        refused_first(argv, deps, :always_on_unavailable, [])
-
-      {:error, reason} ->
-        output = AlwaysOnRelease.unreadable_sentence(reason)
-        refused_first(argv, deps, :home_status_unavailable, output: output)
-    end
-  end
-
-  defp always_on(deps) do
-    case Keyword.fetch(deps, :always_on) do
-      {:ok, available?} when is_boolean(available?) -> {:ok, available?}
-      :error -> AlwaysOnRelease.available_in(home(deps))
-    end
-  end
-
-  defp parsed(argv, deps) do
     case parse(argv) do
       {:ok, step, flags} -> deps |> context(flags) |> start(step)
       {:usage, sentence} -> usage(sentence, deps)
     end
-  end
-
-  # Not offered here, or its switch unreadable: one sentence on stderr, and
-  # the envelope under --json, before the arguments are read.
-  defp refused_first(argv, deps, code, details) do
-    sentence = MachineOutput.sentence(code, details)
-    IO.puts(Keyword.get(deps, :stderr, :stderr), "fermix always-on: " <> sentence)
-
-    if "--json" in argv,
-      do: IO.puts(Keyword.get(deps, :stdout, :stdio), MachineOutput.error(code, details))
-
-    1
   end
 
   @doc "Every step the verb takes, in the kebab form `ACTION` names it."

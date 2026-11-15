@@ -1,7 +1,6 @@
 defmodule FermixCore.Home.CandidateTest do
   use ExUnit.Case, async: true
 
-  alias FermixCore.Home.AlwaysOnRelease
   alias FermixCore.Home.Candidate
   alias FermixCore.Home.DeviceLocal
   alias FermixCore.Home.EnrollmentCode
@@ -38,12 +37,7 @@ defmodule FermixCore.Home.CandidateTest do
                )
 
       assert File.read!(Path.join(ctx.home, "config.toml")) ==
-               ~s([fermix_core.engine]\nrole = "candidate"\n\n[fermix_core.always_on]\nenabled = true\n)
-
-      # A candidate exists only for an Always On move, and its server's first
-      # boot reads `fermix home status` while it waits: a release build of it
-      # offers Always On from its own settings until the move replaces them.
-      assert AlwaysOnRelease.available_in(ctx.home, :prod) == {:ok, true}
+               ~s([fermix_core.engine]\nrole = "candidate"\n)
 
       assert mode(Candidate.dir(ctx.home)) == 0o700
       assert mode(Path.join(Candidate.dir(ctx.home), "mobile")) == 0o700

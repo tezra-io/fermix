@@ -259,7 +259,7 @@ defmodule FermixCore.ComputersTest do
 
       section =
         Computers.prompt_section(
-          opts(rows, live: live, records: records, always_on: true, host_facts: @host) ++ @zone
+          opts(rows, live: live, records: records, host_facts: @host) ++ @zone
         )
 
       assert section == """
@@ -288,9 +288,7 @@ defmodule FermixCore.ComputersTest do
       }
 
       section =
-        Computers.prompt_section(
-          opts(rows, live: live, always_on: true, host_facts: @host) ++ @zone
-        )
+        Computers.prompt_section(opts(rows, live: live, host_facts: @host) ++ @zone)
 
       assert section =~
                "- studio Mac (macOS, connected): files, shell (strict). Files and shell on " <>
@@ -301,15 +299,14 @@ defmodule FermixCore.ComputersTest do
       refute section =~ "/Users/avery"
     end
 
-    test "says nothing on a guest's turn, without Always On, off the primary, or with no computer" do
+    test "says nothing on a guest's turn, off the primary, or with no computer" do
       rows = [row(@loft, "loft Linux", "linux")]
-      base = opts(rows, always_on: true, host_facts: @host)
+      base = opts(rows, host_facts: @host)
 
       assert is_binary(Computers.prompt_section(base))
       assert Computers.prompt_section([trust: :guest] ++ base) == nil
-      assert Computers.prompt_section(Keyword.put(base, :always_on, false)) == nil
       assert Computers.prompt_section(Keyword.put(base, :role, :device)) == nil
-      assert Computers.prompt_section(opts([], always_on: true, host_facts: @host)) == nil
+      assert Computers.prompt_section(opts([], host_facts: @host)) == nil
     end
   end
 
@@ -319,24 +316,22 @@ defmodule FermixCore.ComputersTest do
   describe "who can see the computers" do
     @no_link FermixCore.ComputersTest.NoLinkLoaded
 
-    test "an owner's turn, where Always On is offered, on the primary; nothing else" do
-      base = [role: :primary, always_on: true]
+    test "an owner's turn on the primary; nothing else" do
+      base = [role: :primary]
 
       assert Computers.visible?(base)
       assert Computers.visible?([trust: :operator] ++ base)
       refute Computers.visible?([trust: :guest] ++ base)
       refute Computers.visible?([trust: nil] ++ base)
-      refute Computers.visible?(Keyword.put(base, :always_on, false))
       refute Computers.visible?(Keyword.put(base, :role, :device))
       refute Computers.visible?(Keyword.put(base, :role, nil))
     end
 
     test "a turn that cannot see them never asks the link" do
       refute Code.ensure_loaded?(@no_link)
-      base = [link: @no_link, role: :primary, always_on: true, host_facts: @host]
+      base = [link: @no_link, role: :primary, host_facts: @host]
 
       assert Computers.prompt_section([trust: :guest] ++ base) == nil
-      assert Computers.prompt_section(Keyword.put(base, :always_on, false)) == nil
       assert Computers.prompt_section(Keyword.put(base, :role, :device)) == nil
 
       # The one turn that can see them asks it, and so meets the missing module.

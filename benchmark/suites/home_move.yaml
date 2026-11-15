@@ -308,9 +308,8 @@ scenarios:
           rent a small Debian server. How do I get my Fermix onto it, and
           could Fermix just order a server from a cloud company for me
           instead?
-        # Until the release gate (Home.AlwaysOnRelease) is deleted, this case also accepts "Always On is not in this release of Fermix yet"; narrow it back then.
         expect:
-          reply_matches: '(?i)\bserver\b|\breleas(?:e|ed|es)\b'
+          reply_matches: '(?i)\bserver\b'
           max_cost_usd: 1.2
           max_duration_ms: 160000
         rubric: |
@@ -319,16 +318,13 @@ scenarios:
              Always On pane, the setup page's Always On tab, or
              `fermix always-on` in a terminal) gives a one-time enrollment
              code and a command to run on the server, which asks for the
-             code without showing it; or says Always On is not in this
-             release of Fermix yet (a release build has none). Either is
-             correct while release builds have no Always On.
-          2. Where it describes the setup, says the owner then reviews the
-             move and starts it with Move now and a recovery passphrase, and
-             the home (memory, settings, secrets) moves with it.
+             code without showing it.
+          2. Says the owner then reviews the move and starts it with Move now
+             and a recovery passphrase, and the home (memory, settings,
+             secrets) moves with it.
           3. Says Fermix does not order or create a server with a cloud
              company: the owner sets the server up themselves (Debian 12,
-             Debian 13 or Ubuntu 24.04), or says Always On is not in this
-             release of Fermix yet.
+             Debian 13 or Ubuntu 24.04).
           4. Does not tell the owner to give Fermix a cloud provider's API
              token, or to copy the Fermix home folder onto the server by
              hand.
@@ -481,7 +477,6 @@ scenarios:
   # the rest. Tagged `host-safe-core`, so it runs on every `make regression`:
   # a question and an answer, read-only on the host, with no consent gate for
   # an eval home to pre-grant. The suite's other scenarios stay out of it.
-  # Until the release gate (Home.AlwaysOnRelease) is deleted, both cases also accept "Always On is not in this release of Fermix yet"; narrow them back then.
   - id: always_on_without_the_app
     title: "Setting up Always On on an install with no Fermix app"
     severity: normal
@@ -493,19 +488,16 @@ scenarios:
           I installed Fermix with Homebrew and I don't use the Fermix Mac app.
           How do I keep Fermix running when my MacBook is closed?
         expect:
-          reply_matches: "(?i)(fermix\\s+always-on|setup\\s+page|\\breleas(?:e|ed|es)\\b)"
+          reply_matches: "(?i)(fermix\\s+always-on|setup\\s+page)"
           reply_not_matches: "(?i)(?<!n't need to )(?<!not need to )(?<!no need to )(?<!n't have to )(?<!rather than )(?<!without )\\b(?:install|download)\\s+(?:the\\s+)?(?:fermix\\s+)?(?:mac(?:os)?\\s+)?app\\b"
           max_cost_usd: 1.2
           max_duration_ms: 160000
         rubric: |
           1. Says Always On keeps Fermix running with the Mac closed by moving
-             it to a Linux server of the owner's own; or says
-             Always On is not in this release of Fermix yet (a release build,
-             as Homebrew installs, has none). Either is correct while release
-             builds have no Always On.
-          2. Where it describes the setup, says it is set up without the
-             Fermix app: with `fermix always-on` in a terminal, which walks
-             through each step, or on the setup page's Always On tab.
+             it to a Linux server of the owner's own.
+          2. Says it is set up without the Fermix app: with `fermix always-on`
+             in a terminal, which walks through each step, or on the setup
+             page's Always On tab.
           3. Does not say the Fermix Mac app must be installed to set up
              Always On.
       - id: linux_package_owner_sets_up_always_on
@@ -514,17 +506,14 @@ scenarios:
           top of it. I'd like it to stay up while this machine is switched
           off. How do I set that up?
         expect:
-          reply_matches: "(?i)(fermix\\s+always-on|setup\\s+page|\\breleas(?:e|ed|es)\\b)"
+          reply_matches: "(?i)(fermix\\s+always-on|setup\\s+page)"
           reply_not_matches: "(?i)(?<!n't need to )(?<!not need to )(?<!no need to )(?<!n't have to )(?<!rather than )(?<!without )\\b(?:install|download)\\s+(?:the\\s+)?(?:fermix\\s+)?(?:mac(?:os)?\\s+|linux\\s+)?app\\b"
           max_cost_usd: 1.2
           max_duration_ms: 160000
         rubric: |
           1. Says Always On moves Fermix to a Linux server of the owner's
-             own, so it keeps running while this machine is off; or says Always On is not
-             in this release of Fermix yet (a release build, as the Linux
-             package installs, has none). Either is correct while release
-             builds have no Always On.
-          2. Where it describes the setup, says it is set up from this install
-             with no app: with `fermix always-on` in a terminal, or on the
-             setup page's Always On tab.
+             own, so it keeps running while this machine is off.
+          2. Says it is set up from this install with no app: with
+             `fermix always-on` in a terminal, or on the setup page's Always
+             On tab.
           3. Does not say a Fermix app must be installed to set up Always On.

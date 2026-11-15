@@ -937,9 +937,9 @@ other_homes() {
       "--restore on a candidate $phase is refused"
   done
 
-  home_refuses always_on_unavailable "Always On is not in this release of Fermix yet."
+  home_refuses home_status_unavailable "Fermix could not read this home's status. It said: moved.json is not valid JSON."
   run FERMIX_ENROLL_CODE="$CODE" dash "$COPY"
-  stopped_with "fermix home status could not read the Fermix home $HOME_DIR_MOVED on this server (Always On is not in this release of Fermix yet): run sudo -H -u fermix env -C / /usr/bin/fermix home status to see why." \
+  stopped_with "fermix home status could not read the Fermix home $HOME_DIR_MOVED on this server (Fermix could not read this home's status. It said: moved.json is not valid JSON): run sudo -H -u fermix env -C / /usr/bin/fermix home status to see why." \
     "a home fermix home status cannot read is refused, naming it, with the engine's own sentence and no command that removes it"
   refused_after_reading_the_home "a home the engine refuses to read"
 }

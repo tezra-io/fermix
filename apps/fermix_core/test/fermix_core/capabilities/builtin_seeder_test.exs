@@ -97,8 +97,8 @@ defmodule FermixCore.Capabilities.BuiltinSeederTest do
   end
 
   # M97 §6.4: a server with no screen of its own registers the tool when it may
-  # drive a computer's (a primary where Always On is offered); each turn then
-  # offers it only while a screen is in reach (`Tools.ComputerUse.advertise?/1`).
+  # drive a computer's (a primary); each turn then offers it only while a
+  # screen is in reach (`Tools.ComputerUse.advertise?/1`).
   describe "computer_use_modules/1 gating" do
     test "a screenless primary that may drive a computer's screen registers the tool" do
       assert BuiltinSeeder.computer_use_modules(ready?: false, drives_computers?: true) ==

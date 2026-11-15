@@ -787,13 +787,12 @@ def test_a_second_computers_seed_writes_the_same_bytes(tmp_path, monkeypatch):
     assert any(path.endswith(".json") and path.startswith("device") for path in first)
 
 
-def test_computers_turn_always_on_on_and_a_seed_without_them_takes_them_away(
+def test_computers_come_only_with_the_flag_and_a_seed_without_them_takes_them_away(
         tmp_path, monkeypatch, capsys):
     # The `## Computers` section joins every owner turn of every suite, so a home
     # has the computers only when a run asks (--computers), like cues.
     home = tmp_path / "x-eval"
     on = _seed_main(monkeypatch, home, "--computers")
-    assert on["fermix_core"]["always_on"] == {"enabled": True}
     # A Mac dev daemon carries the Apple helper and would search Apple Maps
     # itself; the computers world looks places up on the studio Mac (D13).
     assert on["fermix_core"]["tools"]["place_search"] == {"backend": "computer"}
@@ -802,14 +801,16 @@ def test_computers_turn_always_on_on_and_a_seed_without_them_takes_them_away(
     assert all(os.path.isfile(path) for path in written)
 
     off = _seed_main(monkeypatch, home)
-    assert "always_on" not in off["fermix_core"]
     assert "place_search" not in off["fermix_core"].get("tools", {})
     assert not any(os.path.exists(path) for path in written)
 
 
-def test_without_computers_the_config_has_no_always_on_section():
-    cfg = seed.render_config("/tmp/x-eval", "openai", {"default_model": "m"}, None)
-    assert "always_on" not in tomllib.loads(cfg)["fermix_core"]
+# Every build serves Always On, so no seed writes its retired switch.
+def test_no_seed_writes_the_retired_always_on_switch():
+    for computers in (False, True):
+        cfg = seed.render_config("/tmp/x-eval", "openai", {"default_model": "m"}, None,
+                                 computers=computers)
+        assert "always_on" not in tomllib.loads(cfg)["fermix_core"]
 
 
 # --- a signed-out Claude Code (M98 D10) ------------------------------------------

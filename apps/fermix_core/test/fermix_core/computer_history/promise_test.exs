@@ -71,41 +71,32 @@ defmodule FermixCore.ComputerHistory.PromiseTest do
 
   describe "on_server?/1" do
     test "a home with no link and no server mark has no server", %{home: home} do
-      refute Promise.on_server?(
-               home: home,
-               record: %{role: :primary, primary: nil},
-               always_on?: true
-             )
+      refute Promise.on_server?(home: home, record: %{role: :primary, primary: nil})
     end
 
     test "a computer linked to its server has one", %{home: home} do
       link!(home)
       device = %{role: :device, primary: "garden-server"}
 
-      assert Promise.on_server?(home: home, record: device, always_on?: true)
-      refute Promise.on_server?(home: home, record: device, always_on?: false)
+      assert Promise.on_server?(home: home, record: device)
     end
 
     test "the server itself has one", %{home: home} do
       File.mkdir_p!(Path.dirname(Candidate.server_path(home)))
       File.write!(Candidate.server_path(home), "{}")
 
-      assert Promise.on_server?(
-               home: home,
-               record: %{role: :primary, primary: nil},
-               always_on?: true
-             )
+      assert Promise.on_server?(home: home, record: %{role: :primary, primary: nil})
     end
 
     test "a process that booted no engine has none", %{home: home} do
       link!(home)
-      refute Promise.on_server?(home: home, record: nil, always_on?: true)
+      refute Promise.on_server?(home: home, record: nil)
     end
   end
 
   describe "facts/2" do
     test "names the provider the status line names, and on this Mac for local", %{home: home} do
-      base = [home: home, record: %{role: :primary, primary: nil}, always_on?: true, os: :macos]
+      base = [home: home, record: %{role: :primary, primary: nil}, os: :macos]
 
       assert %{server?: false, local?: false, provider: "Anthropic", machine: "Mac"} =
                Promise.facts([summarizer: :anthropic], base)

@@ -40,15 +40,11 @@ defmodule FermixCore.ComputerUse.ReachTest do
       refute ComputerUse.advertise?(turn([computer("studio Mac", screen(:off))]))
       refute ComputerUse.advertise?(turn([computer("studio Mac", [])]))
 
-      # A computer the turn cannot see: a guest's turn, or a build without Always On.
+      # A computer the turn cannot see: a guest's turn.
       refute ComputerUse.advertise?(%{
                turn([computer("studio Mac", screen(:on))])
                | source_trust: :guest
              })
-
-      refute ComputerUse.advertise?(
-               Map.put(turn([computer("studio Mac", screen(:on))]), :always_on, false)
-             )
     end
   end
 
@@ -125,7 +121,6 @@ defmodule FermixCore.ComputerUse.ReachTest do
   defp turn(computers) do
     %{
       source_trust: :operator,
-      always_on: true,
       computers_opts: [role: :primary],
       computers: computers
     }

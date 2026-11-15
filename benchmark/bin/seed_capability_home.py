@@ -79,9 +79,7 @@ socket starts only in a daemon run with realtime on (`mix fermix.dev`, not
 computers, both away, for the computers suite (suites/computers.yaml): a
 desktop row each in `mobile/devices.toml` (what `DeviceStore` reads) and a
 record each in `device/computers/<device_id>.json` (its last offers, engine
-version and when it was last seen), with `[fermix_core.always_on]` turned on so
-a release build serves the `## Computers` section too (a dev build serves it
-regardless). It is off by default: the section joins every owner turn, which
+version and when it was last seen). It is off by default: the section joins every owner turn, which
 would move the measured prompt of every unrelated suite. No session ever
 exists in an eval, so both computers are listed as away. The studio Mac offers
 `places` (D13) and the home's place search is set to `backend = "computer"`,
@@ -489,12 +487,7 @@ def render_config(
         lines += voice_lines(voice, voice_conversation)
     if cues:
         lines += cue_lines(home, cues)
-    # With --computers: the home serves Always On, which the `## Computers`
-    # section needs. A dev build serves it whatever this says; a release build
-    # (`Home.AlwaysOnRelease`) only with it. `enabled` is the section's only key.
     if computers:
-        lines += ["# Always On for the computers suite (--computers).",
-                  "[fermix_core.always_on]", "enabled = true", ""]
         # Places are looked up on the studio Mac, as a server's are (D13): a Mac
         # dev daemon carries the Apple helper and would search Apple Maps itself.
         lines += ["[fermix_core.tools.place_search]", 'backend = "computer"', ""]
@@ -1119,8 +1112,7 @@ def parse_args() -> argparse.Namespace:
                              "cue suite's mandate cases need (they are held out without it)")
     parser.add_argument("--computers", action="store_true",
                         help="link two computers to the home (studio Mac, loft Linux), both "
-                             "away, and turn Always On on, for the computers suite; off by "
-                             "default")
+                             "away, for the computers suite; off by default")
     parser.add_argument("--coding-signed-out", dest="coding_signed_out", action="store_true",
                         help="put a stub claude first on the daemon's PATH that fails every "
                              "run as signed out, for coding_harness's signed-out case; off "
@@ -1241,7 +1233,7 @@ def main() -> None:
             print("voice calls: private (each call apart from the chat, its answers only said)")
     if args.computers:
         names = " and ".join(c["name"] for c in COMPUTERS)
-        print(f"computers: {names} linked, both away; Always On on")
+        print(f"computers: {names} linked, both away")
     if args.coding_signed_out:
         print(f"coding signed out: {CLAUDE_STUB} fails every Claude Code run as signed out; "
               "capability-daemon.sh puts it first on the daemon's PATH")

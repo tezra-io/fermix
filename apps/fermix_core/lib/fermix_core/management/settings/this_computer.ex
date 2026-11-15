@@ -11,11 +11,10 @@ defmodule FermixCore.Management.Settings.ThisComputer do
   its recorder in the Computer history section, and what reaches the server
   from this computer has no switch.
 
-  Published only on a computer linked to its server where Always On is
-  offered (`Home.AlwaysOnRelease`): an install that never moved sees no new
-  section. It is a machine section (`Management.Placement`), so it is
-  answered on this computer alone and the server refuses a forwarded write;
-  the server never publishes it.
+  Published only on a computer linked to its server: an install that never
+  moved sees no new section. It is a machine section
+  (`Management.Placement`), so it is answered on this computer alone and the
+  server refuses a forwarded write; the server never publishes it.
 
   **The review.** A computer that moved before M97 starts with its switches
   waiting for the owner's review, offering nothing until then
@@ -29,7 +28,6 @@ defmodule FermixCore.Management.Settings.ThisComputer do
 
   alias FermixCore.Computers.Offers
   alias FermixCore.Computers.Switches
-  alias FermixCore.Home.AlwaysOnRelease
   alias FermixCore.Home.DesktopLink
   alias FermixCore.Home.Role
   alias FermixCore.Management.Settings.Row
@@ -54,8 +52,8 @@ defmodule FermixCore.Management.Settings.ThisComputer do
   @review_footer "Change any switch here to let Fermix on your server use what is switched on."
 
   @doc """
-  The section on a linked computer where Always On is offered, none
-  elsewhere. `computer?:` says which for a test.
+  The section on a linked computer, none elsewhere. `computer?:` says which
+  for a test.
   """
   @spec sections(keyword()) :: [%{id: String.t(), pane: String.t(), title: String.t()}]
   def sections(opts \\ []) when is_list(opts),
@@ -112,15 +110,12 @@ defmodule FermixCore.Management.Settings.ThisComputer do
 
   defp computer?(opts), do: Keyword.get_lazy(opts, :computer?, &linked_computer?/0)
 
-  # A device-role engine whose home holds its link, where Always On is
-  # offered; a process that booted no engine is no computer.
+  # A device-role engine whose home holds its link; a process that booted no
+  # engine is no computer.
   defp linked_computer? do
     case Role.booted() do
-      nil ->
-        false
-
-      record ->
-        AlwaysOnRelease.available?() and DesktopLink.linked?(record, ConfigStore.fermix_home())
+      nil -> false
+      record -> DesktopLink.linked?(record, ConfigStore.fermix_home())
     end
   end
 end

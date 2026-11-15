@@ -5,28 +5,25 @@ defmodule FermixCore.Computers.Argument do
 
   A tool that a computer can run names its capability
   (`Builtin.Tool.computer_capability/0`, carried as `metadata.computer`).
-  On the server, on an owner's turn, where Always On is offered and the home
-  has a computer (`computers/1`), each such tool gains an optional
-  `computer` property whose values are the names of the computers that offer
-  that capability, an away one included, so the model can name it and hear
-  that it is away (`add/2`). A tool no computer offers, a turn with no
-  computers, a guest's turn and a build without Always On are left as they
-  are. `Capabilities.Advertisement.prepare/2` adds it after a tool's own
+  On the server, on an owner's turn, where the home has a computer
+  (`computers/1`), each such tool gains an optional `computer` property
+  whose values are the names of the computers that offer that capability,
+  an away one included, so the model can name it and hear that it is away
+  (`add/2`). A tool no computer offers, a turn with no computers and a
+  guest's turn are left as they are. `Capabilities.Advertisement.prepare/2` adds it after a tool's own
   schema refresh, so no tool's refresh drops it; `Computers.Choice` decides
   where each call runs.
 
   Whether a turn sees the computers at all is `Computers.visible?/1`, the
   rule `## Computers` follows, decided before the link is asked. `computers/1`
-  reads the context's `:computers`, `:always_on` and `:computers_opts` (a
-  keyword for `Computers`: its `:role` and `:link`) where a test hands them
-  in, else `FermixCore.Computers.list/1` and
-  `Home.AlwaysOnRelease.available?/0`. `add/2` is pure.
+  reads the context's `:computers` and `:computers_opts` (a keyword for
+  `Computers`: its `:role` and `:link`) where a test hands them in, else
+  `FermixCore.Computers.list/1`. `add/2` is pure.
   """
 
   alias FermixCore.Capabilities.Capability
   alias FermixCore.Computers
   alias FermixCore.Computers.Computer
-  alias FermixCore.Home.AlwaysOnRelease
 
   @property "computer"
   @description "Which of the owner's computers runs this, by its name in ## Computers. " <>
@@ -92,9 +89,6 @@ defmodule FermixCore.Computers.Argument do
     context
     |> Map.get(:computers_opts, [])
     |> Keyword.put(:trust, Computers.turn_trust(context))
-    |> Keyword.put_new_lazy(:always_on, fn ->
-      Map.get_lazy(context, :always_on, &AlwaysOnRelease.available?/0)
-    end)
   end
 
   defp listed(%{computers: computers}, _opts) when is_list(computers), do: computers

@@ -3,12 +3,9 @@ defmodule FermixCore.ComputerHistory.Supervisor do
   The inert owner of the Computer History rail (MILESTONE_32 §6.3; M97 §8.1),
   regardless of `enabled?()`, wherever something here uses it: on any engine
   whose system has a recorder (`ComputerHistory.recorder?/1`: a Mac, and a Linux
-  computer), and on a home where computer history
-  can arrive (Always On is offered, so a computer can contribute) or already
-  holds notes. Anywhere else (a system with no recorder, no notes and no
-  Always On) its `init/1` answers `:ignore`: no process runs and no store is
-  created. It
-  owns four things:
+  computer), and on the home's primary, where a computer's history can
+  arrive. Anywhere else (a device with no recorder) its `init/1` answers
+  `:ignore`: no process runs and no store is created. It owns four things:
 
     * **`Spool`**, this machine's own store of raw history
       (`device/history.db`), only where this system has a recorder, the home's
@@ -38,14 +35,11 @@ defmodule FermixCore.ComputerHistory.Supervisor do
 
   use Supervisor
 
-  require Logger
-
   alias FermixCore.ComputerHistory
   alias FermixCore.ComputerHistory.Config
   alias FermixCore.ComputerHistory.Controller
   alias FermixCore.ComputerHistory.Retention
   alias FermixCore.ComputerHistory.Spool
-  alias FermixCore.Home.AlwaysOnRelease
   alias FermixCore.Home.Role
   alias FermixCore.Memory.Repo
 
@@ -66,35 +60,9 @@ defmodule FermixCore.ComputerHistory.Supervisor do
     role = Keyword.get_lazy(opts, :engine_role, &Role.current/0)
     recorder? = Keyword.get_lazy(opts, :recorder?, &ComputerHistory.recorder?/0)
 
-    if recorder? or (role == :primary and home_used?(opts)),
+    if recorder? or role == :primary,
       do: children(role, recorder?, opts),
       else: :ignore
-  end
-
-  # A home where a computer can contribute, or that already holds notes (a
-  # home restored from a Mac's archive): its roll-up, delivery and retention
-  # run. Asked at start, after `Memory.Repo`, which the application starts
-  # first.
-  defp home_used?(opts) do
-    Keyword.get_lazy(opts, :always_on?, &AlwaysOnRelease.available?/0) or
-      Keyword.get_lazy(opts, :holds_notes?, fn -> holds_notes?(Keyword.get(opts, :repo, Repo)) end)
-  end
-
-  defp holds_notes?(repo) do
-    case Repo.computer_history_count_memories(server: repo) do
-      {:ok, count} -> count > 0
-      {:error, :disabled} -> false
-      {:error, reason} -> notes_unknown(reason)
-    end
-  end
-
-  # Unknown is treated as holding them: the rail starts, and is inert if not.
-  defp notes_unknown(reason) do
-    Logger.warning(
-      "computer_history: whether this home holds notes is unknown: #{inspect(reason)}"
-    )
-
-    true
   end
 
   defp children(role, recorder?, opts) do

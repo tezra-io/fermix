@@ -1027,9 +1027,6 @@ defmodule FermixCore.Setup.ConfigStoreTest do
   s3_access_key_id = "@keyring"
   s3_secret_access_key = "@file"
 
-  [fermix_core.always_on]
-  enabled = true
-
   [fermix_core.providers.openai_codex]
   primary = true
   reasoning_effort = "high"
@@ -3614,6 +3611,59 @@ defmodule FermixCore.Setup.ConfigStoreTest do
   # booting. It is accepted at parse, named once at warning, its keychain
   # sentinel never read, and dropped, so the next save writes the file without
   # it.
+  # Always On's test switch, from before every build served Always On: a
+  # home that turned it on to test a move carries it, and so does every
+  # server such a move reached.
+  @retired_always_on_toml """
+  [fermix_core.always_on]
+  enabled = true
+
+  [fermix_core.agent]
+  name = "Orchard"
+  """
+
+  describe "retired [fermix_core.always_on] table" do
+    setup do
+      tmp_home = FermixTestSupport.SafeRm.make_tmp_dir!("config-store-retired-always-on")
+      on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
+      System.put_env("FERMIX_HOME", tmp_home)
+      %{config_path: Path.join(tmp_home, "config.toml")}
+    end
+
+    test "load accepts it, names it at warning, and keeps no switch", %{config_path: path} do
+      File.write!(path, @retired_always_on_toml)
+
+      {result, log} =
+        with_log(fn -> ConfigStore.load_runtime_config(resolve_secrets: false) end)
+
+      assert {:ok, loaded} = result
+      refute Keyword.has_key?(loaded.fermix_core, :always_on)
+      assert Keyword.fetch!(loaded.fermix_core, :agent)[:name] == "Orchard"
+      assert log =~ "[warning]"
+      assert log =~ "config.toml [fermix_core.always_on] is retired"
+    end
+
+    test "a save after the load writes the file without it, and the next load is silent",
+         %{config_path: path} do
+      File.write!(path, @retired_always_on_toml)
+
+      {{:ok, loaded}, _log} =
+        with_log(fn -> ConfigStore.load_runtime_config(resolve_secrets: false) end)
+
+      assert :ok = ConfigStore.save_snapshot(loaded)
+
+      contents = File.read!(path)
+      assert contents =~ ~s(name = "Orchard")
+      refute contents =~ "always_on"
+
+      {result, log} =
+        with_log(fn -> ConfigStore.load_runtime_config(resolve_secrets: false) end)
+
+      assert {:ok, _reloaded} = result
+      refute log =~ "retired"
+    end
+  end
+
   @retired_fcm_toml """
   [fermix_channels.mobile]
   enabled = true

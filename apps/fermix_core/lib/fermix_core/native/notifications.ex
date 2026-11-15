@@ -39,7 +39,6 @@ defmodule FermixCore.Native.Notifications do
   require Logger
 
   alias FermixCore.Delivery.Error
-  alias FermixCore.Home.AlwaysOnRelease
   alias FermixCore.Home.Role
   alias FermixCore.Home.ServerPrimary
   alias FermixCore.Native.Notifications.Computers
@@ -159,18 +158,17 @@ defmodule FermixCore.Native.Notifications do
 
   @doc """
   Where a notification rings (M99 §10.1): `:computers`, on the owner's
-  computers, only on an engine booted as the primary, where Always On is
-  available, of a home that is an Always On server's
-  (`Home.ServerPrimary.check/2`, which refuses macOS outright); `:here`
-  everywhere else. A device or a candidate is always `:here` and reads
-  nothing: a desktop whose home moved still holds its own desktop row in
-  its retired copy. A device list that cannot be read is an error with its
+  computers, only on an engine booted as the primary of a home that is an
+  Always On server's (`Home.ServerPrimary.check/2`, which refuses macOS
+  outright); `:here` everywhere else. A device or a candidate is always
+  `:here` and reads nothing: a desktop whose home moved still holds its own
+  desktop row in its retired copy. A device list that cannot be read is an error with its
   clause, never `:here`.
 
   The facts are read in that order, the device list last. Seams: `placement:`
-  names the answer; `role:` (`Home.Role.booted/0`'s role), `always_on:`
-  (boolean), `server_primary:` (1-arity, `ServerPrimary.check/2` of a home)
-  and `home:` stand in for each fact.
+  names the answer; `role:` (`Home.Role.booted/0`'s role), `server_primary:`
+  (1-arity, `ServerPrimary.check/2` of a home) and `home:` stand in for each
+  fact.
   """
   @spec placement(keyword()) :: {:ok, placement()} | {:error, String.t()}
   def placement(opts) when is_list(opts) do
@@ -283,11 +281,7 @@ defmodule FermixCore.Native.Notifications do
 
   defp source(opts), do: if(Keyword.has_key?(opts, :provider), do: :given, else: :build)
 
-  defp placed(:primary, opts) do
-    if Keyword.get_lazy(opts, :always_on, &AlwaysOnRelease.available?/0),
-      do: server_placement(opts),
-      else: {:ok, :here}
-  end
+  defp placed(:primary, opts), do: server_placement(opts)
 
   defp placed(_device_candidate_or_none, _opts), do: {:ok, :here}
 

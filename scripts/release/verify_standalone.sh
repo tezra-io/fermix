@@ -466,29 +466,13 @@ run_join() {
 
 join_settings() {
   mkdir -m 700 "$1"
-  printf '[fermix_core]\nprofile = "%s"\n%s' "$join_profile" "$2" > "$1/config.toml"
+  printf '[fermix_core]\nprofile = "%s"\n' "$join_profile" > "$1/config.toml"
   chmod 600 "$1/config.toml"
 }
 
-# A release without the switch refuses before it asks the keychain anything.
-join_gated_home="$runtime_root/join-gated-home"
-join_settings "$join_gated_home" ""
-run_join "$join_gated_home" "$join_bin"
-[ "$join_status" -eq 1 ] ||
-  fail "computer join in a home without Always On must exit 1, got $join_status"
-grep -Fq "fermix computer join: Always On is not in this release of Fermix yet." "$join_out" ||
-  fail "computer join in a home without Always On did not say so"
-[ ! -e "$join_log" ] && [ ! -e "$join_gated_home/device" ] ||
-  fail "computer join in a home without Always On reached the keychain or wrote a join"
-
-join_switch='
-[fermix_core.always_on]
-enabled = true
-'
-
 # Nothing on stdin: refused because no code was read, before the keychain.
 join_codeless_home="$runtime_root/join-codeless-home"
-join_settings "$join_codeless_home" "$join_switch"
+join_settings "$join_codeless_home"
 run_join "$join_codeless_home" "$join_bin" /dev/null
 [ "$join_status" -eq 1 ] ||
   fail "computer join with no code on stdin must exit 1, got $join_status"
@@ -499,7 +483,7 @@ grep -Fq "fermix computer join: No code was read." "$join_out" ||
 
 # A keychain that will not answer: refused by name, and nothing is left.
 join_refused_home="$runtime_root/join-refused-home"
-join_settings "$join_refused_home" "$join_switch"
+join_settings "$join_refused_home"
 join_refused_settings="$(cat "$join_refused_home/config.toml")"
 run_join "$join_refused_home" "$join_refusing_bin"
 [ "$join_status" -eq 1 ] ||
@@ -516,7 +500,7 @@ grep -Fq "refused find-generic-password" "$join_log" 2>/dev/null ||
 # A fresh keychain: the key is made, stored and read back, and the join waits
 # for the next start of Fermix.
 join_home="$runtime_root/join-home"
-join_settings "$join_home" "$join_switch"
+join_settings "$join_home"
 run_join "$join_home" "$join_bin"
 [ "$join_status" -eq 0 ] ||
   fail "computer join must exit 0 in the throwaway world, got $join_status"
@@ -707,23 +691,14 @@ case "$tls_output" in
 esac
 
 # ── fermix always-on in a release, run from this artifact ──────────────────
-# A release build offers Always On only in a home whose settings file turns
-# it on (`FermixCore.Home.AlwaysOnRelease`: `[fermix_core.always_on]
-# enabled = true`, an unsupported switch for testing), read from that file
-# with no engine and no tree. So in a home that does not exist yet a step
-# must refuse before it reads anything: exit 1, exactly one JSON envelope on
-# stdout naming `always_on_unavailable`, the sentence on stderr, and nothing
-# written but the `secret_key_base` every release boot writes
-# (`holds_only_boot_key`): no settings, no role, no Always On state. An
-# artifact that reaches for the engine instead (`engine_stopped`
-# with no daemon) offers Always On to every home and fails here. In a
-# throwaway home whose settings carry the switch, the same step must reach
-# for the engine instead, exactly `engine_stopped` with no daemon, and leave
-# the settings as they were: an artifact that still refuses there does not
-# read the switch from the home's own file. This stage runs the artifact the
-# release is about to publish. It runs before the migrate-to-app stage
-# because that stage ends the script on a Linux target. When Always On
-# ships, the gate goes and the first half expects `engine_stopped` too.
+# Every release build serves Always On, and the verb needs the engine: in a
+# home that does not exist yet, with no daemon, a step must reach for it and
+# refuse `engine_stopped`: exit 1, exactly one JSON envelope on stdout, the
+# sentence on stderr, and nothing written but the `secret_key_base` every
+# release boot writes (`holds_only_boot_key`): no settings, no role, no
+# Always On state. This stage runs the artifact the release is about to
+# publish. It runs before the migrate-to-app stage because that stage ends
+# the script on a Linux target.
 always_on_home="$runtime_root/always-on-home"
 always_on_out="$runtime_root/always-on.out"
 always_on_err="$runtime_root/always-on.err"
@@ -735,35 +710,13 @@ printf '%s\n' "$(cat "$always_on_err")"
 [ "$always_on_status" -eq 1 ] ||
   fail "fermix always-on own-server with no daemon must exit 1, got $always_on_status"
 always_on_json="$(cat "$always_on_out")"
-always_on_expected='{"error":{"code":"always_on_unavailable","sentence":"Always On is not in this release of Fermix yet."},"ok":false,"schema_version":1}'
+always_on_expected='{"error":{"code":"engine_stopped","sentence":"Fermix is not running from this home, and this needs it. Start it, then try again."},"ok":false,"schema_version":1}'
 [ "$always_on_json" = "$always_on_expected" ] ||
-  fail "fermix always-on --json in a release must print exactly the always_on_unavailable envelope on stdout, got: $always_on_json"
-grep -Fq "Always On is not in this release of Fermix yet." "$always_on_err" ||
+  fail "fermix always-on --json with no daemon must print exactly the engine_stopped envelope on stdout, got: $always_on_json"
+grep -Fq "Fermix is not running from this home" "$always_on_err" ||
   fail "fermix always-on did not say on stderr why it took no step: $(cat "$always_on_err")"
 holds_only_boot_key "$always_on_home" ||
   fail "fermix always-on wrote more than the boot's secret_key_base into $always_on_home with no daemon: $(ls -A "$always_on_home")"
-
-switched_home="$runtime_root/always-on-switched-home"
-switched_settings='[fermix_core.always_on]
-enabled = true'
-mkdir -m 700 "$switched_home"
-printf '%s\n' "$switched_settings" > "$switched_home/config.toml"
-chmod 600 "$switched_home/config.toml"
-always_on_status=0
-env -u FERMIX_OPIK_ENABLED HOME="$home" FERMIX_HOME="$switched_home" \
-  "$artifact" always-on own-server --json < /dev/null > "$always_on_out" 2> "$always_on_err" ||
-  always_on_status=$?
-printf '%s\n' "$(cat "$always_on_err")"
-[ "$always_on_status" -eq 1 ] ||
-  fail "fermix always-on own-server with the switch and no daemon must exit 1, got $always_on_status"
-always_on_json="$(cat "$always_on_out")"
-always_on_expected='{"error":{"code":"engine_stopped","sentence":"Fermix is not running from this home, and this needs it. Start it, then try again."},"ok":false,"schema_version":1}'
-[ "$always_on_json" = "$always_on_expected" ] ||
-  fail "fermix always-on --json in a home whose settings turn Always On on must print exactly the engine_stopped envelope on stdout, got: $always_on_json"
-grep -Fq "Fermix is not running from this home" "$always_on_err" ||
-  fail "fermix always-on with the switch did not say on stderr why it took no step: $(cat "$always_on_err")"
-[ "$(cat "$switched_home/config.toml")" = "$switched_settings" ] ||
-  fail "fermix always-on changed the settings of $switched_home with no daemon: $(cat "$switched_home/config.toml")"
 
 # ── fermix home export, import and mark-moved, run from this artifact ──────
 # `fermix home` runs without the supervision tree and carries a whole home: it
@@ -819,38 +772,21 @@ grep -Fq "\"$home_dst/bin/signal-cli\"" "$home_dst/config.toml" 2>/dev/null ||
   fail "fermix home import did not move the setting that named the old home to the new one"
 [ ! -e "$home_dst/moved.json" ] || fail "fermix home import marked the restored home moved"
 
-# `fermix home status` is Always On's screen, and a release build offers
-# Always On only in a home whose settings turn it on
-# (`FermixCore.Home.AlwaysOnRelease`), so in a home without the switch it
-# refuses as `fermix always-on` does, before reading anything: exit 1 and
-# exactly the `always_on_unavailable` envelope. An artifact that answers the
-# home's facts there offers Always On to every home. With the switch added
-# to the same home's settings it answers from the home's own files with no
-# daemon, as an Always On server's first boot and its updates read
-# it: exit 0, the role and the update ceiling. When Always On ships, the
-# gate goes and the first half reads the home's files too.
+# `fermix home status` is Always On's screen, which every release build
+# serves: with no daemon it answers from the home's own files, as an Always On
+# server's first boot and its updates read it: exit 0, the role and the
+# update ceiling.
 status_out="$runtime_root/home-status.out"
 status_err="$runtime_root/home-status.err"
 home_status=0
 env -u FERMIX_OPIK_ENABLED HOME="$home" FERMIX_HOME="$home_src" \
   "$artifact" home status --json < /dev/null > "$status_out" 2> "$status_err" || home_status=$?
 printf '%s\n' "$(cat "$status_err")"
-[ "$home_status" -eq 1 ] ||
-  fail "fermix home status in a release must exit 1, got $home_status: $(cat "$status_out")"
-status_expected='{"error":{"code":"always_on_unavailable","sentence":"Always On is not in this release of Fermix yet."},"ok":false,"schema_version":1}'
-[ "$(cat "$status_out")" = "$status_expected" ] ||
-  fail "fermix home status --json in a release must print exactly the always_on_unavailable envelope on stdout, got: $(cat "$status_out")"
-
-printf '\n[fermix_core.always_on]\nenabled = true\n' >> "$home_src/config.toml"
-home_status=0
-env -u FERMIX_OPIK_ENABLED HOME="$home" FERMIX_HOME="$home_src" \
-  "$artifact" home status --json < /dev/null > "$status_out" 2> "$status_err" || home_status=$?
-printf '%s\n' "$(cat "$status_err")"
 [ "$home_status" -eq 0 ] ||
-  fail "fermix home status in a home whose settings turn Always On on must exit 0, got $home_status: $(cat "$status_out")"
+  fail "fermix home status with no daemon must exit 0, got $home_status: $(cat "$status_out")"
 for field in '"ok":true' '"role":"primary"' '"update_ceiling":'; do
   grep -Fq "$field" "$status_out" ||
-    fail "fermix home status --json with the switch must answer the home's role and update ceiling ($field), got: $(cat "$status_out")"
+    fail "fermix home status --json must answer the home's role and update ceiling ($field), got: $(cat "$status_out")"
 done
 
 # Under `--json` stdout is one JSON document and nothing else, and nothing the
@@ -858,10 +794,10 @@ done
 # off stdout, but a release starts the `logger` application after it, which
 # installs its own handler on stdout, so `Fermix.CLI.main/1` moves it again
 # before the verb runs; only the packaged binary boots in that order. The home
-# never started and its settings only turn Always On on, with no daemon: home
-# status reads it from its files and logs that the home's computers could not
-# be listed (no engine runs to list them), on stderr. The whole of stdout is
-# parsed, as a caller reads it.
+# never started and its settings are empty, with no daemon: home status reads
+# it from its files and logs that the home's computers could not be listed (no
+# engine runs to list them), on stderr. The whole of stdout is parsed, as a
+# caller reads it.
 one_ok_json_document() {
   uv run --no-project python -c '
 import json, sys
@@ -878,7 +814,7 @@ if not isinstance(document, dict) or document.get("ok") is not True:
 
 status_fresh_home="$runtime_root/home-status-fresh"
 mkdir -m 700 "$status_fresh_home"
-printf '[fermix_core.always_on]\nenabled = true\n' > "$status_fresh_home/config.toml"
+: > "$status_fresh_home/config.toml"
 chmod 600 "$status_fresh_home/config.toml"
 home_status=0
 env -u FERMIX_OPIK_ENABLED HOME="$home" FERMIX_HOME="$status_fresh_home" \

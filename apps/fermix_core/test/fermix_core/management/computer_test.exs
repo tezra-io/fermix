@@ -4,7 +4,6 @@ defmodule FermixCore.Management.ComputerTest do
   use ExUnit.Case, async: true
 
   alias FermixCore.Computers.Journal
-  alias FermixCore.Home.AlwaysOnRelease
   alias FermixCore.Management.Computer
   alias FermixCore.Management.Placement
   alias FermixCore.Management.Router
@@ -128,12 +127,5 @@ defmodule FermixCore.Management.ComputerTest do
     assert Placement.place("computer.journal.list", %{}) == :device
     assert Placement.place("computer_use.permissions.get", %{}) == :device
     refute Placement.served_forwarded?("computer.journal.list", %{})
-  end
-
-  test "it is gated with Always On", %{home: home} do
-    assert "computer.journal.list" in AlwaysOnRelease.methods()
-
-    assert {:error, :unavailable, %{"method" => "computer.journal.list"}} =
-             route(%{}, operation_opts: [home: home], always_on: false)
   end
 end

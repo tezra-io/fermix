@@ -72,8 +72,7 @@ defmodule FermixCore.Management.SetupStateTest do
     carriers = [
       {:computer, studio},
       {:conflict, [%{studio | connected: true}, %{device_id: "d-8", name: "loft Mac"}]},
-      :none,
-      :mac_only
+      :none
     ]
 
     for carrier <- carriers do

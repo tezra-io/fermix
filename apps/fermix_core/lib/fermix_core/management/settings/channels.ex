@@ -58,12 +58,10 @@ defmodule FermixCore.Management.Settings.Channels do
     Inventory.available_channels(macos? or carried?(opts))
   end
 
-  defp carried?(opts) do
-    Keyword.get_lazy(opts, :imessage_carrier, fn -> IMessage.carrier(macos?: false) end) not in [
-      :none,
-      :mac_only
-    ]
-  end
+  defp carried?(opts),
+    do:
+      Keyword.get_lazy(opts, :imessage_carrier, fn -> IMessage.carrier(macos?: false) end) !=
+        :none
 
   # The one line under a row that needs more than its label. Rows whose label
   # says everything carry none.

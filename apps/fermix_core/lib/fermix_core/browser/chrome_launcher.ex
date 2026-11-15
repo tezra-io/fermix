@@ -454,6 +454,13 @@ defmodule FermixCore.Browser.ChromeLauncher do
       # disabled features above; Chrome ignores a feature name it does not know,
       # so a rename degrades to `webmcp_unavailable` and breaks nothing else.
       "--enable-features=WebMCP",
+      # `--remote-debugging-port=0`, the port an `:auto` profile asks for, makes
+      # Chrome report `navigator.webdriver` true to every page (a real port
+      # number does not), and Google sign-in refuses a browser that reports it
+      # ("This browser or app may not be secure"), as bot walls do. This turns
+      # the report off and keeps the port Chrome picks. Chrome shows its
+      # "unsupported command-line flag" bar under the toolbar for it.
+      "--disable-blink-features=AutomationControlled",
       # Teardown SIGKILLs Chrome, so every relaunch would otherwise open with a
       # "Restore pages?" bubble the agent then has to see past (or click away).
       "--hide-crash-restore-bubble",

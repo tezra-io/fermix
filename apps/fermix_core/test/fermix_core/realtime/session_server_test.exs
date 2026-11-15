@@ -259,7 +259,6 @@ defmodule FermixCore.Realtime.SessionServerTest do
       conversation_key: ConversationRecorder.conversation_key("unknown"),
       realtime?: true,
       source_trust: :operator,
-      always_on: true,
       computers_opts: [role: :primary],
       computers: [
         %Computer{

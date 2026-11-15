@@ -55,8 +55,8 @@ defmodule FermixCore.Management.ComputerSettings do
   @type server :: %{name: String.t() | nil, machine_settings: boolean()}
 
   @doc """
-  Whether this engine has a This computer area: a linked computer where
-  Always On is offered (`Settings.ThisComputer`; `computer?:` for a test).
+  Whether this engine has a This computer area: a linked computer
+  (`Settings.ThisComputer`; `computer?:` for a test).
   """
   @spec area?(keyword()) :: boolean()
   def area?(opts) when is_list(opts), do: ThisComputer.sections(opts) != []

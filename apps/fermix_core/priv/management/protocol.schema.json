@@ -2093,7 +2093,7 @@
         "pane": { "$ref": "#/$defs/settingsPane" },
         "detail_key": { "type": "string" },
         "sentence": {
-          "description": "The engine's own sentence for this failure where it publishes one, which a client shows in place of its own words for the detail_key: the iMessage rows channel:imessage:helper, channel:imessage:carrier, channel:imessage:mac_only, channel:imessage:conflict and channel:imessage:away, which name the Mac that carries Messages where the engine knows it. Null on every other row, whose words each client keeps by its detail_key. Absent from an engine older than it, which a client reads as null.",
+          "description": "The engine's own sentence for this failure where it publishes one, which a client shows in place of its own words for the detail_key: the iMessage rows channel:imessage:helper, channel:imessage:carrier, channel:imessage:conflict and channel:imessage:away, which name the Mac that carries Messages where the engine knows it. Null on every other row, whose words each client keeps by its detail_key. Absent from an engine older than it, which a client reads as null.",
           "type": ["string", "null"],
           "minLength": 1
         }

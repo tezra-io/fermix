@@ -31,16 +31,14 @@ defmodule FermixChannels.Gateway.ChannelRegistry do
     channel entirely; message content is always model input. Absent means `true`.
   - `platform: :macos` — the transport only exists on a Mac (iMessage reads the
     Messages of a Mac). Elsewhere it is never started and never reported as
-    missing an owner, unless it is `carried: true` and this engine is one a
-    Mac of the home can carry it for (M97 §6.4): one where Always On is
-    offered, since only there does a home have computers. Then it runs here
-    and its own helper finds the Mac that carries it, live
+    missing an owner, unless it is `carried: true`, which a Mac of the home
+    can carry for this engine (M97 §6.4). Then it runs here and its own
+    helper finds the Mac that carries it, live
     (`IMessage.ComputerHelper`, `FermixCore.IMessage.carrier/1`): at a
     server's start no computer has connected yet, and right after a move none
     has said what it offers, so a carrier read here would never start it.
-    Absent means every platform. The host platform and whether a Mac may
-    carry it are injected (`macos?:`, `carried?:`) and read in one place
-    only.
+    Absent means every platform. The host platform is injected (`macos?:`)
+    and read in one place only.
   - `helper: Module` — the transport runs a helper that must be on disk
     (`Module.installed?/0`). Without it the channel is not started and
     `missing_helpers/1` names it, so a pin that moved with a release never
@@ -344,33 +342,24 @@ defmodule FermixChannels.Gateway.ChannelRegistry do
 
   @doc """
   Whether a registry entry can run on the host described by `opts`: this
-  host is a Mac, or a Mac of the home carries a `carried` channel. The host
-  must be injected (`macos?: boolean`, and `carried?: boolean`, false when
-  absent); this function never reads the OS or the home.
+  host is a Mac, or the channel is `carried`, which a Mac of the home carries
+  for any other host. The host must be injected (`macos?: boolean`); this
+  function never reads the OS or the home.
   """
   @spec platform_ok?(channel(), keyword()) :: boolean()
   def platform_ok?(channel, opts) when is_map(channel) and is_list(opts) do
     case Map.get(channel, :platform) do
       nil -> true
-      :macos -> Keyword.fetch!(opts, :macos?) == true or carried?(channel, opts)
+      :macos -> Keyword.fetch!(opts, :macos?) == true or Map.get(channel, :carried, false)
     end
   end
 
-  defp carried?(channel, opts),
-    do: Map.get(channel, :carried, false) and Keyword.get(opts, :carried?, false) == true
-
   defp find(name), do: Enum.find(channels(), fn channel -> channel.name == name end)
 
-  # The one place the host platform is read from the OS, and whether a Mac of
-  # the home may carry iMessage here (Always On offered: only then are there
-  # computers); every caller can inject both instead.
-  defp host(opts) do
-    macos? = Keyword.get_lazy(opts, :macos?, fn -> match?({:unix, :darwin}, :os.type()) end)
-    [macos?: macos?, carried?: not macos? and host_carried?(opts)]
-  end
-
-  defp host_carried?(opts),
-    do: Keyword.get_lazy(opts, :carried?, &FermixCore.IMessage.carried_off_mac?/0)
+  # The one place the host platform is read from the OS; every caller can
+  # inject it instead.
+  defp host(opts),
+    do: [macos?: Keyword.get_lazy(opts, :macos?, fn -> match?({:unix, :darwin}, :os.type()) end)]
 
   defp trust_of(channel) when is_map(channel), do: Map.get(channel, :trust)
 

@@ -319,7 +319,6 @@ class VerifyStandaloneTest(unittest.TestCase):
         result = self._run("macos_aarch64")
 
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertIn("fermix computer join: Always On is not in this release", result.stdout)
         self.assertIn("fermix computer join: No code was read.", result.stdout)
         self.assertIn("the keychain refused the request.", result.stdout)
         self.assertIn("This computer joins your Fermix on verify-server", result.stdout)
@@ -331,7 +330,7 @@ class VerifyStandaloneTest(unittest.TestCase):
         result = self._run("macos_aarch64")
 
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("in a home without Always On must exit 1, got 64", result.stderr)
+        self.assertIn("computer join with no code on stdin must exit 1, got 64", result.stderr)
 
     def test_rejects_a_join_that_does_not_read_its_code_from_stdin(self):
         self._write_artifact(create_disclaim=True, computer_join="ignores_stdin")
@@ -361,14 +360,6 @@ class VerifyStandaloneTest(unittest.TestCase):
         self.assertIn(
             "computer join ran its keychain helper under a command host", result.stderr
         )
-
-    def test_rejects_a_join_that_ignores_the_always_on_switch(self):
-        self._write_artifact(create_disclaim=True, computer_join="ignores_switch")
-
-        result = self._run("macos_aarch64")
-
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("in a home without Always On must exit 1, got 0", result.stderr)
 
     # A fresh login Keychain answers exit 44 for the item it does not hold
     # yet: a verb that reads that as a refusal can make no computer's key.
@@ -670,48 +661,26 @@ class VerifyStandaloneTest(unittest.TestCase):
 
     # ── the fermix always-on no-daemon stage ──────────────────────────────
 
-    # A release build offers Always On only in a home whose settings turn it
-    # on (`Home.AlwaysOnRelease`): elsewhere the verb refuses in one sentence
-    # before it reads anything, and in such a home it reaches for the engine.
-    def test_always_on_in_a_release_refuses_unreleased_and_writes_nothing(self):
+    # Every release build serves Always On, and its verb needs the engine: with
+    # no daemon a step refuses engine_stopped and writes nothing.
+    def test_always_on_in_a_release_reaches_for_the_engine_and_writes_nothing(self):
         self._write_artifact(create_disclaim=True)
 
         result = self._run("macos_aarch64")
 
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("fermix always-on: Always On is not in this release of Fermix yet.", result.stdout)
         self.assertIn("fermix always-on: Fermix is not running from this home", result.stdout)
+        self.assertNotIn("not in this release", result.stdout)
 
-    # The class the switch's half exists for: a release that does not read
-    # the switch from the home's own settings file.
-    def test_rejects_an_always_on_that_ignores_the_home_switch(self):
-        self._write_artifact(create_disclaim=True, always_on="ignores_switch")
-
-        result = self._run("macos_aarch64")
-
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn(
-            "whose settings turn Always On on must print exactly the engine_stopped envelope",
-            result.stderr,
-        )
-
-    def test_rejects_an_always_on_that_rewrites_the_switched_settings(self):
-        self._write_artifact(create_disclaim=True, always_on="rewrites_settings")
+    # A release that still refuses Always On, as every build did before it
+    # shipped.
+    def test_rejects_a_release_whose_always_on_still_refuses(self):
+        self._write_artifact(create_disclaim=True, always_on="refuses_unreleased")
 
         result = self._run("macos_aarch64")
 
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("fermix always-on changed the settings of", result.stderr)
-
-    # The class the release gate exists for: a release whose build carries
-    # Always On, which reaches for the engine.
-    def test_rejects_a_release_whose_always_on_is_compiled_in(self):
-        self._write_artifact(create_disclaim=True, always_on="compiled_in")
-
-        result = self._run("macos_aarch64")
-
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("must print exactly the always_on_unavailable envelope", result.stderr)
+        self.assertIn("with no daemon must print exactly the engine_stopped envelope", result.stderr)
 
     # The release that lacks the verb: the dispatcher's unknown-command exit.
     def test_rejects_an_artifact_without_the_always_on_verb(self):
@@ -738,7 +707,7 @@ class VerifyStandaloneTest(unittest.TestCase):
         result = self._run("macos_aarch64")
 
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("must print exactly the always_on_unavailable envelope", result.stderr)
+        self.assertIn("must print exactly the engine_stopped envelope", result.stderr)
 
     def test_rejects_always_on_that_does_not_say_why_on_stderr(self):
         self._write_artifact(create_disclaim=True, always_on="silent")
@@ -804,29 +773,15 @@ class VerifyStandaloneTest(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("fermix home mark-moved wrote no marker", result.stderr)
 
-    # A release build has no Always On yet, and home status is its screen:
-    # the verb refuses as fermix always-on does. One that answers the home's
-    # facts instead has Always On compiled in.
-    def test_rejects_a_release_whose_home_status_answers(self):
-        self._write_artifact(create_disclaim=True, home="status_answers")
+    # Home status is Always On's screen, which every release build serves: a
+    # release that still refuses it, as every build did before it shipped.
+    def test_rejects_a_release_whose_home_status_still_refuses(self):
+        self._write_artifact(create_disclaim=True, home="status_refuses_unreleased")
 
         result = self._run("macos_aarch64")
 
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("fermix home status in a release must exit 1, got 0", result.stderr)
-
-    # With the switch in the home's settings the verb answers from the home's
-    # own files, as an Always On server's first boot and its updates read it.
-    def test_rejects_a_home_status_that_ignores_the_switch(self):
-        self._write_artifact(create_disclaim=True, home="status_ignores_switch")
-
-        result = self._run("macos_aarch64")
-
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn(
-            "fermix home status in a home whose settings turn Always On on must exit 0, got 1",
-            result.stderr,
-        )
+        self.assertIn("fermix home status with no daemon must exit 0, got 1", result.stderr)
 
     def test_rejects_a_home_status_that_answers_no_update_ceiling(self):
         self._write_artifact(create_disclaim=True, home="status_without_ceiling")
@@ -856,10 +811,7 @@ class VerifyStandaloneTest(unittest.TestCase):
         result = self._run("macos_aarch64")
 
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn(
-            "fermix home status --json in a release must print exactly the always_on_unavailable envelope",
-            result.stderr,
-        )
+        self.assertIn("fermix home status with no daemon must exit 0, got 1", result.stderr)
 
     # The class the enroll stage exists for: the packaged binary taking a code
     # file that holds no enrollment code and making the home a candidate anyway.
@@ -1378,7 +1330,7 @@ class VerifyStandaloneTest(unittest.TestCase):
         browser_bridge="works",
         settings="refuses",
         upgrade="checks",
-        always_on="refuses",
+        always_on="stops",
         home="carries",
         status="reads_lock",
         iroh_helper="pinned",
@@ -1574,31 +1526,24 @@ class VerifyStandaloneTest(unittest.TestCase):
             return argv + "  exit 0\n"
         raise ValueError(f"unknown upgrade behaviour: {upgrade}")
 
-    # The real verb's shape in a release with no daemon: in a home whose
-    # settings carry Always On's switch, the engine_stopped envelope alone on
-    # stdout and the sentence on stderr; in any other, the
-    # always_on_unavailable envelope; exit 1 and nothing written either way.
-    # The argv is pinned so a stage that stops asking for `--json` cannot pass
-    # against it.
+    # The real verb's shape in a release with no daemon: the engine_stopped
+    # envelope alone on stdout and the sentence on stderr, exit 1 and nothing
+    # written. The argv is pinned so a stage that stops asking for `--json`
+    # cannot pass against it.
     def _always_on_behaviour(self, always_on):
         if always_on == "unknown_verb":
             return "  printf 'fermix: unknown command: always-on\\n' >&2\n  exit 2\n"
         argv = '  [ "$*" = "always-on own-server --json" ] || exit 64\n'
         envelope, said = self._always_on_refusal(
-            "always_on_unavailable", "Always On is not in this release of Fermix yet."
-        )
-        stopped, stopped_said = self._always_on_refusal(
             "engine_stopped",
             "Fermix is not running from this home, and this needs it. Start it, then try again.",
         )
-        stops = stopped + stopped_said + "  exit 1\n"
-        switched = {
-            "ignores_switch": envelope + said + "  exit 1\n",
-            "rewrites_settings": '  printf \'enabled = false\\n\' > "$FERMIX_HOME/config.toml"\n' + stops,
-        }.get(always_on, stops)
+        unreleased, unreleased_said = self._always_on_refusal(
+            "always_on_unavailable", "Always On is not in this release of Fermix yet."
+        )
         shapes = {
-            "refuses": envelope + said + "  exit 1\n",
-            "compiled_in": stops,
+            "stops": envelope + said + "  exit 1\n",
+            "refuses_unreleased": unreleased + unreleased_said + "  exit 1\n",
             "acts": '  printf \'{"ok":true,"result":{}}\\n\'\n' + said + "  exit 0\n",
             "noisy_stdout": "  printf 'boot notice nobody asked for\\n'\n" + envelope + said + "  exit 1\n",
             "silent": envelope + "  exit 1\n",
@@ -1606,12 +1551,10 @@ class VerifyStandaloneTest(unittest.TestCase):
             + envelope
             + said
             + "  exit 1\n",
-            "ignores_switch": envelope + said + "  exit 1\n",
-            "rewrites_settings": envelope + said + "  exit 1\n",
         }
         if always_on not in shapes:
             raise ValueError(f"unknown always-on behaviour: {always_on}")
-        return argv + self._SWITCHED + "  then\n" + switched + "  fi\n" + shapes[always_on]
+        return argv + shapes[always_on]
 
     # What every boot of the real release writes before any verb runs
     # (`config/runtime.exs`, `SecretKeyBase.read_or_create!/1`): the home the
@@ -1621,13 +1564,6 @@ class VerifyStandaloneTest(unittest.TestCase):
         '  mkdir -p "$FERMIX_HOME"\n'
         "  printf 'invented-boot-key\\n' > \"$FERMIX_HOME/secret_key_base\"\n"
         "fi\n"
-    )
-
-    # Whether the home the environment names turns Always On on, read from its
-    # settings file as the real verbs read it.
-    _SWITCHED = (
-        '  if grep -Fqx \'[fermix_core.always_on]\' "$FERMIX_HOME/config.toml" 2>/dev/null &&\n'
-        '    grep -Fqx \'enabled = true\' "$FERMIX_HOME/config.toml"\n'
     )
 
     # One refusal's envelope on stdout and its sentence on stderr, as the
@@ -1761,24 +1697,15 @@ class VerifyStandaloneTest(unittest.TestCase):
             '    printf \'{"error":{"code":"home_status_unavailable","sentence":"Fermix could not '
             'read this home\'"\'"\'s status."},"ok":false,"schema_version":1}\\n\'\n'
         )
-        switched_body = {
-            "status_ignores_switch": refusal + "    exit 1\n",
+        status_body = {
+            "status_refuses_unreleased": refusal + "    exit 1\n",
+            "status_other_refusal": other + "    exit 1\n",
             "status_without_ceiling": no_ceiling,
             "status_logs_on_stdout": logs_on_stdout,
         }.get(home, answers)
-        if home == "status_answers":
-            status_body = answers
-        elif home == "status_other_refusal":
-            status_body = other + "    exit 1\n"
-        else:
-            status_body = refusal + "    exit 1\n"
         status = (
             '  if [ "$2" = "status" ]; then\n'
             '    [ "$3" = "--json" ] || exit 64\n'
-            + self._SWITCHED
-            + "  then\n"
-            + switched_body
-            + "  fi\n"
             + status_body
             + "  fi\n"
         )
@@ -1793,9 +1720,8 @@ class VerifyStandaloneTest(unittest.TestCase):
             "carries",
             "marks_twice",
             "not_moved",
-            "status_answers",
+            "status_refuses_unreleased",
             "status_other_refusal",
-            "status_ignores_switch",
             "status_without_ceiling",
             "status_logs_on_stdout",
             "enroll_accepts",
@@ -1879,21 +1805,14 @@ class VerifyStandaloneTest(unittest.TestCase):
             )
         raise ValueError(f"unknown plugins clear behaviour: {plugins_clear}")
 
-    # The real verb's shape: it takes no argument; refused where the home's
-    # settings do not turn Always On on; else it reads the code from the first
-    # line of stdin, refused when there is none, then asks the keychain for
+    # The real verb's shape: it takes no argument; it reads the code from the
+    # first line of stdin, refused when there is none, then asks the keychain for
     # this computer's key, takes "no such item" (exit 44) as a key to make,
     # stores one, reads it back, writes the join at mode 0600 and makes the
     # engine a device. A keychain that answers anything else is refused in the
     # verb's own sentence.
     def _computer_join_behaviour(self, computer_join):
         argv = '  [ "$*" = "computer join" ] || exit 64\n'
-        gate = (
-            '  if ! grep -Fq \'enabled = true\' "$FERMIX_HOME/config.toml" 2>/dev/null; then\n'
-            "    printf 'fermix computer join: Always On is not in this release of Fermix yet.\\n' >&2\n"
-            "    exit 1\n"
-            "  fi\n"
-        )
         read_code = (
             '  IFS= read -r code || code=""\n'
             '  if [ -z "$code" ]; then\n'
@@ -1937,7 +1856,7 @@ class VerifyStandaloneTest(unittest.TestCase):
             " digits show there.\\n'\n"
             "  exit 0\n"
         )
-        coded = argv + gate + read_code
+        coded = argv + read_code
         if computer_join == "joins":
             return coded + service + find + refused + store + join + role + joined
         if computer_join == "needs_command_host":
@@ -1946,16 +1865,14 @@ class VerifyStandaloneTest(unittest.TestCase):
                 " FermixCore.CommandHost.Supervisor is not running.\\n' >&2\n"
                 "  exit 1\n"
             )
-        if computer_join == "ignores_switch":
-            return argv + read_code + service + find + refused + store + join + role + joined
         # The form the code once had: an argument, readable by every process.
         if computer_join == "takes_argument":
             old_argv = '  [ "$1 $2" = "computer join" ] && [ "$#" -eq 3 ] || exit 64\n'
-            return old_argv + gate + service + find + refused + store + join + role + joined
+            return old_argv + service + find + refused + store + join + role + joined
         if computer_join == "ignores_stdin":
-            return argv + gate + service + find + refused + store + join + role + joined
+            return argv + service + find + refused + store + join + role + joined
         if computer_join == "reads_code_late":
-            return argv + gate + service + find + read_code + refused + store + join + role + joined
+            return argv + service + find + read_code + refused + store + join + role + joined
         # The defect this stage caught: a keychain that holds no item yet read
         # as one that refused, so no computer's first key could be made.
         if computer_join == "absent_is_refusal":

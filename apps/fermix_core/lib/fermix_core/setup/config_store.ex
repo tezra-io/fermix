@@ -21,7 +21,6 @@ defmodule FermixCore.Setup.ConfigStore do
   alias FermixCore.Cues.Config, as: CuesConfig
   alias FermixCore.Cues.SourceManager
   alias FermixCore.Harness.Config, as: HarnessConfig
-  alias FermixCore.Home.AlwaysOnRelease
   alias FermixCore.Home.Archive.ConfigText
   alias FermixCore.Home.Candidate
   alias FermixCore.Home.DesktopLink
@@ -169,7 +168,6 @@ defmodule FermixCore.Setup.ConfigStore do
         secret_store: Application.get_env(:fermix_core, :secret_store, :keyring),
         engine: Application.get_env(:fermix_core, :engine, []),
         snapshots: Application.get_env(:fermix_core, :snapshots, []),
-        always_on: Application.get_env(:fermix_core, :always_on, []),
         computer: Application.get_env(:fermix_core, :computer, [])
       ],
       sandbox: Application.get_env(:fermix_core, :sandbox, SandboxConfig.default()),
@@ -453,23 +451,6 @@ defmodule FermixCore.Setup.ConfigStore do
 
     case File.read(file) do
       {:ok, contents} -> decode_section(contents, file, "snapshots", &SnapshotConfig.normalize/1)
-      {:error, :enoent} -> {:ok, []}
-      {:error, reason} -> {:error, {:config, file, reason}}
-    end
-  end
-
-  @doc """
-  The `[fermix_core.always_on]` section of the settings file under `home`,
-  decoded and normalised alone (`Home.AlwaysOnRelease.normalize/1`), as
-  `engine_config/1` reads the engine section: for `fermix always-on` and
-  `fermix home status`, which ask it before anything else.
-  """
-  @spec always_on_config(Path.t()) :: {:ok, keyword()} | {:error, {:config, Path.t(), term()}}
-  def always_on_config(home) when is_binary(home) and home != "" do
-    file = Path.join(home, "config.toml")
-
-    case File.read(file) do
-      {:ok, contents} -> decode_section(contents, file, "always_on", &AlwaysOnRelease.normalize/1)
       {:error, :enoent} -> {:ok, []}
       {:error, reason} -> {:error, {:config, file, reason}}
     end
@@ -839,7 +820,6 @@ defmodule FermixCore.Setup.ConfigStore do
     apply_secret_store_config(Keyword.get(persisted.fermix_core, :secret_store, :keyring))
     apply_engine_config(Keyword.get(persisted.fermix_core, :engine, []))
     apply_snapshots_config(Keyword.get(persisted.fermix_core, :snapshots, []))
-    apply_always_on_config(Keyword.get(persisted.fermix_core, :always_on, []))
     apply_computer_config(Keyword.get(persisted.fermix_core, :computer, []))
     apply_sandbox_config(Map.get(persisted, :sandbox, SandboxConfig.default()))
 
@@ -1261,11 +1241,6 @@ defmodule FermixCore.Setup.ConfigStore do
           |> Map.get(:fermix_core, [])
           |> Keyword.get(:snapshots, [])
           |> SnapshotConfig.to_keyword(),
-        always_on:
-          snapshot
-          |> Map.get(:fermix_core, [])
-          |> Keyword.get(:always_on, [])
-          |> AlwaysOnRelease.to_keyword(),
         computer:
           snapshot
           |> Map.get(:fermix_core, [])
@@ -1431,7 +1406,6 @@ defmodule FermixCore.Setup.ConfigStore do
         secret_store: :keyring,
         engine: [],
         snapshots: [],
-        always_on: [],
         computer: []
       ],
       sandbox: SandboxConfig.default(),
@@ -1717,18 +1691,10 @@ defmodule FermixCore.Setup.ConfigStore do
     :ok
   end
 
-  # Replace (not merge), re-normalized on the way in like the snapshots
-  # section. `hello` and the router read it at every call
-  # (`Home.AlwaysOnRelease.available?/0`).
   # What Fermix on the server may use on this computer (M97 §7.2), read at
   # each request and by the offers reporter, so it is live.
   defp apply_computer_config(computer_config) do
     Application.put_env(:fermix_core, :computer, ComputerSwitches.normalize(computer_config))
-  end
-
-  defp apply_always_on_config(always_on_config) do
-    Application.put_env(:fermix_core, :always_on, AlwaysOnRelease.normalize(always_on_config))
-    :ok
   end
 
   # Where new secrets are written: the OS keyring (the default and the
@@ -1994,7 +1960,6 @@ defmodule FermixCore.Setup.ConfigStore do
     secret_store = fermix_core |> Keyword.get(:secret_store, :keyring) |> normalize_secret_store()
     engine = Keyword.get(fermix_core, :engine, [])
     snapshots = Keyword.get(fermix_core, :snapshots, [])
-    always_on = Keyword.get(fermix_core, :always_on, [])
     channels = Map.get(snapshot, :fermix_channels, [])
     web = snapshot |> Map.get(:fermix_web, []) |> normalize_web() |> web_to_keyword()
 
@@ -2010,7 +1975,6 @@ defmodule FermixCore.Setup.ConfigStore do
       ),
       render_section(["fermix_core", "engine"], engine),
       render_section(["fermix_core", "snapshots"], snapshots),
-      render_section(["fermix_core", "always_on"], always_on),
       render_section(["fermix_core", "agent"], agent),
       Enum.map(Descriptor.ids(), fn id ->
         render_section(
@@ -2412,6 +2376,8 @@ defmodule FermixCore.Setup.ConfigStore do
   end
 
   defp normalize_document(document) do
+    warn_retired_always_on(get_in(document, ["fermix_core", "always_on"]))
+
     %{
       fermix_core: [
         providers:
@@ -2451,7 +2417,6 @@ defmodule FermixCore.Setup.ConfigStore do
         secret_store: normalize_secret_store(get_in(document, ["fermix_core", "secret_store"])),
         engine: Role.normalize(get_in(document, ["fermix_core", "engine"])),
         snapshots: SnapshotConfig.normalize(get_in(document, ["fermix_core", "snapshots"])),
-        always_on: AlwaysOnRelease.normalize(get_in(document, ["fermix_core", "always_on"])),
         computer: ComputerSwitches.normalize(get_in(document, ["fermix_core", "computer"]))
       ],
       sandbox: SandboxConfig.normalize(Map.get(document, "sandbox")),
@@ -2468,6 +2433,20 @@ defmodule FermixCore.Setup.ConfigStore do
       ],
       fermix_web: normalize_web(get_in(document, ["fermix_web"]))
     }
+  end
+
+  # Always On's test switch was retired when every build came to serve
+  # Always On. A config.toml that still carries its table must keep booting:
+  # the table is accepted, named once at warning, and dropped, so the next
+  # settings save writes the file without it (the retired FCM table's
+  # precedent).
+  defp warn_retired_always_on(nil), do: :ok
+
+  defp warn_retired_always_on(_switch) do
+    Logger.warning(
+      "config.toml [fermix_core.always_on] is retired: every build of Fermix serves Always " <>
+        "On, so the table is ignored, and the next settings save writes the file without it."
+    )
   end
 
   defp put_value(document, [], key, value), do: Map.put(document, key, value)

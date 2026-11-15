@@ -416,16 +416,13 @@ summary offers `update` in place of Move back and Restore here.
 
 ## The Always On summary
 
-**Not in a release build yet.** A build compiled for production serves no
-Always On: `hello` lists none of `home.status`, `home.act`,
-`home.enroll.approve`, `home.enroll.deny`, `home.restart`, `computers.rename`,
-`computer.join.start`, `computer.join.cancel`, `computer.disconnect`,
-`computer.journal.list` and `computer.screen.stop` (in `methods` or
-`minimum_versions`), and each is refused
-by name, `unavailable` {`capability`: `always_on`, `method`, `sentence`:
-"Always On is not in this release of Fermix yet."}. A client shows no Always
-On where `hello` lists no `home.act`. Every other `home.*` method is served
-as ever.
+**A client shows no Always On where `hello` lists no `home.act`**: a
+released engine from before Always On shipped lists none of `home.status`,
+`home.act`, `home.enroll.approve`, `home.enroll.deny`, `home.restart`,
+`computers.rename`, `computer.join.start`, `computer.join.cancel`,
+`computer.disconnect`, `computer.journal.list` and `computer.screen.stop`,
+and refuses each by name with `unavailable` {`capability`: `always_on`}.
+Every engine since serves all of them.
 
 **An app from before the pane's draft 3** (one that knows `learn_more`,
 `detail.actions`, `detail.data` and `detail.review`) keeps working under
@@ -1558,9 +1555,9 @@ Notes that the shapes alone do not carry:
   it, so a client keeps reading `gating` rather than assuming it. A failure
   also carries `sentence`, the engine's own words where it publishes them,
   which a client shows in place of its own for the `detail_key`: the iMessage
-  rows (`channel:imessage:helper`, `:carrier`, `:mac_only`, `:conflict` and
-  `:away`), which name the Mac of the home that carries Messages where the
-  engine knows it ("studio-mac, the Mac that carries Messages, is asleep or
+  rows (`channel:imessage:helper`, `:carrier`, `:conflict` and `:away`),
+  which name the Mac of the home that carries Messages where the engine
+  knows it ("studio-mac, the Mac that carries Messages, is asleep or
   offline."). It is null on every other row, whose words a client keeps by
   its key, and absent from an engine before it, which a client reads as null.
 - **Restart truth has one owner.** `restart.required` and `restart.reasons` come

@@ -97,8 +97,7 @@ defmodule FermixCore.Readiness do
   # the iMessage rows, which say what only the engine knows, the Mac of the
   # home that carries Messages. Every other row's words are each surface's.
   @published_sentences ~w(channel:imessage:helper channel:imessage:carrier
-                          channel:imessage:mac_only channel:imessage:conflict
-                          channel:imessage:away)
+                          channel:imessage:conflict channel:imessage:away)
   # The rows that say a channel's computer is away rather than that setup is
   # owed (M97 D4).
   @away_keys ["channel:imessage:away"]
@@ -186,7 +185,6 @@ defmodule FermixCore.Readiness do
           invalid_auth_mode_action("provider:anthropic", "subscription"),
           imessage_helper_row(),
           imessage_carrier_row(:none),
-          imessage_carrier_row(:mac_only),
           imessage_carrier_row({:conflict, ["loft Mac", "studio Mac"]}),
           imessage_carrier_row({:away, "studio Mac"}),
           slack_socket_row()
@@ -541,7 +539,6 @@ defmodule FermixCore.Readiness do
   defp carrier, do: IMessage.carrier(macos?: false)
 
   defp carrier_failure(:none), do: imessage_carrier_row(:none)
-  defp carrier_failure(:mac_only), do: imessage_carrier_row(:mac_only)
 
   defp carrier_failure({:conflict, computers}),
     do: imessage_carrier_row({:conflict, Enum.map(computers, & &1.name)})
@@ -553,9 +550,6 @@ defmodule FermixCore.Readiness do
 
   defp imessage_carrier_row(:none),
     do: imessage_row(IMessage.none_sentence(), "channel:imessage:carrier")
-
-  defp imessage_carrier_row(:mac_only),
-    do: imessage_row(IMessage.mac_only_sentence(), "channel:imessage:mac_only")
 
   defp imessage_carrier_row({:conflict, names}),
     do: imessage_row(IMessage.conflict_sentence(names), "channel:imessage:conflict")

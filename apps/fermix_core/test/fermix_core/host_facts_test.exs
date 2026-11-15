@@ -247,7 +247,6 @@ defmodule FermixCore.HostFactsTest do
     test "on an Always On server the line names the owner's computers, as the tools do" do
       server = [
         role: :primary,
-        always_on: true,
         home: "/nonexistent/fermix-home",
         server_primary: fn "/nonexistent/fermix-home" -> :server end
       ]

@@ -58,7 +58,7 @@ defmodule FermixCore.Computers.ArgumentTest do
     do: %Computer{device_id: "c3", name: "attic Mac", standing: :settings_only, offers: []}
 
   defp owner(computers),
-    do: %{source_trust: :operator, always_on: true, computers: computers}
+    do: %{source_trust: :operator, computers: computers}
 
   defp computer_property(capability),
     do: capability.parameters |> Map.get(:properties, %{}) |> Map.get(:computer)
@@ -92,10 +92,9 @@ defmodule FermixCore.Computers.ArgumentTest do
     assert computer_property(Argument.add(Builtin.from_tool_module(WebFetch), [studio()])) == nil
   end
 
-  test "only an owner's turn where Always On is offered sees the home's computers" do
+  test "only an owner's turn sees the home's computers" do
     assert Argument.computers(owner([studio()])) == [studio()]
     assert Argument.computers(%{owner([studio()]) | source_trust: :guest}) == []
-    assert Argument.computers(%{owner([studio()]) | always_on: false}) == []
     assert Argument.computers(Map.delete(owner([studio()]), :source_trust)) == []
   end
 
@@ -139,7 +138,6 @@ defmodule FermixCore.Computers.ArgumentTest do
     for context <- [
           %{source_trust: :guest, computers_opts: [link: no_link, role: :primary]},
           %{source_trust: :operator, computers_opts: [link: no_link, role: :device]},
-          %{source_trust: :operator, always_on: false, computers_opts: [link: no_link]},
           %{computers_opts: [link: no_link, role: :primary]}
         ] do
       assert Argument.computers(context) == []

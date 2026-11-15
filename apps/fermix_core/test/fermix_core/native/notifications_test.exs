@@ -376,12 +376,11 @@ defmodule FermixCore.Native.NotificationsTest do
 
   describe "placement/1 (M99 §10.1)" do
     # The three facts, each a seam that says when it was read.
-    defp facts(role, always_on, check) do
+    defp facts(role, check) do
       test = self()
 
       [
         role: role,
-        always_on: always_on,
         home: "/nonexistent/fermix-home",
         server_primary: fn "/nonexistent/fermix-home" ->
           send(test, :device_list_read)
@@ -391,25 +390,20 @@ defmodule FermixCore.Native.NotificationsTest do
     end
 
     test "an Always On server's primary rings on the owner's computers" do
-      assert Notifications.placement(facts(:primary, true, :server)) == {:ok, :computers}
+      assert Notifications.placement(facts(:primary, :server)) == {:ok, :computers}
     end
 
     test "a primary that is no server's rings here" do
       for check <- [{:not_server, :macos}, {:not_server, :no_desktop}] do
-        assert Notifications.placement(facts(:primary, true, check)) == {:ok, :here}
+        assert Notifications.placement(facts(:primary, check)) == {:ok, :here}
       end
-    end
-
-    test "without Always On a primary rings here, and its device list is not read" do
-      assert Notifications.placement(facts(:primary, false, :server)) == {:ok, :here}
-      refute_received :device_list_read
     end
 
     # A desktop whose home moved keeps its own desktop row in the retired copy,
     # which would read as a server's: its role decides first.
     test "a device, a candidate and an engine with no boot ring here, reading nothing" do
       for role <- [:device, :candidate, nil] do
-        assert Notifications.placement(facts(role, true, :server)) == {:ok, :here}, inspect(role)
+        assert Notifications.placement(facts(role, :server)) == {:ok, :here}, inspect(role)
       end
 
       refute_received :device_list_read
@@ -417,9 +411,7 @@ defmodule FermixCore.Native.NotificationsTest do
 
     test "a device list that cannot be read is an error in a clause, never here" do
       assert {:error, clause} =
-               Notifications.placement(
-                 facts(:primary, true, {:not_server, {:device_list, :eacces}})
-               )
+               Notifications.placement(facts(:primary, {:not_server, {:device_list, :eacces}}))
 
       assert clause =~ "device list could not be read"
       refute String.ends_with?(clause, ".")
@@ -455,7 +447,6 @@ defmodule FermixCore.Native.NotificationsTest do
       unread = [
         provider: :dbus,
         role: :primary,
-        always_on: true,
         server_primary: fn _home -> {:not_server, {:device_list, :eacces}} end,
         home: "/nonexistent/fermix-home"
       ]
@@ -471,15 +462,13 @@ defmodule FermixCore.Native.NotificationsTest do
       assert Notifications.resolve(
                host: @brew_mac,
                server_primary: fn _home -> flunk("the device list was read") end,
-               role: :primary,
-               always_on: true
+               role: :primary
              ) == {:error, @brew_sentence}
     end
 
     test "offered?/1 is the build's fact alone: no placement is read" do
       never = [
         role: :primary,
-        always_on: true,
         server_primary: fn _home -> flunk("the device list was read") end
       ]
 
@@ -495,7 +484,6 @@ defmodule FermixCore.Native.NotificationsTest do
     defp mac_primary do
       [
         role: :primary,
-        always_on: true,
         home: "/nonexistent/fermix-home",
         server_primary: fn _home -> {:not_server, :macos} end,
         computers: [rows: fn -> flunk("the home's computers were listed") end],

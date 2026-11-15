@@ -247,27 +247,10 @@ defmodule FermixWebWeb.SetupLiveAlwaysOnTest do
     end
   end
 
-  # Always On is not in a release build yet: there the page lists no Always
-  # On tab, opens none, and takes no Always On event.
-  describe "in a build without Always On" do
-    test "the page has no Always On tab, opens another, and an Always On event does nothing",
-         %{conn: conn, link: link, seams: seams} do
-      put_seams(seams, available: false)
-      {:ok, view, html} = live(conn, ~p"/setup?tab=always_on")
-
-      refute html =~ ~s(phx-value-tab="always_on")
-      refute html =~ ~s(id="always-on-pane")
-
-      render_click(view, "always_on_press", %{"id" => "own_server", "key" => "k"})
-      refute render(view) =~ ~s(id="always-on-step")
-      assert Agent.get(link, & &1.enrollment) == nil
-    end
-
-    test "in a build with it, the tab is listed", %{conn: conn, seams: seams} do
-      put_seams(seams, available: true)
-      {:ok, _view, html} = live(conn, ~p"/setup")
-      assert html =~ ~s(phx-value-tab="always_on")
-    end
+  test "the page lists the Always On tab", %{conn: conn, seams: seams} do
+    put_seams(seams)
+    {:ok, _view, html} = live(conn, ~p"/setup")
+    assert html =~ ~s(phx-value-tab="always_on")
   end
 
   describe "a server of the owner's own" do
@@ -1300,14 +1283,12 @@ defmodule FermixWebWeb.SetupLiveAlwaysOnTest do
   # this engine reaches its server, and how long Move now's overlay leads.
   defp put_seams(seams, overrides \\ [], forwarding \\ fn -> [] end) do
     {watch, overrides} = Keyword.pop(overrides, :status_watch, :setup_always_on_no_watch)
-    {available, overrides} = Keyword.pop(overrides, :available, true)
 
     Application.put_env(:fermix_web, :always_on,
       home: Keyword.merge(home_seams(seams), overrides),
       status_watch: watch,
       forwarding: forwarding,
-      overlay_ms: 0,
-      available: available
+      overlay_ms: 0
     )
   end
 

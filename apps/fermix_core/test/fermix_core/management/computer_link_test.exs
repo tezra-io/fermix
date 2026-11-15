@@ -84,7 +84,7 @@ defmodule FermixCore.Management.ComputerLinkTest do
   defp route(method, params, ctx, opts \\ []) do
     Router.route(
       %{method: method, protocol_version: Protocol.protocol_version(), params: params},
-      [operation_opts: [computer_link: ctx.seams], always_on: true] ++ opts
+      [operation_opts: [computer_link: ctx.seams]] ++ opts
     )
   end
 
