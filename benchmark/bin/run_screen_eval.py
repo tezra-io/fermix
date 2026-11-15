@@ -27,7 +27,8 @@ afterwards) builds the claim the filter builds and takes the screen's own reques
 
 Live, it asks each request on every decision model whose provider key is in this
 shell's environment, through `Providers.DecisionModel.yes_no/4` (the screen's own HTTP
-call): OPENAI_API_KEY (OpenAI, gpt-6-luna), OPENROUTER_API_KEY (OpenRouter, Jev),
+call): OPENAI_API_KEY (OpenAI, gpt-6-luna), OPENROUTER_API_KEY (OpenRouter: Jev,
+Perplexity's Decider and Decider Flash, each measured as its own decision model),
 VENICE_API_KEY (Venice, Jev). That is the path seed_capability_home.py documents for
 its explicit mode: config/runtime.exs reads the variable at boot, so no key is ever on
 disk, and this runner never reads the keychain and never prints a key. A provider with
@@ -90,9 +91,11 @@ SET_PATH = os.path.join(BENCH_DIR, "suites", "capability", "fixtures", "cues", "
 ENGINE_SCRIPT = os.path.join(HERE, "screen_eval.exs")
 REPORTS_DIR = os.path.join(BENCH_DIR, "reports", "screen")
 
-# DecisionModel's providers, in its catalog order, each with the variable
-# config/runtime.exs reads its key from.
-PROVIDERS = {"openrouter": "OPENROUTER_API_KEY", "venice": "VENICE_API_KEY",
+# DecisionModel's choices, in its offer order, each with the variable
+# config/runtime.exs reads its provider's key from. Perplexity's Deciders run on
+# OpenRouter's key beside Jev.
+PROVIDERS = {"openrouter": "OPENROUTER_API_KEY", "openrouter_decider": "OPENROUTER_API_KEY",
+             "openrouter_decider_flash": "OPENROUTER_API_KEY", "venice": "VENICE_API_KEY",
              "openai": "OPENAI_API_KEY"}
 FORMS = ("A", "B")
 BARS = (0.1, 0.2, 0.3, 0.4)

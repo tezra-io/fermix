@@ -2272,6 +2272,18 @@ defmodule FermixCore.Management.CuesTest do
                  "disabled" => true
                },
                %{
+                 "value" => "openrouter_decider",
+                 "label" => "OpenRouter · Perplexity Decider",
+                 "hint" => "Set up this provider first.",
+                 "disabled" => true
+               },
+               %{
+                 "value" => "openrouter_decider_flash",
+                 "label" => "OpenRouter · Perplexity Decider Flash",
+                 "hint" => "Set up this provider first.",
+                 "disabled" => true
+               },
+               %{
                  "value" => "venice",
                  "label" => "Venice · Jev",
                  "hint" => "Set up this provider first.",

@@ -9,23 +9,27 @@ defmodule FermixCore.Providers.DecisionModel do
 
   It runs on a provider the owner already set up, with that provider's own key
   and base URL, so it has no key or setting of its own. Three providers serve
-  one, each a constant here, never configuration:
+  one, and the owner chooses among five decision models (`choices/0`), each a
+  constant here, never configuration:
 
-  | Provider | Endpoint | Model |
-  |---|---|---|
-  | OpenRouter | `POST <base without /v1>/alpha/decisions` | `~typesafe/jev-latest` (TypeSafe's Jev) |
-  | Venice | `POST <base>/decisions` | `jev-latest` (TypeSafe's Jev) |
-  | OpenAI | `POST <base>/decisions` (the Decisions API) | `gpt-6-luna` |
+  | Choice | Provider | Endpoint | Model |
+  |---|---|---|---|
+  | `openrouter` | OpenRouter | `POST <base without /v1>/alpha/decisions` | `~typesafe/jev-latest` (TypeSafe's Jev) |
+  | `openrouter_decider` | OpenRouter | the same | `~perplexity/pplx-decider-latest` (Perplexity's Decider) |
+  | `openrouter_decider_flash` | OpenRouter | the same | `~perplexity/pplx-decider-flash-latest` (Perplexity's Decider Flash) |
+  | `venice` | Venice | `POST <base>/decisions` | `jev-latest` (TypeSafe's Jev) |
+  | `openai` | OpenAI | `POST <base>/decisions` (the Decisions API) | `gpt-6-luna` |
 
-  The caller passes the owner's choice (`route/1`): one of the three, or nil
+  The caller passes the owner's choice (`route/1`): one of the five, or nil
   for Automatic, where Fermix picks the primary provider when it serves a
-  decision model and is set up, otherwise the first of the three that is set
-  up, in the order above. A chosen provider that is not set up is no route,
-  never another provider. `pick/2` is the Automatic rule alone, over a primary
-  and a set-up check the caller passes, so a settings surface answers from its
-  own snapshot. The Jev routes follow the vendor's newest Jev; the answer names
-  the model that answered, and the call's telemetry carries it, so an upgrade
-  stays visible.
+  decision model and is set up, otherwise the first of the three providers
+  that is set up, in the order above, and runs the choice named for that
+  provider. A chosen decision model whose provider is not set up is no route,
+  never another one. `pick/2` is the Automatic rule alone, over a primary and
+  a set-up check the caller passes, so a settings surface answers from its own
+  snapshot. The OpenRouter and Venice routes follow the vendor's newest model
+  of the family; the answer names the model that answered, and the call's
+  telemetry carries it, so an upgrade stays visible.
 
   Set up means `ready?/2`: the provider is configured (`Selection.configured?/2`)
   and its key loaded. A keychain or file secret that never resolved stays in
@@ -36,11 +40,11 @@ defmodule FermixCore.Providers.DecisionModel do
 
   One attempt, with no retry and no other route: the caller owns retries (the
   cue filter holds and retries a watcher whose provider fails). OpenAI asks a
-  `predicate` question, which it may refuse (`{:refused, sentence}`); Jev asks a
-  `noul` with yes and no criteria. An answer of any other shape fails as
-  `{:parser_changed, sentence}` and is never guessed. HTTP and transport
-  failures are `Providers.Error` values (adapter `:decisions`), so a caller
-  classifies them as it classifies a chat call's.
+  `predicate` question, which it may refuse (`{:refused, sentence}`); Jev and
+  Perplexity's Deciders ask a `noul` with yes and no criteria. An answer of any
+  other shape fails as `{:parser_changed, sentence}` and is never guessed. HTTP
+  and transport failures are `Providers.Error` values (adapter `:decisions`),
+  so a caller classifies them as it classifies a chat call's.
 
   Every call rides `Providers.Telemetry.emit_call/3` with the caller's `agent`
   and `session_id`. The key goes only into the request's header.
@@ -56,13 +60,32 @@ defmodule FermixCore.Providers.DecisionModel do
   alias FermixCore.Setup.SecretWriter
 
   @providers [:openrouter, :venice, :openai]
-  @models %{openai: "gpt-6-luna", openrouter: "~typesafe/jev-latest", venice: "jev-latest"}
-  @labels %{openai: "OpenAI · gpt-6-luna", openrouter: "OpenRouter · Jev", venice: "Venice · Jev"}
+  # Each decision model the owner can choose, in the order surfaces offer it:
+  # the provider it runs on, its model, and its label. A provider's own name is
+  # the choice Automatic runs on that provider.
+  @choices [
+    openrouter: %{provider: :openrouter, model: "~typesafe/jev-latest", label: "OpenRouter · Jev"},
+    openrouter_decider: %{
+      provider: :openrouter,
+      model: "~perplexity/pplx-decider-latest",
+      label: "OpenRouter · Perplexity Decider"
+    },
+    openrouter_decider_flash: %{
+      provider: :openrouter,
+      model: "~perplexity/pplx-decider-flash-latest",
+      label: "OpenRouter · Perplexity Decider Flash"
+    },
+    venice: %{provider: :venice, model: "jev-latest", label: "Venice · Jev"},
+    openai: %{provider: :openai, model: "gpt-6-luna", label: "OpenAI · gpt-6-luna"}
+  ]
+  @choice_ids Keyword.keys(@choices)
   @adapter :decisions
   @question "answer"
 
   @type provider :: :openai | :openrouter | :venice
+  @type choice :: provider() | :openrouter_decider | :openrouter_decider_flash
   @type route :: %{
+          choice: choice(),
           provider: provider(),
           model: String.t(),
           url: String.t(),
@@ -80,9 +103,17 @@ defmodule FermixCore.Providers.DecisionModel do
   @spec providers() :: [provider()]
   def providers, do: @providers
 
-  @doc "How a surface names the decision model on `provider`."
-  @spec label(provider()) :: String.t()
-  def label(provider) when provider in @providers, do: Map.fetch!(@labels, provider)
+  @doc "The decision models the owner can choose, in the order surfaces offer them."
+  @spec choices() :: [choice()]
+  def choices, do: @choice_ids
+
+  @doc "How a surface names the decision model `choice`."
+  @spec label(choice()) :: String.t()
+  def label(choice) when choice in @choice_ids, do: Keyword.fetch!(@choices, choice).label
+
+  @doc "The provider whose key and base URL the decision model `choice` runs on."
+  @spec provider(choice()) :: provider()
+  def provider(choice) when choice in @choice_ids, do: Keyword.fetch!(@choices, choice).provider
 
   @doc """
   Whether `block`, `provider`'s settings as application env holds them (live,
@@ -117,23 +148,24 @@ defmodule FermixCore.Providers.DecisionModel do
   defp lead({:error, _reason}), do: []
 
   @doc """
-  The route of the decision model on `choice`, read from application env:
-  that provider's when it is `ready?/2`, `{:not_set_up, provider}` when it is
-  not; for nil (Automatic) the one `pick/2` picks, or `:not_set_up` when no
+  The route of the decision model `choice`, read from application env: on its
+  provider when that provider is `ready?/2`, `{:not_set_up, provider}` when it
+  is not; for nil (Automatic) the one `pick/2` picks, or `:not_set_up` when no
   provider that serves one is ready.
   """
-  @spec route(provider() | nil) ::
+  @spec route(choice() | nil) ::
           {:ok, route()} | {:error, :not_set_up | {:not_set_up, provider()}}
   def route(nil) do
     with {:ok, provider} <- pick(Selection.primary_provider(), &ready?(&1, env_block(&1))),
          do: route(provider)
   end
 
-  def route(provider) when provider in @providers do
+  def route(choice) when choice in @choice_ids do
+    provider = provider(choice)
     block = env_block(provider)
 
     if ready?(provider, block),
-      do: {:ok, build_route(provider, block)},
+      do: {:ok, build_route(choice, block)},
       else: {:error, {:not_set_up, provider}}
   end
 
@@ -146,10 +178,13 @@ defmodule FermixCore.Providers.DecisionModel do
 
   # Only a block `ready?/2` passed gets here, so its key is there; a missing one
   # is a bug that fails loud.
-  defp build_route(provider, block) do
+  defp build_route(choice, block) do
+    %{provider: provider, model: model} = Keyword.fetch!(@choices, choice)
+
     %{
+      choice: choice,
       provider: provider,
-      model: Map.fetch!(@models, provider),
+      model: model,
       url: url(provider, base_url(provider, block)),
       api_key: Keyword.fetch!(block, :api_key)
     }
@@ -214,8 +249,9 @@ defmodule FermixCore.Providers.DecisionModel do
     Map.merge(%{model: model, state: state, questions: %{@question => noul}}, extra(provider))
   end
 
-  # Jev is TypeSafe's alone, so no other host may take the request, and the
-  # item is not offered for training.
+  # Each OpenRouter decision model has one host, its vendor (TypeSafe for Jev,
+  # Perplexity for the Deciders), so no other host may take the request, and
+  # the item is not offered for training.
   defp extra(:openrouter), do: %{provider: %{allow_fallbacks: false, data_collection: "deny"}}
   defp extra(:venice), do: %{}
 
@@ -252,7 +288,7 @@ defmodule FermixCore.Providers.DecisionModel do
 
   defp answer(provider, %{"answers" => %{@question => answer}, "model" => model} = body)
        when provider in [:openrouter, :venice] and is_binary(model),
-       do: jev_answer(provider, answer, model, body)
+       do: noul_answer(provider, answer, model, body)
 
   defp answer(provider, _body), do: parser_changed(provider)
 
@@ -264,10 +300,10 @@ defmodule FermixCore.Providers.DecisionModel do
 
   defp openai_answer(_answer, _model, _body), do: parser_changed(:openai)
 
-  defp jev_answer(provider, %{"type" => "noul", "noul" => probability}, model, body),
+  defp noul_answer(provider, %{"type" => "noul", "noul" => probability}, model, body),
     do: probability(provider, probability, model, body)
 
-  defp jev_answer(provider, _answer, _model, _body), do: parser_changed(provider)
+  defp noul_answer(provider, _answer, _model, _body), do: parser_changed(provider)
 
   defp probability(_provider, value, model, body)
        when is_number(value) and value >= 0 and value <= 1,

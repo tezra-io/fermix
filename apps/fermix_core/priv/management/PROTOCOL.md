@@ -2054,12 +2054,15 @@ Notes that the shapes alone do not carry:
   Venice and OpenAI, and the label names it ("Automatic (Uses OpenAI ·
   gpt-6-luna)"); while none is set up it is "Automatic", disabled with the
   hint "Set up OpenRouter, Venice or OpenAI first.". Then always `openrouter`
-  ("OpenRouter · Jev"), `venice` ("Venice · Jev") and `openai` ("OpenAI ·
-  gpt-6-luna"), each disabled with the hint "Set up this provider first."
-  while its provider is not set up with a key that loaded, a saved one
-  included, so the value is always an option. A chosen provider that is not
-  set up holds the watchers with a sentence naming it, and never falls back to
-  Automatic. `cues_screen` and `cues_decision_provider` may go in one
+  ("OpenRouter · Jev"), `openrouter_decider` ("OpenRouter · Perplexity
+  Decider"), `openrouter_decider_flash` ("OpenRouter · Perplexity Decider
+  Flash"), `venice` ("Venice · Jev") and `openai` ("OpenAI · gpt-6-luna"), each
+  disabled with the hint "Set up this provider first." while the provider it
+  runs on is not set up with a key that loaded, a saved one included, so the
+  value is always an option; the three OpenRouter models run on OpenRouter's
+  key. A chosen decision model whose provider is not set up holds the watchers
+  with a sentence naming that provider, and never falls back to Automatic.
+  `cues_screen` and `cues_decision_provider` may go in one
   `settings.apply`: each is checked before either is written, and neither
   check reads the other's saved value, so a refusal of one writes neither.
 - **Every cue write goes through the setup page's own path**, so the outside

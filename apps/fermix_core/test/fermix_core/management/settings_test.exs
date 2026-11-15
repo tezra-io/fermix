@@ -361,6 +361,7 @@ defmodule FermixCore.Management.SettingsTest do
 
       assert "claude-opus-5-5" in published.("providers.anthropic")
       assert "claude-sonnet-5-5" in published.("providers.anthropic")
+      assert "claude-fable-5-2" in published.("providers.anthropic")
       assert "grok-4.7" in published.("providers.xai")
 
       assert ["gpt-6.1-sol", "gpt-6.1-terra", "gpt-6-luna"] -- published.("providers.openai") ==
@@ -370,6 +371,7 @@ defmodule FermixCore.Management.SettingsTest do
 
       assert [
                "anthropic/claude-sonnet-5.5",
+               "anthropic/claude-fable-5.2",
                "anthropic/claude-fable-5.1",
                "anthropic/claude-opus-5.5",
                "openai/gpt-6-astra",

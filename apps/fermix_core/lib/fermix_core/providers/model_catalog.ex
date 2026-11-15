@@ -145,8 +145,8 @@ defmodule FermixCore.Providers.ModelCatalog do
 
   # Context windows are the API defaults the adapter actually gets (it does not
   # send the `context-1m` beta header, design doc §8). The 4.6+ generation
-  # (Opus 5.5, Opus 5, Fable 5.1, Fable 5, Opus 4.8, Sonnet 5.5, Sonnet 4.6) and
-  # Haiku 5.5 take 1M tokens; Haiku 4.5 takes 200k.
+  # (Opus 5.5, Opus 5, Fable 5.2, Fable 5.1, Fable 5, Opus 4.8, Sonnet 5.5,
+  # Sonnet 4.6) and Haiku 5.5 take 1M tokens; Haiku 4.5 takes 200k.
   #
   # `compaction_ceiling` is where those 1M models compact, whatever the
   # threshold: `compact_at_tokens/3` takes the lower of threshold * window and
@@ -164,11 +164,12 @@ defmodule FermixCore.Providers.ModelCatalog do
   # max_output_tokens are the per-model output ceilings Anthropic requires on
   # every request (Hermes reference values — verify against current Anthropic
   # docs before the SSE follow-up raises the adapter's non-streaming cap above
-  # them). Fable 5.1 is a Covered Model: an organization on zero data retention
-  # gets a 400 on every request until Anthropic authorizes it, which is an
-  # account setting rather than a request-shape defect. Opus 5.5 shares Fable
-  # 5.1's request rules (thinking always on, no forced tool_choice); the
-  # adapter's "opus-5" substring already sends that shape. Sonnet 5.5 400s on
+  # them). Fable 5.2 and 5.1 are Covered Models: an organization on zero data
+  # retention gets a 400 on every request until Anthropic authorizes it, which
+  # is an account setting rather than a request-shape defect. Fable 5.2 keeps
+  # 5.1's request rules (thinking always on, no forced tool_choice), which the
+  # adapter's "fable" substring sends. Opus 5.5 shares them too; the adapter's
+  # "opus-5" substring already sends that shape. Sonnet 5.5 400s on
   # disabled thinking, forced tool_choice and sampling params; its "sonnet-5"
   # substring sends adaptive thinking and no sampling params, and the adapter
   # never sends tool_choice.
@@ -183,6 +184,13 @@ defmodule FermixCore.Providers.ModelCatalog do
     %Entry{
       id: "claude-sonnet-5-5",
       label: "Claude Sonnet 5.5",
+      context_window: 1_000_000,
+      compaction_ceiling: 200_000,
+      max_output_tokens: 128_000
+    },
+    %Entry{
+      id: "claude-fable-5-2",
+      label: "Claude Fable 5.2",
       context_window: 1_000_000,
       compaction_ceiling: 200_000,
       max_output_tokens: 128_000
@@ -320,6 +328,12 @@ defmodule FermixCore.Providers.ModelCatalog do
     %Entry{
       id: "anthropic/claude-sonnet-5.5",
       label: "Claude Sonnet 5.5 via OpenRouter",
+      context_window: 1_000_000,
+      compaction_ceiling: 200_000
+    },
+    %Entry{
+      id: "anthropic/claude-fable-5.2",
+      label: "Claude Fable 5.2 via OpenRouter",
       context_window: 1_000_000,
       compaction_ceiling: 200_000
     },

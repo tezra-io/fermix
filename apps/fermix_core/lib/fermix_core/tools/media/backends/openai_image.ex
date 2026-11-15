@@ -1,6 +1,7 @@
 defmodule FermixCore.Tools.Media.Backends.OpenAIImage do
   @moduledoc """
-  OpenAI Images backend (`gpt-image-2` / `gpt-image-2.5`) for the `:image` modality.
+  OpenAI Images backend (`gpt-image-2` / `gpt-image-2.5` / `gpt-image-2.6`) for the `:image`
+  modality.
 
   Generate → `POST /v1/images/generations` (JSON); edit → `POST /v1/images/edits`
   (multipart image[+mask] file parts). GPT image models *always* return
@@ -18,10 +19,18 @@ defmodule FermixCore.Tools.Media.Backends.OpenAIImage do
 
   @base_url "https://api.openai.com/v1"
   # Curated — head is the default (`Media.Backend.supported_models/0`). The head
-  # is deliberately NOT the newest: the 2.5 family rolls out per-account, so a
-  # modelless operator keeps generating on gpt-image-2 until they pick one.
-  # Never the deprecated gpt-image-1 (§5).
-  @models ["gpt-image-2", "gpt-image-2.5-flare", "gpt-image-2.5-sunburst", "gpt-image-1.5"]
+  # is deliberately NOT the newest: the 2.5 family rolled out per-account, and
+  # a newer family may too, so a modelless operator keeps generating on
+  # gpt-image-2 until they pick one. Newest family first after it. Never the
+  # deprecated gpt-image-1 (§5).
+  @models [
+    "gpt-image-2",
+    "gpt-image-2.6-flare",
+    "gpt-image-2.6-sunburst",
+    "gpt-image-2.5-flare",
+    "gpt-image-2.5-sunburst",
+    "gpt-image-1.5"
+  ]
   @default_model hd(@models)
   @provider :openai
   @mime "image/png"

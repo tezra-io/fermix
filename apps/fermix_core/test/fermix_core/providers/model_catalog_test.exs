@@ -195,8 +195,9 @@ defmodule FermixCore.Providers.ModelCatalogTest do
       assert ModelCatalog.context_window_for(:openai, "gpt-5.6-luna") == 272_000
       # Claude 4.6+ and Haiku 5.5 take 1M tokens; Haiku 4.5 is 200k. The
       # cost line rides `compaction_ceiling`, not the window.
-      for model <- ~w(claude-sonnet-4-6 claude-sonnet-5-5 claude-fable-5 claude-fable-5-1
-                      claude-opus-5-5 claude-opus-5 claude-opus-4-8 claude-haiku-5-5) do
+      for model <-
+            ~w(claude-sonnet-4-6 claude-sonnet-5-5 claude-fable-5 claude-fable-5-1
+                      claude-fable-5-2 claude-opus-5-5 claude-opus-5 claude-opus-4-8 claude-haiku-5-5) do
         assert ModelCatalog.context_window_for(:anthropic, model) == 1_000_000
       end
 
@@ -259,9 +260,10 @@ defmodule FermixCore.Providers.ModelCatalogTest do
 
   describe "compaction ceilings" do
     @claude_1m ~w(claude-sonnet-4-6 claude-sonnet-5-5 claude-fable-5 claude-fable-5-1
-                  claude-opus-5-5 claude-opus-5 claude-opus-4-8)
+                  claude-fable-5-2 claude-opus-5-5 claude-opus-5 claude-opus-4-8)
     @openrouter_claude ~w(anthropic/claude-sonnet-4.6 anthropic/claude-sonnet-5.5
-                          anthropic/claude-fable-5.1 anthropic/claude-fable-5
+                          anthropic/claude-fable-5.2 anthropic/claude-fable-5.1
+                          anthropic/claude-fable-5
                           anthropic/claude-opus-5.5 anthropic/claude-opus-4.8)
 
     test "a 1M Claude model compacts at 200k whatever the threshold" do
@@ -312,6 +314,7 @@ defmodule FermixCore.Providers.ModelCatalogTest do
       assert ModelCatalog.max_output_tokens_for(:anthropic, "claude-sonnet-5-5") == 128_000
       assert ModelCatalog.max_output_tokens_for(:anthropic, "claude-fable-5") == 64_000
       assert ModelCatalog.max_output_tokens_for(:anthropic, "claude-fable-5-1") == 128_000
+      assert ModelCatalog.max_output_tokens_for(:anthropic, "claude-fable-5-2") == 128_000
       assert ModelCatalog.max_output_tokens_for(:anthropic, "claude-opus-5-5") == 128_000
       assert ModelCatalog.max_output_tokens_for(:anthropic, "claude-opus-5") == 128_000
       assert ModelCatalog.max_output_tokens_for(:anthropic, "claude-opus-4-8") == 128_000
@@ -439,6 +442,11 @@ defmodule FermixCore.Providers.ModelCatalogTest do
       assert ModelCatalog.known_model?(:anthropic, "claude-fable-5-1")
       assert ModelCatalog.default_model_for(:anthropic) == "claude-sonnet-4-6"
     end
+
+    test "claude-fable-5-2 is cataloged without changing the Anthropic default" do
+      assert ModelCatalog.known_model?(:anthropic, "claude-fable-5-2")
+      assert ModelCatalog.default_model_for(:anthropic) == "claude-sonnet-4-6"
+    end
   end
 
   # M49 §3.3: the curated Venice list is every-model-is-private, the head is the
@@ -513,6 +521,7 @@ defmodule FermixCore.Providers.ModelCatalogTest do
       assert Enum.map(ModelCatalog.models_for(:openrouter), & &1.id) == [
                "anthropic/claude-sonnet-4.6",
                "anthropic/claude-sonnet-5.5",
+               "anthropic/claude-fable-5.2",
                "anthropic/claude-fable-5.1",
                "anthropic/claude-fable-5",
                "anthropic/claude-opus-5.5",

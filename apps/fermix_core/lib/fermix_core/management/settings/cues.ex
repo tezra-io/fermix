@@ -32,10 +32,10 @@ defmodule FermixCore.Management.Settings.Cues do
   `cues_decision_provider` is which decision model that is, published
   whatever the screen is, so a client shows it beside the screen's choice
   without a read: `""` for Automatic, labelled with what it resolves to, then
-  each provider that serves one (`FilterChoices.decision_provider_choices/1`).
-  One not set up is disabled with its hint, a saved one included, so the
-  value is always an option; its watchers are held until it is set up or
-  another is picked.
+  each decision model the owner can choose
+  (`FilterChoices.decision_provider_choices/1`). One whose provider is not set
+  up is disabled with its hint, a saved one included, so the value is always
+  an option; its watchers are held until it is set up or another is picked.
   """
 
   alias FermixCore.Cues.Config, as: CuesConfig

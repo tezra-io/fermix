@@ -2032,6 +2032,8 @@ defmodule FermixWebWeb.SetupLiveTest do
       # OpenAI (default): a real <select> carrying every curated entry.
       assert html =~ ~r{<select[^>]*name="image_form\[model\]"}
       assert html =~ "gpt-image-2"
+      assert html =~ "gpt-image-2.6-flare"
+      assert html =~ "gpt-image-2.6-sunburst"
       assert html =~ "gpt-image-2.5-flare"
       assert html =~ "gpt-image-2.5-sunburst"
       assert html =~ "gpt-image-1.5"
@@ -2046,6 +2048,7 @@ defmodule FermixWebWeb.SetupLiveTest do
       assert html =~ "grok-imagine-image-quality"
       refute html =~ "gpt-image-1.5"
       refute html =~ "gpt-image-2.5-flare"
+      refute html =~ "gpt-image-2.6-flare"
     end
 
     test "shows an editable OpenAI key field, marked configured when the key is set", %{

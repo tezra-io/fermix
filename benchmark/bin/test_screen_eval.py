@@ -180,7 +180,8 @@ def test_a_feed_entry_and_a_raw_item_keep_their_fields():
 def test_a_provider_is_available_only_when_its_key_variable_is_set_and_not_blank():
     providers = screen.plan_providers(None, {"OPENAI_API_KEY": "sk-x", "VENICE_API_KEY": "  "})
     assert [(p.name, p.available) for p in providers] == [
-        ("openrouter", False), ("venice", False), ("openai", True)]
+        ("openrouter", False), ("openrouter_decider", False), ("openrouter_decider_flash", False),
+        ("venice", False), ("openai", True)]
     assert [p.name for p in screen.plan_providers(["venice"], {})] == ["venice"]
 
 
@@ -195,7 +196,8 @@ def test_every_provider_skipped_spends_nothing_and_exits_3(tmp_path, capsys, mon
     code = screen.main(["--out", str(tmp_path)], environ={})
     out = capsys.readouterr().out
     assert code == 3
-    assert out.count("SKIPPED") == 3
+    # One per decision model: Jev, the two Perplexity Deciders, Venice's Jev, OpenAI's.
+    assert out.count("SKIPPED") == 5
     assert "every provider was skipped: nothing was measured" in out
 
 

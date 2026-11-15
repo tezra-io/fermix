@@ -169,8 +169,14 @@ defmodule FermixCore.Cues.ConfigTest do
       assert Config.screen([]) == :keyword
     end
 
-    test "the screen's decision model is a provider that serves one, or Fermix's own pick with no key" do
-      for provider <- [:openai, :openrouter, :venice] do
+    test "the screen's decision model is one an owner can choose, or Fermix's own pick with no key" do
+      for provider <- [
+            :openai,
+            :openrouter,
+            :openrouter_decider,
+            :openrouter_decider_flash,
+            :venice
+          ] do
         config = Config.normalize(%{"decision_provider" => Atom.to_string(provider)})
         assert config == [decision_provider: provider]
         assert Config.decision_provider(config) == provider
@@ -187,7 +193,7 @@ defmodule FermixCore.Cues.ConfigTest do
         {%{"screen" => "openai"}, ~r/cues\.screen "openai".*keyword, decision_model/},
         {%{"screen" => true}, ~r/cues\.screen/},
         {%{"decision_provider" => "anthropic"},
-         ~r/cues\.decision_provider "anthropic".*openrouter, venice, openai/},
+         ~r/cues\.decision_provider "anthropic".*openrouter, openrouter_decider, openrouter_decider_flash, venice, openai/},
         {%{"decision_provider" => ""}, ~r/cues\.decision_provider/},
         {%{"door_port" => 80}, ~r/cues\.door_port.*1024/},
         {%{"door_port" => 70_000}, ~r/cues\.door_port/},

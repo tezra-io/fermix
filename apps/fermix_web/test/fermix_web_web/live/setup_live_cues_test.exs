@@ -595,11 +595,20 @@ defmodule FermixWebWeb.SetupLiveCuesTest do
 
       options = LazyHTML.query(select, "option")
 
-      assert LazyHTML.attribute(options, "value") == ["", "openrouter", "venice", "openai"]
+      assert LazyHTML.attribute(options, "value") == [
+               "",
+               "openrouter",
+               "openrouter_decider",
+               "openrouter_decider_flash",
+               "venice",
+               "openai"
+             ]
 
       assert options |> Enum.map(&(&1 |> LazyHTML.text() |> squish())) == [
                "Automatic (Uses OpenAI · gpt-6-luna)",
                "OpenRouter · Jev",
+               "OpenRouter · Perplexity Decider",
+               "OpenRouter · Perplexity Decider Flash",
                "Venice · Jev",
                "OpenAI · gpt-6-luna"
              ]

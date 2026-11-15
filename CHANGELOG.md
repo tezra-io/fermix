@@ -211,6 +211,21 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   over the phone's own encrypted connection, so they work wherever Fermix
   runs. A phone app that doesn't draw lists yet keeps showing a reply's list
   as text.
+- **Claude Fable 5.2 on the Anthropic provider and through OpenRouter.**
+  `claude-fable-5-2` (`anthropic/claude-fable-5.2` on OpenRouter) joins the
+  model catalog with a 1M context window and a 128k output ceiling, and is
+  offered wherever a model is picked. No default changes. Like Fable 5.1 it is
+  a Covered Model: an organization on zero data retention gets a 400 on every
+  request until Anthropic authorizes it.
+- **GPT Image 2.6 is selectable on the OpenAI images backend.**
+  `gpt-image-2.6-flare` and `gpt-image-2.6-sunburst` join the image model
+  picker beside the 2.5 models, and both generate and edit. The default stays
+  `gpt-image-2`.
+- **Perplexity's Decider can screen cue items.** The Cues **Decision model**
+  setting offers **OpenRouter · Perplexity Decider** and **OpenRouter ·
+  Perplexity Decider Flash** beside **OpenRouter · Jev**, on your OpenRouter
+  key, each following Perplexity's newest Decider. Automatic is unchanged and
+  still uses Jev on OpenRouter.
 - **Your Android phone is notified while the app is closed.** Fermix now
   sends a paired Android phone its notifications through Fermix's push relay
   at push.fermix.ai, which hands them to Google to deliver, so a reply, a
