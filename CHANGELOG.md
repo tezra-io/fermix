@@ -420,8 +420,11 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   removed, or that your server no longer knows because it was restored from a
   backup taken before the computer joined, says "Your server no longer knows
   this Mac. To join your Fermix again, enter a new code from Add a computer."
-  ("this computer" off a Mac), and a new code joins it again. One removed
-  while its Fermix was stopped can join again once Fermix has started there.
+  ("this computer" off a Mac), and a new code joins it again. It says so with
+  Fermix stopped as well (`fermix home status`), and one whose server knows
+  it again by the time the code is entered keeps its link ("Your server knows
+  this computer again, so it keeps its link to it."). One removed while its
+  Fermix was stopped can join again once Fermix has started there.
   Disconnect this computer does the same from the computer itself and deletes
   its key: a computer that joined says "This Mac is not connected to a
   Fermix." and is its own Fermix again once it restarts, and the one your home
@@ -808,14 +811,17 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **Plan a trip in chat.** Ask for a day trip, a week or three weeks away and
   Fermix keeps it as a trip: days in order, and on each the stops with their
   times, how long each takes, fixed bookings, notes and places. It looks each
-  place up itself, within the town the trip or that day is in, and never
-  places one it has nowhere to search near (unsure of a town's country, it
-  makes the trip anyway and asks you); it says which it placed, which it found
-  under another name (with the link, so you can pick it) and which it could
-  not find. A stop it could not look up yet, because the place search was rate
-  limited or the lookups ran out of time, is saved with its place's name and
-  placed on its own once it can be (for a rate limit, once it resets), with no
-  need to ask again and nothing said in chat; an open trip shows it land. It
+  place up itself, within the town the trip or that day is in, named with its
+  region and country so that a town sharing its name with one elsewhere is
+  searched in the right one, and never places one it has nowhere to search
+  near (unsure of a town's country, it makes the trip anyway and asks you); it
+  says which it placed, which it found under another name (with the link, so
+  you can pick it), which it found by that name only away from the town (with
+  the link) and which it could not find. A stop it could not look up yet,
+  because the place search was rate limited or the lookups ran out of time,
+  is saved with its place's name and placed on its own once it can be (for a
+  rate limit, once it resets), with no need to ask again and nothing said in
+  chat; an open trip shows it land. It
   looks a stop up again at most three times, further apart each time, and
   gives up after a week; anything you change about that stop's place or words
   first wins. Ask what Thursday holds, move the museum to Friday, or have the
@@ -1058,17 +1064,14 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   nothing more is sent until it resets, and Fermix says how long. A Brave
   Search API key whose plan does not include place search is now named as
   that, in the trip's answer and to the agent, which stops searching.
-- **A trip's stop at a place outside its town's centre is now placed.** A stop
-  at a cape, a mountain station or a lighthouse on a day in a town was left
-  without a place ("No place found"), or offered as a place by another name
-  such as a hotel, because Apple Maps searched only the town's centre. Apple
-  Maps now searches at least 25 km around a named town, for a trip and for a
-  place search, and weighs nearness to the town's centre, so the town's own
-  place usually still comes first. When nothing by the place's name is found
-  near the day's town, the reply offers the place of that name found
-  elsewhere, with its link, instead of "No place found". A day's town now
-  names its region as well as its country, so a town that shares its name with
-  one elsewhere is searched in the right one.
+- **A place search near a town finds places outside its centre.** With Apple
+  Maps, a place search near a named town searched only the area Apple Maps
+  gives for the town, which can be little more than its centre, so a cape, a
+  mountain station or a lighthouse a few kilometres out was not found, or a
+  place by another name such as a hotel came back instead. Apple Maps now
+  searches at least 25 km around a named town and weighs nearness to the
+  town's centre, so the town's own place usually still comes first. A trip's
+  stops are looked up the same way.
 - **A Fermix too busy to answer is no longer taken for one that is stopped.**
   When its control socket did not accept a connection within 3 seconds, the
   command line read Fermix as not running, so on a busy machine `fermix home
