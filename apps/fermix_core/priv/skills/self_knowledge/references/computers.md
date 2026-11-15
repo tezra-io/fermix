@@ -112,11 +112,16 @@ no memory of its own.
   (`--yes` on the terminal).
 - **Joining again.** Its next connection ends as revoked, and it keeps that
   in its link; its Always On then says "Your server no longer knows this
-  Mac. To join your Fermix again, enter a new code from Add a computer." A
+  Mac. To join your Fermix again, enter a new code from Add a computer.",
+  with Fermix running or stopped (`fermix home status`), since the link is
+  where that word lives. A computer that cannot write it there says why in
+  its link's status and tries again, as for an outage. A
   new code joins it as the first one did (`fermix computer join` with
   Fermix stopped, or `computer.join.start`): it first lets go of the old
   link here, as Disconnect does (its key, what the server may use there,
-  the link), and a code it cannot join with leaves that link as it is. It
+  the link), and a code it cannot join with leaves that link as it is; so
+  does a running Fermix whose server knows the computer again by then
+  ("it holds a link to a server"). It
   takes that word from the server: a computer removed while its Fermix was
   stopped is refused ("it holds a link to a server") until Fermix has
   started there once. The same holds for a server restored from a snapshot

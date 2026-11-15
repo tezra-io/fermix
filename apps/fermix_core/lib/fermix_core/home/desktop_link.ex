@@ -55,9 +55,12 @@ defmodule FermixCore.Home.DesktopLink do
     handshake, as one that no longer knows this computer (`4003`: removed
     from its devices, or restored from a snapshot taken before this computer
     joined it), and false again once a session comes up. It is the one record
-    of that word with Fermix stopped: a join with a new code takes a link its
-    server revoked as no home of its own (`Home.Join`). A file without it was
-    never revoked.
+    of that word, Fermix running or stopped: the relay writes it before it
+    acts on it (it stops reaching the server only once the file says so, and
+    uses a session only once the file no longer does), and the join, the
+    summary and a disconnect read it here (`revoked?/1`): a join with a new
+    code takes a link its server revoked as no home of its own
+    (`Home.Join`). A file without it was never revoked.
   """
 
   alias FermixCore.Home.Role
@@ -198,8 +201,17 @@ defmodule FermixCore.Home.DesktopLink do
   defp port?(text), do: String.to_integer(text) in 1..65_535
 
   @doc """
+  Whether the link under `home` holds its server's word that it no longer
+  knows this computer (`revoked`, see the moduledoc). No link, or one that
+  cannot be read, holds no such word.
+  """
+  @spec revoked?(Path.t()) :: boolean()
+  def revoked?(home) when is_binary(home) and home != "",
+    do: match?({:ok, %{revoked: true}}, read(home))
+
+  @doc """
   Records whether the primary no longer knows this computer (`revoked`, see
-  the moduledoc): true at its `4003`, false once a session comes up. What
+  the moduledoc): true at its `4003`, false before a session is used. What
   the file holds already changes nothing.
   """
   @spec record_revoked(Path.t(), t(), boolean()) :: {:ok, t()} | {:error, error()}

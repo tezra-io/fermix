@@ -222,6 +222,19 @@ defmodule FermixCore.Home.Link do
   """
   @callback snooze_reminder(String.t(), pos_integer()) :: :ok | {:error, term()}
 
+  @doc """
+  Device role: the desktop relay stops for good, so this computer can let go
+  of its link (`FermixCore.Home.Unlink`): from then until the engine
+  restarts it dials nothing and writes nothing of `device/desktop.json`, of
+  which it is the one other writer. `:revoked` (a join with a new code) only
+  while the link still holds its server's word that it no longer knows this
+  computer, else `{:error, :known}`: a session came up since, and that link
+  stays. `:any` (a disconnect) whatever the link says, ending a session that
+  is up. No relay running has nothing to stop; one that does not answer in
+  time is `{:error, :unanswered}`.
+  """
+  @callback release_link(:revoked | :any) :: :ok | {:error, :known | :unanswered}
+
   @typedoc "How a request reaches the primary: the rail's `forward/2` on a linked desktop."
   @type forwarding ::
           [primary_forward: (Protocol.request(), keyword() -> Protocol.route_result())] | []

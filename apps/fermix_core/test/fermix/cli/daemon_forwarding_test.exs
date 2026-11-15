@@ -18,6 +18,8 @@ defmodule Fermix.CLI.DaemonForwardingTest do
   alias Fermix.CLI.Daemon
   alias Fermix.CLI.Daemon.Client
   alias FermixCore.Home.DesktopLink
+  alias FermixCore.Home.Move
+  alias FermixCore.Home.Moved
   alias FermixCore.Management.Doctor
   alias FermixCore.Management.Doctor.Descriptor
   alias FermixCore.Management.HomeSummary
@@ -137,15 +139,17 @@ defmodule Fermix.CLI.DaemonForwardingTest do
     refute_received {:forwarded, _request, _opts}
   end
 
-  # A device with no link (the server revoked it)
+  # A device with no link (the computer a home moved from, disconnected)
   # opens no database, and every cue method reads or writes the cue rows in
   # memory.db: each is refused by name, as a linked desktop's is while its
-  # server is out of reach, before anything is read. Read from the protocol's
-  # own method list, so a cue method added later is refused too. The host's
-  # own platform places the caller (an owner decision among the cue methods is
-  # placed before it is refused), so the sentence names this host's machine.
+  # server is out of reach, before anything is read, with its summary's own
+  # retired sentence. Read from the protocol's own method list, so a cue
+  # method added later is refused too. The host's own platform places the
+  # caller (an owner decision among the cue methods is placed before it is
+  # refused), so the sentence names this host's machine.
   test "without a desktop link a device refuses every cue method as retired", ctx do
     socket = start_daemon!(ctx, engine_role: @device, desktop_link?: false)
+    moved!(socket)
     machine = if :os.type() == {:unix, :darwin}, do: "this Mac", else: "this computer"
     cue_methods = Enum.filter(FermixCore.Management.Protocol.methods(), &(&1 =~ ~r/^cues\./))
 
@@ -172,6 +176,7 @@ defmodule Fermix.CLI.DaemonForwardingTest do
 
   test "on a Mac the retired sentence names the Mac", ctx do
     socket = start_daemon!(ctx, engine_role: @device, desktop_link?: false, os: {:unix, :darwin})
+    moved!(socket)
 
     assert {:error, {:management_error, "primary_unreachable", _message, details}} =
              Client.request_v1("cues.status", %{}, socket_path: socket, timeout: @reply_ms)
@@ -182,12 +187,36 @@ defmodule Fermix.CLI.DaemonForwardingTest do
 
   test "on a computer that is no Mac the retired sentence names the computer", ctx do
     socket = start_daemon!(ctx, engine_role: @device, desktop_link?: false, os: {:unix, :linux})
+    moved!(socket)
 
     assert {:error, {:management_error, "primary_unreachable", _message, details}} =
              Client.request_v1("cues.status", %{}, socket_path: socket, timeout: @reply_ms)
 
     assert details["sentence"] ==
              "Fermix moved to your server, and this computer is no longer connected to it."
+  end
+
+  # The summary's rule, read from the home's files at the request: Fermix
+  # never moved from a computer with no moved marker (one joining a home, or
+  # one that let go of its link and has not restarted yet), and a server's
+  # own copy that a move back left serving nothing names where Fermix went.
+  test "a device with no link and no moved marker says it is not connected", ctx do
+    socket = start_daemon!(ctx, engine_role: @device, desktop_link?: false, os: {:unix, :darwin})
+
+    assert {:error, {:management_error, "primary_unreachable", _message, details}} =
+             Client.request_v1("cues.status", %{}, socket_path: socket, timeout: @reply_ms)
+
+    assert details["sentence"] == "This Mac is not connected to a Fermix."
+
+    home = Path.dirname(socket)
+    moved!(socket)
+    File.mkdir_p!(Move.dir(home))
+    :ok = Move.put_phase(home, "done", %{"keep_as_desktop" => false}, DateTime.utc_now())
+
+    assert {:error, {:management_error, "primary_unreachable", _message, details}} =
+             Client.request_v1("cues.status", %{}, socket_path: socket, timeout: @reply_ms)
+
+    assert details["sentence"] == "This copy is retired: Fermix moved back to fermix-vm."
   end
 
   test "the primary's refusal while unreachable reaches the app as it was said", ctx do
@@ -719,6 +748,17 @@ defmodule Fermix.CLI.DaemonForwardingTest do
       :socket -> socket_path
     end
   end
+
+  # The marker a move leaves on the computer it moved from, in the home the
+  # socket sits in.
+  defp moved!(socket),
+    do:
+      :ok =
+        Moved.write(Path.dirname(socket), %{
+          epoch: 4,
+          moved_at: ~U[2031-05-04 10:00:00Z],
+          to: "fermix-vm"
+        })
 
   # The home of a computer linked to its server: its link's record, which its
   # summary reads (`DesktopLink.linked?/2`), in the home the socket sits in.

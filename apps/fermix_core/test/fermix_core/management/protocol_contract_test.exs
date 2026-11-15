@@ -2395,9 +2395,8 @@ defmodule FermixCore.Management.ProtocolContractTest do
   end
 
   defp joiner(home) do
-    # No relay runs here: the link says nothing of its server.
-    link_status = fn -> %{primary: nil} end
-    seams = [home: home, now: @join_now, restart: fn -> :ok end, link_status: link_status]
+    # No relay runs here: letting go of a link stops none.
+    seams = [home: home, now: @join_now, restart: fn -> :ok end, release: fn _which -> :ok end]
     [operation_opts: [computer_link: seams]]
   end
 

@@ -11,14 +11,15 @@ defmodule FermixCore.Home.Join do
        "sas": null, "sentence": null}
 
   `start/3` (`computer.join.start`; `fermix computer join`, the code on stdin) refuses a
-  computer that has a home of its own (`own_home/2`), then decodes the code,
-  which must be a computer's (`EnrollmentCode`, version 2) and not expired,
-  then lets go of a link its server revoked (below), then makes this
-  computer's key in the secret store (`ComputerKey.create/2`),
-  then writes the file with the code's route and secret, then makes this
-  engine a device (`[fermix_core.engine] role`), and then restarts it, which
-  a CLI with no engine running leaves to the next start. A step that fails
-  takes back what the ones before it wrote.
+  computer that has a home of its own (below), then decodes the code, which
+  must be a computer's (`EnrollmentCode`, version 2) and not expired, then
+  lets go of a link its server revoked (below), then makes this computer's
+  key in the secret store (`ComputerKey.create/2`), then writes the file
+  with the code's route and secret, then makes this engine a device
+  (`[fermix_core.engine] role`), and then restarts it, which a CLI with no
+  engine running leaves to the next start. A refusal before the letting go
+  changes nothing. A step after it that fails takes back what the join
+  itself wrote (its key and its file), never the link it let go of.
 
   The device tree dials the server while the file is here
   (`FermixChannels.Desktop.Join`), and records what it learns (`record/3`):
@@ -32,9 +33,10 @@ defmodule FermixCore.Home.Join do
   link
   (`FermixCore.Home.DesktopLink`, naming the key's store), then the file
   goes, the computer history mark an earlier home left is forgotten
-  (`forget_history_mark/1`), and the engine restarts as a linked computer. `cancel/2` ends a join
-  wherever it stands: the key and the file go, the engine is the primary of
-  its own home again, and it restarts.
+  (`Home.Unlink.forget_history_mark/1`), and the engine restarts as a
+  linked computer. `cancel/2` ends a join wherever it stands: the key and
+  the file go, the engine is the primary of its own home again, and it
+  restarts.
 
   **A home of its own** (M97 §17): a home that holds any message, memory,
   scheduled job or computer history note, a paired phone or computer, the
@@ -59,32 +61,39 @@ defmodule FermixCore.Home.Join do
   server no longer knows this computer (the owner removed it, or it was
   restored from a snapshot taken before this computer joined it), so the link
   reaches nothing; the relay keeps the server's word in it (`DesktopLink`'s
-  `revoked`), the one record of it a join reads with Fermix stopped. Once the
-  code is one this computer can join with, the join lets go of that link here
-  as a disconnect does (`Home.Leave.let_go/4`: its key, what the server may
-  use here, the role back to the primary's, the link, the history mark),
-  then joins. A code it cannot join with leaves the link as it is; a step
-  after the link went that fails leaves this computer as a disconnect would,
-  the primary of its own home. The computer a home moved from is refused by
-  its moved marker first, so its link and its own copies of the server's
+  `revoked`), the one record of it, which the summary reads too, Fermix
+  running or stopped. Once the code is one this computer can join with, the
+  join lets go of that link here as a disconnect does
+  (`Home.Unlink.let_go/4`, `:revoked`): the relay stops first, and only
+  while its link still holds that word (one whose session came up since,
+  its server knowing this computer again, keeps its link, and the join is
+  refused as for any link to a server); then the key, what the server may
+  use here, the role back to the primary's (`Home.Unlink.role_after/1`),
+  the link and the history mark go; then it joins. A code it cannot join
+  with leaves the link as it is. A letting go that fails part-way leaves
+  the link, and the next join finishes it; once the link went, a later step
+  that fails leaves this computer as a disconnect would, the primary of its
+  own home with no link. The computer a home moved from is refused by its
+  moved marker first, so its link and its own copies of the server's
   backups stay.
 
   `opts`: `:now` (a `DateTime`), `:restart` (0-arity, in place of
   `Management.Lifecycle.restart_self/0`; a CLI passes one that does
-  nothing), and `:key_opts` (handed to `ComputerKey`: `supervised: false`
-  for a caller with no engine tree, and the secret writer's test seams).
+  nothing), `:release` (handed to `Home.Unlink.let_go/4`; a CLI, where no
+  relay runs, passes one that stops nothing), and `:key_opts` (handed to
+  `ComputerKey`: `supervised: false` for a caller with no engine tree, and
+  the secret writer's test seams).
   """
 
   require Logger
 
   alias Exqlite.Sqlite3
-  alias FermixCore.ComputerHistory.Spool
   alias FermixCore.Computers.Consent
   alias FermixCore.Home.ComputerKey
   alias FermixCore.Home.DesktopLink
   alias FermixCore.Home.EnrollmentCode
-  alias FermixCore.Home.Leave
   alias FermixCore.Home.Moved
+  alias FermixCore.Home.Unlink
   alias FermixCore.Management.Lifecycle
   alias FermixCore.Prompt.SetupSeeder
   alias FermixCore.Setup.ConfigStore
@@ -116,7 +125,7 @@ defmodule FermixCore.Home.Join do
           | :code_expired
           | {:computer_key, ComputerKey.error()}
           | {:link, DesktopLink.error()}
-          | {:revoked_link, Leave.error()}
+          | {:revoked_link, Unlink.error()}
           | {:file, Path.t(), term()}
           | {:invalid_join, Path.t()}
           | {:config, term()}
@@ -147,15 +156,6 @@ defmodule FermixCore.Home.Join do
          :ok <- undo_unless(device_role(home), home, state, opts) do
       restart(opts)
     end
-  end
-
-  @doc """
-  Whether `home` has a home of its own (see the moduledoc): `:ok`, or
-  `{:error, {:home_of_its_own, what}}` naming the first thing found.
-  """
-  @spec own_home(Path.t()) :: :ok | {:error, error()}
-  def own_home(home) when is_binary(home) and home != "" do
-    with {:ok, _revoked} <- standing(home), do: :ok
   end
 
   @doc "The join under `home`: its state, `:absent`, or why it cannot be read."
@@ -210,25 +210,8 @@ defmodule FermixCore.Home.Join do
          :ok <- config(Consent.none(home)),
          :ok <- link(DesktopLink.write(home, link_of(approved, state, store))),
          :ok <- remove_file(path(home)) do
-      :ok = forget_history_mark(home)
+      :ok = Unlink.forget_history_mark(home)
       restart(opts)
-    end
-  end
-
-  @doc """
-  Forgets which home this machine's computer history mark counts
-  (`ComputerHistory.Spool.forget_home/1`), as a join and a disconnect do. The
-  home's identity carried with each delivery decides on its own, so a store
-  that cannot be opened is logged and never stops the step that asked.
-  """
-  @spec forget_history_mark(Path.t()) :: :ok
-  def forget_history_mark(home) when is_binary(home) and home != "" do
-    case Spool.forget_home(home) do
-      :ok ->
-        :ok
-
-      {:error, reason} ->
-        Logger.error("this computer's history mark could not be forgotten: #{inspect(reason)}")
     end
   end
 
@@ -288,7 +271,7 @@ defmodule FermixCore.Home.Join do
 
   def error_sentence({:computer_key, reason}), do: ComputerKey.error_sentence(reason)
   def error_sentence({:link, reason}), do: DesktopLink.error_sentence(reason)
-  def error_sentence({:revoked_link, reason}), do: Leave.error_sentence(reason)
+  def error_sentence({:revoked_link, reason}), do: Unlink.error_sentence(reason)
 
   def error_sentence({:invalid_join, _path}),
     do: "This computer's join is not one Fermix wrote. Cancel it and join again."
@@ -380,19 +363,21 @@ defmodule FermixCore.Home.Join do
   # the old one's item would refuse (`ComputerKey`'s `in_use`). A step that
   # fails part-way leaves the link, and the next join finishes it; once it
   # went, a later step that fails leaves this computer its own home's primary,
-  # as a disconnect does.
+  # as a disconnect does. A relay whose session came up since keeps it: its
+  # server knows this computer again, so the link is one of its own.
   defp let_go(_home, nil, _opts), do: :ok
 
   defp let_go(home, link, opts) do
-    case Leave.let_go(home, link, :primary, Keyword.get(opts, :key_opts, [])) do
+    case Unlink.let_go(home, link, :revoked, Keyword.take(opts, [:key_opts, :release])) do
       :ok -> :ok
+      {:error, :known} -> {:error, {:home_of_its_own, "a link to a server"}}
       {:error, reason} -> {:error, {:revoked_link, reason}}
     end
   end
 
-  # A step that fails takes back what the ones before it wrote: the key this
-  # join made (its store and public key are in `state`, whether or not the
-  # file was written) and the file. The step's own error is the answer; an
+  # A step that fails takes back what this join wrote before it: the key it
+  # made (its store and public key are in `state`, whether or not the file
+  # was written) and the file. The step's own error is the answer; an
   # undo that fails as well is logged, since the next join meets what it left.
   defp undo_unless(:ok, _home, _state, _opts), do: :ok
 

@@ -73,10 +73,19 @@ defmodule FermixChannels.Desktop.Relay do
   a primary that ends every session is never redialed every second unseen.
   A primary that no longer knows this computer (`4003`: revoked, or an
   unknown key at the handshake) is not retried: the relay says so and stays
-  down until the engine restarts. It also keeps that word in the link
-  (`DesktopLink.record_revoked/3`), and the next session that comes up
-  clears it: a join with a new code reads it there with Fermix stopped
-  (`Home.Join`).
+  down until the engine restarts. That word lives in the link
+  (`DesktopLink.record_revoked/3`), the one record of it, which a join with
+  a new code (`Home.Join`), the summary and a disconnect read there, Fermix
+  running or stopped; it is written before the relay acts on it, as the
+  epoch is. The relay rests as revoked only once the link says so, and a
+  session that comes up is used only once the link no longer does: a word
+  this computer cannot write either way leaves the session unused, said,
+  and tried again with the backoff, an outage like any other.
+
+  A join with a new code, or a disconnect, lets go of the link while the
+  engine runs (`release_link/2`): the relay stops for good first, so nothing
+  writes the link back. A join asks it only while the link still holds the
+  server's word: one whose session came up since keeps its link.
 
   A session that comes up and every ending tell this engine's Always On watch
   (`FermixCore.Home.StatusWatch`, `:link`): the summary an app draws reads
@@ -239,8 +248,9 @@ defmodule FermixChannels.Desktop.Relay do
   `:status_changed` (a 0-arity call in place of telling the Always On
   watch), `:families` (the `media`, `loopback` and `snapshots` processes,
   by name or pid), `:write` (in place of `Rail.send_event/4`, run in the
-  writer), `:key_opts` (handed to `ComputerKey`: its secret writer) and
-  `:record_epoch` (3-arity, in place of `DesktopLink.record_epoch/3`).
+  writer), `:key_opts` (handed to `ComputerKey`: its secret writer),
+  `:record_epoch` (3-arity, in place of `DesktopLink.record_epoch/3`) and
+  `:record_revoked` (3-arity, in place of `DesktopLink.record_revoked/3`).
   """
 
   use GenServer
@@ -612,6 +622,32 @@ defmodule FermixChannels.Desktop.Relay do
     :exit, {reason, _call} when reason in [:noproc, :normal, :shutdown] -> :ok
   end
 
+  @doc """
+  This computer lets go of its link while the engine runs
+  (`FermixCore.Home.Link`'s `release_link/1`, `FermixCore.Home.Unlink`):
+  from now until the engine restarts the relay dials nothing, reloads
+  nothing and writes nothing of `device/desktop.json`, so no session that
+  comes up later writes back a link this computer let go of. `:revoked` (a
+  join with a new code) only while the link still holds its server's word
+  that it no longer knows this computer, else `{:error, :known}`: a session
+  came up since, so its server knows this computer and the link stays.
+  `:any` (a disconnect) whatever the link says, ending a session that is up,
+  each caller told the server is unreachable. A relay that rests as revoked
+  already dials and writes nothing, and stays as it is. No relay running has
+  nothing to stop; one that does not answer within 5 s is
+  `{:error, :unanswered}`.
+  """
+  @spec release_link(GenServer.server(), :revoked | :any) ::
+          :ok | {:error, :known | :unanswered}
+  def release_link(server \\ __MODULE__, which) when which in [:revoked, :any] do
+    if GenServer.whereis(server),
+      do: GenServer.call(server, {:release_link, which}, @status_wait_ms),
+      else: :ok
+  catch
+    :exit, {reason, _call} when reason in [:noproc, :normal, :shutdown] -> :ok
+    :exit, {:timeout, _call} -> {:error, :unanswered}
+  end
+
   @doc "The calling bridge is done with its call `call_id`: nothing more of it comes here."
   @spec close_call(GenServer.server(), String.t()) :: :ok
   def close_call(server \\ __MODULE__, call_id) when is_binary(call_id),
@@ -658,6 +694,7 @@ defmodule FermixChannels.Desktop.Relay do
       status_changed: Keyword.get(opts, :status_changed, fn -> StatusWatch.changed(:link) end),
       key_opts: Keyword.get(opts, :key_opts, []),
       record_epoch: Keyword.get(opts, :record_epoch, &DesktopLink.record_epoch/3),
+      record_revoked: Keyword.get(opts, :record_revoked, &DesktopLink.record_revoked/3),
       offers: Keyword.get(opts, :offers, ComputerSwitches.listener()),
       computer_caps: %{},
       call_caps: nil,
@@ -782,6 +819,12 @@ defmodule FermixChannels.Desktop.Relay do
     do: open_voice(call_id, bridge, state)
 
   def handle_call(:upload_bound, _from, state), do: {:reply, upload_bound_now(state), state}
+
+  def handle_call({:release_link, :revoked}, _from, %{link: %{revoked: false}} = state),
+    do: {:reply, {:error, :known}, state}
+
+  def handle_call({:release_link, _which}, _from, state), do: {:reply, :ok, released(state)}
+
   def handle_call({:end_calls, why, ms}, from, state), do: end_voice(why, ms, from, state)
   def handle_call({:fetch_media, ref}, {tunnel, _tag}, state), do: fetch(ref, tunnel, state)
 
@@ -1111,14 +1154,19 @@ defmodule FermixChannels.Desktop.Relay do
 
   defp connected(epoch, fields, state) do
     case keep_epoch(state.link, epoch, state) do
-      {:ok, link} ->
-        link
-        |> keep_route(fields, state.root)
-        |> keep_revoked(false, state.root)
-        |> session_up(fields, state)
+      {:ok, link} -> known(keep_route(link, fields, state.root), fields, state)
+      {:error, reason} -> drop_session({:epoch_not_kept, epoch, reason}, state)
+    end
+  end
 
-      {:error, reason} ->
-        drop_session({:epoch_not_kept, epoch, reason}, state)
+  # A session is used only once the link no longer says the server forgot
+  # this computer: a link that still said so would let a new code take it
+  # from a server that serves it. One this computer cannot write leaves the
+  # session unused, as a newer epoch it cannot write does.
+  defp known(link, fields, state) do
+    case keep_revoked(link, false, state) do
+      {:ok, link} -> session_up(link, fields, state)
+      {:error, reason} -> drop_session({:revoked_not_kept, false, reason}, %{state | link: link})
     end
   end
 
@@ -1273,20 +1321,22 @@ defmodule FermixChannels.Desktop.Relay do
   end
 
   # The server's word that it no longer knows this computer, kept in the
-  # link (true at its `4003`, false once a session is up), so a join with a
-  # new code reads it with Fermix stopped. One that cannot be written is said
-  # here; the link stands as it was.
-  defp keep_revoked(link, revoked?, root) do
-    case DesktopLink.record_revoked(root, link, revoked?) do
+  # link before the relay acts on it (true at its `4003`, false before a
+  # session is used): the one record of it, which a join, the summary and a
+  # disconnect read there. One that cannot be written is said here, and its
+  # caller treats it as an outage.
+  defp keep_revoked(link, revoked?, state) do
+    case state.record_revoked.(state.root, link, revoked?) do
       {:ok, link} ->
-        link
+        {:ok, link}
 
-      {:error, reason} ->
+      {:error, reason} = error ->
         Logger.error(
-          "desktop relay: the link's revoked mark was not set to #{revoked?}: #{inspect(reason)}"
+          "desktop relay: the link's revoked mark was not set to #{revoked?}; tried again " <>
+            "with the backoff: #{inspect(reason)}"
         )
 
-        link
+        error
     end
   end
 
@@ -2365,8 +2415,17 @@ defmodule FermixChannels.Desktop.Relay do
 
   # Revoked on the primary (`4003`, live or at the handshake): trying again
   # reaches nothing, so the relay stays down and says why until the engine
-  # restarts and reads its link again.
+  # restarts and reads its link again, once the link keeps the word. One this
+  # computer cannot write is an outage, tried again with the backoff, so the
+  # relay never rests on a word only its memory holds.
   defp revoked(reason, state) do
+    case keep_revoked(state.link, true, state) do
+      {:ok, link} -> rest_revoked(reason, %{state | link: link})
+      {:error, unkept} -> outage({:revoked_not_kept, true, unkept}, state)
+    end
+  end
+
+  defp rest_revoked(reason, state) do
     name = state.link.primary.name
 
     sentence =
@@ -2375,13 +2434,11 @@ defmodule FermixChannels.Desktop.Relay do
         "joined it. Fermix stopped reaching it."
 
     Logger.error("desktop relay: #{sentence} (#{inspect(reason, limit: 20)})")
-    link = keep_revoked(state.link, true, state.root)
     unless state.degraded?, do: state.emit.(:degraded, state.failures + 1, :revoked)
 
     %{
       fail_everyone(state, sentence, :relay_revoked)
-      | link: link,
-        phase: :revoked,
+      | phase: :revoked,
         word: :revoked,
         since: nil,
         down_since_ms: down_since(state),
@@ -2390,6 +2447,35 @@ defmodule FermixChannels.Desktop.Relay do
         degraded?: true,
         sentence: sentence,
         reconnect: nil
+    }
+  end
+
+  # This computer lets go of its link (`release_link/2`): the session ends,
+  # no dial or reload stays armed, and nothing here writes the link again
+  # until the engine restarts. One that rests as revoked already does none
+  # of that.
+  defp released(%{phase: :revoked} = state), do: state
+
+  defp released(state) do
+    :ok = stop_connector(state)
+    :ok = cancel(state, state.reconnect)
+    sentence = Placement.unreachable_sentence(name(state))
+    Logger.info("desktop relay: this computer lets go of its link; nothing dials it again")
+    state = state |> stop_writer() |> fail_everyone(sentence)
+    :ok = state.status_changed.()
+
+    %{
+      state
+      | connector: nil,
+        rail: nil,
+        path: nil,
+        reconnect: nil,
+        phase: :released,
+        word: :unreachable,
+        since: nil,
+        down_since_ms: down_since(state),
+        down_at: down_at(state),
+        sentence: sentence
     }
   end
 
@@ -2476,6 +2562,16 @@ defmodule FermixChannels.Desktop.Relay do
       "this computer's home, so it does not use it: #{unkept(reason)}."
   end
 
+  defp down_sentence({:revoked_not_kept, true, reason}, state) do
+    "The server #{state.link.primary.name} does not know this computer, but Fermix could " <>
+      "not record that here: #{unkept(reason)}."
+  end
+
+  defp down_sentence({:revoked_not_kept, false, reason}, state) do
+    "Fermix could not record that the server #{state.link.primary.name} knows this " <>
+      "computer again, so it does not use it: #{unkept(reason)}."
+  end
+
   defp down_sentence({:renewed_again, _renewals}, state),
     do: "The server #{state.link.primary.name} ends this computer's session each time it opens."
 
@@ -2514,6 +2610,7 @@ defmodule FermixChannels.Desktop.Relay do
   defp error_class({:remote, _code, _text}), do: :remote_closed
   defp error_class({:stale_primary, _mine, _theirs}), do: :stale_primary
   defp error_class({:epoch_not_kept, _epoch, _reason}), do: :epoch_not_kept
+  defp error_class({:revoked_not_kept, _revoked?, _reason}), do: :revoked_not_kept
   defp error_class({:renewed_again, _renewals}), do: :renewed_again
   defp error_class({:handshake, _reason}), do: :handshake
   defp error_class({:protocol_error, _reason}), do: :protocol

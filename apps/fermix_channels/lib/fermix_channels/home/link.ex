@@ -4,7 +4,8 @@ defmodule FermixChannels.Home.Link do
   place `fermix_core` reaches the rail through.
 
   Each callback is owned by the part of the rail that knows its answer:
-  `forward/1` and `status/0`'s `primary` by the desktop relay (device role),
+  `forward/1`, `release_link/1` and `status/0`'s `primary` by the desktop
+  relay (device role),
   `status/0`'s `desktops` by the primary's desktop peers
   (`FermixChannels.Desktop.Peer`), and `open_enrollment/1`,
   `withdraw_enrollment/0`, `open_join/0`, `approve_join/1`, `deny_join/0`,
@@ -48,6 +49,9 @@ defmodule FermixChannels.Home.Link do
   def status do
     %{primary: Relay.status(), desktops: desktops(), enrollment: Enrollment.status()}
   end
+
+  @impl true
+  def release_link(which) when which in [:revoked, :any], do: Relay.release_link(Relay, which)
 
   # The window runs on the primary alone (`FermixChannels.Home.Enrollment`);
   # with no window running here, none opens, said in words an owner reads.

@@ -13,14 +13,18 @@ defmodule Fermix.CLI.ComputerCommand do
   owns this home would otherwise keep running as its own home. The code is
   asked for only once both of those hold. It joins through
   `FermixCore.Home.Join.start/3`: refused by name when this computer has a
-  home of its own (a link its server revoked is none: a computer the owner
-  removed lets go of it, then joins again), when the code is not a
-  computer's or expired, and when
+  home of its own, when the code is not a computer's or expired, and when
   the secret store cannot keep this computer's key (each secret store call
-  runs inline, with no command host to own it). Nothing is left behind by a
-  refusal. Once it is done, the next start of Fermix here dials the server,
-  shows six digits and waits until the owner adds this computer there by
-  typing them.
+  runs inline, with no command host to own it). A refusal of the home or
+  the code leaves everything as it was. A link its server revoked is no
+  home of its own: once the code is good, this computer first lets go of it
+  here as a disconnect does (its key, what the server may use here, the
+  link, its role back to its own home's primary). A letting go that fails
+  part-way leaves the link, and the next join finishes it; a refusal after
+  the link went (the secret store, say) leaves this computer the primary of
+  its own home with no link, and the next join starts from there. Once it
+  is done, the next start of Fermix here dials the server, shows six digits
+  and waits until the owner adds this computer there by typing them.
 
   Exit status: `0` done, `1` refused (one sentence on stderr), `2` usage
   error.
@@ -103,11 +107,12 @@ defmodule Fermix.CLI.ComputerCommand do
     end
   end
 
-  # No engine runs to restart: the next start of Fermix carries the join on.
+  # No engine runs to restart, and no relay to stop before a link its server
+  # revoked goes: the next start of Fermix carries the join on.
   defp join_opts(deps) do
     key_opts = [supervised: false] ++ Keyword.get(deps, :key_opts, [])
     now = Keyword.get_lazy(deps, :now, &DateTime.utc_now/0)
-    [key_opts: key_opts, now: now, restart: fn -> :ok end]
+    [key_opts: key_opts, now: now, restart: fn -> :ok end, release: fn _which -> :ok end]
   end
 
   defp joined(server) do

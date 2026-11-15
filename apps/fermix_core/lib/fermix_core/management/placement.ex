@@ -41,8 +41,8 @@ defmodule FermixCore.Management.Placement do
   refuses every method of a family whose state is the primary's `memory.db`
   (`database_family?/1`: the cues, their sources, watchers, mandates and
   proposals) as retired (`retired/1`): `primary_unreachable`, as a linked
-  desktop's is while its server is out of reach, with the sentence that this
-  computer is no longer connected to its server. The home's recovery, enrollment and move are the primary's too
+  desktop's is while its server is out of reach, with the sentence its own
+  summary's `retired` says (`HomeSummary.retired_sentence/2`). The home's recovery, enrollment and move are the primary's too
   (`home.snapshots.*`, `home.enroll.open`, `home.enroll.withdraw`,
   `home.enroll.approve`, `home.enroll.deny`, `home.candidates.list`,
   `home.move.readiness`, `home.move.start`): after a move the server holds
@@ -90,7 +90,6 @@ defmodule FermixCore.Management.Placement do
   M97 D28c) is the other: the server restarts right after it answers.
   """
 
-  alias FermixCore.Management.Copy
   alias FermixCore.Management.Protocol
 
   # The browser's installer installs on this machine, whose browser the
@@ -552,14 +551,12 @@ defmodule FermixCore.Management.Placement do
 
   @doc """
   The refusal of a device with no link to its server (retired) for a method of
-  a `database_family?/1`: `primary_unreachable` with the summary's own retired
-  sentence for this computer, `os_type` as `:os.type/0` answers it.
+  a `database_family?/1`: `primary_unreachable` with `sentence`, the one its
+  own summary's `retired` says (`HomeSummary.retired_sentence/2`).
   """
-  @spec retired({atom(), atom()}) :: Protocol.route_result()
-  def retired({_family, name} = os_type) when is_tuple(os_type) and is_atom(name) do
-    machine = if os_type == {:unix, :darwin}, do: "Mac", else: "computer"
-    unreachable(nil, Copy.summary_sentence(:retired, %{machine: machine}))
-  end
+  @spec retired(String.t()) :: Protocol.route_result()
+  def retired(sentence) when is_binary(sentence) and sentence != "",
+    do: unreachable(nil, sentence)
 
   @doc "The primary's refusal of a device-class request a desktop forwarded."
   @spec device_class_refusal(String.t()) :: Protocol.route_result()

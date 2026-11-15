@@ -76,18 +76,32 @@ defmodule FermixCore.Management.HomeSummaryTest do
        "The move was undone. Fermix still runs on this Mac.", nil},
       {"a computer the move left with no link", device(linked: false, moved: moved()), "retired",
        "Fermix moved to your server, and this Mac is no longer connected to it.", nil},
-      {"a desktop the server forgot", desktop(link_primary: primary(:revoked)), "retired",
-       "Fermix moved to your server, and this Mac is no longer connected to it.", nil},
+      {"a desktop the server forgot", desktop(link_primary: primary(:revoked), revoked: true),
+       "retired", "Fermix moved to your server, and this Mac is no longer connected to it.", nil},
       # M97 §3.3: Fermix never moved from a computer that joined (it has no
       # moved marker): its server removed it, and a new code joins it again.
       {"a computer that joined, which its server removed",
-       desktop(moved: nil, link_primary: primary(:revoked)), "retired",
+       desktop(moved: nil, link_primary: primary(:revoked), revoked: true), "retired",
        "Your server no longer knows this Mac. To join your Fermix again, enter a new code " <>
          "from Add a computer.", nil},
       {"a Linux computer that joined, which its server removed",
-       desktop(moved: nil, link_primary: primary(:revoked), host_os: :linux), "retired",
+       desktop(moved: nil, link_primary: primary(:revoked), revoked: true, host_os: :linux),
+       "retired",
        "Your server no longer knows this computer. To join your Fermix again, enter a new " <>
          "code from Add a computer.", nil},
+      # The link is the one record of the server's word (`DesktopLink`'s
+      # `revoked`): with Fermix stopped no relay says anything, and the link
+      # still does, as `fermix computer join` reads it then.
+      {"a computer that joined, which its server removed, with Fermix stopped",
+       desktop(moved: nil, link_primary: nil, primary_home: nil, revoked: true), "retired",
+       "Your server no longer knows this Mac. To join your Fermix again, enter a new code " <>
+         "from Add a computer.", nil},
+      # Fermix restarted with the server's word in the link: the relay dials
+      # again, and the link speaks until a session comes up and clears it.
+      {"a computer that joined, which its server removed, redialing it",
+       desktop(moved: nil, link_primary: primary(:renewing), revoked: true), "retired",
+       "Your server no longer knows this Mac. To join your Fermix again, enter a new code " <>
+         "from Add a computer.", nil},
       # Its link gone (a disconnect, or a join cancelled) while it restarts as
       # its own Fermix.
       {"a computer with no marker and no link", device(linked: false, moved: nil), "retired",
@@ -1434,7 +1448,11 @@ defmodule FermixCore.Management.HomeSummaryTest do
             desktop(copies: [copy()]),
             desktop(link_primary: primary(:unreachable, 5 * @minute), copies: [copy()]),
             desktop(link_primary: unreachable, primary_home: nil, copies: []),
-            desktop(link_primary: primary(:revoked), copies: [copy()]),
+            desktop(link_primary: primary(:revoked), revoked: true, copies: [copy()]),
+            # With Fermix stopped no relay says anything; the link says the
+            # server answered that it forgot this computer, which is no
+            # silence.
+            desktop(link_primary: nil, primary_home: nil, revoked: true, copies: [copy()]),
             desktop(
               link_primary: primary(:stale, 11 * @minute),
               primary_home: nil,
@@ -1970,9 +1988,10 @@ defmodule FermixCore.Management.HomeSummaryTest do
                page.("when-the-server-is-gone")
 
       # A retired computer: the one the home moved from, and one that joined.
-      assert help.(desktop(link_primary: primary(:revoked))) == page.("when-the-server-is-gone")
+      assert help.(desktop(link_primary: primary(:revoked), revoked: true)) ==
+               page.("when-the-server-is-gone")
 
-      assert help.(desktop(moved: nil, link_primary: primary(:revoked))) ==
+      assert help.(desktop(moved: nil, link_primary: primary(:revoked), revoked: true)) ==
                page.("add-a-computer")
 
       assert help.(device(linked: false, moved: nil)) == page.("add-a-computer")
@@ -2459,6 +2478,7 @@ defmodule FermixCore.Management.HomeSummaryTest do
         host_os: :macos,
         now: @now,
         linked: false,
+        revoked: false,
         moved: nil,
         move: nil,
         link: link([]),

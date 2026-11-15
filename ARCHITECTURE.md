@@ -1674,7 +1674,10 @@ Current channels:
   once in a row (a renewed session ended normally again within a minute is
   an outage, `renewed_again`, on the ordinary backoff), and a revoked desktop
   (`4003`) stops dialing until the engine restarts, keeping that word in the
-  link (`revoked`, cleared by the next session up). Its posture is
+  link (`revoked`, cleared by the next session up), its one record, which
+  the join, the summary and a disconnect read there; the relay writes it
+  before it acts on it, so a word it cannot write is an outage, redialed
+  (`revoked_not_kept`). Its posture is
   `emit_transport(:desktop_relay, …)` and `home.status`'s `primary`, whose
   `status` word (`connected`, `renewing`, `unreachable`, `revoked`, `stale`;
   set at each transition, so a redial during an outage keeps `unreachable`)
@@ -1768,12 +1771,15 @@ Current channels:
   spent either way. The computer's side is `FermixCore.Home.Join`, the one
   writer of `device/join.json` (refused for a home of its own, which a link
   its server revoked is not: once the code is good that link goes first, as
-  a disconnect lets go of it here, `Home.Leave.let_go/4`; its key made
+  a disconnect lets go of it here, `Home.Unlink.let_go/4`, which first has
+  the relay stop for good, `Relay.release_link/2`, and only while its link
+  still holds that word; its key made
   in the secret store first), and `Desktop.Join`, a worker in the device
   tree's dial subtree while that file is here and no link is; approval
   writes the link with every offer off (`Join.finish/3`) and restarts.
   `FermixCore.Home.Leave` is the way out: the server is told over the link,
-  then the key, the link and the switches go. A
+  then the key, the link and the switches go (`Home.Unlink`, the relay
+  released whatever its link says). A
   candidate engine runs `Home.CandidateSupervisor` alone: its own
   `Iroh.Bridge` (move prelude only) and `Iroh.Helper` in listen mode rooted at
   `<home>/candidate`, then `Home.Candidate`, the one writer of its phase file,

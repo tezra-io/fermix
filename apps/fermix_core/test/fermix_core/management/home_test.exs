@@ -884,6 +884,42 @@ defmodule FermixCore.Management.HomeTest do
       assert summary["notice"] == nil
     end
 
+    # The link is the one record of the server's word that it no longer knows
+    # this computer (`DesktopLink`'s `revoked`): with Fermix stopped no relay
+    # runs, and `fermix home status` reads it from the link as the join does.
+    test "a computer its server removed reads that from its link, Fermix stopped or not",
+         %{home: home} do
+      :ok = DesktopLink.write(home, Map.put(desktop_link(), :revoked, true))
+      device = %{role: :device, primary: "invented-vm"}
+
+      removed =
+        "Your server no longer knows this computer. To join your Fermix again, enter a new " <>
+          "code from Add a computer."
+
+      stopped =
+        opts(home,
+          engine_role: device,
+          host_os: :linux,
+          supervised: false,
+          link_status: link(primary: nil)
+        )
+
+      assert {:ok, %{"summary" => %{"state" => "retired", "sentence" => ^removed}}} =
+               route("home.status", %{}, stopped)
+
+      # Fermix runs, its relay dialing again after a restart: the link speaks.
+      redialing =
+        opts(home,
+          engine_role: device,
+          host_os: :linux,
+          link_status: link(primary: %{primary(nil) | status: :renewing, connected: false})
+        )
+        |> Keyword.put(:primary_forward, fn _request, _opts -> {:ok, %{"role" => "primary"}} end)
+
+      assert {:ok, %{"summary" => %{"state" => "retired", "sentence" => ^removed}}} =
+               route("home.status", %{}, redialing)
+    end
+
     # Re-check note 6: a move's record that cannot be read is said in the
     # log, never taken as "not moved back" without a word.
     test "a retired copy whose move's record cannot be read says why in the log",

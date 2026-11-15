@@ -1286,9 +1286,13 @@ within a minute of opening is `degraded` with `renewed_again`, redialed with
 the backoff, and `recovered` at the next `hello_ack`. A revocation (`4003`)
 is `degraded` with `revoked`, and no
 `recovered` follows until the engine restarts, since the relay stops dialing.
+One whose word the link cannot keep, or a session whose link cannot stop
+saying it, is `degraded` with `revoked_not_kept` instead, redialed with the
+backoff.
 `error_class` is `timeout`, `unreachable`, `refused`, `busy`, `helper`,
-`revoked`, `remote_closed`, `remote_ended`, `idle`, `lifetime`,
-`stale_primary`, `renewed_again`, `handshake`, `protocol` or `socket`. The calls and lines it
+`revoked`, `revoked_not_kept`, `remote_closed`, `remote_ended`, `idle`,
+`lifetime`, `stale_primary`, `renewed_again`, `handshake`, `protocol` or
+`socket`. The calls and lines it
 carries emit nothing of their own on the desktop: the primary's management
 and companion paths emit as for a local request.
 

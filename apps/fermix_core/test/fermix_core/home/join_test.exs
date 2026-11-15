@@ -29,8 +29,11 @@ defmodule FermixCore.Home.JoinTest do
 
     opts = [
       now: @now,
-      # No relay runs here: the link says nothing of its server.
-      link_status: fn -> %{primary: nil} end,
+      # No relay runs here: letting go of the link stops none, and says so.
+      release: fn which ->
+        send(test, {:released, which})
+        :ok
+      end,
       restart: fn ->
         send(test, :restarted)
         :ok
@@ -270,6 +273,9 @@ defmodule FermixCore.Home.JoinTest do
                          "confirmed" => true
                        }}
 
+      # The relay stops first, whatever the link says, so nothing writes the
+      # link back once it went.
+      assert_received {:released, :any}
       assert_received :restarted
       refute File.exists?(DesktopLink.path(ctx.home))
       assert ComputerKey.read(ctx.home, store: :keyring) == {:error, {:missing, :keyring}}
@@ -297,7 +303,22 @@ defmodule FermixCore.Home.JoinTest do
     # The server removes the computer and ends its session at once, so the
     # answer to its own request never arrives: the link then says the server
     # no longer knows this computer, which is the server having taken it.
+    # The relay wrote that in the link before it answered the request
+    # (`DesktopLink`'s `revoked`, the one record of it); its own live word is
+    # not asked.
     test "a server that ended the session as it removed this computer was told", ctx do
+      lost = fn _request, _opts ->
+        revoked!(ctx.home)
+        {:error, :primary_unreachable, %{"sentence" => "The server studio-mac is unreachable."}}
+      end
+
+      assert {:ok, true} = Leave.disconnect(ctx.home, [forward: lost] ++ ctx.opts)
+      assert_received :restarted
+      refute File.exists?(DesktopLink.path(ctx.home))
+    end
+
+    # The relay's own word alone, a link that does not say it, is no answer.
+    test "a lost answer with a link that does not say revoked was not told", ctx do
       lost = fn _request, _opts ->
         {:error, :primary_unreachable, %{"sentence" => "The server studio-mac is unreachable."}}
       end
@@ -305,9 +326,9 @@ defmodule FermixCore.Home.JoinTest do
       revoked = fn -> %{primary: %{status: :revoked, connected: false}} end
       opts = [forward: lost, link_status: revoked] ++ ctx.opts
 
-      assert {:ok, true} = Leave.disconnect(ctx.home, opts)
-      assert_received :restarted
-      refute File.exists?(DesktopLink.path(ctx.home))
+      assert Leave.disconnect(ctx.home, opts) == {:error, :not_told}
+      assert File.exists?(DesktopLink.path(ctx.home))
+      refute_received :restarted
     end
 
     # The link goes last, so a step that fails before it leaves this computer
@@ -384,6 +405,7 @@ defmodule FermixCore.Home.JoinTest do
       spool = marked_spool!(ctx.home)
 
       assert :ok = Join.start(ctx.home, code(), ctx.opts)
+      assert_received {:released, :revoked}
       assert_received :restarted
 
       refute File.exists?(DesktopLink.path(ctx.home))
@@ -421,6 +443,74 @@ defmodule FermixCore.Home.JoinTest do
       assert File.exists?(DesktopLink.path(ctx.home))
       assert {:ok, %{public: kept}} = ComputerKey.read(ctx.home, store: :keyring)
       assert kept == ctx.old
+      refute_received {:released, _which}
+    end
+
+    # While Fermix runs, its relay may bring a session up between the join's
+    # read of the link and its letting go: a server restored to a backup
+    # that knows this computer again. The relay answers for the link it
+    # writes, so that link stays, and so does everything it names.
+    test "a revoked link whose server knows this computer again by now stays", ctx do
+      revoked!(ctx.home)
+      known = Keyword.put(ctx.opts, :release, fn :revoked -> {:error, :known} end)
+
+      assert Join.start(ctx.home, code(), known) ==
+               {:error, {:home_of_its_own, "a link to a server"}}
+
+      assert {:ok, %{revoked: true}} = DesktopLink.read(ctx.home)
+      assert {:ok, %{public: kept}} = ComputerKey.read(ctx.home, store: :keyring)
+      assert kept == ctx.old
+      assert {:ok, %{role: :device}} = Role.configured(ctx.home)
+      refute Join.present?(ctx.home)
+      refute_received :restarted
+    end
+
+    # The link goes last: letting go of it is safe to repeat, so a step that
+    # fails part-way leaves it, and the next join finishes the job.
+    test "a letting go that fails part-way leaves the link, and the next join finishes", ctx do
+      revoked!(ctx.home)
+      machine = Path.join(ctx.home, "machine.toml")
+      SafeRm.rm!(machine)
+      File.mkdir_p!(Path.join(machine, "kept"))
+
+      assert {:error, {:revoked_link, {:config, _reason}} = reason} =
+               Join.start(ctx.home, code(), ctx.opts)
+
+      assert Join.error_sentence(reason) ==
+               "Fermix could not change this computer's settings file. Its log says why."
+
+      assert {:ok, %{revoked: true}} = DesktopLink.read(ctx.home)
+      refute Join.present?(ctx.home)
+      refute_received :restarted
+
+      SafeRm.rm_rf!(machine)
+      assert :ok = Join.start(ctx.home, code(), ctx.opts)
+      assert_received :restarted
+      refute File.exists?(DesktopLink.path(ctx.home))
+      assert {:ok, %{"phase" => "dialing"}} = Join.read(ctx.home)
+      assert {:ok, %{role: :device}} = Role.configured(ctx.home)
+    end
+
+    # Once the link went, this computer is what a disconnect leaves: the
+    # primary of its own home, with no link. A step of the join after it that
+    # fails takes back only what the join itself made.
+    test "a join that fails once the old link went leaves this computer its own home", ctx do
+      revoked!(ctx.home)
+      blocked = Join.path(ctx.home) <> ".tmp"
+      File.mkdir_p!(Path.join(blocked, "kept"))
+
+      assert {:error, {:file, _path, _reason}} = Join.start(ctx.home, code(), ctx.opts)
+
+      refute File.exists?(DesktopLink.path(ctx.home))
+      refute Join.present?(ctx.home)
+      assert ComputerKey.read(ctx.home, store: :keyring) == {:error, {:missing, :keyring}}
+      assert {:ok, %{role: :primary}} = Role.configured(ctx.home)
+      refute_received :restarted
+
+      # Its own home now: the next join starts as a first one does.
+      SafeRm.rm_rf!(blocked)
+      assert :ok = Join.start(ctx.home, code(), ctx.opts)
+      assert_received :restarted
     end
 
     # It keeps its own copies of the server's backups and the marker that

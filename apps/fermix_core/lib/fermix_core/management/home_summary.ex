@@ -40,11 +40,12 @@ defmodule FermixCore.Management.HomeSummary do
     * the computer the move left: `moving` (its last word, once it waits on
       the server's confirmation, is that Fermix keeps trying), `undone` while
       it restarts as it was, `on`, `retired` (no link, or the server forgot
-      this computer; a server's own copy that a move back left serving
-      nothing names where Fermix moved back to, the marker's `to`); a
-      computer that joined is `retired` too once its server forgot it, which
-      says so and that a new code from Add a computer joins it again, or
-      while it restarts with no link, which says it is not connected; its
+      this computer, which its link says, `DesktopLink.revoked?/1`, with
+      Fermix running or stopped; a server's own copy that a move back left
+      serving nothing names where Fermix moved back to, the marker's `to`);
+      a computer that joined is `retired` too once its server forgot it,
+      which says so and that a new code from Add a computer joins it again,
+      or while it restarts with no link, which says it is not connected; its
       help is Add a computer's;
     * the server: `candidate` while it waits for its move, `primary` after;
     * `problem`, with its `kind` (`problems/0`) in `detail` and the one action
@@ -260,6 +261,7 @@ defmodule FermixCore.Management.HomeSummary do
   alias FermixCore.Home.DesktopLink
   alias FermixCore.Home.Join
   alias FermixCore.Home.Move
+  alias FermixCore.Home.Moved
   alias FermixCore.Home.MoveProgress
   alias FermixCore.Home.MoveReadiness
   alias FermixCore.Home.Readable
@@ -324,6 +326,7 @@ defmodule FermixCore.Management.HomeSummary do
           required(:host_os) => :macos | :linux,
           required(:now) => DateTime.t(),
           required(:linked) => boolean(),
+          required(:revoked) => boolean(),
           required(:moved) => map() | nil,
           required(:move) => map() | nil,
           required(:link) => map(),
@@ -379,6 +382,29 @@ defmodule FermixCore.Management.HomeSummary do
   @doc "The summary for `facts` (`gather/5`'s)."
   @spec summary(facts()) :: summary()
   def summary(facts) when is_map(facts), do: facts |> screen() |> finish(facts)
+
+  @doc """
+  The sentence `retired` says on the computer at `home`, read from its own
+  files by the summary's one rule: where Fermix moved back to, on a
+  server's own copy a move back left serving nothing; that Fermix moved to
+  its server, where the home moved from this computer (its moved marker);
+  that its server no longer knows it, where its link says so
+  (`DesktopLink.revoked?/1`); and else that it is not connected to a
+  Fermix. A device with no link refuses with it what it cannot serve
+  (`Placement.retired/1`). `opts`: `:host_os` and `:unreadable_files`, as
+  `gather/5` takes them.
+  """
+  @spec retired_sentence(Path.t(), keyword()) :: String.t()
+  def retired_sentence(home, opts) when is_binary(home) and home != "" and is_list(opts) do
+    reads = Keyword.take(opts, [:unreadable_files])
+
+    retired_sentence(%{
+      host_os: Keyword.get_lazy(opts, :host_os, &host_os/0),
+      moved: moved_marker(home, reads),
+      moved_back: moved_back(home, :device, reads),
+      revoked: DesktopLink.revoked?(home)
+    })
+  end
 
   defp screen(%{role: :candidate} = facts), do: candidate(facts)
   defp screen(%{role: :device} = facts), do: device(facts)
@@ -558,6 +584,7 @@ defmodule FermixCore.Management.HomeSummary do
       host_os: host_os,
       now: now,
       linked: DesktopLink.linked?(record, home),
+      revoked: DesktopLink.linked?(record, home) and DesktopLink.revoked?(home),
       moved: status.moved,
       move: status.move,
       link: link,
@@ -905,7 +932,7 @@ defmodule FermixCore.Management.HomeSummary do
     do: view("undone", sentence(:undone, facts), nil, %{}) |> noted(undone_reason(facts.move))
 
   defp settled(%{linked: false} = facts), do: retired(facts)
-  defp settled(%{link: %{primary: %{status: :revoked}}} = facts), do: retired(facts)
+  defp settled(%{revoked: true} = facts), do: retired(facts)
   defp settled(facts), do: desktop(facts)
 
   # The move from this computer under way: its steps, its route to the
@@ -922,13 +949,14 @@ defmodule FermixCore.Management.HomeSummary do
   # A server's own copy that a move back left serving nothing names where
   # Fermix moved back to; any other computer the home moved from, its
   # server. Fermix never moved from a computer that joined (no moved
-  # marker): its server forgot it, and a new code joins it again
-  # (`Home.Join`), or its link is gone while it restarts as its own Fermix.
+  # marker): its server forgot it, which its link says, and a new code joins
+  # it again (`Home.Join`), or its link is gone while it restarts as its own
+  # Fermix. The one rule, which `retired_sentence/2` reads from the files.
   defp retired_sentence(%{moved_back: true, moved: %{to: to}} = facts),
     do: sentence(:retired_back, facts, %{to: to})
 
   defp retired_sentence(%{moved: %{}} = facts), do: sentence(:retired, facts)
-  defp retired_sentence(%{linked: true} = facts), do: sentence(:removed, facts)
+  defp retired_sentence(%{revoked: true} = facts), do: sentence(:removed, facts)
   defp retired_sentence(facts), do: sentence(:unlinked, facts)
 
   defp desktop(facts) do
@@ -1299,9 +1327,11 @@ defmodule FermixCore.Management.HomeSummary do
   defp stale?(_facts), do: false
 
   # The server silent: nothing answers, so no link (none, or forgotten) or
-  # no session for the limit. One that answers it forgot this computer
-  # (`revoked`), or a retired copy that answers (`stale`: the home lives
-  # elsewhere), is not silent.
+  # no session for the limit. One that answered it forgot this computer
+  # (`revoked`, which the link keeps, so it holds with Fermix stopped too),
+  # or a retired copy that answers (`stale`: the home lives elsewhere), is
+  # not silent.
+  defp silent?(%{revoked: true}), do: false
   defp silent?(%{link: %{primary: nil}}), do: true
 
   defp silent?(%{link: %{primary: %{status: :unreachable} = link}}),
@@ -2450,6 +2480,19 @@ defmodule FermixCore.Management.HomeSummary do
   end
 
   defp moved_back(_home, _role, _reads), do: false
+
+  # A marker that cannot be read is none, logged once while it stays so.
+  defp moved_marker(home, reads) do
+    read = Moved.read(home)
+
+    :ok =
+      UnreadableFiles.log_read(Moved.path(home), "home status", read_result(read), memory(reads))
+
+    case read do
+      {:ok, marker} -> marker
+      _absent_or_unread -> nil
+    end
+  end
 
   defp copy(path) do
     name = Path.basename(path)

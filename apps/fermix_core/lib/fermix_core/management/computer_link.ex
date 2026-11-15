@@ -19,8 +19,9 @@ defmodule FermixCore.Management.ComputerLink do
       nothing changes; `confirmed: true` disconnects anyway and answers
       `server_told: false`.
 
-  Seams in `opts`: `:home`, `:now`, `:restart`, `:key_opts`, `:link_status`
-  and `:primary_forward` (the link, on a linked computer).
+  Seams in `opts`: `:home`, `:now`, `:restart`, `:key_opts`, `:release`
+  (`Home.Unlink.let_go/4`'s) and `:primary_forward` (the link, on a linked
+  computer).
   """
 
   alias FermixCore.Home.Join
@@ -66,7 +67,7 @@ defmodule FermixCore.Management.ComputerLink do
   defp leave(forward, confirmed?, opts) do
     leave_opts =
       [forward: forward, confirmed: confirmed?] ++
-        Keyword.take(opts, [:restart, :key_opts, :link_status])
+        Keyword.take(opts, [:restart, :key_opts, :release])
 
     case Leave.disconnect(home(opts), leave_opts) do
       {:ok, told?} ->
@@ -111,6 +112,6 @@ defmodule FermixCore.Management.ComputerLink do
 
   defp refused(reason), do: {:error, {:unavailable, @capability, Join.error_sentence(reason)}}
 
-  defp join_opts(opts), do: Keyword.take(opts, [:now, :restart, :key_opts])
+  defp join_opts(opts), do: Keyword.take(opts, [:now, :restart, :key_opts, :release])
   defp home(opts), do: Keyword.get_lazy(opts, :home, &ConfigStore.fermix_home/0)
 end

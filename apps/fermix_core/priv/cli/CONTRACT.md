@@ -69,11 +69,20 @@ asked for with echo off (the prompt on stderr), and from a pipe or a file it
 is the first line. It is asked for only once the verb found Fermix stopped.
 The next start of Fermix dials the server and shows six digits, and the
 owner adds this computer on the server only if the same digits show there.
+A link to a server is a home of its own, but not one whose server no longer
+knows this computer (the owner removed it there, or the server was restored
+from before it joined), which the link records once Fermix has run here
+since: once the code is one this computer can join with, it first lets go
+of that link here as a disconnect does (its key, what the server may use
+here, the link), then joins.
 Exit `0` done; `1` refused, with one sentence on stderr after `fermix
 computer join: ` (Fermix runs here; no code read; a home of its own; a code
 that is not a computer's or expired; a secret store that cannot keep the
-key), and nothing is left behind; `2` a usage error, a code given as an
-argument among them.
+key; a link it could not let go of). A refusal of the home or the code
+leaves everything as it was. A letting go that fails part-way leaves the
+link, and the next join finishes letting go of it; a refusal after the link
+went (the secret store, say) leaves this computer the primary of its own
+home, with no link. `2` a usage error, a code given as an argument among them.
 
 ## The action result
 

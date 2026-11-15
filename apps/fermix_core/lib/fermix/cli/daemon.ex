@@ -84,6 +84,7 @@ defmodule Fermix.CLI.Daemon do
   alias FermixCore.Management.Text
   alias FermixCore.Observability
   alias FermixCore.Plugins.Runtime, as: PluginsRuntime
+  alias FermixCore.Setup.ConfigStore
   alias FermixCore.SocketPath
   alias FermixCore.SocketPeer
   alias FermixCore.Trace
@@ -679,12 +680,28 @@ defmodule Fermix.CLI.Daemon do
   end
 
   # A device with no link opens no database: a method whose state is the
-  # primary's memory.db is refused as retired, before anything reads it.
+  # primary's memory.db is refused as retired, before anything reads it,
+  # with the sentence this computer's summary says.
   defp dispatch_management_request(request, state) do
     if device?(state) and Placement.database_family?(request.method),
-      do: Placement.retired(state.os),
+      do: Placement.retired(retired_sentence(state)),
       else: route_management_request(request, management_opts(state))
   end
+
+  # The summary's own `retired` sentence, from this home's files at the
+  # request (`HomeSummary.retired_sentence/2`): the home and its reads are
+  # `home.status`'s, the machine this host's.
+  defp retired_sentence(state) do
+    home_opts =
+      state.management_opts |> Keyword.get(:operation_opts, []) |> Keyword.get(:home, [])
+
+    home = Keyword.get_lazy(home_opts, :home, &ConfigStore.fermix_home/0)
+    reads = Keyword.take(home_opts, [:unreadable_files])
+    HomeSummary.retired_sentence(home, [host_os: host_os(state.os)] ++ reads)
+  end
+
+  defp host_os({:unix, :darwin}), do: :macos
+  defp host_os(_os_type), do: :linux
 
   defp route_management_request(request, opts),
     do: guarded(request.method, fn -> ManagementRouter.route(request, opts) end)

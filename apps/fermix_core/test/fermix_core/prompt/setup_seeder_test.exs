@@ -232,15 +232,19 @@ defmodule FermixCore.Prompt.SetupSeederTest do
       name = "Juno"
       """
 
+      # A join reads its code only once the home is no home of its own, so a
+      # code Fermix did not open is how far a home with none gets, and nothing
+      # is made for it.
       File.write!(Path.join(home, "config.toml"), settings)
-      assert Join.own_home(home) == :ok
+      assert {:error, {:invalid_code, _what}} = Join.start(home, "fxenroll1.nope")
 
       File.write!(
         Path.join(home, "config.toml"),
         String.replace(settings, "Avery Quinn", "Avery Q.")
       )
 
-      assert Join.own_home(home) == {:error, {:home_of_its_own, "memories"}}
+      assert Join.start(home, "fxenroll1.nope") == {:error, {:home_of_its_own, "memories"}}
+      refute Join.present?(home)
     end
   end
 
