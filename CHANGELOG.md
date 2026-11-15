@@ -6,6 +6,8 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.20.0] - 2026-11-15
+
 ### Security
 
 - **Someone on your network can no longer pose as the servers Fermix talks
