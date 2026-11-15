@@ -86,7 +86,10 @@
 (*    fails runs nothing, a finished record that fails is logged and the  *)
 (*    answer still goes. A link file the relay cannot write is no MoveOn: *)
 (*    the newer copy's session is not used (Relay.keep_epoch/3), so the   *)
-(*    relay and Admission read one epoch, the file's;                     *)
+(*    relay and Admission read one epoch, the file's. A revoked mark it   *)
+(*    cannot clear once the epoch is kept leaves the session unused too   *)
+(*    (Relay.known/3): MoveOn with a newer copy, a Reconnect and its Drop *)
+(*    with this server; the mark is set only at a 4003, not modelled;     *)
 (*  - a computer's own request to its server (history.submit, M97 §8.1,   *)
 (*    and a reminder's snooze, M99 §10.1): HistoryUplink or               *)
 (*    ReminderUplink opens it, waits on it and cancels it in the process  *)
@@ -116,7 +119,7 @@
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/desktop/invoke_family.ex#init,handle_event,reconcile @ aafda1185bd7
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/desktop/device_supervisor.ex#children,invoke_spec @ 62d59181f365
 \* SOURCE: apps/fermix_core/lib/fermix_core/computers/switches.ex#write,forget,notify @ bc1e22104814
-\* SOURCE: apps/fermix_channels/lib/fermix_channels/desktop/relay.ex#hello_ack,connected,keep_epoch,invocation @ e08370bf116e
+\* SOURCE: apps/fermix_channels/lib/fermix_channels/desktop/relay.ex#hello_ack,connected,known,keep_epoch,invocation @ 8e756ac63656
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/mobile/lanes.ex @ 2c6c6a6d807e
 \* SOURCE: apps/fermix_core/lib/fermix_core/computers/capabilities/browser.ex#run @ bcd156a3a978
 \* SOURCE: apps/fermix_core/lib/fermix_core/browser/held_turn.ex @ 030374c72d18
@@ -665,10 +668,17 @@ ActHeld(id) ==
                    linkEpoch, stopped, hist_vars>>
 
 \* The home moves on: the computer's next session is with a newer copy, and
-\* it keeps that epoch in device/desktop.json (Relay.keep_epoch/3, relay.ex:1202;
+\* it keeps that epoch in device/desktop.json (Relay.keep_epoch/3, relay.ex:1250;
 \* DesktopLink.record_epoch/3) before anything relies on it. A write that
 \* fails is no move: the newer copy's session is not used (connected/3,
-\* :1121), so the relay and Admission read the one epoch, the file's.
+\* :1158), so the relay and Admission read the one epoch, the file's. Once
+\* the epoch is kept, a session is used only after the link's revoked mark
+\* is clear (known/3, :1166-1171); a clear that fails leaves it unused too,
+\* an outage like a failed epoch write (:1169). With a newer copy that is
+\* this step, its epoch already in the file; with this server, whose side
+\* of the session was up from its hello_ack, a Reconnect and its Drop. The
+\* mark is set only at a 4003, not modelled, and a mark already clear is
+\* not written (DesktopLink.record_revoked/3), so here no such write runs.
 MoveOn ==
     /\ HomeCanMoveOn /\ ~up /\ linkEpoch = ServerEpoch
     /\ linkEpoch' = ServerEpoch + 1

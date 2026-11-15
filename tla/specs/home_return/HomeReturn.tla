@@ -114,7 +114,7 @@
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/desktop/relay.ex#lost_answer @ dfb459724267
 \* SOURCE: apps/fermix_core/lib/fermix_core/management/always_on.ex @ 8fd2754d2746
 \* SOURCE: apps/fermix_core/lib/fermix_core/management/home.ex#restoring? @ 10524f88be3d
-\* SOURCE: apps/fermix_core/lib/fermix_core/management/home_summary.ex#screen,target,device,settled,retired,away,away_here,on,returning,return_view,return_ready,return_moving,return_undone,return_stopped,restore_view,return_cancel,restoring,restore_running?,restore_offer,restorable,started?,stale?,silent?,server_move,server_idle?,move_back,readable_or_update,@before_move,@ended,@server_moves @ f9cc9a57fe7d
+\* SOURCE: apps/fermix_core/lib/fermix_core/management/home_summary.ex#screen,target,device,settled,retired,away,away_here,on,returning,return_view,return_ready,return_moving,return_undone,return_stopped,restore_view,return_cancel,restoring,restore_running?,restore_offer,restorable,started?,stale?,silent?,server_move,server_idle?,move_back,readable_or_update,@before_move,@ended,@server_moves @ c900bc1b2da9
 \* SOURCE: apps/fermix_core/lib/fermix_core/home/local_return.ex#restore,restored,staged,placed,failed,restart @ a9fe927a65e2
 EXTENDS Naturals
 
@@ -173,11 +173,11 @@ CONSTANTS
                          \* FALSE is neither (finding HR-2, fixed)
     UndoneInAnyPhase,    \* a candidate receiving or staged whose server answers as the
                          \* primary with no move under way draws undone, or Cancel with no
-                         \* record (return_view/2, home_summary.ex:1088-1095); FALSE draws
+                         \* record (return_view/2, home_summary.ex:1186-1192); FALSE draws
                          \* moving whatever the server says (finding HR-2, fixed)
     RequestBesideJob,    \* the summary draws Restore here running only while its request
                          \* in return.json stands beside its running job
-                         \* (restore_running?/1, home_summary.ex:1184-1185; Home's
+                         \* (restore_running?/1, home_summary.ex:1282-1283; Home's
                          \* restoring?/2); FALSE takes the request alone, which a stop of
                          \* the engine leaves behind
     EndingSettles        \* the job's ending settles a local candidate a stopped run left,
@@ -791,8 +791,8 @@ CandRestart ==
 -----------------------------------------------------------------------------
 (* The Mac's acts: home.act through Management.AlwaysOn, from the design   *)
 
-\* returning/1 (home_summary.ex:1037-1060), the first clause of the
-\* device's summary (device/1, :852-853, after a computer that is joining a
+\* returning/1 (home_summary.ex:1136-1156), the first clause of the
+\* device's summary (device/1, :922-923, after a computer that is joining a
 \* home, which this one is not): any candidate of this computer's, or,
 \* with none, return.json with move_started_at and no moved_at. (The stale
 \* check against a newer epoch the link reached needs a second desktop: not
@@ -805,19 +805,24 @@ Returning == cPhase # "none" \/ rj = "started"
 ServerAborted == LinkUp /\ sPhase = "aborted"
 ServerIdle == LinkUp /\ sPhase \in {"none", "aborted"}
 
-\* Restore here (restore_offer/1, home_summary.ex:1189-1202): the home moved
+\* Restore here (restore_offer/1, home_summary.ex:1287-1300): the home moved
 \* from this computer (its moved marker stands: a computer that joined, or
 \* one whose activation removed the marker, is offered none), it holds a
 \* copy (always, here) and nothing answers from the server
-\* (silent?/1, :1235-1240: no link, or no session for ten minutes, which here is
+\* (silent?/1, :1334-1340: no link, or no session for ten minutes, which here is
 \* the network down or the server gone). A server that runs answers, as the
-\* primary or, moving or retired, as one that is not (`stale`, `revoked`):
-\* not silent.
+\* primary or, moving or retired, as one that is not (`stale`): not silent.
+\* Nor is one whose word that it forgot this computer the link keeps
+\* (`revoked`, DesktopLink.revoked?/1, Fermix running or stopped): the relay
+\* writes that mark only at a server's 4003, for a computer it no longer
+\* knows, and no step here makes one (the server knows the computer the
+\* home left; no computer is removed and no server restored from before it
+\* joined), so the mark is clear in every state.
 ServerSilent == ~net \/ ~sAlive \/ ~mLink
 
 RestoreOffer == IF ServerSilent /\ mMarker THEN {"restore_here"} ELSE {}
 
-\* restoring/1 (home_summary.ex:1178-1185), the second clause of the device's
+\* restoring/1 (home_summary.ex:1276-1283), the second clause of the device's
 \* summary: moving, with nothing to press, while Restore here's request
 \* stands beside its running job (Home's restoring?/2 reads the job family:
 \* the act's steps here). Without RequestBesideJob the request alone.
@@ -853,9 +858,9 @@ ReturnOffers ==
              IF UndoneInAnyPhase /\ ServerIdle THEN {"cancel"} ELSE {}
       [] OTHER -> {}
 
-\* Neither (settled/1, :852-866): a desktop whose server answers draws on
-\* (on/1, :980-1001), which offers Move back where the home moved from this
-\* computer (move_back/1, :1161-1164: its moved marker; the act refuses it
+\* Neither (settled/1, :922-936): a desktop whose server answers draws on
+\* (on/1, :1078-1100), which offers Move back where the home moved from this
+\* computer (move_back/1, :1259-1262: its moved marker; the act refuses it
 \* while the server reports a move, which it cannot while it answers as the
 \* primary), beside Back up now, Add a computer and, where this computer
 \* moved before M97 and its switches wait for the owner, Keep these
@@ -869,7 +874,7 @@ DeviceOffers ==
     (IF LinkUp /\ mMarker THEN {"move_back"} ELSE {})
     \cup RestoreOffer
 
-\* The actions the Mac's summary offers now (screen/1, :361-363). A primary
+\* The actions the Mac's summary offers now (screen/1, :409-411). A primary
 \* offers none of this spec's actions.
 Offered ==
     IF mBoot # "device" THEN {}

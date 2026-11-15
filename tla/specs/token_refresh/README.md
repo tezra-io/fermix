@@ -16,7 +16,7 @@ then has the profile's manager forget its tokens and stops it (plugin logout,
 anthropic and xai, `management/auth.ex:219-226`, `:519-523`). A logout from a
 tree-less CLI VM deletes the entry the same way, then has a running daemon let
 go of the profile over the control socket (`auth_forget`,
-`cli/daemon.ex:1314-1344` → `TokenSupervisor.forget_signed_out`).
+`cli/daemon.ex:1331-1361` → `TokenSupervisor.forget_signed_out`).
 
 OpenAI Codex signs in with ChatGPT, under the `chatgpt` profile
 (`store.ex:259-269`). That registration outlives a sign-out, so the sign-out
@@ -156,7 +156,7 @@ least one check):
   `:520-545`; `auth_command.ex:328-354`, `:361-379`, `:405-420`;
   `cli/daemon/client.ex:70-84`). The daemon has the profile's manager forget
   its tokens, which also deletes its plugin child's token file, then stops it
-  (`cli/daemon.ex:1071`, `:1314-1344`; `token_supervisor.ex:143-165`). Off, the
+  (`cli/daemon.ex:1088`, `:1331-1361`; `token_supervisor.ex:143-165`). Off, the
   CLI logout reaches no manager. That is also the state a daemon leaves when
   it answers the notice with an error, which the CLI reports by exiting
   non-zero; checks 14 and 26 model that case.
@@ -527,7 +527,7 @@ describes, and the **Fix** bullets cite the code as it is now.
     restart of the daemon (from the Fermix app, or `fermix restart` for a
     daemon the operator runs).
   - **The daemon side.** The daemon validates the profile, then runs
-    `TokenSupervisor.forget_signed_out/1` (`cli/daemon.ex:892`, `:1135-1165`;
+    `TokenSupervisor.forget_signed_out/1` (`cli/daemon.ex:1088`, `:1331-1361`;
     `token_supervisor.ex:143-165`).
     - It reuses `forget` (`drop_tokens`: tokens cleared, refusal set, and the
       plugin child's token file deleted), then `stop_profile`. The next use of
@@ -588,7 +588,7 @@ the Codex CLI's session and then Fermix's, closed when that import was retired
   refresh in flight, so `forget` normally finds the manager idle. It can still
   meet a manager that is itself waiting up to 10 s for the profile lock (held
   by a CLI refresh, say); the management caller then exits first, the socket
-  turns that into `internal_error` (`cli/daemon.ex:689-791`), and
+  turns that into `internal_error` (`cli/daemon.ex:706-808`), and
   `revert_route` (`management/auth.ex:223`) never runs. The in-daemon plugin
   logout's forget (`forget_signed_out`, `plugins/auth.ex:73`) and ChatGPT's
   sign-out's (`chatgpt/logout.ex:46`) are the same call and can meet the same
@@ -730,3 +730,22 @@ them: the notice not answered "ok" that `CliLogoutReachesDaemon` off and
 check 14 describe. No modelled step changed; the line numbers into both
 files point at the committed code.
 
+## Re-read for the retired refusal's sentence (2026-11-15)
+
+`1cafb479` staled the `cli/daemon.ex` pin. The daemon of a device engine
+with no link still refuses a method whose state is the primary's
+`memory.db` as retired before anything reads it
+(`dispatch_management_request/2`, `cli/daemon.ex:685-689`), and now says
+the sentence that computer's summary says, worked out from the home's files
+at each request (`retired_sentence/1`, `:694-701`,
+`HomeSummary.retired_sentence/2`), where it said one sentence for each OS
+(`Placement.retired/1`). That is a management request on a device engine,
+answered in the handler process that serves its connection; no step here is
+one (`auth_forget` is a v0 method, `handle_method/3`, and the model's daemon
+is no device), and the other routes and `guarded/2` are as they were. No
+modelled step changed. The 17 lines the change adds moved every line after
+them, so the line numbers into `cli/daemon.ex` now point at the committed
+code: `:1088` for `auth_forget`, `:1331-1361` for its reply and
+`forget_signed_out/2`, `:706-808` for the route and `guarded/2`. The
+TOKEN-6 fix bullet still named `:892` and `:1135-1165`, lines an earlier
+change had already moved; it now names the same two.

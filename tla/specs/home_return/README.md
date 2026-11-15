@@ -532,6 +532,34 @@ the host's unless a test names it. The switches a move writes are as before,
 and a move back writes none, so no modelled step changed. The comments' line
 numbers into `move_worker.ex` point at the committed code.
 
+Walked again against `1cafb479`, which staled the `home_summary.ex` pin:
+`settled/1` and `silent?/1` take the server's word that it forgot this
+computer from the link file (the `revoked` fact, `DesktopLink.revoked?/1`,
+gathered only while the home is linked), Fermix running or stopped, where
+they read the relay's live `primary.status`. `silent?/1` answers it first,
+not silent, so a computer its server removed no longer reads as silent
+while Fermix is stopped. The relay now writes the mark before it acts on it
+(`Desktop.Relay`'s `revoked/2` at a `4003`, `known/3` before it uses a
+session), so it rests as revoked only once the mark is written, and while
+Fermix runs the two read alike. The mark is set only at a server's `4003`,
+for a computer it no longer knows (removed from its devices, or a server
+restored from before the computer joined it). No step here makes one: the
+server is the primary this home moved to and knows the computer it left,
+the model removes no computer and restores no server, and a retired server
+runs no mobile hub (`Mobile.Supervisor` is among `Role`'s primary-only
+children), so it sends no `4003` either. So the mark is clear in every
+state, `revoked` is false, and `settled/1` and `silent?/1`
+draw what they drew: retired with no link (`~mLink`), else the desktop's
+screens, and silent as `ServerSilent` says. Fermix stopped is no state
+here: a Mac crash boots again in the same step, and what the summary offers
+is pressed through the running engine's `home.act`. `retired_sentence/2`,
+new and public, and the `removed` sentence, now chosen by `revoked` where
+it was chosen by `linked`, change words, not offers; neither is pinned. No
+modelled step changed. The comments' line numbers into `home_summary.ex`
+had drifted since fa21aac6, as code beside the pinned functions grew, and
+now point at the committed code; `ServerSilent`'s comment says where the
+`revoked` word comes from.
+
 ## Done
 
 Deadlock checking is on. `Done` has these ends:

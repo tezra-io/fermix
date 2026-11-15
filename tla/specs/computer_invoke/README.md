@@ -51,7 +51,8 @@ The modules it describes:
 - `FermixChannels.Desktop.Relay`: a session with an older copy of the home
   is refused and a newer copy's epoch kept in `device/desktop.json`, the
   one place it lives, before anything relies on it; a newer epoch it
-  cannot write leaves that session unused (`hello_ack`, `connected`,
+  cannot write, or a `revoked` mark it cannot clear once the epoch is
+  kept, leaves that session unused (`hello_ack`, `connected`, `known`,
   `keep_epoch`), and each `invoke_*` event is handed to Admission as it
   came (`invocation`).
 - `FermixChannels.Mobile.Lanes` (whole): a request's own `invoke_status`
@@ -129,7 +130,11 @@ Not modelled, each covered elsewhere:
   through `Switches`, so later requests are refused and what runs goes on;
 - a link file that cannot be written: the relay does not use the newer
   copy's session (`connected`, `keep_epoch`), so it is no `MoveOn`, and the
-  relay and Admission read one epoch, the file's;
+  relay and Admission read one epoch, the file's. A `revoked` mark it
+  cannot clear once the epoch is kept leaves the session unused too
+  (`known`): `MoveOn` with a newer copy, a `Reconnect` and its `Drop` with
+  this server; the mark is set only at a `4003`, which is not modelled
+  (re-read of `1cafb479` below);
 - a computer's own request to its server (`history.submit`, M97 §8.1, and
   a reminder's `reminders.snooze`, M99 §10.1): `Desktop.HistoryUplink` or
   `Desktop.ReminderUplink` opens it, waits on it and cancels it in the
@@ -166,7 +171,7 @@ The `.tla` header pins these sources:
 - `apps/fermix_core/lib/fermix_core/computers/switches.ex`, by function:
   `write`, `forget`, `notify`;
 - `apps/fermix_channels/lib/fermix_channels/desktop/relay.ex`, by
-  function: `hello_ack`, `connected`, `keep_epoch`, `invocation`;
+  function: `hello_ack`, `connected`, `known`, `keep_epoch`, `invocation`;
 - `apps/fermix_channels/lib/fermix_channels/mobile/lanes.ex`, whole: the
   lane a request's status ask and cancel ride is decided by the
   `interactive?` and `bulk?` guards, which a definition pin cannot name;
@@ -705,6 +710,55 @@ changed. The change, and what it does to the model:
   the session as before and is not modelled.
 - The spec's comment on `MoveOn` named `relay.ex:983` and `:910`, lines an
   earlier change had already moved; it now names `:1202` and `:1121`.
+
+## Re-read (M97, `1cafb479`: one record of a removed computer, 2026-11-15)
+
+Read against `1cafb479`, which staled the `relay.ex` pin. No modelled step
+changed. The change, and what it does to the model:
+- `relay.ex#connected` (`:1155-1160`): once `keep_epoch/3`
+  (`:1250-1263`) kept the epoch and `keep_route/3` the route, the session
+  goes to `known/3` (`:1166-1171`), which uses it only once the link's
+  `revoked` mark is clear (`keep_revoked/3`, `DesktopLink.record_revoked/3`).
+  A clear that fails is no longer only logged: the session is not used
+  (`revoked_not_kept`, `:1169`), said and tried again with the backoff, the
+  outage a failed epoch write already is (`:1158`). The clear writes the
+  link that carries the kept epoch, and the relay keeps that link, so the
+  file and the relay hold one epoch either way. Within the model this path
+  never runs: the mark is set only at a `4003`, which is not modelled, and
+  `record_revoked/3` writes nothing where the mark already says false.
+  Outside it, the path is an instance of two steps the model has, so it
+  needs no step of its own:
+  - **a newer copy's session**: its epoch is in the file before the clear,
+    so Admission refuses this server's requests as after `MoveOn`, and the
+    newer copy's session, unused, is no session with this server, which
+    the model never has;
+  - **this server's session**: the server starts the computer's peer, whose
+    family tells `Calls`, before its `hello_ack` goes
+    (`Mobile.Session.after_hello_ack/3`), so its side is a `Reconnect`;
+    the computer then ends the session before it takes anything on it (an
+    old connector's messages are dropped), a `Drop`, which `SessionCanDrop`
+    allows and `MaxDrops` bounds. A disk write that fails is one more cause
+    of a session that ends, as the network is, so with `SessionCanDrop` off
+    the model has neither; the backoff's next session is the next
+    `Reconnect`.
+- At a `4003` the relay now rests as revoked only once the link keeps the
+  word; a write that fails is an outage tried again with the backoff
+  (`revoked/2`, `:2421-2426`). Either way the session ends as before, and
+  the `4003` is not modelled.
+- `release_link/2` (`:642-649`, `released/1`, `:2457-2480`), new: a join
+  with a new code or a disconnect lets go of the link while the engine
+  runs, the connector stopped and nothing dialed or written until the
+  engine restarts. To this spec that is a `Drop` that no `Reconnect`
+  follows, which the model has (the link owes nothing); what the join or
+  the disconnect removes after it is the computer leaving its home, not
+  modelled.
+- `hello_ack`, `keep_epoch` and `invocation` are unchanged and sit at
+  `:1148-1153`, `:1250-1263` and `:1680-1693`.
+- The pin adds `known`, which `connected` now hands every session to, so a
+  change to which session is used stales the spec as one to `connected`
+  does. The comment on `MoveOn` named `relay.ex:1202` and `:1121`; it now
+  names `:1250` and `:1158`, and says what a clear that fails is to the
+  model, as the header's list of what is not modelled does.
 
 ## Findings
 
