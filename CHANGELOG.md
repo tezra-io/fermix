@@ -1054,6 +1054,15 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   they could read it or be stopped. Each now starts with an empty input
   (`/dev/null`), on macOS and Linux. The Mac app's engine and an installed
   service, whose input was already empty, behave as before.
+- **A command that reads its input no longer waits out its timeout.** Every
+  command the `shell` tool ran, on this computer or on a computer of your
+  home, was handed an input that nothing ever wrote to or closed, so a command
+  that read it (`cat`, a script's `read`, a program asking a question) printed
+  nothing and failed with "Command timed out" once its whole timeout had
+  passed. This happened in every install, the Mac app's engine and an
+  installed service included. Each command Fermix runs and waits for now
+  starts with an empty input (`/dev/null`) as well, so it reads end of file at
+  once, on macOS and Linux.
 - **Place search on Brave keeps to Brave's rate limit.** A trip's place
   lookups ran the first alone and then four at a time, so on a Brave plan that
   allows one search a second most of a long trip's stops were left without a
