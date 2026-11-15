@@ -13,6 +13,7 @@ defmodule FermixChannels.Mobile.ProtocolTest do
     move_commit move_resume call_open call_line call_audio call_frame call_close
     offers link_path join_request
     invoke_open invoke_part invoke_cancel invoke_result invoke_status invoke_restarted
+    push_subscribe
   )
   @server_events ~w(
     hello_ack accepted attach_status turn_started text_delta tool_event text_done turn_done
@@ -609,8 +610,9 @@ defmodule FermixChannels.Mobile.ProtocolTest do
     end
   end
 
-  # The daemon pushes through APNs alone, so `apns` is the whole catalog: the
-  # codec never sends `fcm`, or any other service, in either list.
+  # The daemon pushes through APNs and, from protocol 3, through Fermix's
+  # push relay (`fcm`, M99 §14): the codec sends no other service, and no
+  # service twice, in either list, and `fcm` never at protocol 2.
   test "pair_approved and hello_ack name the push services this daemon has" do
     approved = %{
       "device_id" => "device-1",
@@ -621,7 +623,7 @@ defmodule FermixChannels.Mobile.ProtocolTest do
       "primary_epoch" => 3
     }
 
-    for push <- [[], ["apns"]] do
+    for push <- [[], ["apns"], ["fcm"], ["apns", "fcm"]] do
       assert {:ok, _frame} =
                Protocol.encode_server_frame("pair_approved", %{approved | "push" => push}, 1)
     end
@@ -631,9 +633,20 @@ defmodule FermixChannels.Mobile.ProtocolTest do
     assert {:ok, _frame} =
              Protocol.encode_server_frame("pair_approved", Map.delete(approved, "push"), 1)
 
-    for push <- [["fcm"], ["apns", "fcm"], ["gcm"], ["apns", "apns"], "apns"] do
+    for push <- [["gcm"], ["webpush"], ["apns", "apns"], ["fcm", "fcm"], "apns"] do
       assert {:error, {:invalid_field, "push"}} =
                Protocol.encode_server_frame("pair_approved", %{approved | "push" => push}, 1)
+    end
+
+    for push <- [["fcm"], ["apns", "fcm"]] do
+      assert {:error, {:invalid_field, "push"}} =
+               Protocol.encode_server_frame(
+                 "pair_approved",
+                 %{approved | "push" => push},
+                 1,
+                 <<>>,
+                 version: 2
+               )
     end
 
     ack = %{
@@ -650,7 +663,7 @@ defmodule FermixChannels.Mobile.ProtocolTest do
 
     assert {:ok, _frame} = Protocol.encode_server_frame("hello_ack", ack, 1)
 
-    for push <- [["fcm"], ["apns", "fcm"], ["web"]] do
+    for push <- [["gcm"], ["web"], ["apns", "apns"]] do
       assert {:error, {:invalid_field, "caps.push"}} =
                Protocol.encode_server_frame("hello_ack", put_in(ack, ["caps", "push"], push), 1)
     end
@@ -735,6 +748,128 @@ defmodule FermixChannels.Mobile.ProtocolTest do
   test "push_unregister carries nothing" do
     assert {:ok, %{type: "push_unregister", payload: %{}}} =
              Protocol.decode_client_frame(client_frame("push_unregister", 1, %{}))
+  end
+
+  # M99 §14: a phone's push subscription, at protocol 3 only.
+  test "push_subscribe is the service, the address and the phone's two keys, from protocol 3" do
+    assert Protocol.relay_push_version() == 3
+    fields = push_subscription()
+
+    assert {:ok, %{type: "push_subscribe", version: 3, payload: ^fields}} =
+             Protocol.decode_client_frame(client_frame("push_subscribe", 1, fields, <<>>, 3))
+
+    assert {:ok, _frame} =
+             Protocol.encode_client_frame("push_subscribe", fields, 1, <<>>, version: 3)
+
+    longest = %{fields | "address" => String.duplicate("a", 256)}
+
+    assert {:ok, _event} =
+             Protocol.decode_client_frame(client_frame("push_subscribe", 1, longest, <<>>, 3))
+  end
+
+  # Each field outside its shape is the malformed frame push_register's is.
+  test "push_subscribe refuses each field outside its shape" do
+    fields = push_subscription()
+    point = Base.url_decode64!(fields["p256dh"], padding: false)
+    secret = Base.url_decode64!(fields["auth"], padding: false)
+    <<_first, rest::binary-64>> = point
+
+    refused = [
+      {"service", "apns"},
+      {"service", "FCM"},
+      {"service", "webpush"},
+      {"service", 7},
+      {"address", ""},
+      {"address", String.duplicate("a", 257)},
+      {"address", "address/with/slashes"},
+      {"address", "address with space"},
+      # A registration token's colon: the relay takes an installation id.
+      {"address", "dK3vQ8pLmX2:APA91bH7xZ"},
+      {"address", "adresse-é"},
+      {"address", 22},
+      {"p256dh", Base.url_encode64(<<5, rest::binary>>, padding: false)},
+      {"p256dh", Base.url_encode64(binary_part(point, 0, 64), padding: false)},
+      {"p256dh", Base.url_encode64(point, padding: true)},
+      {"p256dh", Base.encode64(point)},
+      {"p256dh", non_canonical(fields["p256dh"])},
+      # 65 bytes, the first 0x04, and no point on P-256.
+      {"p256dh", Base.url_encode64(<<4, 1::256, 1::256>>, padding: false)},
+      {"auth", Base.url_encode64(secret <> <<0>>, padding: false)},
+      {"auth", Base.url_encode64(secret, padding: true)},
+      {"auth", non_canonical(fields["auth"])},
+      {"auth", 16}
+    ]
+
+    for {field, value} <- refused do
+      frame = client_frame("push_subscribe", 1, %{fields | field => value}, <<>>, 3)
+
+      assert {:error, {:invalid_field, ^field}} = Protocol.decode_client_frame(frame),
+             inspect({field, value})
+    end
+
+    for field <- Map.keys(fields) do
+      frame = client_frame("push_subscribe", 1, Map.delete(fields, field), <<>>, 3)
+      assert {:error, {:missing_field, ^field}} = Protocol.decode_client_frame(frame), field
+    end
+  end
+
+  # A phone at protocol 2 never sends it, and an event protocol 2 does not
+  # know is the unknown event it was before, whatever it carries.
+  test "push_subscribe at protocol 2 is the unknown event it always was" do
+    for fields <- [push_subscription(), %{}] do
+      assert {:error, {:unknown_event, "push_subscribe"}} =
+               Protocol.decode_client_frame(client_frame("push_subscribe", 1, fields))
+
+      assert {:error, {:unknown_event, "push_subscribe"}} =
+               Protocol.encode_client_frame("push_subscribe", fields, 1, <<>>, [])
+    end
+  end
+
+  # Push through the relay rides protocol 3 (M99 §14): at 3 the push list may
+  # name `fcm`, beside `apns` or alone; at 2 it never does.
+  test "hello_ack names fcm at protocol 3, and never at 2" do
+    ack = hello_ack_payload()
+
+    for push <- [["fcm"], ["apns", "fcm"]] do
+      with_fcm = put_in(ack, ["caps", "push"], push)
+      assert {:ok, _frame} = Protocol.encode_server_frame("hello_ack", with_fcm, 1, <<>>, [])
+
+      assert {:error, {:invalid_field, "caps.push"}} =
+               Protocol.encode_server_frame("hello_ack", with_fcm, 1, <<>>, version: 2)
+    end
+
+    for push <- [[], ["apns"]], version <- [2, 3] do
+      without = put_in(ack, ["caps", "push"], push)
+
+      assert {:ok, _frame} =
+               Protocol.encode_server_frame("hello_ack", without, 1, <<>>, version: version)
+    end
+
+    for push <- [["fcm", "fcm"], ["webpush"], ["apns", "webpush"], ["FCM"]] do
+      payload = put_in(ack, ["caps", "push"], push)
+
+      assert {:error, {:invalid_field, "caps.push"}} =
+               Protocol.encode_server_frame("hello_ack", payload, 1),
+             inspect(push)
+    end
+  end
+
+  test "pair_approved names fcm at protocol 3, and never at 2" do
+    approved = %{
+      "device_id" => "device-1",
+      "candidates" => [],
+      "profiles" => [%{"id" => "main", "name" => "Fermix"}],
+      "push_salt" => Base.encode64(:binary.copy(<<7>>, 32)),
+      "primary_epoch" => 3
+    }
+
+    for push <- [["fcm"], ["apns", "fcm"]] do
+      payload = Map.put(approved, "push", push)
+      assert {:ok, _frame} = Protocol.encode_server_frame("pair_approved", payload, 1)
+
+      assert {:error, {:invalid_field, "push"}} =
+               Protocol.encode_server_frame("pair_approved", payload, 1, <<>>, version: 2)
+    end
   end
 
   test "fails loudly on malformed, oversized, and unknown frames" do
@@ -1024,6 +1159,41 @@ defmodule FermixChannels.Mobile.ProtocolTest do
 
   defp client_frame(type, seq, fields, bytes \\ <<>>, version \\ 2) do
     encode_frame(Map.merge(%{"v" => version, "t" => type, "seq" => seq}, fields), bytes)
+  end
+
+  # The phone key and secret of webpush_vectors.json's Fermix message, and an
+  # invented Firebase Installation ID.
+  defp push_subscription do
+    %{
+      "service" => "fcm",
+      "address" => "cQ4vT8pLmX2bR7wZ_k1-Ns",
+      "p256dh" =>
+        "BA-tjEx2wOT1eHWq5MqZhSnLAWPkYti3100PmZD9lbt_6TM7fBWzl6NLxE5ZSS70gcsibTTIqjHkNTQeZP5yKRI",
+      "auth" => "kG0joyQGxf9iMIqP95PJlw"
+    }
+  end
+
+  defp hello_ack_payload do
+    %{
+      "session_id" => "s",
+      "min_version" => 2,
+      "max_version" => 3,
+      "profiles" => [],
+      "candidates" => [],
+      "history_head_seq" => 0,
+      "read_up_to_seq" => 0,
+      "caps" => %{"commands" => [], "max_media_bytes" => 1},
+      "primary_epoch" => 3
+    }
+  end
+
+  # The same bytes with a nonzero bit in the last character's padding, which
+  # a lenient decoder reads as the canonical text.
+  defp non_canonical(text) do
+    {head, last} = String.split_at(text, -1)
+    alphabet = ~c"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
+    index = Enum.find_index(alphabet, &(&1 == hd(String.to_charlist(last))))
+    head <> <<Enum.at(alphabet, index + 1)>>
   end
 
   defp pair_request_fields(cert_lengths) do

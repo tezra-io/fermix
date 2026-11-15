@@ -464,6 +464,48 @@ defmodule Fermix.CLI.Doctor.MobileCheckTest do
     assert result.detail =~ "APNs degraded (connect_failed); the next push reconnects"
   end
 
+  # M99 §6: once a push to an Android phone could not reach Fermix's push
+  # relay, Doctor says so and what it means for the phone, until a later push
+  # is accepted; a relay reached, or not yet tried, adds nothing to the row.
+  test "a push relay that cannot be reached is a warning that says what the phone does",
+       %{mobile_dir: mobile_dir} do
+    write_identity_files(mobile_dir)
+    Application.put_env(:fermix_channels, :mobile, enabled: true, push: [enabled: false])
+
+    report = fn push_relay ->
+      %{
+        "listener" => %{"status" => "ready", "candidates" => ["wss://lan:4031/ws"]},
+        "mdns" => "disabled",
+        "tailnet" => %{"detected" => false, "candidates" => []},
+        "apns" => %{"enabled" => false, "credentials" => "missing", "delivery" => "down"},
+        "push_relay" => push_relay,
+        "paired_devices" => 1
+      }
+    end
+
+    check = fn push_relay ->
+      Checks.mobile(
+        mobile_dir: mobile_dir,
+        client: live_client(report.(push_relay)),
+        health_probe: fn "https://lan:4031/healthz", 750 -> :ok end
+      )
+    end
+
+    unreachable = check.("unreachable")
+    assert unreachable.status == :warn
+
+    assert unreachable.detail =~
+             "APNs disabled; the push service cannot be reached, so an Android phone shows " <>
+               "new messages when its app is opened; 1 paired device"
+
+    for fine <- ["reachable", "unknown"] do
+      result = check.(fine)
+      assert result.status == :ok
+      refute result.detail =~ "push service"
+      assert result.detail =~ "APNs disabled; 1 paired device"
+    end
+  end
+
   # R1-9: a connect that hangs used to leave the status read timing out, and
   # this check then said no dispatcher was running. It is a connect under way.
   test "push connecting to Apple is a warning that says so", %{mobile_dir: mobile_dir} do

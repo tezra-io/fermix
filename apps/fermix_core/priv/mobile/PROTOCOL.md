@@ -13,6 +13,7 @@ vendors this directory pinned by checksum; it does not hand-copy event shapes.
 | `fixtures/client_binary_frames.jsonl`, `fixtures/server_binary_frames.jsonl` | frames with a raw tail, as `{header, bytes_b64}`, including one whole `event_part` run and whole chunked runs (see *Chunked payloads*) |
 | `fixtures/pairing_links.jsonl` | a pairing link and its decoded fields, as the daemon builds it |
 | `noise_vectors.json`, `push_vectors.json` | the Noise handshakes and the push encryption, byte for byte |
+| `webpush_vectors.json` | the sealing of an Android phone's push, byte for byte: the Web Push standard's own example (RFC 8291) and one Fermix message with the phone's private key so an app can open it (see *Android, through Fermix's push relay*) |
 | `attestation_roots.json`, `android_signers.json` | the Google attestation roots and the app's signing certificates a pairing is verified against (see *Attestation*); both are built into the daemon when it is compiled, so a change to either takes a new build |
 | `relays.json` | every list of Fermix relays a release has shipped, built into the daemon; a phone takes its relays from the route it is given, never from this file (see *Remote reach*) |
 
@@ -518,8 +519,19 @@ protocol 2 is sent only `places` and `checklists` blocks, wherever a row
 reaches it (its `text_done`, its `row`, a `history_page` message), since a
 protocol 2 phone app refuses a row with more than two blocks; and its turns
 are written for a phone that draws no events. A session at protocol 3 has its
-turns told that their events are drawn under the reply. Nothing else changes:
-every protocol 2 event, field and rule holds unchanged on protocol 3.
+turns told that their events are drawn under the reply. Beside this and push
+through the relay, below, nothing changes: every protocol 2 event, field and
+rule holds unchanged on protocol 3.
+
+**Protocol 3: push through the relay.** On protocol 3 a phone's `hello_ack`
+`caps.push` and its `pair_approved` `push` name `fcm`, Google's push service
+through Fermix's push relay, after `apns` when both run, and the phone answers
+with `push_subscribe` (see *Android, through Fermix's push relay*). A session
+at protocol 2 is told exactly what it was before: its push lists name `apns`
+alone, and `push_subscribe` there is the unknown event it always was
+(`unsupported`, close `1002`), since a protocol 2 phone app reads the push
+list as `apns` alone. A desktop's session is never told `fcm`: a computer is
+not pushed.
 
 **An engine's hello names its window** when it is the initiator (a
 computer's desktop session to its server, a move's check of its new server;
@@ -588,8 +600,9 @@ served.
 | `cancel` | `profile_id`, `client_msg_id` | stops that request's turn, running or waiting, and no other; never answered |
 | `history_pull` | `profile_id`, `limit`, and exactly one of `after_seq` or `before_seq` | limit is 1–200; `after_seq` (≥ 0) pages forward and `before_seq` (≥ 1) backward, each any unsigned 64-bit value |
 | `media_fetch` | `ref` | re-download a content-addressed blob |
-| `push_register` | `apns_token`, `environment` | environment is `development` or `production` |
-| `push_unregister` | — | clears this phone's token: its notifications cannot show, so no push may come. A phone sends it only to a daemon whose `caps` carries `push[]`, which came with it: an older daemon answers it `unsupported` and closes, as it does any unknown event |
+| `push_register` | `apns_token`, `environment` | environment is `development` or `production`; it replaces a subscription the phone held (see *Push notifications*) |
+| `push_unregister` | — | clears this phone's token or subscription: its notifications cannot show, so no push may come. A phone sends it only to a daemon whose `caps` carries `push[]`, which came with it: an older daemon answers it `unsupported` and closes, as it does any unknown event |
+| `push_subscribe` | `service`, `address`, `p256dh`, `auth` | protocol 3 only: the phone's subscription through Fermix's push relay, which replaces an APNs token it held (see *Android, through Fermix's push relay*). `service` is `fcm`, the only one; `address` is the phone's address at Google, its Firebase Installation ID, 1 to 256 letters, digits, `_` and `-`; `p256dh` is the phone's P-256 public key, 65 bytes whose first is `0x04` and a point on the curve, and `auth` its 16-byte secret, each in base64url without padding. A field outside its shape is a malformed frame |
 | `ack` | `server_seq` | cumulative socket-delivery cursor |
 | `read_state` | `profile_id`, `read_up_to_seq` | monotonic read frontier |
 | `request_status` | `client_msg_ids[]` | 1 to 32 ids of requests this phone sent; see *Requests after a reconnect* |
@@ -613,7 +626,7 @@ What each is answered with:
 | `attach_begin` | `attach_status{status:"upload"}`, or `attach_status{status:"present"}` when the digest is already stored |
 | `attach_chunk` | nothing; a refused chunk is an `error` |
 | `attach_end` | `attach_status{status:"present"}` once size and digest check out |
-| `cancel`, `ack`, `push_register`, `push_unregister` | nothing; a refused one is an `error` |
+| `cancel`, `ack`, `push_register`, `push_unregister`, `push_subscribe` | nothing; a refused one is an `error` |
 | `read_state` | the frontier as `read_state`, to every client of the profile, this one included |
 | `history_pull` | `history_page` |
 | `request_status` | `request_status_page` |
@@ -677,10 +690,12 @@ palette), `media`, `streaming`, `turn_done` (true: every turn a request opened
 ends with `turn_done` or `turn_error`), `max_media_bytes`, the largest
 attachment the daemon takes, and `push[]`, the push services this daemon sends
 through, each once, empty when it pushes through none: `apns` while its APNs
-push runs, the only service there is. Every phone gets the same list, and a
-phone offers notifications only when its own platform's service is in it: an
-iPhone does when `apns` is listed, an Android phone never does. A daemon
-older than the list sends no `push`. A phone's `hello_ack` also carries
+push runs, then, on protocol 3 and to a phone, `fcm`, which every phone
+channel sends through and which needs no setting (see *Android, through
+Fermix's push relay*). Every phone gets the same list, and a phone offers
+notifications only when its own platform's service is in it: an iPhone does
+when `apns` is listed, an Android phone when `fcm` is. A daemon older than the
+list sends no `push`. A phone's `hello_ack` also carries
 `call`, whether this primary serves a call from the phone now (see *Calls
 from the phone*), `lists: true`, that it takes the phone's list channel
 (see *Lists on a phone*), and `trips: true`, that the channel serves the
@@ -895,9 +910,8 @@ submitted, never rendered.
   forgets them without resolving them, so a client also drops a card when its
   own `ttl_s` runs out. The daemon keeps at most 64; past that a card still
   goes out live but is not sent again, so a reconnect drops it.
-- A card a phone's turn raises while no phone of the profile is connected also
-  sends each registered phone a push with no content (see *Push
-  notifications*).
+- A card a phone's turn raises also sends each registered phone that is not
+  connected then a push with no content (see *Push notifications*).
 
 ## Attachments
 
@@ -976,10 +990,28 @@ row's history carries it in `link_previews[]`.
   client decodes them under its own bounds. The same icon bytes have the same
   ref, so a site's icon is fetched once.
 
-## Push notifications (APNs)
+## Push notifications
 
 Push is the one payload that leaves the socket, so it carries its own
-end-to-end encryption. The daemon sends nothing readable to Apple: the alert is
+end-to-end encryption. Each phone is decided on its own: a row the daemon
+writes into the chat pushes every phone with a registration that is not
+connected for the profile at that moment, whichever others are, and a row the
+profile has already read pushes nobody. A phone has one registration, the
+last of `push_register` and `push_subscribe` it sent, and is pushed by that
+route alone: an iPhone (an `ios` phone, or one paired before pairing recorded
+a platform, which was an iPhone) through APNs with its token, and an Android
+phone through Fermix's push relay with its subscription (see *Android, through
+Fermix's push relay*). Neither route is ever tried for the other, and one that
+cannot run stops only its own phones: APNs settings that do not resolve leave
+every Android phone pushed, and a relay that cannot be reached leaves every
+iPhone pushed. An `android` phone holding only a `push_register` token (an
+app from before the relay) is pushed nothing: the token is kept and never
+goes to APNs, and each push it would have had is logged as refused for that
+phone.
+
+### APNs
+
+The daemon sends nothing readable to Apple: the alert is
 a fixed string and the real content rides in a separate `fx` object that only
 the paired device can open, inside the Notification Service Extension.
 
@@ -1015,22 +1047,97 @@ bytes; when the encrypted preview would exceed that, the daemon sends
 `preview_text: null` with a title-only alert rather than truncating content, so
 the extension must accept a null preview.
 
-An approval waiting while no phone of the profile is connected sends each
-registered phone a notification with no content at all: the alert is
+An approval waiting for the owner sends each registered iPhone that is not
+connected a notification with no content at all: the alert is
 `{"title": "Fermix", "body": "Approval needed"}` and the encrypted object is
-`{"preview_text": null, "profile_id": …}`. Nothing is pushed while a phone of
-the profile is connected, or when push is off.
-
-Only an `ios` phone is pushed, and a phone paired before pairing recorded a
-platform, which was an iPhone. An `android` phone is pushed nothing: its
-`push_register` is kept and answered with nothing, as any phone's is, but its
-token never goes to APNs, and each push it would have had is logged as refused
-for that phone.
+`{"preview_text": null, "profile_id": …}`. With APNs push off, no iPhone is
+pushed.
 
 `push_vectors.json` pins one complete example — both static keypairs, the salt,
 the shared secret, the derived key, the nonce, the exact inner plaintext, and
 the resulting payload — and is generated by an implementation independent of the
 daemon's. The extension must reproduce it before shipping.
+
+### Android, through Fermix's push relay
+
+An Android phone is pushed through Google's push service (Firebase Cloud
+Messaging) by way of Fermix's push relay, `https://push.fermix.ai`, which
+Tezra runs, with nothing for the owner to set up: no Firebase project, no
+service account, no setting, and no key of the home's own. The app carries
+Tezra's Firebase config, so Google gives each install an address, its
+Firebase Installation ID, and the phone keeps a P-256 key pair and a 16-byte
+secret for each Fermix it pairs with. The daemon seals each notification to
+the phone's key by the Web Push standard's encryption (RFC 8291) and posts it,
+with the phone's address, to the relay, which passes it to Google. Neither
+the relay nor Google can read it.
+
+**Subscribing.** After every `hello_ack` whose `caps.push` names `fcm`, while
+that Fermix's notifications are on in the app and Android allows them, the
+phone sends `push_subscribe{service, address, p256dh, auth}`: `fcm`, its
+current Firebase Installation ID, the public key of the key pair it keeps for
+this Fermix, and the secret. The daemon stores the four on the phone's row, in
+place of any APNs token, only when they differ from what the row holds, and
+answers nothing, so an address Google changed (after a reinstall, cleared app
+data or a restore to a new phone) or one the daemon dropped is mended at the
+next connection. A `push_subscribe` to a session whose `hello_ack` named no
+`fcm` is refused `push_unavailable`, and the session stays open.
+`push_unregister` clears the subscription, as it clears an APNs token.
+
+**The request.** One per phone that is not connected, from the daemon to the
+relay: `POST https://push.fermix.ai/v1/push` with `Content-Type:
+application/json` and the body
+
+```json
+{"service":"fcm","address":"<the phone's address>","ttl":86400,"body":"<the sealed message>"}
+```
+
+`ttl` is how long Google keeps the message for a phone it cannot reach:
+86,400 seconds (a day) for a row and 300 (five minutes) for an approval, since
+an alert after the approval expired is noise. `body` is the sealed message in
+base64url without padding, always 2,867 characters. No credential goes with
+it, and the address travels in the body alone. The relay hands Google a
+high-priority message whose one data field, `m`, holds `body`, with no
+notification text, so the app receives `m` and nothing else.
+
+**The relay's answers.** `204`: Google accepted it. `410` with
+`{"error":"gone"}`: Google no longer knows the address, or it is not this
+app's, and the daemon drops the phone's subscription; the phone hands over its
+address again at its next connection. `429` `busy`, `503` `unavailable` or
+`permission`, each with `Retry-After` in seconds, the relay's gateway
+answering `429` or a `5xx` of its own with no `Retry-After` and no error word,
+and a failed connection are tried again: at most three tries, none starting a
+minute or more after the first, waiting as long as `Retry-After` asks or else
+2 s and then 10 s. Any other answer is a fault in the daemon or the relay
+(`400` `malformed`, `service`, `address`, `ttl` or `body`, `413` `too_large`,
+`502` `refused`, `404` `not_found`), logged and never tried again. A push that
+fails leaves its row in the chat, which the phone shows when the app is
+opened; after one that could not reach the relay, the daemon's status and
+`fermix doctor` say the push service cannot be reached, until a later push is
+accepted. There is no second route.
+
+**The body** is always 2,150 bytes, RFC 8291 in one record: an 86-byte header
+(a fresh 16-byte salt, the record size 4,096, and the daemon's 65-byte public
+key made for this message alone), a 2,048-byte padded record sealed with
+AES-128-GCM, and its 16-byte tag, so its length tells the relay and Google
+nothing. The plaintext, before its padding, is compact JSON with its keys in
+this order:
+
+```json
+{"v":1,"kind":"message","profile_id":"main","server_seq":42,"preview_text":"…"}
+```
+
+`kind` is `message`, a row the daemon wrote into the chat, or `approval`, one
+that waits for the owner, whose `server_seq` and `preview_text` are `null`: no
+row number and no text. A preview too long for the record is cut at a
+character and ends with "…". The phone tries the message against the key and
+secret of each Fermix it has notifications on for, shows nothing for a message
+none of them opens or a row it already notified, and otherwise posts the
+notification itself, "New message" when that Fermix's previews are off. It
+opens no connection to Fermix first, and a tap never approves anything.
+
+`webpush_vectors.json` pins the standard's own example and one Fermix message
+with the phone's private key, so an app can open it. An app must reproduce it
+before shipping.
 
 ## Calls from the phone
 
@@ -1882,7 +1989,7 @@ sent is never sent to it. `FermixChannels.Mobile.Peers` is this table.
 
 | Kind | Sends | Is sent |
 |---|---|---|
-| phone | `hello` `msg` `attach_begin` `attach_chunk` `attach_end` `command` `cancel` `history_pull` `media_fetch` `push_register` `push_unregister` `ack` `read_state` `request_status` `unpair` `ping` `call_open` `call_line` `call_audio` `call_frame` `call_close` `companion_open` `companion_line` `companion_close` | `hello_ack` `accepted` `attach_status` `turn_started` `text_delta` `tool_event` `text_done` `turn_done` `media_begin` `media_chunk` `media_end` `turn_error` `row` `reaction` `approval` `approval_resolved` `link_preview` `read_state` `history_page` `request_status_page` `notice` `error` `pong` `event_part` `call_attached` `call_line` `call_audio` `call_close` `companion_line` `companion_close` |
+| phone | `hello` `msg` `attach_begin` `attach_chunk` `attach_end` `command` `cancel` `history_pull` `media_fetch` `push_register` `push_unregister` `push_subscribe` `ack` `read_state` `request_status` `unpair` `ping` `call_open` `call_line` `call_audio` `call_frame` `call_close` `companion_open` `companion_line` `companion_close` | `hello_ack` `accepted` `attach_status` `turn_started` `text_delta` `tool_event` `text_done` `turn_done` `media_begin` `media_chunk` `media_end` `turn_error` `row` `reaction` `approval` `approval_resolved` `link_preview` `read_state` `history_page` `request_status_page` `notice` `error` `pong` `event_part` `call_attached` `call_line` `call_audio` `call_close` `companion_line` `companion_close` |
 | desktop | `hello` `ping` `media_fetch` `ack` `companion_open` `companion_line` `companion_close` `manage` `loopback_request` `loopback_failed` `snapshot_stored` `snapshot_refused` `offers` `link_path` `invoke_open` `invoke_part` `invoke_cancel` `invoke_result` `invoke_status` `invoke_restarted` `call_open` `call_line` `call_audio` `call_close` `attach_begin` `attach_chunk` `attach_end` | `hello_ack` `error` `pong` `event_part` `media_begin` `media_chunk` `media_end` `companion_line` `companion_close` `manage_result` `loopback_open` `loopback_response` `loopback_close` `snapshot_begin` `snapshot_chunk` `snapshot_end` `invoke_open` `invoke_part` `invoke_cancel` `invoke_result` `invoke_status` `call_attached` `call_line` `call_audio` `call_close` `attach_status` |
 | enrollment | `enroll_request` `join_request` `ping` | `enroll_accepted` `join_approved` `join_denied` `error` `pong` |
 | move | `move_offer` `move_chunk` `move_end` `move_commit` `move_resume` `ping` | `move_accept` `move_ready` `move_done` `error` `pong` |
@@ -1963,6 +2070,7 @@ parsed.
 | `store_quota_exceeded`, `media_too_large` | an upload that would pass the media store's quota or the largest blob | — | open |
 | `unexpected_chunk`, `size_exceeded`, `size_mismatch`, `sha256_mismatch`, `announced_hash_mismatch` | an upload whose chunks, size or digest differ from its `attach_begin`, or a zero-byte one announced with another digest | — | open |
 | `push_environment_mismatch` | a token for the other APNs environment | — | open |
+| `push_unavailable` | a `push_subscribe` on a session whose `hello_ack` named no `fcm` | — | open |
 
 Every other failure a frame can be refused with is closed `1002` with no
 `error`: malformed JSON or framing, a sequence gap or replay, a frame whose `v`

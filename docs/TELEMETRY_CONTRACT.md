@@ -1256,6 +1256,17 @@ is ready again, never per retry. `error_class` is the failure's kind
 not a transition, and emits nothing; `mobile.status` and `fermix doctor` say
 it. A phone's session over the iroh carrier emits exactly the events a
 WebSocket session does.
+Android push through Fermix's push relay (M99) is another:
+`emit_transport(:mobile_push_relay, :degraded | :recovered, …)` fires from
+the phone channel's `DeviceRegistry` when a push leg first ends with no push
+accepted and the relay not reached after its tries, and at the first accepted
+push after that, never per push or per try. `degraded` carries
+`consecutive_failures: 1` and the last failure's class (`busy`,
+`unavailable`, `permission`, `gateway` for the relay's gateway answering on
+its own, or the transport's reason such as `timeout`); `recovered` carries how
+many legs in a row could not reach the relay and `error_class: :none`. Each
+phone of a leg still gets its own `[:fermix, :channel, :push]` point; no
+address, key or answer body reaches either event.
 Slack over Socket Mode (M75) is another: `emit_transport(:slack, :degraded |
 :recovered, …)` fires when its connection first fails (Slack refused
 `apps.connections.open`, the WebSocket could not open, dropped or went silent,

@@ -188,6 +188,35 @@ defmodule FermixCore.Agents.SelfKnowledgeSkillTest do
     end
   end
 
+  # M99: an Android phone is notified through Fermix's push relay with nothing
+  # for the owner to set up, and the reference says what the relay and Google
+  # see and what happens when the relay cannot be reached. Draft 1's direct
+  # route and its key are gone and must not come back in the owner's answer.
+  test "documents Android push through the relay, with nothing to set up" do
+    reference = mobile_reference_path() |> File.read!() |> String.replace(~r/\s+/, " ")
+    paragraph = mobile_paragraph()
+
+    assert paragraph =~ "relayed push to an Android phone"
+
+    for words <- [
+          "push.fermix.ai",
+          "There is nothing to set up",
+          "Firebase project",
+          "Fermix holds no key of its own",
+          "Neither can read the text",
+          "the push service cannot be reached",
+          "shows when the app is opened",
+          "There is no second route"
+        ] do
+      assert reference =~ words, "the mobile reference does not say #{words}"
+    end
+
+    for gone <- ["Web Push", "webpush_key", "Mobile started WITHOUT Web Push"] do
+      refute reference =~ gone, gone
+      refute paragraph =~ gone, gone
+    end
+  end
+
   # M51 D3 is enforced: the agent must not tell an owner that an emulator or
   # an unlocked phone can pair, nor that the hardware goes unchecked.
   test "documents that a phone proves its secure hardware to pair" do

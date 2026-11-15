@@ -66,6 +66,12 @@ defmodule FermixChannels.Mobile.Supervisor do
   holds, APNs unreachable) never refuse or stop anything: the listener and the
   push dispatcher stay up, degraded, and say why. Push settings that do not
   resolve never refuse it either: the subtree starts without the dispatcher.
+
+  Every session is told the push services the subtree sends through
+  (`:push_services`): `apns` while its APNs dispatcher runs, and always
+  `fcm`, an Android phone's push through Fermix's push relay
+  (`Mobile.PushRelay`), which needs no process, key or setting of its own
+  (M99 §14).
   """
   @spec start_link(keyword()) :: Supervisor.on_start()
   def start_link(opts \\ []) when is_list(opts) do
@@ -425,7 +431,8 @@ defmodule FermixChannels.Mobile.Supervisor do
     if key in @secret_sentinels do
       Logger.error(
         "mobile push is enabled but its APNs key is still the #{key} sentinel — " <>
-          "its secret store could not be read this boot. Mobile started WITHOUT push; " <>
+          "its secret store could not be read this boot. Mobile started WITHOUT push to " <>
+          "iPhones (Android phones are still pushed); " <>
           "unlock the keychain and restart, or run `fermix doctor` to confirm."
       )
 
@@ -448,17 +455,20 @@ defmodule FermixChannels.Mobile.Supervisor do
   defp without_push(reason) do
     Logger.error(
       "mobile push settings do not resolve (#{inspect(reason)}). " <>
-        "Mobile started WITHOUT push; fix [fermix_channels.mobile.push] and restart, " <>
+        "Mobile started WITHOUT push to iPhones (Android phones are still pushed); " <>
+        "fix [fermix_channels.mobile.push] and restart, " <>
         "or run `fermix doctor` to confirm."
     )
 
     []
   end
 
-  # The services a phone is told this daemon pushes through: those whose
-  # dispatcher starts, so a phone never registers for one that cannot send.
+  # The services a phone is told this daemon pushes through: APNs when its
+  # dispatcher starts, so a phone never registers for one that cannot send,
+  # and the relay's `fcm`, which has nothing that could fail to start. The
+  # session names `fcm` only to a phone at the version that carries it.
   defp push_services(push_children) do
-    Enum.map(push_children, fn {PigeonDispatcher, _opts} -> "apns" end)
+    Enum.map(push_children, fn {PigeonDispatcher, _opts} -> "apns" end) ++ ["fcm"]
   end
 
   defp media_opts(opts, root, name),

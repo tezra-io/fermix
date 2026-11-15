@@ -115,6 +115,7 @@ defmodule FermixChannels.Mobile.Management do
             delivery: :ready | :degraded | :down,
             reason: nil | :connecting | :connect_failed | :connection_lost
           },
+          push_relay: DeviceRegistry.push_relay(),
           paired_devices: non_neg_integer(),
           protocol_version: pos_integer(),
           pairing: nil | %{session_id: String.t(), state: session_state()}
@@ -370,7 +371,9 @@ defmodule FermixChannels.Mobile.Management do
   call, bar readiness where this boot held the channel for setup. While the
   channel runs, a read that fails is an error rather than an empty fact.
   `hold` is `:setup` while the channel is on and this boot held it for setup
-  that still is not finished.
+  that still is not finished. `push_relay` is whether Fermix's push relay could
+  be reached when a push to an Android phone last ended (`:unknown` until one
+  has, and while the channel is not running; `DeviceRegistry.push_relay/1`).
   """
   @spec status() :: {:ok, status()} | {:error, term()}
   def status, do: status([])
@@ -787,6 +790,7 @@ defmodule FermixChannels.Mobile.Management do
        listener: listener_fact(:down, nil, configured_bind(config), configured_port(config), []),
        mdns: idle_mdns(config),
        tailnet: %{detected: false, candidates: []},
+       push_relay: :unknown,
        paired_devices: 0,
        pairing: nil
      }}
@@ -795,7 +799,8 @@ defmodule FermixChannels.Mobile.Management do
   defp runtime_facts(true, config, opts) do
     with {:ok, candidates} <- discover(opts),
          {:ok, count} <- paired_device_count(opts),
-         {:ok, pairing} <- pairing_fact(opts) do
+         {:ok, pairing} <- pairing_fact(opts),
+         {:ok, push_relay} <- push_relay_fact(opts) do
       addresses = Enum.map(candidates, & &1.address)
       tailnet = for %{scope: :tailnet, address: address} <- candidates, do: address
 
@@ -804,9 +809,20 @@ defmodule FermixChannels.Mobile.Management do
          listener: listener_status(opts, config, addresses),
          mdns: mdns_status(opts, config),
          tailnet: %{detected: tailnet != [], candidates: tailnet},
+         push_relay: push_relay,
          paired_devices: count,
          pairing: pairing
        }}
+    end
+  end
+
+  defp push_relay_fact(opts) do
+    registry = Keyword.get(opts, :device_registry, DeviceRegistry)
+
+    case invoke(opts, :push_relay, &DeviceRegistry.push_relay/1, [registry]) do
+      state when state in [:unknown, :reachable, :unreachable] -> {:ok, state}
+      {:error, reason} -> {:error, reason}
+      other -> {:error, {:invalid_push_relay_reply, other}}
     end
   end
 

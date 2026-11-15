@@ -52,6 +52,12 @@ defmodule FermixCore.Net.TimeoutPolicyTest do
       assert TimeoutPolicy.receive_timeout_for(:decision) == 15_000
     end
 
+    # One attempt to post a phone's push to the relay waits this long for its
+    # answer; three attempts and two waits must fit the one-minute retry budget.
+    test "a push relay attempt has one centralized bounded timeout" do
+      assert TimeoutPolicy.receive_timeout_for(:push_relay) == 15_000
+    end
+
     test "an unknown request kind fails loud — no silent default (Rule #12)" do
       # apply/3 keeps the kind opaque to the typechecker; a bare literal call here
       # is a provable type violation (zero overlap with the 3 known kinds) and

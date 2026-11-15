@@ -8,6 +8,7 @@ defmodule FermixChannels.Mobile.PushTest do
   alias FermixChannels.Mobile.DeviceStore.Device
   alias FermixChannels.Mobile.Push
   alias FermixChannels.Mobile.Push.Config
+  alias FermixTestSupport.TelemetryCapture
   alias Pigeon.APNS.Notification
 
   @nonce <<0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11>>
@@ -192,7 +193,7 @@ defmodule FermixChannels.Mobile.PushTest do
     assert {:ok, %{status: :sent, sent: 2}} =
              Push.notify("main", 44, "hello from Fermix",
                config: valid_config(),
-               profile_connected: fn "main" -> {:ok, false} end,
+               connected_devices: fn "main" -> {:ok, []} end,
                read_frontier: fn "main" -> {:ok, 43} end,
                list_devices: fn -> {:ok, devices} end,
                load_identity: fn -> {:ok, %{gateway_private_key: gateway_private}} end,
@@ -205,12 +206,16 @@ defmodule FermixChannels.Mobile.PushTest do
     assert Enum.all?(notifications, &(&1.topic == "io.tezra.fermix"))
   end
 
-  test "connected and already-read profiles suppress dispatch before device or identity access" do
+  # Who is away is decided phone by phone, so the registered phones are listed;
+  # nothing that sends is touched.
+  test "connected phones and already-read rows suppress dispatch before identity access" do
+    {device_public, _device_private} = keypair(29)
+    phone = device("device-a", device_public, :binary.copy(<<29>>, 32), "token-a")
     forbidden = fn -> flunk("suppressed delivery consulted a send-only dependency") end
 
     common = [
       config: valid_config(),
-      list_devices: forbidden,
+      list_devices: fn -> {:ok, [phone]} end,
       load_identity: forbidden,
       dispatcher: fn _, _ -> flunk("suppressed delivery dispatched") end
     ]
@@ -221,7 +226,7 @@ defmodule FermixChannels.Mobile.PushTest do
                8,
                "preview",
                Keyword.merge(common,
-                 profile_connected: fn "main" -> {:ok, true} end,
+                 connected_devices: fn "main" -> {:ok, ["device-a"]} end,
                  read_frontier: fn _ -> flunk("connected state must decide first") end
                )
              )
@@ -232,7 +237,7 @@ defmodule FermixChannels.Mobile.PushTest do
                8,
                "preview",
                Keyword.merge(common,
-                 profile_connected: fn "main" -> {:ok, false} end,
+                 connected_devices: fn "main" -> {:ok, []} end,
                  read_frontier: fn "main" -> {:ok, 8} end
                )
              )
@@ -254,7 +259,7 @@ defmodule FermixChannels.Mobile.PushTest do
     assert {:ok, %{status: :sent, sent: 1}} =
              Push.notify_approval("main",
                config: valid_config(),
-               profile_connected: fn "main" -> {:ok, false} end,
+               connected_devices: fn "main" -> {:ok, []} end,
                read_frontier: fn _ -> flunk("an approval is no timeline row") end,
                list_devices: fn -> {:ok, [device]} end,
                load_identity: fn -> {:ok, %{gateway_private_key: gateway_private}} end,
@@ -280,40 +285,67 @@ defmodule FermixChannels.Mobile.PushTest do
     assert {:ok, %{status: :suppressed, reason: :connected, sent: 0}} =
              Push.notify_approval("main",
                config: valid_config(),
-               profile_connected: fn "main" -> {:ok, true} end,
-               list_devices: fn -> flunk("a connected profile listed devices") end
+               connected_devices: fn "main" -> {:ok, ["device-a"]} end,
+               list_devices: fn -> {:ok, [device]} end,
+               load_identity: fn -> flunk("a connected phone loaded the identity") end
              )
 
     assert {:ok, %{status: :disabled, sent: 0}} =
              Push.notify_approval("main",
                config: [enabled: false],
-               profile_connected: fn _ -> flunk("disabled push checked presence") end
+               connected_devices: fn _ -> {:ok, []} end,
+               list_devices: fn -> {:ok, [device]} end,
+               load_identity: fn -> flunk("an iPhone was sent with APNs off") end
              )
   end
 
-  test "returns invalid configuration errors without consulting runtime dependencies" do
+  # The APNs config is the APNs route's alone: an away iPhone it cannot reach
+  # fails with the config's own reason, before any credential is loaded.
+  test "an invalid APNs config fails an away iPhone with the config's reason" do
+    {device_public, _device_private} = keypair(34)
+    iphone = device("device-a", device_public, :binary.copy(<<34>>, 32), "token-a")
+
+    common = [
+      connected_devices: fn _ -> {:ok, []} end,
+      read_frontier: fn _ -> {:ok, 0} end,
+      list_devices: fn -> {:ok, [iphone]} end,
+      load_identity: fn -> flunk("an invalid config loaded the identity") end,
+      dispatcher: fn _, _ -> flunk("an invalid config dispatched") end
+    ]
+
     assert {:error, {:invalid_push_config, :topic, :missing}} =
-             Push.notify("main", 1, "preview",
-               config: Keyword.delete(valid_config(), :topic),
-               profile_connected: fn _ -> flunk("invalid config reached presence lookup") end
+             Push.notify(
+               "main",
+               1,
+               "preview",
+               Keyword.put(common, :config, Keyword.delete(valid_config(), :topic))
              )
 
     assert {:error, {:invalid_push_config, :environment, "staging"}} =
-             Push.notify("main", 1, "preview",
-               config: Keyword.put(valid_config(), :environment, "staging"),
-               profile_connected: fn _ -> flunk("invalid config reached presence lookup") end
+             Push.notify(
+               "main",
+               1,
+               "preview",
+               Keyword.put(common, :config, Keyword.put(valid_config(), :environment, "staging"))
              )
   end
 
-  test "disabled push is an explicit no-op that needs no credentials or runtime dependencies" do
+  # APNs off switches off the APNs route alone: with no away phone holding a
+  # subscription there is nothing to send, and nothing that sends is touched.
+  test "with APNs off and no away phone subscribed, push is disabled and needs no credentials" do
+    {device_public, _device_private} = keypair(33)
+    iphone = device("device-a", device_public, :binary.copy(<<33>>, 32), "token-a")
+
     assert {:ok, %{status: :disabled, sent: 0}} =
              Push.notify("main", 1, "preview",
                config: [enabled: false],
-               profile_connected: fn _ -> flunk("disabled push checked presence") end,
+               connected_devices: fn _ -> {:ok, []} end,
                read_frontier: fn _ -> flunk("disabled push checked read state") end,
-               list_devices: fn -> flunk("disabled push listed devices") end,
+               list_devices: fn -> {:ok, [iphone]} end,
                load_identity: fn -> flunk("disabled push loaded identity") end,
-               dispatcher: fn _, _ -> flunk("disabled push dispatched") end
+               dispatcher: fn _, _ -> flunk("disabled push dispatched") end,
+               relay_send: fn _, _, _, _ -> flunk("disabled push posted to the relay") end,
+               report_relay: fn _outcome -> flunk("disabled push reported the relay") end
              )
   end
 
@@ -349,7 +381,7 @@ defmodule FermixChannels.Mobile.PushTest do
     assert {:error, {:push_failed, [%{device_id: "device-b", reason: :bad_device_token}]}} =
              Push.notify("main", 51, "private preview",
                config: valid_config(),
-               profile_connected: fn _ -> {:ok, false} end,
+               connected_devices: fn _ -> {:ok, []} end,
                read_frontier: fn _ -> {:ok, 50} end,
                list_devices: fn -> {:ok, devices} end,
                load_identity: fn -> {:ok, %{gateway_private_key: gateway_private}} end,
@@ -430,7 +462,7 @@ defmodule FermixChannels.Mobile.PushTest do
     assert {:error, {:too_many_registered_devices, count, max}} =
              Push.notify("main", 1, "preview",
                config: valid_config(),
-               profile_connected: fn _ -> {:ok, false} end,
+               connected_devices: fn _ -> {:ok, []} end,
                read_frontier: fn _ -> {:ok, 0} end,
                list_devices: fn -> {:ok, devices} end,
                load_identity: fn -> {:ok, %{gateway_private_key: gateway_private}} end,
@@ -476,7 +508,7 @@ defmodule FermixChannels.Mobile.PushTest do
       with_log(fn ->
         Push.notify("main", 1, "preview",
           config: valid_config(),
-          profile_connected: fn _ -> {:ok, false} end,
+          connected_devices: fn _ -> {:ok, []} end,
           read_frontier: fn _ -> {:ok, 0} end,
           list_devices: fn -> raise KeyError, key: :registered_devices, term: %{} end,
           load_identity: fn -> flunk("a raising dependency continued the delivery") end,
@@ -492,8 +524,10 @@ defmodule FermixChannels.Mobile.PushTest do
     assert log =~ "push_test.exs"
   end
 
-  # Fermix pushes through APNs alone: an Android phone that registered a token
-  # is refused by name with a typed reason, never sent through APNs.
+  # An Android phone is pushed through Fermix's push relay: one that
+  # registered only a token (an older app's push_register) holds no
+  # subscription, and is refused by name with a typed reason, never sent
+  # through APNs.
   describe "Android phones" do
     setup do
       {_gateway_public, gateway_private} = keypair(40)
@@ -528,8 +562,9 @@ defmodule FermixChannels.Mobile.PushTest do
       assert log =~ "[warning]"
 
       assert log =~
-               "mobile push refused pixel {:no_push_service, :android}: " <>
-                 "Fermix has no push service for Android phones; nothing was sent"
+               "mobile push refused pixel {:no_push_subscription, :android}: " <>
+                 "an Android phone is pushed through Fermix's push relay, and this one " <>
+                 "holds no subscription; nothing was sent"
 
       refute log =~ "android-token"
     end
@@ -546,8 +581,8 @@ defmodule FermixChannels.Mobile.PushTest do
         end)
 
       assert {:ok, %{status: :unconfigured_platform, sent: 0}} = result
-      assert log =~ "mobile push refused pixel {:no_push_service, :android}"
-      assert log =~ "mobile push refused pixel-2 {:no_push_service, :android}"
+      assert log =~ "mobile push refused pixel {:no_push_subscription, :android}"
+      assert log =~ "mobile push refused pixel-2 {:no_push_subscription, :android}"
     end
 
     test "an approval reaches only the iPhones", ctx do
@@ -562,7 +597,7 @@ defmodule FermixChannels.Mobile.PushTest do
         with_log(fn ->
           Push.notify_approval("main",
             config: valid_config(),
-            profile_connected: fn "main" -> {:ok, false} end,
+            connected_devices: fn "main" -> {:ok, []} end,
             list_devices: fn -> {:ok, [ctx.android, ctx.iphone]} end,
             load_identity: fn -> {:ok, %{gateway_private_key: ctx.gateway_private}} end,
             dispatcher: apns
@@ -571,8 +606,397 @@ defmodule FermixChannels.Mobile.PushTest do
 
       assert {:ok, %{status: :sent, sent: 1}} = result
       assert_receive {:apns, ["apns-token"]}
-      assert log =~ "mobile push refused pixel {:no_push_service, :android}"
+      assert log =~ "mobile push refused pixel {:no_push_subscription, :android}"
     end
+  end
+
+  # M99: a phone holding a subscription is pushed through Fermix's push relay,
+  # each phone that is not connected at that moment is pushed on its own, and
+  # APNs being off switches off the APNs route alone.
+  describe "push through the relay" do
+    setup do
+      {_gateway_public, gateway_private} = keypair(50)
+      {phone_public, _phone_private} = keypair(51)
+      salt = :binary.copy(<<52>>, 32)
+
+      iphone = %{device("iphone", phone_public, salt, "apns-iphone") | platform: "ios"}
+
+      %{
+        gateway_private: gateway_private,
+        iphone: iphone,
+        iphone_2: %{iphone | device_id: "iphone-2", push_token: "apns-iphone-2"},
+        pixel: subscribed("pixel", phone_public, salt),
+        pixel_2: subscribed("pixel-2", phone_public, salt),
+        pixel_3: subscribed("pixel-3", phone_public, salt)
+      }
+    end
+
+    test "only the phones that are not connected are pushed, on both routes", ctx do
+      phones = [ctx.iphone, ctx.iphone_2, ctx.pixel, ctx.pixel_2]
+
+      assert {:ok, %{status: :sent, sent: 2}} =
+               relay_notify(ctx, phones,
+                 connected_devices: fn "main" -> {:ok, ["iphone", "pixel"]} end
+               )
+
+      assert_receive {:apns, ["apns-iphone-2"]}
+      assert_receive {:relay, subscription, plaintext, 86_400, []}
+
+      assert %{service: "fcm", address: "fcm-pixel-2", p256dh: p256dh, auth: auth} =
+               subscription
+
+      assert {p256dh, auth} == {ctx.pixel_2.push_p256dh, ctx.pixel_2.push_auth}
+
+      assert Jason.decode!(plaintext) == %{
+               "v" => 1,
+               "kind" => "message",
+               "profile_id" => "main",
+               "server_seq" => 52,
+               "preview_text" => "hi"
+             }
+
+      refute_received {:relay, _subscription, _plaintext, _ttl, _opts}
+      refute_received {:apns, _tokens}
+    end
+
+    test "a subscribed phone is pushed with APNs off, and no iPhone is", ctx do
+      assert {:ok, %{status: :sent, sent: 1}} =
+               relay_notify(ctx, [ctx.iphone, ctx.pixel],
+                 config: [enabled: false],
+                 load_identity: fn -> flunk("an iPhone was sent with APNs off") end,
+                 dispatcher: fn _, _ -> flunk("an iPhone was sent with APNs off") end
+               )
+
+      assert_receive {:relay, %{address: "fcm-pixel"}, _plaintext, 86_400, _opts}
+      refute_received {:relay, _subscription, _plaintext, _ttl, _opts}
+    end
+
+    test "with APNs off and every subscribed phone connected, nothing is sent", ctx do
+      silent = [
+        config: [enabled: false],
+        connected_devices: fn _ -> {:ok, ["pixel"]} end,
+        read_frontier: fn _ -> flunk("disabled push read the frontier") end,
+        load_identity: fn -> flunk("an iPhone was sent with APNs off") end,
+        relay_send: fn _, _, _, _ -> flunk("a connected phone was pushed") end,
+        report_relay: fn _outcome -> flunk("nothing was sent, so nothing was learned") end
+      ]
+
+      assert {:ok, %{status: :disabled, sent: 0}} =
+               relay_notify(ctx, [ctx.iphone, ctx.pixel], silent)
+
+      assert {:ok, %{status: :disabled, sent: 0}} =
+               Push.notify_approval(
+                 "main",
+                 Keyword.merge(silent, list_devices: fn -> {:ok, [ctx.iphone, ctx.pixel]} end)
+               )
+    end
+
+    test "each phone takes its own route once", ctx do
+      assert {:ok, %{status: :sent, sent: 3}} =
+               relay_notify(ctx, [ctx.pixel, ctx.iphone, ctx.pixel_2])
+
+      assert_receive {:apns, ["apns-iphone"]}
+      assert_receive {:relay, %{address: first}, _plaintext, 86_400, _opts}
+      assert_receive {:relay, %{address: second}, _plaintext, 86_400, _opts}
+      assert Enum.sort([first, second]) == ["fcm-pixel", "fcm-pixel-2"]
+      refute_received {:relay, _subscription, _plaintext, _ttl, _opts}
+      refute_received {:apns, _tokens}
+    end
+
+    test "a row already read is pushed to nobody", ctx do
+      assert {:ok, %{status: :suppressed, reason: :read, sent: 0}} =
+               relay_notify(ctx, [ctx.iphone, ctx.pixel],
+                 read_frontier: fn _ -> {:ok, 52} end,
+                 dispatcher: fn _, _ -> flunk("a read row reached APNs") end,
+                 relay_send: fn _, _, _, _ -> flunk("a read row was pushed") end
+               )
+    end
+
+    test "an approval carries no content", ctx do
+      assert {:ok, %{status: :sent, sent: 1}} =
+               Push.notify_approval(
+                 "main",
+                 Keyword.merge(relay_opts(ctx, [ctx.pixel]),
+                   read_frontier: fn _ -> flunk("an approval is no timeline row") end
+                 )
+               )
+
+      assert_receive {:relay, %{address: "fcm-pixel"}, plaintext, 300, _opts}
+
+      assert Jason.decode!(plaintext) == %{
+               "v" => 1,
+               "kind" => "approval",
+               "profile_id" => "main",
+               "server_seq" => nil,
+               "preview_text" => nil
+             }
+    end
+
+    # An alert that an approval waits is noise once the approval expired: it
+    # lives as long as the caller says the approval waits, at most a day.
+    test "an approval's push lives its own wait, capped at a day; a row's lives a day", ctx do
+      approval = fn opts ->
+        Push.notify_approval("main", Keyword.merge(relay_opts(ctx, [ctx.pixel]), opts))
+      end
+
+      assert {:ok, %{status: :sent, sent: 1}} = approval.(ttl_s: 60)
+      assert_receive {:relay, %{address: "fcm-pixel"}, _plaintext, 60, _opts}
+
+      assert {:ok, %{status: :sent, sent: 1}} = approval.(ttl_s: 200_000)
+      assert_receive {:relay, %{address: "fcm-pixel"}, _plaintext, 86_400, _opts}
+
+      for invalid <- [0, -5, 1.5, "60"] do
+        assert {:error, {:invalid_ttl_s, ^invalid}} =
+                 approval.(
+                   ttl_s: invalid,
+                   connected_devices: fn _ -> flunk("an invalid ttl reached presence") end
+                 )
+      end
+
+      assert {:ok, %{status: :sent, sent: 1}} = relay_notify(ctx, [ctx.pixel], ttl_s: 60)
+      assert_receive {:relay, %{address: "fcm-pixel"}, _plaintext, 86_400, _opts}
+      refute_received {:relay, _subscription, _plaintext, _ttl, _opts}
+    end
+
+    test "a subscribed phone is pushed while the APNs config is invalid", ctx do
+      assert {:ok, %{status: :sent, sent: 1}} =
+               relay_notify(ctx, [ctx.pixel],
+                 config: Keyword.delete(valid_config(), :topic),
+                 load_identity: fn -> flunk("no iPhone needed the identity") end
+               )
+
+      assert_receive {:relay, %{address: "fcm-pixel"}, _plaintext, 86_400, _opts}
+    end
+
+    test "an invalid APNs config fails the iPhone and still sends the subscribed phone", ctx do
+      {result, log} =
+        with_log(fn ->
+          relay_notify(ctx, [ctx.iphone, ctx.pixel],
+            config: Keyword.delete(valid_config(), :topic),
+            load_identity: fn -> flunk("an invalid config loaded the identity") end,
+            dispatcher: fn _, _ -> flunk("an invalid config dispatched") end
+          )
+        end)
+
+      assert {:error,
+              {:push_failed,
+               [%{device_id: "iphone", reason: {:invalid_push_config, :topic, :missing}}]}} =
+               result
+
+      assert_receive {:relay, %{address: "fcm-pixel"}, _plaintext, 86_400, _opts}
+      assert [_once] = Regex.scan(~r/mobile push could not use its APNs config/, log)
+    end
+
+    test "an invalid APNs config with no registered phone is no push's business", ctx do
+      assert {:ok, %{status: :no_registered_devices, sent: 0}} =
+               relay_notify(ctx, [], config: Keyword.delete(valid_config(), :topic))
+
+      assert {:ok, %{status: :suppressed, reason: :connected, sent: 0}} =
+               relay_notify(ctx, [ctx.iphone],
+                 config: Keyword.delete(valid_config(), :topic),
+                 connected_devices: fn _ -> {:ok, ["iphone"]} end
+               )
+    end
+
+    # M99 §6: only an address the relay says is gone is dropped; a bug the
+    # relay names, an answer that is not the relay's and a relay that cannot
+    # be reached all leave the registration as it is.
+    test "a subscription whose address is gone is dropped, and nothing else is", ctx do
+      answers = %{
+        "fcm-pixel" => {:error, :gone},
+        "fcm-pixel-2" => {:error, {:rejected, :address}},
+        "fcm-pixel-3" => {:error, {:unavailable, {:relay, :busy}}},
+        "fcm-pixel-4" => {:error, {:refused, 403}}
+      }
+
+      pixel_4 = %{ctx.pixel_3 | device_id: "pixel-4", push_token: "fcm-pixel-4"}
+      test_pid = self()
+
+      {result, log} =
+        with_log(fn ->
+          relay_notify(ctx, [ctx.pixel, ctx.pixel_2, ctx.pixel_3, pixel_4],
+            relay_send: fn subscription, _plaintext, _ttl, _opts ->
+              Map.fetch!(answers, subscription.address)
+            end,
+            update_device: fn device_id, attrs ->
+              send(test_pid, {:update_device, device_id, attrs})
+              {:ok, ctx.pixel}
+            end
+          )
+        end)
+
+      assert {:error,
+              {:push_failed,
+               [
+                 %{device_id: "pixel", reason: :gone},
+                 %{device_id: "pixel-2", reason: {:rejected, :address}},
+                 %{device_id: "pixel-3", reason: {:unavailable, {:relay, :busy}}},
+                 %{device_id: "pixel-4", reason: {:refused, 403}}
+               ]}} = result
+
+      cleared = %{push_token: nil, push_service: nil, push_p256dh: nil, push_auth: nil}
+      assert_receive {:update_device, "pixel", ^cleared}
+      refute_received {:update_device, _device_id, _attrs}
+
+      assert log =~
+               "mobile push dropped pixel's subscription: the relay says Google no longer " <>
+                 "knows its address"
+
+      refute log =~ "dropped pixel-"
+      refute log =~ "fcm-pixel"
+    end
+
+    # M99 §6: the channel holds whether the relay could be reached; a leg
+    # tells it what it learned, once, after every phone settled.
+    test "a leg tells the channel the relay was reached, or could not be", ctx do
+      phones = [ctx.pixel, ctx.pixel_2]
+
+      for {answers, told} <- [
+            {%{"fcm-pixel" => {:error, {:unavailable, {:relay, :busy}}}, "fcm-pixel-2" => :ok},
+             :reached},
+            {%{
+               "fcm-pixel" => {:error, {:unavailable, {:http, 503}}},
+               "fcm-pixel-2" => {:error, {:unavailable, {:transport, :timeout}}}
+             }, {:unreachable, :gateway}},
+            {%{
+               "fcm-pixel" => {:error, {:refused, 400}},
+               "fcm-pixel-2" => {:error, {:unavailable, {:transport, :nxdomain}}}
+             }, {:unreachable, :nxdomain}},
+            {%{
+               "fcm-pixel" => {:error, {:unavailable, {:relay, :permission}}},
+               "fcm-pixel-2" => {:error, {:rejected, :ttl}}
+             }, {:unreachable, :permission}}
+          ] do
+        capture_log(fn ->
+          relay_notify(ctx, phones,
+            relay_send: fn subscription, _plaintext, _ttl, _opts ->
+              Map.fetch!(answers, subscription.address)
+            end
+          )
+        end)
+
+        assert_receive {:relay_outcome, ^told}
+        refute_received {:relay_outcome, _again}
+      end
+    end
+
+    test "a leg in which the relay answered for every phone and accepted none tells nothing",
+         ctx do
+      capture_log(fn ->
+        relay_notify(ctx, [ctx.pixel, ctx.pixel_2],
+          relay_send: fn
+            %{address: "fcm-pixel"}, _plaintext, _ttl, _opts -> {:error, :gone}
+            _subscription, _plaintext, _ttl, _opts -> {:error, {:rejected, :malformed}}
+          end,
+          update_device: fn _id, _attrs -> {:ok, ctx.pixel} end
+        )
+      end)
+
+      refute_received {:relay_outcome, _outcome}
+    end
+
+    test "one push telemetry event per phone, the APNs leg's own event", ctx do
+      TelemetryCapture.attach([[:fermix, :channel, :push]], :emitter)
+
+      assert {:error, {:push_failed, [%{device_id: "pixel-2", reason: :gone}]}} =
+               relay_notify(ctx, [ctx.iphone, ctx.pixel, ctx.pixel_2],
+                 relay_send: fn subscription, _plaintext, _ttl, _opts ->
+                   if subscription.address == "fcm-pixel-2", do: {:error, :gone}, else: :ok
+                 end,
+                 update_device: fn _id, _attrs -> {:ok, ctx.pixel_2} end
+               )
+
+      for status <- [:sent, :sent, :failed] do
+        assert_receive {:telemetry, [:fermix, :channel, :push], %{count: 1, duration_us: us},
+                        %{channel: :mobile, status: ^status}}
+
+        assert us >= 0
+      end
+
+      refute_received {:telemetry, _event, _measurements, _metadata}
+    end
+
+    test "a send that does not finish in time is killed and counted against its phone", ctx do
+      TelemetryCapture.attach([[:fermix, :channel, :push]], :emitter)
+
+      {result, log} =
+        with_log(fn ->
+          relay_notify(ctx, [ctx.iphone, ctx.pixel],
+            relay_timeout_ms: 1,
+            relay_send: fn _, _, _, _ ->
+              receive do
+                :never_sent -> :ok
+              end
+            end
+          )
+        end)
+
+      assert {:error, {:push_failed, [%{device_id: "pixel", reason: :timeout}]}} = result
+      assert_receive {:apns, ["apns-iphone"]}
+      assert log =~ "mobile push to pixel did not finish"
+
+      assert_receive {:telemetry, [:fermix, :channel, :push], _measurements, %{status: :sent}}
+      assert_receive {:telemetry, [:fermix, :channel, :push], _measurements, %{status: :failed}}
+    end
+
+    test "a sender that raises is a typed failure, never a report that quotes the address",
+         ctx do
+      {result, log} =
+        with_log(fn ->
+          relay_notify(ctx, [ctx.pixel],
+            relay_send: fn _, _, _, _ -> raise ArgumentError, "boom" end
+          )
+        end)
+
+      assert {:error, {:push_failed, [%{device_id: "pixel", reason: :push_dependency_exception}]}} =
+               result
+
+      assert log =~ "mobile push dependency :relay_send raised"
+      refute log =~ "fcm-pixel"
+    end
+  end
+
+  defp relay_notify(ctx, devices, opts \\ []) do
+    Push.notify("main", 52, "hi", Keyword.merge(relay_opts(ctx, devices), opts))
+  end
+
+  # Every seam a push reaches, the relay's sender a stub that reports to the
+  # test: no network, no waiting.
+  defp relay_opts(ctx, devices) do
+    test_pid = self()
+
+    [
+      config: valid_config(),
+      connected_devices: fn _ -> {:ok, []} end,
+      read_frontier: fn _ -> {:ok, 51} end,
+      list_devices: fn -> {:ok, devices} end,
+      load_identity: fn -> {:ok, %{gateway_private_key: ctx.gateway_private}} end,
+      dispatcher: fn notifications, _config ->
+        send(test_pid, {:apns, Enum.map(notifications, & &1.device_token)})
+        {:ok, Enum.map(notifications, &%{&1 | response: :success})}
+      end,
+      relay_send: fn subscription, plaintext, ttl_s, opts ->
+        send(test_pid, {:relay, subscription, plaintext, ttl_s, opts})
+        :ok
+      end,
+      report_relay: fn outcome ->
+        send(test_pid, {:relay_outcome, outcome})
+        :ok
+      end,
+      update_device: fn _id, _attrs -> flunk("a registration was cleared") end
+    ]
+  end
+
+  defp subscribed(id, noise_pk, salt) do
+    {p256dh, _private} = :crypto.generate_key(:ecdh, :prime256v1)
+
+    %{
+      device(id, noise_pk, salt, "fcm-#{id}")
+      | platform: "android",
+        push_service: "fcm",
+        push_p256dh: p256dh,
+        push_auth: :crypto.strong_rand_bytes(16)
+    }
   end
 
   defp notify_phones(ctx, devices, opts) do
@@ -583,7 +1007,7 @@ defmodule FermixChannels.Mobile.PushTest do
       Keyword.merge(
         [
           config: valid_config(),
-          profile_connected: fn _ -> {:ok, false} end,
+          connected_devices: fn _ -> {:ok, []} end,
           read_frontier: fn _ -> {:ok, 51} end,
           list_devices: fn -> {:ok, devices} end,
           load_identity: fn -> {:ok, %{gateway_private_key: ctx.gateway_private}} end
@@ -596,7 +1020,7 @@ defmodule FermixChannels.Mobile.PushTest do
   defp notify_with_dispatcher(device, gateway_private, dispatcher) do
     Push.notify("main", 52, "private preview",
       config: valid_config(),
-      profile_connected: fn _ -> {:ok, false} end,
+      connected_devices: fn _ -> {:ok, []} end,
       read_frontier: fn _ -> {:ok, 51} end,
       list_devices: fn -> {:ok, [device]} end,
       load_identity: fn -> {:ok, %{gateway_private_key: gateway_private}} end,

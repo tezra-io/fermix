@@ -130,6 +130,22 @@ defmodule FermixChannels.Mobile.Session do
   and `checklists`. Each `msg` and `command` this session queues says what
   it draws by the same answer (`ReplyBlocks.drawn_types/3`): its lists once
   its list channel pulled the index, its events from mobile 3.
+
+  ## Push through the relay (mobile 3)
+
+  `:push_services` are the services the phone channel sends through: `apns`
+  while its APNs dispatcher runs, and `fcm`, Google's through Fermix's push
+  relay, which needs nothing of its own and so is always there. A phone's
+  session at `Protocol.relay_push_version/0` or later is told every one of
+  them in `caps.push` and `pair_approved.push`; a session at 2, and a
+  desktop's, which is never pushed, is told them without `fcm`, exactly what
+  it was told before (M99 §14). A phone has one push registration, written
+  whole: `push_subscribe` stores its subscription (its address at Google in
+  `push_token`, beside the service and the phone's key and secret), only when
+  it differs from the row this session holds (the one its hello read, kept as
+  each write answers), `push_register` an APNs token with no subscription,
+  and `push_unregister` neither. A `push_subscribe` on a session that was not
+  told `fcm` is refused `push_unavailable`, and the session stays open.
   """
 
   require Logger
@@ -235,6 +251,10 @@ defmodule FermixChannels.Mobile.Session do
     "call" => true,
     "attach" => true
   }
+
+  # A phone's one push registration, written whole (M99 §14): an APNs token
+  # is this with its `push_token` set, a subscription all four.
+  @no_registration %{push_token: nil, push_service: nil, push_p256dh: nil, push_auth: nil}
 
   @type state :: map()
 
@@ -1369,6 +1389,17 @@ defmodule FermixChannels.Mobile.Session do
     end
   end
 
+  # What a session is told it is pushed through (M99 §14): the services that
+  # run, `fcm` among them only for a phone at the version that carries it.
+  defp push_services(state) do
+    if relay_push?(state), do: state.push_services, else: state.push_services -- ["fcm"]
+  end
+
+  defp relay_push?(%{push_services: services, negotiated_version: version} = state) do
+    "fcm" in services and is_integer(version) and version >= Protocol.relay_push_version() and
+      session_kind(state) == :phone
+  end
+
   # A desktop's peer is the desktops', and its families know where the
   # computer stands and whether its hello said it applies M97 §19.3's rule;
   # a phone's runs its list channel alone. The version
@@ -1395,7 +1426,7 @@ defmodule FermixChannels.Mobile.Session do
       "streaming" => true,
       "turn_done" => true,
       "max_media_bytes" => state.max_media_bytes,
-      "push" => state.push_services
+      "push" => push_services(state)
     }
 
     # Whether this primary serves a call from the device (M87; a computer's,
@@ -1562,7 +1593,7 @@ defmodule FermixChannels.Mobile.Session do
       "candidates" => current_candidates(state),
       "profiles" => profiles(state),
       "push_salt" => Base.encode64(value(device, :apns_key_salt)),
-      "push" => state.push_services,
+      "push" => push_services(state),
       "primary_epoch" => epoch
     }
 
@@ -1609,16 +1640,32 @@ defmodule FermixChannels.Mobile.Session do
   end
 
   # Kept for every phone: Push sends only an iPhone's, and refuses the rest by
-  # name, so an Android phone's token is never sent through APNs.
+  # name, so an Android phone's token is never sent through APNs. It is the
+  # phone's whole registration, so it replaces a subscription.
   defp dispatch_event(%{type: "push_register", payload: payload}, state) do
     case validate_push_environment(payload["environment"], state.push_environment) do
-      :ok -> store_push_token(payload["apns_token"], state)
+      :ok -> write_registration(%{@no_registration | push_token: payload["apns_token"]}, state)
       {:error, reason} -> {:error, reason, state}
     end
   end
 
   # The phone's notifications cannot show, so no push may come (M51 §10).
-  defp dispatch_event(%{type: "push_unregister"}, state), do: store_push_token(nil, state)
+  defp dispatch_event(%{type: "push_unregister"}, state),
+    do: write_registration(@no_registration, state)
+
+  # A phone's push subscription (M99 §14), sent after every hello_ack that
+  # names `fcm`: refused by name where this session named none, and written
+  # whole, only when it differs from the phone's row.
+  defp dispatch_event(%{type: "push_subscribe", payload: payload}, state) do
+    with :ok <- relay_push_served(state),
+         {:ok, registration} <- subscription(payload) do
+      if registered?(state.authenticated_device, registration),
+        do: {:ok, nil, state},
+        else: write_registration(registration, state)
+    else
+      {:error, reason} -> {:error, reason, state}
+    end
+  end
 
   defp dispatch_event(%{type: "media_fetch", payload: payload}, state) do
     queue_media_fetch(payload["ref"], state)
@@ -2651,12 +2698,36 @@ defmodule FermixChannels.Mobile.Session do
 
   defp error_code(_reason), do: "request_failed"
 
-  defp store_push_token(token, state) do
-    case state.update_device.(state.device_store, state.device_id, %{push_token: token}) do
-      {:ok, _device} -> {:ok, nil, state}
+  # The row the store answers is the one the next `push_subscribe` is held to.
+  defp write_registration(registration, state) do
+    case state.update_device.(state.device_store, state.device_id, registration) do
+      {:ok, device} -> {:ok, nil, %{state | authenticated_device: device}}
       {:error, reason} -> {:error, reason, state}
     end
   end
+
+  defp relay_push_served(state),
+    do: if(relay_push?(state), do: :ok, else: {:error, :push_unavailable})
+
+  # The codec held both keys to canonical base64url of their sizes. The
+  # phone's address at Google is its one push address, as a token is an
+  # iPhone's (`DeviceStore.Device`).
+  defp subscription(%{"service" => service, "address" => address} = payload) do
+    with {:ok, public} <- decoded_key(payload, "p256dh"),
+         {:ok, secret} <- decoded_key(payload, "auth") do
+      {:ok, %{push_token: address, push_service: service, push_p256dh: public, push_auth: secret}}
+    end
+  end
+
+  defp decoded_key(payload, field) do
+    case Base.url_decode64(payload[field], padding: false) do
+      {:ok, bytes} -> {:ok, bytes}
+      :error -> {:error, {:invalid_field, field}}
+    end
+  end
+
+  defp registered?(%{} = device, registration),
+    do: Enum.all?(registration, fn {field, stored} -> value(device, field) == stored end)
 
   defp validate_push_environment(received, configured)
        when received in ["development", "production"] and

@@ -201,6 +201,22 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   over the phone's own encrypted connection, so they work wherever Fermix
   runs. A phone app that doesn't draw lists yet keeps showing a reply's list
   as text.
+- **Your Android phone is notified while the app is closed.** Fermix now
+  sends a paired Android phone its notifications through Fermix's push relay
+  at push.fermix.ai, which hands them to Google to deliver, so a reply, a
+  reminder or an approval waiting for you reaches the phone with the app
+  closed. Each one is sealed to that phone before it leaves your Fermix, so
+  neither the relay nor Google can read it, and the relay keeps nothing.
+  There is nothing to set up: no Firebase project, no service account, no
+  key, no setting. Each phone is now decided on its own: a phone that is away
+  is notified even while another of your phones is connected, and a message
+  you already read elsewhere still notifies nobody. When the relay cannot be
+  reached, the message waits in the chat for when you open the app, and
+  `fermix doctor` says the push service cannot be reached until a later
+  notification gets through. An iPhone is pushed through APNs as before, and
+  APNs settings that are off or broken no longer stop an Android phone's
+  notifications. This rides version 3 of the phone wire, so a phone app at
+  version 2 is told nothing new. No Android app with this is released yet.
 
 ### Changed
 

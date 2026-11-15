@@ -23,6 +23,7 @@ defmodule FermixCore.Net.TimeoutPolicy do
           | :unfurl
           | :attestation_status
           | :decision
+          | :push_relay
 
   # Buffered LLM: whole-turn response budget (the full body lands at once).
   # Fermix consumes every LLM adapter except Codex in buffered mode; Codex
@@ -50,6 +51,11 @@ defmodule FermixCore.Net.TimeoutPolicy do
   # answer is a provider fault the cue filter holds and retries, not a reason
   # to keep a filter slot.
   @decision_ms 15_000
+  # One attempt to post a phone's push to the relay
+  # (`FermixChannels.Mobile.PushRelay`): the relay answers a small POST once
+  # Google has, and holds each call to Google within seconds. Three attempts
+  # with their waits must fit the sender's one-minute retry budget.
+  @push_relay_ms 15_000
 
   @doc """
   Returns the `receive_timeout` (ms) for a request `kind`.
@@ -65,4 +71,5 @@ defmodule FermixCore.Net.TimeoutPolicy do
   def receive_timeout_for(:unfurl), do: @unfurl_ms
   def receive_timeout_for(:attestation_status), do: @attestation_status_ms
   def receive_timeout_for(:decision), do: @decision_ms
+  def receive_timeout_for(:push_relay), do: @push_relay_ms
 end

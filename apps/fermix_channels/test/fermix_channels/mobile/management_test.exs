@@ -258,6 +258,7 @@ defmodule FermixChannels.Mobile.ManagementTest do
       end,
       list_devices: fn :store -> {:ok, [%{}]} end,
       latest_pair: fn :pair -> :none end,
+      push_relay: fn DeviceRegistry -> :unknown end,
       load_identity: fn [] -> {:ok, %{gateway_public_key: <<7::256>>}} end
     ]
 
@@ -398,6 +399,7 @@ defmodule FermixChannels.Mobile.ManagementTest do
         refusal: fn :store -> :none end,
         listener_info: fn :listener -> {:ok, {{0, 0, 0, 0}, 40_321}} end,
         discover: fn -> {:ok, [%{address: "192.168.1.8", interface: "en0", scope: :lan}]} end,
+        push_relay: fn DeviceRegistry -> :unknown end,
         host_label: fn -> "workstation" end
       ]
 
@@ -1129,6 +1131,7 @@ defmodule FermixChannels.Mobile.ManagementTest do
                identity: %{present: false, fingerprint: nil},
                remote: %{state: :off},
                apns: %{enabled: false, credentials: :missing, delivery: :down, reason: nil},
+               push_relay: :unknown,
                paired_devices: 0,
                protocol_version: FermixChannels.Mobile.Protocol.protocol_version(),
                pairing: nil
@@ -1237,6 +1240,42 @@ defmodule FermixChannels.Mobile.ManagementTest do
 
       assert {:error, {:dependency_exit, :latest_pair, {:timeout, _call}}} =
                Management.status(running.(latest_pair: timeout))
+
+      gone = fn DeviceRegistry -> exit({:noproc, {GenServer, :call, [DeviceRegistry]}}) end
+
+      assert {:error, {:dependency_exit, :push_relay, {:noproc, _call}}} =
+               Management.status(running.(push_relay: gone))
+
+      assert {:error, {:invalid_push_relay_reply, :maybe}} =
+               Management.status(running.(push_relay: fn DeviceRegistry -> :maybe end))
+    end
+
+    # M99 §6: whether Fermix's push relay could be reached is the registry's
+    # fact, read as it holds it while the channel runs.
+    test "a running channel reports whether the push relay could be reached" do
+      registry =
+        start_supervised!(
+          {DeviceRegistry,
+           name: :"management_relay_registry_#{System.unique_integer([:positive])}",
+           emit_relay: fn _status, _failures, _class -> :ok end}
+        )
+
+      opts =
+        serving_opts(
+          list_devices: fn :store -> {:ok, []} end,
+          device_registry: registry,
+          push_relay: &DeviceRegistry.push_relay/1
+        )
+
+      assert {:ok, %{push_relay: :unknown}} = Management.status(opts)
+
+      capture_log(fn ->
+        :ok = DeviceRegistry.relay_outcome(registry, {:unreachable, :gateway})
+        assert {:ok, %{push_relay: :unreachable}} = Management.status(opts)
+
+        :ok = DeviceRegistry.relay_outcome(registry, :reached)
+        assert {:ok, %{push_relay: :reachable}} = Management.status(opts)
+      end)
     end
 
     test "a running channel reports the listener, reachability, devices and window" do
@@ -1583,6 +1622,7 @@ defmodule FermixChannels.Mobile.ManagementTest do
         mdns_status: fn :mdns -> :disabled end,
         discover: fn -> {:ok, []} end,
         latest_pair: fn :pair -> :none end,
+        push_relay: fn DeviceRegistry -> :unknown end,
         load_identity: fn [] -> {:error, :missing} end
       ],
       overrides
@@ -1609,6 +1649,7 @@ defmodule FermixChannels.Mobile.ManagementTest do
       listener_info: unreachable.(:listener_info),
       mdns_status: unreachable.(:mdns_status),
       latest_pair: unreachable.(:latest_pair),
+      push_relay: unreachable.(:push_relay),
       discover: fn -> flunk("discover must not be called") end
     ]
   end

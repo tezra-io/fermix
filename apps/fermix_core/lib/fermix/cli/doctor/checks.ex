@@ -1394,14 +1394,19 @@ defmodule Fermix.CLI.Doctor.Checks do
   end
 
   defp mobile_daemon_result(config, %{status: :reported, report: report}, opts) do
-    checks = [
-      mobile_listener(report, opts),
-      mobile_mdns(report, config),
-      mobile_tailnet(report),
-      mobile_remote(report, opts),
-      mobile_apns(report, config),
-      mobile_device_count(report)
-    ]
+    checks =
+      Enum.reject(
+        [
+          mobile_listener(report, opts),
+          mobile_mdns(report, config),
+          mobile_tailnet(report),
+          mobile_remote(report, opts),
+          mobile_apns(report, config),
+          mobile_push_relay(report),
+          mobile_device_count(report)
+        ],
+        &is_nil/1
+      )
 
     detail = ["identity files 0600" | Enum.map(checks, &elem(&1, 1))] |> Enum.join("; ")
 
@@ -1690,6 +1695,18 @@ defmodule Fermix.CLI.Doctor.Checks do
 
   defp apns_degraded(reason),
     do: {:warn, "APNs degraded (#{reason}); the next push reconnects"}
+
+  # M99 §6: the daemon says when a push to an Android phone could not reach
+  # Fermix's push relay after its tries, until a later push is accepted. A
+  # relay reached, or not yet tried, adds nothing, so a home with no Android
+  # phone reads as before.
+  defp mobile_push_relay(%{"push_relay" => "unreachable"}) do
+    {:warn,
+     "the push service cannot be reached, so an Android phone shows new messages when " <>
+       "its app is opened"}
+  end
+
+  defp mobile_push_relay(_report), do: nil
 
   defp mobile_device_count(%{"paired_devices" => count}) when is_integer(count) and count > 0 do
     suffix = if count == 1, do: "device", else: "devices"
