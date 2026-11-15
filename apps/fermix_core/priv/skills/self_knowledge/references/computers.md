@@ -157,7 +157,7 @@ log says why).
 | Your screen (`computer_use`) | seeing and controlling its screen | Apple silicon Mac or Linux x86_64, with the Computer Use helper installed and not refused the permission to see and control the screen |
 | Messages (`imessage`) | the iMessage channel, through that Mac's Messages | Mac only |
 | Your computer history (`history`) | recording activity there for computer history | Mac, Linux (where its paired helper records) |
-| Apple Maps (`places`) | looking places up in Apple Maps for the server's place search (the `web` reference) | Mac with the Fermix app, whose engine carries the Apple Maps helper |
+| Apple Maps (`places`) | looking places up in Apple Maps for the server's place search (the `web` reference), and finding the town a trip's day shows (the `trips` reference) | Mac with the Fermix app, whose engine carries the Apple Maps helper |
 
 What reaches the server from a computer (a call, an attached file, a robot,
 a notification) is no offer and has no switch: each follows its own

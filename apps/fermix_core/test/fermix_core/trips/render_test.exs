@@ -408,6 +408,48 @@ defmodule FermixCore.Trips.RenderTest do
                "Varonne · rev 3 · created; 5 stops added · 2 days, 5 stops"
     end
 
+    # M89: what each near the call asked came to, the near's words and the
+    # geocoder's quoted, so a misread town shows; nothing on a place search
+    # that names no town, or with none set up.
+    test "each near the call asked: found as the geocoder's words, none, or not looked up yet" do
+      town = %{
+        name: "Brisa, Ostrel, Varonia",
+        latitude: 41.3,
+        longitude: -8.7,
+        radius_meters: 3_100
+      }
+
+      towns = [
+        {"Brisa", {:found, town}},
+        {"Nowhere", {:none, :not_found}},
+        {"Kestrin", {:unresolved, :computer_away}},
+        {"Ostrel", {:unresolved, :capped}},
+        {"Lisset", {:unresolved, :computer_refused}},
+        {"Varonia", {:unresolved, :unsupported}},
+        {"Corvelo", {:unresolved, {:no_backend, "auth_failed: no key"}}}
+      ]
+
+      # Never more than the code does: a reason that heals is looked up again
+      # on its own; any other only on the placer's next wake or the next change.
+      assert Render.answer(applied(rows()), [], %{}, towns) ==
+               Enum.join(
+                 [
+                   "Varonne · rev 3 · created; 5 stops added · 2 days, 5 stops",
+                   ~s(Near "Brisa" found as "Brisa, Ostrel, Varonia".),
+                   ~s(No town found for near "Nowhere"; its days show no town on the map.),
+                   ~s(Towns not looked up yet: "Kestrin", "Ostrel"; they will be looked up again ) <>
+                     "later, or when Fermix starts, a Mac that looks places up connects or the " <>
+                     "trip next changes.",
+                   ~s(Towns not looked up: "Lisset"; they will be looked up again when Fermix ) <>
+                     "starts, a Mac that looks places up connects or the trip next changes."
+                 ],
+                 "\n"
+               )
+
+      silent = [{"Varonia", {:unresolved, :unsupported}}]
+      assert Render.answer(applied(rows()), [], %{}, silent) == Render.answer(applied(rows()), [])
+    end
+
     test "what every lookup did, by the stop's number, a provider's words quoted" do
       rows = rows()
       [_, arrive, _, tower, coffee, lookout, dinner] = rows

@@ -1343,10 +1343,22 @@ whoever made it.
   part of it that watches the date; a client draws it as any push.
 - **A trip** (`trip_pull`, answered `trip`). `trip` is `{trip_id, title, rev,
   starts_on?, timezone?, rows[]}`, the rows in order: each day, then its
-  stops. A day is `{row_id, kind: "day", text?, date?, timezone?}`: `text`
-  only when it is named, `date` only when the trip has a start (the start
-  plus its place among the days, so no client adds days to a date), and
-  `timezone` only when it names its own. A stop is `{row_id, kind: "stop",
+  stops. A day is `{row_id, kind: "day", text?, date?, timezone?, town?}`:
+  `text` only when it is named, `date` only when the trip has a start (the
+  start plus its place among the days, so no client adds days to a date),
+  `timezone` only when it names its own, and `town` only once the near in
+  force for it is found. That near is the day's own, else the trip's, and
+  `town` is on every day it is in force, placed stops or not: `{name,
+  latitude, longitude, radius_meters}`, where `name` is the geocoder's own
+  words for what it found (its place or locality, then its administrative
+  area, then its country, a part equal to the one before it dropped), never
+  the near's words, so a misread shows; `latitude` and `longitude` are the
+  found place's own point;
+  and `radius_meters` is the geocoder's own region about it, a whole number
+  from 1, a scale, never a search's bounds. It is absent with no near in
+  force, with a near not looked up yet or one the search found no town by,
+  and on a day whose own near has no town, which never borrows the trip's;
+  a stop and a removed row never carry one. No client geocodes. A stop is `{row_id, kind: "stop",
   text, time?, duration?, fixed?, note?, place?, leg_m?}`: `time` is `HH:MM`,
   the wall clock where the stop is, `duration` its minutes, `fixed` present
   only when true (a booking, a timed ticket), and `place` the record a
@@ -1378,8 +1390,9 @@ whoever made it.
   the one it shows. A connection that never pulled is sent nothing. An op
   that can grow a trip (`create`, `add`, `edit`, `day`, `rename`, `dates`)
   is refused when the trip's whole `trip` object, with the `removed[]` a pull
-  with `removed: true` carries, would pass 768 KiB; a removed row counts for
-  the 30 days it is kept. `remove`, `move`, `restore` and `remove_trip` are
+  with `removed: true` carries and the widest town on every day, would pass
+  768 KiB; a removed row counts for the 30 days it is kept, and a town found
+  later is inside what was reserved for it. `remove`, `move`, `restore` and `remove_trip` are
   never refused for size, so a trip at the bound can always shrink: what they
   add (a row's `removed_at`, a stop's `leg_m`) is under 70 KB for a trip of
   1,000 rows, so every push stays inside a client's 1 MiB line.

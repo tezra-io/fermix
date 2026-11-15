@@ -115,7 +115,7 @@ defmodule FermixChannels.Companion.Trips do
   def object_payload(profile_id, %{trip: trip, rows: rows} = snapshot, removed?, made) do
     wire_trip =
       trip
-      |> Wire.trip(rows)
+      |> Wire.trip(rows, Map.fetch!(snapshot, :towns))
       |> put_present("removed_at", stamp(trip.removed_at))
       |> put_removed(removed?, Map.get(snapshot, :removed_rows, []))
 

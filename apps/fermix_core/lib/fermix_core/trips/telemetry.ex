@@ -23,7 +23,11 @@ defmodule FermixCore.Trips.Telemetry do
   `unavailable` or `stale_epoch`, nil when no Mac was online to ask), else
   nil. `backend` is `brave`, `apple_maps` or
   `computer`.
-  `lookups` counts the lookups that reached the place search.
+  `lookups` counts the lookups that reached the place search. What the
+  call's towns did (M89, `Trips.Towns`): `towns` (the geocodes that reached
+  the place search), `towns_found` and `towns_not_found` (a near the search
+  found no town by), measurements; and `towns_stop_reason`, metadata, what
+  stopped the towns after it, in `stop_reason`'s words, never the call's.
 
   `Trace.TelemetryHandler` records them as `trip_read` and `trip_edit` agent
   events keyed on `component`, and the Opik exporter places each under its
@@ -33,16 +37,19 @@ defmodule FermixCore.Trips.Telemetry do
   own: one session a run, `trip_place:<16 hex>` (`place_session_id/0`), a
   root with no `parent_session`, bracketed by
   `[:fermix, :trip_place, :run_start]` (measurements `waiting`, the stops
-  waiting when it began, and `expired`, the ones the age cap ended then;
+  waiting when it began, `expired`, the ones the age cap ended then, and
+  `unresolved_towns`, the nears with no town it asks;
   metadata `trigger`: `boot | computer | timer`) and one closer:
   `[:fermix, :trip_place, :run_complete]` (measurements `duration_us`,
   `placed`, `waiting` (still waiting when it ended), `stopped_waiting` (ended
   unplaced, for any reason), `expired` (of those, by the tries or the age
   cap), `superseded` (a newer change ended them first), `lookups`, `trips`
-  (whose rev moved) and `failed` (a trip it could not read or write);
+  (whose rev moved), `failed` (a trip it could not read or write), and
+  `towns`, `towns_found` and `towns_not_found` as an edit's;
   metadata `trigger`, `backend`, `skipped` (`no_mac | brave_spent |
   no_backend | computers_unread` when the place search could not run, so it
-  looked nothing up, else nil), `stop_reason` and `stop_code`, as an edit's)
+  looked nothing up, else nil), `stop_reason` and `stop_code`, as an edit's,
+  and `towns_stop_reason`)
   or `[:fermix, :trip_place, :run_error]` (`duration_us`; `error_code`: the
   store's refusal when the run could not read the waits, or `crashed` or
   `overran` when `Trips.Placer` closes a run that raised or was stopped at
@@ -75,9 +82,21 @@ defmodule FermixCore.Trips.Telemetry do
     :superseded,
     :lookups,
     :trips,
-    :failed
+    :failed,
+    :towns,
+    :towns_found,
+    :towns_not_found
   ]
-  @lookup_counts [:lookups, :placed, :offered, :not_found, :not_looked_up]
+  @lookup_counts [
+    :lookups,
+    :placed,
+    :offered,
+    :not_found,
+    :not_looked_up,
+    :towns,
+    :towns_found,
+    :towns_not_found
+  ]
   @stop_reasons [
     nil,
     :rate_limited,
@@ -139,12 +158,20 @@ defmodule FermixCore.Trips.Telemetry do
   def place_session_id,
     do: @place_prefix <> Base.encode16(:crypto.strong_rand_bytes(8), case: :lower)
 
-  @doc "Opens a placer run: its trigger, the stops waiting and those the age cap ended."
-  @spec emit_place_start(map(), %{waiting: non_neg_integer(), expired: non_neg_integer()}) ::
-          :ok
-  def emit_place_start(run, %{waiting: waiting, expired: expired})
-      when is_integer(waiting) and waiting >= 0 and is_integer(expired) and expired >= 0 do
-    :telemetry.execute(@place_start, %{waiting: waiting, expired: expired}, place_meta(run))
+  @doc """
+  Opens a placer run: its trigger, the stops waiting, those the age cap
+  ended, and the nears with no town it asks.
+  """
+  @spec emit_place_start(map(), %{
+          waiting: non_neg_integer(),
+          expired: non_neg_integer(),
+          unresolved_towns: non_neg_integer()
+        }) :: :ok
+  def emit_place_start(run, %{waiting: waiting, expired: expired, unresolved_towns: towns})
+      when is_integer(waiting) and waiting >= 0 and is_integer(expired) and expired >= 0 and
+             is_integer(towns) and towns >= 0 do
+    measurements = %{waiting: waiting, expired: expired, unresolved_towns: towns}
+    :telemetry.execute(@place_start, measurements, place_meta(run))
   end
 
   @doc "Closes a placer run with what it placed, what still waits and what stopped waiting."
@@ -160,6 +187,7 @@ defmodule FermixCore.Trips.Telemetry do
       |> place_meta()
       |> Map.merge(%{backend: backend(summary), skipped: skipped})
       |> Map.merge(stop(summary))
+      |> Map.put(:towns_stop_reason, towns_stop(summary))
     )
   end
 
@@ -210,8 +238,11 @@ defmodule FermixCore.Trips.Telemetry do
       |> metadata(edit)
       |> Map.merge(%{backend: backend(edit), rate_limited: Map.fetch!(edit, :rate_limited)})
       |> Map.merge(stop(edit))
+      |> Map.put(:towns_stop_reason, towns_stop(edit))
     )
   end
+
+  defp towns_stop(%{towns_stop_reason: reason}) when reason in @stop_reasons, do: reason
 
   defp stop(%{stop_reason: reason, stop_code: code})
        when reason in @stop_reasons and (is_nil(code) or is_binary(code)),

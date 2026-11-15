@@ -39,11 +39,27 @@ defmodule FermixCore.Memory.Repo.TripsSql do
   past the age cap first) and writes what its lookups found for one trip in one transaction
   (`{:place_waiting, ...}`), each wait first checked to stand as it was read,
   so a newer choice is never overwritten.
+
+  Migration 66 (M89) adds `trip_towns` (`towns_schema_sql/0`): beside a
+  trip, the town each near in force names, by the near's exact words,
+  `found` with the geocoder's town or `none` when the search found no town
+  by them; a near with no row is not resolved (`Trips.Towns`). Keyed by the
+  words, a row can only ever be the town of the words it was found for,
+  whoever changed the near since. Every edit clears, in its own transaction,
+  the rows whose words neither the trip nor any of its days (live, or
+  removed and kept) still names, and keeps the towns its call found
+  (`keep_towns/3`); a change that found towns and changed nothing else moves
+  the trip's `rev` once, as the placer's write does (`{:settle_towns, ...}`),
+  so the owner's devices are told. A read hands the towns with the trip
+  (`{:read_trip, ...}` every row, `{:trip_by_id, ...}` the found ones, which
+  `Trips.Wire` puts on each day), and the placer asks for the nears in force
+  that have no row (`{:unresolved_towns, limit}`).
   """
 
   alias FermixCore.Memory.Repo.KeptSql
   alias FermixCore.Memory.Repo.TemporalSql
   alias FermixCore.Trips.Ops
+  alias FermixCore.Trips.Towns
   alias FermixCore.Trips.Waiting
 
   @trip_columns ~w(id owner_id agent_id title starts_on timezone position rev next_n created_at
@@ -125,6 +141,24 @@ defmodule FermixCore.Memory.Repo.TripsSql do
   CREATE INDEX IF NOT EXISTS idx_trip_waits_trip ON trip_waits(trip_id);
   """
 
+  @towns_schema_sql """
+  CREATE TABLE IF NOT EXISTS trip_towns (
+    trip_id TEXT NOT NULL REFERENCES trips(id) ON DELETE CASCADE,
+    words TEXT NOT NULL CHECK (length(words) BETWEEN 1 AND 200),  -- the near, exactly
+    state TEXT NOT NULL CHECK (state IN ('found', 'none')),
+    name TEXT CHECK (name IS NULL OR (typeof(name) = 'text'
+      AND length(CAST(name AS BLOB)) BETWEEN 1 AND 120)),
+    latitude REAL CHECK (latitude IS NULL OR latitude BETWEEN -90 AND 90),
+    longitude REAL CHECK (longitude IS NULL OR longitude BETWEEN -180 AND 180),
+    radius_meters INTEGER CHECK (radius_meters IS NULL OR radius_meters BETWEEN 1 AND 20037509),
+    PRIMARY KEY (trip_id, words),
+    CHECK ((state = 'found') = (name IS NOT NULL AND latitude IS NOT NULL
+      AND longitude IS NOT NULL AND radius_meters IS NOT NULL)),
+    CHECK (state = 'found' OR (name IS NULL AND latitude IS NULL AND longitude IS NULL
+      AND radius_meters IS NULL))
+  );
+  """
+
   @wait_select """
   SELECT w.row_id, w.trip_id, t.owner_id, t.agent_id, w.words, w.reason, w.since, w.tries,
     w.outside, w.due_at
@@ -138,6 +172,10 @@ defmodule FermixCore.Memory.Repo.TripsSql do
   @doc "The waiting stops' table and its indexes, as migration 65 creates them."
   @spec waits_schema_sql() :: String.t()
   def waits_schema_sql, do: @waits_schema_sql
+
+  @doc "The towns' table, as migration 66 creates it."
+  @spec towns_schema_sql() :: String.t()
+  def towns_schema_sql, do: @towns_schema_sql
 
   @doc """
   What migration 64 adds, a table at a time: `near` on a trip, and on a day
@@ -206,6 +244,16 @@ defmodule FermixCore.Memory.Repo.TripsSql do
     end)
   end
 
+  def handle(conn, {:unresolved_towns, limit}) when is_integer(limit) and limit > 0,
+    do: unresolved_towns(conn, limit)
+
+  def handle(conn, {:settle_towns, owner_id, agent_id, trip_id, towns, %DateTime{} = now})
+      when is_binary(trip_id) and is_map(towns) do
+    KeptSql.in_transaction(conn, fn ->
+      settle_towns(conn, {owner_id, agent_id}, trip_id, towns, now)
+    end)
+  end
+
   def handle(_conn, request), do: {:error, {:unknown_request, request}}
 
   # --- reads ---------------------------------------------------------------
@@ -240,8 +288,9 @@ defmodule FermixCore.Memory.Repo.TripsSql do
     with {:ok, trips} <- live_trips(conn, owner_id, agent_id),
          {:ok, trip} <- Ops.resolve(trips, ref),
          {:ok, rows} <- live_rows(conn, trip.id),
-         {:ok, waiting} <- waits_of(conn, trip.id) do
-      {:ok, %{trip: trip, rows: rows, waiting: MapSet.new(Map.keys(waiting))}}
+         {:ok, waiting} <- waits_of(conn, trip.id),
+         {:ok, towns} <- towns_of(conn, trip.id) do
+      {:ok, %{trip: trip, rows: rows, waiting: MapSet.new(Map.keys(waiting)), towns: towns}}
     end
   end
 
@@ -253,8 +302,9 @@ defmodule FermixCore.Memory.Repo.TripsSql do
     with {:ok, [values]} <- KeptSql.query_all(conn, sql, [owner_id, agent_id, trip_id]),
          trip = decode_trip(values),
          {:ok, rows} <- live_rows(conn, trip.id),
-         {:ok, gone} <- if(removed?, do: removed_rows(conn, trip.id), else: {:ok, []}) do
-      {:ok, %{trip: trip, rows: rows, removed_rows: gone}}
+         {:ok, gone} <- if(removed?, do: removed_rows(conn, trip.id), else: {:ok, []}),
+         {:ok, towns} <- towns_of(conn, trip.id) do
+      {:ok, %{trip: trip, rows: rows, removed_rows: gone, towns: found_towns(towns)}}
     else
       {:ok, []} -> {:error, {:no_such_trip, trip_id}}
       {:error, reason} -> {:error, reason}
@@ -322,7 +372,7 @@ defmodule FermixCore.Memory.Repo.TripsSql do
          {:ok, result} <- Ops.apply(loaded, call, edit),
          :ok <- write(conn, owner, result, edit.now),
          :ok <- keep_waits(conn, call, loaded.rows, result, edit) do
-      {:ok, result}
+      keep_towns(conn, result, edit)
     end
   end
 
@@ -667,6 +717,152 @@ defmodule FermixCore.Memory.Repo.TripsSql do
   defp wait_reason("computer_busy"), do: :computer_busy
   defp wait_reason("rate_limited"), do: :rate_limited
   defp wait_reason("deadline"), do: :deadline
+
+  # --- the towns (M89) --------------------------------------------------------
+
+  # A trip's towns by the near's words: `{:found, town}` or `:none`. A row the
+  # CHECKs let through is always one of the two; anything else is an error,
+  # never a raise in the Repo's own process.
+  defp towns_of(conn, trip_id) do
+    sql = """
+    SELECT words, state, name, latitude, longitude, radius_meters FROM trip_towns
+    WHERE trip_id = ?
+    """
+
+    with {:ok, rows} <- KeptSql.query_all(conn, sql, [trip_id]),
+         do: decode_towns(rows, trip_id)
+  end
+
+  defp decode_towns(rows, trip_id) do
+    Enum.reduce_while(rows, {:ok, %{}}, fn row, {:ok, towns} ->
+      case decode_town(row) do
+        {:ok, words, kept} -> {:cont, {:ok, Map.put(towns, words, kept)}}
+        :error -> {:halt, {:error, {:invalid_town, trip_id}}}
+      end
+    end)
+  end
+
+  defp decode_town([words, "found", name, latitude, longitude, radius])
+       when is_binary(name) and is_number(latitude) and is_number(longitude) and
+              is_integer(radius) do
+    town = %{name: name, latitude: latitude / 1, longitude: longitude / 1, radius_meters: radius}
+    {:ok, words, {:found, town}}
+  end
+
+  defp decode_town([words, "none", nil, nil, nil, nil]), do: {:ok, words, :none}
+  defp decode_town(_row), do: :error
+
+  defp found_towns(towns), do: for({words, {:found, town}} <- towns, into: %{}, do: {words, town})
+
+  # An edit's towns: the rows whose words neither the trip nor any of its
+  # days, live or removed and kept, still names go; then the towns the call
+  # found for the nears it leaves in force are kept. Only a town found moves
+  # the rev, and only once, when the call changed nothing else.
+  defp keep_towns(_conn, %{trip: %{removed_at: %DateTime{}}} = result, _edit), do: {:ok, result}
+
+  defp keep_towns(conn, %{trip: trip, rows: rows} = result, edit) do
+    in_force = MapSet.new(Towns.in_force(trip, rows))
+    towns = Map.filter(Map.get(edit, :towns, %{}), &MapSet.member?(in_force, elem(&1, 0)))
+
+    with :ok <- clear_towns(conn, trip.id),
+         {:ok, found} <- put_towns(conn, trip.id, towns) do
+      moved(conn, result, found, edit.now)
+    end
+  end
+
+  defp clear_towns(conn, trip_id) do
+    sql = """
+    DELETE FROM trip_towns WHERE trip_id = ?1 AND words NOT IN (
+      SELECT near FROM trips WHERE id = ?1 AND near IS NOT NULL
+      UNION SELECT near FROM trip_rows WHERE trip_id = ?1 AND kind = 'day' AND near IS NOT NULL
+    )
+    """
+
+    KeptSql.execute(conn, sql, [trip_id])
+  end
+
+  # Each town kept once: a row another writer kept first stands. Answers how
+  # many found towns are new.
+  defp put_towns(conn, trip_id, towns) do
+    Enum.reduce_while(towns, {:ok, 0}, fn {words, kept}, {:ok, found} ->
+      case put_town(conn, trip_id, words, kept) do
+        {:ok, added} -> {:cont, {:ok, found + if(match?({:found, _}, kept), do: added, else: 0)}}
+        {:error, reason} -> {:halt, {:error, reason}}
+      end
+    end)
+  end
+
+  # A town of another shape is a refusal, never a raise in the Repo's own
+  # process (the CHECKs refuse one out of bounds the same way).
+  defp put_town(conn, trip_id, words, kept) do
+    sql = """
+    INSERT INTO trip_towns (trip_id, words, state, name, latitude, longitude, radius_meters)
+    VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(trip_id, words) DO NOTHING
+    """
+
+    case town_values(kept) do
+      {:ok, values} -> KeptSql.execute_changes(conn, sql, [trip_id, words | values])
+      :error -> {:error, {:invalid_town, words}}
+    end
+  end
+
+  defp town_values({:found, %{name: name, latitude: lat, longitude: lon, radius_meters: radius}})
+       when is_binary(name) and is_number(lat) and is_number(lon) and is_integer(radius),
+       do: {:ok, ["found", name, lat, lon, radius]}
+
+  defp town_values(:none), do: {:ok, ["none", nil, nil, nil, nil]}
+  defp town_values(_kept), do: :error
+
+  defp moved(_conn, result, 0, _now), do: {:ok, result}
+  defp moved(_conn, %{changed?: true} = result, _found, _now), do: {:ok, result}
+
+  defp moved(conn, %{trip: trip} = result, _found, now) do
+    with :ok <- bump_rev(conn, trip.id, now),
+         do: {:ok, %{result | changed?: true, trip: %{trip | rev: trip.rev + 1, updated_at: now}}}
+  end
+
+  defp bump_rev(conn, trip_id, now) do
+    sql = "UPDATE trips SET rev = rev + 1, updated_at = ? WHERE id = ? AND removed_at IS NULL"
+    expect_one(conn, sql, [stamp(now), trip_id], {:trip_gone, trip_id})
+  end
+
+  # The placer's towns for one trip, written once: those still in force on
+  # the trip as it now stands are kept, and the rev moves once when a town is
+  # new. A trip removed since keeps nothing new.
+  defp settle_towns(conn, {owner_id, agent_id}, trip_id, towns, now) do
+    with {:ok, %{trip: trip, rows: rows}} <- trip_by_id(conn, owner_id, agent_id, trip_id, false) do
+      if trip.removed_at,
+        do: {:ok, %{changed?: false, trip: trip}},
+        else:
+          keep_towns(conn, %{trip: trip, rows: rows, changed?: false}, %{towns: towns, now: now})
+    end
+  end
+
+  # The nears in force on live trips that have no row, at most `limit`, the
+  # trip changed last first: what the placer asks.
+  defp unresolved_towns(conn, limit) do
+    sql = """
+    SELECT t.id, t.owner_id, t.agent_id, n.near FROM trips AS t
+    JOIN (
+      SELECT id AS trip_id, near FROM trips WHERE near IS NOT NULL
+      UNION SELECT trip_id, near FROM trip_rows
+      WHERE kind = 'day' AND removed_at IS NULL AND near IS NOT NULL
+    ) AS n ON n.trip_id = t.id
+    WHERE t.removed_at IS NULL AND NOT EXISTS (
+      SELECT 1 FROM trip_towns AS w WHERE w.trip_id = n.trip_id AND w.words = n.near
+    )
+    ORDER BY t.updated_at DESC, t.id, n.near
+    LIMIT ?
+    """
+
+    with {:ok, rows} <- KeptSql.query_all(conn, sql, [limit]) do
+      {:ok,
+       for(
+         [trip_id, owner_id, agent_id, words] <- rows,
+         do: %{trip_id: trip_id, owner_id: owner_id, agent_id: agent_id, words: words}
+       )}
+    end
+  end
 
   # Rows of `trip_id` removed more than the retention ago, deleted with the
   # edit that touches their trip: no timer ever purges them.

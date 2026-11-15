@@ -93,7 +93,12 @@ defmodule FermixCore.Home.ReadableTest do
     # engine at this format that edits a waiting stop's place does not clear its
     # wait, so a newer engine's placer may later place it: an edge between two
     # engines on one home, not a home either cannot read, so the format stays.
-    @migrations Enum.to_list(1..39) ++ [41, 42, 43] ++ Enum.to_list(45..65)
+    # 66 (M89, the town each near in force names) adds one table an engine at
+    # this format never reads, keyed by the near's words and gone with its
+    # trip by cascade. An engine at this format that changes a near leaves
+    # the old words' row behind, which no near then matches and the next
+    # newer engine's edit clears: the format stays.
+    @migrations Enum.to_list(1..39) ++ [41, 42, 43] ++ Enum.to_list(45..66)
     @manifest_keys ~w(created_at engine_version files format home_format home_root host links
                       primary_epoch)
     @entry_keys ~w(bytes mode path sha256)

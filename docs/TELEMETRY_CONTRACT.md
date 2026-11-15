@@ -1461,7 +1461,10 @@ transaction), `trips` (the trips it touched), `ops`, and what the call's place
 lookups did: `lookups` (the lookups that reached the place search, so not one
 the Brave pacer refused or a stopped call left unsent), `placed`, `offered`,
 `not_found`, `not_looked_up` (all 0 for a device's edit, which carries a whole
-place). Metadata on both:
+place), and what the call's towns did (`Trips.Towns`: the town each near in
+force names, geocoded after the lookups): `towns` (the geocodes that reached
+the place search), `towns_found` and `towns_not_found` (a near the search
+found no town by). Metadata on both:
 `component: "trips"`, `made_via` (`chat | job | mac | phone`, and `trip_place`
 for the trip placer's write below), `outcome` (`ok |
 refused | failed`), `error_code` (the refusal's tag,
@@ -1476,8 +1479,15 @@ search's own code for it (Brave's `OPTION_NOT_IN_PLAN` or `RATE_LIMITED`; for a
 Mac of the home how its invocation ended, `timed_out` or its refusal such as
 `off`, `unavailable` or `stale_epoch`, nil when no Mac was online to ask; else
 nil), so a key without place search, or a Mac that is away, never traces like
-a deadline. One call's lookups use the place search resolved once for the
-call, so `backend` is the one each of them ran. A lookup on
+a deadline; and `towns_stop_reason`, in the same words, what stopped the
+call's towns after it (an older Mac refusing the `geocode` op is
+`computer_refused`), which is never the call's `stop_reason`. One call's
+lookups use the place search resolved once for the
+call, so `backend` is the one each of them ran, its geocodes too. A geocode
+is neither a tool call nor a provider call: it emits no
+`[:fermix, :tool, :exec]` and no `[:fermix, :provider, :call]` row, and on a
+Mac of the home it is one invocation of the `places` capability's
+`geocode` op, which emits nothing on the server. A lookup on
 a Mac of the home is one invocation of that computer's `places` capability
 (`Computers.call/6`), which emits nothing on the server: the trip's event
 under the turn's `session_id` is its trace, and the invocation's own run is
@@ -1490,9 +1500,10 @@ lookup inside an edit is no tool call and emits no `[:fermix, :tool, :exec]`
 row of its own. `Trace.TelemetryHandler` records them as `trip_read` and
 `trip_edit` `agent_event` rows keyed on `component`, and the Opik exporter
 places each under its turn's or job run's trace as a point span
-(`FermixOpik.Mapper.trip_span/4`: the counts, `scope`, `made_via`, `outcome`,
-`backend`, `rate_limited`, `stop_reason` and `stop_code`, flagged errored with
-the tag when the outcome is `refused` or `failed`).
+(`FermixOpik.Mapper.trip_span/4`: the counts, the towns' among them,
+`scope`, `made_via`, `outcome`, `backend`, `rate_limited`, `stop_reason`,
+`stop_code` and `towns_stop_reason`, flagged errored with the tag when the
+outcome is `refused` or `failed`).
 
 ### The trip placer (a run kind with no model call)
 
@@ -1509,18 +1520,22 @@ root), and the bookends go through `FermixCore.Trips.Telemetry`, never
 hand-rolled:
 
 - `[:fermix, :trip_place, :run_start]`: measurements `waiting` (the stops
-  waiting when it began) and `expired` (those the 7-day cap ended then);
+  waiting when it began), `expired` (those the 7-day cap ended then) and
+  `unresolved_towns` (the nears in force with no town it asks, at most 20,
+  read only when the place search names towns and can run now);
   metadata `trigger` (`boot | computer | timer`).
 - `[:fermix, :trip_place, :run_complete]`: measurements `duration_us`,
   `placed`, `waiting` (still waiting when it ended), `stopped_waiting` (ended
   unplaced, for any reason: a result by another name, none found, a refusal
   that cannot heal, the 3-try cap, the 7-day cap), `expired` (of those, the
   two caps'), `superseded` (a newer change ended them first, so the run wrote
-  nothing for them), `lookups`, `trips` (whose rev moved) and `failed` (a trip
-  it could not read or write); metadata `trigger`, `backend`, `skipped`
+  nothing for them), `lookups`, `trips` (whose rev moved), `failed` (a trip
+  it could not read or write, and the nears with no town when it could not
+  read them, in which case `run_start` still carries what the take ended)
+  and `towns`, `towns_found` and `towns_not_found` as an edit's; metadata `trigger`, `backend`, `skipped`
   (`no_mac | brave_spent | no_backend | computers_unread` when the place
   search could not run, so it looked nothing up and spent no try; else nil),
-  `stop_reason` and `stop_code` as an edit's.
+  `stop_reason`, `stop_code` and `towns_stop_reason` as an edit's.
 - `[:fermix, :trip_place, :run_error]`: measurements `duration_us` (the run's
   own, from when it began); metadata `trigger`, `error_code` and `reason`.
   The run emits it when it could not read the waits at all (`error_code`,
@@ -1533,17 +1548,22 @@ hand-rolled:
   emitted `run_start` is closed by exactly one closer: `run_complete`, or
   `run_error` from the run or from the placer.
 
-A run with nothing due and nothing the age cap ended emits nothing. All three carry `component:
+A run with nothing due, nothing the age cap ended and no near to find a
+town for emits nothing. All three carry `component:
 "trips"` and no stop's words, place or coordinate. Each trip the run writes is
 one ordinary `[:fermix, :trip, :edit]` under the run's `session_id`, with
-`made_via: "trip_place"` and the lookups' counts and stop for that trip. Its
+`made_via: "trip_place"` and the lookups' counts and stop for that trip, and
+each trip whose towns it writes one more, `ops: 0`, with that trip's
+`towns` (its geocodes that reached the place search, answered or not),
+`towns_found` and `towns_not_found`. Its
 lookups go through `PlaceSearch.lookup/3` as a call's do (no `place_search`
 row), and on a Mac of the home each is one `places` invocation whose turn is
 the run (`origin: background`, the run's `session_id`).
 `Trace.TelemetryHandler` records the bookends as `trip_place_run_start`,
 `trip_place_run_complete` and `trip_place_run_error` `agent_event` rows keyed
 on `component`. The Opik exporter subscribes to all three: `run_start` opens
-the root (kind `:trip_place`, also inferred from the id prefix, so a closer
+the root with its trigger, the stops waiting and `unresolved_towns` (kind
+`:trip_place`, also inferred from the id prefix, so a closer
 that arrives without its opener still roots as one), each trip edit nests
 under it as its `trip_edit` span, and the closer ends it with the counts above
 as the trace's metadata allowlist (`reason` among them), errored with

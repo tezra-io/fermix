@@ -150,6 +150,21 @@ defmodule FermixCore.Tools.PlaceSearch.ComputerTest do
   defp places_answer(ctx, id, raw),
     do: answer(ctx, id, %{"status" => "ok"}, Jason.encode!(%{"places" => raw}))
 
+  # What the Mac's helper prints for "Varonne, Portugal", an invented town.
+  defp town_answer(ctx, id) do
+    placemark = %{
+      "name" => "Varonne",
+      "locality" => "Varonne",
+      "administrative_area" => "Ostrel",
+      "country" => "Varonia",
+      "latitude" => 41.1402,
+      "longitude" => -8.6113,
+      "radius_meters" => 5_210.4
+    }
+
+    answer(ctx, id, %{"status" => "ok"}, Jason.encode!(%{"placemark" => placemark}))
+  end
+
   defp told do
     test = self()
 
@@ -379,6 +394,96 @@ defmodule FermixCore.Tools.PlaceSearch.ComputerTest do
       assert_receive {:opened, @studio, %{"id" => id}, _payload, nil}
       :ok = places_answer(ctx, id, too_many)
       assert {:error, "parser_changed: on studio Mac, " <> _rest, _trace} = Task.await(task)
+    end
+  end
+
+  # M89: a trip day's town, found by the Mac's own geocoder.
+  describe "a geocode on a Mac of the home" do
+    @placemark %{
+      "name" => "Varonne",
+      "locality" => "Varonne",
+      "administrative_area" => "Ostrel",
+      "country" => "Varonia",
+      "latitude" => 41.1402,
+      "longitude" => -8.6113,
+      "radius_meters" => 5_210.4
+    }
+
+    test "asks the Mac connected now once for the near alone, and makes the town", ctx do
+      context = context(ctx, [studio(true)])
+
+      task = async(fn -> Computer.geocode("Varonne, Portugal", search_opts(context)) end)
+
+      assert_receive {:opened, @studio, %{"id" => id} = header, payload, nil}
+      assert header["capability"] == "places" and header["op"] == "geocode"
+      assert header["deadline_ms"] == 15_000
+      assert Jason.decode!(payload) == %{"near" => "Varonne, Portugal"}
+
+      :ok = answer(ctx, id, %{"status" => "ok"}, Jason.encode!(%{"placemark" => @placemark}))
+
+      assert {:ok, town, trace} = Task.await(task)
+
+      assert town == %{
+               name: "Varonne, Ostrel, Varonia",
+               latitude: 41.1402,
+               longitude: -8.6113,
+               radius_meters: 5_210
+             }
+
+      assert trace.attempt == 1
+      assert trace.searched_with == "Apple Maps on studio Mac"
+    end
+
+    test "a Mac that is away is refused at once and nothing is sent", ctx do
+      context = context(ctx, [studio(false)])
+      {stop, stopped} = told()
+
+      assert {:error, @away, %{attempt: 0}} =
+               Computer.geocode("Varonne", search_opts(context, stop: stop, stopped: stopped))
+
+      assert_received {:stopped, :computer_away}
+      refute_received {:opened, _device, _header, _payload, _part}
+    end
+
+    # A Mac whose engine predates the op refuses it by name (`Desktop.Invoke`'s
+    # admission): its towns stay unresolved, and the refusal stops the towns'
+    # own call, never a stop's.
+    test "a Mac whose Fermix predates the op refuses it, and that is computer_refused", ctx do
+      context = context(ctx, [studio(true)])
+      {stopping, stopped} = told()
+
+      task =
+        async(fn ->
+          Computer.geocode("Varonne", search_opts(context, stop: stopping, stopped: stopped))
+        end)
+
+      assert_receive {:opened, @studio, %{"id" => id}, _payload, nil}
+
+      :ok =
+        answer(ctx, id, %{
+          "status" => "refused",
+          "refusal" => "unavailable",
+          "message" => "Fermix on this computer does not know how to do that."
+        })
+
+      assert {:error, "computer_refused: " <> _words, %{attempt: 1}} = Task.await(task)
+      assert_received {:stopped, :computer_refused}
+    end
+
+    test "a near the Mac's geocoder finds nothing by keeps Apple Maps' own tag", ctx do
+      context = context(ctx, [studio(true)])
+      task = async(fn -> Computer.geocode("Nowhere", search_opts(context)) end)
+
+      assert_receive {:opened, @studio, %{"id" => id}, _payload, nil}
+
+      :ok =
+        answer(ctx, id, %{
+          "status" => "failed",
+          "message" => "invalid_location: Apple Maps found no place by that name"
+        })
+
+      assert {:error, "invalid_location: on studio Mac, " <> _words, %{attempt: 1}} =
+               Task.await(task)
     end
   end
 
@@ -624,15 +729,24 @@ defmodule FermixCore.Tools.PlaceSearch.ComputerTest do
       holder = holder()
 
       task = async(fn -> edit(ctx, context, ops(), holder) end)
-      assert_receive {:opened, @studio, %{"id" => id}, _payload, nil}
+      assert_receive {:opened, @studio, %{"id" => id, "op" => "search"}, _payload, nil}
       :ok = places_answer(ctx, id, [@prado_raw])
+
+      # M89: after the stops, the trip's near is found on the same Mac.
+      assert_receive {:opened, @studio, %{"id" => town_id, "op" => "geocode"}, payload, nil}
+      assert Jason.decode!(payload) == %{"near" => "Varonne, Portugal"}
+      :ok = town_answer(ctx, town_id)
 
       assert {:ok, %{text: text}} = Task.await(task)
       assert text =~ ~s([3] "Lunch": "Prado, 12 Rua Inventada, Varonne"\n)
       assert text =~ "\nPlaced with Apple Maps on studio Mac: [3]."
+      assert text =~ ~s(\nNear "Varonne, Portugal" found as "Varonne, Ostrel, Varonia".)
 
-      assert_receive {:telemetry, [:fermix, :trip, :edit], %{lookups: 1, placed: 1}, metadata}
-      assert %{backend: "computer", stop_reason: nil, outcome: :ok} = metadata
+      assert_receive {:telemetry, [:fermix, :trip, :edit],
+                      %{lookups: 1, placed: 1, towns: 1, towns_found: 1}, metadata}
+
+      assert %{backend: "computer", stop_reason: nil, towns_stop_reason: nil, outcome: :ok} =
+               metadata
     end
 
     test "with the Mac away, the stops are saved unplaced and the event says why", ctx do
@@ -649,6 +763,12 @@ defmodule FermixCore.Tools.PlaceSearch.ComputerTest do
                  ~s([3] "Lunch".)
 
       refute text =~ "Placed with"
+
+      assert text =~
+               ~s(Towns not looked up yet: "Varonne, Portugal"; they will be looked up again ) <>
+                 "later, or when Fermix starts, a Mac that looks places up connects or the trip " <>
+                 "next changes."
+
       refute_received {:opened, _device, _header, _payload, _part}
 
       assert_receive {:telemetry, [:fermix, :trip, :edit], %{lookups: 0, not_looked_up: 1},
@@ -689,8 +809,14 @@ defmodule FermixCore.Tools.PlaceSearch.ComputerTest do
              }
 
       :ok = places_answer(ctx, id, [@prado_raw])
+
+      # M89: the near the away call left without a town is found in the same run.
+      assert_receive {:opened, @studio, %{"id" => town_id, "op" => "geocode"}, _payload, nil}
+      :ok = town_answer(ctx, town_id)
+
       assert %{next_ms: nil} = Task.await(task)
       assert_receive {:notified, %{trips: [%{rev: 2}]}}
+      assert_receive {:notified, %{trips: [%{rev: 3}]}}
 
       assert {:ok, %{rows: rows}} =
                Repo.trips_call({:read_trip, "default", "main", "Varonne"}, server: ctx.repo)

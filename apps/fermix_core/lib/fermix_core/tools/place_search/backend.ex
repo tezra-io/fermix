@@ -61,6 +61,20 @@ defmodule FermixCore.Tools.PlaceSearch.Backend do
           optional(:units) => :metric | :imperial
         }
   @type place :: %{required(:name) => String.t(), optional(atom()) => term()}
+
+  @typedoc """
+  The town a trip's `near` names, as the geocoder found it (M89): `name`,
+  the geocoder's own words for what it found, never the near's echoed;
+  `latitude` and `longitude`, the found place's own point; and
+  `radius_meters`, the geocoder's own region about it, a scale only.
+  """
+  @type town :: %{
+          required(:name) => String.t(),
+          required(:latitude) => float(),
+          required(:longitude) => float(),
+          required(:radius_meters) => pos_integer()
+        }
+
   @type trace_metadata :: %{optional(atom()) => term()}
   @type source :: :configured | :build_default | :linked_computer | :computers_unknown
   @type resolution :: %{name: Config.backend(), module: module(), source: source()}
@@ -74,6 +88,14 @@ defmodule FermixCore.Tools.PlaceSearch.Backend do
   @doc "One search: the normalized places and the trace metadata, or a tagged reason."
   @callback search(request(), opts :: keyword()) ::
               {:ok, [place()], trace_metadata()} | {:error, String.t(), trace_metadata()}
+
+  @doc """
+  The town a near's words name (M89), geocoded alone: the town, or a tagged
+  reason (`invalid_location` and `not_a_town` when there is none to find,
+  `unsupported` from a backend that names no town).
+  """
+  @callback geocode(String.t(), opts :: keyword()) ::
+              {:ok, town(), trace_metadata()} | {:error, String.t(), trace_metadata()}
 
   @modules %{apple_maps: AppleMaps, computer: Computer, brave: Brave}
 
@@ -122,6 +144,15 @@ defmodule FermixCore.Tools.PlaceSearch.Backend do
   end
 
   def ready(%{module: module}, opts) when is_list(opts), do: module.ready(opts)
+
+  @doc """
+  Whether the resolved backend finds a near's town (M89): Apple Maps, here
+  or on a Mac of the home. Brave's place search says nowhere where it
+  searched, so its `geocode/2` answers `unsupported` and sends nothing.
+  """
+  @spec geocodes?(resolution()) :: boolean()
+  def geocodes?(%{name: name}) when name in [:apple_maps, :computer, :brave],
+    do: name != :brave
 
   @doc "The host this resolves for: `host:` when the caller names it, this build's otherwise."
   @spec host(keyword()) :: BootProfile.host()

@@ -1294,7 +1294,7 @@
     },
     "tripRow": {
       "type": "object",
-      "description": "One row. A day has its text only when it is named, its date only when the trip has a start (the start plus its place among the days, so no client adds days to a date), and its own timezone only when it names one. A stop has its text and only what it has of time (HH:MM, the wall clock where the stop is), duration (minutes), fixed (present only when true), note, place and leg_m: the straight line in metres from the placed stop before it in its day, passing over any unplaced stop between; the day's first placed stop and an unplaced stop have none. row_id is stable for the row's life, across moves and edits.",
+      "description": "One row. A day has its text only when it is named, its date only when the trip has a start (the start plus its place among the days, so no client adds days to a date), its own timezone only when it names one, and its town only once the near in force for it (the day's own, else the trip's) is found; a stop never has one. A stop has its text and only what it has of time (HH:MM, the wall clock where the stop is), duration (minutes), fixed (present only when true), note, place and leg_m: the straight line in metres from the placed stop before it in its day, passing over any unplaced stop between; the day's first placed stop and an unplaced stop have none. row_id is stable for the row's life, across moves and edits.",
       "required": ["row_id", "kind"],
       "properties": {
         "row_id": { "type": "string", "pattern": "^ti_[0-9a-z]{10}$" },
@@ -1307,7 +1307,8 @@
         "fixed": { "const": true },
         "note": { "type": "string", "minLength": 1, "maxLength": 1000 },
         "leg_m": { "type": "integer", "minimum": 0 },
-        "place": { "$ref": "#/$defs/tripPlace" }
+        "place": { "$ref": "#/$defs/tripPlace" },
+        "town": { "$ref": "#/$defs/tripTown" }
       },
       "allOf": [
         {
@@ -1322,10 +1323,21 @@
     },
     "tripRemovedRow": {
       "type": "object",
-      "description": "A day or stop removed in the last 30 days, with when; restore brings it back, a day with the stops removed with it. A removed row has no date and no leg_m: it has no place among the days.",
+      "description": "A day or stop removed in the last 30 days, with when; restore brings it back, a day with the stops removed with it. A removed row has no date, no leg_m and no town: it has no place among the days.",
       "required": ["removed_at"],
       "properties": { "removed_at": { "type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{6}Z$" } },
       "allOf": [{ "$ref": "#/$defs/tripRow" }]
+    },
+    "tripTown": {
+      "type": "object",
+      "description": "A day's town, as the engine's place search found the near in force for the day: present only once that near is found, on every day it is in force, placed stops or not; absent with no near in force, with a near not looked up yet or that the search found no town by, and on a day whose own near has no town, which never borrows the trip's. name is the geocoder's own words for what it found (its place or locality, then its administrative area, then its country, a part equal to the one before it, in any case, dropped), never the near's words. latitude and longitude are the found place's own point. radius_meters is the geocoder's own region about it, a scale only. No client geocodes.",
+      "required": ["name", "latitude", "longitude", "radius_meters"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1, "maxLength": 120, "x-max-bytes": 120 },
+        "latitude": { "type": "number", "minimum": -90, "maximum": 90 },
+        "longitude": { "type": "number", "minimum": -180, "maximum": 180 },
+        "radius_meters": { "type": "integer", "minimum": 1, "maximum": 20037509 }
+      }
     },
     "tripPlace": {
       "type": "object",

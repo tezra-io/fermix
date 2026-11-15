@@ -364,7 +364,7 @@ defmodule FermixCore.Trips.OpsTest do
     assert result.events == ["created", ~s(named Day 3 "Ribeira"; Day 3 near "Porto, Portugal")]
     assert trip(store, "Two cities").near == "Lisbon, Portugal"
     assert [nil, nil, "Porto, Portugal"] = store |> day_rows("Two cities") |> Enum.map(& &1.near)
-    wire = Jason.encode!(Wire.trip(trip(store, "Two cities"), rows(store, "Two cities")))
+    wire = Jason.encode!(Wire.trip(trip(store, "Two cities"), rows(store, "Two cities"), %{}))
     refute wire =~ "Porto"
     refute wire =~ "Lisbon"
 
@@ -639,7 +639,7 @@ defmodule FermixCore.Trips.OpsTest do
   # The `trip` push of a trip pulled with its removed rows, as a line.
   defp push_line(store) do
     trip = trip(store, "Varonne")
-    object = Wire.trip(trip, rows(store, "Varonne"))
+    object = Wire.trip(trip, rows(store, "Varonne"), %{})
     removed = Wire.removed(Map.fetch!(store.removed, trip.id))
 
     payload = %{
@@ -649,6 +649,44 @@ defmodule FermixCore.Trips.OpsTest do
     }
 
     byte_size(Jason.encode!(payload)) + 1
+  end
+
+  # M89: a day's town is found after the call that made the day, and the
+  # placer writes it with no guard, so the guard reserves the widest town on
+  # every day a pull can carry: a trip at the cap with a town on each day
+  # still stays inside it.
+  test "the guard reserves the widest town on every day, so towns found later stay inside it" do
+    edit = %{@edit | now: @stamped_now}
+    create = %{"op" => "create", "days" => 400, "near" => "Varonne"}
+    {_result, store} = call!(empty(), "Varonne", [create], edit)
+
+    # A stop of about 3.7 KB: each character three bytes on the wire.
+    heavy = fn i ->
+      %{
+        "op" => "add",
+        "text" => "#{i} " <> String.duplicate("€", 190),
+        "note" => String.duplicate("€", 1_000),
+        "day" => 2
+      }
+    end
+
+    store =
+      Enum.reduce_while(1..30, store, fn k, acc ->
+        case call(acc, "Varonne", Enum.map((k * 10 - 9)..(k * 10), heavy), edit) do
+          {:ok, _result, acc} -> {:cont, acc}
+          {:error, {:trip_too_large, "Varonne"}} -> {:halt, acc}
+        end
+      end)
+
+    widest = %{
+      name: String.duplicate("\"", 120),
+      latitude: -1.2345678901234567e-5,
+      longitude: -179.12345678901234,
+      radius_meters: 20_037_509
+    }
+
+    object = Wire.trip(trip(store, "Varonne"), rows(store, "Varonne"), %{"Varonne" => widest})
+    assert byte_size(Jason.encode!(Map.put(object, "removed", []))) <= Ops.max_wire_bytes()
   end
 
   # Follow-up to R2#3: only a call that can grow a trip is measured, so one at

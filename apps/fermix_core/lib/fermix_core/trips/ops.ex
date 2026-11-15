@@ -47,8 +47,10 @@ defmodule FermixCore.Trips.Ops do
   overwrite it (C19). The caps are 30 live trips, 1,000 live rows a trip, and
   a call that can grow a trip (`@growing_ops`) refused when its `trip` object
   (`Trips.Wire`), with the removed rows a pull carries while the store keeps
-  them, would pass 768 KiB (C10); a remove, move or restore is never refused,
-  so a trip at the cap can always shrink, and every push fits a line.
+  them, and the widest town reserved on every one of its days (M89, a town
+  being found after its call), would pass 768 KiB (C10); a remove, move or
+  restore is never refused, so a trip at the cap can always shrink, and
+  every push fits a line.
 
   Refusals are `{:error, {:op_failed, op_index, reason}}`, the op counted from
   1, and a trip no live trip answers to is `{:error, {:no_trip, ref, titles}}`;
@@ -985,9 +987,17 @@ defmodule FermixCore.Trips.Ops do
   defp fits(%{trip: trip, rows: rows} = state, ops) do
     cond do
       not Enum.any?(ops, &(&1.op in @growing_ops)) -> :ok
-      Wire.bytes(trip, rows, kept_removed(state)) <= @max_wire_bytes -> :ok
+      wire_bytes(trip, rows, kept_removed(state)) <= @max_wire_bytes -> :ok
       true -> {:error, {:trip_too_large, trip.title}}
     end
+  end
+
+  # The trip's wire form, with the widest town reserved on every day a pull
+  # carries, live or removed and kept (M89, `Trips.Wire`): a town lands
+  # later, with no guard of its own.
+  defp wire_bytes(trip, rows, removed) do
+    days = Enum.count(rows ++ removed, &(&1.kind == :day))
+    Wire.bytes(trip, rows, removed) + days * Wire.town_bytes()
   end
 
   # The removed rows a pull with them carries once the call is written: those

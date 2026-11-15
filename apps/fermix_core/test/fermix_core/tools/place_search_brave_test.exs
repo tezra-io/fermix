@@ -516,6 +516,28 @@ defmodule FermixCore.Tools.PlaceSearch.BraveTest do
     end
   end
 
+  # M89: Brave's place search says nowhere where it searched (the response is
+  # `results` alone), so it names no town and asks nothing for one.
+  describe "a town" do
+    test "is unsupported, and nothing is sent" do
+      test_pid = self()
+      test_id = unique_id()
+
+      Req.Test.stub(test_id, fn conn ->
+        send(test_pid, :unexpected_request)
+        json(conn, %{"results" => []})
+      end)
+
+      assert {:error, "unsupported: " <> _words, %{attempt: 0}} =
+               Brave.geocode("Varonne, Portugal",
+                 context: context(test_id, []),
+                 brave_api_key: @key
+               )
+
+      refute_received :unexpected_request
+    end
+  end
+
   defp search(request, handler, extra_options \\ []) do
     test_id = unique_id()
     Req.Test.stub(test_id, handler)

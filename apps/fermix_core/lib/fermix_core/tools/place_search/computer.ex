@@ -170,7 +170,25 @@ defmodule FermixCore.Tools.PlaceSearch.Computer do
   @spec search(Backend.request(), keyword()) ::
           {:ok, [Backend.place()], Backend.trace_metadata()}
           | {:error, String.t(), Backend.trace_metadata()}
-  def search(%{query: query} = request, opts) when is_binary(query) and is_list(opts) do
+  def search(%{query: query} = request, opts) when is_binary(query) and is_list(opts),
+    do: invoke("search", Places.args(request), opts, &Places.places(&1, request))
+
+  @doc """
+  The town a near's words name (M89), found on the chosen computer by its
+  `places` capability's `geocode` op, as a search is (the moduledoc): its
+  placemark made into the town by the code a geocode here uses
+  (`Places.town/1`). A Mac whose Fermix predates the op refuses it by name,
+  which is `computer_refused`.
+  """
+  @impl true
+  @spec geocode(String.t(), keyword()) ::
+          {:ok, Backend.town(), Backend.trace_metadata()}
+          | {:error, String.t(), Backend.trace_metadata()}
+  def geocode(words, opts) when is_binary(words) and is_list(opts),
+    do: invoke("geocode", %{"near" => String.trim(words)}, opts, &Places.town/1)
+
+  # One invocation of `op` on the chosen computer, its answer read by `read`.
+  defp invoke(op, args, opts, read) do
     terms = terms!(opts)
 
     with nil <- terms.stopped.(),
@@ -178,14 +196,8 @@ defmodule FermixCore.Tools.PlaceSearch.Computer do
          {:ok, computers} <- computers(opts),
          {:ok, computer} <- Choice.places_computer(computers) do
       computer
-      |> Computers.call(
-        Places,
-        "search",
-        Places.args(request),
-        context(opts),
-        call_opts(opts, deadline_ms)
-      )
-      |> answered(computer, request, terms)
+      |> Computers.call(Places, op, args, context(opts), call_opts(opts, deadline_ms))
+      |> answered(computer, read, terms)
     else
       :too_late -> unsent(@deadline)
       :none -> stopped(terms, :computer_away, unsent(@away))
@@ -228,17 +240,17 @@ defmodule FermixCore.Tools.PlaceSearch.Computer do
 
   # -- the answer ----------------------------------------------------------------
 
-  defp answered({:ok, %Outcome{result: result} = outcome}, computer, request, _terms) do
-    case Places.places(result, request) do
-      {:ok, places} ->
-        {:ok, places, Map.put(trace(outcome, nil), :searched_with, searched_with(computer))}
+  defp answered({:ok, %Outcome{result: result} = outcome}, computer, read, _terms) do
+    case read.(result) do
+      {:ok, found} ->
+        {:ok, found, Map.put(trace(outcome, nil), :searched_with, searched_with(computer))}
 
       {:error, reason} ->
         {:error, named_tag(reason, computer.name), trace(outcome, nil)}
     end
   end
 
-  defp answered({:error, %Outcome{} = outcome}, computer, _request, terms) do
+  defp answered({:error, %Outcome{} = outcome}, computer, _read, terms) do
     case failure(outcome, computer) do
       {:stop, why, reason} -> stopped(terms, why, {:error, reason, trace(outcome, code(outcome))})
       reason -> {:error, reason, trace(outcome, nil)}

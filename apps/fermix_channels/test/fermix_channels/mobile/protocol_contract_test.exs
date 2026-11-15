@@ -1629,10 +1629,15 @@ defmodule FermixChannels.Mobile.ProtocolContractTest do
     assert length(trip["rows"]) == TripOps.max_rows()
     assert byte_size(Jason.encode!(trip)) <= TripOps.max_wire_bytes()
 
-    {stored, rows} = store_trip(trip)
+    {stored, rows, towns} = store_trip(trip)
+    snapshot = %{trip: stored, rows: rows, towns: towns}
 
-    assert CompanionTrips.object_payload("main", %{trip: stored, rows: rows}, false, %{}) ==
+    assert CompanionTrips.object_payload("main", snapshot, false, %{}) ==
              Map.delete(event, "type")
+
+    # M89: the widest a trip goes, a town on every day, still one line.
+    days = Enum.filter(trip["rows"], &(&1["kind"] == "day"))
+    assert days != [] and Enum.all?(days, &Map.has_key?(&1, "town"))
 
     stops = Enum.filter(trip["rows"], &(&1["kind"] == "stop"))
     assert Enum.any?(stops, &Map.has_key?(&1, "leg_m"))
@@ -1668,14 +1673,30 @@ defmodule FermixChannels.Mobile.ProtocolContractTest do
       rev: trip["rev"],
       starts_on: trip["starts_on"] && Date.from_iso8601!(trip["starts_on"]),
       timezone: trip["timezone"],
-      removed_at: nil
+      removed_at: nil,
+      near: nil
     }
 
-    {stored, Enum.map(trip["rows"], &store_row/1)}
+    rows = trip["rows"]
+
+    towns =
+      for %{"kind" => "day", "town" => town} = row <- rows,
+          into: %{},
+          do: {row["row_id"], store_town(town)}
+
+    {stored, Enum.map(rows, &store_row/1), towns}
   end
 
+  # A day the store keeps its own near for, named here by its id, whose town
+  # the wire carries.
   defp store_row(%{"kind" => "day"} = row) do
-    %{id: row["row_id"], kind: :day, text: Map.get(row, "text", ""), timezone: row["timezone"]}
+    %{
+      id: row["row_id"],
+      kind: :day,
+      text: Map.get(row, "text", ""),
+      timezone: row["timezone"],
+      near: if(Map.has_key?(row, "town"), do: row["row_id"])
+    }
   end
 
   defp store_row(%{"kind" => "stop"} = row) do
@@ -1687,7 +1708,17 @@ defmodule FermixChannels.Mobile.ProtocolContractTest do
       duration: row["duration"],
       fixed: row["fixed"] == true,
       note: row["note"],
-      place: row["place"]
+      place: row["place"],
+      near: nil
+    }
+  end
+
+  defp store_town(town) do
+    %{
+      name: town["name"],
+      latitude: town["latitude"],
+      longitude: town["longitude"],
+      radius_meters: town["radius_meters"]
     }
   end
 

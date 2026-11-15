@@ -139,8 +139,10 @@ defmodule FermixCore.Memory.RepoTripWaitsTest do
       :ok = stop_supervised(ctx.repo)
 
       with_raw_conn(ctx.db_path, fn conn ->
+        # A store at 64 has neither table that came after it.
+        :ok = Sqlite3.execute(conn, "DROP TABLE trip_towns")
         :ok = Sqlite3.execute(conn, "DROP TABLE trip_waits")
-        :ok = Sqlite3.execute(conn, "DELETE FROM schema_migrations WHERE version = #{@version}")
+        :ok = Sqlite3.execute(conn, "DELETE FROM schema_migrations WHERE version >= #{@version}")
         assert [[64]] = query!(conn, "SELECT MAX(version) FROM schema_migrations")
       end)
 

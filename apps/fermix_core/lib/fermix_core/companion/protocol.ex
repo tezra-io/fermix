@@ -232,6 +232,11 @@ defmodule FermixCore.Companion.Protocol do
   @trip_time ~r/\A([01][0-9]|2[0-3]):[0-5][0-9]\z/
   @trip_minutes 1..1440
   @trip_place_strings ~w(address apple_place_id source_url canonical_url)
+  # A day's town (M89): the geocoder's own words, bounded as the store keeps
+  # them, the found place's point and its region's radius.
+  @trip_town_keys ~w(latitude longitude name radius_meters)
+  @max_town_name_bytes 120
+  @max_town_radius_meters 20_037_509
   # The owner's files (version 7): an attach id names a file in the inbox, so
   # it is a file name and never a path; a kind is a hint, as the phone's is;
   # a mime and a name are bounded as the media store keeps them.
@@ -1188,18 +1193,20 @@ defmodule FermixCore.Companion.Protocol do
   defp removed_trip_rows?(_trip), do: true
 
   # A day: its name when named, its date when the trip has a start, its own
-  # zone. A stop: its words and only what it has of the rest, `fixed` only when
-  # true, and its place as a stop keeps one. No null anywhere.
+  # zone, and its town once found, never on a removed day. A stop: its words
+  # and only what it has of the rest, `fixed` only when true, and its place as
+  # a stop keeps one, never a town. No null anywhere.
   defp trip_row?(%{"row_id" => id, "kind" => "day"} = row, removed?) when is_binary(id) do
     Regex.match?(@trip_row_id, id) and optional_nonempty(row, "text") == :ok and
       optional_pattern(row, "date", @trip_date) == :ok and
-      optional_nonempty(row, "timezone") == :ok and trip_row_removed?(row, removed?)
+      optional_nonempty(row, "timezone") == :ok and day_town?(row, removed?) and
+      trip_row_removed?(row, removed?)
   end
 
   defp trip_row?(%{"row_id" => id, "kind" => "stop", "text" => text} = row, removed?)
        when is_binary(id) and is_binary(text) do
     Regex.match?(@trip_row_id, id) and text != "" and stop_fields?(row) and
-      trip_row_removed?(row, removed?)
+      not Map.has_key?(row, "town") and trip_row_removed?(row, removed?)
   end
 
   defp trip_row?(_row, _removed?), do: false
@@ -1213,6 +1220,25 @@ defmodule FermixCore.Companion.Protocol do
 
   defp trip_row_removed?(row, removed?),
     do: not has_null?(row) and (not removed? or nonempty(row, "removed_at") == :ok)
+
+  defp day_town?(%{"town" => town}, false), do: trip_town?(town)
+  defp day_town?(row, _removed?), do: not Map.has_key?(row, "town")
+
+  defp trip_town?(%{"name" => name, "radius_meters" => radius} = town)
+       when is_binary(name) and is_integer(radius) do
+    Enum.sort(Map.keys(town)) == @trip_town_keys and name != "" and
+      byte_size(name) <= @max_town_name_bytes and radius in 1..@max_town_radius_meters and
+      town_point?(town)
+  end
+
+  defp trip_town?(_town), do: false
+
+  defp town_point?(%{"latitude" => lat, "longitude" => lon})
+       when is_number(lat) and lat >= -90 and lat <= 90 and is_number(lon) and lon >= -180 and
+              lon <= 180,
+       do: true
+
+  defp town_point?(_town), do: false
 
   # A stop's place as a trip keeps it (`Trips.Place`): its name and where it
   # is always, and only what it has of an address, Apple's id, its links and

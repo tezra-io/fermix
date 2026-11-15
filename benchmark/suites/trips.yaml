@@ -9,7 +9,8 @@
 # followed (D9); a trip to a named town is made with that town as its `near`, and a
 # day across a city's districts with the town, never the country (D11); "my
 # trip" is the one to come, never one that is over (D14); a landmark outside a
-# day's town centre is placed; and the shared form carries no note.
+# day's town centre is placed; a trip's town is found and said, for a free day
+# and for a town two states share (M89); and the shared form carries no note.
 #
 # WHAT A TURN CAN DRIVE. `fermix ask` is the owner's private chat (the CLI marks its
 # turns `chat_type: private`), so trip_read and trip_edit are on the surface, and
@@ -27,7 +28,8 @@
 # placing, only the rubrics read what the answer said about each place. The one
 # exception is landmark_outside_the_town: its places are real and public, since
 # it tests the place search's own region around a real town, and its floor is
-# that a lookup placed the landmark.
+# that a lookup placed the landmark, and so are each_day_shows_its_town's, which
+# test the town the place search finds for a near.
 # city_day_across_districts names common landmarks (a church, a museum) in invented
 # towns, so its lookups offer one found elsewhere, by its link, which its floor
 # reads: that case needs a place search ready.
@@ -61,7 +63,8 @@
 # every case ends with a turn in which the owner removes the trip it made. A case
 # that fails before that turn leaves its trip behind; a later run's create is then
 # refused as a title in use, so reseed the home when a run reports title_taken. Every
-# name, place and date is invented, but landmark_outside_the_town's places (PLACES).
+# name, place and date is invented, but landmark_outside_the_town's and
+# each_day_shows_its_town's places (PLACES).
 #
 # PRECONDITIONS. Trips need no switch and no consent gate, only the memory store,
 # which an eval home has. The outside-content cases may read the page with
@@ -404,6 +407,71 @@ scenarios:
              or not placed, and gives no stop an address, town or link the tool
              evidence does not show for it.
           3. The second reply confirms the trip was removed.
+
+  # M89: each day's town. A trip's near is found once, and the engine's own
+  # answer says what it was found as, so the floor is that line, never the
+  # reply's words. Apple Maps names towns and Brave does not, so the scenario
+  # runs where the eval home's place search is Apple Maps. Its places are real
+  # and public (PLACES); on the old code no answer says "found as", so both
+  # floors fail. In portland_named_by_country the model named Maine itself from
+  # the landmark in all of its first runs, so the found-as line it gates is
+  # Maine's and the correction its rubric allows is seldom reached.
+  - id: each_day_shows_its_town
+    title: "A trip's town is found and said, for a day with no stop and for a town two states share"
+    risk: isolated_mutation
+    platforms: [macos]
+    tags: [trips, places, near, towns]
+    cases:
+      - id: ghent_free_sunday
+        turns:
+          - query: >-
+              Plan a weekend in Ghent, Belgium for me, Saturday 9 and Sunday 10 October
+              2027: the Gravensteen at 10 on Saturday, and leave Sunday free.
+            expect:
+              tools_any: [trip_edit]
+              tool_inputs_match_all: ['\bop\W+=>\W+create\b', "2027-10-09"]
+              tool_outputs_match_all:
+                - 'Near \\"[^"\\]*\bGh?ent\b[^"\\]*\\" found as \\"[^"\\]*\bGh?ent\b[^"\\]*\bBelgium\\"'
+              no_tool_errors: false
+          - query: "Thanks, you can remove the Ghent trip now."
+            expect:
+              tools_any: [trip_edit]
+              tool_inputs_match_all: ['\bop\W+remove_trip\b']
+        expect:
+          max_cost_usd: 1.5
+        rubric: |
+          1. The first reply confirms a two-day trip on Saturday 9 and Sunday 10 October
+             2027 in Ghent, with the Gravensteen at 10:00 on Saturday and Sunday left free.
+          2. The first reply calls no stop placed that the tool evidence shows offered or
+             not placed, and gives no stop or day an address, town or link the tool
+             evidence does not show for it.
+          3. The second reply confirms the trip was removed.
+      - id: portland_named_by_country
+        turns:
+          - query: >-
+              Plan Saturday 16 October 2027 in Portland, United States for me: lunch on
+              Commercial Street, then Portland Head Light at 3 in the afternoon.
+            expect:
+              tools_any: [trip_edit]
+              tool_inputs_match_all: ['\bop\W+=>\W+create\b', "2027-10-16"]
+              tool_outputs_match_all:
+                - 'found as \\"[^"\\]*\bPortland\b[^"\\]*\b(?:OR|Oregon|ME|Maine)\b[^"\\]*\\"'
+              no_tool_errors: false
+          - query: "Thanks, you can remove the Portland trip now."
+            expect:
+              tools_any: [trip_edit]
+              tool_inputs_match_all: ['\bop\W+remove_trip\b']
+        expect:
+          max_cost_usd: 1.5
+        rubric: |
+          1. The first reply confirms a one-day trip on Saturday 16 October 2027 in
+             Portland with lunch on Commercial Street and Portland Head Light at 15:00.
+          2. The first reply either has the day in Portland, Maine (set so from the
+             start, or corrected in that same turn), or tells the owner which state the
+             tool evidence says the town was found in and asks which Portland is meant.
+          3. The first reply never presents Portland Head Light as placed, or as being,
+             in Oregon.
+          4. The second reply confirms the trip was removed.
 
   - id: week_and_one_day
     title: "A week from one sentence, then one day of it read on its own"

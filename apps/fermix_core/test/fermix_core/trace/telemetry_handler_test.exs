@@ -502,14 +502,18 @@ defmodule FermixCore.Trace.TelemetryHandlerTest do
         backend: "apple_maps",
         rate_limited: false,
         stop_reason: :deadline,
-        stop_code: nil
+        stop_code: nil,
+        towns: 1,
+        towns_found: 1,
+        towns_not_found: 0,
+        towns_stop_reason: nil
       },
       2_500
     )
 
     # M89 D13 B: the trip placer's run bookends route the same way.
     run = %{session_id: "trip_place:0123456789abcdef", trigger: :computer}
-    :ok = TripTelemetry.emit_place_start(run, %{waiting: 2, expired: 0})
+    :ok = TripTelemetry.emit_place_start(run, %{waiting: 2, expired: 0, unresolved_towns: 0})
 
     :ok =
       TripTelemetry.emit_place_complete(
@@ -526,7 +530,11 @@ defmodule FermixCore.Trace.TelemetryHandlerTest do
           superseded: 0,
           lookups: 2,
           trips: 1,
-          failed: 0
+          failed: 0,
+          towns: 0,
+          towns_found: 0,
+          towns_not_found: 0,
+          towns_stop_reason: nil
         },
         9_000
       )

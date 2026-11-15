@@ -1013,6 +1013,15 @@ most 40 a call, four at a time, 45 s; on Brave they queue for the home's one
 pacer, `PlaceSearch.Brave.Pacer`) and the links from the conversation's
 30-minute place index (`ReplyBlocks.place_by_url/3`); every lookup's record
 joins the conversation first, so an offered link resolves in a later call.
+Each day's town (`Trips.Towns`) is the near in force for it, the day's own
+else the trip's, geocoded alone by the same place search
+(`PlaceSearch.Backend.geocode/2`: the Apple Maps helper's geocode form here,
+the Mac's `places` `geocode` op on a server, none on Brave) after the stops'
+lookups and inside the same 45 s, at most 20 a call, and kept in the same
+transaction in `trip_towns` (migration 66), keyed by the near's exact words,
+so a changed near can never show an old town; `Trips.Wire` puts the found
+town on every day it is in force, and the trip placer finds the rest on its
+runs (`Registry.unresolved_towns/2`, `settle_towns/4`).
 `Trips.Note` is the rules line and the line naming the trips, only while one
 exists, and `ReplyBlocks` keeps the trips a turn touched for its reply's
 `trips` block (a kept kind: drawn once a connection pulls the trips index).
@@ -1028,8 +1037,9 @@ its boot, so a restart never swallows a turn.
 
 Architecture Invariant: one `trip_edit` call is one transaction: every op
 lands or none does, the trip's `rev` moves once, and a row's `n` is never
-reused. The place lookups run before it and never inside it, and a lookup is
-no tool call: one model call is one `[:fermix, :tool, :exec]` event.
+reused. The place lookups and the towns' geocodes run before it and never
+inside it, and neither is a tool call: one model call is one
+`[:fermix, :tool, :exec]` event.
 
 Architecture Invariant: the trips are the owner's, by the lists' rule
 (`Kept.Access`), and the tools are left out of the cached catalog. After a

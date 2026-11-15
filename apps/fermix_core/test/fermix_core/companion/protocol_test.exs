@@ -336,6 +336,47 @@ defmodule FermixCore.Companion.ProtocolTest do
                Protocol.encode_server_event("trip", Map.put(event, "made", %{}))
     end
 
+    # M89: a day's town, as the engine found it; never on a stop or a
+    # removed row, never with a null or a point out of range.
+    test "a day carries its town whole, and only a day" do
+      town = %{
+        "name" => "Varonne, Ostrel, Varonia",
+        "latitude" => 38.5418,
+        "longitude" => -27.2093,
+        "radius_meters" => 2_140
+      }
+
+      day = %{"row_id" => @day_id, "kind" => "day", "town" => town}
+      stop = %{"row_id" => @stop_id, "kind" => "stop", "text" => "Fish"}
+      trip = %{"trip_id" => @trip_id, "title" => "Varonne weekend", "rev" => 3, "rows" => [day]}
+      event = %{"profile_id" => "main", "trip" => trip}
+
+      assert {:ok, _line} = Protocol.encode_server_event("trip", event)
+
+      gone = Map.put(day, "removed_at", "2031-06-02T14:05:00.000000Z")
+
+      for bad <- [
+            %{trip | "rows" => [day, Map.put(stop, "town", town)]},
+            Map.put(trip, "removed", [gone]),
+            %{trip | "rows" => [%{day | "town" => Map.delete(town, "radius_meters")}]},
+            %{trip | "rows" => [%{day | "town" => %{town | "radius_meters" => 0}}]},
+            %{trip | "rows" => [%{day | "town" => %{town | "radius_meters" => 2.5}}]},
+            %{trip | "rows" => [%{day | "town" => %{town | "latitude" => 91}}]},
+            %{trip | "rows" => [%{day | "town" => %{town | "name" => ""}}]},
+            %{
+              trip
+              | "rows" => [%{day | "town" => %{town | "name" => String.duplicate("a", 121)}}]
+            },
+            %{trip | "rows" => [%{day | "town" => %{town | "name" => nil}}]},
+            %{trip | "rows" => [%{day | "town" => Map.put(town, "words", "Varonne")}]},
+            %{trip | "rows" => [%{day | "town" => "Varonne"}]}
+          ] do
+        assert {:error, {:invalid_field, "trip"}} =
+                 Protocol.encode_server_event("trip", %{event | "trip" => bad}),
+               inspect(bad)
+      end
+    end
+
     test "the index lists each trip by id with its days, stops, rev, dates and past" do
       entry = %{
         "trip_id" => @trip_id,

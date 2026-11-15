@@ -1,16 +1,18 @@
-// fermix-maps: one Apple Maps place search per process, for place_search's
-// `apple_maps` backend (M72 §14). The engine spawns it through the disclaim
-// shim, writes one request line, reads one JSON object, and kills its process
-// group at its own bound.
+// fermix-maps: one Apple Maps place search, or one geocode, per process, for
+// place_search's `apple_maps` backend (M72 §14) and a trip day's town (M89).
+// The engine spawns it through the disclaim shim, writes one request line,
+// reads one JSON object, and kills its process group at its own bound.
 //
 // Usage:  fermix-maps            reads one request, a JSON object on one line, from stdin
 //         fermix-maps --check    prints "fermix-maps: ok" and exits 0, touching no network
 //
-// Request, one of three anchors:
+// Request, a search with one of three anchors:
 //   {"query": "coffee", "anchor": {"kind": "query_only"}}
 //   {"query": "coffee", "anchor": {"kind": "location", "location": "SoHo, New York"}}
 //   {"query": "coffee", "anchor": {"kind": "coordinates", "latitude": 40.72,
 //                                  "longitude": -74.0, "radius_meters": 5000}}
+// or a geocode of a place's name alone:
+//   {"geocode": "Sintra, Lisbon, Portugal"}
 //
 // A named location is geocoded once with CLGeocoder and searched within its
 // placemark's region, never under 25 km in radius about the placemark's centre:
@@ -33,6 +35,14 @@
 // one but `name` present only when MapKit gave it: name, latitude, longitude,
 // identifier, url, phone, category, address. Normalizing them is the engine's
 // job. A search that finds nothing is {"places": []}.
+//
+// A geocode answers exit 0 and {"placemark": {...}}: the geocoder's first
+// placemark as it gave it, name, locality, administrative_area and country
+// each only when given, latitude and longitude always (the placemark's own
+// location, never its region's centre: for a large region the two lie far
+// apart), and radius_meters, its circular region's raw radius, only when it
+// has one. Whether that is a town, and its name, is the engine's to say. A
+// geocode that finds no place exits 65, as a search's location does.
 //
 // Failure: {"error": {"message": "..."}} with the framework's own words, never
 // the request's values, and a distinct exit status:
@@ -71,6 +81,11 @@ struct SearchRequest {
   let anchor: Anchor
 }
 
+enum Request {
+  case search(SearchRequest)
+  case geocode(String)
+}
+
 struct Place: Encodable {
   let name: String?
   let latitude: Double?
@@ -84,6 +99,26 @@ struct Place: Encodable {
 
 struct Reply: Encodable {
   let places: [Place]
+}
+
+struct Placemark: Encodable {
+  let name: String?
+  let locality: String?
+  let administrativeArea: String?
+  let country: String?
+  let latitude: Double
+  let longitude: Double
+  let radiusMeters: Double?
+
+  enum CodingKeys: String, CodingKey {
+    case name, locality, country, latitude, longitude
+    case administrativeArea = "administrative_area"
+    case radiusMeters = "radius_meters"
+  }
+}
+
+struct GeocodeReply: Encodable {
+  let placemark: Placemark
 }
 
 struct ErrorReply: Encodable {
@@ -119,9 +154,14 @@ func succeed(_ places: [Place]) -> Never {
   exit(0)
 }
 
+func succeed(_ placemark: Placemark) -> Never {
+  emit(GeocodeReply(placemark: placemark))
+  exit(0)
+}
+
 // MARK: - The request
 
-func readRequest() -> SearchRequest {
+func readRequest() -> Request {
   guard let line = readLine(strippingNewline: true) else {
     fail(.usage, "no request on stdin")
   }
@@ -133,17 +173,20 @@ func readRequest() -> SearchRequest {
   else {
     fail(.usage, "the request is not one JSON object")
   }
-  guard Set(fields.keys) == ["query", "anchor"] else {
-    fail(.usage, "the request takes exactly query and anchor")
+  if Set(fields.keys) == ["geocode"] {
+    return .geocode(query(fields["geocode"]))
   }
-  return SearchRequest(query: query(fields["query"]), anchor: anchor(fields["anchor"]))
+  guard Set(fields.keys) == ["query", "anchor"] else {
+    fail(.usage, "the request takes exactly query and anchor, or geocode alone")
+  }
+  return .search(SearchRequest(query: query(fields["query"]), anchor: anchor(fields["anchor"])))
 }
 
 func query(_ value: Any?) -> String {
   guard let text = value as? String,
     !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
   else {
-    fail(.usage, "query must be a non-blank string")
+    fail(.usage, "query, location and geocode must each be a non-blank string")
   }
   return text
 }
@@ -229,6 +272,31 @@ func geocode(_ location: String, then: @escaping (MKCoordinateRegion) -> Void) {
     } else {
       then(region(position.coordinate, minLocationRadiusMeters))
     }
+  }
+}
+
+// A geocode alone reports the first placemark's own fields: its location, never
+// its region's centre, and its region's radius as it came, a scale only.
+func geocodeOnly(_ location: String) {
+  CLGeocoder().geocodeAddressString(location) { placemarks, error in
+    if let error, (placemarks ?? []).isEmpty { geocodeFailed(error) }
+
+    guard let placemark = placemarks?.first, let position = placemark.location,
+      CLLocationCoordinate2DIsValid(position.coordinate)
+    else {
+      fail(.notFound, "the geocoder found no place for the location")
+    }
+
+    succeed(
+      Placemark(
+        name: placemark.name,
+        locality: placemark.locality,
+        administrativeArea: placemark.administrativeArea,
+        country: placemark.country,
+        latitude: position.coordinate.latitude,
+        longitude: position.coordinate.longitude,
+        radiusMeters: (placemark.region as? CLCircularRegion)?.radius
+      ))
   }
 }
 
@@ -333,5 +401,12 @@ DispatchQueue.main.asyncAfter(deadline: .now() + deadlineSeconds) {
   fail(.timedOut, "Apple Maps did not answer within \(Int(deadlineSeconds)) seconds")
 }
 
-DispatchQueue.main.async { search(request) }
+DispatchQueue.main.async {
+  switch request {
+  case .search(let searchRequest):
+    search(searchRequest)
+  case .geocode(let location):
+    geocodeOnly(location)
+  }
+}
 dispatchMain()

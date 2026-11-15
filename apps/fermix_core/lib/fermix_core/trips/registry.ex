@@ -39,14 +39,22 @@ defmodule FermixCore.Trips.Registry do
       (`Trips.Placer.waits_saved/0`); the placer takes the waits and writes
       what it found through this module too (`take_waits/3`,
       `waiting_trip/2`, `place_waiting/4`), one transaction a trip, told to
-      the devices as any change is, said in no chat.
+      the devices as any change is, said in no chat;
+    * **the towns** (M89) — the town each near in force names, which the
+      owner's devices put on each day (`Trips.Towns`, `Trips.Wire`): a call
+      that gives a place or sets a near, or that changes a trip whose near in
+      force has no town yet, asks every such near of its trip after its
+      lookups, within the same 45 s, and keeps what was found in the same
+      transaction; its answer says what each was found as. The placer asks
+      the rest (`unresolved_towns/2`, `settle_towns/4`).
 
   Every read and edit emits its event (`Trips.Telemetry`).
 
   Seams (`opts`): `:repo` (the Repo server; nil when the turn has none),
   `:now`, `:personalization` (the home's zone, as `FermixCore.Clock` reads
   it), `:notifier`, `:reply_blocks` (the holder a lookup's records join),
-  `:placer` and `:day_turn` (0-arity, in place of telling the trip placer or
+  `:placer`, `:town_placer` and `:day_turn` (0-arity, in place of telling the
+  trip placer of a stop that waits or of a town left for later, or
   the day-turn process) and, for a device, `:made_via`. The place search is
   the one in force for the turn (`Lookup.backend/1`; a context's
   `:place_lookup` stands in for it).
@@ -68,6 +76,7 @@ defmodule FermixCore.Trips.Registry do
   alias FermixCore.Trips.Render
   alias FermixCore.Trips.Shape
   alias FermixCore.Trips.Telemetry
+  alias FermixCore.Trips.Towns
   alias FermixCore.Trips.Waiting
 
   # An edit that gave no place to look up.
@@ -80,8 +89,15 @@ defmodule FermixCore.Trips.Registry do
     backend: nil,
     rate_limited: false,
     stop_reason: nil,
-    stop_code: nil
+    stop_code: nil,
+    towns: 0,
+    towns_found: 0,
+    towns_not_found: 0,
+    towns_stop_reason: nil
   }
+  # A call that looked nothing up: no outcomes, no placers, no waits, no towns.
+  @no_towns %{towns: [], sent: [], stop_reason: nil, stop_code: nil}
+  @no_placings {[], %{}, [], @no_towns}
   # A read's `day`: a day's position, or a run of them (C13).
   @run ~r/\A([0-9]{1,4})(?:\s*[-–]\s*([0-9]{1,4}))?\z/u
 
@@ -232,8 +248,8 @@ defmodule FermixCore.Trips.Registry do
   over it to learn each stop's day (`Trips.Placing`), the lookups run
   (`Trips.Lookup`), and their records join the conversation
   (`ReplyBlocks.put_places/3`) before the store is asked. The answer is the
-  trip's line, what each place came to and what placed them
-  (`Trips.Render.answer/3`), and
+  trip's line, what each place came to and what placed them, and what each
+  near asked was found as (`Trips.Render.answer/4`), and
   `touched` names the trip with the live rows the call added or changed.
   """
   @spec edit(map(), map(), keyword()) :: {:ok, answer()} | {:error, term()}
@@ -263,58 +279,113 @@ defmodule FermixCore.Trips.Registry do
 
   # The ops that gave a place by words or a link, read before any lookup
   # turns one that placed nothing into keeping the place it had: each ends
-  # its stop's wait in the store (`Trips.Waiting.given/1`).
+  # its stop's wait in the store (`Trips.Waiting.given/1`). The call's place
+  # search is resolved once: its lookups search it, its towns are geocoded
+  # on it, and its event names it.
   defp edit_call(call, context, opts) do
     edit = context |> edit_context(opts) |> Map.put(:places_given, Waiting.given(call))
+    search = call_backend(context)
 
-    if Placing.needed?(call) do
-      case look_up(call, edit, context, opts) do
-        {:ok, placed, placings, looked} -> {commit(placed, edit, context, opts, placings), looked}
-        {:error, reason, looked} -> {{:error, reason}, looked}
-      end
-    else
-      {commit(call, edit, context, opts, {[], %{}, []}), @no_lookups}
+    case lookup_path(call, edit, search, {context, opts}) do
+      {:ok, nil} -> {commit(call, edit, {context, opts}, @no_placings), @no_lookups}
+      {:ok, planned} -> looked_up(call, planned, edit, search, {context, opts})
+      {:error, reason} -> {{:error, reason}, @no_lookups}
     end
   end
 
-  # The trip as it stands and the call run over it, which may refuse it before
-  # any lookup is spent; then the lookups, whose records join the conversation
-  # before the store is asked, and the stops they leave waiting.
-  defp look_up(call, edit, context, opts) do
+  # A call looks up when it gives a place, or when the home's place search
+  # names towns and the call, run over its trip as it stands (which refuses
+  # it before anything is sent), changes the trip and leaves a near in force
+  # with no town yet (`Trips.Towns`). Otherwise its trip is not read for it:
+  # a home on Brave never reads a trip for a town.
+  defp lookup_path(call, edit, {_backend, geocoder, _name}, ctx) do
+    places? = Placing.needed?(call)
+    towns? = match?({:ok, _geocode}, geocoder) and towns_possible?(call)
+
+    if places? or towns?,
+      do: planned(call, edit, {places?, towns?}, ctx),
+      else: {:ok, nil}
+  end
+
+  # A trip a call makes has no near but the ones its own ops set.
+  defp towns_possible?(%{ops: [%{op: :create} | _rest]} = call), do: Towns.set_by(call) != []
+  defp towns_possible?(_call), do: true
+
+  defp planned(call, edit, {places?, towns?}, {context, opts}) do
     with {:ok, loaded} <- load(call, context, opts),
-         {:ok, requests, anchors} <- Placing.requests(loaded, call, edit),
-         {:ok, found} <- resolve(requests, anchors, context, opts) do
-      :ok = join_conversation(found.records, context, opts)
-      {placed_call, outcomes} = Placing.placed_call(call, found.outcomes)
-      waits = Waiting.asked(requests, found.outcomes)
-      {:ok, placed_call, {outcomes, found.placed_by, waits}, looked(call, outcomes, found)}
-    else
-      {:error, reason} -> {:error, reason, @no_lookups}
+         {:ok, requests, anchors, changed?} <- Placing.requests(loaded, call, edit) do
+      towns = asked_towns(towns?, anchors, loaded, call)
+      plan = %{requests: requests, anchors: anchors, towns: towns}
+      if places? or (changed? and elem(towns, 0) != []), do: {:ok, plan}, else: {:ok, nil}
+    end
+  end
+
+  defp asked_towns(false, _anchors, _loaded, _call), do: {[], []}
+
+  defp asked_towns(true, anchors, loaded, call),
+    do: Towns.asked(anchors, loaded.towns, Towns.set_by(call))
+
+  defp looked_up(call, planned, edit, search, ctx) do
+    case look_up(call, planned, search, ctx) do
+      {:ok, placed, placings, looked} -> {commit(placed, edit, ctx, placings), looked}
+      {:error, reason, looked} -> {{:error, reason}, looked}
+    end
+  end
+
+  # The lookups, whose records join the conversation before the store is
+  # asked, the stops they leave waiting, and the towns.
+  defp look_up(call, %{requests: requests} = planned, search, {context, opts}) do
+    case resolve(planned, search, {context, opts}) do
+      {:ok, found} ->
+        :ok = join_conversation(found.records, context, opts)
+        {placed_call, outcomes} = Placing.placed_call(call, found.outcomes)
+        waits = Waiting.asked(requests, found.outcomes)
+        placings = {outcomes, found.placed_by, waits, found.towns}
+        {:ok, placed_call, placings, looked(call, outcomes, found)}
+
+      {:error, reason} ->
+        {:error, reason, @no_lookups}
     end
   end
 
   defp load(%{ops: [%{op: :create} | _rest]}, context, opts) do
-    with {:ok, trips} <- store(context, opts, :index), do: {:ok, %{trips: trips, rows: []}}
+    with {:ok, trips} <- store(context, opts, :index),
+         do: {:ok, %{trips: trips, rows: [], towns: %{}}}
   end
 
   defp load(%{trip: ref}, context, opts) do
-    with {:ok, %{trip: trip, rows: rows}} <- store(context, opts, {:read_trip, ref}),
-         do: {:ok, %{trips: [trip], rows: rows}}
+    with {:ok, %{trip: trip, rows: rows, towns: towns}} <- store(context, opts, {:read_trip, ref}),
+         do: {:ok, %{trips: [trip], rows: rows, towns: towns}}
   end
 
-  # The call's place search is resolved once: its lookups search it, and its
-  # event names it.
-  defp resolve(requests, anchors, context, opts) do
-    {backend, name} = call_backend(context)
+  # The towns are geocoded in the time the lookups leave of the call's one
+  # deadline; the nears past the cap are left for later, and said so.
+  defp resolve(%{requests: requests, anchors: anchors, towns: {asked, past}}, search, ctx) do
+    {backend, geocoder, name} = search
+    {context, opts} = ctx
+    now_ms = Keyword.get(opts, :now_ms, fn -> System.monotonic_time(:millisecond) end)
+    deadline = now_ms.() + Lookup.deadline_ms()
 
     lookup_opts = [
       backend: backend,
       conversation_key: Map.fetch!(context, :conversation_key),
-      reply_blocks: reply_blocks(opts)
+      reply_blocks: reply_blocks(opts),
+      deadline_ms: Lookup.deadline_ms(),
+      now_ms: now_ms
     ]
 
+    with {:ok, found} <- lookups(requests, anchors, lookup_opts) do
+      town_opts = [deadline_ms: max(deadline - now_ms.(), 0), stopped: found.stop_reason]
+      towns = Towns.resolve(asked, geocoder, town_opts ++ [now_ms: now_ms])
+      capped = Enum.map(past, &{&1, {:unresolved, :capped}})
+      found = Map.put(found, :towns, %{towns | towns: towns.towns ++ capped})
+      {:ok, Map.put(found, :backend, name)}
+    end
+  end
+
+  defp lookups(requests, anchors, lookup_opts) do
     case Lookup.resolve(requests, anchors, lookup_opts) do
-      {:ok, found} -> {:ok, Map.put(found, :backend, name)}
+      {:ok, found} -> {:ok, found}
       {:error, {:unknown_place_link, index}} -> {:error, {:op_failed, index, :unknown_place_link}}
       {:error, :too_many_lookups} -> {:error, :too_many_lookups}
     end
@@ -329,12 +400,17 @@ defmodule FermixCore.Trips.Registry do
   defp reply_blocks(opts), do: Keyword.get(opts, :reply_blocks, ReplyBlocks)
 
   # `placings`: what each place came to, what searched each one a lookup
-  # placed, and the stops left waiting, which the store keeps with the call.
-  defp commit(call, edit, context, opts, {outcomes, placed_by, waits}) do
-    with {:ok, applied} <- store(context, opts, {:edit, call, Map.put(edit, :waits, waits)}) do
+  # placed, the stops left waiting and the towns found, which the store keeps
+  # with the call.
+  defp commit(call, edit, {context, opts}, {outcomes, placed_by, waits, towns}) do
+    kept = Map.merge(edit, %{waits: waits, towns: Towns.kept(towns.towns)})
+
+    with {:ok, applied} <- store(context, opts, {:edit, call, kept}) do
       :ok = announce(context, applied, %{}, opts)
       :ok = tell_placer(waits, opts)
-      {:ok, edit_answer(applied, Placing.placements(call, applied, outcomes), placed_by)}
+      :ok = tell_town_placer(towns.towns, opts)
+      placements = Placing.placements(call, applied, outcomes)
+      {:ok, edit_answer(applied, placements, placed_by, towns.towns)}
     end
   end
 
@@ -343,10 +419,18 @@ defmodule FermixCore.Trips.Registry do
   defp tell_placer([], _opts), do: :ok
   defp tell_placer(_waits, opts), do: Keyword.get(opts, :placer, &Placer.waits_saved/0).()
 
-  defp edit_answer(applied, placements, placed_by) do
+  # A town left for a reason that heals by waiting, or past the cap, has the
+  # placer look again later (`Trips.Placer.towns_unresolved/0`, a cast).
+  defp tell_town_placer(towns, opts) do
+    if Towns.later?(towns),
+      do: Keyword.get(opts, :town_placer, &Placer.towns_unresolved/0).(),
+      else: :ok
+  end
+
+  defp edit_answer(applied, placements, placed_by, towns) do
     trip = applied.trip
     touched = [%{trip_id: trip.id, title: trip.title, rows: applied.touched_rows}]
-    %{text: Render.answer(applied, placements, placed_by), touched: touched}
+    %{text: Render.answer(applied, placements, placed_by, towns), touched: touched}
   end
 
   # What the call's lookups came to, for its event: each place given counted
@@ -362,9 +446,11 @@ defmodule FermixCore.Trips.Registry do
       offered: Map.get(counts, :offered, 0),
       not_found: Map.get(counts, :not_found, 0),
       not_looked_up: Map.get(counts, :not_looked_up, 0),
-      backend: if(Placing.words?(call), do: found.backend),
-      rate_limited: Enum.any?(outcomes, &match?({_index, {:none, :rate_limited}}, &1))
+      backend: if(Placing.words?(call) or found.towns.sent != [], do: found.backend),
+      rate_limited: Enum.any?(outcomes, &match?({_index, {:none, :rate_limited}}, &1)),
+      towns_stop_reason: found.towns.stop_reason
     }
+    |> Map.merge(Towns.counts(found.towns))
   end
 
   defp bucket({:placed, _place}), do: :placed
@@ -374,13 +460,21 @@ defmodule FermixCore.Trips.Registry do
   defp bucket({:none, {:not_near, _near}}), do: :not_found
   defp bucket({:none, _why}), do: :not_looked_up
 
-  # The place search the call's words go to, and its name; none for a test's.
-  defp call_backend(%{place_lookup: _search} = context), do: {Lookup.backend(context), nil}
+  # The place search the call's words and nears go to, and its name; none
+  # for a test's, whose `:town_lookup` (the words alone) stands in for its
+  # geocode.
+  defp call_backend(%{place_lookup: _search} = context),
+    do: {Lookup.backend(context), town_lookup(context), nil}
 
   defp call_backend(context) do
     resolution = PlaceSearch.resolution(context)
-    {Lookup.backend(context, resolution), Atom.to_string(resolution.name)}
+
+    {Lookup.backend(context, resolution), PlaceSearch.geocoder(context, resolution),
+     Atom.to_string(resolution.name)}
   end
+
+  defp town_lookup(%{town_lookup: geocode}) when is_function(geocode, 1), do: {:ok, geocode}
+  defp town_lookup(_context), do: {:error, "no town lookup stands in here"}
 
   defp plural(1, noun), do: "1 #{noun}"
   defp plural(count, noun), do: "#{count} #{noun}s"
@@ -562,6 +656,45 @@ defmodule FermixCore.Trips.Registry do
   end
 
   @doc """
+  The nears in force on live trips, of every owner, that have no town yet,
+  at most `limit`, the trip changed last first: what the trip placer asks
+  (`Trips.Towns`), each `%{trip_id:, owner_id:, agent_id:, words:}`.
+  """
+  @spec unresolved_towns(pos_integer(), keyword()) :: {:ok, [map()]} | {:error, term()}
+  def unresolved_towns(limit, opts \\ []) when is_integer(limit) and limit > 0 and is_list(opts),
+    do: store(%{}, opts, {:unresolved_towns, limit})
+
+  @doc """
+  What the placer's geocodes found for one trip's nears (`towns`, by the
+  words, `Trips.Towns.kept/1`'s), in one transaction: those still in force
+  are kept, and when a town is new the trip's rev moves once and its devices
+  are told (`Kept.Notify`), said in no chat. `looked` names the backend and
+  how many of the trip's geocodes reached the place search (`towns`), for
+  the trip's edit event, emitted under `opts[:session_id]`, the placer's run.
+  """
+  @spec settle_towns(map(), %{optional(String.t()) => Towns.kept()}, map(), keyword()) ::
+          {:ok, %{changed?: boolean()}} | {:error, term()}
+  def settle_towns(
+        %{owner_id: owner_id, agent_id: agent_id, trip_id: trip_id},
+        towns,
+        %{backend: backend, towns: sent},
+        opts
+      )
+      when is_binary(trip_id) and is_map(towns) and is_integer(sent) and sent >= 0 and
+             is_list(opts) do
+    start = System.monotonic_time(:microsecond)
+    context = %{memory_owner_id: owner_id, memory_agent_id: agent_id}
+
+    result =
+      with {:ok, done} <- store(context, opts, {:settle_towns, trip_id, towns, now(opts)}),
+           :ok <- announce(context, done, %{}, opts),
+           do: {:ok, %{changed?: done.changed?}}
+
+    emit_settled(Keyword.get(opts, :session_id), {result, towns, {backend, sent}}, start)
+    result
+  end
+
+  @doc """
   The live trips, for the per-turn line naming them: each with its title,
   start, day count and `past`, in picker order.
   """
@@ -619,6 +752,11 @@ defmodule FermixCore.Trips.Registry do
 
   defp request(context, {:place_waiting, trip_id, results, edit}),
     do: {:place_waiting, owner_id(context), agent_id(context), trip_id, results, edit}
+
+  defp request(_context, {:unresolved_towns, limit}), do: {:unresolved_towns, limit}
+
+  defp request(context, {:settle_towns, trip_id, towns, now}),
+    do: {:settle_towns, owner_id(context), agent_id(context), trip_id, towns, now}
 
   defp repo_opts(repo, opts), do: [server: repo] ++ Keyword.take(opts, [:on_timeout, :timeout])
 
@@ -685,23 +823,40 @@ defmodule FermixCore.Trips.Registry do
 
     counts = Enum.frequencies_by(found.outcomes, fn {_ref, outcome} -> bucket(outcome) end)
 
-    edit = %{
-      trips: trips,
-      ops: ops,
-      made_via: "trip_place",
-      lookups: found.lookups,
-      placed: Map.get(counts, :placed, 0),
-      offered: Map.get(counts, :offered, 0),
-      not_found: Map.get(counts, :not_found, 0),
-      not_looked_up: Map.get(counts, :not_looked_up, 0),
-      backend: backend,
-      rate_limited: Enum.any?(found.outcomes, &match?({_ref, {:none, :rate_limited}}, &1)),
-      stop_reason: found.stop_reason,
-      stop_code: found.stop_code
-    }
+    edit =
+      Map.merge(@no_lookups, %{
+        trips: trips,
+        ops: ops,
+        made_via: "trip_place",
+        lookups: found.lookups,
+        placed: Map.get(counts, :placed, 0),
+        offered: Map.get(counts, :offered, 0),
+        not_found: Map.get(counts, :not_found, 0),
+        not_looked_up: Map.get(counts, :not_looked_up, 0),
+        backend: backend,
+        rate_limited: Enum.any?(found.outcomes, &match?({_ref, {:none, :rate_limited}}, &1)),
+        stop_reason: found.stop_reason,
+        stop_code: found.stop_code
+      })
 
     context = if session_id, do: %{session_id: session_id}, else: %{}
     Telemetry.emit_edit(context, Map.merge(edit, placed_fields(result)), elapsed(start))
+  end
+
+  # The placer's towns for one trip, under its run: the towns it kept, and
+  # whether the trip's rev moved.
+  defp emit_settled(session_id, {result, towns, {backend, sent}}, start) do
+    trips = if match?({:ok, %{changed?: true}}, result), do: 1, else: 0
+    found = Enum.count(towns, &match?({_words, {:found, _town}}, &1))
+
+    edit =
+      @no_lookups
+      |> Map.merge(%{trips: trips, ops: 0, made_via: "trip_place", backend: backend})
+      |> Map.merge(%{towns: sent, towns_found: found})
+      |> Map.put(:towns_not_found, map_size(towns) - found)
+
+    context = if session_id, do: %{session_id: session_id}, else: %{}
+    Telemetry.emit_edit(context, Map.merge(edit, outcome_fields(result)), elapsed(start))
   end
 
   # A write the store refused names its reason as any refusal does.

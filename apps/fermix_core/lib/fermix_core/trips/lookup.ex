@@ -694,17 +694,27 @@ defmodule FermixCore.Trips.Lookup do
 
   defp outcome({:error, reason, _trace} = answer, _near_answer, _words, _mode)
        when is_binary(reason),
-       do: {{:none, failure(reason)}, answer}
+       do: {{:none, why_failed(reason)}, answer}
 
-  defp failure("rate_limited" <> _rest), do: :rate_limited
-  defp failure("plan_excludes_place_search:" <> _rest), do: :plan_excludes_place_search
-  defp failure("computer_away:" <> _rest), do: :computer_away
-  defp failure("computer_off:" <> _rest), do: :computer_off
-  defp failure("computer_refused:" <> _rest), do: :computer_refused
-  defp failure("computer_timed_out:" <> _rest), do: :computer_timed_out
-  defp failure("computer_busy:" <> _rest), do: :computer_busy
-  defp failure("deadline:" <> _rest), do: :deadline
-  defp failure(reason), do: {:failed, reason}
+  @doc """
+  Why a search the place search answered with `reason` placed nothing: the
+  call's stop kinds, a busy Mac, the deadline, else `{:failed, reason}`. A
+  trip day's town reads its geocode's failures the same way (`Trips.Towns`).
+  """
+  @spec why_failed(String.t()) :: why()
+  def why_failed("rate_limited" <> _rest), do: :rate_limited
+  def why_failed("plan_excludes_place_search:" <> _rest), do: :plan_excludes_place_search
+  def why_failed("computer_away:" <> _rest), do: :computer_away
+  def why_failed("computer_off:" <> _rest), do: :computer_off
+  def why_failed("computer_refused:" <> _rest), do: :computer_refused
+  def why_failed("computer_timed_out:" <> _rest), do: :computer_timed_out
+  def why_failed("computer_busy:" <> _rest), do: :computer_busy
+  def why_failed("deadline:" <> _rest), do: :deadline
+  def why_failed(reason) when is_binary(reason), do: {:failed, reason}
+
+  @doc "What stops the searches of a call that have not started (the moduledoc's Bounds)."
+  @spec stop_reasons() :: [stop_reason()]
+  def stop_reasons, do: @stops
 
   defp choose(located, words, :anchored) do
     case Enum.find(located, &words_match?(words, &1.name)) do

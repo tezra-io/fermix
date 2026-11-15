@@ -100,6 +100,7 @@ defmodule FermixCore.Memory.Repo do
   @trips_migration_version 63
   @trip_near_migration_version 64
   @trip_waits_migration_version 65
+  @trip_towns_migration_version 66
   @sqlite_open_intent :readwritecreate
 
   # The home's requests about notes from every machine (M97 §8), all served by
@@ -5134,8 +5135,29 @@ defmodule FermixCore.Memory.Repo do
          :ok <- apply_checklist_edit_kinds_migration(conn, versions),
          :ok <- apply_trips_migration(conn, versions),
          :ok <- apply_trip_near_migration(conn, versions),
-         :ok <- apply_trip_waits_migration(conn, versions) do
+         :ok <- apply_trip_waits_migration(conn, versions),
+         :ok <- apply_trip_towns_migration(conn, versions) do
       :ok
+    end
+  end
+
+  # M89: the town each trip near in force names, by its words, beside its
+  # trip in a table of their own, with the version in one transaction, after
+  # 65. Nothing is rewritten: a near from before has no town until the next
+  # call or placer run asks it.
+  defp apply_trip_towns_migration(conn, versions) do
+    if Enum.member?(versions, @trip_towns_migration_version) do
+      :ok
+    else
+      Sqlite3.execute(
+        conn,
+        """
+        BEGIN;
+        #{TripsSql.towns_schema_sql()}
+        INSERT INTO schema_migrations(version) VALUES (#{@trip_towns_migration_version});
+        COMMIT;
+        """
+      )
     end
   end
 

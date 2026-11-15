@@ -912,7 +912,8 @@ defmodule FermixOpik.Aggregation do
           trace_metadata:
             compact(%{
               trigger: stringify(Map.get(meta, :trigger)),
-              waiting_at_start: Map.get(meas, :waiting)
+              waiting_at_start: Map.get(meas, :waiting),
+              unresolved_towns: Map.get(meas, :unresolved_towns)
             }),
           at: at.at,
           mono: at.mono
@@ -945,6 +946,10 @@ defmodule FermixOpik.Aggregation do
           lookups: Map.get(meas, :lookups),
           trips: Map.get(meas, :trips),
           failed: Map.get(meas, :failed),
+          towns: Map.get(meas, :towns),
+          towns_found: Map.get(meas, :towns_found),
+          towns_not_found: Map.get(meas, :towns_not_found),
+          towns_stop_reason: stringify(Map.get(meta, :towns_stop_reason)),
           duration_us: Map.get(meas, :duration_us)
         })
     })

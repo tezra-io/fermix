@@ -378,6 +378,51 @@ defmodule FermixCore.Tools.PlaceSearch do
     end
   end
 
+  @doc """
+  The geocode a trip's towns run (M89, `Trips.Towns`), as `searcher/2` is
+  the search its lookups run: on the call's `resolution`, its readiness
+  checked as a call's is, each geocode given a near's words and `send`, how
+  it may send (`:send_within_ms`, `:stopped`, `:stop`), with no tool event
+  of its own. Its trace carries the backend's name and, on success,
+  `searched_with`. It is the one rule for whether a home names towns
+  (`Backend.geocodes?/1`): on Brave, which names none, there is no geocode
+  (`{:error, "unsupported: …"}`), so neither a call nor the trip placer asks
+  for a town there.
+  """
+  @spec geocoder(map(), Backend.resolution()) ::
+          {:ok,
+           (String.t(), keyword() ->
+              {:ok, Backend.town(), Backend.trace_metadata()}
+              | {:error, String.t(), Backend.trace_metadata()})}
+          | {:error, String.t()}
+  def geocoder(context, %{name: _name, module: _module} = resolution) when is_map(context) do
+    opts = backend_opts(resolution, context)
+
+    with :ok <- names_towns(resolution),
+         :ok <- Backend.ready(resolution, opts),
+         do: {:ok, fn words, send -> geocode(words, resolution, opts, send) end}
+  end
+
+  defp names_towns(resolution) do
+    if Backend.geocodes?(resolution),
+      do: :ok,
+      else: {:error, "unsupported: this home's place search names no town"}
+  end
+
+  defp geocode(words, resolution, opts, send) when is_binary(words) and is_list(send) do
+    send = Keyword.validate!(send, [:send_within_ms, :stopped, :stop])
+    backend = %{backend: Atom.to_string(resolution.name)}
+
+    case resolution.module.geocode(words, send ++ opts) do
+      {:ok, town, trace} ->
+        searched = Map.get_lazy(trace, :searched_with, fn -> words(resolution.name) end)
+        {:ok, town, trace |> Map.merge(backend) |> Map.put(:searched_with, searched)}
+
+      {:error, reason, trace} ->
+        {:error, reason, Map.merge(trace, backend)}
+    end
+  end
+
   # The owner's words for a backend that searched here; a Mac of the home
   # names itself (`PlaceSearch.Computer`).
   defp words(:apple_maps), do: "Apple Maps"

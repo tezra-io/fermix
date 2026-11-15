@@ -17,6 +17,7 @@ defmodule FermixCore.Trips.PlacerTest do
   alias FermixCore.Trips.Placer.Run
   alias FermixCore.Trips.Registry
   alias FermixCore.Trips.Telemetry
+  alias FermixCore.Trips.Waiting
   alias FermixCore.Trips.Wire
   alias FermixTestSupport.TelemetryCapture
 
@@ -168,7 +169,14 @@ defmodule FermixCore.Trips.PlacerTest do
       end
     end
 
-    fn _context -> %{name: "computer", search: {:ok, search}, ready: ready} end
+    fn _context ->
+      %{
+        name: "computer",
+        search: {:ok, search},
+        geocode: {:error, "no town lookup stands in here"},
+        ready: ready
+      }
+    end
   end
 
   defp run_opts(ctx, backend, more \\ []) do
@@ -478,7 +486,7 @@ defmodule FermixCore.Trips.PlacerTest do
       assert text =~ ~S|"Quay" (place waiting)|
 
       # A device's wire says nothing of it.
-      refute Jason.encode!(Wire.trip(trip, rows)) =~ "waiting"
+      refute Jason.encode!(Wire.trip(trip, rows, %{})) =~ "waiting"
 
       answers = %{
         "Prado" => {:ok, [place("Prado", 1)], %{}},
@@ -543,6 +551,166 @@ defmodule FermixCore.Trips.PlacerTest do
     test "with nothing waiting a run is no run: no lookup and no event", ctx do
       TelemetryCapture.attach(@run_events, session_id: ctx.session)
       assert %{next_ms: nil} = Run.run(:boot, run_opts(ctx, backend(%{})))
+      refute_received {:telemetry, _event, _measurements, _metadata}
+    end
+  end
+
+  # M89: a near in force that has no town is asked on each run the placer
+  # makes, so a trip with nothing but such a near still gets one.
+  describe "a run's towns" do
+    @varonne %{
+      name: "Varonne, Ostrel, Varonia",
+      latitude: 41.14,
+      longitude: -8.61,
+      radius_meters: 5_210
+    }
+
+    # The backend above, with a geocode that answers each near from `towns`.
+    defp towns_backend(towns, ready \\ fn -> :ok end) do
+      test = self()
+
+      geocode = fn words ->
+        send(test, {:geocoded, words})
+        Map.fetch!(towns, words)
+      end
+
+      fn context -> Map.put(backend(%{}, ready).(context), :geocode, {:ok, geocode}) end
+    end
+
+    # A trip whose near the call that made it could not find a town for.
+    defp unresolved!(ctx) do
+      edit!(ctx, @owner, [%{"op" => "create", "days" => 2, "near" => @town}], %{})
+      trip!(ctx)
+    end
+
+    test "a trip with only a near and no town gets a run, which finds it and tells devices",
+         ctx do
+      %{trip: %{id: id, rev: rev}} = unresolved!(ctx)
+      TelemetryCapture.attach(@run_events ++ [[:fermix, :trip, :edit]], session_id: ctx.session)
+      backend = towns_backend(%{@town => {:ok, @varonne, %{attempt: 1}}})
+
+      assert %{next_ms: nil} = Run.run(:boot, run_opts(ctx, backend))
+      assert_received {:geocoded, @town}
+      assert_received {:notified, %{trips: [%{id: ^id, rev: new_rev}]}}
+      assert new_rev == rev + 1
+      assert trip!(ctx).towns == %{@town => {:found, @varonne}}
+
+      assert_received {:telemetry, [:fermix, :trip_place, :run_start],
+                       %{waiting: 0, unresolved_towns: 1}, _start}
+
+      assert_received {:telemetry, [:fermix, :trip, :edit], %{towns: 1, towns_found: 1, trips: 1},
+                       %{made_via: "trip_place", outcome: :ok}}
+
+      assert_received {:telemetry, [:fermix, :trip_place, :run_complete],
+                       %{towns: 1, towns_found: 1, trips: 1}, %{towns_stop_reason: nil}}
+
+      # Found once: the next run has nothing to do, and is none.
+      assert %{next_ms: nil} = Run.run(:boot, run_opts(ctx, backend))
+      refute_received {:geocoded, _words}
+      refute_received {:telemetry, [:fermix, :trip_place, :run_start], _measurements, _meta}
+    end
+
+    test "a near the search finds nothing by is kept as none and asked no more", ctx do
+      unresolved!(ctx)
+
+      nowhere =
+        {:error, "invalid_location: Apple Maps found no place by that name", %{attempt: 1}}
+
+      backend = towns_backend(%{@town => nowhere})
+
+      assert %{next_ms: nil} = Run.run(:boot, run_opts(ctx, backend))
+      assert_received {:geocoded, @town}
+      assert trip!(ctx).towns == %{@town => :none}
+      refute_received {:notified, _changes}
+
+      assert %{next_ms: nil} = Run.run(:boot, run_opts(ctx, backend))
+      refute_received {:geocoded, _words}
+    end
+
+    test "a near that could not be looked up stays unresolved, for the next run", ctx do
+      unresolved!(ctx)
+      backend = towns_backend(%{@town => {:error, "computer_busy: busy", %{attempt: 1}}})
+
+      assert %{next_ms: nil} = Run.run(:boot, run_opts(ctx, backend))
+      assert_received {:geocoded, @town}
+      assert trip!(ctx).towns == %{}
+
+      assert %{next_ms: nil} = Run.run(:computer, run_opts(ctx, backend))
+      assert_received {:geocoded, @town}
+    end
+
+    # Bounded and event-driven: a run that stored a town, and left one still
+    # unresolved, looks again after 30 min; a run that found nothing new does
+    # not, so a town that fails for good wakes nothing on its own.
+    test "a run that made progress and left a town unresolved looks again in 30 min", ctx do
+      unresolved!(ctx)
+      edit!(ctx, @owner, [%{"op" => "day", "day" => 1, "near" => "Brisa"}], %{})
+
+      throttled = {:error, "rate_limited: Apple Maps is throttling", %{attempt: 1}}
+      both = towns_backend(%{@town => {:ok, @varonne, %{attempt: 1}}, "Brisa" => throttled})
+      assert %{next_ms: 1_800_000} = Run.run(:boot, run_opts(ctx, both))
+
+      # The same throttle again, nothing new stored: no wake of its own.
+      assert %{next_ms: nil} =
+               Run.run(:timer, run_opts(ctx, towns_backend(%{"Brisa" => throttled})))
+
+      assert Waiting.retry_in_s(1) * 1_000 == 1_800_000
+    end
+
+    test "a run that stored a town and hit the cap of 20 looks again in 30 min", ctx do
+      edit!(ctx, @owner, [%{"op" => "create", "days" => 22}], %{})
+      days = for k <- 1..22, do: %{"op" => "day", "day" => k, "near" => "Town #{k}"}
+      edit!(ctx, @owner, days, %{})
+
+      found =
+        Map.new(1..22, &{"Town #{&1}", {:ok, %{@varonne | name: "Town #{&1}"}, %{attempt: 1}}})
+
+      assert %{next_ms: 1_800_000} = Run.run(:boot, run_opts(ctx, towns_backend(found)))
+      assert %{next_ms: nil} = Run.run(:timer, run_opts(ctx, towns_backend(found)))
+      assert map_size(trip!(ctx).towns) == 22
+    end
+
+    # Each trip's edit counts the geocodes that reached the place search, an
+    # answer or not, as the contract defines `towns`.
+    test "a trip's towns edit counts the geocodes sent, not only those answered", ctx do
+      unresolved!(ctx)
+      edit!(ctx, @owner, [%{"op" => "day", "day" => 2, "near" => "Brisa"}], %{})
+      TelemetryCapture.attach([[:fermix, :trip, :edit]], session_id: ctx.session)
+      slow = {:error, "computer_timed_out: no answer in time", %{attempt: 1}}
+      backend = towns_backend(%{@town => {:ok, @varonne, %{attempt: 1}}, "Brisa" => slow})
+
+      Run.run(:boot, run_opts(ctx, backend))
+      assert_received {:telemetry, [:fermix, :trip, :edit], %{towns: 2, towns_found: 1}, _meta}
+    end
+
+    # The waits the age cap ended are counted even when the nears could not
+    # be read: the run is a fault the placer backs off from, never silent.
+    test "a run whose nears cannot be read still says what it ended, and that it failed", ctx do
+      waiting!(ctx)
+      raw(ctx, "DROP TABLE trip_towns")
+      TelemetryCapture.attach(@run_events, session_id: ctx.session)
+      later = at(8 * 86_400)
+
+      log =
+        capture_log(fn ->
+          assert %{failed: true} =
+                   Run.run(:boot, run_opts(ctx, towns_backend(%{}), now: later))
+        end)
+
+      assert log =~ "could not read the nears"
+      assert_received {:telemetry, [:fermix, :trip_place, :run_start], %{expired: 2}, _meta}
+      assert_received {:telemetry, [:fermix, :trip_place, :run_complete], %{failed: 1}, _meta}
+    end
+
+    test "a place search that names no town, or cannot run now, asks for none: no run", ctx do
+      unresolved!(ctx)
+      TelemetryCapture.attach(@run_events, session_id: ctx.session)
+
+      assert %{next_ms: nil} = Run.run(:boot, run_opts(ctx, backend(%{})))
+      away = towns_backend(%{}, fn -> {:later, :no_mac} end)
+      assert %{next_ms: nil} = Run.run(:boot, run_opts(ctx, away))
+
+      refute_received {:geocoded, _words}
       refute_received {:telemetry, _event, _measurements, _metadata}
     end
   end
@@ -702,6 +870,19 @@ defmodule FermixCore.Trips.PlacerTest do
       :ok = Placer.waits_saved(placer)
       assert_receive {:armed, {:wake, _token}, 300_000}
       :ok = Placer.waits_saved(placer)
+      :sys.get_state(placer)
+      refute_received {:armed, {:wake, _token}, _delay}
+    end
+
+    # M89: a call that left a town for a reason that heals has the placer
+    # look again in 30 min, unless it is to look sooner.
+    test "a town left for later arms the timer 30 min on, unless sooner is armed", ctx do
+      placer = start_placer!(ctx, run: fn _trigger, _opts -> %{next_ms: nil} end)
+      :ok = Placer.towns_unresolved(placer)
+      assert_receive {:armed, {:wake, _token}, 1_800_000}
+      :ok = Placer.waits_saved(placer)
+      assert_receive {:armed, {:wake, _token}, 300_000}
+      :ok = Placer.towns_unresolved(placer)
       :sys.get_state(placer)
       refute_received {:armed, {:wake, _token}, _delay}
     end

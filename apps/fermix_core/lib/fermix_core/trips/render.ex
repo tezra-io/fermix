@@ -39,7 +39,9 @@ defmodule FermixCore.Trips.Render do
   **The answer** (`answer/2`) is the trip's line, what each place given in the
   call came to (placed, offered by another name with its link, offered with
   no place to search near and what to give, or not placed and why, from
-  `Trips.Lookup`), and each fixed stop whose date the call moved (C14). A
+  `Trips.Lookup`), what each near the call asked was found as, so a misread
+  town shows (M89, `Trips.Towns`), and each fixed stop whose date the call
+  moved (C14). A
   provider's words, and the owner's, are JSON-quoted there. When a place given
   was not placed, the answer ends with a line asking the reply to tell the
   owner each stop's outcome as the answer lists it: the answer reaches a turn
@@ -49,6 +51,7 @@ defmodule FermixCore.Trips.Render do
   alias FermixCore.Kept.Access, as: KeptAccess
   alias FermixCore.Trips.Lookup
   alias FermixCore.Trips.Ops
+  alias FermixCore.Trips.Towns
 
   @frame KeptAccess.outside_frame()
   @indent "      "
@@ -389,19 +392,25 @@ defmodule FermixCore.Trips.Render do
   each place came to (`placements`, in the call's order), what placed the
   stops a lookup placed (`placed_by`, `Trips.Lookup`'s, by each placement's
   `ref`: "Placed with Apple Maps on studio Mac: [9], [11]."; a stop its link
-  placed is no lookup's, and is not named), and the fixed stops whose date
-  moved.
+  placed is no lookup's, and is not named), what each near the call asked
+  was found as (`towns`, `Trips.Towns`'s: `Near "…" found as "…".`, none
+  found, or not looked up yet), and the fixed stops whose date moved.
   """
-  @spec answer(map(), [placement()], %{optional(term()) => String.t()}) :: String.t()
-  def answer(applied, placements, placed_by \\ %{})
+  @spec answer(
+          map(),
+          [placement()],
+          %{optional(term()) => String.t()},
+          [{String.t(), Towns.outcome()}]
+        ) :: String.t()
+  def answer(applied, placements, placed_by \\ %{}, towns \\ [])
 
   # The model has no restore: the owner's app brings a removed trip back.
-  def answer(%{trip: %{removed_at: %DateTime{}, title: title}}, placements, placed_by)
-      when is_list(placements) and is_map(placed_by),
+  def answer(%{trip: %{removed_at: %DateTime{}, title: title}}, placements, placed_by, towns)
+      when is_list(placements) and is_map(placed_by) and is_list(towns),
       do: "#{title} · removed; it can be restored from the Fermix app for 30 days"
 
-  def answer(%{trip: trip, rows: rows, events: events} = applied, placements, placed_by)
-      when is_list(placements) and is_map(placed_by) do
+  def answer(%{trip: trip, rows: rows, events: events} = applied, placements, placed_by, towns)
+      when is_list(placements) and is_map(placed_by) and is_list(towns) do
     {days, stops} = Ops.counts(rows)
     words = if events == [], do: "nothing changed", else: Enum.join(events, "; ")
 
@@ -414,6 +423,7 @@ defmodule FermixCore.Trips.Render do
     |> Kernel.++(offered_lines(placements))
     |> Kernel.++(unanchored_lines(placements))
     |> Kernel.++(unplaced_lines(placements))
+    |> Kernel.++(town_lines(towns))
     |> Kernel.++(moved_lines(applied.dates_moved))
     |> Kernel.++(report_line(placements))
     |> Enum.join("\n")
@@ -517,6 +527,49 @@ defmodule FermixCore.Trips.Render do
     do: "Not placed, the search's record of that place is too large to keep"
 
   defp why_heading(why), do: Lookup.heading(why)
+
+  # What each near the call asked came to (M89, `Trips.Towns`), the near's
+  # words and the geocoder's both quoted: found, none, or not looked up yet,
+  # this last never on a backend that names no town, or with none set up.
+  # It promises what the placer does and no more: a near left for a reason
+  # that heals, or past the cap, is looked up again on its own later; any
+  # other only on the placer's next wake or the trip's next change.
+  defp town_lines(towns) do
+    found = for {words, {:found, town}} <- towns, do: found_line(words, town)
+    none = for {words, {:none, :not_found}} <- towns, do: none_line(words)
+    {later, waking} = towns |> Enum.filter(&said?/1) |> Enum.split_with(&Towns.later?([&1]))
+    found ++ none ++ later_line(later) ++ waking_line(waking)
+  end
+
+  defp found_line(words, %{name: name}), do: "Near #{quoted(words)} found as #{quoted(name)}."
+
+  defp none_line(words),
+    do: "No town found for near #{quoted(words)}; its days show no town on the map."
+
+  defp said?({_words, {:unresolved, :unsupported}}), do: false
+  defp said?({_words, {:unresolved, {:no_backend, _reason}}}), do: false
+  defp said?({_words, {:unresolved, _why}}), do: true
+  defp said?(_answered), do: false
+
+  defp later_line([]), do: []
+
+  defp later_line(towns) do
+    [
+      "Towns not looked up yet: #{named(towns)}; they will be looked up again later, or when " <>
+        "Fermix starts, a Mac that looks places up connects or the trip next changes."
+    ]
+  end
+
+  defp waking_line([]), do: []
+
+  defp waking_line(towns) do
+    [
+      "Towns not looked up: #{named(towns)}; they will be looked up again when Fermix " <>
+        "starts, a Mac that looks places up connects or the trip next changes."
+    ]
+  end
+
+  defp named(towns), do: Enum.map_join(towns, ", ", &quoted(elem(&1, 0)))
 
   defp moved_lines([]), do: []
 

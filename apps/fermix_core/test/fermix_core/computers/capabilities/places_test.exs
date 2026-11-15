@@ -71,13 +71,23 @@ defmodule FermixCore.Computers.Capabilities.PlacesTest do
     test "one op that only reads, in the owner's words, its target never the query" do
       assert Places.id() == :places
       assert Places.offer() == :places
-      assert Places.ops() == ["search"]
+      assert "search" in Places.ops()
       refute Places.effect?("search")
       refute Places.long_lived?("search")
       assert Places.label() == "Apple Maps"
       assert Places.op_label("search") == "look up places"
       assert Places.target("search", %{"query" => "a private appointment"}) == "Apple Maps"
       assert Places.bounds("search") == %{result_bytes: 65_536, part_bytes: 0}
+    end
+
+    # M89: a trip day's town, found by the same helper, under the same switch.
+    test "a second op finds a near's town, reads only, and names Apple Maps, never the words" do
+      assert Places.ops() == ["search", "geocode"]
+      refute Places.effect?("geocode")
+      refute Places.long_lived?("geocode")
+      assert Places.op_label("geocode") == "find a town"
+      assert Places.target("geocode", %{"near" => "a private address"}) == "Apple Maps"
+      assert Places.bounds("geocode") == %{result_bytes: 4_096, part_bytes: 0}
     end
 
     test "it is what a computer can be asked by the wire's name" do
@@ -129,6 +139,22 @@ defmodule FermixCore.Computers.Capabilities.PlacesTest do
       end
     end
 
+    test "a geocode takes its near alone, 1 to 200 characters" do
+      assert Places.validate("geocode", %{"near" => "Varonne, Portugal"}) == :ok
+
+      for args <- [
+            %{},
+            %{"near" => ""},
+            %{"near" => "  "},
+            %{"near" => 7},
+            %{"near" => String.duplicate("a", 201)},
+            %{"near" => "Varonne", "query" => "coffee"}
+          ] do
+        assert {:error, sentence} = Places.validate("geocode", args), inspect(args)
+        assert is_binary(sentence) and String.ends_with?(sentence, ".")
+      end
+    end
+
     test "the args a place search's request makes are ones it takes, and stand for that request" do
       for request <- [
             %{query: "coffee", count: 5},
@@ -154,6 +180,63 @@ defmodule FermixCore.Computers.Capabilities.PlacesTest do
                  {:refused, :unavailable,
                   "Looking places up in Apple Maps needs the Fermix app on a Mac."}
       end
+    end
+  end
+
+  describe "a geocode" do
+    @placemark %{
+      "name" => "Varonne",
+      "locality" => "Varonne",
+      "administrative_area" => "Ostrel",
+      "country" => "Varonia",
+      "latitude" => 41.1402,
+      "longitude" => -8.6113,
+      "radius_meters" => 5_210.4
+    }
+
+    test "is admitted only where this build carries the helper", %{dir: dir} do
+      helper = fake_helper(dir, %{"placemark" => @placemark}, 0)
+      assert Places.admit("geocode", %{"near" => "Varonne"}, context(helper)) == :ok
+
+      assert {:refused, :unavailable, _sentence} =
+               Places.admit("geocode", %{"near" => "Varonne"}, context(helper, %{host: @linux}))
+    end
+
+    test "runs this computer's helper, and the server makes the town as a geocode here does",
+         %{dir: dir} do
+      helper = fake_helper(dir, %{"placemark" => @placemark}, 0)
+
+      assert {:ok, %{"placemark" => @placemark} = result, nil} =
+               Places.run("geocode", %{"near" => " Varonne, Ostrel "}, nil, context(helper))
+
+      assert dir |> Path.join("request") |> File.read!() |> Jason.decode!() ==
+               %{"geocode" => "Varonne, Ostrel"}
+
+      wire = result |> Jason.encode!() |> Jason.decode!()
+
+      assert Places.town(wire) ==
+               {:ok,
+                %{
+                  name: "Varonne, Ostrel, Varonia",
+                  latitude: 41.1402,
+                  longitude: -8.6113,
+                  radius_meters: 5_210
+                }}
+
+      assert {:error, "parser_changed: " <> _rest} = Places.town(%{"places" => []})
+    end
+
+    test "a near the geocoder finds nothing by answers failed with Apple Maps' own tag",
+         %{dir: dir} do
+      helper = fake_helper(dir, %{"error" => %{"message" => "kCLErrorDomain 8"}}, 65)
+
+      assert {:failed, "invalid_location: Apple Maps found no place by that name" <> _words} =
+               Places.run("geocode", %{"near" => "Nowhere"}, nil, context(helper))
+    end
+
+    test "takes no file" do
+      assert {:failed, "Looking places up takes no file."} =
+               Places.run("geocode", %{"near" => "Varonne"}, "bytes", context("/nonexistent"))
     end
   end
 

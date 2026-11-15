@@ -1,15 +1,19 @@
 defmodule FermixCore.Computers.Capabilities.Places do
   @moduledoc """
   `places` (M89 D13 D, M97 §6.4): looking places up in Apple Maps on a Mac of
-  the home, for its server's place search (`Tools.PlaceSearch.Computer`). One
-  op, `search`, which only reads: it runs this computer's own Apple Maps
+  the home, for its server's place search (`Tools.PlaceSearch.Computer`). Two
+  ops, which only read. `search` runs this computer's own Apple Maps
   helper (`PlaceSearch.AppleMaps.raw_search/2`, the search a Mac's own place
   search makes) and answers what the helper printed, at most #{32} places
   (`{"places": [...]}`). The server makes the record of them with the same
   code a Mac's own search does (`places/2`, `AppleMaps.places/2`), so a place
   from a Mac passes the same checks: an HTTPS site only, sanitized text,
   Apple's page derived from its identifier, one with no page dropped, one
-  with no name dropped.
+  with no name dropped. `geocode` (M89) finds a trip's near: its one arg is
+  `near`, 1 to #{200} characters, the helper's placemark comes back as it
+  printed it (`{"placemark": {...}}`), and the server makes the town of it
+  with the code a geocode there uses (`town/1`, `AppleMaps.town/1`). A Mac
+  whose Fermix predates the op refuses it by name.
 
   Its args (`validate/2`, built by `args/1` from a place search's request):
   `query`, 1 to #{400} characters; at most one anchor, `near` (a place's
@@ -51,6 +55,8 @@ defmodule FermixCore.Computers.Capabilities.Places do
   # What answering takes beside the search, inside the request's deadline.
   @answer_margin_ms 1_500
   @max_raw 32
+  @placemark_bytes 4 * 1_024
+  @ops ["search", "geocode"]
   @keys ~w(query near latitude longitude radius_meters count units)
   @point ["latitude", "longitude", "radius_meters"]
   @units %{"metric" => :metric, "imperial" => :imperial}
@@ -62,25 +68,27 @@ defmodule FermixCore.Computers.Capabilities.Places do
   def offer, do: :places
 
   @impl true
-  def ops, do: ["search"]
+  def ops, do: @ops
 
   @impl true
   def label, do: PlacesOffer.label()
 
   @impl true
   def op_label("search"), do: "look up places"
+  def op_label("geocode"), do: "find a town"
 
   @impl true
-  def effect?("search"), do: false
+  def effect?(op) when op in @ops, do: false
 
   @impl true
-  def long_lived?("search"), do: false
+  def long_lived?(op) when op in @ops, do: false
 
   @impl true
   def bounds("search"), do: %{result_bytes: @result_bytes, part_bytes: 0}
+  def bounds("geocode"), do: %{result_bytes: @placemark_bytes, part_bytes: 0}
 
   @impl true
-  def target("search", _args), do: "Apple Maps"
+  def target(op, _args) when op in @ops, do: "Apple Maps"
 
   @impl true
   def validate("search", args) when is_map(args) do
@@ -92,8 +100,14 @@ defmodule FermixCore.Computers.Capabilities.Places do
     end
   end
 
+  def validate("geocode", args) when is_map(args) do
+    if Map.keys(args) == ["near"],
+      do: near(args["near"]),
+      else: {:error, "Finding a town takes near, and no other key."}
+  end
+
   @impl true
-  def admit("search", _args, context) when is_map(context) do
+  def admit(op, _args, context) when op in @ops and is_map(context) do
     host = Map.get_lazy(context, :host, &BootProfile.host/0)
 
     if Backend.carries_helper?(host),
@@ -112,7 +126,18 @@ defmodule FermixCore.Computers.Capabilities.Places do
     end
   end
 
-  def run("search", _args, _part, _context), do: {:failed, "Looking places up takes no file."}
+  def run("geocode", %{"near" => near}, nil, %{deadline_ms: deadline} = context) do
+    opts =
+      Keyword.put(Map.get(context, :apple_maps, []), :timeout_ms, helper_timeout_ms(deadline))
+
+    case AppleMaps.raw_geocode(near, opts) do
+      {:ok, raw} -> {:ok, %{"placemark" => raw}, nil}
+      {:error, reason} -> {:failed, reason}
+    end
+  end
+
+  def run(op, _args, _part, _context) when op in @ops,
+    do: {:failed, "Looking places up takes no file."}
 
   @doc """
   The helper's bound for a request given `deadline_ms` on this Mac: the
@@ -135,6 +160,15 @@ defmodule FermixCore.Computers.Capabilities.Places do
 
   def places(_result, _request),
     do: {:error, "parser_changed: the computer's answer must carry at most #{@max_raw} places"}
+
+  @doc """
+  The town a Mac's `geocode` answer is: its placemark made into the town by
+  `AppleMaps.town/1`, as a geocode on this server's own helper would be. An
+  answer that carries no placemark is `parser_changed`.
+  """
+  @spec town(map()) :: {:ok, Backend.town()} | {:error, String.t()}
+  def town(%{"placemark" => raw}), do: AppleMaps.town(raw)
+  def town(_result), do: {:error, "parser_changed: the computer's answer must carry a placemark"}
 
   @doc """
   The args of the `search` op for a place search's request

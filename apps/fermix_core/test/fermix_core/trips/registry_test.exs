@@ -577,11 +577,19 @@ defmodule FermixCore.Trips.RegistryTest do
                placed: 0,
                offered: 0,
                not_found: 0,
-               not_looked_up: 0
+               not_looked_up: 0,
+               towns: 0,
+               towns_found: 0,
+               towns_not_found: 0
              }
 
-      assert %{component: "trips", made_via: "chat", outcome: :ok, session_id: ^session} =
-               metadata
+      assert %{
+               component: "trips",
+               made_via: "chat",
+               outcome: :ok,
+               session_id: ^session,
+               towns_stop_reason: nil
+             } = metadata
 
       refute inspect(metadata) =~ "Varonne"
     end

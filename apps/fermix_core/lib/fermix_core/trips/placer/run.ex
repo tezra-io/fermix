@@ -32,8 +32,24 @@ defmodule FermixCore.Trips.Placer.Run do
     5. **writes** each trip once (`Registry.place_waiting/4`): the stops the
        name rule placed, the trip's rev once, its devices told, its edit
        event under the run's session, said in no chat;
-    6. **closes** with its counts (`Trips.Telemetry.emit_place_complete/3`)
-       and answers when to look next (`next_ms`): none while nothing waits;
+    6. **finds towns** (M89, `Trips.Towns`): with the time the run has
+       left, at most 20 nears in force on live trips, of every owner, that
+       have no town yet (`Registry.unresolved_towns/2`), each geocoded once,
+       and each trip's written once (`Registry.settle_towns/4`, its rev and
+       devices told when a town is new). The nears are read before the run
+       opens, and only when the place search in force names towns and can
+       run now (not on Brave, and not while no Mac is online), so a trip
+       with nothing but a near still unresolved gets a run on each wake, and
+       a home whose search cannot find one gets none. A trip's lookups that
+       stopped the run stop the towns too; a town's own stop stops only the
+       towns after it. Nears that cannot be read are a fault (`failed`),
+       logged, and the run goes on with its waits, so what the take ended
+       still shows in `run_start`'s `expired`;
+    7. **closes** with its counts (`Trips.Telemetry.emit_place_complete/3`)
+       and answers when to look next (`next_ms`): 30 min on when it stored a
+       town or a none and left a town unresolved or reached its 20 (never
+       when it stored nothing new, so a near that fails for good wakes
+       nothing on its own); none while nothing waits;
        while waits are due still, Brave's reset when the key is spent, 6 h
        when no Mac that offers places is online (one connecting wakes the
        placer first) or no place search is set up, else 5 min; and never
@@ -52,8 +68,8 @@ defmodule FermixCore.Trips.Placer.Run do
   clock), `:now_ms` (the monotonic clock the lookups' deadline reads),
   `:notifier`, `:session_id`, `:context` (fields the lookups' context adds:
   `:host`, `:computers_opts`, `:computer_call_opts`, `:place_search_pacer`, a
-  `:place_lookup` stand-in) and `:backend`, a test's stand-in for the home's
-  resolved place search (`backend/0`).
+  `:place_lookup` stand-in, with `:town_lookup` beside it) and `:backend`, a
+  test's stand-in for the home's resolved place search (`backend/0`).
   """
 
   require Logger
@@ -65,6 +81,7 @@ defmodule FermixCore.Trips.Placer.Run do
   alias FermixCore.Trips.Lookup
   alias FermixCore.Trips.Registry
   alias FermixCore.Trips.Telemetry
+  alias FermixCore.Trips.Towns
   alias FermixCore.Trips.Waiting
 
   @max_stops 20
@@ -81,11 +98,14 @@ defmodule FermixCore.Trips.Placer.Run do
 
   @typedoc """
   The home's place search for a run: its name for the events, the search
-  (`Lookup.backend/2`'s answer) and whether it can run now, asked as needed.
+  (`Lookup.backend/2`'s answer), its geocode for the towns
+  (`PlaceSearch.geocoder/2`'s, an error where it names none) and whether it
+  can run now, asked as needed.
   """
   @type backend :: %{
           name: String.t() | nil,
           search: {:ok, Lookup.search()} | {:error, String.t()},
+          geocode: {:ok, Towns.geocoder()} | {:error, String.t()},
           ready: (-> :ok | {:later, later()})
         }
 
@@ -107,8 +127,7 @@ defmodule FermixCore.Trips.Placer.Run do
     now = Keyword.get(opts, :now, &DateTime.utc_now/0).()
 
     case Registry.take_waits(now, @max_stops, store_opts(opts)) do
-      {:ok, %{expired: 0, waits: []} = taken} -> %{next_ms: due_in(taken.next_due_at, now)}
-      {:ok, taken} -> started(trigger, taken, now, opts)
+      {:ok, taken} -> planned(%{run: run_of(trigger, opts), now: now, opts: opts}, taken)
       {:error, :disabled} -> %{next_ms: nil}
       {:error, reason} -> unread(run_of(trigger, opts), reason, start)
     end
@@ -148,28 +167,55 @@ defmodule FermixCore.Trips.Placer.Run do
       trigger: trigger
     }
 
-  defp started(trigger, taken, now, opts) do
-    start = System.monotonic_time(:microsecond)
-    run = run_of(trigger, opts)
-    :ok = Telemetry.emit_place_start(run, %{waiting: taken.total, expired: taken.expired})
+  # With nothing due, none ended and no near to find a town for, there is no
+  # run at all; the nears are asked only of a place search that names towns
+  # and can run now. Nears that cannot be read are a fault of the run, which
+  # still says what the take ended (`run_start`'s `expired`) and places what
+  # is due, and backs off.
+  defp planned(env, taken) do
+    context = Map.merge(Keyword.get(env.opts, :context, %{}), %{session_id: env.run.session_id})
+    env = Map.put(env, :backend, backend(context, env.opts))
 
-    context = Map.merge(Keyword.get(opts, :context, %{}), %{session_id: run.session_id})
-    backend = backend(context, opts)
-    env = %{run: run, now: now, backend: backend, opts: opts}
-    summary = summary(taken, env)
-
-    :ok = Telemetry.emit_place_complete(run, summary, elapsed(start))
-    answer(summary, backend, now)
+    case {taken, towns_asked(env.backend, env.opts)} do
+      {%{expired: 0, waits: []}, {:ok, []}} -> %{next_ms: due_in(taken.next_due_at, env.now)}
+      {_taken, {:ok, towns}} -> started(env, taken, {towns, 0})
+      {_taken, {:error, reason}} -> started(env, taken, {[], unread_towns(reason)})
+    end
   end
 
-  defp summary(%{waits: []} = taken, env), do: base(taken, env.backend)
+  defp unread_towns(reason) do
+    Logger.error("trips: the placer could not read the nears with no town: #{inspect(reason)}")
+    1
+  end
 
-  defp summary(taken, env) do
-    acc = base(taken, env.backend)
+  defp towns_asked(%{geocode: {:ok, _geocode}, ready: ready}, opts) do
+    if ready.() == :ok,
+      do: Registry.unresolved_towns(Towns.max_per_call(), store_opts(opts)),
+      else: {:ok, []}
+  end
 
-    case readiness(env.backend) do
-      :ok -> place_trips(taken.waits, env, acc)
-      {:later, why} -> untried(%{acc | skipped: skip(why)}, taken.waits)
+  defp towns_asked(%{geocode: {:error, _reason}}, _opts), do: {:ok, []}
+
+  defp started(env, taken, {towns, failed}) do
+    start = System.monotonic_time(:microsecond)
+    counts = %{waiting: taken.total, expired: taken.expired, unresolved_towns: length(towns)}
+    :ok = Telemetry.emit_place_start(env.run, counts)
+
+    now_ms = Keyword.get(env.opts, :now_ms, fn -> System.monotonic_time(:millisecond) end)
+    env = Map.merge(env, %{now_ms: now_ms, deadline: now_ms.() + Lookup.deadline_ms()})
+    summary = summary(taken, towns, Map.put(env, :failed, failed))
+
+    :ok = Telemetry.emit_place_complete(env.run, summary, elapsed(start))
+    answer(summary, env.backend, env.now)
+  end
+
+  defp summary(taken, towns, env) do
+    acc = %{base(taken, env.backend) | failed: env.failed}
+
+    case {taken.waits, readiness(env.backend)} do
+      {[], _ready} -> place_towns(towns, env, acc)
+      {waits, :ok} -> place_towns(towns, env, place_trips(waits, env, acc))
+      {waits, {:later, why}} -> untried(%{acc | skipped: skip(why)}, waits)
     end
   end
 
@@ -191,6 +237,11 @@ defmodule FermixCore.Trips.Placer.Run do
       lookups: 0,
       trips: 0,
       failed: 0,
+      towns: 0,
+      towns_found: 0,
+      towns_not_found: 0,
+      towns_stop_reason: nil,
+      towns_next_ms: nil,
       due_left: taken.due - length(taken.waits),
       next_due_at: taken.next_due_at
     }
@@ -211,11 +262,8 @@ defmodule FermixCore.Trips.Placer.Run do
   # trip's lookups were stopped, or too little time is left, the rest wait.
   # Bounded: at most `@max_stops` trips.
   defp place_trips(waits, env, acc) do
-    now_ms = Keyword.get(env.opts, :now_ms, fn -> System.monotonic_time(:millisecond) end)
-    deadline = now_ms.() + Lookup.deadline_ms()
-
     Enum.reduce(by_trip(waits), acc, fn {owner, trip_waits}, acc ->
-      left_ms = deadline - now_ms.()
+      left_ms = env.deadline - env.now_ms.()
 
       if acc.stop_reason != nil or left_ms < @min_lookup_ms,
         do: untried(acc, trip_waits),
@@ -253,6 +301,75 @@ defmodule FermixCore.Trips.Placer.Run do
       {:ok, done} -> counted(acc, done, {waits, results}, found)
       {:error, reason} -> failed(acc, waits, "write", reason)
     end
+  end
+
+  # The towns, after the stops, in the time the run has left: each near's
+  # words geocoded once, whatever trips name them, and each trip's written
+  # once. None start with under 10 s left, and a run whose lookups stopped
+  # sends none.
+  defp place_towns([], _env, acc), do: acc
+
+  defp place_towns(towns, env, acc) do
+    left_ms = env.deadline - env.now_ms.()
+
+    if left_ms < @min_lookup_ms do
+      acc
+    else
+      words = towns |> Enum.map(& &1.words) |> Enum.uniq()
+      town_opts = [deadline_ms: left_ms, stopped: acc.stop_reason, now_ms: env.now_ms]
+      found = Towns.resolve(words, env.backend.geocode, town_opts)
+      acc |> towns_counted(found, length(towns)) |> settle_trips(towns, found, env)
+    end
+  end
+
+  # A run that stored a town or a none, and left some unresolved or more past
+  # its cap, looks again 30 min on; one that stored nothing does not, so a
+  # town that fails for good wakes nothing on its own (boot, a Mac connecting
+  # and the trip's next change still ask it).
+  defp towns_counted(acc, found, asked) do
+    counts = Towns.counts(found)
+    progress? = counts.towns_found + counts.towns_not_found > 0
+    left? = asked >= Towns.max_per_call() or Enum.any?(found.towns, &unresolved?/1)
+
+    %{
+      acc
+      | towns: counts.towns,
+        towns_found: counts.towns_found,
+        towns_not_found: counts.towns_not_found,
+        towns_stop_reason: found.stop_reason,
+        towns_next_ms: if(progress? and left?, do: Waiting.retry_in_s(1) * 1_000)
+    }
+  end
+
+  defp unresolved?({_words, outcome}), do: match?({:unresolved, _why}, outcome)
+
+  # Each trip with a town or none found is written once, in the order taken,
+  # its event counting the geocodes of its nears that reached the place search.
+  defp settle_trips(acc, towns, found, env) do
+    kept = Towns.kept(found.towns)
+    sent = MapSet.new(found.sent)
+
+    towns
+    |> Enum.group_by(&Map.take(&1, [:trip_id, :owner_id, :agent_id]), & &1.words)
+    |> Enum.map(fn {owner, words} ->
+      {owner, Map.take(kept, words), Enum.count(words, &(&1 in sent))}
+    end)
+    |> Enum.reject(fn {_owner, trip_kept, _sent} -> trip_kept == %{} end)
+    |> Enum.reduce(acc, &settle_trip(&1, &2, env))
+  end
+
+  defp settle_trip({owner, trip_kept, sent}, acc, env) do
+    looked = %{backend: env.backend.name, towns: sent}
+
+    case Registry.settle_towns(owner, trip_kept, looked, write_opts(env)) do
+      {:ok, %{changed?: changed?}} -> %{acc | trips: acc.trips + if(changed?, do: 1, else: 0)}
+      {:error, reason} -> towns_failed(acc, reason)
+    end
+  end
+
+  defp towns_failed(acc, reason) do
+    Logger.error("trips: the placer could not write a trip's towns: #{inspect(reason)}")
+    %{acc | failed: acc.failed + 1}
   end
 
   defp resolve([], _anchors, _env),
@@ -320,7 +437,11 @@ defmodule FermixCore.Trips.Placer.Run do
   # -- when to look next -------------------------------------------------------------
 
   defp answer(summary, backend, now) do
-    next_ms = [due_now_ms(summary, backend), due_in(summary.next_due_at, now)]
+    next_ms = [
+      due_now_ms(summary, backend),
+      due_in(summary.next_due_at, now),
+      summary.towns_next_ms
+    ]
 
     case {Enum.reject(next_ms, &is_nil/1), summary.failed} do
       {[], 0} -> %{next_ms: nil}
@@ -365,8 +486,14 @@ defmodule FermixCore.Trips.Placer.Run do
     end
   end
 
-  defp resolved(%{place_lookup: _search} = context),
-    do: %{name: nil, search: Lookup.backend(context), ready: fn -> :ok end}
+  defp resolved(%{place_lookup: _search} = context) do
+    %{
+      name: nil,
+      search: Lookup.backend(context),
+      geocode: town_lookup(context),
+      ready: fn -> :ok end
+    }
+  end
 
   defp resolved(context) do
     resolution = PlaceSearch.resolution(context)
@@ -374,9 +501,13 @@ defmodule FermixCore.Trips.Placer.Run do
     %{
       name: Atom.to_string(resolution.name),
       search: Lookup.backend(context, resolution),
+      geocode: PlaceSearch.geocoder(context, resolution),
       ready: fn -> ready(resolution.name, context) end
     }
   end
+
+  defp town_lookup(%{town_lookup: geocode}) when is_function(geocode, 1), do: {:ok, geocode}
+  defp town_lookup(_context), do: {:error, "no town lookup stands in here"}
 
   defp store_opts(opts), do: Keyword.take(opts, [:repo, :timeout]) ++ [on_timeout: :error]
 

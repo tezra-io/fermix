@@ -357,6 +357,152 @@ defmodule FermixCore.Tools.PlaceSearch.AppleMapsTest do
     end
   end
 
+  # A trip day's town (M89): the helper reports the geocoder's own fields and
+  # the engine makes the town of them. Every name and number is invented.
+  @placemark %{
+    "name" => "Vessmark",
+    "locality" => "Vessmark",
+    "administrative_area" => "Ostrel",
+    "country" => "Varonia",
+    "latitude" => 41.2031,
+    "longitude" => -8.4417,
+    "radius_meters" => 6_412.7
+  }
+
+  describe "a town (town/1, pure)" do
+    test "the name is the geocoder's own fields, each said once, and the point is the placemark's" do
+      assert AppleMaps.town(@placemark) ==
+               {:ok,
+                %{
+                  name: "Vessmark, Ostrel, Varonia",
+                  latitude: 41.2031,
+                  longitude: -8.4417,
+                  radius_meters: 6_413
+                }}
+    end
+
+    test "a part equal to the one before it, in any case, is dropped; a blank one too" do
+      same = %{@placemark | "administrative_area" => "VESSMARK", "locality" => " "}
+      assert {:ok, %{name: "Vessmark, Varonia"}} = AppleMaps.town(same)
+
+      misread = %{@placemark | "name" => "Brisa", "locality" => "Kestrin"}
+      assert {:ok, %{name: "Brisa, Kestrin, Ostrel, Varonia"}} = AppleMaps.town(misread)
+
+      unnamed = Map.delete(@placemark, "name")
+      assert {:ok, %{name: "Vessmark, Ostrel, Varonia"}} = AppleMaps.town(unnamed)
+    end
+
+    test "the radius is the geocoder's own, rounded and at least 1 m" do
+      assert {:ok, %{radius_meters: 1}} = AppleMaps.town(%{@placemark | "radius_meters" => 0.2})
+
+      assert {:ok, %{radius_meters: 1_273_000}} =
+               AppleMaps.town(%{@placemark | "radius_meters" => 1_273_000.4})
+    end
+
+    test "a placemark with neither a locality nor an administrative area is no town" do
+      country = Map.drop(@placemark, ["locality", "administrative_area"])
+      assert {:error, "not_a_town: " <> _words} = AppleMaps.town(country)
+
+      assert {:ok, %{name: "Ostrel, Varonia"}} =
+               AppleMaps.town(Map.drop(@placemark, ["name", "locality"]))
+    end
+
+    test "a placemark with no region of its own is no town: no radius is invented" do
+      assert {:error, "not_a_town: " <> _words} =
+               AppleMaps.town(Map.delete(@placemark, "radius_meters"))
+    end
+
+    # An ocean or a continent is no town, kept as none, so it leaves the
+    # placer's window rather than being asked on every run.
+    test "a region wider than any town's, or a country with one, is no town, never a changed parser" do
+      assert {:error, "not_a_town: " <> _words} =
+               AppleMaps.town(%{@placemark | "radius_meters" => 30_000_000})
+
+      country =
+        @placemark
+        |> Map.drop(["locality", "administrative_area"])
+        |> Map.put("radius_meters", 30_000_000)
+
+      assert {:error, "not_a_town: " <> _words} = AppleMaps.town(country)
+    end
+
+    test "a name of nothing but control characters is no town" do
+      blank = %{
+        "locality" => "\u0090",
+        "latitude" => 41.2031,
+        "longitude" => -8.4417,
+        "radius_meters" => 6_412.7
+      }
+
+      assert {:error, "not_a_town: " <> _words} = AppleMaps.town(blank)
+    end
+
+    test "a name is sanitized and cut to 120 bytes on a character boundary" do
+      long = String.duplicate("Ostrelândia ", 20)
+      assert {:ok, %{name: name}} = AppleMaps.town(%{@placemark | "administrative_area" => long})
+      assert byte_size(name) <= 120 and String.valid?(name)
+      assert String.starts_with?(name, "Vessmark, Ostrelândia")
+
+      # No control character: the wire's reserve for a town counts on it.
+      control = %{@placemark | "country" => "Varo\u0001nia\u007F"}
+      assert {:ok, %{name: "Vessmark, Ostrel, Varonia"}} = AppleMaps.town(control)
+
+      tagged = %{@placemark | "name" => "<b>Vessmark</b>", "locality" => nil}
+      assert {:ok, %{name: "Vessmark, Ostrel, Varonia"}} = AppleMaps.town(tagged)
+    end
+
+    test "a field of an unexpected type, or a point out of range, is a changed parser" do
+      for broken <- [
+            %{@placemark | "latitude" => "41.2"},
+            %{@placemark | "latitude" => 91},
+            Map.delete(@placemark, "longitude"),
+            %{@placemark | "country" => 7},
+            %{@placemark | "radius_meters" => -3},
+            %{@placemark | "radius_meters" => "6 km"},
+            "Vessmark"
+          ] do
+        assert {:error, "parser_changed: " <> _detail} = AppleMaps.town(broken),
+               "#{inspect(broken)} was read as a town"
+      end
+    end
+  end
+
+  describe "the geocode request" do
+    test "a near travels alone as one geocode line on stdin, and its placemark is the town",
+         ctx do
+      helper = fake_helper(ctx.dir, %{"placemark" => @placemark}, 0)
+
+      assert {:ok, %{name: "Vessmark, Ostrel, Varonia", radius_meters: 6_413}, %{}} =
+               AppleMaps.geocode("Vessmark, Ostrel, Varonia", helper_opts(helper))
+
+      assert recorded_request(ctx.dir) == %{"geocode" => "Vessmark, Ostrel, Varonia"}
+      assert recorded_args(ctx.dir) == []
+    end
+
+    test "a near the geocoder finds no place by is invalid_location, as a search's", ctx do
+      words = %{"error" => %{"message" => "kCLErrorDomain 8: no result"}}
+      helper = fake_helper(ctx.dir, words, 65)
+
+      assert {:error, "invalid_location: Apple Maps found no place by that name" <> _, %{}} =
+               AppleMaps.geocode("Vessmark", helper_opts(helper))
+    end
+
+    test "a placemark that is no town, or stdout that is no placemark, is an error", ctx do
+      country = Map.drop(@placemark, ["locality", "administrative_area"])
+      helper = fake_helper(ctx.dir, %{"placemark" => country}, 0)
+
+      assert {:error, "not_a_town: " <> _words, %{}} =
+               AppleMaps.geocode("Varonia", helper_opts(helper))
+
+      for stdout <- ["not json", %{"places" => []}, %{"placemark" => "Vessmark"}] do
+        helper = fake_helper(ctx.dir, stdout, 0)
+
+        assert {:error, "parser_changed: " <> _detail, %{}} =
+                 AppleMaps.geocode("Vessmark", helper_opts(helper))
+      end
+    end
+  end
+
   # -- helpers ---------------------------------------------------------------
 
   defp named, do: %{query: "tacos", anchor: {:location, "Suwanee, GA"}, count: 5}

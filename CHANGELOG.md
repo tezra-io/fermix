@@ -843,6 +843,17 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   its own encrypted connection, as it does your lists. On a phone whose app
   does not draw trips yet, and on every other channel, a reply writes out the
   days that changed, each place linked.
+- **Every day of a trip shows its town on the map, stops or not.** When a trip
+  or a day is given its town, Fermix finds it once with Apple Maps, on your
+  Mac or on a Mac of your home, and the Mac app frames each day around it: the
+  day's own town, or else the trip's. The reply that set it says what it was
+  found as ("Portland, OR, United States"), so a town read as another of the
+  same name is easy to spot and fix by naming its region. A town that could
+  not be looked up yet (no Mac online, Apple Maps busy or throttled) is looked
+  up again later on its own, or when Fermix starts, a Mac connects or the trip
+  next changes, and an open trip shows it land. A country given as a trip's
+  town shows none, and a home whose place search is Brave shows no towns,
+  since Brave cannot look a town up on its own.
 - **Your lists on your phone, live.** A paired phone now reads and changes
   your lists as the Mac app does. A reply that read or changed a list shows
   the list under it, and you tick, add, edit, move and restore items there.

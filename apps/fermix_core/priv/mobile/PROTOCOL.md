@@ -1851,10 +1851,13 @@ starts or ends a trip, when that moves the order.
 
 A trip holds at most 1,000 days and stops. An op that can grow a trip is
 refused when its whole `trip`, with the `removed[]` a pull with `removed:
-true` carries, would pass 768 KiB; removing, moving and restoring are never
-refused and add under 70 KB, so a trip goes as one `companion_line` cut into
-chunks inside the 1 MiB line (the fixtures carry a trip of 1,000 rows in
-four).
+true` carries and the widest town on every day (a day's `town`, found after
+the call that made it), would pass 768 KiB; removing, moving and restoring
+are never refused and add under 70 KB, so a trip goes as one
+`companion_line` cut into chunks inside the 1 MiB line (the fixtures carry a
+trip of 1,000 rows, a town on every day, in four). A day row is the
+companion wire's, `town` and all: the phone draws a day's town from it and
+geocodes nothing.
 
 Once the channel has pulled the trips index, a phone at protocol 3 says its
 turns draw trips: a reply that read or changed a trip carries the `trips`

@@ -1,8 +1,10 @@
 defmodule FermixCore.Trips.Placer do
   @moduledoc """
   The trip placer (M89 D13 B): places the stops a trip keeps waiting
-  (`Trips.Waiting`) once the home's place search can run again. Primary-only,
-  in `FermixCore.Supervisor`'s tree.
+  (`Trips.Waiting`) once the home's place search can run again, and on the
+  same runs finds the town of each near in force that has none yet
+  (`Trips.Towns`), so a trip with nothing but such a near still gets a run on
+  each wake below. Primary-only, in `FermixCore.Supervisor`'s tree.
 
   **What wakes it**, each a cast or a timer of its own, never a poll:
 
@@ -10,7 +12,9 @@ defmodule FermixCore.Trips.Placer do
     * **a Mac that offers places**: `Computers.Registry` tells it when a
       computer's offers list Apple Maps on (`places_offered/2`);
     * **its one timer**: armed by a call that saved a wait
-      (`waits_saved/1`, 5 min on) and by each run's answer (`Run`'s
+      (`waits_saved/1`, 5 min on), by a call that left a town for a reason
+      that heals (`towns_unresolved/1`, 30 min on, `Trips.Towns`) and by
+      each run's answer (`Run`'s
       `next_ms`: Brave's reset while the key is spent, 5 min while waits are
       due, 6 h while no Mac that offers places is online, never later than
       the next wait put off comes due), the earlier of two wakes standing,
@@ -50,6 +54,7 @@ defmodule FermixCore.Trips.Placer do
 
   alias FermixCore.Trips.Placer.Run
   alias FermixCore.Trips.Telemetry
+  alias FermixCore.Trips.Waiting
 
   @soon_ms 5 * 60_000
   @min_wake_ms 60_000
@@ -75,6 +80,14 @@ defmodule FermixCore.Trips.Placer do
   @doc "A call saved a waiting stop: look again in 5 min unless sooner is armed."
   @spec waits_saved(GenServer.server()) :: :ok
   def waits_saved(server \\ __MODULE__), do: GenServer.cast(server, :saved)
+
+  @doc """
+  A call left a trip's town for a reason that heals by waiting, or past its
+  cap: look again 30 min on (`Trips.Waiting.retry_in_s/1`'s first wait)
+  unless sooner is armed.
+  """
+  @spec towns_unresolved(GenServer.server()) :: :ok
+  def towns_unresolved(server \\ __MODULE__), do: GenServer.cast(server, :towns_unresolved)
 
   @impl true
   def init(opts) do
@@ -104,6 +117,11 @@ defmodule FermixCore.Trips.Placer do
   def handle_cast({:trigger, trigger}, state), do: {:noreply, trigger(state, trigger)}
   def handle_cast(:saved, %{enabled?: true} = state), do: {:noreply, arm(state, @soon_ms)}
   def handle_cast(:saved, state), do: {:noreply, state}
+
+  def handle_cast(:towns_unresolved, %{enabled?: true} = state),
+    do: {:noreply, arm(state, Waiting.retry_in_s(1) * 1_000)}
+
+  def handle_cast(:towns_unresolved, state), do: {:noreply, state}
 
   @impl true
   def handle_info({ref, result}, %{running: %{ref: ref}} = state) when is_reference(ref) do

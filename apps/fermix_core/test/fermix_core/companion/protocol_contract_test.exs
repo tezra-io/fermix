@@ -52,6 +52,7 @@ defmodule FermixCore.Companion.ProtocolContractTest do
   @version_8_trip_server_events ~w(trips trip trip_shared)
   # The fields a stop's place keeps (`Trips.Place`, C32).
   @trip_place_fields ~w(name location address apple_place_id source_url canonical_url categories)
+  @trip_town_fields ~w(latitude longitude name radius_meters)
   # The characters an engine-minted id is made of (`Kept.Ids`): no i, l, o, u.
   @minted_trip_id ~r/\At[ri]_[0-9a-hjkmnp-tv-z]{10}\z/
   # The follow-up's fields of a card version 5 brought (M60_WATCHER_CODING_RUNS.md §6.2).
@@ -328,6 +329,14 @@ defmodule FermixCore.Companion.ProtocolContractTest do
 
     assert Enum.sort(defs["tripPlace"]["required"]) == ~w(location name)
 
+    # M89: a day's town, the keys `Trips.Wire` writes, on a day alone.
+    town = defs["tripTown"]
+    assert town["properties"] |> Map.keys() |> Enum.sort() == @trip_town_fields
+    assert Enum.sort(town["required"]) == @trip_town_fields
+    assert town["properties"]["name"]["x-max-bytes"] == 120
+    assert town["properties"]["radius_meters"]["minimum"] == 1
+    assert defs["tripRow"]["properties"]["town"] == %{"$ref" => "#/$defs/tripTown"}
+
     edits = @client_fixtures |> jsonl() |> Enum.filter(&(&1["type"] == "trip_edit"))
 
     assert edits |> Enum.map(& &1["op"]["op"]) |> MapSet.new() ==
@@ -384,6 +393,19 @@ defmodule FermixCore.Companion.ProtocolContractTest do
     assert Enum.any?(trips, &Map.has_key?(&1["trip"], "removed_at"))
     assert Enum.any?(trips, &Map.has_key?(&1["trip"], "removed"))
     assert Enum.any?(trips, &(not Map.has_key?(&1["trip"], "starts_on")))
+
+    days = Enum.filter(rows, &(&1["kind"] == "day"))
+    assert Enum.any?(days, &Map.has_key?(&1, "town"))
+    assert Enum.any?(days, &(not Map.has_key?(&1, "town")))
+    refute Enum.any?(stops, &Map.has_key?(&1, "town"))
+
+    for %{"town" => town} <- days do
+      assert town |> Map.keys() |> Enum.sort() == @trip_town_fields
+      assert is_integer(town["radius_meters"]) and town["radius_meters"] >= 1
+    end
+
+    removed = Enum.flat_map(trips, &Map.get(&1["trip"], "removed", []))
+    refute Enum.any?(removed, &Map.has_key?(&1, "town"))
   end
 
   defp assert_trips_documented(protocol) do
@@ -407,6 +429,14 @@ defmodule FermixCore.Companion.ProtocolContractTest do
     section = String.replace(section, ~r/\s+/, " ")
     assert flat =~ "A phone carries the trips' events over its list channel on the mobile wire"
     assert section =~ "**A phone's list channel.**"
+
+    # M89: what a day's town is, when it is absent, and that no client geocodes.
+    assert section =~ "`town` only once the near in force for it is found"
+    assert section =~ "never borrows the trip's"
+    assert section =~ "the found place's own point"
+    assert section =~ "a scale, never a search's bounds"
+    assert section =~ "No client geocodes"
+    assert section =~ "and the widest town on every day"
     assert section =~ ~s(made via the phone \(`made_via: "phone"`\))
 
     for op <- TripRegistry.device_ops() do

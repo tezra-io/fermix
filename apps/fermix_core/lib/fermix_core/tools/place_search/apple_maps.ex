@@ -23,6 +23,13 @@ defmodule FermixCore.Tools.PlaceSearch.AppleMaps do
   the request names one. Either region is required, so no result comes from
   around the Mac.
 
+  A trip's near is geocoded alone (M89) by the second form,
+  `{"geocode": "<words>"}`, which prints `{"placemark": {...}}`: the
+  geocoder's own `name`, `locality`, `administrative_area` and `country`, the
+  placemark's own point (`latitude`, `longitude`, never its region's centre)
+  and its region's raw `radius_meters`, each but the point only when the
+  geocoder gave it. The town is the engine's to make of them (`town/1`).
+
   One request line goes in on stdin, never on the command line, where every
   process on the Mac could read the place being searched. Exit 0 prints
   `{"places": [...]}`; a failure prints `{"error": {"message": ...}}` in the
@@ -58,15 +65,36 @@ defmodule FermixCore.Tools.PlaceSearch.AppleMaps do
   price, hours, description, cuisines and pictures are absent: MapKit's search
   does not carry them. A result with neither an identifier nor an HTTPS site
   has no page to link and is dropped.
+
+  ## The town
+
+  `name` is the placemark's `name`, `locality`, `administrative_area` and
+  `country` in that order, sanitized with no control character, a blank part
+  dropped and a part equal to the one before it, in any case, dropped
+  ("Kyoto, Japan"), joined and cut to #{120} bytes; `latitude` and
+  `longitude` the placemark's own point; `radius_meters` its region's radius,
+  rounded and at least 1. A placemark with neither a locality nor an
+  administrative area (a country), with no region of its own or one wider
+  than any town's, or whose name comes to nothing, is no town
+  (`not_a_town`): its point would mark a day where no town is, and no radius
+  is invented.
   """
 
   @behaviour FermixCore.Tools.PlaceSearch.Backend
 
   alias FermixCore.ProcessGroup
+  alias FermixCore.Text
   alias FermixCore.Tools.PlaceSearch.Backend
   alias FermixCore.Tools.SnippetSanitizer
 
   @timeout_ms 15_000
+  @max_town_bytes 120
+  # Half the Earth's circumference: no region a geocoder draws is wider.
+  @max_region_meters 20_037_509
+  @town_parts ~w(name locality administrative_area country)
+  # A town's name carries no control character, so the wire's reserve for it
+  # (`Trips.Wire.town_bytes/0`) holds: the encoder at most doubles a byte.
+  @control ~r/[\x{0000}-\x{001F}\x{007F}-\x{009F}]/u
   @max_stdout_bytes 1_048_576
   @max_places 10
   @default_radius_meters 5_000
@@ -142,6 +170,57 @@ defmodule FermixCore.Tools.PlaceSearch.AppleMaps do
       decode(stdout)
     end
   end
+
+  @doc """
+  The town `words` name (M89): one helper geocode, made into the town by
+  `town/1`, or its tagged reason. `opts` as `search/2`'s.
+  """
+  @impl true
+  @spec geocode(String.t(), keyword()) ::
+          {:ok, Backend.town(), Backend.trace_metadata()}
+          | {:error, String.t(), Backend.trace_metadata()}
+  def geocode(words, opts) when is_binary(words) and is_list(opts) do
+    with {:ok, raw} <- raw_geocode(words, opts),
+         {:ok, town} <- town(raw) do
+      {:ok, town, %{}}
+    else
+      {:error, reason} -> {:error, reason, %{}}
+    end
+  end
+
+  @doc """
+  One helper geocode's raw placemark, as `fermix-maps` printed it, or its
+  tagged reason: `geocode/2` without the town. A Mac of the home answers its
+  server with this (`Computers.Capabilities.Places`), and the server makes the
+  town of it with `town/1`, as a geocode here does.
+  """
+  @spec raw_geocode(String.t(), keyword()) :: {:ok, term()} | {:error, String.t()}
+  def raw_geocode(words, opts) when is_binary(words) and is_list(opts) do
+    line = Jason.encode!(%{"geocode" => String.trim(words)})
+
+    with {:ok, {executable, args}} <- plan(opts),
+         {:ok, stdout} <- run(executable, args, line, timeout(opts)) do
+      decode_placemark(stdout)
+    end
+  end
+
+  @doc """
+  The town a helper's raw placemark is (pure, the moduledoc): the town, or
+  `not_a_town` for a placemark that names no town, or `parser_changed` for a
+  field of an unexpected type, never a guess.
+  """
+  @spec town(term()) :: {:ok, Backend.town()} | {:error, String.t()}
+  def town(%{} = raw) do
+    with {:ok, latitude, longitude} <- town_point(raw),
+         {:ok, parts} <- town_parts(raw),
+         :ok <- a_town(parts),
+         {:ok, radius} <- town_radius(raw),
+         {:ok, name} <- town_name(parts) do
+      {:ok, %{name: name, latitude: latitude, longitude: longitude, radius_meters: radius}}
+    end
+  end
+
+  def town(_raw), do: {:error, parser_changed("placemark", "an object")}
 
   @doc """
   The spawn target and argv: on macOS through the `disclaim` exec shim, so the
@@ -370,6 +449,76 @@ defmodule FermixCore.Tools.PlaceSearch.AppleMaps do
       {:ok, _other} -> {:error, parser_changed("places", "an array")}
       {:error, %Jason.DecodeError{position: at}} -> {:error, "parser_changed: not JSON at #{at}"}
     end
+  end
+
+  defp decode_placemark(stdout) do
+    case Jason.decode(String.trim(stdout)) do
+      {:ok, %{"placemark" => %{} = placemark}} -> {:ok, placemark}
+      {:ok, _other} -> {:error, parser_changed("placemark", "an object")}
+      {:error, %Jason.DecodeError{position: at}} -> {:error, "parser_changed: not JSON at #{at}"}
+    end
+  end
+
+  # -- the town (pure) -------------------------------------------------------
+
+  defp town_point(raw) do
+    case location(raw) do
+      {:ok, %{latitude: latitude, longitude: longitude}} -> {:ok, latitude, longitude}
+      {:ok, nil} -> {:error, parser_changed("latitude/longitude", "present")}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp town_parts(raw) do
+    Enum.reduce_while(@town_parts, {:ok, %{}}, fn key, {:ok, parts} ->
+      case text(raw, key) do
+        {:ok, value} -> {:cont, {:ok, Map.put(parts, key, value)}}
+        {:error, reason} -> {:halt, {:error, reason}}
+      end
+    end)
+  end
+
+  # A placemark with no region of its own, or one wider than any town's (an
+  # ocean, a continent), names no town: kept as none, it is asked no more.
+  defp town_radius(raw) do
+    case Map.get(raw, "radius_meters") do
+      nil ->
+        {:error, "not_a_town: the geocoder gave the place it found no region"}
+
+      meters when is_number(meters) and meters > @max_region_meters ->
+        {:error, "not_a_town: the geocoder's region for the place is wider than any town"}
+
+      meters when is_number(meters) and meters > 0 ->
+        {:ok, max(round(meters), 1)}
+
+      _other ->
+        {:error, parser_changed("radius_meters", "a radius in metres")}
+    end
+  end
+
+  # A country alone names no town.
+  defp a_town(%{"locality" => nil, "administrative_area" => nil}),
+    do: {:error, "not_a_town: the geocoder found a place that is no town or city"}
+
+  defp a_town(_parts), do: :ok
+
+  # A name left with nothing (its parts only control characters) is no town.
+  defp town_name(parts) do
+    name =
+      @town_parts
+      |> Enum.map(&Map.fetch!(parts, &1))
+      |> Enum.reject(&is_nil/1)
+      |> Enum.dedup_by(&String.downcase/1)
+      |> Enum.join(", ")
+      |> SnippetSanitizer.sanitize()
+      |> String.replace(@control, "")
+      |> Text.truncate_utf8(@max_town_bytes)
+      |> String.trim()
+      |> String.trim_trailing(",")
+
+    if name == "",
+      do: {:error, "not_a_town: the geocoder named the place it found with nothing"},
+      else: {:ok, name}
   end
 
   # -- the record (pure) -----------------------------------------------------

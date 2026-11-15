@@ -460,6 +460,92 @@ defmodule FermixOpik.AggregationTest do
       refute Map.has_key?(edit, :error_info)
     end
 
+    # M89: what an edit's towns did rides its span, and a placer run's close.
+    test "an edit's towns ride its span: geocodes, found, none, and what stopped them" do
+      {_state, closed} =
+        run([
+          {[:fermix, :trip, :edit],
+           %{
+             duration_us: 4_000,
+             trips: 1,
+             ops: 1,
+             lookups: 0,
+             placed: 0,
+             offered: 0,
+             not_found: 0,
+             not_looked_up: 0,
+             towns: 2,
+             towns_found: 1,
+             towns_not_found: 1
+           },
+           %{
+             component: "trips",
+             made_via: "chat",
+             outcome: :ok,
+             error_code: nil,
+             backend: "computer",
+             rate_limited: false,
+             towns_stop_reason: :computer_refused,
+             session_id: "main-1"
+           }},
+          {[:fermix, :agent, :message], %{iterations: 1, total_tokens: 10},
+           %{channel: :telegram, chat_id: "c1", sender: "u1", session_id: "main-1", agent: "main"}}
+        ])
+
+      assert [%{spans: spans}] = closed
+      edit = span_named(spans, "trip_edit")
+
+      assert %{
+               towns: 2,
+               towns_found: 1,
+               towns_not_found: 1,
+               towns_stop_reason: "computer_refused"
+             } =
+               edit.metadata
+    end
+
+    test "a placer run's close carries what its towns did" do
+      meta = %{component: "trips", session_id: "trip_place:fedcba9876543210", trigger: :boot}
+
+      {_state, closed} =
+        run([
+          {[:fermix, :trip_place, :run_start], %{waiting: 0, expired: 0, unresolved_towns: 3},
+           meta},
+          {[:fermix, :trip_place, :run_complete],
+           %{
+             duration_us: 9_000,
+             placed: 0,
+             waiting: 0,
+             stopped_waiting: 0,
+             expired: 0,
+             superseded: 0,
+             lookups: 0,
+             trips: 1,
+             failed: 0,
+             towns: 3,
+             towns_found: 1,
+             towns_not_found: 1
+           },
+           Map.merge(meta, %{
+             backend: "apple_maps",
+             skipped: nil,
+             stop_reason: nil,
+             stop_code: nil,
+             towns_stop_reason: :rate_limited
+           })}
+        ])
+
+      assert [%{trace: trace}] = closed
+
+      assert %{
+               unresolved_towns: 3,
+               towns: 3,
+               towns_found: 1,
+               towns_not_found: 1,
+               towns_stop_reason: "rate_limited"
+             } = trace.metadata
+    end
+
     # M89 D13 B: placing the stops a trip keeps waiting is a run of its own,
     # minted `trip_place:<hex>` by the engine: a root, its trip writes nested
     # under it by the shared session id, closed with what it placed.

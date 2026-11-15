@@ -179,6 +179,18 @@ defmodule FermixCore.Tools.PlaceSearch.Brave do
     end
   end
 
+  @doc """
+  A near's town (M89): unsupported, with nothing sent. Brave's place search
+  answers `results` alone and says nowhere where it searched, and a result's
+  own address is that place's, not the town's, so no town is made of it.
+  """
+  @impl true
+  @spec geocode(String.t(), keyword()) :: {:error, String.t(), trace_metadata()}
+  def geocode(words, opts) when is_binary(words) and is_list(opts) do
+    {:error, "unsupported: Brave's place search names no town, so none was looked up",
+     %{attempt: 0}}
+  end
+
   defp send_terms!(opts) do
     checked_terms(%{
       within_ms: Keyword.get(opts, :send_within_ms, @send_within_ms),

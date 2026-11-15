@@ -721,7 +721,9 @@ defmodule FermixOpik.Mapper do
   Build a point span from a `[:fermix, :trip, :read | :edit]` event — one
   read or one edit of the owner's trips (M89), lasting the store's
   transaction, with what the edit's place lookups did and what stopped them
-  (`stop_reason`, and `stop_code`, the place search's own code). Counts,
+  (`stop_reason`, and `stop_code`, the place search's own code), and what its
+  towns did (M89: `towns`, `towns_found`, `towns_not_found` and
+  `towns_stop_reason`). Counts,
   Fermix's own words and the provider's codes only: a title, a stop's words, a
   place and a coordinate never ride. A
   refused or failed call is flagged errored with its tag. `session_id` places
@@ -751,6 +753,9 @@ defmodule FermixOpik.Mapper do
           :offered,
           :not_found,
           :not_looked_up,
+          :towns,
+          :towns_found,
+          :towns_not_found,
           :duration_us
         ])
         |> Map.merge(%{
@@ -760,7 +765,8 @@ defmodule FermixOpik.Mapper do
           backend: Map.get(metadata, :backend),
           rate_limited: Map.get(metadata, :rate_limited),
           stop_reason: stringify(Map.get(metadata, :stop_reason)),
-          stop_code: Map.get(metadata, :stop_code)
+          stop_code: Map.get(metadata, :stop_code),
+          towns_stop_reason: stringify(Map.get(metadata, :towns_stop_reason))
         })
         |> drop_nil()
     }

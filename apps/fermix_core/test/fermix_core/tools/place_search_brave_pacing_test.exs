@@ -513,6 +513,57 @@ defmodule FermixCore.Tools.PlaceSearch.BravePacingTest do
     end
   end
 
+  # M89: Brave's place search names no town, so a Brave home's trip_edit
+  # says nothing of towns, whatever stopped its lookups.
+  describe "a trip_edit call on Brave" do
+    setup do
+      db_path = Path.join(System.tmp_dir!(), "fermix-brave-towns-#{unique()}.db")
+      repo = :"brave_towns_repo_#{unique()}"
+
+      start_supervised!(
+        {FermixCore.Memory.Repo, name: repo, enabled: true, database_path: db_path}
+      )
+
+      on_exit(fn ->
+        Enum.each([db_path, "#{db_path}-wal", "#{db_path}-shm"], &FermixTestSupport.SafeRm.rm/1)
+      end)
+
+      %{repo: repo}
+    end
+
+    test "with the lookups rate limited, its answer names no town", ctx do
+      context =
+        ctx
+        |> stub(fn conn -> rate_limited(conn, rate(nil, "0, 14999", "1, 1419704")) end)
+        |> Map.merge(%{
+          source_trust: :operator,
+          computer_use_origin: :interactive,
+          chat_type: "private",
+          outside_sources: MapSet.new()
+        })
+
+      ops = [
+        %{"op" => "create", "days" => 2, "near" => "Lisbon, Portugal"},
+        %{"op" => "add", "text" => "Lunch", "day" => 1, "place" => "Prado"}
+      ]
+
+      opts = [
+        repo: ctx.repo,
+        reply_blocks: holder(),
+        notifier: fn _changes -> :ok end,
+        placer: fn -> :ok end,
+        day_turn: fn -> :ok end
+      ]
+
+      assert {:ok, %{text: text}} =
+               FermixCore.Trips.Registry.edit(%{"trip" => "Lisbon", "ops" => ops}, context, opts)
+
+      assert text =~ "the place search is rate limited"
+      refute text =~ "Town"
+      refute text =~ "found as"
+    end
+  end
+
   describe "the application's pacer" do
     test "is started under its name, and a search that names no pacer goes through it" do
       pacer = Process.whereis(Pacer)

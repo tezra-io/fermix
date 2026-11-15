@@ -3,7 +3,7 @@ defmodule FermixChannels.Companion.TripsTest do
   M89 §06: what a companion connection sends of the owner's trips is the
   companion goldens, exactly: the index of a dated, an undated and a past
   trip, a whole trip with its dates, its places, a leg past an unplaced stop and what
-  a device's add made, the trip a create made, a removed trip with the rows
+  a device's add made, a day with its town and one whose own near has none, the trip a create made, a removed trip with the rows
   removed from it, and the shared form, each built by `Companion.Trips` from
   what the store hands it. Pure.
   """
@@ -63,14 +63,20 @@ defmodule FermixChannels.Companion.TripsTest do
   end
 
   test "a whole trip is the golden's, with what a device's add made" do
-    snapshot = %{trip: varonne(), rows: varonne_rows(), removed_rows: []}
+    snapshot = %{trip: varonne(), rows: varonne_rows(), removed_rows: [], towns: varonne_towns()}
     made = %{"mac-61" => "ti_2k6n8q4s7w"}
 
     assert Trips.object_payload("main", snapshot, false, made) == golden("trip", 1)
   end
 
   test "the trip a create made is the golden's: one unnamed day, no start" do
-    snapshot = %{trip: orvenne(), rows: [row(:day, "ti_8c4f2h6j0k", "")], removed_rows: []}
+    snapshot = %{
+      trip: orvenne(),
+      rows: [row(:day, "ti_8c4f2h6j0k", "")],
+      removed_rows: [],
+      towns: %{}
+    }
+
     made = %{"mac-60" => "tr_9t3k6w0p5h"}
 
     assert Trips.object_payload("main", snapshot, false, made) == golden("trip", 0)
@@ -85,7 +91,8 @@ defmodule FermixChannels.Companion.TripsTest do
       rev: 6,
       starts_on: ~D[2031-04-11],
       timezone: nil,
-      removed_at: ~U[2031-05-20 08:00:00.000000Z]
+      removed_at: ~U[2031-05-20 08:00:00.000000Z],
+      near: nil
     }
 
     rows = [
@@ -101,7 +108,7 @@ defmodule FermixChannels.Companion.TripsTest do
       })
     ]
 
-    snapshot = %{trip: trip, rows: rows, removed_rows: removed}
+    snapshot = %{trip: trip, rows: rows, removed_rows: removed, towns: %{}}
     assert Trips.object_payload("main", snapshot, true, %{}) == golden("trip", 2)
 
     # Pulled without them, the trip carries none, and says it was removed.
@@ -142,7 +149,21 @@ defmodule FermixChannels.Companion.TripsTest do
       rev: 12,
       starts_on: ~D[2031-07-05],
       timezone: "Europe/Lisbon",
-      removed_at: nil
+      removed_at: nil,
+      near: "Varonne, Ostrel, Varonia"
+    }
+  end
+
+  # M89: the trip's near, found; the harbour day's own near is not yet, so that
+  # day shows no town, never the trip's.
+  defp varonne_towns do
+    %{
+      "Varonne, Ostrel, Varonia" => %{
+        name: "Varonne, Ostrel, Varonia",
+        latitude: 38.5418,
+        longitude: -27.2093,
+        radius_meters: 2_140
+      }
     }
   end
 
@@ -153,7 +174,8 @@ defmodule FermixChannels.Companion.TripsTest do
       rev: 1,
       starts_on: nil,
       timezone: nil,
-      removed_at: nil
+      removed_at: nil,
+      near: nil
     }
   end
 
@@ -172,7 +194,7 @@ defmodule FermixChannels.Companion.TripsTest do
         note: "Table for two",
         place: @tavern
       }),
-      row(:day, "ti_9a1b5c7d3e", "Harbour"),
+      row(:day, "ti_9a1b5c7d3e", "Harbour", %{near: "Porto Velho, Ostrel, Varonia"}),
       row(:stop, "ti_6m3p9r1t5y", "Boat to the lighthouse", %{
         time: "11:30",
         duration: 45,
@@ -202,6 +224,7 @@ defmodule FermixChannels.Companion.TripsTest do
         updated_at: @now,
         removed_at: nil,
         removed_with: nil,
+        near: nil,
         dirty: nil
       },
       fields

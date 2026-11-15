@@ -59,17 +59,20 @@ defmodule FermixCore.Trips.Placing do
   @doc """
   The lookups `call` needs over `loaded` (`%{trips:, rows:}`, as `Ops.apply/3`
   takes it) under `edit`: one request a place given, with the day its stop
-  lands in, and the anchors they search around (`Lookup.anchors()`).
+  lands in, the anchors they search around (`Lookup.anchors()`), whose nears
+  are also the ones in force as the call leaves the trip, and whether the
+  call changes the trip at all (a call that changes nothing asks no town).
   """
   @spec requests(map(), map(), map()) ::
-          {:ok, [Lookup.request()], Lookup.anchors()} | {:error, term()}
+          {:ok, [Lookup.request()], Lookup.anchors(), boolean()} | {:error, term()}
   def requests(loaded, %{ops: ops} = call, edit) when is_map(loaded) and is_map(edit) do
     marked = %{call | ops: ops |> Enum.with_index(1) |> Enum.map(&marked/1)}
 
-    with {:ok, %{trip: trip, rows: rows}} <- Ops.apply(loaded, marked, edit) do
+    with {:ok, %{trip: trip, rows: rows, changed?: changed?}} <- Ops.apply(loaded, marked, edit) do
       days = Ops.days(rows)
       requests = Enum.sort_by(Enum.flat_map(days, &day_requests(&1, ops)), & &1.ref)
-      {:ok, requests, %{placed: placed(days), day_near: day_near(days), trip_near: trip.near}}
+      anchors = %{placed: placed(days), day_near: day_near(days), trip_near: trip.near}
+      {:ok, requests, anchors, changed?}
     end
   end
 
