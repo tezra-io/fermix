@@ -122,7 +122,7 @@
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/desktop/relay.ex#hello_ack,connected,known,keep_epoch,invocation @ 8e756ac63656
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/mobile/lanes.ex @ 2c6c6a6d807e
 \* SOURCE: apps/fermix_core/lib/fermix_core/computers/capabilities/browser.ex#run @ bcd156a3a978
-\* SOURCE: apps/fermix_core/lib/fermix_core/browser/held_turn.ex @ 030374c72d18
+\* SOURCE: apps/fermix_core/lib/fermix_core/browser/held_turn.ex @ a61d642f6fa0
 
 EXTENDS Naturals, FiniteSets, TLC
 
@@ -185,7 +185,7 @@ CONSTANTS
                         \* gave_up/4, :368-379); FALSE waits for ever
     HeldEndsWithRun,    \* a held turn runs each request linked to the run
                         \* that made it (HeldTurn.handle_call {:run, fun},
-                        \* held_turn.ex:156-167; link/1, :246), so whatever
+                        \* held_turn.ex:156-167; link/1, :257), so whatever
                         \* ends the run (stop_task/2's terminate_child, a
                         \* restart of Desktop.Invoke's :one_for_all) ends the
                         \* request, and a request whose run is gone is never
