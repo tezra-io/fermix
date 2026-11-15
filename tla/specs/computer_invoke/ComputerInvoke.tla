@@ -116,7 +116,7 @@
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/desktop/invoke_family.ex#init,handle_event,reconcile @ aafda1185bd7
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/desktop/device_supervisor.ex#children,invoke_spec @ 62d59181f365
 \* SOURCE: apps/fermix_core/lib/fermix_core/computers/switches.ex#write,forget,notify @ bc1e22104814
-\* SOURCE: apps/fermix_channels/lib/fermix_channels/desktop/relay.ex#hello_ack,connected,keep_epoch,invocation @ 2b7075eee2d1
+\* SOURCE: apps/fermix_channels/lib/fermix_channels/desktop/relay.ex#hello_ack,connected,keep_epoch,invocation @ e08370bf116e
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/mobile/lanes.ex @ 2c6c6a6d807e
 \* SOURCE: apps/fermix_core/lib/fermix_core/computers/capabilities/browser.ex#run @ bcd156a3a978
 \* SOURCE: apps/fermix_core/lib/fermix_core/browser/held_turn.ex @ 030374c72d18
@@ -665,10 +665,10 @@ ActHeld(id) ==
                    linkEpoch, stopped, hist_vars>>
 
 \* The home moves on: the computer's next session is with a newer copy, and
-\* it keeps that epoch in device/desktop.json (Relay.keep_epoch/3, relay.ex:983;
+\* it keeps that epoch in device/desktop.json (Relay.keep_epoch/3, relay.ex:1202;
 \* DesktopLink.record_epoch/3) before anything relies on it. A write that
 \* fails is no move: the newer copy's session is not used (connected/3,
-\* :910), so the relay and Admission read the one epoch, the file's.
+\* :1121), so the relay and Admission read the one epoch, the file's.
 MoveOn ==
     /\ HomeCanMoveOn /\ ~up /\ linkEpoch = ServerEpoch
     /\ linkEpoch' = ServerEpoch + 1

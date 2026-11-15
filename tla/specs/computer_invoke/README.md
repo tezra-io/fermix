@@ -690,6 +690,22 @@ changed. The change, and what it does to the model:
   guards (`:97-119`), and `AfterItsOpen` stands. The word joins a line
   that was there, so no `lanes.ex` line moves.
 
+## Re-read (M97, `a47dbc12`: a removed computer joins again, 2026-11-15)
+
+Read against `a47dbc12`, which staled the `relay.ex` pin. No modelled step
+changed. The change, and what it does to the model:
+- `relay.ex#connected` (`:1112-1123`): once `keep_epoch/3` (`:1202`) kept
+  the epoch, the relay keeps the route and then clears the link's `revoked`
+  mark (`keep_revoked/3`, `DesktopLink.record_revoked/3`), a later write of
+  the same file that keeps the raised epoch and is skipped when the mark is
+  already clear; one that fails is logged and the session still comes up.
+  The epoch is still written first, and a failed epoch write still drops
+  the newer copy's session (`:1121`), so `MoveOn` and the one epoch the
+  relay and Admission read stand. The mark is set at a `4003`, which ends
+  the session as before and is not modelled.
+- The spec's comment on `MoveOn` named `relay.ex:983` and `:910`, lines an
+  earlier change had already moved; it now names `:1202` and `:1121`.
+
 ## Findings
 
 ### INVOKE-2: a long-lived request a restart on the computer loses is answered by nothing while the session stays up
