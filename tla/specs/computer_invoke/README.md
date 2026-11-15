@@ -613,9 +613,11 @@ change, and what it does to the model:
   hands to `Calls` (`:87`), and `init/1` (`:66`) and `"invoke_restarted"`
   reconcile (`:119`).
 - `lanes.ex` (whole): `push_subscribe`, a phone's event, joined the
-  interactive lane with the direct Web Push route and left it when that
-  route was removed (`c31c1804d`). An `invoke_status` or `invoke_cancel`
-  rides its request's lane as before, so `AfterItsOpen` stands.
+  interactive lane with the direct Web Push route, left it when that route
+  was removed (`c31c1804d`), and is on it again with the push relay
+  (`883e6e4b7`; see the re-read of M99 S2 below). An `invoke_status` or
+  `invoke_cancel` rides its request's lane as before, so `AfterItsOpen`
+  stands.
 - The bounds: none here moves. The scene is still two calls, two ids each
   and the drops each check names; Admission's own bound (8 running, 32
   waiting) is unchanged and not modelled, and a `post` holds a running slot
@@ -673,6 +675,20 @@ modelled step changed. Each change, and what it does to the model:
   socket, a sibling of `Desktop.Invoke` and the dial subtree under the same
   `:one_for_one`, so none takes another down; `Desktop.Invoke` is still
   beside the dial subtree, never inside it, and `invoke_spec` is as it was.
+
+## Re-read (M99 S2, `883e6e4b`: push through Fermix's relay, 2026-11-14)
+
+Read against `883e6e4b`, which staled the `lanes.ex` pin. No modelled step
+changed. The change, and what it does to the model:
+- `lanes.ex` (whole): `push_subscribe`, the event in which a phone hands
+  its Fermix the subscription the relay pushes it through, is on the
+  interactive lane again (`@interactive`, `lanes.ex:76`), as from
+  `81b3fc25` to `c31c1804`. It is a phone's event, never a computer's or
+  the server's, and neither an `invoke_*` event nor in `@follow_request`
+  (`:62`), so the lane of a request and of its own `invoke_status` and
+  `invoke_cancel` is decided as before by the `interactive?` and `bulk?`
+  guards (`:97-119`), and `AfterItsOpen` stands. The word joins a line
+  that was there, so no `lanes.ex` line moves.
 
 ## Findings
 
