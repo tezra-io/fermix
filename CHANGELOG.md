@@ -422,9 +422,9 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   this Mac. To join your Fermix again, enter a new code from Add a computer."
   ("this computer" off a Mac), and a new code joins it again. It says so with
   Fermix stopped as well (`fermix home status`), and one whose server knows
-  it again by the time the code is entered keeps its link ("Your server knows
-  this computer again, so it keeps its link to it."). One removed while its
-  Fermix was stopped can join again once Fermix has started there.
+  it again by the time the code is entered keeps its link and is refused as
+  a computer with a Fermix of its own. One removed while its Fermix was
+  stopped can join again once Fermix has started there.
   Disconnect this computer does the same from the computer itself and deletes
   its key: a computer that joined says "This Mac is not connected to a
   Fermix." and is its own Fermix again once it restarts, and the one your home
