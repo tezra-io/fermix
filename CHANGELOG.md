@@ -1014,6 +1014,16 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Google sign-in no longer refuses the Chrome that Fermix opens.** Signing
+  in to Google there ended at "Couldn't sign you in. This browser or app may
+  not be secure", and sites behind a bot check turned it away too. Fermix
+  starts Chrome on a debugging port that Chrome picks, and Chrome marks a
+  browser started that way as automated (`navigator.webdriver`), which is what
+  those pages read. Chrome is now started with that mark off, so a page sees
+  the browser a person would open. Chrome shows its "unsupported command-line
+  flag" bar under the toolbar in that window; it can be closed. On a Linux
+  machine with no display Chrome still runs headless and still names itself
+  `HeadlessChrome`, which some sites refuse on its own.
 - **Coding runs no longer hang when Fermix was started from a terminal or a
   pipe.** Codex and Claude Code, and every other command Fermix streams, were
   handed Fermix's own input instead of an empty one, so with Fermix started
