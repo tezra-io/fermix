@@ -144,7 +144,7 @@ defmodule FermixCore.Capabilities.MCP.Config do
   @doc """
   The retired `[mcp.*]` section headers in `contents`, as written: today the
   inbound server's `[mcp.inbound*]` (M73). `from_toml/1` and `document/1` skip
-  them so a file that still has one boots; the caller says so.
+  them so a file that still has one boots, and `retired_notices/1` names them.
   """
   @spec retired_sections(String.t()) :: [String.t()]
   def retired_sections(contents) when is_binary(contents) do
@@ -152,6 +152,25 @@ defmodule FermixCore.Capabilities.MCP.Config do
     |> String.split(~r/\r?\n/)
     |> Enum.map(&String.trim/1)
     |> Enum.filter(&(String.starts_with?(&1, "[") and retired_section?(header_parts(&1))))
+  end
+
+  @doc """
+  The sentence that names the retired sections `contents` carries, `[]` for
+  none: the settings read that drops them names them with it
+  (`Setup.ConfigStore.say_retired_settings/0`).
+  """
+  @spec retired_notices(String.t()) :: [String.t()]
+  def retired_notices(contents) when is_binary(contents) do
+    case retired_sections(contents) do
+      [] ->
+        []
+
+      _sections ->
+        [
+          "config.toml [mcp.inbound] is retired: this build has no inbound MCP server, so " <>
+            "the section is ignored, and the next settings save writes the file without it."
+        ]
+    end
   end
 
   @doc """

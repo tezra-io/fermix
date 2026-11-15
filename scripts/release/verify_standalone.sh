@@ -828,11 +828,12 @@ one_ok_json_document "$status_out" ||
 # A settings file an earlier release wrote can carry a table this one retired,
 # Always On's test switch `[fermix_core.always_on]` above all, which every
 # home that tried Always On before it shipped still has. It must boot: the
-# table is accepted and ignored, and the process names it once at warning
-# (`FermixCore.Setup.RetiredSettings`), never once per settings load, which
-# the boot, the verb and every poll of a daemon repeat. Under `--json` the
-# notice is on stderr, and the file is left as it was: only a settings save
-# drops the table.
+# table is accepted and ignored, the boot's read keeps the sentence that names
+# it, and the process says it once at warning
+# (`FermixCore.Setup.ConfigStore.say_retired_settings/0`), never once per
+# settings load, which the boot, the verb and every poll of a daemon repeat.
+# Under `--json` the notice is on stderr, and the file is left as it was: only
+# a settings save drops the table.
 retired_home="$runtime_root/home-status-retired"
 retired_settings='[fermix_core.always_on]
 enabled = true'

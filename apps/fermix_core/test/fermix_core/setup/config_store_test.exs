@@ -3,11 +3,14 @@ defmodule FermixCore.Setup.ConfigStoreTest do
 
   import ExUnit.CaptureLog
 
+  alias FermixCore.ComputerHistory.Config, as: ComputerHistoryConfig
   alias FermixCore.Cues.Config, as: CuesConfig
   alias FermixCore.Cues.SourceManager
   alias FermixCore.Cues.SourceSupervisor
   alias FermixCore.Meetings.Config, as: MeetingsConfig
   alias FermixCore.OpenLoops.Config, as: OpenLoopsConfig
+  alias FermixCore.Plugins.Retired
+  alias FermixCore.Providers.Descriptor
   alias FermixCore.Setup.ConfigStore
   alias FermixCore.Setup.MachineFile
 
@@ -657,9 +660,9 @@ defmodule FermixCore.Setup.ConfigStoreTest do
 
   # Fast mode and the Codex image backend are retired, and the owner's dev and
   # prod config.toml carry exactly this today: it must keep booting. Each is
-  # accepted at parse and dropped, the engine process names each once
-  # (`ConfigStore.say_retired_settings/0`), and the next save writes the file
-  # without it.
+  # accepted at parse and dropped, the boot read keeps the sentence that names
+  # it and the engine process says it once (`boot_and_say/0`), and the next save
+  # writes the file without it.
   @retired_toml """
   [fermix_core.providers.openai_codex]
   default_model = "gpt-5.5"
@@ -672,6 +675,8 @@ defmodule FermixCore.Setup.ConfigStoreTest do
   """
 
   describe "retired fast key and openai_codex image backend" do
+    setup :isolated_app_env
+
     setup do
       tmp_home =
         Path.join(System.tmp_dir!(), "fermix-config-store-#{System.unique_integer([:positive])}")
@@ -697,7 +702,8 @@ defmodule FermixCore.Setup.ConfigStoreTest do
       assert Keyword.get(loaded.fermix_core[:tools], :generate_image) == []
       refute log =~ "retired"
 
-      log = capture_log(fn -> assert :ok = ConfigStore.say_retired_settings() end)
+      {boot_log, log} = boot_and_say()
+      refute boot_log =~ "retired"
       assert log =~ "[warning]"
       assert log =~ "[fermix_core.providers.openai_codex] key(s) fast are retired"
       assert log =~ ~s(backend "openai_codex" is retired)
@@ -728,7 +734,7 @@ defmodule FermixCore.Setup.ConfigStoreTest do
       assert reloaded.fermix_core[:providers] == loaded.fermix_core[:providers]
       assert Keyword.get(reloaded.fermix_core[:tools], :generate_image, []) == []
       refute log =~ "retired"
-      refute capture_log(fn -> assert :ok = ConfigStore.say_retired_settings() end) =~ "retired"
+      refute boot_and_say() |> elem(1) =~ "retired"
     end
 
     test "the retired backend leaves the model in place, with no backend",
@@ -2211,6 +2217,8 @@ defmodule FermixCore.Setup.ConfigStoreTest do
   # by name — a retired remote-MCP plugin whose upstream moved on otherwise logs
   # a discovery failure on every boot forever, which reads as "broken", not "gone".
   test "a retired plugin is dropped from enabled, from its section and from its stored-key mapping, and named" do
+    isolated_app_env(%{})
+
     tmp_home =
       Path.join(System.tmp_dir!(), "fermix-config-retired-#{System.unique_integer([:positive])}")
 
@@ -2250,7 +2258,7 @@ defmodule FermixCore.Setup.ConfigStoreTest do
 
     # Named once by the engine process, so the operator can revoke the
     # credential this does not touch.
-    log = capture_log(fn -> assert :ok = ConfigStore.say_retired_settings() end)
+    {_boot_log, log} = boot_and_say()
     assert log =~ ~s{retired plugin(s) ["eden"] dropped from [fermix_core.plugins]}
     assert log =~ ~s{retired plugin(s) ["eden"] dropped from [fermix_core.plugin_secrets]}
   end
@@ -3627,6 +3635,8 @@ defmodule FermixCore.Setup.ConfigStoreTest do
   """
 
   describe "retired [fermix_core.always_on] table" do
+    setup :isolated_app_env
+
     setup do
       tmp_home = FermixTestSupport.SafeRm.make_tmp_dir!("config-store-retired-always-on")
       on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
@@ -3646,7 +3656,8 @@ defmodule FermixCore.Setup.ConfigStoreTest do
       assert Keyword.fetch!(loaded.fermix_core, :agent)[:name] == "Orchard"
       refute log =~ "retired"
 
-      log = capture_log(fn -> assert :ok = ConfigStore.say_retired_settings() end)
+      {boot_log, log} = boot_and_say()
+      refute boot_log =~ "retired"
       assert log =~ "[warning]"
       assert log =~ "config.toml [fermix_core.always_on] is retired"
     end
@@ -3669,15 +3680,15 @@ defmodule FermixCore.Setup.ConfigStoreTest do
 
       assert {:ok, _reloaded} = result
       refute log =~ "retired"
-      refute capture_log(fn -> assert :ok = ConfigStore.say_retired_settings() end) =~ "retired"
+      refute boot_and_say() |> elem(1) =~ "retired"
     end
   end
 
   # Android push straight through FCM was retired before any release shipped
   # it, and the owner's dev home carries exactly this table today: it must keep
   # booting. It is accepted at parse, its keychain sentinel never read, and
-  # dropped, so the next save writes the file without it; the engine process
-  # names it once.
+  # dropped, so the next save writes the file without it; the boot read keeps
+  # the sentence that names it, and the engine process says it once.
   @retired_fcm_toml """
   [fermix_channels.mobile]
   enabled = true
@@ -3692,6 +3703,8 @@ defmodule FermixCore.Setup.ConfigStoreTest do
   """
 
   describe "retired [fermix_channels.mobile.fcm] table" do
+    setup :isolated_app_env
+
     setup do
       tmp_home = FermixTestSupport.SafeRm.make_tmp_dir!("config-store-retired-fcm")
       on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
@@ -3713,7 +3726,8 @@ defmodule FermixCore.Setup.ConfigStoreTest do
       assert Enum.sort(mobile) == [enabled: true, push: [enabled: false]]
       refute log =~ "retired"
 
-      log = capture_log(fn -> assert :ok = ConfigStore.say_retired_settings() end)
+      {boot_log, log} = boot_and_say()
+      refute boot_log =~ "retired"
       assert log =~ "[warning]"
       assert log =~ "config.toml [fermix_channels.mobile.fcm] is retired"
       # Android phones are pushed through Fermix's push relay now (M99), with no
@@ -3745,7 +3759,7 @@ defmodule FermixCore.Setup.ConfigStoreTest do
       assert {:ok, reloaded} = result
       assert reloaded.fermix_channels[:mobile] == loaded.fermix_channels[:mobile]
       refute log =~ "retired"
-      refute capture_log(fn -> assert :ok = ConfigStore.say_retired_settings() end) =~ "retired"
+      refute boot_and_say() |> elem(1) =~ "retired"
     end
 
     # The running app env of a daemon that hydrated the table before it was
@@ -3783,8 +3797,8 @@ defmodule FermixCore.Setup.ConfigStoreTest do
   # carry them. A load accepts each and drops it, and names none: the setup
   # state, the model routing and the doctor load the settings over and over, so
   # a notice said there repeated about once a second for as long as the app was
-  # open. The engine process's boundary names each once
-  # (`ConfigStore.say_retired_settings/0`).
+  # open. The boot read keeps the sentence for each one it dropped, and the
+  # engine process's boundary says each once (`boot_and_say/0`).
   @retired_config_toml """
   [fermix_core.always_on]
   enabled = true
@@ -3838,7 +3852,43 @@ defmodule FermixCore.Setup.ConfigStoreTest do
     "config.toml [mcp.inbound] is retired"
   ]
 
+  # Each retired setting alone, as a file an earlier engine wrote carries it,
+  # with the start of the one sentence that names it: {case, config.toml,
+  # machine.toml, sentence}.
+  @retired_cases [
+    {"the Always On test switch", "[fermix_core.always_on]\nenabled = true\n", "",
+     "config.toml [fermix_core.always_on] is retired: every build of Fermix serves Always On"},
+    {"a provider's retired key", "[fermix_core.providers.openai_codex]\nfast = true\n", "",
+     "config.toml [fermix_core.providers.openai_codex] key(s) fast are retired"},
+    {"the retired image backend, as written",
+     ~s([fermix_core.tools.generate_image]\nbackend = " OpenAI_Codex "\n), "",
+     ~s(config.toml [fermix_core.tools.generate_image] backend "openai_codex" is retired)},
+    {"the home's history sites", ~s([fermix_core.computer_history]\nsites = ["example.org"]\n),
+     "",
+     "computer_history.sites is retired: every site in an allowlisted browser is recorded; " <>
+       "remove the key from the file that holds it"},
+    {"this computer's history sites", "",
+     ~s([fermix_core.computer_history]\nsites = ["example.org"]\n),
+     "computer_history.sites is retired"},
+    {"a retired plugin enabled", ~s([fermix_core.plugins]\nenabled = [" eden "]\n), "",
+     ~s{retired plugin(s) ["eden"] dropped from [fermix_core.plugins]}},
+    {"a retired plugin's section",
+     ~s([fermix_core.plugins.eden]\nauth_profile = "eden:primary"\n), "",
+     ~s{retired plugin(s) ["eden"] dropped from [fermix_core.plugins]}},
+    {"a retired plugin's entry",
+     ~s([fermix_core.plugins.entries.eden]\nauth_profile = "eden:primary"\n), "",
+     ~s{retired plugin(s) ["eden"] dropped from [fermix_core.plugins]}},
+    {"a retired plugin's stored key", ~s([fermix_core.plugin_secrets]\neden = "@keyring"\n), "",
+     ~s{retired plugin(s) ["eden"] dropped from [fermix_core.plugin_secrets]}},
+    {"the FCM table", "[fermix_channels.mobile.fcm]\nenabled = true\n", "",
+     "config.toml [fermix_channels.mobile.fcm] is retired"},
+    {"the inbound MCP section", "[mcp.inbound]\nenabled = false\n", "",
+     "config.toml [mcp.inbound] is retired"}
+  ]
+
   describe "retired settings" do
+    setup :isolated_app_env
+
     setup do
       tmp_home = FermixTestSupport.SafeRm.make_tmp_dir!("config-store-retired-settings")
       on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
@@ -3867,10 +3917,11 @@ defmodule FermixCore.Setup.ConfigStoreTest do
       end
     end
 
-    test "the process boundary names each one once, at warning" do
-      log = capture_log(fn -> assert :ok = ConfigStore.say_retired_settings() end)
+    test "the boot read names none, and the process boundary names each one once, at warning" do
+      {boot_log, log} = boot_and_say()
 
       for notice <- @retired_notices do
+        assert occurrences(boot_log, notice) == 0, "the boot read named #{inspect(notice)}"
         assert occurrences(log, notice) == 1, "#{inspect(notice)} not named once:\n#{log}"
       end
 
@@ -3878,7 +3929,37 @@ defmodule FermixCore.Setup.ConfigStoreTest do
       assert log =~ "the next settings save writes the file without it"
     end
 
-    test "a save writes both files without any of them, and the boundary then names none",
+    # The loads a daemon repeats and a settings save neither say what the boot
+    # read kept nor add to it, and once the boundary has said it, it is gone.
+    test "polled loads and a settings save neither say them nor add to them, and once said they are gone" do
+      {booted, _boot_log} =
+        with_log(fn -> ConfigStore.bootstrap_runtime_config(supervised: false) end)
+
+      assert booted == :ok
+      kept = Application.fetch_env!(:fermix_core, :retired_settings)
+      assert length(kept) == length(@retired_notices)
+
+      log =
+        capture_log(fn ->
+          for _poll <- 1..3 do
+            assert {:ok, _loaded} = ConfigStore.load_runtime_config(resolve_secrets: false)
+          end
+
+          assert {:ok, loaded} = ConfigStore.load_runtime_config(resolve_secrets: false)
+          assert :ok = ConfigStore.save_snapshot(loaded)
+        end)
+
+      refute log =~ "retired"
+      assert Application.fetch_env!(:fermix_core, :retired_settings) == kept
+
+      said = capture_log(fn -> assert :ok = ConfigStore.say_retired_settings() end)
+      assert occurrences(said, "[warning]") == length(@retired_notices)
+
+      refute capture_log(fn -> assert :ok = ConfigStore.say_retired_settings() end) =~ "retired"
+      assert Application.fetch_env(:fermix_core, :retired_settings) == :error
+    end
+
+    test "a save writes both files without any of them, and the next boot names none",
          %{home: home} do
       {{:ok, loaded}, _log} =
         with_log(fn -> ConfigStore.load_runtime_config(resolve_secrets: false) end)
@@ -3896,7 +3977,7 @@ defmodule FermixCore.Setup.ConfigStoreTest do
       refute machine =~ "sites"
       assert config =~ ~s(enabled = ["github"])
 
-      log = capture_log(fn -> assert :ok = ConfigStore.say_retired_settings() end)
+      {_boot_log, log} = boot_and_say()
       refute log =~ "retired"
     end
 
@@ -3905,9 +3986,108 @@ defmodule FermixCore.Setup.ConfigStoreTest do
       on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(empty_home) end)
       System.put_env("FERMIX_HOME", empty_home)
 
-      log = capture_log(fn -> assert :ok = ConfigStore.say_retired_settings() end)
+      {_boot_log, log} = boot_and_say()
       refute log =~ "retired"
     end
+
+    test "each retired setting alone is named in one sentence", %{home: home} do
+      for {name, config, machine, sentence} <- @retired_cases do
+        File.write!(Path.join(home, "config.toml"), config)
+        File.write!(Path.join(home, "machine.toml"), machine)
+
+        {_boot_log, log} = boot_and_say()
+
+        assert occurrences(log, "[warning]") == 1, "#{name}:\n#{log}"
+        assert occurrences(log, sentence) == 1, "#{name} not named:\n#{log}"
+      end
+    end
+
+    # The drift this guards: a retired setting dropped by one reading of the
+    # files and named by another, so that a change to one drops it unnamed.
+    # Every retired setting its owner lists (a provider descriptor's retired
+    # keys, the history section's, the retired plugins) and every retired table
+    # is carried here alone; the read that drops it (the save after it writes
+    # the files without it) must name it.
+    test "no retired setting its owner lists is dropped without being named", %{home: home} do
+      for {config, machine, named, gone} <- owned_retired_settings() do
+        File.write!(Path.join(home, "config.toml"), config)
+        File.write!(Path.join(home, "machine.toml"), machine)
+
+        {_boot_log, log} = boot_and_say()
+        assert log =~ named, "#{inspect(named)} dropped without being named:\n#{config}#{machine}"
+
+        assert {:ok, loaded} = ConfigStore.load_runtime_config(resolve_secrets: false)
+        assert :ok = ConfigStore.save_snapshot(loaded)
+
+        saved =
+          File.read!(Path.join(home, "config.toml")) <>
+            File.read!(Path.join(home, "machine.toml"))
+
+        refute saved =~ gone, "#{inspect(gone)} was not dropped:\n#{saved}"
+      end
+    end
+  end
+
+  # {config.toml, machine.toml, what names it, what is gone once saved}.
+  defp owned_retired_settings do
+    providers =
+      for descriptor <- Descriptor.all(), key <- descriptor.retired_config_keys do
+        block = "[fermix_core.providers.#{descriptor.id}]\n#{key} = true\n"
+        {block, "", "[fermix_core.providers.#{descriptor.id}] key(s) #{key} are", "#{key} ="}
+      end
+
+    history =
+      for key <- ComputerHistoryConfig.retired_keys(),
+          table = ~s([fermix_core.computer_history]\n#{key} = ["example.org"]\n),
+          {config, machine} <- [{table, ""}, {"", table}],
+          do: {config, machine, "computer_history.#{key} is retired", "#{key} ="}
+
+    plugins =
+      for name <- Retired.names(),
+          config <- [
+            ~s([fermix_core.plugins]\nenabled = ["#{name}"]\n),
+            ~s([fermix_core.plugins.#{name}]\nauth_profile = "#{name}:primary"\n),
+            ~s([fermix_core.plugin_secrets]\n#{name} = "@keyring"\n)
+          ],
+          do: {config, "", ~s{retired plugin(s) ["#{name}"] dropped from}, name}
+
+    tables = [
+      {"[fermix_core.always_on]\nenabled = true\n", "", "[fermix_core.always_on] is retired",
+       "always_on"},
+      {~s([fermix_core.tools.generate_image]\nbackend = "openai_codex"\n), "",
+       ~s(backend "openai_codex" is retired), "openai_codex"},
+      {"[fermix_channels.mobile.fcm]\nenabled = true\n", "",
+       "[fermix_channels.mobile.fcm] is retired", "fcm"},
+      {"[mcp.inbound]\nenabled = false\n", "", "[mcp.inbound] is retired", "mcp.inbound"}
+    ]
+
+    providers ++ history ++ plugins ++ tables
+  end
+
+  # What the engine process names for the home on disk: the boot read keeps
+  # what it dropped, and the process's boundary says it
+  # (`ConfigStore.bootstrap_runtime_config/1`, then `say_retired_settings/0`).
+  # The boot read's own log comes back apart, so a test can show it names
+  # nothing.
+  defp boot_and_say do
+    {booted, boot_log} =
+      with_log(fn -> ConfigStore.bootstrap_runtime_config(supervised: false) end)
+
+    assert booted == :ok
+    {boot_log, capture_log(fn -> assert :ok = ConfigStore.say_retired_settings() end)}
+  end
+
+  # The boot read applies every setting it reads to the application
+  # environment; a test that runs it puts the environment back as it found it,
+  # the keys it added gone.
+  defp isolated_app_env(_context) do
+    core = Application.get_all_env(:fermix_core)
+    channels = Application.get_all_env(:fermix_channels)
+
+    on_exit(fn ->
+      restore_app_env(:fermix_core, core)
+      restore_app_env(:fermix_channels, channels)
+    end)
   end
 
   defp occurrences(text, fragment), do: length(String.split(text, fragment)) - 1

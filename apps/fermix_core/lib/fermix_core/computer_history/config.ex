@@ -50,9 +50,11 @@ defmodule FermixCore.ComputerHistory.Config do
 
   `sites` is **retired** (v1.1 decision 1: every site visited in an allowlisted
   browser is recorded, so there is no per-site filter to configure). It stays in
-  `@retired_keys` so a `config.toml` that still carries it is accepted and dropped
-  — a retired key must never refuse boot, and `to_keyword/1` never writes it back
-  — and the engine process names it once at warning (`Setup.RetiredSettings`).
+  `@retired`, with the sentence that names it, so a `config.toml` or
+  `machine.toml` that still carries it is accepted and dropped — a retired key
+  must never refuse boot, and `to_keyword/1` never writes it back — and the
+  settings read that drops it names it (`retired_notices/1`), which the engine
+  process says once at warning (`Setup.ConfigStore.say_retired_settings/0`).
   """
 
   require Logger
@@ -76,9 +78,16 @@ defmodule FermixCore.ComputerHistory.Config do
   # The keys the machine file's own table may hold, as it spells them.
   @machine_file_keys [:enabled, :apps, :summarizer]
 
-  # Keys a persisted config may still carry: accepted at parse, dropped at
-  # normalize, never written back.
-  @retired_keys [:sites]
+  # Keys a persisted config may still carry, each with the sentence that names
+  # it: accepted at parse, dropped at normalize, never written back. Every list
+  # of retired keys here is this map's, so no key is accepted and dropped
+  # without its sentence.
+  @retired %{
+    sites:
+      "computer_history.sites is retired: every site in an allowlisted browser is " <>
+        "recorded; remove the key from the file that holds it"
+  }
+  @retired_keys Map.keys(@retired)
 
   @default_enabled false
   @default_apps []
@@ -99,11 +108,22 @@ defmodule FermixCore.ComputerHistory.Config do
 
   @doc """
   Keys this section no longer honors but still accepts from an existing
-  `config.toml` or `machine.toml`. `normalize/1` drops each one, and the engine
-  process names it once (`Setup.RetiredSettings`).
+  `config.toml` or `machine.toml`. `normalize/1` and `machine_file/1` drop each
+  one, and `retired_notices/1` names it.
   """
   @spec retired_keys() :: [atom()]
   def retired_keys, do: @retired_keys
+
+  @doc """
+  The sentence for each retired key `table` carries (a decoded table, a
+  snapshot's block, or nil), `[]` for none: the keys `normalize/1` and
+  `machine_file/1` accept and drop, named by the settings read that drops them.
+  """
+  @spec retired_notices(nil | map() | keyword()) :: [String.t()]
+  def retired_notices(nil), do: []
+
+  def retired_notices(table) when is_map(table) or is_list(table),
+    do: for({key, sentence} <- @retired, lookup(table, key) != @absent, do: sentence)
 
   @doc """
   Every key the parse boundary accepts: the live keys plus the retired ones. The

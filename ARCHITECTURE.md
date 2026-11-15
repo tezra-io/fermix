@@ -410,12 +410,18 @@ the same renderer, so no save drops an operator's servers.
 
 Architecture Invariant: a settings load never logs a retired setting. A table
 or key a build retired (`[fermix_core.always_on]`, a provider's retired key,
-`[mcp.inbound]` and the rest in `Setup.RetiredSettings`) is accepted and
-dropped by every load, so the next save writes the file without it, and each
-engine process names it once at warning where its logging is in place: an app
-engine or a source boot once its tree has started, every packaged process in
-`Fermix.CLI.main/1`. The setup state, model routing and doctor load the
-settings on every poll, so a notice there repeats once a second.
+`[mcp.inbound]`, a retired plugin and the rest) is accepted and dropped by
+every load, so the next save writes the file without it, and the normalizer
+that drops it returns the sentence that names it, kept in the module that owns
+the setting, so nothing is dropped unnamed. The boot read
+(`ConfigStore.bootstrap_runtime_config/1`, run by `config/runtime.exs` for
+every process) keeps those sentences in application environment beside the
+settings it applied, and each engine process says them once at warning where
+its logging is in place: an app engine or a source boot once its tree has
+started, every packaged process in `Fermix.CLI.main/1`
+(`ConfigStore.say_retired_settings/0`, which reads no file). The setup state,
+model routing and doctor load the settings on every poll, so a notice there
+repeats once a second.
 
 `Setup.Wizard` is the shared setup engine. `fermix setup` and `mix fermix.setup`
 (through `Setup.Runtime`), the setup LiveView, and the management protocol's

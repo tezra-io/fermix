@@ -138,6 +138,10 @@ defmodule FermixCore.Capabilities.MCP.ConfigTest do
 
       assert Config.retired_sections(toml) ==
                ["[mcp.inbound]", "[mcp.inbound.http]", "[mcp.inbound.tools.shell]"]
+
+      assert [notice] = Config.retired_notices(toml)
+      assert notice =~ "config.toml [mcp.inbound] is retired"
+      assert notice =~ "the next settings save writes the file without it"
     end
 
     test "names no retired section in a file without one" do
@@ -147,6 +151,7 @@ defmodule FermixCore.Capabilities.MCP.ConfigTest do
       """
 
       assert Config.retired_sections(toml) == []
+      assert Config.retired_notices(toml) == []
     end
 
     test "raises on an invalid policy_class string" do

@@ -122,14 +122,15 @@ defmodule FermixCore.Application do
   defp start_profile(:source), do: start_tree_naming_retired_settings()
 
   # An app engine and a source boot pass no `Fermix.CLI.main/1`, which names
-  # them for every process of a packaged binary, so their process names the
-  # retired settings its files carry here, once, into the log file its tree
-  # attached (`ConfigStore.say_retired_settings/0`). The boot's read in
-  # `config/runtime.exs` is too early: its only handler is the kernel's on
-  # stdout, which the app's launch agent sends nowhere.
+  # them for every process of a packaged binary, so their process says here,
+  # once, into the log file its tree attached, the retired settings the boot
+  # read in `config/runtime.exs` dropped from its files
+  # (`ConfigStore.say_retired_settings/0`). That read keeps them and does not
+  # say them: its only handler is the kernel's on stdout, which the app's
+  # launch agent sends nowhere. Saying them reads no file.
   defp start_tree_naming_retired_settings do
-    with {:ok, pid} <- start_supervision_tree(),
-         :ok <- ConfigStore.say_retired_settings() do
+    with {:ok, pid} <- start_supervision_tree() do
+      :ok = ConfigStore.say_retired_settings()
       {:ok, pid}
     end
   end

@@ -386,13 +386,34 @@ defmodule FermixCore.ComputerHistory.ConfigTest do
   # v1.1 decision 1: every site visited in an allowlisted browser is recorded, so
   # there is no per-site filter left to configure. A key an operator already has
   # on disk must never refuse boot (the poisoned-config incident) — it is accepted
-  # and dropped here, naming nothing, and the engine process names it once
-  # (`Setup.RetiredSettings`).
+  # and dropped here, logging nothing, and `retired_notices/1` gives the sentence
+  # the settings read that drops it names it with.
   describe "the retired `sites` key" do
     test "retired_keys/0 names it and config_keys/0 does not" do
       assert Config.retired_keys() == [:sites]
       refute :sites in Config.config_keys()
       assert Config.accepted_keys() == Config.config_keys() ++ Config.retired_keys()
+    end
+
+    test "retired_notices/1 names it in a decoded table and in a snapshot's block" do
+      sentence =
+        "computer_history.sites is retired: every site in an allowlisted browser is " <>
+          "recorded; remove the key from the file that holds it"
+
+      assert Config.retired_notices(%{"enabled" => true, "sites" => ["github.com"]}) == [sentence]
+      assert Config.retired_notices(enabled: true, sites: ["github.com"]) == [sentence]
+      assert Config.retired_notices(%{"enabled" => true}) == []
+      assert Config.retired_notices([]) == []
+      assert Config.retired_notices(nil) == []
+    end
+
+    # Every key it accepts as retired has the sentence that names it, so a
+    # retired key cannot be dropped unnamed.
+    test "every retired key has a sentence that names it" do
+      for key <- Config.retired_keys() do
+        assert [sentence] = Config.retired_notices(%{"#{key}" => []})
+        assert sentence =~ "computer_history.#{key} is retired"
+      end
     end
 
     test "a config carrying sites normalizes to the same shape as one without it" do

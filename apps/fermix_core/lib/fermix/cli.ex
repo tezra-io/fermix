@@ -66,19 +66,13 @@ defmodule Fermix.CLI do
 
   # Every process of a packaged binary passes here once, its logging in place:
   # on stderr where stdout is a wire, and in the log file once a verb's tree has
-  # started (`run`, `setup`, `memory`). So the process names the retired
-  # settings its files carry here, once (`ConfigStore.say_retired_settings/0`),
-  # and no settings load names them again. Settings that cannot be read stop the
-  # verb by name, as the boot's read of them does.
+  # started (`run`, `setup`, `memory`). So the process says here, once, the
+  # retired settings the boot read in `config/runtime.exs` dropped from its
+  # files (`ConfigStore.say_retired_settings/0`), and no settings load names
+  # them again. Saying them reads no file.
   defp retired_settings_named(argv) do
-    case ConfigStore.say_retired_settings() do
-      :ok ->
-        dispatch_argv(argv)
-
-      {:error, reason} ->
-        IO.puts(:stderr, "fermix: " <> ConfigStore.load_error_sentence(reason))
-        1
-    end
+    :ok = ConfigStore.say_retired_settings()
+    dispatch_argv(argv)
   end
 
   defp dispatch_argv([]), do: usage(2)

@@ -813,8 +813,6 @@ class VerifyStandaloneTest(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("fermix home status with no daemon must exit 0, got 1", result.stderr)
 
-    # The class the enroll stage exists for: the packaged binary taking a code
-    # file that holds no enrollment code and making the home a candidate anyway.
     # A settings file an earlier release wrote still carries a table this one
     # retired, Always On's test switch above all: the release boots on it,
     # names it once on stderr, and leaves the file as it is.
@@ -872,6 +870,8 @@ class VerifyStandaloneTest(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("fermix home status changed the settings of", result.stderr)
 
+    # The class the enroll stage exists for: the packaged binary taking a code
+    # file that holds no enrollment code and making the home a candidate anyway.
     def test_rejects_an_enroll_that_accepts_an_invalid_code(self):
         self._write_artifact(create_disclaim=True, home="enroll_accepts")
 

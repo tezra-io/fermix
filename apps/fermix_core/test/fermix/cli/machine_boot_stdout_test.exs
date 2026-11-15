@@ -57,9 +57,10 @@ defmodule Fermix.CLI.MachineBootStdoutTest do
 
     # Always On's retired test switch is on every home that tried Always On
     # before it shipped. The process names it once, on stderr, however often it
-    # loads the settings: the boot's read in `config/runtime.exs`, the reads a
-    # verb makes and the ones a daemon repeats on every poll name nothing, and
-    # `Fermix.CLI.main/1` names it once.
+    # loads the settings: the boot's read in `config/runtime.exs` keeps it
+    # without a word, the reads a verb makes and the ones a daemon repeats on
+    # every poll name nothing, and `Fermix.CLI.main/1` says what the boot read
+    # kept, once.
     test "a retired table is named once on stderr however often the settings load", ctx do
       File.write!(Path.join(ctx.home, "config.toml"), "[fermix_core.always_on]\nenabled = true\n")
 
