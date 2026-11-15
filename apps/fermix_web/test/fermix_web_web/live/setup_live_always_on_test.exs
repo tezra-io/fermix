@@ -766,7 +766,10 @@ defmodule FermixWebWeb.SetupLiveAlwaysOnTest do
                "A computer named loft-linux (Linux) asks to join your Fermix. To add it, type " <>
                  "the six digits it shows."
 
-      refute html =~ "482"
+      # The page's own text, never its markup: the root element carries
+      # LiveView's signed session and static tokens, random on every render,
+      # in which any three digits turn up now and then.
+      refute text(html, "main") =~ "482"
 
       html = press(view, "approve_computer")
       assert html =~ ~s(name="always_on_step[sas]")
