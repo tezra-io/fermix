@@ -68,11 +68,11 @@ everything else left out.
 `needs` checks that show a rule depends on it):
 - `IngestChecksPause`: Ingest has a pause gate at all. It reads the horizon
   once per batch and drops each event while the pause is in force,
-  `now < pause_until` (`ingest.ex:177`, `:180`, `:233-242`). Off, nothing is
+  `now < pause_until` (`ingest.ex:181`, `:184`, `:237-246`). Off, nothing is
   dropped.
 - `PauseByStamp`: the gate also drops each event stamped before the horizon,
   however late its batch is flushed: the `ts` half of
-  `min(ts, now) < pause_until` (`ingest.ex:236-237`), the CH-1 fix. Off, the
+  `min(ts, now) < pause_until` (`ingest.ex:240-241`), the CH-1 fix. Off, the
   gate is the flush-time rule of 693970b7.
 - `StopBeforeReply`: `/history off` replies only after its reconcile call
   returns, and that call returns only after the Capturer has exited
@@ -121,7 +121,7 @@ Checks 31 and 32 run in the same setting:
 - Nothing captured after the pause reply is stored, and nothing captured
   while the stored pause is in force is ever stored, whenever its batch is
   flushed (M32 invariant 12's pause half, and the claim at
-  `ingest.ex:221-232`). Since 826ba83a two mechanisms each hold this alone:
+  `ingest.ex:225-236`). Since 826ba83a two mechanisms each hold this alone:
   Ingest's gate, and the pause's own fence (`PauseFences`), which records the
   window before the horizon is stored, so every event a stored pause covers
   reaches an insert that refuses it. With both on, as in the code, no single
@@ -864,3 +864,14 @@ server and records nothing. The scene's host is a computer that records,
 for which the answer is as before; no modelled step changed, and the line
 numbers into `computer_history.ex` point at the committed file.
 
+
+## Re-read for compux 0.12.1's content rules (2026-11-14)
+
+`388b45d4` staled the `ingest.ex` pin. Its secure-text step, a per-event
+gate (Not modelled), also drops the text of any event the helper marked
+`content_withheld`, behind compux's own rules for a Mac password field, a
+terminal and a GTK 4 single-line field. It runs after the pause gate and
+the split, on events already kept, and calls no store. A longer comment
+above the secure roles moves every line the spec cites by four. No
+modelled step changed; the line numbers in the spec and in this README's
+current-code sections point at the committed file.

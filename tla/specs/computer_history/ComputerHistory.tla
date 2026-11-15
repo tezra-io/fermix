@@ -51,9 +51,9 @@
 (*    events: stop_driver and the lock release come first, which          *)
 (*    TeardownBeforeTermFlush checks), a Capturer crash in the middle of  *)
 (*    a flush, a failed config save, a state-read error in Ingest's pause *)
-(*    check (it fails open, ingest.ex:249-252), an unparseable horizon    *)
-(*    and an event with no integer ts (both fail closed, ingest.ex:234,   *)
-(*    :242), a pause or purge whose apply here fails (the reply says the  *)
+(*    check (it fails open, ingest.ex:253-256), an unparseable horizon    *)
+(*    and an event with no integer ts (both fail closed, ingest.ex:238,   *)
+(*    :246), a pause or purge whose apply here fails (the reply says the  *)
 (*    home holds it and this Mac's own store does not yet; the home       *)
 (*    scheduler's tick applies it, Delivery.apply_here/1): single-call    *)
 (*    facts, covered by ExUnit; an apply here run by another command or   *)
@@ -79,7 +79,7 @@
 (***************************************************************************)
 \* SOURCE: apps/fermix_core/lib/fermix_core/computer_history/capturer.ex @ 08663df01d25
 \* SOURCE: apps/fermix_core/lib/fermix_core/computer_history/wire.ex @ 35da392f4930
-\* SOURCE: apps/fermix_core/lib/fermix_core/computer_history/ingest.ex @ 4bd37d542e38
+\* SOURCE: apps/fermix_core/lib/fermix_core/computer_history/ingest.ex @ b4e50b7a0b86
 \* SOURCE: apps/fermix_core/lib/fermix_core/computer_history/controller.ex @ 9a21d4338131
 \* SOURCE: apps/fermix_core/lib/fermix_core/computer_history/supervisor.ex @ c68a3e139d47
 \* SOURCE: apps/fermix_core/lib/fermix_core/computer_history.ex @ d1e9b50a4dc5
@@ -115,10 +115,10 @@ CONSTANTS
     \* each is switched off by the checks that show a property needs it.
     IngestChecksPause,  \* Ingest has a pause gate: it reads the horizon once per batch and
                         \* drops each event while the pause is in force, now < pause_until
-                        \* (ingest.ex:177, :180, :233-242). Off, nothing is dropped
+                        \* (ingest.ex:181, :184, :237-246). Off, nothing is dropped
     PauseByStamp,       \* the gate also drops each event stamped before the horizon, however
                         \* late its batch is flushed: the ts half of min(ts, now) < pause_until
-                        \* (ingest.ex:236-237). Off, it is the flush-time gate of 693970b7
+                        \* (ingest.ex:240-241). Off, it is the flush-time gate of 693970b7
     StopBeforeReply,    \* /history off waits for the reconcile call, which returns after the
                         \* Capturer exited (computer_history.ex:235, :243-247, :306,
                         \* controller.ex:63-64, :202)
@@ -205,7 +205,7 @@ Places == {"unseen", "unread", "buffer", "batch", "spool", "dropped", "fenced", 
 (*  none        : no process (never started, or deleted by terminate_child)*)
 (*  running     : between callbacks, reading its mailbox (capturer.ex:276-391) *)
 (*  flushing    : inside a flush, pause check done, insert pending          *)
-(*                (capturer.ex:489-493 -> ingest.ex:189-203)               *)
+(*                (capturer.ex:489-493 -> ingest.ex:193-207)               *)
 (*  term_stop   : in terminate/2, stop_driver and the lock release next    *)
 (*                (capturer.ex:603-604); its first step                    *)
 (*  term_check  : in terminate/2, its flush's pause check next (:605)      *)
@@ -264,14 +264,14 @@ Move(from, to) == [e \in Events |-> IF where[e] = from THEN to ELSE where[e]]
 \* The stored pause is in force: now < pause_until (0 = no horizon).
 Paused == clock < pauseUntil
 
-\* Ingest's pause gate, per event: paused?/3 (ingest.ex:233-242) drops e when
+\* Ingest's pause gate, per event: paused?/3 (ingest.ex:237-246) drops e when
 \* min(ts, now) < pause_until, i.e. while the pause is in force or when e was
 \* stamped before the horizon. No ts is below 0, so pauseUntil = 0 drops
 \* nothing. With PauseByStamp off only the first half is left (the old
 \* flush-time rule); with IngestChecksPause off nothing is dropped.
 GateDrops(e) == IngestChecksPause /\ (Paused \/ (PauseByStamp /\ ts[e] < pauseUntil))
 
-\* Ingest's split (Enum.split_with, ingest.ex:180): each buffered event is
+\* Ingest's split (Enum.split_with, ingest.ex:184): each buffered event is
 \* dropped by the gate or goes on in the batch.
 Split == [e \in Events |-> IF where[e] = "buffer"
                            THEN IF GateDrops(e) THEN "dropped" ELSE "batch"
@@ -293,7 +293,7 @@ Insert == [e \in Events |-> IF where[e] = "batch"
                             ELSE where[e]]
 
 \* The buffered events that pass the gate. None: write_unpaused([], ...)
-\* returns without an insert call (ingest.ex:185-186).
+\* returns without an insert call (ingest.ex:189-190).
 Kept == {e \in Buffer : ~GateDrops(e)}
 
 \* The call exited without a confirmed stop: the fixed code returns that as an
@@ -365,9 +365,9 @@ CapturerOthersUnchanged ==
 
 \* A flush: handle_info(:flush) on the 2 s timer (capturer.ex:358-368) or the
 \* 25-event size trigger (:457-458) -> flush/do_flush (:473-493) ->
-\* Ingest.ingest (ingest.ex:175). Its first store call, Spool.state
-\* (ingest.ex:245), reads the horizon, and the gate splits the buffer event by
-\* event (ingest.ex:180). The dropped ones are
+\* Ingest.ingest (ingest.ex:179). Its first store call, Spool.state
+\* (ingest.ex:249), reads the horizon, and the gate splits the buffer event by
+\* event (ingest.ex:184). The dropped ones are
 \* gone; the Capturer empties its buffer either way (capturer.ex:493). When
 \* none passes, Ingest returns with no insert call and the flush is over;
 \* otherwise the survivors go on to the insert. A :flush timer message queued
@@ -382,7 +382,7 @@ FlushCheck ==
     /\ UNCHANGED <<sidecar, exitQueued, dsBox, dsBusy>>
     /\ CapturerOthersUnchanged
 
-\* Ingest's second store call: Spool.insert_events (ingest.ex:203,
+\* Ingest's second store call: Spool.insert_events (ingest.ex:207,
 \* spool.ex:63-64 -> computer_history_sql.ex:647-702), one BEGIN IMMEDIATE
 \* transaction that checks each row against the store's fence intervals, then
 \* INSERT OR IGNOREs the rest. It does not read the pause horizon.
@@ -743,7 +743,7 @@ PauseSet ==
 \* The reply (history.ex:633, :643-644), after the computers were told (told/1,
 \* folded in): "paused until <until>. It resumes automatically then." There is
 \* no resume verb: the horizon passing is the only unpause (Ingest re-reads it
-\* per batch, ingest.ex:221-232).
+\* per batch, ingest.ex:225-236).
 PauseReply ==
     /\ pausePc = "committed"
     /\ pausePc' = "done"
@@ -902,7 +902,7 @@ DisableHaltsAtAck == \A e \in afterOff : where[e] /= "spool"
 PauseHaltsAtAck == \A e \in inAckedPause : where[e] /= "spool"
 
 \* An event captured while the stored pause is in force is never stored,
-\* whenever its batch is flushed: the claim at ingest.ex:221-232 ("an event
+\* whenever its batch is flushed: the claim at ingest.ex:225-236 ("an event
 \* stamped inside the pause therefore never reaches the spool, even when its
 \* batch is flushed after the horizon"), which since 826ba83a the pause's own
 \* fence makes as well (history.ex:656-672, spool.ex:161-169: each interval
