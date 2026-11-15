@@ -1091,7 +1091,9 @@ names the conversation.
 each command runs in a temporary `CommandHost` under `CommandHost.Supervisor`,
 the first child of the core tree; the host owns the port and the OS process
 group, and ends the group through `ProcessGroup` and `FermixNif.kill_pgid/2`.
-Callers without a supervision tree pass `supervised: false`.
+Callers without a supervision tree pass `supervised: false`. Every command it
+starts reads its standard input from a file, then end of file: `/dev/null`, or
+the `:input` a `run/3` call gives it, never the port's own pipe.
 
 Architecture Invariant: however a `CommandHost` ends (exit, timeout, cancel,
 output cap, owner death, or shutdown), it signals the whole process group.
