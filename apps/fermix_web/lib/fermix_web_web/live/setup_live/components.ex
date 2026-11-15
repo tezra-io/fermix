@@ -2,8 +2,10 @@ defmodule FermixWebWeb.SetupLive.Components do
   use FermixWebWeb, :html
 
   alias FermixCore.Auth.Redaction
+  alias FermixCore.Harness.SignIn, as: HarnessSignIn
   alias FermixCore.Providers.Descriptor
   alias FermixCore.Providers.ModelCatalog
+  alias FermixWebWeb.SetupLive.Accessories
   alias FermixWebWeb.SetupLive.AlwaysOnPane
   alias FermixWebWeb.SetupLive.CuesPane
   alias FermixWebWeb.SetupLive.Phone
@@ -27,6 +29,7 @@ defmodule FermixWebWeb.SetupLive.Components do
   attr :embed?, :boolean, default: false
   attr :channels_form, :map, required: true
   attr :phone, :map, required: true
+  attr :accessories, :map, default: nil
   attr :xai_auth, :map, required: true
   attr :xai_auth_running?, :boolean, required: true
   attr :xai_auth_url, :string, default: nil
@@ -156,6 +159,7 @@ defmodule FermixWebWeb.SetupLive.Components do
               embed?={@embed?}
               channels_form={@channels_form}
               phone={@phone}
+              accessories={@accessories}
               xai_auth={@xai_auth}
               xai_auth_running?={@xai_auth_running?}
               xai_auth_url={@xai_auth_url}
@@ -315,6 +319,7 @@ defmodule FermixWebWeb.SetupLive.Components do
   attr :embed?, :boolean, default: false
   attr :channels_form, :map, required: true
   attr :phone, :map, required: true
+  attr :accessories, :map, default: nil
   attr :xai_auth, :map, required: true
   attr :xai_auth_running?, :boolean, required: true
   attr :xai_auth_url, :string, default: nil
@@ -1277,6 +1282,8 @@ defmodule FermixWebWeb.SetupLive.Components do
         <.realtime_limit_fields form={@realtime_form} />
         <.form_actions active_tab={@active_tab} tabs={@tabs} save_label="Save realtime" />
       </form>
+
+      <Accessories.panel :if={@accessories} accessories={@accessories} />
     </div>
     """
   end
@@ -1829,7 +1836,7 @@ defmodule FermixWebWeb.SetupLive.Components do
           Brave API docs
         </a>
       </p>
-      <p :if={@search_form.place_backend == :apple_maps} class="pt-1 text-xs">
+      <p :if={@search_form.place_backend in [:apple_maps, :computer]} class="pt-1 text-xs">
         Apple Maps searches are not metered. Place results are transient; only the final answer
         persists, as ordinary chat history.
       </p>
@@ -1855,6 +1862,17 @@ defmodule FermixWebWeb.SetupLive.Components do
     do:
       "place_search is set to Apple Maps, which this build cannot run (Doctor says why). Set " <>
         "[fermix_core.tools.place_search] backend = \"brave\" and save a Brave key to search Brave."
+
+  defp place_search_status(:computer, true),
+    do:
+      "place_search is ready; it searches Apple Maps on a Mac of yours while one is online, " <>
+        "and needs no key."
+
+  defp place_search_status(:computer, false),
+    do:
+      "place_search is set to Apple Maps on a Mac, and no Mac linked to this home offers it " <>
+        "yet (Doctor says why). Set [fermix_core.tools.place_search] backend = \"brave\" and " <>
+        "save a Brave key to search Brave."
 
   defp media_pane(assigns) do
     ~H"""
@@ -2595,13 +2613,11 @@ defmodule FermixWebWeb.SetupLive.Components do
 
   defp harness_vendor_status(%{available?: false}), do: "not installed"
 
-  defp harness_vendor_status(%{version: version, auth: auth}) do
-    "#{version || "installed"} · #{harness_auth_label(auth)}"
+  # The sign-in in doctor's words (`Harness.SignIn.word/1`, M98): a file that is
+  # there reads "sign-in found", never "signed in", since the vendor is not asked.
+  defp harness_vendor_status(%{version: version, sign_in: sign_in}) do
+    "#{version || "installed"} · #{HarnessSignIn.word(sign_in)}"
   end
-
-  defp harness_auth_label(:authenticated), do: "authenticated"
-  defp harness_auth_label(:unverified), do: "installed; auth unverified"
-  defp harness_auth_label(:absent), do: "not authenticated"
 
   defp doctor_pane(assigns) do
     ~H"""

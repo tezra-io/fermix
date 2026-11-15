@@ -32,30 +32,22 @@ raw_argv =
 # before looking; anything else in argv is the verb's own business.
 cli_argv = Enum.reject(raw_argv, &(&1 == "--"))
 
-wire_verb? =
-  case cli_argv do
-    ["acp" | _rest] -> true
-    # The browser-bridge pump's stdout IS the native-messaging wire: one stray
-    # boot warning on it and the browser reads a length header that is not one.
-    ["browser-bridge" | _rest] -> true
-    _other -> false
-  end
-
-# Asking for machine output IS the declaration that stdout is a wire, so the
-# flag is the predicate rather than a second list of verbs to keep in step with
-# the dispatcher.
-wire_stdout? = wire_verb? or "--json" in cli_argv
-
-if wire_stdout? and Code.ensure_loaded?(Fermix.CLI.StdoutPurity) and
-     function_exported?(Fermix.CLI.StdoutPurity, :route_logs_to_stderr, 0) do
+# Which argv has a wire on stdout is `StdoutPurity.wire_stdout?/1`, the one
+# predicate `Fermix.CLI.main/1` asks too: the `logger` application starts after
+# this file and installs its own handler on stdout, so main makes the move
+# again before it dispatches.
+if Code.ensure_loaded?(Fermix.CLI.StdoutPurity) and
+     function_exported?(Fermix.CLI.StdoutPurity, :wire_stdout?, 1) and
+     function_exported?(Fermix.CLI.StdoutPurity, :route_logs_to_stderr, 0) and
+     Fermix.CLI.StdoutPurity.wire_stdout?(cli_argv) do
   case Fermix.CLI.StdoutPurity.route_logs_to_stderr() do
     :ok ->
       :ok
 
     {:error, reason} ->
-      # Not fatal here: the verb runs and its own reader decides what to do with
-      # what it gets. Say what boot could not do, on the channel that is not the
-      # wire.
+      # Not fatal here: `Fermix.CLI.main/1` makes the move again before the
+      # verb runs, and refuses the verb if it still cannot. Say what boot could
+      # not do, on the channel that is not the wire.
       IO.puts(
         :standard_error,
         "fermix: boot logging stayed on stdout — " <>
@@ -96,6 +88,22 @@ if service_run? and Code.ensure_loaded?(FermixCore.BuildInfo) and
 
     {:error, {:invalid, sentence}} ->
       raise "fermix service run: " <> sentence
+  end
+end
+
+# --- a source checkout names its home (must precede the config reader) ------
+#
+# Every `mix` command that loads this file reads, migrates and then boots the
+# home it finds, and with no FERMIX_HOME that is the installed app's
+# `~/.fermix`, whose engine may be another release: a `mix run --no-start` in
+# a checkout once moved a live home's sandbox settings out of the config.toml
+# its engine reads. So in a source checkout (`:dev`) there is no default home;
+# a release and the test suite (which names its own) are not affected.
+if Code.ensure_loaded?(FermixCore.Setup.ConfigStore) and
+     function_exported?(FermixCore.Setup.ConfigStore, :source_home, 2) do
+  case FermixCore.Setup.ConfigStore.source_home(config_env(), System.get_env("FERMIX_HOME")) do
+    :ok -> :ok
+    {:error, sentence} -> raise "fermix: " <> sentence
   end
 end
 
@@ -628,27 +636,10 @@ mobile_push = existing_mobile_push |> put_env_overlay.(:key, "FERMIX_APNS_KEY")
 config :fermix_channels, mobile: Keyword.put(existing_mobile, :push, mobile_push)
 
 if config_env() == :prod do
-  # The secret key base signs Phoenix session cookies. The daemon restarts
-  # itself (service KeepAlive, and the setup UI's restart button), so the key
-  # MUST stay stable across restarts — a per-boot key invalidates the in-flight
-  # setup session cookie and locks the browser out with a 403. Persist it under
-  # FERMIX_HOME (this ships in the release, so brew installs get it too);
-  # operators may override with SECRET_KEY_BASE.
-  secret_key_base =
-    cond do
-      env = System.get_env("SECRET_KEY_BASE") ->
-        env
-
-      Code.ensure_loaded?(FermixCore.Setup.SecretKeyBase) ->
-        secret_home = System.get_env("FERMIX_HOME") || Path.join(System.user_home!(), ".fermix")
-        FermixCore.Setup.SecretKeyBase.read_or_create!(secret_home)
-
-      true ->
-        # Build-time tooling evaluates runtime.exs without the app loaded; this
-        # ephemeral key is never used to sign a served session.
-        Base.encode64(:crypto.strong_rand_bytes(48))
-    end
-
+  # The secret key base that signs Phoenix session cookies is not set here:
+  # this file runs for every verb, and a verb that serves nothing must write
+  # no home (`fermix --version` once made `secret_key_base`). The boot that
+  # serves the web listener resolves it (`FermixCore.BootProfile.prepare/2`).
   host = System.get_env("PHX_HOST") || "localhost"
 
   config :fermix_web, :dns_cluster_query, System.get_env("DNS_CLUSTER_QUERY")
@@ -674,8 +665,7 @@ if config_env() == :prod do
     # The daemon serves its web UI on loopback; allow both loopback origins
     # (and the configured PHX_HOST) so the LiveView socket isn't rejected when
     # the browser uses 127.0.0.1 instead of localhost.
-    check_origin: ["//localhost", "//127.0.0.1", "//#{host}"],
-    secret_key_base: secret_key_base
+    check_origin: ["//localhost", "//127.0.0.1", "//#{host}"]
 
   # ## SSL Support
   #

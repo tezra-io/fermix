@@ -360,6 +360,23 @@ defmodule FermixOpik.MapperTest do
     assert span.metadata.model == "gpt-realtime-2"
   end
 
+  # A call whose session.update went without the owner's lists' and trips'
+  # index lines says so on its span, with why the store could not be read.
+  test "realtime_span keeps whether a session.update went without its kept lines" do
+    span =
+      Mapper.realtime_span(
+        %{model: "gpt-realtime-2", kept_lines: "left_out", kept_lines_reason: "timeout"},
+        %{},
+        trace_id: "trace-1",
+        project_name: "fermix",
+        ended: @ended,
+        phase: :session_updated
+      )
+
+    assert span.metadata.kept_lines == "left_out"
+    assert span.metadata.kept_lines_reason == "timeout"
+  end
+
   # The outbound MCP server identity is already stamped on every MCP tool exec by
   # `MCP.Capability.invoke/6`; before this key was allowlisted it was dropped from
   # every Opik tool span (each builder hard-codes its own key set — there is no
@@ -739,6 +756,143 @@ defmodule FermixOpik.MapperTest do
 
     assert span.metadata == %{cu_session: "cua_ab12", outcome: :refused}
     assert Jason.encode!(span.metadata.outcome) == ~s("refused")
+  end
+
+  # M97 §6.2: the server's one tool exec for an invocation carries the
+  # computer's device id, the invocation's id, how it ended and why the computer
+  # refused it. The invocation's run is a root on the computer's own trace, so
+  # these are the only link from the turn to it. The live emitter sends the two
+  # words as ATOMS and `Map.take` keeps them so; replay hands them back as
+  # strings (pinned in the trace-file round trip). The target and the arguments
+  # are content and must still drop: this stays an allowlist.
+  test "tool_span keeps an invocation's computer, id, status and refusal, and nothing else" do
+    metadata = %{
+      tool: "computer_files",
+      success: false,
+      computer: "dev_7k2m9q",
+      invocation: "inv-mfrgg2lt5vgmy3dpqzt7xk4wha",
+      invoke_status: :refused,
+      refusal: :outside_sandbox,
+      target: "/Users/ines/Taxes/2025.pdf",
+      args: %{"path" => "/Users/ines/Taxes/2025.pdf"}
+    }
+
+    span =
+      Mapper.tool_span(metadata, %{duration_ms: 31},
+        trace_id: "t",
+        project_name: "fermix",
+        ended: @ended
+      )
+
+    assert span.metadata == %{
+             computer: "dev_7k2m9q",
+             invocation: "inv-mfrgg2lt5vgmy3dpqzt7xk4wha",
+             invoke_status: :refused,
+             refusal: :outside_sandbox
+           }
+
+    assert Jason.encode!(span.metadata.invoke_status) == ~s("refused")
+    assert Jason.encode!(span.metadata.refusal) == ~s("outside_sandbox")
+  end
+
+  # M97 §6.5: a call the home refused before sending anything to a computer
+  # (`Computers.Choice`) names why in a closed word, beside the typed
+  # pre-execution marker; the computer's name the call carried is content.
+  test "tool_span keeps a call the home refused before sending, and its marker" do
+    metadata = %{
+      tool: "file_read",
+      success: false,
+      computer_refusal: "away",
+      policy_enforcement: %{source: "computers", decision: "deny", phase: "pre_execution"},
+      error_code: "computer_away",
+      error_summary: "refused before anything was sent to a computer",
+      args: %{"path" => "/Users/ines/notes.txt", "computer" => "studio Mac"}
+    }
+
+    span =
+      Mapper.tool_span(metadata, %{duration_ms: 0},
+        trace_id: "t",
+        project_name: "fermix",
+        ended: @ended
+      )
+
+    assert span.metadata == %{
+             computer_refusal: "away",
+             policy_enforcement: %{source: "computers", decision: "deny", phase: "pre_execution"}
+           }
+
+    assert span.error_info.message == "refused before anything was sent to a computer"
+  end
+
+  @invocation_meta %{
+    session_id: "inv_inv-mfrgg2lt5vgmy3dpqzt7xk4wha",
+    parent_session: "main-41",
+    capability: "files",
+    op: "read",
+    origin: :chat,
+    epoch: 3
+  }
+
+  # The invocation's run on the computer (M97 §6.2). The opener carries the
+  # emitter's allowlist and nothing else: its `duration_ms` is a placeholder
+  # zero, not a measurement, and the target never reaches a trace.
+  test "computer_invocation_root of the opener carries the allowlist and no status" do
+    metadata = Map.put(@invocation_meta, :target, "/Users/ines/Taxes/2025.pdf")
+
+    assert Mapper.computer_invocation_root(:start, metadata, %{duration_ms: 0}) == %{
+             metadata: %{
+               parent_session: "main-41",
+               capability: "files",
+               op: "read",
+               origin: "chat",
+               epoch: 3
+             },
+             status: nil,
+             error_info: nil
+           }
+  end
+
+  # `ok`, `cancelled` and `refused` close with `:complete`: a refusal is the
+  # computer answering, not the run failing, so it carries its word and why,
+  # and no error_info.
+  test "computer_invocation_root of a refusal names it and is no error" do
+    metadata = Map.merge(@invocation_meta, %{status: :refused, refusal: :off})
+
+    root =
+      Mapper.computer_invocation_root(:complete, metadata, %{duration_ms: 4, result_bytes: 0})
+
+    assert root.status == "refused"
+    assert root.error_info == nil
+    assert root.metadata.refusal == "off"
+    assert root.metadata.duration_ms == 4
+    assert root.metadata.result_bytes == 0
+  end
+
+  # `failed`, `timed_out` and `unknown` close with `:error`, which makes the
+  # trace filterable as failed; the status is the whole diagnosis it carries.
+  test "computer_invocation_root of an error flags it with its status" do
+    metadata = Map.put(@invocation_meta, :status, :timed_out)
+
+    root =
+      Mapper.computer_invocation_root(:error, metadata, %{duration_ms: 30_000, result_bytes: 0})
+
+    assert root.status == "timed_out"
+
+    assert root.error_info == %{
+             exception_type: "ComputerInvocationError",
+             message: "timed_out"
+           }
+  end
+
+  # Live, the words are atoms; replayed from JSONL they are strings. The root
+  # reads both alike.
+  test "computer_invocation_root reads a replayed row's strings as the live atoms" do
+    live = Map.merge(@invocation_meta, %{status: :refused, refusal: :busy})
+    replayed = Map.merge(@invocation_meta, %{origin: "chat", status: "refused", refusal: "busy"})
+    counts = %{duration_ms: 1, result_bytes: 0}
+
+    assert Mapper.computer_invocation_root(:complete, live, counts) ==
+             Mapper.computer_invocation_root(:complete, replayed, counts)
   end
 
   # M70 §09: a Grok voice call's `fermix_task` function call is one tool span

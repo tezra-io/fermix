@@ -53,6 +53,7 @@ defmodule FermixChannels.Mobile.Iroh.HelperTest do
     exit_after_hello = Keyword.get(opts, :exit_after_hello)
     exit_after_start = Keyword.get(opts, :exit_after_start)
     close_stdin_before_hello = Keyword.get(opts, :close_stdin_before_hello, false)
+    close_stdin_at_start = Keyword.get(opts, :close_stdin_at_start, false)
 
     script = """
     #!/usr/bin/perl
@@ -70,8 +71,10 @@ defmodule FermixChannels.Mobile.Iroh.HelperTest do
     while (my $line = <STDIN>) {
       print $log $line;
       if ($line =~ /"op":"start"/) {
+        #{if close_stdin_at_start, do: "close(STDIN);", else: ""}
         #{Enum.map_join(after_start, "\n", &"print '#{&1}' . \"\\n\";")}
         #{if exit_after_start, do: "exit #{exit_after_start};", else: ""}
+        #{if close_stdin_at_start, do: "sleep 60; exit 0;", else: ""}
       }
       exit 0 if $line =~ /"op":"shutdown"/;
     }
@@ -118,6 +121,68 @@ defmodule FermixChannels.Mobile.Iroh.HelperTest do
     end
   end
 
+  defp await_connected(pid, attempts \\ div(@helper_ms, @poll_ms)) do
+    case Helper.status(pid) do
+      %{state: :ready, connected: true} = status ->
+        status
+
+      other when attempts > 0 ->
+        # sleep: polls a state the rail announces to no one
+        Process.sleep(@poll_ms)
+
+        if attempts == 1,
+          do: flunk("rail stayed #{inspect(other)}"),
+          else: await_connected(pid, attempts - 1)
+    end
+  end
+
+  # The rail's retry timer, delivered by hand once it has failed `failures`
+  # times, rather than waited for.
+  defp retry_now(pid, failures) do
+    state = await_failures(pid, failures)
+    send(pid, {:retry, state.retry.token})
+  end
+
+  # The day a failing rail retries for starts on its clock at its first
+  # failure. The rail emits `:degraded` before it reads that clock, so a test
+  # that moves the clock waits for the window to open first; moved on the emit
+  # alone, it can open the window a day late and the rail never gives up.
+  defp await_retry_window(pid), do: await_failures(pid, 1).retry.deadline_ms
+
+  defp await_failures(pid, failures, attempts \\ div(@helper_ms, @poll_ms)) do
+    state = :sys.get_state(pid)
+
+    cond do
+      state.rail == :failed and state.failures >= failures and state.retry.token != nil ->
+        state
+
+      attempts == 0 ->
+        flunk("the rail did not fail #{failures} times: #{inspect(state.rail)}")
+
+      true ->
+        # sleep: polls a state the rail announces to no one
+        Process.sleep(@poll_ms)
+        await_failures(pid, failures, attempts - 1)
+    end
+  end
+
+  defp await_given_up(pid, attempts \\ div(@helper_ms, @poll_ms)) do
+    state = :sys.get_state(pid)
+
+    cond do
+      state.rail == :failed and not state.retryable? ->
+        state
+
+      attempts == 0 ->
+        flunk("the rail did not give up: #{inspect(state.rail)}")
+
+      true ->
+        # sleep: polls a state the rail announces to no one
+        Process.sleep(@poll_ms)
+        await_given_up(pid, attempts - 1)
+    end
+  end
+
   defp ops(ctx) do
     ctx.log |> File.read!() |> String.split("\n", trim: true) |> Enum.map(&Jason.decode!/1)
   end
@@ -138,11 +203,49 @@ defmodule FermixChannels.Mobile.Iroh.HelperTest do
     assert %{state: :ready} = await_state(pid, :ready)
   end
 
+  # Opening an enrollment code and a desktop's dial wait for the rail's start
+  # instead of refusing, or failing on, a rail that is only starting.
+  test "await_ready wakes a dormant rail and answers once it is ready", ctx do
+    pid = start(ctx, binary_path: fake(ctx), identity_exists?: fn -> false end, test_pid: self())
+
+    assert %{state: :dormant} = Helper.status(pid)
+    assert %{state: :ready, endpoint_id: @fixture_id} = Helper.await_ready(pid, @helper_ms)
+    assert %{state: :ready} = Helper.await_ready(pid, @helper_ms)
+  end
+
+  test "await_ready answers a start that could not start, and an absent rail, as they are",
+       ctx do
+    missing =
+      start(ctx, binary_path: Path.join(ctx.root, "absent"), identity_exists?: fn -> false end)
+
+    assert %{state: :helper_missing} = Helper.await_ready(missing, @helper_ms)
+
+    failing =
+      start(ctx,
+        binary_path: fake(ctx, exit_after_hello: 3),
+        identity_exists?: fn -> false end,
+        test_pid: self()
+      )
+
+    assert %{state: :failed, failure: _words} = Helper.await_ready(failing, @helper_ms)
+    assert Helper.await_ready(:no_such_rail, @helper_ms) == %{state: :off}
+  end
+
+  test "await_ready on a rail still starting past the caller's bound is a timeout", ctx do
+    pid = start(ctx, binary_path: fake(ctx, after_start: []), test_pid: self())
+
+    # The fake never says ready, and the rail gives it 30 s: still starting.
+    assert Helper.await_ready(pid, 100) == :timeout
+    assert %{state: :starting} = Helper.status(pid)
+  end
+
   test "hello, start, ready: the helper gets the key, the bridge, the relays and the limits",
        ctx do
     pid = start(ctx, binary_path: fake(ctx), test_pid: self())
 
-    assert %{state: :ready, endpoint_id: @fixture_id, connected: true} = await_state(pid, :ready)
+    # The fake reports its relay in the line after `ready`, and a status read
+    # can land between the two: wait for the relay, not only for ready.
+    assert %{state: :ready, endpoint_id: @fixture_id, connected: true} = await_connected(pid)
 
     assert [%{"op" => "start"} = start] = ops(ctx)
     assert start["secret_key_path"] == Path.join(ctx.root, "mobile/iroh_key")
@@ -161,6 +264,172 @@ defmodule FermixChannels.Mobile.Iroh.HelperTest do
              Helper.candidate(pid)
 
     assert rev =~ ~r/\A[0-9a-f]{16}\z/
+  end
+
+  # An Always On server's endpoint binds its fixed port; every other binds
+  # iroh's own, so its start names none.
+  test "a start names the fixed port only when the rail was given one", ctx do
+    pid = start(ctx, binary_path: fake(ctx), test_pid: self())
+    await_state(pid, :ready)
+    assert [%{"op" => "start"} = start] = ops(ctx)
+    refute Map.has_key?(start, "bind_port")
+    GenServer.stop(pid)
+
+    pid = start(ctx, binary_path: fake(ctx), test_pid: self(), bind_port: 4100)
+    await_state(pid, :ready)
+    # The second helper's start follows the first's in the same log.
+    assert %{"op" => "start", "bind_port" => 4100} =
+             ops(ctx) |> Enum.filter(&(&1["op"] == "start")) |> List.last()
+  end
+
+  test "the hints are this machine's tailnet addresses at the fixed port, read when asked",
+       ctx do
+    {:ok, reads} = Agent.start_link(fn -> 0 end)
+
+    interfaces = fn ->
+      Agent.update(reads, &(&1 + 1))
+
+      {:ok,
+       [
+         {~c"en0", [flags: [:up, :running], addr: {192, 168, 1, 9}]},
+         {~c"tailscale0",
+          [
+            flags: [:up, :running],
+            addr: {100, 90, 8, 7},
+            addr: {0xFD7A, 0x115C, 0xA1E0, 0, 0, 0, 0, 2}
+          ]}
+       ]}
+    end
+
+    pid = start(ctx, binary_path: fake(ctx), bind_port: 4100, interfaces: interfaces)
+    await_state(pid, :ready)
+
+    assert Helper.hints(pid) == ["100.90.8.7:4100", "[fd7a:115c:a1e0::2]:4100"]
+    assert Helper.hints(pid) == ["100.90.8.7:4100", "[fd7a:115c:a1e0::2]:4100"]
+    assert Agent.get(reads, & &1) == 2
+
+    # A rail that binds iroh's own port has no address worth recording.
+    GenServer.stop(pid)
+    pid = start(ctx, binary_path: fake(ctx), interfaces: interfaces)
+    await_state(pid, :ready)
+    assert Helper.hints(pid) == []
+    assert Agent.get(reads, & &1) == 2
+
+    # Nor has one that is not ready, or not running.
+    assert Helper.hints(:no_rail_here) == []
+  end
+
+  # An Always On server whose fixed port another process holds: the helper
+  # says `bind_failed` and exits, every time. The rail retries on its backoff,
+  # never a spin, says the failure once for the run of it, and its status
+  # names the port until the port is free.
+  test "a fixed port another process holds is retried on the backoff and said once", ctx do
+    taken =
+      Jason.encode!(%{
+        "event" => "error",
+        "code" => "bind_failed",
+        "message" =>
+          "UDP port 4033 could not be bound: Failed to bind sockets: Address already in use " <>
+            "[os error 48]"
+      })
+
+    binary = fake(ctx, after_start: [taken], exit_after_start: 1)
+
+    log =
+      capture_log(fn ->
+        pid = start(ctx, binary_path: binary, bind_port: 4033, test_pid: self())
+        assert_receive {:emit, :degraded, 1, :helper_error}, @helper_ms
+
+        for failures <- 1..5, do: retry_now(pid, failures)
+        state = await_failures(pid, 6)
+
+        assert state.retry.delay_ms == min(1_000 * Integer.pow(2, state.failures), 60_000)
+        assert %{state: :failed, failure: failure} = Helper.status(pid)
+        assert failure =~ "bind_failed: UDP port 4033 could not be bound"
+        refute_received {:emit, :degraded, 2, _class}
+        GenServer.stop(pid)
+      end)
+
+    assert length(String.split(log, "UDP port 4033 could not be bound")) == 2
+  end
+
+  # The retry window stays the loop's bound. A server whose port was held for
+  # the whole of it has nobody to restart it, so the words it gives up with,
+  # in the log and in its status (Doctor's remote reach line), say what to do.
+  test "a fixed port held for a day gives up saying to free it and restart Fermix", ctx do
+    taken =
+      Jason.encode!(%{
+        "event" => "error",
+        "code" => "bind_failed",
+        "message" => "UDP port 4033 could not be bound: Address already in use [os error 98]"
+      })
+
+    binary = fake(ctx, after_start: [taken], exit_after_start: 1)
+    {:ok, clock} = Agent.start_link(fn -> 0 end)
+
+    log =
+      capture_log(fn ->
+        pid =
+          start(ctx,
+            binary_path: binary,
+            bind_port: 4033,
+            test_pid: self(),
+            clock: fn -> Agent.get(clock, & &1) end
+          )
+
+        assert_receive {:emit, :degraded, 1, :helper_error}, @helper_ms
+        assert await_retry_window(pid) == 24 * 3_600_000
+        Agent.update(clock, fn _ -> 24 * 3_600_000 end)
+        retry_now(pid, 1)
+        state = await_given_up(pid)
+
+        assert state.retry == nil
+
+        assert Helper.status(pid).failure ==
+                 "bind_failed: UDP port 4033 could not be bound: Address already in use " <>
+                   "[os error 98]; Fermix stopped trying a day after the helper last ran: " <>
+                   "free UDP port 4033, then restart Fermix (`fermix restart`, or its " <>
+                   "`fermix.service` unit on a server)"
+
+        GenServer.stop(pid)
+      end)
+
+    assert log =~
+             "fermix-iroh gave up a day after it last ran; remote reach stays off: " <>
+               "bind_failed: UDP port 4033 could not be bound: Address already in use " <>
+               "[os error 98]; free UDP port 4033, then restart Fermix (`fermix restart`, " <>
+               "or its `fermix.service` unit on a server)"
+  end
+
+  # Only a port it could not bind is the owner's to free: any other failure
+  # gives up in its own words.
+  test "a helper that fails for a day otherwise gives up naming no port", ctx do
+    {:ok, clock} = Agent.start_link(fn -> 0 end)
+
+    # The line is matched up to its end, so it is captured uncoloured: at a
+    # terminal the formatter would close its colour after the message,
+    # between the words and the newline.
+    log =
+      capture_log([format: "$message\n", colors: [enabled: false]], fn ->
+        pid =
+          start(ctx,
+            binary_path: fake(ctx, exit_after_hello: 3),
+            bind_port: 4033,
+            test_pid: self(),
+            clock: fn -> Agent.get(clock, & &1) end
+          )
+
+        assert_receive {:emit, :degraded, 1, _class}, @helper_ms
+        assert await_retry_window(pid) == 24 * 3_600_000
+        Agent.update(clock, fn _ -> 24 * 3_600_000 end)
+        retry_now(pid, 1)
+        state = await_given_up(pid)
+
+        refute state.failure =~ "4033"
+        GenServer.stop(pid)
+      end)
+
+    assert log =~ "fermix-iroh gave up a day after it last ran; remote reach stays off\n"
   end
 
   test "a helper that disagrees with this build fails without retrying", ctx do
@@ -252,6 +521,22 @@ defmodule FermixChannels.Mobile.Iroh.HelperTest do
              failure: "the helper's pipe closed: broken pipe",
              retry: %{delay_ms: 2_000}
            } = :sys.get_state(pid)
+  end
+
+  # A helper whose input is closed when the daemon writes `shutdown` (it has
+  # exited, or stopped reading) closes the port with an EXIT and no exit
+  # status. The stop takes that as the helper's end, as it takes an exit
+  # status, and kills its group, instead of waiting out the grace. The fake
+  # closes its input at `start`, refuses it and stays up, so only the closed
+  # pipe can end the wait; the grace is an hour, so a stop that waited for it
+  # would hold the rail, and the emit it sends after the stop, past every bound.
+  test "a stop whose shutdown meets a closed pipe returns at once", ctx do
+    refusal = ~s({"event":"error","code":"bad_request","message":"refused"})
+    binary = fake(ctx, after_start: [refusal], close_stdin_at_start: true)
+    pid = start(ctx, binary_path: binary, test_pid: self(), shutdown_grace_ms: 3_600_000)
+
+    assert_receive {:emit, :degraded, 1, :helper_error}, @helper_ms
+    assert %{state: :failed, failure: "bad_request: refused"} = Helper.status(pid)
   end
 
   # `bad_request` is the helper refusing the daemon's own `start`: the same

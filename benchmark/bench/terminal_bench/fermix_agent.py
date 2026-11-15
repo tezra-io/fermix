@@ -13,8 +13,9 @@ tool-protocol bridging needed (unlike tau2/AppWorld — see ../RUNBOOK.md).
 
 Integration design:
   1. install step: place the Fermix binary on PATH in the container + a minimal
-     `config.toml` pinning the provider/model and enabling shell+sandbox; export
-     the provider key as a container env var (Harbor passes `--env`).
+     `config.toml` pinning the provider/model, and a `machine.toml` beside it
+     setting the sandbox; export the provider key as a container env var
+     (Harbor passes `--env`).
   2. run step:   `fermix ask --timeout <ms> "<task instruction>"` in the task's
      working dir. Fermix's sandbox floor = the container workspace, so its file/
      shell tools mutate exactly the state Terminal-Bench tests.
@@ -47,9 +48,13 @@ cat > "$HOME/.fermix/config.toml" <<TOML
 [fermix_core.providers.{os.environ.get('FERMIX_TBENCH_PROVIDER', 'openai')}]
 primary = true
 default_model = "${{FERMIX_TBENCH_MODEL}}"
-[fermix_core.sandbox]
+TOML
+# the sandbox is this computer's own setting, read from machine.toml only
+cat > "$HOME/.fermix/machine.toml" <<TOML
+[sandbox]
 mode = "standard"
 TOML
+chmod 600 "$HOME/.fermix/machine.toml"
 fermix start
 """
 

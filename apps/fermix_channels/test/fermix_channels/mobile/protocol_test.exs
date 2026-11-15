@@ -3,13 +3,17 @@ defmodule FermixChannels.Mobile.ProtocolTest do
 
   alias FermixChannels.Mobile.Protocol
 
-  # Protocol 2 as it shipped, then what M75 added to it (additive, still 2).
+  # Protocol 2 as it shipped, then what M75, M87 and M97 added to it (additive,
+  # still 2).
   @client_events ~w(
     hello msg attach_begin attach_chunk attach_end command cancel history_pull media_fetch
     push_register push_unregister ack read_state request_status pair_request unpair ping
     companion_open companion_line companion_close manage loopback_request loopback_failed
     snapshot_stored snapshot_refused enroll_request move_offer move_chunk move_end
-    move_commit move_resume
+    move_commit move_resume call_open call_line call_audio call_frame call_close
+    offers link_path join_request
+    invoke_open invoke_part invoke_cancel invoke_result invoke_status invoke_restarted
+    push_subscribe
   )
   @server_events ~w(
     hello_ack accepted attach_status turn_started text_delta tool_event text_done turn_done
@@ -18,13 +22,16 @@ defmodule FermixChannels.Mobile.ProtocolTest do
     error pong event_part
     companion_line companion_close manage_result loopback_open loopback_response
     loopback_close snapshot_begin snapshot_chunk snapshot_end enroll_accepted move_accept
-    move_ready move_done
+    move_ready move_done call_attached call_line call_audio call_close
+    join_approved join_denied
+    invoke_open invoke_part invoke_cancel invoke_result invoke_status
   )
 
-  # Protocol 1 never had a client, so the window is protocol 2 alone (M51 D1).
-  test "publishes the protocol 2 window and approved event catalogs" do
-    assert Protocol.protocol_version() == 2
-    assert Protocol.supported_version_range() == {2, 2}
+  # Protocol 1 never had a client, so protocol 2's window was itself alone
+  # (M51 D1); from protocol 3 on the window is N/N-1.
+  test "publishes the protocol 3 window and approved event catalogs" do
+    assert Protocol.protocol_version() == 3
+    assert Protocol.supported_version_range() == {2, 3}
     assert Protocol.client_events() == @client_events
     assert Protocol.server_events() == @server_events
     assert Protocol.max_header_bytes() == 4_096
@@ -35,14 +42,83 @@ defmodule FermixChannels.Mobile.ProtocolTest do
 
   test "negotiates supported, old, and new clients directionally" do
     assert :ok = Protocol.negotiate(2)
+    assert :ok = Protocol.negotiate(3)
     assert {:error, :client_too_old} = Protocol.negotiate(1)
-    assert {:error, :client_too_new} = Protocol.negotiate(3)
+    assert {:error, :client_too_new} = Protocol.negotiate(4)
+  end
+
+  # M97 §3.4: the hello's window runs both ways, as the companion's does. A
+  # hello names the newest version its sender speaks (`protocol_v`) and may
+  # name the oldest (`min_protocol_v`); one that names none speaks its own
+  # alone. The answer is the versions both windows hold, the newest of which
+  # the session is served.
+  test "negotiates a hello's window against a server's, both ways" do
+    window = Protocol.supported_version_range()
+
+    assert {:ok, {2, 3}} = Protocol.negotiate_hello(3, 2, window)
+    assert {:ok, {2, 2}} = Protocol.negotiate_hello(2, nil, window)
+    assert {:ok, {3, 3}} = Protocol.negotiate_hello(3, nil, window)
+    assert {:ok, {3, 3}} = Protocol.negotiate_hello(4, 3, window)
+    assert {:ok, {2, 2}} = Protocol.negotiate_hello(2, 1, window)
+    assert {:ok, {3, 3}} = Protocol.negotiate_hello(3, 2, {3, 4})
+    assert {:error, :client_too_new} = Protocol.negotiate_hello(4, nil, window)
+    assert {:error, :client_too_new} = Protocol.negotiate_hello(5, 4, window)
+    assert {:error, :client_too_old} = Protocol.negotiate_hello(1, nil, window)
+    assert {:error, :client_too_old} = Protocol.negotiate_hello(3, 2, {4, 5})
+  end
+
+  test "a hello above the window decodes when the oldest it names is one the window holds" do
+    fields = %{"device_id" => "device-1", "app_version" => "1.0.0", "last_server_seq" => 0}
+
+    hello = fn version, extra ->
+      fields = fields |> Map.put("protocol_v", version) |> Map.merge(extra)
+      Protocol.decode_client_frame(client_frame("hello", 1, fields, <<>>, version))
+    end
+
+    assert {:ok, %{type: "hello", version: 4, payload: %{"min_protocol_v" => 3}}} =
+             hello.(4, %{"min_protocol_v" => 3})
+
+    assert {:ok, %{type: "hello", version: 3}} = hello.(3, %{"min_protocol_v" => 2})
+    assert {:ok, %{type: "hello", version: 2}} = hello.(2, %{})
+
+    assert {:error, {:unsupported_protocol_version, :client_too_new, 4}} = hello.(4, %{})
+
+    assert {:error, {:unsupported_protocol_version, :client_too_new, 5}} =
+             hello.(5, %{"min_protocol_v" => 4})
+
+    assert {:error, {:unsupported_protocol_version, :client_too_old, 1}} =
+             hello.(1, %{"min_protocol_v" => 1})
+
+    # The oldest is a version no newer than the hello's own (the encoder
+    # refuses any null field before it reads one).
+    assert {:error, {:invalid_field, "min_protocol_v"}} = hello.(3, %{"min_protocol_v" => nil})
+
+    for bad <- [0, -1, "2", 2.5, 4] do
+      assert {:error, {:invalid_field, "min_protocol_v"}} = hello.(3, %{"min_protocol_v" => bad}),
+             inspect(bad)
+
+      assert {:error, {:invalid_field, "min_protocol_v"}} =
+               Protocol.encode_client_frame(
+                 "hello",
+                 Map.merge(fields, %{"protocol_v" => 3, "min_protocol_v" => bad}),
+                 1,
+                 <<>>,
+                 version: 3
+               ),
+             inspect(bad)
+    end
+
+    # Only a hello names a window: any other frame above it is too new.
+    assert {:error, {:unsupported_protocol_version, :client_too_new, 4}} =
+             Protocol.decode_client_frame(
+               client_frame("ping", 1, %{"min_protocol_v" => 3}, <<>>, 4)
+             )
   end
 
   test "an out-of-window envelope names the direction and the client's version" do
-    assert {:error, {:unsupported_protocol_version, :client_too_new, 3}} =
+    assert {:error, {:unsupported_protocol_version, :client_too_new, 4}} =
              Protocol.decode_client_frame(
-               encode_frame(%{"v" => 3, "t" => "ping", "seq" => 1}, "")
+               encode_frame(%{"v" => 4, "t" => "ping", "seq" => 1}, "")
              )
 
     assert {:error, {:unsupported_protocol_version, :client_too_old, 1}} =
@@ -246,7 +322,7 @@ defmodule FermixChannels.Mobile.ProtocolTest do
     ack = %{
       "session_id" => "s",
       "min_version" => 2,
-      "max_version" => 2,
+      "max_version" => 3,
       "profiles" => [],
       "candidates" => [],
       "history_head_seq" => 0,
@@ -534,8 +610,9 @@ defmodule FermixChannels.Mobile.ProtocolTest do
     end
   end
 
-  # The daemon pushes through APNs alone, so `apns` is the whole catalog: the
-  # codec never sends `fcm`, or any other service, in either list.
+  # The daemon pushes through APNs and, from protocol 3, through Fermix's
+  # push relay (`fcm`, M99 §14): the codec sends no other service, and no
+  # service twice, in either list, and `fcm` never at protocol 2.
   test "pair_approved and hello_ack name the push services this daemon has" do
     approved = %{
       "device_id" => "device-1",
@@ -546,7 +623,7 @@ defmodule FermixChannels.Mobile.ProtocolTest do
       "primary_epoch" => 3
     }
 
-    for push <- [[], ["apns"]] do
+    for push <- [[], ["apns"], ["fcm"], ["apns", "fcm"]] do
       assert {:ok, _frame} =
                Protocol.encode_server_frame("pair_approved", %{approved | "push" => push}, 1)
     end
@@ -556,15 +633,26 @@ defmodule FermixChannels.Mobile.ProtocolTest do
     assert {:ok, _frame} =
              Protocol.encode_server_frame("pair_approved", Map.delete(approved, "push"), 1)
 
-    for push <- [["fcm"], ["apns", "fcm"], ["gcm"], ["apns", "apns"], "apns"] do
+    for push <- [["gcm"], ["webpush"], ["apns", "apns"], ["fcm", "fcm"], "apns"] do
       assert {:error, {:invalid_field, "push"}} =
                Protocol.encode_server_frame("pair_approved", %{approved | "push" => push}, 1)
+    end
+
+    for push <- [["fcm"], ["apns", "fcm"]] do
+      assert {:error, {:invalid_field, "push"}} =
+               Protocol.encode_server_frame(
+                 "pair_approved",
+                 %{approved | "push" => push},
+                 1,
+                 <<>>,
+                 version: 2
+               )
     end
 
     ack = %{
       "session_id" => "s",
       "min_version" => 2,
-      "max_version" => 2,
+      "max_version" => 3,
       "profiles" => [],
       "candidates" => [],
       "history_head_seq" => 0,
@@ -575,9 +663,58 @@ defmodule FermixChannels.Mobile.ProtocolTest do
 
     assert {:ok, _frame} = Protocol.encode_server_frame("hello_ack", ack, 1)
 
-    for push <- [["fcm"], ["apns", "fcm"], ["web"]] do
+    for push <- [["gcm"], ["web"], ["apns", "apns"]] do
       assert {:error, {:invalid_field, "caps.push"}} =
                Protocol.encode_server_frame("hello_ack", put_in(ack, ["caps", "push"], push), 1)
+    end
+  end
+
+  # M87: whether this primary serves a call from the phone, why not, and the
+  # Realtime versions a call needs. Absent from an older primary, and from a
+  # desktop's hello_ack.
+  test "hello_ack's caps.call says whether calls are served, and why not" do
+    ack = %{
+      "session_id" => "s",
+      "min_version" => 2,
+      "max_version" => 3,
+      "profiles" => [],
+      "candidates" => [],
+      "history_head_seq" => 0,
+      "read_up_to_seq" => 0,
+      "caps" => %{"commands" => [], "max_media_bytes" => 1},
+      "primary_epoch" => 3
+    }
+
+    served = %{"available" => true, "min_version" => 2, "max_version" => 3, "camera" => false}
+    assert {:ok, _frame} = Protocol.encode_server_frame("hello_ack", ack, 1)
+
+    assert {:ok, _frame} =
+             Protocol.encode_server_frame("hello_ack", put_in(ack, ["caps", "call"], served), 1)
+
+    # A string: a later primary's reason reads as one this app is too old for.
+    for reason <- ~w(voice_off no_key engine_not_for_phones busy) do
+      refused = served |> Map.put("available", false) |> Map.put("reason", reason)
+
+      assert {:ok, _frame} =
+               Protocol.encode_server_frame(
+                 "hello_ack",
+                 put_in(ack, ["caps", "call"], refused),
+                 1
+               )
+    end
+
+    for bad <- [
+          Map.put(served, "reason", "voice_off"),
+          %{served | "available" => false},
+          served |> Map.put("available", false) |> Map.put("reason", ""),
+          served |> Map.put("available", false) |> Map.put("reason", 7),
+          Map.delete(served, "min_version"),
+          %{served | "max_version" => 0},
+          %{served | "camera" => "no"},
+          "yes"
+        ] do
+      assert {:error, {:invalid_field, "caps.call"}} =
+               Protocol.encode_server_frame("hello_ack", put_in(ack, ["caps", "call"], bad), 1)
     end
   end
 
@@ -613,6 +750,128 @@ defmodule FermixChannels.Mobile.ProtocolTest do
              Protocol.decode_client_frame(client_frame("push_unregister", 1, %{}))
   end
 
+  # M99 §14: a phone's push subscription, at protocol 3 only.
+  test "push_subscribe is the service, the address and the phone's two keys, from protocol 3" do
+    assert Protocol.relay_push_version() == 3
+    fields = push_subscription()
+
+    assert {:ok, %{type: "push_subscribe", version: 3, payload: ^fields}} =
+             Protocol.decode_client_frame(client_frame("push_subscribe", 1, fields, <<>>, 3))
+
+    assert {:ok, _frame} =
+             Protocol.encode_client_frame("push_subscribe", fields, 1, <<>>, version: 3)
+
+    longest = %{fields | "address" => String.duplicate("a", 256)}
+
+    assert {:ok, _event} =
+             Protocol.decode_client_frame(client_frame("push_subscribe", 1, longest, <<>>, 3))
+  end
+
+  # Each field outside its shape is the malformed frame push_register's is.
+  test "push_subscribe refuses each field outside its shape" do
+    fields = push_subscription()
+    point = Base.url_decode64!(fields["p256dh"], padding: false)
+    secret = Base.url_decode64!(fields["auth"], padding: false)
+    <<_first, rest::binary-64>> = point
+
+    refused = [
+      {"service", "apns"},
+      {"service", "FCM"},
+      {"service", "webpush"},
+      {"service", 7},
+      {"address", ""},
+      {"address", String.duplicate("a", 257)},
+      {"address", "address/with/slashes"},
+      {"address", "address with space"},
+      # A registration token's colon: the relay takes an installation id.
+      {"address", "dK3vQ8pLmX2:APA91bH7xZ"},
+      {"address", "adresse-é"},
+      {"address", 22},
+      {"p256dh", Base.url_encode64(<<5, rest::binary>>, padding: false)},
+      {"p256dh", Base.url_encode64(binary_part(point, 0, 64), padding: false)},
+      {"p256dh", Base.url_encode64(point, padding: true)},
+      {"p256dh", Base.encode64(point)},
+      {"p256dh", non_canonical(fields["p256dh"])},
+      # 65 bytes, the first 0x04, and no point on P-256.
+      {"p256dh", Base.url_encode64(<<4, 1::256, 1::256>>, padding: false)},
+      {"auth", Base.url_encode64(secret <> <<0>>, padding: false)},
+      {"auth", Base.url_encode64(secret, padding: true)},
+      {"auth", non_canonical(fields["auth"])},
+      {"auth", 16}
+    ]
+
+    for {field, value} <- refused do
+      frame = client_frame("push_subscribe", 1, %{fields | field => value}, <<>>, 3)
+
+      assert {:error, {:invalid_field, ^field}} = Protocol.decode_client_frame(frame),
+             inspect({field, value})
+    end
+
+    for field <- Map.keys(fields) do
+      frame = client_frame("push_subscribe", 1, Map.delete(fields, field), <<>>, 3)
+      assert {:error, {:missing_field, ^field}} = Protocol.decode_client_frame(frame), field
+    end
+  end
+
+  # A phone at protocol 2 never sends it, and an event protocol 2 does not
+  # know is the unknown event it was before, whatever it carries.
+  test "push_subscribe at protocol 2 is the unknown event it always was" do
+    for fields <- [push_subscription(), %{}] do
+      assert {:error, {:unknown_event, "push_subscribe"}} =
+               Protocol.decode_client_frame(client_frame("push_subscribe", 1, fields))
+
+      assert {:error, {:unknown_event, "push_subscribe"}} =
+               Protocol.encode_client_frame("push_subscribe", fields, 1, <<>>, [])
+    end
+  end
+
+  # Push through the relay rides protocol 3 (M99 §14): at 3 the push list may
+  # name `fcm`, beside `apns` or alone; at 2 it never does.
+  test "hello_ack names fcm at protocol 3, and never at 2" do
+    ack = hello_ack_payload()
+
+    for push <- [["fcm"], ["apns", "fcm"]] do
+      with_fcm = put_in(ack, ["caps", "push"], push)
+      assert {:ok, _frame} = Protocol.encode_server_frame("hello_ack", with_fcm, 1, <<>>, [])
+
+      assert {:error, {:invalid_field, "caps.push"}} =
+               Protocol.encode_server_frame("hello_ack", with_fcm, 1, <<>>, version: 2)
+    end
+
+    for push <- [[], ["apns"]], version <- [2, 3] do
+      without = put_in(ack, ["caps", "push"], push)
+
+      assert {:ok, _frame} =
+               Protocol.encode_server_frame("hello_ack", without, 1, <<>>, version: version)
+    end
+
+    for push <- [["fcm", "fcm"], ["webpush"], ["apns", "webpush"], ["FCM"]] do
+      payload = put_in(ack, ["caps", "push"], push)
+
+      assert {:error, {:invalid_field, "caps.push"}} =
+               Protocol.encode_server_frame("hello_ack", payload, 1),
+             inspect(push)
+    end
+  end
+
+  test "pair_approved names fcm at protocol 3, and never at 2" do
+    approved = %{
+      "device_id" => "device-1",
+      "candidates" => [],
+      "profiles" => [%{"id" => "main", "name" => "Fermix"}],
+      "push_salt" => Base.encode64(:binary.copy(<<7>>, 32)),
+      "primary_epoch" => 3
+    }
+
+    for push <- [["fcm"], ["apns", "fcm"]] do
+      payload = Map.put(approved, "push", push)
+      assert {:ok, _frame} = Protocol.encode_server_frame("pair_approved", payload, 1)
+
+      assert {:error, {:invalid_field, "push"}} =
+               Protocol.encode_server_frame("pair_approved", payload, 1, <<>>, version: 2)
+    end
+  end
+
   test "fails loudly on malformed, oversized, and unknown frames" do
     assert {:error, :truncated_frame} = Protocol.decode_client_frame(<<0, 0, 0>>)
     assert {:error, :invalid_json} = Protocol.decode_client_frame(<<0, 0, 0, 1, ?{>>)
@@ -631,7 +890,7 @@ defmodule FermixChannels.Mobile.ProtocolTest do
                %{
                  "session_id" => "s-1",
                  "min_version" => 2,
-                 "max_version" => 2,
+                 "max_version" => 3,
                  "profiles" => [%{"id" => "main", "name" => "Fermix"}],
                  "candidates" => [],
                  "history_head_seq" => 9,
@@ -644,7 +903,7 @@ defmodule FermixChannels.Mobile.ProtocolTest do
 
     assert {:ok, decoded} = decode_frame(hello)
     assert decoded.header["min_version"] == 2
-    assert decoded.header["max_version"] == 2
+    assert decoded.header["max_version"] == 3
     assert decoded.header["primary_epoch"] == 1
 
     assert {:ok, _accepted} =
@@ -888,15 +1147,53 @@ defmodule FermixChannels.Mobile.ProtocolTest do
 
     assert {:ok, %{header: %{"v" => 2}}} = decode_frame(frame)
 
+    assert {:ok, frame} = Protocol.encode_server_frame("pong", %{}, 1, <<>>, version: 3)
+    assert {:ok, %{header: %{"v" => 3}}} = decode_frame(frame)
+
     assert {:error, :client_too_new} =
-             Protocol.encode_server_frame("pong", %{}, 1, <<>>, version: 3)
+             Protocol.encode_server_frame("pong", %{}, 1, <<>>, version: 4)
 
     assert {:error, :client_too_old} =
              Protocol.encode_server_frame("pong", %{}, 1, <<>>, version: 1)
   end
 
-  defp client_frame(type, seq, fields, bytes \\ <<>>) do
-    encode_frame(Map.merge(%{"v" => 2, "t" => type, "seq" => seq}, fields), bytes)
+  defp client_frame(type, seq, fields, bytes \\ <<>>, version \\ 2) do
+    encode_frame(Map.merge(%{"v" => version, "t" => type, "seq" => seq}, fields), bytes)
+  end
+
+  # The phone key and secret of webpush_vectors.json's Fermix message, and an
+  # invented Firebase Installation ID.
+  defp push_subscription do
+    %{
+      "service" => "fcm",
+      "address" => "cQ4vT8pLmX2bR7wZ_k1-Ns",
+      "p256dh" =>
+        "BA-tjEx2wOT1eHWq5MqZhSnLAWPkYti3100PmZD9lbt_6TM7fBWzl6NLxE5ZSS70gcsibTTIqjHkNTQeZP5yKRI",
+      "auth" => "kG0joyQGxf9iMIqP95PJlw"
+    }
+  end
+
+  defp hello_ack_payload do
+    %{
+      "session_id" => "s",
+      "min_version" => 2,
+      "max_version" => 3,
+      "profiles" => [],
+      "candidates" => [],
+      "history_head_seq" => 0,
+      "read_up_to_seq" => 0,
+      "caps" => %{"commands" => [], "max_media_bytes" => 1},
+      "primary_epoch" => 3
+    }
+  end
+
+  # The same bytes with a nonzero bit in the last character's padding, which
+  # a lenient decoder reads as the canonical text.
+  defp non_canonical(text) do
+    {head, last} = String.split_at(text, -1)
+    alphabet = ~c"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
+    index = Enum.find_index(alphabet, &(&1 == hd(String.to_charlist(last))))
+    head <> <<Enum.at(alphabet, index + 1)>>
   end
 
   defp pair_request_fields(cert_lengths) do

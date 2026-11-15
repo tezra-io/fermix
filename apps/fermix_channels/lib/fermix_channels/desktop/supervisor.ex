@@ -5,7 +5,10 @@ defmodule FermixChannels.Desktop.Supervisor do
   session's `Desktop.Peer` runs under (`FermixChannels.Desktop.PeerSupervisor`),
   and the one the companion connections of their tunnels run under
   (`FermixChannels.Desktop.TunnelSupervisor`, M75 §6), apart from the local
-  socket's so neither counts against the other's clients.
+  socket's so neither counts against the other's clients. A phone's list
+  channel (M85 E4) runs the same peer and companion family, its peer
+  registered apart, in the registry `phone_registry/1` names, so a phone is
+  never listed as a connected desktop.
 
   It runs inside the phone channel's subtree (`Mobile.Supervisor`), the
   carriers' sessions it serves, which only the primary role starts. The two go
@@ -34,10 +37,22 @@ defmodule FermixChannels.Desktop.Supervisor do
     end
   end
 
+  @doc """
+  The registry a phone's list peer runs in: the desktops' registry's name
+  with `Phones` after it, so a test tree that names its own gets its own.
+  """
+  @spec phone_registry(atom()) :: atom()
+  def phone_registry(registry) when is_atom(registry), do: Module.concat(registry, Phones)
+
   @impl true
   def init(opts) do
+    registry = Keyword.get(opts, :registry, @registry)
+
     children = [
-      {Registry, keys: :unique, name: Keyword.get(opts, :registry, @registry)},
+      {Registry, keys: :unique, name: registry},
+      Supervisor.child_spec({Registry, keys: :unique, name: phone_registry(registry)},
+        id: :phones
+      ),
       {DynamicSupervisor,
        strategy: :one_for_one, name: Keyword.get(opts, :peer_supervisor, @peer_supervisor)},
       Supervisor.child_spec({DynamicSupervisor, tunnel_supervisor_opts(opts)}, id: :tunnels)

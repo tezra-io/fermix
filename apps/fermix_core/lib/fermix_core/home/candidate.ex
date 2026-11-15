@@ -7,7 +7,9 @@ defmodule FermixCore.Home.Candidate do
 
     * `code`: the enrollment code, until the enrollment is accepted;
     * `destination.json`: the snapshot bucket and region the new primary
-      writes to (`{}` when none was named);
+      writes to (`{}` when none was named), and `s3_credentials`
+      `"instance_role"` when the server's infrastructure set them (E1): kept
+      here, never sent with the enrollment;
     * `noise_key`: the candidate's X25519 Noise static key (32 raw bytes), its
       key in the enrollment handshake and the move's responder key;
     * `recipient_key`: the one-time snapshot recipient (`Snapshot.Recipient`)
@@ -15,14 +17,19 @@ defmodule FermixCore.Home.Candidate do
     * `mobile/iroh_key`: its own iroh secret key (`FermixChannels.Mobile.Iroh.Key`'s
       format), with which its helper listens for the move under this directory
       as its root;
-    * `state.json`: the phase and what it learned;
+    * `state.json`: the phase and what it learned, and `window`, the window
+      the code opens: a digest of its secret (SHA-256, base64url without
+      padding), which reveals nothing of it and stays once the code is gone;
 
-  and `config.toml` with `[fermix_core.engine] role = "candidate"` and
-  `[fermix_core.always_on] enabled = true`: a candidate exists only for an
-  Always On move, and a release build offers Always On only where the home
-  turns it on (`FermixCore.Home.AlwaysOnRelease`), so its server's first boot
-  can read `fermix home status` while it waits. Activation replaces that
-  file with the home's own.
+  and `config.toml` with `[fermix_core.engine] role = "candidate"`, which
+  activation replaces with the home's own.
+
+  It also marks the machine an Always On server (`device/server.json`,
+  `server?/1`): device-local, so no archive carries it and activation, which
+  replaces the settings with the moved home's, leaves it. Nothing removes it.
+  A server's iroh endpoint binds a fixed UDP port on it, as a candidate and as
+  the primary (`FermixChannels.Mobile.Iroh.Hints`). A return's candidate
+  writes no mark: the computer a home moves back to is no server.
 
   **Phases** (`state.json`): `enrolling` (the code is held), `enrolled` (the
   primary accepted it; waiting for the move up to 24 hours), `receiving` (a
@@ -35,10 +42,18 @@ defmodule FermixCore.Home.Candidate do
   candidate that enrolled already, or anything a fresh install does not write
   (any path outside `FermixCore.Home.DeviceLocal`), and leaves nothing behind
   when it fails part-way: it removes exactly what it wrote. A candidate that
-  never enrolled (`enrolling`, `failed`) is replaced, while the engine of
-  this home is stopped (`FermixCore.Home.DaemonProbe`, `:daemon_running`
-  otherwise): the new one is built beside it and swapped in, and a failure
-  part-way puts the old one back. Activation is
+  never enrolled (`enrolling`, `failed`), that waits for its move
+  (`enrolled`) or whose 24 hours of waiting ran out (`expired`) is
+  replaced, while the engine of this home is stopped
+  (`FermixCore.Home.DaemonProbe`, `:daemon_running` otherwise): the new one
+  is built beside it and swapped in, and a failure part-way puts the old one
+  back. One receiving its move (`receiving`, `staged`, `activating`) is
+  never replaced, and neither is one enrolling or enrolled through the
+  given code's own window (`{:same_window, phase}`, whether its engine runs
+  or not): its primary would refuse the replacement as used, and one still
+  enrolling would lose the way back in after a lost answer. One that ended
+  takes its own code again, and a `state.json` that names no `window`
+  (written before it was kept) is replaced as any other. Activation is
   `FermixCore.Home.Candidate.Activation`.
 
   **A return** (Always On's move back to the computer the home left) writes
@@ -77,12 +92,12 @@ defmodule FermixCore.Home.Candidate do
   @config_text """
   [fermix_core.engine]
   role = "candidate"
-
-  [fermix_core.always_on]
-  enabled = true
   """
   @builder_prefix ".candidate-"
   @ended ~w(failed expired)
+  # What `enroll/3` replaces: every candidate no move has reached.
+  @replaceable ~w(enrolling enrolled failed expired)
+  @server_mark "device/server.json"
 
   @type phase :: String.t()
   @type state :: %{required(String.t()) => term()}
@@ -112,9 +127,23 @@ defmodule FermixCore.Home.Candidate do
   @spec present?(Path.t()) :: boolean()
   def present?(home), do: File.dir?(dir(home))
 
+  @doc "Where `enroll/3` marks the machine an Always On server, under `home`."
+  @spec server_path(Path.t()) :: Path.t()
+  def server_path(home) when is_binary(home) and home != "", do: Path.join(home, @server_mark)
+
+  @doc """
+  Whether this machine is an Always On server: `fermix home enroll` made its
+  home a candidate once (`device/server.json`), whatever the home has become
+  since.
+  """
+  @spec server?(Path.t()) :: boolean()
+  def server?(home) when is_binary(home) and home != "", do: File.regular?(server_path(home))
+
   @doc """
   Makes `home` a candidate from `code_text` (see the moduledoc). `opts`:
-  `:destination` (`%{"s3_bucket" => b, "s3_region" => r}` or nil), `:now` (a `DateTime`),
+  `:destination` (`%{"s3_bucket" => b, "s3_region" => r}`, with
+  `"s3_credentials" => "instance_role"` where the server's infrastructure set
+  them, or nil), `:now` (a `DateTime`),
   `:consume` (a 0-arity function run last, such as removing the code file
   the code came from; its `{:error, reason}` undoes the enrollment too), and
   `:hello` (`DaemonProbe.stopped/2`'s seam).
@@ -125,9 +154,10 @@ defmodule FermixCore.Home.Candidate do
     now = Keyword.get_lazy(opts, :now, &DateTime.utc_now/0)
 
     with {:ok, code} <- EnrollmentCode.decode(code_text),
+         :ok <- candidate_code(code),
          :ok <- not_expired(code, now),
          {:ok, destination} <- given_destination(Keyword.get(opts, :destination)),
-         {:ok, found} <- fresh(home, Keyword.take(opts, [:hello])) do
+         {:ok, found} <- fresh(home, window(code), Keyword.take(opts, [:hello])) do
       consume = Keyword.get(opts, :consume, fn -> :ok end)
       enroll_into(found, home, {code, code_text}, destination, now, consume)
     end
@@ -146,23 +176,35 @@ defmodule FermixCore.Home.Candidate do
   moduledoc): `{:return, code_text}` for one the server's move fills, from the
   manual enrollment code the server opened, or `{:local, from}` for one
   restored from a copy this computer holds of the server named `from`.
-  Answers the state written. `opts`: `:now`, and the seams `:role` (this
-  engine's, `Role.current/0`) and `:restarts_itself?`
-  (`Lifecycle.restarts_itself?/0`).
+  Answers the state written, after `returnable/3`'s checks. `opts`: `:now`,
+  and the seams `:role` (this engine's, `Role.current/0`) and
+  `:restarts_itself?` (`Lifecycle.restarts_itself?/0`).
   """
   @spec prepare_return(Path.t(), {:return, String.t()} | {:local, String.t()}, keyword()) ::
           {:ok, state()} | {:error, term()}
-  def prepare_return(home, source, opts \\ [])
-      when is_binary(home) and home != "" and is_tuple(source) and is_list(opts) do
+  def prepare_return(home, {kind, _text} = source, opts \\ [])
+      when is_binary(home) and home != "" and kind in [:return, :local] and is_list(opts) do
     now = Keyword.get_lazy(opts, :now, &DateTime.utc_now/0)
 
-    with :ok <- returnable_engine(opts),
-         :ok <- returnable_home(home, source),
-         {:ok, found} <- replaceable_return(home),
+    with {:ok, found} <- return_checks(home, kind, opts),
          {:ok, state} <- return_state(source, now),
          :ok <- remove_builders(home) do
       build_return(home, source, state, found)
     end
+  end
+
+  @doc """
+  Whether a return's candidate of `kind` (`:return` or `:local`) could be
+  written beside the moved home at `home` now: every check of this computer
+  `prepare_return/3` makes before it reads its source, refused as it refuses
+  (`:not_device`, `:not_supervised`, `:not_moved`, `:not_linked`,
+  `:move_pending`, `:candidate_present`). A move back runs it before it asks
+  the server for anything. `opts`: `prepare_return/3`'s seams.
+  """
+  @spec returnable(Path.t(), :return | :local, keyword()) :: :ok | {:error, term()}
+  def returnable(home, kind, opts \\ [])
+      when is_binary(home) and home != "" and kind in [:return, :local] and is_list(opts) do
+    with {:ok, _found} <- return_checks(home, kind, opts), do: :ok
   end
 
   @doc "Reads `state.json`."
@@ -269,6 +311,11 @@ defmodule FermixCore.Home.Candidate do
       "The enrollment code expired at #{DateTime.to_iso8601(at)}. Get a new code from the " <>
         "primary's Always On and enroll with it."
 
+  def error_sentence({:code_purpose, :computer}),
+    do:
+      "That code connects a computer to your Fermix, so it sets up no server: open the code " <>
+        "for your own server in Always On."
+
   def error_sentence(:primary_epoch),
     do:
       "This home has run as a primary (it holds a primary epoch), so it cannot become a candidate."
@@ -277,18 +324,25 @@ defmodule FermixCore.Home.Candidate do
     do: "This home carries a moved marker, so it cannot become a candidate."
 
   def error_sentence(:already_candidate),
+    do: "This server is receiving its move, so it is not enrolled again until that move ends."
+
+  def error_sentence({:same_window, :enrolled}),
     do:
-      "This home is a candidate that enrolled already and waits for its move. A candidate " <>
-        "that never enrolled is replaced by enrolling again; this one is not."
+      "This server enrolled with this code already and waits for its move. To set it up " <>
+        "again, open a new code in Always On and run this command with that code."
+
+  def error_sentence({:same_window, :enrolling}),
+    do: "This server is enrolling with this code already."
 
   def error_sentence(:daemon_running),
     do:
-      "Fermix is running in this home: stop it first (fermix service stop), then enroll " <>
-        "again with the new code."
+      "Fermix is running in this home: stop it first (fermix stop), then enroll again " <>
+        "with the new code."
 
   def error_sentence({:daemon_probe_failed, reason}),
     do:
-      "Fermix could not tell whether it runs in this home (#{inspect(reason)}), so it enrolled nothing."
+      "Fermix could not tell whether it runs in this home (#{inspect(reason)}), so it enrolled " <>
+        "nothing. Make sure it is stopped (fermix stop), then enroll again."
 
   def error_sentence({:not_fresh, entry}),
     do:
@@ -338,6 +392,10 @@ defmodule FermixCore.Home.Candidate do
 
   # -- enroll -----------------------------------------------------------------
 
+  # A computer's code joins a computer to a home (M97 §3.1); it makes no server.
+  defp candidate_code(%{purpose: :candidate}), do: :ok
+  defp candidate_code(%{purpose: purpose}), do: {:error, {:code_purpose, purpose}}
+
   defp not_expired(%{expires_at: at}, now) do
     if DateTime.compare(at, now) == :gt, do: :ok, else: {:error, {:code_expired, at}}
   end
@@ -345,40 +403,54 @@ defmodule FermixCore.Home.Candidate do
   defp given_destination(nil), do: {:ok, %{}}
 
   defp given_destination(%{"s3_bucket" => bucket, "s3_region" => region} = facts) do
-    if EnrollmentCode.printable?(bucket) and EnrollmentCode.printable?(region),
-      do: {:ok, Map.take(facts, ["s3_bucket", "s3_region"])},
-      else:
+    cond do
+      not (EnrollmentCode.printable?(bucket) and EnrollmentCode.printable?(region)) ->
         {:error,
          {:invalid_destination, "The snapshot bucket and region are text of 1 to 128 bytes."}}
+
+      Map.get(facts, "s3_credentials", "instance_role") != "instance_role" ->
+        {:error,
+         {:invalid_destination, ~s(A snapshot bucket's signing is "instance_role" or not given.)}}
+
+      true ->
+        {:ok, Map.take(facts, ["s3_bucket", "s3_region", "s3_credentials"])}
+    end
   end
 
   # A fresh install writes nothing a move would carry: every top-level entry
   # must be device-local. The primary epoch, the marker and an existing
   # candidate are named on their own, before the general rule.
-  defp fresh(home, probe) do
+  defp fresh(home, window, probe) do
     case File.ls(home) do
-      {:ok, entries} -> fresh_entries(home, Enum.sort(entries), probe)
+      {:ok, entries} -> fresh_entries(home, Enum.sort(entries), window, probe)
       {:error, :enoent} -> {:ok, true}
       {:error, reason} -> {:error, {:file, home, reason}}
     end
   end
 
-  defp fresh_entries(home, entries, probe) do
+  defp fresh_entries(home, entries, window, probe) do
     cond do
       Epoch.read(home) != :absent -> {:error, :primary_epoch}
       Moved.read(home) != :absent -> {:error, :moved}
-      @dir in entries -> replaceable(home, entries, probe)
+      @dir in entries -> replaceable(home, entries, window, probe)
       true -> device_local_only(entries)
     end
   end
 
   # A candidate that never enrolled holds nothing a primary knows of: no
-  # primary lists it, and its code is spent or was refused. It is replaced
-  # only while no engine runs in the home, whose candidate process would
-  # otherwise go on writing the old one's state.
-  defp replaceable(home, entries, probe) do
-    with {:ok, %{"phase" => phase}} when phase in ~w(enrolling failed) <- read_state(home),
+  # primary lists it, and its code is spent or was refused. One that
+  # enrolled (`enrolled`, `expired`) is given a new code only once its
+  # primary forgot it (Always On's Forget this server) or dropped it at its
+  # 24 hours (`Home.Candidates`' lifetime): a new code is opened only where
+  # no server is held, so no move comes to the old one. One a move reached
+  # stays, and so does one enrolling or enrolled through the code's own
+  # window, whose primary would refuse its replacement as used. Any is
+  # replaced only while no engine runs in the home, whose candidate process
+  # would otherwise go on writing the old one's state.
+  defp replaceable(home, entries, window, probe) do
+    with {:ok, %{"phase" => phase} = state} when phase in @replaceable <- read_state(home),
          {:ok, _found} <- device_local_only(entries -- [@dir, "config.toml"]),
+         :ok <- another_window(state, window),
          :ok <- DaemonProbe.stopped(home, probe) do
       {:ok, :replace}
     else
@@ -386,6 +458,21 @@ defmodule FermixCore.Home.Candidate do
       {:error, _reason} = error -> error
     end
   end
+
+  # A state written before the window was kept names none, and one that
+  # ended (`failed`, `expired`) takes its own code again.
+  defp another_window(%{"phase" => "enrolling", "window" => window}, window),
+    do: {:error, {:same_window, :enrolling}}
+
+  defp another_window(%{"phase" => "enrolled", "window" => window}, window),
+    do: {:error, {:same_window, :enrolled}}
+
+  defp another_window(_state, _window), do: :ok
+
+  # The window a code opens, as `state.json` keeps it: a digest of its
+  # secret, which reveals nothing of it.
+  defp window(%{secret: secret}),
+    do: :crypto.hash(:sha256, secret) |> Base.url_encode64(padding: false)
 
   defp device_local_only(entries) do
     case Enum.reject(entries, &DeviceLocal.excluded?/1) do
@@ -395,6 +482,14 @@ defmodule FermixCore.Home.Candidate do
   end
 
   # -- prepare_return ---------------------------------------------------------
+
+  # The engine, then the home, then any candidate already here: `{:ok,
+  # :new | :replace}`.
+  defp return_checks(home, kind, opts) do
+    with :ok <- returnable_engine(opts),
+         :ok <- returnable_home(home, kind),
+         do: replaceable_return(home)
+  end
 
   defp returnable_engine(opts) do
     cond do
@@ -409,21 +504,21 @@ defmodule FermixCore.Home.Candidate do
     end
   end
 
-  defp returnable_home(home, source) do
+  defp returnable_home(home, kind) do
     case Moved.read(home) do
-      {:ok, _marker} -> linked_and_still(home, source)
+      {:ok, _marker} -> linked_and_still(home, kind)
       :absent -> {:error, :not_moved}
       {:error, _reason} = error -> error
     end
   end
 
-  defp linked_and_still(home, {:return, _code}) do
+  defp linked_and_still(home, :return) do
     if File.regular?(DesktopLink.path(home)),
       do: no_move_here(home),
       else: {:error, :not_linked}
   end
 
-  defp linked_and_still(home, {:local, _from}), do: no_move_here(home)
+  defp linked_and_still(home, :local), do: no_move_here(home)
 
   defp no_move_here(home) do
     case Move.moving_to(home) do
@@ -546,6 +641,7 @@ defmodule FermixCore.Home.Candidate do
          :ok <- write_files(building, code, code_text, destination, now),
          :ok <- rename(building, dir(home)),
          :ok <- create_config(home),
+         :ok <- mark_server(home),
          :ok <- consume.() do
       {:ok, code}
     else
@@ -562,6 +658,7 @@ defmodule FermixCore.Home.Candidate do
 
     with :ok <- make_dir(building),
          :ok <- write_files(building, code, code_text, destination, now),
+         :ok <- mark_server(home),
          :ok <- rename(dir(home), aside),
          :ok <- swap_in(building, home, aside),
          :ok <- consumed(consume.(), home, aside) do
@@ -603,6 +700,7 @@ defmodule FermixCore.Home.Candidate do
       "v" => @version,
       "phase" => "enrolling",
       "primary" => primary_facts(code),
+      "window" => window(code),
       "updated_at" => iso(now)
     }
 
@@ -653,8 +751,18 @@ defmodule FermixCore.Home.Candidate do
     _ = File.rm_rf(building)
     _ = File.rm_rf(dir(home))
     _ = File.rm(Path.join(home, "config.toml"))
+    _ = File.rm(server_path(home))
+    # Only a `device/` the mark alone needed is empty now.
+    _ = File.rmdir(Path.dirname(server_path(home)))
     if created_home?, do: File.rmdir(home)
     {:error, reason}
+  end
+
+  # The mark is written whole and kept; a candidate enrolled again writes it
+  # again, the same.
+  defp mark_server(home) do
+    with :ok <- make_dir(Path.dirname(server_path(home))),
+         do: write_private(server_path(home), Jason.encode!(%{"v" => @version}))
   end
 
   defp make_dir(dir) do

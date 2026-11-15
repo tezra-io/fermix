@@ -16,7 +16,7 @@ then has the profile's manager forget its tokens and stops it (plugin logout,
 anthropic and xai, `management/auth.ex:219-226`, `:519-523`). A logout from a
 tree-less CLI VM deletes the entry the same way, then has a running daemon let
 go of the profile over the control socket (`auth_forget`,
-`cli/daemon.ex:1067-1097` → `TokenSupervisor.forget_signed_out`).
+`cli/daemon.ex:1331-1361` → `TokenSupervisor.forget_signed_out`).
 
 OpenAI Codex signs in with ChatGPT, under the `chatgpt` profile
 (`store.ex:259-269`). That registration outlives a sign-out, so the sign-out
@@ -69,7 +69,7 @@ rotating provider the Fermix side is the same: a consumed token draws a 4xx,
 which Fermix treats as permanent, and it quarantines the grant until a new
 sign-in (`token_manager.ex:348-360`, `:370-375`). A 408 or a 429 is not a
 verdict on the grant: `RefreshClient` retries it like a 5xx and never
-quarantines on it (`refresh_client.ex:43-49`).
+quarantines on it (`refresh_client.ex:52-58`).
 
 Most checks use two profiles:
 - `p1` is a profile that both its manager and a tree-less CLI VM refresh
@@ -154,9 +154,9 @@ least one check):
 - `CliLogoutReachesDaemon`: after its delete, or ChatGPT's write, a CLI logout
   sends a running daemon `auth_forget` for the profile (`plugins_command.ex:278`,
   `:520-545`; `auth_command.ex:328-354`, `:361-379`, `:405-420`;
-  `cli/daemon/client.ex:60-74`). The daemon has the profile's manager forget
+  `cli/daemon/client.ex:70-84`). The daemon has the profile's manager forget
   its tokens, which also deletes its plugin child's token file, then stops it
-  (`cli/daemon.ex:843`, `:1067-1097`; `token_supervisor.ex:143-165`). Off, the
+  (`cli/daemon.ex:1088`, `:1331-1361`; `token_supervisor.ex:143-165`). Off, the
   CLI logout reaches no manager. That is also the state a daemon leaves when
   it answers the notice with an error, which the CLI reports by exiting
   non-zero; checks 14 and 26 model that case.
@@ -372,7 +372,7 @@ describes, and the **Fix** bullets cite the code as it is now.
   state and token file change after the lock is released. A busy lock is a
   transient, logged error, never a refresh from memory. `RefreshClient` states
   its per-attempt bounds (pool 5 s, connect 10 s, receive 15 s;
-  `refresh_client.ex:39-41`, `:51-60`, `:158-173`), so a live refresh (about
+  `refresh_client.ex:46-48`, `:60-69`, `:174-191`), so a live refresh (about
   107 s with two store-lock waits) ends before its lockfile looks stale,
   unless the wall clock jumps mid-refresh (a system sleep or a clock step; see
   "Lock staleness"); a test holds that bound.
@@ -401,8 +401,8 @@ describes, and the **Fix** bullets cite the code as it is now.
   session, and the manager refuses from then on.
 - **Code:**
   - `RefreshClient` retries a transport error, a 5xx, a 408 or a 429 with the
-    same refresh token, up to three attempts (`refresh_client.ex:36`,
-    `:43-49`, `:140-143`, `:148-151`).
+    same refresh token, up to three attempts (`refresh_client.ex:43`,
+    `:52-58`, `:149-155`, `:160-167`).
   - Req does not retry the POST itself: its default `retry: :safe_transient`
     covers GET and HEAD only.
 - **Impact:** the session is revoked on the retry, about 350 ms later, instead
@@ -527,7 +527,7 @@ describes, and the **Fix** bullets cite the code as it is now.
     restart of the daemon (from the Fermix app, or `fermix restart` for a
     daemon the operator runs).
   - **The daemon side.** The daemon validates the profile, then runs
-    `TokenSupervisor.forget_signed_out/1` (`cli/daemon.ex:843`, `:1067-1097`;
+    `TokenSupervisor.forget_signed_out/1` (`cli/daemon.ex:1088`, `:1331-1361`;
     `token_supervisor.ex:143-165`).
     - It reuses `forget` (`drop_tokens`: tokens cleared, refusal set, and the
       plugin child's token file deleted), then `stop_profile`. The next use of
@@ -588,7 +588,7 @@ the Codex CLI's session and then Fermix's, closed when that import was retired
   refresh in flight, so `forget` normally finds the manager idle. It can still
   meet a manager that is itself waiting up to 10 s for the profile lock (held
   by a CLI refresh, say); the management caller then exits first, the socket
-  turns that into `internal_error` (`cli/daemon.ex:550-563`), and
+  turns that into `internal_error` (`cli/daemon.ex:706-808`), and
   `revert_route` (`management/auth.ex:223`) never runs. The in-daemon plugin
   logout's forget (`forget_signed_out`, `plugins/auth.ex:73`) and ChatGPT's
   sign-out's (`chatgpt/logout.ex:46`) are the same call and can meet the same
@@ -696,3 +696,56 @@ the Codex CLI's session and then Fermix's, closed when that import was retired
 - A refresh may start at any time. Expiry, the proactive timer and the
   10-second due window are not modelled. They decide how often the overlaps in
   TOKEN-1 and TOKEN-2 would happen, but not whether they can.
+
+## Re-read for a daemon too busy to answer (2026-11-13)
+
+`95c98746` and `5c958aee` staled the `cli/daemon.ex` and
+`cli/daemon/client.ex` pins. `Client.classify/1` (`classify/2` since
+`f2d5efc5`, below) now takes only a socket no
+daemon can be listening on (`:enoent`, `:econnrefused`, `:eaddrnotavail`,
+`:badarg`) for not running; a connect that times out is `{:error,
+:timeout}`, "could not tell". For a CLI logout that is a notice the daemon
+did not answer "ok": the CLI exits non-zero and nothing reaches the manager,
+the case `CliLogoutReachesDaemon` off and check 14 already describe. Before,
+a busy daemon's connect timeout read as not running, and the logout ended
+zero while that daemon kept the tokens. The daemon gains the `:machine`
+owner family and its forwarding of a computer's requests (M97 D28), which
+no step here reads. No modelled step changed; the line numbers into both
+files point at the committed code.
+
+## Re-read for the daemon's lock (2026-11-14)
+
+`f2d5efc5` staled the `cli/daemon.ex` and `cli/daemon/client.ex` pins. The
+daemon holds an exclusive lock for its life (`Fermix.CLI.Daemon.Lock`,
+`daemon.sock.lock`), taken before its socket, and listens with a backlog of
+128; a second daemon leaves a live one's socket alone. `Client.classify/2`
+takes a refused or missing socket for not running only while that lock is
+free: held, it is `{:error, :not_accepting}`, and a lock that cannot be read
+is an error of its own, both "could not tell". On macOS a daemon too busy to
+accept refuses the next connect at once once its backlog is full, so before
+this a CLI logout against such a daemon read it as not running and ended
+zero while it kept the tokens. Now `forget_auth_profile/2` answers it as an
+error, and the CLI exits non-zero naming the daemon that could not drop
+them: the notice not answered "ok" that `CliLogoutReachesDaemon` off and
+check 14 describe. No modelled step changed; the line numbers into both
+files point at the committed code.
+
+## Re-read for the retired refusal's sentence (2026-11-15)
+
+`1cafb479` staled the `cli/daemon.ex` pin. The daemon of a device engine
+with no link still refuses a method whose state is the primary's
+`memory.db` as retired before anything reads it
+(`dispatch_management_request/2`, `cli/daemon.ex:685-689`), and now says
+the sentence that computer's summary says, worked out from the home's files
+at each request (`retired_sentence/1`, `:694-701`,
+`HomeSummary.retired_sentence/2`), where it said one sentence for each OS
+(`Placement.retired/1`). That is a management request on a device engine,
+answered in the handler process that serves its connection; no step here is
+one (`auth_forget` is a v0 method, `handle_method/3`, and the model's daemon
+is no device), and the other routes and `guarded/2` are as they were. No
+modelled step changed. The 17 lines the change adds moved every line after
+them, so the line numbers into `cli/daemon.ex` now point at the committed
+code: `:1088` for `auth_forget`, `:1331-1361` for its reply and
+`forget_signed_out/2`, `:706-808` for the route and `guarded/2`. The
+TOKEN-6 fix bullet still named `:892` and `:1135-1165`, lines an earlier
+change had already moved; it now names the same two.

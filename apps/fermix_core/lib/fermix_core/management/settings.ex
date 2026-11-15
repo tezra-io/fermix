@@ -19,12 +19,16 @@ defmodule FermixCore.Management.Settings do
 
   alias FermixCore.Auth.Redaction
   alias FermixCore.Browser.Config, as: BrowserConfig
+  alias FermixCore.Computers.Switches, as: ComputerSwitches
   alias FermixCore.Home.Snapshot.Settings, as: SnapshotSettings
+  alias FermixCore.Management.Accessories, as: AccessoryLink
   alias FermixCore.Management.Mobile, as: PhoneChannel
+  alias FermixCore.Management.Settings.Accessories
   alias FermixCore.Management.Settings.AnswerMap
   alias FermixCore.Management.Settings.Assistant
   alias FermixCore.Management.Settings.Browser
   alias FermixCore.Management.Settings.Channels
+  alias FermixCore.Management.Settings.CodingMachine
   alias FermixCore.Management.Settings.Cues, as: CuesSection
   alias FermixCore.Management.Settings.Mobile
   alias FermixCore.Management.Settings.Providers
@@ -32,12 +36,14 @@ defmodule FermixCore.Management.Settings do
   alias FermixCore.Management.Settings.Secrets
   alias FermixCore.Management.Settings.Snapshots
   alias FermixCore.Management.Settings.Source
+  alias FermixCore.Management.Settings.ThisComputer
   alias FermixCore.Management.Settings.Tools
   alias FermixCore.Management.Settings.Voice
   alias FermixCore.Meetings.Config, as: MeetingsConfig
   alias FermixCore.Readiness
   alias FermixCore.Realtime.Config, as: RealtimeConfig
   alias FermixCore.Setup.ConfigStore
+  alias FermixCore.Setup.MachineFile
   alias FermixCore.Setup.RestartState
   alias FermixCore.Setup.Wizard
 
@@ -50,10 +56,15 @@ defmodule FermixCore.Management.Settings do
     Mobile,
     CuesSection,
     Voice,
+    Accessories,
+    # Before Tools: both apps draw the coding pane's sections in this order,
+    # this machine's own approval first, then the home's preferred tool.
+    CodingMachine,
     Tools,
     Browser,
     Secrets,
-    Snapshots
+    Snapshots,
+    ThisComputer
   ]
 
   @type section :: %{id: String.t(), pane: String.t(), title: String.t()}
@@ -66,8 +77,9 @@ defmodule FermixCore.Management.Settings do
   @doc """
   Every section this daemon can serve, ordered, with the pane it renders under.
 
-  A section that exists only on a Mac (`channels.imessage`) is absent off one.
-  `macos?:` names the host, for a test.
+  A section that exists only on a Mac (`channels.imessage`) is absent off one,
+  and Backup settings (`snapshots`) off an Always On server's primary.
+  `macos?:` names the host and `server_primary?:` the server, for a test.
   """
   @spec sections(keyword()) :: [section()]
   def sections(opts \\ []) when is_list(opts),
@@ -119,10 +131,10 @@ defmodule FermixCore.Management.Settings do
   Applies changed keys to one section.
 
   Every value is checked against the row it names before anything is written, so
-  a refused key never leaves half a change behind. The phone channel's switch is
-  the one setting applied the moment it is written: a write that moves it starts
-  or stops the channel (M51 §5.5), and `:mobile_switch` replaces that call in a
-  test.
+  a refused key never leaves half a change behind. The phone channel's switch
+  and the accessory link's are applied the moment they are written: a write
+  that moves one starts or stops its subtree (M51 §5.5, M91 E3), and
+  `:mobile_switch` and `:accessories_switch` replace those calls in a test.
   """
   @spec apply(String.t(), map(), keyword()) :: {:ok, map()} | {:error, write_error()}
   def apply(section, values, opts \\ [])
@@ -185,7 +197,10 @@ defmodule FermixCore.Management.Settings do
 
     current = ConfigStore.current_snapshot()
 
-    for sentence <- phone_switch(before, current, opts) ++ reach_switch(before, current, opts),
+    for sentence <-
+          phone_switch(before, current, opts) ++
+            reach_switch(before, current, opts) ++
+            accessories_switch(before, current, opts) ++ misplaced_machine_settings(),
         do: Logger.warning("settings reload: #{sentence}")
 
     {:ok,
@@ -195,6 +210,17 @@ defmodule FermixCore.Management.Settings do
        "readiness" => readiness(),
        "config_state" => config_state_word()
      }}
+  end
+
+  # This computer's own settings are read from machine.toml alone (M97 §4),
+  # and the outside-edit check compares both files joined, so one written into
+  # config.toml by hand would be ignored without a word: the reload names it.
+  defp misplaced_machine_settings do
+    case ConfigStore.misplaced_machine_settings(ConfigStore.fermix_home()) do
+      {:ok, []} -> []
+      {:ok, names} -> [MachineFile.misplaced_notice(names)]
+      {:error, reason} -> ["config.toml could not be read again: #{inspect(reason)}"]
+    end
   end
 
   defp config_state_word do
@@ -272,6 +298,7 @@ defmodule FermixCore.Management.Settings do
   defp commit(:cues, answers), do: CuesSection.save(answers)
   defp commit(:browser, answers), do: BrowserConfig.save(answers)
   defp commit(:snapshots, answers), do: SnapshotSettings.save(answers)
+  defp commit(:computer, answers), do: ComputerSwitches.save(answers)
 
   defp commit(:sandbox, answers) do
     Wizard.set_sandbox_overrides(
@@ -315,9 +342,29 @@ defmodule FermixCore.Management.Settings do
       "side_effects" =>
         side_effects(before, current, switch) ++
           phone ++
-          reach_switch(before, current, opts)
+          reach_switch(before, current, opts) ++
+          accessories_switch(before, current, opts)
     }
   end
+
+  # The accessory link's switch is live (M91 E3), as the phone's is: a write or
+  # a reload that moves it starts or stops the link at once, and a link that
+  # did not follow is said in the daemon's words.
+  defp accessories_switch(before, current, opts) do
+    now = accessories_on?(current)
+
+    if accessories_on?(before) == now do
+      []
+    else
+      case Keyword.get(opts, :accessories_switch, &AccessoryLink.apply_enabled/1).(now) do
+        :ok -> []
+        {:error, sentence} when is_binary(sentence) -> [sentence]
+      end
+    end
+  end
+
+  defp accessories_on?(snapshot),
+    do: snapshot |> Source.channel(:accessories) |> Keyword.get(:enabled, false) == true
 
   # The phone channel's switch is live (M51 §5.5): a write or a reload that moves
   # it starts or stops the channel at once, and a channel that did not follow it
@@ -378,7 +425,8 @@ defmodule FermixCore.Management.Settings do
     {:model, "realtime_model"},
     {:voice, "realtime_voice"},
     {:reasoning_effort, "realtime_reasoning_effort"},
-    {:conversation, "realtime_conversation"}
+    {:conversation, "realtime_conversation"},
+    {:camera_share, "realtime_camera_share"}
   ]
 
   defp derived_keys(_keys, nil), do: []
@@ -386,9 +434,14 @@ defmodule FermixCore.Management.Settings do
   defp derived_keys(keys, {previous, now}) do
     for {key, row} <- @realtime_derived,
         row not in keys,
-        Keyword.get(previous, key) != Keyword.get(now, key),
+        derived_value(previous, key) != derived_value(now, key),
         do: row
   end
+
+  # The camera row shows the value in force, so a key first written by a move
+  # between Live and Grok moves no row.
+  defp derived_value(block, :camera_share), do: camera_share(block)
+  defp derived_value(block, key), do: Keyword.get(block, key)
 
   # Changes the operator did not type, in the daemon's own words. Two rules, and
   # both are real: choosing a transcription backend snaps the shared model key to
@@ -424,7 +477,8 @@ defmodule FermixCore.Management.Settings do
         Keyword.has_key?(previous, :conversation),
         Keyword.has_key?(now, :conversation)
       ) ++
-      screen_share_sentence(screen_share?(previous), screen_share?(now), realtime_engine(now))
+      screen_share_sentence(screen_share?(previous), screen_share?(now), realtime_engine(now)) ++
+      camera_share_sentence(camera_share(previous), camera_share(now))
   end
 
   # The model is what the operator picked, so naming it back would only repeat
@@ -473,6 +527,29 @@ defmodule FermixCore.Management.Settings do
   defp screen_share?(block),
     do: Keyword.get(block, :screen_share, %RealtimeConfig{}.screen_share?) == true
 
+  # A task-engine setting (M87 Phase 2): the journey onto the Realtime engine,
+  # which takes no calls from the phone, drops it, and the journey back puts it
+  # on. A switch the owner turned off on Live stays off on Grok and is no news.
+  defp camera_share_sentence(previous, nil) when is_boolean(previous),
+    do: [
+      "Sharing the phone's camera was removed because this engine takes no calls from the phone."
+    ]
+
+  defp camera_share_sentence(nil, true),
+    do: [
+      "Sharing the phone's camera was turned on because this engine takes calls from the phone."
+    ]
+
+  defp camera_share_sentence(_previous, _now), do: []
+
+  # The switch in force: `nil` under the Realtime engine, where it is no
+  # setting, and otherwise the key, whose absence is the struct default, on.
+  defp camera_share(block) do
+    if RealtimeConfig.hands_off_tasks?(%RealtimeConfig{engine: realtime_engine(block)}),
+      do: Keyword.get(block, :camera_share, %RealtimeConfig{}.camera_share?) == true,
+      else: nil
+  end
+
   defp transcription_model(snapshot) do
     snapshot
     |> Map.get(:fermix_core, [])
@@ -504,20 +581,43 @@ defmodule FermixCore.Management.Settings do
     end
   end
 
-  # Channels has a section that exists on one platform only, so it is handed
-  # the options that name the host; every other family is the same everywhere.
+  # Channels and Accessories have sections that exist on one platform only,
+  # This computer's exists on a linked computer only, Backup settings on an
+  # Always On server's primary only, the screen's sections off one, and this
+  # machine's coding approval only off a computer (named for the host), so
+  # they are handed the options that name the host; every other family is the
+  # same everywhere.
   defp family(section, opts), do: Enum.find(@families, &family_owns?(&1, section, opts))
 
   defp family_owns?(Channels, section, opts), do: Channels.owns?(section, opts)
+  defp family_owns?(Accessories, section, opts), do: Accessories.owns?(section, opts)
+  defp family_owns?(ThisComputer, section, opts), do: ThisComputer.owns?(section, opts)
+  defp family_owns?(CodingMachine, section, opts), do: CodingMachine.owns?(section, opts)
+  defp family_owns?(Snapshots, section, opts), do: Snapshots.owns?(section, opts)
+  defp family_owns?(Tools, section, opts), do: Tools.owns?(section, opts)
   defp family_owns?(module, section, _opts), do: module.owns?(section)
 
   defp family_sections(Channels, opts), do: Channels.sections(opts)
+  defp family_sections(Accessories, opts), do: Accessories.sections(opts)
+  defp family_sections(ThisComputer, opts), do: ThisComputer.sections(opts)
+  defp family_sections(CodingMachine, opts), do: CodingMachine.sections(opts)
+  defp family_sections(Snapshots, opts), do: Snapshots.sections(opts)
+  defp family_sections(Tools, opts), do: Tools.sections(opts)
   defp family_sections(module, _opts), do: module.sections()
 
   # The search section offers place search's backends as this build can run
-  # them, so Tools is also handed the build's host value when a caller names it.
+  # them, so Tools is also handed the build's host value when a caller names it,
+  # and the history promise's facts (`ComputerHistory.Promise.facts/2`) a test names.
+  # This machine's coding approval and This computer's rows follow the host
+  # (`macos?:`), which a test names.
   defp family_rows(Tools, section, snapshot, opts),
-    do: Tools.rows(section, snapshot, Keyword.take(opts, [:host]))
+    do: Tools.rows(section, snapshot, Keyword.take(opts, [:host, :promise, :computers_opts]))
+
+  defp family_rows(CodingMachine, section, snapshot, opts),
+    do: CodingMachine.rows(section, snapshot, Keyword.take(opts, [:macos?, :server_primary?]))
+
+  defp family_rows(ThisComputer, section, snapshot, opts),
+    do: ThisComputer.rows(section, snapshot, Keyword.take(opts, [:macos?]))
 
   defp family_rows(module, section, snapshot, _opts), do: module.rows(section, snapshot)
 end

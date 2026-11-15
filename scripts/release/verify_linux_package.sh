@@ -216,6 +216,10 @@ if [ "$kind" = rpm ]; then
       # really does own /usr/bin/fermix.
       fermix upgrade 2>&1 | grep -F "dnf upgrade fermix" >/dev/null ||
         { echo "the packaged upgrade refusal did not name dnf" >&2; exit 1; }
+      # An HTTPS connection decodes the server certificate through the asn1
+      # native library the build placed (see the deb path below).
+      fermix upgrade --check >&2 ||
+        { echo "fermix upgrade --check could not reach the release manifest over HTTPS" >&2; exit 1; }
       fermix service status --json || true
     '
   )" || fail "the rpm did not install and run inside fedora:41"
@@ -246,6 +250,28 @@ case "$version_output" in
   *"$version"*) ;;
   *) fail "fermix --version does not contain $version" ;;
 esac
+
+# A working directory this account cannot open, entered and then closed
+# (mode 000), as an owner's 0700 home is to the account an Always On server
+# runs Fermix as: the wrapper refuses before the VM starts, in its one
+# sentence (rel/burrito_plugin.zig), where an interactive-mode boot would
+# stop with a crash dump. The runner's account is not root, which opens any
+# directory.
+closed_dir="$RUNNER_TEMP/fermix-closed-cwd"
+mkdir -m 700 "$closed_dir"
+closed_status=0
+closed_output="$(cd "$closed_dir" && chmod 000 . && fermix --version 2>&1)" || closed_status=$?
+chmod 700 "$closed_dir"
+case "$closed_output" in
+  *"Crash dump"* | *"Kernel pid terminated"*) closed_refused=0 ;;
+  *"fermix: Fermix cannot start in "*"Run the command from one it can open, such as /."*) closed_refused=1 ;;
+  *) closed_refused=0 ;;
+esac
+if [ "$closed_status" -ne 1 ] || [ "$closed_refused" -ne 1 ]; then
+  printf '%s\n' "$closed_output" >&2
+  fail "run from a directory this account cannot open, fermix must refuse in its one sentence and exit 1 (it exited $closed_status)"
+fi
+printf 'closed working directory: %s\n' "$closed_output"
 
 # The run above unpacked the payload; the pinned helper must be in it, with its
 # notices beside it and installed as the package's own document.
@@ -329,4 +355,19 @@ printf '%s\n' "$upgrade_output"
 case "$upgrade_output" in
   *"apt upgrade fermix"*) ;;
   *) fail "the packaged upgrade refusal did not name the package manager: $upgrade_output" ;;
+esac
+
+# Every certificate Fermix checks is decoded through OTP's asn1 native
+# library, which the package build puts where the release loads it
+# (`FermixCore.Release.NativeLibraries`). A library built for the build
+# machine there fails every HTTPS connection. The manifest check fetches from
+# GitHub over HTTPS, checking the server's certificate, and changes nothing.
+check_output="$(fermix upgrade --check 2>&1)" || {
+  printf '%s\n' "$check_output" >&2
+  fail "fermix upgrade --check could not reach the release manifest over HTTPS"
+}
+printf '%s\n' "$check_output"
+case "$check_output" in
+  *"fermix upgrade: "*) ;;
+  *) fail "fermix upgrade --check did not report a version: $check_output" ;;
 esac

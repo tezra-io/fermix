@@ -777,7 +777,10 @@ defmodule FermixCore.Cues.Mandates do
   end
 
   defp owner_inbox(opts),
-    do: OwnerInbox.resolve(Keyword.take(opts, [:jobs_config, :configured_owners]))
+    do:
+      OwnerInbox.for_approval(
+        Keyword.take(opts, [:jobs_config, :configured_owners, :imessage_carrier])
+      )
 
   defp owner_chat?(opts) do
     with {:ok, inbox} <- owner_inbox(opts),

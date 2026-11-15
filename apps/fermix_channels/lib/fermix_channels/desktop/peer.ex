@@ -5,7 +5,9 @@ defmodule FermixChannels.Desktop.Peer do
   When a session whose device row is a `desktop` completes `hello`, it starts
   one peer under `FermixChannels.Desktop.PeerSupervisor` and hands it every
   desktop-family event the desktop sends (`deliver/2`): the companion tunnel,
-  `manage`, `loopback_request` and `snapshot_stored`. The peer puts each
+  `manage`, `loopback_request`, `snapshot_stored`, the computer's own
+  record (`offers`, `link_path`, M97) and the invocation (`invoke_*`, M97
+  §6.1). The peer puts each
   chunked payload back together (`Mobile.Chunks`, within each event's bound)
   and hands every complete event to the module its family names in
   `@families`, the one map of families. An event whose family has no module
@@ -28,6 +30,7 @@ defmodule FermixChannels.Desktop.Peer do
   alias FermixChannels.Mobile.Chunks
   alias FermixChannels.Mobile.Peers
   alias FermixChannels.Mobile.Protocol
+  alias FermixCore.Computers.Versions
 
   # Family => the module implementing `Desktop.Family` for it. Each family's
   # module is added here, one line each, as it is built.
@@ -35,7 +38,9 @@ defmodule FermixChannels.Desktop.Peer do
     companion: FermixChannels.Desktop.Companion,
     manage: FermixChannels.Desktop.Manage,
     loopback: FermixChannels.Desktop.LoopbackForward,
-    snapshots: FermixChannels.Desktop.SnapshotCopies
+    snapshots: FermixChannels.Desktop.SnapshotCopies,
+    computer: FermixChannels.Desktop.ComputerFamily,
+    invoke: FermixChannels.Desktop.InvokeFamily
   }
 
   @event_families %{
@@ -46,9 +51,17 @@ defmodule FermixChannels.Desktop.Peer do
     "loopback_request" => :loopback,
     "loopback_failed" => :loopback,
     "snapshot_stored" => :snapshots,
-    "snapshot_refused" => :snapshots
+    "snapshot_refused" => :snapshots,
+    "offers" => :computer,
+    "link_path" => :computer,
+    "invoke_open" => :invoke,
+    "invoke_part" => :invoke,
+    "invoke_cancel" => :invoke,
+    "invoke_result" => :invoke,
+    "invoke_status" => :invoke,
+    "invoke_restarted" => :invoke
   }
-  @family_names [:companion, :manage, :loopback, :snapshots]
+  @family_names [:companion, :manage, :loopback, :snapshots, :computer, :invoke]
   @registry FermixChannels.Desktop.Peers
   @supervisor FermixChannels.Desktop.PeerSupervisor
   @max_open_payloads 32
@@ -58,12 +71,19 @@ defmodule FermixChannels.Desktop.Peer do
   @deliver_timeout_ms 10_000
   @replace_timeout_ms 5_000
 
-  @typedoc "What a family is told about the desktop it serves."
+  @typedoc """
+  What a family is told about the desktop it serves: `standing` is where the
+  computer stands against this server (`FermixCore.Computers.Versions`, M97
+  §3.4), as its session's hello found it, and `machine_settings` whether that
+  hello said the computer applies §19.3's rule (`caps.computer`).
+  """
   @type context :: %{
           device_id: String.t(),
           session: pid(),
           peer: pid(),
           registry: GenServer.server(),
+          standing: FermixCore.Computers.Versions.standing(),
+          machine_settings: boolean(),
           options: keyword()
         }
 
@@ -88,8 +108,10 @@ defmodule FermixChannels.Desktop.Peer do
 
   @doc """
   Starts the peer of a desktop session under `supervisor`. `opts`:
-  `:device_id`, `:session` (the session's process), and optionally
-  `:registry` and `:families` (a test's own map of families, each a module or
+  `:device_id`, `:session` (the session's process), `:standing` (where the
+  desktop stands, `Computers.Versions`: required, never assumed), and
+  optionally `:machine_settings` (whether its hello said it applies M97
+  §19.3's rule; false when not said), `:registry` and `:families` (a test's own map of families, each a module or
   `{module, options}`, the options reaching the family's `init/1` as the
   context's `options`).
   """
@@ -231,9 +253,22 @@ defmodule FermixChannels.Desktop.Peer do
       session: Keyword.fetch!(opts, :session),
       registry: Keyword.get(opts, :registry, @registry),
       open_bytes_budget: Keyword.get(opts, :open_bytes_budget, @open_bytes_budget),
+      standing: standing!(opts),
+      machine_settings: Keyword.get(opts, :machine_settings, false) == true,
       families: %{},
       open: %{}
     }
+  end
+
+  # Where the desktop stands is its session's to say, never assumed: a peer
+  # told none does not start, so nothing is served on a guess.
+  defp standing!(opts) do
+    standing = Keyword.fetch!(opts, :standing)
+
+    unless standing in Versions.standings(),
+      do: raise(ArgumentError, "a desktop peer's standing is #{inspect(standing)}")
+
+    standing
   end
 
   # A desktop that reconnected has a newer session; its older peer goes, its
@@ -254,11 +289,16 @@ defmodule FermixChannels.Desktop.Peer do
     end
   end
 
+  # The older peer may end by itself while it is stopped: its session ended
+  # as this newer one replaced it, so it stops `:normal` first. Gone either
+  # way, as a stop finds it gone; only a stop that ran out of time leaves it
+  # running, and that still fails the newer peer's start.
   defp stop_older(older) do
     GenServer.stop(older, :replaced, @replace_timeout_ms)
   catch
     :exit, :noproc -> :ok
     :exit, {:noproc, _call} -> :ok
+    :exit, {reason, {GenServer, :stop, _args}} when reason != :timeout -> :ok
   end
 
   defp init_families(families, state) do
@@ -266,7 +306,9 @@ defmodule FermixChannels.Desktop.Peer do
       device_id: state.device_id,
       session: state.session,
       peer: self(),
-      registry: state.registry
+      registry: state.registry,
+      standing: state.standing,
+      machine_settings: state.machine_settings
     }
 
     Enum.reduce_while(families, {:ok, %{}}, fn {family, entry}, {:ok, acc} ->

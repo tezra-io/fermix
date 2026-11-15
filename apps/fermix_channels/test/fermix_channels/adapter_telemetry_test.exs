@@ -16,7 +16,7 @@ defmodule FermixChannels.AdapterTelemetryTest do
 
   # The Fermix Messages helper's answer to a send it recorded (MILESTONE_54 §8.2).
   defmodule IMessageHelper do
-    def call(_server, "send.text", _params, _timeout),
+    def call(_server, "send.text", _params, _timeout, _turn),
       do: {:ok, %{"disposition" => "recorded", "guid" => "sent-1", "rowid" => 1}}
   end
 

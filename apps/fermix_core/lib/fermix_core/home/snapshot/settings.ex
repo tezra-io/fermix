@@ -19,7 +19,9 @@ defmodule FermixCore.Home.Snapshot.Settings do
   alias FermixCore.Setup.ConfigStore
   alias FermixCore.Setup.Wizard
 
-  @answers [:interval_hours, :s3_bucket, :s3_region, :s3_prefix, :s3_endpoint]
+  # The section's one writable row: no app sets any part of S3 (ALWAYS_ON_PANE
+  # §3.12, D7).
+  @answers [:interval_hours]
 
   @doc "The settings door's keys this writer takes."
   @spec answers() :: [atom()]

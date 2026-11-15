@@ -46,7 +46,7 @@ jobs:
           - { os: macos-15-intel, leg: macos-x64, timeout: 45, fetch_depth: 1 }
     env:
       MIX_ENV: test
-      ELIXIR_VERSION: "1.19.5"
+      ELIXIR_VERSION: "1.19.7"
       OTP_VERSION: "28"
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
@@ -301,13 +301,16 @@ jobs:
         run: for t in scripts/release/test_*.py; do echo "== $t =="; uv run "$t" || exit 1; done
       - name: Run hermetic CI script tests
         run: for t in scripts/ci/test_*.py; do echo "== $t =="; uv run "$t" || exit 1; done
+      - name: Run hermetic dev script tests
+        run: for t in scripts/dev/test_*.py; do echo "== $t =="; uv run "$t" || exit 1; done
 
   disclaim-shim:
     # The macOS disclaim exec shim ships inside release payloads, cross-compiled
     # by `zig cc` under strict flags — while dev macOS builds use the lenient
     # host cc. That split already shipped one release-only C break (the v0.6.0
     # NIF), so compile the shim here with the release-exact zig flags on every
-    # run. Keep the flags in lockstep with DISCLAIM_CFLAGS in
+    # run. Keep the flags in lockstep with DISCLAIM_CFLAGS (and SERIAL_CFLAGS,
+    # for the accessory serial helper built beside the shim) in
     # apps/fermix_nif/Makefile and ZIG_VERSION with release.yml.
     #
     # The NIF (fermix_nif.c) is cross-compiled by zig for every release target
@@ -331,6 +334,17 @@ jobs:
               apps/fermix_nif/c_src/fermix_disclaim.c -o "${RUNNER_TEMP}/disclaim_${target}"
             echo "built ${target}"
           done
+      # The accessory serial helper ships beside the shim in every macOS payload,
+      # cross-built by zig per target the same way (SERIAL_CFLAGS in the
+      # Makefile). It links no framework: zig has none for macOS.
+      - name: Cross-compile the accessory serial helper for both macOS targets
+        run: |
+          set -euo pipefail
+          for target in aarch64-macos x86_64-macos; do
+            zig cc -target "$target" -std=c99 -O2 -Wall -Wextra -Werror \
+              apps/fermix_nif/c_src/fermix_serial.c -o "${RUNNER_TEMP}/fermix_serial_${target}"
+            echo "built ${target}"
+          done
       # The Linux Landlock exec shim ships in every Linux payload, cross-built
       # by zig per target the same way (LANDLOCK_CFLAGS in the Makefile).
       - name: Cross-compile the Landlock shim for both Linux targets
@@ -345,7 +359,7 @@ jobs:
       - name: Install Erlang/OTP headers
         uses: erlef/setup-beam@54075bcc5e249e4758d363f27d099f55d843f124 # v1.24.1
         with:
-          otp-version: "28.4.1"
+          otp-version: "28.5.0.8"
       - name: Compile the NIF for every release target
         run: |
           set -euo pipefail

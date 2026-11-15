@@ -4,8 +4,7 @@ defmodule Fermix.CLI.AlwaysOnCommand do
   a Homebrew or Linux install without the Fermix app.
 
       fermix always-on [--json]
-      fermix always-on ACTION [--provider ID] [--type T --location L] [--stdin]
-                       [--recovery-passphrase-file PATH] [--yes] [--wait] [--json]
+      fermix always-on ACTION [--recovery-passphrase-file PATH] [--sas DIGITS] [--yes] [--wait] [--json]
 
   The engine owns the flow. The verb reads `home.status` and draws its
   summary; for the step asked (`ACTION`, an action id in kebab form) it
@@ -16,9 +15,8 @@ defmodule Fermix.CLI.AlwaysOnCommand do
 
   **On a terminal** (and without `--json`), `fermix always-on` with no
   step prints the screen and its steps numbered, Enter taking the main one
-  and `q` quitting; it asks what the step needs (the token masked, the
-  recovery passphrase masked, twice where none is set, the size and place
-  as a numbered list with the recommendation first), shows the confirm as
+  and `q` quitting; it asks what the step needs (the recovery passphrase
+  masked, twice where none is set), shows the confirm as
   `[y/N]`, acts, waits for the screen to move on (`AlwaysOnCommand.Wait`)
   and offers the next step, until the owner quits. A step on its own waits
   too.
@@ -30,20 +28,14 @@ defmodule Fermix.CLI.AlwaysOnCommand do
   again under `--json`); any other refusal is `action_refused` with the
   engine's sentence. It waits only with `--wait`.
 
-  Secrets never enter argv: the token comes from the masked prompt or
-  `--stdin`, the recovery passphrase from the masked prompt or
-  `--recovery-passphrase-file`, and either typed as an argument is refused
-  by name. Prompts, the step's id as it runs and the wait's lines go to
+  Secrets never enter argv: the recovery passphrase comes from the masked
+  prompt or `--recovery-passphrase-file`, and typed as an argument it is
+  refused by name. Prompts, the step's id as it runs and the wait's lines go to
   stderr; the screen, or the one `--json` envelope, to stdout.
 
   On a home the Fermix app manages (`HomeOwner.app_managed?/1`, given this
   verb's own `hello`) it refuses `app_managed`, naming the app's Always On
   pane. With Fermix stopped it refuses `engine_stopped` and writes nothing.
-  Where this build offers no Always On in the home
-  (`Home.AlwaysOnRelease.available_in/1`, read from the home's own settings
-  file, the one its engine boots from) every use refuses
-  `always_on_unavailable` before anything else is read, and a switch it
-  cannot read is `home_status_unavailable` naming the file.
 
   **A step that waits reports how it ended**, from the screen's `outcome`,
   the engine's word: `failed` (the step ended on a problem) is
@@ -58,9 +50,7 @@ defmodule Fermix.CLI.AlwaysOnCommand do
   Dependencies: `:home`, `:client` (a 3-arity management call, as
   `Client.request_v1/3`), `:terminal` (the `SecretInput` terminal), `:stdin`,
   `:stdout`, `:stderr`, `:app_managed?` (as `HomeOwner.app_managed?/1`),
-  `:now_ms` (a 0-arity monotonic clock), `:sleep` and `:always_on` (a
-  boolean standing for the answer of `Home.AlwaysOnRelease.available_in/1`
-  for the home).
+  `:now_ms` (a 0-arity monotonic clock) and `:sleep`.
   """
 
   alias Fermix.CLI.AlwaysOnCommand.Render
@@ -70,22 +60,18 @@ defmodule Fermix.CLI.AlwaysOnCommand do
   alias Fermix.CLI.HomeOwner
   alias Fermix.CLI.MachineOutput
   alias Fermix.CLI.SecretInput
-  alias FermixCore.Home.AlwaysOnRelease
   alias FermixCore.Management.HomeSummary
   alias FermixCore.Setup.ConfigStore
   alias FermixCore.Setup.EngineOwner
 
   @switches [
-    provider: :string,
-    type: :string,
-    location: :string,
-    stdin: :boolean,
     recovery_passphrase_file: :string,
+    sas: :string,
     yes: :boolean,
     wait: :boolean,
     json: :boolean
   ]
-  @secret_flags ~w(--token --recovery-passphrase)
+  @secret_flags ~w(--recovery-passphrase)
   @hello_ms 10_000
   @status_ms 30_000
   # The guided loop's bound: a session that takes this many steps stops and
@@ -94,13 +80,16 @@ defmodule Fermix.CLI.AlwaysOnCommand do
   @usage """
   Usage:
     fermix always-on [--json]
-    fermix always-on ACTION [--provider ID] [--type T --location L] [--stdin]
-                     [--recovery-passphrase-file PATH] [--yes] [--wait] [--json]
+    fermix always-on ACTION [--recovery-passphrase-file PATH] [--sas DIGITS] [--yes] [--wait] [--json]
 
   ACTION is one of the steps Always On offers now:
-    paste-token create-server cancel move-now try-again turn-on restart-server
-    start-again create-in back-up-now replace-server check-again own-server
-    delete-server learn-more open-console update
+    cancel move-now try-again update back-up-now check-again own-server move-back
+    restore-here add-computer approve-computer deny-computer change-passphrase
+    restart-server
+
+  approve-computer takes the six digits the new computer shows (--sas, or asked).
+  restart-server, on a computer linked to its server, restarts the server while a
+  change waits for it, after the work it runs on a computer (ten minutes at most).
   """
 
   @type context :: map()
@@ -108,43 +97,10 @@ defmodule Fermix.CLI.AlwaysOnCommand do
   @doc "Runs `fermix always-on ARGS` with the dependencies the moduledoc names."
   @spec run([String.t()], keyword()) :: non_neg_integer()
   def run(argv, deps \\ []) when is_list(argv) and is_list(deps) do
-    case always_on(deps) do
-      {:ok, true} ->
-        parsed(argv, deps)
-
-      {:ok, false} ->
-        refused_first(argv, deps, :always_on_unavailable, [])
-
-      {:error, reason} ->
-        output = AlwaysOnRelease.unreadable_sentence(reason)
-        refused_first(argv, deps, :home_status_unavailable, output: output)
-    end
-  end
-
-  defp always_on(deps) do
-    case Keyword.fetch(deps, :always_on) do
-      {:ok, available?} when is_boolean(available?) -> {:ok, available?}
-      :error -> AlwaysOnRelease.available_in(home(deps))
-    end
-  end
-
-  defp parsed(argv, deps) do
     case parse(argv) do
       {:ok, step, flags} -> deps |> context(flags) |> start(step)
       {:usage, sentence} -> usage(sentence, deps)
     end
-  end
-
-  # Not offered here, or its switch unreadable: one sentence on stderr, and
-  # the envelope under --json, before the arguments are read.
-  defp refused_first(argv, deps, code, details) do
-    sentence = MachineOutput.sentence(code, details)
-    IO.puts(Keyword.get(deps, :stderr, :stderr), "fermix always-on: " <> sentence)
-
-    if "--json" in argv,
-      do: IO.puts(Keyword.get(deps, :stdout, :stdio), MachineOutput.error(code, details))
-
-    1
   end
 
   @doc "Every step the verb takes, in the kebab form `ACTION` names it."
@@ -169,9 +125,9 @@ defmodule Fermix.CLI.AlwaysOnCommand do
     do: arg in @secret_flags or String.starts_with?(arg, Enum.map(@secret_flags, &(&1 <> "=")))
 
   defp secret_sentence do
-    "fermix always-on: a token or a passphrase is never taken as an argument, where shell " <>
-      "history and process lists keep it. Pipe the token in with --stdin, pass " <>
-      "--recovery-passphrase-file PATH, or run on a terminal to be asked."
+    "fermix always-on: a passphrase is never taken as an argument, where shell history " <>
+      "and process lists keep it. Pass --recovery-passphrase-file PATH, or run on a " <>
+      "terminal to be asked."
   end
 
   defp parse_flags(argv) do
@@ -188,20 +144,13 @@ defmodule Fermix.CLI.AlwaysOnCommand do
   end
 
   defp one_step(step, flags) do
-    cond do
-      step not in steps() -> {:usage, nil}
-      is_nil(flags.type) != is_nil(flags.location) -> {:usage, nil}
-      true -> {:ok, step, flags}
-    end
+    if step in steps(), do: {:ok, step, flags}, else: {:usage, nil}
   end
 
   defp flags(opts) do
     %{
-      provider: Keyword.get(opts, :provider),
-      type: Keyword.get(opts, :type),
-      location: Keyword.get(opts, :location),
-      stdin: Keyword.get(opts, :stdin, false),
       passphrase_file: Keyword.get(opts, :recovery_passphrase_file),
+      sas: Keyword.get(opts, :sas),
       yes: Keyword.get(opts, :yes, false),
       wait: Keyword.get(opts, :wait, false),
       json: Keyword.get(opts, :json, false)
@@ -315,9 +264,10 @@ defmodule Fermix.CLI.AlwaysOnCommand do
     end
   end
 
+  # Update sends nothing: it says how this computer updates.
   defp finish({:opened, record}, summary, ctx) do
     if ctx.flags.json,
-      do: IO.puts(ctx.stdout, MachineOutput.ok(step_result(summary, %{"url" => record["url"]}))),
+      do: IO.puts(ctx.stdout, MachineOutput.ok(step_result(summary, nil))),
       else: IO.puts(ctx.stdout, Render.opened(record))
 
     0

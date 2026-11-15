@@ -298,8 +298,9 @@ make capability-auto     # seed -> start (background) -> preflight -> full sweep
 Under the hood (`bin/capability-daemon.sh` + `bin/seed_capability_home.py`) it:
 
 1. **Seeds `~/.fermix-capability-eval`** — creates the home, a git-backed
-   `workspace/` (the checker's per-trial scoring root), a minimal strict
-   `config.toml`, and the auth the scored model needs. The scored model is derived
+   `workspace/` (the checker's per-trial scoring root), a minimal `config.toml`
+   with a strict `machine.toml` beside it (the sandbox is this computer's own
+   setting), and the auth the scored model needs. The scored model is derived
    from the `primary = true` provider in `~/.fermix-dev/config.toml`, and its
    credentials are reused from the dev home:
    - **OAuth providers** (`openai_codex`, `anthropic`, `xai`) store their token
@@ -314,7 +315,7 @@ Under the hood (`bin/capability-daemon.sh` + `bin/seed_capability_home.py`) it:
    - **API-key providers** keep `profile = "fermix-dev"` plus a `@keyring` sentinel,
      so the existing `fermix:fermix-dev:<ENV>` keychain entry resolves unchanged.
 
-   The `[sandbox]` block is always regenerated strict and home-scoped
+   The `[sandbox]` block, in `machine.toml`, is always regenerated strict and home-scoped
    (`mode = "strict"`, `workspace_root = $FERMIX_HOME/workspace`, `allowed_roots =
    ["$FERMIX_HOME/skills"]`) — never copied from the dev config, whose
    `allowed_roots` escape the home and would fail the runner's precondition. The
@@ -781,9 +782,14 @@ which no reply gate can give. Both come from one place: the pages under
 
 **Nothing is started by hand.** A suite writes `__EVAL_FIXTURE_URL__` where a URL
 would go (`__EVAL_FIXTURE_URL__/form.html`). `run_eval.py` and
-`run_capability.py` each start ONE server, on an ephemeral 127.0.0.1 port, if and
-only if a selected case uses that placeholder, before anything is driven, and
-stop it on every exit path. Each case attempt gets its own token
+`run_capability.py` each start ONE server on 127.0.0.1, if and only if a
+selected case uses that placeholder, before anything is driven, and stop it on
+every exit path. Its port is the one the eval home's seed recorded in
+`eval-fixtures/fixture_server.json`, which `capability-daemon.sh` also hands the
+daemon as `FERMIX_EVAL_FIXTURE_ORIGIN`, so a dev build's `web_fetch` can read the
+pages as well as the browser; a port something else holds fails the run before
+anything is driven. A home with no manifest (`~/.fermix-dev`) gets an ephemeral
+port only the browser can read. Each case attempt gets its own token
 (`/s/<token>/…`), so a `--repeat` trial, a `--fail-retries` attempt and a
 capability trial each read the page state they produced themselves. `--dry-run`
 validates the placeholder and starts nothing; it prints how many case trials
@@ -967,11 +973,15 @@ intersects.
 
 `seed_capability_home.py --extra-config <file.toml>` is the other half of an arm:
 its fragment is appended to the rendered config, and it is REFUSED when it
-redefines a table the seeder already writes (`[sandbox]`, `[fermix_core.harness]`,
-the provider block, …) or starts with a bare key — both would otherwise surface
-as a TOML error at daemon boot, naming a line in a generated file. An arm changes
-what the seeder does not own; if it needs to change what the seeder does own, the
-seeder learns the setting.
+redefines a table the seeder already writes (`[fermix_core.meetings]`, the
+provider block, …) or starts with a bare key — both would otherwise surface
+as a TOML error at daemon boot, naming a line in a generated file — and when it
+sets one of this computer's own settings (`[sandbox]` and the other
+`machine.toml` tables, `dev_local`, or the harness's `approved`, `codex_home`
+and `claude_config_dir`), which Fermix never reads from `config.toml`. The
+harness's other keys (`default_vendor`, …) are the home's, and an arm may set
+them. An arm changes what the seeder does not own; if it needs to
+change what the seeder does own, the seeder learns the setting.
 
 **Comparing two code revisions** (this release's loop against the last) is the
 same mechanism with two checkouts, not a second mode in the runner. Check the
@@ -1054,6 +1064,31 @@ FERMIX_EVAL_HOME="$VOICE_HOME" OPIK_PROJECT=fermix-voice-eval uv run bin/run_eva
   --voice --confirm-daemon-isolated --confirm-isolated-env
 ```
 
+`suites/voice_greeting_goodbye.yaml` (M96: the voice greets first, a spoken goodbye
+ends the call) covers both task engines, so it runs once per engine: once against
+the Grok home above, and once against the same home reseeded for GPT-Live, whose key
+is the OpenAI provider's `api_key` slot, filled at boot from `OPENAI_API_KEY`. Every
+case accepts either engine; Grok's greeting is a gate and GPT-Live's a watched rubric
+line, since GPT-Live may start silent.
+
+```sh
+FERMIX_EVAL_HOME="$VOICE_HOME" OPIK_PROJECT=fermix-voice-eval uv run bin/run_eval.py \
+  --suite voice_greeting_goodbye --judge --voice --confirm-daemon-isolated \
+  --confirm-isolated-env
+# then GPT-Live: stop the daemon, reseed, restart it with OPENAI_API_KEY, run again
+uv run bin/seed_capability_home.py "$VOICE_HOME" --voice --voice-engine openai_live
+(cd .. && FERMIX_HOME="$VOICE_HOME" OPENAI_API_KEY="$OPENAI_API_KEY" FERMIX_OPIK_ENABLED=1 \
+  FERMIX_OPIK_PROJECT=fermix-voice-eval FERMIX_BROWSER_HEADLESS=1 mix fermix.dev --no-web)
+FERMIX_EVAL_HOME="$VOICE_HOME" OPIK_PROJECT=fermix-voice-eval uv run bin/run_eval.py \
+  --suite voice_greeting_goodbye --judge --voice --confirm-daemon-isolated \
+  --confirm-isolated-env
+```
+
+`suites/voice_lists_and_trips.yaml` runs once on a home whose calls join the chat
+(the default above) and once on one whose calls are private, where each task's
+answer is only said: stop the daemon, reseed with `--voice --voice-conversation
+private`, restart it and run the suite again.
+
 `--judge` needs the judge's credential as in §1 (`ANTHROPIC_API_KEY`, else an
 `ant auth login` profile, for the configured `anthropic` judge). Before a run, the
 runner checks the home is a disposable
@@ -1114,7 +1149,7 @@ measures. The preconditions, in order (exit 3): `FERMIX_EVAL_HOME` is set (left
 unset, the harness would fall back to `~/.fermix-dev`, on the owner's Mac the
 live development daemon the phone pairs with) and is not `~/.fermix`, both
 checked before any daemon is contacted; the fixture's platform is
-this host's; its script or binary exists; the daemon answers; its `config.toml`
+this host's; its script or binary exists; the daemon answers; its `machine.toml`
 has `[fermix_core.computer_use] enabled = true` and no strict sandbox (strict
 derives look-only computer use, which refuses every action); and the fixture's
 `--self-test` records every control the corpus asserts on.

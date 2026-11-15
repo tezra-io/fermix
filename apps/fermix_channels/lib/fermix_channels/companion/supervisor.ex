@@ -42,7 +42,9 @@ defmodule FermixChannels.Companion.Supervisor do
   that carries it to the primary through the desktop relay, and its media
   grants are made from the blobs the relay fetched (`Desktop.Relay.Media`)
   rather than from a phone store. Its connections are the primary's, whose
-  inbox is on another computer, so it starts no inbox of its own.
+  inbox is on another computer, so in place of `Companion.Inbox` it starts
+  `Desktop.Uploads` (M97 §9.3, D22): an inbox of its own at the same path,
+  whose files it uploads to the server.
   `:tunnel` is `[relay: server, staging: dir]`, or `nil` (every other engine).
 
   `:rest_for_one`: a registry restart would leave every connection unregistered
@@ -63,6 +65,7 @@ defmodule FermixChannels.Companion.Supervisor do
   alias FermixChannels.Companion.Turns
   alias FermixChannels.Desktop.Relay.Media, as: RelayMedia
   alias FermixChannels.Desktop.Tunnel
+  alias FermixChannels.Desktop.Uploads
   alias FermixChannels.Mobile.RequestCoordinator
   alias FermixCore.Home.StatusWatch
 
@@ -182,11 +185,25 @@ defmodule FermixChannels.Companion.Supervisor do
       ]
   end
 
-  # Only an engine that runs its connections itself takes files in.
+  # An engine that runs its connections itself takes files into its own
+  # store; a desktop's tunnel takes them into an inbox of its own and uploads
+  # them to the server (`:uploads_opts`, `Desktop.Uploads.start_link/1`'s).
   defp inbox_child(nil, inbox_opts),
     do: [Supervisor.child_spec({Inbox, inbox_opts}, id: Keyword.fetch!(inbox_opts, :name))]
 
-  defp inbox_child(_tunnel, _inbox_opts), do: []
+  defp inbox_child(tunnel, _inbox_opts),
+    do: [
+      Supervisor.child_spec({Uploads, uploads_opts(tunnel)},
+        id: Keyword.fetch!(uploads_opts(tunnel), :name)
+      )
+    ]
+
+  defp uploads_opts(tunnel) do
+    tunnel
+    |> Keyword.get(:uploads_opts, [])
+    |> Keyword.put_new(:name, Uploads)
+    |> Keyword.put_new(:relay, Keyword.fetch!(tunnel, :relay))
+  end
 
   # `shared` (the media grants and the Always On watch) go to every
   # connection of either kind, `ordinary` (the registry, the request path,
@@ -197,8 +214,11 @@ defmodule FermixChannels.Companion.Supervisor do
     [
       connection_module: Tunnel,
       connection_opts:
-        [relay: Keyword.fetch!(tunnel, :relay), staging: Keyword.fetch!(tunnel, :staging)] ++
-          shared
+        [
+          relay: Keyword.fetch!(tunnel, :relay),
+          staging: Keyword.fetch!(tunnel, :staging),
+          uploads: Keyword.fetch!(uploads_opts(tunnel), :name)
+        ] ++ shared
     ]
   end
 

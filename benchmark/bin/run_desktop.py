@@ -319,8 +319,9 @@ def production_home_error(cfg) -> str | None:
 
 def config_problems(fermix_home: str) -> list[str]:
     """File truth about the daemon that will act: computer use is OFF by default
-    and a strict sandbox derives look-only access, which refuses every action."""
-    path = os.path.join(os.path.realpath(os.path.expanduser(fermix_home)), "config.toml")
+    and a strict sandbox derives look-only access, which refuses every action. Both
+    are the machine's own settings, read from machine.toml only (M97 §4)."""
+    path = os.path.join(os.path.realpath(os.path.expanduser(fermix_home)), "machine.toml")
     try:
         with open(path, "rb") as handle:
             raw = tomllib.load(handle)

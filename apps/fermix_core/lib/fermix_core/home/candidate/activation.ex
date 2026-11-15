@@ -11,11 +11,15 @@ defmodule FermixCore.Home.Candidate.Activation do
   home itself, `[fermix_core.engine] role = "primary"` (the source wrote
   `device` before it captured), the destination facts in
   `[fermix_core.snapshots]` (the bucket and its region when one was named,
-  and the recovery recipient the move carried). On a host that is not a Mac
-  the restore itself has already turned iMessage off
-  (`FermixCore.Home.Archive.RestoredConfig`), as it does
-  for `fermix home import`: a settings file that turns iMessage on refuses to
-  load anywhere else, and the new primary must boot. The keychain's secrets
+  with `s3_credentials = "instance_role"` in place of any storage address or
+  access keys where the server's infrastructure set them, and the recovery
+  recipient the move carried). The last server's own instance-role bucket
+  never travels on: a move back, or a move to a server whose infrastructure
+  named none, leaves it behind (`Archive.InstanceRole`). No setting of the
+  computer the home left comes with it: those are in that computer's own
+  `machine.toml`, which no stream carries, and the restore leaves out any an
+  earlier engine kept in `config.toml` (`FermixCore.Home.Archive.RestoredConfig`),
+  so the new primary takes its own machine file. The keychain's secrets
   the source carried in the stream are in the staged file store by then, and
   each `@keyring` reference whose file arrived becomes `@file`
   (`FermixCore.Home.MoveSecrets.adopt/2`), so the new primary resolves every
@@ -23,6 +27,19 @@ defmodule FermixCore.Home.Candidate.Activation do
   or architecture (the restore's `plugins_to_reinstall`) are named in the
   staged plugin store (`FermixCore.Plugins.Dist.Reinstall.request/2`), and
   the new primary's first boot installs them again for this computer.
+
+  **History notes** (M97 §8.4). The staged `memory.db` names each note's
+  machine, `""` for the home's own. A move names the computer it left, which
+  stays as a linked computer (the move's `"device_id"`): every row of the
+  home's own machine (its notes, reads, purge and pause intervals, and its row
+  with its delivered mark) becomes that computer's, so the new primary names
+  the computer they were made on. A return does the reverse for this
+  computer, by the device id its desktop link holds: its notes on the server
+  are the home's own again, and every other computer keeps its own.
+  Threads are the home's. One transaction in the staged store
+  (`Memory.Repo.ComputerHistorySql.rename_machine/3`), before anything of it is
+  in use, so a staging that runs again changes nothing more; a store from
+  before notes named their machine is left as it is.
 
   **Activation** renames each staged entry into the home (an entry of the
   candidate's own engine already there, such as a log, is moved aside into
@@ -57,7 +74,14 @@ defmodule FermixCore.Home.Candidate.Activation do
        with its `-wal` and `-shm`, and the staged entry is renamed into
        place; a kept path already moved by an earlier run wins over one a
        boot in between made again;
-    c. the ended tenure's desktop link and key are removed from `device/`;
+    c. the ended tenure's key is deleted from the secret store its desktop
+       link records (`FermixCore.Home.ComputerKey.delete/3`, with any file
+       an older Fermix kept it in), then the link is removed from `device/`.
+       The store and the key's public half are recorded once, before anything
+       is deleted (`candidate/tenure.json`), and the item goes only while it
+       holds that key, so a later run never deletes another home's under the
+       same profile. A link that cannot be read names no store: it is removed,
+       the reason logged by name, and any key it named stays where it is;
     d. the snapshot status asks for a snapshot at the first boot;
     e. the moved marker is removed (`FermixCore.Home.Moved.remove/1`): the
        server carries its own by now, since it sent `move_commit` after
@@ -70,9 +94,12 @@ defmodule FermixCore.Home.Candidate.Activation do
   (`finish_activation/1`).
   """
 
+  alias Exqlite.Sqlite3
   alias FermixCore.Home.Archive.ConfigText
+  alias FermixCore.Home.Archive.InstanceRole
   alias FermixCore.Home.Candidate
   alias FermixCore.Home.Candidate.Return
+  alias FermixCore.Home.ComputerKey
   alias FermixCore.Home.DesktopLink
   alias FermixCore.Home.DeviceLocal
   alias FermixCore.Home.Moved
@@ -80,18 +107,27 @@ defmodule FermixCore.Home.Candidate.Activation do
   alias FermixCore.Home.Snapshot
   alias FermixCore.Home.Snapshot.Recipient
   alias FermixCore.Home.Snapshot.Status
+  alias FermixCore.Memory.Repo.ComputerHistorySql
   alias FermixCore.Plugins.Dist.Reinstall
+  alias FermixCore.Setup.SecretWriter
+
+  require Logger
 
   @config "config.toml"
+  @database "memory.db"
   @file_mode 0o600
   @return_kinds ~w(return local)
   @return_opts [:impl, :supervised, :drop_desktop_row]
+  # Step c's record when this home holds no key it can name.
+  @no_tenure_key %{store: nil, public: nil}
 
   @doc """
   Restores the stream at `incoming` into the staging directory with `pair`
   and settles its settings for `home`. `facts`: `"destination"` (the
-  candidate's `destination.json`) and `"recovery_recipient"` (or nil).
-  `opts` go to `Snapshot.restore/4`. Answers the staged epoch.
+  candidate's `destination.json`), `"recovery_recipient"` (or nil) and
+  `"device_id"`, the computer the move left as the home's (or nil, when it
+  stays as nothing). `opts` go to `Snapshot.restore/4`. Answers the staged
+  epoch.
   """
   @spec stage(Path.t(), Path.t(), Recipient.pair(), map(), keyword()) ::
           {:ok, pos_integer()} | {:error, term()}
@@ -115,6 +151,7 @@ defmodule FermixCore.Home.Candidate.Activation do
     with :ok <- remove_tree(staging),
          {:ok, restored} <- Snapshot.restore(incoming, pair, staging, restore_opts),
          :ok <- settle_config(home, staging, facts, {mode, settle_opts}),
+         :ok <- own_notes(mode, home, staging, facts),
          :ok <- Reinstall.request(Path.join(staging, "plugins"), restored.plugins_to_reinstall) do
       {:ok, restored.epoch}
     else
@@ -205,7 +242,8 @@ defmodule FermixCore.Home.Candidate.Activation do
   `activating`): the steps a to g of the moduledoc, over the entries
   `record_entries/1` recorded (refused as `:entries_unrecorded` without them).
   `opts`: `:after_step`, a 1-arity function called with each step's name once
-  it is done (a test seam that stops it part-way).
+  it is done (a test seam that stops it part-way), and `:impl` and
+  `:supervised`, which the key's read and deletion take.
   """
   @spec activate(Path.t(), :return, keyword()) :: :ok | {:error, term()}
   def activate(home, :return, opts \\ []) when is_binary(home) and is_list(opts) do
@@ -216,7 +254,7 @@ defmodule FermixCore.Home.Candidate.Activation do
          {:ok, entries} <- read_entries(home),
          :ok <- prune_retired(home, entries, after_step),
          :ok <- place_returned(home, staging, entries, after_step),
-         :ok <- step(end_tenure(home), :c, after_step),
+         :ok <- step(end_tenure(home, Keyword.take(opts, [:impl, :supervised])), :c, after_step),
          :ok <- step(Status.write(home, %{Status.empty() | run_at_boot: true}), :d, after_step),
          :ok <- step(Moved.remove(home), :e, after_step),
          :ok <- step(place_return_config(home, staging), :f, after_step) do
@@ -277,6 +315,7 @@ defmodule FermixCore.Home.Candidate.Activation do
   defp moved_settings(text, facts) do
     text
     |> ConfigText.put("fermix_core.engine", "role", ~s("primary"))
+    |> InstanceRole.drop()
     |> put_destination(Map.get(facts, "destination", %{}))
     |> put_recipient(Map.get(facts, "recovery_recipient"))
   end
@@ -301,13 +340,24 @@ defmodule FermixCore.Home.Candidate.Activation do
     end
   end
 
-  defp put_destination(text, %{"s3_bucket" => bucket, "s3_region" => region}) do
+  defp put_destination(text, %{"s3_bucket" => bucket, "s3_region" => region} = destination) do
     text
     |> ConfigText.put("fermix_core.snapshots", "s3_bucket", toml_string(bucket))
     |> ConfigText.put("fermix_core.snapshots", "s3_region", toml_string(region))
+    |> put_signing(Map.get(destination, "s3_credentials"))
   end
 
   defp put_destination(text, %{}), do: text
+
+  # E1: the server's infrastructure set the bucket, and its instance role signs
+  # alone: a storage address or access keys the computer set by hand go.
+  defp put_signing(text, "instance_role") do
+    ~w(s3_endpoint s3_access_key_id s3_secret_access_key)
+    |> Enum.reduce(text, &elem(ConfigText.drop(&2, "fermix_core.snapshots", &1), 0))
+    |> ConfigText.put("fermix_core.snapshots", "s3_credentials", toml_string("instance_role"))
+  end
+
+  defp put_signing(text, nil), do: text
 
   defp put_recipient(text, nil), do: text
 
@@ -316,6 +366,50 @@ defmodule FermixCore.Home.Candidate.Activation do
 
   # A JSON string of printable text is a TOML basic string.
   defp toml_string(value) when is_binary(value), do: Jason.encode!(value)
+
+  # -- history notes ------------------------------------------------------------
+
+  # The machine the home was on is named for what it is now (the moduledoc).
+  defp own_notes(:move, _home, staging, facts) do
+    case Map.get(facts, "device_id") do
+      nil -> :ok
+      device_id when is_binary(device_id) -> rename_machine(staging, "", device_id)
+    end
+  end
+
+  defp own_notes(:return, home, staging, _facts) do
+    case DesktopLink.read(home) do
+      {:ok, %{device_id: device_id}} -> rename_machine(staging, device_id, "")
+      {:error, {:file, _path, :enoent}} -> :ok
+      {:error, reason} -> {:error, {:desktop_link, reason}}
+    end
+  end
+
+  defp rename_machine(staging, from, to) do
+    db = Path.join(staging, @database)
+    if File.regular?(db), do: rename_in(db, from, to), else: :ok
+  end
+
+  defp rename_in(db, from, to) do
+    case Sqlite3.open(db, mode: :readwrite) do
+      {:ok, conn} ->
+        renamed(ComputerHistorySql.rename_machine(conn, from, to), Sqlite3.close(conn))
+
+      {:error, reason} ->
+        {:error, {:history_notes, reason}}
+    end
+  end
+
+  defp renamed({:ok, :unnamed}, :ok) do
+    Logger.info("move: the history store names no machine yet, so no note is renamed")
+  end
+
+  defp renamed({:ok, counts}, :ok) do
+    Logger.info("move: history notes named for the machine they were made on: #{inspect(counts)}")
+  end
+
+  defp renamed({:error, reason}, _closed), do: {:error, {:history_notes, reason}}
+  defp renamed({:ok, _renamed}, {:error, reason}), do: {:error, {:history_notes, reason}}
 
   # -- activation -------------------------------------------------------------
 
@@ -464,9 +558,94 @@ defmodule FermixCore.Home.Candidate.Activation do
   defp keep_unit(home, unit, _to, {:ok, _stat}), do: set_aside_path(home, unit)
   defp keep_unit(_home, _unit, to, {:error, reason}), do: {:error, {:file, to, reason}}
 
-  # Step c: the files of the ended tenure inside a directory a return keeps.
-  defp end_tenure(home),
-    do: each_ok([DesktopLink.path(home), DesktopLink.key_path(home)], &remove_file/1)
+  # Step c: the ended tenure's key, then its link. Which key is this home's is
+  # recorded once, before anything is deleted, so a run after a stop between
+  # the two deletes only that key: two homes under one profile share the item
+  # (D13).
+  defp end_tenure(home, opts) do
+    with {:ok, tenure} <- tenure(home, opts),
+         :ok <- forget_key(home, tenure, opts) do
+      remove_file(DesktopLink.path(home))
+    end
+  end
+
+  defp forget_key(home, %{store: nil}, opts), do: ComputerKey.delete(home, nil, opts)
+
+  defp forget_key(home, %{store: store, public: public}, opts),
+    do: ComputerKey.delete(home, store, [public: public] ++ opts)
+
+  defp tenure(home, opts) do
+    file = tenure_path(home)
+
+    case File.read(file) do
+      {:ok, contents} -> decode_tenure(contents, file)
+      {:error, :enoent} -> record_tenure(home, file, opts)
+      {:error, reason} -> {:error, {:file, file, reason}}
+    end
+  end
+
+  defp record_tenure(home, file, opts) do
+    with {:ok, tenure} <- linked_key(home, opts),
+         :ok <- Candidate.write_private(file, Jason.encode!(encode_tenure(tenure))) do
+      {:ok, tenure}
+    end
+  end
+
+  # The key the store the link names holds now. No link, a link from before
+  # the key moved, and a store that holds no key name none; a link that cannot
+  # be read names no store, so its key is never guessed at.
+  defp linked_key(home, opts) do
+    case DesktopLink.read(home) do
+      {:ok, %{key: nil}} -> {:ok, @no_tenure_key}
+      {:ok, %{key: store}} -> stored_key(home, store, opts)
+      {:error, {:file, _path, :enoent}} -> {:ok, @no_tenure_key}
+      {:error, reason} -> unreadable_link(reason)
+    end
+  end
+
+  defp stored_key(home, store, opts) do
+    case ComputerKey.read(home, [store: store] ++ opts) do
+      {:ok, %{public: public}} -> {:ok, %{store: store, public: public}}
+      {:error, {:missing, ^store}} -> {:ok, @no_tenure_key}
+      {:error, {:invalid, ^store}} -> {:ok, @no_tenure_key}
+      {:error, reason} -> {:error, {:computer_key, reason}}
+    end
+  end
+
+  defp unreadable_link(reason) do
+    Logger.warning(
+      "move back: the desktop link could not be read (#{inspect({:desktop_link, reason})}), " <>
+        "so it is removed and any key it named stays in its store: " <>
+        DesktopLink.error_sentence(reason)
+    )
+
+    {:ok, @no_tenure_key}
+  end
+
+  defp encode_tenure(%{store: nil}), do: %{"store" => nil, "public" => nil}
+
+  defp encode_tenure(%{store: store, public: public}),
+    do: %{"store" => SecretWriter.sentinel_for(store), "public" => Base.encode64(public)}
+
+  defp decode_tenure(contents, file) do
+    case Jason.decode(contents) do
+      {:ok, %{"store" => sentinel, "public" => encoded}} -> tenure_of(sentinel, encoded, file)
+      _invalid -> {:error, {:invalid_state, file}}
+    end
+  end
+
+  defp tenure_of(nil, nil, _file), do: {:ok, @no_tenure_key}
+
+  defp tenure_of(sentinel, encoded, file) when is_binary(encoded) do
+    case {SecretWriter.store_of_sentinel(sentinel), Base.decode64(encoded)} do
+      {{:ok, store}, {:ok, <<_::256>> = public}} -> {:ok, %{store: store, public: public}}
+      _invalid -> {:error, {:invalid_state, file}}
+    end
+  end
+
+  defp tenure_of(_sentinel, _encoded, file), do: {:error, {:invalid_state, file}}
+
+  defp tenure_path(home), do: Candidate.path(home, "tenure.json")
 
   # Step f: done already when an earlier run renamed it.
   defp place_return_config(home, staging) do

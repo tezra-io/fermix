@@ -13,7 +13,7 @@ defmodule FermixChannels.Desktop.SnapshotTargetTest do
   alias FermixTestSupport.SafeRm
 
   @desktop "desk-1"
-  @rows [%{device_id: @desktop, name: "Studio Mac"}]
+  @rows [%{device_id: @desktop, name: "Studio Mac", backups: true}]
   @plenty 100 * 1_024 * 1_024 * 1_024
   @wait 10_000
 
@@ -203,6 +203,20 @@ defmodule FermixChannels.Desktop.SnapshotTargetTest do
              "Your Studio Mac is not connected; the snapshot waits for the next run."
   end
 
+  # M97 D7: a computer that joined keeps no copy unless its owner chose it.
+  test "a connected computer that keeps no backups is sent nothing", ctx do
+    desktop = start_desktop(ctx, {:ok, @plenty})
+    snapshot = snapshot(ctx, "20261027T093000Z-e4.fxsnap", 10)
+    joined = [%{device_id: @desktop, name: "Loft Linux", backups: false}]
+    opts = Keyword.put(target_opts(ctx, desktop), :desktop_rows, fn -> joined end)
+
+    assert {:waiting, {:not_connected, "Studio Mac"}} =
+             SnapshotTarget.store(snapshot, %{names: ["Studio Mac"]}, opts)
+
+    refute_received {:to_primary, _type, _event}
+    assert File.ls(Path.join(ctx.desktop, "snapshots")) in [{:error, :enoent}, {:ok, []}]
+  end
+
   describe "the desktop's store" do
     setup ctx do
       Map.put(ctx, :desktop_store, start_desktop(ctx, {:ok, @plenty}))
@@ -245,8 +259,9 @@ defmodule FermixChannels.Desktop.SnapshotTargetTest do
     end
   end
 
+  # On an Always On server's primary (D18); no other primary has a target.
   test "the scheduler writes to S3 and then to the desktops" do
-    assert Scheduler.targets() == [FermixCore.Home.Snapshot.S3, SnapshotTarget]
+    assert Scheduler.targets(:server) == [FermixCore.Home.Snapshot.S3, SnapshotTarget]
   end
 
   test "it is on only while the primary has a desktop row" do
@@ -270,6 +285,20 @@ defmodule FermixChannels.Desktop.SnapshotTargetTest do
       sentence = SnapshotTarget.sentence(reason)
       assert Copy.violations(sentence, :prose, ["Studio Mac", "GiB"]) == [], sentence
     end
+  end
+
+  # A desktop connecting is when the desktop target can take a snapshot: the
+  # scheduler plans then (the first after a move at once).
+  test "a desktop's family, as it connects, tells the snapshot scheduler" do
+    me = self()
+
+    told = fn ->
+      send(me, :targets_changed)
+      :ok
+    end
+
+    {:ok, _state} = SnapshotCopies.init(%{device_id: @desktop, options: [targets_changed: told]})
+    assert_received :targets_changed
   end
 
   # The family on its own: an answer reaches the run that waits for it, once.

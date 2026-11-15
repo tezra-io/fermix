@@ -24,6 +24,7 @@ defmodule FermixCore.Realtime.SessionServerScreenTest do
   alias FermixCore.ComputerUse.CaptureHealth
   alias FermixCore.Realtime.Config
   alias FermixCore.Realtime.SessionServer
+  alias FermixTestSupport.CallLeases
   alias FermixTestSupport.RealtimeSocket
 
   # A test may register itself under this name to be told about provider events and
@@ -175,6 +176,8 @@ defmodule FermixCore.Realtime.SessionServerScreenTest do
     {:ok, server} =
       SessionServer.start_link(
         companion: self(),
+        endpoint: :desktop,
+        call_lease: CallLeases.own!(),
         config: Config.normalize(enabled: true),
         session_scope: scope,
         openai_client: FakeOpenAIClient,
@@ -417,6 +420,8 @@ defmodule FermixCore.Realtime.SessionServerScreenTest do
     {:ok, server} =
       SessionServer.start_link(
         companion: self(),
+        endpoint: :desktop,
+        call_lease: CallLeases.own!(),
         config: Config.normalize(enabled: true),
         openai_client: FakeOpenAIClient,
         api_key: "sk-test",
@@ -480,6 +485,8 @@ defmodule FermixCore.Realtime.SessionServerScreenTest do
     {:ok, server} =
       SessionServer.start_link(
         companion: self(),
+        endpoint: :desktop,
+        call_lease: CallLeases.own!(),
         # A tiny budget so a realistic frame count crosses the feed's share.
         config: Config.normalize(enabled: true, max_estimated_cost_cents_per_session: 1),
         openai_client: FakeOpenAIClient,
@@ -709,6 +716,8 @@ defmodule FermixCore.Realtime.SessionServerScreenTest do
     {:ok, server} =
       SessionServer.start_link(
         companion: self(),
+        endpoint: :desktop,
+        call_lease: CallLeases.own!(),
         config: Config.normalize(enabled: true, max_estimated_cost_cents_per_session: 1),
         openai_client: FakeOpenAIClient,
         api_key: "sk-test",
@@ -747,5 +756,62 @@ defmodule FermixCore.Realtime.SessionServerScreenTest do
     GenServer.stop(server, :normal)
 
     assert_receive {:DOWN, ^ref, :process, ^feed, _reason}
+  end
+
+  # The shared screen is the Mac's: a call made from an accessory never sees the
+  # verb, whatever the owner's setting says, and the setting is left as it is.
+  test "the desktop is offered screen_share and an accessory is not, the setting on", %{
+    openai: openai
+  } do
+    assert "screen_share" in session_tool_names(openai)
+
+    server = start_accessory_session()
+    accessory_openai = SessionServer.openai_pid(server)
+
+    refute "screen_share" in session_tool_names(accessory_openai)
+    assert :sys.get_state(server).config.screen_share?
+  end
+
+  test "a screen_share an accessory call asks for anyway is refused, and no feed starts" do
+    server = start_accessory_session()
+
+    start_sharing(server)
+
+    assert_receive {:realtime,
+                    %{
+                      type: "tool_event",
+                      status: "error",
+                      name: "screen_share",
+                      reason: "screen_share_desktop_only"
+                    }}
+
+    assert :sys.get_state(server).screen_feed == nil
+    refute :sys.get_state(server).screen_share_resume?
+  end
+
+  defp start_accessory_session do
+    {:ok, server} =
+      SessionServer.start_link(
+        companion: self(),
+        endpoint: {:accessory, "desk-robot"},
+        call_lease: CallLeases.own!(),
+        config: Config.normalize(enabled: true),
+        openai_client: FakeOpenAIClient,
+        api_key: "sk-test",
+        safety_identifier: "safe-id",
+        capabilities: [],
+        screen_feed_module: FakeFeed,
+        screen_probe: &FakeProbe.run/0,
+        prompt_loader: fn _opts -> {:ok, %{messages: [], parts: [], accounting: []}} end
+      )
+
+    :ok = SessionServer.call_start(server)
+    :ok = SessionServer.handle_provider_event(server, {:session_updated, %{}})
+    server
+  end
+
+  defp session_tool_names(openai) do
+    [update | _later] = events_of_type(openai, "session.update")
+    Enum.map(update.session.tools, & &1.name)
   end
 end

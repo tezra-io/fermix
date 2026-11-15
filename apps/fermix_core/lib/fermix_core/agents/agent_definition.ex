@@ -39,6 +39,8 @@ defmodule FermixCore.Agents.AgentDefinition do
           misspelled_tool_keys: [String.t()],
           policy: [Capability.policy_class()] | nil,
           trust: source() | nil,
+          plugin: String.t() | nil,
+          own_plugin: FermixCore.Capabilities.Registry.own_plugin() | nil,
           max_iterations: pos_integer(),
           timeout_seconds: pos_integer(),
           parent: String.t() | nil,
@@ -75,6 +77,12 @@ defmodule FermixCore.Agents.AgentDefinition do
     :allowed_tools,
     :policy,
     :trust,
+    # Set only by SkillRegistry (`with_plugin/2`) for a skill an enabled
+    # plugin ships; NOT parsed from SKILL.md frontmatter.
+    :plugin,
+    # Set only by Capabilities.Skill for a plugin skill's worker: its own
+    # plugin's tools within its parent's grant (`Skill.own_plugin/2`).
+    :own_plugin,
     :max_iterations,
     :timeout_seconds,
     :parent,
@@ -150,6 +158,17 @@ defmodule FermixCore.Agents.AgentDefinition do
   def with_trust(%__MODULE__{} = definition, trust)
       when trust in [:operator, :guest] do
     %{definition | trust: trust}
+  end
+
+  @doc """
+  Tag a guest definition with the plugin it ships with. Used by `SkillRegistry`
+  for a skill under an enabled plugin's skill directory: that plugin's tools are
+  the one thing beyond guest its runs reach (`Capabilities.Skill.own_plugin/2`).
+  """
+  @spec with_plugin(t(), String.t()) :: t()
+  def with_plugin(%__MODULE__{trust: :guest} = definition, plugin)
+      when is_binary(plugin) and plugin != "" do
+    %{definition | plugin: plugin}
   end
 
   defp get(attrs, key, default \\ nil) do

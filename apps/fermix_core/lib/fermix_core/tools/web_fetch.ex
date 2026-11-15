@@ -1,9 +1,15 @@
 defmodule FermixCore.Tools.WebFetch do
   @moduledoc """
   Fetch a public web page and return markdown-light text.
+
+  Every URL, and every redirect target, is pinned by `Net.PinnedUrl` under
+  `Net.Guard`, except in a development or test build the eval fixture
+  origin `EvalFixture` names, which is dialled as given.
   """
 
   @behaviour FermixCore.Capabilities.Builtin.Tool
+
+  require Logger
 
   alias FermixCore.Capabilities.Builtin.Tool
   alias FermixCore.Net.Egress
@@ -11,6 +17,7 @@ defmodule FermixCore.Tools.WebFetch do
   alias FermixCore.Net.PinnedUrl
   alias FermixCore.Tools.HtmlText
   alias FermixCore.Tools.Support
+  alias FermixCore.Tools.WebFetch.EvalFixture
 
   @max_body_bytes 1_048_576
   @max_redirects 5
@@ -64,7 +71,7 @@ defmodule FermixCore.Tools.WebFetch do
 
   defp do_execute(args, context) do
     with {:ok, url} <- Support.required_string(args, "url"),
-         {:ok, pinned} <- PinnedUrl.pin(url, resolver: resolver(context)) do
+         {:ok, pinned} <- pin(url, context) do
       fetch(pinned, context, 0)
     else
       {:error, reason} -> Support.error(format_guard_error(reason))
@@ -160,11 +167,35 @@ defmodule FermixCore.Tools.WebFetch do
         # it: its one lookup is both the check and the address dialled.
         target = pinned.original_url |> URI.merge(location) |> URI.to_string()
 
-        case PinnedUrl.pin(target, resolver: resolver(context)) do
+        case pin(target, context) do
           {:ok, next_pinned} -> fetch(next_pinned, context, redirects + 1)
           {:error, reason} -> Support.error(format_guard_error(reason))
         end
     end
+  end
+
+  # The eval fixture origin (a development or test build only, `EvalFixture`)
+  # is dialled as given, as `PinnedUrl.pin/2` answers for an address the guard
+  # passed: nothing to look up, so nothing to pin. Every other URL is pinned
+  # under the guard.
+  defp pin(url, context) do
+    case EvalFixture.decide(url, fixture_options(context)) do
+      :allow -> {:ok, fixture_url(url)}
+      :guard -> PinnedUrl.pin(url, resolver: resolver(context))
+      {:error, refusal} -> refuse_fixture_flag(refusal)
+    end
+  end
+
+  # A test names the home whose fixture manifest is read; Fermix reads its own.
+  defp fixture_options(%{eval_fixture_home: home}) when is_binary(home), do: [home: home]
+  defp fixture_options(_context), do: []
+
+  defp fixture_url(url),
+    do: %PinnedUrl{url: url, original_url: url, original_host: URI.parse(url).host, ip: nil}
+
+  defp refuse_fixture_flag(refusal) do
+    Logger.error("web_fetch: " <> EvalFixture.describe(refusal))
+    {:error, {:eval_fixture, refusal}}
   end
 
   # `pinned.url` carries the address the guard validated, so behind a proxy an
@@ -229,6 +260,8 @@ defmodule FermixCore.Tools.WebFetch do
   defp header_value(_value), do: nil
 
   defp format_guard_error({:blocked_host, reason}), do: "blocked_url: #{reason}"
+
+  defp format_guard_error({:eval_fixture, refusal}), do: EvalFixture.describe(refusal)
 
   defp format_guard_error({:resolved_to_private_address, ip}),
     do: "blocked_url: resolved to #{inspect(ip)}"

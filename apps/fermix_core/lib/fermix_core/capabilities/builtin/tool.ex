@@ -44,11 +44,21 @@ defmodule FermixCore.Capabilities.Builtin.Tool do
   @callback category() :: atom()
   @callback execute(map(), context()) :: {:ok, tool_result()} | {:error, term()}
 
+  @doc """
+  The `FermixCore.Computers.Capability` that runs this tool on one of the
+  home's computers (M97 §6.4). A tool that exports it takes the `computer`
+  argument where a computer offers that capability
+  (`FermixCore.Computers.Argument`), and `FermixCore.Computers.Choice` decides
+  where each call runs; the tool reads the choice from `context.computer`.
+  """
+  @callback computer_capability() :: module()
+
   @optional_callbacks when_to_use: 0,
                       examples: 0,
                       failure_modes: 0,
                       requires_setup: 0,
-                      category: 0
+                      category: 0,
+                      computer_capability: 0
 
   @spec success(String.t()) :: tool_result()
   def success(output) when is_binary(output) do

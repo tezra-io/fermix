@@ -134,15 +134,17 @@ defmodule FermixCore.Cues.Settings do
 
   @doc """
   Saves which decision model the screen uses
-  (`[fermix_core.cues] decision_provider`): `"openai"`, `"openrouter"` or
-  `"venice"`, refused while that provider is not set up with a key that loaded
+  (`[fermix_core.cues] decision_provider`): one of
+  `Providers.DecisionModel.choices/0` (`"openrouter"`, `"openrouter_decider"`,
+  `"openrouter_decider_flash"`, `"venice"` or `"openai"`), refused while the
+  provider it runs on is not set up with a key that loaded
   (`FilterChoices.decision_model_set_up?/2`), or nil or `""` for Automatic,
   the one Fermix picks, saved as no key. It is checked and saved whatever the
   screen is, so one save can pick both. Read at every filter call, so it
   applies at once.
   """
   @spec save_decision_provider(String.t() | nil) ::
-          {:ok, %{decision_provider: DecisionModel.provider() | nil}}
+          {:ok, %{decision_provider: DecisionModel.choice() | nil}}
           | {:error, refusal() | term()}
   def save_decision_provider(provider) when is_binary(provider) or is_nil(provider) do
     with {:ok, plan} <- decision_provider_plan(blank_to_nil(provider)),
@@ -161,7 +163,7 @@ defmodule FermixCore.Cues.Settings do
     with {:ok, _plan} <- decision_provider_plan(blank_to_nil(provider)), do: :ok
   end
 
-  # The section's normalizer refuses a provider that serves no decision model
+  # The section's normalizer refuses a value that names no decision model
   # (`plan/1`), before the set-up check reads the plan's snapshot.
   defp decision_provider_plan(value) do
     with {:ok, plan} <- plan(&{:ok, put_or_delete(&1, :decision_provider, value), nil}),

@@ -3,11 +3,12 @@ defmodule FermixChannels.Mobile.TlsTransport do
   ThousandIsland's TLS transport for the mobile listener, with a handshake
   that ends and reads that end by the upgrade.
 
-  ThousandIsland 1.4.3 runs `:ssl.handshake/1`, which waits forever, inside
-  the connection process. The listener allows 64 connections before any
-  authentication, so 64 peers that open TCP and never send a ClientHello would
-  lock every phone, every pairing attempt and the doctor's probe out for as
-  long as they stayed connected.
+  ThousandIsland runs a transport's `handshake/2`, in preference to
+  `handshake/1`, inside the connection process, with the listener's
+  `handshake_timeout`, here ten seconds. The listener allows 64 connections
+  before any authentication, so with no bound 64 peers that open TCP and never
+  send a ClientHello would lock every phone, every pairing attempt and the
+  doctor's probe out for as long as they stayed connected.
 
   Bandit then reads the HTTP request with a timeout per read that every byte
   restarts, so a peer that dribbles its request, or never ends a body Bandit
@@ -42,10 +43,7 @@ defmodule FermixChannels.Mobile.TlsTransport do
 
   @impl Transport
   @spec handshake(:ssl.sslsocket()) :: Transport.on_handshake()
-  def handshake(socket) do
-    :ok = start_upgrade_deadline(@upgrade_deadline_ms)
-    handshake(socket, @handshake_timeout_ms)
-  end
+  def handshake(socket), do: handshake(socket, @handshake_timeout_ms)
 
   @doc """
   Starts the calling connection's upgrade deadline, `timeout_ms` from now.
@@ -69,11 +67,16 @@ defmodule FermixChannels.Mobile.TlsTransport do
   def upgrade_deadline, do: Process.get(@upgrade_deadline_key)
 
   @doc """
-  The handshake with its deadline passed in. A peer that has not finished by
-  then is answered `{:error, :timeout}`, and `:ssl` closes its connection.
+  The handshake ThousandIsland runs, with the listener's `handshake_timeout`
+  passed in. It starts the connection's upgrade deadline, then a peer that
+  has not finished the handshake by `timeout_ms` is answered
+  `{:error, :timeout}`, and `:ssl` closes its connection.
   """
+  @impl Transport
   @spec handshake(:ssl.sslsocket(), pos_integer()) :: Transport.on_handshake()
   def handshake(socket, timeout_ms) when is_integer(timeout_ms) and timeout_ms > 0 do
+    :ok = start_upgrade_deadline(@upgrade_deadline_ms)
+
     case :ssl.handshake(socket, timeout_ms) do
       {:ok, socket} -> {:ok, socket}
       {:ok, socket, _protocol_extensions} -> {:ok, socket}

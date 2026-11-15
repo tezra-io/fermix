@@ -151,6 +151,7 @@
     "diagnostics.build": 1,
     "setup.state.get": 2,
     "setup.detect": 2,
+    "coding_agents.check": 2,
     "settings.sections": 2,
     "settings.get": 2,
     "settings.apply": 2,
@@ -234,11 +235,39 @@
     "home.snapshots.passphrase": 2,
     "home.enroll.open": 2,
     "home.enroll.withdraw": 2,
+    "home.enroll.approve": 2,
+    "home.enroll.deny": 2,
     "home.candidates.list": 2,
     "home.move.readiness": 2,
     "home.move.start": 2,
-    "home.provision.options": 2,
-    "home.act": 2
+    "home.restart": 2,
+    "home.act": 2,
+    "computers.rename": 2,
+    "computer.join.start": 2,
+    "computer.join.cancel": 2,
+    "computer.disconnect": 2,
+    "computer.journal.list": 2,
+    "computer.screen.stop": 2,
+    "accessories.status": 2,
+    "accessories.pair.start": 2,
+    "accessories.pair.begin": 2,
+    "accessories.pair.decide": 2,
+    "accessories.pair.cancel": 2,
+    "accessories.retry": 2,
+    "accessories.release": 2,
+    "accessories.reconnect": 2,
+    "accessories.forget": 2,
+    "accessories.revoke": 2,
+    "accessories.voice_device.set": 2,
+    "accessories.call.start": 2,
+    "accessories.call.end": 2,
+    "accessories.call.mute": 2,
+    "accessories.call.interrupt": 2,
+    "accessories.call.task.cancel": 2,
+    "accessories.check.start": 2,
+    "accessories.check.stop": 2,
+    "accessories.calibrate": 2,
+    "accessories.set": 2
   },
   "$defs": {
     "request": {
@@ -263,6 +292,7 @@
             "diagnostics.build",
             "setup.state.get",
             "setup.detect",
+            "coding_agents.check",
             "settings.sections",
             "settings.get",
             "settings.apply",
@@ -346,11 +376,39 @@
             "home.snapshots.passphrase",
             "home.enroll.open",
             "home.enroll.withdraw",
+            "home.enroll.approve",
+            "home.enroll.deny",
             "home.candidates.list",
             "home.move.readiness",
             "home.move.start",
-            "home.provision.options",
-            "home.act"
+            "home.restart",
+            "home.act",
+            "computers.rename",
+            "computer.join.start",
+            "computer.join.cancel",
+            "computer.disconnect",
+            "computer.journal.list",
+            "computer.screen.stop",
+            "accessories.status",
+            "accessories.pair.start",
+            "accessories.pair.begin",
+            "accessories.pair.decide",
+            "accessories.pair.cancel",
+            "accessories.retry",
+            "accessories.release",
+            "accessories.reconnect",
+            "accessories.forget",
+            "accessories.revoke",
+            "accessories.voice_device.set",
+            "accessories.call.start",
+            "accessories.call.end",
+            "accessories.call.mute",
+            "accessories.call.interrupt",
+            "accessories.call.task.cancel",
+            "accessories.check.start",
+            "accessories.check.stop",
+            "accessories.calibrate",
+            "accessories.set"
           ]
         },
         "params": { "type": "object" }
@@ -461,6 +519,13 @@
             "properties": { "method": { "const": "setup.detect" } }
           },
           "then": { "properties": { "params": { "$ref": "#/$defs/setup_detect_params" } } }
+        },
+        {
+          "if": {
+            "required": ["method"],
+            "properties": { "method": { "const": "coding_agents.check" } }
+          },
+          "then": { "properties": { "params": { "$ref": "#/$defs/coding_agents_check_params" } } }
         },
         {
           "if": {
@@ -1008,6 +1073,20 @@
         {
           "if": {
             "required": ["method"],
+            "properties": { "method": { "const": "home.enroll.approve" } }
+          },
+          "then": { "properties": { "params": { "$ref": "#/$defs/home_enroll_approve_params" } } }
+        },
+        {
+          "if": {
+            "required": ["method"],
+            "properties": { "method": { "const": "home.enroll.deny" } }
+          },
+          "then": { "properties": { "params": { "$ref": "#/$defs/home_enroll_deny_params" } } }
+        },
+        {
+          "if": {
+            "required": ["method"],
             "properties": { "method": { "const": "home.candidates.list" } }
           },
           "then": { "properties": { "params": { "$ref": "#/$defs/home_candidates_list_params" } } }
@@ -1029,9 +1108,9 @@
         {
           "if": {
             "required": ["method"],
-            "properties": { "method": { "const": "home.provision.options" } }
+            "properties": { "method": { "const": "home.restart" } }
           },
-          "then": { "properties": { "params": { "$ref": "#/$defs/home_provision_options_params" } } }
+          "then": { "properties": { "params": { "$ref": "#/$defs/home_restart_params" } } }
         },
         {
           "if": {
@@ -1039,6 +1118,188 @@
             "properties": { "method": { "const": "home.act" } }
           },
           "then": { "properties": { "params": { "$ref": "#/$defs/home_act_params" } } }
+        },
+        {
+          "if": {
+            "required": ["method"],
+            "properties": { "method": { "const": "computers.rename" } }
+          },
+          "then": { "properties": { "params": { "$ref": "#/$defs/computers_rename_params" } } }
+        },
+        {
+          "if": {
+            "required": ["method"],
+            "properties": { "method": { "const": "computer.join.start" } }
+          },
+          "then": { "properties": { "params": { "$ref": "#/$defs/computer_join_start_params" } } }
+        },
+        {
+          "if": {
+            "required": ["method"],
+            "properties": { "method": { "const": "computer.join.cancel" } }
+          },
+          "then": { "properties": { "params": { "$ref": "#/$defs/computer_join_cancel_params" } } }
+        },
+        {
+          "if": {
+            "required": ["method"],
+            "properties": { "method": { "const": "computer.disconnect" } }
+          },
+          "then": { "properties": { "params": { "$ref": "#/$defs/computer_disconnect_params" } } }
+        },
+        {
+          "if": {
+            "required": ["method"],
+            "properties": { "method": { "const": "computer.journal.list" } }
+          },
+          "then": { "properties": { "params": { "$ref": "#/$defs/computer_journal_list_params" } } }
+        },
+        {
+          "if": {
+            "required": ["method"],
+            "properties": { "method": { "const": "computer.screen.stop" } }
+          },
+          "then": { "properties": { "params": { "$ref": "#/$defs/computer_screen_stop_params" } } }
+        },
+        {
+          "if": {
+            "required": ["method"],
+            "properties": { "method": { "const": "accessories.status" } }
+          },
+          "then": { "properties": { "params": { "$ref": "#/$defs/accessories_status_params" } } }
+        },
+        {
+          "if": {
+            "required": ["method"],
+            "properties": { "method": { "const": "accessories.pair.start" } }
+          },
+          "then": { "properties": { "params": { "$ref": "#/$defs/accessories_pair_start_params" } } }
+        },
+        {
+          "if": {
+            "required": ["method"],
+            "properties": { "method": { "const": "accessories.pair.begin" } }
+          },
+          "then": { "properties": { "params": { "$ref": "#/$defs/accessories_pair_begin_params" } } }
+        },
+        {
+          "if": {
+            "required": ["method"],
+            "properties": { "method": { "const": "accessories.pair.decide" } }
+          },
+          "then": { "properties": { "params": { "$ref": "#/$defs/accessories_pair_decide_params" } } }
+        },
+        {
+          "if": {
+            "required": ["method"],
+            "properties": { "method": { "const": "accessories.pair.cancel" } }
+          },
+          "then": { "properties": { "params": { "$ref": "#/$defs/accessories_pair_cancel_params" } } }
+        },
+        {
+          "if": {
+            "required": ["method"],
+            "properties": { "method": { "const": "accessories.retry" } }
+          },
+          "then": { "properties": { "params": { "$ref": "#/$defs/accessories_retry_params" } } }
+        },
+        {
+          "if": {
+            "required": ["method"],
+            "properties": { "method": { "const": "accessories.release" } }
+          },
+          "then": { "properties": { "params": { "$ref": "#/$defs/accessories_release_params" } } }
+        },
+        {
+          "if": {
+            "required": ["method"],
+            "properties": { "method": { "const": "accessories.reconnect" } }
+          },
+          "then": { "properties": { "params": { "$ref": "#/$defs/accessories_reconnect_params" } } }
+        },
+        {
+          "if": {
+            "required": ["method"],
+            "properties": { "method": { "const": "accessories.forget" } }
+          },
+          "then": { "properties": { "params": { "$ref": "#/$defs/accessories_forget_params" } } }
+        },
+        {
+          "if": {
+            "required": ["method"],
+            "properties": { "method": { "const": "accessories.revoke" } }
+          },
+          "then": { "properties": { "params": { "$ref": "#/$defs/accessories_revoke_params" } } }
+        },
+        {
+          "if": {
+            "required": ["method"],
+            "properties": { "method": { "const": "accessories.voice_device.set" } }
+          },
+          "then": { "properties": { "params": { "$ref": "#/$defs/accessories_voice_device_set_params" } } }
+        },
+        {
+          "if": {
+            "required": ["method"],
+            "properties": { "method": { "const": "accessories.call.start" } }
+          },
+          "then": { "properties": { "params": { "$ref": "#/$defs/accessories_call_start_params" } } }
+        },
+        {
+          "if": {
+            "required": ["method"],
+            "properties": { "method": { "const": "accessories.call.end" } }
+          },
+          "then": { "properties": { "params": { "$ref": "#/$defs/accessories_call_end_params" } } }
+        },
+        {
+          "if": {
+            "required": ["method"],
+            "properties": { "method": { "const": "accessories.call.mute" } }
+          },
+          "then": { "properties": { "params": { "$ref": "#/$defs/accessories_call_mute_params" } } }
+        },
+        {
+          "if": {
+            "required": ["method"],
+            "properties": { "method": { "const": "accessories.call.interrupt" } }
+          },
+          "then": { "properties": { "params": { "$ref": "#/$defs/accessories_call_interrupt_params" } } }
+        },
+        {
+          "if": {
+            "required": ["method"],
+            "properties": { "method": { "const": "accessories.call.task.cancel" } }
+          },
+          "then": { "properties": { "params": { "$ref": "#/$defs/accessories_call_task_cancel_params" } } }
+        },
+        {
+          "if": {
+            "required": ["method"],
+            "properties": { "method": { "const": "accessories.check.start" } }
+          },
+          "then": { "properties": { "params": { "$ref": "#/$defs/accessories_check_start_params" } } }
+        },
+        {
+          "if": {
+            "required": ["method"],
+            "properties": { "method": { "const": "accessories.check.stop" } }
+          },
+          "then": { "properties": { "params": { "$ref": "#/$defs/accessories_check_stop_params" } } }
+        },
+        {
+          "if": {
+            "required": ["method"],
+            "properties": { "method": { "const": "accessories.calibrate" } }
+          },
+          "then": { "properties": { "params": { "$ref": "#/$defs/accessories_calibrate_params" } } }
+        },
+        {
+          "if": {
+            "required": ["method"],
+            "properties": { "method": { "const": "accessories.set" } }
+          },
+          "then": { "properties": { "params": { "$ref": "#/$defs/accessories_set_params" } } }
         }
       ]
     },
@@ -1124,6 +1385,7 @@
         { "$ref": "#/$defs/secret_set_result" },
         { "$ref": "#/$defs/secret_clear_result" },
         { "$ref": "#/$defs/setup_detect_result" },
+        { "$ref": "#/$defs/coding_agents_check_result" },
         { "$ref": "#/$defs/providers_set_primary_result" },
         { "$ref": "#/$defs/providers_models_list_result" },
         { "$ref": "#/$defs/providers_probe_start_result" },
@@ -1201,11 +1463,39 @@
         { "$ref": "#/$defs/home_snapshots_passphrase_result" },
         { "$ref": "#/$defs/home_enroll_open_result" },
         { "$ref": "#/$defs/home_enroll_withdraw_result" },
+        { "$ref": "#/$defs/home_enroll_approve_result" },
+        { "$ref": "#/$defs/home_enroll_deny_result" },
         { "$ref": "#/$defs/home_candidates_list_result" },
         { "$ref": "#/$defs/home_move_readiness_result" },
         { "$ref": "#/$defs/home_move_start_result" },
-        { "$ref": "#/$defs/home_provision_options_result" },
-        { "$ref": "#/$defs/home_act_result" }
+        { "$ref": "#/$defs/home_restart_result" },
+        { "$ref": "#/$defs/home_act_result" },
+        { "$ref": "#/$defs/computers_rename_result" },
+        { "$ref": "#/$defs/computer_join_start_result" },
+        { "$ref": "#/$defs/computer_join_cancel_result" },
+        { "$ref": "#/$defs/computer_disconnect_result" },
+        { "$ref": "#/$defs/computer_journal_list_result" },
+        { "$ref": "#/$defs/computer_screen_stop_result" },
+        { "$ref": "#/$defs/accessories_status_result" },
+        { "$ref": "#/$defs/accessories_pair_start_result" },
+        { "$ref": "#/$defs/accessories_pair_begin_result" },
+        { "$ref": "#/$defs/accessories_pair_decide_result" },
+        { "$ref": "#/$defs/accessories_pair_cancel_result" },
+        { "$ref": "#/$defs/accessories_retry_result" },
+        { "$ref": "#/$defs/accessories_release_result" },
+        { "$ref": "#/$defs/accessories_reconnect_result" },
+        { "$ref": "#/$defs/accessories_forget_result" },
+        { "$ref": "#/$defs/accessories_revoke_result" },
+        { "$ref": "#/$defs/accessories_voice_device_set_result" },
+        { "$ref": "#/$defs/accessories_call_start_result" },
+        { "$ref": "#/$defs/accessories_call_end_result" },
+        { "$ref": "#/$defs/accessories_call_mute_result" },
+        { "$ref": "#/$defs/accessories_call_interrupt_result" },
+        { "$ref": "#/$defs/accessories_call_task_cancel_result" },
+        { "$ref": "#/$defs/accessories_check_start_result" },
+        { "$ref": "#/$defs/accessories_check_stop_result" },
+        { "$ref": "#/$defs/accessories_calibrate_result" },
+        { "$ref": "#/$defs/accessories_set_result" }
       ]
     },
     "hello_params": { "type": "object", "maxProperties": 0, "additionalProperties": false },
@@ -1268,6 +1558,10 @@
               "type": "array",
               "maxItems": 500,
               "items": { "type": "string" }
+            },
+            "restart_step": {
+              "description": "On a linked computer only (M97 §19.6, D28c): the server's restart is what restart_required reports, and this is the step that restarts it, the same record home.status's summary offers (restart_server); null while no restart is required. Absent from any other engine and from an older one.",
+              "oneOf": [{ "$ref": "#/$defs/homeSummaryAction" }, { "type": "null" }]
             },
             "providers": {
               "type": "array",
@@ -1797,7 +2091,12 @@
         "component": { "type": "string" },
         "gating": { "type": "boolean" },
         "pane": { "$ref": "#/$defs/settingsPane" },
-        "detail_key": { "type": "string" }
+        "detail_key": { "type": "string" },
+        "sentence": {
+          "description": "The engine's own sentence for this failure where it publishes one, which a client shows in place of its own words for the detail_key: the iMessage rows channel:imessage:helper, channel:imessage:carrier, channel:imessage:conflict and channel:imessage:away, which name the Mac that carries Messages where the engine knows it. Null on every other row, whose words each client keeps by its detail_key. Absent from an engine older than it, which a client reads as null.",
+          "type": ["string", "null"],
+          "minLength": 1
+        }
       }
     },
     "restartReason": {
@@ -1952,6 +2251,10 @@
       ],
       "additionalProperties": false,
       "properties": {
+        "restart_step": {
+          "description": "On a linked computer only (M97 §19.6, D28c): setup.state.get is the server's, restart is the server's restart, and this is the step that restarts the server, the same record home.status's summary offers (restart_server); null while no restart is required. Absent from any other engine and from an older one. This computer's own restart is home.status's restart.",
+          "oneOf": [{ "$ref": "#/$defs/homeSummaryAction" }, { "type": "null" }]
+        },
         "readiness": {
           "type": "object",
           "required": ["status", "failures"],
@@ -2104,13 +2407,13 @@
       "additionalProperties": false,
       "properties": {
         "sections": {
-          "description": "On a linked desktop, the sections that configure this computer (sandbox, computer_use, computer_history, channels.imessage) and the primary's others; on any other engine, its own.",
+          "description": "On a linked computer (M97 §19, D28): the server's sections, its own machine sections titled with its name, its sandbox and harness_machine where its hello_ack says it applies the rule (caps.computer.machine_settings) and left out where it does not, its browser either way (a server without the rule serves it as the home's), never its own computer_use, computer_history or accessories (each computer's own) and never a computer or computer.<id> it names; then this computer's own, under the always_on pane: computer, and computer.<id> for each machine section it has (computer.sandbox, computer.browser, computer.computer_use, computer.computer_history where it has a recorder; never computer.accessories, since StackChan does not run while the home is on a server), titled for this machine. On any other engine, its own.",
           "type": "array",
-          "maxItems": 30,
+          "maxItems": 64,
           "items": { "$ref": "#/$defs/settingsSection" }
         },
         "primary_missing": {
-          "description": "On a linked desktop whose primary did not answer within 5 s, the sentence a person is shown for why the primary's sections are missing (this computer's own are still listed); null otherwise.",
+          "description": "On a linked desktop whose primary's sections are missing, the sentence a person is shown for why (this computer's own are still listed): the server is unreachable, did not answer within 5 s, runs a newer Fermix than this computer can talk to, runs an older Fermix than this computer (it updates on its own), or listed its sections in a form this computer does not read; null otherwise.",
           "type": ["string", "null"]
         }
       }
@@ -2162,8 +2465,15 @@
     },
     "settings_reload_params": {
       "type": "object",
-      "maxProperties": 0,
-      "additionalProperties": false
+      "additionalProperties": false,
+      "properties": {
+        "section": {
+          "description": "Optional (M97 §19.3): the section an outside edit was refused for, which names the machine whose settings are read again; computer or computer.<id> is this computer's, any other the home's. Absent, the home's.",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        }
+      }
     },
     "settings_reload_result": {
       "type": "object",
@@ -2238,7 +2548,7 @@
         "imessage_grant",
         "imessage_policy_confirm",
         "mcp_check",
-        "home_provision"
+        "home_restore"
       ]
     },
     "jobStatus": {
@@ -2271,6 +2581,7 @@
       "required": [
         "job_id",
         "kind",
+        "target",
         "status",
         "phase",
         "progress",
@@ -2284,6 +2595,10 @@
       "properties": {
         "job_id": { "type": "string" },
         "kind": { "$ref": "#/$defs/jobKind" },
+        "target": {
+          "description": "What an install installs, stored when it starts: a capability_install's target as capabilities.install.start was given it, browser for a browser_install; null for every other kind. A client finds the job its own row started by kind and target, since two rows start a capability_install. An engine before it sent none, which a client reads as null.",
+          "enum": ["computer_use_sidecar", "meetbot", "local_stt", "imessage_helper", "browser", null]
+        },
         "status": { "$ref": "#/$defs/jobStatus" },
         "phase": { "type": ["string", "null"] },
         "progress": { "oneOf": [{ "$ref": "#/$defs/jobProgress" }, { "type": "null" }] },
@@ -2310,7 +2625,8 @@
         "vendor": { "enum": ["claude", "codex"] },
         "installed": { "type": "boolean" },
         "version": { "type": ["string", "null"], "maxLength": 512 },
-        "auth": { "enum": ["authenticated", "unverified", "absent"] }
+        "auth": { "enum": ["authenticated", "unverified", "absent"] },
+        "signed_out": { "type": "boolean" }
       }
     },
     "detectResult": {
@@ -2322,6 +2638,7 @@
         "present": { "type": "boolean" },
         "detail": { "type": ["string", "null"] },
         "signed_in": { "type": ["boolean", "null"] },
+        "available": { "type": "boolean" },
         "vendors": {
           "type": "array",
           "maxItems": 2,
@@ -2337,6 +2654,9 @@
       "allOf": [{
         "if": { "properties": { "target": { "const": "harness_vendors" } } },
         "else": { "not": { "anyOf": [{ "required": ["vendors"] }, { "required": ["guidance"] }] } }
+      }, {
+        "if": { "properties": { "target": { "const": "meetbot" } } },
+        "else": { "not": { "required": ["available"] } }
       }]
     },
     "setup_detect_params": {
@@ -2353,6 +2673,32 @@
       "additionalProperties": false,
       "properties": {
         "results": { "type": "array", "maxItems": 6, "items": { "$ref": "#/$defs/detectResult" } }
+      }
+    },
+    "coding_agents_check_params": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "vendors": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 2,
+          "uniqueItems": true,
+          "items": { "enum": ["claude", "codex"] }
+        }
+      }
+    },
+    "coding_agents_check_result": {
+      "type": "object",
+      "required": ["results"],
+      "additionalProperties": false,
+      "properties": {
+        "results": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 1,
+          "items": { "$ref": "#/$defs/detectResult" }
+        }
       }
     },
     "providers_set_primary_params": {
@@ -2427,10 +2773,19 @@
     "job_list_params": { "type": "object", "required": [], "additionalProperties": false },
     "job_list_result": {
       "type": "object",
-      "required": ["jobs"],
+      "required": ["jobs", "primary_missing"],
       "additionalProperties": false,
       "properties": {
-        "jobs": { "type": "array", "maxItems": 16, "items": { "$ref": "#/$defs/jobView" } }
+        "jobs": {
+          "description": "Every job this engine retains, oldest first: at most 4 running and 16 finished. On a linked computer (M97 D28): the server's jobs, oldest first, then the ones this computer started itself, oldest first, whose ids begin computer. as job.get and job.cancel take them.",
+          "type": "array",
+          "maxItems": 40,
+          "items": { "$ref": "#/$defs/jobView" }
+        },
+        "primary_missing": {
+          "description": "On a linked computer whose server's jobs are missing, the sentence a person is shown for why (this computer's own are still listed): the server is unreachable, did not answer within 5 s, runs a newer Fermix than this computer can talk to, runs an older Fermix than this computer (it updates on its own), or listed its jobs in a form this computer does not read; null otherwise. An engine before it sent none, which a client reads as null.",
+          "type": ["string", "null"]
+        }
       }
     },
     "auth_start_params": {
@@ -2446,6 +2801,7 @@
       "required": [
         "job_id",
         "kind",
+        "target",
         "status",
         "phase",
         "progress",
@@ -2459,6 +2815,7 @@
       "properties": {
         "job_id": { "type": "string" },
         "kind": { "$ref": "#/$defs/jobKind" },
+        "target": { "description": "A sign-in installs nothing: jobView's target, always null.", "type": "null" },
         "status": { "$ref": "#/$defs/jobStatus" },
         "phase": { "type": ["string", "null"] },
         "progress": { "oneOf": [{ "$ref": "#/$defs/jobProgress" }, { "type": "null" }] },
@@ -3512,7 +3869,7 @@
     },
     "mobileDevice": {
       "type": "object",
-      "description": "A paired device: a phone, or a desktop engine (kind desktop). A desktop has no platform, signer role, boot state or push registration of its own.",
+      "description": "A paired device: a phone, or a computer of the home (kind desktop). A computer's platform is its system, macos or linux, null before it said; it has no signer role, boot state or push registration of its own.",
       "required": [
         "device_id",
         "name",
@@ -3614,9 +3971,13 @@
     },
     "mobile_devices_revoke_params": {
       "type": "object",
+      "description": "The phone to forget or the computer to remove. A removed computer can join again with a code. The one computer that keeps the server's backup copies is removed only with confirmed true: without it the answer is unavailable, with the sentence that names the computer and asks, marked details.confirm true.",
       "required": ["device_id"],
       "additionalProperties": false,
-      "properties": { "device_id": { "type": "string", "minLength": 1, "maxLength": 256 } }
+      "properties": {
+        "device_id": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "confirmed": { "type": "boolean" }
+      }
     },
     "mobile_devices_revoke_result": {
       "type": "object",
@@ -5773,21 +6134,168 @@
           "type": "string",
           "minLength": 1
         },
+        "home_format": {
+          "description": "The home format this engine reads and writes (M97 D16): it reads every home of this format or an older one, whichever engine wrote it, and refuses a newer one. A linked computer reads its server's from primary_home to tell whether it could take the server's home back (Move back, Restore here). Absent from an engine older than it, whose home is format 1.",
+          "type": "integer",
+          "minimum": 1
+        },
         "update_ceiling": {
-          "description": "The Fermix version a server's nightly update installs, in every role: the oldest engine among the desktops this machine served as their primary in the last 30 days, so the home can always move back to one of them; null when none was, or when it cannot be read. Absent from an engine older than it.",
+          "description": "The release an Always On server's update may install: update.eligible, null where update is null or names none. Kept for every server's update script, which reads it, so a script an older first boot wrote follows the server too. An engine before the server led (M97) answered the oldest engine among its desktops here. Absent from an engine older than it.",
           "type": ["string", "null"],
           "minLength": 1
+        },
+        "update": {
+          "description": "On an Always On server, what its update may install (M97: the server leads, from the release table fermix.ai serves): running, this engine's version; eligible, the newest release at or above it whose home a published app for each system whose computers keep backups reads (by the home formats the release table names; an app from before home formats reads only its own release's home or an older one's), null when none or when no table was read, and the update then installs nothing; held, a newer release not eligible yet, with the systems it waits_for (macos, linux, or unknown for a computer that has not said its system) and a sentence that names no version, null when there is none; ahead_of_apps, true when no published app for some backup system reads the home this engine writes (an owner's override); table, read_at when the table was last read and the sentence of a fetch that failed or of why none was read, each null otherwise. Null on every other engine. Absent from an engine older than it.",
+          "oneOf": [
+            {
+              "type": "object",
+              "required": ["running", "eligible", "held", "ahead_of_apps", "table"],
+              "additionalProperties": false,
+              "properties": {
+                "running": { "type": "string", "minLength": 1 },
+                "eligible": { "type": ["string", "null"], "minLength": 1 },
+                "held": {
+                  "oneOf": [
+                    {
+                      "type": "object",
+                      "required": ["version", "waits_for", "sentence"],
+                      "additionalProperties": false,
+                      "properties": {
+                        "version": { "type": "string", "minLength": 1 },
+                        "waits_for": {
+                          "type": "array",
+                          "minItems": 1,
+                          "maxItems": 3,
+                          "items": { "enum": ["macos", "linux", "unknown"] }
+                        },
+                        "sentence": { "type": "string", "minLength": 1 }
+                      }
+                    },
+                    { "type": "null" }
+                  ]
+                },
+                "ahead_of_apps": { "type": "boolean" },
+                "table": {
+                  "type": "object",
+                  "required": ["read_at", "sentence"],
+                  "additionalProperties": false,
+                  "properties": {
+                    "read_at": { "type": ["string", "null"], "minLength": 1 },
+                    "sentence": { "type": ["string", "null"], "minLength": 1 }
+                  }
+                }
+              }
+            },
+            { "type": "null" }
+          ]
+        },
+        "restart": {
+          "description": "This engine's own restart state, as every settings write carries it: on a linked computer this computer's, and primary_home.restart its server's, which a linked computer's summary offers to restart (restart_server). Absent from an engine older than it, which a client reads as no restart required.",
+          "$ref": "#/$defs/restartState"
+        },
+        "profile": {
+          "description": "This engine's own keychain profile, under which its keychain items are named; on a linked computer this computer's, where setup.state.get's profile is its server's. Absent from an engine older than it.",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "computer_changes": {
+          "description": "On the primary, the newest change its computers made to each of its limits, newest first (one write's changes, which share at, in this order of what): at (an RFC 3339 instant, to the millisecond), computer (its name), what and value: sandbox_mode with the mode it was set to (strict, standard or open), sandbox_profile with the command profile (bare, assistant or extended), sandbox_env_allow with the names of the environment variables commands may get, or harness_approved with whether coding agents may run there. A write that changed nothing is none. Empty when none and on every other engine. The summary's notice computer_change:<what>:<at> says the newest for a week, there and on each linked computer, which reads them from primary_home. Absent from an engine older than it, which a client reads as none.",
+          "type": "array",
+          "maxItems": 4,
+          "items": {
+            "type": "object",
+            "required": ["at", "computer", "what", "value"],
+            "additionalProperties": false,
+            "properties": {
+              "at": { "type": "string", "minLength": 1 },
+              "computer": { "type": "string", "minLength": 1, "maxLength": 256 },
+              "what": { "enum": ["sandbox_mode", "sandbox_profile", "sandbox_env_allow", "harness_approved"] },
+              "value": {
+                "oneOf": [
+                  { "enum": ["strict", "standard", "open", "bare", "assistant", "extended"] },
+                  { "type": "boolean" },
+                  { "type": "array", "maxItems": 200, "items": { "type": "string" } }
+                ]
+              }
+            }
+          }
+        },
+        "restart_hold": {
+          "description": "What holds the engine's restart after an update, which the server's update reads: reason move (a move under way, for as long as it runs) or computer_work (work in progress on a computer, at most ten minutes from the oldest one's start), count (the work in progress, 0 for a move), wait_s (the seconds the restart still waits, 0 to 600; 0 once the ten minutes are over) and the sentence; null when nothing holds it. Absent from an engine older than it.",
+          "oneOf": [
+            {
+              "type": "object",
+              "required": ["reason", "count", "wait_s", "sentence"],
+              "additionalProperties": false,
+              "properties": {
+                "reason": { "enum": ["move", "computer_work"] },
+                "count": { "type": "integer", "minimum": 0 },
+                "wait_s": { "type": "integer", "minimum": 0, "maximum": 600 },
+                "sentence": { "type": "string", "minLength": 1 }
+              }
+            },
+            { "type": "null" }
+          ]
+        },
+        "webhooks": {
+          "description": "On the primary, what it serves on loopback that the internet must reach: whatsapp (ref null) on the web listener's port while the WhatsApp channel is on, then each enabled cue webhook source with a URL (cue, ref its name) on the cue door's port, by name; never a source's URL. Empty in any other role. Absent from an engine older than it.",
+          "type": "array",
+          "maxItems": 65,
+          "items": {
+            "type": "object",
+            "required": ["kind", "ref", "port"],
+            "additionalProperties": false,
+            "properties": {
+              "kind": { "enum": ["whatsapp", "cue"] },
+              "ref": { "type": ["string", "null"], "pattern": "^[a-z0-9][a-z0-9-]{0,63}$" },
+              "port": { "type": "integer", "minimum": 1, "maximum": 65535 }
+            }
+          }
+        },
+        "computers": {
+          "description": "On the primary, each computer of the home, by name: its id and name, its system, the engine version it last said, whether its session is up and since when, when the home last heard it, the path its session runs, what it offers its server and whether it keeps the home's backup copies. Empty in any other role. Absent from an engine older than it, which a client reads as none.",
+          "type": "array",
+          "maxItems": 64,
+          "items": { "$ref": "#/$defs/homeComputer" }
+        },
+        "join": { "$ref": "#/$defs/homeJoin" },
+        "screen": {
+          "description": "On a linked computer, while Fermix on its server controls this computer's screen: when it took it and the sentence the mark says, with Stop beside it (computer.screen.stop); null while it does not. Absent on every other engine and from an engine older than it, which a client reads as null.",
+          "oneOf": [{ "$ref": "#/$defs/homeScreen" }, { "type": "null" }]
         }
+      }
+    },
+    "homeScreen": {
+      "type": "object",
+      "description": "Fermix on the server controls this computer's screen: since when (an RFC 3339 instant), and the sentence the mark says.",
+      "required": ["since", "sentence"],
+      "additionalProperties": false,
+      "properties": {
+        "since": { "type": "string", "minLength": 1 },
+        "sentence": { "type": "string", "minLength": 1 }
+      }
+    },
+    "homeJoin": {
+      "type": "object",
+      "description": "On a computer joining a home with a code (computer.join.start), where the join stands: dialing while it reaches the server, awaiting_approval once the server answered and the owner has not yet added it there, denied once it was not added. server is the server's name, sas the six digits this computer shows once the server answered (null until then), which the owner types where the home asks to add it and which no other screen of the home shows, and sentence says where it stands or why it was not added. Absent on every other engine.",
+      "required": ["phase", "server", "sas", "sentence"],
+      "additionalProperties": false,
+      "properties": {
+        "phase": { "enum": ["dialing", "awaiting_approval", "denied"] },
+        "server": { "type": "string", "minLength": 1 },
+        "sas": { "oneOf": [{ "type": "string", "pattern": "^[0-9]{6}$" }, { "type": "null" }] },
+        "sentence": { "type": "string", "minLength": 1 }
       }
     },
     "homeSummary": {
       "type": "object",
-      "description": "Where Always On stands, the screen every surface draws: state maps to a screen, sentence and every label are printed as they are, detail sits behind Details, key is the digest a home.status wait and the watch compare, outcome is what a surface following a step reads (PROTOCOL.md, The Always On summary).",
-      "required": ["key", "state", "sentence", "action", "detail", "notice", "outcome"],
+      "description": "Where Always On stands, the screen every surface draws: state maps to a screen, sentence and every label are printed as they are, action is the one main step or null, detail holds the note, the other steps and what Details draws, key is the digest a home.status wait and the watch compare, outcome is what a surface following a step reads, and help is the screen's page of the Always On docs (PROTOCOL.md, The Always On summary).",
+      "required": ["key", "state", "sentence", "action", "detail", "notice", "outcome", "help"],
       "additionalProperties": false,
       "properties": {
         "key": { "type": "string", "minLength": 1, "maxLength": 64 },
-        "state": { "enum": ["off", "connect", "choose", "creating", "ready", "moving", "on", "undone", "retired", "candidate", "primary", "problem"] },
+        "state": { "enum": ["off", "connect", "creating", "ready", "moving", "on", "undone", "retired", "candidate", "primary", "problem"] },
         "sentence": { "type": "string", "minLength": 1 },
         "action": { "oneOf": [{ "$ref": "#/$defs/homeSummaryAction" }, { "type": "null" }] },
         "detail": { "$ref": "#/$defs/homeSummaryDetail" },
@@ -5799,7 +6307,7 @@
               "required": ["id", "sentence"],
               "additionalProperties": false,
               "properties": {
-                "id": { "type": "string", "pattern": "^(ready|moved|cannot_reach|not_set_up|backup_week|back):.+$" },
+                "id": { "type": "string", "pattern": "^((ready|moved|cannot_reach|backup_week|back|restored|server_lapsed|server_sandbox|computer_joined|computer_change):.+|computer_review)$" },
                 "sentence": { "type": "string", "minLength": 1 }
               }
             },
@@ -5807,46 +6315,34 @@
           ]
         },
         "outcome": {
-          "description": "running while Always On is at something that moves this screen on by itself (a step's job, the server setting up, the move, from its request until the restart shows), waiting while it waits on a server of the owner's own to use its code, failed on a problem, done when the next step is the owner's.",
+          "description": "running while Always On is at something that moves this screen on by itself (the server connecting, the move, from its request until the restart shows, a restore), waiting while it waits on the owner's server to use its code, or, on a computer that joins a home, on the owner to add it there, failed on a problem and on a join that was not added, done when the next step is the owner's.",
           "enum": ["running", "waiting", "done", "failed"]
+        },
+        "help": {
+          "description": "The Always On docs page at the screen's anchor, which a surface opens from one help control: what-you-need, set-up-your-server, tailscale, the-move, on-your-server, webhooks, backups, when-the-server-is-gone, updates, server-disk, move-back or add-a-computer.",
+          "type": "string",
+          "pattern": "^https://fermix\\.ai/docs/always-on/#(what-you-need|set-up-your-server|tailscale|the-move|on-your-server|webhooks|backups|when-the-server-is-gone|updates|server-disk|move-back|add-a-computer)$"
         }
       }
     },
     "homeSummaryAction": {
       "type": "object",
-      "description": "One action a summary offers, the same record wherever it sits: its id, the label it is shown under, what the surface collects first (needs), the sentence the owner accepts first (confirm, null when none), the page a surface opens for it (url, null when none) and its key.",
-      "required": ["id", "label", "needs", "confirm", "url", "key"],
+      "description": "One action a summary offers, the same record wherever it sits (action, detail.alternatives, detail.backup.change): its id, the label it is shown under, what the surface collects first (needs), the sentence the owner accepts first (confirm, null when none; its parts one per line) and its key.",
+      "required": ["id", "label", "needs", "confirm", "key"],
       "additionalProperties": false,
       "properties": {
-        "id": { "enum": ["create_server", "cancel", "move_now", "try_again", "learn_more", "turn_on", "restart_server", "start_again", "create_in", "open_console", "paste_token", "update", "back_up_now", "replace_server", "check_again", "own_server", "delete_server", "move_back", "restore_here"] },
+        "id": { "enum": ["cancel", "move_now", "try_again", "update", "back_up_now", "check_again", "own_server", "move_back", "restore_here", "review_offers", "add_computer", "approve_computer", "deny_computer", "change_passphrase", "restart_server"] },
         "label": { "type": "string", "minLength": 1 },
-        "needs": { "type": "array", "maxItems": 3, "uniqueItems": true, "items": { "enum": ["token", "recovery_passphrase", "new_recovery_passphrase", "choice"] } },
+        "needs": { "type": "array", "maxItems": 1, "uniqueItems": true, "items": { "enum": ["recovery_passphrase", "new_recovery_passphrase", "sas"] } },
         "confirm": { "type": ["string", "null"], "minLength": 1 },
-        "url": { "type": ["string", "null"], "minLength": 1 },
         "key": { "type": "string", "minLength": 1, "maxLength": 64 }
-      }
-    },
-    "homeSummaryProvider": {
-      "type": "object",
-      "description": "One provider's token screen: its id (what a token is given for), name, the token's label, the screen's sentence, its How to get one steps, its console and the docs page at its part.",
-      "required": ["id", "name", "token_label", "sentence", "steps", "console_url", "docs_url"],
-      "additionalProperties": false,
-      "properties": {
-        "id": { "type": "string", "minLength": 1 },
-        "name": { "type": "string", "minLength": 1 },
-        "token_label": { "type": "string", "minLength": 1 },
-        "sentence": { "type": "string", "minLength": 1 },
-        "steps": { "type": "array", "maxItems": 8, "items": { "type": "string", "minLength": 1 } },
-        "console_url": { "type": "string", "minLength": 1 },
-        "docs_url": { "type": "string", "minLength": 1 }
       }
     },
     "homeSummaryDetail": {
       "type": "object",
-      "description": "What Details holds for the state: on off and connect the token screen of every provider (providers) and alternatives; on choose billing; on ready server, readiness and waits_until; on on server, backups, copies_bytes, disk_used, data and actions; on problem kind, note, seen_at and alternatives (next_location and readiness where the problem has them); lines on creating, ready, on and problem wherever there are any; progress while a step's job runs.",
+      "description": "What the state draws, a field only where it has something: note, the one secondary sentence, on any state (the wait, why a move was undone, what to check or do, a failure's own words); alternatives, every step but the main one (on on Back up now, Add a computer and Move back; on primary Add a computer; while a computer asks to join, deny_computer first, then the step the screen led with before); on ready server, waits_until and alternatives (Forget this server), and, on the computer that sets Always On up, keeps_on; on undone alternatives (Forget this server); on on server, backups, copies_bytes and disk_used; on problem kind, note, seen_at and alternatives, readiness on not_ready only, its blocks only; lines, facts only, on ready, on and problem wherever there are any; progress while a move, a move back, a restore or a backup runs; steps on each screen of the move and the move back, route while either moves and transfer only while its bytes move; backup on a linked desktop's on and the server's primary; webhooks on a linked desktop's on only, where its server serves any (never on the server's own primary, whose summary rides inside each desktop's home.status under max_json_depth); not_yet, what Always On does not do yet, on every screen before a move but off, on primary and on a linked desktop's on, wherever any applies.",
       "additionalProperties": false,
       "properties": {
-        "providers": { "type": "array", "minItems": 1, "maxItems": 8, "items": { "$ref": "#/$defs/homeSummaryProvider" } },
         "lines": {
           "type": "array",
           "maxItems": 24,
@@ -5861,9 +6357,7 @@
           }
         },
         "progress": { "type": "string", "minLength": 1 },
-        "alternatives": { "type": "array", "maxItems": 4, "items": { "$ref": "#/$defs/homeSummaryAction" } },
-        "actions": { "type": "array", "maxItems": 4, "items": { "$ref": "#/$defs/homeSummaryAction" } },
-        "billing": { "type": "string", "minLength": 1 },
+        "alternatives": { "type": "array", "maxItems": 6, "items": { "$ref": "#/$defs/homeSummaryAction" } },
         "server": { "$ref": "#/$defs/homeSummaryServer" },
         "readiness": { "type": "array", "maxItems": 32, "items": { "$ref": "#/$defs/homeReadinessItem" } },
         "waits_until": { "type": ["string", "null"] },
@@ -5882,23 +6376,120 @@
         },
         "copies_bytes": { "type": ["integer", "null"], "minimum": 0 },
         "disk_used": { "type": ["number", "null"], "minimum": 0, "maximum": 1 },
-        "data": { "type": "string", "minLength": 1 },
-        "kind": { "enum": ["turned_off", "cannot_reach", "deleted", "not_set_up", "waited_too_long", "no_capacity", "account_limit", "read_only_token", "token_refused", "create_failed", "update", "disk_full", "backup_old", "not_ready", "unreadable", "delete_failed", "power_failed", "server_retired", "return_failed"] },
+        "kind": { "enum": ["cannot_reach", "not_set_up", "waited_too_long", "update", "server_older", "server_ahead", "disk_full", "backup_old", "backup_failed", "not_ready", "return_failed"] },
         "note": { "type": ["string", "null"] },
         "seen_at": { "type": ["string", "null"] },
-        "next_location": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]{0,31}$" }
+        "keeps_on": { "$ref": "#/$defs/computerKeepBlock" },
+        "not_yet": {
+          "description": "What Always On does not do yet (M97): what does not work, or takes a terminal on the server, while the home runs there, each one short sentence only where it applies to this home, in this order: google_meet (meetings on), coding_signin (coding agents approved), whatsapp (WhatsApp on), slack (Slack on without Socket Mode), stackchan (StackChan on a Mac), dev_plugins (a dev plugin folder named) and computer_history (a computer with no history recorder). On every screen before a move but off, on the server's own primary (the home's and the server's own) and on a linked computer's on (its server's, but WhatsApp's where webhooks already says it, then its own); absent where none applies and on every other screen. A client draws it as a short list under its own heading, never as a notice; a client that does not know an id shows its sentence as it is.",
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 16,
+          "items": {
+            "type": "object",
+            "required": ["id", "sentence"],
+            "additionalProperties": false,
+            "properties": {
+              "id": { "type": "string", "minLength": 1 },
+              "sentence": { "type": "string", "minLength": 1 }
+            }
+          }
+        },
+        "steps": {
+          "description": "A flow's steps in order, one line that never wraps: the move's Connect your server, Move now, Send your home, Switch over, or the move back's Get this Mac ready (this computer off a Mac), Move now, Receive your home, Put Fermix in place; state done, active (it runs), yours (the owner takes it: the screen's action) or pending.",
+          "type": "array",
+          "minItems": 4,
+          "maxItems": 4,
+          "items": {
+            "type": "object",
+            "required": ["label", "state"],
+            "additionalProperties": false,
+            "properties": {
+              "label": { "type": "string", "minLength": 1 },
+              "state": { "enum": ["done", "active", "yours", "pending"] }
+            }
+          }
+        },
+        "route": {
+          "description": "While the move or the move back runs: this computer (from, This Mac or This computer), the server (to, its name) and which way the home goes (forward, to the server; back, to this computer).",
+          "type": "object",
+          "required": ["from", "to", "direction"],
+          "additionalProperties": false,
+          "properties": {
+            "from": { "type": "string", "minLength": 1 },
+            "to": { "type": "string", "minLength": 1 },
+            "direction": { "enum": ["forward", "back"] }
+          }
+        },
+        "transfer": {
+          "description": "Only while the move's bytes move: what it counted, the bytes sent (the move) or received (the move back) over the home's size in whole twentieths (fraction), and its words (label). A surface fills only to fraction and never runs ahead of it; absent, nothing is counted and nothing fills.",
+          "type": "object",
+          "required": ["fraction", "label"],
+          "additionalProperties": false,
+          "properties": {
+            "fraction": { "type": "number", "minimum": 0, "maximum": 1 },
+            "label": { "type": "string", "minLength": 1 }
+          }
+        },
+        "backup": {
+          "description": "Where Backup settings shows (a linked desktop's on, the server's primary): whether the recovery passphrase is set (passphrase, its label, value and footer, the key never shown), change (change_passphrase, which needs new_recovery_passphrase and asks its confirm), and s3, the sentence that the server keeps an S3 copy, null where it keeps none.",
+          "type": "object",
+          "required": ["passphrase", "change", "s3"],
+          "additionalProperties": false,
+          "properties": {
+            "passphrase": {
+              "type": "object",
+              "required": ["label", "value", "footer"],
+              "additionalProperties": false,
+              "properties": {
+                "label": { "type": "string", "minLength": 1 },
+                "value": { "type": "string", "minLength": 1 },
+                "footer": { "type": "string", "minLength": 1 }
+              }
+            },
+            "change": { "$ref": "#/$defs/homeSummaryAction" },
+            "s3": { "type": ["string", "null"], "minLength": 1 }
+          }
+        },
+        "webhooks": {
+          "description": "On a linked desktop's on only: the Tailscale Funnel mounts the owner runs on the server for what it serves (home.status webhooks: the server's own, never this computer's): the sentence that says what needs them, each mount's label, command (run as root, with sudo) and note (where its sender is pointed), WhatsApp's first, notes with the one step a tailnet takes once, and url, the docs page that holds the rest. A webhook source's mount is its /cues/hooks/<ref> prefix, so no command carries its URL's secret. Never on the server's own primary: its summary rides inside each desktop's home.status as primary_home, where the mounts would pass max_json_depth.",
+          "type": "object",
+          "required": ["sentence", "mounts", "notes", "url"],
+          "additionalProperties": false,
+          "properties": {
+            "sentence": { "type": "string", "minLength": 1 },
+            "mounts": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 65,
+              "items": {
+                "type": "object",
+                "required": ["label", "command", "note"],
+                "additionalProperties": false,
+                "properties": {
+                  "label": { "type": "string", "minLength": 1 },
+                  "command": { "type": "string", "pattern": "^sudo tailscale funnel --bg --set-path=/" },
+                  "note": { "type": "string", "minLength": 1 }
+                }
+              }
+            },
+            "notes": {
+              "type": "array",
+              "maxItems": 1,
+              "items": { "type": "string", "minLength": 1 }
+            },
+            "url": { "type": "string", "pattern": "^https://fermix\\.ai/docs/always-on/#webhooks$" }
+          }
+        }
       }
     },
     "homeSummaryServer": {
       "type": "object",
-      "description": "The server a summary names: its provider's facts (type, location as a city, ipv4) are null for a server of the owner's own; on ready the system and version it enrolled with, on on the version it answers with.",
+      "description": "The server a summary names: on ready the system and version it enrolled with, on on the version it answers with.",
       "required": ["name"],
       "additionalProperties": false,
       "properties": {
         "name": { "type": ["string", "null"] },
-        "type": { "type": ["string", "null"] },
-        "location": { "type": ["string", "null"] },
-        "ipv4": { "type": ["string", "null"] },
         "system": { "type": "string" },
         "version": { "type": ["string", "null"] }
       }
@@ -5915,7 +6506,7 @@
     },
     "homePrimary": {
       "type": "object",
-      "description": "The primary a desktop reaches: its name, whether the session is up, the link's state in one closed word, since when the session is up (null while not), the highest primary epoch this desktop has seen, and one sentence. status: connected (a session is up); renewing (a session opening with nothing known to be wrong: the first since the engine started, or a quiet renewal after the primary ended one normally; draw it quietly); unreachable (an outage, retried with a backoff, or a link this engine refused to use); revoked (the primary no longer knows this computer; never retried until the engine restarts); stale (the primary answered as an older copy; retried).",
+      "description": "The primary a desktop reaches: its name, whether the session is up, the link's state in one closed word, since when the session is up (null while not), the highest primary epoch this desktop has seen, one sentence, and the session's path while it is up. status: connected (a session is up); renewing (a session opening with nothing known to be wrong: the first since the engine started, or a quiet renewal after the primary ended one normally; draw it quietly); unreachable (an outage, retried with a backoff, or a link this engine refused to use); revoked (the primary no longer knows this computer; never retried until the engine restarts); stale (the primary answered as an older copy; retried). path: direct (a direct UDP path, a tailnet one included) or relay (through Fermix's relay); absent while no session is up, before the helper names it, and from an engine older than the field.",
       "required": ["name", "connected", "status", "since", "epoch", "sentence"],
       "additionalProperties": false,
       "properties": {
@@ -5924,7 +6515,8 @@
         "status": { "enum": ["connected", "renewing", "unreachable", "revoked", "stale"] },
         "since": { "type": ["string", "null"] },
         "epoch": { "type": ["integer", "null"], "minimum": 1 },
-        "sentence": { "type": "string", "minLength": 1 }
+        "sentence": { "type": "string", "minLength": 1 },
+        "path": { "enum": ["direct", "relay"] }
       }
     },
     "homeDesktop": {
@@ -5937,6 +6529,63 @@
         "name": { "type": "string" },
         "connected": { "type": "boolean" },
         "since": { "type": ["string", "null"] }
+      }
+    },
+    "homeComputer": {
+      "type": "object",
+      "description": "A computer of the home, as its primary knows it: device_id and name (unique in the home, compared without case); platform macos or linux, null before it said; engine_version, the Fermix version it last said, null before it did; standing, where that version stands against this server's by major.minor (M97: current, behind by at most two minor versions, ahead, or settings_only past that, when it keeps its link for settings alone and offers nothing until it updates), null before it said a version, absent from a server older than it; connected and since (null while not connected); last_seen, when the home last heard it, null before it did; path direct or relay while its session is up and the path is known, else null; offers, what it offers its server in this session (none before its first offers), and while it is away what it last offered; backups, whether it keeps copies of the home's backups; this_computer, true on the row of the linked computer whose request the server answers (its own row, which its app never offers to remove), false on every other row and to every other caller, absent from a server older than it.",
+      "required": ["device_id", "name", "platform", "engine_version", "connected", "since", "last_seen", "path", "offers", "backups"],
+      "additionalProperties": false,
+      "properties": {
+        "device_id": { "type": "string", "minLength": 1 },
+        "name": { "type": "string" },
+        "platform": { "enum": ["macos", "linux", null] },
+        "engine_version": { "type": ["string", "null"] },
+        "standing": { "enum": ["current", "behind", "ahead", "settings_only", null] },
+        "connected": { "type": "boolean" },
+        "since": { "type": ["string", "null"] },
+        "last_seen": { "type": ["string", "null"] },
+        "path": { "enum": ["direct", "relay", null] },
+        "offers": { "type": "array", "maxItems": 32, "items": { "$ref": "#/$defs/computerOffer" } },
+        "backups": { "type": "boolean" },
+        "this_computer": { "type": "boolean" }
+      }
+    },
+    "computerOffer": {
+      "type": "object",
+      "description": "One thing a computer offers its server. id is files, shell, browser, computer_use, imessage, history or places (looking places up in Apple Maps for the server's place search, which a Mac whose Fermix app carries Apple Maps offers); one another computer names is kept as it came (a computer from before M97 D27 may still name voice, attachments, accessory or notifications, always unavailable), and a client that does not know it shows its sentence as it is. label is the words it goes by in the server's own offer list (files, commands, the browser, your screen, Messages, your computer history, Apple Maps), null for one the server does not know, absent from a server older than it: a client shows it, and the id where it is null or absent. state on, off (switched off on that computer: files and shell by its one switch for files and commands, history by its recorder's own setting, places by its own switch, on while nothing is stored for it; or the master switch off, or not reviewed yet) or unavailable (it cannot work there). sentence says why it is not on, in the engine's words, null while on. detail is a short word while on, such as the sandbox mode commands run in (strict, standard or open), else null.",
+      "required": ["id", "state", "sentence", "detail"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "type": "string", "pattern": "^[a-z][a-z0-9_]{0,31}$" },
+        "label": { "type": ["string", "null"], "minLength": 1 },
+        "state": { "enum": ["on", "off", "unavailable"] },
+        "sentence": { "type": ["string", "null"], "minLength": 1, "maxLength": 300 },
+        "detail": { "type": ["string", "null"], "minLength": 1, "maxLength": 64 }
+      }
+    },
+    "computerKeepBlock": {
+      "type": "object",
+      "description": "What a computer keeps on for its server after the move (ready's keeps_on): sentence asks the owner to tick what stays on and, on a Mac, says where a ticked history goes; warning is the plain warning where files and commands stay on while this computer's sandbox is open (null otherwise), and lines are one per thing this computer's system can have, in order: offer (files_and_shell, browser, computer_use, imessage, places, history; files and commands are one line, M97 D27, places is Apple Maps for the server's place search and only on a Mac, and history's line sets this computer's recorder), label in the owner's words (files and commands with the sandbox mode they run in, the browser, your screen, Messages, Apple Maps, your computer history) and on, whether it stays on. A surface draws each line as a tick the owner may change, and sends the lines left ticked as home.act's input.keep_offers.",
+      "required": ["sentence", "warning", "lines"],
+      "additionalProperties": false,
+      "properties": {
+        "sentence": { "type": "string", "minLength": 1 },
+        "warning": { "type": ["string", "null"], "minLength": 1 },
+        "lines": {
+          "type": "array",
+          "maxItems": 32,
+          "items": {
+            "type": "object",
+            "required": ["offer", "label", "on"],
+            "additionalProperties": false,
+            "properties": {
+              "offer": { "type": "string", "pattern": "^[a-z][a-z0-9_]{0,31}$" },
+              "label": { "type": "string", "minLength": 1 },
+              "on": { "type": "boolean" }
+            }
+          }
+        }
       }
     },
     "home_snapshots_status_params": { "type": "object", "maxProperties": 0, "additionalProperties": false },
@@ -6031,9 +6680,9 @@
     },
     "home_enroll_open_params": {
       "type": "object",
-      "description": "kind is manual (the default: thirty minutes, the code a person copies) or provisioned (24 hours, the code inside a server Fermix creates), which the primary opens only for a request a desktop forwarded. A manual window a desktop asks for is that desktop's move back, and the window names it.",
+      "description": "purpose says what the code is for: candidate (the default), a server of the owner's own or a move back; computer, a computer that joins the home. A code is refused, unavailable with its sentence, while one of the other purpose is open, which stays as it is.",
       "additionalProperties": false,
-      "properties": { "kind": { "enum": ["manual", "provisioned"] } }
+      "properties": { "purpose": { "enum": ["candidate", "computer"] } }
     },
     "home_enroll_open_result": {
       "description": "The enrollment code, shown once: single use, valid until expires_at, never logged and never answered again.",
@@ -6045,18 +6694,38 @@
         "expires_at": { "type": "string" }
       }
     },
-    "home_enroll_withdraw_params": {
-      "type": "object",
-      "description": "kind names the window released: provisioned (the default, the 24-hour code inside a server Fermix creates) or manual (the copied code a desktop opened to move back, when its owner cancels).",
-      "additionalProperties": false,
-      "properties": { "kind": { "enum": ["manual", "provisioned"] } }
-    },
+    "home_enroll_withdraw_params": { "type": "object", "maxProperties": 0, "additionalProperties": false },
     "home_enroll_withdraw_result": {
-      "description": "The window of the kind named is released: an open one ended, a used one no longer holds a manual code back.",
+      "description": "The window is released: an open one ended, a used one stays as the record of who used it.",
       "type": "object",
       "required": ["withdrawn"],
       "additionalProperties": false,
       "properties": { "withdrawn": { "const": true } }
+    },
+    "home_enroll_approve_params": {
+      "type": "object",
+      "description": "The six digits the computer that asks to join shows, as its owner read them there; spaces are dropped. Digits that are not the computer's are refused on sas, the computer is not added, and its code is spent.",
+      "required": ["sas"],
+      "additionalProperties": false,
+      "properties": { "sas": { "type": "string", "minLength": 6, "maxLength": 32, "pattern": "^[0-9 ]+$" } }
+    },
+    "home_enroll_approve_result": {
+      "description": "The computer added: its device id and the name the home gave it, the one it said unless another device holds it.",
+      "type": "object",
+      "required": ["device_id", "name"],
+      "additionalProperties": false,
+      "properties": {
+        "device_id": { "type": "string", "minLength": 1 },
+        "name": { "type": "string", "minLength": 1 }
+      }
+    },
+    "home_enroll_deny_params": { "type": "object", "maxProperties": 0, "additionalProperties": false },
+    "home_enroll_deny_result": {
+      "description": "The computer that waited was not added, and its code is spent; with none waiting, nothing changed.",
+      "type": "object",
+      "required": ["denied"],
+      "additionalProperties": false,
+      "properties": { "denied": { "const": true } }
     },
     "home_candidates_list_params": { "type": "object", "maxProperties": 0, "additionalProperties": false },
     "home_candidates_list_result": {
@@ -6087,7 +6756,7 @@
     },
     "homeReadinessItem": {
       "type": "object",
-      "description": "One fact about the move. id is keychain_secrets, engine_version, disk, s3_size, plugins, stays_here, whatsapp, slack, coding_agents, cutover_gap, serves_nothing or service; a client that does not know an id shows its sentence as it is.",
+      "description": "One fact about the move. id is call_in_progress, meeting_in_progress, keychain_secrets, engine_version, disk, s3_size, plugins, dev_plugins, stays_here, whatsapp, slack, coding_agents, settings, cutover_gap, serves_nothing or service; a client that does not know an id shows its sentence as it is.",
       "required": ["id", "status", "sentence"],
       "additionalProperties": false,
       "properties": {
@@ -6104,7 +6773,7 @@
         "candidate_id": { "type": "string", "minLength": 1, "maxLength": 128 },
         "recovery_passphrase": { "type": "string", "minLength": 12, "maxLength": 1024 },
         "keep_as_desktop": {
-          "description": "Whether this computer becomes a desktop of the new primary; true unless said. False when the source is a server being replaced: it then serves nothing.",
+          "description": "Whether this computer becomes a desktop of the new primary; true unless said. False when the source is a server a desktop moves back from: it then serves nothing.",
           "type": "boolean"
         }
       }
@@ -6123,98 +6792,40 @@
         "sentence": { "type": "string", "minLength": 1 }
       }
     },
-    "homeProvisionProviderId": {
-      "description": "A provider the summary's detail.providers lists.",
-      "type": "string",
-      "pattern": "^[a-z][a-z0-9-]{1,31}$"
-    },
-    "home_provision_options_params": { "type": "object", "maxProperties": 0, "additionalProperties": false },
-    "home_provision_options_result": {
-      "description": "What the provider in use sells now, read live (the one Always On speaks of: the one Fermix created something on, else the one whose token was given last; provider names it, id and name, for display): every type Fermix can use (x86, at least 4 GB, still sold), wherever it is in stock in the locations Fermix offers there, cheapest first. recommended is the cheapest type in the first location where it is in stock, more_room the cheapest type with more memory; either is null when nothing fits. sentence says the recommendation, or that nothing is in stock.",
+    "home_restart_params": { "type": "object", "maxProperties": 0, "additionalProperties": false },
+    "home_restart_result": {
+      "description": "The server's answer to a linked computer's Restart <server> (M97 D28c): when now, it restarts right after answering; when after_work, it waits for the work it runs on a computer and restarts once that ends, or after wait_s seconds at most (never more than 600, and a second request while it waits answers the same wait); the sentence says which.",
       "type": "object",
-      "required": ["provider", "currency", "locations", "offers", "recommended", "more_room", "sentence"],
+      "required": ["when", "wait_s", "sentence"],
       "additionalProperties": false,
       "properties": {
-        "provider": {
-          "type": "object",
-          "required": ["id", "name"],
-          "additionalProperties": false,
-          "properties": {
-            "id": { "$ref": "#/$defs/homeProvisionProviderId" },
-            "name": { "type": "string", "minLength": 1 }
-          }
-        },
-        "currency": { "type": "string" },
-        "locations": { "type": "array", "maxItems": 32, "items": { "$ref": "#/$defs/homeProvisionLocation" } },
-        "offers": { "type": "array", "maxItems": 150, "items": { "$ref": "#/$defs/homeProvisionOffer" } },
-        "recommended": { "oneOf": [{ "$ref": "#/$defs/homeProvisionPick" }, { "type": "null" }] },
-        "more_room": { "oneOf": [{ "$ref": "#/$defs/homeProvisionPick" }, { "type": "null" }] },
+        "when": { "enum": ["now", "after_work"] },
+        "wait_s": { "type": "integer", "minimum": 0, "maximum": 600 },
         "sentence": { "type": "string", "minLength": 1 }
-      }
-    },
-    "homeProvisionLocation": {
-      "type": "object",
-      "required": ["id", "city", "country"],
-      "additionalProperties": false,
-      "properties": {
-        "id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]{0,31}$" },
-        "city": { "type": "string" },
-        "country": { "type": "string" }
-      }
-    },
-    "homeProvisionOffer": {
-      "type": "object",
-      "description": "One type in one location. The prices are monthly, gross, with VAT as the account is billed, as decimal strings in the account's currency; total_monthly adds the IPv4 address. label (the type's name, cores, memory and disk) and price (total_monthly, worded as the summary's Costs line) are the engine's words: a surface draws them as sent and groups the rows by the location's city.",
-      "required": ["type", "description", "cores", "memory_gb", "disk_gb", "dedicated", "location", "monthly", "ipv4_monthly", "total_monthly", "label", "price"],
-      "additionalProperties": false,
-      "properties": {
-        "type": { "type": "string" },
-        "description": { "type": "string" },
-        "cores": { "type": "integer" },
-        "memory_gb": { "type": "number" },
-        "disk_gb": { "type": "integer" },
-        "dedicated": { "type": "boolean" },
-        "location": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]{0,31}$" },
-        "monthly": { "type": "string", "pattern": "^[0-9]+\\.[0-9]{2}$" },
-        "ipv4_monthly": { "type": "string", "pattern": "^[0-9]+\\.[0-9]{2}$" },
-        "total_monthly": { "type": "string", "pattern": "^[0-9]+\\.[0-9]{2}$" },
-        "label": { "type": "string", "minLength": 1 },
-        "price": { "type": "string", "minLength": 1 }
-      }
-    },
-    "homeProvisionPick": {
-      "type": "object",
-      "required": ["type", "location"],
-      "additionalProperties": false,
-      "properties": {
-        "type": { "type": "string" },
-        "location": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]{0,31}$" }
       }
     },
     "home_act_params": {
       "type": "object",
-      "description": "One Always On step: an action the summary offers (its action, an alternative or one of on's detail.actions) and the key it was drawn with, with what the action's needs asked for. learn_more, open_console and update are opened by the surface and refused here on action. The key is checked against the summary as it is now: one that does not offer the action under it answers changed with details {sentence} alone, nothing is done, and the surface reads home.status again.",
+      "description": "One Always On step: an action the summary offers (its action, an alternative or the backup settings' change) and the key it was drawn with, with what the action's needs asked for. update is the app's own and refused here on action. The key is checked against the summary as it is now: one that does not offer the action under it answers changed with details {sentence} alone, nothing is done, and the surface reads home.status again.",
       "required": ["action", "key"],
       "additionalProperties": false,
       "properties": {
         "action": {
           "enum": [
-            "paste_token",
-            "create_server",
             "cancel",
             "move_now",
             "try_again",
-            "turn_on",
-            "restart_server",
-            "start_again",
-            "create_in",
             "back_up_now",
-            "replace_server",
             "check_again",
             "own_server",
-            "delete_server",
             "move_back",
-            "restore_here"
+            "restore_here",
+            "review_offers",
+            "add_computer",
+            "approve_computer",
+            "deny_computer",
+            "change_passphrase",
+            "restart_server"
           ]
         },
         "key": { "type": "string", "minLength": 1, "maxLength": 64 },
@@ -6223,19 +6834,28 @@
     },
     "homeActInput": {
       "type": "object",
-      "description": "What the action's needs collected: token (needs token; provider names one of detail.providers, else the one there is), recovery_passphrase (needs recovery_passphrase, typed once, or new_recovery_passphrase, typed twice and compared by the surface; restore_here's opens the copy it restores), type and location (needs choice: read home.provision.options, which takes no params, and send both, the row the owner chose, the recommendation's own by default; the engine makes no choice itself). Never logged, never answered.",
+      "description": "What the action's needs collected: recovery_passphrase (needs recovery_passphrase, typed once, or new_recovery_passphrase, typed twice and compared by the surface; restore_here's opens the copy it restores, change_passphrase's is the new one), never logged and never answered; keep_offers, the offers of the keeps_on block left ticked; and sas (needs sas), the six digits the computer that asks to join shows.",
       "additionalProperties": false,
       "properties": {
-        "token": { "type": "string", "maxLength": 512 },
-        "provider": { "$ref": "#/$defs/homeProvisionProviderId" },
         "recovery_passphrase": { "type": "string", "minLength": 12, "maxLength": 1024 },
-        "type": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]{0,31}$" },
-        "location": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]{0,31}$" }
+        "sas": {
+          "description": "For approve_computer, the six digits the new computer shows, as the owner read them there; spaces are dropped. Digits that are not six are refused (invalid_params on sas) and nothing is sent; six that are not the computer's are refused the same way, the computer is not added and its code is spent.",
+          "type": "string",
+          "minLength": 6,
+          "maxLength": 32,
+          "pattern": "^[0-9 ]+$"
+        },
+        "keep_offers": {
+          "description": "For move_now and try_again on the computer that sets Always On up, the offers of the ready screen's detail.keeps_on left ticked: what this computer keeps on for its server after the move; absent, the block as it was shown. For review_offers, absent: this computer's switches as they are (set under This computer); an app from before the review's switches moved there sends the lines it left ticked, which stay on. A list that is not of text is refused (invalid_params on keep_offers), and so is an id other than files_and_shell, browser, computer_use, imessage, places and history, or files and shell: the two lines an app from before M97 D27 sends for files and commands, which keep files_and_shell on only when both are sent (one alone keeps it off).",
+          "type": "array",
+          "maxItems": 32,
+          "items": { "type": "string", "pattern": "^[a-z][a-z0-9_]{0,31}$" }
+        }
       }
     },
     "home_act_result": {
       "type": "object",
-      "description": "The summary after the step, and the step's own result: own_server's code (answered once, never again) with the command for the server, which carries no code; move_now's and try_again's move id; null for every other step.",
+      "description": "The summary after the step, and the step's own result: own_server's code (answered once, never again) with the command for the server, which carries no code, the sentence the code is shown with (the systems the server takes and until when the code works, in the owner's zone), and the optional step that also joins the server to the owner's tailnet (tailscale: the label it is folded under, its sentence, its command and its docs page, the same command with --tailscale, after which the server asks for the code and the Tailscale auth key at the terminal without echo, so the key is on no command line); move_now's and try_again's move id; add_computer's code for the computer that joins (answered once, never again); approve_computer's computer, as the home added it; restart_server's answer from the server (home.restart's); null for every other step.",
       "required": ["summary", "result"],
       "additionalProperties": false,
       "properties": {
@@ -6244,12 +6864,24 @@
           "oneOf": [
             {
               "type": "object",
-              "required": ["code", "expires_at", "command"],
+              "required": ["code", "expires_at", "command", "sentence", "tailscale"],
               "additionalProperties": false,
               "properties": {
                 "code": { "type": "string", "maxLength": 2048, "pattern": "^fxenroll1\\.[A-Za-z0-9_-]+$" },
                 "expires_at": { "type": "string" },
-                "command": { "type": "string", "minLength": 1 }
+                "command": { "type": "string", "minLength": 1 },
+                "sentence": { "type": "string", "minLength": 1 },
+                "tailscale": {
+                  "type": "object",
+                  "required": ["label", "sentence", "command", "url"],
+                  "additionalProperties": false,
+                  "properties": {
+                    "label": { "type": "string", "minLength": 1 },
+                    "sentence": { "type": "string", "minLength": 1 },
+                    "command": { "type": "string", "minLength": 1 },
+                    "url": { "type": "string", "pattern": "^https://fermix\\.ai/docs/always-on/#tailscale$" }
+                  }
+                }
               }
             },
             {
@@ -6258,9 +6890,149 @@
               "additionalProperties": false,
               "properties": { "move_id": { "type": "string", "minLength": 1 } }
             },
+            {
+              "type": "object",
+              "required": ["code", "expires_at"],
+              "additionalProperties": false,
+              "properties": {
+                "code": { "type": "string", "maxLength": 2048, "pattern": "^fxenroll1\\.[A-Za-z0-9_-]+$" },
+                "expires_at": { "type": "string" }
+              }
+            },
+            {
+              "type": "object",
+              "required": ["device_id", "name"],
+              "additionalProperties": false,
+              "properties": {
+                "device_id": { "type": "string", "minLength": 1 },
+                "name": { "type": "string", "minLength": 1 }
+              }
+            },
+            { "$ref": "#/$defs/home_restart_result" },
             { "type": "null" }
           ]
         }
+      }
+    },
+    "computers_rename_params": {
+      "type": "object",
+      "description": "The computer to name, by its device id, and its new name: one line, at most 64 bytes once trimmed.",
+      "required": ["device_id", "name"],
+      "additionalProperties": false,
+      "properties": {
+        "device_id": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "name": { "type": "string", "minLength": 1, "maxLength": 256 }
+      }
+    },
+    "computer_join_start_params": {
+      "type": "object",
+      "description": "The code Add a computer opened on the home this computer joins. A code Fermix did not open, one that sets up a server instead, and one that expired are refused on code; a computer that has a home of its own (any message, memory, scheduled job, computer history note, paired device, moved marker or link; not a memory that only repeats the home's settings), and one already joining, are unavailable with their sentence.",
+      "required": ["code"],
+      "additionalProperties": false,
+      "properties": { "code": { "type": "string", "minLength": 1, "maxLength": 4096 } }
+    },
+    "computer_join_start_result": {
+      "description": "The join is recorded and the engine restarts as the home's computer: it then dials the server, and home.status carries join.",
+      "type": "object",
+      "required": ["joining", "sentence"],
+      "additionalProperties": false,
+      "properties": {
+        "joining": { "const": true },
+        "sentence": { "type": "string", "minLength": 1 }
+      }
+    },
+    "computer_join_cancel_params": { "type": "object", "maxProperties": 0, "additionalProperties": false },
+    "computer_join_cancel_result": {
+      "description": "The join ended wherever it stood: its key and record are gone and the engine restarts as its own home.",
+      "type": "object",
+      "required": ["cancelled", "sentence"],
+      "additionalProperties": false,
+      "properties": {
+        "cancelled": { "const": true },
+        "sentence": { "type": "string", "minLength": 1 }
+      }
+    },
+    "computer_disconnect_params": {
+      "type": "object",
+      "description": "confirmed true disconnects even when the server cannot be told; without it, a server that cannot be told is unavailable with the sentence that asks, marked details.confirm true, and nothing changes.",
+      "additionalProperties": false,
+      "properties": { "confirmed": { "type": "boolean" } }
+    },
+    "computer_disconnect_result": {
+      "description": "This computer left its home: its key, its link and what the server may use here are gone, and the engine restarts. server_told is false when the server could not be told and still lists it.",
+      "type": "object",
+      "required": ["disconnected", "server_told", "sentence"],
+      "additionalProperties": false,
+      "properties": {
+        "disconnected": { "const": true },
+        "server_told": { "type": "boolean" },
+        "sentence": { "type": "string", "minLength": 1 }
+      }
+    },
+    "computer_journal_list_params": {
+      "type": "object",
+      "description": "At most limit invocations (1 to 200, default 50), the newest first; with before, only those older than that invocation.",
+      "additionalProperties": false,
+      "properties": {
+        "limit": { "type": "integer", "minimum": 1, "maximum": 200 },
+        "before": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$" }
+      }
+    },
+    "computer_journal_list_result": {
+      "type": "object",
+      "description": "What Fermix on its server did on this computer, from this computer's own journal, the newest first; more is true when older ones remain.",
+      "required": ["entries", "more"],
+      "additionalProperties": false,
+      "properties": {
+        "entries": { "type": "array", "maxItems": 200, "items": { "$ref": "#/$defs/computerJournalEntry" } },
+        "more": { "type": "boolean" }
+      }
+    },
+    "computer_screen_stop_params": {
+      "type": "object",
+      "description": "None: the person at this computer stops Fermix on its server controlling its screen.",
+      "additionalProperties": false,
+      "properties": {}
+    },
+    "computer_screen_stop_result": {
+      "type": "object",
+      "description": "Whether the server held this computer's screen and was stopped; false when it held nothing.",
+      "required": ["stopped"],
+      "additionalProperties": false,
+      "properties": {
+        "stopped": { "type": "boolean" }
+      }
+    },
+    "computerJournalEntry": {
+      "type": "object",
+      "description": "One invocation as this computer journaled it: when it came, when it ended (null while it runs), what it was and what it acted on (a path, a host or an action, never content), the kind of turn that asked, how it ended (null while it runs) and the size of its answer. A request refused before it ran opens and ends at once. capability_label and op_label are the owner's words for capability and op, lower case as an offer's label (commands, run a command), each null where this computer's engine has no words for its id (an older journal row) and absent from an engine older than them: a client shows them, and the id where one is null or absent.",
+      "required": ["id", "at", "finished_at", "capability", "op", "target", "origin", "status", "refusal", "result_bytes", "duration_ms"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "at": { "type": "string" },
+        "finished_at": { "type": ["string", "null"] },
+        "capability": { "type": ["string", "null"], "pattern": "^[a-z][a-z0-9_]{0,31}$" },
+        "capability_label": { "type": ["string", "null"], "minLength": 1, "maxLength": 64 },
+        "op": { "type": ["string", "null"], "maxLength": 64 },
+        "op_label": { "type": ["string", "null"], "minLength": 1, "maxLength": 64 },
+        "target": { "type": ["string", "null"], "maxLength": 256 },
+        "origin": { "enum": ["chat", "voice", "scheduled", "cue", "worker", "background", "computer", null] },
+        "status": { "enum": ["ok", "failed", "refused", "timed_out", "cancelled", "unknown", null] },
+        "refusal": {
+          "enum": ["off", "unavailable", "outside_sandbox", "not_attended", "stopped_here", "busy", "stale_epoch", null]
+        },
+        "result_bytes": { "type": ["integer", "null"], "minimum": 0 },
+        "duration_ms": { "type": ["integer", "null"], "minimum": 0 }
+      }
+    },
+    "computers_rename_result": {
+      "type": "object",
+      "description": "The computer under its new name, as home.status lists it.",
+      "required": ["computer"],
+      "additionalProperties": false,
+      "properties": {
+        "computer": { "$ref": "#/$defs/homeComputer" }
       }
     },
     "homeCandidate": {
@@ -6294,14 +7066,42 @@
     },
     "homeEnrollment": {
       "type": "object",
-      "description": "The primary's enrollment window: open until expires_at, used once a candidate enrolled with it, or expired. kind is manual (the code a person copies) or provisioned (the code inside a server Fermix created); candidate_id is the candidate that enrolled with it, null until one did, which is how the server Fermix created is known.",
-      "required": ["state", "expires_at", "kind", "candidate_id"],
+      "description": "The primary's enrollment window: open until expires_at, used once a candidate enrolled with it, or expired. candidate_id is the candidate that enrolled with it, null until one did. A window opened for a computer that joins the home says purpose computer and carries joiner and joined; a candidate's carries none of the three. Its state is also awaiting_approval while a computer waits for the owner (joiner names it and its system, never the six digits it shows: the owner reads them on the new computer and types them with home.enroll.approve), approved once the owner added it (joined names it) and denied once it was not added; the code is spent either way.",
+      "required": ["state", "expires_at", "candidate_id"],
       "additionalProperties": false,
       "properties": {
-        "state": { "enum": ["open", "used", "expired"] },
+        "state": { "enum": ["open", "used", "expired", "awaiting_approval", "approved", "denied"] },
         "expires_at": { "type": "string" },
-        "kind": { "enum": ["manual", "provisioned"] },
-        "candidate_id": { "oneOf": [{ "type": "string", "pattern": "^cand-[0-9a-f]{16}$" }, { "type": "null" }] }
+        "candidate_id": { "oneOf": [{ "type": "string", "pattern": "^cand-[0-9a-f]{16}$" }, { "type": "null" }] },
+        "purpose": { "const": "computer" },
+        "joiner": {
+          "oneOf": [
+            {
+              "type": "object",
+              "required": ["name", "platform"],
+              "additionalProperties": false,
+              "properties": {
+                "name": { "type": "string", "minLength": 1, "maxLength": 128 },
+                "platform": { "enum": ["macos", "linux"] }
+              }
+            },
+            { "type": "null" }
+          ]
+        },
+        "joined": {
+          "oneOf": [
+            {
+              "type": "object",
+              "required": ["device_id", "name"],
+              "additionalProperties": false,
+              "properties": {
+                "device_id": { "type": "string", "minLength": 1 },
+                "name": { "type": "string", "minLength": 1 }
+              }
+            },
+            { "type": "null" }
+          ]
+        }
       }
     },
     "homeMove": {
@@ -6331,6 +7131,557 @@
         },
         "candidate": { "type": ["string", "null"] },
         "sentence": { "type": "string", "minLength": 1 }
+      }
+    },
+    "accessories_status_params": {
+      "type": "object",
+      "description": "None for the picture as it stands; or after (a key) and wait_ms (at most 25000) together, to be answered once the key is not after, or when wait_ms passed.",
+      "additionalProperties": false,
+      "dependentRequired": { "after": ["wait_ms"], "wait_ms": ["after"] },
+      "properties": {
+        "after": { "type": "string", "pattern": "^[0-9a-f]{16}$" },
+        "wait_ms": { "type": "integer", "minimum": 0, "maximum": 25000 }
+      }
+    },
+    "accessories_status_result": { "$ref": "#/$defs/accessoriesStatus" },
+    "accessories_pair_start_params": {
+      "type": "object",
+      "required": ["path"],
+      "additionalProperties": false,
+      "properties": { "path": { "$ref": "#/$defs/accessoryPortPath" } }
+    },
+    "accessories_pair_start_result": { "$ref": "#/$defs/accessoriesStatus" },
+    "accessories_pair_begin_params": {
+      "type": "object",
+      "required": ["path"],
+      "additionalProperties": false,
+      "properties": {
+        "path": { "$ref": "#/$defs/accessoryPortPath" },
+        "name": { "type": "string", "minLength": 1, "maxLength": 64 }
+      }
+    },
+    "accessories_pair_begin_result": { "$ref": "#/$defs/accessoriesStatus" },
+    "accessories_pair_decide_params": {
+      "type": "object",
+      "required": ["path", "attempt", "matches"],
+      "additionalProperties": false,
+      "properties": {
+        "path": { "$ref": "#/$defs/accessoryPortPath" },
+        "attempt": { "$ref": "#/$defs/accessoryAttempt" },
+        "matches": { "type": "boolean" }
+      }
+    },
+    "accessories_pair_decide_result": { "$ref": "#/$defs/accessoriesStatus" },
+    "accessories_pair_cancel_params": {
+      "type": "object",
+      "required": ["path"],
+      "additionalProperties": false,
+      "properties": {
+        "path": { "$ref": "#/$defs/accessoryPortPath" },
+        "attempt": { "$ref": "#/$defs/accessoryAttempt" }
+      }
+    },
+    "accessories_pair_cancel_result": { "$ref": "#/$defs/accessoriesStatus" },
+    "accessories_retry_params": { "$ref": "#/$defs/accessoryPortParams" },
+    "accessories_retry_result": { "$ref": "#/$defs/accessoriesStatus" },
+    "accessories_release_params": { "$ref": "#/$defs/accessoryPortParams" },
+    "accessories_release_result": { "$ref": "#/$defs/accessoriesStatus" },
+    "accessories_reconnect_params": { "$ref": "#/$defs/accessoryPortParams" },
+    "accessories_reconnect_result": { "$ref": "#/$defs/accessoriesStatus" },
+    "accessories_forget_params": { "$ref": "#/$defs/accessoryIdParams" },
+    "accessories_forget_result": { "$ref": "#/$defs/accessoriesStatus" },
+    "accessories_revoke_params": { "$ref": "#/$defs/accessoryIdParams" },
+    "accessories_revoke_result": { "$ref": "#/$defs/accessoriesStatus" },
+    "accessories_voice_device_set_params": {
+      "type": "object",
+      "required": ["device"],
+      "additionalProperties": false,
+      "properties": { "device": { "$ref": "#/$defs/accessoryVoiceDeviceName" } }
+    },
+    "accessories_voice_device_set_result": { "$ref": "#/$defs/accessoriesStatus" },
+    "accessories_call_start_params": { "$ref": "#/$defs/accessoryIdParams" },
+    "accessories_call_start_result": { "$ref": "#/$defs/accessoriesStatus" },
+    "accessories_call_end_params": { "$ref": "#/$defs/accessoryCallParams" },
+    "accessories_call_end_result": { "$ref": "#/$defs/accessoriesStatus" },
+    "accessories_call_mute_params": {
+      "type": "object",
+      "required": ["accessory_id", "call_id", "muted"],
+      "additionalProperties": false,
+      "properties": {
+        "accessory_id": { "$ref": "#/$defs/accessoryId" },
+        "call_id": { "$ref": "#/$defs/accessoryCallId" },
+        "muted": { "type": "boolean" }
+      }
+    },
+    "accessories_call_mute_result": { "$ref": "#/$defs/accessoriesStatus" },
+    "accessories_call_interrupt_params": { "$ref": "#/$defs/accessoryCallParams" },
+    "accessories_call_interrupt_result": { "$ref": "#/$defs/accessoriesStatus" },
+    "accessories_call_task_cancel_params": {
+      "type": "object",
+      "required": ["accessory_id", "call_id", "task"],
+      "additionalProperties": false,
+      "properties": {
+        "accessory_id": { "$ref": "#/$defs/accessoryId" },
+        "call_id": { "$ref": "#/$defs/accessoryCallId" },
+        "task": { "type": "string", "minLength": 1, "maxLength": 64 }
+      }
+    },
+    "accessories_call_task_cancel_result": { "$ref": "#/$defs/accessoriesStatus" },
+    "accessories_check_start_params": {
+      "type": "object",
+      "required": ["accessory_id", "check"],
+      "additionalProperties": false,
+      "properties": {
+        "accessory_id": { "$ref": "#/$defs/accessoryId" },
+        "check": { "enum": ["tone", "mic", "face", "motion"] },
+        "seconds": { "type": "integer", "minimum": 1, "maximum": 10 }
+      }
+    },
+    "accessories_check_start_result": { "$ref": "#/$defs/accessoriesStatus" },
+    "accessories_check_stop_params": { "$ref": "#/$defs/accessoryIdParams" },
+    "accessories_check_stop_result": { "$ref": "#/$defs/accessoriesStatus" },
+    "accessories_calibrate_params": {
+      "type": "object",
+      "description": "One Calibrate head step: axis and steps exactly when op is nudge.",
+      "required": ["accessory_id", "op"],
+      "additionalProperties": false,
+      "properties": {
+        "accessory_id": { "$ref": "#/$defs/accessoryId" },
+        "op": { "enum": ["begin", "nudge", "set_zero", "cancel"] },
+        "axis": { "enum": ["pan", "tilt"] },
+        "steps": { "type": "integer", "minimum": -64, "maximum": 64, "not": { "const": 0 } }
+      }
+    },
+    "accessories_calibrate_result": { "$ref": "#/$defs/accessoriesStatus" },
+    "accessories_set_params": {
+      "type": "object",
+      "description": "At least one of volume, brightness and motion (motion only on a robot with head motion).",
+      "required": ["accessory_id"],
+      "minProperties": 2,
+      "additionalProperties": false,
+      "properties": {
+        "accessory_id": { "$ref": "#/$defs/accessoryId" },
+        "volume": { "type": "integer", "minimum": 0, "maximum": 100 },
+        "brightness": { "type": "integer", "minimum": 0, "maximum": 100 },
+        "motion": { "type": "boolean" }
+      }
+    },
+    "accessories_set_result": { "$ref": "#/$defs/accessoriesStatus" },
+    "accessoryPortPath": { "type": "string", "minLength": 1, "maxLength": 256 },
+    "accessoryId": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "accessoryAttempt": { "type": "string", "pattern": "^[0-9a-f]{32}$" },
+    "accessoryCallId": { "type": "string", "minLength": 1, "maxLength": 64 },
+    "accessoryVoiceDeviceName": { "type": "string", "pattern": "^(desktop|accessory:[0-9a-f]{64})$" },
+    "accessoryPortParams": {
+      "type": "object",
+      "required": ["path"],
+      "additionalProperties": false,
+      "properties": { "path": { "$ref": "#/$defs/accessoryPortPath" } }
+    },
+    "accessoryIdParams": {
+      "type": "object",
+      "required": ["accessory_id"],
+      "additionalProperties": false,
+      "properties": { "accessory_id": { "$ref": "#/$defs/accessoryId" } }
+    },
+    "accessoryCallParams": {
+      "type": "object",
+      "required": ["accessory_id", "call_id"],
+      "additionalProperties": false,
+      "properties": {
+        "accessory_id": { "$ref": "#/$defs/accessoryId" },
+        "call_id": { "$ref": "#/$defs/accessoryCallId" }
+      }
+    },
+    "accessoriesStatus": {
+      "type": "object",
+      "description": "The accessory picture this Mac draws (PROTOCOL.md, Accessories). Every sentence and every action a row offers is the daemon's.",
+      "required": [
+        "key",
+        "state",
+        "sentence",
+        "enabled",
+        "kinds",
+        "voice",
+        "voice_device",
+        "ports",
+        "ports_sentence",
+        "accessories",
+        "pairing",
+        "call"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "key": { "type": "string", "pattern": "^[0-9a-f]{16}$" },
+        "state": { "enum": ["off", "needs_local_primary", "not_running", "on"] },
+        "sentence": { "type": "string", "minLength": 1 },
+        "enabled": { "type": "boolean" },
+        "kinds": { "type": "array", "items": { "$ref": "#/$defs/accessoryKind" } },
+        "voice": { "$ref": "#/$defs/accessoryVoice" },
+        "voice_device": { "$ref": "#/$defs/accessoryVoiceDevice" },
+        "ports": { "type": "array", "items": { "$ref": "#/$defs/accessoryPort" } },
+        "ports_sentence": { "type": ["string", "null"] },
+        "accessories": {
+          "type": "array",
+          "maxItems": 8,
+          "items": { "$ref": "#/$defs/accessoryRow" }
+        },
+        "pairing": { "oneOf": [{ "$ref": "#/$defs/accessoryPairing" }, { "type": "null" }] },
+        "call": { "oneOf": [{ "$ref": "#/$defs/accessoryCall" }, { "type": "null" }] }
+      }
+    },
+    "accessoryKind": {
+      "type": "object",
+      "required": ["kind", "name", "wire_min", "wire_max", "install_guide"],
+      "additionalProperties": false,
+      "properties": {
+        "kind": { "type": "string", "pattern": "^[a-z][a-z0-9_]{0,15}$" },
+        "name": { "type": "string", "minLength": 1 },
+        "wire_min": { "type": "integer", "minimum": 1 },
+        "wire_max": { "type": "integer", "minimum": 1 },
+        "install_guide": { "type": "string", "pattern": "^https://" }
+      }
+    },
+    "accessoryVoice": {
+      "type": "object",
+      "required": ["ready", "code", "sentence", "engine", "engine_label", "model", "voice"],
+      "additionalProperties": false,
+      "properties": {
+        "ready": { "type": "boolean" },
+        "code": {
+          "enum": ["voice_disabled", "missing_key", "restart_required", null]
+        },
+        "sentence": { "type": "string", "minLength": 1 },
+        "engine": { "type": "string" },
+        "engine_label": { "type": "string" },
+        "model": { "type": "string" },
+        "voice": { "type": "string" }
+      }
+    },
+    "accessoryVoiceDevice": {
+      "type": "object",
+      "required": ["device", "accessory_id", "changeable", "sentence"],
+      "additionalProperties": false,
+      "properties": {
+        "device": {
+          "description": "desktop, accessory:<accessory_id>, or unreadable when the choice cannot be read (every call is then refused until the owner chooses again; an app that does not know a value routes no call to this Mac for it).",
+          "oneOf": [{ "$ref": "#/$defs/accessoryVoiceDeviceName" }, { "const": "unreadable" }]
+        },
+        "accessory_id": { "oneOf": [{ "$ref": "#/$defs/accessoryId" }, { "type": "null" }] },
+        "changeable": { "type": "boolean" },
+        "sentence": { "type": ["string", "null"] }
+      }
+    },
+    "accessoryAction": {
+      "enum": [
+        "pair",
+        "pair_begin",
+        "pair_cancel",
+        "retry",
+        "release",
+        "reconnect",
+        "open_install_guide",
+        "update_fermix",
+        "start_call",
+        "select",
+        "check",
+        "calibrate",
+        "forget",
+        "revoke"
+      ]
+    },
+    "accessoryPort": {
+      "type": "object",
+      "required": [
+        "path",
+        "serial",
+        "status",
+        "selected",
+        "accessory_id",
+        "kind",
+        "firmware",
+        "update",
+        "install_guide",
+        "retrying",
+        "sentence",
+        "actions"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "path": { "type": "string" },
+        "serial": { "type": ["string", "null"] },
+        "status": {
+          "enum": [
+            "unrelated",
+            "attaching",
+            "unpaired",
+            "pairing",
+            "attached",
+            "busy",
+            "needs_firmware",
+            "incompatible",
+            "not_paired",
+            "released",
+            "vanished",
+            "failed"
+          ]
+        },
+        "selected": { "type": "boolean" },
+        "accessory_id": { "oneOf": [{ "$ref": "#/$defs/accessoryId" }, { "type": "null" }] },
+        "kind": { "type": ["string", "null"] },
+        "firmware": { "type": ["string", "null"] },
+        "update": { "enum": ["firmware", "fermix", null] },
+        "install_guide": { "type": ["string", "null"] },
+        "retrying": { "type": "boolean" },
+        "sentence": { "type": "string", "minLength": 1 },
+        "actions": { "type": "array", "items": { "$ref": "#/$defs/accessoryAction" } }
+      }
+    },
+    "accessoryRow": {
+      "type": "object",
+      "required": [
+        "accessory_id",
+        "short_id",
+        "name",
+        "kind",
+        "enrolled_at",
+        "connection",
+        "path",
+        "gen",
+        "firmware",
+        "capabilities",
+        "state",
+        "calibration_sentence",
+        "fault",
+        "diag",
+        "check",
+        "selected",
+        "sentence",
+        "actions",
+        "last_call"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "accessory_id": { "$ref": "#/$defs/accessoryId" },
+        "short_id": { "type": "string", "pattern": "^[0-9a-f]{4}( [0-9a-f]{4}){3}$" },
+        "name": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "kind": { "type": "string" },
+        "enrolled_at": { "type": "string" },
+        "connection": {
+          "enum": [
+            "attached",
+            "attaching",
+            "unplugged",
+            "released",
+            "busy",
+            "not_paired",
+            "incompatible",
+            "failed",
+            "off"
+          ]
+        },
+        "path": { "type": ["string", "null"] },
+        "gen": { "type": ["integer", "null"], "minimum": 1 },
+        "firmware": { "type": ["string", "null"] },
+        "capabilities": {
+          "type": "array",
+          "items": { "enum": ["mic", "speaker", "screen", "touch", "pet", "motion", "battery"] }
+        },
+        "state": { "oneOf": [{ "$ref": "#/$defs/accessoryState" }, { "type": "null" }] },
+        "calibration_sentence": { "type": ["string", "null"] },
+        "fault": { "type": ["string", "null"] },
+        "diag": { "oneOf": [{ "$ref": "#/$defs/accessoryDiag" }, { "type": "null" }] },
+        "check": { "oneOf": [{ "$ref": "#/$defs/accessoryCheck" }, { "type": "null" }] },
+        "selected": { "type": "boolean" },
+        "sentence": { "type": "string", "minLength": 1 },
+        "actions": { "type": "array", "items": { "$ref": "#/$defs/accessoryAction" } },
+        "last_call": { "oneOf": [{ "$ref": "#/$defs/accessoryLastCall" }, { "type": "null" }] }
+      }
+    },
+    "accessoryDiag": {
+      "type": "object",
+      "required": [
+        "uptime_s",
+        "frames_rx",
+        "frames_tx",
+        "crc_errors",
+        "resync_bytes",
+        "pcm_seq_gaps",
+        "mic_overflows",
+        "spk_underflows"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "uptime_s": { "type": "integer", "minimum": 0, "maximum": 4294967295 },
+        "frames_rx": { "type": "integer", "minimum": 0, "maximum": 4294967295 },
+        "frames_tx": { "type": "integer", "minimum": 0, "maximum": 4294967295 },
+        "crc_errors": { "type": "integer", "minimum": 0, "maximum": 4294967295 },
+        "resync_bytes": { "type": "integer", "minimum": 0, "maximum": 4294967295 },
+        "pcm_seq_gaps": { "type": "integer", "minimum": 0, "maximum": 4294967295 },
+        "mic_overflows": { "type": "integer", "minimum": 0, "maximum": 4294967295 },
+        "spk_underflows": { "type": "integer", "minimum": 0, "maximum": 4294967295 }
+      }
+    },
+    "accessoryState": {
+      "type": "object",
+      "required": ["battery", "power", "brownout", "volume", "brightness", "motion", "calibration"],
+      "additionalProperties": false,
+      "properties": {
+        "battery": { "type": ["integer", "null"], "minimum": 0, "maximum": 100 },
+        "power": { "enum": ["usb", "battery", "low", "critical"] },
+        "brownout": { "type": "boolean" },
+        "volume": { "type": "integer", "minimum": 0, "maximum": 100 },
+        "brightness": { "type": "integer", "minimum": 0, "maximum": 100 },
+        "motion": { "enum": ["absent", "off", "homing", "ready", "paused", "fault"] },
+        "calibration": { "enum": ["absent", "missing", "valid", "calibrating", "failed"] }
+      }
+    },
+    "accessoryCheck": {
+      "type": "object",
+      "required": ["check", "status", "code", "level"],
+      "additionalProperties": false,
+      "properties": {
+        "check": { "enum": ["tone", "mic", "face", "motion"] },
+        "status": { "enum": ["running", "ok", "fault"] },
+        "code": { "type": ["string", "null"] },
+        "level": { "type": ["integer", "null"], "minimum": 0, "maximum": 32767 }
+      }
+    },
+    "accessoryLastCall": {
+      "type": "object",
+      "required": ["call_id", "reason", "sentence", "ended_at"],
+      "additionalProperties": false,
+      "properties": {
+        "call_id": { "type": ["string", "null"] },
+        "reason": { "type": "string", "pattern": "^[a-z][a-z0-9_]{0,47}$" },
+        "sentence": { "type": "string", "minLength": 1 },
+        "ended_at": { "type": "string" }
+      }
+    },
+    "accessoryPairing": {
+      "type": "object",
+      "required": [
+        "path",
+        "attempt",
+        "round",
+        "max_rounds",
+        "phase",
+        "code",
+        "accessory_confirmed",
+        "owner_confirmed",
+        "closed_reason",
+        "accessory_id",
+        "expires_at",
+        "sentence"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "path": { "type": "string" },
+        "attempt": { "$ref": "#/$defs/accessoryAttempt" },
+        "round": { "type": "integer", "minimum": 1, "maximum": 3 },
+        "max_rounds": { "const": 3 },
+        "phase": { "enum": ["begun", "offered", "revealed", "committing", "done", "closed"] },
+        "code": { "type": ["string", "null"], "pattern": "^[0-9]{6}$" },
+        "accessory_confirmed": { "type": "boolean" },
+        "owner_confirmed": { "type": "boolean" },
+        "closed_reason": {
+          "enum": [
+            "owner",
+            "expired",
+            "mismatch_limit",
+            "invalid_offer",
+            "invalid_reveal",
+            "link_reset",
+            null
+          ]
+        },
+        "accessory_id": { "oneOf": [{ "$ref": "#/$defs/accessoryId" }, { "type": "null" }] },
+        "expires_at": { "type": ["string", "null"] },
+        "sentence": { "type": "string", "minLength": 1 }
+      }
+    },
+    "accessoryCall": {
+      "type": "object",
+      "description": "The robot call that runs. engine, engine_label, model and voice are the ones it started with, never the saved settings.",
+      "required": [
+        "accessory_id",
+        "call_id",
+        "source",
+        "phase",
+        "phase_sentence",
+        "state",
+        "muted",
+        "muted_by",
+        "engine",
+        "engine_label",
+        "model",
+        "voice",
+        "call_uuid",
+        "conversation",
+        "started_at",
+        "transcript",
+        "tasks",
+        "usage"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "accessory_id": { "$ref": "#/$defs/accessoryId" },
+        "call_id": { "$ref": "#/$defs/accessoryCallId" },
+        "source": { "enum": ["screen_tap", "head_swipe", "mac"] },
+        "phase": { "enum": ["starting", "active", "ending"] },
+        "phase_sentence": { "type": ["string", "null"] },
+        "state": {
+          "enum": ["connecting", "listening", "thinking", "speaking", "muted", "reconnecting", null]
+        },
+        "muted": { "type": "boolean" },
+        "muted_by": { "enum": ["mac", "accessory", null] },
+        "engine": { "type": "string" },
+        "engine_label": { "type": "string" },
+        "model": { "type": "string" },
+        "voice": { "type": "string" },
+        "call_uuid": { "type": ["string", "null"] },
+        "conversation": { "enum": ["chat", "private", null] },
+        "started_at": { "type": ["string", "null"] },
+        "transcript": {
+          "type": "array",
+          "maxItems": 6,
+          "items": { "$ref": "#/$defs/accessoryTranscriptLine" }
+        },
+        "tasks": { "type": "array", "maxItems": 8, "items": { "$ref": "#/$defs/accessoryTask" } },
+        "usage": { "oneOf": [{ "$ref": "#/$defs/accessoryUsage" }, { "type": "null" }] }
+      }
+    },
+    "accessoryTranscriptLine": {
+      "type": "object",
+      "required": ["speaker", "text", "final"],
+      "additionalProperties": false,
+      "properties": {
+        "speaker": { "enum": ["user", "assistant"] },
+        "text": { "type": "string", "maxLength": 400 },
+        "final": { "type": "boolean" }
+      }
+    },
+    "accessoryTask": {
+      "type": "object",
+      "required": ["task", "revision", "status", "summary", "in_chat", "cancellable"],
+      "additionalProperties": false,
+      "properties": {
+        "task": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "revision": { "type": "integer", "minimum": 1 },
+        "status": { "enum": ["running", "completed", "failed", "cancelled"] },
+        "summary": { "type": ["string", "null"], "maxLength": 240 },
+        "in_chat": { "type": "boolean" },
+        "cancellable": { "type": "boolean" }
+      }
+    },
+    "accessoryUsage": {
+      "type": "object",
+      "required": ["cost_cents", "voice_seconds", "accounting"],
+      "additionalProperties": false,
+      "properties": {
+        "cost_cents": { "type": ["number", "null"], "minimum": 0 },
+        "voice_seconds": { "type": ["number", "null"], "minimum": 0 },
+        "accounting": { "enum": ["complete", "incomplete", "running", null] }
       }
     },
     "logEntry": {

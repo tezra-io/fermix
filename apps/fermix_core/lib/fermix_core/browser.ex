@@ -4,6 +4,7 @@ defmodule FermixCore.Browser do
   alias FermixCore.Acp.Identity
   alias FermixCore.Browser.Backend
   alias FermixCore.Browser.ChromeLauncher
+  alias FermixCore.Browser.ComputerRoute
   alias FermixCore.Browser.Config
   alias FermixCore.Browser.Error
   alias FermixCore.Browser.ProfileManager
@@ -11,6 +12,7 @@ defmodule FermixCore.Browser do
   alias FermixCore.Browser.Scope
   alias FermixCore.Browser.SignIn
   alias FermixCore.Browser.TurnMarker
+  alias FermixCore.Computers.Computer
   alias FermixCore.Temporal.Access
 
   @actions ~w(doctor status start stop open navigate snapshot tabs focus close screenshot act pdf
@@ -28,6 +30,9 @@ defmodule FermixCore.Browser do
   # form, so they are decided from their arguments in `mutating?/2`.
   @mutating_actions ~w(open navigate act close upload download dialog focus handover)
   @mutating_act_kinds @act_kinds -- ["get", "wait"]
+  # What a profile answers: the tool's profile actions and a sign-in's two
+  # halves (`SignIn`), the requests `serve/6` takes for a server's turn.
+  @served_actions @profile_actions ++ ~w(login_for sign_in)
   # The `act` kinds that fill a form and can send it in the same call
   # (`submit: true`, composed in `run/5`).
   @submitting_kinds ~w(fill_form sign_in)
@@ -77,9 +82,38 @@ defmodule FermixCore.Browser do
   profile was started on, the pane for a call its turn's lost pane refuses, or
   `nil` when the call never reached a profile (a refusal before dispatch,
   `doctor`, `status`).
+
+  A call `Computers.Choice` sent to one of the home's computers (`:computer`
+  in the context, M97 §6.4) keeps this module's own half here (its
+  arguments, a granted tab and a hand-over only on the owner's attended turn,
+  the owner's approval of a sign-in in the chat, a fill that then submits)
+  and sends each request a profile would answer to that computer
+  (`ComputerRoute`), whose browser serves it (`serve/6` there). It says what
+  served it as `{:computer, backend, metadata}`: that computer's browser and
+  what its one exec event carries of the computer (`ComputerRoute.served/2`).
   """
   @spec execute(map(), map()) ::
-          {{:ok, String.t()} | {:error, Error.t()}, Backend.label() | nil}
+          {{:ok, String.t()} | {:error, Error.t()},
+           Backend.label() | {:computer, String.t() | nil, map()} | nil}
+  def execute(args, %{computer: %Computer{} = computer} = context) when is_map(args) do
+    with {:ok, action} <- action(args),
+         {:ok, owner_key} <- Scope.owner_key(context),
+         {:ok, affinity} <- Scope.tab_affinity(context),
+         :ok <- allowed_turn(named_mode(Map.get(args, "profile")), context),
+         :ok <- allowed_handover(action, context),
+         :ok <- validate_args(action, args) do
+      context = Map.put(context, :tab_affinity, affinity)
+      keys = %{owner: owner_key, pane: Scope.pane_key(owner_key, affinity)}
+      call = make_ref()
+      route = ComputerRoute.route(computer, Map.get(args, "profile"), keys, context, call)
+      outcome = run(action, args, context, :computer, route)
+      {encoded(outcome), ComputerRoute.served(computer, call)}
+    else
+      {:error, %Error{} = error} ->
+        {{:error, error}, {:computer, nil, %{computer: computer.device_id}}}
+    end
+  end
+
   def execute(args, context) when is_map(args) and is_map(context) do
     with {:ok, action} <- action(args),
          {:ok, config} <- Config.current(),
@@ -134,6 +168,12 @@ defmodule FermixCore.Browser do
 
   defp allowed_turn(_profile, _context), do: :ok
 
+  # A computer's profiles are that computer's, so here the granted tab is
+  # known by its built-in name; the computer checks its own profile's mode
+  # too (`Computers.Capabilities.Browser`).
+  defp named_mode("selected_tab"), do: %{mode: :attached_tab}
+  defp named_mode(_name), do: %{mode: :computer}
+
   # A tab is kept open for the person only when they are there to finish in it:
   # on any other turn nobody would, and the tab would wait out the profile's
   # idle period for nothing.
@@ -153,19 +193,11 @@ defmodule FermixCore.Browser do
   defp allowed_handover(_action, _context), do: :ok
 
   defp dispatch("doctor", _args, _context, _keys, _profile_name, _profile, config) do
-    {{:ok, encode(%{"ok" => true, "chrome" => chrome_diagnostics(config)})}, nil}
+    {{:ok, encode(doctor(config))}, nil}
   end
 
-  # The profile this conversation is pinned to (its own pane, else the scope's
-  # shared one), read without deciding anything.
   defp dispatch("status", _args, _context, keys, profile_name, _profile, _config) do
-    key =
-      case Routing.live(keys, profile_name) do
-        {live_key, _backend} -> live_key
-        nil -> keys.owner
-      end
-
-    {{:ok, encode(ProfileManager.status(key, profile_name))}, nil}
+    {{:ok, encode(status(keys, profile_name, %{}))}, nil}
   end
 
   # A turn whose pane task lost the Fermix app's browser answers every later
@@ -184,11 +216,7 @@ defmodule FermixCore.Browser do
   defp dispatch_profile(action, args, context, keys, profile_name, profile, config) do
     {profile, backend, key} = Routing.for_request(keys, profile_name, profile, config, context)
     route = &routed(keys.pane, key, profile_name, profile, config, &1)
-
-    case run(action, args, context, profile.mode, route) do
-      {:ok, result} -> {{:ok, encode(result)}, backend}
-      {:error, %Error{} = error} -> {{:error, error}, backend}
-    end
+    {encoded(run(action, args, context, profile.mode, route)), backend}
   end
 
   # A fill that submits is the fill and then `act kind=submit` on a ref of the
@@ -281,6 +309,70 @@ defmodule FermixCore.Browser do
       nil -> ProfileManager.dispatch(key, profile_name, profile, config, request)
     end
   end
+
+  @doc """
+  Serve one request of a server's turn on this engine's own browser (M97
+  §6.4): the request a profile answers (`:action`, `:args`, `:context`,
+  `:mutating`), as the server's `ComputerRoute` sent it, for the
+  conversation whose keys are `keys` and the profile `profile_name` of this
+  engine's configuration. The same steps a call here takes once it is
+  checked: a turn whose pane was lost answers that loss, `Routing` pins the
+  conversation's live profile or decides afresh, and `ProfileManager` runs it
+  on that profile's backend. `doctor` and `status` read as they do here.
+
+  It runs in the process that stands for the server's turn
+  (`Browser.HeldTurn`), which a pane task binds to and a lost pane marks.
+  `seams` may carry `:routing` (`Routing.for_request/6`'s options),
+  `:manager` (`ProfileManager.dispatch/6`'s) and `:turn_marker`.
+  """
+  @spec serve(map(), Routing.keys(), String.t(), Config.profile(), Config.t(), map()) ::
+          {{:ok, map()} | {:error, Error.t()}, Backend.label() | nil}
+  def serve(request, keys, profile_name, profile, config, seams \\ %{})
+
+  def serve(%{action: "doctor"}, _keys, _profile_name, _profile, %Config{} = config, seams)
+      when is_map(seams),
+      do: {{:ok, doctor(config)}, nil}
+
+  def serve(%{action: "status"}, keys, profile_name, _profile, %Config{}, seams)
+      when is_map(seams),
+      do: {{:ok, status(keys, profile_name, seams)}, nil}
+
+  def serve(%{action: action} = request, keys, profile_name, profile, %Config{} = config, seams)
+      when action in @served_actions and is_map_key(request, :mutating) and is_map(seams) do
+    marker = Map.get(seams, :turn_marker, TurnMarker)
+
+    case TurnMarker.lookup(marker, keys.pane, self()) do
+      %Error{} = lost ->
+        {{:error, lost}, :fermix_app}
+
+      nil ->
+        routing = Map.get(seams, :routing, [])
+        context = request.context
+
+        {profile, backend, key} =
+          Routing.for_request(keys, profile_name, profile, config, context, routing)
+
+        manager = Map.get(seams, :manager, [])
+        {ProfileManager.dispatch(key, profile_name, profile, config, request, manager), backend}
+    end
+  end
+
+  # The profile this conversation is pinned to (its own pane, else the scope's
+  # shared one), read without deciding anything.
+  defp status(keys, profile_name, seams) do
+    key =
+      case Routing.live(keys, profile_name, Map.get(seams, :routing, [])) do
+        {live_key, _backend} -> live_key
+        nil -> keys.owner
+      end
+
+    ProfileManager.status(key, profile_name, Map.get(seams, :manager, []))
+  end
+
+  defp doctor(config), do: %{"ok" => true, "chrome" => chrome_diagnostics(config)}
+
+  defp encoded({:ok, result}), do: {:ok, encode(result)}
+  defp encoded({:error, %Error{}} = failed), do: failed
 
   defp action(%{"action" => action}) when action in @actions, do: {:ok, action}
 

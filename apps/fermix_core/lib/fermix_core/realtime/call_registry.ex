@@ -1,20 +1,22 @@
 defmodule FermixCore.Realtime.CallRegistry do
   @moduledoc """
-  Where the Live call in progress is found (M56 §4.2 and §4.8).
+  Where the task-engine call in progress is found (M56 §4.2).
 
   One unique-key `Registry` under `Realtime.Supervisor`, started before any
-  session. A `LiveSessionServer` registers in it from `init/1`, under two keys:
+  session. A `LiveSessionServer` or `GrokSessionServer` registers in it from
+  `init/1`, under two keys:
 
     * its `call_uuid`, the call's durable identity, so Core code can reach the
       call without naming a Channels module (the meetings precedent);
-    * the one-call claim, an atom key every Live session competes for. A unique
-      key is taken with one `:ets.insert_new/2`, so of two connections starting
-      a call at once exactly one wins, and the other is refused before its
-      session exists.
+    * the claim, an atom key naming the call's chat context.
+
+  Admission is not decided here: every engine session first takes the home's
+  one `CallLease`, so only the session holding it ever claims, and a claim that
+  is already held is a defect that fails loud.
 
   Both keys belong to the session process and last exactly as long as it does:
-  through its settle, so a call still settling counts, and no longer, however it
-  ends. A crashed session releases them with no code of its own.
+  through its settle, and no longer, however it ends. A crashed session
+  releases them with no code of its own.
 
   The claim carries what a reader of the call in progress needs without asking
   the session: its UUID, its `conversation` (`"chat"` or `"private"`, M56 §5),
@@ -38,21 +40,20 @@ defmodule FermixCore.Realtime.CallRegistry do
   end
 
   @doc """
-  Claims the daemon's one call for the calling process and registers its UUID.
+  Claims the call in progress for the calling process and registers its UUID.
 
-  `{:error, :call_in_progress}` while another process holds the claim.
+  The caller holds the home's `CallLease`, so no other process holds the
+  claim: one that does is a defect, and the match fails loud.
   """
-  @spec claim(registry(), call()) :: :ok | {:error, :call_in_progress}
+  @spec claim(registry(), call()) :: :ok
   def claim(
         registry,
         %{call_uuid: call_uuid, conversation: conversation, started_at: %DateTime{}} = call
       )
       when is_atom(registry) and is_binary(call_uuid) and call_uuid != "" and
              conversation in ["chat", "private"] do
-    case Registry.register(registry, @claim_key, call) do
-      {:ok, _owner} -> register_call(registry, call_uuid)
-      {:error, {:already_registered, _holder}} -> {:error, :call_in_progress}
-    end
+    {:ok, _owner} = Registry.register(registry, @claim_key, call)
+    register_call(registry, call_uuid)
   end
 
   # `Registry.lookup/2` still answers with an owner that has exited until the

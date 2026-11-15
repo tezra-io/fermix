@@ -3,6 +3,10 @@ defmodule FermixCore.CommandRunnerTest do
 
   alias FermixCore.CommandRunner
 
+  # The timeout of a run whose child reads its stdin: a hang guard (AGENTS.md,
+  # "Tests under load"), never how long such a run takes.
+  @stdin_hang_guard_ms 10_000
+
   setup do
     sh = System.find_executable("sh") || "/bin/sh"
     %{sh: sh}
@@ -53,10 +57,39 @@ defmodule FermixCore.CommandRunnerTest do
              )
   end
 
+  # A child given no `:input` reads end of file from /dev/null. A port's own
+  # stdin is a pipe it holds open and never writes, so a child that read it
+  # waited out its whole timeout (seen on a server: the shell tool's
+  # `cat; echo …` ran 30 s and printed nothing). The timeout only guards a hang:
+  # a run that gets end of file returns the moment the child exits.
+  describe "with no :input" do
+    for supervised <- [true, false] do
+      test "a child that reads its stdin gets end of file from /dev/null (supervised: #{supervised})",
+           %{sh: sh} do
+        script = ~s(read line; echo "got:$line"; [ /dev/stdin -ef /dev/null ] && echo dev-null)
+
+        assert {:ok, %{exit: 0, stdout: "got:\ndev-null\n", truncated?: false}} =
+                 CommandRunner.run(sh, ["-c", script],
+                   supervised: unquote(supervised),
+                   timeout_ms: @stdin_hang_guard_ms
+                 )
+      end
+    end
+
+    test "a program that reads its stdin to the end, run directly, exits at once" do
+      cat = System.find_executable("cat") || "/bin/cat"
+
+      assert {:ok, %{exit: 0, stdout: "", truncated?: false}} =
+               CommandRunner.run(cat, [], timeout_ms: @stdin_hang_guard_ms)
+    end
+  end
+
   # M45 §4.6: a sandboxed command's environment is a replacement, never an
   # overlay. The child gets exactly the list it was handed; everything the
   # daemon inherited and the list does not name is unset, on both spawn paths,
-  # because both build their port options in one place.
+  # because both build their port options in one place. The one addition is the
+  # stdin shell's own bookkeeping (`@shell_env`), which is no value of the
+  # daemon's.
   describe "env_mode: :replace" do
     setup do
       name = "FERMIX_RUNNER_PARENT_ONLY_#{System.unique_integer([:positive])}"
@@ -149,6 +182,25 @@ defmodule FermixCore.CommandRunnerTest do
       assert {:error, {:executable_not_found, ^path}} = CommandRunner.run(path, [], input: "x")
     end
 
+    # The child runs through `/bin/sh`'s exec, which would run for any path
+    # that exists and answer the shell's "Permission denied" with exit 126:
+    # a path that is not a file this user can run is refused by its own path,
+    # as a missing one is, before any input file is written.
+    test "a file it cannot run, and a directory, are refused by their own paths" do
+      dir = FermixTestSupport.SafeRm.make_tmp_dir!("command-runner-not-runnable")
+      on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(dir) end)
+      plain = Path.join(dir, "not-executable")
+      File.write!(plain, "#!/bin/sh\necho ran\n")
+      File.chmod!(plain, 0o644)
+
+      assert {:error, {:executable_not_found, ^plain}} = CommandRunner.run(plain, [], input: "x")
+      assert {:error, {:executable_not_found, ^dir}} = CommandRunner.run(dir, [], input: "x")
+
+      # The plain path, with no input, keeps the same rule: one check for all.
+      assert {:error, {:executable_not_found, ^plain}} = CommandRunner.run(plain, [])
+      assert {:error, {:executable_not_found, ^dir}} = CommandRunner.run(dir, [])
+    end
+
     test "a child that never reads still times out and is killed", %{sh: sh} do
       assert {:error, {:timeout, 300}} =
                CommandRunner.run(sh, ["-c", "sleep 5"], input: "ignored", timeout_ms: 300)
@@ -181,9 +233,16 @@ defmodule FermixCore.CommandRunnerTest do
       assert merged =~ "late"
     end
 
-    test "stderr: :discard needs :input, and stderr takes only :stdout or :discard", %{sh: sh} do
+    # Every child runs through the stdin shell, so its redirection needs no input.
+    test "stderr: :discard needs no :input, and stderr takes only :stdout or :discard", %{sh: sh} do
+      assert {:ok, %{exit: 0, stdout: "out\n"}} =
+               CommandRunner.run(sh, ["-c", "echo out; echo err 1>&2"],
+                 stderr: :discard,
+                 timeout_ms: 5_000
+               )
+
       assert_raise ArgumentError, ~r/:stderr/, fn ->
-        CommandRunner.run(sh, ["-c", "true"], stderr: :discard)
+        CommandRunner.run(sh, ["-c", "true"], stderr: :file)
       end
 
       assert_raise ArgumentError, ~r/:stderr/, fn ->
@@ -299,6 +358,10 @@ defmodule FermixCore.CommandRunnerTest do
   @poll_max 50
   @poll_ms 100
 
+  # What the stdin shell (`/bin/sh`, then `exec`) sets for itself: dash `PWD`,
+  # bash as sh `PWD` and `SHLVL`, bash `_` too.
+  @shell_env ~w(PWD SHLVL _)
+
   # `env` prints NAME=value lines; a value never spans lines in these fixtures.
   defp env_pairs(out) do
     out
@@ -306,7 +369,14 @@ defmodule FermixCore.CommandRunnerTest do
     |> Enum.map(&List.to_tuple(String.split(&1, "=", parts: 2)))
   end
 
-  defp env_names(out), do: out |> env_pairs() |> Enum.map(&elem(&1, 0)) |> Enum.sort()
+  # The names the child was handed, the shell's own left out.
+  defp env_names(out) do
+    out
+    |> env_pairs()
+    |> Enum.map(&elem(&1, 0))
+    |> Enum.reject(&(&1 in @shell_env))
+    |> Enum.sort()
+  end
 
   defp env_value(out, name) do
     case List.keyfind(env_pairs(out), name, 0) do

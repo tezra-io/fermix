@@ -1,13 +1,17 @@
 defmodule FermixChannels.Desktop.SnapshotTarget do
   @moduledoc """
   The desktop snapshot target (M75 §8, D19): the primary keeps a copy of each
-  snapshot it writes on every desktop connected to it over the rail, beside
-  the S3 copy.
+  snapshot it writes on every connected desktop that keeps the home's backup
+  copies, beside the S3 copy. A computer's row says whether it does (M97 D7,
+  `backups`): the computer the home moved from does, a computer that joined
+  later does not unless its owner chose it, and a row from before the flag
+  existed does.
 
   `FermixCore.Home.Snapshot.Scheduler` writes the encrypted snapshot once and
   hands it to each target (`FermixCore.Home.Snapshot.Target`); this one is
   registered by module (`config :fermix_core, :snapshot_targets`), so core
-  never names it. It is on while the primary has a desktop row.
+  never names it. It is on while the primary has a desktop row that keeps
+  copies.
 
   `store/3` streams the file, never whole in memory, to each connected
   desktop: `snapshot_begin` (name, size and SHA-256), the bytes as
@@ -63,7 +67,7 @@ defmodule FermixChannels.Desktop.SnapshotTarget do
   @impl true
   def store(%{path: path, name: name, size: size, sha256: sha256}, settings, opts)
       when is_binary(path) and is_list(opts) do
-    rows = Keyword.get(opts, :desktop_rows, &desktop_rows/0).()
+    rows = Enum.filter(Keyword.get(opts, :desktop_rows, &desktop_rows/0).(), &keeps_copies?/1)
     registry = Keyword.get(opts, :desktop_peers, FermixChannels.Desktop.Peers)
     opts = Keyword.put(opts, :desktop_peers, registry)
     connected = connected_ids(registry)
@@ -270,14 +274,22 @@ defmodule FermixChannels.Desktop.SnapshotTarget do
       else: MapSet.new()
   end
 
-  # The primary's desktop rows, from the running trust store; none where the
-  # phone channel does not run (no desktop could connect there).
+  # A row that does not say keeps copies, as every computer did before the
+  # flag (M97 D7).
+  defp keeps_copies?(row), do: Map.get(row, :backups) != false
+
+  # The primary's desktop rows that keep copies, from the running trust
+  # store; none where the phone channel does not run (no desktop could
+  # connect there).
   defp desktop_rows do
     if GenServer.whereis(DeviceStore), do: desktops_in(DeviceStore.list(DeviceStore)), else: []
   end
 
-  defp desktops_in({:ok, rows}),
-    do: for(%{kind: :desktop} = row <- rows, do: %{device_id: row.device_id, name: row.name})
+  defp desktops_in({:ok, rows}) do
+    for %{kind: :desktop} = row <- rows,
+        keeps_copies?(row),
+        do: %{device_id: row.device_id, name: row.name, backups: row.backups}
+  end
 
   defp desktops_in({:error, reason}) do
     Logger.error("desktop snapshot: the trust store could not be read: #{inspect(reason)}")

@@ -66,14 +66,16 @@ defmodule FermixCore.Cues.Source.Feed do
   and X's answer is read whole as JSON. Watching starts at the first poll
   with a sign-in: that is when `start_time` is stamped. X refusing the token
   (401) gets one refresh (`:token_refresher`) and one more request in the same
-  poll. No sign-in (no X plugin, X switched off, no token, a token server that
-  does not answer, a refresh that fails) and a second 401 set the row to
-  `auth_failed` with `stop_reason` `x_sign_in`, tell the owner once
-  (`:auth_failed`), and are checked again on the same backoff without counting
-  toward the eighth failure, so connecting X starts the source with no save;
-  the wait writes no cursor. Any other refusal (a 403 or 429 among them) is an
-  ordinary failure, X's own `title` and `detail` going to the log only, and
-  one that ends a sign-in wait sets the row back to `polling`.
+  poll. No sign-in (no X plugin, X switched off, no token, a refresh that
+  fails) and a second 401 set the row to `auth_failed` with `stop_reason`
+  `x_sign_in`, tell the owner once (`:auth_failed`), and are checked again on
+  the same backoff without counting toward the eighth failure, so connecting X
+  starts the source with no save; the wait writes no cursor. A token server
+  that does not answer (it is busy with a refresh, or restarting) is no
+  missing sign-in: it is an ordinary failure, told to nobody. Any other
+  refusal (a 403 or 429 among them) is an ordinary failure too, X's own
+  `title` and `detail` going to the log only, and one that ends a sign-in wait
+  sets the row back to `polling`.
 
   The process's printed state (a crash report, `:sys.get_status/1`) names the
   source by ref, never its URL or secrets.
@@ -224,6 +226,11 @@ defmodule FermixCore.Cues.Source.Feed do
       {:error, reason} -> fetch_failed(state, reason, now)
     end
   end
+
+  # A token server that does not answer (busy with a refresh, or restarting)
+  # says nothing about the sign-in: an ordinary failed poll.
+  defp fetch_failed(state, {:x_sign_in, {:token_server_unavailable, _kind} = reason}, now),
+    do: failed(state, reason, now)
 
   defp fetch_failed(state, {:x_sign_in, reason}, now), do: sign_in_failed(state, reason, now)
   defp fetch_failed(state, reason, now), do: failed(state, reason, now)

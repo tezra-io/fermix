@@ -263,6 +263,7 @@ defmodule FermixCore.Agents.AgentServer do
       allowed_tools: definition.allowed_tools,
       policy: definition.policy,
       trust: definition.trust,
+      own_plugin: definition.own_plugin,
       max_iterations: definition.max_iterations,
       context: tool_context,
       capability_registry: capability_registry

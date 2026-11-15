@@ -186,8 +186,17 @@ defmodule FermixCore.Realtime.OpenAILiveClient do
     {event_id, append_event("session.thinking.append", event_id, delegation_id, content)}
   end
 
-  @doc "A delegation result worth speaking aloud."
-  @spec commentary_append_event(String.t(), String.t(), String.t()) :: {String.t(), map()}
+  @doc """
+  Something worth speaking aloud: a delegation's result, or, with a `nil`
+  delegation id, the greeting a call opens with (M96 §4.3, OpenAI's *Greeting
+  the caller*); `nil` is encoded as JSON `null`.
+  """
+  @spec commentary_append_event(String.t(), String.t() | nil, String.t()) :: {String.t(), map()}
+  def commentary_append_event(event_id, nil, content)
+      when is_binary(event_id) and is_binary(content) do
+    {event_id, append_event("session.commentary.append", event_id, nil, content)}
+  end
+
   def commentary_append_event(event_id, delegation_id, content)
       when is_binary(event_id) and is_binary(delegation_id) and is_binary(content) do
     {event_id, append_event("session.commentary.append", event_id, delegation_id, content)}

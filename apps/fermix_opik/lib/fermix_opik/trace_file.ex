@@ -149,7 +149,18 @@ defmodule FermixOpik.TraceFile do
        :policy_enforcement,
        :validator,
        :mandate_call_id,
-       :mandate_reason
+       :mandate_reason,
+       # An invocation on a linked computer (M97 §6.2): the computer, the
+       # invocation, how it ended and why it was refused. Its run is a root on
+       # the computer's own trace, so these are the only link from a replayed
+       # turn to it. Ids and closed words — never the target or the arguments.
+       # A call the home refused before sending anything names why
+       # (`computer_refusal`, `Computers.Choice`).
+       :computer,
+       :invocation,
+       :invoke_status,
+       :refusal,
+       :computer_refusal
      ])}
   end
 
@@ -312,6 +323,23 @@ defmodule FermixOpik.TraceFile do
     {[:fermix, :voice_live, :call_stop], voice_live_usage_measurements(row), voice_live_meta(row)}
   end
 
+  defp normalize_agent_event("voice_live_phone_detached", row) do
+    {[:fermix, :voice_live, :phone_detached], voice_live_usage_measurements(row),
+     voice_live_meta(row)}
+  end
+
+  defp normalize_agent_event("voice_live_phone_resumed", row) do
+    {[:fermix, :voice_live, :phone_resumed], voice_live_usage_measurements(row),
+     voice_live_meta(row)}
+  end
+
+  # An accessory call's link counters (M91), under the call's session id. The
+  # emitter's closed counter list is carried as the numbers the row holds.
+  defp normalize_agent_event("accessory_call_link", row) do
+    {[:fermix, :accessory, :call_link], accessory_counters(row),
+     meta(row, [:session_id, :endpoint, :engine, :source, :reason])}
+  end
+
   # A management Doctor run (M34 §5). Counts only — a check summary can name an
   # operator path, so no summary or evidence text is replayed.
   defp normalize_agent_event("doctor_session_start", row) do
@@ -377,7 +405,43 @@ defmodule FermixOpik.TraceFile do
     {[:fermix, :computer_use, :session_resume], %{}, computer_use_meta(row)}
   end
 
+  # An invocation's run on the computer (M97 §6.2). One allowlist for the three
+  # rows, `parent_session` included: the run is its own root and that field is
+  # the only record of which turn on the server asked. The opener's
+  # `duration_ms` is a placeholder zero, so it replays no measurement.
+  defp normalize_agent_event("computer_invocation_start", row) do
+    {[:fermix, :computer_invocation, :start], %{}, invocation_meta(row)}
+  end
+
+  defp normalize_agent_event("computer_invocation_complete", row) do
+    {[:fermix, :computer_invocation, :complete], invocation_measurements(row),
+     invocation_meta(row)}
+  end
+
+  defp normalize_agent_event("computer_invocation_error", row) do
+    {[:fermix, :computer_invocation, :error], invocation_measurements(row), invocation_meta(row)}
+  end
+
   defp normalize_agent_event(_other, _row), do: :skip
+
+  @accessory_counters ~w(duration_ms mic_frames mic_chunks pcm_seq_gaps speaker_frames
+                         speaker_bytes segments flushes credit_waits backlog_peak_bytes
+                         speaker_bytes_dropped task_events task_faults mic_frames_before_live
+                         interrupts interrupt_played_ms_last interrupt_played_ms_total
+                         robot_uptime_s robot_frames_rx robot_frames_tx robot_crc_errors
+                         robot_resync_bytes robot_pcm_seq_gaps robot_mic_overflows
+                         robot_spk_underflows mic_rms_max mic_rms_mean mic_chunks_silent
+                         robot_mic_rms robot_mic_peak robot_ref_rms robot_ref_peak robot_out_rms
+                         robot_out_peak)a
+
+  defp accessory_counters(row) do
+    Enum.reduce(@accessory_counters, %{}, fn key, acc ->
+      case Map.fetch(row, Atom.to_string(key)) do
+        {:ok, value} when is_integer(value) -> Map.put(acc, key, value)
+        _other -> acc
+      end
+    end)
+  end
 
   defp computer_use_meta(row) do
     meta(row, [:session_id, :parent_session, :agent, :mode, :origin])
@@ -387,6 +451,20 @@ defmodule FermixOpik.TraceFile do
   # the measurements existed must replay with none rather than a fabricated zero.
   defp computer_use_measurements(row) do
     Enum.reduce([:actions, :duration_ms], %{}, fn key, acc ->
+      case Map.fetch(row, Atom.to_string(key)) do
+        {:ok, value} when is_number(value) -> Map.put(acc, key, value)
+        _other -> acc
+      end
+    end)
+  end
+
+  defp invocation_meta(row) do
+    meta(row, [:session_id, :parent_session, :capability, :op, :origin, :epoch, :status, :refusal])
+  end
+
+  # Only the counts the row holds: a missing one replays as unknown, not zero.
+  defp invocation_measurements(row) do
+    Enum.reduce([:duration_ms, :result_bytes], %{}, fn key, acc ->
       case Map.fetch(row, Atom.to_string(key)) do
         {:ok, value} when is_number(value) -> Map.put(acc, key, value)
         _other -> acc
@@ -412,6 +490,7 @@ defmodule FermixOpik.TraceFile do
       :engine,
       :provider,
       :device_id,
+      :endpoint,
       :model,
       :voice,
       :provider_session_id,
@@ -456,7 +535,19 @@ defmodule FermixOpik.TraceFile do
   end
 
   defp realtime_meta(row) do
-    meta(row, [:session_id, :agent, :device_id, :model, :voice, :session_scope, :reason, :attempt])
+    meta(row, [
+      :session_id,
+      :agent,
+      :device_id,
+      :endpoint,
+      :model,
+      :voice,
+      :session_scope,
+      :reason,
+      :attempt,
+      :kept_lines,
+      :kept_lines_reason
+    ])
   end
 
   # Rebuild the call's final usage measurements from a flattened `call_stop` row.

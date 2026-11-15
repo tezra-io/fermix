@@ -129,6 +129,21 @@ defmodule FermixCore.Realtime.OpenAILiveClientTest do
              }
     end
 
+    # M96 §4.3, OpenAI's *Greeting the caller*: the greeting is a commentary
+    # with a present null delegation id.
+    test "a commentary for no delegation carries a present null delegation id" do
+      assert {"ev_9", event} = OpenAILiveClient.commentary_append_event("ev_9", nil, "Greet.")
+
+      assert event == %{
+               type: "session.commentary.append",
+               event_id: "ev_9",
+               delegation_id: nil,
+               content: "Greet."
+             }
+
+      assert Jason.encode!(event) =~ ~s("delegation_id":null)
+    end
+
     # Session-wide quiet context, the typed-message mirror (M56 §4.3).
     test "a thinking append for the whole session carries a present null delegation id" do
       assert {"ev_8", event} =

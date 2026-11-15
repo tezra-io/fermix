@@ -173,7 +173,7 @@ defmodule FermixChannels.Desktop.TunnelTest do
 
   test "history, an approval card and the hello's epoch are the primary's", ctx do
     client = connect(ctx.socket)
-    send_line(client, %{"type" => "client_hello", "protocol_version" => 6, "primary_epoch" => 2})
+    send_line(client, %{"type" => "client_hello", "protocol_version" => 7, "primary_epoch" => 2})
 
     assert %{"type" => "server_hello", "role" => "primary", "primary_epoch" => 3} = recv(client)
 
@@ -194,7 +194,7 @@ defmodule FermixChannels.Desktop.TunnelTest do
   test "a client that has seen a later primary is refused by the primary, through the tunnel",
        ctx do
     client = connect(ctx.socket)
-    send_line(client, %{"type" => "client_hello", "protocol_version" => 6, "primary_epoch" => 9})
+    send_line(client, %{"type" => "client_hello", "protocol_version" => 7, "primary_epoch" => 9})
     assert %{"type" => "error", "reason" => "stale_primary"} = recv(client)
     assert closed?(client)
   end
@@ -401,9 +401,9 @@ defmodule FermixChannels.Desktop.TunnelTest do
     test "the app hears this desktop's notice after the primary's hello, never the primary's",
          ctx do
       client = connect(ctx.socket)
-      send_line(client, %{"type" => "client_hello", "protocol_version" => 6})
+      send_line(client, %{"type" => "client_hello", "protocol_version" => 7})
 
-      assert %{"type" => "server_hello", "role" => "primary", "max_version" => 7} = recv(client)
+      assert %{"type" => "server_hello", "role" => "primary", "max_version" => 8} = recv(client)
       assert recv(client) == %{"type" => "home_status_changed"}
 
       # Read once when the tunnel joined, once more for the primary's own
@@ -428,15 +428,15 @@ defmodule FermixChannels.Desktop.TunnelTest do
       assert recv(client) == %{"type" => "home_status_changed"}
     end
 
-    # Version 5 is outside the primary's window: the primary refuses it, and
-    # the tunnel, which watches only for an app on version 6 or later, never
-    # read this desktop's summary for it.
-    test "a version 5 app is refused by the primary through the tunnel, and this desktop reads nothing",
+    # Version 6 is outside the primary's window: the primary refuses it, and
+    # the tunnel, which watches for an app on version 6 or later once the
+    # primary's hello comes back, never read this desktop's summary for it.
+    test "a version 6 app is refused by the primary through the tunnel, and this desktop reads nothing",
          ctx do
       client = connect(ctx.socket)
-      send_line(client, %{"type" => "client_hello", "protocol_version" => 5})
+      send_line(client, %{"type" => "client_hello", "protocol_version" => 6})
 
-      assert %{"type" => "error", "reason" => "unsupported_protocol_version", "min_version" => 6} =
+      assert %{"type" => "error", "reason" => "unsupported_protocol_version", "min_version" => 7} =
                recv(client)
 
       assert closed?(client)
@@ -652,7 +652,7 @@ defmodule FermixChannels.Desktop.TunnelTest do
 
   defp hello(path) do
     client = connect(path)
-    send_line(client, %{"type" => "client_hello", "protocol_version" => 6})
+    send_line(client, %{"type" => "client_hello", "protocol_version" => 7})
     assert %{"type" => "server_hello", "role" => "primary"} = recv(client)
     client
   end

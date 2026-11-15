@@ -12,6 +12,7 @@ defmodule FermixChannels.Mobile.SupervisorTest do
   alias FermixChannels.Mobile.Management
   alias FermixChannels.Mobile.RequestCoordinator
   alias FermixChannels.Mobile.Supervisor, as: MobileSupervisor
+  alias FermixCore.Home.Candidate
   alias FermixCore.Setup.SecretWriter
   alias FermixTestSupport.SafeRm
 
@@ -39,6 +40,13 @@ defmodule FermixChannels.Mobile.SupervisorTest do
 
     assert Enum.find_index(ids, &(&1 == instance_names.request_coordinator)) <
              Enum.find_index(ids, &(&1 == Listener))
+
+    # A phone's session finds its call, or starts one, before any carrier
+    # takes a phone (M87).
+    for call_child <- [instance_names.calls, instance_names.call_supervisor] do
+      assert Enum.find_index(ids, &(&1 == call_child)) <
+               Enum.find_index(ids, &(&1 == Listener))
+    end
 
     # Sockets read their candidates from the discovery cache.
     assert Enum.find_index(ids, &(&1 == FermixChannels.Mobile.Discovery)) <
@@ -82,6 +90,24 @@ defmodule FermixChannels.Mobile.SupervisorTest do
         ] do
       children = init_children(config: config)
       assert child_opts(children, FermixChannels.Mobile.MdnsAdvertiser)[:enabled] == enabled?
+    end
+  end
+
+  # EC2 test 2026-11-08: a server that took a Mac's home announced Fermix on
+  # its VPC interface, since the Mac's settings turned the announcement on.
+  # An Always On server is no LAN host. It knows it is one by the mark its
+  # enrollment left, which stays on the machine through the move
+  # (`Home.Candidate.server?/1`, as the fixed port 4033 reads it), so it
+  # announces nothing whatever the settings say.
+  test "an Always On server announces nothing, whatever its settings say" do
+    root = SafeRm.make_tmp_dir!("mobile-server-mdns")
+    on_exit(fn -> SafeRm.rm_rf!(root) end)
+    File.mkdir_p!(Path.join(root, "device"))
+    File.write!(Candidate.server_path(root), "{}")
+
+    for config <- [[advertise_mdns: true], [advertise_mdns: false], []] do
+      children = init_children(root: root, config: config)
+      assert child_opts(children, FermixChannels.Mobile.MdnsAdvertiser)[:enabled] == false
     end
   end
 
@@ -255,17 +281,41 @@ defmodule FermixChannels.Mobile.SupervisorTest do
     assert Enum.find_index(ids, &(&1 == instance_names.push_dispatcher)) <
              Enum.find_index(ids, &(&1 == Listener))
 
-    # The sessions on either carrier tell a phone the service this daemon has.
-    assert router_opts(children)[:push_services] == ["apns"]
-    assert iroh_session_opts(children)[:push_services] == ["apns"]
+    # The sessions on either carrier tell a phone the services this daemon
+    # has: APNs, and the relay's fcm, which every phone channel has (M99 §14).
+    assert router_opts(children)[:push_services] == ["apns", "fcm"]
+    assert iroh_session_opts(children)[:push_services] == ["apns", "fcm"]
   end
 
-  test "with push off, sessions say this daemon pushes through nothing" do
+  # M99 §14: Android push through the relay needs no process, key or setting,
+  # so APNs off leaves it the one service.
+  test "with APNs off, sessions say this daemon pushes through the relay alone" do
     children =
       init_children(config: [advertise_mdns: false, push: [enabled: false]], names: names())
 
-    assert router_opts(children)[:push_services] == []
-    assert iroh_session_opts(children)[:push_services] == []
+    assert router_opts(children)[:push_services] == ["fcm"]
+    assert iroh_session_opts(children)[:push_services] == ["fcm"]
+  end
+
+  # A running subtree hands every session on either carrier the relay's fcm,
+  # and its start writes nothing of push into the home: there is no key.
+  test "a started channel tells every session fcm, and makes no key of the home's own" do
+    opts = switch_opts(names(), fn -> true end)
+    root = Keyword.fetch!(opts, :root)
+
+    assert {:ok, supervisor} = MobileSupervisor.start_link(opts)
+    on_exit(fn -> if Process.alive?(supervisor), do: Process.exit(supervisor, :shutdown) end)
+
+    children =
+      for id <- [Listener, Iroh] do
+        {:ok, spec} = :supervisor.get_childspec(supervisor, id)
+        spec
+      end
+
+    assert "fcm" in router_opts(children)[:push_services]
+    assert router_opts(children)[:push_services] == iroh_session_opts(children)[:push_services]
+    refute Keyword.has_key?(router_opts(children), :web_push_key)
+    refute File.exists?(Path.join([root, "mobile", "webpush_key"]))
   end
 
   test "disabled push starts no dispatcher" do
@@ -303,10 +353,10 @@ defmodule FermixChannels.Mobile.SupervisorTest do
       refute instance_names.push_dispatcher in ids
       assert Listener in ids
       assert Iroh in ids
-      assert router_opts(children)[:push_services] == []
-      assert iroh_session_opts(children)[:push_services] == []
+      assert router_opts(children)[:push_services] == ["fcm"]
+      assert iroh_session_opts(children)[:push_services] == ["fcm"]
       assert log =~ "[error]"
-      assert log =~ "Mobile started WITHOUT push"
+      assert log =~ "Mobile started WITHOUT push to iPhones"
       assert log =~ reason
     end
   end
@@ -344,7 +394,7 @@ defmodule FermixChannels.Mobile.SupervisorTest do
     ids = Enum.map(children, & &1.id)
     refute instance_names.push_dispatcher in ids
     assert Listener in ids
-    assert router_opts(children)[:push_services] == []
+    assert router_opts(children)[:push_services] == ["fcm"]
     assert log =~ "Mobile started WITHOUT push"
     assert log =~ "{:invalid_push_config, :key, :invalid_pem}"
     refute log =~ "not a key"
@@ -722,7 +772,9 @@ defmodule FermixChannels.Mobile.SupervisorTest do
       bridge_connections: Module.concat(__MODULE__, "BridgeConnections#{suffix}"),
       desktop: Module.concat(__MODULE__, "Desktop#{suffix}"),
       desktop_peers: Module.concat(__MODULE__, "DesktopPeers#{suffix}"),
-      desktop_peer_supervisor: Module.concat(__MODULE__, "DesktopPeerSupervisor#{suffix}")
+      desktop_peer_supervisor: Module.concat(__MODULE__, "DesktopPeerSupervisor#{suffix}"),
+      calls: Module.concat(__MODULE__, "Calls#{suffix}"),
+      call_supervisor: Module.concat(__MODULE__, "CallSupervisor#{suffix}")
     }
   end
 

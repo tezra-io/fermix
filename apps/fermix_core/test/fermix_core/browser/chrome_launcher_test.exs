@@ -180,6 +180,18 @@ defmodule FermixCore.Browser.ChromeLauncherTest do
       assert "--disable-features=Translate,MediaRouter" in args
     end
 
+    # `--remote-debugging-port=0`, the port an `:auto` profile asks for, makes
+    # Chrome report `navigator.webdriver` true to every page, and Google sign-in
+    # refuses a browser that reports it ("This browser or app may not be
+    # secure"), as bot walls do. The port sets it, headless or not.
+    test "does not let a page see the browser as automated" do
+      for headless <- [true, false] do
+        args = ChromeLauncher.launch_args(@dir, 0, headless)
+
+        assert "--disable-blink-features=AutomationControlled" in args
+      end
+    end
+
     # Reuse detection matches the --user-data-dir TOKEN, so a flag added to the
     # list must not shift what that comparison sees.
     test "leaves the user-data-dir token reuse detection matches" do

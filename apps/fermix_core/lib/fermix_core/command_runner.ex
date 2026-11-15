@@ -4,7 +4,9 @@ defmodule FermixCore.CommandRunner do
 
   Owns the OS child via `Port.open/2`, caps captured output, enforces a
   wall-clock timeout, and on timeout sends SIGTERM and SIGKILL to the
-  child process so it cannot outlive the BEAM task that started it.
+  child process so it cannot outlive the BEAM task that started it. Every
+  child's standard input is a file, then end of file: `/dev/null`, or the
+  `:input` a `run/3` call gives it.
 
   This module replaces the prior `Task.async/Task.yield/Task.shutdown`
   pattern that wrapped `System.cmd/3`. That pattern only ended the BEAM
@@ -70,17 +72,24 @@ defmodule FermixCore.CommandRunner do
   @default_max_output_bytes 1_048_576
   @default_kill_grace_ms 200
 
-  # `:input` reaches the child as its standard input, then end of file. An
-  # Erlang port cannot close only the child's stdin (closing the port closes
-  # its output too), so the input is written to a private file and the child
-  # runs as `/bin/sh -c 'exec "$@" <"$0"' <file> <executable> <args…>`: the
-  # shell replaces itself with the executable, which keeps the port's process
-  # (and group) and reads the file to its end. The file is removed once the
-  # run ends, whatever the ending.
-  @input_shell "/bin/sh"
-  @input_script ~s(exec "$@" <"$0")
+  # Every child this module starts reads its standard input from a file, then
+  # end of file: `:input`'s private file, else /dev/null (`spawn_command/4`). A
+  # port cannot arrange either. A default port holds a pipe to the child's
+  # stdin open until it closes, and cannot close only that (closing the port
+  # closes its output too), so a child that reads it waits out its timeout; an
+  # `:in` port gives the child the emulator's own fd 0, which is /dev/null only
+  # under launchd or systemd: from a terminal the child reads it or is stopped
+  # by SIGTTIN, and from a pipe it blocks. So each child runs as
+  # `/bin/sh -c 'exec "$@" <"$0"' <file> <executable> <args…>`, on every OS:
+  # the shell opens the file onto fd 0 and replaces itself with the executable,
+  # which keeps the port's process (and group). `:input`'s file is removed once
+  # the run ends, whatever the ending.
+  @stdin_shell "/bin/sh"
+  @stdin_script ~s(exec "$@" <"$0")
   # The same, with the child's standard error sent nowhere (`stderr: :discard`).
-  @input_script_quiet ~s(exec "$@" <"$0" 2>/dev/null)
+  @stdin_script_quiet ~s(exec "$@" <"$0" 2>/dev/null)
+  # The file a child reads when `:input` gives it nothing.
+  @null_input "/dev/null"
   @max_input_bytes 1_048_576
 
   @doc """
@@ -105,15 +114,17 @@ defmodule FermixCore.CommandRunner do
   `env -i NAME=value` argv, where any process on the host can read them.
 
   `:input` (a binary of at most 1 MiB) is written to the child's standard
-  input, which is then at end of file. Without it the buffered path leaves the
-  child's stdin open, as before. With it the child runs through `/bin/sh`'s
-  `exec`, so a POSIX shell may add its own bookkeeping variables (`PWD`,
-  `SHLVL`, `_`) to a replaced environment; it adds no value of the daemon's.
+  input, which is then at end of file. Without it the child's standard input is
+  `/dev/null`, so a child that reads it gets end of file at once. Either way the
+  child runs through `/bin/sh`'s `exec`, so a POSIX shell may add its own
+  bookkeeping variables (`PWD`, `SHLVL`, `_`) to a replaced environment; it adds
+  no value of the daemon's. An executable that is no regular file with an
+  execute bit is refused as a missing one is, `{:executable_not_found, path}`,
+  before any spawn.
 
   `:stderr` is `:stdout` (the default: standard error is captured with standard
   output, as one stream) or `:discard` (standard error goes nowhere, so the
-  captured output is standard output alone). `:discard` needs `:input`: that
-  path's shell makes the redirection; without it this raises.
+  captured output is standard output alone).
   """
   @spec run(String.t(), [String.t()], opts()) :: {:ok, result()} | {:error, reason()}
   def run(executable, args, opts \\ [])
@@ -121,54 +132,48 @@ defmodule FermixCore.CommandRunner do
     limits = build_limits(opts)
     _mode = env_mode!(opts)
     {stderr, opts} = Keyword.pop(opts, :stderr, :stdout)
+    {input, opts} = Keyword.pop(opts, :input)
+    stderr = stderr!(stderr)
+    input = input!(input)
 
-    case {Keyword.pop(opts, :input), stderr!(stderr)} do
-      {{nil, _opts}, :discard} ->
-        raise ArgumentError, stderr_error(stderr)
+    # The executable is checked before anything is written, so a missing one,
+    # or one that cannot run, leaves no file behind and reports its own path,
+    # never the shell's (`runnable?/1`).
+    cond do
+      not runnable?(executable) ->
+        {:error, {:executable_not_found, executable}}
 
-      {{nil, opts}, :stdout} ->
-        run_command(executable, args, opts, limits)
+      input == nil ->
+        run_command(spawn_command(executable, args, @null_input, stderr), opts, limits)
 
-      {{input, opts}, _stderr} ->
-        run_with_input(executable, args, input!(input), stderr, opts, limits)
+      true ->
+        with_input_file(input, fn path ->
+          run_command(spawn_command(executable, args, path, stderr), opts, limits)
+        end)
     end
   end
 
   defp stderr!(stderr) when stderr in [:stdout, :discard], do: stderr
-  defp stderr!(stderr), do: raise(ArgumentError, stderr_error(stderr))
 
-  defp stderr_error(stderr) do
-    "CommandRunner option :stderr must be :stdout, or :discard together with :input, got: " <>
-      inspect(stderr)
+  defp stderr!(stderr) do
+    raise ArgumentError,
+          "CommandRunner option :stderr must be :stdout or :discard, got: " <> inspect(stderr)
   end
 
-  defp run_command(executable, args, opts, limits) do
-    cond do
-      not File.exists?(executable) ->
-        {:error, {:executable_not_found, executable}}
-
-      Keyword.get(opts, :supervised, true) ->
-        run_supervised(executable, args, opts)
-
-      true ->
-        do_run(executable, args, opts, limits)
-    end
+  defp run_command({executable, args}, opts, limits) do
+    if Keyword.get(opts, :supervised, true),
+      do: run_supervised(executable, args, opts),
+      else: do_run(executable, args, opts, limits)
   end
 
-  # The executable is checked before anything is written, so a missing one
-  # leaves no file behind and reports its own path, never the shell's.
-  defp run_with_input(executable, args, input, stderr, opts, limits) do
-    script = if stderr == :discard, do: @input_script_quiet, else: @input_script
-
-    if File.exists?(executable) do
-      with_input_file(input, fn path ->
-        run_command(@input_shell, ["-c", script, path, executable | args], opts, limits)
-      end)
-    else
-      {:error, {:executable_not_found, executable}}
-    end
+  # The one way this module starts a child (`run/3`, `start_stream/3`): the
+  # stdin shell above, with `input_file` as the child's standard input.
+  defp spawn_command(executable, args, input_file, stderr) do
+    script = if stderr == :discard, do: @stdin_script_quiet, else: @stdin_script
+    {@stdin_shell, ["-c", script, input_file, executable | args]}
   end
 
+  defp input!(nil), do: nil
   defp input!(input) when is_binary(input) and byte_size(input) <= @max_input_bytes, do: input
 
   defp input!(input) do
@@ -218,10 +223,18 @@ defmodule FermixCore.CommandRunner do
   Streaming is a second consumption configuration of the SAME supervised host,
   like `supervised:` is for `run/3`; all ownership/sweep semantics are inherited
   unchanged. Supervised-only: a missing supervisor **raises before any OS process
-  spawns** (like `run/3`). A missing executable is refused the same way as `run/3`.
+  spawns** (like `run/3`). A missing executable is refused the same way as `run/3`,
+  and so is one that is no regular file with an execute bit (a directory, a file
+  that may not run), since the shell below would otherwise start a run for it
+  that ends in its own "Permission denied": `{:executable_not_found, path}`.
 
   Stream opts extend the shared opts with `stream_to:` (default `self()`),
   `ack_window:` (default 64), and `pending_bytes_max:` (default 8 MB).
+
+  The child's standard input is `/dev/null`, whatever the daemon's own is, so a
+  child that reads it gets end of file at once. It runs through `/bin/sh`'s
+  `exec` to get it, as every child of `run/3` does, so a POSIX shell may add
+  its own bookkeeping variables (`PWD`, `SHLVL`, `_`) to a replaced environment.
   """
   @spec start_stream(String.t(), [String.t()], stream_opts()) ::
           {:ok, stream_result()} | {:error, reason()}
@@ -229,10 +242,24 @@ defmodule FermixCore.CommandRunner do
       when is_binary(executable) and is_list(args) and is_list(opts) do
     _mode = env_mode!(opts)
 
-    if File.exists?(executable) do
-      start_stream_supervised(executable, args, opts)
+    if runnable?(executable) do
+      {shell, shell_args} = spawn_command(executable, args, @null_input, :stdout)
+      start_stream_supervised(shell, shell_args, opts)
     else
       {:error, {:executable_not_found, executable}}
+    end
+  end
+
+  # The one check of an executable, on every path (`run/3`, `start_stream/3`):
+  # a regular file with an execute bit, a link followed. Without it a path that
+  # exists but cannot run starts the `/bin/sh` exec shell only to end in its own
+  # "Permission denied". One that goes after this check is the shell's exit
+  # 127, as any command that vanishes mid-run.
+  defp runnable?(executable) do
+    case File.stat(executable) do
+      {:ok, %File.Stat{type: :regular, mode: mode}} -> Bitwise.band(mode, 0o111) != 0
+      {:ok, %File.Stat{}} -> false
+      {:error, _absent_or_unreadable} -> false
     end
   end
 
@@ -247,10 +274,11 @@ defmodule FermixCore.CommandRunner do
   end
 
   # Exact Port.open construction shared by the one-shot path (`do_run`) and the
-  # supervised host (`CommandHost.init`). Kept in one place so the two configs
-  # can never drift on cwd/env/stderr/binary handling.
+  # supervised host (`CommandHost.init`, buffered and streaming). Kept in one
+  # place so the configs can never drift on cwd/env/stderr/binary handling. Its
+  # executable is always the stdin shell (`spawn_command/4`).
   @doc false
-  @spec build_port_opts([String.t()], opts()) :: keyword()
+  @spec build_port_opts([String.t()], opts() | stream_opts()) :: keyword()
   def build_port_opts(args, opts) when is_list(args) and is_list(opts) do
     [
       :binary,
@@ -261,17 +289,6 @@ defmodule FermixCore.CommandRunner do
     ]
     |> maybe_put_cwd(Keyword.get(opts, :cwd))
     |> put_env(env_mode!(opts), Keyword.get(opts, :env, []))
-  end
-
-  # Streaming-mode port opts = the shared buffered opts plus `:in`. A default
-  # spawn_executable port holds the child's stdin open forever; `codex exec`
-  # reads non-TTY stdin to EOF and would block indefinitely. `:in` gives the
-  # child immediate stdin EOF while stdout capture and `:exit_status` keep
-  # working. Buffered mode never uses this — it stays byte-for-byte unchanged.
-  @doc false
-  @spec build_stream_port_opts([String.t()], stream_opts()) :: keyword()
-  def build_stream_port_opts(args, opts) when is_list(args) and is_list(opts) do
-    [:in | build_port_opts(args, opts)]
   end
 
   # Daemon path: start a supervised host (fail loud if the supervisor is absent —

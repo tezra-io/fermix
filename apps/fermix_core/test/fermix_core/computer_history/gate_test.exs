@@ -3,7 +3,7 @@ defmodule FermixCore.ComputerHistory.GateTest do
   MILESTONE_32 §9 — the single resolver. Covers the whole-chain rule (§9.2),
   per-hop locality (§9.3), owner-only/attended trust (Decision 7), the provider
   tiers (§9.4), and the always-false telemetry sink (Decision 9). All snapshots
-  inject `macos?: true` so the suite is hermetic on Linux CI.
+  inject `surfaces?: true` so the suite is hermetic on Linux CI.
   """
   use ExUnit.Case, async: false
 
@@ -57,7 +57,7 @@ defmodule FermixCore.ComputerHistory.GateTest do
     Application.put_env(:fermix_core, :computer_history, [enabled: true] ++ kw)
   end
 
-  defp snap(ctx), do: Gate.snapshot(ctx, macos?: true)
+  defp snap(ctx), do: Gate.snapshot(ctx, surfaces?: true)
 
   # Pin every env key `Config.default_summarizer_provider/0` reads so the
   # resolved primary is :openai regardless of what ran before, restoring the
@@ -79,22 +79,24 @@ defmodule FermixCore.ComputerHistory.GateTest do
 
   # --- disabled / operative ----------------------------------------------
 
-  describe "disabled or non-macOS" do
-    test "every consumer sink is denied when disabled" do
+  # M97 §8.3: whether history can surface is the home's fact
+  # (`ComputerHistory.surfaces?/1`), never this host's platform or this
+  # machine's own switch alone.
+  describe "history that cannot surface in this home" do
+    test "every consumer sink is denied" do
       Application.put_env(:fermix_core, :computer_history, enabled: false)
-      s = snap(operator_ctx([local_route()]))
+      s = Gate.snapshot(operator_ctx([local_route()]), surfaces?: false)
 
       refute Gate.allow?(s, {:prompt_section, %{}})
       refute Gate.allow?(s, {:tool_advertise, %{}})
       refute Gate.allow?(s, {:tool_execute, %{}})
       refute Gate.allow?(s, {:llm_chain, [local_route()]})
-      refute Gate.allow?(s, {:summarizer, local_route()})
       refute Gate.allow?(s, {:realtime_session, :openai})
     end
 
     test "enabled config on a non-macOS host is inert" do
       enable([])
-      s = Gate.snapshot(operator_ctx([local_route()]), macos?: false)
+      s = Gate.snapshot(operator_ctx([local_route()]), surfaces?: false)
       refute Gate.allow?(s, {:prompt_section, %{}})
       refute Gate.allow?(s, {:llm_chain, [local_route()]})
     end
@@ -105,10 +107,10 @@ defmodule FermixCore.ComputerHistory.GateTest do
   describe "allow?/2 is total on malformed input" do
     test "a malformed summarizer route denies without crashing" do
       enable([])
-      s = snap(operator_ctx([local_route()]))
-      refute Gate.allow?(s, {:summarizer, nil})
+      config = Application.get_env(:fermix_core, :computer_history)
+      refute Gate.summarizer_permitted?(nil, config)
       # A route_key missing :provider.
-      refute Gate.allow?(s, {:summarizer, %{base_url: "http://localhost:11434/v1"}})
+      refute Gate.summarizer_permitted?(%{base_url: "http://localhost:11434/v1"}, config)
     end
 
     test "a chain hop with a non-atom provider denies without crashing" do
@@ -154,7 +156,7 @@ defmodule FermixCore.ComputerHistory.GateTest do
       enable([])
       s = snap(operator_ctx([local_route()]))
       Application.put_env(:fermix_core, :computer_history, enabled: false)
-      disabled = snap(operator_ctx([local_route()]))
+      disabled = Gate.snapshot(operator_ctx([local_route()]), surfaces?: false)
 
       assert Gate.allow?(s, {:history_replay, [local_route()]})
       assert Gate.allow?(disabled, {:history_replay, [local_route()]})
@@ -320,9 +322,9 @@ defmodule FermixCore.ComputerHistory.GateTest do
   describe "summarizer route" do
     test "local target permits a local route, denies any remote route" do
       enable([])
-      s = snap(operator_ctx([local_route()]))
-      assert Gate.allow?(s, {:summarizer, local_route()})
-      refute Gate.allow?(s, {:summarizer, remote_route(:anthropic)})
+      config = Application.get_env(:fermix_core, :computer_history)
+      assert Gate.summarizer_permitted?(local_route(), config)
+      refute Gate.summarizer_permitted?(remote_route(:anthropic), config)
     end
 
     test "default_provider permits the primary provider's route + grants it for recall (§22.1)" do
@@ -338,11 +340,11 @@ defmodule FermixCore.ComputerHistory.GateTest do
       establish_primary_openai()
       enable(summarizer: :default_provider)
       s = snap(operator_ctx([remote_route(:openai)]))
+      config = Application.get_env(:fermix_core, :computer_history)
 
-      assert s.summarizer_target == {:provider, :openai}
-      assert Gate.allow?(s, {:summarizer, remote_route(:openai)})
+      assert Gate.summarizer_permitted?(remote_route(:openai), config)
       # A different vendor is still not the resolved primary.
-      refute Gate.allow?(s, {:summarizer, remote_route(:anthropic)})
+      refute Gate.summarizer_permitted?(remote_route(:anthropic), config)
       # The primary is granted, so an all-primary turn chain permits recall.
       assert MapSet.member?(s.granted, :openai)
       assert Gate.allow?(s, {:llm_chain, [remote_route(:openai)]})
@@ -350,12 +352,12 @@ defmodule FermixCore.ComputerHistory.GateTest do
 
     test "Tier-3 pins to exactly the named provider (inv. 1b — no failover to another vendor)" do
       enable(summarizer: :anthropic)
-      s = snap(operator_ctx([remote_route(:anthropic)]))
-      assert Gate.allow?(s, {:summarizer, remote_route(:anthropic)})
+      config = Application.get_env(:fermix_core, :computer_history)
+      assert Gate.summarizer_permitted?(remote_route(:anthropic), config)
       # A different vendor — even a failover target — is denied.
-      refute Gate.allow?(s, {:summarizer, remote_route(:openai)})
+      refute Gate.summarizer_permitted?(remote_route(:openai), config)
       # And the local route is not the Tier-3 target either.
-      refute Gate.allow?(s, {:summarizer, local_route()})
+      refute Gate.summarizer_permitted?(local_route(), config)
     end
   end
 
@@ -545,7 +547,7 @@ defmodule FermixCore.ComputerHistory.GateTest do
       enable(remote_summaries: [:openai_codex])
       chain = [remote_route(:openai_codex), remote_route(:openai), remote_route(:mistral)]
 
-      posture = Gate.chain_posture(macos?: true, routes: {:ok, chain})
+      posture = Gate.chain_posture(surfaces?: true, routes: {:ok, chain})
 
       assert posture.state == :pinned
       assert posture.lead == :openai_codex
@@ -561,7 +563,7 @@ defmodule FermixCore.ComputerHistory.GateTest do
       # "your primary" was wrong: `Selection` skips an unconfigured primary, so the
       # lead of the chain the turn actually runs on can be a fallback provider.
       enable(summarizer: :local)
-      posture = Gate.chain_posture(macos?: true, routes: {:ok, [remote_route(:anthropic)]})
+      posture = Gate.chain_posture(surfaces?: true, routes: {:ok, [remote_route(:anthropic)]})
 
       assert posture.state == :unsurfaceable
       assert posture.lead == :anthropic
@@ -579,7 +581,7 @@ defmodule FermixCore.ComputerHistory.GateTest do
       # grants the summarizer's provider and the primary, and the lead is neither.
       establish_primary_openai()
       enable(summarizer: :default_provider)
-      posture = Gate.chain_posture(macos?: true, routes: {:ok, [remote_route(:mistral)]})
+      posture = Gate.chain_posture(surfaces?: true, routes: {:ok, [remote_route(:mistral)]})
 
       assert posture.state == :unsurfaceable
       sentence = Gate.chain_posture_sentence(posture)
@@ -595,7 +597,7 @@ defmodule FermixCore.ComputerHistory.GateTest do
       enable(remote_summaries: [:anthropic])
       chain = [remote_route(:anthropic), %{provider: "openai"}]
 
-      posture = Gate.chain_posture(macos?: true, routes: {:ok, chain})
+      posture = Gate.chain_posture(surfaces?: true, routes: {:ok, chain})
 
       assert posture.state == :unclassifiable_chain
       assert posture.lead == :anthropic
@@ -607,9 +609,9 @@ defmodule FermixCore.ComputerHistory.GateTest do
       refute sentence =~ "remote_summaries"
     end
 
-    test "off when history is disabled" do
+    test "off when history cannot surface" do
       Application.put_env(:fermix_core, :computer_history, enabled: false)
-      posture = Gate.chain_posture(macos?: true, routes: {:ok, [remote_route(:anthropic)]})
+      posture = Gate.chain_posture(surfaces?: false, routes: {:ok, [remote_route(:anthropic)]})
 
       assert posture.state == :off
       assert Gate.chain_posture_sentence(posture) =~ "history is off"
@@ -617,16 +619,16 @@ defmodule FermixCore.ComputerHistory.GateTest do
 
     test "no_chain when the route chain could not be built" do
       enable(remote_summaries: [:anthropic])
-      posture = Gate.chain_posture(macos?: true, routes: {:error, :multiple_primary})
+      posture = Gate.chain_posture(surfaces?: true, routes: {:error, :multiple_primary})
 
       assert posture.state == :no_chain
       assert posture.lead == nil
       assert Gate.chain_posture_sentence(posture) =~ "provider chain"
     end
 
-    test "off on a non-macOS host" do
+    test "off on a home where no machine offers history" do
       enable(remote_summaries: [:anthropic])
-      posture = Gate.chain_posture(macos?: false, routes: {:ok, [remote_route(:anthropic)]})
+      posture = Gate.chain_posture(surfaces?: false, routes: {:ok, [remote_route(:anthropic)]})
 
       assert posture.state == :off
     end

@@ -81,14 +81,14 @@ defmodule FermixCore.Home.StatusWatchTest do
       assert_received :home_status_changed
       assert_receive {:other, :home_status_changed}
 
-      :ok = StatusWatch.changed(ctx.watch, :ledger)
+      :ok = StatusWatch.changed(ctx.watch, :move)
       settle(ctx)
       flush(other, :other)
       refute_received :home_status_changed
       refute_received {:other, :home_status_changed}
 
       Agent.update(ctx.read, &%{&1 | key: :problem})
-      :ok = StatusWatch.changed(ctx.watch, :ledger)
+      :ok = StatusWatch.changed(ctx.watch, :move)
       settle(ctx)
       flush(other, :other)
 
@@ -99,7 +99,7 @@ defmodule FermixCore.Home.StatusWatchTest do
     end
 
     test "with nobody subscribed reads nothing", ctx do
-      :ok = StatusWatch.changed(ctx.watch, :ledger)
+      :ok = StatusWatch.changed(ctx.watch, :move)
       settle(ctx)
       assert reads(ctx) == 0
     end
@@ -111,7 +111,7 @@ defmodule FermixCore.Home.StatusWatchTest do
 
       :ok = :sys.suspend(ctx.watch)
 
-      for kind <- [:ledger, :move, :enrollment, :snapshots, :link],
+      for kind <- [:move, :enrollment, :snapshots, :link],
           do: StatusWatch.changed(ctx.watch, kind)
 
       :ok = :sys.resume(ctx.watch)
@@ -127,7 +127,7 @@ defmodule FermixCore.Home.StatusWatchTest do
       assert_received :home_status_changed
 
       off!(ctx)
-      :ok = StatusWatch.changed(ctx.watch, :ledger)
+      :ok = StatusWatch.changed(ctx.watch, :move)
       settle(ctx)
       assert_received :home_status_changed
       assert reads(ctx) == 2
@@ -137,12 +137,12 @@ defmodule FermixCore.Home.StatusWatchTest do
       settle(ctx)
       assert reads(ctx) == 2
 
-      for kind <- [:ledger, :enrollment, :move] do
+      for kind <- [:enrollment, :move] do
         :ok = StatusWatch.changed(ctx.watch, kind)
         settle(ctx)
       end
 
-      assert reads(ctx) == 5
+      assert reads(ctx) == 4
       refute_received :home_status_changed
     end
 
@@ -236,7 +236,7 @@ defmodule FermixCore.Home.StatusWatchTest do
       settle(ctx)
       assert_received {:cancelled, _timer}
 
-      :ok = StatusWatch.changed(ctx.watch, :ledger)
+      :ok = StatusWatch.changed(ctx.watch, :move)
       settle(ctx)
       assert reads(ctx) == 1
     end
@@ -268,7 +268,7 @@ defmodule FermixCore.Home.StatusWatchTest do
 
     log =
       capture_log(fn ->
-        :ok = StatusWatch.changed(ctx.watch, :ledger)
+        :ok = StatusWatch.changed(ctx.watch, :move)
         settle(ctx)
       end)
 
@@ -278,7 +278,7 @@ defmodule FermixCore.Home.StatusWatchTest do
   end
 
   test "changed/2 and subscribe/2 to a watch that does not run are no-ops" do
-    assert :ok = StatusWatch.changed(:"status_watch_absent_#{System.unique_integer()}", :ledger)
+    assert :ok = StatusWatch.changed(:"status_watch_absent_#{System.unique_integer()}", :move)
     assert :ok = StatusWatch.subscribe(:"status_watch_absent_#{System.unique_integer()}", self())
   end
 

@@ -788,17 +788,19 @@ defmodule FermixCore.Auth.StoreTest do
       assert {:ok, %{tokens: %{access_token: "a_at"}}} = Store.read("a:primary", path)
     end
 
-    # Regression guard, not a fail-first reproduction: without the lock this
-    # loses entries only when two renames happen to interleave. Waiters poll in
-    # lockstep, one winner per 100 ms round, so the last of 16 waits 15 rounds,
-    # well inside the 80-attempt budget.
+    # Regression guard, not a fail-first reproduction: without the lock, two
+    # writers started together lose an entry on every run (15 of 15 measured).
+    # The writers share this VM's one file server with the rest of the suite,
+    # and the last of them waits out every earlier writer's section, each a
+    # dozen or more file-server calls: under load, 16 writers outlasted the 8 s
+    # a writer waits for the lock. Four keep that wait to three sections.
     test "concurrent writers of distinct profiles keep every entry (regression guard)" do
       path = locked_home()
-      profiles = for n <- 1..16, do: "p#{n}:primary"
+      profiles = for n <- 1..4, do: "p#{n}:primary"
 
       profiles
       |> Task.async_stream(&Store.write(&1, plain_entry(&1), path),
-        max_concurrency: 16,
+        max_concurrency: 4,
         timeout: 30_000
       )
       |> Enum.each(fn result -> assert result == {:ok, :ok} end)

@@ -805,6 +805,42 @@ defmodule FermixCore.Cues.MandateGateTest do
       assert error =~ "repository around"
       refute_received {:file_read, _context}
     end
+
+    # M97 §6.5: the skill folder is the server's, so a file tool that names one
+    # of the home's computers would read outside it.
+    test "a mandated run's file tool that names a computer is refused" do
+      skill = SafeRm.make_tmp_dir!("mandate-computer")
+      on_exit(fn -> SafeRm.rm_rf!(skill) end)
+
+      {_fixture, context} = run!("gate_computer_files")
+
+      studio = %FermixCore.Computers.Computer{
+        device_id: "a1",
+        name: "studio Mac",
+        connected: true,
+        offers: [%{id: "files", state: :on, sentence: nil, detail: nil}]
+      }
+
+      context =
+        context
+        |> Map.put(:skill_name, "releases")
+        |> Map.put(:computers, [studio])
+        |> with_seams(skill_dir: fn "releases" -> {:ok, skill} end)
+
+      file_read = %{
+        file_read_capability()
+        | metadata: %{category: :file, computer: FermixCore.Computers.Capabilities.Files}
+      }
+
+      {error, _} =
+        refused!(
+          Capability.execute(file_read, %{"path" => "x", "computer" => "studio Mac"}, context),
+          "refused_mandate_files"
+        )
+
+      assert error =~ "never on one of your computers"
+      refute_received {:file_read, _context}
+    end
   end
 
   # --- the marker with the settle ----------------------------------------------------------------

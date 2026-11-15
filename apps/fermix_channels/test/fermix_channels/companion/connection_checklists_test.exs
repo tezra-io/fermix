@@ -7,7 +7,7 @@ defmodule FermixChannels.Companion.ConnectionChecklistsTest do
   as the whole list, at most once per window per list, whoever made it. A
   connection the daemon started reads and changes nothing, and a turn says it
   draws lists only when its connection pulled the index. Every version in the
-  window, {6, 7}, has the lists.
+  window, {7, 8}, has the lists.
 
   Most tests deliver the coalescing window's end by hand (`flush!/1`), so no
   assertion races a clock; one keeps the real 100 ms window.
@@ -17,9 +17,12 @@ defmodule FermixChannels.Companion.ConnectionChecklistsTest do
   alias FermixChannels.Companion.Approvals
   alias FermixChannels.Companion.ChecklistNotifier
   alias FermixChannels.Companion.Endpoint
+  alias FermixChannels.Companion.Output
   alias FermixChannels.Mobile.RequestCoordinator
   alias FermixCore.Checklists.Registry, as: ChecklistRegistry
+  alias FermixCore.Kept.Notify, as: KeptNotify
   alias FermixCore.Memory.Repo
+  alias FermixCore.Trips.Registry, as: TripRegistry
   alias FermixTestSupport.ParentProcess
 
   # A line's arrival over the socket on a loaded runner.
@@ -119,6 +122,7 @@ defmodule FermixChannels.Companion.ConnectionChecklistsTest do
       socket_path: socket_path,
       registry: registry,
       repo: repo,
+      approvals: approvals,
       checklist_opts: checklist_opts,
       endpoint_opts: endpoint_opts
     }
@@ -187,10 +191,15 @@ defmodule FermixChannels.Companion.ConnectionChecklistsTest do
 
   # --- pulling ---------------------------------------------------------------------
 
-  test "the owner's version 6 connection pulls the index and a whole list", ctx do
+  # Lists came with version 6, so every version in the window has them: a
+  # connection on version 8 pulls them as one on version 7 does.
+  test "the owner's connection on either version pulls the index and a whole list", ctx do
     list_id = groceries!(ctx)
-    client = hello(ctx.socket_path, 6)
 
+    for version <- [7, 8], do: pulls_groceries(hello(ctx.socket_path, version), list_id)
+  end
+
+  defp pulls_groceries(client, list_id) do
     assert [index] = pull_index(client)
 
     assert index == %{
@@ -217,8 +226,8 @@ defmodule FermixChannels.Companion.ConnectionChecklistsTest do
 
   test "two connections that hold a list both hear one edit, as the whole list", ctx do
     list_id = groceries!(ctx)
-    mac = hello(ctx.socket_path, 6)
-    other = hello(ctx.socket_path, 6)
+    mac = hello(ctx.socket_path, 7)
+    other = hello(ctx.socket_path, 7)
     lemons = mac |> pull(list_id) |> row_id("Lemons")
     _ = pull(other, list_id)
 
@@ -235,7 +244,7 @@ defmodule FermixChannels.Companion.ConnectionChecklistsTest do
   test "the real window pushes a change once it ends", ctx do
     list_id = groceries!(ctx)
     restart_endpoint(ctx, checklist_window_ms: 100)
-    mac = hello(ctx.socket_path, 6)
+    mac = hello(ctx.socket_path, 7)
     rice = mac |> pull(list_id) |> row_id("Rice")
 
     edit(mac, "tick-2", list_id, %{"op" => "check", "row_id" => rice})
@@ -246,7 +255,7 @@ defmodule FermixChannels.Companion.ConnectionChecklistsTest do
 
   test "several edits inside one window give one push carrying the final rev", ctx do
     list_id = groceries!(ctx)
-    mac = hello(ctx.socket_path, 6)
+    mac = hello(ctx.socket_path, 7)
     list = pull(mac, list_id)
 
     for {text, n} <- [{"Lemons", 1}, {"Rice", 2}] do
@@ -270,7 +279,7 @@ defmodule FermixChannels.Companion.ConnectionChecklistsTest do
 
   test "an edit sent again by its client_msg_id is a duplicate that changes nothing", ctx do
     list_id = groceries!(ctx)
-    mac = hello(ctx.socket_path, 6)
+    mac = hello(ctx.socket_path, 7)
     _ = pull(mac, list_id)
 
     edit(mac, "add-eggs", list_id, %{"op" => "add", "text" => "Eggs"})
@@ -279,7 +288,7 @@ defmodule FermixChannels.Companion.ConnectionChecklistsTest do
     assert %{"type" => "checklist", "list" => %{"rev" => 2} = list, "made" => made} = recv(mac)
 
     # A reconnect replays its outbox.
-    again = hello(ctx.socket_path, 6)
+    again = hello(ctx.socket_path, 7)
     _ = pull(again, list_id)
     edit(again, "add-eggs", list_id, %{"op" => "add", "text" => "Eggs"})
     accepted!(again, "add-eggs", true)
@@ -294,7 +303,7 @@ defmodule FermixChannels.Companion.ConnectionChecklistsTest do
 
   test "a model's edit reaches the connection that holds the list", ctx do
     list_id = groceries!(ctx)
-    mac = hello(ctx.socket_path, 6)
+    mac = hello(ctx.socket_path, 7)
     _ = pull(mac, list_id)
     _ = pull_index(mac)
 
@@ -314,6 +323,35 @@ defmodule FermixChannels.Companion.ConnectionChecklistsTest do
              Enum.find(pushes, &(&1["type"] == "checklists"))
   end
 
+  # M89: a trip's change goes out through the lists' notifier, by kind, to
+  # every connection, whoever made it. A connection that holds no trip lets
+  # the change pass and goes on serving its lists.
+  test "a trip change through the notifier leaves every connection serving", ctx do
+    list_id = groceries!(ctx)
+    mac = hello(ctx.socket_path, 8)
+    _ = pull(mac, list_id)
+    [{connection, _version}] = Registry.lookup(ctx.registry, "main")
+    watch = Process.monitor(connection)
+
+    {:ok, _answer} =
+      TripRegistry.edit(
+        %{"trip" => "Varonne", "ops" => [%{"op" => "create"}]},
+        @owner_turn,
+        ctx.checklist_opts
+      )
+
+    # The notice reached the connection's mailbox before this pull did.
+    assert [%{"list_id" => ^list_id}] = pull_index(mac)
+    refute_received {:DOWN, ^watch, :process, _pid, _reason}
+    assert Process.alive?(connection)
+  end
+
+  test "the notifier the channels app gives core hears a trip change without raising" do
+    assert Application.get_env(:fermix_core, :checklists_notifier) == ChecklistNotifier
+    change = %{id: "tr_4q8m2x7v1d", rev: 1, made: %{}}
+    assert :ok = KeptNotify.announce(:trips, "owner-l", [change], [])
+  end
+
   # --- holding ---------------------------------------------------------------------
 
   test "a connection holds at most 16 lists, letting the oldest go", ctx do
@@ -321,7 +359,7 @@ defmodule FermixChannels.Companion.ConnectionChecklistsTest do
     for batch <- Enum.chunk_every(changes, 8), do: model_edit!(ctx, batch)
     {:ok, lists} = ChecklistRegistry.device_index(:independent, ctx.checklist_opts)
     ids = Enum.map(lists, & &1.id)
-    mac = hello(ctx.socket_path, 6)
+    mac = hello(ctx.socket_path, 7)
     for id <- ids, do: pull(mac, id)
 
     model_edit!(ctx, [
@@ -341,7 +379,7 @@ defmodule FermixChannels.Companion.ConnectionChecklistsTest do
 
   test "clear_done removes every done item, and Recently removed shows them", ctx do
     list_id = groceries!(ctx)
-    mac = hello(ctx.socket_path, 6)
+    mac = hello(ctx.socket_path, 7)
     list = pull(mac, list_id)
 
     for {text, n} <- [{"Lemons", 1}, {"Rice", 2}] do
@@ -362,7 +400,7 @@ defmodule FermixChannels.Companion.ConnectionChecklistsTest do
   test "restore brings a row back at its place, and a list back unless its title is in use",
        ctx do
     list_id = groceries!(ctx)
-    mac = hello(ctx.socket_path, 6)
+    mac = hello(ctx.socket_path, 7)
     lemons = mac |> pull(list_id) |> row_id("Lemons")
 
     edit(mac, "rm-1", list_id, %{"op" => "remove", "row_id" => lemons})
@@ -402,7 +440,7 @@ defmodule FermixChannels.Companion.ConnectionChecklistsTest do
 
   test "a refused edit is request_failed with the engine's sentence, the connection kept", ctx do
     list_id = groceries!(ctx)
-    mac = hello(ctx.socket_path, 6)
+    mac = hello(ctx.socket_path, 7)
 
     edit(mac, "bad", list_id, %{"op" => "check", "row_id" => "ci_0000000000"})
 
@@ -450,7 +488,7 @@ defmodule FermixChannels.Companion.ConnectionChecklistsTest do
   test "a connection the daemon started reads and changes no list", ctx do
     list_id = groceries!(ctx)
     restart_endpoint(ctx, daemon_os_pid: ParentProcess.os_pid())
-    agent = hello(ctx.socket_path, 6)
+    agent = hello(ctx.socket_path, 7)
     sentence = "Only the owner's own Fermix app can read or change the owner's lists."
 
     send_line(agent, %{"type" => "checklists_pull", "profile_id" => "main"})
@@ -480,7 +518,7 @@ defmodule FermixChannels.Companion.ConnectionChecklistsTest do
     request_opts = ctx.endpoint_opts[:connection_opts][:request_opts]
     role = %{role: :device, primary: "vm.example.test"}
     restart_endpoint(ctx, request_opts: Keyword.put(request_opts, :engine_role, role))
-    mac = hello(ctx.socket_path, 6)
+    mac = hello(ctx.socket_path, 7)
 
     edit(mac, "device-1", list_id, %{"op" => "remove_list"})
 
@@ -505,13 +543,22 @@ defmodule FermixChannels.Companion.ConnectionChecklistsTest do
 
   # --- the card line --------------------------------------------------------------
 
-  test "a turn draws lists only when its connection pulled the index", ctx do
+  # One answer decides what a connection draws and what it is sent
+  # (`ReplyBlocks.drawn_types/3`): lists once it pulled their index, on any
+  # version; events from version 8, pulled or not.
+  test "a turn draws lists only when its connection pulled the index, events from version 8",
+       ctx do
     _ = groceries!(ctx)
-    drawing = hello(ctx.socket_path, 6)
+    drawing = hello(ctx.socket_path, 7)
     _ = pull_index(drawing)
-    plain = hello(ctx.socket_path, 6)
+    plain = hello(ctx.socket_path, 7)
+    events = hello(ctx.socket_path, 8)
+    both = hello(ctx.socket_path, 8)
+    _ = pull_index(both)
 
-    for {client, id} <- [{drawing, "draw-1"}, {plain, "plain-1"}] do
+    clients = [{drawing, "draw-1"}, {plain, "plain-1"}, {events, "events-1"}, {both, "both-1"}]
+
+    for {client, id} <- clients do
       send_line(client, %{
         "type" => "msg",
         "client_msg_id" => id,
@@ -526,17 +573,140 @@ defmodule FermixChannels.Companion.ConnectionChecklistsTest do
     end
 
     messages =
-      for _n <- 1..2 do
+      for _n <- 1..4 do
         assert_receive {:gateway_ingest, message}, @arrival_ms
-        {message.id, Map.get(message.metadata, :draws_lists)}
+        {message.id, Map.get(message.metadata, :draws_lists), message.metadata[:draws_events]}
       end
 
-    assert Enum.sort(messages) == [{"draw-1", true}, {"plain-1", nil}]
+    assert Enum.sort(messages) == [
+             {"both-1", true, true},
+             {"draw-1", true, nil},
+             {"events-1", nil, true},
+             {"plain-1", nil, nil}
+           ]
   end
 
   # --- plumbing -------------------------------------------------------------------
 
   # The answer to a request, past any push that arrived before it.
+  # --- a phone's list channel (M85 E4) ------------------------------------------------
+
+  # The connection a phone's list channel runs: lists only, its edits made via
+  # the phone, and the session it serves told once it draws lists.
+  defp phone_channel!(ctx, opts \\ []) do
+    restart_endpoint(ctx, [scope: :lists, made_via: "phone", draws_to: self()] ++ opts)
+  end
+
+  defp flush_lists!(registry) do
+    for {pid, _version} <- Registry.lookup(registry, {:lists, "main"}),
+        do: send(pid, :checklists_flush)
+
+    :ok
+  end
+
+  describe "a phone's lists-only connection" do
+    test "pulls the index and a list, and edits, its rows made via the phone", ctx do
+      list_id = groceries!(ctx)
+      phone_channel!(ctx)
+      phone = hello(ctx.socket_path, 7)
+
+      assert [%{"list_id" => ^list_id}] = pull_index(phone)
+      assert_receive :list_channel_draws
+      _ = pull(phone, list_id)
+
+      edit(phone, "phone-add-1", list_id, %{"op" => "add", "text" => "Eggs"})
+      accepted!(phone, "phone-add-1")
+
+      {:ok, %{rows: rows}} =
+        ChecklistRegistry.device_list(list_id, false, :independent, ctx.checklist_opts)
+
+      assert %{made_via: "phone"} = Enum.find(rows, &(&1.text == "Eggs"))
+      assert %{made_via: "chat"} = Enum.find(rows, &(&1.text == "Lemons"))
+    end
+
+    test "says it draws lists once, and only after the index was pulled", ctx do
+      list_id = groceries!(ctx)
+      phone_channel!(ctx)
+      phone = hello(ctx.socket_path, 7)
+
+      _ = pull(phone, list_id)
+      refute_received :list_channel_draws
+
+      _ = pull_index(phone)
+      _ = pull_index(phone)
+      assert_receive :list_channel_draws
+      refute_receive :list_channel_draws, 100
+    end
+
+    test "joins no timeline: no row, no approval and no Always On word reach it", ctx do
+      card = Output.approval(%{kind: :sandbox, text: "Mac?", token: "MAC-T"})
+      assert :ok = Approvals.announce(ctx.approvals, "main", card, :companion)
+      phone_channel!(ctx, status_watch: self())
+      phone = hello(ctx.socket_path, 7)
+
+      assert Registry.lookup(ctx.registry, "main") == []
+      assert [{_pid, 7}] = Registry.lookup(ctx.registry, {:lists, "main"})
+      refute_received {:"$gen_cast", {:subscribe, _pid}}
+
+      # A waiting approval would have followed the hello, before this answer.
+      assert [] = pull_index(phone)
+    end
+
+    test "hears a change to a list it holds, whoever made it", ctx do
+      list_id = groceries!(ctx)
+      phone_channel!(ctx)
+      phone = hello(ctx.socket_path, 7)
+      _ = pull(phone, list_id)
+
+      model_edit!(ctx, [%{"list" => "Groceries", "ops" => [%{"op" => "add", "text" => "Milk"}]}])
+      flush_lists!(ctx.registry)
+
+      assert %{"type" => "checklist", "list" => %{"rev" => 2, "rows" => rows}} = recv(phone)
+      assert Enum.any?(rows, &(&1["text"] == "Milk"))
+    end
+
+    test "refuses every event but the lists' as unknown, and closes", ctx do
+      phone_channel!(ctx)
+
+      for %{"type" => type} = event <- refused_on_a_list_channel() do
+        phone = hello(ctx.socket_path, 7)
+        send_line(phone, event)
+        assert %{"type" => "error", "reason" => "unknown_event", "event" => ^type} = recv(phone)
+        assert {:error, :closed} = :gen_tcp.recv(phone, 0, @arrival_ms)
+      end
+    end
+  end
+
+  # Each as the companion goldens carry it, so only its type is refused.
+  defp refused_on_a_list_channel do
+    [
+      %{
+        "type" => "msg",
+        "client_msg_id" => "m-1",
+        "profile_id" => "main",
+        "text" => "hi",
+        "attach_ids" => []
+      },
+      %{
+        "type" => "command",
+        "client_msg_id" => "c-1",
+        "profile_id" => "main",
+        "name" => "confirm",
+        "args" => "opaque-token"
+      },
+      %{"type" => "cancel", "profile_id" => "main", "client_msg_id" => "m-1"},
+      %{"type" => "history_pull", "profile_id" => "main", "before_seq" => 120, "limit" => 50},
+      %{"type" => "read_state", "profile_id" => "main", "read_up_to_seq" => 13},
+      %{
+        "type" => "proposal_answer",
+        "client_msg_id" => "p-1",
+        "profile_id" => "main",
+        "proposal_id" => "cpr_4f1c2a9b7e3d5a60c8b1f2e3",
+        "decision" => "confirm"
+      }
+    ]
+  end
+
   defp next_answer(client) do
     case recv(client) do
       %{"type" => type} when type in ["checklist", "checklists"] -> next_answer(client)

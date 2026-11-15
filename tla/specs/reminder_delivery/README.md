@@ -42,7 +42,7 @@ attempt like every platform's, so nothing here models it separately.
   (`delivery_worker.ex:197-200`, `:66`).
 - `SchedulerCanRestart`: the scheduler crashes while the BEAM stays up. Any
   earlier child of the flat `:rest_for_one` list (`Repo`, `MainAgent`,
-  `JobScheduler`, …; `application.ex:260-363`) restarts it too. A scheduler
+  `JobScheduler`, …; `application.ex:292-384`) restarts it too. A scheduler
   Repo call that times out no longer does: it returns an error (see
   `RepoCanFail`).
 - `DaemonCanCrash`: the whole daemon dies and boots again.
@@ -71,7 +71,7 @@ least one check):
   (`:1033`) repeat it inside the same Repo callback (`repo.ex:3134-3137`), where
   no other writer can interleave, so removing only them would change nothing.
 - `WorkersDieWithScheduler`: `DeliverySupervisor` starts after the scheduler
-  under `:rest_for_one` (`application.ex:363-364`, `:183`).
+  under `:rest_for_one` (`application.ex:392-393`, `:187`).
 - `SendsDieWithWorker`: a worker's send process is spawned linked to it
   (`Process.spawn(fun, [:link, :monitor])`, `channel_send.ex:219-224`), so a
   worker killed mid-send takes its send with it. Off, it is the code before the
@@ -97,7 +97,7 @@ least one check):
   - No sixth attempt (`scheduler.ex:332-335`). This rests on `AttemptCap`
     (check 02).
   - Never two workers for the row (`delivery_supervisor.ex:5-10`,
-    `application.ex:356-364`). This rests on `ClaimRequiresPending` (check 03),
+    `application.ex:385-393`). This rests on `ClaimRequiresPending` (check 03),
     `WorkersDieWithScheduler` (check 04) and `ResetSkipsMonitored` (check 05),
     and on the timing fact `DownHandledBeforeRetryDue` (check 20).
   - Never two sends for the row either (the premise of M30 §19.10's no-lease
@@ -107,15 +107,15 @@ least one check):
   - A scheduler restart leaves no send running (M30 §6.3 :339,
     `channel_send.ex:98-105`; the unlink-to-kill residual below is under the
     spec's step granularity). This rests on `SendsDieWithWorker` (check 24).
-  - No edit or cancel is accepted while a send process runs (`registry.ex:676-679`,
-    M30 §16 :1490). This rests on `RefusesWhileDelivering` (check 29) and
+  - No edit or cancel is accepted while a send process runs (`registry.ex:682-685`,
+    M30 §16 :1496). This rests on `RefusesWhileDelivering` (check 29) and
     `SendsDieWithWorker` (check 26: unlinked, the boot sweep sets the row back
     to `pending` while the orphan still sends, and the edit is accepted).
 
   Before the REMIND-2 fix the same check covered 57,661 states: most of them
   were orphaned sends.
 - Check 06, **hypothetical**: no reminder platform reads `proactive_key`
-  (`registry.ex:48`, enforced at `:1442` and `:1487`). With every fault on and a
+  (`registry.ex:48`, enforced at `:1448` and `:1493`). With every fault on and a
   platform that deduplicates, the user sees the reminder at most once (5,223
   states). This rests on `StableKey` (check 07).
 - Check 08, with no faults and a platform that answers inside the watchdog, 268
@@ -159,10 +159,10 @@ cancel is refused while the row reads `delivering`", to be dropped as a
 property. The refusal and the write are one Repo call
 (`temporal_sql.ex:587-599`, `:631-639`), so the property held by construction.
 That single-call fact belongs in ExUnit. The spec checks what the refusal is
-for instead. `registry.ex:676-679` tells the owner "Wait for the attempt to
-finish", and M30's failure table (`:1490`) says the owner "retries after the
+for instead. `registry.ex:682-685` tells the owner "Wait for the attempt to
+finish", and M30's failure table (`:1496`) says the owner "retries after the
 bounded attempt", so the claimed rule is `NoChangeWhileSendRunning`: no change
-is accepted while a send process runs. M30 §7.3 (`:609-614`) scopes the refusal
+is accepted while a send process runs. M30 §7.3 (`:615-620`) scopes the refusal
 to that bounded attempt and disclaims recall, so the stronger
 `NoChangeWhileRequestAtPlatform`, which also counts a request the attempt
 abandoned at the platform, is a proposed rule (REMIND-3).
@@ -254,7 +254,7 @@ counterexample, run `tla/bin/check.py reminder_delivery` and open
 - **Code:**
   - The watchdog reports `:delivery_timeout` without knowing whether the request
     landed (`channel_send.ex:239`, `:284-300`), and that result is retryable
-    (`error.ex:191`, `delivery_worker.ex:121-138`). A result the send posted
+    (`error.ex:195`, `delivery_worker.ex:121-138`). A result the send posted
     just before the kill is discarded too, so a send that did deliver can still
     be reported as a timeout and sent again.
   - A failed settlement exits with `{:settlement_failed, _}`
@@ -266,7 +266,7 @@ counterexample, run `tla/bin/check.py reminder_delivery` and open
   out:**
   - the HTTP client's own receive timeout (Req's 15 s default;
     `telegram.ex:577-580` sets none), which returns a retryable
-    `{:transport, :timeout}` (`error.ex:165-169`, `:190`) and is the usual way
+    `{:transport, :timeout}` (`error.ex:169-173`, `:194`) and is the usual way
     an attempt gives up on a request the platform may already hold, as are a
     connection reset after the write and signal-cli's own timeout
     (`signal.ex:544-547`);
@@ -452,6 +452,129 @@ taken from the row its write returned. A reminder is delivered as a `row`,
 never a `text_done`, so its row, its proactive dedupe and its push are as
 before; the comments' `output.ex` numbers moved with the code. No delivery
 path the spec models changed.
+
+Re-read on 2026-11-09 for a phone's list channel (M85 E4), which staled the
+`mobile.ex` pin: a phone turn's reply now carries the blocks of its list and
+place records, and a phone's message says when its list channel draws lists.
+A reminder is delivered with no `turn_id`, so it takes no records and its
+row, proactive dedupe and push are as before. The spec cites no `mobile.ex`
+line. No delivery path the spec models changed.
+
+Re-read on 2026-11-10 for the computers' registry (M97), which staled the
+`application.ex` pin: the core tree gained `Computers.Registry`, a
+primary-only process after `Companion.OriginBackfill` and before the
+snapshot scheduler, which keeps what the home's computers offer in files
+under `device/computers/`. It starts after the temporal scheduler and its
+delivery supervisor, which keep their order, so a crash of it reaches
+neither, and it touches no `temporal:` row. The comments' `application.ex`
+numbers had drifted before this change (`:183` named a sidecar call, not the
+strategy at `:185`); they now point at the committed file. No delivery path
+the spec models changed.
+
+Re-read on 2026-11-10 for the server's calls and the release table (M97),
+which staled the `application.ex` pin: the core tree gained
+`Computers.Calls` (the invocations the server waits on from the home's
+computers) and `Home.ReleaseTable` (the release table an Always On server's
+update chooses from), both primary-only, after `Computers.Registry` and
+before the snapshot scheduler. They start after the temporal scheduler and
+its delivery supervisor, which keep their order, so a crash of either
+reaches neither, and they touch no `temporal:` row. The commit's new alias
+moved every cited `application.ex` line down by one; the comments point at
+the committed file. No delivery path the spec models changed.
+
+Re-read on 2026-11-11 for the server's use of a computer's screen and
+Messages (M97, `26196634`), which staled the `error.ex` and `application.ex`
+pins:
+- `error.ex`: one more permanent kind, `:carrier_away`, which the iMessage
+  adapter returns at once when the Mac that carries Messages for the server
+  is asleep or offline. `retryable?/1` answers false for it, as for every
+  permanent kind, so a reminder sent over iMessage while that Mac is away
+  ends `failed` on its first attempt: the spec's `"permanent"` answer, whose
+  path (`settle_failed`) is unchanged. The comments' `error.ex` numbers moved
+  down by four with the new lines.
+- `application.ex`: the computer-use supervisor now also starts on an engine
+  that drives a computer's screen or has its own driven by its server, and
+  `ComputerUse.Seat` (this computer's screen while its server drives it)
+  joins the tree beside it on a linked computer. Both start after the
+  temporal scheduler and its delivery supervisor, which keep their order, so
+  a crash of either reaches neither, and neither touches a `temporal:` row.
+  The commit's new alias moved every cited `application.ex` line down by
+  one; the comments point at the committed file.
+
+No delivery path the spec models changed.
+
+Re-read on 2026-11-11 for computer history on every computer (M97,
+`826ba83a`), which staled the `application.ex` pin: the computer-history
+supervisor is now started with the engine's role, on every primary whatever
+its platform and on a device only where this system has a recorder. It keeps
+its place after the temporal scheduler and its delivery supervisor, which
+keep their order, so a crash of it reaches neither, and it touches no
+`temporal:` row. The change touched only that child's line and the function
+below the tree, so every cited `application.ex` line is where it was. No
+delivery path the spec models changed.
+
+Re-read on 2026-11-11 for the review's fixes (`c6fe1c48`), which staled the
+`application.ex` pin with two comments inside `supervision_children`. No
+child moved and no delivery path the spec models changed; the spec cites no
+line the change moved.
+
+Re-read on 2026-11-12 for the Always On pane's engine half (`8e3f586f`),
+which staled the `application.ex` pin: `Home.MoveProgress` joins the core
+tree after the temporal scheduler and its delivery supervisor, so its crash
+reaches neither. No delivery path the spec models changed; the cited
+`application.ex` lines point at the committed code.
+
+Re-read on 2026-11-12 for the real-machine fixes (`ae8ea336`), which staled
+the `registry.ex` pin: `stated_as/2`, the sentence a write's acknowledgement
+states an occurrence in, is public for the reply's event card
+(`Temporal.Card`). No delivery path changed; the cited `registry.ex` lines
+point at the committed code.
+
+Re-read on 2026-11-13 for events drawn as cards, which staled the `mobile.ex`
+pin: a phone's message now also says it draws events when its session
+negotiated mobile 3, and trips once its list channel pulled the trips index, by the
+same answer that decides which blocks it is sent; `registry.ex`'s yearly `stated_as`
+reads with a comma where it had an em dash, a word of the text it sends.
+A reminder is delivered with no `turn_id`, so it takes no records and carries
+no block; its row, proactive dedupe and push are as before. The spec cites no
+`mobile.ex` line. No delivery path the spec models changed.
+
+Re-read on 2026-11-14 for the place-search pacer (`eb5fc530`), which staled
+the `application.ex` pin: `supervision_children` gains
+`PlaceSearch.Brave.Pacer` right after `ReplyBlocks`, before `AgentSupervisor`,
+so it is one more early child whose crash restarts every later one, the
+temporal rail included, as the model already allows. `TemporalScheduler`
+still starts before `TemporalDeliverySupervisor`, the order the spec rests on.
+No delivery path the spec models changed; the six lines move its citations to
+`application.ex:292-384`, `:385-393` and `:392-393`.
+
+Re-read on 2026-11-14 for the trip placer (`d4f5e1f3`), which staled the
+`application.ex` pin. `supervision_children` gains `Trips.Placer` after
+`Computers.Calls` and before `Home.ReleaseTable` (M89 D13 B, `d4f5e1f3`),
+primary-only: it places the trip stops that wait for their place, runs each
+pass in a task linked to it, and raises on nothing it is sent, so a crash of
+it restarts only the children after it, the cue tree among them, which the
+model already takes as a `:rest_for_one` restart. `TemporalScheduler` still
+starts before `TemporalDeliverySupervisor`, both before the placer. No
+delivery path the spec models changed, and no citation moved.
+
+Re-read on 2026-11-14 for the trips' day turn (`fad8eeea`), which staled the
+`application.ex` pin. `supervision_children` gains `Trips.DayTurn` right
+after `Trips.Placer` (M89 D14), primary-only: it sends the trips index again
+at a day's turn, serves no call, arms one timer and raises on nothing it is
+sent, so a crash of it restarts only the children after it, the cue tree
+among them, which the model already takes as a `:rest_for_one` restart.
+`TemporalScheduler` still starts before `TemporalDeliverySupervisor`, both
+before the day turn. No delivery path the spec models changed, and no
+citation moved.
+
+Re-read on 2026-11-15 for Always On in every build (`d195aa17`), which
+staled the `application.ex` pin. The boot drops the release gate's alias,
+and `Home.ReleaseTable` fetches on an Always On server's primary with no
+build check, its child comment reworded in place. No child moved or changed
+order, and `TemporalScheduler` still starts before
+`TemporalDeliverySupervisor`. No delivery path the spec models changed, and
+the spec cites no `application.ex` line.
 
 ## Code and doc drift
 

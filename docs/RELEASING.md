@@ -87,22 +87,51 @@ attaches the packages to the draft.
 **The installer, and the one job that runs after publishing.** `scripts/install.sh`
 is what `https://fermix.ai/install` serves. On Linux with apt, dnf or zypper it
 installs the package; everywhere else, and with `--standalone`, it installs the
-standalone binary. It reads a package as `packages -> <target> -> <deb|rpm>` in
-`releases.json`, where each entry carries `url`, `sha256`, `sig_url` and
-`cert_url`, with a line-scanning awk rather than jq, so the feed stays
-pretty-printed, one key per line; `test_install_sh.py` runs the installer over
-the feed `build_releases_json.sh` really writes, which is what holds the two
-together. The installer reads the public `latest` feed and the public download
-URLs, and a draft has neither, so `release.yml`'s `installer` job runs after
-`promote`: `scripts/release/verify_installer.sh` waits (twelve checks, ten
-seconds apart) for `latest` to name the tag, runs the installer with `cosign`
-present, and requires that it chose the package, verified the signature against
-the tag, left the package database and `fermix --version` naming the release,
-and changed nothing on a second run — the debs on the two Ubuntu runners through
-`sudo`, the rpms as root inside `fedora:41`. Nothing waits on that job. A red
-one means the advertised command is broken for a release that is already out:
-fix the installer and re-serve it, because the release itself cannot be
-replaced.
+standalone binary. With `--always-on` it runs the release's Always On server
+script instead (`fermix_always_on.sh`, which every release from 0.20.0 on
+publishes and signs as a byte copy of `packaging/cloud/first-boot.sh`), with
+`--version` naming that release and every other argument passed on unread.
+It trusts one document: the digest table fermix.ai serves at
+`https://fermix.ai/install/releases`, which the site writes only after checking
+every file's cosign signature against the tag's release-workflow identity and
+hashing the file itself. The table is plain lines, read with awk:
+
+```
+format 1
+latest <version>
+<version> <sha256> <file>
+```
+
+with one row per file the installer fetches, of every pinned release: the four
+standalone binaries (`fermix_<os>_<arch>`), the four packages (`fermix_<version>_<amd64|arm64>.deb`,
+`fermix-<version>-1.<x86_64|aarch64>.rpm`) and the Always On server script
+(`fermix_always_on.sh`). The installer builds the download
+address itself (`https://github.com/tezra-io/fermix/releases/download/v<version>/<file>`),
+never reads GitHub's `releases.json`, `.sig` or `.pem`, and refuses before any
+download, `sudo` or package manager when the table cannot be fetched, its first
+line is not `format 1`, it names no `latest`, the release or this machine's file
+(with `--always-on`, the server script) has no single row, or the download does
+not match it. `test_install_sh.py` holds
+those refusals, and runs the installer over the table `build_install_table.sh`
+really writes.
+
+A new release is therefore invisible to the installer, Linux packages, standalone
+installs and Always On first boots and updates alike, until the site pins
+it (below). The installer downloads from the public release URLs, which a draft
+does not have, so `release.yml`'s `installer` job runs after `promote` against a
+table the rail builds itself: `scripts/release/build_install_table.sh` checks the
+nine files the installer fetches from the signed candidate with cosign against
+the tag and hashes them, and `scripts/release/verify_installer.sh` runs the repository's
+installer with a `curl` stand-in that answers `https://fermix.ai/install/releases`
+from that table and passes every other address to the real curl. It requires
+that the installer chose the package, checked it against the table, left the
+package database and `fermix --version` naming the release, and changed nothing
+on a second run: the debs on the two Ubuntu runners through `sudo`, the rpms as
+root inside `fedora:41`. On the deb rows it then runs `--always-on` without
+`sudo`, which must check the published server script against the table and
+stop at the script's first refusal, that the account is not root. Nothing waits on that job. A red one means the
+installer is broken for a release that is already out: fix the installer and
+re-serve it, because the release itself cannot be replaced.
 
 **Serving it.** `fermix-site` vendors the script as `src/installer/install.sh`,
 byte for byte, and `src/config/installer.ts` there pins its sha256 and the
@@ -110,6 +139,28 @@ engine commit it came from (a test holds the two together); the served copy is
 never edited in the site repository. The site's `/install` route answers by
 what asks: `curl`, `wget` and `sh` receive the script, and a browser is sent to
 the install page, so check the copy with `curl` and never by opening the address.
+Each release also needs its digests pinned: in the site checkout, with `cosign`
+on `PATH`, `node scripts/pin-engine-release.mjs vX.Y.Z` downloads the nine
+files the installer fetches with their `.sig` and `.pem` from the published release,
+verifies each against the tag's release-workflow identity, hashes it, and adds
+the rows to `src/config/engine-releases.txt`, moving `latest` only forward; any
+failure leaves the file unchanged. That file is what `/install/releases` serves.
+It is cumulative, so an Always On server can still install any release it
+lists; pinning an older release adds its rows without moving `latest`.
+Each app release then adds one row of its own, in the same site change that
+copies its appcast (the Mac app) or pins its packages (the Linux app,
+`node scripts/pin-linux-release.mjs vA.B.C`):
+`node scripts/pin-app-release.mjs macos vA.B.C` for the Mac app,
+`node scripts/pin-app-release.mjs linux vA.B.C` for the Linux app. It adds
+`app <engine_version> <system> <app_version>`, saying that app release is
+published and which engine release it carries, which `FermixCore.Home.Releases`
+reads to choose the release an Always On server may install; the installer
+skips the row. The script needs `cosign` on `PATH` and `gh` signed in to an
+account that can read the app's repository, which is private: it verifies every
+file the app release published on `download.fermix.ai`
+against the app's release workflow for that tag and its commit, then reads the
+engine release the app pins at that commit, which must already be pinned here,
+so pin the engine release first. Any failure leaves the file unchanged.
 Before the site deploys:
 
 ```sh
@@ -120,14 +171,67 @@ and once it has:
 
 ```sh
 curl -fsSL https://fermix.ai/install | cmp - scripts/install.sh
+curl -fsSL https://fermix.ai/install/releases | awk -v v=X.Y.Z '$0 == "latest " v || $1 == v'
 ```
 
-**The order matters the first time a release changes what the installer needs.**
-An installer that installs packages, served against a `latest` release that
-carries none, refuses every apt, dnf and zypper machine with `lists no deb
-package`. So the site deploys the new script only after the release that
-publishes packages is out, which is where the site already sits in the release
-order.
+The second command must print `latest X.Y.Z` and nine rows; then walk the
+Linux package row of the install paths above against the served installer.
+
+**The order matters.** The installer refuses a release the table does not list,
+so until the site's pin of a release deploys, `curl -fsSL https://fermix.ai/install | sh`
+keeps installing the previous `latest`, and `--version X.Y.Z` for the new one
+(an Always On server set up at that release) stops with `lists no release
+X.Y.Z`. Pin each release in the site pull request that follows it. A change to
+what the installer reads deploys only together with, or after, the table it
+reads: an installer ahead of its table refuses every machine.
+
+**The server leads, and what a release owes its computers.** An Always On
+server updates on its own (`fermix-update`, written by
+`packaging/cloud/first-boot.sh`): every five minutes it installs the newest
+release eligible for its home, which `fermix home status --json` answers as
+`update.eligible` (and as `update_ceiling`, the field a script written by an
+older first boot reads). A release is eligible once the table carries an `app`
+row for it for the system of each computer that keeps the home's backups, so
+the order of a release is: the engine is tagged and pinned on the site; the Mac
+app that pins it is published and its `app` row deploys, at which point servers
+take the engine within five minutes; the Linux app follows whenever it is
+ready. Nothing waits for an owner to install an app. An engine release with no
+`app` row reaches no server, which is the safe side: check
+`curl -fsSL https://fermix.ai/install/releases | awk '$1 == "app"'` after the
+app's site change deploys. After each install the server fetches that
+release's `fermix_always_on.sh`, checks it against the table and lets it
+rewrite the update script, so a change to `fermix-update` reaches existing
+servers with the release that carries it; keep `--update-script-only` and the
+`update_ceiling` field working for as long as any server may still run an
+older script. On the server, `sudo fermix-update --release X.Y.Z` is the same
+update by hand: it refuses a release below the installed one, one the table
+does not list, and one that is not eligible unless `--ahead-of-apps` is given.
+
+Computers are clients with a window, counted in minor versions
+(`FermixCore.Computers.Versions`): the server serves a computer on its own
+minor version or up to two behind, and a computer further behind keeps its
+settings only. Every release therefore owes the two minor versions before it:
+
+- a wire change (mobile, companion, management) is additive first, so the
+  server understands the old form and the new, and the old form is removed
+  only once the window has passed it;
+- the companion protocol's `min_version` is never raised above the version
+  the release two minor versions back speaks, and a client newer than the
+  daemon is served the daemon's newest through
+  `client_hello.min_protocol_version` (`priv/companion/PROTOCOL.md`,
+  *Versioning*), so each app keeps speaking the versions inside the window;
+- `home.status` and the settings rows only gain optional fields, since an
+  older app reads a newer server's answers.
+
+A restore, Restore here, a move and a move back read a home by its **format**,
+never by the engine that wrote it (`FermixCore.Home.Readable`, M97 D16): an
+engine reads a home of its own home format or an older one. Eligibility waits
+for a published app that reads the home a release writes, not for its install,
+so a release that keeps the format needs no new app, and one whose change
+raises `@home_format` (the module says when) waits for the apps that carry it.
+The release table names each release's format in a `home_format
+<engine_version> <home_format>` row; once one release has a row, every newer
+one needs its own, or the server refuses the table and installs nothing.
 
 **The version rule, and what it costs.** Neither package may carry a Debian
 revision or an rpm epoch, because `fermix-desktop` pins `Depends: fermix (= <v>)`

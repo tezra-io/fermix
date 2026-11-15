@@ -109,67 +109,31 @@ defmodule FermixCore.Management.HomeMoveTest do
       at = ~U[2031-05-04 10:10:00Z]
 
       seams =
-        Keyword.put(ctx.seams, :open_enrollment, fn :manual, nil ->
+        Keyword.put(ctx.seams, :open_enrollment, fn nil ->
           {:ok, %{code: "fxenroll1.abc", expires_at: at}}
         end)
 
       assert {:ok, %{"code" => "fxenroll1.abc", "expires_at" => "2031-05-04T10:10:00Z"}} =
-               HomeMove.enroll_open(nil, [engine_role: @primary] ++ seams)
+               HomeMove.enroll_open([engine_role: @primary] ++ seams)
 
       refused =
-        Keyword.put(ctx.seams, :open_enrollment, fn :manual, nil ->
+        Keyword.put(ctx.seams, :open_enrollment, fn nil ->
           {:error, {:unavailable, "Remote reach is off."}}
         end)
 
       assert {:error, {:unavailable, "home", "Remote reach is off."}} =
-               HomeMove.enroll_open(nil, [engine_role: @primary] ++ refused)
+               HomeMove.enroll_open([engine_role: @primary] ++ refused)
 
       assert {:error,
               {:unavailable, "home", "Only the primary enrolls candidates and starts a move."}} =
-               HomeMove.enroll_open(nil, [engine_role: @device] ++ seams)
+               HomeMove.enroll_open([engine_role: @device] ++ seams)
 
       assert {:error, :invalid_params, _details} =
                forwarded("home.enroll.open", %{"code" => "x"}, @primary, seams)
 
-      assert {:ok, %{"code" => "fxenroll1.abc"}} =
-               HomeMove.enroll_open("manual", [engine_role: @primary] ++ seams)
-    end
-
-    # M75 lean v1 L15, §4.3: the code inside a server Fermix creates lives 24
-    # hours, and a desktop replacing its server asks the server for one.
-    test "a 24-hour code opens only when the desktop asks over the link", ctx do
-      test = self()
-
-      seams =
-        Keyword.put(ctx.seams, :open_enrollment, fn kind, returning ->
-          send(test, {:opened, kind, returning})
-          {:ok, %{code: "fxenroll1.def", expires_at: ~U[2031-05-05 10:00:00Z]}}
-        end)
-
-      assert {:ok, %{"code" => "fxenroll1.def", "expires_at" => "2031-05-05T10:00:00Z"}} =
-               forwarded("home.enroll.open", %{"kind" => "provisioned"}, @primary, seams)
-
-      assert_received {:opened, :provisioned, nil}
-
-      # Anything but a desktop's forward is refused by name: `home.act` takes the step.
-      assert {:error, :unavailable,
-              %{
-                "capability" => "home",
-                "method" => "home.enroll.open",
-                "sentence" => <<_, _::binary>>
-              }} = route("home.enroll.open", %{"kind" => "provisioned"}, @primary, seams)
-
-      assert {:error, {:invalid_params, "kind", sentence}} =
-               HomeMove.enroll_open("provisioned", [engine_role: @primary] ++ seams)
-
-      assert sentence ==
-               "A code that lives 24 hours opens only for a server Fermix creates from your " <>
-                 "computer."
-
+      # A window has no kind: one named is a param the method does not take.
       assert {:error, :invalid_params, %{"field" => "kind"}} =
-               forwarded("home.enroll.open", %{"kind" => "forever"}, @primary, seams)
-
-      refute_received {:opened, _kind, _returning}
+               forwarded("home.enroll.open", %{"kind" => "manual"}, @primary, seams)
     end
 
     # Always On's move back: the copied-code window a linked desktop opens
@@ -179,8 +143,8 @@ defmodule FermixCore.Management.HomeMoveTest do
       test = self()
 
       seams =
-        Keyword.put(ctx.seams, :open_enrollment, fn kind, returning ->
-          send(test, {:opened, kind, returning})
+        Keyword.put(ctx.seams, :open_enrollment, fn returning ->
+          send(test, {:opened, returning})
           {:ok, %{code: "fxenroll1.ghi", expires_at: ~U[2031-05-04 10:40:00Z]}}
         end)
 
@@ -188,21 +152,83 @@ defmodule FermixCore.Management.HomeMoveTest do
                forwarded("home.enroll.open", %{}, @primary, seams)
 
       {:desktop, desktop_id} = @desktop
-      assert_received {:opened, :manual, ^desktop_id}
+      assert_received {:opened, ^desktop_id}
 
       assert {:ok, %{"code" => "fxenroll1.ghi"}} =
-               HomeMove.enroll_open(nil, [engine_role: @primary] ++ seams)
+               HomeMove.enroll_open([engine_role: @primary] ++ seams)
 
-      assert_received {:opened, :manual, nil}
+      assert_received {:opened, nil}
+    end
+  end
+
+  # M97 §3.1, §7.5: a computer's code, and the owner's answer to the
+  # computer that waits on it, each sent by a linked computer over the link.
+  describe "a computer's window" do
+    test "opens a computer's code for the purpose, and refuses one the method does not know",
+         ctx do
+      test = self()
+
+      seams =
+        Keyword.merge(ctx.seams,
+          open_join: fn ->
+            send(test, :join_opened)
+            {:ok, %{code: "fxenroll1.jkl", expires_at: ~U[2031-05-04 10:40:00Z]}}
+          end,
+          open_enrollment: fn _returning -> flunk("a computer's code is no candidate's") end
+        )
+
+      assert {:ok, %{"code" => "fxenroll1.jkl"}} =
+               forwarded("home.enroll.open", %{"purpose" => "computer"}, @primary, seams)
+
+      assert_received :join_opened
+
+      assert {:error, :invalid_params, %{"field" => "purpose"}} =
+               forwarded("home.enroll.open", %{"purpose" => "phone"}, @primary, seams)
+    end
+
+    test "approves with the computer's digits, typed with or without a space", ctx do
+      test = self()
+
+      seams =
+        Keyword.merge(ctx.seams,
+          approve_join: fn sas ->
+            send(test, {:approved, sas})
+
+            if sas == "482913",
+              do: {:ok, %{device_id: "7e1f0c2a-3b4d-4e5f-8a6b-7c8d9e0f1a2b", name: "loft-linux"}},
+              else: {:error, :sas_mismatch}
+          end,
+          deny_join: fn -> send(test, :denied) && :ok end
+        )
+
+      assert {:ok,
+              %{"device_id" => "7e1f0c2a-3b4d-4e5f-8a6b-7c8d9e0f1a2b", "name" => "loft-linux"}} =
+               forwarded("home.enroll.approve", %{"sas" => "482 913"}, @primary, seams)
+
+      assert_received {:approved, "482913"}
+
+      assert {:error, :invalid_params, %{"field" => "sas", "sentence" => _mismatch}} =
+               forwarded("home.enroll.approve", %{"sas" => "100200"}, @primary, seams)
+
+      assert {:error, :invalid_params, %{"field" => "sas"}} =
+               forwarded("home.enroll.approve", %{"sas" => "48291"}, @primary, seams)
+
+      refute_received {:approved, "48291"}
+
+      assert {:ok, %{"denied" => true}} = forwarded("home.enroll.deny", %{}, @primary, seams)
+      assert_received :denied
+
+      assert {:error, {:unavailable, "home", _sentence}} =
+               HomeMove.enroll_deny([engine_role: @device] ++ seams)
     end
   end
 
   describe "home.enroll.withdraw" do
-    test "closes the server's 24-hour code on the primary", ctx do
+    test "closes the window on the primary", ctx do
       test = self()
 
       seams =
-        Keyword.put(ctx.seams, :withdraw_enrollment, fn :provisioned ->
+        Keyword.put(ctx.seams, :withdraw_enrollment, fn ->
           send(test, :withdrawn)
           :ok
         end)
@@ -213,7 +239,7 @@ defmodule FermixCore.Management.HomeMoveTest do
       assert_received :withdrawn
 
       refused =
-        Keyword.put(ctx.seams, :withdraw_enrollment, fn :provisioned ->
+        Keyword.put(ctx.seams, :withdraw_enrollment, fn ->
           {:error, {:unavailable, "Fermix could not keep the enrollment window."}}
         end)
 
@@ -229,7 +255,7 @@ defmodule FermixCore.Management.HomeMoveTest do
                forwarded("home.enroll.withdraw", %{}, @device, seams)
 
       assert {:error, :invalid_params, %{"field" => "kind"}} =
-               forwarded("home.enroll.withdraw", %{"kind" => "forever"}, @primary, seams)
+               forwarded("home.enroll.withdraw", %{"kind" => "manual"}, @primary, seams)
 
       assert {:error, :unavailable,
               %{
@@ -240,28 +266,6 @@ defmodule FermixCore.Management.HomeMoveTest do
                route("home.enroll.withdraw", %{}, @primary, seams)
 
       refute_received :withdrawn
-    end
-
-    # Always On's move back: Cancel closes the copied code the desktop opened
-    # on its server, so `kind` names the window (`provisioned` unless said).
-    test "closes the copied code when the desktop names it", ctx do
-      test = self()
-
-      seams =
-        Keyword.put(ctx.seams, :withdraw_enrollment, fn kind ->
-          send(test, {:withdrawn, kind})
-          :ok
-        end)
-
-      assert {:ok, %{"withdrawn" => true}} =
-               forwarded("home.enroll.withdraw", %{"kind" => "manual"}, @primary, seams)
-
-      assert_received {:withdrawn, :manual}
-
-      assert {:ok, %{"withdrawn" => true}} =
-               forwarded("home.enroll.withdraw", %{"kind" => "provisioned"}, @primary, seams)
-
-      assert_received {:withdrawn, :provisioned}
     end
   end
 
@@ -278,7 +282,6 @@ defmodule FermixCore.Management.HomeMoveTest do
       window = %{
         state: :used,
         expires_at: ~U[2031-05-04 10:10:00Z],
-        kind: :provisioned,
         candidate_id: record.candidate_id
       }
 
@@ -288,12 +291,10 @@ defmodule FermixCore.Management.HomeMoveTest do
         end)
 
       assert {:ok, status} = route("home.status", %{}, @primary, seams)
-      # Which candidate used the window, and whether it was the code inside a
-      # server Fermix created: the desktop that replaces its server reads it.
+      # Which candidate used the window.
       assert status["enrollment"] == %{
                "state" => "used",
                "expires_at" => "2031-05-04T10:10:00Z",
-               "kind" => "provisioned",
                "candidate_id" => record.candidate_id
              }
 
@@ -319,7 +320,7 @@ defmodule FermixCore.Management.HomeMoveTest do
 
       assert Enum.map(items, & &1["id"]) ==
                ~w(keychain_secrets engine_version disk s3_size plugins stays_here whatsapp slack
-                  coding_agents cutover_gap serves_nothing service)
+                  coding_agents settings cutover_gap serves_nothing service)
 
       assert Enum.all?(items, &(&1["status"] in ~w(ok warn block) and &1["sentence"] != ""))
       refute_received :restarted
@@ -346,6 +347,39 @@ defmodule FermixCore.Management.HomeMoveTest do
 
       assert {:error, :invalid_params, %{"field" => "candidate_id"}} =
                forwarded("home.move.readiness", %{}, @primary, ctx.seams)
+    end
+  end
+
+  # M97 §7.3 (O3): what this computer keeps on for its server after a move.
+  describe "what a move keeps on" do
+    @kept_settings [
+      snapshot: %{fermix_core: [computer_use: [enabled: true]], sandbox: [mode: :standard]},
+      os: :macos
+    ]
+
+    test "the start records what was kept on, the block's own when nothing was said", ctx do
+      {:ok, record} = Candidates.add(ctx.home, candidate_attrs(), @now)
+      seams = [engine_role: @primary] ++ @kept_settings ++ ctx.seams
+
+      assert {:ok, _started} =
+               HomeMove.move_start(
+                 record.candidate_id,
+                 @passphrase,
+                 [keep_offers: [:files_and_shell]] ++ seams
+               )
+
+      assert {:ok, request} = Move.read_request(ctx.home)
+      assert Move.keep_offers(request) == ["files_and_shell"]
+    end
+
+    test "a start with no choice keeps the block as proposed", ctx do
+      {:ok, record} = Candidates.add(ctx.home, candidate_attrs(), @now)
+      seams = [engine_role: @primary] ++ @kept_settings ++ ctx.seams
+
+      assert {:ok, _started} = HomeMove.move_start(record.candidate_id, @passphrase, seams)
+      assert {:ok, request} = Move.read_request(ctx.home)
+      # Apple Maps by its switch's default, on (M89 D13).
+      assert Move.keep_offers(request) == ~w(files_and_shell browser computer_use places)
     end
   end
 

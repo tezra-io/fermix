@@ -35,13 +35,13 @@ behind it:
 - It rejects a `response.create` while a response is running
   (`conversation_already_has_active_response`).
 - A response reads only the outputs and status items appended before it
-  started. The comment at `session_server.ex:1488-1498` records this
+  started. The comment at `session_server.ex:1609-1619` records this
   ("snapshotted context").
 
 The call starts connected on socket 1, configured, with the operator's first
 response under way. The checks use one or two tool calls, one to four sockets,
 two or three reconnect attempts and at most one yes. Production has three
-attempts (`session_server.ex:60`).
+attempts (`session_server.ex:70`).
 
 **Environment switches** (set per check):
 - `Drops`: how many times the network or OpenAI may drop an open socket.
@@ -49,7 +49,7 @@ attempts (`session_server.ex:60`).
   speech (`create_response: true`, `openai_client.ex:432`).
 - `Yeses` (0 or 1): the owner says yes to the command a tool call parked, and
   the session starts its confirmed run (`answer_access` ->
-  `start_access_dispatch`, `session_server.ex:1323-1351`). The yes is one
+  `start_access_dispatch`, `session_server.ex:1444-1472`). The yes is one
   step, `Yes`, on the current socket, allowed once a tool call has run. Its
   own server-VAD response is `VadTurns`'s.
 - `OpensCanFail`: a reconnect's handshake fails. No socket process is left
@@ -71,44 +71,44 @@ attempts (`session_server.ex:60`).
 **Mechanism switches** (`TRUE` is the real code; each is switched off only by
 the checks that show a rule needs it):
 - `DefersWhileCallsPending`: `finish_tool_turn` holds the trigger while other
-  calls of the batch are in flight (`session_server.ex:1499`).
+  calls of the batch are in flight (`session_server.ex:1620`).
 - `DefersWhileResponseActive`: it also holds the trigger while OpenAI's
-  response is active, and `response.done` sends it (`:1503`,
-  `flush_deferred_response` `:1512`).
+  response is active, and `response.done` sends it (`:1540`,
+  `flush_deferred_response` `:1549`).
 - `RearmsOnRejection`: a trigger OpenAI rejected for an active response is owed
   again, and that response's `response.done` sends it
-  (`handle_active_response_race`, `:1538`).
+  (`handle_active_response_race`, `:1575`).
 - `CancelsToolsOnReconnect`: `schedule_reconnect` kills in-flight tool tasks,
-  and `Task.shutdown` flushes their replies (`:669`, `:776-777`). A
+  and `Task.shutdown` flushes their replies (`:694`, `:801-802`). A
   confirmed run is not a tool task: a reconnect leaves it running, and its
   reply stays queued.
 - `ClosesUnconfigured`: `resume_provider_session` closes a socket whose
-  `session.update` failed (`:714`).
+  `session.update` failed (`:739`).
 - `EndsWhenExhausted`: with no reconnect left, the call ends (`end_call`,
-  `:730`).
+  `:755`).
 - `ResetsAttemptsOnSuccess`: a reconnect OpenAI confirms resets
-  `reconnect_attempts`: the new socket's first `session.updated` (`:923`).
-- `ResetsOnlyWhenConfirmed`: nothing earlier resets it (`:526`). A socket
+  `reconnect_attempts`: the new socket's first `session.updated` (`:948`).
+- `ResetsOnlyWhenConfirmed`: nothing earlier resets it (`:544`). A socket
   that opens and takes its `session.update` but drops before
   `session.updated` has used an attempt. Off, the reset runs as soon as the
   socket opens, as it did at `35a6acdc` (`:467`).
 - `OwnSocketOnly`: only `openai_pid`'s events, errors and `EXIT` are acted on.
   Any other socket's are dropped: the event and error clauses match the pid in
-  their heads (`:420`, `:427`, `:489`), one clause drops the rest (`:498`), and
-  the `EXIT` clause matches only `openai_pid` (`:504`).
+  their heads (`:438`, `:445`, `:507`), one clause drops the rest (`:516`), and
+  the `EXIT` clause matches only `openai_pid` (`:522`).
 - `HoldsOutcome`: a confirmed run's outcome that lands while the call is not
   live is held, and told once OpenAI confirms the next socket
-  (`speak_outcome` `:1364-1379`, `hold_outcome` `:1381`,
-  `speak_held_outcomes` `:927`, `:1385-1386`). Not live means
+  (`speak_outcome` `:1401-1416`, `hold_outcome` `:1418`,
+  `speak_held_outcomes` `:952`, `:1422-1423`). Not live means
   `provider_ready?` is false (the reconnect window, before the next socket's
   `session.updated`), or the status item's send fails (`openai_pid` died and
   its `EXIT` is still queued behind the reply). Off, the status item and the
   trigger go out whatever the call's state, and a failed send is only
   reported, as before the fix for RT-4.
 - `EndsOnRefusal`: an error from `openai_pid` before its `session.updated`, of
-  any kind, ends the call: the clause at `:420` matches it while
-  `provider_ready?` is false, and `refuse_call` (`:745`) calls
-  `end_call(:provider_refused)` (`:730`).
+  any kind, ends the call: the clause at `:438` matches it while
+  `provider_ready?` is false, and `refuse_call` (`:770`) calls
+  `end_call(:provider_refused)` (`:755`).
 
 The confirmed run's reply goes through the same `finish_tool_turn`, so the
 first three switches act on its trigger too.
@@ -172,7 +172,7 @@ fails. That is why a failed send holds too. The rule claims no more than
 that: a status item still on the wire, or not yet answered, when its socket
 drops dies with that conversation, as a tool output does. An outcome still
 held when the call ends is never told; `terminate/2` logs one warning naming
-the intent and the tool (`warn_unspoken_outcomes`, `:569`, `:1391-1398`),
+the intent and the tool (`warn_unspoken_outcomes`, `:587`, `:1428-1435`),
 which the spec does not model.
 
 **Check 05** holds with a drop, failed handshakes, failed `session.update`s and
@@ -180,7 +180,7 @@ a closed socket's exit landing at any point:
 - While the call lives, every open socket is `openai_pid`. This rests on
   `ClosesUnconfigured` (check 06).
 - A live call always has a socket or a reconnect timer: the 43 s freeze that
-  the comment at `session_server.ex:721-729` describes. This rests on
+  the comment at `session_server.ex:827-835` describes. This rests on
   `EndsWhenExhausted` (check 07) and on `OwnSocketOnly` (check 17).
 
 Check 05 and its needs checks run production's three attempts. With two, the
@@ -276,13 +276,13 @@ as well. All still hold:
 - `interrupt`. Its `response.cancel` only ends the active response early,
   which `RespDone` already allows at any time.
 - A tool task crash. Its `:DOWN` is answered exactly like a result
-  (`session_server.ex:466-471`). A confirmed run's crash is answered like its
-  reply, with the outcome-unknown text (`:458-462`).
+  (`session_server.ex:502-507`). A confirmed run's crash is answered like its
+  reply, with the outcome-unknown text (`:476-480`).
 - The access gate's own state (`Capabilities.AccessGate`): what the call has
   read from outside (`outside_sources`), the waiting stamp
-  `tool_call_context` gives each tool task (`:1288-1294`), and the binding of
+  `tool_call_context` gives each tool task (`:1322-1331`), and the binding of
   the owner's answer to the first input item committed after the park, by
-  item id (`bind_access_answer` and `answer_access`, `:1304-1333`, with the
+  item id (`bind_access_answer` and `answer_access`, `:1341-1370`, with the
   item id `decode_server_event` passes on, `openai_client.ex:372-380`).
   They decide whether a yes starts a run, not when its reply lands. A spoken
   no only adds a passive status item (no `response.create`) and starts
@@ -295,11 +295,11 @@ as well. All still hold:
   (`held_outcomes`), one per confirmed run.
 - `call_start` and its failure path. It builds the `session.update` before it
   opens a socket, so a failed build opens none. A failed `call_start` stops
-  the voice connection and the session with it
-  (`local_voice_socket.ex:561-564`), and a socket it closed after a failed
-  send never became `openai_pid`. OpenAI refusing the first socket's
+  the voice connection and the session with it (`call_client.ex:275-281`,
+  then `local_voice_socket.ex:394-399`), and a socket it closed after a
+  failed send never became `openai_pid`. OpenAI refusing the first socket's
   `session.update` takes the clause a reconnect's refusal takes
-  (`session_server.ex:420`, modelled); `session_server_test.exs` covers it.
+  (`session_server.ex:456`, modelled); `session_server_test.exs` covers it.
 - The network between OpenAI and the socket process. An event OpenAI emits
   lands in the session's mailbox in the same step.
 - WebSockex itself (`deps/websockex`, 0.5.1 in `mix.lock`). It cannot be
@@ -318,11 +318,34 @@ as well. All still hold:
   session nothing"), and the link by a test over a loopback connection ("a
   real socket's events name it, and its death reaches the caller only as its
   EXIT").
-- `SessionServer.handle_provider_event/2` (`session_server.ex:102`), a test
+- `SessionServer.handle_provider_event/2` (`session_server.ex:112`), a test
   seam that nothing in `lib` calls. It acts on an event without the pid check,
   and an error before `session.updated` does not end the call through it, so
   `NoFreeze`, `NoStrayTimer`, `NoTickWhileConnected` and `NoUnconfiguredWait`
   hold only while it stays a test seam.
+
+## Re-read for the review's fixes (M97, 2026-11-11)
+
+`c6fe1c48` staled the `session_server.ex` pin: the context of each tool call
+names the call's own process (`turn_pid`), so a browser task on a computer
+stays with that call from one tool call to the next. It is one more key in a
+context no step reads, so no modelled step changed. The comments' line
+numbers into `session_server.ex` point at the committed code.
+
+## Re-read for the call's lists and trips (M89, 2026-11-14)
+
+`08e03f95` staled the `session_server.ex` pin: the `session.update` a call
+sends carries the owner's lists' and trips' lines (`kept_lines/2`), from
+two store reads in one linked task bounded at 1.5 s (`read_kept/2`). A read
+that times out, exits or crashes leaves those lines out, or on a refresh keeps
+the last ones, and the event goes as before. The task's own `EXIT` lands in
+the catch-all clause, which drops it (neither the socket nor the screen
+feed), so it is never a `disc`. The read runs only where the event is built,
+in `call_start` and `reload_runtime`, neither modelled. A reconnect resends
+the event already built, with no read. `kept_read` and `kept_unread` are two
+more keys no step reads, `session_updated`'s trace gains them, and the tool
+context gains `trips_told`. No modelled step changed. The comments' line
+numbers into `session_server.ex` point at the committed code.
 
 ## Findings
 

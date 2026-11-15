@@ -1,8 +1,8 @@
 defmodule FermixCore.Home.CandidateTest do
   use ExUnit.Case, async: true
 
-  alias FermixCore.Home.AlwaysOnRelease
   alias FermixCore.Home.Candidate
+  alias FermixCore.Home.DeviceLocal
   alias FermixCore.Home.EnrollmentCode
   alias FermixCore.Home.Epoch
   alias FermixCore.Home.Moved
@@ -37,12 +37,7 @@ defmodule FermixCore.Home.CandidateTest do
                )
 
       assert File.read!(Path.join(ctx.home, "config.toml")) ==
-               ~s([fermix_core.engine]\nrole = "candidate"\n\n[fermix_core.always_on]\nenabled = true\n)
-
-      # A candidate exists only for an Always On move, and its server's first
-      # boot reads `fermix home status` while it waits: a release build of it
-      # offers Always On from its own settings until the move replaces them.
-      assert AlwaysOnRelease.available_in(ctx.home, :prod) == {:ok, true}
+               ~s([fermix_core.engine]\nrole = "candidate"\n)
 
       assert mode(Candidate.dir(ctx.home)) == 0o700
       assert mode(Path.join(Candidate.dir(ctx.home), "mobile")) == 0o700
@@ -63,7 +58,7 @@ defmodule FermixCore.Home.CandidateTest do
       assert {:ok, %{secret_key: <<_::256>>, salt: <<_::128>>}} =
                Candidate.recipient_pair(ctx.home)
 
-      assert {:ok, %{"phase" => "enrolling", "primary" => primary}} =
+      assert {:ok, %{"phase" => "enrolling", "primary" => primary, "window" => window}} =
                Candidate.read_state(ctx.home)
 
       assert primary == %{
@@ -71,6 +66,23 @@ defmodule FermixCore.Home.CandidateTest do
                "gateway_pk" => Base.encode64(@facts.gateway_pk),
                "node_id" => @facts.node_id
              }
+
+      # The window it enrolls into is kept as a digest of its secret: the
+      # state holds neither the secret nor the code.
+      assert window == window(@facts.secret)
+      state_text = File.read!(Candidate.path(ctx.home, "state.json"))
+
+      for text <- [ctx.code | secret_texts(@facts.secret)],
+          do: refute(state_text =~ text)
+
+      # The machine is an Always On server from now on, whatever the move
+      # does to the home's settings: the mark stays on it.
+      assert Candidate.server?(ctx.home)
+      assert Candidate.server_path(ctx.home) == Path.join([ctx.home, "device", "server.json"])
+      assert mode(Candidate.server_path(ctx.home)) == 0o600
+      assert mode(Path.join(ctx.home, "device")) == 0o700
+      assert DeviceLocal.excluded?("device/server.json")
+      assert DeviceLocal.kept_through_return?("device/server.json")
     end
 
     test "takes a home that holds only what stays on a machine", ctx do
@@ -99,7 +111,7 @@ defmodule FermixCore.Home.CandidateTest do
 
       assert {:ok, _code} = Candidate.enroll(ctx.home, ctx.code, now: @now, hello: stopped())
       {:ok, state} = Candidate.read_state(ctx.home)
-      :ok = Candidate.put_state(ctx.home, Map.put(state, "phase", "enrolled"), @now)
+      :ok = Candidate.put_state(ctx.home, Map.put(state, "phase", "receiving"), @now)
 
       assert {:error, :already_candidate} =
                Candidate.enroll(ctx.home, ctx.code, now: @now, hello: stopped())
@@ -125,7 +137,162 @@ defmodule FermixCore.Home.CandidateTest do
       {:ok, new_key} = Candidate.noise_keypair(ctx.home)
       refute new_key.public == old_key.public
       assert File.read!(Path.join(ctx.home, "config.toml")) =~ ~s(role = "candidate")
-      assert Enum.sort(File.ls!(ctx.home)) == ["candidate", "config.toml"]
+      assert Enum.sort(File.ls!(ctx.home)) == ["candidate", "config.toml", "device"]
+      assert Candidate.server?(ctx.home)
+    end
+
+    # Always On review M1: a server waiting for its move, or whose 24 hours
+    # ran out, is set up again by running its command with a new code. A new
+    # code exists only once its primary forgot it (Forget this server) or
+    # dropped it at the same 24 hours, so nothing waits on it.
+    test "replaces a candidate that waits for its move or whose wait ran out, while its " <>
+           "engine is stopped",
+         ctx do
+      {:ok, second} = EnrollmentCode.encode(%{@facts | secret: :binary.copy(<<0x6B>>, 32)})
+
+      for phase <- ~w(enrolled expired) do
+        {:ok, _first} = Candidate.enroll(ctx.home, ctx.code, now: @now, hello: stopped())
+        {:ok, old_key} = Candidate.noise_keypair(ctx.home)
+        {:ok, state} = Candidate.read_state(ctx.home)
+        :ok = Candidate.put_state(ctx.home, Map.put(state, "phase", phase), @now)
+
+        assert {:error, :daemon_running} =
+                 Candidate.enroll(ctx.home, second, now: @now, hello: fn -> {:ok, %{}} end),
+               phase
+
+        assert {:ok, %{secret: <<0x6B, _rest::binary>>}} =
+                 Candidate.enroll(ctx.home, second, now: @now, hello: stopped())
+
+        assert {:ok, %{"phase" => "enrolling", "window" => window}} =
+                 Candidate.read_state(ctx.home)
+
+        assert window == window(:binary.copy(<<0x6B>>, 32)), phase
+        {:ok, new_key} = Candidate.noise_keypair(ctx.home)
+        refute new_key.public == old_key.public, phase
+        # Nothing of the old one is left beside it; the server mark stays.
+        assert Enum.sort(File.ls!(ctx.home)) == ["candidate", "config.toml", "device"]
+        assert Candidate.server?(ctx.home), phase
+      end
+
+      assert Candidate.error_sentence(:daemon_running) ==
+               "Fermix is running in this home: stop it first (fermix stop), then enroll " <>
+                 "again with the new code."
+    end
+
+    # Replacing a held candidate asks whether its engine runs; a probe whose
+    # connect timed out could not tell, so nothing is replaced, and the
+    # sentence says what to do.
+    test "a candidate Fermix cannot tell is stopped is not replaced", ctx do
+      {:ok, second} = EnrollmentCode.encode(%{@facts | secret: :binary.copy(<<0x6B>>, 32)})
+      {:ok, _first} = Candidate.enroll(ctx.home, ctx.code, now: @now, hello: stopped())
+      {:ok, state} = Candidate.read_state(ctx.home)
+      :ok = Candidate.put_state(ctx.home, Map.put(state, "phase", "expired"), @now)
+      before = tree(ctx.home)
+
+      assert Candidate.enroll(ctx.home, second, now: @now, hello: fn -> {:error, :timeout} end) ==
+               {:error, {:daemon_probe_failed, :timeout}}
+
+      assert tree(ctx.home) == before
+
+      assert Candidate.error_sentence({:daemon_probe_failed, :timeout}) ==
+               "Fermix could not tell whether it runs in this home (:timeout), so it enrolled " <>
+                 "nothing. Make sure it is stopped (fermix stop), then enroll again."
+    end
+
+    # Always On re-check: the server's command run again with the code it
+    # enrolled with, inside its thirty minutes, would replace the held server
+    # under new keys, which its primary then refuses as used; one still
+    # enrolling would lose the take-back of a lost answer. The code's window
+    # is the one this candidate enrolls or enrolled into, so nothing changes,
+    # whether its engine runs or not.
+    test "refuses the code it enrolls or enrolled with, changing nothing, its engine running " <>
+           "or not",
+         ctx do
+      for {phase, reason} <- [{"enrolling", :enrolling}, {"enrolled", :enrolled}] do
+        home = Path.join(ctx.tmp, phase)
+        {:ok, _first} = Candidate.enroll(home, ctx.code, now: @now, hello: stopped())
+        {:ok, state} = Candidate.read_state(home)
+        :ok = Candidate.put_state(home, Map.put(state, "phase", phase), @now)
+        # An accepted enrollment drops its code, as the candidate process does.
+        if phase == "enrolled", do: :ok = Candidate.drop_code(home)
+        before = tree(home)
+
+        for hello <- [stopped(), fn -> {:ok, %{}} end] do
+          assert {:error, {:same_window, ^reason}} =
+                   Candidate.enroll(home, ctx.code, now: @now, hello: hello),
+                 phase
+        end
+
+        assert tree(home) == before, phase
+      end
+
+      assert Candidate.error_sentence({:same_window, :enrolled}) ==
+               "This server enrolled with this code already and waits for its move. To set it " <>
+                 "up again, open a new code in Always On and run this command with that code."
+
+      assert Candidate.error_sentence({:same_window, :enrolling}) ==
+               "This server is enrolling with this code already."
+    end
+
+    # A failed enrollment may be tried again with its own code while its
+    # window is open, an expired one's code is long past its thirty minutes,
+    # and a candidate written before the window was kept names none.
+    test "replaces a candidate that ended given its own code, and one whose state names no " <>
+           "window",
+         ctx do
+      for phase <- ~w(failed expired) do
+        home = Path.join(ctx.tmp, phase)
+        {:ok, _first} = Candidate.enroll(home, ctx.code, now: @now, hello: stopped())
+        {:ok, old_key} = Candidate.noise_keypair(home)
+        {:ok, state} = Candidate.read_state(home)
+        :ok = Candidate.put_state(home, Map.put(state, "phase", phase), @now)
+
+        assert {:ok, _code} = Candidate.enroll(home, ctx.code, now: @now, hello: stopped()),
+               phase
+
+        assert {:ok, %{"phase" => "enrolling", "window" => window}} = Candidate.read_state(home)
+        assert window == window(@facts.secret), phase
+        {:ok, new_key} = Candidate.noise_keypair(home)
+        refute new_key.public == old_key.public, phase
+      end
+
+      for phase <- ~w(enrolling enrolled) do
+        home = Path.join(ctx.tmp, "unwindowed-" <> phase)
+        {:ok, _first} = Candidate.enroll(home, ctx.code, now: @now, hello: stopped())
+        {:ok, old_key} = Candidate.noise_keypair(home)
+        {:ok, state} = Candidate.read_state(home)
+        unwindowed = state |> Map.put("phase", phase) |> Map.delete("window")
+        :ok = Candidate.put_state(home, unwindowed, @now)
+
+        assert {:ok, _code} = Candidate.enroll(home, ctx.code, now: @now, hello: stopped()),
+               phase
+
+        assert {:ok, %{"phase" => "enrolling", "window" => window}} = Candidate.read_state(home)
+        assert window == window(@facts.secret), phase
+        {:ok, new_key} = Candidate.noise_keypair(home)
+        refute new_key.public == old_key.public, phase
+      end
+    end
+
+    # One receiving its move is the one its primary is moving to: it stays.
+    test "keeps a candidate that receives its move", ctx do
+      {:ok, _first} = Candidate.enroll(ctx.home, ctx.code, now: @now, hello: stopped())
+      {:ok, state} = Candidate.read_state(ctx.home)
+      {:ok, second} = EnrollmentCode.encode(%{@facts | secret: :binary.copy(<<0x6B>>, 32)})
+
+      for phase <- ~w(receiving staged activating) do
+        :ok = Candidate.put_state(ctx.home, Map.put(state, "phase", phase), @now)
+
+        assert {:error, :already_candidate} =
+                 Candidate.enroll(ctx.home, second, now: @now, hello: stopped()),
+               phase
+
+        assert {:ok, %{secret: <<0x5A, _rest::binary>>}} = Candidate.read_code(ctx.home)
+      end
+
+      assert Candidate.error_sentence(:already_candidate) ==
+               "This server is receiving its move, so it is not enrolled again until that " <>
+                 "move ends."
     end
 
     test "a replacement that fails at its last step keeps the candidate it found", ctx do
@@ -140,7 +307,31 @@ defmodule FermixCore.Home.CandidateTest do
 
       assert {:ok, %{secret: <<0x5A, _rest::binary>>}} = Candidate.read_code(ctx.home)
       assert {:ok, ^old_key} = Candidate.noise_keypair(ctx.home)
-      assert Enum.sort(File.ls!(ctx.home)) == ["candidate", "config.toml"]
+      assert Enum.sort(File.ls!(ctx.home)) == ["candidate", "config.toml", "device"]
+    end
+
+    # E1: a bucket the server's infrastructure set signs with the instance
+    # role, and the candidate keeps that with the bucket and region alone.
+    test "keeps an infrastructure-set destination's signing, and refuses any other", ctx do
+      destination = %{
+        "s3_bucket" => "invented-bucket-91",
+        "s3_region" => "eu-north-1",
+        "s3_credentials" => "instance_role"
+      }
+
+      assert {:error, {:invalid_destination, sentence}} =
+               Candidate.enroll(ctx.home, ctx.code,
+                 destination: %{destination | "s3_credentials" => "access_keys"},
+                 now: @now
+               )
+
+      assert sentence == ~s(A snapshot bucket's signing is "instance_role" or not given.)
+      refute File.exists?(ctx.home)
+
+      assert {:ok, _code} =
+               Candidate.enroll(ctx.home, ctx.code, destination: destination, now: @now)
+
+      assert Candidate.destination(ctx.home) == {:ok, destination}
     end
 
     test "refuses a code that ran out, or one Fermix did not open", ctx do
@@ -191,6 +382,8 @@ defmodule FermixCore.Home.CandidateTest do
 
       assert {:ok, %{"kind" => "return"}} = Candidate.read_state(ctx.mac)
       assert mode(Candidate.dir(ctx.mac)) == 0o700
+      # The computer a home moves back to is no server.
+      refute Candidate.server?(ctx.mac)
 
       for file <- ~w(code destination.json noise_key recipient_key state.json mobile/iroh_key) do
         assert mode(Candidate.path(ctx.mac, file)) == 0o600, file
@@ -240,6 +433,24 @@ defmodule FermixCore.Home.CandidateTest do
       assert {:error, :not_moved} = Candidate.prepare_return(never_moved, {:local, "x"}, opts)
 
       for home <- [never_moved], do: refute(Candidate.present?(home))
+    end
+
+    # A move back makes these before it asks the server for a code, so a
+    # refusal here leaves nothing open there.
+    test "returnable/3 makes every check of this computer with no code, writing nothing",
+         ctx do
+      assert Candidate.returnable(ctx.mac, :return, return_opts()) == :ok
+      terminal = Keyword.put(return_opts(), :restarts_itself?, false)
+      assert {:error, :not_supervised} = Candidate.returnable(ctx.mac, :return, terminal)
+      server = Keyword.put(return_opts(), :role, :primary)
+      assert {:error, :not_device} = Candidate.returnable(ctx.mac, :local, server)
+      refute Candidate.present?(ctx.mac)
+
+      {:ok, _state} = Candidate.prepare_return(ctx.mac, {:return, ctx.code}, return_opts())
+      assert {:error, :candidate_present} = Candidate.returnable(ctx.mac, :return, return_opts())
+
+      SafeRm.rm!(Path.join(ctx.mac, "device/desktop.json"))
+      assert {:error, :not_linked} = Candidate.returnable(ctx.mac, :return, return_opts())
     end
 
     test "refuses while a move is under way here", ctx do
@@ -318,6 +529,29 @@ defmodule FermixCore.Home.CandidateTest do
   end
 
   defp mode(path), do: Bitwise.band(File.stat!(path).mode, 0o777)
+
+  # The window a code opens, as the candidate keeps it: SHA-256 of its
+  # secret, base64url with no padding.
+  defp window(secret), do: :crypto.hash(:sha256, secret) |> Base.url_encode64(padding: false)
+
+  defp secret_texts(secret),
+    do: [
+      Base.encode64(secret),
+      Base.url_encode64(secret, padding: false),
+      Base.encode16(secret, case: :lower)
+    ]
+
+  # Every path under `home` with its mode and, for a file, its bytes.
+  defp tree(home) do
+    home
+    |> Path.join("**")
+    |> Path.wildcard(match_dot: true)
+    |> Enum.sort()
+    |> Enum.map(fn path ->
+      stat = File.lstat!(path)
+      {path, stat.type, stat.mode, if(stat.type == :regular, do: File.read!(path))}
+    end)
+  end
 
   defp return_opts, do: [role: :device, restarts_itself?: true, now: @now]
 

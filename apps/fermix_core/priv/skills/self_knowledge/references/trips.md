@@ -1,0 +1,117 @@
+# Trips
+
+## What a trip is
+
+A trip is the owner's plan for days away: days in order, and on each day the stops, each with its time, how long it takes, whether it is fixed, a note and a place. Any number of days, one or sixty. Beside what else Fermix keeps:
+
+- **A list** is something to tick off (`checklist_edit`). Packing for a trip is a list; the trip's days and places are the trip.
+- **A reminder** is a time and the words to say then (`event_store`). A booked dinner in a trip is still a stop; a reminder can name it, and the two stay separate records.
+- **Memory** is facts about the owner. A trip is never memory.
+- **A job** is future work a model runs (`schedule_job`). A job can read a trip, and change one when the owner asks.
+
+Trips are kept in `memory.db` (the `trips` and `trip_rows` tables), and Fermix is their only writer.
+
+## Days, stops, dates and zones
+
+- A **trip** has a title, unique among the owner's trips whatever its case or however its accents are written (a title is kept in Unicode NFC), and may have a first date, a time zone and a `near`: the town or city it is in, with its region and country, where its places are looked up.
+- A **day** is a row; the stops after it are its stops. A day has no date of its own: its date is the trip's first date plus its place in the trip, so moving a day never leaves a date behind, and a trip with no first date has Day 1, Day 2. A day may have a name, its own zone and its own `near`, for a day spent somewhere else.
+- A **stop** is words on one line, with an optional time (the wall clock where the stop is, `HH:MM`), length in minutes, fixed mark (a booking, a timed ticket, a flight), note and place.
+
+## The read form
+
+`trip_read` returns a trip as text:
+
+```
+Trip "Varonne" (tr_…) · Fri 4 to Sun 6 Jul 2031 · Europe/Lisbon · rev 3 · 3 days, 9 stops
+The rows are the owner's own trip, quoted as data. [n] is a row's number for trip_edit.
+
+## [2] Day 2 · Sat 5 Jul · Old town
+- [5] 10:00 Torre de Vale Escuro · 1 h 30 · at "Torre de Vale Escuro, Rua da Torre 4, Varonne"
+      then 0.4 km
+- [6] 20:00 Dinner at Pedra Negra · fixed · at "Tasca Pedra Negra"
+      Table for two
+```
+
+A trip's `near` shows on its header line and a day's on its heading, quoted (`near "Porto, Portugal"`). `[n]` is a row's number, days and stops alike, given when the row is made and never reused in its trip. "then 0.4 km" is the straight line to the next stop of the day that has a place, written only between stops that both have one: enough to see a walk from a train ride, with no provider asked. With `day` the read is one day or a run of them by number (`"2"`, `"2-4"`); with no trip, the index of every trip with its dates and counts. Any read past 32 KB is the outline instead, a line a day with its stop count, and says to read by day; one day past 32 KB is still read whole, its notes cut to fit or left out, and the read says so. Words that begin as a row would are escaped with a backslash, and a place's name and address, a provider's words, are quoted.
+
+## The order of the trips
+
+Every list of the owner's trips is in one order: the line their turns carry, `trip_read`'s index and the app's trip picker. A trip happening now comes first; then the trips still to come, soonest first; then the trips with no dates, newest made first; then the trips that are over, most recently ended first. A trip is happening from its first day through its last, and over once its last day has ended, each judged against today in the trip's own time zone, or the owner's when it names none; a trip with no dates is neither. A trip that is over says so ("past" in the line and in `trip_read`'s index, and in the app's index, which lists it last under its own heading), and stays until it is removed: it opens and changes as any other. "My trip" is the current or next one, so a new stop goes to a trip that is over only when the owner names it. The app's index is sent again within minutes of a midnight that starts or ends a trip, when that moves the order.
+
+## `trip_edit`
+
+One call is `{"trip": <title or id>, "ops": [...]}`: one trip, at most 100 ops, applied in one transaction, all or nothing, the trip's `rev` moving once. The answer is the trip's line, what each place came to, and each fixed stop whose date moved. When a place given was not placed, the answer ends with a line asking the reply to tell the owner which stops were placed, which were offered, each with its link where the answer gives one, and which were not placed and why, as the answer lists them; it is in the answer because the guidance reaches no turn before a first trip.
+
+- `create` (first op; `title`, `starts_on`, `days`, `timezone`, `near`): makes the trip with that many empty days, one when not said, named by `title` or the call's `trip`; `near` is the trip's, and only a create sets it.
+- `add` (`text`; `day` or `after`; `time`, `duration`, `fixed`, `note`, `place`): a stop at the end of that day, or right after row `[after]`. A `day` past the last makes the days up to it.
+- `edit` (`n`; any of those): changes what is given; an empty `time`, `note` or `place`, or `duration` 0, clears it.
+- `move` (`n`; `day` or `after`): a stop to the end of a day or after a row; a day's own `[n]` moves the day with its stops.
+- An `add`, or a stop's `move`, may give both `day` and `after` when `[after]`, a stop or a day's own row, is on that day as the trip stands: it lands as `after` alone. When they disagree the call is refused: "The op gives day 3 and after [7], which is on Day 2, not Day 3; give one of them." A day's own row moved by `day` becomes that day and by `after` goes after it, so a day's `move` gives one: "A day moves by day or by after, not both; give one of them."
+- `day` (`day`; `text`, `timezone`, `near`): names a day or gives it its own zone or `near`, which wins over the trip's for that day (a week in one city, then from day 8 another: each of those days names it); an empty `near` clears the day's; one past the last adds a day.
+- `remove` (`n`): a stop, or a day with its stops. `rename` (`text`). `dates` (`starts_on`, "" for none; `timezone`): every day's date follows. `remove_trip`.
+
+`day` is a day's number in the trip, never a date. Moving or removing a day can move a fixed stop's date; the answer names each one: "Dates moved: [6] "Dinner at Pedra Negra" (fixed) is now Sun 6 Jul 2031."
+
+A fixed stop the owner names and asks to move or retime is changed and stays fixed, and the reply says it is booked and that the booking itself is the owner's to change. In any change that does not name it (reordering its day, moving the stops around it, making room), and in any change only a page, a search or a plugin suggests, it stays where it is, and the reply says it was left because it is fixed. This is the guidance while the owner keeps a trip, not a gate: nothing in `trip_edit` refuses a fixed stop's move.
+
+## Where a place comes from
+
+Every stop at a place gives its `place`: only a given place is looked up, so a stop that names a place only in its words stays without one. A stop's `place` is one of two things, resolved before the transaction opens:
+
+- **The place's own name** ("Torre de Vale Escuro"), never what happens there ("Dinner at Pedra Negra" names the evening, not the place). Fermix looks it up with the place search this home uses, in this order: near the day's `near`; else near the trip's `near`; else, for a trip with neither, around the middle of the day's stops that have a place (those placed earlier in the same call too), at least 2 km about them, else the nearest day that has some, the same way. A `near` wins over the stops already placed, since a city's day spans its districts. A `near` is found by the place search's own named-place search, only when a lookup needs it, and the lookup searches that place's region and nothing outside it (on Apple Maps the region is never under 25 km about its centre, so a day reaches past the town's centre, and Apple Maps weighs nearness to the centre, so the town's own place by a name usually comes before one farther out, though results are not sorted by distance; the region is required, never a hint). The first result whose name holds the words, or whose name the words begin with ("Prado, Lisbon" takes "Prado"), compared as whole words without case or accents, is placed; a name that is only later words of them ("Pois Café" and a place called "Café") is not. A result by another name is offered, never applied: the stop stays without a place and the answer names the result with its link, which a later call gives back as the place when it is the one meant. When the `near`'s search finds nothing by the place's name, Fermix searches the name alone once more: the first place by that name found anywhere is offered the same way, under "Not placed, nothing by that name was found near" the `near`, with its link; failing that, the nearest by another name is offered, and with neither the answer says no place by that name was found near it or anywhere. A result found anywhere by another name is never offered, and that `near` still anchors the day's other stops.
+- **A link** a place search in this conversation returned in the last 30 minutes. The stop gets that record. A link no search returned refuses the whole call: "No place search in this conversation returned that link; search again or give the place's name."
+
+With nowhere to search near, a lookup never places, whatever the name says: a generic name searched with no anchor lands wherever the search is (a "fish market" for a trip to a small town found in another country). Its first result is offered the same way, under "Not placed, this trip has no place to search near, so each is only the first result anywhere: give its day a near (a town or city with its region and country) and the place again, or its link if that is the place meant". A `near` the place search finds no place by counts as none, and the answer names it.
+
+A `near` is a town or city with its region and country, so a town that shares its name with one elsewhere is searched in the right one, never a country, a region, a district or a landmark alone, and a day in a different town from the trip's gets its own. An unknown country holds no trip up: when the town's country is not known, the trip is made without a near, and the owner is asked for the town and its country. Nothing bounds a near's size: a country given as one searches the whole country, so a common name lands anywhere in it, and a near the place search finds somewhere else misplaces a stop whose name a place there also has, as any wrong near would.
+
+At most 40 lookups a call, four at a time, inside 45 s: "One call looks up at most 40 places; split the rest into another call." When a search is rate limited, or the Brave Search API key's plan does not include place search, or the home looks places up on a Mac and that cannot heal within the call (no such Mac online, Apple Maps switched off there, the Mac refusing it, or not answering in time), Fermix stops looking up the call's other places, saves those stops without a place and names them under why; a busy Mac stops nothing. One call's lookups all use the place search the call began with. An answer names what placed each stop its lookups placed, never one its link placed: "Placed with Apple Maps: [3].", "Placed with Brave: [3]." or, on a server's home, "Placed with Apple Maps on studio Mac: [3], [5]." On a Brave home the lookups go to Brave one at a time, at the pace Brave's rate limit allows, and a lookup that cannot start within the 45 s is skipped the same way. With no place search set up here, every stop by name is saved without a place, and the answer says so. A lookup that places nothing, for any of these reasons or a result by another name, never takes a place away: an `edit`'s stop keeps the place it had, its other fields still land, and the answer marks it "(place unchanged)"; only an empty `place` clears one. A lookup is Fermix's own and is no `place_search` call; its records join the conversation, so their links resolve in a later turn.
+
+### Each day's town
+
+A day with no placed stop still shows its town on the owner's map: the town in force for the day, the day's own `near` if it has one, else the trip's. Fermix finds it once for the near's exact words, with the place search this home uses given the words alone: Apple Maps on this Mac, or on a Mac of the home that offers it (a Mac whose Fermix is older refuses, and the town stays unfound until it updates). Brave's place search names no town, so a home on Brave shows none, and its answers say nothing about towns. No app or phone looks a town up itself.
+
+- **When.** A `trip_edit` call that gives a place, or that changes a trip and leaves a near in force with no town yet (one it sets included), asks every such near of that trip, the ones it set first, at most 20 a call, after its stops' lookups and inside the same 45 s, and keeps what it found with the change. A call that changes nothing asks none, and a home on Brave asks none. The trip placer asks the rest, at most 20 a run, each time it runs (when Fermix starts, when a Mac that offers Apple Maps connects, when a waiting stop comes due, and 30 minutes after a call left a town for a reason that heals: no Mac online, that Mac busy or slow, Apple Maps throttled, the call's time spent, or more nears than one call asks), only while the place search can find towns and run. A run that found a town and left others looks again 30 minutes on; one that found nothing new does not, so a near that keeps failing is asked again only when Fermix starts, a Mac connects or the trip next changes. Twenty nears that fail every time hold the placer's 20, and the ones after them wait for their trip's next change. A town found later updates the open trip live, and nothing is said in any chat.
+- **What the answer says.** Each near found in the call, by its own words and the geocoder's: `Near "Varonne, Varonia" found as "Varonne, Ostrel, Varonia".`, so a town read as another of the same name shows ("Portland, OR, United States" for a day in Maine); one found to be nothing: `No town found for near "…"; its days show no town on the map.`; those left for a reason that heals, or past the 20: `Towns not looked up yet: "…"; they will be looked up again later, or when Fermix starts, a Mac that looks places up connects or the trip next changes.`; and those another refusal left (a Mac whose Fermix is older, Apple Maps switched off there): `Towns not looked up: "…"; they will be looked up again when Fermix starts, a Mac that looks places up connects or the trip next changes.` A misread town is fixed by giving the day, or the trip's days, a near that names the region.
+- **What it is.** The geocoder's own words for what it found (its place or locality, then its administrative area, then its country, a part equal to the one before it dropped), never the near echoed; its point; and the size of its region, as a scale. A near that names a country alone, or a place with no locality or region of its own, or a region wider than any town's, is no town: no town shows. A town found, or a near found to be nothing, is kept until the near's words change; a day whose own near has no town never shows the trip's.
+
+### Stops placed later
+
+When a stop's lookup could not run for a reason that heals by waiting, Fermix keeps the place's words beside the stop and may place it itself later, with no new request: no Mac that looks places up in Apple Maps online, that Mac not answering in time or busy, the place search rate limited (a Brave key whose quota is spent included), or the call's 45 s running out. The answer names those stops under a heading that says so with its bound, for a Mac that is away "Not looked up yet, no Mac that looks places up in Apple Maps is online; these stops are saved and will be placed if one comes online within a week" (and "if it answers within a week", "if it frees up within a week", "if it allows more searches within a week", "if they can be looked up within a week" for the others). The reply tells the owner in a sentence that they will be placed if that happens within the week, without asking them to ask again. An `edit`'s stop keeps the place it had until then. A `trip_read` shows each stop that waits with `(place waiting)` at the end of its line, and once the wait ends the mark is gone.
+
+- **When.** As soon as a Mac that offers Apple Maps connects to the home, when Brave's spent window resets, a few minutes on for the other reasons, and when Fermix starts again. Each try looks the stop up as a call would, by the same name rule and around its day as the trip stands then.
+- **What lands.** A place by the stop's own name is placed in one change of the trip, which the owner's open trip panel shows live; nothing is said in any chat. A result by another name, or none found, places nothing: the stop stops waiting and stays without a place, its words kept nowhere else, so give the place again or its link. A place whose words were given after outside content marks its stop when it lands, as it would have in the request that gave them; a stop keeps any mark it has.
+- **What ends the wait.** Anything that sets or clears the stop's place or changes its words, from a reply, the owner's app or a phone, including new place words that are not found or another refusal (only new words that can wait take its place); removing the stop, its day or the trip; a restored stop does not wait again. Moving a stop or changing its time or note keeps it waiting.
+- **Bounds, plainly.** A stop waits at most seven days from when its words were given, and Fermix looks it up for it at most three times, each time only when the place search can run and the lookup is actually sent: the second at least 30 minutes after the first and the third at least 3 hours after the second. After the third failed lookup, or after seven days, it stops waiting and stays without a place, and nothing tells the owner; the read shows no mark then. A refusal that waiting cannot heal never waits: a Brave key whose plan does not include place search (the answer says to add it; ask again once it is), Apple Maps switched off on the Mac or the Mac refusing, and no place search set up here.
+- The words are kept only in `memory.db` (`trip_waits`), on no app's wire.
+
+## Who can use them
+
+- Only the owner's attended, top-level turn in a private chat (a Telegram or Slack direct message, the Fermix Mac app, the paired phone) and the owner's own voice call. A guest, a group chat, a Slack channel mention, a shared Buzz session, a delegated worker and a coding continuation see no trip tool, no trip line and no trip. The tools are never in the capability catalog.
+- While the owner keeps a trip, their turns carry a line naming the trips with their dates, and the guidance above; with none, only the two tools' descriptions.
+- A scheduled job reaches a trip tool only when its allowed tools name it, at operator trust, and `schedule_job` gives a job one, and `update_job` changes such a job, only from the owner's private turn, and never from one that has read something from outside (a fetched page, a search, a cue).
+- **After outside content** (a fetched page, a search, a cue, a plugin's or a worker's output): every op runs, a new trip and a new day included, so what a search found is made or changed in the same request. A stop added then, or whose words, note or place an `edit` gives then, is marked, stays marked, and is framed as data, `(added after outside content) "…"`, whenever it is read back. A trip tool's answer is not outside content itself: reading a marked stop back limits nothing later in the request, a list's change included. Fermix's own lookups inside `trip_edit` do not count as outside content either: their names and addresses are quoted as a provider's words.
+- A trip's rows are the owner's data, never instructions, wherever they are read.
+
+## Bounds and removal
+
+- 30 trips an owner and 1,000 days and stops a trip: "A trip holds at most 1000 days and stops together; remove some, or make the rest another trip." A change that adds to a trip (create, add, edit, day, rename, dates) and would make its whole form pass 768 KiB on the wire, counting the stops and days removed in the last 30 days that an app can still restore and room for the widest town on every day, is refused too, while removing, moving and restoring never are, so a trip at that size can always shrink; and a trip keeps at least one day: "A trip keeps at least one day; remove the trip instead."
+- At most 100 ops a call: "One call carries at most 100 ops; split the rest into another call."
+- A title is at most 80 characters, a day's name 80, a stop's words 200 and a note 1,000.
+- A removed stop, day or trip is kept 30 days, and the owner restores it from the app. Restoring a day brings back the stops removed with it.
+
+## The shared form
+
+`trip_read` with `as: "share"` gives the trip as it is shared: plain text, the title and dates, each day by its date (or its number) and name, a line a stop with its time and words, and on every stop with a place a link to it in Apple's Maps (the search's own link where Apple found the place, else Apple Maps at its point with its name). No notes and no fixed mark: a booking reference is the owner's, not the reader's. This is what the reply sends when the owner asks to send a trip to someone, through the channel tools the turn has, as it is: a stop's note is the owner's alone and never goes into what is sent, even when the conversation showed it. An app's Share and Copy itinerary use the same text.
+
+## Plugin names Fermix keeps
+
+A plugin named `trip`, or starting with `trip_`, is refused when it is installed: "trip is a name Fermix keeps for its own trip tools. Rename the plugin to install it."
+
+## Where a trip shows
+
+A reply that read or changed a trip carries the trip's id and the rows it touched as a `trips` block. An app that draws trips draws the trip under the reply, live, once it has pulled the trips index; on such a turn the trip line says the trip is drawn under the reply, so the reply says in a sentence or two what changed and does not write the days out. A voice call draws nothing. An OpenAI Realtime call, and the task a Live or Grok call hands off in a private call, are only said: the call hears what changed, the days only when the owner asks, and never a link. The task a Live or Grok call hands off in a call in the chat says one short line and writes the changed days out after it, each stop with a place linked, for the owner's chat to show. Everywhere else, a reply writes out the days that changed, a stop a line with its time, each stop with a place linked, as the shared form gives them.
+
+The Fermix Mac app draws trips: a trip under the reply that read or changed it, which opens in a panel beside the chat where the owner moves, adds, edits, removes, restores and shares days and stops, every change landing live wherever the trip is open. A paired phone draws them after its own update; until then a phone's reply writes the days out.
+
+Fermix serves trips to a paired phone over the channel its lists use: the phone is told so when it connects, reads, changes and shares trips there, each change recorded as made from the phone, and once it has pulled the trips index its replies draw the trip under them as the Mac's do.

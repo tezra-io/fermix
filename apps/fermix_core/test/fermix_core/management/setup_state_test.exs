@@ -58,6 +58,41 @@ defmodule FermixCore.Management.SetupStateTest do
     assert failure["gating"] == true
     assert failure["pane"] == "providers"
     assert failure["detail_key"] == "provider:missing_credentials:anthropic"
+    # Each surface keeps its own words for this key, so the engine's are null.
+    assert Map.fetch!(failure, "sentence") == nil
+  end
+
+  # M97 §6.4: off a Mac the iMessage rows say what only the engine knows,
+  # which Mac of the home carries Messages, so each publishes the engine's
+  # sentence beside its key; a row of another kind publishes none.
+  test "an iMessage row publishes the engine's sentence, naming the Mac that carries Messages" do
+    Application.put_env(:fermix_channels, :imessage, enabled: true, owner_user_id: "+15551234567")
+    studio = %{device_id: "d-7", name: "studio Mac", connected: false}
+
+    carriers = [
+      {:computer, studio},
+      {:conflict, [%{studio | connected: true}, %{device_id: "d-8", name: "loft Mac"}]},
+      :none
+    ]
+
+    for carrier <- carriers do
+      readiness = fn -> Readiness.report(macos?: false, imessage_carrier: carrier) end
+      failures = SetupState.report(Keyword.put(sources(), :readiness, readiness))["readiness"]
+
+      {imessage, others} =
+        Enum.split_with(failures["failures"], &(&1["component"] == "channel:imessage"))
+
+      assert [%{"detail_key" => "channel:imessage:" <> _cause, "sentence" => sentence}] = imessage
+
+      assert {_key, ^sentence} =
+               List.keyfind(Readiness.published_actions(), hd(imessage)["detail_key"], 0)
+
+      assert Enum.all?(others, &(Map.fetch!(&1, "sentence") == nil))
+    end
+
+    away = fn -> Readiness.report(macos?: false, imessage_carrier: {:computer, studio}) end
+    [row] = imessage_failures(SetupState.report(Keyword.put(sources(), :readiness, away)))
+    assert row["sentence"] == "studio Mac, the Mac that carries Messages, is asleep or offline."
   end
 
   # The app never composes a restart sentence; it renders the daemon's.
@@ -229,6 +264,26 @@ defmodule FermixCore.Management.SetupStateTest do
            }
   end
 
+  # M97 stage 4: ready needs a recorder on this system (its paired helper's
+  # word, `ComputerHistory.recorder?/1`), not a Mac: a Linux computer records.
+  test "computer history is ready exactly where this system has a recorder" do
+    Application.put_env(:fermix_core, :computer_history, enabled: true)
+
+    ready = fn recorder? ->
+      sources()
+      |> Keyword.merge(
+        sidecar_installed?: fn -> true end,
+        history_store_open?: fn -> true end,
+        history_recorder?: fn -> recorder? end
+      )
+      |> SetupState.report()
+      |> get_in(["features", "computer_history", "ready"])
+    end
+
+    assert ready.(true)
+    refute ready.(false)
+  end
+
   test "coexistence carries the unit scope and the config state word" do
     report = SetupState.report(sources())
 
@@ -347,6 +402,9 @@ defmodule FermixCore.Management.SetupStateTest do
 
   defp mobile_row(report), do: Enum.find(report["channels"], &(&1["name"] == "mobile"))
   defp imessage_row(report), do: Enum.find(report["channels"], &(&1["name"] == "imessage"))
+
+  defp imessage_failures(report),
+    do: Enum.filter(report["readiness"]["failures"], &(&1["component"] == "channel:imessage"))
 
   defp restore(app, key, nil), do: Application.delete_env(app, key)
   defp restore(app, key, value), do: Application.put_env(app, key, value)

@@ -10,10 +10,10 @@ defmodule FermixCore.Cues.FilterChoices do
   (`screen_choices/1`): keyword match, or a decision model, with the sentence
   both surfaces show beside them (`screen_info/0`); and which decision model
   that is (`decision_provider_choices/1`, `decision_provider_info/0`):
-  Automatic, the one Fermix picks (`decision_model/1`), or a provider the
-  owner chooses. A decision model counts as set up only with a key that
-  loaded (`decision_model_set_up?/2`), so no surface offers one whose call
-  would carry a secret's sentinel.
+  Automatic, the one Fermix picks (`decision_model/1`), or a decision model
+  the owner chooses. A decision model counts as set up only when its provider
+  has a key that loaded (`decision_model_set_up?/2`), so no surface offers one
+  whose call would carry a secret's sentinel.
 
   The one reader behind the setup page's Cues tab and the management `cues`
   section, so both offer the same choices under the same labels. Reads the
@@ -133,13 +133,14 @@ defmodule FermixCore.Cues.FilterChoices do
     do: %{id: "decision_model", label: "Decision model", hint: hint, disabled?: false}
 
   @doc """
-  What to set up before the owner's chosen decision model can run: the
-  screen's hint while it is not set up, and the save's refusal.
+  What to set up before the owner's chosen decision model can run, naming the
+  provider it runs on: the screen's hint while it is not set up, and the
+  save's refusal.
   """
-  @spec decision_model_not_set_up(DecisionModel.provider()) :: String.t()
-  def decision_model_not_set_up(provider) when is_atom(provider) do
-    "Set up #{Descriptor.fetch!(provider).label} first: the screen's decision model runs on " <>
-      "its key."
+  @spec decision_model_not_set_up(DecisionModel.choice()) :: String.t()
+  def decision_model_not_set_up(choice) when is_atom(choice) do
+    "Set up #{Descriptor.fetch!(DecisionModel.provider(choice)).label} first: the screen's " <>
+      "decision model runs on its key."
   end
 
   @doc """
@@ -160,12 +161,16 @@ defmodule FermixCore.Cues.FilterChoices do
   end
 
   @doc """
-  Whether `provider`'s decision model can run, read from the snapshot: set up,
-  with a key that loaded (`Providers.DecisionModel.ready?/2`).
+  Whether the decision model `choice` can run, read from the snapshot: its
+  provider set up, with a key that loaded (`Providers.DecisionModel.ready?/2`).
+  A provider's own name is the choice Automatic runs on it, so `pick/2` asks
+  with providers.
   """
-  @spec decision_model_set_up?(Source.snapshot(), DecisionModel.provider()) :: boolean()
-  def decision_model_set_up?(snapshot, provider) when is_map(snapshot) and is_atom(provider),
-    do: DecisionModel.ready?(provider, Source.provider(snapshot, provider))
+  @spec decision_model_set_up?(Source.snapshot(), DecisionModel.choice()) :: boolean()
+  def decision_model_set_up?(snapshot, choice) when is_map(snapshot) and is_atom(choice) do
+    provider = DecisionModel.provider(choice)
+    DecisionModel.ready?(provider, Source.provider(snapshot, provider))
+  end
 
   @doc "The sentence a surface shows beside the screen's decision model."
   @spec decision_provider_info() :: String.t()
@@ -174,19 +179,20 @@ defmodule FermixCore.Cues.FilterChoices do
   @doc """
   Which decision model the screen uses: Automatic first (`""`), labelled with
   what it resolves to ("Automatic (Uses OpenAI · gpt-6-luna)"), or disabled
-  with what to set up while none is set up; then every provider that serves
-  one ("OpenRouter · Jev"), one not set up disabled with its hint, so a saved
-  choice is always among them.
+  with what to set up while none is set up; then every decision model the
+  owner can choose ("OpenRouter · Jev", "OpenRouter · Perplexity Decider"),
+  one whose provider is not set up disabled with its hint, so a saved choice
+  is always among them.
   """
   @spec decision_provider_choices(Source.snapshot()) :: [screen_choice()]
   def decision_provider_choices(snapshot) when is_map(snapshot) do
-    providers =
+    choices =
       Enum.map(
-        DecisionModel.providers(),
+        DecisionModel.choices(),
         &provider_choice(&1, decision_model_set_up?(snapshot, &1))
       )
 
-    [automatic_choice(decision_model(snapshot)) | providers]
+    [automatic_choice(decision_model(snapshot)) | choices]
   end
 
   defp automatic_choice(nil),
@@ -195,10 +201,10 @@ defmodule FermixCore.Cues.FilterChoices do
   defp automatic_choice(%{label: label}),
     do: %{id: "", label: "Automatic (Uses #{label})", hint: nil, disabled?: false}
 
-  defp provider_choice(provider, set_up?),
+  defp provider_choice(choice, set_up?),
     do: %{
-      id: Atom.to_string(provider),
-      label: DecisionModel.label(provider),
+      id: Atom.to_string(choice),
+      label: DecisionModel.label(choice),
       hint: if(set_up?, do: nil, else: @provider_not_set_up),
       disabled?: not set_up?
     }

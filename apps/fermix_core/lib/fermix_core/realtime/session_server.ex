@@ -12,19 +12,24 @@ defmodule FermixCore.Realtime.SessionServer do
   alias FermixCore.Capabilities.Advertisement
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
   alias FermixCore.Capabilities.UntrustedContent
+  alias FermixCore.Checklists.Note, as: ChecklistNote
   alias FermixCore.ComputerUse.Probe, as: ComputerUseProbe
   alias FermixCore.ComputerUse.SessionManager, as: ComputerUseSessionManager
   alias FermixCore.Memory.Config, as: MemoryConfig
+  alias FermixCore.Prompt.ChannelPresentation
   alias FermixCore.Providers.Telemetry, as: ProviderTelemetry
+  alias FermixCore.Realtime.CallLease
   alias FermixCore.Realtime.Config
   alias FermixCore.Realtime.ConversationRecorder
   alias FermixCore.Realtime.CostTracker
+  alias FermixCore.Realtime.Endpoint
   alias FermixCore.Realtime.OpenAIClient
   alias FermixCore.Realtime.ScreenFeed
   alias FermixCore.Realtime.ScreenShare
   alias FermixCore.Realtime.Telemetry, as: RealtimeTelemetry
   alias FermixCore.Realtime.ToolBridge
   alias FermixCore.Tools.Telemetry, as: ToolsTelemetry
+  alias FermixCore.Trips.Note, as: TripNote
 
   require Logger
 
@@ -57,6 +62,11 @@ defmodule FermixCore.Realtime.SessionServer do
   # upstream stall surfaces as a WebSockex timeout, not a GenServer.call exit.
   @call_start_timeout_ms 10_000
   @runtime_reload_timeout_ms 10_000
+  # Both store reads behind the call's lists and trips lines, together
+  # (`read_kept/2`): far inside the two bounds above, which the reads at the
+  # store's own 5 s each could otherwise use up before the handshake starts.
+  @kept_notes_budget_ms 1_500
+  @kept_none %{trips: %{rules: nil, index: nil}, lists_index: nil}
   @default_reconnect_backoff_ms [1_000, 2_000, 4_000]
 
   @spec start_link(keyword()) :: GenServer.on_start()
@@ -117,6 +127,19 @@ defmodule FermixCore.Realtime.SessionServer do
     Process.flag(:trap_exit, true)
 
     config = Keyword.get_lazy(opts, :config, &Config.current/0)
+    endpoint = Keyword.fetch!(opts, :endpoint)
+
+    # The home's one owner-voice call (`CallLease`), taken before this session
+    # exists to its caller: a second `call_start` from any endpoint is refused
+    # before it can open a billed provider socket. Held until this process
+    # exits.
+    case CallLease.acquire(Keyword.get(opts, :call_lease, CallLease), endpoint, config.engine) do
+      :ok -> init_call(opts, config, endpoint)
+      {:error, reason} -> {:stop, reason}
+    end
+  end
+
+  defp init_call(opts, config, endpoint) do
     capability_registry = Keyword.get(opts, :capability_registry, CapabilityRegistry)
     skill_registry = Keyword.get(opts, :skill_registry, SkillRegistry)
     device_id = Keyword.get(opts, :device_id, "unknown")
@@ -156,6 +179,9 @@ defmodule FermixCore.Realtime.SessionServer do
            # teardown/reconnect can shut in-flight tools down. Concurrent-safe.
            pending_tool_calls: %{},
            config: config,
+           # Who the call is for: decides, with the owner's setting, whether
+           # `screen_share` is offered (`Endpoint.screen_share?/1`).
+           endpoint: endpoint,
            device_id: device_id,
            session_scope: session_scope,
            openai_client: Keyword.get(opts, :openai_client, OpenAIClient),
@@ -188,6 +214,15 @@ defmodule FermixCore.Realtime.SessionServer do
            reconnect_attempts: 0,
            reconnect_timer: nil,
            session_update_event: nil,
+           # The read of the owner's lists and trips that event's lines came
+           # from (`read_kept/2`), nil before one succeeds: a refresh that
+           # cannot read the store keeps it, and a trip tool's answer adds the
+           # call's line only while it carries no trip rules
+           # (`Tools.TripRead.channel_line/2`), as on a text turn.
+           kept_read: nil,
+           # Nil when that event's read answered; else whether its lines were
+           # left out or kept from the last one, and why, for its trace.
+           kept_unread: nil,
            provider_ready?: false,
            current_item_id: nil,
            response_started_ms: nil,
@@ -237,7 +272,7 @@ defmodule FermixCore.Realtime.SessionServer do
 
   @impl true
   def handle_call(:call_start, _from, %{session_update_event: nil} = state) do
-    with {:ok, event} <- build_session_update_event(state),
+    with {:ok, event, kept} <- build_session_update_event(state),
          {:ok, openai_pid, state} <- open_openai_session(state) do
       case send_provider_event(state.openai_client, openai_pid, event) do
         :ok ->
@@ -245,6 +280,7 @@ defmodule FermixCore.Realtime.SessionServer do
 
           state =
             %{state | openai_pid: openai_pid, session_update_event: event, provider_ready?: false}
+            |> put_kept(kept)
 
           {:reply, :ok, state}
 
@@ -594,13 +630,83 @@ defmodule FermixCore.Realtime.SessionServer do
 
   defp build_session_update_event(state) do
     with {:ok, instructions} <- session_instructions(state) do
+      kept = read_kept(state.tool_context, state.kept_read)
+      instructions = Enum.join([instructions | kept_lines(state.tool_context, kept.read)], "\n\n")
       # `screen_share` is a SESSION verb, not a registry capability: it only means
       # anything while this provider session is live, so the session advertises it
       # (and executes it) itself, leaving `ToolBridge` a pure capability bridge.
       advertised = Advertisement.prepare(state.capabilities, state.tool_context)
-      tools = ToolBridge.to_openai_tools(advertised) ++ ScreenShare.tools(state.config)
-      {:ok, OpenAIClient.session_update_event(state.config, instructions, tools)}
+      tools = ToolBridge.to_openai_tools(advertised) ++ screen_share_tools(state)
+      {:ok, OpenAIClient.session_update_event(state.config, instructions, tools), kept}
     end
+  end
+
+  defp put_kept(state, %{read: read, unread: unread}),
+    do: %{state | kept_read: read, kept_unread: unread}
+
+  # What the call is told of the owner's lists and trips (`Checklists.Note`,
+  # `Trips.Note`): the lines a voice-channel turn gets, in `TurnRunner`'s order,
+  # from the call's own tool context each time a `session.update` is built, so
+  # they ride only an owner's call and the trips' only while one is kept. The
+  # call's lines are the voice channel's, chosen by the voice-call fact
+  # (`ChannelPresentation.channel_of/1`); a call draws nothing. The lists'
+  # rules read nothing, so no store can take them away; the rest come from
+  # `read`.
+  defp kept_lines(context, read) do
+    rules = ChecklistNote.rules(context, ChannelPresentation.channel_of(context), false)
+    %{trips: trips, lists_index: lists_index} = read || @kept_none
+    Enum.reject([rules, trips.rules, lists_index, trips.index], &is_nil/1)
+  end
+
+  # The two store reads (the trips' names, which bring the trips' rules and
+  # index, and the lists' names) share one budget (`@kept_notes_budget_ms`), so
+  # a store that is slow, gone or failing costs the call the lines they bring,
+  # never its start. A read that does not answer in time is cut off, and one
+  # that ends in an exit (a Repo restarting, crashed mid-request) or a crash is
+  # the same: logged once with why, and the event goes without those lines, or
+  # on a refresh keeps the ones the call already had (`previous`).
+  defp read_kept(context, previous) do
+    task = Task.async(fn -> read_kept_index(context) end)
+
+    case Task.yield(task, @kept_notes_budget_ms) || Task.shutdown(task, :brutal_kill) do
+      {:ok, {:ok, read}} -> %{read: read, unread: nil}
+      {:ok, {:error, reason}} -> unread(previous, inspect(reason))
+      {:exit, reason} -> unread(previous, inspect(reason))
+      nil -> unread(previous, "timeout after #{@kept_notes_budget_ms} ms")
+    end
+  end
+
+  # Runs in the reading task: an exit from the store is the read's answer,
+  # returned rather than raised, so it reaches the call as a reason.
+  defp read_kept_index(context) do
+    trips = TripNote.lines(context, ChannelPresentation.channel_of(context), false)
+    {:ok, %{trips: trips, lists_index: ChecklistNote.index(context)}}
+  catch
+    :exit, reason -> {:error, reason}
+  end
+
+  defp unread(previous, reason) do
+    {kept_lines, said} =
+      if previous,
+        do: {"previous", "keeps the lines of the last one"},
+        else: {"left_out", "goes without their index lines and the trips' rules"}
+
+    Logger.warning(
+      "realtime: the owner's lists and trips could not be read (#{reason}); " <>
+        "this session.update #{said}"
+    )
+
+    %{read: previous, unread: %{kept_lines: kept_lines, kept_lines_reason: reason}}
+  end
+
+  defp trips_told?(%{trips: %{rules: rules}}), do: is_binary(rules)
+  defp trips_told?(nil), do: false
+
+  # Offered only where the endpoint's policy and the owner's setting both allow
+  # it: the shared screen is the Mac's, so an accessory's call never sees the
+  # verb, and the setting itself is left as the owner saved it.
+  defp screen_share_tools(state) do
+    if Endpoint.screen_share?(state.endpoint), do: ScreenShare.tools(state.config), else: []
   end
 
   defp refresh_runtime(state) do
@@ -638,15 +744,15 @@ defmodule FermixCore.Realtime.SessionServer do
   defp refresh_provider_runtime(%{session_update_event: nil} = state), do: {:ok, state}
 
   defp refresh_provider_runtime(%{openai_pid: openai_pid} = state) when is_pid(openai_pid) do
-    with {:ok, event} <- build_session_update_event(state),
+    with {:ok, event, kept} <- build_session_update_event(state),
          :ok <- send_provider_event(state.openai_client, openai_pid, event) do
-      {:ok, %{state | session_update_event: event}}
+      {:ok, put_kept(%{state | session_update_event: event}, kept)}
     end
   end
 
   defp refresh_provider_runtime(state) do
-    with {:ok, event} <- build_session_update_event(state) do
-      {:ok, %{state | session_update_event: event}}
+    with {:ok, event, kept} <- build_session_update_event(state) do
+      {:ok, put_kept(%{state | session_update_event: event}, kept)}
     end
   end
 
@@ -917,7 +1023,9 @@ defmodule FermixCore.Realtime.SessionServer do
        do: state
 
   defp handle_provider_event_internal({:session_updated, _event}, state) do
-    RealtimeTelemetry.session_updated(telemetry_meta(state))
+    # Whether the instructions OpenAI just took went without the owner's lists'
+    # and trips' lines, or kept the last ones, so the trace shows it.
+    RealtimeTelemetry.session_updated(Map.merge(telemetry_meta(state), state.kept_unread || %{}))
 
     state
     |> Map.merge(%{provider_ready?: true, reconnect_attempts: 0})
@@ -1084,7 +1192,8 @@ defmodule FermixCore.Realtime.SessionServer do
   end
 
   defp start_screen_share(call, display, state) do
-    with :ok <-
+    with :ok <- screen_share_endpoint(state.endpoint),
+         :ok <-
            ScreenShare.gate(state.config, screen_share_origin(state), probe: state.screen_probe),
          {:ok, state} <- open_screen_feed(state, display) do
       answer_tool_ok(
@@ -1095,6 +1204,12 @@ defmodule FermixCore.Realtime.SessionServer do
     else
       {:error, reason} -> {answer_tool_error(call, reason, state), {:error, reason}}
     end
+  end
+
+  # The verb is never advertised off the desktop; a call for it anyway is
+  # refused here, before the setting or the sidecar are asked.
+  defp screen_share_endpoint(endpoint) do
+    if Endpoint.screen_share?(endpoint), do: :ok, else: {:error, :screen_share_desktop_only}
   end
 
   defp stop_screen_share(call, %{screen_feed: pid} = state) when is_pid(pid) do
@@ -1284,9 +1399,15 @@ defmodule FermixCore.Realtime.SessionServer do
   # whether a command it parked still waits on the owner's answer. While one
   # waits nothing else runs, so the model cannot supply that yes itself (a shell
   # `say yes` the mic would pick up). A call that has read nothing from outside
-  # cannot have parked one, so it never asks the store.
+  # cannot have parked one, so it never asks the store. Each call runs in a
+  # process of its own, so the turn is named: this call (`turn_pid`), which a
+  # browser task on a computer stays with from one tool call to the next.
   defp tool_call_context(state) do
-    context = Map.put(state.tool_bridge.context, :outside_sources, state.outside_sources)
+    context =
+      state.tool_bridge.context
+      |> Map.put(:outside_sources, state.outside_sources)
+      |> Map.put(:turn_pid, self())
+      |> Map.put(:trips_told, trips_told?(state.kept_read))
 
     if MapSet.size(state.outside_sources) > 0 and AccessGate.waiting?(context),
       do: Map.put(context, :access_waiting, true),
@@ -1757,6 +1878,7 @@ defmodule FermixCore.Realtime.SessionServer do
     %{
       session_id: to_string(state.session_scope),
       device_id: state.device_id,
+      endpoint: Endpoint.format(state.endpoint),
       model: state.config.model,
       voice: state.config.voice,
       session_scope: to_string(state.session_scope)

@@ -5,7 +5,9 @@
 """Seed a disposable capability-eval FERMIX_HOME so `make capability` can run.
 
 Creates the home, a git-backed workspace (the checker's per-trial scoring root),
-a minimal strict config.toml, and the auth the scored model needs. The scored
+a minimal config.toml with a strict machine.toml beside it (the sandbox and the
+coding agents' approval are the machine's own settings), and the auth the scored
+model needs. The scored
 model is DERIVED from the primary provider in ~/.fermix-dev/config.toml, so the
 disposable daemon benchmarks the same model you develop against, reusing the dev
 home's credentials:
@@ -58,19 +60,59 @@ daemon's PATH; it answers `--version` and refuses to run anything), a stub
 Codex sign-in in `<home>/eval-codex` (`codex_home`), and a Claude Code config
 dir that does not exist (`claude_config_dir`), so Claude Code is never ready
 whether or not its program is installed. The harness consent is pre-granted
-for every home (below).
+for every home (`harness_lines`); it and both folders are machine.toml keys.
 
-`--voice` turns Grok voice on for the `drive: voice` suite (grok_voice.yaml):
-`[fermix_core.realtime]` enabled, engine `xai_realtime`, model `grok-voice-3.0`.
-The voice key is the xAI provider's api_key slot, filled at daemon boot from
-`XAI_API_KEY` (config/runtime.exs) and never written here; the realtime socket
-starts only in a daemon run with realtime on (`mix fermix.dev`, not
+`--voice` turns voice on for the `drive: voice` suites (grok_voice.yaml,
+voice_greeting_goodbye.yaml): `[fermix_core.realtime]` enabled with one task
+engine and its one model. `--voice-engine` picks it: `xai_realtime` (Grok Voice,
+`grok-voice-3.0`, the default) or `openai_live` (GPT-Live, `gpt-live-1`), so a
+suite that covers both engines runs once per engine. `--voice-conversation
+private` keeps each call apart from the chat, as **Voice calls join the chat:
+No** does, so a suite reaches what a private call's tasks say; the default is
+the chat, which writes nothing. The voice key is the
+engine's provider api_key slot, filled at daemon boot from `XAI_API_KEY` or
+`OPENAI_API_KEY` (config/runtime.exs) and never written here; the realtime
+socket starts only in a daemon run with realtime on (`mix fermix.dev`, not
 `--no-realtime`) and that key present.
+
+`--computers` (M97) makes the home an Always On server with two linked
+computers, both away, for the computers suite (suites/computers.yaml): a
+desktop row each in `mobile/devices.toml` (what `DeviceStore` reads) and a
+record each in `device/computers/<device_id>.json` (its last offers, engine
+version and when it was last seen). It is off by default: the section joins every owner turn, which
+would move the measured prompt of every unrelated suite. No session ever
+exists in an eval, so both computers are listed as away. The studio Mac offers
+`places` (D13) and the home's place search is set to `backend = "computer"`,
+so the home looks places up on that Mac, as a server does, and finds it away:
+a dev build on a Mac would otherwise search Apple Maps itself. The seed records what
+it wrote in `eval-fixtures/computers.json`; a seed without `--computers`
+removes all of it, and a seed with it refuses a devices file it did not write.
+
+Every seed picks a free loopback port for the runners' fixture server and
+records it in `eval-fixtures/fixture_server.json` (`{"port": N}`), picked at
+seed time like the cue door's (and never the door's own). `capability-daemon.sh`
+starts the daemon with `FERMIX_EVAL_FIXTURE_ORIGIN=http://127.0.0.1:N` from it,
+the one origin a development build's `web_fetch` reads past its private-address
+guard, and both runners bind exactly that port (`evallib.fixture_server`), so a
+fixture page is readable by `web_fetch` as well as the browser. A home without
+the manifest (one seeded before it existed) gets neither.
+
+`--coding-signed-out` (M98 D10) gives coding_harness's signed-out case a Claude
+Code that fails every run as signed out: a stub `claude` in `<home>/eval-bin`
+(`capability-daemon.sh` puts that folder first on the daemon's PATH) that
+answers `--version` and, for a run, prints Claude Code's stream for a run it
+cannot sign in for, ending "Not logged in · Please run /login", and exits 1. The
+run starts no vendor and spends nothing outside Fermix. Off by default: with it,
+every Claude Code run in the home fails, the lifecycle cases' included. A seed
+without it removes the stub; the case's `requires: [coding_signed_out]` holds it
+out of a home seeded without it.
 """
 
 from __future__ import annotations
 
 import argparse
+import base64
+import hashlib
 import json
 import os
 import re
@@ -84,8 +126,24 @@ import tomllib
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from evallib import safe_rm  # noqa: E402
+from evallib.fixture_server import FIXTURE_MANIFEST  # noqa: E402
 
 DEV_HOME = os.path.expanduser("~/.fermix-dev")
+# This computer's own settings, beside config.toml (M97 §4): the engine reads
+# the sandbox, computer use and history, the accessory link, what Fermix on a
+# server may use on this computer (`[fermix_core.computer]`) and the dev plugin
+# folder from it only. iMessage's section is the home's, in config.toml.
+MACHINE_FILE = "machine.toml"
+MACHINE_TABLES = ("sandbox", "fermix_core.computer_use", "fermix_core.computer_history",
+                  "fermix_channels.accessories", "fermix_core.computer")
+# Keys of a home table that are this computer's own, as table and key: the dev
+# plugin folder (M97 §4), and the coding agents' approval and sign-in folders
+# (M98 D5). The engine reads them from machine.toml only and strips a copy from
+# config.toml at boot; the rest of `[fermix_core.harness]` stays in config.toml.
+MACHINE_KEYS = (("fermix_core.plugins", "dev_local"),
+                ("fermix_core.harness", "approved"),
+                ("fermix_core.harness", "codex_home"),
+                ("fermix_core.harness", "claude_config_dir"))
 # Homes this script must never touch, compared as REALPATHS so a symlink cannot dress
 # one of them up as a disposable eval home.
 _NON_DISPOSABLE = tuple(os.path.realpath(os.path.expanduser(p))
@@ -100,9 +158,14 @@ _NON_DISPOSABLE = tuple(os.path.realpath(os.path.expanduser(p))
 # `ChromeLauncher` persists per owner/profile, and `harness/` holds `Harness.Artifacts`
 # run trees — both survive a sweep and are inherited by the next one's web and harness
 # tasks, which is the residue this reset exists to remove.
+# `device/coding.db` is this machine's coding store (`Harness.MachineStore`, M98 D3),
+# where a run that fails to sign in marks its agent signed out (D10): the mark is
+# sweep state, while the rest of `device/` (the --computers records) is the seed's.
 STATE_DIRS = ("skills", "memory", "job_runs", "journals", "grants", "bootstrap",
               "browser", "harness", "eval-mcp")
-STATE_FILES = ("memory.db", "memory.db-wal", "memory.db-shm")
+STATE_FILES = ("memory.db", "memory.db-wal", "memory.db-shm",
+               os.path.join("device", "coding.db"), os.path.join("device", "coding.db-wal"),
+               os.path.join("device", "coding.db-shm"))
 # Only these keys are allowed in a provider block (else the daemon refuses boot).
 _PROVIDER_KEYS = ("default_model", "reasoning_effort", "auth_mode", "base_url", "api_key")
 # M45 external skill credentials: one allowed sandbox variable whose value a harmless
@@ -145,12 +208,19 @@ _OAUTH_PROFILE_KEY = {
 }
 # Providers whose api_key the daemon reads from an environment variable at boot
 # (config/runtime.exs); the explicit/CI mode supports exactly these + ollama.
-# Grok voice (M70) for `--voice`: the engine's one shipped model. The parser
-# refuses a Grok model under the default `openai_realtime` engine, so the engine
-# is written beside the model; the provider follows from the engine.
-VOICE_ENGINE = "xai_realtime"
-VOICE_MODEL = "grok-voice-3.0"
-VOICE_KEY_ENV = "XAI_API_KEY"
+# The task engines `--voice` can turn on (M70 Grok Voice, M41 GPT-Live): each
+# engine's one shipped model and the daemon environment variable its provider's
+# api_key slot is filled from at boot. The parser refuses either model under the
+# default `openai_realtime` engine, so the engine is written beside the model;
+# the provider follows from the engine.
+VOICE_ENGINES = {
+    "xai_realtime": ("grok-voice-3.0", "XAI_API_KEY"),
+    "openai_live": ("gpt-live-1", "OPENAI_API_KEY"),
+}
+DEFAULT_VOICE_ENGINE = "xai_realtime"
+# Where a task engine's call runs its tasks: `chat`, the product default,
+# writes nothing; `private` keeps each call apart, its answers only said.
+VOICE_CONVERSATIONS = ("chat", "private")
 # A spend bound for a disposable home: a voice case's call lasts a few minutes
 # at most, and the daemon ends one that outlives this whatever its client does.
 VOICE_MAX_SESSION_MINUTES = 5
@@ -199,6 +269,77 @@ CODEX_MODEL_LIST = {
         {"slug": "gpt-quiet-reserve", "display_name": "Quiet Reserve", "visibility": "hide"},
     ],
 }
+# With --coding-signed-out (M98 D10): a stub `claude` in the same folder, first on
+# the daemon's PATH, that fails every run the way Claude Code fails one it cannot
+# sign in for. The adapter reads the session id from the `system`/`init` event and
+# the vendor's words from the terminal `result` event (the line `Harness.Run`
+# quotes); the lines a real signed-out CLI prints between them are to confirm.
+# The session id is invented.
+CLAUDE_STUB = os.path.join(CUE_BIN_DIR, "claude")
+CLAUDE_STUB_INIT = {"type": "system", "subtype": "init",
+                    "session_id": "3f6b2d84-91ce-4a07-b5e2-6d0c8a71f9e3",
+                    "apiKeySource": "none", "claude_code_version": "eval-stub"}
+CLAUDE_NOT_LOGGED_IN = {"type": "result", "subtype": "success", "is_error": True,
+                        "result": "Not logged in · Please run /login"}
+
+
+def _json_line(event: dict) -> str:
+    return json.dumps(event, ensure_ascii=False, separators=(",", ":"))
+
+
+CLAUDE_SIGNED_OUT_STUB = f"""#!/bin/sh
+# The coding_harness suite's stand-in for a signed-out Claude Code
+# (seed_capability_home.py --coding-signed-out): it answers --version, and every
+# run prints the stream Claude Code prints when it is not signed in, then exits 1.
+if [ "$1" = "--version" ]; then
+  echo "eval-stub (Claude Code)"
+  exit 0
+fi
+printf '%s\\n' '{_json_line(CLAUDE_STUB_INIT)}'
+printf '%s\\n' '{_json_line(CLAUDE_NOT_LOGGED_IN)}'
+exit 1
+"""
+# Computers (M97), with --computers: two computers linked to this home, neither
+# with a session. Each is a desktop row in the paired-device store (`DeviceStore`:
+# lowercase uuid, name and model 1..255 bytes, a unique 32-byte Noise key, ISO
+# 8601 UTC times, no phone field) and a record of what it last said about itself.
+# `model` is the string the move writes for each system. Each files offer names
+# the folders files and commands reach on that computer (`roots`, M97 F5) and
+# the home `~` stands for there (`home`): the studio Mac its workspace and
+# Projects (standard), loft Linux its workspace (strict), never Downloads. Every value is invented, and fixed, so every seed
+# writes the same bytes.
+COMPUTERS_MANIFEST = os.path.join("eval-fixtures", "computers.json")
+HISTORY_MANIFEST = os.path.join("eval-fixtures", "computer_history.json")
+DEVICES_FILE = os.path.join("mobile", "devices.toml")
+COMPUTER_RECORDS_DIR = os.path.join("device", "computers")
+COMPUTERS = (
+    {"device_id": "6f1c2a9e-3b7d-4c21-9a8e-1d2f3a4b5c6d", "name": "studio Mac",
+     "model": "macOS desktop", "platform": "macos", "backups": True,
+     "created_at": "2026-10-02T09:00:00Z", "last_seen": "2026-11-09T22:40:00Z",
+     "engine_version": "0.19.0", "offers_rev": "3a7c19e04b2d58f6",
+     "offers": [{"id": "files", "state": "on",
+                 "roots": ["/Users/avery/.fermix/workspace", "/Users/avery/Projects"],
+                 "home": "/Users/avery"},
+                {"id": "shell", "state": "on", "detail": "standard"},
+                {"id": "browser", "state": "on"},
+                {"id": "computer_use", "state": "on"},
+                {"id": "imessage", "state": "on"},
+                {"id": "history", "state": "on"},
+                {"id": "places", "state": "on"}]},
+    {"device_id": "b47e0d93-5a1c-4f68-8e2b-7c9d1a3f6e05", "name": "loft Linux",
+     "model": "Linux desktop", "platform": "linux", "backups": False,
+     "created_at": "2026-10-19T16:30:00Z", "last_seen": "2026-11-06T14:05:00Z",
+     "engine_version": "0.19.0", "offers_rev": "c81e5f2a90d7b347",
+     "offers": [{"id": "files", "state": "on", "roots": ["/home/rowan/.fermix/workspace"],
+                 "home": "/home/rowan"},
+                {"id": "shell", "state": "on", "detail": "strict"},
+                {"id": "browser", "state": "on"},
+                {"id": "imessage", "state": "unavailable",
+                 "sentence": "Messages runs only on a Mac."},
+                {"id": "history", "state": "on"},
+                {"id": "places", "state": "unavailable",
+                 "sentence": "Looking places up in Apple Maps needs the Fermix app on a Mac."}]},
+)
 _ENV_KEY_PROVIDERS = {
     "openai": "OPENAI_API_KEY",
     "anthropic": "ANTHROPIC_API_KEY",
@@ -243,10 +384,9 @@ def dev_provider(dev: dict, pid: str) -> tuple[str, dict, str | None]:
 
 def render_config(
     home: str, pid: str, blk: dict, profile: str | None,
-    allowed_roots: tuple[str, ...] = (), explicit: bool = False, voice: bool = False,
-    cues: dict | None = None,
+    explicit: bool = False, voice: str | None = None, cues: dict | None = None,
+    computers: bool = False, voice_conversation: str = "chat",
 ) -> str:
-    workspace = os.path.join(home, "workspace")
     uses_key = "api_key" in blk
     if explicit:
         source_note = ("# Disposable eval daemon (explicit/CI spec): strict, home-scoped sandbox; no\n"
@@ -271,28 +411,6 @@ def render_config(
             continue
         if key in blk and blk[key] not in (None, ""):
             lines.append(f'{key} = "{blk[key]}"')
-    # `<home>/skills` is always a sandbox root: it is where the daemon
-    # materializes skills, and the skill tasks verify their created SKILL.md
-    # with raw file reads. Under a workspace-only sandbox that read is denied
-    # -> request_directory_access -> "stop and wait for the owner" — an
-    # approval no eval can answer — so the turn ends before the deliverable
-    # is written and the task scores 0 with nothing wrong in the product
-    # (create_and_confirm_skill, 2026-08-06: 9 of 10 base trials died there).
-    # Same rule as the harness consent below: pre-grant every human-decision
-    # gate, scoped to this throwaway home. The runner precondition tolerates
-    # it — only roots that escape the home are refused.
-    roots = ", ".join(
-        json.dumps(root) for root in (os.path.join(home, "skills"), *allowed_roots))
-    lines += ["", "[sandbox]", 'mode = "strict"',
-              f'workspace_root = "{workspace}"', f"allowed_roots = [{roots}]", ""]
-    # The skill-credential fixture (M45): allowed, and read through a `command`
-    # source, so every shell command the eval daemon runs receives it and the
-    # redaction of its value is exercised on the real agent path.
-    token_path = os.path.join(home, SKILL_TOKEN_FILE)
-    lines += ["[sandbox.env]", f"allow = [{json.dumps(SKILL_TOKEN_NAME)}]", "",
-              f"[sandbox.env.{SKILL_TOKEN_NAME}]", 'source = "command"',
-              'command = "/bin/cat"', f"args = [{json.dumps(token_path)}]",
-              "timeout_ms = 3000", ""]
     # The halden_ops fixture MCP server (cap_tool_discovery). `/usr/bin/env python3`
     # because the server is standard-library only and this seeder's interpreter lives
     # in a uv cache the daemon should not depend on.
@@ -300,44 +418,28 @@ def render_config(
                    "--state-dir", os.path.join(home, MCP_STATE_DIR, "halden_ops")]
     lines += ["[mcp.servers.halden_ops]", 'command = "/usr/bin/env"',
               f"args = [{', '.join(json.dumps(arg) for arg in server_args)}]", ""]
-    # Pre-approve coding agents in the disposable home. Consent is a setup decision
-    # (design §23.3) and defaults false, and an unapproved host advertises no run
-    # tool and renders no delegation steering at all (§23.4) — it does not stall,
-    # it silently makes the candidate model do the coding by hand, so the harness
-    # suite would grade main-agent coding instead of delegation and every
-    # delegating task would score zero. Approving here is scoped to this throwaway home
-    # whose sandbox is strict and rooted at the workspace above (the isolation the
-    # --confirm-daemon-isolated / --confirm-isolated-env flags attest to). Left
-    # unset: default_vendor (so both CLIs stay advertised for tasks that name
-    # either) and cloud_enabled (defaults off — the cloud rail is not evaluated).
-    lines += ["[fermix_core.harness]", "approved = true"]
-    # With --cues, the follow-up cases' coding agents: the stub Codex sign-in, and
-    # a Claude Code config dir that is never made (see the module docstring).
-    if cues:
-        lines += [f"codex_home = {json.dumps(os.path.join(home, CUE_CODEX_HOME))}",
-                  f"claude_config_dir = {json.dumps(os.path.join(home, CUE_CLAUDE_DIR))}"]
-    lines += [""]
+    # No `[fermix_core.harness]` here: the coding agents' approval and sign-in
+    # folders are this computer's own (`render_machine`), and the home's harness
+    # keys are left unset: default_vendor (so both CLIs stay advertised for tasks
+    # that name either) and cloud_enabled (defaults off — the cloud rail is not
+    # evaluated).
     # Meetings (MILESTONE_21) are off until the operator turns them on, and a
     # fresh eval home has never made that decision — so `Meetings.ready?()` is
     # false, the seeder registers NO meetings tool, and a task asking the
     # notetaker to join scores 0 with nothing wrong in the product. Same rule as
-    # the harness consent above: pre-grant every human-decision gate, scoped to
+    # the harness consent (`harness_lines`): pre-grant every human-decision gate, scoped to
     # this throwaway home. It is deliberately not sufficient on its own —
     # `ready?()` also wants an installed meetbot sidecar or complete Zoom RTMS
     # credentials, and this seeder installs neither — so a home that never gets a
     # lane still advertises nothing and refuses locally rather than dialling out.
     lines += ["[fermix_core.meetings]", "enabled = true", ""]
-    # Computer history (MILESTONE_32) is the DELIBERATE EXCEPTION to the
-    # pre-grant-every-gate rule, recorded here so its absence never reads as an
-    # oversight. Its `enabled` gate does not merely advertise a tool — it starts
-    # a live capturer that would record the eval HOST's real screen activity
-    # into this throwaway home and ship summaries to a provider, which is
-    # exactly the private-data movement the capability runner exists to refuse:
-    # the recall suite's positive half is risk `private_account_read`, a class
-    # `make capability-auto` never loads. Pre-granting would leak, not unblock.
-    # If a future capability task legitimately needs recall_activity, seed a
-    # synthetic spool instead of enabling live capture.
-    lines += ["[fermix_core.computer_history]", "enabled = false", ""]
+    # Computer history stays off: see `render_machine`, which writes it.
+    # The StackChan accessory link (M91) is another deliberate exception, and
+    # it is not seeded: on, the daemon lists this Mac's USB serial ports every
+    # two seconds and would open a port a paired robot's serial names, which
+    # reaches real hardware on the eval host. No capability task needs it, and
+    # the accessory_voice behavioral suite answers from self-knowledge with the
+    # link off, so leaving its default (off) blocks nothing.
     # Computer use is not seeded at all, so its experimental `background` gate
     # (M42 slice 5) is off here as it is everywhere — deliberately, and recorded
     # so its absence never reads as an oversight either. It is the second
@@ -356,7 +458,7 @@ def render_config(
     # eval home has never made that decision — so the open_loop_* tools are not
     # advertised, the scheduler never starts, and both open-loop suites
     # (open_loops.yaml, capability/candidates/open_loop_checkin.yaml) score 0 with
-    # nothing wrong in the product. Same rule as the harness consent above:
+    # nothing wrong in the product. Same rule as the harness consent (`harness_lines`):
     # pre-grant every human-decision gate, scoped to this throwaway home. `enabled`
     # is the section's only key; any other stops the daemon booting.
     lines += ["[fermix_core.open_loops]", "enabled = true", ""]
@@ -382,10 +484,86 @@ def render_config(
     lines += ["[fermix_core.personalization]", 'user_name = "Eval Operator"',
               'timezone = "America/New_York"', 'communication_style = "concise"', ""]
     if voice:
-        lines += voice_lines()
+        lines += voice_lines(voice, voice_conversation)
     if cues:
         lines += cue_lines(home, cues)
+    if computers:
+        # Places are looked up on the studio Mac, as a server's are (D13): a Mac
+        # dev daemon carries the Apple helper and would search Apple Maps itself.
+        lines += ["[fermix_core.tools.place_search]", 'backend = "computer"', ""]
     return "\n".join(lines)
+
+
+def render_machine(home: str, allowed_roots: tuple[str, ...] = (),
+                   cues: dict | None = None) -> str:
+    """The eval home's `machine.toml` (M97 §4): the settings that describe the
+    computer the daemon runs on, which the engine reads from this file only and
+    never from config.toml. The sandbox, the skill-credential fixture's
+    environment source, computer history held off, the coding agents' approval
+    and, with --cues, their sign-in folders (M98 D5), and, with cue mandates, the
+    dev plugin folder the stub plugin is installed from."""
+    workspace = os.path.join(home, "workspace")
+    lines = ["# Managed by benchmark/bin/seed_capability_home.py — regenerated on each run.",
+             "# This computer's own settings (sandbox, computer history, dev plugins).", ""]
+    # `<home>/skills` is always a sandbox root: it is where the daemon
+    # materializes skills, and the skill tasks verify their created SKILL.md
+    # with raw file reads. Under a workspace-only sandbox that read is denied
+    # -> request_directory_access -> "stop and wait for the owner" — an
+    # approval no eval can answer — so the turn ends before the deliverable
+    # is written and the task scores 0 with nothing wrong in the product
+    # (create_and_confirm_skill, 2026-08-06: 9 of 10 base trials died there).
+    # Same rule as the harness consent in `harness_lines`: pre-grant every
+    # human-decision gate, scoped to this throwaway home. The runner
+    # precondition tolerates it — only roots that escape the home are refused.
+    roots = ", ".join(
+        json.dumps(root) for root in (os.path.join(home, "skills"), *allowed_roots))
+    lines += ["[sandbox]", 'mode = "strict"',
+              f'workspace_root = "{workspace}"', f"allowed_roots = [{roots}]", ""]
+    # The skill-credential fixture (M45): allowed, and read through a `command`
+    # source, so every shell command the eval daemon runs receives it and the
+    # redaction of its value is exercised on the real agent path.
+    token_path = os.path.join(home, SKILL_TOKEN_FILE)
+    lines += ["[sandbox.env]", f"allow = [{json.dumps(SKILL_TOKEN_NAME)}]", "",
+              f"[sandbox.env.{SKILL_TOKEN_NAME}]", 'source = "command"',
+              'command = "/bin/cat"', f"args = [{json.dumps(token_path)}]",
+              "timeout_ms = 3000", ""]
+    # Computer history (MILESTONE_32) is the DELIBERATE EXCEPTION to the
+    # pre-grant-every-gate rule, recorded here so its absence never reads as an
+    # oversight. Its `enabled` gate does not merely advertise a tool — it starts
+    # a live capturer that would record the eval HOST's real screen activity
+    # into this throwaway home and ship summaries to a provider, which is
+    # exactly the private-data movement the capability runner exists to refuse:
+    # the recall suite's positive half is risk `private_account_read`, a class
+    # `make capability-auto` never loads. Pre-granting would leak, not unblock.
+    # If a future capability task legitimately needs recall_activity, seed a
+    # synthetic spool instead of enabling live capture.
+    lines += ["[fermix_core.computer_history]", "enabled = false", ""]
+    lines += harness_lines(home, cues)
+    if cues and cues["mandates"]:
+        lines += ["[fermix_core.plugins]",
+                  f"dev_local = {json.dumps(os.path.join(home, CUE_PLUGIN_DIR))}", ""]
+    return "\n".join(lines)
+
+
+def harness_lines(home: str, cues: dict | None) -> list[str]:
+    """This computer's `[fermix_core.harness]` keys (M98 D5): the approval, and with
+    --cues the follow-up cases' sign-in folders. Fermix reads these three from
+    machine.toml only; every other harness key is the home's, in config.toml."""
+    # Pre-approve coding agents in the disposable home. Consent is a setup decision
+    # (design §23.3) and defaults false, and an unapproved host advertises no run
+    # tool and renders no delegation steering at all (§23.4) — it does not stall,
+    # it silently makes the candidate model do the coding by hand, so the harness
+    # suite would grade main-agent coding instead of delegation and every
+    # delegating task would score zero. Approving here is scoped to this throwaway home
+    # whose sandbox is strict and rooted at the workspace above (the isolation the
+    # --confirm-daemon-isolated / --confirm-isolated-env flags attest to).
+    lines = ["[fermix_core.harness]", "approved = true"]
+    # With --cues, the follow-up cases' coding agents: the stub Codex sign-in, and
+    # a Claude Code config dir that is never made (see the module docstring).
+    if cues:
+        lines += [f"codex_home = {json.dumps(os.path.join(home, CUE_CODEX_HOME))}",
+                  f"claude_config_dir = {json.dumps(os.path.join(home, CUE_CLAUDE_DIR))}"]
+    return lines + [""]
 
 
 def cue_lines(home: str, cues: dict) -> list[str]:
@@ -407,8 +585,7 @@ def cue_lines(home: str, cues: dict) -> list[str]:
     lines += ["[fermix_core.routing]", f"filter_provider = {json.dumps(provider)}",
               f"filter_model = {json.dumps(model)}", ""]
     if cues["mandates"]:
-        lines += ["[fermix_core.plugins]", f"enabled = [{json.dumps(CUE_PLUGIN)}]",
-                  f"dev_local = {json.dumps(os.path.join(home, CUE_PLUGIN_DIR))}", ""]
+        lines += ["[fermix_core.plugins]", f"enabled = [{json.dumps(CUE_PLUGIN)}]", ""]
     return lines
 
 
@@ -426,6 +603,31 @@ def free_door_port() -> int:
         return probe.getsockname()[1]
     finally:
         probe.close()
+
+
+# Bound on the probes for a fixture port that is not the door's: two probes in a
+# row rarely answer the same port, and eight never should.
+FIXTURE_PORT_PROBES = 8
+
+
+def free_fixture_port(door_port: int | None) -> int:
+    """A port nothing listens on now and that is not this home's door, for the
+    runners' fixture server (`FIXTURE_MANIFEST`). Something taking it before a run
+    starts fails that run's fixture server loudly, naming the port."""
+    for _probe in range(FIXTURE_PORT_PROBES):
+        port = free_door_port()
+        if port != door_port:
+            return port
+    die(f"no free fixture port other than the door's {door_port} "
+        f"in {FIXTURE_PORT_PROBES} probes")
+
+
+def write_fixture_manifest(home: str, door_port: int | None) -> int:
+    """Record this seed's fixture port, rewritten on every seed: the port both runners
+    bind and the origin capability-daemon.sh hands the daemon's web_fetch."""
+    port = free_fixture_port(door_port)
+    write_private(os.path.join(home, FIXTURE_MANIFEST), json.dumps({"port": port}) + "\n")
+    return port
 
 
 def cue_filter_route(value: str | None, pid: str, blk: dict) -> tuple[str, str]:
@@ -486,6 +688,22 @@ def write_coding_stubs(home: str) -> None:
                   json.dumps(CODEX_MODEL_LIST))
 
 
+def write_signed_out_claude(home: str) -> str:
+    """The stub `claude` (executable, private) that fails every run as signed out."""
+    stub = os.path.join(home, CLAUDE_STUB)
+    write_private(stub, CLAUDE_SIGNED_OUT_STUB)
+    os.chmod(stub, 0o700)
+    return stub
+
+
+def clear_signed_out_claude(home: str) -> None:
+    """A seed without --coding-signed-out: remove the stub a previous seed left, so
+    no other suite's daemon finds a Claude Code that fails every run."""
+    stub = os.path.join(home, CLAUDE_STUB)
+    if os.path.isfile(stub):
+        os.remove(safe_rm.check(stub, home, min_below=1))
+
+
 def write_private(path: str, text: str) -> None:
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w", encoding="utf-8") as fh:
@@ -517,17 +735,109 @@ def write_cue_plugin(home: str) -> str:
     return path
 
 
-def voice_lines() -> list[str]:
-    """Grok voice on, for the `drive: voice` suite. Turning voice on is the one
-    human decision a voice case needs; the call's conversation stays the
-    product default (the chat), so the cases see what an owner's call does. No
-    other gate is granted: computer history stays off (above), so nothing it
-    guards can reach the voice provider."""
-    return ["# Grok voice for drive: voice (grok_voice.yaml). The key is XAI_API_KEY on the",
-            "# daemon process, read at boot; the socket needs a daemon run with realtime on.",
-            "[fermix_core.realtime]", "enabled = true", f'engine = "{VOICE_ENGINE}"',
-            f'model = "{VOICE_MODEL}"', f"max_session_minutes = {VOICE_MAX_SESSION_MINUTES}",
-            ""]
+def computer_noise_pk(device_id: str) -> str:
+    """A computer's Noise public key as its row stores it (standard base64 of 32
+    bytes). Derived from its id, so every seed writes the same bytes and no two
+    rows share one; no session ever uses it."""
+    digest = hashlib.sha256(f"fermix-eval computer {device_id}".encode()).digest()
+    return base64.b64encode(digest).decode("ascii")
+
+
+def render_devices() -> str:
+    """`mobile/devices.toml` with one desktop row per computer in `COMPUTERS`."""
+    lines = ["# Managed by benchmark/bin/seed_capability_home.py --computers: the",
+             "# computers linked to this home, both away (no session).", ""]
+    for computer in COMPUTERS:
+        lines += ["[[devices]]"]
+        lines += [f"{key} = {json.dumps(computer[key])}"
+                  for key in ("device_id", "name", "model")]
+        lines += [f"noise_pk = {json.dumps(computer_noise_pk(computer['device_id']))}",
+                  f"created_at = {json.dumps(computer['created_at'])}",
+                  'kind = "desktop"',
+                  f"platform = {json.dumps(computer['platform'])}",
+                  f"last_seen = {json.dumps(computer['last_seen'])}",
+                  f"backups = {json.dumps(computer['backups'])}", ""]
+    return "\n".join(lines)
+
+
+def computer_record(computer: dict) -> dict:
+    """What a computer last said about itself, as the home keeps it on disk."""
+    return {"v": 1, "engine_version": computer["engine_version"],
+            "seen_at": computer["last_seen"], "offers_rev": computer["offers_rev"],
+            "offers": computer["offers"]}
+
+
+def computer_paths(home: str) -> list[str]:
+    """Every file `write_computer_fixtures` writes, the manifest last."""
+    records = [os.path.join(home, COMPUTER_RECORDS_DIR, f"{c['device_id']}.json")
+               for c in COMPUTERS]
+    return [os.path.join(home, DEVICES_FILE), *records, os.path.join(home, COMPUTERS_MANIFEST)]
+
+
+def make_private_dir(path: str) -> None:
+    os.makedirs(path, exist_ok=True)
+    os.chmod(path, 0o700)
+
+
+def write_computer_fixtures(home: str) -> dict:
+    """The two computers (`COMPUTERS`): the devices file (directory 0700, file
+    0600, the modes `DeviceStore` refuses anything but), one record each under
+    `device/computers/` (0700 / 0600), and the manifest that says this seed
+    wrote them. Rewritten whole on every seed. A devices file the manifest does
+    not account for is refused, never overwritten: an eval home pairs nothing,
+    so it is someone else's."""
+    devices = os.path.join(home, DEVICES_FILE)
+    if os.path.exists(devices) and not os.path.isfile(os.path.join(home, COMPUTERS_MANIFEST)):
+        die(f"refusing to replace {devices}: this seed did not write it (no "
+            f"{COMPUTERS_MANIFEST}); remove it or seed a fresh home")
+    make_private_dir(os.path.dirname(devices))
+    write_private(devices, render_devices())
+    make_private_dir(os.path.join(home, os.path.dirname(COMPUTER_RECORDS_DIR)))
+    make_private_dir(os.path.join(home, COMPUTER_RECORDS_DIR))
+    for computer in COMPUTERS:
+        path = os.path.join(home, COMPUTER_RECORDS_DIR, f"{computer['device_id']}.json")
+        write_private(path, json.dumps(computer_record(computer), indent=2) + "\n")
+    manifest = {"computers": [{key: c[key] for key in ("name", "platform", "last_seen")}
+                              for c in COMPUTERS]}
+    write_private(os.path.join(home, COMPUTERS_MANIFEST), json.dumps(manifest, indent=2))
+    return manifest
+
+
+def clear_computer_fixtures(home: str) -> None:
+    """A seed without --computers: remove what a previous --computers seed wrote
+    (its manifest says so), so no other suite's turns carry a `## Computers`
+    section. A home without the manifest is left as it is."""
+    if not os.path.isfile(os.path.join(home, COMPUTERS_MANIFEST)):
+        return
+    # seed_history.exs's manifest, written after a --computers seed with the
+    # daemon down; its notes went with memory.db.
+    history = os.path.join(home, HISTORY_MANIFEST)
+    for path in [history, *computer_paths(home)]:
+        if os.path.isfile(path):
+            os.remove(safe_rm.check(path, home, min_below=1))
+
+
+def voice_lines(engine: str, conversation: str = "chat") -> list[str]:
+    """Voice on with one task engine, for the `drive: voice` suites. Turning
+    voice on is the one human decision a voice case needs, on either engine:
+    neither has a consent of its own (`screen_share` is read only by the
+    Realtime engine, `camera_share` only by a phone's call). The call's
+    conversation is the product default (the chat), so the cases see what an
+    owner's call does, unless `conversation` is `private`. No other gate is
+    granted: computer history stays off (above), so nothing it guards can reach
+    the voice provider."""
+    if engine not in VOICE_ENGINES:
+        raise ValueError(f"voice engine must be one of {sorted(VOICE_ENGINES)}, got {engine!r}")
+    if conversation not in VOICE_CONVERSATIONS:
+        raise ValueError(f"voice conversation must be one of {list(VOICE_CONVERSATIONS)}, "
+                         f"got {conversation!r}")
+    model, key_env = VOICE_ENGINES[engine]
+    private = ['conversation = "private"'] if conversation == "private" else []
+    return [f"# Voice for drive: voice ({engine}). The key is {key_env} on the daemon",
+            "# process, read at boot; the socket needs a daemon run with realtime on.",
+            "[fermix_core.realtime]", "enabled = true", f'engine = "{engine}"',
+            f'model = "{model}"', f"max_session_minutes = {VOICE_MAX_SESSION_MINUTES}",
+            *private, ""]
 
 
 _TABLE_HEADER_RE = re.compile(r"^\s*\[\[?\s*([^\[\]]+?)\s*\]\]?\s*$")
@@ -539,7 +849,7 @@ def table_headers(toml_text: str) -> list[str]:
     Explicit headers, not tomllib's nested result: a fragment adding
     `[fermix_core.browser]` is fine beside the seeder's
     `[fermix_core.providers.<id>]` — both only imply `[fermix_core]` — while a
-    second `[fermix_core.harness]` is the duplicate TOML itself refuses. Only the
+    second `[fermix_core.meetings]` is the duplicate TOML itself refuses. Only the
     headers each document actually writes can tell those apart."""
     headers = []
     for line in toml_text.splitlines():
@@ -547,6 +857,15 @@ def table_headers(toml_text: str) -> list[str]:
         if match:
             headers.append(match.group(1).strip())
     return headers
+
+
+def nested_table(parsed: dict, dotted: str) -> dict:
+    """The table a parsed TOML document holds at `dotted` (`fermix_core.harness`),
+    or an empty one where it holds none."""
+    node = parsed
+    for part in dotted.split("."):
+        node = node.get(part) if isinstance(node, dict) else None
+    return node if isinstance(node, dict) else {}
 
 
 def extra_config_error(rendered: str, fragment: str) -> str | None:
@@ -567,6 +886,17 @@ def extra_config_error(rendered: str, fragment: str) -> str | None:
         # THAT table instead of the document root.
         return (f"--extra-config must start with a table header; top-level key(s) "
                 f"{bare} would be appended into the seeder's last table")
+    # The fragment is appended to config.toml only, so this computer's own settings
+    # in it would be stripped at boot or never read. A home table split by key
+    # (`MACHINE_KEYS`) is refused only for the machine's keys: the seeder writes no
+    # `[fermix_core.harness]` in config.toml, so an arm may set its home keys.
+    machine = sorted(header for header in table_headers(fragment)
+                     if any(header == t or header.startswith(t + ".") for t in MACHINE_TABLES))
+    machine += [f"{table}.{key}" for table, key in MACHINE_KEYS
+                if key in nested_table(parsed, table)]
+    if machine:
+        return (f"--extra-config sets this computer's own settings {machine}, "
+                f"which Fermix reads from {MACHINE_FILE}, never from config.toml")
     written = set(table_headers(rendered))
     clashes = sorted(set(table_headers(fragment)) & written)
     if clashes:
@@ -761,8 +1091,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--allow-root", dest="allow_roots", action="append", default=[],
                         help="absolute path appended to sandbox allowed_roots (repeatable)")
     parser.add_argument("--voice", action="store_true",
-                        help="turn Grok voice on for the drive: voice suite (the daemon needs "
-                             f"{VOICE_KEY_ENV} in its environment and realtime on)")
+                        help="turn voice on for the drive: voice suites (the daemon needs the "
+                             "engine's key in its environment and realtime on)")
+    parser.add_argument("--voice-engine", dest="voice_engine", choices=sorted(VOICE_ENGINES),
+                        help=f"with --voice: the task engine (default {DEFAULT_VOICE_ENGINE}; "
+                             + ", ".join(f"{engine} needs {key}" for engine, (_model, key)
+                                         in sorted(VOICE_ENGINES.items())) + ")")
+    parser.add_argument("--voice-conversation", dest="voice_conversation",
+                        choices=VOICE_CONVERSATIONS,
+                        help="with --voice: where a call's tasks run (default chat, the "
+                             "product default; private keeps each call apart)")
     parser.add_argument("--cues", action="store_true",
                         help="turn cues on for the cue suites (door, sources, default filter "
                              "model; seed_cues.exs then makes the watchers); off by default")
@@ -772,6 +1110,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--cue-mandates", dest="cue_mandates", action="store_true",
                         help="with --cues: add the stub http plugin and the two mandates the "
                              "cue suite's mandate cases need (they are held out without it)")
+    parser.add_argument("--computers", action="store_true",
+                        help="link two computers to the home (studio Mac, loft Linux), both "
+                             "away, for the computers suite; off by default")
+    parser.add_argument("--coding-signed-out", dest="coding_signed_out", action="store_true",
+                        help="put a stub claude first on the daemon's PATH that fails every "
+                             "run as signed out, for coding_harness's signed-out case; off "
+                             "by default")
     parser.add_argument("--extra-config", dest="extra_config",
                         help="TOML fragment appended to the rendered config (one "
                              "configuration ARM's difference); refused when it "
@@ -811,6 +1156,12 @@ def main() -> None:
         die("use --provider/--model (explicit mode) or --dev-provider, not both")
     if not args.cues and (args.cue_mandates or args.cue_filter_model):
         die("--cue-mandates and --cue-filter-model need --cues")
+    if args.voice_engine and not args.voice:
+        die("--voice-engine needs --voice")
+    if args.voice_conversation and not args.voice:
+        die("--voice-conversation needs --voice")
+    voice_conversation = args.voice_conversation or "chat"
+    voice_engine = (args.voice_engine or DEFAULT_VOICE_ENGINE) if args.voice else None
     allowed_roots = tuple(
         os.path.abspath(os.path.expanduser(p)) for p in args.allow_roots)
 
@@ -841,12 +1192,24 @@ def main() -> None:
         write_cue_fixtures(home, cues)
     else:
         clear_cue_fixtures(home)
-    config = render_config(home, pid, blk, profile, allowed_roots,
-                           explicit=bool(args.provider), voice=args.voice, cues=cues)
+    if args.computers:
+        write_computer_fixtures(home)
+    else:
+        clear_computer_fixtures(home)
+    if args.coding_signed_out:
+        write_signed_out_claude(home)
+    else:
+        clear_signed_out_claude(home)
+    fixture_port = write_fixture_manifest(home, cues["door_port"] if cues else None)
+    config = render_config(home, pid, blk, profile, explicit=bool(args.provider),
+                           voice=voice_engine, cues=cues, computers=args.computers,
+                           voice_conversation=voice_conversation)
     if args.extra_config:
         config += read_extra_config(config, args.extra_config)
     with open(os.path.join(home, "config.toml"), "w", encoding="utf-8") as fh:
         fh.write(config)
+    with open(os.path.join(home, MACHINE_FILE), "w", encoding="utf-8") as fh:
+        fh.write(render_machine(home, allowed_roots, cues))
 
     if args.provider:
         env_name = _ENV_KEY_PROVIDERS.get(pid)
@@ -857,13 +1220,23 @@ def main() -> None:
         copy_oauth_token(home, pid)
         auth = "oauth (token copied from dev store)"
     print(f"seeded {home}: scoring {pid}/{blk['default_model']} (auth={auth})")
+    print(f"fixture server: 127.0.0.1:{fixture_port}, the origin the daemon's web_fetch reads")
     if cues:
         print(f"cues: door on 127.0.0.1:{cues['door_port']}, filter "
               f"{'/'.join(cues['filter'])}, mandates {'on' if cues['mandates'] else 'off'}; "
               "run seed_cues.exs next, daemon still down")
-    if args.voice:
-        print(f"voice: {VOICE_MODEL} on; {VOICE_KEY_ENV} must be set on the daemon process, "
-              "started with realtime on (mix fermix.dev, not --no-realtime)")
+    if voice_engine:
+        model, key_env = VOICE_ENGINES[voice_engine]
+        print(f"voice: {voice_engine} ({model}) on; {key_env} must be set on the daemon "
+              "process, started with realtime on (mix fermix.dev, not --no-realtime)")
+        if voice_conversation == "private":
+            print("voice calls: private (each call apart from the chat, its answers only said)")
+    if args.computers:
+        names = " and ".join(c["name"] for c in COMPUTERS)
+        print(f"computers: {names} linked, both away")
+    if args.coding_signed_out:
+        print(f"coding signed out: {CLAUDE_STUB} fails every Claude Code run as signed out; "
+              "capability-daemon.sh puts it first on the daemon's PATH")
 
 
 if __name__ == "__main__":

@@ -14,7 +14,11 @@ defmodule Fermix.CLI.Daemon do
 
   and the two a sibling CLI VM sends after changing state on disk:
   `plugins_apply` (re-read the config) and `auth_forget` (let go of the tokens
-  of a profile the CLI just signed out of).
+  of a profile the CLI just signed out of). `home_link` answers this engine's
+  own view of its link to an Always On server (`home.status`'s `primary`, its
+  path included) for Doctor's `server link` row: unlike `home.status`, which a
+  linked desktop composes with the server's own part, it asks the server
+  nothing.
 
   `status` and `overview` were unversioned methods until `fermix status` moved
   onto `hello` plus `overview.get`; they were deleted rather than kept, so one
@@ -34,8 +38,8 @@ defmodule Fermix.CLI.Daemon do
   primary's database (`Placement.database_family?/1`) as retired. The server's
   Always On steps (`Placement.rail_only?/1`) are
   refused here by name in every role: a linked desktop's own `home.act`
-  sends them over the link, and keeps a replace's move in its ledger itself.
-  A composed request (`home.status`, `settings.sections`) is
+  sends them over the link, and keeps a move back's start in its record itself.
+  A composed request (`home.status`, `settings.sections`, `job.list`) is
   answered here, and the router asks the primary for its part through the
   same link (`:primary_forward`). On the primary, `serve_forwarded/3` answers a
   request a desktop forwarded exactly as this socket would, with the router's
@@ -44,11 +48,15 @@ defmodule Fermix.CLI.Daemon do
   Started only inside `fermix run` (the supervision tree branches on
   `:fermix_core, :daemon_socket_enabled`). Stale sockets from prior
   crashes are removed on boot; double-binding fails fast on
-  EADDRINUSE rather than silently overwriting.
+  EADDRINUSE rather than silently overwriting. The daemon holds the lock
+  beside its socket for its life (`Fermix.CLI.Daemon.Lock`), which a client
+  asks when the socket turns it away: a second daemon that finds it held
+  does not start, and never removes the socket of one too busy to accept.
   """
 
   use GenServer
 
+  alias Fermix.CLI.Daemon.Lock
   alias FermixCore.Agents.MainAgent
   alias FermixCore.Agents.SkillRegistry
   alias FermixCore.Auth.TokenSupervisor
@@ -60,8 +68,12 @@ defmodule Fermix.CLI.Daemon do
   alias FermixCore.Introspection.Agents
   alias FermixCore.Introspection.Capabilities
   alias FermixCore.Introspection.Wire
+  alias FermixCore.Management.Accessories, as: ManagementAccessories
+  alias FermixCore.Management.ComputerSettings
   alias FermixCore.Management.Cues, as: ManagementCues
+  alias FermixCore.Management.Home, as: ManagementHome
   alias FermixCore.Management.HomeMove, as: ManagementHomeMove
+  alias FermixCore.Management.HomeSummary
   alias FermixCore.Management.Lifecycle
   alias FermixCore.Management.Mobile, as: ManagementMobile
   alias FermixCore.Management.Placement
@@ -72,6 +84,7 @@ defmodule Fermix.CLI.Daemon do
   alias FermixCore.Management.Text
   alias FermixCore.Observability
   alias FermixCore.Plugins.Runtime, as: PluginsRuntime
+  alias FermixCore.Setup.ConfigStore
   alias FermixCore.SocketPath
   alias FermixCore.SocketPeer
   alias FermixCore.Trace
@@ -79,7 +92,11 @@ defmodule Fermix.CLI.Daemon do
   require Logger
 
   @recv_timeout_ms 5_000
-  @accept_idle_ms 200
+  @accept_retry_ms 1_000
+  # The connections the kernel queues while the acceptor is at another:
+  # macOS's cap (`kern.ipc.somaxconn`). macOS refuses a connect beyond it at
+  # once, and its default of 5 did so on a busy daemon.
+  @listen_backlog 128
   @skill_name_pattern ~r/^[A-Za-z0-9_-]{1,64}$/
   @skill_view_max_bytes 65_536
   @mobile_pair_wait_ms 120_000
@@ -100,13 +117,18 @@ defmodule Fermix.CLI.Daemon do
   # on the phone that asked, closing the window, and forgetting a device.
   @mobile_decisions_v1 ~w(mobile.pair.start mobile.pair.decide mobile.pair.cancel
                           mobile.devices.revoke)
-  # Every Always On step (Always On setup §6): giving Fermix a cloud
-  # provider's token (it decides which account Fermix acts in), creating,
-  # powering and deleting the server (each spends the owner's money or can
-  # take the home away), opening a code that lets a server take this home,
-  # reviewing a move (the review reads every keychain secret it would carry)
-  # and starting it; and replacing the recovery key (M75). The reads stay open.
-  @home_decisions_v1 ~w(home.act home.snapshots.passphrase)
+  # The owner's decisions on an accessory (M91 §07 and the E3 review): every
+  # `accessories.*` method but the status pairs, forgets, calls, sounds, moves
+  # or frees the robot, so a process the daemon started never sends one. Only
+  # `accessories.status` stays open.
+  @accessory_reads_v1 ~w(accessories.status)
+  # Every Always On step (Always On setup §6): opening a code that lets a
+  # server take this home, reviewing a move (the review reads every keychain
+  # secret it would carry), starting it, moving back and restoring here; and
+  # replacing the recovery key (M75); and this computer joining a home or
+  # leaving it (M97 §3.1, §3.3). The reads stay open.
+  @home_decisions_v1 ~w(home.act home.snapshots.passphrase computer.join.start
+                        computer.join.cancel computer.disconnect)
   # Opening the setup page: its session drives every decision the page offers,
   # the owner's included (Always On setup §6). `fermix setup` mints its own
   # launch token in-process and never asks here; the Mac app's agent is an
@@ -115,6 +137,15 @@ defmodule Fermix.CLI.Daemon do
   @setup_capability "setup_session"
   @setup_owner_sentence "Only the owner can open the setup page: use the Fermix app or your " <>
                           "own terminal."
+  # What Fermix on the server may use on this computer (M97 §7.2): no Always
+  # On step, so a sentence of its own, under the Always On capability.
+  @computer_owner_sentence "Only the person at this computer can change what Fermix on your " <>
+                             "server may use on it: use the Fermix app or the setup page."
+  # A machine's own settings (M97 §19.3, D28): its sandbox, browser, coding
+  # agents' approval, screen, history and accessory link, the server's or
+  # this computer's, and a sandbox value of either.
+  @machine_owner_sentence "Only the owner can change a computer's own settings, its sandbox " <>
+                            "among them: use the Fermix app or the setup page."
   @owner_decisions_v0 ~w(mobile_pair_begin mobile_pair_decide mobile_pair_cancel
                          mobile_device_revoke)
   # The cue writes that widen what reaches a task or what a task may do, the
@@ -153,17 +184,26 @@ defmodule Fermix.CLI.Daemon do
   answer is the response this socket would send. It runs in the caller with
   the options this daemon passes its router, and the actor
   `{:desktop, device_id}`. The desktop's engine placed its own caller before
-  forwarding, so an owner decision is served; a device-class request is
-  refused with `device_class_method`.
+  forwarding, so an owner decision is served; a device-class request (a
+  `computer` or `computer.<id>` setting among them, M97 §19.3) is refused with
+  `device_class_method`. `computer` is who sent it: its device id, and
+  whether its `hello` said it applies §19.3's rule (`machine_settings`); a
+  sandbox value from one that did not is refused (`Placement.older_computer/0`).
   """
-  @spec serve_forwarded(binary(), String.t(), GenServer.server()) :: map()
-  def serve_forwarded(frame, device_id, server \\ __MODULE__)
-      when is_binary(frame) and is_binary(device_id) and device_id != "" do
+  @spec serve_forwarded(
+          binary(),
+          %{device_id: String.t(), machine_settings: boolean()},
+          GenServer.server()
+        ) :: map()
+  def serve_forwarded(frame, computer, server \\ __MODULE__)
+
+  def serve_forwarded(frame, %{device_id: device_id, machine_settings: takes?} = computer, server)
+      when is_binary(frame) and is_binary(device_id) and device_id != "" and is_boolean(takes?) do
     opts = GenServer.call(server, :management_opts)
 
     case ManagementProtocol.decode_request(frame) do
       {:ok, {:v1, request}} ->
-        management_response(request.request_id, forwarded_result(request, device_id, opts))
+        management_response(request.request_id, forwarded_result(request, computer, opts))
 
       {:error, {:v1, response}} ->
         response
@@ -176,10 +216,27 @@ defmodule Fermix.CLI.Daemon do
     end
   end
 
-  defp forwarded_result(request, device_id, opts) do
-    if Placement.served_forwarded?(request.method, request.params),
-      do: route_management_request(request, Keyword.put(opts, :actor, {:desktop, device_id})),
-      else: Placement.device_class_refusal(request.method)
+  defp forwarded_result(request, computer, opts) do
+    cond do
+      not Placement.served_forwarded?(request.method, request.params) ->
+        Placement.device_class_refusal(request.method)
+
+      older_computer?(request, computer) ->
+        Placement.older_computer()
+
+      true ->
+        route_management_request(
+          request,
+          Keyword.put(opts, :actor, {:desktop, computer.device_id})
+        )
+    end
+  end
+
+  # A computer without §19.3's rule answers its own sandbox itself, so a
+  # sandbox value it sends was typed in its own Sandbox pane.
+  defp older_computer?(request, %{machine_settings: takes?}) do
+    not takes? and request.method in @secret_writes and
+      Placement.server_machine_request?(request.method, request.params)
   end
 
   @impl true
@@ -211,19 +268,41 @@ defmodule Fermix.CLI.Daemon do
     end
   end
 
+  # The lock first (`Fermix.CLI.Daemon.Lock`): a daemon that holds it lives,
+  # however busy, so its socket is never taken, whatever a connect to it
+  # answers. Held from here until `terminate/2`, and let go of on every path
+  # that does not start.
   defp bind(socket_path, opts) do
     File.mkdir_p!(Path.dirname(socket_path))
 
-    case clear_stale_socket(socket_path) do
-      :ok -> do_listen(socket_path, opts)
+    case Lock.acquire(socket_path) do
+      {:ok, lock} -> bind_locked(socket_path, lock, opts)
+      {:error, :held} -> {:stop, {:another_daemon_running, socket_path}}
       {:error, reason} -> {:stop, reason}
     end
   end
 
-  defp do_listen(socket_path, opts) do
+  defp bind_locked(socket_path, lock, opts) do
+    case clear_stale_socket(socket_path) do
+      :ok -> do_listen(socket_path, lock, opts)
+      {:error, reason} -> stop_unlocked(lock, reason)
+    end
+  end
+
+  defp stop_unlocked(lock, reason) do
+    case Lock.release(lock) do
+      :ok -> :ok
+      {:error, failed} -> Logger.error("Daemon lock not released: #{inspect(failed)}")
+    end
+
+    {:stop, reason}
+  end
+
+  defp do_listen(socket_path, lock, opts) do
     listen_opts = [
       :binary,
       {:active, false},
+      {:backlog, @listen_backlog},
       {:ifaddr, {:local, socket_path}},
       {:packet, 4},
       {:packet_size, @max_frame_bytes},
@@ -234,12 +313,12 @@ defmodule Fermix.CLI.Daemon do
       {:ok, listen_socket} ->
         File.chmod!(socket_path, 0o600)
         Logger.info("Daemon control socket listening at #{socket_path}")
-        Process.send_after(self(), :accept, 0)
 
         {:ok,
          %{
            listen_socket: listen_socket,
            socket_path: socket_path,
+           lock: lock,
            task_supervisor: Keyword.get(opts, :task_supervisor, FermixCore.TaskSupervisor),
            plugins_runtime: Keyword.get(opts, :plugins_runtime, PluginsRuntime),
            token_supervisor: Keyword.get(opts, :token_supervisor, TokenSupervisor),
@@ -260,17 +339,18 @@ defmodule Fermix.CLI.Daemon do
            # requests (`:primary_forward`, the rail's, given the request and its
            # options); any other engine answers every one here.
            forwarding: Keyword.get_lazy(opts, :forwarding, &HomeLink.forwarding/0)
-         }}
+         }, {:continue, :accept}}
 
       {:error, reason} ->
-        {:stop, {:listen_failed, reason, socket_path}}
+        stop_unlocked(lock, {:listen_failed, reason, socket_path})
     end
   end
 
-  # If the socket file exists, probe it before deleting. A live daemon
-  # answers; a stale socket from a previous crash refuses or errors.
-  # Unlinking a live socket would let us bind the same path while the
-  # original daemon stays running but unreachable via status/stop.
+  # Once this daemon holds the lock, no daemon that holds one lives, so a
+  # socket file here is one that crashed left, or one a daemon from before
+  # the lock listens on, which answers. Probe it before deleting: unlinking a
+  # live socket would let us bind the same path while the original daemon
+  # stays running but unreachable via status/stop.
   defp clear_stale_socket(socket_path) do
     cond do
       not File.exists?(socket_path) -> :ok
@@ -308,33 +388,33 @@ defmodule Fermix.CLI.Daemon do
   @impl true
   def handle_call(:management_opts, _from, state), do: {:reply, management_opts(state), state}
 
+  # Connections are accepted by a linked process of the daemon's own, so the
+  # daemon takes a call the moment it comes (`serve_forwarded/3` asks it for
+  # its options on every forwarded request), never once an accept's wait
+  # ends. The acceptor serves each connection with the state init left,
+  # which nothing changes after, but the lock: only the daemon holds it, so
+  # no handler outlives the daemon with it.
   @impl true
-  def handle_info(:accept, state) do
-    case :gen_tcp.accept(state.listen_socket, @accept_idle_ms) do
-      {:ok, conn} ->
-        serve_admitted(state, conn)
-        send(self(), :accept)
-        {:noreply, state}
-
-      {:error, :timeout} ->
-        send(self(), :accept)
-        {:noreply, state}
-
-      {:error, :closed} ->
-        {:stop, :normal, state}
-
-      {:error, reason} ->
-        Logger.warning("Daemon accept error: #{inspect(reason)}")
-        Process.send_after(self(), :accept, 1_000)
-        {:noreply, state}
-    end
+  def handle_continue(:accept, state) do
+    served = Map.delete(state, :lock)
+    acceptor = spawn_link(fn -> accept_loop(served) end)
+    {:noreply, Map.put(state, :acceptor, acceptor)}
   end
 
+  # The acceptor ends once the listening socket closed, or by a crash; the
+  # daemon ends with it.
   @impl true
-  def terminate(_reason, %{listen_socket: socket, socket_path: path}) do
+  def handle_info({:EXIT, acceptor, reason}, %{acceptor: acceptor} = state),
+    do: {:stop, reason, state}
+
+  # The lock goes last: while the socket may still answer, it says the
+  # daemon lives.
+  @impl true
+  def terminate(_reason, %{listen_socket: socket, socket_path: path, lock: lock}) do
     close_result = :gen_tcp.close(socket)
     unlink_result = unlink_socket(path)
-    report_cleanup(close_result, unlink_result)
+    release_result = Lock.release(lock)
+    report_cleanup(close_result, unlink_result, release_result)
   end
 
   defp unlink_socket(path) do
@@ -345,15 +425,32 @@ defmodule Fermix.CLI.Daemon do
     end
   end
 
-  defp report_cleanup(:ok, :ok), do: :ok
+  defp report_cleanup(:ok, :ok, :ok), do: :ok
 
-  defp report_cleanup(close_result, unlink_result) do
+  defp report_cleanup(close_result, unlink_result, release_result) do
     Logger.error(
       "Daemon socket cleanup failed: " <>
-        "listener_close=#{inspect(close_result)} socket_unlink=#{inspect(unlink_result)}"
+        "listener_close=#{inspect(close_result)} socket_unlink=#{inspect(unlink_result)} " <>
+        "lock_release=#{inspect(release_result)}"
     )
 
     :ok
+  end
+
+  defp accept_loop(state) do
+    case :gen_tcp.accept(state.listen_socket) do
+      {:ok, conn} ->
+        serve_admitted(state, conn)
+        accept_loop(state)
+
+      {:error, :closed} ->
+        :ok
+
+      {:error, reason} ->
+        Logger.warning("Daemon accept error: #{inspect(reason)}")
+        Process.sleep(@accept_retry_ms)
+        accept_loop(state)
+    end
   end
 
   # A command Fermix confines gets no answer here, whatever it asks.
@@ -455,6 +552,11 @@ defmodule Fermix.CLI.Daemon do
   # `cues_mandates_enabled` back on undoes the owner's stop of every mandate.
   # Every other secret and section stays open, as it was.
   defp owner_family(method, _params) when method in @mobile_decisions_v1, do: :mobile
+
+  defp owner_family("accessories." <> _rest = method, _params)
+       when method not in @accessory_reads_v1,
+       do: :accessories
+
   defp owner_family(method, _params) when method in @home_decisions_v1, do: :home
   defp owner_family(method, _params) when method in @cue_decisions_v1, do: :cues
   defp owner_family(method, _params) when method in @setup_decisions_v1, do: :setup
@@ -462,10 +564,28 @@ defmodule Fermix.CLI.Daemon do
   defp owner_family(method, %{"id" => @cue_secret_prefix <> _ref}) when method in @secret_writes,
     do: :cues
 
-  defp owner_family("settings.apply", %{"section" => section}) when is_binary(section),
-    do: if(SettingsCues.owns?(section), do: :cues)
+  # What Fermix on the server may use on this computer (M97 §7.2) widens only
+  # here, by the owner: never by a process the daemon started, the server's
+  # own work run on this computer among them.
+  defp owner_family("settings.apply", %{"section" => "computer"}), do: :computer
+
+  # A machine's own settings, the server's or this computer's, and a sandbox
+  # value of either (M97 §19.3, `Placement.machine_write?/2`): a process the
+  # daemon started never asks this computer's engine to widen the server.
+  defp owner_family(method, params) when method in ["settings.apply" | @secret_writes] do
+    cond do
+      Placement.machine_write?(method, params) -> :machine
+      method == "settings.apply" and cue_section?(params) -> :cues
+      true -> nil
+    end
+  end
 
   defp owner_family(_method, _params), do: nil
+
+  defp cue_section?(%{"section" => section}) when is_binary(section),
+    do: SettingsCues.owns?(section)
+
+  defp cue_section?(_params), do: false
 
   # v0 carries the phone's decisions alone.
   defp owner_family_v0(method) when method in @owner_decisions_v0, do: :mobile
@@ -485,8 +605,9 @@ defmodule Fermix.CLI.Daemon do
   # channel is fine and doctor says so, so "not running" would send the
   # operator after the wrong fault. The capability and the sentence are the
   # request's family's: the phone's own pair for its pairing methods, the
-  # cues' for theirs and for a cue write that rides a generic method, and for
-  # Always On's and the recovery key the home's.
+  # cues' for theirs and for a cue write that rides a generic method, for
+  # Always On's and the recovery key the home's, and for this computer's
+  # switches the home's capability with a sentence of their own.
   defp owner_decision_refusal(:home) do
     {:error, :unavailable,
      %{
@@ -494,6 +615,15 @@ defmodule Fermix.CLI.Daemon do
        "sentence" => ManagementHomeMove.owner_only_sentence()
      }}
   end
+
+  defp owner_decision_refusal(:computer) do
+    {:error, :unavailable,
+     %{"capability" => ManagementHomeMove.capability(), "sentence" => @computer_owner_sentence}}
+  end
+
+  defp owner_decision_refusal(:machine),
+    do:
+      {:error, :unavailable, %{"capability" => "settings", "sentence" => @machine_owner_sentence}}
 
   defp owner_decision_refusal(:cues) do
     {:error, :unavailable,
@@ -506,6 +636,14 @@ defmodule Fermix.CLI.Daemon do
   defp owner_decision_refusal(:setup) do
     {:error, :unavailable,
      %{"capability" => @setup_capability, "sentence" => @setup_owner_sentence}}
+  end
+
+  defp owner_decision_refusal(:accessories) do
+    {:error, :unavailable,
+     %{
+       "capability" => ManagementAccessories.capability(),
+       "sentence" => ManagementAccessories.owner_only_sentence()
+     }}
   end
 
   defp owner_decision_refusal(:mobile) do
@@ -535,20 +673,127 @@ defmodule Fermix.CLI.Daemon do
         route_management_request(request, opts)
 
       :primary ->
-        guarded(request.method, fn -> forward.(request, []) end)
+        guarded(request.method, fn ->
+          request |> forward.([]) |> server_answer(request, state)
+        end)
     end
   end
 
   # A device with no link opens no database: a method whose state is the
-  # primary's memory.db is refused as retired, before anything reads it.
+  # primary's memory.db is refused as retired, before anything reads it,
+  # with the sentence this computer's summary says.
   defp dispatch_management_request(request, state) do
     if device?(state) and Placement.database_family?(request.method),
-      do: Placement.retired(state.os),
+      do: Placement.retired(retired_sentence(state)),
       else: route_management_request(request, management_opts(state))
   end
 
+  # The summary's own `retired` sentence, from this home's files at the
+  # request (`HomeSummary.retired_sentence/2`): the home and its reads are
+  # `home.status`'s, the machine this host's.
+  defp retired_sentence(state) do
+    home_opts =
+      state.management_opts |> Keyword.get(:operation_opts, []) |> Keyword.get(:home, [])
+
+    home = Keyword.get_lazy(home_opts, :home, &ConfigStore.fermix_home/0)
+    reads = Keyword.take(home_opts, [:unreadable_files])
+    HomeSummary.retired_sentence(home, [host_os: host_os(state.os)] ++ reads)
+  end
+
+  defp host_os({:unix, :darwin}), do: :macos
+  defp host_os(_os_type), do: :linux
+
   defp route_management_request(request, opts),
     do: guarded(request.method, fn -> ManagementRouter.route(request, opts) end)
+
+  # What a linked computer adds to the server's answer (M97 §19): a machine
+  # section's title names the server (`ComputerSettings.server_title/3`), as
+  # the composed list does, and the restart state the server reports carries
+  # the step that restarts it (`Placement.decorated?/1`, D28c): the record
+  # this computer's summary offers, so the app presses one step everywhere.
+  defp server_answer(
+         {:ok, %{"id" => id, "title" => title} = view},
+         %{method: "settings.get"},
+         state
+       )
+       when is_binary(id) and is_binary(title) do
+    if Placement.machine_section?(id),
+      do:
+        {:ok, %{view | "title" => ComputerSettings.server_title(id, title, server_name(state))}},
+      else: {:ok, view}
+  end
+
+  defp server_answer({:ok, %{} = answer}, %{method: method}, state) do
+    if Placement.decorated?(method),
+      do: {:ok, with_restart_step(method, answer, fn -> offered_restart(state) end)},
+      else: {:ok, answer}
+  end
+
+  defp server_answer(result, _request, _state), do: result
+
+  defp with_restart_step("setup.state.get", answer, offered),
+    do:
+      Map.put(
+        answer,
+        "restart_step",
+        restart_step(get_in(answer, ["restart", "required"]), offered)
+      )
+
+  defp with_restart_step("overview.get", %{"health" => %{} = health} = answer, offered) do
+    step = restart_step(health["restart_required"], offered)
+    %{answer | "health" => Map.put(health, "restart_step", step)}
+  end
+
+  defp with_restart_step(_method, answer, _offered), do: answer
+
+  # The summary is read only while the server says its restart is required.
+  defp restart_step(true, offered), do: offered.()
+  defp restart_step(_required, _offered), do: nil
+
+  # The `restart_server` record this computer's Always On summary offers now,
+  # read from the `home.status` it composes as the apps draw it, or nil where
+  # it offers none: a server whose own home.status says no restart (one
+  # before D28), one whose part is missing, a server this computer knows no
+  # name for. `home.act` takes the step only where the summary offers it.
+  defp offered_restart(%{forwarding: [primary_forward: forward]} = state) do
+    request = %{
+      request_id: "restart-step",
+      protocol_version: ManagementProtocol.protocol_version(),
+      method: "home.status",
+      params: %{}
+    }
+
+    opts = Keyword.put(management_opts(state), :primary_forward, forward)
+
+    case ManagementRouter.route(request, opts) do
+      {:ok, %{"summary" => %{"detail" => detail} = summary}} when is_map(detail) ->
+        summary |> HomeSummary.offered() |> Enum.find(&match?(%{"id" => "restart_server"}, &1))
+
+      other ->
+        Logger.warning("the summary's Restart <server> could not be read: #{inspect(other)}")
+        nil
+    end
+  end
+
+  # The server's name as this computer's link knows it, nil when it says none.
+  defp server_name(state) do
+    case home_link_status(state) do
+      %{primary: %{name: name}} when is_binary(name) -> name
+      _no_name -> nil
+    end
+  end
+
+  defp home_link_status(state) do
+    state.management_opts
+    |> Keyword.get(:operation_opts, [])
+    |> Keyword.get(:home, [])
+    |> Keyword.get(:link_status, fn -> HomeLink.impl().status() end)
+    |> safe_daemon_call()
+    |> case do
+      {:ok, status} -> status
+      {:error, reason} -> Logger.warning("the link's status did not answer: #{inspect(reason)}")
+    end
+  end
 
   defp guarded(method, answer) do
     answer.()
@@ -858,6 +1103,7 @@ defmodule Fermix.CLI.Daemon do
     do: mobile_revoke_reply(request, state)
 
   defp handle_method("mobile_status", _request, state), do: mobile_status_reply(state)
+  defp handle_method("home_link", _request, state), do: home_link_reply(state)
 
   defp handle_method("shutdown", _request, _state) do
     Trace.record(:agent_event, "daemon", %{event: "shutdown_requested"})
@@ -914,6 +1160,24 @@ defmodule Fermix.CLI.Daemon do
   end
 
   defp mobile_status_reply(state), do: mobile_call(state, :status, [])
+
+  # The relay's own view of the link (`Home.Link`'s `status/0`, the seam
+  # `home.status` reads too), never the server's part.
+  defp home_link_reply(state) do
+    link_status =
+      state.management_opts
+      |> Keyword.get(:operation_opts, [])
+      |> Keyword.get(:home, [])
+      |> Keyword.get(:link_status, fn -> HomeLink.impl().status() end)
+
+    case safe_daemon_call(link_status) do
+      {:ok, %{primary: primary}} ->
+        %{status: "ok", result: %{"primary" => ManagementHome.primary_view(primary)}}
+
+      {:error, reason} ->
+        error_reply(reason)
+    end
+  end
 
   defp mobile_call(state, function, args) do
     provider = state.mobile_provider || runtime_mobile_provider()

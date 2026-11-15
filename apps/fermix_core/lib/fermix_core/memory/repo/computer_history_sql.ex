@@ -102,7 +102,12 @@ defmodule FermixCore.Memory.Repo.ComputerHistorySql do
     :kind,
     :subject,
     :source_ids,
-    :last_touched_ts
+    :last_touched_ts,
+    # Migration 59 (M97 §8.4), APPENDED likewise: the machine a note was recorded
+    # on ("" for the home's own machine, else a computer's id) and the key of the
+    # sitting it summarizes, so a sitting submitted twice makes one note.
+    :computer_id,
+    :sitting
   ]
 
   @memory_insert_columns Enum.map_join(@memory_columns, ", ", &Atom.to_string/1)
@@ -297,6 +302,52 @@ defmodule FermixCore.Memory.Repo.ComputerHistorySql do
   -- purge_watermark_ts stays, unread, so a rolled-back engine still opens the store.
   """
 
+  # Migration 59 (M97 §8.1, §8.4), in memory.db, after the raw spool left for
+  # each machine's own store (`ComputerHistory.Spool`, carried by the Repo before
+  # this runs): the raw events table goes, the purge record a move or an earlier
+  # purge left behind goes (each machine's store fences its own raw events), the
+  # single state row keeps only the home's roll-up marks, and every note, read
+  # audit and purge names its machine. "" is the home's own machine; a purge or a
+  # read with no computer (NULL) is about every machine.
+  @machines_schema_sql """
+  DROP TABLE IF EXISTS computer_history_events;
+  DELETE FROM computer_history_purges;
+  UPDATE computer_history_state
+    SET last_summarized_id = 0, pause_until = NULL, paused_reason = NULL,
+        session_open_since_ts = NULL, status = 'idle', claimed_at = NULL,
+        claim_owner = NULL, last_status = NULL;
+
+  CREATE TABLE IF NOT EXISTS computer_history_computers (
+    computer_id TEXT PRIMARY KEY,
+    delivered_mark INTEGER NOT NULL DEFAULT 0,
+    last_submission_at INTEGER,
+    last_status TEXT,
+    last_reason TEXT,
+    submitted INTEGER NOT NULL DEFAULT 0
+  );
+  """
+
+  # The columns migration 59 adds, each added only where it is missing, so the
+  # migration may run again over its own effects (a store rewound by hand).
+  @machines_columns [
+    {"computer_history_memories", "computer_id", "TEXT NOT NULL DEFAULT ''"},
+    {"computer_history_memories", "sitting", "TEXT"},
+    {"computer_history_access", "computer_id", "TEXT"},
+    {"computer_history_purges", "computer_id", "TEXT"},
+    {"computer_history_purges", "kind",
+     "TEXT NOT NULL DEFAULT 'purge' CHECK (kind IN ('purge', 'pause'))"}
+  ]
+
+  @machines_indexes_sql """
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_computer_history_memories_sitting
+    ON computer_history_memories(computer_id, sitting) WHERE sitting IS NOT NULL;
+  CREATE INDEX IF NOT EXISTS idx_computer_history_memories_computer
+    ON computer_history_memories(computer_id, kind, provenance_to_ts);
+  """
+
+  @typedoc "Whose notes a read takes: every machine's, or one's (`\"\"` is the home's own)."
+  @type computer_scope :: :all | String.t()
+
   # The two kinds, as stored. `:all` is the kind-blind read (counts and purge).
   @kinds %{session: "session", thread: "thread"}
   @default_kind "session"
@@ -307,6 +358,255 @@ defmodule FermixCore.Memory.Repo.ComputerHistorySql do
   @doc "Schema for migration 23 — the raw event spool."
   @spec events_schema_sql() :: String.t()
   def events_schema_sql, do: @events_schema_sql
+
+  @doc """
+  Migration 59 — notes, reads and purges name their machine, in `conn`'s
+  open transaction: the raw table and the move's leftovers go, each column is
+  added where it is missing, then the indexes. Safe to run again.
+  """
+  @spec machines_schema(term()) :: :ok | {:error, term()}
+  def machines_schema(conn) do
+    with :ok <- Sqlite3.execute(conn, @machines_schema_sql),
+         :ok <- add_missing_columns(conn, @machines_columns) do
+      Sqlite3.execute(conn, @machines_indexes_sql)
+    end
+  end
+
+  # Migration 60 (M97 §8.5): each machine's row on the home also keeps when the
+  # owner asked from chat that its history go off and it has not yet said it
+  # did, and the last report it sent of its recorder, its unsent sittings and its
+  # coverage, with when it came (counts and a state word, never raw text).
+  @reports_columns [
+    {"computer_history_computers", "off_requested_at", "INTEGER"},
+    {"computer_history_computers", "report", "TEXT"},
+    {"computer_history_computers", "report_at", "INTEGER"}
+  ]
+
+  @doc """
+  Migration 60, in `conn`'s open transaction: each column of the machines' rows
+  is added where it is missing. Safe to run again.
+  """
+  @spec reports_schema(term()) :: :ok | {:error, term()}
+  def reports_schema(conn), do: add_missing_columns(conn, @reports_columns)
+
+  # Migration 61 (M97 §8.5): the home's store gets a token of its own, made
+  # at random, which is the home's history identity
+  # (`ComputerHistory.home_identity/1`). Every store, a server's rebuilt from
+  # nothing or another home's, makes its own, and a store installed from a
+  # stored copy is given a new one (`renew_home_token/1`, HS-4), since its
+  # interval ids may start again below what its computers counted.
+  @home_schema_sql """
+  CREATE TABLE IF NOT EXISTS computer_history_home (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    token TEXT NOT NULL
+  );
+  INSERT OR IGNORE INTO computer_history_home (id, token)
+    VALUES (1, lower(hex(randomblob(16))));
+  """
+
+  @doc "Migration 61, in `conn`'s open transaction: the home store's own token. Safe to run again."
+  @spec home_schema(term()) :: :ok | {:error, term()}
+  def home_schema(conn), do: Sqlite3.execute(conn, @home_schema_sql)
+
+  @doc """
+  Gives the home store in `conn` a new token (migration 61's), so its history
+  is another identity: for a store installed from a stored copy
+  (`Home.Archive.install/5`). A store from before migration 61 has none to
+  renew, and its first start makes one.
+  """
+  @spec renew_home_token(term()) :: :ok | {:error, term()}
+  def renew_home_token(conn) do
+    sql = "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = ?"
+
+    case query_all(conn, sql, ["computer_history_home"]) do
+      {:ok, [[0]]} ->
+        :ok
+
+      {:ok, [[1]]} ->
+        Sqlite3.execute(
+          conn,
+          "UPDATE computer_history_home SET token = lower(hex(randomblob(16))) WHERE id = 1"
+        )
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  @doc "The home store's own token (migration 61)."
+  @spec home_token(term()) :: {:ok, String.t()} | {:error, term()}
+  def home_token(conn) do
+    case query_all(conn, "SELECT token FROM computer_history_home WHERE id = 1", []) do
+      {:ok, [[token]]} when is_binary(token) -> {:ok, token}
+      {:ok, _none} -> {:error, :no_home_token}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp add_missing_columns(conn, columns) do
+    Enum.reduce_while(columns, :ok, fn column, :ok ->
+      case add_missing_column(conn, column) do
+        :ok -> {:cont, :ok}
+        {:error, _reason} = error -> {:halt, error}
+      end
+    end)
+  end
+
+  defp add_missing_column(conn, {table, column, ddl}) do
+    case column?(conn, table, column) do
+      {:ok, true} -> :ok
+      {:ok, false} -> Sqlite3.execute(conn, "ALTER TABLE #{table} ADD COLUMN #{column} #{ddl}")
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp column?(conn, table, column) do
+    with {:ok, rows} <- query_all(conn, "SELECT name FROM pragma_table_info(?)", [table]) do
+      {:ok, [column] in rows}
+    end
+  end
+
+  @doc """
+  The schema of a machine's own raw store (`ComputerHistory.Spool`,
+  `device/history.db`): the events,
+  the purge fence and the state row with the tables and columns memory.db had,
+  so every raw read and write here serves both, and `computer_history_link`, what
+  this machine last heard from its home. Every statement may run again.
+  """
+  @spec spool_schema_sql() :: String.t()
+  def spool_schema_sql do
+    """
+    CREATE TABLE IF NOT EXISTS computer_history_events (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      boot_id TEXT NOT NULL,
+      source_seq INTEGER NOT NULL,
+      ts INTEGER NOT NULL,
+      type TEXT NOT NULL,
+      bundle_id TEXT,
+      prev_bundle_id TEXT,
+      window_title TEXT,
+      page_title TEXT,
+      url TEXT,
+      host TEXT,
+      role TEXT,
+      role_desc TEXT,
+      field_label TEXT,
+      text TEXT,
+      browser_id TEXT,
+      window_ref TEXT,
+      tab_ref TEXT,
+      private_state TEXT,
+      content_withheld INTEGER,
+      gap_reason TEXT,
+      gap_from_ts INTEGER,
+      gap_to_ts INTEGER,
+      scan_flag TEXT,
+      char_len INTEGER
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_computer_history_events_source
+      ON computer_history_events(boot_id, source_seq);
+    CREATE INDEX IF NOT EXISTS idx_computer_history_events_ts
+      ON computer_history_events(ts);
+    CREATE INDEX IF NOT EXISTS idx_computer_history_events_bundle
+      ON computer_history_events(bundle_id);
+    CREATE TABLE IF NOT EXISTS computer_history_purges (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      from_ts INTEGER NOT NULL,
+      to_ts INTEGER NOT NULL,
+      issued_at INTEGER NOT NULL,
+      CHECK (from_ts <= to_ts)
+    );
+    CREATE TABLE IF NOT EXISTS computer_history_state (
+      id INTEGER PRIMARY KEY CHECK (id = 1),
+      last_run_at TEXT,
+      claimed_at TEXT,
+      claim_owner TEXT,
+      status TEXT NOT NULL DEFAULT 'idle' CHECK (status IN ('idle', 'running')),
+      last_status TEXT,
+      last_summarized_id INTEGER NOT NULL DEFAULT 0,
+      purge_watermark_ts INTEGER,
+      paused_reason TEXT,
+      pause_until TEXT,
+      summarizer_route TEXT,
+      summarizer_model TEXT,
+      updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+      last_rollup_ts INTEGER,
+      last_rollup_attempt_ts INTEGER,
+      session_open_since_ts INTEGER
+    );
+    CREATE TABLE IF NOT EXISTS computer_history_link (
+      id INTEGER PRIMARY KEY CHECK (id = 1),
+      home_mark INTEGER NOT NULL DEFAULT 0,
+      expired_unsent INTEGER NOT NULL DEFAULT 0,
+      last_answer TEXT,
+      last_reason TEXT,
+      last_answer_at INTEGER
+    );
+    """
+  end
+
+  @doc """
+  What migration 59 carries from memory.db (`main`) into the machine's store
+  attached as `spool`, in one transaction of the caller's: every raw event under
+  its own id, every purge interval, the cursor, the pause and the open sitting,
+  and the events' id sequence, so a cursor past the last id never skips an event
+  recorded after it. `INSERT OR IGNORE` and `MAX` make it safe to run again.
+  """
+  @spec spool_carry_sql() :: String.t()
+  def spool_carry_sql do
+    columns = Enum.map_join([:id | @event_columns], ", ", &Atom.to_string/1)
+
+    """
+    INSERT OR IGNORE INTO spool.computer_history_events (#{columns})
+      SELECT #{columns} FROM main.computer_history_events;
+    INSERT OR IGNORE INTO spool.computer_history_purges (id, from_ts, to_ts, issued_at)
+      SELECT id, from_ts, to_ts, issued_at FROM main.computer_history_purges;
+    INSERT INTO spool.computer_history_state (id) VALUES (1) ON CONFLICT(id) DO NOTHING;
+    UPDATE spool.computer_history_state SET
+      last_summarized_id = MAX(last_summarized_id,
+        COALESCE((SELECT last_summarized_id FROM main.computer_history_state WHERE id = 1), 0)),
+      pause_until = COALESCE(pause_until,
+        (SELECT pause_until FROM main.computer_history_state WHERE id = 1)),
+      session_open_since_ts = COALESCE(session_open_since_ts,
+        (SELECT session_open_since_ts FROM main.computer_history_state WHERE id = 1))
+      WHERE id = 1;
+    INSERT INTO spool.sqlite_sequence (name, seq)
+      SELECT 'computer_history_events', 0
+      WHERE NOT EXISTS (SELECT 1 FROM spool.sqlite_sequence WHERE name = 'computer_history_events');
+    UPDATE spool.sqlite_sequence SET seq = MAX(seq,
+        COALESCE((SELECT seq FROM main.sqlite_sequence WHERE name = 'computer_history_events'), 0),
+        COALESCE((SELECT last_summarized_id FROM main.computer_history_state WHERE id = 1), 0))
+      WHERE name = 'computer_history_events';
+    """
+  end
+
+  @doc """
+  Whether memory.db (`conn`) holds anything migration 59 carries to the machine's
+  store: an event, a purge interval, a cursor, a pause or an open sitting.
+  """
+  @spec spool_carry?(term()) :: {:ok, boolean()} | {:error, term()}
+  def spool_carry?(conn) do
+    case query_all(
+           conn,
+           "SELECT 1 FROM sqlite_master WHERE type = 'table' AND " <>
+             "name = 'computer_history_events'",
+           []
+         ) do
+      {:ok, []} -> {:ok, false}
+      {:ok, [_table]} -> carry_rows?(conn)
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp carry_rows?(conn) do
+    sql =
+      "SELECT (SELECT count(*) FROM computer_history_events) + " <>
+        "(SELECT count(*) FROM computer_history_purges) + " <>
+        "(SELECT count(*) FROM computer_history_state WHERE id = 1 AND " <>
+        "(last_summarized_id > 0 OR pause_until IS NOT NULL OR session_open_since_ts IS NOT NULL))"
+
+    with {:ok, [[count]]} <- query_all(conn, sql, []), do: {:ok, count > 0}
+  end
 
   @doc "Schema for migration 24 — durable activity memories."
   @spec memories_schema_sql() :: String.t()
@@ -426,6 +726,133 @@ defmodule FermixCore.Memory.Repo.ComputerHistorySql do
     end
   end
 
+  @doc """
+  The retention sweep of a machine's own store (`ComputerHistory.Spool`), in one
+  transaction: `sweep_expired_events/2`, and how many of the events it deleted
+  were never sent to the home (past the cursor), added to the store's count so a
+  sitting that expired unsent is shown, never hidden (M97 §8.1).
+  """
+  @spec sweep_spool(term(), integer()) ::
+          {:ok, %{deleted: non_neg_integer(), unsent: non_neg_integer()}} | {:error, term()}
+  def sweep_spool(conn, cutoff_ts) when is_integer(cutoff_ts) do
+    in_transaction(conn, fn ->
+      with {:ok, cursor} <- summarized_cursor(conn),
+           {:ok, [[unsent]]} <-
+             query_all(
+               conn,
+               "SELECT count(*) FROM computer_history_events WHERE ts < ? AND id > ?",
+               [cutoff_ts, cursor]
+             ),
+           {:ok, deleted} <- sweep_expired_events(conn, cutoff_ts),
+           :ok <- add_expired_unsent(conn, unsent) do
+        {:ok, %{deleted: deleted, unsent: unsent}}
+      end
+    end)
+  end
+
+  defp add_expired_unsent(_conn, 0), do: :ok
+
+  defp add_expired_unsent(conn, count) do
+    with :ok <- ensure_link(conn) do
+      execute(
+        conn,
+        "UPDATE computer_history_link SET expired_unsent = expired_unsent + ? WHERE id = 1",
+        [count]
+      )
+    end
+  end
+
+  defp ensure_link(conn),
+    do:
+      execute(
+        conn,
+        "INSERT INTO computer_history_link (id) VALUES (1) ON CONFLICT(id) DO NOTHING",
+        []
+      )
+
+  @doc """
+  What a machine last heard from its home (`computer_history_link`): the highest
+  purge or pause interval it applied (`home_mark`) of the home store `home`
+  names (its identity, `ComputerHistory.home_identity/1`, nil before any), how
+  many raw events expired before they were sent, and its last answer.
+  """
+  @spec link(term()) :: {:ok, map()} | {:error, term()}
+  def link(conn) do
+    sql =
+      "SELECT home_mark, home, expired_unsent, last_answer, last_reason, last_answer_at " <>
+        "FROM computer_history_link WHERE id = 1"
+
+    with :ok <- ensure_link(conn),
+         {:ok, [[mark, home, expired, answer, reason, at]]} <- query_all(conn, sql, []) do
+      {:ok,
+       %{
+         home_mark: mark,
+         home: home,
+         expired_unsent: expired,
+         last_answer: answer,
+         last_reason: reason,
+         last_answer_at: at
+       }}
+    end
+  end
+
+  @doc "Record the home's answer to this machine's latest sitting."
+  @spec record_answer(term(), String.t(), String.t() | nil, integer()) :: :ok | {:error, term()}
+  def record_answer(conn, answer, reason, at_ts)
+      when is_binary(answer) and (is_binary(reason) or is_nil(reason)) and is_integer(at_ts) do
+    with :ok <- ensure_link(conn) do
+      execute(
+        conn,
+        "UPDATE computer_history_link SET last_answer = ?, last_reason = ?, last_answer_at = ? " <>
+          "WHERE id = 1",
+        [answer, reason, at_ts]
+      )
+    end
+  end
+
+  @doc """
+  Record that this machine applied every interval up to `mark` of the home
+  store `home` names, in one write: under the same store the mark never goes
+  back; under another (a restore, a rebuilt server, another home, whose ids
+  start again) the mark and the store are replaced together.
+  """
+  @spec set_home_mark(term(), String.t(), non_neg_integer()) :: :ok | {:error, term()}
+  def set_home_mark(conn, home, mark)
+      when is_binary(home) and home != "" and is_integer(mark) and mark >= 0 do
+    with :ok <- ensure_link(conn) do
+      execute(
+        conn,
+        "UPDATE computer_history_link SET " <>
+          "home_mark = CASE WHEN home IS ?1 THEN MAX(home_mark, ?2) ELSE ?2 END, home = ?1 " <>
+          "WHERE id = 1",
+        [home, mark]
+      )
+    end
+  end
+
+  @doc "Forget which home store this machine's mark belongs to: the mark is 0 again."
+  @spec forget_home(term()) :: :ok | {:error, term()}
+  def forget_home(conn) do
+    with :ok <- ensure_link(conn) do
+      execute(
+        conn,
+        "UPDATE computer_history_link SET home_mark = 0, home = NULL WHERE id = 1",
+        []
+      )
+    end
+  end
+
+  # The machine store's columns added after its first version (`spool_columns/1`).
+  @spool_columns [{"computer_history_link", "home", "TEXT"}]
+
+  @doc """
+  The machine store's second version (M97 §8.5), safe to run again: what this
+  machine heard from its home also names that home's store (`home`), each
+  column added where it is missing.
+  """
+  @spec spool_columns(term()) :: :ok | {:error, term()}
+  def spool_columns(conn), do: add_missing_columns(conn, @spool_columns)
+
   # An interval matters to the fence while a row stamped inside it could still
   # arrive or be kept, and to the note and thread guard while a batch read before
   # it was issued could still be written. Once it both ended and was issued before
@@ -480,17 +907,6 @@ defmodule FermixCore.Memory.Repo.ComputerHistorySql do
   def count_events(conn) do
     with {:ok, [[count]]} <- query_all(conn, "SELECT count(*) FROM computer_history_events", []) do
       {:ok, count}
-    end
-  end
-
-  @doc "The oldest spool event's `ts` (epoch ms), or nil when the spool is empty."
-  @spec oldest_event_ts(term()) :: {:ok, integer() | nil} | {:error, term()}
-  def oldest_event_ts(conn) do
-    with {:ok, rows} <- query_all(conn, "SELECT min(ts) FROM computer_history_events", []) do
-      case rows do
-        [[ts]] -> {:ok, ts}
-        _empty -> {:ok, nil}
-      end
     end
   end
 
@@ -554,6 +970,22 @@ defmodule FermixCore.Memory.Repo.ComputerHistorySql do
   end
 
   @doc """
+  The apps any event was recorded for since `since_ts`, gaps included, in
+  order: what `/history status` sets against the app list to name the ones that
+  recorded nothing (M97 stage 4).
+  """
+  @spec recorded_apps(term(), integer()) :: {:ok, [String.t()]} | {:error, term()}
+  def recorded_apps(conn, since_ts) when is_integer(since_ts) do
+    sql =
+      "SELECT DISTINCT bundle_id FROM computer_history_events " <>
+        "WHERE ts >= ? AND bundle_id IS NOT NULL ORDER BY bundle_id ASC"
+
+    with {:ok, rows} <- query_all(conn, sql, [since_ts]) do
+      {:ok, Enum.map(rows, fn [bundle_id] -> bundle_id end)}
+    end
+  end
+
+  @doc """
   Per-app coverage states inside the window (§8.4a): the distinct
   `{bundle_id, gap_reason}` pairs of `observer.gap` rows that name an app AND a
   coverage reason (`title_only`, `private_unknown`, `ax_refused:<notifications>`),
@@ -595,22 +1027,20 @@ defmodule FermixCore.Memory.Repo.ComputerHistorySql do
   end
 
   @doc """
-  Purge a `[from_ts, to_ts]` window (epoch ms), atomically: delete spool events
-  in the window, delete activity memories whose provenance window **intersects**
-  it, delete the access rows recorded in it, and record the interval, issued at
-  `issued_at` (§12). The interval fences the spool insert against a row stamped
-  inside it that arrives later, and refuses a note or thread whose batch was read
-  before it. Returns the deleted counts.
+  Fence a `[from_ts, to_ts]` window (epoch ms) in a machine's own store
+  (`ComputerHistory.Spool`), atomically: delete the raw events stamped in it and
+  record the interval, issued at `issued_at`, which refuses a row stamped inside
+  it that arrives later (§12). Returns how many events went.
   """
-  @spec purge_window(term(), integer(), integer(), integer()) ::
-          {:ok, %{events: non_neg_integer(), memories: non_neg_integer()}} | {:error, term()}
-  def purge_window(conn, from_ts, to_ts, issued_at)
+  @spec fence_window(term(), integer(), integer(), integer()) ::
+          {:ok, %{events: non_neg_integer()}} | {:error, term()}
+  def fence_window(conn, from_ts, to_ts, issued_at)
       when is_integer(from_ts) and is_integer(to_ts) and from_ts <= to_ts and
              is_integer(issued_at) do
-    in_transaction(conn, fn -> purge_window_in_tx(conn, from_ts, to_ts, issued_at) end)
+    in_transaction(conn, fn -> fence_window_in_tx(conn, from_ts, to_ts, issued_at) end)
   end
 
-  defp purge_window_in_tx(conn, from_ts, to_ts, issued_at) do
+  defp fence_window_in_tx(conn, from_ts, to_ts, issued_at) do
     with :ok <-
            execute(
              conn,
@@ -621,29 +1051,95 @@ defmodule FermixCore.Memory.Repo.ComputerHistorySql do
          :ok <-
            execute(
              conn,
-             # Interval intersection: memory [pf, pt] overlaps purge [from, to].
+             "INSERT INTO computer_history_purges (from_ts, to_ts, issued_at) VALUES (?, ?, ?)",
+             [from_ts, to_ts, issued_at]
+           ) do
+      {:ok, %{events: events_deleted}}
+    end
+  end
+
+  @doc """
+  Purge a `[from_ts, to_ts]` window (epoch ms) from the home's notes (M97 §8.5),
+  atomically: delete the notes and threads whose provenance **intersects** it, of
+  the machine `scope` names (`:all`, `""` for the home's own, or a computer's id;
+  a thread spans machines, so every thread that reaches the window goes), delete
+  the read-audit rows recorded in it, and record the interval for that scope,
+  issued at `issued_at`. The interval refuses any sitting or note from that
+  machine that reaches the window, whenever it arrives (`note_refusal/4`), and a
+  roll-up whose input a later purge reached (§12). Returns the deleted count and
+  the interval's id.
+  """
+  @spec purge_notes(term(), integer(), integer(), integer(), :all | String.t()) ::
+          {:ok, %{memories: non_neg_integer(), interval: pos_integer()}} | {:error, term()}
+  def purge_notes(conn, from_ts, to_ts, issued_at, scope)
+      when is_integer(from_ts) and is_integer(to_ts) and from_ts <= to_ts and
+             is_integer(issued_at) and (scope == :all or is_binary(scope)) do
+    in_transaction(conn, fn -> purge_notes_in_tx(conn, {from_ts, to_ts}, issued_at, scope) end)
+  end
+
+  # Total: a request the single writer cannot take is answered, never a crash.
+  def purge_notes(_conn, _from_ts, _to_ts, _issued_at, _scope), do: {:error, :invalid_window}
+
+  defp purge_notes_in_tx(conn, {from_ts, to_ts}, issued_at, scope) do
+    {note_sql, note_params} = scoped_notes(scope)
+
+    with :ok <-
+           execute(
+             conn,
              "DELETE FROM computer_history_memories " <>
-               "WHERE provenance_from_ts <= ? AND provenance_to_ts >= ?",
-             [to_ts, from_ts]
+               "WHERE provenance_from_ts <= ? AND provenance_to_ts >= ?" <> note_sql,
+             [to_ts, from_ts] ++ note_params
            ),
          memories_deleted <- changed(conn),
          :ok <-
            execute(
              conn,
-             # Access rows recorded in the window go too: purge means "erase
-             # everything this feature stored in that window", audit included.
              "DELETE FROM computer_history_access WHERE ts >= ? AND ts <= ?",
              [from_ts, to_ts]
            ),
-         :ok <-
-           execute(
-             conn,
-             "INSERT INTO computer_history_purges (from_ts, to_ts, issued_at) VALUES (?, ?, ?)",
-             [from_ts, to_ts, issued_at]
-           ) do
-      {:ok, %{events: events_deleted, memories: memories_deleted}}
+         {:ok, id} <- insert_interval(conn, {from_ts, to_ts}, issued_at, scope, "purge") do
+      {:ok, %{memories: memories_deleted, interval: id}}
     end
   end
+
+  # A purge of one machine's notes still takes every thread that reaches the
+  # window: a thread is the home's, drawn from every machine.
+  defp scoped_notes(:all), do: {"", []}
+  defp scoped_notes(computer), do: {" AND (kind = 'thread' OR computer_id = ?)", [computer]}
+
+  @doc """
+  Record a pause from chat (M97 §8.5) for the machine `scope` names over
+  `[from_ts, until_ts]`: the home then refuses any sitting or note from it with
+  an event stamped inside, as it refuses a purged one, and each machine learns of
+  it. Returns the interval's id.
+  """
+  @spec pause_window(term(), integer(), integer(), integer(), :all | String.t()) ::
+          {:ok, pos_integer()} | {:error, term()}
+  def pause_window(conn, from_ts, until_ts, issued_at, scope)
+      when is_integer(from_ts) and is_integer(until_ts) and from_ts <= until_ts and
+             is_integer(issued_at) and (scope == :all or is_binary(scope)) do
+    in_transaction(conn, fn ->
+      insert_interval(conn, {from_ts, until_ts}, issued_at, scope, "pause")
+    end)
+  end
+
+  def pause_window(_conn, _from_ts, _until_ts, _issued_at, _scope), do: {:error, :invalid_window}
+
+  defp insert_interval(conn, {from_ts, to_ts}, issued_at, scope, kind) do
+    with :ok <-
+           execute(
+             conn,
+             "INSERT INTO computer_history_purges (from_ts, to_ts, issued_at, computer_id, kind) " <>
+               "VALUES (?, ?, ?, ?, ?)",
+             [from_ts, to_ts, issued_at, scope_param(scope), kind]
+           ),
+         {:ok, [[id]]} <- query_all(conn, "SELECT last_insert_rowid()", []) do
+      {:ok, id}
+    end
+  end
+
+  defp scope_param(:all), do: nil
+  defp scope_param(computer) when is_binary(computer), do: computer
 
   @doc """
   The purge mark: the id of the latest recorded purge, or 0 (§12). A reader takes
@@ -659,13 +1155,14 @@ defmodule FermixCore.Memory.Repo.ComputerHistorySql do
   end
 
   # Does a purge with an id above `after_id` reach [from_ts, to_ts]? The one
-  # question the fence (every purge, `after_id` 0) and the note and thread guard
-  # (the purges issued after the batch was read) both ask. Intersection, inclusive
-  # like the purge's own DELETEs. A NULL bound matches nothing.
-  defp purge_reaches?(conn, after_id, from_ts, to_ts) do
+  # question a machine's fence (every purge, `after_id` 0) and the home's thread
+  # guard (the purges issued after the roll-up read its input, never a pause:
+  # `kind_sql`) both ask. Intersection, inclusive like the purge's own DELETEs. A
+  # NULL bound matches nothing.
+  defp purge_reaches?(conn, after_id, from_ts, to_ts, kind_sql \\ "") do
     sql =
       "SELECT EXISTS(SELECT 1 FROM computer_history_purges " <>
-        "WHERE id > ? AND from_ts <= ? AND to_ts >= ?)"
+        "WHERE id > ? AND from_ts <= ? AND to_ts >= ?#{kind_sql})"
 
     case query_all(conn, sql, [after_id, to_ts, from_ts]) do
       {:ok, [[hit]]} -> {:ok, hit == 1}
@@ -701,6 +1198,16 @@ defmodule FermixCore.Memory.Repo.ComputerHistorySql do
   defp kind_clause(:all), do: {"", []}
   defp kind_clause(kind), do: {" AND kind = ?", [Map.fetch!(@kinds, kind)]}
 
+  # The machine filter of a read (M97 §8.4): `:all`, or one machine's notes
+  # (`""` for the home's own). A thread is the home's, drawn from every machine,
+  # so a filtered read keeps the threads that cite that machine's notes only
+  # through those notes.
+  defp computer_clause(scope, prefix \\ "")
+  defp computer_clause(:all, _prefix), do: {"", []}
+
+  defp computer_clause(computer, prefix) when is_binary(computer),
+    do: {" AND #{prefix}computer_id = ?", [computer]}
+
   @doc """
   The most recent (non-superseded) activity memories whose provenance ends at or
   after `since_ts` (epoch ms), newest first — the Recent Activity section source
@@ -708,19 +1215,28 @@ defmodule FermixCore.Memory.Repo.ComputerHistorySql do
   old window is not "recent activity". Reads only derived summaries, never the
   raw spool.
   """
-  @spec recent_memories(term(), integer(), pos_integer(), :all | :session | :thread) ::
+  @spec recent_memories(
+          term(),
+          integer(),
+          pos_integer(),
+          :all | :session | :thread,
+          computer_scope()
+        ) ::
           {:ok, [map()]} | {:error, term()}
-  def recent_memories(conn, since_ts, limit, kind \\ :session)
+  def recent_memories(conn, since_ts, limit, kind \\ :session, computer \\ :all)
       when is_integer(since_ts) and is_integer(limit) and limit > 0 and
              kind in [:all, :session, :thread] do
     {kind_sql, kind_params} = kind_clause(kind)
+    {computer_sql, computer_params} = computer_clause(computer)
 
     sql =
       "SELECT #{@memory_read_select} FROM computer_history_memories " <>
-        "WHERE superseded_at IS NULL AND provenance_to_ts >= ?#{kind_sql} " <>
+        "WHERE superseded_at IS NULL AND provenance_to_ts >= ?#{kind_sql}#{computer_sql} " <>
         "ORDER BY provenance_to_ts DESC, id DESC LIMIT ?"
 
-    with {:ok, rows} <- query_all(conn, sql, [since_ts] ++ kind_params ++ [limit]) do
+    params = [since_ts] ++ kind_params ++ computer_params ++ [limit]
+
+    with {:ok, rows} <- query_all(conn, sql, params) do
       {:ok, Enum.map(rows, &memory_row/1)}
     end
   end
@@ -730,19 +1246,29 @@ defmodule FermixCore.Memory.Repo.ComputerHistorySql do
   `[from_ts, to_ts]` (epoch ms), newest first — the `recall_activity` query
   (§11.2). Derived summaries only.
   """
-  @spec memories_in_window(term(), integer(), integer(), pos_integer(), :all | :session | :thread) ::
+  @spec memories_in_window(
+          term(),
+          integer(),
+          integer(),
+          pos_integer(),
+          :all | :session | :thread,
+          computer_scope()
+        ) ::
           {:ok, [map()]} | {:error, term()}
-  def memories_in_window(conn, from_ts, to_ts, limit, kind \\ :session)
+  def memories_in_window(conn, from_ts, to_ts, limit, kind \\ :session, computer \\ :all)
       when is_integer(from_ts) and is_integer(to_ts) and is_integer(limit) and limit > 0 and
              kind in [:all, :session, :thread] do
     {kind_sql, kind_params} = kind_clause(kind)
+    {computer_sql, computer_params} = computer_clause(computer)
 
     sql =
       "SELECT #{@memory_read_select} FROM computer_history_memories " <>
         "WHERE superseded_at IS NULL AND provenance_from_ts <= ? AND provenance_to_ts >= ?" <>
-        "#{kind_sql} ORDER BY provenance_to_ts DESC, id DESC LIMIT ?"
+        "#{kind_sql}#{computer_sql} ORDER BY provenance_to_ts DESC, id DESC LIMIT ?"
 
-    with {:ok, rows} <- query_all(conn, sql, [to_ts, from_ts] ++ kind_params ++ [limit]) do
+    params = [to_ts, from_ts] ++ kind_params ++ computer_params ++ [limit]
+
+    with {:ok, rows} <- query_all(conn, sql, params) do
       {:ok, Enum.map(rows, &memory_row/1)}
     end
   end
@@ -752,18 +1278,27 @@ defmodule FermixCore.Memory.Repo.ComputerHistorySql do
   denominator behind `memories_in_window/4`'s limited page, so recall can say
   when older entries were omitted instead of truncating silently (§11.2).
   """
-  @spec count_memories_in_window(term(), integer(), integer(), :all | :session | :thread) ::
+  @spec count_memories_in_window(
+          term(),
+          integer(),
+          integer(),
+          :all | :session | :thread,
+          computer_scope()
+        ) ::
           {:ok, non_neg_integer()} | {:error, term()}
-  def count_memories_in_window(conn, from_ts, to_ts, kind \\ :session)
+  def count_memories_in_window(conn, from_ts, to_ts, kind \\ :session, computer \\ :all)
       when is_integer(from_ts) and is_integer(to_ts) and kind in [:all, :session, :thread] do
     {kind_sql, kind_params} = kind_clause(kind)
+    {computer_sql, computer_params} = computer_clause(computer)
 
     sql =
       "SELECT count(*) FROM computer_history_memories " <>
         "WHERE superseded_at IS NULL AND provenance_from_ts <= ? AND provenance_to_ts >= ?" <>
-        kind_sql
+        kind_sql <> computer_sql
 
-    with {:ok, [[count]]} <- query_all(conn, sql, [to_ts, from_ts] ++ kind_params) do
+    params = [to_ts, from_ts] ++ kind_params ++ computer_params
+
+    with {:ok, [[count]]} <- query_all(conn, sql, params) do
       {:ok, count}
     end
   end
@@ -794,35 +1329,54 @@ defmodule FermixCore.Memory.Repo.ComputerHistorySql do
   ones that reach it, and the rest stay in the journal. The caller re-orders for
   rendering.
   """
-  @spec session_notes_since(term(), integer(), pos_integer()) ::
+  @spec session_notes_since(term(), integer(), pos_integer(), machines()) ::
           {:ok, [map()]} | {:error, term()}
-  def session_notes_since(conn, since_ts, limit)
+  def session_notes_since(conn, since_ts, limit, machines \\ :all)
       when is_integer(since_ts) and is_integer(limit) and limit > 0 do
+    {machine_sql, machine_params} = machines_clause(machines)
+
     sql =
       "SELECT #{@memory_read_select} FROM computer_history_memories " <>
-        "WHERE superseded_at IS NULL AND kind = 'session' AND created_at > ? " <>
-        "ORDER BY created_at DESC, id DESC LIMIT ?"
+        "WHERE superseded_at IS NULL AND kind = 'session' AND created_at > ?" <>
+        machine_sql <> " ORDER BY created_at DESC, id DESC LIMIT ?"
 
-    with {:ok, rows} <- query_all(conn, sql, [since_ts, limit]) do
+    with {:ok, rows} <- query_all(conn, sql, [since_ts] ++ machine_params ++ [limit]) do
       {:ok, Enum.map(rows, &memory_row/1)}
     end
   end
 
   @doc """
   How many session notes exist after `since_ts` — the honest denominator behind
-  `session_notes_since/3`'s bounded page, so the roll-up can say it read the newest
+  `session_notes_since/4`'s bounded page, so the roll-up can say it read the newest
   N of M instead of implying it read everything.
   """
-  @spec count_session_notes_since(term(), integer()) ::
+  @spec count_session_notes_since(term(), integer(), machines()) ::
           {:ok, non_neg_integer()} | {:error, term()}
-  def count_session_notes_since(conn, since_ts) when is_integer(since_ts) do
+  def count_session_notes_since(conn, since_ts, machines \\ :all) when is_integer(since_ts) do
+    {machine_sql, machine_params} = machines_clause(machines)
+
     sql =
       "SELECT count(*) FROM computer_history_memories " <>
-        "WHERE superseded_at IS NULL AND kind = 'session' AND created_at > ?"
+        "WHERE superseded_at IS NULL AND kind = 'session' AND created_at > ?" <> machine_sql
 
-    with {:ok, [[count]]} <- query_all(conn, sql, [since_ts]) do
+    with {:ok, [[count]]} <- query_all(conn, sql, [since_ts] ++ machine_params) do
       {:ok, count}
     end
+  end
+
+  @typedoc """
+  Whose session notes a roll-up reads (M97 §8.5): every machine's, or only
+  those of the machines named (`""` is the home's own), at most
+  #{@max_ids_per_lookup}.
+  """
+  @type machines :: :all | [String.t()]
+
+  defp machines_clause(:all), do: {"", []}
+
+  defp machines_clause([_ | _] = machines) when length(machines) <= @max_ids_per_lookup do
+    true = Enum.all?(machines, &is_binary/1)
+    marks = Enum.map_join(machines, ", ", fn _machine -> "?" end)
+    {" AND computer_id IN (#{marks})", machines}
   end
 
   @doc """
@@ -871,12 +1425,12 @@ defmodule FermixCore.Memory.Repo.ComputerHistorySql do
   `OR`, `NEAR(`, a column filter or a stray quote are all literal words. A query
   with no searchable token is refused rather than run as an empty MATCH.
   """
-  @spec search_memories(term(), String.t(), pos_integer()) ::
+  @spec search_memories(term(), String.t(), pos_integer(), computer_scope()) ::
           {:ok, [map()]} | {:error, :empty_query | term()}
-  def search_memories(conn, query, limit)
+  def search_memories(conn, query, limit, computer \\ :all)
       when is_binary(query) and is_integer(limit) and limit > 0 do
     case FtsMatch.expression(query) do
-      {:ok, match} -> search_memories_matching(conn, match, limit)
+      {:ok, match} -> search_memories_matching(conn, match, limit, computer)
       {:error, :empty_query} -> {:error, :empty_query}
     end
   end
@@ -887,35 +1441,40 @@ defmodule FermixCore.Memory.Repo.ComputerHistorySql do
   the search itself, so the count and the page can never disagree about what the
   query meant.
   """
-  @spec count_search_memories(term(), String.t()) ::
+  @spec count_search_memories(term(), String.t(), computer_scope()) ::
           {:ok, non_neg_integer()} | {:error, :empty_query | term()}
-  def count_search_memories(conn, query) when is_binary(query) do
+  def count_search_memories(conn, query, computer \\ :all) when is_binary(query) do
     case FtsMatch.expression(query) do
-      {:ok, match} -> count_matching(conn, match)
+      {:ok, match} -> count_matching(conn, match, computer)
       {:error, :empty_query} -> {:error, :empty_query}
     end
   end
 
-  defp count_matching(conn, match) do
+  defp count_matching(conn, match, computer) do
+    {computer_sql, computer_params} = computer_clause(computer, "m.")
+
     sql =
       "SELECT count(*) FROM computer_history_memories_fts f " <>
         "JOIN computer_history_memories m ON m.id = f.rowid " <>
-        "WHERE computer_history_memories_fts MATCH ? AND m.superseded_at IS NULL"
+        "WHERE computer_history_memories_fts MATCH ? AND m.superseded_at IS NULL" <>
+        computer_sql
 
-    with {:ok, [[count]]} <- query_all(conn, sql, [match]) do
+    with {:ok, [[count]]} <- query_all(conn, sql, [match] ++ computer_params) do
       {:ok, count}
     end
   end
 
-  defp search_memories_matching(conn, match, limit) do
+  defp search_memories_matching(conn, match, limit, computer) do
+    {computer_sql, computer_params} = computer_clause(computer, "m.")
+
     sql =
       "SELECT #{Enum.map_join(@memory_read_columns, ", ", &("m." <> Atom.to_string(&1)))} " <>
         "FROM computer_history_memories_fts f " <>
         "JOIN computer_history_memories m ON m.id = f.rowid " <>
-        "WHERE computer_history_memories_fts MATCH ? AND m.superseded_at IS NULL " <>
-        "ORDER BY m.provenance_to_ts DESC, m.id DESC LIMIT ?"
+        "WHERE computer_history_memories_fts MATCH ? AND m.superseded_at IS NULL" <>
+        computer_sql <> " ORDER BY m.provenance_to_ts DESC, m.id DESC LIMIT ?"
 
-    with {:ok, rows} <- query_all(conn, sql, [match, limit]) do
+    with {:ok, rows} <- query_all(conn, sql, [match] ++ computer_params ++ [limit]) do
       {:ok, Enum.map(rows, &memory_row/1)}
     end
   end
@@ -946,6 +1505,9 @@ defmodule FermixCore.Memory.Repo.ComputerHistorySql do
   defp memory_params(memory) do
     Enum.map(@memory_columns, fn
       :kind -> to_param(Map.get(memory, :kind, @default_kind))
+      # A thread is the home's, drawn from every machine, and a note written with
+      # no machine named is the home's own (M97 §8.4).
+      :computer_id -> to_param(Map.get(memory, :computer_id, ""))
       column -> to_param(Map.get(memory, column))
     end)
   end
@@ -964,8 +1526,16 @@ defmodule FermixCore.Memory.Repo.ComputerHistorySql do
     execute(
       conn,
       "INSERT INTO computer_history_access " <>
-        "(ts, sink, window_from_ts, window_to_ts, result_count) VALUES (?, ?, ?, ?, ?)",
-      [ts, sink, Map.get(access, :window_from_ts), Map.get(access, :window_to_ts), count]
+        "(ts, sink, window_from_ts, window_to_ts, result_count, computer_id) " <>
+        "VALUES (?, ?, ?, ?, ?, ?)",
+      [
+        ts,
+        sink,
+        Map.get(access, :window_from_ts),
+        Map.get(access, :window_to_ts),
+        count,
+        Map.get(access, :computer_id)
+      ]
     )
   end
 
@@ -1079,69 +1649,281 @@ defmodule FermixCore.Memory.Repo.ComputerHistorySql do
   end
 
   @doc """
-  Write a sitting's result atomically (§10, §12): if a note was produced and no
-  purge issued after its batch was read (an id above `purge_mark`, taken before
-  the read) intersects its provenance, insert it beside the existing memories;
-  then advance the `last_summarized_id` cursor to the last summarized event. A
-  purge issued before the read cannot matter: its rows were deleted and fenced
-  first. A `nil` memory (empty/abstained output) only advances the cursor. Nothing
-  is superseded here — see the module comment.
-
-  A `nil` `last_status` advances the cursor and **keeps** the recorded outcome: it
-  is how consuming a boundary marker — which is not a sitting and has no outcome —
-  avoids overwriting the last real one (§24.2).
+  Advance a machine's cursor (`ComputerHistory.Spool`) past `last_id` and record
+  the outcome (§10): what its home answered for the sitting that ended there,
+  or `no_signal` for one it never had to send. A `nil` `last_status` advances the
+  cursor and **keeps** the recorded outcome: consuming a boundary marker, which
+  is not a sitting, must not overwrite the last real one (§24.2). The cursor only
+  ever moves forward. The `status` (idle/running) lifecycle stays with the
+  scheduler's claim and release.
   """
-  @spec write_cycle_result(
-          term(),
-          non_neg_integer(),
-          map() | nil,
-          DateTime.t(),
-          String.t() | nil,
-          non_neg_integer()
-        ) ::
-          {:ok, %{memory_written: boolean()}} | {:error, term()}
-  def write_cycle_result(conn, last_id, memory, %DateTime{} = now, last_status, purge_mark)
-      when is_integer(purge_mark) and purge_mark >= 0 do
-    in_transaction(conn, fn ->
-      write_cycle_result_in_tx(conn, last_id, memory, now, last_status, purge_mark)
-    end)
-  end
+  @spec advance_cursor(term(), non_neg_integer(), DateTime.t(), String.t() | nil) ::
+          :ok | {:error, term()}
+  def advance_cursor(conn, last_id, %DateTime{} = now, last_status)
+      when is_integer(last_id) and last_id >= 0 and
+             (is_binary(last_status) or is_nil(last_status)) do
+    now_iso = DateTime.to_iso8601(now)
 
-  defp write_cycle_result_in_tx(conn, last_id, memory, now, last_status, purge_mark) do
-    with {:ok, _row} <- ensure_state(conn),
-         {:ok, written?} <- maybe_write_memory(conn, memory, purge_mark),
-         :ok <- advance_cursor(conn, last_id, now, last_status) do
-      {:ok, %{memory_written: written?}}
+    with {:ok, _row} <- ensure_state(conn) do
+      execute(
+        conn,
+        "UPDATE computer_history_state SET last_summarized_id = MAX(last_summarized_id, ?), " <>
+          "last_run_at = ?, last_status = COALESCE(?, last_status), updated_at = ? WHERE id = 1",
+        [last_id, now_iso, last_status, now_iso]
+      )
     end
   end
 
-  # No memory, or a purge issued after its batch was read reaches its provenance
-  # ⇒ do not (re-)materialize: that purge erased rows the batch still held.
-  defp maybe_write_memory(_conn, nil, _purge_mark), do: {:ok, false}
+  # --- the home's notes from every machine (M97 §8.1, §8.4) -------------------
 
-  defp maybe_write_memory(conn, %{} = memory, purge_mark) do
-    from_ts = Map.get(memory, :provenance_from_ts)
-    to_ts = Map.get(memory, :provenance_to_ts)
+  @doc """
+  Write one note from the machine `computer` (`""` for the home's own) for the
+  sitting `sitting` keys, atomically with the one rule that keeps a purged or
+  paused window empty: a purge or pause interval of that machine or of every
+  machine that reaches the note's provenance refuses it, whenever either arrived
+  (M97 §8.5), so a purge and a late sitting give the same store in either order.
+  A sitting already noted answers `:duplicate` and writes nothing. The machine's
+  row records the outcome either way. `memory` is `insert_memory/2`'s map;
+  `mark` is the highest interval the machine had applied when it read the
+  sitting, so only intervals above it can reach it.
+  """
+  @spec insert_note(term(), map(), String.t(), String.t(), integer(), non_neg_integer()) ::
+          {:ok, {:written, integer()} | :duplicate | {:refused, :purged | :paused, [map()]}}
+          | {:error, term()}
+  def insert_note(conn, memory, computer, sitting, now_ts, mark \\ 0)
 
-    case purge_reaches?(conn, purge_mark, from_ts, to_ts) do
-      {:ok, true} -> {:ok, false}
-      {:ok, false} -> with {:ok, _id} <- insert_memory(conn, memory), do: {:ok, true}
+  def insert_note(conn, %{} = memory, computer, sitting, now_ts, mark)
+      when is_binary(computer) and is_binary(sitting) and sitting != "" and is_integer(now_ts) and
+             is_integer(mark) and mark >= 0 do
+    in_transaction(conn, fn ->
+      insert_note_in_tx(conn, memory, {computer, sitting, mark}, now_ts)
+    end)
+  end
+
+  def insert_note(_conn, _memory, _computer, _sitting, _now_ts, _mark),
+    do: {:error, :invalid_note}
+
+  defp insert_note_in_tx(conn, memory, {computer, sitting, mark}, now_ts) do
+    from_ts = Map.fetch!(memory, :provenance_from_ts)
+    to_ts = Map.fetch!(memory, :provenance_to_ts)
+
+    with {:ok, nil} <- noted(conn, computer, sitting),
+         {:ok, []} <- reaching_intervals(conn, computer, from_ts, to_ts, mark),
+         {:ok, id} <-
+           insert_memory(conn, Map.merge(memory, %{computer_id: computer, sitting: sitting})),
+         :ok <- record_submission(conn, computer, "summarized", nil, now_ts) do
+      {:ok, {:written, id}}
+    else
+      {:ok, id} when is_integer(id) -> {:ok, :duplicate}
+      {:ok, [first | _rest] = intervals} -> refused(conn, computer, first, intervals, now_ts)
       {:error, reason} -> {:error, reason}
     end
   end
 
-  # Cursor + outcome only; the `status` (idle/running) lifecycle is owned by the
-  # scheduler's claim/release so a paused or errored cycle can't leave a
-  # self-finalized idle that masks a still-held claim.
-  defp advance_cursor(conn, last_id, now, last_status) do
-    now_iso = DateTime.to_iso8601(now)
+  defp refused(conn, computer, %{kind: kind}, intervals, now_ts) do
+    reason = if kind == "pause", do: :paused, else: :purged
 
+    with :ok <- record_submission(conn, computer, "refused", Atom.to_string(reason), now_ts) do
+      {:ok, {:refused, reason, intervals}}
+    end
+  end
+
+  @doc """
+  The id of the note `computer` already has for `sitting`, or nil: a sitting sent
+  again is answered from it rather than summarized twice.
+  """
+  @spec noted(term(), String.t(), String.t()) :: {:ok, integer() | nil} | {:error, term()}
+  def noted(conn, computer, sitting) when is_binary(computer) and is_binary(sitting) do
+    sql =
+      "SELECT id FROM computer_history_memories WHERE computer_id = ? AND sitting = ? LIMIT 1"
+
+    case query_all(conn, sql, [computer, sitting]) do
+      {:ok, [[id]]} -> {:ok, id}
+      {:ok, []} -> {:ok, nil}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  @doc """
+  Every purge or pause interval of `computer` or of every machine, with an id
+  above `after_id` (what the machine had applied), that reaches
+  `[from_ts, to_ts]`, oldest first: the reason the home refuses a sitting, and
+  what it tells the machine so it applies them first.
+  """
+  @spec reaching_intervals(term(), String.t(), integer(), integer(), non_neg_integer()) ::
+          {:ok, [map()]} | {:error, term()}
+  def reaching_intervals(conn, computer, from_ts, to_ts, after_id \\ 0)
+      when is_binary(computer) and is_integer(from_ts) and is_integer(to_ts) and
+             is_integer(after_id) do
+    sql =
+      "SELECT id, from_ts, to_ts, issued_at, kind FROM computer_history_purges " <>
+        "WHERE (computer_id IS NULL OR computer_id = ?) AND from_ts <= ? AND to_ts >= ? " <>
+        "AND id > ? ORDER BY id ASC"
+
+    with {:ok, rows} <- query_all(conn, sql, [computer, to_ts, from_ts, after_id]) do
+      {:ok, Enum.map(rows, &interval_row/1)}
+    end
+  end
+
+  @doc """
+  The intervals of `computer` or of every machine with an id above `after_id`,
+  oldest first and at most `limit`: what a machine has not yet applied.
+  """
+  @spec intervals_after(term(), String.t(), non_neg_integer(), pos_integer()) ::
+          {:ok, [map()]} | {:error, term()}
+  def intervals_after(conn, computer, after_id, limit)
+      when is_binary(computer) and is_integer(after_id) and after_id >= 0 and
+             is_integer(limit) and limit > 0 do
+    sql =
+      "SELECT id, from_ts, to_ts, issued_at, kind FROM computer_history_purges " <>
+        "WHERE (computer_id IS NULL OR computer_id = ?) AND id > ? ORDER BY id ASC LIMIT ?"
+
+    with {:ok, rows} <- query_all(conn, sql, [computer, after_id, limit]) do
+      {:ok, Enum.map(rows, &interval_row/1)}
+    end
+  end
+
+  defp interval_row([id, from_ts, to_ts, issued_at, kind]),
+    do: %{id: id, from_ts: from_ts, to_ts: to_ts, issued_at: issued_at, kind: kind}
+
+  @doc """
+  Record what the home answered `computer` for its latest sitting (`status` and
+  an optional `reason`), at `now_ts`, in that machine's row.
+  """
+  @spec record_submission(term(), String.t(), String.t(), String.t() | nil, integer()) ::
+          :ok | {:error, term()}
+  def record_submission(conn, computer, status, reason, now_ts)
+      when is_binary(computer) and is_binary(status) and is_integer(now_ts) do
     execute(
       conn,
-      "UPDATE computer_history_state SET last_summarized_id = ?, last_run_at = ?, " <>
-        "last_status = COALESCE(?, last_status), updated_at = ? WHERE id = 1",
-      [last_id, now_iso, last_status, now_iso]
+      "INSERT INTO computer_history_computers " <>
+        "(computer_id, last_submission_at, last_status, last_reason, submitted) " <>
+        "VALUES (?, ?, ?, ?, 1) ON CONFLICT(computer_id) DO UPDATE SET " <>
+        "last_submission_at = excluded.last_submission_at, last_status = excluded.last_status, " <>
+        "last_reason = excluded.last_reason, submitted = submitted + 1",
+      [computer, now_ts, status, reason]
     )
+  end
+
+  @doc "Record that `computer` applied every interval up to `mark`; the mark never goes back."
+  @spec record_delivered(term(), String.t(), non_neg_integer()) :: :ok | {:error, term()}
+  def record_delivered(conn, computer, mark)
+      when is_binary(computer) and is_integer(mark) and mark >= 0 do
+    execute(
+      conn,
+      "INSERT INTO computer_history_computers (computer_id, delivered_mark) VALUES (?, ?) " <>
+        "ON CONFLICT(computer_id) DO UPDATE SET " <>
+        "delivered_mark = MAX(delivered_mark, excluded.delivered_mark)",
+      [computer, mark]
+    )
+  end
+
+  @doc """
+  Record that the owner asked from chat, at `at_ts`, that `computer`'s history
+  go off (M97 §8.5): until it says it did (`clear_off/3`), the home takes no
+  sitting from it and leaves its notes out of the roll-up. A later request
+  replaces an earlier one's time.
+  """
+  @spec request_off(term(), String.t(), integer()) :: :ok | {:error, term()}
+  def request_off(conn, computer, at_ts)
+      when is_binary(computer) and computer != "" and is_integer(at_ts) do
+    execute(
+      conn,
+      "INSERT INTO computer_history_computers (computer_id, off_requested_at) VALUES (?, ?) " <>
+        "ON CONFLICT(computer_id) DO UPDATE SET off_requested_at = excluded.off_requested_at",
+      [computer, at_ts]
+    )
+  end
+
+  @doc """
+  Record that `computer` switched its history off as asked at `requested_ts`:
+  that request is done. A request made after it (another `/history off` while
+  the answer was on its way) stands.
+  """
+  @spec clear_off(term(), String.t(), integer()) :: :ok | {:error, term()}
+  def clear_off(conn, computer, requested_ts)
+      when is_binary(computer) and is_integer(requested_ts) do
+    execute(
+      conn,
+      "UPDATE computer_history_computers SET off_requested_at = NULL " <>
+        "WHERE computer_id = ? AND off_requested_at <= ?",
+      [computer, requested_ts]
+    )
+  end
+
+  @doc """
+  Record `computer`'s report of its recorder (`report`, the JSON text
+  `ComputerHistory.Report` validated), received at `at_ts`.
+  """
+  @spec record_report(term(), String.t(), String.t(), integer()) :: :ok | {:error, term()}
+  def record_report(conn, computer, report, at_ts)
+      when is_binary(computer) and computer != "" and is_binary(report) and is_integer(at_ts) do
+    execute(
+      conn,
+      "INSERT INTO computer_history_computers (computer_id, report, report_at) VALUES (?, ?, ?) " <>
+        "ON CONFLICT(computer_id) DO UPDATE SET report = excluded.report, " <>
+        "report_at = excluded.report_at",
+      [computer, report, at_ts]
+    )
+  end
+
+  @doc "Every machine's row, by its id (`\"\"` for the home's own)."
+  @spec computer_rows(term()) :: {:ok, [map()]} | {:error, term()}
+  def computer_rows(conn) do
+    sql =
+      "SELECT computer_id, delivered_mark, last_submission_at, last_status, last_reason, " <>
+        "submitted, off_requested_at, report, report_at FROM computer_history_computers " <>
+        "ORDER BY computer_id"
+
+    with {:ok, rows} <- query_all(conn, sql, []) do
+      {:ok, Enum.map(rows, &computer_row/1)}
+    end
+  end
+
+  defp computer_row([id, mark, at, status, reason, submitted, off_at, report, report_at]) do
+    %{
+      computer_id: id,
+      delivered_mark: mark,
+      last_submission_at: at,
+      last_status: status,
+      last_reason: reason,
+      submitted: submitted,
+      off_requested_at: off_at,
+      report: report,
+      report_at: report_at
+    }
+  end
+
+  @doc """
+  Notes per machine (`{computer_id, sessions}`), for `/history status`'s block of
+  each.
+  """
+  @spec notes_by_computer(term()) :: {:ok, [{String.t(), non_neg_integer()}]} | {:error, term()}
+  def notes_by_computer(conn) do
+    sql =
+      "SELECT computer_id, count(*) FROM computer_history_memories " <>
+        "WHERE superseded_at IS NULL AND kind = 'session' GROUP BY computer_id ORDER BY computer_id"
+
+    with {:ok, rows} <- query_all(conn, sql, []) do
+      {:ok, Enum.map(rows, fn [id, count] -> {id, count} end)}
+    end
+  end
+
+  @doc """
+  Prune the home's purge and pause intervals that can no longer matter: ended and
+  issued before `cutoff_ts`, the retention window, past which no machine holds a
+  raw event they could refuse. Returns how many went.
+  """
+  @spec prune_home_intervals(term(), integer()) :: {:ok, non_neg_integer()} | {:error, term()}
+  def prune_home_intervals(conn, cutoff_ts) when is_integer(cutoff_ts) do
+    with :ok <-
+           execute(
+             conn,
+             "DELETE FROM computer_history_purges WHERE issued_at < ? AND to_ts < ?",
+             [cutoff_ts, cutoff_ts]
+           ) do
+      {:ok, changed(conn)}
+    end
   end
 
   @doc """
@@ -1200,7 +1982,7 @@ defmodule FermixCore.Memory.Repo.ComputerHistorySql do
   # stays put, so the next roll-up rebuilds from what survived.
   defp write_rollup_in_tx(conn, threads, now_ts, mark, {from_ts, to_ts}) do
     with {:ok, _row} <- ensure_state(conn),
-         {:ok, purged?} <- purge_reaches?(conn, mark, from_ts, to_ts) do
+         {:ok, purged?} <- purge_reaches?(conn, mark, from_ts, to_ts, " AND kind = 'purge'") do
       if purged?,
         do: {:ok, %{written: 0, retired: 0, purged: length(threads), subjects: []}},
         else: write_threads(threads, conn, now_ts)
@@ -1297,18 +2079,22 @@ defmodule FermixCore.Memory.Repo.ComputerHistorySql do
   end
 
   @doc """
-  Set (or clear, with nil) the capture pause horizon — an ISO8601 string. A
-  `/history pause 30m` persists this so the pause survives a mid-pause daemon
-  restart rather than silently lapsing (§7.3).
+  Raise the capture pause horizon to `until` (an ISO 8601 string) in one write
+  that never lowers it (M97 §8.5): a horizon already set that ends later is
+  kept, and so is one that cannot be read, which keeps capture paused until it
+  is cleared (`Ingest` fails closed on it). Two writers that race (a pause from
+  chat, and one applied from a refusal or a delivery) cannot leave the earlier
+  horizon in place.
   """
-  @spec set_pause_until(term(), String.t() | nil) :: :ok | {:error, term()}
-  def set_pause_until(conn, pause_until) do
+  @spec raise_pause_until(term(), String.t()) :: :ok | {:error, term()}
+  def raise_pause_until(conn, until) when is_binary(until) and until != "" do
     with {:ok, _row} <- ensure_state(conn) do
       execute(
         conn,
-        "UPDATE computer_history_state SET pause_until = ?, updated_at = " <>
-          "strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id = 1",
-        [pause_until]
+        "UPDATE computer_history_state SET pause_until = ?1, updated_at = " <>
+          "strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id = 1 AND julianday(?1) IS NOT NULL " <>
+          "AND (pause_until IS NULL OR julianday(pause_until) < julianday(?1))",
+        [until]
       )
     end
   end
@@ -1407,4 +2193,90 @@ defmodule FermixCore.Memory.Repo.ComputerHistorySql do
   defp to_param(true), do: 1
   defp to_param(false), do: 0
   defp to_param(other), do: other
+
+  # --- a move's machine (M97 §8.4) --------------------------------------------
+
+  @doc """
+  At a move, every row of the home's history that names the machine `from`
+  names `to` instead, in one transaction: its session notes, its reads, its
+  purge and pause intervals, and its machine's row with its delivered mark (a
+  row `to` already had gives way to it). Threads are the home's, drawn from
+  every machine, and stay. The home's own machine is `""`: a move to a server
+  names the computer it left for the notes it made there, and a move back
+  makes them `""` again. The home's own machine is switched off and reports in
+  process, so a row that becomes `""` keeps no off request or report of a
+  computer (migration 60); `offs` counts an off request that was still
+  pending. Run again over its own work it changes nothing. A store from before
+  notes named their machine (migration 59) has none to rename:
+  `{:ok, :unnamed}`.
+  """
+  @spec rename_machine(term(), String.t(), String.t()) ::
+          {:ok,
+           %{notes: count, reads: count, intervals: count, rows: count, offs: count}
+           | :unnamed}
+          | {:error, term()}
+        when count: non_neg_integer()
+  def rename_machine(conn, from, to) when is_binary(from) and is_binary(to) and from != to do
+    case column?(conn, "computer_history_memories", "computer_id") do
+      {:ok, true} -> in_transaction(conn, fn -> rename_machine_in_tx(conn, from, to) end)
+      {:ok, false} -> {:ok, :unnamed}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp rename_machine_in_tx(conn, from, to) do
+    rename = "SET computer_id = ? WHERE computer_id = ?"
+
+    with {:ok, notes} <-
+           renamed(conn, "UPDATE computer_history_memories #{rename} AND kind = 'session'", [
+             to,
+             from
+           ]),
+         {:ok, reads} <- renamed(conn, "UPDATE computer_history_access #{rename}", [to, from]),
+         {:ok, intervals} <- renamed(conn, "UPDATE computer_history_purges #{rename}", [to, from]),
+         :ok <-
+           execute(
+             conn,
+             "DELETE FROM computer_history_computers WHERE computer_id = ? AND EXISTS " <>
+               "(SELECT 1 FROM computer_history_computers WHERE computer_id = ?)",
+             [to, from]
+           ),
+         {:ok, rows} <- renamed(conn, "UPDATE computer_history_computers #{rename}", [to, from]),
+         {:ok, offs} <- own_row(conn, to) do
+      {:ok, %{notes: notes, reads: reads, intervals: intervals, rows: rows, offs: offs}}
+    end
+  end
+
+  defp own_row(conn, "") do
+    case column?(conn, "computer_history_computers", "off_requested_at") do
+      {:ok, true} -> clear_own_row(conn)
+      {:ok, false} -> {:ok, 0}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp own_row(_conn, _computer), do: {:ok, 0}
+
+  defp clear_own_row(conn) do
+    with {:ok, [[offs]]} <-
+           query_all(
+             conn,
+             "SELECT count(*) FROM computer_history_computers " <>
+               "WHERE computer_id = '' AND off_requested_at IS NOT NULL",
+             []
+           ),
+         :ok <-
+           execute(
+             conn,
+             "UPDATE computer_history_computers " <>
+               "SET off_requested_at = NULL, report = NULL, report_at = NULL WHERE computer_id = ''",
+             []
+           ) do
+      {:ok, offs}
+    end
+  end
+
+  defp renamed(conn, sql, params) do
+    with :ok <- execute(conn, sql, params), do: {:ok, changed(conn)}
+  end
 end

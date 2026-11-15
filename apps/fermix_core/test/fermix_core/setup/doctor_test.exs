@@ -1577,6 +1577,26 @@ defmodule FermixCore.Setup.DoctorTest do
       put_web_search(brave_api_key: "brave-secret")
 
       assert %{probe_result: :rate_limited} = full_place_report(id)
+      assert_received {:probe_slept, 1_000}
+    end
+
+    test "--full names a key whose plan has no place search" do
+      id = :"place_probe_plan_#{System.unique_integer([:positive])}"
+
+      Req.Test.stub(id, fn conn ->
+        place_json(conn, 400, %{
+          "type" => "ErrorResponse",
+          "error" => %{
+            "code" => "OPTION_NOT_IN_PLAN",
+            "detail" => "The option is not included in the plan.",
+            "status" => 400
+          }
+        })
+      end)
+
+      put_web_search(brave_api_key: "brave-secret")
+
+      assert %{probe_result: :plan_excludes_place_search} = full_place_report(id)
     end
 
     test "--full names a schema change independently" do
@@ -1942,6 +1962,45 @@ defmodule FermixCore.Setup.DoctorTest do
 
       assert %{browser_installed?: true, browser_note: nil} = Doctor.meetings_report()
     end
+
+    # M97 D24: an Always On server cannot run Google Meet, so it is never told
+    # to install the notetaker, its browser, or to sign the bot in: it is told
+    # Google Meet's sentence, which says what Zoom does there.
+    test "on an Always On server with no Zoom it names Google Meet's sentence, not a setup step" do
+      Application.put_env(:fermix_core, :meetings, enabled: true)
+      server = [always_on_server: true]
+      sentence = FermixCore.Meetings.meet_unavailable_sentence(false)
+
+      assert %{ready?: false, remedy: ^sentence, profile_note: ^sentence, browser_note: nil} =
+               Doctor.meetings_report(server)
+
+      refute sentence =~ "Zoom meetings work on your server."
+    end
+
+    test "on an Always On server a half-installed notetaker asks for nothing", ctx do
+      Application.put_env(:fermix_core, :meetings, enabled: true)
+      install_fake_meetbot_sidecar(ctx.home)
+      sentence = FermixCore.Meetings.meet_unavailable_sentence(false)
+
+      assert %{remedy: ^sentence, browser_note: nil, profile_note: ^sentence} =
+               Doctor.meetings_report(always_on_server: true)
+    end
+
+    test "on an Always On server with Zoom it is ready, and Google Meet says it works there" do
+      Application.put_env(:fermix_core, :meetings,
+        enabled: true,
+        zoom_account_id: "acct",
+        zoom_client_id: "client",
+        zoom_client_secret: "secret",
+        zoom_ws_subscription_id: "sub"
+      )
+
+      sentence = FermixCore.Meetings.meet_unavailable_sentence(true)
+      assert sentence =~ "Zoom meetings work on your server."
+
+      assert %{ready?: true, remedy: nil, profile_note: ^sentence} =
+               Doctor.meetings_report(always_on_server: true)
+    end
   end
 
   defp install_fake_stt_sidecar(home) do
@@ -2052,12 +2111,20 @@ defmodule FermixCore.Setup.DoctorTest do
     end
   end
 
+  # A 429's one retry waits out Brave's window: the probe's waits are told to
+  # the test, never slept.
   defp full_place_report(id) do
+    test_pid = self()
+
     Doctor.place_search_report(
       full: true,
       host: @linux,
       req_options: [plug: {Req.Test, id}],
-      net_resolver: place_resolver()
+      net_resolver: place_resolver(),
+      place_search_sleep: fn ms ->
+        send(test_pid, {:probe_slept, ms})
+        :ok
+      end
     )
   end
 

@@ -127,4 +127,85 @@ defmodule FermixCore.Home.AlwaysOnTest do
       end
     end
   end
+
+  # The one predicate every surface that differs on a server asks (computer
+  # history's recorder, Google Meet): the facts that define one, read from
+  # the boot that ran or, in a process that booted none, for this home now,
+  # and a server wherever one of them cannot be read.
+  describe "here?/1" do
+    setup do
+      home = SafeRm.make_tmp_dir!("always_on_here")
+      on_exit(fn -> SafeRm.rm_rf!(home) end)
+      %{home: home}
+    end
+
+    @server_host %{install: :linux_package_cli, os: :linux, linux_app: false}
+    @primary %{role: :primary, primary: nil}
+
+    test "a booted engine decides on its own record and host facts", %{home: home} do
+      :ok = Epoch.write(home, 2)
+
+      assert AlwaysOn.here?(home: home, booted: @primary, host_facts: @server_host)
+      refute AlwaysOn.here?(home: home, booted: @primary, host_facts: linux_desktop())
+
+      refute AlwaysOn.here?(
+               home: home,
+               booted: %{role: :device, primary: "north-box"},
+               host_facts: @server_host
+             )
+    end
+
+    # A Linux computer that took the home back from its server while another
+    # computer stays linked holds that computer's desktop row, which is what
+    # `ServerPrimary` reads; it runs the Linux app, so it is no server.
+    test "a Linux computer that took the home back, another one linked, is none",
+         %{home: home} do
+      :ok = Epoch.write(home, 3)
+
+      refute AlwaysOn.here?(home: home, booted: @primary, host_facts: linux_desktop())
+    end
+
+    # `fermix doctor` and every other tree-less verb boot no engine, so the
+    # role is the one this home is configured for and the host facts are read
+    # now, by the reader boot uses.
+    test "a process that booted no engine reads this home's role and host now",
+         %{home: home} do
+      :ok = Epoch.write(home, 2)
+      assert AlwaysOn.here?(home: home, booted: nil, host_facts: @server_host)
+
+      File.write!(Path.join(home, "config.toml"), "[fermix_core.engine]\nrole = \"device\"\n")
+      refute AlwaysOn.here?(home: home, booted: nil, host_facts: @server_host)
+    end
+
+    # The first run on a fresh machine: no settings file, no epoch yet. Every
+    # fact reads, as nothing, and the Linux package there is no server.
+    test "a fresh home on the Linux package, before its first boot, is no server",
+         %{home: home} do
+      refute AlwaysOn.here?(home: home, booted: nil, host_facts: @server_host)
+      refute AlwaysOn.here?(home: home, booted: @primary, host_facts: @server_host)
+    end
+
+    test "with no host facts handed in, a tree-less process reads the suite's own: no server",
+         %{home: home} do
+      :ok = Epoch.write(home, 2)
+      refute AlwaysOn.here?(home: home, booted: nil)
+    end
+
+    @tag :capture_log
+    test "a fact that cannot be read answers server: what a server cannot do stays held",
+         %{home: home} do
+      File.mkdir_p!(Path.join(home, "mobile"))
+      File.write!(Epoch.path(home), "not an epoch\n")
+      assert AlwaysOn.here?(home: home, booted: @primary, host_facts: @server_host)
+
+      File.write!(Path.join(home, "config.toml"), "[fermix_core.engine\n")
+      assert AlwaysOn.here?(home: home, booted: nil, host_facts: @server_host)
+    end
+
+    test "in this suite's own engine, read with no seams, it is none" do
+      refute AlwaysOn.here?()
+    end
+
+    defp linux_desktop, do: %{@server_host | linux_app: true}
+  end
 end

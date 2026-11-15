@@ -1,0 +1,1074 @@
+defmodule FermixCore.Trips.Registry do
+  @moduledoc """
+  The one writer of the owner's trips (M89 §04, §06, §14): a module of
+  functions over `Memory.Repo`, never a process. The model's tools and the
+  owner's devices read and change a trip only through it.
+
+  It owns:
+
+    * **the gate** — `Kept.Access`: the owner's private turn or voice call,
+      or a scheduled job whose allowed tools name the tool; a device only over
+      a connection placed as the owner's;
+    * **the shape of a call** — checked in the caller before the store is
+      asked (`Trips.Shape`): one trip, at most 100 ops, each field within its
+      bound;
+    * **one transaction** — the call goes to the Repo whole, where
+      `Trips.Ops` applies it to the rows it loaded and the trip moves its
+      `rev` once, or nothing changes; a device's edit is applied once by its
+      `client_msg_id`;
+    * **provenance** — after outside content every op runs, and a stop the
+      call adds or gives words, a note or a place is stamped (`Trips.Ops`),
+      which a read shows as data without marking the turn (D9);
+    * **the places** — a model's `place`, words or a link, resolved before the
+      store is asked (`Trips.Placing`, `Trips.Lookup`), the lookups' records
+      joining the conversation first, so a link the answer offers resolves
+      even when the store refuses the call;
+    * **the answers** — a read rendered as text (`Trips.Render`), an edit's
+      line with what each place came to and the fixed stops whose date moved,
+      the shared form a device's Share hands on, and one sentence for every
+      refusal (`describe_error/1`);
+    * **what devices hear** — every committed change, whoever made it, with
+      what a device's create, add or new day made (`Kept.Notify`), and the
+      trips' day-turn process is told (`Trips.DayTurn.trips_changed/0`);
+    * **the order** — every list of the trips, a device's index, the line
+      naming them and `trip_read`'s index, in picker order at `:now` in the
+      home's zone (`Trips.Picker`), each trip with `past`;
+    * **the stops that wait** (D13 B) — a call's stop whose lookup could not
+      run for a reason that heals by waiting keeps its words in the same
+      transaction (`Trips.Waiting`), and the trip placer is told
+      (`Trips.Placer.waits_saved/0`); the placer takes the waits and writes
+      what it found through this module too (`take_waits/3`,
+      `waiting_trip/2`, `place_waiting/4`), one transaction a trip, told to
+      the devices as any change is, said in no chat;
+    * **the towns** (M89) — the town each near in force names, which the
+      owner's devices put on each day (`Trips.Towns`, `Trips.Wire`): a call
+      that gives a place or sets a near, or that changes a trip whose near in
+      force has no town yet, asks every such near of its trip after its
+      lookups, within the same 45 s, and keeps what was found in the same
+      transaction; its answer says what each was found as. The placer asks
+      the rest (`unresolved_towns/2`, `settle_towns/4`).
+
+  Every read and edit emits its event (`Trips.Telemetry`).
+
+  Seams (`opts`): `:repo` (the Repo server; nil when the turn has none),
+  `:now`, `:personalization` (the home's zone, as `FermixCore.Clock` reads
+  it), `:notifier`, `:reply_blocks` (the holder a lookup's records join),
+  `:placer`, `:town_placer` and `:day_turn` (0-arity, in place of telling the
+  trip placer of a stop that waits or of a town left for later, or
+  the day-turn process) and, for a device, `:made_via`. The place search is
+  the one in force for the turn (`Lookup.backend/1`; a context's
+  `:place_lookup` stands in for it).
+  """
+
+  alias FermixCore.Clock
+  alias FermixCore.Kept.Access, as: KeptAccess
+  alias FermixCore.Kept.Ids
+  alias FermixCore.Kept.Notify, as: KeptNotify
+  alias FermixCore.Memory.Repo
+  alias FermixCore.ReplyBlocks
+  alias FermixCore.Tools.PlaceSearch
+  alias FermixCore.Trips.DayTurn
+  alias FermixCore.Trips.Lookup
+  alias FermixCore.Trips.Ops
+  alias FermixCore.Trips.Picker
+  alias FermixCore.Trips.Placer
+  alias FermixCore.Trips.Placing
+  alias FermixCore.Trips.Render
+  alias FermixCore.Trips.Shape
+  alias FermixCore.Trips.Telemetry
+  alias FermixCore.Trips.Towns
+  alias FermixCore.Trips.Waiting
+
+  # An edit that gave no place to look up.
+  @no_lookups %{
+    lookups: 0,
+    placed: 0,
+    offered: 0,
+    not_found: 0,
+    not_looked_up: 0,
+    backend: nil,
+    rate_limited: false,
+    stop_reason: nil,
+    stop_code: nil,
+    towns: 0,
+    towns_found: 0,
+    towns_not_found: 0,
+    towns_stop_reason: nil
+  }
+  # A call that looked nothing up: no outcomes, no placers, no waits, no towns.
+  @no_towns %{towns: [], sent: [], stop_reason: nil, stop_code: nil}
+  @no_placings {[], %{}, [], @no_towns}
+  # A read's `day`: a day's position, or a run of them (C13).
+  @run ~r/\A([0-9]{1,4})(?:\s*[-–]\s*([0-9]{1,4}))?\z/u
+
+  @typedoc "A trip a call read or changed, as a reply's block names it."
+  @type touch :: %{trip_id: String.t(), title: String.t(), rows: [String.t()]}
+
+  @type answer :: %{text: String.t(), touched: [touch()]}
+
+  @doc "Every op a `trip_edit` call takes, by name."
+  @spec ops() :: [String.t()]
+  def ops, do: Shape.ops()
+
+  @doc "Every op a device's `trip_edit` takes, by name."
+  @spec device_ops() :: [String.t()]
+  def device_ops, do: Shape.device_ops()
+
+  @doc "The most ops one `trip_edit` call carries."
+  @spec max_ops() :: pos_integer()
+  def max_ops, do: Shape.max_ops()
+
+  # --- the model's read ------------------------------------------------------
+
+  @doc """
+  A `trip_read` call: with no `"trip"` the index; with one (a title or id)
+  the trip whole, or the days `"day"` names (a day's position, `"2"`, or a
+  run, `"2-4"`, C13), as text, or with `"as": "share"` in its shared form.
+  Any read past 32 KB is its outline (`Trips.Render.read/4`, C26). `touched`
+  names the trip read, with no rows: a read changes none.
+  """
+  @spec read(map(), map(), keyword()) :: {:ok, answer()} | {:error, term()}
+  def read(params, context, opts \\ [])
+      when is_map(params) and is_map(context) and is_list(opts) do
+    start = System.monotonic_time(:microsecond)
+
+    {result, read} =
+      with :ok <- gate(context, "trip_read"),
+           {:ok, asked} <- read_params(params) do
+        do_read(asked, context, opts)
+      else
+        {:error, reason} -> {{:error, reason}, %{scope: asked_scope(params), trips: 0}}
+      end
+
+    emit_read(context, read, result, start)
+    result
+  end
+
+  defp read_params(params) do
+    with {:ok, ref} <- read_ref(Map.get(params, "trip")),
+         {:ok, run} <- read_run(Map.get(params, "day")),
+         {:ok, form} <- read_form(Map.get(params, "as")) do
+      case {ref, run, form} do
+        {nil, :all, :text} -> {:ok, :index}
+        {nil, _run, _form} -> {:error, :trip_needed}
+        asked -> {:ok, asked}
+      end
+    end
+  end
+
+  defp read_ref(nil), do: {:ok, nil}
+
+  defp read_ref(ref) when is_binary(ref) do
+    case String.trim(ref) do
+      "" ->
+        {:ok, nil}
+
+      trimmed ->
+        if String.valid?(trimmed), do: {:ok, trimmed}, else: {:error, {:invalid_param, :trip}}
+    end
+  end
+
+  defp read_ref(_ref), do: {:error, {:invalid_param, :trip}}
+
+  defp read_run(nil), do: {:ok, :all}
+  defp read_run(k) when is_integer(k) and k >= 1, do: {:ok, {k, k}}
+
+  defp read_run(text) when is_binary(text) do
+    case Regex.run(@run, String.trim(text)) do
+      [_whole, from] -> run_of(from, from, text)
+      [_whole, from, to] -> run_of(from, to, text)
+      nil -> if String.trim(text) == "", do: {:ok, :all}, else: {:error, {:not_a_day_run, text}}
+    end
+  end
+
+  defp read_run(value), do: {:error, {:not_a_day_run, value}}
+
+  defp run_of(from, to, value) do
+    {from, to} = {String.to_integer(from), String.to_integer(to)}
+    if from >= 1 and to >= from, do: {:ok, {from, to}}, else: {:error, {:not_a_day_run, value}}
+  end
+
+  defp read_form(value) when value in [nil, ""], do: {:ok, :text}
+  defp read_form("share"), do: {:ok, :share}
+  defp read_form(_value), do: {:error, {:invalid_param, :as}}
+
+  defp do_read(:index, context, opts) do
+    case index(context, opts) do
+      {:ok, trips} ->
+        {{:ok, %{text: Render.index(trips), touched: []}}, %{scope: :index, trips: length(trips)}}
+
+      {:error, reason} ->
+        {{:error, reason}, %{scope: :index, trips: 0}}
+    end
+  end
+
+  defp do_read({ref, run, form}, context, opts) do
+    with {:ok, %{trip: trip, rows: rows} = read} <- store(context, opts, {:read_trip, ref}),
+         :ok <- within_days(rows, run) do
+      {shape, text} = Render.read(trip, rows, run, form, Map.get(read, :waiting, MapSet.new()))
+      touched = [%{trip_id: trip.id, title: trip.title, rows: []}]
+      {{:ok, %{text: text, touched: touched}}, %{scope: read_scope(shape, run, form), trips: 1}}
+    else
+      {:error, reason} -> {{:error, reason}, %{scope: read_scope(:whole, run, form), trips: 0}}
+    end
+  end
+
+  defp within_days(_rows, :all), do: :ok
+
+  defp within_days(rows, {from, to}) do
+    {days, _stops} = Ops.counts(rows)
+
+    cond do
+      from > days -> {:error, {:no_day, from, days}}
+      to > days -> {:error, {:no_day, to, days}}
+      true -> :ok
+    end
+  end
+
+  defp read_scope(:outline, _run, _form), do: :outline
+  defp read_scope(:whole, _run, :share), do: :share
+  defp read_scope(:whole, :all, :text), do: :trip
+  defp read_scope(:whole, _run, :text), do: :days
+
+  # The scope a refused read asked for, as far as its params say.
+  defp asked_scope(params) do
+    cond do
+      Map.get(params, "as") == "share" -> :share
+      Map.get(params, "trip") in [nil, ""] -> :index
+      Map.get(params, "day") != nil -> :days
+      true -> :trip
+    end
+  end
+
+  # --- the model's edit ------------------------------------------------------
+
+  @doc """
+  Applies a `trip_edit` call (`"trip"`, `"ops"`) in one transaction. A place
+  given by words or a link is resolved first: the trip is read, the call run
+  over it to learn each stop's day (`Trips.Placing`), the lookups run
+  (`Trips.Lookup`), and their records join the conversation
+  (`ReplyBlocks.put_places/3`) before the store is asked. The answer is the
+  trip's line, what each place came to and what placed them, and what each
+  near asked was found as (`Trips.Render.answer/4`), and
+  `touched` names the trip with the live rows the call added or changed.
+  """
+  @spec edit(map(), map(), keyword()) :: {:ok, answer()} | {:error, term()}
+  def edit(params, context, opts \\ [])
+      when is_map(params) and is_map(context) and is_list(opts) do
+    start = System.monotonic_time(:microsecond)
+
+    {result, looked} =
+      with :ok <- gate(context, "trip_edit"),
+           {:ok, call} <- Shape.call(params) do
+        edit_call(call, context, opts)
+      else
+        {:error, reason} -> {{:error, reason}, @no_lookups}
+      end
+
+    emit_edit(context, params, {result, looked}, start)
+    result
+  end
+
+  defp edit_context(context, opts) do
+    %{
+      now: now(opts),
+      outside?: KeptAccess.read_outside?(context),
+      made_via: KeptAccess.made_via(context)
+    }
+  end
+
+  # The ops that gave a place by words or a link, read before any lookup
+  # turns one that placed nothing into keeping the place it had: each ends
+  # its stop's wait in the store (`Trips.Waiting.given/1`). The call's place
+  # search is resolved once: its lookups search it, its towns are geocoded
+  # on it, and its event names it.
+  defp edit_call(call, context, opts) do
+    edit = context |> edit_context(opts) |> Map.put(:places_given, Waiting.given(call))
+    search = call_backend(context)
+
+    case lookup_path(call, edit, search, {context, opts}) do
+      {:ok, nil} -> {commit(call, edit, {context, opts}, @no_placings), @no_lookups}
+      {:ok, planned} -> looked_up(call, planned, edit, search, {context, opts})
+      {:error, reason} -> {{:error, reason}, @no_lookups}
+    end
+  end
+
+  # A call looks up when it gives a place, or when the home's place search
+  # names towns and the call, run over its trip as it stands (which refuses
+  # it before anything is sent), changes the trip and leaves a near in force
+  # with no town yet (`Trips.Towns`). Otherwise its trip is not read for it:
+  # a home on Brave never reads a trip for a town.
+  defp lookup_path(call, edit, {_backend, geocoder, _name}, ctx) do
+    places? = Placing.needed?(call)
+    towns? = match?({:ok, _geocode}, geocoder) and towns_possible?(call)
+
+    if places? or towns?,
+      do: planned(call, edit, {places?, towns?}, ctx),
+      else: {:ok, nil}
+  end
+
+  # A trip a call makes has no near but the ones its own ops set.
+  defp towns_possible?(%{ops: [%{op: :create} | _rest]} = call), do: Towns.set_by(call) != []
+  defp towns_possible?(_call), do: true
+
+  defp planned(call, edit, {places?, towns?}, {context, opts}) do
+    with {:ok, loaded} <- load(call, context, opts),
+         {:ok, requests, anchors, changed?} <- Placing.requests(loaded, call, edit) do
+      towns = asked_towns(towns?, anchors, loaded, call)
+      plan = %{requests: requests, anchors: anchors, towns: towns}
+      if places? or (changed? and elem(towns, 0) != []), do: {:ok, plan}, else: {:ok, nil}
+    end
+  end
+
+  defp asked_towns(false, _anchors, _loaded, _call), do: {[], []}
+
+  defp asked_towns(true, anchors, loaded, call),
+    do: Towns.asked(anchors, loaded.towns, Towns.set_by(call))
+
+  defp looked_up(call, planned, edit, search, ctx) do
+    case look_up(call, planned, search, ctx) do
+      {:ok, placed, placings, looked} -> {commit(placed, edit, ctx, placings), looked}
+      {:error, reason, looked} -> {{:error, reason}, looked}
+    end
+  end
+
+  # The lookups, whose records join the conversation before the store is
+  # asked, the stops they leave waiting, and the towns.
+  defp look_up(call, %{requests: requests} = planned, search, {context, opts}) do
+    case resolve(planned, search, {context, opts}) do
+      {:ok, found} ->
+        :ok = join_conversation(found.records, context, opts)
+        {placed_call, outcomes} = Placing.placed_call(call, found.outcomes)
+        waits = Waiting.asked(requests, found.outcomes)
+        placings = {outcomes, found.placed_by, waits, found.towns}
+        {:ok, placed_call, placings, looked(call, outcomes, found)}
+
+      {:error, reason} ->
+        {:error, reason, @no_lookups}
+    end
+  end
+
+  defp load(%{ops: [%{op: :create} | _rest]}, context, opts) do
+    with {:ok, trips} <- store(context, opts, :index),
+         do: {:ok, %{trips: trips, rows: [], towns: %{}}}
+  end
+
+  defp load(%{trip: ref}, context, opts) do
+    with {:ok, %{trip: trip, rows: rows, towns: towns}} <- store(context, opts, {:read_trip, ref}),
+         do: {:ok, %{trips: [trip], rows: rows, towns: towns}}
+  end
+
+  # The towns are geocoded in the time the lookups leave of the call's one
+  # deadline; the nears past the cap are left for later, and said so.
+  defp resolve(%{requests: requests, anchors: anchors, towns: {asked, past}}, search, ctx) do
+    {backend, geocoder, name} = search
+    {context, opts} = ctx
+    now_ms = Keyword.get(opts, :now_ms, fn -> System.monotonic_time(:millisecond) end)
+    deadline = now_ms.() + Lookup.deadline_ms()
+
+    lookup_opts = [
+      backend: backend,
+      conversation_key: Map.fetch!(context, :conversation_key),
+      reply_blocks: reply_blocks(opts),
+      deadline_ms: Lookup.deadline_ms(),
+      now_ms: now_ms
+    ]
+
+    with {:ok, found} <- lookups(requests, anchors, lookup_opts) do
+      town_opts = [deadline_ms: max(deadline - now_ms.(), 0), stopped: found.stop_reason]
+      towns = Towns.resolve(asked, geocoder, town_opts ++ [now_ms: now_ms])
+      capped = Enum.map(past, &{&1, {:unresolved, :capped}})
+      found = Map.put(found, :towns, %{towns | towns: towns.towns ++ capped})
+      {:ok, Map.put(found, :backend, name)}
+    end
+  end
+
+  defp lookups(requests, anchors, lookup_opts) do
+    case Lookup.resolve(requests, anchors, lookup_opts) do
+      {:ok, found} -> {:ok, found}
+      {:error, {:unknown_place_link, index}} -> {:error, {:op_failed, index, :unknown_place_link}}
+      {:error, :too_many_lookups} -> {:error, :too_many_lookups}
+    end
+  end
+
+  defp join_conversation([], _context, _opts), do: :ok
+
+  defp join_conversation(records, context, opts),
+    do:
+      ReplyBlocks.put_places(reply_blocks(opts), Map.fetch!(context, :conversation_key), records)
+
+  defp reply_blocks(opts), do: Keyword.get(opts, :reply_blocks, ReplyBlocks)
+
+  # `placings`: what each place came to, what searched each one a lookup
+  # placed, the stops left waiting and the towns found, which the store keeps
+  # with the call.
+  defp commit(call, edit, {context, opts}, {outcomes, placed_by, waits, towns}) do
+    kept = Map.merge(edit, %{waits: waits, towns: Towns.kept(towns.towns)})
+
+    with {:ok, applied} <- store(context, opts, {:edit, call, kept}) do
+      :ok = announce(context, applied, %{}, opts)
+      :ok = tell_placer(waits, opts)
+      :ok = tell_town_placer(towns.towns, opts)
+      placements = Placing.placements(call, applied, outcomes)
+      {:ok, edit_answer(applied, placements, placed_by, towns.towns)}
+    end
+  end
+
+  # The placer arms its next look once a call leaves a stop waiting; it
+  # never blocks the call (`Trips.Placer.waits_saved/0` is a cast).
+  defp tell_placer([], _opts), do: :ok
+  defp tell_placer(_waits, opts), do: Keyword.get(opts, :placer, &Placer.waits_saved/0).()
+
+  # A town left for a reason that heals by waiting, or past the cap, has the
+  # placer look again later (`Trips.Placer.towns_unresolved/0`, a cast).
+  defp tell_town_placer(towns, opts) do
+    if Towns.later?(towns),
+      do: Keyword.get(opts, :town_placer, &Placer.towns_unresolved/0).(),
+      else: :ok
+  end
+
+  defp edit_answer(applied, placements, placed_by, towns) do
+    trip = applied.trip
+    touched = [%{trip_id: trip.id, title: trip.title, rows: applied.touched_rows}]
+    %{text: Render.answer(applied, placements, placed_by, towns), touched: touched}
+  end
+
+  # What the call's lookups came to, for its event: each place given counted
+  # once, by its outcome, and what stopped them, with the place search's code.
+  defp looked(call, outcomes, found) do
+    counts = Enum.frequencies_by(outcomes, fn {_index, outcome} -> bucket(outcome) end)
+
+    %{
+      lookups: found.lookups,
+      stop_reason: found.stop_reason,
+      stop_code: found.stop_code,
+      placed: Map.get(counts, :placed, 0),
+      offered: Map.get(counts, :offered, 0),
+      not_found: Map.get(counts, :not_found, 0),
+      not_looked_up: Map.get(counts, :not_looked_up, 0),
+      backend: if(Placing.words?(call) or found.towns.sent != [], do: found.backend),
+      rate_limited: Enum.any?(outcomes, &match?({_index, {:none, :rate_limited}}, &1)),
+      towns_stop_reason: found.towns.stop_reason
+    }
+    |> Map.merge(Towns.counts(found.towns))
+  end
+
+  defp bucket({:placed, _place}), do: :placed
+  defp bucket({:offered, _place}), do: :offered
+  defp bucket({:offered, _place, _unanchored}), do: :offered
+  defp bucket({:none, why}) when why in [:not_found, :no_location, :unstorable], do: :not_found
+  defp bucket({:none, {:not_near, _near}}), do: :not_found
+  defp bucket({:none, _why}), do: :not_looked_up
+
+  # The place search the call's words and nears go to, and its name; none
+  # for a test's, whose `:town_lookup` (the words alone) stands in for its
+  # geocode.
+  defp call_backend(%{place_lookup: _search} = context),
+    do: {Lookup.backend(context), town_lookup(context), nil}
+
+  defp call_backend(context) do
+    resolution = PlaceSearch.resolution(context)
+
+    {Lookup.backend(context, resolution), PlaceSearch.geocoder(context, resolution),
+     Atom.to_string(resolution.name)}
+  end
+
+  defp town_lookup(%{town_lookup: geocode}) when is_function(geocode, 1), do: {:ok, geocode}
+  defp town_lookup(_context), do: {:error, "no town lookup stands in here"}
+
+  defp plural(1, noun), do: "1 #{noun}"
+  defp plural(count, noun), do: "#{count} #{noun}s"
+
+  # --- the owner's devices ---------------------------------------------------
+
+  @doc """
+  The index a device draws (`trips`): every live trip with its day and stop
+  counts and rev, in picker order, each with `past` (`Trips.Picker`). Only a
+  connection placed as the owner's (`caller` `:independent`) reads it.
+  """
+  @spec device_index(atom() | nil, keyword()) :: {:ok, [map()]} | {:error, term()}
+  def device_index(caller, opts \\ []) when is_list(opts) do
+    with :ok <- KeptAccess.device_gate(caller),
+         do: index(KeptAccess.device_context(), opts)
+  end
+
+  @doc """
+  One trip a device draws (`trip`), live or removed and not yet swept:
+  `%{trip, rows, removed_rows}`, the rows removed in the last 30 days only
+  when `removed?`.
+  """
+  @spec device_trip(String.t(), boolean(), atom() | nil, keyword()) ::
+          {:ok, map()} | {:error, term()}
+  def device_trip(trip_id, removed?, caller, opts \\ [])
+      when is_binary(trip_id) and is_boolean(removed?) and is_list(opts) do
+    with :ok <- KeptAccess.device_gate(caller),
+         :ok <- trip_id(trip_id),
+         do: store(KeptAccess.device_context(), opts, {:trip_by_id, trip_id, removed?})
+  end
+
+  defp trip_id(id),
+    do: if(Ids.valid?(id, "tr_"), do: :ok, else: {:error, {:invalid_param, :trip_id}})
+
+  @doc """
+  The trip in its shared form, for a device's Share (`trip_share`, M89 §13):
+  whole and plain (`Trips.Render.share/2`), with the rev it shows. Only a
+  connection placed as the owner's asks; a removed trip has none to share.
+  """
+  @spec device_share(String.t(), atom() | nil, keyword()) ::
+          {:ok, %{trip_id: String.t(), rev: non_neg_integer(), text: String.t()}}
+          | {:error, term()}
+  def device_share(trip_id, caller, opts \\ []) when is_binary(trip_id) and is_list(opts) do
+    start = System.monotonic_time(:microsecond)
+    made_via = KeptAccess.device_made_via!(Keyword.get(opts, :made_via, "mac"))
+    context = KeptAccess.device_context()
+
+    result =
+      with :ok <- KeptAccess.device_gate(caller),
+           :ok <- trip_id(trip_id),
+           {:ok, %{trip: trip, rows: rows}} <- store(context, opts, {:trip_by_id, trip_id, false}),
+           :ok <- live_trip(trip) do
+        {:ok, %{trip_id: trip.id, rev: trip.rev, text: Render.share(trip, rows)}}
+      end
+
+    trips = if match?({:ok, _shared}, result), do: 1, else: 0
+    read = %{scope: :share, trips: trips, made_via: made_via}
+    Telemetry.emit_read(%{}, Map.merge(read, outcome_fields(result)), elapsed(start))
+    result
+  end
+
+  defp live_trip(%{removed_at: nil}), do: :ok
+  defp live_trip(%{id: id}), do: {:error, {:no_such_trip, id}}
+
+  @doc """
+  One edit a device sent (`trip_edit`): `"client_msg_id"`, `"op"` and, for
+  every op but `create`, `"trip_id"`. It goes through the same transaction
+  as the model's, its rows made via the device's wire (`opts[:made_via]`,
+  `"mac"` or `"phone"`), and once only: an id already applied is answered
+  `duplicate: true`, changes nothing and announces nothing. Answers the trip
+  it changed and the id a create, an add or a new day made.
+  """
+  @spec device_edit(map(), atom() | nil, keyword()) ::
+          {:ok, %{trip_id: String.t(), made: String.t() | nil, duplicate: boolean()}}
+          | {:error, term()}
+  def device_edit(%{"client_msg_id" => client_msg_id} = params, caller, opts \\ [])
+      when is_binary(client_msg_id) and is_list(opts) do
+    start = System.monotonic_time(:microsecond)
+    context = KeptAccess.device_context()
+    made_via = KeptAccess.device_made_via!(Keyword.get(opts, :made_via, "mac"))
+    edit = %{now: now(opts), outside?: false, made_via: made_via}
+
+    result =
+      with :ok <- KeptAccess.device_gate(caller),
+           {:ok, call} <- Shape.device_change(params),
+           {:ok, outcome} <- store(context, opts, {:device_edit, client_msg_id, call, edit}) do
+        device_outcome(outcome, context, {client_msg_id, opts})
+      end
+
+    result = device_refusal(result)
+    emit_device_edit(result, made_via, start)
+    result
+  end
+
+  defp device_outcome({:applied, applied}, context, {client_msg_id, opts}) do
+    made = if applied.made, do: %{client_msg_id => applied.made}, else: %{}
+    :ok = announce(context, applied, made, opts)
+    {:ok, %{trip_id: applied.trip.id, made: applied.made, duplicate: false}}
+  end
+
+  defp device_outcome({:duplicate, record}, _context, _id_and_opts),
+    do: {:ok, Map.put(record, :duplicate, true)}
+
+  # A device sends one op, so its refusal is the op's own sentence, without
+  # the place in a call the model is told, naming the fields a device sends.
+  defp device_refusal({:error, {:op_failed, _op, reason}}), do: {:error, device_reason(reason)}
+  defp device_refusal({:error, reason}), do: {:error, device_reason(reason)}
+  defp device_refusal(result), do: result
+
+  defp device_reason({:no_trip, id, _titles}), do: {:no_such_trip, id}
+  defp device_reason(:add_needs_place), do: {:device, :add_needs_place}
+  defp device_reason(:place_conflict), do: {:device, :place_conflict}
+  defp device_reason(reason), do: reason
+
+  # Every committed change reaches the owner's devices right after the store
+  # committed it, whoever made it (`Kept.Notify`): the trip with its rev, and
+  # what a device's create, add or new day made. The day-turn process then
+  # reads the new order and arms for its next turn (a cast).
+  defp announce(context, %{changed?: true, trip: trip}, made, opts) do
+    change = %{id: trip.id, rev: trip.rev, made: made}
+
+    with :ok <- KeptNotify.announce(:trips, owner_id(context), [change], opts),
+         do: Keyword.get(opts, :day_turn, &DayTurn.trips_changed/0).()
+  end
+
+  defp announce(_context, %{changed?: false}, _made, _opts), do: :ok
+
+  # --- the trip placer (D13 B) -----------------------------------------------
+
+  @doc """
+  The trip placer's take at `now` (`Trips.Placer`): every wait 7 days old
+  ends unlooked-up, and the oldest `limit` of those due come back, of every
+  owner, with how many wait in all, how many are due and when the next not
+  yet due comes due: `%{expired:, waits:, total:, due:, next_due_at:}`.
+  """
+  @spec take_waits(DateTime.t(), pos_integer(), keyword()) :: {:ok, map()} | {:error, term()}
+  def take_waits(%DateTime{} = now, limit, opts \\ [])
+      when is_integer(limit) and limit > 0 and is_list(opts),
+      do: store(%{}, opts, {:take_waits, now, limit})
+
+  @doc "One trip of waiting stops as it now stands, live (`%{trip:, rows:}`), for the placer."
+  @spec waiting_trip(map(), keyword()) :: {:ok, map()} | {:error, term()}
+  def waiting_trip(%{owner_id: owner_id, agent_id: agent_id, trip_id: trip_id}, opts \\ [])
+      when is_binary(trip_id) and is_list(opts) do
+    context = %{memory_owner_id: owner_id, memory_agent_id: agent_id}
+    store(context, opts, {:trip_by_id, trip_id, false})
+  end
+
+  @doc """
+  What the placer's lookups found for one trip's waiting stops (`results`,
+  `Trips.Waiting.settle/2`'s), in one transaction: the stops placed as one
+  call of edits, made via `trip_place`, each keeping its stamp, the trip's
+  rev moving once and its devices told (`Kept.Notify`); the rest waiting
+  again or ending; any wait a newer change replaced left as that change left
+  it (`superseded`). Said in no chat. `looked` is the lookups' `found`
+  (`Lookup.resolve/3`'s) and the backend's name, for the trip's edit event,
+  emitted under `opts[:session_id]`, the placer's run.
+  """
+  @spec place_waiting(map(), [Waiting.result()], map(), keyword()) ::
+          {:ok, map()} | {:error, term()}
+  def place_waiting(
+        %{owner_id: owner_id, agent_id: agent_id, trip_id: trip_id},
+        results,
+        %{found: found, backend: backend},
+        opts
+      )
+      when is_binary(trip_id) and is_list(results) and is_list(opts) do
+    start = System.monotonic_time(:microsecond)
+    context = %{memory_owner_id: owner_id, memory_agent_id: agent_id}
+    edit = %{now: now(opts), outside?: false, made_via: "trip_place"}
+
+    result =
+      with {:ok, done} <- store(context, opts, {:place_waiting, trip_id, results, edit}),
+           :ok <- announce(context, done.applied || %{changed?: false}, %{}, opts),
+           do: {:ok, Map.delete(done, :applied)}
+
+    emit_placed(Keyword.get(opts, :session_id), {result, found, backend}, start)
+    result
+  end
+
+  @doc """
+  The nears in force on live trips, of every owner, that have no town yet,
+  at most `limit`, the trip changed last first: what the trip placer asks
+  (`Trips.Towns`), each `%{trip_id:, owner_id:, agent_id:, words:}`.
+  """
+  @spec unresolved_towns(pos_integer(), keyword()) :: {:ok, [map()]} | {:error, term()}
+  def unresolved_towns(limit, opts \\ []) when is_integer(limit) and limit > 0 and is_list(opts),
+    do: store(%{}, opts, {:unresolved_towns, limit})
+
+  @doc """
+  What the placer's geocodes found for one trip's nears (`towns`, by the
+  words, `Trips.Towns.kept/1`'s), in one transaction: those still in force
+  are kept, and when a town is new the trip's rev moves once and its devices
+  are told (`Kept.Notify`), said in no chat. `looked` names the backend and
+  how many of the trip's geocodes reached the place search (`towns`), for
+  the trip's edit event, emitted under `opts[:session_id]`, the placer's run.
+  """
+  @spec settle_towns(map(), %{optional(String.t()) => Towns.kept()}, map(), keyword()) ::
+          {:ok, %{changed?: boolean()}} | {:error, term()}
+  def settle_towns(
+        %{owner_id: owner_id, agent_id: agent_id, trip_id: trip_id},
+        towns,
+        %{backend: backend, towns: sent},
+        opts
+      )
+      when is_binary(trip_id) and is_map(towns) and is_integer(sent) and sent >= 0 and
+             is_list(opts) do
+    start = System.monotonic_time(:microsecond)
+    context = %{memory_owner_id: owner_id, memory_agent_id: agent_id}
+
+    result =
+      with {:ok, done} <- store(context, opts, {:settle_towns, trip_id, towns, now(opts)}),
+           :ok <- announce(context, done, %{}, opts),
+           do: {:ok, %{changed?: done.changed?}}
+
+    emit_settled(Keyword.get(opts, :session_id), {result, towns, {backend, sent}}, start)
+    result
+  end
+
+  @doc """
+  The live trips, for the per-turn line naming them: each with its title,
+  start, day count and `past`, in picker order.
+  """
+  @spec names(map(), keyword()) :: {:ok, [map()]} | {:error, term()}
+  def names(context, opts \\ []) when is_map(context) and is_list(opts),
+    do: index(context, opts)
+
+  # --- the store -------------------------------------------------------------
+
+  # The live trips in picker order at `:now`, in the home's zone.
+  defp index(context, opts) do
+    with {:ok, trips} <- store(context, opts, :index) do
+      zone = Clock.shown_zone(Keyword.take(opts, [:personalization]))
+      {:ok, Picker.order(trips, now(opts), zone)}
+    end
+  end
+
+  defp store(context, opts, request) do
+    case Keyword.get(opts, :repo, Repo) do
+      nil ->
+        {:error, :disabled}
+
+      repo ->
+        request(context, request)
+        |> Repo.trips_call(repo_opts(repo, opts))
+        |> listed_titles(context, opts)
+    end
+  end
+
+  # A refusal that names no trip lists the trips as every list of them is:
+  # read again as the index, outside the store's transaction, in picker order
+  # with each trip's `past` (`describe_error/1` marks it).
+  defp listed_titles({:error, {:no_trip, ref, _titles}}, context, opts) do
+    with {:ok, trips} <- index(context, opts),
+         do: {:error, {:no_trip, ref, Enum.map(trips, &{&1.title, &1.past})}}
+  end
+
+  defp listed_titles(result, _context, _opts), do: result
+
+  defp request(context, :index), do: {:index, owner_id(context), agent_id(context)}
+
+  defp request(context, {:read_trip, ref}),
+    do: {:read_trip, owner_id(context), agent_id(context), ref}
+
+  defp request(context, {:trip_by_id, trip_id, removed?}),
+    do: {:trip_by_id, owner_id(context), agent_id(context), trip_id, removed?}
+
+  defp request(context, {:edit, call, edit}),
+    do: {:edit, owner_id(context), agent_id(context), call, edit}
+
+  defp request(context, {:device_edit, client_msg_id, call, edit}),
+    do: {:device_edit, owner_id(context), agent_id(context), client_msg_id, call, edit}
+
+  defp request(_context, {:take_waits, now, limit}), do: {:take_waits, now, limit}
+
+  defp request(context, {:place_waiting, trip_id, results, edit}),
+    do: {:place_waiting, owner_id(context), agent_id(context), trip_id, results, edit}
+
+  defp request(_context, {:unresolved_towns, limit}), do: {:unresolved_towns, limit}
+
+  defp request(context, {:settle_towns, trip_id, towns, now}),
+    do: {:settle_towns, owner_id(context), agent_id(context), trip_id, towns, now}
+
+  defp repo_opts(repo, opts), do: [server: repo] ++ Keyword.take(opts, [:on_timeout, :timeout])
+
+  defp owner_id(context), do: Map.get(context, :memory_owner_id, "default")
+  defp agent_id(context), do: Map.get(context, :memory_agent_id, "main")
+
+  defp now(opts) do
+    opts |> Keyword.get_lazy(:now, &DateTime.utc_now/0) |> DateTime.shift_zone!("Etc/UTC")
+  end
+
+  defp gate(context, tool) do
+    if KeptAccess.permitted?(context, tool), do: :ok, else: {:error, {:not_permitted, tool}}
+  end
+
+  # --- telemetry -------------------------------------------------------------
+
+  defp emit_read(context, read, result, start) do
+    event =
+      read
+      |> Map.put(:made_via, KeptAccess.made_via(context))
+      |> Map.merge(outcome_fields(result))
+
+    Telemetry.emit_read(context, event, elapsed(start))
+  end
+
+  defp emit_edit(context, params, {result, looked}, start) do
+    trips =
+      case result do
+        {:ok, %{touched: touched}} -> length(touched)
+        {:error, _reason} -> 0
+      end
+
+    ops = params |> Map.get("ops") |> List.wrap() |> length()
+    counts = %{trips: trips, ops: ops, made_via: KeptAccess.made_via(context)}
+    edit = looked |> Map.merge(counts) |> Map.merge(outcome_fields(result))
+    Telemetry.emit_edit(context, edit, elapsed(start))
+  end
+
+  # A device's op gives a whole place, so it looks nothing up.
+  defp emit_device_edit(result, made_via, start) do
+    trips =
+      case result do
+        {:ok, %{duplicate: true}} -> 0
+        {:ok, _changed} -> 1
+        {:error, _reason} -> 0
+      end
+
+    edit = Map.merge(@no_lookups, %{trips: trips, ops: 1, made_via: made_via})
+    Telemetry.emit_edit(%{}, Map.merge(edit, outcome_fields(result)), elapsed(start))
+  end
+
+  # The placer's write for one trip, under its run: what that trip's lookups
+  # did, and the stops it placed as the call's ops. A wait it acted on
+  # without a lookup changes no count.
+  defp emit_placed(session_id, {result, found, backend}, start) do
+    {trips, ops} =
+      case result do
+        {:ok, %{changed?: changed?, placed: placed}} ->
+          {if(changed?, do: 1, else: 0), length(placed)}
+
+        {:error, _reason} ->
+          {0, 0}
+      end
+
+    counts = Enum.frequencies_by(found.outcomes, fn {_ref, outcome} -> bucket(outcome) end)
+
+    edit =
+      Map.merge(@no_lookups, %{
+        trips: trips,
+        ops: ops,
+        made_via: "trip_place",
+        lookups: found.lookups,
+        placed: Map.get(counts, :placed, 0),
+        offered: Map.get(counts, :offered, 0),
+        not_found: Map.get(counts, :not_found, 0),
+        not_looked_up: Map.get(counts, :not_looked_up, 0),
+        backend: backend,
+        rate_limited: Enum.any?(found.outcomes, &match?({_ref, {:none, :rate_limited}}, &1)),
+        stop_reason: found.stop_reason,
+        stop_code: found.stop_code
+      })
+
+    context = if session_id, do: %{session_id: session_id}, else: %{}
+    Telemetry.emit_edit(context, Map.merge(edit, placed_fields(result)), elapsed(start))
+  end
+
+  # The placer's towns for one trip, under its run: the towns it kept, and
+  # whether the trip's rev moved.
+  defp emit_settled(session_id, {result, towns, {backend, sent}}, start) do
+    trips = if match?({:ok, %{changed?: true}}, result), do: 1, else: 0
+    found = Enum.count(towns, &match?({_words, {:found, _town}}, &1))
+
+    edit =
+      @no_lookups
+      |> Map.merge(%{trips: trips, ops: 0, made_via: "trip_place", backend: backend})
+      |> Map.merge(%{towns: sent, towns_found: found})
+      |> Map.put(:towns_not_found, map_size(towns) - found)
+
+    context = if session_id, do: %{session_id: session_id}, else: %{}
+    Telemetry.emit_edit(context, Map.merge(edit, outcome_fields(result)), elapsed(start))
+  end
+
+  # A write the store refused names its reason as any refusal does.
+  defp placed_fields({:ok, %{refused: nil}}), do: outcome_fields({:ok, nil})
+  defp placed_fields({:ok, %{refused: reason}}), do: outcome_fields({:error, reason})
+  defp placed_fields({:error, _reason} = error), do: outcome_fields(error)
+
+  defp outcome_fields({:ok, _answer}), do: %{outcome: :ok, error_code: nil}
+
+  defp outcome_fields({:error, reason}),
+    do: %{outcome: outcome(reason), error_code: error_tag(reason)}
+
+  defp outcome(reason) do
+    if error_tag(reason) == "storage_failed", do: :failed, else: :refused
+  end
+
+  defp elapsed(start), do: max(System.monotonic_time(:microsecond) - start, 0)
+
+  # --- error vocabulary ------------------------------------------------------
+
+  @doc """
+  The tag a refused call is traced under: the reason's leading atom, or the
+  op failure's own reason's, and `storage_failed` for a term with neither.
+  """
+  @spec error_tag(term()) :: String.t()
+  def error_tag({:op_failed, _op, reason}), do: error_tag(reason)
+  def error_tag({:invalid_op, _op, reason}), do: error_tag(reason)
+  def error_tag({:device, reason}), do: error_tag(reason)
+
+  def error_tag(reason) when is_atom(reason) and reason not in [nil, true, false],
+    do: Atom.to_string(reason)
+
+  def error_tag(reason) when is_tuple(reason) and is_atom(elem(reason, 0)),
+    do: Atom.to_string(elem(reason, 0))
+
+  def error_tag(_reason), do: "storage_failed"
+
+  @doc """
+  Every refusal as one sentence that tells the model or the device what to
+  do. A refused op says which op it was, and that nothing in the call changed.
+  """
+  @spec describe_error(term()) :: String.t()
+  def describe_error({:op_failed, op, reason}), do: describe_error(reason) <> unchanged(op)
+  def describe_error({:invalid_op, op, reason}), do: describe_error(reason) <> unchanged(op)
+
+  def describe_error({:not_permitted, tool}) do
+    "#{tool} is available only on the owner's own turn in a private chat or a voice call, or " <>
+      "in a scheduled job set up there that names it; group chats and guest, delegated and " <>
+      "other runs cannot read or change the owner's trips."
+  end
+
+  def describe_error(:unknown_place_link) do
+    "No place search in this conversation returned that link; search again or give the " <>
+      "place's name."
+  end
+
+  def describe_error(:too_many_lookups) do
+    "One call looks up at most #{Lookup.max_lookups()} places; split the rest into another " <>
+      "call."
+  end
+
+  def describe_error(:trip_needed),
+    do: "Name the trip, by its title or id, to read a day of it or to share it."
+
+  def describe_error({:not_a_day_run, _value}),
+    do: ~s(day is a day's number from 1, or a run of days as "2-4".)
+
+  def describe_error({:invalid_param, :as}), do: ~s(as takes only "share".)
+
+  def describe_error({:no_trip, ref, titles}) do
+    "No trip is named #{quoted(ref)}#{titles_part(titles)}. To make one, start the call with a " <>
+      "create op, and only when the owner names a new trip."
+  end
+
+  def describe_error({:title_taken, title}),
+    do: "A trip named #{quoted(title)} already exists; name another, or change that one."
+
+  def describe_error({:title_in_use, title}) do
+    "Another trip is named #{quoted(title)} now, so this one cannot come back under that name; " <>
+      "restore it with a new title, or rename the other trip first."
+  end
+
+  def describe_error(:too_many_trips) do
+    "The owner keeps at most #{Ops.max_trips()} trips. Remove one they no longer need to make " <>
+      "room."
+  end
+
+  def describe_error({:trip_full, _title}) do
+    "A trip holds at most #{Ops.max_rows()} days and stops together; remove some, or make the " <>
+      "rest another trip."
+  end
+
+  def describe_error({:trip_too_large, title}) do
+    "That would make #{quoted(title)} too large to send to the owner's devices; shorten its " <>
+      "notes, or make the rest another trip."
+  end
+
+  def describe_error({:last_day, _title}),
+    do: "A trip keeps at least one day; remove the trip instead."
+
+  def describe_error({:no_row, {:id, _id}}),
+    do: "That row is not in this trip any more; pull the trip again."
+
+  def describe_error({:no_row, n}),
+    do: "This trip has no row [#{n}]; read it again for its numbers."
+
+  def describe_error({:no_day, k, days}),
+    do: "This trip has no Day #{k}; it has #{plural(days, "day")}."
+
+  def describe_error({:not_a_stop, ref}),
+    do: "#{subject(ref)} is a day, not a stop; a day op names a day."
+
+  def describe_error({:not_a_day, ref}), do: "#{subject(ref)} is a stop, not a day."
+  def describe_error({:after_self, ref}), do: "#{subject(ref)} cannot be moved after itself."
+  def describe_error(:not_removed), do: "That is not removed, so there is nothing to restore."
+  def describe_error(:create_not_first), do: "create must be the first op of its call."
+  def describe_error(:trip_removed), do: "This trip was removed earlier in the call."
+
+  def describe_error({:no_such_trip, _id}),
+    do: "No trip has that id; it may have been removed more than 30 days ago."
+
+  def describe_error(:not_owner),
+    do: "Only the owner's own Fermix app can read or change the owner's trips."
+
+  def describe_error({:device, :move_needs_place}),
+    do: "Moving a stop needs a day_id or an after_id."
+
+  def describe_error({:device, :add_needs_place}), do: "An add needs a day_id or an after_id."
+  def describe_error({:device, :place_conflict}), do: "Give day_id or after_id, not both."
+
+  def describe_error({:device, :day_conflict}),
+    do: "A day op names a day by its row_id, or makes one after after_id; give one, not both."
+
+  def describe_error({:device, :place_and_unplace}), do: "Give place or unplace, not both."
+
+  def describe_error({:device, :client_msg_id_used}) do
+    "That client_msg_id already named another edit, so nothing changed; send each edit with " <>
+      "an id of its own."
+  end
+
+  def describe_error({:unknown_device_op, name}),
+    do: "#{inspect(name)} is not an op here; the ops are #{Enum.join(device_ops(), ", ")}."
+
+  def describe_error(:too_many_ops),
+    do: "One call carries at most #{max_ops()} ops; split the rest into another call."
+
+  def describe_error({:unknown_op, name}),
+    do: "#{inspect(name)} is not an op; the ops are #{Enum.join(ops(), ", ")}."
+
+  def describe_error(:add_needs_place), do: "An add needs a day or an after."
+  def describe_error(:move_needs_place), do: "A move needs a day or an after."
+
+  def describe_error({:place_conflict, ref, on, k}) do
+    "The op gives day #{k} and after #{subject(ref)}, which is on Day #{on}, not Day #{k}; " <>
+      "give one of them."
+  end
+
+  def describe_error(:day_move_conflict),
+    do: "A day moves by day or by after, not both; give one of them."
+
+  def describe_error(:nothing_to_edit),
+    do: "An edit needs at least one of text, time, duration, fixed, note or place."
+
+  def describe_error({:missing, field}), do: "The op needs #{field}."
+  def describe_error({:not_a_number, field}), do: "#{field} must be a number, 1 or more."
+  def describe_error({:not_days, field}), do: "#{field} must be a number of days, 1 to 1000."
+
+  def describe_error({:not_time, field}),
+    do: "#{field} must be a time of day as HH:MM, 00:00 to 23:59."
+
+  def describe_error({:not_minutes, field}),
+    do: "#{field} must be whole minutes, 1 to 1440, or 0 to clear it."
+
+  def describe_error({:not_boolean, field}), do: "#{field} must be true or false."
+  def describe_error({:not_date, field}), do: "#{field} must be a date, YYYY-MM-DD."
+
+  def describe_error({:invalid_timezone, zone}),
+    do: "#{quoted(zone)} is not a time zone; give an IANA zone such as Europe/Lisbon."
+
+  def describe_error({:not_one_line, field}),
+    do: "The #{field} must be words on one line, with no control characters."
+
+  def describe_error({:too_long, field, max}), do: "The #{field} is over #{max} characters."
+
+  def describe_error({:invalid_place, field}),
+    do: "The place's #{field} is missing or out of its bounds."
+
+  def describe_error({:invalid_param, :ops}), do: "ops must be a list of 1 to #{max_ops()} ops."
+  def describe_error({:invalid_param, field}), do: "#{field} must be text."
+
+  def describe_error(:disabled),
+    do: "The owner's trips are unavailable because memory is off on this install."
+
+  def describe_error(reason) do
+    "The trips could not be read or saved (#{inspect(reason)}), so nothing changed; tell the " <>
+      "owner and do not retry in this turn."
+  end
+
+  defp unchanged(op), do: " Nothing in this call was changed (op #{op})."
+
+  # A row the model names by its number; a device's, by its id.
+  defp subject({:id, _id}), do: "That row"
+  defp subject(n), do: "[#{n}]"
+
+  defp titles_part([]), do: "; the owner keeps no trips yet"
+  defp titles_part(titles), do: "; the trips are " <> Enum.map_join(titles, ", ", &listed/1)
+
+  # A trip as a refusal lists it: its title, and `(past)` when it is over.
+  defp listed({title, false}), do: quoted(title)
+  defp listed({title, true}), do: quoted(title) <> " (past)"
+
+  # Words the owner or the model wrote, JSON-quoted, as anything else the
+  # model sent where words belong: every such value came as JSON.
+  defp quoted(value), do: Jason.encode!(value)
+end

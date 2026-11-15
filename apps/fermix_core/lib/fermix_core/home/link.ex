@@ -3,8 +3,8 @@ defmodule FermixCore.Home.Link do
   The rail-side half of the home (M75), as `fermix_core` sees it: forwarding a
   Fermix-wide management call from a desktop's device-role engine to its
   primary, the rail's facts for `home.status`, opening an enrollment window
-  on a primary, naming a desktop's primary anew after a replace of the
-  server, and receiving the home back on a desktop (Always On's move back).
+  on a primary, and receiving the home back on a desktop (Always On's move
+  back).
 
   `fermix_core` must never compile-depend on `fermix_channels`, so the
   implementation is injected **by module** through
@@ -33,23 +33,27 @@ defmodule FermixCore.Home.Link do
   awake, and `down_at`, when that stretch began on the wall clock (both nil
   while one is up). `desktops` are the primary's desktop peers.
   `enrollment` is the primary's enrollment window: `state` `:open`, `:used` or
-  `:expired`, when it expires, its `kind` (`:manual`, the code a person
-  copies, or `:provisioned`, the code inside a server Fermix created), the
-  `candidate_id` that enrolled through it (nil until one did) and `awake_ms`,
-  how long this engine has held it while the computer was awake; `nil` when
-  no window is kept. Both counts are on the monotonic clock, which stops
-  while the computer sleeps (`home.status.summary`, M75 lean v1 §7).
+  `:expired`, a computer's join's `:awaiting_approval`, `:approved` or
+  `:denied` (M97 §3.1), its `purpose`, when it expires, the `candidate_id`
+  that enrolled through it (nil until one did), the `joiner` waiting for the
+  owner (`name` and `platform`, never its digits, or nil) and the computer that joined
+  through it (`joined`, its `device_id` and `name`, nil until one did);
+  `nil` when no window is kept. `down_ms` is on the
+  monotonic clock, which stops while the computer sleeps
+  (`home.status.summary`, M75 lean v1 §7).
   """
   @type status :: %{
           primary: map() | nil,
           desktops: [map()],
           enrollment:
             %{
-              state: :open | :used | :expired,
-              expires_at: DateTime.t(),
-              kind: :manual | :provisioned,
-              candidate_id: String.t() | nil,
-              awake_ms: non_neg_integer()
+              required(:state) =>
+                :open | :used | :expired | :awaiting_approval | :approved | :denied,
+              required(:expires_at) => DateTime.t(),
+              required(:candidate_id) => String.t() | nil,
+              optional(:purpose) => :candidate | :computer,
+              optional(:joiner) => map() | nil,
+              optional(:joined) => map() | nil
             }
             | nil
         }
@@ -68,39 +72,54 @@ defmodule FermixCore.Home.Link do
   @callback status() :: status()
 
   @doc """
-  Primary role: opens the enrollment window (spec §7.1) of `kind` and answers
-  the code and when it expires: `:manual` (`home.enroll.open`, thirty
-  minutes) or `:provisioned` (the code inside a server Fermix creates, 24
-  hours, M75 lean v1 L15). One window at a time; opening another replaces it,
-  except that a manual one is refused while a provisioned one is open, and
-  while a used one's candidate is still held. `returning` is the device id
-  of the linked desktop a manual window is opened for, to take the home back
-  (Always On's move back), else nil: the window keeps it, and so does the
-  candidate that enrolls through it. A refusal carries the sentence a person
-  is shown.
+  Primary role: opens the enrollment window (spec §7.1, `home.enroll.open`,
+  thirty minutes) and answers the code and when it expires. One window at a
+  time; opening another replaces it. `returning` is the device id of the
+  linked desktop the window is opened for, to take the home back (Always
+  On's move back), else nil: the window keeps it, and so does the candidate
+  that enrolls through it. A refusal carries the sentence a person is shown.
   """
-  @callback open_enrollment(:manual | :provisioned, String.t() | nil) ::
+  @callback open_enrollment(String.t() | nil) ::
               {:ok, %{code: String.t(), expires_at: DateTime.t()}}
               | {:error, {:unavailable, String.t()}}
 
   @doc """
-  Primary role: releases the enrollment window when it is of `kind`: the
-  provisioned one when the server it was opened for was never created or is
-  being deleted (a used one then no longer holds a manual code back), the
-  manual one when the owner cancels its code (Always On's Cancel the code).
-  An open one ends now. A window of the other kind, or none, and any other
-  role, is left as it is.
+  Primary role: releases the enrollment window when the owner cancels its
+  code (Always On's Cancel). An open one ends now. None, and any other role,
+  is left as it is.
   """
-  @callback withdraw_enrollment(:manual | :provisioned) ::
+  @callback withdraw_enrollment() ::
               :ok | {:error, {:unavailable, String.t()}}
 
   @doc """
-  Device role: the server this desktop reaches is known by `name` from now on
-  (the new server of a replace, once the move to it is done; it is reached at
-  the same node id). The desktop link keeps it and every sentence names it.
-  `{:error, reason}` when no link runs or the name could not be kept.
+  Primary role: opens the enrollment window for a computer that joins the
+  home (M97 §3.1, Add a computer), thirty minutes, and answers its code and
+  when it expires. Refused by name while a window of the other purpose is
+  open. A refusal carries the sentence a person is shown.
   """
-  @callback rename_primary(String.t()) :: :ok | {:error, term()}
+  @callback open_join() ::
+              {:ok, %{code: String.t(), expires_at: DateTime.t()}}
+              | {:error, {:unavailable, String.t()}}
+
+  @doc """
+  Primary role: the owner approves the computer waiting on the window with
+  the six digits `sas` it shows: its row is written and it is told. Digits
+  that are not its own deny it and spend the code (`:sas_mismatch`); no
+  computer waiting is `:none`.
+  """
+  @callback approve_join(String.t()) ::
+              {:ok, %{device_id: String.t(), name: String.t()}}
+              | {:error, :none | :sas_mismatch | {:unavailable, String.t()}}
+
+  @doc "Primary role: the owner denies the computer waiting on the window; none is nothing."
+  @callback deny_join() :: :ok | {:error, {:unavailable, String.t()}}
+
+  @doc """
+  Primary role: drops the held candidate `candidate_id` the owner forgot
+  (Always On's Forget this server). One no longer held is forgotten already.
+  A refusal carries the sentence a person is shown.
+  """
+  @callback forget_candidate(String.t()) :: :ok | {:error, {:unavailable, String.t()}}
 
   @doc """
   Any role: removes the desktop row whose Noise key is `noise_pk` from the
@@ -110,6 +129,15 @@ defmodule FermixCore.Home.Link do
   a row of that key that is no desktop is refused by name.
   """
   @callback drop_desktop_row(Path.t(), <<_::256>>) :: :ok | {:error, term()}
+
+  @doc """
+  Any role: the desktop rows in the device list of the home at `root`, read
+  from its file rather than the running store, which starts after
+  `fermix_core` and only on the primary: whether a home is an Always On
+  server's (`FermixCore.Home.ServerPrimary`). No list holds none.
+  """
+  @callback home_desktops(Path.t()) ::
+              {:ok, [%{device_id: String.t(), name: String.t()}]} | {:error, term()}
 
   @doc """
   Device role: starts receiving the home back from the server (Always On's
@@ -127,6 +155,85 @@ defmodule FermixCore.Home.Link do
   running is nothing to stop.
   """
   @callback stop_return() :: :ok
+
+  @doc """
+  Device role, once the server has taken a move back to this computer (M97
+  §9.2, §9.3): ends what this computer carries to its server that the move
+  cuts. The call its app has on the server is hung up, so the server ends it
+  cleanly and settles it, and the app is told why; every file its chat is
+  still uploading is dropped, the chat told why, naming the file; and a call
+  or a file started after it is refused in the same words until a session
+  to the server comes up again. Answers once both are done; one the link
+  does not end within its bound is logged, and the server's restart into
+  the move ends it there. Nothing to end is `:ok`.
+  """
+  @callback end_for_return() :: :ok
+
+  @typedoc """
+  One computer's device row as the primary holds it (M97 §3.2): its id, the
+  name the owner calls it, its system (`"macos"`, `"linux"`, or nil before
+  it said), when it last said `hello`, whether it keeps the home's backup
+  copies (nil: yes), and whether its session is up and since when.
+  """
+  @type computer_row :: %{
+          device_id: String.t(),
+          name: String.t(),
+          platform: String.t() | nil,
+          last_seen: DateTime.t() | nil,
+          backups: boolean() | nil,
+          connected: boolean(),
+          since: DateTime.t() | nil
+        }
+
+  @doc """
+  Primary role: every computer's device row (M97 §3.2), with whether its
+  session is up. Where the device store or the desktop peers are not
+  running, the rows are not known: `{:error, :not_running}`, never none, and
+  `{:error, :not_started}` before the tree that holds them has started in
+  this engine, as at its boot.
+  """
+  @callback computer_rows() :: {:ok, [computer_row()]} | {:error, term()}
+
+  @doc """
+  Primary role: asks the computer of every session that is up to tell the
+  home's live view of its computers (the `Computers.Registry` named
+  `registry`) everything its session said, so a view that restarted is
+  rebuilt. The view asks as it starts; with no session up, nothing is told.
+  """
+  @callback announce_computers(atom()) :: :ok
+
+  @doc """
+  Primary role: names the computer `device_id` `name` on its device row
+  (`computers.rename`). The name is checked by the caller
+  (`FermixCore.Computers.rename/3`); one another computer holds, compared
+  without case, is refused here as well, where the rows are written
+  (`{:name_taken, name}`), and a computer the home does not hold is
+  `{:not_found, device_id}`.
+  """
+  @callback rename_computer(String.t(), String.t()) ::
+              {:ok, computer_row()} | {:error, {:name_taken | :not_found, String.t()} | term()}
+
+  @doc """
+  Device role: hands the server a Snooze of `minutes` pressed on the
+  notification of its reminder `reminder_id` here (M99 §10.1), and returns at
+  once, never waiting on the link; the server's answer is logged where it
+  arrives. An error when nothing here can carry it (this computer is not
+  linked to a server).
+  """
+  @callback snooze_reminder(String.t(), pos_integer()) :: :ok | {:error, term()}
+
+  @doc """
+  Device role: the desktop relay stops for good, so this computer can let go
+  of its link (`FermixCore.Home.Unlink`): from then until the engine
+  restarts it dials nothing and writes nothing of `device/desktop.json`, of
+  which it is the one other writer. `:revoked` (a join with a new code) only
+  while the link still holds its server's word that it no longer knows this
+  computer, else `{:error, :known}`: a session came up since, and that link
+  stays. `:any` (a disconnect) whatever the link says, ending a session that
+  is up. No relay running has nothing to stop; one that does not answer in
+  time is `{:error, :unanswered}`.
+  """
+  @callback release_link(:revoked | :any) :: :ok | {:error, :known | :unanswered}
 
   @typedoc "How a request reaches the primary: the rail's `forward/2` on a linked desktop."
   @type forwarding ::

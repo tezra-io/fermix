@@ -3,45 +3,43 @@ defmodule FermixCore.Management.AlwaysOn.Input do
   What an Always On step was given (Always On setup §3.4): `home.act`'s
   `input`, decoded where it arrived (the router, the setup page's event, the
   CLI) and passed on as this struct alone, never as the map it came in. Its
-  `Inspect` withholds the token and the recovery passphrase, so a crash
-  report, a log line or a page's last event names neither.
+  `Inspect` withholds the recovery passphrase, so a crash report, a log line
+  or a page's last event never names it.
 
-    * `token`: a provider's API token, for `paste_token`;
-    * `provider`: the provider the token is for (the one provider when only
-      one is offered);
     * `recovery_passphrase`: for `move_now` and `try_again`, checked against
-      the recovery key set, or set when none is;
-    * `type` and `location`: the size and place chosen, for `create_server`
-      and `replace_server`: both, or neither for the recommendation.
-
-  Each is text, or nil when not given.
+      the recovery key set, or set when none is; for `restore_here`, the one
+      that opens the copy restored; for `change_passphrase`, the new one.
+      Text, or nil when not given.
+    * `keep_offers` (M97 §7.3): for `move_now` and `try_again`, what this
+      computer keeps on for its server after the move, the lines of the
+      review's block left ticked; for `review_offers`, what it keeps on after
+      the owner's review. A list of offer ids, or nil when not given (the
+      block as the engine proposed it).
+    * `sas` (M97 §7.5): for `approve_computer`, the six digits the computer
+      that asks to join shows, as the owner typed them. Text, or nil.
   """
 
   @fields %{
-    "token" => :token,
-    "provider" => :provider,
     "recovery_passphrase" => :recovery_passphrase,
-    "type" => :type,
-    "location" => :location
+    "keep_offers" => :keep_offers,
+    "sas" => :sas
   }
-  @shape_sentence "Always On takes a token, a provider, a recovery passphrase, a size and a " <>
-                    "place, each as text, and nothing else."
+  @shape_sentence "Always On takes a recovery passphrase, as text, the offers to keep on, " <>
+                    "as a list, and a new computer's digits, as text, and nothing else."
   @field_sentences %{
-    "token" => "Paste the API token as text.",
-    "provider" => "Choose one of the providers Fermix creates a server on.",
     "recovery_passphrase" => "Type the recovery passphrase as text.",
-    "type" => "Choose one of the server types Fermix offers.",
-    "location" => "Choose one of the places Fermix creates a server in."
+    "keep_offers" => "Send the offers to keep on as a list of their ids.",
+    "sas" => "Type the six digits the new computer shows."
   }
+  @max_offers 32
+  @text_fields ~w(recovery_passphrase sas)
 
-  defstruct token: nil, provider: nil, recovery_passphrase: nil, type: nil, location: nil
+  defstruct recovery_passphrase: nil, keep_offers: nil, sas: nil
 
   @type t :: %__MODULE__{
-          token: String.t() | nil,
-          provider: String.t() | nil,
           recovery_passphrase: String.t() | nil,
-          type: String.t() | nil,
-          location: String.t() | nil
+          keep_offers: [String.t()] | nil,
+          sas: String.t() | nil
         }
 
   @doc "The fields `input` may hold, as the wire names them."
@@ -66,7 +64,12 @@ defmodule FermixCore.Management.AlwaysOn.Input do
 
   def decode(_input), do: {:error, {:invalid_params, "input", @shape_sentence}}
 
-  defp given?(field, value) when is_map_key(@fields, field), do: is_binary(value) or is_nil(value)
+  defp given?("keep_offers", value) when is_list(value),
+    do: length(value) <= @max_offers and Enum.all?(value, &is_binary/1)
+
+  defp given?(field, value) when is_map_key(@fields, field),
+    do: is_nil(value) or (field in @text_fields and is_binary(value))
+
   defp given?(_field, _value), do: false
 
   defp put({field, value}, input), do: Map.put(input, Map.fetch!(@fields, field), value)
@@ -79,14 +82,12 @@ defmodule FermixCore.Management.AlwaysOn.Input do
   defimpl Inspect do
     import Inspect.Algebra
 
-    # The two secrets show only whether they were given.
+    # The secret shows only whether it was given.
     def inspect(input, opts) do
       shown = [
-        provider: input.provider,
-        type: input.type,
-        location: input.location,
-        token: withheld(input.token),
-        recovery_passphrase: withheld(input.recovery_passphrase)
+        recovery_passphrase: withheld(input.recovery_passphrase),
+        keep_offers: input.keep_offers,
+        sas: input.sas
       ]
 
       concat(["#FermixCore.Management.AlwaysOn.Input<", to_doc(shown, opts), ">"])

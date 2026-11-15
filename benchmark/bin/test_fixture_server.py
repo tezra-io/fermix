@@ -5,14 +5,16 @@
 # ///
 """Specs for the runner-owned fixture server and the `fixture_state` assertion:
 the routing table and its bounds, the event -> state derivation, the gate's two
-failure kinds, what the loader refuses, and the per-attempt token both runners
-bind. The server binds an EPHEMERAL loopback port inside the tests and is driven
+failure kinds, what the loader refuses, the per-attempt token both runners
+bind, and the port each binds: the one an eval home's manifest names, else an
+ephemeral one. The server binds loopback ports inside the tests and is driven
 with urllib; no daemon, no Opik, no spend.
 Run: `uv run bin/test_fixture_server.py`."""
 from __future__ import annotations
 
 import json
 import os
+import socket
 import sys
 import urllib.error
 import urllib.request
@@ -116,6 +118,127 @@ def test_a_pages_directory_carrying_its_own_helper_is_refused(tmp_path):
     (tmp_path / "fixture.js").write_text("// a stale copy")
     with pytest.raises(fx.ServerError, match="fixture.js"):
         fx.FixtureServer(str(tmp_path), helper=os.path.join(PAGES_DIR, "fixture.js"))
+
+
+# --- the port ---------------------------------------------------------------
+
+def _free_port() -> int:
+    probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        probe.bind((fx.BIND_HOST, 0))
+        return probe.getsockname()[1]
+    finally:
+        probe.close()
+
+
+def _home(tmp_path, manifest=None, raw: str | None = None):
+    """An eval home, with the fixture manifest written as given (or not at all)."""
+    home = tmp_path / "brindle-eval"
+    (home / "eval-fixtures").mkdir(parents=True)
+    if manifest is not None or raw is not None:
+        text = raw if raw is not None else json.dumps(manifest)
+        (home / fx.FIXTURE_MANIFEST).write_text(text)
+    return str(home)
+
+
+def test_a_home_without_the_manifest_binds_an_ephemeral_port(tmp_path):
+    # The dev home, or one seeded before the manifest: its daemon runs without
+    # the origin, so only the browser reads the pages, as before.
+    assert fx.home_port(_home(tmp_path)) == 0
+
+
+def test_a_home_with_the_manifest_binds_exactly_its_port(tmp_path):
+    port = _free_port()
+    home = _home(tmp_path, {"port": port})
+    assert fx.home_port(home) == port
+    server = fx.FixtureServer(PAGES_DIR)
+    assert server.start(fx.home_port(home)) == port
+    try:
+        binding = server.bind("run-case-t1")
+        assert binding.url == f"http://127.0.0.1:{port}/s/run-case-t1"
+        assert _get(f"{binding.url}/form.html")[0] == 200
+    finally:
+        server.stop()
+
+
+@pytest.mark.parametrize("raw", [
+    "", "not json", "[]", "{}", '{"port": "4173"}', '{"port": 0}', '{"port": 65536}',
+    '{"port": true}', '{"port": 41.5}', '{"door_port": 4173}'])
+def test_a_manifest_in_any_other_form_is_refused(tmp_path, raw):
+    with pytest.raises(fx.ServerError, match="fixture manifest"):
+        fx.home_port(_home(tmp_path, raw=raw))
+
+
+def test_a_taken_port_fails_loudly_naming_it_and_never_binds_another(tmp_path):
+    holder = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        holder.bind((fx.BIND_HOST, 0))
+        holder.listen(1)
+        port = holder.getsockname()[1]
+        server = fx.FixtureServer(PAGES_DIR)
+        with pytest.raises(fx.ServerError) as refused:
+            server.start(port)
+        assert f"127.0.0.1:{port}" in str(refused.value)
+        assert fx.FIXTURE_MANIFEST in str(refused.value)
+        # Not started on some other port, and free to try again once the port is.
+        with pytest.raises(fx.ServerError, match="not started"):
+            _ = server.port
+    finally:
+        holder.close()
+
+
+@pytest.mark.parametrize("port", [-1, 65536, "4173", True])
+def test_a_port_out_of_range_is_refused(port):
+    with pytest.raises(fx.ServerError, match="0..65535"):
+        fx.FixtureServer(PAGES_DIR).start(port)
+
+
+def _fixtured_case():
+    return suites.Case(id="c", turns=[suites.Turn("open __EVAL_FIXTURE_URL__/x.html")],
+                       expect={}, rubric=None, judge=False, timeout_ms=None)
+
+
+def test_both_runners_bind_the_port_their_eval_home_names(tmp_path):
+    port = _free_port()
+    home = _home(tmp_path, {"port": port})
+    for start in (lambda: run_eval._start_fixture_server([("s", "scn", _fixtured_case(), 1)], home),
+                  lambda: rc._start_fixture_server([("s", "scn", _fixtured_case())], home)):
+        server = start()
+        try:
+            assert server.port == port
+        finally:
+            server.stop()
+
+
+def test_both_runners_refuse_a_taken_home_port_as_a_precondition(tmp_path):
+    holder = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        holder.bind((fx.BIND_HOST, 0))
+        holder.listen(1)
+        home = _home(tmp_path, {"port": holder.getsockname()[1]})
+        with pytest.raises(fx.ServerError):
+            run_eval._start_fixture_server([("s", "scn", _fixtured_case(), 1)], home)
+        with pytest.raises(fx.ServerError):
+            rc._start_fixture_server([("s", "scn", _fixtured_case())], home)
+    finally:
+        holder.close()
+
+
+def test_the_manifest_is_the_seeders_the_daemon_scripts_and_the_engines_own_path():
+    # One path, four readers: the seeder writes it, capability-daemon.sh starts
+    # the daemon from it, the runners bind it, and the engine honours the origin
+    # only while the running home's copy records the same port.
+    bin_dir = os.path.dirname(os.path.abspath(__file__))
+    repo = os.path.dirname(os.path.dirname(bin_dir))
+    with open(os.path.join(bin_dir, "capability-daemon.sh"), encoding="utf-8") as fh:
+        daemon = fh.read()
+    engine_path = os.path.join(repo, "apps", "fermix_core", "lib", "fermix_core", "tools",
+                               "web_fetch", "eval_fixture.ex")
+    with open(engine_path, encoding="utf-8") as fh:
+        engine = fh.read()
+    assert fx.FIXTURE_MANIFEST == os.path.join("eval-fixtures", "fixture_server.json")
+    assert '"$HOME_DIR/eval-fixtures/fixture_server.json"' in daemon
+    assert '@manifest Path.join("eval-fixtures", "fixture_server.json")' in engine
 
 
 # --- recorded state ---------------------------------------------------------
@@ -674,27 +797,28 @@ def test_a_bound_query_carries_the_attempt_url(served):
         f"open {binding.url}/x.html"
 
 
-def test_a_server_that_cannot_start_is_a_precondition_failure(monkeypatch, capsys):
+def test_a_server_that_cannot_start_is_a_precondition_failure(tmp_path, monkeypatch, capsys):
     """Not a per-case connection refused: without the pages every selected case
     would fail as if the model could not open one."""
     monkeypatch.setattr(run_eval, "FIXTURE_PAGES_DIR", "/nonexistent-fixture-dir")
     fixtured = suites.Case(id="c", turns=[suites.Turn("open __EVAL_FIXTURE_URL__/x.html")],
                            expect={}, rubric=None, judge=False, timeout_ms=None)
     with pytest.raises(fx.ServerError):
-        run_eval._start_fixture_server([("s", "scn", fixtured, 1)])
+        run_eval._start_fixture_server([("s", "scn", fixtured, 1)], _home(tmp_path))
 
 
-def test_the_server_starts_only_when_a_selected_case_addresses_it():
+def test_the_server_starts_only_when_a_selected_case_addresses_it(tmp_path):
     plain = suites.Case(id="c", turns=[suites.Turn("no fixture here")], expect={},
                         rubric=None, judge=False, timeout_ms=None)
     fixtured = suites.Case(id="c", turns=[suites.Turn("open __EVAL_FIXTURE_URL__/x.html")],
                            expect={}, rubric=None, judge=False, timeout_ms=None)
+    home = _home(tmp_path)
     assert not fx.case_uses_fixture(plain)
     assert fx.case_uses_fixture(fixtured)
-    assert run_eval._start_fixture_server([("s", "scn", plain, 1)]) is None
-    assert rc._start_fixture_server([("s", "scn", plain)]) is None
+    assert run_eval._start_fixture_server([("s", "scn", plain, 1)], home) is None
+    assert rc._start_fixture_server([("s", "scn", plain)], home) is None
     # The positive half really binds a port, so the "iff" is proven both ways.
-    started = rc._start_fixture_server([("s", "scn", fixtured)])
+    started = rc._start_fixture_server([("s", "scn", fixtured)], home)
     try:
         assert started.port > 0
     finally:

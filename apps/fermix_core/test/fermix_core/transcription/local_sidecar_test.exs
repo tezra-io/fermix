@@ -12,6 +12,10 @@ defmodule FermixCore.Transcription.Local.SidecarTest do
   # these and get the FermixCore.Timeouts values.
   @fast [hello_timeout_ms: 500, batch_timeout_ms: 500]
 
+  # The bound for a spawned process's report and death; a loaded runner can
+  # take seconds to spawn one.
+  @arrival_ms 10_000
+
   describe "codec" do
     test "decodes every golden frame" do
       assert {:ok, %{"event" => "hello", "protocol_version" => 1, "engine" => "sherpa-onnx"}} =
@@ -154,6 +158,34 @@ defmodule FermixCore.Transcription.Local.SidecarTest do
       # Dead well before the 10s sleep could end on its own, so the exit came
       # from close's kill and not from the sidecar finishing on its own.
       assert eventually_dead(state.os_pid, 3_000)
+    end
+
+    # A sidecar whose input is closed fails the `shutdown` write with EPIPE,
+    # and the port exits with that reason and no exit status. To an owner that
+    # traps exits, that EXIT ends close's wait as an exit status does, and the
+    # group is still killed: a closed input does not prove the sidecar gone.
+    # The fake closes its input before its hello and stays up 60s, so only the
+    # closed pipe can end the wait, and the grace is an hour.
+    test "close of a sidecar whose input is closed kills it at once" do
+      test_pid = self()
+
+      spawn_link(fn ->
+        Process.flag(:trap_exit, true)
+
+        {:ok, state} =
+          Sidecar.open(
+            binary_path: @fake,
+            env: [{~c"FAKE_STT_MODE", ~c"deaf"}],
+            shutdown_grace_ms: 3_600_000
+          )
+
+        send(test_pid, {:sidecar, state.os_pid})
+        send(test_pid, {:closed, Sidecar.close(state)})
+      end)
+
+      assert_receive {:sidecar, os_pid}, @arrival_ms
+      assert_receive {:closed, :ok}, @arrival_ms
+      assert eventually_dead(os_pid, @arrival_ms)
     end
   end
 

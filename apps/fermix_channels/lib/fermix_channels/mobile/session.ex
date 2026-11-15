@@ -48,26 +48,126 @@ defmodule FermixChannels.Mobile.Session do
   A desktop's session starts its `Desktop.Peer` once `hello` is answered and
   hands it every desktop-family event; it gets no approval cards, and phone
   broadcasts never reach it. A desktop's `hello` names its engine's version
-  (`app_version`), which the session records for the server's nightly update
-  (`FermixCore.Home.EngineCeiling`, under the identity's home); a record that
-  fails is logged and the desktop is served all the same.
+  (`app_version`), which the session records in the home's record of its
+  computers (`FermixCore.Computers.Store`, under the identity's home); a
+  record that fails is logged and the desktop is served all the same. It
+  names its system too (`platform`, M97 §3.2), kept on its row when the row
+  says none or another; a phone's `hello` never moves its row's platform. Its
+  `hello_ack` says which of a computer's own events this server takes
+  (`caps.computer`: `offers`, `link_path`, and `invoke` for the
+  invocation's events either way, M97 §6.1), which a computer sends only when
+  it is said, since an older server closes the session on an event it does
+  not know. It says too where the computer stands against this server
+  (`caps.computer.standing`, `FermixCore.Computers.Versions` of the
+  `app_version` its hello named, M97 §3.4) and what this server speaks
+  (`caps.computer.versions`: its engine version and its companion and
+  management ranges); the desktop's peer is told the standing, and its
+  companion family refuses chat to a computer past the window
+  (`settings_only`), which keeps its link for settings alone.
+
+  ## A phone's call
+
+  A phone's call channel (M87; `call_open`, `call_line`, `call_audio`,
+  `call_frame`, the camera's picture, and `call_close`) belongs to the
+  device's `Mobile.Call`, and so does a computer's call, the same channel
+  without the camera, which its engine bridges from its app's `realtime.sock`
+  (M97 §9.2: endpoint `computer:<id>`); this session
+  hands every call event to and never waits on. The call's frames come back
+  as `{:mobile_call, call, :control | :stop | :audio, event}` and are written
+  ahead of everything else queued here, controls first, then audio, so a large
+  media or companion chunk never sits between the phone and its call. A
+  `:stop` (the call's `playback_stop` line) drops that call's audio queued
+  here before it, which the stop would otherwise overtake. While a call is
+  attached to this session (from its `call_attached` until its `call_close`, or
+  the call's end), the media this primary pushes to the phone waits, bounded,
+  and goes after the call; text still flows. A call that ends without its
+  `call_close` (it crashed) is closed `ended` here. A session its call found
+  silent mid-stream (`{:mobile_call_silent, call}`) closes `1000`, so a phone
+  whose link is alive reconnects and resumes; a computer's call that finds
+  its session silent ends alone, the session staying up (M97 D20). A phone's
+  `hello_ack`, and a desktop's, says whether this primary serves calls
+  (`caps.call`), and a desktop's says it takes the call channel and the
+  phone's upload from a computer (`caps.computer.call`, `caps.computer.attach`).
+
+  ## Lanes
+
+  What a session writes rides one of three lanes (`Mobile.Lanes`, M97 §5.1),
+  one mechanism for a phone's session and a desktop's. Each read writes the
+  live lane first: the call frames above, at most 128, the rest at the next
+  read. A read for a bulk frame (a media push, a media fetch's step, a
+  snapshot chunk) then writes up to 16 interactive events queued behind it,
+  in the order they came, and only then its one bulk frame; past 16 the rest
+  wait for the next read, so a flood of chat still lets one bulk frame
+  through per 16. Bulk frames go one per read, in the order they came. Those
+  two lanes queue nowhere but in the carrier's mailbox: their producers bound
+  them (a desktop's forwarded calls and channels, the snapshot stream's
+  catch-up every 16 chunks, the media fetch queue), and the carrier's memory
+  bound past that. Each logical event is encoded whole, so an `event_part`
+  run is never split, and `seq` rises by one per frame in the order written.
+
+  ## A phone's list channel
+
+  A phone's `hello_ack` says `caps.lists: true` (M85 E4): it may open one list
+  channel, the companion family a desktop's tunnel uses. Its first
+  `companion_open` starts its peer (`Desktop.Peer` with the companion family
+  alone, `kind: :phone`, registered apart from the desktops'), which this
+  session hands each of its companion events, as a desktop's; a phone that
+  never opens one runs none. The channel ends with the session. Once the
+  channel has pulled the index (`:list_channel_draws`), each `msg` and
+  `command` this session queues says it draws lists, so the phone's turns are
+  told their lists are drawn under the reply. The `hello_ack` says
+  `caps.trips: true` too (M89 §06): the channel serves the owner's trips from
+  companion 8, and once it has pulled the trips index (`:trip_channel_draws`)
+  a session at mobile 3, the version that sends their block, says it draws
+  trips.
+
+  ## Blocks under a reply (mobile 3)
+
+  Every frame is encoded after the one filter a reply's blocks leave by
+  (`FermixCore.ReplyBlocks.for_session/4`): a `text_done`, a `row` and each
+  message of a `history_page` keep only the block types this session's
+  negotiated version carries, so a phone at mobile 2 is sent only `places`
+  and `checklists`. Each `msg` and `command` this session queues says what
+  it draws by the same answer (`ReplyBlocks.drawn_types/3`): its lists once
+  its list channel pulled the index, its events from mobile 3.
+
+  ## Push through the relay (mobile 3)
+
+  `:push_services` are the services the phone channel sends through: `apns`
+  while its APNs dispatcher runs, and `fcm`, Google's through Fermix's push
+  relay, which needs nothing of its own and so is always there. A phone's
+  session at `Protocol.relay_push_version/0` or later is told every one of
+  them in `caps.push` and `pair_approved.push`; a session at 2, and a
+  desktop's, which is never pushed, is told them without `fcm`, exactly what
+  it was told before (M99 §14). A phone has one push registration, written
+  whole: `push_subscribe` stores its subscription (its address at Google in
+  `push_token`, beside the service and the phone's key and secret), only when
+  it differs from the row this session holds (the one its hello read, kept as
+  each write answers), `push_register` an APNs token with no subscription,
+  and `push_unregister` neither. A `push_subscribe` on a session that was not
+  told `fcm` is refused `push_unavailable`, and the session stays open.
   """
 
   require Logger
+  require FermixChannels.Mobile.Lanes
 
   alias FermixChannels.Companion.Approvals
   alias FermixChannels.Companion.Fanout
   alias FermixChannels.Companion.Output
+  alias FermixChannels.Desktop.Companion, as: DesktopCompanion
   alias FermixChannels.Desktop.Peer, as: DesktopPeer
+  alias FermixChannels.Desktop.Supervisor, as: DesktopSupervisor
   alias FermixChannels.Gateway.Commands.Registry, as: CommandRegistry
   alias FermixChannels.Home.EnrollmentResponder
   alias FermixChannels.Mobile.Attestation
+  alias FermixChannels.Mobile.Call
   alias FermixChannels.Mobile.DeviceRegistry
   alias FermixChannels.Mobile.DeviceStore
   alias FermixChannels.Mobile.Discovery
   alias FermixChannels.Mobile.EventRouter
   alias FermixChannels.Mobile.Identity
   alias FermixChannels.Mobile.Iroh.Helper
+  alias FermixChannels.Mobile.Lanes
   alias FermixChannels.Mobile.MediaStore
   alias FermixChannels.Mobile.Noise
   alias FermixChannels.Mobile.PairManager
@@ -75,8 +175,13 @@ defmodule FermixChannels.Mobile.Session do
   alias FermixChannels.Mobile.Protocol
   alias FermixChannels.Mobile.RequestCoordinator
   alias FermixChannels.Telemetry, as: ChannelTelemetry
+  alias FermixCore.BuildInfo
+  alias FermixCore.Companion.Protocol, as: CompanionProtocol
   alias FermixCore.Companion.Timeline
-  alias FermixCore.Home.EngineCeiling
+  alias FermixCore.Computers.Store, as: ComputerStore
+  alias FermixCore.Computers.Versions
+  alias FermixCore.Management.Protocol, as: ManagementProtocol
+  alias FermixCore.ReplyBlocks
   alias FermixCore.Setup.ConfigStore
 
   @max_wire_bytes 65_535
@@ -108,6 +213,18 @@ defmodule FermixChannels.Mobile.Session do
   @queued_events ~w(msg command)
   @max_pending_requests 32
   @max_media_fetch_queue 8
+  @call_frames ~w(call_line call_audio call_frame call_close)
+  @media_pushes ~w(media_begin media_chunk media_end)
+  # The call frames written ahead of everything else, per read: a bound on the
+  # drain, past which the rest go at the next read.
+  @max_call_frames_per_read 128
+  # The interactive events written ahead of one bulk frame, per read: past it
+  # the rest go at the next read, so a flood of chat still lets bulk through.
+  @max_interactive_per_read 16
+  @call_classes [:control, :stop, :audio]
+  # The media a phone in a call is pushed waits here, up to this; a run past it
+  # is dropped whole, and the phone fetches it by its ref once the call ends.
+  @max_held_media_bytes 32 * 1_024 * 1_024
   @max_candidates 16
   # The rail's candidate comes last, after this many host candidates, so the
   # list stays within `@max_candidates`.
@@ -117,16 +234,36 @@ defmodule FermixChannels.Mobile.Session do
   @typed_refusals ~w(
     store_quota_exceeded media_too_large sha256_mismatch announced_hash_mismatch
     size_mismatch size_exceeded unexpected_chunk invalid_field missing_field
-    attachment_unavailable unsupported_event push_environment_mismatch
+    attachment_unavailable unsupported_event push_environment_mismatch invalid_offers
   )a
+
+  # Which of a computer's own events this server takes (M97 §5.3), in a
+  # desktop's hello_ack, and that it applies M97 §19.3's rule: a management
+  # setting's id names its machine, so it answers its own machine sections.
+  # `call` and `attach` (M97 §9.2, §9.3) are the phone's call channel and its
+  # upload, which a computer drives for its app.
+  @computer_caps %{
+    "v" => 1,
+    "offers" => true,
+    "link_path" => true,
+    "invoke" => true,
+    "machine_settings" => true,
+    "call" => true,
+    "attach" => true
+  }
+
+  # A phone's one push registration, written whole (M99 §14): an APNs token
+  # is this with its `push_token` set, a subscription all four.
+  @no_registration %{push_token: nil, push_service: nil, push_p256dh: nil, push_auth: nil}
 
   @type state :: map()
 
   @typedoc """
   How the carrier closes: a close code and its reason text, the same pair a
-  WebSocket close frame carries. `1000` the session's lifetime ran out, `1002` a
-  protocol error or a stale primary, `1008` the handshake deadline, `1009` a
-  message over 65,535 bytes, `1011` a desktop's peer failed or did not start,
+  WebSocket close frame carries. `1000` the session's lifetime ran out, or its
+  call found it silent, `1002` a protocol error or a stale primary, `1008` the
+  handshake deadline, `1009` a message over 65,535 bytes, `1011` a desktop's
+  peer failed or did not start,
   `4001` replaced by a newer connection, `4003` revoked (live, or a key with
   no row at the handshake), refused pairing or a mismatched device.
   """
@@ -271,6 +408,16 @@ defmodule FermixChannels.Mobile.Session do
     |> Map.put_new(:desktop_peer_supervisor, FermixChannels.Desktop.PeerSupervisor)
     |> Map.put_new(:desktop_peer, nil)
     |> Map.put_new(:desktop_peer_ref, nil)
+    |> Map.put_new(:phone_families, %{companion: {DesktopCompanion, [kind: :phone]}})
+    |> Map.put_new(:draws_lists?, false)
+    |> Map.put_new(:draws_trips?, false)
+    |> Map.put_new(:calls, FermixChannels.Mobile.Calls)
+    |> Map.put_new(:call_supervisor, FermixChannels.Mobile.CallSupervisor)
+    |> Map.put_new(:call_options, [])
+    |> Map.put_new(:call_hold, nil)
+    |> Map.put_new(:held_media, [])
+    |> Map.put_new(:held_media_bytes, 0)
+    |> Map.put_new(:dropped_media, MapSet.new())
     |> Map.put_new(:clock, clock(opts))
     |> Map.put_new(:wall_clock, &DateTime.utc_now/0)
     |> put_default_dependencies()
@@ -345,7 +492,7 @@ defmodule FermixChannels.Mobile.Session do
     if session_expired?(state) do
       session_expired(state)
     else
-      push_fanout_event(event, state)
+      lanes_first(event_lane(event), state, &push_fanout_event(event, &1))
     end
   end
 
@@ -353,9 +500,37 @@ defmodule FermixChannels.Mobile.Session do
     if session_expired?(state) do
       session_expired(state)
     else
-      media_step(state)
+      lanes_first(:bulk, state, &media_step/1)
     end
   end
+
+  def handle_info({:mobile_call, call, class, event}, %{phase: :ready} = state)
+      when is_pid(call) and class in @call_classes and is_map(event) do
+    if session_expired?(state) do
+      session_expired(state)
+    else
+      push_call_frames([{call, class, event}], state)
+    end
+  end
+
+  def handle_info({:DOWN, ref, :process, _call, _reason}, %{call_hold: %{ref: ref}} = state),
+    do: call_gone(state)
+
+  # The call this session carries heard nothing from it mid-stream and let it
+  # go (`Mobile.Call`): the link died without closing, or a phone that is in
+  # fact there reconnects and resumes. Another call's word is not this one's.
+  def handle_info({:mobile_call_silent, call}, %{call_hold: %{call: call}} = state)
+      when is_pid(call),
+      do: {:stop, :call_link_silent, {1000, "call link silent"}, state}
+
+  def handle_info({:mobile_call_silent, call}, state) when is_pid(call), do: {:ok, state}
+
+  # The phone's list channel pulled the index: its turns from now on say they
+  # draw lists (moduledoc).
+  def handle_info(:list_channel_draws, state), do: {:ok, %{state | draws_lists?: true}}
+
+  # It pulled the trips index: from mobile 3 its turns say they draw trips.
+  def handle_info(:trip_channel_draws, state), do: {:ok, %{state | draws_trips?: true}}
 
   def handle_info(
         {:mobile_handshake_deadline, token},
@@ -446,6 +621,7 @@ defmodule FermixChannels.Mobile.Session do
     |> Map.put_new(:authorize_socket, &DeviceRegistry.authorized?/3)
     |> Map.put_new(:discover, fn -> Discovery.candidates(discovery) end)
     |> Map.put_new(:iroh_candidate, fn -> Helper.candidate(iroh_helper) end)
+    |> Map.put_new(:iroh_hints, fn -> Helper.hints(iroh_helper) end)
     |> Map.put_new(:relay_list_acknowledged, fn -> Helper.relays_acknowledged(iroh_helper) end)
     |> Map.put_new(:close_iroh_peer, &Helper.close(iroh_helper, &1))
     |> Map.put_new(:pending_approvals, &Approvals.pending(Approvals.server(), &1, :mobile))
@@ -454,13 +630,33 @@ defmodule FermixChannels.Mobile.Session do
     |> Map.put_new(:run_request, &Task.Supervisor.start_child(FermixCore.TaskSupervisor, &1))
     |> Map.put_new(:record_engine_version, engine_recorder(state.identity_root))
     |> put_peer_dependencies()
+    |> put_call_dependencies()
+  end
+
+  # A device's call: its `Mobile.Call`, found in the session's registry of
+  # calls by the device's id, for the endpoint the session's kind names.
+  defp put_call_dependencies(state) do
+    call_opts = [
+      calls: state.calls,
+      call_supervisor: state.call_supervisor,
+      call_options: state.call_options
+    ]
+
+    state
+    |> Map.put_new(:open_call, &Call.open(&1, &2, &3, &4, call_opts))
+    |> Map.put_new(:route_call, &Call.deliver(&1, &2, &3, &4, &5, call_opts))
+    |> Map.put_new(:end_call, &Call.notify(state.calls, &1, &2))
+    |> Map.put_new(:call_caps, &Call.caps/1)
   end
 
   # The home the session's identity is read from: a test's root, or this
   # engine's own home.
   defp engine_recorder(root) do
     fn device_id, version, at ->
-      EngineCeiling.record(root || ConfigStore.fermix_home(), device_id, version, at)
+      ComputerStore.record(root || ConfigStore.fermix_home(), device_id, %{
+        engine_version: version,
+        seen_at: at
+      })
     end
   end
 
@@ -672,6 +868,10 @@ defmodule FermixChannels.Mobile.Session do
         "the phone has seen epoch #{theirs}"
     )
 
+    # A call this copy still holds for the phone cannot resume here.
+    :ok =
+      state.end_call.(value(state.authenticated_device, :device_id), {:call_end, :stale_primary})
+
     payload = %{
       "code" => "stale_primary",
       "message" =>
@@ -818,7 +1018,19 @@ defmodule FermixChannels.Mobile.Session do
       else: dispatch_event(event, state)
   end
 
-  defp dispatch_ready(event, state), do: dispatch_event(event, state)
+  # A phone's first companion event starts its list peer (moduledoc).
+  defp dispatch_ready(%{type: type} = event, state) do
+    if session_kind(state) == :phone and DesktopPeer.family_event?(type),
+      do: open_list_peer(event, state),
+      else: dispatch_event(event, state)
+  end
+
+  defp open_list_peer(event, state) do
+    case start_desktop_peer(state, :phone) do
+      {:ok, state} -> deliver_to_peer(event, state.desktop_peer, state)
+      {:error, reason} -> {:close, {:desktop_peer_unavailable, reason}, state}
+    end
+  end
 
   defp deliver_to_peer(event, peer, state) do
     case state.deliver_desktop_event.(peer, event) do
@@ -831,6 +1043,15 @@ defmodule FermixChannels.Mobile.Session do
   # What the IK handshake proved, read once from the device's row: a row that
   # names no kind is a phone's, as is every device a pairing approves.
   defp session_kind(state), do: Map.get(state, :peer_kind, :phone)
+
+  # Whose call a call event is (`Realtime.Endpoint`): a phone's, or a linked
+  # computer's, which its engine bridges from its app (M97 §9.2, D18).
+  defp call_endpoint(state) do
+    case session_kind(state) do
+      :phone -> {:phone, state.device_id}
+      :desktop -> {:computer, state.device_id}
+    end
+  end
 
   defp device_kind(device) do
     case value(device, :kind) do
@@ -879,9 +1100,9 @@ defmodule FermixChannels.Mobile.Session do
     end
   end
 
-  defp bind_protocol_version(%{version: version}, state) when is_integer(version) do
+  defp bind_protocol_version(%{version: version} = event, state) when is_integer(version) do
     case Map.get(state, :negotiated_version) do
-      nil -> {:ok, Map.put(state, :negotiated_version, version)}
+      nil -> bind_first(event, state)
       ^version -> {:ok, state}
       _different -> {:error, :protocol_version_mismatch, state}
     end
@@ -890,12 +1111,28 @@ defmodule FermixChannels.Mobile.Session do
   defp bind_protocol_version(_event, state),
     do: {:error, :protocol_version_mismatch, state}
 
+  # The first event binds the session's version: a hello's is the newest
+  # both windows hold (`Protocol.negotiate_hello/3`), which its hello_ack's
+  # `v` says, so a newer client that names an oldest this window holds is
+  # served this window's newest; any other first event's is its own.
+  defp bind_first(%{type: "hello", version: version, payload: payload}, state) do
+    window = Protocol.supported_version_range()
+
+    case Protocol.negotiate_hello(version, payload["min_protocol_v"], window) do
+      {:ok, {_oldest, served}} -> {:ok, Map.put(state, :negotiated_version, served)}
+      {:error, direction} -> {:error, {:unsupported_protocol_version, direction, version}, state}
+    end
+  end
+
+  defp bind_first(%{version: version}, state),
+    do: {:ok, Map.put(state, :negotiated_version, version)}
+
   defp accept_hello(%{type: "hello", payload: payload} = event, state) do
     authenticated_id = value(state.authenticated_device, :device_id)
 
     if payload["device_id"] == authenticated_id do
       with :ok <- current_primary(payload["primary_epoch"], state),
-           {:ok, state} <- persist_hello(state, authenticated_id, payload["relay_list_rev"]) do
+           {:ok, state} <- persist_hello(state, authenticated_id, hello_facts(payload, state)) do
         attach_authenticated(event, state, authenticated_id)
       end
     else
@@ -905,9 +1142,10 @@ defmodule FermixChannels.Mobile.Session do
 
   defp accept_hello(_event, state), do: {:error, :hello_required, state}
 
-  # A desktop's engine version, for the version a server installs at most
-  # (Always On's move back). It never refuses the desktop: a record that
-  # fails is said in the log, and the next hello records it again.
+  # A desktop's engine version, for the home's record of its computers, which
+  # says where each stands against this server (M97 §3.4). It never refuses
+  # the desktop: a record that fails is said in the log, and the next hello
+  # records it again.
   defp record_engine_version(%{payload: payload}, %{peer_kind: :desktop} = state) do
     case state.record_engine_version.(
            state.device_id,
@@ -974,15 +1212,45 @@ defmodule FermixChannels.Mobile.Session do
 
   defp raise_heap_cap(_state), do: :ok
 
-  # Every hello records when the phone was last seen, and the relay list
-  # revision it names (M62 §3.1); the store writes only what changed. A newly
-  # acknowledged revision can widen the relays the daemon's endpoint may use.
-  defp persist_hello(state, device_id, relay_list_rev) do
+  # What a hello moves on its row: the relay list revision it names (M62
+  # §3.1), and a computer's system when its row names none or another (M97
+  # §3.2). A phone's row keeps the platform its attestation proved.
+  defp hello_facts(payload, state) do
+    facts = maybe_put(%{}, :relay_list_rev, payload["relay_list_rev"])
+
+    case {session_kind(state), payload["platform"]} do
+      {:desktop, platform} when is_binary(platform) -> computer_platform(facts, platform, state)
+      _phone_or_unsaid -> facts
+    end
+  end
+
+  defp computer_platform(facts, platform, state) do
+    case value(state.authenticated_device, :platform) do
+      ^platform ->
+        facts
+
+      nil ->
+        Map.put(facts, :platform, platform)
+
+      recorded ->
+        Logger.warning(
+          "computer #{value(state.authenticated_device, :device_id)} says it runs #{platform}, " <>
+            "and its row said #{recorded}; the row now says #{platform}"
+        )
+
+        Map.put(facts, :platform, platform)
+    end
+  end
+
+  # Every hello records when the phone was last seen, and what `hello_facts/2`
+  # read from it; the store writes only what changed. A newly acknowledged
+  # relay list revision can widen the relays the daemon's endpoint may use.
+  defp persist_hello(state, device_id, facts) do
     wall_clock = Map.get(state, :wall_clock, &DateTime.utc_now/0)
 
     case wall_clock.() do
       %DateTime{} = seen_at ->
-        attrs = maybe_put(%{last_seen: seen_at}, :relay_list_rev, relay_list_rev)
+        attrs = Map.put(facts, :last_seen, seen_at)
         update_hello(state, device_id, attrs)
 
       other ->
@@ -1009,8 +1277,10 @@ defmodule FermixChannels.Mobile.Session do
   defp acknowledge_relays(same, same, _state), do: :ok
   defp acknowledge_relays(_previous, _current, state), do: state.relay_list_acknowledged.()
 
-  defp hello_ack(state, _event) do
-    with {:ok, payload} <- build_hello_ack(state),
+  defp hello_ack(state, event) do
+    state = put_standing(state, event)
+
+    with {:ok, payload} <- build_hello_ack(state, ack_window(state, event)),
          {:ok, frames, state} <- encode_event("hello_ack", payload, <<>>, state) do
       {:ok, frames, state}
     end
@@ -1022,7 +1292,7 @@ defmodule FermixChannels.Mobile.Session do
   defp after_hello_ack(:phone, frames, state), do: with_pending_approvals(frames, state)
 
   defp after_hello_ack(:desktop, frames, state) do
-    case start_desktop_peer(state) do
+    case start_desktop_peer(state, :desktop) do
       {:ok, state} -> {:ok, frames, state}
       {:error, reason} -> {:error, {:desktop_peer_not_started, reason}, state}
     end
@@ -1034,13 +1304,12 @@ defmodule FermixChannels.Mobile.Session do
     {:stop, reason, {1011, "desktop peer failed"}, state}
   end
 
-  defp start_desktop_peer(state) do
-    opts = [
-      device_id: state.device_id,
-      session: self(),
-      registry: state.desktop_peers,
-      connected_since: state.wall_clock.()
-    ]
+  # A desktop's peer serves every family it sends; a phone's, its list
+  # channel alone, registered apart so it is never a connected desktop.
+  defp start_desktop_peer(state, kind) do
+    opts =
+      [device_id: state.device_id, session: self(), connected_since: state.wall_clock.()] ++
+        peer_place(kind, state)
 
     case state.start_desktop_peer.(opts) do
       {:ok, peer} when is_pid(peer) ->
@@ -1077,37 +1346,148 @@ defmodule FermixChannels.Mobile.Session do
     end
   end
 
-  defp build_hello_ack(%{hello_ack_builder: builder} = state) when is_function(builder, 1) do
+  # The window a hello_ack names. A phone reads it as the versions it may
+  # speak and is told this server's, whatever its hello names. A computer is
+  # told the versions both engines speak (`Protocol.negotiate_hello/3`), so
+  # an engine whose hello names no oldest version, one from before that rule
+  # that reads the window as its own, is told its own version alone. The
+  # hello was served, so the two windows meet.
+  defp ack_window(state, %{version: version, payload: payload}) do
+    window = Protocol.supported_version_range()
+
+    case session_kind(state) do
+      :phone ->
+        window
+
+      :desktop ->
+        {:ok, shared} = Protocol.negotiate_hello(version, payload["min_protocol_v"], window)
+        shared
+    end
+  end
+
+  defp build_hello_ack(%{hello_ack_builder: builder} = state, _window)
+       when is_function(builder, 1) do
     builder.(state)
   end
 
-  defp build_hello_ack(state) do
+  defp build_hello_ack(state, {min_version, max_version}) do
     with {:ok, history_head} <- history_head(state.profile_id, state),
          {:ok, read_up_to} <- read_frontier(state.profile_id, state),
          {:ok, primary_epoch} <- session_primary_epoch(state) do
-      {min_version, max_version} = Protocol.supported_version_range()
-
       {:ok,
        %{
          "session_id" => session_id(),
          "min_version" => min_version,
          "max_version" => max_version,
          "profiles" => profiles(state),
-         "candidates" => current_candidates(state),
+         "candidates" => hello_candidates(state),
          "history_head_seq" => history_head,
          "read_up_to_seq" => read_up_to,
-         "caps" => %{
-           "commands" => CommandRegistry.catalog(),
-           "media" => true,
-           "streaming" => true,
-           "turn_done" => true,
-           "max_media_bytes" => state.max_media_bytes,
-           "push" => state.push_services
-         },
+         "caps" => caps(state),
          "primary_epoch" => primary_epoch
        }}
     end
   end
+
+  # What a session is told it is pushed through (M99 §14): the services that
+  # run, `fcm` among them only for a phone at the version that carries it.
+  defp push_services(state) do
+    if relay_push?(state), do: state.push_services, else: state.push_services -- ["fcm"]
+  end
+
+  defp relay_push?(%{push_services: services, negotiated_version: version} = state) do
+    "fcm" in services and is_integer(version) and version >= Protocol.relay_push_version() and
+      session_kind(state) == :phone
+  end
+
+  # A desktop's peer is the desktops', and its families know where the
+  # computer stands and whether its hello said it applies M97 §19.3's rule;
+  # a phone's runs its list channel alone. The version
+  # window is a computer's (`Computers.Versions`): a phone, which its own
+  # protocol versions govern, is served as one that stands current.
+  defp peer_place(:desktop, state),
+    do: [
+      registry: state.desktop_peers,
+      standing: state.computer_standing,
+      machine_settings: Map.get(state, :computer_machine_settings, false)
+    ]
+
+  defp peer_place(:phone, state),
+    do: [
+      registry: DesktopSupervisor.phone_registry(state.desktop_peers),
+      standing: :current,
+      families: state.phone_families
+    ]
+
+  defp caps(state) do
+    caps = %{
+      "commands" => CommandRegistry.catalog(),
+      "media" => true,
+      "streaming" => true,
+      "turn_done" => true,
+      "max_media_bytes" => state.max_media_bytes,
+      "push" => push_services(state)
+    }
+
+    # Whether this primary serves a call from the device (M87; a computer's,
+    # M97 §9.2), and that it takes the phone's list channel (M85 E4) and
+    # serves trips on it (M89): a phone's alone, since a desktop's lists ride
+    # its companion tunnel. A computer hears which of its own events this
+    # server takes (M97 §5.3).
+    case session_kind(state) do
+      :phone ->
+        Map.merge(caps, %{
+          "call" => state.call_caps.(call_endpoint(state)),
+          "lists" => true,
+          "trips" => true
+        })
+
+      :desktop ->
+        Map.merge(caps, %{
+          "call" => state.call_caps.(call_endpoint(state)),
+          "computer" => computer_caps(state)
+        })
+    end
+  end
+
+  # A computer also hears where it stands against this server and the
+  # versions this server speaks (M97 §3.4), so it can say "Update Fermix on
+  # this computer" itself.
+  defp computer_caps(state) do
+    {companion_min, companion_max} = CompanionProtocol.supported_version_range()
+    {management_min, management_max} = ManagementProtocol.supported_version_range()
+
+    Map.merge(@computer_caps, %{
+      "standing" => Atom.to_string(state.computer_standing),
+      "versions" => %{
+        "engine" => server_engine_version(state),
+        "companion" => [companion_min, companion_max],
+        "management" => [management_min, management_max]
+      }
+    })
+  end
+
+  # Where a desktop's engine stands against this one, by the version its
+  # hello names (`Computers.Versions`): its chat is refused past the window,
+  # by its peer's companion family. A phone has none. Whether its hello says
+  # it applies M97 §19.3's rule rides beside it to its peer.
+  defp put_standing(state, %{payload: payload}) do
+    case session_kind(state) do
+      :desktop ->
+        standing = Versions.standing(payload["app_version"], server_engine_version(state))
+        rule? = get_in(payload, ["caps", "computer", "machine_settings"]) == true
+
+        state
+        |> Map.put(:computer_standing, standing)
+        |> Map.put(:computer_machine_settings, rule?)
+
+      :phone ->
+        state
+    end
+  end
+
+  defp server_engine_version(state),
+    do: Map.get_lazy(state, :engine_version, &BuildInfo.product_version/0)
 
   # M51 D3: the phone's key attestation is verified before the owner hears of
   # the phone. A refusal ends the session: the pairing manager closes the
@@ -1213,7 +1593,7 @@ defmodule FermixChannels.Mobile.Session do
       "candidates" => current_candidates(state),
       "profiles" => profiles(state),
       "push_salt" => Base.encode64(value(device, :apns_key_salt)),
-      "push" => state.push_services,
+      "push" => push_services(state),
       "primary_epoch" => epoch
     }
 
@@ -1260,16 +1640,32 @@ defmodule FermixChannels.Mobile.Session do
   end
 
   # Kept for every phone: Push sends only an iPhone's, and refuses the rest by
-  # name, so an Android phone's token is never sent through APNs.
+  # name, so an Android phone's token is never sent through APNs. It is the
+  # phone's whole registration, so it replaces a subscription.
   defp dispatch_event(%{type: "push_register", payload: payload}, state) do
     case validate_push_environment(payload["environment"], state.push_environment) do
-      :ok -> store_push_token(payload["apns_token"], state)
+      :ok -> write_registration(%{@no_registration | push_token: payload["apns_token"]}, state)
       {:error, reason} -> {:error, reason, state}
     end
   end
 
   # The phone's notifications cannot show, so no push may come (M51 §10).
-  defp dispatch_event(%{type: "push_unregister"}, state), do: store_push_token(nil, state)
+  defp dispatch_event(%{type: "push_unregister"}, state),
+    do: write_registration(@no_registration, state)
+
+  # A phone's push subscription (M99 §14), sent after every hello_ack that
+  # names `fcm`: refused by name where this session named none, and written
+  # whole, only when it differs from the phone's row.
+  defp dispatch_event(%{type: "push_subscribe", payload: payload}, state) do
+    with :ok <- relay_push_served(state),
+         {:ok, registration} <- subscription(payload) do
+      if registered?(state.authenticated_device, registration),
+        do: {:ok, nil, state},
+        else: write_registration(registration, state)
+    else
+      {:error, reason} -> {:error, reason, state}
+    end
+  end
 
   defp dispatch_event(%{type: "media_fetch", payload: payload}, state) do
     queue_media_fetch(payload["ref"], state)
@@ -1289,6 +1685,21 @@ defmodule FermixChannels.Mobile.Session do
 
   defp dispatch_event(%{type: type} = event, state) when type in @queued_events do
     queue_request(event, state)
+  end
+
+  # A call's events are the device's call's, never a request: no client
+  # message id, no ack, no replay. The call answers through its own frames; a
+  # call this primary does not hold is answered here.
+  defp dispatch_event(%{type: "call_open", payload: payload}, state) do
+    %{"call_id" => call_id, "resume" => resume?} = payload
+    answer = state.open_call.(call_endpoint(state), self(), call_id, resume?)
+    call_answer(answer, call_id, state)
+  end
+
+  defp dispatch_event(%{type: type, payload: payload, bytes: bytes}, state)
+       when type in @call_frames do
+    answer = state.route_call.(state.device_id, self(), type, payload, bytes)
+    call_answer(answer, payload["call_id"], state)
   end
 
   defp dispatch_event(event, state) do
@@ -1348,6 +1759,7 @@ defmodule FermixChannels.Mobile.Session do
     router = state.event_router
     context = ingress_context(state)
     opts = router_opts(state)
+    event = with_draws(event, state)
 
     fn ->
       case router.(event, context, opts) do
@@ -1355,6 +1767,19 @@ defmodule FermixChannels.Mobile.Session do
         {:error, reason} -> report_request_failure(event, context, opts, reason)
       end
     end
+  end
+
+  # What this phone draws, by the one answer that also decides which blocks
+  # it is sent (`ReplyBlocks.drawn_types/3`): its lists and its trips once its
+  # list channel pulled each index (trips from mobile 3), its events from
+  # mobile 3.
+  defp with_draws(event, state) do
+    pulled = for {kind, true} <- [lists: state.draws_lists?, trips: state.draws_trips?], do: kind
+    drawn = ReplyBlocks.drawn_types(:mobile, state.negotiated_version, pulled)
+
+    [draws_lists: "checklists", draws_trips: "trips", draws_events: "events"]
+    |> Enum.filter(fn {_key, type} -> type in drawn end)
+    |> Enum.reduce(event, fn {key, _type}, event -> Map.put(event, key, true) end)
   end
 
   defp report_request_failure(event, context, opts, reason) do
@@ -1449,6 +1874,8 @@ defmodule FermixChannels.Mobile.Session do
   end
 
   defp media_step(%{media_transfer: nil, media_queue: []} = state), do: {:ok, state}
+  # A phone in a call fetches nothing; what it asked for waits for the call.
+  defp media_step(%{call_hold: %{}} = state), do: {:ok, state}
 
   defp media_step(%{media_transfer: nil, media_queue: [ref | rest]} = state),
     do: start_media_transfer(ref, %{state | media_queue: rest})
@@ -1588,6 +2015,10 @@ defmodule FermixChannels.Mobile.Session do
   # peer's: it is dropped for this device, reported where the operator reads,
   # and the session stays up. Encoding finishes before anything is encrypted,
   # so a dropped event never moves the send nonce.
+  defp push_fanout_event(%{"t" => type} = event, %{call_hold: %{}} = state)
+       when type in @media_pushes,
+       do: {:ok, hold_media(event, state)}
+
   defp push_fanout_event(event, state) do
     started = System.monotonic_time()
 
@@ -1598,6 +2029,245 @@ defmodule FermixChannels.Mobile.Session do
       {:error, reason} -> drop_event(event, reason, started, state)
     end
   end
+
+  # -- a phone's call ---------------------------------------------------------
+
+  defp call_answer(:ok, _call_id, state), do: {:ok, nil, state}
+
+  defp call_answer({:close, reason}, call_id, state) do
+    encode_event_frames(%{"t" => "call_close", "call_id" => call_id, "reason" => reason}, state)
+  end
+
+  # -- lanes (M97 §5.1, `Mobile.Lanes`) -----------------------------------------
+
+  # Each read writes the live lane first (the call's frames queued behind it);
+  # a read for a bulk frame then writes the interactive events queued behind
+  # it, at most @max_interactive_per_read, and only then what it is for.
+  defp lanes_first(lane, state, next) do
+    case write_call_frames(queued_call_frames([]), state) do
+      {:ok, frames, state} -> prepend_frames(frames, interactive_first(lane, state, next))
+      {:error, reason, state} -> protocol_error(reason, state)
+    end
+  end
+
+  defp interactive_first(:bulk, state, next),
+    do: drain_interactive(@max_interactive_per_read, [], state, next)
+
+  defp interactive_first(_lane, state, next), do: next.(state)
+
+  # In the order they came; past the bound the rest wait for the next read.
+  defp drain_interactive(0, frames, state, next), do: prepend_frames(frames, next.(state))
+
+  defp drain_interactive(left, frames, state, next) do
+    receive do
+      {:mobile_event, %{"t" => type} = event} when Lanes.interactive?(type, event) ->
+        write_interactive(event, left, frames, state, next)
+
+      {:mobile_event, %{type: type, payload: payload} = event}
+      when Lanes.interactive?(type, payload) ->
+        write_interactive(event, left, frames, state, next)
+    after
+      0 -> prepend_frames(frames, next.(state))
+    end
+  end
+
+  defp write_interactive(event, left, frames, state, next) do
+    case push_fanout_event(event, state) do
+      {:ok, state} -> drain_interactive(left - 1, frames, state, next)
+      {:push, more, state} -> drain_interactive(left - 1, frames ++ more, state, next)
+      stop -> prepend_frames(frames, stop)
+    end
+  end
+
+  # An event the lane table does not name rides no lane: it is dropped by name
+  # where it is encoded (`push_fanout_event/2`).
+  defp event_lane(event) do
+    case Lanes.lane(event_type(event), event_header(event)) do
+      {:ok, lane} -> lane
+      {:error, {:no_lane, _type}} -> :none
+    end
+  end
+
+  defp event_header(%{payload: payload}) when is_map(payload), do: payload
+  defp event_header(event), do: event
+
+  defp push_call_frames(first, state) do
+    case write_call_frames(queued_call_frames(first), state) do
+      {:ok, frames, state} -> reply(frames, state)
+      {:error, reason, state} -> protocol_error(reason, state)
+    end
+  end
+
+  # Controls first, then audio, each in the order it came; `first` is the one
+  # this read is for, and came before everything drained.
+  defp queued_call_frames(first) do
+    {audio, controls} =
+      (first ++ drain_call_frames(@max_call_frames_per_read))
+      |> drop_overtaken()
+      |> Enum.split_with(fn {_call, class, _event} -> class == :audio end)
+
+    controls ++ audio
+  end
+
+  defp drain_call_frames(0), do: []
+
+  defp drain_call_frames(remaining) do
+    receive do
+      {:mobile_call, call, class, event}
+      when is_pid(call) and class in @call_classes and is_map(event) ->
+        [{call, class, event} | drain_call_frames(remaining - 1)]
+    after
+      0 -> []
+    end
+  end
+
+  # Written controls first, a call's playback stop would overtake that call's
+  # audio queued before it, audio the stop made stale: it goes here. Walked
+  # from the newest, so a stop sees everything queued before it.
+  defp drop_overtaken(queued) do
+    {kept, _stopped} =
+      queued
+      |> Enum.reverse()
+      |> Enum.reduce({[], MapSet.new()}, fn {call, class, _event} = frame, {kept, stopped} ->
+        cond do
+          class == :stop -> {[frame | kept], MapSet.put(stopped, call)}
+          class == :audio and MapSet.member?(stopped, call) -> {kept, stopped}
+          true -> {[frame | kept], stopped}
+        end
+      end)
+
+    kept
+  end
+
+  defp write_call_frames(queued, state) do
+    Enum.reduce_while(queued, {:ok, [], state}, fn {call, _class, event}, {:ok, frames, state} ->
+      case call_frame(call, event, state) do
+        {:ok, more, state} -> {:cont, {:ok, frames ++ more, state}}
+        {:error, _reason, _state} = error -> {:halt, error}
+      end
+    end)
+  end
+
+  # A frame this session cannot encode is dropped as a fan-out event is; one
+  # it cannot encrypt ends the session, as any frame's does.
+  defp call_frame(call, event, state) do
+    case encode_plaintexts(event, state) do
+      {:ok, plaintexts} ->
+        with {:ok, frames, state} <- encrypt_batch(plaintexts, state) do
+          after_call_frame(event, call, frames, state)
+        end
+
+      {:error, reason} ->
+        {:ok, state} = drop_event(event, reason, System.monotonic_time(), state)
+        {:ok, [], state}
+    end
+  end
+
+  # From its `call_attached` until its `call_close`, or the call's end, the
+  # call holds this phone's media.
+  defp after_call_frame(%{"t" => "call_attached", "call_id" => id}, call, frames, state) do
+    {:ok, frames, hold_for_call(state, call, id)}
+  end
+
+  defp after_call_frame(%{"t" => "call_close", "call_id" => id}, _call, frames, state) do
+    case state.call_hold do
+      %{call_id: ^id, ref: ref} ->
+        Process.demonitor(ref, [:flush])
+        release_held_media(%{state | call_hold: nil}, frames)
+
+      _other_or_none ->
+        {:ok, frames, state}
+    end
+  end
+
+  defp after_call_frame(_event, _call, frames, state), do: {:ok, frames, state}
+
+  defp hold_for_call(%{call_hold: %{call: call, call_id: id}} = state, call, id), do: state
+
+  defp hold_for_call(state, call, id) do
+    if state.call_hold, do: Process.demonitor(state.call_hold.ref, [:flush])
+    %{state | call_hold: %{call: call, call_id: id, ref: Process.monitor(call)}}
+  end
+
+  # A call that exited without its `call_close` (a crash, a kill) is closed
+  # here, so the phone is not left in a call nobody holds; its media follows.
+  defp call_gone(%{call_hold: %{call_id: id}} = state) do
+    close = %{"t" => "call_close", "call_id" => id, "reason" => "ended"}
+
+    case encode_event_frames(close, %{state | call_hold: nil}) do
+      {:ok, frames, state} -> release_media(state, frames)
+      {:error, reason, state} -> protocol_error(reason, state)
+    end
+  end
+
+  defp release_media(state, frames) do
+    case release_held_media(state, frames) do
+      {:ok, frames, state} -> reply(frames, state)
+      {:error, reason, state} -> protocol_error(reason, state)
+    end
+  end
+
+  # The media held for the call goes now, in order, and a fetch it held
+  # resumes.
+  defp release_held_media(state, frames) do
+    held = Enum.reverse(state.held_media)
+    state = %{state | held_media: [], held_media_bytes: 0, dropped_media: MapSet.new()}
+    :ok = schedule_media_step(state)
+
+    Enum.reduce_while(held, {:ok, frames, state}, fn event, {:ok, frames, state} ->
+      case call_frame(self(), event, state) do
+        {:ok, more, state} -> {:cont, {:ok, frames ++ more, state}}
+        {:error, _reason, _state} = error -> {:halt, error}
+      end
+    end)
+  end
+
+  defp hold_media(%{"ref" => ref} = event, state) do
+    size = byte_size(Map.get(event, "bytes", <<>>))
+
+    cond do
+      MapSet.member?(state.dropped_media, ref) ->
+        forget_dropped(event, state)
+
+      state.held_media_bytes + size > @max_held_media_bytes ->
+        drop_held_run(event, state)
+
+      true ->
+        %{
+          state
+          | held_media: [event | state.held_media],
+            held_media_bytes: state.held_media_bytes + size
+        }
+    end
+  end
+
+  defp forget_dropped(%{"t" => "media_end", "ref" => ref}, state),
+    do: %{state | dropped_media: MapSet.delete(state.dropped_media, ref)}
+
+  defp forget_dropped(_event, state), do: state
+
+  defp drop_held_run(%{"t" => type, "ref" => ref}, state) do
+    Logger.warning(
+      "mobile session dropped media #{ref} pushed during a call: past the " <>
+        "#{@max_held_media_bytes}-byte hold; the phone fetches it by its ref"
+    )
+
+    kept = Enum.reject(state.held_media, &(&1["ref"] == ref))
+    bytes = Enum.reduce(kept, 0, &(&2 + byte_size(Map.get(&1, "bytes", <<>>))))
+
+    dropped =
+      if type == "media_end", do: state.dropped_media, else: MapSet.put(state.dropped_media, ref)
+
+    %{state | held_media: kept, held_media_bytes: bytes, dropped_media: dropped}
+  end
+
+  defp prepend_frames([], result), do: result
+  defp prepend_frames(frames, {:ok, state}), do: {:push, frames, state}
+  defp prepend_frames(frames, {:push, more, state}), do: {:push, frames ++ more, state}
+  defp prepend_frames(frames, {:stop, why, close, state}), do: {:stop, why, close, frames, state}
+
+  defp prepend_frames(frames, {:stop, why, close, more, state}),
+    do: {:stop, why, close, frames ++ more, state}
 
   # M75 §5.3: a server event this session's kind is never sent.
   defp for_kind(event, kind) do
@@ -1665,15 +2335,21 @@ defmodule FermixChannels.Mobile.Session do
     end)
   end
 
+  # Every frame this session writes is encoded here, after the one filter a
+  # reply's blocks leave by: a `text_done`, a `row` and a history page's
+  # messages keep only the block types this session's version carries
+  # (`ReplyBlocks.for_session/4`; mobile 2 is sent no `events`).
   defp encode_plaintexts(event, state) do
+    version = Map.get(state, :negotiated_version)
+
     with {:ok, type, payload, bytes} <- normalize_logical_event(event) do
       call_encoder(
         state.encode_server,
         type,
-        payload,
+        ReplyBlocks.for_session(type, payload, :mobile, version),
         state.server_seq + 1,
         bytes,
-        Map.get(state, :negotiated_version)
+        version
       )
     end
   end
@@ -1945,6 +2621,27 @@ defmodule FermixChannels.Mobile.Session do
     end
   end
 
+  # A desktop also hears where it may dial this engine directly (an Always
+  # On server's tailnet addresses at its fixed port, `Iroh.Hints`), on the
+  # rail's route; a phone's candidates are as they were.
+  defp hello_candidates(state) do
+    candidates = current_candidates(state)
+
+    case session_kind(state) do
+      :desktop -> with_hints(candidates, state.iroh_hints.())
+      :phone -> candidates
+    end
+  end
+
+  defp with_hints(candidates, []), do: candidates
+
+  defp with_hints(candidates, hints) do
+    Enum.map(candidates, fn
+      %{"kind" => "iroh"} = iroh -> Map.put(iroh, "addrs", hints)
+      host -> host
+    end)
+  end
+
   defp host_candidates(state, limit) do
     case state.discover.() do
       {:ok, candidates} ->
@@ -2001,12 +2698,36 @@ defmodule FermixChannels.Mobile.Session do
 
   defp error_code(_reason), do: "request_failed"
 
-  defp store_push_token(token, state) do
-    case state.update_device.(state.device_store, state.device_id, %{push_token: token}) do
-      {:ok, _device} -> {:ok, nil, state}
+  # The row the store answers is the one the next `push_subscribe` is held to.
+  defp write_registration(registration, state) do
+    case state.update_device.(state.device_store, state.device_id, registration) do
+      {:ok, device} -> {:ok, nil, %{state | authenticated_device: device}}
       {:error, reason} -> {:error, reason, state}
     end
   end
+
+  defp relay_push_served(state),
+    do: if(relay_push?(state), do: :ok, else: {:error, :push_unavailable})
+
+  # The codec held both keys to canonical base64url of their sizes. The
+  # phone's address at Google is its one push address, as a token is an
+  # iPhone's (`DeviceStore.Device`).
+  defp subscription(%{"service" => service, "address" => address} = payload) do
+    with {:ok, public} <- decoded_key(payload, "p256dh"),
+         {:ok, secret} <- decoded_key(payload, "auth") do
+      {:ok, %{push_token: address, push_service: service, push_p256dh: public, push_auth: secret}}
+    end
+  end
+
+  defp decoded_key(payload, field) do
+    case Base.url_decode64(payload[field], padding: false) do
+      {:ok, bytes} -> {:ok, bytes}
+      :error -> {:error, {:invalid_field, field}}
+    end
+  end
+
+  defp registered?(%{} = device, registration),
+    do: Enum.all?(registration, fn {field, stored} -> value(device, field) == stored end)
 
   defp validate_push_environment(received, configured)
        when received in ["development", "production"] and

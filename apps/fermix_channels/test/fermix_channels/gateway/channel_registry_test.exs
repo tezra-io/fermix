@@ -290,7 +290,10 @@ defmodule FermixChannels.Gateway.ChannelRegistryTest do
       telegram = Enum.find(ChannelRegistry.channels(), &(&1.name == "telegram"))
 
       assert ChannelRegistry.platform_ok?(imessage, macos?: true)
-      refute ChannelRegistry.platform_ok?(imessage, macos?: false)
+      # M97 §6.4: off a Mac, a Mac of the home carries it.
+      assert ChannelRegistry.platform_ok?(imessage, macos?: false)
+      # A Mac-only channel no Mac carries runs on a Mac alone.
+      refute ChannelRegistry.platform_ok?(Map.delete(imessage, :carried), macos?: false)
       assert ChannelRegistry.platform_ok?(telegram, macos?: false)
       assert ChannelRegistry.platform_ok?(telegram, macos?: true)
     end
@@ -338,7 +341,9 @@ defmodule FermixChannels.Gateway.ChannelRegistryTest do
       assert ChannelRegistry.missing_helpers(macos?: true) == []
     end
 
-    test "never starts on Linux, and Linux never reports it as missing an owner" do
+    # M97 §6.4: a home on a server runs iMessage when a Mac of the home
+    # carries Messages; the helper is that Mac's, so none is needed here.
+    test "starts off a Mac when a Mac of the home carries it, with no helper here" do
       child = {FermixChannels.Channels.IMessage.Supervisor, []}
 
       Application.put_env(:fermix_channels, :imessage,
@@ -346,11 +351,13 @@ defmodule FermixChannels.Gateway.ChannelRegistryTest do
         owner_user_id: "+15551234567"
       )
 
-      refute child in ChannelRegistry.transport_children(%{status: :ready}, macos?: false)
+      host = [macos?: false]
+      assert child in ChannelRegistry.transport_children(%{status: :ready}, host)
+      refute :imessage in ChannelRegistry.missing_helpers(host)
+      refute :imessage in ChannelRegistry.missing_ingress_authorizations(host)
 
       Application.put_env(:fermix_channels, :imessage, enabled: true)
-      refute :imessage in ChannelRegistry.missing_ingress_authorizations(macos?: false)
-      assert :imessage in ChannelRegistry.missing_ingress_authorizations(macos?: true)
+      assert :imessage in ChannelRegistry.missing_ingress_authorizations(host)
     end
   end
 

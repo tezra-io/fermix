@@ -197,4 +197,47 @@ defmodule FermixCore.Tools.ToolHelpTest do
     assert result.success == false
     assert result.error =~ "Unknown capability"
   end
+
+  # A plugin skill's worker runs at guest yet reaches its own plugin's tools
+  # (`effective_own_plugin`), so it reads their docs, and no other plugin's.
+  test "a plugin skill's guest run reads its own plugin's tool docs and no other plugin's" do
+    name = :"tool_help_own_plugin_#{System.unique_integer([:positive])}"
+    start_supervised!({Registry, name: name})
+
+    for {tool, plugin} <- [{"acme_search", "acme"}, {"bolt_search", "bolt"}] do
+      :ok =
+        Registry.register(
+          name,
+          Capability.new(%{
+            name: tool,
+            description: "Search #{plugin}.",
+            parameters: %{"type" => "object", "properties" => %{}},
+            kind: :builtin,
+            executor: {DescribedTool, :execute, []},
+            policy_class: :external_api,
+            metadata: %{plugin_owned?: true, plugin: plugin, category: :plugin}
+          })
+        )
+    end
+
+    context =
+      @context
+      |> Map.put(:capability_registry, name)
+      |> Map.merge(%{
+        source_trust: :operator,
+        effective_trust: :guest,
+        effective_policy: [:read_only],
+        effective_own_plugin: %{name: "acme", classes: [:read_only, :external_api]}
+      })
+
+    assert {:ok, %{success: true, output: output}} =
+             ToolHelp.execute(%{"name" => "acme_search"}, context)
+
+    assert output =~ "# acme_search"
+
+    assert {:ok, %{success: false, error: error}} =
+             ToolHelp.execute(%{"name" => "bolt_search"}, context)
+
+    assert error =~ "Unknown capability"
+  end
 end

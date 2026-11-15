@@ -28,6 +28,15 @@ defmodule FermixCore.Realtime.GrokTurn do
       owed again at most `@max_continuation_attempts` times.
     * **An interrupted response stays interrupted.** Its later audio is
       dropped (`fence/2`), and a call it carries is refused rather than run.
+    * **The greeting is a continuation too** (M96 §4.2). `owe/1` owes one
+      once the call is ready, so the call's first reply is asked for by the
+      same rule; any response that starts answers it.
+    * **Grok runs one response at a time.** A response that starts has
+      ended every other still open, whether or not its `response.done`
+      came: Grok's server VAD can drop a response it had begun, before any
+      audio, and never close it on the wire (seen on a call, 2026-11-09).
+      Left open, it would hold every later continuation, and the goodbye's
+      played-out signal, behind it for the rest of the call.
 
   Pure: the session owns the clock, the timers and the wire.
   """
@@ -48,6 +57,7 @@ defmodule FermixCore.Realtime.GrokTurn do
           owed?: boolean(),
           requested: String.t() | nil,
           attempts: non_neg_integer(),
+          greeting?: boolean(),
           next_id: pos_integer()
         }
 
@@ -62,11 +72,24 @@ defmodule FermixCore.Realtime.GrokTurn do
             # The continuation asked for and not yet started, by its id.
             requested: nil,
             attempts: 0,
+            # Whether what is owed or asked for is the call's greeting.
+            greeting?: false,
             next_id: 1
 
   @doc "A call with no turn taken yet."
   @spec new() :: t()
   def new, do: %__MODULE__{}
+
+  @doc """
+  The call is ready (M96 §4.2): a continuation is owed, the reply that greets
+  the owner, asked for when it is due like any other.
+  """
+  @spec owe(t()) :: t()
+  def owe(%__MODULE__{} = turn), do: %{turn | owed?: true, greeting?: true}
+
+  @doc "Whether what is owed or asked for is the greeting, not a task's result."
+  @spec greeting?(t()) :: boolean()
+  def greeting?(%__MODULE__{greeting?: greeting?}), do: greeting?
 
   @doc "Server VAD heard the owner start speaking."
   @spec speech_started(t()) :: t()
@@ -86,13 +109,19 @@ defmodule FermixCore.Realtime.GrokTurn do
   def vad_grace_over(%__MODULE__{} = turn), do: %{turn | vad_pending?: false}
 
   @doc """
-  A response started. Fermix's own continuation names itself in `metadata`
+  A response started, and every other still open has ended (one response at a
+  time). Fermix's own continuation names itself in `metadata`
   (`fermix_continuation`); any other response, Grok's own after speech, hears
   the outputs already given and consumes what was owed.
   """
   @spec response_created(t(), String.t(), map() | nil) :: t()
   def response_created(%__MODULE__{} = turn, response_id, metadata)
       when is_binary(response_id) and (is_map(metadata) or is_nil(metadata)) do
+    turn =
+      turn.active
+      |> MapSet.delete(response_id)
+      |> Enum.reduce(turn, &response_done(&2, &1))
+
     %{
       turn
       | active: MapSet.put(turn.active, response_id),
@@ -172,7 +201,7 @@ defmodule FermixCore.Realtime.GrokTurn do
   def request_failed(%__MODULE__{requested: id} = turn) when is_binary(id) do
     if turn.attempts < @max_continuation_attempts,
       do: {:retry, %{turn | owed?: true, requested: nil}},
-      else: {:gave_up, %{turn | requested: nil, attempts: 0}}
+      else: {:gave_up, %{turn | requested: nil, attempts: 0, greeting?: false}}
   end
 
   def request_failed(%__MODULE__{} = turn), do: {:none, turn}
@@ -223,9 +252,10 @@ defmodule FermixCore.Realtime.GrokTurn do
   # continuation that still starts is a second answer the provider chose, not
   # one Fermix asks for again.
   defp started(%{requested: id} = turn, id) when is_binary(id),
-    do: %{turn | requested: nil, attempts: 0}
+    do: %{turn | requested: nil, attempts: 0, greeting?: false}
 
-  defp started(turn, _other), do: %{turn | owed?: false, requested: nil, attempts: 0}
+  defp started(turn, _other),
+    do: %{turn | owed?: false, requested: nil, attempts: 0, greeting?: false}
 
   # A done response whose every call is answered is finished: it owes a
   # continuation when it carried any call at all.

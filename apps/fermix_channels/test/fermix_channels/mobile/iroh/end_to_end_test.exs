@@ -12,7 +12,9 @@ defmodule FermixChannels.Mobile.Iroh.EndToEndTest do
   M75's rail (§4.2) runs the same way: `Mobile.Rail` dials the listening
   helper through a second, dial-only helper (helper protocol 3), at the
   listener's UDP address, and carries a desktop's session to the same
-  `Session`.
+  `Session`. An Always On server's endpoint (helper protocol 4) binds the
+  fixed port it is given, and one another process holds fails the rail by
+  name until it is free.
 
   Opt-in, because it needs both binaries built from a `fermix-iroh` checkout
   (`cargo build --release --locked`, then `--example test_peer`):
@@ -163,6 +165,47 @@ defmodule FermixChannels.Mobile.Iroh.EndToEndTest do
     assert %{state: :ready} = Helper.status(dialer)
   end
 
+  test "a server's fixed port: one another process holds fails the rail by name, then it binds",
+       ctx do
+    names = names()
+    registry = start_registry(names, ctx.revoked)
+    {:ok, holder} = :gen_udp.open(0, ip: {0, 0, 0, 0})
+    {:ok, port} = :inet.port(holder)
+
+    log =
+      capture_log([level: :info], fn ->
+        start_supervised!({Iroh, rail_opts(ctx, names, registry, bind_port: port)})
+        state = await_rail(names.iroh_helper, :failed)
+        assert state.failure =~ "bind_failed"
+        assert state.failure =~ "#{port}"
+
+        # The port is free again: the next retry, delivered by hand, binds it.
+        :ok = :gen_udp.close(holder)
+        send(GenServer.whereis(names.iroh_helper), {:retry, state.retry.token})
+        await_rail(names.iroh_helper, :ready)
+        # sleep: the helper's endpoint logs its sockets just after ready
+        Process.sleep(200)
+      end)
+
+    assert log =~ ~r/bound UDP sockets: .*0\.0\.0\.0:#{port}/
+  end
+
+  defp await_rail(helper, rail, attempts \\ 200) do
+    state = :sys.get_state(helper)
+
+    cond do
+      state.rail == rail -> state
+      attempts == 0 -> flunk("the rail stayed #{inspect(state.rail)}: #{inspect(state.failure)}")
+      true -> await_rail_again(helper, rail, attempts)
+    end
+  end
+
+  defp await_rail_again(helper, rail, attempts) do
+    # sleep: polls a state the rail announces to no one
+    Process.sleep(50)
+    await_rail(helper, rail, attempts - 1)
+  end
+
   # The dial-only helper, in a home of its own (a desktop's), and that home.
   defp start_dialer(ctx) do
     dial_root = Path.join(System.tmp_dir!(), "fx-e2e-d-#{System.unique_integer([:positive])}")
@@ -204,22 +247,7 @@ defmodule FermixChannels.Mobile.Iroh.EndToEndTest do
   # -- the rail ----------------------------------------------------------------
 
   defp start_rail(ctx, names, registry) do
-    revisions = Source.parse!(%{"revisions" => [%{"iroh" => "1.3.0", "relays" => [@relay]}]})
-
-    opts = [
-      root: ctx.root,
-      names: names,
-      switch: fn -> true end,
-      session_opts: session_opts(ctx, names, registry),
-      helper_opts: [
-        binary_path: ctx.helper,
-        revisions: revisions,
-        list_devices: fn _store -> {:ok, []} end
-      ]
-    ]
-
-    Logger.put_module_level(Helper, :info)
-    on_exit(fn -> Logger.delete_module_level(Helper) end)
+    opts = rail_opts(ctx, names, registry, [])
 
     {_result, log} =
       with_log([level: :info], fn ->
@@ -230,6 +258,26 @@ defmodule FermixChannels.Mobile.Iroh.EndToEndTest do
     %{endpoint_id: endpoint_id} = Helper.status(names.iroh_helper)
     [_all, port] = Regex.run(~r/bound UDP sockets: .*?(?:0\.0\.0\.0|127\.0\.0\.1):(\d+)/, log)
     {endpoint_id, String.to_integer(port)}
+  end
+
+  defp rail_opts(ctx, names, registry, helper_opts) do
+    revisions = Source.parse!(%{"revisions" => [%{"iroh" => "1.3.0", "relays" => [@relay]}]})
+    Logger.put_module_level(Helper, :info)
+    on_exit(fn -> Logger.delete_module_level(Helper) end)
+
+    [
+      root: ctx.root,
+      names: names,
+      switch: fn -> true end,
+      session_opts: session_opts(ctx, names, registry),
+      helper_opts:
+        [
+          binary_path: ctx.helper,
+          revisions: revisions,
+          list_devices: fn _store -> {:ok, []} end,
+          interfaces: fn -> {:ok, []} end
+        ] ++ helper_opts
+    ]
   end
 
   defp await_ready(helper, attempts) do

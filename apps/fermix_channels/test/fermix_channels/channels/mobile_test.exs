@@ -15,6 +15,7 @@ defmodule FermixChannels.Channels.MobileTest do
   alias FermixChannels.Mobile.SocketHandler
   alias FermixChannels.Mobile.Supervisor, as: MobileSupervisor
   alias FermixCore.Memory.ConversationStore
+  alias FermixCore.ReplyBlocks
 
   defmodule StoreStub do
     def append(profile_id, attrs, _opts) do
@@ -309,6 +310,25 @@ defmodule FermixChannels.Channels.MobileTest do
                Mobile.parse_event(event)
     end
 
+    # What the phone draws is read off its session's event, never the payload
+    # (M85 E4, M89 §06): its lists and trips once its channel pulled each
+    # index, its events from mobile 3.
+    test "a message carries what its phone draws into the turn's metadata" do
+      payload = %{
+        "client_msg_id" => "client-3",
+        "profile_id" => "main",
+        "text" => "What is on Saturday?",
+        "attach_ids" => [],
+        "draws_lists" => true
+      }
+
+      event = %{type: "msg", payload: payload, draws_trips: true, draws_events: true}
+
+      assert {:ok, [%Message{metadata: metadata}]} = Mobile.parse_event(event)
+      assert %{draws_trips: true, draws_events: true} = metadata
+      refute Map.has_key?(metadata, :draws_lists)
+    end
+
     test "refuses a raw wire envelope: only decoded protocol events parse" do
       assert {:error, :invalid_event} =
                Mobile.parse_event(%{
@@ -348,6 +368,60 @@ defmodule FermixChannels.Channels.MobileTest do
 
   # PERF-2 (D8): the phone has no platform edit budget, so its drafts stream
   # at a tenth of a second, from the first character, with no edit cap.
+  # M85 E4: a phone turn takes the lists its tools touched once, as a Mac
+  # turn does, and writes their block with the reply's row; nothing is left
+  # for the next Mac reply in the shared conversation to inherit.
+  describe "a phone turn's lists" do
+    setup do
+      previous = Application.fetch_env(:fermix_channels, :mobile_reply_blocks)
+      on_exit(fn -> restore_env(:mobile_reply_blocks, previous) end)
+      holder = start_supervised!({ReplyBlocks, name: nil}, id: :phone_turn_blocks)
+      Application.put_env(:fermix_channels, :mobile_reply_blocks, holder)
+      key = Companion.conversation_key("main")
+      touch = %{list_id: "ck_abcdefghij", title: "Groceries", rows: ["ci_abcdefghij"]}
+      :ok = ReplyBlocks.put_checklists(holder, key, [touch])
+
+      block = %{
+        "type" => "checklists",
+        "lists" => [
+          %{"list_id" => "ck_abcdefghij", "title" => "Groceries", "rows" => ["ci_abcdefghij"]}
+        ]
+      }
+
+      %{holder: holder, key: key, block: block}
+    end
+
+    test "a streamed reply carries their block on its row and text_done, once", ctx do
+      %{block: block} = ctx
+      message = mobile_message()
+      {:ok, handle} = Mobile.open_draft(message, "Added")
+      assert {:ok, nil} = Mobile.seal_draft(message, handle, "Added eggs to Groceries.")
+
+      assert_received {:timeline_append, "main",
+                       %{content: "Added eggs to Groceries.", blocks: [^block]}}
+
+      assert_receive {:mobile_event, "main", %{"t" => "text_done", "blocks" => [^block]}}
+      assert ReplyBlocks.take(ctx.holder, ctx.key) == []
+
+      {:ok, handle} = Mobile.open_draft(message, "And")
+      assert {:ok, nil} = Mobile.seal_draft(message, handle, "And that is all.")
+      assert_received {:timeline_append, "main", %{content: "And that is all."} = second}
+      refute Map.has_key?(second, :blocks)
+    end
+
+    test "a reply sent whole for the turn carries them too", ctx do
+      %{block: block} = ctx
+      reply = Mobile.build_text_reply(mobile_message())
+      assert :ok = reply.("Added eggs to Groceries.")
+
+      assert_received {:timeline_append, "main",
+                       %{content: "Added eggs to Groceries.", blocks: [^block]}}
+
+      assert_receive {:mobile_event, "main", %{"t" => "text_done", "blocks" => [^block]}}
+      assert ReplyBlocks.take(ctx.holder, ctx.key) == []
+    end
+  end
+
   test "the phone paces its drafts for a socket, not a chat platform" do
     assert Mobile.draft_pacing() == %{
              edit_interval_ms: 100,
@@ -880,15 +954,20 @@ defmodule FermixChannels.Channels.MobileTest do
 
   # A socket past its Noise handshake, about to read the phone's hello.
   defp phone_hello_state(overrides) do
+    # A phone speaks a version this engine serves: the session negotiates a
+    # hello's version itself (`Protocol.negotiate_hello/3`), so a stubbed
+    # decode below the window is refused as a real one is.
+    {_oldest, newest} = FermixChannels.Mobile.Protocol.supported_version_range()
+
     hello = %{
-      version: 1,
+      version: newest,
       type: "hello",
       seq: 1,
       payload: %{
         "device_id" => "paired-device",
         "app_version" => "1.0",
         "last_server_seq" => 0,
-        "protocol_v" => 1
+        "protocol_v" => newest
       },
       bytes: <<>>
     }

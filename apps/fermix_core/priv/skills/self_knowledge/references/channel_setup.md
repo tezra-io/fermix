@@ -112,7 +112,7 @@ Meta's WhatsApp Cloud API. Needs a public HTTPS URL. All values come from the Me
 - **Your WhatsApp number**: the personal number you message from, digits only with country code, no `+`, spaces or `00` (`15551234567`). Mac **Your WhatsApp ID**; browser **Owner user ID**; `--whatsapp-owner-user-id`; `owner_user_id`.
 - The business number is Meta's free test number or a registered one; it cannot be the number you chat from. With the test number, add your own number under API Setup > To > Manage phone number list.
 
-Order: save the values, restart, start the tunnel; then WhatsApp > Configuration > Callback URL `https://<public-host>/webhook/whatsapp` + the Verify token > **Verify and save**, and subscribe the `messages` webhook field.
+Order: save the values, restart, start the tunnel; then WhatsApp > Configuration > Callback URL `https://<public-host>/webhook/whatsapp` + the Verify token > **Verify and save**, and subscribe the `messages` webhook field. On an Always On server the tunnel is Tailscale Funnel on that one path: the desktop's Always On screen prints the command to run on the server (with `sudo`, since the server names no Tailscale operator), and the Callback URL is the address it prints, on the server's ts.net name. WhatsApp stops at the move until Meta is pointed there with **Verify and save**: Meta keeps posting to the old address, retrying, then drops the events. A new ts.net name can take about ten minutes to resolve, so a first Verify right after the mount may fail.
 
 - **First message**: from your personal WhatsApp, message the business number. `/whoami` answering with your number proves the webhook, the signature, the owner match and sending. Direct messages only; no groups.
 
@@ -140,7 +140,7 @@ No public URL: Fermix runs `signal-cli` on the same machine.
 
 ## iMessage
 
-Mac only, and no public URL: Fermix reads and sends through Messages on the Mac it runs on. iMessage does not exist on Linux at all: the setup surfaces never show it there, and a `config.toml` that turns it on refuses to start ("imessage runs only on the Mac whose Messages it reads"). There is no remote-Mac mode.
+Mac only, and no public URL: Fermix reads and sends through Messages on a Mac. On a Mac primary that is the Mac it runs on. Once the home runs on an Always On server, it is the Mac that offers Messages to the server (its **Messages** switch under **This computer**): the server listens and replies, and that Mac's helper reads and sends (skill_view(name: "self-knowledge", file: "computers"), *iMessage through a Mac*). On Linux with no such Mac the setup surfaces never show iMessage, and the channel does not start.
 
 Fermix never opens the Messages database itself. A signed helper app, **Fermix Messages**, does the reading and sending, and the two macOS permissions belong to it, never to Fermix, Terminal or Homebrew, so they survive Fermix updates. The helper also keeps the list of people Fermix may message, which changes only through a dialog it shows on your screen.
 
@@ -148,7 +148,8 @@ Fermix never opens the Messages database itself. A signed helper app, **Fermix M
 - **No account choice**: Fermix Messages works out the account when you confirm the recipients. If your Apple ID or phone number is one of the addresses Messages on this Mac is signed in as, that is your own account, which is not supported yet, and the confirmation is refused.
 - **Your Apple ID or phone number**: the address your iPhone sends iMessages from, as the account on this Mac sees it: an Apple ID email or a phone number in `+E.164` (`+15551234567`, no spaces), quoted. Mac **Your Apple ID or phone number**; browser setup's iMessage card; `--imessage-owner-user-id`; `owner_user_id = "+15551234567"`. An unquoted number refuses to load.
 - **Guests**: `allowed_sender_ids = ["+15557654321", "friend@example.com"]`, or `--imessage-allowed-sender-ids`. The owner is always let in; an empty list means no guests.
-- Other keys under `[fermix_channels.imessage]`: `enabled`, `command_allowlist`, `streaming` (`"block"` or `"off"`; `"draft"` refuses to load, because iMessage cannot edit a sent message). Nothing is secret, so nothing goes to the keychain.
+- Other keys under `[fermix_channels.imessage]`: `enabled`, `command_allowlist`, `streaming` (`"block"` or `"off"`; `"draft"` refuses to load, because iMessage cannot edit a sent message). Nothing is secret, so nothing goes to the keychain. The section is the home's, in `config.toml`: it travels with a move, so a server knows the owner and guests.
+- **Through a Mac, while that Mac sleeps**: iMessage is away. A message to you fails at once, saying the Mac that carries Messages is asleep or offline, and is not kept to send later; approvals go to a channel on the server instead. When the Mac is back, Fermix reads what came in meanwhile (at most 500 messages from the last day) and tells you once how many it missed beyond that.
 
 Order (the Mac app's own iMessage rows arrive with the app release that pins this engine; until then every step below runs from browser setup, `fermix setup`, or the helper's Doctor rows):
 

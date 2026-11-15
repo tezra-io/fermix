@@ -1,0 +1,29 @@
+{
+  "derivation": "scalar = (SHA-256(\"fermix-accessory-fixture-key:\" || seed) as a big-endian integer) mod (n - 1) + 1",
+  "keys": {
+    "host": {
+      "seed": "larkspur-host-1",
+      "private": "3cb600c6fc362c78ddb3e9f19dbc743aa1b859d4597e427a4a36d3b284be6a90",
+      "public": "041c7d4fe6913d1a4252ae17ae7669b66596da58a05cf7c89b344b689ad0ac5f91ee1a1f5fbd125d75f3f6909c4db5b82731538f075916b6af0792ee122dd09361",
+      "id": "6723c33add033f0621b34dddcb835ab4e4911d6f672f5a3774ef5ea3dfc9a1d6"
+    },
+    "other_host": {
+      "seed": "heron-host-2",
+      "private": "e664df6685b5ab31c8697ac1f00ccbf2de4c0b33c35a25f3fbcb414d52ed1207",
+      "public": "04f96977aecbb8608d91b2098419e529fb9a77b838edbd7d0fd3ce963e9440d7ac80e32e2c75ecbb6e784f0f081a505280ec35afdf21881fc6e2f38b35c8b67af7",
+      "id": "48585166ec09ac4cb1a096d95406980707b00f6ae81e2cf03cc53ee6ef77c6ae"
+    },
+    "accessory": {
+      "seed": "kestrel-accessory-1",
+      "private": "6c9b6b753e9fd68dfeb8055d56f3f322ef7741d2c011f2fea5f1202257764d9a",
+      "public": "0421277c0b4a65003786270c6777e7b6c51cc7d09d98be8d3c141b1f22e310e10ebf0df5a835eaffc669c725eb5df0709772ced7ea50c227ce425f9cdd5ba65163",
+      "id": "0ac58c5a88b718ac70aa3ab3057471bbd447e1a5484d41b9d1e59466370bb50e"
+    },
+    "other_accessory": {
+      "seed": "wren-accessory-2",
+      "private": "c5550fc7df3d4d48994c75d8d4cff5d94c1d7b288e9a772753daaa3534a4f053",
+      "public": "04804fe8760423c5522ed41b84ed3d45d69bf4ee312bdd97c40c47ca6aca9f673ab61f84858a05b61bcabec7c4a0c78c9b3f32d1393fa9590b4ebac2c0c4c35eef",
+      "id": "e8b30d94fa6102d94096eb4277c553fce93e1ca2626e573a4d10048dc0510808"
+    }
+  }
+}

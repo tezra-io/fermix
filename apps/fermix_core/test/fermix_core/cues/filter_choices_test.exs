@@ -180,6 +180,18 @@ defmodule FermixCore.Cues.FilterChoicesTest do
                  disabled?: true
                },
                %{
+                 id: "openrouter_decider",
+                 label: "OpenRouter · Perplexity Decider",
+                 hint: "Set up this provider first.",
+                 disabled?: true
+               },
+               %{
+                 id: "openrouter_decider_flash",
+                 label: "OpenRouter · Perplexity Decider Flash",
+                 hint: "Set up this provider first.",
+                 disabled?: true
+               },
+               %{
                  id: "venice",
                  label: "Venice · Jev",
                  hint: "Set up this provider first.",
@@ -210,6 +222,15 @@ defmodule FermixCore.Cues.FilterChoicesTest do
       assert FilterChoices.decision_model_set_up?(snapshot, :openai)
       refute FilterChoices.decision_model_set_up?(snapshot, :venice)
       refute FilterChoices.decision_model_set_up?(snapshot, :openrouter)
+      refute FilterChoices.decision_model_set_up?(snapshot, :openrouter_decider)
+
+      on_openrouter = snapshot(openrouter: [api_key: "sk-or-invented"])
+      assert FilterChoices.decision_model_set_up?(on_openrouter, :openrouter_decider_flash)
+    end
+
+    test "a Decider that is not set up names OpenRouter, the provider it runs on" do
+      assert FilterChoices.decision_model_not_set_up(:openrouter_decider) ==
+               "Set up OpenRouter first: the screen's decision model runs on its key."
     end
   end
 

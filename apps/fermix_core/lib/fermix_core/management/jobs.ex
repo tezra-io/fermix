@@ -8,7 +8,9 @@ defmodule FermixCore.Management.Jobs do
   sign-in, a computer-use grant, a browser download and an MCP server check
   all take longer than a management request may be held open, so each is a
   *job*: the starting method mints an id and returns at once, `job.get`
-  reports progress, and `job.cancel` stops it. One shape covers every family,
+  reports progress, and `job.cancel` stops it; on a computer linked to its
+  server the id names it (`computer.job:<id>`), so those two are answered on
+  the engine that started the job (`Management.Placement`). One shape covers every family,
   so a client writes one poller, one progress row and one failure sentence
   rather than one per operation.
 
@@ -39,6 +41,14 @@ defmodule FermixCore.Management.Jobs do
   only its ending reads `note`. An ending that fails is logged, and the job
   ends as its run did.
 
+  **The target.** An install's job names what it installs (`target`): a
+  `capability_install` the target its start was given, a `browser_install`
+  `browser`. It is stored when the job starts and kept in every view, so a
+  client matches a running job to the row that started it by more than its
+  kind (two rows start a `capability_install`, and a linked computer's
+  `job.list` adds its own installs to the server's). Every other kind names
+  none.
+
   `phase` is a closed per-kind vocabulary, published here and in the export. It
   is display copy the client turns into a sentence, never a state a client
   switches on — `status` is the state. A run that reports a phase outside its
@@ -48,7 +58,11 @@ defmodule FermixCore.Management.Jobs do
 
   use GenServer
 
+  alias FermixCore.Home.DesktopLink
+  alias FermixCore.Home.Role
+  alias FermixCore.Management.Placement
   alias FermixCore.Management.Telemetry
+  alias FermixCore.Setup.ConfigStore
 
   require Logger
 
@@ -82,15 +96,15 @@ defmodule FermixCore.Management.Jobs do
     # first `npx -y` or `uvx` start downloads its package, and `MCP.Server`
     # gives that 60 s, so the connecting wait outlasts it.
     mcp_check: %{budget_ms: 75_000, phases: ["connecting", "listing"]},
-    # M75 lean v1 §4.3: creating, powering or deleting the Always On server on
-    # its provider. Each action is polled every 2 s at most 150 times, and a create
-    # waits on two (the create and the start), so 15 minutes holds the worst.
-    home_provision: %{
-      budget_ms: 900_000,
-      phases: ["checking", "firewall", "server", "starting", "power", "deleting"]
-    }
+    # Always On's Restore here: the computer a home left restores its own copy
+    # of the server's snapshots and restarts (`Home.LocalReturn`). Decrypting
+    # and staging a whole home is bounded by the disk, so 15 minutes.
+    home_restore: %{budget_ms: 900_000, phases: []}
   ]
   @kind_names Keyword.keys(@kinds)
+  # The kinds whose job names what it installs (the moduledoc's target).
+  @targeted_kinds [:capability_install, :browser_install]
+  @browser_target "browser"
   # The closed failure vocabulary a run may answer with. `timed_out` and
   # `internal_error` are minted here; the other two come from the operation.
   @operation_failures [:unavailable, :refused]
@@ -110,8 +124,8 @@ defmodule FermixCore.Management.Jobs do
   # A stop is answered once its run is gone, so a caller waits out the grace
   # and the kill: this much past the grace bounds its call.
   @stop_answer_margin_ms 5_000
-  # An ending writes what its run left (a provider's ledger, whose lock waits
-  # at most 30 s), so this much bounds it before it is killed.
+  # An ending writes what its run left (Restore here's request in the
+  # return's record), so this much bounds it before it is killed.
   @ending_ms 35_000
   @timed_out_sentence "The operation did not finish inside its time budget."
   @internal_sentence "The operation failed inside the daemon."
@@ -131,7 +145,7 @@ defmodule FermixCore.Management.Jobs do
           | :imessage_grant
           | :imessage_policy_confirm
           | :mcp_check
-          | :home_provision
+          | :home_restore
   @type view :: %{String.t() => term()}
   @type report :: ({:phase, String.t()} | {:progress, map()} | {:ready, map()} -> any())
   @type outcome ::
@@ -186,10 +200,13 @@ defmodule FermixCore.Management.Jobs do
   holds the reply until the run reports `{:ready, extra}`, which is how
   `auth.start` hands back an authorize url the run mints and no later read
   repeats. `:ending` is the run's ending (the moduledoc), a 1-arity function
-  given `t:ended/0`.
+  given `t:ended/0`. `:target` is what an install installs (the moduledoc's
+  target): required of a `capability_install` (its start's target) and a
+  `browser_install` (`browser`), refused for every other kind.
   """
   @spec start(kind(), keyword()) :: {:ok, view()} | {:error, :busy | :await_timeout}
   def start(kind, opts) when kind in @kind_names and is_list(opts) do
+    :ok = check_target(kind, Keyword.get(opts, :target))
     GenServer.call(server(opts), {:start, kind, opts}, start_timeout(opts))
   end
 
@@ -225,7 +242,8 @@ defmodule FermixCore.Management.Jobs do
        shutting_down: %{},
        task_supervisor: Keyword.get(opts, :task_supervisor, FermixCore.TaskSupervisor),
        cancel_grace_ms: Keyword.get(opts, :cancel_grace_ms, @cancel_grace_ms),
-       clock: Keyword.get(opts, :clock, &monotonic_ms/0)
+       clock: Keyword.get(opts, :clock, &monotonic_ms/0),
+       computer?: Keyword.get_lazy(opts, :computer?, &linked_computer?/0) == true
      }}
   end
 
@@ -297,7 +315,7 @@ defmodule FermixCore.Management.Jobs do
   def handle_info(_message, state), do: {:noreply, state}
 
   defp start_job(state, kind, name, opts, from) do
-    job_id = mint_job_id()
+    job_id = mint_job_id(state.computer?)
     budget_ms = Keyword.get(opts, :budget_ms, budget_ms(kind))
     task = spawn_run(state, job_id, Keyword.fetch!(opts, :run))
 
@@ -305,6 +323,7 @@ defmodule FermixCore.Management.Jobs do
       job_id: job_id,
       kind: kind,
       name: name,
+      target: Keyword.get(opts, :target),
       status: :running,
       phase: nil,
       progress: nil,
@@ -691,6 +710,7 @@ defmodule FermixCore.Management.Jobs do
     %{
       "job_id" => job.job_id,
       "kind" => Atom.to_string(job.kind),
+      "target" => job.target,
       "status" => Atom.to_string(job.status),
       "phase" => job.phase,
       "progress" => job.progress,
@@ -724,8 +744,22 @@ defmodule FermixCore.Management.Jobs do
   defp scalar?(nil), do: true
   defp scalar?(_value), do: false
 
-  defp mint_job_id do
-    "job:" <> Base.url_encode64(:crypto.strong_rand_bytes(@job_id_bytes), padding: false)
+  # A job is answered by the engine that started it (M97 §19.3's rule): on a
+  # computer linked to its server every id names this computer
+  # (`computer.job:<id>`), so its app's `job.get` and `job.cancel` are
+  # answered here and never sent to the server.
+  defp mint_job_id(computer?) do
+    id = "job:" <> Base.url_encode64(:crypto.strong_rand_bytes(@job_id_bytes), padding: false)
+    if computer?, do: Placement.computer_id(id), else: id
+  end
+
+  # A device-role engine holding its desktop link, decided once at start as
+  # the daemon's forwarding is; a process that booted no engine is none.
+  defp linked_computer? do
+    case Role.booted() do
+      nil -> false
+      record -> DesktopLink.linked?(record, ConfigStore.fermix_home())
+    end
   end
 
   # A job whose reply is deferred until the run mints a value still answers
@@ -735,6 +769,16 @@ defmodule FermixCore.Management.Jobs do
     Keyword.get(opts, :await_timeout_ms, @await_timeout_ms) + @cancel_grace_ms + @ending_ms +
       @stop_answer_margin_ms
   end
+
+  defp check_target(:browser_install, @browser_target), do: :ok
+
+  defp check_target(:capability_install, target) when is_binary(target) and target != "",
+    do: :ok
+
+  defp check_target(kind, nil) when kind not in @targeted_kinds, do: :ok
+
+  defp check_target(kind, target),
+    do: raise(ArgumentError, "a #{kind} job cannot name the target #{inspect(target)}")
 
   defp descriptor(kind), do: Keyword.fetch!(@kinds, kind)
   defp monotonic_ms, do: System.monotonic_time(:millisecond)

@@ -4,180 +4,310 @@ defmodule FermixCore.Management.HomeSummary do
   On stands, worked out once here so the Mac app, the Linux app, the setup
   page and the CLI draw the same screen.
 
-      summary: {key, state, sentence, action, detail, notice, outcome}
+      summary: {key, state, sentence, action, detail, notice, outcome, help}
+
+  One sentence and at most one action per screen (the Always On pane, draft
+  3, R1 to R12): `action` is a step that changes something, and none while a
+  step runs; every other step is in `detail.alternatives`; `detail.note` is
+  the one secondary sentence, on any state, of what the owner must know or do
+  now; Details (`detail.lines`) holds facts only; and `help` is the Always On
+  docs page at the screen's anchor (`Copy.always_on_docs_url/1`), where the
+  background and the caveats live.
 
   `summary/1` is pure: it reads the facts `gather/5` collects (the role, the
-  move's phase, the candidates held, the cloud provider Always On speaks of
-  (`Home.Provision.current/2`), every provider offered, and the ledger of
-  the one in use (`Provision.Ledger.state/3`), the enrollment window and the
-  link as the rail says them (`Home.Link.status/0`), the last readiness
-  review, the review's items this home's settings decide
+  move's phase, the candidates held, the enrollment window and the link as
+  the rail says them (`Home.Link.status/0`), the last readiness review, the
+  review's items this home's settings decide
   (`MoveReadiness.summary_items/4`), the snapshots, the disk, the owner's
   time zone, and on a linked desktop the server's own `home.status`). Its
-  words are `Management.Copy`'s, with the provider's own (its name, its
-  token's label, its cities, its type names and its "How to get one" steps)
-  from its display data; nothing here names a provider.
+  words are `Management.Copy`'s.
+
+  The server is the owner's own: a Linux server they set up, where they run
+  the command Use my own Linux server gives. Fermix creates, powers and
+  deletes no server.
 
   `state` is one of `states/0`:
 
     * the computer that sets Always On up, before the move: `off`, `connect`
-      (a code for a server of the owner's own is open, or the provider refused
-      the token before anything was created), `choose` (the token works),
-      `creating` (a step's job runs, or the server starts, installs or
-      connects), `ready`, `undone` (a move was undone and its server is still
-      held);
+      (a code for the owner's server is open, waiting for it; a new code
+      beside it ends this one, and its label says so), `creating` (the server
+      used its code and connects, Cancel beside it, which closes the code;
+      once the code's half hour is over with no server recorded, the screen
+      is `off` again), `ready` (and a review that blocks), with Forget this
+      server beside Move now, which drops the held server after a confirm,
+      `undone` (a move was undone and its server is still held: Try again,
+      and Forget this server beside it once the undoing is over);
     * the computer the move left: `moving` (its last word, once it waits on
       the server's confirmation, is that Fermix keeps trying), `undone` while
       it restarts as it was, `on`, `retired` (no link, or the server forgot
-      this computer), and `creating` while a step's job runs;
+      this computer, which its link says, `DesktopLink.revoked?/1`, with
+      Fermix running or stopped; a server's own copy that a move back left
+      serving nothing names where Fermix moved back to, the marker's `to`);
+      a computer that joined is `retired` too once its server forgot it,
+      which says so and that a new code from Add a computer joins it again,
+      or while it restarts with no link, which says it is not connected; its
+      help is Add a computer's;
     * the server: `candidate` while it waits for its move, `primary` after;
     * `problem`, with its `kind` (`problems/0`) in `detail` and the one action
-      that fixes it, or Learn more where none does.
+      that fixes it, or none where no step of the owner's does (its note says
+      what to check or do).
 
-  **A step that runs.** While the ledger names a step's job (its `action`,
-  written before the job starts), the summary is `creating` in that step's
-  sentence (creating, deleting, turning on, restarting), with Cancel during
-  a create, before anything the job writes; `detail.progress` says the step
-  in hand, from what the job wrote so far. An action the job outlived reads
-  as the failure `interrupted` (`Ledger.state/3`), and every step's failure
-  is a problem: the create's by its reason, a power action's `power_failed`,
-  a delete's `delete_failed`.
-
-  Times count the way the design asks: a server that never checked in is a
-  problem after 30 minutes of its code being open while this computer is
-  awake (the window's `awake_ms`, a monotonic count), and one that stopped
-  answering after 10 minutes of no session, counted the same way (the link's
-  `down_ms`). The last backup is old past 3 days.
-
-  On the computer the home left, a replace of the server Fermix created
-  (`Ledger.state/3`'s `replace`) leads while it runs: creating the
-  new server (`creating`, with Cancel), its code and its enrollment as the
-  old server's own `home.status` draws them (`primary_home`'s `enrollment`
-  and `candidates`: starting, installing, connecting, then `ready` with Move
-  now), the move to it (`moving`, before any silence of the old server, which
-  serves nothing while it runs), removing the old server, or deleting the new
-  one; a failure is a `problem` with its one action (`delete_failed` and
-  Delete when the old server could not be deleted). Until the move is done
-  the old server is the one the home lives on, and the provider's power
-  actions, which reach only the new one, are not offered for it. The new
-  server's code lives on the old server, which never sleeps, so its 30
-  minutes count from its creation.
+  Times count the way the design asks: a server that stopped answering is a
+  problem after 10 minutes of no session while this computer is awake (the
+  link's `down_ms`, a monotonic count). The last backup is old past 3 days.
 
   **Moving back** (Always On's move back, its design §7 to §9). A linked
-  desktop's `on` offers Move back beside Back up now and Replace the
-  server. Once pressed, the desktop's own candidate for the home
-  (`candidate/state.json`, `returning`) and the return's record
-  (`device/return.json`, `return`) lead, ahead of everything else the
-  desktop shows, its link gone included: `creating` while it connects to the
-  server (Cancel), `ready` once it is held (Move now with the server's
-  recovery passphrase and a confirm built here from this computer's own
-  settings, Cancel beside it; and again once the start is recorded while
-  the server answers as the primary with no move), `moving` from the
-  recorded start (written before the request leaves) while the server moves
-  or cannot answer, to this computer's restart as the primary, `undone` when
-  the server undid it (Try again, Cancel), and `return_failed` when the
-  candidate ended (Move back again) or stopped before any move with no
-  record of it (Cancel). Cancel is never offered while the server's move is
-  under way, once it retired, or once the home is coming in here. A move
-  back the home went past (the link reached a newer epoch than the one it
-  was asked at, without this computer's return) is not drawn. Where a server
-  Fermix created stopped answering (`cannot_reach`, `turned_off`,
-  `deleted`, `retired`) and this computer holds a copy of it, Restore here
-  is offered, with the copy's date; while it runs it deletes the server
-  first and a delete the provider refused restores nothing
-  (`delete_failed`). Back on this computer as the primary, while the server
-  Fermix created for the home stands, the screen is `server_retired` with
-  Delete your server, ahead of the server's own screen and the setup's; a
-  server of the owner's own is told once, `back:<epoch>`.
+  desktop's `on` offers Move back beside Back up now, where this engine
+  starts again by itself (`restarts_itself`); one run from a terminal says
+  in a Details line, in the move back's own refusal, why it is not offered
+  (`Home.Candidate.error_sentence/1`'s `:not_supervised`). Once pressed, the
+  desktop's own candidate for the home (`candidate/state.json`, `returning`)
+  and the return's record (`device/return.json`, `return`) lead, ahead of
+  everything else the desktop shows, its link gone included: `creating`
+  while it connects to the server (Cancel beside it), `ready` once it is held
+  (its sentence says Fermix has not moved yet, its note until when this
+  computer waits; Move now with the server's recovery passphrase and a
+  confirm built here from this computer's own settings, Cancel beside it;
+  and again once the start is recorded while the server answers as the
+  primary with no move),
+  `moving` from the recorded start (written before the request leaves)
+  while the server moves or cannot answer, to this computer's restart as the
+  primary, `undone` when the server undid it (Try again, Cancel), and
+  `return_failed` when the candidate ended (Move back again) or stopped
+  before any move with no record of it (Cancel). Cancel is never offered
+  while the server's move is under way, once it retired, or once the home is
+  coming in here. A move back the home went past (the link reached a newer
+  epoch than the one it was asked at, without this computer's return) is not
+  drawn. Where the server went silent (`cannot_reach`, `retired`) and this
+  computer holds a copy of it, Restore here is offered; its confirm names the
+  date of the copy it restores and asks the owner's word that the server is
+  deleted or stopped, and Fermix deletes nothing. While its job runs (`restoring`, the
+  job family's own record) beside the return's request for it
+  (`restore_requested`), the screen is `moving`. Back on this computer as
+  the primary after a move back, the server's retired copy is told once,
+  `back:<epoch>`.
 
   **Every action is one record** wherever it sits (`action`,
-  `detail.alternatives`, `on`'s `detail.actions`): `id`, `label`, `needs`
-  (what the surface collects: `token`; `new_recovery_passphrase`, typed
-  twice and compared, where this move's recovery key is not set yet, else
-  `recovery_passphrase`, typed once and checked by the move; `choice`),
-  `confirm` (the sentence the owner accepts before Fermix spends money,
-  deletes, restarts a server or moves, with no time or price in it; nil
-  otherwise), `url` (the docs page at the provider's part for Learn more,
-  the provider's console for Open, nil otherwise) and `key` (`action_key/5`).
-  Move now's confirm is built here, before any review, from the review's
-  items this home's settings decide and any other warning the last review of
-  the same server gave (`s3_size`, `plugins`), so the full review at the
-  press moves it, and its key, only when it found something the screen did
-  not say.
+  `detail.alternatives`, `detail.backup.change`): `id`, `label`, `needs`
+  (what the surface collects: `new_recovery_passphrase`, typed twice and
+  compared, where this move's recovery key is not set yet and for a new
+  one, else `recovery_passphrase`, typed once and checked by the move),
+  `confirm` (the sentence the owner accepts before Fermix moves, restores,
+  forgets a server or changes the recovery passphrase, one part per line and
+  with no time that moves with the clock; nil otherwise) and `key`
+  (`action_key/5`). Move now's confirm is built here, before any review,
+  from the review's items this home's settings decide and any other warning
+  the last review of the same server gave (`s3_size`, `plugins`), so the
+  full review at the press moves it, and its key, only when it found
+  something the screen did not say. It is where the review's warnings are
+  said: the `ready` screen shows none, and a review that blocks makes the
+  screen the `not_ready` problem with its blocks in `detail.readiness`.
 
-  `detail` holds what the state draws: on `off` and `connect` the token
-  screen of every provider (`providers`) and the own-server link, on
-  `choose` how the provider bills, on `ready` the server's facts, the
-  readiness warnings and blocks and until when it waits, on `on` the server,
-  each backup, the space this computer's copies take, the disk, what lives on
-  the server and the two actions Details offers (Back up now, Replace the
-  server), and on `problem` its kind, what Fermix last saw and when, one note,
-  and the other actions; wherever there are any, the Details `lines`
-  (`Copy.summary_line/3`), `providers` wherever a token is asked for, and
-  `progress` while a step runs.
+  `detail` holds what the state draws, a field only where it has something:
+  `note`; `alternatives`; on `ready` the server's facts and until when it
+  waits (`waits_until`, which the note says), on `on` the server, each
+  backup, the space this computer's copies take and the disk, on `problem`
+  its kind, what Fermix last saw and when; the Details `lines`
+  (`Copy.summary_line/3`); `progress` while a move, a move back, a restore
+  or a backup runs; a flow's `steps` (`[{label, state}]`, `step_states/0`:
+  the move's Connect your server, Move now, Send your home, Switch over, and
+  the move back's Get this computer ready, Move now, Receive your home, Put
+  Fermix in place, on each of their screens), and while either moves its
+  `route` (`{from, to, direction}`: this computer, the server, `forward` or
+  `back`) and, only while bytes move, `transfer` (`{fraction, label}`, the
+  bytes `Home.MoveProgress` counted in whole twentieths); and on a linked
+  desktop's `on`, where Backup settings shows, `backup` (`{passphrase:
+  {label, value, footer}, change, s3}`, Change being `change_passphrase`).
+  The server's own `primary` carries neither `backup` nor `webhooks`: its
+  summary rides inside each desktop's `home.status`, where a Change's needs
+  would pass the protocol's depth bound (`max_json_depth`).
+
+  **Inbound webhooks** (Always On, "Inbound webhooks without a public IP"):
+  on a linked desktop's `on`, `detail.webhooks` holds the Tailscale Funnel
+  mounts the owner runs on the server, `{sentence, mounts, notes, url}`: the
+  sentence says what needs them, each mount's `label`, `command`
+  (`FermixCore.Funnel`'s, after `sudo`: the server's first boot names no
+  Tailscale operator, so only root changes its serve config) and `note`
+  (where the sender is pointed: Meta's Callback URL for WhatsApp, the host
+  of a webhook source's address in its sender), WhatsApp's first, then each
+  webhook source's; `notes` the one step a tailnet takes once (`funnel` for
+  `tag:fermix-server`, MagicDNS and HTTPS certificates), and `url` the docs
+  page that holds the rest (Cloudflare Tunnel instead, port 443, the
+  ingress, the wait for a new address). The values are the server's: the
+  `webhooks` of its own `home.status` (`primary_home`), never this
+  computer's settings. A webhook source's mount is its prefix,
+  `/cues/hooks/<ref>` (`Cues.Webhook.prefix_path/1`), so the command carries
+  none of its URL's secret, which `home.status`, a read, never hands out:
+  Tailscale passes the rest of the path to the door, which answers only that
+  source's own paths. No `webhooks` where the server serves none. The
+  server's own `primary` draws none: its summary rides inside its desktops'
+  `home.status`, where the mounts would pass the protocol's nesting bound.
+
+  A linked desktop whose server refused its protocol as newer than its own
+  (`daemon_too_old`: this computer updated first) is a `problem` of kind
+  `server_older`, whose sentence says the server updates on its own once the
+  app for each computer that keeps the home's backups carries the newer
+  Fermix (M97 §3.4: the server leads, from the release channel); never a
+  bare `on`.
+
+  Where this computer stands against its server (`standing`,
+  `Computers.Versions` of this engine's version and the server's
+  `home.status` `version`): past the window (`settings_only`) it is the
+  `update` problem in its own sentence (this computer keeps its link for
+  settings alone). A server that installed a release ahead of the apps
+  (its `update.ahead_of_apps`, an owner's override) whose home this
+  computer cannot read (`readable`, `Home.Readable`: by the home format the
+  server's `home.status` names, never by its version, M97 D16) is the
+  problem `server_ahead`, with Update, until this computer's Fermix catches
+  up. Where this computer cannot read the server's home, Move back and
+  Restore here are not offered: in their place an Update action says
+  "Update Fermix on this computer first". A newer server whose home format
+  this computer reads keeps both. A server that says no version (one that
+  is silent) is not compared; the restore itself refuses a home it cannot
+  read.
+
+  **Computers** (M97 §3.1, §7.5). A linked computer's `on` and the server's
+  own `primary` offer Add a computer (`add_computer`, a code a new computer
+  joins with). While a computer asks to join (the server's enrollment window
+  `awaiting_approval`), that screen's sentence names it and its system and
+  asks for the six digits it shows, its action is `approve_computer` (needs
+  `sas`, the digits as the owner reads them on the new computer; its key
+  binds the computer that asks) and `deny_computer` stands first beside it,
+  then the step the screen led with before. The digits prove the computer
+  the owner looks at is the one asking, so no screen of the home shows them:
+  they are read on the new computer and typed. On the computer that joins
+  (`device/join.json`, `Home.Join`), the screen is `creating`, with Cancel
+  beside it while it dials and while it waits for the owner (outcome
+  `running`, then `waiting`, the sentence carrying the digits to type), and
+  once it was not added, its sentence says why and Cancel is its action
+  (outcome `failed`). Move back and Restore here are offered only where the
+  home moved from this computer (its moved marker): a computer that joined
+  has neither.
+
+  **What Fermix on the server may use** (M97 §7.3, D27). On the computer
+  that sets Always On up, `ready` carries `keeps_on`, the block of what this
+  computer keeps on for its server after the move, each line a tick Move now
+  sends. A linked computer that moved before M97, whose switches wait for the
+  owner's review, sets them in one place, its `computer` settings section
+  (This computer): its `on` says so in its note, and its action is
+  `review_offers` (Keep these switches), which takes them as they are.
+
+  **What Always On does not do yet** (M97). `detail.not_yet` lists what
+  does not work, or takes a terminal on the server, while the home runs
+  there, each `{id, sentence}` in `Copy.not_yet_ids/0`'s order and only
+  where it applies to this home: on the computer that sets Always On up, on
+  every screen before a move but `off` (the pane's D1), from its own
+  settings and recorder; on the server's own `primary`, what the home's
+  settings and its own turn on (`@server_not_yet`); on a linked computer's
+  `on`, its server's entries as the server's screen says them (but
+  WhatsApp's where the Funnel mounts already say it), then its own
+  (`@computer_not_yet`). Absent where nothing applies, on a problem and on
+  every other screen: a detail, never a notice.
 
   `notice` is the occurrence the apps raise as a system notification, or
   nil: the server ready (`ready:<candidate>`), the move done
   (`moved:<epoch>`, until the first backup after it), the server out of
-  reach (`cannot_reach:<since>`), a server that must be set up again
-  (`not_set_up:<created_at>`), the newest backup a week old
-  (`backup_week:<at>`) and Fermix back on this computer from a server of
-  the owner's own (`back:<epoch>`). An app posts when the id changes.
+  reach (`cannot_reach:<since>`), the newest backup a week old
+  (`backup_week:<at>`), Fermix back on this computer after a move back
+  (`back:<epoch>`), Restore here finished, naming the day of the backup it
+  restored (`restored:<epoch>`), a computer that joined the home
+  (`computer_joined:<device id>`, while the window names it), and a held
+  server whose 24 hours ran out,
+  which must be set up again with a new code (`server_lapsed:<candidate>`,
+  on the screen it leaves, while the code that enrolled it still names it;
+  never a desktop's candidate for a move back), and the server's sandbox or
+  coding approval changed from one of its computers (M97 §19.5, the newest
+  change, `computer_change:<what>:<at>`, for a week after, on the server and
+  on every linked computer, which reads it from its server's `home.status`).
+  An app posts when the id changes.
+
+  **Restarting the server** (M97 D28c). A change made from a linked
+  computer to the server's settings waits for the server's next start, so
+  while the server's own `home.status` says its restart is required
+  (`primary_home.restart.required`), every screen of a linked computer's
+  `desktop` (its `on` and the problems of a server that answers) offers
+  `restart_server` first in `detail.alternatives`, labelled with the name
+  this computer knows its server by (`restart_server_action/1`); none where
+  it knows no name.
 
   `outcome` is what a surface that follows a step reads (review R6), so none
   keeps its own table of states: `running` while Always On is at something
-  that moves this screen on by itself (a step's job; the server starting,
-  installing and connecting; the move, from its request here until the
-  restart shows; a server receiving its home), `waiting` while it waits on a
-  server of the owner's own to use its code, `failed` on a problem, `done`
-  when the next step is the owner's.
+  that moves this screen on by itself (the server connecting; the move, from
+  its request here until the restart shows; a server receiving its home; a
+  restore; a backup, where Back up now is offered, while it runs there, with
+  `progress` saying so), `waiting` while it waits on the owner's server to
+  use its code, `failed` on a problem, `done` when the next step is the
+  owner's. A backup that failed is the problem `backup_failed` (on a linked
+  desktop, and on a server with desktops), in the newest failed try's own
+  words, where it went and when, with Back up now, until a backup there is
+  stored; so the end of a backup says whether it was.
 
   `key/1` is the one digest of the summary (`summary.key`, and what
   `FermixCore.Home.StatusWatch` tells by, `watch/1`): every change a surface
-  draws moves it, and the clock alone (the last check, what was last seen,
-  an age in a sentence) never does.
+  draws moves it, and the clock alone (what was last seen, an age in a
+  sentence) never does.
   """
 
   alias FermixCore.Clock
+  alias FermixCore.ComputerHistory
+  alias FermixCore.Computers.Consent
+  alias FermixCore.Computers.Switches
+  alias FermixCore.Computers.Versions
+  alias FermixCore.Cues.Webhook
+  alias FermixCore.Funnel
   alias FermixCore.Home.Candidate
+  alias FermixCore.Home.Candidates
+  alias FermixCore.Home.ChangedFromComputer
   alias FermixCore.Home.DesktopLink
+  alias FermixCore.Home.Join
   alias FermixCore.Home.Move
+  alias FermixCore.Home.Moved
+  alias FermixCore.Home.MoveProgress
   alias FermixCore.Home.MoveReadiness
-  alias FermixCore.Home.Provision
-  alias FermixCore.Home.Provision.Ledger
-  alias FermixCore.Home.Provision.Registry
+  alias FermixCore.Home.Readable
   alias FermixCore.Home.Return
+  alias FermixCore.Home.ServerSandbox
   alias FermixCore.Home.Snapshot.Capture
   alias FermixCore.Home.UnreadableFiles
   alias FermixCore.Management.Copy
+  alias FermixCore.Management.Lifecycle
+  alias FermixCore.Setup.ConfigStore
 
-  @states ~w(off connect choose creating ready moving on undone retired candidate primary problem)
+  @states ~w(off connect creating ready moving on undone retired candidate primary problem)
   @outcomes ~w(running waiting done failed)
-  @problems ~w(turned_off cannot_reach deleted not_set_up waited_too_long no_capacity
-               account_limit read_only_token token_refused create_failed update disk_full
-               backup_old not_ready unreadable delete_failed power_failed server_retired
-               return_failed)
-  @actions ~w(create_server cancel move_now try_again learn_more turn_on restart_server
-              start_again create_in open_console paste_token update back_up_now replace_server
-              check_again own_server delete_server move_back restore_here)
-  @needs ~w(token recovery_passphrase new_recovery_passphrase choice)
+  @problems ~w(cannot_reach not_set_up waited_too_long update server_older server_ahead
+               disk_full backup_old backup_failed not_ready return_failed)
+  @actions ~w(cancel move_now try_again update back_up_now check_again own_server move_back
+              restore_here review_offers add_computer approve_computer deny_computer
+              change_passphrase restart_server)
+  @needs ~w(recovery_passphrase new_recovery_passphrase sas)
+  @step_states ~w(done active yours pending)
+  # What Always On does not do yet (M97) by where its fact lives: the home's
+  # settings and the server's own, which the server's screen lists and its
+  # computers read from it, and one computer's own, which only that
+  # computer's screen lists (`Copy.not_yet_ids/0` holds every one).
+  @server_not_yet ~w(google_meet coding_signin whatsapp slack)a
+  @computer_not_yet ~w(stackchan dev_plugins computer_history)a
 
   @unreachable_ms 10 * 60_000
-  @setup_ms 30 * 60_000
   @backup_old_s 3 * 86_400
   @day_s 86_400
   # The apps raise their notification once the newest backup is this old.
   @backup_week_s 7 * @day_s
+  # A server tells that it left out its inherited settings this long after.
+  @server_sandbox_s 7 * @day_s
+  # A change from a computer to the server's sandbox or coding approval is
+  # told this long after (M97 §19.5).
+  @computer_change_s 7 * @day_s
   # The states whose sentence `key/1` leaves out: on `on` and `problem` it
   # carries a figure that moves with the clock (a backup's age, a count of
   # days, how full a disk is), and their state, action and kind say every
-  # change of note; on `off` an app forgets Always On (the owner's rule), so
-  # the line naming what stops is read when its pane opens, never told.
+  # change of note (a failed backup's own words and time are its note, in
+  # `detail`); on `off` an app forgets Always On (the owner's rule).
   @untold_sentences ~w(off on problem)
   @moving ~w(requested streaming committed)
   @undoing ~w(aborting undoing)
-  # A move under way, from its request to its undoing: nothing it goes to is
-  # offered for deletion.
+  # A move under way, from its request to its undoing: the screen runs.
   @in_flight @moving ++ ["committing" | @undoing]
   @receiving ~w(receiving staged activating)
   # A move back's candidate that ended (`FermixCore.Home.Candidate`), and
@@ -186,9 +316,8 @@ defmodule FermixCore.Management.HomeSummary do
   @before_move ~w(enrolling enrolled)
   # A move the server reports under way, from its request to its undoing.
   @server_moves ~w(requested streaming committing aborting committed undoing)
-  @power_steps ~w(power_on power_reset)
   # The states whose Details have lines.
-  @detailed_states ~w(creating ready on problem)
+  @detailed_states ~w(ready on problem)
   # The bytes of a digest a key keeps.
   @key_bytes 16
 
@@ -197,13 +326,11 @@ defmodule FermixCore.Management.HomeSummary do
           required(:host_os) => :macos | :linux,
           required(:now) => DateTime.t(),
           required(:linked) => boolean(),
+          required(:revoked) => boolean(),
           required(:moved) => map() | nil,
           required(:move) => map() | nil,
           required(:link) => map(),
           required(:candidates) => [map()],
-          required(:provider) => module(),
-          required(:providers) => [module(), ...],
-          required(:provision) => map(),
           required(:review) => map() | nil,
           required(:move_items) => [MoveReadiness.item()],
           required(:snapshots) => map(),
@@ -211,11 +338,24 @@ defmodule FermixCore.Management.HomeSummary do
           required(:primary_home) => map() | nil,
           required(:primary_too_old) => boolean(),
           required(:copies_bytes) => non_neg_integer() | nil,
-          required(:stays_here) => [:imessage | :voice | :meetings],
+          required(:stays_here) => [:meetings | :accessories],
+          required(:return_costs) => [:telegram | :meet_notetaker],
           required(:zone) => String.t(),
           required(:return) => map() | nil,
           required(:returning) => map() | :unreadable | nil,
-          required(:copies) => [%{name: String.t(), at: DateTime.t()}]
+          required(:restoring) => boolean(),
+          required(:copies) => [%{name: String.t(), at: DateTime.t()}],
+          required(:lapsed) => String.t() | nil,
+          required(:moved_back) => boolean(),
+          required(:primary_behind) => boolean(),
+          required(:restarts_itself) => boolean() | nil,
+          optional(:standing) => FermixCore.Computers.Versions.standing() | nil,
+          optional(:readable) => :ok | {:error, term()} | nil,
+          optional(:offers_review) => boolean(),
+          optional(:move_progress) => MoveProgress.t() | nil,
+          optional(:computer_changes) => [ChangedFromComputer.change()],
+          optional(:not_yet) => [atom()],
+          optional(:zoom) => boolean()
         }
   @type summary :: %{String.t() => term()}
 
@@ -235,14 +375,6 @@ defmodule FermixCore.Management.HomeSummary do
   @spec outcomes() :: [String.t()]
   def outcomes, do: @outcomes
 
-  @doc """
-  How long a linked desktop's server may be silent, while this computer is
-  awake, before the summary says it cannot be reached (and Restore here may
-  delete it as its fence), in milliseconds.
-  """
-  @spec unreachable_ms() :: pos_integer()
-  def unreachable_ms, do: @unreachable_ms
-
   @doc "Every word an action's `needs` lists."
   @spec needs() :: [String.t()]
   def needs, do: @needs
@@ -251,9 +383,32 @@ defmodule FermixCore.Management.HomeSummary do
   @spec summary(facts()) :: summary()
   def summary(facts) when is_map(facts), do: facts |> screen() |> finish(facts)
 
+  @doc """
+  The sentence `retired` says on the computer at `home`, read from its own
+  files by the summary's one rule: where Fermix moved back to, on a
+  server's own copy a move back left serving nothing; that Fermix moved to
+  its server, where the home moved from this computer (its moved marker);
+  that its server no longer knows it, where its link says so
+  (`DesktopLink.revoked?/1`); and else that it is not connected to a
+  Fermix. A device with no link refuses with it what it cannot serve
+  (`Placement.retired/1`). `opts`: `:host_os` and `:unreadable_files`, as
+  `gather/5` takes them.
+  """
+  @spec retired_sentence(Path.t(), keyword()) :: String.t()
+  def retired_sentence(home, opts) when is_binary(home) and home != "" and is_list(opts) do
+    reads = Keyword.take(opts, [:unreadable_files])
+
+    retired_sentence(%{
+      host_os: Keyword.get_lazy(opts, :host_os, &host_os/0),
+      moved: moved_marker(home, reads),
+      moved_back: moved_back(home, :device, reads),
+      revoked: DesktopLink.revoked?(home)
+    })
+  end
+
   defp screen(%{role: :candidate} = facts), do: candidate(facts)
   defp screen(%{role: :device} = facts), do: device(facts)
-  defp screen(%{role: :primary} = facts), do: back(facts) || here(facts)
+  defp screen(%{role: :primary} = facts), do: here(facts)
 
   defp here(%{link: %{desktops: [_ | _]}} = facts), do: server(facts)
   defp here(facts), do: setup(facts)
@@ -261,11 +416,9 @@ defmodule FermixCore.Management.HomeSummary do
   @doc """
   The one digest of `summary`, `summary.key`: of everything it holds but
   the key itself, the sentence of an `off`, `on` or `problem` (whose figures
-  move with the clock), what was last seen (`detail.seen_at`) and the line
-  that says when the provider was last checked. A change of the state, the
-  sentence of a step, an action, a confirm, an alternative, a line, the
-  progress or the notice moves it; a check of the provider that found
-  nothing new does not.
+  move with the clock) and what was last seen (`detail.seen_at`). A change
+  of the state, the sentence of a step, an action, a confirm, an
+  alternative, a line, the progress or the notice moves it.
   """
   @spec key(summary()) :: String.t()
   def key(%{"state" => state, "detail" => detail} = summary) when is_map(detail) do
@@ -273,26 +426,22 @@ defmodule FermixCore.Management.HomeSummary do
 
     summary
     |> Map.drop(["key", "sentence"])
-    |> Map.put("detail", keyed_detail(detail))
+    |> Map.put("detail", Map.delete(detail, "seen_at"))
     |> Map.put("told", sentence)
     |> digest()
   end
 
-  defp keyed_detail(detail) do
-    clock = [Copy.checked_label(), Copy.summary_line_label(:seen)]
-
-    detail
-    |> Map.delete("seen_at")
-    |> Map.update("lines", [], fn lines -> Enum.reject(lines, &(&1["label"] in clock)) end)
-  end
+  @doc "Every word a step of `detail.steps` takes."
+  @spec step_states() :: [String.t()]
+  def step_states, do: @step_states
 
   @doc """
   An action's `key`: the digest of its `id`, `label`, `confirm`, `needs` and
   `target`, the one thing it acts on: the server a move goes to
-  (`move_now`, `try_again`, `check_again`), the provider's id of the server
-  Fermix created (`turn_on`, `restart_server`, `delete_server`,
-  `start_again`, `cancel`; the old server's for Delete your old server), the
-  provider's id (`paste_token`), the place (`create_in`), or nil.
+  (`move_now`, `try_again`, `check_again`), the server Forget this server
+  drops (`cancel` on a held server), the copy a restore takes
+  (`restore_here`), the computer that asks to join (`approve_computer`, its
+  name and system, never its digits), or nil.
   """
   @spec action_key(String.t(), String.t(), String.t() | nil, [String.t()], String.t() | nil) ::
           String.t()
@@ -301,14 +450,30 @@ defmodule FermixCore.Management.HomeSummary do
       do: digest([id, label, confirm, needs, target])
 
   @doc """
+  The action record a linked computer's summary offers for its server's
+  restart (M97 D28c): `restart_server`, labelled "Restart <server_name>",
+  `server_name` the name this computer knows its server by
+  (`Home.Link.status/0`'s `primary.name`), with no needs, no confirm and its
+  `key` (`action_key/5`, acting on nothing else). The summary offers exactly
+  this record, first in `detail.alternatives`, while the server's own
+  `home.status` says its restart is required; a surface that draws the same
+  step elsewhere (Settings) presses it as `home.act` with this key.
+  """
+  @spec restart_server_action(String.t()) :: map()
+  def restart_server_action(server_name) when is_binary(server_name) and server_name != "",
+    do: record(action(:restart_server, %{name: server_name}), %{})
+
+  @doc """
   Every action record `summary` offers, wherever it sits: its action, then
-  `detail.alternatives`, then `detail.actions` (review simplification 3).
-  The one reading of what a screen offers: `find_action/3`, the CLI's
-  steps and menus, and the tests read it here.
+  `detail.alternatives`, then the backup settings' Change
+  (`detail.backup.change`). The one reading of what a screen offers:
+  `find_action/3`, the CLI's steps and menus, and the tests read it here.
   """
   @spec offered(summary()) :: [map()]
   def offered(%{"action" => action, "detail" => detail}) when is_map(detail),
-    do: List.wrap(action) ++ Map.get(detail, "alternatives", []) ++ Map.get(detail, "actions", [])
+    do:
+      List.wrap(action) ++
+        Map.get(detail, "alternatives", []) ++ List.wrap(get_in(detail, ["backup", "change"]))
 
   @doc """
   The action `id` that `summary` offers under `key` (`offered/1`), or
@@ -325,27 +490,17 @@ defmodule FermixCore.Management.HomeSummary do
 
   @doc """
   The server a move goes to, by the engine's one rule: on the computer that
-  sets Always On up, the one the created server's code enrolled, else the
-  newest held; on a linked desktop moving back, its own candidate once the
-  server holds it (`returning`'s `candidate_id`); on a linked desktop during
-  a replace, the one the old server's code for the new server enrolled, as
-  the old server's own `home.status` holds it (`primary_home`); nil when
-  there is none. Reads `facts`' `role`, `candidates`, `link`, `returning`
-  and `primary_home`.
+  sets Always On up, the one its code enrolled, else the newest held; on a
+  linked desktop moving back, its own candidate once the server holds it
+  (`returning`'s `candidate_id`); nil when there is none. Reads `facts`'
+  `role`, `candidates`, `link` and `returning`.
   """
   @spec target(map()) :: map() | nil
   def target(%{role: :device, returning: %{"kind" => "return", "candidate_id" => id} = state})
       when is_binary(id),
       do: %{"candidate_id" => id, "name" => get_in(state, ["primary", "name"])}
 
-  def target(%{role: :device, returning: %{} = _getting_ready}), do: nil
-
-  def target(%{role: :device} = facts) do
-    case new_window(facts) do
-      %{"candidate_id" => id} when is_binary(id) -> held_by_server(facts, id)
-      _none -> nil
-    end
-  end
+  def target(%{role: :device}), do: nil
 
   def target(%{candidates: []}), do: nil
 
@@ -360,17 +515,15 @@ defmodule FermixCore.Management.HomeSummary do
   What `FermixCore.Home.StatusWatch` watches, from `facts` (`gather/5`'s):
 
     * `key`: the summary's own (`key/1`), and on a server with desktops what
-      their summaries read from its `home.status` (its newest backup, its
-      enrollment code's kind, state and who used it, and the servers it
-      holds), which its own summary does not show.
+      their summaries read from its `home.status` (its newest backup), which
+      its own summary does not show.
     * `off`: whether the summary is `off` with no notice to raise. An `off`
       that carries one (Fermix back on this computer from a server of the
       owner's own) is told as any other summary, or an engine that took the
       home back would never tell the apps.
     * `next_change_ms`: the milliseconds until the summary next changes by
-      the clock alone (a created server's code open 30 minutes awake, a link
-      down 10 minutes awake, a held server's 24 hours, a backup's 3 days and
-      its 7, a step's job budget), or nil when nothing does; always nil while
+      the clock alone (a link down 10 minutes awake, a held server's 24
+      hours, a backup's 3 days and its 7), or nil when nothing does; always nil while
       off. A deadline may change nothing when it comes (another rule decided
       first): the watch then reads a same key and tells nobody.
   """
@@ -385,40 +538,57 @@ defmodule FermixCore.Management.HomeSummary do
   @doc """
   The facts of `home`'s summary: `status` is the `home.status` record's own
   facts (`Management.Home.status/1` has gathered them, with
-  `primary_too_old`), `link` the rail's status, and `opts` the seams `:now`,
-  `:host_os`, `:providers` (in place of `Provision.Registry.all/0`),
-  `:personalization` (the owner's time zone, `FermixCore.Clock`'s seam) and
-  `:unreadable_files` (`Home.UnreadableFiles`, or nil for a verb with no
-  engine tree); `MoveReadiness.summary_items/4` is given `opts` as they are.
-  Reads the provider's ledger, the last readiness review, what this home's
-  settings turn on that runs only on this computer (on the primary, what
-  stops after a move; on a desktop, what runs here again after a move back),
+  `primary_too_old`, `primary_behind` and `restoring`), `link` the rail's
+  status, and `opts`
+  the seams `:now`, `:host_os`, `:personalization` (the owner's time zone,
+  `FermixCore.Clock`'s seam) and `:unreadable_files`
+  (`Home.UnreadableFiles`, or nil for a verb with no engine tree);
+  `MoveReadiness.summary_items/4` is given `opts` as they are. Reads the
+  last readiness review, on a desktop what this home's settings turn on that
+  runs only on this computer, and so here again after a move back, and what
+  of a move back's costs they turn on (`MoveReadiness.costs/2`, `opts`'
+  `:meet_notetaker` in place of this computer's notetaker),
   on the primary the review's items they decide, the record of a move back
   (`Home.Return`), and, on a desktop, its candidate for a move back
   (`Home.Candidate`'s state) and its stored copies, newest first, by the
-  time and epoch their names carry.
+  time and epoch their names carry. On the computer that sets Always On up,
+  the held server whose 24 hours ran out (`Home.Candidates.lapsed/2`) that
+  the window still names, unless it enrolled before the home last came back
+  here (a return's `moved_at`: the server it moved to and back from) or is
+  a desktop's candidate for a move back (`returning`) (`lapsed`); on a
+  desktop, whether its own move left it serving nothing (`moved_back`: a
+  server's copy after a move back, its move's `keep_as_desktop`; a move's
+  record that cannot be read is logged once while it stays so), and whether
+  this engine starts again by itself (`restarts_itself`, a move back's need;
+  on a desktop only, `opts`' `:restarts_itself` in place of
+  `Lifecycle.restarts_itself?/0`); what the move in hand on this
+  computer counted (`move_progress`, `Home.MoveProgress.read/0`, or `opts`'
+  `:move_progress`); and, but on a candidate, what this engine's settings and
+  recorder turn on of what Always On does not do yet (`not_yet`,
+  `MoveReadiness.not_yet/2`, then `ComputerHistory.recorder?/0` or `opts`'
+  `:recorder?`), and whether those settings set up the Zoom app the server
+  joins with (`zoom`, `MoveReadiness.zoom?/1`), which Google Meet's entry
+  says.
   """
   @spec gather(Path.t(), map(), map(), map(), keyword()) :: facts()
   def gather(home, %{role: role} = record, link, status, opts)
       when is_binary(home) and is_map(link) and is_map(status) and is_list(opts) do
     host_os = Keyword.get_lazy(opts, :host_os, &host_os/0)
     reads = Keyword.take(opts, [:unreadable_files])
-    providers = Keyword.get_lazy(opts, :providers, &Registry.all/0)
-    provider = Provision.current(home, providers)
     now = Keyword.get_lazy(opts, :now, &DateTime.utc_now/0)
+    return = return_record(home, reads)
+    {not_yet, zoom} = not_yet(home, role, host_os, {reads, opts})
 
     %{
       role: role,
       host_os: host_os,
       now: now,
       linked: DesktopLink.linked?(record, home),
+      revoked: DesktopLink.linked?(record, home) and DesktopLink.revoked?(home),
       moved: status.moved,
       move: status.move,
       link: link,
       candidates: status.candidates,
-      provider: provider,
-      providers: providers,
-      provision: Ledger.state(home, provider, Keyword.put(reads, :now, now)),
       review: review(home, role, reads),
       move_items: move_items(home, role, host_os, {status, link}, opts),
       snapshots: status.snapshots,
@@ -427,216 +597,138 @@ defmodule FermixCore.Management.HomeSummary do
       primary_too_old: Map.get(status, :primary_too_old, false),
       copies_bytes: copies_bytes(home, role, reads),
       stays_here: stays_here(home, role, host_os, reads),
+      return_costs: return_costs(home, role, reads, opts),
       zone: Clock.shown_zone(Keyword.take(opts, [:personalization])),
-      return: return_record(home, reads),
+      return: return,
       returning: returning_state(home, role, reads),
-      copies: copies(home, role)
+      restoring: Map.get(status, :restoring, false),
+      copies: copies(home, role),
+      lapsed: lapsed(home, role, {link, return}, now, reads),
+      moved_back: moved_back(home, role, reads),
+      primary_behind: Map.get(status, :primary_behind, false),
+      standing: server_compared(status, &Versions.standing/2),
+      readable: server_readable(status),
+      restarts_itself: restarts_itself(role, opts),
+      keeps_on: keeps_on(home, {role, link}, host_os, opts),
+      offers_review: offers_review(DesktopLink.linked?(record, home), opts),
+      join: if(role == :device, do: Join.view(home)),
+      screen: Map.get(status, :screen),
+      server_sandbox: server_sandbox(home, role, reads),
+      computer_changes: computer_changes(role, status),
+      move_progress: Keyword.get_lazy(opts, :move_progress, &MoveProgress.read/0),
+      not_yet: not_yet,
+      zoom: zoom
     }
   end
 
   # -- the computer that sets Always On up ---------------------------------------
 
-  defp setup(facts) do
-    checks = [&running/1, &undone/1, &ledger_problem/1, &provisioned/1, &own_server/1, &chosen/1]
-    Enum.find_value(checks, & &1.(facts)) || off(facts)
-  end
+  defp setup(facts), do: before_move(undone(facts) || own_server(facts), facts) || off(facts)
 
-  # A move undone while its server is still held: Try again, and, once the
-  # undo is over, the delete of a server Fermix created (`cleanup/2`).
+  # Every screen before a move but the first lists what Always On does not
+  # do yet from this computer's own facts (the pane's D1: `off` names nothing
+  # of what a move changes), the dev plugins naming the server held.
+  defp before_move(nil, _facts), do: nil
+
+  defp before_move(view, facts),
+    do: not_yet_listed(view, not_yet_entries(facts, Copy.not_yet_ids(), target(facts)["name"]))
+
+  # A move undone while its server is still held: Try again, or Forget this
+  # server once the undoing is over; why, in the move's own words, where its
+  # record has them.
   defp undone(%{move: %{"phase" => phase}} = facts) when phase in ["aborted", "undoing"] do
     if target(facts),
-      do: view("undone", sentence(:undone, facts), action(:try_again), %{}) |> cleanup(facts)
+      do:
+        view("undone", sentence(:undone, facts), action(:try_again), %{
+          "alternatives" => forget(facts),
+          "steps" => steps(:move, {1, "yours"}, facts)
+        })
+        |> noted(undone_reason(facts.move))
   end
 
   defp undone(_facts), do: nil
 
-  # What the ledger itself says is wrong, before anything about a server.
-  defp ledger_problem(%{provision: %{state: :unreadable, sentence: sentence}}),
-    do: problem("unreadable", sentence, :learn_more, %{})
-
-  defp ledger_problem(%{provision: %{token: :refused, server: server}} = facts) do
-    if standing?(server),
-      do: problem("token_refused", sentence(:token_refused, facts), :paste_token, %{}),
-      else: connect(facts)
-  end
-
-  defp ledger_problem(%{provision: %{state: :failed, failure: failure}} = facts),
-    do: failure_problem(failure, facts)
-
-  defp ledger_problem(_facts), do: nil
-
-  # A step that stopped, by the step: a power action's and a delete's, then
-  # a create's by its reason.
-  defp failure_problem(%{action: action} = failure, facts) when action in @power_steps,
-    do: failure |> power_failed() |> cleanup(facts)
-
-  defp failure_problem(%{action: "delete"} = failure, facts) do
-    {note, delete} = server_costs(facts.provision)
-
-    problem("delete_failed", failure.sentence, delete, %{
-      "note" => note,
-      "seen_at" => iso(failure.at)
-    })
-  end
-
-  defp failure_problem(%{reason: "unavailable", next_location: next} = failure, facts)
-       when is_binary(next) do
-    city = Provision.city(facts.provider, next)
-
-    problem("no_capacity", failure.sentence, action(:create_in, %{city: city, next: next}), %{
-      "next_location" => next,
-      "seen_at" => iso(failure.at)
-    })
-    |> cleanup(facts)
-  end
-
-  # A refusal the provider may lift by itself (stock) or once the owner did
-  # (an account limit) is offered again, Start again with the size and place
-  # the failure kept.
-  defp failure_problem(%{reason: reason} = failure, facts) do
-    {kind, act, alternatives} =
-      case reason do
-        "unavailable" -> {"no_capacity", :start_again, [:learn_more]}
-        "account_limit" -> {"account_limit", :open_console, [:start_again, :own_server]}
-        "read_only_token" -> {"read_only_token", :paste_token, []}
-        "gone" -> {"deleted", :start_again, []}
-        _other -> {"create_failed", :start_again, []}
-      end
-
-    problem(kind, failure.sentence, action(act, words(facts)), %{
-      "seen_at" => iso(failure.at),
-      "alternatives" => Enum.map(alternatives, &action(&1, words(facts)))
-    })
-    |> cleanup(facts)
-  end
-
-  defp power_failed(%{action: action} = failure) do
-    act = if action == "power_on", do: :turn_on, else: :restart_server
-    problem("power_failed", failure.sentence, act, %{"seen_at" => iso(failure.at)})
-  end
-
-  defp provisioned(%{provision: %{state: :deleting}}),
-    do: view("creating", Copy.summary_sentence(:deleting, %{}), nil, %{})
-
-  defp provisioned(%{provision: %{state: :creating}}), do: creating(:starting)
-
-  defp provisioned(%{provision: %{state: :gone, server: server}} = facts),
-    do: deleted(server, :start_again, facts) |> cleanup(facts)
-
-  defp provisioned(%{provision: %{state: :created, server: server}} = facts),
-    do: created(server, facts)
-
-  defp provisioned(_facts), do: nil
-
-  defp created(%{power: "off"} = server, facts),
-    do: turned_off(server) |> cleanup(facts)
-
-  defp created(server, facts), do: waiting_server(window(facts), server, facts)
-
-  # The created server, by where its own 24-hour code stands (L15).
-  defp waiting_server(%{kind: :provisioned, state: :open} = window, server, facts) do
-    cond do
-      Map.get(window, :awake_ms, 0) >= @setup_ms -> not_set_up(server, facts)
-      server.power == "running" -> creating(:installing)
-      true -> creating(:starting)
-    end
-  end
-
-  defp waiting_server(%{kind: :provisioned, state: :used, candidate_id: nil}, _server, _facts),
-    do: creating(:connecting)
-
-  defp waiting_server(%{kind: :provisioned, state: :used, candidate_id: id}, server, facts) do
-    case held(facts, id) do
-      nil ->
-        problem("waited_too_long", sentence(:waited_too_long, facts), :start_again, %{})
-        |> cleanup(facts)
-
-      candidate ->
-        ready(candidate, server, facts)
-    end
-  end
-
-  defp waiting_server(_window, server, facts), do: not_set_up(server, facts)
-
-  defp not_set_up(_server, facts) do
-    problem("not_set_up", sentence(:not_set_up, facts), :start_again, %{
-      "alternatives" => [action(:own_server), action(:open_console, words(facts))]
-    })
-    |> cleanup(facts)
-  end
-
-  # A server of the owner's own (`home.enroll.open`), with none Fermix created.
+  # The owner's server (`home.enroll.open`): its code open, used, or the
+  # server held.
   defp own_server(facts) do
     case {target(facts), window(facts)} do
       {%{} = candidate, _window} ->
-        ready(candidate, nil, facts)
+        ready(candidate, facts)
 
-      {nil, %{kind: :manual, state: :open}} ->
+      {nil, %{state: :open}} ->
         connect(facts)
 
-      {nil, %{kind: :manual, state: :used, candidate_id: nil}} ->
-        view("creating", Copy.summary_sentence(:connecting, %{}), nil, %{})
+      {nil, %{state: :used, candidate_id: nil}} ->
+        view("creating", Copy.summary_sentence(:connecting, %{}), nil, %{
+          "alternatives" => [action(:cancel, %{code: true})],
+          "steps" => steps(:move, {0, "active"}, facts)
+        })
 
       _nothing ->
         nil
     end
   end
 
-  defp chosen(%{provision: %{state: :connected}} = facts) do
-    view("choose", sentence(:choose, facts), action(:create_server), %{
-      "billing" => sentence(:billing, facts)
-    })
-  end
+  defp off(facts), do: view("off", sentence(:off, facts), action(:own_server), %{})
 
-  defp chosen(_facts), do: nil
-
-  defp off(facts) do
-    view(
-      "off",
-      sentence(:off, facts, %{stays_here: facts.stays_here}),
-      action(:paste_token, %{first: true}),
-      %{"alternatives" => [action(:own_server)]}
-    )
-  end
-
-  # The token screen: the first one, while a code for a server of the
-  # owner's own is open (which Cancel closes), or after the provider refused
-  # the token before anything was created.
+  # While the code for the owner's server is open: a new code, which ends
+  # this one (its label says so), or Cancel, which closes it. Running the
+  # command on the server is the owner's step.
   defp connect(facts) do
-    code? = match?(%{kind: :manual, state: :open}, window(facts))
-    paste = action(:paste_token, %{first: facts.provision.token != :refused})
-    cancel = if code?, do: [action(:cancel, %{code: true})], else: []
-
-    view("connect", sentence(:connect, facts), paste, %{
-      "alternatives" => [action(:own_server) | cancel]
+    view("connect", sentence(:connect, facts), nil, %{
+      "alternatives" => [action(:own_server, %{renew: true}), action(:cancel, %{code: true})],
+      "steps" => steps(:move, {0, "yours"}, facts)
     })
   end
-
-  defp creating(step),
-    do: view("creating", Copy.summary_sentence(step, %{}), action(:cancel), %{})
 
   # The server is held and waits for Move now, unless the last review blocks;
-  # either way what Fermix created for it can be deleted.
-  defp ready(candidate, server, facts),
-    do: candidate |> ready_view(server, facts) |> cleanup(facts)
-
-  defp ready_view(candidate, server, facts) do
+  # either way it can be forgotten, except while a move to it runs. Its
+  # warnings are Move now's confirm, which the owner reads before anything
+  # moves; a block is the screen's.
+  defp ready(candidate, facts) do
     items = review_items(facts.review, candidate["candidate_id"])
 
-    case for(%{"status" => "block", "sentence" => block} <- items, do: block) do
-      [block | _more] ->
-        problem("not_ready", Copy.summary_sentence(:not_ready, %{block: block}), :check_again, %{
-          "readiness" => items
+    case Enum.filter(items, &(&1["status"] == "block")) do
+      [_block | _more] = blocks ->
+        problem("not_ready", sentence(:not_ready, facts), :check_again, %{
+          "readiness" => blocks,
+          "alternatives" => forget(facts)
         })
 
       [] ->
-        view("ready", sentence(:ready, facts), action(:move_now), %{
-          "server" => server_facts(candidate, server, facts),
-          "readiness" => items,
-          "waits_until" => candidate["expires_at"]
-        })
+        view(
+          "ready",
+          sentence(:ready, facts),
+          action(:move_now),
+          %{
+            "server" => server_facts(candidate),
+            "waits_until" => candidate["expires_at"],
+            "alternatives" => forget(facts),
+            "steps" => steps(:move, {1, "yours"}, facts)
+          }
+          |> put_some("keeps_on", Map.get(facts, :keeps_on))
+        )
+        |> noted(waits(:ready_waits, candidate["expires_at"], facts, %{to: candidate["name"]}))
     end
   end
+
+  defp forget(facts), do: if(moving?(facts), do: [], else: [action(:cancel, %{forget: true})])
+
+  # Until when a held server, or this computer during a move back, waits.
+  defp waits(_key, nil, _facts, _values), do: nil
+
+  defp waits(key, until, facts, values),
+    do: sentence(key, facts, Map.merge(values, %{at: time(until), zone: facts.zone}))
+
+  # Why a move was undone, in the words its record keeps: the one the worker
+  # wrote when it undid it, never the phase's own (`Move.sentence/2`), which
+  # the screen's sentence already says.
+  defp undone_reason(%{"phase" => phase, "candidate" => to, "sentence" => said})
+       when is_binary(said) do
+    if said != Move.sentence(phase, to), do: said
+  end
+
+  defp undone_reason(_move), do: nil
 
   # The warnings and blocks of the last review of this server; nothing when
   # all is well or none was made.
@@ -645,189 +737,275 @@ defmodule FermixCore.Management.HomeSummary do
 
   defp review_items(_review, _candidate_id), do: []
 
-  defp server_facts(candidate, server, facts) do
+  defp server_facts(candidate) do
     %{
-      "name" => (server && server.name) || candidate["name"],
-      "type" => server && facts.provider.type_name(server.type),
-      "location" => server && Provision.city(facts.provider, server.location),
-      "ipv4" => server && server.ipv4,
+      "name" => candidate["name"],
       "system" => "#{candidate["os"]} #{candidate["arch"]}",
       "version" => candidate["version"]
     }
   end
 
-  # Before a move, while a server Fermix created for it stands, the screen
-  # offers to delete it (during a replace, the new one) beside its own
-  # alternatives, and a problem's note says it costs money: built here
-  # once, for every screen a waiting server has (review R2). Never the
-  # server the home lives on, and never while a move runs.
-  defp cleanup(view, facts) do
-    if deletable?(facts) do
-      {note, delete} = server_costs(facts.provision)
-      detail = Map.update(view["detail"], "alternatives", [delete], &(&1 ++ [delete]))
-      %{view | "detail" => noted(detail, view["state"], note)}
-    else
-      view
-    end
-  end
-
-  defp noted(detail, "problem", note), do: Map.update!(detail, "note", &(&1 || note))
-  defp noted(detail, _state, _note), do: detail
-
-  defp deletable?(%{provision: provision} = facts),
-    do: standing?(provision.server) and not home_server?(facts) and not moving?(facts)
-
-  # The server the home lives on: a linked desktop's own, outside a replace
-  # or once the move to the new one is done.
-  defp home_server?(%{role: :device, provision: %{replace: %{current: :old}}}), do: false
-  defp home_server?(%{role: :device}), do: true
-  defp home_server?(_facts), do: false
-
   defp moving?(%{move: %{"phase" => phase}}), do: phase in @in_flight
   defp moving?(_facts), do: false
 
-  defp server_costs(%{replace: %{}}),
-    do: {Copy.summary_sentence(:new_server_costs, %{}), action(:delete_server, %{which: "new"})}
-
-  defp server_costs(_provision),
-    do: {Copy.summary_sentence(:server_costs, %{}), action(:delete_server)}
-
-  # -- a step whose job runs -----------------------------------------------------
-
-  # The ledger names the step's job before it starts, so this is what the
-  # summary says from the press on, whatever the job has written yet.
-  defp running(%{provision: %{action: %{kind: kind}}} = facts), do: running_step(kind, facts)
-  defp running(_facts), do: nil
-
-  # Start again deletes what stands first, which no one cancels.
-  defp running_step("create", %{provision: %{state: :deleting}} = facts), do: deleting_step(facts)
-
-  defp running_step("create", %{provision: %{replace: %{}}} = facts),
-    do: new_server_step(:replace_creating, facts)
-
-  defp running_step("create", _facts), do: creating(:starting)
-  defp running_step("delete", facts), do: deleting_step(facts)
-
-  defp running_step("power_on", %{provision: %{replace: %{}}} = facts),
-    do: view("creating", sentence(:replace_turning_on, facts), nil, %{})
-
-  defp running_step("power_on", facts),
-    do: view("creating", sentence(:turning_on, facts), nil, %{})
-
-  defp running_step("power_reset", facts),
-    do: view("creating", sentence(:restarting, facts), nil, %{})
-
-  defp deleting_step(%{provision: %{replace: %{current: :new}}} = facts),
-    do: view("creating", sentence(:replace_deleting, facts), nil, %{})
-
-  defp deleting_step(%{provision: %{replace: %{}}} = facts),
-    do: view("creating", sentence(:replace_cancelling, facts), nil, %{})
-
-  defp deleting_step(_facts),
-    do: view("creating", Copy.summary_sentence(:deleting, %{}), nil, %{})
-
-  # The step in hand: a move back's, from what this computer's candidate
-  # wrote so far, else the job's, from what it wrote so far.
+  # The step in hand: a move back's or a restore's, from what this
+  # computer's candidate wrote so far, else Restore here's job, else the
+  # move's from this computer.
   defp progress(%{"state" => "moving"}, %{role: :device} = facts) do
-    case return_progress(facts) do
+    case return_progress(facts) || forward_progress(facts) do
       nil -> nil
-      key -> sentence(key, facts)
+      key -> sentence(key, facts, %{to: get_in(facts, [:move, "candidate"])})
     end
   end
 
-  defp progress(_view, %{provision: %{action: %{kind: kind}} = provision} = facts),
-    do: Copy.summary_sentence(progress_key(kind, provision), words(facts))
+  defp progress(view, facts) do
+    if backing_up?(view, facts), do: sentence(:progress_backing_up, facts)
+  end
 
-  defp progress(_view, _facts), do: nil
+  # The move from this computer: packing, then the worker's own step while
+  # it streams (`Home.MoveProgress`), then switching over once the server
+  # took it. While it commits the screen's sentence says it waits.
+  defp forward_progress(%{move: %{"phase" => "requested"}}), do: :progress_packing
+  defp forward_progress(%{move: %{"phase" => "committed"}}), do: :progress_switching
+
+  defp forward_progress(%{move: %{"phase" => "streaming"}} = facts) do
+    case Map.get(facts, :move_progress) do
+      %{step: :capture} -> :progress_packing
+      %{step: :send} -> :progress_sending
+      %{step: :staging} -> :progress_unpacking
+      _other -> nil
+    end
+  end
+
+  defp forward_progress(_facts), do: nil
+
+  # -- a flow's steps, route and transfer (the pane's §3.13, P1 to P3) ---------
+
+  # The flow's steps, the one at `at` marked (`active` while it runs,
+  # `yours` where the owner takes it), those before it done.
+  defp steps(flow, {at, mark}, facts) when mark in @step_states do
+    flow
+    |> Copy.step_labels(machine(facts.host_os))
+    |> Enum.with_index()
+    |> Enum.map(fn {label, index} ->
+      %{"label" => label, "state" => step_state(index, at, mark)}
+    end)
+  end
+
+  defp step_state(index, at, _mark) when index < at, do: "done"
+  defp step_state(at, at, mark), do: mark
+  defp step_state(_index, _at, _mark), do: "pending"
+
+  # This computer first, the server second, and which way the home goes.
+  defp route(to, direction, facts) when is_binary(to),
+    do: %{"from" => Copy.route_here(machine(facts.host_os)), "to" => to, "direction" => direction}
+
+  defp route(_to, _direction, _facts), do: nil
+
+  # The bytes the move in hand counted (`Home.MoveProgress`), only while
+  # they move, in whole twentieths: the fill never runs ahead of the count.
+  defp transfer(%{move_progress: %{step: step, bytes: bytes, size: size}}, step, way)
+       when is_integer(size) and size > 0 do
+    counted = min(bytes, size)
+
+    %{
+      "fraction" => div(counted * 20, size) / 20,
+      "label" => Copy.transfer_label(counted, size, way)
+    }
+  end
+
+  defp transfer(_facts, _step, _way), do: nil
+
+  # -- the backup settings (the pane's §3.12, S2 and S3) -------------------------
+
+  # Where Backup settings shows: whether the recovery passphrase is set, with
+  # Change, and the line that says the server keeps an S3 copy.
+  defp backup(%{"recipient_set" => set?} = snapshots) when is_boolean(set?) do
+    words = Copy.backup_words(set?)
+
+    %{
+      "passphrase" => %{"label" => words.label, "value" => words.value, "footer" => words.footer},
+      "change" => action(:change_passphrase),
+      "s3" => if(s3_bucket(snapshots), do: words.s3)
+    }
+  end
+
+  defp backup(_snapshots), do: nil
+
+  # The bucket of the server's S3 copy, from its target's destination.
+  defp s3_bucket(%{"targets" => targets}) when is_list(targets) do
+    case Enum.find(targets, &match?(%{"id" => "s3", "configured" => true}, &1)) do
+      %{"destination" => "s3://" <> _rest = destination} -> URI.parse(destination).host
+      _none -> nil
+    end
+  end
+
+  defp s3_bucket(_snapshots), do: nil
+
+  # -- the screen's help page (the pane's R7 and §4) ------------------------------
+
+  defp anchor(%{"action" => %{"id" => "approve_computer"}}, _facts), do: "add-a-computer"
+  defp anchor(_view, %{join: %{}}), do: "add-a-computer"
+
+  defp anchor(%{"state" => "problem", "detail" => detail}, facts),
+    do: problem_anchor(detail, facts)
+
+  defp anchor(%{"state" => "off"}, _facts), do: "what-you-need"
+
+  defp anchor(%{"state" => state}, _facts) when state in ~w(connect candidate),
+    do: "set-up-your-server"
+
+  defp anchor(%{"state" => "creating"}, %{role: :primary}), do: "set-up-your-server"
+  defp anchor(%{"state" => state}, _facts) when state in ~w(on primary), do: "on-your-server"
+  defp anchor(%{"state" => "retired"}, %{moved: %{}}), do: "when-the-server-is-gone"
+  defp anchor(%{"state" => "retired"}, _facts), do: "add-a-computer"
+  defp anchor(_view, %{role: :primary}), do: flow_anchor(:move)
+  defp anchor(_view, facts), do: flow_anchor(device_flow(facts))
+
+  defp problem_anchor(%{"kind" => "cannot_reach"}, _facts), do: "when-the-server-is-gone"
+
+  defp problem_anchor(%{"kind" => kind}, _facts) when kind in ~w(not_set_up waited_too_long),
+    do: "set-up-your-server"
+
+  defp problem_anchor(%{"kind" => kind}, _facts)
+       when kind in ~w(update server_older server_ahead),
+       do: "updates"
+
+  defp problem_anchor(%{"kind" => "disk_full"}, _facts), do: "server-disk"
+
+  defp problem_anchor(%{"kind" => kind}, _facts) when kind in ~w(backup_old backup_failed),
+    do: "backups"
+
+  defp problem_anchor(%{"kind" => "not_ready"}, _facts), do: "the-move"
+  defp problem_anchor(%{"kind" => "return_failed"}, facts), do: flow_anchor(device_flow(facts))
+
+  defp flow_anchor(:move), do: "the-move"
+  defp flow_anchor(:return), do: "move-back"
+  defp flow_anchor(:restore), do: "when-the-server-is-gone"
+
+  # On a linked computer: a restore here, a move back to it, or the move
+  # from it.
+  defp device_flow(%{returning: %{"kind" => "local"}}), do: :restore
+  defp device_flow(%{returning: returning}) when returning != nil, do: :return
+
+  defp device_flow(facts) do
+    cond do
+      restore_running?(facts) -> :restore
+      started?(facts.return) -> :return
+      true -> :move
+    end
+  end
 
   defp return_progress(%{returning: %{"kind" => kind, "phase" => phase}})
        when phase in @receiving,
        do: return_step(kind, phase)
 
-  defp return_progress(%{returning: nil, return: %{fenced_at: %DateTime{}}}),
-    do: :progress_restoring
-
-  defp return_progress(%{returning: nil, return: %{move_started_at: %DateTime{}}}),
-    do: :progress_return_placing
+  defp return_progress(%{returning: nil} = facts) do
+    if restore_running?(facts), do: :progress_restoring, else: return_placing(facts)
+  end
 
   defp return_progress(_facts), do: nil
+
+  defp return_placing(%{return: %{move_started_at: %DateTime{}}}), do: :progress_return_placing
+  defp return_placing(_facts), do: nil
 
   defp return_step(_kind, "activating"), do: :progress_return_placing
   defp return_step("local", _phase), do: :progress_restoring
   defp return_step("return", "receiving"), do: :progress_return_receiving
   defp return_step("return", "staged"), do: :progress_return_staged
 
-  defp progress_key(kind, _provision) when kind in @power_steps, do: :progress_power
-  defp progress_key(_kind, %{state: :deleting}), do: :progress_deleting
-  defp progress_key("delete", _provision), do: :progress_deleting
-
-  defp progress_key("create", %{server: %{status: status}}) when status in [:creating, :created],
-    do: :progress_starting
-
-  defp progress_key("create", %{server: %{status: :requested}}), do: :progress_server
-  defp progress_key("create", %{state: :creating}), do: :progress_firewall
-  defp progress_key("create", _provision), do: :progress_checking
-
   # -- the computer the move left ------------------------------------------------
 
   # A move back leads, whatever the link says (its activation ends the
-  # tenure's link); then Restore here's job; then the computer's own move.
-  defp device(facts), do: returning(facts) || restoring(facts) || settled(facts)
+  # tenure's link); then Restore here's job, before its candidate is
+  # written; then the computer's own move.
+  defp device(facts),
+    do: joining(facts) || returning(facts) || restoring(facts) || asking(settled(facts), facts)
 
   defp settled(%{move: %{"phase" => "committing"}} = facts),
-    do: view("moving", sentence(:waiting, facts), nil, %{})
+    do: view("moving", sentence(:waiting, facts), nil, forward_detail(facts))
 
   defp settled(%{move: %{"phase" => phase}} = facts) when phase in @moving,
-    do: view("moving", sentence(:moving, facts), nil, %{})
+    do: view("moving", sentence(:moving, facts), nil, forward_detail(facts))
 
   defp settled(%{move: %{"phase" => phase}} = facts) when phase in @undoing,
-    do: view("undone", sentence(:undone, facts), nil, %{})
+    do: view("undone", sentence(:undone, facts), nil, %{}) |> noted(undone_reason(facts.move))
 
   defp settled(%{linked: false} = facts), do: retired(facts)
-  defp settled(%{link: %{primary: %{status: :revoked}}} = facts), do: retired(facts)
+  defp settled(%{revoked: true} = facts), do: retired(facts)
   defp settled(facts), do: desktop(facts)
 
-  defp retired(facts),
-    do:
-      view("retired", sentence(:retired, facts), action(:learn_more), %{})
-      |> restorable(facts)
+  # The move from this computer under way: its steps, its route to the
+  # server, and the bytes sent while they move (the pane's §3.13).
+  defp forward_detail(%{move: %{"phase" => phase, "candidate" => to}} = facts) do
+    at = if phase in ["committing", "committed"], do: 3, else: 2
+
+    %{"steps" => steps(:move, {at, "active"}, facts), "route" => route(to, "forward", facts)}
+    |> put_some("transfer", transfer(facts, :send, :sent))
+  end
+
+  defp retired(facts), do: view("retired", retired_sentence(facts), nil, %{}) |> restorable(facts)
+
+  # A server's own copy that a move back left serving nothing names where
+  # Fermix moved back to; any other computer the home moved from, its
+  # server. Fermix never moved from a computer that joined (no moved
+  # marker): its server forgot it, which its link says, and a new code joins
+  # it again (`Home.Join`), or its link is gone while it restarts as its own
+  # Fermix. The one rule, which `retired_sentence/2` reads from the files.
+  defp retired_sentence(%{moved_back: true, moved: %{to: to}} = facts),
+    do: sentence(:retired_back, facts, %{to: to})
+
+  defp retired_sentence(%{moved: %{}} = facts), do: sentence(:retired, facts)
+  defp retired_sentence(%{revoked: true} = facts), do: sentence(:removed, facts)
+  defp retired_sentence(facts), do: sentence(:unlinked, facts)
 
   defp desktop(facts) do
     checks = [
-      &running/1,
-      &failed_step/1,
-      &replace_moving/1,
       &away_here/1,
       &too_old/1,
-      &token_stopped/1,
-      &replace_stopped/1,
+      &settings_only/1,
+      &server_older/1,
+      &server_ahead/1,
       &server_disk/1,
-      &replacing/1,
+      &backup_failed/1,
       &desktop_backup/1
     ]
 
-    Enum.find_value(checks, & &1.(facts)) || on(facts)
+    (Enum.find_value(checks, & &1.(facts)) || on(facts)) |> restartable(facts)
   end
 
-  # A power action on the server the home lives on that stopped: tried again,
-  # and never with a delete beside it, since that server holds the home.
-  defp failed_step(%{provision: %{replace: nil, failure: %{action: action} = failure}})
-       when action in @power_steps,
-       do: power_failed(failure)
+  # The server's restart a change from this computer waits for (M97 D28c):
+  # first beside whatever this screen offers, while the server's own
+  # `home.status` says its restart is required, under the name this computer
+  # knows it by; Settings offers the same step (`restart_server_action/1`).
+  defp restartable(view, %{primary_home: %{"restart" => %{"required" => true}}} = facts) do
+    case get_in(facts, [:link, :primary, :name]) do
+      name when is_binary(name) and name != "" ->
+        restart = action(:restart_server, %{name: name})
 
-  defp failed_step(_facts), do: nil
+        update_in(
+          view,
+          ["detail"],
+          &Map.update(&1, "alternatives", [restart], fn more -> [restart | more] end)
+        )
 
-  # No session with the server: what the provider last said, else ten
-  # minutes of silence while this computer is awake.
-  defp away(%{link: %{primary: %{status: status} = link}, provision: provision} = facts)
+      _no_name ->
+        view
+    end
+  end
+
+  defp restartable(view, _facts), do: view
+
+  # No session with the server for ten minutes while this computer is awake:
+  # what to check, and, where this computer can take the home back from its
+  # own copy, that Restore here is the answer once it is gone for good.
+  defp away(%{link: %{primary: %{status: status} = link}} = facts)
        when status in [:unreachable, :stale] do
-    {server, powered?} = home_server(provision)
+    if (Map.get(link, :down_ms) || 0) >= @unreachable_ms do
+      restore? = match?(%{"id" => "restore_here"}, restore_offer(facts))
+      note = sentence(:cannot_reach_note, facts, %{restore: restore?})
 
-    cond do
-      match?(%{status: :gone}, server) -> deleted(server, :learn_more, facts)
-      match?(%{power: "off"}, server) -> turned_off(server, :turned_off, powered?)
-      (Map.get(link, :down_ms) || 0) >= @unreachable_ms -> cannot_reach(server, powered?)
-      true -> nil
+      problem("cannot_reach", sentence(:cannot_reach, facts), nil, %{"note" => note})
     end
   end
 
@@ -837,48 +1015,37 @@ defmodule FermixCore.Management.HomeSummary do
   # computer can take the home back from its own copy.
   defp away_here(facts), do: facts |> away() |> restorable(facts)
 
-  defp cannot_reach(%{status: :created} = server, powered?) do
-    act = if powered?, do: :restart_server, else: :learn_more
-
-    problem("cannot_reach", Copy.summary_sentence(:cannot_reach, %{}), act, %{
-      "seen_at" => iso(server.seen_at)
-    })
-  end
-
-  defp cannot_reach(_server, _powered?),
-    do: problem("cannot_reach", Copy.summary_sentence(:cannot_reach, %{}), :learn_more, %{})
-
-  # The server the home lives on, and whether the provider's power actions
-  # reach it: during a replace the old one until the move is done, which
-  # they do not (they act on the new server).
-  defp home_server(%{replace: %{current: :old, old: old}}), do: {old, false}
-  defp home_server(provision), do: {provision.server, true}
-
   defp too_old(%{primary_too_old: true} = facts),
     do: problem("update", sentence(:update, facts), :update, %{})
 
   defp too_old(_facts), do: nil
 
-  defp token_stopped(%{provision: %{token: :refused} = provision} = facts) do
-    {server, _powered?} = home_server(provision)
+  # Past the server's window (M97 §3.4): this computer keeps its link for
+  # settings alone until its Fermix updates.
+  defp settings_only(%{standing: :settings_only} = facts),
+    do: problem("update", sentence(:update_settings_only, facts), :update, %{})
 
-    if standing?(server) or standing?(provision.server),
-      do: problem("token_refused", sentence(:token_refused, facts), :paste_token, %{})
+  defp settings_only(_facts), do: nil
+
+  # The server refused this computer's protocol as newer than its own: it
+  # updates on its own once the apps that keep the home's backups carry it.
+  defp server_older(%{primary_behind: true} = facts),
+    do:
+      problem("server_older", sentence(:server_older, facts), nil, %{
+        "note" => sentence(:server_older_note, facts)
+      })
+
+  defp server_older(_facts), do: nil
+
+  # The server installed a release ahead of the apps (an owner's override)
+  # that this computer cannot read: until its Fermix catches up, a restore
+  # here would be refused.
+  defp server_ahead(%{readable: {:error, _newer}, primary_home: %{"update" => update}} = facts) do
+    if match?(%{"ahead_of_apps" => true}, update),
+      do: problem("server_ahead", sentence(:server_ahead, facts), :update, %{})
   end
 
-  defp token_stopped(_facts), do: nil
-
-  # A replace that stopped before the provider made anything for it (review
-  # R4): the server the home lives on is as it was, so Replace is offered
-  # again, never a Start again, whose delete would reach that server.
-  defp replace_stopped(%{provision: %{replace: nil, failure: %{action: "create"} = failure}}) do
-    problem("create_failed", failure.sentence, :replace_server, %{
-      "note" => Copy.summary_sentence(:replace_stopped, %{}),
-      "seen_at" => iso(failure.at)
-    })
-  end
-
-  defp replace_stopped(_facts), do: nil
+  defp server_ahead(_facts), do: nil
 
   defp server_disk(%{primary_home: %{"disk" => disk}}), do: disk_problem(disk, :disk_full)
   defp server_disk(_facts), do: nil
@@ -909,18 +1076,38 @@ defmodule FermixCore.Management.HomeSummary do
   defp no_backup(_facts), do: nil
 
   defp on(facts) do
-    view("on", on_sentence(facts), nil, %{
+    snapshots = get_in(facts, [:primary_home, "snapshots"])
+
+    detail = %{
       "server" => on_server(facts),
-      "backups" => backups(get_in(facts, [:primary_home, "snapshots"])),
+      "backups" => backups(snapshots),
       "copies_bytes" => facts.copies_bytes,
       "disk_used" => get_in(facts, [:primary_home, "disk", "used"]),
-      "data" => sentence(:data, facts, %{provider: provider(facts)}),
-      "actions" => [
-        action(:back_up_now),
-        action(:replace_server),
-        action(:move_back, %{machine: machine(facts.host_os)})
-      ]
-    })
+      "alternatives" =>
+        [action(:back_up_now), action(:add_computer)] ++ List.wrap(move_back(facts))
+    }
+
+    view(
+      "on",
+      on_sentence(facts),
+      nil,
+      detail
+      |> webhooks(get_in(facts, [:primary_home, "webhooks"]))
+      |> put_some("backup", backup(snapshots))
+      |> put_some("not_yet", linked_not_yet(facts))
+    )
+    |> reviewing(facts)
+  end
+
+  # A computer that moved before M97 offers nothing until the owner reviews
+  # what Fermix on the server may use on it (M97 §7.3). Its switches, under
+  # This computer, are where it is done: changing any is the review, and the
+  # screen's one step keeps them as they are, so the five things are set in
+  # one place.
+  defp reviewing(view, facts) do
+    if Map.get(facts, :offers_review),
+      do: %{view | "action" => action(:review_offers)} |> noted(sentence(:review_note, facts)),
+      else: view
   end
 
   defp on_sentence(%{primary_home: %{"snapshots" => snapshots}} = facts) do
@@ -932,121 +1119,12 @@ defmodule FermixCore.Management.HomeSummary do
 
   defp on_sentence(facts), do: sentence(:on, facts)
 
-  defp on_server(%{provision: %{server: server}} = facts) do
-    %{
-      "name" => (server && server.name) || link_name(facts),
-      "location" => server && Provision.city(facts.provider, server.location),
-      "version" => get_in(facts, [:primary_home, "version"])
-    }
-  end
+  defp on_server(facts),
+    do: %{"name" => link_name(facts), "version" => get_in(facts, [:primary_home, "version"])}
 
   defp link_name(%{link: %{primary: %{name: name}}}), do: name
   defp link_name(%{moved: %{to: to}}), do: to
   defp link_name(_facts), do: nil
-
-  defp provider(%{provision: %{server: %{}}} = facts), do: facts.provider.display().name
-  defp provider(_facts), do: "whoever hosts it"
-
-  # -- a replace of the server, on the computer the home left -------------------
-
-  # The old server serves nothing while the move runs, so its silence then is
-  # the move, not a problem.
-  defp replace_moving(%{provision: %{replace: %{state: :moving}}} = facts),
-    do: view("moving", sentence(:replace_moving, facts), nil, %{})
-
-  defp replace_moving(_facts), do: nil
-
-  defp replacing(%{provision: %{replace: %{state: state} = replace}} = facts),
-    do: replace_step(state, replace, facts)
-
-  defp replacing(_facts), do: nil
-
-  defp replace_step(:creating, _replace, facts), do: new_server_step(:replace_creating, facts)
-  defp replace_step(:waiting, _replace, facts), do: new_server(facts.provision.server, facts)
-
-  defp replace_step(:deleting, _replace, facts),
-    do: view("creating", sentence(:replace_deleting, facts), nil, %{})
-
-  defp replace_step(:cancelling, _replace, facts),
-    do: view("creating", sentence(:replace_cancelling, facts), nil, %{})
-
-  defp replace_step(:failed, %{current: :new, failure: failure}, _facts),
-    do: delete_failed(failure)
-
-  defp replace_step(:failed, %{failure: failure}, facts), do: failure_problem(failure, facts)
-  defp replace_step(state, _replace, _facts) when state in [:moving, :done], do: nil
-
-  # The new server, by where the old server's 24-hour code for it stands.
-  defp new_server(%{power: "off"} = server, facts),
-    do: server |> turned_off(:replace_turned_off, true) |> cleanup(facts)
-
-  defp new_server(server, facts), do: new_server_window(new_window(facts), server, facts)
-
-  defp new_server_window(%{"state" => "open"}, server, facts) do
-    if older_than?(server.created_at, @setup_ms, facts),
-      do: new_server_problem("not_set_up", :replace_not_set_up, facts),
-      else: new_server_step(power_step(server), facts)
-  end
-
-  defp new_server_window(%{"state" => "used", "candidate_id" => nil}, _server, facts),
-    do: new_server_step(:replace_connecting, facts)
-
-  defp new_server_window(%{"state" => "used", "candidate_id" => id}, server, facts) do
-    case held_by_server(facts, id) do
-      nil ->
-        new_server_problem("waited_too_long", :replace_waited_too_long, facts)
-
-      candidate ->
-        view("ready", sentence(:replace_ready, facts), action(:move_now), %{
-          "server" => server_facts(candidate, server, facts),
-          "readiness" => [],
-          "waits_until" => candidate["expires_at"]
-        })
-        |> cleanup(facts)
-    end
-  end
-
-  defp new_server_window(%{"state" => "expired"}, _server, facts),
-    do: new_server_problem("not_set_up", :replace_not_set_up, facts)
-
-  # The old server's part is missing, or holds no such code: what the provider
-  # says.
-  defp new_server_window(nil, server, facts), do: new_server_step(power_step(server), facts)
-
-  defp power_step(%{power: "running"}), do: :replace_installing
-  defp power_step(_server), do: :replace_starting
-
-  defp new_server_step(key, facts),
-    do: view("creating", sentence(key, facts), action(:cancel), %{})
-
-  defp new_server_problem(kind, key, facts),
-    do: problem(kind, sentence(key, facts), :start_again, %{}) |> cleanup(facts)
-
-  # Deleting the old server after the move stopped: it stays, and costs.
-  defp delete_failed(failure) do
-    problem("delete_failed", failure.sentence, action(:delete_server, %{which: "old"}), %{
-      "note" => Copy.summary_sentence(:old_server_costs, %{}),
-      "seen_at" => iso(failure.at)
-    })
-  end
-
-  # The old server's window for the new one, as its own `home.status` says.
-  defp new_window(facts) do
-    case get_in(facts, [:primary_home, "enrollment"]) do
-      %{"kind" => "provisioned"} = window -> window
-      _none -> nil
-    end
-  end
-
-  defp held_by_server(facts, id) do
-    candidates = get_in(facts, [:primary_home, "candidates"]) || []
-    Enum.find(candidates, &(&1["candidate_id"] == id))
-  end
-
-  defp older_than?(%DateTime{} = at, ms, facts),
-    do: DateTime.diff(facts.now, at, :millisecond) >= ms
-
-  defp older_than?(nil, _ms, _facts), do: false
 
   # -- moving back to this computer (design §7 to §9) -------------------------------
 
@@ -1077,14 +1155,17 @@ defmodule FermixCore.Management.HomeSummary do
     end
   end
 
+  # Nothing is the owner's to do while this computer connects: Cancel
+  # stands beside it.
   defp return_view(%{"phase" => "enrolling"}, facts),
-    do: view("creating", sentence(:return_connecting, facts), return_cancel(), %{})
+    do:
+      view("creating", sentence(:return_connecting, facts), nil, %{
+        "alternatives" => [return_cancel()],
+        "steps" => steps(:return, {0, "active"}, facts)
+      })
 
-  defp return_view(%{"phase" => phase}, facts) when phase in @ended do
-    problem("return_failed", sentence(:return_failed, facts), move_back(facts), %{
-      "alternatives" => [action(:learn_more)]
-    })
-  end
+  defp return_view(%{"phase" => phase}, facts) when phase in @ended,
+    do: problem("return_failed", sentence(:return_failed, facts), move_back_again(facts), %{})
 
   # Once its start is recorded (before the request leaves), the move back
   # waits on the server: Cancel only where the server undid it, or answers as
@@ -1112,22 +1193,43 @@ defmodule FermixCore.Management.HomeSummary do
 
   defp return_view(_activating, facts), do: return_moving(facts)
 
+  # Fermix has not moved yet: Move now moves it, and the screen says so.
   defp return_ready(state, facts) do
     view("ready", sentence(:return_ready, facts), action(:move_now), %{
       "server" => %{"name" => facts.return.from},
-      "readiness" => [],
       "waits_until" => state["listen_until"],
-      "alternatives" => [return_cancel()]
+      "alternatives" => [return_cancel()],
+      "steps" => steps(:return, {1, "yours"}, facts)
     })
+    |> noted(waits(:return_waits, state["listen_until"], facts, %{}))
   end
 
-  defp return_moving(facts), do: view("moving", sentence(:return_moving, facts), nil, %{})
+  # The home comes back: received, then put in place here.
+  defp return_moving(facts) do
+    at = if return_progress(facts) == :progress_return_placing, do: 3, else: 2
+
+    detail =
+      %{
+        "steps" => steps(:return, {at, "active"}, facts),
+        "route" => route(return_server(facts), "back", facts)
+      }
+      |> put_some("transfer", transfer(facts, :receive, :received))
+
+    view("moving", sentence(:return_moving, facts), nil, detail)
+  end
+
+  # The server a move back takes the home from: as the return's record names
+  # it, or, before the record is kept, as its candidate's code named it.
+  defp return_server(%{return: %{from: from}}), do: from
+  defp return_server(%{returning: %{"primary" => %{"name" => name}}}), do: name
+  defp return_server(_facts), do: nil
 
   # The server undid the move before its marker: it is the primary again,
   # and this computer's candidate still waits.
   defp return_undone(facts) do
     view("undone", sentence(:return_undone, facts), action(:try_again), %{
-      "alternatives" => [return_cancel()]
+      "alternatives" => [return_cancel()],
+      "steps" => steps(:return, {1, "yours"}, facts)
     })
   end
 
@@ -1135,75 +1237,64 @@ defmodule FermixCore.Management.HomeSummary do
   # no record, a record with no candidate, or a state that cannot be read):
   # Cancel clears what is left where no move can be under way.
   defp return_stopped(facts, cancellable?) do
-    act = if cancellable?, do: return_cancel(), else: action(:learn_more)
+    act = if cancellable?, do: return_cancel()
     problem("return_failed", sentence(:return_stopped, facts), act, %{})
   end
 
   defp restore_view(%{"phase" => "failed"} = state, facts) do
-    problem(
-      "return_failed",
-      sentence(:restore_failed, facts),
-      restore_offer(facts) || :learn_more,
-      %{
-        "note" => state["sentence"]
-      }
-    )
+    problem("return_failed", sentence(:restore_failed, facts), restore_offer(facts), %{
+      "note" => state["sentence"]
+    })
   end
 
   defp restore_view(_state, facts),
     do: view("moving", sentence(:restore_moving, facts), nil, %{})
 
   defp return_cancel, do: action(:cancel, %{return: true})
-  defp move_back(facts), do: action(:move_back, %{machine: machine(facts.host_os)})
 
-  # Restore here's job: the server is deleted first, then the copy restored;
-  # a delete the provider refused restored nothing, said while Restore here
-  # can be pressed again.
-  defp restoring(%{return: %{fence_requested: _} = record, provision: provision} = facts) do
-    cond do
-      match?(%{action: %{kind: "delete"}}, provision) -> restore_step(record, facts)
-      fence_failed?(record, provision) -> fence_failed(provision.failure, facts)
-      true -> nil
-    end
+  # Move back, where this engine would start again by itself after it; an
+  # engine run from a terminal is refused it at the press, so it is not
+  # offered (`move_back_lines/3` says why). Where this computer cannot read
+  # the server's home, Update stands in its place.
+  defp move_back(%{restarts_itself: true, moved: %{}} = facts),
+    do: readable_or_update(facts, action(:move_back, %{machine: machine(facts.host_os)}))
+
+  defp move_back(_facts), do: nil
+
+  # A move back that ended is offered again as it was asked: its engine
+  # started again by itself then, and the press checks it once more.
+  defp move_back_again(facts),
+    do: readable_or_update(facts, action(:move_back, %{machine: machine(facts.host_os)}))
+
+  # "Update Fermix on this computer first" (M97 §3.4) in place of an action
+  # that takes the server's home here, which this computer cannot read.
+  defp readable_or_update(%{readable: {:error, _newer}} = facts, _act),
+    do: action(:update, %{first: true, machine: machine(facts.host_os)})
+
+  defp readable_or_update(_facts, act), do: act
+
+  defp restoring(facts) do
+    if restore_running?(facts), do: view("moving", sentence(:restore_moving, facts), nil, %{})
   end
 
-  defp restoring(_facts), do: nil
+  # Restore here's request beside its running job; a request a restart left
+  # stands beside none.
+  defp restore_running?(%{restoring: true, return: %{restore_requested: _copy}}), do: true
+  defp restore_running?(_facts), do: false
 
-  defp restore_step(%{fenced_at: %DateTime{}}, facts),
-    do: view("moving", sentence(:restore_moving, facts), nil, %{})
-
-  defp restore_step(_record, facts),
-    do: view("creating", sentence(:restore_deleting, facts), nil, %{})
-
-  # A fence whose delete went through holds no server any more, whatever
-  # stopped after it (HR-3): that is no failure.
-  defp fence_failed?(record, %{failure: %{action: "delete"}, server: %{}}),
-    do: not Map.has_key?(record, :fenced_at)
-
-  defp fence_failed?(_record, _provision), do: false
-
-  defp fence_failed(failure, facts) do
-    case restore_offer(facts) do
-      nil ->
-        nil
-
-      restore ->
-        problem("delete_failed", failure.sentence, restore, %{"seen_at" => iso(failure.at)})
-    end
-  end
-
-  # Restore here (design §8): only for a server Fermix created, which is
-  # deleted first (the fence), or one a restore asked to delete and whose
-  # ledger no longer holds it (deleted for it, its record written or not:
-  # HR-3); only while the server is as silent as the fence asks, never
-  # during a replace, and only while this computer holds a copy, the newest
-  # named.
-  defp restore_offer(%{copies: [newest | _], provision: %{replace: nil} = provision} = facts) do
-    fence? = provision.server != nil or match?(%{fence_requested: _copy}, facts.return)
-
-    if fence? and silent?(facts),
+  # Restore here (design §8): wherever the server is silent (`silent?/1`),
+  # and only while this computer holds a copy, the newest named.
+  defp restore_offer(%{copies: [newest | _], moved: %{}} = facts) do
+    if silent?(facts),
       do:
-        action(:restore_here, %{copy: newest.name, at: newest.at, machine: machine(facts.host_os)})
+        readable_or_update(
+          facts,
+          action(:restore_here, %{
+            copy: newest.name,
+            at: newest.at,
+            machine: machine(facts.host_os)
+          })
+        )
   end
 
   defp restore_offer(_facts), do: nil
@@ -1224,31 +1315,6 @@ defmodule FermixCore.Management.HomeSummary do
     end
   end
 
-  # Back on this computer as the primary, while the server Fermix created
-  # for the home stands (design §7): the step that runs on it, else what
-  # stopped, else Delete your server. Ahead of the server's own screen and
-  # the setup's, which a second desktop's row or a ledger with nothing set up
-  # would draw instead.
-  defp back(
-         %{
-           return: %{moved_at: %DateTime{}, provider_server: id},
-           provision: %{server: %{id: id} = server}
-         } = facts
-       ) do
-    if standing?(server), do: running(facts) || ledger_problem(facts) || server_retired(facts)
-  end
-
-  defp back(_facts), do: nil
-
-  defp server_retired(facts) do
-    problem(
-      "server_retired",
-      sentence(:server_retired, facts),
-      action(:delete_server, %{back: true}),
-      %{"alternatives" => [action(:learn_more)]}
-    )
-  end
-
   defp started?(%{move_started_at: %DateTime{}} = record), do: not Map.has_key?(record, :moved_at)
   defp started?(_record), do: false
 
@@ -1260,14 +1326,16 @@ defmodule FermixCore.Management.HomeSummary do
 
   defp stale?(_facts), do: false
 
-  # The server as silent as the fence asks (`Management.Provision`): no link,
-  # forgotten, or no session for the limit.
+  # The server silent: nothing answers, so no link (none, or forgotten) or
+  # no session for the limit. One that answered it forgot this computer
+  # (`revoked`, which the link keeps, so it holds with Fermix stopped too),
+  # or a retired copy that answers (`stale`: the home lives elsewhere), is
+  # not silent.
+  defp silent?(%{revoked: true}), do: false
   defp silent?(%{link: %{primary: nil}}), do: true
-  defp silent?(%{link: %{primary: %{status: :revoked}}}), do: true
 
-  defp silent?(%{link: %{primary: %{status: status} = link}})
-       when status in [:unreachable, :stale],
-       do: (Map.get(link, :down_ms) || 0) >= @unreachable_ms
+  defp silent?(%{link: %{primary: %{status: :unreachable} = link}}),
+    do: (Map.get(link, :down_ms) || 0) >= @unreachable_ms
 
   defp silent?(_facts), do: false
 
@@ -1278,11 +1346,113 @@ defmodule FermixCore.Management.HomeSummary do
 
   defp server_idle?(_facts), do: false
 
+  # -- a computer joining, and one that asks to join (M97 §3.1, §7.5) ----------------
+
+  # This computer joining a home: `creating` while it dials and while it
+  # waits for the owner, with the digits both ends show; how it ended once
+  # it was not added. Cancel makes it its own home again: beside the step
+  # that runs or waits, and the one step left once it was not added.
+  defp joining(%{join: %{"phase" => phase} = join} = facts) do
+    case phase do
+      "dialing" ->
+        view("creating", sentence(:join_dialing, facts, %{to: join["server"]}), nil, %{
+          "alternatives" => [action(:cancel)]
+        })
+
+      "awaiting_approval" ->
+        said = sentence(:join_waiting, facts, %{to: join["server"], sas: join["sas"]})
+        view("creating", said, nil, %{"alternatives" => [action(:cancel)]})
+
+      "denied" ->
+        view("creating", join["sentence"], action(:cancel), %{})
+    end
+  end
+
+  defp joining(_facts), do: nil
+
+  # A computer that asks to join the home, on the server's screen and on each
+  # linked computer's: the owner adds it by typing the digits it shows, or
+  # not. Neither screen holds the digits.
+  defp asking(%{"state" => state} = view, facts) when state in ["on", "primary"] do
+    case joiner(facts) do
+      nil -> view
+      joiner -> ask(view, joiner, facts)
+    end
+  end
+
+  defp asking(view, _facts), do: view
+
+  # The ask leads: Add it is the step, Do not add it beside it, then the step
+  # the screen led with before (a review's), then the others.
+  defp ask(view, joiner, facts) do
+    first = [action(:deny_computer) | List.wrap(view["action"])]
+    values = %{name: joiner.name, system: system(joiner.platform)}
+
+    %{
+      view
+      | "sentence" => sentence(:computer_asks, facts, values),
+        "action" => action(:approve_computer, %{joiner: "#{joiner.name} (#{joiner.platform})"})
+    }
+    |> update_in(
+      ["detail"],
+      &Map.update(&1, "alternatives", first, fn more -> first ++ more end)
+    )
+  end
+
+  # The window as this place reads it: the server's own, or the server's
+  # `home.status` on a linked computer.
+  defp joiner(%{role: :device} = facts) do
+    case get_in(facts, [:primary_home, "enrollment"]) do
+      %{"state" => "awaiting_approval", "joiner" => %{"name" => name} = joiner} ->
+        %{name: name, platform: joiner["platform"]}
+
+      _none ->
+        nil
+    end
+  end
+
+  defp joiner(facts) do
+    case window(facts) do
+      %{state: :awaiting_approval, joiner: %{} = joiner} -> joiner
+      _none -> nil
+    end
+  end
+
+  # The computer that joined through the window, while the window names it.
+  defp joined(%{role: :device} = facts) do
+    case get_in(facts, [:primary_home, "enrollment"]) do
+      %{"state" => "approved", "joined" => %{"device_id" => id, "name" => name}} -> {id, name}
+      _none -> nil
+    end
+  end
+
+  defp joined(facts) do
+    case window(facts) do
+      %{state: :approved, joined: %{device_id: id, name: name}} -> {id, name}
+      _none -> nil
+    end
+  end
+
+  defp system("macos"), do: "macOS"
+  defp system(_linux), do: "Linux"
+
   # -- the server ----------------------------------------------------------------
 
+  # The server's own screen: its summary rides inside each linked desktop's
+  # `home.status` (`primary_home`), so it carries nothing nested past the
+  # protocol's depth bound: no webhooks and no backup settings, which its
+  # desktops draw (a Change's needs would sit one level past it).
   defp server(facts) do
     disk = disk_problem(facts.disk, :server_disk_full)
-    disk || server_backup(facts) || view("primary", sentence(:primary, facts), nil, %{})
+
+    disk || backup_failed(facts) || server_backup(facts) ||
+      asking(
+        view("primary", sentence(:primary, facts), nil, %{
+          "alternatives" => [action(:add_computer)]
+        })
+        |> not_yet_listed(not_yet_entries(facts, @server_not_yet, nil)),
+        facts
+      )
   end
 
   defp server_backup(facts) do
@@ -1292,13 +1462,96 @@ defmodule FermixCore.Management.HomeSummary do
     end
   end
 
+  # -- the webhooks a server serves ------------------------------------------------
+
+  # The Funnel mounts of what the server serves (the `webhooks` of its
+  # `home.status`; absent from an older server's), with the one step a
+  # tailnet takes once and the docs page that holds the rest (Cloudflare
+  # Tunnel instead, port 443, the ingress, the wait for a new address);
+  # none when it serves nothing.
+  defp webhooks(detail, served) when served in [nil, []], do: detail
+
+  defp webhooks(detail, served) do
+    Map.put(detail, "webhooks", %{
+      "sentence" => Copy.summary_sentence(:webhooks, %{carried: carried(served)}),
+      "mounts" => Enum.map(served, &mount/1),
+      "notes" => [Copy.summary_sentence(:webhooks_tailnet, %{})],
+      "url" => Copy.always_on_docs_url("webhooks")
+    })
+  end
+
+  defp mount(%{"kind" => "whatsapp", "port" => port}) do
+    %{
+      "label" => Copy.mount_label(:whatsapp),
+      "command" => as_root(Funnel.mount_command(Funnel.whatsapp_path(), port)),
+      "note" => Copy.summary_sentence(:webhooks_whatsapp, %{})
+    }
+  end
+
+  defp mount(%{"kind" => "cue", "ref" => ref, "port" => port}) do
+    %{
+      "label" => Copy.mount_label({:cue, ref}),
+      "command" => as_root(Funnel.mount_command(Webhook.prefix_path(ref), port)),
+      "note" => Copy.summary_sentence(:webhooks_cue, %{})
+    }
+  end
+
+  # The server's first boot names no Tailscale operator, so its serve config
+  # is root's to change.
+  defp as_root(command), do: "sudo " <> command
+
+  # What the server serves, each kind once.
+  defp carried(served), do: served |> Enum.map(&port_of(&1["kind"])) |> Enum.uniq()
+
+  defp port_of("whatsapp"), do: :whatsapp
+  defp port_of("cue"), do: :cues
+
+  # -- what Always On does not do yet (M97) -----------------------------------------
+
+  defp not_yet_listed(view, entries),
+    do: update_in(view, ["detail"], &put_some(&1, "not_yet", entries))
+
+  # The ids among `place`'s that this engine's own facts turn on (`gather/5`'s
+  # `not_yet`), each `{id, sentence}` in the list's order, the dev plugins
+  # naming the server `name` (nil: "your server").
+  defp not_yet_entries(facts, place, name) do
+    own = Map.get(facts, :not_yet, [])
+    values = %{machine: machine(facts.host_os), to: name, zoom: Map.get(facts, :zoom, false)}
+
+    for id <- Copy.not_yet_ids(),
+        id in own and id in place,
+        do: %{"id" => Atom.to_string(id), "sentence" => Copy.not_yet(id, values)}
+  end
+
+  # On a linked computer: its server's entries, as the server's own screen
+  # says them (the home's settings and the server's), then this computer's
+  # own, its dev plugins naming its server.
+  defp linked_not_yet(facts) do
+    (served_not_yet(facts) ++ not_yet_entries(facts, @computer_not_yet, link_name(facts)))
+    |> Enum.uniq_by(& &1["id"])
+  end
+
+  # The server's entries from its own `home.status` summary, but one this
+  # screen's Funnel mounts already say (`detail.webhooks` starts with
+  # WhatsApp's sentence); none from a server that sends none.
+  defp served_not_yet(%{primary_home: %{"summary" => %{"detail" => %{"not_yet" => said}}} = home})
+       when is_list(said) do
+    mounted = for %{"kind" => "whatsapp"} <- home["webhooks"] || [], do: "whatsapp"
+
+    for %{"id" => id, "sentence" => sentence} <- said,
+        is_binary(id) and is_binary(sentence) and id not in mounted,
+        do: %{"id" => id, "sentence" => sentence}
+  end
+
+  defp served_not_yet(_facts), do: []
+
   # -- the server before its move ------------------------------------------------
 
   defp candidate(%{move: %{"phase" => "expired"}} = facts),
-    do: problem("waited_too_long", sentence(:server_waited_too_long, facts), :learn_more, %{})
+    do: problem("waited_too_long", sentence(:server_waited_too_long, facts), nil, %{})
 
   defp candidate(%{move: %{"phase" => "failed"}} = facts),
-    do: problem("not_set_up", sentence(:server_not_set_up, facts), :learn_more, %{})
+    do: problem("not_set_up", sentence(:server_not_set_up, facts), nil, %{})
 
   defp candidate(%{move: %{"phase" => phase}} = facts) when phase in @receiving,
     do: view("candidate", sentence(:candidate_receiving, facts), nil, %{})
@@ -1307,32 +1560,42 @@ defmodule FermixCore.Management.HomeSummary do
 
   # -- problems shared by more than one place ------------------------------------
 
-  # `powered?`: whether Turn it on reaches this server.
-  defp turned_off(server, key \\ :turned_off, powered? \\ true) do
-    act = if powered?, do: :turn_on, else: :learn_more
-
-    problem("turned_off", Copy.summary_sentence(key, %{}), act, %{
-      "note" => Copy.summary_sentence(:turned_off_cost, %{}),
-      "seen_at" => iso(server.seen_at)
-    })
-  end
-
-  defp deleted(server, act, facts) do
-    problem("deleted", sentence(:deleted, facts), act, %{
-      "seen_at" => iso(server && server.seen_at)
-    })
-  end
-
+  # How full the server's disk is, and what to do about it.
   defp disk_problem(%{"used" => used, "nearly_full" => true}, key),
     do:
-      problem(
-        "disk_full",
-        Copy.summary_sentence(key, %{percent: round(used * 100)}),
-        :learn_more,
-        %{}
-      )
+      problem("disk_full", Copy.summary_sentence(key, %{percent: round(used * 100)}), nil, %{
+        "note" => Copy.summary_sentence(:disk_note, %{})
+      })
 
   defp disk_problem(_disk, _key), do: nil
+
+  # The newest try that failed of a place whose backup has not been stored
+  # since (`Snapshot.Status` keeps its error until one is): where it went,
+  # then in its note its own words and when: Back up now tries again. The
+  # note is in `detail`, so a later try that fails in other words moves the
+  # key by itself.
+  defp backup_failed(facts) do
+    case failed_tries(backup_snapshots(facts)) do
+      [] ->
+        nil
+
+      tries ->
+        {place, at, error} = Enum.max_by(tries, &elem(&1, 1), DateTime)
+        values = %{place: place, at: at, zone: facts.zone, error: error}
+
+        problem("backup_failed", sentence(:backup_failed, facts, values), :back_up_now, %{
+          "note" => sentence(:backup_failed_note, facts, values),
+          "seen_at" => iso(at)
+        })
+    end
+  end
+
+  defp failed_tries(snapshots) do
+    for %{"configured" => true, "label" => place, "last_error" => error} = target <-
+          targets(snapshots),
+        is_binary(error) and is_binary(target["last_attempt_at"]),
+        do: {place, time(target["last_attempt_at"]), error}
+  end
 
   defp old_backup(at, key, facts) do
     age = DateTime.diff(facts.now, at, :second)
@@ -1351,9 +1614,6 @@ defmodule FermixCore.Management.HomeSummary do
   defp held(facts, id), do: Enum.find(facts.candidates, &(&1["candidate_id"] == id))
   defp newest(candidates), do: Enum.max_by(candidates, & &1["enrolled_at"])
 
-  defp standing?(%{status: status}), do: status != :gone
-  defp standing?(nil), do: false
-
   defp newest_backup(%{"targets" => targets}) do
     targets
     |> Enum.flat_map(&List.wrap(get_in(&1, ["last_verified", "at"])))
@@ -1362,6 +1622,20 @@ defmodule FermixCore.Management.HomeSummary do
   end
 
   defp newest_backup(_snapshots), do: nil
+
+  # The backup Back up now takes: the server's, which a desktop reads from
+  # its server's own `home.status`.
+  defp backup_snapshots(%{role: :device} = facts), do: get_in(facts, [:primary_home, "snapshots"])
+  defp backup_snapshots(facts), do: facts.snapshots
+
+  defp offers_backup?(view), do: Enum.any?(offered(view), &(&1["id"] == "back_up_now"))
+
+  # A backup runs where the screen offers Back up now.
+  defp backing_up?(view, facts),
+    do: offers_backup?(view) and match?(%{"running" => true}, backup_snapshots(facts))
+
+  defp targets(%{"targets" => targets}) when is_list(targets), do: targets
+  defp targets(_snapshots), do: []
 
   defp backups(%{"targets" => targets}) do
     for %{"label" => label, "last_verified" => %{"at" => at}} <- targets,
@@ -1380,15 +1654,21 @@ defmodule FermixCore.Management.HomeSummary do
   defp view(state, sentence, action, detail) when state in @states,
     do: %{"state" => state, "sentence" => sentence, "action" => action, "detail" => detail}
 
-  defp problem(kind, sentence, %{"id" => _id} = act, extra) when kind in @problems do
+  # A problem's one step, or none where no step of the owner's fixes it.
+  defp problem(kind, sentence, act, extra) when kind in @problems and is_map(extra) do
     detail =
       Map.merge(%{"kind" => kind, "note" => nil, "seen_at" => nil, "alternatives" => []}, extra)
 
-    view("problem", sentence, act, detail)
+    view("problem", sentence, problem_action(act), detail)
   end
 
-  defp problem(kind, sentence, act, extra) when is_atom(act),
-    do: problem(kind, sentence, action(act), extra)
+  defp problem_action(nil), do: nil
+  defp problem_action(%{"id" => _id} = act), do: act
+  defp problem_action(act) when is_atom(act), do: action(act)
+
+  # A screen's one secondary sentence, where it has one.
+  defp noted(view, nil), do: view
+  defp noted(view, note) when is_binary(note), do: put_in(view, ["detail", "note"], note)
 
   # An action as a view names it: its id, its label, and the values its
   # record is finished from (`record/2`).
@@ -1400,16 +1680,8 @@ defmodule FermixCore.Management.HomeSummary do
   defp sentence(key, facts, values \\ %{}),
     do: Copy.summary_sentence(key, Map.merge(words(facts), values))
 
-  # What every sentence may name: this computer, and the provider's own words.
-  defp words(facts) do
-    display = facts.provider.display()
-
-    %{
-      machine: machine(facts.host_os),
-      provider: display.name,
-      token_label: display.token_label
-    }
-  end
+  # What every sentence may name: this computer.
+  defp words(facts), do: %{machine: machine(facts.host_os)}
 
   defp machine(:macos), do: "Mac"
   defp machine(:linux), do: "computer"
@@ -1419,8 +1691,8 @@ defmodule FermixCore.Management.HomeSummary do
 
   # -- finishing the screen ------------------------------------------------------
 
-  # Every action a record, then what Details draws, the notice, the outcome
-  # and the key.
+  # Every action a record, then what Details draws, the notice, the outcome,
+  # the screen's help page and the key.
   defp finish(view, facts) do
     summary =
       view
@@ -1428,6 +1700,7 @@ defmodule FermixCore.Management.HomeSummary do
       |> Map.update!("detail", &finish_detail(&1, view, facts))
       |> Map.put("notice", notice(view, facts))
       |> Map.put("outcome", outcome(view, facts))
+      |> Map.put("help", Copy.always_on_docs_url(anchor(view, facts)))
 
     Map.put(summary, "key", key(summary))
   end
@@ -1435,11 +1708,15 @@ defmodule FermixCore.Management.HomeSummary do
   defp finish_detail(detail, view, facts) do
     detail
     |> records_at("alternatives", facts)
-    |> records_at("actions", facts)
+    |> backup_record(facts)
     |> put_some("lines", lines(view, facts))
-    |> put_some("providers", providers(view, facts))
     |> put_some("progress", progress(view, facts))
   end
+
+  defp backup_record(%{"backup" => %{"change" => change} = backup} = detail, facts),
+    do: %{detail | "backup" => %{backup | "change" => record(change, facts)}}
+
+  defp backup_record(detail, _facts), do: detail
 
   defp records_at(detail, field, facts) do
     case Map.fetch(detail, field) do
@@ -1461,66 +1738,49 @@ defmodule FermixCore.Management.HomeSummary do
       "label" => label,
       "needs" => needs,
       "confirm" => confirm,
-      "url" => url(act, facts),
       "key" => action_key(id, label, confirm, needs, target_of(act, values, facts))
     }
   end
 
-  defp needs(:paste_token, _facts), do: ["token"]
   defp needs(:restore_here, _facts), do: ["recovery_passphrase"]
-  defp needs(act, _facts) when act in [:create_server, :replace_server], do: ["choice"]
+  defp needs(:approve_computer, _facts), do: ["sas"]
+  defp needs(:change_passphrase, _facts), do: ["new_recovery_passphrase"]
   defp needs(act, facts) when act in [:move_now, :try_again], do: [passphrase_need(facts)]
-  defp needs(:start_again, facts), do: again_need(facts.provision)
   defp needs(_act, _facts), do: []
 
-  # Start again creates the server of the size and place the ledger keeps
-  # (the server's, else the failure's); with neither, the owner chooses.
-  defp again_need(%{server: %{type: type, location: location}})
-       when is_binary(type) and is_binary(location),
-       do: []
-
-  defp again_need(%{failure: %{type: type, location: location}})
-       when is_binary(type) and is_binary(location),
-       do: []
-
-  defp again_need(_provision), do: ["choice"]
-
-  # A replace's move checks the server's own key, which every move to it set;
+  # A move back checks the server's own key, which every move to it set;
   # here, the key this home's snapshots keep, or a new one when none is set.
   defp passphrase_need(%{role: :device}), do: "recovery_passphrase"
   defp passphrase_need(%{snapshots: %{"recipient_set" => true}}), do: "recovery_passphrase"
   defp passphrase_need(_facts), do: "new_recovery_passphrase"
 
-  # What the owner accepts first: whatever spends money, deletes, restarts a
-  # server or moves.
-  defp confirm(:create_server, _values, facts), do: sentence(:confirm_create, facts)
+  # What the owner accepts first: a move, a restore (naming the date of the
+  # backup it takes), forgetting a server, or a new recovery passphrase.
+  defp confirm(:cancel, %{forget: true}, facts), do: sentence(:confirm_forget, facts)
 
-  defp confirm(:create_in, %{city: city}, facts),
-    do: sentence(:confirm_create_in, facts, %{city: city})
+  defp confirm(:change_passphrase, _values, facts),
+    do: sentence(:confirm_change_passphrase, facts)
 
-  defp confirm(:start_again, _values, facts), do: sentence(:confirm_start_again, facts)
-  defp confirm(:replace_server, _values, facts), do: sentence(:confirm_replace, facts)
-  defp confirm(:restart_server, _values, facts), do: sentence(:confirm_restart, facts)
-  defp confirm(:delete_server, %{back: true}, facts), do: sentence(:confirm_delete_back, facts)
-  defp confirm(:delete_server, values, facts), do: sentence(:confirm_delete, facts, values)
-  defp confirm(:restore_here, _values, facts), do: sentence(:confirm_restore_here, facts)
-  defp confirm(:cancel, %{code: true}, _facts), do: nil
-  defp confirm(:cancel, %{return: true}, _facts), do: nil
+  defp confirm(:restore_here, %{at: at}, facts),
+    do:
+      sentence(:confirm_restore_here, facts, %{
+        telegram: :telegram in facts.return_costs,
+        at: at,
+        zone: facts.zone
+      })
 
-  defp confirm(:cancel, _values, %{provision: %{replace: %{}}} = facts),
-    do: sentence(:confirm_cancel, facts, %{which: "new"})
-
-  defp confirm(:cancel, _values, facts), do: sentence(:confirm_cancel, facts)
   defp confirm(act, _values, facts) when act in [:move_now, :try_again], do: move_confirm(facts)
   defp confirm(_act, _values, _facts), do: nil
 
-  # During a replace the review is the old server's own, so the confirm
-  # says what every such move does; otherwise each warning this home's
-  # settings give, after any other the last review of the same server gave.
-  defp move_confirm(%{role: :device, returning: %{"kind" => "return"}} = facts),
-    do: sentence(:confirm_return_move, facts, %{stays_here: facts.stays_here})
-
-  defp move_confirm(%{role: :device} = facts), do: sentence(:confirm_replace_move, facts)
+  # A move back's confirm says what runs here again; otherwise each warning
+  # this home's settings give, after any other the last review of the same
+  # server gave.
+  defp move_confirm(%{role: :device} = facts),
+    do:
+      sentence(:confirm_return_move, facts, %{
+        stays_here: facts.stays_here,
+        costs: facts.return_costs
+      })
 
   defp move_confirm(facts) do
     own = Enum.map(facts.move_items, & &1.id)
@@ -1533,117 +1793,81 @@ defmodule FermixCore.Management.HomeSummary do
           do: said
 
     Copy.move_confirm(
-      reviewed ++ for(%{status: :warn} = item <- facts.move_items, do: item.sentence)
+      reviewed ++ for(%{status: :warn} = item <- facts.move_items, do: item.sentence),
+      machine(facts.host_os)
     )
   end
-
-  defp url(:learn_more, facts), do: Copy.always_on_docs_url(facts.provider.display().docs_anchor)
-  defp url(:open_console, facts), do: facts.provider.display().console_url
-  defp url(_act, _facts), do: nil
 
   defp target_of(act, _values, facts) when act in [:move_now, :try_again, :check_again],
     do: candidate_id(target(facts))
 
-  defp target_of(:delete_server, %{which: "old"}, facts),
-    do: server_id(get_in(facts, [:provision, :replace, :old]))
+  defp target_of(:cancel, %{forget: true}, facts), do: candidate_id(target(facts))
 
-  defp target_of(act, _values, facts)
-       when act in [:turn_on, :restart_server, :delete_server, :start_again, :cancel],
-       do: server_id(facts.provision.server)
-
-  defp target_of(:paste_token, _values, facts), do: facts.provider.id()
   defp target_of(:restore_here, %{copy: name}, _facts), do: name
-  defp target_of(:create_in, %{next: next}, _facts), do: next
+  defp target_of(:approve_computer, %{joiner: joiner}, _facts), do: joiner
   defp target_of(_act, _values, _facts), do: nil
 
   defp candidate_id(%{"candidate_id" => id}), do: id
   defp candidate_id(nil), do: nil
 
-  defp server_id(%{id: id}), do: id
-  defp server_id(nil), do: nil
-
-  # Every provider's token screen, wherever a token is asked for.
-  defp providers(view, facts) do
-    if Enum.any?(offered(view), &(&1["id"] == "paste_token")),
-      do: Enum.map(facts.providers, &provider_screen/1),
-      else: []
-  end
-
-  defp provider_screen(provider) do
-    display = provider.display()
-
-    %{
-      "id" => provider.id(),
-      "name" => display.name,
-      "token_label" => display.token_label,
-      "sentence" => Copy.summary_sentence(:connect, %{token_label: display.token_label}),
-      "steps" => display.steps,
-      "console_url" => display.console_url,
-      "docs_url" => Copy.always_on_docs_url(display.docs_anchor)
-    }
-  end
-
   # -- Details' lines --------------------------------------------------------------
 
-  # The states whose Details name a server: from the facts the state's
-  # detail holds, else the server Fermix created, then when the provider was
-  # last read back and what the servers cost.
+  # The states whose Details name a server, from the facts the state's
+  # detail holds.
   defp lines(view, facts) do
     ctx = %{zone: facts.zone, machine: machine(facts.host_os)}
 
-    state_lines(view, facts, ctx) ++
-      restore_lines(view, facts, ctx) ++ again_lines(view, facts, ctx)
+    Enum.concat([
+      state_lines(view, facts, ctx),
+      move_back_lines(view, facts, ctx),
+      link_lines(view, facts, ctx)
+    ])
   end
 
-  defp state_lines(%{"state" => state, "detail" => detail}, facts, ctx)
+  # Facts only (the pane's R8): until when a held server waits is the
+  # screen's note, never a line.
+  defp state_lines(%{"state" => state, "detail" => detail} = view, facts, ctx)
        when state in @detailed_states do
     Enum.concat([
-      server_lines(detail["server"] || created_facts(facts), ctx),
-      time_line(:waits_until, detail["waits_until"], ctx),
+      server_lines(detail["server"], ctx),
       backup_lines(detail["backups"], ctx),
+      bucket_lines(view, facts, ctx),
       value_line(:copies, detail["copies_bytes"], ctx),
-      value_line(:disk, detail["disk_used"], ctx),
-      checked_line(facts, ctx),
-      cost_line(:costs, facts.provision.server, ctx),
-      cost_line(:old_costs, get_in(facts, [:provision, :replace, :old]), ctx)
+      value_line(:disk, detail["disk_used"], ctx)
     ])
   end
 
   defp state_lines(_view, _facts, _ctx), do: []
 
-  # Where Restore here is offered: the date of the copy it restores, and when
-  # the server was last seen (design §8).
-  defp restore_lines(view, facts, ctx) do
-    case Enum.find(offered(view), &(&1["id"] == "restore_here")) do
-      %{values: %{at: at}} -> [Copy.summary_line(:backup_here, at, ctx) | seen_line(facts, ctx)]
+  # On: the bucket the server keeps its S3 copy in, where it keeps one.
+  defp bucket_lines(%{"state" => "on"}, facts, ctx) do
+    case s3_bucket(get_in(facts, [:primary_home, "snapshots"])) do
+      nil -> []
+      bucket -> [Copy.summary_line(:s3_bucket, bucket, ctx)]
+    end
+  end
+
+  defp bucket_lines(_view, _facts, _ctx), do: []
+
+  # On, where Move back is not offered to an engine run from a terminal: the
+  # move back's own refusal, so the owner reads it before any press.
+  defp move_back_lines(%{"state" => "on"}, %{restarts_itself: false}, ctx),
+    do: [Copy.summary_line(:move_back, Candidate.error_sentence(:not_supervised), ctx)]
+
+  defp move_back_lines(_view, _facts, _ctx), do: []
+
+  # On: whether the link runs direct or through Fermix's relay, while its
+  # session is up and the helper has named its path (step 7).
+  defp link_lines(%{"state" => "on"}, %{link: %{primary: %{connected: true} = primary}}, ctx) do
+    case Map.get(primary, :path) do
+      path when path in [:direct, :relay] -> [Copy.summary_line(:connection, path, ctx)]
       nil -> []
     end
   end
 
-  defp seen_line(%{provision: %{server: %{seen_at: %DateTime{} = at}}}, ctx),
-    do: [Copy.summary_line(:seen, at, ctx)]
+  defp link_lines(_view, _facts, _ctx), do: []
 
-  defp seen_line(_facts, _ctx), do: []
-
-  # A move back's ready: what this computer's settings turn on that runs
-  # here again.
-  defp again_lines(%{"state" => "ready"}, %{role: :device, returning: %{}} = facts, ctx) do
-    case facts.stays_here do
-      [] -> []
-      features -> [Copy.summary_line(:runs_again, features, ctx)]
-    end
-  end
-
-  defp again_lines(_view, _facts, _ctx), do: []
-
-  @server_lines [
-    server: "name",
-    size: "type",
-    place: "location",
-    address: "ipv4",
-    system: "system",
-    version: "version"
-  ]
+  @server_lines [server: "name", system: "system", version: "version"]
 
   defp server_lines(nil, _ctx), do: []
 
@@ -1652,24 +1876,6 @@ defmodule FermixCore.Management.HomeSummary do
         is_binary(server[field]),
         do: Copy.summary_line(key, server[field], ctx)
   end
-
-  # The server Fermix created, while it stands and no state names another.
-  defp created_facts(%{provision: %{server: %{status: status} = server}} = facts)
-       when status != :gone do
-    %{
-      "name" => server.name,
-      "type" => facts.provider.type_name(server.type),
-      "location" => Provision.city(facts.provider, server.location),
-      "ipv4" => server.ipv4
-    }
-  end
-
-  defp created_facts(_facts), do: nil
-
-  defp time_line(key, text, ctx) when is_binary(text),
-    do: [Copy.summary_line(key, time(text), ctx)]
-
-  defp time_line(_key, _text, _ctx), do: []
 
   defp backup_lines(nil, _ctx), do: []
 
@@ -1683,33 +1889,30 @@ defmodule FermixCore.Management.HomeSummary do
   defp value_line(_key, nil, _ctx), do: []
   defp value_line(key, value, ctx), do: [Copy.summary_line(key, value, ctx)]
 
-  defp checked_line(%{provision: %{checked_at: %DateTime{} = at, server: server}}, ctx) do
-    if standing?(server), do: [Copy.summary_line(:checked, at, ctx)], else: []
-  end
-
-  defp checked_line(_facts, _ctx), do: []
-
-  defp cost_line(key, %{status: status, total_monthly: total, currency: currency}, ctx)
-       when status != :gone and is_binary(total) and is_binary(currency),
-       do: [Copy.summary_line(key, {total, currency}, ctx)]
-
-  defp cost_line(_key, _server, _ctx), do: []
-
   # -- the outcome -----------------------------------------------------------------
 
   # A move under way runs whatever the screen still shows (one asked for
-  # here reads `ready` until the restart); a code for a server of the owner's
-  # own waits for that server.
-  defp outcome(%{"state" => "problem"}, _facts), do: "failed"
+  # here reads `ready` until the restart); a code for the owner's server
+  # waits for that server.
+  defp outcome(%{"state" => "problem"} = view, facts),
+    do: if(backing_up?(view, facts), do: "running", else: "failed")
+
+  defp outcome(_view, %{join: %{"phase" => phase}}),
+    do:
+      Map.fetch!(
+        %{"dialing" => "running", "awaiting_approval" => "waiting", "denied" => "failed"},
+        phase
+      )
+
   defp outcome(%{"state" => state}, _facts) when state in ["creating", "moving"], do: "running"
   defp outcome(%{"state" => "candidate"}, facts), do: receiving(facts)
 
   defp outcome(view, facts) do
     cond do
-      moving?(facts) ->
+      moving?(facts) or backing_up?(view, facts) ->
         "running"
 
-      view["state"] == "connect" and match?(%{kind: :manual, state: :open}, window(facts)) ->
+      view["state"] == "connect" and match?(%{state: :open}, window(facts)) ->
         "waiting"
 
       true ->
@@ -1730,18 +1933,24 @@ defmodule FermixCore.Management.HomeSummary do
     end
   end
 
-  defp occurrence(_view, %{role: :primary, link: %{desktops: [_ | _]}} = facts),
-    do: week_occurrence(facts, :notice_server_backup_week)
+  defp occurrence(view, %{role: :primary, link: %{desktops: [_ | _]}} = facts),
+    do:
+      week_occurrence(facts, :notice_server_backup_week) || change_occurrence(view, facts) ||
+        sandbox_occurrence(facts) || joined_occurrence(view, facts)
 
   defp occurrence(view, %{role: role} = facts) when role in [:primary, :device] do
     Enum.find_value(
       [
         &reach_occurrence/2,
-        &set_up_occurrence/2,
+        &review_occurrence/2,
         &ready_occurrence/2,
         fn _view, facts -> week_occurrence(facts, :notice_backup_week) end,
         &moved_occurrence/2,
-        &back_occurrence/2
+        &change_occurrence/2,
+        &restored_occurrence/2,
+        &back_occurrence/2,
+        &lapsed_occurrence/2,
+        &joined_occurrence/2
       ],
       & &1.(view, facts)
     )
@@ -1758,34 +1967,108 @@ defmodule FermixCore.Management.HomeSummary do
 
   defp reach_occurrence(_view, _facts), do: nil
 
-  defp set_up_occurrence(%{"detail" => %{"kind" => kind}} = view, facts)
-       when kind in ["not_set_up", "waited_too_long"] do
-    case facts.provision.server do
-      %{created_at: %DateTime{} = at} -> {"not_set_up:" <> iso(at), view["sentence"]}
-      _none -> nil
+  # A computer joined the home (M97 §3.1): told once, on the owner's other
+  # surfaces, while the window names it.
+  defp joined_occurrence(_view, facts) do
+    case joined(facts) do
+      {id, name} ->
+        {"computer_joined:" <> id, sentence(:notice_computer_joined, facts, %{name: name})}
+
+      nil ->
+        nil
     end
   end
 
-  defp set_up_occurrence(_view, _facts), do: nil
+  # A computer whose switches wait for the owner's review (M97 §7.3): told
+  # once, while it waits.
+  defp review_occurrence(_view, %{role: :device} = facts) do
+    if Map.get(facts, :offers_review),
+      do: {"computer_review", sentence(:notice_computer_review, facts)}
+  end
+
+  defp review_occurrence(_view, _facts), do: nil
+
+  # A server that left out the settings it inherited (M97 §4): told for a
+  # week after, once.
+  defp sandbox_occurrence(%{server_sandbox: %DateTime{} = at} = facts) do
+    if DateTime.diff(facts.now, at, :second) < @server_sandbox_s,
+      do: {"server_sandbox:" <> iso(at), sentence(:notice_server_sandbox, facts)}
+  end
+
+  defp sandbox_occurrence(_facts), do: nil
+
+  # The server's sandbox or coding approval changed from a computer (M97
+  # §19.5): the newest change told for a week, once, on the server and on
+  # every linked computer, which names the server as it knows it. Its id is
+  # its own: what it changed, and when to the millisecond.
+  defp change_occurrence(
+         _view,
+         %{computer_changes: [%{at: %DateTime{} = at} = change | _]} = facts
+       ) do
+    if DateTime.diff(facts.now, at, :second) < @computer_change_s do
+      values = %{name: change.computer, change: {change.what, change.value}}
+      %{"what" => what, "at" => said_at} = ChangedFromComputer.view(change)
+
+      {"computer_change:#{what}:#{said_at}",
+       sentence(:notice_computer_change, facts, changed_on(values, facts))}
+    end
+  end
+
+  defp change_occurrence(_view, _facts), do: nil
+
+  # The server's words for itself; a linked computer's for its server, by
+  # its name where it knows one.
+  defp changed_on(values, %{role: :primary}), do: Map.put(values, :server, :this)
+  defp changed_on(values, facts), do: Map.put(values, :server, link_name(facts) || :yours)
 
   defp ready_occurrence(%{"state" => "ready"}, facts),
     do: {"ready:" <> target(facts)["candidate_id"], sentence(ready_notice(facts), facts)}
 
   defp ready_occurrence(_view, _facts), do: nil
 
-  defp ready_notice(%{role: :device, returning: %{"kind" => "return"}}), do: :return_ready
-  defp ready_notice(%{role: :device}), do: :replace_ready
+  defp ready_notice(%{role: :device}), do: :notice_return_ready
   defp ready_notice(_facts), do: :notice_ready
 
-  # Back on this computer from a server of the owner's own, which nothing
-  # here can delete: told once, by the epoch this computer came back at.
+  # Restore here finished: told once, by the epoch it came back at, naming
+  # the day of the backup it restored (`Home.Return`'s `restored`). A record
+  # it shares with a move back that had started is still a restore's.
+  defp restored_occurrence(
+         _view,
+         %{role: :primary, return: %{moved_at: %DateTime{}, restored: name} = record} = facts
+       ) do
+    case copy(name) do
+      [%{at: at}] ->
+        day = Clock.stated_day(at, personalization: [timezone: facts.zone])
+        {"restored:#{record.epoch}", sentence(:notice_restored, facts, %{day: day})}
+
+      [] ->
+        nil
+    end
+  end
+
+  defp restored_occurrence(_view, _facts), do: nil
+
+  # A held server whose 24 hours ran out, on the screen it leaves: told once,
+  # by its id, as one to set up again.
+  defp lapsed_occurrence(%{"state" => "off"}, %{role: :primary, lapsed: id} = facts)
+       when is_binary(id),
+       do: {"server_lapsed:" <> id, sentence(:notice_server_lapsed, facts)}
+
+  defp lapsed_occurrence(_view, _facts), do: nil
+
+  # Back on this computer after a move back, whose server still runs its
+  # retired copy: told once, by the epoch this computer came back at. A
+  # restore here, whose server the owner deleted or stopped, tells only that
+  # it finished (`restored_occurrence/2`).
   defp back_occurrence(
          _view,
-         %{role: :primary, return: %{moved_at: %DateTime{}} = record} = facts
-       ) do
-    if not Map.has_key?(record, :provider_server),
-      do: {"back:#{record.epoch}", sentence(:notice_back, facts)}
-  end
+         %{
+           role: :primary,
+           return: %{moved_at: %DateTime{}, move_started_at: %DateTime{}} = record
+         } =
+           facts
+       ),
+       do: {"back:#{record.epoch}", sentence(:notice_back, facts)}
 
   defp back_occurrence(_view, _facts), do: nil
 
@@ -1814,11 +2097,17 @@ defmodule FermixCore.Management.HomeSummary do
   end
 
   # What a desktop's own summary reads from its server's `home.status`
-  # (`primary_home`); only a server with desktops has anyone to tell.
-  defp drawn(%{role: :primary, link: %{desktops: [_ | _]} = link} = facts) do
-    window = link.enrollment && Map.take(link.enrollment, [:kind, :state, :candidate_id])
-    {newest_backup(facts.snapshots), window, Enum.map(facts.candidates, & &1["candidate_id"])}
+  # (`primary_home`): its newest backup, whether one runs, and each place's
+  # failed try; only a server with desktops has anyone to tell.
+  defp drawn(%{role: :primary, link: %{desktops: [_ | _]}} = facts) do
+    snapshots = facts.snapshots
+
+    {newest_backup(snapshots), match?(%{"running" => true}, snapshots), failed_tries(snapshots)}
   end
+
+  # A linked computer's mark (M97 §7.4): the app draws it from `home.status`'s
+  # `screen`, so taking and letting go of the screen is a change it is told of.
+  defp drawn(%{role: :device, screen: screen}) when is_map(screen), do: screen
 
   defp drawn(_facts), do: nil
 
@@ -1858,32 +2147,32 @@ defmodule FermixCore.Management.HomeSummary do
       link_deadline(facts),
       backup_deadline(since, facts),
       week_deadline(since, facts),
-      action_deadline(facts)
-    ] ++ replace_deadlines(facts)
+      change_deadline(facts)
+    ]
   end
 
   defp deadlines(%{role: :primary, link: %{desktops: [_ | _]}} = facts) do
     since = backup_since(facts)
-    [backup_deadline(since, facts), week_deadline(since, facts)]
+
+    [
+      backup_deadline(since, facts),
+      week_deadline(since, facts),
+      sandbox_deadline(facts),
+      change_deadline(facts)
+    ]
   end
 
-  defp deadlines(%{role: :primary} = facts),
-    do: [
-      window_deadline(window(facts)),
-      action_deadline(facts) | expiries(facts.candidates, facts)
-    ]
+  defp deadlines(%{role: :primary} = facts), do: expiries(facts.candidates, facts)
 
-  # A created server's code, open while this computer is awake (`not_set_up`).
-  defp window_deadline(%{kind: :provisioned, state: :open} = window),
-    do: @setup_ms - Map.get(window, :awake_ms, 0)
+  defp sandbox_deadline(%{server_sandbox: %DateTime{} = at} = facts),
+    do: ms_until(DateTime.add(at, @server_sandbox_s, :second), facts)
 
-  defp window_deadline(_window), do: nil
+  defp sandbox_deadline(_facts), do: nil
 
-  # A step's action is read as interrupted once its job's budget is out.
-  defp action_deadline(%{provision: %{action: %{started_at: at}}} = facts),
-    do: ms_until(DateTime.add(at, Ledger.action_budget_ms(), :millisecond), facts)
+  defp change_deadline(%{computer_changes: [%{at: %DateTime{} = at} | _]} = facts),
+    do: ms_until(DateTime.add(at, @computer_change_s, :second), facts)
 
-  defp action_deadline(_facts), do: nil
+  defp change_deadline(_facts), do: nil
 
   # A held server is dropped at its expiry (`Home.Candidates`).
   defp expiries(candidates, facts),
@@ -1908,21 +2197,6 @@ defmodule FermixCore.Management.HomeSummary do
 
   defp week_deadline(nil, _facts), do: nil
 
-  # During a replace: the new server's 30 minutes from its creation while its
-  # code is open on the old server, and the day each server the old one holds
-  # waits.
-  defp replace_deadlines(%{provision: %{replace: %{state: :waiting}} = provision} = facts) do
-    held = get_in(facts, [:primary_home, "candidates"]) || []
-    [new_server_deadline(new_window(facts), provision.server, facts) | expiries(held, facts)]
-  end
-
-  defp replace_deadlines(_facts), do: []
-
-  defp new_server_deadline(%{"state" => "open"}, %{created_at: %DateTime{} = at}, facts),
-    do: ms_until(DateTime.add(at, @setup_ms, :millisecond), facts)
-
-  defp new_server_deadline(_window, _server, _facts), do: nil
-
   defp ms_until(%DateTime{} = at, facts), do: DateTime.diff(at, facts.now, :millisecond)
 
   # -- gathering -----------------------------------------------------------------
@@ -1933,6 +2207,64 @@ defmodule FermixCore.Management.HomeSummary do
       _other -> :linux
     end
   end
+
+  # What this computer keeps on for its server after the move (M97 §7.3),
+  # where a move from it is set up: never on a server, which has computers.
+  defp keeps_on(home, {:primary, %{desktops: []}}, host_os, opts) do
+    snapshot = Keyword.get(opts, :settings_snapshot, &ConfigStore.current_snapshot/0).()
+    Consent.view(Consent.keep_on_block(home, os: host_os, snapshot: snapshot))
+  end
+
+  defp keeps_on(_home, _role_link, _host_os, _opts), do: nil
+
+  # Whether a linked computer's switches wait for the owner's review.
+  defp offers_review(true, opts) do
+    switches = Keyword.get_lazy(opts, :computer_switches, &Switches.current/0)
+    not Switches.reviewed?(switches)
+  end
+
+  defp offers_review(false, _opts), do: false
+
+  # That this server left out the settings it inherited, and when; one that
+  # cannot be read is logged once while it stays so.
+  defp server_sandbox(home, :primary, reads) do
+    read = ServerSandbox.read(home)
+
+    :ok =
+      UnreadableFiles.log_read(
+        ServerSandbox.path(home),
+        "home status",
+        read_result(read),
+        memory(reads)
+      )
+
+    case read do
+      {:ok, at} -> at
+      _absent_or_unreadable -> nil
+    end
+  end
+
+  defp server_sandbox(_home, _role, _reads), do: nil
+
+  # The changes from a computer to the server's limits (M97 §19.5), newest
+  # first: on the server, what its `home.status` read (`Management.Home`); on
+  # a linked computer, its server's `home.status`, where a change this engine
+  # does not know is left out.
+  defp computer_changes(:primary, status), do: Map.get(status, :computer_changes, [])
+
+  defp computer_changes(:device, %{primary_home: %{"computer_changes" => views}})
+       when is_list(views) do
+    views
+    |> Enum.flat_map(fn view ->
+      case ChangedFromComputer.from_view(view) do
+        {:ok, change} -> [change]
+        :error -> []
+      end
+    end)
+    |> ChangedFromComputer.newest_first()
+  end
+
+  defp computer_changes(_role, _status), do: []
 
   # The last review of the move, whatever its age: on the computer that moves.
   # One that cannot be read is logged once while it stays so.
@@ -1955,10 +2287,17 @@ defmodule FermixCore.Management.HomeSummary do
 
   defp memory(reads), do: Keyword.get(reads, :unreadable_files, UnreadableFiles)
 
-  # What runs only on this computer: what stops after a move, which the
-  # computer that sets it up says, and what runs here again after a move
-  # back, which a desktop says.
-  defp stays_here(home, role, host_os, reads) when role in [:primary, :device] do
+  # A move back's need (`Home.Candidate.returnable/3`), read where Move back
+  # is offered.
+  defp restarts_itself(:device, opts),
+    do: Keyword.get_lazy(opts, :restarts_itself, &Lifecycle.restarts_itself?/0)
+
+  defp restarts_itself(_role, _opts), do: nil
+
+  # What runs only on this computer and so here again after a move back,
+  # which a desktop's Move now confirm says. The computer that sets Always
+  # On up says what stops at Move now, from the review's own items.
+  defp stays_here(home, :device = _role, host_os, reads) do
     case MoveReadiness.stays_here(home, host_os == :macos, reads) do
       {:ok, features} -> features
       {:error, _sentence} -> []
@@ -1966,6 +2305,32 @@ defmodule FermixCore.Management.HomeSummary do
   end
 
   defp stays_here(_home, _role, _host_os, _reads), do: []
+
+  # What this engine's own facts turn on of what Always On does not do yet
+  # (M97): its settings (`MoveReadiness.not_yet/2`), then whether this
+  # computer records its history (`ComputerHistory.recorder?/0`, `opts`'
+  # `:recorder?` in a test). The summary lists each where it applies. With
+  # them, whether the same settings set up the Zoom app Google Meet's entry
+  # says the server joins with (`MoveReadiness.zoom?/1`).
+  defp not_yet(_home, :candidate, _host_os, _reads_opts), do: {[], false}
+
+  defp not_yet(home, _role, host_os, {reads, opts}) do
+    settings = MoveReadiness.settings(home, reads)
+    recorder? = Keyword.get_lazy(opts, :recorder?, &ComputerHistory.recorder?/0)
+    history = if recorder?, do: [], else: [:computer_history]
+    {MoveReadiness.not_yet(settings, host_os == :macos) ++ history, MoveReadiness.zoom?(settings)}
+  end
+
+  # What a move back costs that this desktop's settings turn on, which its
+  # confirm names: the settings of the home it left, the facts it holds.
+  # The notetaker this desktop kept is its own (`:meet_notetaker` in a test).
+  defp return_costs(home, :device, reads, opts),
+    do:
+      home
+      |> MoveReadiness.settings(reads)
+      |> MoveReadiness.costs(Keyword.take(opts, [:meet_notetaker]))
+
+  defp return_costs(_home, _role, _reads, _opts), do: []
 
   # The review's items this home's settings decide, for the server a move
   # would go to, which Move now's confirm names: only the computer that sets
@@ -2028,6 +2393,36 @@ defmodule FermixCore.Management.HomeSummary do
   defp state_result({:ok, _state}), do: :ok
   defp state_result(error), do: error
 
+  # This engine's version against the server's (its own `home.status`, on a
+  # linked desktop), through `compare`; nil where the server said none or
+  # either is not a version.
+  defp server_compared(%{version: ours, primary_home: %{"version" => theirs}}, compare)
+       when is_binary(ours) and is_binary(theirs) do
+    if version?(ours) and version?(theirs), do: compare.(ours, theirs)
+  end
+
+  defp server_compared(_status, _compare), do: nil
+
+  defp version?(text), do: match?({:ok, _version}, Version.parse(text))
+
+  # Whether this engine reads the home its server writes (`Home.Readable`,
+  # M97 D16): by the home format the server's own `home.status` names, one
+  # from before home formats naming none (format 1). Nil where the server
+  # said no version (a silent one), as for its standing, or named a format
+  # that is not one.
+  defp server_readable(%{primary_home: %{"version" => version} = server})
+       when is_binary(version) do
+    case Map.get(server, "home_format") do
+      format when is_nil(format) or (is_integer(format) and format >= 1) ->
+        Readable.readable?(%{home_format: format, engine_version: version})
+
+      _not_a_format ->
+        nil
+    end
+  end
+
+  defp server_readable(_status), do: nil
+
   # The copies a desktop keeps of its server's snapshots, newest first, by
   # the time their names carry (`Snapshot.name/2`); a name that is no
   # copy's is not one.
@@ -2041,6 +2436,63 @@ defmodule FermixCore.Management.HomeSummary do
   end
 
   defp copies(_home, _role), do: []
+
+  # The held server whose 24 hours ran out that the window still names: the
+  # code that enrolled it is the last one opened here. One that enrolled
+  # before the home came back here (a return's `moved_at`) is the server the
+  # home moved to and back from, and a desktop's candidate for a move back
+  # (`returning`) is no server to set up again: neither is a held one that
+  # lapsed. The list that cannot be read is logged once while it stays so,
+  # and names none.
+  defp lapsed(home, :primary, {%{enrollment: %{candidate_id: id}}, return}, now, reads)
+       when is_binary(id) do
+    read = Candidates.lapsed(home, now)
+    file = Candidates.path(home)
+    :ok = UnreadableFiles.log_read(file, "home status", lapsed_read(read), memory(reads))
+
+    case read do
+      {:ok, records} -> if Enum.any?(records, &lapsed_since?(&1, id, return)), do: id
+      {:error, _reason} -> nil
+    end
+  end
+
+  defp lapsed(_home, _role, _link, _now, _reads), do: nil
+
+  defp lapsed_since?(%{returning: returning}, _id, _return) when is_binary(returning), do: false
+
+  defp lapsed_since?(%{candidate_id: id, enrolled_at: enrolled_at}, id, %{moved_at: back}),
+    do: DateTime.compare(enrolled_at, back) == :gt
+
+  defp lapsed_since?(%{candidate_id: id}, id, _return), do: true
+  defp lapsed_since?(_record, _id, _return), do: false
+
+  defp lapsed_read({:ok, _records}), do: :ok
+  defp lapsed_read(error), do: error
+
+  # A server's own copy after a move back: its move kept it as no desktop.
+  # The move's record that cannot be read is logged once while it stays so,
+  # and says no.
+  defp moved_back(home, :device, reads) do
+    read = Move.read_phase(home)
+    file = Path.join(Move.dir(home), "phase.json")
+    :ok = UnreadableFiles.log_read(file, "home status", read_result(read), memory(reads))
+    match?({:ok, %{"keep_as_desktop" => false}}, read)
+  end
+
+  defp moved_back(_home, _role, _reads), do: false
+
+  # A marker that cannot be read is none, logged once while it stays so.
+  defp moved_marker(home, reads) do
+    read = Moved.read(home)
+
+    :ok =
+      UnreadableFiles.log_read(Moved.path(home), "home status", read_result(read), memory(reads))
+
+    case read do
+      {:ok, marker} -> marker
+      _absent_or_unread -> nil
+    end
+  end
 
   defp copy(path) do
     name = Path.basename(path)

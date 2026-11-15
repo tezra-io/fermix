@@ -11,14 +11,27 @@ defmodule FermixChannels.Desktop.SnapshotCopies do
   (with why) are handed to that process as
   `{:desktop_snapshot, snapshot_id, {:stored, sha256} | {:refused, reason}}`.
   An answer nobody waits for (a run that gave up) is logged and dropped.
+
+  Its start, a desktop connecting, tells the snapshot scheduler that the
+  desktop target can take a snapshot now
+  (`FermixCore.Home.Snapshot.Scheduler.targets_changed/1`), so a primary
+  whose only target is its desktops plans its runs, and takes the first one
+  after a move at once. Seam: the context's `options` `:targets_changed` (a
+  0-arity call in its place).
   """
 
   @behaviour FermixChannels.Desktop.Family
 
   require Logger
 
+  alias FermixCore.Home.Snapshot.Scheduler
+
   @impl true
-  def init(context), do: {:ok, %{device_id: context.device_id, waiters: %{}}}
+  def init(context) do
+    options = Map.get(context, :options, [])
+    :ok = Keyword.get(options, :targets_changed, &Scheduler.targets_changed/0).()
+    {:ok, %{device_id: context.device_id, waiters: %{}}}
+  end
 
   @impl true
   def handle_event(

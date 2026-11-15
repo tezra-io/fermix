@@ -141,6 +141,11 @@ defmodule FermixChannels.Mobile.NoiseVectorsTest do
 
     assert Noise.handshake_hash(responder) == Noise.handshake_hash(initiator)
     assert Noise.sas(initiator) == vector["sas"]
+    # M97 §7.5: a computer's join derives its digits under its own label, so
+    # the same handshake never shows a phone's digits.
+    assert Noise.sas(initiator, :computer) == vector["computer_sas"]
+    assert Noise.sas(responder, :computer) == vector["computer_sas"]
+    refute vector["computer_sas"] == vector["sas"]
 
     {initiator, responder} = assert_transport(vector, initiator, responder)
     assert_rekey(vector["rekey"], initiator, responder)

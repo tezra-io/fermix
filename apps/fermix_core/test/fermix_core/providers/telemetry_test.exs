@@ -1,6 +1,7 @@
 defmodule FermixCore.Providers.TelemetryTest do
   use ExUnit.Case, async: false
 
+  alias FermixCore.ComputerHistory.Summarizer
   alias FermixCore.Providers.Telemetry, as: ProviderTelemetry
 
   setup do
@@ -82,5 +83,41 @@ defmodule FermixCore.Providers.TelemetryTest do
     assert_receive {:provider_call, _measurements, meta}
     assert meta.output == "the answer is 42"
     assert meta.tool_calls == ["shell", "file_read"]
+  end
+
+  # M97 D10: a computer-history summary call carries the owner's raw activity;
+  # a trace or an Opik export keeping it would be a second raw store.
+  test "a computer-history summary call never carries its content, capture on or not" do
+    set_capture_content(true)
+    agent = Summarizer.summarizer_agent()
+    assert agent in ProviderTelemetry.content_withheld()
+
+    ProviderTelemetry.emit_call(%{provider: :ollama, model: "llama3", agent: agent}, 10,
+      session_id: "computer_history_summarize:1",
+      input: "text=\"the owner's draft\"",
+      output: "Drafted a note.",
+      tool_calls: [%{name: "x"}]
+    )
+
+    assert_receive {:provider_call, %{duration_ms: 10}, meta}
+    assert meta.content_withheld == true
+    assert meta.session_id == "computer_history_summarize:1"
+    refute Map.has_key?(meta, :input)
+    refute Map.has_key?(meta, :output)
+    refute Map.has_key?(meta, :tool_calls)
+  end
+
+  test "the roll-up, which reads notes and never raw activity, keeps the capture setting" do
+    set_capture_content(true)
+
+    ProviderTelemetry.emit_call(
+      %{provider: :ollama, model: "llama3", agent: "computer_history_rollup"},
+      10,
+      output: "Thread: the lease."
+    )
+
+    assert_receive {:provider_call, _measurements, meta}
+    assert meta.output == "Thread: the lease."
+    refute Map.has_key?(meta, :content_withheld)
   end
 end

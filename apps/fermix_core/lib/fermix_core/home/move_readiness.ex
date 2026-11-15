@@ -6,6 +6,18 @@ defmodule FermixCore.Home.MoveReadiness do
 
   Each item is `ok`, `warn` or `block`, with the one sentence the owner reads:
 
+    * `call_in_progress`, first and only while a voice call is in progress
+      (`Realtime.CallLease`; `:call_holder` in a test), warns, naming whom
+      the call is with: the move restarts this engine, which ends the call
+      before the move's capture starts. A computer's call, bridged from its
+      app (M97 §9.2), is named by the computer's name (D18; `:computer_names`
+      in a test): on a move back it is the computer the home moves to, which
+      ends its call cleanly before it asks for the move;
+    * `meeting_in_progress`, next and only while the notetaker is in a
+      meeting (`Meetings.in_progress/1`; `:meeting_holder` in a test),
+      blocks, naming the meeting: the restart would end it before its notes
+      are written (M97 §9.5). On a move and on a move back alike, and
+      `Move.start/5` asks again whatever review it is given;
     * `keychain_secrets`: the secrets this computer keeps in its keychain
       move with the home, into the server's secret files
       (`FermixCore.Home.MoveSecrets`); one Fermix cannot read, or a
@@ -16,17 +28,27 @@ defmodule FermixCore.Home.MoveReadiness do
       prompt), and the sentence says so; a start soon after a ready review
       takes the review rather than reading again (`Move.review/3`), so a move
       opens the keychain here and once more in its capture;
-    * `engine_version`: a server that runs an older Fermix than this computer
-      blocks (a restore by an older engine is refused anyway,
-      `Archive.install/5`), as does a version that cannot be read; so does a
-      newer one, which could never move the home back here (Always On's move
-      back: a server runs its desktop's Fermix exactly). A move back, to the
-      desktop the home left (a candidate that enrolled through the window
-      that desktop opened, `Home.Candidates`' `returning`), blocks only a
-      desktop older than the server;
+    * `engine_version`, by the one rule of what an engine reads
+      (`Home.Readable`, M97 D16: a home's format, never the engine that
+      wrote it): a server whose Fermix cannot read this home blocks (its
+      staging would refuse it anyway, `Archive.install/5`), by the home
+      format its enrollment named, or, from an engine before formats, by
+      its version, which blocks when it cannot be read. A server whose home
+      this computer could not read back is `ok` once a published update for
+      this computer's system reads it (M97 §3.4: the server leads; the
+      release table read once, `Home.ReleaseTable.fetch/1`, `:release_table`
+      in a test, `Home.Releases.restorable?/3`), and blocks otherwise, or
+      when the table cannot be read, since the home could never move back
+      here; a newer server of this computer's format is `ok` with no table
+      read. A move back, to the desktop the home left (a candidate that
+      enrolled through the window that desktop opened, `Home.Candidates`'
+      `returning`), blocks only a desktop that cannot read the server's
+      home;
     * `disk`: the capture needs about twice the home free on this computer
       (`FermixCore.Home.Disk`); short of it, or with the free space unknown,
-      it blocks, saying how much is needed; the server needs as much again;
+      it blocks, saying how much is needed; the server needs as much again.
+      A home the walk refuses blocks too, naming the path and what to do
+      in `fermix home export`'s words (`Archive.collect_sentence/1`);
     * `s3_size`: a home larger than one S3 upload (5 GiB) warns where the
       server keeps its snapshots in S3: it would never back up there;
     * `plugins`: on a server of another OS or architecture, the plugins
@@ -34,39 +56,68 @@ defmodule FermixCore.Home.MoveReadiness do
       named: they stop working after the move. The server installs every
       other one again for itself right after the move
       (`FermixCore.Plugins.Dist.Reinstall`), through the plugin installer;
+    * `dev_plugins`, only while this computer's settings name a dev plugin
+      folder (`[fermix_core.plugins] dev_local`, in its `machine.toml`), warns:
+      the folder and its links to checkouts stay on this computer
+      (`FermixCore.Home.DeviceLocal`), so the server runs none of them, and
+      the walk never blocks on them;
     * `stays_here`: what the home has turned on that runs only on this
-      computer (iMessage on a Mac, voice calls, meetings; `stays_here/2`)
-      stops after the move, each named; with none of them on it is `ok`. On
+      computer (Google Meet meetings, StackChan on a Mac;
+      `stays_here/2`; iMessage is not among them: the Mac carries it for the
+      server, M97 §6.4, as the move's keep-on block shows)
+      stops after the move, each named; with none of them on it is `ok`.
+      Voice calls are not among them either: after the move this computer's
+      app calls the server through its engine (M97 §9.2), and the phone's
+      calls carry on there (M87 §07), on the server's Talk to Fermix and its
+      key, which moves into the server's secret store. Meetings are the home's and run on
+      the server, Zoom's with no browser, so with Zoom set up they carry on
+      there; Google Meet's stop, since the server cannot sign the notetaker
+      in to Google (M97 §9.5, D24). On
       a move back, what the server's settings turn on of them runs there
       again, named, and is `ok`;
-    * `whatsapp`: WhatsApp turned on warns: it needs an inbound address Meta
-      can reach, which the server does not have, so it stops after the move;
+    * `whatsapp`: WhatsApp turned on warns: it stops after the move until
+      the owner runs the Tailscale Funnel mount Always On shows once Fermix
+      runs there, which gives it an inbound address Meta can reach, and
+      points Meta at that address;
     * `slack`: Slack turned on in its Events (webhook) mode warns for the
       same reason, unless it is switched to Socket Mode first;
-    * `coding_agents`: coding-harness consent given here warns: a move
-      withdraws it, as every restore does (`Archive.RestoredConfig`), so
-      coding agents ask for the owner's approval again on the server;
-    * `cutover_gap`: Telegram messages sent during the move wait until it
-      is done (Telegram keeps them, `Channels.Telegram.Poller`), and a
-      recurring job more than an hour late is skipped;
+    * `coding_agents`: coding agents approved here warn that they stop on
+      this computer after the move: the approval is this computer's own
+      (M98 D5, its `machine.toml`), which stays here, and the server runs
+      them only with its own, which the apps' Settings allow after the move
+      (M97 D28);
+    * `settings`, always `ok` on a move (none on a move back): after the
+      move the apps' Settings change Fermix on the server, its sandbox and
+      coding agents included, a new server's sandbox starts open, and what
+      the server may use on this computer and this computer's own sandbox
+      are under This Mac (This computer on Linux), M97 §19.8;
+    * `cutover_gap`: a recurring job more than an hour late is skipped, and
+      while Telegram is set up (a bot token, and not turned off), its
+      messages sent during the move wait until it is done (Telegram keeps
+      them, `Channels.Telegram.Poller`);
     * `serves_nothing`: this computer serves nothing during the move;
     * `service`: Fermix run from a terminal (`fermix run`) warns, since the
       move stops it and nothing starts it again
       (`Management.Lifecycle.restarts_itself?/1`): it has to be started again
       to finish the move.
 
-  The last seven are `summary_items/4`: what a review reads from this home's
+  The last eight (seven on a move back) are `summary_items/4`: what a review reads from this home's
   settings alone, needing neither the keychain nor a walk of the home, so
   `home.status`'s summary builds Move now's confirm from them before any
   review (`Management.HomeSummary`), in the words the review says them.
+  What Always On does not do yet (M97, `not_yet/2`) reads the same facts as
+  the `stays_here`, `whatsapp`, `slack`, `coding_agents` and `dev_plugins`
+  items, so the summary's list and the review never disagree.
 
   `opts`: `:free_bytes` (a 1-arity reader of free space), `:supervised` (for
   `CommandRunner` and the keychain read from a tree-less verb), `:version`
-  (this engine's, `BuildInfo.product_version/0`), `:host` (this host's plugin
+  and `:home_format` (this engine's, `BuildInfo.product_version/0` and
+  `Readable.home_format/0`), `:host` (this host's plugin
   target, `Archive.host/1`), `:home_bytes` (the home's size, in place of
   walking it), `:index_opts` (`Plugins.Dist.Index.load/1`'s, the catalog),
   `:restarts_itself` (a boolean, in place of
-  `Management.Lifecycle.restarts_itself?/0`). `summary_items/4` also reads
+  `Management.Lifecycle.restarts_itself?/0`), `:meeting_holder` (in place of
+  `Meetings.in_progress/1`). `summary_items/4` also reads
   `:returning` (a boolean, `report/3` gives the candidate's), which tells a
   move back from a move.
   """
@@ -75,18 +126,34 @@ defmodule FermixCore.Home.MoveReadiness do
   alias FermixCore.Home.Archive
   alias FermixCore.Home.Archive.ConfigText
   alias FermixCore.Home.Disk
+  alias FermixCore.Home.Link
   alias FermixCore.Home.MoveSecrets
+  alias FermixCore.Home.Readable
+  alias FermixCore.Home.Releases
+  alias FermixCore.Home.ReleaseTable
   alias FermixCore.Home.Snapshot.S3
   alias FermixCore.Home.UnreadableFiles
   alias FermixCore.Management.Copy
   alias FermixCore.Management.Lifecycle
   alias FermixCore.Management.Settings
+  alias FermixCore.Meetings
   alias FermixCore.Plugins.Dist.Index
+  alias FermixCore.Realtime.CallLease
+  alias FermixCore.Setup.MachineFile
 
   require Logger
 
   @plugin_lockfile "plugins/installed.json"
   @unreadable_settings "The settings file could not be read; Fermix's log says why."
+  # Every id a review can say, in its order: no item is made with another.
+  # The management schema and PROTOCOL.md name exactly these.
+  @ids ~w(call_in_progress meeting_in_progress keychain_secrets engine_version disk s3_size
+          plugins dev_plugins stays_here whatsapp slack coding_agents settings cutover_gap
+          serves_nothing service)
+  # A Zoom app the server can join with (M97 §9.5): all four of its values.
+  @zoom_keys ~w(zoom_account_id zoom_client_id zoom_client_secret zoom_ws_subscription_id)
+  # A meeting's platform, as its row and the owner name it.
+  @platform_names %{"zoom" => "Zoom", "meet" => "Google Meet"}
 
   @type status :: :ok | :warn | :block
   @type item :: %{id: String.t(), status: status(), sentence: String.t()}
@@ -105,20 +172,20 @@ defmodule FermixCore.Home.MoveReadiness do
         :error -> home_bytes(home)
       end
 
+    macos? = String.starts_with?(host, "macos-")
+
     items =
-      [
-        keychain(config, opts),
-        version(candidate, Keyword.get_lazy(opts, :version, &BuildInfo.product_version/0)),
-        disk(home, home_bytes, name, opts),
-        s3_size(candidate, home_bytes),
-        plugins(home, host, candidate, opts)
-      ] ++
-        summary_items(
-          config,
-          String.starts_with?(host, "macos-"),
-          name,
-          Keyword.put(opts, :returning, returning?(candidate))
-        )
+      call_in_progress(Keyword.get(opts, :call_holder, &call_holder/0), opts) ++
+        meeting_in_progress(opts) ++
+        [
+          keychain(config, opts),
+          version(candidate, this_engine(opts), {system(macos?), opts}),
+          disk(home, home_bytes, name, opts),
+          s3_size(candidate, home_bytes),
+          plugins(home, host, candidate, opts)
+        ] ++
+        dev_plugins(config, macos?, name) ++
+        summary_items(config, macos?, name, Keyword.put(opts, :returning, returning?(candidate)))
 
     %{ready: not Enum.any?(items, &(&1.status == :block)), items: items}
   end
@@ -126,9 +193,9 @@ defmodule FermixCore.Home.MoveReadiness do
   @doc """
   The items of a review of the move to the server `name` that read nothing
   but `config` (this home's settings, as `settings/2` reads them) and this
-  engine, in the review's order and words: `stays_here` (iMessage only when
-  `macos?`), `whatsapp`, `slack`, `coding_agents`, `cutover_gap`,
-  `serves_nothing`, `service`. `report/3` ends with them, and `home.status`'s
+  engine, in the review's order and words: `stays_here` (StackChan only when
+  `macos?`), `whatsapp`, `slack`, `coding_agents`, `settings` (not on a
+  move back), `cutover_gap`, `serves_nothing`, `service`. `report/3` ends with them, and `home.status`'s
   summary builds Move now's confirm from them before any review. `opts` are
   `report/3`'s.
   """
@@ -136,38 +203,48 @@ defmodule FermixCore.Home.MoveReadiness do
           [item()]
   def summary_items(config, macos?, name, opts)
       when is_boolean(macos?) and is_binary(name) and is_list(opts) do
+    returning? = Keyword.get(opts, :returning, false)
+
     [
-      stays_here_item(config, macos?, name, Keyword.get(opts, :returning, false)),
+      stays_here_item(config, macos?, name, returning?),
       whatsapp(config, name),
       slack(config, name),
-      coding_agents(config, name),
-      item("cutover_gap", :warn, cutover_sentence()),
-      item(
-        "serves_nothing",
-        :warn,
-        "This computer serves nothing while the move runs: no chat, channels or jobs " <>
-          "until #{name} takes over."
-      ),
-      service(Keyword.get_lazy(opts, :restarts_itself, &Lifecycle.restarts_itself?/0))
-    ]
+      coding_agents(config, macos?, name)
+    ] ++
+      settings_item(macos?, name, returning?) ++
+      [
+        item("cutover_gap", :warn, cutover_sentence(config)),
+        item(
+          "serves_nothing",
+          :warn,
+          "This computer serves nothing while the move runs: no chat, channels or jobs " <>
+            "until #{name} takes over."
+        ),
+        service(Keyword.get_lazy(opts, :restarts_itself, &Lifecycle.restarts_itself?/0))
+      ]
   end
 
   @doc """
   This home's settings as `summary_items/4` reads them: the text of its
-  `config.toml` (none is an empty one), or the sentence that says it could
-  not be read. `home.status` reads it on every poll, so an unreadable file
-  is logged once when it stops being readable and once when it reads again
+  `config.toml` followed by this computer's `machine.toml` (none is an empty
+  one; `settings_text/2`), or the sentence that says one could not be read.
+  `home.status` reads it on every poll, so an unreadable file is logged once
+  when it stops being readable and once when it reads again
   (`Home.UnreadableFiles`, `opts`' `:unreadable_files`: that memory, or nil
   for none).
   """
   @spec settings(Path.t(), keyword()) :: {:ok, String.t()} | {:error, String.t()}
   def settings(home, opts \\ []) when is_binary(home) and is_list(opts) do
-    file = config_path(home)
-    read = config_text(file)
     memory = Keyword.get(opts, :unreadable_files, UnreadableFiles)
-    :ok = UnreadableFiles.log_read(file, "home status", read, memory)
 
-    case read do
+    [config, machine] =
+      for file <- [config_path(home), MachineFile.path(home)] do
+        read = config_text(file)
+        :ok = UnreadableFiles.log_read(file, "home status", read, memory)
+        read
+      end
+
+    case settings_text(config, machine) do
       {:ok, text} -> {:ok, text}
       {:error, _reason} -> {:error, @unreadable_settings}
     end
@@ -175,19 +252,105 @@ defmodule FermixCore.Home.MoveReadiness do
 
   @doc """
   What the home at `home` has turned on that runs only on this computer and
-  stops after a move, read from its settings: iMessage (only when `macos?`),
-  voice calls and meetings, in that order; or the sentence that says the
-  settings could not be read. `home.status` reads it on every poll, so an
+  stops after a move, read from its settings: meetings; or the sentence that
+  says the settings could not be read. StackChan (`:accessories`, M91) is
+  named last, on a Mac only. Neither iMessage nor voice calls are ever
+  named: after the move this Mac carries iMessage for the server (M97 §6.4),
+  and this computer's app calls the server through its engine (§9.2).
+  `home.status` reads it on every poll, so an
   unreadable file is logged once when it stops being readable and once when
   it reads again (`Home.UnreadableFiles`, `opts`' `:unreadable_files`: that
   memory, or nil for none).
   """
   @spec stays_here(Path.t(), boolean(), keyword()) ::
-          {:ok, [:imessage | :voice | :meetings]} | {:error, String.t()}
+          {:ok, [:meetings | :accessories]} | {:error, String.t()}
   def stays_here(home, macos?, opts \\ [])
       when is_binary(home) and is_boolean(macos?) and is_list(opts) do
     with {:ok, text} <- settings(home, opts), do: {:ok, features(text, macos?)}
   end
+
+  @doc """
+  What a move costs that this home's settings (`settings/2`'s answer) turn
+  on: `:telegram` (set up, so its messages wait while the move runs), then
+  `:meet_notetaker` (meetings on, and Google Meet needs the notetaker
+  installed again on this computer, `Meetings.meet_reinstall_needed?/0`;
+  `opts`' `:meet_notetaker` in its place, asked only while meetings are on:
+  M97 §9.5). None when the settings could not be read. Coding agents cost a
+  move back nothing: this computer kept its own approval (M98 D5).
+  """
+  @spec costs({:ok, String.t()} | {:error, String.t()}, keyword()) ::
+          [:telegram | :meet_notetaker]
+  def costs(settings, opts \\ [])
+
+  def costs({:ok, text}, opts) when is_list(opts) do
+    reinstall? = Keyword.get(opts, :meet_notetaker, &Meetings.meet_reinstall_needed?/0)
+    telegram = if telegram?(text), do: [:telegram], else: []
+    meetings? = on?(text, "fermix_core.meetings", "enabled")
+    notetaker = if meetings? and reinstall?.(), do: [:meet_notetaker], else: []
+    telegram ++ notetaker
+  end
+
+  def costs({:error, _sentence}, opts) when is_list(opts), do: []
+
+  @doc """
+  What of what Always On does not do yet (M97, `Management.Copy.not_yet_ids/0`)
+  this home's settings (`settings/2`'s answer) turn on, by the facts the
+  review's own items read, in the list's order: `:google_meet` while
+  meetings are on (`stays_here`), `:coding_signin` while coding agents are
+  approved here (`coding_agents`), `:whatsapp` while WhatsApp is on
+  (`whatsapp`), `:slack` while Slack is on without Socket Mode (`slack`),
+  `:stackchan` while StackChan is on a Mac (`stays_here`, when `macos?`) and
+  `:dev_plugins` while a dev plugin folder is named (`dev_plugins`). None
+  when the settings could not be read, which `settings/2` logged.
+  """
+  @spec not_yet({:ok, String.t()} | {:error, String.t()}, boolean()) :: [atom()]
+  def not_yet({:ok, text}, macos?) when is_binary(text) and is_boolean(macos?) do
+    features = features(text, macos?)
+
+    for {id, true} <- [
+          google_meet: :meetings in features,
+          coding_signin: coding_approved?(text),
+          whatsapp: whatsapp?(text),
+          slack: slack_stops?(text),
+          stackchan: :accessories in features,
+          dev_plugins: dev_folder?(text)
+        ],
+        do: id
+  end
+
+  def not_yet({:error, sentence}, macos?) when is_binary(sentence) and is_boolean(macos?),
+    do: []
+
+  @doc """
+  Whether this home's settings (`settings/2`'s answer) set up the Zoom app a
+  server joins Zoom meetings with: all four of its values, the secret as the
+  reference the move carries, as the review's own item reads it. What Google
+  Meet's entry in what Always On does not do yet says the server joins
+  instead. False when the settings could not be read.
+  """
+  @spec zoom?({:ok, String.t()} | {:error, String.t()}) :: boolean()
+  def zoom?({:ok, text}) when is_binary(text), do: zoom_app?(text)
+  def zoom?({:error, sentence}) when is_binary(sentence), do: false
+
+  @doc """
+  The `meeting_in_progress` item, while the notetaker is in a meeting
+  (`Meetings.in_progress/1`, `opts`' `:meeting_holder` in its place): it
+  blocks, naming the meeting, since the move restarts this engine, which
+  would end the meeting before its notes are written. None otherwise.
+  `Move.start/5` asks it again whatever review it is given, since a meeting
+  can start after the review.
+  """
+  @spec meeting_in_progress(keyword()) :: [item()]
+  def meeting_in_progress(opts) when is_list(opts) do
+    case Keyword.get(opts, :meeting_holder, &Meetings.in_progress/0).() do
+      {:ok, meeting} -> [item("meeting_in_progress", :block, in_meeting(meeting))]
+      :none -> []
+    end
+  end
+
+  @doc "Every id a review's item can carry, in the review's order."
+  @spec ids() :: [String.t()]
+  def ids, do: @ids
 
   @doc "The block sentences of `report`, in order; none when it is ready."
   @spec blocks(report()) :: [String.t()]
@@ -218,9 +381,10 @@ defmodule FermixCore.Home.MoveReadiness do
 
   def from_view(_other), do: :error
 
+  # A kept review is read back as it was written, whichever engine wrote it.
   defp item_from_view(%{"id" => id, "status" => status, "sentence" => sentence})
        when is_binary(id) and status in ~w(ok warn block) and is_binary(sentence),
-       do: item(id, String.to_existing_atom(status), sentence)
+       do: %{id: id, status: String.to_existing_atom(status), sentence: sentence}
 
   defp item_from_view(_other), do: nil
 
@@ -278,55 +442,125 @@ defmodule FermixCore.Home.MoveReadiness do
   defp them([_one]), do: "it"
   defp them(_many), do: "them"
 
-  # The versions themselves are on the candidate's row; the sentence says
-  # which way they differ. An older one can never restore this home; a newer
-  # server could never move it back here.
-  defp version(%{name: name, version: theirs} = candidate, ours) do
-    case {Version.parse(theirs), Version.parse(ours)} do
-      {{:ok, there}, {:ok, here}} ->
-        versions(Version.compare(there, here), returning?(candidate), name)
+  # By the one rule of what an engine reads (`Home.Readable`, M97 D16): the
+  # candidate's Fermix must read this home, by the home format its
+  # enrollment named (one from before formats names none and reads by its
+  # version, which must then be one). On a move this computer must also read
+  # the candidate's home back, now or once an update for it is published
+  # (M97 §3.4: the server leads), read from the release table at the review;
+  # otherwise the home could never move back here. A move back needs only
+  # the first.
+  defp version(%{name: name} = candidate, ours, system_opts) do
+    theirs = %{home_format: Map.get(candidate, :home_format), engine_version: candidate.version}
 
-      _unreadable ->
-        item(
-          "engine_version",
-          :block,
-          "Fermix cannot read which version #{name} runs: enroll it again from an " <>
-            "up-to-date Fermix."
-        )
+    if known?(theirs) do
+      versions(read_both(theirs, ours), returning?(candidate), name, {theirs, system_opts})
+    else
+      item(
+        "engine_version",
+        :block,
+        "Fermix cannot read which version #{name} runs: enroll it again from an " <>
+          "up-to-date Fermix."
+      )
     end
   end
 
-  defp versions(:lt, _returning?, name),
+  defp known?(%{home_format: format}) when is_integer(format), do: true
+  defp known?(%{engine_version: version}), do: match?({:ok, _parsed}, Version.parse(version))
+
+  # Whether the candidate reads this home, and whether this computer reads
+  # the candidate's.
+  defp read_both(theirs, ours) do
+    cond do
+      not Readable.reads?(theirs, ours) -> :older
+      not Readable.reads?(ours, theirs) -> :newer
+      true -> :both
+    end
+  end
+
+  defp versions(:older, _returning?, name, _newer),
     do:
       item(
         "engine_version",
         :block,
-        "#{name} runs an older Fermix than this computer: update Fermix on #{name} " <>
-          "first, then check again."
+        "#{name} runs an older Fermix than this computer, one that cannot read this home: " <>
+          "update Fermix on #{name} first, then check again."
       )
 
-  defp versions(:gt, false, name),
+  defp versions(:newer, false, name, {theirs, {system, opts}}),
+    do: newer_server(published_for(theirs, system, opts), name)
+
+  defp versions(:both, false, name, _newer),
+    do:
+      item(
+        "engine_version",
+        :ok,
+        "#{name} runs a Fermix that reads this home, and this computer could read it back."
+      )
+
+  defp versions(_reads, true, name, _newer),
+    do: item("engine_version", :ok, "#{name} runs a Fermix that reads this home.")
+
+  defp newer_server(:published, name),
+    do:
+      item(
+        "engine_version",
+        :ok,
+        "#{name} runs a newer Fermix than this computer. The update for this computer is " <>
+          "published: install it before you move Fermix back here."
+      )
+
+  defp newer_server(:not_published, name),
     do:
       item(
         "engine_version",
         :block,
-        "#{name} runs a newer Fermix than this computer, so Fermix could not move back. " <>
-          "Update Fermix on this computer first."
+        "#{name} runs a newer Fermix than this computer, and no update for this computer " <>
+          "reads its home yet, so Fermix could not move back. Set the server up with this " <>
+          "computer's version, or wait for that update."
       )
 
-  defp versions(:gt, true, name),
-    do: item("engine_version", :ok, "#{name} runs this computer's Fermix, or a newer one.")
+  defp newer_server({:unread, _sentence}, name),
+    do:
+      item(
+        "engine_version",
+        :block,
+        "#{name} runs a newer Fermix than this computer, and Fermix could not read which " <>
+          "updates are published. Check again."
+      )
 
-  defp versions(:eq, _returning?, name),
-    do: item("engine_version", :ok, "#{name} runs this computer's Fermix.")
+  # Whether a published app for this computer's system reads the server's
+  # home, by the release table (`Home.Releases.restorable?/3`,
+  # `Home.ReleaseTable.fetch/1`; `:release_table` in a test).
+  defp published_for(theirs, system, opts) do
+    case Keyword.get(opts, :release_table, &ReleaseTable.fetch/0).() do
+      {:ok, table} ->
+        if Releases.restorable?(table, system, theirs), do: :published, else: :not_published
+
+      {:error, sentence} ->
+        {:unread, sentence}
+    end
+  end
+
+  defp system(true), do: :macos
+  defp system(false), do: :linux
+
+  # This engine as a reader and a writer of homes: its version and its home
+  # format (`:version` and `:home_format` in a test).
+  defp this_engine(opts),
+    do: %{
+      engine_version: Keyword.get_lazy(opts, :version, &BuildInfo.product_version/0),
+      home_format: Keyword.get_lazy(opts, :home_format, &Readable.home_format/0)
+    }
 
   # A move back goes to the desktop the home left: the candidate that
   # enrolled through the window that desktop opened on this server.
   defp returning?(%{returning: desktop}), do: is_binary(desktop)
 
+  # What the walk refused, in the words `fermix home export` says it in.
   defp disk(_home, {:error, reason}, _name, _opts) do
     Logger.error("move readiness: the home could not be measured: #{inspect(reason)}")
-    item("disk", :block, "Fermix could not measure this home; Fermix's log says why.")
+    item("disk", :block, Archive.collect_sentence(reason))
   end
 
   defp disk(home, {:ok, home_bytes}, name, opts) do
@@ -441,10 +675,102 @@ defmodule FermixCore.Home.MoveReadiness do
           "#{Enum.join(names, ", ")}."
       )
 
+  # The dev plugin folder is this computer's (its `machine.toml`): no move
+  # carries it, so the server runs none of its plugins.
+  defp dev_plugins({:ok, text}, macos?, name) do
+    machine = if macos?, do: "Mac", else: "computer"
+
+    if dev_folder?(text),
+      do: [item("dev_plugins", :warn, Copy.dev_plugins_stay(machine, name))],
+      else: []
+  end
+
+  defp dev_plugins({:error, _sentence}, _macos?, _name), do: []
+
+  defp dev_folder?(text) do
+    case ConfigText.value(text, "fermix_core.plugins", "dev_local") do
+      {:ok, raw} -> ConfigText.string(raw) != {:ok, ""}
+      :absent -> false
+    end
+  end
+
+  # M87: a move restarts this engine, and the restart ends a voice call in
+  # progress before the move's capture starts; the review names it first.
+  defp call_in_progress(holder, opts) do
+    case holder.() do
+      {:ok, %{endpoint: endpoint}} ->
+        [
+          item(
+            "call_in_progress",
+            :warn,
+            "A voice call #{call_with(endpoint, opts)} is in progress: the move ends it " <>
+              "before it starts."
+          )
+        ]
+
+      :none ->
+        []
+    end
+  end
+
+  defp call_with("desktop", _opts), do: "on this computer"
+  defp call_with("phone:" <> _device_id, _opts), do: "from your phone"
+  defp call_with("accessory:" <> _device_id, _opts), do: "from an accessory"
+
+  # M97 D18: a computer's call, read "on <its name>".
+  defp call_with("computer:" <> device_id, opts) do
+    names = Keyword.get(opts, :computer_names, &computer_names/0).()
+
+    case Map.fetch(names, device_id) do
+      {:ok, name} -> "on #{name}"
+      :error -> "on one of your computers"
+    end
+  end
+
+  # The home's computers by their device ids, as their rows name them; rows
+  # that cannot be read name none, and the review says so without a name.
+  defp computer_names do
+    case Link.impl().computer_rows() do
+      {:ok, rows} ->
+        Map.new(rows, &{&1.device_id, &1.name})
+
+      {:error, reason} ->
+        Logger.warning("move review: the computers' names could not be read: #{inspect(reason)}")
+        %{}
+    end
+  end
+
+  # Voice's tree runs only where Talk to Fermix is on: no lease, no call.
+  defp call_holder do
+    if Process.whereis(CallLease), do: CallLease.holder(CallLease), else: :none
+  end
+
+  # M97 §9.5: the meeting by its title and its platform, as far as its row
+  # says them.
+  defp in_meeting(meeting) do
+    "The notetaker is in #{meeting_named(meeting)} now, and the move would end it before " <>
+      "its notes are written: ask Fermix to leave the meeting, or wait until it ends, then " <>
+      "check again."
+  end
+
+  defp meeting_named(%{title: title, platform: platform}) when is_binary(title) and title != "" do
+    case Map.fetch(@platform_names, platform) do
+      {:ok, platform_name} -> "#{title} on #{platform_name}"
+      :error -> title
+    end
+  end
+
+  defp meeting_named(%{platform: platform}) do
+    case Map.fetch(@platform_names, platform) do
+      {:ok, platform_name} -> "a #{platform_name} meeting"
+      :error -> "a meeting"
+    end
+  end
+
   defp stays_here_item({:ok, text}, macos?, name, returning?) do
     case {features(text, macos?), returning?} do
       {[], _returning?} -> item("stays_here", :ok, none_on(macos?))
-      {features, false} -> item("stays_here", :warn, stops(features, macos?, name))
+      {features, false} -> item("stays_here", :warn, stops(features, text, macos?, name))
       {features, true} -> item("stays_here", :ok, "#{Copy.runs_again(features, name)}.")
     end
   end
@@ -452,36 +778,75 @@ defmodule FermixCore.Home.MoveReadiness do
   defp stays_here_item({:error, sentence}, _macos?, _name, _returning?),
     do: item("stays_here", :warn, sentence)
 
-  defp stops(features, macos?, name) do
+  defp stops(features, text, macos?, name) do
     machine = if macos?, do: "Mac", else: "computer"
-    them = if features == [:imessage], do: "it", else: "them"
+
+    [
+      stays_behind(leaving(features), machine, name),
+      zoom_moves(features, text, name)
+    ]
+    |> Enum.reject(&(&1 == ""))
+    |> Enum.join(" ")
+  end
+
+  # M97 §9.5, D24: meetings are the home's and run on the server, which joins
+  # Zoom's with no browser but cannot sign the notetaker in to Google, so of
+  # them only Google Meet's stop with this computer.
+  defp leaving(features),
+    do:
+      Enum.map(features, fn feature ->
+        if feature == :meetings, do: :google_meet, else: feature
+      end)
+
+  defp zoom_moves(features, text, name) do
+    if :meetings in features and zoom_app?(text), do: "#{Copy.zoom_after_move(name)}.", else: ""
+  end
+
+  # All four of the Zoom app's values, the secret as the reference the move
+  # carries (`MoveSecrets`): half an app could not join there either.
+  defp zoom_app?(text) do
+    Enum.all?(@zoom_keys, fn key ->
+      case ConfigText.value(text, "fermix_core.meetings", key) do
+        {:ok, raw} -> ConfigText.string(raw) not in [:error, {:ok, ""}]
+        :absent -> false
+      end
+    end)
+  end
+
+  defp stays_behind([], _machine, _name), do: ""
+
+  defp stays_behind(features, machine, name) do
+    them = if features == [:accessories], do: "it", else: "them"
     "#{Copy.stops_after_move(features)}: neither this #{machine} nor #{name} runs #{them}."
   end
 
-  defp none_on(true), do: "iMessage, voice calls and meetings are not turned on."
-  defp none_on(false), do: "Voice calls and meetings are not turned on."
+  defp none_on(_macos?), do: "Meetings are not turned on."
 
-  # iMessage runs only on a Mac, so another computer never names it.
+  # iMessage is not here: after a move the Mac carries it for the server
+  # (M97 §6.4), and the move's keep-on block names it. Nor is voice: this
+  # computer's app calls the server through its engine (§9.2).
   defp features(text, macos?) do
     [
-      imessage: macos? and on?(text, "fermix_channels.imessage", "enabled"),
-      voice: on?(text, "fermix_core.realtime", "enabled"),
-      meetings: on?(text, "fermix_core.meetings", "enabled")
+      meetings: on?(text, "fermix_core.meetings", "enabled"),
+      # M91 D7, D13: a server carries the pairing and starts no accessory link.
+      accessories: macos? and on?(text, "fermix_channels.accessories", "enabled")
     ]
     |> Enum.filter(fn {_feature, on} -> on end)
     |> Enum.map(fn {feature, _on} -> feature end)
   end
 
   # WhatsApp's Cloud API reaches Fermix only at an inbound address, and the
-  # server takes no inbound connection.
+  # server opens no port of its own: a Funnel mount, whose command Always On
+  # shows after the move, gives it one, and Meta posts to the old address
+  # until it is pointed at that one.
   defp whatsapp({:ok, text}, name) do
-    if on?(text, "fermix_channels.whatsapp", "enabled"),
+    if whatsapp?(text),
       do:
         item(
           "whatsapp",
           :warn,
-          "WhatsApp stops after the move: it needs an address on the internet that " <>
-            "WhatsApp can send messages to, and #{name} has none."
+          "WhatsApp stops after the move until you run the Tailscale Funnel command " <>
+            "Always On shows for #{name} and point Meta at the address it prints."
         ),
       else: item("whatsapp", :ok, "WhatsApp is not turned on.")
   end
@@ -491,35 +856,85 @@ defmodule FermixCore.Home.MoveReadiness do
   # Slack's Events API needs the same inbound address; Socket Mode dials out.
   defp slack({:ok, text}, name) do
     cond do
-      not on?(text, "fermix_channels.slack", "enabled") ->
-        item("slack", :ok, "Slack is not turned on.")
-
-      slack_mode(text) == {:ok, "socket"} ->
-        item("slack", :ok, "Slack uses Socket Mode and keeps working on #{name}.")
-
-      true ->
+      slack_stops?(text) ->
         item(
           "slack",
           :warn,
           "Slack stops after the move unless it uses Socket Mode, which you turn on in " <>
             "your Slack app's settings and then in Fermix's Slack settings."
         )
+
+      slack?(text) ->
+        item("slack", :ok, "Slack uses Socket Mode and keeps working on #{name}.")
+
+      true ->
+        item("slack", :ok, "Slack is not turned on.")
     end
   end
 
   defp slack({:error, sentence}, _name), do: item("slack", :warn, sentence)
 
-  # A restore withdraws coding-harness consent (`Archive.RestoredConfig`), and
-  # the move restores the home on the server.
-  defp coding_agents({:ok, text}, name) do
-    if on?(text, "fermix_core.harness", "approved"),
-      do: item("coding_agents", :warn, "Coding agents ask for your approval again on #{name}."),
+  # The approval is this computer's own (M98 D5): it stays here, where no
+  # coding agent runs after the move, and each machine decides with its own.
+  defp coding_agents({:ok, text}, macos?, name) do
+    machine = if macos?, do: "Mac", else: "computer"
+
+    if coding_approved?(text),
+      do:
+        item(
+          "coding_agents",
+          :warn,
+          "Coding agents stop on this #{machine} after the move. They run on #{name} only " <>
+            "with your approval there. To run them on #{name} too, allow them there in " <>
+            "Settings, Coding agents, after the move."
+        ),
       else: item("coding_agents", :ok, "No coding agent has your approval on this computer.")
   end
 
-  defp coding_agents({:error, sentence}, _name), do: item("coding_agents", :warn, sentence)
+  defp coding_agents({:error, sentence}, _macos?, _name),
+    do: item("coding_agents", :warn, sentence)
+
+  # M97 D28 (§19.8): after the move, every app's Settings are the server's,
+  # its own machine settings included; what the server may use on this
+  # computer, and this computer's own sandbox, are under This Mac (This
+  # computer on Linux). A move back makes this computer its own home again,
+  # so it says nothing of the kind.
+  defp settings_item(_macos?, _name, true = _returning?), do: []
+
+  defp settings_item(macos?, name, false) do
+    machine = if macos?, do: "Mac", else: "computer"
+
+    [
+      item(
+        "settings",
+        :ok,
+        "After the move, Settings in this app change Fermix on #{name}, its sandbox and " <>
+          "coding agents included. A new server's sandbox starts Open. What #{name} may use " <>
+          "on this #{machine}, and this #{machine}'s own sandbox, are under This #{machine}."
+      )
+    ]
+  end
 
   defp on?(text, section, key), do: ConfigText.value(text, section, key) == {:ok, "true"}
+
+  # The facts a review's item and what Always On does not do yet both read.
+  defp whatsapp?(text), do: on?(text, "fermix_channels.whatsapp", "enabled")
+  defp slack?(text), do: on?(text, "fermix_channels.slack", "enabled")
+  defp slack_stops?(text), do: slack?(text) and slack_mode(text) != {:ok, "socket"}
+  defp coding_approved?(text), do: on?(text, "fermix_core.harness", "approved")
+
+  # Telegram runs once it has a bot token, unless turned off: it ships on.
+  defp telegram?(text) do
+    ConfigText.value(text, "fermix_channels.telegram", "enabled") != {:ok, "false"} and
+      telegram_token(text) not in [:absent, :error, {:ok, ""}]
+  end
+
+  defp telegram_token(text) do
+    case ConfigText.value(text, "fermix_channels.telegram", "bot_token") do
+      {:ok, raw} -> ConfigText.string(raw)
+      :absent -> :absent
+    end
+  end
 
   defp slack_mode(text) do
     case ConfigText.value(text, "fermix_channels.slack", "mode") do
@@ -542,26 +957,57 @@ defmodule FermixCore.Home.MoveReadiness do
           "to finish."
       )
 
-  defp cutover_sentence,
-    do:
-      "Messages sent to Telegram while the move runs wait until it is done, and a recurring " <>
-        "job more than an hour late is skipped."
+  # Telegram keeps what it holds until the poller asks again, so its messages
+  # wait out the move: named only where this home has it set up.
+  defp cutover_sentence({:ok, text}) do
+    if telegram?(text),
+      do:
+        "Messages sent to Telegram while the move runs wait until it is done, and a " <>
+          "recurring job more than an hour late is skipped.",
+      else: jobs_gap()
+  end
+
+  defp cutover_sentence({:error, _sentence}), do: jobs_gap()
+
+  defp jobs_gap, do: "A recurring job more than an hour late while the move runs is skipped."
 
   # -- facts ------------------------------------------------------------------
 
-  defp item(id, status, sentence), do: %{id: id, status: status, sentence: sentence}
+  defp item(id, status, sentence) when id in @ids,
+    do: %{id: id, status: status, sentence: sentence}
 
   # A review is asked for, not polled, so each unreadable read is logged.
   defp read_config(home) do
-    case config_text(config_path(home)) do
-      {:ok, text} ->
-        {:ok, text}
-
-      {:error, reason} ->
-        Logger.error("move readiness: config.toml could not be read: #{inspect(reason)}")
-        {:error, @unreadable_settings}
+    case settings_text(logged_read(config_path(home)), logged_read(MachineFile.path(home))) do
+      {:ok, text} -> {:ok, text}
+      {:error, _reason} -> {:error, @unreadable_settings}
     end
   end
+
+  defp logged_read(file) do
+    read = config_text(file)
+
+    case read do
+      {:ok, _text} ->
+        read
+
+      {:error, reason} ->
+        Logger.error(
+          "move readiness: #{Path.basename(file)} could not be read: #{inspect(reason)}"
+        )
+
+        read
+    end
+  end
+
+  # This home's settings and this computer's own as one text, each read where
+  # it lives: `config.toml` without any machine setting it still holds, then
+  # `machine.toml` (`Setup.MachineFile`).
+  defp settings_text({:ok, config}, {:ok, machine}),
+    do: {:ok, elem(MachineFile.strip(config), 0) <> "\n" <> machine}
+
+  defp settings_text({:error, _reason} = error, _machine), do: error
+  defp settings_text(_config, {:error, _reason} = error), do: error
 
   defp config_path(home), do: Path.join(home, "config.toml")
 

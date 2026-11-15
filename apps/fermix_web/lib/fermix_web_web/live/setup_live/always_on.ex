@@ -5,17 +5,14 @@ defmodule FermixWebWeb.SetupLive.AlwaysOn do
 
   The tab draws the engine's summary (`home.status.summary`) and nothing of
   its own: for the action the owner presses it collects what the action
-  `needs` (a token, with the provider when the summary lists several; the
-  recovery passphrase, typed twice and compared here where none is set yet,
-  else once; a size and place from `home.provision.options`, the
-  recommendation chosen), asks its `confirm` sentence, and sends one step,
+  `needs` (the recovery passphrase, typed twice and compared here where none
+  is set yet, else once), asks its `confirm` sentence, and sends one step,
   `Management.AlwaysOn.act/2` (`home.act`) in the page's own process with
   `actor: :setup_page`, then draws the summary it answers. A `changed`
   refusal is shown in its sentence and the summary is read again. It never
   sequences calls, follows a job, picks a server or words what the engine
-  words; Learn more and Open the provider's console are links to the
-  action's `url`, and Update is the sentence alone (this page installs
-  nothing).
+  words; Learn more is a link to the summary's `help`, and Update is the
+  sentence alone (this page installs nothing).
 
   **Reads** run in `start_async` when the tab opens and at each
   `:home_status_changed` from `Home.StatusWatch`, which the page subscribes
@@ -24,12 +21,12 @@ defmodule FermixWebWeb.SetupLive.AlwaysOn do
   subscribes again when it comes back, trying at most `@watch_tries` times a
   second apart. Every act runs in `start_async` too.
 
-  **Secrets.** A token or a passphrase lives only in the submitted event
-  and the one act it becomes (`AlwaysOn.Input`, whose inspection withholds
-  both): never in an assign, and every field is drawn empty, its form
-  replaced after each submit (`form_gen`). The one-time code of a server of
-  the owner's own is held in `Code`, whose inspection withholds it, and
-  copied from the page by the `CopyText` hook, never through an event.
+  **Secrets.** A passphrase lives only in the submitted event and the one
+  act it becomes (`AlwaysOn.Input`, whose inspection withholds it): never in
+  an assign, and every field is drawn empty, its form replaced after each
+  submit (`form_gen`). The one-time code of the owner's server is held in
+  `Code`, whose inspection withholds it, and copied from the page by the
+  `CopyText` hook, never through an event.
 
   **Move now** on the computer that sets Always On up restarts the engine:
   the restart overlay goes up first, with the tab stamped into the url
@@ -49,7 +46,6 @@ defmodule FermixWebWeb.SetupLive.AlwaysOn do
   use FermixWebWeb, :html
 
   alias FermixCore.Clock
-  alias FermixCore.Home.AlwaysOnRelease
   alias FermixCore.Home.Link
   alias FermixCore.Home.Role
   alias FermixCore.Home.StatusWatch
@@ -59,7 +55,6 @@ defmodule FermixWebWeb.SetupLive.AlwaysOn do
   alias FermixCore.Management.HomeSummary
   alias FermixCore.Management.Placement
   alias FermixCore.Management.Protocol
-  alias FermixCore.Management.Provision
   alias FermixCore.Setup.ConfigStore
 
   require Logger
@@ -67,15 +62,97 @@ defmodule FermixWebWeb.SetupLive.AlwaysOn do
 
   defmodule Code do
     @moduledoc """
-    The one-time code of a server of the owner's own, answered once by
-    `own_server`, with the command to run there and until when the code
-    works. LiveView's crash report prints every assign, so no print of it
+    The one-time code of the owner's server, answered once by
+    `own_server`, with the command to run there, the engine's sentence for
+    both (`sentence`: the systems it takes and until when the code works) and
+    the optional step that also joins it to the owner's tailnet (`tailscale`,
+    its label, sentence, command and docs page); or the one-time code a new
+    computer joins with (M97 §3.1), answered once by `add_computer`, which has
+    no command, no sentence and no Tailscale step (each nil) and says until
+    when it works (`until`, nil for the owner's server, whose sentence says
+    it). LiveView's crash report prints every assign, so no print of it
     spells the code.
     """
-    @enforce_keys [:code, :command, :until]
-    defstruct [:code, :command, :until]
+    @enforce_keys [:code, :command, :sentence, :tailscale, :until]
+    defstruct [:code, :command, :sentence, :tailscale, :until]
 
-    @type t :: %__MODULE__{code: String.t(), command: String.t(), until: String.t()}
+    @type t :: %__MODULE__{
+            code: String.t(),
+            command: String.t() | nil,
+            sentence: String.t() | nil,
+            tailscale: %{String.t() => String.t()} | nil,
+            until: String.t() | nil
+          }
+
+    @doc """
+    The card a step's `result` makes: `own_server`'s, matched whole (the
+    code's five fields, then its Tailscale step's four on their own),
+    `add_computer`'s (`{code, expires_at}` and nothing else), or none for a
+    step that answers none (null, a move's `{move_id}`, or the computer
+    `approve_computer` added, which the screen after it names). Any other
+    shape raises: the code is answered once, so it is never dropped in silence. A
+    refusal names the fields, never the code.
+    """
+    @spec from_result(map() | nil) :: t() | nil
+    def from_result(nil), do: nil
+
+    def from_result(%{"move_id" => id} = result) when is_binary(id) and map_size(result) == 1,
+      do: nil
+
+    def from_result(
+          %{
+            "code" => code,
+            "expires_at" => at,
+            "command" => command,
+            "sentence" => sentence,
+            "tailscale" => step
+          } = result
+        )
+        when is_binary(code) and is_binary(at) and is_binary(command) and is_binary(sentence) and
+               map_size(result) == 5 do
+      %__MODULE__{
+        code: code,
+        command: command,
+        sentence: sentence,
+        tailscale: tailscale_step(step),
+        until: nil
+      }
+    end
+
+    def from_result(%{"code" => code, "expires_at" => at} = result)
+        when is_binary(code) and is_binary(at) and map_size(result) == 2 do
+      {:ok, expires, _offset} = DateTime.from_iso8601(at)
+
+      %__MODULE__{
+        code: code,
+        command: nil,
+        sentence: nil,
+        tailscale: nil,
+        until: Clock.stated_instant(expires)
+      }
+    end
+
+    def from_result(%{"device_id" => id, "name" => name} = result)
+        when is_binary(id) and is_binary(name) and map_size(result) == 2,
+        do: nil
+
+    def from_result(result), do: raise(ArgumentError, "home.act answered #{shape(result)}")
+
+    defp tailscale_step(
+           %{"label" => label, "sentence" => sentence, "command" => command, "url" => url} =
+             step
+         )
+         when is_binary(label) and is_binary(sentence) and is_binary(command) and
+                is_binary(url) and map_size(step) == 4,
+         do: step
+
+    defp tailscale_step(step),
+      do: raise(ArgumentError, "home.act answered own_server's Tailscale step as #{shape(step)}")
+
+    defp shape(%{} = map),
+      do: "a result with the fields #{map |> Map.keys() |> Enum.sort() |> inspect()}"
+
+    defp shape(_other), do: "a result that is no object"
 
     defimpl Inspect do
       def inspect(_code, _opts), do: "#AlwaysOnCode<withheld>"
@@ -97,6 +174,8 @@ defmodule FermixWebWeb.SetupLive.AlwaysOn do
   # Each tab of the page by the management request its controls make, so the
   # one placement table (`Management.Placement`) decides which engine serves
   # it. A tab missing here fails loud rather than being served by default.
+  # The page's sandbox is this computer's own (M97 §19.7: the page sends
+  # nothing to the server), so it names this computer's id for it.
   @tab_requests %{
     "provider" => {"settings.apply", "providers.openai"},
     "realtime" => {"settings.apply", "realtime"},
@@ -105,7 +184,7 @@ defmodule FermixWebWeb.SetupLive.AlwaysOn do
     "plugins" => {"plugins.list", nil},
     "search" => {"settings.apply", "web_search"},
     "media" => {"settings.apply", "generate_image"},
-    "sandbox" => {"settings.apply", "sandbox"},
+    "sandbox" => {"settings.apply", "computer.sandbox"},
     "coding" => {"settings.apply", "harness"},
     "memory" => {"settings.apply", "memory"},
     "personalization" => {"settings.apply", "personalization"},
@@ -131,8 +210,10 @@ defmodule FermixWebWeb.SetupLive.AlwaysOn do
   defp place({method, nil}), do: Placement.place(method, %{})
   defp place({method, section}), do: Placement.place(method, %{"section" => section})
 
-  # An owner may have no Fermix app (a Homebrew or Linux install), so neither
-  # names one; the server's own setup page is out of reach on most servers.
+  # An owner may have no Fermix app on this computer (a Homebrew or Linux
+  # install), so the notice names none; a tab of the server's says where its
+  # settings change, any computer's app (M97 §19.7): the server's own setup
+  # page is out of reach on most servers.
   @doc "The notice a device-role page leads with, or nil off the device role."
   @spec device_notice(Role.record()) :: String.t() | nil
   def device_notice(%{role: :device} = record) do
@@ -145,7 +226,9 @@ defmodule FermixWebWeb.SetupLive.AlwaysOn do
   @doc "The sentence a tab the primary serves shows in the device role."
   @spec unavailable_sentence(Role.record()) :: String.t()
   def unavailable_sentence(%{role: :device} = record),
-    do: "These settings are Fermix-wide, so they live on #{server_words(record)}."
+    do:
+      "These settings are Fermix-wide, so they live on #{server_words(record)}. Change them " <>
+        "in the Fermix app on any of your computers."
 
   defp server_words(%{primary: name}) when is_binary(name) and name != "",
     do: "your server, #{name}"
@@ -164,7 +247,6 @@ defmodule FermixWebWeb.SetupLive.AlwaysOn do
       gen: 0,
       form_gen: 0,
       open: nil,
-      options: nil,
       code: nil,
       acting: nil,
       restarting?: false,
@@ -246,7 +328,8 @@ defmodule FermixWebWeb.SetupLive.AlwaysOn do
   # -- events --------------------------------------------------------------------
 
   @doc """
-  One `always_on_*` event: a press of an action the summary drew, the step's
+  One `always_on_*` event: a press of an action the summary drew (its main
+  step, an alternative, or the backup settings' Change), the step's
   form submitted, Back (closes the step) and Done (puts the code away).
   Nothing here raises: a failure is the tab's error line.
   """
@@ -287,23 +370,15 @@ defmodule FermixWebWeb.SetupLive.AlwaysOn do
 
   defp press(socket, _id, _key), do: ignored(socket, "always_on_press")
 
-  # A link (Learn more, Open the console) and Update are never pressed here.
-  defp pressed(socket, %{"url" => url}) when is_binary(url),
-    do: ignored(socket, "always_on_press")
-
+  # Update is never pressed here: this page installs nothing.
   defp pressed(socket, %{"id" => "update"}), do: ignored(socket, "always_on_press")
 
   defp pressed(socket, %{"needs" => [], "confirm" => nil} = action),
     do: act(socket, action, %Input{})
 
-  defp pressed(socket, action) do
-    socket
-    |> put(open: action, options: nil, error: nil)
-    |> next_form()
-    |> choice_options(action)
-  end
+  defp pressed(socket, action), do: socket |> put(open: action, error: nil) |> next_form()
 
-  defp close(socket), do: socket |> put(open: nil, options: nil, error: nil) |> next_form()
+  defp close(socket), do: socket |> put(open: nil, error: nil) |> next_form()
 
   defp next_form(socket), do: put(socket, form_gen: socket.assigns.always_on.form_gen + 1)
 
@@ -311,7 +386,7 @@ defmodule FermixWebWeb.SetupLive.AlwaysOn do
 
   defp submit(%{assigns: %{always_on: %{open: %{} = open, acting: nil}}} = socket, fields)
        when is_map(fields) do
-    with {:ok, given} <- collected(open["needs"], fields, socket.assigns.always_on),
+    with {:ok, given} <- collected(open["needs"], fields),
          {:ok, input} <- Input.decode(given) do
       act(socket, open, input)
     else
@@ -325,70 +400,27 @@ defmodule FermixWebWeb.SetupLive.AlwaysOn do
   # The step stays open, its fields drawn empty again, with the sentence.
   defp refused_here(socket, sentence), do: socket |> put(error: sentence) |> next_form()
 
-  defp collected(needs, fields, state) do
+  defp collected(needs, fields) do
     Enum.reduce_while(needs, {:ok, %{}}, fn need, {:ok, given} ->
-      case needed(need, fields, state) do
+      case needed(need, fields) do
         {:ok, more} -> {:cont, {:ok, Map.merge(given, more)}}
         {:error, _sentence} = refused -> {:halt, refused}
       end
     end)
   end
 
-  defp needed("token", fields, state) do
-    case providers(state) do
-      [_one] -> {:ok, %{"token" => fields["token"]}}
-      _several -> {:ok, %{"token" => fields["token"], "provider" => fields["provider"]}}
-    end
-  end
-
-  defp needed("new_recovery_passphrase", fields, _state) do
+  defp needed("new_recovery_passphrase", fields) do
     if fields["passphrase"] == fields["passphrase_again"],
       do: {:ok, %{"recovery_passphrase" => fields["passphrase"]}},
       else: {:error, @mismatch_sentence}
   end
 
-  defp needed("recovery_passphrase", fields, _state),
+  defp needed("recovery_passphrase", fields),
     do: {:ok, %{"recovery_passphrase" => fields["passphrase"]}}
 
-  # The radio's value is `location/type`; anything else goes to the engine
-  # as the size, which refuses it in its own words.
-  defp needed("choice", fields, _state) do
-    case fields["choice"] do
-      choice when is_binary(choice) -> {:ok, chosen(String.split(choice, "/", parts: 2))}
-      other -> {:ok, %{"type" => other}}
-    end
-  end
-
-  defp chosen([location, type]), do: %{"type" => type, "location" => location}
-  defp chosen([other]), do: %{"type" => other}
-
-  @doc "The token screens the summary drew, one per provider."
-  @spec providers(map()) :: [map()]
-  def providers(%{summary: %{"detail" => %{"providers" => providers}}}) when is_list(providers),
-    do: providers
-
-  def providers(_state), do: []
-
-  # `home.provision.options` of the provider Always On speaks of, read
-  # while the choice is open.
-  defp choice_options(socket, %{"needs" => needs}) do
-    if "choice" in needs, do: read_options(socket), else: socket
-  end
-
-  defp read_options(socket) do
-    state = socket.assigns.always_on
-    opts = engine_opts(state)
-    form_gen = state.form_gen
-
-    socket
-    |> put(options: :reading)
-    |> Phoenix.LiveView.start_async({:always_on, :options}, fn ->
-      {form_gen, offers(opts)}
-    end)
-  end
-
-  # The one call of `home.provision.options`: what the provider in use sells.
-  defp offers(opts), do: Provision.options(opts)
+  # The six digits the computer that asks to join shows (M97 §7.5), as the
+  # owner typed them; the engine reads them.
+  defp needed("sas", fields), do: {:ok, %{"sas" => fields["sas"]}}
 
   # -- the step ------------------------------------------------------------------
 
@@ -409,8 +441,8 @@ defmodule FermixWebWeb.SetupLive.AlwaysOn do
     end)
   end
 
-  # Only this engine's own move restarts it; a linked desktop's replace moves
-  # its server.
+  # Only this engine's own move restarts it at once; a linked desktop's move
+  # back restarts it only once its home is in place.
   defp restarts_here?(%{"id" => id}, %{forwarding: []}), do: id in @moves
   defp restarts_here?(_action, _state), do: false
 
@@ -419,13 +451,13 @@ defmodule FermixWebWeb.SetupLive.AlwaysOn do
   # lands on this tab.
   defp overlay(socket, true) do
     socket
-    |> put(open: nil, options: nil)
+    |> put(open: nil)
     |> Phoenix.LiveView.push_patch(to: ~p"/setup?tab=always_on")
   end
 
   defp overlay(socket, false), do: socket
 
-  @doc "The answer of a read, an act or the choice's options."
+  @doc "The answer of a read or an act."
   @spec handle_async(tuple(), {:ok, term()} | {:exit, term()}, Phoenix.LiveView.Socket.t()) ::
           Phoenix.LiveView.Socket.t()
   def handle_async({:always_on, :read}, {:ok, {gen, {:ok, record}}}, socket) do
@@ -436,12 +468,6 @@ defmodule FermixWebWeb.SetupLive.AlwaysOn do
 
   def handle_async({:always_on, :act}, {:ok, answer}, socket), do: answered(socket, answer)
 
-  def handle_async({:always_on, :options}, {:ok, {form_gen, answer}}, socket) do
-    if form_gen == socket.assigns.always_on.form_gen,
-      do: options(socket, answer),
-      else: socket
-  end
-
   def handle_async({:always_on, what}, {:exit, reason}, socket) do
     Logger.error("setup always on: the #{what} stopped: #{inspect(reason)}")
     stopped(socket, what)
@@ -451,16 +477,15 @@ defmodule FermixWebWeb.SetupLive.AlwaysOn do
     put(socket,
       summary: summary,
       gen: socket.assigns.always_on.gen + 1,
-      code: code(result),
+      code: Code.from_result(result),
       open: nil,
-      options: nil,
       acting: nil
     )
   end
 
   defp answered(socket, {:error, :changed, details}) do
     socket
-    |> put(error: sentence(:changed, details), open: nil, options: nil)
+    |> put(error: sentence(:changed, details), open: nil)
     |> settled()
     |> load()
   end
@@ -471,48 +496,25 @@ defmodule FermixWebWeb.SetupLive.AlwaysOn do
 
   defp answered(socket, {:error, code, details}) when is_atom(code) do
     socket
-    |> put(error: sentence(code, details), open: nil, options: nil)
+    |> put(error: sentence(code, details), open: nil)
     |> settled()
   end
 
   defp settled(socket), do: put(socket, acting: nil, restarting?: false)
 
   defp stopped(socket, :read), do: put(socket, error: @unread_sentence)
-  defp stopped(socket, :options), do: put(socket, options: nil, error: @unread_sentence)
 
   defp stopped(socket, :act),
-    do: socket |> put(error: @stopped_sentence, open: nil, options: nil) |> settled() |> load()
-
-  defp options(socket, {:ok, options}), do: put(socket, options: options)
-
-  defp options(socket, {:error, {_code, _field, sentence}}) when is_binary(sentence),
-    do: put(socket, options: nil, error: sentence)
+    do: socket |> put(error: @stopped_sentence, open: nil) |> settled() |> load()
 
   # Every refusal names its own sentence; the protocol's message for the code
   # stands where one does not.
   defp sentence(_code, %{"sentence" => sentence}) when is_binary(sentence), do: sentence
   defp sentence(code, _details), do: Map.fetch!(Protocol.error_messages(), code)
 
-  defp code(%{"code" => code, "expires_at" => at, "command" => command})
-       when is_binary(code) and is_binary(at) and is_binary(command) do
-    {:ok, expires, _offset} = DateTime.from_iso8601(at)
-    %Code{code: code, command: command, until: Clock.stated_instant(expires)}
-  end
-
-  defp code(_result), do: nil
-
   # -- seams ---------------------------------------------------------------------
 
   defp seams, do: Application.get_env(:fermix_web, :always_on, [])
-
-  @doc """
-  Whether this engine offers Always On (`Home.AlwaysOnRelease.available?/0`:
-  the build's environment, and in a release build the home's switch): where
-  it does not, the page lists no Always On tab and takes no Always On event.
-  The `available:` seam stands for that answer.
-  """
-  @spec offered?() :: boolean()
-  def offered?, do: Keyword.get_lazy(seams(), :available, &AlwaysOnRelease.available?/0)
 
   # Every read and act takes the same options: the seams, the role the page
   # booted in and this engine's way to its server.

@@ -23,6 +23,14 @@
 # `s3_end_to_end` runs the snapshot S3 target against MinIO in Docker
 # (`Home.Snapshot.S3EndToEndTest`): opt in with `--only s3_end_to_end` on a
 # machine that has Docker and the pinned MinIO image.
+#
+# FERMIX_EVAL_FIXTURE_ORIGIN is the eval daemon's (`Tools.WebFetch.EvalFixture`):
+# exported in the shell that runs the suite, it would make every `web_fetch` test
+# turn on that shell's value. It is removed here, once, before any test runs, so
+# no test depends on the caller's environment; a test that needs it sets it and
+# restores it itself (async: false).
+System.delete_env("FERMIX_EVAL_FIXTURE_ORIGIN")
+
 ExUnit.start(
   capture_log: true,
   assert_receive_timeout: 2_000,

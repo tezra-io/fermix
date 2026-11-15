@@ -11,7 +11,7 @@ defmodule FermixCore.Home.Snapshot.Recovery do
       is derived and kept, as `set/2` keeps it. Either way it answers the key
       the move carries, so a move never makes a second key for an unchanged
       passphrase, and a mistyped one never becomes the key the new primary's
-      snapshots are encrypted to. On a replace it runs on the server, whose
+      snapshots are encrypted to. On a move back it runs on the server, whose
       key it is.
     * `set/2`, `home.snapshots.passphrase`'s: a new key under a new salt,
       replacing the one kept; snapshots written before it open only with the

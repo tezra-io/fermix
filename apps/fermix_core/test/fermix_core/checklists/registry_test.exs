@@ -819,6 +819,38 @@ defmodule FermixCore.Checklists.RegistryTest do
       assert_receive {:telemetry, [:fermix, :checklist, :edit], %{lists: 0, ops: 1},
                       %{outcome: :refused, made_via: "mac", error_code: "move_needs_place"}}
     end
+
+    # M85 E4: a phone's list channel names its wire, and no other name passes.
+    test "a phone's edit is made via the phone and says so in its telemetry", %{repo: repo} do
+      TelemetryCapture.attach([[:fermix, :checklist, :edit]], :emitter)
+      fermix!(repo)
+      %{id: list_id} = list(repo, "Fermix")
+
+      params = %{
+        "client_msg_id" => "phone-1",
+        "list_id" => list_id,
+        "op" => %{"op" => "add", "text" => "Lists on the phone"}
+      }
+
+      assert {:ok, %{made: made, duplicate: false}} =
+               Registry.device_edit(params, :independent,
+                 repo: repo,
+                 now: @now,
+                 made_via: "phone"
+               )
+
+      assert %{made_via: "phone"} = Enum.find(rows(repo, "Fermix"), &(&1.id == made))
+
+      assert_receive {:telemetry, [:fermix, :checklist, :edit], %{lists: 1, ops: 1},
+                      %{outcome: :ok, made_via: "phone", error_code: nil}}
+
+      assert_raise FunctionClauseError, fn ->
+        Registry.device_edit(%{params | "client_msg_id" => "watch-1"}, :independent,
+          repo: repo,
+          made_via: "watch"
+        )
+      end
+    end
   end
 
   describe "the boot sweep" do

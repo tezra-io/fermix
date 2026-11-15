@@ -84,6 +84,30 @@ defmodule Fermix.CLI.Service.PackagedTest do
       assert status["listener"]["origin"] == "http://127.0.0.1:4030"
     end
 
+    # The published status has no word for a daemon too busy to answer, so its
+    # `running` stays empty as for one that stopped, and the log says which.
+    test "a daemon too busy to answer is said in the log, never read as stopped", context do
+      :ok = Binding.write(context.home, root: context.config_root)
+      busy = fn _socket_path -> {:error, :not_accepting} end
+
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          assert {:ok, status} = Packaged.status(opts(context, hello: busy))
+          assert status["running"] == nil
+        end)
+
+      assert log =~ "Fermix could not tell whether it is running"
+
+      stopped = fn _socket_path -> {:error, :not_running} end
+
+      quiet =
+        ExUnit.CaptureLog.capture_log(fn ->
+          assert {:ok, _status} = Packaged.status(opts(context, hello: stopped))
+        end)
+
+      refute quiet =~ "could not tell"
+    end
+
     test "hello is asked at the bound home's own socket", context do
       :ok = Binding.write(context.home, root: context.config_root)
       test = self()
@@ -657,6 +681,33 @@ defmodule Fermix.CLI.Service.PackagedTest do
       assert_receive {:ran, "systemctl", ["--user", "restart", @unit]}
     end
 
+    # A daemon that runs but is too busy to answer is not one that stopped: it
+    # is restarted the same way, since the restart is the way out of that, and
+    # the log says it gave no lease.
+    test "a daemon too busy to answer is restarted without a lease, and the log says why",
+         context do
+      opts = restart_opts(context, pids: [:busy, "412"])
+
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          assert {:ok, result} = Packaged.restart(opts)
+          assert result["previous_pid"] == nil
+          assert result["pid"] == "412"
+        end)
+
+      assert log =~ "Fermix could not tell whether it is running"
+      assert log =~ "restarts it without a lease"
+      refute_received {:called, "lifecycle.prepare", _params}
+      assert_receive {:ran, "systemctl", ["--user", "restart", @unit]}
+
+      quiet =
+        ExUnit.CaptureLog.capture_log(fn ->
+          assert {:ok, _result} = Packaged.restart(restart_opts(context, pids: [:down, "412"]))
+        end)
+
+      refute quiet =~ "could not tell"
+    end
+
     test "a daemon that will not open a window refuses before anything is restarted", context do
       opts =
         restart_opts(context,
@@ -708,6 +759,7 @@ defmodule Fermix.CLI.Service.PackagedTest do
 
       case Enum.at(pids, index) do
         :down -> {:error, :not_running}
+        :busy -> {:error, :not_accepting}
         pid -> {:ok, %{"engine" => Map.put(engine.(pid), "pid", pid)}}
       end
     end

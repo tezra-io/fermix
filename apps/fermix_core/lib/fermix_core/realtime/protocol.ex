@@ -21,27 +21,33 @@ defmodule FermixCore.Realtime.Protocol do
 
   Version 2 adds the Live engine's frames (`task_cancel`, `call_ready`,
   `caption`, `task`). Version 3 adds the Grok engine's playback feedback
-  (`playback_id` on `audio_delta`, `playback_progress`). An older companion is
+  (`playback_id` on `audio_delta`, `playback_progress`). Version 4 adds the
+  phone's camera (M87): `client_hello`'s optional `camera` flag, which says
+  whether the endpoint has one, and the `camera` object that turns it on and
+  off (`CallClient` decides who may send it). Version 5 adds the call that
+  ends itself (M96): `call_ended`, a normal end the daemon starts, today when
+  the owner says goodbye; only a peer at 5 or later is given one. An older companion is
   still served for the engines it can render; a call whose engine needs a newer
   version refuses it at `call_start` with `update_required` (the rule lives in
-  `LocalVoiceSocket`, which is the only place that knows both the negotiated
-  version and the configured engine).
+  `CallClient`, the one place that knows both the peer's version and the
+  configured engine).
   """
 
   alias FermixCore.Realtime.Config
 
   # Bumped in lockstep with any wire-shape change.
-  @protocol_version 3
+  @protocol_version 5
   # A literal, not derived from the version: a v1 companion still runs the
   # Realtime engine, and the N/N-1 window this once was would have dropped it
   # silently at v3. Raising the floor is a release decision of its own.
   @min_supported_version 1
 
-  @client_events ~w(client_hello call_start audio_chunk interrupt mute call_stop task_cancel playback_progress)
-  @server_events ~w(server_hello state audio_delta transcript_delta assistant_text_delta assistant_text_done tool_event usage error playback_stop call_ready caption task)
+  @client_events ~w(client_hello call_start audio_chunk interrupt mute call_stop task_cancel playback_progress camera)
+  @server_events ~w(server_hello state audio_delta transcript_delta assistant_text_delta assistant_text_done tool_event usage error playback_stop call_ready caption task call_ended)
 
-  # One call per daemon: a `call_start` while another task-engine call is up or
-  # still settling is refused with this `error.reason`.
+  # One call per home (`CallLease`): a `call_start` while another call is up or
+  # still settling, on any engine and from any endpoint, is refused with this
+  # `error.reason`.
   @call_in_progress "call_in_progress"
 
   # The wire's bound on a `playback_id`. The daemon mints the id and the
@@ -55,8 +61,9 @@ defmodule FermixCore.Realtime.Protocol do
   def protocol_version, do: @protocol_version
 
   @doc """
-  The `error.reason` that refuses a `call_start` while another task-engine call
-  is up or still settling. Terminal: the connection closes after it.
+  The `error.reason` that refuses a `call_start` while another call is up or
+  still settling, on any engine and from any endpoint; the frame's `held_by`
+  names the endpoint holding it. Terminal: the connection closes after it.
   """
   @spec call_in_progress() :: String.t()
   def call_in_progress, do: @call_in_progress
@@ -87,6 +94,33 @@ defmodule FermixCore.Realtime.Protocol do
       client_version < min -> {:error, :client_too_old}
       client_version > max -> {:error, :client_too_new}
       true -> :ok
+    end
+  end
+
+  @doc """
+  The daemon's answer to a `client_hello` at `client_version`: `server_hello`
+  with the range it accepts, or the refusal that names which side must update,
+  after which the adapter closes. Every adapter speaking this wire answers the
+  handshake with it: the Unix socket, and the phone's call channel.
+  """
+  @spec hello_reply(integer()) :: {:ok, map()} | {:error, map()}
+  def hello_reply(client_version) when is_integer(client_version) do
+    {min, max} = supported_version_range()
+
+    case negotiate(client_version) do
+      :ok ->
+        {:ok, %{type: "server_hello", min_version: min, max_version: max}}
+
+      {:error, direction} ->
+        {:error,
+         %{
+           type: "error",
+           reason: "unsupported_protocol_version",
+           direction: Atom.to_string(direction),
+           client_version: client_version,
+           min_version: min,
+           max_version: max
+         }}
     end
   end
 
@@ -137,17 +171,16 @@ defmodule FermixCore.Realtime.Protocol do
   end
 
   defp payload_for("client_hello", decoded, _config) do
-    case Map.get(decoded, "protocol_version") do
-      version when is_integer(version) and version > 0 ->
-        {:ok, %{"protocol_version" => version}}
-
-      nil ->
-        {:error, :missing_protocol_version}
-
-      _other ->
-        {:error, :invalid_protocol_version}
+    with {:ok, version} <- fetch_protocol_version(decoded),
+         {:ok, camera?} <- fetch_hello_camera(decoded) do
+      {:ok, %{"protocol_version" => version, "camera" => camera?}}
     end
   end
+
+  defp payload_for("camera", %{"on" => on?}, _config) when is_boolean(on?),
+    do: {:ok, %{"on" => on?}}
+
+  defp payload_for("camera", _decoded, _config), do: {:error, :invalid_camera}
 
   defp payload_for("task_cancel", decoded, _config) do
     case Map.get(decoded, "delegation_id") do
@@ -173,6 +206,23 @@ defmodule FermixCore.Realtime.Protocol do
   end
 
   defp payload_for(_type, decoded, _config), do: {:ok, Map.delete(decoded, "type")}
+
+  defp fetch_protocol_version(decoded) do
+    case Map.get(decoded, "protocol_version") do
+      version when is_integer(version) and version > 0 -> {:ok, version}
+      nil -> {:error, :missing_protocol_version}
+      _other -> {:error, :invalid_protocol_version}
+    end
+  end
+
+  # v4: whether the endpoint has a camera. A hello that says nothing of it,
+  # every older peer's, has none.
+  defp fetch_hello_camera(decoded) do
+    case Map.get(decoded, "camera", false) do
+      camera? when is_boolean(camera?) -> {:ok, camera?}
+      _other -> {:error, :invalid_camera}
+    end
+  end
 
   defp fetch_playback_id(%{"playback_id" => id})
        when is_binary(id) and id != "" and byte_size(id) <= @playback_id_max_bytes,

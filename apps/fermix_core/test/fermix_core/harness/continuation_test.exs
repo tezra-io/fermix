@@ -152,6 +152,40 @@ defmodule FermixCore.Harness.ContinuationTest do
       assert vendor_at < reason_at, "the vendor's diagnosis must lead the body"
     end
 
+    # M98 D10: a run that failed to sign in names the agent and the machine in
+    # Fermix's own voice, after the vendor's words and outside their frame, and
+    # never claims the run did nothing: a sign-in can expire mid-run.
+    test "a run that failed to sign in says so after the vendor's words" do
+      vendor = "Your access token could not be refreshed. Please log out and sign in again."
+
+      text =
+        Continuation.notice_text(
+          row(%{status: "failed", reason: "signed_out"}),
+          vendor,
+          machine: "this Mac"
+        )
+
+      sentence =
+        "Codex is signed out on this Mac, so the run stopped. Sign in to Codex on this Mac " <>
+          "(run codex login in a terminal), then tell me."
+
+      assert framed_region(text) =~ vendor
+      refute framed_region(text) =~ sentence
+      assert after_last(text, @frame_close) =~ sentence
+      assert elem(:binary.match(text, vendor), 0) < elem(:binary.match(text, sentence), 0)
+      assert text =~ "check the working tree before redoing anything"
+      refute text =~ "did nothing"
+    end
+
+    test "a failure that is not a sign-in carries no sign-in sentence" do
+      text =
+        Continuation.notice_text(row(%{status: "failed", reason: "exit_1"}), "boom",
+          machine: "this Mac"
+        )
+
+      refute text =~ "signed out"
+    end
+
     # The context the agent needs to take a stance. Deliberately NOT a router:
     # both moves are named as legitimate and the agent judges from the failure
     # text, so no reason has to be classified as retryable or terminal.

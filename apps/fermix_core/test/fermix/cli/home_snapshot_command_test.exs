@@ -14,6 +14,8 @@ defmodule Fermix.CLI.HomeSnapshotCommandTest do
   alias FermixTestSupport.SafeRm
 
   @passphrase "invented-quarry-semaphore"
+  # A home that never moved keeps no snapshots, on any host (D18).
+  @off_server "Snapshots are kept only by an Always On server, and this computer is not one."
   @now_ms 1_793_083_733_000
 
   setup_all do
@@ -30,7 +32,7 @@ defmodule Fermix.CLI.HomeSnapshotCommandTest do
 
     File.write!(
       Path.join(home, "config.toml"),
-      "[sandbox]\nworkspace_root = \"#{home}/workspace\"\n"
+      "[fermix_core.meetings]\nrecordings = \"#{home}/workspace/meetings\"\n"
     )
 
     File.write!(Path.join(home, "journal.md"), "an invented journal\n")
@@ -65,7 +67,7 @@ defmodule Fermix.CLI.HomeSnapshotCommandTest do
 
       assert {status, err} == {0, ""}
       assert out =~ "Restored 3 files into #{ctx.into} at primary epoch 6."
-      assert out =~ "Rewrote 1 path in config.toml: sandbox.workspace_root."
+      assert out =~ "Rewrote 1 path in config.toml: fermix_core.meetings.recordings."
       assert File.read!(Path.join(ctx.into, "journal.md")) == "an invented journal\n"
       assert Epoch.read(ctx.into) == {:ok, 6}
     end
@@ -126,11 +128,11 @@ defmodule Fermix.CLI.HomeSnapshotCommandTest do
       assert %{"ok" => true, "result" => result} = Jason.decode!(out)
       assert result["role"] == "primary"
       assert result["epoch"] == 5
-      assert result["snapshots"]["sentence"] =~ "set a recovery passphrase"
+      assert result["snapshots"]["sentence"] == @off_server
 
       {0, human, ""} = run(["status"], home: ctx.home, client: stopped())
       assert human =~ "Role: primary\nPrimary epoch: 5\n"
-      assert human =~ "Snapshots: Snapshots are off: set a recovery passphrase to turn them on."
+      assert human =~ "Snapshots: #{@off_server}"
     end
 
     test "a home marked moved reads as a device, naming where it went", ctx do
@@ -191,9 +193,9 @@ defmodule Fermix.CLI.HomeSnapshotCommandTest do
         "role" => "device",
         "summary" => %{
           "state" => "problem",
-          "sentence" => "Your server is turned off.",
-          "action" => %{"id" => "turn_on", "label" => "Turn it on"},
-          "detail" => %{"kind" => "turned_off"}
+          "sentence" => "Your server's last backup is 4 days old.",
+          "action" => %{"id" => "back_up_now", "label" => "Back up now"},
+          "detail" => %{"kind" => "backup_old"}
         },
         "snapshots" => %{"sentence" => "Snapshots are the server's.", "targets" => []}
       }
@@ -202,8 +204,8 @@ defmodule Fermix.CLI.HomeSnapshotCommandTest do
       {0, out, ""} = run(["status"], home: ctx.home, client: client)
 
       assert [
-               "Your server is turned off.",
-               "Next: Turn it on (fermix always-on)",
+               "Your server's last backup is 4 days old.",
+               "Next: Back up now (fermix always-on)",
                "Role: device" | _
              ] =
                String.split(out, "\n")
@@ -211,7 +213,9 @@ defmodule Fermix.CLI.HomeSnapshotCommandTest do
       quiet = put_in(answer, ["summary", "action"], nil)
       client = fn "home.status", %{}, _opts -> {:ok, quiet} end
       {0, out, ""} = run(["status"], home: ctx.home, client: client)
-      assert ["Your server is turned off.", "Role: device" | _] = String.split(out, "\n")
+
+      assert ["Your server's last backup is 4 days old.", "Role: device" | _] =
+               String.split(out, "\n")
     end
 
     # Always On setup §8.2: a home the Fermix app manages takes its steps in
@@ -222,7 +226,7 @@ defmodule Fermix.CLI.HomeSnapshotCommandTest do
         "summary" => %{
           "state" => "off",
           "sentence" => "Keep Fermix running when this Mac sleeps.",
-          "action" => %{"id" => "paste_token", "label" => "Set up"},
+          "action" => %{"id" => "own_server", "label" => "Use my own Linux server"},
           "detail" => %{}
         },
         "snapshots" => %{"sentence" => "Snapshots are off.", "targets" => []}
@@ -233,8 +237,10 @@ defmodule Fermix.CLI.HomeSnapshotCommandTest do
       {0, out, ""} =
         run(["status"], home: ctx.home, client: client, app_managed?: fn -> true end)
 
-      assert ["Keep Fermix running when this Mac sleeps.", "Next: Set up (in the Fermix app)" | _] =
-               String.split(out, "\n")
+      assert [
+               "Keep Fermix running when this Mac sleeps.",
+               "Next: Use my own Linux server (in the Fermix app)" | _
+             ] = String.split(out, "\n")
 
       {0, json, ""} =
         run(["status", "--json"],
@@ -256,72 +262,11 @@ defmodule Fermix.CLI.HomeSnapshotCommandTest do
       assert %{"result" => %{"summary" => %{"state" => "off"}}} = Jason.decode!(json)
     end
 
-    # Always On is not in a release build yet, and home status is its screen:
-    # there it refuses as fermix always-on does, before reading anything.
-    test "in a build without Always On, it refuses in one sentence, reading nothing", ctx do
-      client = fn method, _params, _opts -> flunk("#{method} was called") end
-      absent = Path.join(ctx.tmp, "no-home")
-
-      {1, "", err} = run(["status"], home: absent, client: client, always_on: false)
-      assert err == "fermix home: Always On is not in this release of Fermix yet.\n"
-
-      {1, out, ""} = run(["status", "--json"], home: absent, client: client, always_on: false)
-
-      assert Jason.decode!(out) == %{
-               "schema_version" => 1,
-               "ok" => false,
-               "error" => %{
-                 "code" => "always_on_unavailable",
-                 "sentence" => "Always On is not in this release of Fermix yet."
-               }
-             }
-
-      refute File.exists?(absent)
-    end
-
-    # With no seam the verb asks the resolver of this home's own settings
-    # file, the one the engine's boot reads (`Home.AlwaysOnRelease`), with
-    # no engine and no tree: a switch it cannot read is named with its
-    # file, never read as off.
-    test "it reads Always On's switch from this home's own settings file", ctx do
-      file = Path.join(ctx.home, "config.toml")
-      File.write!(file, "\n[fermix_core.always_on]\nenabled = 1\n", [:append])
-      client = fn method, _params, _opts -> flunk("#{method} was called") end
-
-      {1, out, ""} = run(["status", "--json"], home: ctx.home, client: client)
-
-      assert %{"error" => %{"code" => "home_status_unavailable", "sentence" => sentence}} =
-               Jason.decode!(out)
-
-      assert sentence =~ file
-      assert sentence =~ "[fermix_core.always_on] enabled takes true or false"
-    end
-
-    test "in a build with Always On, it reads the home as ever", ctx do
-      {0, out, ""} = run(["status", "--json"], home: ctx.home, client: stopped(), always_on: true)
-      assert %{"ok" => true, "result" => %{"role" => "primary"}} = Jason.decode!(out)
-    end
-
-    test "in a build without Always On, the snapshots verbs are as ever", ctx do
-      {0, out, ""} =
-        run(["snapshots", "status", "--json"],
-          home: ctx.home,
-          client: stopped(),
-          always_on: false
-        )
-
-      assert %{"ok" => true, "result" => %{"configured" => false}} = Jason.decode!(out)
-    end
-
     test "snapshots status prints the snapshots alone", ctx do
       {0, out, ""} = run(["snapshots", "status", "--json"], home: ctx.home, client: stopped())
 
-      assert %{
-               "result" => %{
-                 "configured" => false,
-                 "targets" => [%{"id" => "s3"}, %{"id" => "desktop"}]
-               }
-             } = Jason.decode!(out)
+      assert %{"result" => %{"configured" => false, "targets" => [], "sentence" => @off_server}} =
+               Jason.decode!(out)
     end
   end
 

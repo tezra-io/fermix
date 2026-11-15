@@ -7,7 +7,9 @@ defmodule FermixCore.Agents.SkillRegistry do
 
     * `core_dir` (default: `priv/skills` inside the Fermix release) → `:operator`
     * `local_dir` (default: `$FERMIX_HOME/skills`, i.e. `~/.fermix/skills`) → `:operator`
-    * `plugin_skill_dirs` (enabled plugin skill roots under `$FERMIX_HOME/plugins`) → `:guest`
+    * `plugin_skill_dirs` (enabled plugin skill roots under `$FERMIX_HOME/plugins`,
+      each `{plugin_name, dir}`) → `:guest`, tagged with that plugin
+      (`AgentDefinition.with_plugin/2`)
 
   Local and plugin roots resolve through `ConfigStore` so they follow
   `FERMIX_HOME` (dev daemons, tests) instead of hardcoding the real home.
@@ -210,23 +212,35 @@ defmodule FermixCore.Agents.SkillRegistry do
              |> Map.put("source_path", path)
            ),
          :ok <- validate_no_capability_collision(definition, capability_registry) do
-      trust = classify_source(path, dirs)
-      {:ok, AgentDefinition.with_trust(definition, trust)}
+      {:ok, tag_source(definition, classify_source(path, dirs))}
     else
       {:error, reason} ->
         {:error, {:invalid_skill, skill_name_from_path(path), reason}}
     end
   end
 
+  defp tag_source(definition, {:plugin, plugin}) do
+    definition
+    |> AgentDefinition.with_trust(:guest)
+    |> AgentDefinition.with_plugin(plugin)
+  end
+
+  defp tag_source(definition, trust), do: AgentDefinition.with_trust(definition, trust)
+
   defp classify_source(skill_path, dirs) do
     skill_dir = Path.dirname(skill_path)
+    plugin_dir = owning_plugin_dir(skill_dir, Map.get(dirs, :plugin_skill_dirs, []))
 
     cond do
       under?(skill_dir, dirs.core_dir) -> :operator
-      under_any?(skill_dir, Map.get(dirs, :plugin_skill_dirs, [])) -> :guest
+      plugin_dir -> {:plugin, elem(plugin_dir, 0)}
       under?(skill_dir, dirs.local_dir) -> :operator
       true -> :guest
     end
+  end
+
+  defp owning_plugin_dir(skill_dir, plugin_dirs) when is_list(plugin_dirs) do
+    Enum.find(plugin_dirs, fn {_plugin, dir} -> under?(skill_dir, dir) end)
   end
 
   defp discovery_dirs(dirs) do
@@ -238,7 +252,7 @@ defmodule FermixCore.Agents.SkillRegistry do
     plugin_dirs =
       dirs
       |> Map.get(:plugin_skill_dirs, [])
-      |> Enum.map(&{:plugin_skill_dir, &1})
+      |> Enum.map(fn {_plugin, dir} -> {:plugin_skill_dir, dir} end)
 
     base ++ plugin_dirs
   end
@@ -255,10 +269,6 @@ defmodule FermixCore.Agents.SkillRegistry do
 
     expanded_path == expanded_root or
       String.starts_with?(expanded_path, expanded_root <> "/")
-  end
-
-  defp under_any?(path, roots) when is_list(roots) do
-    Enum.any?(roots, &under?(path, &1))
   end
 
   defp validate_no_capability_collision(_definition, nil), do: :ok

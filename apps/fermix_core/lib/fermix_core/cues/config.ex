@@ -369,13 +369,12 @@ defmodule FermixCore.Cues.Config do
   def screen(config \\ current()), do: Keyword.get(config, :screen, :keyword)
 
   @doc """
-  The provider whose decision model the screen uses while it is
-  `:decision_model`, one of `Providers.DecisionModel.providers/0`, or nil (no
-  key) for Automatic, the one `Providers.DecisionModel.route/1` picks. Read at
-  every filter call; whether it is set up is the call's to find, as for the
-  screen.
+  The decision model the screen uses while it is `:decision_model`, one of
+  `Providers.DecisionModel.choices/0`, or nil (no key) for Automatic, the one
+  `Providers.DecisionModel.route/1` picks. Read at every filter call; whether
+  its provider is set up is the call's to find, as for the screen.
   """
-  @spec decision_provider(t()) :: DecisionModel.provider() | nil
+  @spec decision_provider(t()) :: DecisionModel.choice() | nil
   def decision_provider(config \\ current()), do: Keyword.get(config, :decision_provider)
 
   @doc "The loopback port the door listens on."
@@ -862,7 +861,7 @@ defmodule FermixCore.Cues.Config do
   defp normalize_decision_provider(nil), do: nil
 
   defp normalize_decision_provider(value),
-    do: enum!(value, DecisionModel.providers(), "cues.decision_provider")
+    do: enum!(value, DecisionModel.choices(), "cues.decision_provider")
 
   defp normalize_door_port(nil), do: nil
   defp normalize_door_port(port) when is_integer(port) and port in @door_ports, do: port

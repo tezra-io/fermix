@@ -3,23 +3,29 @@ defmodule FermixCore.Setup.ConfigStore do
   Thin persisted setup store shared by web and CLI onboarding.
 
   Persists the runtime snapshot to `config.toml` under `FERMIX_HOME` (or the
-  default `~/.fermix`) and owns the local workspace layout used by setup,
-  health reporting, traces, and logs.
+  default `~/.fermix`), and this computer's own settings to `machine.toml`
+  beside it (`Setup.MachineFile`), and owns the local workspace layout used by
+  setup, health reporting, traces, and logs.
   """
 
+  alias FermixCore.Accessories.Config, as: AccessoriesConfig
   alias FermixCore.Browser.Config, as: BrowserConfig
+  alias FermixCore.BuildInfo
   alias FermixCore.Capabilities.MCP.Config, as: McpConfig
   alias FermixCore.Capabilities.MCP.OAuth.Grant, as: McpGrant
   alias FermixCore.Capabilities.MCP.Secrets, as: McpSecrets
   alias FermixCore.Capabilities.MCP.Supervisor, as: McpSupervisor
   alias FermixCore.ComputerHistory.Config, as: ComputerHistoryConfig
+  alias FermixCore.Computers.Switches, as: ComputerSwitches
   alias FermixCore.ComputerUse.Config, as: ComputerUseConfig
   alias FermixCore.Cues.Config, as: CuesConfig
   alias FermixCore.Cues.SourceManager
   alias FermixCore.Harness.Config, as: HarnessConfig
-  alias FermixCore.Home.AlwaysOnRelease
   alias FermixCore.Home.Archive.ConfigText
+  alias FermixCore.Home.Candidate
+  alias FermixCore.Home.DesktopLink
   alias FermixCore.Home.Role
+  alias FermixCore.Home.ServerSandbox
   alias FermixCore.Home.Snapshot.Config, as: SnapshotConfig
   alias FermixCore.IMessage
   alias FermixCore.Memory.CompactionConfig
@@ -33,6 +39,8 @@ defmodule FermixCore.Setup.ConfigStore do
   alias FermixCore.Realtime.Config, as: RealtimeConfig
   alias FermixCore.Sandbox.Config, as: SandboxConfig
   alias FermixCore.Sandbox.EnvHealth
+  alias FermixCore.Setup.EngineOwner
+  alias FermixCore.Setup.MachineFile
   alias FermixCore.Setup.RestartState
   alias FermixCore.Setup.SecretStore
   alias FermixCore.Setup.SecretWriter
@@ -160,7 +168,7 @@ defmodule FermixCore.Setup.ConfigStore do
         secret_store: Application.get_env(:fermix_core, :secret_store, :keyring),
         engine: Application.get_env(:fermix_core, :engine, []),
         snapshots: Application.get_env(:fermix_core, :snapshots, []),
-        always_on: Application.get_env(:fermix_core, :always_on, [])
+        computer: Application.get_env(:fermix_core, :computer, [])
       ],
       sandbox: Application.get_env(:fermix_core, :sandbox, SandboxConfig.default()),
       fermix_channels: [
@@ -171,7 +179,8 @@ defmodule FermixCore.Setup.ConfigStore do
         signal: Application.get_env(:fermix_channels, :signal, []),
         acp: Application.get_env(:fermix_channels, :acp, []),
         mobile: Application.get_env(:fermix_channels, :mobile, []),
-        imessage: Application.get_env(:fermix_channels, :imessage, [])
+        imessage: Application.get_env(:fermix_channels, :imessage, []),
+        accessories: Application.get_env(:fermix_channels, :accessories, [])
       ],
       fermix_web: Application.get_env(:fermix_web, :listener, [])
     }
@@ -179,20 +188,266 @@ defmodule FermixCore.Setup.ConfigStore do
   end
 
   @doc """
-  Reads and normalizes the settings file.
+  Reads and normalizes the settings file and the machine file beside it, each
+  setting from its own file only (`MachineFile.join/2`).
 
-  A value a normalizer refuses raises with the key named. A section the file
-  enables on a host that cannot run it answers a typed error instead: an
-  enabled `[fermix_channels.imessage]` off a Mac is
-  `{:error, {:unsupported_platform, :imessage}}`. `macos?:` names the host for a
-  test; every other caller reads the real one.
+  A value a normalizer refuses raises with the key named. An enabled
+  `[fermix_channels.imessage]` loads on any host (M97 §6.4): a home that moved
+  to a server keeps it there and runs it through the Mac that carries
+  Messages, and the channel registry decides whether this engine can run it.
   """
   @spec load_runtime_config(keyword()) :: {:ok, runtime_config()} | {:error, term()}
   def load_runtime_config(opts \\ []) do
-    case File.read(path()) do
-      {:ok, contents} -> platform_checked(parse_document(contents), opts)
-      {:error, :enoent} -> {:ok, empty_runtime_config()}
+    with {:ok, snapshot, _retired} <- read_runtime_config(opts), do: {:ok, snapshot}
+  end
+
+  # The settings as `load_runtime_config/1` reads them, with the sentence for
+  # each setting a build retired that the files carried: the normalizer that
+  # drops one names it, as data (`normalize_document/1`). Only the boot read
+  # keeps them (`bootstrap_runtime_config/1`); every other load, the ones the
+  # setup state, the model routing and the doctor repeat on every poll among
+  # them, names nothing.
+  defp read_runtime_config(opts) do
+    with {:ok, config} <- read_named(path()),
+         {:ok, machine} <- read_named(MachineFile.path(fermix_home())) do
+      loaded(config, machine, opts)
+    end
+  end
+
+  @doc """
+  Names, once each at warning, the settings this build retired that the boot
+  read found in the settings files and dropped (`bootstrap_runtime_config/1`),
+  and forgets them, so a second call names nothing. No load names them. Each engine process calls it once, where its logging is
+  in place: an app engine or a source boot once its tree has started
+  (`FermixCore.Application`), and every process of a packaged binary in
+  `Fermix.CLI.main/1`, after a verb's tree where it starts one. It reads no
+  file, so it cannot fail.
+  """
+  @spec say_retired_settings() :: :ok
+  def say_retired_settings do
+    retired = Application.get_env(:fermix_core, :retired_settings, [])
+    Application.delete_env(:fermix_core, :retired_settings)
+    Enum.each(retired, &Logger.warning/1)
+  end
+
+  # The settings are two files, so one that cannot be read is named
+  # (`{:config, file, reason}`, `load_error_sentence/1`).
+  defp read_named(file) do
+    case read_settings(file) do
+      {:error, reason} -> {:error, {:config, file, reason}}
+      read -> read
+    end
+  end
+
+  # Neither file: the in-memory defaults of a home nobody set up.
+  defp loaded(:absent, :absent, _opts), do: {:ok, empty_runtime_config(), []}
+
+  # `join/2` takes only this machine's keys from the machine file, so the
+  # machine file's own coding-agent and browser tables are checked here (M98
+  # D5, M97 D28d): any other key there would otherwise be dropped without a
+  # word. The `[mcp.*]` blocks have their own reader, which drops a retired
+  # one and names it from the same text (`McpConfig.retired_notices/1`).
+  defp loaded(config, machine, opts) do
+    machine = decode_document(text(machine))
+    :ok = HarnessConfig.machine_file!(get_in(machine, ["fermix_core", "harness"]))
+    :ok = BrowserConfig.machine_file!(get_in(machine, ["fermix_core", "browser"]))
+    document = MachineFile.join(decode_document(text(config)), machine)
+    {snapshot, retired} = normalize_document(document)
+    {snapshot, machine_retired} = with_machine_history(snapshot, machine)
+    retired = retired ++ machine_retired ++ McpConfig.retired_notices(text(config))
+
+    with {:ok, checked} <- platform_checked(snapshot, opts),
+         do: {:ok, checked, Enum.uniq(retired)}
+  end
+
+  # The machine file's own `[fermix_core.computer_history]` (M97 §4): its keys
+  # checked, and its `summarizer`, which says only "local", held beside the
+  # home's route as `machine_summarizer` (`ComputerHistoryConfig.machine_file/1`),
+  # with the sentence for each retired key it carried, which that drops.
+  defp with_machine_history(snapshot, machine) do
+    table = get_in(machine, ["fermix_core", "computer_history"])
+    own = ComputerHistoryConfig.machine_file(table)
+
+    snapshot =
+      update_in(
+        snapshot,
+        [:fermix_core, :computer_history],
+        &ComputerHistoryConfig.normalize(&1 ++ own)
+      )
+
+    {snapshot, ComputerHistoryConfig.retired_notices(table)}
+  end
+
+  defp read_settings(file) do
+    case File.read(file) do
+      {:ok, contents} -> {:ok, contents}
+      {:error, :enoent} -> {:ok, :absent}
       {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp text(:absent), do: ""
+  defp text(contents) when is_binary(contents), do: contents
+
+  @doc """
+  Moves this computer's own settings out of `home`'s `config.toml` into its
+  `machine.toml` (M97 §4, `MachineFile.migration/3`): the machine file is
+  written first and `config.toml` loses them after, each write atomic, under
+  the config lock. Run at every boot before any setting is read
+  (`bootstrap_runtime_config/1`, which `config/runtime.exs` calls for the
+  daemon and every CLI verb alike), so a boot stopped between the writes is
+  finished by the next. A home that is not there yet has nothing to move.
+  The machine file's write also rewrites this computer's switches where an
+  engine before M97 D27 wrote them (`Computers.Switches.upgrade/2`), once,
+  and logs it once; an old key whose value is not a boolean stops the boot
+  by name, with nothing written.
+
+  A home the Mac app manages (its `engine-owner.json` names the app, whose
+  bundle is still there: `EngineOwner.app_managed_marker?/1`) is migrated by
+  an app engine only: there the app's own engine moves the settings, at its
+  first start on a release that reads `machine.toml`. Any other engine (a
+  formula binary, a source checkout) refuses by name a migration that would
+  write anything there, `{:app_managed, home}`, and takes no lock; one with
+  nothing to move goes on. `opts`: `:server?`, whether this machine is an
+  Always On server, in place of `Home.Candidate.server?/1`, `:app_engine?`
+  in place of `BuildInfo.app_engine?/0`, and `:bundle_exists?` for the
+  marker (tests).
+  """
+  @spec migrate_machine_file(Path.t(), keyword()) :: :ok | {:error, term()}
+  def migrate_machine_file(home, opts \\ [])
+      when is_binary(home) and home != "" and is_list(opts) do
+    if File.dir?(home), do: migrate_home(home, opts), else: :ok
+  end
+
+  defp migrate_home(home, opts) do
+    server? = Keyword.get_lazy(opts, :server?, fn -> Candidate.server?(home) end)
+
+    if app_managed_elsewhere?(home, opts),
+      do: refuse_if_pending(home, server?),
+      else: with_config_lock(home, fn -> migrate_locked(home, server?) end)
+  end
+
+  @doc """
+  Whether a boot of the Mix environment `env` may name its home as
+  `fermix_home` (`FERMIX_HOME`, nil or blank when unset) says: a source
+  checkout (`:dev`) never falls back to the installed home, so it needs the
+  variable, and refuses with the sentence that says so; every other build
+  defaults as `fermix_home/0` does. `config/runtime.exs` asks before the
+  configuration is read or anything is written.
+  """
+  @spec source_home(atom(), String.t() | nil) :: :ok | {:error, String.t()}
+  def source_home(:dev, fermix_home) when fermix_home in [nil, ""],
+    do:
+      {:error,
+       "this is a Fermix source checkout, which never uses the installed home by default. " <>
+         "Set FERMIX_HOME to the home it should use: a new temporary folder, or " <>
+         "~/.fermix-dev for the development daemon."}
+
+  def source_home(env, fermix_home)
+      when is_atom(env) and (is_nil(fermix_home) or is_binary(fermix_home)),
+      do: :ok
+
+  defp app_managed_elsewhere?(home, opts) do
+    not Keyword.get_lazy(opts, :app_engine?, &BuildInfo.app_engine?/0) and
+      EngineOwner.app_managed_marker?([home: home] ++ Keyword.take(opts, [:bundle_exists?]))
+  end
+
+  # What the migration would write, read without the lock: nothing, or a
+  # refusal naming the home the app's engine migrates.
+  defp refuse_if_pending(home, server?) do
+    with {:ok, config} <- read_named(home_document_path(home)),
+         {:ok, machine} <- read_named(MachineFile.path(home)),
+         homeward = MachineFile.homeward(text(config), machine),
+         machine = homeward.machine || machine,
+         plan = MachineFile.migration(homeward.config || text(config), machine, server?),
+         {:ok, switches} <- upgraded_switches(home, plan.machine || machine) do
+      writes = [homeward.config, homeward.machine, plan.machine, plan.config, switches.machine]
+      if Enum.all?(writes, &is_nil/1), do: :ok, else: {:error, {:app_managed, home}}
+    end
+  end
+
+  defp migrate_locked(home, server?) do
+    with {:ok, config} <- read_named(home_document_path(home)),
+         {:ok, machine} <- read_named(MachineFile.path(home)),
+         {:ok, config, machine} <- homeward(home, text(config), machine),
+         plan = MachineFile.migration(config, machine, server?),
+         {:ok, switches} <- upgraded_switches(home, plan.machine || machine),
+         :ok <- write_if(MachineFile.path(home), switches.machine || plan.machine),
+         :ok <- write_if(home_document_path(home), plan.config),
+         :ok <- record_server_sandbox(home, plan) do
+      log_notice(switches.notice)
+      log_notice(MachineFile.notice(plan))
+    end
+  end
+
+  # This computer's switches as an engine before M97 D27 wrote them,
+  # rewritten in the machine file's one write (`Computers.Switches.upgrade/2`),
+  # which treats a computer linked to its server (its link file present)
+  # apart from one that is its own home.
+  defp upgraded_switches(home, machine) do
+    case ComputerSwitches.upgrade(machine, File.regular?(DesktopLink.path(home))) do
+      {:error, sentence} -> {:error, {:config, MachineFile.path(home), sentence}}
+      plan -> {:ok, plan}
+    end
+  end
+
+  # The home's tables an earlier engine wrote into the machine file go back
+  # to config.toml, which is written first (`MachineFile.homeward/2`).
+  defp homeward(home, config, machine) do
+    plan = MachineFile.homeward(config, machine)
+
+    with :ok <- write_if(home_document_path(home), plan.config),
+         :ok <- write_if(MachineFile.path(home), plan.machine) do
+      if notice = MachineFile.homeward_notice(plan.moved), do: Logger.info(notice)
+      {:ok, plan.config || config, plan.machine || machine}
+    end
+  end
+
+  # A server that left out the settings it inherited records it once, for
+  # its summary's notice (`Home.ServerSandbox`).
+  defp record_server_sandbox(home, %{server_default?: true, removed: [_ | _]}),
+    do: ServerSandbox.record(home, DateTime.utc_now())
+
+  defp record_server_sandbox(_home, _plan), do: :ok
+
+  defp write_if(_file, nil), do: :ok
+  defp write_if(file, text), do: write_atomic(file, text)
+
+  defp log_notice(nil), do: :ok
+  defp log_notice({:info, sentence}), do: Logger.info(sentence)
+  defp log_notice({:warning, sentence}), do: Logger.warning(sentence)
+
+  @doc """
+  The machine settings `home`'s `config.toml` holds, by name
+  (`MachineFile.strip/1`): ones written there by hand since the boot moved
+  them, which no load reads (`MachineFile.join/2`). Only named, for a reload
+  to say (`MachineFile.misplaced_notice/1`); `[]` when it holds none or does
+  not exist.
+  """
+  @spec misplaced_machine_settings(Path.t()) ::
+          {:ok, [String.t()]} | {:error, {:config, Path.t(), term()}}
+  def misplaced_machine_settings(home) when is_binary(home) and home != "" do
+    file = home_document_path(home)
+
+    case read_settings(file) do
+      {:ok, contents} -> {:ok, contents |> text() |> MachineFile.strip() |> elem(1)}
+      {:error, reason} -> {:error, {:config, file, reason}}
+    end
+  end
+
+  # Written beside the file and renamed over it, mode `0600`; a write that
+  # fails removes what it left.
+  defp write_atomic(file, text) do
+    tmp = file <> ".tmp"
+
+    with :ok <- File.write(tmp, text),
+         :ok <- File.chmod(tmp, 0o600),
+         :ok <- File.rename(tmp, file) do
+      :ok
+    else
+      {:error, reason} ->
+        _ = File.rm(tmp)
+        {:error, {:file, file, reason}}
     end
   end
 
@@ -239,19 +494,113 @@ defmodule FermixCore.Setup.ConfigStore do
   end
 
   @doc """
-  The `[fermix_core.always_on]` section of the settings file under `home`,
-  decoded and normalised alone (`Home.AlwaysOnRelease.normalize/1`), as
-  `engine_config/1` reads the engine section: for `fermix always-on` and
-  `fermix home status`, which ask it before anything else.
+  What the settings file under `home` says of the owner and the agent, which
+  a seed repeats in memory (`Prompt.SetupSeeder.setting_memories/2`): the
+  `[fermix_core.personalization]` section as a map (`user_name`, `timezone`,
+  `communication_style`) and `[fermix_core.agent] name`, each decoded and
+  normalised alone, as `engine_config/1` reads the engine section; none of
+  either when the file does not exist. For `FermixCore.Home.Join`, which may
+  run with no engine.
   """
-  @spec always_on_config(Path.t()) :: {:ok, keyword()} | {:error, {:config, Path.t(), term()}}
-  def always_on_config(home) when is_binary(home) and home != "" do
+  @spec personalization_config(Path.t()) ::
+          {:ok, %{personalization: map(), agent_name: String.t() | nil}}
+          | {:error, {:config, Path.t(), term()}}
+  def personalization_config(home) when is_binary(home) and home != "" do
     file = Path.join(home, "config.toml")
 
     case File.read(file) do
-      {:ok, contents} -> decode_section(contents, file, "always_on", &AlwaysOnRelease.normalize/1)
-      {:error, :enoent} -> {:ok, []}
+      {:ok, contents} -> decode_personalization(contents, file)
+      {:error, :enoent} -> {:ok, %{personalization: %{}, agent_name: nil}}
       {:error, reason} -> {:error, {:config, file, reason}}
+    end
+  end
+
+  defp decode_personalization(contents, file) do
+    with {:ok, personalization} <-
+           decode_section(contents, file, "personalization", &normalize_personalization/1),
+         {:ok, agent} <- decode_section(contents, file, "agent", &normalize_agent/1) do
+      {:ok, %{personalization: Map.new(personalization), agent_name: Keyword.get(agent, :name)}}
+    end
+  end
+
+  @doc """
+  One table of `home`'s `machine.toml` (`MachineFile`), decoded with the
+  file's own decoder and not normalized: the table's string-keyed map, nil
+  when the file or the table is absent, `{:config, path, reason}` when the
+  file cannot be read. For a reader of one machine section with no engine
+  tree, or of another home (`Computers.Switches.read/1`).
+  """
+  @spec machine_table(Path.t(), String.t()) ::
+          {:ok, map() | nil} | {:error, {:config, Path.t(), term()}}
+  def machine_table(home, table)
+      when is_binary(home) and home != "" and is_binary(table) and table != "" do
+    file = MachineFile.path(home)
+
+    case File.read(file) do
+      {:ok, contents} -> {:ok, contents |> decode_document() |> get_in(String.split(table, "."))}
+      {:error, :enoent} -> {:ok, nil}
+      {:error, reason} -> {:error, {:config, file, reason}}
+    end
+  end
+
+  @doc """
+  Sets each `{key, raw}` of `pairs` in `table` of `home`'s `machine.toml`
+  (`raw` the value's TOML text): in place, every other line of the file kept
+  (`Home.Archive.ConfigText.put/4`), the file created with its header when it
+  does not exist. Under the config lock, like every writer of the settings;
+  written to a temporary file and renamed, mode `0600`, and this VM's own
+  write to its own home is the new baseline (`save_snapshot/2`).
+  """
+  @spec put_machine_table(Path.t(), String.t(), [{String.t(), String.t()}]) ::
+          :ok | {:error, term()}
+  def put_machine_table(home, table, pairs)
+      when is_binary(home) and home != "" and is_binary(table) and table != "" and
+             is_list(pairs) do
+    with_config_lock(home, fn -> write_machine_table(home, table, pairs) end)
+  end
+
+  @doc """
+  Removes `table`, and every table beneath it, from `home`'s `machine.toml`,
+  every other line of the file kept; a file or a table that is absent has
+  nothing to remove. Under the config lock, as `put_machine_table/3`.
+  """
+  @spec drop_machine_table(Path.t(), String.t()) :: :ok | {:error, term()}
+  def drop_machine_table(home, table)
+      when is_binary(home) and home != "" and is_binary(table) and table != "" do
+    with_config_lock(home, fn -> remove_machine_table(home, table) end)
+  end
+
+  defp remove_machine_table(home, table) do
+    file = MachineFile.path(home)
+
+    case File.read(file) do
+      {:ok, text} ->
+        with :ok <- write_atomic(file, ConfigText.drop_tables(text, table)),
+             do: persisted_baseline(home)
+
+      {:error, :enoent} ->
+        :ok
+
+      {:error, reason} ->
+        {:error, {:config_unreadable, file, reason}}
+    end
+  end
+
+  defp write_machine_table(home, table, pairs) do
+    file = MachineFile.path(home)
+
+    contents =
+      case File.read(file) do
+        {:ok, text} -> {:ok, text}
+        {:error, :enoent} -> {:ok, MachineFile.header() <> "\n"}
+        {:error, reason} -> {:error, {:config_unreadable, file, reason}}
+      end
+
+    with {:ok, text} <- contents,
+         text =
+           Enum.reduce(pairs, text, fn {key, raw}, acc -> ConfigText.put(acc, table, key, raw) end),
+         :ok <- write_atomic(file, text) do
+      persisted_baseline(home)
     end
   end
 
@@ -262,22 +611,25 @@ defmodule FermixCore.Setup.ConfigStore do
   end
 
   @doc """
-  The sentence a load refusal is reported with: a typed platform refusal in its
-  operator words, any other reason as its term.
+  The sentence a load refusal is reported with: a file of the settings that
+  could not be read, by its path and why; any other reason as its term.
   """
   @spec load_error_sentence(term()) :: String.t()
-  def load_error_sentence({:unsupported_platform, :imessage} = reason),
-    do: IMessage.error_message(reason)
+  def load_error_sentence({:config, file, reason}) when is_binary(file) and is_atom(reason),
+    do: "#{file} could not be read: #{:file.format_error(reason)}."
+
+  def load_error_sentence({:config, file, sentence})
+      when is_binary(file) and is_binary(sentence),
+      do: "#{file} could not be read: #{sentence} Fix it and start Fermix again."
+
+  def load_error_sentence({:app_managed, home}) when is_binary(home),
+    do:
+      "#{home} is managed by Fermix.app, so only the app's engine moves this computer's " <>
+        "settings into its machine.toml. Open Fermix.app, or set FERMIX_HOME to another home."
 
   def load_error_sentence(reason), do: inspect(reason)
 
-  defp platform_checked(snapshot, opts) do
-    imessage = Keyword.get(snapshot.fermix_channels, :imessage, [])
-
-    with :ok <- IMessage.check_platform(imessage, opts) do
-      {:ok, maybe_resolve_keyring(snapshot, opts)}
-    end
-  end
+  defp platform_checked(snapshot, opts), do: {:ok, maybe_resolve_keyring(snapshot, opts)}
 
   @spec realtime_configured?() :: boolean()
   def realtime_configured? do
@@ -312,22 +664,152 @@ defmodule FermixCore.Setup.ConfigStore do
   The whole read, change and write runs under the config lock, which every
   writer of the file takes, so a save never lands between an MCP server write's
   read and its write, whichever VM made either.
+
+  This computer's own settings are written to `machine.toml` (`MachineFile`),
+  first and atomically, and every other setting to `config.toml`.
   """
   @spec save_snapshot(runtime_config(), keyword()) :: :ok | {:error, term()}
   def save_snapshot(snapshot, opts \\ []) do
     with_config_lock(fermix_home(), fn -> write_snapshot(snapshot, opts) end)
   end
 
+  @doc """
+  `save_snapshot/2` for a save built on `base`, a snapshot read earlier, as a
+  setup page's is, which may have gone stale while this computer's own
+  settings changed elsewhere (M97 §4, §7.2): under the config lock, each
+  machine table the save did not change (the same in `snapshot` and `base`)
+  is taken from `machine.toml` as it is at the write, so a save writes only
+  the machine tables it changed and never turns a switch back, loosens the
+  sandbox or starts the recorder. Answers the snapshot it wrote, which is
+  what the caller applies.
+  """
+  @spec save_changes(runtime_config(), runtime_config(), keyword()) ::
+          {:ok, runtime_config()} | {:error, term()}
+  def save_changes(snapshot, base, opts \\ [])
+      when is_map(snapshot) and is_map(base) and is_list(opts) do
+    with_config_lock(fermix_home(), fn ->
+      with {:ok, current} <- load_runtime_config(resolve_secrets: false),
+           written = machine_rebased(snapshot, base, current),
+           :ok <- write_snapshot(written, opts) do
+        {:ok, written}
+      end
+    end)
+  end
+
+  # The machine tables `dump_machine/1` writes, each as a snapshot holds it.
+  @machine_parts [
+    :sandbox,
+    :computer_use,
+    :computer_history,
+    :computer,
+    :harness,
+    :browser,
+    :dev_local,
+    :accessories
+  ]
+
+  defp machine_rebased(snapshot, base, current) do
+    Enum.reduce(@machine_parts, snapshot, fn part, acc ->
+      if machine_part(snapshot, part) == machine_part(base, part),
+        do: put_machine_part(acc, part, machine_part(current, part)),
+        else: acc
+    end)
+  end
+
+  defp machine_part(snapshot, :sandbox), do: Map.get(snapshot, :sandbox)
+
+  defp machine_part(snapshot, :dev_local),
+    do: snapshot |> core_section(:plugins) |> Keyword.get(:dev_local)
+
+  defp machine_part(snapshot, :accessories),
+    do: snapshot |> Map.get(:fermix_channels, []) |> Keyword.get(:accessories)
+
+  # The history section is split by key: its machine keys are every one the
+  # home's are not (`ComputerHistoryConfig.home_keyword/1`).
+  defp machine_part(snapshot, :computer_history) do
+    block = core_section(snapshot, :computer_history)
+    home = Keyword.keys(ComputerHistoryConfig.home_keyword(block))
+    Enum.reject(block, fn {key, _value} -> key in home end)
+  end
+
+  # The coding agents' table is split by key too (M98 D5), and compared as
+  # the machine file holds it: an approval no page gave is off, so a form
+  # that clears the key is no change.
+  defp machine_part(snapshot, :harness),
+    do: snapshot |> core_section(:harness) |> HarnessConfig.machine_keyword()
+
+  # The browser's table is this machine's whole (M97 D28d), compared as the
+  # machine file holds it: how tasks run, when no page set it, is the default
+  # the file writes, so a form that leaves it out is no change.
+  defp machine_part(snapshot, :browser),
+    do: snapshot |> core_section(:browser) |> BrowserConfig.to_keyword()
+
+  defp machine_part(snapshot, key), do: snapshot |> Map.get(:fermix_core, []) |> Keyword.get(key)
+
+  defp put_machine_part(snapshot, :sandbox, nil), do: Map.delete(snapshot, :sandbox)
+  defp put_machine_part(snapshot, :sandbox, value), do: Map.put(snapshot, :sandbox, value)
+
+  defp put_machine_part(snapshot, :dev_local, value) do
+    plugins = snapshot |> core_section(:plugins) |> put_or_delete(:dev_local, value)
+    put_core(snapshot, :plugins, plugins)
+  end
+
+  defp put_machine_part(snapshot, :accessories, value) do
+    channels = snapshot |> Map.get(:fermix_channels, []) |> put_or_delete(:accessories, value)
+    Map.put(snapshot, :fermix_channels, channels)
+  end
+
+  defp put_machine_part(snapshot, :computer_history, machine) do
+    home = ComputerHistoryConfig.home_keyword(core_section(snapshot, :computer_history))
+    put_core(snapshot, :computer_history, home ++ machine)
+  end
+
+  defp put_machine_part(snapshot, :harness, machine) do
+    home = HarnessConfig.home_keyword(core_section(snapshot, :harness))
+    put_core(snapshot, :harness, home ++ machine)
+  end
+
+  defp put_machine_part(snapshot, key, value),
+    do:
+      Map.put(
+        snapshot,
+        :fermix_core,
+        put_or_delete(Map.get(snapshot, :fermix_core, []), key, value)
+      )
+
+  defp core_section(snapshot, key),
+    do: snapshot |> Map.get(:fermix_core, []) |> Keyword.get(key, [])
+
+  defp put_core(snapshot, key, value),
+    do:
+      Map.put(
+        snapshot,
+        :fermix_core,
+        Keyword.put(Map.get(snapshot, :fermix_core, []), key, value)
+      )
+
+  defp put_or_delete(keyword, key, nil), do: Keyword.delete(keyword, key)
+  defp put_or_delete(keyword, key, value), do: Keyword.put(keyword, key, value)
+
   defp write_snapshot(snapshot, opts) do
     with {:ok, contents} <- read_home_document(fermix_home()),
          mcp = mcp_document(contents),
+         {_home_only, dropped} = MachineFile.strip(contents),
          {:ok, persisted} <- persisted_snapshot(snapshot, opts),
          :ok <- File.mkdir_p(fermix_home()),
          :ok <- ensure_workspace(),
+         :ok <- write_atomic(MachineFile.path(fermix_home()), dump_machine(persisted)),
          :ok <- File.write(path(), dump_snapshot(Map.put(persisted, :mcp, mcp))) do
+      :ok = said_dropped(dropped)
       RestartState.record_persisted_baseline()
     end
   end
+
+  # Machine settings written into config.toml by hand: the write above takes
+  # this computer's settings from what runs, so it dropped them, and says so
+  # as a start does (`MachineFile.dropped_notice/1`).
+  defp said_dropped([]), do: :ok
+  defp said_dropped(names), do: log_notice(MachineFile.dropped_notice(names))
 
   @spec apply_snapshot(runtime_config()) :: :ok
   @spec apply_snapshot(runtime_config(), keyword()) :: :ok
@@ -359,7 +841,12 @@ defmodule FermixCore.Setup.ConfigStore do
     apply_memory_config(Keyword.get(persisted.fermix_core, :memory, []))
     apply_realtime_config(Keyword.get(persisted.fermix_core, :realtime, []))
     apply_computer_use_config(Keyword.get(persisted.fermix_core, :computer_use, []))
-    apply_computer_history_config(Keyword.get(persisted.fermix_core, :computer_history, []))
+
+    apply_computer_history_config(
+      Keyword.get(persisted.fermix_core, :computer_history, []),
+      Keyword.get(persisted.fermix_core, :engine, [])
+    )
+
     apply_transcription_config(Keyword.get(persisted.fermix_core, :transcription, []))
     apply_meetings_config(Keyword.get(persisted.fermix_core, :meetings, []))
     apply_tools_config(Keyword.get(persisted.fermix_core, :tools, []))
@@ -370,7 +857,7 @@ defmodule FermixCore.Setup.ConfigStore do
     apply_secret_store_config(Keyword.get(persisted.fermix_core, :secret_store, :keyring))
     apply_engine_config(Keyword.get(persisted.fermix_core, :engine, []))
     apply_snapshots_config(Keyword.get(persisted.fermix_core, :snapshots, []))
-    apply_always_on_config(Keyword.get(persisted.fermix_core, :always_on, []))
+    apply_computer_config(Keyword.get(persisted.fermix_core, :computer, []))
     apply_sandbox_config(Map.get(persisted, :sandbox, SandboxConfig.default()))
 
     apply_channel_config(:telegram, Keyword.get(persisted.fermix_channels, :telegram, []))
@@ -381,6 +868,7 @@ defmodule FermixCore.Setup.ConfigStore do
     apply_channel_config(:acp, Keyword.get(persisted.fermix_channels, :acp, []))
     apply_channel_config(:mobile, Keyword.get(persisted.fermix_channels, :mobile, []))
     apply_channel_config(:imessage, Keyword.get(persisted.fermix_channels, :imessage, []))
+    apply_accessories_config(Keyword.get(persisted.fermix_channels, :accessories, []))
     apply_web_config(Map.get(persisted, :fermix_web, []))
   end
 
@@ -424,13 +912,22 @@ defmodule FermixCore.Setup.ConfigStore do
   Missing TOML returns `:ok` (the in-memory defaults from
   `empty_runtime_config/0` apply, which normalize to no-op merges).
   Malformed TOML returns `{:error, reason}` so boot can surface the
-  problem rather than silently start with stale defaults.
+  problem rather than silently start with stale defaults. This computer's
+  own settings are moved into `machine.toml` first
+  (`migrate_machine_file/2`, given `opts`' `:server?`).
+
+  The sentence for each setting a build retired that the read dropped is
+  kept beside the settings it applied, as `:retired_settings`, until the
+  engine process names it (`say_retired_settings/0`).
   """
   @spec bootstrap_runtime_config() :: :ok | {:error, term()}
   @spec bootstrap_runtime_config(keyword()) :: :ok | {:error, term()}
   def bootstrap_runtime_config(opts \\ []) do
-    with {:ok, snapshot} <- load_runtime_config(Keyword.take(opts, [:supervised, :macos?])),
+    with :ok <- migrate_machine_file(fermix_home(), Keyword.take(opts, [:server?])),
+         {:ok, snapshot, retired} <-
+           read_runtime_config(Keyword.take(opts, [:supervised, :macos?])),
          :ok <- apply_snapshot(snapshot, opts),
+         :ok <- remember_retired(retired),
          # This is the boot read of the file, which is what the external-change
          # baseline means: the values in application environment now came from
          # the document on disk. A no-op before the tree starts, and the whole
@@ -439,6 +936,16 @@ defmodule FermixCore.Setup.ConfigStore do
       apply_mcp_config()
     end
   end
+
+  # The boot read runs in `config/runtime.exs`, before any process or log
+  # handler that could hold or say what it dropped, so the sentences go where
+  # the same read puts every setting it applied: application environment,
+  # which is what crosses from that evaluation into the started system. Only
+  # this read writes the key, and it puts the list rather than adding to it:
+  # the loads a daemon repeats and a settings save leave it alone, and
+  # `say_retired_settings/0` takes it out once said.
+  defp remember_retired(retired) when is_list(retired),
+    do: Application.put_env(:fermix_core, :retired_settings, retired)
 
   @doc """
   The `:fermix_core` environment the boot hydration wrote, as configuration.
@@ -455,9 +962,9 @@ defmodule FermixCore.Setup.ConfigStore do
   `transcription` and `jobs`. Mix loads `runtime.exs` on its own, so a daemon
   run from source never showed it.
 
-  The key set is the snapshot's own plus the two the boot writes beside it, so a
-  section added to `apply_snapshot/2` is restated without a second list to keep
-  in step. A key with no value in the environment is not restated.
+  The key set is the snapshot's own plus the three the boot writes beside it, so
+  a section added to `apply_snapshot/2` is restated without a second list to
+  keep in step. A key with no value in the environment is not restated.
   """
   @spec hydrated_environment() :: keyword()
   def hydrated_environment do
@@ -468,17 +975,18 @@ defmodule FermixCore.Setup.ConfigStore do
   end
 
   # Every `:fermix_core` key the boot writes: the snapshot's sections, the sandbox
-  # (carried at the snapshot's top level), and the MCP key `apply_mcp_config/0`
-  # reads straight from the file.
+  # (carried at the snapshot's top level), the MCP key `apply_mcp_config/0`
+  # reads straight from the file, and the retired settings the read dropped
+  # (`remember_retired/1`).
   defp hydrated_keys do
-    Keyword.keys(empty_runtime_config().fermix_core) ++ [:sandbox, :mcp_servers]
+    Keyword.keys(empty_runtime_config().fermix_core) ++
+      [:sandbox, :mcp_servers, :retired_settings]
   end
 
   @spec apply_mcp_config() :: :ok | {:error, term()}
   def apply_mcp_config do
     case File.read(path()) do
       {:ok, contents} ->
-        warn_retired_mcp_sections(contents)
         servers = McpConfig.from_toml(contents)
         Application.put_env(:fermix_core, :mcp_servers, servers)
         warn_unread_mcp_keys(contents)
@@ -494,23 +1002,10 @@ defmodule FermixCore.Setup.ConfigStore do
     end
   end
 
-  # The inbound MCP server was retired before it was ever started (M73), so a
-  # `[mcp.inbound*]` block has no reader. It is said once per load, and
-  # `mcp_document/1` leaves it out, so the next settings save drops it.
-  defp warn_retired_mcp_sections(contents) do
-    if McpConfig.retired_sections(contents) != [] do
-      Logger.warning(
-        "config.toml [mcp.inbound] is retired: this build has no inbound MCP server, so the " <>
-          "section is ignored, and the next settings save writes the file without it."
-      )
-    end
-
-    :ok
-  end
-
-  # A key the reader does not read stays in the file and is said once per load,
-  # never a refusal: refusing would turn a hand-written server that carries one
-  # into a daemon that does not boot (M74 E2).
+  # A key the reader does not read stays in the file and is said each time the
+  # servers are applied (the boot, an MCP write, a plugin apply), never a
+  # refusal: refusing would turn a hand-written server that carries one into a
+  # daemon that does not boot (M74 E2).
   defp warn_unread_mcp_keys(contents) do
     case McpConfig.unread_keys(contents) do
       [] ->
@@ -735,7 +1230,8 @@ defmodule FermixCore.Setup.ConfigStore do
           snapshot
           |> Map.get(:fermix_core, [])
           |> Keyword.get(:computer_history, [])
-          |> normalize_computer_history()
+          |> normalize_computer_history(ComputerHistoryConfig.env_keys(), "the settings")
+          |> section()
           |> ComputerHistoryConfig.to_keyword(),
         transcription:
           snapshot
@@ -751,12 +1247,14 @@ defmodule FermixCore.Setup.ConfigStore do
           snapshot
           |> Map.get(:fermix_core, [])
           |> Keyword.get(:tools, [])
-          |> normalize_tools(),
+          |> normalize_tools()
+          |> section(),
         plugins:
           snapshot
           |> Map.get(:fermix_core, [])
           |> Keyword.get(:plugins, [])
-          |> normalize_plugins(),
+          |> normalize_plugins()
+          |> section(),
         oauth:
           snapshot
           |> Map.get(:fermix_core, [])
@@ -766,7 +1264,8 @@ defmodule FermixCore.Setup.ConfigStore do
           snapshot
           |> Map.get(:fermix_core, [])
           |> Keyword.get(:plugin_secrets, %{})
-          |> normalize_plugin_secrets(),
+          |> normalize_plugin_secrets()
+          |> section(),
         profile:
           snapshot
           |> Map.get(:fermix_core, [])
@@ -787,11 +1286,11 @@ defmodule FermixCore.Setup.ConfigStore do
           |> Map.get(:fermix_core, [])
           |> Keyword.get(:snapshots, [])
           |> SnapshotConfig.to_keyword(),
-        always_on:
+        computer:
           snapshot
           |> Map.get(:fermix_core, [])
-          |> Keyword.get(:always_on, [])
-          |> AlwaysOnRelease.to_keyword()
+          |> Keyword.get(:computer, [])
+          |> ComputerSwitches.to_keyword()
       ],
       sandbox:
         snapshot
@@ -832,16 +1331,28 @@ defmodule FermixCore.Setup.ConfigStore do
           snapshot
           |> Map.get(:fermix_channels, [])
           |> Keyword.get(:mobile, [])
-          |> normalize_mobile(),
+          |> normalize_mobile()
+          |> section(),
         imessage:
           snapshot
           |> Map.get(:fermix_channels, [])
           |> Keyword.get(:imessage, [])
-          |> normalize_imessage()
+          |> normalize_imessage(),
+        accessories:
+          snapshot
+          |> Map.get(:fermix_channels, [])
+          |> Keyword.get(:accessories, [])
+          |> normalize_accessories()
       ],
       fermix_web: snapshot |> Map.get(:fermix_web, []) |> normalize_web() |> web_to_keyword()
     }
   end
+
+  # A snapshot's section from a normalizer that also names the retired settings
+  # it dropped (`{normalized, retired}`). A snapshot holds the running settings,
+  # which the boot read already took its retired settings out of and named, so
+  # only the section is kept: saving one names nothing.
+  defp section({normalized, retired}) when is_list(retired), do: normalized
 
   @spec ensure_workspace() :: :ok | {:error, term()}
   def ensure_workspace do
@@ -947,7 +1458,7 @@ defmodule FermixCore.Setup.ConfigStore do
         secret_store: :keyring,
         engine: [],
         snapshots: [],
-        always_on: []
+        computer: []
       ],
       sandbox: SandboxConfig.default(),
       fermix_channels: [
@@ -958,7 +1469,8 @@ defmodule FermixCore.Setup.ConfigStore do
         signal: [],
         acp: [],
         mobile: [],
-        imessage: []
+        imessage: [],
+        accessories: []
       ],
       fermix_web: []
     }
@@ -1231,12 +1743,10 @@ defmodule FermixCore.Setup.ConfigStore do
     :ok
   end
 
-  # Replace (not merge), re-normalized on the way in like the snapshots
-  # section. `hello` and the router read it at every call
-  # (`Home.AlwaysOnRelease.available?/0`).
-  defp apply_always_on_config(always_on_config) do
-    Application.put_env(:fermix_core, :always_on, AlwaysOnRelease.normalize(always_on_config))
-    :ok
+  # What Fermix on the server may use on this computer (M97 §7.2), read at
+  # each request and by the offers reporter, so it is live.
+  defp apply_computer_config(computer_config) do
+    Application.put_env(:fermix_core, :computer, ComputerSwitches.normalize(computer_config))
   end
 
   # Where new secrets are written: the OS keyring (the default and the
@@ -1367,11 +1877,19 @@ defmodule FermixCore.Setup.ConfigStore do
   # persistable_snapshot's TOML strings (save/apply) — so the app env holds
   # exactly one shape (normalized atoms) on every path. normalize/1 is
   # idempotent over its own output by contract (config_test).
-  defp apply_computer_history_config(computer_history_config) do
+  # On a computer whose home is elsewhere (the role its `engine` section
+  # names), the home's keys are left out (M97 §4, `for_role/2`): its
+  # config.toml may still carry the route and grants from before its move,
+  # and a computer never acts on them; its next save writes them no more.
+  defp apply_computer_history_config(computer_history_config, engine_config) do
+    role = engine_config |> Role.normalize() |> Keyword.get(:role, :primary)
+
     Application.put_env(
       :fermix_core,
       :computer_history,
-      ComputerHistoryConfig.normalize(computer_history_config)
+      computer_history_config
+      |> ComputerHistoryConfig.normalize()
+      |> ComputerHistoryConfig.for_role(role)
     )
 
     :ok
@@ -1459,6 +1977,15 @@ defmodule FermixCore.Setup.ConfigStore do
     :ok
   end
 
+  # Replace (not merge), re-normalized on the way in: the section has no
+  # compile-time baseline, and the off default is omitted from the keyword, so
+  # a merge would keep an earlier `enabled: true` running after a save that
+  # turned the link off.
+  defp apply_accessories_config(accessories_config) do
+    Application.put_env(:fermix_channels, :accessories, normalize_accessories(accessories_config))
+    :ok
+  end
+
   defp dump_snapshot(snapshot) do
     fermix_core = Map.get(snapshot, :fermix_core, [])
     providers = Keyword.get(fermix_core, :providers, [])
@@ -1469,13 +1996,11 @@ defmodule FermixCore.Setup.ConfigStore do
     compaction = Keyword.get(fermix_core, :compaction, [])
     network = Keyword.get(fermix_core, :network, [])
     harness = Keyword.get(fermix_core, :harness, [])
-    browser = Keyword.get(fermix_core, :browser, [])
     skill_curation = Keyword.get(fermix_core, :skill_curation, [])
     open_loops = Keyword.get(fermix_core, :open_loops, [])
     cues = Keyword.get(fermix_core, :cues, [])
     memory = Keyword.get(fermix_core, :memory, [])
     realtime = Keyword.get(fermix_core, :realtime, [])
-    computer_use = Keyword.get(fermix_core, :computer_use, [])
     computer_history = Keyword.get(fermix_core, :computer_history, [])
     transcription = Keyword.get(fermix_core, :transcription, [])
     meetings = Keyword.get(fermix_core, :meetings, [])
@@ -1487,22 +2012,21 @@ defmodule FermixCore.Setup.ConfigStore do
     secret_store = fermix_core |> Keyword.get(:secret_store, :keyring) |> normalize_secret_store()
     engine = Keyword.get(fermix_core, :engine, [])
     snapshots = Keyword.get(fermix_core, :snapshots, [])
-    always_on = Keyword.get(fermix_core, :always_on, [])
-    sandbox = Map.get(snapshot, :sandbox, [])
     channels = Map.get(snapshot, :fermix_channels, [])
     web = snapshot |> Map.get(:fermix_web, []) |> normalize_web() |> web_to_keyword()
 
     [
-      "# Managed by mix fermix.setup",
+      "# Managed by Fermix: the app, the setup page, fermix setup and fermix settings " <>
+        "rewrite this file.",
       "# Built-in tools ship inside Fermix and are always available when registered.",
-      "# Skills are separate SKILL.md directories under ~/.fermix/skills and plugin roots.",
+      "# Skills are separate SKILL.md directories in the skills folder beside this file " <>
+        "and in plugin roots.",
       render_section(
         ["fermix_core"],
         profile_render(profile) ++ secret_store_render(secret_store)
       ),
       render_section(["fermix_core", "engine"], engine),
       render_section(["fermix_core", "snapshots"], snapshots),
-      render_section(["fermix_core", "always_on"], always_on),
       render_section(["fermix_core", "agent"], agent),
       Enum.map(Descriptor.ids(), fn id ->
         render_section(
@@ -1519,15 +2043,19 @@ defmodule FermixCore.Setup.ConfigStore do
       render_section(["fermix_core", "routing"], routing),
       render_section(["fermix_core", "compaction"], compaction),
       render_section(["fermix_core", "network"], network),
-      render_section(["fermix_core", "harness"], harness),
-      render_section(["fermix_core", "browser"], browser),
+      # The home's coding keys; this computer's are in machine.toml (M98 D5).
+      render_section(["fermix_core", "harness"], HarnessConfig.home_keyword(harness)),
+      # The browser's keys are all this computer's, in machine.toml (M97 D28d).
       render_section(["fermix_core", "skill_curation"], skill_curation),
       render_section(["fermix_core", "open_loops"], open_loops),
       render_cues(cues),
       render_section(["fermix_core", "memory"], memory),
       render_section(["fermix_core", "realtime"], realtime),
-      render_section(["fermix_core", "computer_use"], computer_use),
-      render_section(["fermix_core", "computer_history"], computer_history),
+      # The home's history keys: the route it summarizes on and its grants (M97 §4).
+      render_section(
+        ["fermix_core", "computer_history"],
+        ComputerHistoryConfig.home_keyword(computer_history)
+      ),
       render_section(["fermix_core", "transcription"], transcription),
       render_section(["fermix_core", "meetings"], meetings),
       render_section(["fermix_core", "tools", "web_search"], Keyword.get(tools, :web_search, [])),
@@ -1546,19 +2074,64 @@ defmodule FermixCore.Setup.ConfigStore do
       render_plugins(plugins),
       render_oauth(oauth),
       render_plugin_secrets(plugin_secrets),
-      render_sandbox(sandbox),
       render_section(["fermix_channels", "telegram"], Keyword.get(channels, :telegram, [])),
       render_section(["fermix_channels", "whatsapp"], Keyword.get(channels, :whatsapp, [])),
       render_section(["fermix_channels", "discord"], Keyword.get(channels, :discord, [])),
       render_section(["fermix_channels", "slack"], Keyword.get(channels, :slack, [])),
       render_section(["fermix_channels", "signal"], Keyword.get(channels, :signal, [])),
+      # The home uses iMessage, with its owner and guests (M97 §4).
+      render_section(["fermix_channels", "imessage"], Keyword.get(channels, :imessage, [])),
       render_section(["fermix_channels", "acp"], Keyword.get(channels, :acp, [])),
       render_mobile(Keyword.get(channels, :mobile, [])),
-      render_section(["fermix_channels", "imessage"], Keyword.get(channels, :imessage, [])),
       render_section(["fermix_web"], web),
       render_mcp(Map.fetch!(snapshot, :mcp))
     ]
     |> List.flatten()
+    |> Enum.reject(&(&1 in [nil, ""]))
+    |> Enum.join("\n\n")
+    |> Kernel.<>("\n")
+  end
+
+  # `machine.toml`: this computer's own settings (`MachineFile`), which
+  # `dump_snapshot/1` leaves out, through the same renderers.
+  defp dump_machine(snapshot) do
+    fermix_core = Map.get(snapshot, :fermix_core, [])
+    channels = Map.get(snapshot, :fermix_channels, [])
+    dev_local = fermix_core |> Keyword.get(:plugins, []) |> Keyword.take([:dev_local])
+
+    [
+      MachineFile.header(),
+      render_sandbox(Map.get(snapshot, :sandbox, [])),
+      render_section(
+        ["fermix_core", "computer_use"],
+        Keyword.get(fermix_core, :computer_use, [])
+      ),
+      # This machine's history keys: whether it records, its apps, and
+      # `summarizer = "local"` where it makes its own notes (M97 §4).
+      render_section(
+        ["fermix_core", "computer_history"],
+        ComputerHistoryConfig.machine_keyword(Keyword.get(fermix_core, :computer_history, []))
+      ),
+      render_section(
+        ["fermix_core", "computer"],
+        ComputerSwitches.to_keyword(Keyword.get(fermix_core, :computer, []))
+      ),
+      # Whether coding agents may run here and where they keep their sign-ins
+      # (M98 D5), `approved` always written: the table marks the file as one
+      # that holds them (`MachineFile`).
+      render_section(
+        ["fermix_core", "harness"],
+        HarnessConfig.machine_keyword(Keyword.get(fermix_core, :harness, []))
+      ),
+      # This computer's browser (M97 D28d), `default_profile` always written:
+      # the table marks the file as one that holds its keys (`MachineFile`).
+      render_section(
+        ["fermix_core", "browser"],
+        BrowserConfig.to_keyword(Keyword.get(fermix_core, :browser, []))
+      ),
+      render_section(["fermix_core", "plugins"], dev_local),
+      render_section(["fermix_channels", "accessories"], Keyword.get(channels, :accessories, []))
+    ]
     |> Enum.reject(&(&1 in [nil, ""]))
     |> Enum.join("\n\n")
     |> Kernel.<>("\n")
@@ -1626,8 +2199,9 @@ defmodule FermixCore.Setup.ConfigStore do
   defp render_plugins(plugins) when is_list(plugins) do
     entries = Keyword.get(plugins, :entries, %{})
 
+    # `dev_local` is this computer's own, written to `machine.toml`.
     [
-      render_section(["fermix_core", "plugins"], Keyword.drop(plugins, [:entries])),
+      render_section(["fermix_core", "plugins"], Keyword.drop(plugins, [:entries, :dev_local])),
       render_named_sections(["fermix_core", "plugins"], entries)
     ]
     |> List.flatten()
@@ -1743,8 +2317,9 @@ defmodule FermixCore.Setup.ConfigStore do
   # The `[mcp.*]` blocks of a settings file, by the reader that owns them:
   # `Capabilities.MCP.Config` reads `[mcp.servers.*]`. Every key it stored is
   # here, the ones it ignores today included, because none of it is this
-  # module's to drop. A retired `[mcp.inbound*]` block is not read, so it is not
-  # written back (`warn_retired_mcp_sections/1`).
+  # module's to drop. A retired `[mcp.inbound*]` block, the inbound server
+  # retired before it was ever started (M73), is not read, so it is not written
+  # back; the settings read names it (`McpConfig.retired_notices/1`).
   defp mcp_document(contents) do
     %{servers: McpConfig.document(contents)}
   end
@@ -1814,9 +2389,14 @@ defmodule FermixCore.Setup.ConfigStore do
       else: "\"" <> String.replace(value, "\"", "\\\"") <> "\""
   end
 
+  # `config.toml` alone, for a writer that renders it again: this computer's
+  # own settings are `machine.toml`'s, so none is read from here. A retired
+  # setting goes from the file as at a settings save; the boot read named it.
   defp parse_document(contents) do
-    document = decode_document(contents)
-    normalize_document(document)
+    {snapshot, _retired} =
+      contents |> decode_document() |> MachineFile.drop() |> normalize_document()
+
+    snapshot
   end
 
   # The settings file's decoder: one assignment per line under the last
@@ -1852,48 +2432,19 @@ defmodule FermixCore.Setup.ConfigStore do
     |> elem(1)
   end
 
+  # The snapshot a decoded document holds, and the sentence for each setting a
+  # build retired that it carried. A retired setting is accepted and dropped,
+  # so the next settings save writes the file without it, and the normalizer
+  # that drops it names it, as data (`{normalized, retired}`): no setting is
+  # dropped by one reading and named by another. A load logs none of them; the
+  # boot read keeps them for the engine process to say once
+  # (`bootstrap_runtime_config/1`, `say_retired_settings/0`).
   defp normalize_document(document) do
-    %{
-      fermix_core: [
-        providers:
-          Enum.map(Descriptor.all(), fn descriptor ->
-            raw = get_in(document, ["fermix_core", "providers", Atom.to_string(descriptor.id)])
-            validate_provider_section_keys!(raw, descriptor)
-            warn_retired_provider_keys(raw, descriptor)
-            {descriptor.id, normalize_provider_block(raw, descriptor)}
-          end),
-        personalization:
-          normalize_personalization(get_in(document, ["fermix_core", "personalization"])),
-        agent: normalize_agent(get_in(document, ["fermix_core", "agent"])),
-        jobs: normalize_jobs(get_in(document, ["fermix_core", "jobs"])),
-        routing: normalize_routing(get_in(document, ["fermix_core", "routing"])),
-        compaction: normalize_compaction(get_in(document, ["fermix_core", "compaction"])),
-        network: normalize_network(get_in(document, ["fermix_core", "network"])),
-        harness: normalize_harness(get_in(document, ["fermix_core", "harness"])),
-        browser: normalize_browser(get_in(document, ["fermix_core", "browser"])),
-        skill_curation:
-          normalize_skill_curation(get_in(document, ["fermix_core", "skill_curation"])),
-        open_loops: normalize_open_loops(get_in(document, ["fermix_core", "open_loops"])),
-        cues: normalize_cues(get_in(document, ["fermix_core", "cues"])),
-        memory: normalize_memory(get_in(document, ["fermix_core", "memory"])),
-        realtime: normalize_realtime(get_in(document, ["fermix_core", "realtime"])),
-        computer_use: normalize_computer_use(get_in(document, ["fermix_core", "computer_use"])),
-        computer_history:
-          normalize_computer_history(get_in(document, ["fermix_core", "computer_history"])),
-        transcription:
-          normalize_transcription(get_in(document, ["fermix_core", "transcription"])),
-        meetings: normalize_meetings(get_in(document, ["fermix_core", "meetings"])),
-        tools: normalize_tools(get_in(document, ["fermix_core", "tools"])),
-        plugins: normalize_plugins(get_in(document, ["fermix_core", "plugins"])),
-        oauth: normalize_oauth(get_in(document, ["fermix_core", "oauth"])),
-        plugin_secrets:
-          normalize_plugin_secrets(get_in(document, ["fermix_core", "plugin_secrets"])),
-        profile: normalize_profile(get_in(document, ["fermix_core", "profile"])),
-        secret_store: normalize_secret_store(get_in(document, ["fermix_core", "secret_store"])),
-        engine: Role.normalize(get_in(document, ["fermix_core", "engine"])),
-        snapshots: SnapshotConfig.normalize(get_in(document, ["fermix_core", "snapshots"])),
-        always_on: AlwaysOnRelease.normalize(get_in(document, ["fermix_core", "always_on"]))
-      ],
+    {core, core_retired} = normalize_core(document)
+    {mobile, mobile_retired} = normalize_mobile(get_in(document, ["fermix_channels", "mobile"]))
+
+    snapshot = %{
+      fermix_core: core,
       sandbox: SandboxConfig.normalize(Map.get(document, "sandbox")),
       fermix_channels: [
         telegram: normalize_telegram(get_in(document, ["fermix_channels", "telegram"])),
@@ -1902,11 +2453,107 @@ defmodule FermixCore.Setup.ConfigStore do
         slack: normalize_slack(get_in(document, ["fermix_channels", "slack"])),
         signal: normalize_signal(get_in(document, ["fermix_channels", "signal"])),
         acp: normalize_acp(get_in(document, ["fermix_channels", "acp"])),
-        mobile: normalize_mobile(get_in(document, ["fermix_channels", "mobile"])),
-        imessage: normalize_imessage(get_in(document, ["fermix_channels", "imessage"]))
+        mobile: mobile,
+        imessage: normalize_imessage(get_in(document, ["fermix_channels", "imessage"])),
+        accessories: normalize_accessories(get_in(document, ["fermix_channels", "accessories"]))
       ],
       fermix_web: normalize_web(get_in(document, ["fermix_web"]))
     }
+
+    always_on = retired_always_on(get_in(document, ["fermix_core", "always_on"]))
+    {snapshot, always_on ++ core_retired ++ mobile_retired}
+  end
+
+  # Always On's test switch, from before every build served Always On: no
+  # normalizer reads its table, so it is dropped here, and named here.
+  defp retired_always_on(nil), do: []
+
+  defp retired_always_on(_switch) do
+    [
+      "config.toml [fermix_core.always_on] is retired: every build of Fermix serves Always " <>
+        "On, so the table is ignored, and the next settings save writes the file without it."
+    ]
+  end
+
+  # The `[fermix_core.*]` sections, and the sentence for each retired setting
+  # their normalizers dropped.
+  defp normalize_core(document) do
+    {providers, providers_retired} = normalize_providers(document)
+
+    {computer_history, history_retired} =
+      normalize_computer_history(get_in(document, ["fermix_core", "computer_history"]))
+
+    {tools, tools_retired} = normalize_tools(get_in(document, ["fermix_core", "tools"]))
+    {plugins, plugins_retired} = normalize_plugins(get_in(document, ["fermix_core", "plugins"]))
+
+    {plugin_secrets, secrets_retired} =
+      normalize_plugin_secrets(get_in(document, ["fermix_core", "plugin_secrets"]))
+
+    core = [
+      providers: providers,
+      personalization:
+        normalize_personalization(get_in(document, ["fermix_core", "personalization"])),
+      agent: normalize_agent(get_in(document, ["fermix_core", "agent"])),
+      jobs: normalize_jobs(get_in(document, ["fermix_core", "jobs"])),
+      routing: normalize_routing(get_in(document, ["fermix_core", "routing"])),
+      compaction: normalize_compaction(get_in(document, ["fermix_core", "compaction"])),
+      network: normalize_network(get_in(document, ["fermix_core", "network"])),
+      harness: normalize_harness(get_in(document, ["fermix_core", "harness"])),
+      browser: normalize_browser(get_in(document, ["fermix_core", "browser"])),
+      skill_curation:
+        normalize_skill_curation(get_in(document, ["fermix_core", "skill_curation"])),
+      open_loops: normalize_open_loops(get_in(document, ["fermix_core", "open_loops"])),
+      cues: normalize_cues(get_in(document, ["fermix_core", "cues"])),
+      memory: normalize_memory(get_in(document, ["fermix_core", "memory"])),
+      realtime: normalize_realtime(get_in(document, ["fermix_core", "realtime"])),
+      computer_use: normalize_computer_use(get_in(document, ["fermix_core", "computer_use"])),
+      computer_history: computer_history,
+      transcription: normalize_transcription(get_in(document, ["fermix_core", "transcription"])),
+      meetings: normalize_meetings(get_in(document, ["fermix_core", "meetings"])),
+      tools: tools,
+      plugins: plugins,
+      oauth: normalize_oauth(get_in(document, ["fermix_core", "oauth"])),
+      plugin_secrets: plugin_secrets,
+      profile: normalize_profile(get_in(document, ["fermix_core", "profile"])),
+      secret_store: normalize_secret_store(get_in(document, ["fermix_core", "secret_store"])),
+      engine: Role.normalize(get_in(document, ["fermix_core", "engine"])),
+      snapshots: SnapshotConfig.normalize(get_in(document, ["fermix_core", "snapshots"])),
+      computer: ComputerSwitches.normalize(get_in(document, ["fermix_core", "computer"]))
+    ]
+
+    {core,
+     providers_retired ++ history_retired ++ tools_retired ++ plugins_retired ++ secrets_retired}
+  end
+
+  # Each provider's block, and the sentence for the keys its descriptor retired
+  # that the block carries. The descriptor's `retired_config_keys` is the one
+  # list: `validate_provider_section_keys!/2` accepts them,
+  # `normalize_provider_block/2` reads only the live keys and so drops them,
+  # and `retired_provider_keys/2` names them.
+  defp normalize_providers(document) do
+    Enum.map_reduce(Descriptor.all(), [], fn descriptor, retired ->
+      raw = get_in(document, ["fermix_core", "providers", Atom.to_string(descriptor.id)])
+      validate_provider_section_keys!(raw, descriptor)
+      block = {descriptor.id, normalize_provider_block(raw, descriptor)}
+      {block, retired ++ retired_provider_keys(raw, descriptor)}
+    end)
+  end
+
+  defp retired_provider_keys(nil, _descriptor), do: []
+
+  defp retired_provider_keys(config, descriptor) when is_map(config) do
+    case Enum.filter(descriptor.retired_config_keys, &Map.has_key?(config, Atom.to_string(&1))) do
+      [] ->
+        []
+
+      present ->
+        [
+          "config.toml [fermix_core.providers.#{descriptor.id}] key(s) " <>
+            "#{Enum.map_join(present, ", ", &Atom.to_string/1)} are retired: this build no " <>
+            "longer reads them, so they are ignored, and the next settings save writes the " <>
+            "file without them."
+        ]
+    end
   end
 
   defp put_value(document, [], key, value), do: Map.put(document, key, value)
@@ -2019,9 +2666,9 @@ defmodule FermixCore.Setup.ConfigStore do
   # the parse boundary — a typo'd key must never be silently dropped
   # (M12 §4; Code Rule 6). The legacy `provider = ...` key keeps its more
   # specific migration message. A key the descriptor retired is accepted here
-  # (an existing config.toml must keep booting), named once by
-  # `warn_retired_provider_keys/2`, and dropped by `normalize_provider_block/2`,
-  # which reads only the live keys, so the next save writes the block without it.
+  # (an existing config.toml must keep booting) and dropped by
+  # `normalize_provider_block/2`, which reads only the live keys, so the next
+  # save writes the block without it; `normalize_providers/1` names it.
   defp validate_provider_section_keys!(nil, _descriptor), do: :ok
 
   defp validate_provider_section_keys!(config, descriptor) when is_map(config) do
@@ -2048,26 +2695,6 @@ defmodule FermixCore.Setup.ConfigStore do
       """
     end
   end
-
-  defp warn_retired_provider_keys(nil, _descriptor), do: :ok
-
-  defp warn_retired_provider_keys(config, descriptor) when is_map(config) do
-    present = Enum.filter(descriptor.retired_config_keys, &present_key?(config, &1))
-
-    if present != [] do
-      Logger.warning(
-        "config.toml [fermix_core.providers.#{descriptor.id}] key(s) " <>
-          "#{Enum.map_join(present, ", ", &Atom.to_string/1)} are retired: this build no " <>
-          "longer reads them, so they are ignored, and the next settings save writes the " <>
-          "file without them."
-      )
-    end
-
-    :ok
-  end
-
-  defp present_key?(config, key),
-    do: Map.has_key?(config, Atom.to_string(key)) or Map.has_key?(config, key)
 
   defp normalize_realtime(config) do
     config
@@ -2103,16 +2730,27 @@ defmodule FermixCore.Setup.ConfigStore do
   # default-off consent section has no keyless degrade path (Rule #12),
   # mirroring validate_harness_section_keys!/1. The accepted set is
   # `accepted_keys/0` (live + retired), so a key this release retired keeps
-  # booting an existing config.toml; normalize names it once and drops it.
-  defp normalize_computer_history(config) do
-    validate_computer_history_section_keys!(config)
-    ComputerHistoryConfig.normalize(config)
+  # booting an existing config.toml; normalize drops it, and the sentence that
+  # names it comes back beside the section (`{normalized, retired}`,
+  # `ComputerHistoryConfig.retired_notices/1`).
+  # The joined document's table is config.toml's with this machine's `enabled`
+  # and `apps` (M97 §4), so a key it does not know is config.toml's; the
+  # machine file's own are checked apart (`with_machine_history/2`). A
+  # snapshot also holds `machine_summarizer` (`ComputerHistoryConfig.env_keys/0`).
+  defp normalize_computer_history(
+         config,
+         keys \\ ComputerHistoryConfig.accepted_keys(),
+         where \\ "config.toml"
+       ) do
+    validate_computer_history_section_keys!(config, keys, where)
+    {ComputerHistoryConfig.normalize(config), ComputerHistoryConfig.retired_notices(config)}
   end
 
-  defp validate_computer_history_section_keys!(nil), do: :ok
+  defp validate_computer_history_section_keys!(nil, _keys, _where), do: :ok
 
-  defp validate_computer_history_section_keys!(config) when is_map(config) or is_list(config) do
-    allowed = MapSet.new(ComputerHistoryConfig.accepted_keys(), &Atom.to_string/1)
+  defp validate_computer_history_section_keys!(config, keys, where)
+       when is_map(config) or is_list(config) do
+    allowed = MapSet.new(keys, &Atom.to_string/1)
 
     unknown =
       config
@@ -2124,7 +2762,7 @@ defmodule FermixCore.Setup.ConfigStore do
       :ok
     else
       raise ArgumentError, """
-      config.toml [fermix_core.computer_history] has unknown key(s): #{Enum.join(unknown, ", ")}.
+      #{where} [fermix_core.computer_history] has unknown key(s): #{Enum.join(unknown, ", ")}.
 
       Allowed keys: #{Enum.map_join(ComputerHistoryConfig.config_keys(), ", ", &Atom.to_string/1)}.
       Remove or fix the key(s); the daemon will not boot until this is fixed.
@@ -2336,29 +2974,33 @@ defmodule FermixCore.Setup.ConfigStore do
     end
   end
 
-  defp normalize_tools(nil), do: []
+  # `{tools, retired}`: the image tool's backend is the setting here a build
+  # retired (`normalize_image_backend/1`).
+  defp normalize_tools(nil), do: {[], []}
 
   defp normalize_tools(config) when is_map(config) or is_list(config) do
-    []
-    |> put_if_present(
-      :web_search,
-      normalize_web_search_tool(lookup(config, "web_search", :web_search))
-    )
-    |> put_if_present(
-      :place_search,
-      normalize_place_search_tool(lookup(config, "place_search", :place_search))
-    )
-    |> put_if_present(
-      :tool_search,
-      normalize_tool_search(lookup(config, "tool_search", :tool_search))
-    )
-    |> put_if_present(
-      :generate_image,
+    tools =
+      []
+      |> put_if_present(
+        :web_search,
+        normalize_web_search_tool(lookup(config, "web_search", :web_search))
+      )
+      |> put_if_present(
+        :place_search,
+        normalize_place_search_tool(lookup(config, "place_search", :place_search))
+      )
+      |> put_if_present(
+        :tool_search,
+        normalize_tool_search(lookup(config, "tool_search", :tool_search))
+      )
+
+    {generate_image, retired} =
       normalize_generate_image(lookup(config, "generate_image", :generate_image))
-    )
+
+    {put_if_present(tools, :generate_image, generate_image), retired}
   end
 
-  defp normalize_tools(_config), do: []
+  defp normalize_tools(_config), do: {[], []}
 
   # Tool-schema deferral flag (M10). `enabled` round-trips as a boolean; any
   # other shape is left for FermixCore.Capabilities.Deferral to reject loudly
@@ -2376,7 +3018,8 @@ defmodule FermixCore.Setup.ConfigStore do
   defp normalize_boolean("false"), do: false
   defp normalize_boolean(_other), do: nil
 
-  defp normalize_plugins(nil), do: []
+  # `{plugins, retired}`, the plugins this build retired dropped and named.
+  defp normalize_plugins(nil), do: {[], []}
 
   defp normalize_plugins(config) when is_map(config) or is_list(config) do
     enabled = normalize_string_list(lookup(config, "enabled", :enabled))
@@ -2402,32 +3045,34 @@ defmodule FermixCore.Setup.ConfigStore do
     retired =
       Enum.filter(Enum.uniq(List.wrap(enabled) ++ Map.keys(entries)), &Retired.retired?/1)
 
-    warn_retired_plugins(retired)
+    plugins =
+      []
+      |> put_if_present(:enabled, drop_retired_names(enabled))
+      |> put_if_present(:dev_local, dev_local)
+      |> put_if_present(:entries, Map.drop(entries, retired))
 
-    []
-    |> put_if_present(:enabled, drop_retired_names(enabled))
-    |> put_if_present(:dev_local, dev_local)
-    |> put_if_present(:entries, Map.drop(entries, retired))
+    {plugins, retired_plugins(retired)}
   end
 
-  defp normalize_plugins(_config), do: []
+  defp normalize_plugins(_config), do: {[], []}
 
-  # Named at the read boundary, so the one message reaches every caller that
-  # loads config, and the operator learns the plugin is gone rather than broken.
+  # Dropped where the settings are read, so no caller starts a retired plugin,
+  # and named by the read that drops it, so the operator learns the plugin is
+  # gone rather than broken.
   defp drop_retired_names(nil), do: nil
 
   defp drop_retired_names(names) when is_list(names),
     do: Enum.reject(names, &Retired.retired?/1)
 
-  defp warn_retired_plugins([]), do: :ok
+  defp retired_plugins([]), do: []
 
-  defp warn_retired_plugins(names) do
-    Logger.warning(
+  defp retired_plugins(names) do
+    [
       "retired plugin(s) #{inspect(Enum.sort(names))} dropped from [fermix_core.plugins]: " <>
         "this build no longer offers them, so they are not started and the next config save " <>
         "writes the file without them. Any credential you stored for them is left exactly as " <>
         "it is — revoke it at the source if you have not already."
-    )
+    ]
   end
 
   defp normalize_oauth(nil), do: %{}
@@ -2438,7 +3083,8 @@ defmodule FermixCore.Setup.ConfigStore do
   defp normalize_oauth(_config), do: %{}
 
   # Plugin api_key secrets are a flat string-keyed map (plugin name → value or
-  # the @keyring sentinel), unlike oauth's nested client sections.
+  # the @keyring sentinel), unlike oauth's nested client sections; `{secrets,
+  # retired}`, a retired plugin's mapping dropped and named.
   defp normalize_plugin_secrets(secrets) when is_map(secrets) or is_list(secrets) do
     secrets
     |> Enum.sort_by(fn {key, _value} -> to_string(key) end)
@@ -2446,7 +3092,7 @@ defmodule FermixCore.Setup.ConfigStore do
     |> drop_retired_secrets()
   end
 
-  defp normalize_plugin_secrets(_secrets), do: %{}
+  defp normalize_plugin_secrets(_secrets), do: {%{}, []}
 
   # The mapping goes with the plugin; the secret it points at does not. Deleting
   # a stored credential is the operator's call, so this names the plugin and
@@ -2454,15 +3100,14 @@ defmodule FermixCore.Setup.ConfigStore do
   defp drop_retired_secrets(secrets) do
     case Enum.filter(Map.keys(secrets), &Retired.retired?/1) do
       [] ->
-        secrets
+        {secrets, []}
 
       names ->
-        Logger.warning(
-          "retired plugin(s) #{inspect(Enum.sort(names))} dropped from " <>
-            "[fermix_core.plugin_secrets]: the stored value itself is untouched."
-        )
-
-        Map.drop(secrets, names)
+        {Map.drop(secrets, names),
+         [
+           "retired plugin(s) #{inspect(Enum.sort(names))} dropped from " <>
+             "[fermix_core.plugin_secrets]: the stored value itself is untouched."
+         ]}
     end
   end
 
@@ -2572,22 +3217,26 @@ defmodule FermixCore.Setup.ConfigStore do
   # boundary, mirroring `validate_provider_section_keys!/2`.
   @generate_image_keys ~w(backend model size google_api_key)
 
-  defp normalize_generate_image(nil), do: []
+  defp normalize_generate_image(nil), do: {[], []}
 
   defp normalize_generate_image(config) when is_map(config) or is_list(config) do
     validate_generate_image_keys!(config)
+    {backend, retired} = normalize_image_backend(lookup(config, "backend", :backend))
 
-    []
-    |> put_if_present(:backend, normalize_image_backend(lookup(config, "backend", :backend)))
-    |> put_if_present(:model, normalize_string(lookup(config, "model", :model)))
-    |> put_if_present(:size, normalize_string(lookup(config, "size", :size)))
-    |> put_if_present(
-      :google_api_key,
-      normalize_string(lookup(config, "google_api_key", :google_api_key))
-    )
+    generate_image =
+      []
+      |> put_if_present(:backend, backend)
+      |> put_if_present(:model, normalize_string(lookup(config, "model", :model)))
+      |> put_if_present(:size, normalize_string(lookup(config, "size", :size)))
+      |> put_if_present(
+        :google_api_key,
+        normalize_string(lookup(config, "google_api_key", :google_api_key))
+      )
+
+    {generate_image, retired}
   end
 
-  defp normalize_generate_image(_config), do: []
+  defp normalize_generate_image(_config), do: {[], []}
 
   defp validate_generate_image_keys!(config) do
     unknown =
@@ -2619,14 +3268,15 @@ defmodule FermixCore.Setup.ConfigStore do
   # backend has no keyless fallback to limp along on.
   #
   # A backend this build retired is not a typo: an existing config.toml that
-  # names it must keep booting. It is accepted, named once at warning with the
-  # backends that replace it, and dropped, which leaves the image tool with no
-  # backend (it refuses until one is chosen) and the next save writes the file
-  # without it (the `ComputerHistory.Config.retired_keys/0` precedent). The
-  # live set is the media registry's, never a second list maintained here.
+  # names it must keep booting. It is accepted and dropped, which leaves the
+  # image tool with no backend (it refuses until one is chosen) and the next
+  # save writes the file without it (the `ComputerHistory.Config.retired_keys/0`
+  # precedent), and it comes back named, with the backends that replace it
+  # (`{backend, retired}`). The live set is the media registry's, never a
+  # second list maintained here.
   @retired_image_backends ~w(openai_codex)
 
-  defp normalize_image_backend(nil), do: nil
+  defp normalize_image_backend(nil), do: {nil, []}
 
   defp normalize_image_backend(value) when is_atom(value),
     do: normalize_image_backend(Atom.to_string(value))
@@ -2636,10 +3286,10 @@ defmodule FermixCore.Setup.ConfigStore do
 
     cond do
       backend in image_backend_names() ->
-        backend
+        {backend, []}
 
       backend in @retired_image_backends ->
-        warn_retired_image_backend(backend)
+        {nil, [retired_image_backend(backend)]}
 
       true ->
         raise ArgumentError, """
@@ -2653,15 +3303,11 @@ defmodule FermixCore.Setup.ConfigStore do
 
   defp image_backend_names, do: :image |> MediaRegistry.providers() |> Enum.sort()
 
-  defp warn_retired_image_backend(backend) do
-    Logger.warning(
-      "config.toml [fermix_core.tools.generate_image] backend #{inspect(backend)} is retired: " <>
-        "this build no longer has it, so image generation stays off until you choose " <>
-        "#{Enum.join(image_backend_names(), ", ")} in setup, and the next settings save " <>
-        "writes the file without it."
-    )
-
-    nil
+  defp retired_image_backend(backend) do
+    "config.toml [fermix_core.tools.generate_image] backend #{inspect(backend)} is retired: " <>
+      "this build no longer has it, so image generation stays off until you choose " <>
+      "#{Enum.join(image_backend_names(), ", ")} in setup, and the next settings save " <>
+      "writes the file without it."
   end
 
   # Canonical enum + per-provider mapping live in ReasoningEffort.
@@ -3195,6 +3841,17 @@ defmodule FermixCore.Setup.ConfigStore do
     put_if_present([], :enabled, lookup(config, "enabled", :enabled))
   end
 
+  # The accessory link (M91). `AccessoriesConfig.normalize/1` refuses a
+  # non-boolean `enabled` by name and ignores keys it does not know (a later
+  # phase's keys must not stop a rolled-back daemon's boot); `to_keyword/1` is
+  # its inverse and omits the off default. The file and application
+  # environment hold the same keyword: `[]` or `[enabled: true]`.
+  defp normalize_accessories(config) do
+    config
+    |> AccessoriesConfig.normalize()
+    |> AccessoriesConfig.to_keyword()
+  end
+
   # The iMessage channel (M54 §11). Every value that would otherwise be dropped
   # or guessed refuses the load with its key named: an id that is not a quoted
   # string (M53 OWN-2: an unquoted `+1555…` is a TOML integer that has already
@@ -3303,34 +3960,51 @@ defmodule FermixCore.Setup.ConfigStore do
     fields
   end
 
-  defp normalize_mobile(nil), do: []
+  defp normalize_mobile(nil), do: {[], []}
 
+  # Android push straight through FCM was retired before any release shipped
+  # it. A config.toml that still carries its `fcm` table is not a typo and must
+  # keep booting: the table is accepted and dropped, so its keychain sentinel is
+  # never read and the next save writes the file without it, and it comes back
+  # named (`{mobile, retired}`).
   defp normalize_mobile(config) when is_map(config) or is_list(config) do
     validate_mobile_keys!(config, ["fcm" | @mobile_keys], "mobile")
-    warn_retired_mobile_fcm(lookup(config, "fcm", :fcm))
     push = lookup(config, "push", :push)
 
-    []
-    |> put_if_present(:enabled, normalize_mobile_boolean(config, :enabled))
-    |> put_if_present(:iroh, normalize_mobile_boolean(config, :iroh))
-    |> put_if_present(:mode, normalize_mobile_mode(lookup(config, "mode", :mode)))
-    |> put_if_present(:port, normalize_mobile_port(lookup(config, "port", :port)))
-    |> put_if_present(:bind, normalize_mobile_bind(config))
-    |> put_if_present(:advertise_mdns, normalize_mobile_boolean(config, :advertise_mdns))
-    |> put_streaming(config)
-    |> put_if_present(
-      :max_media_bytes,
-      normalize_mobile_positive_integer(config, :max_media_bytes)
-    )
-    |> put_if_present(
-      :media_store_max_bytes,
-      normalize_mobile_positive_integer(config, :media_store_max_bytes)
-    )
-    |> put_mobile_push(push)
+    mobile =
+      []
+      |> put_if_present(:enabled, normalize_mobile_boolean(config, :enabled))
+      |> put_if_present(:iroh, normalize_mobile_boolean(config, :iroh))
+      |> put_if_present(:mode, normalize_mobile_mode(lookup(config, "mode", :mode)))
+      |> put_if_present(:port, normalize_mobile_port(lookup(config, "port", :port)))
+      |> put_if_present(:bind, normalize_mobile_bind(config))
+      |> put_if_present(:advertise_mdns, normalize_mobile_boolean(config, :advertise_mdns))
+      |> put_streaming(config)
+      |> put_if_present(
+        :max_media_bytes,
+        normalize_mobile_positive_integer(config, :max_media_bytes)
+      )
+      |> put_if_present(
+        :media_store_max_bytes,
+        normalize_mobile_positive_integer(config, :media_store_max_bytes)
+      )
+      |> put_mobile_push(push)
+
+    {mobile, retired_mobile_fcm(lookup(config, "fcm", :fcm))}
   end
 
   defp normalize_mobile(config) do
     raise ArgumentError, "invalid mobile config #{inspect(config)}; expected a table"
+  end
+
+  defp retired_mobile_fcm(nil), do: []
+
+  defp retired_mobile_fcm(_fcm) do
+    [
+      "config.toml [fermix_channels.mobile.fcm] is retired: Android phones are pushed " <>
+        "through Fermix's push relay with no settings, so the table is ignored, and the next " <>
+        "settings save writes the file without it."
+    ]
   end
 
   defp put_mobile_push(fields, nil), do: fields
@@ -3355,20 +4029,6 @@ defmodule FermixCore.Setup.ConfigStore do
 
   defp put_mobile_push(_fields, push) do
     raise ArgumentError, "invalid mobile.push #{inspect(push)}; expected a table"
-  end
-
-  # Android push straight through FCM was retired before any release shipped
-  # it. A config.toml that still carries its table is not a typo and must keep
-  # booting: the table is accepted, named once at warning, and dropped, so its
-  # keychain sentinel is never read and the next save writes the file without
-  # it (the `@retired_image_backends` precedent).
-  defp warn_retired_mobile_fcm(nil), do: :ok
-
-  defp warn_retired_mobile_fcm(_fcm) do
-    Logger.warning(
-      "config.toml [fermix_channels.mobile.fcm] is retired: this build has no Android push, " <>
-        "so the table is ignored, and the next settings save writes the file without it."
-    )
   end
 
   defp validate_mobile_keys!(config, allowed, label) do

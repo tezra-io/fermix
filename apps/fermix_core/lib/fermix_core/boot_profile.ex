@@ -14,6 +14,7 @@ defmodule FermixCore.BootProfile do
   """
 
   alias FermixCore.Boot.PathBaseline
+  alias FermixCore.Setup.SecretKeyBase
 
   @profiles [:app_engine, :standalone_cli, :linux_package_cli, :source]
 
@@ -55,25 +56,36 @@ defmodule FermixCore.BootProfile do
   end
 
   @doc """
-  Applies runtime gates required before sibling OTP applications start.
+  Applies runtime gates required before sibling OTP applications start, for
+  the daemon of the home at `home`.
 
   The `PATH` baseline is applied here and only here: an `SMAppService`-launched
   engine inherits launchd's bare `PATH` and would otherwise resolve no `cosign`,
   no brew `node` or `python`, and no `codex` or `claude` in `~/.local/bin`.
   A `:source` run deliberately gets none, so a developer sees their own `PATH`.
+
+  The web listener serves from here on, so this is where it gets the key it
+  signs its cookies with (`SecretKeyBase.resolve!/1`), made under `home` the
+  first time: a verb that serves nothing writes no home.
   """
-  @spec prepare(profile()) :: :ok
-  def prepare(profile) when profile in [:app_engine, :standalone_cli, :linux_package_cli] do
+  @spec prepare(profile(), Path.t()) :: :ok
+  def prepare(profile, home)
+      when profile in [:app_engine, :standalone_cli, :linux_package_cli] and is_binary(home) do
     PathBaseline.ensure!()
-    enable_endpoint_server()
+    enable_endpoint_server(home)
     Application.put_env(:fermix_core, :daemon_socket_enabled, true)
     Application.put_env(:fermix_core, :realtime_socket_enabled, true)
   end
 
-  def prepare(:source), do: :ok
+  def prepare(:source, home) when is_binary(home), do: :ok
 
-  defp enable_endpoint_server do
-    existing = Application.get_env(:fermix_web, FermixWebWeb.Endpoint, [])
-    Application.put_env(:fermix_web, FermixWebWeb.Endpoint, Keyword.put(existing, :server, true))
+  defp enable_endpoint_server(home) do
+    endpoint =
+      :fermix_web
+      |> Application.get_env(FermixWebWeb.Endpoint, [])
+      |> Keyword.put(:server, true)
+      |> Keyword.put(:secret_key_base, SecretKeyBase.resolve!(home))
+
+    Application.put_env(:fermix_web, FermixWebWeb.Endpoint, endpoint)
   end
 end

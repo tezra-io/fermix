@@ -1,0 +1,4 @@
+interface:
+  display_name: "Fermix Audit Lab"
+  short_description: "Run and analyze the Fermix browser audit"
+  default_prompt: "Use $fermix-audit to plan or run the Fermix browser audit and analyze its evidence."

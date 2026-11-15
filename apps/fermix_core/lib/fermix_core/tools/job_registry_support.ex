@@ -234,6 +234,26 @@ defmodule FermixCore.Tools.JobRegistrySupport do
   end
 
   @doc """
+  For `schedule_job` and `update_job`, when the call binds `skill` to `job`
+  (the row, or the attributes it is created with): every tool the job's own
+  list names must stay on its runs' surface, since a run fails on one that
+  does not (`Jobs.Runner.unusable_tools_sentence/3`, the one check). A plugin
+  skill's runs are at guest, so it is refused for a job that needs an
+  owner-only tool or another plugin's. A name no capability carries now (a
+  plugin turned off) is not refused here; the run says so.
+  """
+  @spec check_skill_tools(map(), map() | nil, map()) :: :ok | {:error, String.t()}
+  def check_skill_tools(job, nil, context) when is_map(job) and is_map(context), do: :ok
+
+  def check_skill_tools(job, skill, context)
+      when is_map(job) and is_map(skill) and is_map(context) do
+    case Runner.unusable_tools_sentence(job, skill, registry(context)) do
+      nil -> :ok
+      sentence -> {:error, sentence}
+    end
+  end
+
+  @doc """
   `payload` with the bound `skill`'s tool warning
   (`Capabilities.Skill.tool_warning/2`) added to its `:note`: what the skill's
   list asks for that the job's runs will not get. A job bound to no skill, or

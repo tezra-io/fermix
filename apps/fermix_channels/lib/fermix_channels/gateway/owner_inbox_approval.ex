@@ -8,8 +8,10 @@ defmodule FermixChannels.Gateway.OwnerInboxApproval do
 
   It composes three existing seams and adds no delivery path of its own:
 
-    1. `FermixCore.Delivery.OwnerInbox.resolve/1`, the one answer to "where is
-       the owner's inbox". Only an inbox `OwnerInbox.dm_origin/1` answers for
+    1. `FermixCore.Delivery.OwnerInbox.for_approval/1`, the one answer to "where
+       is the owner's inbox" for a prompt that waits on the owner (iMessage that
+       a computer carries comes last, and never while that computer is away).
+       Only an inbox `OwnerInbox.dm_origin/1` answers for
        qualifies (Telegram, Signal, WhatsApp, iMessage): on those the DM's chat
        id is the owner's user id, so the owner's `/confirm` there passes the
        pending record's origin check. That rule lives in core alone.
@@ -154,7 +156,9 @@ defmodule FermixChannels.Gateway.OwnerInboxApproval do
   end
 
   defp owner_dm(opts) do
-    case OwnerInbox.resolve(Keyword.take(opts, [:jobs_config, :configured_owners])) do
+    case OwnerInbox.for_approval(
+           Keyword.take(opts, [:jobs_config, :configured_owners, :imessage_carrier])
+         ) do
       {:ok, inbox} -> with {:ok, origin} <- dm_inbox(inbox), do: {:ok, inbox, origin}
       :no_delivery_target -> {:error, :no_owner_inbox}
     end

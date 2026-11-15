@@ -132,4 +132,15 @@ defmodule Mix.Tasks.Fermix.Cues.SecretTest do
            ) ==
              {:error, :missing_secret}
   end
+
+  # The settings are two files; a refusal names the one that failed.
+  test "names machine.toml when it is the file that cannot be read", %{home: home} do
+    File.mkdir!(Path.join(home, "machine.toml"))
+
+    error =
+      assert_raise Mix.Error, fn -> SecretTask.execute(["home-alerts", "token"], piped("v\n")) end
+
+    assert error.message =~ "#{Path.join(home, "machine.toml")} could not be read"
+    refute error.message =~ "config.toml"
+  end
 end

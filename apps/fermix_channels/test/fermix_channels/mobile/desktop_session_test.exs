@@ -96,7 +96,7 @@ defmodule FermixChannels.Mobile.DesktopSessionTest do
 
   # Always On's move back, design §6: the server records each desktop's
   # engine version (a desktop's hello carries its engine's in `app_version`),
-  # the version its nightly update never goes past; a phone's names its app.
+  # the version its update never goes past; a phone's names its app.
   test "a desktop's hello records its engine's version; a phone's records nothing", ctx do
     test = self()
 
@@ -110,6 +110,95 @@ defmodule FermixChannels.Mobile.DesktopSessionTest do
 
     {_driver, _client} = ready!(ctx, ctx.phone, @phone_id, record_engine_version: record)
     refute_received {:engine_recorded, @phone_id, _version, _at}
+  end
+
+  # M97 §3.4: the server leads. A desktop's hello says its engine's version,
+  # which stands against this server's by major.minor; its peer is told the
+  # standing, and a phone has none.
+  test "a desktop's hello stands against the server, and its peer is told", ctx do
+    test = self()
+    supervisor = ctx.peer_supervisor
+
+    for {server, standing} <- [
+          {"0.17.4", :current},
+          {"0.19.0", :behind},
+          {"0.16.2", :ahead},
+          {"0.20.0", :settings_only}
+        ] do
+      {_driver, _client} =
+        ready_desktop!(ctx, %{},
+          engine_version: server,
+          hello_ack_builder: fn state ->
+            send(test, {:standing_at_ack, state.computer_standing})
+            {:ok, hello_ack()}
+          end,
+          start_desktop_peer: fn opts ->
+            send(test, {:peer_standing, Keyword.fetch!(opts, :standing)})
+            Peer.start(supervisor, Keyword.put(opts, :families, %{}))
+          end
+        )
+
+      assert_receive {:standing_at_ack, ^standing}
+      assert_receive {:peer_standing, ^standing}
+    end
+
+    {_driver, _client} =
+      ready!(ctx, ctx.phone, @phone_id,
+        engine_version: "0.20.0",
+        hello_ack_builder: fn state ->
+          send(test, {:phone_standing, Map.get(state, :computer_standing)})
+          {:ok, hello_ack()}
+        end
+      )
+
+    assert_receive {:phone_standing, nil}
+  end
+
+  # M97 §19.3: whether a desktop's hello says it applies the rule that a
+  # setting's id names its machine reaches its peer, which hands it to each
+  # forwarded call; a hello that says nothing is a desktop without it.
+  test "a desktop's hello says whether it applies the settings rule, and its peer is told",
+       ctx do
+    test = self()
+    supervisor = ctx.peer_supervisor
+
+    for {hello, rule?} <- [
+          {%{"caps" => %{"computer" => %{"machine_settings" => true}}}, true},
+          {%{}, false}
+        ] do
+      {_driver, _client} =
+        ready_desktop!(ctx, %{},
+          hello: hello,
+          start_desktop_peer: fn opts ->
+            send(test, {:peer_rule, Keyword.fetch!(opts, :machine_settings)})
+            Peer.start(supervisor, Keyword.put(opts, :families, %{}))
+          end
+        )
+
+      assert_receive {:peer_rule, ^rule?}
+    end
+  end
+
+  # M97 §3.2: a computer names its system in its hello, kept on its row; a
+  # phone's row keeps the platform its attestation proved.
+  test "a desktop's hello names its system on its row; a phone's moves nothing", ctx do
+    test = self()
+
+    update = fn :store, id, changes ->
+      send(test, {:updated, id, changes})
+      {:ok, row(id)}
+    end
+
+    {_driver, _client} =
+      ready_desktop!(ctx, %{}, update_device: update, hello: %{"platform" => "linux"})
+
+    assert_receive {:updated, @desktop_id, %{platform: "linux", last_seen: @seen}}
+
+    {_driver, _client} =
+      ready!(ctx, ctx.phone, @phone_id, update_device: update, hello: %{"platform" => "macos"})
+
+    assert_receive {:updated, @phone_id, changes}
+    refute Map.has_key?(changes, :platform)
   end
 
   test "a version that could not be recorded is logged, and the desktop is served", ctx do
@@ -159,8 +248,10 @@ defmodule FermixChannels.Mobile.DesktopSessionTest do
     {[{refusal, <<>>}], _client} = Driver.client_receive(desktop, desktop_client)
     assert refusal["code"] == "unsupported_event"
 
+    # A phone's list channel is the companion family's (M85 E4); the rest of
+    # a desktop's families stay a desktop's.
     {phone, phone_client} = ready_phone!(ctx)
-    phone_client = Driver.client_send(phone, phone_client, "companion_open", %{"channel" => 1}, 2)
+    phone_client = Driver.client_send(phone, phone_client, "manage", manage_fields(), 2, "{}")
     {[{refusal, <<>>}], phone_client} = Driver.client_receive(phone, phone_client)
     assert refusal["code"] == "unsupported_event"
 
@@ -358,6 +449,7 @@ defmodule FermixChannels.Mobile.DesktopSessionTest do
   # A paired device's session through IK and hello, its hello_ack read.
   defp ready!(ctx, keypair, device_id, opts) do
     keys = %{ctx.desktop.public => @desktop_id, ctx.phone.public => @phone_id}
+    {extra_hello, opts} = Keyword.pop(opts, :hello, %{})
 
     driver =
       Driver.start!(
@@ -392,7 +484,7 @@ defmodule FermixChannels.Mobile.DesktopSessionTest do
       "protocol_v" => Protocol.protocol_version()
     }
 
-    client = Driver.client_send(driver, client, "hello", hello, 1)
+    client = Driver.client_send(driver, client, "hello", Map.merge(hello, extra_hello), 1)
 
     assert {[{%{"t" => "hello_ack", "seq" => 1}, <<>>}], client} =
              Driver.client_receive(driver, client)

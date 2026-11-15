@@ -2,6 +2,7 @@ defmodule FermixCore.Setup.SecretMigrationTest do
   use ExUnit.Case, async: false
 
   alias FermixCore.Setup.ConfigStore
+  alias FermixCore.Setup.MachineFile
   alias FermixCore.Setup.SecretMigration
   alias FermixCore.Setup.SecretPaths
   alias FermixCore.Setup.SecretWriter
@@ -75,7 +76,8 @@ defmodule FermixCore.Setup.SecretMigrationTest do
                prompt: fn _ -> "yes" end
              )
 
-    contents = File.read!(ConfigStore.path())
+    # The sandbox is this computer's own (M97 §4).
+    contents = File.read!(MachineFile.path(ConfigStore.fermix_home()))
 
     assert contents =~ ~s([sandbox.env.OPENAI_API_KEY])
     assert contents =~ ~s([sandbox.env.ANTHROPIC_API_KEY])

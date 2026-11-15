@@ -3,10 +3,13 @@ defmodule Fermix.CLI.DaemonTest do
 
   alias Fermix.CLI.Daemon
   alias Fermix.CLI.Daemon.Client
+  alias Fermix.CLI.Daemon.Lock
   alias FermixCore.Auth.Store
   alias FermixCore.Auth.TokenSupervisor
   alias FermixCore.Capabilities.MCP.RuntimeStatus
+  alias FermixCore.Management.Accessories, as: ManagementAccessories
   alias FermixCore.Management.Lifecycle
+  alias FermixCore.Management.Protocol, as: ManagementProtocol
   alias FermixCore.Management.Router
   alias FermixCore.Plugins.Dist.Store, as: DistStore
   alias FermixCore.SocketPath
@@ -778,6 +781,94 @@ defmodule Fermix.CLI.DaemonTest do
     assert {:ok, %{"engine" => _engine}} = hello(socket_path)
   end
 
+  # A daemon too busy to accept turns a connection away as a stale socket
+  # does (on macOS its full backlog refuses the connect at once), so a second
+  # start decides from the lock only a live daemon holds, never from the
+  # connect: the busy daemon keeps its socket.
+  test "a second daemon leaves the socket of one that holds the lock but does not accept" do
+    socket_dir = mkdir!()
+    socket_path = Path.join(socket_dir, "busy.sock")
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf(socket_dir) end)
+    File.touch!(socket_path)
+    {:ok, busy} = Lock.acquire(socket_path)
+    on_exit(fn -> Lock.release(busy) end)
+    Process.flag(:trap_exit, true)
+
+    assert {:error, {:another_daemon_running, ^socket_path}} =
+             Daemon.start_link(
+               name: unique_name(:busy_second_daemon),
+               socket_path: socket_path,
+               task_supervisor: __MODULE__.TaskSup
+             )
+
+    assert File.exists?(socket_path)
+    assert Lock.held(socket_path) == {:ok, true}
+  end
+
+  test "a daemon holds its lock while it runs and lets go of it when it stops" do
+    socket_dir = mkdir!()
+    socket_path = Path.join(socket_dir, "held.sock")
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf(socket_dir) end)
+
+    {:ok, daemon} =
+      Daemon.start_link(
+        name: unique_name(:lock_daemon),
+        socket_path: socket_path,
+        task_supervisor: __MODULE__.TaskSup,
+        management_opts: management_opts()
+      )
+
+    assert Lock.held(socket_path) == {:ok, true}
+    assert {:ok, %{"engine" => _engine}} = hello(socket_path)
+
+    :ok = GenServer.stop(daemon, :normal, @reply_ms)
+
+    refute File.exists?(socket_path)
+    assert Lock.held(socket_path) == {:ok, false}
+    assert Client.request_v1("hello", %{}, socket_path: socket_path) == {:error, :not_running}
+  end
+
+  # While the daemon is at one connection, the ones behind it wait in the
+  # listen backlog. macOS's default of 5 refused the sixth at once, which a
+  # client read as no daemon at all; the daemon asks for macOS's cap.
+  test "connections that wait behind a busy accept are queued, not refused" do
+    socket_dir = mkdir!()
+    socket_path = Path.join(socket_dir, "queue.sock")
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf(socket_dir) end)
+    test = self()
+
+    gate = fn _conn ->
+      send(test, {:at_gate, self()})
+
+      receive do
+        :admit -> {:error, :test_over}
+      end
+    end
+
+    {:ok, daemon} =
+      Daemon.start_link(
+        name: unique_name(:queue_daemon),
+        socket_path: socket_path,
+        task_supervisor: __MODULE__.TaskSup,
+        management_opts: management_opts(),
+        peer_gate: gate
+      )
+
+    {:ok, first} = connect_waiting(socket_path)
+    assert_receive {:at_gate, acceptor}
+
+    for _waiting <- 1..20 do
+      assert {:ok, conn} = connect_waiting(socket_path)
+      :gen_tcp.close(conn)
+    end
+
+    # Each queued connection reaches the gate in turn: one admit apiece frees
+    # the acceptor to see the listener close.
+    :gen_tcp.close(first)
+    for _connection <- 0..20, do: send(acceptor, :admit)
+    GenServer.stop(daemon, :normal, @reply_ms)
+  end
+
   test "agent_message routes the prompt through the configured CLI bridge", %{
     socket_path: socket_path
   } do
@@ -1013,8 +1104,20 @@ defmodule Fermix.CLI.DaemonTest do
     ]
     @other_writes [
       {"secret.set", %{"id" => "openai_api_key", "value" => "sk-Larch-0412"}, :secret_set},
-      {"secret.set", %{"id" => "env:HERON_TOKEN", "value" => "Heron-9081"}, :secret_set},
       {"settings.apply", %{"section" => "assistant", "values" => %{"agent_name" => "Wren"}},
+       :settings_apply}
+    ]
+    # A machine's own settings, the server's or this computer's, and a
+    # sandbox value of either (M97 §19.3).
+    @machine_writes [
+      {"secret.set", %{"id" => "env:HERON_TOKEN", "value" => "Heron-9081"}, :secret_set},
+      {"secret.clear", %{"id" => "env:HERON_TOKEN"}, :secret_clear},
+      {"settings.apply", %{"section" => "sandbox", "values" => %{"sandbox_mode" => "open"}},
+       :settings_apply},
+      {"settings.apply",
+       %{"section" => "harness_machine", "values" => %{"harness_approved" => true}},
+       :settings_apply},
+      {"settings.apply", %{"section" => "browser", "values" => %{"browser_max_tabs" => 4}},
        :settings_apply}
     ]
 
@@ -1046,6 +1149,117 @@ defmodule Fermix.CLI.DaemonTest do
            "the daemon did not start" do
       socket_path = start_peer_daemon(management_opts: recording_writers())
       assert_writes_reached(socket_path, @cue_writes)
+    end
+
+    # M97 §7.2: what Fermix on the server may use on this computer widens only
+    # at this computer, by its owner: a command the daemon started (the
+    # server's work run here, among them) never writes it. The refusal says
+    # that, in a sentence of its own: it is no Always On step.
+    test "this computer's switches are refused to a process the daemon started" do
+      golden = golden_error_details("unavailable_computer_owner_decision")
+
+      write =
+        {"settings.apply", %{"section" => "computer", "values" => %{"computer_shell" => true}}}
+
+      socket_path =
+        start_peer_daemon(
+          management_opts: recording_writers(),
+          daemon_os_pid: ParentProcess.os_pid()
+        )
+
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          {method, params} = write
+
+          assert {:error, {:management_error, "unavailable", _message, ^golden}} =
+                   Client.request_v1(method, params, socket_path: socket_path, timeout: @reply_ms)
+        end)
+
+      assert log =~ "only the owner may"
+      refute_received {:written, _write, _target}
+      assert golden["capability"] == "home"
+      refute golden["sentence"] =~ "passphrase"
+    end
+
+    # M97 §19.3, §19.11: a process the daemon started (the server's own
+    # commands run on this computer among them) never asks this engine to
+    # change a machine's own settings, so it never widens the server from
+    # here; the owner's own app still does.
+    test "a machine's own settings and sandbox values are refused to a process the daemon " <>
+           "started" do
+      golden = golden_error_details("unavailable_machine_owner_decision")
+
+      socket_path =
+        start_peer_daemon(
+          management_opts: recording_writers(),
+          daemon_os_pid: ParentProcess.os_pid()
+        )
+
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          for {method, params, _write} <- @machine_writes do
+            assert {:error, {:management_error, "unavailable", _message, ^golden}} =
+                     Client.request_v1(method, params,
+                       socket_path: socket_path,
+                       timeout: @reply_ms
+                     ),
+                   inspect({method, params})
+          end
+        end)
+
+      assert log =~ "only the owner may"
+      refute_received {:written, _write, _target}
+      assert golden["capability"] == "settings"
+
+      owner = start_peer_daemon(management_opts: recording_writers())
+      assert_writes_reached(owner, @machine_writes)
+    end
+
+    # A computer's own settings and sandbox values by the ids its app writes
+    # them with (`computer.<id>`, `computer.env:<NAME>`, M97 §19.3): refused
+    # to a process the daemon started, and the owner's reach this computer's
+    # own writers under their plain ids.
+    @own_machine_writes [
+      {"settings.apply",
+       %{"section" => "computer.sandbox", "values" => %{"sandbox_mode" => "open"}},
+       {:settings_apply, "sandbox"}},
+      {"secret.set", %{"id" => "computer.env:HERON_TOKEN", "value" => "Heron-9081"},
+       {:secret_set, "env:HERON_TOKEN"}},
+      {"secret.clear", %{"id" => "computer.env:HERON_TOKEN"}, {:secret_clear, "env:HERON_TOKEN"}}
+    ]
+
+    test "this computer's own settings and sandbox values are refused to a process the " <>
+           "daemon started, and the owner's are served" do
+      golden = golden_error_details("unavailable_machine_owner_decision")
+      own = recording_writers() ++ [computer?: true]
+
+      socket_path =
+        start_peer_daemon(management_opts: own, daemon_os_pid: ParentProcess.os_pid())
+
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          for {method, params, _written} <- @own_machine_writes do
+            assert {:error, {:management_error, "unavailable", _message, ^golden}} =
+                     Client.request_v1(method, params,
+                       socket_path: socket_path,
+                       timeout: @reply_ms
+                     ),
+                   inspect({method, params})
+          end
+        end)
+
+      assert log =~ "only the owner may"
+      refute_received {:written, _write, _target}
+
+      owner = start_peer_daemon(management_opts: own)
+
+      for {method, params, {write, target}} <- @own_machine_writes do
+        assert {:ok, _result} =
+                 Client.request_v1(method, params, socket_path: owner, timeout: @reply_ms),
+               inspect({method, params})
+
+        assert_received {:written, ^write, ^target}
+      end
     end
 
     test "every other secret and section stays open to a process the daemon started" do
@@ -1205,6 +1419,96 @@ defmodule Fermix.CLI.DaemonTest do
     end
   end
 
+  # M91 E3 and its review: every accessories.* method but the status moves
+  # the robot or the owner's call (pairing streams the owner's microphone, a
+  # call opens it, a check sounds a tone or moves the head, a release frees
+  # the port), so neither the agent nor a command it ran may send any of
+  # them. Only `accessories.status` stays open.
+  describe "owner decisions on accessories" do
+    @robot_id String.duplicate("b", 64)
+    @port "/dev/cu.usbmodem1101"
+    @accessory_decisions [
+      {"accessories.pair.start", %{"path" => @port}},
+      {"accessories.pair.begin", %{"path" => @port}},
+      {"accessories.pair.decide",
+       %{"path" => @port, "attempt" => String.duplicate("a", 32), "matches" => true}},
+      {"accessories.pair.cancel", %{"path" => @port}},
+      {"accessories.retry", %{"path" => @port}},
+      {"accessories.release", %{"path" => @port}},
+      {"accessories.reconnect", %{"path" => @port}},
+      {"accessories.forget", %{"accessory_id" => @robot_id}},
+      {"accessories.revoke", %{"accessory_id" => @robot_id}},
+      {"accessories.voice_device.set", %{"device" => "desktop"}},
+      {"accessories.call.start", %{"accessory_id" => @robot_id}},
+      {"accessories.call.end", %{"accessory_id" => @robot_id, "call_id" => "voice-1"}},
+      {"accessories.call.mute",
+       %{"accessory_id" => @robot_id, "call_id" => "voice-1", "muted" => true}},
+      {"accessories.call.interrupt", %{"accessory_id" => @robot_id, "call_id" => "voice-1"}},
+      {"accessories.call.task.cancel",
+       %{"accessory_id" => @robot_id, "call_id" => "voice-1", "task" => "dlg_1"}},
+      {"accessories.check.start", %{"accessory_id" => @robot_id, "check" => "tone"}},
+      {"accessories.check.stop", %{"accessory_id" => @robot_id}},
+      {"accessories.calibrate", %{"accessory_id" => @robot_id, "op" => "begin"}},
+      {"accessories.set", %{"accessory_id" => @robot_id, "volume" => 40}}
+    ]
+
+    test "every accessories method is in the list, and only the status is not" do
+      listed = Enum.map(@accessory_decisions, &elem(&1, 0))
+
+      published =
+        for "accessories." <> _ = method <- ManagementProtocol.methods(), do: method
+
+      assert Enum.sort(listed ++ ["accessories.status"]) == Enum.sort(published)
+    end
+
+    test "a process the daemon started is refused, and so is one it cannot place" do
+      golden = accessories_owner_golden()
+
+      for peer <- [[daemon_os_pid: ParentProcess.os_pid()], [os: {:win32, :nt}]] do
+        socket_path = start_peer_daemon(peer)
+
+        log =
+          ExUnit.CaptureLog.capture_log(fn ->
+            for {method, params} <- @accessory_decisions do
+              assert {:error, {:management_error, "unavailable", _message, ^golden}} =
+                       Client.request_v1(method, params,
+                         socket_path: socket_path,
+                         timeout: 5_000
+                       ),
+                     method
+            end
+
+            refute match?(
+                     {:error, {:management_error, "unavailable", _message, ^golden}},
+                     Client.request_v1("accessories.status", %{},
+                       socket_path: socket_path,
+                       timeout: 5_000
+                     )
+                   )
+          end)
+
+        assert log =~ "only the owner may"
+      end
+    end
+
+    defp accessories_owner_golden do
+      golden =
+        :fermix_core
+        |> Application.app_dir("priv/management/fixtures/errors.jsonl")
+        |> File.stream!()
+        |> Enum.map(&Jason.decode!/1)
+        |> Enum.find(&(&1["name"] == "unavailable_accessories_owner_decision"))
+        |> get_in(["response", "error", "details"])
+
+      assert golden == %{
+               "capability" => "accessories",
+               "sentence" => ManagementAccessories.owner_only_sentence()
+             }
+
+      golden
+    end
+  end
+
   # Always On setup §6: a setup page session drives every decision the page
   # offers, the owner's included, so a command the agent ran cannot mint one;
   # the Mac app (a launchd process) still opens the page.
@@ -1260,13 +1564,10 @@ defmodule Fermix.CLI.DaemonTest do
 
   # Always On setup §3.5: the server's steps a linked desktop's `home.act`
   # sends over the link are served only to a desktop's forward, so this
-  # socket refuses each by name whoever asks, before any owner placement; the
-  # provisioner's writes left the wire, `home.act` runs them.
-  describe "the rail-only steps and the provisioner's writes" do
+  # socket refuses each by name whoever asks, before any owner placement.
+  describe "the rail-only steps" do
     @rail_only ~w(home.move.readiness home.move.start home.enroll.open home.enroll.withdraw
-                  home.snapshots.run)
-    @gone ~w(home.provision.providers home.provision.connect home.provision.create
-             home.provision.power home.provision.resources home.provision.delete)
+                  home.snapshots.run home.restart)
 
     test "a rail-only step is refused on the socket by name, the owner's peer included", %{
       socket_path: socket_path
@@ -1281,25 +1582,6 @@ defmodule Fermix.CLI.DaemonTest do
 
         assert details == %{golden | "method" => method}
       end
-    end
-
-    test "the provisioner's writes are no method, and its choice of offers is no decision" do
-      socket_path = start_peer_daemon(daemon_os_pid: ParentProcess.os_pid())
-
-      for method <- @gone do
-        assert {:error, {:management_error, "method_not_found", _message, %{"method" => ^method}}} =
-                 Client.request_v1(method, %{}, socket_path: socket_path, timeout: 5_000)
-      end
-
-      # A read for the provider in use, answered to a caller Fermix started:
-      # here, with no token, the provisioner's own sentence, never the owner's.
-      assert {:error,
-              {:management_error, "unavailable", _message,
-               %{"capability" => "home", "sentence" => "Paste a Hetzner API token first."}}} =
-               Client.request_v1("home.provision.options", %{},
-                 socket_path: socket_path,
-                 timeout: 5_000
-               )
     end
 
     defp rail_only_golden do
@@ -2007,6 +2289,12 @@ defmodule Fermix.CLI.DaemonTest do
 
   defp hello(socket_path) do
     Client.request_v1("hello", %{}, socket_path: socket_path, timeout: @reply_ms)
+  end
+
+  # A connection the kernel queues answers the connect at once; only a refused
+  # or blocked one reaches the bound.
+  defp connect_waiting(socket_path) do
+    :gen_tcp.connect({:local, to_charlist(socket_path)}, 0, [active: false], @reply_ms)
   end
 
   defp unique_name(prefix) do

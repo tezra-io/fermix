@@ -5,7 +5,20 @@ defmodule FermixChannels.Desktop.DeviceSupervisor do
   device role starts it (`FermixCore.Home.Role`'s device-only list, through
   the one filter `Role.children/2`).
 
-  `:one_for_one` over two subtrees, so neither takes the other down:
+  `:one_for_one` over its subtrees, so none takes another down:
+
+  - **This computer's invocations** (`Desktop.Invoke`, M97 §6.2) when
+    `device/desktop.json` exists: what its server asks of it, a sibling of
+    the dial subtree so a helper or relay restart ends no running one.
+
+  - **The app's voice socket** (M97 §9.2) when `device/desktop.json` exists
+    and this boot serves the realtime socket (a daemon run's boot profile,
+    never `mix test`): `realtime.sock` at its usual path, its calls carried
+    to the server by `Desktop.CallBridge` (`LocalVoiceSocket`'s bridged
+    configuration), a sibling of the dial subtree too, so a relay restart
+    closes no app connection and a call resumes on the next session. No
+    session runs here; on the primary, after a move back, the same path is
+    served by the primary's own sessions (`FermixCore.Realtime.Supervisor`).
 
   - **The dial subtree** (`children/1`'s `:dial`, `:rest_for_one`): one list,
     in start order, each with the condition under which this boot starts it
@@ -13,7 +26,9 @@ defmodule FermixChannels.Desktop.DeviceSupervisor do
     protocol 3, a fresh in-memory key, no bridge) they dial through, started
     only when one of them starts. While a move this home started is pending
     (`FermixCore.Home.Move.pending?/1`): the move worker
-    (`FermixChannels.Home.MoveWorker`), its source. When
+    (`FermixChannels.Home.MoveWorker`), its source. While this computer joins
+    a home and has no link yet (`FermixCore.Home.Join.present?/1`, M97
+    §3.1): the joiner (`FermixChannels.Desktop.Join`). When
     `device/desktop.json` exists: the desktop's services
     (`Desktop.DeviceServices`), then the desktop relay (`Desktop.Relay`). The
     users dial through the helper, so its restart takes them down with it,
@@ -31,12 +46,19 @@ defmodule FermixChannels.Desktop.DeviceSupervisor do
 
   require Logger
 
+  alias FermixChannels.Desktop.CallBridge
+  alias FermixChannels.Desktop.Invoke
   alias FermixChannels.Desktop.Relay
   alias FermixChannels.Home.CandidateSupervisor
   alias FermixChannels.Mobile.Iroh.Helper
+  alias FermixCore.Computers.Capabilities.Browser, as: BrowserCapability
   alias FermixCore.Home.Candidate
   alias FermixCore.Home.DesktopLink
+  alias FermixCore.Home.Join
   alias FermixCore.Home.Move
+  alias FermixCore.Realtime.Config, as: RealtimeConfig
+  alias FermixCore.Realtime.LocalVoiceSocket
+  alias FermixCore.Sandbox.Config, as: SandboxConfig
   alias FermixCore.Setup.ConfigStore
 
   @helper FermixChannels.Desktop.DialHelper
@@ -57,19 +79,31 @@ defmodule FermixChannels.Desktop.DeviceSupervisor do
   end
 
   @doc """
-  This boot's subtrees for the home at `root`: the dial subtree when the rail
-  has a user here, the candidate subtree when the home holds a candidate;
-  none at all when it needs neither.
+  This boot's subtrees for the home at `root`: this computer's invocations
+  (`Desktop.Invoke`), the app's bridged voice socket when `voice?` (this
+  boot serves the realtime socket) and the dial subtree when the home is
+  linked, the dial subtree alone while a move this home started is pending,
+  the candidate subtree when the home holds a candidate; none at all when it
+  needs none.
   """
-  @spec children(Path.t()) :: [Supervisor.child_spec()]
-  def children(root) when is_binary(root) and root != "" do
+  @spec children(Path.t(), boolean()) :: [Supervisor.child_spec()]
+  def children(root, voice? \\ realtime_socket?())
+      when is_binary(root) and root != "" and is_boolean(voice?) do
     dial =
       case dial_children(root) do
         [] -> []
         children -> [dial_spec(children)]
       end
 
-    if Candidate.present?(root), do: dial ++ [candidate_spec(root)], else: dial
+    # Beside the dial subtree, never inside it: a helper or relay restart
+    # ends no running invocation (M97 §5.2). Started first, so it takes the
+    # server's requests from the session's first frame.
+    linked? = File.regular?(DesktopLink.path(root))
+    invoke = if linked?, do: [invoke_spec(root)], else: []
+    voice = if linked? and voice?, do: [voice_spec(root)], else: []
+    serving = invoke ++ voice ++ dial
+
+    if Candidate.present?(root), do: serving ++ [candidate_spec(root)], else: serving
   end
 
   @doc """
@@ -85,6 +119,8 @@ defmodule FermixChannels.Desktop.DeviceSupervisor do
       for {start?, child} <- [
             # One line per child, in start order; the relay comes last.
             {Move.pending?(root), {FermixChannels.Home.MoveWorker, home: root, helper: @helper}},
+            {Join.present?(root) and not linked?,
+             {FermixChannels.Desktop.Join, home: root, helper: @helper}},
             {linked?, {FermixChannels.Desktop.DeviceServices, home: root}},
             {linked?, {Relay, root: root, helper: @helper}}
           ],
@@ -153,6 +189,42 @@ defmodule FermixChannels.Desktop.DeviceSupervisor do
       start: {Supervisor, :start_link, [children, [strategy: :rest_for_one, name: @dial]]},
       type: :supervisor
     }
+
+  # Every option explicit, none read from application environment on the
+  # way: this computer's switches are read from its own machine file at each
+  # request, and one that cannot be read refuses everything
+  # (`Invoke.switches_in/1`); its sandbox and its browser are this engine's
+  # own, as its live settings hold them, at each request.
+  defp invoke_spec(root),
+    do:
+      Supervisor.child_spec(
+        {Invoke,
+         home: root,
+         switches: Invoke.switches_in(root),
+         sandbox: &SandboxConfig.current/0,
+         browser: &BrowserCapability.local/0,
+         capabilities: Invoke.capabilities(),
+         clock: &DateTime.utc_now/0,
+         relay: Relay},
+        []
+      )
+
+  # The boot profile of a daemon run turns the realtime socket on
+  # (`FermixCore.BootProfile.prepare/2`); `mix test` and a tree-less verb
+  # serve none.
+  defp realtime_socket?,
+    do: Application.get_env(:fermix_core, :realtime_socket_enabled, false) == true
+
+  # The app's `realtime.sock`, its calls bridged to the server (M97 §9.2).
+  defp voice_spec(root),
+    do:
+      Supervisor.child_spec(
+        {LocalVoiceSocket,
+         socket_path: RealtimeConfig.socket_path(root),
+         name: LocalVoiceSocket,
+         bridge: {CallBridge, relay: Relay}},
+        id: :voice_bridge
+      )
 
   defp candidate_spec(root),
     do: %{

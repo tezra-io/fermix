@@ -1,35 +1,51 @@
 defmodule FermixCore.ComputerHistory.Purge do
   @moduledoc """
-  Owner purge executor (MILESTONE_32 §12). `/history purge 10m|1h|24h|all`
-  erases a recent window from the spool **and** the activity memories whose
-  provenance window intersects it, and records the window as a purge interval.
-  The interval fences the spool insert, so an event stamped inside the window
-  that was still buffered or in flight never lands after the purge, and it
-  refuses a session note or thread whose batch was read before the purge and
-  reaches the window, so an in-flight summarizer write cannot re-materialize it.
+  Owner purge executor (MILESTONE_32 §12; M97 §8.5). `/history purge
+  10m|1h|24h|all` runs on the home: in one transaction it deletes the notes and
+  threads whose provenance window intersects the window (for every machine, or
+  one) and records the window as a purge interval. Then this machine, on a home
+  that records itself, applies every interval it has not yet applied, this one
+  included (`Delivery.apply_here/1`), which deletes and fences its own raw
+  events in each. The interval reaches every other machine: the home refuses
+  any sitting of theirs that touches the window, with the interval, until they
+  have applied it (`ComputerHistory.Submission`), so a purged window never
+  gains a note in whichever order the purge and a late sitting arrive; a
+  connected computer is told at once (`ComputerHistory.Delivery`).
 
-  Purge is **logical deletion**: rows leave every query, but `memory.db` runs
-  in WAL mode with no `secure_delete`, so raw bytes may linger in the `-wal`
-  file and the SQLite freelist until overwritten — bounded against an offline
-  attacker by FileVault, not zeroed on purge (§12, §14 T14). It also cannot
-  reach already-delivered replies, any remote vendor copies, or the operator's
-  own backups; the acknowledgment (Stage 6) states this plainly.
+  The two stores are separate databases with no transaction across them, so
+  the act is answered in two parts, and the reply says which stood. The home's
+  transaction either commits or changes nothing. Once it commits, the interval
+  stands and is never taken back: undoing it would leave the notes deleted with
+  nothing refusing a late sitting in the window. When this machine's own apply
+  then fails, the home still takes nothing from that window, and this machine
+  applies it at the scheduler's next tick (`here: {:failed, reason}`).
 
-  Runs in the daemon process so it shares the summarizer's in-flight-purge
-  check (§15.3) — the CLI routes mutations here over the control socket rather
-  than opening `memory.db` in a second tree.
+  Purge is **logical deletion**: rows leave every query, but each store runs in
+  WAL mode with no `secure_delete`, so raw bytes may linger in the `-wal` file
+  and the SQLite freelist until overwritten — bounded against an offline
+  attacker by disk encryption, not zeroed on purge (§12, §14 T14). It also
+  cannot reach already-delivered replies, any remote vendor copies, the
+  owner's own backups or the server's.
   """
 
   require Logger
 
+  alias FermixCore.ComputerHistory.Delivery
   alias FermixCore.Memory.Repo
 
   @type window :: :all | {:last, non_neg_integer()}
+  @typedoc """
+  What a purge did: on the home, the notes deleted and the interval recorded;
+  here, the raw events deleted and whether this machine applied it (`:none`
+  where it keeps no store).
+  """
   @type result :: %{
           events: non_neg_integer(),
           memories: non_neg_integer(),
           from_ts: integer(),
-          to_ts: integer()
+          to_ts: integer(),
+          interval: pos_integer(),
+          here: :ok | :none | {:failed, term()}
         }
 
   @doc """
@@ -49,26 +65,61 @@ defmodule FermixCore.ComputerHistory.Purge do
 
   @doc """
   Execute a purge over `window`. `opts`: `:now` (epoch ms, injected for tests),
-  `:repo`. Returns the deleted counts plus the resolved bounds, or the error.
+  `:repo` (the home's store), `:home` (the home folder, for the store's
+  identity, `ComputerHistory.home_identity/1`), `:spool` (this machine's, nil
+  when this engine keeps none), `:computer` (`:all`, the default, or one
+  machine's id, `""` for
+  the home's own). `{:ok, result}` once the home's transaction committed,
+  whatever this machine's apply did (`result.here`); `{:error, reason}` when it
+  did not, and nothing changed.
   """
   @spec purge(window(), keyword()) :: {:ok, result()} | {:error, term()}
   def purge(window, opts \\ []) do
     now = Keyword.get(opts, :now, System.system_time(:millisecond))
     repo = Keyword.get(opts, :repo, Repo)
+    scope = Keyword.get(opts, :computer, :all)
     {from_ts, to_ts} = bounds(window, now)
 
-    case Repo.computer_history_purge_window(from_ts, to_ts, now, server: repo) do
-      {:ok, counts} ->
+    case Repo.computer_history_home(:purge_notes, [from_ts, to_ts, now, scope], server: repo) do
+      {:ok, %{memories: memories, interval: id}} ->
+        {events, here} = apply_here(Keyword.get(opts, :spool), now, opts)
+
         Logger.info(
-          "computer_history purge removed #{counts.events} event(s), " <>
-            "#{counts.memories} memory(ies) in [#{from_ts}, #{to_ts}]"
+          "computer_history purge removed #{memories} memory(ies) in [#{from_ts}, #{to_ts}] " <>
+            "and #{events} event(s) here (#{inspect(here)})"
         )
 
-        {:ok, Map.merge(counts, %{from_ts: from_ts, to_ts: to_ts})}
+        {:ok,
+         %{
+           events: events,
+           memories: memories,
+           from_ts: from_ts,
+           to_ts: to_ts,
+           interval: id,
+           here: here
+         }}
 
       {:error, reason} = error ->
-        Logger.error("computer_history purge failed: #{inspect(reason)}")
+        Logger.error("computer_history purge failed, nothing changed: #{inspect(reason)}")
         error
+    end
+  end
+
+  # This machine's own raw events: every interval it has not applied, this one
+  # among them, as any machine applies what it is told of.
+  defp apply_here(nil, _now, _opts), do: {0, :none}
+
+  defp apply_here(spool, now, opts) do
+    case Delivery.apply_here(
+           [spool: spool, now: DateTime.from_unix!(now, :millisecond)] ++
+             Keyword.take(opts, [:repo, :home])
+         ) do
+      {:ok, events} ->
+        {events, :ok}
+
+      {:error, reason} ->
+        Logger.error("computer_history purge was not applied here yet: #{inspect(reason)}")
+        {0, {:failed, reason}}
     end
   end
 

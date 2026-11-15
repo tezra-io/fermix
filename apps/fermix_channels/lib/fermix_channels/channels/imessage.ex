@@ -19,12 +19,18 @@ defmodule FermixChannels.Channels.IMessage do
 
   No typing, no drafts, no reactions, no ephemeral messages: the Messages
   dictionary offers none of them (§21), so they are declared absent.
+
+  On a server (M97 §6.4) the helper is the Mac of the home that carries
+  Messages (`IMessage.ComputerHelper`): while that Mac is asleep or offline a
+  send fails at once with `{:permanent, :carrier_away}`, whose sentence says
+  so, and nothing is kept to send later (D4).
   """
 
   @behaviour FermixChannels.Gateway.Channel
 
   require Logger
 
+  alias FermixChannels.Channels.IMessage.ComputerHelper
   alias FermixChannels.Channels.IMessage.Port, as: HelperPort
   alias FermixChannels.Channels.IMessage.Protocol
   alias FermixChannels.Gateway.Idempotency
@@ -333,7 +339,13 @@ defmodule FermixChannels.Channels.IMessage do
 
     {result, duration_us} =
       Telemetry.timed_us(fn ->
-        runtime.helper.call(runtime.server, "send.text", params, @send_text_timeout_ms)
+        runtime.helper.call(
+          runtime.server,
+          "send.text",
+          params,
+          @send_text_timeout_ms,
+          runtime.turn
+        )
       end)
 
     send_outcome(result, key, duration_us)
@@ -364,6 +376,13 @@ defmodule FermixChannels.Channels.IMessage do
   defp send_outcome({:ok, result}, key, _duration_us) do
     Logger.error("iMessage send #{key} returned an unknown disposition: #{bounded(result)}")
     {:error, {:unexpected_delivery_result, :invalid_contract}}
+  end
+
+  # The Mac that carries Messages is asleep or offline (M97 D4): nothing is
+  # kept to send later.
+  defp send_outcome({:error, {kind, message, %{"class" => "computer_away"}}}, key, _duration_us) do
+    Logger.warning("iMessage send #{key} not sent (#{kind}): #{bounded(message)}")
+    {:error, {:permanent, :carrier_away}}
   end
 
   defp send_outcome({:error, {kind, message, _data}}, key, _duration_us) do
@@ -476,7 +495,13 @@ defmodule FermixChannels.Channels.IMessage do
 
     {result, duration_us} =
       Telemetry.timed_us(fn ->
-        runtime.helper.call(runtime.server, "send.file", params, @send_file_timeout_ms)
+        runtime.helper.call(
+          runtime.server,
+          "send.file",
+          params,
+          @send_file_timeout_ms,
+          runtime.turn
+        )
       end)
 
     with :ok <- send_outcome(result, file_key, duration_us) do
@@ -588,7 +613,7 @@ defmodule FermixChannels.Channels.IMessage do
   @spec build_text_reply(FermixChannels.Gateway.Channel.message()) ::
           (String.t() -> :ok | {:error, term()})
   def build_text_reply(%Message{reply_target: reply_target, metadata: metadata}) do
-    opts = routing_opts(metadata)
+    opts = reply_opts(metadata)
     fn text -> send_message(reply_target, text, opts) end
   end
 
@@ -596,9 +621,14 @@ defmodule FermixChannels.Channels.IMessage do
   @spec build_media_reply(FermixChannels.Gateway.Channel.message()) ::
           (FermixChannels.Gateway.Channel.media_part() -> :ok | {:error, term()})
   def build_media_reply(%Message{reply_target: reply_target, metadata: metadata}) do
-    opts = routing_opts(metadata)
+    opts = reply_opts(metadata)
     fn media_part -> send_media(reply_target, media_part, opts) end
   end
+
+  # A reply is the turn that answers the message here: that conversation's
+  # chat turn, whose origin facts it carries.
+  defp reply_opts(metadata),
+    do: [{:turn_origin, %{computer_use_origin: :interactive}} | routing_opts(metadata)]
 
   # --- Inbound attachments (§8.3) ----------------------------------------------------
 
@@ -646,7 +676,13 @@ defmodule FermixChannels.Channels.IMessage do
   defp fetch_attachment(runtime, guid, index, convert?) do
     params = %{"message_guid" => guid, "index" => index, "convert" => convert?}
 
-    case runtime.helper.call(runtime.server, "attachment.fetch", params, @fetch_timeout_ms) do
+    case runtime.helper.call(
+           runtime.server,
+           "attachment.fetch",
+           params,
+           @fetch_timeout_ms,
+           runtime.turn
+         ) do
       {:ok, %{"path" => path}} when is_binary(path) -> {:ok, path}
       {:ok, other} -> {:error, {:protocol_error, bounded(other)}}
       {:error, {kind, message, _data}} -> {:error, {kind, message}}
@@ -680,11 +716,32 @@ defmodule FermixChannels.Channels.IMessage do
   serving helper: Doctor asks from a tree-less CLI process where no Port runs,
   and the daemon's own answer must be the same one, so there is one path.
   The owner it checks against the account's own aliases is the saved one.
-  `control:`, `home:` and `owner:` are test seams.
+  Off a Mac (M97 §6.4) there is no helper here to probe: health is the
+  posture of the Mac that carries Messages, as this engine's computer
+  helper holds it (`IMessage.ComputerHelper.poll_health/1`), away while that
+  Mac is asleep. `control:`, `home:`, `owner:`, `macos?:` and
+  `carried_health:` are test seams.
   """
   @impl true
   @spec health_check(keyword()) :: FermixChannels.Gateway.Channel.health_result()
   def health_check(opts \\ []) when is_list(opts) do
+    if Keyword.get_lazy(opts, :macos?, &FermixCore.IMessage.macos?/0),
+      do: probed_health(opts),
+      else: carried_health(Keyword.get_lazy(opts, :carried_health, &ComputerHelper.poll_health/0))
+  end
+
+  defp carried_health(%{status: :ready}),
+    do: {:ok, %{detail: "The Mac that carries Messages is connected", latency_ms: 0}}
+
+  defp carried_health(%{status: status, detail: detail}), do: {:error, {status, detail}}
+
+  defp carried_health(nil),
+    do:
+      {:error,
+       {:not_running,
+        "iMessage runs through the Mac that carries Messages, and this engine is not running it"}}
+
+  defp probed_health(opts) do
     control = Keyword.get(opts, :control, Control)
     owner = Keyword.get_lazy(opts, :owner, &configured_owner/0)
     started = System.monotonic_time(:millisecond)
@@ -840,11 +897,15 @@ defmodule FermixChannels.Channels.IMessage do
   # --- Shared ---------------------------------------------------------------------
 
   # The helper a call goes through: explicit options (tests, the bench), then
-  # the inbound message's routing, then the channel's own Port.
+  # the inbound message's routing, then the channel's own Port. `turn` is the
+  # origin facts of the turn that sends (`:turn_origin`), which a helper
+  # reached through a Mac hands on to its rules and journal; none is
+  # `background`.
   defp runtime(opts, metadata) do
     %{
       helper: Keyword.get(opts, :helper) || Map.get(metadata, :imessage_helper) || HelperPort,
-      server: Keyword.get(opts, :server) || Map.get(metadata, :imessage_server) || HelperPort
+      server: Keyword.get(opts, :server) || Map.get(metadata, :imessage_server) || HelperPort,
+      turn: Keyword.get(opts, :turn_origin, %{})
     }
   end
 

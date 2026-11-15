@@ -6,9 +6,13 @@ defmodule FermixChannels.Home.MoveWorker do
 
   **Before `move_ready`** (phases `requested`, `streaming`):
 
-    1. the desktop's X25519 key goes to `device/desktop_key` and its row
+    1. the desktop's X25519 key goes into the secret store
+       (`FermixCore.Home.ComputerKey`; the phase records which store and the
+       key's public half first, so a restart finds its own key, and never
+       takes or deletes another home's under the same profile) and its row
        (`kind: :desktop`) into `mobile/devices.toml`, before
-       anything is captured, so the row travels and the key never does;
+       anything is captured, so the row travels and the key never does; a
+       key the store will not take aborts the move by name;
     2. the value of every `@keyring` reference in `config.toml` is read from
        the keychain (`FermixCore.Home.MoveSecrets`), and the home is captured
        (`Snapshot.write/4`) into `.move/<id>.fxsnap`, encrypted to the one-time
@@ -22,7 +26,9 @@ defmodule FermixChannels.Home.MoveWorker do
     3. the worker dials the candidate (`Mobile.Rail`, `:ik_move`: the gateway
        key as its static key, the candidate's Noise key as the responder's),
        sends `move_offer` (the file's size and SHA-256, the source epoch, the
-       recovery recipient, and the attempt, which only grows across restarts),
+       recovery recipient, the attempt, which only grows across restarts, and
+       the desktop row's device id of a source kept as a desktop, for which
+       the new primary names the home's own history notes, M97 §8.4),
        checks `move_accept` names the same recipient,
        streams the file as `move_chunk`s and `move_end`, and waits for
        `move_ready {epoch}`.
@@ -35,9 +41,14 @@ defmodule FermixChannels.Home.MoveWorker do
   retired.
 
   **The commit.** On `move_ready` the worker records the ready epoch, writes
-  `moved.json` (`to` the candidate's name) and `device/desktop.json` (the
-  source's own gateway key and node id, since the identity bundle moves),
-  records `committing`, and only then sends `move_commit`. On `move_done` it
+  `moved.json` (`to` the candidate's name), `device/desktop.json` (the
+  source's own gateway key and node id, since the identity bundle moves) and
+  what this computer keeps on for its server (`[fermix_core.computer]` in its
+  `machine.toml`, as the request recorded it, M97 §7.3), records
+  `committing`, and only then sends `move_commit`. The link names the
+  candidate's address hints (an Always On server's tailnet addresses, which
+  the move dialed it with), so the desktop dials its new primary there too.
+  On `move_done` it
   records `committed` and restarts, and the engine boots as a desktop of the
   new primary, whose boot records `done`: an ending is published only by the
   engine that came back, never by one about to stop. Once `moved.json` exists the move is never aborted: a lost
@@ -48,11 +59,11 @@ defmodule FermixChannels.Home.MoveWorker do
   which only an activated candidate can be. Resuming retries 1 s doubling to
   60 s for 24 hours, then stops with a sentence; the next start resumes again.
 
-  A source the request does not keep as a desktop (`keep_as_desktop: false`, a
-  server being replaced) makes no desktop key, row or link: it is retired by
-  the marker and serves nothing afterwards. Having no desktop key, it cannot
-  ask the moved identity for its `hello_ack`, so a lost `move_done` there is
-  resumed through the candidate alone.
+  A source the request does not keep as a desktop (`keep_as_desktop: false`,
+  a server a desktop moves back from) makes no desktop key, row or link: it
+  is retired by the marker and serves nothing afterwards. Having no desktop
+  key, it cannot ask the moved identity for its `hello_ack`, so a lost
+  `move_done` there is resumed through the candidate alone.
 
   The restart is the daemon's deliberate self-restart
   (`Management.Lifecycle.restart_self/0`: the systemd start budget reset
@@ -69,9 +80,19 @@ defmodule FermixChannels.Home.MoveWorker do
   A request file that cannot be read is recorded with its sentence, and the
   worker ends without changing anything else.
 
+  **Counted** (Always On pane §3.13, P4). The step the worker is in and the
+  bytes it handed the rail are kept where the Always On summary reads them
+  (`FermixCore.Home.MoveProgress`): `:capture` as the capture starts, `:send`
+  at 0 of the capture's size as the send starts and again at each whole 5%
+  crossed, never per chunk, `:staging` while it awaits `move_ready`, and
+  `:commit` while it commits or resumes the commit. The record is forgotten
+  however the worker's move ends.
+
   Test seams: `:home`, `:helper`, `:connect` (route to a `Mobile.Rail`
   `:connect` function), `:clock`, `:sleep`, `:restart`, `:snapshot_opts`,
-  `:resume_for_ms`, `:awake` (0-arity, as `MoveAwake.hold/0`).
+  `:resume_for_ms`, `:awake` (0-arity, as `MoveAwake.hold/0`), `:key_opts`
+  (handed to `ComputerKey`: its secret writer), `:progress` (the
+  `MoveProgress` server).
   """
 
   use Task, restart: :transient
@@ -86,17 +107,24 @@ defmodule FermixChannels.Home.MoveWorker do
   alias FermixChannels.Mobile.Protocol
   alias FermixChannels.Mobile.Rail
   alias FermixCore.BuildInfo
+  alias FermixCore.Computers.Consent
+  alias FermixCore.Computers.Switches
+  alias FermixCore.Home.ComputerKey
+  alias FermixCore.Home.ComputerName
   alias FermixCore.Home.DesktopLink
   alias FermixCore.Home.Move
   alias FermixCore.Home.MoveAwake
   alias FermixCore.Home.Moved
+  alias FermixCore.Home.MoveProgress
   alias FermixCore.Home.MoveSecrets
   alias FermixCore.Home.MoveTelemetry
   alias FermixCore.Home.Snapshot
   alias FermixCore.Home.Snapshot.Run
+  alias FermixCore.Management.Copy
   alias FermixCore.Management.Lifecycle
   alias FermixCore.Management.Settings
   alias FermixCore.Setup.ConfigStore
+  alias FermixCore.Setup.SecretWriter
 
   @chunk_bytes 60 * 1_024
   @accept_ms 60_000
@@ -108,8 +136,31 @@ defmodule FermixChannels.Home.MoveWorker do
   @resume_for_ms 24 * 3_600_000
   @compiled_env Mix.env()
 
+  @unreadable_sentence "The move's own files could not be read; nothing was sent or undone, " <>
+                         "and Fermix looks again when it restarts."
+
   @spec start_link(keyword()) :: {:ok, pid()}
   def start_link(opts) when is_list(opts), do: Task.start_link(__MODULE__, :run, [opts])
+
+  @doc """
+  Every sentence this worker records for a move's screens in its own words,
+  with `to` as the server's name, for the copy gate: those it takes from
+  `Management.Copy` and its own. A server's refusal is said as
+  `Management.Copy.move_refused/2` says it; the words `Home.MoveSecrets`,
+  `Snapshot.Run` and `ComputerKey` give are their own modules'.
+  """
+  @spec sentences(String.t()) :: [String.t()]
+  def sentences(to) when is_binary(to) do
+    [
+      attempts_spent_sentence(to),
+      Copy.summary_sentence(:undone_refused, %{to: to}),
+      Copy.summary_sentence(:undone_unmarked, %{}),
+      Copy.summary_sentence(:move_marker_unread, %{}),
+      @unreadable_sentence,
+      link_unwritten_sentence(to),
+      key_sentence({:in_use, :keyring})
+    ]
+  end
 
   @doc "Carries the pending move of `opts[:home]` on from its recorded phase."
   @spec run(keyword()) :: :ok
@@ -144,14 +195,19 @@ defmodule FermixChannels.Home.MoveWorker do
     end
   end
 
+  # The move's count is forgotten however its carrying on ends.
   defp carry_on(ctx, request, phase) do
     ctx = Map.merge(ctx, %{request: request, started_ms: started(request, phase)})
 
-    case {phase["phase"], Moved.read(ctx.home)} do
-      {_phase, {:ok, _marker}} -> resume(ctx)
-      {"aborting", :absent} -> abort(ctx, :recorded_abort, phase["sentence"])
-      {_before_commit, :absent} -> transfer(ctx)
-      {phase_name, {:error, reason}} -> unconfirmed(ctx, phase_name, marker_sentence(reason))
+    try do
+      case {phase["phase"], Moved.read(ctx.home)} do
+        {_phase, {:ok, _marker}} -> resume(ctx)
+        {"aborting", :absent} -> abort(ctx, :recorded_abort, phase["sentence"])
+        {_before_commit, :absent} -> transfer(ctx)
+        {phase_name, {:error, reason}} -> marker_unread(ctx, phase_name, reason)
+      end
+    after
+      :ok = MoveProgress.clear(ctx.progress, request["move_id"])
     end
   end
 
@@ -167,7 +223,12 @@ defmodule FermixChannels.Home.MoveWorker do
       restart: Keyword.get(opts, :restart, &Lifecycle.restart_self/0),
       snapshot_opts: Keyword.get(opts, :snapshot_opts, []),
       resume_for_ms: Keyword.get(opts, :resume_for_ms, @resume_for_ms),
-      awake: Keyword.get(opts, :awake, default_awake())
+      awake: Keyword.get(opts, :awake, default_awake()),
+      key_opts: Keyword.get(opts, :key_opts, []),
+      # This computer's system for the keep block's lines (`Consent`'s `:os`),
+      # the host's unless a case names it.
+      consent_opts: Keyword.get(opts, :consent_opts, []),
+      progress: Keyword.get(opts, :progress, MoveProgress)
     }
   end
 
@@ -188,7 +249,7 @@ defmodule FermixChannels.Home.MoveWorker do
     attempt = (phase["attempts"] || 0) + 1
 
     if attempt > Move.max_attempts() do
-      abort(ctx, :attempts_spent, "The move to #{name(ctx)} failed #{Move.max_attempts()} times.")
+      abort(ctx, :attempts_spent, attempts_spent_sentence(name(ctx)))
     else
       :ok = record(ctx, "streaming", %{"attempts" => attempt, "sentence" => nil})
       attempt_transfer(Map.put(ctx, :attempt, attempt))
@@ -200,7 +261,7 @@ defmodule FermixChannels.Home.MoveWorker do
          :ok <- record(ctx, "streaming", %{"device_id" => desktop.device_id}),
          {:ok, snapshot} <- capture(ctx),
          {:ok, rail} <- open_candidate(ctx) do
-      case stream(ctx, rail, snapshot) do
+      case stream(ctx, rail, snapshot, desktop.device_id) do
         {:ok, epoch} ->
           commit(ctx, rail, desktop, epoch)
 
@@ -213,8 +274,12 @@ defmodule FermixChannels.Home.MoveWorker do
     end
   end
 
-  defp attempt_failed(ctx, {:refused, code, message}),
-    do: abort(ctx, {:refused, code}, "#{name(ctx)} refused the move (#{code}: #{message}).")
+  # The server's code and words go to the log; the note says it in words an
+  # owner reads (`Management.Copy.move_refused/2`).
+  defp attempt_failed(ctx, {:refused, code, message}) do
+    Logger.warning("move: #{name(ctx)} refused the move (#{code}: #{message})")
+    abort(ctx, {:refused, code}, Copy.move_refused(name(ctx), message))
+  end
 
   # Neither comes right on another attempt: the owner acts first.
   defp attempt_failed(ctx, {:secrets, sentence}), do: abort(ctx, :secrets, sentence)
@@ -224,6 +289,9 @@ defmodule FermixChannels.Home.MoveWorker do
 
   defp attempt_failed(ctx, {:capture, {:free_space_unknown, _reason} = reason}),
     do: abort(ctx, {:capture, :free_space_unknown}, Run.capture_sentence(reason))
+
+  defp attempt_failed(ctx, {:computer_key, reason}),
+    do: abort(ctx, :computer_key, key_sentence(reason))
 
   defp attempt_failed(ctx, reason) do
     Logger.warning(
@@ -242,19 +310,56 @@ defmodule FermixChannels.Home.MoveWorker do
       else: {:ok, %{device_id: nil, keypair: nil}}
   end
 
+  # The key's store and public half are in the phase before the key is
+  # stored, so a restart knows the item it finds is this move's, and an abort
+  # deletes only that one: two homes under one profile share it (M97 D13).
   defp desktop_key(ctx) do
-    case DesktopLink.read_key(ctx.home) do
-      {:ok, keypair} -> desktop_row(ctx, keypair)
-      {:error, {:file, _path, :enoent}} -> new_desktop(ctx)
-      {:error, reason} -> {:error, {:desktop_key, reason}}
+    {:ok, phase} = Move.read_phase(ctx.home)
+
+    case recorded_key(phase) do
+      {:ok, store, public} -> stored_key(ctx, store, public)
+      :none -> new_desktop(ctx)
+    end
+  end
+
+  defp stored_key(ctx, store, public) do
+    case ComputerKey.read(ctx.home, [store: store] ++ ctx.key_opts) do
+      {:ok, %{public: ^public} = keypair} -> desktop_row(ctx, keypair)
+      {:ok, _another} -> {:error, {:computer_key, {:in_use, store}}}
+      {:error, {:missing, ^store}} -> new_desktop(ctx)
+      {:error, reason} -> {:error, {:computer_key, reason}}
     end
   end
 
   defp new_desktop(ctx) do
     keypair = Noise.generate_keypair()
 
-    with :ok <- DesktopLink.write_key(ctx.home, keypair.private), do: desktop_row(ctx, keypair)
+    with {:ok, store} <- computer_key(ComputerKey.store(ctx.home)),
+         :ok <- record(ctx, "streaming", %{"key" => key_record(store, keypair.public)}),
+         {:ok, _keypair, _store} <-
+           computer_key(
+             ComputerKey.create(ctx.home, [keypair: keypair, store: store] ++ ctx.key_opts)
+           ) do
+      desktop_row(ctx, keypair)
+    end
   end
+
+  defp computer_key({:error, reason}), do: {:error, {:computer_key, reason}}
+  defp computer_key(answer), do: answer
+
+  defp key_record(store, public),
+    do: %{"store" => SecretWriter.sentinel_for(store), "public" => Base.encode64(public)}
+
+  defp recorded_key(%{"key" => %{"store" => sentinel, "public" => encoded}}) do
+    with {:ok, store} <- SecretWriter.store_of_sentinel(sentinel),
+         {:ok, <<_::256>> = public} <- Base.decode64(encoded) do
+      {:ok, store, public}
+    else
+      _unreadable -> :none
+    end
+  end
+
+  defp recorded_key(_phase), do: :none
 
   # The row is found by the key, so a restart between the key and the row (or
   # after both) adds it once.
@@ -266,6 +371,8 @@ defmodule FermixChannels.Home.MoveWorker do
     end
   end
 
+  # The computer the move leaves keeps the home's backup copies (M97 D7), and
+  # says its system in its row (M97 §3.2).
   defp add_row(ctx, keypair) do
     attrs = %{
       device_id: uuid(),
@@ -273,7 +380,9 @@ defmodule FermixChannels.Home.MoveWorker do
       model: "#{os()} desktop",
       noise_pk: keypair.public,
       created_at: DateTime.truncate(ctx.clock.(), :second),
-      kind: :desktop
+      kind: :desktop,
+      platform: platform(),
+      backups: true
     }
 
     case DeviceStore.add(attrs, root: ctx.home) do
@@ -286,11 +395,13 @@ defmodule FermixChannels.Home.MoveWorker do
   # is in the device role, so the file an earlier attempt wrote, of the size
   # the phase recorded, is sent again.
   defp capture(ctx) do
+    :ok = progress(ctx, :capture)
     path = Move.snapshot_path(ctx.home, ctx.request["move_id"])
     {:ok, phase} = Move.read_phase(ctx.home)
 
     case {phase["capture"], File.stat(path)} do
       {%{"size" => size, "sha256" => sha256}, {:ok, %File.Stat{type: :regular, size: size}}} ->
+        :ok = ctx |> phase("capture") |> MoveTelemetry.phase_ended(:reused, {"captured", size})
         {:ok, %{path: path, size: size, sha256: sha256}}
 
       _none ->
@@ -315,10 +426,16 @@ defmodule FermixChannels.Home.MoveWorker do
 
   defp write_capture(ctx, recipient, path, extra) do
     opts = Keyword.put(ctx.snapshot_opts, :extra_files, extra)
+    phase = phase(ctx, "capture")
 
     case Snapshot.write(ctx.home, recipient, path, opts) do
-      {:ok, written} -> {:ok, %{"size" => written.size, "sha256" => written.sha256}}
-      {:error, reason} -> {:error, {:capture, reason}}
+      {:ok, written} ->
+        :ok = MoveTelemetry.phase_ended(phase, :done, {"captured", written.size})
+        {:ok, %{"size" => written.size, "sha256" => written.sha256}}
+
+      {:error, reason} ->
+        :ok = MoveTelemetry.phase_ended(phase, :failed, nil)
+        {:error, {:capture, reason}}
     end
   end
 
@@ -358,27 +475,63 @@ defmodule FermixChannels.Home.MoveWorker do
     end
   end
 
-  defp stream(ctx, rail, snapshot) do
+  defp stream(ctx, rail, snapshot, device_id) do
+    sending = fn -> send_snapshot(ctx, rail, snapshot, device_id) end
+
+    with :ok <- timed(ctx, "send", sending, snapshot.size),
+         :ok <- progress(ctx, :staging),
+         {:ok, %{"epoch" => epoch}} <-
+           timed(ctx, "staging", fn -> await(rail, "move_ready", @ready_ms) end, nil) do
+      {:ok, epoch}
+    end
+  end
+
+  # A source kept as a linked computer names its own device id, so the new
+  # primary names the home's own history notes for it (M97 §8.4).
+  defp send_snapshot(ctx, rail, snapshot, device_id) do
+    :ok = progress(ctx, :send, 0, snapshot.size)
     move_id = ctx.request["move_id"]
 
-    offer = %{
-      "move_id" => move_id,
-      "size_bytes" => snapshot.size,
-      "sha256" => snapshot.sha256,
-      "source_epoch" => ctx.request["source_epoch"],
-      "recovery_recipient" => ctx.request["recovery_recipient"],
-      "attempt" => ctx.attempt
-    }
+    offer =
+      %{
+        "move_id" => move_id,
+        "size_bytes" => snapshot.size,
+        "sha256" => snapshot.sha256,
+        "source_epoch" => ctx.request["source_epoch"],
+        "recovery_recipient" => ctx.request["recovery_recipient"],
+        "attempt" => ctx.attempt
+      }
+      |> put_device(device_id)
 
     with :ok <- Rail.send_event(rail, "move_offer", offer),
          {:ok, accept} <- await(rail, "move_accept", @accept_ms),
          :ok <- same_recipient(accept, ctx),
-         :ok <- send_file(rail, move_id, snapshot.path),
-         :ok <- Rail.send_event(rail, "move_end", %{"move_id" => move_id}),
-         {:ok, %{"epoch" => epoch}} <- await(rail, "move_ready", @ready_ms) do
-      {:ok, epoch}
+         :ok <- send_file(ctx, rail, snapshot) do
+      Rail.send_event(rail, "move_end", %{"move_id" => move_id})
     end
   end
+
+  defp put_device(offer, nil), do: offer
+  defp put_device(offer, device_id), do: Map.put(offer, "device_id", device_id)
+
+  # Runs one phase's step and logs its line once it answered: the bytes
+  # `sent` only when it did what it was for.
+  defp timed(ctx, name, step, sent) do
+    phase = phase(ctx, name)
+    result = step.()
+
+    case result do
+      {:error, _reason} ->
+        :ok = MoveTelemetry.phase_ended(phase, :failed, nil)
+
+      _done ->
+        :ok = MoveTelemetry.phase_ended(phase, :done, sent && {"sent", sent})
+    end
+
+    result
+  end
+
+  defp phase(ctx, name), do: MoveTelemetry.phase(:source, name, ctx.request["move_id"], ctx.clock)
 
   defp same_recipient(%{"recipient" => recipient}, ctx) do
     if Base.decode64(recipient) == {:ok, ctx.request["candidate"].recipient},
@@ -386,15 +539,17 @@ defmodule FermixChannels.Home.MoveWorker do
       else: {:error, {:refused, "move_mismatch", "the candidate's key changed; enroll it again"}}
   end
 
-  defp send_file(rail, move_id, path) do
-    File.open(path, [:read, :binary], fn io -> send_chunks(rail, move_id, io, 0) end)
+  defp send_file(ctx, rail, snapshot) do
+    count = %{index: 0, sent: 0, size: snapshot.size}
+
+    File.open(snapshot.path, [:read, :binary], fn io -> send_chunks(ctx, rail, io, count) end)
     |> case do
       {:ok, result} -> result
-      {:error, reason} -> {:error, {:file, path, reason}}
+      {:error, reason} -> {:error, {:file, snapshot.path, reason}}
     end
   end
 
-  defp send_chunks(rail, move_id, io, index) do
+  defp send_chunks(ctx, rail, io, count) do
     case IO.binread(io, @chunk_bytes) do
       :eof ->
         :ok
@@ -403,11 +558,22 @@ defmodule FermixChannels.Home.MoveWorker do
         {:error, {:read, reason}}
 
       bytes ->
-        payload = %{"move_id" => move_id, "index" => index}
+        payload = %{"move_id" => ctx.request["move_id"], "index" => count.index}
 
         with :ok <- Rail.send_event(rail, "move_chunk", payload, bytes),
-             do: send_chunks(rail, move_id, io, index + 1)
+             do: send_chunks(ctx, rail, io, sent(ctx, count, byte_size(bytes)))
     end
+  end
+
+  # A chunk handed to the rail is sent; the count is put at each whole 5% it
+  # crosses (`MoveProgress.crossed?/3`), never per chunk.
+  defp sent(ctx, count, bytes) do
+    now = count.sent + bytes
+
+    if MoveProgress.crossed?(count.sent, now, count.size),
+      do: :ok = progress(ctx, :send, now, count.size)
+
+    %{count | index: count.index + 1, sent: now}
   end
 
   # -- the commit -------------------------------------------------------------
@@ -424,21 +590,29 @@ defmodule FermixChannels.Home.MoveWorker do
     else
       {:error, reason} ->
         close_rail(rail)
-        abort(ctx, {:retire, reason}, "This home could not be marked moved (#{inspect(reason)}).")
+        Logger.error("move: this home could not be marked moved: #{inspect(reason)}")
+        abort(ctx, {:retire, reason}, Copy.summary_sentence(:undone_unmarked, %{}))
     end
   end
 
   defp retired(ctx, rail, desktop, epoch) do
     with :ok <- link(ctx, desktop.device_id, epoch),
+         :ok <- keep_offers(ctx),
          :ok <- record(ctx, "committing", %{"sentence" => nil}),
-         :ok <- Rail.send_event(rail, "move_commit", %{"move_id" => ctx.request["move_id"]}),
-         {:ok, %{"epoch" => done_epoch}} <- await(rail, "move_done", @done_ms) do
+         :ok <- progress(ctx, :commit),
+         {:ok, %{"epoch" => done_epoch}} <-
+           timed(ctx, "commit", fn -> send_commit(ctx, rail) end, nil) do
       done(ctx, done_epoch)
     else
       {:error, reason} ->
         close_rail(rail)
         resume_after(ctx, reason)
     end
+  end
+
+  defp send_commit(ctx, rail) do
+    with :ok <- Rail.send_event(rail, "move_commit", %{"move_id" => ctx.request["move_id"]}),
+         do: await(rail, "move_done", @done_ms)
   end
 
   defp resume_after(ctx, reason) do
@@ -468,20 +642,34 @@ defmodule FermixChannels.Home.MoveWorker do
 
   defp link(ctx, device_id, epoch) do
     with {:ok, identity} <- Identity.load(root: ctx.home),
-         {:ok, node_id} <- node_id(ctx.home) do
+         {:ok, node_id} <- node_id(ctx.home),
+         {:ok, store} <- key_store(ctx.home) do
       current = Relays.current()
 
       DesktopLink.write(ctx.home, %{
         device_id: device_id,
+        key: store,
         primary: %{
           name: name(ctx),
           gateway_pk: identity.gateway_public_key,
           node_id: node_id,
           relays: Relays.to_wire(current.relays),
-          relays_rev: current.id
+          relays_rev: current.id,
+          addrs: ctx.request["candidate"].addrs
         },
         epoch: epoch
       })
+    end
+  end
+
+  # The store the key went to, as the phase recorded it: the link records it
+  # from here on. A move an older Fermix began recorded none.
+  defp key_store(home) do
+    {:ok, phase} = Move.read_phase(home)
+
+    case recorded_key(phase) do
+      {:ok, store, _public} -> {:ok, store}
+      :none -> {:error, :no_key_recorded}
     end
   end
 
@@ -500,13 +688,25 @@ defmodule FermixChannels.Home.MoveWorker do
     epoch = phase["ready_epoch"]
 
     with :ok <- ensure_link(ctx, phase, epoch),
-         :ok <- record(ctx, "committing", %{}) do
+         :ok <- ensure_offers(ctx),
+         :ok <- record(ctx, "committing", %{}),
+         :ok <- progress(ctx, :commit) do
       deadline = System.monotonic_time(:millisecond) + ctx.resume_for_ms
       resume_loop(ctx, epoch, deadline, @first_resume_ms)
     else
+      {:error, {:switches, reason}} ->
+        Logger.error("move: this computer's switches could not be written: #{inspect(reason)}")
+
+        unconfirmed(
+          ctx,
+          "committing",
+          "What this computer keeps on for #{name(ctx)} could not be written to its " <>
+            "machine.toml; fix the file and restart Fermix."
+        )
+
       {:error, reason} ->
         Logger.error("move: the desktop link could not be written: #{inspect(reason)}")
-        unconfirmed(ctx, "committing", "The desktop link to #{name(ctx)} could not be written.")
+        unconfirmed(ctx, "committing", link_unwritten_sentence(name(ctx)))
     end
   end
 
@@ -514,6 +714,65 @@ defmodule FermixChannels.Home.MoveWorker do
     if File.regular?(DesktopLink.path(ctx.home)),
       do: :ok,
       else: link(ctx, phase["device_id"], epoch)
+  end
+
+  # What this computer keeps on for its server (M97 §7.3), as the move
+  # recorded it when it was accepted: written beside the link, before the
+  # server is told to commit, so a move undone leaves no switches. A source
+  # not kept as a desktop keeps nothing; a request written before the choice
+  # existed keeps the block as this engine proposes it.
+  defp keep_offers(ctx) do
+    if Move.keep_as_desktop?(ctx.request),
+      do: accept_offers(ctx),
+      else: :ok
+  end
+
+  defp accept_offers(ctx) do
+    case Consent.accept(ctx.home, kept_offers(ctx), ctx.consent_opts) do
+      :ok -> :ok
+      {:error, reason} -> {:error, {:switches, reason}}
+    end
+  end
+
+  defp kept_offers(ctx) do
+    case Move.keep_offers(ctx.request) do
+      nil -> Consent.default_keep(ctx.consent_opts)
+      offers -> known_offers(offers)
+    end
+  end
+
+  # A line this engine does not decide (a request a newer engine wrote) is
+  # left off and named in the log, and the move goes on. A request an engine
+  # before D27 wrote is read as a surface's is (`Consent.known/1`).
+  defp known_offers(offers) do
+    {known, unknown} = Consent.known(offers)
+
+    if unknown != [] do
+      Logger.warning(
+        "move: the request keeps offers this engine does not know, left off: " <>
+          Enum.map_join(unknown, ", ", &inspect/1)
+      )
+    end
+
+    known
+  end
+
+  # Resuming after the marker: a source kept as a desktop gets its switches
+  # once, unless the commit already wrote them and someone at this computer
+  # has changed them since. A source that is not kept is owed none, so its
+  # machine.toml is not read.
+  defp ensure_offers(ctx) do
+    if Move.keep_as_desktop?(ctx.request),
+      do: owed_offers(ctx),
+      else: :ok
+  end
+
+  defp owed_offers(ctx) do
+    case Switches.read(ctx.home) do
+      {:ok, []} -> accept_offers(ctx)
+      {:ok, _written} -> :ok
+      {:error, reason} -> {:error, {:switches, reason}}
+    end
   end
 
   defp resume_loop(ctx, epoch, deadline, pause_ms) do
@@ -564,8 +823,8 @@ defmodule FermixChannels.Home.MoveWorker do
   # the candidate activated: only it holds the gateway key and the epoch.
   defp probe_primary(ctx, epoch) do
     with {:ok, link} <- DesktopLink.read(ctx.home),
-         {:ok, keypair} <- DesktopLink.read_key(ctx.home),
-         route = Map.take(link.primary, [:node_id, :relays, :relays_rev]),
+         {:ok, keypair} <- ComputerKey.read(ctx.home, ctx.key_opts),
+         route = Map.take(link.primary, [:node_id, :relays, :relays_rev, :addrs]),
          {:ok, rail} <-
            rail_open(ctx, route, :ik,
              static_keypair: keypair,
@@ -596,28 +855,30 @@ defmodule FermixChannels.Home.MoveWorker do
     :exit, {reason, _call} when reason in [:noproc, :normal] -> :ok
   end
 
+  # Named as a computer's hello names them (`Protocol.hello_versions/0`).
   defp hello(device_id, epoch) do
-    %{
-      "device_id" => device_id,
-      "app_version" => BuildInfo.product_version(),
-      "last_server_seq" => 0,
-      "protocol_v" => Protocol.protocol_version(),
-      "primary_epoch" => epoch
-    }
+    Map.merge(
+      %{
+        "device_id" => device_id,
+        "app_version" => BuildInfo.product_version(),
+        "last_server_seq" => 0,
+        "primary_epoch" => epoch
+      },
+      Protocol.hello_versions()
+    )
   end
 
   # Whether this home retired cannot be told, so it neither sends nor undoes
-  # anything until the marker is readable again.
-  defp marker_sentence(reason),
-    do: "The moved marker could not be read (#{inspect(reason)}); fix it and restart Fermix."
+  # anything until the marker is readable again; why goes to the log.
+  defp marker_unread(ctx, phase, reason) do
+    Logger.error("move: the moved marker could not be read: #{inspect(reason)}")
+    unconfirmed(ctx, phase, Copy.summary_sentence(:move_marker_unread, %{}))
+  end
 
   # A request or phase file this worker cannot read: nothing is sent or undone
   # until it can be, and the phase says why.
   defp unreadable(ctx, reason) do
-    sentence =
-      "The move's own files could not be read; nothing was sent or undone, and Fermix " <>
-        "looks again when it restarts."
-
+    sentence = @unreadable_sentence
     Logger.error("move: #{sentence} (#{inspect(reason)})")
 
     case Move.read_phase(ctx.home) do
@@ -634,6 +895,12 @@ defmodule FermixChannels.Home.MoveWorker do
     Logger.error("move: #{sentence}")
     :ok
   end
+
+  defp attempts_spent_sentence(to), do: "The move to #{to} failed #{Move.max_attempts()} times."
+  defp link_unwritten_sentence(to), do: "The desktop link to #{to} could not be written."
+
+  defp key_sentence(reason),
+    do: "#{ComputerKey.error_sentence(reason)} Nothing moved; start the move again."
 
   # -- endings ----------------------------------------------------------------
 
@@ -666,7 +933,7 @@ defmodule FermixChannels.Home.MoveWorker do
   defp undo(ctx, reason, sentence) do
     {:ok, phase} = Move.read_phase(ctx.home)
     :ok = record(ctx, "aborting", %{"sentence" => sentence})
-    :ok = remove_desktop(ctx, phase["device_id"])
+    :ok = remove_desktop(ctx, phase)
     _ = File.rm(Move.snapshot_path(ctx.home, ctx.request["move_id"]))
     :ok = ConfigStore.put_engine_role(ctx.home, :primary)
     :ok = Move.remove_request(ctx.home)
@@ -684,15 +951,29 @@ defmodule FermixChannels.Home.MoveWorker do
     ctx.restart.()
   end
 
-  defp remove_desktop(ctx, device_id) do
-    with :ok <- remove_row(ctx.home, device_id) do
-      case File.rm(DesktopLink.key_path(ctx.home)) do
-        :ok -> :ok
-        {:error, :enoent} -> :ok
-        {:error, reason} -> {:error, {:file, DesktopLink.key_path(ctx.home), reason}}
+  # The row, then the key the phase recorded, and only if it is still that
+  # key (D13). A key the store will not delete now (a keyring that locked)
+  # is logged and left: the primary comes back regardless.
+  defp remove_desktop(ctx, phase) do
+    with :ok <- remove_row(ctx.home, phase["device_id"]) do
+      case forget_key(ctx, recorded_key(phase)) do
+        :ok ->
+          :ok
+
+        {:error, reason} ->
+          Logger.error(
+            "move: the desktop key was not deleted: #{ComputerKey.error_sentence(reason)}"
+          )
+
+          :ok
       end
     end
   end
+
+  defp forget_key(ctx, {:ok, store, public}),
+    do: ComputerKey.delete(ctx.home, store, [public: public] ++ ctx.key_opts)
+
+  defp forget_key(ctx, :none), do: ComputerKey.delete(ctx.home, nil, ctx.key_opts)
 
   defp remove_row(_home, nil), do: :ok
 
@@ -715,7 +996,8 @@ defmodule FermixChannels.Home.MoveWorker do
       route = %{
         node_id: candidate.node_id,
         relays: candidate.relays,
-        relays_rev: Relays.current().id
+        relays_rev: Relays.current().id,
+        addrs: candidate.addrs
       }
 
       rail_open(ctx, route, :ik_move, static_keypair: keypair, remote_static: candidate.noise_pk)
@@ -763,6 +1045,13 @@ defmodule FermixChannels.Home.MoveWorker do
     Move.put_phase(ctx.home, phase, fields, ctx.clock.())
   end
 
+  # The step this move is in, and its count while bytes move, where the
+  # Always On summary reads them.
+  defp progress(ctx, step, bytes \\ 0, size \\ nil) do
+    record = %{move_id: ctx.request["move_id"], step: step, bytes: bytes, size: size}
+    MoveProgress.put(ctx.progress, record)
+  end
+
   defp name(ctx), do: ctx.request["candidate"].name
 
   defp uuid do
@@ -775,8 +1064,8 @@ defmodule FermixChannels.Home.MoveWorker do
   end
 
   defp host_name do
-    {:ok, name} = :inet.gethostname()
-    name |> to_string() |> String.slice(0, 64)
+    {:ok, name} = ComputerName.read()
+    name
   end
 
   defp os do
@@ -784,6 +1073,14 @@ defmodule FermixChannels.Home.MoveWorker do
       {:unix, :darwin} -> "macOS"
       {:unix, :linux} -> "Linux"
       {_family, other} -> Atom.to_string(other)
+    end
+  end
+
+  # A computer row's `platform`: the two systems a computer runs Fermix on.
+  defp platform do
+    case :os.type() do
+      {:unix, :darwin} -> "macos"
+      {:unix, :linux} -> "linux"
     end
   end
 end

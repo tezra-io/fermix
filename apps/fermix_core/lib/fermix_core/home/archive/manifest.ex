@@ -4,9 +4,17 @@ defmodule FermixCore.Home.Archive.Manifest do
   how to check it.
 
       {"format": 1, "created_at": "…", "primary_epoch": 3, "engine_version": "…",
-       "home_root": "/home/operator/.fermix", "host": "macos-aarch64",
+       "home_format": 1, "home_root": "/home/operator/.fermix", "host": "macos-aarch64",
        "files": [{"path": "config.toml", "bytes": 812, "sha256": "…", "mode": 384}],
        "links": [{"path": "plugins/installed/notes/current", "target": "1.0.0"}]}
+
+  `format` is this manifest's own layout; `home_format` is the form of the
+  home it carries, which decides whether an engine reads it
+  (`FermixCore.Home.Readable`, M97 D16), and `engine_version` names the
+  engine that wrote it and decides nothing. An engine before home formats
+  wrote no `home_format`: such a manifest decodes with `home_format: nil`,
+  and `Home.Readable` says what that home is. A `home_format` that is not a
+  positive whole number is `{:invalid_manifest, {:home_format, value}}`.
 
   `home_root` is the absolute path the home had when it was archived, so a
   restore into another path can move the settings that named it, and `host` is
@@ -38,6 +46,7 @@ defmodule FermixCore.Home.Archive.Manifest do
   alias FermixCore.BuildInfo
   alias FermixCore.Home.DeviceLocal
   alias FermixCore.Home.Epoch
+  alias FermixCore.Home.Readable
 
   @format 1
   @max_files 100_000
@@ -57,6 +66,7 @@ defmodule FermixCore.Home.Archive.Manifest do
           created_at: DateTime.t(),
           primary_epoch: pos_integer(),
           engine_version: String.t(),
+          home_format: pos_integer() | nil,
           home_root: Path.t(),
           host: String.t(),
           files: [entry()],
@@ -80,8 +90,8 @@ defmodule FermixCore.Home.Archive.Manifest do
   def max_total_bytes, do: @max_total_bytes
 
   @doc """
-  A manifest for `files` and `links`, stamped now with this engine's version.
-  `header` names the home's `primary_epoch`, its `home_root` (absolute and
+  A manifest for `files` and `links`, stamped now with this engine's version
+  and home format. `header` names the home's `primary_epoch`, its `home_root` (absolute and
   normalized) and the `host` it was archived on, as the plugin installer names
   a target (`macos-aarch64`).
   """
@@ -98,6 +108,7 @@ defmodule FermixCore.Home.Archive.Manifest do
       created_at: DateTime.truncate(DateTime.utc_now(), :second),
       primary_epoch: epoch,
       engine_version: BuildInfo.product_version(),
+      home_format: Readable.home_format(),
       home_root: home_root,
       host: host,
       files: files,
@@ -107,12 +118,17 @@ defmodule FermixCore.Home.Archive.Manifest do
 
   @doc "The manifest as the JSON the archive carries."
   @spec encode(t()) :: binary()
-  def encode(%{format: @format, created_at: %DateTime{} = created_at} = manifest) do
+  def encode(
+        %{format: @format, created_at: %DateTime{} = created_at, home_format: home_format} =
+          manifest
+      )
+      when is_integer(home_format) and home_format >= 1 do
     Jason.encode!(%{
       "format" => @format,
       "created_at" => DateTime.to_iso8601(created_at),
       "primary_epoch" => manifest.primary_epoch,
       "engine_version" => manifest.engine_version,
+      "home_format" => home_format,
       "home_root" => manifest.home_root,
       "host" => manifest.host,
       "files" => Enum.map(manifest.files, &Map.take(&1, [:path, :bytes, :sha256, :mode])),
@@ -217,6 +233,7 @@ defmodule FermixCore.Home.Archive.Manifest do
       epoch > Epoch.max_epoch() -> {:error, {:invalid_manifest, {:primary_epoch, epoch}}}
       not absolute_root?(root) -> {:error, {:invalid_manifest, {:home_root, root}}}
       not host?(host) -> {:error, {:invalid_manifest, {:host, host}}}
+      not home_format?(map) -> {:error, {:invalid_manifest, {:home_format, map["home_format"]}}}
       true -> header_at(map, DateTime.from_iso8601(created_at))
     end
   end
@@ -231,6 +248,7 @@ defmodule FermixCore.Home.Archive.Manifest do
        created_at: at,
        primary_epoch: map["primary_epoch"],
        engine_version: map["engine_version"],
+       home_format: Map.get(map, "home_format"),
        home_root: map["home_root"],
        host: map["host"]
      }}
@@ -240,6 +258,15 @@ defmodule FermixCore.Home.Archive.Manifest do
     do: {:error, {:invalid_manifest, {:created_at, map["created_at"], other}}}
 
   defp host?(host), do: is_binary(host) and String.match?(host, ~r/\A[a-z0-9_]+-[a-z0-9_]+\z/)
+
+  # Absent is an engine's from before home formats; present, a positive
+  # whole number, never null.
+  defp home_format?(map) do
+    case Map.fetch(map, "home_format") do
+      :error -> true
+      {:ok, format} -> is_integer(format) and format >= 1
+    end
+  end
 
   # An absolute, already-normalized path: what `Path.expand/1` leaves as it is.
   defp absolute_root?(root) do

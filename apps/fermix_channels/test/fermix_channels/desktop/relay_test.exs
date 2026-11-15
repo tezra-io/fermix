@@ -13,10 +13,77 @@ defmodule FermixChannels.Desktop.RelayTest do
   alias FermixChannels.Desktop.Relay
   alias FermixChannels.Mobile.DeviceRegistry
   alias FermixChannels.Mobile.Protocol
+  alias FermixChannels.Mobile.Rail
   alias FermixChannels.Test.DesktopRail
+  alias FermixCore.Home.ComputerKey
   alias FermixCore.Home.DesktopLink
 
   @unreachable "The server fermix-vm is unreachable. Fermix keeps your message until it is back."
+
+  # The keychain as a locked login keyring answers it, until the test opens
+  # it; kept per profile, so each test's desktop home has its own. Reads and
+  # writes are the stub keychain's.
+  defmodule LockableKeychain do
+    @moduledoc false
+    @behaviour FermixCore.Setup.SecretWriter
+
+    alias FermixTestSupport.SecretWriterStub
+
+    def lock(profile), do: :persistent_term.put({__MODULE__, profile}, :locked)
+    def open(profile), do: :persistent_term.erase({__MODULE__, profile})
+
+    @impl true
+    def available?(_opts \\ []), do: true
+
+    @impl true
+    def probe(opts \\ []) do
+      case :persistent_term.get({__MODULE__, Keyword.fetch!(opts, :profile)}, :open) do
+        :locked ->
+          %{
+            store: Keyword.fetch!(opts, :store),
+            state: :locked,
+            sentence: "the login keyring is locked: unlock it"
+          }
+
+        :open ->
+          SecretWriterStub.probe(opts)
+      end
+    end
+
+    @impl true
+    def put(key, value, opts \\ []), do: SecretWriterStub.put(key, value, opts)
+
+    @impl true
+    def get(key, opts \\ []), do: SecretWriterStub.get(key, opts)
+
+    @impl true
+    def delete(key, opts \\ []), do: SecretWriterStub.delete(key, opts)
+
+    @impl true
+    def command_source(key, opts \\ []), do: SecretWriterStub.command_source(key, opts)
+  end
+
+  # A family of the primary that refuses each event it is handed with the
+  # next reason its Agent holds, which the session answers as `error{code}`.
+  defmodule RefusingFamily do
+    @moduledoc false
+    @behaviour FermixChannels.Desktop.Family
+
+    @impl true
+    def init(context), do: {:ok, Keyword.fetch!(context.options, :refusals)}
+
+    @impl true
+    def handle_event(_type, _fields, _payload, refusals) do
+      reason = Agent.get_and_update(refusals, fn [next | rest] -> {next, rest} end)
+      {:error, reason, refusals}
+    end
+
+    @impl true
+    def handle_info(_message, refusals), do: {:ok, refusals}
+
+    @impl true
+    def terminate(_reason, _refusals), do: :ok
+  end
 
   # A family of the primary, reporting each event the desktop sends it.
   defmodule CaptureFamily do
@@ -71,46 +138,35 @@ defmodule FermixChannels.Desktop.RelayTest do
     refute_received {:relay_emit, _status, _failures, _class}
   end
 
-  # M75 lean v1 §4.3: reaching the server one epoch above the one a replace's
-  # old server held is how this desktop sees the move to the new one done, so
-  # every session the relay opens says the primary's epoch.
-  test "every session it opens tells the Always On provisioner the primary's epoch" do
-    primary = DesktopRail.primary!(epoch: 6)
-    root = DesktopRail.desktop_home!(primary, epoch: 5)
-    relay = DesktopRail.start_relay!(root, primary)
+  # M97 §3.4: a computer says hello at its engine's newest phone-wire version
+  # and names its oldest, so a server a version either side serves it; this
+  # server serves the newest, as its own window holds it.
+  test "hello names this engine's newest version and its oldest, and the newest is served" do
+    test = self()
 
-    pid = GenServer.whereis(relay)
+    primary =
+      DesktopRail.primary!(
+        hello_ack_builder: fn state ->
+          send(test, {:served, state.negotiated_version})
+          {:ok, ack(3)}
+        end
+      )
 
-    DesktopRail.await_connected(relay)
-    assert_receive {:primary_reached, 6}, 10_000
+    write = fn rail, type, fields, bytes ->
+      send(test, {:relay_wrote, type, fields})
+      Rail.send_event(rail, type, fields, bytes)
+    end
 
-    :ok = drop_sessions(primary)
-    assert_receive {:scheduled, {:relay_timer, :reconnect, _token} = timer, 1_000}, 10_000
-    send(pid, timer)
-    DesktopRail.await_connected(relay)
-    assert_receive {:primary_reached, 6}, 10_000
-  end
+    root = DesktopRail.desktop_home!(primary)
+    relay = DesktopRail.start_relay!(root, primary, write: write)
+    {oldest, newest} = Protocol.supported_version_range()
 
-  # M75 lean v1 §4.3: once a replace's move is done the home lives on the new
-  # server, reached at the same node id, and the provisioner names it here.
-  test "the server's new name after a replace is kept and said from then on" do
-    primary = DesktopRail.primary!(epoch: 6)
-    root = DesktopRail.desktop_home!(primary, epoch: 5)
-    relay = DesktopRail.start_relay!(root, primary)
-    DesktopRail.await_connected(relay)
+    assert_receive {:relay_wrote, "hello",
+                    %{"protocol_v" => ^newest, "min_protocol_v" => ^oldest}},
+                   10_000
 
-    assert :ok = Relay.rename(relay, "fermix-general-5d2e")
-    assert {:ok, %{primary: %{name: "fermix-general-5d2e"}, epoch: 6}} = DesktopLink.read(root)
-
-    assert %{name: "fermix-general-5d2e", sentence: sentence} = Relay.status(relay)
-    assert sentence == "Fermix is connected to the server fermix-general-5d2e."
-
-    :ok = drop_sessions(primary)
-    assert_receive {:scheduled, {:relay_timer, :reconnect, _token}, 1_000}, 10_000
-
-    assert {:error, {:unreachable, unreachable}} = Relay.open_channel(relay)
-    assert unreachable =~ "The server fermix-general-5d2e is unreachable."
-    refute unreachable =~ "fermix-vm"
+    assert_receive {:served, ^newest}, 10_000
+    assert %{connected: true} = DesktopRail.await_connected(relay)
   end
 
   # A hello_ack that names no epoch never reaches the relay: the rail's codec
@@ -132,6 +188,39 @@ defmodule FermixChannels.Desktop.RelayTest do
                "computer has seen 6), so Fermix does not use it. Fermix tries again in 1 s."
 
     assert {:ok, %{epoch: 6}} = DesktopLink.read(root)
+  end
+
+  # tla/specs/computer_invoke: the relay and the invocations' Admission read
+  # one epoch, the file's. A newer one this computer cannot write is never
+  # held in memory alone: the session is not used, and it says why.
+  test "a newer epoch this computer cannot write is not used: refused, said, the file kept" do
+    test = self()
+    primary = DesktopRail.primary!(epoch: 5)
+    root = DesktopRail.desktop_home!(primary, epoch: 3)
+
+    refuse = fn _root, _link, epoch ->
+      send(test, {:recording, epoch})
+      {:error, {:file, Path.join(root, "device/desktop.json"), :enospc}}
+    end
+
+    log =
+      ExUnit.CaptureLog.capture_log(fn ->
+        relay = DesktopRail.start_relay!(root, primary, record_epoch: refuse)
+        assert_receive {:recording, 5}, 10_000
+        assert_receive {:scheduled, {:relay_timer, :reconnect, _token}, 1_000}, 10_000
+        assert_receive {:relay_emit, :degraded, 1, :epoch_not_kept}
+
+        assert %{connected: false, status: :unreachable, epoch: 3, sentence: sentence} =
+                 Relay.status(relay)
+
+        assert sentence ==
+                 "Fermix could not record that the server fermix-vm is a newer copy of this " <>
+                   "computer's home, so it does not use it: the link file could not be " <>
+                   "written (no space left on device). Fermix tries again in 1 s."
+      end)
+
+    assert log =~ "the primary epoch 5 was not kept"
+    assert {:ok, %{epoch: 3}} = DesktopLink.read(root)
   end
 
   test "a primary that refuses the epoch this desktop has seen is a stale primary too" do
@@ -263,6 +352,49 @@ defmodule FermixChannels.Desktop.RelayTest do
     assert_receive :status_changed, 10_000
   end
 
+  # Step 7: the session's path, direct or through the relay, from the dial's
+  # `dialed` and each `dial_path` after it; none while no session is up.
+  test "the path is the dial's, then each change; none while the session is down" do
+    primary = DesktopRail.primary!()
+    root = DesktopRail.desktop_home!(primary)
+    test = self()
+    real = DesktopRail.bridge_connect(primary.bridge_socket)
+
+    connect = fn ->
+      send(test, {:session, self()})
+
+      with {:ok, socket} <- real.(),
+           do: {:ok, socket, %{kind: :relay, relay: "https://relay.invalid/"}}
+    end
+
+    relay =
+      DesktopRail.start_relay!(root, primary,
+        connect: connect,
+        status_changed: fn ->
+          send(test, :status_changed)
+          :ok
+        end
+      )
+
+    assert_receive {:session, session}, 10_000
+    assert %{connected: true, path: :relay} = await_path(relay, :relay)
+    assert_receive :status_changed, 10_000
+
+    # Hole punching moved it off the relay: the summary an app draws moves.
+    send(session, {:iroh_dial, "d1", {:path, %{kind: :direct, relay: nil}}})
+    assert %{path: :direct} = await_path(relay, :direct)
+    assert_receive :status_changed, 10_000
+
+    # The same path again changes nothing.
+    send(session, {:iroh_dial, "d1", {:path, %{kind: :direct, relay: nil}}})
+    assert %{path: :direct} = Relay.status(relay)
+    refute_received :status_changed
+
+    :ok = drop_sessions(primary)
+    assert_receive {:scheduled, {:relay_timer, :reconnect, _token}, 1_000}, 10_000
+    assert %{connected: false, path: nil} = Relay.status(relay)
+  end
+
   # The status word is what an app draws: the first dial is quiet, and a
   # redial during an outage is still the outage until a session is up.
   test "the first dial is renewing, and a redial during an outage stays unreachable" do
@@ -342,6 +474,8 @@ defmodule FermixChannels.Desktop.RelayTest do
              {:error, :primary_unreachable, %{"primary" => "fermix-vm", "sentence" => revoked}}
 
     assert {:error, {:revoked, ^revoked}} = Relay.open_channel(relay)
+    # Kept in the link, so a new code joins again with Fermix stopped here.
+    assert {:ok, %{revoked: true}} = DesktopLink.read(root)
   end
 
   test "a desktop the primary does not know at the handshake is not tried again" do
@@ -354,6 +488,163 @@ defmodule FermixChannels.Desktop.RelayTest do
     refute_receive {:scheduled, {:relay_timer, :reconnect, _token}, _delay}, 200
     assert %{status: :revoked, sentence: sentence} = Relay.status(relay)
     assert sentence =~ "does not know this computer"
+    assert {:ok, %{revoked: true}} = DesktopLink.read(root)
+  end
+
+  # A server that knows this computer again (one restored from a newer
+  # snapshot) answers its next start: the link is no longer revoked, so no
+  # code takes it.
+  test "a session that comes up again clears what the link kept of a revocation" do
+    primary = DesktopRail.primary!()
+    root = DesktopRail.desktop_home!(primary)
+    {:ok, link} = DesktopLink.read(root)
+    path = DesktopLink.path(root)
+
+    File.write!(
+      path,
+      path |> File.read!() |> Jason.decode!() |> Map.put("revoked", true) |> Jason.encode!()
+    )
+
+    assert {:ok, %{revoked: true}} = DesktopLink.read(root)
+
+    relay = DesktopRail.start_relay!(root, primary)
+    DesktopRail.await_connected(relay)
+
+    assert {:ok, %{revoked: false, device_id: device_id}} = DesktopLink.read(root)
+    assert device_id == link.device_id
+  end
+
+  # The link is the one record of the server's word that it no longer knows
+  # this computer, which a join, the summary and a disconnect read there,
+  # Fermix running or stopped: the relay stops reaching the server only once
+  # the link keeps that word. One this computer cannot write is never held in
+  # memory alone: an outage, said, and tried again with the backoff.
+  test "a revocation this computer cannot record is an outage, said and tried again" do
+    test = self()
+    primary = DesktopRail.primary!()
+    Agent.update(primary.revoked, fn _ -> true end)
+    root = DesktopRail.desktop_home!(primary)
+
+    refuse = fn _root, _link, revoked? ->
+      send(test, {:recording_revoked, revoked?})
+      {:error, {:file, DesktopLink.path(root), :enospc}}
+    end
+
+    log =
+      ExUnit.CaptureLog.capture_log(fn ->
+        relay = DesktopRail.start_relay!(root, primary, record_revoked: refuse)
+        assert_receive {:recording_revoked, true}, 10_000
+        assert_receive {:scheduled, {:relay_timer, :reconnect, _token}, 1_000}, 10_000
+        assert_receive {:relay_emit, :degraded, 1, :revoked_not_kept}
+
+        assert %{connected: false, status: :unreachable, sentence: sentence} =
+                 Relay.status(relay)
+
+        assert sentence ==
+                 "The server fermix-vm does not know this computer, but Fermix could not " <>
+                   "record that here: the link file could not be written (no space left on " <>
+                   "device). Fermix tries again in 1 s."
+      end)
+
+    assert log =~ "the link's revoked mark was not set to true"
+    assert {:ok, %{revoked: false}} = DesktopLink.read(root)
+  end
+
+  # A server that knows this computer again is used only once the link no
+  # longer says it forgot this computer: a link that still said so would let
+  # a new code take it while its server serves it.
+  test "a session whose link cannot stop saying revoked is not used, said and tried again" do
+    test = self()
+    primary = DesktopRail.primary!()
+    root = DesktopRail.desktop_home!(primary)
+    revoked!(root)
+
+    refuse = fn _root, _link, revoked? ->
+      send(test, {:recording_revoked, revoked?})
+      {:error, {:file, DesktopLink.path(root), :enospc}}
+    end
+
+    log =
+      ExUnit.CaptureLog.capture_log(fn ->
+        relay = DesktopRail.start_relay!(root, primary, record_revoked: refuse)
+        assert_receive {:recording_revoked, false}, 10_000
+        assert_receive {:scheduled, {:relay_timer, :reconnect, _token}, 1_000}, 10_000
+        assert_receive {:relay_emit, :degraded, 1, :revoked_not_kept}
+
+        assert %{connected: false, status: :unreachable, sentence: sentence} =
+                 Relay.status(relay)
+
+        assert sentence ==
+                 "Fermix could not record that the server fermix-vm knows this computer " <>
+                   "again, so it does not use it: the link file could not be written (no " <>
+                   "space left on device). Fermix tries again in 1 s."
+      end)
+
+    assert log =~ "the link's revoked mark was not set to false"
+    assert {:ok, %{revoked: true}} = DesktopLink.read(root)
+  end
+
+  # A join with a new code lets go of a link its server revoked while Fermix
+  # runs (`Home.Unlink`): the relay stops for good first, so a session that
+  # comes up later never writes back the link this computer let go of.
+  test "a revoked link is released: nothing dials it or writes it again" do
+    test = self()
+    primary = DesktopRail.primary!()
+    root = DesktopRail.desktop_home!(primary)
+    revoked!(root)
+    {:ok, reach} = Agent.start_link(fn -> :down end)
+    real = DesktopRail.bridge_connect(primary.bridge_socket)
+
+    connect = fn ->
+      send(test, :dialed)
+      if Agent.get(reach, & &1) == :down, do: {:error, :econnrefused}, else: real.()
+    end
+
+    relay = DesktopRail.start_relay!(root, primary, connect: connect)
+    assert_receive :dialed, 10_000
+    assert_receive {:scheduled, {:relay_timer, :reconnect, _token} = timer, 1_000}, 10_000
+
+    assert Relay.release_link(relay, :revoked) == :ok
+
+    # The server knows this computer again, and the backoff runs out.
+    Agent.update(reach, fn _ -> :up end)
+    send(GenServer.whereis(relay), timer)
+
+    assert %{connected: false} = Relay.status(relay)
+    refute_receive :dialed, 200
+    assert {:ok, %{revoked: true}} = DesktopLink.read(root)
+  end
+
+  # A session that came up cleared the mark: its server knows this computer,
+  # so a join cannot take the link from it.
+  test "a link whose server knows this computer is not released for a join" do
+    primary = DesktopRail.primary!()
+    root = DesktopRail.desktop_home!(primary)
+    relay = DesktopRail.start_relay!(root, primary)
+    DesktopRail.await_connected(relay)
+
+    assert Relay.release_link(relay, :revoked) == {:error, :known}
+    assert %{connected: true} = Relay.status(relay)
+  end
+
+  # A disconnect lets go of the link whatever it says: the session ends, and
+  # nothing dials again.
+  test "a disconnect releases the link whatever it says" do
+    primary = DesktopRail.primary!()
+    root = DesktopRail.desktop_home!(primary)
+    relay = DesktopRail.start_relay!(root, primary)
+    DesktopRail.await_connected(relay)
+
+    assert Relay.release_link(relay, :any) == :ok
+    assert %{connected: false, status: :unreachable} = Relay.status(relay)
+
+    request = %{request_id: "r-1", protocol_version: 2, method: "cues.status", params: %{}}
+    assert {:error, :primary_unreachable, _details} = Relay.forward(relay, request)
+    refute_receive {:scheduled, {:relay_timer, :reconnect, _token}, _delay}, 200
+  end
+
+  test "no relay running has no link to release" do
+    assert Relay.release_link(:"desktop_rail_relay_none_#{System.unique_integer()}", :any) == :ok
   end
 
   test "a forwarded call is answered within 8 s, or within the deadline its caller asks" do
@@ -395,30 +686,110 @@ defmodule FermixChannels.Desktop.RelayTest do
     assert sentence =~ "it sent a message this computer could not read"
   end
 
-  test "a desktop key readable by others is refused by name, and nothing is dialed" do
+  # M97 D13: the key is in the secret store the link records; a relay that
+  # cannot have it says why, by name, and never dials.
+  test "a key the keychain does not hold is refused by name, and nothing is dialed" do
     primary = DesktopRail.primary!()
-    root = DesktopRail.desktop_home!(primary, key_mode: 0o644)
-    test = self()
-
-    relay =
-      DesktopRail.start_relay!(root, primary,
-        connect: fn ->
-          send(test, :dialed)
-          {:error, :econnrefused}
-        end
-      )
+    root = DesktopRail.desktop_home!(primary)
+    :ok = ComputerKey.delete(root, :keyring)
+    relay = DesktopRail.start_relay!(root, primary, connect: dialed_by_test())
 
     assert %{connected: false, status: :unreachable, name: "fermix-vm", sentence: sentence} =
              Relay.status(relay)
 
-    assert sentence ==
-             "The desktop key file is mode 0644, readable by others; Fermix uses it only at 0600."
+    assert sentence == "This computer's key is not in the keychain, so Fermix cannot use it."
 
     request = %{request_id: "r-1", protocol_version: 2, method: "settings.sections", params: %{}}
 
     assert {:error, :primary_unreachable, %{"sentence" => ^sentence}} =
              Relay.forward(relay, request)
 
+    refute_received :dialed
+    refute_received {:scheduled, {:relay_timer, :reload, _token}, _delay}
+  end
+
+  test "a key an older Fermix kept in a file moves into the keychain as the relay starts" do
+    primary = DesktopRail.primary!()
+    root = DesktopRail.desktop_home!(primary)
+    keep_key_in_file!(root, primary.desktop.private, 0o600)
+
+    relay = DesktopRail.start_relay!(root, primary)
+
+    assert %{connected: true} = DesktopRail.await_connected(relay)
+    assert {:ok, %{key: :keyring}} = DesktopLink.read(root)
+    refute File.exists?(Path.join(root, "device/desktop_key"))
+    assert ComputerKey.read(root) == {:ok, primary.desktop}
+  end
+
+  test "a key file the move cannot use is refused by name, and is never read instead" do
+    primary = DesktopRail.primary!()
+    root = DesktopRail.desktop_home!(primary)
+    keep_key_in_file!(root, primary.desktop.private, 0o644)
+
+    relay = DesktopRail.start_relay!(root, primary, connect: dialed_by_test())
+
+    assert %{connected: false, status: :unreachable, sentence: sentence} = Relay.status(relay)
+
+    assert sentence ==
+             "This computer's key file is mode 0644, readable by others; Fermix uses it " <>
+               "only at 0600."
+
+    refute_received :dialed
+    assert {:ok, %{key: nil}} = DesktopLink.read(root)
+  end
+
+  test "a locked keyring is refused by name, asked again on the backoff, and reached once open" do
+    primary = DesktopRail.primary!()
+    root = DesktopRail.desktop_home!(primary)
+    profile = Path.basename(root)
+    LockableKeychain.lock(profile)
+    on_exit(fn -> LockableKeychain.open(profile) end)
+
+    relay = DesktopRail.start_relay!(root, primary, key_opts: [impl: LockableKeychain])
+
+    assert %{connected: false, status: :unreachable, sentence: sentence} = Relay.status(relay)
+
+    assert sentence ==
+             "Fermix cannot use this computer's key: the login keyring is locked: unlock it. " <>
+               "Fermix tries again in 1 s."
+
+    assert_receive {:scheduled, {:relay_timer, :reload, _token} = second, 1_000}
+    send(relay, second)
+    assert_receive {:scheduled, {:relay_timer, :reload, _token} = third, 2_000}
+    assert %{sentence: later} = Relay.status(relay)
+    assert later =~ "Fermix tries again in 2 s."
+
+    LockableKeychain.open(profile)
+    send(relay, third)
+
+    assert %{connected: true} = DesktopRail.await_connected(relay)
+  end
+
+  test "a keyring still locked after ten asks is left refused, saying how to go on" do
+    primary = DesktopRail.primary!()
+    root = DesktopRail.desktop_home!(primary)
+    profile = Path.basename(root)
+    LockableKeychain.lock(profile)
+    on_exit(fn -> LockableKeychain.open(profile) end)
+
+    relay =
+      DesktopRail.start_relay!(root, primary,
+        key_opts: [impl: LockableKeychain],
+        connect: dialed_by_test()
+      )
+
+    for _ask <- 2..10 do
+      assert_receive {:scheduled, {:relay_timer, :reload, _token} = again, _delay}
+      send(relay, again)
+    end
+
+    assert %{connected: false, status: :unreachable, sentence: sentence} = Relay.status(relay)
+
+    assert sentence ==
+             "Fermix cannot use this computer's key: the login keyring is locked: unlock it. " <>
+               "Start Fermix again once it is unlocked."
+
+    refute_received {:scheduled, {:relay_timer, :reload, _token}, _delay}
     refute_received :dialed
   end
 
@@ -476,6 +847,159 @@ defmodule FermixChannels.Desktop.RelayTest do
     assert_receive {:hello_seen, %{relay_list_rev: "fedcba9876543210"}}, 10_000
   end
 
+  # Always On: the server's tailnet addresses at its fixed port, which its
+  # session tells each desktop, as `fermix-iroh` helpers dial them.
+  test "the hints each session gives are kept, and none kept when it gives none" do
+    hints = ["100.101.102.103:4033", "[fd7a:115c:a1e0::9]:4033"]
+    {:ok, given} = Agent.start_link(fn -> hints end)
+
+    route = %{
+      "kind" => "iroh",
+      "node_id" => DesktopRail.node_id(),
+      "relays" => [%{"url" => "https://relay.invalid/", "quic_port" => 7842}],
+      "relays_rev" => DesktopRail.relays_rev()
+    }
+
+    primary =
+      DesktopRail.primary!(
+        iroh_candidate: fn -> {:ok, route} end,
+        iroh_hints: fn -> Agent.get(given, & &1) end
+      )
+
+    root = DesktopRail.desktop_home!(primary)
+    relay = DesktopRail.start_relay!(root, primary)
+    DesktopRail.await_connected(relay)
+    assert {:ok, %{primary: %{addrs: ^hints}}} = DesktopLink.read(root)
+
+    # The server's Tailscale went away: the next session gives none.
+    Agent.update(given, fn _ -> [] end)
+    :ok = drop_sessions(primary)
+    assert_receive {:scheduled, {:relay_timer, :reconnect, _token} = timer, 1_000}, 10_000
+    send(GenServer.whereis(relay), timer)
+    DesktopRail.await_connected(relay)
+    DesktopRail.await_link(root, &(&1.primary.addrs == []))
+  end
+
+  # A server of another build, or a broken one, must not crash the relay at
+  # every connection: a route whose `addrs` is not a list of hints keeps its
+  # relays and drops its hints, said once.
+  test "hints that are not a list of hints are dropped with a warning, and the relay stays up" do
+    route = %{
+      "kind" => "iroh",
+      "node_id" => DesktopRail.node_id(),
+      "relays" => [%{"url" => "https://relay.invalid/", "quic_port" => 7842}],
+      "relays_rev" => DesktopRail.relays_rev(),
+      "addrs" => "100.64.0.1:4033"
+    }
+
+    primary =
+      DesktopRail.primary!(
+        hello_ack_builder: fn _state -> {:ok, Map.put(ack(3), "candidates", [route])} end
+      )
+
+    root = DesktopRail.desktop_home!(primary, addrs: ["100.101.102.103:4033"])
+
+    log =
+      ExUnit.CaptureLog.capture_log(fn ->
+        relay = DesktopRail.start_relay!(root, primary)
+        pid = GenServer.whereis(relay)
+        DesktopRail.await_connected(relay)
+        DesktopRail.await_link(root, &(&1.primary.addrs == []))
+        assert GenServer.whereis(relay) == pid
+      end)
+
+    assert log =~ "desktop relay: the primary's address hints were dropped"
+  end
+
+  # The same for the route itself: relays that are not a list, or a relay
+  # revision that is not text, refuse the route as the link refuses any
+  # relays or revision it cannot hold, keeping the route it has, said once.
+  test "a route whose relays are not a list is refused, the link and the relay kept" do
+    # A list of anything but relays is the link's own refusal, as before.
+    for relays <- ["https://relay-two.invalid/", :absent, ["https://relay-two.invalid/"]] do
+      assert refused_route(%{"relays" => relays}) =~
+               "desktop relay: the primary's route was not kept"
+    end
+  end
+
+  test "a route whose relay revision is not text is refused, the link and the relay kept" do
+    relays = [%{"url" => "https://relay-two.invalid/", "quic_port" => 7843}]
+
+    for rev <- [17, :absent, "not-a-revision"] do
+      assert refused_route(%{"relays" => relays, "relays_rev" => rev}) =~
+               "desktop relay: the primary's route was not kept"
+    end
+  end
+
+  # The primary's iroh route for this link's node with `fields` over it
+  # (`:absent` leaves a field out): the relay connects on the same pid and
+  # the link keeps the route it held. Answers the log.
+  defp refused_route(fields) do
+    route =
+      %{
+        "kind" => "iroh",
+        "node_id" => DesktopRail.node_id(),
+        "relays" => [%{"url" => "https://relay.invalid/", "quic_port" => 7842}],
+        "relays_rev" => "fedcba9876543210"
+      }
+      |> Map.merge(fields)
+      |> Map.reject(fn {_key, value} -> value == :absent end)
+
+    primary =
+      DesktopRail.primary!(
+        hello_ack_builder: fn _state -> {:ok, Map.put(ack(3), "candidates", [route])} end
+      )
+
+    root = DesktopRail.desktop_home!(primary)
+    {:ok, before} = DesktopLink.read(root)
+
+    log =
+      ExUnit.CaptureLog.capture_log(fn ->
+        relay = DesktopRail.start_relay!(root, primary)
+        pid = GenServer.whereis(relay)
+        DesktopRail.await_connected(relay)
+        assert GenServer.whereis(relay) == pid
+      end)
+
+    assert DesktopLink.read(root) == {:ok, before}
+    log
+  end
+
+  # The dial-only helper starts beside the relay: a session opened while the
+  # engine starts waits for it, so the start is no outage and says nothing.
+  test "the first dial waits for the helper to start, with no outage meanwhile" do
+    primary = DesktopRail.primary!()
+    root = DesktopRail.desktop_home!(primary)
+    File.mkdir_p!(Path.join(root, "mobile"))
+    File.chmod!(Path.join(root, "mobile"), 0o700)
+    socket = Path.join([root, "mobile", "d1.sock"])
+    spy = start_supervised!({DesktopRail.StartingSpy, {self(), socket}})
+
+    relay = DesktopRail.start_relay!(root, primary, connect: nil, helper: spy)
+    assert_receive :awaited, 10_000
+
+    assert %{status: :renewing} = Relay.status(relay)
+    refute_received {:relay_emit, :degraded, _failures, _class}
+    refute_received {:scheduled, {:relay_timer, :reconnect, _token}, _delay}
+
+    DesktopRail.StartingSpy.ready(spy)
+    assert_receive {:dial_op, %{"op" => "dial"}}, 10_000
+  end
+
+  test "every dial names the hints the link holds" do
+    primary = DesktopRail.primary!()
+    hints = ["100.101.102.103:4033"]
+    root = DesktopRail.desktop_home!(primary, addrs: hints)
+    File.mkdir_p!(Path.join(root, "mobile"))
+    File.chmod!(Path.join(root, "mobile"), 0o700)
+
+    spy =
+      start_supervised!({DesktopRail.DialSpy, {self(), Path.join([root, "mobile", "d1.sock"])}})
+
+    _relay = DesktopRail.start_relay!(root, primary, connect: nil, helper: spy)
+    assert_receive {:dial_op, %{"op" => "dial", "addrs" => ^hints}}, 10_000
+  end
+
   test "the primary's media bound is taken up to this desktop's own 64 MiB, never past it" do
     huge = %{"commands" => [], "max_media_bytes" => 1_152_921_504_606_846_976}
 
@@ -488,6 +1012,29 @@ defmodule FermixChannels.Desktop.RelayTest do
     relay = DesktopRail.start_relay!(root, primary)
     DesktopRail.await_connected(relay)
     assert :sys.get_state(relay).max_media_bytes == 67_108_864
+  end
+
+  # M97 §9.3: the server's refusal of an upload names no upload, so the ones
+  # only an upload is refused with go to this computer's uploads, which send
+  # one at a time; a refusal any event can draw (`invalid_field`,
+  # `missing_field`, `request_failed`) is never taken for the upload's.
+  test "only the refusals an upload alone draws go to the uploads" do
+    refusals =
+      start_supervised!(
+        {Agent,
+         fn -> [{:invalid_field, :path}, :missing_field, {:no_word, :here}, :unknown_upload] end}
+      )
+
+    primary = DesktopRail.primary!(families: %{computer: {RefusingFamily, refusals: refusals}})
+    root = DesktopRail.desktop_home!(primary)
+    relay = DesktopRail.start_relay!(root, primary, families: %{attach: self()})
+    DesktopRail.await_connected(relay)
+
+    for _refused <- 1..4,
+        do: :ok = Relay.send_event(relay, %{"t" => "link_path", "path" => "direct"})
+
+    assert_receive {:"$gen_cast", {:answer, "error", %{"code" => "unknown_upload"}}}, 10_000
+    refute_received {:"$gen_cast", {:answer, "error", %{"code" => _other}}}
   end
 
   describe "the move's forwarded calls" do
@@ -554,6 +1101,26 @@ defmodule FermixChannels.Desktop.RelayTest do
     end
   end
 
+  # M97 D28c: the server restarts right after it answers Restart <server>,
+  # so an answer lost to its own restart is unconfirmed, never a failure.
+  test "a restart whose answer is lost is unconfirmed" do
+    primary = DesktopRail.primary!(families: %{manage: {CaptureFamily, test: self()}})
+    root = DesktopRail.desktop_home!(primary)
+    relay = DesktopRail.start_relay!(root, primary)
+    DesktopRail.await_connected(relay)
+    restart = %{request_id: "r-1", protocol_version: 2, method: "home.restart", params: %{}}
+
+    call = Task.async(fn -> Relay.forward(relay, restart) end)
+    assert_receive {:primary_got, "manage", %{"method" => "home.restart"}, _params}, 10_000
+    :ok = drop_sessions(primary)
+
+    assert {:error, :unconfirmed,
+            %{"method" => "home.restart", "primary" => "fermix-vm", "sentence" => sentence}} =
+             Task.await(call, 10_000)
+
+    assert sentence =~ "was asked to restart"
+  end
+
   describe "a primary that ends every session normally" do
     test "is renewed quietly once, then redialed with the backoff, and the posture says so" do
       primary = DesktopRail.primary!()
@@ -603,6 +1170,23 @@ defmodule FermixChannels.Desktop.RelayTest do
 
   # The primary's side of every bridge connection stops, as a stopping daemon's
   # does: each session hears `1000` and ends.
+  # The relay announces no path; its status is read until it names `path`,
+  # within 10 s.
+  defp await_path(relay, path, attempts \\ 1_000) do
+    case Relay.status(relay) do
+      %{connected: true, path: ^path} = status ->
+        status
+
+      status when attempts == 0 ->
+        flunk("the relay never ran #{path}: #{inspect(status)}")
+
+      _other ->
+        # sleep: polls the relay's status, which announces no path
+        Process.sleep(10)
+        await_path(relay, path, attempts - 1)
+    end
+  end
+
   defp drop_sessions(primary) do
     for {_id, pid, _type, _modules} <- DynamicSupervisor.which_children(primary.connections),
         is_pid(pid),
@@ -625,5 +1209,34 @@ defmodule FermixChannels.Desktop.RelayTest do
       "caps" => %{"commands" => [], "max_media_bytes" => 20_971_520}
     }
     |> Map.put("primary_epoch", epoch)
+  end
+
+  # The link as the relay leaves it once its server ended a session as one
+  # that no longer knows this computer (`DesktopLink`'s `revoked`).
+  defp revoked!(root) do
+    path = DesktopLink.path(root)
+    link = path |> File.read!() |> Jason.decode!() |> Map.put("revoked", true)
+    File.write!(path, Jason.encode!(link))
+  end
+
+  defp dialed_by_test do
+    test = self()
+
+    fn ->
+      send(test, :dialed)
+      {:error, :econnrefused}
+    end
+  end
+
+  # The desktop home as an engine before the key moved left it: a version 1
+  # link and the key in its own file, the keychain holding none.
+  defp keep_key_in_file!(root, private, mode) do
+    :ok = ComputerKey.delete(root, :keyring)
+    path = DesktopLink.path(root)
+    link = path |> File.read!() |> Jason.decode!() |> Map.delete("key") |> Map.put("v", 1)
+    File.write!(path, Jason.encode!(link))
+    file = Path.join(root, "device/desktop_key")
+    File.write!(file, private)
+    File.chmod!(file, mode)
   end
 end

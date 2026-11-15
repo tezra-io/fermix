@@ -182,7 +182,8 @@ class TurnView:
     @classmethod
     def build(cls, trace: dict, spans: list[dict],
               elapsed_ms: float | None = None,
-              require_duration: bool = True) -> "TurnView":
+              require_duration: bool = True,
+              require_tokens: bool = True) -> "TurnView":
         tool_spans = sorted(
             [s for s in spans if s.get("type") == "tool"],
             key=lambda s: parse_ts(s.get("start_time")) or datetime.min.replace(tzinfo=timezone.utc),
@@ -220,7 +221,7 @@ class TurnView:
         if not trace_complete and not issues:
             issues.append("trace was not proven settled by OpikClient.await_complete")
         issues.extend(_metric_issues(
-            cost_ok, duration_ok, tokens_ok, iterations_ok, require_duration))
+            cost_ok, duration_ok, tokens_ok, iterations_ok, require_duration, require_tokens))
         return cls(
             reply=text_of(trace.get("output")),
             cost=cost,
@@ -283,7 +284,8 @@ def _duration_metric(elapsed_ms: float | None) -> tuple[float, bool, str]:
 
 
 def _metric_issues(cost_ok: bool, duration_ok: bool, tokens_ok: bool,
-                   iterations_ok: bool, require_duration: bool = True) -> list[str]:
+                   iterations_ok: bool, require_duration: bool = True,
+                   require_tokens: bool = True) -> list[str]:
     # Cost and iterations are exporter/provider-dependent: an OAuth or not-yet-priced
     # model reports no cost (Opik owns pricing), and some paths emit no iteration
     # count. They are reported when present but never gate gradability — a settled
@@ -291,7 +293,7 @@ def _metric_issues(cost_ok: bool, duration_ok: bool, tokens_ok: bool,
     del cost_ok, iterations_ok
     checks = (
         (duration_ok or not require_duration, "duration missing or invalid"),
-        (tokens_ok, "usage.total_tokens missing or invalid"),
+        (tokens_ok or not require_tokens, "usage.total_tokens missing or invalid"),
     )
     return [detail for ok, detail in checks if not ok]
 
@@ -326,11 +328,14 @@ def _first_start(view: TurnView, name: str) -> datetime | None:
 
 # Which decisions each enforcing source stamps (docs/TELEMETRY_CONTRACT.md,
 # "Proving a policy denial"). The access gate holds a call for the owner's
-# confirmation or refuses it; either way its executor never ran.
+# confirmation or refuses it; either way its executor never ran. `computers`
+# is the home refusing a call that names one of its computers before anything
+# is sent (away, no such computer, not offered): it ran nowhere.
 _PRE_EXECUTION_DECISIONS = {
     "sandbox": {"deny", "hardline"},
     "netguard": {"deny", "hardline"},
     "access_gate": {"confirm", "deny"},
+    "computers": {"deny"},
 }
 
 
@@ -377,13 +382,27 @@ def _tool_inputs_text(view: TurnView) -> str:
     return json.dumps(inputs, ensure_ascii=False, sort_keys=True, default=str)
 
 
+def _tool_outputs_text(view: TurnView) -> str:
+    outputs = [span.get("output") for span in view.tool_spans]
+    return json.dumps(outputs, ensure_ascii=False, sort_keys=True, default=str)
+
+
+def _tool_evidence_text(view: TurnView) -> str:
+    """Every tool span's input and output, serialized the way the inputs are, so
+    one pattern style reads both (quotes inside a recorded text come out `\\"`)."""
+    evidence = [{"i": span.get("input"), "o": span.get("output")} for span in view.tool_spans]
+    return json.dumps(evidence, ensure_ascii=False, sort_keys=True, default=str)
+
+
 def grade(trace: dict, spans: list[dict], expect: dict,
           elapsed_ms: float | None = None,
           require_duration: bool = True,
           fixture_state: dict | None = None,
-          workspace_paths: dict | None = None) -> list[GateResult]:
+          workspace_paths: dict | None = None,
+          require_tokens: bool = True) -> list[GateResult]:
     v = TurnView.build(
-        trace, spans, elapsed_ms=elapsed_ms, require_duration=require_duration)
+        trace, spans, elapsed_ms=elapsed_ms, require_duration=require_duration,
+        require_tokens=require_tokens)
     out: list[GateResult] = []
 
     def add(key, passed, detail, conclusive=True):
@@ -446,6 +465,25 @@ def grade(trace: dict, spans: list[dict], expect: dict,
         missing = [pattern for pattern in patterns if re.search(pattern, inputs_text) is None]
         add("tool_inputs_match_all", not missing,
             f"all input patterns present; missing={missing or 'none'}")
+
+    if "tool_outputs_match_all" in expect:
+        # What the tools themselves said came of the turn's calls, such as a
+        # trip's answer naming a stop placed: a positive floor on the outputs
+        # alone, so a call that only asked for it never passes.
+        patterns = expect["tool_outputs_match_all"]
+        outputs_text = _tool_outputs_text(v)
+        missing = [pattern for pattern in patterns if re.search(pattern, outputs_text) is None]
+        add("tool_outputs_match_all", not missing,
+            f"all output patterns present; missing={missing or 'none'}")
+
+    if "tool_evidence_match_none" in expect:
+        # A ban on an action, read from the tools' own record of it: an input that
+        # asked for it or an answer that says it was done. Conclusive, so sticky.
+        patterns = expect["tool_evidence_match_none"]
+        evidence_text = _tool_evidence_text(v)
+        matched = [pattern for pattern in patterns if re.search(pattern, evidence_text)]
+        add("tool_evidence_match_none", not matched,
+            f"no tool input or output matches; matched={matched or 'none'}")
 
     if "min_subagent_spawns" in expect:
         n = expect["min_subagent_spawns"]

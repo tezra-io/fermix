@@ -10,9 +10,15 @@ defmodule FermixCore.AgentLoopTest do
   alias FermixCore.Capabilities.Capability
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
   alias FermixCore.Capabilities.UntrustedContent
+  alias FermixCore.Checklists.Registry, as: ChecklistRegistry
+  alias FermixCore.Memory.Repo, as: MemoryRepo
   alias FermixCore.Providers.Error, as: ProviderError
   alias FermixCore.Providers.OpenAI.ChatCompletions
+  alias FermixCore.ReplyBlocks
+  alias FermixCore.Tools.ChecklistEdit
   alias FermixCore.Tools.Telemetry, as: ToolsTelemetry
+  alias FermixCore.Tools.TripRead
+  alias FermixCore.Trips.Registry, as: TripRegistry
 
   # -- Mock adapter --
 
@@ -1498,6 +1504,85 @@ defmodule FermixCore.AgentLoopTest do
 
       assert_received {:tool_exec, _,
                        %{tool: "tesla_unlock_doors", access_gate: "refused_cue_run"}}
+    end
+
+    # The owner's private turn over a store of its own, with a trip whose stop
+    # was added after outside content and a list.
+    defp kept_owner_turn(chat_id) do
+      unique = System.unique_integer([:positive])
+      db_path = Path.join(System.tmp_dir!(), "fermix-loop-kept-#{unique}.db")
+      repo = :"loop_kept_repo_#{unique}"
+      start_supervised!({MemoryRepo, name: repo, enabled: true, database_path: db_path}, id: repo)
+      holder = start_supervised!(Supervisor.child_spec({ReplyBlocks, name: nil}, id: :holder))
+
+      on_exit(fn ->
+        Enum.each([db_path, "#{db_path}-wal", "#{db_path}-shm"], &FermixTestSupport.SafeRm.rm/1)
+      end)
+
+      owner = %{
+        agent_name: "main",
+        conversation_key: {"telegram", chat_id, :root},
+        session_id: "#{chat_id}-#{unique}",
+        source_trust: :operator,
+        computer_use_origin: :interactive,
+        chat_type: "private",
+        memory_repo: repo,
+        reply_blocks: holder,
+        outside_sources: MapSet.new()
+      }
+
+      tainted = %{owner | outside_sources: MapSet.new([{:tool, "web_fetch"}])}
+
+      {:ok, _} =
+        TripRegistry.edit(%{"trip" => "Varonne", "ops" => [%{"op" => "create"}]}, owner,
+          repo: repo
+        )
+
+      stop = [%{"op" => "add", "text" => "Night market", "day" => 1}]
+      {:ok, _} = TripRegistry.edit(%{"trip" => "Varonne", "ops" => stop}, tainted, repo: repo)
+      row = [%{"op" => "create"}, %{"op" => "add", "text" => "Sandals"}]
+
+      {:ok, _} =
+        ChecklistRegistry.edit(%{"changes" => [%{"list" => "Packing", "ops" => row}]}, owner,
+          repo: repo
+        )
+
+      owner
+    end
+
+    # D9: a trip tool's answer is not outside content. A read that shows a stop
+    # written after outside content labels it and records no source, so a later
+    # step of the same turn still renames a list, a change the lists refuse
+    # after outside content.
+    test "a trip read that shows a stamped stop leaves the turn clean for a list's rename" do
+      rename = [%{"list" => "Packing", "ops" => [%{"op" => "rename", "text" => "Beach bag"}]}]
+
+      set_mock_responses([
+        turn("", tool_calls: [tool_call("c1", "trip_read", %{"trip" => "Varonne"})]),
+        turn("",
+          tool_calls: [
+            tool_call("c2", "checklist_edit", %{"changes" => rename}),
+            tool_call("c3", "probe", %{})
+          ]
+        ),
+        turn("Done")
+      ])
+
+      capabilities = [
+        BuiltinCapability.from_tool_module(TripRead),
+        BuiltinCapability.from_tool_module(ChecklistEdit)
+        | taint_caps()
+      ]
+
+      assert {:ok, _result} =
+               run_loop(capabilities: capabilities, context: kept_owner_turn("loop-kept"))
+
+      [{_read_state, [read], _}, {_edit_state, [renamed, _probe], _}] = mock_continues()
+      assert read.output =~ ~s{(added after outside content) "Night market"}
+      refute renamed.output =~ "read nothing from outside"
+      assert renamed.output =~ "Beach bag"
+      assert_received {:sources, sources}
+      assert sources == MapSet.new()
     end
   end
 

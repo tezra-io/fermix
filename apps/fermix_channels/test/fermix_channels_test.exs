@@ -239,6 +239,38 @@ defmodule FermixChannelsTest do
     end
   end
 
+  # M97 F8: only the primary starts transports (`Home.Role`), so a computer
+  # that joined a home, whose readiness judges none of them, says no refusal
+  # of one at boot.
+  describe "startup refusal logs by role" do
+    setup do
+      previous_telegram = Application.get_env(:fermix_channels, :telegram, [])
+      Application.put_env(:fermix_channels, :telegram, enabled: true)
+      on_exit(fn -> Application.put_env(:fermix_channels, :telegram, previous_telegram) end)
+      :ok
+    end
+
+    test "a computer that joined a home says none of the primary's refusals" do
+      log =
+        capture_log(fn ->
+          FermixChannels.Application.log_refusals(@ready, :device, macos?: false)
+        end)
+
+      refute log =~ "ingress is enabled"
+      refute log =~ "helper it needs is not installed"
+    end
+
+    test "the primary still says them" do
+      log =
+        capture_log(fn ->
+          FermixChannels.Application.log_refusals(@ready, :primary, macos?: false)
+        end)
+
+      assert log =~
+               "telegram ingress is enabled but no owner_user_id or allowed_*_ids list is set"
+    end
+  end
+
   # MILESTONE_54 §14: iMessage on without Fermix Messages on disk is a named
   # refusal at boot, not a failed channels application.
   describe "missing-helper startup logs" do

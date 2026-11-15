@@ -534,6 +534,7 @@ defmodule FermixCore.Providers.Anthropic.MessagesTest do
             "claude-opus-5",
             "claude-opus-4-8",
             "claude-fable-5-1",
+            "claude-fable-5-2",
             "claude-haiku-5-5"
           ] do
         assert {:ok, _turn} =
@@ -602,6 +603,7 @@ defmodule FermixCore.Providers.Anthropic.MessagesTest do
             "claude-opus-5",
             "claude-fable-5",
             "claude-fable-5-1",
+            "claude-fable-5-2",
             "claude-haiku-5-5"
           ] do
         assert {:ok, _turn} =

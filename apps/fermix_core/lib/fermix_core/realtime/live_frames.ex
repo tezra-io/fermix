@@ -24,6 +24,8 @@ defmodule FermixCore.Realtime.LiveFrames do
   @task_statuses ~w(pending running completed failed cancelled)
   @speakers ~w(user assistant)
   @conversations ~w(chat private)
+  # Why the daemon ended a call itself (v5, M96): a normal end, never a failure.
+  @end_reasons [:goodbye]
 
   # The wire's own bound on `task.summary`.
   @summary_max_chars 240
@@ -159,6 +161,15 @@ defmodule FermixCore.Realtime.LiveFrames do
     |> Map.put(:call_uuid, call_uuid)
     |> put_status(status)
   end
+
+  @doc """
+  The daemon ended the call itself, normally (v5, M96 §6): the owner said
+  goodbye. A companion treats it as its own hang-up: no error, and the
+  connection stays open for a fresh call.
+  """
+  @spec call_ended(atom()) :: map()
+  def call_ended(reason) when reason in @end_reasons,
+    do: %{type: "call_ended", reason: Atom.to_string(reason)}
 
   @doc """
   A terminal failure the companion should show.

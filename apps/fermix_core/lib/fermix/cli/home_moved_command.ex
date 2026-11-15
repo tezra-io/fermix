@@ -142,7 +142,9 @@ defmodule Fermix.CLI.HomeMovedCommand do
   defp code(reason), do: {:mark_moved_failed, output: describe(reason)}
 
   defp describe({:daemon_probe_failed, reason}),
-    do: "could not tell whether Fermix is running (#{probe_error(reason)})"
+    do:
+      "could not tell whether Fermix is running (#{probe_error(reason)}); make sure it is " <>
+        "stopped, then mark it moved again"
 
   defp describe({:invalid_epoch, file, _excerpt}),
     do: "the primary epoch at #{file} is not one Fermix wrote"

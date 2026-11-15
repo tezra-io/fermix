@@ -23,7 +23,12 @@ defmodule FermixCore.Capabilities.AccessGate do
   (`metadata.host_command_confined?` false: the `codex` and `claude_code`
   presets, and the coding runs, whose vendor CLI acts with the owner's account
   authority outside the sandbox), so those are decided on every platform. A
-  confined call on macOS is not decided here, as `shell` is not.
+  confined call on macOS is not decided here, as `shell` is not. A call that
+  runs on one of the home's computers (`Computers.Choice`, M97 §6.4) is decided
+  with that computer's system, never this host's: a confined command on a Mac
+  runs, and every command on a Linux computer waits for the owner's confirm,
+  whose prompt names the computer. That confirm is a yes to one call inside
+  what that computer allows, never a widening of it.
 
   `Capability.execute/3` — the single invoke boundary for the agent loop and the
   realtime voice bridge — asks `admit/3` first, and every other capability
@@ -107,6 +112,7 @@ defmodule FermixCore.Capabilities.AccessGate do
   alias FermixCore.Capabilities.Capability
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
   alias FermixCore.Capabilities.UntrustedContent
+  alias FermixCore.Computers.Computer
   alias FermixCore.Cues.MandateGate
   alias FermixCore.Harness.Authorization
   alias FermixCore.Harness.Ledger
@@ -121,6 +127,8 @@ defmodule FermixCore.Capabilities.AccessGate do
   alias FermixCore.Tools.Telemetry, as: ToolTelemetry
 
   @max_args_chars 300
+  # A computer's system as `OsSandbox`'s platform seam names it.
+  @computer_os %{macos: {:unix, :darwin}, linux: {:unix, :linux}}
   # What the owner is shown of a host command (`shown_command/1`: the command or
   # a coding run's task, every other argument a coding run hands its vendor CLI,
   # the folder) past this is not shown; the call is refused rather than parked on
@@ -762,7 +770,13 @@ defmodule FermixCore.Capabilities.AccessGate do
     do: Map.get(metadata, :host_command_confined?, true)
 
   # The platform seam `OsSandbox` reads; tests inject `os: {:unix, :linux}` or
-  # `{:unix, :darwin}` here so the host the suite runs on never decides.
+  # `{:unix, :darwin}` here so the host the suite runs on never decides. A call
+  # that runs on one of the home's computers (`Computers.Choice`) is decided by
+  # that computer's system (M97 §6.4): Seatbelt holds a command on a Mac, and
+  # one whose system the home does not know is not taken to be held.
+  defp os_opts(%{computer: %Computer{platform: platform}}),
+    do: [os: Map.get(@computer_os, platform, :unknown)]
+
   defp os_opts(context), do: Map.get(context, :os_sandbox, [])
 
   # Every job run carries its `trigger`; only a cue run's is "cue".
@@ -1263,7 +1277,7 @@ defmodule FermixCore.Capabilities.AccessGate do
   # shows everything that will run, verbatim (`shown_command/1`).
   defp owner_prompt(%{capability: %{metadata: %{host_command?: true}} = capability} = call) do
     [
-      "Confirm #{capability.name}? " <> prompt_head(capability),
+      "Confirm #{capability.name}? " <> prompt_head(capability, call.context),
       shown_command(call),
       "Asked because #{reason_phrase(call)}."
     ]
@@ -1278,10 +1292,13 @@ defmodule FermixCore.Capabilities.AccessGate do
     """
   end
 
-  defp prompt_head(%Capability{metadata: %{coding_run?: true}}),
+  defp prompt_head(%Capability{}, %{computer: %Computer{name: name}}),
+    do: "It runs a command on #{name}, which Fermix cannot sandbox there."
+
+  defp prompt_head(%Capability{metadata: %{coding_run?: true}}, _context),
     do: "It starts a coding agent on this computer, outside Fermix's sandbox, with your access."
 
-  defp prompt_head(%Capability{}),
+  defp prompt_head(%Capability{}, _context),
     do: "It runs a command on this computer, which Fermix cannot sandbox here."
 
   defp command_label(%Capability{metadata: %{coding_run?: true}}), do: "Task"
@@ -1307,6 +1324,7 @@ defmodule FermixCore.Capabilities.AccessGate do
   # `@max_command_chars`, measured on this whole text.
   defp shown_command(%{capability: capability, args: args, context: context}) do
     [{command_label(capability), command_text(capability, args)}]
+    |> Kernel.++(computer_line(context))
     |> Kernel.++(argument_lines(capability, args))
     |> Kernel.++(folder_line(command_folder(capability, args, context)))
     |> Enum.map_join("\n", fn {label, value} ->
@@ -1343,6 +1361,10 @@ defmodule FermixCore.Capabilities.AccessGate do
   # Where a host command runs, when the call or the turn says: `shell`'s
   # `working_dir`, else the turn's folder; `git_write`'s `repo`; a coding run's
   # `cwd`.
+  # On a computer the turn's folder is the server's, so only the call's own.
+  defp command_folder(%Capability{name: "shell"}, args, %{computer: %Computer{}}),
+    do: Map.get(args, "working_dir")
+
   defp command_folder(%Capability{name: "shell"}, args, context),
     do: Map.get(args, "working_dir") || Map.get(context, :cwd)
 
@@ -1352,6 +1374,10 @@ defmodule FermixCore.Capabilities.AccessGate do
     do: Map.get(args, "cwd")
 
   defp command_folder(%Capability{}, _args, _context), do: nil
+
+  # The computer a command runs on (M97 §6.4), named on a line of its own.
+  defp computer_line(%{computer: %Computer{name: name}}), do: [{"Computer", name}]
+  defp computer_line(_context), do: []
 
   defp folder_line(folder) when is_binary(folder), do: [{"Folder", folder}]
   defp folder_line(_none), do: []

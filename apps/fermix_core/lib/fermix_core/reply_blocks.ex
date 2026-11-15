@@ -5,12 +5,27 @@ defmodule FermixCore.ReplyBlocks do
   text makes of them.
 
   The holder keeps, per conversation key, the places `place_search` handed the
-  model (`put_places/3`) and the lists `checklist_read` and `checklist_edit`
-  read or changed (`put_checklists/3`, M85 §07), until the companion turn
-  writer takes them for the reply it writes (`take/2`). It is bounded whichever channel ran the search:
-  a record expires 30 minutes after it was put, a conversation keeps its newest
-  50, and expired records of every conversation are dropped on each call, so a
-  conversation that never takes holds nothing past the window.
+  model (`put_places/3`), the lists `checklist_read` and `checklist_edit`
+  read or changed (`put_checklists/3`, M85 §07) and the trips `trip_read` and
+  `trip_edit` read or changed (`put_trips/3`, M89 §06), and the events the
+  event tools returned (`put_events/3`), until the companion turn writer takes
+  them for the reply it writes (`take/2`). A turn starts with none of them:
+  what an earlier turn put and no reply took (a Live call's hand-off in the
+  chat, a turn that ended with no reply, failed or was stopped) is dropped as
+  the next turn in the conversation begins (`FermixCore.Agents.TurnRunner`), so a
+  reply draws only its own turn's records.
+
+  It is bounded whichever channel ran the search, each kind on its own so
+  that no kind evicts another: a record expires 30 minutes after it was put,
+  and a conversation keeps its newest 50 places, its newest 100 list touches
+  and, apart from them, its newest 100 trip touches (a trip's lookups put a
+  place each, up to 40 a call, and must not evict what the turn touched, M89
+  C3). Its events are kept once each, in their last state with the turn's
+  latest change, and only as far as a block can draw them: every event the
+  turn changed (at most 50) and the eight listed ones a block would draw
+  first, so a long agenda never evicts the turn's own changes. Expired
+  records of every conversation are dropped on each call, so a conversation
+  that never takes holds nothing past the window.
 
   `build/2` is pure. The link is the reference: it reads the links in a reply's
   text in order (a markdown link's target or a bare URL) and keeps the places
@@ -30,17 +45,77 @@ defmodule FermixCore.ReplyBlocks do
   read or changed, in the order the turn first touched them, at most eight,
   each its id, its newest title and the ids of the rows the turn added or
   changed, none for a list it only read. Ids, never words: a client draws a
-  list's rows as they stand now. `build/2` adds it after the places, and a
-  job's delivery takes it alone.
+  list's rows as they stand now. `build/2` adds it after the places.
+
+  `events/1` is the third (EVENTS_DRAWN_AS_CARDS §04): every event the turn's
+  event tools returned, as each tool handed it over (`put_events/3`, the
+  card `FermixCore.Temporal.Card` makes of its record), once each in its last
+  state, the ones the turn changed first in the order it first changed them
+  and the rest by date, at most eight. A receipt, not a live view: the card
+  is the event as the reply left it. `build/2` adds it after the lists.
+
+  `trips/1` is the fourth (M89 §06), the lists' block for the owner's trips:
+  the trips the turn's trip tools read or changed, in first-touch order, at
+  most four, each its id, its newest title and the ids of the rows the turn
+  added or changed, none for a trip it only read. `build/2` adds it after the
+  others, and a job's delivery keeps the lists, the events and the trips
+  (`delivered/1`).
+
+  ## Which blocks a session is sent, and which it draws
+
+  `drawn_types/3` is the one answer to both. A block that is a snapshot of
+  tool records (`places`, `events`) is drawn from the protocol version of the
+  session's wire that brought it; a kept kind (`checklists`, the owner's
+  lists, and `trips`, which came with companion 8 and mobile 3) is drawn by a
+  session that pulled its index. A session is sent the
+  types it would draw with every kept kind pulled (`sent_types/2`), since a
+  kept kind's block names ids a client pulls to draw, so a session is never
+  told a type is drawn that it is not sent. `for_session/4` is the filter
+  every row leaves by: a `text_done`, a `row` and each message of a
+  `history_page` keep only the blocks their session is sent.
+
+  ## The place index
+
+  Every place put is also indexed under its conversation for the same 30
+  minutes, newest 120: two `trip_edit` calls of 40 lookups each and four
+  searches of ten between them, so a link one call offered still resolves two
+  calls later. `take/2` leaves the index alone: a trip's `place`
+  given as a link a search in this conversation returned resolves through
+  `place_by_url/3` a turn after the reply that showed it (M89 §04, C2), on a
+  channel whose replies take the records as on one whose replies do not. The
+  link is compared as `build/2` compares a reply's links, and the newest
+  search names a link two searches returned.
   """
 
   use GenServer
 
-  @types ["places", "checklists"]
+  @types ["places", "checklists", "events", "trips"]
+  # The version of each wire that brought a block type (M72 and M85 rode
+  # every version as additive keys; events and trips came with companion 8
+  # and mobile 3, the versions in which a row may carry more than two block
+  # types).
+  @type_versions %{
+    "places" => %{companion: 1, mobile: 1},
+    "checklists" => %{companion: 1, mobile: 1},
+    "events" => %{companion: 8, mobile: 3},
+    "trips" => %{companion: 8, mobile: 3}
+  }
+  # The kept kinds, by the block that names them: drawn once their index is pulled.
+  @kept_kinds %{"checklists" => :lists, "trips" => :trips}
+  @wires [:companion, :mobile]
+  # The server events a reply's blocks leave by, on both wires.
+  @row_events ["text_done", "row", "history_page"]
   @max_places 10
   @max_checklists 8
+  @max_events 8
+  @max_trips 4
   @max_categories 5
   @max_records 50
+  @max_touches 100
+  # Far past the eight a block draws: a turn's own changes are kept whole.
+  @max_changed_events 50
+  # Two trip_edit calls of 40 lookups and four searches of ten between them.
+  @max_indexed 120
   @ttl_ms 30 * 60 * 1_000
 
   # A link a reader clicks: a markdown link's target (the text between its
@@ -62,8 +137,30 @@ defmodule FermixCore.ReplyBlocks do
   """
   @type checklist_touch :: %{list_id: String.t(), title: String.t(), rows: [String.t()]}
 
-  @typedoc "What the holder keeps: a place a search returned, or a list a tool touched."
-  @type record :: map() | {:checklist, checklist_touch()}
+  @typedoc """
+  A trip a tool read or changed: its id and title, and the ids of the rows the
+  call added or changed (none for a trip it only read).
+  """
+  @type trip_touch :: %{trip_id: String.t(), title: String.t(), rows: [String.t()]}
+
+  @typedoc """
+  An event an event tool returned, as the `events` block carries it
+  (`FermixCore.Temporal.Card`), string keyed.
+  """
+  @type event_card :: %{required(String.t()) => term()}
+
+  @typedoc """
+  What the holder keeps: a place a search returned, a list or a trip a tool
+  touched, an event.
+  """
+  @type record ::
+          map() | {:checklist, checklist_touch()} | {:trip, trip_touch()} | {:event, event_card()}
+
+  @typedoc "A session's wire: the Mac's companion socket, or a phone's mobile session."
+  @type wire :: :companion | :mobile
+
+  @typedoc "A kept kind a session pulls the index of: the owner's lists, or trips."
+  @type kept_kind :: :lists | :trips
 
   @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(opts \\ []) when is_list(opts) do
@@ -85,6 +182,75 @@ defmodule FermixCore.ReplyBlocks do
   @spec max_checklists() :: pos_integer()
   def max_checklists, do: @max_checklists
 
+  @doc "The most events one `events` block carries."
+  @spec max_events() :: pos_integer()
+  def max_events, do: @max_events
+
+  @doc "The most trips one `trips` block names."
+  @spec max_trips() :: pos_integer()
+  def max_trips, do: @max_trips
+
+  @doc """
+  The block types a session on `wire` at protocol `version` draws, in
+  `types/0` order, with `pulled` the kept kinds whose index it pulled: each
+  snapshot type its version carries, and each kept kind it pulled whose type
+  its version carries (moduledoc). The one answer to what the model is told
+  is drawn and, through `sent_types/2`, to what the session is sent.
+  """
+  @spec drawn_types(wire(), pos_integer(), [kept_kind()]) :: [String.t()]
+  def drawn_types(wire, version, pulled)
+      when wire in @wires and is_integer(version) and version > 0 and is_list(pulled) do
+    Enum.filter(@types, fn type ->
+      version >= @type_versions[type][wire] and pulled_kind?(type, pulled)
+    end)
+  end
+
+  defp pulled_kind?(type, pulled) do
+    case Map.fetch(@kept_kinds, type) do
+      {:ok, kind} -> kind in pulled
+      :error -> true
+    end
+  end
+
+  @doc """
+  The block types a session on `wire` at protocol `version` is sent: the ones
+  it would draw with every kept kind pulled (`drawn_types/3`), since a kept
+  kind's block names what a client pulls to draw.
+  """
+  @spec sent_types(wire(), pos_integer()) :: [String.t()]
+  def sent_types(wire, version), do: drawn_types(wire, version, Map.values(@kept_kinds))
+
+  @doc """
+  Server event `type`'s `payload` as a session on `wire` at protocol
+  `version` is sent it: a `text_done`'s and a `row`'s `blocks`, and each
+  `history_page` message's, keep only the types `sent_types/2` names, and a
+  row left with none has no `blocks` key. Every other event is unchanged.
+  This is the one filter a row leaves by, on both wires.
+  """
+  @spec for_session(String.t(), map(), wire(), pos_integer() | nil) :: map()
+  def for_session(type, payload, wire, version)
+      when type in ["text_done", "row"] and is_map(payload) and is_integer(version),
+      do: keep_sent(payload, sent_types(wire, version))
+
+  def for_session("history_page", %{"messages" => messages} = payload, wire, version)
+      when is_list(messages) and is_integer(version) do
+    sent = sent_types(wire, version)
+    %{payload | "messages" => Enum.map(messages, &keep_sent(&1, sent))}
+  end
+
+  def for_session(type, payload, wire, _version)
+      when is_binary(type) and type not in @row_events and is_map(payload) and wire in @wires,
+      do: payload
+
+  defp keep_sent(%{"blocks" => blocks} = row, sent) when is_list(blocks) do
+    case Enum.filter(blocks, &(&1["type"] in sent)) do
+      [] -> Map.delete(row, "blocks")
+      kept -> %{row | "blocks" => kept}
+    end
+  end
+
+  defp keep_sent(row, _sent), do: row
+
   @doc "The most categories one place carries."
   @spec max_categories() :: pos_integer()
   def max_categories, do: @max_categories
@@ -92,6 +258,14 @@ defmodule FermixCore.ReplyBlocks do
   @doc "The most place records a conversation keeps, newest kept."
   @spec max_records() :: pos_integer()
   def max_records, do: @max_records
+
+  @doc "The most touches of one kept kind (lists, trips) a conversation keeps, newest kept."
+  @spec max_touches() :: pos_integer()
+  def max_touches, do: @max_touches
+
+  @doc "The most places the place index keeps for a conversation, newest kept."
+  @spec max_indexed() :: pos_integer()
+  def max_indexed, do: @max_indexed
 
   @doc "How long a place record is kept after it was put, in milliseconds."
   @spec ttl_ms() :: pos_integer()
@@ -122,8 +296,37 @@ defmodule FermixCore.ReplyBlocks do
        do: {:checklist, %{list_id: id, title: title, rows: rows}}
 
   @doc """
-  The conversation's live records, oldest first, which the holder then
-  forgets.
+  Keep `touches`, the trips a trip tool read or changed, under the
+  conversation it ran in, after the records already kept.
+  """
+  @spec put_trips(GenServer.server(), conversation_key(), [trip_touch()]) :: :ok
+  def put_trips(server \\ __MODULE__, conversation_key, touches)
+      when is_tuple(conversation_key) and tuple_size(conversation_key) == 3 and is_list(touches) do
+    GenServer.call(server, {:put, conversation_key, Enum.map(touches, &trip_record/1)})
+  end
+
+  defp trip_record(%{trip_id: id, title: title, rows: rows})
+       when is_binary(id) and is_binary(title) and is_list(rows),
+       do: {:trip, %{trip_id: id, title: title, rows: rows}}
+
+  @doc """
+  Keep `cards`, the events an event tool returned (`FermixCore.Temporal.Card`),
+  under the conversation it ran in, after the records already kept.
+  """
+  @spec put_events(GenServer.server(), conversation_key(), [event_card()]) :: :ok
+  def put_events(server \\ __MODULE__, conversation_key, cards)
+      when is_tuple(conversation_key) and tuple_size(conversation_key) == 3 and is_list(cards) do
+    GenServer.call(server, {:put, conversation_key, Enum.map(cards, &event_record/1)})
+  end
+
+  defp event_record(%{"event_id" => id, "date" => date} = card)
+       when is_binary(id) and is_binary(date),
+       do: {:event, card}
+
+  @doc """
+  The conversation's live records, oldest first and its events once each after
+  the rest, which the holder then forgets. A turn begins by taking what an
+  earlier turn left (moduledoc).
   """
   @spec take(GenServer.server(), conversation_key()) :: [record()]
   def take(server \\ __MODULE__, conversation_key)
@@ -132,10 +335,23 @@ defmodule FermixCore.ReplyBlocks do
   end
 
   @doc """
+  The newest place a search in the conversation put in the last 30 minutes
+  whose `canonical_url` or `source_url` is `url`, compared as `build/2`
+  compares a reply's links, or `:error`. A take leaves it (moduledoc).
+  """
+  @spec place_by_url(GenServer.server(), conversation_key(), String.t()) :: {:ok, map()} | :error
+  def place_by_url(server \\ __MODULE__, conversation_key, url)
+      when is_tuple(conversation_key) and tuple_size(conversation_key) == 3 and is_binary(url) do
+    GenServer.call(server, {:place_by_url, conversation_key, url})
+  end
+
+  @doc """
   The blocks a reply's `text` makes of `records`: a `places` block with the
   places the text links, when it links any, then a `checklists` block with the
-  lists the turn touched, when it touched any. When two records name the same
-  link, the later one (the newer search) is the one drawn.
+  lists the turn touched, when it touched any, then an `events` block with the
+  events its event tools returned, when they returned any, then a `trips`
+  block with the trips the turn touched, when it touched any. When two records
+  name the same link, the later one (the newer search) is the one drawn.
   """
   @spec build(String.t(), [record()]) :: [block()]
   def build(text, records) when is_binary(text) and is_list(records) do
@@ -149,7 +365,77 @@ defmodule FermixCore.ReplyBlocks do
     |> Enum.take(@max_places)
     |> places_block()
     |> Kernel.++(checklists(records))
+    |> Kernel.++(events(records))
+    |> Kernel.++(trips(records))
   end
+
+  @doc """
+  The blocks a job's delivery keeps of its run's `records`: the lists, the
+  events and the trips, which need no link in the text, so a morning brief
+  that read `event_list` draws its agenda. Places stay out: a delivery is not
+  a reply whose links name them.
+  """
+  @spec delivered([record()]) :: [block()]
+  def delivered(records) when is_list(records),
+    do: checklists(records) ++ events(records) ++ trips(records)
+
+  @doc """
+  The `events` block `records` make: `[]`, or one block carrying each event
+  an event tool returned, once, in its last state, with the latest change the
+  turn made to it: the events the turn changed first, in the order it first
+  changed them, then the rest by date and time (an event with no time first
+  on its day), at most #{@max_events}.
+  """
+  @spec events([record()]) :: [block()]
+  def events(records) when is_list(records) do
+    {changed, listed} =
+      records
+      |> Enum.flat_map(fn
+        {:event, card} -> [{nil, card}]
+        _other -> []
+      end)
+      |> fold_events()
+      |> Enum.map(&elem(&1, 1))
+      |> Enum.split_with(&changed?/1)
+
+    (changed ++ Enum.sort_by(listed, &event_order/1))
+    |> Enum.take(@max_events)
+    |> events_block()
+  end
+
+  # Each event once, oldest first, each with what it was put with (the holder's
+  # put time, or nothing): an event returned again keeps its place and takes
+  # its newest state, and the latest change the turn made to it. An event
+  # first only listed and changed later moves to where it was changed.
+  defp fold_events(pairs), do: pairs |> Enum.reduce([], &merge_event/2) |> Enum.reverse()
+
+  # Newest first while folding.
+  defp merge_event({put_at, card}, merged) do
+    case Enum.find_index(merged, fn {_at, kept} -> kept["event_id"] == card["event_id"] end) do
+      nil ->
+        [{put_at, card} | merged]
+
+      index ->
+        {_at, kept} = Enum.at(merged, index)
+        newest = keep_change(card, kept)
+
+        if changed?(kept) or not changed?(newest),
+          do: List.replace_at(merged, index, {put_at, newest}),
+          else: [{put_at, newest} | List.delete_at(merged, index)]
+    end
+  end
+
+  defp changed?(card), do: Map.has_key?(card, "change")
+
+  defp event_order(card), do: {card["date"], Map.get(card, "time", ""), card["event_id"]}
+
+  defp keep_change(%{"change" => _change} = card, _kept), do: card
+
+  defp keep_change(card, %{"change" => change}), do: Map.put(card, "change", change)
+  defp keep_change(card, _kept), do: card
+
+  defp events_block([]), do: []
+  defp events_block(cards), do: [%{"type" => "events", "events" => cards}]
 
   @doc """
   The `checklists` block `records` make: `[]`, or one block naming each list a
@@ -181,6 +467,50 @@ defmodule FermixCore.ReplyBlocks do
           %{kept | title: touch.title, rows: kept.rows ++ (touch.rows -- kept.rows)}
         end)
     end
+  end
+
+  @doc """
+  The `trips` block `records` make: `[]`, or one block naming each trip a trip
+  tool touched, in first-touch order, at most #{@max_trips}, with the rows every
+  touch of it added or changed, in the order they were first named.
+  """
+  @spec trips([record()]) :: [block()]
+  def trips(records) when is_list(records) do
+    records
+    |> Enum.flat_map(fn
+      {:trip, touch} -> [touch]
+      _other -> []
+    end)
+    |> Enum.reduce([], &merge_trip/2)
+    |> Enum.reverse()
+    |> Enum.take(@max_trips)
+    |> trips_block()
+  end
+
+  # As a list's touches fold: a trip touched again keeps its first place,
+  # takes its newest title and adds the rows it had not named.
+  defp merge_trip(touch, merged) do
+    case Enum.find_index(merged, &(&1.trip_id == touch.trip_id)) do
+      nil ->
+        [touch | merged]
+
+      index ->
+        List.update_at(merged, index, fn kept ->
+          %{kept | title: touch.title, rows: kept.rows ++ (touch.rows -- kept.rows)}
+        end)
+    end
+  end
+
+  defp trips_block([]), do: []
+
+  defp trips_block(trips) do
+    [
+      %{
+        "type" => "trips",
+        "trips" =>
+          Enum.map(trips, &%{"trip_id" => &1.trip_id, "title" => &1.title, "rows" => &1.rows})
+      }
+    ]
   end
 
   defp checklists_block([]), do: []
@@ -215,24 +545,99 @@ defmodule FermixCore.ReplyBlocks do
   @impl true
   def init(opts) do
     case Keyword.get(opts, :clock, &monotonic_ms/0) do
-      clock when is_function(clock, 0) -> {:ok, %{clock: clock, conversations: %{}}}
+      clock when is_function(clock, 0) -> {:ok, %{clock: clock, conversations: %{}, places: %{}}}
       other -> {:stop, {:invalid_clock, other}}
     end
   end
 
   @impl true
-  def handle_call({:put, key, places}, _from, state) do
+  def handle_call({:put, key, records}, _from, state) do
     now = state.clock.()
-    stamped = Enum.map(places, &{now, &1})
+    stamped = Enum.map(records, &{now, &1})
     conversations = sweep(state.conversations, now)
-    kept = Enum.take(Map.get(conversations, key, []) ++ stamped, -@max_records)
-    {:reply, :ok, %{state | conversations: Map.put(conversations, key, kept)}}
+    kept = bounded(Map.get(conversations, key, []) ++ stamped)
+    places = index(sweep(state.places, now), key, Enum.filter(stamped, &place_record?/1))
+
+    {:reply, :ok, %{state | conversations: Map.put(conversations, key, kept), places: places}}
   end
 
   def handle_call({:take, key}, _from, state) do
-    {records, conversations} = Map.pop(sweep(state.conversations, state.clock.()), key, [])
-    {:reply, Enum.map(records, &elem(&1, 1)), %{state | conversations: conversations}}
+    now = state.clock.()
+    {records, conversations} = Map.pop(sweep(state.conversations, now), key, [])
+
+    {:reply, Enum.map(records, &elem(&1, 1)),
+     %{state | conversations: conversations, places: sweep(state.places, now)}}
   end
+
+  def handle_call({:place_by_url, key, url}, _from, state) do
+    places = sweep(state.places, state.clock.())
+
+    found =
+      places
+      |> Map.get(key, [])
+      |> Enum.map(&elem(&1, 1))
+      |> url_index()
+      |> linked_record(url)
+
+    case found do
+      [place] -> {:reply, {:ok, place}, %{state | places: places}}
+      [] -> {:reply, :error, %{state | places: places}}
+    end
+  end
+
+  # Each kind is bounded on its own: the places, the lists' touches and the
+  # trips', each newest kept and where it was put among the rest, then the
+  # events, once each and only as far as a block can draw them.
+  defp bounded(records) do
+    {events, others} = Enum.split_with(records, &event_record?/1)
+
+    others
+    |> keep_newest(&place_record?/1, @max_records)
+    |> keep_newest(&record_of?(&1, :checklist), @max_touches)
+    |> keep_newest(&record_of?(&1, :trip), @max_touches)
+    |> Kernel.++(kept_events(events))
+  end
+
+  # Every event the turn changed, in the order it first changed them, and the
+  # listed ones a block would draw first (by date): a listed one changed later
+  # moves among the changes, and the next listed one by date is kept already.
+  defp kept_events(records) do
+    {changed, listed} =
+      records
+      |> Enum.map(fn {put_at, {:event, card}} -> {put_at, card} end)
+      |> fold_events()
+      |> Enum.split_with(fn {_put_at, card} -> changed?(card) end)
+
+    listed = listed |> Enum.sort_by(&event_order(elem(&1, 1))) |> Enum.take(@max_events)
+
+    changed
+    |> Enum.take(@max_changed_events)
+    |> Kernel.++(listed)
+    |> Enum.map(fn {put_at, card} -> {put_at, {:event, card}} end)
+  end
+
+  defp keep_newest(records, member?, max) do
+    excess = Enum.count(records, member?) - max
+
+    {kept, _left} =
+      Enum.flat_map_reduce(records, excess, fn record, left ->
+        if left > 0 and member?.(record), do: {[], left - 1}, else: {[record], left}
+      end)
+
+    kept
+  end
+
+  defp record_of?({_put_at, {kind, _record}}, kind), do: true
+  defp record_of?({_put_at, _record}, _kind), do: false
+
+  defp event_record?(stamped), do: record_of?(stamped, :event)
+
+  defp place_record?({_put_at, record}), do: is_map(record)
+
+  defp index(places, _key, []), do: places
+
+  defp index(places, key, stamped),
+    do: Map.put(places, key, Enum.take(Map.get(places, key, []) ++ stamped, -@max_indexed))
 
   defp sweep(conversations, now) do
     conversations
@@ -247,7 +652,7 @@ defmodule FermixCore.ReplyBlocks do
 
   # -- building --------------------------------------------------------------
 
-  defp places(records), do: Enum.reject(records, &match?({:checklist, _touch}, &1))
+  defp places(records), do: Enum.filter(records, &is_map/1)
 
   defp drawn_urls(%{"type" => "places", "places" => places}),
     do: Enum.flat_map(places, &[&1["canonical_url"], &1["source_url"]])

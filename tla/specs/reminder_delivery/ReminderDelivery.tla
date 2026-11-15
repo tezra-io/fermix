@@ -41,11 +41,11 @@
 \* SOURCE: apps/fermix_core/lib/fermix_core/memory/repo/temporal_sql.ex @ b85c5212fe61
 \* SOURCE: apps/fermix_core/lib/fermix_core/memory/repo.ex#call,request_message,deadline_after,deadline_passed?,call_or_timeout_error,periodic_opts,claim_due_reminders,recover_delivering_reminder,sweep_delivering_reminders,update_temporal_event @ d060bd80ce43
 \* SOURCE: apps/fermix_core/lib/fermix_core/delivery/channel_send.ex @ 9b06289e25ae
-\* SOURCE: apps/fermix_core/lib/fermix_core/delivery/error.ex @ a3cd3a75d3ca
+\* SOURCE: apps/fermix_core/lib/fermix_core/delivery/error.ex @ 2f1ce6530e0b
 \* SOURCE: apps/fermix_core/lib/fermix_core/memory/repo/mobile_sql.ex @ 20b02d329b95
-\* SOURCE: apps/fermix_core/lib/fermix_core/application.ex#start_supervision_tree,supervision_children,temporal_scheduler_opts @ 32bbfe32b6c1
-\* SOURCE: apps/fermix_core/lib/fermix_core/temporal/registry.ex @ 26a90999cd1c
-\* SOURCE: apps/fermix_channels/lib/fermix_channels/channels/mobile.ex @ 5def89c66a6b
+\* SOURCE: apps/fermix_core/lib/fermix_core/application.ex#start_supervision_tree,supervision_children,temporal_scheduler_opts @ b5f3cecb295c
+\* SOURCE: apps/fermix_core/lib/fermix_core/temporal/registry.ex @ 55032cca8ccb
+\* SOURCE: apps/fermix_channels/lib/fermix_channels/channels/mobile.ex @ 118d025b7f6e
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/companion/output.ex @ 71be1c83368c
 EXTENDS Naturals, FiniteSets
 
@@ -87,7 +87,7 @@ CONSTANTS
                              \* (:1033) repeat it inside the same Repo call
                              \* (repo.ex:3203-3206), so they add nothing here.
     WorkersDieWithScheduler, \* DeliverySupervisor starts after the scheduler under
-                             \* :rest_for_one (application.ex:363-364, :183)
+                             \* :rest_for_one (application.ex:392-393, :187)
     SendsDieWithWorker,      \* a worker's send process is spawned linked to it
                              \* (Process.spawn [:link, :monitor], channel_send.ex:219-224),
                              \* so a worker killed mid-send takes its send with it
@@ -367,9 +367,9 @@ Boot ==
 (* Crashes *)
 
 \* The scheduler, or any earlier child of FermixCore.Supervisor (Repo,
-\* MainAgent, JobScheduler, ...), crashes. :rest_for_one (application.ex:183)
+\* MainAgent, JobScheduler, ...), crashes. :rest_for_one (application.ex:187)
 \* terminates every later child, DeliverySupervisor and its workers included
-\* (:347-348), before init runs again. The workers do not trap exits, so they
+\* (:386-387), before init runs again. The workers do not trap exits, so they
 \* die at once. Each worker's send process is linked to it
 \* (Process.spawn [:link, :monitor], channel_send.ex:219-224), so it dies
 \* too, as in DaemonCrash: a request it already wrote is still processed by
@@ -379,8 +379,8 @@ Boot ==
 \* workers die every send dies. A worker killed in the few instructions
 \* between its watchdog's unlink and kill (channel_send.ex:281-287) would
 \* leave its send running; that is below this spec's step granularity.
-\* Capabilities.AccessGate.Pending (application.ex:341) and ReplyBlocks
-\* (:344) are two more earlier children: a crash of either is this step. The
+\* Capabilities.AccessGate.Pending (application.ex:364) and ReplyBlocks
+\* (:368) are two more earlier children: a crash of either is this step. The
 \* owner confirmations one parks and the place records the other holds are
 \* never read by the reminder rail, so they are not modelled.
 \* A scheduler Repo call that times out is no longer a cause: it returns an
@@ -438,7 +438,7 @@ Start(w) ==
 \* The `after timeout_ms` clause of monitored_call (channel_send.ex:239) ->
 \* kill_and_drain/3 (:284-300): unlink, kill the send process, wait for its
 \* :DOWN, drop any result it posted, and report :delivery_timeout, which is
-\* retryable (error.ex:191). A request already at the platform is not recalled. Unless
+\* retryable (error.ex:195). A request already at the platform is not recalled. Unless
 \* the platform can be slow, it always answers inside the watchdog, so the
 \* watchdog can only catch a send that has not reached it (a stuck pool
 \* checkout, for example).
@@ -516,7 +516,7 @@ PlatformDecide(w) ==
 \* exits :normal (channel_send.ex:224, :227-233, :248-254). Its worker then
 \* drops the link and the monitor (release/2, :264-269). A worker that is
 \* gone never gets the answer.
-\* The worker's view goes through Error.normalize/retryable? (error.ex:189-204).
+\* The worker's view goes through Error.normalize/retryable? (error.ex:193-208).
 SenderAnswer(w) ==
     /\ sender[w] = "out"
     /\ request[w] \in {"ok", "transient", "permanent"}
@@ -677,7 +677,7 @@ Spec == Init /\ [][Next]_vars /\ Fairness
 \* never attempt six."
 NeverAttemptSix == attempts <= 5
 
-\* delivery_supervisor.ex:5-10 and application.ex:356-364: "no delivery
+\* delivery_supervisor.ex:5-10 and application.ex:385-393: "no delivery
 \* worker can outlive the scheduler", which is "what lets claims be
 \* serialized in one process"; M30 design §6.3 (:335-337): "two workers for
 \* the same row cannot exist".
@@ -702,9 +702,9 @@ OneSendAtATime == Cardinality({w \in Workers : sender[w] /= "idle"}) <= 1
 \* reminder from landing after its superseding rule is due".
 SendEndsBeforeBoundary == ~valid => \A w \in Workers : sender[w] = "idle"
 
-\* registry.ex:676-679, the refusal the owner gets: "A reminder for this
+\* registry.ex:682-685, the refusal the owner gets: "A reminder for this
 \* event is being sent right now and a send cannot be recalled. Wait for the
-\* attempt to finish and try again." M30 design (:1490): "Event mutation
+\* attempt to finish and try again." M30 design (:1496): "Event mutation
 \* while a send is in flight | Fail with delivery_in_progress". Read as: an
 \* edit or cancel is accepted only when no send process for the reminder is
 \* running, that is, once the bounded attempt has finished. (That the

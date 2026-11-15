@@ -42,41 +42,47 @@ defmodule FermixCore.Home.Archive do
   archive carries only their `@keyring` references. Both directions answer how
   many there are, so the owner knows how many to enter again on the new host.
 
-  **A newer engine's home is refused.** The manifest names the engine that
-  wrote it; a restore by an older engine refuses it by name
-  (`{:newer_engine, theirs, ours}`) before it writes anything, since the home
-  may hold settings and data this engine cannot read.
+  **A home in a newer format is refused.** The manifest names the home's
+  format (M97 D16); one newer than this engine's is refused by name
+  (`{:newer_home_format, theirs, ours}`) before anything is written, since it
+  may hold settings and data this engine cannot read. Which engine wrote it
+  decides nothing, so a newer engine's home of this format restores here
+  (`Home.Readable`, the one rule, which also says what a manifest with no
+  format is).
 
-  **What does not travel as consent or history.** A restore withdraws
-  coding-harness consent, moves a keyring-mode home to the file store on a host
+  **What does not travel as consent or history.** A restore moves a
+  keyring-mode home to the file store on a host
   whose keyring did not answer `available` (`FermixCore.Home.Archive.RestoredConfig`;
-  a probe that timed out counts as not answering, logged once), deletes
-  screen history from the restored database
-  (`FermixCore.Home.Archive.ScreenHistory`), and names the installed plugins
+  a probe that timed out counts as not answering, logged once), or whose engine
+  keeps its secrets in files, which asks no keyring, and names the installed plugins
   built for another OS or architecture (the manifest's `host`). Sandbox grants
-  are device-local and never in the archive.
+  and the machine file (`machine.toml`, `FermixCore.Setup.MachineFile`) are
+  device-local and never in the archive, and a home an earlier engine wrote,
+  whose `config.toml` still held that machine's own settings, is restored
+  without them: coding-agent consent among them (M98 D5).
   """
 
+  alias Exqlite.Sqlite3
   alias Fermix.CLI.Upgrade.Manifest, as: HostTarget
-  alias FermixCore.BuildInfo
   alias FermixCore.Home.Archive.ConfigText
   alias FermixCore.Home.Archive.Manifest
   alias FermixCore.Home.Archive.RestoredConfig
-  alias FermixCore.Home.Archive.ScreenHistory
   alias FermixCore.Home.Archive.Seal
   alias FermixCore.Home.DaemonProbe
   alias FermixCore.Home.DeviceLocal
   alias FermixCore.Home.Epoch
   alias FermixCore.Home.Moved
+  alias FermixCore.Home.Readable
+  alias FermixCore.Memory.Repo.ComputerHistorySql
   alias FermixCore.Setup.SecretWriter
 
   require Logger
 
   @manifest_entry "manifest.json"
   @config "config.toml"
+  @plugin_lockfile "plugins/installed.json"
   @database "memory.db"
   @database_sidecars ~w(memory.db-wal memory.db-shm memory.db-journal)
-  @plugin_lockfile "plugins/installed.json"
   @home_prefix "home/"
   @max_depth 64
   @dir_mode 0o700
@@ -90,16 +96,22 @@ defmodule FermixCore.Home.Archive do
           keyring_secrets: non_neg_integer()
         }
   @type source :: {:memory, %{String.t() => binary()}} | {:staged, Path.t()}
+  @typedoc "Why `collect/2` refused a home."
+  @type collect_refusal ::
+          {:too_many_files | :too_many_bytes, pos_integer(), pos_integer()}
+          | {:unsupported_entry, String.t(), atom()}
+          | {:unsupported_link, String.t(), String.t()}
+          | {:unsupported_name | :too_deep, String.t()}
+          | {:file, Path.t(), term()}
   @type restored :: %{
           files: non_neg_integer(),
           epoch: pos_integer(),
           rewritten: [String.t()],
           kept_paths: [String.t()],
-          harness_consent_reset: boolean(),
           secret_store_switched: boolean(),
-          imessage_disabled: boolean(),
+          instance_role_dropped: boolean(),
+          device_settings_dropped: [String.t()],
           keyring_secrets: non_neg_integer(),
-          screen_history_removed: non_neg_integer(),
           source_host: String.t(),
           host: String.t(),
           plugins_to_reinstall: [String.t()]
@@ -116,7 +128,8 @@ defmodule FermixCore.Home.Archive do
   home is read: a retired copy restored elsewhere would mint the live
   primary's own epoch under the same identity, a running engine
   (`:daemon_running`, read through the control socket's `hello`, the probe
-  `fermix status` uses; `opts[:hello]` replaces it in tests), a probe that
+  `fermix status` uses; `opts[:hello]` replaces it in tests and
+  `opts[:hello_timeout]` bounds its reply), a probe that
   cannot tell (`{:daemon_probe_failed, reason}`), a home with no primary epoch
   (`:epoch_absent`), and a home beyond the manifest's bounds.
   """
@@ -156,9 +169,10 @@ defmodule FermixCore.Home.Archive do
 
   `opts` replace this host's facts in tests: `:host` (the plugin installer's
   target name, such as `linux-x86_64`), `:keyring_usable?` (a 0-arity
-  function), `:probe_timeout_ms` (the bound on each question the keyring
-  probe asks, when `:keyring_usable?` is not given) and `:now_ms` (the
-  screen-history clear's bound).
+  function), `:secret_store` (the store this engine keeps its secrets in,
+  `SecretWriter.store/1`'s; with `:file` no keyring is asked) and
+  `:probe_timeout_ms` (the bound on each question the keyring probe asks,
+  when `:keyring_usable?` is not given).
 
   Refuses, by name: a passphrase under twelve bytes, a root that is not empty
   (`:root_not_empty`), an archive that does not open (`:archive_rejected`), a
@@ -187,33 +201,39 @@ defmodule FermixCore.Home.Archive do
   Makes `root` the next primary from a verified `manifest` and its files, the
   one restore path an archive and a snapshot (`FermixCore.Home.Snapshot`)
   share: `primary_epoch` the manifest's plus one, `config.toml` settled for
-  this host and path (`RestoredConfig`), screen history cleared, the plugins
-  built for another host named, each file written with its recorded mode under
-  `0700` directories, and every link recreated. A failure part-way removes
+  this host and path (`RestoredConfig`), the plugins built for another host
+  named, each file written with its recorded mode under
+  `0700` directories, and every link recreated. The memory store's history
+  gets a new identity (M97 §8.5, HS-4: its interval ids may start again below
+  what the home's computers counted), the one change made to a file's
+  contents; then the epoch is written, last. A failure part-way removes
   exactly what it wrote.
 
   `source` holds the files the manifest lists, each already checked against
   its entry: `{:memory, contents}` (path to bytes) or `{:staged, dir}` (the
   files under a private directory on the root's own filesystem, each renamed
   into place). `root_state` is `root_state/1`'s answer for `root`. `opts` as
-  `restore/4`.
+  `restore/4`, and `:history`: `:fresh` (the default) for any stored copy, or
+  `:continued` for a move's or a move back's live stream, whose interval ids
+  go on, so its store keeps its identity and the computers their marks.
   """
   @spec install(Manifest.t(), source(), Path.t(), :absent | :empty, keyword()) ::
           {:ok, restored()} | {:error, term()}
   def install(manifest, source, root, root_state, opts)
       when is_map(manifest) and is_binary(root) and root_state in [:absent, :empty] and
              is_list(opts) do
+    history = history!(opts)
+
     with {:ok, host} <- host(opts),
-         :ok <- not_newer(manifest.engine_version),
+         :ok <- not_newer(manifest),
          {:ok, epoch} <- next_epoch(manifest.primary_epoch),
          {:ok, source, settled} <- settle_config(source, manifest, root, host, opts),
          {:ok, reinstall} <- plugins_to_reinstall(source, manifest, host),
-         {:ok, removed} <- write_home(root, root_state, manifest, source, epoch, now_ms(opts)) do
+         :ok <- write_home(root, root_state, manifest, source, {epoch, history}) do
       {:ok,
        Map.merge(settled, %{
          files: length(manifest.files),
          epoch: epoch,
-         screen_history_removed: removed,
          source_host: manifest.host,
          host: host,
          plugins_to_reinstall: reinstall
@@ -235,8 +255,6 @@ defmodule FermixCore.Home.Archive do
 
   defp host_target({:ok, {os, arch}}), do: {:ok, "#{os}-#{arch}"}
   defp host_target({:error, reason}), do: {:error, {:host_unsupported, reason}}
-
-  defp now_ms(opts), do: Keyword.get_lazy(opts, :now_ms, fn -> System.os_time(:millisecond) end)
 
   # -- create -----------------------------------------------------------------
 
@@ -276,7 +294,8 @@ defmodule FermixCore.Home.Archive do
     end
   end
 
-  defp daemon_stopped(opts, root), do: DaemonProbe.stopped(root, Keyword.take(opts, [:hello]))
+  defp daemon_stopped(opts, root),
+    do: DaemonProbe.stopped(root, Keyword.take(opts, [:hello, :hello_timeout]))
 
   defp primary_epoch(root) do
     case Epoch.read(root) do
@@ -295,7 +314,8 @@ defmodule FermixCore.Home.Archive do
   capture, so both carry the same set.
   """
   @spec collect(Path.t(), Manifest.max_bytes()) ::
-          {:ok, [{String.t(), File.Stat.t()}], [Manifest.link()]} | {:error, term()}
+          {:ok, [{String.t(), File.Stat.t()}], [Manifest.link()]}
+          | {:error, collect_refusal()}
   def collect(root, max_total_bytes) when is_binary(root) do
     acc = %{files: [], links: [], count: 0, bytes: 0, max: max_total_bytes}
 
@@ -304,6 +324,53 @@ defmodule FermixCore.Home.Archive do
       {:error, _reason} = error -> error
     end
   end
+
+  @doc """
+  The sentence an owner reads for a home `collect/2` refused: the path, and
+  what to do. Every surface that walks a home for an archive says it in these
+  words: `fermix home export` and a move's readiness review
+  (`FermixCore.Home.MoveReadiness`).
+  """
+  @spec collect_sentence(collect_refusal()) :: String.t()
+  def collect_sentence({:too_many_files, count, max}),
+    do:
+      "The home holds #{count} files or more, beyond the #{max} one archive carries. " <>
+        "Make it smaller, then try again."
+
+  def collect_sentence({:too_many_bytes, bytes, max}),
+    do:
+      "The home holds #{bytes} bytes or more, beyond the #{max} one archive carries. " <>
+        "Make it smaller, then try again."
+
+  def collect_sentence({:unsupported_entry, path, type}),
+    do:
+      "#{path} in the home is a #{entry_kind(type)}, which an archive cannot carry. " <>
+        "Move it out of the home, then try again."
+
+  def collect_sentence({:unsupported_link, path, target}),
+    do:
+      "#{path} in the home links to #{target}, outside the home, which an archive cannot " <>
+        "carry. Move it out of the home, then try again."
+
+  def collect_sentence({:unsupported_name, path}),
+    do:
+      "#{inspect(path)} in the home has a name an archive cannot carry. Rename it, then try " <>
+        "again."
+
+  def collect_sentence({:too_deep, path}),
+    do:
+      "#{path} in the home is nested too deep for an archive. Move it out of the home, then " <>
+        "try again."
+
+  def collect_sentence({:file, path, reason}), do: "#{path}: #{describe_file_error(reason)}."
+
+  defp entry_kind(:device), do: "device file"
+  defp entry_kind(_other), do: "special file"
+
+  defp describe_file_error(reason) when is_atom(reason),
+    do: List.to_string(:file.format_error(reason))
+
+  defp describe_file_error(reason), do: inspect(reason)
 
   defp walk(_root, rel_dir, depth, _acc) when depth > @max_depth,
     do: {:error, {:too_deep, rel_dir}}
@@ -693,10 +760,21 @@ defmodule FermixCore.Home.Archive do
     end
   end
 
+  # Only the store this engine is set to use is asked (`SecretWriter.store/1`,
+  # `:secret_store` in its place): an engine that keeps its secrets in files,
+  # as a headless Always On server does, has no keyring for the home to keep
+  # them in, so the home keeps files and no keyring is probed (M97 F9).
+  defp keyring_usable?(opts) do
+    case SecretWriter.store(store: Keyword.get(opts, :secret_store)) do
+      :file -> false
+      :keyring -> keyring_answers?(opts)
+    end
+  end
+
   # Only a keyring that answered keeps keyring mode: on a server with no
   # session bus, a probe that timed out (`unknown`) would otherwise move in a
   # home whose secrets the new primary cannot read.
-  defp keyring_usable?(opts) do
+  defp keyring_answers?(opts) do
     probe_opts = [store: :keyring] ++ Keyword.take(opts, [:probe_timeout_ms])
 
     case SecretWriter.probe(probe_opts) do
@@ -731,55 +809,75 @@ defmodule FermixCore.Home.Archive do
   defp installed_names({:ok, %{} = installed}), do: {:ok, installed |> Map.keys() |> Enum.sort()}
   defp installed_names(other), do: {:error, {:plugin_lockfile, other}}
 
-  # A home a newer engine wrote may carry settings and data this engine does
-  # not know, so it is refused by name rather than run half-understood; an
-  # engine version that does not parse is refused the same way.
-  defp not_newer(version) do
-    ours = BuildInfo.product_version()
-
-    case Version.parse(version) do
-      {:ok, theirs} ->
-        if Version.compare(theirs, Version.parse!(ours)) == :gt,
-          do: {:error, {:newer_engine, version, ours}},
-          else: :ok
-
-      :error ->
-        {:error, {:newer_engine, version, ours}}
-    end
-  end
+  # A home in a newer format than this engine's is refused by name
+  # (`Home.Readable`, the one rule a restore, a move's review and Always On's
+  # screen share).
+  defp not_newer(%{home_format: _format} = manifest), do: Readable.readable?(manifest)
 
   defp next_epoch(epoch) do
     if epoch + 1 <= Epoch.max_epoch(), do: {:ok, epoch + 1}, else: {:error, :epoch_overflow}
   end
 
-  defp write_home(root, root_state, manifest, source, epoch, now_ms) do
+  # Computer history's notes are the home's and travel with it (M97 §8.6); its
+  # raw events never were in the home's database once memory.db's migration 59
+  # ran. A home restored from an archive made before it still holds them in
+  # memory.db, and its first boot's migration 59 moves them into that
+  # machine's own store (`device/history.db`); only an Always On server drops
+  # them there, since nothing records on it.
+  defp write_home(root, root_state, manifest, source, {epoch, history}) do
     with :ok <- prepare_root(root, root_state) do
       case write_entries(root, manifest, source) do
-        {:ok, written} -> finish_home(root, root_state, manifest, written, epoch, now_ms)
+        {:ok, written} -> settle_home(root, root_state, written, epoch, history)
         {:error, reason, touched} -> roll_back(root, root_state, touched, reason)
       end
     end
   end
 
-  # SQLite may leave its own sidecars beside the database it just changed, so a
-  # roll-back after the clear removes those too.
-  defp finish_home(root, root_state, manifest, written, epoch, now_ms) do
+  # The history's identity, then the epoch, which is written last. SQLite may
+  # leave its own sidecars beside the database it changed, so a roll-back
+  # after that removes those too.
+  defp settle_home(root, root_state, written, epoch, history) do
     touched = @database_sidecars ++ written
 
-    with {:ok, removed} <- clear_screen_history(root, root_state, manifest, touched, now_ms),
-         :ok <- write_epoch(root, root_state, touched, epoch) do
-      {:ok, removed}
+    with :ok <- history_identity(root, root_state, touched, history),
+         do: write_epoch(root, root_state, touched, epoch)
+  end
+
+  # M97 §8.5, HS-4: a computer's purge mark counts one store's interval ids,
+  # and a stored copy (a backup, a snapshot) may start them again below what
+  # the computers counted, the same copy as often as it is restored. So the
+  # store it installs gets a new identity before anything uses it; a move's or
+  # a move back's live stream (`:continued`), whose ids go on, keeps its own,
+  # and with it every computer's mark.
+  defp history_identity(_root, _root_state, _touched, :continued), do: :ok
+
+  defp history_identity(root, root_state, touched, :fresh) do
+    db = Path.join(root, @database)
+
+    case if(File.regular?(db), do: renew_token(db), else: :ok) do
+      :ok -> :ok
+      {:error, reason} -> roll_back(root, root_state, touched, {:history_identity, reason})
     end
   end
 
-  defp clear_screen_history(root, root_state, manifest, touched, now_ms) do
-    if Enum.any?(manifest.files, &(&1.path == @database)) do
-      case ScreenHistory.clear(Path.join(root, @database), now_ms) do
-        {:ok, removed} -> {:ok, removed}
-        {:error, reason} -> roll_back(root, root_state, touched, reason)
-      end
-    else
-      {:ok, 0}
+  defp renew_token(db) do
+    case Sqlite3.open(db, mode: :readwrite) do
+      {:ok, conn} -> renewed(ComputerHistorySql.renew_home_token(conn), Sqlite3.close(conn))
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp renewed(:ok, :ok), do: :ok
+  defp renewed({:error, reason}, _closed), do: {:error, reason}
+  defp renewed(:ok, {:error, reason}), do: {:error, reason}
+
+  defp history!(opts) do
+    case Keyword.get(opts, :history, :fresh) do
+      history when history in [:fresh, :continued] ->
+        history
+
+      other ->
+        raise ArgumentError, "a restore's :history is :fresh or :continued: #{inspect(other)}"
     end
   end
 

@@ -67,6 +67,40 @@ defmodule Fermix.CLI.HomeMoveCommandTest do
       assert {:ok, %{role: :candidate}} = Role.configured(ctx.home)
     end
 
+    # E1: first boot passes --snapshot-instance-role when the server's
+    # infrastructure set the bucket; the candidate keeps it with the bucket.
+    test "an infrastructure-set bucket is kept with how it signs", ctx do
+      argv = [
+        "enroll",
+        "--code-file",
+        ctx.code_file,
+        "--snapshot-bucket",
+        "invented-bucket-91",
+        "--snapshot-region",
+        "eu-north-1",
+        "--snapshot-instance-role"
+      ]
+
+      assert {0, _out, ""} = run(argv, home: ctx.home, now: fn -> @now end)
+
+      assert Candidate.destination(ctx.home) ==
+               {:ok,
+                %{
+                  "s3_bucket" => "invented-bucket-91",
+                  "s3_region" => "eu-north-1",
+                  "s3_credentials" => "instance_role"
+                }}
+    end
+
+    test "the instance role signs only a bucket given with it", ctx do
+      assert {2, _out, _err} =
+               run(["enroll", "--code-file", ctx.code_file, "--snapshot-instance-role"],
+                 home: ctx.home
+               )
+
+      assert File.exists?(ctx.code_file)
+    end
+
     test "a refusal leaves the home and the code file as they were", ctx do
       {status, _out, err} =
         run(["enroll", "--code-file", ctx.code_file],
@@ -89,6 +123,64 @@ defmodule Fermix.CLI.HomeMoveCommandTest do
       assert status == 1
       assert err =~ "holds a primary epoch"
       assert File.exists?(ctx.code_file)
+    end
+
+    # Always On review M1 (D1): the installer runs this again on a server
+    # whose enrollment failed, ran out or waits for a move its computer
+    # forgot, with the new code, and reads the exit status; the sentence is a
+    # fresh enrollment's. One that ended takes its own code again too.
+    test "enrolls again a server whose enrollment failed, ran out or waits for its move", ctx do
+      {0, _out, ""} =
+        run(["enroll", "--code-file", ctx.code_file], home: ctx.home, now: fn -> @now end)
+
+      {:ok, state} = Candidate.read_state(ctx.home)
+      {:ok, facts} = EnrollmentCode.decode(ctx.code)
+      {:ok, new_code} = EnrollmentCode.encode(%{facts | secret: :binary.copy(<<0x6B>>, 32)})
+
+      for {phase, code} <- [{"failed", ctx.code}, {"expired", ctx.code}, {"enrolled", new_code}] do
+        :ok = Candidate.put_state(ctx.home, Map.put(state, "phase", phase), @now)
+        File.write!(ctx.code_file, code <> "\n")
+
+        {status, out, err} =
+          run(["enroll", "--code-file", ctx.code_file], home: ctx.home, now: fn -> @now end)
+
+        assert {status, err} == {0, ""}, phase
+
+        # What happens next, true for a person who starts Fermix and for a
+        # first boot that starts it on its next line (EC2 test finding 9).
+        assert out ==
+                 "This home is now a candidate of orchard-mini. When Fermix starts here, it " <>
+                   "enrolls with orchard-mini, then waits up to 24 hours for the move.\n"
+
+        assert {:ok, %{"phase" => "enrolling"}} = Candidate.read_state(ctx.home)
+        refute File.exists?(ctx.code_file)
+      end
+    end
+
+    # The installer run again with the code the server enrolled with reads
+    # the refusal's exit status and shows its sentence.
+    test "refuses the code a server enrolled with, leaving the home and the code file", ctx do
+      {0, _out, ""} =
+        run(["enroll", "--code-file", ctx.code_file], home: ctx.home, now: fn -> @now end)
+
+      {:ok, state} = Candidate.read_state(ctx.home)
+      :ok = Candidate.put_state(ctx.home, Map.put(state, "phase", "enrolled"), @now)
+      {:ok, key} = Candidate.noise_keypair(ctx.home)
+      File.write!(ctx.code_file, ctx.code <> "\n")
+
+      {status, out, err} =
+        run(["enroll", "--code-file", ctx.code_file], home: ctx.home, now: fn -> @now end)
+
+      assert {status, out} == {1, ""}
+
+      assert err ==
+               "fermix home enroll: This server enrolled with this code already and waits for " <>
+                 "its move. To set it up again, open a new code in Always On and run this " <>
+                 "command with that code.\n"
+
+      assert File.exists?(ctx.code_file)
+      assert {:ok, %{"phase" => "enrolled"}} = Candidate.read_state(ctx.home)
+      assert {:ok, ^key} = Candidate.noise_keypair(ctx.home)
     end
 
     test "a missing file is a refusal and half an option pair is a usage error", ctx do

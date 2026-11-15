@@ -58,7 +58,6 @@ defmodule FermixCore.ComputerHistory.Gate do
           | {:prompt_section, map()}
           | {:tool_advertise, map()}
           | {:tool_execute, map()}
-          | {:summarizer, route()}
           | {:realtime_session, atom()}
 
   @type posture :: %{
@@ -71,31 +70,30 @@ defmodule FermixCore.ComputerHistory.Gate do
 
   @doc """
   Build the per-turn snapshot. `context` is the turn's plain context map; `opts`
-  carries `:macos?` (defaults to `ComputerHistory.macos?/0`) and `:config` (the
-  history config block, defaults to `Config.current/0`), so tests and the status
-  surfaces inject the platform and the consent posture explicitly instead of
-  depending on the host OS and on live app env.
+  carries `:surfaces?` (whether history can surface in this home at all,
+  defaults to `ComputerHistory.surfaces?/0`: never this host's platform, M97
+  §8.3) and `:config` (the history config block, defaults to
+  `Config.current/0`), so tests and the status surfaces inject the fact and the
+  consent posture explicitly instead of depending on live state.
   """
   @spec snapshot(map(), keyword()) :: Snapshot.t()
   def snapshot(context, opts \\ []) when is_map(context) and is_list(opts) do
-    macos? = Keyword.get(opts, :macos?, ComputerHistory.macos?())
+    operative? = Keyword.get_lazy(opts, :surfaces?, &ComputerHistory.surfaces?/0)
     config = Keyword.get_lazy(opts, :config, &Config.current/0)
-    operative? = macos? and Config.enabled?(config)
     attended? = Access.attended_operator_turn?(context)
 
     chain = Map.get(context, :ordered_routes)
 
-    # `granted` and `summarizer_target` both fold in the default summarizer's
+    # `granted` folds in the default summarizer's
     # provider and the primary (§22.1). This is the only IO-bearing resolution;
     # `allow?/2` stays pure on the result.
-    granted = effective_history_granted(config)
+    granted = effective_history_granted(config, operative?)
     {routes, dropped_hops} = pin_chain(chain, granted, operative? and attended?)
 
     %Snapshot{
       operative?: operative?,
       attended_operator?: attended?,
       granted: granted,
-      summarizer_target: default_summarizer_target(config),
       chain: chain,
       routes: routes,
       dropped_hops: dropped_hops,
@@ -146,14 +144,15 @@ defmodule FermixCore.ComputerHistory.Gate do
   # `remote_summaries` for history to surface in chat. One resolver so recall (the
   # snapshot), the turn chain (pinning) and taint masking
   # (`chain_permits_history?/1`) never disagree about those providers.
-  defp effective_history_granted(config) do
+  defp effective_history_granted(config, surfaces?) do
     base = Config.granted_providers(config)
 
-    # Gated on `enabled?`: the auto-grant is a CONSEQUENCE of running the default
-    # summarizer, not an explicit grant — so it lapses the moment history is
-    # disabled, reverting taint masking to the explicit Tier-2 grants only (§13.6:
-    # a tainted turn must not reach an ungranted-remote provider after disabling).
-    with true <- Config.enabled?(config),
+    # Gated on history surfacing in this home: the auto-grant is a CONSEQUENCE
+    # of running the default summarizer, not an explicit grant — so it lapses the
+    # moment history is off everywhere, reverting taint masking to the explicit
+    # Tier-2 grants only (§13.6: a tainted turn must not reach an ungranted-remote
+    # provider after disabling).
+    with true <- surfaces?,
          :default_provider <- Config.summarizer(config) do
       base
       |> put_resolved(Config.default_summarizer_provider())
@@ -192,7 +191,11 @@ defmodule FermixCore.ComputerHistory.Gate do
   """
   @spec chain_permits_history?([route()] | nil) :: boolean()
   def chain_permits_history?(routes),
-    do: chain_permitted?(routes, effective_history_granted(Config.current()))
+    do:
+      chain_permitted?(
+        routes,
+        effective_history_granted(Config.current(), ComputerHistory.surfaces?())
+      )
 
   @doc """
   The chain posture the operator surfaces render — `/history status`, the
@@ -206,10 +209,10 @@ defmodule FermixCore.ComputerHistory.Gate do
       chat (the lead may be a fallback: `Selection` skips an unconfigured primary);
     * `:unclassifiable_chain` — a hop names no provider id, so the chain cannot be
       classified at all; a grant would not fix it;
-    * `:off` — history is disabled, or the host is not macOS;
+    * `:off` — history cannot surface in this home (M97 §8.3);
     * `:no_chain` — the provider chain could not be built (a config error).
 
-  `opts` carries `snapshot/2`'s `:macos?`/`:config` seams plus `:routes`, which
+  `opts` carries `snapshot/2`'s `:surfaces?`/`:config` seams plus `:routes`, which
   takes `Selection.ordered_routes/0`'s own return shape so a tree-less CLI verb
   or a test passes a chain instead of resolving one.
   """
@@ -223,7 +226,7 @@ defmodule FermixCore.ComputerHistory.Gate do
       computer_use_origin: :interactive,
       ordered_routes: resolved_chain(routes)
     }
-    |> snapshot(Keyword.take(opts, [:macos?]) ++ [config: config])
+    |> snapshot(Keyword.take(opts, [:surfaces?]) ++ [config: config])
     |> posture(Config.summarizer(config))
   end
 
@@ -307,6 +310,18 @@ defmodule FermixCore.ComputerHistory.Gate do
 
   defp provider_list(providers), do: Enum.map_join(providers, ", ", &to_string/1)
 
+  @doc """
+  Whether `route` is the one a note may be made on under `config` (§9.4,
+  inv. 1b): the derived local route under `local`, else exactly the named or
+  resolved default provider, never a failover to another vendor. Asked wherever
+  a note is made: on the home for a sitting a machine sent, and on a machine
+  that summarizes locally (M97 §8.1). The sitting's arrival is the consent of the
+  machine that recorded it, so no platform or switch of this engine is read.
+  """
+  @spec summarizer_permitted?(route(), keyword()) :: boolean()
+  def summarizer_permitted?(route, config) when is_list(config),
+    do: summarizer_route_permitted?(route, default_summarizer_target(config))
+
   @doc "Whether history may flow into `sink` under `snapshot`. Pure and total."
   @spec allow?(Snapshot.t(), sink()) :: boolean()
   def allow?(snapshot, sink)
@@ -344,14 +359,6 @@ defmodule FermixCore.ComputerHistory.Gate do
 
   def allow?(%Snapshot{} = snapshot, {:tool_execute, ctx}) when is_map(ctx),
     do: consumer_permitted?(snapshot)
-
-  # The summarizer's single pinned route: local under Tier 1/2 (raw stays on
-  # device), or exactly the one named provider under Tier 3. Any other route —
-  # including a failover to a different vendor — is denied (inv. 1b).
-  def allow?(%Snapshot{operative?: false}, {:summarizer, _route}), do: false
-
-  def allow?(%Snapshot{summarizer_target: target}, {:summarizer, route}),
-    do: summarizer_route_permitted?(route, target)
 
   # A realtime voice session advertises the tool only when the voice provider
   # is itself local-or-granted (OpenAI realtime is remote ⇒ Tier 2 grant), on

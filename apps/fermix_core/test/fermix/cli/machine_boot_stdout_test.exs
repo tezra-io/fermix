@@ -54,20 +54,43 @@ defmodule Fermix.CLI.MachineBootStdoutTest do
       assert stderr =~ "contains plaintext TAVILY_API_KEY"
       assert status == 1
     end
+
+    # Always On's retired test switch is on every home that tried Always On
+    # before it shipped. The process names it once, on stderr, however often it
+    # loads the settings: the boot's read in `config/runtime.exs` keeps it
+    # without a word, the reads a verb makes and the ones a daemon repeats on
+    # every poll name nothing, and `Fermix.CLI.main/1` says what the boot read
+    # kept, once.
+    test "a retired table is named once on stderr however often the settings load", ctx do
+      File.write!(Path.join(ctx.home, "config.toml"), "[fermix_core.always_on]\nenabled = true\n")
+
+      loads =
+        "for _load <- 1..3, do: {:ok, _} = FermixCore.Setup.ConfigStore.load_runtime_config(" <>
+          "resolve_secrets: false, supervised: false)"
+
+      {stdout, stderr, status} = run_verb(ctx, ["service", "status", "--json"], loads)
+
+      assert {:ok, envelope} = Jason.decode(String.trim(stdout))
+      assert envelope["error"]["code"] == "foreign_distribution"
+      assert status == 1
+
+      assert length(String.split(stderr, "config.toml [fermix_core.always_on] is retired")) == 2,
+             stderr
+    end
   end
 
   # --- the subprocess -------------------------------------------------------
 
   # `System.cmd/3` can only merge the child's streams or let stderr through to
   # the parent's own, and this test is precisely about telling them apart.
-  defp run_verb(ctx, argv) do
+  defp run_verb(ctx, argv, before \\ ":ok") do
     err_path = Path.join(ctx.root, "stderr.txt")
     script = ~s(err_file=$1; shift; exec "$@" 2> "$err_file")
 
     {stdout, status} =
       System.cmd(
         "sh",
-        ["-c", script, "fermix-machine-boot-stdout", err_path, "mix" | mix_args(argv)],
+        ["-c", script, "fermix-machine-boot-stdout", err_path, "mix" | mix_args(argv, before)],
         cd: umbrella_root(),
         env: [{"MIX_ENV", Atom.to_string(Mix.env())}, {"FERMIX_HOME", ctx.home}],
         stderr_to_stdout: false
@@ -76,13 +99,14 @@ defmodule Fermix.CLI.MachineBootStdoutTest do
     {stdout, File.read!(err_path), status}
   end
 
-  defp mix_args(argv) do
+  # `before` runs in the process ahead of the verb.
+  defp mix_args(argv, before) do
     [
       "run",
       "--no-start",
       "--no-compile",
       "-e",
-      "System.halt(Fermix.CLI.main(System.argv()))",
+      before <> "; System.halt(Fermix.CLI.main(System.argv()))",
       "--"
     ] ++ argv
   end

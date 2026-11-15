@@ -13,6 +13,31 @@ defmodule FermixCore.Home.DeviceLocalTest do
     assert patterns == Enum.uniq(patterns)
   end
 
+  # M97 §4: this computer's own settings (its sandbox, computer use, screen
+  # history, Messages, accessory link and dev plugin folder) are a file of its
+  # own, which no archive carries and a return keeps; an interrupted write of
+  # it, or of config.toml, goes.
+  test "the machine file stays on this machine and a return keeps it" do
+    assert DeviceLocal.excluded?("machine.toml")
+    assert DeviceLocal.kept_through_return?("machine.toml")
+
+    for partial <- ["machine.toml.tmp", "config.toml.tmp"] do
+      assert DeviceLocal.excluded?(partial), partial
+      refute DeviceLocal.kept_through_return?(partial), partial
+    end
+
+    refute DeviceLocal.excluded?("config.toml")
+  end
+
+  # M97 D13: a computer's own key on the file store is a file of that store,
+  # and the store travels; the key never does, nor survives a return.
+  test "a computer's own key in the file store stays here, and only it" do
+    assert DeviceLocal.excluded?("secrets/device.desktop_key")
+    refute DeviceLocal.kept_through_return?("secrets/device.desktop_key")
+    refute DeviceLocal.excluded?("secrets/OPENAI_API_KEY")
+    refute DeviceLocal.excluded?("secrets/device.desktop_key.old")
+  end
+
   test "every entry says whether a return keeps it, and there is no third answer" do
     for %{pattern: pattern, return: return} <- DeviceLocal.excluded() do
       assert return in [:keep, :drop], pattern
@@ -30,7 +55,6 @@ defmodule FermixCore.Home.DeviceLocalTest do
           "auth.json.broken.1793083733",
           "config.toml.pre-m5",
           "device",
-          "device/provision/srv-1.json",
           "device/return.json",
           "snapshots/2026-10-30T02:00:00Z-e5.fxsnap",
           "engine-owner.json",
@@ -54,7 +78,9 @@ defmodule FermixCore.Home.DeviceLocalTest do
           "plugins/compux/1.2.0/macos/Fermix.app/Contents/Info.plist",
           "plugins/stt/bin/macos/fermix-stt",
           "plugins/meetbot/profile/Cookies",
-          "plugins/imessage_helper/1.0.0/macos-universal/x"
+          "plugins/imessage_helper/1.0.0/macos-universal/x",
+          "dev-plugins",
+          "dev-plugins/tesla"
         ] do
       assert DeviceLocal.kept_through_return?(path), path
     end
@@ -66,6 +92,7 @@ defmodule FermixCore.Home.DeviceLocalTest do
           ".move/phase.json",
           "device/desktop.json",
           "device/desktop_key",
+          "secrets/device.desktop_key",
           "candidate/state.json",
           "mobile/candidates.json",
           "mobile/enrollment.json",
@@ -85,6 +112,8 @@ defmodule FermixCore.Home.DeviceLocalTest do
           "mobile/uploads/a.part",
           "mobile/materialized/a.png",
           "acp_identities/peer.json.tmp.2",
+          "accessories/host_key.tmp.9",
+          "accessories/accessories.json.tmp.41",
           "bootstrap/main/IDENTITY.md.tmp-4",
           "plugins/installed/notes/current.tmp",
           "plugins/installed/notes/.1.0.0.replacing",
@@ -177,6 +206,8 @@ defmodule FermixCore.Home.DeviceLocalTest do
           "secrets/.OPENAI_API_KEY.991",
           "acp_identities/peer.json.tmp.2",
           "acp_identities/peer.json.broken.1793083733",
+          "accessories/host_key.tmp.9",
+          "accessories/accessories.json.tmp.41",
           "bootstrap/main/IDENTITY.md.tmp-4",
           "plugins/.staging/x",
           "plugins/run/default.token",
@@ -187,7 +218,9 @@ defmodule FermixCore.Home.DeviceLocalTest do
           "plugins/installed/notes/current.tmp",
           "plugins/installed/notes/.1.0.0.replacing",
           "plugins/evidence/notes/.1.0.0.staging/sig",
-          "workspace/project/run.sock"
+          "workspace/project/run.sock",
+          "dev-plugins/tesla",
+          "dev-plugins/tesla/plugin.json"
         ] do
       assert DeviceLocal.excluded?(path), path
     end
@@ -221,6 +254,8 @@ defmodule FermixCore.Home.DeviceLocalTest do
           "plugins/evidence/notes/1.0.0/sig",
           "plugins/github/skills/github/SKILL.md",
           "acp_identities/peer.json",
+          "accessories/host_key",
+          "accessories/accessories.json",
           "job_runs/job_runs/run-1/output.md",
           "realtime/device_id",
           "browser/artifacts/owner/screenshot/a.png",

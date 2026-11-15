@@ -8,7 +8,7 @@ defmodule Fermix.CLI.HomeCommand do
       fermix home status [--json]
       fermix home snapshots status [--json]
       fermix home snapshots passphrase --passphrase-file PATH [--json]
-      fermix home enroll --code-file PATH [--snapshot-bucket B --snapshot-region R]
+      fermix home enroll --code-file PATH [--snapshot-bucket B --snapshot-region R [--snapshot-instance-role]]
       fermix home candidates [--json]
 
   `export` archives the home this command runs against (`FERMIX_HOME`, default
@@ -44,6 +44,7 @@ defmodule Fermix.CLI.HomeCommand do
   alias Fermix.CLI.SecretInput
   alias FermixCore.Home.Archive
   alias FermixCore.Home.Moved
+  alias FermixCore.Home.Readable
   alias FermixCore.Home.Snapshot
   alias FermixCore.Home.Snapshot.Format
   alias FermixCore.Home.Snapshot.Recipient
@@ -64,7 +65,7 @@ defmodule Fermix.CLI.HomeCommand do
   archives), `:terminal` (the `Fermix.CLI.SecretInput` terminal), `:hello`
   (the daemon probe), `:now` (a 0-arity clock for the moved marker), and the
   host facts `FermixCore.Home.Archive.restore/4` takes (`:host`,
-  `:keyring_usable?`, `:now_ms`).
+  `:keyring_usable?`).
   """
   @spec run([String.t()], keyword()) :: non_neg_integer()
   def run(argv, deps) when is_list(argv) and is_list(deps) do
@@ -80,7 +81,7 @@ defmodule Fermix.CLI.HomeCommand do
   end
 
   defp status_deps(deps),
-    do: Keyword.take(deps, [:home, :client, :terminal, :app_managed?, :always_on])
+    do: Keyword.take(deps, [:home, :client, :terminal, :app_managed?])
 
   defp move_deps(deps), do: Keyword.take(deps, [:home, :client, :now])
 
@@ -179,7 +180,7 @@ defmodule Fermix.CLI.HomeCommand do
   # with the recovery key its passphrase and the header's salt derive; anything
   # else is an archive, as it always was.
   defp restore(file, root, opts, deps) do
-    restore_opts = Keyword.take(deps, [:host, :keyring_usable?, :now_ms])
+    restore_opts = Keyword.take(deps, [:host, :keyring_usable?])
     kind = if Format.snapshot?(file), do: :snapshot, else: :archive
 
     with {:ok, passphrase} <- passphrase(opts, deps, kind),
@@ -198,21 +199,27 @@ defmodule Fermix.CLI.HomeCommand do
     print_rewritten(restored.rewritten)
     print_kept_paths(restored.kept_paths)
 
-    if restored.harness_consent_reset,
-      do: IO.puts("Coding-harness consent does not travel; approve it again here.")
-
     if restored.secret_store_switched do
       IO.puts(
         ~s(This host has no usable keyring, so secrets are kept in files here: secret_store = "file".)
       )
     end
 
-    if restored.imessage_disabled,
-      do: IO.puts("iMessage needs a Mac, so it is turned off here.")
+    if restored.instance_role_dropped,
+      do: IO.puts("The server's S3 bucket stays with the server: a Mac keeps no S3 snapshots.")
+
+    print_left_out(restored.device_settings_dropped)
 
     print_keyring(restored.keyring_secrets, "The archived home kept", "on this host")
-    print_screen_history(restored.screen_history_removed)
     print_reinstall(restored)
+  end
+
+  defp print_left_out([]), do: :ok
+
+  defp print_left_out(keys) do
+    IO.puts(
+      "Settings of the computer the home came from stay there: " <> Enum.join(keys, ", ") <> "."
+    )
   end
 
   defp print_kept_paths([]), do: :ok
@@ -221,15 +228,6 @@ defmodule Fermix.CLI.HomeCommand do
     IO.puts(
       "Kept as they were; review them, they hold paths outside the old home: " <>
         Enum.join(keys, ", ") <> "."
-    )
-  end
-
-  defp print_screen_history(0), do: :ok
-
-  defp print_screen_history(rows) do
-    IO.puts(
-      "Removed #{count(rows, "screen-history row")}: screen history stays on the machine " <>
-        "it describes."
     )
   end
 
@@ -402,14 +400,6 @@ defmodule Fermix.CLI.HomeCommand do
       "(#{inspect(reason)}). Run fermix home mark-moved --to TEXT before it runs again."
   end
 
-  defp sentence({:screen_history_remaining, rows}, _root) do
-    "The archive's screen history holds #{rows} rows stamped after this host's clock, so it " <>
-      "was not cleared. Check this host's clock. Nothing was written."
-  end
-
-  defp sentence({:screen_history, reason}, _root),
-    do: "Screen history could not be cleared from the restored database (#{inspect(reason)})."
-
   defp sentence({:plugin_lockfile, reason}, _root) do
     "The archive's plugin lockfile could not be read (#{inspect(reason)}). Nothing was written."
   end
@@ -424,27 +414,17 @@ defmodule Fermix.CLI.HomeCommand do
 
   defp sentence({:home_not_found, root}, _root), do: "There is no Fermix home at #{root}."
 
-  defp sentence({:too_many_files, count, max}, _root),
-    do: "The home holds #{count} files or more, beyond the #{max} one archive carries."
+  # A home the walk refused, in the words a move's readiness says it in.
+  defp sentence({kind, _count, _max} = reason, _root)
+       when kind in [:too_many_files, :too_many_bytes],
+       do: Archive.collect_sentence(reason)
 
-  defp sentence({:too_many_bytes, bytes, max}, _root),
-    do: "The home holds #{bytes} bytes or more, beyond the #{max} one archive carries."
+  defp sentence({kind, _path, _detail} = reason, _root)
+       when kind in [:unsupported_entry, :unsupported_link],
+       do: Archive.collect_sentence(reason)
 
-  defp sentence({:unsupported_entry, path, type}, _root) do
-    "#{path} in the home is a #{type}, which an archive cannot carry. Move it out of the " <>
-      "home, then export again."
-  end
-
-  defp sentence({:unsupported_link, path, target}, _root) do
-    "#{path} in the home links to #{target}, outside the home, which an archive cannot " <>
-      "carry. Move it out of the home, then export again."
-  end
-
-  defp sentence({:unsupported_name, path}, _root),
-    do: "#{inspect(path)} in the home has a name an archive cannot carry. Rename it."
-
-  defp sentence({:too_deep, path}, _root),
-    do: "#{path} in the home is nested too deep for an archive."
+  defp sentence({kind, _path} = reason, _root) when kind in [:unsupported_name, :too_deep],
+    do: Archive.collect_sentence(reason)
 
   defp sentence({:changed_during_export, path}, _root) do
     "#{path} changed while it was being archived. Make sure nothing runs on this home, " <>
@@ -495,10 +475,8 @@ defmodule Fermix.CLI.HomeCommand do
       "primary. Nothing was written."
   end
 
-  defp sentence({:newer_engine, theirs, ours}, _root) do
-    "Fermix #{theirs} wrote this home, and this is Fermix #{ours}: update Fermix here first, " <>
-      "then restore it. Nothing was written."
-  end
+  defp sentence({:newer_home_format, _theirs, _ours}, _root),
+    do: Readable.refusal_sentence() <> " Nothing was written."
 
   defp sentence({kind, path}, _root)
        when kind in [:corrupt_entry, :missing_entry, :unsafe_path, :device_local_entry] do
@@ -526,7 +504,12 @@ defmodule Fermix.CLI.HomeCommand do
       "old home cannot be moved safely. Nothing was written."
   end
 
-  defp sentence({:file, path, reason}, _root), do: "#{path}: #{describe(reason)}."
+  defp sentence({:history_identity, reason}, _root) do
+    "The restored memory.db could not be opened to give its computer history a new identity " <>
+      "(#{inspect(reason)}), so the copy may be damaged. Nothing was written."
+  end
+
+  defp sentence({:file, _path, _reason} = reason, _root), do: Archive.collect_sentence(reason)
   defp sentence({:tar, name, reason}, _root), do: "Writing #{name} failed: #{inspect(reason)}."
   defp sentence(reason, _root), do: "The command failed: #{inspect(reason)}."
 
@@ -542,7 +525,7 @@ defmodule Fermix.CLI.HomeCommand do
       fermix home status [--json]
       fermix home snapshots status [--json]
       fermix home snapshots passphrase --passphrase-file PATH [--json]
-      fermix home enroll --code-file PATH [--snapshot-bucket B --snapshot-region R]
+      fermix home enroll --code-file PATH [--snapshot-bucket B --snapshot-region R [--snapshot-instance-role]]
       fermix home candidates [--json]
     """)
 

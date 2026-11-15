@@ -24,7 +24,7 @@ defmodule FermixWebWeb.SetupLive.CuesPane do
 
   use FermixWebWeb, :html
 
-  alias FermixCore.Cues.Webhook
+  alias FermixCore.Funnel
   alias FermixCore.Management.Cues.SourceForm
   alias FermixCore.Management.Cues.WatcherRow
   alias FermixWebWeb.SetupLive.Components
@@ -322,7 +322,11 @@ defmodule FermixWebWeb.SetupLive.CuesPane do
       With Tailscale Funnel, this command puts this one path on the internet, and the address
       is your machine's ts.net name followed by the path:
     </p>
-    <.copy_block id="cues-reveal-funnel" text={funnel_command(@path, @port)} label="Copy command" />
+    <.copy_block
+      id="cues-reveal-funnel"
+      text={Funnel.mount_command(@path, @port)}
+      label="Copy command"
+    />
     <p class="text-xs leading-5 text-base-content/60">
       Funnel opens port 443 as a whole: whatever else <code class="font-mono">tailscale serve</code>
       has on 443 becomes public too, so check <code class="font-mono">tailscale funnel status</code>
@@ -332,9 +336,6 @@ defmodule FermixWebWeb.SetupLive.CuesPane do
   end
 
   defp door_url(path, port), do: "http://127.0.0.1:#{port}#{path}"
-
-  defp funnel_command(path, port),
-    do: Enum.join(["tailscale" | Webhook.funnel_args(path, port)], " ")
 
   # --- settings ----------------------------------------------------------------
 

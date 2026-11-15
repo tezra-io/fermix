@@ -89,7 +89,7 @@ defmodule FermixCore.Tools.RecallActivityTest do
 
     # The platform is injected so the topic validation, not the macOS gate, is
     # what answers — otherwise this case is a gate refusal on Linux CI.
-    permitted = Map.put(context, :computer_history_gate, Gate.snapshot(context, macos?: true))
+    permitted = Map.put(context, :computer_history_gate, Gate.snapshot(context, surfaces?: true))
 
     assert {:ok, result} = RecallActivity.execute(%{"about" => "***"}, permitted)
 
@@ -97,7 +97,7 @@ defmodule FermixCore.Tools.RecallActivityTest do
     assert result.error =~ "word"
 
     # The paired fail-closed branch: same call, non-macOS snapshot, gate refusal.
-    refused = Map.put(context, :computer_history_gate, Gate.snapshot(context, macos?: false))
+    refused = Map.put(context, :computer_history_gate, Gate.snapshot(context, surfaces?: false))
 
     assert {:ok, off_platform} = RecallActivity.execute(%{"about" => "***"}, refused)
 

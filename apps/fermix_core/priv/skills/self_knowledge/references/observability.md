@@ -35,6 +35,7 @@ On an app-managed Mac the bundled `fermix logs` returns one bounded page and ref
 | Realtime voice call | `session:<n>` |
 | GPT-Live call | `voice_live:<n>`; each delegated task is its own run with the call as `parent_session` |
 | computer-use session | `cua_<id>` |
+| a request from the home's server, on the computer that runs it | `inv_<id>`, on that computer's own trace, with the server turn that asked as `parent_session` |
 | meeting | `meeting_<id>_<ts>` |
 
 ## Content capture

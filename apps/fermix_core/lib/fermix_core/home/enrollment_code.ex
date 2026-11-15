@@ -1,11 +1,17 @@
 defmodule FermixCore.Home.EnrollmentCode do
   @moduledoc """
-  The enrollment code a primary opens for a candidate primary (M75 §7.1):
+  The enrollment code a primary opens for a candidate primary (M75 §7.1),
+  or for a computer that joins the home (M97 §3.1):
 
       fxenroll1.<base64url(JSON)>
 
   The JSON is `{"v": 1, "secret", "gateway_pk", "node_id", "relays",
-  "relays_rev", "name", "expires_at"}`: the window's 32-byte secret and the
+  "relays_rev", "name", "expires_at"}` for a candidate, and the same with
+  `"v": 2` and `"purpose": "computer"` for a computer: the code's
+  `purpose`, `:candidate` or `:computer`. A candidate's code stays version 1,
+  so a server's first boot already in the field still reads it; a decoder
+  that knows only version 1 refuses a computer's on `v`, by name. The rest
+  is the window's 32-byte secret and the
   primary's X25519 gateway key (standard base64 with padding, as the mobile
   wire carries keys), its iroh endpoint id (64 lowercase hex digits), the
   relays it listens on (1 to 8, in the wire's `{url, quic_port}` shape) and
@@ -24,6 +30,9 @@ defmodule FermixCore.Home.EnrollmentCode do
 
   @prefix "fxenroll1."
   @version 1
+  # A computer's code: a version of its own, which names its purpose.
+  @computer_version 2
+  @purposes [:candidate, :computer]
   @max_code_bytes 2_048
   @max_name_bytes 128
   @max_relays 8
@@ -35,8 +44,12 @@ defmodule FermixCore.Home.EnrollmentCode do
   @typedoc "A relay in the mobile wire's shape."
   @type relay :: %{required(String.t()) => String.t() | pos_integer()}
 
+  @typedoc "What a code is for: a candidate primary, or a computer that joins."
+  @type purpose :: :candidate | :computer
+
   @typedoc "What a code carries."
   @type t :: %{
+          purpose: purpose(),
           secret: <<_::256>>,
           gateway_pk: <<_::256>>,
           node_id: String.t(),
@@ -53,13 +66,19 @@ defmodule FermixCore.Home.EnrollmentCode do
   @doc """
   The code for `facts`: `{:ok, code}`, or `{:error, {:invalid_code, field}}`
   for a fact out of its bounds and `{:error, :code_too_long}` past
-  #{@max_code_bytes} characters.
+  #{@max_code_bytes} characters. `facts.purpose` is `:candidate` when it
+  names none.
   """
-  @spec encode(t()) :: {:ok, String.t()} | {:error, {:invalid_code, String.t()} | :code_too_long}
+  @spec encode(map()) ::
+          {:ok, String.t()} | {:error, {:invalid_code, String.t()} | :code_too_long}
   def encode(%{expires_at: %DateTime{} = expires_at} = facts) do
+    purpose = Map.get(facts, :purpose, :candidate)
+    true = purpose in @purposes
+
     json =
-      Jason.encode!(%{
-        "v" => @version,
+      purpose
+      |> versioned()
+      |> Map.merge(%{
         "secret" => Base.encode64(Map.fetch!(facts, :secret)),
         "gateway_pk" => Base.encode64(Map.fetch!(facts, :gateway_pk)),
         "node_id" => Map.fetch!(facts, :node_id),
@@ -68,6 +87,7 @@ defmodule FermixCore.Home.EnrollmentCode do
         "name" => Map.fetch!(facts, :name),
         "expires_at" => expires_at |> DateTime.truncate(:second) |> DateTime.to_iso8601()
       })
+      |> Jason.encode!()
 
     code = @prefix <> Base.url_encode64(json, padding: false)
 
@@ -76,20 +96,25 @@ defmodule FermixCore.Home.EnrollmentCode do
          do: {:ok, code}
   end
 
+  defp versioned(:candidate), do: %{"v" => @version}
+  defp versioned(:computer), do: %{"v" => @computer_version, "purpose" => "computer"}
+
   defp within_bound(code) when byte_size(code) <= @max_code_bytes, do: :ok
   defp within_bound(_code), do: {:error, :code_too_long}
 
   @doc """
-  The facts a code carries, or `{:error, {:invalid_code, what}}` naming the
-  first thing that is not as `encode/1` writes it. Never echoes the code.
+  The facts a code carries, its purpose among them, or `{:error,
+  {:invalid_code, what}}` naming the first thing that is not as `encode/1`
+  writes it. Never echoes the code.
   """
   @spec decode(term()) :: {:ok, t()} | {:error, {:invalid_code, String.t()}}
   def decode(text) when is_binary(text) do
     with {:ok, body} <- body(String.trim(text)),
          {:ok, json} <- base64url(body),
          {:ok, map} <- json_object(json),
-         :ok <- version(map) do
-      fields(map)
+         {:ok, purpose} <- version(map),
+         {:ok, facts} <- fields(map) do
+      {:ok, Map.put(facts, :purpose, purpose)}
     end
   end
 
@@ -114,7 +139,11 @@ defmodule FermixCore.Home.EnrollmentCode do
     end
   end
 
-  defp version(%{"v" => @version}), do: :ok
+  defp version(%{"v" => @version} = map) when not is_map_key(map, "purpose"),
+    do: {:ok, :candidate}
+
+  defp version(%{"v" => @computer_version, "purpose" => "computer"}), do: {:ok, :computer}
+  defp version(%{"v" => @computer_version}), do: invalid("purpose")
   defp version(_map), do: invalid("v")
 
   defp fields(map) do

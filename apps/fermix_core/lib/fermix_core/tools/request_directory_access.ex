@@ -22,6 +22,8 @@ defmodule FermixCore.Tools.RequestDirectoryAccess do
 
   alias FermixCore.Capabilities.Builtin.Tool
   alias FermixCore.Capabilities.UntrustedContent
+  alias FermixCore.Computers.Capabilities.Files
+  alias FermixCore.Computers.Computer
   alias FermixCore.Sandbox.Config
   alias FermixCore.Sandbox.ConfigMutation
   alias FermixCore.Sandbox.Mode
@@ -131,6 +133,22 @@ defmodule FermixCore.Tools.RequestDirectoryAccess do
   def execute(args, context) when is_map(args) and is_map(context) do
     Support.run(name(), context, fn -> do_execute(args, context) end)
   end
+
+  # A folder on one of the home's computers is allowed only at that computer
+  # (M97 §7.2): the server never widens a computer's sandbox, so it asks for
+  # nothing.
+  @impl true
+  def computer_capability, do: Files
+
+  @doc "What the model reads when it asks for a folder on a computer of the home."
+  @spec at_computer_sentence(String.t()) :: String.t()
+  def at_computer_sentence(name) when is_binary(name),
+    do:
+      "Folders on #{name} are allowed only at #{name}: someone there adds the folder to its " <>
+        "sandbox. Fermix cannot ask for it from here."
+
+  defp do_execute(_args, %{computer: %Computer{name: name}}),
+    do: {:ok, Tool.error(at_computer_sentence(name))}
 
   defp do_execute(args, context) do
     with {:ok, path} <- Support.required_string(args, "path"),

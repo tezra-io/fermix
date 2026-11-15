@@ -40,6 +40,20 @@ defmodule FermixChannels.Desktop.Tunnel do
   nothing, as on any engine. Every other line, the hello included, is the
   primary's.
 
+  ## Files the app attaches, taken here (companion protocol 7, M97 §9.3)
+
+  The app writes a file it attaches on this computer, so this engine takes
+  it (`Desktop.Uploads`, D22): on a connection whose hello declared version
+  7 or later, the primary's `server_hello` gains `attachments`, this
+  computer's inbox and the server's bound on a file, while the server takes
+  a computer's uploads; each `attach_file` is then answered here, never
+  passed on, by `attach_status` `present` once the server holds the file,
+  or `error: request_failed` with the sentence and the `attach_id`, as a
+  primary answers it. The `msg` that names it goes to the primary, which
+  finds the file in its own store. Where the server takes no upload from a
+  computer the hello offers none, and an `attach_file` sent anyway is the
+  primary's to refuse, as before.
+
   ## Always On, answered here (companion protocol 6)
 
   The app's Always On pane reads this computer's own `home.status`, so on a
@@ -60,6 +74,7 @@ defmodule FermixChannels.Desktop.Tunnel do
   alias FermixChannels.Companion.MediaGrants
   alias FermixChannels.Desktop.Relay
   alias FermixChannels.Desktop.Relay.Media
+  alias FermixChannels.Desktop.Uploads
   alias FermixCore.Companion.Protocol
   alias FermixCore.Home.StatusWatch
   alias FermixCore.SocketPeer
@@ -67,6 +82,7 @@ defmodule FermixChannels.Desktop.Tunnel do
   @profile "main"
   @handover_timeout_ms 5_000
   @media_events ~w(media_fetch media_release)
+  @local_events @media_events ++ ~w(attach_file)
 
   @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(opts) when is_list(opts), do: GenServer.start_link(__MODULE__, opts)
@@ -85,6 +101,10 @@ defmodule FermixChannels.Desktop.Tunnel do
       media_grants: Keyword.get(opts, :media_grants, MediaGrants),
       media_grants_module: Keyword.get(opts, :media_grants_module, MediaGrants),
       staging: Keyword.fetch!(opts, :staging),
+      # This computer's own inbox (`Desktop.Uploads`), nil where none runs;
+      # whether the app was offered it, once the primary's hello passed.
+      uploads: Keyword.get(opts, :uploads),
+      attachments?: false,
       # This engine's Always On watch, for a version 6 app (moduledoc).
       status_watch: Keyword.get(opts, :status_watch, StatusWatch),
       watching: false,
@@ -129,6 +149,7 @@ defmodule FermixChannels.Desktop.Tunnel do
   def handle_info({:relay_line, channel, line}, %{channel: channel} = state) do
     case from_primary(line, state) do
       {:pass, state} -> relay_line(line, state)
+      {:rewrite, rewritten, state} -> relay_line(rewritten, state)
       {:drop, state} -> {:noreply, state}
     end
   end
@@ -152,6 +173,9 @@ defmodule FermixChannels.Desktop.Tunnel do
     do: refuse("primary_unreachable", "Fermix lost its link to the server.", state)
 
   def handle_info({:relay_media, ref, result}, state), do: media_answer(ref, result, state)
+
+  def handle_info({:upload_done, attach_id, outcome}, state),
+    do: reply(upload_answer(attach_id, outcome), state)
 
   def handle_info(message, state) do
     Logger.debug("desktop tunnel ignored #{inspect(message)}")
@@ -242,15 +266,19 @@ defmodule FermixChannels.Desktop.Tunnel do
     case local(line, state) do
       {:ok, %{type: "media_fetch", payload: payload}} -> media_fetch(payload, state)
       {:ok, %{type: "media_release", payload: payload}} -> media_release(payload, state)
+      {:ok, %{type: "attach_file", payload: payload}} -> attach_file(payload, state)
       :primary -> forward(line, state)
     end
   end
 
-  defp local(line, %{version: version}) when is_integer(version) do
-    with true <- String.contains?(line, "media_"),
-         {:ok, %{type: type} = event} when type in @media_events <-
+  # An `attach_file` is this computer's only once its hello offered the app
+  # this computer's inbox; before that, or with none, it is the primary's.
+  defp local(line, %{version: version} = state) when is_integer(version) do
+    with true <- String.contains?(line, "media_") or String.contains?(line, "attach_file"),
+         {:ok, %{type: type} = event} when type in @local_events <-
            Protocol.decode_client_event(line),
-         true <- Protocol.client_event_version(type) <= version do
+         true <- Protocol.client_event_version(type) <= version,
+         true <- type != "attach_file" or state.attachments? do
       {:ok, event}
     else
       _primary -> :primary
@@ -288,14 +316,29 @@ defmodule FermixChannels.Desktop.Tunnel do
   end
 
   # Only two of the primary's lines are this tunnel's to read (moduledoc):
-  # its own Always On notice, dropped, and its hello to a version 6 app.
+  # its own Always On notice, dropped, and its hello to a version 6 app,
+  # which gains this computer's inbox for a version 7 one.
   defp from_primary(line, state) do
     case primary_type(line, state) do
       "home_status_changed" -> {:drop, server_moved(state)}
-      "server_hello" -> {:pass, watch_home(state)}
+      "server_hello" -> offer_attachments(line, watch_home(state))
       _other -> {:pass, state}
     end
   end
+
+  defp offer_attachments(line, %{uploads: uploads, version: version} = state)
+       when uploads != nil and is_integer(version) do
+    with true <- version >= Protocol.client_event_version("attach_file"),
+         {:ok, offer} <- Uploads.offer(uploads),
+         {:ok, %{"type" => "server_hello"} = hello} <- Jason.decode(line) do
+      {:rewrite, Jason.encode!(Map.put(hello, "attachments", offer)),
+       %{state | attachments?: true}}
+    else
+      _none -> {:pass, state}
+    end
+  end
+
+  defp offer_attachments(_line, state), do: {:pass, state}
 
   defp primary_type(line, state) do
     if String.contains?(line, "home_status_changed") or hello_due?(line, state) do
@@ -306,19 +349,30 @@ defmodule FermixChannels.Desktop.Tunnel do
     end
   end
 
-  defp hello_due?(line, %{watching: false, status_watch: watch, version: version})
-       when watch != nil and is_integer(version),
+  defp hello_due?(line, %{watching: false, attachments?: false, version: version} = state)
+       when is_integer(version),
        do:
-         version >= Protocol.server_event_version("home_status_changed") and
+         (watch_due?(state) or (state.uploads != nil and version >= attach_version())) and
            String.contains?(line, "server_hello")
 
   defp hello_due?(_line, _state), do: false
 
+  defp watch_due?(%{status_watch: watch, version: version}),
+    do: watch != nil and version >= Protocol.server_event_version("home_status_changed")
+
+  defp attach_version, do: Protocol.client_event_version("attach_file")
+
   # Before the hello reaches the app, so the watch's first word follows it.
-  defp watch_home(state) do
-    :ok = StatusWatch.subscribe(state.status_watch, self())
-    %{state | watching: true}
+  defp watch_home(%{watching: false} = state) do
+    if watch_due?(state) do
+      :ok = StatusWatch.subscribe(state.status_watch, self())
+      %{state | watching: true}
+    else
+      state
+    end
   end
+
+  defp watch_home(state), do: state
 
   defp server_moved(%{status_watch: nil} = state), do: state
 
@@ -326,6 +380,20 @@ defmodule FermixChannels.Desktop.Tunnel do
     :ok = StatusWatch.changed(state.status_watch, :server)
     state
   end
+
+  # -- attachments (M97 §9.3) -------------------------------------------------------
+
+  defp attach_file(payload, state) do
+    :ok = Uploads.take(state.uploads, payload, self())
+    {:cont, state}
+  end
+
+  defp upload_answer(attach_id, :present),
+    do: {"attach_status", %{"attach_id" => attach_id, "status" => "present"}}
+
+  defp upload_answer(attach_id, {:error, sentence}),
+    do:
+      {"error", %{"reason" => "request_failed", "message" => sentence, "attach_id" => attach_id}}
 
   # -- media ---------------------------------------------------------------------
 

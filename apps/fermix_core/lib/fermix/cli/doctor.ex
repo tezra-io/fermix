@@ -130,6 +130,8 @@ defmodule Fermix.CLI.Doctor do
       Checks.meetings(),
       Checks.realtime(),
       Checks.mobile(),
+      Checks.server_link(),
+      Checks.s3_backups(),
       Checks.imessage_helper(),
       Checks.imessage_permissions(),
       Checks.acp(),
@@ -137,6 +139,7 @@ defmodule Fermix.CLI.Doctor do
       Checks.computer_use_background(),
       Checks.computer_history(),
       Checks.browser_disclaim(),
+      Checks.accessories(),
       Checks.harness(),
       Checks.skill_curation(),
       Checks.plugins()

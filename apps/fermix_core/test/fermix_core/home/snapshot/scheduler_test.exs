@@ -107,9 +107,10 @@ defmodule FermixCore.Home.Snapshot.SchedulerTest do
     assert hidden(home) == []
   end
 
-  # Companion protocol 6: a finished run moves the newest backup the Always On
-  # summary reads, so it tells the watch, once the status file holds it.
-  test "a finished run tells the Always On watch, after the status holds it",
+  # Companion protocol 6: the Always On summary runs while a backup does and
+  # reads the newest backup, so a run tells the watch as it starts, and again
+  # once the status file holds its end.
+  test "a run tells the Always On watch as it starts, and after the status holds its end",
        %{home: home} = context do
     test = self()
 
@@ -128,6 +129,8 @@ defmodule FermixCore.Home.Snapshot.SchedulerTest do
     advance(context, 300)
     send(scheduler, {:tick, token})
 
+    assert_receive {:status_changed, {:ok, started}}, @wait
+    refute Map.has_key?(started.targets, "fake")
     assert_receive {:status_changed, {:ok, status}}, @wait
     assert %{last_verified: %{epoch: 2}} = status.targets["fake"]
     refute_received {:status_changed, _again}
@@ -211,6 +214,39 @@ defmodule FermixCore.Home.Snapshot.SchedulerTest do
     assert {:ok, %{run_at_boot: false}} = Status.read(home)
   end
 
+  # The desktops are a target the scheduler cannot name when it starts (the
+  # channels' device store comes up after it): the first boot after a move
+  # still runs at once, as soon as a target can take it.
+  test "the first boot after a move with no target yet runs at once when one comes",
+       %{home: home, config: config, pair: pair} = context do
+    :ok = Status.write(home, %{Status.empty() | run_at_boot: true})
+    Agent.update(config, fn _ -> [recipient: Recipient.encode(pair), interval_hours: 6] end)
+    scheduler = start!(context)
+
+    assert %{next_run_at: nil} = Scheduler.info(scheduler)
+    refute_received {:planned, _tick, _delay}
+
+    Agent.update(config, fn _ -> configured(pair, "kept") end)
+    :ok = Scheduler.targets_changed(scheduler)
+
+    assert_receive {:planned, {:tick, token}, 0}
+    send(scheduler, {:tick, token})
+    assert_receive {:stored, _snapshot, _bytes}, @wait
+    assert {:ok, %{run_at_boot: false}} = Status.read(home)
+  end
+
+  test "a target that comes later plans from the last attempt, never sooner than the delay",
+       %{config: config, pair: pair} = context do
+    Agent.update(config, fn _ -> [recipient: Recipient.encode(pair), interval_hours: 6] end)
+    scheduler = start!(context)
+    refute_received {:planned, _tick, _delay}
+
+    Agent.update(config, fn _ -> configured(pair, "kept") end)
+    :ok = Scheduler.targets_changed(scheduler)
+
+    assert_receive {:planned, {:tick, _token}, 300_000}
+  end
+
   test "a restart plans from the last attempt, never sooner than the boot delay",
        %{home: home} = context do
     last = %{
@@ -260,6 +296,30 @@ defmodule FermixCore.Home.Snapshot.SchedulerTest do
 
     assert Scheduler.run_now(scheduler) == {:error, :not_configured}
     assert %{running: false, next_run_at: nil} = Scheduler.info(scheduler)
+  end
+
+  # D18: the targets are S3 and the desktops on an Always On server's
+  # primary, and none anywhere else, so a Mac primary whose settings name a
+  # bucket schedules nothing and writes nothing.
+  test "an Always On server's primary writes to S3 and its desktops; no other primary to any" do
+    assert Scheduler.targets(:server) ==
+             [
+               FermixCore.Home.Snapshot.S3
+               | Application.fetch_env!(:fermix_core, :snapshot_targets)
+             ]
+
+    assert Scheduler.targets({:not_server, :macos}) == []
+    assert Scheduler.targets({:not_server, :no_desktop}) == []
+  end
+
+  test "a Mac primary with a bucket in its settings schedules nothing and writes nothing",
+       context do
+    scheduler = start!(context, targets: Scheduler.targets({:not_server, :macos}))
+
+    refute_received {:planned, _message, _delay}
+    assert %{next_run_at: nil, running: false} = Scheduler.info(scheduler)
+    assert Scheduler.run_now(scheduler) == {:error, :not_configured}
+    refute_received {:stored, _snapshot, _bytes}
   end
 
   test "a stale tick does nothing", context do
@@ -407,7 +467,7 @@ defmodule FermixCore.Home.Snapshot.SchedulerTest do
     test = self()
     %{home: home, clock: clock, config: config} = context
 
-    opts =
+    defaults =
       [
         name: nil,
         home: home,
@@ -419,9 +479,9 @@ defmodule FermixCore.Home.Snapshot.SchedulerTest do
           make_ref()
         end,
         run_opts: [test: test, host: "macos-aarch64"]
-      ] ++ extra
+      ]
 
-    start_supervised!({Scheduler, opts})
+    start_supervised!({Scheduler, Keyword.merge(defaults, extra)})
   end
 
   defp configured(pair, bucket),

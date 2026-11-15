@@ -237,13 +237,14 @@ defmodule FermixCore.Agents.SkillRegistryTest do
            name: :"classifier_plugin_#{System.unique_integer([:positive])}",
            skills_dir: local,
            core_dir: nil,
-           plugin_skill_dirs: [plugin_skills],
+           plugin_skill_dirs: [{"fixture_plugin", plugin_skills}],
            seed_defaults: false},
           id: :"classifier_plugin_child_#{System.unique_integer([:positive])}"
         )
 
       [definition] = SkillRegistry.list_detailed(registry)
       assert definition.trust == :guest
+      assert definition.plugin == "fixture_plugin"
     end
 
     test "enabled bundled plugin skills seed into the workspace plugins dir" do
@@ -288,6 +289,7 @@ defmodule FermixCore.Agents.SkillRegistryTest do
       [definition] = SkillRegistry.list_detailed(registry)
       assert definition.name == "google-calendar"
       assert definition.trust == :guest
+      assert definition.plugin == "google_calendar"
       assert definition.source_path == skill_path
       assert File.exists?(skill_path)
 

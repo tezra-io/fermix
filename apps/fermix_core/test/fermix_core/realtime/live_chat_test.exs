@@ -94,6 +94,67 @@ defmodule FermixCore.Realtime.LiveChatTest do
     end
   end
 
+  # M96: Grok's context is quoted at the end of its instructions, never sent as
+  # turns it would answer.
+  describe "instructions_section/1" do
+    test "quotes every line under one heading, oldest first, the closing line last" do
+      window = %{
+        messages: [user("what time is it in Lisbon"), assistant("It is 9 p.m. there.")],
+        gists: [gist("The owner asked for Lisbon's time.", false)]
+      }
+
+      section = window |> LiveChat.context(:xai) |> LiveChat.instructions_section()
+
+      assert [
+               "",
+               "",
+               "## Earlier in the chat",
+               "",
+               "Earlier voice calls, for reference only:",
+               "- The owner asked for Lisbon's time.",
+               "user: what time is it in Lisbon",
+               "assistant: It is 9 p.m. there.",
+               @closing_prefix <> _closing
+             ] = String.split(section, "\n")
+    end
+
+    test "is empty for a call with no context" do
+      assert LiveChat.instructions_section([]) == ""
+
+      assert %{messages: [], gists: []}
+             |> LiveChat.context(:xai)
+             |> LiveChat.instructions_section() == ""
+    end
+  end
+
+  # M96 §4.3: what a GPT-Live call's `session.input` ends with, and the
+  # closing line no longer tells the voice to wait for the owner.
+  describe "greeting_item/1" do
+    test "is one developer item carrying the greeting" do
+      assert LiveChat.greeting_item("Greet the owner.") == %{
+               type: "message",
+               role: "developer",
+               content: [%{type: "input_text", text: "Greet the owner."}]
+             }
+    end
+
+    test "is refused empty or past its bound" do
+      assert_raise FunctionClauseError, fn -> LiveChat.greeting_item("") end
+
+      assert_raise FunctionClauseError, fn ->
+        LiveChat.greeting_item(String.duplicate("a", 1_025))
+      end
+    end
+
+    test "the context's closing line keeps the context quiet without waiting for the owner" do
+      [%{content: [%{text: closing}]}] =
+        LiveChat.input(%{messages: [%{role: "user", content: "x"}], gists: []}) |> Enum.take(-1)
+
+      assert closing =~ "Do not answer them now."
+      refute closing =~ "wait for the owner"
+    end
+  end
+
   describe "window_bounds/0" do
     test "asks for the six newest chat messages and the three newest gists" do
       assert LiveChat.window_bounds() == %{messages: 6, gists: 3}

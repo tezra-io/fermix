@@ -31,6 +31,10 @@
 - **`/pause`** makes the session refuse actions (checked at classification and again at execution) while staying resumable; **`/resume`** hands it back. `/pause` reports what the helper confirmed: paused, paused with one action still finishing (a sent action cannot be recalled), or that the helper was shut down because it did not confirm. It stops a drag part way and releases held keys and buttons. `/pause`, `/resume` and shutdown are answered while an action is running.
 - **`/stop`** cancels turns, not this session: `/pause` is how the owner takes the machine back. Ending the conversation or a helper reset releases held keys and buttons; a helper killed outright releases nothing.
 
+## On a computer of the home (Always On)
+
+On an Always On server, `computer_use` also drives the screen of a linked computer that offers it, by naming it in `computer` (or with no name, where the server has no screen and one computer offers its own): the session stays on the server, and that computer runs each step with its own helper. There the turn must be the owner's own chat or call, the access level is that computer's sandbox mode, courtesy reads its idle signal, and its mark's **Stop** or its **Your screen** switch ends the session at once. The whole picture: skill_view(name: "self-knowledge", file: "computers"), *A computer's screen*.
+
 ## What an action reports
 
 - A pointer action names the image (`observation_id`) its coordinates were read in. The helper keeps the last few images for about half a minute and re-reads display geometry before each action, so a replaced, expired or foreign id, or a point outside its image, is refused: take a fresh screenshot. A point plausible on both a zoomed image and the full screen is refused as ambiguous until re-sent with `confirm_grid: true`.

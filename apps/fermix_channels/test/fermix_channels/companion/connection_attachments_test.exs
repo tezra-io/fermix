@@ -6,8 +6,9 @@ defmodule FermixChannels.Companion.ConnectionAttachmentsTest do
   store under a temporary root and removes it before the answer, and a `msg`
   naming it reaches its turn with its attachments while its user's row
   carries their media refs. Each refusal is the inbox's sentence naming the
-  attach id, the connection kept; version 6, a connection the daemon started
-  and an engine in the device role take no file. Only the Gateway and the
+  attach id, the connection kept; a connection the daemon started and an
+  engine in the device role take no file. Every version in the window,
+  {7, 8}, takes files; version 6 is refused at its hello. Only the Gateway and the
   settlement owner are stand-ins.
   """
   use ExUnit.Case, async: true
@@ -144,14 +145,14 @@ defmodule FermixChannels.Companion.ConnectionAttachmentsTest do
   describe "the hello" do
     test "the owner's connection is offered the inbox and the store's bound, on either version",
          ctx do
-      for version <- [6, 7] do
+      for version <- [7, 8] do
         client = connect(ctx.socket_path)
         send_line(client, %{"type" => "client_hello", "protocol_version" => version})
 
         assert recv(client) == %{
                  "type" => "server_hello",
-                 "min_version" => 6,
-                 "max_version" => 7,
+                 "min_version" => 7,
+                 "max_version" => 8,
                  "primary_epoch" => 2,
                  "role" => "primary",
                  "commands" => CommandRegistry.catalog(),
@@ -365,28 +366,23 @@ defmodule FermixChannels.Companion.ConnectionAttachmentsTest do
       assert {:error, :unknown_attachment} = MediaStore.attachment(ctx.store, "mac-att-1")
     end
 
-    test "a version 6 connection does not have attach_file", ctx do
-      client = hello(ctx.socket_path, 6)
-      path = write_inbox!(ctx, "mac-att-1", @picture)
+    test "a version 8 connection takes a file as version 7 does", ctx do
+      client = hello(ctx.socket_path, 8)
+      _path = write_inbox!(ctx, "mac-att-1", @picture)
 
       send_line(client, attach_file("mac-att-1"))
 
-      assert recv(client) == %{
-               "type" => "error",
-               "reason" => "unknown_event",
-               "event" => "attach_file"
-             }
+      assert %{"type" => "attach_status", "attach_id" => "mac-att-1", "status" => "present"} =
+               recv(client)
 
-      assert closed?(client)
-      assert {:error, :unknown_attachment} = MediaStore.attachment(ctx.store, "mac-att-1")
-      assert File.exists?(path)
+      assert {:ok, _attachment} = MediaStore.attachment(ctx.store, "mac-att-1")
     end
   end
 
   describe "a message naming files" do
     test "reaches its turn with its attachments, and its row carries their media refs", ctx do
-      client = hello(ctx.socket_path, 7)
-      watcher = hello(ctx.socket_path, 6)
+      client = hello(ctx.socket_path, 8)
+      watcher = hello(ctx.socket_path, 7)
       _path = write_inbox!(ctx, "mac-att-1", @picture)
       send_line(client, attach_file("mac-att-1"))
       assert %{"type" => "attach_status"} = recv(client)
@@ -446,12 +442,7 @@ defmodule FermixChannels.Companion.ConnectionAttachmentsTest do
       assert_open(client)
     end
 
-    test "is refused on version 6 and from a connection the daemon started", ctx do
-      old = hello(ctx.socket_path, 6)
-      send_line(old, message("mac-42", "look", ["mac-att-1"]))
-      assert %{"type" => "error", "reason" => "attachments_unsupported"} = recv(old)
-      assert closed?(old)
-
+    test "is refused from a connection the daemon started", ctx do
       restart_endpoint(ctx, daemon_os_pid: ParentProcess.os_pid())
       agent = hello(ctx.socket_path, 7)
       send_line(agent, message("agent-1", "look", ["mac-att-1"]))

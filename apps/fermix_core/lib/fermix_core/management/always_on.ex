@@ -5,9 +5,14 @@ defmodule FermixCore.Management.AlwaysOn do
   `needs`, asks its `confirm`, and sends the action's id, the key it was
   drawn with and the input (`AlwaysOn.Input`); `act/2` runs the step and
   answers `{summary, result}`: the summary after it, and the step's result
-  (`own_server`: `{code, expires_at, command}`, the code answered once and
-  the command carrying none; `move_now` and `try_again`: `{move_id}`;
-  otherwise null).
+  (`own_server`: `{code, expires_at, command, sentence, tailscale}`, the code
+  answered once, the command carrying none, `sentence` the one the code is
+  shown with (the systems it takes and until when it works, in the owner's
+  zone), and `tailscale` the optional step that also joins the server to the
+  owner's tailnet, `{label, sentence, command, url}`, folded under `label`
+  with its docs page; `move_now` and `try_again`: `{move_id}`;
+  `restart_server`: the server's `{when, wait_s, sentence}`; otherwise
+  null).
 
   **One rule for "the owner saw this".** Acts run one at a time per engine,
   in this process, and each reads the summary first: one that does not offer
@@ -19,70 +24,100 @@ defmodule FermixCore.Management.AlwaysOn do
   waiting (its deadline, `deadline_ms/0`, passed while it queued) is not run.
 
   **The steps.** Placement is decided here: the computer that sets Always On
-  up runs every step itself; a linked desktop (`:primary_forward`) runs what
-  its own ledger holds and sends its server's steps over the link as the
-  rail-only methods (`Management.Placement`).
+  up runs every step itself; a linked desktop (`:primary_forward`) runs a
+  move back and Restore here itself and sends its server's steps over the
+  link as the rail-only methods (`Management.Placement`).
 
-    * `paste_token`: `Provision.connect/2` with `input.provider`, or the one
-      provider offered.
-    * `create_server`, `replace_server` (the desktop's create), `create_in`
-      (the failure's size at its next place) and `start_again` (one job:
-      what stands is deleted, then a server of its size and place is
-      created, else of the failure's), with `replace` on a linked desktop:
-      the create job.
-    * `turn_on`, `restart_server`: the power job. `delete_server`: the delete
-      job.
-    * `cancel`, by what the screen showed: the manual code it offered to
-      cancel is withdrawn; a create that runs is cancelled and, once its run
-      has stopped, what it made is deleted; a server standing is deleted.
-    * `own_server`: a manual code (`HomeMove.enroll_open/2`).
+    * `own_server`: a code (`HomeMove.enroll_open/1`) for the owner's
+      server, answered with the command that installs Fermix there and the
+      one that also joins it to the owner's tailnet, with its sentence
+      (`Copy.own_server_tailscale_command/0`).
+    * `cancel` on the code's screen, and on Connecting your server: the code
+      is withdrawn. On a held server's screen (ready, a review that blocks,
+      or a move undone), Forget this server: the held server is dropped
+      (`Home.Link`'s `forget_candidate/1`), after the owner's confirm, and
+      the screen is off again.
     * `back_up_now` and `check_again`: run here, or on a linked desktop sent
       as `home.snapshots.run` and `home.move.readiness`.
+    * `change_passphrase` (the backup settings' Change, Always On pane
+      §3.12): a new recovery passphrase, `input.recovery_passphrase`, set
+      by `home.snapshots.passphrase` here, or on a linked desktop sent to
+      its server; backups made before keep the key they were written for.
     * `move_now`, `try_again`: the server a move goes to is the engine's
       own rule (`HomeSummary.target/1`). Here the review runs at the press
       unless a ready one under 15 minutes old is kept (`Move.review/3`); a
       block refuses with its sentence, and a warning the confirm did not name
       moves the confirm and the key, so it answers `changed`; then
       `HomeMove.move_start/3` checks or sets the recovery passphrase and
-      restarts the engine. On a linked desktop, `home.move.start` is sent
-      with `keep_as_desktop` false, refused only by the server's own blocks,
-      and this desktop records the replace's move once the server answered
-      (`Provision.move_forwarded/3`); during a move back, the server it goes
-      to is this desktop's own candidate, and the start is recorded in the
-      return's record (`Home.Return`), never as a replace.
+      restarts the engine. On a linked desktop moving back, the server it
+      goes to is this desktop's own candidate: `home.move.start` is sent with
+      `keep_as_desktop` false, refused only by the server's own blocks, and
+      the start is recorded in the return's record (`Home.Return`); once the
+      server took it, the app's call on the server and its uploads end, each
+      told why (`Home.Link`'s `end_for_return/0`, M97 §9.2, §9.3).
     * `move_back` (Always On's move back, its design §9): on a linked
-      desktop, the server opens a copied code for it (`home.enroll.open`,
-      which names this desktop), this desktop's candidate for the home is
-      written beside the moved home (`Home.Candidate.prepare_return/3`,
-      refused as it refuses: an engine that would not start again by itself
-      among them), the return's record with the server's name, the ledger's
-      server and the epoch the link reached, and the candidate's subtree
-      starts beside the link (`Home.Link`'s `start_return/1`; one that does
-      not start leaves neither file). Refused while the server reports a
-      move of its own.
+      desktop, every check of this computer first
+      (`Home.Candidate.returnable/3`, refused as it refuses: an engine that
+      would not start again by itself among them), so a refused one asks the
+      server for nothing; then the server opens a copied code for it
+      (`home.enroll.open`, which names this desktop), this desktop's
+      candidate for the home is written beside the moved home
+      (`Home.Candidate.prepare_return/3`), the return's record with the
+      server's name and the epoch the link reached, and the candidate's
+      subtree starts beside the link (`Home.Link`'s `start_return/1`; one
+      that does not start leaves neither file). A step after the code that
+      does not go through withdraws it (`home.enroll.withdraw`), and a
+      withdraw the server does not take is said after the refusal. Refused
+      while the server reports a move of its own.
     * `cancel` during a move back (offered until the server started the
       move, and again once it undid it): the candidate's subtree stops, the
-      server's copied code is closed (`home.enroll.withdraw {kind: manual}`;
+      server's copied code is closed (`home.enroll.withdraw`;
       one the server cannot be asked to close lapses by itself), and the
       candidate and the record go.
-    * `restore_here` (design §8): the newest copy of the server's snapshots
-      this desktop keeps that the recovery passphrase opens
-      (`Home.LocalReturn.choose/2`; none is the wrong passphrase, before
-      anything else), the request in the return's record, then one job that
-      deletes the server first and restores the copy
-      (`Provision.start_return_restore/2`, `Home.LocalReturn.restore/3`); the
+    * `review_offers` (M97 §7.3; Keep these switches): on a linked computer
+      that moved before M97, whose switches wait for the owner's review:
+      with no `keep_offers`, its switches as they are (set under This
+      computer, the one place they are set), and the recorder as it is;
+      with `keep_offers` (an app that drew the review's ticks), those lines
+      stay on, every other is off and the history line sets the recorder;
+      either way the switches are reviewed (`Computers.Consent.review/3`). `move_now` and `try_again` record their
+      `keep_offers` in the move the same way (`HomeMove.move_start/3`); a
+      `try_again` with none, whose undone screen offers no block, moves with
+      the keep the undone move started with (`Move.undone_keep/1`), never
+      the proposal. An earlier app's `files` and `shell` keep files and
+      commands on only together (`Consent.known/1`, M97 D27).
+    * `add_computer` (M97 §3.1): a code a new computer joins the home with
+      (`home.enroll.open {purpose: computer}`, here on the server, over the
+      link on a linked computer), answered once as `{code, expires_at}`.
+    * `approve_computer` and `deny_computer` (M97 §7.5): the owner's answer
+      to the computer that waits to join, approved with the six digits it
+      shows (`input.sas`, `home.enroll.approve`), which `result` names as
+      `{device_id, name}`, or denied (`home.enroll.deny`). Digits that are
+      not its own deny it, and the code is spent.
+    * `cancel` on a computer joining a home (M97 §3.1): the join ends and
+      this computer is its own home again (`Home.Join.cancel/2`).
+    * `restart_server` (M97 D28c), offered on a linked computer while its
+      server's restart is required: sent as the rail-only `home.restart`,
+      which the server takes after its restart hold
+      (`Home.ServerRestart`); `result` is its answer, `{when, wait_s,
+      sentence}`.
+    * `restore_here` (design §8), offered once the server went silent and
+      pressed once the owner confirmed they deleted or stopped it: the
+      newest copy of the server's snapshots this desktop keeps that the
+      recovery passphrase opens (`Home.LocalReturn.choose/2`; none is the
+      wrong passphrase, before anything else), the return's record, then
+      one job of its own (`home_restore`) that restores the copy
+      (`Home.LocalReturn.restore/3`); Fermix deletes no server, and the
       derived key lives only in that job.
 
-  Every action the summary offers is one of `acts/0`, or one a surface opens
-  itself (`learn_more`, `open_console`, `update`), refused as
-  `invalid_params` on `action`.
+  Every action the summary offers is one of `acts/0`, or the one a surface
+  opens itself (`update`, the app's own update), refused as `invalid_params`
+  on `action`.
 
-  A step that starts a job names it in the ledger first
-  (`Provision.put_action/2`), so the summary the act answers already says
-  the step runs; a start refused after that clears it again, and the job's
-  end clears it otherwise. The job family's busy rule stays the second
-  guard: an act that meets a running read of the provider is refused in
-  words.
+  Restore here keeps its request in the return's record before its job
+  starts, so the summary the act answers already says the restore runs; a
+  start refused takes it back, and the job's end takes it back otherwise.
+  The job family's busy rule stays the second guard.
 
   Refusals, each with a sentence: `changed` (its sentence alone),
   `invalid_params` (a missing or bad input, a passphrase that is not the one
@@ -96,14 +131,16 @@ defmodule FermixCore.Management.AlwaysOn do
   action and who asked (`:actor`: nil from `daemon.sock`, `:setup_page`) and
   emits no event of its own; a job keeps its own bookends.
 
-  Seams in `opts`, passed as they are to `Management.Home`,
-  `Management.Provision` and `Management.HomeMove`: `:home`,
-  `:engine_role`, `:now`, `:providers`, `:provider_opts`, `:jobs`,
+  Seams in `opts`, passed as they are to `Management.Home` and
+  `Management.HomeMove`: `:home`, `:engine_role`, `:now`, `:jobs`,
   `:link_status`, `:config`, `:scheduler`, `:save_recipient`, `:restart`,
-  `:open_enrollment`, `:withdraw_enrollment` (a 1-arity stand-in for the
-  rail's, given the window's kind) and the review's; for a move back,
+  `:version` (the release `own_server`'s commands name, this engine's),
+  `:open_enrollment`, `:withdraw_enrollment` (a 0-arity stand-in for the
+  rail's), `:forget_candidate` (a 1-arity stand-in for the rail's, given the
+  held server's id) and the review's; for a move back,
   `Home.Candidate.prepare_return/3`'s `:role` and `:restarts_itself?`,
-  `:start_return` and `:stop_return` (in place of the rail's), and
+  `:start_return`, `:stop_return` and `:end_for_return` (in place of the
+  rail's), and
   `:local_return` (a 2-arity stand-in for `Home.LocalReturn.restore/3`,
   given the home and the copy); and `:serializer` (the name of this
   process), `:actor` and `:primary_forward`.
@@ -111,39 +148,43 @@ defmodule FermixCore.Management.AlwaysOn do
 
   use GenServer
 
+  alias FermixCore.BuildInfo
+  alias FermixCore.Computers.Consent
+  alias FermixCore.Computers.Switches
   alias FermixCore.Home.Candidate
+  alias FermixCore.Home.Join
   alias FermixCore.Home.Link
   alias FermixCore.Home.LocalReturn
   alias FermixCore.Home.Move
-  alias FermixCore.Home.Provision.Registry
   alias FermixCore.Home.Return
   alias FermixCore.Management.AlwaysOn.Input
   alias FermixCore.Management.Copy
   alias FermixCore.Management.Home
   alias FermixCore.Management.HomeMove
   alias FermixCore.Management.HomeSummary
+  alias FermixCore.Management.Jobs
+  alias FermixCore.Management.Lifecycle
   alias FermixCore.Management.Protocol
-  alias FermixCore.Management.Provision
   alias FermixCore.Setup.ConfigStore
 
   require Logger
 
   @capability "home"
-  @acts ~w(paste_token create_server cancel move_now try_again turn_on restart_server
-           start_again create_in back_up_now replace_server check_again own_server delete_server
-           move_back restore_here)
-  @opened ~w(learn_more open_console update)
-  # Every client allows `home.act` this long: a token check takes up to about
-  # 45 s and a review sent to the server up to 60 s.
+  @acts ~w(cancel move_now try_again back_up_now check_again own_server move_back restore_here
+           review_offers add_computer approve_computer deny_computer change_passphrase
+           restart_server)
+  @opened ~w(update)
+  # Every client allows `home.act` this long: a review sent to the server
+  # takes up to 60 s.
   @deadline_ms 90_000
   # A summary's key is a short digest; the bound only refuses junk.
   @max_key_bytes 64
 
   @changed_sentence "Always On changed since this was shown, so look at it again."
-  @busy_step_sentence "Fermix is already working on your server, so try again once that is " <>
-                        "done."
   @busy_backup_sentence "A backup is already running, and it finishes by itself."
-  @opened_sentence "This one opens a page of its own; Fermix takes no step for it."
+  @busy_restore_sentence "Fermix is already restoring its backup here, and it finishes by itself."
+  @busy_sentence "Fermix is busy with other work right now, so try again in a minute."
+  @opened_sentence "This one is the app's own update; Fermix takes no step for it."
   @unknown_sentence "Name one of the steps Always On offers."
   @key_sentence "Send the key the action came with."
   @nothing_to_move_sentence "There is no server to move to yet."
@@ -157,6 +198,14 @@ defmodule FermixCore.Management.AlwaysOn do
   @not_receiving_sentence "Fermix could not start receiving the move back here, so nothing " <>
                             "was kept; Fermix's log says why."
   @no_copy_sentence "There is no backup on this computer to restore."
+  @code_left_sentence "The code your server opened for it could not be closed, so it stops " <>
+                        "working by itself within half an hour."
+  @keep_sentence "Name only what this computer may keep on for your server."
+  @review_kept_sentence "Your review could not be saved. See the daemon log."
+  @restart_unread_sentence "Your server answered the restart in a form this computer does not " <>
+                             "read, so whether it restarts is not known. See the daemon log."
+  # Restore here's job.
+  @restore_kind :home_restore
   # A move the server reports, from its request to its undoing.
   @server_moves ~w(requested streaming committing aborting committed undoing)
 
@@ -180,8 +229,9 @@ defmodule FermixCore.Management.AlwaysOn do
   def sentences do
     [
       @changed_sentence,
-      @busy_step_sentence,
       @busy_backup_sentence,
+      @busy_restore_sentence,
+      @busy_sentence,
       @opened_sentence,
       @unknown_sentence,
       @key_sentence,
@@ -192,7 +242,11 @@ defmodule FermixCore.Management.AlwaysOn do
       @external_sentence,
       @server_moving_sentence,
       @not_receiving_sentence,
-      @no_copy_sentence
+      @no_copy_sentence,
+      @code_left_sentence,
+      @keep_sentence,
+      @review_kept_sentence,
+      @restart_unread_sentence
     ]
   end
 
@@ -280,44 +334,30 @@ defmodule FermixCore.Management.AlwaysOn do
 
   # -- the steps -------------------------------------------------------------
 
-  defp step(%{action: "paste_token", input: input}, _seen, opts) do
-    params = %{"provider" => input.provider || only_provider(opts), "token" => input.token}
-    with {:ok, _view} <- Provision.connect(params, opts), do: {:ok, nil}
-  end
-
-  defp step(%{action: action, input: input}, _seen, opts)
-       when action in ["create_server", "replace_server"] do
-    choice = %{type: input.type, location: input.location, replace: action == "replace_server"}
-    job("create", fn -> Provision.start_create(choice, opts) end, opts)
-  end
-
-  defp step(%{action: "create_in"}, %{facts: %{provision: %{failure: failure}}}, opts) do
-    choice = %{type: failure.type, location: failure.next_location, replace: desktop?(opts)}
-    job("create", fn -> Provision.start_create(choice, opts) end, opts)
-  end
-
-  defp step(%{action: "start_again", input: input}, _seen, opts) do
-    again = %{replace: desktop?(opts), type: input.type, location: input.location}
-    job("create", fn -> Provision.start_again(again, opts) end, opts)
-  end
-
-  defp step(%{action: "turn_on"}, _seen, opts),
-    do: job("power_on", fn -> Provision.power(%{"action" => "on"}, opts) end, opts)
-
-  defp step(%{action: "restart_server"}, _seen, opts),
-    do: job("power_reset", fn -> Provision.power(%{"action" => "reset"}, opts) end, opts)
-
-  defp step(%{action: "delete_server"}, _seen, opts), do: delete_job(opts)
   defp step(%{action: "move_back"}, seen, opts), do: move_back(seen, opts)
 
   defp step(%{action: "restore_here", input: input}, seen, opts),
     do: restore_here(input.recovery_passphrase, seen, opts)
 
   defp step(%{action: "cancel"}, seen, opts), do: cancel(seen, opts)
-  defp step(%{action: "own_server"}, _seen, opts), do: own_server(opts)
+  defp step(%{action: "review_offers", input: input}, _seen, opts), do: review_offers(input, opts)
+  defp step(%{action: "own_server"}, seen, opts), do: own_server(seen.facts.zone, opts)
+
+  defp step(%{action: "change_passphrase", input: input}, _seen, opts),
+    do: change_passphrase(input.recovery_passphrase, opts)
+
+  defp step(%{action: "add_computer"}, _seen, opts), do: add_computer(opts)
+
+  defp step(%{action: "approve_computer", input: input}, _seen, opts),
+    do: approve_computer(input.sas, opts)
+
+  defp step(%{action: "deny_computer"}, _seen, opts),
+    do: on_server("home.enroll.deny", %{}, fn -> HomeMove.enroll_deny(opts) end, opts)
 
   defp step(%{action: "back_up_now"}, _seen, opts),
     do: on_server("home.snapshots.run", %{}, fn -> Home.snapshots_run(opts) end, opts)
+
+  defp step(%{action: "restart_server"}, _seen, opts), do: restart_server(opts)
 
   defp step(%{action: "check_again"}, seen, opts) do
     id = candidate_id(HomeSummary.target(seen.facts))
@@ -332,40 +372,40 @@ defmodule FermixCore.Management.AlwaysOn do
 
   defp step(%{action: action} = request, seen, opts) when action in ["move_now", "try_again"] do
     case HomeSummary.target(seen.facts) do
-      %{"candidate_id" => id} -> move(id, request, seen, opts)
+      %{"candidate_id" => id} -> move(id, request, opts)
       nil -> unavailable(@nothing_to_move_sentence)
     end
   end
 
-  # A step's job: named in the ledger first, so the summary says it runs; a
-  # start refused after that leaves no step behind.
-  defp job(kind, start, opts) do
-    with :ok <- Provision.put_action(kind, opts) do
-      case start.() do
-        {:ok, _job} -> {:ok, nil}
-        {:error, _reason} = refused -> unstarted(refused, opts)
-      end
+  # A move back's; on the computer that sets Always On up, the held server
+  # its screen offers to forget; else the code of the owner's server.
+  defp cancel(%{facts: facts}, opts) do
+    cond do
+      joining?(facts) -> cancel_join(opts)
+      returning?(facts) -> cancel_return(opts)
+      facts.role == :primary and HomeSummary.target(facts) != nil -> forget_server(facts, opts)
+      true -> withdraw_code(opts)
     end
   end
 
-  defp unstarted(refused, opts) do
-    case Provision.clear_action(opts) do
-      :ok ->
-        refused
+  defp forget_server(facts, opts) do
+    %{"candidate_id" => id} = HomeSummary.target(facts)
+    forget = Keyword.get(opts, :forget_candidate, fn id -> Link.impl().forget_candidate(id) end)
 
-      {:error, reason} ->
-        Logger.error("always on: a refused step's name stays in the ledger: #{inspect(reason)}")
-        refused
+    case forget.(id) do
+      :ok -> {:ok, nil}
+      {:error, {:unavailable, sentence}} when is_binary(sentence) -> unavailable(sentence)
     end
   end
 
-  defp delete_job(opts), do: job("delete", fn -> Provision.delete(opts) end, opts)
+  # A computer joining a home (M97 §3.1): its own home again, restarted.
+  defp joining?(facts), do: Map.get(facts, :join) != nil
 
-  # By what the screen showed: a move back's, on the token screen the code
-  # of a server of the owner's own, while a create runs that create,
-  # otherwise the server that stands.
-  defp cancel(%{facts: facts} = seen, opts) do
-    if returning?(facts), do: cancel_return(opts), else: cancel_step(seen, opts)
+  defp cancel_join(opts) do
+    case Join.cancel(home(opts), Keyword.take(opts, [:restart, :key_opts])) do
+      :ok -> {:ok, nil}
+      {:error, reason} -> unavailable(Join.error_sentence(reason))
+    end
   end
 
   # A move back's screen: its candidate, or its started record alone.
@@ -376,52 +416,125 @@ defmodule FermixCore.Management.AlwaysOn do
 
   defp returning?(_facts), do: false
 
-  defp cancel_step(%{summary: %{"state" => "connect"}}, opts), do: withdraw_code(opts)
-
-  defp cancel_step(%{facts: %{provision: %{action: %{kind: "create"}}}}, opts) do
-    with :ok <- Provision.stop_step(opts),
-         :ok <- Provision.clear_action(opts),
-         {:ok, holding?} <- Provision.holding(opts) do
-      if holding?, do: delete_job(opts), else: {:ok, nil}
-    end
-  end
-
-  defp cancel_step(_seen, opts), do: delete_job(opts)
-
   defp withdraw_code(opts) do
     withdraw =
-      Keyword.get(opts, :withdraw_enrollment, fn kind -> Link.impl().withdraw_enrollment(kind) end)
+      Keyword.get(opts, :withdraw_enrollment, fn -> Link.impl().withdraw_enrollment() end)
 
-    case withdraw.(:manual) do
+    case withdraw.() do
       :ok -> {:ok, nil}
       {:error, {:unavailable, sentence}} when is_binary(sentence) -> unavailable(sentence)
     end
   end
 
-  defp own_server(opts) do
-    with {:ok, %{"code" => code, "expires_at" => at}} <- HomeMove.enroll_open(nil, opts),
-         do: {:ok, %{"code" => code, "expires_at" => at, "command" => Copy.own_server_command()}}
+  # The commands name the release this engine runs (`:version`, as
+  # `home.status` reads it), which the server installs; the code's sentence
+  # says until when it works in the owner's `zone`.
+  defp own_server(zone, opts) do
+    version = Keyword.get_lazy(opts, :version, &BuildInfo.product_version/0)
+
+    with {:ok, %{"code" => code, "expires_at" => at}} <- HomeMove.enroll_open(opts) do
+      {:ok, until, 0} = DateTime.from_iso8601(at)
+
+      {:ok,
+       %{
+         "code" => code,
+         "expires_at" => at,
+         "command" => Copy.own_server_command(version),
+         "sentence" => Copy.summary_sentence(:own_server, %{at: until, zone: zone}),
+         "tailscale" => %{
+           "label" => Copy.tailscale_label(),
+           "sentence" => Copy.summary_sentence(:own_server_tailscale, %{}),
+           "command" => Copy.own_server_tailscale_command(version),
+           "url" => Copy.always_on_docs_url("tailscale")
+         }
+       }}
+    end
+  end
+
+  # A new recovery passphrase (the backup settings' Change): the server's
+  # key, set there, or over the link from a linked computer, as Back up now
+  # is. Backups made before keep the key they were written for.
+  defp change_passphrase(passphrase, opts) do
+    on_server(
+      "home.snapshots.passphrase",
+      %{"recovery_passphrase" => passphrase},
+      fn -> Home.snapshots_passphrase(passphrase, opts) end,
+      opts
+    )
   end
 
   # A step the server takes: here, or over the link on a linked desktop.
   defp on_server(method, params, local, opts) do
-    answered =
-      case Keyword.fetch(opts, :primary_forward) do
-        {:ok, forward} -> forward.(server_request(method, params), [])
-        :error -> local.()
-      end
-
-    case answered do
+    case server_answer(method, params, local, opts) do
       {:ok, _answer} -> {:ok, nil}
       refused -> refused
     end
   end
 
+  defp server_answer(method, params, local, opts) do
+    case Keyword.fetch(opts, :primary_forward) do
+      {:ok, forward} -> forward.(server_request(method, params), [])
+      :error -> local.()
+    end
+  end
+
+  # Restart <server> (M97 D28c): only a linked computer's summary offers it,
+  # so the step is always sent over the link, and the server's answer (now,
+  # or once its computers' work ends) is the result. An answer of any other
+  # shape is refused with a sentence, its keys in the log.
+  defp restart_server(opts) do
+    forward = Keyword.fetch!(opts, :primary_forward)
+
+    case forward.(server_request("home.restart", %{}), []) do
+      {:ok, %{"when" => moment, "wait_s" => wait_s, "sentence" => said}}
+      when moment in ["now", "after_work"] and is_integer(wait_s) and wait_s >= 0 and
+             is_binary(said) ->
+        {:ok, %{"when" => moment, "wait_s" => wait_s, "sentence" => said}}
+
+      {:ok, unread} ->
+        Logger.error(
+          "always on: the server answered home.restart in a form this computer does not " <>
+            "read: #{answer_shape(unread)}"
+        )
+
+        unavailable(@restart_unread_sentence)
+
+      {:error, _code, _details} = refused ->
+        refused
+    end
+  end
+
+  defp answer_shape(answer) when is_map(answer), do: inspect(answer |> Map.keys() |> Enum.sort())
+  defp answer_shape(_answer), do: "not an object"
+
+  # Add a computer (M97 §3.1): the server's code for a computer that joins,
+  # answered once.
+  defp add_computer(opts) do
+    local = fn -> HomeMove.enroll_open([purpose: :computer] ++ opts) end
+
+    case server_answer("home.enroll.open", %{"purpose" => "computer"}, local, opts) do
+      {:ok, %{"code" => code, "expires_at" => at}} -> {:ok, %{"code" => code, "expires_at" => at}}
+      refused -> refused
+    end
+  end
+
+  # The owner adds the computer that waits, with the digits it shows.
+  defp approve_computer(sas, opts) do
+    with {:ok, sas} <- HomeMove.sas_param(sas) do
+      local = fn -> HomeMove.enroll_approve(sas, opts) end
+
+      case server_answer("home.enroll.approve", %{"sas" => sas}, local, opts) do
+        {:ok, %{"device_id" => id, "name" => name}} -> {:ok, %{"device_id" => id, "name" => name}}
+        refused -> refused
+      end
+    end
+  end
+
   # -- the move --------------------------------------------------------------
 
-  defp move(candidate_id, request, seen, opts) do
+  defp move(candidate_id, request, opts) do
     case Keyword.fetch(opts, :primary_forward) do
-      {:ok, forward} -> forwarded_move(candidate_id, request.input, forward, seen, opts)
+      {:ok, forward} -> forwarded_move(candidate_id, request.input, forward, opts)
       :error -> local_move(candidate_id, request, opts)
     end
   end
@@ -429,9 +542,63 @@ defmodule FermixCore.Management.AlwaysOn do
   defp local_move(candidate_id, request, opts) do
     with :ok <- reviewed(candidate_id, opts),
          :ok <- still_offered(request, opts),
+         {:ok, keep} <- keep_offers(request, opts),
          {:ok, started} <-
-           HomeMove.move_start(candidate_id, request.input.recovery_passphrase, opts),
+           HomeMove.move_start(candidate_id, request.input.recovery_passphrase, opts ++ keep),
          do: {:ok, %{"move_id" => started["move_id"]}}
+  end
+
+  # What this computer keeps on for its server after the move (M97 §7.3): the
+  # lines the owner left ticked; Try again, which offers no block to tick,
+  # moves with the keep the undone move started with (`Move.undone_keep/1`);
+  # else the block as the engine proposed it.
+  defp keep_offers(%{input: %Input{keep_offers: nil}, action: "try_again"}, opts),
+    do: cast_keep(Move.undone_keep(home(opts)))
+
+  defp keep_offers(%{input: %Input{keep_offers: keep}}, _opts), do: cast_keep(keep)
+
+  defp cast_keep(nil), do: {:ok, []}
+
+  defp cast_keep(keep) do
+    case Consent.cast(keep) do
+      {:ok, offers} -> {:ok, [keep_offers: offers]}
+      {:error, _offer} -> {:error, {:invalid_params, "keep_offers", @keep_sentence}}
+    end
+  end
+
+  # The owner's review of what a computer that moved before M97 keeps on:
+  # with no lines named, its switches as the screen showed them (the
+  # summary's `:computer_switches`, the running engine's), taken as they
+  # are; an app that drew the review's ticks names the lines it left ticked.
+  defp review_offers(input, opts) do
+    keep =
+      case input.keep_offers do
+        nil ->
+          {:ok, Consent.proposed(Keyword.get_lazy(opts, :computer_switches, &Switches.current/0))}
+
+        offers ->
+          Consent.cast(offers)
+      end
+
+    with {:ok, offers} <- keep_or_refuse(keep),
+         :ok <- reviewed_kept(Consent.review(home(opts), offers)) do
+      {:ok, nil}
+    end
+  end
+
+  defp keep_or_refuse({:ok, offers}), do: {:ok, offers}
+
+  defp keep_or_refuse({:error, _offer}),
+    do: {:error, {:invalid_params, "keep_offers", @keep_sentence}}
+
+  defp reviewed_kept(:ok), do: :ok
+
+  defp reviewed_kept({:error, reason}) do
+    Logger.error(
+      "always on: the review of this computer's offers was not saved: #{inspect(reason)}"
+    )
+
+    unavailable(@review_kept_sentence)
   end
 
   # The review the owner was shown under 15 minutes ago, else one now, kept
@@ -471,39 +638,34 @@ defmodule FermixCore.Management.AlwaysOn do
     end
   end
 
-  # A replace's move: the server checks the passphrase against its own key
-  # and refuses on its own blocks; this desktop keeps that it started the
-  # move once the server answered. A move back's start is kept before the
-  # request leaves (`return_start_ahead/2`), since the server restarts into
-  # the move as it answers, and settled by the answer (`return_answered/3`).
-  defp forwarded_move(candidate_id, input, forward, %{facts: facts}, opts) do
+  # A move back: the server checks the passphrase against its own key and
+  # refuses on its own blocks. Its start is kept before the request leaves
+  # (`return_start_ahead/2`), since the server restarts into the move as it
+  # answers, and settled by the answer (`return_answered/3`). Once the server
+  # took it, what this computer carries to the server that the restart cuts
+  # ends (M97 §9.2, §9.3): the app's call and its uploads. A move refused,
+  # never sent or unconfirmed leaves both as they were.
+  defp forwarded_move(candidate_id, input, forward, opts) do
     params = %{
       "candidate_id" => candidate_id,
       "recovery_passphrase" => input.recovery_passphrase,
       "keep_as_desktop" => false
     }
 
-    with :ok <- start_ahead(facts, candidate_id, opts) do
+    with :ok <- return_start_ahead(candidate_id, opts) do
       answer = forward.(server_request("home.move.start", params), [])
-      _kept = keep_move(facts, candidate_id, answer, opts)
+      _kept = return_answered(answer, home(opts), opts)
 
       case answer do
-        {:ok, %{"move_id" => move_id}} -> {:ok, %{"move_id" => move_id}}
-        {:error, _code, _details} = refused -> refused
+        {:ok, %{"move_id" => move_id}} ->
+          :ok = Keyword.get(opts, :end_for_return, fn -> Link.impl().end_for_return() end).()
+          {:ok, %{"move_id" => move_id}}
+
+        {:error, _code, _details} = refused ->
+          refused
       end
     end
   end
-
-  defp start_ahead(%{returning: %{"kind" => "return"}}, candidate_id, opts),
-    do: return_start_ahead(candidate_id, opts)
-
-  defp start_ahead(_facts, _candidate_id, _opts), do: :ok
-
-  defp keep_move(%{returning: %{"kind" => "return"}}, _candidate_id, answer, opts),
-    do: return_answered(answer, home(opts), opts)
-
-  defp keep_move(_facts, candidate_id, answer, opts),
-    do: Provision.move_forwarded(%{"candidate_id" => candidate_id}, answer, opts)
 
   # Move now on a move back (the move back's TLA spec, finding HR-1): the
   # start is in the return's record before the request leaves, so no stop of
@@ -522,8 +684,8 @@ defmodule FermixCore.Management.AlwaysOn do
   end
 
   # The server's answer settles the start: its move id kept; an answer lost
-  # (`unconfirmed`) keeps the start, as a replace's is kept; a request that
-  # never left (no link) or one the server refused takes it back.
+  # (`unconfirmed`) keeps the start, since the server may have it; a request
+  # that never left (no link) or one the server refused takes it back.
   defp return_answered({:ok, %{"move_id" => move_id}}, home, _opts),
     do: update_return(home, &Map.put(&1, :move_id, move_id))
 
@@ -545,15 +707,47 @@ defmodule FermixCore.Management.AlwaysOn do
 
   # -- moving back -------------------------------------------------------------
 
-  # Move back (design §9, M0): the server opens a copied code that names this
-  # desktop, the candidate and the return's record are written beside the
-  # moved home, and the candidate's subtree starts beside the link.
+  # Move back (design §9, M0): this computer's checks first, so a refused one
+  # leaves nothing open on the server; then the server opens a copied code
+  # that names this desktop, the candidate and the return's record are
+  # written beside the moved home, and the candidate's subtree starts beside
+  # the link. A step after the code that does not go through withdraws it.
   defp move_back(%{facts: facts}, opts) do
+    forward = Keyword.fetch!(opts, :primary_forward)
+
     with :ok <- server_still(facts),
-         {:ok, code} <- return_code(Keyword.fetch!(opts, :primary_forward)),
-         {:ok, state} <- prepared(code, opts),
+         :ok <- returnable(opts),
+         {:ok, code} <- return_code(forward) do
+      code |> receive_back(facts, opts) |> withdrawn_unless_taken(forward)
+    end
+  end
+
+  defp returnable(opts) do
+    case Candidate.returnable(home(opts), :return, prepare_opts(opts)) do
+      :ok -> :ok
+      {:error, reason} -> unavailable(Candidate.error_sentence(reason))
+    end
+  end
+
+  defp receive_back(code, facts, opts) do
+    with {:ok, state} <- prepared(code, opts),
          :ok <- keep_record(home(opts), return_record(facts, state, opts)),
          do: receiving(opts)
+  end
+
+  # The code would stay open on the server for half an hour; one the server
+  # does not withdraw is said after the refusal.
+  defp withdrawn_unless_taken({:ok, _result} = taken, _forward), do: taken
+
+  defp withdrawn_unless_taken({:error, kind, %{"sentence" => sentence} = details}, forward) do
+    case forward.(server_request("home.enroll.withdraw", %{}), []) do
+      {:ok, _withdrawn} ->
+        {:error, kind, details}
+
+      {:error, refused, _said} ->
+        Logger.warning("always on: the server did not withdraw the move back's code (#{refused})")
+        {:error, kind, %{details | "sentence" => sentence <> " " <> @code_left_sentence}}
+    end
   end
 
   defp server_still(facts) do
@@ -570,21 +764,19 @@ defmodule FermixCore.Management.AlwaysOn do
   end
 
   defp prepared(code, opts) do
-    prepare = [now: now(opts)] ++ Keyword.take(opts, [:role, :restarts_itself?])
-
-    case Candidate.prepare_return(home(opts), {:return, code}, prepare) do
+    case Candidate.prepare_return(home(opts), {:return, code}, prepare_opts(opts)) do
       {:ok, state} -> {:ok, state}
       {:error, reason} -> unavailable(Candidate.error_sentence(reason))
     end
   end
 
-  # The server's name as its code gave it, the server the ledger holds (none
-  # for a server of the owner's own) and the epoch the link reached.
+  defp prepare_opts(opts), do: [now: now(opts)] ++ Keyword.take(opts, [:role, :restarts_itself?])
+
+  # The server's name as its code gave it and the epoch the link reached.
   defp return_record(facts, state, opts) do
     %{
       from: get_in(state, ["primary", "name"]),
       started_at: now(opts),
-      provider_server: get_in(facts, [:provision, :server, :id]),
       primary_epoch: get_in(facts, [:link, :primary, :epoch])
     }
     |> Map.reject(fn {_key, value} -> is_nil(value) end)
@@ -629,7 +821,7 @@ defmodule FermixCore.Management.AlwaysOn do
   # close (no link runs here, or the server did not answer) lapses by
   # itself within its half hour.
   defp close_return_code(opts) do
-    request = server_request("home.enroll.withdraw", %{"kind" => "manual"})
+    request = server_request("home.enroll.withdraw", %{})
 
     case Keyword.fetch(opts, :primary_forward) do
       {:ok, forward} -> closed(forward.(request, []))
@@ -655,8 +847,9 @@ defmodule FermixCore.Management.AlwaysOn do
   end
 
   # Restore here (design §8): the copy is chosen before anything else, so a
-  # passphrase that opens none deletes nothing; then the request is kept and
-  # one job deletes the server and restores the copy.
+  # passphrase that opens none writes nothing; then the request is kept and
+  # one job restores the copy. The owner deleted or stopped the server, as
+  # the confirm asks: Fermix deletes nothing.
   defp restore_here(passphrase, %{facts: facts}, opts) do
     home = home(opts)
 
@@ -664,8 +857,7 @@ defmodule FermixCore.Management.AlwaysOn do
          :ok <- keep_record(home, restore_record(facts, copy, opts)) do
       copy = Map.put(copy, :from, server_name(facts))
       restore = Keyword.get(opts, :local_return, &LocalReturn.restore(&1, &2, restore_opts(opts)))
-      run = fn _report -> restore.(home, copy) end
-      job("delete", fn -> Provision.start_return_restore(run, opts) end, opts)
+      start_restore(home, fn -> restore.(home, copy) end, opts)
     end
   end
 
@@ -673,22 +865,94 @@ defmodule FermixCore.Management.AlwaysOn do
   defp chosen({:error, :no_copy}), do: unavailable(@no_copy_sentence)
   defp chosen({:error, reason}), do: Home.recovery_result({:error, reason})
 
-  # The request in the return's record: a record of its own when none was
-  # kept, the server the ledger holds named, the copy to restore asked for.
+  # The request in the return's record: the one kept for a move back not yet
+  # done, else a record of its own, the server named, the copy to restore
+  # asked for. A move back that ended (`moved_at`) is one the home moved away
+  # from since: merged into, the restored primary's boot would keep its old
+  # `moved_at` and raise its notice again.
   defp restore_record(facts, copy, opts) do
-    kept = facts.return || %{from: server_name(facts), started_at: now(opts)}
-
-    kept
-    |> Map.put(:fence_requested, copy.name)
-    |> maybe_put(:provider_server, get_in(facts, [:provision, :server, :id]))
+    kept = unfinished(facts.return) || %{from: server_name(facts), started_at: now(opts)}
+    Map.put(kept, :restore_requested, copy.name)
   end
 
-  defp server_name(%{provision: %{server: %{name: name}}}) when is_binary(name), do: name
+  defp unfinished(%{moved_at: %DateTime{}}), do: nil
+  defp unfinished(record), do: record
+
+  # The restore's own job (`home_restore`): while it runs beside the request
+  # the summary says it runs, from the press on; its ending, however the run
+  # ended, takes the request back, which tells the watch, so a run that
+  # stopped before its copy was in place offers Restore here again. A start
+  # refused takes it back too.
+  defp start_restore(home, restore, opts) do
+    job = [
+      name: "restore_here",
+      run: fn _job_id, _report -> restore.() end,
+      ending: fn ended -> restore_ended(home, ended, opts) end
+    ]
+
+    case Jobs.start(@restore_kind, Keyword.merge(Keyword.get(opts, :jobs, []), job)) do
+      {:ok, _view} ->
+        {:ok, nil}
+
+      {:error, :busy} ->
+        :ok = request_done(home)
+        {:error, {:busy, busy_with(opts)}}
+    end
+  end
+
+  # The family refuses a start busy beside a restore already running, and
+  # when it runs as many jobs as it takes, of other kinds.
+  defp busy_with(opts) do
+    {:ok, views} = Jobs.list(Keyword.get(opts, :jobs, []))
+    restoring? = Enum.any?(views, &match?(%{"kind" => "home_restore", "status" => "running"}, &1))
+    if restoring?, do: Atom.to_string(@restore_kind), else: :jobs
+  end
+
+  # A run stopped from outside (past its budget, cancelled, or crashed) ran
+  # nothing after the stop, so its ending settles the copy it left as the
+  # next start of this engine would: one not yet being put in place is
+  # discarded (`Home.Candidate.remove/1`, as the candidate's start drops
+  # it), and one being put in place is finished by that start, so the
+  # engine restarts (`LocalReturn`'s restart). A run that answered settled
+  # its own: it restarted, or kept its failure to show.
+  defp restore_ended(home, ended, opts) do
+    :ok = request_done(home)
+
+    case {Candidate.read_state(home), ended} do
+      {{:ok, %{"kind" => "local", "phase" => "receiving"}}, _ended} -> discard_left(home)
+      {{:ok, %{"kind" => "local", "phase" => "activating"}}, {:answered, _}} -> :ok
+      {{:ok, %{"kind" => "local", "phase" => "activating"}}, _stopped} -> restart_left(opts)
+      _nothing_left -> :ok
+    end
+  end
+
+  defp discard_left(home) do
+    case Candidate.remove(home) do
+      :ok ->
+        Logger.warning("restore here: stopped before its copy was put in place; it is removed")
+
+      {:error, reason} ->
+        Logger.error("restore here: the stopped restore could not be removed: #{inspect(reason)}")
+    end
+  end
+
+  defp restart_left(opts) do
+    Logger.warning("restore here: stopped while its copy was put in place; restarting to finish")
+    :ok = Keyword.get(opts, :restart, &Lifecycle.restart_self/0).()
+  end
+
+  defp request_done(home) do
+    with {:ok, record} <- Return.read(home),
+         :ok <- Return.write(home, Map.delete(record, :restore_requested)) do
+      :ok
+    else
+      unkept ->
+        Logger.error("always on: restore here's request was not taken back: #{inspect(unkept)}")
+    end
+  end
+
   defp server_name(%{link: %{primary: %{name: name}}}) when is_binary(name), do: name
   defp server_name(%{moved: %{to: to}}), do: to
-
-  defp maybe_put(map, _key, nil), do: map
-  defp maybe_put(map, key, value), do: Map.put_new(map, key, value)
 
   defp restore_opts(opts),
     do:
@@ -697,7 +961,8 @@ defmodule FermixCore.Management.AlwaysOn do
   # -- refusals and seams ----------------------------------------------------
 
   defp refusal({:busy, "home.snapshots.run"}), do: unavailable(@busy_backup_sentence)
-  defp refusal({:busy, _operation}), do: unavailable(@busy_step_sentence)
+  defp refusal({:busy, "home_restore"}), do: unavailable(@busy_restore_sentence)
+  defp refusal({:busy, :jobs}), do: unavailable(@busy_sentence)
 
   defp refusal({:unavailable, capability, sentence}),
     do: {:error, :unavailable, %{"capability" => capability, "sentence" => sentence}}
@@ -725,17 +990,9 @@ defmodule FermixCore.Management.AlwaysOn do
     }
   end
 
-  defp only_provider(opts) do
-    case Keyword.get_lazy(opts, :providers, &Registry.all/0) do
-      [provider] -> provider.id()
-      _several -> nil
-    end
-  end
-
   defp candidate_id(%{"candidate_id" => id}), do: id
   defp candidate_id(nil), do: nil
 
-  defp desktop?(opts), do: Keyword.has_key?(opts, :primary_forward)
   defp home(opts), do: Keyword.get_lazy(opts, :home, &ConfigStore.fermix_home/0)
   defp now(opts), do: Keyword.get_lazy(opts, :now, &DateTime.utc_now/0)
 end

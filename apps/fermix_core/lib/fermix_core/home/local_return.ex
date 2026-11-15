@@ -2,9 +2,9 @@ defmodule FermixCore.Home.LocalReturn do
   @moduledoc """
   Restore here (Always On's move back design §8): the computer a home left
   takes it back from its own copy of the server's snapshots, when the server
-  Fermix created for it cannot answer. `Management.AlwaysOn` runs it as
-  `restore_here`, inside the job that deletes the server first
-  (`Management.Provision.start_return_restore/2`, the fence).
+  cannot answer and the owner confirmed they deleted or stopped it.
+  `Management.AlwaysOn` runs it as `restore_here`, in a job of its own
+  (`home_restore`).
 
   **The copy** (`choose/2`). A desktop keeps the server's newest snapshots
   under `snapshots/` (`<UTC>-e<epoch>.fxsnap`, written by its snapshot store),
@@ -21,9 +21,10 @@ defmodule FermixCore.Home.LocalReturn do
   alone, refused as it refuses), the copy staged as a return's
   (`Candidate.Activation.stage/6`: this computer's device settings, secret
   store and keychain items, and without its own desktop row), the entries
-  recorded and the staged home put in place of the retired copy
-  (`Activation.activate/2`), then the engine's restart, from which it boots
-  as the primary. A copy that does not stage leaves the candidate `failed`
+  recorded, the copy's name kept in the return's record (`Home.Return`'s
+  `restored`, which the primary tells the owner once), and the staged home
+  put in place of the retired copy (`Activation.activate/2`), then the
+  engine's restart, from which it boots as the primary. A copy that does not stage leaves the candidate `failed`
   with its sentence, and no restart; an activation that stops part-way is
   finished by the next start, as any activation is, so the engine restarts.
   It is never resumed by itself: a stop before the activation leaves a
@@ -44,6 +45,8 @@ defmodule FermixCore.Home.LocalReturn do
   alias FermixCore.Home.Candidate.Activation
   alias FermixCore.Home.Candidate.Return
   alias FermixCore.Home.MoveTelemetry
+  alias FermixCore.Home.Readable
+  alias FermixCore.Home.Return, as: ReturnRecord
   alias FermixCore.Home.Snapshot.Capture
   alias FermixCore.Home.Snapshot.Format
   alias FermixCore.Home.Snapshot.Recipient
@@ -191,15 +194,16 @@ defmodule FermixCore.Home.LocalReturn do
             "move" => %{"move_id" => move_id, "epoch" => epoch}
           })
 
-        placed(home, epoch, Candidate.put_state(home, activating, now), opts)
+        placed(home, {copy, now}, epoch, Candidate.put_state(home, activating, now), opts)
 
       {:error, reason} ->
         failed(home, state, reason, now, opts)
     end
   end
 
-  defp placed(home, epoch, :ok, opts) do
+  defp placed(home, {copy, now}, epoch, :ok, opts) do
     with {:ok, _entries} <- Activation.record_entries(home),
+         :ok <- record_restored(home, copy, now),
          :ok <- Activation.activate(home, :return) do
       restart(opts)
       {:done, epoch}
@@ -212,8 +216,32 @@ defmodule FermixCore.Home.LocalReturn do
     end
   end
 
-  defp placed(_home, _epoch, {:error, reason}, _opts),
+  defp placed(_home, _copy, _epoch, {:error, reason}, _opts),
     do: {:refused, reason, @failed_sentence}
+
+  # The copy about to be put in place, in the return's record Restore here
+  # wrote first (or one of its own), for the primary it makes to tell once.
+  # One that cannot be kept is said in the log, and the restore goes on: it
+  # costs the notice, not the home.
+  defp record_restored(home, copy, now) do
+    kept =
+      case ReturnRecord.read(home) do
+        {:ok, record} -> ReturnRecord.write(home, Map.put(record, :restored, copy.name))
+        :absent -> ReturnRecord.write(home, restored_record(copy, now))
+        {:error, _reason} = error -> error
+      end
+
+    case kept do
+      :ok ->
+        :ok
+
+      {:error, reason} ->
+        Logger.error("restore here: the restored copy's name was not kept: #{inspect(reason)}")
+    end
+  end
+
+  defp restored_record(copy, now),
+    do: %{from: copy.from, started_at: DateTime.truncate(now, :second), restored: copy.name}
 
   defp failed(home, state, reason, now, opts) do
     Logger.error("restore here: the copy could not be restored: #{inspect(reason)}")
@@ -234,6 +262,10 @@ defmodule FermixCore.Home.LocalReturn do
     names = Keyword.get(opts, :secret_names, &Settings.secret_names/0)
     Return.error_sentence(refused, names.())
   end
+
+  # A copy in a newer format than this Fermix reads (`Home.Readable`).
+  defp failed_sentence({:newer_home_format, _theirs, _ours}, _opts),
+    do: Readable.refusal_sentence()
 
   defp failed_sentence(_reason, _opts), do: @failed_sentence
 

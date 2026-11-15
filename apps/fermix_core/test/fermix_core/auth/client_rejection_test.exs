@@ -215,12 +215,58 @@ defmodule FermixCore.Auth.ClientRejectionTest do
 
     defp quarantine_modules do
       @apps
-      |> Path.join("*/lib/**/*.ex")
-      |> Path.wildcard()
-      |> Stream.map(&{&1, File.read!(&1)})
+      |> lib_sources()
       |> Stream.filter(fn {_file, source} -> String.contains?(source, @quarantine_values) end)
       |> Stream.map(fn {file, source} -> {file, literals(source)} end)
       |> Enum.filter(fn {_file, found} -> Enum.any?(@quarantine_values, &(&1 in found)) end)
+    end
+
+    # Every `*/lib/**/*.ex` under `apps`, read raw: never through the VM's file
+    # server, which every other async test's file call queues on. This walk
+    # makes a call for each of thousands of files, and on the macos-x64 leg it
+    # timed out waiting on File.read! behind that queue.
+    @max_depth 16
+
+    defp lib_sources(apps) do
+      for app <- raw_names(apps),
+          lib = Path.join([apps, app, "lib"]),
+          raw_dir?(lib),
+          file <- ex_files(lib, 0) do
+        {:ok, source} = :file.read_file(file, [:raw])
+        {file, source}
+      end
+    end
+
+    defp ex_files(_dir, depth) when depth > @max_depth,
+      do: raise("lib is nested deeper than #{@max_depth} folders")
+
+    defp ex_files(dir, depth) do
+      Enum.flat_map(raw_names(dir), fn name ->
+        path = Path.join(dir, name)
+
+        cond do
+          raw_dir?(path) -> ex_files(path, depth + 1)
+          String.ends_with?(name, ".ex") -> [path]
+          true -> []
+        end
+      end)
+    end
+
+    # As `**` does, hidden entries are left out.
+    defp raw_names(dir) do
+      {:ok, names} = :prim_file.list_dir(dir)
+
+      names
+      |> Enum.map(&IO.chardata_to_string/1)
+      |> Enum.reject(&String.starts_with?(&1, "."))
+      |> Enum.sort()
+    end
+
+    defp raw_dir?(path) do
+      case :file.read_file_info(path, [:raw]) do
+        {:ok, info} -> File.Stat.from_record(info).type == :directory
+        {:error, :enoent} -> false
+      end
     end
 
     defp literals(source) do

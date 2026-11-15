@@ -148,10 +148,10 @@ defmodule FermixCore.Setup.ConfigStoreMcpTest do
   end
 
   # The inbound server was retired before it ever ran. A file that still has its
-  # section boots with the servers it names, says once that the section is
-  # ignored, and the next save writes the file without it, the way a retired
-  # provider key goes.
-  test "a retired [mcp.inbound] block boots with one warning and the next save drops it",
+  # section boots with the servers it names, the engine process says once that
+  # the section is ignored (the boot's read says nothing), and the next save
+  # writes the file without it, the way a retired provider key goes.
+  test "a retired [mcp.inbound] block boots, is named once, and the next save drops it",
        %{config_path: config_path} do
     File.write!(config_path, @settings <> "\n" <> @mcp <> "\n" <> @retired_inbound)
 
@@ -160,6 +160,9 @@ defmodule FermixCore.Setup.ConfigStoreMcpTest do
     assert [%{name: "files"}, %{name: "github"}] =
              Application.get_env(:fermix_core, :mcp_servers)
 
+    refute log =~ "[mcp.inbound] is retired"
+
+    log = capture_log(fn -> assert :ok = ConfigStore.say_retired_settings() end)
     assert length(String.split(log, "[mcp.inbound] is retired")) == 2
     assert log =~ "the next settings save writes the file without it"
 

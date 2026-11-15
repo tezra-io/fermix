@@ -4,6 +4,7 @@ defmodule FermixCore.Setup.WizardTest do
   import ExUnit.CaptureLog
 
   alias FermixCore.Auth.Store, as: AuthStore
+  alias FermixCore.Computers.Switches
   alias FermixCore.Memory.Repo, as: MemoryRepo
   alias FermixCore.Realtime.Config, as: RealtimeConfig
   alias FermixCore.Sandbox.Config, as: SandboxConfig
@@ -817,11 +818,17 @@ defmodule FermixCore.Setup.WizardTest do
     assert {:ok, granted} = ConfigStore.load_runtime_config()
     assert granted.fermix_core |> Keyword.get(:harness, []) |> Keyword.get(:approved) == true
 
-    # `false` clears the key back to the default (never written explicitly).
+    # `false` clears the key back to the default, which this computer's
+    # machine.toml writes as it is (M98 D5: the table always says it).
     assert {:ok, _} = Wizard.report().wizard |> Wizard.save_answers(harness_approved: false)
 
     assert {:ok, revoked} = ConfigStore.load_runtime_config()
-    refute revoked.fermix_core |> Keyword.get(:harness, []) |> Keyword.has_key?(:approved)
+    assert revoked.fermix_core |> Keyword.get(:harness, []) |> Keyword.get(:approved) == false
+
+    assert tmp_home |> Path.join("machine.toml") |> File.read!() =~
+             "[fermix_core.harness]\napproved = false"
+
+    refute tmp_home |> Path.join("config.toml") |> File.read!() =~ "approved"
   end
 
   test "save_answers writes skill_curation enabled only on decline" do
@@ -1512,7 +1519,8 @@ defmodule FermixCore.Setup.WizardTest do
         telegram_owner_user_id: "111"
       )
 
-    contents = File.read!(Path.join(tmp_home, "config.toml"))
+    # The sandbox is this computer's own (M97 §4).
+    contents = File.read!(Path.join(tmp_home, "machine.toml"))
 
     assert contents =~ ~s([sandbox.env.OPENAI_API_KEY])
     assert contents =~ ~s(source = "command")
@@ -2933,7 +2941,8 @@ defmodule FermixCore.Setup.WizardTest do
       assert "FOO_API_KEY" in persisted.env.allow
       assert "BAR_API_KEY" in persisted.env.allow
 
-      contents = File.read!(Path.join(tmp_home, "config.toml"))
+      # The sandbox is this computer's own (M97 §4).
+      contents = File.read!(Path.join(tmp_home, "machine.toml"))
       assert contents =~ ~s(mode = "open")
       assert contents =~ ~s(profile = "extended")
       assert contents =~ "FOO_API_KEY"
@@ -3003,7 +3012,9 @@ defmodule FermixCore.Setup.WizardTest do
 
       contents = File.read!(Path.join(tmp_home, "config.toml"))
       refute contents =~ "sk-from-env-only"
-      assert contents =~ ~s(mode = "open")
+      machine = File.read!(Path.join(tmp_home, "machine.toml"))
+      refute machine =~ "sk-from-env-only"
+      assert machine =~ ~s(mode = "open")
     end
 
     test "moves already persisted API key to keyring on save", %{tmp_home: tmp_home} do
@@ -3020,7 +3031,7 @@ defmodule FermixCore.Setup.WizardTest do
       contents = File.read!(Path.join(tmp_home, "config.toml"))
       assert contents =~ ~s(api_key = "@keyring")
       refute contents =~ "sk-already-on-disk"
-      assert contents =~ ~s(mode = "strict")
+      assert File.read!(Path.join(tmp_home, "machine.toml")) =~ ~s(mode = "strict")
 
       assert {:ok, "sk-already-on-disk"} =
                FermixTestSupport.SecretWriterStub.get(:openai_api_key)
@@ -3239,6 +3250,70 @@ defmodule FermixCore.Setup.WizardTest do
 
       assert provider_auth_mode(:anthropic) == :oauth
       assert provider_auth_mode(:xai) == :oauth
+    end
+  end
+
+  # M97 §4, §7.2: a setup page left open while this computer's own settings
+  # changed elsewhere (the app switching an offer off, another tab tightening
+  # the sandbox, the recorder turned off) saves an unrelated answer. The save
+  # writes the machine tables it changed and nothing else of the machine
+  # file: every other is the file's at save time, and so is what runs.
+  describe "a page that went stale" do
+    setup do
+      saved =
+        for key <- [:computer, :computer_history, :computer_use],
+            do: {key, Application.fetch_env(:fermix_core, key)}
+
+      on_exit(fn ->
+        Enum.each(saved, fn {key, value} -> restore_env(:fermix_core, key, value) end)
+      end)
+    end
+
+    test "never turns a machine switch back on, loosens the sandbox or starts the recorder" do
+      home = System.get_env("FERMIX_HOME")
+
+      File.write!(Path.join(home, "machine.toml"), """
+      [sandbox]
+      mode = "open"
+
+      [fermix_core.computer_history]
+      enabled = true
+
+      [fermix_core.computer]
+      enabled = true
+      files_and_shell = true
+      """)
+
+      {:ok, opened} = ConfigStore.load_runtime_config()
+      :ok = ConfigStore.apply_snapshot(opened)
+      stale = Wizard.report().wizard
+
+      # Elsewhere, since: the app switches this computer off on disk, another
+      # page tightens the sandbox and turns the recorder off.
+      :ok = Switches.write(home, enabled: false, files_and_shell: true)
+      assert {:ok, _report} = Wizard.set_sandbox_overrides(:strict, nil, nil)
+
+      assert {:ok, _report} =
+               Wizard.save_answers(Wizard.report().wizard, computer_history_enabled: false)
+
+      assert {:ok, _report} = Wizard.save_answers(stale, bot_name: "Orchard")
+
+      {:ok, saved} = ConfigStore.load_runtime_config()
+      assert Keyword.fetch!(saved.fermix_core[:computer], :enabled) == false
+      assert Keyword.fetch!(saved.fermix_core[:computer], :files_and_shell) == true
+      assert SandboxConfig.normalize(saved.sandbox).mode == :strict
+      assert Keyword.fetch!(saved.fermix_core[:computer_history], :enabled) == false
+
+      # What runs is the file's too.
+      assert Keyword.fetch!(Application.get_env(:fermix_core, :computer), :enabled) == false
+
+      assert Keyword.fetch!(Application.get_env(:fermix_core, :computer_history), :enabled) ==
+               false
+
+      assert SandboxConfig.normalize(Application.get_env(:fermix_core, :sandbox)).mode == :strict
+
+      # The answer the stale page did give is saved.
+      assert saved.fermix_core |> Keyword.fetch!(:agent) |> Keyword.fetch!(:name) == "Orchard"
     end
   end
 

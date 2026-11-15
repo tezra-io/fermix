@@ -20,10 +20,14 @@ defmodule FermixCore.Tools.ComputerUse do
 
   alias Compux.Protocol
   alias FermixCore.Capabilities.Builtin.Tool
+  alias FermixCore.Computers.Capabilities.Screen
+  alias FermixCore.Computers.Computer
+  alias FermixCore.Computers.Remote
   alias FermixCore.ComputerUse.Background
+  alias FermixCore.ComputerUse.ComputerDriver
   alias FermixCore.ComputerUse.Config
   alias FermixCore.ComputerUse.Controls
-  alias FermixCore.ComputerUse.HelperActions
+  alias FermixCore.ComputerUse.Reach
   alias FermixCore.ComputerUse.Session
   alias FermixCore.ComputerUse.SessionManager
   alias FermixCore.Tools.Telemetry, as: ToolTelemetry
@@ -51,16 +55,30 @@ defmodule FermixCore.Tools.ComputerUse do
   # before any helper has answered, so it is the pixel wording;
   # `dynamic_description/1` is what a turn reads.
   @impl true
-  def description, do: description(HelperActions.offered())
+  def description, do: description(Reach.here().actions)
 
   @doc """
   The description for this turn (`Capabilities.Advertisement`): the same words
-  for the helper's latest reading. A function of that reading and the
+  for the reading of the machine the call runs on (`ComputerUse.Reach`: this
+  host's helper, or a computer's, M97 §6.4). A function of that reading and the
   bound-window flag alone, so it changes only when they do and the provider's
   cached prompt prefix holds from one turn to the next.
   """
   @spec dynamic_description(map()) :: String.t()
-  def dynamic_description(context) when is_map(context), do: description()
+  def dynamic_description(context) when is_map(context),
+    do: description(Reach.reading(context).actions)
+
+  @doc """
+  Offered on a turn that can reach a screen (`ComputerUse.Reach.reachable?/1`):
+  this host's, or a computer's that offers it. A screenless server is offered
+  it while one of its computers offers its screen.
+  """
+  @spec advertise?(map()) :: boolean()
+  def advertise?(context) when is_map(context), do: Reach.reachable?(context)
+
+  @doc "The computer capability a call runs through on one of the home's computers."
+  @impl true
+  def computer_capability, do: Screen
 
   defp description(offered) do
     screen_description(offered) <>
@@ -355,25 +373,22 @@ defmodule FermixCore.Tools.ComputerUse do
     end
   end
 
-  # `offered` is what the installed helper says it has (M86 F1), never the
-  # library's whole list: a verb the helper lacks is one that always refuses.
-  defp actions(offered) do
-    if Config.background?(),
-      do: offered,
-      else: Enum.reject(offered, &(&1 in Background.actions()))
-  end
-
+  # `offered` is what the helper of the machine the call runs on says it has
+  # (M86 F1), with that machine's bound-window flag applied
+  # (`ComputerUse.Reach`), never the library's whole list: a verb the helper
+  # lacks is one that always refuses.
+  #
   # Whether the bound-window surface is offered at all: the flag is on AND the
   # helper lists the verb that binds. Everything that names the surface asks
   # this, so the words never teach a binding the enum cannot carry.
-  defp bound?(offered), do: "select_target" in actions(offered)
+  defp bound?(offered), do: "select_target" in offered
 
   # The schema for the helper's latest reading (`HelperActions`): what it offers
   # and how it sends input, read in one call so both halves are one helper's
   # answer. Read at the call, so the static copy registered at boot and the
   # per-turn refresh are the same function of the same facts.
   @impl true
-  def parameters, do: schema(HelperActions.reading())
+  def parameters, do: schema(Reach.here())
 
   defp schema(%{actions: offered, input_methods: input_methods}) do
     %{
@@ -389,7 +404,7 @@ defmodule FermixCore.Tools.ComputerUse do
         |> Map.merge(%{
           "action" => %{
             "type" => "string",
-            "enum" => actions(offered),
+            "enum" => offered,
             "description" => base_action_description(offered)
           },
           "observation_id" => %{
@@ -721,14 +736,18 @@ defmodule FermixCore.Tools.ComputerUse do
   # current posture — strict (look only), standard (confirm destructive), or open
   # (autonomous). This is how the prompt-driven §14 confirm principle reaches the
   # model without a cached prompt section that would freeze on config change.
+  #
+  # The reading is the machine's the call runs on (`ComputerUse.Reach`): this
+  # host's helper and sandbox mode, or a computer's, whose access level follows
+  # its own sandbox mode (M97 §6.4).
   @spec dynamic_parameters(map()) :: map()
-  def dynamic_parameters(_context) do
-    reading = HelperActions.reading()
+  def dynamic_parameters(context) when is_map(context) do
+    reading = Reach.reading(context)
 
     put_in(
       schema(reading),
       ["properties", "action", "description"],
-      action_description(Config.current().access, reading.actions)
+      action_description(reading.access, reading.actions)
     )
   end
 
@@ -864,7 +883,7 @@ defmodule FermixCore.Tools.ComputerUse do
   # pixel one; `tool_help` reads this again when it renders.
   @impl true
   def examples do
-    offered = HelperActions.offered()
+    offered = Reach.here().actions
     Enum.filter(all_examples(offered), &example_offered?(&1.args, offered))
   end
 
@@ -940,7 +959,7 @@ defmodule FermixCore.Tools.ComputerUse do
   # back door (M86 P2).
   @impl true
   def failure_modes do
-    offered = HelperActions.offered()
+    offered = Reach.here().actions
 
     common_failure_modes(offered) ++
       naming_list(offered, "screenshot", pixel_failure_modes(offered)) ++
@@ -1282,7 +1301,10 @@ defmodule FermixCore.Tools.ComputerUse do
   @spec execute(map(), Tool.context()) :: {:ok, Tool.tool_result()}
   def execute(params, context) when is_map(params) and is_map(context) do
     start = System.monotonic_time(:millisecond)
-    {result, telemetry} = dispatch(params, context)
+    computer = Remote.computer(context)
+    reading = reading(computer)
+    {result, telemetry} = dispatch(params, context, computer, reading)
+    result = on_computer(result, computer)
     duration = System.monotonic_time(:millisecond) - start
     success = match?({:ok, %{success: true}}, result)
 
@@ -1297,7 +1319,8 @@ defmodule FermixCore.Tools.ComputerUse do
       metadata:
         telemetry
         |> Map.put(:action, Map.get(params, "action"))
-        |> put_verb(params, HelperActions.reading().input_methods),
+        |> put_verb(params, reading.input_methods)
+        |> put_computer(computer),
       input: params,
       result: result
     )
@@ -1320,17 +1343,39 @@ defmodule FermixCore.Tools.ComputerUse do
 
   defp put_verb(metadata, _params, _input_methods), do: metadata
 
+  # The reading of the helper the call runs on, and whether it is a computer's.
+  defp reading(nil), do: Map.put(Reach.here(), :on_computer?, false)
+  defp reading(%Computer{} = computer), do: Map.put(Reach.of(computer), :on_computer?, true)
+
+  # Which computer's screen the call drove (M97 §6.4): its device id, as every
+  # call that runs on a computer records it (`Computers.Outcome.exec_metadata/1`).
+  defp put_computer(metadata, %Computer{device_id: id}), do: Map.put(metadata, :computer, id)
+  defp put_computer(metadata, nil), do: metadata
+
+  # Every result names the computer it came from, so the model never reads a
+  # computer's screen as this server's (M97 §6.5).
+  defp on_computer({:ok, %{success: true, output: output} = result}, %Computer{name: name}),
+    do: {:ok, %{result | output: "On #{name}:\n" <> output}}
+
+  defp on_computer({:ok, %{success: false, error: error} = result}, %Computer{name: name})
+       when is_binary(error),
+       do: {:ok, %{result | error: "On #{name}: " <> error}}
+
+  defp on_computer(result, _here), do: result
+
   # Resolve the per-conversation session lazily: a caller may pre-place
   # `:computer_use_session` on the context (tests, a future eager path), otherwise
   # the tool starts/reuses it through `SessionManager.ensure/3` keyed by the turn's
   # `conversation_key` — so the OS-driver process opens only when the tool is actually
   # used, and is reused across actions in the same conversation.
   # Returns `{tool_result, telemetry_metadata}`; the caller emits the one exec event.
-  defp dispatch(params, context) do
-    config = Map.get(context, :computer_use_config) || Config.current()
-
-    case resolve_session(context, config) do
-      {:ok, session} -> with_cu_session(run(session, params), session)
+  #
+  # On a computer (`Computers.Choice` chose one, M97 §6.4) the session drives
+  # that computer's screen through `ComputerDriver`, with the config its reading
+  # gives (`Reach.config/1`), and each request carries this turn.
+  defp dispatch(params, context, computer, reading) do
+    case resolve_session(context, computer) do
+      {:ok, session} -> with_cu_session(run(session, params, context, reading), session)
       {:error, reason} -> {{:ok, Tool.error(unavailable_message(reason))}, refused(:na)}
     end
   end
@@ -1348,11 +1393,21 @@ defmodule FermixCore.Tools.ComputerUse do
 
   defp refused(courtesy), do: %{courtesy: courtesy, outcome: :refused}
 
-  defp resolve_session(context, config) do
+  defp resolve_session(context, nil) do
     case Map.get(context, :computer_use_session) do
-      nil -> ensure_session(context, config)
+      nil -> ensure_session(context, Map.get(context, :computer_use_config) || Config.current())
       session -> {:ok, session}
     end
+  end
+
+  defp resolve_session(context, %Computer{} = computer) do
+    if Map.has_key?(context, :conversation_key),
+      do:
+        SessionManager.ensure(Reach.config(computer), context,
+          computer: computer,
+          driver: ComputerDriver.spec(computer, context)
+        ),
+      else: {:error, :no_conversation}
   end
 
   # Guard before reaching the supervisor: a hot-disabled feature (registered tool not
@@ -1405,8 +1460,37 @@ defmodule FermixCore.Tools.ComputerUse do
     "this action was not sent: " <> operator_stopped_lead()
   end
 
+  defp unavailable_message({:computer, sentence}) when is_binary(sentence), do: sentence
+
+  defp unavailable_message({:computer_stopped, sentence}) when is_binary(sentence),
+    do: sentence <> " " <> computer_stopped_lead()
+
+  # One conversation drives one screen at a time (M97 §6.4), and its last action
+  # on the other one has not answered yet.
+  defp unavailable_message({:screen_in_use, name}) when is_binary(name) do
+    "this action was not sent: this conversation's last computer-use action on " <>
+      "#{name}'s screen has not answered yet, and a conversation drives one screen at a " <>
+      "time. Wait for it, then ask again."
+  end
+
+  defp unavailable_message({:screen_held, name, holder}) when is_binary(name) do
+    "this action was not sent: another of your conversations (#{channel(holder)}) is using " <>
+      "#{name}'s screen right now, and one screen is driven by one conversation at a time. " <>
+      "Looking at it from here waits too. Tell the user, or wait for that work to finish."
+  end
+
   defp unavailable_message(reason) do
     "computer-use session unavailable: #{format_reason(reason)}"
+  end
+
+  # Which conversation holds a screen, by the surface it came from; never its id.
+  defp channel({surface, _chat, _scope}) when is_binary(surface), do: "on #{surface}"
+  defp channel(_other), do: "elsewhere"
+
+  defp computer_stopped_lead do
+    "They have that screen back and computer use there is over for now. Do NOT take another " <>
+      "computer-use action on it of any kind, a `screenshot` included. Tell them where you got " <>
+      "to and what is left, and ask before going any further."
   end
 
   # One wording for one fact, on both routes to it: the call that was interrupted
@@ -1419,23 +1503,26 @@ defmodule FermixCore.Tools.ComputerUse do
       "left, and ask before going any further."
   end
 
-  defp run(session, params) do
+  defp run(session, params, context, reading) do
     case Session.classify(session, params) do
       {:ok, :auto, request} ->
-        perform(session, request)
+        perform(session, request, context, reading)
 
       {:error, reason} ->
-        {{:ok, Tool.error(gate_message(reason, HelperActions.offered()))},
-         refusal_telemetry(reason)}
+        {{:ok, Tool.error(gate_message(reason, reading))}, refusal_telemetry(reason)}
     end
   end
 
   # A refusal from this side's own gate. Naming a target twice is answered in the
   # words of the ways this helper's reading offers to name one.
-  defp gate_message(:addressing_conflict, offered),
-    do: code_message("addressing_conflict", offered)
+  defp gate_message(:addressing_conflict, reading),
+    do: code_message("addressing_conflict", reading.actions)
 
-  defp gate_message(reason, _offered), do: refusal_message(reason)
+  # A computer's own sandbox mode is what makes it look only (M97 §6.4), and only
+  # someone at that computer can change it.
+  defp gate_message({:refused, :strict_mode}, %{on_computer?: true}), do: strict_message()
+
+  defp gate_message(reason, _reading), do: refusal_message(reason)
 
   defp refusal_telemetry(reason) do
     reason
@@ -1647,13 +1734,18 @@ defmodule FermixCore.Tools.ComputerUse do
   defp format_points([{x, y}]), do: "(#{x},#{y})"
   defp format_points([{fx, fy}, {tx, ty}]), do: "(#{fx},#{fy})→(#{tx},#{ty})"
 
-  defp perform(session, request) do
-    perform_result(Session.execute(session, request), request, HelperActions.offered())
+  # A request to a computer carries this turn, so the computer checks the turn
+  # that asked rather than the one that started the session (`ComputerDriver`).
+  defp perform(session, request, context, reading) do
+    request =
+      if Remote.computer(context), do: ComputerDriver.with_turn(request, context), else: request
+
+    perform_result(Session.execute(session, request), request, reading)
   end
 
   # `offered` is the helper's latest reading: the refusals whose next step is an
   # argument or an action name only what it offers.
-  defp perform_result(execution, request, offered) do
+  defp perform_result(execution, request, %{actions: offered} = reading) do
     case execution do
       {:ok, %{image: nil} = result} ->
         {{:ok, Tool.success(action_summary(result, offered))}, action_telemetry(result)}
@@ -1681,12 +1773,18 @@ defmodule FermixCore.Tools.ComputerUse do
       # as at classify — never "action failed" with a raw term for an action that
       # was never attempted.
       {:error, {:refused, _reason} = refusal} ->
-        {{:ok, Tool.error(refusal_message(refusal))}, refused(refusal_courtesy(refusal))}
+        {{:ok, Tool.error(gate_message(refusal, reading))}, refused(refusal_courtesy(refusal))}
 
       {:error, reason} ->
         {{:ok, Tool.error(action_error_message(reason))},
          %{courtesy: :na, outcome: error_outcome(reason, request)}}
     end
+  end
+
+  defp strict_message do
+    "this computer's sandbox mode is strict, so its screen is look-only from here: only " <>
+      "looking runs, and this action was not sent. Only someone at that computer can change " <>
+      "its sandbox mode; tell the user rather than retrying."
   end
 
   # The two codes whose sentence ends by promising the helper's own numbers: the
@@ -1830,6 +1928,7 @@ defmodule FermixCore.Tools.ComputerUse do
   defp refusal?(:sidecar_unavailable), do: true
   defp refusal?(:busy), do: true
   defp refusal?({:not_dispatched, _reason}), do: true
+  defp refusal?({:computer, _sentence}), do: true
   defp refusal?(_reason), do: false
 
   # The action deadline is the helper going quiet mid-action; the SESSION deadline is
@@ -1838,6 +1937,7 @@ defmodule FermixCore.Tools.ComputerUse do
   # both the input was already on its way, so dispatch is unknown — which is the one
   # verdict that must never be reported as "it did not happen".
   defp unknown_dispatch?({:operator_stopped, _dispatch}), do: true
+  defp unknown_dispatch?({:computer_stopped, _sentence}), do: true
   defp unknown_dispatch?({:timeout, :cu_sidecar_action, _ms}), do: true
   defp unknown_dispatch?({:timeout, :cu_session_call, _ms}), do: true
   defp unknown_dispatch?({:sidecar_exited, _status}), do: true
@@ -1881,6 +1981,14 @@ defmodule FermixCore.Tools.ComputerUse do
 
   # Coexistence (V3 R0): the human is actively using the machine, so a disturbing
   # action was held back rather than fighting them for the cursor.
+  # A computer answered for itself (M97 §6.4), in its own sentence, which names it.
+  defp action_error_message({:computer, sentence}) when is_binary(sentence), do: sentence
+
+  # The person at the computer stopped the server there, or switched its screen
+  # off (M97 §7.4). Whatever was under way when they did is theirs to judge.
+  defp action_error_message({:computer_stopped, sentence}) when is_binary(sentence),
+    do: sentence <> " " <> computer_stopped_lead()
+
   defp action_error_message(:user_active) do
     "the user is actively using the machine right now, so this action was held back to " <>
       "avoid taking the cursor from them. Wait for them to pause, or ask them to let you continue."

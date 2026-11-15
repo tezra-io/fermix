@@ -138,30 +138,165 @@ primary's, exactly as its own socket would give it.
 
 - **Answered on this computer** (device-class): `hello`, `lifecycle.*`,
   `diagnostics.build`, `logs.query`, `doctor.*`, `setup.session.create`,
-  `setup.detect`, `computer_use.*`, `imessage.*`, `browser.install.start`,
-  `capabilities.install.start`, Always On's steps and offers (`home.act` and
-  `home.provision.options`: the provider tokens and the ledgers stay on the
-  computer that created the server, and `home.act` sends the server's own
-  steps itself, below), and `settings.get` and `settings.apply` for a section
-  that configures only this computer: `sandbox`, `computer_use`,
-  `computer_history` and `channels.imessage`.
+  `computer_use.*`, `imessage.*`, `accessories.*` (the
+  robot is wired to this computer), `computer.*` (this computer's own
+  record of what its server did here, `computer.journal.list`, the Stop
+  beside the mark while its server controls its screen,
+  `computer.screen.stop`, and its own link to a home, `computer.join.start`,
+  `computer.join.cancel` and `computer.disconnect`),
+  `job.get` and `job.cancel` of a job this computer started (its id begins
+  `computer.`),
+  `browser.install.start` (the browser the server's requests drive here),
+  `capabilities.install.start` for a capability that runs on this computer
+  (`computer_use_sidecar`, `imessage_helper`), `setup.detect` unless every
+  target it names is the home's (below), Always On's steps (`home.act`: a
+  move back and Restore here are this computer's own, and `home.act` sends
+  the server's own steps itself, below), and every setting and secret of
+  this computer's own: `settings.get`, `settings.apply` and `settings.reload`
+  whose `section` is `computer` or begins `computer.`, and `secret.set` and
+  `secret.clear` whose `id` begins `computer.` (*One set of settings*,
+  below). `channels.imessage` is the home's:
+  that the home uses iMessage, its owner and its guests are the primary's, and
+  a linked Mac asks for them there, while who Fermix may write to is confirmed
+  on that Mac (`imessage.policy.confirm`, which reads the primary's owner and
+  guests).
+- **One set of settings** (M97 §19, D28). The id names the machine: a
+  settings section or a secret whose id is `computer` or begins `computer.`
+  is this computer's and answered here; every other id is the home's, which
+  after a move is the server, its own machine sections included: its
+  `sandbox`, `browser` and `harness_machine` (whether coding agents may run
+  on the server), and a sandbox value of the server's, `env:<NAME>`. One id
+  names one machine, for the read and for the write, and this computer
+  decides by the id before it asks the server anything. This computer
+  publishes its own under the `always_on` pane, titled for itself:
+  `computer` (what Fermix on the server may use here, "This computer"), then
+  `computer.sandbox`, `computer.browser`, `computer.computer_use` and
+  `computer.computer_history` (where this computer has a recorder: a Mac,
+  and a Linux computer), each titled "<the section's title> on this Mac"
+  ("on this computer" elsewhere), and each answered by the plain section's
+  own rows.
+  Its answer carries the prefix: the section's
+  `id`, and each secret row's `key` (`computer.env:LEDGER_TOKEN`), so the
+  `secret.set` a row sends comes back here; a refusal's `section`, `field`
+  or `id` names it the same way, so `settings.reload` with that `section`
+  clears an outside edit of this computer's own files here. A
+  `computer.<id>` that is no section this computer publishes is
+  `invalid_params` on `section`. StackChan is not part of Always On, so
+  this computer publishes no `computer.accessories`, and its
+  `invalid_params` on `section` carries the sentence *Accessories* answers
+  here ("StackChan works only while Fermix runs on this Mac.", or
+  "StackChan works only on a Mac." off a Mac); the robot's setting stays in
+  this computer's `machine.toml` as it was, for a move back. A
+  `computer.` secret that is not a sandbox
+  value is `invalid_params` on `id` (`This computer keeps only its sandbox's
+  values: computer.env:<NAME>.`). The server refuses every `computer` and
+  `computer.<id>` a computer forwards (`device_class_method`). A screen, a
+  history and an accessory are each computer's own: a primary refuses
+  another computer's `settings.get` or `settings.apply` of its own
+  `computer_use`, `computer_history` or `accessories`
+  (`device_class_method`; a Mac can be the primary, after a move back, while
+  a second computer stays linked), and a linked computer lists none of them
+  from it.
+  **Who says the rule.** A computer's `hello` and the server's `hello_ack`
+  both say `caps.computer.machine_settings: true`. To a server whose
+  `hello_ack` does not, a computer sends none of what the rule moved to the
+  server: it leaves the server's `sandbox` and `harness_machine` out of
+  `settings.sections`, and answers a request for one itself (`settings.get`
+  or `settings.apply` of either, `secret.set` or `secret.clear` of
+  `env:<NAME>`) with `unavailable`, `details.capability` `settings`,
+  `details.sentence` `<server name> runs an older Fermix, which takes its
+  own sandbox and coding settings only on the server. It updates on its
+  own.`, and a request the rule made the server's that is no setting
+  (`coding_agents.check`, `capabilities.install.start` for `meetbot` or
+  `local_stt`, `setup.detect` whose every target is the home's) with
+  `unavailable`, `details.capability` `settings`, `details.sentence`
+  `<server name> runs an older Fermix, which does this only on the server
+  itself. It updates on its own.` ("Your server" where its name is not
+  known). Every other request goes to such a server as before the rule: its
+  `browser` is the home's section there, listed and sent as it is, and a
+  `settings.reload` goes without its `section`, so it reloads all of the
+  server's settings. A server refuses a sandbox
+  value (`env:<NAME>`) from a computer whose `hello` did not say it, since
+  such a computer answers its own sandbox itself: `unavailable`,
+  `details.capability` `settings`, `details.sentence` `Update Fermix on this
+  computer to change its sandbox values.` **Who may write.** On this socket,
+  every write of a machine section (`sandbox`, `browser`, `harness_machine`,
+  `computer_use`, `computer_history`, `accessories`), of `computer` and of
+  any `computer.<id>`, and every `secret.set` or `secret.clear` of
+  `env:<NAME>` or `computer.env:<NAME>`, is an owner decision: from a process
+  the engine started it is `unavailable`, `details.capability` `settings`,
+  `details.sentence` `Only the owner can change a computer's own settings,
+  its sandbox among them: use the Fermix app or the setup page.` (`computer` keeps its own sentence, above). After a move the
+  notetaker, the local speech-to-text and the coding agents run on the
+  server: `capabilities.install.start` for `meetbot` or `local_stt`,
+  `coding_agents.check`, and `setup.detect` whose every target is the
+  home's (`existing_primary`, the provider the home's settings chose,
+  `claude_code`, `codex_cli`, `ollama`, `harness_vendors`, `meetbot`) are
+  the server's. Meetings run there too: the server joins Zoom meetings where
+  its Zoom app is set up, and on an Always On server Google Meet is
+  unavailable (M97 D24), so there the notetaker's install
+  (`capabilities.install.start` for `meetbot`) and `meetings.signin.start`
+  download and open nothing and fail in their jobs with `Google Meet is not
+  available on your server yet: the notetaker needs a Google sign-in on a
+  computer with a screen. Zoom meetings work on your server.` (`Zoom
+  meetings work on your server once Zoom is set up.` in place of the last
+  sentence where its Zoom app is not), which the `meetings` section's
+  `meetings_enabled` footer says after `Enable meeting notes for Google Meet
+  and Zoom.`
 - **Composed** (answered here, with the primary's own part): `home.status`
   answers this computer's facts and adds `primary_home`, the primary's own
-  `home.status`; `settings.sections` lists this computer's own sections and
-  the primary's others. The primary's part is asked within 5 s; while it is
-  missing (unreachable, or no answer in time) this computer's part is still
-  answered and `primary_missing` holds the sentence that says why. The primary
+  `home.status`; `settings.sections` lists the primary's sections (its
+  machine sections titled with its name, "Sandbox on garden server",
+  "Browser on garden server", and "garden server" for `harness_machine`,
+  its `sandbox` and `harness_machine` where it says the rule, its `browser`
+  either way, and never its own `computer_use`, `computer_history` or
+  `accessories`, nor a `computer` or `computer.<id>` it names), then this
+  computer's own; `job.list` lists the primary's jobs, then
+  the ones this computer started itself (their ids begin `computer.`, as
+  `job.get` and `job.cancel` take them), each part oldest first. The
+  primary's part is asked within 5 s;
+  while it is missing this computer's part is still answered and
+  `primary_missing` holds the sentence that says why: while the server is
+  unreachable or has not answered within 5 s, "The server <name> is
+  unreachable. Fermix keeps your message until it is back." ("Fermix cannot
+  reach its server. Fermix keeps your message until it is back." while its
+  name is unknown); while it runs a newer Fermix than this computer can talk
+  to (`client_too_old`), "The server runs a newer Fermix than this computer
+  can talk to, so update Fermix on this computer."; while it runs an older
+  one (`daemon_too_old`), until its update takes this computer's, "The
+  server runs an older Fermix than this computer. It updates on its own once
+  the app for each computer that keeps your backups carries the newer one.";
+  any other refusal in the server's own sentence, or "The server did not
+  answer this (<code>)." where it gives none; and a list in a form this
+  computer does not read, "The server listed its settings in a form this
+  computer does not read." (`settings.sections`) or "The server listed its
+  jobs in a form this computer does not read." (`job.list`). The primary
   answers a composed request a desktop forwards as its own.
+- **Decorated** (the primary's, with the step that restarts it added):
+  `setup.state.get` and `overview.get` are sent to the primary and answered
+  as it answered, and a linked computer adds the step that restarts the
+  server, the `restart_server` action record its summary offers, while the
+  restart they report is required: `setup.state.get`'s `restart_step` and
+  `overview.get`'s `health.restart_step` (null while none is required, and
+  null while the summary offers no `restart_server`, so a pressed step is
+  never answered `changed`: a server whose own `home.status` says nothing of
+  its restart, one before this step, and one whose part is missing; absent
+  from any other engine). Its `label` names the server ("Restart garden
+  server"), and pressing it is `home.act` with that `action` and `key`. A
+  forwarded `settings.get` of a machine section is answered with its title
+  naming the server, as the list names it.
 - **Answered by the primary** (primary-class): every other method, the
   home's recovery and the servers it holds included (`home.snapshots.status`,
-  `home.snapshots.passphrase`, `home.candidates.list`): after a move the
-  server holds them.
+  `home.snapshots.passphrase`, `home.candidates.list`), and the names of the
+  home's computers (`computers.rename`): after a move the server holds them.
 - **Rail-only** (Always On setup §3.5): the server's Always On steps,
   `home.move.readiness`, `home.move.start`, `home.enroll.open` (both kinds),
-  `home.enroll.withdraw` and `home.snapshots.run`, are primary-class and
+  `home.enroll.withdraw`, `home.enroll.approve`, `home.enroll.deny`,
+  `home.snapshots.run` and `home.restart`, are primary-class and
   answered only to a desktop's forward, which a linked desktop's own
-  `home.act` sends (Back up now, Check again, Move now and Try again of a
-  replace, and the create job's request for the new server's code). On this
+  `home.act` sends (Back up now, Check again, Add a computer and its Add it
+  and Do not add it, Restart <server>, and a move back's Move back,
+  Move now, Try again and Cancel). On this
   socket, in every role, each is refused by name before anything else:
   `unavailable`, `details.capability` `home`, `details.method` naming it and
   `details.sentence` `Always On takes this step itself: send home.act with
@@ -182,9 +317,17 @@ primary's, exactly as its own socket would give it.
   renewal above; draw it quietly, not as an outage), `unreachable` (an
   outage, the renewal loop included, retried with the backoff; also a link
   this engine refused to use), `revoked` (the primary no longer knows this
-  computer; not retried until the engine restarts) and `stale` (the primary
-  answered as an older copy; retried). A redial during an outage keeps the
+  computer, which the computer keeps in its link before it says so; not
+  retried until the engine restarts; a computer that cannot keep it there
+  is `unreachable` and retried, its `sentence` saying why) and `stale` (the
+  primary answered as an older copy; retried). A redial during an outage keeps the
   outage's word until a session is up; `sentence` says the rest.
+- **The link's path.** While a session is up, `primary.path` says how it
+  runs: `direct` (a direct UDP path, a tailnet address included) or `relay`
+  (through Fermix's relay), as the iroh helper reported it when the session
+  opened and at each change after. It is absent while no session is up,
+  before the helper names it, and from an engine older than the field, which
+  a client draws as no path.
 - **Forward deadlines.** How long the computer waits for the primary's answer
   to a forwarded request:
 
@@ -206,9 +349,15 @@ primary's, exactly as its own socket would give it.
   `home.move.start`, `details.primary` naming the server and
   `details.sentence` `The server <name> did not confirm in time whether the
   move started. Its state shows once the server answers again, and starting
-  it again never starts a second move.` The desktop records the replace's
-  move as started either way, and the client reads what happened from
-  `home.status`; a second start is refused while one runs.
+  it again never starts a second move.` The desktop records the move back's
+  start either way, and the client reads what happened from
+  `home.status`; a second start is refused while one runs. Restart <server>
+  is the same (M97 D28c): the server restarts right after it answers
+  `home.restart`, so an answer lost to that restart makes `home.act`'s
+  `restart_server` answer `unconfirmed`, `details.method` `home.restart`,
+  `details.sentence` `The server <name> was asked to restart and did not
+  confirm it in time. Always On shows how it stands once the server is
+  back.`
 - The primary refuses a device-class request that reaches it anyway with
   `device_class_method`, `details.method` naming it.
 
@@ -224,123 +373,476 @@ else until the move makes it the primary.` Its `home.status` reports `role`
 `candidate`, `move` with `candidate` null, and `snapshots` that say they are
 the primary's.
 
+## The server leads
+
+An Always On server updates itself from the release channel; its computers
+are clients with a window (M97). It reads the release table fermix.ai
+serves (`https://fermix.ai/install/releases`, the one the installer
+trusts) every five minutes, and a release is eligible once, for each
+system whose computers keep the home's backups, a published app carries an
+engine that reads the home that release writes. `home.status.update` says
+what it found:
+
+| Field | Meaning |
+|---|---|
+| `running` | this engine's version |
+| `eligible` | the newest eligible release at or above `running`; null when there is none or no table was read, and the update then installs nothing |
+| `held` | `{version, waits_for, sentence}`: a newer release not eligible yet, the systems whose app it waits for (`macos`, `linux`, `unknown` for a computer that has not said its system), and a sentence that names no version; null when there is none |
+| `ahead_of_apps` | `true` once no published app for some backup system reads the home this engine writes, after an owner's override |
+| `table` | `{read_at, sentence}`: when the table was last read, and the sentence of a fetch that failed or of why none was read; each null otherwise |
+
+`update_ceiling` is `update.eligible`. A computer stands against the
+server's version by major.minor, never by patch (`computers[].standing`,
+and `hello_ack.caps.computer.standing` on its link): `current`, `behind`
+(the same major, at most two minor versions behind: served as `current`
+is), `ahead` (newer, speaking the server's versions) or `settings_only`
+(further behind, or an older major: its link carries settings alone, its
+chat is refused and it offers nothing until it updates; its summary is the
+`update` problem in its own sentence).
+
+That window is about the wire. Whether an engine can take a home into its
+keeping (a restore, Restore here, a move, a move back) is the home's
+**format** (M97 D16), never the engine version that wrote it:
+`home.status.home_format` is the format this engine reads and writes, and
+every archive, snapshot and move stream names its own. An engine reads a
+home of its format or an older one, whichever engine wrote it, and refuses a
+newer one before anything is written; a home or an engine that names no
+format is from before home formats, and such a home is format 1. The format
+is raised only by a release that writes something an older engine cannot
+read, so most releases restore on an older app, and the release table names
+each release's format in a `home_format <engine_version> <home_format>` row,
+which the gate above reads; an app whose engine the table names none for
+reads only its own release's home or an older one's. Where this engine
+cannot read the home its server writes (by `primary_home.home_format`), the
+summary offers `update` in place of Move back and Restore here.
+
 ## The Always On summary
 
-**Not in a release build yet.** A build compiled for production serves no
-Always On: `hello` lists none of `home.status`, `home.act` and
-`home.provision.options` (in `methods` or `minimum_versions`), and each is
-refused by name, `unavailable` {`capability`: `always_on`, `method`,
-`sentence`: "Always On is not in this release of Fermix yet."}. A client
-shows no Always On where `hello` lists no `home.act`. Every other `home.*`
-method is served as ever.
+**A client shows no Always On where `hello` lists no `home.act`**: a
+released engine from before Always On shipped lists none of `home.status`,
+`home.act`, `home.enroll.approve`, `home.enroll.deny`, `home.restart`,
+`computers.rename`, `computer.join.start`, `computer.join.cancel`,
+`computer.disconnect`, `computer.journal.list` and `computer.screen.stop`.
+Of them, 0.18.0 knows `home.status` and `home.act` and refuses each by name
+with `unavailable` {`capability`: `always_on`}; it answers every other one
+`method_not_found`, as a release before it answers them all. Every engine
+since serves all of them.
+
+**An app from before the pane's draft 3** (one that knows `learn_more`,
+`detail.actions`, `detail.data` and `detail.review`) keeps working under
+the protocol's rule for fields (*Versioning*): every field this summary adds
+(`help`, `note` on any state, `steps`, `route`, `transfer`, `backup`,
+`webhooks.url`, `own_server`'s `sentence` and `tailscale`'s `label` and
+`url`) is one it ignores, and every field it no longer carries is one such
+an app reads as optional, with its absent rendering: no `detail.actions`
+(`on`'s steps are in `detail.alternatives`, which it draws the same way), no
+`detail.data`, no `detail.review` (a review is `on`'s `action`
+`review_offers`, sent with no `keep_offers`: the switches as they are), no
+action `url` and never `learn_more` (no help control until it reads `help`).
+Neither the protocol version nor `home.status`'s minimum moves.
 
 `home.status.summary` is the Always On screen, worked out once by the engine
 (M75 lean v1 §7, Always On setup §3), so the Mac app, the Linux app, the
-setup page and `fermix home status` draw the same thing:
+setup page and `fermix home status` draw the same thing. The server is the
+owner's own: a Linux server they set up and install Fermix on with the
+command `own_server` answers; Fermix creates, powers and deletes no server.
 
 ```json
 {"key": "Hpj619zuAVxgXXRVumw26w", "state": "problem",
- "sentence": "Your server is turned off.",
- "action": {"id": "turn_on", "label": "Turn it on", "needs": [], "confirm": null,
-            "url": null, "key": "er-r-ReXG6gOEo4Q7ANhcQ"},
- "detail": {"kind": "turned_off", "note": "A turned-off server still costs its monthly price.",
-            "seen_at": "2031-05-04T11:50:00Z", "alternatives": [],
-            "lines": [{"label": "Server", "value": "fermix-general-a3f9"},
-                      {"label": "Costs", "value": "€8.33 a month, billed by the hour until deleted"}]},
- "notice": null, "outcome": "failed"}
+ "sentence": "Fermix cannot reach your server. Your messages wait until it is back.",
+ "action": null,
+ "detail": {"kind": "cannot_reach", "seen_at": null,
+            "note": "Check that your server is on and online. If it is gone for good, restore Fermix on this Mac.",
+            "alternatives": [{"id": "restore_here", "label": "Restore on this Mac",
+                              "needs": ["recovery_passphrase"],
+                              "confirm": "Restore Fermix on this Mac from its backup of Sunday, May 4, 2031 at 12:00 PM CEST?\nConfirm only once you deleted your server, or stopped it for good: if it runs again, two copies of Fermix answer the same channels.\nMessages, memory and jobs since that backup are gone.",
+                              "key": "er-r-ReXG6gOEo4Q7ANhcQ"}]},
+ "notice": {"id": "cannot_reach:2031-05-04T11:49:00Z",
+            "sentence": "Fermix cannot reach your server. Your messages wait until it is back."},
+ "outcome": "failed",
+ "help": "https://fermix.ai/docs/always-on/#when-the-server-is-gone"}
 ```
 
-A client maps `state` to its screen, prints `sentence` as it is and, when
-`action` is not null, offers that one action under its `label`; `detail`
-sits behind Details. Every word is the engine's: none names an epoch, the
-primary, a candidate, the relay, the rail, a phase, an item id or a key id.
+**One sentence and at most one action per screen** (the Always On pane,
+draft 3). A client maps `state` to its screen and draws, top to bottom:
+`sentence` as it is (a screen's own words are at most 20 words); under it
+`detail.note`, the one secondary sentence, on any state (what the owner must
+know or do now: the wait, why a move was undone, what to check, what to do,
+a failure's own words), never in Details; the step in hand
+(`detail.progress`, with `detail.steps`, `detail.route` and
+`detail.transfer` where the screen has them); the blocks of
+`detail.readiness`; then `action`, the one main step, or none, and every
+other step (`detail.alternatives`) beside it as equal buttons. `action` is
+null while a step runs (`outcome` `running`): Cancel, where it is offered,
+is then an alternative. `detail.lines` sit behind Details and are facts
+only. `help` is the Always On docs page at the screen's anchor, which a
+client opens from one help control (the Mac's help button, a Learn more row
+on Linux, a link on the setup page, the CLI's last line): background,
+caveats and alternatives live there, and no action is ever Learn more. Every
+word is the engine's: none names an epoch, the primary, a candidate, the
+relay, the rail, a phase, an item id or a key id.
+
+`help`'s anchors are the contract with the docs page: `what-you-need`
+(`off`), `set-up-your-server` (`connect`, the owner's server connecting,
+`candidate`, `not_set_up`, `waited_too_long`), `tailscale` (the code's
+Tailscale step), `the-move` (`ready`, `not_ready`, `moving`, `undone`),
+`on-your-server` (`on`, `primary`), `webhooks` (`detail.webhooks.url`),
+`backups` (`backup_old`, `backup_failed`), `when-the-server-is-gone`
+(`cannot_reach`, `retired` where the home moved from this computer, a
+restore), `updates` (`update`, `server_older`, `server_ahead`),
+`server-disk` (`disk_full`), `move-back` (the move back's screens,
+`return_failed`) and `add-a-computer` (a computer that asks to join, the
+computer that joins, and a computer that joined once it is `retired`).
 An engine that sends no `summary` is older than this record: the apps answer
 it with their "update Fermix" screen, so they raise their own minimum for
 `home.status` to an engine that sends it.
 
 **Every action is one record**, wherever it sits (`action`,
-`detail.alternatives`, `on`'s `detail.actions`): `id`, `label`, `needs`,
-`confirm`, `url` and `key`.
+`detail.alternatives`, `detail.backup.change`): `id`, `label`, `needs`,
+`confirm` and `key`.
 
-- `needs` lists what the surface collects before it acts: `token` (the
-  provider's token, from the token screen in `detail.providers`, with a
-  provider pick when it lists more than one), `new_recovery_passphrase`
-  (Move now and Try again where this move's recovery key is not set yet: the
-  surface asks for it twice and compares the two), `recovery_passphrase`
-  (where one is set, and on a linked desktop's replace, whose key is the
-  server's own: asked once, and the move checks it), or `choice` (the size
-  and place: read `home.provision.options`, which takes no params and
-  answers for the provider in use, whose recommendation is the default, and
-  send the row chosen as `input.type` and `input.location`, the
-  recommendation's own included: the engine makes no choice itself, so what
-  it creates is what the owner was shown). `start_again` needs `choice` only
-  when the server it creates again has no size and place kept (the server's,
-  else its failure's). Either passphrase is sent as `input.recovery_passphrase`;
-  `restore_here` needs `recovery_passphrase` too, the key the copy it restores
-  was written for.
-- `confirm` is the sentence the owner accepts before Fermix spends money,
-  deletes, restarts a server or moves; null otherwise. It never carries a
-  time or a price, so it is stable. Move now's is built at `ready` from the
-  review's items this home's settings decide (`stays_here`, `whatsapp`,
-  `slack`, `coding_agents`, `cutover_gap`, `serves_nothing`, in their own
-  words) and any other warning the last review of the same server gave;
-  during a replace it says what every such move does; during a move back,
-  what runs on this computer again and what the move back costs.
-- `url` is the Always On docs page at the provider's part for `learn_more`
-  (`https://fermix.ai/docs/always-on/#<anchor>`) and the provider's console
-  for `open_console`; null otherwise.
+- `needs` lists what the surface collects before it acts:
+  `new_recovery_passphrase` (Move now and Try again where this move's
+  recovery key is not set yet: the surface asks for it twice and compares
+  the two) or `recovery_passphrase` (where one is set, and on a move back,
+  whose key is the server's own: asked once, and the move checks it).
+  Either passphrase is sent as `input.recovery_passphrase`; `restore_here`
+  needs `recovery_passphrase` too, the key the copy it restores was written
+  for, and `change_passphrase` needs `new_recovery_passphrase`.
+- `confirm` is what the owner accepts before Fermix moves, restores, forgets
+  a server or changes the recovery passphrase; null otherwise. Its parts are
+  one per line (`\n`): the question, then each thing it says, which an
+  alert, a sheet, a terminal and a page (`white-space: pre-line`) draw as it
+  is. It never carries a time that moves with the clock, so it is stable.
+  Move now's asks "Move Fermix to your server now? You can move it back to
+  this Mac any time.", then says each warning: those the review's items this
+  home's settings decide give now (`stays_here`, `whatsapp`, `slack`,
+  `coding_agents`, `cutover_gap`, `serves_nothing`, in their own words; a
+  review's older word for one of them gives way), and every other warning the
+  last review of the same server gave. `ready` draws no warning of its own,
+  so this is where the owner reads each before anything moves. During a move
+  back it says what runs on this computer again and what the move back
+  costs, each only where this computer's settings have it (Telegram set up;
+  coding agents cost nothing, since this computer keeps its own approval,
+  M98 D5). Restore here's names the date of the backup it restores, stated
+  absolutely in the owner's zone, asks the owner's word that the server is
+  deleted, or stopped for good, and names Telegram's 24 hours only where this
+  computer's settings have it set up. Forget this server's (`cancel` on a
+  held server) asks before the server is dropped, and Change's
+  (`change_passphrase`) says that backups made before keep opening only with
+  the passphrase set before.
 - `key` is the digest of the action's `id`, `label`, `confirm`, `needs` and
   the one thing it acts on: the server a move goes to (`move_now`,
-  `try_again`, `check_again`), the provider's id of the server Fermix created
-  (`turn_on`, `restart_server`, `delete_server`, `start_again`, `cancel`; the
-  old server's for Delete your old server), the provider (`paste_token`), the
-  place (`create_in`), the copy a restore takes (`restore_here`), or nothing;
-  during a move back, the server a move goes to is this computer's own
-  candidate.
+  `try_again`, `check_again`), the server Forget this server drops
+  (`cancel` on a held server), the copy a restore takes (`restore_here`), or
+  nothing; during a move back, the server a move goes to is this computer's
+  own candidate.
 
 **The keys.** `summary.key` is the one digest of the summary: of everything
 it holds but `key` itself, the sentence of an `off`, `on` or `problem` (whose
-figures move with the clock), what was last seen (`detail.seen_at`) and the
-`Last checked` and `Last seen` lines. A change of the state, a step's sentence, an action, a
-confirm, an alternative, a line, the progress or the notice moves it; a check
-of the provider that found nothing new does not. It is what the companion
-socket's `home_status_changed` and a waiting `home.status` (below) compare.
+figures move with the clock; not a `backup_failed` problem's, which names its
+try's own time and words) and what was last seen (`detail.seen_at`). A
+change of the state, a step's sentence, an action, a confirm, an
+alternative, a line, the progress or the notice moves it. It is what the
+companion socket's `home_status_changed` and a waiting `home.status` (below)
+compare.
 
 **`detail`** holds what the state draws, a field only where it has
-something: `providers` (every provider's token screen, `{id, name,
-token_label, sentence, steps, console_url, docs_url}`, wherever a token is
-asked for: `off`, `connect`, `token_refused`, `read_only_token`); `lines`
-(the Details, `{label, value}` each, finished by the engine: the server, its
-size, place, address, system and version, until when it waits, each place's
-newest backup, the space this computer's copies take, the server's disk,
-when the provider was last checked and what the servers cost; times stated
-absolutely in the owner's zone, prices as the ledger keeps them; on
-`creating`, `ready`, `on` and `problem`; beside `restore_here`, the date of
-the copy it restores and when the server was last seen, on any state; on a
-move back's `ready`, what runs on this computer again); and `progress` (the
-sentence of the step in hand while a step's job runs, or a move back's).
+something: `note` and `alternatives` (above); `lines` (the Details, facts
+only, `{label, value}` each, finished by the engine: the server, its system
+and version, each place's newest backup and the S3 bucket where the server
+keeps an S3 copy, the space this computer's copies take and the server's
+disk, the move back's own refusal where Move back is not offered, the
+link's path; times stated absolutely in the owner's zone; on `ready`, `on`
+and `problem`); `progress` (the sentence of the step in hand while a move, a
+move back, a restore or a backup runs: for the move "Packing your home…",
+"Sending your home to <server>…", "<server> is unpacking your home…",
+"Switching over to <server>…"); `steps`, `route` and `transfer` (see *A
+flow's steps and progress*); `backup` (see *Backup settings*); `webhooks`
+(see *Inbound webhooks*); `keeps_on` (see *What a computer keeps on for
+its server*); and `not_yet` (see *What Always On does not do yet*). The
+raw facts beside them (`server`, `waits_until`,
+`backups`, `copies_bytes`, `disk_used`, `kind`, `seen_at`) are for machines;
+their words are the lines and the note.
+
+**A flow's steps and progress.** Every screen of the move to the owner's
+server (`connect`, `creating`, `ready`, `moving`, `undone`) and of the move
+back (its `creating`, `ready`, `moving`, `undone`) carries `steps`, its four
+steps in order as one line that never wraps, `{label, state}` each: the
+move's Connect your server, Move now, Send your home, Switch over, and the
+move back's Get this Mac ready ("this computer" off a Mac), Move now,
+Receive your home, Put Fermix in place; `state` is `done`, `active` (it
+runs), `yours` (the owner takes it: the screen's action, or on `connect`
+running the command on the server) or `pending`. A screen that waits on the
+owner says so in its sentence ("… when you press Move now"), and a step done
+is never worded as the flow done. While either flow moves (`moving`),
+`route` is `{from, to, direction}`: this computer ("This Mac", "This
+computer"), the server's name, and `forward` (the home goes to the server)
+or `back`. `transfer` is present only while the move's bytes move: the bytes
+the source handed to the link (the move) or the bytes this computer received
+(the move back) over the home's size, counted in whole twentieths
+(`fraction`, 0 to 1) with its words (`label`, "700 MiB of 1.4 GiB sent");
+the count changes the summary's key at most 20 times per transfer, and a
+client never fills ahead of it nor shows a percentage or a time the engine
+did not send. Where nothing is counted (packing, unpacking, switching over,
+a restore, a backup) there is no `transfer`.
+
+**Backup settings** (the pane's §3.12). Backups show only once the home has
+a server: a Mac that never moved has none, and the `snapshots` settings
+section ("Backup settings") is listed only where the primary is an Always
+On server. On a linked desktop's `on`, `detail.backup` is `{passphrase:
+{label, value, footer}, change, s3}`: whether the recovery passphrase is set
+("Recovery passphrase": "Set" or "Not set"; the recovery key is never
+shown), `change`, the `change_passphrase` action ("Change", needs
+`new_recovery_passphrase`, with its confirm; sent to the server, which sets
+it as `home.snapshots.passphrase` does), and `s3`, "Also kept in S3, set up
+with your server." where the server's S3 target is configured, null
+otherwise (the app sets no part of S3). The server's own `primary` carries
+none: its summary rides inside each desktop's `home.status`, where
+`change.needs` would pass `max_json_depth` (*Bounds*).
+
+**What a computer keeps on for its server** (M97, D27). Fermix on the
+server may use the computer it moved from, and every computer linked to it,
+only for what that computer keeps on: its switches on the computer itself
+(the `computer` settings section, *Notes*), which the server can never
+write, one for files and commands together, and computer history's own
+recorder setting. Before the move, one block says it, `{sentence, warning,
+lines}`: `sentence` asks the owner to tick what stays on ("Tick what Fermix
+on your server may still use on this Mac after the move.") and, on a Mac,
+says where a ticked history goes ("Ticked, each sitting of your computer
+history goes to your server, which keeps its summary."); `warning` is the
+plain warning where files and commands stay on while this computer's
+sandbox is open ("With files and commands on and this Mac's sandbox open, a
+server that is taken over can read and change this account's files on this
+Mac."; null otherwise), and `lines` are one per thing this computer's system
+can have, in order (`files_and_shell`, `browser`, `computer_use`,
+`imessage`, `places`, `history`; a Linux computer lists no `imessage`,
+`places` or `history`; `places` is on unless unticked),
+each `{offer, label, on}`: what it decides, its words ("files and commands,
+in this Mac's sandbox (Standard)", naming this computer's own sandbox and
+its mode, "in this computer's sandbox" off a Mac, "the browser", "your
+screen", "Messages", "Apple Maps", "your computer history") and whether it
+stays on. A
+surface draws `sentence` and `warning` as they are and each line as a tick
+the owner may change, and sends the lines left ticked as `home.act`'s
+`input.keep_offers`. The history line sets that computer's recorder: ticked,
+it records (and so offers its history); left unticked, it stops. An app from
+before D27 drew `files` and `shell` as two lines and sends them so: both
+keep `files_and_shell` on, one alone keeps it off.
+
+- `keeps_on`, on the computer that sets Always On up, in `ready`'s
+  `detail`: what this computer keeps on for its server after the move.
+  Files and commands and the browser are ticked; its screen, Messages and
+  its computer history are ticked where their own settings have them on.
+  Move now and Try again send the lines left ticked (absent: the block as
+  shown), the move records them when it is accepted, and the computer
+  writes exactly those when the move commits (the recorder first, then the
+  switches), so a move that is undone leaves no switches behind. Never on a
+  server, and never on a move back.
+- A linked computer that moved before M97 offers its server nothing until
+  the owner reviews its switches, which are set in one place, its `computer`
+  settings section ("This computer"), so the summary carries no block of its
+  own for them (one source of truth: a tick drawn twice on one screen could
+  disagree with the switch it stands for until it was saved). Its `on` says
+  so in `detail.note` ("Fermix on your server can use nothing on this Mac
+  until you review the switches under This computer.") and its `action` is
+  `review_offers` ("Keep these switches"; no needs, no confirm), which takes
+  the switches as they are and the recorder as it is; the notice
+  `computer_review` says it once. Saving any switch of the `computer` section
+  is the review too. An app from before this sent the lines of a `review`
+  block it drew as `input.keep_offers`: still read, they stay on, everything
+  else is switched off, and the history line sets the recorder as at a
+  move.
+
+**Adding a computer (M97).** A computer joins a home that already runs with
+a code and a six-digit check, and moves nothing.
+
+- A linked computer's `on` and the server's own `primary` list
+  `add_computer` ("Add a computer"; no needs, no confirm) in
+  `detail.alternatives`. Its `result` is `{code, expires_at}`, answered once: the
+  code works once, for thirty minutes, for a computer and for nothing else.
+  While a code for the owner's own server is open the step is refused
+  (`unavailable`, "A code for your own server is open. Use it or cancel it
+  before you add a computer."), and that code stays as it is.
+- The new computer takes the code in `computer.join.start` (or `fermix
+  computer join`, with Fermix stopped there, which asks for the code or reads it piped
+  in and never takes it as an argument). Its own `home.status` then
+  carries `join` and its summary is `creating` with `cancel` beside it (no
+  action: nothing is the owner's to do there while it dials or waits):
+  "Connecting this Mac to your Fermix on <server>." (`outcome` `running`),
+  then, once the server answered, "Type 482 913 on <server>, where it asks
+  you to add this Mac." (`outcome` `waiting`; "this computer" on Linux). The
+  digits show only here, on the computer that asks: they prove the computer
+  the owner looks at is the one asking, so the owner reads them here and
+  types them where the home asks. A
+  join that was not added says why in its sentence (`outcome` `failed`),
+  with `cancel` its action; `cancel` makes the computer its own home
+  again.
+- While that computer waits, the server's `primary` and every linked
+  computer's `on` carry the request: the sentence is "A computer named
+  loft-linux (Linux) asks to join your Fermix. To add it, type the six
+  digits it shows.", `action` is `approve_computer` ("Add it"; `needs`
+  `["sas"]`: the surface asks the owner for the six digits they read on the
+  new computer and sends them as `input.sas`), and `deny_computer` ("Do not
+  add it") is first in `detail.alternatives`, then the step the screen led
+  with before (`review_offers`, while a review waits). No screen of the home holds
+  the digits: neither the summary nor `enrollment.joiner` carries them. The
+  key of `approve_computer` binds the computer that asks (its name and
+  system), so a second computer that takes the place of the first answers
+  `changed`. Digits that are not the computer's are refused on `sas`
+  ("Those digits are not the ones the new computer showed, so it was not
+  added. Open a new code to try again."), the computer is not added, and
+  the code is spent. Until the owner approves, the new computer has no row
+  and no access; a refusal, a wrong code, a session that ends while it
+  waits and the window's half hour running out add nothing, and the code is
+  spent either way.
+- An added computer is listed in `computers` at once, with every offer off
+  and `backups` false, and the window names it until another code is
+  opened: the notice `computer_joined:<device id>` says "A computer named
+  loft-linux joined your Fermix." once on the owner's other surfaces. Its
+  own summary offers no Move back and no Restore here: those are offered
+  only where the home moved from this computer (its moved marker).
+- A computer its server no longer knows (the owner removed it,
+  `mobile.devices.revoke`, or the server was restored from before it
+  joined) ends its next connection as revoked and keeps that in its link
+  (its `primary.status` is `revoked` while it runs; the next session that
+  comes up clears it, and is used only once it did). The link is the one
+  record of it: its summary, with Fermix running or stopped, is
+  `retired`: "Your server no longer knows this Mac. To join your Fermix
+  again, enter a new code from Add a computer." That link is no home of its
+  own: `computer.join.start` (or `fermix computer join`, with Fermix
+  stopped) with a new code first lets go of it here as `computer.disconnect`
+  does (its key, what the server may use here, the link), then joins as
+  above. A code it cannot join with leaves the link as it is, and so does a
+  running Fermix whose session came up again meanwhile (the server knows
+  this computer again: "This computer already has a Fermix of its own (it
+  holds a link to a server)…"). A letting go that fails part-way leaves the
+  link, and the next join finishes it; a refusal after the link went
+  leaves this computer its own home with no link. The computer the home
+  moved from is still refused (its moved marker), so its link and its own
+  copies of the server's backups stay.
+- A phone is no approval surface yet.
+
+**Inbound webhooks.** On a linked desktop's `on` only, where its server
+serves a webhook the internet must reach, `detail.webhooks` is `{sentence,
+mounts, notes, url}`: the Tailscale Funnel mounts the owner runs on the
+server, in the engine's words. The server's own `primary` carries none: its
+summary rides inside each linked desktop's `home.status` as `primary_home`,
+where `detail.webhooks.mounts[].command` would sit one level past
+`max_json_depth` (6, *Bounds*), so a desktop's `home.status` would be
+refused as `invalid_result`. `sentence` says what needs them, naming only
+what the server serves ("WhatsApp and your webhook sources need a public
+address to reach your server. Run each command once, on the server.");
+`mounts` lists `{label, command, note}`, WhatsApp's first
+(`/webhook/whatsapp` on the web listener's port, one mount for Meta's GET
+check and its POSTs; its `note`: "Then set the address it prints as Meta's
+Callback URL, with your verify token."), then each webhook source's (its
+prefix, `/cues/hooks/<ref>`, on the cue door's port: Tailscale passes the
+rest of each request's path to the door, which answers only that source's
+own `/cues/hooks/<ref>/<random>`, so no command carries the URL's secret;
+its `note`: "In the sender, change the host of the source's webhook address
+to the one it prints."). Every command starts with `sudo `: the server's
+first boot names no Tailscale operator, so only root changes its serve
+config. `notes` holds one note, the step a tailnet takes once ("These use
+Tailscale Funnel. Once per tailnet, let tag:fermix-server use Funnel, and
+turn on MagicDNS and HTTPS certificates."), and `url` is the docs page
+(`#webhooks`) that holds the rest: Cloudflare Tunnel to the same loopback
+ports instead, that Funnel publishes whatever `tailscale serve` has on port
+443, Tailscale's ingress, and the wait for a new address. The values are the
+server's own (its `home.status` `webhooks`; a desktop reads them in
+`primary_home`), never this computer's. A surface draws the sentence, each
+mount folded under its label with its command (and a way to copy it) and
+its note, then the note and a link to `url`. No `webhooks` where the server
+serves none.
+
+**What Always On does not do yet** (M97). Some things do not work, or
+take a terminal on the server, while the home runs there; `detail.not_yet`
+says which, and only those that apply to this home: a list of `{id,
+sentence}`, each sentence short (within the screen's word bound) and in the
+owner's words, in this order: `google_meet` while meetings are on ("Google
+Meet needs the notetaker signed in on a computer with a screen, so your
+server joins only Zoom meetings." where the home's settings set up its Zoom
+app, all four of its values, and otherwise "Google Meet needs a computer
+with a screen, so your server joins no meetings until Zoom is set up."),
+`coding_signin` while coding agents are
+approved ("Installing and signing in Codex or Claude Code on your server
+takes a terminal there."), `whatsapp` while WhatsApp is on (the sentence
+`webhooks`' own starts with: "WhatsApp needs a public address to reach your
+server."), `slack` while Slack is on without Socket Mode ("Slack works on
+your server only in Socket Mode."), `stackchan` while StackChan is on a Mac
+("StackChan works only while Fermix runs on this Mac.", what *Accessories*
+says on a Mac whose home is on its server),
+`dev_plugins` while this computer's settings name a dev plugin folder (the
+move review's own item, naming the server, "your server" before one is
+held: "Dev plugins stay on this Mac: north-box runs none of them.") and
+`computer_history` on a computer that has no history recorder
+("This computer has no recorder for computer history."). Where it shows:
+
+- on the computer that sets Always On up, on every screen before a move
+  but `off` (`connect`, `creating`, `ready`, the `not_ready` problem and
+  `undone`), from its own settings and its own recorder, so the owner reads
+  it before Move now; `off` names nothing a move changes (the pane's D1);
+- on the server's own `primary`, what the home's settings and its own turn
+  on (`google_meet`, `coding_signin`, `whatsapp`, `slack`);
+- on a linked computer's `on`, the server's entries as its `primary` says
+  them (`primary_home.summary.detail.not_yet`), but `whatsapp` where this
+  screen's `webhooks` already says it, then what this computer's own
+  settings and recorder turn on (`stackchan`, `dev_plugins`,
+  `computer_history`).
+
+None where nothing applies, on a problem, and on every other screen. It is
+information only: no action, no confirm, no notice; a change of it moves
+`summary.key` like any detail, and a settings write tells nothing (as for
+every settings change). A client draws it as a short list under its own
+heading, "Not with Always On yet", one sentence per entry, on the screen
+itself (Details hold facts only) and never as a notification, and shows an
+entry whose `id` it does not know by its sentence as it is. An engine
+before this sends none, read as none.
 
 **`outcome`** is what a surface following a step reads, so none keeps its
 own table of states: `running` while Always On is at something that moves
-the screen on by itself (a step's job; the server starting, installing and
-connecting; the move, from its request here, whose screen reads `ready`
-until the restart shows, to its end or undoing; a server receiving its home),
-`waiting` while it waits on a server of the owner's own to use its code,
-`failed` on a `problem`, and `done` when the next step is the owner's. A
-surface that waits for a step it sent follows the screen while the outcome
-is `running` (or `waiting`, right after the step that opened the code), and
-reports a `failed` one as the step's failure.
+the screen on by itself (the server connecting; the move, from its request
+here, whose screen reads `ready` until the restart shows, to its end or
+undoing; a server receiving its home; a restore; a backup, on a screen that
+offers `back_up_now`, while it runs, so `back_up_now`'s screen runs until its
+backup ends), `waiting` while it waits
+on the owner's server to use its code, `failed` on a `problem`, and `done`
+when the next step is the owner's. A surface that waits for a step it sent
+follows the screen while the outcome is `running` (or `waiting`, right after
+the step that opened the code), and reports a `failed` one as the step's
+failure.
 
 **`notice`** is the occurrence the apps raise as a system notification, or
 null: the server ready (`ready:<candidate>`), the move done
 (`moved:<epoch>`, until the first backup after it), the server out of reach
-(`cannot_reach:<since>`, since the link went down), a server that must be set
-up again (`not_set_up:<created_at>`), the newest backup a week old
-(`backup_week:<at>`) and Fermix back on this computer from a server of the
-owner's own, which nothing here can delete (`back:<epoch>`, the epoch it came
-back at). Its `id` stays the same while the occurrence stands, so
-an app posts when the id changes and keeps the last one; the page and the
-CLI ignore it.
+(`cannot_reach:<since>`, since the link went down), the newest backup a week
+old (`backup_week:<at>`), Fermix back on this computer after a move back,
+whose server still runs its retired copy (`back:<epoch>`, the epoch it came
+back at), Restore here finished, naming the day of the backup it restored
+(`restored:<epoch>`), and a held server whose 24 hours ran out, which must
+be set up again by running its command with a new code
+(`server_lapsed:<candidate>`, on the `off` it leaves, until a new code is
+opened), a computer that joined the home (`computer_joined:<device id>`,
+while the server's window names it), a linked computer whose switches wait for the owner's review
+(`computer_review`, while it waits: "Fermix on your server can use nothing
+on this Mac until you review what it may use."), and a server whose own
+settings file left out what it had inherited from the computer it moved
+from, so it now uses its own sandbox setting (`server_sandbox:<at>`, for a
+week after: "This server now uses its own sandbox setting: open. The
+settings it had from your computer stay on that computer."), and the
+server's sandbox or coding approval changed from one of its computers (the
+newest change, `computer_change:<what>:<at>`, `at` to the millisecond, so
+each change has its own id, for a week after, on the server and on every
+linked computer, which reads it from its server's `home.status`
+`computer_changes`; a write that changed nothing is told nothing:
+"garden-server's sandbox was set to Open from loft-linux.", "garden-server's
+command profile was set to Extended from loft-linux.", "garden-server's
+allowed environment variables were changed from loft-linux.", "Coding agents
+were allowed to run on garden-server from loft-linux." or "Coding agents were
+turned off on garden-server from loft-linux."; on the server itself "This
+server's sandbox …" and "… on this server …"). Its `id` stays
+the same while the occurrence stands, so an app posts when the id changes
+and keeps the last one; the page and the CLI ignore it.
 
 **Waiting for a change.** `home.status {after, wait_ms}` (`wait_ms` at most
 25,000) answers at once when `summary.key` is not `after`; otherwise the
@@ -354,77 +856,69 @@ A client need not read the summary on a timer: on the companion chat socket,
 the hello unless the state is `off` (`priv/companion/PROTOCOL.md`, *When
 Always On changes*).
 
-**Fresh from the provider.** A `home.status` read in `problem`, `creating` or
-`ready`, while a server Fermix created stands and was last checked with the
-provider over a minute ago, starts one reconcile as a `home_provision` job
-named by the provider (one at a time, never beside a step); its write moves
-the summary.
-
 | `state` | Where it is answered | What it means |
 |---|---|---|
-| `off` | the computer that sets Always On up | Nothing is set up. The sentence's second line names what this home has turned on that stops after the move (iMessage on a Mac, voice calls, meetings), only when there is something. Its action is `paste_token`, labelled `Set up`, which needs a token: `detail.providers` holds each provider's token screen, and `detail.alternatives` the own-server link. |
-| `connect` | the same | A code for a server of the owner's own is open, or the provider refused the token before anything was created. The action is `paste_token` (`Set up`, or `Paste a new token` once a token was refused); `detail.providers` the token screens, `detail.alternatives` the own-server link and, while a code is open, `cancel` (`Cancel the code`). |
-| `choose` | the same | The token works. `detail.billing` says the provider bills by the hour until the server is deleted; the recommendation, the prices and the other offers are `home.provision.options`'s. |
-| `creating` | the same, and a linked desktop | A step's job runs, from before it wrote anything: creating (`cancel`), deleting, turning on or restarting the server, each in its own sentence, with `detail.progress`. Or the server starts, installs Fermix or connects, each in its own sentence, `cancel` while Fermix's own server sets up. During a replace of the server: creating, starting, installing Fermix on or connecting the new server (`cancel`), as the old server's own code for it says (`primary_home`'s `enrollment` and `candidates`), removing the old server after the move, or deleting the new one before it (no action). |
-| `ready` | the same, and a linked desktop during a replace | The server is held and waits for Move now. `detail`: `server` (`{name, type, location, ipv4, system, version}`, the provider's facts null for a server of the owner's own), `readiness` (the last review's warnings and blocks, `home.move.readiness`'s items; empty when all is well or no review was made, and always during a replace, whose review is the old server's own) and `waits_until`. During a replace the new server is held by the old one, and Move now is the move to it from there. Until the move begins, `detail.alternatives` holds `delete_server` for a server Fermix created (during a replace, the new one), here and when its review blocks (`not_ready`); a server of the owner's own has none. |
-| `moving` | the computer the move leaves, and a linked desktop during a replace | The move runs; once that computer waits on the server's confirmation the sentence says Fermix keeps trying. During a replace, the move to the new server, which this desktop started: the old server serves nothing until it is done, so its silence then is no problem. |
-| `on` | a linked desktop | Fermix runs on the server. `detail`: `server` (`{name, location, version}`), `backups` (`{place, at}` for each place's newest verified backup), `copies_bytes` (the space this computer's copies take), `disk_used`, `data` (what lives on the server, and that its host can technically read its disk) and `actions` (`back_up_now`, `replace_server`, `move_back`). |
-| `undone` | the computer the move left | The move was undone and its server is still held (`try_again`, and once the undo is over `delete_server` in `detail.alternatives` for a server Fermix created), or the engine is restarting as it was (no action). |
-| `retired` | a computer the move left | It has no link to the server, or the server no longer knows it. `restore_here` in `detail.alternatives` where it applies (*Moving back*). |
+| `off` | the computer that sets Always On up | Nothing is set up: "Keep Fermix running when this Mac sleeps. It moves to a server you own." (what stops after the move is Move now's confirm). Its action is `own_server`, labelled `Use my own Linux server`, which opens a code for the owner's server; its `result` holds the code, the command that installs Fermix there, the sentence the code is shown with and the optional step that also joins the server to the owner's tailnet. |
+| `connect` | the same | A code for the owner's server is open: "Waiting for your server to use its code." No action; `detail.alternatives` holds `own_server` (`Replace the code`: a new code in place of the open one, which a server may be using already) and `cancel` (`Cancel the code`); `steps` mark Connect your server as the owner's. |
+| `creating` | the same, and a linked desktop | The owner's server used its code and connects (`cancel` in `detail.alternatives`, `Cancel the code`, which closes it; once the code's 30 minutes are over with no server recorded, the window reads `expired` and the screen is `off`), or a linked desktop connects to its server to move back (`cancel` in `detail.alternatives`), or this computer joins a home with a code (*Adding a computer*). No action while it connects. |
+| `ready` | the same, and a linked desktop during a move back | The server is held, and Fermix has not moved: "Your server is ready. Fermix moves to it when you press Move now." (during a move back, "Fermix still runs on your server. It moves back to this Mac when you press Move now."), `note` until when it waits, `steps` with Move now the owner's. `detail`: `server` (`{name, system, version}`), `waits_until`, and on the computer that sets Always On up `alternatives` with `cancel` (`Forget this server`, with a confirm: the held server is dropped and the screen is `off`), except while a move to it runs, `keeps_on`, what this computer keeps on for its server after the move (*What a computer keeps on for its server*), and `not_yet` where any applies (*What Always On does not do yet*); during a move back `alternatives` with `cancel`. No warning on the screen: they are Move now's confirm; a review that blocks makes the `not_ready` problem. |
+| `moving` | the computer the move leaves, and a linked desktop during a move back or a restore | The move runs; once that computer waits on the server's confirmation the sentence says Fermix keeps trying. `progress`, and on the move and the move back `steps`, `route` and, while bytes move, `transfer` (*A flow's steps and progress*). |
+| `on` | a linked desktop | Fermix runs on the server. `detail`: `server` (`{name, version}`), `backups` (`{place, at}` for each place's newest verified backup), `copies_bytes` (the space this computer's copies take), `disk_used`, `alternatives` (`back_up_now`, `add_computer`, and, only where the home moved from this computer, `move_back` where this engine starts again by itself; one run from a terminal has a `Move back` line instead, saying why in the move back's own refusal; where this engine cannot read a home the server's engine writes (a newer one), `update` labelled `Update Fermix on this Mac first` stands in place of `move_back`, as it does of `restore_here` wherever that would be offered), `backup` (*Backup settings*), where the server serves any, `webhooks` (*Inbound webhooks*), and, where any applies, `not_yet` (*What Always On does not do yet*); while its server's restart is required, `restart_server` first in `alternatives` (*Restarting the server*); while this computer waits for the owner's review of its switches, `review_offers` is its action and `note` says where they are (*What a computer keeps on for its server*); its `lines` end with `Connection` while the link's session is up and its path is known: `Direct`, or `Through Fermix's network` through Fermix's relay. |
+| `undone` | the computer the move left | The move was undone and its server is still held (`try_again`, and `cancel`, `Forget this server`, with `ready`'s confirm in `detail.alternatives`, once the undoing is over; `note`, why, in the move's own words, where its record has them), or the engine is restarting as it was (no action). |
+| `retired` | a computer the move left, and a computer that joined | It has no link to the server, or the server no longer knows it. On a server's own copy that a move back left serving nothing, the sentence names where Fermix moved back to (the marker's `to`). `restore_here` in `detail.alternatives` where it applies (*Moving back*). A computer that joined (no moved marker) says what is true of it instead: "Your server no longer knows this Mac. To join your Fermix again, enter a new code from Add a computer." once its server forgot it (*Adding a computer*), and "This Mac is not connected to a Fermix." with no link, while it restarts as its own home ("this computer" on Linux); no action. |
 | `candidate` | the server, before its move | It waits for its move, or receives the home. |
-| `primary` | the server, after its move | Fermix runs there. |
-| `problem` | anywhere | `detail.kind` names it, `detail.note` adds one sentence where the design gives one, `detail.seen_at` is when Fermix last saw what it rests on, and `detail.alternatives` lists the other actions. Before the move, while a server Fermix created stands, `note` says it costs money and `alternatives` ends with `delete_server`; never for the server the home lives on, and never while a move runs. |
+| `primary` | the server, after its move | Fermix runs there. `detail.alternatives` holds `add_computer`; while a computer asks to join, the sentence names it and the action is `approve_computer` (*Adding a computer*). No `detail.webhooks` and no `detail.backup`: its desktops' `on` draws them. `detail.not_yet` where any of the home's applies (*What Always On does not do yet*), which its desktops read. For a week after its own settings file left out what it had inherited, its `notice` is `server_sandbox:<at>`. |
+| `problem` | anywhere | `detail.kind` names it, `detail.note` adds one sentence where the screen has one (what to check or do, a failure's own words), `detail.seen_at` is when Fermix last saw what it rests on, and `detail.alternatives` lists the other steps. Its action is the one step that fixes it, or none where no step of the owner's does. |
 
-Problems (`detail.kind`): `turned_off` (the provider says the server is off),
-`cannot_reach` (no session with the server for 10 minutes while this
-computer is awake; `restart_server` when the provider says it runs, `learn_more`
-for a server of the owner's own), `deleted` (gone from its provider), `not_set_up`
-(no check-in within 30 minutes of the code being open while this computer is
-awake), `waited_too_long` (enrolled, but waited past its 24 hours),
-`no_capacity` (`create_in`, its location in `detail.next_location`, or
-`start_again` with the size and place the failure kept, and `learn_more`
-beside it, when nothing is in stock), `account_limit` (`open_console`, then
-`start_again` once the limit is lifted, and the own-server link),
-`read_only_token` and `token_refused` (`paste_token`: once a token that
-writes is accepted the refused create no longer stands in the way: `choose`
-when it made nothing, else `create_failed`, "The new token works, so try
-again."), `create_failed` (a create stopped, or a step whose job ended with
-no answer, the engine's restart or a run that raised, exited, was killed or
-ran past its budget: `start_again`; on a linked desktop, a replace that
-stopped before its new server was made: `replace_server` again, `note`
-saying the server still runs Fermix, never `start_again`, whose delete would
-reach that server), `update` (the server speaks a protocol this
-engine is too old for), `disk_full` (85% or more), `backup_old` (the newest
-backup is over 3 days old, or none since a move that long ago), `not_ready`
-(the last review blocks the move: `check_again`, every item in
-`detail.readiness`), `unreadable` (the provisioner's file), `delete_failed`
-(deleting a server stopped: `delete_server` tries again, and `note` says it
-costs money until then; after a replace's move, the old server) and
-`power_failed` (turning the server on or restarting it stopped: `turn_on` or
-`restart_server` tries again), `server_retired` (back on this computer after
-a move back, the server Fermix created for it still runs and costs money:
-`delete_server`, whose confirm says nothing on it is kept, and `learn_more`)
-and `return_failed` (a move back to this computer that ended or stopped
-part-way: `move_back` again, `cancel` where it stopped with no record of it,
-or `restore_here` again for a restore). Every step's ending is kept in the
-provisioner's ledger, written by the daemon once the step's run is over
-however it ended, so these outlive the job that met them.
-During a replace, a problem of the new server says so in its sentence
-(`turned_off`, `not_set_up`, `waited_too_long`, `deleted` when its provider no
-longer has it, and the create's own), and `alternatives` ends with
-`delete_server` for it while it stands; a problem of the old server, which
-holds the home until the move is done, offers `learn_more` where the
-provider's power actions would act on the new one (`turned_off`, `cannot_reach`).
+Problems (`detail.kind`): `cannot_reach` (no session with the server for 10
+minutes while this computer is awake: no action; its note says to check
+that the server is on and online and, where Restore here is offered, that
+it is the answer once the server is gone for good), `not_set_up` (on the
+server, its enrollment failed), `waited_too_long` (on the server, it waited
+past its 24 hours for its move; both say to open a new code and run the
+command there again; no action), `update` (the server speaks a protocol this engine
+is too old for; or, in a sentence of its own, this engine is past the
+server's window, more than two minor versions behind the server's
+`version` or on an older major, so it keeps its link for settings alone:
+`update`), `server_older` (the server refused this engine's protocol as
+newer than its own, `daemon_too_old`, because this computer updated
+first: its note says the server updates on its own once the app for each
+computer that keeps the backups carries the newer release, since the server
+leads from the release channel (*The server leads*); no action),
+`server_ahead` (the server runs a release whose home no published app
+reads, its `update.ahead_of_apps`, after an owner's override, and this
+engine cannot read the home it writes, by its `home_format`: until this
+computer's Fermix catches up, a restore here would be refused; `update`),
+`disk_full` (85% or more; its note says to free space or give the server a
+bigger disk; no action), `backup_old` (the
+newest backup is over 3 days old, or none since a move that long ago),
+`backup_failed` (on a linked desktop, and on a server with desktops: a
+backup that failed, until a backup is stored at the place it failed at; the
+sentence says where it went ("Backing up to S3 failed."), its note the
+newest failed try's own words and when ("S3 could not be reached: the
+connection timed out. Tried Sunday, May 4, 2031 at 1:00 PM CEST."),
+`detail.seen_at` that try's time, and `back_up_now` its action; a later try
+that fails in other words moves the key, since the note is in `detail`),
+`not_ready` (the last review blocks the move: "The move cannot start yet.",
+`check_again`, its blocks alone in `detail.readiness`, and `cancel`, Forget
+this server, in `detail.alternatives`) and `return_failed` (a move back to this computer that
+ended or stopped part-way: `move_back` again, `cancel` where it stopped with
+no record of it, or `restore_here` again for a restore).
 
 **Moving back** (Always On's move back: the home comes back to the computer
 it left). On a linked desktop, `on` offers `move_back` ("Move back to this
-Mac", "this computer" off a Mac; no needs, no confirm). Once pressed, the
+Mac", "this computer" off a Mac; no needs, no confirm) where its engine
+starts again by itself (see `on`). Once pressed, the
 desktop's own move back leads its screen, ahead of everything else, the link
-gone included: `creating` while it connects to the server (`cancel`),
-`ready` once the server holds it ("This Mac is ready to take Fermix back.":
-`move_now` needs the server's `recovery_passphrase`, its confirm built on
-the desktop; `cancel` in `detail.alternatives`; `detail` the server,
-`readiness` empty and `waits_until`), `moving` from the server's start of
+gone included: `creating` while it connects to the server (no action,
+`cancel` in `detail.alternatives`), `ready` once the server holds it
+("Fermix still runs on your server. It moves back to this Mac when you
+press Move now.", its note until when this computer waits: `move_now` needs
+the server's `recovery_passphrase`, its confirm built on the desktop says
+what runs here again; `cancel` in `detail.alternatives`; `detail` the server
+and `waits_until`; its notice says the same: "Fermix still runs on your
+server. Open Always On and press Move now to move it back to this Mac."),
+`moving` from the server's start of
 the move until this computer restarts as the primary (`detail.progress`:
 receiving, waiting for the server to hand over, putting Fermix in place;
 no action), `undone` when the server undid it (`try_again`, `cancel`), and
@@ -436,23 +930,46 @@ this computer had begun to receive), never while its move runs, once it
 retired, or once the home is being put in place here. A stop part-way that
 leaves the start recorded with no candidate, while the server answers as
 the primary with no move, is `return_failed` with `cancel`. A move back the home went past (another
-desktop took it, at a newer epoch) is dropped, and not drawn. Where a server
-Fermix created stopped answering (`cannot_reach`, `turned_off`, `deleted`,
-`retired`, once it has had no session for 10 minutes, or none at all),
-or which a restore here already asked to delete and the ledger no longer
-holds, and this computer keeps a copy of its snapshots,
-`detail.alternatives` adds `restore_here` (needs `recovery_passphrase`; its
-confirm says what is lost and that a server only restarting or offline is
-deleted all the same), with the copy's date and when the server was last
-seen in `lines`. It deletes the server first: while that runs the screen is
-`creating`, then `moving` while the copy is restored; a delete the provider
-refused restores nothing (`delete_failed`, `restore_here` again), and a
-server that answers again by then is not deleted: nothing is restored, the
-request is dropped, and the screen is the linked one. A server
-of the owner's own gets no `restore_here`: nothing here can delete it.
-Back on this computer as the primary, while the server Fermix created for
-the home still stands, the screen is `server_retired`, ahead of the setup's
-own and a second desktop's; once it is deleted, the setup's own screens.
+desktop took it, at a newer epoch) is dropped, and not drawn. Where
+nothing answers from the server (`cannot_reach` once it has had no session
+for 10 minutes, or `retired` with no link at all; a server that answers it
+no longer knows this computer, or a retired copy that answers, is not
+silent) and this computer keeps a copy of its snapshots,
+`detail.alternatives` adds `restore_here` (needs
+`recovery_passphrase`; its confirm asks the owner's word that the server is
+deleted, or stopped for good, since a server that runs again answers the
+same channels as the restored copy, names the date of the copy it restores
+and says what is lost). Fermix deletes no server for it: one job of its own
+(`home_restore`) restores the copy, and the screen is `moving` from the
+press until this computer restarts as the primary. A restore that stopped
+before its copy was in place offers `restore_here` again. Back on this
+computer as the primary after a move back, the server's retired copy is
+told once (`back:<epoch>`), and after Restore here the restore is
+(`restored:<epoch>`, naming the day of the backup).
+
+**Restarting the server** (M97 D28c). A change a computer makes to its
+server's settings (a sandbox mode, a key, a coding approval) is stored on
+the server at once and used from its next start. `home.status.restart` is
+each engine's own restart state (`{required, reasons}`, as every settings
+write carries it), so on a linked computer `primary_home.restart` is the
+server's. While it says `required`, every screen of a linked computer whose
+server answers (`on`, and its problems) offers `restart_server` ("Restart
+<server>", the name this computer knows its server by; no needs, no
+confirm) first in `detail.alternatives`, and Settings may draw the same
+record; none where this computer knows no name for its server. It sends
+the rail-only `home.restart`, which the server takes as `fermix restart`
+would there, after its restart hold (`restart_hold`): with nothing holding
+it, it restarts right after it answers (`when` `now`); while it runs work on
+a computer, it answers at once that it waits (`when` `after_work`, `wait_s`,
+"Fermix on your server restarts once the work it runs on a computer ends, or
+in ten minutes at most.") and restarts once the work ends, never more than
+ten minutes after it was asked, work that starts meanwhile holding it too,
+a second request while it waits answering the same wait in the hold's own
+`wait_s`, or restarting now once nothing holds it any more;
+while a move is under way it refuses, `unavailable` with the hold's
+sentence. A restart this computer's own settings need stays its own
+(`lifecycle.*`). `fermix always-on restart-server` takes the same step from
+a terminal.
 
 **Acting on it: `home.act`.** A surface sequences nothing. For the action the
 owner pressed it collects what `needs` lists, asks `confirm` (when it is not
@@ -462,30 +979,29 @@ step (which calls, in what order, which server, following the job) and
 answers `{summary, result}`, the summary after the step, which the surface
 draws. On `changed` it shows that refusal's sentence and reads `home.status`
 again, as after any act, and the owner presses again from the screen drawn
-then. While a step's job runs the summary says so
-(`creating`, `detail.progress`), and its end moves the key, so the surface
-follows it with `home_status_changed` or a waiting `home.status`, never
-`job.*`. Three actions are opened by the surface itself and never sent:
-`learn_more` and `open_console` open `url`, and `update` is the app's own
-update.
+then. While a move back or a restore runs the summary says so (`moving`,
+`detail.progress`), and its end moves the key, so the surface follows it
+with `home_status_changed` or a waiting `home.status`, never `job.*`. One
+action is opened by the surface itself and never sent: `update`, the app's
+own update.
 
 | `id` | What the engine does on `home.act` |
 |---|---|
-| `paste_token` | checks `input.token` with `input.provider` (or the one provider) and keeps it on this computer |
-| `create_server` | the create job, with `input.type` and `input.location`, both, the row the owner chose (a create without them is refused `invalid_params` on `type`) |
-| `replace_server` | on a linked desktop: the create job with `replace` and `input.type` and `input.location` as `create_server`'s, the new server's code asked of the server over the link |
-| `create_in` | the create job in `detail.next_location`, with the failure's size (`replace` on a linked desktop) |
-| `start_again` | one job: what stands is deleted, then the server is created again with its size and place, else the failure's, else `input.type` and `input.location` (its `needs` then lists `choice`; `replace` on a linked desktop) |
-| `turn_on`, `restart_server` | the power job |
-| `delete_server` | the delete job (its label names the new or the old server during a replace) |
-| `cancel` | on `connect`, closes the code for a server of the owner's own; while a create runs, cancels it and, once its run has stopped, deletes what it made; otherwise deletes the server that stands (during a replace, the new one) |
-| `own_server` | opens a code for a server of the owner's own; `result` is `{code, expires_at, command}`, answered once |
-| `back_up_now` | runs a backup now (on a linked desktop, on the server) |
+| `own_server` | opens a code for the owner's server; `result` is `{code, expires_at, command, sentence, tailscale}`, answered once: `command` installs Fermix, `sentence` is the line the code is shown with ("Run this on your Debian 12 or 13, or Ubuntu 24.04 server, then paste the code when it asks. The code works once, until …", the time in the owner's zone), which replaces every surface's own, and `tailscale` (`{label, sentence, command, url}`, folded under its label, its tagOwners and policy steps on the docs page at `url`) is the optional step that also joins the server to the owner's tailnet, which WhatsApp and webhook sources need: the same command with `--tailscale`, after which the server asks for the code and then a Tailscale auth key (created with `tag:fermix-server`, which the tailnet policy declares under `tagOwners` first) at the terminal without echo, so the key is on no command line |
+| `cancel` | on `connect` and on `creating`, closes the code for the owner's server; on a held server's `ready`, `not_ready` or `undone` (Forget this server), drops the held server, after its confirm, and the screen is `off` |
+| `back_up_now` | runs a backup now (on a linked desktop, on the server); the screen it answers runs (`outcome` `running`, `progress` "Backing up now…") until the backup ends: back on `on`, its backup's line updated, when it was stored (`fermix always-on back-up-now --wait` exits 0), or the `backup_failed` problem when it failed (`outcome` `failed`, exit 1) |
 | `check_again` | runs the move's review again, and keeps it |
-| `move_now`, `try_again` | reviews at the press (a block refuses; a warning the confirm did not name answers `changed`), checks or sets the recovery passphrase, starts the move and restarts the engine; `result` is `{move_id}`. On a linked desktop's replace it sends the move to the server, which checks the passphrase against its own key and keeps no desktop of itself; during a move back, the same to this desktop's own candidate, kept in the move back's own record |
-| `move_back` | on a linked desktop: asks the server for a copied code (`home.enroll.open`, which names this desktop), writes this desktop's candidate for the home beside it and the move back's record, and starts receiving beside the link. Refused, `unavailable` with a sentence, while the server reports a move of its own, and where Fermix would not start again by itself (run from a terminal) |
-| `cancel` (a move back) | stops receiving, closes the server's copied code (`home.enroll.withdraw {kind: manual}`; one the server cannot be asked to close lapses by itself) and forgets the move back |
-| `restore_here` | chooses the newest copy `input.recovery_passphrase` opens (none: `invalid_params` on `recovery_passphrase`, before anything else), then one job deletes the server first and restores the copy, and the engine restarts as the primary; a delete the provider refused restores nothing |
+| `move_now`, `try_again` | reviews at the press (a block refuses; a warning the confirm did not name answers `changed`), checks or sets the recovery passphrase, records what this computer keeps on for its server (`input.keep_offers`, the lines of `keeps_on` left ticked; absent, the block as shown; an id that is not one of `files_and_shell`, `browser`, `computer_use`, `imessage`, `places` and `history`, or an earlier app's `files` and `shell`, which keep `files_and_shell` on only together, is `invalid_params` on `keep_offers`, "Name only what this computer may keep on for your server."), starts the move and restarts the engine; `result` is `{move_id}`. During a move back it sends the move to the server, which checks the passphrase against its own key and keeps no desktop of itself, to this desktop's own candidate, kept in the move back's own record |
+| `review_offers` | Keep these switches, on a linked computer whose switches wait for the owner's review: with no `input.keep_offers`, its switches as they are and its recorder as it is; with them (an app from before this change), those lines stay on, every other is switched off and the history line sets the recorder (an id that is not one of those, as for Move now, is `invalid_params` on `keep_offers`); either way the review is done; `result` is null. One that cannot be saved is `unavailable` {`capability`: `home`}, "Your review could not be saved. See the daemon log." |
+| `add_computer` | opens a code for a computer that joins the home, on the server (`home.enroll.open` with `purpose` `computer`, sent over the link from a linked computer); `result` is `{code, expires_at}`, answered once |
+| `approve_computer` | adds the computer that waits, with the six digits it shows (`input.sas`; spaces are dropped; anything but six digits is `invalid_params` on `sas`, "Type the six digits the new computer shows.", and nothing is sent): `home.enroll.approve` on the server; `result` is `{device_id, name}`, the computer as the home added it |
+| `deny_computer` | does not add the computer that waits (`home.enroll.deny` on the server), and its code is spent; `result` is null |
+| `cancel` (a join) | on the computer that joins: ends the join wherever it stands, deletes the key it made, and restarts the engine as its own home |
+| `move_back` | on a linked desktop: makes this computer's own checks first, so a refused one asks the server for nothing, then asks the server for a copied code (`home.enroll.open`, which names this desktop), writes this desktop's candidate for the home beside it and the move back's record, and starts receiving beside the link; a step after the code that does not go through withdraws it (`home.enroll.withdraw`), and the refusal's sentence says so when the server could not be asked. Refused, `unavailable` with a sentence, while the server reports a move of its own, and where Fermix would not start again by itself (run from a terminal) |
+| `cancel` (a move back) | stops receiving, closes the server's copied code (`home.enroll.withdraw`; one the server cannot be asked to close lapses by itself) and forgets the move back |
+| `change_passphrase` | Change, in the backup settings: a new recovery passphrase (`input.recovery_passphrase`, collected twice), set on the server as `home.snapshots.passphrase` sets it (sent over the link from a linked desktop); backups made before keep the key they were written for; `result` is null. A shorter one is `invalid_params` on `recovery_passphrase` |
+| `restart_server` | Restart <server>, on a linked computer while its server's restart is required: sends `home.restart` to the server, which restarts after its restart hold; `result` is the server's answer, `{when, wait_s, sentence}` (*Restarting the server*). The server's refusal (a move under way) and the server away (`primary_unreachable`) are answered as the server's are for every other step; an answer of any other shape is `unavailable` {`capability`: `home`} ("Your server answered the restart in a form this computer does not read, so whether it restarts is not known. See the daemon log.") |
+| `restore_here` | chooses the newest copy `input.recovery_passphrase` opens (none: `invalid_params` on `recovery_passphrase`, before anything else), keeps the request in the move back's record, then one job (`home_restore`) restores the copy, and the engine restarts as the primary; it deletes no server |
 
 The server also tells the paired phones, once per occurrence, when its newest
 backup passes 7 days, as a message in the owner's phone chat ("Your last
@@ -552,9 +1068,9 @@ daemon onto anything else.
 | `method` | Params | Result |
 |---|---|---|
 | `hello` | none | Supported range, method catalog, immutable engine identity, PID, and the loopback Setup endpoint. |
-| `overview.get` | none | Typed projection of readiness, health, daemon, provider, channels, memory, jobs, agents, realtime, and capability counts. |
+| `overview.get` | none | Typed projection of readiness, health, daemon, provider, channels, memory, jobs, agents, realtime, and capability counts. A channel's `status` is `away` while the computer that carries it is asleep or offline (iMessage on a server, through the Mac that carries Messages, M97 D4), as that channel reads it now; a readiness row that says so owes no setup, so it never makes the channel `setup_required`, which a row that does owe setup still does. |
 | `setup.session.create` | none | A one-use Setup URL and its absolute expiry. The durable token is never returned. An owner decision. |
-| `doctor.start` | `scope` (`local` \| `network`, default `local`) | A session view; the run continues in the background. |
+| `doctor.start` | `scope` (`local` \| `network`, default `local`) | A session view; the run continues in the background. In the device role the local scope, named or by default, runs on this computer, and the network scope is `unavailable` {`capability`: `doctor`, `sentence`}: its probes would call a provider with this computer's retired credentials. |
 | `doctor.get` | `session_id` | The session view with the checks that have landed so far. |
 | `doctor.cancel` | `session_id` | The terminal session view. Cancelling a finished session is a no-op, not an error. |
 | `logs.query` | `limit`, `level`, `subsystem`, `search`, `direction`, `cursor` | A bounded page of redacted entries plus the opaque cursor for the next page in the same direction. |
@@ -563,19 +1079,20 @@ daemon onto anything else.
 | `lifecycle.cancel` | `lease_id` | Releases the window with the daemon untouched. |
 | `diagnostics.build` | none | A bounded, field-allowlisted, scrubbed diagnostic object for user-selected export. |
 | `setup.state.get` | none | Everything a setup surface reads before it renders: readiness with its gating split, restart state with the daemon's own reason sentences, one row per provider and per channel, the personalization presence summary, feature switches, the profile, and the coexistence facts. Minimum version `2`. |
-| `settings.sections` | none | The ordered inventory of every section this daemon can serve, each with the pane it renders under, as `{sections, primary_missing}`. The one enumerator: a section reachable through `settings.get` and absent here fails the daemon's own contract test. On a linked desktop it is composed (see *After a move*): this computer's own sections (`sandbox`, `computer_use`, `computer_history`, `channels.imessage`) and the primary's others, and `primary_missing` the sentence while the primary's are missing; null everywhere else. Minimum version `2`. |
-| `settings.get` | `section` | One section's rows. Exactly one section per call, which is what keeps every result inside the published depth budget. Minimum version `2`. |
-| `settings.apply` | `section`, `values` | Applies the changed keys of one section and answers with what landed, the restart state, a readiness summary, and the changes the operator did not type. Minimum version `2`. |
-| `settings.reload` | none | Re-reads the settings file, pushes it into the running configuration, and re-records the baseline. The one action behind `Reload settings from disk`. Minimum version `2`. |
-| `secret.set` | `id`, `value` | Stores one secret and answers with its presence, never its value, and the environment variable that overrides it, if any. Minimum version `2`. |
-| `secret.clear` | `id` | Forgets one secret: the keyring item, the reference that reads it, and the value in force. Answers with the environment variable still in use, if any. Minimum version `2`. |
-| `setup.detect` | `targets` | One row per target asked for: whether this Mac already has it, and a short detail where there is one. The harness target also reports vendor installation, version and authentication status, with guidance. The `meetbot` target reports whether both halves of the meeting notetaker are installed, its detail carries the state of the notetaker's Google sign-in as a sentence, and `signed_in` carries the same state as a boolean, null while the notetaker is absent. Never a credential value. Minimum version `2`. |
+| `settings.sections` | none | The ordered inventory of every section this daemon can serve, each with the pane it renders under, as `{sections, primary_missing}`. The one enumerator: a section reachable through `settings.get` and absent here fails the daemon's own contract test. On a linked desktop it is composed (see *After a move*): this computer's own sections (`sandbox`, `computer_use`, `computer_history`, `accessories`, and `computer`, which only a linked computer publishes) and the primary's others, `channels.imessage` among them where the primary publishes it but not its `harness_machine` (whether coding agents may run on the server, which only the server shows), and `primary_missing` the sentence while the primary's are missing; null everywhere else. Every engine but a linked computer publishes its own `harness_machine` (M98 D5: whether coding agents may run on this machine, its `machine.toml`), titled "This Mac" or "This computer", in the `coding` pane before `harness`, which keeps the home's preferred tool. Minimum version `2`. |
+| `settings.get` | `section` | One section's rows. Exactly one section per call, which is what keeps every result inside the published depth budget. On a linked computer, `computer` and `computer.<id>` are this computer's and every other section the server's (*After a move*, *One set of settings*). Minimum version `2`. |
+| `settings.apply` | `section`, `values` | Applies the changed keys of one section and answers with what landed, the restart state, a readiness summary, and the changes the operator did not type. A write of a machine section, of `computer` or of `computer.<id>` is an owner decision (*One set of settings*). Minimum version `2`. |
+| `settings.reload` | `section` (optional: the section an outside edit was refused for) | Re-reads the settings file, pushes it into the running configuration, and re-records the baseline. The one action behind `Reload settings from disk`. On a linked computer, a `section` of `computer` or `computer.<id>` reloads this computer's own; any other, or none, the server's (sent without its `section` to a server without the rule, *One set of settings*). Minimum version `2`. |
+| `secret.set` | `id`, `value` | Stores one secret and answers with its presence, never its value, and the environment variable that overrides it, if any. On a linked computer, `computer.env:<NAME>` is a sandbox value of this computer's own, every other id the server's; a sandbox value is an owner decision. Minimum version `2`. |
+| `secret.clear` | `id` | Forgets one secret: the keyring item, the reference that reads it, and the value in force. Answers with the environment variable still in use, if any. Placed as `secret.set`. Minimum version `2`. |
+| `setup.detect` | `targets` | One row per target asked for: whether this Mac already has it, and a short detail where there is one. The harness target also reports vendor installation, version and sign-in state (`auth`, and `signed_out` once a run there failed to sign in), with guidance. The `meetbot` target reports whether both halves of the meeting notetaker are installed, its detail carries the state of the notetaker's Google sign-in as a sentence, and `signed_in` carries the same state as a boolean, null while the notetaker is absent. Only the `meetbot` row carries `available`: false where Google Meet cannot run on the machine that answers (an Always On server, M97 D24), its `detail` then Google Meet's sentence there in place of the sign-in's ("Google Meet is not available on your server yet: the notetaker needs a Google sign-in on a computer with a screen.", then "Zoom meetings work on your server." where the server's Zoom app is set up, else "Zoom meetings work on your server once Zoom is set up."), and true everywhere else; `present` and `signed_in` are read as they are either way (`setup_detect_server`). `available` came after the method, so an older engine's row has none, which a client reads as true. Never a credential value. On a linked computer a request whose every target is the home's (`existing_primary`, `claude_code`, `codex_cli`, `ollama`, `harness_vendors`, `meetbot`) is the server's, any other this computer's (*After a move*). Minimum version `2`. |
+| `coding_agents.check` | `vendors` (optional: a list naming `codex` and `claude`, each at most once; both when absent) | Check again for this computer's coding agents: the owner's word that they signed in again. The sign-in marks of the agents it names (an agent whose last run here failed to sign in, `signed_out` in `setup.detect`) are cleared on this computer, and the answer is `{results}` with the one `harness_vendors` row `setup.detect` answers, read again. A client calls it only when `hello` lists it, and `setup.detect` otherwise. Refusals: a parameter it does not take, or `vendors` that is not such a list, is `invalid_params` with `field`; sign-in marks this computer cannot read are `unavailable` {`capability`: `coding_agents`, `sentence`: "Fermix could not read the coding agents' sign-in marks here, so none was cleared."}, and nothing is cleared. On a linked computer it is the server's (M97 §19, D28: the coding agents the server runs, *After a move*); this computer's own coding facts are not drawn there. Minimum version `2`. |
 | `providers.set_primary` | `provider` | Makes one configured provider the primary and answers with the restart state and any change the operator did not type. Minimum version `2`. |
 | `providers.models.list` | `provider`, `live`, `query`, `cursor`, `limit` | One page of models, from the catalog this build ships or from the provider's own live listing, with the cursor for the next page. Minimum version `2`. |
 | `providers.probe.start` | `provider` | Starts a metered call against the provider. A job; the result carries the model and the latency. Minimum version `2`. |
-| `job.get` | `job_id` | One job's uniform view. Minimum version `2`. |
-| `job.cancel` | `job_id` | Stops a running job and answers its terminal view once its run has stopped: the run is signalled to stop and killed if it is still running 5 s later, so the answer can take that long, and a step started after it never runs beside the run it cancelled. Cancelling a finished job is a no-op, not an error. Minimum version `2`. |
-| `job.list` | none | Every job this daemon retains, oldest first. What lets a reopened surface find a run it started rather than starting a second one. Minimum version `2`. |
+| `job.get` | `job_id` | One job's uniform view. A job is answered by the engine that started it: on a computer linked to its server, the jobs it starts itself (its browser's install, computer use's or Messages' helper, Restore here) have ids that begin `computer.` (`computer.job:<id>`) and are answered there; every other id is the server's (*After a move*). Minimum version `2`. |
+| `job.cancel` | `job_id` | Stops a running job and answers its terminal view once its run has stopped: the run is signalled to stop and killed if it is still running 5 s later, so the answer can take that long, and a step started after it never runs beside the run it cancelled. Cancelling a finished job is a no-op, not an error. Placed by its `job_id` as `job.get` is. Minimum version `2`. |
+| `job.list` | none | Every job this daemon retains, oldest first, as `{jobs, primary_missing}`. What lets a reopened surface find a run it started rather than starting a second one. On a computer linked to its server it is composed (see *After a move*): the server's jobs, oldest first, then the ones this computer started itself, oldest first, whose ids begin `computer.` (`computer.job:<id>`), so a pane reopened over this computer's own install finds it; at most 40, and `primary_missing` the sentence while the server's are missing; null everywhere else. `primary_missing` came after the method: a client reads a missing one as null. Minimum version `2`. |
 | `auth.start` | `provider` | Starts a browser sign-in and answers with the job plus the authorize url and its lifetime, returned once. `openai_codex` signs in with ChatGPT: a sign-in that leaves ChatGPT plan usage off fails the job with its sentence, and a completed one first makes sure the default model is one the account lists. When that check cannot be made (the account's model list could not be read, or the model could not be saved), the sign-in still completes and its result carries `model_warning`, the daemon's sentence saying the default model was not checked and why, beside `account_label`. The field is optional: absent means the check was made, and a client that does not know it shows the sign-in as completed. `mcp:<name>` signs in one MCP server the owner added, a remote one whose `auth` is `auto`, and is refused with `invalid_params` on `provider` and a sentence for a name no server has, a server on this Mac, one that sends a key and one set to need no sign-in. Minimum version `2`. |
 | `auth.import.start` | `source` | Adopts a sign-in this Mac already has, from Claude Code. A job, because reading the keychain can prompt. `codex_cli` is still accepted as a source and refused with `invalid_params` and a sentence: a Codex CLI sign-in is no longer adopted, and `openai_codex` signs in with ChatGPT through `auth.start`. Minimum version `2`. |
 | `auth.logout` | `provider` | Forgets one provider's local session and reverts the route it fed. Nothing is revoked upstream, except for `openai_codex`: its sign-out revokes the ChatGPT session and keeps the registration, so the next sign-in reuses it. `mcp:<name>` forgets one MCP server's sign-in, revokes nothing upstream, and starts the server again without it; a client its sign-in registered is kept for the next one. Minimum version `2`. |
@@ -589,8 +1106,8 @@ daemon onto anything else.
 | `plugins.disconnect` | `name` | Forgets the credential behind one plugin, locally: an OAuth session is deleted, a stored token is removed from the keyring, and neither is revoked upstream. Minimum version `2`. |
 | `plugins.oauth_client.set` | `provider`, `client_id`, `redirect_port`, `region` | Registers one sign-in client. The client secret is not a parameter: it arrives through `secret.set`. `region` is required exactly where the client row publishes a non-empty `regions`, and refused where it publishes none; it is optional on the wire, like `secret_present`, so an older engine is unaffected. Minimum version `2`. |
 | `plugins.setting.set` | `name`, `key`, `value` | Writes one manifest-declared setting and answers with the plugin's row. `value` is always a string, and a setting whose `kind` is `boolean` takes only `true` or `false`. Minimum version `2`. |
-| `capabilities.install.start` | `target` | Installs the computer use helper, the meeting notetaker, the on-device speech backend, or the iMessage helper (`imessage_helper`). A job. Minimum version `2`. |
-| `meetings.signin.start` | none | Starts the notetaker's one-time interactive sign-in. A job, because it waits for a person. Minimum version `2`. |
+| `capabilities.install.start` | `target` | Installs the computer use helper, the meeting notetaker, the on-device speech backend, or the iMessage helper (`imessage_helper`). A job. On a linked computer the notetaker (`meetbot`) and the on-device speech backend (`local_stt`) install on the server, which runs them, and the others here. On an Always On server the notetaker's install downloads nothing and fails in its job with the sentence Google Meet says there (*After a move*). Minimum version `2`. |
+| `meetings.signin.start` | none | Starts the notetaker's one-time interactive sign-in. A job, because it waits for a person. On an Always On server, where it lands after a move, it opens nothing and fails in its job with the sentence Google Meet says there (*After a move*). Minimum version `2`. |
 | `computer_use.grant.start` | none | Raises the OS permission prompts and answers with what was granted. A job, and only ever on an explicit ask. Minimum version `2`. |
 | `computer_use.permissions.get` | none | The current, non-prompting permission state: whether the helper is installed, which grants it holds (on Linux, what this session's pixel route serves), and when they were read. A probed answer names the helper's `platform`; a Linux one adds its `display_server` and the doctor's Linux `rows`. Minimum version `2`. |
 | `mobile.status` | none | The phone channel as it stands: whether it is enabled, whether it started, whether it was refused this boot and the class of that refusal, whether it is held until setup is finished, the listener (`status`, `reason`, `port`, `bind`, `candidates`), the local-network announcement, detected tailnet addresses, the gateway identity's presence and fingerprint, remote reach, push credentials and delivery, the paired-phone count, the mobile protocol version this daemon serves, and the pairing session open or newest retained. Answers with the channel off. Minimum version `2`. |
@@ -599,7 +1116,7 @@ daemon onto anything else.
 | `mobile.pair.decide` | `session_id`, `approved` (boolean) | Approves or denies the phone waiting in the session and answers the terminal view. Minimum version `2`. |
 | `mobile.pair.cancel` | `session_id` | Closes the window and answers the terminal view. Cancelling a finished session is a no-op, not an error. Minimum version `2`. |
 | `mobile.devices.list` | none | Every paired device, oldest first, at most 64, read from the paired-device file while the channel is not running. Each row names its `kind`, `phone` or `desktop` (a desktop engine a move paired). Minimum version `2`. |
-| `mobile.devices.revoke` | `device_id` | Forgets one paired phone and closes its live connection, and answers with the id and `revoked: true`. While the channel is not running it forgets the phone in the paired-device file. A desktop (`kind` `desktop`, the computer a move linked) is refused `unavailable` {`capability`: `mobile`, `sentence`: "This desktop cannot be removed: this version of Fermix cannot link it to the server again, and it keeps copies of the server's backups."} and stays paired. Minimum version `2`. |
+| `mobile.devices.revoke` | `device_id`, `confirmed` (optional boolean) | Forgets one paired phone, or removes one computer of the home (`kind` `desktop`, M97), closes its live connection, and answers with the id and `revoked: true`. While the channel is not running it forgets the device in the paired-device file. A removed computer's next connection ends as revoked, the home forgets what it offered, and it can join again with a code (*Adding a computer*). The one computer that keeps the server's backup copies is removed only with `confirmed: true`: without it the answer is `unavailable` {`capability`: `mobile`, `sentence`: "<name> keeps the only copies of your server's backups. Remove it anyway?", `confirm`: true}, nothing changes, and the surface asks the owner and sends the request again with `confirmed`. A `confirmed` that is not a boolean is `invalid_params` on `confirmed`. Minimum version `2`. |
 | `browser.install.start` | none | Downloads a browser for tasks: the meeting notetaker's helper, then the Chromium build it is pinned to, and completes with the name of the browser tasks now run in. A job. Minimum version `2`. |
 | `imessage.permissions.get` | none | The Fermix Messages helper's non-prompting state: whether it is installed, its version, Full Disk Access, the Messages database, Automation, whether Messages runs and is signed in, the user session, the confirmed recipient policy, whether that policy is exactly the saved settings, and when it was read. Minimum version `2`. |
 | `imessage.grant.start` | `service` (`automation` or `full_disk_access`) | Asks for one grant: `automation` raises the one system prompt, `full_disk_access` registers the helper, opens the Full Disk Access pane and reveals the helper for drag-in. A job that completes with the permissions view. Minimum version `2`. |
@@ -641,17 +1158,45 @@ daemon onto anything else.
 | `cues.proposals.list` | `state` (`waiting`, the default, or `recent`) | Fermix's record of each waiting proposal (oldest first, at most 100) or of the last 7 days (at most 50), and `waiting`. No arguments and no cue text. Minimum version `2`. |
 | `cues.proposals.get` | `proposal_id` | `{proposal}`: the record plus the card, the outside text apart. Minimum version `2`. |
 | `cues.proposals.decide` | `proposal_id`, `decision` (`confirm` or `deny`) | Answers a waiting proposal and returns `{proposal}` once the decision is recorded: `denied`, or `confirmed` with a null `result_status` while the call runs. Minimum version `2`. |
-| `home.status` | none; or `after` (a `summary.key`) and `wait_ms` (at most 25,000) together, to wait for a change (see *The Always On summary*) | The one picture of this home every surface draws: `role` (`primary`, `device` or `candidate`), `epoch` (null before the home's first boot as the primary), `moved` (`{to, moved_at, epoch}` or null), `snapshots` (as `home.snapshots.status`), `primary` (in the device role after a move, the primary this desktop reaches: `{name, connected, status, since, epoch, sentence}`, `status` one of `connected`, `renewing`, `unreachable`, `revoked` or `stale` (see *After a move*), `since` null while not connected and `epoch` the highest primary epoch this desktop has seen; null otherwise), `desktops` (on the primary, each desktop that holds a session to it: `{device_id, name, connected, since}`, `since` null while not connected; empty otherwise), `enrollment` (on the primary, the enrollment window opened since the engine started: `{state, expires_at, kind, candidate_id}`, `state` `open`, `used` or `expired`, `kind` `manual` or `provisioned` (the code inside a server Fermix created), `candidate_id` the candidate that enrolled with it, null until one did, which is how the server Fermix created is known, never the code; null otherwise), `candidates` (on the primary, the candidate primaries it holds, as `home.candidates.list` answers them; empty otherwise), `move` (the move this home started or, on a candidate, the one it waits for: `{phase, candidate, sentence}`; null when there is none), `secrets_missing` (on the primary, the ids `secret.set` takes of the secret references in its settings that did not resolve on this host, each one to enter again; empty otherwise), `primary_home` (on a linked desktop, the primary's own `home.status`, asked within 5 s; null otherwise), `primary_missing` (on a linked desktop, the sentence while `primary_home` is missing; null otherwise), `summary` (the Always On screen: `{key, state, sentence, action, detail, notice, outcome}`, see *The Always On summary*), `disk` (on the primary, how full its disk is: `{used, nearly_full}`, `used` a fraction from 0 to 1 and `nearly_full` from 0.85; null in any other role and when it cannot be read), `version` (this engine's version) and `update_ceiling` (the Fermix version a server's nightly update installs, in every role: the oldest engine among the desktops this machine served as their primary in the last 30 days, each read from its `hello`'s `app_version`, so the home can always move back to one of them; null when none was, or when it cannot be read). Answered locally in every role; composed on a linked desktop (see *After a move*), whose own `snapshots` list no target, its status file being a retired copy. `summary`, `disk`, `version` and `update_ceiling` came after the method: an engine that does not send `summary` is drawn as one that needs updating, and a client reads a missing `update_ceiling` as null. Minimum version `2`. |
+| `home.status` | none; or `after` (a `summary.key`) and `wait_ms` (at most 25,000) together, to wait for a change (see *The Always On summary*) | The one picture of this home every surface draws: `role` (`primary`, `device` or `candidate`), `epoch` (null before the home's first boot as the primary), `moved` (`{to, moved_at, epoch}` or null), `snapshots` (as `home.snapshots.status`), `primary` (in the device role after a move, the primary this desktop reaches: `{name, connected, status, since, epoch, sentence}`, `status` one of `connected`, `renewing`, `unreachable`, `revoked` or `stale` (see *After a move*), `since` null while not connected and `epoch` the highest primary epoch this desktop has seen; null otherwise), `desktops` (on the primary, each desktop that holds a session to it: `{device_id, name, connected, since}`, `since` null while not connected; empty otherwise), `enrollment` (on the primary, the enrollment window opened since the engine started: `{state, expires_at, candidate_id}`, `state` `open`, `used` or `expired`, `candidate_id` the candidate that enrolled with it, null until one did, never the code; a window opened for a computer that joins the home also carries `purpose` `computer`, `joiner` (`{name, platform}` while a computer waits for the owner, its `state` then `awaiting_approval`, never its digits; else null; an engine before this one also sent `sas`, which a client does not show) and `joined` (`{device_id, name}` once the owner added it, its `state` then `approved`; else null), and its `state` is `denied` once the computer was not added; null otherwise), `join` (only on a computer joining a home with a code: `{phase, server, sas, sentence}`, `phase` `dialing`, `awaiting_approval` or `denied`, `server` the server's name, `sas` the six digits this computer shows for the owner to type where the home asks, null until the server answered; absent on every other engine), `screen` (only on a linked computer: while Fermix on its server controls this computer's screen, `{since, sentence}`, `since` when it took the screen (an RFC 3339 instant) and `sentence` the words the mark says, "Fermix on your server is controlling this screen.", which a client shows as a mark (the menu bar on a Mac, the tray on Linux) with Stop beside it, `computer.screen.stop`, whether or not a window is open; null while it does not; absent on every other engine; taking and letting go of the screen is a change told as `home_status_changed`), `candidates` (on the primary, the candidate primaries it holds, as `home.candidates.list` answers them; empty otherwise), `move` (the move this home started or, on a candidate, the one it waits for: `{phase, candidate, sentence}`; null when there is none), `secrets_missing` (on the primary, the ids `secret.set` takes of the secret references in its settings that did not resolve on this host, each one to enter again; empty otherwise), `primary_home` (on a linked desktop, the primary's own `home.status`, asked within 5 s; null otherwise), `primary_missing` (on a linked desktop, the sentence while `primary_home` is missing; null otherwise), `summary` (the Always On screen: `{key, state, sentence, action, detail, notice, outcome}`, its `detail.not_yet` what Always On does not do yet for this home, see *The Always On summary*), `disk` (on the primary, how full its disk is: `{used, nearly_full}`, `used` a fraction from 0 to 1 and `nearly_full` from 0.85; null in any other role and when it cannot be read), `version` (this engine's version), `home_format` (the home format this engine reads and writes, see *The server leads*), `update` (on an Always On server, what its update may install, see *The server leads*; null on every other engine), `update_ceiling` (the release an Always On server's update may install, `update.eligible`; null where `update` is null or names none; kept because every server's update script reads it, so a script an older first boot wrote follows the server too), `restart_hold` (what holds the engine's restart after an update, `{reason, count, wait_s, sentence}`: `reason` `move` for a move under way, or `computer_work` for work in progress on a computer, at most ten minutes from the oldest one's start, `count` that work, `wait_s` the seconds the restart still waits, 0 to 600; null when nothing holds it), `restart` (this engine's own restart state, `{required, reasons}` as every settings write carries it: on a linked computer this computer's, and `primary_home.restart` its server's, *Restarting the server*), `profile` (this engine's own keychain profile, under which its keychain items are named: on a linked computer this computer's, where `setup.state.get`'s `profile` is its server's), `computer_changes` (on the primary, the newest change its computers made to each of its limits, newest first and one write's changes in this order, each `{at, computer, what, value}`, `at` to the millisecond: `what` `sandbox_mode` with `value` `strict`, `standard` or `open`, `sandbox_profile` with `value` `bare`, `assistant` or `extended`, `sandbox_env_allow` with `value` the names of the environment variables commands may get, or `harness_approved` with `value` a boolean; a write that changed nothing is none; the newest one's notice is `computer_change:<what>:<at>`; empty when none and on every other engine) and `webhooks` (on the primary, what it serves on loopback that the internet must reach, `{kind, ref, port}` each: `whatsapp`, `ref` null, on the web listener's port while the WhatsApp channel is on, then each enabled cue webhook source with a URL, `cue` and `ref` its name, on the cue door's port, by name; never a source's URL; empty otherwise; *Inbound webhooks*) and `computers` (on the primary, each computer of the home, by name: `{device_id, name, platform, engine_version, standing, connected, since, last_seen, path, offers, backups}`, `platform` `macos` or `linux` and null before it said, `engine_version` the Fermix version it last said, `standing` where that version stands against this server's (*The server leads*), null before it said one, `since` null while not connected, `last_seen` when the home last heard it, `path` `direct` or `relay` while its session is up and the path is known, else null, `offers` what it offers its server, each `{id, label, state, sentence, detail}` (`id` one of `files`, `shell`, `browser`, `computer_use`, `imessage`, `history` and `places` (looking places up in Apple Maps for the server's place search, label `Apple Maps`: a Mac whose Fermix app carries it offers it by its own switch, `computer_places`, on while nothing is stored for it; anywhere else it is `unavailable`), or another a different engine names, kept as it came; `label` the words it goes by in the server's own offer list, such as `commands` or `your screen`, null for an id the server does not know, `state` `on`, `off` or `unavailable`, `sentence` why it is not on, null while on, `detail` a short word while on, such as the sandbox mode commands run in), in its session the ones it sent (none before its first), while it is away the ones it last sent, `backups` whether it keeps copies of the home's backups, and `this_computer` true on the row of the linked computer whose request the server answers (its own row, which its app never offers to remove) and false on every other row and to every other caller; empty otherwise. `desktops` stays for the clients that read it; `computers` says more of the same). Answered locally in every role; composed on a linked desktop (see *After a move*), whose own `snapshots` list no target, its status file being a retired copy. `summary`, `disk`, `version`, `home_format`, `update_ceiling`, `update`, `restart_hold`, `webhooks`, `computers`, `restart`, `profile`, `computer_changes`, `summary.detail.not_yet`, each computer's `standing` and `this_computer` and each offer's `label` came after the method: a client reads a missing `restart` as no restart required, a missing `profile` as not said and a missing `computer_changes` or `summary.detail.not_yet` as none; an engine that does not send `summary` is drawn as one that needs updating, a client reads a missing `update_ceiling`, `update`, `restart_hold`, `standing` or `label` as null (and shows an offer's `id` in place of a null `label`), a missing `this_computer` as false, a missing `home_format` as 1, a missing `screen` as null, and a missing `webhooks` or `computers` as none. Minimum version `2`. |
 | `home.snapshots.status` | none | The snapshots view: `configured`, `recipient_set`, `interval_hours`, `running`, `next_run_at`, one row per target (`id`, `label`, `configured`, `destination`, `last_attempt_at`, `last_result` (`verified`, `failed`, `waiting` or null), `last_verified` `{at, name, epoch, size, sha256, location, key_id}` or null, `last_error`, `waiting`) and one `sentence`. Minimum version `2`. |
 | `home.snapshots.run` | none | Starts a snapshot now and answers `{started: true, snapshots}`. `busy` while one runs; `unavailable` {`capability`: `snapshots`} with the daemon's sentence when nothing is configured, in the device role, or with no scheduler. Rail-only: answered only to a desktop's forward, which a linked desktop's own `home.act` sends; on `daemon.sock` it is `unavailable` {`capability`: `home`, `method`} with "Always On takes this step itself: send home.act with the action the summary offers." (*After a move*). On the computer that sets up, Back up now (`home.act`) runs it in place. Minimum version `2`. |
 | `home.snapshots.passphrase` | `recovery_passphrase` (12 to 1024 bytes) | Derives a new recovery key from the passphrase, under a new salt, and keeps only its public half as `[fermix_core.snapshots] recipient` in place of any kept one; answers `{recipient, key_id, snapshots, sentence}`, the sentence saying that snapshots written before now open only with the earlier passphrase. `home.move.start` checks a passphrase against the key this keeps. The passphrase is never stored, logged or answered. A shorter one is `invalid_params` with a sentence; the device role answers `unavailable`. Minimum version `2`. |
-| `home.enroll.open` | `kind` (optional: `manual`, the default, or `provisioned`) | On the primary only: opens the one enrollment window, for thirty minutes and replacing an open one, kept across an engine restart, and answers `{code, expires_at}`. While the 24-hour window of a server Fermix's create job made is open, and once that server enrolled with it while the primary still holds it as a candidate, it is refused, `unavailable` {`capability`: `home`} with the sentence, so the server's own code is never stranded and the window keeps which candidate the created server is; deleting that server releases it. `kind` `provisioned` opens that 24-hour window instead, under the same one-window rules (it replaces any window), for the desktop replacing this server, which puts it inside the new one it creates. The manual code is the one `home.act`'s `own_server` opens on the computer that sets up, which reaches this window directly; a manual window a desktop asks for is that desktop's move back (`home.act`'s `move_back`): the window names the desktop, and so does the candidate that enrolls through it, which is how this server knows the move goes back to it. The code (`fxenroll1.` and base64url, at most 2,048 characters) is single use and answered once: it is never logged, and `home.status` shows the window's `state` and `expires_at` and never the code. `unavailable` {`capability`: `home`} with the daemon's sentence in any other role, or while the rail cannot open a window. Rail-only: answered only to a desktop's forward, which a linked desktop's own `home.act` sends; on `daemon.sock` it is `unavailable` {`capability`: `home`, `method`} with "Always On takes this step itself: send home.act with the action the summary offers." (*After a move*). Minimum version `2`. |
-| `home.enroll.withdraw` | `kind` (optional: `provisioned`, the default, or `manual`) | On the primary only: releases the window of `kind`: the 24-hour one when the server it was opened for will not exist or is being deleted, the copied code a desktop opened to move back when its owner cancels (`home.act`'s `cancel` on a move back). An open one ends now and its secret leaves the disk, a used one no longer holds a manual code back. A window of the other kind, or none, is left as it is. Answers `{withdrawn: true}`; `unavailable` {`capability`: `home`} with the daemon's sentence in any other role, or when the window cannot be kept. Rail-only: answered only to a desktop's forward, which a linked desktop's own `home.act` sends; on `daemon.sock` it is `unavailable` {`capability`: `home`, `method`} with "Always On takes this step itself: send home.act with the action the summary offers." (*After a move*). A desktop replacing this server sends it when its new server will not exist. Minimum version `2`. |
+| `home.enroll.open` | `purpose` (optional: `candidate`, the default, or `computer`) | On the primary only: opens the one enrollment window, for thirty minutes and replacing an open one of the same purpose, kept across an engine restart, and answers `{code, expires_at}`. With `purpose` `computer` the code is for a computer that joins the home (`home.act`'s `add_computer`, *Adding a computer*) and for nothing else; a code of either purpose is refused, `unavailable` with its sentence, while one of the other purpose is open, which stays as it is. Its code is the one `home.act`'s `own_server` opens on the computer that sets up, which reaches this window directly; a window a desktop asks for is that desktop's move back (`home.act`'s `move_back`): the window names the desktop, and so does the candidate that enrolls through it, which is how this server knows the move goes back to it. The code (`fxenroll1.` and base64url, at most 2,048 characters) is single use and answered once: it is never logged, and `home.status` shows the window's `state` and `expires_at` and never the code. `unavailable` {`capability`: `home`} with the daemon's sentence in any other role, or while the rail cannot open a window. Rail-only: answered only to a desktop's forward, which a linked desktop's own `home.act` sends; on `daemon.sock` it is `unavailable` {`capability`: `home`, `method`} with "Always On takes this step itself: send home.act with the action the summary offers." (*After a move*). Minimum version `2`. |
+| `home.enroll.withdraw` | none | On the primary only: releases the window, the copied code a desktop opened to move back, when its owner cancels (`home.act`'s `cancel` on a move back). An open one ends now and its secret leaves the disk, a used one stays as the record of who used it. None is left as it is. Answers `{withdrawn: true}`; `unavailable` {`capability`: `home`} with the daemon's sentence in any other role, or when the window cannot be kept. Rail-only: answered only to a desktop's forward, which a linked desktop's own `home.act` sends; on `daemon.sock` it is `unavailable` {`capability`: `home`, `method`} with "Always On takes this step itself: send home.act with the action the summary offers." (*After a move*). Minimum version `2`. |
 | `home.candidates.list` | none | The candidate primaries this home holds, oldest first: `{candidates}`, each `{candidate_id, name, os, arch, version, node_id, snapshots, enrolled_at, expires_at}` and never its keys. A candidate is held for 24 hours after it enrolled, at most four at once. `snapshots` (`{s3_bucket, s3_region}`) is the bucket it was told to keep snapshots in, null when the host gave none. `unavailable` {`capability`: `home`} with the daemon's sentence when the list cannot be read. Minimum version `2`. |
-| `home.move.readiness` | `candidate_id` | On the primary only: what the owner reviews before moving this home to a held candidate, answered `{ready, items}`, each item `{id, status, sentence}` with `status` `ok`, `warn` or `block` and `ready` false while any item blocks. The items, in order: `keychain_secrets` (the secrets this computer keeps in its keychain move with the home, into the server's secret files; one the keychain will not give blocks, named as its settings row labels it ("your Anthropic key", with the section's title when the label alone does not say which; one no row shows is counted), never by its id or its value; checking reads each value, which opens the keychain and can raise its prompt, and the sentence says so), `engine_version` (a server that runs an older Fermix blocks, and so does a newer one, which could never move the home back here; on a move back to the Mac the home left, a candidate whose `os` is macOS, only a Mac older than the server blocks), `disk` (the capture needs about twice the home free here; short of it blocks, with the numbers), `s3_size` (a home over one S3 upload, 5 GiB, warns where the server keeps snapshots in S3), `plugins` (on a server of another OS or architecture, the plugins the catalog has no build of for it warn, named; the server installs every other one again right after the move), `stays_here` (what the home has turned on that runs only on this computer stops after the move: iMessage on a Mac, voice calls, meetings, each named; `ok` when none is on; on a move back to a Mac, what of them the server's settings turn on runs there again, named, and is `ok`), `whatsapp` (WhatsApp turned on warns: it needs an inbound address, so it stops after the move), `slack` (Slack turned on without Socket Mode warns: it stops after the move unless switched to Socket Mode), `coding_agents` (coding agents approved here warn: they ask for the owner's approval again on the server, as after any restore), `cutover_gap` (Telegram messages sent during the move wait until it is done; a recurring job more than an hour late is skipped), `serves_nothing` (this computer serves nothing during the move) and `service` (Fermix run from a terminal, with nothing to start it again, warns: "Fermix runs from a terminal here, so it stops when the move starts. Start it again to finish."; the Mac app's engine, a process inside Fermix's own systemd unit (`fermix.service`, read from its cgroup, never from an inherited `INVOCATION_ID`) and a `fermix service` install are `ok`). A client that does not know an id shows its sentence as it is. The engine keeps the review for the start that follows it; one it cannot keep is `unavailable` {`capability`: `home`}. A candidate this home does not hold is `invalid_params` on `candidate_id`; another role is `unavailable` {`capability`: `home`}. It walks the whole home first: a client gives it at least 65 s, and a desktop forwarding it waits 60 s (*Forward deadlines*). Rail-only: answered only to a desktop's forward, which a linked desktop's own `home.act` sends; on `daemon.sock` it is `unavailable` {`capability`: `home`, `method`} with "Always On takes this step itself: send home.act with the action the summary offers." (*After a move*). On the computer that sets up, `home.act` runs the same review at Move now and at Check again. Minimum version `2`. |
-| `home.move.start` | `candidate_id`, `recovery_passphrase` (12 to 1024 bytes), `keep_as_desktop?` (boolean, true unless said) | On the primary only, and only while `home.move.readiness` has no item that blocks (otherwise `unavailable` {`capability`: `home`} with the sentence of each block). A ready review of the same candidate at most 15 minutes old is taken as it was shown, so the keychain is not read again before the move's capture reads it; with none, the engine checks now. Before anything else of the move, the recovery passphrase is checked against the recovery key this primary keeps: with one set, it must be the passphrase that set it (derived under the kept key's own salt, it must give its public half), else `invalid_params` on `recovery_passphrase` with "That is not the recovery passphrase you set."; with none set, it sets one, as `home.snapshots.passphrase` does, and a start refused after that keeps it. The move carries the kept key, so the new primary's snapshots open with the passphrase the owner already has and a move never makes a second key. On a replace this runs on the server, whose key it is. It writes the move to a held candidate, hands this home to the device role, answers `{move_id, candidate, recovery_recipient, key_id, keep_as_desktop, sentence}`, and then restarts the engine through the daemon's one stop path; the service manager brings it back in the device role, which carries the move out. The passphrase is never stored, logged or answered. A candidate this home does not hold is `invalid_params` on `candidate_id` and a passphrase under 12 bytes `invalid_params` on `recovery_passphrase`, each with a sentence; another role, a move already under way, or a home that never started as the primary is `unavailable` {`capability`: `home`} with the daemon's sentence. It may walk the whole home first: a client gives it at least 65 s, and a desktop forwarding it waits 60 s, answering `unconfirmed` when the primary had it and its answer was lost (*After a move*). Rail-only: answered only to a desktop's forward, which a linked desktop's own `home.act` sends; on `daemon.sock` it is `unavailable` {`capability`: `home`, `method`} with "Always On takes this step itself: send home.act with the action the summary offers." (*After a move*). On the computer that sets up, `home.act`'s Move now reaches the same start in place. Minimum version `2`. |
-| `home.provision.options` | none | What the provider in use sells now, read live: the one Always On speaks of (the one Fermix created something on, else the one whose token was given last), so a surface names none, after a restart too. `{provider, currency, locations, offers, recommended, more_room, sentence}`, `provider` that provider's `{id, name}` for display. `locations` are the places Fermix creates a server in there, `{id, city, country}`, in the order it recommends them (Hetzner: Falkenstein `fsn1`, Nuremberg `nbg1`, Helsinki `hel1`). `offers` is every x86 type with at least 4 GB that is still sold, in each of those locations where it is in stock, cheapest first: `{type, description, cores, memory_gb, disk_gb, dedicated, location, monthly, ipv4_monthly, total_monthly, label, price}`, the prices monthly and gross (VAT as the account is billed) as decimal strings, `total_monthly` with the IPv4 address. `label` and `price` are the engine's words, which a surface draws as sent, grouping the rows by the city of their `location`: `label` the type's name, cores (dedicated where they are), memory and disk ("CPX22: 2 cores, 4 GB memory, 80 GB disk"), `price` `total_monthly` as the summary's Costs line words it ("€20.09 a month, billed by the hour until deleted"). `recommended` is the cheapest type in the first location where it is in stock, `more_room` the cheapest type with more memory (where the recommendation is, or else where it is in stock), each `{type, location}` or null; `sentence` says the recommendation ("Recommended: CPX22 in Falkenstein, €20 a month.") or that nothing is in stock. With no token for the provider in use (nothing set up yet), `unavailable` {`capability`: `home`} "Paste a Hetzner API token first." (in its words). Params are refused (`invalid_params`, `details.method`). Device-class. Minimum version `2`. |
-| `home.act` | `action` (an action id the summary offers, but `learn_more`, `open_console` and `update`, which the surface opens itself), `key` (the `key` it was drawn with), `input` (optional: `token`, `provider`, `recovery_passphrase`, `type`, `location`, each text, as the action's `needs` asked) | Every Always On step (Always On setup §3.4, and *The Always On summary*'s *Acting on it*). The engine runs one act at a time and reads the summary first: one that does not offer `action` under `key` answers `changed` with `details.sentence` alone, and does nothing; the surface reads `home.status` again. Otherwise it runs the step and answers `{summary, result}`: the summary after it (a step that starts a job already says it runs) and `result`, `own_server`'s `{code, expires_at, command}` (the code answered once and never again, the command carrying none), `move_now`'s and `try_again`'s `{move_id}`, null for every other step. Refusals, each with `details.sentence`: `invalid_params` on `action` (one the surface opens itself, or no action), `key`, `input` or the field of a missing or bad input (a token the provider refuses, a size without a place, a passphrase that is not the one set: "That is not the recovery passphrase you set."); `unavailable` {`capability`: `home`} (another step of the family runs, the review blocks the move, nothing to move to); `external_change` and `config_unreadable` when the recovery key could not be kept; and a step sent to the server answered as the server answered it (`primary_unreachable`, `unconfirmed` among them). `input` is never logged, traced or answered. An owner decision. Device-class: a linked desktop answers it itself, sending the server's own steps over the link (*After a move*), and the server refuses one forwarded to it with `device_class_method`. A client gives it 90 s (a token check takes up to about 45 s, a review sent to the server up to 60 s). Minimum version `2`. |
+| `home.move.readiness` | `candidate_id` | On the primary only: what the owner reviews before moving this home to a held candidate, answered `{ready, items}`, each item `{id, status, sentence}` with `status` `ok`, `warn` or `block` and `ready` false while any item blocks. The items, in order: `call_in_progress` (first, and only while a voice call is in progress: it warns, naming whom the call is with, "on this computer", "from your phone", "from an accessory", or "on <name>" for a linked computer's call bridged from its app (M97 §9.2), which on a move back is the computer the home moves to, whose Move now hangs it up before it sends the move, since the move ends the call before it starts), `meeting_in_progress` (next, and only while the meeting notetaker is in a meeting: it blocks, naming the meeting by its title and platform where its record has them, "The notetaker is in Quarter planning on Zoom now, and the move would end it before its notes are written: ask Fermix to leave the meeting, or wait until it ends, then check again.", on a move and on a move back alike; `home.move.start` asks again whatever review it takes, since a meeting can start after the review), `keychain_secrets` (the secrets this computer keeps in its keychain move with the home, into the server's secret files; one the keychain will not give blocks, named as its settings row labels it ("your Anthropic key", with the section's title when the label alone does not say which; one no row shows is counted), never by its id or its value; checking reads each value, which opens the keychain and can raise its prompt, and the sentence says so), `engine_version` (a server that runs an older Fermix blocks, and so does a newer one, which could never move the home back here; on a move back to the Mac the home left, a candidate whose `os` is macOS, only a Mac older than the server blocks), `disk` (the capture needs about twice the home free here; short of it blocks, with the numbers; a home the move cannot carry, such as a link out of it, blocks, naming the path and what to do in the words `fermix home export` uses), `s3_size` (a home over one S3 upload, 5 GiB, warns where the server keeps snapshots in S3), `plugins` (on a server of another OS or architecture, the plugins the catalog has no build of for it warn, named; the server installs every other one again right after the move), `dev_plugins` (only while this computer's settings name a dev plugin folder, `[fermix_core.plugins] dev_local`, it warns: "Dev plugins stay on this Mac: north-box runs none of them."; the folder, its links and the setting stay on this computer, and a move back keeps them), `stays_here` (what the home has turned on that runs only on this computer stops after the move: iMessage on a Mac, Google Meet meetings, each named; voice calls are never named: after the move this computer's app calls the server through its engine (M97 §9.2); meetings run on the server, which joins Zoom's and cannot sign the notetaker in to Google, so with a Zoom app set up it adds "Zoom meetings carry on at north-box."; `ok` when none is on; on a move back to a Mac, what of them the server's settings turn on runs there again, named, and is `ok`), `whatsapp` (WhatsApp turned on warns: it stops after the move until the owner runs the Tailscale Funnel command the Always On screen shows for the server, which gives it an inbound address there, and points Meta at the address it prints), `slack` (Slack turned on without Socket Mode warns: it stops after the move unless switched to Socket Mode), `coding_agents` (coding agents approved on this computer warn: "Coding agents stop on this Mac after the move. They run on north-box only with your approval there."; the approval is this computer's own, in its `machine.toml`, and stays here, and the server runs them only with its own (M98 D5); `ok` when none is approved here; where it warns it adds "To run them on north-box too, allow them there in Settings, Coding agents, after the move."), `settings` (always `ok`, on a move and never on a move back: "After the move, Settings in this app change Fermix on north-box, its sandbox and coding agents included. A new server's sandbox starts Open. What north-box may use on this Mac, and this Mac's own sandbox, are under This Mac.", "this computer" and "This computer" off a Mac), `cutover_gap` (a recurring job more than an hour late is skipped; with Telegram set up, its messages sent during the move wait until it is done), `serves_nothing` (this computer serves nothing during the move) and `service` (Fermix run from a terminal, with nothing to start it again, warns: "Fermix runs from a terminal here, so it stops when the move starts. Start it again to finish."; the Mac app's engine, a process inside Fermix's own systemd unit (`fermix.service`, read from its cgroup, never from an inherited `INVOCATION_ID`) and a `fermix service` install are `ok`). A client that does not know an id shows its sentence as it is. The engine keeps the review for the start that follows it; one it cannot keep is `unavailable` {`capability`: `home`}. A candidate this home does not hold is `invalid_params` on `candidate_id`; another role is `unavailable` {`capability`: `home`}. It walks the whole home first: a client gives it at least 65 s, and a desktop forwarding it waits 60 s (*Forward deadlines*). Rail-only: answered only to a desktop's forward, which a linked desktop's own `home.act` sends; on `daemon.sock` it is `unavailable` {`capability`: `home`, `method`} with "Always On takes this step itself: send home.act with the action the summary offers." (*After a move*). On the computer that sets up, `home.act` runs the same review at Move now and at Check again. Minimum version `2`. |
+| `home.move.start` | `candidate_id`, `recovery_passphrase` (12 to 1024 bytes), `keep_as_desktop?` (boolean, true unless said) | On the primary only, and only while `home.move.readiness` has no item that blocks (otherwise `unavailable` {`capability`: `home`} with the sentence of each block). A ready review of the same candidate at most 15 minutes old is taken as it was shown, so the keychain is not read again before the move's capture reads it; with none, the engine checks now. Before anything else of the move, the recovery passphrase is checked against the recovery key this primary keeps: with one set, it must be the passphrase that set it (derived under the kept key's own salt, it must give its public half), else `invalid_params` on `recovery_passphrase` with "That is not the recovery passphrase you set."; with none set, it sets one, as `home.snapshots.passphrase` does, and a start refused after that keeps it. The move carries the kept key, so the new primary's snapshots open with the passphrase the owner already has and a move never makes a second key. On a move back this runs on the server, whose key it is. It writes the move to a held candidate, hands this home to the device role, removes this home's record of a move back that ended (`device/return.json`), answers `{move_id, candidate, recovery_recipient, key_id, keep_as_desktop, sentence}`, and then restarts the engine through the daemon's one stop path; the service manager brings it back in the device role, which carries the move out. The passphrase is never stored, logged or answered. A candidate this home does not hold is `invalid_params` on `candidate_id` and a passphrase under 12 bytes `invalid_params` on `recovery_passphrase`, each with a sentence; another role, a move already under way, or a home that never started as the primary is `unavailable` {`capability`: `home`} with the daemon's sentence. It may walk the whole home first: a client gives it at least 65 s, and a desktop forwarding it waits 60 s, answering `unconfirmed` when the primary had it and its answer was lost (*After a move*). Rail-only: answered only to a desktop's forward, which a linked desktop's own `home.act` sends; on `daemon.sock` it is `unavailable` {`capability`: `home`, `method`} with "Always On takes this step itself: send home.act with the action the summary offers." (*After a move*). On the computer that sets up, `home.act`'s Move now reaches the same start in place. Minimum version `2`. |
+| `home.restart` | none | On the server only: a linked computer's Restart <server> (`home.act`'s `restart_server`, M97 D28c), taken as `fermix restart` would be there, after the restart hold (`home.status.restart_hold`). Nothing holds it: answers `{when: "now", wait_s: 0, sentence}` ("Fermix on your server restarts now, with the changes that waited for it.") and restarts right after, through the daemon's one stop path, which the service manager brings back (a systemd user unit's start budget reset first, as a move's restart is). Work in progress on a computer: answers at once `{when: "after_work", wait_s, sentence}`, the hold's own sentence, and restarts once nothing holds it, the hold's own wait runs out (the oldest work ran ten minutes), or 600 seconds pass since the request, whichever is first: work that starts while it waits holds it too, within those 600 seconds, and a hold the server cannot read while it waits still holds it; one wait at a time, so a request while one waits looks again, restarting now (`when: "now"`) once nothing holds it any more and otherwise answering the same wait, `wait_s` the hold's own, never past the request's 600 seconds. Refusals, each `unavailable` {`capability`: `home`, `sentence`}: a move under way, in the hold's sentence ("A move is under way, so Fermix on your server restarts once it is done."), and a move that starts while it waits ends the wait, since the move restarts the engine itself; Fermix run from a terminal, which nothing starts again ("Fermix on your server runs from a terminal, so nothing would start it again. Restart it there."); no waiter running ("Fermix on your server cannot be restarted from here right now. Its log says why."). A param is `invalid_params` naming it. Rail-only: answered only to a desktop's forward, which a linked computer's own `home.act` sends; on `daemon.sock` it is `unavailable` {`capability`: `home`, `method`} with "Always On takes this step itself: send home.act with the action the summary offers." (*After a move*). Part of Always On (*The Always On summary*). Minimum version `2`. |
+| `home.enroll.approve` | `sas` (text: the six digits the computer that asks shows; spaces are dropped) | On the primary only: the owner adds the computer waiting on the window (`home.act`'s `approve_computer`). Its row is written, with its system, every offer off and no backup copies, under the name it said unless another device holds it (then suffixed ` 2`, ` 3` and on), it is told where its server is, and the answer is `{device_id, name}`. Refusals: `invalid_params` on `sas` for anything but six digits ("Type the six digits the new computer shows."), and for six that are not the computer's ("Those digits are not the ones the new computer showed, so it was not added. Open a new code to try again."), which denies the computer and spends the code; `unavailable` {`capability`: `home`} with "No computer is waiting to join your Fermix." when none waits, and with the daemon's sentence in any other role. Rail-only, as `home.enroll.open` is. Part of Always On (*The Always On summary*). Minimum version `2`. |
+| `home.enroll.deny` | none | On the primary only: the owner does not add the computer waiting on the window (`home.act`'s `deny_computer`). It is told, nothing of it is written, and its code is spent; with none waiting nothing changes. Answers `{denied: true}`. Rail-only, as `home.enroll.open` is. Part of Always On (*The Always On summary*). Minimum version `2`. |
+| `home.act` | `action` (an action id the summary offers, but `update`, which the surface opens itself), `key` (the `key` it was drawn with), `input` (optional: `recovery_passphrase`, text, as the action's `needs` asked; `keep_offers`, at most 32 offer ids, for `move_now` and `try_again`, the lines of the `keeps_on` block left ticked, and for `review_offers` from an app before this change, the lines it drew left ticked; `sas`, text, for `approve_computer`: the six digits the new computer shows) | Every Always On step (Always On setup §3.4, and *The Always On summary*'s *Acting on it*). The engine runs one act at a time and reads the summary first: one that does not offer `action` under `key` answers `changed` with `details.sentence` alone, and does nothing; the surface reads `home.status` again. Otherwise it runs the step and answers `{summary, result}`: the summary after it (Restore here's job already says it runs) and `result`, `own_server`'s `{code, expires_at, command, sentence, tailscale}` (the code answered once and never again, the command carrying none, `sentence` the line the code is shown with, `tailscale` the optional step that also joins the server to the owner's tailnet, `{label, sentence, command, url}`), `move_now`'s and `try_again`'s `{move_id}`, `add_computer`'s `{code, expires_at}` (answered once), `approve_computer`'s `{device_id, name}`, `restart_server`'s the server's `home.restart` answer `{when, wait_s, sentence}`, null for every other step. Refusals, each with `details.sentence`: `invalid_params` on `action` (one the surface opens itself, or no action), `key`, `input` or the field of a missing or bad input (a passphrase that is not the one set: "That is not the recovery passphrase you set."; `keep_offers` that is not a list of text: "Send the offers to keep on as a list of their ids.", or names an offer a move does not decide: "Name only what this computer may keep on for your server."); `unavailable` {`capability`: `home`} (a backup or a restore already runs, the review blocks the move, nothing to move to, a review of what the server may use that could not be saved); `external_change` and `config_unreadable` when the recovery key could not be kept; and a step sent to the server answered as the server answered it (`primary_unreachable`, `unconfirmed` among them). `input` is never logged, traced or answered. An owner decision. Device-class: a linked desktop answers it itself, sending the server's own steps over the link (*After a move*), and the server refuses one forwarded to it with `device_class_method`. A client gives it 90 s (a review sent to the server takes up to 60 s). Minimum version `2`. |
+| `computers.rename` | `device_id`, `name` (text, each at most 256 bytes) | Names a computer of the home (M97): `name` is trimmed and must be one line of 1 to 64 bytes, held by no other computer of the home and not the server's own name, each compared without case. Answers `{computer}`, the computer under its new name as `home.status` lists it in `computers`. Refusals: `invalid_params` with `field` and `sentence`, on `name` ("Give the computer a name of one line, at most 64 characters.", "Another computer of yours is already called <name>.", "Your server is already called <name>." or, when the name could not be written, "The name could not be saved. See the daemon log.") or on `device_id` ("Your Fermix has no such computer."); a missing or non-text parameter, or one it does not take, is `invalid_params` with `field` alone. Primary-class: a linked computer forwards it to its server (*After a move*). Part of Always On: an engine from before it neither lists it in `hello` nor serves it (*The Always On summary*). Minimum version `2`. |
+| `computer.join.start` | `code` (text, at most 4,096 bytes: the code Add a computer opened) | This computer joins the home the code names (M97, *Adding a computer*): it makes its own key in the secret store, records the join (`device/join.json`, mode `0600`), becomes a device, and the engine restarts, dials the server and waits for the owner there; `home.status` then carries `join`. Answers `{joining: true, sentence}`. Refusals, each with `sentence`: `invalid_params` on `code` for a code Fermix did not open ("That is not a code Fermix opened. Copy the code again from Add a computer."), one for the owner's own server ("That code sets up a server of your own, so a computer cannot join with it. Use Add a computer in Always On.") and one that expired ("That code expired. Open a new one with Add a computer."); `unavailable` {`capability`: `computer`} for a computer that has a home of its own ("This computer already has a Fermix of its own (it holds <what>), so it cannot join another. Two homes cannot be merged.": any message, memory, scheduled job or computer history note, a paired phone or computer, the moved marker, or a link to a server, but not one its server revoked, which the join first lets go of here as `computer.disconnect` does once the code is one it can join with (*Adding a computer*); a memory that only repeats the home's settings, as every settings save and the first start write the owner's name, time zone and communication style and the assistant's name, is not one, so a computer whose Fermix started, or whose owner finished setting it up, may still join; nothing is deleted to make a home empty), one already joining, a secret store that cannot keep the key, and a link it could not let go of. A refusal of the home or the code leaves nothing behind; one after the join let go of a link its server revoked leaves this computer the primary of its own home, with no link (*Adding a computer*). An owner decision. Device-class: answered on the computer that asks. Part of Always On (*The Always On summary*). Minimum version `2`. |
+| `computer.join.cancel` | none | Ends this computer's join wherever it stands: the key it made and its record go, the engine restarts as its own home, and `{cancelled: true, sentence}` is the answer; `unavailable` {`capability`: `computer`} with "This computer is not joining a Fermix." when none is under way. `home.act`'s `cancel` on the joining screen does the same. An owner decision. Device-class. Part of Always On (*The Always On summary*). Minimum version `2`. |
+| `computer.disconnect` | `confirmed` (optional boolean) | This computer leaves the home it is linked to (M97): it tells the server (`mobile.devices.revoke` for its own id, over the link), which forgets it and closes its session, then deletes its key from the secret store, its link and what the server may use here, and the engine restarts; a computer that joined is its own home again, and the one a home moved from stays retired with its own copies of the server's backups. Answers `{disconnected: true, server_told, sentence}`. A server that cannot be told is `unavailable` {`capability`: `computer`, `sentence`: "Fermix could not tell your server. Disconnect anyway? Your server lists this computer until you remove it there.", `confirm`: true} and nothing changes; with `confirmed: true` the computer leaves anyway and `server_told` is false. A computer with no link is `unavailable` with "This computer is not connected to a Fermix." An owner decision. Device-class. Part of Always On (*The Always On summary*). Minimum version `2`. |
+| `computer.journal.list` | `limit` (integer 1 to 200, default 50), `before` (an invocation's id) | What Fermix on its server did on this computer (M97 §6.3), from this computer's own journal, which the server cannot edit: the app shows it as "What Fermix did on this computer". Answers `{entries, more}`, the newest first, at most `limit`, only those older than the invocation `before` when it is given; `more` is true while older ones remain. Each entry is `{id, at, finished_at, capability, capability_label, op, op_label, target, origin, status, refusal, result_bytes, duration_ms}`: `capability_label` and `op_label` the owner's words for `capability` and `op`, from the capability's own module, lower case as an offer's `label` (`commands` and `run a command`, `files` and `write a file`), each null where this computer's engine has no words for its id (an older journal row), which a client shows as the id, as it does for an engine before them, which sends neither; `at` when it came (an RFC 3339 instant), `finished_at` when it ended, null while it runs; `target` a short description of what it acted on (a path, a host or an action, never content); `origin` the kind of turn that asked (`chat`, `voice`, `scheduled`, `cue`, `worker`, `background`, or `computer` for a computer's own request); `status` `ok`, `failed`, `refused`, `timed_out`, `cancelled` or `unknown` (the engine stopped while it ran), null while it runs; `refusal` (`off`, `unavailable`, `outside_sandbox`, `not_attended`, `stopped_here`, `busy`, `stale_epoch`) only when refused, else null; `result_bytes` and `duration_ms` null while it runs. A request refused before it ran opens and ends at once. The journal keeps the newest 2,000 invocations of the last 7 days. A computer that never moved, and a server, answer no entries. Refusals: a parameter it does not take, a `limit` outside its range or a `before` that is not an id is `invalid_params` with `field`; a journal this computer cannot read is `unavailable` with `sentence` ("This computer's record of what Fermix did here could not be read. See the daemon log."). Device-class: answered on the computer that asks; a server refuses a forwarded one (`device_class_method`). Part of Always On (*The Always On summary*). Minimum version `2`. |
+| `computer.screen.stop` | none | The person at this computer stops Fermix on its server controlling its screen (M97 §7.4): the Stop beside the mark `home.status`'s `screen` draws. The server's hold ends at once: held keys and buttons are released, the helper stops, the mark goes (`screen` null, told as `home_status_changed`), and the server hears that the person at this computer stopped it and tells the model so; the server's session on this screen ends and that session is refused from then on, so the screen is used again only when the owner asks again. Answers `{stopped}`, false when the server held nothing. Switching the master switch or the screen switch off in the `computer` section ends the hold the same way. A parameter it does not take is `invalid_params` with `field`. Device-class: answered on the computer that asks. Part of Always On (*The Always On summary*). Minimum version `2`. |
+| `accessories.status` | none; or `after` (a `key`) and `wait_ms` (at most 25,000) together, to wait for a change | The accessory picture this Mac draws (see *Accessories*): `key`, `state` (`off`, `needs_local_primary`, `not_running`, `on`), `sentence`, `enabled`, `kinds`, `voice`, `voice_device`, `ports`, `accessories`, `pairing` and `call`. Answered in every role and with accessories off. With `after` and `wait_ms` it is answered once its `key` is not `after`, or when `wait_ms` passed. Device-class. Minimum version `2`. |
+| `accessories.pair.start` | `path` | Opens the port the owner selected for pairing, ending whatever held it, and answers the status. A port must be listed (`invalid_params` on `path`) and not released for a firmware update. An owner decision. Device-class. Minimum version `2`. |
+| `accessories.pair.begin` | `path`, `name` (optional, 1 to 64 bytes) | Starts the pairing attempt on the selected port once it reads `unpaired`: the robot asks "Pair with this Mac?" on its screen. `name` is the name the paired robot is kept under, the kind's name when absent. Answers the status, whose `pairing` names the new `attempt`. An owner decision. Device-class. Minimum version `2`. |
+| `accessories.pair.decide` | `path`, `attempt`, `matches` (boolean) | The owner's answer to the compare code: `true` confirms it (the robot is enrolled once it confirmed too), `false` says the codes differ (the next round with a new code, and the third closes the attempt). Answers the status. An `attempt` that is not the open one answers `changed`. An owner decision. Device-class. Minimum version `2`. |
+| `accessories.pair.cancel` | `path`, `attempt` (optional) | Cancels the open attempt, if any (`changed` when `attempt` names another), closes the selected port and clears the selection, and answers the status. A robot already enrolled stays paired: its row says so, and Forget removes it. An owner decision. Device-class. Minimum version `2`. |
+| `accessories.retry` | `path` | Opens a busy or failed port again now, or the port that gave no Fermix answer, and answers the status. An owner decision. Device-class. Minimum version `2`. |
+| `accessories.release` | `path` | Releases a port for a firmware update: the port is closed, and it stays closed, across the installer's resets, until `accessories.reconnect`. Refused with "End the call first." while the robot on it has a call, running or settling. Answers the status. An owner decision. Device-class. Minimum version `2`. |
+| `accessories.reconnect` | `path` | Watches a released port again and answers the status. An owner decision. Device-class. Minimum version `2`. |
+| `accessories.forget` | `accessory_id` | Forgets a paired robot (the `forget` action): an attached one is told to erase its keys and its call ends; its record is erased either way, and it stops being the voice device. Answers the status. An owner decision. Device-class. Minimum version `2`. |
+| `accessories.revoke` | `accessory_id` | Erases a paired robot's record at this Mac alone (the `revoke` action, offered wherever `forget` is), without telling the robot, so its next attach is refused: for a robot that is lost or that cannot be told. Its call ends and it stops being the voice device. Answers the status. An owner decision. Device-class. Minimum version `2`. |
+| `accessories.voice_device.set` | `device` (`desktop` or `accessory:<accessory_id>`) | Chooses where the next call captures and plays audio. Only while no call runs or settles anywhere in this home (otherwise `unavailable` with the sentence); an accessory must be paired. While an accessory is chosen, the Mac's own call on `realtime.sock` is refused `voice_device_elsewhere` with the daemon's sentence (`priv/realtime/PROTOCOL.md`, *One call at a time*), and a tap on a robot that is not chosen is refused `not_selected`. Answers the status. An owner decision. Device-class. Minimum version `2`. |
+| `accessories.call.start` | `accessory_id` | Starts a call on an attached robot from the Mac and answers the status at once, inside the standard call timeout. The status long poll carries what follows: `call.phase` `starting`, then `active` once admitted, or, when the voice core refuses it (another call holds the home's one call), no `call` and the robot's `last_call` naming the refusal. A start the link refuses itself answers `unavailable` {`capability`: `accessories`, `code`, `sentence`}, `code` the refusal's (`call_in_progress` while the robot has a call, `voice_disabled`, `missing_key`, `restart_required`, `power_too_low`). A robot that is not attached is refused `invalid_params` on `accessory_id` ("That robot is not connected."). An owner decision. Device-class. Minimum version `2`. |
+| `accessories.call.end` | `accessory_id`, `call_id` | Ends the robot's call and answers the status. A `call_id` that is not the current call's answers `changed`. An owner decision. Device-class. Minimum version `2`. |
+| `accessories.call.mute` | `accessory_id`, `call_id`, `muted` (boolean) | The Mac's mute for the robot's call: the robot closes its microphone gate. Answers the status; `changed` as `accessories.call.end`. An owner decision. Device-class. Minimum version `2`. |
+| `accessories.call.interrupt` | `accessory_id`, `call_id` | Stops the assistant's reply on the robot. It does not cancel a task. Answers the status; `changed` as `accessories.call.end`. An owner decision. Device-class. Minimum version `2`. |
+| `accessories.call.task.cancel` | `accessory_id`, `call_id`, `task` | Cancels one task of a Live or Grok call (a task the call view marks `cancellable`). Answers the status; `changed` as `accessories.call.end`. An owner decision. Device-class. Minimum version `2`. |
+| `accessories.check.start` | `accessory_id`, `check` (`tone`, `mic`, `face`, `motion`), `seconds` (`mic` only, 1 to 10, default 5) | Runs one local setup check on an attached robot with no call: a test tone, the microphone's level while the owner speaks (levels only, no audio leaves the robot), the kind's test face or its test head movement. Its progress and result show in the accessory's `check`. Answers the status. An owner decision. Device-class. Minimum version `2`. |
+| `accessories.check.stop` | `accessory_id` | Ends any running check and answers the status. An owner decision. Device-class. Minimum version `2`. |
+| `accessories.calibrate` | `accessory_id`, `op` (`begin`, `nudge`, `set_zero`, `cancel`), `axis` and `steps` (`nudge` only: `pan` or `tilt`, −64 to 64 and not 0) | Calibrate head, one step at a time, on an attached robot with head motion and no call. Progress shows in the accessory's `state.calibration`. Answers the status. An owner decision. Device-class. Minimum version `2`. |
+| `accessories.set` | `accessory_id`, `volume`, `brightness` (each 0 to 100), `motion` (boolean, robots with head motion only), at least one | Changes the robot's own settings and answers the status; the robot reports the values it took in `state`. An owner decision. Device-class. Minimum version `2`. |
 
 Notes that the shapes alone do not carry:
 
@@ -669,17 +1214,27 @@ Notes that the shapes alone do not carry:
   `capability_install` 900000 ms, `meetings_signin` 660000 ms,
   `computer_use_grant` 120000 ms, `browser_install` 900000 ms, `imessage_grant`
   120000 ms, `imessage_policy_confirm` 180000 ms, `mcp_check` 75000 ms,
-  `home_provision` 900000 ms. At most 4 jobs run at once, at most one per
+  `home_restore` 900000 ms. At most 4 jobs run at once, at most one per
   kind and name (`busy` beyond either), and at most 16 finished jobs are
   retained, none older than 600000 ms. A `job_id` this daemon does not retain
   answers `unknown_job`. A job that is stopped (cancelled, past its budget, or
   never minting the value its start waits for) stays `running` until its run
   has stopped, at most 5 s more, and holds its place against `busy` until then;
-  it then finishes `cancelled`, `timed_out` or `failed`. An Always On step's
-  job (`home_provision`) is ended by the daemon itself once its run is over,
-  however it ended, before it finishes: what the run left is written to the
-  provisioner's ledger then (at most 35 s more), so a job read as finished
-  never left its step half-kept.
+  it then finishes `cancelled`, `timed_out` or `failed`. Restore here's job
+  (`home_restore`) is ended by the daemon itself once its run is over,
+  however it ended, before it finishes: its request in the move back's record
+  is taken back then (at most 35 s more), so a job read as finished never
+  left a restore said to run.
+- **`target` names what an install installs.** A `capability_install`'s
+  view carries the target its `capabilities.install.start` was given
+  (`computer_use_sidecar`, `meetbot`, `local_stt` or `imessage_helper`), a
+  `browser_install`'s `browser`, and every other kind's is null. It is stored
+  when the job starts and kept in every later view (`job.get`, `job.list`,
+  `job.cancel`), so a client finds the job its own row started by kind and
+  target: Voice's on-device speech model and Meetings' notetaker both start
+  a `capability_install`, and a linked computer's `job.list` adds its own
+  installs to the server's. `target` came after the job view: a client reads
+  a missing one as null.
 - **`phase` is display copy, never a state.** It names the current step from a
   closed per-kind vocabulary — `provider_probe`: `calling`; `auth`: `binding`,
   `discovering`, `registering`, `awaiting_browser`, `verifying` (an MCP server's
@@ -691,8 +1246,7 @@ Notes that the shapes alone do not carry:
   `verifying`; `meetings_signin`: `awaiting_signin`; `computer_use_grant`: none;
   `browser_install`: `sidecar_downloading`, `downloading`; `imessage_grant`: none;
   `imessage_policy_confirm`: none; `mcp_check`: `connecting`, `listing`;
-  `home_provision`: `checking`, `firewall`, `server`, `starting` (a create),
-  `power`, `deleting`.
+  `home_restore`: none.
   `status` is the state a client switches on. A terminal job clears its phase
   unless it `failed` or `timed_out`, where the step it stopped in is part of the
   diagnosis. A run that reports a phase outside its vocabulary fails the job:
@@ -749,8 +1303,8 @@ Notes that the shapes alone do not carry:
   verified attestation carries them null and keeps working.
 - **`mobile.status`, `mobile.devices.list` and `mobile.devices.revoke` answer
   with the channel off**, so a pane can always read the state and the owner
-  can always forget a phone: while the channel is not running the paired
-  phones are read from, and forgotten in, the paired-device file. The switch
+  can always forget a phone or remove a computer: while the channel is not running the paired
+  devices are read from, and forgotten in, the paired-device file. The switch
   is live: a `settings.apply` or a reload that moves it starts or stops the
   channel at once, and a write says in `side_effects` when the channel did not
   follow it. `enabled` is the switch and `started` whether the channel runs;
@@ -839,21 +1393,31 @@ Notes that the shapes alone do not carry:
   mandate, answering a proposal or switching mandates back on. Every cue read
   stays open, and so does every other secret and settings section.
 - **Every Always On step and setting the recovery passphrase are the
-  owner's decisions (M75, Always On setup §6).** `home.act` (a provider's
-  token decides which account Fermix acts in; creating, powering and
-  deleting the server spend the owner's money or can take the home away; a
-  code lets a server take this home; a review reads every keychain secret the
-  move would carry; a move hands the home to a server) and
+  owner's decisions (M75, Always On setup §6).** `home.act` (a code lets a
+  server take this home; a review reads every keychain secret the move would
+  carry; a move hands the home to a server; a restore takes it back from a
+  copy) and
   `home.snapshots.passphrase` answer `unavailable` {`capability`: `home`,
   `sentence`: "Only the owner can set up Always On, move Fermix or set its
   recovery passphrase: use the Fermix app, the setup page or your own
   terminal."} to the same callers, so a command the agent ran can neither
-  spend the owner's money, hand this home to a server nor replace the key its
-  snapshots are encrypted to. `home.status`, `home.provision.options`,
-  `home.candidates.list` and `home.snapshots.status` stay open. The server's
+  hand this home to a server nor replace the key its snapshots are encrypted
+  to. `home.status`, `home.candidates.list` and `home.snapshots.status` stay
+  open. The server's
   Always On steps (`home.enroll.open`, `home.enroll.withdraw`,
-  `home.move.readiness`, `home.move.start`, `home.snapshots.run`) are refused
-  on this socket to every caller, by name (*After a move*).
+  `home.enroll.approve`, `home.enroll.deny`,
+  `home.move.readiness`, `home.move.start`, `home.snapshots.run`,
+  `home.restart`) are refused
+  on this socket to every caller, by name (*After a move*). A computer's own
+  link is its owner's decision the same way: `computer.join.start`,
+  `computer.join.cancel` and `computer.disconnect` are refused to those
+  callers with that sentence.
+- **What Fermix on the server may use on this computer is its owner's
+  decision too (M97 §7.2).** `settings.apply` on the `computer` section
+  answers `unavailable` {`capability`: `home`, `sentence`: "Only the person at
+  this computer can change what Fermix on your server may use on it: use the
+  Fermix app or the setup page."} to the same callers, so a command run on
+  this computer, the server's work among them, never widens it.
 - **`channels.mobile` is the phone channel's settings section**: the enable
   switch and the remote-reach switch `mobile_iroh` (on by default), each
   applied the moment it is written (their rows' `restart` is false), and the
@@ -890,13 +1454,18 @@ Notes that the shapes alone do not carry:
 - **`web_search` also carries place search's backend.** After
   `web_search_backend`, the row `place_search_backend` (a choice, `Place
   search`) is `[fermix_core.tools.place_search] backend`, and its `value` is the
-  backend in force: the one the file names, or the build's default when it
+  backend in force: the one the file names, or the home's default when it
   names none (`apple_maps` in the Fermix Mac app's engine, which carries the
-  Apple Maps helper, `brave` in the Homebrew and Linux builds). Its options are
-  the ones this build can run: `apple_maps` (`Apple Maps`, hint `Needs no key`)
-  and `brave` (`Brave`) where the build carries the helper, `brave` alone
-  everywhere else, where `settings.apply` refuses `apple_maps` as a value the
-  row does not publish. The `brave_api_key`
+  Apple Maps helper; elsewhere `computer` where a computer of the home's
+  latest offers list `places` on, an Always On server with the owner's Mac
+  linked; else `brave`). Its options are the ones this build can run:
+  `apple_maps` (`Apple Maps`, hint `Needs no key`) and `brave` (`Brave`) where
+  the build carries the helper; `computer` (`Apple Maps on your Mac`, hint
+  `Needs a Mac with the Fermix app`) and `brave` everywhere else, where
+  `settings.apply` refuses `apple_maps` as a value the row does not publish.
+  On `computer` a place search runs on the connected Mac seen last that
+  offers places, and while none is connected it is refused at once, never
+  sent to Brave. The `brave_api_key`
   row stands whenever web search or place search uses Brave, its footer
   `Also powers place search.` when both do and `Powers place search.` when only
   place search does; with neither on Brave it is not published. A call reads
@@ -955,10 +1524,12 @@ Notes that the shapes alone do not carry:
   *Per-method minimum versions*), so neither the protocol version nor the
   method's minimum moves: a client that finds no `platform` renders the two
   booleans as the screen capture and input control rows it always has.
-- **iMessage exists only on a Mac.** The three `imessage.*` methods answer
-  `unavailable` {`capability`: `imessage`} anywhere else, `settings.sections`
-  publishes no `channels.imessage` there, and `settings.get` refuses that
-  section. On a Mac, `channels.imessage` carries three boot-bound rows:
+- **iMessage runs on a Mac, or through one.** The three `imessage.*` methods
+  answer `unavailable` {`capability`: `imessage`} anywhere but a Mac. Off a
+  Mac, `settings.sections` publishes `channels.imessage` only where a Mac of
+  the home offers Messages (a server whose iMessage that Mac carries), and
+  `settings.get` refuses the section elsewhere. `channels.imessage` carries
+  three boot-bound rows:
   `imessage_owner_user_id` (`text`); `imessage_allowed_sender_ids`, the guests
   (`list`); and the `imessage_enabled` switch. There is no account row: the
   helper derives the account when it confirms the recipients. Saving the owner
@@ -1005,7 +1576,14 @@ Notes that the shapes alone do not carry:
   advisory because the daemon's first boot seeds it from the machine (the
   system time zone, the account's full name, a default style), so its row
   fires only where the machine could not answer; engines before this gated on
-  it, so a client keeps reading `gating` rather than assuming it.
+  it, so a client keeps reading `gating` rather than assuming it. A failure
+  also carries `sentence`, the engine's own words where it publishes them,
+  which a client shows in place of its own for the `detail_key`: the iMessage
+  rows (`channel:imessage:helper`, `:carrier`, `:conflict` and `:away`),
+  which name the Mac of the home that carries Messages where the engine
+  knows it ("studio-mac, the Mac that carries Messages, is asleep or
+  offline."). It is null on every other row, whose words a client keeps by
+  its key, and absent from an engine before it, which a client reads as null.
 - **Restart truth has one owner.** `restart.required` and `restart.reasons` come
   from the daemon's two baselines: the application environment captured at boot,
   and the parsed settings file as this daemon last saw it. The sentence for each
@@ -1121,14 +1699,21 @@ Notes that the shapes alone do not carry:
   only under a task engine too, a choice of `chat` or `private` stored as
   `realtime.conversation`: `chat`, the value in force while the key is unset,
   runs a call's hand-offs in the chat's own conversation, and `private` keeps
-  them in one of the call's own. The key row is the voice provider's own slot:
+  them in one of the call's own. `realtime_camera_share` ("Share the phone's
+  camera") is present only under a task engine as well, a toggle stored as
+  `realtime.camera_share` and on by default: whether a call from a paired phone
+  may share its camera once the owner turns the camera on in the call (M87).
+  The Realtime engine takes no calls from the phone, so it has no such row and
+  refuses the key. The key row is the voice provider's own slot:
   `openai_api_key` under both OpenAI engines and `xai_api_key` under Grok, which
   takes an API key only (a SpaceXAI sign-in does not authorize voice). Applying a
   model of another engine therefore moves the engine and its provider with it,
   adds or removes the reasoning effort, moves a voice the new engine does not
-  ship to that engine's default, drops a chosen `realtime_conversation` on the
-  way to Realtime, and on the way to Grok turns off screen sharing during calls,
-  which Grok does not support. The result names every key the daemon derived in
+  ship to that engine's default, drops a chosen `realtime_conversation` and the
+  camera switch on the way to Realtime, puts the camera switch back, on, on the
+  way from Realtime to a task engine (a move between Live and Grok keeps it as it
+  was), and on the way to Grok turns off screen sharing during calls, which Grok
+  does not support. The result names every key the daemon derived in
   `applied` — including `realtime_engine`, which is a derived key rather than a
   row — with a sentence for each in `side_effects` (screen sharing has a
   sentence and no row); reload the section when one of those keys appears,
@@ -1490,12 +2075,15 @@ Notes that the shapes alone do not carry:
   Venice and OpenAI, and the label names it ("Automatic (Uses OpenAI ·
   gpt-6-luna)"); while none is set up it is "Automatic", disabled with the
   hint "Set up OpenRouter, Venice or OpenAI first.". Then always `openrouter`
-  ("OpenRouter · Jev"), `venice` ("Venice · Jev") and `openai` ("OpenAI ·
-  gpt-6-luna"), each disabled with the hint "Set up this provider first."
-  while its provider is not set up with a key that loaded, a saved one
-  included, so the value is always an option. A chosen provider that is not
-  set up holds the watchers with a sentence naming it, and never falls back to
-  Automatic. `cues_screen` and `cues_decision_provider` may go in one
+  ("OpenRouter · Jev"), `openrouter_decider` ("OpenRouter · Perplexity
+  Decider"), `openrouter_decider_flash` ("OpenRouter · Perplexity Decider
+  Flash"), `venice` ("Venice · Jev") and `openai` ("OpenAI · gpt-6-luna"), each
+  disabled with the hint "Set up this provider first." while the provider it
+  runs on is not set up with a key that loaded, a saved one included, so the
+  value is always an option; the three OpenRouter models run on OpenRouter's
+  key. A chosen decision model whose provider is not set up holds the watchers
+  with a sentence naming that provider, and never falls back to Automatic.
+  `cues_screen` and `cues_decision_provider` may go in one
   `settings.apply`: each is checked before either is written, and neither
   check reads the other's saved value, so a refusal of one writes neither.
 - **Every cue write goes through the setup page's own path**, so the outside
@@ -1616,9 +2204,16 @@ Notes that the shapes alone do not carry:
   `detail` fields. Both additions are optional for older protocol-2 engines.
   `vendors` contains at most one row each for `claude` and `codex`, with required
   `vendor`, `installed`, `version` and `auth` fields. Version is nullable and at
-  most 512 characters; auth is `authenticated`, `unverified` or `absent`.
-  Guidance is nullable and at most 512 characters. Neither binary paths nor
-  credential values are returned.
+  most 512 characters; auth is `authenticated`, `unverified` or `absent`,
+  read from the agent's sign-in file alone ("Sign-in found" for
+  `authenticated`: the vendor is never asked). An optional boolean
+  `signed_out` is true while the agent is marked signed out on this computer:
+  its last run here ended because the vendor could not sign in, and the mark
+  clears on a run of it that works, a change to its sign-in file, or
+  `coding_agents.check`; an engine that cannot read its marks leaves the field
+  out. Guidance is nullable and at most 512 characters, and names a marked
+  agent and how to sign in again. Neither binary paths nor credential values
+  are returned.
 - **Notetaker detection is both halves plus the sign-in.** The `meetbot` target
   is present only when the notetaker's sidecar and its browser are both
   installed: half an install can neither sign in nor join a meeting. Its
@@ -1659,25 +2254,15 @@ Notes that the shapes alone do not carry:
   target, the sentence saying so). A linked desktop adds the primary's own
   picture as `primary_home`, or says in `primary_missing` why it is missing;
   the rest of the family is the primary's there (see *After a move*).
-- **Replacing the server runs through the same move** (M75). A desktop's
-  `home.act` sends `home.enroll.open` and `home.move.start` to the server;
-  with `keep_as_desktop` false the server being replaced keeps no desktop
-  key, row or link and serves nothing once the move commits. A server Fermix
-  created on a provider is replaced from the desktop with `home.act`'s
-  `replace_server`, on the same provider: the desktop's create job sends
-  `home.enroll.open` `{kind: provisioned}` for the new server's code, the
-  owner presses Move now, which starts the same move to the candidate that
-  code enrolled (`enrollment.candidate_id` in the server's `home.status`,
-  which `primary_home` carries), and once the desktop reaches
-  its server one primary epoch above the one the old server held, the old
-  server is deleted, once, as a `home_provision` job. From then on the
-  desktop names the new server: `home.status`'s `primary.name` and every
-  sentence of the link (`primary_unreachable` included) say it. Moving Fermix back to a
-  desktop is not part of this release: to bring it back to a computer, restore
-  the newest snapshot into a fresh home there.
+- **A move back runs through the same move** (M75). A desktop's `home.act`
+  sends `home.enroll.open` and `home.move.start` to the server; with
+  `keep_as_desktop` false the server keeps no desktop key, row or link and
+  serves nothing once the move commits.
 - **Enrollment and the move are the primary's** (M75). `home.enroll.open`
   opens one window at a time; a host that enrolls with its code becomes a
-  candidate the primary holds for 24 hours. `home.move.start` answers before
+  candidate the primary holds for 24 hours. A window opened for a computer
+  (M97) takes a computer that joins the home instead, which the owner adds
+  with `home.enroll.approve` or not with `home.enroll.deny`. `home.move.start` answers before
   the engine restarts, so the same socket then answers from the device role;
   the move runs on its own from there, and `home.status`'s `move` follows it:
   `requested`, `streaming`, `committing`, `committed` (restarting as a
@@ -1694,30 +2279,315 @@ Notes that the shapes alone do not carry:
   A move session has no one-hour lifetime, and its attempts send one capture. On a candidate, `phase` is `enrolling`, `enrolled`,
   `receiving`, `staged`, `activating`, `expired` or `failed`, and `candidate`
   is null.
-- **A snapshot target row is the daemon's.** There are two targets, in
-  order: `s3` (label `S3`) and `desktop` (label `your desktop`: every desktop
-  connected to this primary over the rail, on while it has a desktop row).
+- **A snapshot target row is the daemon's.** On an Always On server's
+  primary (its home holds a desktop row a move wrote, and the host is not
+  macOS) there are two targets, in order: `s3` (label `S3`) and `desktop`
+  (label `your desktop`: every desktop connected to this primary over the
+  rail, on while it has a desktop row). Any other primary has none:
+  `targets` is `[]`, `configured` false, and `sentence` says
+  `Snapshots are kept only by an Always On server, and this computer is not one.`,
+  whatever its settings name; `home.snapshots.run` is refused with that
+  sentence.
   `last_verified` is the newest snapshot the target proved it holds (S3
   accepted its SHA-256 checksum; a desktop answered the same SHA-256) and
   outlives later failures; `last_error` is the newest failure's sentence,
-  carrying the storage service's own words, and clears at the next verified
-  or waiting run. A desktop asleep or offline is no failure: `last_result` is
+  carrying the storage service's own words, and clears only at the next
+  verified run. A desktop asleep or offline is no failure: `last_result` is
   `waiting` and `waiting` holds the sentence
   (`Your <name> is not connected; the snapshot waits for the next run.`),
-  null otherwise. Each point names the recovery key it was written for
+  null otherwise; such a run stored nothing, so while a failure stands it is
+  not recorded over it, and `last_attempt_at`, `last_result` and
+  `last_error` stay the failed try's (Always On's `backup_failed` says them). Each point names the recovery key it was written for
   (`key_id`, as `home.snapshots.passphrase` answers it). The first boot of a
   primary a move activated runs its first snapshot at once. `destination` is where the target puts
   snapshots (`s3://<bucket>/<prefix>/<profile>/`, or `snapshots/ on <names>`
   for the desktops), null while it is off.
-- **`snapshots` is the snapshot section**, under pane `always_on`:
-  `snapshots_recipient` (read-only: it changes only through
-  `home.snapshots.passphrase`), `snapshots_interval_hours` (1 to 168, format
-  `hours`), `snapshots_s3_bucket`, `snapshots_s3_region`, the two secret rows
-  `snapshot_s3_access_key_id` and `snapshot_s3_secret_access_key` (stored with
-  `secret.set` under those ids), and, `advanced`, `snapshots_s3_prefix` and
-  `snapshots_s3_endpoint` (an S3-compatible host, addressed path-style). None
-  needs a restart: the scheduler reads the section at every run and plans
-  again when it is saved.
+- **`snapshots` is Backup settings**, under pane `always_on`, with one row:
+  `snapshots_interval_hours` ("Back up every", 1 to 168, format `hours`).
+  Only an Always On server's primary lists it and takes its `settings.get`
+  and `settings.apply` (a home a move moved there, never a Mac); a Mac that
+  never moved, or any home that never moved, keeps no S3 backup and has no
+  `snapshots` section (`settings.get` and `settings.apply` answer
+  `invalid_params` on `section` there). A linked desktop lists the server's own, since it is no section
+  of this machine. Whether the recovery passphrase is set is the summary's
+  `detail.backup`, and the passphrase changes only through
+  `home.snapshots.passphrase` (`home.act` `change_passphrase`); the recovery
+  key is never shown. No app sets any part of S3: an Always On server's bucket
+  comes from its infrastructure through first boot, and another S3 service is
+  set on the server itself (`config.toml`, its keys through `secret.set`,
+  which still takes `snapshot_s3_access_key_id` and
+  `snapshot_s3_secret_access_key` though no row shows them). The row needs no
+  restart: the scheduler reads the section at every run and plans again when
+  it is saved.
+- **`computer_history` is this computer's part of computer history** (M97),
+  answered on this computer (*After a move*): `computer_history_enabled`
+  (whether it records), `computer_history_apps` (which apps; on a computer
+  whose recorder is Linux its `info` says an entry is the app's name on the
+  accessibility bus, matched exactly, and a Mac's has none), both in
+  `[fermix_core.computer_history]` of this computer's `machine.toml`, and
+  `computer_history_summarizer` (read-only), what this computer's own
+  sittings are summarized with: `local` where its `machine.toml` says
+  `summarizer = "local"` (it makes its own notes, and where it is the home,
+  its roll-up stays on it too), else the home's route (`default_provider`,
+  `local`, or a pinned provider's id). Where `machine.toml`'s local
+  summarizer decides over a different one in this home's `config.toml`, the
+  row's footer says so; otherwise it has none. Deleting that line from
+  `machine.toml` hands the choice back to `config.toml`. The home's route and
+  the providers that may receive summaries (`summarizer`, `remote_summaries`
+  in the home's `config.toml`) have no row, so no write here reaches them. The switch's
+  footer says what switching history on agrees to, true on this computer:
+  with no server, that the raw record stays here for 48 hours and each
+  finished sitting is summarized by the provider it names (or on this Mac);
+  where this computer's history goes to its server (a computer linked to it,
+  or the server itself), that each sitting is
+  sent there (or only its summary, where this computer makes its own notes)
+  and summaries from every computer can be recalled in chat.
+- **`computer` is a linked computer's own section** (M97), under pane
+  `always_on`, titled `This computer`: what Fermix on the server may use on
+  this computer, `[fermix_core.computer]` in this computer's `machine.toml`,
+  which travels with no move, backup or restore. Only a computer linked to
+  its server publishes it; the server never
+  does, and refuses a forwarded `settings.get` or `settings.apply` for it
+  with `device_class_method` (*After a move*), so it can never widen it.
+  Its rows (M97 D27), every one a toggle with `restart` false:
+  `computer_enabled` ("Fermix on your server may use this computer", off
+  stops everything the server does here from its next request; while a
+  computer that moved before M97 waits for the owner's review, its footer
+  says so), `computer_files_and_shell` ("Files and commands": the `files` and
+  `shell` offers together, in this computer's sandbox mode),
+  `computer_browser` ("The browser"), `computer_computer_use` ("Your screen")
+  and, on a Mac only, `computer_imessage` ("Messages"), each off until
+  switched on, and `computer_places` ("Apple Maps": looking places up in
+  Apple Maps for the server's place search, M89 D13), on a Mac only, its
+  `value` on while nothing is stored for it: six rows on a Mac, four on
+  Linux. Nothing else is a row: the
+  review is the computer's own state, computer history's consent is its
+  recorder (the `computer_history` section), and what reaches the server from
+  the computer has no switch. A key that is no row, `computer_reviewed` and
+  an earlier engine's `computer_files`, `computer_shell`, `computer_history`,
+  `computer_voice`, `computer_attachments`, `computer_accessory` and
+  `computer_notifications` among them, is `invalid_params` on that key. Any
+  write is the owner's review: it leaves the switches reviewed. Every switch
+  is live: the next request reads it, and the computer sends its offers to
+  its server again at once.
+
+## Accessories
+
+`accessories.*` manages a Fermix accessory (M91: a StackChan robot) wired to
+this Mac over USB. The daemon owns the port, the pairing records and the
+robot's calls (`priv/accessory/PROTOCOL.md`); the app sends requests and draws
+what the daemon answers, and keeps no state of its own but unsaved form input.
+Every sentence and every action a row offers is the daemon's; the app renders
+them as they are and keeps no compatibility table, no readiness rule and no
+copy of its own.
+
+**Where it answers.** Every method is device-class (*After a move*): the
+engine that receives it answers it. Accessories run only on a local Mac
+primary, and are not part of Always On, so on a device-role or candidate
+engine, or off macOS, `accessories.status` answers `state`
+`needs_local_primary`, offers no action, and every other method is
+`unavailable` {`capability`: `accessories`}, the status's `sentence`, each
+paired robot's `sentence` and the refusal's all saying why: "StackChan works
+only while Fermix runs on this Mac." on a Mac whose home is on its server
+(device role, one that joined the home and never held it included), "StackChan works once Fermix has moved to this Mac." on a Mac
+waiting for a move to it (candidate), and "StackChan works only on a Mac."
+off macOS, whatever the role. A linked computer publishes no
+`computer.accessories` then (*One set of settings*). With accessories off,
+the status answers `off` and the other methods `unavailable` with
+"StackChan is off."; Forget and Revoke still erase a record then.
+
+**The switch.** `[fermix_channels.accessories] enabled` is the `accessories`
+settings section's one row, `accessories_enabled` (pane `voice`, a Mac only).
+It is live: `settings.apply` starts or stops the accessory link at once
+(turning it off ends a robot call and closes the port), and a link that did not
+follow says so in `side_effects`. It never needs a restart.
+
+### The status
+
+`accessories.status` and every other method's success answer the same object:
+
+| Field | Shape |
+|---|---|
+| `key` | 16 hex digits: changes when anything below changes. A client waits with `{after: key, wait_ms}` (at most 25,000) and is answered at the first change or when the wait ran out. A waiting read wakes at once at each change of the ports, links and calls the accessory link owns, so a call's state, captions and tasks arrive as they happen, and reads again every 2 s for what no process announces (the home's call lease, voice readiness, the switch, the pairing store), so no change waits out the wait. |
+| `state` | `off`, `needs_local_primary`, `not_running` (on, but the link has not started this boot) or `on`. |
+| `sentence` | The daemon's one line for the whole picture. |
+| `enabled` | The switch. |
+| `kinds` | `[{kind, name, wire_min, wire_max, install_guide}]`: each kind this engine pairs and its pinned metadata. `stackchan`: name `StackChan`, wire `1`–`1`, the guide `https://github.com/tezra-io/fermix-stackchan/blob/main/INSTALL.md`. Compatible firmware is firmware that speaks a wire version in the range. |
+| `voice` | `{ready, code, sentence, engine, engine_label, model, voice}`: whether a call can start now (`code` null, `voice_disabled`, `missing_key` or `restart_required`), and the configured voice a next call takes. |
+| `voice_device` | `{device, accessory_id, changeable, sentence}`: `device` is `desktop`, `accessory:<accessory_id>`, or `unreadable` when the choice cannot be read (`accessory_id` null; every call, the Mac's own and a robot's tap, is refused until the owner chooses again with `accessories.voice_device.set`, which stays allowed). A client routes a call on `device` and opens this Mac's microphone only for `desktop`: an app that does not know `unreadable`, or any later value, decodes it as unrecognized and routes no call to this Mac for it. `changeable` is false while a call runs or settles anywhere in this home. `sentence` says why the device needs the owner: the call that keeps it ("The voice device can change once the call has finished."), a choice that cannot be read ("The voice device could not be read. Choose one in Pet."), or a robot still chosen while accessories are off ("StackChan is off but is still your voice device. Choose This Mac in Pet to talk here.", also the status's `sentence`); null otherwise. The choice never changes by itself. |
+| `ports` | Every Espressif USB serial port the daemon sees, by `path` (at most 16 that went away are kept): `{path, serial, status, selected, accessory_id, kind, firmware, update, install_guide, retrying, sentence, actions}`. |
+| `ports_sentence` | While accessories are on and no port is seen: "Plug your StackChan into this Mac with its USB-C cable."; null otherwise. |
+| `accessories` | Every paired robot, oldest first, at most 8: `{accessory_id, short_id, name, kind, enrolled_at, connection, path, gen, firmware, capabilities, state, calibration_sentence, fault, diag, check, selected, sentence, actions, last_call}`. |
+| `pairing` | The attempt on the selected port, or null: `{path, attempt, round, max_rounds, phase, code, accessory_confirmed, owner_confirmed, closed_reason, accessory_id, expires_at, sentence}`. |
+| `call` | The robot call that runs, or null (a desktop or phone call is not here): `{accessory_id, call_id, source, phase, phase_sentence, state, muted, muted_by, engine, engine_label, model, voice, call_uuid, conversation, started_at, transcript, tasks, usage}`. |
+
+A **port**'s `status`, its `sentence` and the `actions` it offers:
+
+| `status` | `sentence` | `actions` |
+|---|---|---|
+| `unrelated` | "A USB serial device is plugged in." | `pair` |
+| `attaching` | "Checking the USB device." | none |
+| `unpaired` | "StackChan found. Fermix firmware is compatible." (the selected port, an unpaired robot that answered) | `pair_begin`, `pair_cancel` |
+| `pairing` | the attempt's sentence (below) | `pair_cancel` |
+| `attached` | "Connected by USB." | `release` |
+| `busy` | "Another app is using StackChan's USB port. Close it and try again." | `retry` |
+| `needs_firmware` | "This USB device isn't running Fermix firmware. If it's your StackChan, install the firmware first." | `open_install_guide`, `retry` |
+| `incompatible` | `update` `firmware`: "Update the robot firmware." `update` `fermix`: "Update Fermix: this robot's firmware is newer than this Fermix." | `open_install_guide` or `update_fermix`, then `release` |
+| `not_paired` | "This robot isn't paired with this Mac." (a robot whose proof failed, or one that forgot its pairing); a robot that refused this Mac as another host (`unknown_host`), which ignores a pairing request until it forgets that Mac: "This StackChan is paired with another Mac. To pair it here, hold the right edge of its screen for 3 seconds, tap Forget, then choose Pair." | `pair` |
+| `released` | "Install the firmware update now, then choose Reconnect." | `reconnect` |
+| `vanished` | "The USB device was unplugged." | none |
+| `failed` | "The USB connection failed. Try again." | `retry` |
+
+`selected` is the port chosen for pairing. `retrying` is true while a busy
+port is opened again on its own (five opens, 1, 2, 4, 8 and 15 s apart; after
+them only Retry opens it). `install_guide` is the kind's guide on a row that
+offers `open_install_guide`, null otherwise. `accessory_id` is the robot
+attached on it, `kind` and `firmware` what it reported, and `update` (`firmware`
+or `fermix`) which side to update on an `incompatible` port. The daemon opens
+only the selected port and ports whose USB serial a paired robot's record
+names, so `unrelated` is any other Espressif board as much as a robot: the app
+does not call it a StackChan.
+
+An **accessory**'s `connection` and `sentence` (the robot's own fault or power
+sentence comes first while attached):
+
+| `connection` | `sentence` |
+|---|---|
+| `attached` | "Connected by USB. Firmware compatible." |
+| `attaching` | "Connecting to StackChan." |
+| `unplugged` | "Plug StackChan into this Mac." |
+| `released` | "Install the firmware update now, then choose Reconnect." |
+| `busy` | the port's |
+| `not_paired` | the port's `not_paired` sentence |
+| `incompatible` | the port's |
+| `failed` | "StackChan's USB connection failed. Try again." |
+| `off` | the status's |
+
+While attached: `fault` set, "StackChan reports a problem: `<fault>`. Check its
+screen."; `state.power` `low` or `critical`, "StackChan needs more power. Plug
+it into one of this Mac's USB-C ports, not a hub."
+
+`actions` come from `start_call` (attached, voice ready, power not low, no
+call anywhere), `select` (not the voice device, no call), `check` and
+`calibrate` (attached, no call; `calibrate` only with `motion`), `release`
+(attached, no call), `reconnect`, `retry`, `pair`, `open_install_guide`,
+`update_fermix`, and `forget` and `revoke`, which every paired robot on a
+local Mac primary offers. `short_id` is the ID as a person reads it (16 hex digits in four groups
+of four). `gen` is the connection generation of an attached robot, null
+otherwise. `capabilities` are the ones in use on the link (`mic`, `speaker`,
+`screen`, `touch`, `pet`, `motion`, `battery`); the app offers a kind's
+controls only for these. `state` is the robot's own report, or null before one
+arrives: `{battery, power, brownout, volume, brightness, motion,
+calibration}`, `battery` null when the robot has no reading (never zero, never a
+factory placeholder), `motion` `absent`, `off`, `homing`, `ready`, `paused` or
+`fault`, and `calibration` `absent`, `missing`, `valid`, `calibrating` or
+`failed`; Head movements stays off until `calibration` is `valid`.
+`calibration_sentence` is the daemon's sentence for `calibration`, null for
+`absent` or with no `state`: `missing` "Head movement is off until the robot is
+calibrated.", `valid` "The head is calibrated.", `calibrating` "Calibrating the
+head: nudge each axis to its center, then set zero.", `failed` "The head
+calibration did not finish, so head movement stays off until a calibration
+succeeds." `diag` is the robot's own counters, since its boot, as it last
+reported them (`diag.counters`, every 10 s and at a call's end) on this attach,
+or null before a report and on a robot not attached: `{uptime_s, frames_rx,
+frames_tx, crc_errors, resync_bytes, pcm_seq_gaps, mic_overflows,
+spk_underflows}`, each an integer from 0 to 4,294,967,295; read-only, for
+diagnosis. `check` is
+the newest setup check, or null: `{check, status, code, level}`, `status`
+`running`, `ok` or `fault`, `level` the microphone's newest RMS level (0 to
+32,767) during `mic`. `selected` is whether it is the voice device.
+`last_call` is how its newest call ended, or null: `{call_id, reason, sentence,
+ended_at}`. A reason the daemon has no sentence for reads "The call ended.",
+and `reason` keeps the token:
+
+| `reason` | `sentence` |
+|---|---|
+| `unplugged` | "StackChan was unplugged, so the call ended." |
+| `link_lost` | "StackChan's connection was lost, so the call ended." |
+| `forgotten` | "The robot was forgotten, so its call ended." |
+| `call_in_progress` | "Another voice call is in progress." |
+| `not_selected` | "StackChan is not your voice device. Choose it in Pet to call from the robot." |
+| `power_too_low` | the power sentence |
+| `voice_disabled`, `missing_key`, `restart_required` | the voice sentence |
+| `call_failed` | "The call could not start. See the daemon log." |
+
+The **pairing** attempt: `phase` `begun` (the robot asks "Pair with this
+Mac?"), `offered`, `revealed` (both screens show `code`, six digits), `committing`,
+`done` or `closed` (`closed_reason` `owner`, `expired`, `mismatch_limit`,
+`invalid_offer`, `invalid_reveal` or `link_reset`). `code` is null before
+`revealed`. `round` counts from 1 to `max_rounds` (3). `accessory_id` is the
+robot the attempt paired once it is `done`, null before. `expires_at` is when the
+attempt's two minutes run out, until the robot is committing. Its sentences:
+`begun` "Tap Pair with this Mac on your robot.", `offered` and `revealed`
+"Check the code on your robot. It should match the code shown here.",
+`committing` "Pairing your robot. Keep it plugged in.", `done` "Your robot is
+paired.", and closed: `owner` "Pairing was cancelled.", `expired` "Pairing took
+longer than two minutes. Start again.", `mismatch_limit` "The codes did not
+match three times. Start pairing again.", `invalid_offer` and `invalid_reveal`
+"The robot's pairing answer did not check out, so nothing was paired.",
+`link_reset` "The robot's connection reset during pairing. Start again." A
+code match alone pairs nothing: the robot's own confirmation, which proves it
+holds the key it offered, and the owner's `matches: true`, in either order,
+commit it. The first pairing burns one of the robot's eFuse key blocks, which
+the robot says on its own screen before the owner confirms.
+
+The **call**: `call_id` is the call's session id, which the call controls
+name. `source` `screen_tap`, `head_swipe` or `mac`. `phase` `starting` (not yet
+admitted), `active` or `ending` (settling: the voice device cannot change).
+`state` the voice state (`connecting`, `listening`, `thinking`, `speaking`,
+`muted`, `reconnecting`) or null before the first. `phase_sentence` is "The call
+is starting." while `starting`, "The call is ending." while `ending`, and null
+while `active`, where `state` says what the call is doing. `muted` with `muted_by`
+`mac` or `accessory`. `engine`, `engine_label`, `model` and `voice` are the
+ones the call started with, which a voice setting saved during the call does
+not change; the app labels the call with them, never with `voice`'s.
+`call_uuid` and `conversation` (`chat` or `private`) once the call is ready,
+null before and on an engine without them. `started_at` is when the call was
+admitted, null while `starting`. `transcript` is the call's newest lines,
+oldest first, at most 6: `{speaker, text, final}`, `speaker` `user` or
+`assistant`, `text` at most 400 characters (a longer line keeps its end),
+`final` once the line is whole; nothing of it is persisted by this method.
+`tasks` are the call's newest tasks, at most 8, in the order they started:
+`{task, revision, status, summary, in_chat, cancellable}`, `status`
+`running`, `completed`, `failed` or `cancelled`, `summary` at most 240
+characters or null, `in_chat` true when the result was written to the chat,
+`cancellable` true for a Live or Grok task still running. `usage` is null or
+`{cost_cents, voice_seconds, accounting}`, each null when the engine did not
+say; unknown is never zero. The app observes the call through this method and
+opens no microphone or speaker of the Mac; a robot call also runs, and its
+controls work on the robot, with the app closed.
+
+**Refusals.** Every refusal carries `details.sentence`:
+
+- `invalid_params` on `volume` for an `accessories.set` with no setting
+  ("Send at least one of volume, brightness or motion."), on `path` ("No USB
+  device is plugged in at that port.",
+  "That port is released for a firmware update. Choose Reconnect first.",
+  "Pairing has not been started on that port."), on `accessory_id` ("No paired
+  robot has that id.", "That robot is not connected."), on `device` ("No paired
+  robot has that id."), on `task` ("That task cannot be cancelled."), and on
+  any other field with the field alone;
+- `unavailable` {`capability`: `accessories`} with the status's sentence when
+  accessories are off, need a local Mac primary or have not started; with
+  "Only the owner can set up or control StackChan: use the Fermix app or your
+  own terminal." for an owner decision another caller asked for (every method
+  of the family but `accessories.status`: a process the daemon started never
+  pairs, calls, sounds, moves or frees the robot, nor ends or mutes the
+  owner's call); with
+  "The voice device can change once the call has finished." while a call runs;
+  with "End the call first." for a check, calibration, setting or release
+  during one; with "StackChan cannot do that." for a check or setting the
+  robot did not report the capability of; with "Pairing is already open on
+  this port." and "StackChan is already paired."; and, for `call.start`, with
+  `code` and the refusal's sentence (*Accessories*, `last_call`);
+- `changed` when an `attempt` or `call_id` is not the current one, with "That
+  pairing attempt has ended, so look at it again." or "That call has ended, so
+  look at it again."
+
+**Bounds.** At most 8 paired robots, 16 vanished ports, 6 transcript lines of
+400 characters and 8 tasks of 240-character summaries; a status wait of
+25,000 ms. Every method but a status wait answers inside the standard call
+timeout.
 
 ## Error codes
 
@@ -1729,7 +2599,7 @@ Notes that the shapes alone do not carry:
 | `client_too_old` | The declared version is below the daemon's floor. |
 | `daemon_too_old` | The declared version is above the daemon's ceiling. |
 | `internal_error` | The daemon failed to complete the request. Details are always empty. |
-| `unavailable` | The named capability could not answer. `details.capability` names it. `details.sentence`, when present, is the daemon's own sentence for this refusal. |
+| `unavailable` | The named capability could not answer. `details.capability` names it. `details.sentence`, when present, is the daemon's own sentence for this refusal. `details.confirm` true marks a refusal that is a question: the same request with `confirmed: true` is the act (`mobile.devices.revoke` of the one computer that keeps the backups, `computer.disconnect` when the server cannot be told), so a surface asks the owner with the sentence instead of showing an error; absent otherwise, and from an engine before it, where a client keeps its own reading. |
 | `busy` | Another operation of this kind is already running. |
 | `lease_expired` | The lifecycle lease's window elapsed and the daemon resumed. |
 | `unknown_lease` | The lease was never issued by this daemon, or was already consumed. |
@@ -1737,13 +2607,13 @@ Notes that the shapes alone do not carry:
 | `unknown_job` | The job is not retained by this daemon. `details.job_id` names it. |
 | `cursor_expired` | The log cursor predates a rotation and cannot be resumed. |
 | `secret_store_failed` | The OS keyring refused the write. `details.reason` is `unavailable`, `locked` or `timeout`. |
-| `external_change` | The settings file was changed outside Fermix. `details.section` names the section the refused write targeted; `settings.reload` clears the state. |
+| `external_change` | The settings file was changed outside Fermix. `details.section` names the section the refused write targeted; `settings.reload` clears the state, sent with that `section` on a linked computer so the machine it names reads its files again. |
 | `config_unreadable` | The settings file could not be read or parsed. `details.sentence` is the parser's own message, and no reload is offered for it. |
 | `unknown_pairing_session` | The pairing session is not retained by this daemon. `details.session_id` names it. |
 | `primary_unreachable` | After a move, the primary this computer forwards to cannot be reached, or did not answer in time. `details.sentence` says so, and `details.primary` names it when it is known (see *After a move*). |
 | `device_class_method` | The primary refused a request that configures the computer that forwarded it. `details.method` names it and `details.sentence` says why. |
 | `unconfirmed` | After a move, the primary had a forwarded request whose effect may stand though its answer did not arrive (`home.move.start`). `details.method` names it, `details.primary` names the primary when known, and `details.sentence` says where its outcome shows (see *After a move*). Not a failure: read `home.status`. |
-| `changed` | `home.act` was drawn from a summary that no longer offers the action under its key, so nothing was done. `details` holds `sentence` alone, which says so; the surface reads `home.status` again and the owner presses again from there (see *The Always On summary*). |
+| `changed` | `home.act` was drawn from a summary that no longer offers the action under its key, or an `accessories.*` request named a pairing attempt or a call that is no longer the current one, so nothing was done. `details` holds `sentence` alone, which says so; the surface reads `home.status` again and the owner presses again from there (see *The Always On summary*). |
 
 `lease_expired` and `unknown_lease` are deliberately distinct: the first lets
 the app tell the operator the transaction timed out, the second says the id was
@@ -1767,10 +2637,13 @@ one, is `details.sentence`. Six codes carry one:
 - `config_unreadable` — `details.sentence` is the parser's own message.
 - `unavailable` — when a caller that is not the owner asks for an owner's
   decision: the phone's, "Only the owner can pair or forget a phone; run this
-  from your own terminal.", the cues', "Only the owner can change cues: use
-  the Fermix app or your own terminal.", and the home's, "Only the owner can
+  from your own terminal.", the accessories', "Only the owner can set up or
+  control StackChan: use the Fermix app or your own terminal.", the cues', "Only the owner can change cues: use
+  the Fermix app or your own terminal.", the home's, "Only the owner can
   move Fermix or set its recovery passphrase: use the Fermix app or your own
-  terminal." And when the cues cannot reach their records, with the cues'
+  terminal.", and this computer's switches', "Only the person at this
+  computer can change what Fermix on your server may use on it: use the
+  Fermix app or the setup page." And when the cues cannot reach their records, with the cues'
   sentence for why: memory is off, or the records could not be read.
 - `primary_unreachable` — "The server <name> is unreachable. Fermix keeps your
   message until it is back.", or why this computer does not reach it.
@@ -1805,7 +2678,8 @@ Operation-specific bounds, owned by the operation rather than the envelope: a
 262144 encoded bytes, with a 256-character search and a 64-character subsystem;
 a `diagnostics.build` object carries at most 500 log entries; `mobile.devices.list`
 carries at most 64 devices, each string a phone sends in a pairing request is
-at most 128 bytes, and a pairing `uri` is at most 2048 bytes.
+at most 128 bytes, and a pairing `uri` is at most 2048 bytes; `accessories.status`
+carries at most 8 paired robots and 16 vanished ports (*Accessories*).
 
 ## Vendoring into `fermix-macos`
 
@@ -1817,11 +2691,35 @@ own client tests against the same golden frames the daemon is tested against.
   parameter variants. Each record declares the classification the daemon owes
   it.
 - `fixtures/success.jsonl` — one full success envelope per method, for
-  `settings.get` one per section, because a section with no golden result is a
+  `settings.get` one per section (`computer` as a linked computer answers
+  it), because a section with no golden result is a
   pane whose row keys nothing on the far side is held to, for
+  `settings.sections` also a linked computer's composed inventory
+  (`settings_sections_computer`), for `job.list` also a linked computer's
+  composed list, the server's job then its own (`job_list_computer`), for
+  `setup.detect` also an Always On server's notetaker row, Google Meet
+  unavailable (`setup_detect_server`), for
   `mobile.pair.get` one per session state, for `job.get` a browser download
-  both completed and failed, and for `computer_use.permissions.get` a Mac
-  answer and a Linux one.
+  both completed and failed, for `computer_use.permissions.get` a Mac
+  answer and a Linux one, for `home.status` one per family of the Always On
+  summary's states and four of M97's (a server listing its two computers,
+  `home_status_server_computers`; a linked Mac waiting for the review of
+  what its server may use, `home_status_on_review`; `ready` with what the
+  Mac keeps on for its server after the move, `home_status_ready_keeps_on`;
+  and the linked Mac of `home_status_on` while its server controls its
+  screen, with the mark's `screen`, `home_status_on_screen`, where every
+  other golden has no `screen`, which a client reads as null),
+  for `accessories.status` one per family of the setup and
+  call states (off, a Mac whose home is on its server, a port with no Fermix answer,
+  incompatible firmware, pairing with its code, a pairing just done, a paired
+  robot in a call, that call settling, StackChan off with the robot still
+  chosen, and a voice device choice that cannot be read), and for `home.act` a cancelled code, `own_server`'s
+  answer (`home_act_own_server`: the code, its command and the Tailscale
+  step), Add a computer's code (`home_act_add_computer`) and the computer
+  added with its digits (`home_act_approve_computer`). A computer joining:
+  the server while one asks (`home_status_server_asking`), once it was added
+  (`home_status_server_joined`, with its notice), and the joining computer's
+  own picture (`home_status_joining`).
 - `fixtures/errors.jsonl` — one full error envelope per published code,
   including the fixed `message` text. `method_not_found` appears twice: once
   for a method this daemon does not serve at all, and once as
@@ -1831,7 +2729,8 @@ own client tests against the same golden frames the daemon is tested against.
   `client_too_old` and `daemon_too_old`, an N-1 client calling a v2 method
   (`expect: refused_by_router`, answered by the router with `method_not_found`
   and `requires`, once for a settings method, once for the plugin surface, once
-  for the phone pairing surface and once for the browser download),
+  for the phone pairing surface, once for the browser download, and once each
+  for the cue, home and computer surfaces),
   and golden responses (`expect: response`) showing optional fields absent at
   once (a plugin row, a sign-in client row, and a probed
   `computer_use.permissions.get` answer from before `platform`), which is the

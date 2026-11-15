@@ -17,13 +17,14 @@
 # change to the screen's wording stops this script instead of measuring a stale B.
 #
 # render: writes both requests of every pair (no network, no key).
-# call: asks every pair in both forms on each provider the plan names, through
+# call: asks every pair in both forms on each decision model the plan names (a
+# `DecisionModel.choices/0` name, written as the line's `provider`), through
 # `Providers.DecisionModel.yes_no/4` on `DecisionModel.route/1`, whose key
-# config/runtime.exs read from the provider's environment variable. Providers run
-# side by side, each one request at a time. A rate limit, a server error or a
+# config/runtime.exs read from its provider's environment variable. Decision models
+# run side by side, each one request at a time. A rate limit, a server error or a
 # transport failure is retried twice; a refused question or an item too large for
 # the provider (the screen's content failures) is written and the run goes on; any
-# other failure stops that provider and is written as its reason.
+# other failure stops that decision model and is written as its reason.
 
 defmodule ScreenEval do
   alias FermixCore.Cues.Filter.Decision
@@ -188,13 +189,13 @@ defmodule ScreenEval do
     |> Enum.map(&provider!/1)
     |> Task.async_stream(&ask_all(&1, calls, plan["run_id"], out),
       timeout: length(calls) * @call_bound_ms,
-      max_concurrency: length(DecisionModel.providers())
+      max_concurrency: length(DecisionModel.choices())
     )
     |> Stream.run()
   end
 
   defp provider!(name) do
-    Enum.find(DecisionModel.providers(), &(Atom.to_string(&1) == name)) ||
+    Enum.find(DecisionModel.choices(), &(Atom.to_string(&1) == name)) ||
       raise "screen eval: #{inspect(name)} serves no decision model"
   end
 
@@ -211,13 +212,13 @@ defmodule ScreenEval do
   end
 
   defp ask_one({{request, form}, n}, :ok, route, run_id, out) do
-    session_id = "screen_eval_#{run_id}_#{route.provider}_#{n}"
-    line = %{provider: route.provider, pair: request.pair, form: form}
+    session_id = "screen_eval_#{run_id}_#{route.choice}_#{n}"
+    line = %{provider: route.choice, pair: request.pair, form: form}
 
     case ask(route, request.item, Map.fetch!(request.forms, form), session_id, @max_attempts) do
       {:ok, answer} ->
         write(out, Map.merge(line, Map.take(answer, [:probability, :model, :tokens])))
-        progress(route.provider, n)
+        progress(route.choice, n)
         {:cont, :ok}
 
       {:content, reason} ->
@@ -225,7 +226,7 @@ defmodule ScreenEval do
         {:cont, :ok}
 
       {:abort, reason} ->
-        write(out, %{provider: route.provider, aborted: describe(reason)})
+        write(out, %{provider: route.choice, aborted: describe(reason)})
         {:halt, :aborted}
     end
   end

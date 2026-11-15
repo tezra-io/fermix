@@ -9,6 +9,8 @@ defmodule FermixCore.Agents.SelfKnowledgeSkillTest do
   alias FermixCore.Plugins.Registry, as: PluginRegistry
   alias FermixCore.Temporal.Registry, as: TemporalRegistry
   alias FermixCore.Trace
+  alias FermixCore.Trips.Lookup, as: TripLookup
+  alias FermixCore.Trips.Registry, as: TripRegistry
 
   test "bundled self-knowledge skill loads as a core skill with no tools" do
     local =
@@ -183,6 +185,35 @@ defmodule FermixCore.Agents.SelfKnowledgeSkillTest do
 
     for word <- ~w(awaiting_scan awaiting_decision cancelled device_disconnected) do
       assert reference =~ word, "the mobile reference does not describe #{word}"
+    end
+  end
+
+  # M99: an Android phone is notified through Fermix's push relay with nothing
+  # for the owner to set up, and the reference says what the relay and Google
+  # see and what happens when the relay cannot be reached. Draft 1's direct
+  # route and its key are gone and must not come back in the owner's answer.
+  test "documents Android push through the relay, with nothing to set up" do
+    reference = mobile_reference_path() |> File.read!() |> String.replace(~r/\s+/, " ")
+    paragraph = mobile_paragraph()
+
+    assert paragraph =~ "relayed push to an Android phone"
+
+    for words <- [
+          "push.fermix.ai",
+          "There is nothing to set up",
+          "Firebase project",
+          "Fermix holds no key of its own",
+          "Neither can read the text",
+          "the push service cannot be reached",
+          "shows when the app is opened",
+          "There is no second route"
+        ] do
+      assert reference =~ words, "the mobile reference does not say #{words}"
+    end
+
+    for gone <- ["Web Push", "webpush_key", "Mobile started WITHOUT Web Push"] do
+      refute reference =~ gone, gone
+      refute paragraph =~ gone, gone
     end
   end
 
@@ -371,10 +402,43 @@ defmodule FermixCore.Agents.SelfKnowledgeSkillTest do
           ChecklistAccess.outside_refusal(),
           ChecklistRegistry.describe_error({:list_full, "Fermix"}),
           ChecklistRegistry.describe_error({:stale, 112, 113}),
-          PluginRegistry.reserved_name_sentence()
+          PluginRegistry.reserved_name_sentence("checklist")
         ] do
       assert reference =~ sentence
     end
+  end
+
+  # M89: the trips reference quotes the engine's own refusals, as the lists'
+  # does, so a reworded sentence fails here until the reference follows.
+  test "documents the owner's trips, their tools and the sentences their refusals say" do
+    body = File.read!(self_knowledge_path())
+    reference = "trips" |> reference_path() |> File.read!() |> String.replace(~r/\s+/, " ")
+
+    for tool <- ["trip_read", "trip_edit"] do
+      assert body =~ "`#{tool}`"
+      assert reference =~ "`#{tool}`"
+    end
+
+    assert body =~ ~s{skill_view(name: "self-knowledge", file: "trips")}
+
+    for sentence <- [
+          TripRegistry.describe_error(:too_many_lookups),
+          TripRegistry.describe_error(:unknown_place_link),
+          TripRegistry.describe_error({:trip_full, "Varonne"}),
+          TripRegistry.describe_error({:last_day, "Varonne"}),
+          TripRegistry.describe_error(:too_many_ops),
+          TripRegistry.describe_error({:place_conflict, 7, 2, 3}),
+          TripRegistry.describe_error(:day_move_conflict),
+          TripLookup.offered_heading(:no_anchor),
+          PluginRegistry.reserved_name_sentence("trip")
+        ] do
+      assert reference =~ sentence
+    end
+
+    # D9: after outside content every trip op runs, so no refusal or wait is told.
+    refute reference =~ "can only add stops"
+    refute reference =~ "waits for the owner"
+    refute body =~ "rests on a search waits"
   end
 
   test "the events_reminders reference names every reminder platform and the derived order" do
@@ -605,6 +669,24 @@ defmodule FermixCore.Agents.SelfKnowledgeSkillTest do
     end
   end
 
+  # M87 Phase 2: "can you see what I'm holding up?" on a phone call is answered
+  # by the agent from the camera's newest frame, never by the voice, and the
+  # owner can turn the sharing off.
+  test "documents a phone call's camera" do
+    reference = File.read!(reference_path("voice"))
+
+    for required <- [
+          "`camera_share`",
+          "The voice itself sees nothing",
+          "newest picture",
+          "no picture is kept"
+        ] do
+      assert reference =~ required, "the voice reference does not say #{required}"
+    end
+
+    refute reference =~ "No camera yet"
+  end
+
   # After the first provider, the primary moves only by an explicit action; a
   # self-reference that says saving a provider promotes it sends an owner to
   # the wrong control.
@@ -698,6 +780,36 @@ defmodule FermixCore.Agents.SelfKnowledgeSkillTest do
     end
   end
 
+  # M97 §6.4: once the home runs on a server, a Mac's Messages carry its
+  # iMessage. "Can you still text me?" and "what if the Mac sleeps?" are
+  # answered only if the reference names the carrier, the away state and the
+  # policy that stays on the Mac. Each string is a key, a readiness key or a
+  # section name, not a phrasing.
+  test "documents iMessage through a Mac: the bridge, away, and the policy kept on the Mac" do
+    computers = "computers" |> reference_path() |> File.read!() |> String.replace(~r/\s+/, " ")
+    setup = channel_setup_reference_path() |> File.read!() |> String.replace(~r/\s+/, " ")
+
+    for required <- [
+          "## iMessage through a Mac",
+          "`imessage`",
+          "one Messages bridge",
+          "**away**",
+          "`policy.set`",
+          "500",
+          "20 MiB",
+          "channel:imessage:away",
+          "channel:imessage:carrier",
+          "channel:imessage:conflict",
+          "[fermix_channels.imessage]"
+        ] do
+      assert computers =~ required, "computers reference does not mention #{required}"
+    end
+
+    assert setup =~ "*iMessage through a Mac*"
+    refute setup =~ "There is no remote-Mac mode"
+    refute computers =~ "screen and Messages of a computer are listed but not used"
+  end
+
   # iMessage is the one channel whose setup is macOS permissions rather than
   # platform credentials, and the one that refuses Linux outright, so "how do I
   # connect iMessage?" and "why is it silent?" are answered only if the grants,
@@ -778,6 +890,24 @@ defmodule FermixCore.Agents.SelfKnowledgeSkillTest do
     end
 
     refute reference =~ "it does not submit the form"
+  end
+
+  # An Always On server is set up with the regular installer's --always-on,
+  # which runs the release's own server script; no other address serves it.
+  test "documents the Always On server command as the regular installer's --always-on" do
+    home = "home" |> reference_path() |> File.read!() |> squash()
+    service = service_unit_reference_path() |> File.read!() |> squash()
+
+    assert home =~ "`curl -fsSL https://fermix.ai/install | sudo sh -s -- --always-on`"
+
+    assert home =~
+             "`curl -fsSL https://fermix.ai/install | sudo sh -s -- --always-on --version X`"
+
+    assert service =~ "`--always-on`"
+
+    for text <- [home, service] do
+      refute text =~ ~r{fermix\.ai/always-on}
+    end
   end
 
   # M75 L20: an Always On server keeps the bodies of its traces about a day,

@@ -16,7 +16,7 @@ Models one move of M75 §7.2 (B5). Three parts take part:
 **Who serves as the primary**:
 - The source serves as the primary when its engine booted as one, or when its
   next boot will: `config.toml` says primary and `moved.json` is absent
-  (`Role.resolve/2`, `role.ex:165-177`). Counting the next boot keeps the end
+  (`Role.resolve/2`, `role.ex:206-216`). Counting the next boot keeps the end
   of `undo/3` on the cautious side: the role is written there, and the restart
   comes after.
 - The candidate serves as the primary once `config.toml` is renamed into
@@ -31,9 +31,16 @@ Models one move of M75 §7.2 (B5). Three parts take part:
 - `SourceCanCrash`, `CandidateCanCrash` (at most `MaxCrashes` times each):
   the engine dies and boots again from its files. The source's worker re-runs
   `run/1`; the candidate re-runs `carry_on/1`.
-- `TransferCanFail`, before `move_ready`. Three failures fall under it:
-  - an attempt fails at the source before its offer is out (the desktop key
-    or row, or the capture), and the worker tries again;
+- `TransferCanFail`, before `move_ready`. Five failures fall under it:
+  - an attempt fails at the source before its offer is out in a way another
+    attempt may mend (the device row, or a capture that failed for another
+    reason than room), and the worker tries again (`AttemptFails`);
+  - an attempt fails at the source before its offer is out in a way another
+    would not mend, and the worker aborts the move (`AttemptAborts`,
+    `attempt_failed/2`, `move_worker.ex:279-295`): the secret store refuses
+    the desktop key, or its item holds another home's key under the same
+    profile; the keychain does not give the settings' secrets; or the
+    capture has no room;
   - the candidate's restore fails: it goes back to enrolled, holding no move,
     and refuses, so the source aborts;
   - the ready epoch or the marker cannot be written, and `commit/4` aborts;
@@ -49,7 +56,7 @@ Models one move of M75 §7.2 (B5). Three parts take part:
 - `OldRequestsArrive`: a request the worker sent on a rail it has since given
   up on still reaches the candidate. Two rails are two streams, so nothing
   orders one rail's frames against another's. The worker closes a rail it
-  gives up on (`close_rail/1`, `move_worker.ex:208`, `:426`, `:439`), but
+  gives up on (`close_rail/1`, `move_worker.ex:269`, `:589`, `:605`), but
   `Rail.close/1` sends its close frame behind whatever the rail already sent
   (`rail.ex`). Whether the iroh helper still delivers what it holds once the
   socket closes ("the helper ends its stream on its own", `helper.ex`) is
@@ -57,24 +64,24 @@ Models one move of M75 §7.2 (B5). Three parts take part:
 
 **Mechanism switches** (`TRUE` is the real code):
 - `CandidateWaitsForCommit`: the candidate activates only on `move_commit`
-  for the move it staged (`commit_move/2`, `candidate.ex:578-611`).
+  for the move it staged (`commit_move/2`, `candidate.ex:666-697`).
 - `MarkerBeforeCommit`: the worker writes `moved.json` and records
   `committing` before it sends `move_commit` (`commit/4`, then `retired/4`,
-  `move_worker.ex:420-442`).
+  `move_worker.ex:586-611`).
 - `OffersFenced`: the candidate takes an offer only when it is later than the
   move it holds, a later move id or a later attempt of the same move, and
   refuses an earlier or equal one (`move_mismatch`), leaving what it holds
-  untouched (`fenced_offer/2`, `later?/2`, `candidate.ex:447-459`).
-  `move_offer` carries the attempt (`stream/3`, `move_worker.ex:370`), which
-  only grows across restarts. Move ids are ordered by when the move started
-  (`move_id/1`, `move.ex:505-514`); with one move id, the fence orders by
-  attempt.
+  untouched (`fenced_offer/2`, `later?/2`, `candidate.ex:509-521`).
+  `move_offer` carries the attempt (`send_snapshot/4`, `move_worker.ex:502`),
+  which only grows across restarts. Move ids are ordered by when the move
+  started (`move_id/1`, `move.ex:550-559`); with one move id, the fence
+  orders by attempt.
 - `ReadyAfterStaged`: `move_ready` goes out only after `staged` is written.
   `restored/2` records `staged`, then tells the responder
-  (`candidate.ex:547-553`), which answers `move_ready` only then
-  (`move_responder.ex:65-69`).
+  (`candidate.ex:624-631`), which answers `move_ready` only then
+  (`move_responder.ex:74-78`).
 - `AwaitPinsRail`: the worker takes an answer only from the rail it waits on
-  (`await_any/3` matches `{:rail, ^rail, _}`, `move_worker.ex:742-755`).
+  (`await_any/3` matches `{:rail, ^rail, _}`, `move_worker.ex:1024-1037`).
 - `EndingsAfterRestart`: the worker records `committed` (after `move_done`)
   or `undoing` (after an undo) and then restarts itself (`SelfRestart`,
   `Lifecycle.restart_self/0`); the engine that boots after it records `done`
@@ -90,10 +97,11 @@ Models one move of M75 §7.2 (B5). Three parts take part:
 There is no `AbortRechecksMarker` switch, because in this model the re-check
 in `abort/3` never finds a marker. Every road to `abort/3` starts before
 `retire/1` writes one:
-- a refusal or the attempt cap, in `transfer/1` and `attempt_failed/2`,
-  which run only while the marker is absent;
+- a refusal, a failure another attempt would not mend, or the attempt cap,
+  in `transfer/1` and `attempt_failed/2`, which run only while the marker is
+  absent;
 - `commit/4`'s error clause, after the ready epoch or the marker could not
-  be written (`move_worker.ex:425-427`);
+  be written (`move_worker.ex:589-595`);
 - a recorded `aborting`, which `carry_on/3` reaches only when the marker is
   absent.
 
@@ -135,7 +143,7 @@ serve"). It rests on two mechanisms:
   marker write fails, and the source undoes the move.
 
 Run by hand against the retire rule (check 04's setup), neither mechanism
-switched off breaks `RetiredOnlyForStagedCandidate` (26,486 and 29,530 states
+switched off breaks `RetiredOnlyForStagedCandidate` (37,100 and 35,061 states
 explored). When the marker lands, the candidate is already activating or
 active, and both are in the rule's set. They protect only the one-primary
 rule.
@@ -161,8 +169,9 @@ rests on three mechanisms:
 **Witnesses**:
 - **08**: the move completes, with the source done and the candidate booted
   as the primary.
-- **09**: the move is undone (the restore fails, the candidate refuses, the
-  source aborts) and the source boots as the primary again.
+- **09**: the move is undone and the source boots as the primary again. Its
+  shortest path is an attempt that aborts at the source before its offer is
+  out (`AttemptAborts`), as a desktop key the secret store refuses does.
 - **10**: the move completes after a `move_done` was lost. Its shortest path
   is the candidate's own scheduled restart, which ends the rail before the
   `move_done` arrives. The worker's wait ends, it resumes, the dial finds no
@@ -175,7 +184,7 @@ rests on three mechanisms:
 **Check 12**: `done` and `aborted` are written only by the engine that came
 back after its restart, never by one about to stop. The rule is
 `EndingsFromSurvivor`. It rests on two mechanisms:
-- `EndingsAfterRestart` (check 13: a 545-state search finds the
+- `EndingsAfterRestart` (check 13: a 219-state search finds the
   counterexample, the worker writing `done` and still running).
 - `RetryOnlyAfterBoot` (check 14: a 19-state counterexample). The worker
   records `committed` and is about to restart its engine, and a
@@ -226,7 +235,7 @@ Nothing in Fermix's own code fenced it.
   home untouched.
 
 The same change answers a second `move_commit` after activation from the
-`activated?` flag (`candidate.ex:580-584`). Before, it crashed in `put/3`,
+`activated?` flag (`candidate.ex:666-670`). Before, it crashed in `put/3`,
 because `activate/1` had removed `candidate/`. The model's `OnCommit` now
 answers it `move_done`.
 
@@ -277,22 +286,28 @@ deadlock check cannot see one, which is why the invariant must.
 
 The checks run with one move, the code's three attempts, `MaxLosses = 2` and
 `MaxCrashes = 1` per engine. Each check takes about a second; the largest,
-checks 01, 04 and 12, explore 24,579 states.
+checks 01, 04 and 12, explore 24,617 states.
 
 Each `holds` check was run by hand with one more loss and one more crash
-(`MaxLosses = 3`, `MaxCrashes = 2`): checks 01, 04 and 12 hold (133,698
-states, about 1 s each). With two more of each (`MaxLosses = 4`,
-`MaxCrashes = 3`), check 04 still holds (382,677 states, 4 s).
+(`MaxLosses = 3`, `MaxCrashes = 2`): checks 01, 04 and 12 hold (133,773
+states, about 2 s for the three together). With two more of each
+(`MaxLosses = 4`, `MaxCrashes = 3`), check 04 still holds (382,801 states,
+5 s).
 
 ## Not modelled
 
 The `.tla` header lists what is left out:
 - enrollment, and its 24-hour listen window;
 - the stream's frames and their checks;
-- the desktop key, its row, `desktop.json` and the snapshot file;
+- the desktop key (in the secret store, its store and public half recorded
+  in `.move/phase.json` first), its row, `desktop.json`, the switches in
+  `machine.toml` (what the computer keeps on for its server), the request's
+  `keep_offers`, and the snapshot file;
 - the sleep guard the worker holds for its run (`MoveAwake`) and the staged
   plugin store's reinstall request (`Plugins.Dist.Reinstall`);
-- the resume loop's 24-hour bound;
+- the resume loop's 24-hour bound, and a link or switches write after the
+  marker that fails at the commit and again on resuming: each ends the
+  worker until the next boot, which resumes;
 - a part-way marker write;
 - a failed rename inside `activate/1` (retried on a timer; a resume meanwhile
   is refused, as for any candidate still activating);
@@ -313,9 +328,189 @@ This was noticed while reading the code. TLC does not show it.
   exclusively, then writes it (`moved.ex:45-59`). If the write or the close
   fails (a full disk), the file may be left unreadable. `commit/4` then
   aborts, and `abort/3` raises on the unreadable marker
-  (`move_worker.ex:658-664`). The worker's restart reaches `carry_on/3`'s
-  clause for an unreadable marker (`:154`), which records a sentence asking for the
+  (`move_worker.ex:848-854`). The worker's restart reaches `carry_on/3`'s
+  clause for an unreadable marker (`:169`), which records a sentence asking for the
   marker to be fixed and does nothing else. The source stays a device and
   the candidate stays staged: safe, never two primaries, and stopped until a
   person acts. This is by design, since whether the home retired cannot be
   told.
+
+## Re-read for the computer's key and switches (M97, 2026-11-10)
+
+Re-read against db21a29d, which staled the `move_worker.ex`, `activation.ex`,
+`move.ex` and `home_move.ex` pins:
+- **The desktop key** moved from `device/desktop_key` to the secret store
+  (`ComputerKey`). Before the key is stored, its store and public half are
+  recorded in `.move/phase.json`, whose phase stays `streaming`; a restart
+  reads that record, and an undo deletes only that key, logging and leaving
+  one the store will not delete. None of these is a write a rule reads.
+- **A key failure now aborts the move** where a key file failure tried
+  again: `attempt_failed/2` aborts on `{:computer_key, _}` by name. The
+  model had no abort before the offer, though the keychain's secrets and a
+  capture with no room already aborted there. `AttemptAborts` adds it, under
+  `TransferCanFail`. With it, every check keeps its verdict and every `needs`
+  counterexample its length; the holds checks explore 24,617 states, up from
+  24,579; witness 09 now takes it, a 10-state path where it was 12.
+- **The switches** (`[fermix_core.computer]` in `machine.toml`, what the
+  computer keeps on for its server) are written by `retired/4` between the
+  link and `committing`, after the marker, and once by `resume/1`. They are
+  read by no rule, and one that cannot be written ends the worker until the
+  next boot as a link that cannot be written does.
+- **`Move.start/5` and `HomeMove.move_start/3`** add `keep_offers` to the
+  request, a field no rule reads.
+- **`activation.ex`** changed only in a return's step c (`home_return`) and
+  its moduledoc; the forward `activate/1` is as before.
+
+The comments' line numbers for these four files had drifted before this
+change too; they now point at the committed code.
+
+## Re-read for a second computer and the server's lead on versions (M97, 2026-11-10)
+
+Re-read against 16207ff5, which staled the `move_worker.ex`,
+`activation.ex` and `device_supervisor.ex` pins:
+- **The switches on a resume.** `resume/1` still writes the link, then the
+  switches, then `committing`, but a source not kept as a computer is owed
+  no switches and its `machine.toml` is no longer read. A switches write
+  that fails, at the commit or on a resume, ends the worker with a sentence
+  of its own where it shared the link's. An offer the request keeps that
+  this engine does not know is left off and logged where it crashed the
+  worker. None is a write a rule reads.
+- **`activation.ex`** changed in a return's step c (`home_return`), its
+  moduledoc and its aliases; the forward `activate/1` and `place_config/2`
+  are as before.
+- **The device tree** starts this computer's invocations (`Desktop.Invoke`)
+  beside the dial subtree while the home is linked, and a joiner in the
+  dial subtree only while this computer joins a home and has no link. The
+  move worker still starts only while a move is pending, the first of the
+  dial subtree's users after the helper.
+
+No modelled step changed. The comments' line numbers into these files, and
+into `role.ex` and `home_move.ex`, point at the committed code.
+
+## Re-read for history notes named for their machine (M97, 2026-11-11)
+
+Re-read against 18710c89, which staled the `move_worker.ex`, `candidate.ex`
+and `activation.ex` pins:
+- **`move_offer` names the source's device id** when the source stays as a
+  linked computer (`send_snapshot/4`, `put_device/2`), and the candidate
+  hands it to the staging as the fact `"device_id"` (`stage_move/3`). A
+  field no rule reads; the attempt it carries beside it is as before.
+- **The staging names the home's own notes for that computer.** After the
+  settings and before the plugin reinstall request, `Activation.stage/5`
+  renames the staged `memory.db`'s rows of the home's own machine (`""`) to
+  that device id in one transaction (`own_notes/4`,
+  `ComputerHistorySql.rename_machine/3`). A failure there is one more way
+  the staging fails (`restored/2`'s error clause, back to enrolled), which
+  the model has; a staging run again restores afresh first, so it renames
+  once. No rule reads the notes.
+- **`activate/1` and `place_config/2`** are as before.
+
+No modelled step changed. The comments' line numbers into these three
+files point at the committed code; those into `candidate.ex` had drifted
+before this change too.
+
+## Re-read for the review's fixes (M97, 2026-11-11)
+
+Re-read against c6fe1c48, which staled the `move.ex` pin: `write_request/3`
+records the request's `keep_offers` in the phase too, so they outlast the
+request an undo removes, and Try again reads them (`Move.undone_keep/1`,
+not pinned). One more field in the same write of `phase.json`, which no rule
+reads; no modelled step changed. The comments' line numbers into `move.ex`
+point at the committed code.
+
+## Re-read for HS-4's fix (M97, 2026-11-11)
+
+Re-read against 1a89beae, which staled the `candidate.ex` pin: the
+candidate stages a move's live stream with `history: :continued`
+(`stage_fun/4`, `continued/1`), so `Archive.install/5` keeps the store's
+history token, where a stored copy gets a new one. A write no rule reads;
+no modelled step changed. Why keeping it is safe is in `history_submit`'s
+README (the re-read for HS-4's fix). The comments' line numbers into
+`candidate.ex` point at the committed code.
+
+## Re-read for the home's format (M97 D16, 2026-11-11)
+
+Re-read against c4c72e1f, which staled the `candidate.ex` pin: the
+candidate names its `home_format` in its enrolment, and a staging the
+restore refuses for a newer format (`Archive.install/5`'s `not_newer`,
+`Home.Readable`) is said in the candidate's words. That refusal comes in
+the staging, before `move_ready`, so it is a failed staging (`restored/2`'s
+error clause, back to enrolled) that the responder refuses and the source's
+worker aborts on, which the model has; the source retires only for a staged
+candidate, so no move stages on a candidate that cannot read the home and
+then retires the source. The readiness check before a move
+(`MoveReadiness`, `Releases.eligible/3`) refuses earlier and writes nothing.
+No modelled step changed, and the readability rule is a single read of the
+manifest at the staging, so it is not modelled on its own. The comments'
+line numbers into `candidate.ex` point at the committed code.
+
+## Re-read for the computer's switches (M97 D27, 2026-11-12)
+
+Re-read against 101830533, which staled the `move_worker.ex` pin: the kept
+offers a request names are read through `Consent.known/1`, so a request an
+engine before D27 wrote is read as a surface's is. The switches it writes
+are read by no rule; no modelled step changed. The comments' line numbers
+into `move_worker.ex` point at the committed code.
+
+## Re-read for the Always On pane's engine half (M97, 2026-11-12)
+
+Re-read against 8e3f586f, which staled the `move_worker.ex` and
+`move_responder.ex` pins. Both now tell `Home.MoveProgress` where the move
+is: the worker its step (capture, send at each whole 5% of the bytes it hands
+the rail, staging, commit) and clears it however its carrying on ends; the
+responder the bytes it wrote, at the offer and at each whole 5%, cleared at
+`move_end` or as the session closes. Each is a `GenServer.call` to a store
+that holds one record in an ETS table it owns; its callbacks write that one
+key and cast to the status watch, so they never fail, and the table never
+fills. A call to a store that is not running (a candidate's tree has none)
+answers `:ok` (`move_progress.ex:117-121`). A store that does not answer
+within the call's 5 s, or stops during one, exits its caller, since only
+`:noproc` is caught: the worker is restarted and carries on from its phase
+(before `move_ready` a transport failure, one of its three attempts; after
+the marker a resume), and the responder's session closes, a transport
+failure too. Those are paths the model has, and the store answers in
+microseconds, so no step is added; catching every exit there would keep a
+display from ever ending an attempt. No modelled step changed. The comments'
+line numbers into both files point at the committed code.
+
+## Re-read for the real-machine fixes (M97, 2026-11-12)
+
+Re-read against ae8ea336, which staled the `move_worker.ex` pin: the
+sentences the worker records are an owner's words (`Management.Copy`), the
+causes go to the log, and its probe of the moved identity names the
+initiator's protocol version. The same steps write the same files in the
+same order, so no modelled step changed. The comments' line numbers into
+`move_worker.ex` point at the committed code.
+
+## Re-read for the phone-wire version rule (M97, 2026-11-13)
+
+Re-read against 03df6995, which staled the `move_worker.ex` and the
+`rail.ex` `@moduledoc` pins. The worker's probe of the moved identity names
+its versions as a computer's hello does (`Protocol.hello_versions/0`: its
+newest and its oldest), and the server answers at the newest both hold; the
+rail sends a hello at the version it names and speaks the version of the
+server's first frame after it, refusing a later frame at another. A move's
+own rail (`:ik_move`) sends no hello, so its frames go at the version they
+did; the probe answers, or does not, as before. What the moduledoc says of
+a close frame behind a request is unchanged. No modelled step changed; the
+comments' line numbers into `move_worker.ex` point at the committed code.
+
+## Re-read for voice and attachments from a computer (M97 stage A, 2026-11-14)
+
+Re-read against 4c58837a, which staled the `device_supervisor.ex` pin of
+`children` and `dial_children`. A linked computer's tree serves the app's
+voice socket, its calls bridged to the server (`Desktop.CallBridge` behind
+`LocalVoiceSocket`), as a sibling between `Desktop.Invoke` and the dial
+subtree under the same `:one_for_one`, so its crash or restart touches
+neither, and the dial subtree, where the move worker runs, is as before. No
+modelled step changed; the comments' line numbers into `device_supervisor.ex`
+point at the committed code.
+
+## Re-read for the Apple Maps switch's tests (M89 D13, 2026-11-14)
+
+Re-read against 2b8d4211, which staled the `move_worker.ex` pin: the worker's
+context gains `consent_opts`, the system the keep block's lines are drawn for
+(`Consent.accept/3` and `default_keep/1`), the host's unless a test names it,
+so a move's switches are written as before on every computer. It is one more
+key in a context no step reads, and no modelled step changed. The comments'
+line numbers into `move_worker.ex` point at the committed code.

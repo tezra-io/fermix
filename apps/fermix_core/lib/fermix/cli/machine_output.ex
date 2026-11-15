@@ -17,8 +17,6 @@ defmodule Fermix.CLI.MachineOutput do
   as `details`, so the words stay in this module and the caller supplies facts.
   """
 
-  alias FermixCore.Home.AlwaysOnRelease
-
   @schema_version 1
 
   @codes ~w(
@@ -53,7 +51,6 @@ defmodule Fermix.CLI.MachineOutput do
     changed
     step_failed
     step_unfinished
-    always_on_unavailable
   )a
 
   @doc "Every error code this CLI can print, for the caller that renders them."
@@ -147,9 +144,12 @@ defmodule Fermix.CLI.MachineOutput do
       "setup page is not reachable yet. Read what it said with journalctl --user -u fermix."
   end
 
+  # A Mac or a standalone binary runs the service `fermix service install`
+  # writes, which Doctor's service unit row reports.
   def sentence(:foreign_distribution, _details) do
-    "This Fermix was not installed from a Linux package, so there is no packaged " <>
-      "background service for it to manage."
+    "fermix service status reports only a Linux package's background service, and this " <>
+      "Fermix was not installed from one. For the service fermix service install sets up " <>
+      "here, see the service unit row of fermix doctor."
   end
 
   def sentence(:service_unbound, _details) do
@@ -225,8 +225,6 @@ defmodule Fermix.CLI.MachineOutput do
 
   def sentence(:step_failed, details),
     do: "That step ended on a problem: " <> reason(details) <> " Run fermix always-on to fix it."
-
-  def sentence(:always_on_unavailable, _details), do: AlwaysOnRelease.sentence()
 
   def sentence(:step_unfinished, _details),
     do: "Always On is still at it after 45 minutes; fermix always-on shows where it stands."

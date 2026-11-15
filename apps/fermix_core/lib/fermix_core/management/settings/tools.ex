@@ -6,13 +6,32 @@ defmodule FermixCore.Management.Settings.Tools do
   Search and images publish the key row of the backend in force rather than
   every backend's slot: asking an operator to store six keys to use one is how
   the browser door's search tab reads today. The search section also carries
-  place search's backend (M72 §14.1), offered as this build can run it (Brave
-  alone where the build carries no Apple Maps helper), and the Brave key row
-  stands whenever web or place search uses Brave.
+  place search's backend (M72 §14.1), offered as this build can run it (a Mac
+  of the home and Brave where the build carries no Apple Maps helper, M89
+  D13), its value the one in force, and the Brave key row stands whenever web
+  or place search uses Brave.
+
+  `harness` is the home's coding settings, the preferred tool; whether coding
+  agents may run is each machine's own (M98 D5, `Settings.CodingMachine`).
+
+  `computer_history` is this machine's part of the history settings (M97 §4,
+  a machine section in `Management.Placement`): whether it records, which
+  apps (on a Linux recorder, the row's info says an entry is the app's name
+  on the accessibility bus, matched exactly; `opts`' `:history_system` names
+  the recorder's system in a test), and how its own sittings are summarized
+  (read-only). The home's route
+  and grants are in the home's `config.toml` and have no row, so a write here
+  never reaches them. The switch's footer is the history promise
+  (`ComputerHistory.Promise`), true on this machine: with or without a server.
+  An Always On server publishes neither `computer_use` nor `computer_history`:
+  nobody sits at it (M97 §19.2).
   """
 
-  alias FermixCore.Harness.Config, as: HarnessConfig
+  alias FermixCore.ComputerHistory
+  alias FermixCore.ComputerHistory.Config, as: ComputerHistoryConfig
+  alias FermixCore.ComputerHistory.Promise
   alias FermixCore.Harness.Vendors
+  alias FermixCore.Home.AlwaysOn
   alias FermixCore.Management.Secrets
   alias FermixCore.Management.Settings.Row
   alias FermixCore.Management.Settings.Source
@@ -57,7 +76,11 @@ defmodule FermixCore.Management.Settings.Tools do
     "firecrawl" => :firecrawl_api_key
   }
 
-  @place_labels %{"apple_maps" => "Apple Maps", "brave" => "Brave"}
+  @place_labels %{
+    "apple_maps" => "Apple Maps",
+    "computer" => "Apple Maps on your Mac",
+    "brave" => "Brave"
+  }
 
   @image_labels %{
     "openai" => "OpenAI",
@@ -88,18 +111,34 @@ defmodule FermixCore.Management.Settings.Tools do
   @env_unstorable_footer "Fermix cannot store a value under this name. " <>
                            "Commands get it from the environment Fermix was started with."
 
-  @doc "Every section this module owns, in publication order."
-  @spec sections() :: [%{id: String.t(), pane: String.t(), title: String.t()}]
-  def sections, do: @sections
+  # Nobody sits at an Always On server, so it publishes neither its screen's
+  # nor its history's (M97 §19.2).
+  @screen_sections ~w(computer_use computer_history)
 
-  @doc "Whether this module owns the named section."
-  @spec owns?(String.t()) :: boolean()
-  def owns?(section) when is_binary(section), do: Enum.any?(@sections, &(&1.id == section))
+  @doc """
+  Every section this module owns here, in publication order: on an Always On
+  server (`Home.AlwaysOn.here?/1`), none of the screen's (`server_primary?:`
+  says which for a test, or `:always_on` hands that rule its facts).
+  """
+  @spec sections(keyword()) :: [%{id: String.t(), pane: String.t(), title: String.t()}]
+  def sections(opts \\ []) when is_list(opts) do
+    if server_primary?(opts),
+      do: Enum.reject(@sections, &(&1.id in @screen_sections)),
+      else: @sections
+  end
+
+  @doc "Whether this module owns the named section here (`sections/1`'s options)."
+  @spec owns?(String.t(), keyword()) :: boolean()
+  def owns?(section, opts \\ []) when is_binary(section) and is_list(opts),
+    do: Enum.any?(sections(opts), &(&1.id == section))
 
   @doc """
   The rows of one owned section. `host:` (`BootProfile.host/0`'s shape) names
-  the build for a test; the search section's place search options are the ones
-  this build can run.
+  the build for a test, and `computers_opts:` the home's computers
+  (`PlaceSearch.Backend.resolve/2`'s `records:` and `version:`); the search
+  section's place search options are the ones this build can run, its value
+  the backend in force. `promise:` holds `ComputerHistory.Promise.facts/2`'s
+  seams for the history switch's footer.
   """
   @spec rows(String.t(), Source.snapshot(), keyword()) :: [Row.t()]
   def rows(section, snapshot, opts \\ [])
@@ -124,38 +163,36 @@ defmodule FermixCore.Management.Settings.Tools do
     ]
   end
 
-  def rows("computer_history", snapshot, _opts) do
+  def rows("computer_history", snapshot, opts) do
     block = Source.core(snapshot, :computer_history)
     restart = Row.restart?(:computer_history)
+    # As this engine holds it: a computer holds none of the home's keys.
+    here = ComputerHistoryConfig.normalize(block)
 
     [
       Row.new("computer_history_enabled", :toggle, "Computer history",
+        footer: Promise.sentence(:footer, Promise.facts(here, Keyword.get(opts, :promise, []))),
         value: Source.boolean(block, :enabled, false),
         restart: restart
       ),
       Row.new("computer_history_apps", :list, "Apps",
         footer: "Only these apps are watched.",
+        info: apps_info(Keyword.get_lazy(opts, :history_system, &ComputerHistory.system/0)),
         value: Source.strings(block, :apps),
         restart: restart
       ),
-      summarizer_row(block, restart)
+      summarizer_row(here, restart)
     ]
   end
 
   def rows("harness", snapshot, _opts) do
     block = Source.core(snapshot, :harness)
-    restart = Row.restart?(:harness)
 
     [
-      Row.new("harness_approved", :toggle, "Allow coding agents to run on this Mac",
-        footer: "Each tool keeps its own login. Cloud runs are off in this release.",
-        value: Source.boolean(block, :approved, HarnessConfig.approved?([])),
-        restart: restart
-      ),
       Row.new("harness_default_vendor", :choice, "Preferred tool",
         value: Source.string(block, :default_vendor),
         options: [Row.option("", "No preference") | vendor_options()],
-        restart: restart
+        restart: Row.restart?(:harness)
       )
     ]
   end
@@ -164,7 +201,7 @@ defmodule FermixCore.Management.Settings.Tools do
     block = Source.tool(snapshot, :web_search)
     backend = Source.string(block, :backend, "duckduckgo")
     host = PlaceBackend.host(opts)
-    place = place_backend(snapshot, host)
+    place = place_backend(snapshot, [host: host] ++ Keyword.get(opts, :computers_opts, []))
     restart = Row.restart?(:tools)
 
     [
@@ -273,10 +310,26 @@ defmodule FermixCore.Management.Settings.Tools do
   end
 
   # Read-only until the summarizer has an answer key of its own: a control whose
-  # save always refuses is worse than a row that says what is in force.
-  defp summarizer_row(block, restart) do
+  # save always refuses is worse than a row that says what is in force. What
+  # is in force for this machine's own sittings (`ComputerHistoryConfig.summarizer/1`):
+  # `local` where it makes its own notes, else the home's route, a pinned
+  # provider by its id.
+  # Where this machine's local summarizer decides over a different one in
+  # config.toml, the footer says so (`ComputerHistoryConfig.shadowed_route/1`).
+  defp summarizer_row(here, restart) do
+    value =
+      case ComputerHistoryConfig.summarizer(here) do
+        {:provider, provider} -> Atom.to_string(provider)
+        summarizer -> Atom.to_string(summarizer)
+      end
+
+    footer =
+      if ComputerHistoryConfig.shadowed_route(here),
+        do: ComputerHistoryConfig.shadowed_footer()
+
     Row.new("computer_history_summarizer", :choice, "Summarize with",
-      value: Source.string(block, :summarizer, "default_provider"),
+      value: value,
+      footer: footer,
       options: [
         Row.option("default_provider", "The primary provider"),
         Row.option("local", "On this Mac")
@@ -304,12 +357,12 @@ defmodule FermixCore.Management.Settings.Tools do
   defp search_hint(_name), do: nil
 
   # The value in force, from the one resolver: the configured backend, or the
-  # build's default when none is set.
-  defp place_backend(snapshot, host) do
+  # home's default when none is set.
+  defp place_backend(snapshot, resolve_opts) do
     snapshot
     |> Source.tool(:place_search)
     |> PlaceConfig.normalize()
-    |> PlaceBackend.resolve(host: host)
+    |> PlaceBackend.resolve(resolve_opts)
     |> Map.fetch!(:name)
     |> Atom.to_string()
   end
@@ -320,6 +373,7 @@ defmodule FermixCore.Management.Settings.Tools do
   end
 
   defp place_hint(:apple_maps), do: "Needs no key"
+  defp place_hint(:computer), do: "Needs a Mac with the Fermix app"
   defp place_hint(:brave), do: nil
 
   # The selected web backend's key, plus Brave's while place search runs on
@@ -370,8 +424,28 @@ defmodule FermixCore.Management.Settings.Tools do
 
   defp image_label(backend), do: Map.get(@image_labels, backend, backend)
 
+  # On Linux an entry is the app's name on the accessibility bus, matched
+  # exactly (M97 stage 4, D1), which an app need not show anywhere; a Mac's
+  # entries are its bundle ids, which its app picks for the owner.
+  defp apps_info(:linux),
+    do:
+      "Each entry is an app's name on the accessibility bus, matched exactly, which can " <>
+        "differ from the name the app shows. /history status names the listed apps that " <>
+        "recorded nothing."
+
+  defp apps_info(system) when system in [:macos, :other], do: nil
+
   defp mode_option(mode),
     do: Row.option(word(mode), title(mode), hint: Map.fetch!(@sandbox_mode_hints, mode))
+
+  # An Always On server, by the rule computer history's recorder and Google
+  # Meet ask (`Home.AlwaysOn.here?/1`, `opts`' `:always_on` its seams), so a
+  # Linux computer that took the home back keeps its screen and history.
+  defp server_primary?(opts) do
+    Keyword.get_lazy(opts, :server_primary?, fn ->
+      AlwaysOn.here?(Keyword.get(opts, :always_on, []))
+    end)
+  end
 
   defp word(value) when is_atom(value), do: Atom.to_string(value)
   defp title(value) when is_atom(value), do: value |> Atom.to_string() |> String.capitalize()

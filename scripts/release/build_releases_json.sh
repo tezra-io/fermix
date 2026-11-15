@@ -43,11 +43,9 @@
 #     ]
 #   }
 #
-# The "packages" object sits after "artifacts" and carries no "target" key,
-# because scripts/install.sh reads this document with a line-scanning awk that
-# keys on "target" and takes the next "url"/"sha256" it sees. The same script
-# reads a package as packages -> <target> -> <deb|rpm> -> <field>, one key per
-# line, so this document stays pretty-printed.
+# `fermix upgrade` and scripts/homebrew/bump.sh read this document as JSON.
+# scripts/install.sh does not read it: it trusts only the digest table fermix.ai
+# serves, of which scripts/release/build_install_table.sh builds the rail's copy.
 
 set -euo pipefail
 

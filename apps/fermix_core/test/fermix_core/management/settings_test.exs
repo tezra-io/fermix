@@ -10,6 +10,8 @@ defmodule FermixCore.Management.SettingsTest do
 
   use ExUnit.Case, async: false
 
+  import ExUnit.CaptureLog
+
   alias FermixCore.Browser.Error, as: BrowserError
   alias FermixCore.Management.Copy
   alias FermixCore.Management.Router
@@ -45,6 +47,7 @@ defmodule FermixCore.Management.SettingsTest do
     :meetings,
     :computer_use,
     :computer_history,
+    :computer,
     :harness,
     :tools,
     :sandbox,
@@ -52,7 +55,17 @@ defmodule FermixCore.Management.SettingsTest do
     :secret_writer,
     :secret_store
   ]
-  @channel_keys [:telegram, :whatsapp, :discord, :slack, :signal, :acp, :mobile, :imessage]
+  @channel_keys [
+    :telegram,
+    :whatsapp,
+    :discord,
+    :slack,
+    :signal,
+    :acp,
+    :mobile,
+    :imessage,
+    :accessories
+  ]
 
   @row_fields ~w(
     key kind label footer info example advanced value present options min max step restart
@@ -348,6 +361,7 @@ defmodule FermixCore.Management.SettingsTest do
 
       assert "claude-opus-5-5" in published.("providers.anthropic")
       assert "claude-sonnet-5-5" in published.("providers.anthropic")
+      assert "claude-fable-5-2" in published.("providers.anthropic")
       assert "grok-4.7" in published.("providers.xai")
 
       assert ["gpt-6.1-sol", "gpt-6.1-terra", "gpt-6-luna"] -- published.("providers.openai") ==
@@ -357,6 +371,7 @@ defmodule FermixCore.Management.SettingsTest do
 
       assert [
                "anthropic/claude-sonnet-5.5",
+               "anthropic/claude-fable-5.2",
                "anthropic/claude-fable-5.1",
                "anthropic/claude-opus-5.5",
                "openai/gpt-6-astra",
@@ -580,6 +595,7 @@ defmodule FermixCore.Management.SettingsTest do
                "realtime_voice",
                "realtime_backend",
                "realtime_conversation",
+               "realtime_camera_share",
                "openai_api_key",
                "realtime_max_session_minutes",
                "realtime_max_cost_cents",
@@ -674,6 +690,50 @@ defmodule FermixCore.Management.SettingsTest do
       refute "realtime_conversation" in Enum.map(rows("realtime"), & &1["key"])
     end
 
+    # M87 Phase 2: a call from the phone may share its camera once the owner
+    # turns it on in the call. Only a task engine takes calls from the phone,
+    # so only a task engine publishes the switch, on until someone turns it off.
+    test "each task engine publishes the camera switch, on by default" do
+      for engine <- ~w(openai_live xai_realtime) do
+        Application.put_env(:fermix_core, :realtime, enabled: true, engine: engine)
+
+        assert %{
+                 "kind" => "toggle",
+                 "label" => "Share the phone's camera",
+                 "footer" =>
+                   "Lets a call from the phone show your Fermix agent what its camera sees, " <>
+                     "once you turn the camera on in the call. " <>
+                     "The voice itself cannot see, and no picture is kept.",
+                 "value" => true,
+                 "read_only" => false
+               } = row("realtime", "realtime_camera_share")
+      end
+    end
+
+    test "turning the camera switch off writes the key and reads back" do
+      Application.put_env(:fermix_core, :realtime,
+        enabled: true,
+        engine: "openai_live",
+        model: "gpt-live-1"
+      )
+
+      assert {:ok, result} = Settings.apply("realtime", %{"realtime_camera_share" => false})
+
+      assert result["applied"] == ["realtime_camera_share"]
+      assert result["side_effects"] == []
+      assert Keyword.get(Application.get_env(:fermix_core, :realtime), :camera_share) == false
+      assert %{"value" => false} = row("realtime", "realtime_camera_share")
+    end
+
+    test "the Realtime engine publishes no camera switch" do
+      Application.put_env(:fermix_core, :realtime, enabled: true, engine: "openai_realtime")
+
+      refute "realtime_camera_share" in Enum.map(rows("realtime"), & &1["key"])
+
+      assert {:error, {:invalid_params, "realtime_camera_share", _sentence}} =
+               Settings.apply("realtime", %{"realtime_camera_share" => true})
+    end
+
     # M70 §06: Grok is a task engine like Live, so it publishes the same backend
     # and conversation rows, its own voices, and the SpaceXAI provider's key slot
     # in place of OpenAI's.
@@ -690,6 +750,7 @@ defmodule FermixCore.Management.SettingsTest do
                "realtime_voice",
                "realtime_backend",
                "realtime_conversation",
+               "realtime_camera_share",
                "xai_api_key",
                "realtime_max_session_minutes",
                "realtime_max_cost_cents",
@@ -754,10 +815,18 @@ defmodule FermixCore.Management.SettingsTest do
       assert Keyword.get(realtime, :model) == "gpt-live-1"
       refute Keyword.has_key?(realtime, :reasoning_effort)
 
-      assert Enum.sort(result["applied"]) ==
-               ["realtime_engine", "realtime_model", "realtime_reasoning_effort"]
+      assert Enum.sort(result["applied"]) == [
+               "realtime_camera_share",
+               "realtime_engine",
+               "realtime_model",
+               "realtime_reasoning_effort"
+             ]
 
       assert "The engine changed to Live, with your Fermix agent." in result["side_effects"]
+
+      assert "Sharing the phone's camera was turned on because this engine takes calls from the phone." in result[
+               "side_effects"
+             ]
 
       assert "Reasoning effort was removed because this engine does not use it." in result[
                "side_effects"
@@ -942,10 +1011,12 @@ defmodule FermixCore.Management.SettingsTest do
       # Grok's move turned screen sharing off; the move back puts it on again.
       assert Keyword.get(back, :screen_share) == true
       refute Keyword.has_key?(back, :conversation)
+      refute Keyword.has_key?(back, :camera_share)
       assert Keyword.get(back, :max_session_minutes) == 30
       assert Keyword.get(back, :persist_transcripts) == true
 
       assert Enum.sort(realtime_result["applied"]) == [
+               "realtime_camera_share",
                "realtime_conversation",
                "realtime_engine",
                "realtime_model",
@@ -958,7 +1029,8 @@ defmodule FermixCore.Management.SettingsTest do
                "The voice changed to marin.",
                "Reasoning effort was restored because this engine uses it.",
                "Whether voice calls join the chat was reset because this engine does not use it.",
-               "Screen sharing during calls was turned back on."
+               "Screen sharing during calls was turned back on.",
+               "Sharing the phone's camera was removed because this engine takes no calls from the phone."
              ]
 
       assert {:ok, reloaded} = ConfigStore.load_runtime_config()
@@ -985,6 +1057,45 @@ defmodule FermixCore.Management.SettingsTest do
 
       assert Keyword.get(Application.get_env(:fermix_core, :realtime), :screen_share) == true
       refute Enum.any?(result["side_effects"], &(&1 =~ "Screen sharing"))
+    end
+
+    # The owner's camera switch is a task-engine setting: a move between Live
+    # and Grok keeps it as it was and says nothing, and only the move onto the
+    # Realtime engine, which takes no calls from the phone, drops it.
+    test "Live to Grok keeps a camera switch turned off, and says nothing of it" do
+      Application.put_env(:fermix_core, :realtime,
+        enabled: true,
+        engine: "openai_live",
+        model: "gpt-live-1",
+        voice: "marin",
+        camera_share: false
+      )
+
+      assert {:ok, result} = Settings.apply("realtime", %{"realtime_model" => "grok-voice-3.0"})
+
+      assert Keyword.get(Application.get_env(:fermix_core, :realtime), :camera_share) == false
+      refute "realtime_camera_share" in result["applied"]
+      refute Enum.any?(result["side_effects"], &(&1 =~ "camera"))
+    end
+
+    test "Live to Realtime drops a camera switch turned off, and names it" do
+      Application.put_env(:fermix_core, :realtime,
+        enabled: true,
+        engine: "openai_live",
+        model: "gpt-live-1",
+        voice: "marin",
+        camera_share: false
+      )
+
+      assert {:ok, result} =
+               Settings.apply("realtime", %{"realtime_model" => "gpt-realtime-2"})
+
+      refute Keyword.has_key?(Application.get_env(:fermix_core, :realtime), :camera_share)
+      assert "realtime_camera_share" in result["applied"]
+
+      assert "Sharing the phone's camera was removed because this engine takes no calls from the phone." in result[
+               "side_effects"
+             ]
     end
 
     test "a model no engine ships is refused against the published options" do
@@ -1270,6 +1381,45 @@ defmodule FermixCore.Management.SettingsTest do
 
       assert is_binary(sentence) and sentence != ""
       assert {:error, {:config_unreadable, _same}} = Settings.reload()
+    end
+  end
+
+  # M97 §4: this computer's own settings are read from machine.toml alone, and
+  # the outside-edit check compares both files joined, so a section written
+  # into config.toml by hand changes nothing it sees. A reload names it once,
+  # with where it belongs, and machine.toml still wins.
+  describe "a machine setting written into config.toml" do
+    test "a reload names it and where it belongs, and reads the machine file's", %{home: home} do
+      File.write!(Path.join(home, "machine.toml"), "[sandbox]\nmode = \"strict\"\n")
+
+      File.write!(Path.join(home, "config.toml"), """
+      [sandbox]
+      mode = "open"
+
+      [fermix_core.computer_use]
+      enabled = true
+      """)
+
+      log = capture_log(fn -> assert {:ok, %{"reloaded" => true}} = Settings.reload() end)
+
+      assert log =~
+               "settings reload: config.toml holds this computer's own settings, which Fermix " <>
+                 "reads only from machine.toml, so they are ignored: sandbox, " <>
+                 "fermix_core.computer_use."
+
+      assert SandboxConfig.normalize(Application.get_env(:fermix_core, :sandbox)).mode == :strict
+      assert Application.get_env(:fermix_core, :computer_use)[:enabled] != true
+    end
+
+    test "a reload of a config.toml that holds none says nothing of it", %{home: home} do
+      File.write!(
+        Path.join(home, "config.toml"),
+        "[fermix_core.memory]\nreview_interval_hours = 9\n"
+      )
+
+      log = capture_log(fn -> assert {:ok, %{"reloaded" => true}} = Settings.reload() end)
+
+      refute log =~ "this computer's own settings"
     end
   end
 
@@ -1641,6 +1791,85 @@ defmodule FermixCore.Management.SettingsTest do
   # The managed task browser's pane. Its first row is the launcher's answer,
   # injected here so the host's own Chrome never decides a verdict; the other
   # three are the `[fermix_core.browser]` keys a person sets.
+  # M91 E3: `[fermix_channels.accessories] enabled`, the StackChan switch. A
+  # Mac's only, live like the phone's, and round-tripped through the file.
+  describe "the accessories section" do
+    test "a Mac publishes one live switch, off by default; another computer has no section" do
+      Application.delete_env(:fermix_channels, :accessories)
+
+      assert %{id: "accessories", pane: "voice", title: "StackChan"} in Settings.sections(
+               macos?: true
+             )
+
+      refute Enum.any?(Settings.sections(macos?: false), &(&1.id == "accessories"))
+      refute Settings.section?("accessories", macos?: false)
+
+      assert [row] = rows("accessories")
+
+      assert {row["key"], row["kind"], row["value"], row["restart"]} ==
+               {"accessories_enabled", "toggle", false, false}
+
+      assert row["label"] == "Allow a StackChan connection"
+      assert Copy.violations(row["footer"], :prose) == []
+    end
+
+    test "turning it on writes the file, applies at once and needs no restart", %{home: home} do
+      Application.delete_env(:fermix_channels, :accessories)
+
+      assert {:ok, result} =
+               Settings.apply("accessories", %{"accessories_enabled" => true},
+                 macos?: true,
+                 accessories_switch: &accessories_switched/1
+               )
+
+      assert_received {:accessories_switch, true}
+      assert result["applied"] == ["accessories_enabled"]
+      assert result["side_effects"] == []
+      refute RestartState.boot_bound?([:channels, :accessories, :enabled])
+      assert Application.get_env(:fermix_channels, :accessories) == [enabled: true]
+      assert row("accessories", "accessories_enabled")["value"] == true
+
+      # The save reads back as it was written: the section, then its one key,
+      # in this computer's own file (M97 §4).
+      text = File.read!(Path.join(home, "machine.toml"))
+      assert text =~ "[fermix_channels.accessories]"
+      assert {:ok, persisted} = RestartState.load_persisted()
+      assert persisted.fermix_channels[:accessories] == [enabled: true]
+
+      assert {:ok, _off} =
+               Settings.apply("accessories", %{"accessories_enabled" => false},
+                 macos?: true,
+                 accessories_switch: &accessories_switched/1
+               )
+
+      assert_received {:accessories_switch, false}
+      assert Application.get_env(:fermix_channels, :accessories) == []
+    end
+
+    test "a switch the link did not follow is said as a side effect" do
+      Application.delete_env(:fermix_channels, :accessories)
+      sentence = "StackChan is on but could not start. See the daemon log."
+
+      assert {:ok, result} =
+               Settings.apply("accessories", %{"accessories_enabled" => true},
+                 macos?: true,
+                 accessories_switch: fn true -> {:error, sentence} end
+               )
+
+      assert result["side_effects"] == [sentence]
+    end
+
+    test "a value that is not a switch is refused by name" do
+      assert {:error, {:invalid_params, "accessories_enabled", _sentence}} =
+               Settings.apply("accessories", %{"accessories_enabled" => "yes please"},
+                 macos?: true,
+                 accessories_switch: &accessories_switched/1
+               )
+
+      refute_received {:accessories_switch, _on?}
+    end
+  end
+
   describe "the browser section" do
     test "publishes the browser in force and three live settings with their defaults" do
       Application.delete_env(:fermix_core, :browser)
@@ -1714,9 +1943,11 @@ defmodule FermixCore.Management.SettingsTest do
         assert row("browser", key)["value"] == value
       end
 
-      contents = File.read!(Path.join(home, "config.toml"))
+      # This machine's own (M97 D28d): the keys are in its machine file.
+      contents = File.read!(Path.join(home, "machine.toml"))
       assert contents =~ ~s(default_profile = "fermix_headless")
       assert contents =~ "max_tabs = 4"
+      refute File.read!(Path.join(home, "config.toml")) =~ "max_tabs"
     end
 
     test "a value the browser would refuse at launch is refused in its own words" do
@@ -1789,7 +2020,9 @@ defmodule FermixCore.Management.SettingsTest do
 
       assert names["anthropic_api_key"] == "Anthropic key"
       assert names["telegram_bot_token"] == "Bot token in Telegram"
-      assert names["snapshot_s3_secret_access_key"] == "Secret access key in Recovery snapshots"
+      # No section shows another S3 service's keys (ALWAYS_ON_PANE §3.12), so
+      # they are named nowhere and a move's review counts them.
+      refute Map.has_key?(names, "snapshot_s3_secret_access_key")
 
       # The first section that shows a secret names it.
       assert names["openai_api_key"] == "OpenAI key"
@@ -1985,10 +2218,108 @@ defmodule FermixCore.Management.SettingsTest do
     end
   end
 
+  # M97 §4, §8.2: the computer_history section is this machine's (whether it
+  # records, which apps, whether it makes its own notes). The home's route
+  # and grants stay in config.toml, with no row, so a write here never
+  # reaches them; and the switch's footer says what is true on this machine.
+  describe "computer history, this machine's section" do
+    test "a Mac with no server names the provider, and no server", %{home: home} do
+      footer = history_footer([summarizer: "anthropic"], home, on_server?: false)
+
+      assert footer =~ "summarized by Anthropic, and Fermix keeps the summary."
+      assert footer =~ "for 48 hours"
+      refute footer =~ "server"
+      refute footer =~ "all your computers"
+    end
+
+    test "a home with Always On in use says the sitting goes to the server", %{home: home} do
+      footer = history_footer([summarizer: "anthropic"], home, on_server?: true)
+
+      assert footer =~ "each finished sitting is sent to your Fermix server"
+      assert footer =~ "Summaries from all your computers can be recalled in chat."
+      refute footer =~ "Anthropic"
+    end
+
+    test "the summarizer row reads this machine's summarizer in force", %{home: home} do
+      assert summarizer_value([machine_summarizer: "local", summarizer: "default"], home) ==
+               "local"
+
+      assert summarizer_value([summarizer: "default"], home) == "default_provider"
+      assert summarizer_value([], home) == "default_provider"
+    end
+
+    # M97 §4: the machine file's local summarizer decides over a different one
+    # in config.toml, and the row says so; where both agree, nothing is said.
+    test "the summarizer row says when this Mac's machine file decides over config.toml", %{
+      home: home
+    } do
+      shadowed = summarizer_row([machine_summarizer: "local", summarizer: "anthropic"], home)
+      assert shadowed["value"] == "local"
+
+      assert shadowed["footer"] ==
+               ~s(This Mac's `machine.toml` says `summarizer = "local"`, so its notes are made ) <>
+                 "here and the summarizer in `config.toml` is not used while that line is there."
+
+      assert summarizer_row([machine_summarizer: "local", summarizer: "local"], home)["footer"] ==
+               nil
+
+      assert summarizer_row([machine_summarizer: "local"], home)["footer"] == nil
+    end
+
+    test "a write reaches this machine's keys alone, and the home's stay", %{home: home} do
+      Application.put_env(:fermix_core, :computer_history,
+        enabled: false,
+        apps: ["com.example.Notes"],
+        summarizer: :anthropic,
+        remote_summaries: [:anthropic]
+      )
+
+      assert {:ok, _result} =
+               Settings.apply("computer_history", %{"computer_history_enabled" => true})
+
+      machine = File.read!(Path.join(home, "machine.toml"))
+      config = File.read!(Path.join(home, "config.toml"))
+
+      [_before, own] = String.split(machine, "[fermix_core.computer_history]\n")
+      assert own =~ "enabled = true"
+      assert own =~ ~s(apps = ["com.example.Notes"])
+      refute machine =~ "remote_summaries"
+      refute machine =~ "summarizer"
+      assert config =~ ~s([fermix_core.computer_history]\nsummarizer = "anthropic")
+      assert config =~ ~s(remote_summaries = ["anthropic"])
+      refute config =~ "com.example.Notes"
+    end
+  end
+
+  defp history_rows(block, home, promise) do
+    snapshot = %{fermix_core: [computer_history: block]}
+    promise = [home: home, os: :macos] ++ promise
+
+    assert {:ok, %{"rows" => rows}} =
+             Settings.get("computer_history", snapshot: snapshot, promise: promise)
+
+    rows
+  end
+
+  defp history_footer(block, home, promise) do
+    rows = history_rows(block, home, promise)
+    Enum.find(rows, &(&1["key"] == "computer_history_enabled"))["footer"]
+  end
+
+  defp summarizer_value(block, home), do: summarizer_row(block, home)["value"]
+
+  defp summarizer_row(block, home) do
+    rows = history_rows(block, home, on_server?: false)
+    Enum.find(rows, &(&1["key"] == "computer_history_summarizer"))
+  end
+
   describe "the save then load round trip" do
     test "every section a write touches survives being written and read back", %{home: home} do
       seed_normalized_app_env()
 
+      # This computer's own settings are written by their own section; a write
+      # of another leaves them as the machine file holds them (M97 §4).
+      assert {:ok, _result} = Settings.apply("sandbox", %{"sandbox_mode" => "strict"})
       assert {:ok, _result} = Settings.apply("memory", %{"review_interval_hours" => 6})
       assert File.exists?(Path.join(home, "config.toml"))
 
@@ -2001,6 +2332,38 @@ defmodule FermixCore.Management.SettingsTest do
       assert core[:transcription][:backend] == "deepgram"
       assert Map.get(reloaded, :sandbox).mode == :strict
       assert core[:realtime][:voice] == "cedar"
+    end
+
+    # M97 §4, §7.2: a write of one section writes exactly the machine tables
+    # it changed. The machine file is the truth for every other: a table
+    # written to the file alone (`ConfigStore.put_machine_table/3`, as a
+    # switch or a history off is) is never written back from what this engine
+    # last loaded, and what runs follows the file.
+    test "a write of another section never rewrites this computer's settings", %{home: home} do
+      Application.put_env(:fermix_core, :computer,
+        enabled: true,
+        reviewed: true,
+        files_and_shell: true
+      )
+
+      assert {:ok, _result} = Settings.apply("sandbox", %{"sandbox_mode" => "strict"})
+
+      :ok =
+        ConfigStore.put_machine_table(home, "fermix_core.computer", [
+          {"enabled", "false"},
+          {"reviewed", "true"},
+          {"files_and_shell", "true"}
+        ])
+
+      Application.put_env(:fermix_core, :sandbox, SandboxConfig.normalize(%{mode: :open}))
+      assert {:ok, _result} = Settings.apply("memory", %{"review_interval_hours" => 6})
+
+      assert {:ok, reloaded} = ConfigStore.load_runtime_config()
+      assert Keyword.fetch!(reloaded.fermix_core[:computer], :enabled) == false
+      assert Map.get(reloaded, :sandbox).mode == :strict
+      assert reloaded.fermix_core[:memory][:review_interval_hours] == 6
+      assert Keyword.fetch!(Application.get_env(:fermix_core, :computer), :enabled) == false
+      assert Application.get_env(:fermix_core, :sandbox).mode == :strict
     end
 
     # The phone block normalizes its mode to an atom and carries a push table;
@@ -2274,6 +2637,11 @@ defmodule FermixCore.Management.SettingsTest do
   # The phone channel's switch as settings call it, without starting anything.
   defp switched(on?) do
     send(self(), {:mobile_switch, on?})
+    :ok
+  end
+
+  defp accessories_switched(on?) do
+    send(self(), {:accessories_switch, on?})
     :ok
   end
 

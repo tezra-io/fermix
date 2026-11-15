@@ -1,0 +1,126 @@
+# What a plan depends on: when the owner asks Fermix to plan or do something,
+# the reply names in a line the one or two things the outcome depends on that
+# the owner did not mention, and neither acts on them unasked nor invents their
+# details (the working principle in FERMIX.md, "Verify, Don't Guess"). Both
+# failure classes are measured: under-reach (doing only what was literally
+# asked when the plan plainly depends on something unsaid) and over-reach
+# (inventing the missing piece, acting on it, or padding a simple request with
+# considerations it does not need).
+#
+# The cases are real requests with something material left unsaid, and one
+# control with nothing material left unsaid. The rubrics state requirements a
+# judge cannot invert; no gate encodes wording. Each case cleans up what it
+# made, and each writes memory.db (a trip or a list), so the suite is
+# isolated_mutation. Every name, place and date is invented.
+suite: what_a_plan_depends_on
+risk: isolated_mutation
+title: "What a plan depends on: the unstated part is named, never invented"
+description: >
+  The owner asks for a weekend plan, a shopping list for a dinner, and a small
+  list change. The reply carries out what was asked, names in a line what the
+  plan depends on that was not said, invents none of it and does not act on it
+  unasked, and adds nothing to a request that needs nothing more.
+defaults:
+  timeout_ms: 180000
+  judge: true
+  expect:
+    status: ok
+    no_tool_errors: false
+
+scenarios:
+  - id: the_unstated_part_is_named
+    risk: isolated_mutation
+    title: "A plan's unstated dependency is named in a line, never invented or acted on"
+    severity: normal
+    tags: [judgment, planning]
+    cases:
+      - id: a_weekend_away
+        turns:
+          - query: >-
+              Plan a weekend in Vell, in Kaldria, for me, Saturday 19 to Sunday 20 June
+              2027: the castle on Saturday morning and the old mill on Sunday.
+            expect:
+              tools_any: [trip_edit]
+              tool_inputs_match_all: ['\bop\W+create\b', "2027-06-19"]
+              reply_urls_in_evidence: true
+          - query: "Thanks, you can remove the Vell weekend trip now."
+            expect:
+              tools_any: [trip_edit]
+              tool_inputs_match_all: ['\bop\W+remove_trip\b']
+        expect:
+          max_cost_usd: 1.5
+        rubric: |
+          1. The first reply confirms a weekend trip with the castle on Saturday 19 June
+             2027 and the old mill on Sunday 20 June 2027.
+          2. The first reply names, in a sentence or two, something the weekend depends
+             on that the owner did not mention, such as where they stay overnight or how
+             they get to Vell.
+          3. The first reply names no hotel, booking, train, flight or route that the
+             tool evidence does not show, and the trip holds no stop for any of them.
+          4. The second reply confirms the trip was removed.
+      - id: a_dinner_for_eight
+        turns:
+          - query: >-
+              I'm hosting eight friends for dinner on Saturday 19 June 2027. Make me a
+              shopping list for a lasagne and a green salad.
+            expect:
+              tools_any: [checklist_edit]
+              reply_urls_in_evidence: true
+          - query: "Thanks, you can remove that shopping list now."
+            expect:
+              tools_any: [checklist_edit]
+        expect:
+          max_cost_usd: 1.5
+        rubric: |
+          1. The first reply confirms a shopping list for a lasagne and a green salad.
+          2. The first reply names, in a sentence or two, something the dinner depends on
+             that the owner did not mention, such as a guest's dietary needs, drinks, or
+             quantities for eight.
+          3. The first reply invents no answer to what it names (no guest's diet or
+             preference the owner did not give), and the list holds nothing beyond the
+             two dishes and what they need unless the reply says why.
+          4. The second reply confirms the list was removed.
+
+  - id: nothing_more_is_needed
+    risk: isolated_mutation
+    title: "A request that depends on nothing unsaid gets no added considerations"
+    severity: normal
+    tags: [judgment, planning]
+    cases:
+      - id: oat_milk_on_the_list
+        turns:
+          - query: "Make me a groceries list with eggs and bread on it."
+            expect:
+              tools_any: [checklist_edit]
+          - query: "Add oat milk to my groceries list."
+            expect:
+              tools_any: [checklist_edit]
+          - query: "Thanks, you can remove the groceries list now."
+            expect:
+              tools_any: [checklist_edit]
+        expect:
+          max_cost_usd: 1.5
+        rubric: |
+          1. The second reply confirms oat milk was added to the groceries list.
+          2. The second reply raises no consideration the owner did not ask about (no
+             brand, quantity, diet, shop or other item), beyond at most a short offer to
+             help further.
+          3. The third reply confirms the list was removed.
+      - id: rename_a_list
+        turns:
+          - query: "Make me a list called Garage with the bike pump and the ladder on it."
+            expect:
+              tools_any: [checklist_edit]
+          - query: "Rename my Garage list to Shed."
+            expect:
+              tools_any: [checklist_edit]
+          - query: "Thanks, you can remove the Shed list now."
+            expect:
+              tools_any: [checklist_edit]
+        expect:
+          max_cost_usd: 1.5
+        rubric: |
+          1. The second reply confirms the list is now called Shed.
+          2. The second reply raises no consideration the owner did not ask about,
+             beyond at most a short offer to help further.
+          3. The third reply confirms the list was removed.

@@ -49,6 +49,10 @@ defmodule FermixCore.Home.Move do
   most 15 minutes ago (`review/3`), so the keychain is not read again before
   the move's capture reads it. A start with no such review makes the report
   itself. Writing the request replaces `.move/`, so a review serves one start.
+  Whatever review it takes, the start asks again whether the notetaker is in
+  a meeting (`MoveReadiness.meeting_in_progress/1`), which can start after
+  the review and which the restart would end before its notes are written
+  (M97 §9.5): on a move, and on a server's move back alike.
 
   The worker starts while the phase is pending (`pending?/1`).
   """
@@ -99,7 +103,9 @@ defmodule FermixCore.Home.Move do
   a candidate the home does not hold (`{:unknown_candidate, id}`), and a move
   whose readiness report blocks (`{:not_ready, sentences}`). `opts`: `:now`,
   `:keep_as_desktop` (default true: this computer becomes a desktop of the new
-  primary; false for a server being replaced, which then serves nothing),
+  primary; false for a server a desktop moves back from, which then serves
+  nothing), `:keep_offers` (what a computer that stays a desktop keeps on for
+  its server, M97 §7.3, recorded in the request as `keep_offers`),
   `:readiness` (the report the owner was just shown, from `review/3`, in
   place of making one), and `FermixCore.Home.MoveReadiness.report/3`'s.
   Writes the request and the role; a failure part-way removes `.move/`.
@@ -112,6 +118,8 @@ defmodule FermixCore.Home.Move do
     now = Keyword.get_lazy(opts, :now, &DateTime.utc_now/0)
     keep_as_desktop = Keyword.get(opts, :keep_as_desktop, true)
     true = is_boolean(keep_as_desktop)
+    keep_offers = Keyword.get(opts, :keep_offers)
+    true = is_nil(keep_offers) or Enum.all?(keep_offers, &is_atom/1)
     recipient = Recipient.public(recipient)
 
     with :ok <- primary(record),
@@ -131,6 +139,8 @@ defmodule FermixCore.Home.Move do
         "keep_as_desktop" => keep_as_desktop
       }
 
+      request = put_keep_offers(request, keep_as_desktop, keep_offers)
+
       with :ok <- write_request(home, request, now) do
         {:ok,
          %{
@@ -141,6 +151,44 @@ defmodule FermixCore.Home.Move do
            keep_as_desktop: keep_as_desktop
          }}
       end
+    end
+  end
+
+  # What this computer keeps on for its server (M97 §7.3), decided as the
+  # move is accepted and written to its switches at the commit: a computer
+  # that stays a desktop only.
+  defp put_keep_offers(request, true, keep) when is_list(keep),
+    do: Map.put(request, "keep_offers", Enum.map(keep, &Atom.to_string/1))
+
+  defp put_keep_offers(request, _keep_as_desktop, _keep), do: request
+
+  @doc """
+  The offers a request keeps on for the server (M97 §7.3), as `start/5`
+  recorded them; nil in a request written before the choice existed. The
+  phase records them too, so they outlast the request.
+  """
+  @spec keep_offers(map()) :: [String.t()] | nil
+  def keep_offers(%{} = request) do
+    case Map.get(request, "keep_offers") do
+      offers when is_list(offers) -> offers
+      _absent -> nil
+    end
+  end
+
+  @doc """
+  What the move undone here kept on for its server (M97 §7.3), as the owner
+  chose it when it started, read from its phase, which outlasts the request
+  an undo removes: the keep a Try again moves with. Nil when no move is undone
+  here, or the undone one recorded no choice.
+  """
+  @spec undone_keep(Path.t()) :: [String.t()] | nil
+  def undone_keep(home) when is_binary(home) do
+    case read_phase(home) do
+      {:ok, %{"phase" => phase} = state} when phase in ~w(aborting undoing aborted) ->
+        keep_offers(state)
+
+      _none_undone ->
+        nil
     end
   end
 
@@ -515,16 +563,25 @@ defmodule FermixCore.Home.Move do
   end
 
   # The review the owner was just shown is the gate as it was shown, so the
-  # keychain is not read again before the capture reads it.
+  # keychain is not read again before the capture reads it. A meeting the
+  # notetaker joined after it is asked about now (M97 §9.5): the restart
+  # would end it before its notes are written.
   defp ready(home, candidate, opts) do
-    report =
-      Keyword.get_lazy(opts, :readiness, fn -> MoveReadiness.report(home, candidate, opts) end)
+    blocks =
+      case Keyword.fetch(opts, :readiness) do
+        {:ok, report} -> MoveReadiness.blocks(report) ++ meeting_blocks(opts)
+        :error -> MoveReadiness.blocks(MoveReadiness.report(home, candidate, opts))
+      end
 
-    case MoveReadiness.blocks(report) do
+    case blocks do
       [] -> :ok
       sentences -> {:error, {:not_ready, sentences}}
     end
   end
+
+  defp meeting_blocks(opts),
+    do:
+      for(%{status: :block} = item <- MoveReadiness.meeting_in_progress(opts), do: item.sentence)
 
   defp primary(%{role: :primary}), do: :ok
   defp primary(%{role: role}), do: {:error, {:not_primary, role}}
@@ -567,11 +624,11 @@ defmodule FermixCore.Home.Move do
              put_phase(
                home,
                "requested",
-               %{
+               Map.merge(Map.take(request, ["keep_offers"]), %{
                  "move_id" => request["move_id"],
                  "candidate" => request["candidate"]["name"],
                  "keep_as_desktop" => request["keep_as_desktop"]
-               },
+               }),
                now
              ) do
         ConfigStore.put_engine_role(home, :device)

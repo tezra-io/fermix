@@ -1,14 +1,28 @@
 """Loopback fixture server the RUNNERS own, plus the recorded-state contract.
 
 Runner contract, the lifecycle `aimlib/server.py` already models: build one
-`FixtureServer`, `start()` (binds `127.0.0.1:0`, returns the OS-assigned port,
-runs a daemon thread), `bind(token)` once per case attempt, put the binding's
-`url` into the turn's prompt, read `binding.state()` when the turn is graded, and
-`stop()` in a finally. Loopback HTTP is the only page transport the browser
-policy allows without configuration (`file://` and `data:` are hard-blocked) and
-it is a secure context, which the WebMCP API requires; the ephemeral port keeps
-concurrent runs from colliding and the per-attempt token keeps concurrent trials
-and retries from reading each other's state.
+`FixtureServer`, `start(home_port(home))` (binds `127.0.0.1:<port>`, returns the
+bound port, runs a daemon thread), `bind(token)` once per case attempt, put the
+binding's `url` into the turn's prompt, read `binding.state()` when the turn is
+graded, and `stop()` in a finally. Loopback HTTP is the only page transport the
+browser policy allows without configuration (`file://` and `data:` are
+hard-blocked) and it is a secure context, which the WebMCP API requires; the
+per-attempt token keeps concurrent trials and retries from reading each other's
+state.
+
+WHICH PORT. An eval home seeded by `seed_capability_home.py` records a free port
+in `eval-fixtures/fixture_server.json` (`{"port": N}`, `FIXTURE_MANIFEST`), and
+`capability-daemon.sh` starts that home's daemon with
+`FERMIX_EVAL_FIXTURE_ORIGIN=http://127.0.0.1:N`: the one origin a development
+build's `web_fetch` reads past its private-address guard, and only while the
+running home's manifest records that same port
+(`FermixCore.Tools.WebFetch.EvalFixture`). So a run against that home binds
+exactly that port, and a port something else holds (another run against the
+same home, say) fails the start loudly rather than serving the pages where
+`web_fetch` cannot read them. A home with no manifest (the dev home, or one
+seeded before the manifest existed) binds `127.0.0.1:0`, an ephemeral port only
+the browser can read, as its daemon runs without the variable. One run per
+eval home serves pages at a time; runs against different homes never collide.
 
 `aimlib/server.py` stays as it is: it serves generated aim batches over exactly
 two routes and is a different job.
@@ -61,6 +75,9 @@ from urllib.parse import urlparse
 # The run placeholder a suite writes instead of a literal port (suites/SCHEMA.md).
 # Expands to this server's per-attempt base URL, `http://127.0.0.1:<port>/s/<token>`.
 FIXTURE_URL_PLACEHOLDER = "__EVAL_FIXTURE_URL__"
+# The eval home's record of the port its runners bind and its daemon's web_fetch
+# reads (WHICH PORT above), under the home; the seeder writes it.
+FIXTURE_MANIFEST = os.path.join("eval-fixtures", "fixture_server.json")
 
 BIND_HOST = "127.0.0.1"
 # The derived key the SERVER writes: the ordered list of reported keys. A page
@@ -155,10 +172,17 @@ class FixtureServer:
 
     # --- lifecycle ---
 
-    def start(self) -> int:
+    def start(self, port: int = 0) -> int:
+        """Bind `127.0.0.1:<port>` (0: an ephemeral one) and serve. A fixed port
+        that cannot be bound is a ServerError naming it, never another port."""
         if self._httpd is not None:
             raise ServerError("fixture server already started")
-        self._httpd = ThreadingHTTPServer((BIND_HOST, 0), _make_handler(self))
+        if isinstance(port, bool) or not isinstance(port, int) or not 0 <= port <= 65535:
+            raise ServerError(f"fixture server port must be 0..65535, got {port!r}")
+        try:
+            self._httpd = ThreadingHTTPServer((BIND_HOST, port), _make_handler(self))
+        except OSError as exc:
+            raise ServerError(_bind_failure(port, exc)) from exc
         self._port = self._httpd.server_address[1]
         self._thread = threading.Thread(target=self._httpd.serve_forever,
                                         name="eval-fixture-http", daemon=True)
@@ -299,6 +323,36 @@ class FixtureServer:
     def token_exists(self, token: str) -> bool:
         with self._lock:
             return token in self._tokens
+
+
+def home_port(home: str) -> int:
+    """The port a run against `home` binds: the one its `FIXTURE_MANIFEST` records,
+    or 0 (ephemeral) for a home with none. A manifest that is there but is not
+    `{"port": <1..65535>}` is a ServerError: its daemon would read an origin the
+    runner cannot match."""
+    path = os.path.join(os.path.expanduser(home), FIXTURE_MANIFEST)
+    if not os.path.exists(path):
+        return 0
+    try:
+        with open(path, encoding="utf-8") as fh:
+            manifest = json.load(fh)
+    except (OSError, ValueError) as exc:
+        raise ServerError(f"cannot read the fixture manifest {path}: {exc}") from exc
+    port = manifest.get("port") if isinstance(manifest, dict) else None
+    if isinstance(port, bool) or not isinstance(port, int) or not 1 <= port <= 65535:
+        raise ServerError(f"the fixture manifest {path} must be {{\"port\": <1..65535>}}, "
+                          f"got {manifest!r}; reseed the home (capability-daemon.sh up)")
+    return port
+
+
+def _bind_failure(port: int, exc: OSError) -> str:
+    reason = exc.strerror or str(exc)
+    if port == 0:
+        return f"cannot bind {BIND_HOST}:0: {reason}"
+    return (f"cannot bind {BIND_HOST}:{port}, the port the eval home's {FIXTURE_MANIFEST} "
+            f"names and the one origin its daemon's web_fetch reads: {reason}. Free that "
+            "port (is another run using this home?) or reseed the home with its daemon "
+            "down (capability-daemon.sh up picks a new one)")
 
 
 def _load_documents(pages_dir: str) -> dict[str, tuple[str, bytes]]:

@@ -110,17 +110,24 @@ defmodule FermixCore.Browser.Capabilities do
     handover: true
   }
 
+  # A profile on one of the home's computers, seen from the server (M97
+  # §6.4): which browser serves it is decided there, and that computer's own
+  # profile refuses what its mode cannot do, so nothing is withheld here.
+  @computer Map.new(Map.keys(@managed), &{&1, true})
+
   @doc """
   The capabilities of a profile mode.
 
   `:managed`, `:existing_session` and `:remote_cdp` all drive a whole browser
   over one CDP endpoint and differ only in who launched it, which decides
-  whose tabs they are.
+  whose tabs they are. `:computer` is a profile on one of the home's
+  computers, which decides there.
   """
   @spec for_mode(atom()) :: t()
   def for_mode(:managed), do: @managed
   def for_mode(:attached_tab), do: @attached_tab
   def for_mode(:fermix_app), do: @fermix_app
+  def for_mode(:computer), do: @computer
   def for_mode(mode) when is_atom(mode), do: @attached_browser
 
   @doc "Whether `capability` is available in `mode`."

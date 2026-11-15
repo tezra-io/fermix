@@ -72,13 +72,16 @@ defmodule FermixCore.Management.SetupState do
   # `gating` is on the wire because the app routes on *which* failure gates and
   # `status` alone cannot say which. `detail_key` is the closed-set copy key,
   # deliberately not `component`, which is an open string that collapses three
-  # distinct provider causes into one value.
+  # distinct provider causes into one value. `sentence` is the engine's own
+  # where only the engine has the words (which Mac carries Messages), null on
+  # every other row.
   defp project_failure(failure) do
     %{
       "component" => failure.component,
       "gating" => failure.gating,
       "pane" => failure.pane,
-      "detail_key" => failure.detail_key
+      "detail_key" => failure.detail_key,
+      "sentence" => Readiness.sentence(failure)
     }
   end
 
@@ -258,7 +261,10 @@ defmodule FermixCore.Management.SetupState do
       "computer_history" => %{
         "enabled" => history_enabled?,
         "installed" => installed?,
-        "ready" => history_enabled? and installed? and ComputerHistory.macos?()
+        "ready" =>
+          history_enabled? and installed? and
+            source(opts, :history_recorder?, &ComputerHistory.recorder?/0) and
+            source(opts, :history_store_open?, &ComputerHistory.store_open?/0)
       }
     }
   end

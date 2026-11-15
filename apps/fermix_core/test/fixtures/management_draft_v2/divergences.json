@@ -943,6 +943,18 @@
       "why": "M72 section 14 makes place search's backend a choice (Apple Maps in the Fermix Mac app, Brave in the Homebrew and Linux builds) after the draft was written, and publishes it in this section after the web backend. It is the ordinary choice row with the options this host can run, so the app draws it through the descriptor form with no Swift work; the Brave key row now stands only while web or place search uses Brave."
     },
     {
+      "method": "settings.get:harness",
+      "field": "rows:harness_approved",
+      "kind": "draft_only",
+      "why": "M98 D5: whether coding agents may run is each machine's own setting, in its machine.toml, so the consent row left the home's harness section for harness_machine. The harness section keeps the preferred tool. The app's coding pane draws every section of the coding pane and specialises the consent row by its key, so it follows with no Swift change; only a test that looks for the row in harness moves."
+    },
+    {
+      "method": "settings.get:harness_machine",
+      "field": "rows:harness_approved",
+      "kind": "engine_only",
+      "why": "M98 D5: the section the draft predates, titled This Mac or This computer under the coding pane, before harness, published wherever coding agents run and never on a computer whose home is on its server. Its one row is the consent toggle the draft drew in harness, labelled for the machine that answers."
+    },
+    {
       "method": "plugins.list",
       "field": "oauth_clients[].client_id",
       "kind": "engine_only",
@@ -1009,6 +1021,12 @@
       "why": "The meetbot row publishes its Google sign-in as a boolean beside the sentence it also carries, null while the notetaker is absent. A client that hides the sign-in control once the account is in place switches on this fact rather than on the words of the sentence it renders, which the app's rules forbid. The draft predates the row; the app adds the field when it re-vendors."
     },
     {
+      "method": "setup.detect",
+      "field": "results[].available",
+      "kind": "engine_only",
+      "why": "The meetbot row says whether Google Meet can run on the machine that answers: false on an Always On server (M97 D24), whose detail is then the sentence every surface says. The Meetings pane draws Google Meet as unavailable before anything is pressed, where before it learned it only from a refused job whose code it shares with a notetaker not installed. The draft predates the row; the app adds the field when it re-vendors."
+    },
+    {
       "method": "overview.get",
       "field": "realtime.engine",
       "kind": "engine_only",
@@ -1061,6 +1079,12 @@
       "field": "unavailable:capability,sentence",
       "kind": "engine_only",
       "why": "unavailable is illustrated twice: once with details {capability} for a capability that could not answer, and once with details {capability, sentence} for the phone channel refusing a pairing or forgetting decision from a caller that is not the owner. The sentence is what tells that refusal from a channel that is not running; without it the CLI sent the operator to doctor, which reported the channel healthy. The draft predates the phone pairing surface and drew only the {capability} case."
+    },
+    {
+      "method": "(errors)",
+      "field": "unavailable:capability,confirm,sentence",
+      "kind": "engine_only",
+      "why": "M97 §3.3: a refusal that is a question carries details {capability, sentence, confirm: true}, removing the one computer that keeps the server's backups and disconnecting a computer whose server cannot be told, where the same request with confirmed true is the act, so a surface asks the owner instead of showing an error. The draft predates computers; a client that does not read confirm shows the sentence as before."
     },
     {
       "method": "(schema)",
@@ -2548,7 +2572,7 @@
       "method": "(schema)",
       "field": "methods:home.enroll.withdraw",
       "kind": "engine_only",
-      "why": "M75 lean v1: a desktop replacing the Always On server Fermix created asks that server to release the 24-hour code it opened for the new one when the new server will not exist or is deleted, so a copied code can open again. The draft predates the home family; the method is minimum version 2 and additive, and a client never calls it: the desktop's own engine forwards it."
+      "why": "M75 lean v1: a desktop cancelling its move back asks its server to release the copied code it opened. The draft predates the home family; the method is minimum version 2 and additive, and a client never calls it: the desktop's own engine forwards it."
     },
     {
       "method": "(schema)",
@@ -2648,49 +2672,7 @@
     },
     {
       "method": "settings.get:snapshots",
-      "field": "rows:snapshot_s3_access_key_id",
-      "kind": "engine_only",
-      "why": "M75: the snapshots section (pane always_on) publishes where and how often the primary keeps its encrypted snapshots, and the two S3 access-key secrets. The draft predates it; the rows are the ordinary row shape."
-    },
-    {
-      "method": "settings.get:snapshots",
-      "field": "rows:snapshot_s3_secret_access_key",
-      "kind": "engine_only",
-      "why": "M75: the snapshots section (pane always_on) publishes where and how often the primary keeps its encrypted snapshots, and the two S3 access-key secrets. The draft predates it; the rows are the ordinary row shape."
-    },
-    {
-      "method": "settings.get:snapshots",
       "field": "rows:snapshots_interval_hours",
-      "kind": "engine_only",
-      "why": "M75: the snapshots section (pane always_on) publishes where and how often the primary keeps its encrypted snapshots, and the two S3 access-key secrets. The draft predates it; the rows are the ordinary row shape."
-    },
-    {
-      "method": "settings.get:snapshots",
-      "field": "rows:snapshots_recipient",
-      "kind": "engine_only",
-      "why": "M75: the snapshots section (pane always_on) publishes where and how often the primary keeps its encrypted snapshots, and the two S3 access-key secrets. The draft predates it; the rows are the ordinary row shape."
-    },
-    {
-      "method": "settings.get:snapshots",
-      "field": "rows:snapshots_s3_bucket",
-      "kind": "engine_only",
-      "why": "M75: the snapshots section (pane always_on) publishes where and how often the primary keeps its encrypted snapshots, and the two S3 access-key secrets. The draft predates it; the rows are the ordinary row shape."
-    },
-    {
-      "method": "settings.get:snapshots",
-      "field": "rows:snapshots_s3_endpoint",
-      "kind": "engine_only",
-      "why": "M75: the snapshots section (pane always_on) publishes where and how often the primary keeps its encrypted snapshots, and the two S3 access-key secrets. The draft predates it; the rows are the ordinary row shape."
-    },
-    {
-      "method": "settings.get:snapshots",
-      "field": "rows:snapshots_s3_prefix",
-      "kind": "engine_only",
-      "why": "M75: the snapshots section (pane always_on) publishes where and how often the primary keeps its encrypted snapshots, and the two S3 access-key secrets. The draft predates it; the rows are the ordinary row shape."
-    },
-    {
-      "method": "settings.get:snapshots",
-      "field": "rows:snapshots_s3_region",
       "kind": "engine_only",
       "why": "M75: the snapshots section (pane always_on) publishes where and how often the primary keeps its encrypted snapshots, and the two S3 access-key secrets. The draft predates it; the rows are the ordinary row shape."
     },
@@ -2722,13 +2704,97 @@
       "method": "home.move.start",
       "field": "params:keep_as_desktop",
       "kind": "engine_only",
-      "why": "M75: replacing the server runs through the same move; false keeps the replaced server as nothing rather than a desktop of the new primary. Optional, true unless said, so a client built against the draft moves as before."
+      "why": "M75: a move back runs through the same move; false keeps the server a desktop moves back from as nothing rather than a desktop of the new primary. Optional, true unless said, so a client built against the draft moves as before."
     },
     {
       "method": "settings.sections",
       "field": "primary_missing",
       "kind": "engine_only",
       "why": "M75: on a linked desktop the section list composes this computer's own sections with the primary's, and this sentence says why the primary's part is missing while it cannot be reached; null on every other engine, so a client built against the draft reads the same list."
+    },
+    {
+      "method": "job.list",
+      "field": "primary_missing",
+      "kind": "engine_only",
+      "why": "M97 D28: on a linked computer the job list composes the server's jobs with the ones this computer started itself, and this sentence says why the server's part is missing while it cannot be reached; null on every other engine, so a client built against the draft reads the same list."
+    },
+    {
+      "method": "auth.import.start",
+      "field": "target",
+      "kind": "engine_only",
+      "why": "The job view names what an install installs, stored when it starts: a capability_install's target as capabilities.install.start was given it, browser for a browser_install, null for every other kind. Two app rows start a capability_install, and a linked computer's job.list adds its own installs to the server's, so a client finds its own row's job by kind and target. Always present; a client built against the draft ignores it."
+    },
+    {
+      "method": "auth.start",
+      "field": "target",
+      "kind": "engine_only",
+      "why": "The job view names what an install installs, stored when it starts: a capability_install's target as capabilities.install.start was given it, browser for a browser_install, null for every other kind. Two app rows start a capability_install, and a linked computer's job.list adds its own installs to the server's, so a client finds its own row's job by kind and target. Always present; a client built against the draft ignores it."
+    },
+    {
+      "method": "capabilities.install.start",
+      "field": "target",
+      "kind": "engine_only",
+      "why": "The job view names what an install installs, stored when it starts: a capability_install's target as capabilities.install.start was given it, browser for a browser_install, null for every other kind. Two app rows start a capability_install, and a linked computer's job.list adds its own installs to the server's, so a client finds its own row's job by kind and target. Always present; a client built against the draft ignores it."
+    },
+    {
+      "method": "computer_use.grant.start",
+      "field": "target",
+      "kind": "engine_only",
+      "why": "The job view names what an install installs, stored when it starts: a capability_install's target as capabilities.install.start was given it, browser for a browser_install, null for every other kind. Two app rows start a capability_install, and a linked computer's job.list adds its own installs to the server's, so a client finds its own row's job by kind and target. Always present; a client built against the draft ignores it."
+    },
+    {
+      "method": "job.cancel",
+      "field": "target",
+      "kind": "engine_only",
+      "why": "The job view names what an install installs, stored when it starts: a capability_install's target as capabilities.install.start was given it, browser for a browser_install, null for every other kind. Two app rows start a capability_install, and a linked computer's job.list adds its own installs to the server's, so a client finds its own row's job by kind and target. Always present; a client built against the draft ignores it."
+    },
+    {
+      "method": "job.get",
+      "field": "target",
+      "kind": "engine_only",
+      "why": "The job view names what an install installs, stored when it starts: a capability_install's target as capabilities.install.start was given it, browser for a browser_install, null for every other kind. Two app rows start a capability_install, and a linked computer's job.list adds its own installs to the server's, so a client finds its own row's job by kind and target. Always present; a client built against the draft ignores it."
+    },
+    {
+      "method": "job.list",
+      "field": "jobs[].target",
+      "kind": "engine_only",
+      "why": "The job view names what an install installs, stored when it starts: a capability_install's target as capabilities.install.start was given it, browser for a browser_install, null for every other kind. Two app rows start a capability_install, and a linked computer's job.list adds its own installs to the server's, so a client finds its own row's job by kind and target. Always present; a client built against the draft ignores it."
+    },
+    {
+      "method": "meetings.signin.start",
+      "field": "target",
+      "kind": "engine_only",
+      "why": "The job view names what an install installs, stored when it starts: a capability_install's target as capabilities.install.start was given it, browser for a browser_install, null for every other kind. Two app rows start a capability_install, and a linked computer's job.list adds its own installs to the server's, so a client finds its own row's job by kind and target. Always present; a client built against the draft ignores it."
+    },
+    {
+      "method": "plugins.check.start",
+      "field": "target",
+      "kind": "engine_only",
+      "why": "The job view names what an install installs, stored when it starts: a capability_install's target as capabilities.install.start was given it, browser for a browser_install, null for every other kind. Two app rows start a capability_install, and a linked computer's job.list adds its own installs to the server's, so a client finds its own row's job by kind and target. Always present; a client built against the draft ignores it."
+    },
+    {
+      "method": "plugins.install.start",
+      "field": "target",
+      "kind": "engine_only",
+      "why": "The job view names what an install installs, stored when it starts: a capability_install's target as capabilities.install.start was given it, browser for a browser_install, null for every other kind. Two app rows start a capability_install, and a linked computer's job.list adds its own installs to the server's, so a client finds its own row's job by kind and target. Always present; a client built against the draft ignores it."
+    },
+    {
+      "method": "plugins.workspace.select.start",
+      "field": "target",
+      "kind": "engine_only",
+      "why": "The job view names what an install installs, stored when it starts: a capability_install's target as capabilities.install.start was given it, browser for a browser_install, null for every other kind. Two app rows start a capability_install, and a linked computer's job.list adds its own installs to the server's, so a client finds its own row's job by kind and target. Always present; a client built against the draft ignores it."
+    },
+    {
+      "method": "plugins.workspaces.discover.start",
+      "field": "target",
+      "kind": "engine_only",
+      "why": "The job view names what an install installs, stored when it starts: a capability_install's target as capabilities.install.start was given it, browser for a browser_install, null for every other kind. Two app rows start a capability_install, and a linked computer's job.list adds its own installs to the server's, so a client finds its own row's job by kind and target. Always present; a client built against the draft ignores it."
+    },
+    {
+      "method": "providers.probe.start",
+      "field": "target",
+      "kind": "engine_only",
+      "why": "The job view names what an install installs, stored when it starts: a capability_install's target as capabilities.install.start was given it, browser for a browser_install, null for every other kind. Two app rows start a capability_install, and a linked computer's job.list adds its own installs to the server's, so a client finds its own row's job by kind and target. Always present; a client built against the draft ignores it."
     },
     {
       "method": "(errors)",
@@ -2744,27 +2810,9 @@
     },
     {
       "method": "(schema)",
-      "field": "job_kinds:home_provision",
+      "field": "job_kinds:home_restore",
       "kind": "engine_only",
-      "why": "M75 lean v1: creating, powering and deleting the Always On server on Hetzner wait on Hetzner's actions, so each is a job of the kind home_provision, with the phases checking, firewall, server, starting, power and deleting. The draft predates it; a closed decoder that has never heard the kind refuses the job view rather than ignoring it, so the app adds it when it re-vendors."
-    },
-    {
-      "method": "(schema)",
-      "field": "methods:home.provision.options",
-      "kind": "engine_only",
-      "why": "M75 lean v1 adds the Always On provisioner (Fermix creates the owner's server on Hetzner) after the draft was written, so the draft publishes no home.provision.* method. The one left on the wire, home.provision.options (no params), is minimum version 2 and additive: a client built against the draft never calls it, and the app re-vendors this export before it draws the Always On pane."
-    },
-    {
-      "method": "(schema)",
-      "field": "minimum_versions:home.provision.options=2",
-      "kind": "engine_only",
-      "why": "M75 lean v1: every home.provision.* method is published with minimum version 2 in the whole-table minimum versions, as every v2 method is. The draft predates the provisioner, so its table has no entry for it; the addition is additive and needs no protocol bump."
-    },
-    {
-      "method": "hello",
-      "field": "capabilities.minimum_versions.home.provision.options",
-      "kind": "engine_only",
-      "why": "M75 lean v1: hello publishes every method this daemon serves with its minimum version, the provisioner included. The draft predates it; a client ignores a method it does not know."
+      "why": "M75: Always On's Restore here, the computer a home left restoring its own copy of the server's snapshots once the owner confirmed the server is deleted or stopped, runs as a job of the kind home_restore, with no phases. The draft predates it; a closed decoder that has never heard the kind refuses the job view rather than ignoring it, so the app adds it when it re-vendors."
     },
     {
       "method": "home.status",
@@ -2777,24 +2825,6 @@
       "field": "params:wait_ms",
       "kind": "engine_only",
       "why": "Always On setup 3.3: home.status takes wait_ms, at most 25000, with after: how long the daemon holds the request for the summary's key to move. The draft predates the summary; a request with no params is answered at once as before."
-    },
-    {
-      "method": "job.get",
-      "field": "result.location",
-      "kind": "engine_only",
-      "why": "M75 lean v1: the export illustrates a finished home_provision job, whose flat result names the server Fermix created, its type and its location. The draft illustrates no such job; the result stays the published flat object of public scalars."
-    },
-    {
-      "method": "job.get",
-      "field": "result.server",
-      "kind": "engine_only",
-      "why": "M75 lean v1: the export illustrates a finished home_provision job, whose flat result names the server Fermix created, its type and its location. The draft illustrates no such job; the result stays the published flat object of public scalars."
-    },
-    {
-      "method": "job.get",
-      "field": "result.type",
-      "kind": "engine_only",
-      "why": "M75 lean v1: the export illustrates a finished home_provision job, whose flat result names the server Fermix created, its type and its location. The draft illustrates no such job; the result stays the published flat object of public scalars."
     },
     {
       "method": "(schema)",
@@ -2885,6 +2915,840 @@
       "field": "rows[].status",
       "kind": "engine_only",
       "why": "Each Linux row's status is the doctor's: ok, warn, fail or not_applicable. A Linux answer carries the rows fermix doctor prints after its computer use row, from the same producers, so the pane and doctor read one source. Optional within protocol 2; the draft predates the Linux helper, and a Mac answer never carries them."
+    },
+    {
+      "method": "(errors)",
+      "field": "unavailable:capability,code,sentence",
+      "kind": "engine_only",
+      "why": "M91 E3: a refused accessories.call.start answers unavailable with details {capability, code, sentence}: code is the refusal's own (call_in_progress, voice_disabled, missing_key, restart_required, power_too_low, not_attached), which the app keys its next action on, and sentence is the daemon's. The draft predates the accessory surface."
+    },
+    {
+      "method": "(schema)",
+      "field": "methods:accessories.calibrate",
+      "kind": "engine_only",
+      "why": "M91 E3: the accessories.* methods (a StackChan robot wired to this Mac) postdate the draft. They are published under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls them; the app finds them in hello's methods and minimum versions."
+    },
+    {
+      "method": "(schema)",
+      "field": "methods:accessories.call.end",
+      "kind": "engine_only",
+      "why": "M91 E3: the accessories.* methods (a StackChan robot wired to this Mac) postdate the draft. They are published under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls them; the app finds them in hello's methods and minimum versions."
+    },
+    {
+      "method": "(schema)",
+      "field": "methods:accessories.call.interrupt",
+      "kind": "engine_only",
+      "why": "M91 E3: the accessories.* methods (a StackChan robot wired to this Mac) postdate the draft. They are published under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls them; the app finds them in hello's methods and minimum versions."
+    },
+    {
+      "method": "(schema)",
+      "field": "methods:accessories.call.mute",
+      "kind": "engine_only",
+      "why": "M91 E3: the accessories.* methods (a StackChan robot wired to this Mac) postdate the draft. They are published under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls them; the app finds them in hello's methods and minimum versions."
+    },
+    {
+      "method": "(schema)",
+      "field": "methods:accessories.call.start",
+      "kind": "engine_only",
+      "why": "M91 E3: the accessories.* methods (a StackChan robot wired to this Mac) postdate the draft. They are published under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls them; the app finds them in hello's methods and minimum versions."
+    },
+    {
+      "method": "(schema)",
+      "field": "methods:accessories.call.task.cancel",
+      "kind": "engine_only",
+      "why": "M91 E3: the accessories.* methods (a StackChan robot wired to this Mac) postdate the draft. They are published under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls them; the app finds them in hello's methods and minimum versions."
+    },
+    {
+      "method": "(schema)",
+      "field": "methods:accessories.check.start",
+      "kind": "engine_only",
+      "why": "M91 E3: the accessories.* methods (a StackChan robot wired to this Mac) postdate the draft. They are published under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls them; the app finds them in hello's methods and minimum versions."
+    },
+    {
+      "method": "(schema)",
+      "field": "methods:accessories.check.stop",
+      "kind": "engine_only",
+      "why": "M91 E3: the accessories.* methods (a StackChan robot wired to this Mac) postdate the draft. They are published under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls them; the app finds them in hello's methods and minimum versions."
+    },
+    {
+      "method": "(schema)",
+      "field": "methods:accessories.forget",
+      "kind": "engine_only",
+      "why": "M91 E3: the accessories.* methods (a StackChan robot wired to this Mac) postdate the draft. They are published under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls them; the app finds them in hello's methods and minimum versions."
+    },
+    {
+      "method": "(schema)",
+      "field": "methods:accessories.pair.begin",
+      "kind": "engine_only",
+      "why": "M91 E3: the accessories.* methods (a StackChan robot wired to this Mac) postdate the draft. They are published under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls them; the app finds them in hello's methods and minimum versions."
+    },
+    {
+      "method": "(schema)",
+      "field": "methods:accessories.pair.cancel",
+      "kind": "engine_only",
+      "why": "M91 E3: the accessories.* methods (a StackChan robot wired to this Mac) postdate the draft. They are published under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls them; the app finds them in hello's methods and minimum versions."
+    },
+    {
+      "method": "(schema)",
+      "field": "methods:accessories.pair.decide",
+      "kind": "engine_only",
+      "why": "M91 E3: the accessories.* methods (a StackChan robot wired to this Mac) postdate the draft. They are published under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls them; the app finds them in hello's methods and minimum versions."
+    },
+    {
+      "method": "(schema)",
+      "field": "methods:accessories.pair.start",
+      "kind": "engine_only",
+      "why": "M91 E3: the accessories.* methods (a StackChan robot wired to this Mac) postdate the draft. They are published under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls them; the app finds them in hello's methods and minimum versions."
+    },
+    {
+      "method": "(schema)",
+      "field": "methods:accessories.reconnect",
+      "kind": "engine_only",
+      "why": "M91 E3: the accessories.* methods (a StackChan robot wired to this Mac) postdate the draft. They are published under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls them; the app finds them in hello's methods and minimum versions."
+    },
+    {
+      "method": "(schema)",
+      "field": "methods:accessories.release",
+      "kind": "engine_only",
+      "why": "M91 E3: the accessories.* methods (a StackChan robot wired to this Mac) postdate the draft. They are published under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls them; the app finds them in hello's methods and minimum versions."
+    },
+    {
+      "method": "(schema)",
+      "field": "methods:accessories.retry",
+      "kind": "engine_only",
+      "why": "M91 E3: the accessories.* methods (a StackChan robot wired to this Mac) postdate the draft. They are published under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls them; the app finds them in hello's methods and minimum versions."
+    },
+    {
+      "method": "(schema)",
+      "field": "methods:accessories.revoke",
+      "kind": "engine_only",
+      "why": "M91 E3: the accessories.* methods (a StackChan robot wired to this Mac) postdate the draft. They are published under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls them; the app finds them in hello's methods and minimum versions."
+    },
+    {
+      "method": "(schema)",
+      "field": "methods:accessories.set",
+      "kind": "engine_only",
+      "why": "M91 E3: the accessories.* methods (a StackChan robot wired to this Mac) postdate the draft. They are published under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls them; the app finds them in hello's methods and minimum versions."
+    },
+    {
+      "method": "(schema)",
+      "field": "methods:accessories.status",
+      "kind": "engine_only",
+      "why": "M91 E3: the accessories.* methods (a StackChan robot wired to this Mac) postdate the draft. They are published under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls them; the app finds them in hello's methods and minimum versions."
+    },
+    {
+      "method": "(schema)",
+      "field": "methods:accessories.voice_device.set",
+      "kind": "engine_only",
+      "why": "M91 E3: the accessories.* methods (a StackChan robot wired to this Mac) postdate the draft. They are published under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls them; the app finds them in hello's methods and minimum versions."
+    },
+    {
+      "method": "(schema)",
+      "field": "minimum_versions:accessories.calibrate=2",
+      "kind": "engine_only",
+      "why": "M91 E3: the accessories.* methods (a StackChan robot wired to this Mac) postdate the draft. They are published under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls them; the app finds them in hello's methods and minimum versions."
+    },
+    {
+      "method": "(schema)",
+      "field": "minimum_versions:accessories.call.end=2",
+      "kind": "engine_only",
+      "why": "M91 E3: the accessories.* methods (a StackChan robot wired to this Mac) postdate the draft. They are published under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls them; the app finds them in hello's methods and minimum versions."
+    },
+    {
+      "method": "(schema)",
+      "field": "minimum_versions:accessories.call.interrupt=2",
+      "kind": "engine_only",
+      "why": "M91 E3: the accessories.* methods (a StackChan robot wired to this Mac) postdate the draft. They are published under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls them; the app finds them in hello's methods and minimum versions."
+    },
+    {
+      "method": "(schema)",
+      "field": "minimum_versions:accessories.call.mute=2",
+      "kind": "engine_only",
+      "why": "M91 E3: the accessories.* methods (a StackChan robot wired to this Mac) postdate the draft. They are published under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls them; the app finds them in hello's methods and minimum versions."
+    },
+    {
+      "method": "(schema)",
+      "field": "minimum_versions:accessories.call.start=2",
+      "kind": "engine_only",
+      "why": "M91 E3: the accessories.* methods (a StackChan robot wired to this Mac) postdate the draft. They are published under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls them; the app finds them in hello's methods and minimum versions."
+    },
+    {
+      "method": "(schema)",
+      "field": "minimum_versions:accessories.call.task.cancel=2",
+      "kind": "engine_only",
+      "why": "M91 E3: the accessories.* methods (a StackChan robot wired to this Mac) postdate the draft. They are published under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls them; the app finds them in hello's methods and minimum versions."
+    },
+    {
+      "method": "(schema)",
+      "field": "minimum_versions:accessories.check.start=2",
+      "kind": "engine_only",
+      "why": "M91 E3: the accessories.* methods (a StackChan robot wired to this Mac) postdate the draft. They are published under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls them; the app finds them in hello's methods and minimum versions."
+    },
+    {
+      "method": "(schema)",
+      "field": "minimum_versions:accessories.check.stop=2",
+      "kind": "engine_only",
+      "why": "M91 E3: the accessories.* methods (a StackChan robot wired to this Mac) postdate the draft. They are published under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls them; the app finds them in hello's methods and minimum versions."
+    },
+    {
+      "method": "(schema)",
+      "field": "minimum_versions:accessories.forget=2",
+      "kind": "engine_only",
+      "why": "M91 E3: the accessories.* methods (a StackChan robot wired to this Mac) postdate the draft. They are published under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls them; the app finds them in hello's methods and minimum versions."
+    },
+    {
+      "method": "(schema)",
+      "field": "minimum_versions:accessories.pair.begin=2",
+      "kind": "engine_only",
+      "why": "M91 E3: the accessories.* methods (a StackChan robot wired to this Mac) postdate the draft. They are published under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls them; the app finds them in hello's methods and minimum versions."
+    },
+    {
+      "method": "(schema)",
+      "field": "minimum_versions:accessories.pair.cancel=2",
+      "kind": "engine_only",
+      "why": "M91 E3: the accessories.* methods (a StackChan robot wired to this Mac) postdate the draft. They are published under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls them; the app finds them in hello's methods and minimum versions."
+    },
+    {
+      "method": "(schema)",
+      "field": "minimum_versions:accessories.pair.decide=2",
+      "kind": "engine_only",
+      "why": "M91 E3: the accessories.* methods (a StackChan robot wired to this Mac) postdate the draft. They are published under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls them; the app finds them in hello's methods and minimum versions."
+    },
+    {
+      "method": "(schema)",
+      "field": "minimum_versions:accessories.pair.start=2",
+      "kind": "engine_only",
+      "why": "M91 E3: the accessories.* methods (a StackChan robot wired to this Mac) postdate the draft. They are published under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls them; the app finds them in hello's methods and minimum versions."
+    },
+    {
+      "method": "(schema)",
+      "field": "minimum_versions:accessories.reconnect=2",
+      "kind": "engine_only",
+      "why": "M91 E3: the accessories.* methods (a StackChan robot wired to this Mac) postdate the draft. They are published under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls them; the app finds them in hello's methods and minimum versions."
+    },
+    {
+      "method": "(schema)",
+      "field": "minimum_versions:accessories.release=2",
+      "kind": "engine_only",
+      "why": "M91 E3: the accessories.* methods (a StackChan robot wired to this Mac) postdate the draft. They are published under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls them; the app finds them in hello's methods and minimum versions."
+    },
+    {
+      "method": "(schema)",
+      "field": "minimum_versions:accessories.retry=2",
+      "kind": "engine_only",
+      "why": "M91 E3: the accessories.* methods (a StackChan robot wired to this Mac) postdate the draft. They are published under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls them; the app finds them in hello's methods and minimum versions."
+    },
+    {
+      "method": "(schema)",
+      "field": "minimum_versions:accessories.revoke=2",
+      "kind": "engine_only",
+      "why": "M91 E3: the accessories.* methods (a StackChan robot wired to this Mac) postdate the draft. They are published under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls them; the app finds them in hello's methods and minimum versions."
+    },
+    {
+      "method": "(schema)",
+      "field": "minimum_versions:accessories.set=2",
+      "kind": "engine_only",
+      "why": "M91 E3: the accessories.* methods (a StackChan robot wired to this Mac) postdate the draft. They are published under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls them; the app finds them in hello's methods and minimum versions."
+    },
+    {
+      "method": "(schema)",
+      "field": "minimum_versions:accessories.status=2",
+      "kind": "engine_only",
+      "why": "M91 E3: the accessories.* methods (a StackChan robot wired to this Mac) postdate the draft. They are published under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls them; the app finds them in hello's methods and minimum versions."
+    },
+    {
+      "method": "(schema)",
+      "field": "minimum_versions:accessories.voice_device.set=2",
+      "kind": "engine_only",
+      "why": "M91 E3: the accessories.* methods (a StackChan robot wired to this Mac) postdate the draft. They are published under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls them; the app finds them in hello's methods and minimum versions."
+    },
+    {
+      "method": "accessories.calibrate",
+      "field": "params:accessory_id",
+      "kind": "engine_only",
+      "why": "M91 E3: the accessories.* methods postdate the draft, so it has no params for them; PROTOCOL.md's Accessories section and the schema publish each."
+    },
+    {
+      "method": "accessories.calibrate",
+      "field": "params:axis",
+      "kind": "engine_only",
+      "why": "M91 E3: the accessories.* methods postdate the draft, so it has no params for them; PROTOCOL.md's Accessories section and the schema publish each."
+    },
+    {
+      "method": "accessories.calibrate",
+      "field": "params:op",
+      "kind": "engine_only",
+      "why": "M91 E3: the accessories.* methods postdate the draft, so it has no params for them; PROTOCOL.md's Accessories section and the schema publish each."
+    },
+    {
+      "method": "accessories.calibrate",
+      "field": "params:steps",
+      "kind": "engine_only",
+      "why": "M91 E3: the accessories.* methods postdate the draft, so it has no params for them; PROTOCOL.md's Accessories section and the schema publish each."
+    },
+    {
+      "method": "accessories.call.end",
+      "field": "params:accessory_id",
+      "kind": "engine_only",
+      "why": "M91 E3: the accessories.* methods postdate the draft, so it has no params for them; PROTOCOL.md's Accessories section and the schema publish each."
+    },
+    {
+      "method": "accessories.call.end",
+      "field": "params:call_id",
+      "kind": "engine_only",
+      "why": "M91 E3: the accessories.* methods postdate the draft, so it has no params for them; PROTOCOL.md's Accessories section and the schema publish each."
+    },
+    {
+      "method": "accessories.call.interrupt",
+      "field": "params:accessory_id",
+      "kind": "engine_only",
+      "why": "M91 E3: the accessories.* methods postdate the draft, so it has no params for them; PROTOCOL.md's Accessories section and the schema publish each."
+    },
+    {
+      "method": "accessories.call.interrupt",
+      "field": "params:call_id",
+      "kind": "engine_only",
+      "why": "M91 E3: the accessories.* methods postdate the draft, so it has no params for them; PROTOCOL.md's Accessories section and the schema publish each."
+    },
+    {
+      "method": "accessories.call.mute",
+      "field": "params:accessory_id",
+      "kind": "engine_only",
+      "why": "M91 E3: the accessories.* methods postdate the draft, so it has no params for them; PROTOCOL.md's Accessories section and the schema publish each."
+    },
+    {
+      "method": "accessories.call.mute",
+      "field": "params:call_id",
+      "kind": "engine_only",
+      "why": "M91 E3: the accessories.* methods postdate the draft, so it has no params for them; PROTOCOL.md's Accessories section and the schema publish each."
+    },
+    {
+      "method": "accessories.call.mute",
+      "field": "params:muted",
+      "kind": "engine_only",
+      "why": "M91 E3: the accessories.* methods postdate the draft, so it has no params for them; PROTOCOL.md's Accessories section and the schema publish each."
+    },
+    {
+      "method": "accessories.call.start",
+      "field": "params:accessory_id",
+      "kind": "engine_only",
+      "why": "M91 E3: the accessories.* methods postdate the draft, so it has no params for them; PROTOCOL.md's Accessories section and the schema publish each."
+    },
+    {
+      "method": "accessories.call.task.cancel",
+      "field": "params:accessory_id",
+      "kind": "engine_only",
+      "why": "M91 E3: the accessories.* methods postdate the draft, so it has no params for them; PROTOCOL.md's Accessories section and the schema publish each."
+    },
+    {
+      "method": "accessories.call.task.cancel",
+      "field": "params:call_id",
+      "kind": "engine_only",
+      "why": "M91 E3: the accessories.* methods postdate the draft, so it has no params for them; PROTOCOL.md's Accessories section and the schema publish each."
+    },
+    {
+      "method": "accessories.call.task.cancel",
+      "field": "params:task",
+      "kind": "engine_only",
+      "why": "M91 E3: the accessories.* methods postdate the draft, so it has no params for them; PROTOCOL.md's Accessories section and the schema publish each."
+    },
+    {
+      "method": "accessories.check.start",
+      "field": "params:accessory_id",
+      "kind": "engine_only",
+      "why": "M91 E3: the accessories.* methods postdate the draft, so it has no params for them; PROTOCOL.md's Accessories section and the schema publish each."
+    },
+    {
+      "method": "accessories.check.start",
+      "field": "params:check",
+      "kind": "engine_only",
+      "why": "M91 E3: the accessories.* methods postdate the draft, so it has no params for them; PROTOCOL.md's Accessories section and the schema publish each."
+    },
+    {
+      "method": "accessories.check.start",
+      "field": "params:seconds",
+      "kind": "engine_only",
+      "why": "M91 E3: the accessories.* methods postdate the draft, so it has no params for them; PROTOCOL.md's Accessories section and the schema publish each."
+    },
+    {
+      "method": "accessories.check.stop",
+      "field": "params:accessory_id",
+      "kind": "engine_only",
+      "why": "M91 E3: the accessories.* methods postdate the draft, so it has no params for them; PROTOCOL.md's Accessories section and the schema publish each."
+    },
+    {
+      "method": "accessories.forget",
+      "field": "params:accessory_id",
+      "kind": "engine_only",
+      "why": "M91 E3: the accessories.* methods postdate the draft, so it has no params for them; PROTOCOL.md's Accessories section and the schema publish each."
+    },
+    {
+      "method": "accessories.pair.begin",
+      "field": "params:name",
+      "kind": "engine_only",
+      "why": "M91 E3: the accessories.* methods postdate the draft, so it has no params for them; PROTOCOL.md's Accessories section and the schema publish each."
+    },
+    {
+      "method": "accessories.pair.begin",
+      "field": "params:path",
+      "kind": "engine_only",
+      "why": "M91 E3: the accessories.* methods postdate the draft, so it has no params for them; PROTOCOL.md's Accessories section and the schema publish each."
+    },
+    {
+      "method": "accessories.pair.cancel",
+      "field": "params:attempt",
+      "kind": "engine_only",
+      "why": "M91 E3: the accessories.* methods postdate the draft, so it has no params for them; PROTOCOL.md's Accessories section and the schema publish each."
+    },
+    {
+      "method": "accessories.pair.cancel",
+      "field": "params:path",
+      "kind": "engine_only",
+      "why": "M91 E3: the accessories.* methods postdate the draft, so it has no params for them; PROTOCOL.md's Accessories section and the schema publish each."
+    },
+    {
+      "method": "accessories.pair.decide",
+      "field": "params:attempt",
+      "kind": "engine_only",
+      "why": "M91 E3: the accessories.* methods postdate the draft, so it has no params for them; PROTOCOL.md's Accessories section and the schema publish each."
+    },
+    {
+      "method": "accessories.pair.decide",
+      "field": "params:matches",
+      "kind": "engine_only",
+      "why": "M91 E3: the accessories.* methods postdate the draft, so it has no params for them; PROTOCOL.md's Accessories section and the schema publish each."
+    },
+    {
+      "method": "accessories.pair.decide",
+      "field": "params:path",
+      "kind": "engine_only",
+      "why": "M91 E3: the accessories.* methods postdate the draft, so it has no params for them; PROTOCOL.md's Accessories section and the schema publish each."
+    },
+    {
+      "method": "accessories.pair.start",
+      "field": "params:path",
+      "kind": "engine_only",
+      "why": "M91 E3: the accessories.* methods postdate the draft, so it has no params for them; PROTOCOL.md's Accessories section and the schema publish each."
+    },
+    {
+      "method": "accessories.reconnect",
+      "field": "params:path",
+      "kind": "engine_only",
+      "why": "M91 E3: the accessories.* methods postdate the draft, so it has no params for them; PROTOCOL.md's Accessories section and the schema publish each."
+    },
+    {
+      "method": "accessories.release",
+      "field": "params:path",
+      "kind": "engine_only",
+      "why": "M91 E3: the accessories.* methods postdate the draft, so it has no params for them; PROTOCOL.md's Accessories section and the schema publish each."
+    },
+    {
+      "method": "accessories.retry",
+      "field": "params:path",
+      "kind": "engine_only",
+      "why": "M91 E3: the accessories.* methods postdate the draft, so it has no params for them; PROTOCOL.md's Accessories section and the schema publish each."
+    },
+    {
+      "method": "accessories.revoke",
+      "field": "params:accessory_id",
+      "kind": "engine_only",
+      "why": "M91 E3: the accessories.* methods postdate the draft, so it has no params for them; PROTOCOL.md's Accessories section and the schema publish each."
+    },
+    {
+      "method": "accessories.set",
+      "field": "params:accessory_id",
+      "kind": "engine_only",
+      "why": "M91 E3: the accessories.* methods postdate the draft, so it has no params for them; PROTOCOL.md's Accessories section and the schema publish each."
+    },
+    {
+      "method": "accessories.set",
+      "field": "params:volume",
+      "kind": "engine_only",
+      "why": "M91 E3: the accessories.* methods postdate the draft, so it has no params for them; PROTOCOL.md's Accessories section and the schema publish each."
+    },
+    {
+      "method": "accessories.status",
+      "field": "params:after",
+      "kind": "engine_only",
+      "why": "M91 E3: the accessories.* methods postdate the draft, so it has no params for them; PROTOCOL.md's Accessories section and the schema publish each."
+    },
+    {
+      "method": "accessories.status",
+      "field": "params:wait_ms",
+      "kind": "engine_only",
+      "why": "M91 E3: the accessories.* methods postdate the draft, so it has no params for them; PROTOCOL.md's Accessories section and the schema publish each."
+    },
+    {
+      "method": "accessories.voice_device.set",
+      "field": "params:device",
+      "kind": "engine_only",
+      "why": "M91 E3: the accessories.* methods postdate the draft, so it has no params for them; PROTOCOL.md's Accessories section and the schema publish each."
+    },
+    {
+      "method": "hello",
+      "field": "capabilities.minimum_versions.accessories.calibrate",
+      "kind": "engine_only",
+      "why": "M91 E3: the accessories.* methods (a StackChan robot wired to this Mac) postdate the draft. They are published under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls them; the app finds them in hello's methods and minimum versions."
+    },
+    {
+      "method": "hello",
+      "field": "capabilities.minimum_versions.accessories.call.end",
+      "kind": "engine_only",
+      "why": "M91 E3: the accessories.* methods (a StackChan robot wired to this Mac) postdate the draft. They are published under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls them; the app finds them in hello's methods and minimum versions."
+    },
+    {
+      "method": "hello",
+      "field": "capabilities.minimum_versions.accessories.call.interrupt",
+      "kind": "engine_only",
+      "why": "M91 E3: the accessories.* methods (a StackChan robot wired to this Mac) postdate the draft. They are published under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls them; the app finds them in hello's methods and minimum versions."
+    },
+    {
+      "method": "hello",
+      "field": "capabilities.minimum_versions.accessories.call.mute",
+      "kind": "engine_only",
+      "why": "M91 E3: the accessories.* methods (a StackChan robot wired to this Mac) postdate the draft. They are published under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls them; the app finds them in hello's methods and minimum versions."
+    },
+    {
+      "method": "hello",
+      "field": "capabilities.minimum_versions.accessories.call.start",
+      "kind": "engine_only",
+      "why": "M91 E3: the accessories.* methods (a StackChan robot wired to this Mac) postdate the draft. They are published under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls them; the app finds them in hello's methods and minimum versions."
+    },
+    {
+      "method": "hello",
+      "field": "capabilities.minimum_versions.accessories.call.task.cancel",
+      "kind": "engine_only",
+      "why": "M91 E3: the accessories.* methods (a StackChan robot wired to this Mac) postdate the draft. They are published under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls them; the app finds them in hello's methods and minimum versions."
+    },
+    {
+      "method": "hello",
+      "field": "capabilities.minimum_versions.accessories.check.start",
+      "kind": "engine_only",
+      "why": "M91 E3: the accessories.* methods (a StackChan robot wired to this Mac) postdate the draft. They are published under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls them; the app finds them in hello's methods and minimum versions."
+    },
+    {
+      "method": "hello",
+      "field": "capabilities.minimum_versions.accessories.check.stop",
+      "kind": "engine_only",
+      "why": "M91 E3: the accessories.* methods (a StackChan robot wired to this Mac) postdate the draft. They are published under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls them; the app finds them in hello's methods and minimum versions."
+    },
+    {
+      "method": "hello",
+      "field": "capabilities.minimum_versions.accessories.forget",
+      "kind": "engine_only",
+      "why": "M91 E3: the accessories.* methods (a StackChan robot wired to this Mac) postdate the draft. They are published under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls them; the app finds them in hello's methods and minimum versions."
+    },
+    {
+      "method": "hello",
+      "field": "capabilities.minimum_versions.accessories.pair.begin",
+      "kind": "engine_only",
+      "why": "M91 E3: the accessories.* methods (a StackChan robot wired to this Mac) postdate the draft. They are published under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls them; the app finds them in hello's methods and minimum versions."
+    },
+    {
+      "method": "hello",
+      "field": "capabilities.minimum_versions.accessories.pair.cancel",
+      "kind": "engine_only",
+      "why": "M91 E3: the accessories.* methods (a StackChan robot wired to this Mac) postdate the draft. They are published under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls them; the app finds them in hello's methods and minimum versions."
+    },
+    {
+      "method": "hello",
+      "field": "capabilities.minimum_versions.accessories.pair.decide",
+      "kind": "engine_only",
+      "why": "M91 E3: the accessories.* methods (a StackChan robot wired to this Mac) postdate the draft. They are published under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls them; the app finds them in hello's methods and minimum versions."
+    },
+    {
+      "method": "hello",
+      "field": "capabilities.minimum_versions.accessories.pair.start",
+      "kind": "engine_only",
+      "why": "M91 E3: the accessories.* methods (a StackChan robot wired to this Mac) postdate the draft. They are published under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls them; the app finds them in hello's methods and minimum versions."
+    },
+    {
+      "method": "hello",
+      "field": "capabilities.minimum_versions.accessories.reconnect",
+      "kind": "engine_only",
+      "why": "M91 E3: the accessories.* methods (a StackChan robot wired to this Mac) postdate the draft. They are published under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls them; the app finds them in hello's methods and minimum versions."
+    },
+    {
+      "method": "hello",
+      "field": "capabilities.minimum_versions.accessories.release",
+      "kind": "engine_only",
+      "why": "M91 E3: the accessories.* methods (a StackChan robot wired to this Mac) postdate the draft. They are published under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls them; the app finds them in hello's methods and minimum versions."
+    },
+    {
+      "method": "hello",
+      "field": "capabilities.minimum_versions.accessories.retry",
+      "kind": "engine_only",
+      "why": "M91 E3: the accessories.* methods (a StackChan robot wired to this Mac) postdate the draft. They are published under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls them; the app finds them in hello's methods and minimum versions."
+    },
+    {
+      "method": "hello",
+      "field": "capabilities.minimum_versions.accessories.revoke",
+      "kind": "engine_only",
+      "why": "M91 E3: the accessories.* methods (a StackChan robot wired to this Mac) postdate the draft. They are published under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls them; the app finds them in hello's methods and minimum versions."
+    },
+    {
+      "method": "hello",
+      "field": "capabilities.minimum_versions.accessories.set",
+      "kind": "engine_only",
+      "why": "M91 E3: the accessories.* methods (a StackChan robot wired to this Mac) postdate the draft. They are published under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls them; the app finds them in hello's methods and minimum versions."
+    },
+    {
+      "method": "hello",
+      "field": "capabilities.minimum_versions.accessories.status",
+      "kind": "engine_only",
+      "why": "M91 E3: the accessories.* methods (a StackChan robot wired to this Mac) postdate the draft. They are published under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls them; the app finds them in hello's methods and minimum versions."
+    },
+    {
+      "method": "hello",
+      "field": "capabilities.minimum_versions.accessories.voice_device.set",
+      "kind": "engine_only",
+      "why": "M91 E3: the accessories.* methods (a StackChan robot wired to this Mac) postdate the draft. They are published under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls them; the app finds them in hello's methods and minimum versions."
+    },
+    {
+      "method": "settings.get:accessories",
+      "field": "rows:accessories_enabled",
+      "kind": "engine_only",
+      "why": "M91 E3: the accessories section, a Mac's only, under the voice pane, holds the one live switch of [fermix_channels.accessories]: allowing a StackChan to connect over USB. It postdates the draft, and an app that has not re-vendored never asks for the section."
+    },
+    {
+      "method": "(schema)",
+      "field": "methods:computers.rename",
+      "kind": "engine_only",
+      "why": "M97 §3.2: computers.rename names a computer of the home, unique in it and not the server's own name, and answers the computer as home.status lists it. It postdates the draft and is published under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls it."
+    },
+    {
+      "method": "(schema)",
+      "field": "minimum_versions:computers.rename=2",
+      "kind": "engine_only",
+      "why": "M97 §3.2: computers.rename is published with minimum version 2 in the whole-table minimum versions, as every v2 method is. The draft predates it; the addition is additive and needs no protocol bump."
+    },
+    {
+      "method": "hello",
+      "field": "capabilities.minimum_versions.computers.rename",
+      "kind": "engine_only",
+      "why": "M97 §3.2: hello publishes every method this daemon serves with its minimum version, computers.rename included. The draft predates it; a client ignores a method it does not know."
+    },
+    {
+      "method": "computers.rename",
+      "field": "params:device_id",
+      "kind": "engine_only",
+      "why": "M97 §3.2: computers.rename names the computer by the device id home.status lists it under. The draft predates the method."
+    },
+    {
+      "method": "computers.rename",
+      "field": "params:name",
+      "kind": "engine_only",
+      "why": "M97 §3.2: computers.rename carries the new name, one line of at most 64 bytes once trimmed, refused with a sentence otherwise. The draft predates the method."
+    },
+    {
+      "method": "(schema)",
+      "field": "methods:computer.journal.list",
+      "kind": "engine_only",
+      "why": "M97 §6.3: computer.journal.list is the owner's read of this computer's own journal of what its server did here. It postdates the draft and is published under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls it."
+    },
+    {
+      "method": "(schema)",
+      "field": "minimum_versions:computer.journal.list=2",
+      "kind": "engine_only",
+      "why": "M97 §6.3: computer.journal.list is published with minimum version 2 in the whole-table minimum versions, as every v2 method is. The draft predates it; the addition is additive and needs no protocol bump."
+    },
+    {
+      "method": "hello",
+      "field": "capabilities.minimum_versions.computer.journal.list",
+      "kind": "engine_only",
+      "why": "M97 §6.3: hello publishes every method this daemon serves with its minimum version, computer.journal.list included. The draft predates it; a client ignores a method it does not know."
+    },
+    {
+      "method": "computer.journal.list",
+      "field": "params:limit",
+      "kind": "engine_only",
+      "why": "M97 §6.3: computer.journal.list takes how many entries to answer, 1 to 200 and 50 when absent. The draft predates the method."
+    },
+    {
+      "method": "(schema)",
+      "field": "methods:computer.screen.stop",
+      "kind": "engine_only",
+      "why": "M97 §7.4: computer.screen.stop is the Stop beside the mark a linked computer's app draws while Fermix on its server controls its screen. It postdates the draft and is published under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls it."
+    },
+    {
+      "method": "(schema)",
+      "field": "minimum_versions:computer.screen.stop=2",
+      "kind": "engine_only",
+      "why": "M97 §7.4: computer.screen.stop is published with minimum version 2 in the whole-table minimum versions, as every v2 method is. The draft predates it; the addition is additive and needs no protocol bump."
+    },
+    {
+      "method": "hello",
+      "field": "capabilities.minimum_versions.computer.screen.stop",
+      "kind": "engine_only",
+      "why": "M97 §7.4: hello publishes every method this daemon serves with its minimum version, computer.screen.stop included. The draft predates it; a client ignores a method it does not know."
+    },
+    {
+      "method": "(schema)",
+      "field": "methods:home.enroll.approve",
+      "kind": "engine_only",
+      "why": "M97 §7.5: home.enroll.approve is the owner's approval of the computer that waits to join, with the six digits it shows. It postdates the draft and is published under minimum version 2 with no protocol bump, as part of Always On."
+    },
+    {
+      "method": "(schema)",
+      "field": "minimum_versions:home.enroll.approve=2",
+      "kind": "engine_only",
+      "why": "M97 §7.5: home.enroll.approve is published with minimum version 2 in the whole-table minimum versions, as every v2 method is. The draft predates it; the addition is additive and needs no protocol bump."
+    },
+    {
+      "method": "hello",
+      "field": "capabilities.minimum_versions.home.enroll.approve",
+      "kind": "engine_only",
+      "why": "M97 §7.5: hello publishes every method this daemon serves with its minimum version, home.enroll.approve included. The draft predates it; a client ignores a method it does not know."
+    },
+    {
+      "method": "(schema)",
+      "field": "methods:home.enroll.deny",
+      "kind": "engine_only",
+      "why": "M97 §7.5: home.enroll.deny is the owner's refusal of the computer that waits to join. It postdates the draft and is published under minimum version 2 with no protocol bump, as part of Always On."
+    },
+    {
+      "method": "(schema)",
+      "field": "minimum_versions:home.enroll.deny=2",
+      "kind": "engine_only",
+      "why": "M97 §7.5: home.enroll.deny is published with minimum version 2 in the whole-table minimum versions, as every v2 method is. The draft predates it; the addition is additive and needs no protocol bump."
+    },
+    {
+      "method": "hello",
+      "field": "capabilities.minimum_versions.home.enroll.deny",
+      "kind": "engine_only",
+      "why": "M97 §7.5: hello publishes every method this daemon serves with its minimum version, home.enroll.deny included. The draft predates it; a client ignores a method it does not know."
+    },
+    {
+      "method": "(schema)",
+      "field": "methods:home.restart",
+      "kind": "engine_only",
+      "why": "M97 D28c: home.restart is a linked computer's Restart <server>, which the server takes after its restart hold. It postdates the draft and is published under minimum version 2 with no protocol bump, rail-only, as part of Always On."
+    },
+    {
+      "method": "(schema)",
+      "field": "minimum_versions:home.restart=2",
+      "kind": "engine_only",
+      "why": "M97 D28c: home.restart is published with minimum version 2 in the whole-table minimum versions, as every v2 method is. The draft predates it; the addition is additive and needs no protocol bump."
+    },
+    {
+      "method": "hello",
+      "field": "capabilities.minimum_versions.home.restart",
+      "kind": "engine_only",
+      "why": "M97 D28c: hello publishes every method this daemon serves with its minimum version, home.restart included. The draft predates it; a client ignores a method it does not know."
+    },
+    {
+      "method": "(schema)",
+      "field": "methods:computer.join.start",
+      "kind": "engine_only",
+      "why": "M97 §3.1: computer.join.start joins this computer to a home that already runs, with the code Add a computer opened there. It postdates the draft and is published under minimum version 2 with no protocol bump, as part of Always On."
+    },
+    {
+      "method": "(schema)",
+      "field": "minimum_versions:computer.join.start=2",
+      "kind": "engine_only",
+      "why": "M97 §3.1: computer.join.start is published with minimum version 2 in the whole-table minimum versions, as every v2 method is. The draft predates it; the addition is additive and needs no protocol bump."
+    },
+    {
+      "method": "hello",
+      "field": "capabilities.minimum_versions.computer.join.start",
+      "kind": "engine_only",
+      "why": "M97 §3.1: hello publishes every method this daemon serves with its minimum version, computer.join.start included. The draft predates it; a client ignores a method it does not know."
+    },
+    {
+      "method": "(schema)",
+      "field": "methods:computer.join.cancel",
+      "kind": "engine_only",
+      "why": "M97 §3.1: computer.join.cancel ends this computer's join wherever it stands. It postdates the draft and is published under minimum version 2 with no protocol bump, as part of Always On."
+    },
+    {
+      "method": "(schema)",
+      "field": "minimum_versions:computer.join.cancel=2",
+      "kind": "engine_only",
+      "why": "M97 §3.1: computer.join.cancel is published with minimum version 2 in the whole-table minimum versions, as every v2 method is. The draft predates it; the addition is additive and needs no protocol bump."
+    },
+    {
+      "method": "hello",
+      "field": "capabilities.minimum_versions.computer.join.cancel",
+      "kind": "engine_only",
+      "why": "M97 §3.1: hello publishes every method this daemon serves with its minimum version, computer.join.cancel included. The draft predates it; a client ignores a method it does not know."
+    },
+    {
+      "method": "(schema)",
+      "field": "methods:computer.disconnect",
+      "kind": "engine_only",
+      "why": "M97 §3.3: computer.disconnect takes this computer out of the home it is linked to. It postdates the draft and is published under minimum version 2 with no protocol bump, as part of Always On."
+    },
+    {
+      "method": "(schema)",
+      "field": "minimum_versions:computer.disconnect=2",
+      "kind": "engine_only",
+      "why": "M97 §3.3: computer.disconnect is published with minimum version 2 in the whole-table minimum versions, as every v2 method is. The draft predates it; the addition is additive and needs no protocol bump."
+    },
+    {
+      "method": "hello",
+      "field": "capabilities.minimum_versions.computer.disconnect",
+      "kind": "engine_only",
+      "why": "M97 §3.3: hello publishes every method this daemon serves with its minimum version, computer.disconnect included. The draft predates it; a client ignores a method it does not know."
+    },
+    {
+      "method": "computer.join.start",
+      "field": "params:code",
+      "kind": "engine_only",
+      "why": "M97 §3.1: computer.join.start carries the code a computer joins with, at most 4,096 bytes, refused on code when Fermix did not open it, when it sets up a server instead, or when it expired. The draft predates the method."
+    },
+    {
+      "method": "home.enroll.approve",
+      "field": "params:sas",
+      "kind": "engine_only",
+      "why": "M97 §7.5: home.enroll.approve carries the six digits the computer that asks shows, as its owner read them there; digits that are not its own are refused on sas and spend the code. The draft predates the method."
+    },
+    {
+      "method": "home.enroll.open",
+      "field": "params:purpose",
+      "kind": "engine_only",
+      "why": "M97 §3.1: home.enroll.open takes an optional purpose, candidate (the default, as before) or computer, which opens the code a computer joins the home with. The draft predates it; a request without it means what it always meant."
+    },
+    {
+      "method": "mobile.devices.revoke",
+      "field": "params:confirmed",
+      "kind": "engine_only",
+      "why": "M97 §3.3: mobile.devices.revoke now removes a computer too, and takes an optional confirmed, which the one computer that keeps the only copies of the server's backups needs. The draft predates it; a request without it forgets a phone as before."
+    },
+    {
+      "method": "setup.state.get",
+      "field": "readiness.failures[].sentence",
+      "kind": "engine_only",
+      "why": "M97: a readiness failure carries the engine's own sentence where it has one (the iMessage rows, naming the Mac that carries Messages), null elsewhere. Optional and additive: an app built against the draft keeps its own words."
+    },
+    {
+      "method": "(schema)",
+      "field": "methods:coding_agents.check",
+      "kind": "engine_only",
+      "why": "M98: coding_agents.check is Check again for this computer's coding agents, the owner's word that they signed in again: it clears their sign-in marks and answers the harness_vendors row. Minimum version 2 and additive: an app calls it only when hello lists it, and calls setup.detect otherwise, as an app built against the draft does."
+    },
+    {
+      "method": "(schema)",
+      "field": "minimum_versions:coding_agents.check=2",
+      "kind": "engine_only",
+      "why": "M98: coding_agents.check is published with minimum version 2 in the whole-table minimum versions, as every v2 method is. The draft predates it, so its table has no entry for it; the addition is additive and needs no protocol bump."
+    },
+    {
+      "method": "hello",
+      "field": "capabilities.minimum_versions.coding_agents.check",
+      "kind": "engine_only",
+      "why": "M98: hello's minimum-version table carries coding_agents.check, the table being whole. A client built against the draft never calls the method, so the entry changes nothing for it."
+    },
+    {
+      "method": "coding_agents.check",
+      "field": "params:vendors",
+      "kind": "engine_only",
+      "why": "M98: the optional list of agents whose sign-in marks Check again clears, both when absent. The draft has no coding_agents.check at all."
+    },
+    {
+      "method": "setup.detect",
+      "field": "results[].vendors[].signed_out",
+      "kind": "engine_only",
+      "why": "M98 D10: an agent whose last run on this computer failed to sign in is marked signed out until a run of it works, its sign-in file changes or Check again is pressed. A new optional boolean beside auth, never a new auth value, because the app decodes auth as a closed set; an app built against the draft keeps drawing auth alone."
     }
   ]
 }

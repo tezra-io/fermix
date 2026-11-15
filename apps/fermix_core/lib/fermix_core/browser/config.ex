@@ -2,11 +2,19 @@ defmodule FermixCore.Browser.Config do
   @moduledoc """
   Single source of truth for every browser timeout, interval, and bound.
 
-  All durations are milliseconds. Three fields are a person's to set in
+  All durations are milliseconds. Four fields are a person's to set in
   `[fermix_core.browser]` (`config_keys/0`); the rest are system tunables
   overridable only through `config :fermix_core, :browser, ...`. Keeping them
   here (instead of as literals scattered across the runtime) makes every
   browser timeout greppable, documentable, and adjustable in one place.
+
+  ## This computer's own
+
+  The settable keys describe the browser of the machine an engine runs on,
+  so they are that machine's own, in its `machine.toml` (`Setup.MachineFile`,
+  M97 D28d), which no move or backup carries: a server's browser and a
+  computer's are each set on their own machine. `to_keyword/1` is the block
+  as that file holds it, and `machine_file!/1` checks the file's table.
 
   ## Capacity
 
@@ -102,6 +110,13 @@ defmodule FermixCore.Browser.Config do
 
   `address_limits/0`, likewise: the DNS budget of the address checks and the
   sizes of what they remember.
+
+  ## Fermix's own web interface
+
+    * `engine_web_port` — the port the engine's web listener serves its setup
+      pages on, which the policy refuses on every loopback spelling. It is not
+      a setting: `current/2` takes it from `Setup.Endpoint.port/1`, the resolver
+      the listener itself binds by, so the two cannot disagree.
   """
 
   alias FermixCore.AppLauncher
@@ -109,6 +124,7 @@ defmodule FermixCore.Browser.Config do
   alias FermixCore.Browser.Policy
   alias FermixCore.BuildInfo
   alias FermixCore.Setup.ConfigStore
+  alias FermixCore.Setup.Endpoint
   alias FermixCore.Setup.Wizard
 
   @default_allowed_hosts ["localhost", "127.0.0.1", "::1"]
@@ -134,6 +150,9 @@ defmodule FermixCore.Browser.Config do
   # `action_timeout_ms` is told it is not settable instead of editing a line that
   # silently does nothing.
   @config_keys [:allowed_hosts, :default_profile, :max_tabs, :launch_app]
+  # How tasks run when nothing is set, and the key `machine.toml` always
+  # holds (`to_keyword/1`).
+  @default_profile "fermix"
   # `selected_tab` is the tab the person grants with the browser extension
   # (M42 slice 7). It is built in rather than configured because there is
   # nothing to configure: the grant names the tab, and the person makes it.
@@ -164,6 +183,7 @@ defmodule FermixCore.Browser.Config do
           allow_private_network: boolean(),
           allowed_hosts: [String.t()],
           launch_app: boolean(),
+          engine_web_port: 1..65_535 | nil,
           max_live_profiles: pos_integer(),
           max_tabs: pos_integer(),
           idle_profile_ttl_ms: pos_integer(),
@@ -201,11 +221,13 @@ defmodule FermixCore.Browser.Config do
           profiles: %{String.t() => profile()}
         }
 
-  defstruct default_profile: "fermix",
+  defstruct default_profile: @default_profile,
             allow_private_network: false,
             allowed_hosts: @default_allowed_hosts,
             # Resolved by `current/2`; `nil` only until then.
             launch_app: nil,
+            # The web listener's, resolved by `current/2`; `nil` only until then.
+            engine_web_port: nil,
             max_live_profiles: 6,
             max_tabs: 10,
             idle_profile_ttl_ms: 900_000,
@@ -405,6 +427,47 @@ defmodule FermixCore.Browser.Config do
   end
 
   @doc """
+  The block (`normalize/1`'s shape) as this computer's `machine.toml` holds
+  it, the shape `Setup.ConfigStore` writes and compares: each settable key
+  the block sets, in `config_keys/0`'s order, and `default_profile` always,
+  `"fermix"` where the block names none, which is how tasks run with no
+  setting at all. That key marks the file as one that holds the browser's
+  keys (`Setup.MachineFile`). The values are the file's own spellings (a
+  string, an integer, a boolean, a list of strings), so `normalize/1` reads
+  back exactly what this wrote.
+  """
+  @spec to_keyword(nil | map() | keyword()) :: keyword()
+  def to_keyword(block) when is_nil(block) or is_map(block) or is_list(block) do
+    marked = Keyword.put_new(normalize(block), :default_profile, @default_profile)
+    for key <- @config_keys, Keyword.has_key?(marked, key), do: {key, Keyword.fetch!(marked, key)}
+  end
+
+  @doc """
+  Checks the machine file's own `[fermix_core.browser]` (`table`, decoded, nil
+  when absent): it holds only settable keys. Raises `ArgumentError` naming
+  `machine.toml` for any other, which nothing would read there. Its values
+  are read with the rest of the settings (`Setup.MachineFile.join/2`).
+  """
+  @spec machine_file!(nil | map()) :: :ok
+  def machine_file!(nil), do: :ok
+
+  def machine_file!(table) when is_map(table) do
+    allowed = Enum.map(@config_keys, &Atom.to_string/1)
+
+    case table |> Map.keys() |> Enum.map(&to_string/1) |> Enum.reject(&(&1 in allowed)) do
+      [] ->
+        :ok
+
+      unknown ->
+        raise ArgumentError,
+              "machine.toml [fermix_core.browser] has unknown key(s): " <>
+                "#{unknown |> Enum.sort() |> Enum.join(", ")}. Allowed keys: " <>
+                "#{Enum.join(allowed, ", ")}. Browser timeouts, buffer sizes and the other " <>
+                "caps are internal constants, not config."
+    end
+  end
+
+  @doc """
   Persists a partial change to `[fermix_core.browser]`, the one writer for it.
 
   The merged block is read through `current/1` first, so a value the browser
@@ -447,10 +510,37 @@ defmodule FermixCore.Browser.Config do
     raw_map = to_map(raw)
     app_engine? = Keyword.get_lazy(opts, :app_engine?, &BuildInfo.app_engine?/0)
 
-    %__MODULE__{}
-    |> merge(raw_map)
-    |> resolve_launch_app(app_engine?)
-    |> validate()
+    with {:ok, engine_web_port} <- engine_web_port(opts) do
+      %__MODULE__{}
+      |> merge(raw_map)
+      |> resolve_launch_app(app_engine?)
+      |> Map.put(:engine_web_port, engine_web_port)
+      |> validate()
+    end
+  end
+
+  # `opts` may name the port (tests, and a caller that already holds it);
+  # otherwise it is the listener's own answer. A port the resolver refuses is a
+  # listener that never bound either, so the refusal is returned, not guessed past.
+  defp engine_web_port(opts) do
+    case Keyword.fetch(opts, :engine_web_port) do
+      {:ok, port} -> {:ok, port}
+      :error -> listener_port()
+    end
+  end
+
+  defp listener_port do
+    case Endpoint.port() do
+      {:ok, port} ->
+        {:ok, port}
+
+      {:error, reason} ->
+        {:error,
+         Error.new(
+           "invalid_config",
+           "engine_web_port: the web listener's port does not resolve (#{inspect(reason)})"
+         )}
+    end
   end
 
   @doc """
@@ -499,7 +589,13 @@ defmodule FermixCore.Browser.Config do
     |> Map.put(:profiles, profiles(Map.get(raw, :profiles, config.profiles)))
   end
 
-  defp known_keys, do: __MODULE__.__struct__() |> Map.keys() |> List.delete(:__struct__)
+  # `engine_web_port` is the listener's answer, never the browser settings'.
+  defp known_keys,
+    do:
+      __MODULE__.__struct__()
+      |> Map.keys()
+      |> List.delete(:__struct__)
+      |> List.delete(:engine_web_port)
 
   defp profiles(raw) when is_map(raw) do
     Map.new(raw, fn {name, profile} -> {to_string(name), normalize_profile(profile)} end)
@@ -521,6 +617,7 @@ defmodule FermixCore.Browser.Config do
     with :ok <- validate_positive_fields(config),
          :ok <- validate_depth_bounds(config),
          :ok <- boolean(:launch_app, config.launch_app),
+         :ok <- port(:engine_web_port, config.engine_web_port),
          :ok <- validate_allowed_hosts(config.allowed_hosts),
          :ok <- validate_profiles(config.profiles),
          :ok <- validate_default_profile(config) do
@@ -655,6 +752,12 @@ defmodule FermixCore.Browser.Config do
 
   defp positive(key, _value) do
     {:error, Error.new("invalid_config", "#{key} must be a positive integer")}
+  end
+
+  defp port(_key, value) when is_integer(value) and value in 1..65_535, do: :ok
+
+  defp port(key, _value) do
+    {:error, Error.new("invalid_config", "#{key} must be a port number from 1 to 65535")}
   end
 
   defp boolean(_key, value) when is_boolean(value), do: :ok

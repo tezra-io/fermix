@@ -19,7 +19,29 @@ defmodule FermixCore.Home.EnrollmentCodeTest do
     assert byte_size(code) in 42..2_048
 
     assert {:ok, decoded} = EnrollmentCode.decode("  " <> code <> "\n")
-    assert decoded == @facts
+    assert decoded == Map.put(@facts, :purpose, :candidate)
+  end
+
+  # M97 §3.1: a candidate's code stays version 1, which a server's first boot
+  # in the field reads; a computer's is version 2 and names its purpose, so a
+  # decoder that knows only version 1 refuses it on `v`, by name.
+  test "a computer's code is version 2 with its purpose, and a candidate's stays version 1" do
+    {:ok, candidate} = EnrollmentCode.encode(@facts)
+    assert %{"v" => 1} = body(candidate)
+    refute Map.has_key?(body(candidate), "purpose")
+
+    assert {:ok, computer} = EnrollmentCode.encode(Map.put(@facts, :purpose, :computer))
+    assert %{"v" => 2, "purpose" => "computer"} = body(computer)
+    assert {:ok, decoded} = EnrollmentCode.decode(computer)
+    assert decoded == Map.put(@facts, :purpose, :computer)
+
+    assert {:error, {:invalid_code, "purpose"}} =
+             EnrollmentCode.decode(wrap(json(%{"v" => 2, "purpose" => "candidate"})))
+
+    assert {:error, {:invalid_code, "purpose"}} = EnrollmentCode.decode(wrap(json(%{"v" => 2})))
+
+    assert {:error, {:invalid_code, "v"}} =
+             EnrollmentCode.decode(wrap(json(%{"v" => 1, "purpose" => "computer"})))
   end
 
   test "anything else is refused by what is wrong, never echoed" do
@@ -28,7 +50,7 @@ defmodule FermixCore.Home.EnrollmentCodeTest do
     assert {:error, {:invalid_code, "prefix"}} = EnrollmentCode.decode("fxpair1." <> code)
     assert {:error, {:invalid_code, "base64url"}} = EnrollmentCode.decode("fxenroll1.!!!")
     assert {:error, {:invalid_code, "json"}} = EnrollmentCode.decode(wrap("not json"))
-    assert {:error, {:invalid_code, "v"}} = EnrollmentCode.decode(wrap(~s({"v":2})))
+    assert {:error, {:invalid_code, "v"}} = EnrollmentCode.decode(wrap(~s({"v":3})))
 
     bad_node = json(%{"node_id" => "XYZ"})
     assert {:error, {:invalid_code, "node_id"}} = EnrollmentCode.decode(wrap(bad_node))
@@ -75,4 +97,7 @@ defmodule FermixCore.Home.EnrollmentCodeTest do
   end
 
   defp wrap(json), do: "fxenroll1." <> Base.url_encode64(json, padding: false)
+
+  defp body("fxenroll1." <> body),
+    do: body |> Base.url_decode64!(padding: false) |> Jason.decode!()
 end

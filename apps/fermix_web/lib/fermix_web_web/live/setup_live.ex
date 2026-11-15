@@ -20,6 +20,7 @@ defmodule FermixWebWeb.SetupLive do
   alias FermixCore.ComputerUse
   alias FermixCore.ComputerUse.SidecarInstaller
   alias FermixCore.Delivery.OwnerInbox
+  alias FermixCore.Harness.SignIn, as: HarnessSignIn
   alias FermixCore.Harness.Vendors, as: HarnessVendors
   alias FermixCore.Home.Role
   alias FermixCore.IMessage
@@ -64,6 +65,7 @@ defmodule FermixWebWeb.SetupLive do
   alias FermixCore.Transcription.Local.ModelStore, as: LocalModelStore
   alias FermixCore.Transcription.Local.SidecarInstaller, as: LocalSttInstaller
   alias FermixCore.Transcription.Registry, as: TranscriptionRegistry
+  alias FermixWebWeb.SetupLive.Accessories
   alias FermixWebWeb.SetupLive.AlwaysOn
   alias FermixWebWeb.SetupLive.Components
   alias FermixWebWeb.SetupLive.CuesState
@@ -249,6 +251,9 @@ defmodule FermixWebWeb.SetupLive do
       |> assign(:computer_history_picker, nil)
       |> assign(:meetings_config_open?, false)
       |> assign(:phone, Phone.initial())
+      |> assign(:accessories, Accessories.initial())
+      |> Accessories.load()
+      |> Accessories.watch()
       |> assign_report(report)
       |> AlwaysOn.watch()
       |> AlwaysOn.on_tab(active_tab)
@@ -260,18 +265,12 @@ defmodule FermixWebWeb.SetupLive do
   # reaches the server (M75 B14): the rest of the setup is the primary's.
   # Embedded in the Mac app the page has no Always On: the app's own pane is
   # the one surface there.
-  defp first_tab(%{role: :device}, report, false),
-    do: if(AlwaysOn.offered?(), do: "always_on", else: next_action_tab(report))
-
+  defp first_tab(%{role: :device}, _report, false), do: "always_on"
   defp first_tab(_record, report, _embed?), do: next_action_tab(report)
 
-  # Every tab the page lists: all but Always On when embedded in the Mac app,
-  # or in a build without Always On.
-  defp shown_tabs(embed?) do
-    if embed? or not AlwaysOn.offered?(),
-      do: Enum.reject(@tabs, &(&1.id == "always_on")),
-      else: @tabs
-  end
+  # Every tab the page lists: all but Always On when embedded in the Mac app.
+  defp shown_tabs(true), do: Enum.reject(@tabs, &(&1.id == "always_on"))
+  defp shown_tabs(false), do: @tabs
 
   # A pairing window this page still shows is cancelled when the page goes away
   # (the tab closed or the socket dropped).
@@ -476,6 +475,17 @@ defmodule FermixWebWeb.SetupLive do
 
     # The Phone card reads the phone channel only while it is the one shown.
     {:noreply, if(channel == :mobile, do: Phone.load(socket), else: socket)}
+  end
+
+  # The StackChan section's events (M91 E3): the switch, its own setter, never
+  # part of the voice form's draft, and pairing and the paired robots, through
+  # the `accessories.*` methods. A switch write refreshes the report and the
+  # restart notice.
+  def handle_event("accessories_" <> _rest = event, params, socket) do
+    case Accessories.handle_event(event, params, socket) do
+      {socket, nil} -> {:noreply, socket}
+      {socket, _write} -> {:noreply, assign_report(socket, Wizard.report())}
+    end
   end
 
   # The Phone card's events. A settings write refreshes the report, so the card,
@@ -739,11 +749,16 @@ defmodule FermixWebWeb.SetupLive do
 
   # Opens the meetbot's headed browser so the operator signs the bot's Google
   # account in. A no-op while one is already running or if the sidecar isn't
-  # installed yet (the button is disabled in that case — this is belt).
+  # installed yet (the button is disabled in that case — this is belt). On an
+  # Always On server, which has no screen and cannot run Google Meet (M97
+  # D24), no browser opens: the banner says Google Meet's sentence.
   def handle_event("meetbot_signin", _params, socket) do
     cond do
       installing?(socket.assigns.meetbot_signin) ->
         {:noreply, socket}
+
+      meet_here() != :ok ->
+        {:noreply, assign(socket, :meetbot_signin, failed(Meetings.meet_unavailable_sentence()))}
 
       not MeetbotInstaller.installed?() ->
         {:noreply, socket}
@@ -929,12 +944,9 @@ defmodule FermixWebWeb.SetupLive do
      )}
   end
 
-  # The Always On tab (Always On setup §8.1), in a build that offers it.
-  def handle_event("always_on_" <> _rest = event, params, socket) do
-    if AlwaysOn.offered?(),
-      do: {:noreply, AlwaysOn.handle_event(event, params, socket)},
-      else: {:noreply, socket}
-  end
+  # The Always On tab (Always On setup §8.1).
+  def handle_event("always_on_" <> _rest = event, params, socket),
+    do: {:noreply, AlwaysOn.handle_event(event, params, socket)}
 
   # The Cues tab (M60 §15): `CuesState` turns each `cues_*` event into a
   # change and says what follows.
@@ -1042,6 +1054,17 @@ defmodule FermixWebWeb.SetupLive do
   def handle_info({phone_read, _gen} = message, socket)
       when phone_read in [:phone_poll, :phone_reach],
       do: {:noreply, Phone.handle_info(message, socket)}
+
+  # The StackChan section follows the accessory watcher: a change notice, the
+  # watcher ending, or the time to look for it again.
+  def handle_info({:accessories_changed, _version} = message, socket),
+    do: {:noreply, Accessories.handle_info(message, socket)}
+
+  def handle_info({:accessories_watch, _ref, :process, _pid, _reason} = message, socket),
+    do: {:noreply, Accessories.handle_info(message, socket)}
+
+  def handle_info({:accessories_watch, :retry} = message, socket),
+    do: {:noreply, Accessories.handle_info(message, socket)}
 
   # Always On changed (`Home.StatusWatch`): the tab, when it is open, reads
   # it again.
@@ -1228,6 +1251,7 @@ defmodule FermixWebWeb.SetupLive do
       embed?={@embed?}
       channels_form={@channels_form}
       phone={@phone}
+      accessories={@accessories}
       doctor_result={@doctor_result}
       memory_form={@memory_form}
       personalization_form={@personalization_form}
@@ -2405,16 +2429,30 @@ defmodule FermixWebWeb.SetupLive do
   end
 
   # Enabling meetings is what fetches the Meet notetaker binary — the Zoom RTMS
-  # lane needs no sidecar, so a refusal here never blocks the save.
+  # lane needs no sidecar, so a refusal here never blocks the save. On an
+  # Always On server Google Meet cannot run (M97 D24), so neither the notetaker
+  # nor its browser downloads there: the banner says Google Meet's sentence.
   defp maybe_install_meetbot(socket, false), do: socket
 
   defp maybe_install_meetbot(socket, true) do
     cond do
-      installing?(socket.assigns.meetbot_install) -> socket
-      not MeetbotInstaller.installed?() -> start_meetbot_install(socket)
-      true -> continue_meetbot_setup(socket)
+      installing?(socket.assigns.meetbot_install) ->
+        socket
+
+      meet_here() != :ok ->
+        assign(socket, :meetbot_install, failed(Meetings.meet_unavailable_sentence()))
+
+      not MeetbotInstaller.installed?() ->
+        start_meetbot_install(socket)
+
+      true ->
+        continue_meetbot_setup(socket)
     end
   end
+
+  # Whether Google Meet can run on the engine serving this page; injectable so
+  # a LiveView test names the server it means (`Meetings.meet_here/0`).
+  defp meet_here, do: Application.get_env(:fermix_web, :meet_here, &Meetings.meet_here/0).()
 
   defp start_meetbot_install(socket) do
     install = meetbot_installer()
@@ -2599,11 +2637,16 @@ defmodule FermixWebWeb.SetupLive do
   # `Vendors.detect_all/0` (which probes each CLI's `--version` in a subprocess and
   # reads `~/.codex`/`~/.claude`), while `config/test.exs` overrides it with an
   # inert stub so `mix test` never spawns a vendor CLI or touches host auth.
+  # Each vendor also carries its sign-in state (`Harness.SignIn`, M98 D10), from
+  # this machine's coding store read on a connection of its own.
   defp build_harness_setup(snapshot) do
+    marks = harness_sign_in_marks()
+
     detections =
       harness_detector().()
       |> Map.values()
       |> Enum.sort_by(& &1.vendor)
+      |> Enum.map(&Map.put(&1, :sign_in, HarnessSignIn.view(&1.auth, Map.get(marks, &1.vendor))))
 
     harness = get_fermix_core(snapshot, :harness)
 
@@ -2617,6 +2660,25 @@ defmodule FermixWebWeb.SetupLive do
 
   defp harness_detector do
     Application.get_env(:fermix_web, :harness_detector, &HarnessVendors.detect_all/0)
+  end
+
+  # Marks that cannot be read are logged and the page shows each sign-in as
+  # its file reads; doctor's coding harness row says the marks are unreadable.
+  defp harness_sign_in_marks do
+    reader =
+      Application.get_env(:fermix_web, :harness_sign_in_marks, fn -> HarnessSignIn.marks([]) end)
+
+    case reader.() do
+      {:ok, marks} ->
+        marks
+
+      {:error, reason} ->
+        Logger.warning(
+          "setup: coding agents' sign-in marks could not be read: #{inspect(reason)}"
+        )
+
+        %{}
+    end
   end
 
   defp build_personalization_form(snapshot) do
@@ -3662,7 +3724,7 @@ defmodule FermixWebWeb.SetupLive do
   defp computer_history_recall_sentence do
     ComputerHistoryConfig.current()
     |> Keyword.put(:enabled, true)
-    |> then(&ComputerHistoryGate.chain_posture(config: &1))
+    |> then(&ComputerHistoryGate.chain_posture(config: &1, surfaces?: true))
     |> ComputerHistoryGate.chain_posture_sentence()
     |> then(&" #{&1}")
   end

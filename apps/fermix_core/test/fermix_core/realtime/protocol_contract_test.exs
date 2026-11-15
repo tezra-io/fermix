@@ -10,7 +10,9 @@ defmodule FermixCore.Realtime.ProtocolContractTest do
 
   use ExUnit.Case, async: true
 
+  alias FermixCore.Realtime.CallClient
   alias FermixCore.Realtime.Config
+  alias FermixCore.Realtime.Endpoint
   alias FermixCore.Realtime.LiveFrames
   alias FermixCore.Realtime.Protocol
 
@@ -171,7 +173,92 @@ defmodule FermixCore.Realtime.ProtocolContractTest do
       |> fixture_lines()
       |> Enum.map(&Jason.decode!/1)
 
-    assert %{"type" => "error", "reason" => reason} in golden
+    # The refusal names the endpoint holding the call, in the form the lease
+    # and the daemon's `Endpoint` speak.
+    assert %{"held_by" => held_by} =
+             Enum.find(golden, &(&1["type"] == "error" and &1["reason"] == reason))
+
+    assert {:ok, _endpoint} = Endpoint.parse(held_by)
+    refute "held_by" in schema["$defs"]["error"]["required"]
+    assert schema["$defs"]["error"]["properties"]["held_by"]["type"] == "string"
+  end
+
+  # M91 E3: while a paired accessory is the owner's voice device, the Mac's
+  # own call_start is refused before any session, naming the device in the
+  # Endpoint form and carrying the daemon's sentence, which the app renders.
+  test "the voice device refusal is a published error reason with a golden row",
+       %{schema: schema} do
+    properties = schema["$defs"]["error"]["properties"]
+    assert properties["reason"]["description"] =~ "voice_device_elsewhere"
+    assert properties["voice_device"]["type"] == "string"
+    assert properties["sentence"]["type"] == "string"
+
+    golden =
+      @server_fixtures
+      |> fixture_lines()
+      |> Enum.map(&Jason.decode!/1)
+      |> Enum.find(&(&1["type"] == "error" and &1["reason"] == "voice_device_elsewhere"))
+
+    assert %{"voice_device" => device, "sentence" => sentence} = golden
+    assert {:ok, {:accessory, _id}} = Endpoint.parse(device)
+
+    test = self()
+
+    client =
+      CallClient.new(
+        endpoint: :desktop,
+        protocol_version: 3,
+        config: Config.current(),
+        emit: fn frame ->
+          send(test, {:emitted, frame})
+          :ok
+        end,
+        task_supervisor: :unused_until_a_session_starts,
+        voice_device: fn -> Endpoint.parse(device) end,
+        accessories_enabled?: fn -> true end
+      )
+
+    assert {:stop, _client} = CallClient.call_start(client)
+    assert_receive {:emitted, frame}
+    assert Jason.decode!(Jason.encode!(frame)) == golden
+    assert sentence != ""
+  end
+
+  # Fable review 3: a choice that cannot be read refuses the Mac's own call
+  # with its own reason and sentence, and names no device.
+  test "the unreadable voice device refusal is a published error reason with a golden row",
+       %{schema: schema} do
+    assert schema["$defs"]["error"]["properties"]["reason"]["description"] =~
+             "voice_device_unreadable"
+
+    golden =
+      @server_fixtures
+      |> fixture_lines()
+      |> Enum.map(&Jason.decode!/1)
+      |> Enum.find(&(&1["type"] == "error" and &1["reason"] == "voice_device_unreadable"))
+
+    test = self()
+
+    client =
+      CallClient.new(
+        endpoint: :desktop,
+        protocol_version: 3,
+        config: Config.current(),
+        emit: fn frame ->
+          send(test, {:emitted, frame})
+          :ok
+        end,
+        task_supervisor: :unused_until_a_session_starts,
+        voice_device: fn -> {:error, {:invalid_voice_device, "/invented"}} end
+      )
+
+    ExUnit.CaptureLog.capture_log(fn ->
+      assert {:stop, _client} = CallClient.call_start(client)
+    end)
+
+    assert_receive {:emitted, frame}
+    assert Jason.decode!(Jason.encode!(frame)) == golden
+    refute Map.has_key?(golden, "voice_device")
   end
 
   test "the golden Live frames carry the call UUID" do
@@ -240,6 +327,72 @@ defmodule FermixCore.Realtime.ProtocolContractTest do
 
     assert {:error, :missing_playback_id} =
              Protocol.decode_client_event(frame.(longest <> "p"), config)
+  end
+
+  # v4, the phone's camera (M87 Phase 2): an optional flag on the hello, which
+  # an older peer never sends, and one client object that states the camera's
+  # state. Its refusals are published with golden rows: the one that closes a
+  # connection sending it where it is not taken, and `camera_off`, which
+  # refuses the event alone and leaves the call up.
+  test "the v4 defs publish the camera as the daemon reads it", %{schema: schema} do
+    defs = schema["$defs"]
+
+    assert %{"type" => "boolean"} = defs["client_hello"]["properties"]["camera"]
+    refute "camera" in defs["client_hello"]["required"]
+
+    assert defs["camera"]["required"] == ["type", "on"]
+    assert %{"type" => "boolean"} = defs["camera"]["properties"]["on"]
+
+    description = defs["error"]["properties"]["reason"]["description"]
+
+    golden =
+      @server_fixtures
+      |> fixture_lines()
+      |> Enum.map(&Jason.decode!/1)
+
+    for reason <- ~w(unsupported_by_endpoint camera_off) do
+      assert description =~ reason, "the error def does not publish #{reason}"
+      assert %{"type" => "error", "reason" => reason} in golden, "no golden #{reason} row"
+    end
+
+    assert description =~ "the one reason that does not end the call"
+    assert defs["camera"]["description"] =~ "the call goes on"
+
+    clients =
+      @client_fixtures
+      |> fixture_lines()
+      |> Enum.map(&Jason.decode!/1)
+
+    assert %{"type" => "client_hello", "protocol_version" => 4, "camera" => true} in clients
+
+    for on <- [true, false],
+        do: assert(%{"type" => "camera", "on" => on} in clients, "no golden camera #{on}")
+  end
+
+  # v5, the call that ends itself (M96 §7): one server object with a required
+  # reason, a golden row the daemon builds exactly, and a v5 hello.
+  test "the v5 def publishes call_ended as the daemon builds it", %{schema: schema} do
+    defs = schema["$defs"]
+
+    assert defs["call_ended"]["required"] == ["type", "reason"]
+    assert %{"type" => "string"} = defs["call_ended"]["properties"]["reason"]
+    assert defs["call_ended"]["description"] =~ "no error"
+    assert defs["call_ended"]["description"] =~ "connection stays open"
+
+    golden =
+      @server_fixtures
+      |> fixture_lines()
+      |> Enum.map(&Jason.decode!/1)
+      |> Enum.find(&(&1["type"] == "call_ended"))
+
+    assert golden == LiveFrames.call_ended(:goodbye) |> Jason.encode!() |> Jason.decode!()
+
+    clients =
+      @client_fixtures
+      |> fixture_lines()
+      |> Enum.map(&Jason.decode!/1)
+
+    assert %{"type" => "client_hello", "protocol_version" => 5} in clients
   end
 
   test "the playback refusals are published error reasons with golden rows", %{schema: schema} do

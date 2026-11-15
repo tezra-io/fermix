@@ -124,6 +124,28 @@ defmodule FermixCore.Prompt.TemplateReconcilerTest do
       assert revision_count(ctx, :fermix_md) == 2
       assert read(ctx, :fermix) == Defaults.fermix_md()
     end
+
+    # An unedited install of the FERMIX.md shipped before the principle that
+    # an outcome's unmentioned dependency is named adopts it, after the bullet
+    # on asking.
+    test "an untouched install of the previous FERMIX.md adopts the outside-dependency principle",
+         ctx do
+      ask = "- Before asking, I use available context and tools."
+
+      principle =
+        "- When the outcome also depends on something outside the request that the user " <>
+          "hasn't mentioned and that would materially change it, I name it in a line instead " <>
+          "of acting on it.\n"
+
+      previous = String.replace(Defaults.fermix_md(), principle, "")
+      refute previous == Defaults.fermix_md()
+      install(ctx, :fermix, previous)
+      seed(ctx, :fermix, previous)
+
+      assert {:ok, report} = TemplateReconciler.run(ctx.opts)
+      assert resource(report, :fermix).outcome == :adopted
+      assert read(ctx, :fermix) =~ ~r/^#{Regex.escape(ask)}[^\n]*\n#{Regex.escape(principle)}/m
+    end
   end
 
   describe "run/1 preservation" do

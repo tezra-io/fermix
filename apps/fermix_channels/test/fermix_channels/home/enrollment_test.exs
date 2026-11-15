@@ -60,6 +60,8 @@ defmodule FermixChannels.Home.EnrollmentTest do
     assert record.name == "north-box"
     assert record.noise_pk == noise.public
     assert record.recipient == pair.public_key
+    assert record.addrs == []
+    assert record.home_format == nil
     refute Map.has_key?(record, :instance)
     assert Bitwise.band(File.stat!(Candidates.path(ctx.primary.root)).mode, 0o777) == 0o600
 
@@ -71,6 +73,35 @@ defmodule FermixChannels.Home.EnrollmentTest do
     :ok = Rail.send_event(again, "enroll_request", request(other))
     assert_refused(again, "enrollment_used", "enrollment used")
     assert {:ok, [_one]} = Candidates.list(ctx.primary.root, HomeMove.now())
+  end
+
+  test "a server's address hints are kept with its candidate record", ctx do
+    home = HomeMove.candidate_home!(ctx.code)
+    {:ok, rail} = open_enrollment(ctx.primary, ctx.code, home)
+    hints = ["100.101.102.103:4033", "[fd7a:115c:a1e0::9]:4033"]
+
+    :ok =
+      Rail.send_event(
+        rail,
+        "enroll_request",
+        put_in(request(home), ["candidate", "addrs"], hints)
+      )
+
+    assert_receive {:rail, ^rail, {:event, %{"t" => "enroll_accepted"}, _bytes}}, 10_000
+    assert {:ok, [%{addrs: ^hints}]} = Candidates.list(ctx.primary.root, HomeMove.now())
+  end
+
+  # M97 D16: the home format the candidate reads is kept for the move's
+  # review; an engine before home formats says none.
+  test "a candidate's home format is kept with its record, and none when it said none", ctx do
+    home = HomeMove.candidate_home!(ctx.code)
+    {:ok, rail} = open_enrollment(ctx.primary, ctx.code, home)
+
+    :ok =
+      Rail.send_event(rail, "enroll_request", put_in(request(home), ["host", "home_format"], 4))
+
+    assert_receive {:rail, ^rail, {:event, %{"t" => "enroll_accepted"}, _bytes}}, 10_000
+    assert {:ok, [%{home_format: 4}]} = Candidates.list(ctx.primary.root, HomeMove.now())
   end
 
   test "a candidate whose enroll_accepted was lost hears it again, as the same candidate",
@@ -158,13 +189,32 @@ defmodule FermixChannels.Home.EnrollmentTest do
 
   test "the candidate process enrolls, drops the code and waits a day", ctx do
     home = HomeMove.candidate_home!(ctx.code)
-    _candidate = HomeMove.start_candidate!(home, ctx.primary)
+    hints = ["100.101.102.103:4033"]
+    _candidate = HomeMove.start_candidate!(home, ctx.primary, hints: fn -> hints end)
 
     state = HomeMove.await_phase(home, "enrolled")
     assert "cand-" <> _id = state["candidate_id"]
+    # Its own endpoint's hints, as it read them when it enrolled.
+    assert {:ok, [%{addrs: ^hints}]} = Candidates.list(ctx.primary.root, HomeMove.now())
     assert state["listen_until"] == "2031-05-05T10:00:00Z"
     refute File.exists?(Candidate.path(home, "code"))
     assert_receive {:scheduled, :listen_end, 86_400_000}, 10_000
+  end
+
+  # The window the candidate enrolled into stays in its state once the code
+  # is gone, so the server's command run again with that code is refused
+  # while the server waits for its move.
+  test "the candidate keeps the window it enrolled into once it enrolled", ctx do
+    {:ok, facts} = EnrollmentCode.decode(ctx.code)
+    window = :crypto.hash(:sha256, facts.secret) |> Base.url_encode64(padding: false)
+    home = HomeMove.candidate_home!(ctx.code)
+    assert {:ok, %{"phase" => "enrolling", "window" => ^window}} = Candidate.read_state(home)
+
+    _candidate = HomeMove.start_candidate!(home, ctx.primary)
+
+    state = HomeMove.await_phase(home, "enrolled")
+    assert state["window"] == window
+    refute File.exists?(Candidate.path(home, "code"))
   end
 
   test "the candidate process ends its enrollment on a refusal, by name, dropping the code",
@@ -176,6 +226,51 @@ defmodule FermixChannels.Home.EnrollmentTest do
     state = HomeMove.await_phase(home, "failed")
     assert state["sentence"] == "The enrollment code expired at studio-mac; open a new one there."
     refute File.exists?(Candidate.path(home, "code"))
+  end
+
+  # Remote reach sleeps until something needs it: the first code after a
+  # start wakes it and waits, rather than refusing a first try.
+  test "a rail asleep is woken and waited for, and the code opens once it is ready", ctx do
+    rail = start_supervised!({HomeMove.WakingRail, self()})
+    suffix = System.unique_integer([:positive])
+
+    enrollment =
+      start_supervised!(
+        {Enrollment,
+         name: :"enrollment_waking_#{suffix}",
+         home: ctx.primary.root,
+         helper: rail,
+         device_store: ctx.primary.store,
+         host_name: fn -> {:ok, "studio-mac"} end,
+         status_changed: fn -> :ok end}
+      )
+
+    opening = Task.async(fn -> Enrollment.open(enrollment) end)
+    assert_receive {:awaited, ^rail}, 10_000
+    HomeMove.WakingRail.wake(rail, %{state: :ready, endpoint_id: ctx.primary.node_id})
+
+    assert {:ok, %{code: code}} = Task.await(opening, 15_000)
+    assert {:ok, %{node_id: node_id}} = EnrollmentCode.decode(code)
+    assert node_id == ctx.primary.node_id
+  end
+
+  test "a rail still starting past the wait is refused in its own sentence" do
+    rail = start_supervised!({HomeMove.WakingRail, self()})
+    suffix = System.unique_integer([:positive])
+
+    enrollment =
+      start_supervised!(
+        {Enrollment, name: :"enrollment_slow_#{suffix}", helper: rail, rail_wait_ms: 100}
+      )
+
+    assert {:error, {:unavailable, sentence}} = Enrollment.open(enrollment)
+
+    assert sentence ==
+             "Remote reach did not start within 10 seconds, so Fermix opened no code. Open " <>
+               "it again in a minute; Doctor says why if remote reach still does not start."
+
+    assert Copy.summary_violations(sentence) == []
+    assert Enrollment.status(enrollment) == nil
   end
 
   test "no code is opened while the rail is not ready" do

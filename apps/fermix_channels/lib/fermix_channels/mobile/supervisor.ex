@@ -23,6 +23,7 @@ defmodule FermixChannels.Mobile.Supervisor do
   require Logger
 
   alias FermixChannels.Desktop.Supervisor, as: DesktopSupervisor
+  alias FermixChannels.Mobile.Call
   alias FermixChannels.Mobile.DeviceRegistry
   alias FermixChannels.Mobile.DeviceStore
   alias FermixChannels.Mobile.Discovery
@@ -36,6 +37,7 @@ defmodule FermixChannels.Mobile.Supervisor do
   alias FermixChannels.Mobile.Push.PigeonDispatcher
   alias FermixChannels.Mobile.RequestCoordinator
   alias FermixChannels.Mobile.Session
+  alias FermixCore.Home.Candidate
   alias FermixCore.Memory.Config, as: MemoryConfig
   alias FermixCore.Memory.Repo, as: MemoryRepo
 
@@ -64,6 +66,12 @@ defmodule FermixChannels.Mobile.Supervisor do
   holds, APNs unreachable) never refuse or stop anything: the listener and the
   push dispatcher stay up, degraded, and say why. Push settings that do not
   resolve never refuse it either: the subtree starts without the dispatcher.
+
+  Every session is told the push services the subtree sends through
+  (`:push_services`): `apns` while its APNs dispatcher runs, and always
+  `fcm`, an Android phone's push through Fermix's push relay
+  (`Mobile.PushRelay`), which needs no process, key or setting of its own
+  (M99 §14).
   """
   @spec start_link(keyword()) :: Supervisor.on_start()
   def start_link(opts \\ []) when is_list(opts) do
@@ -299,7 +307,8 @@ defmodule FermixChannels.Mobile.Supervisor do
       {DeviceRegistry,
        name: names.device_registry,
        device_store: names.device_store,
-       relays_changed: fn -> Iroh.Helper.relays_acknowledged(names.iroh_helper) end},
+       relays_changed: fn -> Iroh.Helper.relays_acknowledged(names.iroh_helper) end,
+       end_call: &Call.notify(names.calls, &1, &2)},
       {PairManager,
        root: root,
        name: names.pair_manager,
@@ -324,6 +333,13 @@ defmodule FermixChannels.Mobile.Supervisor do
              device_store: names.device_store},
             id: names.request_coordinator
           ),
+          # Before the carriers: a phone's session finds its call here, and
+          # starts one under the call supervisor (M87).
+          Supervisor.child_spec({Registry, keys: :unique, name: names.calls}, id: names.calls),
+          Supervisor.child_spec(
+            {DynamicSupervisor, name: names.call_supervisor, strategy: :one_for_one},
+            id: names.call_supervisor
+          ),
           # Before the carriers: a desktop's session starts its peer here.
           {DesktopSupervisor,
            name: names.desktop,
@@ -331,7 +347,7 @@ defmodule FermixChannels.Mobile.Supervisor do
            peer_supervisor: names.desktop_peer_supervisor},
           {Discovery, name: names.discovery, bind: listener_bind(opts)},
           {Listener, listener_opts(opts, root, names)},
-          {MdnsAdvertiser, mdns_opts(opts, names)},
+          {MdnsAdvertiser, mdns_opts(opts, root, names)},
           # Last, so its restart, and its live switch, touch nothing else.
           {Iroh, iroh_opts(opts, root, names)}
         ]
@@ -377,7 +393,9 @@ defmodule FermixChannels.Mobile.Supervisor do
       bridge_connections: FermixChannels.Mobile.Iroh.Connections,
       desktop: DesktopSupervisor,
       desktop_peers: FermixChannels.Desktop.Peers,
-      desktop_peer_supervisor: FermixChannels.Desktop.PeerSupervisor
+      desktop_peer_supervisor: FermixChannels.Desktop.PeerSupervisor,
+      calls: FermixChannels.Mobile.Calls,
+      call_supervisor: FermixChannels.Mobile.CallSupervisor
     }
 
     Map.merge(defaults, Keyword.get(opts, :names, %{}))
@@ -413,7 +431,8 @@ defmodule FermixChannels.Mobile.Supervisor do
     if key in @secret_sentinels do
       Logger.error(
         "mobile push is enabled but its APNs key is still the #{key} sentinel — " <>
-          "its secret store could not be read this boot. Mobile started WITHOUT push; " <>
+          "its secret store could not be read this boot. Mobile started WITHOUT push to " <>
+          "iPhones (Android phones are still pushed); " <>
           "unlock the keychain and restart, or run `fermix doctor` to confirm."
       )
 
@@ -436,17 +455,20 @@ defmodule FermixChannels.Mobile.Supervisor do
   defp without_push(reason) do
     Logger.error(
       "mobile push settings do not resolve (#{inspect(reason)}). " <>
-        "Mobile started WITHOUT push; fix [fermix_channels.mobile.push] and restart, " <>
+        "Mobile started WITHOUT push to iPhones (Android phones are still pushed); " <>
+        "fix [fermix_channels.mobile.push] and restart, " <>
         "or run `fermix doctor` to confirm."
     )
 
     []
   end
 
-  # The services a phone is told this daemon pushes through: those whose
-  # dispatcher starts, so a phone never registers for one that cannot send.
+  # The services a phone is told this daemon pushes through: APNs when its
+  # dispatcher starts, so a phone never registers for one that cannot send,
+  # and the relay's `fcm`, which has nothing that could fail to start. The
+  # session names `fcm` only to a phone at the version that carries it.
   defp push_services(push_children) do
-    Enum.map(push_children, fn {PigeonDispatcher, _opts} -> "apns" end)
+    Enum.map(push_children, fn {PigeonDispatcher, _opts} -> "apns" end) ++ ["fcm"]
   end
 
   defp media_opts(opts, root, name),
@@ -479,6 +501,8 @@ defmodule FermixChannels.Mobile.Supervisor do
       iroh_helper: names.iroh_helper,
       desktop_peers: names.desktop_peers,
       desktop_peer_supervisor: names.desktop_peer_supervisor,
+      calls: names.calls,
+      call_supervisor: names.call_supervisor,
       max_media_bytes: Keyword.get(config, :max_media_bytes, @default_max_media_bytes),
       push_environment: config |> Keyword.get(:push, []) |> Keyword.get(:environment),
       push_services: push_services
@@ -512,13 +536,28 @@ defmodule FermixChannels.Mobile.Supervisor do
     Keyword.get(explicit, :bind, Keyword.get(config, :bind, "0.0.0.0"))
   end
 
-  defp mdns_opts(opts, names) do
+  defp mdns_opts(opts, root, names) do
     config = Keyword.get(opts, :config, [])
 
     [
       name: names.mdns_advertiser,
-      enabled: Keyword.get(config, :advertise_mdns, false),
+      enabled: announces?(Keyword.get(config, :advertise_mdns, false), root),
       port: Keyword.get(config, :port, 4_031)
     ]
+  end
+
+  # An Always On server is no LAN host, so it announces nothing whatever the
+  # settings it took from the home say. It knows it is one by the mark its
+  # enrollment left, which stays on the machine through the move, as the
+  # fixed port reads it (`Iroh.Hints.bind_port/1`).
+  defp announces?(false, _root), do: false
+
+  defp announces?(true, root) do
+    if Candidate.server?(root) do
+      Logger.info("mobile mDNS: an Always On server announces nothing on its network")
+      false
+    else
+      true
+    end
   end
 end

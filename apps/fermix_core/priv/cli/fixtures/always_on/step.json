@@ -3,46 +3,41 @@
   "result": {
     "result": null,
     "summary": {
-      "action": {
-        "confirm": "Cancel and delete your server? Everything Fermix created for it is deleted.",
-        "id": "cancel",
-        "key": "lW7Sx3Zz1dpg_Diwa6TmhA",
-        "label": "Cancel",
-        "needs": [],
-        "url": null
-      },
+      "action": null,
       "detail": {
-        "lines": [
+        "alternatives": [
           {
-            "label": "Server",
-            "value": "fermix-general-a3f9"
+            "confirm": null,
+            "id": "cancel",
+            "key": "PGFKmgUa3i48MJgwQSKf-g",
+            "label": "Cancel the code",
+            "needs": []
+          }
+        ],
+        "steps": [
+          {
+            "label": "Connect your server",
+            "state": "active"
           },
           {
-            "label": "Size",
-            "value": "CPX22"
+            "label": "Move now",
+            "state": "pending"
           },
           {
-            "label": "Place",
-            "value": "Falkenstein"
+            "label": "Send your home",
+            "state": "pending"
           },
           {
-            "label": "Address",
-            "value": "203.0.113.7"
-          },
-          {
-            "label": "Last checked",
-            "value": "Sunday, May 4, 2031 at 1:59 PM CEST"
-          },
-          {
-            "label": "Costs",
-            "value": "€8.33 a month, billed by the hour until deleted"
+            "label": "Switch over",
+            "state": "pending"
           }
         ]
       },
-      "key": "IurlVhODFUU1O0uKPI2ezA",
+      "help": "https://fermix.ai/docs/always-on/#set-up-your-server",
+      "key": "MYG-kWQCVf9PYa0b7sKbYw",
       "notice": null,
       "outcome": "running",
-      "sentence": "Installing Fermix on your server…",
+      "sentence": "Connecting your server…",
       "state": "creating"
     }
   },

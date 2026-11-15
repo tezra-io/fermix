@@ -3,8 +3,9 @@ defmodule Mix.Tasks.Fermix.Cues.Funnel do
 
   @moduledoc """
   Puts one webhook source on the internet through Tailscale Funnel (M60 §6.5)
-  from a source checkout; a release's setup page shows the same mount command
-  (`Cues.Webhook.funnel_args/2`) without this task's port check:
+  from a source checkout; a release's setup page and the Always On screen show
+  the same mount command (`FermixCore.Funnel`, its one builder) without this
+  task's port check:
 
       mix fermix.cues.funnel <source_ref> [--apply]
       mix fermix.cues.funnel <source_ref> --remove [--apply]
@@ -22,15 +23,18 @@ defmodule Mix.Tasks.Fermix.Cues.Funnel do
   running and Funnel allowed for this machine) and `tailscale funnel status
   --json`. Funnel is allowed per host and port, not per path, so it refuses to
   add a mount while port 443 carries one Fermix did not make: a handler that
-  is not a `/cues/hooks/<ref>/<random>` path proxied to the same path on
+  is not one `FermixCore.Funnel` builds (a `/cues/hooks/<ref>/<random>` path,
+  a source's `/cues/hooks/<ref>` prefix, which the Always On screen mounts,
+  or WhatsApp's `/webhook/whatsapp`) proxied to the same path on
   `127.0.0.1`, or a raw TCP forward, in the background config or a foreground
   session. A source already mounted at its path is left alone; one mounted at
-  an older path must be removed first.
+  an older path, or at its prefix, must be removed first.
 
   `--remove` removes every mount of the source found in the Funnel status
-  (`tailscale funnel --https=<port> --set-path=<path> off`), so it works after
-  the URL changed or the source left the config. Disabling or removing a
-  source in settings does not remove its mount; this does.
+  (`tailscale funnel --https=<port> --set-path=<path> off`), its prefix
+  included, so it works after the URL changed or the source left the config.
+  Disabling or removing a source in settings does not remove its mount; this
+  does.
 
   It reads the current `FERMIX_HOME`'s config without resolving any other
   secret and starts no daemon tree. The source's URL is made
@@ -42,12 +46,14 @@ defmodule Mix.Tasks.Fermix.Cues.Funnel do
 
   alias FermixCore.Cues.Config, as: CuesConfig
   alias FermixCore.Cues.Webhook
+  alias FermixCore.Funnel
   alias FermixCore.Setup.ConfigStore
   alias FermixCore.Setup.SecretWriter
 
   @usage "usage: mix fermix.cues.funnel <source_ref> [--remove] [--apply]"
   @funnel_port "443"
   @hook_path ~r|\A/cues/hooks/[a-z0-9][a-z0-9-]{0,63}/[A-Za-z0-9_-]{1,128}\z|
+  @hook_prefix ~r|\A/cues/hooks/[a-z0-9][a-z0-9-]{0,63}\z|
   @loopback_target ~r|\Ahttp://127\.0\.0\.1:\d{1,5}(/.*)\z|
   @funnel_caps ["funnel", "https://tailscale.com/cap/funnel"]
   @funnel_cap_prefix "https://tailscale.com/cap/funnel"
@@ -97,7 +103,7 @@ defmodule Mix.Tasks.Fermix.Cues.Funnel do
   defp mount(ref, apply?, runner) do
     {port, random} = source_url!(ref)
     path = Webhook.path(ref, random)
-    [_funnel, _bg, _set_path, target] = args = Webhook.funnel_args(path, port)
+    [_funnel, _bg, _set_path, target] = args = Funnel.mount_args(path, port)
     url = "https://#{tailnet_host!(runner)}#{path}"
     mounts = funnel_mounts!(runner)
     check_port!(mounts)
@@ -120,7 +126,7 @@ defmodule Mix.Tasks.Fermix.Cues.Funnel do
   end
 
   defp add_mount(args, url, apply?, runner) do
-    Mix.shell().info("The Funnel mount for this source:\n  " <> command_line(args))
+    Mix.shell().info("The Funnel mount for this source:\n  " <> Funnel.command(args))
 
     if apply? do
       print_output(call!(runner, args))
@@ -138,7 +144,7 @@ defmodule Mix.Tasks.Fermix.Cues.Funnel do
           snapshot
 
         {:error, reason} ->
-          Mix.raise("config.toml could not be read: #{ConfigStore.load_error_sentence(reason)}")
+          Mix.raise("The settings could not be read: #{ConfigStore.load_error_sentence(reason)}")
       end
 
     cues = Keyword.get(snapshot.fermix_core, :cues, [])
@@ -194,7 +200,7 @@ defmodule Mix.Tasks.Fermix.Cues.Funnel do
 
   defp remove_mount(mount, apply?, runner) do
     args = ["funnel", "--https=#{mount.port}", "--set-path=" <> mount.path, "off"]
-    Mix.shell().info("Removing the Funnel mount at #{mount.path}:\n  " <> command_line(args))
+    Mix.shell().info("Removing the Funnel mount at #{mount.path}:\n  " <> Funnel.command(args))
 
     if apply? do
       print_output(call!(runner, args))
@@ -278,14 +284,26 @@ defmodule Mix.Tasks.Fermix.Cues.Funnel do
   defp handler_target(%{"Text" => _text}), do: "a text reply"
   defp handler_target(_other), do: "another handler"
 
+  # A mount `FermixCore.Funnel` makes: a source's hook path, a source's
+  # prefix (Always On's), or WhatsApp's path, proxied to the same path on
+  # loopback.
   defp fermix_mount?(%{path: path, target: target}) when is_binary(path) do
-    Regex.match?(@hook_path, path) and match?([_url, ^path], Regex.run(@loopback_target, target))
+    fermix_path?(path) and match?([_url, ^path], Regex.run(@loopback_target, target))
   end
 
   defp fermix_mount?(_tcp_forward), do: false
 
+  defp fermix_path?(path),
+    do:
+      Regex.match?(@hook_path, path) or Regex.match?(@hook_prefix, path) or
+        path == Funnel.whatsapp_path()
+
+  # The source's hook paths, and its prefix, which the Always On screen mounts.
   defp own_mount?(mount, ref),
-    do: fermix_mount?(mount) and String.starts_with?(mount.path, "/cues/hooks/#{ref}/")
+    do:
+      fermix_mount?(mount) and
+        (String.starts_with?(mount.path, "/cues/hooks/#{ref}/") or
+           mount.path == Webhook.prefix_path(ref))
 
   defp check_port!(mounts) do
     case Enum.find(mounts, &(&1.port == @funnel_port and not fermix_mount?(&1))) do
@@ -319,7 +337,7 @@ defmodule Mix.Tasks.Fermix.Cues.Funnel do
 
       _not_an_object ->
         Mix.raise(
-          "Fermix could not read `#{command_line(args)}`: it did not answer a JSON object."
+          "Fermix could not read `#{Funnel.command(args)}`: it did not answer a JSON object."
         )
     end
   end
@@ -333,7 +351,7 @@ defmodule Mix.Tasks.Fermix.Cues.Funnel do
         output
 
       {output, status} when is_binary(output) and is_integer(status) ->
-        Mix.raise("`#{command_line(args)}` failed (exit #{status}): #{String.trim(output)}")
+        Mix.raise("`#{Funnel.command(args)}` failed (exit #{status}): #{String.trim(output)}")
     end
   end
 
@@ -343,8 +361,6 @@ defmodule Mix.Tasks.Fermix.Cues.Funnel do
       text -> Mix.shell().info(text)
     end
   end
-
-  defp command_line(args), do: Enum.join(["tailscale" | args], " ")
 
   defp map_at(map, key) do
     case Map.get(map, key) do

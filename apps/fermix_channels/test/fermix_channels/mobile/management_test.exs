@@ -9,6 +9,7 @@ defmodule FermixChannels.Mobile.ManagementTest do
   alias FermixChannels.Mobile.Management
   alias FermixChannels.Mobile.PairManager
   alias FermixChannels.Mobile.Supervisor, as: MobileSupervisor
+  alias FermixCore.Computers.Store, as: ComputerStore
   alias FermixTestSupport.SafeRm
 
   @endpoint_id "79b5562e8fe654f94078b112e8a98ba7901f853ae695bed7e0e3910bad049664"
@@ -257,6 +258,7 @@ defmodule FermixChannels.Mobile.ManagementTest do
       end,
       list_devices: fn :store -> {:ok, [%{}]} end,
       latest_pair: fn :pair -> :none end,
+      push_relay: fn DeviceRegistry -> :unknown end,
       load_identity: fn [] -> {:ok, %{gateway_public_key: <<7::256>>}} end
     ]
 
@@ -397,6 +399,7 @@ defmodule FermixChannels.Mobile.ManagementTest do
         refusal: fn :store -> :none end,
         listener_info: fn :listener -> {:ok, {{0, 0, 0, 0}, 40_321}} end,
         discover: fn -> {:ok, [%{address: "192.168.1.8", interface: "en0", scope: :lan}]} end,
+        push_relay: fn DeviceRegistry -> :unknown end,
         host_label: fn -> "workstation" end
       ]
 
@@ -1003,33 +1006,76 @@ defmodule FermixChannels.Mobile.ManagementTest do
       assert {:ok, [%{device_id: ^kept}]} = DeviceStore.list(root: root)
     end
 
-    # The desktop a move linked to this primary is refused, running or not:
-    # this version cannot link it again, and it keeps the server's snapshots.
-    test "a desktop is refused and stays, whether the channel runs or not" do
+    # M97 §3.3: a computer can be removed, and joins again with a code. Its
+    # record of what it offered goes with its row.
+    test "a computer is removed, and its record with it" do
       desktop = "33333333-3333-4333-8333-333333333333"
-      attrs = device_attrs(desktop) |> Map.drop([:push_token, :apns_key_salt])
-      root = stored_root([Map.put(attrs, :kind, :desktop)])
+      holder = "44444444-4444-4444-8444-444444444444"
+
+      root =
+        stored_root([
+          computer_attrs(desktop, "Loft Linux", false),
+          computer_attrs(holder, "Studio Mac", true)
+        ])
+
+      :ok = ComputerStore.record(root, desktop, %{engine_version: "0.31.0"})
 
       stopped =
         serving_opts(
           config: [enabled: false],
           root: root,
           whereis: fn MobileSupervisor -> nil end,
-          revoke_requests: fn _id -> flunk("a desktop's work is not revoked") end
+          revoke_requests: fn _id -> :ok end
         )
 
-      assert {:error, :desktop_device} = Management.devices_revoke(desktop, stopped)
-      assert {:error, :desktop_device} = Management.revoke_device(desktop, stopped)
+      assert {:ok, %{device_id: ^desktop}} = Management.devices_revoke(desktop, stopped)
+      assert {:ok, [%{device_id: ^holder}]} = DeviceStore.list(root: root)
+      assert {:ok, records} = ComputerStore.read_all(root)
+      refute Map.has_key?(records, desktop)
+    end
+
+    # The one computer that keeps the server's backup copies is named, and
+    # removed only once the owner confirmed it, running or not.
+    test "the only computer keeping backups is removed only once confirmed" do
+      desktop = "33333333-3333-4333-8333-333333333333"
+      root = stored_root([computer_attrs(desktop, "Studio Mac", true)])
+      test_pid = self()
+
+      stopped =
+        serving_opts(
+          config: [enabled: false],
+          root: root,
+          whereis: fn MobileSupervisor -> nil end,
+          revoke_requests: fn id -> send(test_pid, {:requests_revoked, id}) && :ok end
+        )
+
+      assert {:error, {:only_backups, "Studio Mac"}} = Management.devices_revoke(desktop, stopped)
+      refute_received {:requests_revoked, _id}
 
       running =
         serving_opts(
+          root: root,
           device_registry: :registry,
           fetch_device: fn :store, ^desktop -> DeviceStore.fetch(desktop, root: root) end,
-          revoke_device: fn _registry, _id -> flunk("a desktop is not revoked") end
+          list_devices: fn :store -> DeviceStore.list(root: root) end,
+          revoke_device: fn _registry, _id -> flunk("an unconfirmed removal reaches nothing") end
         )
 
-      assert {:error, :desktop_device} = Management.devices_revoke(desktop, running)
-      assert {:ok, [%{device_id: ^desktop, kind: :desktop}]} = DeviceStore.list(root: root)
+      assert {:error, {:only_backups, "Studio Mac"}} = Management.devices_revoke(desktop, running)
+      assert {:ok, [%{device_id: ^desktop}]} = DeviceStore.list(root: root)
+
+      confirmed =
+        Keyword.merge(running,
+          confirmed: true,
+          revoke_device: fn :registry, ^desktop ->
+            send(test_pid, {:registry_revoked, desktop})
+            DeviceStore.delete(desktop, root: root)
+          end
+        )
+
+      assert {:ok, %{device_id: ^desktop}} = Management.devices_revoke(desktop, confirmed)
+      assert_received {:registry_revoked, ^desktop}
+      assert {:ok, []} = DeviceStore.list(root: root)
     end
   end
 
@@ -1085,6 +1131,7 @@ defmodule FermixChannels.Mobile.ManagementTest do
                identity: %{present: false, fingerprint: nil},
                remote: %{state: :off},
                apns: %{enabled: false, credentials: :missing, delivery: :down, reason: nil},
+               push_relay: :unknown,
                paired_devices: 0,
                protocol_version: FermixChannels.Mobile.Protocol.protocol_version(),
                pairing: nil
@@ -1193,6 +1240,42 @@ defmodule FermixChannels.Mobile.ManagementTest do
 
       assert {:error, {:dependency_exit, :latest_pair, {:timeout, _call}}} =
                Management.status(running.(latest_pair: timeout))
+
+      gone = fn DeviceRegistry -> exit({:noproc, {GenServer, :call, [DeviceRegistry]}}) end
+
+      assert {:error, {:dependency_exit, :push_relay, {:noproc, _call}}} =
+               Management.status(running.(push_relay: gone))
+
+      assert {:error, {:invalid_push_relay_reply, :maybe}} =
+               Management.status(running.(push_relay: fn DeviceRegistry -> :maybe end))
+    end
+
+    # M99 §6: whether Fermix's push relay could be reached is the registry's
+    # fact, read as it holds it while the channel runs.
+    test "a running channel reports whether the push relay could be reached" do
+      registry =
+        start_supervised!(
+          {DeviceRegistry,
+           name: :"management_relay_registry_#{System.unique_integer([:positive])}",
+           emit_relay: fn _status, _failures, _class -> :ok end}
+        )
+
+      opts =
+        serving_opts(
+          list_devices: fn :store -> {:ok, []} end,
+          device_registry: registry,
+          push_relay: &DeviceRegistry.push_relay/1
+        )
+
+      assert {:ok, %{push_relay: :unknown}} = Management.status(opts)
+
+      capture_log(fn ->
+        :ok = DeviceRegistry.relay_outcome(registry, {:unreachable, :gateway})
+        assert {:ok, %{push_relay: :unreachable}} = Management.status(opts)
+
+        :ok = DeviceRegistry.relay_outcome(registry, :reached)
+        assert {:ok, %{push_relay: :reachable}} = Management.status(opts)
+      end)
     end
 
     test "a running channel reports the listener, reachability, devices and window" do
@@ -1539,6 +1622,7 @@ defmodule FermixChannels.Mobile.ManagementTest do
         mdns_status: fn :mdns -> :disabled end,
         discover: fn -> {:ok, []} end,
         latest_pair: fn :pair -> :none end,
+        push_relay: fn DeviceRegistry -> :unknown end,
         load_identity: fn [] -> {:error, :missing} end
       ],
       overrides
@@ -1565,6 +1649,7 @@ defmodule FermixChannels.Mobile.ManagementTest do
       listener_info: unreachable.(:listener_info),
       mdns_status: unreachable.(:mdns_status),
       latest_pair: unreachable.(:latest_pair),
+      push_relay: unreachable.(:push_relay),
       discover: fn -> flunk("discover must not be called") end
     ]
   end
@@ -1618,6 +1703,13 @@ defmodule FermixChannels.Mobile.ManagementTest do
       last_seen: nil,
       apns_key_salt: :crypto.strong_rand_bytes(32)
     }
+  end
+
+  defp computer_attrs(device_id, name, backups) do
+    device_id
+    |> device_attrs()
+    |> Map.drop([:push_token, :apns_key_salt])
+    |> Map.merge(%{name: name, kind: :desktop, platform: "linux", backups: backups})
   end
 
   defp stored_root(devices) do

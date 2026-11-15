@@ -58,11 +58,19 @@ defmodule FermixCore.Capabilities.BuiltinSeeder do
   # reason: `checklist_tools_trust_invariant_test.exs` loops over it and asserts
   # both directions of its membership for every `checklist_*` built-in. Seeded
   # always; every member's `advertise?/1` and `execute/2` ask
-  # `Checklists.Access`, so only the owner's private turn or voice call, or a
+  # `Kept.Access`, so only the owner's private turn or voice call, or a
   # job whose allowed tools name it, is offered one.
   @checklist_tool_modules [
     FermixCore.Tools.ChecklistRead,
     FermixCore.Tools.ChecklistEdit
+  ]
+
+  # The owner's trips (M89 §14), named as its own list for the same reason:
+  # `trip_tools_trust_invariant_test.exs` loops over it. Seeded always, gated
+  # by `Kept.Access` as the lists' tools are.
+  @trip_tool_modules [
+    FermixCore.Tools.TripRead,
+    FermixCore.Tools.TripEdit
   ]
 
   @builtin_tool_modules [
@@ -128,7 +136,10 @@ defmodule FermixCore.Capabilities.BuiltinSeeder do
     FermixCore.Tools.OpenLoopRespond,
     # The lists family; keep `@checklist_tool_modules` in step.
     FermixCore.Tools.ChecklistRead,
-    FermixCore.Tools.ChecklistEdit
+    FermixCore.Tools.ChecklistEdit,
+    # The trips family; keep `@trip_tool_modules` in step.
+    FermixCore.Tools.TripRead,
+    FermixCore.Tools.TripEdit
   ]
 
   def child_spec(opts) do
@@ -171,9 +182,12 @@ defmodule FermixCore.Capabilities.BuiltinSeeder do
   ]
 
   # Computer use: the single tool is seeded only when `ComputerUse.ready?()`
-  # (enabled + sidecar installed + OS permissions granted). Disabled-or-unready =
-  # zero residue: the LLM never sees a tool it cannot run. Re-evaluated each boot,
-  # which (with the save+restart enable flow) is the readiness-transition trigger.
+  # (enabled + sidecar installed + OS permissions granted), or on a primary that
+  # may drive a computer's screen (`ComputerUse.drives_computers?/1`, M97 §6.4),
+  # where each turn offers it only while a screen is in reach (its
+  # `advertise?/1`). Neither = zero residue: the LLM never sees a tool it cannot
+  # run. Re-evaluated each boot, which (with the save+restart enable flow) is the
+  # readiness-transition trigger.
   @computer_use_tool_modules [FermixCore.Tools.ComputerUse]
 
   # Meetings notetaker (MILESTONE_21 C2 §14.1): seeded only when
@@ -278,6 +292,14 @@ defmodule FermixCore.Capabilities.BuiltinSeeder do
   def checklist_tool_modules, do: @checklist_tool_modules
 
   @doc """
+  The trip tool family (M89 §14). Exposed so the whole-surface invariant test
+  gates EVERY member: none is offered outside the owner's private turn or
+  voice call and a job that names it.
+  """
+  @spec trip_tool_modules() :: [module()]
+  def trip_tool_modules, do: @trip_tool_modules
+
+  @doc """
   The meetings notetaker tool family (MILESTONE_21 C2 §14.1). Exposed so the
   not-ready invariant test gates the WHOLE feature surface: the assertion is
   that NO member is advertised when `Meetings.ready?()` is false, looped over
@@ -302,7 +324,7 @@ defmodule FermixCore.Capabilities.BuiltinSeeder do
       :error ->
         @builtin_tool_modules ++
           bridge_modules() ++
-          computer_use_modules() ++
+          computer_use_modules([]) ++
           auto_harness_modules() ++ meetings_modules() ++ cue_modules()
     end
   end
@@ -322,8 +344,23 @@ defmodule FermixCore.Capabilities.BuiltinSeeder do
     if Deferral.enabled?(), do: @bridge_tool_modules, else: []
   end
 
-  defp computer_use_modules do
-    if ComputerUse.ready?(), do: @computer_use_tool_modules, else: []
+  @doc """
+  The computer-use tool, when this boot can reach a screen: its own
+  (`:ready?`, `ComputerUse.ready?/0`) or a computer's (`:drives_computers?`,
+  `ComputerUse.drives_computers?/1`). The second is off under `mix test`
+  (compile-time env), so the shared test registry is not perturbed; a test
+  passes it.
+  """
+  @spec computer_use_modules(keyword()) :: [module()]
+  def computer_use_modules(opts) when is_list(opts) do
+    ready? = Keyword.get_lazy(opts, :ready?, &ComputerUse.ready?/0)
+
+    computers? =
+      Keyword.get_lazy(opts, :drives_computers?, fn ->
+        @compiled_env != :test and ComputerUse.drives_computers?()
+      end)
+
+    if ready? or computers?, do: @computer_use_tool_modules, else: []
   end
 
   defp meetings_modules do

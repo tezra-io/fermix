@@ -15,6 +15,12 @@ defmodule FermixCore.Companion.ProtocolContractTest do
   alias FermixCore.Companion.Protocol
   alias FermixCore.Cues.ProposalView
   alias FermixCore.ReplyBlocks
+  alias FermixCore.Temporal.Card
+  alias FermixCore.Temporal.Defaults
+  alias FermixCore.Temporal.Registry
+  alias FermixCore.Trips.Ops, as: TripOps
+  alias FermixCore.Trips.Place
+  alias FermixCore.Trips.Registry, as: TripRegistry
 
   @priv_dir Application.app_dir(:fermix_core, "priv/companion")
   @schema_path Path.join(@priv_dir, "protocol.schema.json")
@@ -41,6 +47,14 @@ defmodule FermixCore.Companion.ProtocolContractTest do
   # The events version 7 brought: the owner's files, by path.
   @version_7_client_events ~w(attach_file)
   @version_7_server_events ~w(attach_status)
+  # The events version 8 brought for the owner's trips (M89 §06).
+  @version_8_trip_client_events ~w(trips_pull trip_pull trip_edit trip_share)
+  @version_8_trip_server_events ~w(trips trip trip_shared)
+  # The fields a stop's place keeps (`Trips.Place`, C32).
+  @trip_place_fields ~w(name location address apple_place_id source_url canonical_url categories)
+  @trip_town_fields ~w(latitude longitude name radius_meters)
+  # The characters an engine-minted id is made of (`Kept.Ids`): no i, l, o, u.
+  @minted_trip_id ~r/\At[ri]_[0-9a-hjkmnp-tv-z]{10}\z/
   # The follow-up's fields of a card version 5 brought (M60_WATCHER_CODING_RUNS.md §6.2).
   @follow_up_fields ~w(asks offers_always_allow name instructions tools reports_to)
 
@@ -128,7 +142,8 @@ defmodule FermixCore.Companion.ProtocolContractTest do
     end
 
     assert Protocol.owner_server_events() ==
-             @version_4_server_events ++ @version_6_list_server_events
+             @version_4_server_events ++
+               @version_6_list_server_events ++ @version_8_trip_server_events
 
     assert protocol =~ "### Version 4: proposals on the owner's devices"
     assert protocol =~ "## Proposals"
@@ -217,8 +232,9 @@ defmodule FermixCore.Companion.ProtocolContractTest do
     assert protocol =~ "## When Always On changes"
   end
 
-  # M85 §07: the owner's lists are version 6 events this wire alone carries,
-  # sent only to the owner's connection; the ops and bounds the schema
+  # M85 §07: the owner's lists are version 6 events of this wire, sent only to
+  # the owner's connection, never in the phone's shared broadcast: a phone
+  # reaches them over its list channel (M85 E4); the ops and bounds the schema
   # publishes are the engine's, and the goldens carry every op and shape.
   test "the owner's lists are version 6 events this wire does not share, with goldens", %{
     schema: schema,
@@ -266,11 +282,165 @@ defmodule FermixCore.Companion.ProtocolContractTest do
     flat = String.replace(protocol, ~r/\s+/, " ")
     assert protocol =~ "## Lists"
     assert flat =~ "Version 6 also brings the owner's lists"
-    assert flat =~ "The phone's wire does not carry lists in this version."
+    assert flat =~ "A phone carries the same events over its list channel on the mobile wire"
+    assert flat =~ "**A phone's list channel.**"
     assert flat =~ "at most once per 100 ms"
 
     for op <- ChecklistRegistry.device_ops() do
       assert protocol =~ ~r/^\| `#{op}`|, `#{op}` \|/m, "PROTOCOL.md has no row for the #{op} op"
+    end
+  end
+
+  # M89 §06: the owner's trips are the lists' family again on version 8, under
+  # the lists' rules word for word, sent only to the owner's connection; the
+  # ops and bounds the schema publishes are the engine's, and the goldens carry
+  # every op, what a create and an add made, a duplicate, a refusal, every
+  # shape of a row and the shared form.
+  test "the owner's trips are version 8 events this wire does not share, with goldens", %{
+    schema: schema,
+    protocol: protocol
+  } do
+    defs = schema["$defs"]
+
+    for type <- @version_8_trip_client_events do
+      assert Protocol.client_event_version(type) == 8, "#{type} is not a version 8 event"
+      assert defs[type]["x-since-version"] == 8
+      refute type in Protocol.shared_client_events()
+    end
+
+    for type <- @version_8_trip_server_events do
+      assert Protocol.server_event_version(type) == 8, "#{type} is not a version 8 event"
+      assert defs[type]["x-since-version"] == 8
+      refute type in Protocol.shared_server_events()
+      assert type in Protocol.owner_server_events()
+    end
+
+    assert defs["tripOp"]["properties"]["op"]["enum"] == TripRegistry.device_ops()
+
+    for type <- ~w(trip_edit trip_share) do
+      assert defs[type]["properties"]["client_msg_id"]["maxLength"] == Protocol.max_trip_msg_id()
+    end
+
+    assert defs["trips"]["properties"]["trips"]["maxItems"] == TripOps.max_trips()
+    assert defs["tripObject"]["properties"]["rows"]["maxItems"] == TripOps.max_rows()
+
+    assert defs["tripPlace"]["properties"] |> Map.keys() |> Enum.sort() ==
+             Enum.sort(@trip_place_fields)
+
+    assert Enum.sort(defs["tripPlace"]["required"]) == ~w(location name)
+
+    # M89: a day's town, the keys `Trips.Wire` writes, on a day alone.
+    town = defs["tripTown"]
+    assert town["properties"] |> Map.keys() |> Enum.sort() == @trip_town_fields
+    assert Enum.sort(town["required"]) == @trip_town_fields
+    assert town["properties"]["name"]["x-max-bytes"] == 120
+    assert town["properties"]["radius_meters"]["minimum"] == 1
+    assert defs["tripRow"]["properties"]["town"] == %{"$ref" => "#/$defs/tripTown"}
+
+    edits = @client_fixtures |> jsonl() |> Enum.filter(&(&1["type"] == "trip_edit"))
+
+    assert edits |> Enum.map(& &1["op"]["op"]) |> MapSet.new() ==
+             MapSet.new(TripRegistry.device_ops())
+
+    assert Enum.any?(edits, &match?(%{"op" => %{"op" => "restore", "title" => _}}, &1))
+    assert Enum.any?(edits, &match?(%{"op" => %{"op" => "add", "place" => _}}, &1))
+    assert Enum.any?(edits, &match?(%{"op" => %{"op" => "edit", "unplace" => true}}, &1))
+
+    server = jsonl(@server_fixtures)
+    trips = Enum.filter(server, &(&1["type"] == "trip"))
+    assert_trip_goldens(trips, edits)
+
+    shared = Enum.find(server, &(&1["type"] == "trip_shared"))
+    assert shared["profile_id"] == "main"
+    assert shared["text"] =~ "https://maps.apple.com/"
+
+    assert Enum.any?(
+             server,
+             &(&1["type"] == "accepted" and &1["duplicate"] == true and
+                 &1["client_msg_id"] in Enum.map(edits, fn edit -> edit["client_msg_id"] end))
+           )
+
+    assert Enum.any?(
+             server,
+             &(&1["reason"] == "request_failed" and
+                 &1["message"] == "That row is not in this trip any more; pull the trip again." and
+                 is_binary(&1["client_msg_id"]))
+           )
+
+    for id <- golden_trip_ids(jsonl(@client_fixtures) ++ server) do
+      assert Regex.match?(@minted_trip_id, id), "#{id} is not an id the engine mints"
+    end
+
+    for place <- golden_trip_places(trips ++ edits), do: assert(Place.cut(place) == {:ok, place})
+
+    assert_trips_documented(protocol)
+  end
+
+  defp assert_trip_goldens(trips, edits) do
+    made = Enum.flat_map(trips, &Map.to_list(Map.get(&1, "made", %{})))
+    rows = Enum.flat_map(trips, & &1["trip"]["rows"])
+    stops = Enum.filter(rows, &(&1["kind"] == "stop"))
+    sent = Map.new(edits, &{&1["client_msg_id"], &1["op"]["op"]})
+    made_by = for {id, made_id} <- made, do: {sent[id], binary_part(made_id, 0, 3)}
+
+    assert {"create", "tr_"} in made_by
+    assert {"add", "ti_"} in made_by
+    assert Enum.any?(stops, &(Map.has_key?(&1, "place") and Map.has_key?(&1, "leg_m")))
+    assert Enum.any?(stops, &(not Map.has_key?(&1, "place")))
+    assert Enum.any?(stops, &(&1["fixed"] == true and is_binary(&1["note"])))
+    assert Enum.any?(rows, &(&1["kind"] == "day" and is_binary(&1["date"])))
+    assert Enum.any?(rows, &(&1["kind"] == "day" and not Map.has_key?(&1, "text")))
+    assert Enum.any?(trips, &Map.has_key?(&1["trip"], "removed_at"))
+    assert Enum.any?(trips, &Map.has_key?(&1["trip"], "removed"))
+    assert Enum.any?(trips, &(not Map.has_key?(&1["trip"], "starts_on")))
+
+    days = Enum.filter(rows, &(&1["kind"] == "day"))
+    assert Enum.any?(days, &Map.has_key?(&1, "town"))
+    assert Enum.any?(days, &(not Map.has_key?(&1, "town")))
+    refute Enum.any?(stops, &Map.has_key?(&1, "town"))
+
+    for %{"town" => town} <- days do
+      assert town |> Map.keys() |> Enum.sort() == @trip_town_fields
+      assert is_integer(town["radius_meters"]) and town["radius_meters"] >= 1
+    end
+
+    removed = Enum.flat_map(trips, &Map.get(&1["trip"], "removed", []))
+    refute Enum.any?(removed, &Map.has_key?(&1, "town"))
+  end
+
+  defp assert_trips_documented(protocol) do
+    flat = String.replace(protocol, ~r/\s+/, " ")
+    assert protocol =~ "## Trips"
+    assert flat =~ "Version 8 also brings the owner's trips"
+    assert flat =~ "at most once per 100 ms"
+
+    for section <- ["## Lists", "## Trips"] do
+      [_before, rest] = String.split(protocol, section <> "\n", parts: 2)
+      [body | _after] = String.split(rest, "\n## ", parts: 2)
+
+      assert String.replace(body, ~r/\s+/, " ") =~ "A `client_msg_id` names one edit of any kind",
+             "#{section} does not say a client_msg_id names one edit of any kind"
+    end
+
+    [_before, trips] = String.split(protocol, "## Trips\n", parts: 2)
+
+    # A phone's list channel carries the trips too, from version 8 (M89 §06).
+    [section | _after] = String.split(trips, "\n## ", parts: 2)
+    section = String.replace(section, ~r/\s+/, " ")
+    assert flat =~ "A phone carries the trips' events over its list channel on the mobile wire"
+    assert section =~ "**A phone's list channel.**"
+
+    # M89: what a day's town is, when it is absent, and that no client geocodes.
+    assert section =~ "`town` only once the near in force for it is found"
+    assert section =~ "never borrows the trip's"
+    assert section =~ "the found place's own point"
+    assert section =~ "a scale, never a search's bounds"
+    assert section =~ "No client geocodes"
+    assert section =~ "and the widest town on every day"
+    assert section =~ ~s(made via the phone \(`made_via: "phone"`\))
+
+    for op <- TripRegistry.device_ops() do
+      assert trips =~ ~r/^\| `#{op}`|, `#{op}` \|/m, "PROTOCOL.md has no row for the #{op} op"
     end
   end
 
@@ -283,8 +453,6 @@ defmodule FermixCore.Companion.ProtocolContractTest do
     protocol: protocol
   } do
     defs = schema["$defs"]
-    assert Protocol.protocol_version() == 7
-    assert Protocol.supported_version_range() == {6, 7}
 
     for type <- @version_7_client_events do
       assert Protocol.client_event_version(type) == 7, "#{type} is not a version 7 event"
@@ -494,7 +662,7 @@ defmodule FermixCore.Companion.ProtocolContractTest do
 
     for def <-
           ~w(mediaRef linkPreviewCard replyBlock placesBlock place checklistsBlock checklistRef
-             commandDescriptor) do
+             eventsBlock eventCard tripsBlock tripRef commandDescriptor) do
       assert schema["$defs"][def] == mobile["$defs"][def], "#{def} differs between the wires"
     end
 
@@ -713,6 +881,141 @@ defmodule FermixCore.Companion.ProtocolContractTest do
     assert section =~ "`apple_place_id`"
   end
 
+  # EVENTS_DRAWN_AS_CARDS §04: version 8 is the version in which a row may
+  # carry a block type beyond places and checklists; it brings `events`, one
+  # card an event, and a golden of each form a client decodes: one stored
+  # event with reminders, an agenda with a yearly event and one with no
+  # time, a cancelled one and a snoozed one, each the card the engine makes.
+  test "a reply's events are version 8's block, with a golden of each form", %{
+    schema: schema,
+    protocol: protocol
+  } do
+    assert Protocol.protocol_version() == 8
+    assert Protocol.supported_version_range() == {7, 8}
+
+    defs = schema["$defs"]
+    assert defs["eventsBlock"]["x-since-versions"] == %{"companion" => 8, "mobile" => 3}
+    assert defs["eventsBlock"]["properties"]["events"]["maxItems"] == ReplyBlocks.max_events()
+    assert "events" in defs["replyBlock"]["properties"]["type"]["enum"]
+
+    blocks = golden_event_blocks(jsonl(@server_fixtures))
+    cards = Enum.flat_map(blocks, & &1["events"])
+
+    for block <- blocks do
+      assert ReplyBlocks.events(Enum.map(block["events"], &{:event, &1})) == [block]
+    end
+
+    for card <- cards, do: assert(byte_size(Jason.encode!(card)) < 400, card["title"])
+    assert Enum.sort(Enum.uniq(cards)) == Enum.sort(Enum.uniq(engine_cards()))
+
+    assert Enum.any?(cards, &match?(%{"change" => "stored", "reminds" => _, "rings" => _}, &1))
+    assert Enum.any?(blocks, &(length(&1["events"]) > 2))
+    assert Enum.any?(cards, &(&1["yearly"] == true and not Map.has_key?(&1, "time")))
+    assert Enum.any?(cards, &(&1["kind"] == "deadline" and not Map.has_key?(&1, "time")))
+
+    assert Enum.any?(
+             cards,
+             &(&1["change"] == "cancelled" and not Map.has_key?(&1, "reminds"))
+           )
+
+    assert Enum.any?(cards, &(&1["change"] == "snoozed" and &1["reminds"] =~ ~r/\Aagain on /))
+
+    [_before, section] = String.split(protocol, "### Version 8", parts: 2)
+    assert section =~ "{7, 8}"
+    [_before, blocks_section] = String.split(protocol, "## Blocks under a reply", parts: 2)
+    assert blocks_section =~ "### Which blocks a client draws"
+    assert blocks_section =~ "drawn from the"
+    assert blocks_section =~ "that pulled its index"
+  end
+
+  # One filter where rows leave: a connection on version 7 is sent only the
+  # types its version carries, so the goldens' events reach it without them.
+  test "a version 7 connection is sent a golden reply without its events, a version 8 one with" do
+    server = jsonl(@server_fixtures)
+
+    for frame <- server,
+        type = frame["type"],
+        type in ~w(text_done row history_page),
+        payload = Map.delete(frame, "type"),
+        golden_event_blocks([frame]) != [] do
+      old = ReplyBlocks.for_session(type, payload, :companion, 7)
+      assert golden_event_blocks([Map.put(old, "type", type)]) == []
+      assert :ok = Protocol.validate_server_payload(type, old)
+      assert ReplyBlocks.for_session(type, payload, :companion, 8) == payload
+    end
+  end
+
+  # M89 §06: version 8 carries `trips`, the lists' block for the owner's
+  # trips, a kept kind: ids and the title, the rows the turn added or changed,
+  # none for a trip it only read. Goldens of both, each the builder's own.
+  test "a reply's trips are version 8's kept block, with goldens of a change and a read", %{
+    schema: schema,
+    protocol: protocol
+  } do
+    defs = schema["$defs"]
+    assert defs["tripsBlock"]["x-since-versions"] == %{"companion" => 8, "mobile" => 3}
+    assert defs["tripsBlock"]["properties"]["trips"]["maxItems"] == ReplyBlocks.max_trips()
+    assert "trips" in defs["replyBlock"]["properties"]["type"]["enum"]
+
+    blocks = golden_blocks(jsonl(@server_fixtures), "trips")
+    trips = Enum.flat_map(blocks, & &1["trips"])
+
+    for block <- blocks do
+      touches =
+        for trip <- block["trips"],
+            do: {:trip, %{trip_id: trip["trip_id"], title: trip["title"], rows: trip["rows"]}}
+
+      assert ReplyBlocks.trips(touches) == [block]
+    end
+
+    assert Enum.any?(trips, &(&1["rows"] != []))
+    assert Enum.any?(trips, &(&1["rows"] == []))
+
+    [_before, blocks_section] = String.split(protocol, "## Blocks under a reply", parts: 2)
+    assert blocks_section =~ "**Trips, by id** (version 8)"
+    assert blocks_section =~ "(`checklists`, the owner's lists, and `trips`, the owner's trips)"
+  end
+
+  test "a version 7 connection is sent a golden reply without its trips, a version 8 one with" do
+    for frame <- jsonl(@server_fixtures),
+        type = frame["type"],
+        type in ~w(text_done row history_page),
+        payload = Map.delete(frame, "type"),
+        golden_blocks([frame], "trips") != [] do
+      old = ReplyBlocks.for_session(type, payload, :companion, 7)
+      assert golden_blocks([Map.put(old, "type", type)], "trips") == []
+      assert :ok = Protocol.validate_server_payload(type, old)
+      assert ReplyBlocks.for_session(type, payload, :companion, 8) == payload
+    end
+  end
+
+  test "the codec takes a trips block beside the others, and refuses one the export rules out" do
+    done = %{"turn_id" => "t-1", "server_seq" => 7, "text" => "Planned."}
+    trip = %{"trip_id" => "tr_4q8m2x7v1d", "title" => "Varonne", "rows" => ["ti_7h2k9m4p1c"]}
+    trips = %{"type" => "trips", "trips" => [trip]}
+    list = %{"list_id" => "ck_3m9q2x7d1a", "title" => "Fermix", "rows" => []}
+    checklists = %{"type" => "checklists", "lists" => [list]}
+
+    assert :ok =
+             Protocol.validate_server_payload(
+               "text_done",
+               Map.put(done, "blocks", [checklists, trips])
+             )
+
+    for blocks <- [
+          [trips, trips],
+          [%{trips | "trips" => []}],
+          [%{trips | "trips" => List.duplicate(trip, ReplyBlocks.max_trips() + 1)}],
+          [%{trips | "trips" => [%{trip | "rows" => ["Fish market"]}]}],
+          [%{trips | "trips" => [%{trip | "trip_id" => "ck_3m9q2x7d1a"}]}],
+          [%{trips | "trips" => [Map.delete(trip, "title")]}]
+        ] do
+      assert {:error, {:invalid_field, "blocks"}} =
+               Protocol.validate_server_payload("text_done", Map.put(done, "blocks", blocks)),
+             "text_done accepted blocks #{inspect(blocks)}"
+    end
+  end
+
   # M85 §07: a reply's lists ride beside its places, by id, on every version.
   test "the codec takes a checklists block beside places, and refuses one the export rules out" do
     done = %{"turn_id" => "t-1", "server_seq" => 7, "text" => "Filed both."}
@@ -855,9 +1158,18 @@ defmodule FermixCore.Companion.ProtocolContractTest do
     hellos = @server_fixtures |> jsonl() |> Enum.filter(&(&1["type"] == "server_hello"))
 
     for hello <- hellos do
-      assert Map.drop(hello, ~w(primary_epoch role commands attachments)) ==
+      assert Map.drop(hello, ~w(primary_epoch role commands attachments protocol_version)) ==
                %{"type" => "server_hello", "min_version" => min, "max_version" => max}
     end
+
+    # M97 §3.4: a hello that served a newer client its newest names it.
+    assert [%{"protocol_version" => ^max}] =
+             Enum.filter(hellos, &Map.has_key?(&1, "protocol_version"))
+
+    assert [%{"min_protocol_version" => served}] =
+             @client_fixtures |> jsonl() |> Enum.filter(&Map.has_key?(&1, "min_protocol_version"))
+
+    assert served <= max
   end
 
   # M75 D14: both hellos carry the primary epoch, optional on each, with a
@@ -1061,8 +1373,44 @@ defmodule FermixCore.Companion.ProtocolContractTest do
         "mime" => "application/pdf",
         "size_bytes" => 0,
         "sha256" => String.duplicate("a", 64)
+      },
+      "trips_pull" => %{"profile_id" => "main"},
+      "trip_pull" => %{"profile_id" => "main", "trip_id" => "tr_0123456789"},
+      "trip_edit" => %{
+        "client_msg_id" => "c",
+        "profile_id" => "main",
+        "op" => %{"op" => "remove_trip"}
+      },
+      "trip_share" => %{
+        "client_msg_id" => "c",
+        "profile_id" => "main",
+        "trip_id" => "tr_0123456789"
       }
     }
+  end
+
+  # Every trip and row id the goldens carry, wherever it sits.
+  defp golden_trip_ids(frames) do
+    frames
+    |> Enum.flat_map(&json_strings/1)
+    |> Enum.filter(&String.starts_with?(&1, ["tr_", "ti_"]))
+    |> Enum.uniq()
+  end
+
+  defp json_strings(value) when is_map(value),
+    do: Enum.flat_map(value, fn {key, sub} -> [key | json_strings(sub)] end)
+
+  defp json_strings(value) when is_list(value), do: Enum.flat_map(value, &json_strings/1)
+  defp json_strings(value) when is_binary(value), do: [value]
+  defp json_strings(_value), do: []
+
+  # Every place a golden trip's row or a golden device op carries.
+  defp golden_trip_places(frames) do
+    for frame <- frames,
+        row <- Map.get(Map.get(frame, "trip", %{}), "rows", []) ++ [Map.get(frame, "op", %{})],
+        place = Map.get(row, "place"),
+        is_map(place),
+        do: place
   end
 
   defp row_payload do
@@ -1090,6 +1438,112 @@ defmodule FermixCore.Companion.ProtocolContractTest do
   end
 
   defp fixture_types(path), do: path |> jsonl() |> MapSet.new(& &1["type"])
+
+  # Every golden events block, as a reply, a row or a history message carries it.
+  defp golden_event_blocks(frames), do: golden_blocks(frames, "events")
+
+  defp golden_blocks(frames, type) do
+    for frame <- frames,
+        row <- [frame | Map.get(frame, "messages", [])],
+        %{"type" => ^type} = block <- Map.get(row, "blocks", []),
+        do: block
+  end
+
+  # The cards the engine makes of the goldens' events, stated on 2026-11-12 at
+  # 10:05 in New York: the stored dentist, the agenda of four, the cancelled
+  # dinner and the snoozed call, each the record its tool returns.
+  defp engine_cards do
+    now = ~U[2026-11-12 15:05:00Z]
+
+    plan = fn kind, form ->
+      kind |> Defaults.plan_for(form) |> elem(1) |> Defaults.encode_plan()
+    end
+
+    dentist =
+      golden_event("evt_k2m4q7xd3np5rtwa", "Dentist", "appointment", %{
+        local_date: ~D[2026-11-13],
+        local_time: ~T[10:30:00],
+        next_occurrence_on: ~D[2026-11-13],
+        reminder_plan: plan.("appointment", "datetime")
+      })
+
+    birthday =
+      golden_event("evt_b7c3n5q2w4e6r2ta", "Mum's birthday", "birthday", %{
+        recurrence_kind: "yearly",
+        recurrence_month: 11,
+        recurrence_day: 16,
+        next_occurrence_on: ~D[2026-11-16],
+        reminder_plan: plan.("birthday", "date")
+      })
+
+    car =
+      golden_event("evt_c4r5e6g7a2b3d4fh", "Car registration due", "deadline", %{
+        local_date: ~D[2026-11-19],
+        next_occurrence_on: ~D[2026-11-19],
+        reminder_plan: plan.("deadline", "date")
+      })
+
+    dinner =
+      golden_event("evt_d2n3r4s5m6w7q2xz", "Dinner with Sam", "appointment", %{
+        local_date: ~D[2026-11-24],
+        local_time: ~T[18:30:00],
+        next_occurrence_on: ~D[2026-11-24],
+        reminder_plan: plan.("appointment", "datetime")
+      })
+
+    bank =
+      golden_event("evt_m3k4l5n6p7q2r3sa", "Call the bank", "explicit_reminder", %{
+        local_date: ~D[2026-11-12],
+        local_time: ~T[15:00:00],
+        next_occurrence_on: ~D[2026-11-12],
+        reminder_plan: plan.("explicit_reminder", "datetime")
+      })
+
+    snooze = %{
+      status: :created,
+      reminder: %{scheduled_for: ~U[2026-11-12 20:40:00Z], delivery_platform: "telegram"},
+      event: bank,
+      timezone: "America/New_York",
+      source: %{},
+      superseded: []
+    }
+
+    stored = %{
+      status: :created,
+      event: dentist,
+      reminders: [%{}],
+      stated_as: Registry.stated_as(dentist, now)
+    }
+
+    [
+      Card.stored(stored),
+      Card.cancelled(%{dinner | status: "cancelled"}, now),
+      Card.snoozed(snooze, now)
+      | Enum.map([dentist, birthday, car, dinner], &Card.listed(&1, now))
+    ]
+    |> Enum.map(fn {:ok, card} -> card end)
+  end
+
+  defp golden_event(id, title, kind, attrs) do
+    Map.merge(
+      %{
+        id: id,
+        title: title,
+        kind: kind,
+        status: "active",
+        timezone: "America/New_York",
+        recurrence_kind: "once",
+        recurrence_month: nil,
+        recurrence_day: nil,
+        local_date: nil,
+        local_time: nil,
+        next_occurrence_on: nil,
+        delivery_platform: "telegram",
+        next_reminder_at: ~U[2026-11-12 16:00:00Z]
+      },
+      attrs
+    )
+  end
 
   defp fixture_lines(path), do: path |> File.read!() |> String.split("\n", trim: true)
 

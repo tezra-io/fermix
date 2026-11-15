@@ -302,10 +302,11 @@ defmodule FermixWebWeb.SetupLive.PhonePairingTest do
 
       assert PhonePairing.refusal_sentence({:unavailable, "mobile"}) == messages.unavailable
 
-      # The desktop a move linked cannot be forgotten, and the daemon says why.
+      # The one computer keeping the backups is named before it is removed.
       assert PhonePairing.refusal_sentence(
-               {:unavailable, "mobile", "This desktop cannot be removed."}
-             ) == "This desktop cannot be removed."
+               {:unavailable, "mobile",
+                "Loft Mac keeps the only copies of your server's backups. Remove it anyway?"}
+             ) == "Loft Mac keeps the only copies of your server's backups. Remove it anyway?"
 
       assert PhonePairing.refusal_sentence({:unknown_pairing_session, "s1"}) ==
                messages.unknown_pairing_session

@@ -52,7 +52,9 @@ home = os.environ["FERMIX_HOME"]
 db = os.path.join(home, "memory.db")
 seen = open(db).read() if os.path.exists(db) else None
 with open(os.path.join(home, "fake-daemon.log"), "a") as log:
-    log.write(json.dumps({"pid": os.getpid(), "memory_db": seen}) + "\n")
+    log.write(json.dumps({"pid": os.getpid(), "memory_db": seen,
+                          "path": os.environ.get("PATH", ""),
+                          "fixture_origin": os.environ.get("FERMIX_EVAL_FIXTURE_ORIGIN")}) + "\n")
 with open(db, "a") as fh:
     fh.write("+written-by-the-daemon")
 path = os.path.join(home, "daemon.sock")
@@ -207,8 +209,37 @@ def test_restore_puts_back_the_seeded_state_and_removes_what_came_after(scratch)
     assert (home / "auth.json").read_text() == '{"rotated": true}'
 
 
+def test_restore_removes_a_sign_in_mark_written_after_the_snapshot(scratch):
+    # M98 D10: each attempt starts without the marks an earlier attempt's run left
+    # in this machine's coding store; the computers' records beside it stay.
+    home = _seeded_home(scratch)
+    _write_tree(home, {"device/computers/b47e0d93.json": '{"v": 1}'})
+    state.snapshot(str(home))
+    store = ("device/coding.db", "device/coding.db-wal", "device/coding.db-shm")
+    _write_tree(home, {name: "claude signed out" for name in store})
+
+    state.restore(str(home))
+
+    assert not any((home / name).exists() for name in store)
+    assert (home / "device/computers/b47e0d93.json").read_text() == '{"v": 1}'
+
+
+def test_a_snapshot_taken_with_the_coding_store_present_puts_it_back(scratch):
+    # `capability-daemon.sh snapshot` may run after a daemon made device/coding.db.
+    home = _seeded_home(scratch)
+    _write_tree(home, {"device/coding.db": "seeded store"})
+    state.snapshot(str(home))
+    (home / "device/coding.db").write_text("a mark from the attempt")
+
+    state.restore(str(home))
+
+    assert (home / "device/coding.db").read_text() == "seeded store"
+
+
 def test_snapshot_keeps_what_reset_state_clears_and_the_config():
-    assert set(state.KEPT) == {*seed.STATE_DIRS, *seed.STATE_FILES, "config.toml"}
+    # The seeded sandbox is the machine's own setting (M97 §4), which a grant changes.
+    assert set(state.KEPT) == {*seed.STATE_DIRS, *seed.STATE_FILES, "config.toml",
+                               seed.MACHINE_FILE}
     assert "auth.json" not in state.KEPT
 
 
@@ -267,6 +298,68 @@ def test_up_snapshots_the_seed_before_the_daemon_starts(scratch, fake_mix, stray
         assert (saved / "skills").is_dir()
         # The daemon wrote memory.db once it started; the snapshot was taken before.
         assert (home / "memory.db").exists() and not (saved / "memory.db").exists()
+    finally:
+        _down(home, stray_daemons)
+
+
+@pytest.mark.parametrize("flag, leads", [("--coding-signed-out", True), ("", False)])
+def test_up_puts_the_eval_bin_first_on_the_daemons_path_only_for_a_stub(
+        scratch, fake_mix, stray_daemons, flag, leads):
+    # The signed-out stub `claude` is the Claude Code the daemon finds at boot only
+    # when its folder leads the daemon's PATH, as the cue suites' stub codex does.
+    home = scratch / "cap-eval"
+    up = _script("up", home, FERMIX_CAP_SEED_ARGS=f"--provider ollama --model brindle-7b {flag}")
+    try:
+        assert up.returncode == 0, up.stderr
+        [start] = _starts(home)
+        eval_bin = str(home / seed.CUE_BIN_DIR)
+        assert (start["path"].split(os.pathsep)[0] == eval_bin) is leads
+    finally:
+        _down(home, stray_daemons)
+
+
+def test_up_hands_the_daemon_the_fixture_origin_its_seed_recorded(
+        scratch, fake_mix, stray_daemons):
+    # The one origin the daemon's web_fetch may read is the port the runners bind,
+    # whatever the caller's own environment says.
+    home = scratch / "cap-eval"
+    up = _script("up", home, FERMIX_CAP_SEED_ARGS="--provider ollama --model brindle-7b",
+                 FERMIX_EVAL_FIXTURE_ORIGIN="http://127.0.0.1:1")
+    try:
+        assert up.returncode == 0, up.stderr
+        port = json.loads((home / seed.FIXTURE_MANIFEST).read_text())["port"]
+        [start] = _starts(home)
+        assert start["fixture_origin"] == f"http://127.0.0.1:{port}"
+    finally:
+        _down(home, stray_daemons)
+
+
+def test_a_home_without_the_fixture_manifest_starts_the_daemon_without_the_origin(
+        scratch, fake_mix, stray_daemons):
+    # A home seeded before the manifest existed: its daemon's web_fetch refuses
+    # loopback as every Fermix does, even when the caller's environment carries
+    # the variable.
+    home = _seeded_home(scratch)
+    assert not (home / seed.FIXTURE_MANIFEST).exists()
+    assert _script("snapshot", home).returncode == 0
+    try:
+        reset = _script("reset", home, FERMIX_EVAL_FIXTURE_ORIGIN="http://127.0.0.1:4173")
+        assert reset.returncode == 0, reset.stderr
+        [start] = _starts(home)
+        assert start["fixture_origin"] is None
+    finally:
+        _down(home, stray_daemons)
+
+
+def test_a_fixture_manifest_it_cannot_read_stops_the_start(scratch, fake_mix, stray_daemons):
+    home = _seeded_home(scratch)
+    _write_tree(home, {seed.FIXTURE_MANIFEST: '{"port": "4173"}'})
+    assert _script("snapshot", home).returncode == 0
+    try:
+        reset = _script("reset", home)
+        assert reset.returncode != 0
+        assert "fixture manifest" in reset.stderr
+        assert _starts(home) == []
     finally:
         _down(home, stray_daemons)
 

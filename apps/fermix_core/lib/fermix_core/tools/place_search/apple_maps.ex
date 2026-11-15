@@ -16,6 +16,20 @@ defmodule FermixCore.Tools.PlaceSearch.AppleMaps do
                          < {"query": ..., "anchor": {"kind": "coordinates", "latitude": ...,
                                                      "longitude": ..., "radius_meters": ...}}
 
+  A named location is geocoded and searched within its region, never under
+  25 km in radius about its centre; MapKit weighs nearness to the centre, so
+  the town's own place usually comes first, though it does not sort by
+  distance. Coordinates are searched `radius_meters` about them, 5 km unless
+  the request names one. Either region is required, so no result comes from
+  around the Mac.
+
+  A trip's near is geocoded alone (M89) by the second form,
+  `{"geocode": "<words>"}`, which prints `{"placemark": {...}}`: the
+  geocoder's own `name`, `locality`, `administrative_area` and `country`, the
+  placemark's own point (`latitude`, `longitude`, never its region's centre)
+  and its region's raw `radius_meters`, each but the point only when the
+  geocoder gave it. The town is the engine's to make of them (`town/1`).
+
   One request line goes in on stdin, never on the command line, where every
   process on the Mac could read the place being searched. Exit 0 prints
   `{"places": [...]}`; a failure prints `{"error": {"message": ...}}` in the
@@ -33,7 +47,8 @@ defmodule FermixCore.Tools.PlaceSearch.AppleMaps do
   `spawn_plan/3` is a deliberate copy of
   `FermixChannels.Mobile.Iroh.Helper.spawn_plan/3`, pinned by its own test.
   Every call is bounded at 15 s and the helper's process
-  group is killed when the call ends, whatever ended it. The helper never
+  group is killed when the call ends, whatever ended it, a kill of the calling
+  process included (a guard process owns the helper until the call ends). The helper never
   creates a `CLLocationManager` and never reads where the Mac is.
 
   ## The record
@@ -50,15 +65,36 @@ defmodule FermixCore.Tools.PlaceSearch.AppleMaps do
   price, hours, description, cuisines and pictures are absent: MapKit's search
   does not carry them. A result with neither an identifier nor an HTTPS site
   has no page to link and is dropped.
+
+  ## The town
+
+  `name` is the placemark's `name`, `locality`, `administrative_area` and
+  `country` in that order, sanitized with no control character, a blank part
+  dropped and a part equal to the one before it, in any case, dropped
+  ("Kyoto, Japan"), joined and cut to #{120} bytes; `latitude` and
+  `longitude` the placemark's own point; `radius_meters` its region's radius,
+  rounded and at least 1. A placemark with neither a locality nor an
+  administrative area (a country), with no region of its own or one wider
+  than any town's, or whose name comes to nothing, is no town
+  (`not_a_town`): its point would mark a day where no town is, and no radius
+  is invented.
   """
 
   @behaviour FermixCore.Tools.PlaceSearch.Backend
 
   alias FermixCore.ProcessGroup
+  alias FermixCore.Text
   alias FermixCore.Tools.PlaceSearch.Backend
   alias FermixCore.Tools.SnippetSanitizer
 
   @timeout_ms 15_000
+  @max_town_bytes 120
+  # Half the Earth's circumference: no region a geocoder draws is wider.
+  @max_region_meters 20_037_509
+  @town_parts ~w(name locality administrative_area country)
+  # A town's name carries no control character, so the wire's reserve for it
+  # (`Trips.Wire.town_bytes/0`) holds: the encoder at most doubles a byte.
+  @control ~r/[\x{0000}-\x{001F}\x{007F}-\x{009F}]/u
   @max_stdout_bytes 1_048_576
   @max_places 10
   @default_radius_meters 5_000
@@ -111,15 +147,80 @@ defmodule FermixCore.Tools.PlaceSearch.AppleMaps do
           {:ok, [Backend.place()], Backend.trace_metadata()}
           | {:error, String.t(), Backend.trace_metadata()}
   def search(%{query: query} = request, opts) when is_binary(query) and is_list(opts) do
-    with {:ok, {executable, args}} <- plan(opts),
-         {:ok, stdout} <- run(executable, args, request_line(request), timeout(opts)),
-         {:ok, raw} <- decode(stdout),
+    with {:ok, raw} <- raw_search(request, opts),
          {:ok, places} <- places(raw, request) do
       {:ok, places, %{}}
     else
       {:error, reason} -> {:error, reason, %{}}
     end
   end
+
+  @doc """
+  One helper search's raw places, as `fermix-maps` printed them, or its
+  tagged reason: `search/2` without the record, which `places/2` makes. A Mac
+  of the home answers its server with these
+  (`Computers.Capabilities.Places`), and the server normalizes them with
+  `places/2`, so a place from a Mac passes the checks a place found here
+  does. `opts` as `search/2`'s.
+  """
+  @spec raw_search(Backend.request(), keyword()) :: {:ok, [term()]} | {:error, String.t()}
+  def raw_search(%{query: query} = request, opts) when is_binary(query) and is_list(opts) do
+    with {:ok, {executable, args}} <- plan(opts),
+         {:ok, stdout} <- run(executable, args, request_line(request), timeout(opts)) do
+      decode(stdout)
+    end
+  end
+
+  @doc """
+  The town `words` name (M89): one helper geocode, made into the town by
+  `town/1`, or its tagged reason. `opts` as `search/2`'s.
+  """
+  @impl true
+  @spec geocode(String.t(), keyword()) ::
+          {:ok, Backend.town(), Backend.trace_metadata()}
+          | {:error, String.t(), Backend.trace_metadata()}
+  def geocode(words, opts) when is_binary(words) and is_list(opts) do
+    with {:ok, raw} <- raw_geocode(words, opts),
+         {:ok, town} <- town(raw) do
+      {:ok, town, %{}}
+    else
+      {:error, reason} -> {:error, reason, %{}}
+    end
+  end
+
+  @doc """
+  One helper geocode's raw placemark, as `fermix-maps` printed it, or its
+  tagged reason: `geocode/2` without the town. A Mac of the home answers its
+  server with this (`Computers.Capabilities.Places`), and the server makes the
+  town of it with `town/1`, as a geocode here does.
+  """
+  @spec raw_geocode(String.t(), keyword()) :: {:ok, term()} | {:error, String.t()}
+  def raw_geocode(words, opts) when is_binary(words) and is_list(opts) do
+    line = Jason.encode!(%{"geocode" => String.trim(words)})
+
+    with {:ok, {executable, args}} <- plan(opts),
+         {:ok, stdout} <- run(executable, args, line, timeout(opts)) do
+      decode_placemark(stdout)
+    end
+  end
+
+  @doc """
+  The town a helper's raw placemark is (pure, the moduledoc): the town, or
+  `not_a_town` for a placemark that names no town, or `parser_changed` for a
+  field of an unexpected type, never a guess.
+  """
+  @spec town(term()) :: {:ok, Backend.town()} | {:error, String.t()}
+  def town(%{} = raw) do
+    with {:ok, latitude, longitude} <- town_point(raw),
+         {:ok, parts} <- town_parts(raw),
+         :ok <- a_town(parts),
+         {:ok, radius} <- town_radius(raw),
+         {:ok, name} <- town_name(parts) do
+      {:ok, %{name: name, latitude: latitude, longitude: longitude, radius_meters: radius}}
+    end
+  end
+
+  def town(_raw), do: {:error, parser_changed("placemark", "an object")}
 
   @doc """
   The spawn target and argv: on macOS through the `disclaim` exec shim, so the
@@ -200,10 +301,12 @@ defmodule FermixCore.Tools.PlaceSearch.AppleMaps do
   # The port is unlinked and monitored before the request is written: a helper
   # that died before reading closes the port on the write (EPIPE), which then
   # arrives here as a `:DOWN` this call answers, not as an exit signal that
-  # ends the turn running it.
+  # ends the turn running it. A guard owns the helper should the caller go
+  # first (`guard/2`).
   defp run(executable, args, line, timeout_ms) do
     port = Port.open({:spawn_executable, executable}, [:binary, :exit_status, :hide, args: args])
     os_pid = os_pid(port)
+    guard = guard(port, os_pid)
     Process.unlink(port)
     monitor = Port.monitor(port)
     deadline = System.monotonic_time(:millisecond) + timeout_ms
@@ -213,6 +316,7 @@ defmodule FermixCore.Tools.PlaceSearch.AppleMaps do
       collect(port, monitor, deadline, timeout_ms, "")
     after
       teardown(port, monitor, os_pid)
+      send(guard, {:done, self()})
     end
   rescue
     error in [ArgumentError, ErlangError] ->
@@ -280,6 +384,38 @@ defmodule FermixCore.Tools.PlaceSearch.AppleMaps do
     end
   end
 
+  # A caller can end with no `after` run: a kill (a trip lookup's deadline ends
+  # its task so) or any exit signal it does not trap. The unlinked port then
+  # stays open and the helper runs on, so this process waits for the call to
+  # end, which it always does, by its `after` or by its caller's death, and on
+  # the death kills the helper's group and closes the port.
+  defp guard(port, os_pid) do
+    caller = self()
+
+    spawn(fn ->
+      watch = Process.monitor(caller)
+
+      receive do
+        {:done, ^caller} -> :ok
+        {:DOWN, ^watch, :process, ^caller, _reason} -> release(port, os_pid)
+      end
+    end)
+  end
+
+  defp release(port, os_pid) do
+    if os_pid, do: ProcessGroup.signal(os_pid, :sigkill)
+    close(port)
+  end
+
+  # Any process may close a port. One the killed helper's exit closed first is
+  # already what this asks for.
+  defp close(port) do
+    if Port.info(port), do: Port.close(port)
+    :ok
+  rescue
+    ArgumentError -> :ok
+  end
+
   defp finish(0, stdout), do: {:ok, stdout}
   defp finish(status, stdout), do: {:error, exit_reason(status, stdout)}
 
@@ -313,6 +449,76 @@ defmodule FermixCore.Tools.PlaceSearch.AppleMaps do
       {:ok, _other} -> {:error, parser_changed("places", "an array")}
       {:error, %Jason.DecodeError{position: at}} -> {:error, "parser_changed: not JSON at #{at}"}
     end
+  end
+
+  defp decode_placemark(stdout) do
+    case Jason.decode(String.trim(stdout)) do
+      {:ok, %{"placemark" => %{} = placemark}} -> {:ok, placemark}
+      {:ok, _other} -> {:error, parser_changed("placemark", "an object")}
+      {:error, %Jason.DecodeError{position: at}} -> {:error, "parser_changed: not JSON at #{at}"}
+    end
+  end
+
+  # -- the town (pure) -------------------------------------------------------
+
+  defp town_point(raw) do
+    case location(raw) do
+      {:ok, %{latitude: latitude, longitude: longitude}} -> {:ok, latitude, longitude}
+      {:ok, nil} -> {:error, parser_changed("latitude/longitude", "present")}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp town_parts(raw) do
+    Enum.reduce_while(@town_parts, {:ok, %{}}, fn key, {:ok, parts} ->
+      case text(raw, key) do
+        {:ok, value} -> {:cont, {:ok, Map.put(parts, key, value)}}
+        {:error, reason} -> {:halt, {:error, reason}}
+      end
+    end)
+  end
+
+  # A placemark with no region of its own, or one wider than any town's (an
+  # ocean, a continent), names no town: kept as none, it is asked no more.
+  defp town_radius(raw) do
+    case Map.get(raw, "radius_meters") do
+      nil ->
+        {:error, "not_a_town: the geocoder gave the place it found no region"}
+
+      meters when is_number(meters) and meters > @max_region_meters ->
+        {:error, "not_a_town: the geocoder's region for the place is wider than any town"}
+
+      meters when is_number(meters) and meters > 0 ->
+        {:ok, max(round(meters), 1)}
+
+      _other ->
+        {:error, parser_changed("radius_meters", "a radius in metres")}
+    end
+  end
+
+  # A country alone names no town.
+  defp a_town(%{"locality" => nil, "administrative_area" => nil}),
+    do: {:error, "not_a_town: the geocoder found a place that is no town or city"}
+
+  defp a_town(_parts), do: :ok
+
+  # A name left with nothing (its parts only control characters) is no town.
+  defp town_name(parts) do
+    name =
+      @town_parts
+      |> Enum.map(&Map.fetch!(parts, &1))
+      |> Enum.reject(&is_nil/1)
+      |> Enum.dedup_by(&String.downcase/1)
+      |> Enum.join(", ")
+      |> SnippetSanitizer.sanitize()
+      |> String.replace(@control, "")
+      |> Text.truncate_utf8(@max_town_bytes)
+      |> String.trim()
+      |> String.trim_trailing(",")
+
+    if name == "",
+      do: {:error, "not_a_town: the geocoder named the place it found with nothing"},
+      else: {:ok, name}
   end
 
   # -- the record (pure) -----------------------------------------------------

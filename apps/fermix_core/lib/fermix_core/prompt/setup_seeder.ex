@@ -45,6 +45,8 @@ defmodule FermixCore.Prompt.SetupSeeder do
   # never gave, and contradict the current-date note, which says none is set.
   @placeholder_timezone "not set"
   @placeholder_communication_style "neutral and direct"
+  # The agent's name where the settings name none.
+  @default_agent_name "fermix"
 
   @spec seed(personalization(), keyword()) :: {:ok, [seeded_file()]} | {:error, term()}
   def seed(personalization, opts \\ []) when is_map(personalization) and is_list(opts) do
@@ -307,45 +309,60 @@ defmodule FermixCore.Prompt.SetupSeeder do
   end
 
   defp user_memory_rows(agent_id, owner_id, personalization) do
-    base = %{
-      agent_id: agent_id,
-      owner_id: owner_id,
-      source_message_id: nil
-    }
+    for memory <- setting_memories(personalization, agent_name()) do
+      scope_id = if memory.scope_type == "owner", do: owner_id, else: agent_id
 
+      Map.merge(memory, %{
+        agent_id: agent_id,
+        owner_id: owner_id,
+        scope_id: scope_id,
+        source_message_id: nil
+      })
+    end
+  end
+
+  @doc """
+  The memory rows a seed writes for `personalization` (the settings' own
+  `user_name`, `timezone` and `communication_style`, each absent one as its
+  placeholder) and the agent's `agent_name`: each row's scope (`owner` or
+  `agent`, whose id is the owner's or the agent's), category, key, value and
+  prompt file. They repeat the home's settings and nothing else, carry no
+  source, session or run, and every save of the settings writes them again,
+  so a row that differs from them was changed since (M97 §3.1: a home whose
+  memories are only these is no home of its own, `FermixCore.Home.Join`).
+  """
+  @spec setting_memories(personalization(), String.t() | nil) :: [map()]
+  def setting_memories(personalization, agent_name)
+      when is_map(personalization) and (is_binary(agent_name) or is_nil(agent_name)) do
     [
-      Map.merge(base, %{
+      %{
         scope_type: "owner",
-        scope_id: owner_id,
         category: "identity",
         key: "name",
         value: Map.get(personalization, :user_name, @placeholder_user_name),
         promote_target: "user_md"
-      }),
-      Map.merge(base, %{
+      },
+      %{
         scope_type: "owner",
-        scope_id: owner_id,
         category: "identity",
         key: "timezone",
         value: Map.get(personalization, :timezone, @placeholder_timezone),
         promote_target: "user_md"
-      }),
-      Map.merge(base, %{
+      },
+      %{
         scope_type: "owner",
-        scope_id: owner_id,
         category: "preference",
         key: "communication style",
         value: Map.get(personalization, :communication_style, @placeholder_communication_style),
         promote_target: "user_md"
-      }),
-      Map.merge(base, %{
+      },
+      %{
         scope_type: "agent",
-        scope_id: agent_id,
         category: "identity",
         key: "agent name",
-        value: agent_name(),
+        value: agent_name || @default_agent_name,
         promote_target: "memory_md"
-      })
+      }
     ]
   end
 
@@ -394,6 +411,6 @@ defmodule FermixCore.Prompt.SetupSeeder do
   defp agent_name do
     :fermix_core
     |> Application.get_env(:agent, [])
-    |> Keyword.get(:name, "fermix")
+    |> Keyword.get(:name, @default_agent_name)
   end
 end

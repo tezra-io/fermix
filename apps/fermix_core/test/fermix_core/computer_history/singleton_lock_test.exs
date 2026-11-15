@@ -33,6 +33,19 @@ defmodule FermixCore.ComputerHistory.SingletonLockTest do
     :ok = :file.write_file_info(path, file_info(atime: old, mtime: old), [:raw, {:time, :posix}])
   end
 
+  # One login session is one event source on either system, so the path is
+  # the account's, never a home's: macOS's Application Support, and on Linux
+  # the XDG state folder (M97 stage 4).
+  describe "default_path/1" do
+    test "is the account's on each system, never a home's" do
+      assert SingletonLock.default_path(system: :macos, home: "/Users/avery") ==
+               "/Users/avery/Library/Application Support/Fermix/observer.lock"
+
+      assert SingletonLock.default_path(system: :linux, home: "/home/rowan") ==
+               "/home/rowan/.local/state/fermix/observer.lock"
+    end
+  end
+
   describe "acquire / release" do
     test "acquires a free lock and records the holder home", %{path: path} do
       assert :ok = SingletonLock.acquire(path, home: "/tmp/home-a")

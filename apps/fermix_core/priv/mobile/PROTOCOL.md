@@ -13,6 +13,7 @@ vendors this directory pinned by checksum; it does not hand-copy event shapes.
 | `fixtures/client_binary_frames.jsonl`, `fixtures/server_binary_frames.jsonl` | frames with a raw tail, as `{header, bytes_b64}`, including one whole `event_part` run and whole chunked runs (see *Chunked payloads*) |
 | `fixtures/pairing_links.jsonl` | a pairing link and its decoded fields, as the daemon builds it |
 | `noise_vectors.json`, `push_vectors.json` | the Noise handshakes and the push encryption, byte for byte |
+| `webpush_vectors.json` | the sealing of an Android phone's push, byte for byte: the Web Push standard's own example (RFC 8291) and one Fermix message with the phone's private key so an app can open it (see *Android, through Fermix's push relay*) |
 | `attestation_roots.json`, `android_signers.json` | the Google attestation roots and the app's signing certificates a pairing is verified against (see *Attestation*); both are built into the daemon when it is compiled, so a change to either takes a new build |
 | `relays.json` | every list of Fermix relays a release has shipped, built into the daemon; a phone takes its relays from the route it is given, never from this file (see *Remote reach*) |
 
@@ -222,10 +223,11 @@ message) is sent as one run of `event_part` frames instead of one frame:
 ## Chunked payloads
 
 A payload too large for one frame (a desktop's management call, a tunneled
-companion line) travels as frames of one event, each with `index` (from 0)
-and `last` (boolean) in its header and at most 60 KiB of the payload as its
-raw tail. A chunked event's header stays within 4,075 bytes, so a full tail
-still fits one plaintext.
+companion line, a computer's offers, an invocation's arguments or result)
+travels as frames of one event, each
+with `index` (from 0) and `last` (boolean) in its header and at most 60 KiB
+of the payload as its raw tail. A chunked event's header stays within 4,075
+bytes, so a full tail still fits one plaintext.
 
 - One payload's frames carry the same value of the event's key field and the
   same header fields, and arrive in `index` order, the last one marked
@@ -248,10 +250,50 @@ still fits one plaintext.
 | `manage` | `call_id` | 1 MiB |
 | `manage_result` | `call_id` | 4 MiB |
 | `loopback_response` | `request_id` | 256 KiB |
+| `offers` | `rev` | 64 KiB |
+| `invoke_open` | `id` | 1 MiB |
+| `invoke_result` | `id` | 4 MiB |
 
 `snapshot_chunk` and `move_chunk` are streams, not chunked payloads: `index`
 alone, contiguous from 0, ended by `snapshot_end` or `move_end`, and bounded
 only by the disk. The binary fixtures carry a whole two-frame run each way.
+`invoke_part` is a stream too, with `index` from 0 and `last`, bounded by the
+size its invocation announced (see *Invocations*).
+
+## Lanes
+
+What a session writes rides one of three lanes: an order inside the one
+session, not a second connection, and nothing on the wire names it.
+
+| Lane | Events | Rule |
+|---|---|---|
+| live | `call_open`, `call_attached`, `call_line`, `call_audio`, `call_frame`, `call_close` | written first |
+| interactive | every event of no other lane: chat, `manage` and `manage_result`, `companion_*`, `loopback_*`, a computer's `offers` and `link_path`, `invoke_open`, `invoke_cancel`, `invoke_result`, `invoke_status` and `invoke_restarted`, an `invoke_part` whose `size_bytes` is at most 256 KiB, `hello`, `ping`, `pong`, `error`, `ack` | written before bulk |
+| bulk | `media_fetch`, `media_begin`, `media_chunk`, `media_end`, `attach_*`, `snapshot_*`, `move_*`, an `invoke_part` whose `size_bytes` is over 256 KiB, an `invoke_open`, `invoke_cancel` or `invoke_status` that names a history sitting's submit (`capability` `history`, `op` `submit`) | written when nothing live or interactive waits, one frame at a time |
+
+- A family's events share one lane, so a lane never reorders a family's own
+  events (a snapshot's `snapshot_stored` rides bulk with its chunks), except
+  the invocation's: `invoke_part`, `invoke_open`, `invoke_cancel` and
+  `invoke_status` take their lane from their header, so a large part's
+  frames ride bulk while its `invoke_result` rides interactive (see
+  *Invocations*). A request's own `invoke_cancel` and `invoke_status` name
+  its `capability` and `op` and so ride its lane, and never pass it. Events
+  of different lanes may overtake one another: a reply's `row` may arrive
+  before the blob a `media_begin` push carries, as it does during a call.
+- Within a lane, frames go in the order they were handed over: a chunked
+  payload's frames stay in `index` order, and an `event_part` run is written
+  whole and never split.
+- `seq` still rises by exactly one per frame, in the order frames are written.
+- The daemon writes, at each read, the live frames waiting (at most 128),
+  then, before a bulk frame, up to 16 interactive events waiting behind it,
+  then that one bulk frame; past 16 the rest go at the next read, so a flood
+  of interactive events still lets one bulk frame through per 16.
+- A desktop engine queues what it sends per lane, at most 256 KiB of raw
+  tails live, 16 MiB interactive and 4 MiB bulk, and 4,096 frames each. An
+  event its lane cannot take is refused before any of it is sent: a forwarded
+  call is answered `busy` and a tunneled chat ends as too busy.
+- A receiver holds every rule it held before (`seq`, chunk order,
+  `event_part` runs); lanes add none.
 
 ## Noise modes and pairing
 
@@ -262,7 +304,7 @@ first handshake message starts with one fixed, clear five-byte prelude:
 |---|---|---|---|
 | `46 58 4d 31 01` (`FXM1` + `0x01`) | `IK` | a paired phone's or desktop's session | the primary |
 | `46 58 4d 31 02` (`FXM1` + `0x02`) | `IKpsk2` | owner-open pairing window | the primary |
-| `46 58 4d 31 03` (`FXM1` + `0x03`) | `IKpsk2` | enrollment of a candidate primary (see *Enrollment and the move*) | the primary, only while an enrollment window is open |
+| `46 58 4d 31 03` (`FXM1` + `0x03`) | `IKpsk2` | enrollment of a candidate primary, or a computer joining the home (see *Enrollment and the move*) | the primary, only while an enrollment window is open |
 | `46 58 4d 31 04` (`FXM1` + `0x04`) | `IK` | the move of a home to its candidate (see *Enrollment and the move*) | the candidate engine |
 
 The responder validates this prelude before initializing cryptographic state.
@@ -450,20 +492,66 @@ Every JSON header has these required fields:
   optional fields do not require a version bump.
 
 The first encrypted event in a paired session is `hello` and its `seq` is 1.
-`hello.protocol_v` must equal the envelope `v`, and every later frame of the
-session carries the same `v`. The daemon replies with `hello_ack` containing
-`min_version` and `max_version`. This daemon serves protocol 2 alone: protocol 1
-shipped in daemons but no phone app ever spoke it, so the window is the current
-version rather than **N/N-1**, the current protocol and the previous one, which
-it becomes from the next version on. No other event is serviced before hello
-and a second hello is terminal.
+`hello.protocol_v` must equal the envelope `v`: it is the newest version the
+client speaks. A hello may also name the oldest it speaks, `min_protocol_v`
+(at least 1 and at most `protocol_v`); one that names none speaks
+`protocol_v` alone, as a phone's does. The daemon serves the newest version
+both windows hold: the hello's own when its window holds it, and its own
+newest for a hello newer than its window whose `min_protocol_v` the window
+holds. It replies with `hello_ack` at the version it serves, so the
+`hello_ack`'s `v` says which, and every later frame of the session, both
+ways, carries that `v`. The `hello_ack`'s `min_version` and `max_version` are
+a window holding that version: to a phone the daemon's own, to a desktop the
+versions both engines speak (see *Desktop sessions*). This daemon serves
+protocols 2 and 3, an **N/N-1** window: the current protocol and the previous
+one. (Protocol 1 shipped in daemons but no phone app ever spoke it, so
+protocol 2's window was protocol 2 alone.) No other event is serviced before
+hello and a second hello is terminal. A client reads `hello_ack` at the
+version its `v` names, one the client speaks, and the window it names must
+hold that version, whatever the daemon's own newest is. A hello that names no
+oldest is served exactly as before `min_protocol_v` existed.
 
-A `hello` or `pair_request` whose `v` is outside the window is answered with a
-typed refusal, then close `1002` with the text `unsupported mobile protocol
-version`. The refusal is encoded at the daemon's own version, `seq` 1:
+**Protocol 3: a row may carry any number of block types.** On protocol 3 a
+`text_done`, a `row` and a history message may carry any number of block
+types under `blocks`, one block of each, and a phone skips a type it does not
+know. Protocol 3 brings two, `events` and `trips` (see *Timeline shapes*). A session at
+protocol 2 is sent only `places` and `checklists` blocks, wherever a row
+reaches it (its `text_done`, its `row`, a `history_page` message), since a
+protocol 2 phone app refuses a row with more than two blocks; and its turns
+are written for a phone that draws no events. A session at protocol 3 has its
+turns told that their events are drawn under the reply. Beside this and push
+through the relay, below, nothing changes: every protocol 2 event, field and
+rule holds unchanged on protocol 3.
+
+**Protocol 3: push through the relay.** On protocol 3 a phone's `hello_ack`
+`caps.push` and its `pair_approved` `push` name `fcm`, Google's push service
+through Fermix's push relay, after `apns` when both run, and the phone answers
+with `push_subscribe` (see *Android, through Fermix's push relay*). A session
+at protocol 2 is told exactly what it was before: its push lists name `apns`
+alone, and `push_subscribe` there is the unknown event it always was
+(`unsupported`, close `1002`), since a protocol 2 phone app reads the push
+list as `apns` alone. A desktop's session is never told `fcm`: a computer is
+not pushed.
+
+**An engine's hello names its window** when it is the initiator (a
+computer's desktop session to its server, a move's check of its new server;
+see *Desktop sessions*): it says `hello` at its newest version and names its
+oldest as `min_protocol_v`, then speaks the version the `hello_ack`'s `v`
+chose. A server frame at a version the engine does not speak is refused,
+naming the server's side (`server_too_old` or `server_too_new`), and the
+session closes `1002`. So a computer a version ahead of its server links, as
+does one a version behind, which the server's own window serves; two apart,
+the server refuses the hello naming the side that must update. A session
+that says no `hello` (an enrollment, a move's copy) speaks the oldest version
+its engine serves and is served the version of its first frame.
+
+A `pair_request` whose `v` is outside the window, or a `hello` with no
+version in common with it, is answered with a typed refusal, then close
+`1002` with the text `unsupported mobile protocol version`. The refusal is
+encoded at the daemon's own version, `seq` 1:
 
 ```json
-{"v":2,"t":"error","seq":1,"code":"unsupported_protocol_version","message":"…","direction":"client_too_old","client_version":1,"min_version":2,"max_version":2}
+{"v":3,"t":"error","seq":1,"code":"unsupported_protocol_version","message":"…","direction":"client_too_old","client_version":1,"min_version":2,"max_version":3}
 ```
 
 `direction` is `client_too_old` (the app must update) or `client_too_new`
@@ -503,7 +591,7 @@ served.
 
 | `t` | Required payload | Rules |
 |---|---|---|
-| `hello` | `device_id`, `app_version`, `last_server_seq`, `protocol_v`; `relay_list_rev?`, `primary_epoch?` | first paired-session event; `relay_list_rev` is the revision of the relay list the phone holds (see *Remote reach*), 16 lowercase hex digits; `primary_epoch` is the highest primary epoch the phone has seen, absent when it has seen none (see *Primary epoch*) |
+| `hello` | `device_id`, `app_version`, `last_server_seq`, `protocol_v`; `min_protocol_v?`, `relay_list_rev?`, `primary_epoch?`, `platform?` | first paired-session event; `protocol_v` is the newest version the client speaks and `min_protocol_v` the oldest, at most `protocol_v`, absent when it speaks `protocol_v` alone (see *Envelope, ordering, and version negotiation*); `relay_list_rev` is the revision of the relay list the phone holds (see *Remote reach*), 16 lowercase hex digits; `primary_epoch` is the highest primary epoch the phone has seen, absent when it has seen none (see *Primary epoch*); `platform` is a desktop's alone, the system its computer runs, and a phone never sends it (see *A computer's own record*) |
 | `msg` | `client_msg_id`, `profile_id`, `text`, `attach_ids[]` | text or at least one attachment is required |
 | `attach_begin` | `attach_id`, `kind`, `mime`, `size_bytes`, `sha256`; `name?`, `poster_of?` | SHA-256 is announced before transfer so the host can deduplicate. `kind` is one of `image`, `animation`, `video`, `audio`, `voice`, `document`, `file`; the daemon names the kind from the bytes itself and reads `kind` as a hint. `voice` is a recording the owner made in the app: the daemon treats it as the owner's own words, while `audio` (an audio file attached or forwarded) is treated as content someone else could have written. The row's `media_refs` and every media event name a `voice` upload `audio`. A daemon older than `voice` reads it as no hint and handles the recording as an audio file, so a phone sends `voice` without checking the daemon's version. A still sent with `poster_of` set to a video's `attach_id` is that video's poster frame, not an attachment of its own |
 | `attach_chunk` | `attach_id`, `index` + raw bytes | contiguous zero-based indexes; raw bytes ≤60 KiB |
@@ -512,8 +600,9 @@ served.
 | `cancel` | `profile_id`, `client_msg_id` | stops that request's turn, running or waiting, and no other; never answered |
 | `history_pull` | `profile_id`, `limit`, and exactly one of `after_seq` or `before_seq` | limit is 1–200; `after_seq` (≥ 0) pages forward and `before_seq` (≥ 1) backward, each any unsigned 64-bit value |
 | `media_fetch` | `ref` | re-download a content-addressed blob |
-| `push_register` | `apns_token`, `environment` | environment is `development` or `production` |
-| `push_unregister` | — | clears this phone's token: its notifications cannot show, so no push may come. A phone sends it only to a daemon whose `caps` carries `push[]`, which came with it: an older daemon answers it `unsupported` and closes, as it does any unknown event |
+| `push_register` | `apns_token`, `environment` | environment is `development` or `production`; it replaces a subscription the phone held (see *Push notifications*) |
+| `push_unregister` | — | clears this phone's token or subscription: its notifications cannot show, so no push may come. A phone sends it only to a daemon whose `caps` carries `push[]`, which came with it: an older daemon answers it `unsupported` and closes, as it does any unknown event |
+| `push_subscribe` | `service`, `address`, `p256dh`, `auth` | protocol 3 only: the phone's subscription through Fermix's push relay, which replaces an APNs token it held (see *Android, through Fermix's push relay*). `service` is `fcm`, the only one; `address` is the phone's address at Google, its Firebase Installation ID, 1 to 256 letters, digits, `_` and `-`; `p256dh` is the phone's P-256 public key, 65 bytes whose first is `0x04` and a point on the curve, and `auth` its 16-byte secret, each in base64url without padding. A field outside its shape is a malformed frame |
 | `ack` | `server_seq` | cumulative socket-delivery cursor |
 | `read_state` | `profile_id`, `read_up_to_seq` | monotonic read frontier |
 | `request_status` | `client_msg_ids[]` | 1 to 32 ids of requests this phone sent; see *Requests after a reconnect* |
@@ -524,9 +613,9 @@ served.
 `profile_id` is `main`, the one profile; any other is refused with
 `unsupported_profile`.
 
-These are a phone's events. A desktop's, enrollment and the move have
-sections of their own below, and *Who may send what* says which session may
-send which.
+These are a phone's chat events; its call events are in *Calls from the
+phone*. A desktop's, enrollment and the move have sections of their own
+below, and *Who may send what* says which session may send which.
 
 What each is answered with:
 
@@ -537,7 +626,7 @@ What each is answered with:
 | `attach_begin` | `attach_status{status:"upload"}`, or `attach_status{status:"present"}` when the digest is already stored |
 | `attach_chunk` | nothing; a refused chunk is an `error` |
 | `attach_end` | `attach_status{status:"present"}` once size and digest check out |
-| `cancel`, `ack`, `push_register`, `push_unregister` | nothing; a refused one is an `error` |
+| `cancel`, `ack`, `push_register`, `push_unregister`, `push_subscribe` | nothing; a refused one is an `error` |
 | `read_state` | the frontier as `read_state`, to every client of the profile, this one included |
 | `history_pull` | `history_page` |
 | `request_status` | `request_status_page` |
@@ -551,7 +640,7 @@ A client must not upload chunks after `present`.
 
 | `t` | Required payload | Rules |
 |---|---|---|
-| `hello_ack` | `session_id`, `min_version`, `max_version`, `profiles[]`, `candidates[]`, `history_head_seq`, `read_up_to_seq`, `caps{}`; `primary_epoch?` | completes hello negotiation; `primary_epoch` is the daemon's primary epoch, which this daemon always sends and a daemon older than the epoch leaves out (see *Primary epoch*) |
+| `hello_ack` | `session_id`, `min_version`, `max_version`, `profiles[]`, `candidates[]`, `history_head_seq`, `read_up_to_seq`, `caps{}`; `primary_epoch?` | completes hello negotiation; its `v` is the version the session is served, which `min_version` to `max_version` holds: the daemon's window to a phone, the versions both engines speak to a desktop; `primary_epoch` is the daemon's primary epoch, which this daemon always sends and a daemon older than the epoch leaves out (see *Primary epoch*) |
 | `accepted` | `client_msg_id`, `duplicate`; `server_seq?` | durable receipt for a `msg` or `command`; clears the outbox item |
 | `attach_status` | `attach_id`, `status` | status is `upload` or `present` |
 | `turn_started` | `profile_id`, `turn_id`, `in_reply_to` | begins streamed draft |
@@ -586,7 +675,11 @@ routes for later reconnects, best first: `{host, interface, scope}`, where
 `host` is an address or a MagicDNS name of at most 253 bytes and `scope` is
 `lan` or `tailnet`. While remote reach is ready the last of them is the route
 `{kind: "iroh", node_id, relays[], relays_rev}`, each relay `{url,
-quic_port}`, and the host routes are cut to 15. A host route has no `kind`;
+quic_port}`, and the host routes are cut to 15. On a desktop's session the
+route also carries `addrs[]`, 1 to 8 direct UDP addresses (`ip:port`, an IPv6
+address in brackets) the desktop dials beside the relays: an Always On
+server's tailnet addresses at its fixed port, read when the `hello_ack` is
+sent, and absent when it has none; a phone's route never carries them. A host route has no `kind`;
 a phone skips a candidate whose `kind` it does not know. A daemon whose listener is bound to one address lists only
 that address, with its MagicDNS name when it is a tailnet address, here and in
 the pairing link. A daemon that cannot list its addresses sends an empty list,
@@ -597,10 +690,20 @@ palette), `media`, `streaming`, `turn_done` (true: every turn a request opened
 ends with `turn_done` or `turn_error`), `max_media_bytes`, the largest
 attachment the daemon takes, and `push[]`, the push services this daemon sends
 through, each once, empty when it pushes through none: `apns` while its APNs
-push runs, the only service there is. Every phone gets the same list, and a
-phone offers notifications only when its own platform's service is in it: an
-iPhone does when `apns` is listed, an Android phone never does. A daemon
-older than the list sends no `push`. A `hello_ack` with 16 numeric candidates and the whole
+push runs, then, on protocol 3 and to a phone, `fcm`, which every phone
+channel sends through and which needs no setting (see *Android, through
+Fermix's push relay*). Every phone gets the same list, and a phone offers
+notifications only when its own platform's service is in it: an iPhone does
+when `apns` is listed, an Android phone when `fcm` is. A daemon older than the
+list sends no `push`. A phone's `hello_ack` also carries
+`call`, whether this primary serves a call from the phone now (see *Calls
+from the phone*), `lists: true`, that it takes the phone's list channel
+(see *Lists on a phone*), and `trips: true`, that the channel serves the
+owner's trips too (see *Trips on a phone*); an older primary's may lack any
+of them, and a phone opens a list channel only on `lists: true` and sends a
+trip event on it only on `trips: true`. A desktop's
+carries `computer` instead, which of a computer's own events the primary
+takes (see *A computer's own record*); a phone's never does. A `hello_ack` with 16 numeric candidates and the whole
 command catalog fits one frame; one whose candidates are long MagicDNS names
 arrives as an `event_part` run.
 
@@ -625,11 +728,31 @@ stored before links were kept has none). A row carries at most 4, and has the
 key only when it has one.
 
 `blocks[]` are records a reply carries, such as the places a search found
-that it recommends or the lists its turn read or changed, which the Mac's chat
-draws beside the text: the shape and
-rules are the companion socket's (`priv/companion/PROTOCOL.md`, *Blocks under
-a reply*). A row has the key only when it has one. The text stands alone, so a
-phone may ignore them, and skips a block `type` it does not know.
+that it recommends, the lists or trips its turn read or changed, or the events
+its turn stored, changed or listed, which the Mac's chat draws beside the text,
+and a phone's turn carries too (*Lists on a phone*): the shape and rules are
+the companion socket's (`priv/companion/PROTOCOL.md`, *Blocks under a reply*,
+*Which blocks a client draws*). A row has the key only when it has one. The
+text stands alone, so a phone may ignore them, and skips a block `type` it
+does not know. Which types a session is sent is its protocol's: at protocol
+2, `places` and `checklists`, at most one of each; at protocol 3 any number
+of types, one block of each, `events` and `trips` among them. A snapshot of
+tool records (`places`, `events`) is drawn from the protocol that brought it;
+a kept kind (`checklists`, and from protocol 3 `trips`) by a phone whose list
+channel pulled its index.
+
+An `events` block is the companion socket's, field for field: every event
+the turn's event tools returned, one to eight, each `{event_id, title, kind,
+date, time?, timezone, yearly?, status, change?, when, reminds?, rings?}`,
+the engine's sentences in `when`, `reminds` and `rings`, and a date a phone
+draws its tile from. A turn on a protocol 3 session is told its events are
+drawn, so its text confirms in a sentence.
+
+A `trips` block is the companion socket's too, field for field: the owner's
+trips the turn's trip tools read or changed, one to four, each `{trip_id,
+title, rows[]}`, the ids of the days and stops the turn added or changed,
+none for a trip it only read. Ids and the title, never a stop's words: a
+phone draws a trip as it stands now, once its channel pulled the trips index.
 
 A `row` is the same message with `text` in place of `content`, plus
 `profile_id`. It is the companion socket's `row` event, which on that wire
@@ -787,9 +910,8 @@ submitted, never rendered.
   forgets them without resolving them, so a client also drops a card when its
   own `ttl_s` runs out. The daemon keeps at most 64; past that a card still
   goes out live but is not sent again, so a reconnect drops it.
-- A card a phone's turn raises while no phone of the profile is connected also
-  sends each registered phone a push with no content (see *Push
-  notifications*).
+- A card a phone's turn raises also sends each registered phone that is not
+  connected then a push with no content (see *Push notifications*).
 
 ## Attachments
 
@@ -830,9 +952,9 @@ wait; one more is refused at once with `error{code:"media_fetch_backlog_full",
 ref}`, naming the fetch it refuses.
 
 A blob streams as `media_begin`, its `media_chunk`s (indexes from 0, each at
-most 60 KiB) and `media_end`, one chunk a step: other frames, `pong`
-included, can arrive between them, but one blob's frames stay in order and two
-blobs never mix. The daemon checks the size and SHA-256 as it streams: a blob
+most 60 KiB) and `media_end`, one chunk a step in the bulk lane (see
+*Lanes*): other frames, `pong` included, can arrive between them, but one
+blob's frames stay in order and two blobs never mix. The daemon checks the size and SHA-256 as it streams: a blob
 that no longer matches its row ends with `error{code:"media_descriptor_mismatch",
 ref}` in place of `media_end`, and the client discards what it received. A
 fetch that cannot start is `error{code, ref}`, such as `not_found` or
@@ -868,10 +990,28 @@ row's history carries it in `link_previews[]`.
   client decodes them under its own bounds. The same icon bytes have the same
   ref, so a site's icon is fetched once.
 
-## Push notifications (APNs)
+## Push notifications
 
 Push is the one payload that leaves the socket, so it carries its own
-end-to-end encryption. The daemon sends nothing readable to Apple: the alert is
+end-to-end encryption. Each phone is decided on its own: a row the daemon
+writes into the chat pushes every phone with a registration that is not
+connected for the profile at that moment, whichever others are, and a row the
+profile has already read pushes nobody. A phone has one registration, the
+last of `push_register` and `push_subscribe` it sent, and is pushed by that
+route alone: an iPhone (an `ios` phone, or one paired before pairing recorded
+a platform, which was an iPhone) through APNs with its token, and an Android
+phone through Fermix's push relay with its subscription (see *Android, through
+Fermix's push relay*). Neither route is ever tried for the other, and one that
+cannot run stops only its own phones: APNs settings that do not resolve leave
+every Android phone pushed, and a relay that cannot be reached leaves every
+iPhone pushed. An `android` phone holding only a `push_register` token (an
+app from before the relay) is pushed nothing: the token is kept and never
+goes to APNs, and each push it would have had is logged as refused for that
+phone.
+
+### APNs
+
+The daemon sends nothing readable to Apple: the alert is
 a fixed string and the real content rides in a separate `fx` object that only
 the paired device can open, inside the Notification Service Extension.
 
@@ -907,22 +1047,304 @@ bytes; when the encrypted preview would exceed that, the daemon sends
 `preview_text: null` with a title-only alert rather than truncating content, so
 the extension must accept a null preview.
 
-An approval waiting while no phone of the profile is connected sends each
-registered phone a notification with no content at all: the alert is
+An approval waiting for the owner sends each registered iPhone that is not
+connected a notification with no content at all: the alert is
 `{"title": "Fermix", "body": "Approval needed"}` and the encrypted object is
-`{"preview_text": null, "profile_id": …}`. Nothing is pushed while a phone of
-the profile is connected, or when push is off.
-
-Only an `ios` phone is pushed, and a phone paired before pairing recorded a
-platform, which was an iPhone. An `android` phone is pushed nothing: its
-`push_register` is kept and answered with nothing, as any phone's is, but its
-token never goes to APNs, and each push it would have had is logged as refused
-for that phone.
+`{"preview_text": null, "profile_id": …}`. With APNs push off, no iPhone is
+pushed.
 
 `push_vectors.json` pins one complete example — both static keypairs, the salt,
 the shared secret, the derived key, the nonce, the exact inner plaintext, and
 the resulting payload — and is generated by an implementation independent of the
 daemon's. The extension must reproduce it before shipping.
+
+### Android, through Fermix's push relay
+
+An Android phone is pushed through Google's push service (Firebase Cloud
+Messaging) by way of Fermix's push relay, `https://push.fermix.ai`, which
+Tezra runs, with nothing for the owner to set up: no Firebase project, no
+service account, no setting, and no key of the home's own. The app carries
+Tezra's Firebase config, so Google gives each install an address, its
+Firebase Installation ID, and the phone keeps a P-256 key pair and a 16-byte
+secret for each Fermix it pairs with. The daemon seals each notification to
+the phone's key by the Web Push standard's encryption (RFC 8291) and posts it,
+with the phone's address, to the relay, which passes it to Google. Neither
+the relay nor Google can read it.
+
+**Subscribing.** After every `hello_ack` whose `caps.push` names `fcm`, while
+that Fermix's notifications are on in the app and Android allows them, the
+phone sends `push_subscribe{service, address, p256dh, auth}`: `fcm`, its
+current Firebase Installation ID, the public key of the key pair it keeps for
+this Fermix, and the secret. The daemon stores the four on the phone's row, in
+place of any APNs token, only when they differ from what the row holds, and
+answers nothing, so an address Google changed (after a reinstall, cleared app
+data or a restore to a new phone) or one the daemon dropped is mended at the
+next connection. A `push_subscribe` to a session whose `hello_ack` named no
+`fcm` is refused `push_unavailable`, and the session stays open.
+`push_unregister` clears the subscription, as it clears an APNs token.
+
+**The request.** One per phone that is not connected, from the daemon to the
+relay: `POST https://push.fermix.ai/v1/push` with `Content-Type:
+application/json` and the body
+
+```json
+{"service":"fcm","address":"<the phone's address>","ttl":86400,"body":"<the sealed message>"}
+```
+
+`ttl` is how long Google keeps the message for a phone it cannot reach:
+86,400 seconds (a day) for a row and 300 (five minutes) for an approval, since
+an alert after the approval expired is noise. `body` is the sealed message in
+base64url without padding, always 2,867 characters. No credential goes with
+it, and the address travels in the body alone. The relay hands Google a
+high-priority message whose one data field, `m`, holds `body`, with no
+notification text, so the app receives `m` and nothing else.
+
+**The relay's answers.** `204`: Google accepted it. `410` with
+`{"error":"gone"}`: Google no longer knows the address, or it is not this
+app's, and the daemon drops the phone's subscription; the phone hands over its
+address again at its next connection. `429` `busy`, `503` `unavailable` or
+`permission`, each with `Retry-After` in seconds, the relay's gateway
+answering `429` or a `5xx` of its own with no `Retry-After` and no error word,
+and a failed connection are tried again: at most three tries, none starting a
+minute or more after the first, waiting as long as `Retry-After` asks or else
+2 s and then 10 s. Any other answer is a fault in the daemon or the relay
+(`400` `malformed`, `service`, `address`, `ttl` or `body`, `413` `too_large`,
+`502` `refused`, `404` `not_found`), logged and never tried again. A push that
+fails leaves its row in the chat, which the phone shows when the app is
+opened; after one that could not reach the relay, the daemon's status and
+`fermix doctor` say the push service cannot be reached, until a later push is
+accepted. There is no second route.
+
+**The body** is always 2,150 bytes, RFC 8291 in one record: an 86-byte header
+(a fresh 16-byte salt, the record size 4,096, and the daemon's 65-byte public
+key made for this message alone), a 2,048-byte padded record sealed with
+AES-128-GCM, and its 16-byte tag, so its length tells the relay and Google
+nothing. The plaintext, before its padding, is compact JSON with its keys in
+this order:
+
+```json
+{"v":1,"kind":"message","profile_id":"main","server_seq":42,"preview_text":"…"}
+```
+
+`kind` is `message`, a row the daemon wrote into the chat, or `approval`, one
+that waits for the owner, whose `server_seq` and `preview_text` are `null`: no
+row number and no text. A preview too long for the record is cut at a
+character and ends with "…". The phone tries the message against the key and
+secret of each Fermix it has notifications on for, shows nothing for a message
+none of them opens or a row it already notified, and otherwise posts the
+notification itself, "New message" when that Fermix's previews are off. It
+opens no connection to Fermix first, and a tap never approves anything.
+
+`webpush_vectors.json` pins the standard's own example and one Fermix message
+with the phone's private key, so an app can open it. An app must reproduce it
+before shipping.
+
+## Calls from the phone
+
+A phone talks to Fermix by voice over its own session. A call is a Realtime
+protocol conversation (`priv/realtime/PROTOCOL.md`), the one the Mac's voice
+companion speaks over its local socket, carried in four events each way
+beside the chat, and a fifth from the phone for its camera's stills. A
+computer whose home moved calls its server the same way (M97 §9.2; see *A
+computer's call*, below).
+
+`hello_ack.caps.call` says whether this primary serves a call now:
+`{available, reason?, min_version, max_version, camera}`. When `available` is
+false, `reason` says why: `voice_off` (Talk to Fermix is off, or turned on and
+waiting for a restart), `no_key` (its provider key is missing) or
+`engine_not_for_phones` (the configured engine is `openai_realtime`, which
+serves the Mac alone). `min_version` and `max_version` are the Realtime
+protocol versions a call's lines may speak; `min_version` is the configured
+engine's floor, and an app whose own range does not reach it needs an update.
+`camera` is true when a call takes the phone's camera (below): on a task
+engine (`openai_live`, `xai_realtime`) while the owner's `[fermix_core.realtime]
+camera_share` setting is on. `reason` is a string, as
+`error.code` is: these are the values this primary sends, and a later one may
+give another, which an app reads as needing an update. A primary older than
+calls, and a desktop's `hello_ack`, carry no `call`. The primary checks again
+at every new call's `call_open`, so an app that offers a call still handles a
+refusal.
+
+The phone sends:
+
+| `t` | Required payload | Rules |
+|---|---|---|
+| `call_open` | `call_id`, `resume` | open a call under a new `call_id`, or with `resume: true` take back the call this phone holds; answered `call_attached`, or `call_close` |
+| `call_line` | `call_id`; `control_seq?` + raw bytes | one Realtime client line, its JSON without the newline, in one frame of at most 60 KiB; `control_seq` numbers a control line (below) |
+| `call_audio` | `call_id` + raw bytes | the microphone: PCM16 at 24 kHz mono, whole samples, 2 to 4,800 bytes (100 ms) a frame |
+| `call_frame` | `call_id`, `width`, `height`, `captured_ms` + raw bytes | one camera still while the call's camera is on (below): one JPEG, opening `FF D8 FF`, of 1 byte to 60 KiB; `width` and `height` are its pixels, 1 to 4,096; `captured_ms` is when the phone took it, on its own clock, for logs |
+| `call_close` | `call_id`; `reason?` | the owner ended the call; `reason`, at most 512 bytes of text, is for logs; answered with the call's last lines and `call_close{reason:"ended"}`, or `call_close{reason:"unknown_call"}` |
+
+The primary sends:
+
+| `t` | Required payload | Rules |
+|---|---|---|
+| `call_attached` | `call_id`, `resumed`, `muted`, `camera`, `control_seq` | this session carries the call: `resumed` is true when the call was held across a reconnect, `muted` and `camera` are its state as the primary holds it, and `control_seq` is the last control line applied, 0 for none |
+| `call_line` | `call_id` + raw bytes | one Realtime server line, its JSON without the newline, in one frame |
+| `call_audio` | `call_id`, `playback_id` + raw bytes | the assistant's audio: PCM16 at 24 kHz mono, whole samples, at most 4,800 bytes a frame; `playback_id` is 1 to 64 letters, digits, `.`, `_`, `:` and `-` |
+| `call_close` | `call_id`, `reason` | the call ended: `ended` (hung up, refused or failed), `link_too_slow`, `revoked` (the phone was removed), `unknown_call` (this primary holds no such call) or `lost` (reserved: the window runs out only while no session carries the call, so a phone that comes back after it is answered `unknown_call`); `reason` is a string, as `error.code` is, and a phone reads one it does not know as an ended call |
+
+**Lines.** A `call_line` carries one line of the Realtime wire as the Mac's
+socket would, without its newline. A call starts with the Realtime handshake
+on its lines (`client_hello`, answered `server_hello`), which belongs to the
+call, not to a session. A link can drop with it in flight, so on resume the
+phone sends `client_hello` again only if it never saw `server_hello`: on a
+call whose handshake never completed it is the first; at the version already
+negotiated it is answered with `server_hello` again; at any other version it
+is refused (`unexpected_client_hello`) and the call ends. Audio never rides a line: the
+phone's `audio_chunk` is refused (`audio_on_call_line`), and the session's
+`audio_delta` arrives as `call_audio`. A refusal at `call_open` (Talk to Fermix
+off or its key missing) is a Realtime `error` line before any handshake, then
+`call_close{reason:"ended"}`; `engine_not_for_phones` comes the same way at
+`call_start`. A Realtime error that would close the Mac's socket ends the call
+the same way: the error line, then `call_close{reason:"ended"}`. Nothing about
+a call closes the session or touches the chat; a malformed call frame is a
+protocol error like any frame's (`1002`).
+
+**One call, held by the phone.** The call belongs to the phone, not to a
+session: one session carries it at a time, the last to open or resume it, and
+call frames from any other are dropped. A home holds one call at a time across
+every endpoint: a `call_start` while the Mac or another endpoint holds it is
+answered `error{reason:"call_in_progress", held_by}` as on the Mac's socket,
+then `call_close{reason:"ended"}`, and a `call_open` under a new `call_id`
+while this phone's call runs is answered the same way, `held_by` naming
+`phone:<device_id>`.
+
+**Reconnects.** A session that closes, for any reason (its one-hour lifetime
+and `4001` included), leaves the call held for 20 s. So does one that goes
+silent mid-call: while the phone holds audio it reports on, no call frame
+from its session for 1.5 s is a link that died without closing, and the
+primary lets that session go as if it had closed, then closes it
+(`1000`, `call link silent`, not a protocol error), so a phone whose link
+is in fact alive reconnects at once and resumes. The phone's next session
+sends `call_open{resume: true}` with the same `call_id`, and is answered
+`call_attached{resumed: true}`, then the lines that came while it was away
+(at most 512, the oldest dropped past that), then the call's audio. Past the
+20 s the call ends, and a resume is answered `call_close{reason:"unknown_call"}`,
+as it is by a primary that restarted. While the phone is away, `call_close`
+from any of its sessions ends the call, no `call_open` needed. On a Grok call,
+a reply the phone had not finished hearing when its session closed is
+interrupted then, cut at what it reported playing, since Grok ends a call
+whose audio goes unreported for 2 s.
+
+**Controls.** The phone numbers each control line it sends (`call_start`,
+`mute`, `camera`, `interrupt`, `task_cancel`, `call_stop`) with `control_seq`,
+rising from 1 within a call, and each states its result (a `mute` names
+`enabled`, a `camera` names `on`). The primary applies each once and drops one
+at or below the last it applied, which `call_attached.control_seq` names, so
+after a resume the phone sends again only the controls after it, before any
+audio. A control the primary refused and the call outlived (a `camera` refused
+`camera_off`) counts as applied: its `control_seq` is consumed, and the phone
+does not send it again after a resume. A line without `control_seq`
+(`client_hello`, `playback_progress`) is applied as it comes.
+
+**Audio.** Every `call_audio` the primary sends carries a `playback_id`: on a
+Grok call, Grok's own, passed through; on any other engine one the primary
+mints, which names every stretch of audio up to the next `playback_stop` line,
+with a new one after each (an id that drained takes more audio when the next
+reply comes before any stop, as Grok's may). The phone reports
+`playback_progress` (a Realtime line: `playback_id`, `played_ms`, `drained`)
+against it on every engine, at most every 100 ms and at once when a playback
+drains or stops. The primary checks each report as the Realtime session
+does, on every engine: an id it never sent (or no longer holds; it keeps the
+latest 64), a `played_ms` below one already reported for the id, or one past
+the audio it wrote to the phone under the id ends the call with the error
+line `unknown_playback`, `playback_regressed` or `playback_beyond_sent` and
+`call_close{reason:"ended"}`. The primary
+keeps at most 1 s of audio sent and not yet reported played (a playback
+reported drained counts nothing sent before the report), room for a playout
+cushion the phone keeps against a provider that delivers unevenly and for the
+link's round trip. The phone never
+reports the audio it drops after a `playback_stop`, or what was in flight when
+its link went, so a `playback_stop` and a resume count everything sent so far
+as played; a later report is still checked against all of it. The primary
+drops its audio that waited 300 ms before writing it, and ends a call whose
+link kept audio waiting 5 s (a report that frees credit starts the 5 s again)
+with the error line `link_too_slow`, then the session's last lines, then
+`call_close{reason:"link_too_slow"}`. It drops the phone's audio that waited
+300 ms before reaching the call. The report goes on to the voice session only
+on a Grok call, whose audio the session paces to the phone in a 300 ms window,
+inside the credit.
+
+**Ordering.** A session writes a call's frames ahead of everything else it has
+queued (the live lane, see *Lanes*), its control frames (`call_attached`,
+`call_line`, `call_close`) ahead of its audio. A `playback_stop` line would so overtake audio queued before it,
+so the session drops that call's audio queued behind it unwritten. Audio
+already written can still arrive after the stop, so after a `playback_stop`
+the phone drops every `call_audio` under a `playback_id` it saw before that
+line. From `call_attached` until the call's `call_close`, the primary holds
+this phone's media (`media_begin`, `media_chunk`, `media_end`, pushed or
+fetched) and sends it after; text still flows. It holds at most 32 MiB: a
+download past that is dropped whole, and the phone fetches it again by its
+`ref`. A call that ends on a fault, without its own `call_close`, is closed
+by the session with `call_close{reason:"ended"}`, and the held media follows.
+
+**The camera.** The camera is Realtime version 4's
+(`priv/realtime/PROTOCOL.md`): a phone that has one says `camera: true` in its
+`client_hello` at version 4, and turns it on and off with the control line
+`camera{on}`. A `camera` from a phone whose hello did not say so is refused
+with `unsupported_by_endpoint`, which ends the call as a Realtime error does.
+The call reads the owner's `camera_share` when it opens (`call_open`) and
+keeps that reading for its life, resumes included; `caps.call.camera` is read
+when the phone connects, so the owner may have turned it off between the two.
+`camera{on: true}` while the call's reading is off is then refused alone with
+the error line `camera_off`: the call goes on, the camera stays off
+(`call_attached.camera` false), and a `call_frame` sent anyway is dropped and
+counted. The phone takes `camera_off` as "the camera is off" and stops its
+camera. It is the one error line that does not end a call; `unknown_playback`
+and the other playback errors, and `unsupported_by_endpoint`, end it.
+`call_attached.camera` is the camera's state as the primary holds it: it stays
+on across a reconnect, so a phone that turned it off while away sends that
+again after `call_attached`. While it is on, the phone sends its stills as
+`call_frame`, not as lines: at most one a second and at least one every 6 s,
+sooner when the scene changes (a still each second while the owner speaks,
+each two otherwise, and each six once the scene is still). The primary takes
+at most one a second (give or take 100 ms of the link's jitter) and at most 60
+a minute (a fixed minute from the first still taken), whatever the phone
+sends, so a phone at that cadence is never dropped. It drops a still past
+those bounds, one identical to the last one it took, one that comes while the
+camera is off, and one from a session the call is not attached to; a dropped
+still is counted in the primary's log and never ends the call. The voice never
+sees a still. The primary keeps the newest still for 8 s, the phone's longest
+gap and 2 s for the link's jitter, so each task the voice hands the Fermix
+agent while the camera is on carries the newest still the primary took within
+the last 8 s, and a task with none tells the agent there is no current
+picture, so the voice says it cannot see right now. The newest still is let go
+once it is 8 s old, and on Camera off, a detach and the call's end; the
+primary keeps none longer, never logs its bytes, and cannot take back a still
+a task already carried to a provider.
+
+**A computer's call** (M97 §9.2). A desktop engine whose home moved carries
+its app's calls to its server on its own desktop session: its app keeps the
+Mac's or Linux's local socket and audio stack, and the engine bridges each
+call to this channel. The primary admits it as the endpoint
+`computer:<device_id>` (its device row's id), under the home's one call, so
+a phone's `call_start` while a computer holds the call is refused `held_by:
+"computer:<device_id>"`, and the reverse. A desktop sends a call's events
+only to a primary whose `hello_ack` says `caps.computer.call: true`, which
+also carries `caps.call` for the computer: `available` and `reason` as a
+phone's (`engine_not_for_phones` never: a computer's call runs on the
+configured engine, any of the three), the Realtime window, and `camera`
+always false. Everything above holds, with three differences:
+
+- no camera: a desktop sends no `call_frame` (`unsupported_event`), and a
+  `camera` line ends its call as `unsupported_by_endpoint`;
+- no screen: the call's voice is offered no screen share, whatever the
+  primary's setting;
+- a silent session ends the call alone: a desktop's session carries its
+  chat and settings too, so no call frame from it for 1.5 s while the
+  computer holds audio it reports on ends the call with the error line
+  `link_too_slow`, then the session's last lines and
+  `call_close{reason:"link_too_slow"}`, and the session stays open.
+
+A desktop's session that closes leaves the call held for 20 s, as a phone's
+does, and its next session resumes it with `call_open{resume: true}`.
+
+**Revocation.** A phone revoked mid-call is sent the error line `revoked`
+first; then it is muted, the hand-offs its call started that have not settled
+are cancelled, the session's last lines follow, and the call ends with
+`call_close{reason:"revoked"}`. The session's `4003` close may overtake any of
+these.
 
 ## Desktop sessions
 
@@ -932,8 +1354,17 @@ keeps a session to the new primary as a `desktop` device. Its row in
 field; a row that names no kind is a phone's, as every row written before
 desktops did. A
 desktop authenticates exactly as a paired phone does: `IK` (`0x01`) with its
-own static key, then `hello` with the highest `primary_epoch` it has seen,
-answered with `hello_ack`. The primary reads the row's kind and admits that
+own static key, then `hello` with the highest `primary_epoch` it has seen and
+the system its computer runs (`platform`, see *A computer's own record*),
+answered with `hello_ack`. Its `hello` is sent at its engine's newest
+protocol and names its oldest (`min_protocol_v`, see *Envelope, ordering, and
+version negotiation*), so a computer a version ahead of its server, or a
+version behind it, connects, and the session speaks the version the
+`hello_ack`'s `v` names. A desktop's `hello_ack` names as `min_version` and
+`max_version` the versions both engines speak, so a desktop engine from
+before `min_protocol_v`, whose hello names none and which reads that window as
+its own, is told its own version alone (`{2, 2}` for a protocol 2 engine);
+a phone's names the daemon's own window. The primary reads the row's kind and admits that
 kind's events alone (see *Who may send what*). The desktop's Mac or Linux app
 speaks only its local sockets; the desktop's engine carries them over this
 session. A desktop's session is meant to stay up: it has no one-hour lifetime
@@ -942,10 +1373,19 @@ the primary ends normally (`1000`, a daemon stopping) is renewed at once
 without being shown as an outage, once in a row: a renewed session the
 primary ends normally again within a minute of opening is an outage from then
 on, redialed with the usual backoff. A desktop the primary revoked (`4003`,
-live or at the handshake) does not dial again until its engine restarts.
+live or at the handshake) does not dial again until its engine restarts. The
+owner removes a computer as a phone is forgotten (management
+`mobile.devices.revoke`; the one that keeps the home's backup copies only
+once they confirmed it), and a computer that disconnects itself asks for the
+same over its own session (`manage`) before it deletes its key. The primary
+drops the row and what it kept of the computer's offers, and closes its
+session `4003` (`device revoked`). A removed computer comes back only by
+joining again with a code (see *Enrollment and the move*).
 
 A desktop's session takes the phone events `hello`, `ping`, `media_fetch` and
-`ack`, and these:
+`ack`, and these (the companion family, `companion_open`, `companion_line` and
+`companion_close`, is a phone's list channel too, one channel and lists only:
+see *Lists on a phone*):
 
 | `t` | Required payload | Rules |
 |---|---|---|
@@ -957,10 +1397,31 @@ A desktop's session takes the phone events `hello`, `ping`, `media_fetch` and
 | `loopback_failed` | `loopback_id`, `port`, `reason` | the desktop would not or could not listen on `127.0.0.1` on `port` of the loopback: `port_in_use` (something listens there), `not_permitted` (the system refused, or the port is below 1024 or one of the desktop engine's own) or `failed` (anything else, or 8 loopbacks already open); the sign-in ends with that sentence |
 | `snapshot_stored` | `snapshot_id`, `sha256` | the desktop kept a snapshot, and the SHA-256 of what it wrote |
 | `snapshot_refused` | `snapshot_id`, `reason` | the desktop kept no copy: `disk_floor` (it would have left under 2 GiB free), `space_unknown`, `mismatch` (size or SHA-256 not `snapshot_begin`'s), `out_of_order`, `invalid_name` or `write_failed`; nothing partial is left |
+| `offers` | `rev`, `index`, `last` + raw bytes | what the computer offers its server, a JSON payload chunked, at most 64 KiB; `rev` is the payload's revision; sent only when `hello_ack` says `caps.computer.offers: true` (see *A computer's own record*) |
+| `link_path` | `path` | the session the desktop dialed runs `direct` or through a `relay`; sent only when `hello_ack` says `caps.computer.link_path: true` |
+| `invoke_restarted` | (none) | the desktop's request handler started again while the session stayed up; sent only when `hello_ack` says `caps.computer.invoke: true` (see *After a reconnect*) |
+
+The invocation's five events (`invoke_open`, `invoke_part`, `invoke_cancel`,
+`invoke_result`, `invoke_status`) go both ways on a desktop's session, a
+desktop sending them, and `invoke_restarted`, only when `hello_ack` says
+`caps.computer.invoke: true` (see *Invocations*).
+
+A desktop also sends the phone's call events but its camera (`call_open`,
+`call_line`, `call_audio`, `call_close`; see *A computer's call*) only when
+`hello_ack` says `caps.computer.call: true`, and the phone's upload
+(`attach_begin`, `attach_chunk`, `attach_end`; see *Attachments*) only when it
+says `caps.computer.attach: true` (M97 §9.3): its engine takes the files its
+app attaches into an inbox of its own and uploads each one so, one at a time,
+in the bulk lane, and the app's `msg` that names it, which its chat tunnel
+carries, finds it in the primary's store. The primary answers an upload as it
+answers a phone's (`attach_status`, or an `error` naming no upload, which is
+why a desktop sends one at a time).
 
 The primary sends a desktop `hello_ack`, `pong`, `error`, `event_part`,
 `media_begin`, `media_chunk` and `media_end`, `companion_line` and
-`companion_close` (above), and these:
+`companion_close` (above), the invocation's events, a call's events
+(`call_attached`, `call_line`, `call_audio`, `call_close`), `attach_status`,
+and these:
 
 | `t` | Required payload | Rules |
 |---|---|---|
@@ -990,6 +1451,313 @@ holds at most 32 chunked payloads open at once, as the primary does; the
 primary also holds at most 64 MiB across a desktop's open payloads. Past
 either, the session closes `1002`.
 
+### A computer's own record
+
+A desktop tells the primary about the computer it runs on: its system, what
+it offers the home, and the path its session runs. The primary keeps each
+computer's record; a phone sends none of it.
+
+- **Its system.** `hello.platform` is `macos` or `linux`; any other value is a
+  malformed frame (close `1002`). A desktop always sends it, a phone never
+  does, and a desktop engine older than the record leaves it out. The primary
+  writes it on the desktop's row when the row names no platform or another
+  one; a phone's `hello` never moves its row's platform.
+- **What the primary takes.** A desktop's `hello_ack` carries
+  `caps.computer`, with
+  `{"v":1,"offers":true,"link_path":true,"invoke":true,"machine_settings":true,"call":true,"attach":true}`
+  among its keys from this primary: `v` is a positive integer, and `offers`,
+  `link_path`, `invoke` (the five events of *Invocations*, and
+  `invoke_restarted`), `call` (a call's four events, *A computer's call*) and
+  `attach` (the upload's three), each a
+  boolean when present, say whether the primary takes that event. A later
+  primary may add keys, which a desktop ignores. A phone's `hello_ack`, and a
+  primary's older than the record, carry no `computer`.
+- **One set of settings** (M97 §19, D28). `caps.computer.machine_settings:
+  true` in a desktop's `hello_ack` says the primary applies the rule that a
+  management setting's id names its machine (`computer` and `computer.<id>`
+  the computer's own, every other id the home's, the primary's own sandbox,
+  browser and coding approval included; the management protocol's *One set
+  of settings*), and the same key in a desktop's `hello`
+  (`hello.caps.computer.machine_settings: true`, absent from a phone's and
+  from an older desktop) says the desktop does. A desktop sends a primary
+  whose `hello_ack` does not say it none of the primary's machine settings,
+  and a primary refuses a sandbox value from a desktop whose `hello` did not
+  say it.
+- **Where it stands.** The primary leads: it updates on its own, and serves
+  a computer up to two minor versions behind it. `caps.computer.standing`
+  says where this computer stands, by the `app_version` its `hello` named,
+  counted by major.minor and never by patch: `current` (the primary's
+  major.minor), `behind` (the same major, at most two minor versions behind,
+  served as `current` is), `ahead` (newer than the primary, which it speaks
+  to in the primary's versions) or `settings_only` (further behind, or an
+  older major). A `settings_only` computer keeps its link for settings
+  alone: every `companion_open` is answered `companion_close` with "Update
+  Fermix on this computer to chat through your server.", and the primary
+  treats it as offering nothing until it updates; it never holds the primary
+  back. `caps.computer.versions` is what the primary speaks: its `engine`
+  version, and its `companion` and `management` protocol ranges, each
+  `[min, max]`. A primary older than the window sends neither.
+- **Sent only when taken.** A desktop sends `offers` only when
+  `caps.computer.offers` is true, `link_path` only when
+  `caps.computer.link_path` is true, and an `invoke_*` event, including
+  `invoke_restarted`, only when `caps.computer.invoke` is true. A primary older than these events does
+  not know their `t`, and an unknown client event is refused `unsupported`
+  and closes the session (`1002`, see *Errors*), so a desktop that sent
+  one unasked would lose its session at every reconnect.
+
+**Offers.** `offers` carries the computer's whole list as one chunked payload
+(see *Chunked payloads*), a UTF-8 JSON object:
+
+```json
+{"v":1,"offers":[{"id":"files","state":"on","roots":["/Users/avery/.fermix/workspace","/Users/avery/Projects"],"home":"/Users/avery"},{"id":"shell","state":"on","detail":"standard"},{"id":"imessage","state":"off","sentence":"Switched off on this Mac. Only someone at this Mac can switch it on."}]}
+```
+
+| Field | Rule |
+|---|---|
+| `v` | `1` |
+| `offers` | 0 to 32 offers, each `id` named once |
+| `id` | `^[a-z][a-z0-9_]{0,31}$`: `files`, `shell`, `browser`, `computer_use`, `imessage`, `history`, `places`, `voice`, `attachments`, `accessory` and `notifications` today; the primary keeps an id it does not know as it came, since a newer computer may offer more |
+| `state` | `on`, `off` or `unavailable` |
+| `sentence?` | why the offer is not on, for the owner to read: required unless `state` is `on`, 1 to 300 bytes of UTF-8 with no control character |
+| `detail?` | a short note on the offer, such as the sandbox mode `shell` runs commands in, or the access level `computer_use` gives (its sandbox mode: `strict` looks only): 1 to 64 bytes of UTF-8 with no control character |
+| `helper?` | what the offer's helper offers, which the primary's tool for it follows (`computer_use`: what this computer's screen helper says it does): `{actions, input_methods}`, 1 to 64 action names and 0 to 8 input methods, each `^[a-z][a-z0-9_]{0,31}$`; absent while the helper has said nothing, and from a computer older than it, which the primary reads as the actions every helper has |
+| `roots?` | the folders files and commands reach on this computer (`files`, while on: its sandbox's roots in its mode, the workspace and the folders allowed there), which the primary tells the model and names when it refuses a path outside them: 1 to 32 absolute paths, each 1 to 1,024 bytes of UTF-8 with no control character; a folder the wire cannot carry is left out by the computer, and only the first 32 are sent; absent from a computer older than it, which the primary reads as folders it was not told |
+| `home?` | beside `roots`, the folder a path's `~` stands for on this computer (its account's home, which every file and command tool resolves `~` and `~/…` against there): one absolute path, as a root is; the primary says a folder under it from `~`, with the computer's name, so the account's name stays out of what the model reads; absent from a computer older than it, whose folders are said whole |
+
+The header's `rev` is the payload's revision, the first 8 bytes of its
+SHA-256 as 16 lowercase hex digits, and the payload's chunk key. A desktop
+sends its offers at each session's start, as soon as `hello_ack` says the
+primary takes them (the primary holds none from an earlier session), and
+again whenever the revision changes.
+
+The primary decodes the whole payload and checks that `rev` is its own. A
+payload it refuses, or whose `rev` is another payload's, is answered
+`error{code:"invalid_offers"}`, whose `message` names the first thing wrong,
+and the session stays open. The computer then offers nothing until it sends
+a payload the primary takes: a bad payload fails closed, for that computer
+alone, as does a session that has sent none yet. A header that breaks the
+codec's rules (a `rev` that is not 16 lowercase hex digits, say) is a
+malformed frame like any other (close `1002`).
+
+**The path.** Only the side that dials learns whether its session runs
+`direct` or through a `relay`, so the desktop tells the primary with
+`link_path{path}`: at the session's start, once it knows, and again at each
+change.
+
+### Invocations
+
+The primary and a computer ask each other to run one operation: the primary
+one of the capabilities the computer offers, the computer one of the home's
+services. Both directions use the same five events with the same fields. The
+side that sends `invoke_open` is the caller, and the other side answers. A
+computer sends none of them unless its `hello_ack` says
+`caps.computer.invoke: true`. The primary asks only a computer that is
+connected and has sent its offers this session, and refuses on its own side,
+before anything is sent, an operation whose offer the computer says is not
+on.
+
+| `t` | Required payload | Rules |
+|---|---|---|
+| `invoke_open` | `id`, `capability`, `op`, `deadline_ms`, `epoch`, `origin`, `index`, `last` + raw bytes; `turn?`, `part?` | the request: its arguments, a JSON object, chunked, at most 1 MiB |
+| `invoke_part` | `id`, `index`, `last`, `size_bytes` + raw bytes | the one part a request or its answer announced, a stream (see *The part*) |
+| `invoke_cancel` | `id`, `capability`, `op` | the caller cancels its request, naming the request's `capability` and `op` (its lane); answered with exactly one `invoke_result` |
+| `invoke_status` | `id`, `capability`, `op` | the caller asks for the answer again, naming the request's `capability` and `op` (its lane; see *After a reconnect*) |
+| `invoke_result` | `id`, `status`, `duration_ms`, `index`, `last` + raw bytes; `refusal?`, `message?`, `receipt?`, `part?` | how the request ended: its result, a JSON object, chunked, at most 4 MiB (each operation's own bound is tighter), `{}` for none |
+
+**The request.**
+
+| Field | Rule |
+|---|---|
+| `id` | the caller's, never reused; this primary mints `inv-` and 26 lowercase base32 characters |
+| `capability` | `^[a-z][a-z0-9_]{0,31}$` |
+| `op` | lowercase words joined by `.`, as a management method is named, at most 64 bytes |
+| `deadline_ms` | 0 to 900,000, counted from the request's arrival, its wait included; 0 means until cancelled and is taken only for a long-lived op |
+| `epoch` | the caller's primary epoch, 1 to 2^64−1 |
+| `origin` | the kind of turn that asked: `chat`, `voice`, `scheduled`, `cue`, `worker` or `background`; `computer` for a computer's own request |
+| `turn?` | `{session_id, tool_call_id}`, each at most 128 bytes: the turn that asked (the invocation's `id` as `tool_call_id` when the turn gives none), required for every origin but `computer` |
+| `part?` | `{size_bytes, sha256, mime}`: an upload follows, 1 to 20 MiB, its SHA-256 in lowercase hex, its media type at most 127 bytes with no white space |
+
+The origin is the primary's word. A computer applies its own rules to it
+(computer use runs only for a turn the owner is in), which guards against a
+mistake on the primary, not against a primary that was taken over. An
+operation the receiver does not have is refused `unavailable`.
+
+**The answer.**
+
+| Field | Rule |
+|---|---|
+| `status` | `ok` (it ran; the payload is its result), `failed` (it ran and failed), `refused` (it never ran), `timed_out` (it did not finish within its deadline), `cancelled`, or `unknown` (whether it ran is not known) |
+| `refusal?` | for `refused` alone: `off` (switched off on that computer), `unavailable` (it cannot run there), `outside_sandbox`, `not_attended` (it runs only while the owner is in the conversation), `stopped_here` (the person at the computer stopped it), `busy` or `stale_epoch` (an older copy of the home asked) |
+| `message?` | 1 to 512 bytes of UTF-8 with no control character: required for `failed` (the operation's own words) and `refused` (the answering side's sentence), optional for `unknown`, absent otherwise |
+| `receipt?` | `{at, target}`, the answering side's record that it took the request: when, in UTC as ISO 8601 writes it, and what it acted on, a path, a host or an action of at most 256 bytes, never content |
+| `part?` | `{size_bytes, sha256, mime}`: a part follows, as for a request |
+| `duration_ms` | from the request's arrival to its answer |
+
+The payload `{"receipt_only":true}` marks an answer that holds only the
+journal's receipt, and no result. A caller that cannot read an answer (a
+refusal on another status, a message where none rides, a result that is not
+a JSON object) ends its request `failed`. No invocation's failure is an
+`error`; a header the codec refuses is a malformed frame (close `1002`).
+
+**The part.** An invocation carries at most one part each way: an upload its
+request announces, or a file its answer announces. The part follows as
+`invoke_part` frames under the invocation's `id`: `index` from 0 and
+contiguous, each tail 1 to 60 KiB, `last` on the final frame, and on every
+frame `size_bytes`, the whole part's announced size, which picks its lane
+(see *Lanes*). The receiver joins the frames and checks their total and
+SHA-256 against the announcement. A gap, a frame past the announced size, a
+`size_bytes` that changes, or a total or SHA-256 that differs fails the
+invocation ("The upload did not arrive whole." on a computer, "The answer's
+file did not arrive whole." on the primary), and the session stays open; an
+operation that changed something and lost only its answer's part stays
+`ok`. A computer holds at most 20 MiB of one upload and 64 MiB across its
+uploads, and refuses a request past that `busy`; the primary holds at most
+20 MiB of one answer's part and 64 MiB across a computer's.
+
+**An answer and its part.** An `invoke_result` rides the interactive lane,
+and its part rides interactive up to 256 KiB announced and bulk above, so
+other events come between them. The caller is done only once the
+`invoke_result` and any part it announced have both arrived, and takes them
+in either order.
+
+**Cancel.** `invoke_cancel` is answered with exactly one `invoke_result` for
+its `id`: `cancelled`, or the outcome the request reached first. A request
+the receiver already answered is answered as `invoke_status` is, and the
+caller keeps the first answer it took.
+
+**After a reconnect.** The primary waits on its invocations, not on a
+session. When a computer's session comes back, the primary sends
+`invoke_status` for every invocation it still waits on from that computer,
+each only once that invocation's `invoke_open` was sent and from the same
+sender, so a computer is never asked about a request it was not sent yet
+and never hears the ask before the request. The computer answers each:
+
+- an answer it still holds is sent again, its part included;
+- holding only its journal's record, an `invoke_result` of the recorded
+  status with the receipt, the payload `{"receipt_only":true}` and no part;
+- with no record, `unknown` with no receipt;
+- a request still running or waiting is answered when it ends.
+
+The same happens, with the session up, when a computer sends
+`invoke_restarted`: its request handler started again, so a request on its
+way to it while it was down, or one that waited there when it stopped, may
+be lost, with no record, and is answered `unknown`. A computer sends it each
+time its request handler starts.
+
+The primary never sends an operation that changes something (an effect)
+again: an answer that is `unknown`, or that holds only the receipt, ends it
+as it stands. A read is asked once more under a new `id`, with the time it
+has left, when a second or more is left. When no answer comes within the
+deadline and 2 s more, an effect ends `unknown` and a read `timed_out`, and
+the primary sends `invoke_cancel`, best-effort. A computer never runs an
+`id` twice: an `invoke_open` whose `id` it knows is answered as
+`invoke_status` is. The primary holds no answer to a computer's own request
+once sent, so its `invoke_status` for one that ended is answered `unknown`.
+
+**Computer history (M97 §8).** One of the home's services a computer asks is
+`history` `submit`: one finished sitting of its computer history, sent with no
+part in the bulk lane, as its cancel and status ask are (`capability`
+`history`, `op` `submit`), origin `computer`. Its arguments: `v` (1),
+`sitting` (its key, at most 128 bytes), `from_ts` and `to_ts` (epoch ms),
+`event_count`, `field_values`, `mark` (the highest of the home's purge and
+pause intervals this computer has applied), `apps`, `sites`, `titles` and
+`urls` (each at most 12 strings of at most 2,048 characters), and either
+`text` (the rendered sitting, at most 60,000 characters) or `note` (`summary`,
+at most 901 characters, and `model`) from a computer that summarizes on its
+own device. A sitting with any other field is refused `invalid`. The result
+is `{status, reason, intervals}`: `status` `summarized`, `abstained`,
+`no_signal` or `refused`; on a refusal, `reason` `purged` or `paused` with
+`intervals`, every interval of that computer or of every computer above its
+`mark`, oldest first, at most 256 (`id`, `from_ts`, `to_ts`, `issued_at`,
+`kind` `purge` or `pause`), which the computer applies before it sends what is
+left; or `invalid` (never sent again), `no_summarizer`, `route_not_permitted`,
+`summarizer_unavailable` or `store` (sent again later). The home never writes
+the sitting's text down. The primary hands a computer the intervals it has not
+applied with its capability `history` `apply` (`{intervals}`, the same five
+fields each), gated by the computer's master switch alone and answered
+`{applied}`, the highest id applied.
+
+**Notifications (M99 §10.1).** An Always On server's primary shows a
+notification on the owner's computers with the computer's capability
+`notifications`, which has no offer of its own: the master switch alone
+gates it. It asks every connected computer, at most 16, each once, origin
+`background` with `turn` `{session_id: "reminder-<reminder id>"}` (or
+`notification-<key>` for one that is no reminder's). `post` shows one
+notification, an effect, deadline 15,000 ms; its arguments are `key`
+(`^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$`, the reminder's own key, the same on
+every retry), `title` (1 to 256 Unicode scalars), `body` (0 to 1,800),
+`sound` (boolean) and `reminder_id?` (1 to 64), and no other field; the
+computer posts it the way its own home would (the Fermix app's native host on
+a Mac, which offers Snooze 10 minutes for a `reminder_id`; the session bus on
+Linux), and its result is at most 1 KiB with no part: `{"shown": "now"}`, or
+`{"shown": "before"}` for a key it already showed in the last 24 hours (it
+keeps at most 512 keys, in memory, so an engine restart between a lost answer
+and the retry can show one twice); a post that did not show is `failed`, its
+`message` the backend's words and its result `{"reason": …}`, one of
+`not_authorized`, `no_server`, `host_unavailable`, `timeout`,
+`backend_missing`, `not_offered` or `failed`, and its key is let go so a
+retry posts again. `ready` takes `{}`, a read, deadline 10,000 ms, recorded in
+no journal, and is answered `{"ready": true}` or `{"ready": false, "sentence":
+…}`, the backend's own clause in at most 300 bytes; it never raises a
+permission prompt on the computer. The primary reads the answers together:
+shown on one computer is delivered; else a computer that could not be reached
+(`refused` `unavailable` with no receipt, made by the primary before anything
+was sent), `busy`, `timed_out`, `unknown`, `cancelled` or a transient
+`reason` (`no_server`, `host_unavailable`, `timeout`) is retried on the
+reminder's own schedule; else the first computer's reason, in name order,
+ends it: `off` or `stopped_here` as `not_authorized`, and a computer's own
+`unavailable` or `stale_epoch` in its words, never retried.
+
+**Reminders (M99 §10.1).** A Snooze pressed on such a notification on a
+computer goes to the home that holds the reminder, as the home's service
+`reminders` `snooze`, origin `computer`, an effect with no part, deadline
+15,000 ms, under an id the computer mints, `snz-` and 24 lowercase hex
+characters, in the interactive lane, as its cancel is. Its arguments are
+`reminder_id` (1 to 64 characters) and `minutes` (an integer, 1 to 1,440),
+and no other field. The home snoozes the reminder as a press on its own
+notification would, the owner's act with no model turn, and answers `{"status":
+"created"}`, or `"existing"` for the same snooze made again; a reminder that
+did not ring on "this computer", or one already gone, is `failed` in the
+home's sentence. A computer keeps at most 16 snoozes waiting on the home,
+drops a press past that, and sends `invoke_cancel` 5 s past the deadline for
+one with no answer.
+
+**On the computer.** A computer admits a request in this order, each step a
+refusal with the computer's sentence:
+
+1. the request's `epoch` is at least its link's (`stale_epoch`: an older
+   copy of the home never acts here);
+2. it has the capability and its op (`unavailable`);
+3. its master switch is on, its switches are reviewed and the capability's
+   offer is on, read at that moment (`off`);
+4. a `deadline_ms` of 0 only for a long-lived op, and a `turn` for every
+   origin but `computer` (`unavailable`);
+5. arguments the capability takes (`failed`, with the capability's
+   sentence);
+6. the capability's own rules, such as the origin and the sandbox's folders
+   (`not_attended`, `outside_sandbox`).
+
+It runs at most 8 requests at once and keeps at most 32 waiting, first come
+first served, a request whose upload has not arrived among them; past that
+it answers `busy`. A request still waiting when its deadline passes never
+runs, and a run past it is stopped; both are answered `timed_out`. Turning
+the master switch off ends everything running or waiting as `refused`
+`stopped_here`.
+
+Each request is recorded in the computer's journal, `device/invocations/`
+in its home, one file per UTC day. A `started` record is written to disk
+before the run, and a journal that cannot be written runs nothing; a
+`finished` record is written before the answer goes. A request refused
+before it ran has only its `finished` record. The journal holds ids, times,
+the capability, op, target, origin, status and sizes, never arguments,
+results or files, and keeps 7 days and at most 2,000 invocations. At start,
+a request a crash left started is recorded `unknown` (`interrupted`).
+`device/` never travels with the home.
+
+Each answer also stays in memory for 10 minutes, at most 32 answers and
+32 MiB, the oldest leaving first, for an `invoke_status` after a lost
+answer; past that, the journal's record alone answers.
+
 ### The sign-in forward and snapshot copies
 
 **Sign-in forward.** A browser sign-in the desktop started (its forwarded
@@ -1012,10 +1780,91 @@ no `Content-Length` on the wire (each end writes its own); a chunked request
 body is refused.
 
 **Snapshot copies.** The primary sends each snapshot it writes, still
-encrypted: `snapshot_begin`, `snapshot_chunk`s of at most 60 KiB from
+encrypted, to each connected desktop that keeps the home's backup copies
+(the computer the home moved from does; one that joined with a code does
+not): `snapshot_begin`, `snapshot_chunk`s of at most 60 KiB from
 `index` 0, `snapshot_end`. The desktop answers `snapshot_stored` with the
 SHA-256 it computed, which verifies the copy when it is `snapshot_begin`'s,
 or `snapshot_refused`. A new `snapshot_begin` abandons a copy in progress.
+The desktop writes a copy apart from the rest of its session, so its disk
+delays no other event; a copy whose frames outrun its disk by 256 is refused
+`write_failed`, and the next run sends it again.
+
+## Lists on a phone
+
+A phone reads and changes the owner's lists over one list channel in its own
+session: the companion family a desktop's tunnel uses (`companion_open`,
+`companion_line`, `companion_close`, above), carrying the companion wire's
+list events line for line (`priv/companion/PROTOCOL.md`, *Lists*). A phone
+opens it only when its `hello_ack` says `caps.lists: true`; an older daemon
+says nothing and is sent no `companion_open`.
+
+The channel's first line is the phone's `client_hello`, in the companion
+window (`{7, 8}` today; a phone keeps up with companion versions as the Mac
+does, and one too old is refused `client_too_old`). On the primary it is an
+ordinary companion connection placed as the owner's, the phone's pairing being
+the proof, in the lists scope: it takes `client_hello`, `checklists_pull`,
+`checklist_pull` and `checklist_edit`, and is sent `server_hello`,
+`checklists`, `checklist`, `accepted` (to a `checklist_edit`) and `error`,
+and the trips' events from companion 8 (see *Trips on a phone*).
+Any other client event is refused `error{reason:"unknown_event", event}` on
+the channel, which then closes (`companion_close`); the session stays open.
+It is never sent a row, read state, history, a turn's stream, an approval, a
+proposal or `home_status_changed`: the phone has those on its own session.
+Its edits record `made_via: "phone"`.
+
+One channel per session: a second `companion_open`, whatever its number, is
+answered `companion_close` with "One list channel is open from this phone.",
+and the session stays open. The channel ends with the session; the phone
+opens it again after each `hello_ack`, and does not open it again in a session
+whose channel the primary closed. A line is at most 1 MiB, and a long list
+passes one frame's 60 KiB, so a whole list goes as one `companion_line` cut
+into chunks (the fixtures carry a 500-row list in two); the companion wire's
+own bounds hold inside it (a client line at most 65,536 bytes).
+
+Once the channel has pulled the index, the phone's turns say they draw lists:
+a reply that read or changed a list carries the `checklists` block (see
+*Timeline shapes*) on its `text_done` and `row`, and the model is told
+the list is drawn under its reply rather than to write it out.
+
+## Trips on a phone
+
+The same channel carries the owner's trips (M89) when the phone's `hello_ack`
+says `caps.trips: true`; an older daemon says nothing, and a phone sends it no
+trip event. A phone that wants trips says hello on the channel at companion 8,
+the version that brought them: the channel then takes `trips_pull`,
+`trip_pull`, `trip_edit` and `trip_share`, and is sent `trips`, `trip`,
+`trip_shared`, `accepted` (to a `trip_edit`) and `error`, line for line as the
+companion wire carries them (`priv/companion/PROTOCOL.md`, *Trips*). A channel
+whose hello said companion 7 is refused each trip event
+`error{reason:"unknown_event", event}` and closes, as any event it does not
+take. Its edits record `made_via: "phone"`, a trip's as a list's. A
+`client_msg_id` names one edit of any kind, a list's or a trip's: a phone
+mints a new one for every edit it sends, and an edit whose id an edit of the
+other kind already used is refused and changes nothing.
+
+The `trips` index is the companion wire's too: in the engine's picker order,
+a trip happening now first and the trips that are over last. Only a trip that
+is over carries `past: true`; every other trip has no `past`. A channel that
+pulled the index is sent it again within minutes of a local midnight that
+starts or ends a trip, when that moves the order.
+
+A trip holds at most 1,000 days and stops. An op that can grow a trip is
+refused when its whole `trip`, with the `removed[]` a pull with `removed:
+true` carries and the widest town on every day (a day's `town`, found after
+the call that made it), would pass 768 KiB; removing, moving and restoring
+are never refused and add under 70 KB, so a trip goes as one
+`companion_line` cut into chunks inside the 1 MiB line (the fixtures carry a
+trip of 1,000 rows, a town on every day, in four). A day row is the
+companion wire's, `town` and all: the phone draws a day's town from it and
+geocodes nothing.
+
+Once the channel has pulled the trips index, a phone at protocol 3 says its
+turns draw trips: a reply that read or changed a trip carries the `trips`
+block (see *Timeline shapes*) on its `text_done` and `row`, and the model is
+told the trip is drawn under its reply rather than to write its days out. A
+phone at protocol 2 is sent no `trips` block, so its turns write the days out
+whatever its channel pulled.
 
 ## Enrollment and the move
 
@@ -1037,13 +1886,62 @@ first frame within 10 s of the handshake, or the stream closes `1008`.
 
 | `t` | Required payload | Rules |
 |---|---|---|
-| `enroll_request` | `host{name, os, arch, version}`, `candidate{node_id, relays[], recipient}`; `snapshots?{s3_bucket, s3_region}` | candidate to primary, the session's first event; `node_id` and `relays` (1 to 8) as a route's; `recipient` the one-time X25519 public key (32 bytes, standard base64) the move's stream will be encrypted to; each text at most 128 bytes |
+| `enroll_request` | `host{name, os, arch, version, home_format?}`, `candidate{node_id, relays[], recipient, addrs[]?}`; `snapshots?{s3_bucket, s3_region}` | candidate to primary, the session's first event; `home_format` the home format the candidate's Fermix reads and writes (M97 D16), absent from an engine before home formats, which the move's review then judges by `version`; `node_id` and `relays` (1 to 8) as a route's; `recipient` the one-time X25519 public key (32 bytes, standard base64) the move's stream will be encrypted to; `addrs` (1 to 8, absent when it has none) the direct addresses an Always On server listens on, as a desktop route's, which the move dials and the moved desktop's link keeps; each text at most 128 bytes |
 | `enroll_accepted` | `candidate_id`, `primary_name` | primary to candidate; the session then closes `1000` |
 
 A refused enrollment is an `error` with `code` `enrollment_expired`,
-`enrollment_used` or `enrollment_limit` (4 candidates already held), then
-close `4003` with the text `enrollment expired`, `enrollment used` or
-`enrollment limit`.
+`enrollment_used`, `enrollment_limit` (4 candidates already held) or
+`enrollment_purpose` (below), then
+close `4003` with the text `enrollment expired`, `enrollment used`,
+`enrollment limit` or `enrollment purpose`.
+
+**A computer joining the home** (M97) uses the same session. The owner opens
+a window for a computer (Add a computer); its code is version 2 and names
+its purpose (`"v": 2, "purpose": "computer"`), where a candidate's stays
+version 1, so a decoder that knows only version 1 refuses a computer's code
+on `v`. One window is held at a time: a code of the other purpose is refused
+while one is open, and the open window stays as it is. The window takes the
+first event of its own purpose alone: `join_request` on a candidate's
+window, and `enroll_request` on a computer's, are answered `error` with
+`code` `enrollment_purpose` and closed `4003` (`enrollment purpose`).
+
+| `t` | Required payload | Rules |
+|---|---|---|
+| `join_request` | `host{name, os, arch, version}`, `platform` | computer to primary, the session's first event, within 10 s of the handshake; `platform` is `macos` or `linux`; each text at most 128 bytes |
+| `join_approved` | `device_id`, `name`, `primary_epoch`, `primary{name, node_id, relays[], relays_rev, addrs[]?}` | primary to computer, once the owner approved; `name` is the home's name for the computer, the one it said unless another device holds it (then suffixed ` 2`, ` 3` and on); `primary` is where the computer reaches the primary from now on, as a desktop route's (`relays` 1 to 8, `addrs` 0 to 8); the session then closes `1000` (`joined`) |
+| `join_denied` | `reason` | primary to computer; `reason` is `denied` (the owner said no, or typed digits that are not the computer's), `timeout` (the window's thirty minutes ran out) or `cancelled` (the owner cancelled the code or opened another); the session then closes `4003` (`join <reason>`) |
+
+The join has the second step a phone's pairing has. After the handshake both
+ends derive six digits from the handshake hash exactly as a pairing's SAS is
+derived (see *Noise modes and pairing*), with a label of their own:
+
+1. `digest = HMAC-SHA256(key: handshake_hash, data: "fermix-computer-sas-v1")`
+2. read the first four digest bytes as an unsigned big-endian integer;
+3. reduce modulo 1,000,000 and zero-pad to six decimal digits.
+
+The label differs from a pairing's, so a phone's digits and a computer's
+never match by construction (`noise_vectors.json` carries both for each
+vector, as `sas` and `computer_sas`). The computer shows the digits with its
+name and system. The primary never shows or sends them: the owner reads them
+on the new computer and types them where it is approved (management
+`home.act`'s `approve_computer`, `home.enroll.approve`), so a join cannot be
+approved without looking at the computer that asks.
+The `join_request` burns the window as an enrollment does, and the primary
+then holds the session with no deadline but the window's own: while the
+owner decides it answers `ping` with `pong` and refuses every other event
+(`unsupported_event`), so a keepalive never has to stop. Until the owner
+approves, the computer has no row and no access. Approval writes its
+`desktop` row (its `platform`, no backup copies, every offer off) and
+answers `join_approved`; a denial, digits that are not the computer's, a
+cancelled code and the window running out answer `join_denied` where the
+session still stands and write nothing. The code is spent either way. A
+session that ends while the computer waits ends nothing: nobody waits until
+the computer dials again with the same key, which the window admits while
+it lasts, and it then waits with the digits of its new session. A computer
+whose answer was lost dials again with the same key while the window lasts
+and is answered as it was: `join_approved` again, or `join_denied` with the
+reason kept; any other key is `enrollment_used`. Once approved, the computer links with `IK` (`0x01`)
+as every desktop does (see *Desktop sessions*).
 
 **The move** (`FXM1 0x04`, `IK`). The source of a move, the old primary in the
 device role, streams the home to its candidate. The initiator's static key is
@@ -1066,7 +1964,7 @@ a staged home the source may have retired for.
 
 | `t` | Required payload | Rules |
 |---|---|---|
-| `move_offer` | `move_id`, `size_bytes`, `sha256`, `source_epoch`, `attempt`; `recovery_recipient?` | source to candidate: the home's snapshot is ready to stream; `size_bytes` and `sha256` are the encrypted stream's; `attempt` counts the source's attempts at this move (1, 2, …; it only grows across restarts); `recovery_recipient` is the snapshot recipient the new primary keeps, `fxsnap1.<salt>.<key>` |
+| `move_offer` | `move_id`, `size_bytes`, `sha256`, `source_epoch`, `attempt`; `recovery_recipient?`, `device_id?` | source to candidate: the home's snapshot is ready to stream; `size_bytes` and `sha256` are the encrypted stream's; `attempt` counts the source's attempts at this move (1, 2, …; it only grows across restarts); `recovery_recipient` is the snapshot recipient the new primary keeps, `fxsnap1.<salt>.<key>`; `device_id` is the source's own row in the moved device list when it stays as a linked computer (M97), and the new primary names the home's own computer-history notes for that computer |
 | `move_accept` | `move_id`, `recipient` | candidate to source: the one-time X25519 public key, 32 bytes in standard base64, the stream is encrypted to |
 | `move_chunk` | `move_id`, `index` + raw bytes | source to candidate: the encrypted stream, contiguous from 0 |
 | `move_end` | `move_id` | source to candidate: the stream is complete |
@@ -1094,9 +1992,9 @@ sent is never sent to it. `FermixChannels.Mobile.Peers` is this table.
 
 | Kind | Sends | Is sent |
 |---|---|---|
-| phone | `hello` `msg` `attach_begin` `attach_chunk` `attach_end` `command` `cancel` `history_pull` `media_fetch` `push_register` `push_unregister` `ack` `read_state` `request_status` `unpair` `ping` | `hello_ack` `accepted` `attach_status` `turn_started` `text_delta` `tool_event` `text_done` `turn_done` `media_begin` `media_chunk` `media_end` `turn_error` `row` `reaction` `approval` `approval_resolved` `link_preview` `read_state` `history_page` `request_status_page` `notice` `error` `pong` `event_part` |
-| desktop | `hello` `ping` `media_fetch` `ack` `companion_open` `companion_line` `companion_close` `manage` `loopback_request` `loopback_failed` `snapshot_stored` `snapshot_refused` | `hello_ack` `error` `pong` `event_part` `media_begin` `media_chunk` `media_end` `companion_line` `companion_close` `manage_result` `loopback_open` `loopback_response` `loopback_close` `snapshot_begin` `snapshot_chunk` `snapshot_end` |
-| enrollment | `enroll_request` `ping` | `enroll_accepted` `error` `pong` |
+| phone | `hello` `msg` `attach_begin` `attach_chunk` `attach_end` `command` `cancel` `history_pull` `media_fetch` `push_register` `push_unregister` `push_subscribe` `ack` `read_state` `request_status` `unpair` `ping` `call_open` `call_line` `call_audio` `call_frame` `call_close` `companion_open` `companion_line` `companion_close` | `hello_ack` `accepted` `attach_status` `turn_started` `text_delta` `tool_event` `text_done` `turn_done` `media_begin` `media_chunk` `media_end` `turn_error` `row` `reaction` `approval` `approval_resolved` `link_preview` `read_state` `history_page` `request_status_page` `notice` `error` `pong` `event_part` `call_attached` `call_line` `call_audio` `call_close` `companion_line` `companion_close` |
+| desktop | `hello` `ping` `media_fetch` `ack` `companion_open` `companion_line` `companion_close` `manage` `loopback_request` `loopback_failed` `snapshot_stored` `snapshot_refused` `offers` `link_path` `invoke_open` `invoke_part` `invoke_cancel` `invoke_result` `invoke_status` `invoke_restarted` `call_open` `call_line` `call_audio` `call_close` `attach_begin` `attach_chunk` `attach_end` | `hello_ack` `error` `pong` `event_part` `media_begin` `media_chunk` `media_end` `companion_line` `companion_close` `manage_result` `loopback_open` `loopback_response` `loopback_close` `snapshot_begin` `snapshot_chunk` `snapshot_end` `invoke_open` `invoke_part` `invoke_cancel` `invoke_result` `invoke_status` `call_attached` `call_line` `call_audio` `call_close` `attach_status` |
+| enrollment | `enroll_request` `join_request` `ping` | `enroll_accepted` `join_approved` `join_denied` `error` `pong` |
 | move | `move_offer` `move_chunk` `move_end` `move_commit` `move_resume` `ping` | `move_accept` `move_ready` `move_done` `error` `pong` |
 
 A pairing session (`0x02`), until the owner decides, sends `pair_request` and
@@ -1139,7 +2037,8 @@ until the command reports, and its later answer is that request's output.
 
 Revoking a phone (`fermix devices revoke`, the management protocol, or its own
 `unpair`) closes its socket with `4003`, cancels every request it sent that
-has not ended and stops their turns; none is run again after a restart.
+has not ended and stops their turns; none is run again after a restart. It
+also ends the phone's call (see *Calls from the phone*).
 
 Malformed JSON, an invalid length, an oversized frame/chunk, a sequence gap,
 authentication failure, a repeated hello, or a version mismatch fails loudly.
@@ -1158,13 +2057,14 @@ parsed.
 |---|---|---|---|
 | `unsupported` | an unknown `t` once paired, `event_part` from a client included | — | closed `1002` |
 | `repeated_hello` | a second `hello` | — | closed `1002` |
-| `unsupported_protocol_version` | a `hello` or `pair_request` outside the version window | `direction`, `client_version`, `min_version`, `max_version` | closed `1002` |
+| `unsupported_protocol_version` | a `pair_request` outside the version window, or a `hello` with no version in common with it | `direction`, `client_version`, `min_version`, `max_version` | closed `1002` |
 | `stale_primary` | a `hello` whose `primary_epoch` is greater than this daemon's (see *Primary epoch*) | — | closed `1002` |
 | `request_failed`, `client_message_conflict`, `unsupported_profile` | a request refused or failed after `accepted`, or any refusal with no word of its own | `client_msg_id` for a `msg` or `command` | open |
 | `attachment_unavailable` | a `msg` naming an `attach_id` the daemon no longer holds | `client_msg_id` | open |
 | `invalid_field`, `missing_field` | a field the daemon refuses once the frame decoded, such as a `msg`'s `attach_ids` | `client_msg_id` for a `msg` or `command` | open |
 | `unsupported_event` | a known event this session's kind may not send (see *Who may send what*), such as `pair_request` on a paired socket, or a desktop's event outside the families the primary serves | — | open |
-| `enrollment_expired`, `enrollment_used`, `enrollment_limit` | a refused enrollment (see *Enrollment and the move*) | — | closed `4003` |
+| `invalid_offers` | a desktop's `offers` payload the primary refuses, or whose `rev` is not its own; the computer offers nothing until it sends one the primary takes (see *A computer's own record*) | — | open |
+| `enrollment_expired`, `enrollment_used`, `enrollment_limit`, `enrollment_purpose` | a refused enrollment, or a first event for a window of the other purpose (see *Enrollment and the move*) | — | closed `4003` |
 | `move_unknown`, `move_mismatch`, `move_failed` | a refused move step (see *Enrollment and the move*) | — | closed `4003` |
 | `request_backlog_full` | 32 requests already waiting | — | open |
 | `media_fetch_backlog_full` | 8 fetches already waiting | `ref` | open |
@@ -1173,6 +2073,7 @@ parsed.
 | `store_quota_exceeded`, `media_too_large` | an upload that would pass the media store's quota or the largest blob | — | open |
 | `unexpected_chunk`, `size_exceeded`, `size_mismatch`, `sha256_mismatch`, `announced_hash_mismatch` | an upload whose chunks, size or digest differ from its `attach_begin`, or a zero-byte one announced with another digest | — | open |
 | `push_environment_mismatch` | a token for the other APNs environment | — | open |
+| `push_unavailable` | a `push_subscribe` on a session whose `hello_ack` named no `fcm` | — | open |
 
 Every other failure a frame can be refused with is closed `1002` with no
 `error`: malformed JSON or framing, a sequence gap or replay, a frame whose `v`
@@ -1183,13 +2084,13 @@ the device has since replaced.
 
 | Code | Why | Client |
 |---|---|---|
-| `1000` | a phone's one-hour session lifetime ran out (`Noise session lifetime reached`; a desktop's session has none), the daemon is shutting down, or an enrollment was accepted | reconnect with a new handshake (a desktop at once, showing no outage, once in a row: then with the backoff); a candidate does not |
+| `1000` | a phone's one-hour session lifetime ran out (`Noise session lifetime reached`; a desktop's session has none), the daemon is shutting down, an enrollment was accepted, a computer's join was approved (`joined`), or a phone's session went silent mid-call: no call frame for 1.5 s while the phone holds the call's audio (`call link silent`) | reconnect with a new handshake (a desktop at once, showing no outage, once in a row: then with the backoff); a candidate does not |
 | `1002` | a protocol error (`mobile protocol error`, `invalid mobile prelude`, `unsupported mobile protocol version`, `stale primary`), no inbound frame for 150 s, or a malformed WebSocket frame | reconnect; after `unsupported_protocol_version`, update first; after `stale_primary`, tell the owner and keep the highest epoch it has seen |
 | `1003` | a text message | send binary messages |
 | `1008` | the handshake deadline (`mobile handshake deadline`); on the remote route, also a stream still in its handshake closed to make room for a newer one | reconnect |
 | `1009` | a message over 65,535 bytes (`mobile frame too large`) | never send one |
-| `1011` | the daemon's socket failed, or the primary's side of a desktop's session failed or did not start (`desktop peer failed`) | reconnect |
+| `1011` | the daemon's socket failed, or the primary's side of a desktop's session, or of a phone's list channel, failed or did not start (`desktop peer failed`) | reconnect |
 | `4001` | `connection replaced`: a newer connection of the same phone, or a pairing request from the same phone key | do not reconnect this connection; the newer one is live |
-| `4003` | `device revoked`, `device unknown` (an `IK` handshake from a key no row holds), `pairing <reason>` after `pair_denied`, `authenticated device mismatch` (the `hello` named another device), `enrollment <reason>` after a refused enrollment, or `move <code>` after a refused move step | do not reconnect with this identity until it pairs again; a candidate or a move's source reads the `error` before it |
+| `4003` | `device revoked`, `device unknown` (an `IK` handshake from a key no row holds), `pairing <reason>` after `pair_denied`, `authenticated device mismatch` (the `hello` named another device), `enrollment <reason>` after a refused enrollment, `join <reason>` after `join_denied`, or `move <code>` after a refused move step | do not reconnect with this identity until it pairs again; a candidate, a joining computer or a move's source reads the `error` or the `join_denied` before it |
 
 A connection past its memory bound is dropped with no close frame.

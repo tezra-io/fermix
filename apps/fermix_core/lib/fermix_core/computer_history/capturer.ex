@@ -34,7 +34,7 @@ defmodule FermixCore.ComputerHistory.Capturer do
       never a silent hole.
     * **teardown** — `terminate/2` and a degrade `observe_stop`, kill the
       sidecar pid (`Compux.Port.kill/1`) and release the lock first, then
-      flush the buffer best-effort. The flush's Repo calls can outlast the
+      flush the buffer best-effort. The flush's store calls can outlast the
       supervisor's shutdown timeout, and the kill that follows skips whatever
       is still ahead. A `:kill` skips `terminate/2` altogether: the Port closes
       with the process, the sidecar exits on stdin EOF (one wedged in a native
@@ -56,9 +56,9 @@ defmodule FermixCore.ComputerHistory.Capturer do
   alias FermixCore.ComputerHistory.Config
   alias FermixCore.ComputerHistory.Ingest
   alias FermixCore.ComputerHistory.SingletonLock
+  alias FermixCore.ComputerHistory.Spool
   alias FermixCore.ComputerHistory.Wire
   alias FermixCore.ComputerUse.SidecarInstaller
-  alias FermixCore.Memory.Repo
 
   # The wire this rail requires, pinned EQUAL to the library's own
   # `Compux.Protocol.protocol_version()` (a test proves it, so the two constants
@@ -113,7 +113,7 @@ defmodule FermixCore.ComputerHistory.Capturer do
   def status(server \\ __MODULE__, timeout \\ 5_000) when is_integer(timeout) and timeout >= 0 do
     GenServer.call(server, :status, timeout)
   catch
-    # A Capturer busy past the timeout (say, blocked in a flush's Repo call) is
+    # A Capturer busy past the timeout (say, blocked in a flush's store call) is
     # still alive, and may still be capturing: it must not read as stopped.
     :exit, {:timeout, _call} -> %{mode: :not_answering, reason: nil, lock_holder: nil}
     # Every other exit of the call means the process was not there, or died
@@ -147,7 +147,7 @@ defmodule FermixCore.ComputerHistory.Capturer do
 
     state = %{
       mode: :bootstrapping,
-      repo: Keyword.get(opts, :repo, Repo),
+      spool: Keyword.get(opts, :spool, Spool),
       apps: Keyword.get_lazy(opts, :apps, &Config.apps/0),
       binary_path: Keyword.get(opts, :binary_path),
       sidecar_env: Keyword.get(opts, :sidecar_env, []),
@@ -183,7 +183,7 @@ defmodule FermixCore.ComputerHistory.Capturer do
       restart_backoff_ms: Keyword.get(opts, :restart_backoff_ms, @restart_backoff_ms)
     }
 
-    # All work — lock, Port, repo — happens off `init` so boot never blocks on
+    # All work — lock, Port, store — happens off `init` so boot never blocks on
     # the sidecar handshake or a contended lock.
     {:ok, state, {:continue, :bootstrap}}
   end
@@ -487,7 +487,7 @@ defmodule FermixCore.ComputerHistory.Capturer do
   defp do_flush(state, [], held), do: %{state | buffer: held}
 
   defp do_flush(state, writable, held) do
-    case Ingest.ingest(writable, repo: state.repo, apps: state.apps) do
+    case Ingest.ingest(writable, spool: state.spool, apps: state.apps) do
       {:ok, stats} ->
         log_ingest_stats(stats)
         %{state | buffer: held, overflow_pending?: false}
@@ -576,7 +576,7 @@ defmodule FermixCore.ComputerHistory.Capturer do
   # Degrade is terminal: stop the sidecar and RELEASE the machine-wide lock so a
   # healthy daemon on this Mac can take over, then flush what survived (verified
   # events + self-gaps). Teardown goes first, as in terminate/2: a `:shutdown`
-  # that arrives during the flush's Repo calls is followed by a kill 5 s later.
+  # that arrives during the flush's store calls is followed by a kill 5 s later.
   defp degrade(state, reason) do
     Logger.error("computer_history capturer degraded: #{inspect(reason)}")
     stop_driver(state)
@@ -595,7 +595,7 @@ defmodule FermixCore.ComputerHistory.Capturer do
   @impl true
   def terminate(_reason, state) do
     # Runs on supervisor `:shutdown` because `init/1` traps exits. Stop the
-    # sidecar and release the lock BEFORE the flush: the flush makes Repo calls
+    # sidecar and release the lock BEFORE the flush: the flush makes store calls
     # that can outlast the supervisor's shutdown timeout, and the kill that
     # follows skips whatever is still ahead. The buffer is this process's memory,
     # so the flush (partition writes verified events + self-gaps, drops

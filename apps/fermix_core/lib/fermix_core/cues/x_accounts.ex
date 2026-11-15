@@ -364,8 +364,8 @@ defmodule FermixCore.Cues.XAccounts do
     if plugin.name in enabled, do: :ok, else: {:error, :x_plugin_off}
   end
 
-  # A wedged or crashed token server exits the GenServer call; that is a
-  # missing sign-in, so a source waits for one instead of crashing.
+  # A wedged or crashed token server exits the GenServer call; that comes back
+  # as an error naming it, so a source retries instead of crashing.
   defp token_call(call) do
     case call.() do
       {:ok, token} when is_binary(token) and token != "" -> {:ok, token}

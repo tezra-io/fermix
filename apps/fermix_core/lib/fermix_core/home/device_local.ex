@@ -15,13 +15,18 @@ defmodule FermixCore.Home.DeviceLocal do
     {"auth.json.broken.*", :keep,
      "a token file this machine quarantined as unreadable, kept here for recovery"},
     {"config.toml.pre-m5", :keep, "a backup taken by a secret migration on this machine"},
+    {"machine.toml", :keep,
+     "this computer's own settings: its sandbox, computer use, screen history, Messages, " <>
+       "accessory link and dev plugin folder"},
+    {"*.toml.tmp", :drop, "an interrupted write of the settings or the machine file"},
     {"moved.json", :drop,
      "the marker that retires this copy; a restored home is the new primary"},
-    {"device", :keep,
-     "this machine's own Always On records: the provision ledger with its provider token, " <>
-       "and a return's"},
+    {"device", :keep, "this machine's own Always On record: a return's"},
+    {"device/server.json", :keep,
+     "marks this machine an Always On server, whose iroh endpoint binds a fixed port"},
     {"device/desktop.json", :drop, "a desktop's link to its primary"},
-    {"device/desktop_key", :drop, "a desktop's own key"},
+    {"device/desktop_key", :drop,
+     "a computer's own key, in the file an older Fermix kept it in before it moved"},
     {"snapshots", :keep,
      "this machine's snapshot status and capture staging, and a desktop's copies of the " <>
        "primary's snapshots"},
@@ -60,9 +65,12 @@ defmodule FermixCore.Home.DeviceLocal do
     {"mobile/*.part", :drop, "an interrupted write of the media manifest"},
     {"mobile/media/*.part", :drop, "an interrupted write of timeline media"},
     {"secrets/.*", :drop, "the file secret store's staging for an interrupted write"},
+    {"secrets/device.desktop_key", :drop, "a computer's own key, which never travels"},
     {"acp_identities/*.tmp.*", :drop, "an interrupted write of an ACP identity"},
     {"acp_identities/*.broken.*", :keep,
      "an ACP identity this machine quarantined as unreadable"},
+    {"accessories/*.tmp.*", :drop,
+     "an interrupted write of the accessory host key, records or voice device"},
     {"bootstrap/*/*.tmp-*", :drop, "an interrupted write of a prompt file"},
     {"plugins/.staging", :drop, "plugin install scratch"},
     {"plugins/reinstall.json", :drop,
@@ -73,6 +81,8 @@ defmodule FermixCore.Home.DeviceLocal do
     {"plugins/meetbot", :keep,
      "the meeting bot's binary and the browser profile it signed in with here"},
     {"plugins/imessage_helper", :keep, "the Messages helper app for this Mac"},
+    {"dev-plugins", :keep,
+     "links to plugin checkouts on this machine, for the dev plugin folder setting"},
     {"plugins/installed/*/current.tmp", :drop,
      "an interrupted switch of a plugin's current version"},
     {"plugins/installed/*/.*.replacing", :drop, "a plugin version being replaced"},
@@ -105,8 +115,10 @@ defmodule FermixCore.Home.DeviceLocal do
   Everything else in the home travels: `config.toml`, `memory.db` with its
   `-wal` and `-shm` files, `auth.json` and `chatgpt_host.json`, the file secret
   store under `secrets/`, the identity bundle, device list, media and
-  `primary_epoch` under `mobile/`, `memory/`, `bootstrap/`, `skills/`,
-  `journals/`, `workspace/`, `job_runs/`, `acp_identities/`,
+  `primary_epoch` under `mobile/`, the accessory host key, the enrolled
+  accessories' records and the chosen voice device under `accessories/` (M91
+  D7), `memory/`, `bootstrap/`,
+  `skills/`, `journals/`, `workspace/`, `job_runs/`, `acp_identities/`,
   `realtime/device_id` (it keys the local voice conversation), the plugin
   lockfile, installed trees, provenance and skills under `plugins/`, and the
   browser's artifacts and downloads. Cues and open loops live in `memory.db`.
@@ -132,6 +144,11 @@ defmodule FermixCore.Home.DeviceLocal do
   | Pattern | Through a return | Why it stays |
   |---|---|---|
   #{Enum.map_join(@entries, "\n", fn {pattern, return, reason} -> "| `#{pattern}` | #{return} | #{reason} |" end)}
+
+  **Settings.** The settings that describe this machine live in its own
+  `machine.toml` (`FermixCore.Setup.MachineFile`), which stays here like any
+  other path above, so another machine never reads a path or a switch it
+  does not have, and a return keeps this machine's own.
   """
 
   @matchers for {pattern, return, _reason} <- @entries,

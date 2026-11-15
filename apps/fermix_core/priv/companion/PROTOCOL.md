@@ -72,9 +72,25 @@ previous one (or the same value while only one version exists).
 
 | Field | Value |
 |---|---|
-| `protocol_version` (companion declares) | `7` |
-| daemon `min_version` | `6` |
-| daemon `max_version` | `7` |
+| `protocol_version` (companion declares) | `8` |
+| daemon `min_version` | `7` |
+| daemon `max_version` | `8` |
+
+**The window runs both ways** (M97: the server leads). After a move a
+computer's chat is carried to its server, which updates on its own and may
+run ahead of the computer or behind it. A computer behind the server is
+served inside `{min_version, max_version}`; one ahead of it names the oldest
+version it still speaks in `client_hello.min_protocol_version` (at most its
+own `protocol_version`). When that is at most the daemon's `max_version`,
+the daemon serves `max_version` and says so in `server_hello.protocol_version`,
+and the client speaks that version on the connection from then on: it sends
+no event, and expects none, that a later version brought. Both fields are
+additive and optional; a client that sends no `min_protocol_version` is
+served exactly as before. The policy: `min_version` is never above the
+version the engine release two minor versions back speaks, so every computer
+inside the server's window (two minor versions) connects; a release that
+bumps this protocol on consecutive minor versions keeps the older version in
+the window for that long.
 
 ### Version 2: a turn that ends with no reply
 
@@ -233,18 +249,19 @@ live beside the chat. It adds:
   change (see *Lists*).
 
 Each of the five names version 6 as its `x-since-version`. The daemon takes
-them from, and sends them to, only a version 6 connection placed as the
+them from, and sends them to, only a connection on version 6 or later placed as the
 owner's, and sends a list event only to a connection that pulled: the index
 to one that pulled the index, a list to one that holds it. A version 5
 connection that sends one is refused with `error: unknown_event` and closed,
-and is never sent one. The phone's wire does not carry lists in this version.
+and is never sent one. A phone carries the same events over its list channel
+on the mobile wire (see *Lists*).
 
 Version 6 also lets an app stop asking for Always On's state on a timer. It
 adds one more server event, `home_status_changed`, with no fields: Always
 On's summary (management `home.status`'s `summary`, the one source of its
 words) changed, and the app reads `home.status` again over management for
 what it is now (see *When Always On changes*). It names version 6 as its
-`x-since-version` and reaches version 6 connections only.
+`x-since-version` and reaches connections on version 6 or later only.
 
 Every version 5 event, field and rule holds unchanged on version 6. Since
 version 6 the window is {5, 6}, so a version 4 client is refused with
@@ -267,8 +284,8 @@ crosses by path, never in chunks on this line. It adds:
   in `media_refs`.
 
 Each of the two events names version 7 as its `x-since-version`. The daemon
-takes `attach_file`, and a `msg` that names a file, only from a version 7
-connection placed as the owner's (see *Transport*), and sends `attach_status`
+takes `attach_file`, and a `msg` that names a file, only from a connection
+on version 7 or later placed as the owner's (see *Transport*), and sends `attach_status`
 only to that connection. A version 6 connection that sends `attach_file` is
 refused with `error: unknown_event` and closed; a `msg` that names a file from
 a version 6 connection, or from one not placed as the owner's, is refused with
@@ -286,6 +303,52 @@ Every version 6 event, field and rule holds unchanged on version 7. Since
 version 7 the window is {6, 7}, so a version 5 client is refused with
 `error: unsupported_protocol_version` (`client_too_old`).
 
+### Version 8: a reply's events, and blocks that can grow
+
+Version 8 is the version in which a reply may carry a block type beyond
+`places` and `checklists`: `blocks` holds at most one block of each type, in
+no fixed number, and a client skips a type it does not know. It brings two
+types: `events`, the events the reply's turn stored, changed, cancelled,
+snoozed or listed, each as the engine's card of it, which a client draws
+under the reply as a calendar shows an event; and `trips`, the owner's trips
+the reply's turn read or changed, by id, which a client that pulled the trips
+index draws as it draws a list (see *Blocks under a reply*).
+
+The blocks add no event and no field: a block's `type` names what it needs. The
+daemon sends a connection on version 7 only `places` and `checklists`
+blocks, wherever a reply reaches it (its `text_done`, its `row`, and a
+`history_page` message), so a reply stored with an `events` or a `trips`
+block reaches a version 7 client without it, and a turn a version 7 connection carries is
+written for a client that draws no events. A turn a version 8 connection
+carries is told its events are drawn under the reply, so its text confirms
+in a sentence and does not write each event out (see *Blocks under a
+reply*, *Which blocks a client draws*).
+
+Version 8 also brings the owner's trips (M89) to the Mac, drawn and changed
+live beside the chat as the lists are. It adds:
+
+- four client events: `trips_pull { profile_id }`, the index; `trip_pull {
+  profile_id, trip_id, removed? }`, one whole trip; `trip_edit {
+  client_msg_id, profile_id, trip_id?, op }`, one change by row id; and
+  `trip_share { client_msg_id, profile_id, trip_id }`, the trip as it is
+  shared;
+- three server events: `trips`, the index, and `trip`, one whole trip, each
+  the answer to its pull and pushed again, whole, after every committed
+  change; and `trip_shared`, the answer to a share (see *Trips*).
+
+Each of the seven names version 8 as its `x-since-version`. The daemon takes
+them from, and sends them to, only a connection on version 8 placed as the
+owner's, and sends a trip event only to a connection that pulled: the index
+to one that pulled the index, a trip to one that holds it. A version 7
+connection that sends one is refused with `error: unknown_event` and closed,
+and is never sent one. A phone carries the trips' events over its list
+channel on the mobile wire, on a channel whose hello says version 8 (see
+*Trips*).
+
+Every version 7 event, field and rule holds unchanged on version 8. Since
+version 8 the window is {7, 8}, so a version 6 client is refused with
+`error: unsupported_protocol_version` (`client_too_old`).
+
 ## Handshake state machine
 
 The connection opens with a **mandatory, one-shot handshake**, exactly as the
@@ -293,15 +356,17 @@ Realtime voice socket's. No other event is serviced until it completes.
 
 ```
 companion: connect socket
-companion -> daemon:  client_hello { protocol_version: P, primary_epoch?: E }
+companion -> daemon:  client_hello { protocol_version: P, min_protocol_version?: L, primary_epoch?: E }
                       daemon negotiates P against {min, max}:
-                        P in [min, max] -> daemon -> companion: server_hello { min_version, max_version, primary_epoch?, role, commands, attachments? }
-                        P < min         -> error(unsupported_protocol_version, client_too_old); close
-                        P > max         -> error(unsupported_protocol_version, client_too_new); close
+                        P in [min, max]       -> daemon -> companion: server_hello { min_version, max_version, primary_epoch?, role, commands, attachments? }
+                        P < min               -> error(unsupported_protocol_version, client_too_old); close
+                        P > max, L <= max     -> daemon -> companion: server_hello { ..., protocol_version: max }; the connection speaks max
+                        P > max, L absent or > max -> error(unsupported_protocol_version, client_too_new); close
                       then, on the primary, E against the home's primary epoch M:
                         E > M           -> error(stale_primary); close
-companion: on server_hello, validate its own version V in [min_version, max_version]:
-             in range     -> connected
+companion: on server_hello, take V = server_hello.protocol_version when present, else its own,
+           and validate V in [min_version, max_version]:
+             in range     -> connected, speaking V
              out of range -> refuse; report which side must update
 ```
 
@@ -313,7 +378,9 @@ Rules the daemon enforces:
 2. A second `client_hello` is rejected with `error: unexpected_client_hello`
    and the connection is closed.
 3. A `client_hello` without a positive integer `protocol_version` is rejected
-   with `error: missing_protocol_version` or `error: invalid_protocol_version`.
+   with `error: missing_protocol_version` or `error: invalid_protocol_version`;
+   a `min_protocol_version` that is not a positive integer at most
+   `protocol_version` is rejected with `error: invalid_field`.
 
 Rules the companion enforces:
 
@@ -384,7 +451,7 @@ in a fixed order:
 | `type` | Fields | Notes |
 |---|---|---|
 | `client_hello` | `protocol_version` (int > 0); `primary_epoch?` (int > 0) | First frame. Opens the handshake. `primary_epoch` is the highest primary epoch the client has seen, absent when it has seen none; see *Primary epoch*. |
-| `msg` | `client_msg_id`, `profile_id`, `text`, `attach_ids[]` | A message to the agent. `text` must not be blank unless `attach_ids` names a file. Version 7: `attach_ids` names files whose `attach_file` was answered `present`, from a version 7 connection placed as the owner's only; on version 6, or from any other connection, a non-empty list is refused with `error: attachments_unsupported`. See *Attachments*. |
+| `msg` | `client_msg_id`, `profile_id`, `text`, `attach_ids[]` | A message to the agent. `text` must not be blank unless `attach_ids` names a file. Version 7: `attach_ids` names files whose `attach_file` was answered `present`, from a connection on version 7 or later placed as the owner's only; on version 6, or from any other connection, a non-empty list is refused with `error: attachments_unsupported`. See *Attachments*. |
 | `command` | `client_msg_id`, `profile_id`, `name`; `args?` | A slash command, `/name args`. An approval's routes are sent this way. |
 | `cancel` | `profile_id`, `client_msg_id`; `task_ref?` | Stops the turn of that request, running or waiting, and no other, whichever client sent the request (the Mac or a phone). Never answered itself; see *Streaming a turn*. Version 2: with `task_ref { call_uuid, task_id, revision }` it stops instead the GPT-Live task those ids name, one that outlived its call, and `client_msg_id` names the cancel itself; see *A Live call's rows*. |
 | `history_pull` | `profile_id`, `limit` (1–200), and exactly one of `after_seq` (≥ 0) or `before_seq` (≥ 1) | `after_seq` pages forward (the catch-up read); `before_seq` pages backward from it (scroll to the top). Either is any unsigned 64-bit value. |
@@ -397,6 +464,10 @@ in a fixed order:
 | `checklist_pull` | `profile_id`, `list_id` (`ck_` id); `removed?` (boolean) | Version 6. Asks for one whole list, answered `checklist`; the connection then holds it (at most 16) and is sent it again after every change. `removed: true` adds the rows removed in the last 30 days. Owner's connection only; see *Lists*. |
 | `checklist_edit` | `client_msg_id` (at most 128 characters), `profile_id`, `op`; `list_id?` (`ck_` id, for every op but `create`) | Version 6. One op on the owner's lists, by row id. Answered `accepted` once applied, `duplicate: true` when the `client_msg_id` was already applied; a refusal is `error: request_failed` with the engine's sentence and `client_msg_id`, and changes nothing. Owner's connection only; see *Lists*. |
 | `attach_file` | `attach_id` (1–64 of `A–Z a–z 0–9 _ -`), `kind`, `mime` (at most 255 bytes), `size_bytes`, `sha256` (64 lowercase hex digits); `name?` (at most 255 bytes) | Version 7. Hands the daemon the file the client wrote at `<attachments.dir>/<attach_id>`; there is no path field. `kind` is `image`, `animation`, `video`, `audio`, `voice`, `document` or `file`, a hint. Answered `attach_status` (`present`), or `error: request_failed` with the daemon's sentence and `attach_id`; the daemon removes the file either way. Owner's connection only; see *Attachments*. |
+| `trips_pull` | `profile_id` | Version 8. Asks for the index of the owner's trips, answered `trips`; from then on this connection is sent the index again after any change. Taken only from a connection placed as the owner's; see *Trips*. |
+| `trip_pull` | `profile_id`, `trip_id` (`tr_` id); `removed?` (boolean) | Version 8. Asks for one whole trip, answered `trip`; the connection then holds it (at most 16) and is sent it again after every change. `removed: true` adds the days and stops removed in the last 30 days. Owner's connection only; see *Trips*. |
+| `trip_edit` | `client_msg_id` (at most 128 characters), `profile_id`, `op`; `trip_id?` (`tr_` id, for every op but `create`) | Version 8. One op on the owner's trips, by row id. Answered `accepted` once applied, `duplicate: true` when the `client_msg_id` was already applied; a refusal is `error: request_failed` with the engine's sentence and `client_msg_id`, and changes nothing. Owner's connection only; see *Trips*. |
+| `trip_share` | `client_msg_id` (at most 128 characters), `profile_id`, `trip_id` (`tr_` id) | Version 8. Asks for the trip in its shared form, answered `trip_shared`; a refusal is `error: request_failed` with the engine's sentence and `client_msg_id`. Changes nothing. Owner's connection only; see *Trips*. |
 
 `profile_id` is `main`, the one profile; any other is refused with
 `error: unsupported_profile`, and the connection stays open.
@@ -406,29 +477,32 @@ in a fixed order:
 | `type` | Fields | Notes |
 |---|---|---|
 | `server_hello` | `min_version`, `max_version`; `primary_epoch?`, `role?`, `commands[]?`, `attachments?` | Handshake reply. `primary_epoch` is the home's primary epoch, absent only from a home that has never booted as the primary; `role` is the engine's, `primary` or `device`, which this daemon always sends and an older daemon leaves out; see *Primary epoch*. `commands` is the slash command palette, each `{name, aliases[], description}`, which this daemon always sends; `attachments` is `{dir, max_bytes}`, sent only to a connection placed as the owner's while the media store runs; see *Version 7* and *Attachments*. |
-| `accepted` | `client_msg_id`, `duplicate`; `server_seq?` | Durable receipt for a `msg`, a `command` or (version 6) a `checklist_edit`; clears the outbox item. `server_seq` is present only on a duplicate whose request already has a reply row: that reply's seq. A first `accepted` never carries it; the request's own row arrives as a `row`. |
+| `accepted` | `client_msg_id`, `duplicate`; `server_seq?` | Durable receipt for a `msg`, a `command`, (version 6) a `checklist_edit` or (version 8) a `trip_edit`; clears the outbox item. `server_seq` is present only on a duplicate whose request already has a reply row: that reply's seq. A first `accepted` never carries it; the request's own row arrives as a `row`. |
 | `turn_started` | `profile_id`, `turn_id`, `in_reply_to` | A turn began answering `in_reply_to`. |
 | `text_delta` | `turn_id`, `text` | Text to append to the turn's draft, exactly as sent. |
 | `tool_event` | `turn_id`, `tool`, `phase`; `detail?`, `activity?` | `phase` is `start` or `stop`. `detail` is at most 512 bytes. `activity`, on a start, is the engine's sentence for the step, at most 120 bytes; see *Version 6*. |
-| `reasoning` | `turn_id`, `text` | Version 6. The model's summary of one step of its reasoning, at most 4,096 bytes. Live-only, no seq; see *Version 6*. Sent only to a connection on version 6. |
+| `reasoning` | `turn_id`, `text` | Version 6. The model's summary of one step of its reasoning, at most 4,096 bytes. Live-only, no seq; see *Version 6*. Sent only to a connection on version 6 or later. |
 | `text_done` | `turn_id`, `server_seq`, `text`; `ts?`, `blocks[]?` | A reply's canonical text at its timeline row, sent once the turn has completed; replaces the draft. A turn may send more than one, each at its own row. `ts` is the time that row stores, exactly as its `row` and its `history_page` message carry it, so a client shows when the reply was written without reading history; this daemon always sends it and an older daemon leaves it out. `blocks` are the row's, present only when it has one; see *Blocks under a reply*. |
 | `turn_error` | `turn_id`, `code`, `message` | The turn's terminal failure: `code` is `cancelled` after a `cancel`, `interrupted` when the daemon lost the turn, `uncertain_after_restart` when the request may have run before the daemon restarted (see *Delivery and the outbox*). `message` is at most 512 bytes. |
-| `turn_done` | `turn_id` | Version 2. The turn completed and wrote no reply: it ends the turn, and nothing of its draft is kept. Sent only to a connection on version 2; see *Version 2*. |
+| `turn_done` | `turn_id` | Version 2. The turn completed and wrote no reply: it ends the turn, and nothing of its draft is kept. Sent only to a connection on version 2 or later; see *Version 2*. |
 | `row` | `profile_id`, `server_seq`, `role`, `text`, `ts`, `media_refs[]`; `client_msg_id?`, `kind?`, `metadata?`, `link_previews[]?`, `blocks[]?` | A timeline row this socket did not stream, announced to every connection as it is written: the sender's own message (with its `client_msg_id`, to match the outbox), a slash command's answer, a scheduled delivery, a message from a phone, the reply to a phone's turn, and a Live call's row. `kind`, `metadata`, `media_refs`, `link_previews` and `blocks` are the history message's, as a `history_page` carries them (see *Timeline shapes*); a Live call's row carries `metadata.call` (see *A Live call's rows*), and a message a scheduled job's or a cue's run sent carries `metadata.origin` (see *Where a message came from*). |
-| `row_updated` | `profile_id`, `server_seq` | Version 3. A row already written changed: its text, its media refs or its link previews. Carries no content; see *When a row changes*. Sent only to a connection on version 3. |
+| `row_updated` | `profile_id`, `server_seq` | Version 3. A row already written changed: its text, its media refs or its link previews. Carries no content; see *When a row changes*. Sent only to a connection on version 3 or later. |
 | `approval` | `approval_id`, `kind`, `text`, `token`, `ttl_s`, `approve_command`, `deny_command`; `detail?` | An owner-approval card raised by a turn on this socket. The token is submitted, never rendered. Routes are nonempty and at most 1,024 characters. Sent again after `server_hello` while it waits; see *Approvals*. |
 | `approval_resolved` | `approval_id`, `outcome` | `approved` or `denied` when the owner answered, `expired` when its `ttl_s` ran out. |
 | `read_state` | `profile_id`, `read_up_to_seq` | The read frontier, sent to every connection, whichever client (the Mac or a phone) moved it. |
 | `history_page` | `profile_id`, `messages[]`, `history_head_seq`; `next_after_seq?`, `next_before_seq?` | Messages oldest first, at most `limit` and about 60 KiB of them. |
 | `search_results` | `profile_id`, `query`, `hits[]`; `next_before_seq?` | Hits newest first. |
-| `media_path` | `ref`, `path`, `kind`, `mime`, `size_bytes`, `sha256` | Version 3. The grant answering `media_fetch`: an absolute path to a managed file holding the ref's bytes, held for this connection; see *Managed media files*. Sent only to a connection on version 3. |
-| `media_missing` | `ref` | Version 3. Nothing to grant for `ref`; see *Managed media files*. Sent only to a connection on version 3. |
-| `proposal` | `profile_id`, `proposal` (the card) | Version 4. A proposal waiting for the owner: sent when it is stored, and again after `server_hello` for each still waiting, oldest first. Sent only to a connection on version 4 placed as the owner's; see *Proposals*. |
-| `proposal_resolved` | `profile_id`, `proposal_id`, `state`, `sentence`; `result_status?`, `result_text?` | Version 4. A proposal left `waiting`: `denied`, `expired` or `refused`, or `confirmed` once its call has finished, whichever surface decided it. Sent only to a connection on version 4 placed as the owner's; see *Proposals*. |
-| `home_status_changed` | none | Version 6. Always On's summary changed: read `home.status` over management. Carries no content. Sent once after `server_hello` unless Always On is off, then at each change, never while it stays off, only to a connection on version 6; see *When Always On changes*. |
-| `checklists` | `profile_id`, `lists[]` | Version 6. The index: every live list as `{list_id, title, folder?, open, done, rev}`, in picker order. The answer to `checklists_pull`, and pushed again, whole, after any change. Sent only to a version 6 connection placed as the owner's that pulled the index; see *Lists*. |
-| `checklist` | `profile_id`, `list`; `made?` | Version 6. One whole list, `{list_id, title, rev, rows[], removed[]?, removed_at?}`. The answer to `checklist_pull`, and pushed again, whole, after every committed change to it, at most once per 100 ms. Sent only to a version 6 connection placed as the owner's that holds the list; see *Lists*. |
-| `attach_status` | `attach_id`, `status` | Version 7. The answer to an `attach_file` the daemon now holds: `status` is `present`, the only value this wire sends, and a `msg` may name `attach_id` from then on. Sent only to the version 7 owner's connection that sent it; see *Attachments*. |
+| `media_path` | `ref`, `path`, `kind`, `mime`, `size_bytes`, `sha256` | Version 3. The grant answering `media_fetch`: an absolute path to a managed file holding the ref's bytes, held for this connection; see *Managed media files*. Sent only to a connection on version 3 or later. |
+| `media_missing` | `ref` | Version 3. Nothing to grant for `ref`; see *Managed media files*. Sent only to a connection on version 3 or later. |
+| `proposal` | `profile_id`, `proposal` (the card) | Version 4. A proposal waiting for the owner: sent when it is stored, and again after `server_hello` for each still waiting, oldest first. Sent only to a connection on version 4 or later placed as the owner's; see *Proposals*. |
+| `proposal_resolved` | `profile_id`, `proposal_id`, `state`, `sentence`; `result_status?`, `result_text?` | Version 4. A proposal left `waiting`: `denied`, `expired` or `refused`, or `confirmed` once its call has finished, whichever surface decided it. Sent only to a connection on version 4 or later placed as the owner's; see *Proposals*. |
+| `home_status_changed` | none | Version 6. Always On's summary changed: read `home.status` over management. Carries no content. Sent once after `server_hello` unless Always On is off, then at each change, never while it stays off, only to a connection on version 6 or later; see *When Always On changes*. |
+| `checklists` | `profile_id`, `lists[]` | Version 6. The index: every live list as `{list_id, title, folder?, open, done, rev}`, in picker order. The answer to `checklists_pull`, and pushed again, whole, after any change. Sent only to a connection on version 6 or later placed as the owner's that pulled the index; see *Lists*. |
+| `checklist` | `profile_id`, `list`; `made?` | Version 6. One whole list, `{list_id, title, rev, rows[], removed[]?, removed_at?}`. The answer to `checklist_pull`, and pushed again, whole, after every committed change to it, at most once per 100 ms. Sent only to a connection on version 6 or later placed as the owner's that holds the list; see *Lists*. |
+| `attach_status` | `attach_id`, `status` | Version 7. The answer to an `attach_file` the daemon now holds: `status` is `present`, the only value this wire sends, and a `msg` may name `attach_id` from then on. Sent only to the owner's connection on version 7 or later that sent it; see *Attachments*. |
+| `trips` | `profile_id`, `trips[]` | Version 8. The index: every live trip as `{trip_id, title, days, stops, rev, starts_on?, ends_on?, past?}`, in picker order. The answer to `trips_pull`, and pushed again, whole, after any change and within minutes of a local midnight that starts or ends a trip. Sent only to a connection on version 8 placed as the owner's that pulled the index; see *Trips*. |
+| `trip` | `profile_id`, `trip`; `made?` | Version 8. One whole trip, `{trip_id, title, rev, starts_on?, timezone?, rows[], removed[]?, removed_at?}`. The answer to `trip_pull`, and pushed again, whole, after every committed change to it, at most once per 100 ms. Sent only to a connection on version 8 placed as the owner's that holds the trip; see *Trips*. |
+| `trip_shared` | `profile_id`, `client_msg_id`, `trip_id`, `rev`, `text` | Version 8. The answer to `trip_share`: the trip in its shared form, as plain text the engine writes, at the `rev` it shows. Sent only to the owner's connection that asked; see *Trips*. |
 | `error` | `reason`; `message?`, `field?`, `event?`, `client_msg_id?`, `ref?`, `attach_id?`, `direction?`, `client_version?`, `min_version?`, `max_version?` | A refusal; see *Errors*. |
 
 ### Timeline shapes
@@ -601,8 +675,10 @@ reads it, on the same machine (version 7):
    takes: the media store's bound, the same `max_media_bytes` setting the
    phone's `caps.max_media_bytes` comes from, 20 MiB by default. A hello
    without `attachments` (a connection not placed as the owner's, the media
-   store not running, a desktop whose home moved) means no file can be handed
-   over, and the app offers none.
+   store not running, a desktop whose server takes no file from it) means no
+   file can be handed over, and the app offers none. A desktop whose home
+   moved offers its own inbox, at the same path, and the server's bound (see
+   *After a move: the desktop's tunnel*).
 2. **Write, then announce.** The client picks an `attach_id`, 1 to 64 ASCII
    letters, digits, `_` or `-`, new for each file it attaches (it is the
    file's name: an `attach_id` the daemon already took is refused), writes
@@ -664,7 +740,7 @@ that reconnects reads again the rows it shows.
 `home_status_changed` (version 6) says that Always On's summary changed, and
 carries none of it: the app reads management's `home.status` and draws its
 `summary`, so the words come from one place. The daemon sends it to every
-version 6 connection:
+connection on version 6 or later:
 
 - **once after `server_hello`**, after the approvals and proposals that
   follow it, unless Always On is `off`: an app that connects while Always On
@@ -674,31 +750,26 @@ version 6 connection:
   (management's *The Always On summary*), which is every change the app
   draws (the state, an action and its confirm, an alternative, a Details
   line, the step in hand, the notice) and never the clock alone (a sentence
-  on `on` and `problem` and `off` with an age or a percentage in it, when
-  the provider was last checked, what was last seen). On the server, which
-  its desktops' summaries read in their `primary_home`, a change of its
-  newest backup, of its enrollment code or of the servers it holds counts as
-  well. The newest backup the summary counts from turning 7 days old moves
-  the summary's notice, so it is told once.
+  on `on` and `problem` and `off` with an age or a percentage in it, what
+  was last seen). On the server, which its desktops' summaries read in their
+  `primary_home`, a change of its newest backup counts as well. The newest
+  backup the summary counts from turning 7 days old moves the summary's
+  notice, so it is told once.
 - **never while Always On stays `off`**: an app forgets Always On while it is
   off. A settings write that changes what the `off` sentence names (iMessage,
   voice calls, meetings) is not told; the app reads that line when the owner
-  opens the pane. Entering `off` from another state (a server deleted before
-  the move, a cancelled setup) is a change, told once.
+  opens the pane. Entering `off` from another state (a code cancelled
+  before the move) is a change, told once.
 
 The daemon works this out without polling anything. It reads the summary
-again only when something it rests on happens (the move's phase, a server
-enrolling or its code being opened, used, withdrawn or expiring, the Always
-On provisioner's file being written, the link to the server going up or
-down, a backup run finishing) and at the next time the
-summary changes by the clock alone (a code open 30 minutes while the
-computer is awake, a link down 10 minutes while it is awake, a waiting
-server's 24 hours, a backup's 3 days and its 7), on one timer, armed again
-at each read; and only while a version 6 connection is attached. While Always On is
-`off` it arms nothing and reads only on what could end `off` (a token, a
-code, a move). It never calls the cloud provider: the provider is read by a
-job, one of which a management `home.status` read starts when the summary
-rests on the provider's word and the last check is over a minute old.
+again only when something it rests on happens (the move's phase or a move
+back's record, a server enrolling or its code being opened, used, withdrawn
+or expiring, the link to the server going up or down, a backup run
+finishing) and at the next time the summary changes by the clock alone (a
+link down 10 minutes while it is awake, a waiting server's 24 hours, a
+backup's 3 days and its 7), on one timer, armed again at each read; and only
+while a connection on version 6 or later is attached. While Always On is `off` it arms
+nothing and reads only on what could end `off` (a code, a move).
 
 A notice sent while the app was disconnected is lost, so an app that
 connects reads nothing on its own: the notice after `server_hello` is its
@@ -716,18 +787,23 @@ ends that way: that is when the summary moves to `cannot_reach` and back.
 
 ## Blocks under a reply
 
-A reply can carry `blocks[]`: records its text links, and the lists its turn
-read or changed, which a client draws beside the text. Its `text_done`, its `row` and its history message carry the
+A reply can carry `blocks[]`: records its text links, and the lists and trips
+its turn read or changed, which a client draws beside the text. Its `text_done`, its `row` and its history message carry the
 same `blocks`, and have the key only when the reply has one. The rules:
 
 - **The text stands alone.** Every reply is complete as text, each place it
   recommends linked by name. A block adds to the text and never replaces it,
   so a client that draws no blocks, every other channel and the transcript
   search lose nothing.
-- **A client skips a block `type` it does not know.** The types are `places`
-  and `checklists`, and `blocks` holds at most one block of each type.
-- **Additive, so no version bump.** An older client ignores the key (*Absent
-  is absent*, under *Transport*).
+- **A client skips a block `type` it does not know.** The types are
+  `places`, `checklists` and (version 8) `events` and `trips`, and `blocks`
+  holds at most one block of each type, in no fixed number.
+- **Additive within a type, so no version bump.** An older client ignores the
+  key (*Absent is absent*, under *Transport*). A new block type is not: it
+  comes with the version that brought it, since a client before version 8
+  refused a row with more than two blocks, and a connection below that
+  version is sent only the types its version carries. `places` and
+  `checklists` ride every version; `events` and `trips` came with version 8.
 - **Places, in first-link order.** A `places` block holds the places a
   `place_search` in the same conversation found in the last 30 minutes that
   the reply's text links, one to ten, in the order the text first links them,
@@ -765,12 +841,64 @@ same `blocks`, and have the key only when the reply has one. The rules:
   (at most 80 characters), and `rows` the `ci_` ids of the rows the turn added
   or changed, empty for a list it only read. It holds ids and the title, never
   an item's words: a client that draws it draws each list's rows as they stand
-  now (on version 6, by `checklist_pull`; see *Lists*), and the reply's text
+  now (from version 6, by `checklist_pull`; see *Lists*), and the reply's text
   stays the record of what happened. A scheduled
   job's message carries one the same way.
+- **Events, as the reply left them** (version 8). An `events` block carries
+  every event the turn's event tools (`event_store`, `event_update`,
+  `event_remove`, `event_list`, `reminder_snooze`) returned, one to eight,
+  each once in its last state: the ones the turn changed first, in the order
+  it first changed them, then the rest by date, an event with no time first
+  on its day. A list of more says so in the reply's text. A turn that stores
+  an event and then changes it carries it once, as changed. It is a receipt,
+  never pulled again: a later reply that moves the event carries its own.
+  Each event is the card the engine made of the tool's record:
+
+  | Field | What |
+  |---|---|
+  | `event_id`, `title`, `kind` | As stored. The engine's kinds are `birthday`, `anniversary`, `appointment`, `deadline`, `event`, `follow_up` and `explicit_reminder`; a kind a client does not know draws as a plain event. |
+  | `date`, `time?`, `timezone` | The occurrence the reply is about, in the event's own zone: for a yearly event, the next one. `date` is `YYYY-MM-DD`; `time` is `HH:MM`, only for an event with a time. |
+  | `yearly?` | `true` for a yearly event, absent otherwise. |
+  | `status` | `active`, `completed` or `cancelled`. |
+  | `change?` | What the reply's turn did: `stored`, `changed`, `cancelled` or `snoozed`. Absent for an event the turn only listed, or found already stored or already snoozed to that time. |
+  | `when` | The engine's sentence for the occurrence, as the tool told the model: `Friday, November 13 at 10:30 AM EST`, or for a yearly event `every November 16, next on Monday, November 16`. |
+  | `reminds?`, `rings?` | The reminder plan and where it rings, in the engine's words: `1 day and 1 hour before`, `1 week before and on the day, at 9:00 AM`, `at the time`; `on Telegram`, `on your computer`. Both absent when no reminder is left (a cancelled or past event, one stored with none). For a snooze, `reminds` says when it rings next: `again on Thursday, November 12 at 3:40 PM EST`. |
+
+  The engine writes every sentence about the event; a client draws a date
+  tile from `date` and writes none of its own. An event's card is under 400
+  bytes for an ordinary title (a title holds at most 240 bytes).
+- **Trips, by id** (version 8). A `trips` block (M89) names the owner's trips
+  that `trip_read` or `trip_edit` read or changed in the reply's turn, in the
+  order the turn first touched them, one to four: each `{trip_id, title,
+  rows[]}`, `trip_id` a `tr_` id, `title` the trip's title when the turn
+  ended (at most 80 characters), and `rows` the `ti_` ids of the days and
+  stops the turn added or changed, empty for a trip it only read. As a list's,
+  it holds ids and the title, never a stop's words or place: a client that
+  pulled the trips index draws each trip as it stands now, and the reply's
+  text stays the record of what happened. A scheduled job's message carries
+  one the same way.
+
+### Which blocks a client draws
+
+A block is drawn by one of two rules, and the daemon tells the model a block
+is drawn only where its rule holds, so it never says a card is drawn that a
+client is not sent:
+
+- **A snapshot of tool records** (`places`, `events`) is drawn from the
+  protocol version that brought it: `places` on every version, `events` from
+  version 8. A turn a version 8 connection carries is told its events are
+  drawn under the reply.
+- **A kept kind** (`checklists`, the owner's lists, and `trips`, the owner's trips)
+  is drawn by a connection that pulled its index (`checklists_pull`, see
+  *Lists*, and `trips_pull`, see *Trips*), and is sent to every connection
+  whose version carries its block, since its block names the ids a client
+  pulls to draw it. A turn is told a kept kind is drawn under the reply only
+  when its connection pulled that index; every other turn is told to write
+  the list or the trip's days out.
 
 The phones' `row` carries the history message whole, so it carries `blocks`
-too, and a phone app may ignore them.
+too, under the same rules by the phone session's own version (the mobile
+protocol's *Timeline shapes*); a phone app may ignore them.
 
 ## After a move: the desktop's tunnel
 
@@ -797,10 +925,23 @@ refuses a client that has seen a later primary.
   it against its ref and grants the managed file under its own home, as
   *Managed media files* says, once the connection's `client_hello` declared a
   version that has it. `media_release` is answered by nothing, as always.
-- **No files to attach.** The app writes a file on the desktop, which the
-  primary's inbox is not on, so the primary's `server_hello` carries no
-  `attachments` there and the app offers none; an `attach_file` sent anyway
-  is refused with `error: request_failed` and its sentence.
+- **Files are taken here** (M97 §9.3). The app writes a file on the
+  desktop, which the primary's inbox is not on, so the desktop's engine
+  keeps an inbox of its own, at the same path on the desktop, and adds it
+  to the primary's `server_hello` on a version 7 connection (`attachments {
+  dir, max_bytes }`, `max_bytes` the primary's bound), while its primary
+  takes a computer's uploads. The app attaches exactly as above. The
+  desktop's engine answers each `attach_file` itself: it reads the file
+  with the same checks, removes it, uploads it to the primary over its link
+  (the phone's upload, its SHA-256 first, so a file the primary holds is not
+  sent again), and answers `attach_status { status: "present" }` once the
+  primary holds it, or `error: request_failed` with its sentence and the
+  `attach_id` (the sentences above, the link's own when it is down, or
+  that a move back to this computer dropped it, naming the file). The
+  `msg` that names it is the primary's, which finds the file in its store.
+  A primary that takes no upload from a computer gets no `attachments` in
+  its hello, and an `attach_file` sent anyway is refused there with `error:
+  request_failed` and its sentence.
 - **Always On is the desktop's.** The app's Always On pane reads this
   computer's `home.status`, so on a connection whose `client_hello` declared
   version 6 the desktop's engine sends its own `home_status_changed` after
@@ -1075,8 +1216,8 @@ job and the Mac change them through one transaction. Version 6 brings them to
 this socket: the Mac reads the index and whole lists, changes them by row id,
 and draws every change as it commits, whoever made it.
 
-- **Who.** List events go only to version 6 connections the daemon placed as
-  the owner's (see *Transport*). A pull or an edit from any other connection
+- **Who.** List events go only to connections on version 6 or later the
+  daemon placed as the owner's (see *Transport*). A pull or an edit from any other connection
   is refused with `error: request_failed`, `message` "Only the owner's own
   Fermix app can read or change the owner's lists.", and reads or changes
   nothing.
@@ -1108,7 +1249,8 @@ and draws every change as it commits, whoever made it.
   state, never a delta; a client drops one whose `rev` is below the one it
   shows. A connection that never pulled is sent nothing.
 - **An edit** (`checklist_edit`). One `op`, applied in the same transaction
-  as the model's edits, its rows recorded as made from the Mac. `list_id`
+  as the model's edits, its rows recorded as made from the Mac, or from the
+  phone over a phone's list channel (`made_via: "phone"`). `list_id`
   names the list for every op but `create`. It is answered `accepted`
   (`duplicate: false`) once applied, and its change reaches every holder as a
   push, the sender too. An edit sent again with a `client_msg_id` already
@@ -1117,7 +1259,10 @@ and draws every change as it commits, whoever made it.
   `made` on the next push of a list maps the `client_msg_id` of each `create`
   or `add` a device sent since the last one to what it made: a `create`'s
   `list_id`, an `add`'s `row_id`. A client matches the ids it sent and
-  ignores the rest.
+  ignores the rest. A `client_msg_id` names one edit of any kind, a list's
+  or a trip's (see *Trips*): a client mints a new one for every edit it
+  sends, and an edit whose id an edit of the other kind already used is
+  refused and changes nothing.
 - **Refusals.** An op the engine cannot take changes nothing and is answered
   `error: request_failed` with the engine's sentence as `message` and the
   edit's `client_msg_id`; the connection stays open. A client shows the
@@ -1133,6 +1278,16 @@ and draws every change as it commits, whoever made it.
   leaves the items to the list drawn under it (the reply's `checklists` block,
   see *Blocks under a reply*). A turn from a connection that never pulled the
   index writes the list out as text.
+- **A phone's list channel.** A paired phone reads and changes the lists
+  over one companion connection carried in its own mobile session (the mobile
+  protocol's *Lists on a phone*). It is placed as the owner's, the pairing
+  being the proof, and speaks these events and nothing else: `client_hello`,
+  `checklists_pull`, `checklist_pull` and `checklist_edit` in, `server_hello`,
+  `checklists`, `checklist`, `accepted` and `error` out, and on version 8 the
+  trips' events too (see *Trips*). Any other client event is refused `error:
+  unknown_event` and the channel closes. Holding, pushes, edits, refusals and
+  bounds are as above; its edits are made via the phone, and a phone turn
+  after its pull of the index is told the app draws lists, as a Mac turn is.
 
 The ops, the model's by row id without its `replace`, with `clear_done` and
 `restore`:
@@ -1151,6 +1306,165 @@ The ops, the model's by row id without its `replace`, with `clear_done` and
 | `remove_list` | — | Removes the list; it can be restored for 30 days. |
 | `clear_done` | — | Removes every done item; each stays in Recently removed. |
 | `restore` | `row_id?`; `title?` | With `row_id`, brings that removed row back at its place. Without it, brings the removed list back, under `title` when given, else under its own; a live list holding that title refuses it ("Another list is named "…" now, so this one cannot come back under that name; restore it with a new title, or rename the other list first."). |
+
+## Trips
+
+The owner's trips (M89) live in the engine's store beside the lists, and the
+model, a scheduled job and the Mac change them through one transaction.
+Version 8 brings them to this socket as the lists' family again, under the
+lists' rules: the Mac reads the index and whole trips, changes them by row
+id, asks for a trip's shared form, and draws every change as it commits,
+whoever made it.
+
+- **Who.** Trip events go only to connections on version 8 the daemon placed
+  as the owner's (see *Transport*). A pull, an edit or a share from any other
+  connection is refused with `error: request_failed`, `message` "Only the
+  owner's own Fermix app can read or change the owner's trips.", and reads or
+  changes nothing. An engine in the device role refuses each with its
+  sentence, an edit's and a share's with its `client_msg_id`.
+- **The index** (`trips_pull`, answered `trips`). Every live trip in picker
+  order, each `{trip_id, title, days, stops, rev, starts_on?, ends_on?,
+  past?}`: `days` and `stops` count its rows, `rev` moves with every change
+  to it, `starts_on` and `ends_on`, its first and last days' dates, are there
+  only when it has a start, and `past` is there, `true`, only on a trip that
+  is over. Picker order is the engine's, and a client draws it as sent: a
+  trip happening now first; then the trips to come, by first day, soonest
+  first; then the trips with no dates, newest made first; then the trips that
+  are over, most recently ended first; a tie goes to the trip made first. A
+  trip is happening now from its first day through its last, and over once
+  its last day has ended, each judged against today in the trip's own time
+  zone, or in the home's when it names none; a trip with no dates is never
+  either. A past trip stays until it is removed, and opens and changes as any
+  other. Once a connection has pulled the index it is sent the index again,
+  whole, after any change to any trip, and within minutes of a local midnight
+  that starts or ends a trip, when the date alone moves the order or a trip's
+  `past` (a Mac that slept through the midnight sends it within minutes of
+  waking). It may also be sent once unchanged after the engine restarts the
+  part of it that watches the date; a client draws it as any push.
+- **A trip** (`trip_pull`, answered `trip`). `trip` is `{trip_id, title, rev,
+  starts_on?, timezone?, rows[]}`, the rows in order: each day, then its
+  stops. A day is `{row_id, kind: "day", text?, date?, timezone?, town?}`:
+  `text` only when it is named, `date` only when the trip has a start (the
+  start plus its place among the days, so no client adds days to a date),
+  `timezone` only when it names its own, and `town` only once the near in
+  force for it is found. That near is the day's own, else the trip's, and
+  `town` is on every day it is in force, placed stops or not: `{name,
+  latitude, longitude, radius_meters}`, where `name` is the geocoder's own
+  words for what it found (its place or locality, then its administrative
+  area, then its country, a part equal to the one before it dropped), never
+  the near's words, so a misread shows; `latitude` and `longitude` are the
+  found place's own point;
+  and `radius_meters` is the geocoder's own region about it, a whole number
+  from 1, a scale, never a search's bounds. It is absent with no near in
+  force, with a near not looked up yet or one the search found no town by,
+  and on a day whose own near has no town, which never borrows the trip's;
+  a stop and a removed row never carry one. No client geocodes. A stop is `{row_id, kind: "stop",
+  text, time?, duration?, fixed?, note?, place?, leg_m?}`: `time` is `HH:MM`,
+  the wall clock where the stop is, `duration` its minutes, `fixed` present
+  only when true (a booking, a timed ticket), and `place` the record a
+  lookup or a device made (`tripPlace`: `name` and `location` always,
+  `address`, `apple_place_id`, `source_url`, `canonical_url` and `categories`
+  where given). `leg_m` is the straight line in metres from the placed stop
+  before it in its day, passing over any unplaced stop between; the day's
+  first placed stop and an unplaced stop have none. A client builds every
+  Maps address from the record and opens no link a row carries. With
+  `removed: true` the trip also carries `removed[]`, the days and stops
+  removed in the last 30 days, newest first, each with its `removed_at` and
+  no `date` or `leg_m`; a day and the stops removed with it share one
+  `removed_at`. A trip itself removed and not yet swept still answers, with
+  `removed_at`, so it can be restored. A trip that is gone is `error:
+  request_failed` ("No trip has that id; it may have been removed more than
+  30 days ago."). Times are RFC 3339 UTC with microseconds.
+- **Holding.** A connection holds each trip it pulled, and the trip a
+  `create` from it made, at most 16, apart from the lists it holds: pulling
+  another lets the one it pulled longest ago go, and nothing more of that
+  trip is sent to it until it pulls it again. A trip is held with or without
+  its removed rows, as its last pull asked. A trip swept while held is let
+  go.
+- **Pushes.** After every committed change to a trip, by the model, a job or
+  any device, every connection that holds it is sent `trip`, the whole trip
+  again, and every connection that pulled the index `trips`, at most once per
+  100 ms per connection, in a window of the trips' own: a burst of changes is
+  one push of each trip carrying the rev it ended on, then the index. Every
+  push is whole state, never a delta; a client drops one whose `rev` is below
+  the one it shows. A connection that never pulled is sent nothing. An op
+  that can grow a trip (`create`, `add`, `edit`, `day`, `rename`, `dates`)
+  is refused when the trip's whole `trip` object, with the `removed[]` a pull
+  with `removed: true` carries and the widest town on every day, would pass
+  768 KiB; a removed row counts for the 30 days it is kept, and a town found
+  later is inside what was reserved for it. `remove`, `move`, `restore` and `remove_trip` are
+  never refused for size, so a trip at the bound can always shrink: what they
+  add (a row's `removed_at`, a stop's `leg_m`) is under 70 KB for a trip of
+  1,000 rows, so every push stays inside a client's 1 MiB line.
+- **An edit** (`trip_edit`). One `op`, applied in the same transaction as the
+  model's edits, its rows recorded as made from the Mac, or from the phone
+  over a phone's list channel (`made_via: "phone"`). `trip_id` names the
+  trip for every op but `create`. It is answered `accepted` (`duplicate:
+  false`) once applied, and its change reaches every holder as a push, the
+  sender too. An edit sent again with a `client_msg_id` already applied (kept
+  30 days) is answered `accepted` with `duplicate: true`, changes nothing,
+  and the sender, when it holds the trip, is sent it again. `made` on the
+  next push of a trip maps the `client_msg_id` of each `create`, `add` or new
+  `day` a device sent since the last one to what it made: a `create`'s
+  `trip_id`, an `add`'s or a new day's `row_id`. A client matches the ids it
+  sent and ignores the rest. A `client_msg_id` names one edit of any kind, a
+  list's or a trip's: a client mints a new one for every edit it sends, and
+  a trip's edit whose id a list's edit already used is refused ("That
+  client_msg_id already named another edit, so nothing changed; send each
+  edit with an id of its own.") and changes nothing. There is no rev on an edit: a row another edit removed
+  refuses the op with its sentence, and the client pulls the trip again.
+- **A share** (`trip_share`, answered `trip_shared`). The trip in its one
+  shared form, which the engine writes and a client hands to the pasteboard
+  or the share sheet as it is: plain text, the title and dates, each day by
+  its date (or its number) and name, a line a stop with its time and words,
+  and on every placed stop a link to it in Apple Maps; no notes and no fixed
+  mark. `rev` is the trip's when it was written. A share changes nothing; a
+  removed trip has none, and is refused as one that is gone.
+- **Refusals.** An op the engine cannot take changes nothing and is answered
+  `error: request_failed` with the engine's sentence as `message` and the
+  edit's `client_msg_id`, as a refused share is with the share's; the
+  connection stays open. A client shows the sentence and pulls the trip
+  again. A `row_id` the trip no longer has is "That row is not in this trip
+  any more; pull the trip again."
+- **Bounds.** A title is at most 80 characters, a day's name 80, a stop's
+  text 200 and a note 1,000, each one line, trimmed (a note may hold line
+  breaks); a duration is 1 to 1,440 minutes. The owner keeps at most 30
+  trips and a trip holds at most 1,000 days and stops together. Ids are the
+  engine's: `tr_` and ten lowercase letters or digits for a trip, `ti_` for a
+  day or a stop, stable for the row's life.
+- **The reply.** A turn this connection carries after it pulled the trips
+  index is told the app draws trips, so the reply says in a sentence or two
+  what changed and leaves the days to the trip drawn under it (the reply's
+  `trips` block, see *Blocks under a reply*). A turn from a connection that
+  never pulled the index writes the days that changed out as text.
+- **A phone's list channel.** A paired phone reads, changes and shares the
+  trips over the companion connection that carries its lists (the mobile
+  protocol's *Trips on a phone*), placed as the owner's, the pairing being
+  the proof. Its `hello_ack` says `caps.trips: true` when the daemon serves
+  them there, and a phone that wants them says hello on the channel at
+  version 8: the channel then takes `trips_pull`, `trip_pull`, `trip_edit`
+  and `trip_share` and is sent `trips`, `trip`, `trip_shared`, `accepted` and
+  `error`, beside the lists' events. A channel on version 7 is refused each
+  as `error: unknown_event` and closes. Holding, pushes, edits, shares,
+  refusals and bounds are as above; its edits are made via the phone
+  (`made_via: "phone"`), and a phone turn after its pull of the trips index
+  is told the app draws trips, as a Mac turn is, when the phone's own
+  session sends the `trips` block (mobile protocol 3).
+
+The ops, the model's by row id, with `restore`:
+
+| `op` | Fields | Effect |
+|---|---|---|
+| `create` | `title` | Makes a trip of one day, with no start, held by the sending connection. A live trip with the title, compared without case and however its accents are written (a title is kept in Unicode NFC), is refused. |
+| `add` | `text`; `day_id` or `after_id`; `time?`, `duration?`, `fixed?`, `note?`, `place?` | Adds a stop at the end of that day, or right after that row: after a day's own row, it is that day's first stop. |
+| `edit` | `row_id`; `text?`, `time?`, `duration?`, `fixed?`, `note?`, `place?` or `unplace?` (one at least) | Changes the stop; `time: ""`, `note: ""` or `duration: 0` clears it, and `unplace: true` takes its place away. |
+| `move` | `row_id`; `day_id?` or `after_id?` | Moves a stop to the end of that day, or right after that row (one of the two), first in a day when the row is that day's own. A day's `row_id` moves the day with its stops before `day_id`'s day, after `after_id`'s day, or first with neither; every day's date follows its new place. |
+| `day` | `row_id?`; `text?`, `after_id?` | With `row_id`, names that day (`text: ""` takes its name away). Without it, adds a day after `after_id`'s day, or at the end. |
+| `remove` | `row_id` | Removes the stop, or the day with its stops; each stays in Recently removed for 30 days. A trip keeps at least one day. |
+| `restore` | `row_id?`; `title?` | With `row_id`, brings that removed row back at its place, a day with the stops removed with it. Without it, brings the removed trip back, under `title` when given, else under its own; a live trip holding that title refuses it ("Another trip is named "…" now, so this one cannot come back under that name; restore it with a new title, or rename the other trip first."). |
+| `rename` | `text` | Renames the trip. |
+| `dates` | `starts_on` | Sets the first day's date, `YYYY-MM-DD`, or `""` for none; every day's date follows. |
+| `remove_trip` | — | Removes the trip; it can be restored for 30 days. |
 
 ## Errors
 
@@ -1189,7 +1503,9 @@ a `media_fetch`, and `attach_id` only on an error that answers an
 message's `client_msg_id`. A refused `proposal_answer` is a `request_failed` whose
 `message` is the daemon's sentence, with the answer's `client_msg_id`. So is
 a refused `checklist_edit`, with the edit's `client_msg_id`; a refused
-`checklists_pull` or `checklist_pull` carries none.
+`checklists_pull` or `checklist_pull` carries none. So are a refused
+`trip_edit` and a refused `trip_share` (version 8), each with its
+`client_msg_id`; a refused `trips_pull` or `trip_pull` carries none.
 
 ## Chat sequence
 

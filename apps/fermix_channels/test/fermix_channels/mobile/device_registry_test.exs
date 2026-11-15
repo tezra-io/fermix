@@ -1,6 +1,8 @@
 defmodule FermixChannels.Mobile.DeviceRegistryTest do
   use ExUnit.Case, async: true
 
+  import ExUnit.CaptureLog, only: [with_log: 1]
+
   alias FermixChannels.Mobile.DeviceRegistry
 
   setup do
@@ -166,6 +168,46 @@ defmodule FermixChannels.Mobile.DeviceRegistryTest do
     assert_received {:requests_revoked, "gone"}
   end
 
+  # M87: a phone's call outlives its socket, so revocation tells the call
+  # itself, socket or none; a device whose row vanished ends its call too.
+  test "revocation and a vanished device end the device's call, attached or not" do
+    test_pid = self()
+
+    registry =
+      start_supervised!(
+        {DeviceRegistry,
+         name: :"call_registry_#{System.unique_integer([:positive])}",
+         device_store: :store,
+         authorize_device: fn :store, id ->
+           if id == "vanished", do: {:error, :not_found}, else: {:ok, %{device_id: id}}
+         end,
+         delete_device: fn :store, _id -> :ok end,
+         revoke_requests: fn _id -> :ok end,
+         relays_changed: fn -> :ok end,
+         end_call: fn device_id, message ->
+           send(test_pid, {:end_call, device_id, message})
+           :ok
+         end},
+        id: make_ref()
+      )
+
+    assert :ok = DeviceRegistry.revoke(registry, "away")
+    assert_received {:end_call, "away", {:mobile_revoked, "away"}}
+
+    socket = spawn(fn -> Process.sleep(:infinity) end)
+    :ok = DeviceRegistry.attach(registry, "kept", socket)
+    {:error, _reason} = DeviceRegistry.attach(registry, "vanished", socket)
+    refute_received {:end_call, _id, _message}
+
+    other = spawn(fn -> Process.sleep(:infinity) end)
+    :ok = DeviceRegistry.attach(registry, "doomed", other)
+    :sys.replace_state(registry, &%{&1 | authorize_device: fn :store, _id -> {:error, :gone} end})
+    assert {:error, _reason} = DeviceRegistry.authorized?(registry, "doomed", other)
+    assert_received {:end_call, "doomed", {:call_end, :unknown_device}}
+
+    Enum.each([socket, other], &Process.exit(&1, :kill))
+  end
+
   # M62 §5: the relays the daemon's endpoint uses are those every paired phone
   # acknowledged, so a phone that leaves may widen them.
   test "a revocation asks the remote rail to recompute its relays" do
@@ -312,6 +354,78 @@ defmodule FermixChannels.Mobile.DeviceRegistryTest do
 
     assert_receive {:socket_message, ^socket, {:mobile_revoked, "device"}}
     assert {:error, :not_connected} = DeviceRegistry.lookup(registry, "device")
+  end
+
+  # M99 §6: whether Fermix's push relay could be reached, held in memory for
+  # the channel's status and Doctor; only the transitions are said and
+  # emitted.
+  describe "the push relay's reach" do
+    setup do
+      test_pid = self()
+
+      registry =
+        start_supervised!(
+          {DeviceRegistry,
+           name: :"mobile_relay_registry_#{System.unique_integer([:positive])}",
+           emit_relay: fn status, failures, class ->
+             send(test_pid, {:relay_transport, status, failures, class})
+             :ok
+           end},
+          id: :relay_registry
+        )
+
+      %{relay_registry: registry}
+    end
+
+    test "is unknown until a push to an Android phone ends", %{relay_registry: registry} do
+      assert DeviceRegistry.push_relay(registry) == :unknown
+      refute_received {:relay_transport, _status, _failures, _class}
+    end
+
+    test "goes unreachable at the first push that could not reach it, and back at the next one",
+         %{relay_registry: registry} do
+      {_result, log} =
+        with_log(fn ->
+          :ok = DeviceRegistry.relay_outcome(registry, {:unreachable, :gateway})
+          assert DeviceRegistry.push_relay(registry) == :unreachable
+          assert_received {:relay_transport, :degraded, 1, :gateway}
+
+          for class <- [:busy, :timeout] do
+            :ok = DeviceRegistry.relay_outcome(registry, {:unreachable, class})
+          end
+
+          assert DeviceRegistry.push_relay(registry) == :unreachable
+          refute_received {:relay_transport, _status, _failures, _class}
+
+          :ok = DeviceRegistry.relay_outcome(registry, :reached)
+          assert DeviceRegistry.push_relay(registry) == :reachable
+          assert_received {:relay_transport, :recovered, 3, :none}
+        end)
+
+      # Presence only: this file runs async, and the transitions' count is the
+      # emitted events' above. The recovery is logged at info, below the
+      # suite's level.
+      assert log =~ "mobile push relay cannot be reached (gateway)"
+      assert log =~ "an Android phone shows new messages when its app is opened"
+    end
+
+    test "a relay reached while it was reachable says nothing", %{relay_registry: registry} do
+      for _push <- 1..2, do: :ok = DeviceRegistry.relay_outcome(registry, :reached)
+      assert DeviceRegistry.push_relay(registry) == :reachable
+      refute_received {:relay_transport, _status, _failures, _class}
+    end
+
+    # The registry serves every phone's socket, so nothing a caller passes can
+    # reach it unless it is an outcome it holds.
+    test "an outcome it does not hold is refused at the caller", %{relay_registry: registry} do
+      for outcome <- [:gone, {:unreachable, "gateway"}, {:reached, :now}] do
+        assert_raise FunctionClauseError, fn ->
+          DeviceRegistry.relay_outcome(registry, outcome)
+        end
+      end
+
+      assert DeviceRegistry.push_relay(registry) == :unknown
+    end
   end
 
   defp socket_process do

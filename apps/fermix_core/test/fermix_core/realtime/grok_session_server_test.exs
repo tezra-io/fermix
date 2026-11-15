@@ -1,15 +1,19 @@
 defmodule FermixCore.Realtime.GrokSessionServerTest do
   use ExUnit.Case, async: false
 
+  alias FermixCore.Realtime.CallLease
   alias FermixCore.Realtime.CallRegistry
   alias FermixCore.Realtime.Config
   alias FermixCore.Realtime.GrokSessionServer
+  alias FermixCore.Realtime.LivePrompt
   alias FermixCore.Realtime.SessionControl
   alias FermixCore.Realtime.XAIRealtimeClient
+  alias FermixTestSupport.TelemetryCapture
 
   @moduletag :capture_log
 
   @call_registry Module.concat(__MODULE__, CallRegistry)
+  @call_lease Module.concat(__MODULE__, CallLease)
   # One 100 ms chunk of 24 kHz PCM16 silence, as the vendor sends it.
   @chunk Base.encode64(:binary.copy(<<0, 0>>, 2_400))
 
@@ -44,6 +48,7 @@ defmodule FermixCore.Realtime.GrokSessionServerTest do
     def close(socket), do: Agent.stop(socket)
 
     def events, do: Agent.get(@name, & &1.events)
+    def clear_events, do: Agent.update(@name, &%{&1 | events: []})
     def socket, do: Agent.get(@name, & &1.socket)
 
     def deliver(frame) do
@@ -144,6 +149,7 @@ defmodule FermixCore.Realtime.GrokSessionServerTest do
     {:ok, _bridge} = FakeBridge.start(self())
     on_exit(&FakeBridge.stop/0)
     start_supervised!(%{id: :fake_xai, start: {FakeXAI, :start_agent, [self()]}})
+    start_supervised!({CallLease, name: @call_lease})
     start_supervised!({CallRegistry, name: @call_registry})
     clock = start_supervised!({Agent, fn -> 0 end}, id: :grok_clock)
     %{clock: clock}
@@ -182,6 +188,23 @@ defmodule FermixCore.Realtime.GrokSessionServerTest do
       refute Map.has_key?(session_config.turn_detection, :idle_timeout_ms)
     end
 
+    test "call_start names the endpoint the call runs for", %{clock: clock} do
+      scope = "voice_live:endpoint_#{System.unique_integer([:positive, :monotonic])}"
+      TelemetryCapture.attach([[:fermix, :voice_live, :call_start]], session_id: scope)
+      session = start_session(clock: clock, session_scope: scope, endpoint: {:phone, "0d7f6a52"})
+
+      :ok = SessionControl.call_start(session)
+
+      assert_receive {:telemetry, [:fermix, :voice_live, :call_start], _m,
+                      %{endpoint: "phone:0d7f6a52"}}
+    end
+
+    # 300 ms of PCM16 at 24 kHz mono (`Endpoint.grok_playback_opts/1`).
+    test "a phone's call paces Grok's audio in the phone's window", %{clock: clock} do
+      session = start_session(clock: clock, endpoint: {:phone, "0d7f6a52"})
+      assert :sys.get_state(session).playback.window_bytes == 300 * 48
+    end
+
     test "a refused handshake answers the companion in the vendor's words", %{clock: clock} do
       session = start_session(clock: clock, client: RefusingXAI)
 
@@ -191,7 +214,10 @@ defmodule FermixCore.Realtime.GrokSessionServerTest do
                        %{type: "error", kind: "provider_refused", detail: "401 Unauthorized"}}
     end
 
-    test "call_ready waits for the context's acknowledgement and the bridge", %{clock: clock} do
+    # M96: the chat's context is quoted at the end of the instructions, never
+    # sent as conversation items Grok would answer as the owner's turns.
+    test "the chat's context ends the instructions, quoted, and call_ready waits for the bridge",
+         %{clock: clock} do
       FakeBridge.set_window(
         {:ok,
          %{
@@ -204,21 +230,17 @@ defmodule FermixCore.Realtime.GrokSessionServerTest do
 
       session = start_session(clock: clock)
       :ok = SessionControl.call_start(session)
+      sync(session)
+      refute_received {:bridge_open_call, _call}
       configure(session)
 
-      items = for %{type: "conversation.item.create", item: item} <- FakeXAI.events(), do: item
-      assert [%{role: "user"} = chat, %{role: "system"} = closing] = items
-      assert [%{type: "input_text", text: "use the lease link"}] = chat.content
-      assert hd(closing.content).text =~ "not a request"
-      refute Enum.any?(FakeXAI.events(), &(&1.type == "response.create"))
-      refute_received {:realtime, %{type: "call_ready"}}
-      refute_received {:bridge_open_call, _call}
+      [%{session: %{instructions: instructions}}] =
+        Enum.filter(FakeXAI.events(), &(&1.type == "session.update"))
 
-      ack(chat.id)
-      refute_received {:realtime, %{type: "call_ready"}}
+      assert instructions =~
+               ~r/\n\n## Earlier in the chat\n\nuser: use the lease link\nThe messages above .* not a request\. Do not answer them now\.\z/
 
-      ack(closing.id)
-      sync(session)
+      refute Enum.any?(FakeXAI.events(), &(&1.type == "conversation.item.create"))
       assert_received {:bridge_open_call, %{conversation: "chat"}}
 
       assert_received {:realtime,
@@ -228,7 +250,8 @@ defmodule FermixCore.Realtime.GrokSessionServerTest do
                          provider_session_id: "sess_1"
                        }}
 
-      assert :sys.get_state(session).ledger.text_items_sent == 2
+      # Nothing billed as a text item: neither the context nor the greeting is one.
+      assert :sys.get_state(session).ledger.text_items_sent == 0
     end
 
     test "a private call reads no chat and is ready once configured", %{clock: clock} do
@@ -276,6 +299,108 @@ defmodule FermixCore.Realtime.GrokSessionServerTest do
       assert_receive {:realtime, %{type: "error", kind: "provider_refused", detail: detail}}
       assert detail =~ "invalid_voice"
       assert_receive {:EXIT, ^session, {:shutdown, :provider_refused}}
+    end
+  end
+
+  # M87 Phase 2: a phone's camera. Grok sees nothing, so the voice is told so
+  # once, as a quiet system item, the first time the camera turns on, and each
+  # task carries the camera's newest fresh frame.
+  describe "the phone's camera" do
+    test "the first Camera on tells the voice it cannot see, once", %{clock: clock} do
+      session = ready_session(clock)
+
+      for on? <- [true, false, true], do: assert(:ok = SessionControl.camera(session, on?))
+
+      assert [%{role: "system"}] = camera_rules()
+      refute Enum.any?(FakeXAI.events(), &(&1.type == "response.create"))
+    end
+
+    test "a Camera on before the session is ready is told once it is", %{clock: clock} do
+      session = start_session(clock: clock)
+      :ok = SessionControl.call_start(session)
+      :ok = SessionControl.camera(session, true)
+      assert camera_rules() == []
+
+      configure(session)
+
+      assert [%{role: "system"}] = camera_rules()
+    end
+
+    test "a task carries the camera's newest fresh frame", %{clock: clock} do
+      session = ready_session(clock)
+      :ok = SessionControl.camera(session, true)
+      user_says(session, "u1", "what am I holding", clock)
+      :ok = SessionControl.camera_frame(session, %{mime_type: "image/jpeg", data: "jpeg"})
+
+      call(session, "r1", "call_1", %{action: "submit", request: "Say what the owner holds"})
+
+      assert_receive {:bridge_submit, %{frame: frame, camera_on?: true}}
+      assert frame == %{source: :camera, mime_type: "image/jpeg", data: "jpeg"}
+    end
+
+    test "the frame is let go when its own timer says it is no longer fresh", %{clock: clock} do
+      session = ready_session(clock)
+      :ok = SessionControl.camera(session, true)
+      :ok = SessionControl.camera_frame(session, %{mime_type: "image/jpeg", data: "jpeg"})
+      %{ref: ref} = :sys.get_state(session).tasks.frame
+
+      send(session, {:camera_frame_stale, ref})
+
+      assert :sys.get_state(session).tasks.frame == nil
+    end
+
+    # The rule is a billable item: one the budget cannot afford is not sent,
+    # and stays owed, so the next Camera on says it.
+    test "a rule the budget refused is said at the next chance", %{clock: clock} do
+      session = ready_session(clock)
+      ledger = :sys.get_state(session).ledger
+      :sys.replace_state(session, &%{&1 | ledger: %{ledger | ceiling_millicents: 0}})
+
+      :ok = SessionControl.camera(session, true)
+      assert camera_rules() == []
+      assert :sys.get_state(session).camera_rule == :owed
+
+      :sys.replace_state(session, &%{&1 | ledger: ledger})
+      :ok = SessionControl.camera(session, false)
+      :ok = SessionControl.camera(session, true)
+
+      assert [%{role: "system"}] = camera_rules()
+      assert :sys.get_state(session).camera_rule == :said
+    end
+
+    # A crash report prints the session's state and the message it was
+    # handling: a picture, either voice's audio and the key are their sizes.
+    test "its printed status carries no picture, audio or key", %{clock: clock} do
+      session = ready_session(clock)
+      picture = %{mime_type: "image/jpeg", data: <<0xFF, 0xD8, 0xFF, "picture">>}
+      :ok = SessionControl.camera(session, true)
+      :ok = SessionControl.camera_frame(session, picture)
+
+      :sys.replace_state(session, fn state ->
+        queue = :queue.in({"p1", "Z3Jvay1zZWNyZXQtdm9pY2U=", 17}, state.playback.queue)
+
+        %{
+          state
+          | held_audio: ["mic-secret-audio"],
+            held_audio_bytes: 16,
+            playback: %{state.playback | queue: queue, queued_bytes: 17}
+        }
+      end)
+
+      secrets = ~r/255, 216, 255|mic-secret-audio|Z3Jvay1zZWNyZXQtdm9pY2U|xai-test/
+      printed = inspect(:sys.get_status(session), limit: :infinity, printable_limit: :infinity)
+      refute printed =~ secrets
+      assert printed =~ "bytes: 10"
+
+      for message <- [
+            {:"$gen_cast", {:camera_frame, picture}},
+            {:"$gen_cast", {:audio_chunk, "mic-secret-audio"}}
+          ] do
+        status =
+          GrokSessionServer.format_status(%{state: :sys.get_state(session), message: message})
+
+        refute inspect(status, limit: :infinity, printable_limit: :infinity) =~ secrets
+      end
     end
   end
 
@@ -366,7 +491,11 @@ defmodule FermixCore.Realtime.GrokSessionServerTest do
       deliver(response_done("r2"))
       sync(session)
 
-      assert [%{response: %{metadata: %{"fermix_continuation" => _id}}}] = continuations()
+      assert [%{response: %{metadata: %{"fermix_continuation" => _id}} = response}] =
+               continuations()
+
+      # A result's continuation reads the call's own instructions.
+      refute Map.has_key?(response, :instructions)
     end
 
     test "a response Grok starts after the output consumes the continuation", %{clock: clock} do
@@ -523,6 +652,181 @@ defmodule FermixCore.Realtime.GrokSessionServerTest do
       assert_receive {:tool_exec, %{tool: "fermix_task", status: "completed", action: "submit"}}
       refute_received {:tool_exec, _meta}
       :telemetry.detach(handler)
+    end
+  end
+
+  # M96 §4.2: the voice speaks first. The reply that greets the owner is the
+  # one continuation the call owes before anything was said, and the greeting
+  # rides in that reply's own instructions, never in a conversation item.
+  describe "the greeting" do
+    test "once ready, exactly one response.create, the greeting after the call's instructions",
+         %{clock: clock} do
+      session = start_session(clock: clock)
+      :ok = SessionControl.call_start(session)
+      :ok = SessionControl.audio_chunk(session, <<1, 2>>)
+      configure(session)
+
+      types = Enum.map(FakeXAI.events(), & &1.type)
+      assert List.last(types) == "response.create"
+      assert Enum.count(types, &(&1 == "response.create")) == 1
+      refute "conversation.item.create" in types
+
+      # The held microphone audio goes before the request for the greeting.
+      assert Enum.find_index(types, &(&1 == "input_audio_buffer.append")) <
+               Enum.find_index(types, &(&1 == "response.create"))
+
+      [%{session: %{instructions: call_instructions}}] =
+        Enum.filter(FakeXAI.events(), &(&1.type == "session.update"))
+
+      assert [%{response: %{metadata: %{"fermix_continuation" => _id}} = response}] =
+               continuations()
+
+      assert String.starts_with?(response.instructions, call_instructions <> "\n\n")
+      assert response.instructions =~ "The owner has just started this call. Now: "
+      assert_received {:realtime, %{type: "call_ready"}}
+    end
+
+    test "a call whose budget is already spent is not greeted", %{clock: clock} do
+      Process.flag(:trap_exit, true)
+      session = start_session(clock: clock, config: grok_config(cost_cents: 1))
+      :ok = SessionControl.call_start(session)
+      # Ten connected seconds cost more than the cent the call may spend.
+      Agent.update(clock, fn _ms -> 10_000 end)
+      configure(session)
+
+      refute Enum.any?(FakeXAI.events(), &(&1.type == "conversation.item.create"))
+      assert continuations() == []
+    end
+
+    test "the owner speaking over the greeting cuts it, as over any reply", %{clock: clock} do
+      session = start_session(clock: clock)
+      ready(session)
+      [%{response: %{metadata: metadata}}] = continuations()
+
+      deliver(%{
+        "type" => "response.created",
+        "response" => %{"id" => "r_hi", "metadata" => metadata}
+      })
+
+      deliver(audio_delta("r_hi", "a_hi"))
+      sync(session)
+      flush_frames()
+
+      deliver(%{"type" => "input_audio_buffer.speech_started", "item_id" => "u1"})
+      sync(session)
+
+      assert_received {:realtime, %{type: "playback_stop"}}
+    end
+
+    test "a greeting that never starts is asked for once more, then given up", %{clock: clock} do
+      session = ready_session_ungreeted(clock)
+      [%{response: %{metadata: %{"fermix_continuation" => first}}}] = continuations()
+
+      send(session, {:continuation_wait, first})
+      sync(session)
+
+      assert [
+               _first,
+               %{response: %{metadata: %{"fermix_continuation" => second}, instructions: again}}
+             ] = continuations()
+
+      assert again =~ "The owner has just started this call."
+
+      send(session, {:continuation_wait, second})
+      sync(session)
+      assert length(continuations()) == 2
+      refute :sys.get_state(session).turn.greeting?
+    end
+  end
+
+  # M96 §5: on a call whose client takes `call_ended` (wire v5), the owner's
+  # whole turn being a goodbye ends the call once Grok's reply has played.
+  describe "the goodbye" do
+    test "a goodbye whose transcript lands after the reply began ends the call once it played",
+         %{clock: clock} do
+      Process.flag(:trap_exit, true)
+      scope = "voice_live:goodbye_#{System.unique_integer([:positive, :monotonic])}"
+      TelemetryCapture.attach([[:fermix, :voice_live, :call_stop]], session_id: scope)
+      session = ready_session(clock, ends_on_goodbye: true, session_scope: scope)
+
+      playback_id = goodbye_reply(session, clock, "Okay, thanks, bye.")
+      :ok = SessionControl.playback_progress(session, playback_id, 100, true)
+
+      assert_receive {:EXIT, ^session, {:shutdown, :goodbye}}
+      assert_received {:realtime, %{type: "state", state: "idle"}}
+      assert_received {:realtime, %{type: "call_ended", reason: "goodbye"}}
+      refute_received {:realtime, %{type: "error"}}
+
+      assert_receive {:telemetry, [:fermix, :voice_live, :call_stop], _measurements,
+                      %{reason: "goodbye"}}
+    end
+
+    test "the reply's end at response.done ends it when the client already drained", %{
+      clock: clock
+    } do
+      Process.flag(:trap_exit, true)
+      session = ready_session(clock, ends_on_goodbye: true)
+      user_says(session, "u1", "bye", clock)
+      Agent.update(clock, fn _ms -> 2_300 end)
+      deliver(%{"type" => "response.created", "response" => %{"id" => "r1"}})
+      deliver(audio_delta("r1", "a1"))
+      sync(session)
+      assert_received {:realtime, %{type: "audio_delta", playback_id: playback_id}}
+      :ok = SessionControl.playback_progress(session, playback_id, 100, true)
+      assert Process.alive?(session)
+
+      deliver(response_done("r1"))
+
+      assert_receive {:EXIT, ^session, {:shutdown, :goodbye}}
+      assert_received {:realtime, %{type: "call_ended", reason: "goodbye"}}
+    end
+
+    # A robot call (2026-11-09): Grok began a reply and its VAD dropped it
+    # before any audio, with no response.done; the next reply Grok started was
+    # the only sign it had ended. Held open, it kept the goodbye from ever
+    # ending the call.
+    test "a reply Grok drops without closing it does not hold the goodbye", %{clock: clock} do
+      Process.flag(:trap_exit, true)
+      session = ready_session(clock, ends_on_goodbye: true)
+      deliver(%{"type" => "response.created", "response" => %{"id" => "r_dropped"}})
+      sync(session)
+
+      playback_id = goodbye_reply(session, clock, "Okay, thanks, bye.")
+      :ok = SessionControl.playback_progress(session, playback_id, 100, true)
+
+      assert_receive {:EXIT, ^session, {:shutdown, :goodbye}}
+    end
+
+    test "speaking over the voice's goodbye keeps the call", %{clock: clock} do
+      session = ready_session(clock, ends_on_goodbye: true)
+      playback_id = goodbye_reply(session, clock, "bye")
+      :ok = SessionControl.playback_progress(session, playback_id, 50, false)
+
+      deliver(%{"type" => "input_audio_buffer.speech_started", "item_id" => "u2"})
+      sync(session)
+      assert_received {:realtime, %{type: "playback_stop"}}
+
+      :ok = SessionControl.playback_progress(session, playback_id, 50, true)
+      assert Process.alive?(session)
+      refute_received {:realtime, %{type: "call_ended"}}
+    end
+
+    test "a turn that only mentions a goodbye keeps the call", %{clock: clock} do
+      session = ready_session(clock, ends_on_goodbye: true)
+      playback_id = goodbye_reply(session, clock, "Remind me to say bye to Priya at five")
+      :ok = SessionControl.playback_progress(session, playback_id, 100, true)
+
+      assert Process.alive?(session)
+      refute_received {:realtime, %{type: "call_ended"}}
+    end
+
+    test "a client older than wire version 5 is never ended on a goodbye", %{clock: clock} do
+      session = ready_session(clock)
+      playback_id = goodbye_reply(session, clock, "Okay, thanks, bye.")
+      :ok = SessionControl.playback_progress(session, playback_id, 100, true)
+
+      assert Process.alive?(session)
+      refute_received {:realtime, %{type: "call_ended"}}
     end
   end
 
@@ -742,6 +1046,7 @@ defmodule FermixCore.Realtime.GrokSessionServerTest do
                Enum.filter(FakeXAI.events(), &(&1.type == "conversation.item.create"))
 
       refute Enum.any?(FakeXAI.events(), &(&1.type == "response.create"))
+      # The typed line alone: the greeting is no item.
       assert :sys.get_state(session).ledger.text_items_sent == 1
     end
 
@@ -751,7 +1056,7 @@ defmodule FermixCore.Realtime.GrokSessionServerTest do
       :ok = SessionControl.chat_typed(session, "use https://x.test/lease")
       sync(session)
 
-      assert Enum.filter(FakeXAI.events(), &(&1.type == "conversation.item.create")) == []
+      refute Enum.any?(FakeXAI.events(), &(&1.type == "conversation.item.create"))
     end
 
     test "an answer drawn from Computer History is withheld when only OpenAI is granted", %{
@@ -808,6 +1113,7 @@ defmodule FermixCore.Realtime.GrokSessionServerTest do
                          voice_cost_cents: cents
                        }}
 
+      # Ninety seconds connected; the greeting is no text item.
       assert cents == 12.0
 
       assert_received {:call_stop, %{voice_cost_millicents: 12_000},
@@ -875,7 +1181,8 @@ defmodule FermixCore.Realtime.GrokSessionServerTest do
     Process.flag(:trap_exit, true)
     _session = start_session(clock: clock)
 
-    assert {:error, :call_in_progress} = GrokSessionServer.start_link(session_opts(clock: clock))
+    assert {:error, {:call_in_progress, "desktop"}} =
+             GrokSessionServer.start_link(session_opts(clock: clock))
   end
 
   ## Helpers
@@ -889,6 +1196,8 @@ defmodule FermixCore.Realtime.GrokSessionServerTest do
   defp session_opts(opts) do
     [
       companion: self(),
+      endpoint: :desktop,
+      call_lease: @call_lease,
       config: grok_config(),
       api_key: "xai-test",
       device_id: "device-1",
@@ -916,11 +1225,60 @@ defmodule FermixCore.Realtime.GrokSessionServerTest do
     )
   end
 
-  defp ready_session(clock) do
+  # A ready call whose greeting has been said: the greeting's reply started
+  # and ended, and the fake's record of what was sent starts after it.
+  defp ready_session(clock, opts \\ []) do
+    session = start_session(Keyword.put(opts, :clock, clock))
+    ready(session)
+    greeted(session)
+    flush_frames()
+    FakeXAI.clear_events()
+    session
+  end
+
+  defp ready_session_ungreeted(clock) do
     session = start_session(clock: clock)
     ready(session)
     flush_frames()
     session
+  end
+
+  # The owner says `text` (VAD heard it from 1 s to 2 s), Grok's reply begins
+  # at 2.3 s with one 100 ms chunk, the transcript of what the owner said
+  # lands after that, and the reply is done. The reply's playback id.
+  defp goodbye_reply(session, clock, text) do
+    Agent.update(clock, fn _ms -> 1_000 end)
+    deliver(%{"type" => "input_audio_buffer.speech_started", "item_id" => "u1"})
+    sync(session)
+    Agent.update(clock, fn _ms -> 2_000 end)
+    deliver(%{"type" => "input_audio_buffer.speech_stopped", "item_id" => "u1"})
+    sync(session)
+    Agent.update(clock, fn _ms -> 2_300 end)
+    deliver(%{"type" => "response.created", "response" => %{"id" => "r1"}})
+    deliver(audio_delta("r1", "a1"))
+
+    deliver(%{
+      "type" => "conversation.item.input_audio_transcription.completed",
+      "item_id" => "u1",
+      "transcript" => text
+    })
+
+    deliver(response_done("r1"))
+    sync(session)
+    assert_received {:realtime, %{type: "audio_delta", playback_id: playback_id}}
+    playback_id
+  end
+
+  defp greeted(session) do
+    [%{response: %{metadata: metadata}}] = continuations()
+
+    deliver(%{
+      "type" => "response.created",
+      "response" => %{"id" => "r_hi", "metadata" => metadata}
+    })
+
+    deliver(response_done("r_hi"))
+    sync(session)
   end
 
   # A started call with no chat to prime: ready as soon as it is configured.
@@ -938,13 +1296,6 @@ defmodule FermixCore.Realtime.GrokSessionServerTest do
     })
 
     sync(session)
-  end
-
-  defp ack(item_id) do
-    deliver(%{
-      "type" => "conversation.item.added",
-      "item" => %{"id" => item_id, "type" => "message", "role" => "user"}
-    })
   end
 
   # The owner says `text` between 1 s and 2 s after the call started, as VAD
@@ -1017,6 +1368,12 @@ defmodule FermixCore.Realtime.GrokSessionServerTest do
   defp outputs do
     for %{type: "conversation.item.create", item: %{type: "function_call_output"} = item} <-
           FakeXAI.events(),
+        do: item
+  end
+
+  defp camera_rules do
+    for %{type: "conversation.item.create", item: %{type: "message"} = item} <- FakeXAI.events(),
+        Enum.any?(item.content, &(&1.text == LivePrompt.camera_rule())),
         do: item
   end
 

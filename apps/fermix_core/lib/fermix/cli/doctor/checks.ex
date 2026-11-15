@@ -17,6 +17,7 @@ defmodule Fermix.CLI.Doctor.Checks do
   alias Fermix.CLI.Upgrade.InstallMethod
   alias Fermix.CLI.Upgrade.Manifest
   alias Fermix.CLI.VersionSkew
+  alias FermixCore.Accessories.Config, as: AccessoriesConfig
   alias FermixCore.Acp.IdentityStore
   alias FermixCore.Auth.Store, as: AuthStore
   alias FermixCore.Boot.PathBaseline
@@ -33,8 +34,12 @@ defmodule Fermix.CLI.Doctor.Checks do
   alias FermixCore.Harness.Config, as: HarnessConfig
   alias FermixCore.Harness.Identity
   alias FermixCore.Harness.Ledger, as: HarnessLedger
+  alias FermixCore.Harness.SignIn, as: HarnessSignIn
   alias FermixCore.Harness.Vendors, as: HarnessVendors
+  alias FermixCore.Home.DesktopLink
   alias FermixCore.Home.Epoch
+  alias FermixCore.Home.Role
+  alias FermixCore.Home.ServerPrimary
   alias FermixCore.IMessage
   alias FermixCore.IMessage.Control, as: IMessageControl
   alias FermixCore.IMessage.HelperInstaller, as: IMessageHelper
@@ -78,14 +83,34 @@ defmodule Fermix.CLI.Doctor.Checks do
   @mobile_health_candidate_limit 8
   @mobile_health_timeout_ms 750
 
+  # What the device role does instead of the surfaces it never starts.
+  @device_mobile "this engine runs in the device role, which starts no phone channel: " <>
+                   "phones reach the primary"
+  @device_acp "this engine runs in the device role, which starts no ACP listener"
+
   # {vendor, run-tool name} pairs — the boot-registry vs current-PATH mismatch
   # (§7.3) compares each run tool's registration against its vendor's detection.
   @harness_run_tools [{"codex", "codex_run"}, {"claude", "claude_code_run"}]
   @bytes_per_gb 1_073_741_824
 
-  @spec readiness() :: result()
-  def readiness do
-    report = FermixCore.Readiness.report()
+  @doc """
+  Readiness as the engine judges it for the role this home is configured
+  for (`Home.Role.configured/1`): doctor runs with no engine tree, so on a
+  computer that joined a home it judges only what a device needs, as that
+  computer's own `setup.state` does (M97 F8). A home whose role cannot be
+  read fails the row with why. `:home` is the tests' seam.
+  """
+  @spec readiness(keyword()) :: result()
+  def readiness(opts \\ []) when is_list(opts) do
+    home = Keyword.get_lazy(opts, :home, &ConfigStore.fermix_home/0)
+
+    case Role.configured(home) do
+      {:ok, %{role: role}} -> readiness_row(FermixCore.Readiness.report(role: role))
+      {:error, reason} -> fail("readiness", Role.error_sentence(reason))
+    end
+  end
+
+  defp readiness_row(report) do
     gating = FermixCore.Readiness.gating_failures(report.failures)
     advisory = report.failures -- gating
 
@@ -878,7 +903,7 @@ defmodule Fermix.CLI.Doctor.Checks do
   @spec place_search(keyword()) :: result()
   def place_search(opts \\ []) when is_list(opts) do
     opts
-    |> Keyword.take([:host, :apple_maps])
+    |> Keyword.take([:host, :apple_maps, :computers_opts])
     |> ProviderProbe.place_search_report()
     |> format_place_search()
   end
@@ -897,6 +922,23 @@ defmodule Fermix.CLI.Doctor.Checks do
     warn(
       "place search",
       "Apple Maps (#{place_why(report)}) is not ready — place_search hidden: #{reason}"
+    )
+  end
+
+  defp format_place_search(%{backend: :computer, ready: :ok} = report) do
+    ok(
+      "place search",
+      "Apple Maps on your Mac (#{place_why(report)}), with no key; place_search advertised. " <>
+        "While no such Mac is online there is no place search; set " <>
+        "[fermix_core.tools.place_search] backend = \"brave\" to search Brave instead."
+    )
+  end
+
+  defp format_place_search(%{backend: :computer, ready: {:error, reason}} = report) do
+    warn(
+      "place search",
+      "Apple Maps on your Mac (#{place_why(report)}) is not ready — place_search hidden: " <>
+        reason
     )
   end
 
@@ -932,6 +974,12 @@ defmodule Fermix.CLI.Doctor.Checks do
   defp place_why(%{backend_source: :configured}), do: "set in [fermix_core.tools.place_search]"
   defp place_why(%{backend_source: :build_default}), do: "the default in this build"
 
+  defp place_why(%{backend_source: :linked_computer}),
+    do: "a linked Mac offers it, and this build carries no Apple Maps helper"
+
+  defp place_why(%{backend_source: :computers_unknown}),
+    do: "this home's computers could not be read, so Brave is not assumed"
+
   @doc """
   One live search on the place backend in force (M31 §14.3), for `--full` only:
   metered on Brave, free on Apple Maps.
@@ -963,6 +1011,13 @@ defmodule Fermix.CLI.Doctor.Checks do
 
   defp format_place_probe(%{backend: :brave}) do
     ok("place probe", "skipped — no Brave key configured, so no metered call was made")
+  end
+
+  defp format_place_probe(%{backend: :computer}) do
+    ok(
+      "place probe",
+      "skipped — place search runs on your Mac, which a probe never asks"
+    )
   end
 
   defp format_place_probe(_report) do
@@ -1115,6 +1170,65 @@ defmodule Fermix.CLI.Doctor.Checks do
   defp refusal_label(status, nil), do: "HTTP #{status}"
   defp refusal_label(status, code), do: "HTTP #{status}, #{code}"
 
+  @doc """
+  The StackChan link (M91): off is a quiet row. On, it needs a local Mac
+  primary (another computer watches no USB port, whatever its `config.toml`
+  says after a move) and the packaged `fermix_serial` helper, which is found
+  and checked executable without starting it or opening any port. A CLI verb
+  with no engine of its own judges no role. `opts`: `:enabled?`, `:os_type`,
+  `:role` and `:helper_path` replace the reads in a test.
+  """
+  @spec accessories(keyword()) :: result()
+  def accessories(opts \\ []) when is_list(opts) do
+    os = Keyword.get_lazy(opts, :os_type, &:os.type/0)
+    role = Keyword.get_lazy(opts, :role, &booted_role/0)
+
+    cond do
+      not Keyword.get_lazy(opts, :enabled?, &AccessoriesConfig.enabled?/0) ->
+        ok("accessories", "StackChan is off")
+
+      os != {:unix, :darwin} or role not in [:primary, nil] ->
+        warn(
+          "accessories",
+          "on in machine.toml, but StackChan works only on a Mac that is its own home; " <>
+            "this computer watches no USB port"
+        )
+
+      true ->
+        serial_helper(
+          Keyword.get_lazy(opts, :helper_path, fn ->
+            Application.app_dir(:fermix_nif, "priv/fermix_serial")
+          end)
+        )
+    end
+  end
+
+  defp booted_role do
+    case Role.booted() do
+      %{role: role} -> role
+      nil -> nil
+    end
+  end
+
+  defp serial_helper(path) do
+    case File.stat(path) do
+      {:ok, %{type: :regular, mode: mode}} when Bitwise.band(mode, 0o111) != 0 ->
+        ok("accessories", "on; the USB serial helper is in place (#{path})")
+
+      {:ok, _not_executable} ->
+        fail(
+          "accessories",
+          "the USB serial helper at #{path} is not executable; reinstall fermix"
+        )
+
+      {:error, _reason} ->
+        fail(
+          "accessories",
+          "the USB serial helper is missing at #{path}; rebuild or reinstall fermix"
+        )
+    end
+  end
+
   @doc "Reports mobile identity permissions and daemon-owned listener state."
   @spec mobile(keyword()) :: result()
   def mobile(opts \\ []) when is_list(opts) do
@@ -1257,22 +1371,42 @@ defmodule Fermix.CLI.Doctor.Checks do
     )
   end
 
-  defp mobile_daemon_result(_config, %{status: :reported, report: %{"started" => false}}, _opts) do
-    fail(
-      "mobile companion",
-      "identity files 0600; mobile channel not started; restart the daemon"
-    )
+  # A device-role engine starts no phone channel (`FermixCore.Home.Role`): the
+  # phones reach the primary, so a channel it did not start is the role at work.
+  defp mobile_daemon_result(_config, %{status: :reported, report: %{"started" => false}}, opts) do
+    case opts |> Keyword.get(:client, &Client.request/1) |> engine_role() do
+      {:ok, "device"} ->
+        ok("mobile companion", "identity files 0600; " <> @device_mobile)
+
+      {:ok, _role} ->
+        fail(
+          "mobile companion",
+          "identity files 0600; mobile channel not started; restart the daemon"
+        )
+
+      {:error, detail} ->
+        fail(
+          "mobile companion",
+          "identity files 0600; mobile channel not started, and the engine's role could " <>
+            "not be read: #{detail}"
+        )
+    end
   end
 
   defp mobile_daemon_result(config, %{status: :reported, report: report}, opts) do
-    checks = [
-      mobile_listener(report, opts),
-      mobile_mdns(report, config),
-      mobile_tailnet(report),
-      mobile_remote(report, opts),
-      mobile_apns(report, config),
-      mobile_device_count(report)
-    ]
+    checks =
+      Enum.reject(
+        [
+          mobile_listener(report, opts),
+          mobile_mdns(report, config),
+          mobile_tailnet(report),
+          mobile_remote(report, opts),
+          mobile_apns(report, config),
+          mobile_push_relay(report),
+          mobile_device_count(report)
+        ],
+        &is_nil/1
+      )
 
     detail = ["identity files 0600" | Enum.map(checks, &elem(&1, 1))] |> Enum.join("; ")
 
@@ -1307,6 +1441,20 @@ defmodule Fermix.CLI.Doctor.Checks do
        do: {:fail, "listener unavailable (#{reason}); it keeps retrying"}
 
   defp mobile_listener(_report, _opts), do: {:fail, "listener down"}
+
+  # The role the running engine booted in, as its health report names it.
+  defp engine_role(client) do
+    case client.("health") do
+      {:ok, %{"status" => "ok", "health" => %{"role" => role}}} when is_binary(role) ->
+        {:ok, role}
+
+      {:ok, other} ->
+        {:error, "unexpected reply: #{inspect(other)}"}
+
+      {:error, reason} ->
+        {:error, Client.describe_error(reason)}
+    end
+  end
 
   defp refusal_class(%{"refusal" => class}) when is_binary(class), do: " (#{class})"
   defp refusal_class(_report), do: ""
@@ -1377,10 +1525,13 @@ defmodule Fermix.CLI.Doctor.Checks do
 
   defp mobile_mdns(_report, config) when not is_list(config), do: {:fail, "invalid mDNS config"}
 
+  # The engine's own word wins over the file's: an Always On server
+  # announces nothing whatever its settings say, and reports it disabled.
   defp mobile_mdns(report, config) do
     cond do
       Keyword.get(config, :advertise_mdns, false) == false -> {:ok, "mDNS disabled"}
       Map.get(report, "mdns") == "advertising" -> {:ok, "mDNS advertising"}
+      Map.get(report, "mdns") == "disabled" -> {:ok, "mDNS disabled"}
       true -> {:fail, "mDNS down"}
     end
   end
@@ -1448,6 +1599,83 @@ defmodule Fermix.CLI.Doctor.Checks do
 
   defp mobile_relay(_remote), do: {:warn, "reach from anywhere not connected to a relay yet"}
 
+  @server_link_ms 15_000
+
+  @doc """
+  How this computer reaches its Always On server (M75 step 7), as the
+  running engine holds its link (`home_link` on the control socket, which
+  asks the server nothing): connected directly, through Fermix's relay, or
+  why not in the link's own sentence (a server that no longer knows this
+  computer fails). A computer with no desktop link (`device/desktop.json`)
+  has no row. `:home` and `:client` (0-arity, the `home_link` request) are
+  the tests' seams.
+  """
+  @spec server_link(keyword()) :: result() | nil
+  def server_link(opts \\ []) when is_list(opts) do
+    home = Keyword.get_lazy(opts, :home, &ConfigStore.fermix_home/0)
+
+    client =
+      Keyword.get(opts, :client, fn -> Client.request("home_link", timeout: @server_link_ms) end)
+
+    if File.regular?(DesktopLink.path(home)), do: server_link_result(client.())
+  end
+
+  defp server_link_result({:ok, %{"status" => "ok", "result" => %{"primary" => primary}}}),
+    do: link_row(primary)
+
+  defp server_link_result({:ok, %{"status" => "error", "reason" => reason}}),
+    do: warn("server link", "not read: the running engine answered #{reason}")
+
+  defp server_link_result({:error, :not_running}),
+    do: warn("server link", "not read: the engine is not running (start with `fermix start`)")
+
+  defp server_link_result({:error, reason}),
+    do: warn("server link", "not read: #{Client.describe_error(reason)}")
+
+  defp link_row(%{"connected" => true} = primary),
+    do: ok("server link", "connected to #{primary["name"]}#{path_words(primary["path"])}")
+
+  defp link_row(%{"status" => "revoked", "sentence" => said}), do: fail("server link", said)
+  defp link_row(%{"sentence" => said}), do: warn("server link", said)
+
+  defp link_row(nil),
+    do: warn("server link", "not read: the running engine reports no link to a server")
+
+  @doc """
+  S3 backups that stopped (ALWAYS_ON_PANE §3.12, D18): a primary that is no
+  Always On server's (`Home.ServerPrimary`) keeps none, so one whose
+  `[fermix_core.snapshots]` still names a bucket, set by hand in
+  `config.toml`, is told so once here rather than left silent. Any other home
+  has no row: a server's primary (its S3 status is `home.snapshots.status`'s),
+  one naming no bucket, a device or candidate (the primary keeps the
+  snapshots), and a home whose role or settings cannot be read (the rows that
+  read those say why). `:home`, `:macos?` and `:desktop_rows` are the tests'
+  seams.
+  """
+  @spec s3_backups(keyword()) :: result() | nil
+  def s3_backups(opts \\ []) when is_list(opts) do
+    home = Keyword.get_lazy(opts, :home, &ConfigStore.fermix_home/0)
+
+    with {:ok, %{role: :primary}} <- Role.configured(home),
+         {:ok, section} <- ConfigStore.snapshots_config(home),
+         bucket when is_binary(bucket) <- Keyword.get(section, :s3_bucket),
+         {:not_server, reason} <-
+           ServerPrimary.check(home, Keyword.take(opts, [:macos?, :desktop_rows])) do
+      warn(
+        "s3 backups",
+        "stopped: config.toml names the S3 bucket #{bucket}, but " <>
+          ServerPrimary.sentence(reason) <>
+          " Remove s3_bucket from [fermix_core.snapshots] to clear this."
+      )
+    else
+      _not_stopped -> nil
+    end
+  end
+
+  defp path_words("direct"), do: " directly"
+  defp path_words("relay"), do: " through Fermix's relay"
+  defp path_words(nil), do: ""
+
   # Push connects lazily and stays up when Apple is unreachable, so credentials
   # that resolve are not yet delivery: the daemon says which it is.
   defp mobile_apns(report, config) do
@@ -1467,6 +1695,18 @@ defmodule Fermix.CLI.Doctor.Checks do
 
   defp apns_degraded(reason),
     do: {:warn, "APNs degraded (#{reason}); the next push reconnects"}
+
+  # M99 §6: the daemon says when a push to an Android phone could not reach
+  # Fermix's push relay after its tries, until a later push is accepted. A
+  # relay reached, or not yet tried, adds nothing, so a home with no Android
+  # phone reads as before.
+  defp mobile_push_relay(%{"push_relay" => "unreachable"}) do
+    {:warn,
+     "the push service cannot be reached, so an Android phone shows new messages when " <>
+       "its app is opened"}
+  end
+
+  defp mobile_push_relay(_report), do: nil
 
   defp mobile_device_count(%{"paired_devices" => count}) when is_integer(count) and count > 0 do
     suffix = if count == 1, do: "device", else: "devices"
@@ -1572,6 +1812,10 @@ defmodule Fermix.CLI.Doctor.Checks do
     path = AcpCommand.socket_path()
 
     case client.("health") do
+      # A device-role engine starts no ACP listener (`FermixCore.Home.Role`).
+      {:ok, %{"status" => "ok", "health" => %{"role" => "device"}}} ->
+        ok("acp surface", @device_acp)
+
       {:ok, %{"status" => "ok", "health" => health}} ->
         acp_listener_result(acp_channel(health), path)
 
@@ -2481,9 +2725,16 @@ defmodule Fermix.CLI.Doctor.Checks do
   (active/pending/dead-letter), and artifact quota usage. Returns `nil` to skip
   when the harness is disabled AND no vendor CLI is present.
 
-  Vendor detection, the capability registry, run counts, and the quota probe are
-  all injectable (`:detections`, `:registry`, `:counts`, `:quota`,
-  `:harness_enabled`) so the check unit-tests hermetically. Run counts and the
+  Each vendor's sign-in reads in the owner's words (`Harness.SignIn.word/1`):
+  "sign-in found" (a file Fermix never asks the vendor about), "sign-in not
+  verified", "not signed in", or "signed out (a run failed to sign in)" from
+  this machine's coding store, read on a connection of its own so a tree-less
+  CLI reads it too; the last two warn.
+
+  Vendor detection, the sign-in marks, the capability registry, run counts, and
+  the quota probe are all injectable (`:detections`, `:sign_in_marks`,
+  `:registry`, `:counts`, `:quota`, `:harness_enabled`) so the check unit-tests
+  hermetically. Run counts and the
   registry lookup degrade to a skip when the memory repo / registry are
   unavailable (the tree-less CLI), never a crash.
   """
@@ -2496,29 +2747,38 @@ defmodule Fermix.CLI.Doctor.Checks do
 
     cond do
       not enabled? and not any_vendor_available?(detections) -> nil
-      enabled? -> enabled_harness_result(detections, opts)
-      true -> disabled_harness_result(detections)
+      enabled? -> enabled_harness_result(detections, harness_marks(opts), opts)
+      true -> disabled_harness_result(detections, harness_marks(opts))
     end
   end
 
+  defp harness_marks(opts),
+    do: Keyword.get_lazy(opts, :sign_in_marks, fn -> HarnessSignIn.marks([]) end)
+
   @doc """
-  Computer history (MILESTONE_32 §15.3): a macOS-only, opt-in row. Tree-less —
+  Computer history (MILESTONE_32 §15.3): this machine's opt-in row, where it
+  has a recorder (M97 §8.3, `ComputerHistory.recorder?/1`: a Mac, and a Linux
+  computer, whose row also says which applications its recorder cannot see,
+  M97 stage 4 D3; never an Always On server, which this tree-less verb tells
+  by its home and host, `Home.AlwaysOn.here?/1`). Tree-less —
   reports config-level state (availability, on/off, summarizer posture, allowlist
   sizes) plus the chain posture (§9.4): an enabled rail whose primary is not
   granted for history captures and summarizes but never appears in a reply, which
   is a **warn** here, with the grant that would fix it named. Runtime detail
   (spool size, pause) integrates with the capturer stage over the control socket.
-  `:macos?`/`:config`/`:routes` are injectable so the row is hermetic on non-macOS
-  CI; `:routes` takes `Selection.ordered_routes/0`'s own shape.
+  `:recorder?`/`:system`/`:config`/`:routes` are injectable so the row is
+  hermetic on any CI; `:routes` takes `Selection.ordered_routes/0`'s own shape.
   """
   @spec computer_history(keyword()) :: result()
   def computer_history(opts \\ []) when is_list(opts) do
-    macos? = Keyword.get_lazy(opts, :macos?, &ComputerHistory.macos?/0)
-
-    if macos? do
+    if Keyword.get_lazy(opts, :recorder?, &ComputerHistory.recorder?/0) do
       computer_history_result(opts)
     else
-      ok("computer history", "macOS only; unavailable on this host")
+      ok(
+        "computer history",
+        "no recorder on this computer: a Mac or a Linux computer records, and an " <>
+          "Always On server records none"
+      )
     end
   end
 
@@ -2538,16 +2798,32 @@ defmodule Fermix.CLI.Doctor.Checks do
   defp enabled_history_result(config, opts) do
     posture =
       ComputerHistoryGate.chain_posture(
-        [macos?: true, config: config] ++ Keyword.take(opts, [:routes])
+        [surfaces?: true, config: config] ++ Keyword.take(opts, [:routes])
       )
 
     detail =
       "on; summarizer #{summarizer_label(ComputerHistoryConfig.summarizer(config))}; " <>
         "#{length(ComputerHistoryConfig.apps(config))} app(s) allowlisted. " <>
-        ComputerHistoryGate.chain_posture_sentence(posture)
+        ComputerHistoryGate.chain_posture_sentence(posture) <>
+        unseen_apps_sentence(Keyword.get_lazy(opts, :system, &history_system/0))
 
     history_row(posture.state, detail)
   end
+
+  # compux never switches an application's accessibility on (M86 R8), so a Linux
+  # recorder sees only what the person's session already publishes. The row is
+  # tree-less and reads no store, so it says which applications that is, and
+  # `/history status`, which reads this computer's store, names them.
+  defp unseen_apps_sentence(:linux),
+    do:
+      " On Linux an application records only while it publishes its controls on the " <>
+        "accessibility bus: Chromium, Electron and Qt applications do so only while " <>
+        "accessibility is on in your session; /history status names the allowlisted " <>
+        "applications that recorded nothing."
+
+  defp unseen_apps_sentence(_system), do: ""
+
+  defp history_system, do: if(ComputerHistory.macos?(), do: :macos, else: :linux)
 
   # Only "unsurfaceable" is this row's own warning: capture is working and the
   # operator has one config line to add. A broken provider chain is reported here
@@ -2634,14 +2910,15 @@ defmodule Fermix.CLI.Doctor.Checks do
   # Enabled: the feature is on, so no CLI at all is a real fault (fail); an
   # installed-but-unauthenticated vendor, a boot/PATH mismatch, dead-lettered
   # deliveries, or a breached quota each warn; otherwise ok.
-  defp enabled_harness_result(detections, opts) do
+  defp enabled_harness_result(detections, marks, opts) do
     counts = harness_counts(opts)
     quota = harness_quota(opts)
     mismatch = harness_mismatch(detections, opts)
 
     detail =
       [
-        harness_vendor_detail(detections),
+        harness_vendor_detail(detections, marks),
+        harness_marks_detail(marks),
         harness_consent_detail(opts),
         harness_counts_detail(counts),
         harness_quota_detail(quota),
@@ -2652,24 +2929,25 @@ defmodule Fermix.CLI.Doctor.Checks do
 
     %{
       name: "coding harness",
-      status: harness_status(detections, counts, quota, mismatch),
+      status: harness_status({detections, marks}, counts, quota, mismatch),
       detail: detail
     }
   end
 
   # Disabled but a CLI is present (else `harness/1` skipped): a valid config, not
   # a fault — report the detected vendors and how to turn the feature on.
-  defp disabled_harness_result(detections) do
+  defp disabled_harness_result(detections, marks) do
     ok(
       "coding harness",
-      "disabled in config; #{harness_vendor_detail(detections)} — enable [fermix_core.harness] to use"
+      "disabled in config; #{harness_vendor_detail(detections, marks)} — enable " <>
+        "[fermix_core.harness] to use"
     )
   end
 
-  defp harness_status(detections, counts, quota, mismatch) do
+  defp harness_status(sign_ins, counts, quota, mismatch) do
     cond do
       harness_quota_fail?(quota) -> :fail
-      harness_warn?(detections, counts, quota, mismatch) -> :warn
+      harness_warn?(sign_ins, counts, quota, mismatch) -> :warn
       true -> :ok
     end
   end
@@ -2682,17 +2960,23 @@ defmodule Fermix.CLI.Doctor.Checks do
   defp harness_quota_fail?({:error, {:artifact_quota, %{kind: :quota_exceeded}}}), do: true
   defp harness_quota_fail?(_other), do: false
 
-  defp harness_warn?(detections, counts, quota, mismatch) do
+  defp harness_warn?({detections, marks}, counts, quota, mismatch) do
     not any_vendor_available?(detections) or mismatch != nil or
       harness_quota_warn?(quota) or harness_dead_letter?(counts) or
-      harness_unauthenticated?(detections)
+      harness_not_signed_in?(detections, marks) or match?({:error, _reason}, marks)
   end
 
-  defp harness_unauthenticated?(detections) do
+  # Installed and either with no sign-in at all or signed out by a failed run.
+  defp harness_not_signed_in?(detections, marks) do
     Enum.any?(detections, fn {_vendor, detection} ->
-      detection.available? and detection.auth == :absent
+      detection.available? and harness_sign_in(detection, marks) in [:not_signed_in, :signed_out]
     end)
   end
+
+  defp harness_sign_in(%{vendor: vendor, auth: auth}, {:ok, marks}),
+    do: HarnessSignIn.view(auth, Map.get(marks, vendor))
+
+  defp harness_sign_in(%{auth: auth}, {:error, _reason}), do: HarnessSignIn.view(auth, nil)
 
   defp harness_dead_letter?(:skipped), do: false
   defp harness_dead_letter?(%{dead_letter: dead_letter}), do: dead_letter > 0
@@ -2710,23 +2994,26 @@ defmodule Fermix.CLI.Doctor.Checks do
     if approved?, do: "consent: approved", else: "consent: not yet approved"
   end
 
-  # Per-vendor one-liner: name + version (or "not installed") + auth word.
-  defp harness_vendor_detail(detections) do
+  # Per-vendor one-liner: name + version (or "not installed") + sign-in word.
+  defp harness_vendor_detail(detections, marks) do
     detections
     |> Map.values()
     |> Enum.sort_by(& &1.vendor)
-    |> Enum.map_join(", ", &harness_vendor_line/1)
+    |> Enum.map_join(", ", &harness_vendor_line(&1, marks))
   end
 
-  defp harness_vendor_line(%{vendor: vendor, available?: false}), do: "#{vendor} not installed"
+  defp harness_vendor_line(%{vendor: vendor, available?: false}, _marks),
+    do: "#{vendor} not installed"
 
-  defp harness_vendor_line(%{vendor: vendor, version: version, auth: auth}) do
-    "#{vendor} #{version || "installed"} (#{harness_auth_word(auth)})"
+  defp harness_vendor_line(%{vendor: vendor, version: version} = detection, marks) do
+    "#{vendor} #{version || "installed"} " <>
+      "(#{HarnessSignIn.word(harness_sign_in(detection, marks))})"
   end
 
-  defp harness_auth_word(:authenticated), do: "authenticated"
-  defp harness_auth_word(:unverified), do: "auth unverified"
-  defp harness_auth_word(:absent), do: "not authenticated"
+  # This machine's coding store could not be read: the marks are unknown, so
+  # the row says so rather than read every agent as never marked.
+  defp harness_marks_detail({:ok, _marks}), do: nil
+  defp harness_marks_detail({:error, reason}), do: "sign-in marks unreadable (#{inspect(reason)})"
 
   # Boot registry (which run tools seeded at boot) vs current-PATH detection: a
   # disagreement means a CLI was installed/removed since boot and a restart syncs

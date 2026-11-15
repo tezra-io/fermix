@@ -57,9 +57,12 @@ defmodule FermixCore.Agents.TurnRunner do
   alias FermixCore.Providers.RouteResolver
   alias FermixCore.Realtime.RecentCalls
   alias FermixCore.Reply
+  alias FermixCore.ReplyBlocks
   alias FermixCore.Setup.SecretPaths
   alias FermixCore.Telemetry
+  alias FermixCore.Temporal.Access, as: TemporalAccess
   alias FermixCore.Tools.HarnessSupport
+  alias FermixCore.Trips.Note, as: TripNote
 
   @auto_compaction_failure_backoff_ms 60_000
 
@@ -263,7 +266,7 @@ defmodule FermixCore.Agents.TurnRunner do
   `recall_activity`'s advertise/execute gates, the pinned route chain, and the
   commit-time taint stamp — consumes this one snapshot, so a config flip landing
   mid-turn cannot make any two of them disagree. `opts` is passed to
-  `Gate.snapshot/2` (`:macos?`, `:config`), the platform/posture injection seam.
+  `Gate.snapshot/2` (`:surfaces?`, `:config`), the surfacing/posture injection seam.
   """
   @spec computer_history_gate(map(), term(), keyword()) :: ComputerHistoryGate.Snapshot.t()
   def computer_history_gate(msg, ordered_routes, opts \\ []) when is_list(opts) do
@@ -491,6 +494,7 @@ defmodule FermixCore.Agents.TurnRunner do
     owner_text = UntrustedContent.owner_text(msg)
     {msg, parts} = with_attachments(msg, state, session_id, voice_call)
     conversation_key = ConversationKey.from(msg)
+    :ok = drop_earlier_records(state, conversation_key)
     %RuntimeContext{} = ctx = state.runtime_context
     cache_status = Map.get(msg, :__runtime_context_cache_status, :hit)
     source_trust = Map.get(msg, :source_trust)
@@ -620,6 +624,10 @@ defmodule FermixCore.Agents.TurnRunner do
       # parks on that call and the owner's spoken yes can answer it. `nil` on
       # every non-voice turn (a forged `voice_call` never clears `VoiceCall`).
       voice_call_id: voice_call_id(voice_call),
+      # The call's mode (`"chat"` or `"private"`, M56 §5), nil off a call: in a
+      # chat call what the reply cannot say is shown in the owner's chat, so
+      # `ChannelPresentation.channel_of/1` tells it a screen's lines.
+      voice_conversation: voice_conversation(voice_call),
       channel: msg.channel,
       # Chat context (private DM vs shared group), from the inbound message
       # metadata. `request_directory_access` reads it to keep the tap-to-copy
@@ -674,11 +682,27 @@ defmodule FermixCore.Agents.TurnRunner do
     # date note's once-a-day churn the only churn in this prompt region.
     messages = inject_channel_presentation(messages, msg)
 
-    messages =
-      append_system_note(messages, ChecklistNote.rules(context, msg.channel, draws_lists?(msg)))
+    # The lists' and trips' lines are the channel's whose reply this is
+    # (`ChannelPresentation.channel_of/1`): the turn's own, but a call's on a
+    # hand-off whose reply is only said.
+    presented = ChannelPresentation.channel_of(context)
 
+    messages =
+      append_system_note(messages, ChecklistNote.rules(context, presented, draws_lists?(msg)))
+
+    # The owner's trips (M89 §04) beside the lists, only while a trip exists
+    # (C8); a trip tool tells a turn that was not told how its channel shows
+    # a trip (`trips_told`).
+    trips = TripNote.lines(context, presented, draws_trips?(msg))
+
+    context =
+      Map.merge(context, %{trips_told: trips.rules != nil, draws_trips: draws_trips?(msg)})
+
+    messages = append_system_note(messages, trips.rules)
+    messages = append_system_note(messages, events_note(context, msg))
     messages = inject_current_date(messages)
     messages = append_system_note(messages, ChecklistNote.index(context))
+    messages = append_system_note(messages, trips.index)
     messages = inject_recent_calls(messages, state, source_trust, voice_call)
     {messages, context} = inject_recent_activity(messages, context)
     :ok = capture_open_loop_reply(context, owner_text)
@@ -796,11 +820,36 @@ defmodule FermixCore.Agents.TurnRunner do
   defp session_id({:ok, %{turn_session_id: turn_session_id}}), do: turn_session_id
   defp session_id(:none), do: "main-#{System.unique_integer([:positive, :monotonic])}"
 
+  # A reply draws only what its own turn's tools put (`FermixCore.ReplyBlocks`):
+  # what an earlier turn in the conversation put and no reply took (a Live
+  # call's hand-off in the chat, a turn that ended with no reply, failed or was
+  # stopped) is dropped as this turn begins, before any tool of it runs. The
+  # conversation's turns run one at a time, and a reply takes its turn's
+  # records before that turn ends, so none a reply is owed is here. The place
+  # index stays (`ReplyBlocks.place_by_url/3`). A holder that cannot answer is
+  # the operator's to read: the turn runs, and a reply stands as its text.
+  # `:reply_blocks` is a test's own holder.
+  defp drop_earlier_records(state, conversation_key) do
+    _left = state |> Map.get(:reply_blocks, ReplyBlocks) |> ReplyBlocks.take(conversation_key)
+    :ok
+  catch
+    :exit, reason ->
+      Logger.error(
+        "an earlier turn's reply records in #{inspect(conversation_key)} were not dropped: " <>
+          inspect(reason)
+      )
+
+      :ok
+  end
+
   defp parent_session({:ok, %{call_id: call_id}}), do: call_id
   defp parent_session(:none), do: nil
 
   defp voice_call_id({:ok, %{call_id: call_id}}), do: call_id
   defp voice_call_id(:none), do: nil
+
+  defp voice_conversation({:ok, %{conversation: conversation}}), do: conversation
+  defp voice_conversation(:none), do: nil
 
   defp request_cwd_for(:operator, msg), do: Map.get(msg, :request_cwd)
   defp request_cwd_for(_trust, _msg), do: nil
@@ -830,6 +879,25 @@ defmodule FermixCore.Agents.TurnRunner do
   # key, never read from a payload.
   defp draws_lists?(%{metadata: %{draws_lists: true}}), do: true
   defp draws_lists?(_msg), do: false
+
+  # The connection that carried the turn pulled the trips' index, so its app
+  # draws them (M89 §06), stamped by the channel under an atom key, never read
+  # from a payload. No connection pulls it until the daemon serves trips
+  # (E3), so every turn is told to write a trip's days out.
+  defp draws_trips?(%{metadata: %{draws_trips: true}}), do: true
+  defp draws_trips?(_msg), do: false
+
+  # The connection that carried the turn draws the events its reply carries
+  # (EVENTS_DRAWN_AS_CARDS §04: companion 8 or mobile 3), stamped by the
+  # companion and mobile channels under an atom key, never read from a
+  # payload. Only a turn that may use the event tools hears it; byte-stable
+  # for the connection, so it sits before the date as the list line does.
+  defp events_note(context, %{metadata: %{draws_events: true}} = msg) do
+    if TemporalAccess.operator_read_turn?(context),
+      do: ChannelPresentation.events_line(msg.channel, true)
+  end
+
+  defp events_note(_context, _msg), do: nil
 
   # Kept in the leading system run (the Anthropic adapter requires system
   # messages to lead) so the date sits with the rest of the system prompt.

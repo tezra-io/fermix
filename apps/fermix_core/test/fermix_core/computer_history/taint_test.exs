@@ -87,7 +87,7 @@ defmodule FermixCore.ComputerHistory.TaintTest do
       # A mid-turn grant edit must not retroactively un-mask the replay the
       # turn already built: every mask in one turn reads one grant set.
       enable([])
-      snapshot = Gate.snapshot(operator_ctx([local_route()]), macos?: true)
+      snapshot = Gate.snapshot(operator_ctx([local_route()]), surfaces?: true)
 
       enable(remote_summaries: [:anthropic])
 
@@ -100,7 +100,7 @@ defmodule FermixCore.ComputerHistory.TaintTest do
 
     test "the frozen snapshot permits a chain the live config would now mask" do
       enable(remote_summaries: [:anthropic])
-      snapshot = Gate.snapshot(operator_ctx([local_route()]), macos?: true)
+      snapshot = Gate.snapshot(operator_ctx([local_route()]), surfaces?: true)
 
       Application.put_env(:fermix_core, :computer_history, enabled: false)
 
@@ -151,7 +151,7 @@ defmodule FermixCore.ComputerHistory.TaintTest do
 
     test "reads the turn's frozen grant set when given a snapshot" do
       enable(remote_summaries: [:anthropic])
-      snapshot = Gate.snapshot(operator_ctx([local_route()]), macos?: true)
+      snapshot = Gate.snapshot(operator_ctx([local_route()]), surfaces?: true)
 
       Application.put_env(:fermix_core, :computer_history, enabled: false)
 
@@ -182,7 +182,7 @@ defmodule FermixCore.ComputerHistory.TaintTest do
   describe "tainted_turn?/2" do
     test "an operator turn on an all-local permitted chain is tainted" do
       enable([])
-      assert Taint.tainted_turn?(operator_ctx([local_route()]), macos?: true)
+      assert Taint.tainted_turn?(operator_ctx([local_route()]), surfaces?: true)
     end
 
     test "a guest turn is not tainted" do
@@ -194,17 +194,17 @@ defmodule FermixCore.ComputerHistory.TaintTest do
         ordered_routes: [local_route()]
       }
 
-      refute Taint.tainted_turn?(ctx, macos?: true)
+      refute Taint.tainted_turn?(ctx, surfaces?: true)
     end
 
     test "an ungranted-remote chain is not tainted (no section this turn)" do
       enable([])
-      refute Taint.tainted_turn?(operator_ctx([remote_route(:openai)]), macos?: true)
+      refute Taint.tainted_turn?(operator_ctx([remote_route(:openai)]), surfaces?: true)
     end
 
     test "a disabled feature is never tainted" do
       Application.put_env(:fermix_core, :computer_history, enabled: false)
-      refute Taint.tainted_turn?(operator_ctx([local_route()]), macos?: true)
+      refute Taint.tainted_turn?(operator_ctx([local_route()]), surfaces?: false)
     end
 
     test "the turn's frozen snapshot wins over a mid-turn config flip" do
@@ -213,12 +213,12 @@ defmodule FermixCore.ComputerHistory.TaintTest do
       # un-stamp a reply whose prompt already carried the section.
       enable([])
       ctx = operator_ctx([local_route()])
-      snapshot = Gate.snapshot(ctx, macos?: true)
+      snapshot = Gate.snapshot(ctx, surfaces?: true)
 
       Application.put_env(:fermix_core, :computer_history, enabled: false)
 
       assert Taint.tainted_turn?(ctx, snapshot: snapshot)
-      refute Taint.tainted_turn?(ctx, macos?: true)
+      refute Taint.tainted_turn?(ctx, surfaces?: false)
     end
   end
 end

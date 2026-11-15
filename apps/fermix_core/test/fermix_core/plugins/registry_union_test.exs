@@ -212,7 +212,7 @@ defmodule FermixCore.Plugins.RegistryUnionTest do
 
       dirs = Registry.enabled_skill_dirs(installed_root: root, dev_local: dev)
 
-      assert dirs == [Path.join([dev, "devplug", "skills"])]
+      assert dirs == [{"devplug", Path.join([dev, "devplug", "skills"])}]
       refute File.dir?(Path.join([home, "plugins", "devplug", "skills"]))
     end
   end
@@ -240,7 +240,7 @@ defmodule FermixCore.Plugins.RegistryUnionTest do
 
       dirs = Registry.enabled_skill_dirs(installed_root: root)
 
-      assert dirs == [Path.join([root, "installed", "demo", "current", "skills"])]
+      assert dirs == [{"demo", Path.join([root, "installed", "demo", "current", "skills"])}]
       refute File.dir?(Path.join([home, "plugins", "demo", "skills"]))
     end
   end

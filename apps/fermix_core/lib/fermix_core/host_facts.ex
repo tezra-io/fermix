@@ -3,7 +3,8 @@ defmodule FermixCore.HostFacts do
   Which Fermix this is and the machine it runs on, read once as the daemon's
   supervision tree starts (M76 §4.1) for the owner's `## This Fermix` prompt
   section, so "how do I…" is answered for the install the person has rather
-  than guessed. A CLI verb that starts no tree never reads it.
+  than guessed. A CLI verb that starts no tree reads them only where it asks
+  whether this is an Always On server (`read_here/0`).
 
   It re-derives nothing another module owns: the install is the profile boot
   selected (`BootProfile.current/0`), the operating system is
@@ -33,7 +34,10 @@ defmodule FermixCore.HostFacts do
   The section's last line says whether a reminder can ring on this computer.
   That is `Native.Notifications.offered?/1`'s answer for the host the facts
   name, the same answer `event_store` publishes `delivery` on, so the line and
-  the tool never disagree; nothing here re-derives the provider.
+  the tool never disagree; nothing here re-derives the provider. Where it
+  rings is `Native.Notifications.placement/1`'s answer, read as the section
+  renders, the one the tools word `delivery` by: on an Always On server, the
+  owner's computers, never the server.
 
   `remember/0` reads through the module `config :fermix_core,
   :host_facts_reader` names (this one by default): `config/test.exs` pins
@@ -75,10 +79,18 @@ defmodule FermixCore.HostFacts do
   as the supervision tree starts, after `BootProfile.remember/1`.
   """
   @spec remember() :: :ok
-  def remember do
+  def remember, do: Application.put_env(:fermix_core, :host_facts, read_here())
+
+  @doc """
+  Reads this host's facts now, through the configured reader, as `remember/0`
+  does at boot: for a process that booted no engine and so recorded none (a
+  tree-less verb asking `Home.AlwaysOn.here?/1`). Needs the boot profile,
+  which every start of the application records first.
+  """
+  @spec read_here() :: t()
+  def read_here do
     reader = Application.get_env(:fermix_core, :host_facts_reader, __MODULE__)
-    facts = reader.read(BootProfile.host(), BuildInfo.identity().architecture)
-    Application.put_env(:fermix_core, :host_facts, facts)
+    reader.read(BootProfile.host(), BuildInfo.identity().architecture)
   end
 
   @doc """
@@ -128,11 +140,13 @@ defmodule FermixCore.HostFacts do
 
   @doc """
   The `## This Fermix` section for `facts`: the install, the machine, then
-  whether a reminder can ring on this computer.
+  whether a reminder can ring on this computer, or, on an Always On server,
+  on the owner's computers. `opts` are `Native.Notifications.placement/1`'s
+  seams.
   """
-  @spec render(t()) :: String.t()
-  def render(%{install: _install, os: _os} = facts) do
-    lines = [install_line(facts), machine_line(facts), computer_line(facts)]
+  @spec render(t(), keyword()) :: String.t()
+  def render(%{install: _install, os: _os} = facts, opts \\ []) when is_list(opts) do
+    lines = [install_line(facts), machine_line(facts), computer_line(facts, opts)]
     Enum.join(["## This Fermix" | lines], "\n")
   end
 
@@ -289,9 +303,25 @@ defmodule FermixCore.HostFacts do
     do: "- Machine: #{version} on #{processor(facts)}."
 
   # Whether it rings is the build's offer for the host the facts name; the
-  # wording then says how, or where else a reminder goes.
-  defp computer_line(%{install: install, os: os} = facts) do
-    computer_sentence(Notifications.offered?(host: %{profile: install, os: os}), facts)
+  # wording then says how, or where else a reminder goes. An Always On
+  # server rings on the owner's computers (M99 §10.1); a placement that
+  # cannot be read keeps the words the tools say, and a reminder stored then
+  # is refused in its sentence.
+  defp computer_line(%{install: install, os: os} = facts, opts) do
+    native = [{:host, %{profile: install, os: os}} | opts]
+
+    cond do
+      not Notifications.offered?(native) -> computer_sentence(false, facts)
+      Notifications.placement(native) == {:ok, :computers} -> computers_sentence()
+      true -> computer_sentence(true, facts)
+    end
+  end
+
+  defp computers_sentence do
+    "- This computer: the Always On server, which shows no notification itself. A reminder " <>
+      "or timer with `delivery: \"computer\"` (`event_store`) rings as a notification on each " <>
+      "of your computers that is awake, through the Fermix on it; one due while none is " <>
+      "awake is tried again while it is still valid."
   end
 
   defp computer_sentence(true, %{os: :darwin}) do

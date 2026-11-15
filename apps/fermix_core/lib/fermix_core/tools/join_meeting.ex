@@ -94,6 +94,14 @@ defmodule FermixCore.Tools.JoinMeeting do
         tag: "meet_browser_not_installed",
         description: "the Google Meet notetaker has no browser to drive"
       },
+      %{
+        tag: "meet_unavailable_on_server",
+        description: "Google Meet on an Always On server, which cannot sign the notetaker in"
+      },
+      %{
+        tag: "move_under_way",
+        description: "a move of Fermix to another computer is under way, which restarts it"
+      },
       %{tag: "zoom_rtms_not_configured", description: "the Zoom RTMS credentials are incomplete"},
       %{tag: "max_concurrent", description: "the notetaker is already in another meeting"},
       %{tag: "not_attended", description: "the turn is not an attended top-level owner turn"}
@@ -151,6 +159,14 @@ defmodule FermixCore.Tools.JoinMeeting do
   def describe_error(:meet_browser_not_installed) do
     "The Google Meet notetaker is installed but has no browser to drive, so it cannot join " <>
       "a Meet call yet. Open fermix setup (web) → Meetings and it installs the browser."
+  end
+
+  # M97 D24: the one sentence every surface says, naming what does work.
+  def describe_error(:meet_unavailable_on_server), do: Meetings.meet_unavailable_sentence()
+
+  def describe_error(:move_under_way) do
+    "Fermix is moving to another computer right now, and the move restarts it, which would " <>
+      "end the meeting before its notes are written. Ask me again once the move is done."
   end
 
   def describe_error(:zoom_rtms_not_configured) do

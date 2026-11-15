@@ -14,6 +14,7 @@ defmodule FermixCore.Realtime.LivePromptTest do
 
   @title "# LIVE.md — Live Voice Companion"
   @voice_in_chat_suite Path.expand("../../../../../benchmark/suites/voice_in_chat.yaml", __DIR__)
+  @grok_voice_suite Path.expand("../../../../../benchmark/suites/grok_voice.yaml", __DIR__)
 
   setup do
     bootstrap_dir =
@@ -165,6 +166,20 @@ defmodule FermixCore.Realtime.LivePromptTest do
       refute prompt =~ "Time zone:"
       refute prompt =~ "Communication style:"
       refute prompt =~ ": x"
+    end
+
+    test "a set name comes with how seldom to say it: in the greeting, then once in a while" do
+      named = LivePrompt.compose(@title, [], %{@bare | personalization: [user_name: "Marisol"]})
+
+      [_before, owner] = String.split(named, "## The owner\n\n- Name: Marisol\n\n", parts: 2)
+      assert owner =~ "Use the owner's name when you greet them and only once in a while after"
+      assert owner =~ "not as a tag on your sentences"
+
+      unnamed =
+        LivePrompt.compose(@title, [], %{@bare | personalization: [timezone: "Pacific/Fiji"]})
+
+      assert unnamed =~ "## The owner\n\n- Time zone: Pacific/Fiji"
+      refute unnamed =~ "owner's name"
     end
 
     # M56 §4.5: the voice learns from the generated capability section, not
@@ -454,6 +469,82 @@ defmodule FermixCore.Realtime.LivePromptTest do
 
       assert copies > 0
       assert length(String.split(suite, addendum)) - 1 == copies
+    end
+
+    # M87 Phase 2: the camera's hand-off case in each voice suite carries the
+    # addendum the same way, and the no-picture line after it as the bridge
+    # adds it, so both are held to the code's copy.
+    test "the grok_voice camera case carries the addendum a call in the chat sends" do
+      suite = one_spaced(File.read!(@grok_voice_suite))
+      opening = "This task comes from an ongoing voice conversation."
+      copies = length(String.split(suite, opening)) - 1
+
+      assert copies > 0
+
+      assert length(String.split(suite, one_spaced(LivePrompt.backend_addendum("chat")))) - 1 ==
+               copies
+    end
+
+    test "the no-picture line each voice eval carries is the one a hand-off is told" do
+      told =
+        one_spaced(LivePrompt.backend_addendum("chat")) <>
+          " " <> one_spaced(LivePrompt.no_picture_note())
+
+      for path <- [@voice_in_chat_suite, @grok_voice_suite] do
+        assert String.contains?(one_spaced(File.read!(path)), told), Path.basename(path)
+      end
+    end
+  end
+
+  # M96 §4.1: the one greeting instruction, built per call, the time in the
+  # owner's zone; no sample greeting and no scripted line.
+  describe "greeting/2" do
+    test "says the owner just called, the time in their zone, and to greet first, then listen" do
+      greeting =
+        LivePrompt.greeting(~U[2027-03-05 00:42:00Z],
+          personalization: [timezone: "America/New_York"]
+        )
+
+      assert greeting =~ "The owner has just started this call."
+      assert greeting =~ "Now: Thursday, March 4, 2027 at 7:42 PM EST."
+      assert greeting =~ "Greet the owner first, by name if you know it"
+      assert greeting =~ "then stop and listen"
+      assert greeting =~ "Don't answer or act on any earlier message."
+      refute greeting =~ ~r/"[^"]+"/
+    end
+  end
+
+  # M96 §5.4: told only to a call the owner's goodbye can end.
+  describe "goodbye_rule/0 and compose's ends_on_goodbye" do
+    test "a call that ends on a goodbye is told to say goodbye back and nothing more" do
+      prompt =
+        LivePrompt.compose(Defaults.live_md(), [capability("web_search", :web)], @bare,
+          ends_on_goodbye: true
+        )
+
+      assert LivePrompt.goodbye_rule() =~ "say a short goodbye back and ask nothing more"
+      assert String.ends_with?(prompt, LivePrompt.goodbye_rule())
+    end
+
+    test "any other call is not told it" do
+      for opts <- [[], [ends_on_goodbye: false]] do
+        prompt =
+          LivePrompt.compose(Defaults.live_md(), [capability("web_search", :web)], @bare, opts)
+
+        refute prompt =~ LivePrompt.goodbye_rule()
+      end
+    end
+  end
+
+  describe "camera_rule/0" do
+    # M87 Phase 2, after M41's rule for a screen: the voice sees nothing, so it
+    # never implies it does, and hands off anything about the picture.
+    test "tells the voice it cannot see and to hand off what the camera shows" do
+      rule = LivePrompt.camera_rule()
+
+      assert rule =~ "You cannot see"
+      assert rule =~ "never say or imply that you can see"
+      assert rule =~ "Hand off anything about what the camera shows"
     end
   end
 

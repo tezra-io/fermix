@@ -30,8 +30,8 @@ defmodule Fermix.CLI.HomeCommandTest do
     [fermix_core.providers.openai]
     api_key = "@keyring"
 
-    [sandbox]
-    workspace_root = "#{home}/workspace"
+    [fermix_core.meetings]
+    recordings = "#{home}/workspace/meetings"
     """)
 
     :ok = Epoch.write(home, 5)
@@ -73,14 +73,14 @@ defmodule Fermix.CLI.HomeCommandTest do
 
     assert {status, err} == {0, ""}
     assert out =~ "Restored 2 files into #{ctx.into} at primary epoch 6."
-    assert out =~ "Rewrote 1 path in config.toml: sandbox.workspace_root."
+    assert out =~ "Rewrote 1 path in config.toml: fermix_core.meetings.recordings."
     assert out =~ "The archived home kept 1 secret in the OS keyring"
     assert out =~ "The passphrase file #{ctx.passphrase_file} holds the owner root"
     assert String.ends_with?(out, @moved <> "\n")
     refute out =~ "Coding-harness"
     refute out =~ "screen-history"
     refute out =~ "Reinstall"
-    assert File.read!(Path.join(ctx.into, "config.toml")) =~ ~s("#{ctx.into}/workspace")
+    assert File.read!(Path.join(ctx.into, "config.toml")) =~ ~s("#{ctx.into}/workspace/meetings")
     assert Epoch.read(ctx.into) == {:ok, 6}
     refute File.exists?(Path.join(ctx.home, "moved.json"))
   end
@@ -136,6 +136,18 @@ defmodule Fermix.CLI.HomeCommandTest do
     assert status == 1
     assert err =~ "The engine that owns this home is running"
 
+    # A probe that could not tell (a connect that timed out) refuses too.
+    {status, _out, err} =
+      run(["export", ctx.archive, "--passphrase-file", ctx.passphrase_file],
+        home: ctx.home,
+        hello: fn -> {:error, :timeout} end
+      )
+
+    assert status == 1
+    assert err =~ "Fermix could not tell whether the engine that owns this home is running"
+    assert err =~ "Make sure it is stopped, then export again."
+    refute File.exists?(ctx.archive)
+
     File.write!(ctx.passphrase_file, "short\n")
 
     {status, _out, err} =
@@ -143,6 +155,25 @@ defmodule Fermix.CLI.HomeCommandTest do
 
     assert status == 1
     assert err =~ "at least 12 bytes"
+  end
+
+  # One wording for a home an archive cannot carry: a move's readiness says
+  # the same sentence (`Archive.collect_sentence/1`), so it ends in what to
+  # do whichever surface shows it.
+  test "export refuses a home it cannot carry, naming the path and what to do", ctx do
+    File.mkdir_p!(Path.join(ctx.home, "workspace"))
+    File.ln_s!("/etc", Path.join(ctx.home, "workspace/notes"))
+
+    {status, _out, err} =
+      run(["export", ctx.archive, "--passphrase-file", ctx.passphrase_file], home: ctx.home)
+
+    assert status == 1
+
+    assert err ==
+             "fermix home: workspace/notes in the home links to /etc, outside the home, " <>
+               "which an archive cannot carry. Move it out of the home, then try again.\n"
+
+    refute File.exists?(ctx.archive)
   end
 
   test "import refuses a root that is not empty", ctx do
@@ -219,9 +250,15 @@ defmodule Fermix.CLI.HomeCommandTest do
     [fermix_core.harness]
     approved = true
 
-    [sandbox]
-    workspace_root = "#{ctx.home}/workspace"
+    [fermix_core.meetings]
+    recordings = "#{ctx.home}/workspace/meetings"
     extra = "/Users/invented/Projects"
+
+    [sandbox]
+    mode = "open"
+
+    [fermix_core.plugins]
+    dev_local = "/Users/invented/Projects/plugins"
     """)
 
     seed_database!(Path.join(ctx.home, "memory.db"))
@@ -244,15 +281,21 @@ defmodule Fermix.CLI.HomeCommandTest do
     assert {status, err} == {0, ""}
 
     assert out =~
-             "Kept as they were; review them, they hold paths outside the old home: sandbox.extra."
+             "Kept as they were; review them, they hold paths outside the old home: " <>
+               "fermix_core.meetings.extra."
 
-    assert out =~ "Coding-harness consent does not travel; approve it again here."
+    refute out =~ "Coding-harness consent"
+
+    # Whether coding agents may run is the computer's own too (M98 D5).
+    assert out =~
+             "Settings of the computer the home came from stay there: " <>
+               "sandbox, fermix_core.plugins.dev_local, fermix_core.harness.approved."
 
     assert out =~
              ~s(This host has no usable keyring, so secrets are kept in files here: secret_store = "file".)
 
-    assert out =~
-             "Removed 1 screen-history row: screen history stays on the machine it describes."
+    # Computer history's notes travel with the home (M97 §8.6): nothing is removed.
+    refute out =~ "screen-history"
 
     assert out =~
              "Installed plugins were built for macos-aarch64, and this host is linux-x86_64. " <>
@@ -313,13 +356,12 @@ defmodule Fermix.CLI.HomeCommandTest do
     assert out =~ "Exported #{ctx.home} to #{ctx.archive}"
   end
 
-  # This host's facts, pinned: a macOS host whose keyring answers, at a fixed now.
+  # This host's facts, pinned: a macOS host whose keyring answers.
   defp run(argv, deps \\ [], input \\ "") do
     defaults = [
       hello: fn -> @not_running end,
       host: "macos-aarch64",
-      keyring_usable?: fn -> true end,
-      now_ms: @now
+      keyring_usable?: fn -> true end
     ]
 
     deps = Keyword.merge(defaults, deps)

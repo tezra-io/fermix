@@ -5,25 +5,25 @@ defmodule FermixCore.Management.HomeMove do
   `home.move.start`, and the `enrollment`, `candidates` and `move` places of
   `home.status`.
 
-  - `home.enroll.open {kind?}` (primary only) opens the one enrollment
-    window, a manual one of thirty minutes, replacing an open one, through the
-    rail (`FermixCore.Home.Link.impl().open_enrollment/2`), and answers the
-    code and when it expires; while a server Fermix created waits on its own
-    24-hour window (M75 lean v1 L15), and while it is held as the candidate
-    that window enrolled, it is refused with the rail's sentence. A manual
-    window a desktop asks for over the link is that desktop's move back
-    (Always On's Move back), and the window names it (its device id), as
-    does the candidate that enrolls through it. With `kind` `provisioned` it
-    opens that 24-hour window instead, under the same one-window rules, and
-    only for a request a desktop forwarded: the desktop replacing this
-    server puts the code inside the new server it creates. The code is
-    answered once and never logged or kept in a status.
-  - `home.enroll.withdraw {kind?}` (primary only) releases the window of
-    `kind` (`provisioned` unless said)
-    (`FermixCore.Home.Link.impl().withdraw_enrollment/1`): the 24-hour one
-    when the server it was opened for was never created or is being
-    deleted, so a copied code can open again; the copied code a desktop
-    opened to move back when its owner cancels.
+  - `home.enroll.open` (primary only) opens the one enrollment window, of
+    thirty minutes, replacing an open one, through the rail
+    (`FermixCore.Home.Link.impl().open_enrollment/1`), and answers the code
+    and when it expires. A window a desktop asks for over the link is that
+    desktop's move back (Always On's Move back), and the window names it
+    (its device id), as does the candidate that enrolls through it. The code
+    is answered once and never logged or kept in a status.
+  - `home.enroll.open {purpose: "computer"}` (primary only, M97 §3.1) opens
+    the window for a computer that joins the home instead (Add a computer):
+    `Home.Link.impl().open_join/0`. A window of the other purpose that is
+    open is not replaced: the code is refused by name.
+  - `home.enroll.approve {sas}` and `home.enroll.deny` (primary only) are
+    the owner's answer to the computer that waits on that window
+    (`approve_join/1`, `deny_join/0`): approved with the six digits it
+    shows, its row is written; digits that are not its own deny it, and the
+    code is spent either way.
+  - `home.enroll.withdraw` (primary only) releases the window
+    (`FermixCore.Home.Link.impl().withdraw_enrollment/0`): the copied code a
+    desktop opened to move back, when its owner cancels.
   - `home.candidates.list` answers the candidates the primary holds
     (`FermixCore.Home.Candidates`), never their keys.
   - `home.move.readiness {candidate_id}` (primary only) answers what the owner
@@ -39,34 +39,42 @@ defmodule FermixCore.Management.HomeMove do
     (`FermixCore.Home.Move.start/5`), refused while
     the readiness report blocks: the ready review the owner was just shown
     (`Move.review/3`), so the keychain is not read again, else a report made
-    now. That hands the home to the device role,
-    and then restarts the engine through its deliberate self-restart
+    now. That hands the home to the device role, removes the record of a
+    move back that ended here (`FermixCore.Home.Return`), and then restarts
+    the engine through its deliberate self-restart
     (`Management.Lifecycle.restart_self/0`), which the service manager brings
     back (launchd's `KeepAlive` for the Mac app's
     agent, systemd's `Restart=always` for the Linux service). The passphrase
     lives only inside that check: it is never stored, logged or answered.
   - In `home.status`: `enrollment` is the window (`state` `open`, `used` or
-    `expired`, `expires_at`, its `kind`, `manual` or `provisioned`, and the
-    `candidate_id` that enrolled through it, null until one did) or null; `candidates` the held candidates on
+    `expired`, `expires_at`, and the `candidate_id` that enrolled through
+    it, null until one did; a computer's window also says `purpose`
+    `computer`, its `state` may be `awaiting_approval`, `approved` or
+    `denied`, and it names the `joiner` that waits, `{name, platform}`, or
+    null (never its digits, which the owner reads on the new computer and
+    types), and the computer that joined through it, `joined {device_id,
+    name}`, or null) or null; `candidates` the held candidates on
     a primary, empty elsewhere; `move` the move's `phase`, `candidate` (its
     name, null on the candidate itself) and `sentence`, or null.
 
   Test seams in `opts`: those of `Management.Home` (its `:config` and
   `:save_recipient` reach the passphrase check), plus `:now` (a
-  `DateTime`), `:open_enrollment` (a 2-arity stand-in for the rail's, given
-  the kind and the desktop it is opened for, or nil), `:withdraw_enrollment`
-  (a 1-arity stand-in for the rail's, given the kind), `:actor`
+  `DateTime`), `:open_enrollment` (a 1-arity stand-in for the rail's, given
+  the desktop it is opened for, or nil), `:withdraw_enrollment` (a 0-arity
+  stand-in for the rail's), `:actor`
   (`{:desktop, device_id}` for a request a desktop forwarded), `:restart` (in
   place of the restart), `:boot_ending` (in place of `Move.boot_ending/0`),
   and the readiness report's `:free_bytes`, `:version`, `:host` and
   `:restarts_itself`.
   """
 
+  alias FermixCore.Computers.Consent
   alias FermixCore.Home.Candidate
   alias FermixCore.Home.Candidates
   alias FermixCore.Home.Link
   alias FermixCore.Home.Move
   alias FermixCore.Home.MoveReadiness
+  alias FermixCore.Home.Return
   alias FermixCore.Home.Role
   alias FermixCore.Home.Snapshot.Recovery
   alias FermixCore.Management.Home
@@ -77,10 +85,10 @@ defmodule FermixCore.Management.HomeMove do
 
   @capability "home"
   @not_primary "Only the primary enrolls candidates and starts a move."
-  @provisioned_here "A code that lives 24 hours opens only for a server Fermix creates from " <>
-                      "your computer."
-  @kind_sentence "A code is `manual`, or `provisioned` for a server Fermix creates."
-  @kinds %{"manual" => :manual, "provisioned" => :provisioned}
+  @sas_sentence "Type the six digits the new computer shows."
+  @mismatch_sentence "Those digits are not the ones the new computer showed, so it was not " <>
+                       "added. Open a new code to try again."
+  @no_joiner_sentence "No computer is waiting to join your Fermix."
   @owner_sentence "Only the owner can set up Always On, move Fermix or set its recovery " <>
                     "passphrase: use the Fermix app, the setup page or your own terminal."
 
@@ -111,19 +119,14 @@ defmodule FermixCore.Management.HomeMove do
     }
   end
 
-  @doc "`home.enroll.open`, a window of `kind` (`\"manual\"` unless said)."
-  @spec enroll_open(term(), keyword()) :: {:ok, map()} | {:error, term()}
-  def enroll_open(kind, opts \\ []) when is_list(opts) do
-    open =
-      Keyword.get(opts, :open_enrollment, fn kind, returning ->
-        Link.impl().open_enrollment(kind, returning)
-      end)
-
-    actor = Keyword.get(opts, :actor)
-
-    with {:ok, kind} <- window_kind(kind, actor),
-         :ok <- primary(role(opts)) do
-      case open.(kind, returning(kind, actor)) do
+  @doc """
+  `home.enroll.open`: the enrollment window; `opts[:purpose]` `:computer`
+  opens one for a computer that joins the home (`:candidate` unless said).
+  """
+  @spec enroll_open(keyword()) :: {:ok, map()} | {:error, term()}
+  def enroll_open(opts \\ []) when is_list(opts) do
+    with :ok <- primary(role(opts)) do
+      case opener(Keyword.get(opts, :purpose, :candidate), opts).() do
         {:ok, %{code: code, expires_at: %DateTime{} = at}} ->
           {:ok, %{"code" => code, "expires_at" => DateTime.to_iso8601(at)}}
 
@@ -133,37 +136,37 @@ defmodule FermixCore.Management.HomeMove do
     end
   end
 
-  # The 24-hour code is the one a desktop puts inside the server it creates in
-  # place of this one; nobody copies it.
-  defp window_kind(nil, _actor), do: {:ok, :manual}
-  defp window_kind("provisioned", {:desktop, _device_id}), do: {:ok, :provisioned}
+  defp opener(:candidate, opts) do
+    open =
+      Keyword.get(opts, :open_enrollment, fn returning ->
+        Link.impl().open_enrollment(returning)
+      end)
 
-  defp window_kind("provisioned", _actor),
-    do: {:error, {:invalid_params, "kind", @provisioned_here}}
-
-  defp window_kind(kind, _actor) do
-    case Map.fetch(@kinds, kind) do
-      {:ok, :manual} -> {:ok, :manual}
-      _unknown -> {:error, {:invalid_params, "kind", @kind_sentence}}
-    end
+    fn -> open.(returning(Keyword.get(opts, :actor))) end
   end
 
-  # The copied code a linked desktop asks its server for is the one it takes
-  # the home back with: the window names that desktop.
-  defp returning(:manual, {:desktop, device_id}), do: device_id
-  defp returning(_kind, _actor), do: nil
+  defp opener(:computer, opts),
+    do: Keyword.get(opts, :open_join, fn -> Link.impl().open_join() end)
 
-  @doc "`home.enroll.withdraw`: releases the window of `kind` (`\"provisioned\"` unless said)."
-  @spec enroll_withdraw(term(), keyword()) :: {:ok, map()} | {:error, term()}
-  def enroll_withdraw(kind, opts \\ []) when is_list(opts) do
-    withdraw =
-      Keyword.get(opts, :withdraw_enrollment, fn kind -> Link.impl().withdraw_enrollment(kind) end)
+  @doc """
+  `home.enroll.approve`: the owner adds the computer waiting on the window,
+  with the six digits it shows (`sas`).
+  """
+  @spec enroll_approve(term(), keyword()) :: {:ok, map()} | {:error, term()}
+  def enroll_approve(sas, opts \\ []) when is_list(opts) do
+    approve = Keyword.get(opts, :approve_join, fn sas -> Link.impl().approve_join(sas) end)
 
-    with {:ok, kind} <- withdraw_kind(kind),
+    with {:ok, sas} <- sas_param(sas),
          :ok <- primary(role(opts)) do
-      case withdraw.(kind) do
-        :ok ->
-          {:ok, %{"withdrawn" => true}}
+      case approve.(sas) do
+        {:ok, %{device_id: id, name: name}} ->
+          {:ok, %{"device_id" => id, "name" => name}}
+
+        {:error, :sas_mismatch} ->
+          {:error, {:invalid_params, "sas", @mismatch_sentence}}
+
+        {:error, :none} ->
+          {:error, {:unavailable, @capability, @no_joiner_sentence}}
 
         {:error, {:unavailable, sentence}} when is_binary(sentence) ->
           {:error, {:unavailable, @capability, sentence}}
@@ -171,12 +174,51 @@ defmodule FermixCore.Management.HomeMove do
     end
   end
 
-  defp withdraw_kind(nil), do: {:ok, :provisioned}
+  @doc "`home.enroll.deny`: the owner does not add the computer waiting on the window."
+  @spec enroll_deny(keyword()) :: {:ok, map()} | {:error, term()}
+  def enroll_deny(opts \\ []) when is_list(opts) do
+    deny = Keyword.get(opts, :deny_join, fn -> Link.impl().deny_join() end)
 
-  defp withdraw_kind(kind) do
-    case Map.fetch(@kinds, kind) do
-      {:ok, kind} -> {:ok, kind}
-      :error -> {:error, {:invalid_params, "kind", @kind_sentence}}
+    with :ok <- primary(role(opts)) do
+      case deny.() do
+        :ok -> {:ok, %{"denied" => true}}
+        {:error, {:unavailable, sentence}} -> {:error, {:unavailable, @capability, sentence}}
+      end
+    end
+  end
+
+  @doc "The six digits a computer shows, as the owner typed them: spaces dropped."
+  @spec sas_param(term()) ::
+          {:ok, String.t()} | {:error, {:invalid_params, String.t(), String.t()}}
+  def sas_param(sas) when is_binary(sas) and byte_size(sas) <= 32 do
+    digits = String.replace(sas, " ", "")
+
+    if Regex.match?(~r/\A[0-9]{6}\z/, digits),
+      do: {:ok, digits},
+      else: {:error, {:invalid_params, "sas", @sas_sentence}}
+  end
+
+  def sas_param(_sas), do: {:error, {:invalid_params, "sas", @sas_sentence}}
+
+  # The copied code a linked desktop asks its server for is the one it takes
+  # the home back with: the window names that desktop.
+  defp returning({:desktop, device_id}), do: device_id
+  defp returning(_actor), do: nil
+
+  @doc "`home.enroll.withdraw`: releases the enrollment window."
+  @spec enroll_withdraw(keyword()) :: {:ok, map()} | {:error, term()}
+  def enroll_withdraw(opts \\ []) when is_list(opts) do
+    withdraw =
+      Keyword.get(opts, :withdraw_enrollment, fn -> Link.impl().withdraw_enrollment() end)
+
+    with :ok <- primary(role(opts)) do
+      case withdraw.() do
+        :ok ->
+          {:ok, %{"withdrawn" => true}}
+
+        {:error, {:unavailable, sentence}} when is_binary(sentence) ->
+          {:error, {:unavailable, @capability, sentence}}
+      end
     end
   end
 
@@ -231,12 +273,33 @@ defmodule FermixCore.Management.HomeMove do
                role(opts),
                candidate_id,
                recipient,
-               [now: now(opts), keep_as_desktop: Keyword.get(opts, :keep_as_desktop, true)] ++
-                 reviewed ++ readiness_opts(opts)
+               [
+                 now: now(opts),
+                 keep_as_desktop: Keyword.get(opts, :keep_as_desktop, true),
+                 keep_offers:
+                   Keyword.get_lazy(opts, :keep_offers, fn -> Consent.default_keep(opts) end)
+               ] ++ reviewed ++ readiness_opts(opts)
              )
            ) do
+      :ok = forget_ended_return(home(opts))
       :ok = Keyword.get(opts, :restart, &Lifecycle.restart_self/0).()
       {:ok, started_view(started)}
+    end
+  end
+
+  # A move away from this home starts a tenure elsewhere: the record of a
+  # move back that ended here (`device/return.json`) describes nothing any
+  # more, and read on it would draw the new move's progress, a later move
+  # back's screen and its notice from that old one. It goes, which tells the
+  # Always On watch; one that cannot go is said in the log, and the move,
+  # already written, goes on.
+  defp forget_ended_return(home) do
+    case Return.remove(home) do
+      :ok ->
+        :ok
+
+      {:error, reason} ->
+        Logger.error("move: the ended move back's record stays: #{inspect(reason)}")
     end
   end
 
@@ -302,14 +365,36 @@ defmodule FermixCore.Management.HomeMove do
 
   defp enrollment_view(nil), do: nil
 
-  defp enrollment_view(%{state: state, expires_at: %DateTime{} = at, kind: kind} = window)
-       when state in [:open, :used, :expired] and kind in [:manual, :provisioned],
-       do: %{
-         "state" => Atom.to_string(state),
-         "expires_at" => DateTime.to_iso8601(at),
-         "kind" => Atom.to_string(kind),
-         "candidate_id" => window.candidate_id
-       }
+  # A candidate's window as it always was; a computer's names its purpose,
+  # the computer that waits and the one that joined.
+  defp enrollment_view(%{state: state, expires_at: %DateTime{} = at} = window)
+       when state in [:open, :used, :expired, :awaiting_approval, :approved, :denied] do
+    view = %{
+      "state" => Atom.to_string(state),
+      "expires_at" => DateTime.to_iso8601(at),
+      "candidate_id" => window.candidate_id
+    }
+
+    case Map.get(window, :purpose, :candidate) do
+      :candidate ->
+        view
+
+      :computer ->
+        Map.merge(view, %{
+          "purpose" => "computer",
+          "joiner" => joiner_view(Map.get(window, :joiner)),
+          "joined" => joined_view(Map.get(window, :joined))
+        })
+    end
+  end
+
+  defp joiner_view(nil), do: nil
+
+  defp joiner_view(%{name: name, platform: platform}),
+    do: %{"name" => name, "platform" => platform}
+
+  defp joined_view(nil), do: nil
+  defp joined_view(%{device_id: id, name: name}), do: %{"device_id" => id, "name" => name}
 
   defp held(home, :primary, now) do
     case Candidates.list(home, now) do
@@ -365,7 +450,7 @@ defmodule FermixCore.Management.HomeMove do
   defp primary(_record), do: {:error, {:unavailable, @capability, @not_primary}}
 
   defp readiness_opts(opts),
-    do: Keyword.take(opts, [:free_bytes, :version, :host, :restarts_itself])
+    do: Keyword.take(opts, [:free_bytes, :version, :host, :restarts_itself, :meeting_holder])
 
   defp home(opts), do: Keyword.get_lazy(opts, :home, &ConfigStore.fermix_home/0)
   defp role(opts), do: Keyword.get_lazy(opts, :engine_role, &Role.recorded/0)

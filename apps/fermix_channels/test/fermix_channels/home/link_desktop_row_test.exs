@@ -14,6 +14,24 @@ defmodule FermixChannels.Home.LinkDesktopRowTest do
     %{staging: staging}
   end
 
+  # M97 §3.4: an Always On server's update reads who keeps its backups from
+  # the computer rows; rows it cannot read are not known, never none, so the
+  # update holds rather than install past a computer it could not see.
+  test "with the desktop peers not running, the computer rows are not known" do
+    refute Process.whereis(FermixChannels.Desktop.Peers)
+    assert Link.computer_rows() == {:error, :not_running}
+  end
+
+  # M97 F9: at a primary's start the computers are asked for before the
+  # channels tree that holds the link is up, which is the boot and not a
+  # rail that stopped; neither is ever none.
+  test "before the channels tree has started, the computer rows are not started yet" do
+    refute Process.whereis(FermixChannels.Desktop.Peers)
+    assert FermixChannels.Application.started?()
+    assert Link.computer_rows(false) == {:error, :not_started}
+    assert Link.computer_rows(true) == {:error, :not_running}
+  end
+
   test "drops the row of that key and keeps every other", %{staging: staging} do
     mac = row(:desktop, "orchard-mac")
     other = row(:desktop, "studio-mac")
@@ -41,6 +59,24 @@ defmodule FermixChannels.Home.LinkDesktopRowTest do
 
     assert {:error, {:not_a_desktop, _device_id}} = Link.drop_desktop_row(staging, phone.noise_pk)
     assert {:ok, [_phone]} = DeviceStore.list(root: staging)
+  end
+
+  # E1 (D18): whether a home is an Always On server's is read from its file,
+  # before the channels' running store starts, and from any home by its root.
+  test "the desktop rows of a home are read from its file", %{staging: staging} do
+    assert Link.home_desktops(staging) == {:ok, []}
+
+    {:ok, _device} = DeviceStore.add(row(:phone, "Pixel 9"), root: staging)
+    assert Link.home_desktops(staging) == {:ok, []}
+
+    mac = row(:desktop, "orchard-mac")
+    {:ok, _device} = DeviceStore.add(mac, root: staging)
+
+    assert Link.home_desktops(staging) ==
+             {:ok, [%{device_id: mac.device_id, name: "orchard-mac"}]}
+
+    File.write!(DeviceStore.store_path(staging), "not = [toml")
+    assert {:error, _reason} = Link.home_desktops(staging)
   end
 
   test "a list that cannot be read is named", %{staging: staging} do

@@ -5,10 +5,13 @@ defmodule FermixCore.Realtime.SessionServerTest do
   alias FermixCore.Capabilities.Builtin
   alias FermixCore.Capabilities.Capability
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
+  alias FermixCore.Checklists.Note, as: ChecklistNote
+  alias FermixCore.Computers.Computer
   alias FermixCore.HostFacts
   alias FermixCore.Jobs.Registry
   alias FermixCore.Memory.Repo
   alias FermixCore.Realtime.Config
+  alias FermixCore.Realtime.ConversationRecorder
   alias FermixCore.Realtime.OpenAIClient
   alias FermixCore.Realtime.SessionServer
   alias FermixCore.Sandbox.Config, as: SandboxConfig
@@ -16,6 +19,7 @@ defmodule FermixCore.Realtime.SessionServerTest do
   alias FermixCore.Tools.ScheduleJob
   alias FermixCore.Tools.Subagents
   alias FermixCore.Tools.UpdateJob
+  alias FermixTestSupport.CallLeases
   alias FermixTestSupport.RealtimeSocket
 
   defmodule FakeOpenAIClient do
@@ -172,12 +176,23 @@ defmodule FermixCore.Realtime.SessionServerTest do
     {:ok, pid} =
       SessionServer.start_link(
         companion: self(),
+        endpoint: :desktop,
+        call_lease: CallLeases.own!(),
         config: config,
         openai_client: FakeOpenAIClient,
         api_key: "sk-test",
         safety_identifier: "safe-id",
         capabilities: [capability],
         task_supervisor: task_supervisor,
+        # The call's own tool context, with no store: what it is told of the
+        # owner's lists and trips never rests on the suite's global Repo.
+        context: %{
+          agent_name: "realtime",
+          conversation_key: ConversationRecorder.conversation_key("unknown"),
+          memory_repo: nil,
+          realtime?: true,
+          source_trust: :operator
+        },
         prompt_loader: fn _opts ->
           {:ok, %{messages: [%{role: "system", content: "prompt"}], parts: [], accounting: []}}
         end
@@ -195,7 +210,11 @@ defmodule FermixCore.Realtime.SessionServerTest do
     [event] = FakeOpenAIClient.events(openai)
 
     assert event.type == "session.update"
-    assert event.session.instructions == "prompt"
+    # The owner's call has no store, so keeps no list or trip: after the
+    # prompt, the lists' rules alone, with the call's line (`Checklists.Note`).
+    owner_call = %{source_trust: :operator, computer_use_origin: :voice}
+    list_rules = ChecklistNote.rules(owner_call, "voice", false)
+    assert event.session.instructions == "prompt\n\n" <> list_rules
     assert [%{name: "echo"}] = event.session.tools
   end
 
@@ -208,11 +227,16 @@ defmodule FermixCore.Realtime.SessionServerTest do
     {:ok, server} =
       SessionServer.start_link(
         companion: self(),
+        endpoint: :desktop,
+        call_lease: CallLeases.own!(),
         config: Config.normalize(enabled: true),
         openai_client: FakeOpenAIClient,
         api_key: "sk-test",
         safety_identifier: "safe-id",
         capabilities: [Builtin.from_tool_module(ComputerUse)],
+        # The test host has no screen of its own, so the screen in reach is a
+        # computer's (M97 §6.4), whose access level is its own sandbox mode.
+        context: screen_on_a_computer("strict"),
         prompt_loader: fn _opts ->
           {:ok, %{messages: [%{role: "system", content: "prompt"}], parts: [], accounting: []}}
         end
@@ -227,12 +251,34 @@ defmodule FermixCore.Realtime.SessionServerTest do
     assert tool.parameters["properties"]["action"]["description"] =~ "ACCESS=strict"
   end
 
+  defp screen_on_a_computer(mode) do
+    offer = %{id: "computer_use", state: :on, sentence: nil, detail: mode}
+
+    %{
+      agent_name: "realtime",
+      conversation_key: ConversationRecorder.conversation_key("unknown"),
+      realtime?: true,
+      source_trust: :operator,
+      computers_opts: [role: :primary],
+      computers: [
+        %Computer{
+          device_id: "device-studio",
+          name: "studio Mac",
+          connected: true,
+          offers: [offer]
+        }
+      ]
+    }
+  end
+
   test "call_start hides context-gated capabilities without removing dispatchability" do
     task_supervisor = start_supervised!({Task.Supervisor, []}, id: :hidden_tool_task_sup)
 
     {:ok, server} =
       SessionServer.start_link(
         companion: self(),
+        endpoint: :desktop,
+        call_lease: CallLeases.own!(),
         config: Config.normalize(enabled: true),
         openai_client: FakeOpenAIClient,
         api_key: "sk-test",
@@ -293,6 +339,8 @@ defmodule FermixCore.Realtime.SessionServerTest do
     {:ok, server} =
       SessionServer.start_link(
         companion: self(),
+        endpoint: :desktop,
+        call_lease: CallLeases.own!(),
         config: Config.normalize(enabled: true),
         openai_client: FakeOpenAIClient,
         api_key: "sk-test",
@@ -326,6 +374,8 @@ defmodule FermixCore.Realtime.SessionServerTest do
     {:ok, server} =
       SessionServer.start_link(
         companion: self(),
+        endpoint: :desktop,
+        call_lease: CallLeases.own!(),
         config: Config.normalize(enabled: true),
         openai_client: FakeOpenAIClient,
         api_key: "sk-test",
@@ -362,6 +412,8 @@ defmodule FermixCore.Realtime.SessionServerTest do
     {:ok, server} =
       SessionServer.start_link(
         companion: self(),
+        endpoint: :desktop,
+        call_lease: CallLeases.own!(),
         config: Config.normalize(enabled: true),
         openai_client: FakeOpenAIClient,
         api_key: "sk-test",
@@ -400,6 +452,8 @@ defmodule FermixCore.Realtime.SessionServerTest do
     {:ok, server} =
       SessionServer.start_link(
         companion: self(),
+        endpoint: :desktop,
+        call_lease: CallLeases.own!(),
         config: Config.normalize(enabled: true),
         openai_client: FakeOpenAIClient,
         api_key: "sk-test",
@@ -473,6 +527,8 @@ defmodule FermixCore.Realtime.SessionServerTest do
     {:ok, server} =
       SessionServer.start_link(
         companion: self(),
+        endpoint: :desktop,
+        call_lease: CallLeases.own!(),
         config: Config.normalize(enabled: true),
         openai_client: FakeOpenAIClient,
         api_key: "sk-test",
@@ -533,6 +589,8 @@ defmodule FermixCore.Realtime.SessionServerTest do
     {:ok, server} =
       SessionServer.start_link(
         companion: self(),
+        endpoint: :desktop,
+        call_lease: CallLeases.own!(),
         config: Config.normalize(enabled: true),
         openai_client: FakeOpenAIClient,
         api_key: "sk-test",
@@ -568,6 +626,8 @@ defmodule FermixCore.Realtime.SessionServerTest do
     {:ok, server} =
       SessionServer.start_link(
         companion: self(),
+        endpoint: :desktop,
+        call_lease: CallLeases.own!(),
         config: Config.normalize(enabled: true),
         openai_client: FakeOpenAIClient,
         api_key: "sk-test",
@@ -600,6 +660,8 @@ defmodule FermixCore.Realtime.SessionServerTest do
     {:ok, server} =
       SessionServer.start_link(
         companion: self(),
+        endpoint: :desktop,
+        call_lease: CallLeases.own!(),
         config: Config.normalize(enabled: true),
         openai_client: FakeOpenAIClient,
         api_key: "sk-test",
@@ -631,6 +693,8 @@ defmodule FermixCore.Realtime.SessionServerTest do
     {:ok, server} =
       SessionServer.start_link(
         companion: self(),
+        endpoint: :desktop,
+        call_lease: CallLeases.own!(),
         config: Config.normalize(enabled: true),
         openai_client: FakeOpenAIClient,
         api_key: "sk-test",
@@ -654,6 +718,8 @@ defmodule FermixCore.Realtime.SessionServerTest do
     {:ok, server} =
       SessionServer.start_link(
         companion: self(),
+        endpoint: :desktop,
+        call_lease: CallLeases.own!(),
         config: Config.normalize(enabled: true),
         openai_client: FakeOpenAIClient,
         api_key: "sk-test",
@@ -682,6 +748,8 @@ defmodule FermixCore.Realtime.SessionServerTest do
     {:ok, server} =
       SessionServer.start_link(
         companion: self(),
+        endpoint: :desktop,
+        call_lease: CallLeases.own!(),
         config: Config.normalize(enabled: true),
         openai_client: FakeOpenAIClient,
         api_key: "sk-test",
@@ -756,6 +824,8 @@ defmodule FermixCore.Realtime.SessionServerTest do
     {:ok, server} =
       SessionServer.start_link(
         companion: self(),
+        endpoint: :desktop,
+        call_lease: CallLeases.own!(),
         config: Config.normalize(enabled: true, max_estimated_cost_cents_per_session: 1),
         openai_client: FakeOpenAIClient,
         api_key: "sk-test",
@@ -886,6 +956,8 @@ defmodule FermixCore.Realtime.SessionServerTest do
     {:ok, server} =
       SessionServer.start_link(
         companion: self(),
+        endpoint: :desktop,
+        call_lease: CallLeases.own!(),
         config: Config.normalize(enabled: true, max_estimated_cost_cents_per_session: 1),
         openai_client: FakeOpenAIClient,
         api_key: "sk-test",
@@ -950,6 +1022,8 @@ defmodule FermixCore.Realtime.SessionServerTest do
     {:ok, server} =
       SessionServer.start_link(
         companion: self(),
+        endpoint: :desktop,
+        call_lease: CallLeases.own!(),
         config: Config.normalize(enabled: true),
         session_scope: scope,
         openai_client: FakeOpenAIClient,
@@ -995,6 +1069,8 @@ defmodule FermixCore.Realtime.SessionServerTest do
     {:ok, server} =
       SessionServer.start_link(
         companion: self(),
+        endpoint: :desktop,
+        call_lease: CallLeases.own!(),
         config: Config.normalize(enabled: true),
         session_scope: scope,
         openai_client: FakeOpenAIClient,
@@ -1035,6 +1111,8 @@ defmodule FermixCore.Realtime.SessionServerTest do
     {:ok, pid} =
       SessionServer.start_link(
         companion: self(),
+        endpoint: :desktop,
+        call_lease: CallLeases.own!(),
         config: Config.normalize(enabled: true),
         openai_client: FakeOpenAIClient,
         api_key: "sk-test",
@@ -1054,6 +1132,8 @@ defmodule FermixCore.Realtime.SessionServerTest do
     {:ok, pid} =
       SessionServer.start_link(
         companion: self(),
+        endpoint: :desktop,
+        call_lease: CallLeases.own!(),
         config: Config.normalize(enabled: true),
         openai_client: FakeOpenAIClient,
         api_key: "sk-test",
@@ -1073,6 +1153,8 @@ defmodule FermixCore.Realtime.SessionServerTest do
     {:ok, pid} =
       SessionServer.start_link(
         companion: self(),
+        endpoint: :desktop,
+        call_lease: CallLeases.own!(),
         config: Config.normalize(enabled: true),
         openai_client: FakeOpenAIClient,
         api_key: "sk-test",
@@ -1092,6 +1174,8 @@ defmodule FermixCore.Realtime.SessionServerTest do
     {:ok, pid} =
       SessionServer.start_link(
         companion: self(),
+        endpoint: :desktop,
+        call_lease: CallLeases.own!(),
         config: Config.normalize(enabled: true),
         openai_client: FakeOpenAIClient,
         api_key: "sk-test",
@@ -1124,6 +1208,8 @@ defmodule FermixCore.Realtime.SessionServerTest do
     {:ok, pid} =
       SessionServer.start_link(
         companion: self(),
+        endpoint: :desktop,
+        call_lease: CallLeases.own!(),
         config: Config.normalize(enabled: true),
         openai_client: FakeOpenAIClient,
         api_key: "sk-test",
@@ -1224,6 +1310,8 @@ defmodule FermixCore.Realtime.SessionServerTest do
     {:ok, server} =
       SessionServer.start_link(
         companion: self(),
+        endpoint: :desktop,
+        call_lease: CallLeases.own!(),
         config: Config.normalize(enabled: true),
         openai_client: FakeOpenAIClient,
         api_key: "sk-test",
@@ -1300,6 +1388,8 @@ defmodule FermixCore.Realtime.SessionServerTest do
     {:ok, server} =
       SessionServer.start_link(
         companion: self(),
+        endpoint: :desktop,
+        call_lease: CallLeases.own!(),
         config: Config.normalize(enabled: true),
         openai_client: FakeOpenAIClient,
         api_key: "sk-test",
@@ -1342,6 +1432,8 @@ defmodule FermixCore.Realtime.SessionServerTest do
     {:ok, pid} =
       SessionServer.start_link(
         companion: self(),
+        endpoint: :desktop,
+        call_lease: CallLeases.own!(),
         config: Config.normalize(enabled: true, persist_transcripts: true),
         openai_client: FakeOpenAIClient,
         api_key: "sk-test",
@@ -1375,6 +1467,8 @@ defmodule FermixCore.Realtime.SessionServerTest do
       {:ok, server} =
         SessionServer.start_link(
           companion: self(),
+          endpoint: :desktop,
+          call_lease: CallLeases.own!(),
           config: Config.normalize(enabled: true),
           openai_client: ProgrammableOpenAIClient,
           api_key: "sk-test",
@@ -1416,6 +1510,8 @@ defmodule FermixCore.Realtime.SessionServerTest do
       {:ok, server} =
         SessionServer.start_link(
           companion: self(),
+          endpoint: :desktop,
+          call_lease: CallLeases.own!(),
           config: Config.normalize(enabled: true),
           openai_client: ProgrammableOpenAIClient,
           api_key: "sk-test",
@@ -1452,6 +1548,8 @@ defmodule FermixCore.Realtime.SessionServerTest do
       {:ok, server} =
         SessionServer.start_link(
           companion: self(),
+          endpoint: :desktop,
+          call_lease: CallLeases.own!(),
           config: Config.normalize(enabled: true),
           openai_client: ProgrammableOpenAIClient,
           api_key: "sk-test",
@@ -1482,6 +1580,8 @@ defmodule FermixCore.Realtime.SessionServerTest do
       {:ok, server} =
         SessionServer.start_link(
           companion: self(),
+          endpoint: :desktop,
+          call_lease: CallLeases.own!(),
           config: Config.normalize(enabled: true),
           openai_client: ProgrammableOpenAIClient,
           api_key: "sk-test",
@@ -1835,6 +1935,8 @@ defmodule FermixCore.Realtime.SessionServerTest do
       {:ok, server} =
         SessionServer.start_link(
           companion: self(),
+          endpoint: :desktop,
+          call_lease: CallLeases.own!(),
           config: Config.normalize(enabled: true),
           openai_client: FakeOpenAIClient,
           api_key: "sk-test",
@@ -2049,6 +2151,8 @@ defmodule FermixCore.Realtime.SessionServerTest do
     {:ok, pid} =
       SessionServer.start_link(
         companion: self(),
+        endpoint: :desktop,
+        call_lease: CallLeases.own!(),
         config: Config.normalize(enabled: true),
         openai_client: FakeOpenAIClient,
         api_key: "sk-test",
@@ -2194,6 +2298,8 @@ defmodule FermixCore.Realtime.SessionServerTest do
   defp start_reconnecting_server(backoff_ms, opts \\ []) do
     defaults = [
       companion: self(),
+      endpoint: :desktop,
+      call_lease: CallLeases.own!(),
       config: Config.normalize(enabled: true),
       openai_client: ProgrammableOpenAIClient,
       api_key: "sk-test",

@@ -15,11 +15,14 @@ defmodule FermixCore.Home.LocalReturnTest do
   alias FermixCore.Home.LocalReturn
   alias FermixCore.Home.Moved
   alias FermixCore.Home.MoveTelemetry
+  alias FermixCore.Home.Readable
+  alias FermixCore.Home.Return
   alias FermixCore.Home.Role
   alias FermixCore.Home.Snapshot
   alias FermixCore.Home.Snapshot.Capture
   alias FermixCore.Home.Snapshot.Format
   alias FermixCore.Home.Snapshot.Recipient
+  alias FermixTestSupport.CraftedSnapshot
   alias FermixTestSupport.SafeRm
   alias FermixTestSupport.TelemetryCapture
 
@@ -91,6 +94,11 @@ defmodule FermixCore.Home.LocalReturnTest do
     # The copy itself stays, as every copy this computer keeps does.
     assert File.exists?(chosen.path)
 
+    # Review m3: the return's record names the copy put in place, which the
+    # primary it made tells once.
+    assert {:ok, %{restored: restored, from: "north-box"}} = Return.read(ctx.mac)
+    assert restored == chosen.name
+
     assert_received {:telemetry, _event, _measurements,
                      %{phase: :started, side: :candidate, move_id: "local-" <> stamp}}
 
@@ -121,6 +129,25 @@ defmodule FermixCore.Home.LocalReturnTest do
 
     assert {:ok, %{role: :device}} = Role.configured(ctx.mac)
     assert {:ok, _marker} = Moved.read(ctx.mac)
+    assert Return.read(ctx.mac) == :absent
+  end
+
+  # M97 D16: a copy in a newer format than this computer's Fermix reads is
+  # refused before anything is written, and the owner reads what to do.
+  test "a copy in a newer format says to update Fermix on this computer first", ctx do
+    {:ok, pair} = Recipient.from_passphrase(@passphrase)
+    File.mkdir_p!(Capture.dir(ctx.mac))
+    path = Path.join(Capture.dir(ctx.mac), Snapshot.name(~U[2031-06-01 02:00:00Z], 5))
+    newer = Readable.home_format() + 1
+    CraftedSnapshot.write!(path, Recipient.public(pair), ctx.server, home_format: newer)
+    {:ok, chosen} = LocalReturn.choose(ctx.mac, @passphrase)
+
+    assert LocalReturn.restore(ctx.mac, Map.put(chosen, :from, "north-box"), opts()) ==
+             {:error, {:refused, Readable.refusal_sentence()}}
+
+    refute_received :restarted
+    assert {:ok, %{role: :device}} = Role.configured(ctx.mac)
+    refute File.exists?(Candidate.staging_path(ctx.mac))
   end
 
   test "an engine that would not start again on its own is refused before anything", ctx do

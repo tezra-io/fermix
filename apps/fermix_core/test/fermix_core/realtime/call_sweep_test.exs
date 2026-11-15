@@ -95,9 +95,13 @@ defmodule FermixCore.Realtime.CallSweepTest do
   end
 
   # A boot step, not a service: the pass runs once and the process stops normally.
+  # Its end is read from the link start_link makes as it spawns, never from a
+  # monitor taken after: with nothing to sweep the pass can finish before a
+  # monitor lands, which then answers :noproc and says nothing of the reason.
   defp run_sweep(repo) do
+    trapping = Process.flag(:trap_exit, true)
     {:ok, sweep} = CallSweep.start_link(record_repo: repo)
-    ref = Process.monitor(sweep)
-    assert_receive {:DOWN, ^ref, :process, ^sweep, :normal}, 5_000
+    assert_receive {:EXIT, ^sweep, :normal}, 5_000
+    Process.flag(:trap_exit, trapping)
   end
 end

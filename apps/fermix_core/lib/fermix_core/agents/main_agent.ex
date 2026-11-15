@@ -149,11 +149,11 @@ defmodule FermixCore.Agents.MainAgent do
         Keyword.get(opts, :capability_registry, FermixCore.Capabilities.Registry),
       adapter_overrides: adapter_overrides,
       ordered_routes: resolved_ordered_routes(opts, adapter_overrides),
-      # The platform half of the Computer History gate, resolved once (the OS
-      # does not change under a running daemon) and injectable so the pinning
-      # seam is provable on every CI leg, not only on macOS.
-      computer_history_macos?:
-        Keyword.get_lazy(opts, :computer_history_macos?, &ComputerHistory.macos?/0),
+      # Whether Computer History can surface in this home (M97 §8.3), asked at
+      # each turn, since a computer may offer it or stop: injectable so the
+      # pinning seam is provable on every CI leg.
+      computer_history_surfaces:
+        Keyword.get(opts, :computer_history_surfaces, &ComputerHistory.surfaces?/0),
       adapter: Keyword.get(opts, :adapter),
       adapter_opts: Keyword.get(opts, :adapter_opts, []),
       agent_supervisor: Keyword.get(opts, :agent_supervisor, AgentSupervisor),
@@ -436,7 +436,7 @@ defmodule FermixCore.Agents.MainAgent do
   defp memory_review?({:ok, _voice_call}), do: false
   defp memory_review?(:none), do: true
 
-  defp gate_opts(state), do: [macos?: state.computer_history_macos?]
+  defp gate_opts(state), do: [surfaces?: state.computer_history_surfaces.()]
 
   # The turn's effective chain: the Gate's pinned list, or the boot snapshot when
   # the Gate pinned nothing (history off, a non-owner turn, or the boot

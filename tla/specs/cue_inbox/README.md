@@ -544,3 +544,121 @@ pin. The task reads `job_runs`, `scheduled_jobs`, `cue_deliveries`,
 run. The cue tree is still the tree's last child, a crash of anything before
 it restarts it as before, and the task's own exit restarts nothing, so
 nothing the spec models changed.
+
+## Re-read for the computers' registry (2026-11-10)
+
+The core tree gained `Computers.Registry` (M97), a primary-only process
+between `Companion.OriginBackfill` and the snapshot scheduler that keeps what
+the home's computers offer, in files under `device/computers/`. It staled
+the `application.ex` pin. It reads and writes no delivery, watcher, run or
+proposal row. The cue tree is still the tree's last child. A crash of the
+registry restarts the snapshot scheduler and the cue tree, as a crash of the
+snapshot scheduler already did: for the dispatcher that is the filtering
+group's restart, its call tasks first, which the model takes as
+`FiltersRestart`, and `Jobs.Scheduler`, before it, is untouched. Nothing the
+spec models changed; it cites no `application.ex` line.
+
+## Re-read for the server's calls and the release table (2026-11-10)
+
+The core tree gained two primary-only processes (M97) between
+`Computers.Registry` and the snapshot scheduler: `Computers.Calls`, the
+invocations the server waits on from the home's computers, and
+`Home.ReleaseTable`, the release table an Always On server's update chooses
+from. It staled the `application.ex` pin. Neither reads or writes a
+delivery, watcher, run or proposal row. The cue tree is still the tree's
+last child. A crash of either restarts the snapshot scheduler and the cue
+tree, as a crash of the registry or the snapshot scheduler already did,
+which the model takes as `FiltersRestart`; `Jobs.Scheduler`, before them, is
+untouched. Nothing the spec models changed; it cites no `application.ex`
+line.
+
+## Re-read for a computer's screen and Messages (2026-11-11)
+
+The server's use of a computer's screen and Messages (M97 §6.4,
+`26196634`) staled the `proposals.ex` and `application.ex` pins:
+- `proposals.ex`: a proposal's card goes to the inbox
+  `OwnerInbox.for_approval/1` picks (`owner_dm`), no longer `resolve/1`'s.
+  It keeps `resolve/1`'s order except that iMessage carried by a computer
+  comes after every inbox on this engine and is never picked while that
+  computer is asleep or offline; with no inbox left the proposal is refused
+  as before. Which chat is picked is not modelled: `OwnerConfirm(right)`
+  takes the chat the card was sent to, and `decide_waiting` still fences on
+  the `sent_platform`, chat and user written with it, so the confirm and the
+  proposal's states are as before.
+- `application.ex`: the computer-use supervisor now also starts on an engine
+  that drives a computer's screen or has its own driven by its server, and
+  `ComputerUse.Seat` joins the tree beside it on a linked computer. Both
+  start before the cue tree, which is still the tree's last child, so a
+  crash of either restarts the cue tree, which the model takes as
+  `FiltersRestart`, and `Jobs.Scheduler`, before them, is untouched.
+  Neither reads or writes a delivery, watcher, run or proposal row.
+
+Nothing the spec models changed; it cites no `application.ex` or
+`proposals.ex` line the change moved.
+
+## Re-read for computer history on every computer (2026-11-11)
+
+Computer history from every computer (M97 §8.1, `826ba83a`) staled the
+`application.ex` pin. The computer-history supervisor is now started with the
+engine's role: on every primary, whatever its platform (a Linux server
+included, where it was absent before), and on a device only where this system
+has a recorder. It keeps its place, after `Jobs.Scheduler` and the temporal
+rail and before the cue tree, which is still the tree's last child, so a
+crash of it restarts the cue tree, which the model takes as
+`FiltersRestart`, and `Jobs.Scheduler`, before it, is untouched. It reads and
+writes no delivery, watcher, run or proposal row. Nothing the spec models
+changed; it cites no `application.ex` line the change moved.
+
+## Re-read for the review's fixes (2026-11-11)
+
+`c6fe1c48` staled the `application.ex` pin with two comments inside
+`supervision_children`: the computers' record is rebuilt by asking each open
+session again, and the computer-history store failing to open never stops
+the tree. No child moved, so nothing the spec models changed, and it cites
+no `application.ex` line the change moved.
+
+## Re-read for the Always On pane's engine half (2026-11-12)
+
+`8e3f586f` staled the `application.ex` pin: `Home.MoveProgress` joins the
+core tree before the computers' registry, and so before the cue tree, which
+is still the tree's last child. On a primary nothing writes to it (a move
+runs on a device, a candidate's tree has none), and its callbacks cannot
+fail; were it to crash, the cue tree restarts after it, which the model
+takes as `FiltersRestart`, as for the children before it. Nothing the spec
+models changed, and it cites no line the change moved.
+
+## Re-read for the place-search pacer (2026-11-14)
+
+`supervision_children` gains `PlaceSearch.Brave.Pacer` right after
+`ReplyBlocks` (M89 D13, `eb5fc530`), early in the tree and long before the cue
+subtree, which keeps its place after `Jobs.Scheduler` and the temporal rail.
+Were the pacer to crash, the cue tree restarts after it, which the model takes
+as `FiltersRestart`, as for the children before it. Nothing the spec models
+changed, and it cites no `application.ex` line.
+
+## Re-read for the trip placer (2026-11-14)
+
+`supervision_children` gains `Trips.Placer` after `Computers.Calls` and
+before `Home.ReleaseTable` (M89 D13 B, `d4f5e1f3`), primary-only: it places
+the trip stops that wait for their place, runs each pass in a task linked to
+it, and raises on nothing it is sent, so a crash of it restarts only the
+children after it, the cue tree among them, which the model takes as
+`FiltersRestart`. The cue tree is still last. Nothing the spec models changed,
+and it cites no `application.ex` line.
+
+## Re-read for the trips' day turn (2026-11-14)
+
+`supervision_children` gains `Trips.DayTurn` right after `Trips.Placer`
+(M89 D14, `fad8eeea`), primary-only: it sends the trips index again at a
+day's turn, serves no call, arms one timer and raises on nothing it is sent,
+so a crash of it restarts only the children after it, the cue tree among
+them, which the model takes as `FiltersRestart`. The cue tree is still last.
+Nothing the spec models changed, and it cites no `application.ex` line.
+
+## Re-read for Always On in every build (2026-11-15)
+
+`d195aa17` staled the `application.ex` pin. Every build now serves Always
+On: the boot drops the release gate's alias, and `Home.ReleaseTable` fetches
+on an Always On server's primary with no build check, its child comment
+reworded in place. No child moved or changed order. The cue tree is still last.
+Nothing the spec models changed, and it cites no `application.ex` line.

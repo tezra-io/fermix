@@ -1,0 +1,636 @@
+defmodule FermixCore.Home.Join do
+  @moduledoc """
+  A computer joining a home that already runs (M97 §3.1, §7.5): the one
+  writer of `<home>/device/join.json`, mode `0600` under the device-local
+  `device/` (`0700`), written whole to a temporary file and renamed.
+
+      {"v": 1, "phase": "dialing", "key": "@keyring", "public": "<32 bytes>",
+       "server": {"name": "studio-mac", "gateway_pk": "<32 bytes>",
+                  "node_id": "<64 hex>", "relays": [...], "relays_rev": "<16 hex>"},
+       "secret": "<32 bytes>", "expires_at": "2031-05-04T10:30:00Z",
+       "sas": null, "sentence": null}
+
+  `start/3` (`computer.join.start`; `fermix computer join`, the code on stdin) refuses a
+  computer that has a home of its own (below), then decodes the code, which
+  must be a computer's (`EnrollmentCode`, version 2) and not expired, then
+  lets go of a link its server revoked (below), then makes this computer's
+  key in the secret store (`ComputerKey.create/2`), then writes the file
+  with the code's route and secret, then makes this engine a device
+  (`[fermix_core.engine] role`), and then restarts it, which a CLI with no
+  engine running leaves to the next start. A refusal before the letting go
+  changes nothing. A step after it that fails takes back what the join
+  itself wrote (its key and its file), never the link it let go of.
+
+  The device tree dials the server while the file is here
+  (`FermixChannels.Desktop.Join`), and records what it learns (`record/3`):
+  `dialing`, `awaiting_approval` with the six digits it shows, which the
+  owner types on the server, or
+  `denied` with the sentence that says why; the code's secret leaves the
+  file once denied. `finish/3` takes the server's approval: this
+  computer's switches, every offer off but those on by default (Apple Maps,
+  M89 D13) and reviewed, its recorder off (`Computers.Consent.none/2`, M97
+  §7.3: a computer that joins starts with every other offer off), then its
+  link
+  (`FermixCore.Home.DesktopLink`, naming the key's store), then the file
+  goes, the computer history mark an earlier home left is forgotten
+  (`Home.Unlink.forget_history_mark/1`), and the engine restarts as a
+  linked computer. `cancel/2` ends a join wherever it stands: the key and
+  the file go, the engine is the primary of its own home again, and it
+  restarts.
+
+  **A home of its own** (M97 §17): a home that holds any message, memory,
+  scheduled job or computer history note, a paired phone or computer, the
+  moved marker, or a link to a server (but one its server revoked, below). A
+  memory that only repeats the home's settings is not one: every save of
+  the settings, and the first start's own
+  seed (`Setup.HomeSeeder`), writes the owner's name, time zone and
+  communication style and the agent's name into memory as well
+  (`Prompt.SetupSeeder.setting_memories/2`), so a row that still says
+  exactly that, with no source, session or run and not archived, is a
+  setting; one a conversation saved or changed says something else and
+  counts. The files a first start writes and nothing
+  uses, those rows among them, are left as they are: nothing is deleted to
+  make a home empty. A device opens no `memory.db` (`Home.Role`), the
+  server never reads one (it is a protected path in every sandbox mode), a
+  move back never lands on a computer that joined (it has no moved marker),
+  and after a disconnect the computer is the primary of this home again,
+  whose settings they are.
+
+  **A link its server revoked** is no home of its own (PROTOCOL.md's
+  `mobile.devices.revoke`: a removed computer joins again with a code). That
+  server no longer knows this computer (the owner removed it, or it was
+  restored from a snapshot taken before this computer joined it), so the link
+  reaches nothing; the relay keeps the server's word in it (`DesktopLink`'s
+  `revoked`), the one record of it, which the summary reads too, Fermix
+  running or stopped. Once the code is one this computer can join with, the
+  join lets go of that link here as a disconnect does
+  (`Home.Unlink.let_go/4`, `:revoked`): the relay stops first, and only
+  while its link still holds that word (one whose session came up since,
+  its server knowing this computer again, keeps its link, and the join is
+  refused as for any link to a server); then the key, what the server may
+  use here, the role back to the primary's (`Home.Unlink.role_after/1`),
+  the link and the history mark go; then it joins. A code it cannot join
+  with leaves the link as it is. A letting go that fails part-way leaves
+  the link, and the next join finishes it; once the link went, a later step
+  that fails leaves this computer as a disconnect would, the primary of its
+  own home with no link. The computer a home moved from is refused by its
+  moved marker first, so its link and its own copies of the server's
+  backups stay.
+
+  `opts`: `:now` (a `DateTime`), `:restart` (0-arity, in place of
+  `Management.Lifecycle.restart_self/0`; a CLI passes one that does
+  nothing), `:release` (handed to `Home.Unlink.let_go/4`; a CLI, where no
+  relay runs, passes one that stops nothing), and `:key_opts` (handed to
+  `ComputerKey`: `supervised: false` for a caller with no engine tree, and
+  the secret writer's test seams).
+  """
+
+  require Logger
+
+  alias Exqlite.Sqlite3
+  alias FermixCore.Computers.Consent
+  alias FermixCore.Home.ComputerKey
+  alias FermixCore.Home.DesktopLink
+  alias FermixCore.Home.EnrollmentCode
+  alias FermixCore.Home.Moved
+  alias FermixCore.Home.Unlink
+  alias FermixCore.Management.Lifecycle
+  alias FermixCore.Prompt.SetupSeeder
+  alias FermixCore.Setup.ConfigStore
+  alias FermixCore.Setup.SecretWriter
+
+  @dir "device"
+  @file_name "join.json"
+  @version 1
+  @file_mode 0o600
+  @dir_mode 0o700
+  @phases ~w(dialing awaiting_approval denied)
+  # What a home holds in memory.db that makes it a home of its own: any row,
+  # but of its memories only those that do not repeat its settings.
+  @own_tables [
+    messages: "messages",
+    memories: "memories",
+    scheduled_jobs: "scheduled jobs",
+    computer_history_memories: "computer history"
+  ]
+
+  @type phase :: String.t()
+  @type state :: %{required(String.t()) => term()}
+  @type error ::
+          :computer_join_running
+          | :not_joining
+          | {:home_of_its_own, String.t()}
+          | {:invalid_code, String.t()}
+          | {:code_purpose, EnrollmentCode.purpose()}
+          | :code_expired
+          | {:computer_key, ComputerKey.error()}
+          | {:link, DesktopLink.error()}
+          | {:revoked_link, Unlink.error()}
+          | {:file, Path.t(), term()}
+          | {:invalid_join, Path.t()}
+          | {:config, term()}
+
+  @doc "Where the join is kept under `home`."
+  @spec path(Path.t()) :: Path.t()
+  def path(home) when is_binary(home) and home != "", do: Path.join([home, @dir, @file_name])
+
+  @doc "Whether `home` is joining a home (its file is here)."
+  @spec present?(Path.t()) :: boolean()
+  def present?(home) when is_binary(home) and home != "", do: File.regular?(path(home))
+
+  @doc "Every phase the file may hold."
+  @spec phases() :: [phase()]
+  def phases, do: @phases
+
+  @doc "Joins the home a computer's `code` names (see the moduledoc)."
+  @spec start(Path.t(), String.t(), keyword()) :: :ok | {:error, error()}
+  def start(home, code, opts \\ [])
+      when is_binary(home) and home != "" and is_binary(code) and is_list(opts) do
+    with :ok <- not_joining(home),
+         {:ok, revoked} <- standing(home),
+         {:ok, facts} <- computer_code(code, now(opts)),
+         :ok <- let_go(home, revoked, opts),
+         {:ok, keypair, store} <- new_key(home, opts),
+         state = initial(facts, keypair, store),
+         :ok <- undo_unless(write_state(home, state), home, state, opts),
+         :ok <- undo_unless(device_role(home), home, state, opts) do
+      restart(opts)
+    end
+  end
+
+  @doc "The join under `home`: its state, `:absent`, or why it cannot be read."
+  @spec read(Path.t()) :: {:ok, state()} | :absent | {:error, error()}
+  def read(home) when is_binary(home) and home != "" do
+    file = path(home)
+
+    with {:ok, text} <- read_file(file),
+         {:ok, %{"v" => @version, "phase" => phase} = state} when phase in @phases <-
+           Jason.decode(text) do
+      {:ok, state}
+    else
+      :absent -> :absent
+      {:error, {:file, _file, _reason}} = error -> error
+      _not_a_join -> {:error, {:invalid_join, file}}
+    end
+  end
+
+  @doc """
+  Records `phase` with `fields` (string keys: `sas`, `sentence`) over what the
+  file holds; a denial takes the code's secret off the disk.
+  """
+  @spec record(Path.t(), phase(), map()) :: :ok | {:error, error()}
+  def record(home, phase, fields) when phase in @phases and is_map(fields) do
+    with {:ok, state} <- read_present(home) do
+      state = state |> Map.merge(fields) |> Map.put("phase", phase)
+      write_state(home, if(phase == "denied", do: Map.put(state, "secret", nil), else: state))
+    end
+  end
+
+  @doc "Ends the join wherever it stands (see the moduledoc)."
+  @spec cancel(Path.t(), keyword()) :: :ok | {:error, error()}
+  def cancel(home, opts \\ []) when is_binary(home) and home != "" and is_list(opts) do
+    with {:ok, state} <- read_present(home),
+         :ok <- forget_key(home, state, opts),
+         :ok <- remove_file(path(home)),
+         :ok <- config(ConfigStore.put_engine_role(home, :primary)) do
+      restart(opts)
+    end
+  end
+
+  @doc """
+  Takes the server's approval (`join_approved`'s fields): this computer's
+  switches, every offer off but Apple Maps and its recorder off, then its link, then the
+  file goes and the engine restarts as a linked computer.
+  """
+  @spec finish(Path.t(), map(), keyword()) :: :ok | {:error, error()}
+  def finish(home, %{"device_id" => _id, "primary" => _primary} = approved, opts \\ [])
+      when is_binary(home) and home != "" and is_list(opts) do
+    with {:ok, state} <- read_present(home),
+         {:ok, store} <- recorded_store(state),
+         :ok <- config(Consent.none(home)),
+         :ok <- link(DesktopLink.write(home, link_of(approved, state, store))),
+         :ok <- remove_file(path(home)) do
+      :ok = Unlink.forget_history_mark(home)
+      restart(opts)
+    end
+  end
+
+  @doc """
+  The join as `home.status` shows it on the computer that joins: its phase,
+  the server's name, the six digits once the server answered (shown here
+  alone, for the owner to type on the server), and the sentence; nil when no
+  join is under way.
+  """
+  @spec view(Path.t()) :: map() | nil
+  def view(home) when is_binary(home) and home != "" do
+    case read(home) do
+      {:ok, state} -> view_of(state)
+      _absent_or_unreadable -> nil
+    end
+  end
+
+  defp view_of(state) do
+    %{
+      "phase" => state["phase"],
+      "server" => get_in(state, ["server", "name"]),
+      "sas" => state["sas"],
+      "sentence" => state["sentence"] || phase_sentence(state)
+    }
+  end
+
+  defp phase_sentence(%{"phase" => "dialing", "server" => %{"name" => name}}),
+    do: "Connecting to your Fermix on #{name}."
+
+  defp phase_sentence(%{"phase" => "awaiting_approval", "server" => %{"name" => name}}),
+    do: "Waiting for you to add this computer on #{name}."
+
+  defp phase_sentence(_state), do: "This computer was not added to your Fermix."
+
+  @doc "The sentence a person is shown for an error of this module."
+  @spec error_sentence(error()) :: String.t()
+  def error_sentence(:computer_join_running),
+    do: "This computer is already joining a Fermix. Cancel that first."
+
+  def error_sentence(:not_joining), do: "This computer is not joining a Fermix."
+
+  def error_sentence({:home_of_its_own, what}),
+    do:
+      "This computer already has a Fermix of its own (it holds #{what}), so it cannot join " <>
+        "another. Two homes cannot be merged."
+
+  def error_sentence({:invalid_code, _what}),
+    do: "That is not a code Fermix opened. Copy the code again from Add a computer."
+
+  def error_sentence({:code_purpose, :candidate}),
+    do:
+      "That code sets up a server of your own, so a computer cannot join with it. Use Add a " <>
+        "computer in Always On."
+
+  def error_sentence(:code_expired),
+    do: "That code expired. Open a new one with Add a computer."
+
+  def error_sentence({:computer_key, reason}), do: ComputerKey.error_sentence(reason)
+  def error_sentence({:link, reason}), do: DesktopLink.error_sentence(reason)
+  def error_sentence({:revoked_link, reason}), do: Unlink.error_sentence(reason)
+
+  def error_sentence({:invalid_join, _path}),
+    do: "This computer's join is not one Fermix wrote. Cancel it and join again."
+
+  def error_sentence({:file, _path, reason}) when is_atom(reason),
+    do: "Fermix could not use this computer's join (#{:file.format_error(reason)})."
+
+  def error_sentence(_reason), do: "Fermix could not keep this computer's join."
+
+  @doc """
+  Every sentence this module shows a person, for the copy rules, with
+  `server` as the server's name.
+  """
+  @spec sentences(String.t()) :: [String.t()]
+  def sentences(server) when is_binary(server) do
+    own = for {_table, words} <- @own_tables, do: {:home_of_its_own, words}
+
+    reasons =
+      own ++
+        [
+          :computer_join_running,
+          :not_joining,
+          {:home_of_its_own, "a home that moved to a server"},
+          {:home_of_its_own, "a link to a server"},
+          {:home_of_its_own, "a paired phone or computer"},
+          {:invalid_code, "v"},
+          {:code_purpose, :candidate},
+          :code_expired,
+          {:invalid_join, "join.json"},
+          {:file, "join.json", :eacces},
+          {:config, :eacces}
+        ]
+
+    phases =
+      for phase <- @phases,
+          do: phase_sentence(%{"phase" => phase, "server" => %{"name" => server}})
+
+    Enum.map(reasons, &error_sentence/1) ++ phases
+  end
+
+  # -- start ---------------------------------------------------------------------
+
+  defp not_joining(home) do
+    if present?(home), do: {:error, :computer_join_running}, else: :ok
+  end
+
+  defp computer_code(text, now) do
+    case EnrollmentCode.decode(text) do
+      {:ok, %{purpose: :computer} = facts} -> unexpired(facts, now)
+      {:ok, %{purpose: purpose}} -> {:error, {:code_purpose, purpose}}
+      {:error, {:invalid_code, _what}} = error -> error
+    end
+  end
+
+  defp unexpired(%{expires_at: at} = facts, now) do
+    if DateTime.compare(now, at) == :lt, do: {:ok, facts}, else: {:error, :code_expired}
+  end
+
+  defp new_key(home, opts) do
+    case ComputerKey.create(home, Keyword.get(opts, :key_opts, [])) do
+      {:ok, keypair, store} -> {:ok, keypair, store}
+      {:error, reason} -> {:error, {:computer_key, reason}}
+    end
+  end
+
+  defp initial(facts, keypair, store) do
+    %{
+      "v" => @version,
+      "phase" => "dialing",
+      "key" => SecretWriter.sentinel_for(store),
+      "public" => Base.encode64(keypair.public),
+      "server" => %{
+        "name" => facts.name,
+        "gateway_pk" => Base.encode64(facts.gateway_pk),
+        "node_id" => facts.node_id,
+        "relays" => facts.relays,
+        "relays_rev" => facts.relays_rev
+      },
+      "secret" => Base.encode64(facts.secret),
+      "expires_at" => DateTime.to_iso8601(facts.expires_at),
+      "sas" => nil,
+      "sentence" => nil
+    }
+  end
+
+  defp device_role(home), do: config(ConfigStore.put_engine_role(home, :device))
+
+  # The link its server revoked goes before this join makes its own key, which
+  # the old one's item would refuse (`ComputerKey`'s `in_use`). A step that
+  # fails part-way leaves the link, and the next join finishes it; once it
+  # went, a later step that fails leaves this computer its own home's primary,
+  # as a disconnect does. A relay whose session came up since keeps it: its
+  # server knows this computer again, so the link is one of its own.
+  defp let_go(_home, nil, _opts), do: :ok
+
+  defp let_go(home, link, opts) do
+    case Unlink.let_go(home, link, :revoked, Keyword.take(opts, [:key_opts, :release])) do
+      :ok -> :ok
+      {:error, :known} -> {:error, {:home_of_its_own, "a link to a server"}}
+      {:error, reason} -> {:error, {:revoked_link, reason}}
+    end
+  end
+
+  # A step that fails takes back what this join wrote before it: the key it
+  # made (its store and public key are in `state`, whether or not the file
+  # was written) and the file. The step's own error is the answer; an
+  # undo that fails as well is logged, since the next join meets what it left.
+  defp undo_unless(:ok, _home, _state, _opts), do: :ok
+
+  defp undo_unless({:error, _reason} = error, home, state, opts) do
+    for {what, {:error, reason}} <- [
+          key: forget_key(home, state, opts),
+          file: remove_file(path(home))
+        ],
+        do: Logger.error("a failed join could not take back its #{what}: #{inspect(reason)}")
+
+    error
+  end
+
+  # -- a home of its own ------------------------------------------------------------
+
+  # No home of its own, and the link its server revoked, if it holds one.
+  defp standing(home) do
+    with :ok <- not_moved(home),
+         {:ok, revoked} <- not_linked(home),
+         :ok <- no_devices(home),
+         {:ok, settings} <- setting_memories(home),
+         :ok <- no_memory(Path.join(home, "memory.db"), settings) do
+      {:ok, revoked}
+    end
+  end
+
+  defp not_moved(home) do
+    case Moved.read(home) do
+      :absent -> :ok
+      _marker_or_unreadable -> {:error, {:home_of_its_own, "a home that moved to a server"}}
+    end
+  end
+
+  # A link that cannot be read is one: only the server's word ends it.
+  defp not_linked(home) do
+    case DesktopLink.read(home) do
+      {:error, {:file, _path, :enoent}} -> {:ok, nil}
+      {:ok, %{revoked: true} = link} -> {:ok, link}
+      _known_or_unread -> {:error, {:home_of_its_own, "a link to a server"}}
+    end
+  end
+
+  defp no_devices(home) do
+    file = Path.join([home, "mobile", "devices.toml"])
+
+    case File.read(file) do
+      {:error, :enoent} -> :ok
+      {:ok, text} -> paired(TomlElixir.decode(text), file)
+      {:error, reason} -> {:error, {:file, file, reason}}
+    end
+  end
+
+  defp paired({:ok, %{"devices" => [_ | _]}}, _file),
+    do: {:error, {:home_of_its_own, "a paired phone or computer"}}
+
+  defp paired({:ok, _none}, _file), do: :ok
+  defp paired({:error, _reason}, file), do: {:error, {:file, file, :invalid_devices}}
+
+  # The memory rows the home's settings make (see the moduledoc), from its
+  # settings file, read as an engine would read it.
+  defp setting_memories(home) do
+    case ConfigStore.personalization_config(home) do
+      {:ok, %{personalization: personalization, agent_name: agent_name}} ->
+        {:ok, SetupSeeder.setting_memories(personalization, agent_name)}
+
+      {:error, reason} ->
+        {:error, {:config, reason}}
+    end
+  end
+
+  # Read-only: an engine running in this home keeps its own connection, and
+  # a reader sees what it committed (the WAL included).
+  defp no_memory(db, settings) do
+    if File.regular?(db) do
+      case Sqlite3.open(db, mode: :readonly) do
+        {:ok, conn} -> close_after(conn, first_rows(conn, settings))
+        {:error, reason} -> {:error, {:file, db, reason}}
+      end
+    else
+      :ok
+    end
+  end
+
+  defp close_after(conn, result) do
+    :ok = Sqlite3.close(conn)
+    result
+  end
+
+  defp first_rows(conn, settings) do
+    Enum.reduce_while(@own_tables, :ok, fn {table, words}, :ok ->
+      case rows?(conn, table, settings) do
+        {:ok, false} -> {:cont, :ok}
+        {:ok, true} -> {:halt, {:error, {:home_of_its_own, words}}}
+        {:error, _reason} = error -> {:halt, error}
+      end
+    end)
+  end
+
+  # A table a first start has not created holds nothing.
+  defp rows?(conn, table, settings) do
+    with {:ok, [[present]]} <-
+           query(conn, "SELECT count(*) FROM sqlite_master WHERE name = ?1", [
+             Atom.to_string(table)
+           ]) do
+      cond do
+        present == 0 -> {:ok, false}
+        table == :memories -> own_memories(conn, settings)
+        true -> any_row(conn, table)
+      end
+    end
+  end
+
+  defp any_row(conn, table) do
+    with {:ok, [[found]]} <- query(conn, "SELECT EXISTS (SELECT 1 FROM #{table})", []),
+         do: {:ok, found == 1}
+  end
+
+  # Any memory row but one that repeats a setting exactly: in a setting's
+  # scope (the owner's id for the owner's, the agent's for the agent's),
+  # category, key, value and prompt file, with no source, session or run, and
+  # not archived. A column that is null where a setting has a value is not
+  # that setting (`COALESCE`), so it counts.
+  defp own_memories(conn, settings) do
+    rows = Enum.map_join(settings, ", ", fn _setting -> "(?, ?, ?, ?, ?)" end)
+
+    sql = """
+    SELECT EXISTS (SELECT 1 FROM memories WHERE COALESCE(
+      source_message_id IS NULL AND source_id IS NULL AND source_type IS NULL
+      AND source_name IS NULL AND source_description IS NULL AND session_id IS NULL
+      AND run_id IS NULL AND archived_at IS NULL
+      AND scope_id = CASE scope_type WHEN 'owner' THEN owner_id WHEN 'agent' THEN agent_id END
+      AND (scope_type, category, key, value, promote_target) IN (VALUES #{rows}), 0) = 0)
+    """
+
+    args =
+      Enum.flat_map(settings, &[&1.scope_type, &1.category, &1.key, &1.value, &1.promote_target])
+
+    with {:ok, [[found]]} <- query(conn, sql, args), do: {:ok, found == 1}
+  end
+
+  defp query(conn, sql, args) do
+    with {:ok, statement} <- Sqlite3.prepare(conn, sql) do
+      result =
+        with :ok <- Sqlite3.bind(statement, args), do: Sqlite3.fetch_all(conn, statement)
+
+      :ok = Sqlite3.release(conn, statement)
+      result
+    end
+  end
+
+  # -- finish and cancel --------------------------------------------------------------
+
+  defp link_of(approved, state, store) do
+    primary = approved["primary"]
+    {:ok, gateway_pk} = Base.decode64(state["server"]["gateway_pk"])
+
+    %{
+      device_id: approved["device_id"],
+      key: store,
+      primary: %{
+        name: primary["name"],
+        gateway_pk: gateway_pk,
+        node_id: primary["node_id"],
+        relays: primary["relays"],
+        relays_rev: primary["relays_rev"],
+        addrs: Map.get(primary, "addrs", [])
+      },
+      epoch: approved["primary_epoch"]
+    }
+  end
+
+  defp recorded_store(%{"key" => sentinel}) do
+    case SecretWriter.store_of_sentinel(sentinel) do
+      {:ok, store} -> {:ok, store}
+      _unknown -> {:error, {:computer_key, {:invalid, :keyring}}}
+    end
+  end
+
+  # Only the key this join made: another home's under the same profile stays.
+  defp forget_key(home, state, opts) do
+    with {:ok, store} <- recorded_store(state),
+         {:ok, public} <- public_of(state) do
+      key_opts = [public: public] ++ Keyword.get(opts, :key_opts, [])
+
+      case ComputerKey.delete(home, store, key_opts) do
+        :ok -> :ok
+        {:error, reason} -> {:error, {:computer_key, reason}}
+      end
+    end
+  end
+
+  defp public_of(%{"public" => encoded}) do
+    case Base.decode64(encoded || "") do
+      {:ok, <<_::256>> = public} -> {:ok, public}
+      _invalid -> {:error, {:computer_key, {:invalid, :keyring}}}
+    end
+  end
+
+  # -- the file --------------------------------------------------------------------
+
+  defp read_present(home) do
+    case read(home) do
+      {:ok, state} -> {:ok, state}
+      :absent -> {:error, :not_joining}
+      {:error, _reason} = error -> error
+    end
+  end
+
+  defp read_file(file) do
+    case File.read(file) do
+      {:ok, text} -> {:ok, text}
+      {:error, :enoent} -> :absent
+      {:error, reason} -> {:error, {:file, file, reason}}
+    end
+  end
+
+  defp write_state(home, state) do
+    file = path(home)
+    tmp = file <> ".tmp"
+
+    with :ok <- dir(Path.dirname(file)),
+         :ok <- file_op(File.write(tmp, Jason.encode!(state)), tmp),
+         :ok <- file_op(File.chmod(tmp, @file_mode), tmp),
+         :ok <- file_op(File.rename(tmp, file), file) do
+      :ok
+    else
+      {:error, _reason} = error ->
+        _ = File.rm(tmp)
+        error
+    end
+  end
+
+  defp dir(dir) do
+    with :ok <- file_op(File.mkdir_p(dir), dir), do: file_op(File.chmod(dir, @dir_mode), dir)
+  end
+
+  defp remove_file(file) do
+    case File.rm(file) do
+      :ok -> :ok
+      {:error, :enoent} -> :ok
+      {:error, reason} -> {:error, {:file, file, reason}}
+    end
+  end
+
+  defp file_op(:ok, _path), do: :ok
+  defp file_op({:error, reason}, path), do: {:error, {:file, path, reason}}
+
+  defp config(:ok), do: :ok
+  defp config({:error, reason}), do: {:error, {:config, reason}}
+
+  defp link(:ok), do: :ok
+  defp link({:error, reason}), do: {:error, {:link, reason}}
+
+  defp restart(opts), do: Keyword.get(opts, :restart, &Lifecycle.restart_self/0).()
+  defp now(opts), do: Keyword.get_lazy(opts, :now, &DateTime.utc_now/0)
+end

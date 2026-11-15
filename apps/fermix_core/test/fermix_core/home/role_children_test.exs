@@ -23,7 +23,9 @@ defmodule FermixCore.Home.RoleChildrenTest do
     FermixCore.Plugins.Dist.Reinstall,
     FermixCore.Companion.OriginBackfill,
     FermixCore.Memory.Repo,
-    FermixCore.Prompt.TemplateReconciler
+    FermixCore.Prompt.TemplateReconciler,
+    FermixCore.Trips.Placer,
+    FermixCore.Trips.DayTurn
   ]
 
   @kept_here [
@@ -61,7 +63,12 @@ defmodule FermixCore.Home.RoleChildrenTest do
   defp module({module, _arg}), do: module
   defp module(module) when is_atom(module), do: module
 
-  defp tree(role), do: CoreApplication.supervision_children(Egress.new([]), role)
+  defp full_tree(role), do: CoreApplication.supervision_children(Egress.new([]), role)
+
+  # The tree less the history rail, the one child whose presence the platform
+  # decides (asserted for both systems below), so the trees compare alike on
+  # any host.
+  defp tree(role), do: Enum.reject(full_tree(role), &(module(&1) == ComputerHistorySupervisor))
 
   test "the primary starts the primary-only children this boot declares" do
     primary = modules(tree(:primary))
@@ -90,15 +97,37 @@ defmodule FermixCore.Home.RoleChildrenTest do
     assert Role.children(@kept_elsewhere, :device) == @kept_elsewhere
   end
 
+  # M97 §8.1, §8.3: the history rail is offered on every home, and on a computer
+  # only where its system has a recorder (a Mac): a Linux computer records
+  # nothing and starts none of it.
+  test "the history rail runs on every home, and on a computer only where it records" do
+    rail = [ComputerHistorySupervisor]
+    assert ComputerHistorySupervisor in modules(full_tree(:primary))
+
+    for recorder? <- [true, false] do
+      assert modules(CoreApplication.maybe_computer_history_supervisor(:primary, recorder?)) ==
+               rail
+    end
+
+    assert modules(CoreApplication.maybe_computer_history_supervisor(:device, true)) == rail
+    assert CoreApplication.maybe_computer_history_supervisor(:device, false) == []
+  end
+
   # A device's database is a retired copy, which a return replaces in place
   # while the device engine runs (Always On's move back): a device opens it
-  # never, so nothing it starts captures into it, purges it, migrates it or
-  # fills in its timeline.
-  test "a device opens no database: no repo, no template pass, no screen capture or purge" do
+  # never, so nothing it starts migrates it or fills in its timeline. Computer
+  # history records into the machine's own store on every engine with a
+  # recorder (M97 §8.1, D9), so on a Mac its recorder, retention and scheduler
+  # run on a device too, with no home store: a computer keeps no notes and rolls
+  # nothing up. A Linux computer has no recorder, so none of it starts there.
+  test "a device opens no database, and records history into its own store" do
     database = [
       FermixCore.Memory.Repo,
       FermixCore.Prompt.TemplateReconciler,
-      FermixCore.Companion.OriginBackfill,
+      FermixCore.Companion.OriginBackfill
+    ]
+
+    history = [
       FermixCore.ComputerHistory.Capturer,
       FermixCore.ComputerHistory.Retention,
       FermixCore.ComputerHistory.Summarizer.Scheduler
@@ -107,22 +136,32 @@ defmodule FermixCore.Home.RoleChildrenTest do
     assert Role.children(database, :primary) == database
     assert Role.children(database, :device) == []
     refute Enum.any?(modules(tree(:device)), &(&1 in database))
+    assert Role.children(history, :device) == history
 
-    assert ComputerHistoryController.default_children(:device) == []
+    names = &Enum.map(ComputerHistoryController.default_children(&1), fn child -> child.name end)
+    assert names.(:device) == history -- [FermixCore.ComputerHistory.Retention]
+    assert names.(:primary) == history -- [FermixCore.ComputerHistory.Retention]
 
-    assert Enum.map(ComputerHistoryController.default_children(:primary), & &1.name) == [
-             FermixCore.ComputerHistory.Capturer,
-             FermixCore.ComputerHistory.Summarizer.Scheduler
-           ]
+    [_capturer, %{spec: {_scheduler, device_opts}}] =
+      ComputerHistoryController.default_children(:device)
 
-    assert history_children(:device) == [DynamicSupervisor, ComputerHistoryController]
+    assert Keyword.fetch!(device_opts, :repo) == nil
 
-    assert history_children(:primary) ==
-             [DynamicSupervisor, ComputerHistoryController, FermixCore.ComputerHistory.Retention]
+    expected = [
+      FermixCore.ComputerHistory.Spool,
+      DynamicSupervisor,
+      ComputerHistoryController,
+      FermixCore.ComputerHistory.Retention
+    ]
+
+    assert history_children(:device) == expected
+    assert history_children(:primary) == expected
+    assert ComputerHistorySupervisor.init(engine_role: :device, recorder?: false) == :ignore
   end
 
+  # The rail's children on a system with a recorder (a Mac).
   defp history_children(role) do
-    {:ok, {_flags, children}} = ComputerHistorySupervisor.init(engine_role: role)
+    {:ok, {_flags, children}} = ComputerHistorySupervisor.init(engine_role: role, recorder?: true)
     Enum.map(children, fn %{start: {module, _function, _args}} -> module end)
   end
 

@@ -1,6 +1,7 @@
 defmodule FermixCore.Home.DesktopLinkTest do
-  # M75 §3, §6: the two files that make a device-role engine a desktop of its
-  # primary, as the move worker writes them and the relay reads them.
+  # M75 §3, §6: the file that makes a device-role engine a desktop of its
+  # primary, as the move worker writes it and the relay reads it, and which
+  # secret store holds the desktop's key (M97 §7.5).
   use ExUnit.Case, async: true
 
   alias FermixCore.Home.DesktopLink
@@ -8,14 +9,17 @@ defmodule FermixCore.Home.DesktopLinkTest do
 
   @link %{
     device_id: "6f1e2d3c-4b5a-4968-8778-695a4b3c2d1e",
+    key: :keyring,
     primary: %{
       name: "fermix-vm",
       gateway_pk: <<7::256>>,
       node_id: String.duplicate("ab", 32),
       relays: [%{"url" => "https://relay.invalid/", "quic_port" => 7842}],
-      relays_rev: "0123456789abcdef"
+      relays_rev: "0123456789abcdef",
+      addrs: ["100.101.102.103:4033", "[fd7a:115c:a1e0::9]:4033"]
     },
-    epoch: 4
+    epoch: 4,
+    revoked: false
   }
 
   setup do
@@ -34,7 +38,8 @@ defmodule FermixCore.Home.DesktopLinkTest do
     assert Bitwise.band(dir_mode, 0o777) == 0o700
 
     on_disk = home |> DesktopLink.path() |> File.read!() |> Jason.decode!()
-    assert on_disk["v"] == 1
+    assert on_disk["v"] == 2
+    assert on_disk["key"] == "@keyring"
     assert on_disk["primary_epoch"] == 4
     assert on_disk["primary"]["gateway_pk"] == Base.encode64(<<7::256>>)
   end
@@ -45,13 +50,22 @@ defmodule FermixCore.Home.DesktopLinkTest do
     good = path |> File.read!() |> Jason.decode!()
 
     for {field, broken} <- [
-          {:v, Map.put(good, "v", 2)},
+          {:v, Map.put(good, "v", 3)},
+          {:key, Map.put(good, "key", "@vault")},
+          {:key, Map.delete(good, "key")},
           {:device_id, Map.put(good, "device_id", "desk")},
           {:primary_epoch, Map.put(good, "primary_epoch", 0)},
           {:node_id, put_in(good, ["primary", "node_id"], "AB")},
           {:gateway_pk, put_in(good, ["primary", "gateway_pk"], "short")},
           {:relays, put_in(good, ["primary", "relays"], [%{"url" => "http://x/"}])},
-          {:name, put_in(good, ["primary", "name"], "two\nlines")}
+          {:name, put_in(good, ["primary", "name"], "two\nlines")},
+          {:addrs, put_in(good, ["primary", "addrs"], ["100.101.102.103"])},
+          {:addrs, put_in(good, ["primary", "addrs"], ["100.101.102.103:0"])},
+          {:addrs, put_in(good, ["primary", "addrs"], ["fd7a:115c:a1e0::9:4033"])},
+          {:addrs, put_in(good, ["primary", "addrs"], ["fermix-vm.ts.net:4033"])},
+          {:addrs, put_in(good, ["primary", "addrs"], List.duplicate("100.64.0.1:4033", 9))},
+          {:addrs, put_in(good, ["primary", "addrs"], nil)},
+          {:revoked, Map.put(good, "revoked", "yes")}
         ] do
       File.write!(path, Jason.encode!(broken))
       assert {:error, {:invalid_link, ^path, ^field}} = DesktopLink.read(home)
@@ -73,46 +87,103 @@ defmodule FermixCore.Home.DesktopLinkTest do
     assert {:ok, ^raised} = DesktopLink.read(home)
 
     relays = [%{"url" => "https://two.invalid/", "quic_port" => 7843}]
-    assert {:ok, routed} = DesktopLink.record_route(home, raised, {relays, "fedcba9876543210"})
+    addrs = ["100.64.7.8:4033"]
 
-    assert {:ok, %{primary: %{relays: ^relays, relays_rev: "fedcba9876543210"}}} =
+    assert {:ok, routed} =
+             DesktopLink.record_route(home, raised, {relays, "fedcba9876543210", addrs})
+
+    assert {:ok, %{primary: %{relays: ^relays, relays_rev: "fedcba9876543210", addrs: ^addrs}}} =
              DesktopLink.read(home)
 
-    assert {:ok, ^routed} = DesktopLink.record_route(home, routed, {relays, "fedcba9876543210"})
+    assert {:ok, ^routed} =
+             DesktopLink.record_route(home, routed, {relays, "fedcba9876543210", addrs})
+
+    # A server that has no hints now (its Tailscale went away) has none kept.
+    assert {:ok, %{primary: %{addrs: []}}} =
+             DesktopLink.record_route(home, routed, {relays, "fedcba9876543210", []})
+
+    assert {:ok, %{primary: %{addrs: []}}} = DesktopLink.read(home)
   end
 
-  # A replace of the server moves the home to a new server, reached at the
-  # same node id: from then on the link names the new one.
-  test "the server's name is kept when it changes, and a name it cannot be is refused",
-       %{home: home} do
+  # The relay keeps the server's word that it no longer knows this computer,
+  # so a join with a new code reads it with Fermix stopped (`Home.Join`).
+  test "a link the server revoked says so until a session comes up again", %{home: home} do
+    assert :ok = DesktopLink.write(home, Map.delete(@link, :revoked))
+    assert {:ok, %{revoked: false} = link} = DesktopLink.read(home)
+
+    assert {:ok, %{revoked: true} = revoked} = DesktopLink.record_revoked(home, link, true)
+    assert {:ok, ^revoked} = DesktopLink.read(home)
+    assert (home |> DesktopLink.path() |> File.read!() |> Jason.decode!())["revoked"] == true
+
+    # What the link holds already changes nothing; the epoch keeps the mark.
+    assert {:ok, ^revoked} = DesktopLink.record_revoked(home, revoked, true)
+    assert {:ok, %{revoked: true, epoch: 5} = raised} = DesktopLink.record_epoch(home, revoked, 5)
+
+    assert {:ok, %{revoked: false}} = DesktopLink.record_revoked(home, raised, false)
+    assert {:ok, %{revoked: false, epoch: 5}} = DesktopLink.read(home)
+
+    # One from before the mark was kept was never revoked.
+    path = DesktopLink.path(home)
+    older = path |> File.read!() |> Jason.decode!() |> Map.delete("revoked")
+    File.write!(path, Jason.encode!(older))
+    assert {:ok, %{revoked: false}} = DesktopLink.read(home)
+  end
+
+  test "a link written without hints holds none", %{home: home} do
+    plain = %{@link | primary: Map.delete(@link.primary, :addrs)}
+    assert :ok = DesktopLink.write(home, plain)
+    assert {:ok, %{primary: %{addrs: []}}} = DesktopLink.read(home)
+
+    # One from before hints were kept reads as none.
+    path = DesktopLink.path(home)
+
+    older =
+      path |> File.read!() |> Jason.decode!() |> update_in(["primary"], &Map.delete(&1, "addrs"))
+
+    File.write!(path, Jason.encode!(older))
+    assert {:ok, %{primary: %{addrs: []}}} = DesktopLink.read(home)
+  end
+
+  test "a hint is an IPv4 address or a bracketed IPv6 one, with its port" do
+    for hint <- ["100.64.0.1:4033", "[fd7a:115c:a1e0::1]:4033", "127.0.0.1:1"],
+        do: assert(DesktopLink.hint?(hint), hint)
+
+    for hint <- [
+          "100.64.0.1",
+          "fd7a::1:4033",
+          "[fd7a::1]",
+          "[fd7a::1]:65536",
+          "a.ts.net:4033",
+          4033,
+          ""
+        ],
+        do: refute(DesktopLink.hint?(hint), inspect(hint))
+  end
+
+  # M97 D13: the file store holds the key too, and every write names which.
+  test "the key's store is recorded, and a write that names none is refused", %{home: home} do
+    assert :ok = DesktopLink.write(home, %{@link | key: :file})
+    assert {:ok, %{key: :file}} = DesktopLink.read(home)
+    assert (home |> DesktopLink.path() |> File.read!() |> Jason.decode!())["key"] == "@file"
+
+    path = DesktopLink.path(home)
+
+    for keyless <- [Map.delete(@link, :key), %{@link | key: nil}] do
+      assert DesktopLink.write(home, keyless) == {:error, {:invalid_link, path, :key}}
+    end
+
+    assert {:ok, %{key: :file}} = DesktopLink.read(home)
+  end
+
+  # An engine before the key moved wrote version 1, with the key in its own
+  # file: it still reads, with no store, until the key moves.
+  test "a link from before the key moved reads with no store", %{home: home} do
     assert :ok = DesktopLink.write(home, @link)
+    path = DesktopLink.path(home)
+    older = path |> File.read!() |> Jason.decode!() |> Map.delete("key") |> Map.put("v", 1)
+    File.write!(path, Jason.encode!(older))
 
-    assert {:ok, renamed} = DesktopLink.record_name(home, @link, "fermix-general-5d2e")
-    assert renamed.primary.name == "fermix-general-5d2e"
-    assert {:ok, ^renamed} = DesktopLink.read(home)
-    assert {:ok, ^renamed} = DesktopLink.record_name(home, renamed, "fermix-general-5d2e")
-
-    assert {:error, {:invalid_link, _path, :name}} =
-             DesktopLink.record_name(home, renamed, "two\nlines")
-
-    assert {:ok, ^renamed} = DesktopLink.read(home)
-  end
-
-  test "the key is read only at 0600, and a looser mode is refused by name", %{home: home} do
-    {public, private} = :crypto.generate_key(:ecdh, :x25519)
-    assert :ok = DesktopLink.write_key(home, private)
-    assert {:ok, %{private: ^private, public: ^public}} = DesktopLink.read_key(home)
-
-    path = DesktopLink.key_path(home)
-    File.chmod!(path, 0o644)
-    assert {:error, {:key_mode, ^path, 0o644}} = DesktopLink.read_key(home)
-
-    assert DesktopLink.error_sentence({:key_mode, path, 0o644}) ==
-             "The desktop key file is mode 0644, readable by others; Fermix uses it only at 0600."
-
-    File.chmod!(path, 0o600)
-    File.write!(path, "short")
-    assert {:error, {:invalid_key, ^path, :length}} = DesktopLink.read_key(home)
+    assert DesktopLink.read(home) == {:ok, %{@link | key: nil}}
   end
 
   test "linked only in the device role with the link present", %{home: home} do

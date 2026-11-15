@@ -15,6 +15,7 @@ defmodule FermixChannels.Test.HomeMove do
 
   import ExUnit.Callbacks, only: [start_supervised!: 2]
 
+  alias Exqlite.Sqlite3
   alias FermixChannels.Desktop.Peer
   alias FermixChannels.Desktop.Supervisor, as: DesktopSupervisor
   alias FermixChannels.Home.Candidate, as: CandidateProcess
@@ -29,9 +30,12 @@ defmodule FermixChannels.Test.HomeMove do
   alias FermixChannels.Test.DesktopRail
   alias FermixCore.Home.Candidate
   alias FermixCore.Home.Epoch
+  alias FermixCore.Memory.Repo
 
   @now ~U[2031-05-04 10:00:00Z]
   @plenty 1_099_511_627_776
+  # When the history notes `history!/3` writes were made (epoch ms).
+  @history_ts 1_935_000_000_000
 
   def now, do: @now
 
@@ -48,7 +52,7 @@ defmodule FermixChannels.Test.HomeMove do
 
   defmodule RailStatus do
     @moduledoc false
-    # Answers `Iroh.Helper.status/1` with a fixed status.
+    # Answers `Iroh.Helper.status/1` and `await_ready/2` with a fixed status.
     use GenServer
 
     def start_link(status), do: GenServer.start_link(__MODULE__, status)
@@ -57,12 +61,51 @@ defmodule FermixChannels.Test.HomeMove do
     def init(status), do: {:ok, status}
 
     @impl true
-    def handle_call(:status, _from, status), do: {:reply, status, status}
+    def handle_call(message, _from, status) when message in [:status, :await_ready],
+      do: {:reply, status, status}
+
+    # The endpoint's direct address hints (`Iroh.Helper.hints/1`): a status
+    # may name some, else none.
+    def handle_call(:hints, _from, status), do: {:reply, Map.get(status, :hints, []), status}
+  end
+
+  defmodule WakingRail do
+    @moduledoc false
+    # A rail asleep until the test wakes it: `Iroh.Helper.status/1` says
+    # dormant, `await_ready/2` tells the test it waits (`{:awaited, rail}`) and
+    # is answered once the test calls `wake/2` with the status it settles at.
+    use GenServer
+
+    def start_link(test), do: GenServer.start_link(__MODULE__, test)
+    def wake(rail, status), do: GenServer.cast(rail, {:wake, status})
+
+    @impl true
+    def init(test), do: {:ok, %{test: test, status: %{state: :dormant}, waiting: []}}
+
+    @impl true
+    def handle_call(:status, _from, state), do: {:reply, state.status, state}
+
+    def handle_call(:await_ready, from, %{status: %{state: :dormant}} = state) do
+      send(state.test, {:awaited, self()})
+      {:noreply, %{state | waiting: [from | state.waiting]}}
+    end
+
+    def handle_call(:await_ready, _from, state), do: {:reply, state.status, state}
+
+    @impl true
+    def handle_cast(:activate, state), do: {:noreply, state}
+
+    def handle_cast({:wake, status}, state) do
+      Enum.each(state.waiting, &GenServer.reply(&1, status))
+      {:noreply, %{state | status: status, waiting: []}}
+    end
   end
 
   @doc """
   A primary's home at `:epoch` (4), its gateway identity and iroh key, a
-  config naming a path inside it, its device store, its enrollment window
+  config naming a path inside it and a keychain profile of its own (the stub
+  keychain is one table for the VM, and a move's source stores its desktop
+  key there), its device store, its enrollment window
   (its timers through `:schedule`, and what it tells the Always On watch
   through `:status_changed`, when given) and its bridge. Answers the
   facts a test needs.
@@ -74,7 +117,8 @@ defmodule FermixChannels.Test.HomeMove do
 
     File.write!(
       Path.join(root, "config.toml"),
-      "# the owner's note\n[sandbox]\nworkspace_root = \"#{root}/workspace\"\n"
+      "# the owner's note\n[fermix_core]\nprofile = \"#{Path.basename(root)}\"\n\n" <>
+        "[fermix_core.meetings]\nrecordings = \"#{root}/workspace/meetings\"\n"
     )
 
     File.mkdir_p!(Path.join(root, "journals"))
@@ -113,7 +157,7 @@ defmodule FermixChannels.Test.HomeMove do
          device_store: store,
          clock: fn -> Agent.get(clock, & &1) end,
          host_name: fn -> {:ok, Keyword.get(opts, :name, "studio-mac")} end
-       ] ++ Keyword.take(opts, [:schedule, :monotonic, :status_changed])},
+       ] ++ Keyword.take(opts, [:schedule, :status_changed])},
       id: {:enrollment, suffix}
     )
 
@@ -225,8 +269,11 @@ defmodule FermixChannels.Test.HomeMove do
   Starts the candidate process for `home`, reaching `primary` for its
   enrollment, and its own bridge serving the move. Timers and the restart
   come to the test as `{:scheduled, message, delay}` and `:candidate_restart`.
-  Options: `:now`, `:free_bytes`, and the candidate's own `:host` facts and
-  `:restore_opts` (a Linux server's unless said).
+  Options: `:now`, `:free_bytes`, and the candidate's own `:host` facts,
+  `:restore_opts` (a Linux server's unless said), `:hints` (its endpoint's
+  address hints, a 0-arity function; none unless said), `:connect` (its
+  dial, the primary's bridge unless said) and `:helper` (what answers its
+  rail's status; none unless said).
   """
   def start_candidate!(home, primary, opts \\ []) do
     test = self()
@@ -246,7 +293,11 @@ defmodule FermixChannels.Test.HomeMove do
          send(test, :candidate_restart)
          :ok
        end,
-       rail_opts: [connect: DesktopRail.bridge_connect(primary.bridge_socket)],
+       rail_opts: [
+         connect: Keyword.get(opts, :connect, DesktopRail.bridge_connect(primary.bridge_socket))
+       ],
+       helper: Keyword.get(opts, :helper),
+       hints: Keyword.get(opts, :hints, fn -> [] end),
        restore_opts:
          Keyword.get(opts, :restore_opts, host: "linux-aarch64", keyring_usable?: fn -> false end),
        free_bytes: Keyword.get(opts, :free_bytes, fn _dir -> {:ok, @plenty} end),
@@ -340,9 +391,125 @@ defmodule FermixChannels.Test.HomeMove do
           :ok
         end,
         snapshot_opts: [host: "macos-aarch64"],
+        # The source is a Mac, as its snapshot says, on every host (Apple Maps
+        # is a Mac's line, written at its default where there is none).
+        consent_opts: [os: :macos],
         resume_for_ms: 0
       ],
       overrides
     )
+  end
+
+  @doc """
+  Writes the computer-history notes of the home at `root` (its `memory.db`)
+  through the engine's own store (M97 §8.4): a note of the machine `own` (the
+  machine whose notes a move carries: `""` on a home that recorded itself), a
+  note of each computer in `others`, a thread (the home's), a read and a purge
+  of `own`'s notes, and each machine's row with a delivered mark of 2; with
+  `off: true`, the owner's request from chat, still pending, that `own` (a
+  computer) switch its history off. The store is written in a folder of its
+  own and checkpointed, and only its database file is put in the home: the
+  store's connection closes after it stops, so its `-wal` and `-shm` would go
+  while a capture walks the home.
+  """
+  def history!(root, own, others, opts \\ []) do
+    repo = :"home_move_history_#{System.unique_integer([:positive])}"
+    seed = Path.join(DesktopRail.root!("fx-hist"), "memory.db")
+    File.mkdir_p!(Path.dirname(seed))
+    start_supervised!({Repo, name: repo, enabled: true, database_path: seed}, id: repo)
+
+    for {computer, n} <- Enum.with_index([own | others], 1) do
+      note = history_note(n, "an invented sitting #{n}")
+      sitting = "#{n}-#{n + 3}:#{note.provenance_from_ts}"
+
+      {:ok, {:written, _id}} =
+        Repo.computer_history_home(:insert_note, [note, computer, sitting, @history_ts],
+          server: repo
+        )
+
+      :ok = Repo.computer_history_home(:record_delivered, [computer, 2], server: repo)
+    end
+
+    thread = Map.merge(history_note(9, "an invented thread"), %{kind: "thread", subject: "Trip"})
+    {:ok, _id} = Repo.computer_history_insert_memory(thread, server: repo)
+    read = %{ts: @history_ts, sink: "recall_activity", result_count: 1, computer_id: own}
+    :ok = Repo.computer_history_record_access(read, server: repo)
+    purge = [@history_ts + 100, @history_ts + 200, @history_ts + 300, own]
+    {:ok, _purged} = Repo.computer_history_home(:purge_notes, purge, server: repo)
+
+    if Keyword.get(opts, :off, false),
+      do: :ok = Repo.computer_history_home(:request_off, [own, @history_ts], server: repo)
+
+    :ok = ExUnit.Callbacks.stop_supervised!(repo)
+    :ok = checkpointed(seed)
+    File.cp!(seed, Path.join(root, "memory.db"))
+  end
+
+  # Every committed row in the database file itself, on a connection of its own.
+  defp checkpointed(db) do
+    {:ok, conn} = Sqlite3.open(db)
+
+    try do
+      {:ok, stmt} = Sqlite3.prepare(conn, "PRAGMA wal_checkpoint(TRUNCATE)")
+      {:row, [0, _log, _done]} = Sqlite3.step(conn, stmt)
+      Sqlite3.release(conn, stmt)
+    after
+      Sqlite3.close(conn)
+    end
+  end
+
+  @doc """
+  Which machine each history row of the home at `root` names: its notes as
+  `{computer_id, kind}`, the machines of its reads and its purges, and each
+  machine's row as `{computer_id, delivered_mark}`, and the machines an off
+  request is pending for.
+  """
+  def history(root) do
+    rows = fn sql -> history_rows(Path.join(root, "memory.db"), sql) end
+
+    %{
+      notes:
+        rows.("SELECT computer_id, kind FROM computer_history_memories ORDER BY id")
+        |> Enum.map(&List.to_tuple/1),
+      reads: rows.("SELECT computer_id FROM computer_history_access") |> List.flatten(),
+      intervals: rows.("SELECT computer_id FROM computer_history_purges") |> List.flatten(),
+      rows:
+        rows.(
+          "SELECT computer_id, delivered_mark FROM computer_history_computers " <>
+            "ORDER BY computer_id"
+        )
+        |> Enum.map(&List.to_tuple/1),
+      offs:
+        rows.(
+          "SELECT computer_id FROM computer_history_computers WHERE off_requested_at IS NOT NULL"
+        )
+        |> List.flatten()
+    }
+  end
+
+  defp history_note(n, summary) do
+    from = @history_ts - 10_000 * n
+
+    %{
+      created_at: @history_ts,
+      provenance_from_ts: from,
+      provenance_to_ts: from + 5_000,
+      summary: summary,
+      model: "invented-model",
+      event_count: 3
+    }
+  end
+
+  defp history_rows(db, sql) do
+    {:ok, conn} = Sqlite3.open(db, mode: :readonly)
+
+    try do
+      {:ok, stmt} = Sqlite3.prepare(conn, sql)
+      {:ok, rows} = Sqlite3.fetch_all(conn, stmt)
+      :ok = Sqlite3.release(conn, stmt)
+      rows
+    after
+      Sqlite3.close(conn)
+    end
   end
 end

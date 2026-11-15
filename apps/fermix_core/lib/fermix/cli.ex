@@ -17,6 +17,7 @@ defmodule Fermix.CLI do
   alias Fermix.CLI.BrowserCommand
   alias Fermix.CLI.CapabilitiesCommand
   alias Fermix.CLI.ChatCommand
+  alias Fermix.CLI.ComputerCommand
   alias Fermix.CLI.DevicesCommand
   alias Fermix.CLI.DiagnosticsCommand
   alias Fermix.CLI.Doctor
@@ -36,12 +37,14 @@ defmodule Fermix.CLI do
   alias Fermix.CLI.SkillsCommand
   alias Fermix.CLI.StartCommand
   alias Fermix.CLI.StatusCommand
+  alias Fermix.CLI.StdoutPurity
   alias Fermix.CLI.StopCommand
   alias Fermix.CLI.UninstallCommand
   alias Fermix.CLI.UpgradeCommand
   alias Fermix.CLI.Version
   alias Fermix.CLI.VoiceCommand
   alias FermixCore.Providers.ModelCatalog
+  alias FermixCore.Setup.ConfigStore
 
   @doc """
   Dispatch entry point.
@@ -55,10 +58,43 @@ defmodule Fermix.CLI do
 
   @spec main([String.t()]) :: non_neg_integer()
   def main(argv) when is_list(argv) do
-    case argv do
-      [] -> usage(2)
-      [cmd | rest] -> dispatch(cmd, rest)
+    case pure_stdout(argv) do
+      :ok -> retired_settings_named(argv)
+      {:error, reason} -> impure_stdout(reason)
     end
+  end
+
+  # Every process of a packaged binary passes here once, its logging in place:
+  # on stderr where stdout is a wire, and in the log file once a verb's tree has
+  # started (`run`, `setup`, `memory`). So the process says here, once, the
+  # retired settings the boot read in `config/runtime.exs` dropped from its
+  # files (`ConfigStore.say_retired_settings/0`), and no settings load names
+  # them again. Saying them reads no file.
+  defp retired_settings_named(argv) do
+    :ok = ConfigStore.say_retired_settings()
+    dispatch_argv(argv)
+  end
+
+  defp dispatch_argv([]), do: usage(2)
+  defp dispatch_argv([cmd | rest]), do: dispatch(cmd, rest)
+
+  # `config/runtime.exs` moves logging off a wire's stdout before boot logs,
+  # but in a release the `logger` application starts after it and installs
+  # its own handler on stdout. Every verb passes here once `logger` runs, so
+  # the move is made again before any verb can log.
+  defp pure_stdout(argv) do
+    if StdoutPurity.wire_stdout?(argv), do: StdoutPurity.route_logs_to_stderr(), else: :ok
+  end
+
+  # A wire that would carry log lines is refused before the verb runs, as
+  # `fermix acp` refuses one.
+  defp impure_stdout(reason) do
+    IO.puts(
+      :stderr,
+      "fermix: " <> StdoutPurity.message(reason) <> ", so the command did not run."
+    )
+
+    1
   end
 
   defp dispatch(cmd, _rest) when cmd in @help_flags, do: usage(0)
@@ -92,6 +128,7 @@ defmodule Fermix.CLI do
   defp dispatch("memory", rest), do: MemoryCommand.run(rest)
   defp dispatch("home", rest), do: HomeCommand.run(rest)
   defp dispatch("always-on", rest), do: AlwaysOnCommand.run(rest)
+  defp dispatch("computer", rest), do: ComputerCommand.run(rest)
   defp dispatch("upgrade", rest), do: UpgradeCommand.run(rest)
   defp dispatch("uninstall", rest), do: UninstallCommand.run(rest)
   defp dispatch("migrate-to-app", rest), do: MigrateToApp.run(rest)
@@ -145,7 +182,7 @@ defmodule Fermix.CLI do
       fermix plugins [list|catalog|enable NAME|disable NAME|auth ...] [--json]
       fermix pair                                  Pair a phone companion device
       fermix devices list                          List paired phones
-      fermix devices revoke DEVICE_ID              Revoke a paired phone
+      fermix devices revoke DEVICE_ID [--yes]      Revoke a paired phone, or remove a computer
       fermix settings [list] [--json]              List the running daemon's settings sections
       fermix settings show SECTION [--info] [--json]  Show one section's rows and values
       fermix settings set SECTION KEY=VALUE... [--json]  Change keys in one section
@@ -161,12 +198,12 @@ defmodule Fermix.CLI do
       fermix home status [--json]                  Show the role, epoch and snapshots of this home
       fermix home snapshots status [--json]        Show the snapshots
       fermix home snapshots passphrase --passphrase-file PATH [--json]  Set the recovery passphrase
-      fermix home enroll --code-file PATH [--snapshot-bucket B --snapshot-region R]  Make this fresh home a candidate primary
+      fermix home enroll --code-file PATH [--snapshot-bucket B --snapshot-region R [--snapshot-instance-role]]  Make this fresh home a candidate primary
       fermix home candidates [--json]              List the enrolled candidate primaries
       fermix always-on [--json]                    Show Always On; on a terminal, take each step
-      fermix always-on ACTION [--provider ID] [--type T --location L] [--stdin]
-                       [--recovery-passphrase-file PATH] [--yes] [--wait] [--json]
-                                                   Take one Always On step (create-server, move-now, ...)
+      fermix always-on ACTION [--recovery-passphrase-file PATH] [--yes] [--wait] [--json]
+                                                   Take one Always On step (own-server, move-now, ...)
+      fermix computer join                         Join this computer to a Fermix that already runs (asks for the code)
       fermix logs   [-f] [-n LINES]                Show daemon log file
       fermix upgrade [--check]                     Self-update from signed releases
       fermix uninstall                             Remove a Fermix.app-managed installation

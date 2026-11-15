@@ -24,6 +24,7 @@ defmodule FermixCore.Tools.ReminderSnooze do
 
   alias FermixCore.Capabilities.Builtin.Tool
   alias FermixCore.Temporal.Access
+  alias FermixCore.Temporal.Card
   alias FermixCore.Temporal.Registry
   alias FermixCore.Tools.Telemetry, as: ToolTelemetry
 
@@ -140,10 +141,16 @@ defmodule FermixCore.Tools.ReminderSnooze do
     end
   end
 
+  # The snoozed reminder's event is handed to the reply's blocks as its card
+  # (`Temporal.Card`), saying when the reminder rings next.
   defp defer(args, context) do
     case Registry.snooze_reminder(params(args), context) do
-      {:ok, result} -> {:ok, Tool.success(Jason.encode!(Registry.snooze_view(result)))}
-      {:error, reason} -> {:ok, Tool.error(Registry.describe_error(reason))}
+      {:ok, result} ->
+        :ok = Card.put(context, [Card.snoozed(result, Card.now(context))])
+        {:ok, Tool.success(Jason.encode!(Registry.snooze_view(result)))}
+
+      {:error, reason} ->
+        {:ok, Tool.error(Registry.describe_error(reason))}
     end
   end
 

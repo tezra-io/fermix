@@ -58,6 +58,7 @@ defmodule FermixCore.ComputerUse.Session do
   alias FermixCore.ComputerUse.OperatorStop
   alias FermixCore.ComputerUse.Safety
   alias FermixCore.ComputerUse.Telemetry
+  alias FermixCore.ComputerUse.Yield
   alias FermixCore.Timeouts
 
   require Logger
@@ -97,14 +98,6 @@ defmodule FermixCore.ComputerUse.Session do
   # loudly by the helper if it should not have been.
   @untargetable ~w(windows wait wait_for_change) ++ @background_actions
   @targetable Enum.reject(Protocol.actions(), &(&1 in @untargetable))
-
-  # The actions that reach their control through accessibility rather than the
-  # pointer: every verb a control lists (M86 P2, PROTOCOL.md §6.3) apart from
-  # `type`, which is one only when it names a control on a helper that types by
-  # accessibility (`ax_addressed?/2`). One list, two readers: it decides which
-  # evidence an action comes back with (M42 slice 6) and, since a bound window, how
-  # wide the contention question is (M42 §5.3).
-  @ax_addressed Controls.verbs() -- ["type"]
 
   # The verbs that read their control's state first and act only when it differs
   # (PROTOCOL.md §4), so their receipt says what it found.
@@ -311,6 +304,14 @@ defmodule FermixCore.ComputerUse.Session do
   @spec resume(GenServer.server()) :: control_verdict()
   def resume(server), do: GenServer.call(server, :resume, @control_call_ms)
 
+  @doc """
+  Whether no action is under way: answered at once, since this process never
+  waits on the helper. A conversation that turns to another screen ends this
+  session only while it is (`SessionManager`, M97 §6.4).
+  """
+  @spec idle?(GenServer.server()) :: boolean()
+  def idle?(server), do: GenServer.call(server, :idle?)
+
   @doc "Whether the session is currently paused by the human."
   @spec paused?(GenServer.server()) :: boolean()
   def paused?(server), do: GenServer.call(server, :paused?)
@@ -334,16 +335,23 @@ defmodule FermixCore.ComputerUse.Session do
     # down before it can report one.
     Process.flag(:trap_exit, true)
 
+    # The computer whose screen this session drives (M97 §6.4: its driver is
+    # `ComputerDriver`), or nil for this machine's own. A computer's helper is
+    # not this machine's: its reading is not recorded here, and its faults are
+    # not this machine's capture health.
+    computer = Keyword.get(opts, :computer)
+
     with :ok <- ensure_host_start_allowed(config, origin),
          {:ok, worker} <- start_worker(driver_mod, driver_opts) do
       # Asked at every start, whatever the flags: the handshake identity is free
       # to read, and the actions this helper lists are what the tool's schema is
       # built from (M86 F1), so every session refreshes the daemon's reading.
-      capabilities = record_capabilities(ActionWorker.capabilities(worker))
+      capabilities = record_capabilities(ActionWorker.capabilities(worker), computer)
 
       state = %{
         config: config,
         origin: origin,
+        computer: computer,
         # The `:via` tuple this session was started under, so `terminate/2` can
         # drop the key itself. `nil` when a caller started one directly (tests,
         # and any future unregistered use) — there is then nothing to leave.
@@ -428,12 +436,14 @@ defmodule FermixCore.ComputerUse.Session do
   # (`Capabilities.none/0`), so every consumer reads one map rather than
   # remembering a `nil`, and a driver double that predates the handshake lands
   # here too — a double proves nothing about what the shipped helper can do.
-  defp record_capabilities({:ok, capabilities}) do
+  defp record_capabilities({:ok, capabilities}, nil) do
     :ok = HelperActions.record(Map.take(capabilities, [:actions, :input_methods]))
     capabilities
   end
 
-  defp record_capabilities({:error, reason}) do
+  defp record_capabilities({:ok, capabilities}, _computer), do: capabilities
+
+  defp record_capabilities({:error, reason}, _computer) do
     Logger.warning(
       "computer-use helper did not report its capabilities (none assumed): " <> inspect(reason)
     )
@@ -472,6 +482,8 @@ defmodule FermixCore.ComputerUse.Session do
   def handle_call(:action_count, _from, state), do: {:reply, state.action_count, state}
 
   def handle_call(:paused?, _from, state), do: {:reply, state.paused, state}
+
+  def handle_call(:idle?, _from, state), do: {:reply, is_nil(state.pending), state}
 
   # The flag first, so nothing new is admitted even while the barrier is being
   # confirmed, then the control, then the verdict the ACK gives. A repeated
@@ -581,7 +593,7 @@ defmodule FermixCore.ComputerUse.Session do
     # nil, so this is a no-op there rather than a second reply.
     state = reply_pending(state, {:error, {:helper_fault, reason}})
     deregister(state.registered_name)
-    note_capture_wedge(reason)
+    note_capture_wedge(reason, state)
     emit_lifecycle_end(reason, state)
     release_input(state)
     ActionWorker.stop(state.worker)
@@ -633,6 +645,15 @@ defmodule FermixCore.ComputerUse.Session do
   # machine back.
   @operator_stop_message "Computer use stopped from the on-screen controls. The cursor and keyboard are yours, and nothing further will be sent. Tell me when you want me to pick it back up."
 
+  # A computer's screen is stopped by the person at it (M97 §7.4), who may not be
+  # the person in this conversation, so the notice names the computer.
+  defp operator_stop_message(%{computer: %{name: name}}),
+    do:
+      "The person at #{name} stopped Fermix from using its screen, so nothing further will " <>
+        "be sent there. Tell me when you want me to pick it back up."
+
+  defp operator_stop_message(_state), do: @operator_stop_message
+
   # Run in an UNLINKED process, like `release_input/1` and for the same reason: a
   # channel that is slow, or an adapter that raises, must not delay the reply the
   # caller is waiting on, the lifecycle row, or handing the input seat back. The
@@ -640,7 +661,7 @@ defmodule FermixCore.ComputerUse.Session do
   # already delivered to the model by the refusal above.
   defp announce_operator_stop(state) do
     conversation = conversation_key(state.registered_name)
-    message = @operator_stop_message
+    message = operator_stop_message(state)
 
     spawn(fn ->
       case Notice.deliver(conversation, message) do
@@ -760,13 +781,15 @@ defmodule FermixCore.ComputerUse.Session do
   # sidecar-action timeout) are the wedge signal. Recorded here rather than at
   # each call site so every path that produces them counts once, and so a plain
   # crash or a normal abort is never mistaken for a wedge.
-  defp note_capture_wedge({:shutdown, {:sidecar_exited, 75}} = reason),
+  defp note_capture_wedge(_reason, %{computer: %{}}), do: :ok
+
+  defp note_capture_wedge({:shutdown, {:sidecar_exited, 75}} = reason, _state),
     do: CaptureHealth.record_wedge(reason)
 
-  defp note_capture_wedge({:shutdown, :sidecar_timeout} = reason),
+  defp note_capture_wedge({:shutdown, :sidecar_timeout} = reason, _state),
     do: CaptureHealth.record_wedge(reason)
 
-  defp note_capture_wedge(_reason), do: :ok
+  defp note_capture_wedge(_reason, _state), do: :ok
 
   defp classify_action(params, state) do
     # Read BEFORE Protocol.validate: validate canonicalizes the request from known
@@ -901,14 +924,18 @@ defmodule FermixCore.ComputerUse.Session do
     do: {:error, :busy}
 
   defp execute_precheck(request, state) do
-    with :ok <- check_budget(state), do: acquire_input(request)
+    with :ok <- check_budget(state), do: acquire_input(request, state)
   end
 
   # One conversation drives the cursor at a time (M42 slice 2 §6). Read-only
   # actions never take the seat — two conversations may look at the same screen —
   # and `Courtesy`'s notion of disturbing is the right one here: `mouse_move`
-  # mutates nothing yet warps the pointer out from under whoever holds it.
-  defp acquire_input(request) do
+  # mutates nothing yet warps the pointer out from under whoever holds it. The
+  # seat is this machine's: a computer's screen is held on that computer, one
+  # server session at a time (`ComputerUse.Seat`, M97 §6.4).
+  defp acquire_input(_request, %{computer: %{}}), do: :ok
+
+  defp acquire_input(request, _state) do
     if Courtesy.disturbing?(request["action"]),
       do: input_seat(InputOwner.acquire(self())),
       else: :ok
@@ -956,8 +983,16 @@ defmodule FermixCore.ComputerUse.Session do
   # control acknowledgement names the request it is still running, which is the
   # same fact from the side that actually knows it, so the flag is gone rather than
   # kept beside it.
+  #
+  # A session that drives a computer's screen publishes that computer's device id
+  # beside it, so a second conversation asking for the same screen is told which
+  # one holds it (`SessionManager`, M97 §6.4) without calling either session.
   defp publish_identity(%{registered_name: {:via, Registry, {registry, key}}} = state) do
-    value = %{session_id: state.session_id}
+    value = %{
+      session_id: state.session_id,
+      computer: state.computer && state.computer.device_id,
+      computer_name: state.computer && state.computer.name
+    }
 
     case Registry.update_value(registry, key, fn _previous -> value end) do
       {_new, _previous} ->
@@ -991,10 +1026,11 @@ defmodule FermixCore.ComputerUse.Session do
   end
 
   # Coexistence gate (V3 R0): before a DISTURBING action, when courtesy is on, yield
-  # to a present human. This is the one place that does the idle I/O — the decision
-  # itself is `Courtesy` (pure). Not disturbing / courtesy off → proceed untouched.
+  # to a present human. The step and its idle I/O are `Yield`'s, shared with a
+  # computer whose server drives its screen; the decision itself is `Courtesy`
+  # (pure). Not disturbing / courtesy off → proceed untouched.
   defp execute_with_courtesy(request, state) do
-    case apply_courtesy(request, state) do
+    case Yield.check(request, yield_facts(state), {state.driver_mod, state.driver_state}) do
       {:proceed, courtesy} -> run_action(request, state, courtesy)
       {:refuse, reason} -> {:reply, {:error, reason}, state}
       {:abort, reason} -> probe_failure(reason, state)
@@ -1008,102 +1044,14 @@ defmodule FermixCore.ComputerUse.Session do
     {:stop, driver_stop_reason(reason), {:error, {:not_dispatched, reason}}, state}
   end
 
-  defp apply_courtesy(request, state) do
-    if state.config.courtesy == :yield and Courtesy.disturbing?(request["action"]),
-      do: arbitrate(request, state),
-      else: {:proceed, :off}
-  end
-
-  # How wide the contention question is depends on what this action takes (M42
-  # §5.3). A control pressed by name inside a bound window takes nothing the
-  # person is holding, so only activity in THAT window's application is
-  # contention; everything else takes the one cursor or the one keyboard, and any
-  # activity at all is.
-  defp arbitrate(request, state) do
-    scope = Courtesy.scope(ax_addressed?(request, state.capabilities), bound_kind(state.target))
-
-    case idle_probe(state) do
-      {:ok, idle_ms, front_is_target} ->
-        active? =
-          Courtesy.human_active?(idle_ms, since_agent_ms(state), state.config.courtesy_idle_ms)
-
-        if Courtesy.contends?(scope, active?, front_is_target),
-          do: defer_to_human(state),
-          else: {:proceed, :proceeded}
-
-      {:error, reason} ->
-        courtesy_error(reason)
-    end
-  end
-
-  # `type` with an `element_ref` reaches the control through accessibility only
-  # where this helper says it types that way (`input_methods`, PROTOCOL.md §1).
-  defp ax_addressed?(%{"action" => "type", "element_ref" => ref}, %{input_methods: methods})
-       when is_binary(ref),
-       do: "ax" in methods
-
-  defp ax_addressed?(%{"action" => action}, _capabilities), do: action in @ax_addressed
-
-  defp bound_kind(%{kind: kind}), do: kind
-  defp bound_kind(nil), do: nil
-
-  defp defer_to_human(state) do
-    case wait_for_idle(state) do
-      {:ok, true} -> {:proceed, :deferred}
-      {:ok, false} -> {:refuse, :user_active}
-      {:error, reason} -> courtesy_error(reason)
-    end
-  end
-
-  # A missing idle signal (the compux probe is macOS-only, or a malformed reply) is
-  # not a failure: courtesy is a nicety, not a safety gate, so it fails OPEN and
-  # proceeds; the access posture + attended-origin gate remain the hard floors.
-  #
-  # A sidecar TIMEOUT or EXIT is not a missing signal, it is a helper that stopped
-  # answering. A reply now reaches the request that asked for it by id, so no late
-  # frame can answer the action — but a helper that went quiet is not one to hand
-  # real input to next, so these two abort before any is sent.
-  defp courtesy_error({:timeout, :cu_sidecar_action, _ms} = reason), do: {:abort, reason}
-  defp courtesy_error({:sidecar_exited, _status} = reason), do: {:abort, reason}
-  defp courtesy_error(:sidecar_unavailable = reason), do: {:abort, reason}
-  defp courtesy_error(_reason), do: {:proceed, :unavailable}
-
-  # `front_is_target` is the helper's reading of whether the application in front
-  # is the bound one (M42 slice 5 §3.1). Absent is unknown, as everywhere else,
-  # and unknown is not contention: a bound window exists so that work inside it
-  # survives the person using something else.
-  defp idle_probe(state) do
-    case state.driver_mod.execute(state.driver_state, %{"action" => "idle_ms"}) do
-      {:ok, %{"idle_ms" => ms} = reply} when is_integer(ms) and ms >= 0 ->
-        {:ok, ms, front_is_target(reply["front_is_target"])}
-
-      {:ok, _other} ->
-        {:error, :malformed_idle_response}
-
-      {:error, reason} ->
-        {:error, reason}
-    end
-  end
-
-  defp front_is_target(front) when is_boolean(front), do: front
-  defp front_is_target(_absent), do: nil
-
-  defp wait_for_idle(state) do
-    request = %{
-      "action" => "wait_for_idle",
-      "idle_ms" => state.config.courtesy_idle_ms,
-      "timeout_ms" => Courtesy.defer_ms()
+  defp yield_facts(state) do
+    %{
+      config: state.config,
+      capabilities: state.capabilities,
+      target_kind: state.target && state.target.kind,
+      last_action_at: state.last_action_at
     }
-
-    case state.driver_mod.execute(state.driver_state, request) do
-      {:ok, %{"idle" => idle}} when is_boolean(idle) -> {:ok, idle}
-      {:ok, _other} -> {:error, :malformed_idle_response}
-      {:error, reason} -> {:error, reason}
-    end
   end
-
-  defp since_agent_ms(%{last_action_at: :never}), do: :never
-  defp since_agent_ms(%{last_action_at: at}), do: now_ms() - at
 
   # Choosing the whole desktop is a Fermix-side decision: the helper has no
   # desktop target, so what it needs from us is only the binding it is holding,
@@ -1384,7 +1332,7 @@ defmodule FermixCore.ComputerUse.Session do
   # between them: whatever the helper brought back is read here, recorded, and
   # rendered.
   defp reply_action(request, response, state, courtesy, receipt) do
-    note_capture_health(response)
+    note_capture_health(response, state)
     age = observation_age_ms(request, state)
     response = note_aim(request, response)
 
@@ -2008,10 +1956,12 @@ defmodule FermixCore.ComputerUse.Session do
   # never read as health (the reset-on-anything bug that defeated watch's strike
   # counter). A wedge is recorded in `terminate/2`, where both the EX_TEMPFAIL
   # exit and the sidecar-action timeout land as typed stop reasons.
-  defp note_capture_health(%{"data" => data}) when is_binary(data),
+  defp note_capture_health(_response, %{computer: %{}}), do: :ok
+
+  defp note_capture_health(%{"data" => data}, _state) when is_binary(data),
     do: CaptureHealth.record_success()
 
-  defp note_capture_health(_response), do: :ok
+  defp note_capture_health(_response, _state), do: :ok
 
   # Stamp the last time the agent DISTURBED the seat, so the courtesy arbiter can
   # distinguish the human's input from the agent's own on the next disturbing action
@@ -2081,7 +2031,9 @@ defmodule FermixCore.ComputerUse.Session do
   # than a picture of the screen. The operator's switch has nothing to say about it
   # — that switch turns off an IMAGE, and this is not one.
   defp check_kind(request, state) do
-    if ax_addressed?(request, state.capabilities), do: "semantic", else: view_check(state)
+    if Courtesy.ax_addressed?(request, state.capabilities),
+      do: "semantic",
+      else: view_check(state)
   end
 
   # Everything else went out over the pointer or the keyboard, where the only

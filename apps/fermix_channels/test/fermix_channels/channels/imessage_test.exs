@@ -576,7 +576,12 @@ defmodule FermixChannels.Channels.IMessageTest do
 
     test "is ok only when every gate is open, through the one-shot probe", ctx do
       assert {:ok, %{detail: detail, latency_ms: ms}} =
-               IMessage.health_check(control: OkControl, home: ctx.home, owner: @owner)
+               IMessage.health_check(
+                 control: OkControl,
+                 home: ctx.home,
+                 owner: @owner,
+                 macos?: true
+               )
 
       assert detail =~ "Fermix Messages"
       assert is_integer(ms)
@@ -622,23 +627,44 @@ defmodule FermixChannels.Channels.IMessageTest do
     end
 
     test "names the separate Apple ID when Messages here is signed in as the owner" do
-      assert IMessage.health_check(control: OwnMacControl, owner: @owner) ==
+      assert IMessage.health_check(control: OwnMacControl, owner: @owner, macos?: true) ==
                {:error,
                 {:owner_is_this_mac, "Sign Messages in with a separate Apple ID for Fermix"}}
     end
 
     test "returns the class and a sentence naming the remedy" do
       assert {:error, {:policy_unconfirmed, detail}} =
-               IMessage.health_check(control: UnconfirmedControl, owner: @owner)
+               IMessage.health_check(control: UnconfirmedControl, owner: @owner, macos?: true)
 
       assert detail =~ "Awaiting confirmation"
     end
 
     test "a helper that is not installed reports it as missing, without a daemon" do
       assert {:error, {:helper_missing, detail}} =
-               IMessage.health_check(control: MissingControl, owner: @owner)
+               IMessage.health_check(control: MissingControl, owner: @owner, macos?: true)
 
       assert detail =~ "not installed"
+    end
+
+    # M97 §6.4, D4: off a Mac the health is the carrying Mac's; asleep, it is
+    # away, never degraded.
+    test "off a Mac, health is the carrying Mac's: away while it sleeps" do
+      away = %{
+        status: :away,
+        detail: "studio Mac, the Mac that carries Messages, is asleep or offline."
+      }
+
+      assert IMessage.health_check(macos?: false, carried_health: away) ==
+               {:error, {:away, away.detail}}
+
+      assert {:ok, %{detail: "The Mac that carries Messages is connected"}} =
+               IMessage.health_check(
+                 macos?: false,
+                 carried_health: %{status: :ready, detail: nil}
+               )
+
+      assert {:error, {:not_running, _sentence}} =
+               IMessage.health_check(macos?: false, carried_health: nil)
     end
   end
 

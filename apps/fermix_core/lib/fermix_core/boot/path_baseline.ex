@@ -14,14 +14,14 @@ defmodule FermixCore.Boot.PathBaseline do
 
     * `Fermix.CLI.Service` writes `dirs/1` into the unit it installs.
     * `ensure!/1` appends whatever is missing to this process's own `PATH`, and
-      is called from `FermixCore.BootProfile.prepare/1`.
+      is called from `FermixCore.BootProfile.prepare/2`.
 
   **Appending only, never prepending.** `PATH` is first-match-wins, so a tail
   entry can make an unresolvable name resolvable and can never shadow a binary
   the operator's own `PATH` already chose. That property is why `ensure!/1` is
   safe to run on a process whose environment someone deliberately arranged.
 
-  **Its reach is the daemon boot path, not every verb.** `BootProfile.prepare/1`
+  **Its reach is the daemon boot path, not every verb.** `BootProfile.prepare/2`
   runs for `:app_engine` and for `fermix run`; every other tree-less verb
   inherits the invoking shell's `PATH`, which is normally a superset and is the
   environment the operator chose. A source run gets no baseline at all, because

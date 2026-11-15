@@ -36,7 +36,10 @@ defmodule Fermix.CLI.SettingsCommand.ArgsTest do
 
       assert Args.parse(["primary"]) == {:primary, nil, @off}
       assert Args.parse(["primary", "openai"]) == {:primary, "openai", @off}
-      assert Args.parse(["reload", "--json"]) == {:reload, @json}
+      assert Args.parse(["reload", "--json"]) == {:reload, nil, @json}
+
+      assert Args.parse(["reload", "computer.sandbox"]) ==
+               {:reload, "computer.sandbox", @off}
     end
 
     test "an unknown switch is a usage error" do
@@ -62,7 +65,7 @@ defmodule Fermix.CLI.SettingsCommand.ArgsTest do
             ["secret", "clear"],
             ["secret", "clear", "a", "b"],
             ["primary", "openai", "extra"],
-            ["reload", "now"],
+            ["reload", "computer.sandbox", "now"],
             ["list", "extra"],
             ["show", ""],
             ["secret", "set", ""],

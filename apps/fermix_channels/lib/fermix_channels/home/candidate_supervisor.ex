@@ -18,7 +18,11 @@ defmodule FermixChannels.Home.CandidateSupervisor do
     3. the iroh helper in listen mode with the candidate's own key and its own
        root (`<home>/candidate`: key at `mobile/iroh_key`, dial sockets beside
        it), on the launch relays, since no device has acknowledged any other;
-       it also dials the primary for the enrollment;
+       it also dials the primary for the enrollment. On an Always On server
+       it binds the fixed UDP port it keeps as the primary
+       (`Iroh.Hints.bind_port/1`), so the addresses its enrollment gives hold
+       for the move and after it; a desktop receiving the home back binds
+       iroh's own;
     4. the candidate process (`FermixChannels.Home.Candidate`).
   """
 
@@ -28,6 +32,7 @@ defmodule FermixChannels.Home.CandidateSupervisor do
   alias FermixChannels.Home.MoveResponder
   alias FermixChannels.Mobile.Iroh.Bridge
   alias FermixChannels.Mobile.Iroh.Helper
+  alias FermixChannels.Mobile.Iroh.Hints
   alias FermixCore.Home.Candidate, as: Files
   alias FermixCore.Setup.ConfigStore
 
@@ -78,7 +83,8 @@ defmodule FermixChannels.Home.CandidateSupervisor do
        bridge_socket: socket,
        bridge: @bridge,
        identity_exists?: fn -> true end,
-       list_devices: fn _store -> {:ok, []} end},
+       list_devices: fn _store -> {:ok, []} end,
+       bind_port: Hints.bind_port(home)},
       {Candidate, home: home, helper: @helper}
     ]
   end

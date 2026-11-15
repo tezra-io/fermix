@@ -26,7 +26,8 @@ defmodule FermixCore.Cues.MandateGate do
     * in a run of a mandated job, a file tool reads only inside the job's own
       skill folder, and nowhere when the job names none (design §10.4);
       `git_read` is refused there, since git reads the repository around the
-      folder it starts in;
+      folder it starts in, and so is a file tool that names one of the home's
+      computers (M97 §6.5), which the server's skill folder cannot hold;
     * anything else goes on to the other clauses.
 
   A mandate call is written in three Repo calls (design §10.3): the
@@ -68,6 +69,7 @@ defmodule FermixCore.Cues.MandateGate do
   alias FermixCore.Capabilities.Builtin.Tool
   alias FermixCore.Capabilities.Capability
   alias FermixCore.Capabilities.UntrustedContent
+  alias FermixCore.Computers.Computer
   alias FermixCore.Cues.Mandates
   alias FermixCore.Cues.Pins
   alias FermixCore.Cues.Proposals
@@ -291,6 +293,17 @@ defmodule FermixCore.Cues.MandateGate do
   end
 
   defp files_or_pass(_capability, _args, _context, _mandate, _opts), do: :not_mandated
+
+  # The skill folder is this server's, so a file tool naming one of the home's
+  # computers (M97 §6.5) would read outside it: in a mandated run it is refused.
+  defp skill_files_only(capability, args, %{computer: %Computer{}} = context, _opts) do
+    refuse_files(
+      capability,
+      args,
+      context,
+      "that folder is on this server, never on one of your computers"
+    )
+  end
 
   # git finds the repository above the folder it starts in, so the strict root
   # cannot hold `git_read` to the skill folder: in a mandated run it is refused.

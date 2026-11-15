@@ -1,7 +1,7 @@
 # fish completion for fermix, installed by the fermix package.
 # The verb list is the one `fermix help` prints; a test keeps them in step.
 
-set -l fermix_verbs setup auth ask chat run sandbox grant revoke service start stop restart status health voice acp browser browser-bridge agents capabilities skills plugins pair devices settings memory home always-on logs upgrade uninstall migrate-to-app doctor diagnostics version help
+set -l fermix_verbs setup auth ask chat run sandbox grant revoke service start stop restart status health voice acp browser browser-bridge agents capabilities skills plugins pair devices settings memory home always-on computer logs upgrade uninstall migrate-to-app doctor diagnostics version help
 
 complete -c fermix -f
 
@@ -33,6 +33,7 @@ complete -c fermix -n "not __fish_seen_subcommand_from $fermix_verbs" -a setting
 complete -c fermix -n "not __fish_seen_subcommand_from $fermix_verbs" -a memory -d "Review and restore memory"
 complete -c fermix -n "not __fish_seen_subcommand_from $fermix_verbs" -a home -d "Move, restore and snapshot this home"
 complete -c fermix -n "not __fish_seen_subcommand_from $fermix_verbs" -a always-on -d "Set up Always On and take its steps"
+complete -c fermix -n "not __fish_seen_subcommand_from $fermix_verbs" -a computer -d "Join this computer to a Fermix that already runs"
 complete -c fermix -n "not __fish_seen_subcommand_from $fermix_verbs" -a logs -d "Show the daemon log file"
 complete -c fermix -n "not __fish_seen_subcommand_from $fermix_verbs" -a upgrade -d "Update the engine"
 complete -c fermix -n "not __fish_seen_subcommand_from $fermix_verbs" -a uninstall -d "Remove an app-managed install"
@@ -62,15 +63,14 @@ complete -c fermix -n "__fish_seen_subcommand_from home" -l mark-moved -d "Mark 
 complete -c fermix -n "__fish_seen_subcommand_from home; and __fish_seen_subcommand_from enroll" -l code-file -r -d "Read the enrollment code from this file"
 complete -c fermix -n "__fish_seen_subcommand_from home; and __fish_seen_subcommand_from enroll" -l snapshot-bucket -r -d "The bucket this server keeps its snapshots in"
 complete -c fermix -n "__fish_seen_subcommand_from home; and __fish_seen_subcommand_from enroll" -l snapshot-region -r -d "The region of that bucket"
+complete -c fermix -n "__fish_seen_subcommand_from home; and __fish_seen_subcommand_from enroll" -l snapshot-instance-role -d "Sign with this server's instance role (set by its infrastructure)"
 complete -c fermix -n "__fish_seen_subcommand_from browser" -a "bridge install uninstall status" -d "Browser bridge subcommand"
 complete -c fermix -n "__fish_seen_subcommand_from acp" -a "forget"
 complete -c fermix -n "__fish_seen_subcommand_from diagnostics" -a "export"
 complete -c fermix -n "__fish_seen_subcommand_from diagnostics" -l offline -d "Collect without a running daemon"
-complete -c fermix -n "__fish_seen_subcommand_from always-on; and not __fish_seen_subcommand_from paste-token create-server cancel move-now try-again turn-on restart-server start-again create-in back-up-now replace-server check-again own-server delete-server learn-more open-console update" -a "paste-token create-server cancel move-now try-again turn-on restart-server start-again create-in back-up-now replace-server check-again own-server delete-server learn-more open-console update"
-complete -c fermix -n "__fish_seen_subcommand_from always-on" -l provider -r -d "The provider the token is for"
-complete -c fermix -n "__fish_seen_subcommand_from always-on" -l type -r -d "The server type to create"
-complete -c fermix -n "__fish_seen_subcommand_from always-on" -l location -r -d "The place to create it in"
-complete -c fermix -n "__fish_seen_subcommand_from always-on" -l stdin -d "Read the token from standard input"
+complete -c fermix -n "__fish_seen_subcommand_from always-on; and not __fish_seen_subcommand_from cancel move-now try-again learn-more update back-up-now check-again own-server move-back restore-here add-computer approve-computer deny-computer" -a "cancel move-now try-again learn-more update back-up-now check-again own-server move-back restore-here add-computer approve-computer deny-computer"
+complete -c fermix -n "__fish_seen_subcommand_from always-on" -l sas -r -d "The six digits the new computer shows"
+complete -c fermix -n "__fish_seen_subcommand_from computer; and not __fish_seen_subcommand_from join" -a "join" -d "Join with the code Add a computer opened"
 complete -c fermix -n "__fish_seen_subcommand_from always-on" -l recovery-passphrase-file -r -d "Read the recovery passphrase from this file"
 complete -c fermix -n "__fish_seen_subcommand_from always-on" -l yes -d "Accept what the step asks first"
 complete -c fermix -n "__fish_seen_subcommand_from always-on" -l wait -d "Wait for the step to settle"

@@ -1,0 +1,50 @@
+defmodule FermixCore.Computers.Offer do
+  @moduledoc """
+  One thing a computer may offer its server (M97 §3.2): what it is, in the
+  owner's words, which systems can have it, and whether this computer offers
+  it now, from its switches (`Computers.Switches`) and the facts of the
+  machine (`Computers.Facts`).
+
+  Each offer is one module, so the session that builds its capability flips
+  its state in one place. `Computers.Offers.compute/3` asks each module of a
+  list, in order; every offer a computer makes is in `Offers.modules/0`,
+  which the computer's offers reporter (`FermixChannels.Desktop.Offers`)
+  works out.
+
+  A state is `{:on, detail}` (a short word or nil, such as the sandbox mode
+  of the shell), `{:on, detail, more}` for an offer that also carries what
+  the server's tool for it follows (`more`: `computer_use`'s `helper`, its
+  actions and input methods; `files`' `roots`, the folders files and
+  commands reach here, M97 §6.4), `{:off, sentence}` (switched off on this
+  computer, or never switched on) or `{:unavailable, sentence}` (it cannot
+  work here, in the engine's words). Every sentence obeys
+  `Management.Copy`'s rules.
+  """
+
+  alias FermixCore.Computers.Facts
+  alias FermixCore.Computers.Switches
+
+  @typedoc "An offer's state on this computer."
+  @type state ::
+          {:on, String.t() | nil}
+          | {:on, String.t() | nil, more()}
+          | {:off | :unavailable, String.t()}
+
+  @typedoc "What an offer that is on carries beyond its detail."
+  @type more :: %{
+          optional(:helper) => %{actions: [String.t()], input_methods: [String.t()]},
+          optional(:roots) => [String.t(), ...]
+        }
+
+  @doc "The offer's id."
+  @callback id() :: Switches.offer()
+
+  @doc ~s(What the offer is, in the owner's words: "commands", "the browser", "your screen".)
+  @callback label() :: String.t()
+
+  @doc "The systems that can have it."
+  @callback systems() :: [:macos | :linux]
+
+  @doc "Whether this computer offers it now."
+  @callback state(Switches.t(), Facts.t()) :: state()
+end

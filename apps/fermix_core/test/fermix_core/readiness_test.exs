@@ -141,6 +141,43 @@ defmodule FermixCore.ReadinessTest do
     end
   end
 
+  # M97 F8: a computer that joined a home runs the device role (`Home.Role`):
+  # no turn, no provider call, no channel, no voice session and no memory of
+  # its own, so none of their rows is its to judge. The role is handed in; the
+  # host's is never read.
+  describe "a computer that joined a home (the device role)" do
+    setup do
+      # A fresh Linux box that joined: nothing but the shipped defaults.
+      Application.put_env(:fermix_core, :providers, [])
+      Application.put_env(:fermix_core, :personalization, [])
+      Application.put_env(:fermix_channels, :telegram, enabled: true)
+      Application.put_env(:fermix_core, :realtime, enabled: true, provider: "openai")
+      :ok
+    end
+
+    test "is ready with no provider, channel, voice or personality row" do
+      device = Readiness.report(role: :device)
+
+      assert device.status == :ready
+      assert Enum.reject(device.failures, &(&1.pane == "sandbox")) == []
+    end
+
+    test "the primary with the same settings is judged on every row, as before" do
+      primary = Readiness.report(role: :primary)
+      keys = Enum.map(primary.failures, & &1.detail_key)
+
+      assert primary.status == :setup_required
+      assert Enum.any?(primary.failures, &(&1.pane == "providers" and &1.gating))
+      assert "channel:telegram" in keys
+      assert "personalization" in keys
+      assert "realtime:openai" in keys
+    end
+
+    test "with no role named, a report is the one of the role this engine booted in" do
+      assert Readiness.report() == Readiness.report(role: :primary)
+    end
+  end
+
   describe "the channel table" do
     test "publishes the six channels readiness knows about" do
       assert Readiness.channels() == [:telegram, :whatsapp, :discord, :slack, :signal, :imessage]
@@ -325,9 +362,89 @@ defmodule FermixCore.ReadinessTest do
       assert "channel:imessage:helper" in keys
     end
 
-    defp imessage_failure do
+    # M97 §6.4: off a Mac the channel runs through the Mac of the home that
+    # carries Messages, and its row names that Mac.
+    test "off a Mac, the row names the carrying Mac: none, more than one, or away" do
+      Application.put_env(:fermix_channels, :imessage,
+        enabled: true,
+        owner_user_id: "+15551234567"
+      )
+
+      studio = %FermixCore.Computers.Computer{device_id: "d-1", name: "studio Mac"}
+      loft = %FermixCore.Computers.Computer{device_id: "d-2", name: "loft Mac"}
+
+      assert %{detail_key: "channel:imessage:carrier", gating: false, action: none} =
+               imessage_failure(macos?: false, imessage_carrier: :none)
+
+      assert none =~ "No Mac of yours carries Messages"
+
+      assert %{detail_key: "channel:imessage:conflict", action: conflict} =
+               imessage_failure(macos?: false, imessage_carrier: {:conflict, [studio, loft]})
+
+      assert conflict =~ "loft Mac and studio Mac each offer Messages"
+
+      assert %{detail_key: "channel:imessage:away", gating: false, action: away} =
+               imessage_failure(
+                 macos?: false,
+                 imessage_carrier: {:computer, %{studio | connected: false}}
+               )
+
+      assert away == "studio Mac, the Mac that carries Messages, is asleep or offline."
+
+      refute imessage_failure(
+               macos?: false,
+               imessage_carrier: {:computer, %{studio | connected: true}}
+             )
+    end
+
+    # M97 D4: of the iMessage rows only the away one owes no setup, and the
+    # engine publishes its own sentence for each, which names the Mac where it
+    # knows one; a row of another kind leaves its words to each surface.
+    test "only the away row is away, and each iMessage row's sentence is published" do
+      Application.put_env(:fermix_channels, :imessage,
+        enabled: true,
+        owner_user_id: "+15551234567"
+      )
+
+      studio = %{device_id: "d-1", name: "studio Mac", connected: false}
+
+      away = imessage_failure(macos?: false, imessage_carrier: {:computer, studio})
+      none = imessage_failure(macos?: false, imessage_carrier: :none)
+      helper = imessage_failure(macos?: true)
+
+      assert Readiness.away?(away)
+      refute Readiness.away?(none)
+      refute Readiness.away?(helper)
+
+      assert Readiness.sentence(away) ==
+               "studio Mac, the Mac that carries Messages, is asleep or offline."
+
+      assert Readiness.sentence(none) == none.action
+      assert Readiness.sentence(helper) == helper.action
+
+      provider = %{
+        component: "provider:anthropic",
+        action: "Add the Anthropic API key in Providers settings.",
+        gating: true,
+        pane: "providers",
+        detail_key: "provider:missing_credentials:anthropic"
+      }
+
+      refute Readiness.away?(provider)
+      assert Readiness.sentence(provider) == nil
+    end
+
+    test "the carrier rows are published for the copy gate" do
+      keys = Enum.map(Readiness.published_actions(), &elem(&1, 0))
+
+      for key <-
+            ~w(channel:imessage:carrier channel:imessage:conflict channel:imessage:away),
+          do: assert(key in keys)
+    end
+
+    defp imessage_failure(opts \\ [macos?: true]) do
       Enum.find(
-        Readiness.report().failures,
+        Readiness.report(opts).failures,
         &String.starts_with?(&1.detail_key, "channel:imessage")
       )
     end
@@ -990,6 +1107,18 @@ defmodule FermixCore.ReadinessTest do
       allow_names([])
 
       refute Enum.any?(Readiness.report().failures, &(&1.pane == "sandbox"))
+    end
+
+    # M97 F8: a computer runs the home's commands in its own sandbox, so the
+    # variables it cannot read are its own to say, as on the primary.
+    test "a computer that joined a home still names a variable it cannot read" do
+      record_missing(["FERMIX_TEST_ABSENT"])
+
+      report = Readiness.report(role: :device)
+
+      assert report.status == :ready
+      assert [%{detail_key: "sandbox:env_missing"} = failure] = report.failures
+      assert failure.action =~ "`FERMIX_TEST_ABSENT`"
     end
 
     test "both causes are published for the copy gate, and the pane is routable" do

@@ -3,6 +3,7 @@ defmodule FermixCore.Sandbox.ConfigTest do
 
   alias FermixCore.Sandbox.Config
   alias FermixCore.Setup.ConfigStore
+  alias FermixCore.Setup.MachineFile
 
   setup do
     sandbox = Application.get_env(:fermix_core, :sandbox)
@@ -149,7 +150,9 @@ defmodule FermixCore.Sandbox.ConfigTest do
     }
 
     assert :ok = ConfigStore.save_snapshot(snapshot)
-    contents = File.read!(ConfigStore.path())
+    # The sandbox is this computer's own (M97 §4).
+    contents = File.read!(MachineFile.path(home))
+    refute File.read!(ConfigStore.path()) =~ "sandbox"
 
     assert contents =~ "[sandbox]"
     assert contents =~ ~s(mode = "strict")

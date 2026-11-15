@@ -4,18 +4,20 @@ defmodule FermixCore.Tools.PlaceSearch do
   on the backend in force (MILESTONE_31 §10, M72 §14).
 
   The tool owns the provider-visible schema (§10.1) and the anchor decision
-  (§10.5). `PlaceSearch.Backend.resolve/2` picks the backend once per call:
-  `[fermix_core.tools.place_search] backend` when set, otherwise the build's
-  default: Apple Maps where the build carries the `fermix-maps` helper (the
-  Fermix Mac app's engine; `PlaceSearch.AppleMaps`, no key), Brave in the
-  Homebrew and Linux builds (`PlaceSearch.Brave`). The backend owns the request, the parser
-  and the tagged failures (§10.2–§10.4), and both yield the one record. Nothing
-  here falls back to web search, a browser, or the other backend: a failure is
-  returned with its tag.
+  (§10.5). `PlaceSearch.Backend.resolve/2` names the home's one backend:
+  `[fermix_core.tools.place_search] backend` when set; else Apple Maps where
+  the build carries the `fermix-maps` helper (the Fermix Mac app's engine;
+  `PlaceSearch.AppleMaps`, no key); else Apple Maps on a Mac of the home where
+  one offers it (a server's home, `PlaceSearch.Computer`, M89 D13); else
+  Brave (`PlaceSearch.Brave`). The backend owns the request, the parser and
+  the tagged failures (§10.2–§10.4), and each yields the one record. Nothing
+  here falls back to web search, a browser, or another backend: a failure is
+  returned with its tag, and a Mac that is away is `computer_away` at once.
 
   `country` and `language` are Brave's knobs: the schema publishes them only
-  while Brave is the backend (`dynamic_parameters/1`), and under Apple Maps a
-  call that passes one anyway is refused rather than run without it.
+  while Brave is the backend (`dynamic_parameters/1`), and under Apple Maps,
+  here or on a Mac, a call that passes one anyway is refused rather than run
+  without it.
 
   ## The anchor, in strict precedence
 
@@ -105,6 +107,7 @@ defmodule FermixCore.Tools.PlaceSearch do
 
   @brave_only_locale "invalid_query: country and language are options of the Brave place " <>
                        "search; this search runs on Apple Maps, so pass neither"
+  @apple_maps_backends [:apple_maps, :computer]
 
   @location_required "location_required: this query is anchored to the user's own " <>
                        "position, but no location was supplied. Ask which area to search, " <>
@@ -163,7 +166,7 @@ defmodule FermixCore.Tools.PlaceSearch do
     }
   end
 
-  defp locale_properties(:apple_maps), do: %{}
+  defp locale_properties(backend) when backend in @apple_maps_backends, do: %{}
 
   @impl true
   @spec when_to_use() :: String.t()
@@ -220,7 +223,46 @@ defmodule FermixCore.Tools.PlaceSearch do
         description: "the query is anchored to the user's own position and no anchor is available"
       },
       %{tag: "auth_failed", description: "the Brave API key is missing or rejected"},
-      %{tag: "rate_limited", description: "the place provider returned a rate limit"},
+      %{
+        tag: "rate_limited",
+        description:
+          "the place provider returned a rate limit, or the Brave Search API key's quota is " <>
+            "spent until the reset the error names"
+      },
+      %{
+        tag: "plan_excludes_place_search",
+        description:
+          "the Brave Search API key's plan does not include place search, so no search with " <>
+            "it can succeed; do not search again"
+      },
+      %{
+        tag: "deadline",
+        description: "the place search is busy with this home's other searches; try again shortly"
+      },
+      %{
+        tag: "computer_away",
+        description:
+          "this home looks places up in Apple Maps on a Mac, and none that does is online " <>
+            "now; nothing was searched, so ask again once one is online"
+      },
+      %{
+        tag: "computer_off",
+        description:
+          "the Mac that looks places up has Apple Maps switched off; only someone at that " <>
+            "Mac can switch it on"
+      },
+      %{
+        tag: "computer_refused",
+        description: "the Mac that looks places up refused the search, in its own words"
+      },
+      %{
+        tag: "computer_busy",
+        description: "the Mac that looks places up is busy; try again in a moment"
+      },
+      %{
+        tag: "computer_timed_out",
+        description: "the Mac that looks places up did not answer in time; try again shortly"
+      },
       %{
         tag: "provider_error",
         description:
@@ -244,8 +286,9 @@ defmodule FermixCore.Tools.PlaceSearch do
       config_path: "[fermix_core.tools.web_search] brave_api_key",
       description:
         "A Brave Search API key, needed only while place_search runs on Brave " <>
-          "(`[fermix_core.tools.place_search] backend`: the Homebrew and Linux builds use " <>
-          "Brave, and the Fermix Mac app searches Apple Maps with no key). One key serves " <>
+          "(`[fermix_core.tools.place_search] backend`: the Fermix Mac app searches Apple " <>
+          "Maps with no key, and so does a server's home on a linked Mac that offers it; " <>
+          "the Homebrew and Linux builds use Brave otherwise). One key serves " <>
           "both consumers: web_search's Brave backend and place_search. Brave does not have " <>
           "to be the active web backend, and each endpoint call is separately metered."
     }
@@ -257,8 +300,9 @@ defmodule FermixCore.Tools.PlaceSearch do
 
   @doc """
   Advertise the tool only when the backend in force is ready (§14.1, M72
-  §14.1): Brave's key resolves, or the Apple Maps helper can be spawned on a
-  build that carries it.
+  §14.1): Brave's key resolves, the Apple Maps helper can be spawned on a
+  build that carries it, or a computer of the home offers places (a Mac that
+  is away answers `computer_away` when called, so the tool stays).
 
   Discovered via `function_exported?` at `AgentLoop.build_state`. A daemon
   whose every call would refuse never shows the tool; `execute/2` repeats the
@@ -279,13 +323,110 @@ defmodule FermixCore.Tools.PlaceSearch do
   @doc "The backend `context` resolves to (`PlaceSearch.Backend.resolve/2`)."
   @spec resolution(map()) :: Backend.resolution()
   def resolution(context) when is_map(context),
-    do: Backend.resolve(Config.current(), host(context))
+    do: Backend.resolve(Config.current(), host(context) ++ computers_opts(context))
 
   @impl true
   @spec execute(map(), Tool.context()) :: {:ok, Tool.tool_result()}
   def execute(args, context) when is_map(args) and is_map(context) do
     Support.run(name(), Map.delete(context, :tool_trace), fn -> run(args, context) end)
   end
+
+  @doc """
+  The place search a caller that is not this tool runs: a trip's place
+  lookups inside `trip_edit` (M89 §04, C12). `resolution` is the call's, made
+  once (`resolution/1`), so every search of one call runs on one backend
+  whatever changes meanwhile; its readiness is checked as a call of the
+  tool's is. `{:ok, search}`, the call's search, which each lookup runs with
+  its request as given (`Backend.request()`; the backend checks its fields)
+  and `send`, how it may send: `:send_within_ms`, the most it may wait for
+  its turn (the lookup's time left), and the call's shared stop, `:stopped`
+  and `:stop` (`PlaceSearch.Brave`; Apple Maps queues nothing and reads
+  neither; a Mac of the home reads both and bounds its invocation by the
+  time left, `PlaceSearch.Computer`); or why the backend is not ready. Unlike
+  `execute/2` a search emits no tool event, since the model's one call is the
+  `trip_edit` that runs it, and keeps nothing for a reply: what joins the
+  conversation is the caller's to choose. Its trace carries the backend's
+  name and, on success, `searched_with`, the owner's words for what searched
+  ("Brave", "Apple Maps", "Apple Maps on studio Mac"), which a trip's answer
+  says.
+  """
+  @spec searcher(map(), Backend.resolution()) ::
+          {:ok,
+           (Backend.request(), keyword() ->
+              {:ok, [Backend.place()], Backend.trace_metadata()}
+              | {:error, String.t(), Backend.trace_metadata()})}
+          | {:error, String.t()}
+  def searcher(context, %{name: _name, module: _module} = resolution) when is_map(context) do
+    opts = backend_opts(resolution, context)
+
+    with :ok <- Backend.ready(resolution, opts),
+         do: {:ok, fn request, send -> lookup(request, resolution, opts, send) end}
+  end
+
+  defp lookup(%{query: query} = request, resolution, opts, send)
+       when is_binary(query) and is_list(send) do
+    send = Keyword.validate!(send, [:send_within_ms, :stopped, :stop])
+    backend = %{backend: Atom.to_string(resolution.name)}
+
+    case resolution.module.search(request, send ++ opts) do
+      {:ok, places, trace} ->
+        searched = Map.get_lazy(trace, :searched_with, fn -> words(resolution.name) end)
+        {:ok, places, trace |> Map.merge(backend) |> Map.put(:searched_with, searched)}
+
+      {:error, reason, trace} ->
+        {:error, reason, Map.merge(trace, backend)}
+    end
+  end
+
+  @doc """
+  The geocode a trip's towns run (M89, `Trips.Towns`), as `searcher/2` is
+  the search its lookups run: on the call's `resolution`, its readiness
+  checked as a call's is, each geocode given a near's words and `send`, how
+  it may send (`:send_within_ms`, `:stopped`, `:stop`), with no tool event
+  of its own. Its trace carries the backend's name and, on success,
+  `searched_with`. It is the one rule for whether a home names towns
+  (`Backend.geocodes?/1`): on Brave, which names none, there is no geocode
+  (`{:error, "unsupported: …"}`), so neither a call nor the trip placer asks
+  for a town there.
+  """
+  @spec geocoder(map(), Backend.resolution()) ::
+          {:ok,
+           (String.t(), keyword() ->
+              {:ok, Backend.town(), Backend.trace_metadata()}
+              | {:error, String.t(), Backend.trace_metadata()})}
+          | {:error, String.t()}
+  def geocoder(context, %{name: _name, module: _module} = resolution) when is_map(context) do
+    opts = backend_opts(resolution, context)
+
+    with :ok <- names_towns(resolution),
+         :ok <- Backend.ready(resolution, opts),
+         do: {:ok, fn words, send -> geocode(words, resolution, opts, send) end}
+  end
+
+  defp names_towns(resolution) do
+    if Backend.geocodes?(resolution),
+      do: :ok,
+      else: {:error, "unsupported: this home's place search names no town"}
+  end
+
+  defp geocode(words, resolution, opts, send) when is_binary(words) and is_list(send) do
+    send = Keyword.validate!(send, [:send_within_ms, :stopped, :stop])
+    backend = %{backend: Atom.to_string(resolution.name)}
+
+    case resolution.module.geocode(words, send ++ opts) do
+      {:ok, town, trace} ->
+        searched = Map.get_lazy(trace, :searched_with, fn -> words(resolution.name) end)
+        {:ok, town, trace |> Map.merge(backend) |> Map.put(:searched_with, searched)}
+
+      {:error, reason, trace} ->
+        {:error, reason, Map.merge(trace, backend)}
+    end
+  end
+
+  # The owner's words for a backend that searched here; a Mac of the home
+  # names itself (`PlaceSearch.Computer`).
+  defp words(:apple_maps), do: "Apple Maps"
+  defp words(:brave), do: "Brave"
 
   # The backend is resolved and its readiness re-checked on every call:
   # advertisement can never be the only readiness/security barrier (§14.1).
@@ -325,13 +466,23 @@ defmodule FermixCore.Tools.PlaceSearch do
     [context: context] ++ host(context) ++ Map.get(context, :apple_maps, [])
   end
 
+  # A Mac of the home reads the home's computers, and the turn for its
+  # invocation.
+  defp backend_opts(%{name: :computer}, context),
+    do: [context: context] ++ computers_opts(context)
+
   defp host(%{host: %{profile: _profile, os: _os} = host}), do: [host: host]
   defp host(_context), do: []
 
+  defp computers_opts(%{computers_opts: opts}) when is_list(opts), do: opts
+  defp computers_opts(_context), do: []
+
   # Truncated to `count` BEFORE encoding: the provider may return more than it
   # was asked for, and the model must never be handed rows the caller capped out.
-  # Exactly the places it is handed are kept for a reply to be drawn with.
+  # Exactly the places it is handed are kept for a reply to be drawn with. A
+  # Mac's words for itself are for a trip's answer, never an event's.
   defp success(backend, fields, anchor, places, trace, context) do
+    trace = Map.delete(trace, :searched_with)
     kept = Enum.take(places, fields.count)
     :ok = remember_places(context, kept)
 
@@ -474,7 +625,7 @@ defmodule FermixCore.Tools.PlaceSearch do
     end
   end
 
-  defp locale_for(:apple_maps, args) do
+  defp locale_for(backend, args) when backend in @apple_maps_backends do
     if Map.has_key?(args, "country") or Map.has_key?(args, "language"),
       do: {:error, @brave_only_locale},
       else: :ok

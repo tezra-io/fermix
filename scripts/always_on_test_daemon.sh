@@ -4,14 +4,15 @@
 #
 #   always_on_test_daemon.sh up [--release X]   install the published, signed
 #                                               macOS release X (the latest when
-#                                               none is named) with a home of its
-#                                               own, and open its web setup
+#                                               none is named, 0.20.0 or later)
+#                                               with a home of its own, and open
+#                                               its web setup
 #   always_on_test_daemon.sh status             what runs, where, and the home's
 #                                               Always On screen
 #   always_on_test_daemon.sh down               stop it and remove all of it
 #
-# Everything the owner does after `up` (model key, Hetzner token, create the
-# server, move, move back, delete the server) is done in the web setup.
+# Everything the owner does after `up` (model key, the code for their own
+# server, move, move back) is done in the web setup.
 #
 # What keeps it apart from the owner's own Fermix:
 #   * Root: ~/fermix-always-on-test (bin/, home/), carrying a marker file. Only
@@ -50,6 +51,8 @@ readonly MARKER_NAME=".always-on-test-daemon"
 readonly MARKER_TEXT="This directory is a throwaway Fermix made by scripts/always_on_test_daemon.sh; its down removes it."
 readonly COSIGN_ISSUER="https://token.actions.githubusercontent.com"
 readonly COSIGN_IDENTITY_PREFIX="https://github.com/${REPO}/.github/workflows/release.yml@refs/tags/v"
+# The first release that serves Always On; every older one refuses each step of it.
+readonly ALWAYS_ON_SINCE="0.20.0"
 # One probe of the web listener a second, so about a minute.
 readonly HEALTH_WAIT_ATTEMPTS=60
 readonly MANIFEST_MAX_SECONDS=60
@@ -181,6 +184,18 @@ running_from() {
 
 valid_version() { [[ "$1" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; }
 
+# Whether version $1 comes before $2, both valid_version.
+version_before() {
+  local a b i
+  IFS=. read -r -a a <<<"$1"
+  IFS=. read -r -a b <<<"$2"
+  for i in 0 1 2; do
+    [ "${a[$i]}" -lt "${b[$i]}" ] && return 0
+    [ "${a[$i]}" -gt "${b[$i]}" ] && return 1
+  done
+  return 1
+}
+
 # ── up ────────────────────────────────────────────────────────────────────────
 
 refuse_taken_label() {
@@ -198,6 +213,12 @@ refuse_shared_runtime() {
   [ -z "$other" ] || fail "another fermix is installed at $other, and its runtime would share $BURRITO_BASE with this one"
   running="$(running_from "$BURRITO_BASE/")"
   [ -z "$running" ] || fail "a fermix runs from $BURRITO_BASE ($running), and this one would share that runtime directory"
+}
+
+refuse_release_without_always_on() {
+  if version_before "$1" "$ALWAYS_ON_SINCE"; then
+    fail "Fermix $1 serves no Always On; every release from $ALWAYS_ON_SINCE on does"
+  fi
 }
 
 refuse_unpacked_runtime() {
@@ -268,10 +289,6 @@ render_config() {
 # Its own keychain namespace, so no secret saved here replaces another home's.
 [fermix_core]
 profile = "$PROFILE"
-
-# Always On, which a release build offers only where this says so.
-[fermix_core.always_on]
-enabled = true
 
 # Its own ports: the cue door, the phone listener and the web setup.
 [fermix_core.cues]
@@ -386,6 +403,7 @@ cmd_up() {
   work="$(mktemp -d)"
   version="$release"
   [ -n "$version" ] || version="$(latest_version)"
+  refuse_release_without_always_on "$version"
   refuse_unpacked_runtime "$version"
   port="$(pick_port)"
   download_release "$version" "fermix_macos_$arch"
@@ -455,7 +473,9 @@ cmd_status() {
 # ── down ──────────────────────────────────────────────────────────────────────
 
 # The states in which Always On holds no server and no move: nothing set up, a
-# code for a server of the owner's own, or a token that created nothing yet.
+# code for the owner's server that no server used yet, or (`choose`, in
+# v0.18.0, which `up` no longer installs but an earlier version of this script
+# did, so `down` can still meet it) a provider token that created nothing yet.
 holds_nothing() {
   case "$1" in
     off | connect | choose) return 0 ;;
@@ -463,23 +483,19 @@ holds_nothing() {
   esac
 }
 
-# A build without Always On made no server: one that refuses it by name, or
-# one older than it, which has no `home` verb at all. Anything else this cannot
-# read keeps the home.
+# A release with no `home` verb at all, from before Always On, holds no
+# server: `up` installs none, but an earlier version of this script could.
+# Any refusal, and anything else this cannot read, keeps the home.
 refuse_held_server() {
   local out="$work/home.json" err="$work/home.err" code=0
   engine home status --json >"$out" 2>"$err" || code=$?
   case "$code" in
     0) check_screen "$out" ;;
-    1)
-      [ "$(screen_field "$out" error code)" = always_on_unavailable ] ||
-        fail "fermix home status refused: $(screen_field "$out" error sentence)"
-      say "Fermix $(state_get version) serves no Always On here, so it made no server."
-      ;;
+    1) fail "fermix home status refused: $(screen_field "$out" error sentence)" ;;
     2)
       [ "$(head -n 1 "$err")" = "fermix: unknown command: home" ] ||
         { cat "$err" >&2; fail "fermix home status did not answer"; }
-      say "Fermix $(state_get version) predates Always On, so it made no server."
+      say "Fermix $(state_get version) predates Always On, so it holds no server."
       ;;
     *) cat "$err" >&2; fail "fermix home status exited $code" ;;
   esac
@@ -500,7 +516,7 @@ check_screen() {
     say "Always On holds no server here ($state)."
     return 0
   fi
-  fail "Always On says \"$sentence\" ($role, $state); delete the server in the web setup (http://127.0.0.1:$(state_get port)/setup) first, then run $prog down again"
+  fail "Always On says \"$sentence\" ($role, $state); move back or cancel in the web setup (http://127.0.0.1:$(state_get port)/setup) first, then run $prog down again"
 }
 
 # The service is this root's or absent; another's is never touched.

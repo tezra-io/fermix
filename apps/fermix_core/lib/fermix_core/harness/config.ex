@@ -19,6 +19,16 @@ defmodule FermixCore.Harness.Config do
   intervals, delivery counts) require a positive integer; `max_framing_errors`
   and `min_free_gb` are non-negative because zero is a coherent setting
   (zero framing tolerance; no free-space floor).
+
+  **Split by key (M98 D5).** The table is in both settings files. Whether
+  coding agents may run here (`approved`) and where Codex and Claude Code keep
+  their sign-ins (`codex_home`, `claude_config_dir`) are this computer's own,
+  in its `machine.toml` (`Setup.MachineFile`), which no move or backup
+  carries; every other key, the default agent among them, is the home's, in
+  `config.toml`. Application environment holds both under one key, and
+  `machine_keyword/1` and `home_keyword/1` split it back for the two files.
+  The machine file's table always holds `approved`, written even when off:
+  it is how a boot knows this computer's keys were taken from `config.toml`.
   """
 
   @type t :: keyword()
@@ -67,6 +77,9 @@ defmodule FermixCore.Harness.Config do
     :claude_config_dir
   ]
 
+  # This computer's own keys, in machine.toml; every other is the home's.
+  @machine_keys [:approved, :codex_home, :claude_config_dir]
+
   @non_negative_int_keys [:max_framing_errors, :min_free_gb]
 
   @positive_int_keys [
@@ -90,6 +103,51 @@ defmodule FermixCore.Harness.Config do
   """
   @spec config_keys() :: [atom()]
   def config_keys, do: @config_keys
+
+  @doc "The keys that are this computer's own, in its `machine.toml`, in the order it writes them."
+  @spec machine_keys() :: [atom(), ...]
+  def machine_keys, do: @machine_keys
+
+  @doc """
+  This computer's keys of a block (`normalize/1`'s shape), as its machine file
+  holds them: `approved` always, `false` when the block does not set it, then
+  each sign-in folder the block sets.
+  """
+  @spec machine_keyword(t()) :: t()
+  def machine_keyword(block) when is_list(block) do
+    folders =
+      for key <- @machine_keys -- [:approved], is_binary(block[key]), do: {key, block[key]}
+
+    [{:approved, Keyword.get(block, :approved, @default_approved)} | folders]
+  end
+
+  @doc "The home's keys of a block (`normalize/1`'s shape), as `config.toml` holds them."
+  @spec home_keyword(t()) :: t()
+  def home_keyword(block) when is_list(block), do: Keyword.drop(block, @machine_keys)
+
+  @doc """
+  Checks the machine file's own `[fermix_core.harness]` (`table`, decoded, nil
+  when absent): it holds only this computer's keys. Raises `ArgumentError`
+  naming `machine.toml` for any other, which nothing would read there. Its
+  values are read with the rest of the settings (`Setup.MachineFile.join/2`).
+  """
+  @spec machine_file!(nil | map()) :: :ok
+  def machine_file!(nil), do: :ok
+
+  def machine_file!(table) when is_map(table) do
+    allowed = Enum.map(@machine_keys, &Atom.to_string/1)
+
+    case table |> Map.keys() |> Enum.map(&to_string/1) |> Enum.reject(&(&1 in allowed)) do
+      [] ->
+        :ok
+
+      unknown ->
+        raise ArgumentError,
+              "machine.toml [fermix_core.harness] has unknown key(s): " <>
+                "#{unknown |> Enum.sort() |> Enum.join(", ")}. It takes this computer's " <>
+                "approved, codex_home and claude_config_dir; the rest are in config.toml."
+    end
+  end
 
   @spec normalize(nil | map() | keyword()) :: t()
   def normalize(nil), do: []

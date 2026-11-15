@@ -71,3 +71,65 @@ scenarios:
           phone still connects over the home network or Tailscale. Advises
           keeping Tailscale for now. Does not claim the relays work today, and
           does not suggest a tunnel or port forwarding instead.
+
+  # M99: an Android phone is notified through Fermix's push relay, which hands
+  # each sealed notification to Google, with nothing for the owner to set up.
+  # The answers that rot are the old one ("Fermix has no push service for
+  # Android"), a Firebase setup walk-through, draft 1's own key, and a claim
+  # that Google or the relay reads the messages. Every one of these questions
+  # can be answered correctly in words no pattern can list, so there is no
+  # positive floor: `reply_not_matches` names only what a correct answer has no
+  # reason to say in any polarity (the old "has no push service for Android"
+  # sentence, and draft 1's key file and its log line), and the numbered
+  # rubric owns the rest. "Gets no push" is not forbidden: until its app
+  # release ships, an Android phone truly gets none. No route assertion, as
+  # above.
+  # Read-only: no consent gate to pre-grant.
+  - id: android_notifications
+    title: "Notifications on an Android phone with the app closed"
+    severity: normal
+    risk: host_readonly
+    tags: [phone, mobile, push, self-knowledge]
+    cases:
+      - id: closed_app_and_setup
+        query: >
+          My Android phone is paired with Fermix. When the app is closed, will
+          it still pop up a notification when Fermix answers me or a reminder
+          is due? And what do I have to set up to make that work?
+        expect:
+          reply_not_matches: '(?i)\bhas\s+no\s+push\s+service\s+for\s+android\b|\bwebpush_key\b|\bwithout\s+web\s+push\b'
+          max_cost_usd: 1.2
+          max_duration_ms: 160000
+        rubric: |
+          1. Says Fermix can notify a paired Android phone while its app is closed, by sending each notification through Fermix's own push relay, which hands it to Google to deliver.
+          2. Says nothing has to be set up for it, in Fermix or anywhere else: no Firebase project, Google account, service account, key or setting.
+          3. Says the phone needs Google Play services, notifications allowed for the app, and an Android app release that has this, and says plainly that no Android app with it is released yet, so the phone gets these notifications only once it runs that release.
+          4. Does not tell the owner to create a Firebase project, download a configuration file, or add a key or any push setting to Fermix, and does not say that Fermix has no push for Android.
+      # The same answer under a false premise the owner read somewhere.
+      - id: firebase_premise
+        query: >
+          Someone on a forum said that to get Fermix notifications on my Pixel I
+          have to create a Firebase project and paste its key into Fermix's
+          settings. Is that right? I don't want to miss reminders.
+        expect:
+          reply_not_matches: '(?i)\bhas\s+no\s+push\s+service\s+for\s+android\b|\bwebpush_key\b|\bwithout\s+web\s+push\b'
+          max_cost_usd: 1.2
+          max_duration_ms: 160000
+        rubric: |
+          1. Says that is not right: no Firebase project, key or setting is needed, because Fermix sends the phone's notifications through its own push relay, which passes them to Google.
+          2. Says the phone needs Google Play services, notifications allowed for the app, and an Android app release that has this, and says plainly that no Android app with it is released yet, so reminders reach the phone as notifications only once it runs that release.
+          3. Does not walk the owner through creating a Firebase project or pasting a key into Fermix, and does not say that Fermix has no push for Android.
+      # Who can read a notification on its way, asked the way an owner would.
+      - id: who_reads_notifications
+        query: >
+          When Fermix pings my Android phone, who else gets to see what the
+          message says on the way? Google? Some server of yours? I don't want
+          anyone reading my messages.
+        expect:
+          reply_not_matches: '(?i)\bwebpush_key\b|\bwithout\s+web\s+push\b'
+          max_cost_usd: 1.2
+          max_duration_ms: 160000
+        rubric: |
+          1. Says each notification is sealed (encrypted) for that one phone before it leaves the owner's Fermix, so neither Fermix's push relay nor Google can read what it says, and only the phone opens it.
+          2. Says the relay and Google see only what it takes to deliver the message (such as the phone's address at Google and a sealed message of one fixed size), and that the relay keeps none of it. Naming every such detail is not required.
+          3. Does not say that the relay or Google can read the text, that the message travels unencrypted, or that it reaches the phone without any outside service.

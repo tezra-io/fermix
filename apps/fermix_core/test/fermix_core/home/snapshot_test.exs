@@ -31,7 +31,11 @@ defmodule FermixCore.Home.SnapshotTest do
     "traces/2026-10-27/run.jsonl",
     "daemon.sock",
     "grants/grant-1793083733-1.json",
-    "snapshots/status.json"
+    "snapshots/status.json",
+    # M97 §4: this computer's own settings never travel.
+    "machine.toml",
+    # M97 D13: a computer's own key, where its home keeps secrets as files.
+    "secrets/device.desktop_key"
   ]
 
   @link {"plugins/installed/invented/current", "1.0.0"}
@@ -68,8 +72,9 @@ defmodule FermixCore.Home.SnapshotTest do
 
       assert {:ok, restored} = restore(out, pair, into)
       assert restored.epoch == 4
-      assert restored.rewritten == ["sandbox.workspace_root"]
-      assert restored.harness_consent_reset
+      assert restored.rewritten == ["fermix_core.meetings.recordings"]
+      # The coding approval is the computer's own (M98 D5).
+      assert restored.device_settings_dropped == ["fermix_core.harness.approved"]
       # The included files, the database, the epoch and the plugin lockfile.
       assert restored.files == map_size(@included) + 3
 
@@ -80,8 +85,11 @@ defmodule FermixCore.Home.SnapshotTest do
 
       assert File.read!(Path.join(into, "config.toml")) ==
                config_toml(home)
-               |> String.replace(~s("#{home}/workspace"), ~s("#{into}/workspace"))
-               |> String.replace("approved = true", "approved = false")
+               |> String.replace(
+                 ~s("#{home}/workspace/meetings"),
+                 ~s("#{into}/workspace/meetings")
+               )
+               |> String.replace("[fermix_core.harness]\napproved = true\n\n", "")
 
       assert rows(Path.join(into, "memory.db")) == 2
       assert mode(Path.join(into, "memory.db")) == 0o644
@@ -323,8 +331,8 @@ defmodule FermixCore.Home.SnapshotTest do
     [fermix_core.harness]
     approved = true
 
-    [sandbox]
-    workspace_root = "#{home}/workspace"
+    [fermix_core.meetings]
+    recordings = "#{home}/workspace/meetings"
     """
   end
 

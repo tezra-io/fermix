@@ -4,15 +4,40 @@ defmodule FermixCore.ComputerHistory.Config do
   (MILESTONE_32 §9.4). Each key is a distinct consent question, so they are
   allowed under the minimal-knobs rule (consent-class settings, not tuning).
 
+  **Split by key (M97 §4).** The table is in both settings files, with
+  different keys in each:
+
   ```toml
+  # machine.toml: this computer's own, never carried by a move or a backup
   [fermix_core.computer_history]
-  enabled          = false   # the enable/consent act
+  enabled          = false   # the enable/consent act: this computer records
   apps             = []      # capture allowlist, default-deny (bundle ids)
+  summarizer       = "local" # only "local", or absent: this computer makes
+                             #   its own notes on its own model and sends
+                             #   only the note
+
+  # config.toml: the home's, which a move carries to its server
+  [fermix_core.computer_history]
   remote_summaries = []      # Tier 2: providers that may receive DERIVED summaries
-  summarizer       = "default" # where summarization runs: "default" (the daemon's
-                             #   default provider), "local" (on-device), or one
-                             #   provider id (Tier 3: RAW events to that provider — S9)
+  summarizer       = "default" # the route the home summarizes on: "default"
+                             #   (the daemon's default provider), "local" (the
+                             #   home's own on-device model), or one provider id
+                             #   (Tier 3: RAW sitting text to that provider — S9)
   ```
+
+  Application environment holds both under one key, the machine file's
+  `summarizer` as `machine_summarizer` (`machine_file/1`), so neither ever
+  stands for the other, and `machine_keyword/1` and `home_keyword/1` split it
+  back for the two files. One writer each: the machine's keys are written
+  only on that machine, the home's only on the home.
+
+  **Which summarizer is in force (`summarizer/1`).** A machine that chose
+  local makes its own notes, and where that machine is the home, the
+  roll-up and every sitting it summarizes stay on it too: no history leaves
+  it for a provider. Otherwise the home's route is in force. A computer whose
+  home is elsewhere (the `device` role) never reads the home's keys
+  (`for_role/2`, applied when the settings are), so its own sittings are
+  either made into notes here or sent to the home as text.
 
   `normalize/1` is the parse-boundary validator (the `HarnessConfig.normalize`
   shape): present keys only, each value validated fail-loud, strings coerced to
@@ -25,14 +50,17 @@ defmodule FermixCore.ComputerHistory.Config do
 
   `sites` is **retired** (v1.1 decision 1: every site visited in an allowlisted
   browser is recorded, so there is no per-site filter to configure). It stays in
-  `@retired_keys` so a `config.toml` that still carries it is accepted, named once
-  at warning, and dropped — a retired key must never refuse boot, and `to_keyword/1`
-  never writes it back.
+  `@retired`, with the sentence that names it, so a `config.toml` or
+  `machine.toml` that still carries it is accepted and dropped — a retired key
+  must never refuse boot, and `to_keyword/1` never writes it back — and the
+  settings read that drops it names it (`retired_notices/1`), which the engine
+  process says once at warning (`Setup.ConfigStore.say_retired_settings/0`).
   """
 
   require Logger
 
   alias FermixCore.Clock
+  alias FermixCore.Home.Role
   alias FermixCore.Providers.Descriptor
   alias FermixCore.Providers.PrimaryConfig
   alias FermixCore.Providers.RoutingOverrides
@@ -41,10 +69,25 @@ defmodule FermixCore.ComputerHistory.Config do
   @section :computer_history
 
   @config_keys [:enabled, :apps, :remote_summaries, :summarizer]
+  # What application environment holds: the files' keys, and the machine
+  # file's `summarizer` under a name of its own.
+  @env_keys @config_keys ++ [:machine_summarizer]
+  # This machine's keys, and the home's (§4).
+  @machine_keys [:enabled, :apps, :machine_summarizer]
+  @home_keys [:summarizer, :remote_summaries]
+  # The keys the machine file's own table may hold, as it spells them.
+  @machine_file_keys [:enabled, :apps, :summarizer]
 
-  # Keys a persisted config may still carry: accepted at parse, dropped at
-  # normalize, never written back.
-  @retired_keys [:sites]
+  # Keys a persisted config may still carry, each with the sentence that names
+  # it: accepted at parse, dropped at normalize, never written back. Every list
+  # of retired keys here is this map's, so no key is accepted and dropped
+  # without its sentence.
+  @retired %{
+    sites:
+      "computer_history.sites is retired: every site in an allowlisted browser is " <>
+        "recorded; remove the key from the file that holds it"
+  }
+  @retired_keys Map.keys(@retired)
 
   @default_enabled false
   @default_apps []
@@ -65,10 +108,22 @@ defmodule FermixCore.ComputerHistory.Config do
 
   @doc """
   Keys this section no longer honors but still accepts from an existing
-  `config.toml`. `normalize/1` names each one at warning and drops it.
+  `config.toml` or `machine.toml`. `normalize/1` and `machine_file/1` drop each
+  one, and `retired_notices/1` names it.
   """
   @spec retired_keys() :: [atom()]
   def retired_keys, do: @retired_keys
+
+  @doc """
+  The sentence for each retired key `table` carries (a decoded table, a
+  snapshot's block, or nil), `[]` for none: the keys `normalize/1` and
+  `machine_file/1` accept and drop, named by the settings read that drops them.
+  """
+  @spec retired_notices(nil | map() | keyword()) :: [String.t()]
+  def retired_notices(nil), do: []
+
+  def retired_notices(table) when is_map(table) or is_list(table),
+    do: for({key, sentence} <- @retired, lookup(table, key) != @absent, do: sentence)
 
   @doc """
   Every key the parse boundary accepts: the live keys plus the retired ones. The
@@ -79,9 +134,84 @@ defmodule FermixCore.ComputerHistory.Config do
   @spec accepted_keys() :: [atom(), ...]
   def accepted_keys, do: @config_keys ++ @retired_keys
 
+  @doc """
+  Every key the block holds in application environment and in a settings
+  snapshot: the files' keys and `machine_summarizer`, with the retired ones.
+  The config store's key check for a snapshot.
+  """
+  @spec env_keys() :: [atom(), ...]
+  def env_keys, do: @env_keys ++ @retired_keys
+
   @doc "The current config block from app env."
   @spec current() :: keyword()
   def current, do: Application.get_env(@app, @section, [])
+
+  @doc """
+  `config` as an engine in `role` holds it: a computer whose home is
+  elsewhere (`:device`) without the home's keys, which it never acts on;
+  every other role as it is.
+  """
+  @spec for_role(keyword(), Role.role() | nil) :: keyword()
+  def for_role(config, :device) when is_list(config), do: Keyword.drop(config, @home_keys)
+
+  def for_role(config, role) when is_list(config) and role in [nil, :primary, :candidate],
+    do: config
+
+  @doc """
+  The machine file's own `[fermix_core.computer_history]` (`table`, decoded,
+  nil when absent): its local summarizer as application environment holds
+  it (`[machine_summarizer: :local]`), or `[]`. Raises `ArgumentError`
+  naming `machine.toml` for a key that is not this machine's (the home's
+  `remote_summaries` included) or a summarizer other than `"local"`. Its
+  `enabled` and `apps` are read with the rest of the settings
+  (`Setup.MachineFile.join/2`).
+  """
+  @spec machine_file(nil | map() | keyword()) :: keyword()
+  def machine_file(nil), do: []
+
+  def machine_file(table) when is_map(table) or is_list(table) do
+    machine_file_keys!(table)
+
+    case lookup(table, :summarizer) do
+      @absent -> []
+      value -> [machine_summarizer: machine_summarizer!(value, "machine.toml ")]
+    end
+  end
+
+  defp machine_file_keys!(table) do
+    allowed = Enum.map(@machine_file_keys ++ @retired_keys, &Atom.to_string/1)
+    keys = if is_map(table), do: Map.keys(table), else: Keyword.keys(table)
+
+    case keys |> Enum.map(&to_string/1) |> Enum.reject(&(&1 in allowed)) |> Enum.sort() do
+      [] ->
+        :ok
+
+      unknown ->
+        raise ArgumentError,
+              "machine.toml [fermix_core.computer_history] has unknown key(s): " <>
+                "#{Enum.join(unknown, ", ")}. It takes this computer's enabled, apps and " <>
+                ~s(summarizer = "local"; the home's summarizer and remote_summaries are in ) <>
+                "config.toml."
+    end
+  end
+
+  @doc """
+  This machine's keys of a persisted block (`to_keyword/1`'s shape), as the
+  machine file spells them: `enabled`, `apps`, and `summarizer = "local"`
+  where it makes its own notes.
+  """
+  @spec machine_keyword(keyword()) :: keyword()
+  def machine_keyword(block) when is_list(block) do
+    for {key, value} <- block, key in @machine_keys, do: machine_entry(key, value)
+  end
+
+  defp machine_entry(:machine_summarizer, value), do: {:summarizer, value}
+  defp machine_entry(key, value), do: {key, value}
+
+  @doc "The home's keys of a persisted block, as config.toml spells them."
+  @spec home_keyword(keyword()) :: keyword()
+  def home_keyword(block) when is_list(block),
+    do: for({key, value} <- block, key in @home_keys, do: {key, value})
 
   @spec enabled?(keyword()) :: boolean()
   def enabled?(config \\ current()), do: Keyword.get(config, :enabled, @default_enabled)
@@ -111,14 +241,76 @@ defmodule FermixCore.ComputerHistory.Config do
   end
 
   @doc """
-  Where summarization runs: `:default_provider` (default — the daemon's primary
-  provider, §22.1), `:local` (on-device opt-in), or `{:provider, id}` (Tier 3, a
-  specific pinned provider). Fails **closed** on a malformed value — an unexpected
-  shape keeps summarization on-device (`:local`, no egress) rather than crashing
-  the per-turn Gate snapshot (§9.4).
+  Where summarization runs on this engine (the moduledoc's rule): `:local`
+  where this machine chose to make its own notes (`machine_summarizer`),
+  else the home's route: `:default_provider` (default — the daemon's primary
+  provider, §22.1), `:local` (the home's on-device model), or
+  `{:provider, id}` (Tier 3, a specific pinned provider). A computer holds
+  no route (`for_role/2`), so there it is `:local` or `:default_provider`,
+  its sittings sent to the home as text. Fails **closed** on a malformed
+  value — an unexpected shape keeps summarization on-device (`:local`, no
+  egress) rather than crashing the per-turn Gate snapshot (§9.4).
   """
   @spec summarizer(keyword()) :: summarizer()
   def summarizer(config \\ current()) do
+    case Keyword.get(config, :machine_summarizer) do
+      nil -> route(config)
+      _local_or_malformed -> :local
+    end
+  end
+
+  @doc """
+  The home's route this machine's own local summarizer decides over (M97 §4):
+  where `machine.toml` says `summarizer = "local"` and the home's
+  `config.toml` names another, that one, as `summarizer/1` would answer it
+  without the machine's; nil where nothing is overridden. A computer holds no
+  home route (`for_role/2`), so there it is always nil. Deleting the line
+  from `machine.toml` hands the choice back to `config.toml`.
+  """
+  @spec shadowed_route(keyword()) :: summarizer() | nil
+  def shadowed_route(config \\ current()) when is_list(config) do
+    machine? = Keyword.get(config, :machine_summarizer) != nil
+
+    if machine? and Keyword.has_key?(config, :summarizer) and route(config) != :local,
+      do: route(config),
+      else: nil
+  end
+
+  @doc """
+  Say once, where it is true, that this machine's local summarizer decides
+  over the home's route in `config.toml` (`shadowed_route/1`). Called as the
+  history rail starts, so a route edited in `config.toml` that does not take
+  is never silent.
+  """
+  @spec warn_if_shadowed(keyword()) :: :ok
+  def warn_if_shadowed(config \\ current()) when is_list(config) do
+    case shadowed_route(config) do
+      nil ->
+        :ok
+
+      route ->
+        Logger.warning(
+          ~s(computer_history: summarizer = "local" in this machine's machine.toml decides ) <>
+            "over config.toml's summarizer (#{route_word(route)}), which is not used while " <>
+            "that line is there; delete it from machine.toml to use config.toml's"
+        )
+    end
+  end
+
+  @doc "What a settings row says while `shadowed_route/1` names a route."
+  @spec shadowed_footer() :: String.t()
+  def shadowed_footer,
+    do:
+      ~s(This Mac's `machine.toml` says `summarizer = "local"`, so its notes are made here ) <>
+        "and the summarizer in `config.toml` is not used while that line is there."
+
+  @doc "A route as `config.toml` spells it: `default`, `local` or a provider's id."
+  @spec route_word(summarizer()) :: String.t()
+  def route_word(:default_provider), do: "default"
+  def route_word(:local), do: "local"
+  def route_word({:provider, provider}), do: Atom.to_string(provider)
+
+  defp route(config) do
     case Keyword.get(config, :summarizer, @default_summarizer) do
       :local -> :local
       :default_provider -> :default_provider
@@ -214,35 +406,12 @@ defmodule FermixCore.ComputerHistory.Config do
   def normalize(nil), do: []
 
   def normalize(config) when is_map(config) or is_list(config) do
-    warn_retired_keys(config)
-
-    Enum.reduce(@config_keys, [], fn key, acc ->
+    Enum.reduce(@env_keys, [], fn key, acc ->
       case lookup(config, key) do
         @absent -> acc
         value -> Keyword.put(acc, key, normalize_value(key, value))
       end
     end)
-  end
-
-  # One line per retired key actually present, never a refusal: the operator's
-  # existing config.toml must keep booting. Because normalize DROPS the key, the
-  # second pass over its own output is silent (idempotence, config_test).
-  # Expect the line TWICE on the first setup save and never again: the save reads
-  # the still-on-disk file (one line) and then re-parses the snapshot it is about
-  # to write (a second). The saved file no longer has the key, so every later boot
-  # is silent. That is the retirement working, not a double-warn bug.
-  defp warn_retired_keys(config) do
-    Enum.each(@retired_keys, fn key ->
-      case lookup(config, key) do
-        @absent -> :ok
-        _present -> Logger.warning(retired_message(key))
-      end
-    end)
-  end
-
-  defp retired_message(:sites) do
-    "computer_history.sites is retired: every site in an allowlisted browser is " <>
-      "recorded; remove the key from config.toml"
   end
 
   # --- per-key validators -------------------------------------------------
@@ -288,6 +457,19 @@ defmodule FermixCore.ComputerHistory.Config do
 
   defp normalize_value(:summarizer, value),
     do: raise(ArgumentError, summarizer_error(value))
+
+  defp normalize_value(:machine_summarizer, value), do: machine_summarizer!(value, "")
+
+  # The machine file's summarizer says one thing: this computer makes its own
+  # notes. Any other value is the home's route, which lives in config.toml.
+  defp machine_summarizer!(value, _file) when value in ["local", :local], do: :local
+
+  defp machine_summarizer!(value, file) do
+    raise ArgumentError,
+          "invalid #{file}computer_history.summarizer #{inspect(value)}: this computer's " <>
+            ~s(summarizer takes only "local"; the route the home summarizes on is ) <>
+            "config.toml's summarizer"
+  end
 
   # The summarizer's refusal names its FULL vocabulary — "default"/"local" ahead
   # of the provider ids — because this message is the repair instruction a user
@@ -337,6 +519,7 @@ defmodule FermixCore.ComputerHistory.Config do
 
   defp persist_value(:summarizer, :default_provider), do: "default"
   defp persist_value(:summarizer, :local), do: "local"
+  defp persist_value(:machine_summarizer, :local), do: "local"
   defp persist_value(:summarizer, provider) when is_atom(provider), do: Atom.to_string(provider)
   defp persist_value(:remote_summaries, providers), do: Enum.map(providers, &Atom.to_string/1)
   defp persist_value(_key, value), do: value

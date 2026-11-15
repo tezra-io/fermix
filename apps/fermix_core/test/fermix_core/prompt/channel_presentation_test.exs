@@ -108,4 +108,90 @@ defmodule FermixCore.Prompt.ChannelPresentationTest do
       refute note =~ "Current date"
     end
   end
+
+  # EVENTS_DRAWN_AS_CARDS §04: one line where the connection draws events, and
+  # nothing anywhere else.
+  describe "events_line/2" do
+    test "says the events are drawn on a drawing companion or phone turn, else nothing" do
+      for channel <- ["companion", "mobile"] do
+        line = ChannelPresentation.events_line(channel, true)
+        assert line =~ "drawn under your reply"
+        assert line =~ "confirm in a sentence"
+      end
+
+      for {channel, draws?} <- [
+            {"companion", false},
+            {"mobile", false},
+            {"telegram", true},
+            {"telegram", false},
+            {nil, true}
+          ] do
+        assert ChannelPresentation.events_line(channel, draws?) == nil, inspect(channel)
+      end
+    end
+
+    # A block carries at most `ReplyBlocks.max_events/0` events, so the line
+    # says no more are drawn and has the reply say how many more there are:
+    # the rest are in neither the card nor the text otherwise.
+    test "says how many a reply draws at most, and to say how many more there are" do
+      most = Integer.to_string(FermixCore.ReplyBlocks.max_events())
+
+      for channel <- ["companion", "mobile"] do
+        line = ChannelPresentation.events_line(channel, true)
+        assert line =~ "at most #{most}"
+        assert line =~ "more than #{most}, say how many more"
+      end
+    end
+  end
+
+  # A call that is only said hears what changed in a list or a trip: the
+  # OpenAI Realtime call, whose tool context names no channel and is known by
+  # the voice-call fact, and a Live or Grok call's hand-off in a private call.
+  # Nothing is drawn on a call, and a screen's lines (write the list, link
+  # each stop) would be read aloud. A hand-off in a chat call shows what it
+  # cannot say in the owner's chat, as text, so it keeps those lines.
+  describe "a call's lines" do
+    test "the voice channel says what changed, never a screen's lines" do
+      list = ChannelPresentation.checklist_line("voice", false)
+      trip = ChannelPresentation.trip_line("voice", false)
+
+      assert list ==
+               "On a call, say what changed in a list; read its items aloud only when asked."
+
+      assert trip ==
+               "On a call, say what changed in a trip; read its days aloud only when asked, " <>
+                 "and never read a link aloud."
+
+      assert ChannelPresentation.checklist_line("voice", true) == list
+      assert ChannelPresentation.trip_line("voice", true) == trip
+      refute ChannelPresentation.checklist_line("telegram", false) == list
+      refute ChannelPresentation.trip_line("telegram", false) == trip
+    end
+
+    test "a call that is only said is the voice channel's; every other context is its own" do
+      assert ChannelPresentation.channel_of(%{computer_use_origin: :voice}) == "voice"
+
+      assert ChannelPresentation.channel_of(%{channel: "voice", computer_use_origin: :voice}) ==
+               "voice"
+
+      private = %{channel: "voice", computer_use_origin: :voice, voice_conversation: "private"}
+      assert ChannelPresentation.channel_of(private) == "voice"
+
+      # A chat call's hand-off: its shown part is text in the owner's chat,
+      # which draws nothing, so it is told the lines of no drawing surface.
+      chat = %{private | voice_conversation: "chat"}
+      assert ChannelPresentation.channel_of(chat) == nil
+
+      assert ChannelPresentation.checklist_line(ChannelPresentation.channel_of(chat), false) ==
+               ChannelPresentation.checklist_line("telegram", false)
+
+      assert ChannelPresentation.channel_of(%{
+               channel: "telegram",
+               computer_use_origin: :interactive
+             }) == "telegram"
+
+      assert ChannelPresentation.channel_of(%{channel: "companion"}) == "companion"
+      assert ChannelPresentation.channel_of(%{computer_use_origin: :unattended}) == nil
+    end
+  end
 end

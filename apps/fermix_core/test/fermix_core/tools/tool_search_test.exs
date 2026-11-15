@@ -142,6 +142,42 @@ defmodule FermixCore.Tools.ToolSearchTest do
     end
   end
 
+  # A plugin skill's worker runs at guest, below every plugin's `:external_api`
+  # tools, yet its loop reaches its own plugin's (`effective_own_plugin`), so
+  # the search finds exactly those: deferred plugin tools are reached only
+  # through it. Within the stamped classes, never another plugin's.
+  test "a plugin skill's guest run finds its own plugin's tools and no other's", %{
+    registry: registry
+  } do
+    for {name, plugin} <- [{"acme_search_issues", "acme"}, {"bolt_search_issues", "bolt"}] do
+      register(registry, name, "Search #{plugin} issues.",
+        metadata: %{plugin_owned?: true, plugin: plugin, category: :plugin}
+      )
+    end
+
+    guest_run = %{
+      capability_registry: registry,
+      agent_name: "test",
+      source_trust: :operator,
+      effective_trust: :guest,
+      effective_policy: [:read_only]
+    }
+
+    for {own_plugin, found} <- [
+          {nil, []},
+          {%{name: "acme", classes: [:read_only, :external_api]}, ["acme_search_issues"]},
+          {%{name: "acme", classes: [:read_only]}, []}
+        ] do
+      context = Map.put(guest_run, :effective_own_plugin, own_plugin)
+
+      {:ok, %{success: true, output: output}} =
+        ToolSearch.execute(%{"query" => "search issues"}, context)
+
+      names = Enum.map(Jason.decode!(output)["matches"], & &1["name"])
+      assert {own_plugin, names} == {own_plugin, found}
+    end
+  end
+
   # `[:fermix, :tool_search, :query]` coverage lives in
   # `tool_search_telemetry_test.exs`: the content gate is read from application
   # env, so those tests must set it and cannot be async.

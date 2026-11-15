@@ -29,7 +29,6 @@ defmodule FermixCore.Home.ReturnTest do
   test "write then read round-trips the record, 0600 under a 0700 device/", %{home: home} do
     record = %{
       from: "hetzner-cx22-orchard",
-      provider_server: "srv-7f3a",
       primary_epoch: 5,
       started_at: @started
     }
@@ -42,14 +41,6 @@ defmodule FermixCore.Home.ReturnTest do
     moving = Map.merge(record, %{move_started_at: @moving, candidate_id: "c-91", move_id: "m-12"})
     assert :ok = Return.write(home, moving)
     assert Return.read(home) == {:ok, moving}
-  end
-
-  test "an own server has no ledger row, so the record names none", %{home: home} do
-    record = %{from: "home-nas", primary_epoch: 3, started_at: @started}
-
-    :ok = Return.write(home, record)
-    assert {:ok, read} = Return.read(home)
-    refute Map.has_key?(read, :provider_server)
   end
 
   test "a record that is not the documented shape is refused by name, written or read",
@@ -78,6 +69,25 @@ defmodule FermixCore.Home.ReturnTest do
         ] do
       File.write!(file, contents)
       assert {:error, {:invalid_record, ^file, _detail}} = Return.read(home), inspect(contents)
+    end
+  end
+
+  # Restore here deletes no server (the owner did), so the record keeps the
+  # copy asked for and no request for a delete or time one happened.
+  test "a restore here keeps the copy it asked for, and no request to delete the server " <>
+         "and no time of a delete",
+       %{home: home} do
+    file = Return.path(home)
+    asked = %{from: "x", started_at: @started, restore_requested: "20310601T080000Z-e6.fxsnap"}
+
+    assert :ok = Return.write(home, asked)
+    assert Return.read(home) == {:ok, asked}
+
+    for record <- [
+          %{from: "x", started_at: @started, fence_requested: "20310601T080000Z-e6.fxsnap"},
+          %{from: "x", started_at: @started, fenced_at: @moving}
+        ] do
+      assert {:error, {:invalid_record, ^file, :unknown_key}} = Return.write(home, record)
     end
   end
 
@@ -142,7 +152,6 @@ defmodule FermixCore.Home.ReturnTest do
   defp moving_record do
     %{
       from: "hetzner-cx22-orchard",
-      provider_server: "srv-7f3a",
       primary_epoch: 5,
       started_at: @started,
       move_started_at: @moving,

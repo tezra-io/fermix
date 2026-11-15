@@ -151,6 +151,7 @@ defmodule FermixCore.Home.Snapshot.S3EndToEndTest do
       region: @region,
       prefix: "fermix",
       endpoint: ctx.endpoint,
+      credentials: :access_keys,
       access_key_id: @user,
       secret_access_key: secret
     }

@@ -17,25 +17,41 @@ defmodule FermixCore.Management.CopyTest do
   alias FermixCore.Auth.Redaction
   alias FermixCore.Capabilities.MCP.Config, as: McpConfig
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
+  alias FermixCore.Computers
+  alias FermixCore.Computers.Consent
+  alias FermixCore.Computers.Facts, as: ComputerFacts
+  alias FermixCore.Computers.Offers
+  alias FermixCore.Computers.Offers.ComputerUse, as: ComputerUseOffer
+  alias FermixCore.Computers.Offers.Places, as: PlacesOffer
+  alias FermixCore.Computers.Switches
   alias FermixCore.Cues.Config, as: CuesConfig
   alias FermixCore.Cues.Filter.Decision
   alias FermixCore.Cues.FollowUpReadiness
   alias FermixCore.Cues.FollowUps
   alias FermixCore.Cues.Mandates
   alias FermixCore.Cues.ProposalView
+  alias FermixCore.Harness.SignIn
+  alias FermixCore.Home.Archive
   alias FermixCore.Home.Candidate, as: HomeCandidate
+  alias FermixCore.Home.Join, as: HomeJoin
+  alias FermixCore.Home.Leave, as: HomeLeave
   alias FermixCore.Home.Move, as: HomeMove
   alias FermixCore.Home.MoveReadiness
-  alias FermixCore.Home.Provision
-  alias FermixCore.Home.Provision.Hetzner
-  alias FermixCore.Home.Provision.Registry, as: ProvisionRegistry
+  alias FermixCore.Home.ReleaseTable
+  alias FermixCore.Home.RestartHold
+  alias FermixCore.Home.ServerPrimary
+  alias FermixCore.Home.ServerRestart
   alias FermixCore.Home.Snapshot.Recipient, as: SnapshotRecipient
   alias FermixCore.Home.Snapshot.Recovery
   alias FermixCore.Home.Snapshot.Run, as: SnapshotRun
   alias FermixCore.Home.Snapshot.S3, as: SnapshotS3
   alias FermixCore.Home.Snapshot.Status, as: SnapshotStatus
+  alias FermixCore.Management.Accessories
   alias FermixCore.Management.AlwaysOn
   alias FermixCore.Management.AlwaysOn.Input, as: AlwaysOnInput
+  alias FermixCore.Management.Computer, as: ComputerJournal
+  alias FermixCore.Management.ComputerLink
+  alias FermixCore.Management.ComputerSettings
   alias FermixCore.Management.ComputerUse
   alias FermixCore.Management.Copy
   alias FermixCore.Management.Cues, as: ManagementCues
@@ -43,16 +59,22 @@ defmodule FermixCore.Management.CopyTest do
   alias FermixCore.Management.Cues.SourceForm, as: CueSourceForm
   alias FermixCore.Management.Cues.SourceRow, as: CueSourceRow
   alias FermixCore.Management.Cues.WatcherRow, as: CueWatcherRow
+  alias FermixCore.Management.Detect
   alias FermixCore.Management.Doctor.Remediation
+  alias FermixCore.Management.Home, as: ManagementHome
   alias FermixCore.Management.HomeMove, as: ManagementHomeMove
   alias FermixCore.Management.HomeSummary
+  alias FermixCore.Management.Jobs
   alias FermixCore.Management.McpServers.Row, as: McpRow
   alias FermixCore.Management.Mobile
   alias FermixCore.Management.Placement
   alias FermixCore.Management.Plugins
   alias FermixCore.Management.Plugins.Row, as: PluginRow
   alias FermixCore.Management.Protocol
+  alias FermixCore.Management.Router
   alias FermixCore.Management.Settings
+  alias FermixCore.Management.Settings.CodingMachine
+  alias FermixCore.Management.Settings.ThisComputer
   alias FermixCore.Providers.DecisionModel
   alias FermixCore.Providers.Descriptor
   alias FermixCore.Readiness
@@ -61,13 +83,12 @@ defmodule FermixCore.Management.CopyTest do
   alias FermixCore.Setup.ConfigStore
   alias FermixCore.Setup.RestartState
   alias FermixCore.Setup.SecretWriter
+  alias FermixTestSupport.TestSourceScan
 
   # What the two renderers really answer for a reason the plugin installer
   # produces: a tuple, a map, and the operator's own home directory.
   @internal_term Redaction.format({:tree_missing, %{root: "/Users/example/.fermix/plugins"}})
   @placeholder "Value"
-  # Hetzner's own messages a refusal carries: its words, not the daemon's.
-  @vendor_messages ["invalid input in field 'server_type'", "server placement failed"]
 
   # A backticked span is a literal the operator types, which is the one place a
   # path belongs; the rest of the sentence is prose and may carry none.
@@ -228,6 +249,7 @@ defmodule FermixCore.Management.CopyTest do
       keys = Enum.map(view["rows"], & &1["key"])
 
       assert "realtime_backend" in keys and "realtime_conversation" in keys
+      assert "realtime_camera_share" in keys
 
       for row <- view["rows"] do
         where = "realtime.#{row["key"]}"
@@ -256,6 +278,7 @@ defmodule FermixCore.Management.CopyTest do
       keys = Enum.map(view["rows"], & &1["key"])
 
       assert "realtime_backend" in keys and "xai_api_key" in keys
+      assert "realtime_camera_share" in keys
 
       for row <- view["rows"] do
         where = "realtime.#{row["key"]}"
@@ -304,6 +327,29 @@ defmodule FermixCore.Management.CopyTest do
       for sentence <- Mobile.sentences() do
         assert_clean(sentence, :prose, [], "mobile sentence")
         assert internal_terms(sentence) == []
+      end
+    end
+
+    # M91 E3: the StackChan screens draw these as they are, in both doors.
+    test "every accessory sentence obeys the rules" do
+      for sentence <- Accessories.sentences() do
+        assert_clean(sentence, :prose, [], "accessories sentence")
+        assert internal_terms(sentence) == []
+      end
+    end
+
+    # The owner's decision (StackChan is not part of Always On): why StackChan
+    # is off on this engine is said in the owner's words, never the engine's
+    # for a role, and This Mac's refusal of its StackChan says the same.
+    test "why StackChan is off here is said in the owner's words" do
+      for place <- [:device, :candidate, :not_mac] do
+        sentence = Accessories.not_here_sentence(place)
+        assert sentence in Accessories.sentences()
+        assert_owner_words(sentence, :prose, [], "accessories off here, #{place}")
+      end
+
+      for sentence <- Accessories.sentences() do
+        refute sentence =~ ~r/\b(?:primary|candidate)\b/i, "accessories: #{inspect(sentence)}"
       end
     end
 
@@ -670,6 +716,23 @@ defmodule FermixCore.Management.CopyTest do
         assert_clean(view["sentence"], :prose, [], "snapshot status")
         refute_command(view["sentence"], "snapshot status")
       end
+
+      # A primary that is no Always On server's has no target (D18).
+      off_server =
+        SnapshotStatus.view(SnapshotStatus.empty(), %{
+          config: on,
+          targets: [],
+          running: false,
+          profile: "general"
+        })
+
+      assert_clean(off_server["sentence"], :prose, [], "snapshot status off a server")
+      refute_command(off_server["sentence"], "snapshot status off a server")
+
+      for reason <- [:macos, :no_desktop, {:device_list, :eacces}] do
+        assert_clean(ServerPrimary.sentence(reason), :prose, [], "server primary")
+        refute_command(ServerPrimary.sentence(reason), "server primary")
+      end
     end
 
     test "every target and capture failure sentence obeys the rules" do
@@ -679,7 +742,15 @@ defmodule FermixCore.Management.CopyTest do
         {:unreachable, "connection refused"},
         {:checksum_mismatch, "x"},
         {:keys_missing, :snapshot_s3_access_key_id},
-        {:secret_unreadable, :snapshot_s3_secret_access_key, :missing_secret}
+        {:secret_unreadable, :snapshot_s3_secret_access_key, :missing_secret},
+        # E1: the instance role's session and the bucket's owner.
+        {:not_the_owners_bucket, "invented-bucket", "111122223333", 403, "Access Denied"},
+        {:session_missing, nil},
+        {:session_missing,
+         "AWS STS refused the snapshot session (HTTP 403 AccessDenied: Access Denied)."},
+        {:session_unreadable, :eacces},
+        :session_malformed,
+        {:session_expired, ~U[2026-10-27 09:30:30Z], nil}
       ]
 
       capture_reasons = [
@@ -758,9 +829,16 @@ defmodule FermixCore.Management.CopyTest do
         returning: nil
       }
 
-      for {free, version, bytes, restarts?} <- [
-            {1_000, "0.16.0", 6_442_450_944, false},
-            {1_099_511_627_776, "0.9.0", 10, true}
+      # M97 §9.5: the meeting the notetaker is in blocks, by its title, its
+      # platform, or neither.
+      meetings = [
+        {:ok, %{id: "mtg_00000000001", platform: "zoom", title: "Quarter planning"}},
+        {:ok, %{id: "mtg_00000000001", platform: "meet", title: nil}}
+      ]
+
+      for {free, version, bytes, restarts?, meeting} <- [
+            {1_000, "0.16.0", 6_442_450_944, false, Enum.at(meetings, 0)},
+            {1_099_511_627_776, "0.9.0", 10, true, Enum.at(meetings, 1)}
           ] do
         report =
           MoveReadiness.report(home, candidate,
@@ -768,16 +846,34 @@ defmodule FermixCore.Management.CopyTest do
             version: version,
             host: "macos-aarch64",
             home_bytes: bytes,
-            restarts_itself: restarts?
+            restarts_itself: restarts?,
+            meeting_holder: fn -> meeting end
           )
 
         # The summary shows a block as its sentence and each warning in
         # Details, so each item is a summary word too.
         for item <- report.items do
-          assert_clean(item.sentence, :prose, ["invented-notes"], item.id)
+          assert_clean(item.sentence, :prose, ["invented-notes", "Quarter planning"], item.id)
           assert Copy.summary_violations(item.sentence) == [], "#{item.id}: #{item.sentence}"
           refute_command(item.sentence, item.id)
         end
+      end
+
+      # A home the walk refuses blocks the review in the walk's own words.
+      for reason <- [
+            {:unsupported_link, "workspace/notes", "/etc"},
+            {:unsupported_entry, "workspace/pipe", :other},
+            {:unsupported_entry, "workspace/disk", :device},
+            {:unsupported_name, <<"workspace/", 0xFF>>},
+            {:too_deep, "workspace/deep"},
+            {:too_many_files, 100_001, 100_000},
+            {:too_many_bytes, 1_073_741_825, 1_073_741_824},
+            {:file, "/home/owner/.fermix/workspace", :eacces}
+          ] do
+        sentence = Archive.collect_sentence(reason)
+        assert_clean(sentence, :prose, [], "walk refusal #{inspect(reason)}")
+        assert Copy.summary_violations(sentence) == [], sentence
+        refute_command(sentence, "walk refusal")
       end
     end
   end
@@ -791,7 +887,8 @@ defmodule FermixCore.Management.CopyTest do
   # while it enrolls.
   describe "the Always On copy an app shows" do
     test "names no fermix command" do
-      {:ok, view} = Settings.get("snapshots")
+      # Backup settings are an Always On server's alone (ALWAYS_ON_PANE §3.12, D18).
+      {:ok, view} = Settings.get("snapshots", server_primary?: true)
 
       section_rows =
         for row <- view["rows"],
@@ -814,13 +911,16 @@ defmodule FermixCore.Management.CopyTest do
               {:code_expired, ~U[2026-10-27 12:30:00Z]},
               {:invalid_code, "a bad checksum"},
               :already_candidate,
+              {:same_window, :enrolled},
+              {:same_window, :enrolling},
               :moved
             ],
             do: {"candidate refusal", HomeCandidate.error_sentence(reason)}
 
       owner = [
         {"home owner decision", ManagementHomeMove.owner_only_sentence()},
-        {"setup owner decision", setup_owner_sentence()}
+        {"setup owner decision", setup_owner_sentence()},
+        {"computer owner decision", computer_owner_sentence()}
       ]
 
       recovery =
@@ -842,7 +942,10 @@ defmodule FermixCore.Management.CopyTest do
       {:error, :unconfirmed, %{"sentence" => unconfirmed}} =
         Placement.unconfirmed("north-box", "home.move.start")
 
-      device = [{"move unconfirmed", unconfirmed}]
+      {:error, :unconfirmed, %{"sentence" => restart_unconfirmed}} =
+        Placement.unconfirmed("north-box", "home.restart")
+
+      device = [{"move unconfirmed", unconfirmed}, {"restart unconfirmed", restart_unconfirmed}]
 
       for {where, text} <-
             section_rows ++
@@ -870,6 +973,7 @@ defmodule FermixCore.Management.CopyTest do
         end
 
       Enum.map(AlwaysOn.sentences(), &{"home.act", &1}) ++
+        Enum.map(ServerRestart.sentences(), &{"home.restart", &1}) ++
         [{"rail-only step", rail_only} | inputs]
     end
 
@@ -879,12 +983,18 @@ defmodule FermixCore.Management.CopyTest do
 
     # The daemon's refusal of a setup session, as the golden its own test
     # holds the daemon to.
-    defp setup_owner_sentence do
+    defp setup_owner_sentence, do: golden_owner_sentence("unavailable_setup_owner_decision")
+
+    # The daemon's refusal of this computer's switches (M97 §7.2), likewise.
+    defp computer_owner_sentence,
+      do: golden_owner_sentence("unavailable_computer_owner_decision")
+
+    defp golden_owner_sentence(name) do
       :fermix_core
       |> Application.app_dir("priv/management/fixtures/errors.jsonl")
       |> File.stream!()
       |> Enum.map(&Jason.decode!/1)
-      |> Enum.find(&(&1["name"] == "unavailable_setup_owner_decision"))
+      |> Enum.find(&(&1["name"] == name))
       |> get_in(["response", "error", "details", "sentence"])
     end
 
@@ -897,94 +1007,258 @@ defmodule FermixCore.Management.CopyTest do
     end
   end
 
-  # The provisioner's refusals are written in `Home.Provision` (the shared
-  # kinds, in each provider's words) and in the provider's own module (its
-  # other refusals), outside the management tree the sweep below reads, so
-  # each reason they can answer is rendered here, for every provider in the
-  # registry; the type and the city it names are Hetzner's words.
-  describe "the Always On provisioner copy" do
-    test "every refusal obeys the rules and names no fermix command" do
-      for {reason, sentence} <- provision_copy() do
-        # Hetzner's own message is its words, not the daemon's.
-        assert_clean(sentence, :prose, ["CPX22", "cpx12" | @vendor_messages], inspect(reason))
-        refute_command(sentence, inspect(reason))
-      end
-    end
-
+  # The sentence that keeps the owner's decisions the owner's, written in
+  # `Management.HomeMove`.
+  describe "the Always On owner copy" do
     test "the owner decision obeys the rules" do
       assert_clean(ManagementHomeMove.owner_only_sentence(), :prose, ["Always On"], "owner")
       refute_command(ManagementHomeMove.owner_only_sentence(), "owner")
     end
   end
 
-  defp provision_copy do
-    unavailable = %{city: "Falkenstein", description: "CPX22", next_city: "Nuremberg"}
+  # M97: what a computer offers its server (`home.status` `computers`), the
+  # block of what it keeps on (the summary's `keeps_on` and `review`), a
+  # rename's refusals and the `computer` section. The apps print each as it
+  # is, so beside the rules each names no fermix command and none of the
+  # engine's own words for the move.
+  describe "the computer copy" do
+    test "every offer sentence and label obeys the rules" do
+      for {where, text} <- offer_copy(), do: assert_owner_words(text, :prose, [], where)
 
-    reasons = [
-      :token_invalid,
-      :token_refused,
-      :unauthorized,
-      :read_only_token,
-      :account_limit,
-      {:unavailable, unavailable},
-      {:unavailable, %{unavailable | next_city: nil}},
-      {:rate_limited, 1_999_999_999},
-      {:unreachable, "timeout"},
-      {:code_unavailable, "Remote reach is off."},
-      :user_data_too_large,
-      :invalid_code,
-      :interrupted,
-      :no_token,
-      :no_server,
-      :server_exists,
-      :nothing_to_delete,
-      :not_primary,
-      :other_project,
-      :live_home,
-      :move_under_way,
-      {:ledger, :eacces},
-      :unreadable,
-      # Replace the server, from the linked desktop.
-      :replace_only,
-      :nothing_to_replace,
-      :replacement_exists,
-      :replace_moving,
-      :old_server_remains,
-      :replacement_gone,
-      :no_link,
-      :code_unreachable,
-      :withdraw_unreachable,
-      {:code_refused, "unavailable"},
-      {:withdraw_refused, "unavailable"},
-      {:old_server, :unauthorized},
-      {:old_server, Hetzner.error({:refused, 422, "server_error", "Hetzner had a hiccup."})},
-      # What the driver answers around a provider's primitives.
-      {:ineligible_type, "cpx12"},
-      {:action_failed, :create, "server placement failed"},
-      {:action_timeout, :start},
-      :no_image,
-      :no_capacity,
-      :not_found,
-      :resource_in_use,
-      # Hetzner's own refusals, in its words.
-      Hetzner.error({:refused, 422, "invalid_input", "invalid input in field 'server_type'"}),
-      Hetzner.error(:too_many_types)
+      # `home.status` names every offer a computer reports by its label
+      # (`Offers.label/1`).
+      for module <- Offers.modules(),
+          do: assert_owner_words(module.label(), :name, [], "offer label #{module.id()}")
+    end
+
+    # This computer's record of what its server did here (M97 §6.3) names
+    # each entry's capability and op in the owner's words, from the
+    # capability's own module: every capability a computer can be asked has
+    # them, for every op, and each obeys the rules (`Management.Computer`).
+    test "every capability and op a computer journals has the owner's words" do
+      capabilities = Application.fetch_env!(:fermix_core, :computer_capabilities).capabilities()
+
+      assert map_size(capabilities) >= 6
+
+      for {id, module} <- capabilities do
+        Code.ensure_loaded!(module)
+        assert function_exported?(module, :label, 0), "the #{id} capability has no label"
+        assert_owner_words(module.label(), :name, [], "capability label #{id}")
+
+        for op <- module.ops() do
+          label = module.op_label(op)
+          assert is_binary(label) and byte_size(label) in 1..64, "#{id} #{op}"
+          # Lower case, as an offer's label: a client capitalises it.
+          refute label =~ ~r/\A\p{Lu}/u, "#{id} #{op}: #{label}"
+          assert_owner_words(label, :name, ["Git", "PDF", "Messages"], "op label #{id} #{op}")
+        end
+      end
+    end
+
+    # A block names the offers it keeps on by their labels, for a Mac and a
+    # Linux computer, in every sandbox mode, its warning included.
+    test "every block of what a computer keeps on obeys the rules" do
+      sentences = Consent.sentences()
+
+      assert length(sentences) > 10
+      assert Enum.any?(sentences, &String.starts_with?(&1, "With files and commands on"))
+
+      for text <- sentences, do: assert_owner_words(text, :prose, [], "keep block")
+    end
+
+    # M97 §8.2: what switching history on agrees to, with and without a
+    # server, from the one function every surface says it with. A provider is
+    # named by its label, which stands as data.
+    test "every sentence of the history promise obeys the rules" do
+      alias FermixCore.ComputerHistory.Promise
+
+      for text <- Promise.sentences(),
+          do: assert_owner_words(String.trim(text), :prose, ["Anthropic"], "history promise")
+    end
+
+    # M97 §4: what the summarizer row says while this Mac's machine file
+    # decides over the summarizer in config.toml.
+    test "the summarizer row's footer obeys the rules" do
+      footer = FermixCore.ComputerHistory.Config.shadowed_footer()
+      assert_clean(footer, :prose, [], "summarizer footer")
+      refute_command(footer, "summarizer footer")
+    end
+
+    # A rename refusal names the computer or the server as the owner typed it.
+    test "every rename refusal and switch refusal obeys the rules" do
+      for text <- Computers.sentences(),
+          do: assert_owner_words(text, :prose, ["studio Mac", "garden server"], "rename")
+
+      # A command the daemon started is refused the switches in words of their own.
+      assert_owner_words(computer_owner_sentence(), :prose, [], "computer owner")
+
+      # This computer's record of what its server did here (M97 §6.3): a
+      # management refusal, which points at the log as the others do.
+      for text <- ComputerJournal.sentences(),
+          do: assert_clean(text, :prose, [], "computer journal")
+    end
+
+    # M97 §3.1, §3.3: a computer joining a home, its owner's answer on the
+    # server, and a computer leaving, each printed as it is.
+    test "every sentence of a computer joining and leaving obeys the rules" do
+      names = ["studio Mac", "garden server"]
+
+      golden =
+        for name <- ~w(invalid_params_home_enroll_approve_sas unavailable_home_enroll_approve_none
+                       unavailable_computer_disconnect_not_told),
+            do: golden_owner_sentence(name)
+
+      sentences =
+        HomeJoin.sentences("garden server") ++
+          HomeLeave.sentences() ++
+          ComputerLink.sentences() ++
+          [Mobile.only_backups_sentence("studio Mac") | golden]
+
+      assert length(sentences) > 20
+      for text <- sentences, do: assert_owner_words(text, :prose, names, "join")
+    end
+
+    test "the This computer section obeys the rules, reviewed and waiting" do
+      [section] = ThisComputer.sections(computer?: true)
+      assert_owner_words(section.title, :prose, [], "section title computer")
+
+      for text <- ThisComputer.sentences(),
+          do: assert_owner_words(text, :prose, [], "computer footer")
+
+      for reviewed <- [true, false],
+          macos? <- [true, false],
+          row <-
+            ThisComputer.rows(
+              "computer",
+              %{fermix_core: [computer: [reviewed: reviewed]]},
+              macos?: macos?
+            ),
+          {field, text} <- [label: row["label"], footer: row["footer"]],
+          is_binary(text),
+          do: assert_owner_words(text, :prose, [], "computer.#{row["key"]} #{field}")
+    end
+
+    # M98 D5: the coding approval's section is named for the machine that
+    # answers, so every host's words are held to the rules, whichever this
+    # is: a Mac, another computer, and an Always On server (M97 §19.9).
+    test "this machine's coding section obeys the rules on a Mac and elsewhere" do
+      for {macos?, server?} <- [{true, false}, {false, false}, {false, true}],
+          opts = [macos?: macos?, computer?: false, server_primary?: server?],
+          section <- CodingMachine.sections(opts),
+          row <- CodingMachine.rows(section.id, %{}, opts),
+          {field, text} <- [title: section.title, label: row["label"], footer: row["footer"]],
+          do: assert_owner_words(text, :prose, [], "harness_machine #{field} #{inspect(opts)}")
+
+      assert length(CodingMachine.sentences()) == 7
+
+      for text <- CodingMachine.sentences(),
+          do: assert_owner_words(text, :prose, [], "harness_machine")
+    end
+
+    # M98 D10: what `setup.detect` and `coding_agents.check` say about this
+    # machine's coding agents, and the sentence a run that failed to sign in
+    # carries, for each agent and each machine word.
+    test "the coding agents' sign-in sentences obey the rules" do
+      assert length(SignIn.sentences()) == 12
+
+      for text <- Detect.sentences(),
+          do: assert_owner_words(text, :prose, [], "coding agents sign-in")
+    end
+
+    # Each offer's state rests on more than one fact, so a case set that
+    # stopped reaching a branch would pass on the sentences left. These are
+    # the ones it must reach.
+    test "the case set reaches every sentence each offer says" do
+      reached = offer_copy() |> Enum.map(&elem(&1, 1)) |> MapSet.new()
+
+      switched =
+        for machine <- ["Mac", "computer"],
+            say <- [
+              &Offers.waiting_sentence/1,
+              &Offers.master_off_sentence/1,
+              &Offers.switched_off_sentence/1
+            ],
+            do: say.(machine)
+
+      wanted =
+        [Offers.no_system_sentence(), PlacesOffer.needs_mac_app_sentence() | switched] ++
+          ComputerUseOffer.sentences()
+
+      assert Enum.reject(wanted, &MapSet.member?(reached, &1)) == []
+      assert MapSet.size(reached) >= length(wanted) + 3
+    end
+  end
+
+  # Every sentence an offer says across invented machines and switches, from
+  # the offer modules themselves.
+  defp offer_copy do
+    for facts <- offer_facts(),
+        switches <- offer_switches(),
+        offer <- Offers.compute(Offers.modules(), switches, facts),
+        is_binary(offer.sentence),
+        uniq: true,
+        do: {"offer #{offer.id}", offer.sentence}
+  end
+
+  # A Mac and a Linux computer as they should be; each on the wrong processor,
+  # without the computer use helper, and refusing the screen; a Linux computer
+  # whose kernel does not hold commands to the sandbox; and a system Fermix
+  # offers nothing on.
+  defp offer_facts do
+    base = [
+      helpers: %{computer_use: true},
+      permissions: %{},
+      sandbox_mode: :standard,
+      recording: true
     ]
 
-    for provider <- ProvisionRegistry.all(),
-        reason <- reasons,
-        do: {reason, Provision.error_sentence(reason, provider)}
+    mac = [os: :macos, arch: "arm64", landlock: :not_asked]
+    linux = [os: :linux, arch: "x86_64", landlock: :ok]
+    no_helper = [helpers: %{computer_use: false}]
+    no_screen = [permissions: %{screen: false}]
+
+    for machine <- [mac, linux],
+        change <- [[], [arch: "riscv64"], no_helper, no_screen, [recording: false]] do
+      ComputerFacts.read(base |> Keyword.merge(machine) |> Keyword.merge(change))
+    end ++
+      [
+        ComputerFacts.read(base ++ [os: :linux, arch: "x86_64", landlock: {:error, "no ABI"}]),
+        ComputerFacts.read(base ++ [os: :other, arch: "x86_64", landlock: :not_asked])
+      ]
+  end
+
+  # Waiting for the review, the master off, every offer off, every offer on.
+  defp offer_switches do
+    [
+      Switches.only(Switches.switches(), reviewed: false),
+      Switches.only(Switches.switches(), enabled: false),
+      Switches.only([]),
+      Switches.only(Switches.switches())
+    ]
+  end
+
+  defp assert_owner_words(text, kind, names, where) do
+    assert_clean(text, kind, names, where)
+
+    assert Copy.summary_violations(text) == [],
+           "#{where}: #{inspect(text)} breaks #{inspect(Copy.summary_violations(text))}"
+
+    refute_command(text, where)
   end
 
   # The words of `home.status.summary` (M75 lean v1 §7): every sentence key
-  # Copy holds, for a Mac and for a Linux computer, every action's label, the
-  # token steps, and the refusal that asks a desktop to update. The apps and
+  # Copy holds, for a Mac and for a Linux computer, every action's label, and
+  # the refusal that asks a desktop to update. The apps and
   # the setup page print them as they are, so beside the rules they carry
   # none of the engine's own words for the move and no fermix command.
+  @restored_day "Saturday, May 3, 2031"
+  # When a failed backup was tried, as `FermixCore.Clock` states it.
+  @failed_at "Sunday, May 4, 2031 at 10:00 AM UTC"
+
   describe "the Always On summary copy" do
     test "every sentence, label and step obeys the rules and names nothing internal" do
       for {where, text, kind} <- summary_copy() do
-        assert_clean(text, kind, [], where)
+        assert_clean(text, kind, summary_names(), where)
 
         assert Copy.summary_violations(text) == [],
                "#{where}: #{inspect(text)} breaks #{inspect(Copy.summary_violations(text))}"
@@ -997,7 +1271,7 @@ defmodule FermixCore.Management.CopyTest do
     # literal to type or a code, which `violations/3` lets stand as one, and
     # an internal word is the engine's own.
     test "the summary's own rule catches a backticked code and an internal word" do
-      assert Copy.summary_violations("Hetzner refused the request (422 `invalid_input`).") ==
+      assert Copy.summary_violations("Your server refused the request (422 `invalid_input`).") ==
                [{:backtick, "`invalid_input`"}]
 
       assert Copy.summary_violations("A stray ` mark.") == [{:backtick, "`"}]
@@ -1022,35 +1296,14 @@ defmodule FermixCore.Management.CopyTest do
                []
     end
 
-    # The summary prints a create's or a replace's failure as the provisioner
-    # wrote it (`Provision.error_sentence/1`, kept in the ledger), so every
-    # refusal it can keep is held to the summary's rule too.
-    test "every failure sentence the summary prints is plain words" do
-      offenders =
-        for {reason, sentence} <- provision_copy(),
-            (found = Copy.summary_violations(sentence)) != [],
-            do: {reason, sentence, found}
-
-      assert offenders == []
-
-      quoted =
-        Provision.error_sentence(
-          Hetzner.error({:refused, 422, "invalid_input", "bad `name` field"}),
-          Hetzner
-        )
-
-      assert Copy.summary_violations(quoted) == [], inspect(quoted)
-    end
-
     # Always On setup §3.1: Details are lines the engine finishes, its times
-    # absolute in the owner's zone and its prices from the ledger, so no
-    # surface formats a time, a size or money.
+    # absolute in the owner's zone, so no surface formats a time or a size.
     test "each Details line is a label and a value the engine finished" do
       ctx = %{zone: "Europe/Berlin", machine: "Mac"}
       at = ~U[2031-05-04 10:00:00Z]
 
-      assert Copy.summary_line(:waits_until, at, ctx) ==
-               %{"label" => "Waits until", "value" => "Sunday, May 4, 2031 at 12:00 PM CEST"}
+      assert Copy.summary_line(:s3_bucket, "invented-larch-backups", ctx) ==
+               %{"label" => "S3 bucket", "value" => "invented-larch-backups"}
 
       assert Copy.summary_line(:backup, {"S3", at}, ctx) ==
                %{
@@ -1058,83 +1311,246 @@ defmodule FermixCore.Management.CopyTest do
                  "value" => "Sunday, May 4, 2031 at 12:00 PM CEST"
                }
 
-      assert Copy.summary_line(:checked, at, %{ctx | zone: "Etc/UTC"})["value"] ==
-               "Sunday, May 4, 2031 at 10:00 AM UTC"
-
       assert Copy.summary_line(:copies, 3_221_225_472, ctx) ==
                %{"label" => "Backups on this Mac", "value" => "3 GiB"}
 
       assert Copy.summary_line(:disk, 0.42, ctx) ==
                %{"label" => "Server disk", "value" => "42% used"}
 
-      assert Copy.summary_line(:costs, {"8.33", "EUR"}, ctx) ==
-               %{"label" => "Costs", "value" => "€8.33 a month, billed by the hour until deleted"}
-
-      assert Copy.summary_line(:costs, {"12.00", "USD"}, ctx)["value"] =~ "$12.00 a month"
-      assert Copy.summary_line(:costs, {"9.10", "CHF"}, ctx)["value"] =~ "CHF 9.10 a month"
       assert Copy.summary_line(:server, "fermix-general-a3f9", ctx)["label"] == "Server"
-      assert Copy.checked_label() == Copy.summary_line(:checked, at, ctx)["label"]
 
       for key <- Copy.summary_line_keys() do
         assert Copy.violations(Copy.summary_line_label(key), :name) == [], inspect(key)
       end
     end
 
-    # The offers `home.provision.options` answers are words too: no surface
-    # words memory, cores, disk or a price itself.
-    test "each offer is a label and a price the engine finished" do
-      shared = %{
-        "description" => "CPX22",
-        "cores" => 2,
-        "memory_gb" => 4.0,
-        "disk_gb" => 80,
-        "dedicated" => false
-      }
-
-      dedicated = %{shared | "description" => "CCX13", "memory_gb" => 8, "dedicated" => true}
-      small = %{shared | "cores" => 1, "memory_gb" => 4.5}
-
-      assert Copy.offer_label(shared) == "CPX22: 2 cores, 4 GB memory, 80 GB disk"
-      assert Copy.offer_label(dedicated) == "CCX13: 2 dedicated cores, 8 GB memory, 80 GB disk"
-      assert Copy.offer_label(small) == "CPX22: 1 core, 4.5 GB memory, 80 GB disk"
-
-      # A fractional size is stated exactly, which the version-number rule
-      # reads as a version; every type Fermix offers today has whole gigabytes.
-      for offer <- [shared, dedicated] do
-        assert_clean(Copy.offer_label(offer), :prose, [offer["description"]], "offer")
-      end
-
-      assert Copy.offer_price("20.09", "EUR") ==
-               "€20.09 a month, billed by the hour until deleted"
-
-      assert Copy.offer_price("9.10", "CHF") ==
-               Copy.summary_line(:costs, {"9.10", "CHF"}, %{})["value"]
-    end
-
     # Move now's confirm names what the move costs the owner, in the
-    # review's own words, and never a time or a price, so it is stable.
-    test "Move now's confirm asks once and names each warning in its words" do
+    # review's own words, one per line, and never a time or a price, so it is
+    # stable (the pane's D3).
+    test "Move now's confirm asks once, says the way back, and names each warning on its line" do
       warnings = [
         "WhatsApp stops after the move: it needs an address on the internet that WhatsApp " <>
-          "can send messages to, and north-box has none."
+          "can send messages to, and north-box has none.",
+        "This computer serves nothing while the move runs."
       ]
 
-      assert Copy.move_confirm(warnings) ==
-               "Move Fermix to your server now? WhatsApp stops after the move: it needs an " <>
-                 "address on the internet that WhatsApp can send messages to, and north-box " <>
-                 "has none."
+      assert Copy.move_confirm(warnings, "Mac") ==
+               "Move Fermix to your server now? You can move it back to this Mac any time.\n" <>
+                 "WhatsApp stops after the move: it needs an address on the internet that " <>
+                 "WhatsApp can send messages to, and north-box has none.\n" <>
+                 "This computer serves nothing while the move runs."
 
-      assert Copy.move_confirm([]) == "Move Fermix to your server now?"
+      assert Copy.move_confirm([], "computer") ==
+               "Move Fermix to your server now? You can move it back to this computer any time."
     end
 
-    test "the docs and the own-server command are the engine's to word" do
-      assert Copy.always_on_docs_url("hetzner") == "https://fermix.ai/docs/always-on/#hetzner"
+    # R1: a screen's own words are short. Seen failing on the copy before the
+    # pane's draft 3 (`off` 47 words with what stops, `connect` 55, the
+    # webhooks sentence 50).
+    test "every screen's sentence, note, progress and webhooks say at most the word bound" do
+      over =
+        for {"summary " <> key, text, :prose} <- summary_copy(),
+            String.to_existing_atom(key) not in Copy.unbounded_keys(),
+            (words = text |> String.split(~r/\s+/, trim: true) |> length()) > Copy.word_bound(),
+            do: {key, words, text}
+
+      assert over == []
+      assert Copy.word_bound() == 20
+    end
+
+    # §4: the anchors are the contract with the docs page.
+    test "each screen's help is the docs page at one of its anchors" do
+      for anchor <- Copy.docs_anchors() do
+        assert Copy.always_on_docs_url(anchor) == "https://fermix.ai/docs/always-on/#" <> anchor
+      end
+
+      assert_raise FunctionClauseError, fn -> Copy.always_on_docs_url("nowhere") end
+    end
+
+    test "a flow's steps, its route and the bytes it counted are the engine's words" do
+      assert Copy.step_labels(:move, "Mac") ==
+               ["Connect your server", "Move now", "Send your home", "Switch over"]
+
+      assert Copy.step_labels(:return, "computer") ==
+               ["Get this computer ready", "Move now", "Receive your home", "Put Fermix in place"]
+
+      assert Copy.route_here("Mac") == "This Mac"
+      assert Copy.transfer_label(526_385_152, 1_503_238_554, :sent) == "502 MiB of 1.4 GiB sent"
+      assert Copy.transfer_label(0, 104_857_600, :received) == "0 MiB of 100 MiB received"
+
+      for label <- Copy.step_labels(:move, "Mac") ++ Copy.step_labels(:return, "Mac") do
+        assert Copy.violations(label, :name) == [], label
+        assert Copy.summary_violations(label) == [], label
+      end
+    end
+
+    # The systems the code's sentence names are the ones the server's first
+    # boot takes: read from the script it runs, so the two cannot drift. Its
+    # architectures and kernel are the docs page's.
+    test "the systems the code's sentence names are the ones the first boot takes" do
+      script =
+        File.read!(Path.join(TestSourceScan.umbrella_root(), "packaging/cloud/first-boot.sh"))
+
+      [_all, systems] = Regex.run(~r/\n\s*("debian [^\n]*)\) ;;/, script)
+      [_all, arches] = Regex.run(~r/\n\s*(aarch64 \| x86_64)\) ;;/, script)
+
+      taken =
+        ~r/"(\w+) ([\d.]+)"/
+        |> Regex.scan(systems)
+        |> Enum.map(fn [_all, id, version] -> "#{String.capitalize(id)} #{version}" end)
+
+      assert taken == Copy.own_server_names()
+      assert arches == "aarch64 | x86_64"
+
+      said = Copy.summary_sentence(:own_server, %{at: ~U[2031-06-03 13:30:00Z], zone: "Etc/UTC"})
+
+      assert said ==
+               "Run this on your Debian 12 or 13, or Ubuntu 24.04 server, then paste the code " <>
+                 "when it asks. The code works once, until Tuesday, June 3, 2031 at 1:30 PM UTC."
+    end
+
+    test "the own-server command and its Tailscale step are the engine's to word" do
+      assert Copy.tailscale_label() == "Also join your tailnet (optional)"
+
       # The server installs the release this computer runs (design §6).
       assert Copy.own_server_command() ==
-               "curl -fsSL https://fermix.ai/always-on | sudo sh -s -- --version " <>
+               "curl -fsSL https://fermix.ai/install | sudo sh -s -- --always-on --version " <>
                  FermixCore.BuildInfo.product_version()
 
       refute Copy.own_server_command() =~ "FERMIX_ENROLL_CODE"
+
+      # The optional Tailscale step: the server asks for its auth key at the
+      # terminal without echo, so the key is on no command line.
+      assert Copy.own_server_tailscale_command() ==
+               "curl -fsSL https://fermix.ai/install | sudo sh -s -- --always-on --version " <>
+                 FermixCore.BuildInfo.product_version() <> " --tailscale"
+
+      refute Copy.own_server_tailscale_command() =~ "TS_AUTHKEY"
+      refute Copy.own_server_tailscale_command() =~ "--ts-authkey"
+    end
+
+    # The pane's R4: where it went is the sentence, the try's own words and
+    # when it was tried the note.
+    test "a failed backup says where it went, and its note the try's own words and when" do
+      values = %{
+        place: "S3",
+        at: ~U[2031-05-04 10:00:00Z],
+        zone: "Etc/UTC",
+        error: "S3 refused the snapshot",
+        machine: "Mac"
+      }
+
+      assert Copy.summary_sentence(:backup_failed, values) == "Backing up to S3 failed."
+
+      assert Copy.summary_sentence(:backup_failed_note, values) ==
+               "S3 refused the snapshot. Tried #{@failed_at}."
+
+      done = %{values | error: "Your desk did not confirm the snapshot in time."}
+      assert Copy.summary_sentence(:backup_failed_note, done) =~ ~r/in time\. Tried /
+    end
+
+    test "each Funnel mount is labelled by what it carries" do
+      assert Copy.mount_label(:whatsapp) == "WhatsApp"
+      assert Copy.mount_label({:cue, "gh-hooks"}) == "Webhook source gh-hooks"
+    end
+
+    # M97 §19.5: every change a computer can make to the server's sandbox or
+    # coding approval, said on the server and on a computer.
+    test "a change from a computer is said in plain words, everywhere it is told" do
+      changes =
+        Enum.map(~w(strict standard open), &{:sandbox_mode, &1}) ++
+          Enum.map(~w(bare assistant extended), &{:sandbox_profile, &1}) ++
+          [
+            {:sandbox_env_allow, ["LEDGER_TOKEN"]},
+            {:sandbox_env_allow, []},
+            {:harness_approved, true},
+            {:harness_approved, false}
+          ]
+
+      for change <- changes, server <- [:this, :yours, "garden-server"] do
+        said =
+          Copy.summary_sentence(:notice_computer_change, %{
+            name: "loft-linux",
+            change: change,
+            server: server
+          })
+
+        assert Copy.violations(said, :prose, ["loft-linux", "garden-server"]) == [], said
+        assert Copy.summary_violations(said) == [], said
+        assert said =~ "from loft-linux."
+      end
+
+      said = fn change ->
+        Copy.summary_sentence(:notice_computer_change, %{
+          name: "loft-linux",
+          change: change,
+          server: "garden-server"
+        })
+      end
+
+      assert said.({:sandbox_profile, "extended"}) ==
+               "garden-server's command profile was set to Extended from loft-linux."
+
+      assert said.({:sandbox_env_allow, ["LEDGER_TOKEN"]}) ==
+               "garden-server's allowed environment variables were changed from loft-linux."
+
+      assert Copy.summary_label(:restart_server, %{name: "garden-server"}) ==
+               "Restart garden-server"
+    end
+
+    # M97: what Always On does not do yet, one short sentence each in the
+    # owner's words, for a Mac and a Linux computer, with the server named
+    # and not.
+    test "every entry of what Always On does not do yet is short and in the owner's words" do
+      assert Copy.not_yet_ids() ==
+               ~w(google_meet coding_signin whatsapp slack stackchan dev_plugins
+                  computer_history)a
+
+      for id <- Copy.not_yet_ids(),
+          machine <- ["Mac", "computer"],
+          to <- [nil, "garden-server"],
+          zoom <- [true, false] do
+        said = Copy.not_yet(id, %{machine: machine, to: to, zoom: zoom})
+        assert_owner_words(said, :prose, ["garden-server"], "not yet #{id}")
+        words = said |> String.split(~r/\s+/, trim: true) |> length()
+        assert words <= Copy.word_bound(), "not yet #{id}: #{words} words in #{inspect(said)}"
+      end
+    end
+
+    # Google Meet's entry says what the server joins instead, true of this
+    # home: Zoom's meetings only where a Zoom app is set up, else none.
+    test "Google Meet's entry says the server joins Zoom's meetings only where Zoom is set up" do
+      assert Copy.not_yet(:google_meet, %{zoom: true}) ==
+               "Google Meet needs the notetaker signed in on a computer with a screen, so your " <>
+                 "server joins only Zoom meetings."
+
+      assert Copy.not_yet(:google_meet, %{zoom: false}) ==
+               "Google Meet needs a computer with a screen, so your server joins no meetings " <>
+                 "until Zoom is set up."
+
+      assert Copy.not_yet(:google_meet, %{}) == Copy.not_yet(:google_meet, %{zoom: false})
+    end
+
+    # Never two wordings of one fact: WhatsApp's entry is the sentence the
+    # webhooks' Funnel mounts start with, and the dev plugins' the review's
+    # own item.
+    test "an entry another sentence already says is said in that sentence's words" do
+      assert Copy.summary_sentence(:webhooks, %{carried: [:whatsapp]}) ==
+               Copy.not_yet(:whatsapp, %{}) <> " Run each command once, on the server."
+
+      assert Copy.not_yet(:dev_plugins, %{machine: "Mac", to: "north-box"}) ==
+               "Dev plugins stay on this Mac: north-box runs none of them."
+
+      assert Copy.not_yet(:dev_plugins, %{machine: "computer", to: nil}) ==
+               "Dev plugins stay on this computer: your server runs none of them."
+
+      # StackChan's is the sentence every Mac in the device role is told,
+      # one that never held the home included.
+      assert Copy.not_yet(:stackchan, %{machine: "Mac", to: nil}) ==
+               Accessories.not_here_sentence(:device)
+
+      assert Accessories.not_here_sentence(:device) ==
+               "StackChan works only while Fermix runs on this Mac."
     end
 
     test "every key and every action answers its words" do
@@ -1144,36 +1560,51 @@ defmodule FermixCore.Management.CopyTest do
     end
   end
 
+  # What the summary's words interpolate rather than write: the systems the
+  # server's first boot takes, and the day a restored backup was taken, as
+  # `FermixCore.Clock` states it.
+  defp summary_names, do: [@restored_day, @failed_at | Copy.own_server_names()]
+
   defp summary_copy do
     values = %{
       age: 7_200,
       days: 5,
       percent: 90,
       block: "This home is about 4 GiB; the move needs about 9 GiB free.",
-      stays_here: [:imessage, :voice, :meetings]
+      stays_here: [:meetings, :accessories],
+      ports: [whatsapp: 4030, cues: 4032],
+      carried: [:whatsapp, :cues],
+      costs: [:telegram],
+      telegram: true,
+      to: "studio-mac",
+      name: "loft-linux",
+      system: "Linux",
+      sas: "482913",
+      day: @restored_day,
+      place: "your desktop",
+      at: ~U[2031-05-04 10:00:00Z],
+      zone: "Etc/UTC",
+      error: "the snapshot could not be read to send it",
+      change: {:sandbox_mode, "open"},
+      server: "garden-server"
     }
 
     sentences =
-      for provider <- ProvisionRegistry.all(),
-          key <- Copy.summary_keys(),
+      for key <- Copy.summary_keys(),
           machine <- ["Mac", "computer"],
-          values = Map.merge(values, provider_values(provider)),
+          restore <- [true, false],
+          uniq: true,
           do:
-            {"summary #{key}", Copy.summary_sentence(key, Map.put(values, :machine, machine)),
+            {"summary #{key}",
+             Copy.summary_sentence(key, Map.merge(values, %{machine: machine, restore: restore})),
              :prose}
 
     labels =
-      for provider <- ProvisionRegistry.all(),
-          id <- HomeSummary.actions(),
-          extra <- [%{}, %{first: true, code: true}],
+      for id <- HomeSummary.actions(),
+          extra <- [%{}, %{code: true}, %{forget: true}, %{renew: true}, %{first: true}],
           machine <- ["Mac", "computer"],
-          values = provider |> provider_values() |> Map.merge(extra) |> Map.put(:machine, machine),
+          values = Map.merge(extra, %{machine: machine, name: "garden-server"}),
           do: {"action #{id}", Copy.summary_label(String.to_existing_atom(id), values), :name}
-
-    steps =
-      for provider <- ProvisionRegistry.all(),
-          step <- provider.display().steps,
-          do: {"#{provider.id()} token step", step, :prose}
 
     {:too_old, too_old} =
       Placement.primary_part(
@@ -1181,29 +1612,35 @@ defmodule FermixCore.Management.CopyTest do
         "home.status"
       )
 
-    sentences ++ labels ++ steps ++ [{"too old", too_old, :prose}]
-  end
+    mounts =
+      for mount <- [:whatsapp, {:cue, "gh-hooks"}],
+          do: {"mount #{inspect(mount)}", Copy.mount_label(mount), :name}
 
-  # What the summary names of a provider: its name, its token's label and a
-  # city of its own.
-  defp provider_values(provider) do
-    display = provider.display()
+    words = Copy.backup_words(true)
 
-    %{
-      provider: display.name,
-      token_label: display.token_label,
-      city: List.last(display.locations).city
-    }
+    flows =
+      for flow <- [:move, :return],
+          machine <- ["Mac", "computer"],
+          label <- Copy.step_labels(flow, machine),
+          uniq: true,
+          do: {"step", label, :name}
+
+    backup = [{"backup", words.footer, :prose}, {"backup", words.s3, :prose}]
+
+    names = [
+      {"tailscale", Copy.tailscale_label(), :name},
+      {"route", Copy.route_here("Mac"), :name}
+    ]
+
+    sentences ++ labels ++ mounts ++ flows ++ backup ++ names ++ [{"too old", too_old, :prose}]
   end
 
   # The older copy the apps and the setup page show (readiness actions and
   # every settings row) is held to the same rule: what to do in the app, or
   # on the server, never a `fermix` command.
   # The summary prints sentences written outside `Copy` as they are: a
-  # create's failure (`Home.Provision`, kept in the ledger), which keeps a
-  # refused code as its own (`{:code_unavailable, _}`: the enrollment
-  # window's and the rail's, `Home.Link`, in the channels app), the ledger's
-  # unreadable file and the readiness items. They are swept from source with
+  # refused code (the enrollment window's and the rail's, `Home.Link`, in the
+  # channels app) and the readiness items. They are swept from source with
   # every template rendered, so a fixed word of the engine's own, a code, or
   # a term an interpolation inlines fails here rather than in an owner's pane.
   describe "the sentences the summary takes from elsewhere" do
@@ -1219,12 +1656,8 @@ defmodule FermixCore.Management.CopyTest do
     test "the sweep reads every producer" do
       files = summary_sources() |> Enum.map(&Path.basename(elem(&1, 0))) |> Enum.uniq()
 
-      # The ledger's own sentences are the contract's now (`Provision`), in
-      # its provider's words; it is still read, so one written there is held.
-      assert Enum.sort(files) ==
-               ~w(enrollment.ex hetzner.ex link.ex move_readiness.ex provision.ex)
-
-      assert Enum.count(summary_sources()) > 60
+      assert Enum.sort(files) == ~w(enrollment.ex link.ex move_readiness.ex)
+      assert Enum.count(summary_sources()) > 40
     end
   end
 
@@ -1316,33 +1749,12 @@ defmodule FermixCore.Management.CopyTest do
     assert unused == [], "proper nouns no published sentence uses: #{inspect(unused)}"
   end
 
-  # A proper noun an Always On provider declares is held to its own words: a
-  # name none of them uses has quietly widened the rule.
-  test "every proper noun an Always On provider declares is used by its words" do
-    for provider <- ProvisionRegistry.all() do
-      display = provider.display()
-
-      corpus =
-        Enum.join(
-          [display.name, display.token_label, display.write_token] ++
-            display.steps ++
-            Enum.map(display.locations, & &1.city) ++
-            Enum.map(provision_copy(), &elem(&1, 1)),
-          "\n"
-        )
-
-      unused = Enum.reject(display.proper_nouns, &String.contains?(corpus, &1))
-      assert unused == [], "#{provider.id()} declares unused proper nouns: #{inspect(unused)}"
-    end
-  end
-
-  # The derived half comes from the provider registries and cannot go stale;
+  # The derived half comes from the provider descriptors and cannot go stale;
   # only what the module writes by hand has to be asserted against the copy.
   defp hand_listed do
     derived =
       Descriptor.all()
       |> Enum.flat_map(&String.split(&1.label, ~r/[\s()]+/, trim: true))
-      |> Enum.concat(Enum.flat_map(ProvisionRegistry.all(), & &1.display().proper_nouns))
       |> MapSet.new()
 
     Enum.reject(Copy.proper_nouns(), &MapSet.member?(derived, &1))
@@ -1363,7 +1775,6 @@ defmodule FermixCore.Management.CopyTest do
       PluginRow.verbs() ++
       Enum.map(PluginRow.statuses(), &PluginRow.check_sentence/1) ++
       plugin_copy() ++
-      Enum.map(provision_copy(), &elem(&1, 1)) ++
       Enum.map(summary_copy(), &elem(&1, 1)) ++
       Enum.map(source_sentences(), &elem(&1, 1)) ++
       linux_computer_use_copy()
@@ -2077,12 +2488,7 @@ defmodule FermixCore.Management.CopyTest do
   defp summary_sources do
     files =
       Enum.map(
-        [
-          "home/provision.ex",
-          "home/provision/ledger.ex",
-          "home/provision/hetzner.ex",
-          "home/move_readiness.ex"
-        ],
+        ["home/move_readiness.ex"],
         &Path.join(@lib, &1)
       ) ++ Enum.map(["home/enrollment.ex", "home/link.ex"], &Path.join(@channels_lib, &1))
 
@@ -2166,8 +2572,103 @@ defmodule FermixCore.Management.CopyTest do
 
   defp assert_clean(nil, _kind, _names, _where), do: :ok
 
+  # M97 §3.4, the server leads: what `home.status.update` and
+  # `restart_hold` say, the problem sentences and the label in place of Move
+  # back, all without a version number (the version is a field).
+  describe "the server leads" do
+    test "every sentence of the update, the table and the restart hold is plain words" do
+      held =
+        for waits_for <- [[:macos], [:linux], [:macos, :linux], [:macos, :unknown], [:unknown]],
+            do: {"held #{inspect(waits_for)}", ManagementHome.held_sentence(waits_for)}
+
+      table = for said <- ReleaseTable.sentences(), do: {"table", said}
+      hold = for said <- RestartHold.sentences(), do: {"restart hold", said}
+
+      for {where, sentence} <- held ++ table ++ hold do
+        assert_clean(sentence, :prose, ["Mac", "Linux"], where)
+        assert Copy.summary_violations(sentence) == [], "#{where}: #{sentence}"
+      end
+
+      # The Always On pane's R1: the update words an app draws are short.
+      for {where, sentence} <- held do
+        words = sentence |> String.split(~r/\s+/, trim: true) |> length()
+        assert words <= Copy.word_bound(), "#{where}: #{words} words"
+      end
+
+      for machine <- ["Mac", "computer"],
+          key <- [:update_settings_only, :server_older, :server_ahead] do
+        said = Copy.summary_sentence(key, %{machine: machine})
+        refute said =~ ~r/\d+\.\d+/, "#{key}: #{said}"
+      end
+
+      assert Copy.summary_label(:update, %{first: true, machine: "Mac"}) ==
+               "Update Fermix on this Mac first"
+    end
+  end
+
   defp assert_clean(text, kind, names, where) when is_binary(text) do
     assert Copy.violations(text, kind, names) == [],
            "#{where}: #{inspect(text)} breaks #{inspect(Copy.violations(text, kind, names))}"
+  end
+
+  # M97 §19 (D28): the words of one set of settings after a move, the
+  # refusals a computer and a server give, the owner decision's, and the
+  # titles a linked computer draws for its own sections and its server's.
+  describe "one set of settings" do
+    test "its refusals and titles obey the rules" do
+      {:error, :unavailable, %{"sentence" => older_server}} =
+        Placement.older_server("garden server")
+
+      {:answer, {:error, :unavailable, %{"sentence" => older_server_does}}} =
+        Placement.to_older_server(
+          %{request_id: "r-1", method: "coding_agents.check", params: %{}},
+          "garden server"
+        )
+
+      {:error, :unavailable, %{"sentence" => older_computer}} = Placement.older_computer()
+      machine_owner = golden_owner_sentence("unavailable_machine_owner_decision")
+
+      for {where, text} <- [
+            {"older server", older_server},
+            {"older server, no setting", older_server_does},
+            {"older computer", older_computer},
+            {"machine owner", machine_owner}
+          ],
+          do: assert_owner_words(text, :prose, ["garden server"], where)
+
+      rows = for section <- Settings.sections(macos?: true, computer?: true), do: row(section)
+
+      titles =
+        Enum.map(
+          ComputerSettings.own_sections(rows, macos?: true, computer?: true),
+          & &1["title"]
+        ) ++
+          for id <- ~w(sandbox browser harness_machine),
+              do: ComputerSettings.server_title(id, "Sandbox", "garden server")
+
+      assert "Sandbox on this Mac" in titles
+      assert "garden server" in titles
+      for title <- titles, do: assert_clean(title, :name, ["garden server", "Mac"], "title")
+    end
+
+    # A linked computer's job list whose server answered in a form it does not
+    # read: its own jobs are listed, and `primary_missing` says why the
+    # server's are not.
+    test "the words for a server's jobs it cannot read obey the rules" do
+      tasks = start_supervised!(Task.Supervisor)
+      name = :"copy_jobs_#{System.unique_integer([:positive])}"
+      start_supervised!({Jobs, name: name, task_supervisor: tasks, computer?: true})
+      request = %{request_id: "req-1", protocol_version: 2, method: "job.list", params: %{}}
+
+      {:ok, %{"primary_missing" => unread}} =
+        Router.route(request,
+          primary_forward: fn _request, _opts -> {:ok, %{}} end,
+          operation_opts: [jobs: [server: name]]
+        )
+
+      assert_owner_words(unread, :prose, [], "jobs unread")
+    end
+
+    defp row(section), do: %{"id" => section.id, "pane" => section.pane, "title" => section.title}
   end
 end

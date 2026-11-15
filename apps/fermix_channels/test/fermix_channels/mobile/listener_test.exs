@@ -3,6 +3,7 @@ defmodule FermixChannels.Mobile.ListenerTest do
 
   alias FermixChannels.Mobile.Identity
   alias FermixChannels.Mobile.Listener
+  alias FermixChannels.Mobile.TlsTransport
 
   defmodule ShortDeadline do
     @moduledoc false
@@ -13,10 +14,14 @@ defmodule FermixChannels.Mobile.ListenerTest do
     alias FermixChannels.Mobile.TlsTransport
 
     @impl true
-    def handshake(socket) do
+    def handshake(socket, timeout_ms) do
+      result = TlsTransport.handshake(socket, timeout_ms)
       :ok = TlsTransport.start_upgrade_deadline(200)
-      TlsTransport.handshake(socket, TlsTransport.handshake_timeout_ms())
+      result
     end
+
+    @impl true
+    def handshake(socket), do: handshake(socket, TlsTransport.handshake_timeout_ms())
 
     @impl true
     defdelegate listen(port, options), to: TlsTransport
@@ -69,6 +74,8 @@ defmodule FermixChannels.Mobile.ListenerTest do
 
     @impl true
     defdelegate handshake(socket), to: TlsTransport
+    @impl true
+    defdelegate handshake(socket, timeout_ms), to: TlsTransport
 
     @impl true
     def send(socket, data) do
@@ -153,8 +160,10 @@ defmodule FermixChannels.Mobile.ListenerTest do
     assert island[:num_acceptors] * island[:num_connections] == 64
     assert island[:read_timeout] == 10_000
     # R1-1: the stock TLS transport's handshake has no timeout, so a silent
-    # peer held one of those 64 slots until it hung up.
-    assert island[:transport_module] == FermixChannels.Mobile.TlsTransport
+    # peer held one of those 64 slots until it hung up. ThousandIsland passes
+    # its own `handshake_timeout` (five seconds unless set) to the transport.
+    assert island[:transport_module] == TlsTransport
+    assert island[:handshake_timeout] == TlsTransport.handshake_timeout_ms()
 
     # R3-1: Bandit's defaults keep a connection alive for any number of
     # requests, each with a 10,000-byte line and 50 headers of 10,000 bytes,
@@ -376,6 +385,38 @@ defmodule FermixChannels.Mobile.ListenerTest do
 
       received = receive_until_closed(socket, "")
       assert length(String.split(received, "HTTP/1.1 200")) == 2
+    end
+
+    # ThousandIsland calls a transport's `handshake/2` in preference to
+    # `handshake/1`, so the deadline has to start in the call it makes, which
+    # `ThousandIsland.Socket.handshake/1` is.
+    test "the handshake ThousandIsland runs starts the upgrade deadline", ctx do
+      assert {:ok, listener} =
+               TlsTransport.listen(0,
+                 ip: {127, 0, 0, 1},
+                 certfile: ctx.identity.tls_cert_path,
+                 keyfile: ctx.identity.tls_key_path
+               )
+
+      on_exit(fn -> TlsTransport.close(listener) end)
+      assert {:ok, {_ip, port}} = TlsTransport.sockname(listener)
+      assert {:ok, peer} = :gen_tcp.connect(~c"127.0.0.1", port, [:binary, active: false])
+      assert {:ok, accepted} = TlsTransport.accept(listener)
+      :ok = :gen_tcp.close(peer)
+
+      socket = %ThousandIsland.Socket{
+        socket: accepted,
+        transport_module: TlsTransport,
+        read_timeout: 1_000,
+        handshake_timeout: TlsTransport.handshake_timeout_ms(),
+        silent_terminate_on_error: true,
+        span: nil,
+        peername: nil
+      }
+
+      assert TlsTransport.upgrade_deadline() == nil
+      assert {:error, _closed} = ThousandIsland.Socket.handshake(socket)
+      assert is_integer(TlsTransport.upgrade_deadline())
     end
 
     test "a request whose headers never end is closed at the upgrade deadline", ctx do

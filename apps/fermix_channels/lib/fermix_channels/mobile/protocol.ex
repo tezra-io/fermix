@@ -29,13 +29,19 @@ defmodule FermixChannels.Mobile.Protocol do
   """
 
   alias FermixChannels.Mobile.PeerEvents
+  alias FermixChannels.Mobile.PushRelay
+  alias FermixChannels.Mobile.WebPush.Encryption
   alias FermixCore.Companion.Protocol, as: ChatProtocol
   alias FermixCore.Text
 
-  @protocol_version 2
-  # Protocol 1 shipped in daemons but never had a client, so the window is the
-  # current version alone (M51 D1), not N/N-1.
-  @min_supported_version 2
+  @protocol_version 3
+  # Protocol 1 shipped in daemons but never had a client, so protocol 2's
+  # window was itself alone (M51 D1); from protocol 3 on it is N/N-1.
+  @min_supported_version @protocol_version - 1
+  # Push through Fermix's relay came with protocol 3 (M99 §14): a phone app
+  # at 2 reads the push list as `apns` alone, so nothing of it reaches a
+  # session at 2.
+  @relay_push_version 3
   @max_header_bytes 4_096
   @max_raw_chunk_bytes 60 * 1_024
   @max_plaintext_bytes 65_535 - 16
@@ -44,8 +50,16 @@ defmodule FermixChannels.Mobile.Protocol do
   @max_u64 18_446_744_073_709_551_615
   @default_max_media_bytes 20 * 1_024 * 1_024
   @platforms ~w(ios android)
-  # This daemon pushes through APNs alone, so it is the wire's whole catalog.
-  @push_services ~w(apns)
+  @computer_platforms ~w(macos linux)
+  # Where a computer stands against its server (M97 §3.4, `Computers.Versions`).
+  @computer_standings ~w(current behind ahead settings_only)
+  # The services a push list may name, each once: `fcm`, Google's through
+  # Fermix's relay, from protocol 3 (`@relay_push_version`).
+  @push_services ~w(apns fcm)
+  @protocol_2_push_services ~w(apns)
+  # A P-256 public point, 65 bytes, the first 0x04; a push auth secret.
+  @p256_point_bytes 65
+  @push_auth_bytes 16
   @attestation_kinds ~w(android_keymint apple_app_attest)
   @max_attestation_certs 6
   @max_attestation_chain_bytes 16 * 1_024
@@ -63,7 +77,11 @@ defmodule FermixChannels.Mobile.Protocol do
     link_preview read_state history_page request_status_page notice pair_approved pair_denied
     error pong event_part
   )
-  @client_events @shipped_client_events ++ PeerEvents.client_events()
+  # The client events a later protocol brought, each with the version that
+  # brought it: at an older version each is the unknown event it was there.
+  @later_client_events [{"push_subscribe", @relay_push_version}]
+  @client_events @shipped_client_events ++
+                   PeerEvents.client_events() ++ Enum.map(@later_client_events, &elem(&1, 0))
   @server_events @shipped_server_events ++ PeerEvents.server_events()
   @raw_client_events ~w(attach_chunk pair_request)
   @raw_server_events ~w(media_chunk event_part)
@@ -77,6 +95,7 @@ defmodule FermixChannels.Mobile.Protocol do
     "media_fetch" => ~w(ref),
     "push_register" => ~w(apns_token environment),
     "push_unregister" => [],
+    "push_subscribe" => ~w(service address p256dh auth),
     "ack" => ~w(server_seq),
     "request_status" => ~w(client_msg_ids),
     "pair_request" => ~w(device_name model app_version platform attestation),
@@ -120,6 +139,59 @@ defmodule FermixChannels.Mobile.Protocol do
   @doc "Inclusive `{min, max}` protocol versions accepted by this daemon."
   @spec supported_version_range() :: {pos_integer(), pos_integer()}
   def supported_version_range, do: {@min_supported_version, @protocol_version}
+
+  @doc """
+  The version an engine's session speaks as the initiator (`Mobile.Rail`)
+  before any hello: an enrollment's and a move's, which say no hello and are
+  served the version of their first frame, the oldest this engine serves. A
+  session that says hello names its own window instead (`hello_versions/0`)
+  and speaks the version its hello_ack chose.
+  """
+  @spec initiator_version() :: pos_integer()
+  def initiator_version, do: @min_supported_version
+
+  @doc """
+  What an engine's hello names as the initiator (a computer's session to its
+  server, a move's probe of the new one, M97 §3.4): its newest version as
+  `protocol_v`, which the hello is sent at, and its oldest as
+  `min_protocol_v`. The server serves the newest version both windows hold
+  (`negotiate_hello/3`) and its hello_ack's `v` says which, so a computer a
+  version ahead of its server or a version behind it links.
+  """
+  @spec hello_versions() :: %{String.t() => pos_integer()}
+  def hello_versions,
+    do: %{"protocol_v" => @protocol_version, "min_protocol_v" => @min_supported_version}
+
+  @doc """
+  Negotiate a hello against a server's inclusive `window`: its `protocol_v`,
+  the newest version its sender speaks, and `min_protocol_v`, the oldest, or
+  nil for a hello that names none, which speaks its own version alone (a
+  phone, an engine from before the rule). `{:ok, {oldest, served}}` is the
+  versions both windows hold; the session is served `served`, the newest of
+  them. Otherwise `{:error, :client_too_old}` means the client must update,
+  and `{:error, :client_too_new}` that the server must.
+  """
+  @spec negotiate_hello(integer(), integer() | nil, {integer(), integer()}) ::
+          {:ok, {pos_integer(), pos_integer()}} | {:error, :client_too_old | :client_too_new}
+  def negotiate_hello(version, nil, window), do: negotiate_hello(version, version, window)
+
+  def negotiate_hello(version, oldest, {server_min, server_max})
+      when is_integer(version) and is_integer(oldest) and oldest <= version and
+             is_integer(server_min) and is_integer(server_max) do
+    cond do
+      version < server_min -> {:error, :client_too_old}
+      oldest > server_max -> {:error, :client_too_new}
+      true -> {:ok, {max(oldest, server_min), min(version, server_max)}}
+    end
+  end
+
+  @doc """
+  The first version that carries push through Fermix's relay (M99 §14):
+  `fcm` in a push list and the client's `push_subscribe`. A session at an
+  older version is told and sent none of it.
+  """
+  @spec relay_push_version() :: pos_integer()
+  def relay_push_version, do: @relay_push_version
 
   @doc "Ordered client event catalog."
   @spec client_events() :: [String.t()]
@@ -168,7 +240,8 @@ defmodule FermixChannels.Mobile.Protocol do
 
     with :ok <- validate_media_cap(max_media_bytes),
          {:ok, header, bytes} <- split_frame(frame),
-         {:ok, envelope} <- decode_envelope(header, @client_events),
+         {:ok, envelope} <- decode_envelope(header, :client),
+         :ok <- carried(envelope),
          :ok <- validate_client_event(envelope, max_media_bytes),
          :ok <- validate_binary(:client, envelope.type, bytes, @raw_client_events),
          :ok <- validate_attestation_chain(envelope, bytes) do
@@ -182,14 +255,15 @@ defmodule FermixChannels.Mobile.Protocol do
   @doc """
   Encode and validate one client plaintext frame, holding it to the rules
   `decode_client_frame/2` holds a client to: the initiator's side of the wire
-  (`Mobile.Rail`).
+  (`Mobile.Rail`), at `:version`, by default the one an initiator speaks
+  (`initiator_version/0`).
   """
   @spec encode_client_frame(String.t(), map(), pos_integer(), binary(), keyword()) ::
           {:ok, binary()} | {:error, term()}
   def encode_client_frame(type, payload, seq, bytes, opts)
       when is_binary(type) and is_map(payload) and is_integer(seq) and is_binary(bytes) and
              is_list(opts) do
-    version = Keyword.get(opts, :version, @protocol_version)
+    version = Keyword.get(opts, :version, @min_supported_version)
     max_media_bytes = Keyword.get(opts, :max_media_bytes, @default_max_media_bytes)
 
     with :ok <- known_type(type, @client_events),
@@ -198,6 +272,7 @@ defmodule FermixChannels.Mobile.Protocol do
          {:ok, payload} <- stringify_top_level(payload),
          :ok <- reject_reserved(payload),
          envelope = %{version: version, type: type, seq: seq, payload: payload},
+         :ok <- carried(envelope),
          :ok <- validate_client_event(envelope, max_media_bytes),
          :ok <- validate_binary(:client, type, bytes, @raw_client_events),
          :ok <- validate_attestation_chain(envelope, bytes) do
@@ -214,8 +289,8 @@ defmodule FermixChannels.Mobile.Protocol do
   @spec decode_server_frame(binary()) :: {:ok, decoded_event()} | {:error, term()}
   def decode_server_frame(frame) when is_binary(frame) do
     with {:ok, header, bytes} <- split_frame(frame),
-         {:ok, envelope} <- decode_envelope(header, @server_events),
-         :ok <- validate_server_event(envelope.type, envelope.payload),
+         {:ok, envelope} <- decode_envelope(header, :server),
+         :ok <- validate_server_event(envelope.type, envelope.payload, envelope.version),
          :ok <- validate_binary(:server, envelope.type, bytes, @raw_server_events) do
       {:ok, Map.put(envelope, :bytes, bytes)}
     end
@@ -240,7 +315,7 @@ defmodule FermixChannels.Mobile.Protocol do
          :ok <- valid_seq(seq),
          payload = Map.delete(decoded, "t"),
          :ok <- reject_reserved(payload),
-         :ok <- validate_server_event(type, payload),
+         :ok <- validate_server_event(type, payload, version),
          :ok <- validate_binary(:server, type, <<>>, @raw_server_events) do
       {:ok, %{version: version, type: type, seq: seq, payload: payload, bytes: <<>>}}
     end
@@ -294,7 +369,7 @@ defmodule FermixChannels.Mobile.Protocol do
          :ok <- valid_seq(seq),
          {:ok, payload} <- stringify_top_level(payload),
          :ok <- reject_reserved(payload),
-         :ok <- validate_server_event(type, payload),
+         :ok <- validate_server_event(type, payload, version),
          :ok <- validate_binary(:server, type, bytes, @raw_server_events) do
       {:ok, payload}
     end
@@ -302,6 +377,15 @@ defmodule FermixChannels.Mobile.Protocol do
 
   defp logical_type("event_part"), do: {:error, :nested_event_part}
   defp logical_type(_type), do: :ok
+
+  # A client event a later version brought is, at an older one, the unknown
+  # event it was there, whatever it carries.
+  defp carried(%{type: type, version: version}) do
+    case List.keyfind(@later_client_events, type, 0) do
+      {^type, since} when version < since -> {:error, {:unknown_event, type}}
+      _carried -> :ok
+    end
+  end
 
   defp validate_client_event(%{type: type, payload: payload, version: version}, max_media_bytes) do
     cond do
@@ -319,7 +403,9 @@ defmodule FermixChannels.Mobile.Protocol do
     end
   end
 
-  defp validate_server_event(type, payload) do
+  # A `hello_ack` is read against the version its frame carries, which the
+  # window it names must hold: the initiator reads a server's own window.
+  defp validate_server_event(type, payload, version) do
     cond do
       type in ChatProtocol.shared_server_events() ->
         ChatProtocol.validate_server_payload(type, payload)
@@ -328,11 +414,39 @@ defmodule FermixChannels.Mobile.Protocol do
         PeerEvents.validate(:server, type, payload)
 
       true ->
-        with :ok <- require_fields(type, payload, @server_required) do
-          validate_server_payload(type, payload)
+        with :ok <- require_fields(type, payload, @server_required),
+             :ok <- validate_server_payload(type, payload),
+             :ok <- push_at_version(type, payload, version) do
+          window_holds(type, payload, version)
         end
     end
   end
+
+  # What a push list may name at the frame's version (`@relay_push_version`).
+  defp push_at_version("hello_ack", %{"caps" => caps}, version),
+    do: services_at_version(Map.get(caps, "push", []), "caps.push", version)
+
+  defp push_at_version("pair_approved", payload, version),
+    do: services_at_version(Map.get(payload, "push", []), "push", version)
+
+  defp push_at_version(_type, _payload, _version), do: :ok
+
+  defp services_at_version(services, field, version) when version < @relay_push_version do
+    if services -- @protocol_2_push_services == [],
+      do: :ok,
+      else: {:error, {:invalid_field, field}}
+  end
+
+  defp services_at_version(_services, _field, _version), do: :ok
+
+  defp window_holds("hello_ack", %{"min_version" => min, "max_version" => max}, version)
+       when min <= version and version <= max,
+       do: :ok
+
+  defp window_holds("hello_ack", _payload, _version),
+    do: {:error, {:invalid_field, "version_range"}}
+
+  defp window_holds(_type, _payload, _version), do: :ok
 
   defp split_frame(frame) when byte_size(frame) > @max_plaintext_bytes,
     do: {:error, {:frame_too_large, byte_size(frame), @max_plaintext_bytes}}
@@ -353,12 +467,12 @@ defmodule FermixChannels.Mobile.Protocol do
 
   defp split_frame(_frame), do: {:error, :truncated_frame}
 
-  defp decode_envelope(header, known_events) do
+  defp decode_envelope(header, side) do
     with {:ok, decoded} <- decode_json_object(header),
          {:ok, version} <- fetch_integer(decoded, "v"),
-         :ok <- supported_version(version),
+         :ok <- supported_version(side, version, decoded),
          {:ok, type} <- fetch_nonempty(decoded, "t"),
-         :ok <- known_type(type, known_events),
+         :ok <- known_type(type, known_events(side)),
          {:ok, seq} <- fetch_integer(decoded, "seq"),
          :ok <- valid_seq(seq) do
       {:ok,
@@ -371,14 +485,47 @@ defmodule FermixChannels.Mobile.Protocol do
     end
   end
 
+  defp known_events(:client), do: @client_events
+  defp known_events(:server), do: @server_events
+
   # A client outside the window must learn which side has to update, so the
-  # refusal carries the direction and the version it sent.
-  defp supported_version(version) do
-    case negotiate(version) do
-      :ok -> :ok
-      {:error, direction} -> {:error, {:unsupported_protocol_version, direction, version}}
+  # refusal carries the direction and the version it sent. A hello above the
+  # window is still served when the oldest version it names is one the
+  # window holds (`negotiate_hello/3`). A server frame outside it is the
+  # initiator's to refuse, naming the server's side.
+  defp supported_version(:client, version, %{"t" => "hello"} = header) do
+    with {:ok, oldest} <- hello_oldest(header, version) do
+      case negotiate_hello(version, oldest, supported_version_range()) do
+        {:ok, _window} -> :ok
+        {:error, direction} -> {:error, {:unsupported_protocol_version, direction, version}}
+      end
     end
   end
+
+  defp supported_version(side, version, _header) do
+    case negotiate(version) do
+      :ok ->
+        :ok
+
+      {:error, direction} ->
+        {:error, {:unsupported_protocol_version, side(side, direction), version}}
+    end
+  end
+
+  defp side(:client, direction), do: direction
+  defp side(:server, :client_too_old), do: :server_too_old
+  defp side(:server, :client_too_new), do: :server_too_new
+
+  # The oldest version a hello names (`min_protocol_v`): none, or a version
+  # no newer than the hello's own.
+  defp hello_oldest(%{"min_protocol_v" => oldest}, version)
+       when is_integer(oldest) and oldest >= 1 and oldest <= version,
+       do: {:ok, oldest}
+
+  defp hello_oldest(%{"min_protocol_v" => _other}, _version),
+    do: {:error, {:invalid_field, "min_protocol_v"}}
+
+  defp hello_oldest(_payload, _version), do: {:ok, nil}
 
   defp decode_json_object(header) do
     case Jason.decode(header) do
@@ -575,6 +722,10 @@ defmodule FermixChannels.Mobile.Protocol do
   defp validate_client_payload("history_pull", payload, _max), do: validate_history_pull(payload)
   defp validate_client_payload("media_fetch", payload, _max), do: nonempty(payload, "ref")
   defp validate_client_payload("push_register", payload, _max), do: validate_push(payload)
+
+  defp validate_client_payload("push_subscribe", payload, _max),
+    do: validate_push_subscribe(payload)
+
   defp validate_client_payload("ack", payload, _max), do: nonnegative_u64(payload, "server_seq")
 
   defp validate_client_payload("request_status", payload, _max),
@@ -591,10 +742,43 @@ defmodule FermixChannels.Mobile.Protocol do
          :ok <- nonempty(payload, "app_version"),
          :ok <- nonnegative_u64(payload, "last_server_seq"),
          :ok <- positive_integer(payload, "protocol_v"),
-         :ok <- optional_positive_u64(payload, "primary_epoch") do
+         {:ok, _oldest} <- hello_oldest(payload, payload["protocol_v"]),
+         :ok <- optional_positive_u64(payload, "primary_epoch"),
+         :ok <- optional_computer_platform(payload),
+         :ok <- optional_hello_caps(payload) do
       optional_relay_list_rev(payload)
     end
   end
+
+  # What a desktop says of itself (M97 §19.3): `caps.computer.machine_settings`,
+  # that it applies the rule that a management setting's id names its
+  # machine. Absent from a phone's hello and from an older desktop's; present,
+  # objects down to a boolean flag, so the session reads it with nothing left
+  # to check. A later desktop may name more, which is ignored.
+  defp optional_hello_caps(%{"caps" => %{} = caps}) do
+    case Map.get(caps, "computer", %{}) do
+      %{} = computer ->
+        if is_boolean(Map.get(computer, "machine_settings", false)),
+          do: :ok,
+          else: {:error, {:invalid_field, "caps.computer"}}
+
+      _other ->
+        {:error, {:invalid_field, "caps.computer"}}
+    end
+  end
+
+  defp optional_hello_caps(%{"caps" => _other}), do: {:error, {:invalid_field, "caps"}}
+  defp optional_hello_caps(_payload), do: :ok
+
+  # The system a computer runs (M97 §3.2), named by a desktop's hello; absent
+  # from a phone's and from an engine older than the computer record.
+  defp optional_computer_platform(%{"platform" => platform}) when platform in @computer_platforms,
+    do: :ok
+
+  defp optional_computer_platform(%{"platform" => _other}),
+    do: {:error, {:invalid_field, "platform"}}
+
+  defp optional_computer_platform(_payload), do: :ok
 
   # The relay list revision the phone has stored (M62 §3.1): 16 lowercase hex
   # digits. A well-formed revision this daemon does not know is still recorded.
@@ -670,6 +854,35 @@ defmodule FermixChannels.Mobile.Protocol do
     with :ok <- nonempty(payload, "apns_token") do
       enum(payload, "environment", ~w(development production))
     end
+  end
+
+  # A phone's push subscription (M99 §14): a service the relay takes, the
+  # phone's address there, and the phone's P-256 public key and auth secret,
+  # each in canonical base64url without padding. The session decodes it.
+  defp validate_push_subscribe(payload) do
+    with :ok <- enum(payload, "service", PushRelay.services()),
+         :ok <- push_address(payload),
+         :ok <- base64url_bytes(payload, "p256dh", @p256_point_bytes, <<4>>),
+         :ok <- p256_point(payload["p256dh"]) do
+      base64url_bytes(payload, "auth", @push_auth_bytes, <<>>)
+    end
+  end
+
+  # Read as the sender reads it (`Encryption.valid_point?/1`), so a key no
+  # push can be sealed to is refused when the phone sends it, not at every
+  # later send. Its text was held to 65 bytes of base64url just before.
+  defp p256_point(text) do
+    if Encryption.valid_point?(Base.url_decode64!(text, padding: false)),
+      do: :ok,
+      else: {:error, {:invalid_field, "p256dh"}}
+  end
+
+  # Read as the sender reads it (`PushRelay.valid_address?/1`), so an address
+  # the relay would refuse is refused when the phone sends it.
+  defp push_address(%{"address" => address}) do
+    if PushRelay.valid_address?(address),
+      do: :ok,
+      else: {:error, {:invalid_field, "address"}}
   end
 
   defp validate_pair_request(payload) do
@@ -759,10 +972,87 @@ defmodule FermixChannels.Mobile.Protocol do
          :ok <- nonnegative_u64(payload, "history_head_seq"),
          :ok <- nonnegative_u64(payload, "read_up_to_seq"),
          :ok <- map_field(payload, "caps"),
-         :ok <- positive_u64(payload, "primary_epoch") do
+         :ok <- positive_u64(payload, "primary_epoch"),
+         :ok <- optional_trips_caps(payload["caps"]),
+         :ok <- optional_call_caps(payload["caps"]),
+         :ok <- optional_computer_caps(payload["caps"]) do
       optional_push_services(payload["caps"], "caps.push")
     end
   end
+
+  # Which of a computer's own events the server takes (M97 §5.3): absent from
+  # a server older than the computer record and from a phone's hello_ack, and
+  # a computer sends none of them then. Each flag a boolean; a later server
+  # may name more. `machine_settings` says the server applies M97 §19.3's
+  # rule; `call` and `attach` that it takes the call channel and the phone's
+  # upload from a computer (§9.2, §9.3). Where the computer stands against
+  # the server and what the server speaks (§3.4) are optional: absent from a
+  # server before them.
+  defp optional_computer_caps(%{"computer" => %{"v" => version} = computer})
+       when is_integer(version) and version > 0 do
+    flags = Map.take(computer, ~w(offers link_path invoke machine_settings call attach))
+
+    if Enum.all?(flags, fn {_flag, value} -> is_boolean(value) end) and
+         computer_standing?(computer) and computer_versions?(computer),
+       do: :ok,
+       else: {:error, {:invalid_field, "caps.computer"}}
+  end
+
+  defp optional_computer_caps(%{"computer" => _computer}),
+    do: {:error, {:invalid_field, "caps.computer"}}
+
+  defp optional_computer_caps(_caps), do: :ok
+
+  defp computer_standing?(%{"standing" => standing}), do: standing in @computer_standings
+  defp computer_standing?(_computer), do: true
+
+  # The server's engine version, and the companion and management ranges it
+  # speaks, each `[min, max]`.
+  defp computer_versions?(%{"versions" => %{"engine" => engine} = versions})
+       when is_binary(engine) and engine != "",
+       do: version_range?(versions["companion"]) and version_range?(versions["management"])
+
+  defp computer_versions?(%{"versions" => _versions}), do: false
+  defp computer_versions?(_computer), do: true
+
+  defp version_range?([min, max]) when is_integer(min) and is_integer(max),
+    do: min >= 1 and min <= max
+
+  defp version_range?(_range), do: false
+
+  # Whether the primary serves a call from the phone (M87): absent from an
+  # older primary and from a desktop's hello_ack. A call it does not serve
+  # says why; one it serves says nothing more.
+  defp optional_call_caps(%{"call" => call}) do
+    if call_caps?(call), do: :ok, else: {:error, {:invalid_field, "caps.call"}}
+  end
+
+  defp optional_call_caps(_caps), do: :ok
+
+  defp call_caps?(%{"available" => available?, "camera" => camera?} = call)
+       when is_boolean(available?) and is_boolean(camera?) do
+    versions? =
+      integer_range(call, "min_version", 1, @max_u64) == :ok and
+        integer_range(call, "max_version", 1, @max_u64) == :ok
+
+    versions? and call_reason?(available?, Map.get(call, "reason"))
+  end
+
+  defp call_caps?(_call), do: false
+
+  # A string, as `error.code` is: a later primary may refuse calls for a
+  # reason this one does not name, which a phone reads as needing an update.
+  defp call_reason?(true, nil), do: true
+  defp call_reason?(false, reason), do: is_binary(reason) and reason != ""
+  defp call_reason?(_available?, _reason), do: false
+
+  # Whether the primary serves the owner's trips on the phone's list channel
+  # (M89 §06): a boolean, absent from an older primary and from a desktop's
+  # hello_ack.
+  defp optional_trips_caps(%{"trips" => trips}) when not is_boolean(trips),
+    do: {:error, {:invalid_field, "caps.trips"}}
+
+  defp optional_trips_caps(_caps), do: :ok
 
   # Absent from a daemon older than the list, as every field protocol 2 gained
   # after it shipped may be.
@@ -778,11 +1068,10 @@ defmodule FermixChannels.Mobile.Protocol do
 
   defp push_services(_services, field), do: {:error, {:invalid_field, field}}
 
-  defp valid_version_range(%{
-         "min_version" => @min_supported_version,
-         "max_version" => @protocol_version
-       }),
-       do: :ok
+  # A server's window, whichever server: the frame's version must lie in it
+  # (`window_holds/3`), so an initiator reads an older or newer server's.
+  defp valid_version_range(%{"min_version" => min, "max_version" => max}) when min <= max,
+    do: :ok
 
   defp valid_version_range(_payload), do: {:error, {:invalid_field, "version_range"}}
 
@@ -995,6 +1284,21 @@ defmodule FermixChannels.Mobile.Protocol do
   defp base64_bytes(payload, field, size) do
     with value when is_binary(value) <- Map.get(payload, field),
          {:ok, decoded} when byte_size(decoded) == size <- Base.decode64(value) do
+      :ok
+    else
+      _invalid -> {:error, {:invalid_field, field}}
+    end
+  end
+
+  # Canonical base64url without padding of `size` bytes starting with
+  # `prefix`: the decoder reads padding and stray trailing bits, so the text
+  # must also be what the bytes encode to.
+  defp base64url_bytes(payload, field, size, prefix) do
+    with value when is_binary(value) <- Map.get(payload, field),
+         {:ok, decoded} <- Base.url_decode64(value, padding: false),
+         true <- byte_size(decoded) == size,
+         true <- binary_part(decoded, 0, byte_size(prefix)) == prefix,
+         ^value <- Base.url_encode64(decoded, padding: false) do
       :ok
     else
       _invalid -> {:error, {:invalid_field, field}}

@@ -24,10 +24,12 @@ _TOP_KEYS = {
     "suite", "title", "description", "risk", "confirm_cost", "defaults", "scenarios", "soft",
     "abort_on_tool_error", "requires",
 }
-# What a suite may require of the eval home beyond the defaults (`requires:`). A
-# home seeded without it holds the suite's cases out as NOT EVALUATED, never as
-# zeros. `cues`: seeded with `seed_capability_home.py --cues` and seed_cues.exs.
-REQUIREMENTS = ("cues",)
+# What a suite, or one case of it, may require of the eval home beyond the
+# defaults (`requires:`). A home seeded without it holds those cases out as NOT
+# EVALUATED, never as zeros. `cues`: seeded with `seed_capability_home.py --cues`
+# and seed_cues.exs; `computers`: with --computers; `coding_signed_out`: with
+# --coding-signed-out (a stub `claude` that fails every run as signed out).
+REQUIREMENTS = ("cues", "computers", "coding_signed_out")
 _DEFAULT_KEYS = {"timeout_ms", "judge", "expect"}
 _SCENARIO_KEYS = {"id", "title", "severity", "risk", "confirm_cost", "tags", "cases",
                   "sticky_gates", "platforms"}
@@ -39,7 +41,7 @@ PLATFORMS = ("linux", "macos")
 _CASE_KEYS = {
     "id", "query", "turns", "expect", "rubric", "judge", "timeout_ms", "drive",
     "image", "images", "score", "checker", "requires_tools", "requires_tools_all",
-    "cross_session", "companion", "watch", "voice", "cue",
+    "cross_session", "companion", "watch", "voice", "cue", "requires",
 }
 _TURN_KEYS = {"query", "expect"}
 
@@ -54,6 +56,15 @@ EXPECT_SPEC: dict[str, tuple] = {
     "tools_none_succeeded": (list,),
     "tools_in_order": (list,),
     "tool_inputs_match_all": (list,),
+    # What the tools' own answers said, read from their outputs alone: every
+    # regex must match one, as `tool_inputs_match_all` reads the inputs. A
+    # positive floor (an outcome a later attempt may still reach), never sticky.
+    "tool_outputs_match_all": (list,),
+    # A ban on an action, read from the tools' own record: no regex may match any
+    # tool span's input (the call asked for it) or output (the tool says it did
+    # it). Always sticky, as `tools_none` is, for a ban no tool-name list can
+    # express, such as one stop of a trip left alone while the others move.
+    "tool_evidence_match_none": (list,),
     "min_tool_calls": (int,),
     "max_tool_calls": (int,),
     "min_subagent_spawns": (int,),
@@ -165,6 +176,8 @@ class Case:
     #   and when; evallib/voice.py.
     cue: dict = field(default_factory=dict)  # drive: cue — the source and the events
     #   the runner posts to the door; evallib/cue_drive.py.
+    requires: tuple[str, ...] = ()  # what the eval home must be seeded with for this case
+    #   beyond its suite's `requires` (REQUIREMENTS); run_eval.py holds it out without.
 
     @property
     def needs_operator(self) -> bool:
@@ -243,7 +256,7 @@ def _validate_expect(expect, where: str, problems: list[str]) -> None:
         if key in ("tools_any", "tools_all", "tools_none", "tools_none_succeeded", "tools_in_order"):
             if not all(isinstance(t, str) for t in val):
                 problems.append(f"{where}: expect `{key}` must be a list of tool-name strings")
-        if key == "tool_inputs_match_all":
+        if key in ("tool_inputs_match_all", "tool_outputs_match_all", "tool_evidence_match_none"):
             if not all(isinstance(pattern, str) for pattern in val):
                 problems.append(f"{where}: expect `{key}` must be a list of regex strings")
                 continue
@@ -277,14 +290,17 @@ def _validate_expect(expect, where: str, problems: list[str]) -> None:
 # forbidden tool and thereby dropped the eight-tool write guard the defaults set,
 # so the profile-boundary assertion those cases appeared to make was not running.
 _PROHIBITION_KEYS = ("tools_none", "tools_none_succeeded")
+# Every ban list accumulates across defaults, case and turn: the tool bans and
+# `tool_evidence_match_none`, a ban read from the tools' own record.
+_BAN_LIST_KEYS = (*_PROHIBITION_KEYS, "tool_evidence_match_none")
 
 
 def _final_turn_conflicts(case_declared: dict, turn_declared: dict, cloc: str) -> list[str]:
     """The case's expect is graded on the final turn beside that turn's own, so a
     key both declare with different values is two gates for one trace: refused,
-    never resolved silently. Prohibition lists accumulate instead."""
+    never resolved silently. Ban lists accumulate instead."""
     conflicts = sorted(key for key in turn_declared
-                       if key not in _PROHIBITION_KEYS and key in case_declared
+                       if key not in _BAN_LIST_KEYS and key in case_declared
                        and case_declared[key] != turn_declared[key])
     if not conflicts:
         return []
@@ -295,7 +311,7 @@ def _final_turn_conflicts(case_declared: dict, turn_declared: dict, cloc: str) -
 def _merge_expect(base: dict, override: dict) -> dict:
     out = dict(base or {})
     out.update(override or {})
-    for key in _PROHIBITION_KEYS:
+    for key in _BAN_LIST_KEYS:
         merged = list(dict.fromkeys([*(base or {}).get(key, []),
                                      *(override or {}).get(key, [])]))
         if merged:
@@ -312,8 +328,11 @@ def _merge_expect(base: dict, override: dict) -> dict:
 # without typed pre-execution evidence" half of `tools_none_succeeded`.
 # `workspace_paths_absent` joins on the same terms: a path the turn created is on
 # the disk whatever a retry does, while one that was there before the turn
-# proves nothing about it and grades inconclusive.
-ALWAYS_STICKY_GATES = (*_PROHIBITION_KEYS, "fixture_state", "workspace_paths_absent")
+# proves nothing about it and grades inconclusive. `tool_evidence_match_none`
+# joins on the tools' own record: a matched input asked for the banned action and
+# a matched answer says it was done, which no retry unmakes.
+ALWAYS_STICKY_GATES = (*_PROHIBITION_KEYS, "fixture_state", "workspace_paths_absent",
+                       "tool_evidence_match_none")
 # The negative gates grade.py implements: each one asserts that something did NOT
 # happen. Only these may be declared `sticky_gates:` — a positive gate is a
 # quality assertion a later attempt can legitimately satisfy, while a disclosed
@@ -910,6 +929,7 @@ def _load_one(path: str, fixtures_dir: str, problems: list[str]) -> Suite | None
                 problems.append(f"{cloc}: a case may carry only one of score/checker/rubric, got {present}")
             requires_tools = _validate_tool_list(cs, "requires_tools", cloc, problems)
             requires_all = _validate_tool_list(cs, "requires_tools_all", cloc, problems)
+            case_requires = _case_requirements(cs, str(name), cloc, problems)
             # cross_session: every turn but the last runs in one session, the last
             # (the recall) in a fresh one — needs 2+ turns and a scorer for the
             # recall: a `score` block on its reply, or a case-level `fixture_state`
@@ -987,7 +1007,7 @@ def _load_one(path: str, fixtures_dir: str, problems: list[str]) -> Suite | None
                         score_spec=score_spec, checker_spec=checker_spec,
                         requires_tools=requires_tools, cross_session=cross_session,
                         requires_tools_all=tuple(requires_all), companion=companion_spec,
-                        watch=watch, voice=voice_spec, cue=cue_spec)
+                        watch=watch, voice=voice_spec, cue=cue_spec, requires=case_requires)
             _refuse_misplaced_fixture_state(case, turn_expects, cloc, problems)
             _refuse_misplaced_workspace_paths(case, str(name), cloc, problems)
             cases.append(case)
@@ -1017,6 +1037,22 @@ def _requirements(value, fname: str, problems: list[str]) -> tuple[str, ...]:
         problems.append(f"{fname}: `requires` must be a list drawn from {list(REQUIREMENTS)}")
         return ()
     return tuple(dict.fromkeys(value))
+
+
+def _case_requirements(cs: dict, suite_name: str, where: str,
+                       problems: list[str]) -> tuple[str, ...]:
+    """A case's own `requires:`, for a case whose suite runs without that seed.
+
+    A capability suite may not declare it: `run_capability.py` holds a task out by
+    its suite's `cues` only, so the case would be driven on a home that cannot
+    measure it."""
+    if "requires" not in cs:
+        return ()
+    if suite_name.startswith(CAPABILITY_SUITE_PREFIX):
+        problems.append(f"{where}: a case's `requires` is read by run_eval.py only; a "
+                        "capability suite's case would be driven on any home")
+        return ()
+    return _requirements(cs["requires"], where, problems)
 
 
 def _abort_fragments(value, fname: str, problems: list[str]) -> list[str]:

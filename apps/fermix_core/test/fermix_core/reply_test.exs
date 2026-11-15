@@ -32,7 +32,8 @@ defmodule FermixCore.ReplyTest do
         :invalid_destination,
         :malformed_request,
         :remote_rejected,
-        :adapter_unavailable
+        :adapter_unavailable,
+        :carrier_away
       ]
 
       rendered = Enum.map(kinds, &Reply.format_delivery_error({:permanent, &1}))

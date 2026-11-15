@@ -14,16 +14,21 @@ defmodule FermixChannels.Home.CandidateReturnTest do
   alias FermixChannels.Home.Candidate, as: CandidateProcess
   alias FermixChannels.Mobile.DeviceStore
   alias FermixChannels.Mobile.Noise
+  alias FermixChannels.Test.DesktopRail
   alias FermixChannels.Test.HomeMove
   alias FermixCore.Home.Candidate
   alias FermixCore.Home.Candidate.Activation
+  alias FermixCore.Home.ComputerKey
   alias FermixCore.Home.DesktopLink
   alias FermixCore.Home.EnrollmentCode
   alias FermixCore.Home.Epoch
   alias FermixCore.Home.Moved
+  alias FermixCore.Home.Readable
   alias FermixCore.Home.Role
   alias FermixCore.Home.Snapshot
   alias FermixCore.Home.Snapshot.Recipient
+  alias FermixCore.Setup.MachineFile
+  alias FermixTestSupport.CraftedSnapshot
   alias FermixTestSupport.SafeRm
 
   @now ~U[2031-06-01 09:00:00Z]
@@ -59,9 +64,9 @@ defmodule FermixChannels.Home.CandidateReturnTest do
 
       staging = Candidate.staging_path(ctx.mac)
       staged = File.read!(Path.join(staging, "config.toml"))
-      # This computer's own sandbox, not the server's.
-      assert staged =~ "this computer's sandbox"
-      refute staged =~ "the server's sandbox"
+      # M97 §4: neither computer's own sandbox is in the home's settings;
+      # this one's stays in its machine file.
+      refute staged =~ "sandbox"
       # Its own desktop row is gone from the device list it takes back.
       assert {:ok, [%{name: "office-mac"}]} = DeviceStore.list(root: staging)
 
@@ -77,6 +82,8 @@ defmodule FermixChannels.Home.CandidateReturnTest do
       assert File.read!(Path.join([ctx.mac, "browser", "profiles", "owner", "Cookies"])) ==
                "signed-in sessions"
 
+      assert File.read!(MachineFile.path(ctx.mac)) =~ "this computer's sandbox"
+
       refute File.exists?(Path.join(ctx.mac, "chatgpt_host.json"))
       refute File.exists?(DesktopLink.path(ctx.mac))
 
@@ -85,6 +92,37 @@ defmodule FermixChannels.Home.CandidateReturnTest do
       assert_receive first when first in [:awake_released, :candidate_restart]
       assert first == :awake_released
       assert_receive :candidate_restart
+    end
+
+    # M97 D16: a server's home in a newer format than this computer's Fermix
+    # reads is refused before anything is staged, in words that say what to
+    # do, which the server reads in its refusal too.
+    test "a server's home in a newer format says to update Fermix here first", ctx do
+      {:ok, pair} = Candidate.recipient_pair(ctx.mac)
+      newer = Path.join(ctx.tmp, "newer.fxsnap")
+      format = Readable.home_format() + 1
+
+      CraftedSnapshot.write!(newer, Recipient.public(pair), ctx.server,
+        home_format: format,
+        engine_version: "0.1.0",
+        host: "linux-aarch64"
+      )
+
+      name = start_candidate!(ctx.mac)
+      assert {:ok, %{incoming: incoming}} = CandidateProcess.offer(name, offer(newer))
+      File.cp!(newer, incoming)
+
+      assert :ok = CandidateProcess.stage(name, @move_id, self())
+      assert_receive {:candidate_staged, @move_id, {:error, sentence}}, 30_000
+
+      assert sentence ==
+               "The home from north-box is in a newer form than the Fermix here reads. Update " <>
+                 "Fermix here first, then try again."
+
+      refute File.exists?(Candidate.staging_path(ctx.mac))
+
+      assert {:ok, %{"phase" => "enrolled", "sentence" => ^sentence}} =
+               Candidate.read_state(ctx.mac)
     end
 
     test "a staging that fails lets the computer sleep again until the next offer", ctx do
@@ -161,6 +199,42 @@ defmodule FermixChannels.Home.CandidateReturnTest do
     end
   end
 
+  # Every dial to the server names the address hints the link holds, the
+  # move back's enrollment included.
+  test "a return's enrollment dials the server at the hints its link holds", ctx do
+    hint = "100.101.102.103:4033"
+    facts = code_facts()
+
+    :ok =
+      DesktopLink.write(ctx.mac, %{
+        device_id: "6f1e2d3c-4b5a-4968-8778-695a4b3c2d1e",
+        key: :file,
+        primary: %{
+          name: "north-box",
+          gateway_pk: facts.gateway_pk,
+          node_id: facts.node_id,
+          relays: facts.relays,
+          relays_rev: facts.relays_rev,
+          addrs: [hint]
+        },
+        epoch: 5
+      })
+
+    {:ok, code} = EnrollmentCode.encode(facts)
+    {:ok, %{"phase" => "enrolling"}} = prepare(ctx.mac, {:return, code})
+
+    sockets = Path.join(System.tmp_dir!(), "fx-cr-#{System.unique_integer([:positive])}")
+    File.mkdir_p!(sockets)
+    SafeRm.mark!(sockets)
+    on_exit(fn -> SafeRm.rm_rf!(sockets) end)
+    spy = start_supervised!({DesktopRail.DialSpy, {self(), Path.join(sockets, "d1.sock")}})
+
+    _name = start_candidate!(ctx.mac, helper: spy, hints: fn -> [] end)
+
+    endpoint = facts.node_id
+    assert_receive {:dial_op, %{"endpoint_id" => ^endpoint, "addrs" => [^hint]}}, 10_000
+  end
+
   describe "a restore from a copy this computer holds" do
     test "stopped before it was put in place, it is dropped and offered again", ctx do
       {:ok, _state} = prepare(ctx.mac, {:local, "north-box"})
@@ -202,6 +276,8 @@ defmodule FermixChannels.Home.CandidateReturnTest do
 
   # The computer the home left: retired, marked, linked, with a path of its
   # own deep inside a kept directory and a stale file the server never had.
+  # Its key is in its file store under a profile of its own: the stub
+  # keychain is one table for the VM.
   defp retired_mac!(mac) do
     File.mkdir_p!(Path.join([mac, "browser", "profiles", "owner"]))
     File.mkdir_p!(Path.join(mac, "journals"))
@@ -211,8 +287,11 @@ defmodule FermixChannels.Home.CandidateReturnTest do
     role = "device"
 
     [fermix_core]
+    profile = "cr-#{System.unique_integer([:positive])}"
     secret_store = "file"
+    """)
 
+    File.write!(MachineFile.path(mac), """
     [sandbox]
     # this computer's sandbox
     workspace_root = "#{mac}/workspace"
@@ -222,20 +301,33 @@ defmodule FermixChannels.Home.CandidateReturnTest do
     File.write!(Path.join(mac, "chatgpt_host.json"), "stale")
     File.write!(Path.join([mac, "journals", "day.md"]), "a retired day\n")
     :ok = Moved.write(mac, %{epoch: 4, moved_at: @now, to: "north-box"})
-    File.mkdir_p!(Path.dirname(DesktopLink.path(mac)))
-    File.write!(DesktopLink.path(mac), "{}")
+    :ok = DesktopLink.write(mac, retired_link())
     mac
   end
 
+  defp retired_link do
+    %{
+      device_id: "0d3f8a7e-5c21-4b9e-8f60-2a4c6e8b1d37",
+      key: :file,
+      primary: %{
+        name: "north-box",
+        gateway_pk: :binary.copy(<<0x3C>>, 32),
+        node_id: String.duplicate("4f", 32),
+        relays: [%{"url" => "https://eu1.relay.invalid/", "quic_port" => 7842}],
+        relays_rev: "0123456789abcdef"
+      },
+      epoch: 4
+    }
+  end
+
   defp desktop_key!(mac) do
-    keypair = Noise.generate_keypair()
-    :ok = DesktopLink.write_key(mac, keypair.private)
+    {:ok, keypair, :file} = ComputerKey.create(mac, keypair: Noise.generate_keypair())
     keypair
   end
 
   # The server, retired into the device role for the move: its own sandbox,
-  # a day of its own, and a device list holding this computer's desktop row
-  # and another desktop's.
+  # in its settings as an earlier engine kept it, a day of its own, and a
+  # device list holding this computer's desktop row and another desktop's.
   defp server_home!(server, desktop_key) do
     File.mkdir_p!(Path.join(server, "journals"))
 
@@ -367,7 +459,7 @@ defmodule FermixChannels.Home.CandidateReturnTest do
          free_bytes: Keyword.get(opts, :free_bytes, fn _dir -> {:ok, @plenty} end),
          host: @mac,
          awake: held_awake(test)
-       ] ++ Keyword.take(opts, [:secret_names])},
+       ] ++ Keyword.take(opts, [:secret_names, :helper, :hints])},
       id: name
     )
 

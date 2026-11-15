@@ -92,6 +92,63 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
     end
   end
 
+  # M91 E3: the StackChan link. Off is fine; on, it needs a Mac primary and
+  # the packaged serial helper, which doctor finds without opening any port.
+  describe "accessories/1" do
+    setup do
+      dir = FermixTestSupport.SafeRm.make_tmp_dir!("doctor-accessories")
+      on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(dir) end)
+      helper = Path.join(dir, "fermix_serial")
+      %{helper: helper}
+    end
+
+    defp accessories(overrides) do
+      Checks.accessories(
+        Keyword.merge([enabled?: true, os_type: {:unix, :darwin}, role: :primary], overrides)
+      )
+    end
+
+    test "off, it is a quiet row", %{helper: helper} do
+      assert %{name: "accessories", status: :ok, detail: "StackChan is off"} =
+               accessories(enabled?: false, helper_path: helper)
+    end
+
+    test "on with the helper packaged and executable, it is ready", %{helper: helper} do
+      File.write!(helper, "#!/bin/sh\n")
+      File.chmod!(helper, 0o755)
+
+      assert %{status: :ok, detail: detail} = accessories(helper_path: helper)
+      assert detail =~ "USB serial helper"
+    end
+
+    test "on with the helper missing, or not executable, it fails naming the path",
+         %{helper: helper} do
+      assert %{status: :fail, detail: missing} = accessories(helper_path: helper)
+      assert missing =~ helper
+
+      File.write!(helper, "not a program")
+      File.chmod!(helper, 0o644)
+      assert %{status: :fail, detail: not_executable} = accessories(helper_path: helper)
+      assert not_executable =~ "not executable"
+    end
+
+    test "on, but on a computer that is not a Mac that is its own home, it warns",
+         %{helper: helper} do
+      for overrides <- [[os_type: {:unix, :linux}], [role: :device], [role: :candidate]] do
+        assert %{status: :warn, detail: detail} =
+                 accessories([helper_path: helper] ++ overrides)
+
+        assert detail =~ "works only on a Mac that is its own home"
+      end
+    end
+
+    test "a CLI verb with no engine of its own judges no role", %{helper: helper} do
+      File.write!(helper, "#!/bin/sh\n")
+      File.chmod!(helper, 0o755)
+      assert %{status: :ok} = accessories(helper_path: helper, role: nil)
+    end
+  end
+
   describe "browser_disclaim/1" do
     test "not required off macOS" do
       result = Checks.browser_disclaim({:unix, :linux})
@@ -1739,7 +1796,7 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
         web_search: [backend: :duckduckgo, brave_api_key: "brave-secret"]
       )
 
-      result = Checks.place_search(host: @linux)
+      result = Checks.place_search(host: @linux, computers_opts: [records: %{}])
 
       assert result.name == "place search"
       assert result.status == :ok
@@ -1753,7 +1810,7 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
     test "reports a missing key as hidden and optional, not a warning" do
       Application.put_env(:fermix_core, :tools, web_search: [backend: :duckduckgo])
 
-      result = Checks.place_search(host: @linux)
+      result = Checks.place_search(host: @linux, computers_opts: [records: %{}])
 
       assert result.status == :ok
       assert result.detail =~ "hidden"
@@ -1809,7 +1866,12 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
     test "Homebrew on a Mac with no key is ok, Brave the build's default and the tool hidden" do
       Application.put_env(:fermix_core, :tools, web_search: [backend: :duckduckgo])
 
-      result = Checks.place_search(host: @brew_mac, apple_maps: [helper_path: "/bin/sh"])
+      result =
+        Checks.place_search(
+          host: @brew_mac,
+          apple_maps: [helper_path: "/bin/sh"],
+          computers_opts: [records: %{}]
+        )
 
       assert result.status == :ok
       assert result.detail =~ "Brave (the default in this build): no Brave key"
@@ -1819,10 +1881,61 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
     test "the default check reports no probe outcome" do
       Application.put_env(:fermix_core, :tools, web_search: [brave_api_key: "brave-secret"])
 
-      result = Checks.place_search(host: @linux)
+      result = Checks.place_search(host: @linux, computers_opts: [records: %{}])
 
       refute result.detail =~ "probe"
     end
+
+    # M89 D13: a server's home whose Mac offers Apple Maps searches there.
+    test "reports Apple Maps on a Mac of the home, why, and a choice no Mac offers" do
+      Application.put_env(:fermix_core, :tools, web_search: [backend: :duckduckgo])
+
+      result = Checks.place_search(host: @linux, computers_opts: mac_offers_places())
+
+      assert result.status == :ok
+
+      assert result.detail ==
+               "Apple Maps on your Mac (a linked Mac offers it, and this build carries no Apple " <>
+                 "Maps helper), with no key; place_search advertised. While no such Mac is " <>
+                 "online there is no place search; set [fermix_core.tools.place_search] " <>
+                 ~s(backend = "brave" to search Brave instead.)
+
+      Application.put_env(:fermix_core, :tools,
+        web_search: [backend: :duckduckgo],
+        place_search: [backend: "computer"]
+      )
+
+      none = Checks.place_search(host: @linux, computers_opts: [records: %{}, version: "1.2.3"])
+
+      assert none.status == :warn
+      assert none.detail =~ "(set in [fermix_core.tools.place_search]) is not ready"
+      assert none.detail =~ "no computer of this home offers Apple Maps"
+    end
+  end
+
+  # A primary whose link lists one Mac, away, whose latest offers list
+  # Apple Maps on.
+  defp mac_offers_places do
+    id = "6f1e2d3c-4b5a-4968-8778-695a4b3c2d1e"
+    offers = [%{id: "places", state: :on, sentence: nil, detail: nil}]
+
+    row = %{
+      device_id: id,
+      name: "studio Mac",
+      platform: "macos",
+      last_seen: ~U[2031-06-02 09:00:00Z],
+      backups: true,
+      connected: false,
+      since: nil
+    }
+
+    [
+      role: :primary,
+      rows: fn -> {:ok, [row]} end,
+      live: %{},
+      records: %{id => %{engine_version: "1.2.3", offers: offers}},
+      version: "1.2.3"
+    ]
   end
 
   describe "place_probe/1 (M31 §14.3)" do
@@ -1861,6 +1974,19 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
 
       assert result.status == :ok
       assert result.detail =~ "skipped"
+      refute_received {:place_probe_request, _query}
+    end
+
+    test "never asks a Mac of the home, nor Brave in its place" do
+      Application.put_env(:fermix_core, :tools, web_search: [brave_api_key: "brave-secret"])
+
+      opts =
+        Keyword.put(place_probe_opts(place_ok_plug(self())), :computers_opts, mac_offers_places())
+
+      result = Checks.place_probe(opts)
+
+      assert result.status == :ok
+      assert result.detail =~ "skipped — place search runs on your Mac"
       refute_received {:place_probe_request, _query}
     end
   end
@@ -2657,6 +2783,42 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
 
       assert result.status == :fail
       assert result.detail =~ "listener"
+    end
+
+    # The device role starts no ACP listener by design (`Home.Role`), so its
+    # absence there is the role at work: nobody is sent to the daemon's logs
+    # (EC2 test finding 1).
+    test "passes in the device role, which starts no listener, and says so" do
+      Application.put_env(:fermix_channels, :acp, enabled: true)
+      channel = %{"name" => "acp", "enabled" => true, "process_alive" => false}
+
+      client = fn "health" ->
+        {:ok, %{"status" => "ok", "health" => %{"role" => "device", "channels" => [channel]}}}
+      end
+
+      result = Checks.acp(client: client)
+
+      assert result == %{
+               name: "acp surface",
+               status: :ok,
+               detail: "this engine runs in the device role, which starts no ACP listener"
+             }
+    end
+
+    test "a record the store refuses still fails the row in the device role", %{home: home} do
+      Application.put_env(:fermix_channels, :acp, enabled: true)
+      path = connect_identity(home)
+      File.chmod!(path, 0o644)
+
+      client = fn "health" ->
+        {:ok, %{"status" => "ok", "health" => %{"role" => "device", "channels" => []}}}
+      end
+
+      result = Checks.acp(client: client)
+
+      assert result.status == :fail
+      assert result.detail =~ "device role"
+      assert result.detail =~ "chmod 600"
     end
 
     test "warns with the socket path when the daemon is not running" do
@@ -3721,15 +3883,46 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
   # `Harness.ArtifactsTest`, where a dead supervisor name reproduces the CLI's
   # world for real.
   describe "computer_history/1" do
-    test "non-macOS host reports macOS-only" do
-      result = Checks.computer_history(macos?: false)
+    test "a system with no recorder says so" do
+      result = Checks.computer_history(recorder?: false)
       assert result.name == "computer history"
       assert result.status == :ok
-      assert result.detail =~ "macOS only"
+
+      assert result.detail ==
+               "no recorder on this computer: a Mac or a Linux computer records, and an " <>
+                 "Always On server records none"
+    end
+
+    # M97 stage 4, D3: compux never switches an application's accessibility on, so
+    # on Linux the row says which applications that leaves out, and where they
+    # are named.
+    test "on Linux an enabled recorder says which applications record only with accessibility on" do
+      result =
+        Checks.computer_history(
+          recorder?: true,
+          system: :linux,
+          config: [enabled: true, apps: ["Firefox", "Code"], summarizer: :local],
+          routes: {:ok, [loopback_route()]}
+        )
+
+      assert result.detail =~ "2 app(s) allowlisted"
+
+      assert result.detail =~
+               "On Linux an application records only while it publishes its controls on the " <>
+                 "accessibility bus: Chromium, Electron and Qt applications do so only while " <>
+                 "accessibility is on in your session; /history status names the allowlisted " <>
+                 "applications that recorded nothing."
+
+      refute Checks.computer_history(
+               recorder?: true,
+               system: :macos,
+               config: [enabled: true, apps: ["com.apple.Safari"], summarizer: :local],
+               routes: {:ok, [loopback_route()]}
+             ).detail =~ "On Linux"
     end
 
     test "macOS + disabled config reports off" do
-      result = Checks.computer_history(macos?: true, config: [enabled: false])
+      result = Checks.computer_history(recorder?: true, config: [enabled: false])
       assert result.status == :ok
       assert result.detail =~ "off"
     end
@@ -3739,7 +3932,7 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
       # without it this case would read whatever provider config ran before it.
       result =
         Checks.computer_history(
-          macos?: true,
+          recorder?: true,
           config: [enabled: true, apps: ["com.apple.Safari"], summarizer: :local],
           routes: {:ok, [loopback_route()]}
         )
@@ -3755,7 +3948,7 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
     test "macOS + Tier-3 summarizer flags the remote egress" do
       result =
         Checks.computer_history(
-          macos?: true,
+          recorder?: true,
           config: [enabled: true, summarizer: :anthropic],
           routes: {:ok, [route(:anthropic)]}
         )
@@ -3768,7 +3961,7 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
     test "an enabled rail names the pinned chain and the failover it turns off" do
       result =
         Checks.computer_history(
-          macos?: true,
+          recorder?: true,
           config: [enabled: true, summarizer: :local, remote_summaries: [:openai]],
           routes: {:ok, [route(:openai), route(:anthropic)]}
         )
@@ -3781,7 +3974,7 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
     test "an ungranted primary is a WARN naming the grant that would surface it" do
       result =
         Checks.computer_history(
-          macos?: true,
+          recorder?: true,
           config: [enabled: true, summarizer: :local],
           routes: {:ok, [route(:anthropic)]}
         )
@@ -3794,7 +3987,7 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
     test "a chain that could not be built is reported, never raised" do
       result =
         Checks.computer_history(
-          macos?: true,
+          recorder?: true,
           config: [enabled: true, summarizer: :local],
           routes: {:error, :multiple_primary}
         )
@@ -3897,7 +4090,7 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
         )
 
       assert result.status == :ok
-      assert result.detail =~ "codex codex 1.0.0 (authenticated)"
+      assert result.detail =~ "codex codex 1.0.0 (sign-in found)"
       assert result.detail =~ "1 active, 0 pending delivery, 0 dead-letter"
       assert result.detail =~ "artifacts within quota"
     end
@@ -3956,7 +4149,7 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
         )
 
       assert result.status == :warn
-      assert result.detail =~ "codex codex 1.0.0 (not authenticated)"
+      assert result.detail =~ "codex codex 1.0.0 (not signed in)"
     end
 
     test "dead-letter deliveries warn with the count surfaced" do
@@ -4049,6 +4242,50 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
       assert result.detail =~ "low free space"
     end
 
+    # M98 D10: a found sign-in file is not proof the vendor accepts it, so the
+    # row says what was found, and an agent whose run failed to sign in warns.
+    test "an agent whose last run failed to sign in reads signed out and warns" do
+      registry = registry_with([FermixCore.Tools.CodexRun, FermixCore.Tools.ClaudeCodeRun])
+
+      result =
+        Checks.harness(
+          harness_enabled: true,
+          detections: %{
+            "codex" => detection("codex", true, "codex 1.0.0", :authenticated),
+            "claude" => detection("claude", true, "claude 2.0.0", :unverified)
+          },
+          sign_in_marks: {:ok, %{"codex" => %{run_id: "hr_0a1b2c3d4e5f"}}},
+          registry: registry,
+          counts: %{active: 0, pending: 0, dead_letter: 0},
+          quota: :ok
+        )
+
+      assert result.status == :warn
+      assert result.detail =~ "codex codex 1.0.0 (signed out (a run failed to sign in))"
+      assert result.detail =~ "claude claude 2.0.0 (sign-in not verified)"
+    end
+
+    test "marks that cannot be read are said, and warn" do
+      registry = registry_with([FermixCore.Tools.CodexRun])
+
+      result =
+        Checks.harness(
+          harness_enabled: true,
+          detections: %{
+            "codex" => detection("codex", true, "codex 1.0.0", :authenticated),
+            "claude" => detection("claude", false, nil, :absent)
+          },
+          sign_in_marks: {:error, :enotdir},
+          registry: registry,
+          counts: %{active: 0, pending: 0, dead_letter: 0},
+          quota: :ok
+        )
+
+      assert result.status == :warn
+      assert result.detail =~ "codex codex 1.0.0 (sign-in found)"
+      assert result.detail =~ "sign-in marks unreadable (:enotdir)"
+    end
+
     test "unavailable run counts skip honestly instead of crashing" do
       registry = registry_with([FermixCore.Tools.CodexRun])
 
@@ -4106,6 +4343,7 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
   defp place_probe_opts(id) do
     [
       host: @linux,
+      computers_opts: [records: %{}],
       req_options: [plug: {Req.Test, id}],
       net_resolver: fn "api.search.brave.com" -> {:ok, [{93, 184, 216, 34}]} end
     ]

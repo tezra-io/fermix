@@ -341,6 +341,11 @@ _ANTHROPIC_RATES: dict[str, Rate] = {
     # but Opus 5.5 and Sonnet 5.5 (0.05x, above) at the standard 0.1x. Do not
     # "fix" it to 1.00.
     "claude-fable-5-1": Rate(10.00, 50.00, 0.25, 12.50),
+    # Fable 5.1's successor at a lower price: $8 / $40, cache read $0.20 (0.025x
+    # input, Fable 5.1's tier), 5-minute write $10 (1.25x). The vendor's model
+    # table and OpenRouter's listing of anthropic/claude-fable-5.2 (read
+    # 2026-11-13) agree on every leg.
+    "claude-fable-5-2": Rate(8.00, 40.00, 0.20, 10.00),
     "claude-fable-5": Rate(10.00, 50.00, 1.00, 12.50),
     "claude-haiku-4-5": Rate(1.00, 5.00, 0.10, 1.25),
     # The tier for prompts up to 100,000 tokens, read first-party 2026-10-10;
@@ -401,6 +406,7 @@ _OPENROUTER_RATES: dict[str, Rate] = {
     "moonshotai/kimi-k3": Rate(2.55, 12.75, 0.256),
     "anthropic/claude-sonnet-4.6": Rate(3.00, 15.00, 0.30, 3.75),
     "anthropic/claude-sonnet-5.5": Rate(2.00, 10.00, 0.10, 2.50),
+    "anthropic/claude-fable-5.2": Rate(8.00, 40.00, 0.20, 10.00),
     "anthropic/claude-fable-5.1": Rate(10.00, 50.00, 0.25, 12.50),
     "anthropic/claude-fable-5": Rate(10.00, 50.00, 1.00, 12.50),
     "anthropic/claude-opus-5.5": Rate(4.00, 20.00, 0.20, 5.00),

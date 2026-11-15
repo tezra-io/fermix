@@ -6,9 +6,13 @@ defmodule FermixChannels.Channels.IMessage.PortTest do
   transport transitions.
 
   The fake is a POSIX `sh` script written into a per-test home: it answers by
-  method, records each spawn in `<home>/spawns`, exits with `<home>/exit_code`
-  when that file exists and answers `initialize` with `<home>/protocol_version`.
-  It uses only shell builtins, so nothing on PATH is involved.
+  method, records each spawn in `<home>/spawns`, reads `initialize` and exits
+  with `<home>/exit_code` when that file exists, and answers `initialize` with
+  `<home>/protocol_version`.
+  With `<home>/close_stdin` it closes its input before that answer and stays up
+  (`/bin/sleep`); with `<home>/mute` it never answers, writes `<home>/muted`
+  and stays up. It uses shell builtins and absolute paths only, so nothing on
+  PATH is involved.
   """
   use ExUnit.Case, async: false
 
@@ -21,6 +25,7 @@ defmodule FermixChannels.Channels.IMessage.PortTest do
   echo spawn >> "$home/spawns"
   if [ -f "$home/exit_code" ]; then
     read code < "$home/exit_code"
+    IFS= read -r line
     exit "$code"
   fi
   version=1
@@ -34,7 +39,10 @@ defmodule FermixChannels.Channels.IMessage.PortTest do
     method=${method%%\\"*}
     case "$method" in
       initialize)
-        printf '{"id":%s,"result":{"protocol_version":%s,"helper_version":"0.0.0-test","macos_version":"27.0","bundle_id":"io.tezra.fermix.messages","db_generation":{"inode":7,"birth_time":"2026-09-01T00:00:00Z"}}}\\n' "$id" "$version" ;;
+        if [ -f "$home/mute" ]; then : > "$home/muted"; /bin/sleep 30; exit 0; fi
+        if [ -f "$home/close_stdin" ]; then exec 0<&-; fi
+        printf '{"id":%s,"result":{"protocol_version":%s,"helper_version":"0.0.0-test","macos_version":"27.0","bundle_id":"io.tezra.fermix.messages","db_generation":{"inode":7,"birth_time":"2026-09-01T00:00:00Z"}}}\\n' "$id" "$version"
+        if [ -f "$home/close_stdin" ]; then /bin/sleep 30; exit 0; fi ;;
       probe)
         printf '{"id":%s,"result":{"db":"readable","echo":"%s"}}\\n' "$id" "$home" ;;
       watch.subscribe)
@@ -117,7 +125,7 @@ defmodule FermixChannels.Channels.IMessage.PortTest do
       {:ok, port} = start_port(ctx)
 
       assert {:ok, %{"db" => "readable", "echo" => home}} =
-               HelperPort.call(port, "probe", %{}, 2_000)
+               HelperPort.call(port, "probe", %{}, 2_000, %{})
 
       assert home == ctx.home
       assert HelperPort.home(port) == {:ok, ctx.home}
@@ -140,7 +148,7 @@ defmodule FermixChannels.Channels.IMessage.PortTest do
                HelperPort.attach(port, self())
 
       assert {:ok, %{"started_at_rowid" => 10}} =
-               HelperPort.call(port, "watch.subscribe", %{"since_rowid" => nil}, 2_000)
+               HelperPort.call(port, "watch.subscribe", %{"since_rowid" => nil}, 2_000, %{})
 
       assert_receive {:imessage_event, "watch.overflow", %{"dropped" => 3}}
     end
@@ -151,24 +159,24 @@ defmodule FermixChannels.Channels.IMessage.PortTest do
       {:ok, port} = start_port(ctx)
 
       assert {:error, {:request_timeout, _message, %{"method" => "policy.get"}}} =
-               HelperPort.call(port, "policy.get", %{}, 50)
+               HelperPort.call(port, "policy.get", %{}, 50, %{})
 
-      assert {:ok, _probe} = HelperPort.call(port, "probe", %{}, 2_000)
+      assert {:ok, _probe} = HelperPort.call(port, "probe", %{}, 2_000, %{})
     end
 
     test "the helper's busy is surfaced as its closed kind", ctx do
       {:ok, port} = start_port(ctx)
 
       assert {:error, {:busy, "more than 32 outstanding requests", %{}}} =
-               HelperPort.call(port, "messages.after", %{}, 2_000)
+               HelperPort.call(port, "messages.after", %{}, 2_000, %{})
     end
 
     test "more outstanding requests than the cap are refused as busy without being sent", ctx do
       {:ok, port} = start_port(ctx, max_outstanding: 1)
-      task = Task.async(fn -> HelperPort.call(port, "policy.get", %{}, 1_000) end)
+      task = Task.async(fn -> HelperPort.call(port, "policy.get", %{}, 1_000, %{}) end)
 
       assert_eventually(fn -> HelperPort.status(port).outstanding == 1 end)
-      assert {:error, {:busy, _message, %{}}} = HelperPort.call(port, "probe", %{}, 1_000)
+      assert {:error, {:busy, _message, %{}}} = HelperPort.call(port, "probe", %{}, 1_000, %{})
       assert {:error, {:request_timeout, _, _}} = Task.await(task)
     end
 
@@ -176,19 +184,19 @@ defmodule FermixChannels.Channels.IMessage.PortTest do
       {:ok, port} = start_port(ctx)
 
       assert {:error, {:protocol_error, _message, %{"kind" => "teleported"}}} =
-               HelperPort.call(port, "policy.set", %{}, 2_000)
+               HelperPort.call(port, "policy.set", %{}, 2_000, %{})
     end
 
     test "an unknown method never reaches the helper", ctx do
       {:ok, port} = start_port(ctx)
 
       assert {:error, {:protocol_error, _message, %{"method" => "messages.delete"}}} =
-               HelperPort.call(port, "messages.delete", %{}, 2_000)
+               HelperPort.call(port, "messages.delete", %{}, 2_000, %{})
     end
 
     test "a port that is not running answers helper_unavailable" do
       assert {:error, {:helper_unavailable, _message, %{}}} =
-               HelperPort.call(:imessage_port_not_running, "probe", %{}, 100)
+               HelperPort.call(:imessage_port_not_running, "probe", %{}, 100, %{})
     end
   end
 
@@ -206,7 +214,7 @@ defmodule FermixChannels.Channels.IMessage.PortTest do
       assert spawns(ctx.home) == 1
 
       assert {:error, {:helper_unavailable, _message, %{"class" => "helper_exit 64"}}} =
-               HelperPort.call(port, "probe", %{}, 100)
+               HelperPort.call(port, "probe", %{}, 100, %{})
     end
 
     test "every disclaim exit class (70-72) is never retried", ctx do
@@ -251,11 +259,11 @@ defmodule FermixChannels.Channels.IMessage.PortTest do
       {:ok, _handshake} = HelperPort.attach(port, self())
 
       assert {:error, {:helper_unavailable, _message, %{"class" => "helper_exit 75"}}} =
-               HelperPort.call(port, "grant", %{"service" => "automation"}, 2_000)
+               HelperPort.call(port, "grant", %{"service" => "automation"}, 2_000, %{})
 
       assert_receive {:imessage_helper, :down, {:helper_exit, 75}}
       assert_receive {:imessage_helper, :up, _handshake}
-      assert {:ok, _probe} = HelperPort.call(port, "probe", %{}, 2_000)
+      assert {:ok, _probe} = HelperPort.call(port, "probe", %{}, 2_000, %{})
     end
 
     test "a missing executable backs off as helper_missing", ctx do
@@ -277,6 +285,94 @@ defmodule FermixChannels.Channels.IMessage.PortTest do
 
   defp assert_eventually(fun) do
     assert_eventually(fun, System.monotonic_time(:millisecond) + @arrival_ms)
+  end
+
+  # A helper whose input is closed when the port writes `shutdown` (it has
+  # exited, or stopped reading) closes the port with an EXIT and no exit
+  # status, which ends the stop's wait as an exit status does. The fake closes
+  # its input before it answers `initialize` and stays up, so only the closed
+  # pipe can end the wait; the wait is an hour, so a stop that sat it out
+  # would outlast the bound.
+  test "a stop whose shutdown meets a closed pipe returns at once", ctx do
+    File.write!(Path.join(ctx.home, "close_stdin"), "")
+    {:ok, port} = start_port(ctx, shutdown_wait_ms: 3_600_000)
+
+    assert :ok = GenServer.stop(port, :normal, @arrival_ms)
+  end
+
+  # A helper that exits as it starts can close its input before the Port
+  # writes `initialize`: the write fails with EPIPE, and the port exits with
+  # that reason and no exit status. The write follows the spawn by
+  # microseconds, so no fake can order that race; the test delivers the same
+  # EXIT by hand, once the fake has read `initialize` and gone quiet (a port
+  # killed while it is still being spawned never reports its exit). The
+  # handshake's deadline and the backoff are an hour, so only the EXIT can end
+  # the start, and nothing respawns while the test reads the status.
+  test "a port that exits during the handshake fails it at once, in a class of its own", ctx do
+    attach_transport_events()
+    File.write!(Path.join(ctx.home, "mute"), "")
+    exit_port_once_muted(ctx, :epipe)
+
+    opts = [
+      executable: ctx.executable,
+      home: ctx.home,
+      init_timeout_ms: 3_600_000,
+      backoff_initial_ms: 3_600_000,
+      backoff_max_ms: 3_600_000
+    ]
+
+    assert {:ok, port} = GenServer.start_link(HelperPort, opts, timeout: @arrival_ms)
+
+    assert_receive {:transport, ^port, :degraded, %{consecutive_failures: 1},
+                    %{error_class: :helper_exited_in_handshake}}
+
+    assert %{status: :backoff, class: :helper_exited_in_handshake} = HelperPort.status(port)
+  end
+
+  # A request written to a helper whose input is closed fails with EPIPE, and
+  # the port exits with that reason and no exit status. The helper can no
+  # longer be reached, so that EXIT is its death: the request fails, and the
+  # helper restarts under the usual rules. The fake closes its input before it
+  # answers `initialize` and stays up; the next spawn, without that knob,
+  # answers.
+  test "a port that exits under a request write is the helper's death, and it restarts", ctx do
+    close_stdin = Path.join(ctx.home, "close_stdin")
+    File.write!(close_stdin, "")
+    {:ok, port} = start_port(ctx)
+    {:ok, _handshake} = HelperPort.attach(port, self())
+    SafeRm.rm!(close_stdin)
+
+    assert {:error, {:helper_unavailable, _message, %{"class" => "helper_exited"}}} =
+             HelperPort.call(port, "probe", %{}, @arrival_ms, %{})
+
+    assert_receive {:imessage_helper, :down, :helper_exited}
+    assert_receive {:imessage_helper, :up, _handshake}, @arrival_ms
+    assert {:ok, _probe} = HelperPort.call(port, "probe", %{}, 2_000, %{})
+  end
+
+  # Sends `reason` as an exit signal to the helper's port once the fake has
+  # written `<home>/muted`. The port is found by its executable's path, which
+  # is this test's own.
+  defp exit_port_once_muted(ctx, reason) do
+    muted = Path.join(ctx.home, "muted")
+    name = String.to_charlist(ctx.executable)
+    deadline = System.monotonic_time(:millisecond) + @arrival_ms
+    spawn_link(fn -> exit_port(muted, name, reason, deadline) end)
+  end
+
+  defp exit_port(muted, name, reason, deadline) do
+    cond do
+      File.exists?(muted) ->
+        port = Enum.find(Port.list(), &(Port.info(&1, :name) == {:name, name}))
+        Process.exit(port, reason)
+
+      System.monotonic_time(:millisecond) >= deadline ->
+        flunk("the fake helper never read initialize")
+
+      true ->
+        Process.sleep(5)
+        exit_port(muted, name, reason, deadline)
+    end
   end
 
   defp assert_eventually(fun, deadline) do

@@ -34,10 +34,11 @@ defmodule FermixCore.Setup.EngineOwner do
           written_at: String.t()
         }
 
-  @doc "The marker path inside the configured home."
+  @doc "The marker path inside the configured home, or inside `opts`' `:home`."
   @spec path(keyword()) :: String.t()
   def path(opts \\ []) when is_list(opts) do
-    Keyword.get(opts, :path) || Path.join(ConfigStore.fermix_home(), @file_name)
+    Keyword.get(opts, :path) ||
+      Path.join(Keyword.get_lazy(opts, :home, &ConfigStore.fermix_home/0), @file_name)
   end
 
   @doc """

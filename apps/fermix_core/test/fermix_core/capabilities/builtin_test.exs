@@ -201,6 +201,9 @@ defmodule FermixCore.Capabilities.BuiltinTest do
                "send_attachment",
                # `send_to_channel` writes to the owner's own inboxes (M56 §4.7).
                "send_to_channel",
+               # Every day and stop of a trip is the owner's own plan (M89 §14).
+               "trip_edit",
+               "trip_read",
                # `view_image` returns the owner's own image files, exactly as
                # `file_read` returns their text (M46 §5.1).
                "view_image",

@@ -2,17 +2,20 @@ defmodule FermixTestSupport.HomeSummaryGoldens do
   @moduledoc """
   The `home.status` goldens beyond the first (`success.jsonl`), one for each
   family of the summary's states (M75 lean v1 §7): the computer that sets
-  Always On up while its server installs and once it is ready, the server
-  before and after its move, and a linked desktop when all is well (Move back
-  among its actions) and when its server stopped answering (Restore here
-  beside it, from the copies the desktop keeps). Each is the record
+  Always On up while its server connects and once it is ready, the server
+  before and after its move, a linked desktop when all is well (Move back
+  among its steps, its backup settings, and the Tailscale Funnel mounts of
+  what its server serves), when its server's last backup failed (the
+  `backup_failed` problem, the try's own words its note), and when its
+  server stopped answering (Restore here beside it, from the copies the
+  desktop keeps); the move while it sends the home (its steps, route and
+  transfer), and a move back the server holds. Each is the record
   `Management.Home.picture/1`
   builds from invented facts, with the summary `HomeSummary.summary/1`
   answers for the same facts, so a golden can only say what the engine says.
   """
 
   alias FermixCore.Home.MoveReadiness
-  alias FermixCore.Home.Provision.Hetzner
   alias FermixCore.Home.Snapshot
   alias FermixCore.Home.Snapshot.S3, as: SnapshotS3
   alias FermixCore.Home.Snapshot.Status, as: SnapshotStatus
@@ -22,6 +25,16 @@ defmodule FermixTestSupport.HomeSummaryGoldens do
   @now ~U[2031-05-04 12:00:00Z]
   @cand "cand-5e2a9c1f7b3d4086"
   @server_name "fermix-general-a3f9"
+  # The settings of the Mac that sets Always On up (meetings on), of the
+  # server the home moved to (meetings and WhatsApp on) and of the linked
+  # Mac's own machine file (StackChan on): what Always On does not do yet is
+  # read from them (`MoveReadiness.not_yet/2`), as `HomeSummary.gather/5`
+  # reads it, this Mac recording its history.
+  @ready_settings {:ok, "[fermix_core.meetings]\nenabled = true\n"}
+  @server_settings {:ok,
+                    "[fermix_core.meetings]\nenabled = true\n\n" <>
+                      "[fermix_channels.whatsapp]\nenabled = true\n"}
+  @desktop_settings {:ok, "[fermix_channels.accessories]\nenabled = true\n"}
 
   @doc "Each golden's name and the `home.status` result it holds."
   @spec rows() :: [{String.t(), map()}]
@@ -33,20 +46,178 @@ defmodule FermixTestSupport.HomeSummaryGoldens do
       {"home_status_candidate", candidate()},
       {"home_status_server", server()},
       {"home_status_on", on()},
-      {"home_status_problem", problem()}
+      {"home_status_backup_failed", backup_failed()},
+      {"home_status_problem", problem()},
+      {"home_status_server_asking", server_asking()},
+      {"home_status_server_joined", server_joined()},
+      {"home_status_joining", joining()},
+      {"home_status_moving", moving()},
+      {"home_status_return_ready", return_ready()}
     ]
   end
 
+  # The move from this Mac to its server, sending the home: its steps, its
+  # route, what it is doing, and the bytes it handed on so far, counted in
+  # whole twentieths (Always On pane §3.13).
+  defp moving do
+    move = %{
+      "phase" => "streaming",
+      "candidate" => @server_name,
+      "sentence" => "This home is being sent to #{@server_name}."
+    }
+
+    sent = %{move_id: "mv-0001f2e3d4c5b6a7", step: :send, bytes: 734_003_200, size: 1_503_238_554}
+
+    record(:device, %{epoch: 4, snapshots: retired_snapshots(:device)}, %{
+      move: move,
+      move_progress: sent
+    })
+  end
+
+  # A move back held by the server: Fermix has not moved yet, Move now moves
+  # it, and until when this Mac waits is the note (Always On pane §3.11, D16).
+  defp return_ready do
+    moved = %{to: @server_name, moved_at: ~U[2031-05-01 09:00:00Z], epoch: 4}
+
+    returning = %{
+      "v" => 1,
+      "phase" => "enrolled",
+      "kind" => "return",
+      "primary" => %{"name" => @server_name},
+      "candidate_id" => "cand-7a3e1c9b5d2f4086",
+      "listen_until" => "2031-05-04T12:30:00Z"
+    }
+
+    record(:device, %{epoch: 4, moved: moved, snapshots: retired_snapshots(:device)}, %{
+      link: link(primary: primary(:connected, nil)),
+      linked: true,
+      primary_home: server(),
+      returning: returning,
+      return: %{from: @server_name, started_at: ~U[2031-05-04 11:30:00Z], primary_epoch: 5},
+      copies_bytes: 3 * 48_211
+    })
+  end
+
+  @doc """
+  The `ready` goldens' last review of the held server and the review's
+  items this home's settings decide. The home has meetings on, so the review
+  warns that they stop, as the settings do; it also found plugins the server
+  has no build for, which only the review can say. Move now's confirm says
+  both, since the screen shows neither (the Always On pane's D3).
+  """
+  @spec ready_review() :: {map(), [MoveReadiness.item()]}
+  def ready_review do
+    items =
+      MoveReadiness.summary_items(@ready_settings, true, @server_name, restarts_itself: true)
+
+    stays_here = Enum.find(items, &(&1.id == "stays_here"))
+
+    review = %{
+      candidate_id: @cand,
+      reviewed_at: ~U[2031-05-04 11:30:00Z],
+      ready: true,
+      items: [
+        %{"id" => "stays_here", "status" => "warn", "sentence" => stays_here.sentence},
+        %{
+          "id" => "plugins",
+          "status" => "warn",
+          "sentence" =>
+            "These plugins have no build for #{@server_name}, so they stop working after " <>
+              "the move: invented-notes."
+        }
+      ]
+    }
+
+    {review, items}
+  end
+
+  # M97 §3.1, §7.5: a computer asks to join on the code Add a computer
+  # opened. The server's screen names it and its system and asks for the six
+  # digits it shows, which it never shows itself, and its owner adds it or
+  # not.
+  defp server_asking do
+    joiner = %{name: "loft-linux", platform: "linux"}
+
+    server_with_window(
+      Map.merge(window(:awaiting_approval, nil, ~U[2031-05-04 12:20:00Z]), %{
+        purpose: :computer,
+        joiner: joiner,
+        joined: nil
+      }),
+      %{
+        "state" => "awaiting_approval",
+        "expires_at" => "2031-05-04T12:20:00Z",
+        "candidate_id" => nil,
+        "purpose" => "computer",
+        "joiner" => %{"name" => "loft-linux", "platform" => "linux"},
+        "joined" => nil
+      }
+    )
+  end
+
+  # The owner added it: the window names the computer that joined, and the
+  # owner's other surfaces are told once.
+  defp server_joined do
+    joined = %{device_id: "7e1f0c2a-3b4d-4e5f-8a6b-7c8d9e0f1a2b", name: "loft-linux"}
+
+    server_with_window(
+      Map.merge(window(:approved, nil, ~U[2031-05-04 12:20:00Z]), %{
+        purpose: :computer,
+        joiner: nil,
+        joined: joined
+      }),
+      %{
+        "state" => "approved",
+        "expires_at" => "2031-05-04T12:20:00Z",
+        "candidate_id" => nil,
+        "purpose" => "computer",
+        "joiner" => nil,
+        "joined" => %{"device_id" => joined.device_id, "name" => joined.name}
+      }
+    )
+  end
+
+  defp server_with_window(window, view) do
+    desktop = %{device_id: "6f1e2d3c-4b5a-4968-8778-695a4b3c2d1e", name: "studio-mac"}
+
+    record(
+      :primary,
+      %{epoch: 5, snapshots: server_snapshots(), disk: disk(0.42), update_ceiling: "1.2.3"},
+      %{
+        link:
+          link(
+            desktops: [Map.merge(desktop, %{connected: true, since: ~U[2031-05-04 09:00:00Z]})],
+            enrollment: window
+          ),
+        enrollment: view
+      }
+    )
+  end
+
+  # The computer that joins, once the server answered: it shows the six
+  # digits and waits for its owner to type them there.
+  defp joining do
+    join = %{
+      "phase" => "awaiting_approval",
+      "server" => @server_name,
+      "sas" => "482913",
+      "sentence" => "Waiting for you to add this computer on #{@server_name}."
+    }
+
+    record(:device, %{epoch: nil, snapshots: retired_snapshots(:device), join: join}, %{
+      join: join
+    })
+  end
+
+  # The owner's server used its code and connects.
   defp creating do
-    window = window(:open, nil)
+    window = window(:used, nil, ~U[2031-05-04 12:25:00Z])
 
     record(:primary, %{epoch: 4, snapshots: s3_snapshots(), disk: disk(0.31)}, %{
       link: link(enrollment: window),
-      provision: ledger(),
       enrollment: %{
-        "state" => "open",
-        "expires_at" => "2031-05-05T11:00:00Z",
-        "kind" => "provisioned",
+        "state" => "used",
+        "expires_at" => "2031-05-04T12:25:00Z",
         "candidate_id" => nil
       }
     })
@@ -55,31 +226,17 @@ defmodule FermixTestSupport.HomeSummaryGoldens do
   # Ready with the recovery key kept, and ready for the first move, which
   # sets it (Move now's needs say which).
   defp ready(snapshots) do
-    review = %{
-      candidate_id: @cand,
-      reviewed_at: ~U[2031-05-04 11:30:00Z],
-      ready: true,
-      items: [
-        %{
-          "id" => "stays_here",
-          "status" => "warn",
-          "sentence" =>
-            "iMessage, voice calls and meetings stop after the move: neither this Mac nor " <>
-              "#{@server_name} runs them."
-        }
-      ]
-    }
+    {review, items} = ready_review()
 
     record(:primary, %{epoch: 4, snapshots: snapshots, disk: disk(0.31)}, %{
-      link: link(enrollment: window(:used, @cand)),
-      provision: ledger(),
+      link: link(enrollment: window(:used, @cand, ~U[2031-05-04 11:15:00Z])),
       candidates: [candidate_view()],
       review: review,
-      move_items: MoveReadiness.summary_items({:ok, ""}, true, @server_name, restarts_itself: true),
+      move_items: items,
+      not_yet: MoveReadiness.not_yet(@ready_settings, true),
       enrollment: %{
         "state" => "used",
-        "expires_at" => "2031-05-05T11:00:00Z",
-        "kind" => "provisioned",
+        "expires_at" => "2031-05-04T11:15:00Z",
         "candidate_id" => @cand
       }
     })
@@ -95,23 +252,37 @@ defmodule FermixTestSupport.HomeSummaryGoldens do
     record(:candidate, %{epoch: nil, snapshots: retired_snapshots(:candidate)}, %{move: move})
   end
 
-  defp server do
+  defp server(snapshots \\ server_snapshots()) do
     desktop = %{device_id: "6f1e2d3c-4b5a-4968-8778-695a4b3c2d1e", name: "studio-mac"}
 
-    # The server installs the version its desktop runs, at most.
+    # The server installs the version its desktop runs, at most, and serves
+    # WhatsApp and one webhook source, whose Funnel mounts its desktop prints.
     record(
       :primary,
-      %{epoch: 5, snapshots: server_snapshots(), disk: disk(0.42), update_ceiling: "1.2.3"},
+      %{
+        epoch: 5,
+        snapshots: snapshots,
+        disk: disk(0.42),
+        update_ceiling: "1.2.3",
+        webhooks: [
+          %{"kind" => "whatsapp", "ref" => nil, "port" => 4030},
+          %{"kind" => "cue", "ref" => "gh-hooks", "port" => 4032}
+        ]
+      },
       %{
         link:
           link(
             desktops: [Map.merge(desktop, %{connected: true, since: ~U[2031-05-04 09:00:00Z]})]
-          )
+          ),
+        not_yet: MoveReadiness.not_yet(@server_settings, false)
       }
     )
   end
 
   defp on, do: desktop(primary(:connected, nil), server())
+
+  # The server's backup at 11:00 failed after the one stored at 10:00.
+  defp backup_failed, do: desktop(primary(:connected, nil), server(failed_snapshots()))
 
   defp problem, do: desktop(primary(:unreachable, 11 * 60_000), nil)
 
@@ -121,12 +292,12 @@ defmodule FermixTestSupport.HomeSummaryGoldens do
     record(:device, %{epoch: 4, moved: moved, snapshots: retired_snapshots(:device)}, %{
       link: link(primary: link_primary),
       linked: true,
-      provision: ledger(),
       primary_home: primary_home,
       primary_missing:
         if(primary_home, do: nil, else: "The server #{@server_name} is unreachable."),
       copies_bytes: 3 * 48_211,
-      copies: copies()
+      copies: copies(),
+      not_yet: MoveReadiness.not_yet(@desktop_settings, true)
     })
   end
 
@@ -149,7 +320,8 @@ defmodule FermixTestSupport.HomeSummaryGoldens do
           primary_missing: Map.get(extra, :primary_missing),
           secrets_missing: [],
           disk: nil,
-          version: "1.2.3"
+          version: "1.2.3",
+          webhooks: []
         },
         own
       )
@@ -164,9 +336,6 @@ defmodule FermixTestSupport.HomeSummaryGoldens do
         move: facts.move,
         link: link,
         candidates: facts.candidates,
-        provider: Hetzner,
-        providers: [Hetzner],
-        provision: Map.get(extra, :provision, none()),
         review: Map.get(extra, :review),
         move_items: Map.get(extra, :move_items, []),
         snapshots: facts.snapshots,
@@ -175,10 +344,20 @@ defmodule FermixTestSupport.HomeSummaryGoldens do
         primary_too_old: false,
         copies_bytes: Map.get(extra, :copies_bytes),
         stays_here: [],
+        return_costs: [],
         zone: "Europe/Berlin",
-        return: nil,
-        returning: nil,
-        copies: Map.get(extra, :copies, [])
+        return: Map.get(extra, :return),
+        returning: Map.get(extra, :returning),
+        move_progress: Map.get(extra, :move_progress),
+        restoring: false,
+        join: Map.get(extra, :join),
+        copies: Map.get(extra, :copies, []),
+        lapsed: nil,
+        moved_back: false,
+        primary_behind: false,
+        # The app engine, which starts again by itself after a move back.
+        restarts_itself: true,
+        not_yet: Map.get(extra, :not_yet, [])
       })
 
     Home.picture(Map.put(facts, :summary, summary))
@@ -196,13 +375,11 @@ defmodule FermixTestSupport.HomeSummaryGoldens do
   defp link(overrides),
     do: Map.merge(%{primary: nil, desktops: [], enrollment: nil}, Map.new(overrides))
 
-  defp window(state, candidate_id) do
+  defp window(state, candidate_id, expires_at) do
     %{
       state: state,
-      expires_at: ~U[2031-05-05 11:00:00Z],
-      kind: :provisioned,
-      candidate_id: candidate_id,
-      awake_ms: 9 * 60_000
+      expires_at: expires_at,
+      candidate_id: candidate_id
     }
   end
 
@@ -219,44 +396,8 @@ defmodule FermixTestSupport.HomeSummaryGoldens do
           else: "The server #{@server_name} is unreachable: it did not answer."
         ),
       down_ms: down_ms,
-      down_at: if(status == :connected, do: nil, else: ~U[2031-05-04 11:49:00Z])
-    }
-  end
-
-  defp none,
-    do: %{
-      state: :none,
-      token: :none,
-      server: nil,
-      failure: nil,
-      sentence: nil,
-      replace: nil,
-      action: nil,
-      checked_at: nil
-    }
-
-  defp ledger do
-    %{
-      state: :created,
-      token: :accepted,
-      failure: nil,
-      sentence: nil,
-      replace: nil,
-      action: nil,
-      checked_at: ~U[2031-05-04 11:59:00Z],
-      server: %{
-        name: @server_name,
-        id: "61839204",
-        status: :created,
-        type: "cpx22",
-        location: "fsn1",
-        ipv4: "203.0.113.7",
-        power: "running",
-        created_at: ~U[2031-05-04 10:58:00Z],
-        seen_at: ~U[2031-05-04 11:50:00Z],
-        total_monthly: "8.33",
-        currency: "EUR"
-      }
+      down_at: if(status == :connected, do: nil, else: ~U[2031-05-04 11:49:00Z]),
+      path: if(status == :connected, do: :direct)
     }
   end
 
@@ -281,6 +422,27 @@ defmodule FermixTestSupport.HomeSummaryGoldens do
   defp s3_snapshots, do: snapshots_view(~U[2031-05-04 09:30:00Z])
   defp server_snapshots, do: snapshots_view(~U[2031-05-04 10:00:00Z])
 
+  defp failed_snapshots do
+    stored = snapshots_status(~U[2031-05-04 10:00:00Z])
+
+    failed = %{
+      at: ~U[2031-05-04 11:00:00Z],
+      result: :failed,
+      name: "20310504T110000Z-e4.fxsnap",
+      epoch: 4,
+      size: 48_302,
+      sha256: String.duplicate("4e", 32),
+      location: nil,
+      key_id: "08c15ca36dd935c4",
+      error: "S3 could not be reached: the connection timed out."
+    }
+
+    stored
+    |> SnapshotStatus.record("s3", failed)
+    |> Map.put(:next_run_at, ~U[2031-05-04 17:00:00Z])
+    |> snapshots_of()
+  end
+
   # No recovery passphrase set yet: no key, so no snapshot either.
   defp unkeyed_snapshots do
     SnapshotStatus.view(SnapshotStatus.empty(), %{
@@ -291,7 +453,9 @@ defmodule FermixTestSupport.HomeSummaryGoldens do
     })
   end
 
-  defp snapshots_view(at) do
+  defp snapshots_view(at), do: at |> snapshots_status() |> snapshots_of()
+
+  defp snapshots_status(at) do
     attempt = %{
       at: at,
       result: :verified,
@@ -304,11 +468,13 @@ defmodule FermixTestSupport.HomeSummaryGoldens do
       error: nil
     }
 
-    status = %{
+    %{
       SnapshotStatus.record(SnapshotStatus.empty(), "s3", attempt)
       | next_run_at: DateTime.add(at, 6 * 3_600, :second)
     }
+  end
 
+  defp snapshots_of(status) do
     SnapshotStatus.view(status, %{
       config: [recipient: @recipient, s3_bucket: "invented-fermix-snapshots"],
       targets: [SnapshotS3],

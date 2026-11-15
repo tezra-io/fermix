@@ -595,11 +595,20 @@ defmodule FermixWebWeb.SetupLiveCuesTest do
 
       options = LazyHTML.query(select, "option")
 
-      assert LazyHTML.attribute(options, "value") == ["", "openrouter", "venice", "openai"]
+      assert LazyHTML.attribute(options, "value") == [
+               "",
+               "openrouter",
+               "openrouter_decider",
+               "openrouter_decider_flash",
+               "venice",
+               "openai"
+             ]
 
       assert options |> Enum.map(&(&1 |> LazyHTML.text() |> squish())) == [
                "Automatic (Uses OpenAI · gpt-6-luna)",
                "OpenRouter · Jev",
+               "OpenRouter · Perplexity Decider",
+               "OpenRouter · Perplexity Decider Flash",
                "Venice · Jev",
                "OpenAI · gpt-6-luna"
              ]
@@ -1023,6 +1032,11 @@ defmodule FermixWebWeb.SetupLiveCuesTest do
 
       assert reveal_text(html, "#cues-reveal-value") ==
                "http://127.0.0.1:4032/cues/hooks/github/#{random}"
+
+      # The mount, as the one builder writes it (`FermixCore.Funnel`).
+      assert reveal_text(html, "#cues-reveal-funnel") ==
+               "tailscale funnel --bg --set-path=/cues/hooks/github/#{random} " <>
+                 "http://127.0.0.1:4032/cues/hooks/github/#{random}"
 
       steps =
         html

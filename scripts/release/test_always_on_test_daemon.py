@@ -432,6 +432,20 @@ class AlwaysOnTestDaemonTest(unittest.TestCase):
         self.assertIn(f"cosign did not verify {ARTIFACT} as signed by release.yml on refs/tags/v{VERSION}", result.stderr)
         self.assert_nothing_installed()
 
+    # Always On came to every build in 0.20.0; an older release refuses each
+    # step, so up refuses it before it downloads anything.
+    def test_up_refuses_a_release_from_before_always_on(self):
+        for release in ("0.18.0", "0.19.9"):
+            result = self.run_script("up", "--release", release)
+
+            self.assertEqual(result.returncode, 1, release)
+            self.assertIn(
+                f"Fermix {release} serves no Always On; every release from 0.20.0 on does",
+                result.stderr,
+            )
+            self.assertNotIn("could not download", result.stderr)
+            self.assert_nothing_installed()
+
     def test_up_refuses_a_release_that_was_not_published(self):
         result = self.run_script("up", "--release", "9.9.7")
 
@@ -464,9 +478,10 @@ class AlwaysOnTestDaemonTest(unittest.TestCase):
             "[fermix_core.cues]\ndoor_port = 4742\n",
             "[fermix_channels.mobile]\nport = 4741\n",
             "[fermix_web]\nport = 4740\n",
-            "[fermix_core.always_on]\nenabled = true\n",
         ):
             self.assertIn(line, config)
+        # Every release this installs serves Always On, so the home needs no switch.
+        self.assertNotIn("[fermix_core.always_on]", config)
         state = (self.root / "state").read_text(encoding="utf-8")
         self.assertIn(f"version={VERSION}\nport=4740\nruntime={self.runtime}\n", state)
         self.assertEqual(self.log("open"), "http://127.0.0.1:4740/setup?t=launch-token\n")
@@ -584,7 +599,7 @@ class AlwaysOnTestDaemonTest(unittest.TestCase):
 
                 self.assertEqual(result.returncode, 1)
                 self.assertIn(f'Always On says "The {case["state"]} sentence."', result.stderr)
-                self.assertIn("delete the server in the web setup (http://127.0.0.1:4730/setup) first", result.stderr)
+                self.assertIn("move back or cancel in the web setup (http://127.0.0.1:4730/setup) first", result.stderr)
                 self.assertTrue(self.plist.exists())
                 self.assertTrue((self.root / "bin/fermix").exists())
                 self.assertEqual(self.keychain_left(), ["fermix:always-on-test:OPENAI_API_KEY"])
@@ -608,8 +623,8 @@ class AlwaysOnTestDaemonTest(unittest.TestCase):
         self.keychain(
             "fermix:always-on-test:OPENAI_API_KEY",
             "fermix:OPENAI_API_KEY",
-            "fermix:always-on-test:HCLOUD_TOKEN",
-            "fermix:always-on-test:HCLOUD_TOKEN",
+            "fermix:always-on-test:ANTHROPIC_API_KEY",
+            "fermix:always-on-test:ANTHROPIC_API_KEY",
             "fermix:fermix-dev:OPENAI_API_KEY",
             "fermix:always-on-tester:OPENAI_API_KEY",
         )
@@ -617,7 +632,7 @@ class AlwaysOnTestDaemonTest(unittest.TestCase):
         result = self.run_script("down")
 
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn(f"Fermix {VERSION} predates Always On, so it made no server.", result.stdout)
+        self.assertIn(f"Fermix {VERSION} predates Always On, so it holds no server.", result.stdout)
         self.assertIn("Removed 2 Keychain items of profile always-on-test.", result.stdout)
         self.assertEqual(
             self.keychain_left(),
@@ -629,6 +644,9 @@ class AlwaysOnTestDaemonTest(unittest.TestCase):
         self.assertFalse(self.root.exists())
         self.assertIn("service uninstall --user\n", self.log("fermix"))
 
+    # `choose` is v0.18.0's screen for a provider token that created nothing
+    # yet: `up` no longer installs v0.18.0, but an earlier version of the
+    # script did, so `down` can still meet it.
     def test_down_proceeds_where_always_on_holds_nothing(self):
         for state in ("off", "connect", "choose"):
             with self.subTest(state=state):
@@ -640,19 +658,6 @@ class AlwaysOnTestDaemonTest(unittest.TestCase):
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertIn(f"Always On holds no server here ({state}).", result.stdout)
                 self.assertFalse(self.root.exists())
-
-    def test_down_proceeds_where_the_build_serves_no_always_on(self):
-        self.up()
-        self.screen_envelope(
-            {"schema_version": 1, "ok": False, "error": {"code": "always_on_unavailable", "sentence": "Always On is not in this release of Fermix yet."}},
-            1,
-        )
-
-        result = self.run_script("down")
-
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn(f"Fermix {VERSION} serves no Always On here, so it made no server.", result.stdout)
-        self.assertFalse(self.root.exists())
 
     def test_down_finishes_what_a_failed_up_left(self):
         failed = self.run_script("up", "--release", VERSION, extra_env={"FAKE_HEALTH_VERSION": "0.0.1"})

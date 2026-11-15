@@ -9,11 +9,16 @@ defmodule FermixCore.Management.Meetings do
 
   Refused before it starts unless both halves of the notetaker are installed: a
   sign-in with no sidecar has nothing to launch, and one with no browser has
-  nothing to launch it in.
+  nothing to launch it in. Refused first on an Always On server, where it
+  lands after a move (M97 D24): the sign-in opens a window, a server has no
+  screen, and Google Meet is unavailable there
+  (`FermixCore.Meetings.meet_here/1`, whose `:always_on_server` seam `opts`
+  carries).
   """
 
   alias FermixCore.Auth.Redaction
   alias FermixCore.Management.Jobs
+  alias FermixCore.Meetings
   alias FermixCore.Meetings.SidecarInstaller
   alias FermixCore.Meetings.SignIn
 
@@ -37,9 +42,17 @@ defmodule FermixCore.Management.Meetings do
     browser? = Keyword.get(opts, :browser_installed?, &SidecarInstaller.browser_installed?/0)
 
     cond do
-      not installed?.() -> {:error, {:unavailable, @not_installed}}
-      not browser?.() -> {:error, {:unavailable, @no_browser}}
-      true -> :ok
+      Meetings.meet_here(opts) != :ok ->
+        {:error, {:unavailable, Meetings.meet_unavailable_sentence()}}
+
+      not installed?.() ->
+        {:error, {:unavailable, @not_installed}}
+
+      not browser?.() ->
+        {:error, {:unavailable, @no_browser}}
+
+      true ->
+        :ok
     end
   end
 

@@ -231,5 +231,46 @@ defmodule FermixCore.Auth.RefreshClientTest do
         assert Map.get(options, :receive_timeout) == 15_000
       end
     end
+
+    # The connect options give the request a Finch instance Req starts for
+    # them, whose pool otherwise keeps an idle connection for good and hands
+    # the next refresh, an hour or two later, a socket that died meanwhile.
+    test "the request's pool closes after 15 s idle, an option Req hands to the pool it starts" do
+      assert {:ok, _tokens} =
+               RefreshClient.refresh(provider("x"), "old_rt", adapter: recording_adapter(self()))
+
+      assert_received {:request_options, options}
+      assert Map.get(options, :pool_max_idle_time) == 15_000
+      assert Req.Finch.pool_options(options)[:pool_max_idle_time] == 15_000
+    end
+  end
+
+  describe "refresh/3 — a failed attempt" do
+    # Fails the first request with `reason` and answers the next with tokens.
+    defp failing_once_adapter(reason) do
+      seen = :counters.new(1, [])
+
+      fn request ->
+        :counters.add(seen, 1, 1)
+
+        if :counters.get(seen, 1) == 1,
+          do: {request, %Req.TransportError{reason: reason}},
+          else: {request, Req.Response.new(status: 200, body: %{"access_token" => "new_at"})}
+      end
+    end
+
+    test "is logged with its provider and its reason before the retry, never the token" do
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          assert {:ok, %{access_token: "new_at"}} =
+                   RefreshClient.refresh(provider("x"), "old_rt",
+                     adapter: failing_once_adapter(:closed),
+                     retry_sleep: fn _ms -> :ok end
+                   )
+        end)
+
+      assert log =~ "RefreshClient: x attempt 1/3 failed: %Req.TransportError{reason: :closed}"
+      refute log =~ "old_rt"
+    end
   end
 end

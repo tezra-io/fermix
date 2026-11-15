@@ -43,6 +43,8 @@ defmodule FermixCore.NativeHost.Link do
 
   require Logger
 
+  alias FermixCore.Home.Link, as: HomeLink
+  alias FermixCore.Home.Role
   alias FermixCore.Native.HostAvailability
   alias FermixCore.NativeHost.Protocol
   alias FermixCore.SocketPeer
@@ -95,10 +97,31 @@ defmodule FermixCore.NativeHost.Link do
       pending: %{},
       daemon_os_pid: Keyword.get(opts, :daemon_os_pid, String.to_integer(System.pid())),
       os: Keyword.get(opts, :os, :os.type()),
-      snooze: Keyword.get(opts, :snooze, &Registry.snooze_from_notification/3)
+      snooze: Keyword.get_lazy(opts, :snooze, fn -> snooze_for(role(opts)) end)
     }
 
     {:ok, state, @handover_timeout_ms}
+  end
+
+  # Where a press of Snooze goes, by the role this engine booted in (M99
+  # §10.1): a device's reminders are its server's, so the press is handed to
+  # the link, which returns at once; any other engine holds its reminders.
+  defp snooze_for(:device) do
+    fn reminder_id, minutes, _opts ->
+      case HomeLink.impl().snooze_reminder(reminder_id, minutes) do
+        :ok -> :ok
+        {:error, reason} -> {:error, {:not_sent, reason}}
+      end
+    end
+  end
+
+  defp snooze_for(_primary_candidate_or_none), do: &Registry.snooze_from_notification/3
+
+  defp role(opts) do
+    case Keyword.get_lazy(opts, :role, &Role.booted/0) do
+      %{role: role} -> role
+      nil -> nil
+    end
   end
 
   @impl true
@@ -290,15 +313,29 @@ defmodule FermixCore.NativeHost.Link do
 
   # The person's press on a notification's action, validated by the codec:
   # Snooze 10 minutes on a reminder that rang here, the owner's own act,
-  # applied through the one snooze path with no model turn (M76 D6). The press
-  # has no answer on the wire, so a snooze the registry refuses is logged with
-  # its own sentence, and the connection goes on.
+  # applied through the one snooze path with no model turn (M76 D6), or, on a
+  # computer whose home is on its server, handed to the link for the server
+  # that holds the reminder (M99 §10.1). The press has no answer on the wire,
+  # so a snooze the registry refuses is logged with its own sentence, and the
+  # connection goes on.
   defp notification_action(%{"reminder_id" => reminder_id, "action" => action}, state) do
     minutes = Protocol.snooze_minutes(action)
 
     case snooze(state, reminder_id, minutes) do
       {:ok, _snoozed} ->
         Logger.info("reminder #{reminder_id} snoozed #{minutes} minutes from its notification")
+
+      :ok ->
+        Logger.info(
+          "reminder #{reminder_id}: the press to snooze it #{minutes} minutes was sent to the " <>
+            "server, which holds it"
+        )
+
+      {:error, {:not_sent, reason}} ->
+        Logger.warning(
+          "reminder #{reminder_id} was not snoozed from its notification: the press could not " <>
+            "be sent to the server (#{inspect(reason, limit: 5, printable_limit: 200)})"
+        )
 
       {:error, reason} ->
         Logger.warning(

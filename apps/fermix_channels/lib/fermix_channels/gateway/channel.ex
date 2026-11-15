@@ -32,7 +32,12 @@ defmodule FermixChannels.Gateway.Channel do
           # `%{"kind" => "job" | "cue", "name" => name}`: the Mac's and the
           # phone's timeline store it on the row (`metadata.origin`); every
           # other channel ignores it.
-          origin: %{required(String.t()) => String.t()}
+          origin: %{required(String.t()) => String.t()},
+          # The origin facts of the turn that sends
+          # (`FermixCore.Computers.Origin.facts/1`): iMessage through a Mac
+          # hands them on, so that Mac's rules see the turn's own origin;
+          # absent is `background`. Every other channel ignores it.
+          turn_origin: map()
         ]
 
   @type media_part :: Reply.media_part()

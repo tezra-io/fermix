@@ -957,31 +957,51 @@ defmodule FermixCore.Cues.Source.FeedTest do
       poll_every_interval()
     end
 
-    # A token server that does not answer exits the call; that is a sign-in
-    # wait like any other, never a crash (five crashes would stop the source).
-    test "a token server that does not answer leaves it waiting for the X sign-in", ctx do
+    # A token server that does not answer (busy with a refresh, or restarting)
+    # exits the call. That says nothing about the X sign-in: it is an ordinary
+    # failed poll, told to nobody, and never a crash (five would stop the source).
+    test "a token server that does not answer is a failed poll, not a sign-in wait", ctx do
       ref = ctx.ref
+      wedged = start_supervised!({Agent, fn -> false end}, id: :wedged)
 
-      wedged = fn _profile ->
-        exit({:timeout, {GenServer, :call, [:x_tokens, :get_token, 15_000]}})
+      get_token = fn _profile ->
+        if Agent.get(wedged, & &1),
+          do: exit({:timeout, {GenServer, :call, [:x_tokens, :get_token, 15_000]}}),
+          else: {:ok, "x-access-1"}
       end
 
       sign_in = fn ->
         XAccounts.sign_in_token(
           find: fn "x" -> {:ok, x_plugin()} end,
           enabled: fn -> ["x"] end,
-          get_token: wedged
+          get_token: get_token
         )
       end
 
       {pid, poll} = start_x(ctx, token_getter: sign_in)
-      log = ExUnit.CaptureLog.capture_log(fn -> fire(pid, poll) end)
+      fire(pid, poll)
+      assert_received {:x_request, _host, _path, _query, ["Bearer x-access-1"]}
+
+      Agent.update(wedged, fn _wedged -> true end)
+      log = ExUnit.CaptureLog.capture_log(fn -> fire(pid, poll_every_interval()) end)
 
       assert Process.alive?(pid)
       assert log =~ "token_server_unavailable"
-      assert %{status: "auth_failed", stop_reason: "x_sign_in"} = source_row(ctx)
-      assert_received {:notice, ^ref, :auth_failed, %{reason: "x_sign_in"}}
-      next_poll(60_000)
+      refute_received {:x_request, _host, _path, _query, _auth}
+      refute_received {:notice, ^ref, _kind, _data}
+      assert %{status: "polling", stop_reason: nil} = source_row(ctx)
+
+      assert_received {:telemetry, [:fermix, :cue, :source], _m,
+                       %{phase: :disconnect, attempt: 1, error_class: "token_server_unavailable"}}
+
+      Agent.update(wedged, fn _wedged -> false end)
+      fire(pid, next_poll(60_000))
+
+      assert_received {:x_request, _host, _path, _query, ["Bearer x-access-1"]}
+      assert_received {:telemetry, [:fermix, :cue, :source], _m, %{phase: :reconnect}}
+      refute_received {:notice, ^ref, _kind, _data}
+      assert %{status: "polling", stop_reason: nil} = source_row(ctx)
+      poll_every_interval()
     end
 
     test "X refusing the token is refreshed once and asked again with the new one", ctx do

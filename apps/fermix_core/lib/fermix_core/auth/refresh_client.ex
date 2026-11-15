@@ -20,6 +20,13 @@ defmodule FermixCore.Auth.RefreshClient do
   lock (the code exchange, the account lookup, a region probe) set the same
   bounds.
 
+  **Idle connections.** The bounds' connect options give these requests a
+  Finch instance Req starts for them, whose pool would keep an idle connection
+  for good. A refresh comes an hour or two after the last one, so it would be
+  handed a socket that died meanwhile (the machine slept, a load balancer
+  dropped it) and spend an attempt finding out. The pool is therefore stopped
+  after 15 s idle, its connections with it (`pool_max_idle_time`).
+
   `req_options` are merged into each request, except `:retry_sleep`: a test
   seam, a one-argument function that replaces `Process.sleep/1` between
   attempts, so a test of the retries does not wait them out.
@@ -39,6 +46,8 @@ defmodule FermixCore.Auth.RefreshClient do
   @pool_timeout_ms 5_000
   @connect_timeout_ms 10_000
   @receive_timeout_ms 15_000
+  # The shared pools' idle bound (`FermixCore.Application`).
+  @pool_max_idle_ms 15_000
 
   # A 4xx is the OAuth server's verdict on the grant (invalid_grant,
   # refresh_token_reused, …), and retrying the same dead refresh token can
@@ -138,15 +147,22 @@ defmodule FermixCore.Auth.RefreshClient do
         {:error, {:permanent, status, body}}
 
       {:ok, %{status: status}} when attempt < @max_attempts ->
-        Logger.warning("RefreshClient: attempt #{attempt}/#{@max_attempts} got #{status}")
+        Logger.warning(
+          "RefreshClient: #{provider.id} attempt #{attempt}/#{@max_attempts} got #{status}"
+        )
+
         sleep.(@retry_base_ms * attempt)
         do_refresh(provider, refresh_token, req_options, sleep, attempt + 1)
 
       {:ok, %{status: status, body: body}} ->
         {:error, "Refresh failed (#{status}): #{Redaction.format(body)}"}
 
-      {:error, _reason} when attempt < @max_attempts ->
-        Logger.warning("RefreshClient: attempt #{attempt}/#{@max_attempts} failed")
+      {:error, reason} when attempt < @max_attempts ->
+        Logger.warning(
+          "RefreshClient: #{provider.id} attempt #{attempt}/#{@max_attempts} failed: " <>
+            Redaction.format(reason)
+        )
+
         sleep.(@retry_base_ms * attempt)
         do_refresh(provider, refresh_token, req_options, sleep, attempt + 1)
 
@@ -160,7 +176,8 @@ defmodule FermixCore.Auth.RefreshClient do
   10 s, receive 15 s, and no Req retry, so each request is one attempt of at
   most 30 s. Req retries a GET on a transient failure up to three more times
   and honours a `Retry-After` of any length, which no lock's stale threshold
-  could bound. A refresh does its own bounded retries.
+  could bound. A refresh does its own bounded retries. The pool the connect
+  options start is stopped after 15 s idle (see "Idle connections").
   """
   @spec request_bounds() :: keyword()
   def request_bounds do
@@ -168,7 +185,8 @@ defmodule FermixCore.Auth.RefreshClient do
       retry: false,
       pool_timeout: @pool_timeout_ms,
       connect_options: [timeout: @connect_timeout_ms],
-      receive_timeout: @receive_timeout_ms
+      receive_timeout: @receive_timeout_ms,
+      pool_max_idle_time: @pool_max_idle_ms
     ]
   end
 

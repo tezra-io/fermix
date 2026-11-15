@@ -558,8 +558,9 @@ defmodule FermixOpik.Aggregation do
   end
 
   # Realtime voice runs on its own WebSocket session. call_start opens the root
-  # trace (carrying model/voice/device); the model turn and tool calls reuse the
-  # provider/tool spans and nest via the shared session_id; call_stop closes it.
+  # trace (carrying model/voice/device and the endpoint the call ran for); the
+  # model turn and tool calls reuse the provider/tool spans and nest via the
+  # shared session_id; call_stop closes it.
   def apply_event(state, [:fermix, :realtime, :call_start], _meas, meta, at) do
     case Map.get(meta, :session_id) do
       nil ->
@@ -574,6 +575,7 @@ defmodule FermixOpik.Aggregation do
           trace_metadata:
             compact(%{
               device_id: Map.get(meta, :device_id),
+              endpoint: Map.get(meta, :endpoint),
               model: Map.get(meta, :model),
               voice: Map.get(meta, :voice),
               session_scope: Map.get(meta, :session_scope)
@@ -631,6 +633,15 @@ defmodule FermixOpik.Aggregation do
     })
   end
 
+  # An accessory call's link counters (M91), one span under the call's own
+  # trace, on either run kind (`realtime` or `voice_live`): the session id is
+  # the call's. Emitted as the call ends, so attached only while its run is
+  # open, never opening one. The two sessionless accessory points (attach,
+  # fault) are not subscribed, as pairing's are not.
+  def apply_event(state, [:fermix, :accessory, :call_link], meas, meta, at) do
+    attach_if_open(state, meta, at, &Mapper.accessory_call_link_span(meta, meas, &1))
+  end
+
   # A voice call on a task engine, GPT Live (M41 §7) or Grok (M70 §09), is its
   # own run kind, and always a ROOT: the provider session owns the microphone
   # while every tool, memory lookup and model answer runs in a SEPARATE Fermix
@@ -661,6 +672,7 @@ defmodule FermixOpik.Aggregation do
           trace_metadata:
             compact(%{
               device_id: Map.get(meta, :device_id),
+              endpoint: Map.get(meta, :endpoint),
               model: Map.get(meta, :model),
               voice: Map.get(meta, :voice),
               engine: Map.get(meta, :engine),
@@ -696,9 +708,18 @@ defmodule FermixOpik.Aggregation do
 
   # Point spans for the call's lifecycle. A `provider_error` is deliberately NOT
   # terminal: a Live moderation refusal cuts the audio and the session keeps
-  # running, so closing the trace here would truncate the rest of the call.
+  # running, so closing the trace here would truncate the rest of the call. A
+  # phone's detach and resume (M87) are the call's too; the resume's
+  # `duration_ms` is the gap, so its span covers the time the phone was away.
   def apply_event(state, [:fermix, :voice_live, phase], meas, meta, at)
-      when phase in [:session_started, :delegation_start, :delegation_stop, :provider_error] do
+      when phase in [
+             :session_started,
+             :delegation_start,
+             :delegation_stop,
+             :provider_error,
+             :phone_detached,
+             :phone_resumed
+           ] do
     add_child_span(
       state,
       meta,
@@ -858,6 +879,80 @@ defmodule FermixOpik.Aggregation do
   def apply_event(state, [:fermix, :checklist, kind], meas, meta, at)
       when kind in [:read, :edit] do
     add_child_span(state, meta, at, &Mapper.checklist_span(kind, meta, meas, &1))
+  end
+
+  # A read or an edit of the owner's trips ([:fermix, :trip, :read | :edit],
+  # M89): a point span under the turn or job run that made it, via the shared
+  # session_id, lasting the store's transaction. Counts and words of Fermix's
+  # own only. session_id nil → place_under no-ops.
+  def apply_event(state, [:fermix, :trip, kind], meas, meta, at) when kind in [:read, :edit] do
+    add_child_span(state, meta, at, &Mapper.trip_span(kind, meta, meas, &1))
+  end
+
+  # The trip placer's run (M89 D13 B) places the stops a trip keeps waiting,
+  # minted `trip_place:<hex>` by the engine, which no turn asked for: always a
+  # root. run_start opens it, each trip it writes nests as that trip's
+  # trip_edit span via the shared session id, and one closer ends it:
+  # run_complete with what it placed, what still waits and what stopped
+  # waiting, or run_error, from the run (the store's refusal) or from the
+  # placer when the run raised or passed its bound (`crashed`, `overran`,
+  # with the kind as `reason`). Counts and Fermix's own
+  # words only: no stop's words or place ride.
+  def apply_event(state, [:fermix, :trip_place, :run_start], meas, meta, at) do
+    case Map.get(meta, :session_id) do
+      nil ->
+        {state, []}
+
+      session_id ->
+        ctx = %{
+          parent_session: nil,
+          kind: :trip_place,
+          name: nil,
+          input: nil,
+          trace_metadata:
+            compact(%{
+              trigger: stringify(Map.get(meta, :trigger)),
+              waiting_at_start: Map.get(meas, :waiting),
+              unresolved_towns: Map.get(meas, :unresolved_towns)
+            }),
+          at: at.at,
+          mono: at.mono
+        }
+
+        {state, _ref} = ensure_session(state, session_id, ctx)
+        {state, []}
+    end
+  end
+
+  # Counts only: this compact map is the run's metadata allowlist.
+  def apply_event(state, [:fermix, :trip_place, run], meas, meta, at)
+      when run in [:run_complete, :run_error] do
+    close_root(state, meta, at, %{
+      status: if(run == :run_error, do: "error", else: "ok"),
+      error_info: trip_place_error_info(run, meta),
+      metadata:
+        compact(%{
+          trigger: stringify(Map.get(meta, :trigger)),
+          reason: Map.get(meta, :reason),
+          backend: Map.get(meta, :backend),
+          skipped: stringify(Map.get(meta, :skipped)),
+          stop_reason: stringify(Map.get(meta, :stop_reason)),
+          stop_code: Map.get(meta, :stop_code),
+          placed: Map.get(meas, :placed),
+          waiting: Map.get(meas, :waiting),
+          stopped_waiting: Map.get(meas, :stopped_waiting),
+          expired: Map.get(meas, :expired),
+          superseded: Map.get(meas, :superseded),
+          lookups: Map.get(meas, :lookups),
+          trips: Map.get(meas, :trips),
+          failed: Map.get(meas, :failed),
+          towns: Map.get(meas, :towns),
+          towns_found: Map.get(meas, :towns_found),
+          towns_not_found: Map.get(meas, :towns_not_found),
+          towns_stop_reason: stringify(Map.get(meta, :towns_stop_reason)),
+          duration_us: Map.get(meas, :duration_us)
+        })
+    })
   end
 
   # In-loop context compaction ([:fermix, :agent_loop, :context_compaction]) and
@@ -1202,7 +1297,8 @@ defmodule FermixOpik.Aggregation do
   end
 
   # A management job (M34 native setup §7.3) is a bounded background run minted
-  # with its own `job:<rand>` session before its body executes. Like a Doctor
+  # with its own `job:<rand>` session before its body executes
+  # (`computer.job:<rand>` on a computer linked to its server). Like a Doctor
   # run it is always a root: the app asks the daemon directly, so there is no
   # originating turn to nest under. A provider call made inside the run carries
   # the same session id and lands as its child.
@@ -1328,6 +1424,50 @@ defmodule FermixOpik.Aggregation do
       at,
       &Mapper.computer_use_span(meta, meas, Keyword.put(&1, :phase, verb))
     )
+  end
+
+  # An invocation (M97 §6.2) is a run kind on the computer that runs it, and
+  # always a ROOT there. The turn that asked is on another machine's trace (the
+  # server's), so `parent_session` rides as correlation metadata only, as for
+  # computer use: a turn's id is minted per engine, so here it can name an
+  # unrelated turn of this computer's own, and nesting under it would put the
+  # invocation in that turn's trace and let the bookend ship it. The model's
+  # call stays on the server as one tool exec, joined by its `invocation` key.
+  #
+  # `ok`, `cancelled` and `refused` close with `:complete`; `failed`,
+  # `timed_out` and `unknown` with `:error`, which alone carries `error_info`.
+  # An invocation that outlives the idle TTL ships its root then, and its
+  # bookend opens a continuation root under the same id, as computer use does.
+  def apply_event(state, [:fermix, :computer_invocation, :start], meas, meta, at) do
+    case Map.get(meta, :session_id) do
+      nil ->
+        {state, []}
+
+      session_id ->
+        ctx = %{
+          parent_session: nil,
+          kind: :computer_invocation,
+          name: nil,
+          input: nil,
+          trace_metadata: Mapper.computer_invocation_root(:start, meta, meas).metadata,
+          at: at.at,
+          mono: at.mono
+        }
+
+        {state, _ref} = ensure_session(state, session_id, ctx)
+        {state, []}
+    end
+  end
+
+  def apply_event(state, [:fermix, :computer_invocation, verb], meas, meta, at)
+      when verb in [:complete, :error] do
+    root = Mapper.computer_invocation_root(verb, meta, meas)
+
+    close_root(state, meta, at, %{
+      status: root.status,
+      error_info: root.error_info,
+      metadata: root.metadata
+    })
   end
 
   def apply_event(state, _event, _meas, _meta, _at), do: {state, []}
@@ -1727,6 +1867,9 @@ defmodule FermixOpik.Aggregation do
   defp infer_kind("harness_" <> _), do: :harness
   defp infer_kind("session:" <> _), do: :realtime
   defp infer_kind("skill_curation:" <> _), do: :skill_curation
+  # The trip placer's run, minted in `Trips.Telemetry.place_session_id/0`: its
+  # own root, whichever of its bookends arrives first.
+  defp infer_kind("trip_place:" <> _), do: :trip_place
   defp infer_kind("soul_curation:" <> _), do: :soul_curation
   defp infer_kind("memory_review:" <> _), do: :memory_review
   # An open-loop check-in, minted in `OpenLoops.Telemetry.correlation/2`.
@@ -1756,8 +1899,15 @@ defmodule FermixOpik.Aggregation do
   # this clause a completion whose opener was missed reads as a `:subagent`
   # phantom root, which is what the voice-call clauses above exist to prevent.
   defp infer_kind("cua_" <> _), do: :computer_use
+  # An invocation's run on the computer. The prefix is minted in
+  # `Computers.Telemetry.session_id/1`; keep the two in lockstep, or a bookend
+  # whose opener was missed reads as a `:subagent` phantom root.
+  defp infer_kind("inv_" <> _), do: :computer_invocation
   defp infer_kind("doctor:" <> _), do: :doctor
   defp infer_kind("job:" <> _), do: :management_job
+  # A job a computer linked to its server started itself, whose id names it
+  # (`Management.Jobs`, `Placement.computer_id/1`): a management job too.
+  defp infer_kind("computer.job:" <> _), do: :management_job
   defp infer_kind(_other), do: :subagent
 
   defp kind_from_role(role) when role in [:skill, "skill"], do: :skill
@@ -1782,6 +1932,8 @@ defmodule FermixOpik.Aggregation do
   defp wrapper_name(:voice_delegation, _name, session), do: session
   # "voice_gist:<call_uuid>" already says what it is and which call.
   defp wrapper_name(:voice_gist, _name, session), do: session
+  # "trip_place:<hex>" already says what it is; the run has no agent name.
+  defp wrapper_name(:trip_place, _name, session), do: session
   # "cue_filter_<watcher>_<ts>_<hex>" already says what it is and for which
   # watcher; the agent name ("cue_filter") would only repeat the kind.
   defp wrapper_name(:cue_filter, _name, session), do: session
@@ -1796,6 +1948,11 @@ defmodule FermixOpik.Aggregation do
   # nothing about which session it was — so the id identifies it, as for a voice
   # delegation. One conversation can run several sessions in a day.
   defp wrapper_name(:computer_use, _name, session), do: "computer_use:#{session}"
+  # The id identifies an invocation; the capability is in its metadata, and a
+  # replayed row's `agent` (the capability, by the trace handler) is no name.
+  defp wrapper_name(:computer_invocation, _name, session),
+    do: "computer_invocation:#{session}"
+
   defp wrapper_name(kind, nil, session), do: "#{kind}:#{session}"
   defp wrapper_name(kind, name, _session), do: "#{kind}:#{name}"
 
@@ -2068,6 +2225,11 @@ defmodule FermixOpik.Aggregation do
     do: error_info("VoiceGistError", stringify(Map.get(metadata, :error)))
 
   defp voice_gist_error_info(_run, _metadata), do: nil
+
+  defp trip_place_error_info(:run_error, metadata),
+    do: error_info("TripPlaceError", stringify(Map.get(metadata, :error_code)))
+
+  defp trip_place_error_info(_run, _metadata), do: nil
 
   defp cue_filter_metadata(metadata) do
     compact(%{

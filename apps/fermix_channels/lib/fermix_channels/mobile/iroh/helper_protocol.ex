@@ -4,6 +4,8 @@ defmodule FermixChannels.Mobile.Iroh.HelperProtocol do
   events (NDJSON over the helper's stdin and stdout) and the bridge preamble.
   Protocol 3 adds the endpoint that only dials (`start_dial_only/2`) and the
   `dial` op with its `dialed`, `dial_failed` and `dial_closed` events (M75).
+  Protocol 4 adds `start`'s fixed port (`bind_port`) and the `dial_path`
+  event, a dialed connection's path after `dialed` (M75 Always On).
 
   This module is the protocol's source of truth;
   `fermix_core/priv/iroh_helper/PROTOCOL.md` and its fixtures are its export,
@@ -12,7 +14,7 @@ defmodule FermixChannels.Mobile.Iroh.HelperProtocol do
   process.
   """
 
-  @protocol_version 3
+  @protocol_version 4
   @max_line_bytes 65_536
   @max_text_bytes 512
   @alpn "fermix/mobile/1"
@@ -76,6 +78,12 @@ defmodule FermixChannels.Mobile.Iroh.HelperProtocol do
               kind: :relay | :direct,
               relay: String.t() | nil
             }
+          | %{
+              event: :dial_path,
+              dial_id: String.t(),
+              kind: :relay | :direct,
+              relay: String.t() | nil
+            }
           | %{event: :dial_failed, dial_id: String.t(), reason: dial_failure()}
           | %{event: :dial_closed, dial_id: String.t()}
 
@@ -112,9 +120,13 @@ defmodule FermixChannels.Mobile.Iroh.HelperProtocol do
   @spec dial_deadline_ms() :: pos_integer()
   def dial_deadline_ms, do: @dial_deadline_ms
 
-  @doc "The `start` op."
-  @spec start(Path.t(), Path.t(), [map()], limits()) :: map()
-  def start(secret_key_path, bridge_socket, relays, limits)
+  @doc """
+  The `start` op: the endpoint binds iroh's own UDP ports, or `bind_port`
+  (1 to 65535, an Always On server's) when one is given. A port outside the
+  contract fails loud.
+  """
+  @spec start(Path.t(), Path.t(), [map()], limits(), 1..65_535 | nil) :: map()
+  def start(secret_key_path, bridge_socket, relays, limits, bind_port \\ nil)
       when is_binary(secret_key_path) and is_binary(bridge_socket) and is_list(relays) and
              relays != [] and is_map(limits) do
     %{
@@ -125,7 +137,15 @@ defmodule FermixChannels.Mobile.Iroh.HelperProtocol do
       "relays" => relays,
       "limits" => Map.new(limits, fn {key, value} -> {Atom.to_string(key), value} end)
     }
+    |> put_bind_port(bind_port)
   end
+
+  defp put_bind_port(op, nil), do: op
+
+  defp put_bind_port(op, port) when is_integer(port) and port in 1..65_535,
+    do: Map.put(op, "bind_port", port)
+
+  defp put_bind_port(_op, port), do: raise(ArgumentError, "not a bind port: #{inspect(port)}")
 
   @doc """
   The `start` op of an endpoint that only dials: no key and no bridge socket,
@@ -144,9 +164,10 @@ defmodule FermixChannels.Mobile.Iroh.HelperProtocol do
 
   @doc """
   The `dial` op: dial `endpoint_id` through `relays` (and `addrs`, direct
-  `ip:port` addresses, which only a test that knows where the peer listens
-  names), open one stream and copy it to `socket`. Anything outside the
-  contract fails loud: the helper would refuse it and end.
+  `ip:port` addresses: the hints an Always On server gave, or a test's that
+  knows where the peer listens), open one stream and copy it to `socket`.
+  Anything outside the contract fails loud: the helper would refuse it and
+  end.
   """
   @spec dial(String.t(), String.t(), [map()], Path.t(), [String.t()]) :: map()
   def dial(dial_id, endpoint_id, relays, socket, addrs \\ [])
@@ -291,6 +312,14 @@ defmodule FermixChannels.Mobile.Iroh.HelperProtocol do
     with :ok <- dial_id(id),
          :ok <- path_relay(kind, relay) do
       {:ok, %{event: :dialed, dial_id: id, kind: Map.fetch!(@path_kinds, kind), relay: relay}}
+    end
+  end
+
+  defp event("dial_path", %{"dial_id" => id, "kind" => kind, "relay" => relay})
+       when is_map_key(@path_kinds, kind) and (is_binary(relay) or is_nil(relay)) do
+    with :ok <- dial_id(id),
+         :ok <- path_relay(kind, relay) do
+      {:ok, %{event: :dial_path, dial_id: id, kind: Map.fetch!(@path_kinds, kind), relay: relay}}
     end
   end
 

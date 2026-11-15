@@ -1,11 +1,10 @@
 defmodule FermixCore.Home.Return do
   @moduledoc """
-  The one record of a return (Always On's move back to this computer):
-  `<home>/device/return.json`, for a server Fermix created and an owner's own
-  server alike. `device/` stays on this machine and is kept through the
-  return's activation (`FermixCore.Home.DeviceLocal`), so the record is still
-  here once this computer is the primary again. The provider ledger
-  (`FermixCore.Home.Provision.Ledger`) is never touched by a return.
+  The one record of a return (Always On's move back to this computer, or
+  Restore here): `<home>/device/return.json`. `device/` stays on this
+  machine and is kept through the return's activation
+  (`FermixCore.Home.DeviceLocal`), so the record is still here once this
+  computer is the primary again.
 
   Mode `0600` under a `0700` `device/`, written whole to a temporary file and
   renamed, so a reader never sees half of one:
@@ -13,14 +12,13 @@ defmodule FermixCore.Home.Return do
       {
         "v": 1,
         "from": "orchard-server",
-        "provider_server": "srv-7f3a",
         "primary_epoch": 5,
         "started_at": "2031-06-01T09:00:00Z",
         "move_started_at": "2031-06-01T09:05:00Z",
         "candidate_id": "c-91",
         "move_id": "m-12",
-        "fence_requested": "20310601T080000Z-e6.fxsnap",
-        "fenced_at": "2031-06-01T09:02:00Z",
+        "restore_requested": "20310601T080000Z-e6.fxsnap",
+        "restored": "20310601T080000Z-e6.fxsnap",
         "moved_at": "2031-06-01T09:20:00Z",
         "epoch": 7
       }
@@ -29,15 +27,17 @@ defmodule FermixCore.Home.Return do
     holds it, so the screen can name it afterwards; 1 to 128 bytes of
     printable text.
   - `started_at` (required): when the owner asked to move back.
-  - `provider_server`: the ledger's server, absent for an owner's own server.
   - `primary_epoch`: the epoch the link had seen when the return was asked for.
   - `move_started_at`, `candidate_id`, `move_id`: once the server started the
     move.
-  - `fence_requested`: the copy this computer restores itself from when the
-    server Fermix created for the home cannot answer (Restore here, the
-    name of a copy under `snapshots/`), asked for before the server is
-    deleted; `fenced_at`: once it was (`Management.Provision`'s fence), so a
-    stop after it never deletes again.
+  - `restore_requested`: the copy Restore here restores this computer from
+    (the name of a copy under `snapshots/`), kept before its job starts and
+    taken back when the job ends, however it ended (`Management.AlwaysOn`);
+    one left by a restart that ended the job stands beside no job, which the
+    summary reads as no restore.
+  - `restored`: the copy Restore here put in place, written once its
+    staging held and before the activation (`Home.LocalReturn`), so the
+    primary it made tells the owner once which backup it came back from.
   - `moved_at`, `epoch`: once this computer booted as the primary again
     (`done/2`, which the primary's boot runs before anything reads the home;
     one it could not write is remembered, `remember_unrecorded/0`, and each
@@ -58,8 +58,8 @@ defmodule FermixCore.Home.Return do
   @dir_mode 0o700
   @file_mode 0o600
   @max_text_bytes 128
-  @times [:started_at, :move_started_at, :fenced_at, :moved_at]
-  @texts [:from, :provider_server, :candidate_id, :move_id, :fence_requested]
+  @times [:started_at, :move_started_at, :moved_at]
+  @texts [:from, :candidate_id, :move_id, :restore_requested, :restored]
   @epochs [:primary_epoch, :epoch]
   @keys @times ++ @texts ++ @epochs
   @required [:from, :started_at]
@@ -68,13 +68,12 @@ defmodule FermixCore.Home.Return do
   @type record :: %{
           required(:from) => String.t(),
           required(:started_at) => DateTime.t(),
-          optional(:provider_server) => String.t(),
           optional(:primary_epoch) => pos_integer(),
           optional(:move_started_at) => DateTime.t(),
           optional(:candidate_id) => String.t(),
           optional(:move_id) => String.t(),
-          optional(:fence_requested) => String.t(),
-          optional(:fenced_at) => DateTime.t(),
+          optional(:restore_requested) => String.t(),
+          optional(:restored) => String.t(),
           optional(:moved_at) => DateTime.t(),
           optional(:epoch) => pos_integer()
         }

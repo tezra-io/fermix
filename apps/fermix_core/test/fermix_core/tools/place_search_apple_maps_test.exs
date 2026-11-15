@@ -295,6 +295,40 @@ defmodule FermixCore.Tools.PlaceSearch.AppleMapsTest do
       assert gone_by?(os_pid, deadline), "the helper outlived its call"
     end
 
+    # R2#5: a trip lookup's 45 s deadline ends its task with a kill, which runs
+    # no `after`; the helper and its port go with the call all the same.
+    test "a call whose process is killed leaves no helper and no port behind", ctx do
+      pid_file = Path.join(ctx.dir, "helper.pid")
+      path = Path.join(ctx.dir, "fermix-maps")
+
+      File.write!(
+        path,
+        "#!/bin/sh\necho $$ > '#{pid_file}.part'\nmv '#{pid_file}.part' '#{pid_file}'\n" <>
+          "exec sleep 3600\n"
+      )
+
+      File.chmod!(path, 0o755)
+      caller = spawn(fn -> AppleMaps.search(named(), helper_opts(path)) end)
+      on_exit(fn -> Process.exit(caller, :kill) end)
+
+      deadline = System.monotonic_time(:millisecond) + @process_bound_ms
+      assert written_by?(pid_file, deadline), "the helper never started"
+      os_pid = pid_file |> File.read!() |> String.trim()
+      on_exit(fn -> kill_leftover(os_pid) end)
+
+      port =
+        Enum.find(Port.list(), &(Port.info(&1, :os_pid) == {:os_pid, String.to_integer(os_pid)}))
+
+      assert is_port(port)
+
+      watch = Process.monitor(caller)
+      Process.exit(caller, :kill)
+      assert_receive {:DOWN, ^watch, :process, ^caller, :killed}
+
+      assert gone_by?(os_pid, deadline), "the helper outlived its killed call"
+      assert closed_by?(port, deadline), "the helper's port outlived its killed call"
+    end
+
     test "a missing helper is not ready and refuses every search", ctx do
       missing = Path.join(ctx.dir, "absent/fermix-maps")
 
@@ -320,6 +354,152 @@ defmodule FermixCore.Tools.PlaceSearch.AppleMapsTest do
       assert {:error, ^reason, %{}} = AppleMaps.search(named(), opts)
 
       assert :ok = AppleMaps.ready(helper_path: helper, os_type: {:unix, :linux}, shim_path: nil)
+    end
+  end
+
+  # A trip day's town (M89): the helper reports the geocoder's own fields and
+  # the engine makes the town of them. Every name and number is invented.
+  @placemark %{
+    "name" => "Vessmark",
+    "locality" => "Vessmark",
+    "administrative_area" => "Ostrel",
+    "country" => "Varonia",
+    "latitude" => 41.2031,
+    "longitude" => -8.4417,
+    "radius_meters" => 6_412.7
+  }
+
+  describe "a town (town/1, pure)" do
+    test "the name is the geocoder's own fields, each said once, and the point is the placemark's" do
+      assert AppleMaps.town(@placemark) ==
+               {:ok,
+                %{
+                  name: "Vessmark, Ostrel, Varonia",
+                  latitude: 41.2031,
+                  longitude: -8.4417,
+                  radius_meters: 6_413
+                }}
+    end
+
+    test "a part equal to the one before it, in any case, is dropped; a blank one too" do
+      same = %{@placemark | "administrative_area" => "VESSMARK", "locality" => " "}
+      assert {:ok, %{name: "Vessmark, Varonia"}} = AppleMaps.town(same)
+
+      misread = %{@placemark | "name" => "Brisa", "locality" => "Kestrin"}
+      assert {:ok, %{name: "Brisa, Kestrin, Ostrel, Varonia"}} = AppleMaps.town(misread)
+
+      unnamed = Map.delete(@placemark, "name")
+      assert {:ok, %{name: "Vessmark, Ostrel, Varonia"}} = AppleMaps.town(unnamed)
+    end
+
+    test "the radius is the geocoder's own, rounded and at least 1 m" do
+      assert {:ok, %{radius_meters: 1}} = AppleMaps.town(%{@placemark | "radius_meters" => 0.2})
+
+      assert {:ok, %{radius_meters: 1_273_000}} =
+               AppleMaps.town(%{@placemark | "radius_meters" => 1_273_000.4})
+    end
+
+    test "a placemark with neither a locality nor an administrative area is no town" do
+      country = Map.drop(@placemark, ["locality", "administrative_area"])
+      assert {:error, "not_a_town: " <> _words} = AppleMaps.town(country)
+
+      assert {:ok, %{name: "Ostrel, Varonia"}} =
+               AppleMaps.town(Map.drop(@placemark, ["name", "locality"]))
+    end
+
+    test "a placemark with no region of its own is no town: no radius is invented" do
+      assert {:error, "not_a_town: " <> _words} =
+               AppleMaps.town(Map.delete(@placemark, "radius_meters"))
+    end
+
+    # An ocean or a continent is no town, kept as none, so it leaves the
+    # placer's window rather than being asked on every run.
+    test "a region wider than any town's, or a country with one, is no town, never a changed parser" do
+      assert {:error, "not_a_town: " <> _words} =
+               AppleMaps.town(%{@placemark | "radius_meters" => 30_000_000})
+
+      country =
+        @placemark
+        |> Map.drop(["locality", "administrative_area"])
+        |> Map.put("radius_meters", 30_000_000)
+
+      assert {:error, "not_a_town: " <> _words} = AppleMaps.town(country)
+    end
+
+    test "a name of nothing but control characters is no town" do
+      blank = %{
+        "locality" => "\u0090",
+        "latitude" => 41.2031,
+        "longitude" => -8.4417,
+        "radius_meters" => 6_412.7
+      }
+
+      assert {:error, "not_a_town: " <> _words} = AppleMaps.town(blank)
+    end
+
+    test "a name is sanitized and cut to 120 bytes on a character boundary" do
+      long = String.duplicate("Ostrelândia ", 20)
+      assert {:ok, %{name: name}} = AppleMaps.town(%{@placemark | "administrative_area" => long})
+      assert byte_size(name) <= 120 and String.valid?(name)
+      assert String.starts_with?(name, "Vessmark, Ostrelândia")
+
+      # No control character: the wire's reserve for a town counts on it.
+      control = %{@placemark | "country" => "Varo\u0001nia\u007F"}
+      assert {:ok, %{name: "Vessmark, Ostrel, Varonia"}} = AppleMaps.town(control)
+
+      tagged = %{@placemark | "name" => "<b>Vessmark</b>", "locality" => nil}
+      assert {:ok, %{name: "Vessmark, Ostrel, Varonia"}} = AppleMaps.town(tagged)
+    end
+
+    test "a field of an unexpected type, or a point out of range, is a changed parser" do
+      for broken <- [
+            %{@placemark | "latitude" => "41.2"},
+            %{@placemark | "latitude" => 91},
+            Map.delete(@placemark, "longitude"),
+            %{@placemark | "country" => 7},
+            %{@placemark | "radius_meters" => -3},
+            %{@placemark | "radius_meters" => "6 km"},
+            "Vessmark"
+          ] do
+        assert {:error, "parser_changed: " <> _detail} = AppleMaps.town(broken),
+               "#{inspect(broken)} was read as a town"
+      end
+    end
+  end
+
+  describe "the geocode request" do
+    test "a near travels alone as one geocode line on stdin, and its placemark is the town",
+         ctx do
+      helper = fake_helper(ctx.dir, %{"placemark" => @placemark}, 0)
+
+      assert {:ok, %{name: "Vessmark, Ostrel, Varonia", radius_meters: 6_413}, %{}} =
+               AppleMaps.geocode("Vessmark, Ostrel, Varonia", helper_opts(helper))
+
+      assert recorded_request(ctx.dir) == %{"geocode" => "Vessmark, Ostrel, Varonia"}
+      assert recorded_args(ctx.dir) == []
+    end
+
+    test "a near the geocoder finds no place by is invalid_location, as a search's", ctx do
+      words = %{"error" => %{"message" => "kCLErrorDomain 8: no result"}}
+      helper = fake_helper(ctx.dir, words, 65)
+
+      assert {:error, "invalid_location: Apple Maps found no place by that name" <> _, %{}} =
+               AppleMaps.geocode("Vessmark", helper_opts(helper))
+    end
+
+    test "a placemark that is no town, or stdout that is no placemark, is an error", ctx do
+      country = Map.drop(@placemark, ["locality", "administrative_area"])
+      helper = fake_helper(ctx.dir, %{"placemark" => country}, 0)
+
+      assert {:error, "not_a_town: " <> _words, %{}} =
+               AppleMaps.geocode("Varonia", helper_opts(helper))
+
+      for stdout <- ["not json", %{"places" => []}, %{"placemark" => "Vessmark"}] do
+        helper = fake_helper(ctx.dir, stdout, 0)
+
+        assert {:error, "parser_changed: " <> _detail, %{}} =
+                 AppleMaps.geocode("Vessmark", helper_opts(helper))
+      end
     end
   end
 
@@ -368,6 +548,48 @@ defmodule FermixCore.Tools.PlaceSearch.AppleMapsTest do
         # sleep: the interval between two looks at a pid the kernel has not reaped yet
         Process.sleep(25)
         gone_by?(os_pid, deadline)
+    end
+  end
+
+  # The helper writes its pid once it runs. A bounded look, since it starts
+  # on the kernel's schedule.
+  defp written_by?(path, deadline) do
+    cond do
+      File.exists?(path) ->
+        true
+
+      System.monotonic_time(:millisecond) > deadline ->
+        false
+
+      true ->
+        # sleep: the interval between two looks for a file the helper has not written yet
+        Process.sleep(25)
+        written_by?(path, deadline)
+    end
+  end
+
+  # A port closes once its helper is killed or it is closed. A bounded look.
+  defp closed_by?(port, deadline) do
+    cond do
+      Port.info(port) == nil ->
+        true
+
+      System.monotonic_time(:millisecond) > deadline ->
+        false
+
+      true ->
+        # sleep: the interval between two looks at a port the runtime has not closed yet
+        Process.sleep(25)
+        closed_by?(port, deadline)
+    end
+  end
+
+  # A helper a failing run left behind holds the test's stderr open: it goes,
+  # and only while its pid still names the stand-in's sleep.
+  defp kill_leftover(os_pid) do
+    case System.cmd("ps", ["-p", os_pid, "-o", "command="], stderr_to_stdout: true) do
+      {"sleep 3600\n", 0} -> System.cmd("kill", ["-9", os_pid], stderr_to_stdout: true)
+      _gone -> :ok
     end
   end
 

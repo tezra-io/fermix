@@ -41,15 +41,14 @@ defmodule FermixCore.Checklists.Ops do
   """
 
   alias FermixCore.Checklists.Render
+  alias FermixCore.Kept.Ids
+  alias FermixCore.Kept.Positions
 
-  @gap 1_024
   @max_lists 50
   # The only ops a call that read outside content may run (§11): an allow-list,
   # so an op added later is refused there until it is ruled on.
   @outside_ops [:add, :check]
   @max_rows 500
-  @id_alphabet ~c"0123456789abcdefghjkmnpqrstvwxyz"
-  @list_id ~r/\Ack_[0-9a-z]{10}\z/
 
   @typedoc "One list as the store holds it, with what this call did to it."
   @type list_meta :: %{
@@ -80,18 +79,6 @@ defmodule FermixCore.Checklists.Ops do
   @spec max_rows() :: pos_integer()
   def max_rows, do: @max_rows
 
-  @doc "A new id: `prefix` and ten lowercase base32 characters."
-  @spec new_id(String.t()) :: String.t()
-  def new_id(prefix) when prefix in ["ck_", "ci_"] do
-    suffix =
-      10
-      |> :crypto.strong_rand_bytes()
-      |> :binary.bin_to_list()
-      |> Enum.map(&Enum.at(@id_alphabet, rem(&1, 32)))
-
-    prefix <> List.to_string(suffix)
-  end
-
   @doc """
   The live list `ref` names: its id, or its title compared case-blind, which
   names one list because titles are unique that way.
@@ -105,7 +92,7 @@ defmodule FermixCore.Checklists.Ops do
   end
 
   defp names?(list, ref) do
-    if Regex.match?(@list_id, ref), do: list.id == ref, else: same_words?(list.title, ref)
+    if Ids.valid?(ref, "ck_"), do: list.id == ref, else: same_words?(list.title, ref)
   end
 
   @doc """
@@ -268,18 +255,18 @@ defmodule FermixCore.Checklists.Ops do
     cond do
       length(lists) >= @max_lists -> {:error, :too_many_lists}
       title_taken?(lists, title, nil) -> {:error, {:title_taken, title}}
-      true -> put_new_list(state, new_id("ck_"), {title, folder_spelling(lists, folder)}, edit)
+      true -> put_new_list(state, Ids.new("ck_"), {title, folder_spelling(lists, folder)}, edit)
     end
   end
 
   defp put_new_list(state, id, {title, folder}, edit) do
-    last = state.lists |> Map.values() |> Enum.map(& &1.position) |> Enum.max(fn -> 0 end)
+    positions = state.lists |> Map.values() |> Enum.map(& &1.position)
 
     list = %{
       id: id,
       title: title,
       folder: folder,
-      position: last + @gap,
+      position: Positions.after_last(positions),
       rev: 0,
       next_n: 1,
       created_at: edit.now,
@@ -495,7 +482,7 @@ defmodule FermixCore.Checklists.Ops do
     list = list(state, id)
 
     row = %{
-      id: new_id("ci_"),
+      id: Ids.new("ci_"),
       checklist_id: id,
       n: list.next_n,
       kind: kind,
@@ -665,7 +652,7 @@ defmodule FermixCore.Checklists.Ops do
       gone = Enum.map(removed, &(%{&1 | updated_at: edit.now} |> Map.put(:removed_at, edit.now)))
 
       state
-      |> put_rows(id, renumber(rows, edit.now))
+      |> put_rows(id, Positions.renumber(rows, edit.now))
       |> Map.update!(:removed_rows, &(gone ++ &1))
       |> event(id, replaced_words(tally, length(gone)))
       |> changed(id)
@@ -787,30 +774,8 @@ defmodule FermixCore.Checklists.Ops do
     end
   end
 
-  defp insert(state, id, index, row, now) do
-    rows = rows(state, id)
-    previous = if index == 0, do: 0, else: Enum.at(rows, index - 1).position
-    next = rows |> Enum.at(index) |> next_position(previous)
-
-    placed =
-      if next - previous >= 2,
-        do: List.insert_at(rows, index, %{row | position: previous + div(next - previous, 2)}),
-        else: rows |> List.insert_at(index, row) |> renumber(now)
-
-    put_rows(state, id, placed)
-  end
-
-  defp next_position(nil, previous), do: previous + 2 * @gap
-  defp next_position(row, _previous), do: row.position
-
-  defp renumber(rows, now) do
-    rows
-    |> Enum.with_index(1)
-    |> Enum.map(fn {row, i} -> renumbered(row, i * @gap, now) end)
-  end
-
-  defp renumbered(%{position: position} = row, position, _now), do: row
-  defp renumbered(row, position, now), do: dirty(%{row | position: position}, now)
+  defp insert(state, id, index, row, now),
+    do: put_rows(state, id, Positions.insert(rows(state, id), index, row, now))
 
   # --- lookups and bookkeeping -----------------------------------------------
 

@@ -22,10 +22,11 @@
 
 The SOURCE pins name the code the design replaces: `Mobile.Push`, the push
 scheduling in `Channels.Mobile`, the `DeviceRegistry`, the socket's `ack`
-handler and the transport's idle timeout. When stage D2 of M51 lands, those
-files change, the spec goes STALE, and it is re-read against the
-implementation. The phone app lives in another repository and has no pin. Its
-rules are M51 §7, §8.2, §10 and §12.5.
+handler, the transport's idle timeout, and the attempts of a phone's send
+through the push relay (`Push.RelayLeg`, `PushRelay.send/4`). When stage D2
+of M51 lands, those files change, the spec goes STALE, and it is re-read
+against the implementation. The phone app lives in another repository and
+has no pin. Its rules are M51 §7, §8.2, §10 and §12.5.
 
 Time is abstract. The task's one wait of 5 s is "the decision has not run
 yet". The 2 s, 10 s and 30 s between attempts are "the next attempt has not
@@ -47,7 +48,7 @@ shows up as a broken `ChatAccounted` instead.
 
 | Switch | When `TRUE` |
 |---|---|
-| `SocketsCanFreeze` | The OS suspends an app with no clean close. The daemon keeps its socket registered until the 150 s idle timeout (`Session.idle_timeout_ms`, `session.ex:159`), which the WebSocket (`router.ex:53-60`) and the iroh bridge connection (`bridge_connection.ex:199-206`) both apply. |
+| `SocketsCanFreeze` | The OS suspends an app with no clean close. The daemon keeps its socket registered until the 150 s idle timeout (`Session.idle_timeout_ms`, `session.ex:301`), which the WebSocket (`router.ex:53-60`) and the iroh bridge connection (`bridge_connection.ex:233-241`) both apply. |
 | `DispatchCanFail` | A dispatcher call returns a transient error. |
 | `AnswerCanBeLost` | The platform accepted a push and the daemon saw a timeout instead. |
 | `DaemonCanCrash` | The daemon dies with push tasks in flight, and boots again. |
@@ -58,11 +59,11 @@ one check):
 
 | Switch | The design | Switched off |
 |---|---|---|
-| `DecidesOnEvidence` | D20: the decision reads the read frontier and each device's acked cursor. | **Today's code:** one registered socket of the profile suppresses the push for every device (`push.ex:172`, `:444-454`). |
+| `DecidesOnEvidence` | D20: the decision reads the read frontier and each device's acked cursor. | **Today's code:** a phone whose socket is registered is not pushed, and the phones beside it are (`away_decision`, `push.ex:216-233`; `connected_devices`, `:572-584`). |
 | `AcksAfterAnnounce` | The app acks a row once it has announced it: shown it on screen, or posted its notification. | The design's first draft: the app acks as soon as the row is persisted (PUSH-2). |
 | `LocalNotify` | The app posts the notification itself for a row that arrives while its chat is off screen. | The row is only listed. |
 | `NotifiedSet` | D22: the app announces an id once, whichever path brought it. | Every arrival alerts. |
-| `RetriesTransient` | D21: a transient dispatcher error is retried. | **Today's code:** one attempt, its failure logged (`notify_timeline_row`, `channels/mobile.ex:575-582`). |
+| `RetriesTransient` | D21: a transient dispatcher error is retried. | **Today's code for an iPhone:** one APNs attempt, its failure logged (`notify_timeline_row`, `channels/mobile.ex:602-609`). A phone's send through the relay retries; see "What today's code does". |
 | `AttemptCap` | D21: at most three attempts per device. | The retry has no bound. |
 | `BootCheck` | D21: a boot step reads `push_attempted_seq` and decides once for the newest unread row above it. | **Today's code:** nothing runs at boot. |
 
@@ -87,8 +88,10 @@ one check):
 - Check 06, with every fault on, 194,363 states: a reply the owner has not
   read is in the end announced on every phone, held by the push platform for
   it, or given up with a logged failure (`ChatAccounted`). This rests on:
-  - `DecidesOnEvidence` (check 07). With presence, the phone in the owner's
-    hand silences the push to the idle phone.
+  - `DecidesOnEvidence` (check 07). With presence, a phone frozen before it
+    announced the reply, its socket still registered when the decision
+    runs, silences its own push, and nothing tells its owner until the app
+    is opened.
   - `AcksAfterAnnounce` (check 08). See PUSH-2.
   - `LocalNotify` (check 09). A phone with the app open on another screen
     acks the row, so the daemon skips it. Only the app can tell its owner.
@@ -138,11 +141,19 @@ not run.
 
 Three mechanism switches are today's code when switched off. Their checks are
 therefore also the statement of what today's code gets wrong:
-- **Presence** (`DecidesOnEvidence`, checks 05 and 07). A phone with a socket,
-  frozen or on another screen, silences the push to every device of the
-  profile (M51 R18).
-- **One attempt** (`RetriesTransient`, check 04). A transient dispatcher error
-  ends the push (M51 R19).
+- **Presence** (`DecidesOnEvidence`, checks 05 and 07). A phone whose socket
+  is registered when the decision runs is not pushed, though it may not have
+  announced the reply: frozen before it did, or gone before it took the row
+  off its socket (M51 R18). Since `883e6e4b` the phone silences only
+  itself, and the phones beside it are pushed.
+- **One attempt** (`RetriesTransient`, check 04), for an iPhone. A transient
+  APNs error ends the push (M51 R19). A phone's one send through the relay
+  (`PushRelay.send/4`) tries the relay's `busy`, `unavailable` or
+  `permission`, the gateway's 429 or 5xx, or a transport error again, at
+  most three attempts, none starting a minute or more after the first: the
+  retry and the cap of D21, inside one call. A wait that would reach the
+  minute ends it sooner, which `GivesUpOnlyAfterThree` does not allow; the
+  spec has no clock, and does not model that bound.
 - **Nothing at boot** (`BootCheck`, checks 10 and 12). A crash inside the
   task's wait or between attempts loses the push (M51 R19).
 
@@ -168,7 +179,7 @@ Today's app-side rules are the iOS app's and are not pinned here.
 
 Re-read on 2026-10-17 against M60 (cues and watchers, not yet committed on
 `release/0.17.0`), which staled the `mobile.ex` pin: `delivered_effects`
-(`channels/mobile.ex:496-501`) skips the link-preview fetch when a send
+(`channels/mobile.ex:517-522`) skips the link-preview fetch when a send
 passes `link_previews: false` (a cue run's message, M60 §9.5,
 `schedule_previews`, `:503-506`). The push launch beside it is unchanged, and
 no push rule reads a preview, so nothing the spec models changed. Re-read
@@ -218,6 +229,74 @@ returned rather than its `server_seq`, so a phone's `text_done` carries the
 row's time as `ts`. The event, its row and the push decisions after it are
 as before, so nothing the spec models changed, and no line the spec cites
 moved.
+
+Re-read on 2026-11-09 for a phone's list channel (M85 E4), which staled the
+`mobile.ex` pin: `delivered_text` passes `Output.text_done` the reply's
+blocks, which a turn's reply now takes from its tools' list and place records
+before its row is written, as a Mac turn's does. The row, its event, the
+sockets it reaches and the push decisions after it are as before, so nothing
+the spec models changed. The comments' `mobile.ex` and `session.ex` numbers,
+which had drifted since the phone's call, now point at the committed files.
+
+Re-read on 2026-11-14 for push through Fermix's relay (M99 S2, `883e6e4b`),
+which staled the `push.ex`, `device_registry.ex` and `session.ex` pins. Its
+decision is the one `81b3fc25` brought with direct Web Push and `c31c1804`
+took away, which this spec read on 2026-11-13 and set back on its removal
+(`4a805398`); the route is now the relay. What it changed, and what that
+does to the model:
+- **The decision is per phone.** `Mobile.Push.notify` (`push.ex:164-183`)
+  leaves out each phone `DeviceRegistry` lists as connected for the profile
+  (`away_decision`, `:216-225`); with none left nobody is pushed
+  (`decide_away`, `:230`), else the read frontier decides for every phone
+  (`read_decision`, `:235-244`), else each phone left out is pushed. Before,
+  one socket of the profile silenced every phone. That is the step
+  `Decision` takes with `DecidesOnEvidence` off, and the one modelled step
+  that changed: `EverySocket` in place of `AnySocket`, and a phone with a
+  registered socket marked `presence` alone. The design's branch is
+  unchanged, so every `holds` check, witness and PUSH-1 keep their verdicts
+  and state counts, and no expectation moved. Check 05 still breaks
+  `SkippedOnlyOnEvidence` at the decision itself in 5 states, now with the
+  phone in the owner's hand marked `presence` and the idle phone `pending`
+  (both were `presence`). Check 07 still breaks `ChatAccounted`, by another
+  path: the idle phone is now pushed, and the reply is lost instead on the
+  phone in the owner's hand, which took the row as it connected and froze
+  before it announced it, its socket still registered when the decision
+  ran, so it was left out, and nothing tells its owner until the app is
+  opened. That is M51 R18 narrowed to the phone itself, not a new finding.
+- **Two routes, one platform.** Each phone left out has one route, by what
+  it registered: the relay for a phone holding a subscription
+  (`Push.RelayLeg`, one `PushRelay.send/4` each, the phones sent beside one
+  another, eight at a time at most), APNs for an iPhone holding only a
+  token, and a refusal by name for any other; the APNs config, off or
+  broken, stops the APNs route alone. The spec does not model a phone's
+  route: the push platform is whichever service the route reaches, and it
+  holds what it accepted (`atPlatform`), a row's push for a day (the TTL,
+  not modelled). An iPhone still gets one attempt. A relay send retries
+  (What today's code does): `RetriesTransient` and `AttemptCap` for that
+  route, inside one call, lost with the daemon as any task is (`BootCheck`
+  off). Its one-minute bound is a clock the spec does not have. An answer
+  whose word names a fault, or a status the relay does not retry, is logged
+  and not tried again, terminal as `UNREGISTERED` is, and not modelled.
+- **Registration.** `dispatch_event`'s `push_register` and `push_unregister`
+  now write a phone's whole registration, and `push_subscribe` writes a
+  relay subscription, refused where the session was not told `fcm` and
+  written only when it differs from the phone's row. Of the relay's
+  answers, `gone` alone clears a subscription, until the phone next
+  connects. The spec models no registration: a device is registered
+  throughout. The `ack` clause, `terminate` and `idle_timeout_ms` are
+  unchanged.
+- **The registry's new fact.** `DeviceRegistry` holds in memory whether the
+  relay could be reached when last asked: `relay_outcome/2`, a cast the leg
+  sends once its phones settle, and `push_relay/1`, a call the channel's
+  status and Doctor make. It changes no socket entry, attach, `:DOWN` or
+  broadcast, and no push decision reads it, so no variable here moves.
+- **The pins** gain `push_relay_leg.ex#deliver,send_all` and
+  `push_relay.ex#send,deliver,classify,classify_answer,settle,next_step,@max_attempts,@budget_ms,@retried_words`,
+  the attempts the switch tables now cite for a phone sent through the
+  relay. The comments' `push.ex`, `session.ex` and `device_registry.ex`
+  numbers point at the commit, and `end_phone_turn`'s `event_router.ex`
+  number, which `4a805398` set back to one that no longer named it, is
+  `:197-202` again.
 
 ## What the spec changed in the design
 
@@ -316,8 +395,17 @@ connects. The paths below are the short ones.
   deduplicates them by id in the same notified set. What is theirs alone (no
   retry past `expires_at`, a late approval shown as expired) is a single-call
   rule.
-- **`push_unregister`, `UNREGISTERED` / `NOT_FOUND` and a device with no
-  token.** A device is registered throughout.
+- **Registration:** `push_register`, `push_subscribe` and `push_unregister`,
+  each a phone's whole registration; `UNREGISTERED` / `NOT_FOUND`, the
+  relay's `gone` and its answers that name a fault, terminal before any
+  retry, `gone` alone clearing the phone's registration until it next
+  connects; and a device with no token. A device is registered throughout.
+- **A phone's route:** the push relay for a phone holding a subscription,
+  APNs for an iPhone holding a token, a refusal by name for any other. The
+  push platform is whichever service the route reaches. Push turned off,
+  the APNs config, which stops the APNs route alone, and what the relay said
+  of itself, which the `DeviceRegistry` holds for the status and Doctor, are
+  outside the spec.
 - **The push TTL (24 h)** and the boot check's "younger than the TTL".
 - **The plaintext, its padding and the encryption.** These are single-call
   rules, pinned by `push_vectors.json`.
@@ -349,3 +437,14 @@ connects. The paths below are the short ones.
   doing. A push the platform never delivers is one that stays there.
 - **A phone knows the read frontier only while it has a socket.** Away from
   it, a push for a row read elsewhere alerts (witness 16).
+
+## Re-read for voice from a computer (M97 stage A, 2026-11-14)
+
+`4c58837a` staled the `session.ex` pin of `dispatch_event`: a session opens
+its call at an endpoint it builds (`call_endpoint/1`: the phone's device, or
+`computer:<id>` for a linked computer's desktop session), where it passed the
+device id. A desktop session now carries the app's calls bridged to the
+server; a call is no state this spec reads, and the acked cursor, the read
+frontier, the push decision, its retries and the boot step are as before. No
+modelled step changed; the cited `session.ex` lines point at the committed
+code.

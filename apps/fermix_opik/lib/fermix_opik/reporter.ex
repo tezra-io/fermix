@@ -64,6 +64,9 @@ defmodule FermixOpik.Reporter do
     [:fermix, :voice_live, :delegation_stop],
     [:fermix, :voice_live, :provider_error],
     [:fermix, :voice_live, :call_stop],
+    [:fermix, :voice_live, :phone_detached],
+    [:fermix, :voice_live, :phone_resumed],
+    [:fermix, :accessory, :call_link],
     [:fermix, :voice_gist, :run_start],
     [:fermix, :voice_gist, :run_complete],
     [:fermix, :voice_gist, :run_error],
@@ -85,10 +88,18 @@ defmodule FermixOpik.Reporter do
     [:fermix, :computer_use, :session_error],
     [:fermix, :computer_use, :session_pause],
     [:fermix, :computer_use, :session_resume],
+    [:fermix, :computer_invocation, :start],
+    [:fermix, :computer_invocation, :complete],
+    [:fermix, :computer_invocation, :error],
     [:fermix, :timeout, :expired],
     [:fermix, :attachment, :save],
     [:fermix, :checklist, :read],
-    [:fermix, :checklist, :edit]
+    [:fermix, :checklist, :edit],
+    [:fermix, :trip, :read],
+    [:fermix, :trip, :edit],
+    [:fermix, :trip_place, :run_start],
+    [:fermix, :trip_place, :run_complete],
+    [:fermix, :trip_place, :run_error]
   ]
 
   @handler_id "fermix-opik-reporter"

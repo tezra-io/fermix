@@ -1,0 +1,1034 @@
+defmodule FermixCore.Memory.Repo.TripsSql do
+  @moduledoc """
+  The store's half of the owner's trips (M89 §05), served by
+  `FermixCore.Memory.Repo.trips_call/2`. Every function that takes a `conn`
+  runs only from the Repo's `handle_call`, so the single writer is unchanged
+  and one `trip_edit` call is one transaction against every other Repo caller.
+  What an op means is `FermixCore.Trips.Ops`, a pure module this one hands the
+  loaded rows to inside the transaction; this module only reads, writes and
+  purges rows.
+
+  A trip is a row of `trips`; its days and stops are rows of `trip_rows`,
+  ordered by `position` and numbered by `n`, which the trip's `next_n` hands
+  out and never takes back. A removed row or trip keeps its `removed_at`, and
+  a stop removed with its day keeps the day's id in `removed_with`: rows
+  removed more than 30 days ago are deleted in the same transaction as the
+  next edit of their trip, and trips by the sweep when the store opens
+  (`{:purge_removed_trips, now}`). A device's edit is applied once by its
+  `client_msg_id`, its receipt in the table the lists' edits use, by kind
+  (`KeptSql.once/4`). The transaction, the statement helpers and the 30-day
+  cutoff are what every kept kind shares (`Memory.Repo.KeptSql`).
+
+  Rows are selected by column name and decoded by name (`decode_row/1`) into
+  the map `Trips.Ops` names `row`.
+
+  Migration 64 (D10) adds `near` to both tables (`near_columns/0`): the
+  place's name a trip, or one of its days, is searched near; a stop has none.
+
+  Migration 65 (D13 B) adds `trip_waits` (`waits_schema_sql/0`): beside a
+  stop, the place words a call could not look up for a reason that heals by
+  waiting, when it began waiting, its reason, how many times the trip
+  placer tried it, when it is next due (`due_at`, nil for now; a try that
+  reached the place search pushes it back) and whether its call had read
+  outside content (`outside`, so the stop is marked when it is placed, D9),
+  never on a device's wire (`Trips.Waiting`); a model's read of the trip
+  marks each waiting stop (`{:read_trip, ...}`'s `waiting`). Every edit
+  keeps them in its own transaction, whoever makes it: it ends the waits its
+  ops end and saves the ones its lookups left (`keep_waits/5`). The placer
+  takes the oldest that are due (`{:take_waits, now, limit}`, ending those
+  past the age cap first) and writes what its lookups found for one trip in one transaction
+  (`{:place_waiting, ...}`), each wait first checked to stand as it was read,
+  so a newer choice is never overwritten.
+
+  Migration 66 (M89) adds `trip_towns` (`towns_schema_sql/0`): beside a
+  trip, the town each near in force names, by the near's exact words,
+  `found` with the geocoder's town or `none` when the search found no town
+  by them; a near with no row is not resolved (`Trips.Towns`). Keyed by the
+  words, a row can only ever be the town of the words it was found for,
+  whoever changed the near since. Every edit clears, in its own transaction,
+  the rows whose words neither the trip nor any of its days (live, or
+  removed and kept) still names, and keeps the towns its call found
+  (`keep_towns/3`); a change that found towns and changed nothing else moves
+  the trip's `rev` once, as the placer's write does (`{:settle_towns, ...}`),
+  so the owner's devices are told. A read hands the towns with the trip
+  (`{:read_trip, ...}` every row, `{:trip_by_id, ...}` the found ones, which
+  `Trips.Wire` puts on each day), and the placer asks for the nears in force
+  that have no row (`{:unresolved_towns, limit}`).
+  """
+
+  alias FermixCore.Memory.Repo.KeptSql
+  alias FermixCore.Memory.Repo.TemporalSql
+  alias FermixCore.Trips.Ops
+  alias FermixCore.Trips.Towns
+  alias FermixCore.Trips.Waiting
+
+  @trip_columns ~w(id owner_id agent_id title starts_on timezone position rev next_n created_at
+                   updated_at removed_at near)a
+  @row_columns ~w(id trip_id n kind text note local_time duration_min fixed timezone place_json
+                  position added_after_outside_content made_via created_at updated_at removed_at
+                  removed_with near)a
+  @trip_select Enum.map_join(@trip_columns, ", ", &Atom.to_string/1)
+  @row_select Enum.map_join(@row_columns, ", ", &Atom.to_string/1)
+  @trip_placeholders Enum.map_join(@trip_columns, ", ", fn _column -> "?" end)
+  @row_placeholders Enum.map_join(@row_columns, ", ", fn _column -> "?" end)
+
+  @schema_sql """
+  CREATE TABLE IF NOT EXISTS trips (
+    id TEXT PRIMARY KEY,                           -- "tr_" + ten base32 characters
+    owner_id TEXT NOT NULL DEFAULT 'default',
+    agent_id TEXT NOT NULL DEFAULT 'main',
+    title TEXT NOT NULL CHECK (length(title) BETWEEN 1 AND 80),
+    starts_on TEXT CHECK (
+      starts_on IS NULL OR starts_on GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]'
+    ),
+    timezone TEXT CHECK (timezone IS NULL OR length(timezone) BETWEEN 1 AND 64),
+    position INTEGER NOT NULL,                     -- order in the picker
+    rev INTEGER NOT NULL DEFAULT 0 CHECK (rev >= 0),
+    next_n INTEGER NOT NULL DEFAULT 1 CHECK (next_n >= 1),
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    removed_at TEXT
+  );
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_trips_live_title
+    ON trips(owner_id, agent_id, lower(title)) WHERE removed_at IS NULL;
+  CREATE INDEX IF NOT EXISTS idx_trips_owner ON trips(owner_id, agent_id, removed_at, position);
+
+  CREATE TABLE IF NOT EXISTS trip_rows (
+    id TEXT PRIMARY KEY,                           -- "ti_" + ten base32 characters
+    trip_id TEXT NOT NULL REFERENCES trips(id) ON DELETE CASCADE,
+    n INTEGER NOT NULL CHECK (n >= 1),             -- the row's number in its trip
+    kind TEXT NOT NULL CHECK (kind IN ('day', 'stop')),
+    text TEXT NOT NULL CHECK (length(text) <= 200),
+    note TEXT CHECK (note IS NULL OR length(note) BETWEEN 1 AND 1000),
+    local_time TEXT CHECK (local_time IS NULL OR local_time GLOB '[0-2][0-9]:[0-5][0-9]'),
+    duration_min INTEGER CHECK (duration_min IS NULL OR duration_min BETWEEN 1 AND 1440),
+    fixed INTEGER NOT NULL DEFAULT 0 CHECK (fixed IN (0, 1)),
+    timezone TEXT CHECK (timezone IS NULL OR length(timezone) BETWEEN 1 AND 64),
+    place_json TEXT CHECK (
+      place_json IS NULL OR (json_valid(place_json) AND length(place_json) <= 4096)
+    ),
+    position INTEGER NOT NULL,                     -- gaps of 1,024, renumbered when one closes
+    added_after_outside_content INTEGER NOT NULL DEFAULT 0 CHECK (
+      added_after_outside_content IN (0, 1)
+    ),
+    made_via TEXT NOT NULL CHECK (made_via IN ('mac', 'phone', 'chat', 'job')),
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    removed_at TEXT,
+    removed_with TEXT CHECK (removed_with IS NULL OR removed_at IS NOT NULL),
+    UNIQUE (trip_id, n),
+    CHECK (kind = 'stop' OR (length(text) <= 80 AND note IS NULL AND local_time IS NULL
+      AND duration_min IS NULL AND fixed = 0 AND place_json IS NULL)),
+    CHECK (kind = 'day' OR (length(text) >= 1 AND timezone IS NULL))
+  );
+  CREATE INDEX IF NOT EXISTS idx_trip_rows_trip ON trip_rows(trip_id, removed_at, position);
+  """
+
+  @waits_schema_sql """
+  CREATE TABLE IF NOT EXISTS trip_waits (
+    row_id TEXT PRIMARY KEY REFERENCES trip_rows(id) ON DELETE CASCADE,
+    trip_id TEXT NOT NULL REFERENCES trips(id) ON DELETE CASCADE,
+    words TEXT NOT NULL CHECK (length(words) BETWEEN 1 AND 200),
+    reason TEXT NOT NULL CHECK (
+      reason IN ('computer_away', 'computer_timed_out', 'computer_busy', 'rate_limited', 'deadline')
+    ),
+    since TEXT NOT NULL,
+    tries INTEGER NOT NULL DEFAULT 0 CHECK (tries >= 0),
+    outside INTEGER NOT NULL DEFAULT 0 CHECK (outside IN (0, 1)),
+    due_at TEXT
+  );
+  CREATE INDEX IF NOT EXISTS idx_trip_waits_since ON trip_waits(since, row_id);
+  CREATE INDEX IF NOT EXISTS idx_trip_waits_trip ON trip_waits(trip_id);
+  """
+
+  @towns_schema_sql """
+  CREATE TABLE IF NOT EXISTS trip_towns (
+    trip_id TEXT NOT NULL REFERENCES trips(id) ON DELETE CASCADE,
+    words TEXT NOT NULL CHECK (length(words) BETWEEN 1 AND 200),  -- the near, exactly
+    state TEXT NOT NULL CHECK (state IN ('found', 'none')),
+    name TEXT CHECK (name IS NULL OR (typeof(name) = 'text'
+      AND length(CAST(name AS BLOB)) BETWEEN 1 AND 120)),
+    latitude REAL CHECK (latitude IS NULL OR latitude BETWEEN -90 AND 90),
+    longitude REAL CHECK (longitude IS NULL OR longitude BETWEEN -180 AND 180),
+    radius_meters INTEGER CHECK (radius_meters IS NULL OR radius_meters BETWEEN 1 AND 20037509),
+    PRIMARY KEY (trip_id, words),
+    CHECK ((state = 'found') = (name IS NOT NULL AND latitude IS NOT NULL
+      AND longitude IS NOT NULL AND radius_meters IS NOT NULL)),
+    CHECK (state = 'found' OR (name IS NULL AND latitude IS NULL AND longitude IS NULL
+      AND radius_meters IS NULL))
+  );
+  """
+
+  @wait_select """
+  SELECT w.row_id, w.trip_id, t.owner_id, t.agent_id, w.words, w.reason, w.since, w.tries,
+    w.outside, w.due_at
+  FROM trip_waits AS w JOIN trips AS t ON t.id = w.trip_id
+  """
+
+  @doc "The two tables and their indexes, as migration 63 creates them."
+  @spec schema_sql() :: String.t()
+  def schema_sql, do: @schema_sql
+
+  @doc "The waiting stops' table and its indexes, as migration 65 creates them."
+  @spec waits_schema_sql() :: String.t()
+  def waits_schema_sql, do: @waits_schema_sql
+
+  @doc "The towns' table, as migration 66 creates it."
+  @spec towns_schema_sql() :: String.t()
+  def towns_schema_sql, do: @towns_schema_sql
+
+  @doc """
+  What migration 64 adds, a table at a time: `near` on a trip, and on a day
+  row only, each at most 200 characters, as `Memory.Repo`'s column adder takes
+  it (the columns before and after, and the statement that adds it).
+  """
+  @spec near_columns() :: [
+          {String.t(), %{before: [String.t()], after: [String.t()], sql: String.t()}}
+        ]
+  def near_columns do
+    trips = Enum.map(@trip_columns -- [:near], &Atom.to_string/1)
+    rows = Enum.map(@row_columns -- [:near], &Atom.to_string/1)
+
+    [
+      {"trips",
+       %{
+         before: trips,
+         after: trips ++ ["near"],
+         sql:
+           "ALTER TABLE trips ADD COLUMN near TEXT " <>
+             "CHECK (near IS NULL OR length(near) BETWEEN 1 AND 200);"
+       }},
+      {"trip_rows",
+       %{
+         before: rows,
+         after: rows ++ ["near"],
+         sql:
+           "ALTER TABLE trip_rows ADD COLUMN near TEXT " <>
+             "CHECK (near IS NULL OR (kind = 'day' AND length(near) BETWEEN 1 AND 200));"
+       }}
+    ]
+  end
+
+  # --- requests (single-writer process) ------------------------------------
+
+  @doc "Serves one request about the owner's trips on the Repo's connection."
+  @spec handle(term(), tuple()) :: {:ok, term()} | {:error, term()}
+  def handle(conn, {:index, owner_id, agent_id}), do: index(conn, owner_id, agent_id)
+
+  def handle(conn, {:read_trip, owner_id, agent_id, ref}),
+    do: read_trip(conn, owner_id, agent_id, ref)
+
+  def handle(conn, {:trip_by_id, owner_id, agent_id, trip_id, removed?}),
+    do: trip_by_id(conn, owner_id, agent_id, trip_id, removed?)
+
+  def handle(conn, {:edit, owner_id, agent_id, call, edit}),
+    do: KeptSql.in_transaction(conn, fn -> edit(conn, {owner_id, agent_id}, call, edit) end)
+
+  def handle(conn, {:device_edit, owner_id, agent_id, client_msg_id, call, edit}) do
+    KeptSql.in_transaction(conn, fn ->
+      device_edit(conn, {owner_id, agent_id, client_msg_id}, call, edit)
+    end)
+  end
+
+  def handle(conn, {:purge_removed_trips, %DateTime{} = now}),
+    do: KeptSql.in_transaction(conn, fn -> purge_removed_trips(conn, now) end)
+
+  def handle(conn, {:take_waits, %DateTime{} = now, limit})
+      when is_integer(limit) and limit > 0,
+      do: KeptSql.in_transaction(conn, fn -> take_waits(conn, now, limit) end)
+
+  def handle(conn, {:place_waiting, owner_id, agent_id, trip_id, results, edit})
+      when is_binary(trip_id) and is_list(results) do
+    KeptSql.in_transaction(conn, fn ->
+      place_waiting(conn, {owner_id, agent_id}, trip_id, results, edit)
+    end)
+  end
+
+  def handle(conn, {:unresolved_towns, limit}) when is_integer(limit) and limit > 0,
+    do: unresolved_towns(conn, limit)
+
+  def handle(conn, {:settle_towns, owner_id, agent_id, trip_id, towns, %DateTime{} = now})
+      when is_binary(trip_id) and is_map(towns) do
+    KeptSql.in_transaction(conn, fn ->
+      settle_towns(conn, {owner_id, agent_id}, trip_id, towns, now)
+    end)
+  end
+
+  def handle(_conn, request), do: {:error, {:unknown_request, request}}
+
+  # --- reads ---------------------------------------------------------------
+
+  # Every live trip with its day and stop counts, in the order made: the
+  # picker's order is `Trips.Picker`'s, which judges it by the date.
+  defp index(conn, owner_id, agent_id) do
+    sql = """
+    SELECT #{prefixed("t", @trip_columns)},
+      COALESCE(SUM(CASE WHEN r.kind = 'day' THEN 1 ELSE 0 END), 0),
+      COALESCE(SUM(CASE WHEN r.kind = 'stop' THEN 1 ELSE 0 END), 0)
+    FROM trips AS t
+    LEFT JOIN trip_rows AS r ON r.trip_id = t.id AND r.removed_at IS NULL
+    WHERE t.owner_id = ? AND t.agent_id = ? AND t.removed_at IS NULL
+    GROUP BY t.id
+    ORDER BY t.position, t.id
+    """
+
+    with {:ok, rows} <- KeptSql.query_all(conn, sql, [owner_id, agent_id]) do
+      {:ok, Enum.map(rows, &counted_trip/1)}
+    end
+  end
+
+  defp counted_trip(values) do
+    {trip_values, [days, stops]} = Enum.split(values, length(@trip_columns))
+    trip_values |> decode_trip() |> Map.merge(%{days: days, stops: stops})
+  end
+
+  # The trip, its live rows, and the ids of its stops that wait for their
+  # place, which only the model's read marks.
+  defp read_trip(conn, owner_id, agent_id, ref) do
+    with {:ok, trips} <- live_trips(conn, owner_id, agent_id),
+         {:ok, trip} <- Ops.resolve(trips, ref),
+         {:ok, rows} <- live_rows(conn, trip.id),
+         {:ok, waiting} <- waits_of(conn, trip.id),
+         {:ok, towns} <- towns_of(conn, trip.id) do
+      {:ok, %{trip: trip, rows: rows, waiting: MapSet.new(Map.keys(waiting)), towns: towns}}
+    end
+  end
+
+  # One trip by id, live or removed and not yet swept, with its live rows and,
+  # when asked, the rows removed from it in the last 30 days, newest first.
+  defp trip_by_id(conn, owner_id, agent_id, trip_id, removed?) do
+    sql = "SELECT #{@trip_select} FROM trips WHERE owner_id = ? AND agent_id = ? AND id = ?"
+
+    with {:ok, [values]} <- KeptSql.query_all(conn, sql, [owner_id, agent_id, trip_id]),
+         trip = decode_trip(values),
+         {:ok, rows} <- live_rows(conn, trip.id),
+         {:ok, gone} <- if(removed?, do: removed_rows(conn, trip.id), else: {:ok, []}),
+         {:ok, towns} <- towns_of(conn, trip.id) do
+      {:ok, %{trip: trip, rows: rows, removed_rows: gone, towns: found_towns(towns)}}
+    else
+      {:ok, []} -> {:error, {:no_such_trip, trip_id}}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp live_trips(conn, owner_id, agent_id) do
+    sql = """
+    SELECT #{@trip_select} FROM trips
+    WHERE owner_id = ? AND agent_id = ? AND removed_at IS NULL
+    ORDER BY position, id
+    """
+
+    with {:ok, rows} <- KeptSql.query_all(conn, sql, [owner_id, agent_id]) do
+      {:ok, Enum.map(rows, &decode_trip/1)}
+    end
+  end
+
+  defp removed_trip(_conn, _owner_id, _agent_id, nil), do: {:ok, []}
+
+  defp removed_trip(conn, owner_id, agent_id, trip_id) do
+    sql = """
+    SELECT #{@trip_select} FROM trips
+    WHERE owner_id = ? AND agent_id = ? AND id = ? AND removed_at IS NOT NULL
+    """
+
+    with {:ok, rows} <- KeptSql.query_all(conn, sql, [owner_id, agent_id, trip_id]) do
+      {:ok, Enum.map(rows, &decode_trip/1)}
+    end
+  end
+
+  defp live_rows(conn, trip_id) do
+    sql = """
+    SELECT #{@row_select} FROM trip_rows
+    WHERE trip_id = ? AND removed_at IS NULL
+    ORDER BY position, n
+    """
+
+    with {:ok, rows} <- KeptSql.query_all(conn, sql, [trip_id]) do
+      {:ok, Enum.map(rows, &decode_row/1)}
+    end
+  end
+
+  defp removed_rows(conn, trip_id) do
+    sql = """
+    SELECT #{@row_select} FROM trip_rows
+    WHERE trip_id = ? AND removed_at IS NOT NULL
+    ORDER BY removed_at DESC, n
+    """
+
+    with {:ok, rows} <- KeptSql.query_all(conn, sql, [trip_id]) do
+      {:ok, Enum.map(rows, &decode_row/1)}
+    end
+  end
+
+  # --- the edit ------------------------------------------------------------
+
+  # Loads the owner's trips and the rows of the trip the call names, live and
+  # removed (a restore brings removed ones back, and the size guard counts the
+  # ones a pull carries), hands them to `Ops`, and writes what it changed.
+  # Inside `in_transaction/2`, so a refusal of any op leaves every trip as it
+  # was.
+  defp edit(conn, owner, call, edit) do
+    with {:ok, loaded} <- load(conn, owner, call, edit.now),
+         {:ok, result} <- Ops.apply(loaded, call, edit),
+         :ok <- write(conn, owner, result, edit.now),
+         :ok <- keep_waits(conn, call, loaded.rows, result, edit) do
+      keep_towns(conn, result, edit)
+    end
+  end
+
+  defp load(conn, {owner_id, agent_id}, call, now) do
+    with {:ok, live} <- live_trips(conn, owner_id, agent_id),
+         {:ok, gone} <- removed_trip(conn, owner_id, agent_id, Ops.restored_trip(call)),
+         trips = live ++ gone,
+         id = Ops.referenced(trips, call),
+         {:ok, rows} <- rows_of(conn, id, &live_rows/2),
+         {:ok, removed} <- rows_of(conn, id, &removed_rows/2) do
+      {:ok, %{trips: trips, rows: rows, removed: removed, kept_from: kept_from(now)}}
+    end
+  end
+
+  defp rows_of(_conn, nil, _read), do: {:ok, []}
+  defp rows_of(conn, id, read), do: read.(conn, id)
+
+  # The first moment a removed row is still kept once a call at `now` is
+  # written: the purge that ends it deletes every row removed before.
+  defp kept_from(now), do: now |> KeptSql.cutoff() |> parse_stamp()
+
+  # A device's edit, once (`KeptSql.once/4`): an id already recorded is
+  # answered as the duplicate it is, with the trip it changed and what it made,
+  # and changes nothing; a new one is applied and recorded in the same
+  # transaction.
+  defp device_edit(conn, {owner_id, agent_id, client_msg_id}, call, edit) do
+    key = {"trip", owner_id, agent_id, client_msg_id}
+
+    apply = fn ->
+      with {:ok, result} <- edit(conn, {owner_id, agent_id}, call, edit),
+           do: {:ok, result, %{id: result.trip.id, made: result.made}}
+    end
+
+    with :ok <- unused_by_another_kind(conn, key) do
+      case KeptSql.once(conn, key, edit.now, apply) do
+        {:ok, {:applied, result}} ->
+          {:ok, {:applied, result}}
+
+        {:ok, {:duplicate, receipt}} ->
+          {:ok, {:duplicate, %{trip_id: receipt.id, made: receipt.made}}}
+
+        {:error, reason} ->
+          {:error, reason}
+      end
+    end
+  end
+
+  # A client_msg_id names one edit of any kind (companion PROTOCOL.md). One a
+  # list's edit already used is refused before anything runs, with its own
+  # sentence, rather than by the receipt's insert failing after the edit.
+  defp unused_by_another_kind(conn, {kind, owner_id, agent_id, client_msg_id}) do
+    sql = """
+    SELECT 1 FROM checklist_edits
+    WHERE owner_id = ? AND agent_id = ? AND client_msg_id = ? AND kind != ?
+    """
+
+    case KeptSql.query_all(conn, sql, [owner_id, agent_id, client_msg_id, kind]) do
+      {:ok, []} -> :ok
+      {:ok, [_used | _rest]} -> {:error, {:device, :client_msg_id_used}}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  # A call that changed nothing writes nothing. One trip changes per call, so
+  # its live title never meets another's mid-call; then its rows, then the
+  # purge of its rows removed past the retention.
+  defp write(_conn, _owner, %{changed?: false}, _now), do: :ok
+
+  defp write(conn, {owner_id, agent_id}, %{trip: trip} = result, now) do
+    with :ok <- write_trip(conn, owner_id, agent_id, trip),
+         :ok <- each(dirty_rows(result), &write_row(conn, &1)) do
+      purge_rows(conn, trip.id, now)
+    end
+  end
+
+  defp write_trip(conn, owner_id, agent_id, %{created?: true} = trip) do
+    values = trip |> Map.merge(%{owner_id: owner_id, agent_id: agent_id}) |> trip_values()
+    sql = "INSERT INTO trips (#{@trip_select}) VALUES (#{@trip_placeholders})"
+    KeptSql.execute(conn, sql, values)
+  end
+
+  # A trip a call brings back is the one row this update finds removed.
+  defp write_trip(conn, _owner_id, _agent_id, trip) do
+    live = if Map.get(trip, :restored?, false), do: "IS NOT NULL", else: "IS NULL"
+
+    sql = """
+    UPDATE trips SET title = ?, starts_on = ?, timezone = ?, rev = ?, next_n = ?,
+      updated_at = ?, removed_at = ?
+    WHERE id = ? AND removed_at #{live}
+    """
+
+    params = [
+      trip.title,
+      optional_date(trip.starts_on),
+      trip.timezone,
+      trip.rev,
+      trip.next_n,
+      stamp(trip.updated_at),
+      optional_stamp(trip.removed_at),
+      trip.id
+    ]
+
+    expect_one(conn, sql, params, {:trip_gone, trip.id})
+  end
+
+  # The live rows an op changed, then the rows it removed, less any added and
+  # removed in this same call, which never reach the store.
+  defp dirty_rows(result) do
+    live = Enum.filter(result.rows, & &1.dirty)
+    removed = Enum.reject(result.removed_rows, &(&1.dirty == :new))
+    live ++ Enum.map(removed, &Map.put(&1, :dirty, :removed))
+  end
+
+  defp write_row(conn, %{dirty: :new} = row) do
+    sql = "INSERT INTO trip_rows (#{@row_select}) VALUES (#{@row_placeholders})"
+    KeptSql.execute(conn, sql, row_values(row))
+  end
+
+  # A row coming back is the one this update finds removed; every other is
+  # found live, a removal included.
+  defp write_row(conn, row) do
+    live = if row.dirty == :restored, do: "IS NOT NULL", else: "IS NULL"
+
+    sql = """
+    UPDATE trip_rows SET text = ?, note = ?, local_time = ?, duration_min = ?, fixed = ?,
+      timezone = ?, place_json = ?, position = ?, added_after_outside_content = ?,
+      updated_at = ?, removed_at = ?, removed_with = ?, near = ?
+    WHERE id = ? AND removed_at #{live}
+    """
+
+    params = [
+      row.text,
+      row.note,
+      row.time,
+      row.duration,
+      bit(row.fixed),
+      row.timezone,
+      place_json(row.place),
+      row.position,
+      bit(row.stamped),
+      stamp(row.updated_at),
+      optional_stamp(row.removed_at),
+      row.removed_with,
+      row.near,
+      row.id
+    ]
+
+    expect_one(conn, sql, params, {:row_gone, row.id})
+  end
+
+  # --- waiting stops (D13 B) -----------------------------------------------
+
+  # Whatever changed, the call's waits: those its ops end go (a trip it
+  # removed takes all of its own), then those its lookups left are saved,
+  # each from now with no try and with whether the call had read outside
+  # content, in place of any the stop had. A call that changed nothing but
+  # leaves a stop waiting saves its wait all the same.
+  defp keep_waits(conn, call, before, %{trip: trip} = result, edit) do
+    given = Map.get(edit, :places_given, [])
+
+    with {:ok, waiting} <- waits_of(conn, trip.id),
+         :ok <- end_waits(conn, trip.id, Waiting.cleared(call, before, result, given), waiting) do
+      saved = Waiting.saved(call, result, Map.get(edit, :waits, []))
+      each(saved, &save_wait(conn, trip.id, &1, edit))
+    end
+  end
+
+  defp end_waits(_conn, _trip_id, _ended, waiting) when map_size(waiting) == 0, do: :ok
+
+  defp end_waits(conn, trip_id, :all, _waiting),
+    do: KeptSql.execute(conn, "DELETE FROM trip_waits WHERE trip_id = ?", [trip_id])
+
+  defp end_waits(conn, _trip_id, ended, waiting),
+    do: each(Enum.filter(ended, &Map.has_key?(waiting, &1)), &delete_wait(conn, &1))
+
+  defp save_wait(conn, trip_id, %{row_id: row_id, words: words, reason: reason}, edit) do
+    sql = """
+    INSERT INTO trip_waits (row_id, trip_id, words, reason, since, tries, outside)
+    VALUES (?, ?, ?, ?, ?, 0, ?)
+    ON CONFLICT(row_id) DO UPDATE SET words = excluded.words, reason = excluded.reason,
+      since = excluded.since, tries = 0, outside = excluded.outside, due_at = NULL
+    """
+
+    params = [row_id, trip_id, words, Atom.to_string(reason), stamp(edit.now), bit(edit.outside?)]
+    KeptSql.execute(conn, sql, params)
+  end
+
+  defp delete_wait(conn, row_id),
+    do: KeptSql.execute(conn, "DELETE FROM trip_waits WHERE row_id = ?", [row_id])
+
+  # A trip's waits by row id.
+  defp waits_of(conn, trip_id) do
+    with {:ok, rows} <- KeptSql.query_all(conn, @wait_select <> "WHERE w.trip_id = ?", [trip_id]),
+         do: {:ok, Map.new(rows, &{hd(&1), decode_wait(&1)})}
+  end
+
+  # The placer's take at `now`: every wait 7 days old ends, unlooked-up;
+  # then the oldest `limit` of those due, how many wait in all and how many
+  # are due, and when the next one not yet due comes due.
+  defp take_waits(conn, now, limit) do
+    expire = "DELETE FROM trip_waits WHERE since < ? RETURNING row_id"
+
+    due =
+      @wait_select <> "WHERE w.due_at IS NULL OR w.due_at <= ? ORDER BY w.since, w.row_id LIMIT ?"
+
+    counts = """
+    SELECT COUNT(*), COALESCE(SUM(CASE WHEN due_at IS NULL OR due_at <= ?1 THEN 1 ELSE 0 END), 0),
+      MIN(CASE WHEN due_at > ?1 THEN due_at END)
+    FROM trip_waits
+    """
+
+    with {:ok, expired} <- KeptSql.query_all(conn, expire, [stamp(Waiting.cutoff(now))]),
+         {:ok, rows} <- KeptSql.query_all(conn, due, [stamp(now), limit]),
+         {:ok, [[total, due_count, next]]} <- KeptSql.query_all(conn, counts, [stamp(now)]) do
+      {:ok,
+       %{
+         expired: length(expired),
+         waits: Enum.map(rows, &decode_wait/1),
+         total: total,
+         due: due_count,
+         next_due_at: optional_parse(next)
+       }}
+    end
+  end
+
+  # What the placer's lookups found for one trip, written once: only the
+  # waits that still stand as they were read (the same words since the same
+  # moment) are acted on. The ones a lookup placed become one call of edits,
+  # applied as any other (`Ops`, its rev once), each stop stamped as its
+  # call would have stamped it: marked when that call had read outside
+  # content, else as it was; a refusal of it (the trip too large, a row gone) ends their waits. The rest
+  # wait again, counted, or end.
+  defp place_waiting(conn, owner, trip_id, results, edit) do
+    with {:ok, current} <- waits_of(conn, trip_id) do
+      standing = Enum.filter(results, &stands?(&1, current))
+      {placing, rest} = Enum.split_with(standing, &match?(%{action: {:place, _place}}, &1))
+
+      with {:ok, applied, refused} <- place_stops(conn, owner, {trip_id, current}, placing, edit),
+           :ok <- each(rest, &settle_wait(conn, &1)),
+           :ok <- end_refused(conn, placing, refused) do
+        {:ok,
+         waiting_summary(applied, refused, placing, rest, length(results) - length(standing))}
+      end
+    end
+  end
+
+  defp stands?(%{row_id: id, words: words, since: since}, current) do
+    case Map.fetch(current, id) do
+      {:ok, %{words: ^words, since: kept}} -> DateTime.compare(kept, since) == :eq
+      _other -> false
+    end
+  end
+
+  defp place_stops(_conn, _owner, _trip, [], _edit), do: {:ok, nil, nil}
+
+  defp place_stops(conn, owner, {trip_id, current}, placing, edit) do
+    call = %{trip: trip_id, ops: Enum.map(placing, &place_op(&1, Map.fetch!(current, &1.row_id)))}
+
+    with {:ok, loaded} <- load(conn, owner, call, edit.now) do
+      case Ops.apply(loaded, call, edit) do
+        {:ok, result} -> written(conn, owner, {call, loaded, result}, edit)
+        {:error, reason} -> {:ok, nil, reason}
+      end
+    end
+  end
+
+  defp written(conn, owner, {call, loaded, result}, edit) do
+    with :ok <- write(conn, owner, result, edit.now),
+         :ok <- keep_waits(conn, call, loaded.rows, result, edit),
+         do: {:ok, result, nil}
+  end
+
+  # The placer's edit gives a stop its place alone, by its id, marking it
+  # when the call that gave the words had read outside content (`Ops`).
+  defp place_op(%{row_id: id, action: {:place, place}}, %{outside: outside?}) do
+    %{
+      op: :edit,
+      n: {:id, id},
+      text: nil,
+      time: :keep,
+      duration: :keep,
+      fixed: :keep,
+      note: :keep,
+      place: place,
+      after_outside: outside?
+    }
+  end
+
+  defp settle_wait(conn, %{row_id: id, action: {:wait, reason, tries, due_at}}) do
+    sql = "UPDATE trip_waits SET reason = ?, tries = ?, due_at = ? WHERE row_id = ?"
+    KeptSql.execute(conn, sql, [Atom.to_string(reason), tries, optional_stamp(due_at), id])
+  end
+
+  defp settle_wait(conn, %{row_id: id, action: {:stop, _why}}), do: delete_wait(conn, id)
+
+  defp end_refused(_conn, _placing, nil), do: :ok
+  defp end_refused(conn, placing, _refused), do: each(placing, &delete_wait(conn, &1.row_id))
+
+  defp waiting_summary(applied, refused, placing, rest, superseded) do
+    placed = if applied, do: Enum.map(placing, & &1.row_id), else: []
+    refused_ids = if refused, do: Enum.map(placing, & &1.row_id), else: []
+
+    %{
+      applied: applied,
+      changed?: match?(%{changed?: true}, applied),
+      refused: refused,
+      placed: placed,
+      waiting: for(%{action: {:wait, _r, _t, _due}, row_id: id} <- rest, do: id),
+      stopped: refused_ids ++ for(%{action: {:stop, _w}, row_id: id} <- rest, do: id),
+      superseded: superseded
+    }
+  end
+
+  defp decode_wait([
+         row_id,
+         trip_id,
+         owner_id,
+         agent_id,
+         words,
+         reason,
+         since,
+         tries,
+         outside,
+         due_at
+       ]) do
+    %{
+      row_id: row_id,
+      trip_id: trip_id,
+      owner_id: owner_id,
+      agent_id: agent_id,
+      words: words,
+      reason: wait_reason(reason),
+      since: parse_stamp(since),
+      tries: tries,
+      outside: outside == 1,
+      due_at: optional_parse(due_at)
+    }
+  end
+
+  defp wait_reason("computer_away"), do: :computer_away
+  defp wait_reason("computer_timed_out"), do: :computer_timed_out
+  defp wait_reason("computer_busy"), do: :computer_busy
+  defp wait_reason("rate_limited"), do: :rate_limited
+  defp wait_reason("deadline"), do: :deadline
+
+  # --- the towns (M89) --------------------------------------------------------
+
+  # A trip's towns by the near's words: `{:found, town}` or `:none`. A row the
+  # CHECKs let through is always one of the two; anything else is an error,
+  # never a raise in the Repo's own process.
+  defp towns_of(conn, trip_id) do
+    sql = """
+    SELECT words, state, name, latitude, longitude, radius_meters FROM trip_towns
+    WHERE trip_id = ?
+    """
+
+    with {:ok, rows} <- KeptSql.query_all(conn, sql, [trip_id]),
+         do: decode_towns(rows, trip_id)
+  end
+
+  defp decode_towns(rows, trip_id) do
+    Enum.reduce_while(rows, {:ok, %{}}, fn row, {:ok, towns} ->
+      case decode_town(row) do
+        {:ok, words, kept} -> {:cont, {:ok, Map.put(towns, words, kept)}}
+        :error -> {:halt, {:error, {:invalid_town, trip_id}}}
+      end
+    end)
+  end
+
+  defp decode_town([words, "found", name, latitude, longitude, radius])
+       when is_binary(name) and is_number(latitude) and is_number(longitude) and
+              is_integer(radius) do
+    town = %{name: name, latitude: latitude / 1, longitude: longitude / 1, radius_meters: radius}
+    {:ok, words, {:found, town}}
+  end
+
+  defp decode_town([words, "none", nil, nil, nil, nil]), do: {:ok, words, :none}
+  defp decode_town(_row), do: :error
+
+  defp found_towns(towns), do: for({words, {:found, town}} <- towns, into: %{}, do: {words, town})
+
+  # An edit's towns: the rows whose words neither the trip nor any of its
+  # days, live or removed and kept, still names go; then the towns the call
+  # found for the nears it leaves in force are kept. Only a town found moves
+  # the rev, and only once, when the call changed nothing else.
+  defp keep_towns(_conn, %{trip: %{removed_at: %DateTime{}}} = result, _edit), do: {:ok, result}
+
+  defp keep_towns(conn, %{trip: trip, rows: rows} = result, edit) do
+    in_force = MapSet.new(Towns.in_force(trip, rows))
+    towns = Map.filter(Map.get(edit, :towns, %{}), &MapSet.member?(in_force, elem(&1, 0)))
+
+    with :ok <- clear_towns(conn, trip.id),
+         {:ok, found} <- put_towns(conn, trip.id, towns) do
+      moved(conn, result, found, edit.now)
+    end
+  end
+
+  defp clear_towns(conn, trip_id) do
+    sql = """
+    DELETE FROM trip_towns WHERE trip_id = ?1 AND words NOT IN (
+      SELECT near FROM trips WHERE id = ?1 AND near IS NOT NULL
+      UNION SELECT near FROM trip_rows WHERE trip_id = ?1 AND kind = 'day' AND near IS NOT NULL
+    )
+    """
+
+    KeptSql.execute(conn, sql, [trip_id])
+  end
+
+  # Each town kept once: a row another writer kept first stands. Answers how
+  # many found towns are new.
+  defp put_towns(conn, trip_id, towns) do
+    Enum.reduce_while(towns, {:ok, 0}, fn {words, kept}, {:ok, found} ->
+      case put_town(conn, trip_id, words, kept) do
+        {:ok, added} -> {:cont, {:ok, found + if(match?({:found, _}, kept), do: added, else: 0)}}
+        {:error, reason} -> {:halt, {:error, reason}}
+      end
+    end)
+  end
+
+  # A town of another shape is a refusal, never a raise in the Repo's own
+  # process (the CHECKs refuse one out of bounds the same way).
+  defp put_town(conn, trip_id, words, kept) do
+    sql = """
+    INSERT INTO trip_towns (trip_id, words, state, name, latitude, longitude, radius_meters)
+    VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(trip_id, words) DO NOTHING
+    """
+
+    case town_values(kept) do
+      {:ok, values} -> KeptSql.execute_changes(conn, sql, [trip_id, words | values])
+      :error -> {:error, {:invalid_town, words}}
+    end
+  end
+
+  defp town_values({:found, %{name: name, latitude: lat, longitude: lon, radius_meters: radius}})
+       when is_binary(name) and is_number(lat) and is_number(lon) and is_integer(radius),
+       do: {:ok, ["found", name, lat, lon, radius]}
+
+  defp town_values(:none), do: {:ok, ["none", nil, nil, nil, nil]}
+  defp town_values(_kept), do: :error
+
+  defp moved(_conn, result, 0, _now), do: {:ok, result}
+  defp moved(_conn, %{changed?: true} = result, _found, _now), do: {:ok, result}
+
+  defp moved(conn, %{trip: trip} = result, _found, now) do
+    with :ok <- bump_rev(conn, trip.id, now),
+         do: {:ok, %{result | changed?: true, trip: %{trip | rev: trip.rev + 1, updated_at: now}}}
+  end
+
+  defp bump_rev(conn, trip_id, now) do
+    sql = "UPDATE trips SET rev = rev + 1, updated_at = ? WHERE id = ? AND removed_at IS NULL"
+    expect_one(conn, sql, [stamp(now), trip_id], {:trip_gone, trip_id})
+  end
+
+  # The placer's towns for one trip, written once: those still in force on
+  # the trip as it now stands are kept, and the rev moves once when a town is
+  # new. A trip removed since keeps nothing new.
+  defp settle_towns(conn, {owner_id, agent_id}, trip_id, towns, now) do
+    with {:ok, %{trip: trip, rows: rows}} <- trip_by_id(conn, owner_id, agent_id, trip_id, false) do
+      if trip.removed_at,
+        do: {:ok, %{changed?: false, trip: trip}},
+        else:
+          keep_towns(conn, %{trip: trip, rows: rows, changed?: false}, %{towns: towns, now: now})
+    end
+  end
+
+  # The nears in force on live trips that have no row, at most `limit`, the
+  # trip changed last first: what the placer asks.
+  defp unresolved_towns(conn, limit) do
+    sql = """
+    SELECT t.id, t.owner_id, t.agent_id, n.near FROM trips AS t
+    JOIN (
+      SELECT id AS trip_id, near FROM trips WHERE near IS NOT NULL
+      UNION SELECT trip_id, near FROM trip_rows
+      WHERE kind = 'day' AND removed_at IS NULL AND near IS NOT NULL
+    ) AS n ON n.trip_id = t.id
+    WHERE t.removed_at IS NULL AND NOT EXISTS (
+      SELECT 1 FROM trip_towns AS w WHERE w.trip_id = n.trip_id AND w.words = n.near
+    )
+    ORDER BY t.updated_at DESC, t.id, n.near
+    LIMIT ?
+    """
+
+    with {:ok, rows} <- KeptSql.query_all(conn, sql, [limit]) do
+      {:ok,
+       for(
+         [trip_id, owner_id, agent_id, words] <- rows,
+         do: %{trip_id: trip_id, owner_id: owner_id, agent_id: agent_id, words: words}
+       )}
+    end
+  end
+
+  # Rows of `trip_id` removed more than the retention ago, deleted with the
+  # edit that touches their trip: no timer ever purges them.
+  defp purge_rows(conn, trip_id, now) do
+    KeptSql.execute(
+      conn,
+      "DELETE FROM trip_rows WHERE trip_id = ? AND removed_at IS NOT NULL AND removed_at < ?",
+      [trip_id, KeptSql.cutoff(now)]
+    )
+  end
+
+  # Every trip removed more than the retention before `now`, its rows with it
+  # (the foreign key cascades), answering how many trips went. The Repo runs
+  # it once when it opens the store, beside the lists' sweep, and no timer.
+  defp purge_removed_trips(conn, now) do
+    sql = "DELETE FROM trips WHERE removed_at IS NOT NULL AND removed_at < ? RETURNING 1"
+
+    with {:ok, rows} <- KeptSql.query_all(conn, sql, [KeptSql.cutoff(now)]),
+         do: {:ok, length(rows)}
+  end
+
+  defp expect_one(conn, sql, params, gone) do
+    case KeptSql.execute_changes(conn, sql, params) do
+      {:ok, 1} -> :ok
+      {:ok, _other} -> {:error, gone}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp each(items, fun) do
+    Enum.reduce_while(items, :ok, fn item, :ok ->
+      case fun.(item) do
+        :ok -> {:cont, :ok}
+        {:error, reason} -> {:halt, {:error, reason}}
+      end
+    end)
+  end
+
+  # --- row mapping ---------------------------------------------------------
+
+  defp trip_values(trip) do
+    [
+      trip.id,
+      trip.owner_id,
+      trip.agent_id,
+      trip.title,
+      optional_date(trip.starts_on),
+      trip.timezone,
+      trip.position,
+      trip.rev,
+      trip.next_n,
+      stamp(trip.created_at),
+      stamp(trip.updated_at),
+      optional_stamp(trip.removed_at),
+      trip.near
+    ]
+  end
+
+  defp row_values(row) do
+    [
+      row.id,
+      row.trip_id,
+      row.n,
+      Atom.to_string(row.kind),
+      row.text,
+      row.note,
+      row.time,
+      row.duration,
+      bit(row.fixed),
+      row.timezone,
+      place_json(row.place),
+      row.position,
+      bit(row.stamped),
+      row.made_via,
+      stamp(row.created_at),
+      stamp(row.updated_at),
+      optional_stamp(row.removed_at),
+      row.removed_with,
+      row.near
+    ]
+  end
+
+  defp decode_trip(values) do
+    raw = @trip_columns |> Enum.zip(values) |> Map.new()
+
+    Map.merge(raw, %{
+      starts_on: optional_date_parse(raw.starts_on),
+      created_at: parse_stamp(raw.created_at),
+      updated_at: parse_stamp(raw.updated_at),
+      removed_at: optional_parse(raw.removed_at),
+      created?: false,
+      restored?: false
+    })
+  end
+
+  @doc """
+  One `trip_rows` row, its values in the order of the store's columns, as
+  `Trips.Ops` names a `row`: `time` and `duration` for `local_time` and
+  `duration_min`, `place` for `place_json` decoded, `stamped` for
+  `added_after_outside_content`, `near` as it is, and `dirty` nil.
+  """
+  @spec decode_row([term()]) :: Ops.row()
+  def decode_row(values) when is_list(values) and length(values) == length(@row_columns) do
+    raw = @row_columns |> Enum.zip(values) |> Map.new()
+
+    %{
+      id: raw.id,
+      trip_id: raw.trip_id,
+      n: raw.n,
+      kind: kind(raw.kind),
+      text: raw.text,
+      note: raw.note,
+      time: raw.local_time,
+      duration: raw.duration_min,
+      fixed: raw.fixed == 1,
+      timezone: raw.timezone,
+      place: place(raw.place_json),
+      position: raw.position,
+      stamped: raw.added_after_outside_content == 1,
+      made_via: raw.made_via,
+      created_at: parse_stamp(raw.created_at),
+      updated_at: parse_stamp(raw.updated_at),
+      removed_at: optional_parse(raw.removed_at),
+      removed_with: raw.removed_with,
+      near: raw.near,
+      dirty: nil
+    }
+  end
+
+  defp kind("day"), do: :day
+  defp kind("stop"), do: :stop
+
+  defp place(nil), do: nil
+
+  defp place(json) do
+    {:ok, place} = Jason.decode(json)
+    place
+  end
+
+  defp place_json(nil), do: nil
+  defp place_json(place), do: Jason.encode!(place)
+
+  defp prefixed(alias_name, columns), do: Enum.map_join(columns, ", ", &"#{alias_name}.#{&1}")
+
+  defp bit(true), do: 1
+  defp bit(false), do: 0
+
+  defp optional_date(nil), do: nil
+  defp optional_date(%Date{} = date), do: Date.to_iso8601(date)
+
+  defp optional_date_parse(nil), do: nil
+  defp optional_date_parse(value), do: Date.from_iso8601!(value)
+
+  defp stamp(%DateTime{} = at) do
+    {:ok, value} = TemporalSql.timestamp(at)
+    value
+  end
+
+  defp optional_stamp(nil), do: nil
+  defp optional_stamp(at), do: stamp(at)
+
+  defp parse_stamp(value) do
+    {:ok, at, _offset} = DateTime.from_iso8601(value)
+    at
+  end
+
+  defp optional_parse(nil), do: nil
+  defp optional_parse(value), do: parse_stamp(value)
+end

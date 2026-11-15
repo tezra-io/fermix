@@ -29,15 +29,15 @@ what is left out and every step folded into another.
   what the platform took survive. This also covers a crash of any core child
   started before the `RunnerSupervisor` (`CommandHostSupervisor` through
   `MainAgent`, `Memory.Repo`, `Trace` and `Finch` among them,
-  `application.ex:260-347`) or of the `RunnerSupervisor` itself, since
-  `:rest_for_one` restarts every job process in each case (`:182`). A
+  `application.ex:292-376`) or of the `RunnerSupervisor` itself, since
+  `:rest_for_one` restarts every job process in each case (`:187`). A
   runner's send helper and its AgentLoop are linked to it, so none outlives
   the restart; `LoopDiesWithRunner` off lets the loop outlive it (JOB-8).
 - `SchedulerCrashes`: how many times the Scheduler alone may die, at any point
   of any callback, including its own init. A Repo timeout no longer kills it
   (`SchedulerTimeouts`); another cause still does, such as `:rest_for_one`
   restarting it when `MeetingsSupervisor`, started between the
-  `RunnerSupervisor` and the Scheduler, dies (`application.ex:348-355`).
+  `RunnerSupervisor` and the Scheduler, dies (`application.ex:377-384`).
   Runners keep running. When it dies waiting on the reaper's write, that write
   may still land (see late writes).
 - `SchedulerTimeouts`: how many of the Scheduler's Repo calls may time out.
@@ -348,6 +348,19 @@ fault ran past the runner's two-minute limit. Check 36's two properties were
 split again (36, 53) when `runsKnown` took it to that limit on a loaded
 machine (123 s, against 71 s and 92 s apart).
 
+Checks 08, 43 and 53 then sat at 60 to 80 s and timed out when TLA runs
+overlapped. Two narrowings that leave each verdict and what it covers as it
+was brought them to 35 s, 35 s and 17 s (from 78 s, 73 s and 61 s):
+- Checks 43 and 53, and their `needs` checks 44 and 38, run with no fire
+  time. `Due` is false for a watcher's task, so the clock drives none of its
+  steps, and a tick only doubled the states (43: 2,926,878 to 1,463,439; 53:
+  91,342 to 45,671).
+- A configuration with no owner request leaves out `JobChanged`'s strong
+  fairness, and one with no cue tree `CueAdmit`'s (`FairnessScope`). TLC
+  splits a liveness check in two for each strongly fair action: check 08's
+  liveness pass went from 54 s to 13 s, and check 53's from 39 s to 18 s
+  before its clock went too.
+
 **Follow-ups (M60 watcher follow-ups).** Every property below is broken by
 its `needs` check too.
 - **One active run of a follow-up** (check 54), with two triggers, a run by
@@ -439,7 +452,7 @@ every pin but `runner_supervisor.ex`, `delivery.ex`, `channel_send.ex` and
   `tools_started_at` and `cue_delivery_id`, two columns the spec does not
   model), the registry's pause, resume and edit (an extra refusal for cue
   tasks only), and the core tree (the cue subtree is its LAST child,
-  `application.ex:393`, after `JobRunnerSupervisor`, `MeetingsSupervisor` and
+  `application.ex:399`, after `JobRunnerSupervisor`, `MeetingsSupervisor` and
   `JobScheduler`, which keep their order). The `:clock` option and the
   session-id suffix change nothing modelled. Checks 01 to 35 set the new
   constants off and reproduce their earlier verdicts and state counts.
@@ -678,6 +691,85 @@ so nothing the spec models changed.
 
 - **Line numbers** were moved through the diff, so each moved reference
   points at the same line it did.
+
+## Re-read for the computers' registry (2026-11-10)
+
+The core tree gained `Computers.Registry` (M97), a primary-only process
+between `Companion.OriginBackfill` and the snapshot scheduler that keeps what
+the home's computers offer, in files under `device/computers/`. It staled
+the `application.ex` pin. It starts after `JobScheduler` and the temporal
+rail, so a crash of it restarts only the snapshot scheduler and the cue tree,
+and it reads and writes no job, run or delivery row. `JobRunnerSupervisor`
+and `JobScheduler` keep their order, so nothing the spec models changed.
+
+- **Line numbers**: the comments' `application.ex` numbers had drifted
+  before this change (`:183` named a sidecar call, not the strategy at
+  `:185`); they now point at the committed file.
+
+## Re-read for the server's calls and the release table (2026-11-10)
+
+The core tree gained two primary-only processes (M97) between
+`Computers.Registry` and the snapshot scheduler: `Computers.Calls`, the
+invocations the server waits on from the home's computers, and
+`Home.ReleaseTable`, the release table an Always On server's update chooses
+from. It staled the `application.ex` pin. Both start after `JobScheduler`
+and the temporal rail, so a crash of either restarts only what follows it
+(the snapshot scheduler and the cue tree), and neither reads or writes a
+job, run or delivery row. `JobRunnerSupervisor`, `MeetingsSupervisor` and
+`JobScheduler` keep their order, so nothing the spec models changed.
+
+- **Line numbers**: the commit's new alias moved every cited
+  `application.ex` line down by one, and the cue tree's by nine; the comments
+  point at the committed file.
+
+## Re-read for a computer's screen and Messages (2026-11-11)
+
+The server's use of a computer's screen (M97 §6.4, `26196634`) staled the
+`application.ex` pin. The computer-use supervisor now also starts on an
+engine that drives a computer's screen or has its own driven by its server,
+and `ComputerUse.Seat`, this computer's screen while its server drives it,
+joins the tree beside it on a linked computer, never under `mix test`. Both
+start after `JobScheduler` and the temporal rail, so a crash of either
+restarts only what follows it (the computer-history supervisor through the
+cue tree), and neither reads or writes a job, run or delivery row.
+`JobRunnerSupervisor`, `MeetingsSupervisor` and `JobScheduler` keep their
+order, so nothing the spec models changed.
+
+- **Line numbers**: the commit's new alias moved every cited
+  `application.ex` line down by one, and the cue tree's by two; the comments
+  point at the committed file.
+
+## Re-read for computer history on every computer (2026-11-11)
+
+Computer history from every computer (M97 §8.1, `826ba83a`) staled the
+`application.ex` pin. The computer-history supervisor is now started with the
+engine's role: on every primary, whatever its platform (a Linux server
+included), and on a device only where this system has a recorder. It keeps
+its place after `JobScheduler` and the temporal rail, so a crash of it
+restarts only what follows it (the origin backfill through the cue tree), and
+it reads and writes no job, run or delivery row. `JobRunnerSupervisor`,
+`MeetingsSupervisor` and `JobScheduler` keep their order, so nothing the spec
+models changed.
+
+- **Line numbers**: the change touched only that one child's line and the
+  function below the tree, so every cited `application.ex` line is where it
+  was.
+
+## Re-read for the review's fixes (2026-11-11)
+
+`c6fe1c48` staled the `application.ex` pin with two comments inside
+`supervision_children`, one above the computers' record and one above the
+computer-history supervisor. No child moved, so nothing the spec models
+changed; the one cited `application.ex` line after them moved by one
+(`:437`).
+
+## Re-read for the Always On pane's engine half (2026-11-12)
+
+`8e3f586f` staled the `application.ex` pin: `Home.MoveProgress` joins the
+core tree after `JobScheduler`, the temporal rail and the computer-history
+supervisor, so its crash reaches none of the job tree. Nothing the spec
+models changed; the cited `application.ex` lines point at the committed
+code.
 
 ## Plan hypotheses
 
@@ -1034,6 +1126,62 @@ shortest and can change between runs.
   exits normally"; the watchdog tests, which kill a linked loop and still
   expect the runner to exit `:normal`).
 
+## Re-read for events drawn as cards (2026-11-13)
+
+`reply_delivery_opts` now keeps the run's events and trips blocks beside its lists (M89): it
+takes the run's records from the in-memory `ReplyBlocks` holder once, as
+before, and passes the kept blocks as the send's `blocks`, which a channel that
+draws none ignores. No modelled row, helper, delivery or report changed, and
+the change sits below every line the spec cites, so no reference moved.
+
+## Re-read for the place-search pacer (2026-11-14)
+
+`supervision_children` gains `PlaceSearch.Brave.Pacer` right after
+`ReplyBlocks` (M89 D13, `eb5fc530`): the home's one door to Brave's place
+search, holding only who waits and when the next request may send. It starts
+before `AgentSupervisor`, so under `:rest_for_one` a pacer crash restarts the
+job rail with every later child, which the model already takes as a
+`:rest_for_one` restart of the scheduler and its runs; its callbacks raise on
+nothing their guarded callers hand them. The order of `JobRunnerSupervisor`,
+`JobScheduler` and the cue subtree is unchanged. No modelled row, helper,
+delivery or report changed; the six lines move every citation past
+`ReplyBlocks`, now `application.ex:292-376`, `:377-384` and `:399`.
+
+## Re-read for the trip placer (2026-11-14)
+
+`supervision_children` gains `Trips.Placer` after `Computers.Calls` and
+before `Home.ReleaseTable` (M89 D13 B, `d4f5e1f3`), primary-only: it places
+the trip stops that wait for their place, runs each pass in a task linked to
+it, and raises on nothing it is sent, so a crash of it restarts only the
+children after it, the cue tree among them, which the model already takes
+as a `:rest_for_one` restart. The job rail and its order are unchanged. No modelled row,
+helper, delivery or report changed; the cue tree's citation, which the
+pacer's six lines had already moved, is now the call itself,
+`application.ex:457`.
+
+## Re-read for the trips' day turn (2026-11-14)
+
+`supervision_children` gains `Trips.DayTurn` right after `Trips.Placer` and
+before `Home.ReleaseTable` (M89 D14, `fad8eeea`), primary-only: it sends the
+trips index again at a day's turn, serves no call, arms one timer and raises
+on nothing it is sent, so a crash of it restarts only the children after it,
+the cue tree among them, which the model already takes as a `:rest_for_one`
+restart. The job rail and its order are unchanged. No modelled row, helper,
+delivery or report changed; its seven lines move the cue tree's citation to
+`application.ex:465`.
+
+## Re-read for Always On in every build (2026-11-15)
+
+`d195aa17` staled the `application.ex` pin. Every build now serves Always
+On: the boot drops the release gate's alias, and `Home.ReleaseTable` fetches
+on an Always On server's primary with no build check, its child comment
+reworded in place. No child moved or changed order. The job rail and its order
+are unchanged, so no modelled row, helper, delivery or report changed. The
+removed alias moves every later line by one: the spec's citations point at
+the committed file, the cue tree at `application.ex:464` and
+JobRunnerSupervisor before JobScheduler at `:377` and `:384`, which an
+earlier change had left at `:371` and `:378`.
+
 ## Assumptions
 
 - Every Repo call completes, or its caller dies, or, for the Scheduler, it
@@ -1079,8 +1227,8 @@ shortest and can change between runs.
   write or Scheduler call (`job_registry_support.ex:36-41`): a request the owner
   never made. That check's job-row read feeds no modelled column. The store
   of parked confirmations (`Capabilities.AccessGate.Pending`,
-  `application.ex:341`) and the holder of a conversation's place records
-  (`ReplyBlocks`, `:344`, which no job process reads) are two more core
+  `application.ex:364`) and the holder of a conversation's place records
+  (`ReplyBlocks`, `:368`, which no job process reads) are two more core
   children started before the `RunnerSupervisor`, so a crash of either is the
   daemon crash above.
 - The run-row value `unset` stands for the `"none"` the claim writes before a
@@ -1138,5 +1286,7 @@ shortest and can change between runs.
   constant: that window is not modelled.
 - Fairness: weak on each runner's, send helper's, report task's and Scheduler
   callback's next step, and on the runner's delivery timer. Strong on the
-  Scheduler serving its mailbox and its own timers. None on the clock, the
-  owner, the cue inbox, the platform or crashes.
+  Scheduler serving its mailbox and its own timers; a configuration with no
+  owner request or no cue tree leaves out the strong fairness of the step it
+  can never take (`FairnessScope` in `TypeOK` holds that it cannot). None on
+  the clock, the owner, the cue inbox, the platform or crashes.

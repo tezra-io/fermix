@@ -117,6 +117,33 @@ defmodule FermixCore.Providers.DecisionModelTest do
 
       assert DecisionModel.route(:openrouter) == {:error, {:not_set_up, :openrouter}}
       assert DecisionModel.route(:venice) == {:error, {:not_set_up, :venice}}
+
+      assert DecisionModel.route(:openrouter_decider_flash) ==
+               {:error, {:not_set_up, :openrouter}}
+    end
+
+    test "Perplexity's Deciders run on OpenRouter's own key, beside Jev" do
+      Application.put_env(:fermix_core, :providers,
+        openai: [api_key: "sk-invented", primary: true],
+        openrouter: [api_key: "sk-or-invented"]
+      )
+
+      for {choice, model} <- [
+            openrouter_decider: "~perplexity/pplx-decider-latest",
+            openrouter_decider_flash: "~perplexity/pplx-decider-flash-latest"
+          ] do
+        assert DecisionModel.route(choice) ==
+                 {:ok,
+                  %{
+                    choice: choice,
+                    provider: :openrouter,
+                    model: model,
+                    url: "https://openrouter.ai/api/alpha/decisions",
+                    api_key: "sk-or-invented"
+                  }}
+      end
+
+      assert {:ok, %{choice: :openai}} = DecisionModel.route(nil)
     end
 
     # A keychain or file secret that never resolved stays as its sentinel in
@@ -152,6 +179,28 @@ defmodule FermixCore.Providers.DecisionModelTest do
 
     test "the providers that serve a decision model, in catalog order" do
       assert DecisionModel.providers() == [:openrouter, :venice, :openai]
+    end
+
+    test "the decision models the owner can choose, each on its provider, in offer order" do
+      assert DecisionModel.choices() == [
+               :openrouter,
+               :openrouter_decider,
+               :openrouter_decider_flash,
+               :venice,
+               :openai
+             ]
+
+      assert Enum.map(
+               DecisionModel.choices(),
+               &{DecisionModel.provider(&1), DecisionModel.label(&1)}
+             ) ==
+               [
+                 {:openrouter, "OpenRouter · Jev"},
+                 {:openrouter, "OpenRouter · Perplexity Decider"},
+                 {:openrouter, "OpenRouter · Perplexity Decider Flash"},
+                 {:venice, "Venice · Jev"},
+                 {:openai, "OpenAI · gpt-6-luna"}
+               ]
     end
   end
 
@@ -193,6 +242,33 @@ defmodule FermixCore.Providers.DecisionModelTest do
                },
                "provider" => %{"allow_fallbacks" => false, "data_collection" => "deny"}
              }
+    end
+
+    test "OpenRouter asks Perplexity's Decider the same noul, on the same terms" do
+      test = self()
+
+      id =
+        stub(fn conn, body ->
+          send(test, {:request, conn.request_path, body})
+
+          json(conn, 200, %{
+            "model" => "perplexity/pplx-decider-v1.3-20261112",
+            "answers" => %{"answer" => %{"type" => "noul", "noul" => 0.42}}
+          })
+        end)
+
+      assert {:ok, %{probability: 0.42, model: "perplexity/pplx-decider-v1.3-20261112"}} =
+               DecisionModel.yes_no(
+                 route(:openrouter_decider),
+                 "A kettle recall.",
+                 @question,
+                 opts(id)
+               )
+
+      assert_received {:request, "/api/alpha/decisions", body}
+      assert body["model"] == "~perplexity/pplx-decider-latest"
+      assert body["questions"]["answer"]["type"] == "noul"
+      assert body["provider"] == %{"allow_fallbacks" => false, "data_collection" => "deny"}
     end
 
     test "Venice gets the same noul with no provider preferences" do
@@ -356,6 +432,10 @@ defmodule FermixCore.Providers.DecisionModelTest do
       url: "https://openrouter.ai/api/alpha/decisions",
       api_key: "sk-or-invented"
     }
+  end
+
+  defp route(:openrouter_decider) do
+    %{route(:openrouter) | model: "~perplexity/pplx-decider-latest"}
   end
 
   defp route(:venice) do

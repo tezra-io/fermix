@@ -82,10 +82,12 @@ jobs:
     runs-on: ubuntu-24.04
     env:
       MIX_ENV: prod
-      ELIXIR_VERSION: "1.19.5"
-      # Burrito downloads ERTS by this exact upstream release string. Confirm all
-      # beam-machine target artifacts exist before changing it.
-      OTP_VERSION: "28.4.1"
+      ELIXIR_VERSION: "1.19.7"
+      # The Erlang code every Burrito target ships, ssl and public_key included.
+      # Its native runtime is beam-machine's OTP 28.5.0.6, the newest it has
+      # built, named by FermixCore.Release.NativeRuntime, which refuses a build
+      # on any OTP but this one: change the two together.
+      OTP_VERSION: "28.5.0.8"
       ZIG_VERSION: "0.15.2"
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
@@ -141,8 +143,9 @@ jobs:
         target: [linux_x86_64, linux_aarch64]
     env:
       MIX_ENV: prod
-      ELIXIR_VERSION: "1.19.5"
-      OTP_VERSION: "28.4.1"
+      ELIXIR_VERSION: "1.19.7"
+      # The standalone job's OTP, for the same reason (FermixCore.Release.NativeRuntime).
+      OTP_VERSION: "28.5.0.8"
       ZIG_VERSION: "0.15.2"
       # One build identity for both package targets, the way the app engine
       # already stamps one identity across its two slices.
@@ -201,8 +204,8 @@ jobs:
           - { os: macos-15, target: macos_aarch64 }
           - { os: macos-15-intel, target: macos_x86_64 }
     env:
-      ELIXIR_VERSION: "1.19.5"
-      OTP_VERSION: "28.4.1"
+      ELIXIR_VERSION: "1.19.7"
+      OTP_VERSION: "28.5.0.8"
       # One build identity per release run, shared by both targets: the app
       # ships a universal DMG with one engine build in two slices and verifies
       # the engine it boots after an update against the one build id the feed
@@ -276,6 +279,12 @@ jobs:
           PACKAGES_DIR: linux_packages
         run: ./scripts/release/build_releases_json.sh > burrito_out/releases.json
 
+      # The installer's --always-on runs this release's own copy of the Always
+      # On server script, so it is published beside the packages, byte for
+      # byte, and signed with them.
+      - name: Stage the Always On server script
+        run: mkdir always_on && cp packaging/cloud/first-boot.sh always_on/fermix_always_on.sh
+
       - name: Install cosign
         uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3.9.1
 
@@ -290,14 +299,15 @@ jobs:
             linux_packages/fermix_*.deb
             linux_packages/fermix-*.rpm
             app_engine_out/fermix_app_engine_*.tar.gz
+            always_on/fermix_always_on.sh
           )
           unsigned=()
           for artifact in "${artifacts[@]}"; do
             case "$artifact" in *.sig|*.pem|*.sha256) continue ;; esac
             unsigned+=("$artifact")
           done
-          [ "${#unsigned[@]}" -eq 10 ] || {
-            echo "::error::Expected four standalone, four package and two app-engine artifacts, found ${#unsigned[@]}"
+          [ "${#unsigned[@]}" -eq 11 ] || {
+            echo "::error::Expected four standalone, four package and two app-engine artifacts and the Always On server script, found ${#unsigned[@]}"
             exit 1
           }
           for artifact in "${unsigned[@]}"; do
@@ -325,6 +335,7 @@ jobs:
             burrito_out/releases.json
             linux_packages/fermix*
             app_engine_out/fermix_app_engine_*
+            always_on/fermix_always_on.sh*
           if-no-files-found: error
           retention-days: 1
 
@@ -351,6 +362,7 @@ jobs:
           - { name: engine-macos-arm64, os: macos-15, kind: app_engine, target: macos_aarch64, mode: native }
           - { name: engine-macos-x64, os: macos-15-intel, kind: app_engine, target: macos_x86_64, mode: native }
           - { name: engine-macos-x64-rosetta, os: macos-15, kind: app_engine, target: macos_x86_64, mode: rosetta }
+          - { name: always-on-script, os: ubuntu-24.04, kind: always_on }
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5.4.2
@@ -375,6 +387,7 @@ jobs:
             standalone) artifact="burrito_out/fermix_${{ matrix.target }}" ;;
             deb) artifact="linux_packages/fermix_${version}_${{ matrix.package_arch }}.deb" ;;
             rpm) artifact="linux_packages/fermix-${version}-1.${{ matrix.package_arch }}.rpm" ;;
+            always_on) artifact="always_on/fermix_always_on.sh" ;;
             *) artifact="app_engine_out/fermix_app_engine_${{ matrix.target }}.tar.gz" ;;
           esac
           # The candidate path is resolved once and handed to the run step, so
@@ -427,6 +440,10 @@ jobs:
             "${{ matrix.kind }}" \
             "${TAG_NAME#v}"
 
+      - name: Compare the Always On server script with the tag's first boot
+        if: matrix.kind == 'always_on'
+        run: cmp "$CANDIDATE_ARTIFACT" packaging/cloud/first-boot.sh
+
   stage-release:
     name: Stage draft release
     needs: [preflight, verify-candidate]
@@ -470,6 +487,7 @@ jobs:
             burrito_out/releases.json
             linux_packages/fermix*
             app_engine_out/fermix_app_engine_*
+            always_on/fermix_always_on.sh*
 
   verify-published:
     name: Verify staged assets (${{ matrix.name }})
@@ -493,6 +511,7 @@ jobs:
           - { name: engine-macos-arm64, os: macos-15, kind: app_engine, target: macos_aarch64, mode: native }
           - { name: engine-macos-x64, os: macos-15-intel, kind: app_engine, target: macos_x86_64, mode: native }
           - { name: engine-macos-x64-rosetta, os: macos-15, kind: app_engine, target: macos_x86_64, mode: rosetta }
+          - { name: always-on-script, os: ubuntu-24.04, kind: always_on }
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5.4.2
@@ -517,6 +536,7 @@ jobs:
             standalone) artifact="fermix_${{ matrix.target }}" ;;
             deb) artifact="fermix_${version}_${{ matrix.package_arch }}.deb" ;;
             rpm) artifact="fermix-${version}-1.${{ matrix.package_arch }}.rpm" ;;
+            always_on) artifact="fermix_always_on.sh" ;;
             *) artifact="fermix_app_engine_${{ matrix.target }}.tar.gz" ;;
           esac
           # Resolved once here and reused by the steps below, so the staged
@@ -595,6 +615,10 @@ jobs:
             "${{ matrix.kind }}" \
             "${TAG_NAME#v}"
 
+      - name: Compare the Always On server script with the tag's first boot
+        if: matrix.kind == 'always_on'
+        run: cmp "$STAGED_ARTIFACT" packaging/cloud/first-boot.sh
+
   promote:
     name: Promote verified release
     needs: [stage-release, verify-published]
@@ -622,10 +646,14 @@ jobs:
             "/repos/$REPO/releases/$RELEASE_ID" \
             --field draft=false >/dev/null
 
-  # The installer served at https://fermix.ai/install reads the public feed of
-  # the latest release, which a draft is not, so this is the first point at
-  # which it can be run for real. Nothing waits on it: a failure here says the
-  # advertised command is broken for a release that is already out.
+  # The installer served at https://fermix.ai/install downloads from the public
+  # release URLs, which a draft does not have, so this is the first point at
+  # which it can be run for real. It trusts only the digest table fermix.ai
+  # serves, which lists this release only after the site pins it, so the rail
+  # hands it the same table built from its own cosign-verified files; the
+  # served table and script are checked once the site deploys
+  # (docs/RELEASING.md). Nothing waits on this job: a failure here says the
+  # installer is broken for a release that is already out.
   installer:
     name: Install the published release (${{ matrix.name }})
     needs: promote
@@ -642,20 +670,32 @@ jobs:
           - { name: rpm-linux-arm64, os: ubuntu-24.04-arm, kind: rpm }
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5.4.2
 
-      # With cosign present the installer checks the package signature instead
-      # of skipping the check, and the verification below requires that it did.
+      - name: Download signed release candidate
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: signed-release-candidate
+          path: .
+
       - name: Install cosign
         uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3.9.1
 
-      - name: Run the advertised installer against the published release
+      # The rows fermix.ai will list for this release once the site pins it:
+      # each file the installer fetches, the Always On server script included,
+      # checked against the tag's signing identity, then hashed here.
+      - name: Build the release's digest table from the verified candidate
+        env:
+          TAG_NAME: ${{ github.ref_name }}
+        run: scripts/release/build_install_table.sh . "${TAG_NAME#v}" > "$RUNNER_TEMP/install-releases"
+
+      - name: Run the repository's installer against the published release
         env:
           TAG_NAME: ${{ github.ref_name }}
         run: |
           scripts/release/verify_installer.sh \
             "${{ matrix.kind }}" \
-            "${TAG_NAME#v}"
+            "${TAG_NAME#v}" \
+            "$RUNNER_TEMP/install-releases"
 
   homebrew:
     name: Update and verify Homebrew formula
@@ -680,6 +720,12 @@ jobs:
         env:
           TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
           VERSION: ${{ github.ref_name }}
+          # Homebrew updated itself inside this step (its "You have N outdated
+          # formulae" report), and the next `brew update` found the update lock
+          # held ("Another `brew update` process is already running", v0.18.0,
+          # twice). The step updates Homebrew once, itself, and refreshes only
+          # the tap after that.
+          HOMEBREW_NO_AUTO_UPDATE: "1"
         run: |
           set -euo pipefail
           if [ -z "${TAP_TOKEN:-}" ]; then
@@ -710,9 +756,12 @@ jobs:
           # `brew trust` to an older runner image.
           brew update >/dev/null
           brew trust --formula tezra-io/tap/fermix
+          # The loop needs only the tap's newest formula: a git pull of the tap
+          # takes no Homebrew lock, where a second `brew update` would.
+          tap_repo="$(brew --repository tezra-io/tap)"
           visible_version=""
           for attempt in $(seq 1 12); do
-            brew update >/dev/null
+            git -C "$tap_repo" pull --ff-only --quiet
             visible_version="$(brew info --formula --json=v2 tezra-io/tap/fermix | jq -r '.formulae[0].versions.stable // empty')"
             [ "$visible_version" = "$version" ] && break
             [ "$attempt" -eq 12 ] || sleep 10

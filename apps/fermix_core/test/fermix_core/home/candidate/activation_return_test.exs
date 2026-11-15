@@ -5,14 +5,33 @@ defmodule FermixCore.Home.Candidate.ActivationReturnTest do
   # staging leaves (`return_settle_test.exs` covers that).
   use ExUnit.Case, async: true
 
-  alias FermixCore.Home.AlwaysOnRelease
+  import ExUnit.CaptureLog
+
   alias FermixCore.Home.Candidate
   alias FermixCore.Home.Candidate.Activation
+  alias FermixCore.Home.ComputerKey
+  alias FermixCore.Home.DesktopLink
   alias FermixCore.Home.Moved
   alias FermixCore.Home.Snapshot.Status
+  alias FermixCore.Setup.SecretWriter
   alias FermixTestSupport.SafeRm
 
   @now ~U[2031-06-01 09:20:00Z]
+
+  # The ended tenure's link as an engine before the key moved wrote it: its
+  # key is the file beside it, which step c deletes with the link.
+  @link_before_key Jason.encode!(%{
+                     "v" => 1,
+                     "device_id" => "6f1e2d3c-4b5a-4968-8778-695a4b3c2d1e",
+                     "primary" => %{
+                       "name" => "hetzner-orchard",
+                       "gateway_pk" => Base.encode64(:binary.copy(<<3>>, 32)),
+                       "node_id" => String.duplicate("c4", 32),
+                       "relays" => [%{"url" => "https://eu1.relay.invalid/", "quic_port" => 7842}],
+                       "relays_rev" => String.duplicate("a1", 8)
+                     },
+                     "primary_epoch" => 5
+                   })
 
   # This computer's retired copy: its own paths, the ended tenure's
   # bookkeeping, and the stale copy of what travels.
@@ -25,11 +44,14 @@ defmodule FermixCore.Home.Candidate.ActivationReturnTest do
     "chatgpt_host.json" => "stale, the server has none",
     "daemon.sock" => "",
     "config.toml.lock" => "",
+    # M97 §4: this computer's own settings, and an interrupted write of them.
+    "machine.toml" => ~s([sandbox]\nmode = "strict"\n),
+    "machine.toml.tmp" => "an interrupted write",
     ".move/phase.json" => ~s({"phase":"done"}),
     "logs/fermix.log" => "this computer's log",
-    "device/desktop.json" => "the link to the server",
+    "device/desktop.json" => @link_before_key,
     "device/desktop_key" => "the desktop key",
-    "device/provision/srv-7f3a.json" => "the ledger with its token",
+    "device/local/window.json" => "a file of this machine's own",
     "device/return.json" => "the return's record",
     "snapshots/2031-05-30T02:00:00Z-e6.fxsnap" => "a copy of the server's",
     "harness/runs/run-1/events.jsonl" => "a coding run's spool",
@@ -52,10 +74,9 @@ defmodule FermixCore.Home.Candidate.ActivationReturnTest do
     ".candidate-3F2A" => "a stray builder"
   }
 
-  # The server's copy as the return staged it, Always On's switch with it.
+  # The server's copy as the return staged it.
   @staged %{
-    "config.toml" =>
-      ~s([fermix_core.engine]\nrole = "primary"\n\n[fermix_core.always_on]\nenabled = true\n),
+    "config.toml" => ~s([fermix_core.engine]\nrole = "primary"\n),
     "memory.db" => "the server's database",
     "auth.json" => "the server's tokens",
     "mobile/devices.toml" => "the server's device list",
@@ -67,7 +88,7 @@ defmodule FermixCore.Home.Candidate.ActivationReturnTest do
     "workspace/notes.md" => "the server's notes"
   }
 
-  # The stop case builds a home per stop, so it runs on a small copy that still
+  # The stop cases build a home each, so they run on a small copy that still
   # holds every kind of step: a path set aside in place, a kept path moved into
   # a staged entry, an entry with its database files, the ended tenure and the
   # marker.
@@ -86,6 +107,23 @@ defmodule FermixCore.Home.Candidate.ActivationReturnTest do
 
   @small_staged Map.take(@staged, ["config.toml", "memory.db", "plugins/reinstall.json"])
 
+  @small {@small_retired, @small_staged}
+
+  # What a stop case finishes against: one whole activation of the small home,
+  # run once for the module, gives the first step of each kind and the files
+  # it leaves.
+  @stop_kinds [:a, :kept, :aside, :placed, :c, :d, :e, :f]
+
+  setup_all do
+    tmp = SafeRm.make_tmp_dir!("activation_return_reference")
+    on_exit(fn -> SafeRm.rm_rf!(tmp) end)
+    reference = activating_home!(tmp, "reference", @small)
+    test = self()
+    :ok = Activation.activate(reference, :return, after_step: &send(test, {:step, &1, nil, nil}))
+    stops = collect_steps() |> Enum.map(&elem(&1, 0)) |> first_of_each_kind()
+    %{reference: %{expected: files(reference), stops: stops}}
+  end
+
   setup do
     tmp = SafeRm.make_tmp_dir!("activation_return")
     on_exit(fn -> SafeRm.rm_rf!(tmp) end)
@@ -101,8 +139,9 @@ defmodule FermixCore.Home.Candidate.ActivationReturnTest do
       Map.merge(
         Map.take(@retired, [
           "config.toml.lock",
+          "machine.toml",
           "logs/fermix.log",
-          "device/provision/srv-7f3a.json",
+          "device/local/window.json",
           "device/return.json",
           "snapshots/2031-05-30T02:00:00Z-e6.fxsnap",
           "harness/runs/run-1/events.jsonl",
@@ -117,14 +156,78 @@ defmodule FermixCore.Home.Candidate.ActivationReturnTest do
       |> Map.put(Path.relative_to(Status.path(home), home), File.read!(Status.path(home)))
 
     assert files(home) == expected
-    # The home is back with its own Always On switch.
-    assert AlwaysOnRelease.available_in(home, :prod) == {:ok, true}
     assert {:ok, %{run_at_boot: true}} = Status.read(home)
     assert Moved.read(home) == :absent
     refute Candidate.present?(home)
     # A top-level the staging lacks keeps its kept path and goes with the rest.
     assert File.dir?(Path.join(home, "harness"))
     refute File.exists?(Path.join(home, "job_runs"))
+  end
+
+  # M97 D13: a move back deletes this computer's key from the store its link
+  # records, then the link that records it.
+  test "the ended tenure's key goes from the store its link names, then the link", ctx do
+    home = activating_home!(ctx.tmp, "home", @small)
+    profile = "activation-return-#{System.unique_integer([:positive])}"
+    File.write!(Path.join(home, "config.toml"), ~s([fermix_core]\nprofile = "#{profile}"\n))
+    SafeRm.rm!(Path.join(home, "device/desktop_key"))
+    {:ok, _keypair, :keyring} = ComputerKey.create(home)
+    {:ok, link} = DesktopLink.read(home)
+    :ok = DesktopLink.write(home, %{link | key: :keyring})
+
+    stored = fn ->
+      SecretWriter.get({:device_key, :desktop}, profile: profile, store: :keyring)
+    end
+
+    assert {:ok, _base64} = stored.()
+
+    assert :ok = Activation.activate(home, :return)
+
+    # The returned settings name a profile of their own, so the item is
+    # looked up by the one the key was stored under.
+    assert stored.() == {:error, :missing_secret}
+    refute File.exists?(DesktopLink.path(home))
+  end
+
+  # A run after a stop between the key's deletion and the link's deletes only
+  # the key this home had, as the first run recorded it: another home under the
+  # same profile may have stored its own in the item since (D13).
+  test "a later run of step c leaves another home's key under the same profile", ctx do
+    home = activating_home!(ctx.tmp, "home", @small)
+    profile = keyed_profile!(home)
+    {:ok, link} = DesktopLink.read(home)
+
+    assert catch_throw(Activation.activate(home, :return, after_step: stop_at(:c))) ==
+             {:stopped, :c}
+
+    # The stop came before the link went: it is back as the first run found it.
+    :ok = DesktopLink.write(home, link)
+    other = Path.join(ctx.tmp, "other")
+    write!(other, "config.toml", ~s([fermix_core]\nprofile = "#{profile}"\n))
+    {:ok, %{public: other_public}, :keyring} = ComputerKey.create(other)
+
+    assert :ok = Activation.activate(home, :return)
+    assert {:ok, %{public: ^other_public}} = ComputerKey.read(other, store: :keyring)
+    refute File.exists?(DesktopLink.path(home))
+  end
+
+  # The step ends this computer's time as a linked computer however its link
+  # reads. One that cannot be read names no store, so it goes, the reason is
+  # logged by name, and no key is guessed at.
+  test "a link that cannot be read goes at step c, logged by name, and no key is guessed",
+       ctx do
+    home = activating_home!(ctx.tmp, "home", @small)
+    profile = keyed_profile!(home)
+    File.write!(DesktopLink.path(home), "{\"v\": 2, \"key\": \"@keyring\"")
+
+    log = capture_log(fn -> assert :ok = Activation.activate(home, :return) end)
+
+    refute File.exists?(DesktopLink.path(home))
+    assert log =~ "the desktop link could not be read"
+    assert log =~ "invalid_link"
+
+    assert {:ok, _base64} =
+             SecretWriter.get({:device_key, :desktop}, profile: profile, store: :keyring)
   end
 
   test "the config is primary only once the marker is gone, at every step", ctx do
@@ -149,27 +252,26 @@ defmodule FermixCore.Home.Candidate.ActivationReturnTest do
     assert {:f, true, false} in steps
   end
 
-  test "a stop after any step is finished by the next run from the recorded entries", ctx do
-    small = {@small_retired, @small_staged}
-    reference = activating_home!(ctx.tmp, "reference", small)
-    test = self()
-    :ok = Activation.activate(reference, :return, after_step: &send(test, {:step, &1, nil, nil}))
-    expected = files(reference)
-    steps = Enum.map(collect_steps(), &elem(&1, 0))
-    stops = first_of_each_kind(steps)
+  test "a whole activation of the small home takes every kind of step a stop follows", ctx do
+    assert ctx.reference.stops |> Enum.map(&kind/1) |> Enum.sort() == Enum.sort(@stop_kinds)
+  end
 
-    assert stops |> Enum.map(&kind/1) |> Enum.sort() ==
-             Enum.sort([:a, :kept, :aside, :placed, :c, :d, :e, :f])
-
-    for {step, index} <- Enum.with_index(stops) do
-      home = activating_home!(ctx.tmp, "stop-#{index}", small)
+  # A case per kind of step, each on one home of its own: every file call a
+  # home's activation makes queues on the VM's one file server behind the
+  # whole suite's, so one case that built a home for every kind outlasted the
+  # test timeout on a loaded runner.
+  for kind <- @stop_kinds do
+    test "a stop after step #{kind} is finished by the next run from the recorded entries",
+         ctx do
+      step = Enum.find(ctx.reference.stops, &(kind(&1) == unquote(kind)))
+      home = activating_home!(ctx.tmp, "home", @small)
 
       assert catch_throw(Activation.activate(home, :return, after_step: stop_at(step))) ==
                {:stopped, step}
 
       refute primary?(home) and Moved.read(home) != :absent, inspect(step)
       assert :ok = next_boot(home, step), inspect(step)
-      assert files(home) == expected, "after a stop at #{inspect(step)}"
+      assert files(home) == ctx.reference.expected, "after a stop at #{inspect(step)}"
     end
   end
 
@@ -282,6 +384,18 @@ defmodule FermixCore.Home.Candidate.ActivationReturnTest do
     home
   end
 
+  # The home under a profile of its own, its key in the keychain and its link
+  # naming that store.
+  defp keyed_profile!(home) do
+    profile = "activation-return-#{System.unique_integer([:positive])}"
+    File.write!(Path.join(home, "config.toml"), ~s([fermix_core]\nprofile = "#{profile}"\n))
+    SafeRm.rm!(Path.join(home, "device/desktop_key"))
+    {:ok, _keypair, :keyring} = ComputerKey.create(home)
+    {:ok, link} = DesktopLink.read(home)
+    :ok = DesktopLink.write(home, %{link | key: :keyring})
+    profile
+  end
+
   # After f the next boot is the primary's, which finishes the activation;
   # before it, the device's, whose candidate runs it again.
   defp next_boot(home, :f), do: Candidate.finish_activation(home)
@@ -313,11 +427,29 @@ defmodule FermixCore.Home.Candidate.ActivationReturnTest do
 
   defp primary?(home), do: File.read!(Path.join(home, "config.toml")) =~ ~s(role = "primary")
 
-  # Raw writes skip the VM's one file server, which the whole suite queues on.
+  # Raw writes skip the VM's one file server, which the whole suite queues on,
+  # and each directory below `root` is one call to it: File.mkdir_p makes and
+  # stats every ancestor from / down, for every file.
   defp write!(root, path, contents) do
     file = Path.join(root, path)
-    File.mkdir_p!(Path.dirname(file))
+    Enum.each(dirs_from(root, Path.dirname(path)), &mkdir!/1)
     File.write!(file, contents, [:raw])
+  end
+
+  # `root`, then each directory of `rel` beneath it, parents first.
+  defp dirs_from(root, rel) do
+    below =
+      rel |> Path.split() |> Enum.reject(&(&1 == ".")) |> Enum.scan(root, &Path.join(&2, &1))
+
+    [root | below]
+  end
+
+  defp mkdir!(dir) do
+    case File.mkdir(dir) do
+      :ok -> :ok
+      {:error, :eexist} -> :ok
+      {:error, reason} -> raise File.Error, reason: reason, action: "make directory", path: dir
+    end
   end
 
   defp mode(path), do: Bitwise.band(File.stat!(path).mode, 0o777)

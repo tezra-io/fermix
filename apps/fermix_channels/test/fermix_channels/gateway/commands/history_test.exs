@@ -9,7 +9,11 @@ defmodule FermixChannels.Gateway.Commands.HistoryTest do
   alias FermixChannels.Gateway.Message
   alias FermixCore.ComputerHistory.Config, as: ComputerHistoryConfig
   alias FermixCore.ComputerHistory.Ingest
+  alias FermixCore.ComputerHistory.Spool
+  alias FermixCore.Computers.Computer
   alias FermixCore.Memory.Repo
+  alias FermixTestSupport.HistorySpool
+  alias FermixTestSupport.SafeRm
 
   defp message(content) do
     Message.new!(%{
@@ -42,7 +46,22 @@ defmodule FermixChannels.Gateway.Commands.HistoryTest do
       Enum.each([db_path, "#{db_path}-wal", "#{db_path}-shm"], &FermixTestSupport.SafeRm.rm/1)
     end)
 
-    %{ctx: %{computer_history_repo: repo_name}, repo: repo_name}
+    # This machine's own store, in a folder of its own; the home has no computer
+    # and tells none unless a test says so.
+    store = SafeRm.make_tmp_dir!("history_cmd_spool")
+    on_exit(fn -> SafeRm.rm_rf!(store) end)
+
+    spool =
+      start_supervised!({Spool, path: Path.join([store, "device", "history.db"]), name: nil})
+
+    ctx = %{
+      computer_history_repo: repo_name,
+      computer_history_spool: spool,
+      computer_history_computers: [],
+      computer_history_deliver: fn _opts -> flunk("no computer to tell") end
+    }
+
+    %{ctx: ctx, repo: repo_name, spool: spool}
   end
 
   test "metadata: owner-only, no aliases" do
@@ -59,9 +78,83 @@ defmodule FermixChannels.Gateway.Commands.HistoryTest do
     assert is_binary(text) and text != ""
   end
 
-  # The macOS-only guard is injected, so the status body is asserted on every
-  # host (the feature's own platform check is covered by ComputerHistory).
-  defp macos_ctx(ctx), do: Map.put(ctx, :computer_history_macos?, true)
+  # This system's recorder and its system are injected, so the status body is
+  # asserted on every host (the recorder fact itself is covered by
+  # ComputerHistory).
+  defp macos_ctx(ctx),
+    do: Map.merge(ctx, %{computer_history_recorder?: true, computer_history_system: :macos})
+
+  defp linux_ctx(ctx),
+    do: Map.merge(ctx, %{computer_history_recorder?: true, computer_history_system: :linux})
+
+  defp linux_status(ctx) do
+    assert :ok = History.execute(message("status"), reply_fn(self()), linux_ctx(ctx))
+    assert_receive {:reply, text}
+    text
+  end
+
+  defp seen(spool, app, type, extra \\ %{}) do
+    event =
+      Map.merge(
+        %{boot_id: "b-#{app}", source_seq: 1, ts: now_ms(), type: type, bundle_id: app},
+        extra
+      )
+
+    {:ok, _written} = Spool.insert_events([event], server: spool)
+  end
+
+  defp now_ms, do: System.system_time(:millisecond)
+
+  # M97 stage 4, D3: an application records on Linux only while it publishes its
+  # controls on the accessibility bus, and compux never switches that on, so the
+  # status names the allowlisted applications that recorded nothing.
+  test "on Linux status names the allowlisted apps that recorded nothing, and why", %{
+    ctx: ctx,
+    spool: spool
+  } do
+    Application.put_env(:fermix_core, :computer_history,
+      enabled: true,
+      apps: ["Firefox", "Code", "Terminal"]
+    )
+
+    seen(spool, "Firefox", "window.focused")
+
+    text = linux_status(ctx)
+
+    assert text =~
+             "Recorded nothing in the last 48 hours from Code, Terminal. On Linux an " <>
+               "application records only while it publishes its controls on the accessibility " <>
+               "bus: Chromium, Electron and Qt applications do so only while accessibility is " <>
+               "on in your session."
+
+    refute status_reply(ctx) =~ "Recorded nothing"
+  end
+
+  test "on Linux status names this computer, never a Mac", %{ctx: ctx, spool: spool} do
+    seen(spool, "Firefox", "observer.gap", %{
+      gap_reason: "private_unknown",
+      gap_from_ts: now_ms(),
+      gap_to_ts: now_ms()
+    })
+
+    text = linux_status(ctx)
+
+    assert text =~ "private-window state unknown for Firefox (typed text is not recorded there)"
+    assert text =~ "leaves this computer"
+    refute text =~ "Mac"
+  end
+
+  test "on a Mac status keeps its own words", %{ctx: ctx, spool: spool} do
+    seen(spool, "com.apple.Safari", "observer.gap", %{
+      gap_reason: "private_unknown",
+      gap_from_ts: now_ms(),
+      gap_to_ts: now_ms()
+    })
+
+    assert status_reply(ctx) =~
+             "private-window state unknown for com.apple.Safari " <>
+               "(page URLs are recorded there; typed text is not)"
+  end
 
   # Stand-in for the capture rail: the status line reads the live `Capturer` by
   # its module name, and these are the two dead ends an operator has to be told
@@ -131,7 +224,7 @@ defmodule FermixChannels.Gateway.Commands.HistoryTest do
              "Capture: degraded — recorder protocol v5 ≠ required v7 (a compux upgrade is needed)."
   end
 
-  test "status reports the unsummarized backlog and how old it is", %{ctx: ctx, repo: repo} do
+  test "status reports the unsummarized backlog and how old it is", %{ctx: ctx, spool: spool} do
     now = System.system_time(:millisecond)
 
     events = [
@@ -145,11 +238,25 @@ defmodule FermixChannels.Gateway.Commands.HistoryTest do
       %{boot_id: "b1", source_seq: 2, ts: now, type: "app.activated", bundle_id: "com.a"}
     ]
 
-    assert {:ok, 2} = Repo.computer_history_insert_events(events, server: repo)
+    assert {:ok, 2} = Spool.insert_events(events, server: spool)
 
     assert :ok = History.execute(message("status"), reply_fn(self()), macos_ctx(ctx))
     assert_receive {:reply, text}
     assert text =~ "Spool: 2 event(s), 2 unsummarized (oldest 2h 10m old)."
+  end
+
+  # M97 §8.1: a sitting that expired before it was sent is shown, never hidden.
+  test "status counts the events that expired before they were sent", %{ctx: ctx, spool: spool} do
+    events = [
+      %{boot_id: "b1", source_seq: 1, ts: 1_000, type: "app.activated", bundle_id: "com.a"},
+      %{boot_id: "b1", source_seq: 2, ts: 2_000, type: "app.activated", bundle_id: "com.a"}
+    ]
+
+    assert {:ok, 2} = Spool.insert_events(events, server: spool)
+    assert {:ok, %{deleted: 2, unsent: 2}} = Spool.sweep_expired(10_000, server: spool)
+
+    text = status_reply(ctx)
+    assert text =~ "2 events expired before they were sent."
   end
 
   test "status states a zero backlog without an age", %{ctx: ctx} do
@@ -160,7 +267,7 @@ defmodule FermixChannels.Gateway.Commands.HistoryTest do
 
   # Per-app coverage states (§8.4a): an app the driver can only see titles in
   # observes no typed text at all, which silently changes what history can answer.
-  test "status names the apps only titles are observable in", %{ctx: ctx, repo: repo} do
+  test "status names the apps only titles are observable in", %{ctx: ctx, spool: spool} do
     now = System.system_time(:millisecond)
 
     events = [
@@ -182,7 +289,7 @@ defmodule FermixChannels.Gateway.Commands.HistoryTest do
       }
     ]
 
-    assert {:ok, 2} = Repo.computer_history_insert_events(events, server: repo)
+    assert {:ok, 2} = Spool.insert_events(events, server: spool)
 
     assert :ok = History.execute(message("status"), reply_fn(self()), macos_ctx(ctx))
     assert_receive {:reply, text}
@@ -211,7 +318,7 @@ defmodule FermixChannels.Gateway.Commands.HistoryTest do
   # M32.1 §2.2: a browser whose private-window state the recorder cannot classify
   # is a THIRD coverage state, and the owner has to be told that its addresses are
   # recorded while its typed text is not.
-  test "status names all three coverage states distinctly", %{ctx: ctx, repo: repo} do
+  test "status names all three coverage states distinctly", %{ctx: ctx, spool: spool} do
     now = System.system_time(:millisecond)
 
     events = [
@@ -241,7 +348,7 @@ defmodule FermixChannels.Gateway.Commands.HistoryTest do
       }
     ]
 
-    assert {:ok, 3} = Repo.computer_history_insert_events(events, server: repo)
+    assert {:ok, 3} = Spool.insert_events(events, server: spool)
 
     text = status_reply(ctx)
 
@@ -258,7 +365,7 @@ defmodule FermixChannels.Gateway.Commands.HistoryTest do
     refute text =~ "Coverage:"
   end
 
-  test "status ignores coverage gaps older than the retention window", %{ctx: ctx, repo: repo} do
+  test "status ignores coverage gaps older than the retention window", %{ctx: ctx, spool: spool} do
     stale = System.system_time(:millisecond) - :timer.hours(49)
 
     events = [
@@ -272,7 +379,7 @@ defmodule FermixChannels.Gateway.Commands.HistoryTest do
       }
     ]
 
-    assert {:ok, 1} = Repo.computer_history_insert_events(events, server: repo)
+    assert {:ok, 1} = Spool.insert_events(events, server: spool)
 
     assert :ok = History.execute(message("status"), reply_fn(self()), macos_ctx(ctx))
     assert_receive {:reply, text}
@@ -324,13 +431,239 @@ defmodule FermixChannels.Gateway.Commands.HistoryTest do
   defp restore_env(key, nil), do: Application.delete_env(:fermix_core, key)
   defp restore_env(key, value), do: Application.put_env(:fermix_core, key, value)
 
-  test "pause persists a pause horizon", %{ctx: ctx, repo: repo} do
-    assert :ok = History.execute(message("pause 30m"), reply_fn(self()), ctx)
+  # M97 §8.5: recorded on the home, which then takes no sitting stamped inside
+  # it from any machine, and applied on this machine at once.
+  test "pause persists a pause horizon", %{ctx: ctx, repo: repo, spool: spool} do
+    assert :ok = History.execute(message("pause 30m"), reply_fn(self()), macos_ctx(ctx))
     assert_receive {:reply, text}
     assert text =~ "paused until"
 
-    {:ok, state} = Repo.computer_history_fetch_state(server: repo)
+    {:ok, state} = Spool.state(server: spool)
     assert is_binary(state.pause_until)
+
+    assert {:ok, [%{kind: "pause"}]} =
+             Repo.computer_history_home(:intervals_after, ["studio-7f3a", 0, 10], server: repo)
+  end
+
+  defp studio(connected?) do
+    %Computer{
+      device_id: "studio-7f3a",
+      name: "studio Mac",
+      connected: connected?,
+      last_seen: DateTime.add(DateTime.utc_now(), -2, :hour),
+      offers: [%{id: "history", state: :on, sentence: nil, detail: nil}]
+    }
+  end
+
+  # M97 §8.5: one block per computer; what it last sent, and what it has not
+  # applied yet.
+  test "status shows a block per computer", %{ctx: ctx, repo: repo} do
+    {:ok, _id} =
+      Repo.computer_history_home(:pause_window, [1, 2, 1, :all], server: repo)
+
+    :ok =
+      Repo.computer_history_home(
+        :record_submission,
+        ["studio-7f3a", "summarized", nil, System.system_time(:millisecond) - 120_000],
+        server: repo
+      )
+
+    ctx = ctx |> macos_ctx() |> Map.put(:computer_history_computers, [studio(false)])
+    text = status_reply(ctx)
+
+    assert text =~ "studio Mac: history on; away, last seen 2h"
+    assert text =~ "last sitting 2m ago (summarized)"
+    assert text =~ "1 purge or pause not yet applied there"
+  end
+
+  test "a purge and a pause from chat are told to the computers, and name who is away", ctx do
+    test_pid = self()
+
+    deliver = fn opts ->
+      send(test_pid, {:delivered, opts})
+      %{applied: ["studio Mac"], away: ["loft Linux"], failed: []}
+    end
+
+    ctx =
+      ctx.ctx
+      |> macos_ctx()
+      |> Map.merge(%{
+        computer_history_computers: [studio(true)],
+        computer_history_deliver: deliver
+      })
+
+    assert :ok = History.execute(message("purge 1h"), reply_fn(self()), ctx)
+    assert_receive {:reply, purged}
+    assert_received {:delivered, [repo: _repo]}
+    assert purged =~ "Applied on studio Mac."
+    assert purged =~ "loft Linux gets it when next connected"
+    assert purged =~ "your Fermix server's"
+
+    assert :ok = History.execute(message("pause 1h"), reply_fn(self()), ctx)
+    assert_receive {:reply, paused}
+    assert paused =~ "paused until"
+    assert paused =~ "loft Linux gets it when next connected"
+  end
+
+  # A machine store that answers every request with an error.
+  defmodule FailingStore do
+    @moduledoc false
+    use GenServer
+
+    def start_link(_arg), do: GenServer.start_link(__MODULE__, nil)
+
+    @impl true
+    def init(nil), do: {:ok, nil}
+
+    @impl true
+    def handle_call(_request, _from, state), do: {:reply, {:error, :injected}, state}
+  end
+
+  # The two stores share no transaction: once the home recorded a pause or a
+  # purge it stands, and the reply says exactly what did not happen yet.
+  test "a pause this Mac could not apply yet says the pause stands and what is owed", %{
+    ctx: ctx,
+    repo: repo
+  } do
+    ctx = ctx |> macos_ctx() |> Map.put(:computer_history_spool, start_supervised!(FailingStore))
+
+    assert :ok = History.execute(message("pause 30m"), reply_fn(self()), ctx)
+    assert_receive {:reply, text}
+
+    assert text =~ "The pause is recorded on this home until"
+    assert text =~ "nothing stamped inside it is summarized from any computer"
+    assert text =~ "This Mac's recorder could not be paused yet (:injected)"
+    assert text =~ "tries again every five minutes"
+    refute text =~ "NOT paused"
+
+    assert {:ok, [%{kind: "pause"}]} =
+             Repo.computer_history_home(:intervals_after, ["", 0, 10], server: repo)
+  end
+
+  test "a purge this Mac could not apply yet says the purge stands and what is owed", %{ctx: ctx} do
+    ctx = ctx |> macos_ctx() |> Map.put(:computer_history_spool, start_supervised!(FailingStore))
+
+    assert :ok = History.execute(message("purge 1h"), reply_fn(self()), ctx)
+    assert_receive {:reply, text}
+
+    assert text =~ "Deleted 0 activity memory(ies) on this home, and the purge stands"
+    assert text =~ "This Mac's raw record in that window could not be deleted yet (:injected)"
+    refute text =~ "Purge failed"
+  end
+
+  test "a purge the home could not record says nothing was deleted", %{spool: spool} do
+    unique = System.unique_integer([:positive])
+    disabled = :"history_cmd_disabled_purge_#{unique}"
+    start_supervised!({Repo, name: disabled, enabled: false}, id: :disabled_purge_repo)
+
+    {:ok, 1} =
+      Spool.insert_events([%{boot_id: "b1", source_seq: 1, ts: 1_000, type: "app.activated"}],
+        server: spool
+      )
+
+    ctx = %{
+      computer_history_repo: disabled,
+      computer_history_spool: spool,
+      computer_history_recorder?: true
+    }
+
+    assert :ok = History.execute(message("purge all"), reply_fn(self()), ctx)
+    assert_receive {:reply, text}
+    assert text =~ "Purge failed (:disabled): nothing was deleted."
+    assert {:ok, 1} = Spool.count_events(server: spool)
+  end
+
+  # M97 §7.2, §8.5: narrowing from anywhere; off for a named computer stands on
+  # the home at once and the computer applies it now, or once it is back.
+  test "off naming a computer switches it off there, or says it will once it is back", %{
+    ctx: ctx
+  } do
+    test_pid = self()
+
+    switch_off = fn answer ->
+      fn computer, opts ->
+        send(test_pid, {:switch_off, computer.device_id, Keyword.fetch!(opts, :repo)})
+        answer
+      end
+    end
+
+    ctx =
+      ctx
+      |> Map.put(:computer_history_computers, [studio(true)])
+      |> Map.put(:computer_history_switch_off, switch_off.(:done))
+
+    assert :ok = History.execute(message("off Studio mac"), reply_fn(self()), ctx)
+    assert_receive {:reply, done}
+    assert_received {:switch_off, "studio-7f3a", _repo}
+    assert done =~ "Computer history is off on studio Mac: it records nothing more"
+    assert done =~ "only someone at studio Mac can switch it on again"
+    assert ComputerHistoryConfig.enabled?()
+
+    ctx = Map.put(ctx, :computer_history_switch_off, switch_off.(:away))
+    assert :ok = History.execute(message("off studio-7f3a"), reply_fn(self()), ctx)
+    assert_receive {:reply, away}
+    assert away =~ "studio Mac is away. Its computer history goes off once it is back"
+
+    ctx = Map.put(ctx, :computer_history_switch_off, switch_off.({:failed, :timeout}))
+    assert :ok = History.execute(message("off studio Mac"), reply_fn(self()), ctx)
+    assert_receive {:reply, failed}
+    assert failed =~ "studio Mac could not be told now (:timeout)"
+    assert failed =~ "summarizes nothing from it from now on"
+  end
+
+  test "off naming a computer the home does not have names the ones it has", %{ctx: ctx} do
+    ctx = Map.put(ctx, :computer_history_computers, [studio(true)])
+
+    assert :ok = History.execute(message("off attic pc"), reply_fn(self()), ctx)
+    assert_receive {:reply, text}
+    assert text == "This home has no computer named attic pc. Its computers: studio Mac."
+  end
+
+  # M97 §8.5: the home holds no raw record of a computer, so its status block
+  # shows what the computer last reported, with its age.
+  test "status shows what a computer last reported of its recorder, and an off owed", %{
+    ctx: ctx,
+    repo: repo
+  } do
+    now = System.system_time(:millisecond)
+
+    report = %{
+      "v" => 1,
+      "recorder" => "running",
+      "events" => 40,
+      "unsent" => 12,
+      "oldest_unsent_ts" => now - 3_900_000,
+      "expired_unsent" => 2,
+      "title_only" => 1,
+      "private_unknown" => 0,
+      "ax_refused" => 2
+    }
+
+    :ok =
+      Repo.computer_history_home(
+        :record_report,
+        ["studio-7f3a", Jason.encode!(report), now - 240_000],
+        server: repo
+      )
+
+    :ok = Repo.computer_history_home(:request_off, ["studio-7f3a", now], server: repo)
+
+    ctx = Map.put(ctx, :computer_history_computers, [studio(true)])
+    assert :ok = History.execute(message("status"), reply_fn(self()), ctx)
+    assert_receive {:reply, text}
+
+    assert text =~
+             "recorder running, 12 event(s) unsent (oldest 1h 5m old), 2 expired before they " <>
+               "were sent, coverage: title-only in 1 app, AX refused in 2 apps (reported 4m ago)"
+
+    assert text =~ "asked to switch its history off, not yet done there"
+  end
+
+  test "status says when a computer has not reported yet", %{ctx: ctx} do
+    ctx = Map.put(ctx, :computer_history_computers, [studio(false)])
+    assert :ok = History.execute(message("status"), reply_fn(self()), ctx)
+    assert_receive {:reply, text}
+    assert text =~ "no recorder report yet"
   end
 
   test "pause without a duration shows usage", %{ctx: ctx} do
@@ -340,42 +673,43 @@ defmodule FermixChannels.Gateway.Commands.HistoryTest do
   end
 
   test "pause is ENFORCED at ingest: events stamped before the horizon never reach the spool",
-       %{ctx: ctx, repo: repo} do
-    assert :ok = History.execute(message("pause 30m"), reply_fn(self()), ctx)
+       %{ctx: ctx, spool: spool} do
+    assert :ok = History.execute(message("pause 30m"), reply_fn(self()), macos_ctx(ctx))
     assert_receive {:reply, text}
     assert text =~ "paused until"
 
     event = %{boot_id: "b1", source_seq: 1, ts: 1_000, type: "app.activated", bundle_id: "com.a"}
 
     assert {:ok, %{written: 0, dropped: 1}} =
-             Ingest.ingest([event], repo: repo, apps: ["com.a"])
+             Ingest.ingest([event], spool: spool, apps: ["com.a"])
 
-    assert {:ok, 0} = Repo.computer_history_count_events(server: repo)
+    assert {:ok, 0} = Spool.count_events(server: spool)
 
     # The horizon passing resumes capture with no timer to arm — each batch
     # re-reads the persisted state. The event stamped before the horizon stays
     # out even when it is flushed after it (M32 inv. 12); one stamped after the
-    # horizon is written.
+    # horizon is written. The pause's window is fenced too (M97 §8.5), so only
+    # an event stamped after its end is.
     past = DateTime.utc_now() |> DateTime.add(-60, :second) |> DateTime.to_iso8601()
-    assert :ok = Repo.computer_history_set_pause_until(past, server: repo)
-    resumed = %{event | source_seq: 2, ts: System.system_time(:millisecond)}
+    assert :ok = HistorySpool.put_pause_until(spool, past)
+    resumed = %{event | source_seq: 2, ts: System.system_time(:millisecond) + 31 * 60_000}
 
     assert {:ok, %{written: 1, dropped: 1}} =
-             Ingest.ingest([event, resumed], repo: repo, apps: ["com.a"])
+             Ingest.ingest([event, resumed], spool: spool, apps: ["com.a"])
 
     assert {:ok, [%{source_seq: 2}]} =
-             Repo.computer_history_events_after_id(0, 10, server: repo)
+             Spool.events_after(0, 10, server: spool)
   end
 
-  test "an unparseable pause horizon fails CLOSED (capture stays off)", %{repo: repo} do
-    assert :ok = Repo.computer_history_set_pause_until("not-a-timestamp", server: repo)
+  test "an unparseable pause horizon fails CLOSED (capture stays off)", %{spool: spool} do
+    assert :ok = HistorySpool.put_pause_until(spool, "not-a-timestamp")
 
     event = %{boot_id: "b1", source_seq: 1, ts: 1_000, type: "app.activated", bundle_id: "com.a"}
 
     assert {:ok, %{written: 0, dropped: 1}} =
-             Ingest.ingest([event], repo: repo, apps: ["com.a"])
+             Ingest.ingest([event], spool: spool, apps: ["com.a"])
 
-    assert {:ok, 0} = Repo.computer_history_count_events(server: repo)
+    assert {:ok, 0} = Spool.count_events(server: spool)
   end
 
   test "pause reports failure instead of claiming success when the persist fails", %{ctx: _ctx} do
@@ -399,7 +733,8 @@ defmodule FermixChannels.Gateway.Commands.HistoryTest do
   # stalled roll-up or a sitting that never closed is invisible otherwise.
   test "status counts session notes and threads, the roll-up age and the open sitting", %{
     ctx: ctx,
-    repo: repo
+    repo: repo,
+    spool: spool
   } do
     now = System.system_time(:millisecond)
 
@@ -436,7 +771,7 @@ defmodule FermixChannels.Gateway.Commands.HistoryTest do
                server: repo
              )
 
-    assert :ok = Repo.computer_history_set_session_open_since(now - 600_000, server: repo)
+    assert :ok = Spool.set_open_since(now - 600_000, server: spool)
 
     assert :ok = History.execute(message("status"), reply_fn(self()), macos_ctx(ctx))
     assert_receive {:reply, text}
@@ -456,11 +791,11 @@ defmodule FermixChannels.Gateway.Commands.HistoryTest do
     refute text =~ "open sitting"
   end
 
-  test "purge erases the spool and acknowledges what it cannot reach", %{ctx: ctx, repo: repo} do
+  test "purge erases the spool and acknowledges what it cannot reach", %{ctx: ctx, spool: spool} do
     events = [%{boot_id: "b1", source_seq: 1, ts: 1_000, type: "app.activated"}]
-    {:ok, 1} = Repo.computer_history_insert_events(events, server: repo)
+    {:ok, 1} = Spool.insert_events(events, server: spool)
 
-    assert :ok = History.execute(message("purge all"), reply_fn(self()), ctx)
+    assert :ok = History.execute(message("purge all"), reply_fn(self()), macos_ctx(ctx))
     assert_receive {:reply, text}
     assert text =~ "Purged"
     assert text =~ "cannot reach"
@@ -474,7 +809,25 @@ defmodule FermixChannels.Gateway.Commands.HistoryTest do
 
     refute text =~ "rebuilt at the next roll-up from what remains"
 
-    assert {:ok, 0} = Repo.computer_history_count_events(server: repo)
+    assert {:ok, 0} = Spool.count_events(server: spool)
+  end
+
+  # A system with no recorder (Linux) keeps no raw record of its own (M97 §8.3):
+  # the purge stands on the home, and no machine store is touched.
+  test "a purge on a system with no recorder reaches the home alone", %{
+    ctx: ctx,
+    repo: repo,
+    spool: spool
+  } do
+    events = [%{boot_id: "b1", source_seq: 1, ts: 1_000, type: "app.activated"}]
+    {:ok, 1} = Spool.insert_events(events, server: spool)
+    ctx = Map.put(ctx, :computer_history_recorder?, false)
+
+    assert :ok = History.execute(message("purge all"), reply_fn(self()), ctx)
+    assert_receive {:reply, text}
+    assert text =~ "Purged 0 event(s) and 0 activity memory(ies)."
+    assert {:ok, 1} = Repo.computer_history_purge_mark(server: repo)
+    assert {:ok, 1} = Spool.count_events(server: spool)
   end
 
   test "purge with a bad window shows usage", %{ctx: ctx} do
@@ -554,19 +907,83 @@ defmodule FermixChannels.Gateway.Commands.HistoryTest do
     refute ComputerHistoryConfig.enabled?()
   end
 
-  # The rail exists only on macOS, so elsewhere there is nothing to stop: a
-  # second configuration, not a second path. Passes before the CH-3 fix too; it
-  # pins that the new call is macOS-only.
-  test "off on a non-macOS host never calls the controller", %{ctx: ctx} do
+  # The rail exists only where this system has a recorder, so elsewhere there is
+  # nothing to stop: a second configuration, not a second path.
+  test "off on a system with no recorder never calls the controller", %{ctx: ctx} do
     ctx =
       ctx
-      |> Map.put(:computer_history_macos?, false)
+      |> Map.put(:computer_history_recorder?, false)
       |> Map.put(:computer_history_controller, controller_stub(:ok))
 
     text = off_reply(ctx)
     refute_received :reconciled
     assert text =~ "disabled — nothing new is captured"
     refute ComputerHistoryConfig.enabled?()
+  end
+
+  # One rule for `/history off`: on a home with no computer, whatever follows
+  # it, this machine goes off, as before computers could be named.
+  test "off with more words on a home with no computer switches this machine off", %{ctx: ctx} do
+    ctx = ctx |> macos_ctx() |> Map.put(:computer_history_controller, controller_stub(:ok))
+
+    assert :ok = History.execute(message("off for now"), reply_fn(self()), ctx)
+    assert_receive {:reply, text}
+    assert_received :reconciled
+    assert text =~ "disabled — nothing new is captured"
+    refute ComputerHistoryConfig.enabled?()
+  end
+
+  # A server records nothing itself: bare off there changes nothing, says so,
+  # and names the computers that do and what to type.
+  test "off alone on a home that records nothing itself names its computers", %{ctx: ctx} do
+    ctx =
+      ctx
+      |> Map.put(:computer_history_recorder?, false)
+      |> Map.put(:computer_history_computers, [studio(true)])
+      |> Map.put(:computer_history_controller, controller_stub(:ok))
+
+    text = off_reply(ctx)
+    refute_received :reconciled
+
+    assert text ==
+             "This server records no computer history itself, so there is nothing to switch " <>
+               "off here. Each computer records its own: /history off studio Mac switches off " <>
+               "studio Mac."
+
+    assert ComputerHistoryConfig.enabled?()
+  end
+
+  # M97 §8.1: a store that did not open keeps the recorder off, and the
+  # status says why.
+  test "status says this Mac's store did not open, and why", %{ctx: ctx} do
+    store = SafeRm.make_tmp_dir!("history_cmd_blocked")
+    on_exit(fn -> SafeRm.rm_rf!(store) end)
+    File.write!(Path.join(store, "home"), "")
+    blocked = Spool.path(Path.join(store, "home"))
+    spool = start_supervised!({Spool, path: blocked, name: nil}, id: :blocked_spool)
+
+    text = status_reply(Map.put(ctx, :computer_history_spool, spool))
+
+    assert text =~
+             "Store: this Mac's history store at #{blocked} did not open (:enotdir), so " <>
+               "nothing is recorded. Fermix opens it again when it restarts."
+  end
+
+  # M97 §4: a local summarizer in this Mac's machine file decides, and the
+  # status says the home's choice in config.toml is not used while it does.
+  test "status names the machine file's summarizer when it shadows the home's", %{ctx: ctx} do
+    Application.put_env(:fermix_core, :computer_history,
+      enabled: true,
+      summarizer: :anthropic,
+      machine_summarizer: :local
+    )
+
+    text = status_reply(ctx)
+
+    assert text =~
+             ~s|Summarizer: on-device (local), set by summarizer = "local" in this Mac's | <>
+               "machine.toml; the summarizer in config.toml (anthropic) is not used while " <>
+               "that line is there."
   end
 
   test "an unknown subcommand shows usage", %{ctx: ctx} do

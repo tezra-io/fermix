@@ -204,7 +204,7 @@ defmodule Fermix.CLI.SettingsCommandTest do
       assert stderr == ""
 
       assert stdout ==
-               "Saved memory: compaction_threshold, review_interval_hours\n" <>
+               "Saved Memory (memory): compaction_threshold, review_interval_hours\n" <>
                  "Restart to apply:\n" <>
                  "  - Memory settings changed since Fermix started.\n" <>
                  "Restart it with `fermix restart`.\n"
@@ -245,9 +245,36 @@ defmodule Fermix.CLI.SettingsCommandTest do
           client(%{"settings.get" => {:ok, realtime}, "settings.apply" => apply_reply})
         )
 
-      assert stdout =~ "Saved realtime: realtime_model, realtime_engine\n"
+      assert stdout =~ "Saved Voice (realtime): realtime_model, realtime_engine\n"
       assert stdout =~ "The engine changed to GPT-Live.\n"
       assert stdout =~ "run `fermix settings show realtime` to see them"
+    end
+
+    # M97 D28: on a linked computer `sandbox` is the server's, so the line
+    # says which machine the write changed, in the title the read gave.
+    test "the saved line names the machine the section's title names" do
+      sandbox = %{
+        "id" => "sandbox",
+        "title" => "Sandbox on garden server",
+        "rows" => [%{"key" => "sandbox_mode", "kind" => "choice", "label" => "Sandbox"}]
+      }
+
+      apply_reply =
+        {:ok,
+         %{
+           "applied" => ["sandbox_mode"],
+           "restart" => %{"required" => false, "reasons" => []},
+           "readiness" => @ready,
+           "side_effects" => []
+         }}
+
+      {0, stdout, ""} =
+        run(
+          ["set", "sandbox", "sandbox_mode=standard"],
+          client(%{"settings.get" => {:ok, sandbox}, "settings.apply" => apply_reply})
+        )
+
+      assert stdout == "Saved Sandbox on garden server (sandbox): sandbox_mode\n"
     end
 
     test "the daemon's refusal is printed as key: sentence" do
@@ -338,8 +365,8 @@ defmodule Fermix.CLI.SettingsCommandTest do
 
       assert run(["set", "memory", "review_interval_hours=12"], client(replies)) ==
                {1, "",
-                "fermix settings: config.toml changed outside Fermix, so nothing was saved.\n" <>
-                  "Load it with `fermix settings reload`, then retry.\n"}
+                "fermix settings: config.toml or machine.toml changed outside Fermix, so " <>
+                  "nothing was saved.\nLoad them with `fermix settings reload`, then retry.\n"}
     end
 
     test "a receive timeout on apply says the change may still be applied" do
@@ -368,9 +395,41 @@ defmodule Fermix.CLI.SettingsCommandTest do
 
       assert stdout =~ "Reloaded settings from disk.\n"
       assert stdout =~ "  - Memory settings changed since Fermix started.\n"
-      assert stdout =~ "config.toml state: external_change\n"
+      assert stdout =~ "config.toml and machine.toml state: external_change\n"
       assert [{"settings.reload", %{}, opts}] = calls()
       assert opts[:timeout] == 30_000
+    end
+
+    # M97 §19.3: a section names the machine whose files are read again, so
+    # on a linked computer `reload computer.sandbox` clears an outside edit
+    # of this computer's own files; it is passed through as the app sends it.
+    test "a section names the machine that reads its settings again" do
+      reply =
+        {:ok,
+         %{
+           "reloaded" => true,
+           "restart" => @restart,
+           "readiness" => @ready,
+           "config_state" => "clear"
+         }}
+
+      {0, stdout, ""} = run(["reload", "computer.sandbox"], client(%{"settings.reload" => reply}))
+
+      assert stdout =~ "Reloaded settings from disk.\n"
+      assert [{"settings.reload", %{"section" => "computer.sandbox"}, _opts}] = calls()
+    end
+
+    test "an outside edit of this computer's own settings names its reload" do
+      replies = %{
+        "settings.get" => {:ok, @memory},
+        "settings.apply" => mgmt("external_change", %{"section" => "computer.sandbox"})
+      }
+
+      assert run(["set", "memory", "review_interval_hours=12"], client(replies)) ==
+               {1, "",
+                "fermix settings: config.toml or machine.toml changed outside Fermix, so " <>
+                  "nothing was saved.\nLoad them with `fermix settings reload computer.sandbox`, " <>
+                  "then retry.\n"}
     end
 
     test "an unreadable config prints the daemon's sentence" do
@@ -378,8 +437,8 @@ defmodule Fermix.CLI.SettingsCommandTest do
 
       assert run(["reload"], client(%{"settings.reload" => reply})) ==
                {1, "",
-                "fermix settings: config.toml could not be read: config.toml line 3 is not TOML. " <>
-                  "Fix it, then run `fermix settings reload`.\n"}
+                "fermix settings: config.toml or machine.toml could not be read: config.toml " <>
+                  "line 3 is not TOML. Fix it, then run `fermix settings reload`.\n"}
     end
   end
 

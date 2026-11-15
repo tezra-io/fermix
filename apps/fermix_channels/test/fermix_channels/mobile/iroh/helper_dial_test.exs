@@ -40,6 +40,18 @@ defmodule FermixChannels.Mobile.Iroh.HelperDialTest do
           print '{"event":"dial_closed","dial_id":"' . $id . '"}' . "\\n";
           """
 
+        # Opens on the relay, then hole punching moves it to a direct path.
+        :path ->
+          """
+          my $c = IO::Socket::UNIX->new(Type => SOCK_STREAM(), Peer => $sock) or die "connect: $!";
+          print '{"event":"dialed","dial_id":"' . $id . '","kind":"relay","relay":"https://relay.invalid/"}' . "\\n";
+          print '{"event":"dial_path","dial_id":"' . $id . '","kind":"direct","relay":null}' . "\\n";
+          print '{"event":"dial_path","dial_id":"ffffffff","kind":"relay","relay":"https://relay.invalid/"}' . "\\n";
+          sleep 1;
+          close($c);
+          print '{"event":"dial_closed","dial_id":"' . $id . '"}' . "\\n";
+          """
+
         {:fail, reason} ->
           ~s(print '{"event":"dial_failed","dial_id":"' . $id . '","reason":"#{reason}"}' . "\\n";)
 
@@ -164,6 +176,19 @@ defmodule FermixChannels.Mobile.Iroh.HelperDialTest do
     assert_receive {:iroh_dial, ^dial_id, :closed}, @helper_ms
     assert {:error, :closed} = :gen_tcp.recv(socket, 0, @helper_ms)
     assert :sys.get_state(pid).dials == %{}
+  end
+
+  test "a dialed connection's path changes reach the dial's owner until it closes", ctx do
+    pid = ctx |> start(binary_path: fake(ctx, :path)) |> ready(ctx)
+
+    assert {:ok, _socket, %{kind: :relay, relay: "https://relay.invalid/"}} =
+             Helper.dial(pid, @target)
+
+    assert_receive {:iroh_dial, dial_id, {:path, %{kind: :direct, relay: nil}}}, @helper_ms
+    assert_receive {:iroh_dial, ^dial_id, :closed}, @helper_ms
+    # A path for a dial the rail does not hold reaches no one.
+    refute_received {:iroh_dial, _other, {:path, _path}}
+    assert %{state: :ready} = Helper.status(pid)
   end
 
   test "a dial the helper refuses comes back as its reason, with nothing left behind", ctx do

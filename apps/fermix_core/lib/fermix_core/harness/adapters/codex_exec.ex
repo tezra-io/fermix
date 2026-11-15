@@ -47,6 +47,18 @@ defmodule FermixCore.Harness.Adapters.CodexExec do
   # accept it, verified).
   @skip_git_repo_check "--skip-git-repo-check"
 
+  # Codex's words on `turn.failed` when it cannot sign in (M98 D10), from the
+  # codex-cli 0.166.0 binary and captured runs (fixtures
+  # `codex_0_166_0_*.jsonl`): every refresh failure ends on one of the first
+  # two, and a run with no sign-in at all gets the API's 401 for a request
+  # that carried no credential. "Not logged in" is `codex login status`'s
+  # wording, never `codex exec`'s.
+  @signed_out_phrases [
+    "Please log out and sign in again",
+    "logged out or signed in to another account. Please sign in again",
+    "Missing bearer or basic authentication in header"
+  ]
+
   # Codex reasoning-effort is a model config override with no fixed CLI enum;
   # sandbox has a documented closed vocabulary.
   @sandbox_modes ~w(read-only workspace-write danger-full-access)
@@ -123,6 +135,10 @@ defmodule FermixCore.Harness.Adapters.CodexExec do
       _plain_text -> message
     end
   end
+
+  @impl true
+  @spec signed_out?(String.t()) :: boolean()
+  def signed_out?(text) when is_binary(text), do: String.contains?(text, @signed_out_phrases)
 
   @impl true
   @spec resume_hint(map()) :: String.t() | nil

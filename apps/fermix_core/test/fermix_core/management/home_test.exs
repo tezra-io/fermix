@@ -1,17 +1,21 @@
 defmodule FermixCore.Management.HomeTest do
   use ExUnit.Case, async: true
 
+  alias FermixCore.Computers.Computer
+  alias FermixCore.Cues.Config, as: CuesConfig
   alias FermixCore.Home.Candidate
   alias FermixCore.Home.Candidates
+  alias FermixCore.Home.ChangedFromComputer
   alias FermixCore.Home.DesktopLink
-  alias FermixCore.Home.EngineCeiling
   alias FermixCore.Home.EnrollmentCode
   alias FermixCore.Home.Epoch
   alias FermixCore.Home.Move
   alias FermixCore.Home.Moved
-  alias FermixCore.Home.Provision.Driver
-  alias FermixCore.Home.Provision.Ledger
+  alias FermixCore.Home.Readable
+  alias FermixCore.Home.Releases
+  alias FermixCore.Home.RestartHold
   alias FermixCore.Home.Return
+  alias FermixCore.Home.ServerRestart
   alias FermixCore.Home.Snapshot.Capture
   alias FermixCore.Home.Snapshot.Recipient
   alias FermixCore.Home.Snapshot.Scheduler
@@ -21,15 +25,16 @@ defmodule FermixCore.Management.HomeTest do
   alias FermixCore.Management.HomeSummary
   alias FermixCore.Management.Jobs
   alias FermixCore.Management.Router
-  alias FermixTestSupport.FakeCloudProvider
+  alias FermixCore.Setup.MachineFile
   alias FermixTestSupport.SafeRm
-  alias FermixTestSupport.TelemetryCapture
 
   @primary %{role: :primary, primary: nil}
   @device %{role: :device, primary: "invented host"}
   @desktop {:desktop, "6f1e2d3c-4b5a-4968-8778-695a4b3c2d1e"}
   @passphrase "invented-lighthouse-meridian"
   @at ~U[2031-05-04 12:00:00Z]
+  @mac_id "5b2e7c1a-9d43-4f08-b6a1-3c7e9f2d8a54"
+  @linux_id "8e4a1f6c-2b7d-4c95-a3e0-6d1b9c8f7e23"
 
   setup do
     tmp = SafeRm.make_tmp_dir!("management_home")
@@ -144,6 +149,53 @@ defmodule FermixCore.Management.HomeTest do
       end
     end
 
+    # Step 7: whether the link runs direct or through Fermix's relay, as the
+    # helper reports it; absent while no session is up.
+    test "a desktop's primary names the link's path while it is connected", %{home: home} do
+      link = fn path, connected ->
+        fn ->
+          %{
+            primary: %{
+              name: "invented-vm",
+              connected: connected,
+              status: if(connected, do: :connected, else: :unreachable),
+              since: nil,
+              epoch: 5,
+              sentence: "Fermix is connected to the server invented-vm.",
+              path: path
+            },
+            desktops: [],
+            enrollment: nil
+          }
+        end
+      end
+
+      for {path, connected, word} <- [
+            {:direct, true, "direct"},
+            {:relay, true, "relay"}
+          ] do
+        assert {:ok, status} =
+                 route(
+                   "home.status",
+                   %{},
+                   opts(home, engine_role: @device, link_status: link.(path, connected))
+                 )
+
+        assert status["primary"]["path"] == word
+      end
+
+      for {path, connected} <- [{nil, true}, {nil, false}] do
+        assert {:ok, status} =
+                 route(
+                   "home.status",
+                   %{},
+                   opts(home, engine_role: @device, link_status: link.(path, connected))
+                 )
+
+        refute Map.has_key?(status["primary"], "path")
+      end
+    end
+
     test "a home that never booted as the primary has no epoch yet", %{home: home} do
       SafeRm.rm!(Epoch.path(home))
 
@@ -174,35 +226,252 @@ defmodule FermixCore.Management.HomeTest do
       assert {:ok, %{moved_at: @at, epoch: 4}} = Return.read(home)
     end
 
-    # Design §6: the version a server's nightly update installs, the oldest
-    # of its desktops' seen in the last 30 days, in every role.
-    test "the update ceiling is the oldest desktop's engine, or null", %{home: home} do
-      assert {:ok, %{"update_ceiling" => nil}} = route("home.status", %{}, opts(home))
+    # M97 §3.4, the server leads: an Always On server's update installs the
+    # newest release whose app is published for each system of the computers
+    # that keep its backups, read from the release table it keeps;
+    # `update_ceiling` is that release, the field every update script reads.
+    test "a server's update is the newest release its backup holders' apps carry",
+         %{home: home} do
+      table = release_table(["app 9.9.10 macos 3.1.0", "app 9.10.0 linux 1.4.0"])
+      at = ~U[2031-05-04 11:55:00Z]
+      server = [always_on_server: true, release_table: fn -> {:ok, table, at, nil} end]
 
-      :ok = EngineCeiling.record(home, "6f1e2d3c-4b5a-4968-8778-695a4b3c2d1e", "0.18.0", @at)
-      :ok = EngineCeiling.record(home, "0d3f8a7e-5c21-4b9e-8f60-2a4c6e8b1d37", "0.17.1", @at)
+      mac = computer("studio-mac", :macos, true)
+      linux = computer("loft-linux", :linux, false)
 
-      assert {:ok, %{"update_ceiling" => "0.17.1"}} = route("home.status", %{}, opts(home))
+      assert {:ok, %{"update" => update, "update_ceiling" => "9.9.10"}} =
+               route("home.status", %{}, opts(home, server ++ [computers: [mac, linux]]))
 
-      assert {:ok, %{"update_ceiling" => "0.17.1"}} =
+      assert update == %{
+               "running" => "9.9.9",
+               "eligible" => "9.9.10",
+               "held" => %{
+                 "version" => "9.10.0",
+                 "waits_for" => ["macos"],
+                 "sentence" =>
+                   "A newer Fermix is released. Your server takes it once the Mac app that " <>
+                     "carries it is published."
+               },
+               "ahead_of_apps" => false,
+               "table" => %{"read_at" => "2031-05-04T11:55:00Z", "sentence" => nil}
+             }
+
+      # A computer that keeps no backups holds nothing back.
+      assert {:ok, %{"update_ceiling" => "9.10.0"}} =
+               route("home.status", %{}, opts(home, server ++ [computers: [linux]]))
+
+      # Not a server: no update, and no ceiling.
+      assert {:ok, %{"update" => nil, "update_ceiling" => nil}} =
+               route("home.status", %{}, opts(home, computers: [mac]))
+
+      assert {:ok, %{"update" => nil, "update_ceiling" => nil}} =
                route("home.status", %{}, opts(home, engine_role: @device))
     end
 
-    test "an update ceiling that cannot be read is null, and the log says why", %{home: home} do
-      :ok = EngineCeiling.record(home, "6f1e2d3c-4b5a-4968-8778-695a4b3c2d1e", "0.18.0", @at)
+    # M97 D16: the gate reads the home formats the table names, so a release
+    # that keeps the format is eligible on the app already published, and
+    # only one that raises it waits for an app; `home.status` says this
+    # engine's own format.
+    test "a server's update waits for an app only for a release that raises the home format",
+         %{home: home} do
+      at = ~U[2031-05-04 11:55:00Z]
+      mac = computer("studio-mac", :macos, true)
+      apps = ["app 9.9.10 macos 3.1.0", "home_format 9.9.10 1"]
 
-      File.write!(
-        Path.join(EngineCeiling.dir(home), "0d3f8a7e-5c21-4b9e-8f60-2a4c6e8b1d37.json"),
-        "{"
-      )
+      status = fn rows ->
+        server = [always_on_server: true, release_table: fn -> {:ok, rows, at, nil} end]
+        {:ok, status} = route("home.status", %{}, opts(home, server ++ [computers: [mac]]))
+        status
+      end
 
-      log =
-        ExUnit.CaptureLog.capture_log(fn ->
-          assert {:ok, %{"update_ceiling" => nil}} =
-                   route("home.status", %{}, opts(home, unreadable_files: nil))
-        end)
+      kept = status.(release_table(apps ++ ["home_format 9.10.0 1"]))
+      assert %{"update_ceiling" => "9.10.0", "update" => %{"held" => nil}} = kept
+      assert kept["home_format"] == Readable.home_format()
 
-      assert log =~ "engine_ceiling could not be read"
+      raised = status.(release_table(apps ++ ["home_format 9.10.0 2"]))
+
+      assert %{
+               "eligible" => "9.9.10",
+               "held" => %{"version" => "9.10.0", "waits_for" => ["macos"]}
+             } =
+               raised["update"]
+    end
+
+    # An unknown list is not "no computers": the server cannot see whether
+    # one that keeps its backups needs an app that is not out yet, so the
+    # update installs nothing newer than what runs, and the status says why.
+    test "a server that cannot list its computers holds its update, and says why",
+         %{home: home} do
+      table = release_table(["app 9.9.10 macos 3.1.0", "app 9.10.0 linux 1.4.0"])
+      at = ~U[2031-05-04 11:55:00Z]
+
+      server = [
+        always_on_server: true,
+        release_table: fn -> {:ok, table, at, nil} end,
+        computers: {:error, :not_running}
+      ]
+
+      assert {:ok, %{"update" => update, "update_ceiling" => ceiling, "computers" => []}} =
+               route("home.status", %{}, opts(home, server))
+
+      assert ceiling in [nil, "9.9.9"]
+
+      assert %{
+               "running" => "9.9.9",
+               "held" => %{"version" => "9.10.0", "sentence" => sentence},
+               "ahead_of_apps" => false
+             } = update
+
+      assert sentence ==
+               "A newer Fermix is released. Your server takes it once Fermix can list your " <>
+                 "computers again."
+    end
+
+    # The table fails closed: none read yet is no eligible release, with the
+    # sentence that says why, so the update installs nothing.
+    test "a server with no table read installs nothing, and says why", %{home: home} do
+      failed = fn -> {:error, "An invented failure to read the table."} end
+      server = [always_on_server: true, release_table: failed, computers: []]
+
+      assert {:ok, %{"update" => update, "update_ceiling" => nil}} =
+               route("home.status", %{}, opts(home, server))
+
+      assert %{
+               "eligible" => nil,
+               "held" => nil,
+               "ahead_of_apps" => false,
+               "table" => %{
+                 "read_at" => nil,
+                 "sentence" => "An invented failure to read the table."
+               }
+             } = update
+    end
+
+    # §3.4: a restart waits for a move, and for work in progress on a
+    # computer at most ten minutes.
+    test "the restart hold names a move, then a computer's work", %{home: home} do
+      assert {:ok, %{"restart_hold" => nil}} = route("home.status", %{}, opts(home))
+
+      work = fn -> [%{started_at: DateTime.add(@at, -240, :second)}] end
+
+      assert {:ok, %{"restart_hold" => %{"reason" => "computer_work", "count" => 1} = hold}} =
+               route("home.status", %{}, opts(home, computer_work: work))
+
+      assert hold["wait_s"] == 360
+    end
+
+    # M97 §3.2: each offer carries the words it goes by, from its offer
+    # module, so an app that keeps no list of offers can name it; one a newer
+    # computer offers that this engine has no module for has none, and so does
+    # one an earlier computer still sends that this engine no longer offers
+    # (`voice`, M97 D27). A linked computer reading its server's list over the
+    # rail finds its own row marked, and only there.
+    test "each offer has its words, and the row of the computer that asks is marked",
+         %{home: home} do
+      offers = [
+        %{id: "shell", state: :on, sentence: nil, detail: "strict"},
+        %{id: "browser", state: :off, sentence: "Switched off on this Mac.", detail: nil},
+        %{id: "voice", state: :unavailable, sentence: "Not on this Fermix.", detail: nil},
+        %{id: "lantern", state: :on, sentence: nil, detail: nil}
+      ]
+
+      mac = %{computer("studio-mac", :macos, true) | offers: offers}
+      linux = computer("loft-linux", :linux, false)
+      listed = opts(home, computers: [mac, linux])
+
+      assert {:ok, %{"computers" => [studio, loft]}} =
+               route("home.status", %{}, Keyword.put(listed, :actor, {:desktop, @mac_id}))
+
+      assert Enum.map(studio["offers"], &{&1["id"], &1["label"]}) == [
+               {"shell", "commands"},
+               {"browser", "the browser"},
+               {"voice", nil},
+               {"lantern", nil}
+             ]
+
+      assert {studio["this_computer"], loft["this_computer"]} == {true, false}
+
+      # The server's own app and its setup page are no computer of the home.
+      for asked <- [listed, Keyword.put(listed, :actor, :setup_page)] do
+        assert {:ok, %{"computers" => rows}} = route("home.status", %{}, asked)
+        assert Enum.map(rows, & &1["this_computer"]) == [false, false]
+      end
+    end
+
+    # Always On's inbound webhooks (design, "Inbound webhooks without a public
+    # IP"): the primary names what it serves on loopback that the internet
+    # must reach, from its own settings: WhatsApp when its channel is on, on
+    # the web listener's port, and each enabled webhook source with a URL, on
+    # the door's port. Whether a source has a URL is its sentinel in the
+    # settings, never a read of the secret store.
+    test "the primary names the webhooks it serves, from its own settings", %{home: home} do
+      settings = webhook_settings(whatsapp: [enabled: true], web_port: 4130)
+
+      assert {:ok, status} =
+               route("home.status", %{}, opts(home, webhook_settings: fn -> settings end))
+
+      assert status["webhooks"] == [
+               %{"kind" => "whatsapp", "ref" => nil, "port" => 4130},
+               %{"kind" => "cue", "ref" => "github", "port" => 4532},
+               %{"kind" => "cue", "ref" => "stripe", "port" => 4532}
+             ]
+
+      quiet = webhook_settings(whatsapp: [enabled: false], sources: %{})
+
+      assert {:ok, %{"webhooks" => []}} =
+               route("home.status", %{}, opts(home, webhook_settings: fn -> quiet end))
+    end
+
+    # `fermix home status` with Fermix stopped reads the record with no engine
+    # tree (`supervised: false`): a stopped Fermix serves nothing, and the web
+    # listener's port, which only the running daemon bound, is never resolved.
+    test "a stopped primary serves no webhook, and nothing is read for it", %{home: home} do
+      unread = fn -> flunk("the webhook settings were read with no engine tree") end
+
+      assert {:ok, %{"webhooks" => []}} =
+               route("home.status", %{}, opts(home, supervised: false, webhook_settings: unread))
+    end
+
+    # The values are the server's: a desktop serves none of its own, and its
+    # screen prints the server's, as the server's own `home.status` names them.
+    test "a desktop names none of its own and prints its server's", %{home: home} do
+      :ok = DesktopLink.write(home, desktop_link())
+      :ok = Moved.write(home, %{epoch: 4, moved_at: @at, to: "invented-vm"})
+      mac = webhook_settings(whatsapp: [enabled: true], web_port: 4030)
+
+      server_part = %{
+        "role" => "primary",
+        "version" => "9.9.8",
+        "snapshots" => %{"targets" => []},
+        "webhooks" => [%{"kind" => "whatsapp", "ref" => nil, "port" => 4130}]
+      }
+
+      forward = fn _request, _opts -> {:ok, server_part} end
+
+      assert {:ok, status} =
+               route(
+                 "home.status",
+                 %{},
+                 opts(home,
+                   engine_role: @device,
+                   link_status: link(primary: primary(nil)),
+                   webhook_settings: fn -> mac end
+                 )
+                 |> Keyword.put(:primary_forward, forward)
+               )
+
+      assert status["webhooks"] == []
+      assert %{"state" => "on", "detail" => %{"webhooks" => webhooks}} = status["summary"]
+
+      assert [
+               %{
+                 "label" => "WhatsApp",
+                 "command" =>
+                   "sudo tailscale funnel --bg --set-path=/webhook/whatsapp " <>
+                     "http://127.0.0.1:4130/webhook/whatsapp",
+                 "note" => "Then set the address it prints as Meta's Callback URL" <> _rest
+               }
+             ] = webhooks["mounts"]
     end
 
     test "the next run and a run in progress come from a running scheduler",
@@ -220,27 +489,27 @@ defmodule FermixCore.Management.HomeTest do
   end
 
   # The gatherer behind `home.status.summary` (M75 lean v1 §7), with each of
-  # its sources a real file in a temp home or an injected seam: the ledger,
-  # the candidates, the window and link as the rail says them, the review,
-  # the disk, the server's own part and this desktop's copies.
+  # its sources a real file in a temp home or an injected seam: the
+  # candidates, the window and link as the rail says them, the review, the
+  # disk, the server's own part, this desktop's copies and its restore job.
   describe "home.status's summary" do
     test "a primary with nothing says off, and publishes its disk and version", %{home: home} do
       assert {:ok, status} =
                route("home.status", %{}, opts(home, disk_usage: disk(0.42), version: "9.9.9"))
 
       assert status["summary"]["state"] == "off"
-      assert status["summary"]["action"]["id"] == "paste_token"
+      assert status["summary"]["action"]["id"] == "own_server"
       assert status["summary"]["key"] == HomeSummary.key(status["summary"])
       assert status["disk"] == %{"used" => 0.42, "nearly_full" => false}
       assert status["version"] == "9.9.9"
     end
 
-    test "off names what this home uses that stops after the move, read from its settings",
+    # The Always On pane's D1: what stops after the move is said at Move now,
+    # from the review's own items, never on the first screen, whatever the
+    # settings turn on.
+    test "off says what Always On does, and nothing of what stops after the move",
          %{home: home} do
       File.write!(Path.join(home, "config.toml"), """
-      [fermix_channels.imessage]
-      enabled = true
-
       [fermix_core.realtime]
       enabled = false
 
@@ -248,14 +517,24 @@ defmodule FermixCore.Management.HomeTest do
       enabled = true
       """)
 
+      # This Mac carries Messages for the server after a move (M97 §6.4), so
+      # iMessage on is not among what stops.
+      File.write!(MachineFile.path(home), "[fermix_core.computer]\nimessage = true\n")
+
+      File.write!(
+        Path.join(home, "config.toml"),
+        File.read!(Path.join(home, "config.toml")) <>
+          "\n[fermix_channels.imessage]\nenabled = true\n"
+      )
+
       assert {:ok, %{"summary" => summary}} =
                route("home.status", %{}, opts(home, host_os: :macos))
 
       assert summary["sentence"] ==
-               "Keep Fermix running when this Mac sleeps. It moves to a server you own. " <>
-                 "iMessage and meetings stop after the move."
+               "Keep Fermix running when this Mac sleeps. It moves to a server you own."
 
       File.write!(Path.join(home, "config.toml"), "")
+      File.write!(MachineFile.path(home), "")
 
       assert {:ok, %{"summary" => %{"sentence" => sentence}}} =
                route("home.status", %{}, opts(home, host_os: :macos))
@@ -263,20 +542,73 @@ defmodule FermixCore.Management.HomeTest do
       assert sentence == "Keep Fermix running when this Mac sleeps. It moves to a server you own."
     end
 
-    test "the ledger's token makes choose, and its created server waiting makes ready, " <>
-           "with the last review's warnings",
+    # M97: what Always On does not do yet, from this home's settings and
+    # whether this computer records its history (`ComputerHistory.recorder?/0`,
+    # given here as `:recorder?` so the suite holds on any host).
+    test "a screen before a move lists what the settings and this computer's recorder say",
          %{home: home} do
-      {:ok, _ledger} =
-        Ledger.update(home, "hetzner", &{:ok, Ledger.connect(&1, "invented-token-0001", @at)})
+      File.write!(Path.join(home, "config.toml"), "[fermix_core.meetings]\nenabled = true\n")
 
-      assert {:ok, %{"summary" => %{"state" => "choose"}}} = route("home.status", %{}, opts(home))
+      listed = fn recorder? ->
+        seams = [host_os: :linux, link_status: link(enrollment: manual(:open, nil))]
 
+        assert {:ok, %{"summary" => %{"state" => "connect", "detail" => detail}}} =
+                 route("home.status", %{}, opts(home, [recorder?: recorder?] ++ seams))
+
+        Enum.map(detail["not_yet"], & &1["id"])
+      end
+
+      assert listed.(false) == ["google_meet", "computer_history"]
+      assert listed.(true) == ["google_meet"]
+    end
+
+    # A linked computer's `on` lists its server's entries as the server's own
+    # screen says them, then what this computer's own settings say.
+    test "a linked desktop lists its server's entries, then its own", %{home: home} do
+      :ok = DesktopLink.write(home, desktop_link())
+      :ok = Moved.write(home, %{epoch: 4, moved_at: @at, to: "invented-vm"})
+      File.write!(MachineFile.path(home), "[fermix_channels.accessories]\nenabled = true\n")
+      said = %{"id" => "google_meet", "sentence" => "The server's own words."}
+
+      server_part = %{
+        "role" => "primary",
+        "version" => "9.9.8",
+        "snapshots" => %{
+          "targets" => [
+            %{"label" => "your desktop", "last_verified" => %{"at" => "2031-05-04T11:00:00Z"}}
+          ]
+        },
+        "summary" => %{"state" => "primary", "detail" => %{"not_yet" => [said]}}
+      }
+
+      forward = fn _request, _opts -> {:ok, server_part} end
+      seams = [engine_role: @device, link_status: link(primary: primary(nil)), recorder?: true]
+
+      assert {:ok, %{"summary" => %{"state" => "on", "detail" => detail}}} =
+               route(
+                 "home.status",
+                 %{},
+                 opts(home, [host_os: :macos] ++ seams) |> Keyword.put(:primary_forward, forward)
+               )
+
+      assert detail["not_yet"] == [
+               said,
+               %{
+                 "id" => "stackchan",
+                 "sentence" => "StackChan works only while Fermix runs on this Mac."
+               }
+             ]
+    end
+
+    test "a server held with its code makes ready, the last review's warnings in Move now's confirm",
+         %{home: home} do
       {:ok, held} = Candidates.add(home, candidate_attrs(), @at)
-      {:ok, _ledger} = Ledger.update(home, "hetzner", &{:ok, Ledger.put_server(&1, server())})
-      report = %{ready: true, items: [%{id: "whatsapp", status: :warn, sentence: "Warned."}]}
+      # A warning only the review can give: Move now's confirm says it, since
+      # the screen shows no warning (the Always On pane's D3).
+      report = %{ready: true, items: [%{id: "plugins", status: :warn, sentence: "Warned."}]}
       :ok = Move.put_review(home, held.candidate_id, report, @at)
 
-      window = provisioned(:used, held.candidate_id)
+      window = manual(:used, held.candidate_id)
 
       assert {:ok, %{"summary" => summary}} =
                route("home.status", %{}, opts(home, link_status: link(enrollment: window)))
@@ -284,28 +616,10 @@ defmodule FermixCore.Management.HomeTest do
       assert summary["state"] == "ready"
       assert summary["action"]["id"] == "move_now"
 
-      assert summary["detail"]["readiness"] == [
-               %{"id" => "whatsapp", "status" => "warn", "sentence" => "Warned."}
-             ]
+      refute Map.has_key?(summary["detail"], "readiness")
+      assert summary["action"]["confirm"] =~ ~r/\nWarned\.(\n|\z)/
 
-      assert summary["detail"]["server"]["location"] == "Falkenstein"
-    end
-
-    test "a created server whose code has been open thirty minutes awake did not set up",
-         %{home: home} do
-      {:ok, _ledger} =
-        Ledger.update(home, "hetzner", fn ledger ->
-          {:ok,
-           ledger |> Ledger.connect("invented-token-0001", @at) |> Ledger.put_server(server())}
-        end)
-
-      window = %{provisioned(:open, nil) | awake_ms: 31 * 60_000}
-
-      assert {:ok, %{"summary" => summary}} =
-               route("home.status", %{}, opts(home, link_status: link(enrollment: window)))
-
-      assert summary["state"] == "problem"
-      assert summary["detail"]["kind"] == "not_set_up"
+      assert summary["detail"]["server"]["name"] == "fermix-general-a3f9"
     end
 
     test "a linked desktop reads the server's part, its own copies and the link's silence",
@@ -354,63 +668,8 @@ defmodule FermixCore.Management.HomeTest do
                )
 
       assert summary["detail"]["kind"] == "cannot_reach"
-      assert summary["action"]["id"] == "learn_more"
-    end
-
-    test "a linked desktop replacing its server reads the replace from its ledger and the " <>
-           "new server's code from the old one",
-         %{home: home} do
-      :ok = DesktopLink.write(home, desktop_link())
-      new_server = %{server() | name: "fermix-general-5d2e", id: "61900117"}
-
-      {:ok, _ledger} =
-        Ledger.update(home, "hetzner", fn ledger ->
-          {:ok, replacing} =
-            ledger
-            |> Ledger.connect("invented-token-0001", @at)
-            |> Ledger.put_server(server())
-            |> Ledger.begin_replace(5, @at)
-
-          {:ok, Ledger.put_server(replacing, new_server)}
-        end)
-
-      candidate = %{
-        "candidate_id" => "cand-9d41c7e2b05a3f68",
-        "name" => "fermix-general-5d2e",
-        "os" => "linux",
-        "arch" => "x86_64",
-        "version" => "9.9.9",
-        "enrolled_at" => "2031-05-04T10:05:00Z",
-        "expires_at" => "2031-05-05T10:05:00Z"
-      }
-
-      server_part = %{
-        "role" => "primary",
-        "version" => "9.9.9",
-        "disk" => %{"used" => 0.4, "nearly_full" => false},
-        "snapshots" => %{"targets" => []},
-        "enrollment" => %{
-          "state" => "used",
-          "expires_at" => "2031-05-05T10:00:00Z",
-          "kind" => "provisioned",
-          "candidate_id" => "cand-9d41c7e2b05a3f68"
-        },
-        "candidates" => [candidate]
-      }
-
-      forward = fn _request, _opts -> {:ok, server_part} end
-
-      assert {:ok, %{"summary" => summary}} =
-               route(
-                 "home.status",
-                 %{},
-                 opts(home, engine_role: @device, link_status: link(primary: primary(nil)))
-                 |> Keyword.put(:primary_forward, forward)
-               )
-
-      assert summary["sentence"] == "Your new server is ready for the move."
-      assert summary["action"]["id"] == "move_now"
-      assert summary["detail"]["server"]["name"] == "fermix-general-5d2e"
+      assert summary["action"] == nil
+      assert summary["help"] == "https://fermix.ai/docs/always-on/#when-the-server-is-gone"
     end
 
     # Always On's move back (design §9, §14): a desktop's screen reads its own
@@ -424,7 +683,11 @@ defmodule FermixCore.Management.HomeTest do
       assert {:ok, %{"summary" => summary}} = desktop_status(home, link(primary: primary(nil)))
 
       assert summary["state"] == "ready"
-      assert summary["sentence"] == "This computer is ready to take Fermix back."
+
+      assert summary["sentence"] ==
+               "Fermix still runs on your server. It moves back to this computer when you " <>
+                 "press Move now."
+
       assert summary["action"]["id"] == "move_now"
     end
 
@@ -432,13 +695,6 @@ defmodule FermixCore.Management.HomeTest do
          %{home: home} do
       :ok = DesktopLink.write(home, desktop_link())
       :ok = Moved.write(home, %{epoch: 4, moved_at: @at, to: "invented-vm"})
-
-      {:ok, _ledger} =
-        Ledger.update(home, "hetzner", fn ledger ->
-          {:ok,
-           ledger |> Ledger.connect("invented-token-0001", @at) |> Ledger.put_server(server())}
-        end)
-
       File.mkdir_p!(Capture.dir(home))
 
       for name <- ~w(20310503T100000Z-e5.fxsnap 20310504T100000Z-e5.fxsnap notes.fxsnap) do
@@ -448,14 +704,11 @@ defmodule FermixCore.Management.HomeTest do
       assert {:ok, %{"summary" => summary}} =
                desktop_status(home, link(primary: primary(11 * 60_000)))
 
-      assert "restore_here" in Enum.map(HomeSummary.offered(summary), & &1["id"])
+      restore = Enum.find(HomeSummary.offered(summary), &(&1["id"] == "restore_here"))
 
-      assert %{
-               "label" => "Backup on this computer",
-               "value" => "Sunday, May 4, 2031 at 10:00 AM UTC"
-             } in summary[
-               "detail"
-             ]["lines"]
+      assert restore["confirm"] =~
+               "Restore Fermix on this computer from its backup of Sunday, May 4, 2031 at " <>
+                 "10:00 AM UTC?"
     end
 
     # A second desktop's move back the home went past (design §14): the link
@@ -514,6 +767,224 @@ defmodule FermixCore.Management.HomeTest do
       assert status["primary_missing"] =~ "newer Fermix"
     end
 
+    # M97 §3.4: a desktop stands against its server's version by
+    # major.minor: past the window it keeps settings alone and is asked to
+    # update. Whether it could take the server's home back is the home's
+    # format (D16), never the version: a newer server in a newer format
+    # takes Move back's place with Update, and one in this format keeps it.
+    test "a desktop reads where it stands against its server's version", %{home: home} do
+      :ok = DesktopLink.write(home, desktop_link())
+      :ok = Moved.write(home, %{epoch: 4, moved_at: @at, to: "invented-vm"})
+      newer_format = Readable.home_format() + 1
+
+      status_with = fn server_version, format ->
+        part =
+          %{"role" => "primary", "version" => server_version, "snapshots" => %{}}
+          |> Map.merge(if format == :none, do: %{}, else: %{"home_format" => format})
+
+        {:ok, status} =
+          route(
+            "home.status",
+            %{},
+            opts(home,
+              engine_role: @device,
+              link_status: link(primary: primary(nil)),
+              restarts_itself: true
+            )
+            |> Keyword.put(:primary_forward, fn _request, _opts -> {:ok, part} end)
+          )
+
+        status["summary"]
+      end
+
+      assert %{"state" => "problem", "detail" => %{"kind" => "update"}} =
+               status_with.("9.12.0", newer_format)
+
+      inside = status_with.("9.10.1", newer_format)
+      assert inside["state"] == "on"
+      assert "update" in Enum.map(inside["detail"]["alternatives"], & &1["id"])
+      refute "move_back" in Enum.map(inside["detail"]["alternatives"], & &1["id"])
+
+      # The same newer server, writing this computer's home format, or one
+      # from before home formats, which names none: Move back stays.
+      for format <- [Readable.home_format(), :none] do
+        actions = status_with.("9.10.1", format)["detail"]["alternatives"]
+        assert "move_back" in Enum.map(actions, & &1["id"]), inspect(format)
+        refute "update" in Enum.map(actions, & &1["id"]), inspect(format)
+      end
+
+      assert "move_back" in Enum.map(
+               status_with.("9.9.0", :none)["detail"]["alternatives"],
+               & &1["id"]
+             )
+    end
+
+    # Review M4: a desktop that updated first meets a server on an older
+    # protocol until its update takes this version, which the screen
+    # says.
+    test "a server older than this desktop says when it takes this version", %{home: home} do
+      :ok = DesktopLink.write(home, desktop_link())
+      older = fn _request, _opts -> {:error, :daemon_too_old, %{"maximum_version" => 2}} end
+
+      assert {:ok, status} =
+               route(
+                 "home.status",
+                 %{},
+                 opts(home, engine_role: @device, link_status: link(primary: primary(nil)))
+                 |> Keyword.put(:primary_forward, older)
+               )
+
+      assert status["summary"]["state"] == "problem"
+      assert status["summary"]["detail"]["kind"] == "server_older"
+      assert status["summary"]["action"] == nil
+      assert status["summary"]["help"] == "https://fermix.ai/docs/always-on/#updates"
+      assert status["primary_home"] == nil
+      assert is_binary(status["primary_missing"])
+    end
+
+    # Review M2: a held server whose 24 hours ran out, which the window
+    # names and the list still holds, is told as lapsed; one forgotten, or
+    # one this home moved to and back from since it enrolled, is not.
+    test "a held server whose day ran out is told as lapsed until it is forgotten",
+         %{home: home} do
+      {:ok, held} = Candidates.add(home, candidate_attrs(), ~U[2031-05-03 11:00:00Z])
+      status = opts(home, link_status: link(enrollment: manual(:used, held.candidate_id)))
+
+      assert {:ok, %{"summary" => summary}} = route("home.status", %{}, status)
+      assert summary["state"] == "off"
+      assert summary["notice"]["id"] == "server_lapsed:" <> held.candidate_id
+
+      :ok = Return.write(home, %{from: "studio-mac", started_at: @at, moved_at: @at, epoch: 6})
+      assert {:ok, %{"summary" => %{"notice" => nil}}} = route("home.status", %{}, status)
+
+      # A move back that came home before this server enrolled is no reason
+      # to keep quiet: the owner set this one up after it.
+      earlier = ~U[2031-05-02 08:00:00Z]
+
+      :ok =
+        Return.write(home, %{from: "studio-mac", started_at: earlier, moved_at: earlier, epoch: 6})
+
+      assert {:ok, %{"summary" => %{"notice" => %{"id" => "server_lapsed:" <> _id}}}} =
+               route("home.status", %{}, status)
+
+      :ok = Return.remove(home)
+      :ok = Candidates.remove(home, held.candidate_id, @at)
+      assert {:ok, %{"summary" => %{"notice" => nil}}} = route("home.status", %{}, status)
+    end
+
+    # Re-check note 5: a desktop's candidate for a move back (`returning`)
+    # is never a server to set up again, so its day running out is not told.
+    test "a move back's candidate whose day ran out is not told as lapsed", %{home: home} do
+      attrs = Map.put(candidate_attrs(), :returning, "6f1e2d3c-4b5a-4968-8778-695a4b3c2d1e")
+      {:ok, back} = Candidates.add(home, attrs, ~U[2031-05-03 11:00:00Z])
+      status = opts(home, link_status: link(enrollment: manual(:used, back.candidate_id)))
+
+      assert {:ok, %{"summary" => summary}} = route("home.status", %{}, status)
+      assert summary["state"] == "off"
+      assert summary["notice"] == nil
+    end
+
+    # The link is the one record of the server's word that it no longer knows
+    # this computer (`DesktopLink`'s `revoked`): with Fermix stopped no relay
+    # runs, and `fermix home status` reads it from the link as the join does.
+    test "a computer its server removed reads that from its link, Fermix stopped or not",
+         %{home: home} do
+      :ok = DesktopLink.write(home, Map.put(desktop_link(), :revoked, true))
+      device = %{role: :device, primary: "invented-vm"}
+
+      removed =
+        "Your server no longer knows this computer. To join your Fermix again, enter a new " <>
+          "code from Add a computer."
+
+      stopped =
+        opts(home,
+          engine_role: device,
+          host_os: :linux,
+          supervised: false,
+          link_status: link(primary: nil)
+        )
+
+      assert {:ok, %{"summary" => %{"state" => "retired", "sentence" => ^removed}}} =
+               route("home.status", %{}, stopped)
+
+      # Fermix runs, its relay dialing again after a restart: the link speaks.
+      redialing =
+        opts(home,
+          engine_role: device,
+          host_os: :linux,
+          link_status: link(primary: %{primary(nil) | status: :renewing, connected: false})
+        )
+        |> Keyword.put(:primary_forward, fn _request, _opts -> {:ok, %{"role" => "primary"}} end)
+
+      assert {:ok, %{"summary" => %{"state" => "retired", "sentence" => ^removed}}} =
+               route("home.status", %{}, redialing)
+    end
+
+    # Re-check note 6: a move's record that cannot be read is said in the
+    # log, never taken as "not moved back" without a word.
+    test "a retired copy whose move's record cannot be read says why in the log",
+         %{home: home} do
+      :ok = Moved.write(home, %{epoch: 5, moved_at: @at, to: "studio-mac"})
+      File.mkdir_p!(Move.dir(home))
+      File.write!(Path.join(Move.dir(home), "phase.json"), "{")
+      device = %{role: :device, primary: "studio-mac"}
+      seams = opts(home, engine_role: device, host_os: :linux, unreadable_files: nil)
+
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          assert {:ok, %{"summary" => %{"state" => "retired"}}} =
+                   route("home.status", %{}, seams)
+        end)
+
+      assert log =~ "phase.json could not be read"
+    end
+
+    # Review m4: the server's own copy after a move back names where Fermix
+    # went, from its move's own record.
+    test "a server's copy retired by a move back says where Fermix moved back to",
+         %{home: home} do
+      :ok = Moved.write(home, %{epoch: 5, moved_at: @at, to: "studio-mac"})
+      File.mkdir_p!(Move.dir(home))
+
+      :ok =
+        Move.put_phase(
+          home,
+          "done",
+          %{"candidate" => "studio-mac", "keep_as_desktop" => false},
+          @at
+        )
+
+      device = %{role: :device, primary: "studio-mac"}
+
+      assert {:ok, %{"summary" => summary}} =
+               route("home.status", %{}, opts(home, engine_role: device, host_os: :linux))
+
+      assert summary["state"] == "retired"
+      assert summary["sentence"] == "This copy is retired: Fermix moved back to studio-mac."
+    end
+
+    # Review m3: Restore here finished is told once on the primary it made,
+    # naming the backup's day.
+    test "a restore finished here is told by its epoch and its backup's day", %{home: home} do
+      :ok =
+        Return.write(home, %{
+          from: "invented-vm",
+          started_at: @at,
+          restored: "20310503T093000Z-e5.fxsnap",
+          moved_at: @at,
+          epoch: 6
+        })
+
+      assert {:ok, %{"summary" => %{"notice" => notice}}} =
+               route("home.status", %{}, opts(home, host_os: :macos))
+
+      assert notice == %{
+               "id" => "restored:6",
+               "sentence" =>
+                 "Fermix runs on this Mac again, from its backup of Saturday, May 3, 2031."
+             }
+    end
+
     test "a disk that cannot be read publishes none and says why in the log", %{home: home} do
       log =
         ExUnit.CaptureLog.capture_log(fn ->
@@ -526,6 +997,185 @@ defmodule FermixCore.Management.HomeTest do
         end)
 
       assert log =~ "df_unavailable"
+    end
+  end
+
+  # M97 D28 (§19.5, §19.6): every engine says its own restart and keychain
+  # profile, so a linked computer's top-level ones are its own and its
+  # server's sit in `primary_home`; the server says a change from a computer,
+  # which each linked computer's summary tells naming the server.
+  describe "home.status after one set of settings" do
+    @required %{
+      "required" => true,
+      "reasons" => [
+        %{"section" => "sandbox", "sentence" => "The sandbox changes at the next start."}
+      ]
+    }
+    @clear %{"required" => false, "reasons" => []}
+
+    test "every engine says its own restart and its keychain profile", %{home: home} do
+      :ok = Moved.write(home, %{epoch: 4, moved_at: @at, to: "invented-vm"})
+
+      assert {:ok, %{"restart" => @required, "profile" => "invented-work"}} =
+               route(
+                 "home.status",
+                 %{},
+                 opts(home, engine_restart: fn -> @required end, profile: "invented-work")
+               )
+
+      server_part = %{
+        "role" => "primary",
+        "version" => "9.9.9",
+        "snapshots" => %{"targets" => []},
+        "restart" => @required,
+        "profile" => "general"
+      }
+
+      :ok = DesktopLink.write(home, desktop_link())
+
+      assert {:ok, status} =
+               route(
+                 "home.status",
+                 %{},
+                 opts(home,
+                   engine_role: @device,
+                   link_status: link(primary: primary(nil)),
+                   engine_restart: fn -> @clear end,
+                   profile: "invented-mac"
+                 )
+                 |> Keyword.put(:primary_forward, fn _request, _opts -> {:ok, server_part} end)
+               )
+
+      assert {status["restart"], status["profile"]} == {@clear, "invented-mac"}
+      assert status["primary_home"]["restart"] == @required
+
+      assert %{"id" => "restart_server"} =
+               Enum.find(HomeSummary.offered(status["summary"]), &(&1["id"] == "restart_server"))
+    end
+
+    test "the server says a change from a computer, and each linked computer tells it",
+         %{home: home} do
+      assert {:ok, %{"computer_changes" => []}} = route("home.status", %{}, opts(home))
+
+      change = %{
+        at: ~U[2031-05-04 11:30:00.000Z],
+        computer: "loft-linux",
+        what: :sandbox_mode,
+        value: "open"
+      }
+
+      # An earlier change of another of its limits is kept beside it.
+      approved = %{
+        change
+        | at: ~U[2031-05-04 11:00:00.000Z],
+          what: :harness_approved,
+          value: true
+      }
+
+      for recorded <- [approved, change],
+          do: :ok = ChangedFromComputer.record(home, recorded, status_changed: fn -> :ok end)
+
+      assert {:ok, status} =
+               route(
+                 "home.status",
+                 %{},
+                 opts(home, link_status: link(desktops: [desktop_row()]))
+               )
+
+      assert status["computer_changes"] == [
+               ChangedFromComputer.view(change),
+               ChangedFromComputer.view(approved)
+             ]
+
+      assert status["summary"]["notice"] == %{
+               "id" => "computer_change:sandbox_mode:2031-05-04T11:30:00.000Z",
+               "sentence" => "This server's sandbox was set to Open from loft-linux."
+             }
+
+      # A backup since the move, so the move itself is told no more.
+      backed_up = %{"label" => "S3", "last_verified" => %{"at" => "2031-05-04T11:00:00Z"}}
+
+      server_part = %{
+        "role" => "primary",
+        "version" => "9.9.9",
+        "snapshots" => %{"targets" => [backed_up]},
+        "computer_changes" => status["computer_changes"]
+      }
+
+      :ok = DesktopLink.write(home, desktop_link())
+      :ok = Moved.write(home, %{epoch: 4, moved_at: ~U[2031-05-01 09:00:00Z], to: "invented-vm"})
+
+      assert {:ok, linked} =
+               route(
+                 "home.status",
+                 %{},
+                 opts(home, engine_role: @device, link_status: link(primary: primary(nil)))
+                 |> Keyword.put(:primary_forward, fn _request, _opts -> {:ok, server_part} end)
+               )
+
+      assert linked["computer_changes"] == []
+
+      assert linked["summary"]["notice"]["sentence"] ==
+               "invented-vm's sandbox was set to Open from loft-linux."
+    end
+  end
+
+  # M97 D28c (§19.6): a linked computer's Restart <server> reaches the server
+  # as the rail-only `home.restart`, which restarts after its hold.
+  describe "home.restart" do
+    setup %{home: home} do
+      test = self()
+      name = :"home_restart_#{System.unique_integer([:positive])}"
+      start_supervised!({ServerRestart, name: name, timer: fn _message, _delay -> make_ref() end})
+
+      seams = [
+        server_restart: name,
+        restart_hold: fn -> nil end,
+        restarts_itself: true,
+        restart: fn ->
+          send(test, :restarted)
+          :ok
+        end
+      ]
+
+      %{seams: seams, opts: opts(home, seams)}
+    end
+
+    test "answers a desktop's forward and restarts after answering", ctx do
+      assert {:ok, %{"when" => "now", "wait_s" => 0, "sentence" => _said}} =
+               route("home.restart", %{}, forwarded(ctx.opts))
+
+      assert_received :restarted
+    end
+
+    test "is refused on daemon.sock by name, and takes no params", ctx do
+      assert {:error, :unavailable, %{"method" => "home.restart", "capability" => "home"}} =
+               route("home.restart", %{}, ctx.opts)
+
+      assert {:error, :invalid_params, %{"field" => "now"}} =
+               route("home.restart", %{"now" => true}, forwarded(ctx.opts))
+
+      refute_received :restarted
+    end
+
+    test "refuses during a move, and waits for the work on a computer", ctx do
+      moving = fn -> RestartHold.view("streaming", [], @at) end
+
+      assert {:error, :unavailable, %{"sentence" => "A move is under way" <> _rest}} =
+               route(
+                 "home.restart",
+                 %{},
+                 forwarded(opts(ctx.home, Keyword.put(ctx.seams, :restart_hold, moving)))
+               )
+
+      # The hold as `home.status` reads it: a command still running there.
+      work = fn -> [%{started_at: DateTime.add(@at, -60, :second)}] end
+      waiting = opts(ctx.home, Keyword.delete(ctx.seams, :restart_hold) ++ [computer_work: work])
+
+      assert {:ok, %{"when" => "after_work", "wait_s" => 540}} =
+               route("home.restart", %{}, forwarded(waiting))
+
+      refute_received :restarted
     end
   end
 
@@ -578,6 +1228,21 @@ defmodule FermixCore.Management.HomeTest do
                   "capability" => "snapshots",
                   "sentence" => "Snapshots are off: set a recovery passphrase to turn them on."
                 }}
+    end
+
+    # D18: a primary that is no Always On server has no target, so its bucket
+    # is never written and a run is refused in the status's own words.
+    test "a primary that is no Always On server keeps none", %{home: home, recipient: recipient} do
+      config = [recipient: recipient, s3_bucket: "invented-bucket"]
+      scheduler = scheduler!(home, config, targets: [])
+      opts = forwarded(opts(home, config: config, scheduler: scheduler, snapshot_targets: []))
+      sentence = "Snapshots are kept only by an Always On server, and this computer is not one."
+
+      assert route("home.snapshots.run", %{}, opts) ==
+               {:error, :unavailable, %{"capability" => "snapshots", "sentence" => sentence}}
+
+      assert {:ok, %{"configured" => false, "targets" => [], "sentence" => ^sentence}} =
+               route("home.snapshots.status", %{}, opts)
     end
 
     test "a device, and an engine with no scheduler, refuse by name", %{home: home} do
@@ -647,73 +1312,47 @@ defmodule FermixCore.Management.HomeTest do
     end
   end
 
-  # Always On setup §5: freshness is the engine's. A read that draws a state
-  # resting on the provider, while a server Fermix created stands and was
-  # last checked over a minute ago, starts one reconcile, as a job of the
-  # provider's family: one at a time, and never beside a step.
-  describe "home.status keeps the provider's word fresh" do
-    setup %{home: home} = ctx do
-      world = FakeCloudProvider.start!()
+  # Restore here's job (`home_restore`) runs on this desktop: a read draws it
+  # running beside the return's request for it, from the job family's own
+  # record, and draws nothing of it once the job is gone.
+  describe "home.status reads Restore here's job" do
+    test "a restore asked for and running is moving; one beside no job is not", ctx do
+      %{home: home} = ctx
+      :ok = DesktopLink.write(home, desktop_link())
+      :ok = Moved.write(home, %{epoch: 4, moved_at: @at, to: "invented-vm"})
+
+      :ok =
+        Return.write(home, %{
+          from: "invented-vm",
+          started_at: @at,
+          restore_requested: "20310504T100000Z-e5.fxsnap"
+        })
+
       jobs = jobs!(ctx)
-      seams = nimbus_seams(world)
+      silent = link(primary: primary(11 * 60_000))
 
-      {:ok, _ledger} =
-        Ledger.update(home, "nimbus", &{:ok, Ledger.connect(&1, FakeCloudProvider.token(), @at)})
+      assert {:ok, %{"summary" => %{"state" => "problem"}}} =
+               desktop_status(home, silent, jobs: jobs)
 
-      request = %{type: "small-4", location: "osl1", profile: "general"}
-      {:ok, _server} = Driver.create(FakeCloudProvider, home, request, seams[:provider_opts])
-      %{world: world, jobs: jobs, seams: seams}
-    end
-
-    test "a read in a problem with an unchecked server starts one reconcile", ctx do
-      opts = opts(ctx.home, [jobs: ctx.jobs] ++ ctx.seams)
-
-      assert {:ok, %{"summary" => %{"state" => "problem"}}} = route("home.status", %{}, opts)
-      assert [%{"kind" => "home_provision"} = job] = jobs(ctx.jobs)
-      assert %{"status" => "completed"} = finished(job, ctx.jobs)
-      assert %{checked_at: @at} = Ledger.state(ctx.home, FakeCloudProvider)
-
-      # Checked just now: the next read starts nothing.
-      {:ok, _status} = route("home.status", %{}, opts)
-      assert length(jobs(ctx.jobs)) == 1
-
-      # Over a minute later it reads the provider again.
-      later = DateTime.add(@at, 61, :second)
-
-      {:ok, _status} =
-        route("home.status", %{}, opts(ctx.home, [jobs: ctx.jobs, now: later] ++ ctx.seams))
-
-      assert length(jobs(ctx.jobs)) == 2
-    end
-
-    test "a read while a step runs starts nothing beside it", ctx do
-      gate = self()
+      test = self()
 
       {:ok, _view} =
-        Jobs.start(:home_provision,
-          name: "nimbus",
-          server: ctx.jobs[:server],
+        Jobs.start(:home_restore,
+          name: "restore_here",
+          server: jobs[:server],
           run: fn _id, _report ->
-            send(gate, :holding)
-
-            receive do
-              :go -> {:ok, %{}}
-            end
+            send(test, {:restoring, self()})
+            receive do: (:go -> {:ok, %{}})
           end
         )
 
-      opts = opts(ctx.home, [jobs: ctx.jobs] ++ ctx.seams)
-      assert {:ok, %{"summary" => %{"state" => "problem"}}} = route("home.status", %{}, opts)
-      assert [%{"status" => "running"}] = jobs(ctx.jobs)
-      assert %{checked_at: nil} = Ledger.state(ctx.home, FakeCloudProvider)
-    end
+      assert_receive {:restoring, run}, 10_000
 
-    test "a state that rests on nothing the provider says starts nothing", ctx do
-      {:ok, _ledger} = Ledger.update(ctx.home, "nimbus", &{:ok, Ledger.clear(&1)})
-      opts = opts(ctx.home, [jobs: ctx.jobs] ++ ctx.seams)
+      assert {:ok, %{"summary" => %{"state" => "moving", "sentence" => sentence}}} =
+               desktop_status(home, silent, jobs: jobs)
 
-      assert {:ok, %{"summary" => %{"state" => "choose"}}} = route("home.status", %{}, opts)
-      assert jobs(ctx.jobs) == []
+      assert sentence =~ "Restoring Fermix on this computer from its backup."
+      send(run, :go)
     end
   end
 
@@ -761,12 +1400,10 @@ defmodule FermixCore.Management.HomeTest do
 
       assert_receive {:wait_timer, _pid, {:home_status_wait, _token}, 25_000}
 
-      {:ok, _ledger} =
-        Ledger.update(ctx.home, "hetzner", &{:ok, Ledger.connect(&1, "invented-token-0001", @at)})
+      {:ok, _held} = Candidates.add(ctx.home, candidate_attrs(), @at)
+      :ok = StatusWatch.changed(ctx.watch, :enrollment)
 
-      :ok = StatusWatch.changed(ctx.watch, :ledger)
-
-      assert {:ok, %{"summary" => %{"state" => "choose", "key" => moved}}} =
+      assert {:ok, %{"summary" => %{"state" => "ready", "key" => moved}}} =
                Task.await(waiting, 10_000)
 
       refute moved == key
@@ -811,42 +1448,6 @@ defmodule FermixCore.Management.HomeTest do
     [server: name]
   end
 
-  defp jobs(jobs) do
-    {:ok, views} = Jobs.list(jobs)
-    views
-  end
-
-  defp nimbus_seams(world) do
-    [
-      providers: [FakeCloudProvider],
-      provider_opts: [
-        world: world,
-        now: fn -> @at end,
-        sleep: fn _ms -> :ok end,
-        open_code: fn -> {:ok, "fxenroll1.eyJ2IjoxLCJuYW1lIjoiaW52ZW50ZWQifQ"} end,
-        withdraw_code: fn -> :ok end
-      ],
-      open_code: fn -> {:ok, "fxenroll1.eyJ2IjoxLCJuYW1lIjoiaW52ZW50ZWQifQ"} end,
-      withdraw_code: fn -> :ok end
-    ]
-  end
-
-  # The job's end is its completion event; one that ended before the handler
-  # was attached is read as it stands.
-  defp finished(%{"job_id" => id}, jobs) do
-    TelemetryCapture.attach([[:fermix, :management_job, :complete]], session_id: id)
-
-    case Jobs.get(id, jobs) do
-      {:ok, %{"status" => "running"}} ->
-        assert_receive {:telemetry, _event, _measurements, %{session_id: ^id}}, 10_000
-        {:ok, view} = Jobs.get(id, jobs)
-        view
-
-      {:ok, view} ->
-        view
-    end
-  end
-
   test "a status file the scheduler wrote is what the view reads", %{
     home: home,
     recipient: recipient
@@ -876,19 +1477,43 @@ defmodule FermixCore.Management.HomeTest do
 
   defp disk(used), do: fn _home -> {:ok, %{used: used, nearly_full: used >= 0.85}} end
 
+  # A desktop of the server, as the rail lists it.
+  defp desktop_row,
+    do: %{device_id: "6f1e2d3c-4b5a-4968-8778-695a4b3c2d1e", name: "studio-mac", connected: true}
+
   # The rail's facts, as the `link_status` seam answers them.
   defp link(overrides) do
     status = Map.merge(%{primary: nil, desktops: [], enrollment: nil}, Map.new(overrides))
     fn -> status end
   end
 
-  defp provisioned(state, candidate_id) do
+  # What `home.status` reads the webhooks a primary serves from: the WhatsApp
+  # channel's settings, the cues section (two webhook sources with a URL, one
+  # without yet, one switched off, and a feed) and the web listener's port.
+  defp webhook_settings(overrides) do
+    hooks = %{"preset" => "github", "secret" => "@file", "path_secret" => "@file"}
+
+    sources =
+      Keyword.get(overrides, :sources, %{
+        "github" => hooks,
+        "stripe" => hooks,
+        "fresh-hooks" => Map.delete(hooks, "path_secret"),
+        "off-hooks" => Map.put(hooks, "enabled", false),
+        "eng-blogs" => %{"preset" => "rss", "url" => "https://example.org/releases.atom"}
+      })
+
+    %{
+      whatsapp: Keyword.fetch!(overrides, :whatsapp),
+      cues: CuesConfig.normalize(%{"door_port" => 4532, "sources" => sources}),
+      web_port: Keyword.get(overrides, :web_port, 4030)
+    }
+  end
+
+  defp manual(state, candidate_id) do
     %{
       state: state,
-      expires_at: ~U[2031-05-05 10:00:00Z],
-      kind: :provisioned,
-      candidate_id: candidate_id,
-      awake_ms: 60_000
+      expires_at: ~U[2031-05-04 12:30:00Z],
+      candidate_id: candidate_id
     }
   end
 
@@ -901,20 +1526,6 @@ defmodule FermixCore.Management.HomeTest do
       epoch: 5,
       sentence: "The link's own words.",
       down_ms: down_ms
-    }
-  end
-
-  defp server do
-    %{
-      name: "fermix-general-a3f9",
-      id: "61839204",
-      status: :created,
-      type: "cpx22",
-      location: "fsn1",
-      ipv4: "203.0.113.7",
-      power: "running",
-      created_at: @at,
-      seen_at: @at
     }
   end
 
@@ -935,6 +1546,7 @@ defmodule FermixCore.Management.HomeTest do
   defp desktop_link do
     %{
       device_id: "6f1e2d3c-4b5a-4968-8778-695a4b3c2d1e",
+      key: :keyring,
       primary: %{
         name: "invented-vm",
         gateway_pk: :binary.copy(<<3>>, 32),
@@ -1004,7 +1616,14 @@ defmodule FermixCore.Management.HomeTest do
           scheduler: nil,
           profile: "general",
           now: @at,
-          disk_usage: disk(0.42)
+          disk_usage: disk(0.42),
+          # An Always On server's primary, unless a test says otherwise (D18).
+          snapshot_targets: Scheduler.targets(:server),
+          # The live channel and cue settings are global: a home here serves none.
+          webhook_settings: fn -> %{whatsapp: [], cues: [], web_port: 4030} end,
+          # This engine's version, which a desktop's server stands against
+          # (M97 §3.4): the servers here run 9.9.8 and 9.9.9.
+          version: "9.9.9"
         ],
         extra
       )
@@ -1021,15 +1640,38 @@ defmodule FermixCore.Management.HomeTest do
 
     start_supervised!(
       {Scheduler,
-       [
-         name: name,
-         home: home,
-         config: fn -> config end,
-         now: fn -> ~U[2026-10-27 09:00:00Z] end,
-         timer: fn _message, _delay -> make_ref() end
-       ] ++ extra}
+       Keyword.merge(
+         [
+           name: name,
+           home: home,
+           config: fn -> config end,
+           targets: Scheduler.targets(:server),
+           now: fn -> ~U[2026-10-27 09:00:00Z] end,
+           timer: fn _message, _delay -> make_ref() end
+         ],
+         extra
+       )}
     )
 
     name
   end
+
+  # A release table pinning 9.9.9, 9.9.10 and 9.10.0, with `rows` after.
+  defp release_table(rows) do
+    digests =
+      for version <- ["9.9.9", "9.9.10", "9.10.0"],
+          do: "#{version} #{String.duplicate("d", 64)} fermix_always_on.sh"
+
+    text = Enum.join(["format 1", "latest 9.10.0"] ++ digests ++ rows, "\n") <> "\n"
+    {:ok, table} = Releases.parse(text)
+    table
+  end
+
+  defp computer(name, platform, backups),
+    do: %Computer{
+      device_id: if(platform == :macos, do: @mac_id, else: @linux_id),
+      name: name,
+      platform: platform,
+      backups: backups
+    }
 end

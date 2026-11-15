@@ -25,6 +25,9 @@ defmodule FermixChannels.Mobile.Noise do
   @patterns [:ik, :ikpsk2, :ikpsk2_enroll, :ik_move]
   @prologue_prefix "fermix-mobile-v1"
   @sas_label "fermix-mobile-sas-v1"
+  # A computer's join (M97 §7.5) has its own label, so a phone's digits and a
+  # computer's never match by construction.
+  @computer_sas_label "fermix-computer-sas-v1"
   @max_noise_message_bytes 65_535
   @max_transport_plaintext_bytes @max_noise_message_bytes - 16
   @zero_key :binary.copy(<<0>>, 32)
@@ -182,11 +185,23 @@ defmodule FermixChannels.Mobile.Noise do
   @spec handshake_hash(State.t()) :: binary()
   def handshake_hash(%State{complete?: true, handshake_hash: hash}), do: hash
 
-  @doc "Six-digit SAS derived from the final handshake hash."
+  @doc "Six-digit SAS derived from the final handshake hash: a phone's pairing."
   @spec sas(State.t()) :: String.t()
-  def sas(%State{complete?: true} = state) do
-    digest = :crypto.mac(:hmac, :sha256, handshake_hash(state), @sas_label)
-    <<value::unsigned-big-32, _rest::binary>> = digest
+  def sas(%State{complete?: true} = state), do: sas(state, :phone)
+
+  @doc """
+  The six-digit SAS of `purpose`: `:phone` for a phone's pairing,
+  `:computer` for a computer's join, each under its own label.
+  """
+  @spec sas(State.t(), :phone | :computer) :: String.t()
+  def sas(%State{complete?: true} = state, purpose) when purpose in [:phone, :computer],
+    do: sas_digits(handshake_hash(state), purpose)
+
+  @doc "The six digits of `purpose` for a completed handshake's hash."
+  @spec sas_digits(binary(), :phone | :computer) :: String.t()
+  def sas_digits(hash, purpose) when is_binary(hash) and purpose in [:phone, :computer] do
+    label = if purpose == :computer, do: @computer_sas_label, else: @sas_label
+    <<value::unsigned-big-32, _rest::binary>> = :crypto.mac(:hmac, :sha256, hash, label)
     value |> rem(1_000_000) |> Integer.to_string() |> String.pad_leading(6, "0")
   end
 

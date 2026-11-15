@@ -21,7 +21,9 @@ defmodule FermixCore.CommandHost do
 
     * The host monitors the owner (requester / subscriber) **first**, then
       `Port.open`s, then reads `os_pid` immediately (`Port.info`) — the port child
-      is its own group leader, so `os_pid` is the pgid.
+      is its own group leader, so `os_pid` is the pgid. The command it is handed
+      is `CommandRunner`'s stdin shell, which gives the child its standard input
+      and replaces itself with the executable in that same process.
     * Every command **ending** sweeps the group. Success/failure exit → immediate
       group-SIGKILL (any survivor is a leak). Output-cap truncation / wall-clock
       timeout / cancel / stalled subscriber → group-SIGTERM, drain (discarding
@@ -157,10 +159,7 @@ defmodule FermixCore.CommandHost do
     # open the port, then read os_pid. Report the os_pid back to the start caller
     # before the receive loop can process any exit (race-free os_pid discovery).
     subscriber_mon = Process.monitor(stream_to)
-
-    port =
-      Port.open({:spawn_executable, executable}, CommandRunner.build_stream_port_opts(args, opts))
-
+    port = Port.open({:spawn_executable, executable}, CommandRunner.build_port_opts(args, opts))
     os_pid = read_os_pid(port)
     send(caller, {:command_host_started, ref, os_pid})
 

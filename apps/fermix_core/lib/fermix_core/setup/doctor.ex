@@ -41,6 +41,7 @@ defmodule FermixCore.Setup.Doctor do
   alias FermixCore.Tools.PlaceSearch
   alias FermixCore.Tools.PlaceSearch.AppleMaps, as: PlaceAppleMaps
   alias FermixCore.Tools.PlaceSearch.Brave, as: PlaceBrave
+  alias FermixCore.Tools.PlaceSearch.Brave.Pacer, as: PlacePacer
   alias FermixCore.Tools.SearchCredential
   alias FermixCore.Tools.WebSearch
   alias FermixCore.Transcription
@@ -91,8 +92,8 @@ defmodule FermixCore.Setup.Doctor do
           optional(:result_count) => non_neg_integer()
         }
   @type place_search_report :: %{
-          :backend => :apple_maps | :brave,
-          :backend_source => :configured | :build_default,
+          :backend => :apple_maps | :computer | :brave,
+          :backend_source => :configured | :build_default | :linked_computer | :computers_unknown,
           :web_backend => atom(),
           :credential_present? => boolean(),
           :ready => :ok | {:error, String.t()},
@@ -170,6 +171,7 @@ defmodule FermixCore.Setup.Doctor do
   @place_probe_tags [
     {"auth_failed", :auth_failed},
     {"rate_limited", :rate_limited},
+    {"plan_excludes_place_search", :plan_excludes_place_search},
     {"provider_error", :provider_error},
     {"parser_changed", :parser_changed},
     {"response_too_large", :response_too_large},
@@ -597,7 +599,7 @@ defmodule FermixCore.Setup.Doctor do
   end
 
   defp probe_context(opts) do
-    Enum.reduce([:req_options, :net_resolver], %{}, fn key, acc ->
+    Enum.reduce([:req_options, :net_resolver, :place_search_sleep], %{}, fn key, acc ->
       case Keyword.get(opts, key) do
         nil -> acc
         value -> Map.put(acc, key, value)
@@ -625,7 +627,8 @@ defmodule FermixCore.Setup.Doctor do
   `full: true` and a ready backend it runs **one** live search on that backend
   (fixed query, `count: 1`, result discarded): metered on Brave, free on Apple
   Maps. It adds `:probe_result` / `:probe_error` / `:result_count`. Each §10.4
-  failure kind keeps its own tag, and no probe ever switches backend.
+  failure kind keeps its own tag, and no probe ever switches backend. A Mac of
+  the home is never asked (M89 D13): nothing is added for it.
   `host:` names the build and `apple_maps:` the helper's options for a test;
   `req_options`/`net_resolver` stub the Brave probe.
 
@@ -638,7 +641,7 @@ defmodule FermixCore.Setup.Doctor do
   def place_search_report(opts \\ []) do
     config = WebSearch.config()
     {web_backend, _module} = WebSearch.active_backend(config)
-    context = opts |> Keyword.take([:host, :apple_maps]) |> Map.new()
+    context = opts |> Keyword.take([:host, :apple_maps, :computers_opts]) |> Map.new()
     resolution = PlaceSearch.resolution(context)
     ready = PlaceSearch.readiness(context)
 
@@ -658,11 +661,27 @@ defmodule FermixCore.Setup.Doctor do
     end
   end
 
-  defp place_search_probe(:brave, config, opts),
-    do: place_probe(PlaceBrave, Keyword.put(config, :context, probe_context(opts)))
+  # The probe runs in `fermix doctor --full`, a command that starts no engine
+  # tree, so no home pacer is registered where it runs: its one request goes
+  # through a pacer of its own, the way every Brave place search goes (one
+  # turn, and once more after a 429), which stops with the probe.
+  defp place_search_probe(:brave, config, opts) do
+    context = probe_context(opts)
+    {:ok, pacer} = PlacePacer.start_link(name: nil)
+    probe_opts = Keyword.put(config, :context, Map.put(context, :place_search_pacer, pacer))
+
+    try do
+      place_probe(PlaceBrave, probe_opts)
+    after
+      GenServer.stop(pacer)
+    end
+  end
 
   defp place_search_probe(:apple_maps, _config, opts),
     do: place_probe(PlaceAppleMaps, Keyword.get(opts, :apple_maps, []))
+
+  # A health check sends nothing to the owner's Mac.
+  defp place_search_probe(:computer, _config, _opts), do: %{}
 
   defp place_probe(backend, backend_opts) do
     request = %{query: @place_probe_query, count: 1}
@@ -790,38 +809,58 @@ defmodule FermixCore.Setup.Doctor do
   a Playwright browser to answer a doctor row is not a diagnostic, and the
   sidecar offers no cheaper identity call — so this reports installed state, not
   a live handshake.
+
+  On an Always On server (`Meetings.meet_here/1`, whose `:always_on_server`
+  seam `opts` may carry) Google Meet cannot run, so nothing tells it to
+  install the notetaker, its browser or to sign the bot in: the sign-in's
+  note, and the remedy where Zoom is not set up, are Google Meet's sentence
+  there (`Meetings.meet_unavailable_sentence/1`), with no browser note.
   """
   @spec meetings_report(keyword()) :: meetings_report()
-  def meetings_report(_opts \\ []) do
+  def meetings_report(opts \\ []) when is_list(opts) do
     config = MeetingsConfig.load()
 
     if config.enabled do
-      enabled_meetings_report(config)
+      enabled_meetings_report(config, Keyword.take(opts, [:always_on_server]))
     else
       %{status: :disabled}
     end
   end
 
-  defp enabled_meetings_report(config) do
+  defp enabled_meetings_report(config, here_opts) do
     installed? = MeetbotInstaller.installed?()
     browser_installed? = MeetbotInstaller.browser_installed?()
     rtms_configured? = MeetingsConfig.rtms_configured?(config)
     profile = meet_profile_state()
-    browser_note = meet_browser_note(installed?, browser_installed?)
+    lane = {installed?, browser_installed?, profile}
+    meet = meet_notes(Meetings.meet_here(here_opts), lane, rtms_configured?)
 
     %{
       status: :enabled,
-      ready?: Meetings.ready?(),
+      ready?: Meetings.ready?(here_opts),
       sidecar_installed?: installed?,
       browser_installed?: browser_installed?,
-      browser_note: browser_note,
+      browser_note: meet.browser,
       pinned_tag: MeetbotInstaller.pinned_tag(),
       profile: profile,
-      profile_note: meet_profile_note(profile),
+      profile_note: meet.profile,
       rtms_configured?: rtms_configured?,
-      remedy: meetings_remedy(browser_note, rtms_configured?)
+      remedy: meetings_remedy(meet, rtms_configured?)
     }
   end
+
+  # Where Google Meet runs, the notes say how far its lane got; on an Always On
+  # server, Google Meet's sentence (what Zoom does there, by whether it is set
+  # up) is the one note, and no step that cannot work is named.
+  defp meet_notes(:ok, {installed?, browser_installed?, profile}, _zoom?),
+    do: %{
+      here: true,
+      browser: meet_browser_note(installed?, browser_installed?),
+      profile: meet_profile_note(profile)
+    }
+
+  defp meet_notes({:error, :meet_unavailable_on_server}, _lane, zoom?),
+    do: %{here: false, browser: nil, profile: Meetings.meet_unavailable_sentence(zoom?)}
 
   # Only meaningful once the binary is present: the browser installs right after
   # it, so a missing browser on an installed sidecar is the state to name.
@@ -846,10 +885,13 @@ defmodule FermixCore.Setup.Doctor do
   # A meetbot release is pinned in this build, so the "no release at all" state is
   # unreachable; a host with no pinned artifact for its target surfaces the
   # installer's own error at enable time.
-  defp meetings_remedy(_browser_note, true), do: nil
-  defp meetings_remedy(browser_note, false) when is_binary(browser_note), do: browser_note
+  defp meetings_remedy(_meet, true), do: nil
+  defp meetings_remedy(%{here: false, profile: sentence}, false), do: sentence
 
-  defp meetings_remedy(nil, false) do
+  defp meetings_remedy(%{browser: browser_note}, false) when is_binary(browser_note),
+    do: browser_note
+
+  defp meetings_remedy(%{browser: nil}, false) do
     if Meetings.meet_lane_ready?(), do: nil, else: @meetings_no_lane
   end
 

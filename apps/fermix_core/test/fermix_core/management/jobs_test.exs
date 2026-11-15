@@ -59,10 +59,12 @@ defmodule FermixCore.Management.JobsTest do
                )
 
       assert Map.keys(view) |> Enum.sort() ==
-               ~w(budget_ms failure finished_at job_id kind phase progress result started_at status)
+               ~w(budget_ms failure finished_at job_id kind phase progress result started_at
+                  status target)
 
       assert String.starts_with?(view["job_id"], "job:")
       assert view["kind"] == "provider_probe"
+      assert view["target"] == nil
       assert view["status"] == "running"
       assert view["phase"] == nil
       assert view["progress"] == nil
@@ -74,6 +76,45 @@ defmodule FermixCore.Management.JobsTest do
 
       assert_receive {:running, pid}
       send(pid, {:finish, {:ok, %{}}})
+    end
+
+    # An install's job names what it installs, from its start, so a client
+    # matches a running job to the row that started it by more than its kind:
+    # two rows start a capability_install.
+    test "an install's job names its target, and every later view keeps it", %{server: server} do
+      owner = self()
+
+      for {kind, target} <- [{:capability_install, "local_stt"}, {:browser_install, "browser"}] do
+        assert {:ok, %{"target" => ^target} = view} =
+                 Jobs.start(
+                   kind,
+                   opts(server, name: target, target: target, run: blocking_run(owner))
+                 )
+
+        assert {:ok, %{"target" => ^target}} = Jobs.get(view["job_id"], opts(server))
+        assert {:ok, listed} = Jobs.list(opts(server))
+        assert %{"target" => ^target} = Enum.find(listed, &(&1["job_id"] == view["job_id"]))
+
+        assert_receive {:running, pid}
+        send(pid, {:finish, {:ok, %{}}})
+      end
+    end
+
+    test "only an install names a target, and an install always names one", %{server: server} do
+      run = blocking_run(self())
+
+      for {kind, target} <- [
+            {:provider_probe, "anthropic"},
+            {:capability_install, nil},
+            {:capability_install, ""},
+            {:browser_install, "meetbot"}
+          ] do
+        assert_raise ArgumentError, fn ->
+          Jobs.start(kind, opts(server, name: "named", target: target, run: run))
+        end
+      end
+
+      assert {:ok, []} = Jobs.list(opts(server))
     end
 
     test "a completed job carries its result and drops its phase", %{server: server} do
@@ -115,7 +156,10 @@ defmodule FermixCore.Management.JobsTest do
       end
 
       assert {:ok, started} =
-               Jobs.start(:capability_install, opts(server, name: "meetbot", run: run))
+               Jobs.start(
+                 :capability_install,
+                 opts(server, name: "meetbot", target: "meetbot", run: run)
+               )
 
       assert {:ok, failed} = eventually_terminal(server, started["job_id"])
 
@@ -142,7 +186,10 @@ defmodule FermixCore.Management.JobsTest do
       end
 
       assert {:ok, started} =
-               Jobs.start(:capability_install, opts(server, name: "meetbot", run: run))
+               Jobs.start(
+                 :capability_install,
+                 opts(server, name: "meetbot", target: "meetbot", run: run)
+               )
 
       assert_receive {:reported, pid}
 
@@ -264,15 +311,17 @@ defmodule FermixCore.Management.JobsTest do
       assert_receive {:DOWN, ^ref, :process, ^pid, _reason}
     end
 
-    # Always On setup §5: a delete started right after a cancel must never run
-    # beside the cancelled create still inside its provider call, so a stopped
-    # run stays running until its task is gone, and the cancel answers then.
+    # Always On setup §5: a run started right after a cancel must never run
+    # beside the cancelled one still inside its work, so a stopped run stays
+    # running until its task is gone, and the cancel answers then.
     test "cancel answers once the run has stopped, and the run counts as running until then",
          %{server: server} do
       owner = self()
       run = stopping_run(owner)
 
-      assert {:ok, started} = Jobs.start(:home_provision, opts(server, name: "hetzner", run: run))
+      assert {:ok, started} =
+               Jobs.start(:home_restore, opts(server, name: "restore_here", run: run))
+
       assert_receive {:running, pid}
 
       canceller = Task.async(fn -> Jobs.cancel(started["job_id"], opts(server)) end)
@@ -282,7 +331,7 @@ defmodule FermixCore.Management.JobsTest do
       assert {:ok, %{"status" => "running"}} = Jobs.get(started["job_id"], opts(server))
 
       assert {:error, :busy} =
-               Jobs.start(:home_provision, opts(server, name: "hetzner", run: run))
+               Jobs.start(:home_restore, opts(server, name: "restore_here", run: run))
 
       assert Task.yield(canceller, 0) == nil
 
@@ -293,8 +342,8 @@ defmodule FermixCore.Management.JobsTest do
 
       assert {:ok, _next} =
                Jobs.start(
-                 :home_provision,
-                 opts(server, name: "hetzner", run: blocking_run(owner))
+                 :home_restore,
+                 opts(server, name: "restore_here", run: blocking_run(owner))
                )
 
       assert_receive {:running, next_pid}
@@ -404,7 +453,7 @@ defmodule FermixCore.Management.JobsTest do
 
       assert {:ok, started} =
                Jobs.start(
-                 :home_provision,
+                 :home_restore,
                  opts(server, name: "n", run: run, ending: holding_ending(owner))
                )
 
@@ -413,7 +462,7 @@ defmodule FermixCore.Management.JobsTest do
 
       assert note == %{kept: true}
       assert {:ok, %{"status" => "running"}} = Jobs.get(started["job_id"], opts(server))
-      assert {:error, :busy} = Jobs.start(:home_provision, opts(server, name: "n", run: run))
+      assert {:error, :busy} = Jobs.start(:home_restore, opts(server, name: "n", run: run))
 
       send(ending, :release)
       assert {:ok, view} = eventually_terminal(server, started["job_id"])
@@ -427,7 +476,7 @@ defmodule FermixCore.Management.JobsTest do
       ending = fn ended -> send(owner, {:ended, ended}) end
 
       assert {:ok, started} =
-               Jobs.start(:home_provision, opts(server, name: "n", run: run, ending: ending))
+               Jobs.start(:home_restore, opts(server, name: "n", run: run, ending: ending))
 
       assert_receive {:ended, {:answered, {:ok, %{"done" => true}}}}
       assert {:ok, %{"status" => "completed"}} = eventually_terminal(server, started["job_id"])
@@ -444,7 +493,7 @@ defmodule FermixCore.Management.JobsTest do
             {"killed", fn _job_id, _report -> Process.exit(self(), :kill) end}
           ] do
         assert {:ok, started} =
-                 Jobs.start(:home_provision, opts(server, name: name, run: run, ending: ending))
+                 Jobs.start(:home_restore, opts(server, name: name, run: run, ending: ending))
 
         assert_receive {:ended, :crashed}
         assert {:ok, %{"status" => "failed"}} = eventually_terminal(server, started["job_id"])
@@ -456,7 +505,7 @@ defmodule FermixCore.Management.JobsTest do
 
       assert {:ok, started} =
                Jobs.start(
-                 :home_provision,
+                 :home_restore,
                  opts(server, name: "n", run: blocking_run(owner), ending: holding_ending(owner))
                )
 
@@ -475,7 +524,7 @@ defmodule FermixCore.Management.JobsTest do
 
       assert {:ok, started} =
                Jobs.start(
-                 :home_provision,
+                 :home_restore,
                  opts(server, name: "n", run: blocking_run(owner), ending: ending, budget_ms: 30)
                )
 
@@ -490,7 +539,7 @@ defmodule FermixCore.Management.JobsTest do
       log =
         ExUnit.CaptureLog.capture_log(fn ->
           assert {:ok, started} =
-                   Jobs.start(:home_provision, opts(server, name: "n", run: run, ending: ending))
+                   Jobs.start(:home_restore, opts(server, name: "n", run: run, ending: ending))
 
           assert {:ok, %{"status" => "completed"}} =
                    eventually_terminal(server, started["job_id"])

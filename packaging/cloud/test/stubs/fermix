@@ -1,12 +1,17 @@
 #!/bin/sh
 # Test stand-in for the packaged fermix, installed by the fake installer.
 # Records its arguments, its account and the names (never the values) of its
-# environment; `home enroll` records the SHA-256 of the code file it can read
-# and writes a candidate home the way the real verb does. `home status --json`
+# environment, the process that started it (runuser, when a PAM session holds
+# the call) and the uid, gid and groups it runs with; `home enroll` records
+# the SHA-256 of the code file it can read and writes a candidate home the way
+# the real verb does. `home status --json`
 # answers the candidate's phases from /etc/fermix-test/phases, one line per
-# call ("phase|sentence"), the last repeated (enrolled without the file), and
-# its update_ceiling from /etc/fermix-test/ceiling (1.2.3 without it, null
-# when it says none).
+# call ("phase|sentence"), the last repeated (enrolled without the file), its
+# role from /etc/fermix-test/role (candidate without it), its moved marker's
+# `to` from /etc/fermix-test/moved-to (no marker without it), its
+# update_ceiling (the eligible release) from /etc/fermix-test/ceiling (1.2.3
+# without it, null when it says none), and its restart_hold's wait_s from
+# /etc/fermix-test/hold (no hold without it).
 # The release the service runs is kept in $state/running-version: `service
 # install` and `restart` start the installed one (the fake installer records
 # it in $state/installed-version), and `service status --json` answers
@@ -20,14 +25,16 @@ fixtures=/etc/fermix-test
 state=/var/lib/fermix-test
 printf 'fermix %s [as %s]\n' "$*" "$(id -un)" >>"$log/calls.log"
 verb="$1${2+ $2}"
-env | cut -d= -f1 | sort >"$log/env-$(printf '%s' "$verb" | tr ' ' -)"
+name=$(printf '%s' "$verb" | tr ' ' -)
+env | cut -d= -f1 | sort >"$log/env-$name"
+cat "/proc/$PPID/comm" >"$log/parent-$name"
+printf '%s %s %s\n' "$(id -u)" "$(id -g)" "$(id -G)" >"$log/ids-$name"
 case "$verb" in
   "home enroll")
     code_file=$4
     sha256sum <"$code_file" | cut -d' ' -f1 >"$log/code-file.sha256"
     mkdir -p "$FERMIX_HOME"
-    printf '[fermix_core.engine]\nrole = "candidate"\n\n[fermix_core.always_on]\nenabled = true\n' \
-      >"$FERMIX_HOME/config.toml"
+    printf '[fermix_core.engine]\nrole = "candidate"\n' >"$FERMIX_HOME/config.toml"
     ;;
   "service install")
     printf '%s\n' "$XDG_RUNTIME_DIR" >"$log/service-runtime-dir"
@@ -65,7 +72,17 @@ case "$verb" in
     ceiling='"1.2.3"'
     if [ -f "$fixtures/ceiling" ]; then ceiling="\"$(cat "$fixtures/ceiling")\""; fi
     if [ "$ceiling" = '"none"' ]; then ceiling=null; fi
-    printf '{\n  "ok": true,\n  "result": {\n    "move": {\n      "candidate": null,\n      "phase": "%s",\n      "sentence": "%s"\n    },\n    "moved": null,\n    "role": "candidate",\n    "update_ceiling": %s\n  },\n  "schema_version": 1\n}\n' \
-      "${line%%|*}" "${line#*|}" "$ceiling"
+    role=candidate
+    if [ -f "$fixtures/role" ]; then role=$(cat "$fixtures/role"); fi
+    moved=null
+    if [ -f "$fixtures/moved-to" ]; then
+      moved="{\"epoch\": 4, \"moved_at\": \"2026-11-05T20:00:00Z\", \"to\": \"$(cat "$fixtures/moved-to")\"}"
+    fi
+    hold=null
+    if [ -f "$fixtures/hold" ]; then
+      hold="{\"count\": 1, \"reason\": \"computer_work\", \"sentence\": \"Invented work.\", \"wait_s\": $(cat "$fixtures/hold")}"
+    fi
+    printf '{\n  "ok": true,\n  "result": {\n    "move": {\n      "candidate": null,\n      "phase": "%s",\n      "sentence": "%s"\n    },\n    "moved": %s,\n    "restart_hold": %s,\n    "role": "%s",\n    "update_ceiling": %s\n  },\n  "schema_version": 1\n}\n' \
+      "${line%%|*}" "${line#*|}" "$moved" "$hold" "$role" "$ceiling"
     ;;
 esac

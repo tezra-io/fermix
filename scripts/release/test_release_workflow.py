@@ -210,8 +210,47 @@ class ReleaseWorkflowTest(unittest.TestCase):
         self.assertIn("needs: [standalone, linux-packages, app-engine]", self.release)
         self.assertIn("linux_packages/fermix_*.deb", self.release)
         self.assertIn("linux_packages/fermix-*.rpm", self.release)
-        self.assertIn('[ "${#unsigned[@]}" -eq 10 ]', self.release)
+        self.assertIn('[ "${#unsigned[@]}" -eq 11 ]', self.release)
         self.assertIn("linux_packages/fermix*", self.release)
+
+    # The regular installer's --always-on runs the release's own copy of the
+    # Always On server script, so every release signs it beside the binaries,
+    # hashes it, verifies it and publishes it as fermix_always_on.sh.
+    def test_every_release_signs_and_publishes_the_always_on_server_script(self):
+        sign = self._job("sign-candidate")
+        copy = "cp packaging/cloud/first-boot.sh always_on/fermix_always_on.sh"
+        self.assertIn(copy, sign)
+        self.assertLess(sign.index(copy), sign.index("- name: Sign, hash, and verify candidate artifacts"))
+        signing = sign.split("- name: Sign, hash, and verify candidate artifacts", 1)[1]
+        self.assertIn("            always_on/fermix_always_on.sh\n          )", signing)
+        self.assertIn(
+            "Expected four standalone, four package and two app-engine artifacts and the Always On "
+            "server script, found ${#unsigned[@]}",
+            signing,
+        )
+        upload = sign.split("name: signed-release-candidate", 1)[1]
+        self.assertIn("            always_on/fermix_always_on.sh*\n", upload)
+        files = self._job("stage-release").split("files: |", 1)[1]
+        self.assertIn("            always_on/fermix_always_on.sh*\n", files)
+        self.assertNotIn("burrito_out/fermix_always_on", self.release)
+
+    def test_both_verification_jobs_check_the_always_on_script_against_the_tagged_source(self):
+        row = "{ name: always-on-script, os: ubuntu-24.04, kind: always_on }"
+        self.assertEqual(self.release.count(row), 2)
+        for job, artifact, variable in (
+            ("verify-candidate", "always_on/fermix_always_on.sh", "CANDIDATE_ARTIFACT"),
+            ("verify-published", "fermix_always_on.sh", "STAGED_ARTIFACT"),
+        ):
+            with self.subTest(job=job):
+                body = self._job(job)
+                self.assertIn(row, body)
+                self.assertIn(f'always_on) artifact="{artifact}" ;;', body)
+                self.assertIn(
+                    "      - name: Compare the Always On server script with the tag's first boot\n"
+                    "        if: matrix.kind == 'always_on'\n"
+                    f'        run: cmp "${variable}" packaging/cloud/first-boot.sh\n',
+                    body,
+                )
 
     def test_the_release_feed_is_generated_where_both_halves_are_present(self):
         self.assertIn("PACKAGES_DIR: linux_packages", self.release)
@@ -302,7 +341,8 @@ class ReleaseWorkflowTest(unittest.TestCase):
         self.assertIsNotNone(job, "release.yml has no installer job ahead of homebrew")
         body = job.group(1)
 
-        # The installer reads the public `latest` feed, which a draft is not.
+        # The installer downloads from the public release URLs, which a draft
+        # does not have.
         self.assertIn("needs: promote\n", body)
         self.assertIn("if: ${{ !contains(github.ref_name, '-') }}", body)
         for row in (
@@ -313,10 +353,16 @@ class ReleaseWorkflowTest(unittest.TestCase):
         ):
             with self.subTest(row=row):
                 self.assertIn(row, body)
-        # Without cosign the installer skips the signature check, loudly, and
-        # the verification requires that it ran.
+        # fermix.ai lists the release only once the site pins it, so the
+        # installer is handed the table built from the rail's own signed files,
+        # each checked with cosign first, and the table is what it runs against.
+        self.assertIn("name: signed-release-candidate\n", body)
         self.assertIn("sigstore/cosign-installer@", body)
+        build = 'scripts/release/build_install_table.sh . "${TAG_NAME#v}" > "$RUNNER_TEMP/install-releases"'
+        self.assertIn(build, body)
         self.assertIn("scripts/release/verify_installer.sh", body)
+        self.assertLess(body.index(build), body.index("scripts/release/verify_installer.sh"))
+        self.assertIn('"$RUNNER_TEMP/install-releases"\n', body.split("scripts/release/verify_installer.sh", 1)[1])
         # Nothing may wait on a job that can only run once the release is out.
         self.assertNotRegex(self.release, r"needs:[^\n]*\binstaller\b")
 
@@ -328,6 +374,17 @@ class ReleaseWorkflowTest(unittest.TestCase):
         self.assertIn("brew info --formula --json=v2 tezra-io/tap/fermix", self.release)
         self.assertIn("brew install --formula tezra-io/tap/fermix", self.release)
         self.assertIn('fermix --version | grep -F "$version"', self.release)
+        # The step runs its own `brew update` before each read. Homebrew's
+        # auto-update, started by `brew tap` or `brew trust`, held the update
+        # lock when the loop's next one ran ("Another `brew update` process is
+        # already running", v0.18.0's release), so the job turns it off.
+        self.assertIn('HOMEBREW_NO_AUTO_UPDATE: "1"', self._job("homebrew"))
+        # The check loop needs only the tap's newest formula, so it pulls the
+        # tap with git and never takes Homebrew's update lock again: the one
+        # `brew update` is the one that brings `brew trust`.
+        self.assertIn('tap_repo="$(brew --repository tezra-io/tap)"', self._job("homebrew"))
+        self.assertIn('git -C "$tap_repo" pull --ff-only', self._job("homebrew"))
+        self.assertEqual(self._job("homebrew").count("brew update >/dev/null"), 1)
 
     def _job(self, name):
         job = re.search(

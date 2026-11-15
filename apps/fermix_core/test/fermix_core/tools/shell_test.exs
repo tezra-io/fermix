@@ -191,6 +191,16 @@ defmodule FermixCore.Tools.ShellTest do
       assert result.success == false
       assert result.error =~ "timed out"
     end
+
+    # Seen on a server: `cat; echo stdin-done-7731` ran 30 s, printed nothing
+    # and "timed out", since the command's stdin was a pipe nothing wrote or
+    # closed. It reads end of file now; the timeout only guards a hang.
+    test "a command that reads its stdin gets end of file, not its timeout" do
+      args = %{"command" => "cat; echo stdin-done-7731", "timeout_ms" => 10_000}
+      assert {:ok, result} = Shell.execute(args, @context)
+      assert result.success == true, "the command did not finish: #{inspect(result.error)}"
+      assert result.output == "stdin-done-7731\n"
+    end
   end
 
   describe "telemetry" do

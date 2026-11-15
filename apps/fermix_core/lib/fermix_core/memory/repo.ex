@@ -9,6 +9,8 @@ defmodule FermixCore.Memory.Repo do
 
   alias Exqlite.Sqlite3
   alias FermixCore.Agents.IterationLimits
+  alias FermixCore.ComputerHistory.Spool
+  alias FermixCore.Home.Candidate
   alias FermixCore.Memory.Config
   alias FermixCore.Memory.Repo.ChecklistsSql
   alias FermixCore.Memory.Repo.ComputerHistorySql
@@ -22,13 +24,16 @@ defmodule FermixCore.Memory.Repo do
   alias FermixCore.Memory.Repo.CuesWatchersSql
   alias FermixCore.Memory.Repo.FtsMatch
   alias FermixCore.Memory.Repo.InboundEventsSql
+  alias FermixCore.Memory.Repo.KeptSql
   alias FermixCore.Memory.Repo.MeetingsSql
   alias FermixCore.Memory.Repo.MobileSql
   alias FermixCore.Memory.Repo.OpenLoopReactionsSql
   alias FermixCore.Memory.Repo.OpenLoopsSql
   alias FermixCore.Memory.Repo.TemporalSql
+  alias FermixCore.Memory.Repo.TripsSql
   alias FermixCore.Memory.Repo.VoiceCallsSql
   alias FermixCore.Memory.Scope
+  alias FermixCore.Setup.ConfigStore
   alias FermixCore.Timeouts
 
   @base_migration_version 1
@@ -88,7 +93,35 @@ defmodule FermixCore.Memory.Repo do
   @checklists_migration_version 56
   @checklist_edits_migration_version 57
   @follow_up_always_allow_migration_version 58
+  @computer_history_machines_migration_version 59
+  @computer_history_reports_migration_version 60
+  @computer_history_home_migration_version 61
+  @checklist_edit_kinds_migration_version 62
+  @trips_migration_version 63
+  @trip_near_migration_version 64
+  @trip_waits_migration_version 65
+  @trip_towns_migration_version 66
   @sqlite_open_intent :readwritecreate
+
+  # The home's requests about notes from every machine (M97 §8), all served by
+  # `computer_history_home/3`.
+  @computer_history_home_ops [
+    :insert_note,
+    :noted,
+    :reaching_intervals,
+    :intervals_after,
+    :record_submission,
+    :record_delivered,
+    :request_off,
+    :clear_off,
+    :record_report,
+    :computer_rows,
+    :notes_by_computer,
+    :purge_notes,
+    :pause_window,
+    :prune_home_intervals,
+    :home_token
+  ]
 
   # The cue SQL modules (M60), one per lane, all served by `cues_call/3`.
   @cue_sql_modules [
@@ -2013,28 +2046,6 @@ defmodule FermixCore.Memory.Repo do
 
   # --- computer history (MILESTONE_32 §7) ---------------------------------
 
-  @doc "Idempotently insert a batch of computer-history spool events. Returns the inserted count."
-  @spec computer_history_insert_events([map()], keyword()) ::
-          {:ok, non_neg_integer()} | {:error, term()}
-  def computer_history_insert_events(events, opts \\ []) when is_list(events) do
-    call({:computer_history_insert_events, events}, opts)
-  end
-
-  @doc "Sweep spool events older than `cutoff_ts` (epoch ms). Returns the deleted count."
-  @spec computer_history_sweep_expired_events(integer(), keyword()) ::
-          {:ok, non_neg_integer()} | {:error, term()}
-  def computer_history_sweep_expired_events(cutoff_ts, opts \\ []) when is_integer(cutoff_ts) do
-    call({:computer_history_sweep_expired_events, cutoff_ts}, opts)
-  end
-
-  @doc "Byte-ceiling backstop: keep the newest spool events fitting `ceiling_bytes`, delete the rest."
-  @spec computer_history_sweep_spool_over_bytes(pos_integer(), keyword()) ::
-          {:ok, non_neg_integer()} | {:error, term()}
-  def computer_history_sweep_spool_over_bytes(ceiling_bytes, opts \\ [])
-      when is_integer(ceiling_bytes) and ceiling_bytes > 0 do
-    call({:computer_history_sweep_spool_over_bytes, ceiling_bytes}, opts)
-  end
-
   @doc "Record one agent read of history (metadata only — sink, window, count)."
   @spec computer_history_record_access(map(), keyword()) :: :ok | {:error, term()}
   def computer_history_record_access(access, opts \\ []) when is_map(access) do
@@ -2054,44 +2065,6 @@ defmodule FermixCore.Memory.Repo do
   def computer_history_cap_access_rows(max_rows, opts \\ [])
       when is_integer(max_rows) and max_rows > 0 do
     call({:computer_history_cap_access_rows, max_rows}, opts)
-  end
-
-  @doc "Count of computer-history spool events."
-  @spec computer_history_count_events(keyword()) :: {:ok, non_neg_integer()} | {:error, term()}
-  def computer_history_count_events(opts \\ []) do
-    call(:computer_history_count_events, opts)
-  end
-
-  @doc "The oldest spool event's `ts` (epoch ms), or nil when empty."
-  @spec computer_history_oldest_event_ts(keyword()) ::
-          {:ok, integer() | nil} | {:error, term()}
-  def computer_history_oldest_event_ts(opts \\ []) do
-    call(:computer_history_oldest_event_ts, opts)
-  end
-
-  @doc "Read up to `limit` spool events with `id > after_id`, oldest first (summarizer cursor)."
-  @spec computer_history_events_after_id(non_neg_integer(), pos_integer(), keyword()) ::
-          {:ok, [map()]} | {:error, term()}
-  def computer_history_events_after_id(after_id, limit, opts \\ [])
-      when is_integer(after_id) and after_id >= 0 and is_integer(limit) and limit > 0 do
-    call({:computer_history_events_after_id, after_id, limit}, opts)
-  end
-
-  @doc "Summarizer lag: `{count, oldest_ts | nil}` for spool events past the cursor."
-  @spec computer_history_unsummarized_stats(keyword()) ::
-          {:ok, {non_neg_integer(), integer() | nil}} | {:error, term()}
-  def computer_history_unsummarized_stats(opts \\ []) do
-    call(:computer_history_unsummarized_stats, opts)
-  end
-
-  @doc """
-  Per-app coverage states since `since_ts`: the distinct `{bundle_id, reason}`
-  pairs of app-scoped `observer.gap` rows (`title_only`, `ax_refused:<names>`).
-  """
-  @spec computer_history_coverage_gaps(integer(), keyword()) ::
-          {:ok, [{String.t(), String.t()}]} | {:error, term()}
-  def computer_history_coverage_gaps(since_ts, opts \\ []) when is_integer(since_ts) do
-    call({:computer_history_coverage_gaps, since_ts}, opts)
   end
 
   @doc """
@@ -2126,6 +2099,16 @@ defmodule FermixCore.Memory.Repo do
     end
   end
 
+  # Whose notes a read takes (M97 §8.4): `:computer` is `:all` (the default), or
+  # one machine's id, `""` for the home's own.
+  defp memory_computer(opts) do
+    case Keyword.get(opts, :computer, :all) do
+      :all -> :all
+      computer when is_binary(computer) -> computer
+      other -> raise ArgumentError, "computer_history: unknown computer #{inspect(other)}"
+    end
+  end
+
   @doc "Insert one durable activity memory. Returns the new row id."
   @spec computer_history_insert_memory(map(), keyword()) :: {:ok, integer()} | {:error, term()}
   def computer_history_insert_memory(memory, opts \\ []) when is_map(memory) do
@@ -2141,7 +2124,8 @@ defmodule FermixCore.Memory.Repo do
   def computer_history_recent_memories(since_ts, limit, opts \\ [])
       when is_integer(since_ts) and is_integer(limit) and limit > 0 do
     call(
-      {:computer_history_recent_memories, since_ts, limit, memory_kind(opts, :session)},
+      {:computer_history_recent_memories, since_ts, limit, memory_kind(opts, :session),
+       memory_computer(opts)},
       opts
     )
   end
@@ -2155,7 +2139,8 @@ defmodule FermixCore.Memory.Repo do
   def computer_history_memories_in_window(from_ts, to_ts, limit, opts \\ [])
       when is_integer(from_ts) and is_integer(to_ts) and is_integer(limit) and limit > 0 do
     call(
-      {:computer_history_memories_in_window, from_ts, to_ts, limit, memory_kind(opts, :session)},
+      {:computer_history_memories_in_window, from_ts, to_ts, limit, memory_kind(opts, :session),
+       memory_computer(opts)},
       opts
     )
   end
@@ -2166,7 +2151,8 @@ defmodule FermixCore.Memory.Repo do
   def computer_history_count_memories_in_window(from_ts, to_ts, opts \\ [])
       when is_integer(from_ts) and is_integer(to_ts) do
     call(
-      {:computer_history_count_memories_in_window, from_ts, to_ts, memory_kind(opts, :session)},
+      {:computer_history_count_memories_in_window, from_ts, to_ts, memory_kind(opts, :session),
+       memory_computer(opts)},
       opts
     )
   end
@@ -2189,20 +2175,30 @@ defmodule FermixCore.Memory.Repo do
     call({:computer_history_memories_by_ids, ids, memory_kind(opts, :session)}, opts)
   end
 
-  @doc "Session notes written after `since_ts` (the roll-up's input), newest first."
+  @doc """
+  Session notes written after `since_ts` (the roll-up's input), newest first;
+  `machines:` (`:all`, the default, or the machine ids to read) narrows them.
+  """
   @spec computer_history_session_notes_since(integer(), pos_integer(), keyword()) ::
           {:ok, [map()]} | {:error, term()}
   def computer_history_session_notes_since(since_ts, limit, opts \\ [])
       when is_integer(since_ts) and is_integer(limit) and limit > 0 do
-    call({:computer_history_session_notes_since, since_ts, limit}, opts)
+    call(
+      {:computer_history_session_notes_since, since_ts, limit,
+       Keyword.get(opts, :machines, :all)},
+      opts
+    )
   end
 
-  @doc "How many session notes exist after `since_ts` (the roll-up's denominator)."
+  @doc "How many session notes exist after `since_ts` (the roll-up's denominator), as above."
   @spec computer_history_count_session_notes_since(integer(), keyword()) ::
           {:ok, non_neg_integer()} | {:error, term()}
   def computer_history_count_session_notes_since(since_ts, opts \\ [])
       when is_integer(since_ts) do
-    call({:computer_history_count_session_notes_since, since_ts}, opts)
+    call(
+      {:computer_history_count_session_notes_since, since_ts, Keyword.get(opts, :machines, :all)},
+      opts
+    )
   end
 
   @doc """
@@ -2212,7 +2208,7 @@ defmodule FermixCore.Memory.Repo do
   @spec computer_history_count_search_memories(String.t(), keyword()) ::
           {:ok, non_neg_integer()} | {:error, :empty_query | term()}
   def computer_history_count_search_memories(query, opts \\ []) when is_binary(query) do
-    call({:computer_history_count_search_memories, query}, opts)
+    call({:computer_history_count_search_memories, query, memory_computer(opts)}, opts)
   end
 
   @doc """
@@ -2224,7 +2220,7 @@ defmodule FermixCore.Memory.Repo do
           {:ok, [map()]} | {:error, :empty_query | term()}
   def computer_history_search_memories(query, limit, opts \\ [])
       when is_binary(query) and is_integer(limit) and limit > 0 do
-    call({:computer_history_search_memories, query, limit}, opts)
+    call({:computer_history_search_memories, query, limit, memory_computer(opts)}, opts)
   end
 
   @doc """
@@ -2263,34 +2259,6 @@ defmodule FermixCore.Memory.Repo do
     call({:computer_history_stamp_rollup_attempt, ts}, opts)
   end
 
-  @doc "Set/clear the first `ts` of the sitting the summarizer is still waiting on."
-  @spec computer_history_set_session_open_since(integer() | nil, keyword()) ::
-          :ok | {:error, term()}
-  def computer_history_set_session_open_since(ts, opts \\ [])
-      when is_integer(ts) or is_nil(ts) do
-    call({:computer_history_set_session_open_since, ts}, opts)
-  end
-
-  @doc "The `text` of the newest spool events that carry any (the roll-up's verbatim guard)."
-  @spec computer_history_recent_event_texts(pos_integer(), keyword()) ::
-          {:ok, [String.t()]} | {:error, term()}
-  def computer_history_recent_event_texts(limit, opts \\ [])
-      when is_integer(limit) and limit > 0 do
-    call({:computer_history_recent_event_texts, limit}, opts)
-  end
-
-  @doc """
-  Purge the [from_ts, to_ts] window: events + intersecting memories + access rows,
-  and record the interval, issued at `issued_at` (§12).
-  """
-  @spec computer_history_purge_window(integer(), integer(), integer(), keyword()) ::
-          {:ok, %{events: non_neg_integer(), memories: non_neg_integer()}} | {:error, term()}
-  def computer_history_purge_window(from_ts, to_ts, issued_at, opts \\ [])
-      when is_integer(from_ts) and is_integer(to_ts) and from_ts <= to_ts and
-             is_integer(issued_at) do
-    call({:computer_history_purge_window, from_ts, to_ts, issued_at}, opts)
-  end
-
   @doc """
   The purge mark: the id of the latest recorded purge (0 if none). Taken before a
   batch is read and handed to its write (§12).
@@ -2312,63 +2280,20 @@ defmodule FermixCore.Memory.Repo do
     call(:computer_history_fetch_state, opts)
   end
 
-  @doc "Atomically claim a summarizer cycle (idle -> running), reclaiming a stale one."
-  @spec computer_history_claim_cycle(DateTime.t(), non_neg_integer(), keyword()) ::
-          {:ok, map()} | {:error, :concurrent_run | term()}
-  def computer_history_claim_cycle(%DateTime{} = now, stale_after_ms, opts \\ [])
-      when is_integer(stale_after_ms) and stale_after_ms >= 0 do
-    call({:computer_history_claim_cycle, now, stale_after_ms}, opts)
-  end
-
   @doc """
-  Write a summarizer sitting result (insert under the purge guard, advance cursor).
-  `purge_mark` is the one taken before the batch was read. A `nil` `last_status`
-  advances the cursor and keeps the recorded outcome.
+  One request about the home's notes from every machine (M97 §8.4, §8.5), served
+  by the `Memory.Repo.ComputerHistorySql` function `op` names on this store's
+  connection, its arguments `args` after the connection: `insert_note`, `noted`,
+  `reaching_intervals`, `intervals_after`, `record_submission`,
+  `record_delivered`, `request_off`, `clear_off`, `record_report`,
+  `computer_rows`, `notes_by_computer`, `purge_notes`,
+  `pause_window` or `prune_home_intervals`. Only `ComputerHistory`'s home half
+  calls it.
   """
-  @spec computer_history_write_cycle_result(
-          non_neg_integer(),
-          map() | nil,
-          DateTime.t(),
-          String.t() | nil,
-          non_neg_integer(),
-          keyword()
-        ) :: {:ok, %{memory_written: boolean()}} | {:error, term()}
-  def computer_history_write_cycle_result(
-        last_id,
-        memory,
-        %DateTime{} = now,
-        last_status,
-        purge_mark,
-        opts \\ []
-      )
-      when is_integer(last_id) and (is_map(memory) or is_nil(memory)) and
-             (is_binary(last_status) or is_nil(last_status)) and is_integer(purge_mark) and
-             purge_mark >= 0 do
-    call(
-      {:computer_history_write_cycle_result, last_id, memory, now, last_status, purge_mark},
-      opts
-    )
-  end
-
-  @doc "Record the summarizer's paused reason (surfaced to status)."
-  @spec computer_history_set_paused_reason(String.t() | nil, keyword()) :: :ok | {:error, term()}
-  def computer_history_set_paused_reason(reason, opts \\ [])
-      when is_binary(reason) or is_nil(reason) do
-    call({:computer_history_set_paused_reason, reason}, opts)
-  end
-
-  @doc "Set/clear the capture pause horizon (ISO8601 string, or nil to resume)."
-  @spec computer_history_set_pause_until(String.t() | nil, keyword()) :: :ok | {:error, term()}
-  def computer_history_set_pause_until(pause_until, opts \\ [])
-      when is_binary(pause_until) or is_nil(pause_until) do
-    call({:computer_history_set_pause_until, pause_until}, opts)
-  end
-
-  @doc "Release a claimed summarizer cycle (running -> idle)."
-  @spec computer_history_release_claim(DateTime.t(), keyword()) :: :ok | {:error, term()}
-  def computer_history_release_claim(%DateTime{} = now, opts \\ []) do
-    call({:computer_history_release_claim, now}, opts)
-  end
+  @spec computer_history_home(atom(), list(), keyword()) :: term()
+  def computer_history_home(op, args, opts \\ [])
+      when op in @computer_history_home_ops and is_list(args) and is_list(opts),
+      do: call({:computer_history_home, op, args}, opts)
 
   @doc """
   Allowlisted partial update of the singleton state row. Keys present in
@@ -3830,6 +3755,15 @@ defmodule FermixCore.Memory.Repo do
     do: call({:checklists, request}, opts)
 
   @doc """
+  Serves one request about the owner's trips (M89) with
+  `Memory.Repo.TripsSql`, a `handle(conn, request)` with one head per request
+  tuple. Only `FermixCore.Trips.Registry` calls it.
+  """
+  @spec trips_call(tuple(), keyword()) :: term()
+  def trips_call(request, opts \\ []) when is_tuple(request) and is_list(opts),
+    do: call({:trips, request}, opts)
+
+  @doc """
   The base schema as SQL, for a test that seeds a store an older release wrote.
 
   Every statement is `IF NOT EXISTS`, so a fixture can lay the base tables down
@@ -3869,13 +3803,14 @@ defmodule FermixCore.Memory.Repo do
   def init(opts) do
     enabled = Config.enabled?(opts)
     database_path = Config.database_path(opts)
+    carry = history_carry(opts)
 
-    case open_connection(enabled, database_path) do
+    case open_connection(enabled, database_path, carry) do
       {:ok, conn} ->
-        {:ok, %{enabled: true, conn: conn, database_path: database_path}}
+        {:ok, %{enabled: true, conn: conn, database_path: database_path, history_carry: carry}}
 
       :disabled ->
-        {:ok, %{enabled: false, conn: nil, database_path: database_path}}
+        {:ok, %{enabled: false, conn: nil, database_path: database_path, history_carry: carry}}
 
       {:error, reason} ->
         {:stop, reason}
@@ -4135,7 +4070,7 @@ defmodule FermixCore.Memory.Repo do
   end
 
   def handle_call(:migrate, _from, state) do
-    {:reply, with_connection(state, &run_migrations/1), state}
+    {:reply, with_connection(state, &run_migrations(&1, state.history_carry)), state}
   end
 
   def handle_call(:migration_versions, _from, state) do
@@ -4497,41 +4432,6 @@ defmodule FermixCore.Memory.Repo do
     {:reply, reply, state}
   end
 
-  def handle_call({:computer_history_insert_events, events}, _from, state) do
-    reply = with_connection(state, &ComputerHistorySql.insert_events(&1, events))
-    {:reply, reply, state}
-  end
-
-  def handle_call({:computer_history_sweep_expired_events, cutoff_ts}, _from, state) do
-    reply = with_connection(state, &ComputerHistorySql.sweep_expired_events(&1, cutoff_ts))
-    {:reply, reply, state}
-  end
-
-  def handle_call(:computer_history_count_events, _from, state) do
-    reply = with_connection(state, &ComputerHistorySql.count_events/1)
-    {:reply, reply, state}
-  end
-
-  def handle_call(:computer_history_oldest_event_ts, _from, state) do
-    reply = with_connection(state, &ComputerHistorySql.oldest_event_ts/1)
-    {:reply, reply, state}
-  end
-
-  def handle_call({:computer_history_events_after_id, after_id, limit}, _from, state) do
-    reply = with_connection(state, &ComputerHistorySql.events_after_id(&1, after_id, limit))
-    {:reply, reply, state}
-  end
-
-  def handle_call(:computer_history_unsummarized_stats, _from, state) do
-    reply = with_connection(state, &ComputerHistorySql.unsummarized_stats/1)
-    {:reply, reply, state}
-  end
-
-  def handle_call({:computer_history_sweep_spool_over_bytes, ceiling_bytes}, _from, state) do
-    reply = with_connection(state, &ComputerHistorySql.sweep_spool_over_bytes(&1, ceiling_bytes))
-    {:reply, reply, state}
-  end
-
   def handle_call({:computer_history_record_access, access}, _from, state) do
     reply = with_connection(state, &ComputerHistorySql.record_access(&1, access))
     {:reply, reply, state}
@@ -4547,13 +4447,13 @@ defmodule FermixCore.Memory.Repo do
     {:reply, reply, state}
   end
 
-  def handle_call({:computer_history_coverage_gaps, since_ts}, _from, state) do
-    reply = with_connection(state, &ComputerHistorySql.coverage_gaps(&1, since_ts))
+  def handle_call({:computer_history_count_memories, kind, scope}, _from, state) do
+    reply = with_connection(state, &ComputerHistorySql.count_memories(&1, kind, scope))
     {:reply, reply, state}
   end
 
-  def handle_call({:computer_history_count_memories, kind, scope}, _from, state) do
-    reply = with_connection(state, &ComputerHistorySql.count_memories(&1, kind, scope))
+  def handle_call({:computer_history_home, op, args}, _from, state) do
+    reply = with_connection(state, &apply(ComputerHistorySql, op, [&1 | args]))
     {:reply, reply, state}
   end
 
@@ -4562,34 +4462,43 @@ defmodule FermixCore.Memory.Repo do
     {:reply, reply, state}
   end
 
-  def handle_call({:computer_history_recent_memories, since_ts, limit, kind}, _from, state) do
-    reply = with_connection(state, &ComputerHistorySql.recent_memories(&1, since_ts, limit, kind))
-    {:reply, reply, state}
-  end
-
   def handle_call(
-        {:computer_history_memories_in_window, from_ts, to_ts, limit, kind},
+        {:computer_history_recent_memories, since_ts, limit, kind, computer},
         _from,
         state
       ) do
     reply =
       with_connection(
         state,
-        &ComputerHistorySql.memories_in_window(&1, from_ts, to_ts, limit, kind)
+        &ComputerHistorySql.recent_memories(&1, since_ts, limit, kind, computer)
       )
 
     {:reply, reply, state}
   end
 
   def handle_call(
-        {:computer_history_count_memories_in_window, from_ts, to_ts, kind},
+        {:computer_history_memories_in_window, from_ts, to_ts, limit, kind, computer},
         _from,
         state
       ) do
     reply =
       with_connection(
         state,
-        &ComputerHistorySql.count_memories_in_window(&1, from_ts, to_ts, kind)
+        &ComputerHistorySql.memories_in_window(&1, from_ts, to_ts, limit, kind, computer)
+      )
+
+    {:reply, reply, state}
+  end
+
+  def handle_call(
+        {:computer_history_count_memories_in_window, from_ts, to_ts, kind, computer},
+        _from,
+        state
+      ) do
+    reply =
+      with_connection(
+        state,
+        &ComputerHistorySql.count_memories_in_window(&1, from_ts, to_ts, kind, computer)
       )
 
     {:reply, reply, state}
@@ -4605,23 +4514,39 @@ defmodule FermixCore.Memory.Repo do
     {:reply, reply, state}
   end
 
-  def handle_call({:computer_history_session_notes_since, since_ts, limit}, _from, state) do
-    reply = with_connection(state, &ComputerHistorySql.session_notes_since(&1, since_ts, limit))
+  def handle_call(
+        {:computer_history_session_notes_since, since_ts, limit, machines},
+        _from,
+        state
+      ) do
+    reply =
+      with_connection(
+        state,
+        &ComputerHistorySql.session_notes_since(&1, since_ts, limit, machines)
+      )
+
     {:reply, reply, state}
   end
 
-  def handle_call({:computer_history_count_session_notes_since, since_ts}, _from, state) do
-    reply = with_connection(state, &ComputerHistorySql.count_session_notes_since(&1, since_ts))
+  def handle_call({:computer_history_count_session_notes_since, since_ts, machines}, _from, state) do
+    reply =
+      with_connection(
+        state,
+        &ComputerHistorySql.count_session_notes_since(&1, since_ts, machines)
+      )
+
     {:reply, reply, state}
   end
 
-  def handle_call({:computer_history_count_search_memories, query}, _from, state) do
-    reply = with_connection(state, &ComputerHistorySql.count_search_memories(&1, query))
+  def handle_call({:computer_history_count_search_memories, query, computer}, _from, state) do
+    reply = with_connection(state, &ComputerHistorySql.count_search_memories(&1, query, computer))
     {:reply, reply, state}
   end
 
-  def handle_call({:computer_history_search_memories, query, limit}, _from, state) do
-    reply = with_connection(state, &ComputerHistorySql.search_memories(&1, query, limit))
+  def handle_call({:computer_history_search_memories, query, limit, computer}, _from, state) do
+    reply =
+      with_connection(state, &ComputerHistorySql.search_memories(&1, query, limit, computer))
+
     {:reply, reply, state}
   end
 
@@ -4632,23 +4557,6 @@ defmodule FermixCore.Memory.Repo do
 
   def handle_call({:computer_history_stamp_rollup_attempt, ts}, _from, state) do
     reply = with_connection(state, &ComputerHistorySql.stamp_rollup_attempt(&1, ts))
-    {:reply, reply, state}
-  end
-
-  def handle_call({:computer_history_set_session_open_since, ts}, _from, state) do
-    reply = with_connection(state, &ComputerHistorySql.set_session_open_since(&1, ts))
-    {:reply, reply, state}
-  end
-
-  def handle_call({:computer_history_recent_event_texts, limit}, _from, state) do
-    reply = with_connection(state, &ComputerHistorySql.recent_event_texts(&1, limit))
-    {:reply, reply, state}
-  end
-
-  def handle_call({:computer_history_purge_window, from_ts, to_ts, issued_at}, _from, state) do
-    reply =
-      with_connection(state, &ComputerHistorySql.purge_window(&1, from_ts, to_ts, issued_at))
-
     {:reply, reply, state}
   end
 
@@ -4664,40 +4572,6 @@ defmodule FermixCore.Memory.Repo do
 
   def handle_call(:computer_history_fetch_state, _from, state) do
     reply = with_connection(state, &ComputerHistorySql.fetch_state/1)
-    {:reply, reply, state}
-  end
-
-  def handle_call({:computer_history_claim_cycle, now, stale_after_ms}, _from, state) do
-    reply = with_connection(state, &ComputerHistorySql.claim_cycle(&1, now, stale_after_ms))
-    {:reply, reply, state}
-  end
-
-  def handle_call(
-        {:computer_history_write_cycle_result, last_id, memory, now, last_status, purge_mark},
-        _from,
-        state
-      ) do
-    reply =
-      with_connection(
-        state,
-        &ComputerHistorySql.write_cycle_result(&1, last_id, memory, now, last_status, purge_mark)
-      )
-
-    {:reply, reply, state}
-  end
-
-  def handle_call({:computer_history_set_paused_reason, reason}, _from, state) do
-    reply = with_connection(state, &ComputerHistorySql.set_paused_reason(&1, reason))
-    {:reply, reply, state}
-  end
-
-  def handle_call({:computer_history_set_pause_until, pause_until}, _from, state) do
-    reply = with_connection(state, &ComputerHistorySql.set_pause_until(&1, pause_until))
-    {:reply, reply, state}
-  end
-
-  def handle_call({:computer_history_release_claim, now}, _from, state) do
-    reply = with_connection(state, &ComputerHistorySql.release_claim(&1, now))
     {:reply, reply, state}
   end
 
@@ -5077,6 +4951,10 @@ defmodule FermixCore.Memory.Repo do
     {:reply, with_connection(state, &ChecklistsSql.handle(&1, request)), state}
   end
 
+  def handle_call({:trips, request}, _from, state) do
+    {:reply, with_connection(state, &TripsSql.handle(&1, request)), state}
+  end
+
   # Every request is served in order by this one process, so a call waits
   # behind every request ahead of it. A timed-out call exits its caller unless
   # the caller passed `on_timeout: :error` (`periodic_opts/2`).
@@ -5138,14 +5016,33 @@ defmodule FermixCore.Memory.Repo do
   defp request_name(request) when is_tuple(request), do: elem(request, 0)
   defp request_name(request) when is_atom(request), do: request
 
-  defp open_connection(false, _database_path), do: :disabled
+  # Where migration 59 carries a home's raw computer history (M97 §8.1): this
+  # machine's own store under the home, whether the home is an Always On
+  # server, whose leftovers are a move's and are never carried, and whether
+  # this system has a recorder at all: one with none keeps no store (nothing
+  # would ever sweep it), so it drops them too. Read only when memory.db holds
+  # something to carry. `:fermix_home`, `:history_spool_path`,
+  # `:history_server?` and `:history_recorder?` are a test's seams.
+  defp history_carry(opts) do
+    home = Keyword.get_lazy(opts, :fermix_home, &ConfigStore.fermix_home/0)
 
-  defp open_connection(true, database_path) do
+    %{
+      spool_path: Keyword.get_lazy(opts, :history_spool_path, fn -> Spool.path(home) end),
+      server?: Keyword.get_lazy(opts, :history_server?, fn -> Candidate.server?(home) end),
+      recorder?:
+        Keyword.get_lazy(opts, :history_recorder?, &FermixCore.ComputerHistory.recorder?/0)
+    }
+  end
+
+  defp open_connection(false, _database_path, _carry), do: :disabled
+
+  defp open_connection(true, database_path, carry) do
     with :ok <- ensure_database_dir(database_path),
          {:ok, conn} <- Sqlite3.open(database_path, sqlite_open_opts(@sqlite_open_intent)),
          :ok <- configure_connection(conn),
-         :ok <- run_migrations(conn) do
+         :ok <- run_migrations(conn, carry) do
       :ok = sweep_removed_checklists(conn)
+      :ok = sweep_removed_trips(conn)
       {:ok, conn}
     end
   end
@@ -5173,7 +5070,7 @@ defmodule FermixCore.Memory.Repo do
   defp with_connection(%{enabled: false}, _fun), do: {:error, :disabled}
   defp with_connection(%{conn: conn}, fun), do: fun.(conn)
 
-  defp run_migrations(conn) do
+  defp run_migrations(conn, carry) do
     with :ok <- ensure_schema_migrations_table(conn),
          {:ok, versions} <- migration_versions_for_conn(conn),
          :ok <- apply_base_migration(conn, versions),
@@ -5231,10 +5128,272 @@ defmodule FermixCore.Memory.Repo do
          :ok <- apply_cue_delivery_window_index_migration(conn, versions),
          :ok <- apply_checklists_migration(conn, versions),
          :ok <- apply_checklist_edits_migration(conn, versions),
-         :ok <- apply_follow_up_always_allow_migration(conn, versions) do
+         :ok <- apply_follow_up_always_allow_migration(conn, versions),
+         :ok <- apply_computer_history_machines_migration(conn, versions, carry),
+         :ok <- apply_computer_history_reports_migration(conn, versions),
+         :ok <- apply_computer_history_home_migration(conn, versions),
+         :ok <- apply_checklist_edit_kinds_migration(conn, versions),
+         :ok <- apply_trips_migration(conn, versions),
+         :ok <- apply_trip_near_migration(conn, versions),
+         :ok <- apply_trip_waits_migration(conn, versions),
+         :ok <- apply_trip_towns_migration(conn, versions) do
       :ok
     end
   end
+
+  # M89: the town each trip near in force names, by its words, beside its
+  # trip in a table of their own, with the version in one transaction, after
+  # 65. Nothing is rewritten: a near from before has no town until the next
+  # call or placer run asks it.
+  defp apply_trip_towns_migration(conn, versions) do
+    if Enum.member?(versions, @trip_towns_migration_version) do
+      :ok
+    else
+      Sqlite3.execute(
+        conn,
+        """
+        BEGIN;
+        #{TripsSql.towns_schema_sql()}
+        INSERT INTO schema_migrations(version) VALUES (#{@trip_towns_migration_version});
+        COMMIT;
+        """
+      )
+    end
+  end
+
+  # M89 D13 B: the place words a stop waits to be looked up by, beside it in
+  # a table of their own, with the version in one transaction, after 64.
+  # Nothing is rewritten: a stop from before waits for nothing.
+  defp apply_trip_waits_migration(conn, versions) do
+    if Enum.member?(versions, @trip_waits_migration_version) do
+      :ok
+    else
+      Sqlite3.execute(
+        conn,
+        """
+        BEGIN;
+        #{TripsSql.waits_schema_sql()}
+        INSERT INTO schema_migrations(version) VALUES (#{@trip_waits_migration_version});
+        COMMIT;
+        """
+      )
+    end
+  end
+
+  # M89 D10: where a trip, or one of its days, is searched near, a nullable
+  # column on each trip table, with the version in one transaction, after 63,
+  # which made the tables. Nothing is rewritten: a trip from before has none.
+  # Reapplying it changes nothing: a column is added only while its table holds
+  # 63's columns, and a table that holds neither set is refused.
+  defp apply_trip_near_migration(conn, versions) do
+    if Enum.member?(versions, @trip_near_migration_version) do
+      :ok
+    else
+      with :ok <- Sqlite3.execute(conn, "BEGIN;") do
+        conn |> trip_near_step() |> commit_migration(conn)
+      end
+    end
+  end
+
+  defp trip_near_step(conn) do
+    added =
+      Enum.reduce_while(TripsSql.near_columns(), :ok, fn {table, columns}, :ok ->
+        case add_columns(conn, table, columns) do
+          :ok -> {:cont, :ok}
+          {:error, reason} -> {:halt, {:error, reason}}
+        end
+      end)
+
+    with :ok <- added do
+      Sqlite3.execute(
+        conn,
+        "INSERT INTO schema_migrations(version) VALUES (#{@trip_near_migration_version});"
+      )
+    end
+  end
+
+  # The owner's trips (M89 §05), their two tables and version in one
+  # transaction, after 62. Nothing is rewritten: a store from before has no
+  # trips.
+  defp apply_trips_migration(conn, versions) do
+    if Enum.member?(versions, @trips_migration_version) do
+      :ok
+    else
+      Sqlite3.execute(
+        conn,
+        """
+        BEGIN;
+        #{TripsSql.schema_sql()}
+        INSERT INTO schema_migrations(version) VALUES (#{@trips_migration_version});
+        COMMIT;
+        """
+      )
+    end
+  end
+
+  # M89 §07: a device edit's receipt names the kind of kept thing it changed,
+  # the lists' for every receipt from before, with the version in one
+  # transaction. It runs after 57, which made the table. Reapplying it changes
+  # nothing: the column is added only while the table holds 57's columns, and
+  # a table that holds neither set is refused.
+  defp apply_checklist_edit_kinds_migration(conn, versions) do
+    if Enum.member?(versions, @checklist_edit_kinds_migration_version) do
+      :ok
+    else
+      with :ok <- Sqlite3.execute(conn, "BEGIN;") do
+        conn |> edit_kinds_step() |> commit_migration(conn)
+      end
+    end
+  end
+
+  defp edit_kinds_step(conn) do
+    with :ok <- add_columns(conn, "checklist_edits", KeptSql.receipt_kinds_columns()) do
+      Sqlite3.execute(
+        conn,
+        "INSERT INTO schema_migrations(version) " <>
+          "VALUES (#{@checklist_edit_kinds_migration_version});"
+      )
+    end
+  end
+
+  # M97 §8.5: the home's store gets its own token, made once at random, in one
+  # transaction with the version.
+  defp apply_computer_history_home_migration(conn, versions) do
+    if Enum.member?(versions, @computer_history_home_migration_version) do
+      :ok
+    else
+      with :ok <- Sqlite3.execute(conn, "BEGIN;") do
+        conn |> home_step() |> commit_migration(conn)
+      end
+    end
+  end
+
+  defp home_step(conn) do
+    with :ok <- ComputerHistorySql.home_schema(conn) do
+      Sqlite3.execute(
+        conn,
+        "INSERT INTO schema_migrations(version) " <>
+          "VALUES (#{@computer_history_home_migration_version});"
+      )
+    end
+  end
+
+  # M97 §8.5: each machine's row on the home gains the owner's pending request
+  # from chat that its history go off, and its last report of its recorder, in
+  # one transaction with the version. Nothing is rewritten.
+  defp apply_computer_history_reports_migration(conn, versions) do
+    if Enum.member?(versions, @computer_history_reports_migration_version) do
+      :ok
+    else
+      with :ok <- Sqlite3.execute(conn, "BEGIN;") do
+        conn |> reports_step() |> commit_migration(conn)
+      end
+    end
+  end
+
+  defp reports_step(conn) do
+    with :ok <- ComputerHistorySql.reports_schema(conn) do
+      Sqlite3.execute(
+        conn,
+        "INSERT INTO schema_migrations(version) " <>
+          "VALUES (#{@computer_history_reports_migration_version});"
+      )
+    end
+  end
+
+  # M97 §8.1, §8.4: the raw spool leaves memory.db for this machine's own store,
+  # and the home's notes, reads and purges name their machine. Two steps, each
+  # its own transaction, so a boot stopped between them does the first again
+  # (`INSERT OR IGNORE` under the events' own ids changes nothing twice) and a
+  # boot stopped inside either finds it undone: the carry into the machine's
+  # store commits first, and only then does memory.db lose its raw table and
+  # record the version. A home that holds nothing to carry, and an Always On
+  # server, whose leftovers a move wrote, carry nothing.
+  defp apply_computer_history_machines_migration(conn, versions, carry) do
+    if Enum.member?(versions, @computer_history_machines_migration_version) do
+      :ok
+    else
+      with :ok <- carry_history(conn, carry), :ok <- Sqlite3.execute(conn, "BEGIN") do
+        conn
+        |> machines_step()
+        |> settle_machines_step(conn)
+      end
+    end
+  end
+
+  defp machines_step(conn) do
+    with :ok <- ComputerHistorySql.machines_schema(conn) do
+      Sqlite3.execute(
+        conn,
+        "INSERT INTO schema_migrations(version) " <>
+          "VALUES (#{@computer_history_machines_migration_version})"
+      )
+    end
+  end
+
+  defp settle_machines_step(:ok, conn), do: Sqlite3.execute(conn, "COMMIT")
+
+  defp settle_machines_step({:error, reason}, conn) do
+    _ = Sqlite3.execute(conn, "ROLLBACK")
+    {:error, {:computer_history_machines, reason}}
+  end
+
+  defp carry_history(conn, carry) do
+    case ComputerHistorySql.spool_carry?(conn) do
+      {:ok, false} -> :ok
+      {:ok, true} -> carry_to(conn, carry)
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp carry_to(_conn, %{server?: true}) do
+    Logger.info(
+      "computer history: this server's memory.db held a move's leftover spool rows; " <>
+        "they are dropped, not carried"
+    )
+
+    :ok
+  end
+
+  defp carry_to(_conn, %{recorder?: false}) do
+    Logger.info(
+      "computer history: memory.db held raw history rows, and this system has no recorder " <>
+        "to keep a store for them; they are dropped, not carried"
+    )
+
+    :ok
+  end
+
+  defp carry_to(conn, %{spool_path: path}) do
+    with {:ok, spool} <- Spool.open(path),
+         :ok <- Sqlite3.close(spool),
+         :ok <- Sqlite3.execute(conn, "ATTACH DATABASE #{sql_literal(path)} AS spool") do
+      carried = carry_in_transaction(conn)
+      detached = Sqlite3.execute(conn, "DETACH DATABASE spool")
+      carried_and_detached(carried, detached, path)
+    end
+  end
+
+  defp carry_in_transaction(conn) do
+    case Sqlite3.execute(conn, "BEGIN; #{ComputerHistorySql.spool_carry_sql()} COMMIT;") do
+      :ok ->
+        :ok
+
+      {:error, reason} ->
+        _ = Sqlite3.execute(conn, "ROLLBACK")
+        {:error, {:history_carry, reason}}
+    end
+  end
+
+  defp carried_and_detached(:ok, :ok, path) do
+    Logger.info("computer history: the raw spool moved from memory.db to #{path}")
+    :ok
+  end
+
+  defp carried_and_detached({:error, _reason} = error, _detached, _path), do: error
+  defp carried_and_detached(:ok, {:error, reason}, _path), do: {:error, {:history_carry, reason}}
+
+  defp sql_literal(text), do: "'" <> String.replace(text, "'", "''") <> "'"
 
   # The edits the owner's devices sent (M85 §07), kept by `client_msg_id` so
   # one sent again changes nothing, with its version in one transaction.
@@ -5282,6 +5441,19 @@ defmodule FermixCore.Memory.Repo do
 
       {:error, reason} ->
         Logger.error("memory: removed lists could not be swept: #{inspect(reason)}")
+    end
+  end
+
+  # Trips removed more than 30 days ago go when the store opens, beside the
+  # lists' sweep and as it does: a sweep that fails is logged and the store
+  # opens, and what it would have deleted waits for the next.
+  defp sweep_removed_trips(conn) do
+    case TripsSql.handle(conn, {:purge_removed_trips, DateTime.utc_now()}) do
+      {:ok, _deleted} ->
+        :ok
+
+      {:error, reason} ->
+        Logger.error("memory: removed trips could not be swept: #{inspect(reason)}")
     end
   end
 

@@ -41,6 +41,7 @@ defmodule FermixCore.Delivery.OwnerInbox do
 
   alias FermixCore.Config
   alias FermixCore.Delivery.ChannelSend
+  alias FermixCore.IMessage
 
   # All owner-capable channels, in the order owner identity is read.
   @owner_channel_order [:telegram, :discord, :signal, :slack, :whatsapp, :imessage]
@@ -113,6 +114,47 @@ defmodule FermixCore.Delivery.OwnerInbox do
     case configured_inbox(opts, owners) do
       {:ok, inbox} -> {:ok, inbox}
       :skip -> first_candidate(candidates(owners))
+    end
+  end
+
+  @doc """
+  The owner's inbox for a prompt that waits on the owner's answer (an
+  approval, a proposal's Run or Skip): `resolve/1`'s precedence, except that
+  iMessage carried by a computer (M97 §6.4, §14) comes after every inbox
+  that lives on this engine, configured or derived, and is never chosen
+  while that computer is asleep or offline, nor while no computer or more
+  than one carries it: a sleeping Mac is no inbox for a prompt that waits.
+  iMessage on this Mac keeps its place.
+
+  Seams as `resolve/1`, and `:imessage_carrier` (`FermixCore.IMessage.carrier/1`'s
+  answer), read only when an iMessage inbox is among the candidates.
+  """
+  @spec for_approval(keyword()) :: {:ok, inbox()} | :no_delivery_target
+  def for_approval(opts \\ []) when is_list(opts) do
+    owners = owners(opts)
+
+    configured =
+      case configured_inbox(opts, owners) do
+        {:ok, inbox} -> [inbox]
+        :skip -> []
+      end
+
+    inboxes = Enum.uniq(configured ++ candidates(owners))
+
+    reach =
+      if Enum.any?(inboxes, &(&1.platform == "imessage")), do: imessage_reach(opts), else: :here
+
+    inboxes
+    |> Enum.reject(&(&1.platform == "imessage" and reach == :unreachable))
+    |> Enum.sort_by(&(&1.platform == "imessage" and reach == :carried))
+    |> first_candidate()
+  end
+
+  defp imessage_reach(opts) do
+    case Keyword.get_lazy(opts, :imessage_carrier, &IMessage.carrier/0) do
+      :here -> :here
+      {:computer, %{connected: true}} -> :carried
+      _away_conflicting_or_none -> :unreachable
     end
   end
 

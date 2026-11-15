@@ -262,7 +262,20 @@ defmodule FermixOpik.Mapper do
             # closed enum and an opaque id; the request the model sent is
             # content and is never a field.
             :status,
-            :task_id
+            :task_id,
+            # An invocation on a linked computer (M97 §6.2): the computer's
+            # device id, the invocation's id, how it ended and why the computer
+            # refused it. Its run is a root on the computer's own trace, so
+            # these are the only link from the turn to it. Two ids and two
+            # closed words (atoms live, strings after replay); the target and
+            # the arguments are content and never a field. A call the home
+            # refused before sending anything (`Computers.Choice`) carries
+            # `computer_refusal`, a closed word.
+            :computer,
+            :invocation,
+            :invoke_status,
+            :refusal,
+            :computer_refusal
           ])
         )
     }
@@ -328,8 +341,50 @@ defmodule FermixOpik.Mapper do
           model: Map.get(metadata, :model),
           voice: Map.get(metadata, :voice),
           reason: Map.get(metadata, :reason),
-          attempt: Map.get(metadata, :attempt)
+          attempt: Map.get(metadata, :attempt),
+          # A `session_updated` whose instructions went without the owner's
+          # lists' and trips' lines, or kept the last ones, and why.
+          kept_lines: Map.get(metadata, :kept_lines),
+          kept_lines_reason: Map.get(metadata, :kept_lines_reason)
         })
+    }
+    |> drop_nil()
+  end
+
+  @doc """
+  Build the span of one accessory call's link counters from
+  `[:fermix, :accessory, :call_link]` (M91): the call's endpoint, engine,
+  source and why it ended, and the link's counters
+  (`FermixCore.Accessories.Telemetry.call_counters/0`). Counts and closed
+  words only; the event carries no audio, transcript or tool name. The
+  emitter refuses any measurement outside its closed counter list, so every
+  measurement here is one of those counters: they are carried as they came,
+  integers only. Its extent is the call's, from `duration_ms`.
+  """
+  @spec accessory_call_link_span(map(), map(), keyword()) :: map()
+  def accessory_call_link_span(metadata, measurements, opts) do
+    ended = Keyword.fetch!(opts, :ended)
+    started = start_of(ended, Map.get(measurements, :duration_ms, 0))
+
+    %{
+      id: new_id(started),
+      trace_id: Keyword.fetch!(opts, :trace_id),
+      parent_span_id: Keyword.get(opts, :parent_span_id),
+      project_name: Keyword.fetch!(opts, :project_name),
+      name: "accessory:call_link",
+      type: "general",
+      start_time: iso(started),
+      end_time: iso(ended),
+      metadata:
+        Map.merge(
+          drop_nil(%{
+            endpoint: Map.get(metadata, :endpoint),
+            engine: Map.get(metadata, :engine),
+            source: stringify(Map.get(metadata, :source)),
+            reason: stringify(Map.get(metadata, :reason))
+          }),
+          Map.filter(measurements, fn {_name, count} -> is_integer(count) and count >= 0 end)
+        )
     }
     |> drop_nil()
   end
@@ -367,6 +422,7 @@ defmodule FermixOpik.Mapper do
       metadata:
         drop_nil(%{
           device_id: Map.get(metadata, :device_id),
+          endpoint: Map.get(metadata, :endpoint),
           # Both task engines share this run kind and these phases (M70 §09):
           # the engine and the voice provider are what tell a Grok call from a
           # GPT Live one on every span, not only on the root.
@@ -494,6 +550,58 @@ defmodule FermixOpik.Mapper do
   end
 
   @doc """
+  The root fields of one invocation's run on a computer, from a
+  `[:fermix, :computer_invocation, :start | :complete | :error]` event (M97
+  §6.2): its metadata, its terminal word and, on `:error` alone, its
+  `error_info`. `Aggregation` opens the root with the metadata and closes it
+  with all three.
+
+  The key list mirrors the emitter's allowlist exactly
+  (`FermixCore.Computers.Telemetry`). `session_id` names the root and is not
+  repeated; `parent_session` is the server turn that asked, correlation only.
+  A bookend adds its `duration_ms` and `result_bytes`; the opener's
+  `duration_ms` is a placeholder zero and never exports. The words are read
+  alike as atoms (live) or strings (replayed), and nothing an invocation acted
+  on or answered is in any of them.
+  """
+  @spec computer_invocation_root(:start | :complete | :error, map(), map()) :: %{
+          metadata: map(),
+          status: String.t() | nil,
+          error_info: map() | nil
+        }
+  def computer_invocation_root(verb, metadata, measurements)
+      when verb in [:start, :complete, :error] and is_map(metadata) and is_map(measurements) do
+    counts =
+      if verb == :start, do: %{}, else: Map.take(measurements, [:duration_ms, :result_bytes])
+
+    status = stringify(Map.get(metadata, :status))
+
+    labels =
+      drop_nil(%{
+        parent_session: Map.get(metadata, :parent_session),
+        capability: Map.get(metadata, :capability),
+        op: Map.get(metadata, :op),
+        origin: stringify(Map.get(metadata, :origin)),
+        epoch: Map.get(metadata, :epoch),
+        refusal: stringify(Map.get(metadata, :refusal))
+      })
+
+    %{
+      metadata: Map.merge(labels, counts),
+      status: status,
+      error_info: invocation_error(verb, status)
+    }
+  end
+
+  # `failed`, `timed_out` and `unknown` close with `:error`; the status word is
+  # the whole diagnosis the event carries, and the event name alone says it
+  # failed when a row lost its word.
+  defp invocation_error(:error, status),
+    do: %{exception_type: "ComputerInvocationError", message: status || "error"}
+
+  defp invocation_error(_verb, _status), do: nil
+
+  @doc """
   Build a point span from a `[:fermix, :timeout, :expired]` event — a failure
   deadline that fired. `error_info` flags it so the span surfaces as errored, not
   silently green; the timeout `name` rides in the event metadata (the event name
@@ -608,6 +716,73 @@ defmodule FermixOpik.Mapper do
          })
 
   defp maybe_checklist_failure(span, _metadata), do: span
+
+  @doc """
+  Build a point span from a `[:fermix, :trip, :read | :edit]` event — one
+  read or one edit of the owner's trips (M89), lasting the store's
+  transaction, with what the edit's place lookups did and what stopped them
+  (`stop_reason`, and `stop_code`, the place search's own code), and what its
+  towns did (M89: `towns`, `towns_found`, `towns_not_found` and
+  `towns_stop_reason`). Counts,
+  Fermix's own words and the provider's codes only: a title, a stop's words, a
+  place and a coordinate never ride. A
+  refused or failed call is flagged errored with its tag. `session_id` places
+  the span and is not repeated in its metadata.
+  """
+  @spec trip_span(:read | :edit, map(), map(), keyword()) :: map()
+  def trip_span(kind, metadata, measurements, opts) when kind in [:read, :edit] do
+    ended = Keyword.fetch!(opts, :ended)
+    started = start_of(ended, div(Map.get(measurements, :duration_us, 0), 1000))
+
+    %{
+      id: new_id(started),
+      trace_id: Keyword.fetch!(opts, :trace_id),
+      parent_span_id: Keyword.get(opts, :parent_span_id),
+      project_name: Keyword.fetch!(opts, :project_name),
+      name: "trip_#{kind}",
+      type: "general",
+      start_time: iso(started),
+      end_time: iso(ended),
+      metadata:
+        measurements
+        |> Map.take([
+          :trips,
+          :ops,
+          :lookups,
+          :placed,
+          :offered,
+          :not_found,
+          :not_looked_up,
+          :towns,
+          :towns_found,
+          :towns_not_found,
+          :duration_us
+        ])
+        |> Map.merge(%{
+          scope: stringify(Map.get(metadata, :scope)),
+          made_via: stringify(Map.get(metadata, :made_via)),
+          outcome: stringify(Map.get(metadata, :outcome)),
+          backend: Map.get(metadata, :backend),
+          rate_limited: Map.get(metadata, :rate_limited),
+          stop_reason: stringify(Map.get(metadata, :stop_reason)),
+          stop_code: Map.get(metadata, :stop_code),
+          towns_stop_reason: stringify(Map.get(metadata, :towns_stop_reason))
+        })
+        |> drop_nil()
+    }
+    |> maybe_trip_failure(metadata)
+    |> drop_nil()
+  end
+
+  defp maybe_trip_failure(span, %{outcome: outcome} = metadata)
+       when outcome in [:refused, :failed],
+       do:
+         Map.put(span, :error_info, %{
+           exception_type: "Trip" <> String.capitalize(Atom.to_string(outcome)),
+           message: to_string(Map.get(metadata, :error_code) || outcome)
+         })
+
+  defp maybe_trip_failure(span, _metadata), do: span
 
   @doc """
   Build a point span from a `[:fermix, :agent_loop, :context_compaction]` event

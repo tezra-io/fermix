@@ -5,6 +5,7 @@ defmodule FermixChannels.Mobile.SessionTest do
   use ExUnit.Case, async: true
 
   alias FermixChannels.Mobile.Identity
+  alias FermixChannels.Mobile.Protocol
   alias FermixChannels.Mobile.Session
   alias FermixCore.Home.Epoch
   alias FermixTestSupport.SafeRm
@@ -196,6 +197,217 @@ defmodule FermixChannels.Mobile.SessionTest do
     refute_received :socket_attached
   end
 
+  # M87: a phone's hello_ack says whether this primary serves its calls; a
+  # desktop's voice is its own computer's, so its hello_ack says nothing.
+  # M97 §9.2: a computer calls its server on the phone's channel, so its
+  # hello_ack says whether the server serves its call, for its endpoint, and
+  # that it takes the call channel and the upload from a computer.
+  test "a phone's hello_ack and a desktop's carry caps.call, each for its endpoint" do
+    served = %{"available" => true, "min_version" => 2, "max_version" => 3, "camera" => false}
+    computer = Map.put(served, "camera", false)
+
+    caps = fn
+      {:phone, "paired-device"} -> served
+      {:computer, "paired-device"} -> computer
+    end
+
+    assert {:push, [ack], _ready} =
+             Session.handle_frame(
+               hello_frame(%{}),
+               hello_state(primary_epoch: 3, call_caps: caps)
+             )
+
+    assert header(ack)["caps"]["call"] == served
+
+    desktop =
+      hello_state(
+        primary_epoch: 3,
+        call_caps: caps,
+        peer_kind: :desktop,
+        start_desktop_peer: fn _opts -> {:ok, spawn(fn -> :ok end)} end,
+        record_engine_version: fn _id, _version, _at -> :ok end
+      )
+
+    assert {:push, [ack], _ready} = Session.handle_frame(hello_frame(%{}), desktop)
+    assert header(ack)["caps"]["call"] == computer
+    assert %{"call" => true, "attach" => true} = header(ack)["caps"]["computer"]
+  end
+
+  # M97 §3.4: the hello's window runs both ways. A hello that names the oldest
+  # version its sender speaks is served the newest version both windows hold:
+  # its hello_ack's `v` says which, and every later frame carries it.
+  test "a hello naming its oldest is served the newest both windows hold, from then on" do
+    {_oldest, newest} = Protocol.supported_version_range()
+    ahead = newest + 1
+
+    for state <- [desktop_hello_state(), hello_state(primary_epoch: 3)] do
+      hello = hello_frame(%{"v" => ahead, "protocol_v" => ahead, "min_protocol_v" => newest})
+
+      assert {:push, [ack], ready} = Session.handle_frame(hello, ready_socket(state))
+      assert %{"t" => "hello_ack", "v" => ^newest} = header(ack)
+      assert ready.negotiated_version == newest
+
+      assert {:ok, ready} = Session.handle_frame(frame(newest, "ping", 2), ready)
+      assert_received {:device_event_sent, %{"t" => "pong"} = pong}
+      assert {:push, [pong], ready} = Session.handle_info({:mobile_event, pong}, ready)
+      assert %{"t" => "pong", "v" => ^newest, "seq" => 2} = header(pong)
+
+      assert {:stop, {:unsupported_protocol_version, :client_too_new, ^ahead},
+              {1002, "mobile protocol error"}, _stopped} =
+               Session.handle_frame(frame(ahead, "ping", 3), ready)
+    end
+  end
+
+  # An engine whose hello names no oldest version (one from before the rule)
+  # reads its hello_ack's window as its own window: a computer is told the
+  # versions both engines speak, so such an engine is told its own alone. A
+  # phone reads the window as the versions it may speak, and is told this
+  # server's whatever its hello names.
+  test "a computer's hello_ack names the versions both engines speak; a phone's this server's" do
+    {oldest, newest} = Protocol.supported_version_range()
+
+    for {fields, served, shared} <- [
+          {%{"v" => oldest, "protocol_v" => oldest}, oldest, {oldest, oldest}},
+          {%{"v" => newest, "protocol_v" => newest}, newest, {newest, newest}},
+          {%{"v" => newest, "protocol_v" => newest, "min_protocol_v" => oldest}, newest,
+           {oldest, newest}},
+          {%{"v" => newest + 1, "protocol_v" => newest + 1, "min_protocol_v" => newest}, newest,
+           {newest, newest}}
+        ] do
+      assert {:push, [ack], _ready} =
+               Session.handle_frame(hello_frame(fields), desktop_hello_state())
+
+      assert %{"v" => ^served} = header(ack)
+      assert {header(ack)["min_version"], header(ack)["max_version"]} == shared, inspect(fields)
+
+      assert {:push, [ack], _ready} =
+               Session.handle_frame(hello_frame(fields), hello_state(primary_epoch: 3))
+
+      assert %{"v" => ^served, "min_version" => ^oldest, "max_version" => ^newest} = header(ack)
+    end
+  end
+
+  # A copy of the home the phone has seen move on holds a call it cannot
+  # resume: it ends at once.
+  test "a stale primary ends the phone's call here" do
+    test_pid = self()
+
+    end_call = fn device_id, message ->
+      send(test_pid, {:call_ended, device_id, message})
+      :ok
+    end
+
+    state = hello_state(primary_epoch: 3, end_call: end_call)
+
+    assert {:stop, :stale_primary, _close, _frames, _state} =
+             Session.handle_frame(hello_frame(%{"primary_epoch" => 4}), state)
+
+    assert_received {:call_ended, "paired-device", {:call_end, :stale_primary}}
+  end
+
+  # The media a phone in a call is pushed waits, bounded: a run past the bound
+  # is dropped whole (the phone fetches it by its ref after the call), and the
+  # rest goes after the call's close.
+  @tag :capture_log
+  test "media pushed during a call waits for its close, a run past the bound dropped whole" do
+    {:push, _ack, ready} = Session.handle_frame(hello_frame(%{}), hello_state(primary_epoch: 3))
+    call = spawn(fn -> Process.sleep(:infinity) end)
+
+    attached = %{
+      "t" => "call_attached",
+      "call_id" => "c1",
+      "resumed" => false,
+      "muted" => false,
+      "camera" => false,
+      "control_seq" => 0
+    }
+
+    assert {:push, [frame], ready} =
+             Session.handle_info({:mobile_call, call, :control, attached}, ready)
+
+    assert header(frame)["t"] == "call_attached"
+    chunk = :binary.copy(<<7>>, 61_440)
+
+    ready =
+      Enum.reduce(media_run("big", 560, chunk) ++ media_run("small", 1, "x"), ready, fn event,
+                                                                                        ready ->
+        assert {:ok, ready} = Session.handle_info({:mobile_event, event}, ready)
+        ready
+      end)
+
+    assert {:push, [text], ready} =
+             Session.handle_info(
+               {:mobile_event, %{"t" => "notice", "kind" => "k", "text" => "t"}},
+               ready
+             )
+
+    assert header(text)["t"] == "notice"
+    close = %{"t" => "call_close", "call_id" => "c1", "reason" => "ended"}
+
+    assert {:push, frames, _ready} =
+             Session.handle_info({:mobile_call, call, :control, close}, ready)
+
+    assert Enum.map(frames, &{header(&1)["t"], header(&1)["ref"]}) == [
+             {"call_close", nil},
+             {"media_begin", "small"},
+             {"media_chunk", "small"},
+             {"media_end", "small"}
+           ]
+
+    Process.exit(call, :kill)
+  end
+
+  test "a call that ends without its close is closed ended, then the media it held goes" do
+    {:push, _ack, ready} = Session.handle_frame(hello_frame(%{}), hello_state(primary_epoch: 3))
+    call = spawn(fn -> Process.sleep(:infinity) end)
+
+    attached = %{
+      "t" => "call_attached",
+      "call_id" => "c1",
+      "resumed" => false,
+      "muted" => false,
+      "camera" => false,
+      "control_seq" => 0
+    }
+
+    {:push, _frames, ready} = Session.handle_info({:mobile_call, call, :control, attached}, ready)
+    [begin | _rest] = media_run("small", 1, "x")
+    assert {:ok, ready} = Session.handle_info({:mobile_event, begin}, ready)
+
+    ref = Process.monitor(call)
+    Process.exit(call, :kill)
+    assert_receive {:DOWN, ^ref, :process, ^call, :killed}
+    assert_receive {:DOWN, hold, :process, ^call, :killed}
+    assert hold == ready.call_hold.ref
+
+    assert {:push, [close, frame], _ready} =
+             Session.handle_info({:DOWN, hold, :process, call, :killed}, ready)
+
+    assert Map.take(header(close), ~w(t call_id reason)) ==
+             %{"t" => "call_close", "call_id" => "c1", "reason" => "ended"}
+
+    assert header(frame)["t"] == "media_begin"
+  end
+
+  defp media_run(ref, chunks, bytes) do
+    begin = %{
+      "t" => "media_begin",
+      "ref" => ref,
+      "server_seq" => 9,
+      "kind" => "file",
+      "mime" => "application/octet-stream",
+      "size_bytes" => 1,
+      "sha256" => String.duplicate("a", 64)
+    }
+
+    chunk_events =
+      for index <- 0..(chunks - 1),
+          do: %{"t" => "media_chunk", "ref" => ref, "index" => index, "bytes" => bytes}
+
+    [begin] ++
+      chunk_events ++ [%{"t" => "media_end", "ref" => ref, "sha256" => String.duplicate("a", 64)}]
+  end
+
   test "pair_approved gives a newly paired phone the daemon's primary epoch" do
     {:ok, state} =
       Session.init(%{
@@ -272,6 +484,36 @@ defmodule FermixChannels.Mobile.SessionTest do
       |> Map.merge(fields)
       |> Jason.encode!()
 
+    <<byte_size(json)::32, json::binary>>
+  end
+
+  # A desktop's session at `hello`, its peer stood in for.
+  defp desktop_hello_state do
+    hello_state(
+      primary_epoch: 3,
+      peer_kind: :desktop,
+      start_desktop_peer: fn _opts -> {:ok, spawn(fn -> :ok end)} end,
+      record_engine_version: fn _id, _version, _at -> :ok end
+    )
+  end
+
+  # A ready session's socket stays the device's own, and what the registry
+  # would push to it is reported.
+  defp ready_socket(state) do
+    test_pid = self()
+
+    %{
+      state
+      | authorize_socket: fn :registry, "paired-device", _pid -> :ok end,
+        send_device_event: fn :registry, "paired-device", event ->
+          send(test_pid, {:device_event_sent, event})
+          :ok
+        end
+    }
+  end
+
+  defp frame(version, type, seq) do
+    json = Jason.encode!(%{"v" => version, "t" => type, "seq" => seq})
     <<byte_size(json)::32, json::binary>>
   end
 

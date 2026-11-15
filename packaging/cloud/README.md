@@ -8,13 +8,18 @@ script, two modes:
   enabled, as Debian 13 and Ubuntu 24.04 have by default. Debian 12's own 6.1
   gives ABI 2, so a stock Debian 12 is refused, and one on a 6.2 or later
   kernel is not:
-  `curl -fsSL https://fermix.ai/always-on | sudo sh`, which serves
-  `first-boot.sh` byte for byte and asks for the code without echo. Cloud-init
-  user data can run it with the code in `FERMIX_ENROLL_CODE` instead.
+  `curl -fsSL https://fermix.ai/install | sudo sh -s -- --always-on`. The
+  regular installer's `--always-on` downloads the release's copy of
+  `first-boot.sh` (every release publishes it byte for byte, signed, as
+  `fermix_always_on.sh`), refuses it unless its sha256 is the one
+  `https://fermix.ai/install/releases` lists, as it does a package, and runs
+  it with `--version` naming that release and every other option passed on
+  unread; it asks for the code without echo. Cloud-init user data can run it
+  with the code in `FERMIX_ENROLL_CODE` instead.
   `--version X` names the release to install: the one the computer that sets
-  the server up runs, which Always On's own-server command and the cloud-init
-  of a server Fermix creates both pass, so the home can always move back
-  there; without it, the latest.
+  the server up runs, which Always On's command for the server passes, so the
+  home can always move back there; without it, the latest. `--tailscale`
+  joins the server to the owner's tailnet before it enrolls (below).
 - **Enroll** (the default) makes the server a candidate the primary moves
   to. **Restore** (`--restore`) takes no code and enrolls nothing: it prepares
   the same hardened server and prints the exact steps that restore the newest
@@ -23,7 +28,7 @@ script, two modes:
 | File | What it is |
 |---|---|
 | `first-boot.sh` | The root first boot. POSIX `sh`, run once, safe to run again. |
-| `test/first_boot_test.sh` | shellcheck, then the script in throwaway `debian:trixie-slim` containers, one per scenario. |
+| `test/first_boot_test.sh` | shellcheck, then the script's own main on this host (`test/on_host.sh`), then the script in throwaway `debian:trixie-slim` containers (`test/in_container.sh`), one per scenario. |
 
 ## What the first boot does
 
@@ -36,10 +41,64 @@ from ABI 3, and below it the engine installs and runs but refuses every
 command. The ABI is the kernel's own answer to `landlock_create_ruleset`'s
 version query (syscall 444 on both architectures), asked through `perl`
 (`perl-base` is essential on Debian and Ubuntu); a kernel built without
-Landlock, or booted without it in its `lsm=` list, answers none.
+Landlock, or booted without it in its `lsm=` list, answers none. It refuses
+just as early a Tailscale auth key in `TS_AUTHKEY` without `--tailscale`, and,
+with it, a key that is not one (below) or no key without a terminal. The
+enrollment code and the key are both read and checked before either is
+written.
+
+A host whose Fermix home `/home/fermix/.fermix` exists already, a run again,
+is read first, still before anything is installed: `fermix home status
+--json` as `fermix` (it answers with Fermix running or not) gives the home's
+`role` and, on a candidate, its move's `phase`.
+
+- A candidate that has not begun to receive its move (`enrolling`,
+  `failed` or `expired`: the code ran out before the computer was reached,
+  it was used elsewhere or cancelled, or no move came within 24 hours; or
+  `enrolled`, waiting for a move the owner gave up on, as when the computer
+  forgot this server) enrolls again with a new code, read like a first one:
+  Fermix is stopped (`fermix service uninstall` as `fermix`, since the
+  candidate is replaced only while no engine runs in the home), enrolled
+  with the new code, started and waited for. The code this server enrolled
+  with is refused while it enrolls or waits for its move ("This server
+  enrolled with this code already and waits for its move…"), since its
+  replacement would be refused as used. A refused enrollment (that code, or
+  one past its thirty minutes) changes nothing in the home, so the service
+  is started again with the enrollment the server had, once, and the run
+  fails with "fermix home enroll stopped, so this server keeps the
+  enrollment it had and runs again; its message above says why." (or, when
+  that start fails too, one sentence that says so).
+- A home that runs (the primary, or a candidate receiving its move) is bound
+  and started as it is, and the run ends with "Done. Fermix runs from the
+  home it already had.", then the sentence below, which says what the home
+  is and the commands that remove it: a run at a terminal asks no code of a
+  home that runs, so this is how an owner reusing the server (after Restore
+  here, say) learns the way to set it up again. Given a code, it is refused
+  with that sentence.
+- Any other home (a retired copy a move left, naming where Fermix moved; a
+  desktop of another primary; a candidate whose move cannot be read) is
+  refused, and so is a candidate that has not received its move under
+  `--restore`.
+
+Each refusal is one sentence that says what the home is and the commands
+that remove it, should the owner want the server set up again (`sudo -H -u
+fermix env -C / XDG_RUNTIME_DIR=/run/user/<uid> /usr/bin/fermix service
+uninstall`, then `sudo rm -rf /home/fermix/.fermix`, then the command
+again). A home `fermix home status` cannot read is refused with its
+sentence and no such commands, since what it holds is not known: `sudo -H
+-u fermix env -C / /usr/bin/fermix home status` shows why. The script itself
+never removes a home. Every `fermix` command it gives the owner runs from
+`/` (`env -C /`): the account `fermix` cannot open the directory an owner
+logs in to (`/home/admin` is 0700 on Debian 13), and `fermix` refuses to
+start in a directory the account running it cannot open, in one sentence,
+before it unpacks or starts anything.
 
 Then, in this order, failing with one sentence and a non-zero exit at any
-step:
+step. Each `apt-get` keeps what it and dpkg say (a few lines per package,
+which `-qq` does not quiet, and Chromium brings about 150 packages) in a file
+in the work directory, so the output holds the run's own lines; one that
+fails prints all of it on stderr, above its sentence. `systemctl enable`
+runs `--quiet`.
 
 1. Enroll mode only: writes the code to `/run/fermix/enroll.code` (tmpfs; the
    directory 0700 and the file 0600, root's until the engine account exists,
@@ -50,8 +109,8 @@ step:
    and tcp 53) and time (udp 123), through
    `fermix-metadata-block.service`: before `network-pre.target` at every boot,
    again after `nftables.service` starts or reloads (which flushes the
-   ruleset). The server's user data, which holds the enrollment code, stays
-   readable through the metadata service for the server's life. Some clouds
+   ruleset). User data that holds the enrollment code stays readable
+   through the metadata service for the server's life. Some clouds
    serve DNS and time from the same address, so those two are accepted before
    the drop and keep working for every account; anything else a cloud serves
    there stays root's. An accept ends only this table's chain, whose policy is
@@ -61,16 +120,16 @@ step:
    which is one reason the server runs no containers: Fermix's Linux sandbox
    is Landlock, which confines commands in place. A container runtime would
    need its own rule.
-3. Swap, the memory guard's first half: a host with no swap (Hetzner's images
-   have none) gets a 2 GB swap file, `/swapfile` (0600, made with
+3. Swap, the memory guard's first half: a host with no swap (many cloud
+   images have none) gets a 2 GB swap file, `/swapfile` (0600, made with
    `fallocate` and `mkswap`, listed in `/etc/fstab`, turned on), so memory
    pressure slows the server before the kernel stops a process. A host with
    swap of its own keeps it and gets none, and a run again changes nothing.
    The guard's second half is the engine's: on Linux it starts Chromium with
    `oom_score_adj` 1000, inherited by each of Chromium's processes, so out of
    memory the kernel stops a Chromium process before the engine. Both values
-   are constants until a measurement on the smallest server Fermix creates
-   sets them (M75 §3).
+   are constants until a measurement on a small real server sets them
+   (M75 §3).
 4. Installs the Linux package through `https://fermix.ai/install --no-setup`
    (`--version X` when it was given one), the installer every host uses, with
    its checks. The package's user unit
@@ -84,26 +143,71 @@ step:
    `apt-config`; it installs security updates every day and never reboots on
    its own. Fermix's own: the package comes from release files, not an apt
    source, so unattended-upgrades never sees it, and the package's postinst
-   restarts nothing. `fermix-update.timer` (root, `OnCalendar=*-*-* 04:00:00
-   UTC`, `Persistent=true`) runs `fermix-update.service`, a oneshot bounded
-   by `TimeoutStartSec=30min` that runs `/usr/local/sbin/fermix-update`: the
-   release the computers this server serves run, read from `fermix home
-   status --json`'s `update_ceiling` (the oldest engine among the desktops
-   that reached it in the last 30 days), installed with the installer again
-   (`--no-setup --version X`, with its sha256 check and the cosign signature
-   check through the package's own cosign) when it is newer than the
-   installed one in `dpkg --compare-versions`' order; an installed release
-   newer than it is never installed back down, and no home, no computer seen
-   or a `home status` that fails installs nothing that night (the last fails
-   the night). So the home can always move back to its computer, the server's
-   Fermix follows that computer's: a fix reaches the server the night after
-   the computer has it. Then `fermix restart`
+   restarts nothing. Two root timers run `/usr/local/sbin/fermix-update`,
+   each through a oneshot bounded by `TimeoutStartSec=30min`:
+   `fermix-follow.timer` (`OnBootSec=2min`, `OnUnitActiveSec=5min`) runs
+   `fermix-follow.service`, `fermix-update --follow`, every five minutes, and
+   `fermix-update.timer` (`OnCalendar=*-*-* 04:00:00 UTC`,
+   `Persistent=true`) runs `fermix-update.service`, the nightly update. The
+   server leads (M97): both install the newest release eligible for this
+   server, read from `fermix home status --json`'s `update_ceiling`, which is
+   the engine's `update.eligible`: the newest release, at or above the one
+   it runs, that the app of each system whose computers keep the home's
+   backups carries, from the release table the engine reads from fermix.ai
+   every five minutes (`FermixCore.Home.ReleaseTable`; an app row is added
+   when that app release is published). They install it with the installer
+   again (`--no-setup --version X`, with its sha256 check and the cosign
+   signature check through the package's own cosign) when it is newer than
+   the installed one in `dpkg --compare-versions`' order; an installed
+   release newer than it is never installed back down, and no home, none
+   eligible (a table not read yet among the reasons, so it fails closed) or
+   a `home status` that fails installs nothing on that run (the last fails
+   the run). A stopped engine reads no table, so nothing is installed until
+   it runs. After each install the script becomes that release's own: it
+   fetches the release's `fermix_always_on.sh` from its GitHub release,
+   refuses it unless its sha256 is the one the table lists, and runs it with
+   `--update-script-only`, which writes `/usr/local/sbin/fermix-update`
+   again as that release writes it and nothing else (a script that cannot
+   be fetched, checked or run leaves the old one, says so, and fails the run
+   once the restart is decided). The owner's own update on the server is
+   the same act behind the same gate: `fermix-update --release X` refuses X
+   below the installed release (an older Fermix cannot read the home), a
+   release the table does not list, and one newer than the eligible release
+   unless `--ahead-of-apps` is given, which installs it all the same: each
+   computer that keeps backups then says the server runs a newer Fermix
+   than it can restore, until its app catches up. A hand update waits for a
+   run that holds the lock as the night does, installs, takes the release's
+   script, and restarts as a follow run does; it never reboots. Then
+   `fermix restart`
    as `fermix` when `fermix service status --json` says `pending_restart`
-   (the running engine is older than the installed one, so a restart a night
-   skipped or failed is still due the next night, and an engine that is not
-   running, such as a restore host's before its import, is not started); then
-   `systemctl reboot` when `/run/reboot-required` exists (unattended-upgrades'
-   kernel hook writes it). A move under way is read from `fermix home status
+   (the running engine is older than the installed one, so a restart a run
+   skipped or failed is still due at the next, and an engine that is not
+   running, such as a restore host's before its import, is not started). The
+   reboot stays the night's: only the nightly update runs `systemctl reboot`,
+   when `/run/reboot-required` exists (unattended-upgrades' kernel hook
+   writes it), and only it reads or writes the deferral count below. A
+   follow run never reboots, does nothing on a server with no home yet, and
+   says nothing when nothing is due, so the journal holds a line only for
+   what one did or why it could not: its unit logs the script's lines at
+   `notice` (`SyslogLevel=notice`) and keeps everything below `notice` out
+   (`LogLevelMax=notice`), which drops systemd's own start and finish lines
+   for each run (at `info`) and keeps systemd's lines for a run that fails,
+   and its `fermix` calls open no PAM session (below). A restart a move held
+   off happens at the first follow run after the move ends. Work Fermix runs
+   on a computer (a command, a screen session, a message send) holds the
+   restart too, at most ten minutes from the oldest one's start: `fermix
+   home status --json`'s `restart_hold.wait_s` above 0 skips it, in one
+   line, and the first run after the engine lets go restarts it; it never
+   holds the night's reboot. The two never run at once: each
+   takes an exclusive `flock` on `/run/fermix-update.lock` (root's, 0600; a
+   file only root can make, as `/run` is root's) before anything else, with
+   the lock's descriptor closed for the installer and every `fermix` call, so
+   nothing they leave running holds it. A follow run that finds it held
+   leaves the update to the run that holds it and exits 0, in one line; the
+   night says it waits and waits at most 15 minutes, half its unit's
+   timeout, then fails in one sentence and the next night tries again. A
+   server set up before the follow timer existed gets it only when its
+   install line runs again. A move under way is read from `fermix home status
    --json`, in the phases the move code treats as pending: `requested`,
    `streaming`, `committing` or `aborting` on a server sending its home
    (`FermixCore.Home.Move`'s pending list), `enrolling`, `receiving`,
@@ -118,14 +222,16 @@ step:
    third night reboots all the same and says so; a failed read of the engine
    counts as no move. Each night says what it did in one line per step. An
    installer that cannot be downloaded from `fermix.ai` never ran, so
-   nothing changed and the restart and the reboot are still decided; one
-   that ran and failed stops the night before both and leaves the running
-   engine as it was, since its exit status (1 for a refusal before the
-   package manager runs and for a failure after it) cannot say whether the
-   package was touched. Any failure says why on stderr (the journal:
-   `journalctl -u fermix-update`) and the night exits non-zero; the next
-   night tries again. First boot writes the script again whenever it
-   runs.
+   nothing changed and the restart (and at night the reboot) is still
+   decided; one that ran and failed stops the run before both and leaves the
+   running engine as it was, since its exit status (1 for a refusal before
+   the package manager runs and for a failure after it) cannot say whether
+   the package was touched. Any failure says why on stderr (the journal:
+   `journalctl -u fermix-follow` and `journalctl -u fermix-update`) and the
+   run exits non-zero; the next one tries again. Any argument but `--follow`
+   or `--release X [--ahead-of-apps]` is refused in one sentence before
+   anything runs. First boot writes the script and both timers' units again
+   whenever it runs, and each installed release writes the script again.
 6. Creates the account `fermix` (home `/home/fermix`, `/usr/sbin/nologin`, no
    password), lingering, with `/run/fermix` recreated for it at every boot
    (tmpfiles.d) and a `user@<uid>.service` drop-in whose `ExecStartPre` refuses
@@ -133,27 +239,186 @@ step:
    metadata table is missing. Not `/var/lib/fermix`: it holds the root-owned
    loader every packaged engine executes, and no engine account may own a
    directory above it. A normal uid also keeps `journalctl --user` working.
-7. Enroll mode, as `fermix`, with a clean environment: `fermix home enroll
+7. With `--tailscale` (either mode), joins the owner's tailnet, so the
+   server's tailnet address exists when it enrolls (below).
+   On a server whose infrastructure set its snapshot bucket (E1:
+   fermix-server-aws's `enable_s3_backups` writes
+   `/etc/fermix/snapshot-destination`, root's, `bucket=`, `region=` and
+   `role_arn=` once each, read before anything is installed, and refused when
+   another account could write it, a line is missing or doubled, or
+   `--snapshot-bucket` and `--snapshot-region` name another bucket), either
+   mode then installs the S3 credentials helper,
+   `/usr/local/sbin/fermix-snapshot-credentials` (root's, the role and region
+   baked in), and runs it once, failing the first boot when it cannot hand a
+   session. It reads the instance role's credentials from the metadata
+   service, which only root reaches, assumes the snapshot writer role with
+   them through `curl --aws-sigv4` (every secret on curl's standard input,
+   never its command line), and writes the one-hour session and the role's
+   account to `/run/fermix-snapshots/credentials.json` (the directory `root:fermix`
+   0750, recreated at boot; the file 0640, replaced by rename), or its one
+   failure's sentence to `error` beside it. `fermix-snapshot-credentials.timer`
+   runs it a minute after each boot and every 15 minutes. The engine signs
+   its uploads with that session and never sees the instance role's own.
+8. Enroll mode, as `fermix`, with a clean environment: `fermix home enroll
    --code-file /run/fermix/enroll.code [--snapshot-bucket B --snapshot-region
-   R]`, then, with `XDG_RUNTIME_DIR=/run/user/<uid>` (systemctl reaches the user manager's
+   R [--snapshot-instance-role]]` (the last when the bucket came from the
+   destination file), then, with `XDG_RUNTIME_DIR=/run/user/<uid>` (systemctl reaches the user manager's
    private socket; no user D-Bus needed), `fermix service install --home
-   /home/fermix/.fermix`. Enrolling is skipped, and said, when
-   `/home/fermix/.fermix` exists; the service is bound and started again.
-8. A browser for the agent's tasks. Debian: the distribution's `chromium`,
+   /home/fermix/.fermix`. A candidate enrolling again is stopped first
+   (`fermix service uninstall`), and started again with the enrollment it had
+   when `fermix home enroll` refuses; a home that runs is not enrolled again,
+   which is said, and its service is bound and started again. Every `fermix`
+   call the first boot and the update make runs through `setpriv
+   --reuid=fermix --regid=fermix --init-groups` (util-linux, essential on
+   Debian and Ubuntu): the account's uid, gid and groups and no PAM session,
+   so no `pam_unix` session lines in the journal, then `env -i` with exactly
+   `HOME`, `USER`, `LOGNAME`, `SHELL`, `PATH`, `LANG`, `XDG_RUNTIME_DIR` and
+   `FERMIX_HOME`. The account holds two unpacked copies of the engine, about
+   126 MB each: the service's under `~/.cache/fermix/runtime` (the package's
+   unit sets `FERMIX_LINUX_PACKAGE_INSTALL_DIR`) and the one these calls
+   unpack under `~/.local/share`. They stay apart on purpose: Burrito, which
+   wraps the engine, deletes every older release under the directory it
+   unpacks into on each run, so with one directory the first `fermix` call
+   after an update would delete the running engine's tree before its
+   restart, and keep it gone for as long as a move holds that restart off.
+9. A browser for the agent's tasks. Debian: the distribution's `chromium`,
    which the engine's launcher finds on its `PATH` and starts headless as
    `fermix`, with Chromium's own sandbox. Ubuntu ships Chromium only as a
    snap, so nothing is installed and one sentence says to install a browser by
    hand (Google Chrome's own package, for example), or browser tasks answer
    that no Chrome or Chromium is installed.
-9. Enroll mode: waits, up to 5 minutes, for the primary to accept the server
-   (`fermix home status --json` shows the candidate `enrolled`), and fails
-   with the candidate's own sentence when the enrollment expired or failed.
-   Restore mode: prints the restore steps instead (below).
+10. Enroll mode: waits, up to 5 minutes, for the primary to accept the server
+    (`fermix home status --json` shows the candidate `enrolled`), and fails
+    with the candidate's own sentence when the enrollment expired or failed.
+    Restore mode: prints the restore steps instead (below).
 
 The code reaches the engine only as that file: never in an argument, never in
 an environment the engine inherits (`env -i`), never in the output. An option
 the script does not know is refused without being echoed, in case it is a code
 pasted in the wrong place.
+
+### Joining a tailnet (`--tailscale`)
+
+Opt-in: without `--tailscale` nothing of Tailscale is installed, written or
+run. With it:
+
+- **The key.** A Tailscale auth key from `TS_AUTHKEY` (cloud-init user data,
+  or any run with no terminal) or, when that is absent, asked for on the
+  terminal without echo, after the enrollment code. It must start with
+  `tskey-`, hold only letters, digits, `-` and `_`, and be 20 to 200
+  characters long; anything else is refused, without echoing it, before
+  anything is installed. An OAuth client secret (`tskey-client-`) is refused
+  as not an auth key: `tailscale up` takes one only with tags the script
+  never passes. The key is never on a command line and never printed:
+  `TS_AUTHKEY` is unset before the script runs anything, and the key goes
+  only to `tailscale.authkey` (0600) in the script's work directory under
+  `/run` (tmpfs, 0700, root's), which `tailscale up --auth-key=file:PATH`
+  reads and which is removed right after it, whether it joined or not, and
+  with the work directory on every exit; a `kill -9` or a power loss
+  mid-run skips that, and the file stays in `/run` until the next reboot
+  empties it. Create the key in Tailscale's admin console tagged
+  `tag:fermix-server`, after declaring that tag in the tailnet policy
+  (below), so the server joins as a tagged device; the script passes no
+  `--advertise-tags` of its own. A one-off, pre-approved key suits a server;
+  one that is used up, expired or revoked is refused by `tailscale up`.
+- **The package.** Tailscale's own package from its signed repository for
+  the host's release (`https://pkgs.tailscale.com/stable/debian bookworm`,
+  `debian trixie` or `ubuntu noble`), never a script piped into a shell. The
+  repository's signing key (`<suite>.noarmor.gpg`) is downloaded over HTTPS
+  and must hold Tailscale's package signing key alone, by its fingerprint
+  `2596A99EAAB33821893C0A79458CA832957F5868` (`gpg --show-keys`, installed
+  for it); only then is it written to
+  `/usr/share/keyrings/tailscale-archive-keyring.gpg`, and
+  `/etc/apt/sources.list.d/tailscale.list` names the repository with
+  `signed-by` that keyring alone. Those are the paths Tailscale's own
+  instructions use, so a host set up by them converges. Then `apt-get
+  install tailscale` and `systemctl enable --now tailscaled.service`, each
+  failing with one sentence.
+- **A host with Tailscale already**, read from `tailscale status --json`
+  before anything is installed. One whose daemon says `Running` is on a
+  tailnet: without a key it keeps it, and the first boot names it
+  (`CurrentTailnet.Name`), installs nothing of Tailscale and logs in again
+  nowhere; with a key in `TS_AUTHKEY` it stops, naming that tailnet, rather
+  than drop the key while the server stays on a tailnet that may not be the
+  owner's (leave the key out to keep it, or `sudo tailscale logout` first).
+  One that is logged in with Tailscale down (`Stopped`) stops too, with or
+  without a key, since `tailscale up` with a key would log it in again: run
+  `sudo tailscale up`, then the script again.
+- **`tailscale up`**, bounded by `--timeout=2m`, runs after the engine account
+  and before enrolling, so the server's tailnet address exists when it
+  enrolls; one that fails stops the first boot there with one sentence: a
+  key that is used up, expired or revoked needs a new one, and a server
+  waiting for approval (a tailnet with device approval on and a key that is
+  not pre-approved, for which `tailscale up` prints a link) is approved there
+  and the script run again without a key. Either way the first boot says the
+  server's tailnet address (`tailscale ip -1`).
+- **Restore mode** takes `--tailscale` too: the server joins the tailnet the
+  same way, then prints the restore steps.
+
+Never pass `TS_AUTHKEY` on sudo's command line (`sudo TS_AUTHKEY=… sh`):
+sudo logs it, as `ENV=TS_AUTHKEY=…` in the line it writes to the system
+journal for every command it runs; every account on the server can read it in
+sudo's own command line in `/proc` while the run lasts; and the shell keeps
+it in its history. At a terminal, leave it out and let the script ask.
+Cloud-init runs the user data as root, so it needs no sudo: give the code and
+the key as assignments in front of `sh`, in a `runcmd` item written as one
+string, which cloud-init hands to a shell, so neither is in any process's
+command line (an item written as a list is run as one command line, key
+included):
+
+```yaml
+#cloud-config
+runcmd:
+  - curl -fsSL https://fermix.ai/install | FERMIX_ENROLL_CODE='<the code>' TS_AUTHKEY='<a one-off auth key>' sh -s -- --always-on --version X --tailscale
+```
+
+with `X` the release Always On's command names. Cloud-init keeps the user
+data, the code and the key with it, on the server's disk (under
+`/var/lib/cloud`, root's), so use a one-off key, which joins nothing once it
+has been used.
+
+### The tailnet policy
+
+The policy is the owner's: the first boot opens no port and adds no firewall
+rule for the tailnet. A server's engine takes UDP port 4033 for iroh, and the
+tailnet policy should let only the owner's own devices reach
+`tag:fermix-server` on `udp:4033`. Three parts of the tailnet policy file
+(HuJSON, on the admin console's Access controls page) concern the server:
+
+```jsonc
+{
+  // Declared before the key is created: the key form offers only the tags
+  // listed here.
+  "tagOwners": {
+    "tag:fermix-server": ["autogroup:admin"]
+  },
+  // Only the owner's own devices reach the server, on its iroh port.
+  "grants": [
+    {"src": ["autogroup:member"], "dst": ["tag:fermix-server"], "ip": ["udp:4033"]}
+  ],
+  // Only with webhooks (WhatsApp, cue webhook sources): Tailscale Funnel.
+  "nodeAttrs": [
+    {"target": ["tag:fermix-server"], "attr": ["funnel"]}
+  ]
+}
+```
+
+The grant holds only once the policy stops allowing everything: a new
+tailnet's file starts with a rule from `*` to `*:*`, and a file with no rule
+at all is read as that same allow-all. Removing that rule, or adding any rule
+to a file that has none, turns allow-all off for every device, so the file
+then needs a rule for whatever the owner's other devices reach today. The
+grant above lets the owner's devices reach the server on `udp:4033` alone, so
+once allow-all is off, SSH or anything else to the server's tailnet address
+needs a rule of the owner's own, such as `tcp:22` from their own devices or a
+Tailscale SSH rule. SSH to the server's public address is not the tailnet
+policy's to allow or refuse.
+
+Webhooks reach the server through Tailscale Funnel, with the mount commands
+Always On shows once Fermix runs there. Funnel also needs MagicDNS and HTTPS
+certificates on (the admin console's DNS page), and a new server name can
+take up to ten minutes to resolve, so a sender's first check right after the
+mount may fail.
 
 ### The restore steps it prints
 
@@ -164,53 +429,129 @@ In a shell on the server, as an account that may use `sudo`:
    -g fermix -m 0600 FILE /home/fermix/restore.fxsnap`). With a bucket named,
    the step names it: download the snapshot whose name sorts last from it
    first.
-2. `sudo -H -u fermix env FERMIX_HOME=/home/fermix/.fermix-restore fermix home
-   import /home/fermix/restore.fxsnap --into /home/fermix/.fermix`, which asks
+2. `sudo -H -u fermix env -C / FERMIX_HOME=/home/fermix/.fermix-restore fermix
+   home import /home/fermix/restore.fxsnap --into /home/fermix/.fermix`, which asks
    for the recovery passphrase without echo. The import runs from a scratch
    home of its own so that nothing it writes as it starts lands in the empty
    home it restores into.
-3. `sudo -H -u fermix env XDG_RUNTIME_DIR=/run/user/<uid> fermix service
-   install --home /home/fermix/.fermix`.
+3. `sudo -H -u fermix env -C / XDG_RUNTIME_DIR=/run/user/<uid> fermix
+   service install --home /home/fermix/.fermix`.
 4. `sudo rm -rf /home/fermix/restore.fxsnap /home/fermix/.fermix-restore`.
 
-Run again once the home exists, the first boot binds and starts it and prints
-no steps.
+Run again once the import made the home, a primary, the first boot binds and
+starts it and prints no steps.
 
 ## Testing
 
 ```bash
-sh packaging/cloud/test/first_boot_test.sh
+sh packaging/cloud/test/first_boot_test.sh        # shellcheck, host, containers
+sh packaging/cloud/test/first_boot_test.sh host   # shellcheck and the host part
 ```
 
-Needs shellcheck, Docker with `debian:trixie-slim`, and network inside the
-containers (they install `nftables` and `shellcheck`, and Chromium in its
-scenario). `useradd`, `runuser`, `nft` and `apt-config` run for real
-(`--cap-add NET_ADMIN`, `/run` on a tmpfs); `systemctl` (which runs a unit's
-`ExecStart` for `start` and `restart`), `loginctl`, `curl` (the fake
-installer, which records the release it installed), `apt-get`, `dpkg-query`,
-`perl` (the Landlock ABI from a fixture), `swapon`, `fallocate`, `mkswap` and
-`fermix` (which runs the release its last start installed, and whose status
-reads can fail) are the stand-ins in `test/stubs/`. The chromium scenario
+The host part (`test/on_host.sh`) needs shellcheck, dash, `script(1)` and
+`perl`, on macOS or Linux, as any account. It runs first-boot.sh's own main,
+less its update script's writer, with six fixed paths moved under a
+directory of its own (each line asserted present exactly once) and the steps
+that need a Debian server as root stood in for by functions that log their
+names, and the engine account's `fermix` calls by one that logs them,
+answers `home status --json` from a fixture in the engine's own one-line
+envelope and fails the calls a fixture names (the script's own enroll and
+service steps run through it). `tailscale`, `apt-get`, `curl`, `gpg`, `id` and `systemctl` are
+stand-ins, and every other command runs through a shim that logs its
+arguments and its environment, so every command line the run starts is seen.
+Its cases: no `--tailscale` (nothing of Tailscale runs), the key from
+`TS_AUTHKEY`, the code and the key typed at a terminal, a key without the
+flag, malformed keys, an OAuth client secret and no key without a terminal
+(each refused before any step), a host already on a tailnet (named, refused
+with a key, refused when its status names none), a host with Tailscale down,
+a served key that is not Tailscale's alone, `tailscaled` that does not start,
+`tailscale up` failing before enrolling, each release's repository, and
+`--restore`; after each, the key is in no file, output, command line or
+environment, and its file is gone. Then a host whose home exists: a
+candidate `enrolling`, `failed`, `expired` or `enrolled` enrolling again
+(the code in the environment, typed at a terminal, or missing), a Fermix
+that does not stop, an enrollment refused after the stop (the service
+started again, once, and a start that fails too) and a first enrollment
+refused (no service started); a home that runs, with no code and with one; a retired
+copy, a desktop, a candidate whose move cannot be read, a candidate under
+`--restore` and a home the engine cannot read (refused without the
+commands that remove it), each refused. Its `apt-get` stand-in says dpkg's
+lines for each package: none reaches the output of a run that joins a
+tailnet, and a run whose `apt-get` fails shows only that call's message
+above its sentence. A failure
+is counted in a file, so a check that ends a pipeline counts too.
+
+The containers need Docker with `debian:trixie-slim`, and network inside them
+(they install `nftables` and `shellcheck`, Chromium in its scenario, and
+`ca-certificates`, `curl` and `gpg` in the tailnet scenario). `useradd`, `setpriv`, `nft` and
+`apt-config` run for real (`--cap-add NET_ADMIN`, `/run` on a tmpfs);
+`systemctl` (which runs a unit's `ExecStart` for `start` and `restart`, and
+says the link an `enable` makes unless `--quiet`),
+`loginctl`, `curl` (the fake installer, which records the release it
+installed; a stand-in digest table and release script for the regular
+installer's `--always-on`; `pkgs.tailscale.com` fetched for real), `apt-get`, `dpkg-query`,
+`perl` (the Landlock ABI from a fixture), `swapon`, `fallocate`, `mkswap`,
+`tailscale` (which records the key file it read, never the key) and `fermix`
+(which runs the release its last start installed, whose status reads can
+fail, and which records the process that started it, its ids and its
+environment's names) are the stand-ins in `test/stubs/`; `apt-get` says
+dpkg's lines for each package and fails a fixture's package with apt-get's
+own message. The existing host's output holds only its own steps, a failed
+install shows only that call's message above its sentence, the chromium
+scenario's real `apt-get` and dpkg say nothing in it, and the first boot's
+and the update's `fermix` calls run with no PAM session (runuser does not
+start them), the account's uid, gid and groups, and exactly the clean
+environment. The chromium scenario
 keeps the real `perl`, so it asks the kernel Docker runs on for its Landlock
 ABI and needs Linux 6.2 or later with Landlock enabled. The scenarios: an
-existing host typing the code at a terminal, then enrolling again with the
-code in the environment and a bucket, after the refusals (a stock Debian 12
-host and kernels with Landlock ABI 2 or none, by the ABI sentence, among
-them); a restore host and its printed steps; the failures that stop the
+existing host typing the code at a terminal, run again with no code once
+it is the primary, then given a code (refused), then enrolling again once
+its enrollment failed,
+then enrolling afresh with the code in the environment and a bucket, after
+the refusals (a stock Debian 12 host and kernels with Landlock ABI 2 or none,
+by the ABI sentence, among them), then the same through the regular
+installer (`scripts/install.sh`, mounted at `/install.sh`) with `--always-on`,
+the release from the table, after a table that disagrees with the script and
+a code passed as an argument (refused, unechoed); a restore host and its printed steps, run
+again once its home is a primary, and refused as a retired copy; the
+failures that stop the
 first boot, each by its exit status and its one sentence on stderr; an
 Ubuntu host with swap of its own; the nightly update, one night per case (the
-computers' release already installed, a newer one, a failed installer while
-a reboot is asked for, the reboot, an installer that cannot be downloaded
-(the reboot all the same), a failed `service status` and a failed `home
-status` (no restart, the reboot all the same), three nights under a move
-(the reboot waits two, then goes), a move in an ended phase, a failed
-restart (the reboot all the same), an older release never installed back
-down, no computer seen, no home yet); and the distribution's Chromium installed with
+eligible release already installed, a newer one and then the update script
+it publishes, checked against the table, a marked copy proving it replaced
+the script, a failed installer while a reboot is asked for, the reboot, an
+installer that cannot be downloaded (the reboot all the same), a failed
+`service status` and a failed `home status` (no restart, the reboot all the
+same), three nights under a move (the reboot waits two, then goes), a move
+in an ended phase, a failed restart (the reboot all the same), an older
+release never installed back down, none eligible, no home yet), then the
+follow run (no home yet: nothing run or said; a newer release installed and
+the engine restarted while a reboot is asked for, which it leaves to the
+night with its count untouched; a move holding the restart until the first
+run after it ends; a computer's work holding it until the engine lets go;
+nothing due, nothing said; any other option refused), the owner's hand
+update (an older release, one the table lacks and one ahead of the apps
+refused, then `--ahead-of-apps` installing it), and the lock with
+the real `flock` (a follow run leaving the update to the run that holds
+it, in one line; the night saying it waits, running nothing until that
+run ends, then running); a host joining a tailnet with
+Tailscale's live signing key checked by its fingerprint and the source read
+by the real `apt-get`, a re-run on the tailnet, and a `tailscale up` that
+fails before enrolling; and the distribution's Chromium installed with
 the real `apt-get` and started headless as `fermix` through the engine's
 `oom_score_adj` shell, with its own sandbox (that container runs without
 Docker's seccomp profile, which refuses the user namespaces a server's kernel
-gives an unprivileged account). It is not wired into CI;
-`scripts/release/test_fermix_update.py` runs the nightly update's release
-choice and first boot's `--version` hermetically, in CI. What only a real
-server proves: the user manager starting behind the drop-in, the swap file
-turning on, the timer firing at 04:00 UTC and the reboot.
+gives an unprivileged account); and a server whose infrastructure set its
+S3 bucket (E1): enrolled with it and `--snapshot-instance-role`, the
+credentials helper's session that the engine account reads and cannot
+change, no secret in any command line, each of the helper's failures in its
+own words, a first boot whose helper fails stopped before enrolling, the
+destination file's refusals, and a restore host. It is not wired into CI;
+`scripts/release/test_fermix_update.py` runs the update's release choice,
+the update script each release takes (and every way it refuses one), the
+owner's hand update and its gate, the restart a computer's work holds, the
+follow run, the lock (with a stand-in `flock` and the night's wait cut to a
+second) and first boot's `--version` hermetically, in CI. What only a
+real server proves: the user manager starting behind the drop-in, the swap
+file turning on, the timers firing (every five minutes, and at 04:00 UTC)
+and the reboot.

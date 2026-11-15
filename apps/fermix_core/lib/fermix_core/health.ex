@@ -12,6 +12,7 @@ defmodule FermixCore.Health do
   alias FermixCore.Providers.Descriptor
   alias FermixCore.Providers.PrimaryConfig
   alias FermixCore.Providers.Selection
+  alias FermixCore.Readiness
   alias FermixCore.Realtime.Config, as: RealtimeConfig
   alias FermixCore.Realtime.LocalVoiceSocket
   alias FermixCore.Realtime.SessionSupervisor
@@ -72,13 +73,15 @@ defmodule FermixCore.Health do
       health_provider_key: nil
     },
     # iMessage (M54 §5.1) is probed through its Supervisor: it owns the helper's
-    # Port and the Listener, and both are its children.
+    # Port and the Listener, and both are its children. Off a Mac (M97 §6.4)
+    # the helper is the Mac that carries Messages, whose posture comes through
+    # the provider: `:away` while that Mac is asleep or offline.
     %{
       key: :imessage,
       name: "imessage",
       default_enabled: false,
       child: FermixChannels.Channels.IMessage.Supervisor,
-      health_provider_key: nil
+      health_provider_key: :imessage_health_provider
     },
     %{
       key: :acp,
@@ -197,9 +200,11 @@ defmodule FermixCore.Health do
     status =
       cond do
         not enabled -> :disabled
-        failure = failure_status(failures, "channel:#{channel.name}") -> failure
+        failure = setup_status(failures, "channel:#{channel.name}") -> failure
         process_alive == false -> :degraded
         match?(%{status: :degraded}, transport) -> :degraded
+        # A channel whose computer is asleep is away, never degraded (M97 D4).
+        match?(%{status: :away}, transport) -> :away
         true -> :ready
       end
 
@@ -353,5 +358,16 @@ defmodule FermixCore.Health do
     if Enum.any?(failures, &(&1.component == component)) do
       :setup_required
     end
+  end
+
+  # A channel's readiness rows, but for one that says its computer is away
+  # (M97 D4): that owes no setup. Whether the computer is away now is its
+  # transport's to say, read live, where these rows are the boot report's,
+  # read once.
+  defp setup_status(failures, component) do
+    failures
+    |> Enum.filter(&(&1.component == component))
+    |> Enum.reject(&Readiness.away?/1)
+    |> failure_status(component)
   end
 end

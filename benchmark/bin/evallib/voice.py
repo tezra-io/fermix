@@ -2,7 +2,7 @@
 
 The socket is the Mac app's voice call: newline-delimited JSON, a mandatory
 `client_hello`, and the wire `apps/fermix_core/priv/realtime/PROTOCOL.md`
-documents (protocol v3). The runner speaks it the way the app does, so a
+documents (protocol v5). The runner speaks it the way the app does, so a
 `drive: voice` case exercises the whole spoken path: the provider's voice model
 hears fixture audio, decides to hand the request to Fermix, and Fermix's task
 runs through the real VoiceBridge and agent loop. `fermix ask` and the
@@ -15,11 +15,27 @@ A case is one call (the `voice:` map of the case):
   named by their key in `suites/fixtures/voice/manifest.json`. Each clip waits
   `gap_ms` of silence first; a later clip with `after: task_running` waits for a
   task frame saying `running` before its gap starts, so "while that runs" and
-  "cancel that" are said while the task is in flight. A clip whose `after`
-  never holds is abandoned, with the clips after it, and the call goes on.
+  "cancel that" are said while the task is in flight, and one with `after:
+  task_settled` waits until a task ended since the clip before began, none is in
+  flight, the speaker has played all it was sent and the voice has been quiet a
+  second, so a next request follows the answer to the last. A clip whose `after` never holds is abandoned, with the
+  clips after it, and the call goes on.
 - `quiet_ms` — the call has settled once every clip was said, every task's
   newest revision ended, everything the voice sent has played, and nothing new
   arrived for this long. Then the runner ends the call.
+
+The voice speaks first on a task engine (M96: it greets the owner after
+`call_ready`), so the owner waits for it, as a person on a call would: the
+first clip's gap starts only once the voice's opening is over. The owner stays
+silent up to `OPENING_WAIT_MS` for the voice to begin; once it has, until it
+has stopped speaking and been quiet `OPENING_QUIET_MS`; never past
+`OPENING_MAX_MS`. Without that wait a first clip would be said over the
+greeting, and on Grok it would barge in and cut it.
+
+The daemon may end the call itself (v5, `call_ended`: the owner said
+goodbye). Then the runner sends nothing more, `call_stop` included: it reads
+the call's last frames (a detached task, the final usage) and closes the
+connection, as the app does after its own hang-up.
 
 The microphone streams continuously from the daemon's `listening` until the
 call ends: 100 ms chunks of 24 kHz mono PCM16 at real-time pace, silence
@@ -30,16 +46,17 @@ playback stops. A simulated sink proves the protocol logic, not physical
 latency: that belongs to the native app.
 
 What the daemon said is recorded frame by frame (`state`, `call_ready`,
-`caption`, `task`, `usage`, `error`, `playback_stop`, and `audio_delta` by size
-only) and becomes the `wire.*` gates (`wire_gates`). The call's Opik trace,
-whose root is the call (`voice_live:<n>`) and into which every backend task
-turn (`voice_delegation_<n>`, `parent_session` = the call) nests, is found by
-`poll_call_trace` and graded by the ordinary gates.
+`caption`, `task`, `usage`, `error`, `playback_stop`, `call_ended`, and
+`audio_delta` by size only) and becomes the `wire.*` gates (`wire_gates`). The
+call's Opik trace, whose root is the call (`voice_live:<n>`) and into which
+every backend task turn (`voice_delegation_<n>`, `parent_session` = the call)
+nests, is found by `poll_call_trace` and graded by the ordinary gates.
 
-Everything is bounded: the handshake, the start, each clip's wait, the whole
-call (`timeout_ms`), and the close. A socket that cannot be reached, refuses,
-closes, or does not settle within the bound is evidence that is not gradable,
-never a failed gate; the call is ended on every path once it was started.
+Everything is bounded: the handshake, the start, the opening, each clip's
+wait, the whole call (`timeout_ms`), and the close. A socket that cannot be
+reached, refuses, closes, or does not settle within the bound is evidence that
+is not gradable, never a failed gate; the call is ended on every path once it
+was started.
 """
 
 from __future__ import annotations
@@ -60,7 +77,7 @@ from datetime import datetime, timedelta, timezone
 from .grade import GateResult
 from .opik import parse_ts
 
-PROTOCOL_VERSION = 3
+PROTOCOL_VERSION = 5
 SOCKET_NAME = "realtime.sock"
 SAMPLE_RATE = 24_000
 BYTES_PER_MS = 48                       # PCM16, 24 kHz, mono
@@ -71,18 +88,20 @@ FIXTURE_SUBDIR = "voice"
 MANIFEST = "manifest.json"
 
 FRAME_TYPES = ("state", "call_ready", "caption", "audio_delta", "playback_stop", "task",
-               "usage", "error")
+               "usage", "error", "call_ended")
+# The engines a call can run on (`call_ready.engine`).
+ENGINES = ("openai_realtime", "openai_live", "xai_realtime")
 TASK_STATUSES = ("pending", "running", "completed", "failed", "cancelled")
 TERMINAL_STATUSES = ("completed", "failed", "cancelled")
 # What a task revision ENDED as: its last status, except that a cancelled
 # revision a newer revision of the same task replaced reads `superseded`.
 ENDED_STATUSES = (*TASK_STATUSES, "superseded")
-AFTER_CONDITIONS = ("task_running",)
+AFTER_CONDITIONS = ("task_running", "task_settled")
 SPEC_KEYS = {"clips", "quiet_ms"}
 CLIP_KEYS = {"say", "gap_ms", "after"}
 WIRE_KEYS = {"engine", "events_all", "events_none", "task_statuses_all", "task_statuses_none",
              "caption_not_matches", "max_tasks", "task_terminal_once",
-             "spoke_while_task_running"}
+             "spoke_while_task_running", "spoke_first_on", "call_ended", "call_stop_sent"}
 
 MAX_CLIPS = 4
 DEFAULT_GAP_MS = 1_500
@@ -91,6 +110,10 @@ DEFAULT_QUIET_MS = 5_000
 MIN_QUIET_MS = 1_000
 MAX_QUIET_MS = 20_000
 AFTER_WAIT_MS = 30_000                  # how long a clip waits for its `after`
+SETTLED_WAIT_MS = 150_000               # ...for `task_settled`: a task may take this long
+OPENING_WAIT_MS = 4_000                 # call_ready -> the voice begins its greeting
+OPENING_QUIET_MS = 1_000                # the voice is done once quiet this long
+OPENING_MAX_MS = 20_000                 # call_ready -> the opening is over, whatever it does
 HELLO_WAIT_S = 5.0
 READY_WAIT_S = 20.0                     # call_start -> call_ready (the daemon's own is 12 s)
 CLOSE_WAIT_S = 10.0                     # call_stop -> the final usage
@@ -203,8 +226,18 @@ def wire_problems(wire, where: str) -> list[str]:
     if not isinstance(wire, dict):
         return [f"{where}: expect `wire` must be a map"]
     problems = [f"{where}: unknown `wire` key `{key}`" for key in wire if key not in WIRE_KEYS]
-    if "engine" in wire and not (isinstance(wire["engine"], str) and wire["engine"]):
-        problems.append(f"{where}: `wire.engine` must be a non-empty string")
+    engine = wire.get("engine")
+    if "engine" in wire and not (engine in ENGINES or _engine_list(engine)):
+        problems.append(f"{where}: `wire.engine` must be an engine, or a non-empty list of "
+                        f"engines, drawn from {list(ENGINES)}")
+    if "spoke_first_on" in wire and not _engine_list(wire["spoke_first_on"]):
+        problems.append(f"{where}: `wire.spoke_first_on` must be a non-empty list of engines "
+                        f"drawn from {list(ENGINES)}")
+    if "call_ended" in wire and not (isinstance(wire["call_ended"], str) and wire["call_ended"]):
+        problems.append(f"{where}: `wire.call_ended` must be the non-empty reason the daemon "
+                        "ended the call with")
+    if "call_stop_sent" in wire and not isinstance(wire["call_stop_sent"], bool):
+        problems.append(f"{where}: `wire.call_stop_sent` must be true or false")
     for key, vocabulary in (("events_all", FRAME_TYPES), ("events_none", FRAME_TYPES),
                             ("task_statuses_all", ENDED_STATUSES),
                             ("task_statuses_none", ENDED_STATUSES)):
@@ -218,12 +251,17 @@ def wire_problems(wire, where: str) -> list[str]:
                                         f"{where}: `wire.caption_not_matches`"))
     if "max_tasks" in wire:
         value = wire["max_tasks"]
-        if isinstance(value, bool) or not isinstance(value, int) or value < 1:
-            problems.append(f"{where}: `wire.max_tasks` must be a positive integer")
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            problems.append(f"{where}: `wire.max_tasks` must be a non-negative integer")
     for key in ("task_terminal_once", "spoke_while_task_running"):
         if key in wire and wire[key] is not True:
             problems.append(f"{where}: `wire.{key}` must be true")
     return problems
+
+
+def _engine_list(value) -> bool:
+    return (isinstance(value, list) and bool(value)
+            and all(isinstance(item, str) and item in ENGINES for item in value))
 
 
 def _regex_problems(pattern, where: str) -> list[str]:
@@ -284,6 +322,7 @@ class PlaybackSink:
         self._ids: dict[str, dict] = {}
         self._clock = now_ms
         self._carry = 0.0
+        self.quiet_since = now_ms               # when it last had nothing left to play
 
     def idle(self) -> bool:
         return not self._queue
@@ -310,6 +349,8 @@ class PlaybackSink:
             self._carry = 0.0
             return []
         played = self._play(elapsed * BYTES_PER_MS + self._carry)
+        if not self._queue:
+            self.quiet_since = now_ms
         return [report for pid in played if (report := self._due(pid, now_ms)) is not None]
 
     def stop(self, now_ms: float) -> list[dict]:
@@ -319,6 +360,7 @@ class PlaybackSink:
         cut = list(dict.fromkeys(pid for pid, _left in self._queue))
         self._queue.clear()
         self._carry = 0.0
+        self.quiet_since = now_ms
         for pid in cut:
             entry = self._ids[pid]
             reports.append(self._report(pid, now_ms, drained=False))
@@ -371,6 +413,7 @@ _KEPT_FIELDS = {
               "backend_turns", "backend_cost"),
     "error": ("reason", "kind", "detail", "required_for"),
     "playback_stop": (),
+    "call_ended": ("reason",),
 }
 
 
@@ -408,8 +451,10 @@ class Evidence:
     elapsed_ms: float = 0.0             # call_start until the call settled
     frames: list[dict] = field(default_factory=list)
     clips: list[dict] = field(default_factory=list)      # {"say", "start_ms", "end_ms"}
-    abandoned: list[str] = field(default_factory=list)   # clips whose `after` never held
+    # Clips never said: their `after` never held, or the call ended first.
+    abandoned: list[str] = field(default_factory=list)
     reports_sent: int = 0
+    call_stop_sent: bool = False        # the runner ended the call; False when the daemon did
 
     def of(self, kind: str) -> list[dict]:
         return [frame for frame in self.frames if frame["type"] == kind]
@@ -454,7 +499,7 @@ class Evidence:
                 "frames": counts, "playback_reports": self.reports_sent,
                 "clips": [{"say": c["say"], "start_ms": c["start_ms"], "end_ms": c["end_ms"]}
                           for c in self.clips],
-                "abandoned_clips": list(self.abandoned)}
+                "abandoned_clips": list(self.abandoned), "call_stop_sent": self.call_stop_sent}
 
 
 def _in_flight_while(evidence: Evidence, after_ms: float) -> bool:
@@ -485,9 +530,10 @@ def wire_gates(evidence: Evidence, wire: dict) -> list[GateResult]:
     def add(key, passed, detail):
         out.append(GateResult(key=f"wire.{key}", passed=passed, detail=detail))
 
+    engine = evidence.call_ready().get("engine")
     if "engine" in wire:
-        engine = evidence.call_ready().get("engine")
-        add("engine", engine == wire["engine"],
+        allowed = wire["engine"] if isinstance(wire["engine"], list) else [wire["engine"]]
+        add("engine", engine in allowed,
             f"call_ready.engine {engine!r}, expected {wire['engine']!r}")
     if "events_all" in wire:
         missing = [e for e in wire["events_all"] if e not in seen]
@@ -521,7 +567,52 @@ def wire_gates(evidence: Evidence, wire: dict) -> list[GateResult]:
         add("spoke_while_task_running", spoke,
             "the voice spoke after the last clip while a task was in flight"
             if spoke else "no assistant caption after the last clip while a task was in flight")
+    # Graded only on a listed engine: on another the requirement is the judge's
+    # watched one, and no gate is reported, so none is counted as passed.
+    if "spoke_first_on" in wire and engine in wire["spoke_first_on"]:
+        add("spoke_first_on", *_spoke_first(evidence))
+    if "call_ended" in wire:
+        add("call_ended", *_ended_with(evidence, wire["call_ended"]))
+    if "call_stop_sent" in wire:
+        sent = evidence.call_stop_sent
+        add("call_stop_sent", sent == wire["call_stop_sent"],
+            f"the runner {'sent' if sent else 'never sent'} call_stop "
+            f"(expected {'sent' if wire['call_stop_sent'] else 'never sent'})")
     return out
+
+
+def _spoke_first(evidence: Evidence) -> tuple[bool, str]:
+    """The voice spoke before the owner did: its first caption arrived before
+    the owner's first caption and before the owner's first clip began."""
+    def first(speaker):
+        return next((frame["t_ms"] for frame in evidence.of("caption")
+                     if frame.get("speaker") == speaker), None)
+
+    voice_at, owner_caption_at = first("assistant"), first("user")
+    clip_at = evidence.clips[0]["start_ms"] if evidence.clips else None
+    owner_at = min((t for t in (owner_caption_at, clip_at) if t is not None), default=None)
+    passed = voice_at is not None and (owner_at is None or voice_at < owner_at)
+    return passed, (f"first assistant caption at {voice_at} ms; the owner's first clip at "
+                    f"{clip_at} ms, first owner caption at {owner_caption_at} ms")
+
+
+def _ended_with(evidence: Evidence, reason: str) -> tuple[bool, str]:
+    """The daemon ended the call once, for `reason`, in the protocol's order:
+    after `state: idle`, and followed by the call's final `usage`."""
+    frames = evidence.frames
+    ends = [index for index, frame in enumerate(frames) if frame["type"] == "call_ended"]
+    reasons = [frames[index].get("reason") for index in ends]
+    if reasons != [reason]:
+        return False, f"call_ended reasons={reasons}, expected exactly one {reason!r}"
+    at = ends[0]
+    idle_before = any(frame["type"] == "state" and frame.get("state") == "idle"
+                      for frame in frames[:at])
+    final_after = any(frame["type"] == "usage"
+                      and frame.get("accounting") not in (None, "running")
+                      for frame in frames[at + 1:])
+    return idle_before and final_after, (
+        f"call_ended {reason!r}; state idle before it: {idle_before}; "
+        f"final usage after it: {final_after}")
 
 
 def _terminal_once(evidence: Evidence) -> tuple[bool, str]:
@@ -550,6 +641,7 @@ class Connection:
     def __init__(self, path: str, timeout_s: float):
         self._sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         self._sock.settimeout(timeout_s)
+        self._timeout_s = timeout_s             # a send's bound; a read sets its own
         self._buffer = b""
         try:
             self._sock.connect(path)
@@ -559,6 +651,7 @@ class Connection:
 
     def send(self, event: dict) -> None:
         try:
+            self._sock.settimeout(self._timeout_s)
             self._sock.sendall(json.dumps(event).encode("utf-8") + b"\n")
         except OSError as exc:
             raise VoiceError(f"send failed: {exc}") from exc
@@ -618,13 +711,18 @@ class _Mic:
     def last_end(self) -> float | None:
         return self.played[-1]["end_ms"] if self.played else None
 
-    def chunk(self, at_ms: float, call: "_Call") -> bytes:
+    def unsaid(self) -> list[str]:
+        """The clips not begun yet: what a call that ended now never heard."""
+        begun = self._index + (1 if self._offset is not None else 0)
+        return [clip.say for clip in self._clips[begun:]]
+
+    def chunk(self, at_ms: float, call: "_Call", speaker: PlaybackSink) -> bytes:
         """The next chunk. `at_ms` is when it is due on the microphone's own
         schedule, not when it is sent, so a clip ends when its audio does: a
         loop that wakes late and catches up cannot send the silence after a
         clip before the clip's recorded end."""
         if self._offset is None and not self.done():
-            self._maybe_start(at_ms, call)
+            self._maybe_start(at_ms, call, speaker)
         if self._offset is None:
             return bytes(CHUNK_BYTES)
         clip = self._clips[self._index]
@@ -636,31 +734,91 @@ class _Mic:
             self._index += 1
         return piece + bytes(CHUNK_BYTES - len(piece))
 
-    def _maybe_start(self, now_ms: float, call: "_Call") -> None:
+    def _maybe_start(self, now_ms: float, call: "_Call", speaker: PlaybackSink) -> None:
         if call.ready_at_ms is None:
             return
         clip = self._clips[self._index]
+        if self._index == 0:
+            # Recomputed on every chunk, never latched: a voice that begins
+            # during the gap holds the first clip until it is done.
+            opened = _opening_end(call, now_ms)
+            if opened is not None and now_ms >= opened + clip.gap_ms:
+                self._begin(clip, now_ms)
+            return
         since = self._since if self._since is not None else call.ready_at_ms
         if self._ready_at is None:
-            held_at = self._condition_held_at(clip, call)
+            held_at = self._condition_held_at(clip, call, now_ms, speaker)
             if held_at is None:
-                if now_ms - since > AFTER_WAIT_MS:
+                if now_ms - since > _after_wait_ms(clip):
                     self.abandoned.extend(c.say for c in self._clips[self._index:])
                     self._index = len(self._clips)
                 return
             self._ready_at = max(held_at, since) + clip.gap_ms
         if now_ms >= self._ready_at:
-            self._offset = 0
-            self.played.append({"say": clip.say, "start_ms": round(now_ms, 1),
-                                "end_ms": round(now_ms, 1)})
+            self._begin(clip, now_ms)
 
-    def _condition_held_at(self, clip: Clip, call: "_Call") -> float | None:
+    def _begin(self, clip: Clip, now_ms: float) -> None:
+        self._offset = 0
+        self.played.append({"say": clip.say, "start_ms": round(now_ms, 1),
+                            "end_ms": round(now_ms, 1)})
+
+    def _condition_held_at(self, clip: Clip, call: "_Call", now_ms: float,
+                           speaker: PlaybackSink) -> float | None:
         """When the clip's `after` first held: `task_running` is a task frame
-        saying `running` since the previous clip began."""
+        saying `running` since the previous clip began; `task_settled` is a task
+        that ended since then, with none in flight, the speaker drained and the
+        voice quiet OPENING_QUIET_MS, so its answer was said before the next clip."""
         if clip.after is None:
             return 0.0
         begun = self.played[-1]["start_ms"] if self.played else call.ready_at_ms
-        return next((t for t in call.running_at if t >= begun), None)
+        if clip.after == "task_running":
+            return next((t for t in call.running_at if t >= begun), None)
+        return _settled_at(call, begun, now_ms, speaker)
+
+
+def _after_wait_ms(clip: Clip) -> int:
+    return SETTLED_WAIT_MS if clip.after == "task_settled" else AFTER_WAIT_MS
+
+
+def _settled_at(call: "_Call", begun: float, now_ms: float,
+                speaker: PlaybackSink) -> float | None:
+    """When the call settled after a task that ended since `begun`, or None
+    while one is in flight, the voice speaks, the speaker still has audio to
+    play, or it has not been quiet long. A voice's audio can arrive faster than
+    it plays, with no `speaking` state around it, so the frames' last arrival
+    is not when the owner stopped hearing it."""
+    ended = next((t for t in call.ended_at if t >= begun), None)
+    if ended is None or call.in_flight() or call.state == "speaking" or not speaker.idle():
+        return None
+    quiet_from = max(ended, call.voice_last_ms, speaker.quiet_since)
+    return quiet_from + OPENING_QUIET_MS if now_ms >= quiet_from + OPENING_QUIET_MS else None
+
+
+def _opening_end(call: "_Call", now_ms: float) -> float | None:
+    """When the voice's opening was over, or None while the owner still waits
+    for it: up to OPENING_WAIT_MS after `call_ready` for the voice to begin,
+    and once it has, until it has stopped speaking (Grok says `listening` only
+    once the speaker drained) and been quiet OPENING_QUIET_MS. Never later
+    than OPENING_MAX_MS after `call_ready`."""
+    ready = call.ready_at_ms
+    if now_ms >= ready + OPENING_MAX_MS:
+        return ready + OPENING_MAX_MS
+    if call.voice_at_ms is None:
+        silent_until = ready + OPENING_WAIT_MS
+        return silent_until if now_ms >= silent_until else None
+    if call.state == "speaking":
+        return None
+    end = max(call.voice_last_ms + OPENING_QUIET_MS, call.state_ms)
+    return end if now_ms >= end else None
+
+
+def _voice_heard(kept: dict) -> bool:
+    """A frame that says the voice is talking: voiced audio, `speaking`, or
+    one of its captions."""
+    kind = kept["type"]
+    return ((kind == "audio_delta" and not kept.get("silent"))
+            or (kind == "state" and kept.get("state") == "speaking")
+            or (kind == "caption" and kept.get("speaker") == "assistant"))
 
 
 class _Call:
@@ -671,10 +829,16 @@ class _Call:
         self.ready_at_ms: float | None = None
         self.listening = False
         self.running_at: list[float] = []
+        self.ended_at: list[float] = []     # task frames with a terminal status
         self.last_activity_ms = 0.0
         self.tasks: dict[str, tuple[int, str]] = {}     # id -> newest (revision, status)
         self.final_usage = False
         self.idle = False
+        self.ended = False                  # the daemon ended the call (`call_ended`)
+        self.state: str | None = None       # the newest `state`, and when it came
+        self.state_ms = 0.0
+        self.voice_at_ms: float | None = None   # the voice first heard after call_ready
+        self.voice_last_ms = 0.0
 
     def take(self, frame: dict, t_ms: float) -> dict:
         kept = record(frame, t_ms)
@@ -683,15 +847,21 @@ class _Call:
         if kind == "state":
             self.listening |= kept.get("state") == "listening"
             self.idle |= kept.get("state") == "idle"
+            self.state, self.state_ms = kept.get("state"), t_ms
         elif kind == "call_ready" and self.ready_at_ms is None:
             self.ready_at_ms = t_ms
         elif kind == "task":
             self._task(kept, t_ms)
         elif kind == "usage" and self.idle and kept.get("accounting") not in (None, "running"):
             self.final_usage = True
+        elif kind == "call_ended":
+            self.ended = True
         speech = kind != "audio_delta" or not kept.get("silent")
         if kind in ("audio_delta", "caption", "task", "playback_stop") and speech:
             self.last_activity_ms = t_ms
+        if self.ready_at_ms is not None and _voice_heard(kept):
+            self.voice_at_ms = t_ms if self.voice_at_ms is None else self.voice_at_ms
+            self.voice_last_ms = t_ms
         return kept
 
     def _task(self, kept: dict, t_ms: float) -> None:
@@ -700,6 +870,8 @@ class _Call:
             return
         if status == "running":
             self.running_at.append(t_ms)
+        elif status in TERMINAL_STATUSES:
+            self.ended_at.append(t_ms)
         if pid not in self.tasks or rev >= self.tasks[pid][0]:
             self.tasks[pid] = (rev, status)
 
@@ -709,8 +881,9 @@ class _Call:
 
 
 def drive(fermix_home: str, plan: Plan, timeout_s: float) -> Evidence:
-    """Run one call: handshake, `call_start`, the clips at real-time pace with
-    the speaker acknowledging, `call_stop` once settled. Never raises for the
+    """Run one call: handshake, `call_start`, the voice's opening, the clips at
+    real-time pace with the speaker acknowledging, and `call_stop` once settled,
+    unless the daemon ended the call first (`call_ended`). Never raises for the
     socket: a failure is evidence with `ok=False`. The call is ended on every
     path once it was started, and the connection is closed on return."""
     started_at = datetime.now(timezone.utc)
@@ -739,7 +912,7 @@ def drive(fermix_home: str, plan: Plan, timeout_s: float) -> Evidence:
             _hang_up(conn, call, sink, origin, evidence)
         conn.close()
         evidence.frames, evidence.clips = call.frames, mic.played
-        evidence.abandoned = mic.abandoned
+        evidence.abandoned = mic.abandoned + mic.unsaid()
     return evidence
 
 
@@ -761,6 +934,8 @@ def _converse(conn: Connection, plan: Plan, call: _Call, mic: _Mic, sink: Playba
     _await_listening(conn, call, origin, deadline)
     next_chunk = time.monotonic()
     while True:
+        if call.ended:
+            return _ms(origin)          # the daemon ended it: the microphone stops here
         now = time.monotonic()
         if now >= deadline:
             raise VoiceError(f"the call did not settle within {deadline - origin:.0f}s "
@@ -770,7 +945,7 @@ def _converse(conn: Connection, plan: Plan, call: _Call, mic: _Mic, sink: Playba
         for _ in range(_MAX_CATCH_UP):
             if now < next_chunk:
                 break
-            pcm = mic.chunk((next_chunk - origin) * 1000.0, call)
+            pcm = mic.chunk((next_chunk - origin) * 1000.0, call, sink)
             conn.send({"type": "audio_chunk", "audio": base64.b64encode(pcm).decode("ascii")})
             next_chunk += CHUNK_MS / 1000.0
         _send_reports(conn, sink.tick(_ms(origin)), evidence)
@@ -830,13 +1005,21 @@ def _pending(call: _Call, mic: _Mic, sink: PlaybackSink) -> str:
 
 def _hang_up(conn: Connection, call: _Call, sink: PlaybackSink, origin: float,
              evidence: Evidence) -> None:
-    """`call_stop`, then what the call says as it ends — a detached task, the
-    final usage — until that usage, the bound, or the connection closing."""
+    """`call_stop`, unless the daemon already ended the call (`call_ended`);
+    then what the call says as it ends — a detached task, the final usage —
+    until that usage, the bound, or the connection closing. Once the call has
+    ended the runner sends nothing more: no `call_stop`, no playback report."""
     try:
-        conn.send({"type": "call_stop"})
+        if not call.ended:
+            conn.send({"type": "call_stop"})
+            evidence.call_stop_sent = True
         until = time.monotonic() + CLOSE_WAIT_S
         while not call.final_usage and time.monotonic() < until:
             frame = conn.recv(min(until, time.monotonic() + _TICK_S))
+            if call.ended:
+                if frame is not None:
+                    call.take(frame, _ms(origin))
+                continue
             if frame is not None:
                 _take(conn, call, sink, frame, _ms(origin), evidence)
             _send_reports(conn, sink.tick(_ms(origin)), evidence)
@@ -902,6 +1085,31 @@ def trace_window_start(evidence: Evidence) -> datetime:
     return evidence.started_at - timedelta(seconds=10)
 
 
+def call_routes(trace: dict) -> list[dict]:
+    """The voice model as a candidate route, from the call trace's own
+    `provider` and `model`: what the judge grades is what it said aloud, so the
+    judge is kept apart from it as from any task turn's model. Empty when the
+    trace names neither."""
+    meta = trace.get("metadata") or {}
+    provider, model = meta.get("provider"), meta.get("model")
+    if not (isinstance(provider, str) and provider and isinstance(model, str) and model):
+        return []
+    return [{"provider": provider, "model": model, "reasoning_effort": "default"}]
+
+
+def accounted_without_tasks(trace: dict) -> bool:
+    """Whether the call handed Fermix no task and its trace carries the call's
+    own voice accounting: billed voice seconds and a cost. Token usage comes
+    only from a task's turns, so a call that was a greeting and a goodbye has
+    none, and this accounting is what shows its trace whole instead."""
+    meta = trace.get("metadata") or {}
+    seconds, cost = meta.get("voice_seconds"), meta.get("voice_cost_millicents")
+    return (meta.get("backend_turns") == 0
+            and isinstance(seconds, (int, float)) and not isinstance(seconds, bool)
+            and seconds > 0
+            and isinstance(cost, int) and not isinstance(cost, bool) and cost >= 0)
+
+
 # --- what the judge reads -----------------------------------------------------
 
 def transcript(evidence: Evidence, spoken: list[str]) -> list[dict]:
@@ -933,6 +1141,8 @@ def judge_evidence(evidence: Evidence) -> dict:
             timeline.append({"t_ms": frame["t_ms"], "task": frame.get("delegation_id"),
                              "revision": frame.get("revision"), "status": frame.get("status"),
                              "summary": frame.get("summary")})
+        elif frame["type"] == "call_ended":
+            timeline.append({"t_ms": frame["t_ms"], "call_ended_by_fermix": frame.get("reason")})
     timeline.sort(key=lambda item: item["t_ms"])
     outcomes = [{"task": key[0], "revision": key[1], "ended": status}
                 for key, status in evidence.task_outcomes().items()]

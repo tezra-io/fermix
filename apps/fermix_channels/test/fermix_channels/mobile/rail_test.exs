@@ -14,6 +14,7 @@ defmodule FermixChannels.Mobile.RailTest do
   alias FermixChannels.Mobile.Noise
   alias FermixChannels.Mobile.Protocol
   alias FermixChannels.Mobile.Rail
+  alias FermixChannels.Test.DesktopRail
   alias FermixTestSupport.PrimaryHome
   alias FermixTestSupport.SafeRm
 
@@ -122,19 +123,24 @@ defmodule FermixChannels.Mobile.RailTest do
       connect: bridge_connect(ctx.bridge_socket)
     ]
 
-    Rail.open(@route, :ik, keys ++ Keyword.drop(opts, [:static_keypair]))
+    Rail.open(@route, :ik, Keyword.merge(keys, Keyword.drop(opts, [:static_keypair])))
+  end
+
+  # A desktop's hello: this engine's newest version, naming its oldest.
+  defp hello_payload do
+    Map.merge(
+      %{
+        "device_id" => @device_id,
+        "app_version" => "1.0.0",
+        "last_server_seq" => 0,
+        "primary_epoch" => 1
+      },
+      Protocol.hello_versions()
+    )
   end
 
   defp hello(rail) do
-    payload = %{
-      "device_id" => @device_id,
-      "app_version" => "1.0.0",
-      "last_server_seq" => 0,
-      "protocol_v" => Protocol.protocol_version(),
-      "primary_epoch" => 1
-    }
-
-    assert :ok = Rail.send_event(rail, "hello", payload)
+    assert :ok = Rail.send_event(rail, "hello", hello_payload())
     assert_receive {:rail, ^rail, {:event, %{"t" => "hello_ack"} = ack, <<>>}}
     ack
   end
@@ -162,11 +168,15 @@ defmodule FermixChannels.Mobile.RailTest do
     ctx = start_responder(ctx)
     assert {:ok, rail} = open(ctx)
 
+    # The engine's own responder serves the newest version both speak.
+    newest = Protocol.protocol_version()
     ack = hello(rail)
-    assert %{"v" => 2, "seq" => 1, "primary_epoch" => 1, "profiles" => [%{"id" => "main"}]} = ack
+
+    assert %{"v" => ^newest, "seq" => 1, "primary_epoch" => 1, "profiles" => [%{"id" => "main"}]} =
+             ack
 
     assert :ok = Rail.send_event(rail, "ping", %{})
-    assert_receive {:rail, ^rail, {:event, %{"t" => "pong", "seq" => 2, "v" => 2}, <<>>}}
+    assert_receive {:rail, ^rail, {:event, %{"t" => "pong", "seq" => 2, "v" => ^newest}, <<>>}}
 
     responder = Process.monitor(connection(ctx))
     rail_down = Process.monitor(rail)
@@ -186,7 +196,8 @@ defmodule FermixChannels.Mobile.RailTest do
     assert {:ok, rail} = open(ctx)
 
     ack = hello(rail)
-    assert %{"t" => "hello_ack", "seq" => 1, "v" => 2} = ack
+    newest = Protocol.protocol_version()
+    assert %{"t" => "hello_ack", "seq" => 1, "v" => ^newest} = ack
     assert length(ack["candidates"]) == 16
     refute Map.has_key?(ack, "index") or Map.has_key?(ack, "count")
 
@@ -346,11 +357,41 @@ defmodule FermixChannels.Mobile.RailTest do
     Task.async(fn -> accept_handshake(listen, mode, ctx, psk, test_pid) end)
   end
 
-  defp server_send(responder, type, payload, seq, bytes \\ <<>>) do
-    {:ok, plaintext} = Protocol.encode_server_frame(type, payload, seq, bytes)
+  # The responder answers at the version the rail speaks before any hello
+  # (`initiator_version/0`), or at the one it chose for the session.
+  defp server_send(
+         responder,
+         type,
+         payload,
+         seq,
+         bytes \\ <<>>,
+         version \\ Protocol.initiator_version()
+       ) do
+    {:ok, plaintext} = Protocol.encode_server_frame(type, payload, seq, bytes, version: version)
     {:ok, ciphertext, noise} = Noise.encrypt(responder.noise, plaintext)
     :ok = :gen_tcp.send(responder.socket, Carrier.message(ciphertext))
     %{responder | noise: noise}
+  end
+
+  # The next client frame, as the responder's codec reads it.
+  defp responder_read(responder) do
+    {:message, ciphertext} = read_frame(responder.socket)
+    {:ok, plaintext, noise} = Noise.decrypt(responder.noise, ciphertext)
+    {:ok, event} = Protocol.decode_client_frame(plaintext)
+    {event, %{responder | noise: noise}}
+  end
+
+  # A hello_ack the test's responder sends, its window put in by the test.
+  defp played_ack do
+    %{
+      "session_id" => "played",
+      "profiles" => [],
+      "candidates" => [],
+      "history_head_seq" => 0,
+      "read_up_to_seq" => 0,
+      "caps" => %{"commands" => [], "max_media_bytes" => 1},
+      "primary_epoch" => 1
+    }
   end
 
   defp read_frame(socket) do
@@ -394,13 +435,82 @@ defmodule FermixChannels.Mobile.RailTest do
         assert {:ok, rail} = open_manual(ctx, path, :ik)
         responder = Task.await(task)
 
-        {:ok, plaintext} = Protocol.encode_server_frame("pong", %{}, seq, <<>>)
+        {:ok, plaintext} =
+          Protocol.encode_server_frame("pong", %{}, seq, <<>>,
+            version: Protocol.initiator_version()
+          )
+
         plaintext = if version == 2, do: plaintext, else: at_version(plaintext, version)
         {:ok, ciphertext, _noise} = Noise.encrypt(responder.noise, plaintext)
         :ok = :gen_tcp.send(responder.socket, Carrier.message(ciphertext))
 
         assert_receive {:rail, ^rail, {:closed, {:protocol_error, reason}}}
         assert reason == why or match?({:unsupported_protocol_version, _, 3}, reason)
+        assert {:close, 1002, "mobile protocol error"} = read_frame(responder.socket)
+      end
+    end
+
+    # M97 §3.4: a hello is sent at the version it names, this engine's newest,
+    # and the server's first frame after it carries the version the server
+    # chose, which the session speaks from then on: here a server a version
+    # behind serves the oldest.
+    test "after its hello the session speaks the version the server's hello_ack chose", ctx do
+      {listen, path} = manual_listener(ctx)
+      {oldest, newest} = Protocol.supported_version_range()
+      task = handshake_task(listen, :ik, ctx)
+      assert {:ok, rail} = open_manual(ctx, path, :ik)
+      responder = Task.await(task)
+
+      assert :ok = Rail.send_event(rail, "hello", hello_payload())
+      {hello, responder} = responder_read(responder)
+
+      assert %{type: "hello", version: ^newest, seq: 1} = hello
+      assert %{"protocol_v" => ^newest, "min_protocol_v" => ^oldest} = hello.payload
+
+      ack = Map.merge(played_ack(), %{"min_version" => oldest - 1, "max_version" => oldest})
+      responder = server_send(responder, "hello_ack", ack, 1, <<>>, oldest)
+      assert_receive {:rail, ^rail, {:event, %{"t" => "hello_ack", "v" => ^oldest}, <<>>}}
+
+      assert :ok = Rail.send_event(rail, "ping", %{})
+      {ping, responder} = responder_read(responder)
+      assert %{type: "ping", version: ^oldest, seq: 2} = ping
+
+      responder = server_send(responder, "pong", %{}, 2, <<>>, oldest)
+      assert_receive {:rail, ^rail, {:event, %{"t" => "pong", "v" => ^oldest}, <<>>}}
+
+      # Chosen once: a later frame at another version is refused.
+      _responder = server_send(responder, "pong", %{}, 3, <<>>, newest)
+      assert_receive {:rail, ^rail, {:closed, {:protocol_error, {:version, ^newest}}}}
+    end
+
+    # A hello_ack at a version this engine does not speak is refused naming
+    # the server's side, and the session closes 1002.
+    test "a hello_ack outside this engine's window closes 1002, naming the server's side", ctx do
+      {listen, path} = manual_listener(ctx)
+      {oldest, newest} = Protocol.supported_version_range()
+
+      for {version, side} <- [{newest + 1, :server_too_new}, {oldest - 1, :server_too_old}] do
+        task = handshake_task(listen, :ik, ctx)
+        assert {:ok, rail} = open_manual(ctx, path, :ik)
+        responder = Task.await(task)
+
+        assert :ok = Rail.send_event(rail, "hello", hello_payload())
+        {_hello, responder} = responder_read(responder)
+
+        ack = Map.merge(played_ack(), %{"min_version" => oldest, "max_version" => newest})
+
+        {:ok, plaintext} =
+          Protocol.encode_server_frame("hello_ack", ack, 1, <<>>, version: oldest)
+
+        {:ok, ciphertext, _noise} =
+          Noise.encrypt(responder.noise, at_version(plaintext, version))
+
+        :ok = :gen_tcp.send(responder.socket, Carrier.message(ciphertext))
+
+        assert_receive {:rail, ^rail,
+                        {:closed,
+                         {:protocol_error, {:unsupported_protocol_version, ^side, ^version}}}}
+
         assert {:close, 1002, "mobile protocol error"} = read_frame(responder.socket)
       end
     end
@@ -541,6 +651,57 @@ defmodule FermixChannels.Mobile.RailTest do
     assert {:error, :invalid_psk} = Rail.open(@route, :ikpsk2_enroll, keys)
     assert {:error, :no_helper} = Rail.open(@route, :ik, Keyword.delete(keys, :helper))
     assert_raise FunctionClauseError, fn -> Rail.open(@route, :ikpsk2, keys) end
+  end
+
+  test "a dial names the route's address hints, at most eight", ctx do
+    File.mkdir_p!(Path.join(ctx.root, "mobile"))
+    File.chmod!(Path.join(ctx.root, "mobile"), 0o700)
+    socket = Path.join([ctx.root, "mobile", "dial-d1.sock"])
+    spy = start_supervised!({DesktopRail.DialSpy, {self(), socket}})
+    keys = [static_keypair: ctx.device, remote_static: ctx.gateway_public_key, helper: spy]
+    hints = ["100.101.102.103:4033", "[fd7a:115c:a1e0::9]:4033"]
+
+    assert {:error, {:dial, :unreachable}} =
+             Rail.open(Map.put(@route, :addrs, hints), :ik, keys)
+
+    assert_receive {:dial_op, %{"op" => "dial", "endpoint_id" => @peer_id, "addrs" => ^hints}}
+
+    # A route with none dials without them.
+    assert {:error, {:dial, :unreachable}} = Rail.open(Map.put(@route, :addrs, []), :ik, keys)
+    assert_receive {:dial_op, op}
+    refute Map.has_key?(op, "addrs")
+
+    too_many = List.duplicate("100.64.0.1:4033", 9)
+    assert {:error, :invalid_addrs} = Rail.open(Map.put(@route, :addrs, too_many), :ik, keys)
+    refute_received {:dial_op, _op}
+  end
+
+  test "an owner that asks for paths hears the one the dial opened on, then each change", ctx do
+    ctx = start_responder(ctx)
+    test = self()
+    real = bridge_connect(ctx.bridge_socket)
+
+    connect = fn ->
+      send(test, {:session, self()})
+
+      with {:ok, socket} <- real.(),
+           do: {:ok, socket, %{kind: :relay, relay: "https://relay.invalid/"}}
+    end
+
+    assert {:ok, rail} = open(ctx, connect: connect, paths: true)
+    assert_receive {:rail, ^rail, {:path, %{kind: :relay, relay: "https://relay.invalid/"}}}
+
+    # The helper's word that hole punching moved the connection.
+    send(rail, {:iroh_dial, "d1", {:path, %{kind: :direct, relay: nil}}})
+    assert_receive {:rail, ^rail, {:path, %{kind: :direct, relay: nil}}}
+    hello(rail)
+
+    # An owner that did not ask hears nothing of paths.
+    assert {:ok, quiet} = open(ctx, connect: connect)
+    assert_receive {:session, ^quiet}
+    send(quiet, {:iroh_dial, "d2", {:path, %{kind: :direct, relay: nil}}})
+    hello(quiet)
+    refute_received {:rail, ^quiet, {:path, _path}}
   end
 
   test "a rail with no helper to dial through fails the open, not the opener", ctx do

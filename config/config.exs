@@ -45,10 +45,12 @@ config :phoenix,
   filter_parameters:
     ~w(password passphrase secret token t _csrf_token access_token refresh_token bot_token verify_token api_key mobile_push_key mobile_apns_key)
 
+# No provider block names a model here: a save writes the app env back to
+# config.toml, so a model set here would be written as the owner's choice, and
+# `ModelCatalog.effective_model/2` is the one default for a block naming none.
 config :fermix_core,
   providers: [
     openai: [
-      default_model: "gpt-5.4-mini",
       default_temperature: 0.7
     ]
   ],
@@ -139,6 +141,18 @@ config :fermix_core,
 # Injected by module for the same reason as the dispatcher above
 # (`FermixCore.Home.Link`).
 config :fermix_core, :home_link, FermixChannels.Home.Link
+
+# How the server reaches a computer's session for an invocation (M97 §6.1):
+# through its peer. Injected by module for the same reason as the dispatcher
+# above (`FermixCore.Computers.Transport`).
+config :fermix_core, :computers_transport, FermixChannels.Desktop.InvokeTransport
+
+# What a computer can be asked by its server (M97 §6), by the wire's
+# capability name: the module whose `capabilities/0` maps each to its module,
+# so this computer's journal names each in the owner's words. Injected by
+# module for the same reason as the dispatcher above
+# (`FermixCore.Management.Computer`).
+config :fermix_core, :computer_capabilities, FermixChannels.Desktop.Invoke
 
 # Where the primary keeps snapshots beyond S3 (M75 §8, D19): its connected
 # desktops, over the rail. Injected by module for the same reason as the

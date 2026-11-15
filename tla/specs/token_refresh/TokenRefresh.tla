@@ -80,7 +80,7 @@
 \* SOURCE: apps/fermix_core/lib/fermix_core/auth/token_manager.ex @ 6d4919ab4a67
 \* SOURCE: apps/fermix_core/lib/fermix_core/auth/token_supervisor.ex @ 2e6da90246af
 \* SOURCE: apps/fermix_core/lib/fermix_core/auth/store.ex @ 5f5d2943f424
-\* SOURCE: apps/fermix_core/lib/fermix_core/auth/refresh_client.ex @ 8ddbae2d81fc
+\* SOURCE: apps/fermix_core/lib/fermix_core/auth/refresh_client.ex @ 5ceb88dad81f
 \* SOURCE: apps/fermix_core/lib/fermix_core/auth/token_expiry.ex @ 8373575105e9
 \* SOURCE: apps/fermix_core/lib/fermix_core/auth/xai_login.ex @ 65d372661f4f
 \* SOURCE: apps/fermix_core/lib/fermix_core/auth/anthropic_login.ex @ 2f13a06f0e4f
@@ -95,8 +95,8 @@
 \* SOURCE: apps/fermix_core/lib/fermix_core/auth/chatgpt/registration.ex#read,signed_out,@profile @ 8a05570f216c
 \* SOURCE: apps/fermix_core/lib/fermix/cli/plugins_command.ex @ be9afb0398a5
 \* SOURCE: apps/fermix_core/lib/fermix/cli/auth_command.ex @ 248ca48a51fc
-\* SOURCE: apps/fermix_core/lib/fermix/cli/daemon.ex @ 9b5813c82a53
-\* SOURCE: apps/fermix_core/lib/fermix/cli/daemon/client.ex @ fd0cff9607dc
+\* SOURCE: apps/fermix_core/lib/fermix/cli/daemon.ex @ 5e9f53c9e8bd
+\* SOURCE: apps/fermix_core/lib/fermix/cli/daemon/client.ex @ 1abb139ada33
 EXTENDS Naturals, FiniteSets
 
 CONSTANTS
@@ -104,7 +104,7 @@ CONSTANTS
     CliProfile,         \* the profile the CLI VM refreshes
     LogoutProfile,      \* the profile the user logs out of
     None,               \* "no token" / "no entry" / "no lock holder"
-    MaxAttempts,        \* RefreshClient @max_attempts (refresh_client.ex:36), 3 in the code
+    MaxAttempts,        \* RefreshClient @max_attempts (refresh_client.ex:43), 3 in the code
     Rounds,             \* bound: how many refreshes each refresher may start
     \* Environment switches: what may happen.
     CliRefreshes,           \* a tree-less CLI VM refreshes CliProfile directly
@@ -123,7 +123,7 @@ CONSTANTS
     StoreLock,              \* auth.json.lock around every Store.write and delete_provider (store.ex:179-185, :195-203)
     ProfileLock,            \* the profile's lock over one refresh, read to write, and over a delete (store.ex:220-226)
     RefusesMissingEntry,    \* a manager whose entry is gone drops its tokens (token_manager.ex:320-328, :381-405)
-    CliLogoutReachesDaemon  \* a CLI logout then has a running daemon let go of the profile (auth_command.ex:405-420, plugins_command.ex:520-545, cli/daemon.ex:1067-1097)
+    CliLogoutReachesDaemon  \* a CLI logout then has a running daemon let go of the profile (auth_command.ex:405-420, plugins_command.ex:520-545, cli/daemon.ex:1331-1361)
 
 ASSUME /\ CliProfile \in Profiles /\ LogoutProfile \in Profiles
        /\ MaxAttempts \in Nat \ {0} /\ Rounds \in Nat
@@ -329,12 +329,12 @@ CliStart(a) ==
 -----------------------------------------------------------------------------
 (* The refresh request: one provider-side effect each. RefreshClient.refresh *)
 (* posts the refresh token to the provider's token endpoint                  *)
-(* (refresh_client.ex:71-76, :92-121). The provider accepts only its newest  *)
+(* (refresh_client.ex:80-85, :101-130). The provider accepts only its newest *)
 (* token.                                                                    *)
 
 Valid(a) == ~revoked[Prof(a)] /\ tok[a] = issued[Prof(a)]
 
-\* 200: the provider rotates and the new pair arrives (refresh_client.ex:134-135).
+\* 200: the provider rotates and the new pair arrives (refresh_client.ex:143-144).
 \* refresh_entry goes on to Store.write.
 SendOk(a) ==
     /\ pc[a] = "send"
@@ -347,9 +347,9 @@ SendOk(a) ==
 
 \* The provider rotates, but the response is lost: Req's receive timeout, a
 \* closed connection, or a 5xx after the rotation. RefreshClient cannot tell
-\* and retries with the SAME refresh token (refresh_client.ex:140-143,
-\* :148-151). A 408 or a 429 takes the same retries (the classifier,
-\* :43-49); one sent after a rotation is this step. After the last attempt
+\* and retries with the SAME refresh token (refresh_client.ex:149-155,
+\* :160-167). A 408 or a 429 takes the same retries (the classifier,
+\* :52-58); one sent after a rotation is this step. After the last attempt
 \* the refresh fails with no state change (token_manager.ex:306-307) and the
 \* profile lock is released.
 SendLost(a) ==
@@ -364,8 +364,8 @@ SendLost(a) ==
     /\ UNCHANGED <<disk, revoked, mgr, mem, rounds, lpc, lbuf, best, slock, tfile>>
 
 \* A consumed token, or any token of a revoked session: a 4xx other than 408
-\* and 429, returned as {:permanent, status, body} (refresh_client.ex:43-49,
-\* :137-138). ChatGPT's refresh reads the provider's code, and a terminal
+\* and 429, returned as {:permanent, status, body} (refresh_client.ex:52-58,
+\* :146-147). ChatGPT's refresh reads the provider's code, and a terminal
 \* one, refresh_token_reused among them, is {:reconnect_needed, code}
 \* (chatgpt/refresh.ex:33-34, :81-92). A consumed token revokes the whole
 \* session (the rule in latest_entry's comment, token_manager.ex:496-500).
@@ -523,8 +523,8 @@ Freed(h) == IF h \in Actors /\ Killed(h) THEN None ELSE h
 \*      or its write, every CLI logout tells a running daemon to let go of
 \*      the profile (plugins_command.ex:278, :520-545; auth_command.ex:
 \*      321-354, :361-379, :405-420): an `auth_forget` request on the
-\*      control socket (cli/daemon/client.ex:60-74), answered by
-\*      forget_signed_out (cli/daemon.ex:843, :1067-1097). Without
+\*      control socket (cli/daemon/client.ex:70-84), answered by
+\*      forget_signed_out (cli/daemon.ex:1088, :1331-1361). Without
 \*      CliLogoutReachesDaemon, or when the daemon does not answer "ok"
 \*      (the CLI then exits non-zero), nothing reaches the manager.
 \*    - The in-daemon plugin logout calls it right after its delete

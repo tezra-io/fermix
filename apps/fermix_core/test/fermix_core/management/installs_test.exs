@@ -79,6 +79,7 @@ defmodule FermixCore.Management.InstallsTest do
       assert {:ok, started} =
                Capabilities.install_start("meetbot",
                  jobs: jobs,
+                 always_on_server: false,
                  install: install,
                  install_browser: install_browser
                )
@@ -129,11 +130,37 @@ defmodule FermixCore.Management.InstallsTest do
     test "an unpinned notetaker release refuses in the installer's own words", %{jobs: jobs} do
       install = fn -> {:error, :no_pinned_release} end
 
-      assert {:ok, started} = Capabilities.install_start("meetbot", jobs: jobs, install: install)
+      assert {:ok, started} =
+               Capabilities.install_start("meetbot",
+                 jobs: jobs,
+                 always_on_server: false,
+                 install: install
+               )
+
       assert {:ok, done} = terminal(jobs, started["job_id"])
 
       assert done["status"] == "failed"
       assert done["failure"]["sentence"] =~ "No meetbot sidecar release is pinned"
+    end
+
+    # M97 D24: on an Always On server the notetaker joins Zoom alone, which
+    # needs no binary, and Google Meet is unavailable there, so its install
+    # downloads nothing and says why, in the sentence every surface uses.
+    test "the notetaker install on an Always On server says Google Meet is unavailable", %{
+      jobs: jobs
+    } do
+      opts = [
+        jobs: jobs,
+        always_on_server: true,
+        install: fn -> flunk("a server must not download the notetaker") end,
+        install_browser: fn -> flunk("a server must not download its browser") end
+      ]
+
+      assert {:ok, started} = Capabilities.install_start("meetbot", opts)
+      assert {:ok, done} = terminal(jobs, started["job_id"])
+
+      assert done["status"] == "failed"
+      assert done["failure"]["sentence"] == FermixCore.Meetings.meet_unavailable_sentence()
     end
 
     # The app's install row runs on every Mac, so a machine this build has no
@@ -264,6 +291,34 @@ defmodule FermixCore.Management.InstallsTest do
 
       assert {:error, {:busy, "capability_install"}} =
                Capabilities.install_start("computer_use_sidecar", jobs: jobs, install: install)
+    end
+
+    # Two rows start a capability_install (Voice's speech model, Meetings'
+    # notetaker), and a linked computer's own helpers join them in job.list:
+    # each job names its target from the start, so a row finds its own. Each
+    # install here refuses at once, so nothing is downloaded.
+    test "each install's job names its target, from its start on", %{jobs: jobs} do
+      refuse = fn -> {:error, :no_pinned_release} end
+
+      for target <- Capabilities.targets() do
+        assert {:ok, %{"target" => ^target, "job_id" => job_id}} =
+                 Capabilities.install_start(target,
+                   jobs: jobs,
+                   install: refuse,
+                   offered?: false,
+                   always_on_server: false
+                 )
+
+        assert {:ok, %{"status" => "failed", "target" => ^target}} = terminal(jobs, job_id)
+      end
+
+      assert {:ok, %{"target" => "browser", "job_id" => job_id}} =
+               Capabilities.browser_install_start(
+                 jobs: jobs,
+                 install: fn -> {:error, :no_pinned_release} end
+               )
+
+      assert {:ok, %{"target" => "browser"}} = terminal(jobs, job_id)
     end
 
     test "the published target catalog is closed" do
@@ -555,6 +610,21 @@ defmodule FermixCore.Management.InstallsTest do
       assert done["failure"]["sentence"] =~ "browser is not installed yet"
     end
 
+    # M97 D24: the sign-in opens a window, and an Always On server has no
+    # screen, so after a move it refuses before it launches anything.
+    test "a sign-in on an Always On server says Google Meet is unavailable", %{jobs: jobs} do
+      opts =
+        jobs
+        |> signin_opts(fn -> flunk("a server must not open a sign-in window") end)
+        |> Keyword.put(:always_on_server, true)
+
+      assert {:ok, started} = Meetings.signin_start(opts)
+      assert {:ok, done} = terminal(jobs, started["job_id"])
+
+      assert done["status"] == "failed"
+      assert done["failure"]["sentence"] == FermixCore.Meetings.meet_unavailable_sentence()
+    end
+
     test "a cancelled sign-in says so rather than reporting a bare exit", %{jobs: jobs} do
       assert {:ok, started} =
                Meetings.signin_start(signin_opts(jobs, fn -> {:error, :cancelled} end))
@@ -622,7 +692,8 @@ defmodule FermixCore.Management.InstallsTest do
       jobs: jobs,
       signin: signin,
       installed?: fn -> true end,
-      browser_installed?: fn -> true end
+      browser_installed?: fn -> true end,
+      always_on_server: false
     ]
   end
 

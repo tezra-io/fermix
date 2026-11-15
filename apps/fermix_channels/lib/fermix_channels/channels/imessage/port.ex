@@ -16,9 +16,12 @@ defmodule FermixChannels.Channels.IMessage.Port do
   process running: the exit status is classified, `64` (usage) and `70`–`72`
   (the disclaim contract) and a mismatch are never retried, anything else is
   re-spawned with backoff from 5 s doubling to a 60 s cap, retried
-  indefinitely. The transport telemetry fires on transitions only: one
-  `:degraded` at the first failure, one `:recovered` when a spawn answers
-  `initialize` again. A raise in this module's own code still crashes it.
+  indefinitely. A port that exits with no status, because a write met the
+  helper's closed input, is retried as `:helper_exited_in_handshake` during
+  the handshake and `:helper_exited` after it. The transport telemetry fires
+  on transitions only: one `:degraded` at the first failure, one `:recovered`
+  when a spawn answers `initialize` again. A raise in this module's own code
+  still crashes it.
   """
 
   use GenServer
@@ -61,6 +64,8 @@ defmodule FermixChannels.Channels.IMessage.Port do
           | :helper_missing
           | {:helper_spawn_failed, atom()}
           | :helper_timeout
+          | :helper_exited_in_handshake
+          | :helper_exited
           | :helper_protocol_mismatch
           | :helper_initialize_failed
           | :protocol_error
@@ -85,11 +90,13 @@ defmodule FermixChannels.Channels.IMessage.Port do
     GenServer.start_link(__MODULE__, opts, name: name)
   end
 
+  # The helper runs here, so the turn's origin decides nothing it does.
   @impl FermixChannels.Channels.IMessage.Helper
-  @spec call(GenServer.server(), String.t(), map(), pos_integer()) ::
+  @spec call(GenServer.server(), String.t(), map(), pos_integer(), map()) ::
           {:ok, map()} | {:error, FermixChannels.Channels.IMessage.Helper.error()}
-  def call(server, method, params, timeout)
-      when is_binary(method) and is_map(params) and is_integer(timeout) and timeout > 0 do
+  def call(server, method, params, timeout, turn)
+      when is_binary(method) and is_map(params) and is_integer(timeout) and timeout > 0 and
+             is_map(turn) do
     GenServer.call(server, {:request, method, params, timeout}, timeout + @call_margin_ms)
   catch
     :exit, {:noproc, _call} -> {:error, not_running()}
@@ -189,8 +196,15 @@ defmodule FermixChannels.Channels.IMessage.Port do
     {:noreply, %{state | listener: nil, listener_ref: nil}}
   end
 
-  # A port is linked to its owner, and this process traps exits; the exit
-  # status (or our own close) already accounted for the helper.
+  # A port is linked to its owner, and this process traps exits. The current
+  # port exits with no exit status when a write met the helper's closed input
+  # (EPIPE). The helper can no longer be reached, so that is its death, and the
+  # restart rules follow.
+  def handle_info({:EXIT, port, _reason}, %{port: port} = state) do
+    {:noreply, note_failure(%{state | port: nil}, :helper_exited)}
+  end
+
+  # Any other port's exit status, or our own close, already accounted for it.
   def handle_info({:EXIT, port, _reason}, state) when is_port(port), do: {:noreply, state}
 
   # Output of a helper this process already gave up on (closed after a protocol
@@ -209,7 +223,7 @@ defmodule FermixChannels.Channels.IMessage.Port do
     {:ok, line} = Protocol.encode_request(state.next_id, "shutdown", %{})
 
     case command(port, line) do
-      :ok -> await_exit(port, @shutdown_wait_ms)
+      :ok -> await_exit(port, state.shutdown_wait_ms)
       {:error, :closed} -> :ok
     end
 
@@ -225,6 +239,7 @@ defmodule FermixChannels.Channels.IMessage.Port do
       backoff_initial_ms: Keyword.get(opts, :backoff_initial_ms, @backoff_initial_ms),
       backoff_max_ms: Keyword.get(opts, :backoff_max_ms, @backoff_max_ms),
       init_timeout_ms: Keyword.get(opts, :init_timeout_ms, @init_timeout_ms),
+      shutdown_wait_ms: Keyword.get(opts, :shutdown_wait_ms, @shutdown_wait_ms),
       max_outstanding: Keyword.get(opts, :max_outstanding, @max_outstanding),
       port: nil,
       status: :backoff,
@@ -274,9 +289,10 @@ defmodule FermixChannels.Channels.IMessage.Port do
     deadline = System.monotonic_time(:millisecond) + state.init_timeout_ms
     state = %{state | next_id: id + 1}
 
-    # The write fails only when the helper already exited. Its exit status, the
-    # real reason, is then the next message from the port, so both outcomes
-    # wait for the answer.
+    # A write to a helper that has exited fails in the port, which then exits
+    # with the helper's exit status or, when the write met its closed input
+    # (EPIPE), with an EXIT and none. The wait reads either, so both results
+    # of the write go to it.
     case command(state.port, line) do
       written when written in [:ok, {:error, :closed}] -> await_handshake(state, id, deadline)
     end
@@ -289,6 +305,7 @@ defmodule FermixChannels.Channels.IMessage.Port do
     receive do
       {^port, {:data, data}} -> handshake_data(state, id, deadline, take_line(state, data))
       {^port, {:exit_status, code}} -> {:error, {:helper_exit, code}, %{state | port: nil}}
+      {:EXIT, ^port, _reason} -> {:error, :helper_exited_in_handshake, %{state | port: nil}}
     after
       remaining -> {:error, :helper_timeout, close_helper(state)}
     end
@@ -582,9 +599,12 @@ defmodule FermixChannels.Channels.IMessage.Port do
     ArgumentError -> :ok
   end
 
+  # A shutdown written to a helper that has exited or stopped reading fails
+  # with EPIPE and the port exits with no status: its EXIT ends the wait too.
   defp await_exit(port, wait_ms) do
     receive do
       {^port, {:exit_status, _code}} -> :ok
+      {:EXIT, ^port, _reason} -> :ok
       {^port, {:data, _discarded}} -> await_exit(port, wait_ms)
     after
       wait_ms -> :ok

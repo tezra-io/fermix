@@ -16,24 +16,53 @@ defmodule FermixChannels.Mobile.DeviceRegistry do
   asks the remote-reach rail to recompute the relays it uses (M62 §5), a cast
   that never waits on the rail.
 
+  A phone's voice call (`Mobile.Call`) outlives the socket it started on, so
+  revocation tells the device's call itself (`{:mobile_revoked, device_id}`),
+  whether or not a socket is attached; the call cancels the hand-offs it
+  started, which run as `voice` and are claimed by no device. A device whose
+  row is gone while its socket is attached ends its call too (`{:call_end,
+  :unknown_device}`).
+
   Each entry carries its device's kind, read from the trust store when the
   socket attaches (M75 §3): `:phone`, or `:desktop` for a desktop engine's
   session. The phones' audience (`broadcast/3`, `connected/2`) is phones
   only: a desktop's chat rides its companion tunnel, and a connected desktop
   is not a phone that makes a push unnecessary. A desktop is found through
   `FermixChannels.Desktop.Peer`.
+
+  ## The push relay's reach (M99 §6)
+
+  A phone that is away is reached through Fermix's push relay, and this
+  registry also holds, in memory alone, whether the relay could be reached
+  when it was last asked (`push_relay/1`): `:unknown` until a push to an
+  Android phone has ended since the channel started, `:unreachable` once one
+  ended with no push accepted and the relay not reached after its tries, and
+  `:reachable` again at the next accepted push (`relay_outcome/2`, which
+  `Push.RelayLeg` casts without waiting). The channel's status and Doctor
+  read it. Only the transitions are logged and emitted, as
+  `[:fermix, :channel, :transport]` with channel `:mobile_push_relay`
+  (`degraded` with the failure's class, `recovered` with how many pushes in a
+  row could not reach the relay).
   """
 
   use GenServer
 
+  require Logger
+
   alias FermixChannels.Companion.Turns
+  alias FermixChannels.Mobile.Call
   alias FermixChannels.Mobile.DeviceStore
   alias FermixChannels.Mobile.Iroh.Helper
+  alias FermixChannels.Telemetry
 
   @type device_id :: String.t()
   @type profile_id :: String.t()
   @type kind :: :phone | :desktop
   @type entry :: %{device_id: device_id(), pid: pid(), profile_id: profile_id(), kind: kind()}
+  @typedoc "Whether Fermix's push relay could be reached when it was last asked."
+  @type push_relay :: :unknown | :reachable | :unreachable
+  @typedoc "What one push leg learned of the relay (`Push.RelayLeg.relay_outcome/0`)."
+  @type relay_outcome :: :reached | {:unreachable, atom()}
 
   @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(opts \\ []) when is_list(opts) do
@@ -114,6 +143,23 @@ defmodule FermixChannels.Mobile.DeviceRegistry do
     GenServer.cast(server, {:broadcast, profile_id, event})
   end
 
+  @doc """
+  Records what one push leg learned of Fermix's push relay, without waiting:
+  a registry that is not running (the phone channel is off) has nothing to
+  record it for.
+  """
+  @spec relay_outcome(GenServer.server(), relay_outcome()) :: :ok
+  def relay_outcome(server \\ __MODULE__, outcome)
+
+  def relay_outcome(server, :reached), do: GenServer.cast(server, {:relay_outcome, :reached})
+
+  def relay_outcome(server, {:unreachable, class} = outcome) when is_atom(class),
+    do: GenServer.cast(server, {:relay_outcome, outcome})
+
+  @doc "Whether Fermix's push relay could be reached when it was last asked."
+  @spec push_relay(GenServer.server()) :: push_relay()
+  def push_relay(server \\ __MODULE__), do: GenServer.call(server, :push_relay)
+
   @impl true
   def init(opts) when is_list(opts) do
     {:ok,
@@ -125,8 +171,17 @@ defmodule FermixChannels.Mobile.DeviceRegistry do
        authorize_device: Keyword.get(opts, :authorize_device, &DeviceStore.fetch/2),
        delete_device: Keyword.get(opts, :delete_device, &DeviceStore.delete/2),
        revoke_requests: Keyword.get(opts, :revoke_requests, &Turns.revoke_device(Turns, &1)),
+       end_call: Keyword.get(opts, :end_call, &Call.notify(&1, &2)),
        relays_changed:
-         Keyword.get(opts, :relays_changed, fn -> Helper.relays_acknowledged(Helper) end)
+         Keyword.get(opts, :relays_changed, fn -> Helper.relays_acknowledged(Helper) end),
+       push_relay: :unknown,
+       relay_failures: 0,
+       emit_relay:
+         Keyword.get(
+           opts,
+           :emit_relay,
+           &Telemetry.emit_transport(:mobile_push_relay, &1, &2, &3)
+         )
      }}
   end
 
@@ -180,12 +235,14 @@ defmodule FermixChannels.Mobile.DeviceRegistry do
       :ok ->
         state = revoke_presence(state, device_id)
         :ok = state.revoke_requests.(device_id)
+        :ok = state.end_call.(device_id, {:mobile_revoked, device_id})
         :ok = state.relays_changed.()
         {:reply, :ok, state}
 
       {:error, {:device_not_found, ^device_id}} = missing ->
         state = revoke_presence(state, device_id)
         :ok = state.revoke_requests.(device_id)
+        :ok = state.end_call.(device_id, {:mobile_revoked, device_id})
         {:reply, missing, state}
 
       {:error, _reason} = error ->
@@ -202,6 +259,8 @@ defmodule FermixChannels.Mobile.DeviceRegistry do
       _missing_or_replaced -> {:reply, {:error, :not_connected}, state}
     end
   end
+
+  def handle_call(:push_relay, _from, state), do: {:reply, state.push_relay, state}
 
   def handle_call({:send_device_event, device_id, event}, _from, state) do
     case Map.get(state.by_device, device_id) do
@@ -223,6 +282,8 @@ defmodule FermixChannels.Mobile.DeviceRegistry do
 
     {:noreply, state}
   end
+
+  def handle_cast({:relay_outcome, outcome}, state), do: {:noreply, record_relay(state, outcome)}
 
   @impl true
   def handle_info({:DOWN, ref, :process, pid, _reason}, state) do
@@ -278,6 +339,7 @@ defmodule FermixChannels.Mobile.DeviceRegistry do
         {:reply, :ok, state}
 
       {:error, _reason} = error ->
+        :ok = state.end_call.(device_id, {:call_end, :unknown_device})
         {:reply, error, revoke_presence(state, device_id)}
     end
   end
@@ -344,6 +406,34 @@ defmodule FermixChannels.Mobile.DeviceRegistry do
     |> update_in([:by_device], &Map.delete(&1, entry.device_id))
     |> update_in([:by_pid], &Map.delete(&1, entry.pid))
     |> update_in([:by_ref], &Map.delete(&1, entry.ref))
+  end
+
+  # The first push that could not reach the relay, and the first accepted one
+  # after it, are the transitions said and emitted; the pushes between only
+  # count (moduledoc).
+  defp record_relay(%{push_relay: :unreachable} = state, :reached) do
+    Logger.info(
+      "mobile push relay reached again, after #{state.relay_failures} push(es) " <>
+        "that could not reach it"
+    )
+
+    :ok = state.emit_relay.(:recovered, state.relay_failures, :none)
+    %{state | push_relay: :reachable, relay_failures: 0}
+  end
+
+  defp record_relay(state, :reached), do: %{state | push_relay: :reachable, relay_failures: 0}
+
+  defp record_relay(%{push_relay: :unreachable} = state, {:unreachable, _class}),
+    do: %{state | relay_failures: state.relay_failures + 1}
+
+  defp record_relay(state, {:unreachable, class}) do
+    Logger.warning(
+      "mobile push relay cannot be reached (#{class}): an Android phone shows new " <>
+        "messages when its app is opened"
+    )
+
+    :ok = state.emit_relay.(:degraded, 1, class)
+    %{state | push_relay: :unreachable, relay_failures: 1}
   end
 
   defp option(opts, key, default) when is_list(opts), do: Keyword.get(opts, key, default)

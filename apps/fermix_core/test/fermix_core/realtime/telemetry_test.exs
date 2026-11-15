@@ -43,6 +43,18 @@ defmodule FermixCore.Realtime.TelemetryTest do
     assert meta.voice == "marin"
   end
 
+  # M87: who the call runs for (`desktop`, `<kind>:<device_id>`), on its start alone.
+  test "call_start names the endpoint the call runs for" do
+    Telemetry.call_start(Map.put(@meta, :endpoint, "phone:0d7f6a52"))
+
+    assert_receive {:rt, [:fermix, :realtime, :call_start], %{}, meta}
+    assert meta.endpoint == "phone:0d7f6a52"
+
+    Telemetry.session_created(Map.put(@meta, :endpoint, "phone:0d7f6a52"))
+    assert_receive {:rt, [:fermix, :realtime, :session_created], _m, created}
+    refute Map.has_key?(created, :endpoint)
+  end
+
   test "session_created and session_updated emit" do
     Telemetry.session_created(@meta)
     assert_receive {:rt, [:fermix, :realtime, :session_created], _m, _meta}

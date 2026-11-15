@@ -38,10 +38,14 @@ defmodule FermixChannels.Test.SessionDriver do
   end
 
   @doc "Sends one client event, encrypted, at `seq`."
-  def client_send(driver, client, type, payload, seq, bytes \\ <<>>) do
+  def client_send(driver, client, type, payload, seq, bytes \\ <<>>),
+    do: client_send_at(driver, client, Protocol.protocol_version(), type, payload, seq, bytes)
+
+  @doc "Sends one client event, encrypted, at `seq`, its envelope at `version`."
+  def client_send_at(driver, client, version, type, payload, seq, bytes \\ <<>>) do
     header =
       payload
-      |> Map.merge(%{"v" => Protocol.protocol_version(), "t" => type, "seq" => seq})
+      |> Map.merge(%{"v" => version, "t" => type, "seq" => seq})
       |> Jason.encode!()
 
     plaintext = <<byte_size(header)::unsigned-big-32, header::binary, bytes::binary>>
@@ -49,6 +53,20 @@ defmodule FermixChannels.Test.SessionDriver do
     wire(driver, ciphertext)
     client
   end
+
+  @doc """
+  Holds the carrier before its next read, so whatever the test sends it waits
+  in its mailbox, in order, until `release/2`.
+  """
+  def hold(driver) do
+    ref = make_ref()
+    send(driver, {:driver_hold, self(), ref})
+    assert_receive {:driver_held, ^ref}
+    ref
+  end
+
+  @doc "Lets a held carrier read again."
+  def release(driver, ref), do: send(driver, {:driver_release, ref})
 
   @doc "Waits for the session's next push and decodes its events: `{[{header, bytes}], client}`."
   def client_receive(driver, client) do
@@ -83,7 +101,16 @@ defmodule FermixChannels.Test.SessionDriver do
     receive do
       {:driver_wire, bytes} -> bytes |> Session.handle_frame(state) |> carry(test)
       {:driver_to_test, message} -> forward(message, state, test)
+      {:driver_hold, from, ref} -> held(from, ref, state, test)
       message -> message |> Session.handle_info(state) |> carry(test)
+    end
+  end
+
+  defp held(from, ref, state, test) do
+    send(from, {:driver_held, ref})
+
+    receive do
+      {:driver_release, ^ref} -> loop(state, test)
     end
   end
 

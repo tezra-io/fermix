@@ -208,10 +208,14 @@ defmodule FermixCore.Capabilities.Builtin do
       owner_only?: true
     },
     # The owner's lists (MILESTONE_85 §11). Owner-only because every row is the
-    # owner's; the advertise?/execute gates (`Checklists.Access`) are the hard
+    # owner's; the advertise?/execute gates (`Kept.Access`) are the hard
     # barrier, and these registry fields do not replace it.
     "checklist_read" => %{policy_class: :read_only, hidden_from_agent?: false, owner_only?: true},
     "checklist_edit" => %{policy_class: :read_write, hidden_from_agent?: false, owner_only?: true},
+    # The owner's trips (M89 §14), as the lists: every row is the owner's, and
+    # the advertise?/execute gates (`Kept.Access`) are the hard barrier.
+    "trip_read" => %{policy_class: :read_only, hidden_from_agent?: false, owner_only?: true},
+    "trip_edit" => %{policy_class: :read_write, hidden_from_agent?: false, owner_only?: true},
     # Meetings notetaker (MILESTONE_21 C2 §14.1). `:external_api` sits in the
     # operator's default policy and the guest deny-list, and owner-only keeps
     # the owner's own meetings out of a guest's surface; the attended-operator
@@ -296,6 +300,9 @@ defmodule FermixCore.Capabilities.Builtin do
     })
   end
 
+  # A tool a computer of the home can run carries its capability module as
+  # `computer` (M97 §6.5): `Computers.Argument` and `Computers.Choice` read it.
+  # Skill and MCP capabilities are never built here, so they never carry it.
   defp metadata(tool_module) do
     %{
       tool_module: tool_module,
@@ -305,7 +312,13 @@ defmodule FermixCore.Capabilities.Builtin do
       requires_setup: callback_or(tool_module, :requires_setup, nil),
       category: callback_or(tool_module, :category, :system)
     }
+    |> put_computer(callback_or(tool_module, :computer_capability, nil))
   end
+
+  defp put_computer(metadata, nil), do: metadata
+
+  defp put_computer(metadata, module) when is_atom(module),
+    do: Map.put(metadata, :computer, module)
 
   defp callback_or(module, function, default) do
     if function_exported?(module, function, 0) do

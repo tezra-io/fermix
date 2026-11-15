@@ -2,11 +2,15 @@ defmodule FermixCore.Home.ArchiveTest do
   use ExUnit.Case, async: true
 
   alias Exqlite.Sqlite3
+  alias FermixCore.Accessories.P256
+  alias FermixCore.Accessories.Record, as: AccessoryRecord
+  alias FermixCore.Accessories.Store, as: AccessoryStore
   alias FermixCore.Home.Archive
   alias FermixCore.Home.Archive.Manifest
   alias FermixCore.Home.Archive.Seal
   alias FermixCore.Home.Epoch
   alias FermixCore.Home.Moved
+  alias FermixCore.Home.Readable
   alias FermixCore.Memory.Repo.ComputerHistorySql
   alias FermixTestSupport.SafeRm
 
@@ -32,8 +36,6 @@ defmodule FermixCore.Home.ArchiveTest do
     "plugins/installed/invented/1.0.0/bin/run" => 0o755
   }
 
-  @database_files ["memory.db", "memory.db-wal", "memory.db-shm"]
-
   # An installed plugin names its version through a relative link.
   @link {"plugins/installed/invented/current", "1.0.0"}
 
@@ -48,7 +50,12 @@ defmodule FermixCore.Home.ArchiveTest do
     "browser/profiles/default/Cookies",
     "imessage/cursor.json",
     "harness/runs/run-1/stdout.log",
-    "grants/grant-1793083733-1.json"
+    "grants/grant-1793083733-1.json",
+    # M97 §4: this computer's own settings, and an interrupted write of them.
+    "machine.toml",
+    "machine.toml.tmp",
+    # M97 D13: a computer's own key, where its home keeps secrets as files.
+    "secrets/device.desktop_key"
   ]
 
   setup do
@@ -85,42 +92,47 @@ defmodule FermixCore.Home.ArchiveTest do
                 %{
                   files: created.files,
                   epoch: 4,
-                  rewritten: ["sandbox.workspace_root"],
-                  kept_paths: ["sandbox.helper"],
-                  harness_consent_reset: true,
+                  rewritten: ["fermix_core.meetings.recordings"],
+                  kept_paths: ["fermix_core.meetings.helper"],
                   secret_store_switched: false,
-                  imessage_disabled: false,
+                  instance_role_dropped: false,
+                  # The coding approval is the computer's own (M98 D5).
+                  device_settings_dropped: ["fermix_core.harness.approved"],
                   keyring_secrets: 2,
-                  screen_history_removed: 3,
                   source_host: @host,
                   host: @host,
                   plugins_to_reinstall: []
                 }}
 
-      # The database's own files belong to SQLite once the restore has cleared
-      # screen history from it; the database is checked below.
-      for {path, file_mode} <- @included, path not in @database_files do
+      # Every file arrives as it was archived but the database: the restore
+      # opens it only to give its history a new identity (M97 §8.5, HS-4), and
+      # SQLite folds its sidecars into it as it closes.
+      for {path, file_mode} <- Map.drop(@included, ["memory.db-wal", "memory.db-shm"]) do
         restored = Path.join(into, path)
         assert mode(restored) == file_mode, path
 
-        if path != "config.toml",
+        if path not in ["config.toml", "memory.db"],
           do: assert(File.read!(restored) == File.read!(Path.join(home, path)), path)
       end
 
-      assert mode(Path.join(into, "memory.db")) == @included["memory.db"]
+      refute token(Path.join(into, "memory.db")) == "invented-token"
 
-      # The value that named the old home moved and consent was withdrawn;
-      # nothing else in the file changed.
+      # The value that named the old home moved and the computer's coding
+      # approval was left out (M98 D5); nothing else in the file changed.
       assert File.read!(Path.join(into, "config.toml")) ==
                config_toml(home)
-               |> String.replace(~s("#{home}/workspace"), ~s("#{into}/workspace"))
-               |> String.replace("approved = true", "approved = false")
+               |> String.replace(
+                 ~s("#{home}/workspace/meetings"),
+                 ~s("#{into}/workspace/meetings")
+               )
+               |> String.replace("[fermix_core.harness]\napproved = true\n\n", "")
 
-      # Screen history went from the restored database and nothing else did; the
-      # archived home's own database is untouched.
-      assert screen_history_rows(Path.join(into, "memory.db")) == 0
+      # Computer history's notes are the home's and travel with it (M97 §8.6): a
+      # restore deletes none of them. A home from before memory.db's migration 59
+      # still holds raw events, which its first boot drops (`Memory.Repo`).
+      assert history_rows(Path.join(into, "memory.db")) == 3
       assert unrelated_rows(Path.join(into, "memory.db")) == 1
-      assert screen_history_rows(Path.join(home, "memory.db")) == 3
+      assert history_rows(Path.join(home, "memory.db")) == 3
 
       {link, target} = @link
       assert File.read_link(Path.join(into, link)) == {:ok, target}
@@ -134,6 +146,34 @@ defmodule FermixCore.Home.ArchiveTest do
       refute File.exists?(Path.join(into, "moved.json"))
     end
 
+    # M91 D7: the accessory pairing store travels with the home, and the modes
+    # its strict reads require survive the trip, so a restored or moved home
+    # keeps its accessories paired; an interrupted write stays behind.
+    test "carries the accessory store with the modes its reads require",
+         %{home: home, archive: archive, into: into} do
+      {:ok, key} = AccessoryStore.ensure_host_key(home)
+      {pk, _private} = P256.generate()
+
+      record = %AccessoryRecord{
+        accessory_id: P256.id(pk),
+        accessory_pk: pk,
+        kind: "stackchan",
+        name: "StackChan",
+        enrolled_at: ~U[2026-11-07 22:04:22Z]
+      }
+
+      :ok = AccessoryStore.put(home, record)
+      File.write!(AccessoryStore.records_path(home) <> ".tmp.9", "partial")
+
+      assert {:ok, _created} = create(home, archive)
+      assert {:ok, _restored} = restore(archive, into)
+
+      assert {:ok, ^key} = AccessoryStore.load_host_key(into)
+      assert {:ok, [^record]} = AccessoryStore.list(into)
+      assert mode(AccessoryStore.dir(into)) == 0o700
+      refute File.exists?(AccessoryStore.records_path(into) <> ".tmp.9")
+    end
+
     test "into the path the home was archived from rewrites nothing",
          %{tmp: tmp, home: home, archive: archive} do
       {:ok, _created} = create(home, archive)
@@ -142,7 +182,7 @@ defmodule FermixCore.Home.ArchiveTest do
       assert {:ok, %{rewritten: [], epoch: 4}} = restore(archive, home)
 
       assert File.read!(Path.join(home, "config.toml")) ==
-               String.replace(config_toml(home), "approved = true", "approved = false")
+               String.replace(config_toml(home), "[fermix_core.harness]\napproved = true\n\n", "")
     end
 
     test "leaves only the archive beside the destination", %{home: home, archive: archive} do
@@ -199,6 +239,20 @@ defmodule FermixCore.Home.ArchiveTest do
       refute File.exists?(into)
     end
 
+    # M97 §8.5, HS-4: the store gets a new history identity before the home is
+    # used, so one that is no database refuses the restore, and nothing stays.
+    test "a memory.db that is no database refuses it, and nothing it wrote stays",
+         %{tmp: tmp, into: into} do
+      archive =
+        craft!(tmp, [
+          {%{path: "memory.db", content: "not a database"}, "not a database"},
+          {%{path: "journals/day.md", content: "an invented day\n"}, "an invented day\n"}
+        ])
+
+      assert {:error, {:history_identity, _reason}} = restore(archive, into)
+      refute File.exists?(into)
+    end
+
     test "leaves an existing root empty", %{tmp: tmp, into: into} do
       File.mkdir_p!(into)
 
@@ -246,6 +300,18 @@ defmodule FermixCore.Home.ArchiveTest do
       assert config.sha256 == Base.encode16(:crypto.hash(:sha256, content), case: :lower)
       assert config.mode == 0o600
     end
+
+    # EC2 test 2026-11-08: a dev plugin folder is links to checkouts on this
+    # machine, outside the home. It stays here (`DeviceLocal`), so the walk
+    # neither carries nor refuses it.
+    test "no dev plugin folder, its links out of the home included", %{home: home} do
+      File.mkdir_p!(Path.join(home, "dev-plugins"))
+      File.ln_s!("/etc", Path.join(home, "dev-plugins/tesla"))
+
+      assert {:ok, found, links} = Archive.collect(home, :infinity)
+      paths = Enum.map(found, &elem(&1, 0)) ++ Enum.map(links, & &1.path)
+      refute Enum.any?(paths, &String.starts_with?(&1, "dev-plugins"))
+    end
   end
 
   describe "create refuses" do
@@ -263,15 +329,25 @@ defmodule FermixCore.Home.ArchiveTest do
       refute File.exists?(archive)
     end
 
+    # The probe reads the home's real socket. The listener answers `hello` as
+    # soon as the frame arrives: the engine's own daemon answers through the
+    # management router and this VM's global settings. The reply bound is the
+    # test's own: an answer returns at once, and the client's 3 s raced a busy
+    # runner (read as "could not tell").
     test "through the daemon socket the CLI's own probe reads" do
       root = short_root!()
       seed_home!(root)
       out = SafeRm.make_tmp_dir!("home_archive_out")
       on_exit(fn -> SafeRm.rm_rf!(out) end)
       archive = Path.join(out, "home.fxhome")
-      start_daemon!(Path.join(root, "daemon.sock"))
+      listen = listening!(Path.join(root, "daemon.sock"))
+      test = self()
+      start_supervised!({Task, fn -> answer_hello(listen, test) end})
 
-      assert Archive.create(root, @passphrase, to: archive) == {:error, :daemon_running}
+      assert Archive.create(root, @passphrase, to: archive, hello_timeout: 10_000) ==
+               {:error, :daemon_running}
+
+      assert_receive {:asked, "hello"}
       refute File.exists?(archive)
     end
 
@@ -419,19 +495,32 @@ defmodule FermixCore.Home.ArchiveTest do
                {:error, {:unlisted_entry, "home/stowaway"}}
     end
 
-    test "refuses a home a newer engine wrote, and writes nothing", %{tmp: tmp, into: into} do
-      archive =
-        craft!(tmp, [{%{path: "config.toml", content: "x"}, "x"}], engine_version: "99.0.0")
+    # M97 D16: a restore reads a home by its format, never by the engine
+    # that wrote it.
+    test "refuses a home in a newer format, and writes nothing", %{tmp: tmp, into: into} do
+      ours = Readable.home_format()
+      config = [{%{path: "config.toml", content: "x"}, "x"}]
+      archive = craft!(tmp, config, engine_version: "0.0.1", home_format: ours + 1)
 
-      assert restore(archive, into) ==
-               {:error, {:newer_engine, "99.0.0", FermixCore.BuildInfo.product_version()}}
-
+      assert restore(archive, into) == {:error, {:newer_home_format, ours + 1, ours}}
       refute File.exists?(into)
+    end
 
-      older =
-        craft!(tmp, [{%{path: "config.toml", content: "x"}, "x"}], engine_version: "0.0.1")
+    test "restores a home of this format that a newer engine wrote", %{tmp: tmp, into: into} do
+      config = [{%{path: "config.toml", content: "x"}, "x"}]
+      archive = craft!(tmp, config, engine_version: "99.0.0", home_format: Readable.home_format())
 
-      assert {:ok, _restored} = restore(older, into)
+      assert {:ok, %{epoch: 4}} = restore(archive, into)
+      assert File.read!(Path.join(into, "config.toml")) == "x"
+    end
+
+    # An engine before home formats wrote none; every such engine is older
+    # than this one, and its home is format 1, the oldest there is.
+    test "restores a home whose manifest names no format", %{tmp: tmp, into: into} do
+      config = [{%{path: "config.toml", content: "x"}, "x"}]
+      archive = craft!(tmp, config, engine_version: "0.17.0", home_format: :absent)
+
+      assert {:ok, %{epoch: 4}} = restore(archive, into)
     end
 
     test "refuses a manifest at the highest epoch, which has no next one", %{tmp: tmp, into: into} do
@@ -446,10 +535,10 @@ defmodule FermixCore.Home.ArchiveTest do
   defp create(home, archive),
     do: Archive.create(home, @passphrase, to: archive, hello: fn -> @not_running end, host: @host)
 
-  # This host's facts, pinned: a macOS host whose keyring answers, at a fixed now.
+  # This host's facts, pinned: a macOS host whose keyring answers.
   defp restore(archive, into, opts \\ []) do
     {passphrase, opts} = Keyword.pop(opts, :passphrase, @passphrase)
-    defaults = [host: @host, keyring_usable?: fn -> true end, now_ms: @now]
+    defaults = [host: @host, keyring_usable?: fn -> true end]
     Archive.restore(archive, passphrase, into, Keyword.merge(defaults, opts))
   end
 
@@ -488,8 +577,8 @@ defmodule FermixCore.Home.ArchiveTest do
     [fermix_core.harness]
     approved = true
 
-    [sandbox]
-    workspace_root = "#{home}/workspace"
+    [fermix_core.meetings]
+    recordings = "#{home}/workspace/meetings"
     helper = "/opt/invented/tool"
     """
   end
@@ -498,8 +587,8 @@ defmodule FermixCore.Home.ArchiveTest do
     do: ~s({"invented": {"version": "1.0.0"}, "github": {"version": "2.0.0"}}\n)
 
   # A real database in rollback-journal mode, so SQLite never reads the seeded
-  # `-wal` and `-shm` text beside it: two screen-history events, one summary
-  # and one unrelated row.
+  # `-wal` and `-shm` text beside it: a home from before migration 59, with two
+  # raw computer-history events, one note and one unrelated row.
   defp seed_database!(db) do
     SafeRm.rm!(db)
     {:ok, conn} = Sqlite3.open(db)
@@ -510,6 +599,8 @@ defmodule FermixCore.Home.ArchiveTest do
           ComputerHistorySql.state_schema_sql(),
           ComputerHistorySql.access_schema_sql(),
           ComputerHistorySql.purges_schema_sql(@now - 86_400_000),
+          "CREATE TABLE computer_history_home (id INTEGER PRIMARY KEY, token TEXT NOT NULL); " <>
+            "INSERT INTO computer_history_home VALUES (1, 'invented-token');",
           "CREATE TABLE unrelated (id INTEGER); INSERT INTO unrelated VALUES (1);",
           "INSERT INTO computer_history_events (boot_id, source_seq, ts, type) " <>
             "VALUES ('invented', 1, #{@now - 7_200_000}, 'app_switch'), " <>
@@ -526,7 +617,7 @@ defmodule FermixCore.Home.ArchiveTest do
     File.chmod!(db, @included["memory.db"])
   end
 
-  defp screen_history_rows(db) do
+  defp history_rows(db) do
     count(
       db,
       "SELECT (SELECT COUNT(*) FROM computer_history_events) + " <>
@@ -578,6 +669,7 @@ defmodule FermixCore.Home.ArchiveTest do
       |> Manifest.new(files, Keyword.get(opts, :links, []))
       |> Map.update!(:engine_version, &Keyword.get(opts, :engine_version, &1))
       |> Manifest.encode()
+      |> home_format(Keyword.get(opts, :home_format, :as_written))
 
     tar_path = Path.join(tmp, "crafted.tar")
     {:ok, tar} = :erl_tar.open(String.to_charlist(tar_path), [:write])
@@ -596,6 +688,16 @@ defmodule FermixCore.Home.ArchiveTest do
     archive
   end
 
+  # The manifest's `home_format` as a test states it: as this engine wrote
+  # it, another number, or absent (an engine before home formats).
+  defp home_format(json, :as_written), do: json
+
+  defp home_format(json, :absent),
+    do: json |> Jason.decode!() |> Map.delete("home_format") |> Jason.encode!()
+
+  defp home_format(json, format),
+    do: json |> Jason.decode!() |> Map.put("home_format", format) |> Jason.encode!()
+
   # A unix socket address is capped at 104 bytes on macOS, so a home that hosts
   # a live daemon socket sits directly under the temp dir.
   defp short_root! do
@@ -605,15 +707,41 @@ defmodule FermixCore.Home.ArchiveTest do
     root
   end
 
-  defp start_daemon!(socket_path) do
-    sup = :"archive_test_tasks_#{System.unique_integer([:positive, :monotonic])}"
-    start_supervised!({Task.Supervisor, name: sup})
+  # Listening before the probe dials: `listen/2` returns once the socket is
+  # bound and accepting connections into its backlog. The seeded home holds a
+  # stale `daemon.sock` (an entry the archive leaves out), which goes first,
+  # as the daemon's own start clears it.
+  defp listening!(path) do
+    SafeRm.rm!(path)
 
-    start_supervised!(
-      {Fermix.CLI.Daemon,
-       name: :"archive_test_daemon_#{System.unique_integer([:positive, :monotonic])}",
-       socket_path: socket_path,
-       task_supervisor: sup}
-    )
+    {:ok, listen} =
+      :gen_tcp.listen(0, [:binary, active: false, packet: 4, ifaddr: {:local, path}])
+
+    on_exit(fn -> :gen_tcp.close(listen) end)
+    listen
+  end
+
+  # One connection, one v1 answer: the request's own id and an empty result,
+  # sent the moment the frame is read. Each wait ends on the socket's event.
+  defp answer_hello(listen, test) do
+    {:ok, conn} = :gen_tcp.accept(listen)
+    {:ok, frame} = :gen_tcp.recv(conn, 0)
+    %{"request_id" => id, "method" => method} = Jason.decode!(frame)
+    send(test, {:asked, method})
+    :ok = :gen_tcp.send(conn, Jason.encode!(%{"request_id" => id, "result" => %{}}))
+    :gen_tcp.close(conn)
+  end
+
+  defp token(db) do
+    {:ok, conn} = Sqlite3.open(db, mode: :readonly)
+
+    try do
+      {:ok, statement} = Sqlite3.prepare(conn, "SELECT token FROM computer_history_home")
+      {:ok, [[token]]} = Sqlite3.fetch_all(conn, statement)
+      :ok = Sqlite3.release(conn, statement)
+      token
+    after
+      Sqlite3.close(conn)
+    end
   end
 end

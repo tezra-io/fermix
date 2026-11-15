@@ -16,6 +16,7 @@ defmodule FermixCore.Tools.SendToChannelTest do
   alias FermixCore.Capabilities.Builtin
   alias FermixCore.Capabilities.BuiltinSeeder
   alias FermixCore.Capabilities.Registry
+  alias FermixCore.Computers.Origin
   alias FermixCore.Tools.SendToChannel
 
   # Every send any adapter below takes, and the proactive keys a timeline has
@@ -107,6 +108,9 @@ defmodule FermixCore.Tools.SendToChannelTest do
 
       assert_receive {:sent, "telegram", "owner-t", @text, opts}
       assert is_binary(opts[:proactive_key])
+      # The turn's own origin rides with the send (a computer's channel checks it).
+      assert opts[:turn_origin] == %{computer_use_origin: :voice}
+      assert Origin.of(opts[:turn_origin]) == :voice
       assert output =~ "telegram"
       refute_receive {:sent, _platform, _destination, _text, _opts}, 100
     end
@@ -253,6 +257,7 @@ defmodule FermixCore.Tools.SendToChannelTest do
       conversation_key: {"companion", "main", :root},
       session_id: Keyword.get(overrides, :session_id, "turn-1"),
       source_trust: :operator,
+      computer_use_origin: :voice,
       jobs_config: [delivery_channels: channels],
       configured_owners: %{"telegram" => "owner-t"}
     }

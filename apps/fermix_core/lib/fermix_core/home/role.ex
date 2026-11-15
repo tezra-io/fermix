@@ -61,6 +61,7 @@ defmodule FermixCore.Home.Role do
   with a sentence that names the role.
   """
 
+  alias FermixCore.Home.DesktopLink
   alias FermixCore.Home.Moved
   alias FermixCore.Setup.ConfigStore
 
@@ -93,10 +94,15 @@ defmodule FermixCore.Home.Role do
     {FermixChannels.Channels.Discord.Gateway, "takes Discord messages into turns"},
     {FermixChannels.Channels.Slack.SocketMode, "takes Slack events into turns over Socket Mode"},
     {FermixChannels.Channels.Signal.Listener, "takes Signal messages into turns"},
-    {FermixChannels.Channels.IMessage.Supervisor, "takes iMessages into turns"},
+    {FermixChannels.Channels.IMessage.Supervisor,
+     "takes iMessages into turns; a Mac whose home is on a server carries them for it " <>
+       "(the bridge, device-only)"},
     {FermixChannels.Channels.Acp.Supervisor, "runs an ACP client's prompts as turns"},
     {FermixChannels.Mobile.Supervisor,
      "admits phone turns through the identity bundle, which moved with the primary"},
+    {FermixChannels.Accessories.Supervisor,
+     "watches this computer's accessory ports and runs their calls; an accessory needs a " <>
+       "local Mac primary, and a device runs no realtime session"},
     {FermixChannels.Voice.CallRowSweep,
      "settles the rows and detached tasks the primary's calls owe"},
     {FermixCore.Auth.TokenSupervisor,
@@ -106,13 +112,6 @@ defmodule FermixCore.Home.Role do
        "comes back through the primary"},
     {FermixChannels.Voice.Supervisor,
      "routes realtime delegations, and a device runs no realtime session"},
-    {FermixCore.ComputerHistory.Summarizer.Scheduler,
-     "summarizes captured history with a provider"},
-    {FermixCore.ComputerHistory.Capturer,
-     "captures this screen's history into memory.db; a device's captures are never " <>
-       "summarized and a return discards them"},
-    {FermixCore.ComputerHistory.Retention,
-     "purges captured history from memory.db, which a device does not open"},
     {FermixCore.Memory.Repo,
      "opens memory.db; a device's database is a retired copy, and a return replaces it in " <>
        "place while the device engine runs"},
@@ -132,7 +131,20 @@ defmodule FermixCore.Home.Role do
        "retired copy"},
     {FermixCore.Companion.OriginBackfill,
      "says where earlier messages came from on memory.db's timeline, which a device does " <>
-       "not open"}
+       "not open"},
+    {FermixCore.Home.ReleaseTable,
+     "reads the release table an Always On server's update chooses from; only a server's " <>
+       "primary updates itself"},
+    {FermixCore.Computers.Registry,
+     "keeps what the home's computers offer and how they connect; only the primary serves " <>
+       "them"},
+    {FermixCore.Computers.Calls,
+     "waits on what the server asked of its computers; only the primary asks them"},
+    {FermixCore.Trips.Placer,
+     "places the stops a trip keeps waiting in memory.db, which a device does not open"},
+    {FermixCore.Trips.DayTurn,
+     "sends the trips index again when a day's turn moves it, read from memory.db, which a " <>
+       "device does not open"}
   ]
 
   @primary_only_modules Enum.map(@primary_only, &elem(&1, 0))
@@ -142,7 +154,11 @@ defmodule FermixCore.Home.Role do
   @device_only [
     {FermixChannels.Desktop.DeviceSupervisor,
      "dials the primary from a desktop whose home moved, carries the move from its source, " <>
-       "and receives the home back on a move back"}
+       "and receives the home back on a move back"},
+    {FermixChannels.Channels.IMessage.Bridge,
+     "carries the home's iMessage through this Mac's Messages for its server (M97 §6.4): " <>
+       "the helper and what it says, never the listener that makes a turn, which the " <>
+       "primary runs"}
   ]
 
   @device_only_modules Enum.map(@device_only, &elem(&1, 0))
@@ -207,7 +223,8 @@ defmodule FermixCore.Home.Role do
 
   @doc """
   What a boot of `root` records: its role and, for a device, where the marker
-  says the primary went (`nil` when there is no marker to say).
+  says the primary went, or else the server its link names (a computer that
+  joined the home, M97 §3.1, has no marker); `nil` when neither says.
   """
   @spec boot(Path.t(), keyword() | map() | nil) :: {:ok, record()} | {:error, error()}
   def boot(root, config) when is_binary(root) and root != "" do
@@ -219,7 +236,15 @@ defmodule FermixCore.Home.Role do
     end
   end
 
-  defp primary_name(root), do: root |> Moved.read() |> marker_primary()
+  defp primary_name(root), do: marker_primary(Moved.read(root)) || linked_primary(root)
+
+  # A computer that joined names its server by its link alone.
+  defp linked_primary(root) do
+    case DesktopLink.read(root) do
+      {:ok, %{primary: %{name: name}}} -> name
+      {:error, _absent_or_unreadable} -> nil
+    end
+  end
 
   # The device decides without the marker, so one it cannot read costs only the
   # name in a refusal; it is logged rather than refusing the safe role.
@@ -252,18 +277,21 @@ defmodule FermixCore.Home.Role do
   @spec configured(Path.t()) :: {:ok, record()} | {:error, error()}
   def configured(home) when is_binary(home) and home != "" do
     with {:ok, config} <- ConfigStore.engine_config(home) do
-      configured_record(configured_role(config), Moved.read(home))
+      configured_record(configured_role(config), Moved.read(home), home)
     end
   end
 
-  defp configured_record(:device, marker),
-    do: {:ok, %{role: :device, primary: marker_primary(marker)}}
+  defp configured_record(:device, marker, home),
+    do: {:ok, %{role: :device, primary: marker_primary(marker) || linked_primary(home)}}
 
-  defp configured_record(:candidate, _marker), do: {:ok, %{role: :candidate, primary: nil}}
+  defp configured_record(:candidate, _marker, _home), do: {:ok, %{role: :candidate, primary: nil}}
 
-  defp configured_record(:primary, :absent), do: {:ok, %{role: :primary, primary: nil}}
-  defp configured_record(:primary, {:ok, %{to: to}}), do: {:ok, %{role: :device, primary: to}}
-  defp configured_record(:primary, {:error, reason}), do: {:error, reason}
+  defp configured_record(:primary, :absent, _home), do: {:ok, %{role: :primary, primary: nil}}
+
+  defp configured_record(:primary, {:ok, %{to: to}}, _home),
+    do: {:ok, %{role: :device, primary: to}}
+
+  defp configured_record(:primary, {:error, reason}, _home), do: {:error, reason}
 
   @doc "The sentence a person is shown for a refusal from `admit/1` or `admit_configured/1`."
   @spec refusal_sentence(refusal() | error()) :: String.t()

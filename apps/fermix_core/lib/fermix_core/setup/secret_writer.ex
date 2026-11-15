@@ -2,7 +2,7 @@ defmodule FermixCore.Setup.SecretWriter do
   @moduledoc """
   Facade for setup-managed secret storage.
 
-  A key is one of four shapes. A registry atom names a `SecretPaths` entry and
+  A key is one of five shapes. A registry atom names a `SecretPaths` entry and
   is stored under that entry's environment name. `{:external_env, name}` is a
   skill's own credential (M45 §4.1), stored under `external_env:<NAME>` so it
   can never share an item with a provider key of the same variable name. The
@@ -14,7 +14,10 @@ defmodule FermixCore.Setup.SecretWriter do
   stored under `cue_source:<ref>:<field>`; the ref is validated by
   `Cues.Config.valid_name?/1` and the field is one of `token`, `key`,
   `secret` or `path_secret` (a webhook URL's random part, M60 §6.5), so
-  neither part can become an arbitrary address.
+  neither part can become an arbitrary address. `{:device_key, :desktop}` is
+  a linked computer's own key (M97 §7.5, `FermixCore.Home.ComputerKey`),
+  stored under `device:desktop_key`; no `config.toml` reference names it,
+  since `device/desktop.json` records its store.
 
   There are two stores, and `config.toml` says which one a home writes to
   (`[fermix_core] secret_store`, default `keyring`) and which one each secret
@@ -42,10 +45,14 @@ defmodule FermixCore.Setup.SecretWriter do
   @external_prefix "external_env:"
   @cue_source_prefix "cue_source:"
   @cue_secret_fields [:token, :key, :secret, :path_secret]
+  @device_key_item "device:desktop_key"
+  # `security` exits 44 (errSecItemNotFound) for an item it does not hold.
+  @keychain_item_not_found 44
   @type external_key :: {:external_env, String.t()}
   @type mcp_key :: {:mcp, String.t()}
   @type cue_source_key :: {:cue_source, String.t(), :token | :key | :secret | :path_secret}
-  @type secret_key :: atom() | external_key() | mcp_key() | cue_source_key()
+  @type device_key :: {:device_key, :desktop}
+  @type secret_key :: atom() | external_key() | mcp_key() | cue_source_key() | device_key()
   @type writer_error :: {:error, term()}
   @type store :: :keyring | :file
 
@@ -70,14 +77,16 @@ defmodule FermixCore.Setup.SecretWriter do
           optional(:evidence) => String.t()
         }
 
-  @doc "Whether `key` is one of the four key shapes every writer accepts."
+  @doc "Whether `key` is one of the five key shapes every writer accepts."
   defguard is_secret_key(key)
            when is_atom(key) or
                   (is_tuple(key) and tuple_size(key) == 2 and
                      elem(key, 0) in [:external_env, :mcp] and is_binary(elem(key, 1))) or
                   (is_tuple(key) and tuple_size(key) == 3 and elem(key, 0) == :cue_source and
                      is_binary(elem(key, 1)) and
-                     elem(key, 2) in [:token, :key, :secret, :path_secret])
+                     elem(key, 2) in [:token, :key, :secret, :path_secret]) or
+                  (is_tuple(key) and tuple_size(key) == 2 and elem(key, 0) == :device_key and
+                     elem(key, 1) == :desktop)
 
   @doc "The secret fields a cue source may declare, in its `{:cue_source, ref, field}` key."
   @spec cue_secret_fields() :: [:token | :key | :secret | :path_secret]
@@ -188,6 +197,28 @@ defmodule FermixCore.Setup.SecretWriter do
   def get(key, opts \\ []) when is_secret_key(key), do: impl(opts).get(key, opts)
 
   @doc """
+  Whether `reason`, a failed `get/2`, says the store holds no such item
+  rather than that it could not be asked. Each store has its own word for
+  it: `:missing_secret` (an empty value, a file that is not there), the
+  Keychain's `security find-generic-password` exiting 44
+  (errSecItemNotFound), and `secret-tool lookup` exiting 1 with nothing
+  printed, where a failure of its own prints why. A caller that must tell
+  "not stored yet" from "cannot be read" asks here; `get/2` itself hands
+  each helper's answer on unchanged.
+  """
+  @spec absent?(term()) :: boolean()
+  def absent?(:missing_secret), do: true
+
+  def absent?({:helper_failed, command, @keychain_item_not_found, _output})
+      when is_binary(command),
+      do: String.contains?(command, " find-generic-password ")
+
+  def absent?({:helper_failed, command, 1, ""}) when is_binary(command),
+    do: String.contains?(command, " lookup ")
+
+  def absent?(_reason), do: false
+
+  @doc """
   Removes the OS-keyring item for `key`. Succeeds when no item exists — the
   postcondition ("this machine no longer stores that credential") already
   holds — and reports every other helper failure, so a caller that must not
@@ -249,7 +280,8 @@ defmodule FermixCore.Setup.SecretWriter do
   @doc """
   The name an OS store files `key` under, before the profile prefix: a
   registry key's environment name, `external_env:<NAME>`, an MCP server's id,
-  or `cue_source:<ref>:<field>`. Raises for an external name, an id or a ref
+  `cue_source:<ref>:<field>`, or `device:desktop_key` for a linked computer's
+  own key. Raises for an external name, an id or a ref
   that fails validation, so an unvalidated name can never reach a keychain
   address.
   """
@@ -277,6 +309,8 @@ defmodule FermixCore.Setup.SecretWriter do
       raise ArgumentError, "cue source ref refused"
     end
   end
+
+  def item_name({:device_key, :desktop}), do: @device_key_item
 
   @spec format_error(secret_key(), term()) :: String.t()
   def format_error(key, reason) when is_atom(key) do

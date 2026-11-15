@@ -872,7 +872,13 @@ defmodule FermixCore.Cues.FiltersTest do
                  server: ctx.repo
                )
 
+      # A monitor is an asynchronous signal, and a kill from another process
+      # (the dispatcher's) can overtake it: the monitor then reports `:noproc`.
+      # The task lists this process among its monitors only once it has taken
+      # the monitor in, so the deadline goes out after that.
       ref = Process.monitor(pid)
+      assert {:monitored_by, monitors} = Process.info(pid, :monitored_by)
+      assert self() in monitors
       send(filters, {:deadline, task_ref})
       assert_receive {:DOWN, ^ref, :process, ^pid, :killed}
       sync(filters)

@@ -278,12 +278,14 @@ defmodule FermixOpik.TraceFileTest do
                  "agent" => "realtime",
                  "model" => "gpt-realtime-2",
                  "voice" => "marin",
-                 "device_id" => "dev-1"
+                 "device_id" => "dev-1",
+                 "endpoint" => "desktop"
                })
              )
 
     assert start_meta.session_id == "session:1"
     assert start_meta.model == "gpt-realtime-2"
+    assert start_meta.endpoint == "desktop"
 
     assert {[:fermix, :realtime, :call_stop], %{}, _stop_meta} =
              TraceFile.normalize(
@@ -330,7 +332,9 @@ defmodule FermixOpik.TraceFileTest do
       {"voice_live_delegation_start", :delegation_start},
       {"voice_live_delegation_stop", :delegation_stop},
       {"voice_live_provider_error", :provider_error},
-      {"voice_live_call_stop", :call_stop}
+      {"voice_live_call_stop", :call_stop},
+      {"voice_live_phone_detached", :phone_detached},
+      {"voice_live_phone_resumed", :phone_resumed}
     ]
 
     for {row_event, phase} <- phases do
@@ -350,10 +354,12 @@ defmodule FermixOpik.TraceFileTest do
           "revision" => 1,
           "turn_session_id" => "voice_delegation_7",
           "status" => "completed",
-          "reason" => "call_stop"
+          "reason" => "call_stop",
+          "endpoint" => "phone:0d7f6a52",
+          "duration_ms" => 1_250
         })
 
-      assert {[:fermix, :voice_live, ^phase], _meas, meta} =
+      assert {[:fermix, :voice_live, ^phase], meas, meta} =
                TraceFile.normalize("agent_event", row)
 
       assert meta.session_id == "voice_live:1"
@@ -361,6 +367,8 @@ defmodule FermixOpik.TraceFileTest do
       assert meta.engine == "openai_live"
       assert meta.provider == "openai"
       assert meta.turn_session_id == "voice_delegation_7"
+      assert meta.endpoint == "phone:0d7f6a52"
+      assert meas.duration_ms == 1_250
     end
   end
 
@@ -557,6 +565,68 @@ defmodule FermixOpik.TraceFileTest do
                  "session_id" => "voice_live:1"
                })
              )
+  end
+
+  # M91: an accessory call's link row replays its counters and the closed words
+  # that say whose call it was and why it ended; nothing else rides it.
+  test "an accessory_call_link row replays its counters under the call's session" do
+    row = %{
+      "ts" => "2026-11-07T12:00:00.000Z",
+      "type" => "agent_event",
+      "event" => "accessory_call_link",
+      "agent" => "accessory:abc",
+      "session_id" => "voice_live:3",
+      "endpoint" => "accessory:abc",
+      "engine" => "openai_live",
+      "source" => "head_swipe",
+      "reason" => "end_request",
+      "mic_frames" => 120,
+      "speaker_bytes" => 48_000,
+      "duration_ms" => 3_000,
+      "mic_frames_before_live" => 0,
+      "interrupts" => 1,
+      "interrupt_played_ms_last" => 340,
+      "interrupt_played_ms_total" => 340,
+      "robot_crc_errors" => 0,
+      "robot_spk_underflows" => 2,
+      "mic_rms_max" => 2_400,
+      "mic_rms_mean" => 610,
+      "mic_chunks_silent" => 4,
+      "robot_mic_rms" => 238,
+      "robot_mic_peak" => 911,
+      "robot_ref_rms" => 4,
+      "robot_ref_peak" => 17,
+      "robot_out_rms" => 702,
+      "robot_out_peak" => 2_655
+    }
+
+    assert {[:fermix, :accessory, :call_link], measurements, meta} =
+             TraceFile.normalize("agent_event", row)
+
+    assert measurements == %{
+             mic_frames: 120,
+             speaker_bytes: 48_000,
+             duration_ms: 3_000,
+             mic_frames_before_live: 0,
+             interrupts: 1,
+             interrupt_played_ms_last: 340,
+             interrupt_played_ms_total: 340,
+             robot_crc_errors: 0,
+             robot_spk_underflows: 2,
+             mic_rms_max: 2_400,
+             mic_rms_mean: 610,
+             mic_chunks_silent: 4,
+             robot_mic_rms: 238,
+             robot_mic_peak: 911,
+             robot_ref_rms: 4,
+             robot_ref_peak: 17,
+             robot_out_rms: 702,
+             robot_out_peak: 2_655
+           }
+
+    assert meta.session_id == "voice_live:3"
+    assert meta.endpoint == "accessory:abc"
+    assert meta.reason == "end_request"
   end
 
   test "a voice_live_delegation_stop row replays its duration measurement" do
@@ -762,6 +832,191 @@ defmodule FermixOpik.TraceFileTest do
 
     assert meta.cu_session == "cua_ab12"
     assert meta.outcome == "performed"
+  end
+
+  @invocation_meta %{
+    session_id: "inv_inv-mfrgg2lt5vgmy3dpqzt7xk4wha",
+    parent_session: "main-41",
+    capability: "files",
+    op: "read",
+    origin: :chat,
+    epoch: 3
+  }
+
+  # An invocation's whole record on the computer is these three rows, and replay
+  # rebuilds each, `parent_session` included: the run is its own root, and that
+  # field is the only record of which turn on the server asked.
+  test "normalizes every computer_invocation agent_event row back into its event" do
+    rows = [
+      {"computer_invocation_start", :start, %{"duration_ms" => 0}},
+      {"computer_invocation_complete", :complete,
+       %{"duration_ms" => 4, "result_bytes" => 0, "status" => "refused", "refusal" => "off"}},
+      {"computer_invocation_error", :error,
+       %{"duration_ms" => 20_000, "result_bytes" => 0, "status" => "timed_out"}}
+    ]
+
+    for {row_event, verb, extra} <- rows do
+      row =
+        Map.merge(
+          %{
+            "ts" => "2026-11-10T09:00:00.000Z",
+            "type" => "agent_event",
+            "event" => row_event,
+            "agent" => "files",
+            "session_id" => "inv_inv-mfrgg2lt5vgmy3dpqzt7xk4wha",
+            "parent_session" => "main-41",
+            "capability" => "files",
+            "op" => "read",
+            "origin" => "chat",
+            "epoch" => 3,
+            "target" => "/Users/ines/Taxes/2025.pdf"
+          },
+          extra
+        )
+
+      assert {[:fermix, :computer_invocation, ^verb], measurements, meta} =
+               TraceFile.normalize("agent_event", row)
+
+      assert Map.take(meta, [:session_id, :parent_session, :capability, :op, :origin, :epoch]) ==
+               %{
+                 session_id: "inv_inv-mfrgg2lt5vgmy3dpqzt7xk4wha",
+                 parent_session: "main-41",
+                 capability: "files",
+                 op: "read",
+                 origin: "chat",
+                 epoch: 3
+               }
+
+      assert meta[:status] == extra["status"]
+      assert meta[:refusal] == extra["refusal"]
+      refute Map.has_key?(meta, :target), "the target is in the journal, never the trace"
+
+      if verb == :start do
+        assert measurements == %{}
+      else
+        assert measurements == %{
+                 duration_ms: extra["duration_ms"],
+                 result_bytes: extra["result_bytes"]
+               }
+      end
+    end
+  end
+
+  # The server's half of the seam: the live exec carries `invoke_status` and
+  # `refusal` as atoms, `Trace` writes them through Jason, and replay reads the
+  # strings back. The target and the arguments are content and still drop.
+  test "a tool_exec row written from an invocation's atoms replays its four keys as strings" do
+    row =
+      Jason.decode!(
+        Jason.encode!(%{
+          ts: "2026-11-10T09:00:00.000Z",
+          type: "tool_exec",
+          tool: "computer_files",
+          agent: "main",
+          session_id: "main-41",
+          success: false,
+          duration_ms: 31,
+          computer: "dev_7k2m9q",
+          invocation: "inv-mfrgg2lt5vgmy3dpqzt7xk4wha",
+          invoke_status: :refused,
+          refusal: :outside_sandbox,
+          target: "/Users/ines/Taxes/2025.pdf",
+          args: %{path: "/Users/ines/Taxes/2025.pdf"}
+        })
+      )
+
+    assert {[:fermix, :tool, :exec], %{duration_ms: 31}, meta} =
+             TraceFile.normalize("tool_exec", row)
+
+    assert meta.computer == "dev_7k2m9q"
+    assert meta.invocation == "inv-mfrgg2lt5vgmy3dpqzt7xk4wha"
+    assert meta.invoke_status == "refused"
+    assert meta.refusal == "outside_sandbox"
+    refute Map.has_key?(meta, :target)
+    refute Map.has_key?(meta, :args)
+  end
+
+  # A call the home refused before sending anything (`Computers.Choice`)
+  # replays why, beside its marker; the computer's name it carried does not.
+  test "a tool_exec row of a call refused before sending replays its computer_refusal" do
+    row =
+      Jason.decode!(
+        Jason.encode!(%{
+          ts: "2026-11-10T09:00:00.000Z",
+          type: "tool_exec",
+          tool: "file_read",
+          agent: "main",
+          session_id: "main-41",
+          success: false,
+          duration_ms: 0,
+          computer_refusal: "away",
+          policy_enforcement: %{source: "computers", decision: "deny", phase: "pre_execution"},
+          args: %{path: "/Users/ines/notes.txt", computer: "studio Mac"}
+        })
+      )
+
+    assert {[:fermix, :tool, :exec], _measurements, meta} =
+             TraceFile.normalize("tool_exec", row)
+
+    assert meta.computer_refusal == "away"
+    assert meta.policy_enforcement["source"] == "computers"
+    refute Map.has_key?(meta, :args)
+  end
+
+  # Replay must rebuild the root live traffic builds. The rows are written the
+  # way `Trace.TelemetryHandler` writes them (measurements and metadata
+  # flattened, `agent` the capability, `event` the trace_event name), so the
+  # atoms live traffic carries come back as strings, and the roots still match.
+  @tag :tmp_dir
+  test "an invocation's rows replay into the roots live traffic builds", %{tmp_dir: dir} do
+    day = Path.join(dir, "2026-11-10")
+    File.mkdir_p!(day)
+
+    refused = %{@invocation_meta | session_id: "inv_inv-ab3kq7m2zx5vt4wn6pyr2cd7ha"}
+    timed_out = %{@invocation_meta | session_id: "inv_inv-qz6tn2wk4mb7xv3hr5pdy2ca6e"}
+
+    live = [
+      {[:fermix, :computer_invocation, :start], %{duration_ms: 0}, refused,
+       ~U[2026-11-10 09:00:00.000Z]},
+      {[:fermix, :computer_invocation, :complete], %{duration_ms: 4, result_bytes: 0},
+       Map.merge(refused, %{status: :refused, refusal: :off}), ~U[2026-11-10 09:00:01.000Z]},
+      {[:fermix, :computer_invocation, :start], %{duration_ms: 0}, timed_out,
+       ~U[2026-11-10 09:00:02.000Z]},
+      {[:fermix, :computer_invocation, :error], %{duration_ms: 20_000, result_bytes: 0},
+       Map.put(timed_out, :status, :timed_out), ~U[2026-11-10 09:00:22.000Z]}
+    ]
+
+    write(day, "agent_event.jsonl", Enum.map(live, &invocation_row/1))
+
+    {_agg, from_live} = replay(live)
+    {_agg, from_rows} = replay(TraceFile.read_events(dir))
+
+    assert [%{trace: refused_root}, %{trace: failed_root}] = from_rows
+    assert invocation_roots(from_rows) == invocation_roots(from_live)
+
+    assert refused_root.metadata.status == "refused"
+    assert refused_root.metadata.refusal == "off"
+    refute Map.has_key?(refused_root, :error_info)
+    assert failed_root.metadata.status == "timed_out"
+    assert failed_root.error_info.message == "timed_out"
+  end
+
+  defp invocation_row({[:fermix, :computer_invocation, verb], measurements, metadata, at}) do
+    measurements
+    |> Map.merge(metadata)
+    |> Map.merge(%{
+      ts: DateTime.to_iso8601(at),
+      type: "agent_event",
+      agent: metadata.capability,
+      event: "computer_invocation_#{verb}"
+    })
+  end
+
+  defp invocation_roots(closed) do
+    Enum.map(closed, fn %{trace: trace, spans: spans} ->
+      {Map.take(trace, [:name, :tags, :metadata, :error_info, :start_time, :end_time]),
+       Enum.map(spans, &Map.take(&1, [:name, :parent_span_id, :start_time, :end_time]))}
+    end)
   end
 
   defp replay(events) do

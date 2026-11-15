@@ -106,6 +106,11 @@ defmodule FermixCore.Reply do
     "channel client is unavailable; check that this channel is configured and installed"
   end
 
+  def format_delivery_error({:permanent, :carrier_away}) do
+    "the Mac that carries Messages is asleep or offline, so the message was not sent, and " <>
+      "nothing is kept to send later"
+  end
+
   def format_delivery_error({:transport, :pool_unavailable}) do
     "no outbound connection was available before the checkout budget ran out"
   end

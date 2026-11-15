@@ -22,11 +22,13 @@ defmodule FermixCore.Agents.TurnRunnerTest do
   alias FermixCore.Providers.Error, as: ProviderError
   alias FermixCore.Realtime.CallRecord
   alias FermixCore.Realtime.LivePrompt
+  alias FermixCore.ReplyBlocks
   alias FermixCore.Sandbox.Config, as: SandboxConfig
   alias FermixCore.Temporal.Access
   alias FermixCore.Tools.HarnessSupport
   alias FermixCore.Tools.SendAttachment
   alias FermixCore.Tools.ViewImage
+  alias FermixCore.Trips.Registry, as: TripRegistry
   alias FermixTestSupport.ComputerHistoryCanary
 
   defmodule NoopReviewer do
@@ -2378,29 +2380,72 @@ defmodule FermixCore.Agents.TurnRunnerTest do
     end
 
     # M85 §07: the card's line goes only to a turn the Mac's connection carried
-    # after it pulled the lists' index; the Mac's chat on a connection that did
-    # not, and every other channel, keep the line that says to write the list.
-    test "the card's line rides only a companion turn whose connection draws lists",
+    # after it pulled the lists' index, or a phone's whose list channel did
+    # (E4); the Mac's chat and the phone on a connection that did not, and
+    # every other channel, keep the line that says to write the list.
+    test "the card's line rides only a companion or phone turn whose connection draws lists",
          %{repo: repo} do
       card = "A list you read or change is drawn under your reply, live"
       written = "No list is drawn here"
 
-      drawn =
-        %{channel: "companion", chat_id: "main", metadata: %{draws_lists: true}}
-        |> capture_prompt(memory_repo: repo)
-        |> rules_line()
+      for channel <- ["companion", "mobile"] do
+        drawn =
+          %{channel: channel, chat_id: "main", metadata: %{draws_lists: true}}
+          |> capture_prompt(memory_repo: repo)
+          |> rules_line()
 
-      assert drawn =~ card
-      refute drawn =~ written
+        assert drawn =~ card, channel
+        refute drawn =~ written, channel
+      end
 
       for msg <- [
             %{channel: "companion", chat_id: "main"},
             %{channel: "companion", chat_id: "main", metadata: %{draws_lists: false}},
+            %{channel: "mobile", chat_id: "main"},
             put_in(private_chat("40041"), [:metadata, :draws_lists], true)
           ] do
         line = msg |> capture_prompt(memory_repo: repo) |> rules_line()
         assert line =~ written, inspect(msg)
         refute line =~ card, inspect(msg)
+      end
+    end
+
+    # EVENTS_DRAWN_AS_CARDS §04: a turn whose connection draws events
+    # (companion 8, mobile 3, stamped by the channel) is told its events are
+    # drawn under the reply, after the list rules and before the date; every
+    # other turn is told nothing new, a guest's included.
+    test "the events line rides only a companion or phone turn whose connection draws events",
+         %{repo: repo} do
+      line = "Events you store, change or list are drawn under your reply"
+
+      for channel <- ["companion", "mobile"] do
+        system_run =
+          %{channel: channel, chat_id: "main", metadata: %{draws_events: true}}
+          |> capture_prompt(memory_repo: repo)
+          |> Enum.take_while(&(&1.role == "system"))
+
+        rules =
+          Enum.find_index(system_run, &(&1.content =~ "lives in a list and never in memory"))
+
+        events = Enum.find_index(system_run, &(&1.content =~ line))
+        date = Enum.find_index(system_run, &(&1.content =~ "Current date:"))
+        assert rules < events and events < date, channel
+      end
+
+      for msg <- [
+            %{channel: "companion", chat_id: "main"},
+            %{channel: "companion", chat_id: "main", metadata: %{draws_lists: true}},
+            %{channel: "mobile", chat_id: "main", metadata: %{draws_events: false}},
+            put_in(private_chat("40041"), [:metadata, :draws_events], true),
+            Map.merge(
+              %{channel: "companion", chat_id: "main", metadata: %{draws_events: true}},
+              %{
+                source_trust: :guest
+              }
+            )
+          ] do
+        messages = capture_prompt(msg, memory_repo: repo)
+        refute Enum.any?(messages, &(&1.content =~ line)), inspect(msg)
       end
     end
 
@@ -2426,6 +2471,159 @@ defmodule FermixCore.Agents.TurnRunnerTest do
       end
     end
   end
+
+  # M89 §04, C8: while the owner keeps a trip, their private turn carries the
+  # trip rules after the lists' and the line naming the trips after the lists'
+  # index; the drawn line only where the connection draws trips (none does
+  # until a connection pulls the trips index); with no trip, a group chat's
+  # turn or a guest's, no trip line at all.
+  describe "the owner's trips" do
+    setup do
+      unique = System.unique_integer([:positive])
+      db_path = Path.join(System.tmp_dir!(), "fermix-tr-trips-#{unique}.db")
+      repo = :"tr_trips_repo_#{unique}"
+      start_supervised!({Repo, name: repo, enabled: true, database_path: db_path}, id: repo)
+
+      on_exit(fn ->
+        Enum.each([db_path, "#{db_path}-wal", "#{db_path}-shm"], &FermixTestSupport.SafeRm.rm/1)
+      end)
+
+      owner = %{
+        agent_name: "main",
+        conversation_key: {"telegram", "40071", :root},
+        source_trust: :operator,
+        computer_use_origin: :interactive,
+        chat_type: "private",
+        outside_sources: MapSet.new()
+      }
+
+      lists = [%{"list" => "Groceries", "ops" => [%{"op" => "create"}]}]
+      {:ok, _answer} = ChecklistRegistry.edit(%{"changes" => lists}, owner, repo: repo)
+      %{repo: repo, owner: owner}
+    end
+
+    defp create_trip!(repo, owner) do
+      ops = [%{"op" => "create", "days" => 3, "starts_on" => "2031-07-04"}]
+
+      {:ok, _answer} =
+        TripRegistry.edit(%{"trip" => "Varonne", "ops" => ops}, owner,
+          repo: repo,
+          notifier: fn _changes -> :ok end
+        )
+    end
+
+    test "with no trip, a turn carries no trip line (C8)", %{repo: repo} do
+      messages = capture_prompt(private_chat("40071"), memory_repo: repo)
+      refute Enum.any?(messages, &(&1.content =~ "trip_"))
+      refute Enum.any?(messages, &(&1.content =~ "The owner's trips:"))
+    end
+
+    test "with a trip, the rules after the lists' and the index after the lists' index",
+         %{repo: repo, owner: owner} do
+      create_trip!(repo, owner)
+
+      system_run =
+        private_chat("40071")
+        |> capture_prompt(memory_repo: repo)
+        |> Enum.take_while(&(&1.role == "system"))
+
+      list_rules =
+        Enum.find_index(system_run, &(&1.content =~ "lives in a list and never in memory"))
+
+      trip_rules = Enum.find_index(system_run, &(&1.content =~ "lives in their trips"))
+      date = Enum.find_index(system_run, &(&1.content =~ "Current date:"))
+      list_index = Enum.find_index(system_run, &(&1.content =~ "The owner's lists:"))
+      trip_index = Enum.find_index(system_run, &(&1.content =~ "The owner's trips:"))
+
+      assert list_rules < trip_rules and trip_rules < date
+      assert date < list_index and list_index < trip_index
+      assert Enum.at(system_run, trip_rules).content =~ "No trip is drawn here"
+
+      assert Enum.at(system_run, trip_index).content ==
+               ~s|The owner's trips: "Varonne" (4 to 6 Jul 2031).|
+    end
+
+    test "the drawn line rides only a companion or phone turn whose connection draws trips",
+         %{repo: repo, owner: owner} do
+      create_trip!(repo, owner)
+      drawn = "A trip you read or change is drawn under your reply, live"
+      written = "No trip is drawn here"
+
+      for channel <- ["companion", "mobile"] do
+        line =
+          %{channel: channel, chat_id: "main", metadata: %{draws_trips: true}}
+          |> capture_prompt(memory_repo: repo)
+          |> trip_rules_line()
+
+        assert line =~ drawn, channel
+        refute line =~ written, channel
+      end
+
+      for msg <- [
+            %{channel: "companion", chat_id: "main"},
+            %{channel: "companion", chat_id: "main", metadata: %{draws_lists: true}},
+            %{channel: "mobile", chat_id: "main", metadata: %{draws_events: true}},
+            put_in(private_chat("40071"), [:metadata, :draws_trips], true)
+          ] do
+        line = msg |> capture_prompt(memory_repo: repo) |> trip_rules_line()
+        assert line =~ written, inspect(msg)
+        refute line =~ drawn, inspect(msg)
+      end
+    end
+
+    # A Live or Grok call hands its task to a turn on the voice channel. In a
+    # private call the reply is only said: it is told what a call says of a
+    # list or a trip, never a screen's lines (write the list, link each stop),
+    # which would be read aloud.
+    test "a private call's hand-off is told the call's lines, never a screen's",
+         %{repo: repo, owner: owner} do
+      create_trip!(repo, owner)
+
+      {messages, _opts} =
+        run_capture_turn(voice_msg("what is left on the trip"), start_voice_store(),
+          memory_repo: repo
+        )
+
+      assert rules_line(messages) =~ "\nOn a call, say what changed in a list"
+      refute rules_line(messages) =~ "No list is drawn here"
+      assert trip_rules_line(messages) =~ "\nOn a call, say what changed in a trip"
+      refute trip_rules_line(messages) =~ "No trip is drawn here"
+    end
+
+    # In a call in the chat, what the hand-off cannot say is shown as text in
+    # the owner's chat (`LivePrompt.backend_addendum/1`), so it keeps the
+    # lines that write the list and the days out for that part.
+    test "a chat call's hand-off keeps the lines that write a list and a trip out",
+         %{repo: repo, owner: owner} do
+      create_trip!(repo, owner)
+
+      {messages, _opts} =
+        run_capture_turn(chat_hand_off("what is left on the trip"), start_voice_store(),
+          memory_repo: repo
+        )
+
+      assert rules_line(messages) =~ "\nNo list is drawn here"
+      refute rules_line(messages) =~ "On a call"
+      assert trip_rules_line(messages) =~ "\nNo trip is drawn here"
+      refute trip_rules_line(messages) =~ "On a call"
+    end
+
+    test "a shared chat's turn and a guest's carry no trip line", %{repo: repo, owner: owner} do
+      create_trip!(repo, owner)
+
+      for msg <- [
+            %{channel: "telegram", chat_id: "-40071", metadata: %{chat_type: "group"}},
+            Map.put(private_chat("guest-11"), :source_trust, :guest)
+          ] do
+        messages = capture_prompt(msg, memory_repo: repo)
+        refute Enum.any?(messages, &(&1.content =~ "trip_")), inspect(msg)
+        refute Enum.any?(messages, &(&1.content =~ "The owner's trips:")), inspect(msg)
+      end
+    end
+  end
+
+  defp trip_rules_line(messages),
+    do: Enum.find(messages, &(&1.content =~ "lives in their trips")).content
 
   defp rules_line(messages),
     do: Enum.find(messages, &(&1.content =~ "lives in a list and never in memory")).content
@@ -2891,7 +3089,6 @@ defmodule FermixCore.Agents.TurnRunnerTest do
       operative?: operative?,
       attended_operator?: true,
       granted: MapSet.new(),
-      summarizer_target: :local,
       chain: local_routes(),
       routes: local_routes(),
       dropped_hops: [],
@@ -3554,6 +3751,80 @@ defmodule FermixCore.Agents.TurnRunnerTest do
   # chat's, which a call joins unless it is private (M56 §4.1).
   @private_key {"voice", "6f1c2a4e-9b3d-4c5e-8a7f-0123456789ab", :root}
   @chat_key {"companion", "main", :root}
+
+  # The records a reply draws are its own turn's (EVENTS_DRAWN_AS_CARDS §04,
+  # M85 §07, M89 §06). What an earlier turn in the conversation put and no
+  # reply took is dropped as the next turn begins: a Live call's hand-off in
+  # the chat (the voice channel takes nothing), a Mac or phone turn that ended
+  # with no reply, failed or was stopped. Taken at the start, by the turn that
+  # follows on the conversation's one lane, it can never race a reply still
+  # owed its records, and a turn stopped while it waited, which never ran,
+  # touches nothing.
+  describe "the reply's records" do
+    test "a turn begins with none an earlier turn left; the place index stays" do
+      holder = start_supervised!({ReplyBlocks, name: nil})
+      other = {"telegram", "40099", :root}
+
+      # A hand-off's cancelled card, a reply-less turn's list, a failed turn's
+      # trip, and a place an earlier search returned.
+      cancelled = %{
+        "event_id" => "evt_dentist000001",
+        "title" => "Dentist",
+        "kind" => "appointment",
+        "date" => "2027-03-02",
+        "timezone" => "America/New_York",
+        "status" => "cancelled",
+        "change" => "cancelled",
+        "when" => "Tuesday, March 2, 2027"
+      }
+
+      place = %{
+        name: "Cafe Lumen",
+        canonical_url: "https://cafe-lumen.example/",
+        location: %{latitude: 40.72, longitude: -74.0}
+      }
+
+      :ok = ReplyBlocks.put_events(holder, @chat_key, [cancelled])
+
+      :ok =
+        ReplyBlocks.put_checklists(holder, @chat_key, [
+          %{list_id: "ck_3m9q2x7d1a", title: "Errands", rows: ["ci_7k2m9d0q4a"]}
+        ])
+
+      :ok =
+        ReplyBlocks.put_trips(holder, @chat_key, [
+          %{trip_id: "tr_1q8m2x7v1d", title: "Varonne", rows: []}
+        ])
+
+      :ok = ReplyBlocks.put_places(holder, @chat_key, [place])
+      :ok = ReplyBlocks.put_events(holder, other, [cancelled])
+
+      capture_prompt(%{channel: "companion", chat_id: "main", metadata: %{}},
+        reply_blocks: holder
+      )
+
+      assert ReplyBlocks.take(holder, @chat_key) == []
+      assert [{:event, ^cancelled}] = ReplyBlocks.take(holder, other)
+
+      assert {:ok, %{name: "Cafe Lumen"}} =
+               ReplyBlocks.place_by_url(holder, @chat_key, "https://cafe-lumen.example/")
+    end
+
+    test "a Live call's hand-off in the chat begins with none either" do
+      holder = start_supervised!({ReplyBlocks, name: nil})
+
+      :ok =
+        ReplyBlocks.put_checklists(holder, @chat_key, [
+          %{list_id: "ck_3m9q2x7d1a", title: "Errands", rows: []}
+        ])
+
+      run_capture_turn(chat_hand_off("user: what is next"), start_voice_store(),
+        reply_blocks: holder
+      )
+
+      assert ReplyBlocks.take(holder, @chat_key) == []
+    end
+  end
 
   describe "voice delegations" do
     test "the turn carries the session's turn id and the call as parent_session" do

@@ -123,6 +123,31 @@ case "$version_output" in
   *) fail "--version output does not contain $version" ;;
 esac
 
+# ── a working directory this account cannot open ────────────────────────────
+# Burrito's launcher boots the VM in interactive mode (it passes "-mode
+# embedded" as one argument), whose code path starts with the working
+# directory, and a directory the account cannot search stops that VM with a
+# crash dump before any Fermix code runs. The wrapper's plugin
+# (rel/burrito_plugin.zig) refuses first, in one sentence. The directory is
+# entered and then closed (mode 000), so no second account is needed; an
+# account that is root opens it all the same, so this runs as an ordinary one.
+closed_dir="$runtime_root/closed"
+mkdir -m 700 "$closed_dir"
+closed_status=0
+closed_output="$(cd "$closed_dir" && chmod 000 . && HOME="$home" FERMIX_HOME="$fermix_home" "$artifact" --version 2>&1)" ||
+  closed_status=$?
+chmod 700 "$closed_dir"
+case "$closed_output" in
+  *"Crash dump"* | *"Kernel pid terminated"*) closed_refused=0 ;;
+  *"fermix: Fermix cannot start in "*"Run the command from one it can open, such as /."*) closed_refused=1 ;;
+  *) closed_refused=0 ;;
+esac
+if [ "$closed_status" -ne 1 ] || [ "$closed_refused" -ne 1 ]; then
+  printf '%s\n' "$closed_output" >&2
+  fail "run from a directory this account cannot open, the artifact must refuse in its one sentence and exit 1 (it exited $closed_status)"
+fi
+printf 'closed working directory: %s\n' "$closed_output"
+
 # ── the bundled fermix-iroh helper ──────────────────────────────────────────
 # Reach from anywhere runs this helper, and a release without it reports the
 # switch as unavailable on every install. The Burrito step puts the pinned
@@ -270,7 +295,9 @@ esac
 # an argv it does not recognize exits non-zero so a keychain call added later
 # cannot pass this gate unanswered. The home is a fresh one whose profile names
 # no stored item, and it holds a dev_local api_key plugin for the verb to find,
-# because `auth clear` resolves the plugin before it asks the keychain.
+# because `auth clear` resolves the plugin before it asks the keychain. The dev
+# plugin folder is this computer's own setting, which the release reads from
+# machine.toml beside config.toml and never from config.toml.
 plugins_home="$runtime_root/plugins-home"
 keychain_bin="$runtime_root/keychain-bin"
 keychain_log="$runtime_root/keychain.log"
@@ -311,10 +338,13 @@ MANIFEST
 cat > "$plugins_home/config.toml" <<CONFIG
 [fermix_core]
 profile = "$profile"
+CONFIG
 
+cat > "$plugins_home/machine.toml" <<MACHINE
 [fermix_core.plugins]
 dev_local = "$plugin_checkout"
-CONFIG
+MACHINE
+chmod 600 "$plugins_home/machine.toml"
 
 clear_status=0
 clear_output="$(
@@ -342,6 +372,156 @@ esac
 # this stage would pass vacuously.
 grep -Fq "delete-generic-password -a fermix -s fermix:$profile:FERMIX_PLUGIN_DISCORD" "$keychain_log" 2>/dev/null ||
   fail "plugins auth clear never ran the stand-in keychain helper, so this stage proved nothing"
+
+# ── computer join, run tree-less from this artifact ─────────────────────────
+# `fermix computer join` joins this computer to a Fermix that already runs.
+# It runs with Fermix stopped and no supervision tree, and it makes this
+# computer's key in the secret store, so every keychain helper it runs has to
+# run inline: a verb that asks for a command host dies on every install, as
+# `plugins auth clear` once did. A join is part of Always On, so a release
+# refuses it in a home whose settings do not turn Always On on. It runs
+# before the migrate-to-app stage because that stage ends the script on a
+# Linux target.
+#
+# The code comes on stdin, never in argv, where every process can read it:
+# here from a file holding it, the first line of a stdin that is not a
+# terminal (a file rather than a pipe, so a verb that exits before it reads
+# cannot fail the writer). Run with nothing on stdin in a home that offers
+# Always On, the verb must refuse because no code was read, before it asks
+# the keychain anything: one that joins anyway takes its code from
+# somewhere else.
+#
+# No keychain is touched. Two stand-in `security` helpers, each first on PATH
+# for its run, record what the verb asks (never the key it stores). One
+# refuses every request as a keychain that will not answer does: the verb
+# must exit 1 with its own sentence naming the keychain, and leave no join
+# and no role behind. The other answers as a fresh login Keychain does, exit
+# 44 for the item it does not hold yet, then keeps what is added and gives it
+# back: the verb must take "no such item" as a key to make, store it, read it
+# back, write `device/join.json` at mode 0600 and make the engine a device.
+# The code is one this script builds, for a server that does not exist: the
+# verb dials nothing, the next start of Fermix does.
+join_bin="$runtime_root/join-keychain-bin"
+join_refusing_bin="$runtime_root/join-refusing-keychain-bin"
+join_log="$runtime_root/join-keychain.log"
+join_item="$runtime_root/join-keychain.item"
+join_profile="fermix-verify-join-$$"
+join_out="$runtime_root/join.out"
+mkdir -p "$join_bin" "$join_refusing_bin"
+
+cat > "$join_bin/security" <<SECURITY
+#!/bin/sh
+printf '%s %s %s %s %s\n' "\$1" "\$2" "\$3" "\$4" "\$5" >> "$join_log"
+case "\$1:\$6" in
+  find-generic-password:-g)
+    if [ -f "$join_item" ]; then
+      printf 'password: "%s"\n' "\$(cat "$join_item")" >&2
+      exit 0
+    fi
+    printf 'security: SecKeychainSearchCopyNext: The specified item could not be found in the keychain.\n' >&2
+    exit 44
+    ;;
+  add-generic-password:-w)
+    printf '%s' "\$7" > "$join_item"
+    exit 0
+    ;;
+  delete-generic-password:)
+    if [ -f "$join_item" ]; then rm -f "$join_item"; exit 0; fi
+    printf 'security: The specified item could not be found in the keychain.\n' >&2
+    exit 44
+    ;;
+  *) printf 'stand-in security: unexpected invocation: security %s\n' "\$1" >&2 ; exit 64 ;;
+esac
+SECURITY
+
+cat > "$join_refusing_bin/security" <<SECURITY
+#!/bin/sh
+printf 'refused %s\n' "\$1" >> "$join_log"
+printf 'security: SecKeychainSearchCopyNext: User interaction is not allowed.\n' >&2
+exit 51
+SECURITY
+chmod +x "$join_bin/security" "$join_refusing_bin/security"
+
+join_json='{"v":2,"purpose":"computer","secret":"WlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlo=","gateway_pk":"PDw8PDw8PDw8PDw8PDw8PDw8PDw8PDw8PDw8PDw8PDw=","node_id":"4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f","relays":[{"url":"https://eu1.relay.invalid/","quic_port":7842}],"relays_rev":"0123456789abcdef","name":"verify-server","expires_at":"2099-01-01T00:00:00Z"}'
+join_code="fxenroll1.$(printf '%s' "$join_json" | base64 | tr -d '\n=' | tr '+/' '-_')"
+join_code_file="$runtime_root/join-code"
+(umask 077; printf '%s\n' "$join_code" > "$join_code_file")
+
+# Runs the verb in the home $1 with the keychain stand-in directory $2 first
+# on PATH and stdin from $3 (the code file unless named); its output lands
+# in $join_out and its exit status in $join_status.
+run_join() {
+  join_status=0
+  env -u FERMIX_OPIK_ENABLED \
+    HOME="$home" \
+    FERMIX_HOME="$1" \
+    PATH="$2:/usr/bin:/bin:/usr/sbin:/sbin" \
+    "$artifact" computer join < "${3:-$join_code_file}" > "$join_out" 2>&1 || join_status=$?
+  cat "$join_out"
+  # Named before any other verdict, so the message is precise when this
+  # class comes back.
+  ! grep -Fq "command host supervisor" "$join_out" ||
+    fail "computer join ran its keychain helper under a command host this tree-less verb does not have"
+}
+
+join_settings() {
+  mkdir -m 700 "$1"
+  printf '[fermix_core]\nprofile = "%s"\n' "$join_profile" > "$1/config.toml"
+  chmod 600 "$1/config.toml"
+}
+
+# Nothing on stdin: refused because no code was read, before the keychain.
+join_codeless_home="$runtime_root/join-codeless-home"
+join_settings "$join_codeless_home"
+run_join "$join_codeless_home" "$join_bin" /dev/null
+[ "$join_status" -eq 1 ] ||
+  fail "computer join with no code on stdin must exit 1, got $join_status"
+grep -Fq "fermix computer join: No code was read." "$join_out" ||
+  fail "computer join with no code on stdin did not say that no code was read"
+[ ! -e "$join_log" ] && [ ! -e "$join_codeless_home/device" ] ||
+  fail "computer join with no code on stdin reached the keychain or wrote a join"
+
+# A keychain that will not answer: refused by name, and nothing is left.
+join_refused_home="$runtime_root/join-refused-home"
+join_settings "$join_refused_home"
+join_refused_settings="$(cat "$join_refused_home/config.toml")"
+run_join "$join_refused_home" "$join_refusing_bin"
+[ "$join_status" -eq 1 ] ||
+  fail "computer join with a keychain that will not answer must exit 1, got $join_status"
+grep -Fq "fermix computer join: Fermix could not use this computer's key: the keychain refused the request." "$join_out" ||
+  fail "computer join did not name the keychain that refused it"
+grep -Fq "refused find-generic-password" "$join_log" 2>/dev/null ||
+  fail "computer join never asked the refusing keychain stand-in, so this stage proved nothing"
+[ ! -e "$join_refused_home/device/join.json" ] ||
+  fail "computer join left a join behind after the keychain refused it"
+[ "$(cat "$join_refused_home/config.toml")" = "$join_refused_settings" ] ||
+  fail "computer join changed the settings of a home whose keychain refused it: $(cat "$join_refused_home/config.toml")"
+
+# A fresh keychain: the key is made, stored and read back, and the join waits
+# for the next start of Fermix.
+join_home="$runtime_root/join-home"
+join_settings "$join_home"
+run_join "$join_home" "$join_bin"
+[ "$join_status" -eq 0 ] ||
+  fail "computer join must exit 0 in the throwaway world, got $join_status"
+grep -Fq "This computer joins your Fermix on verify-server when Fermix starts here." "$join_out" ||
+  fail "computer join did not say that the join waits for the next start of Fermix"
+join_service="fermix:$join_profile:device:desktop_key"
+grep -Fq "find-generic-password -a fermix -s $join_service" "$join_log" &&
+  grep -Fq "add-generic-password -a fermix -s $join_service" "$join_log" ||
+  fail "computer join never stored its key through the stand-in keychain helper, so this stage proved nothing"
+[ -s "$join_item" ] ||
+  fail "computer join stored no key in the stand-in keychain"
+[ -f "$join_home/device/join.json" ] ||
+  fail "computer join wrote no join for the next start of Fermix"
+case "$(ls -l "$join_home/device/join.json")" in
+  -rw-------*) ;;
+  *) fail "computer join wrote its join readable by others: $(ls -l "$join_home/device/join.json")" ;;
+esac
+! grep -Fq "$(cat "$join_item")" "$join_home/device/join.json" ||
+  fail "computer join wrote this computer's private key into its join"
+grep -Eq '^role = "device"$' "$join_home/config.toml" ||
+  fail "computer join did not make the engine a device: $(cat "$join_home/config.toml")"
 
 # ── auth logout, run tree-less from this artifact ───────────────────────────
 # `fermix auth logout` runs without the supervision tree. It takes the two
@@ -488,64 +668,55 @@ settings_json="$(cat "$settings_out")"
 grep -Fq "daemon is not running" "$settings_err" ||
   fail "fermix settings did not say on stderr why it changed nothing: $(cat "$settings_err")"
 
+# ── an HTTPS connection, run from this artifact ─────────────────────────────
+# Every certificate Fermix checks is decoded through OTP's asn1 native
+# library, which the Burrito build puts where the release loads it
+# (`FermixCore.Release.NativeLibraries`). A library built for the build
+# machine there loads on that machine alone, and on every other one each HTTPS
+# connection fails. `fermix upgrade --check` fetches the release manifest from
+# GitHub over HTTPS, checking the server's certificate, and changes nothing,
+# so it must exit 0 and name a version. It runs before the migrate-to-app
+# stage because that stage ends the script on a Linux target.
+tls_home="$runtime_root/tls-home"
+mkdir -m 700 "$tls_home"
+if ! tls_output="$(env -u FERMIX_OPIK_ENABLED HOME="$home" FERMIX_HOME="$tls_home" \
+  "$artifact" upgrade --check 2>&1)"; then
+  printf '%s\n' "$tls_output" >&2
+  fail "fermix upgrade --check could not reach the release manifest over HTTPS"
+fi
+printf '%s\n' "$tls_output"
+case "$tls_output" in
+  *"fermix upgrade: "*) ;;
+  *) fail "fermix upgrade --check did not report a version: $tls_output" ;;
+esac
+
 # ── fermix always-on in a release, run from this artifact ──────────────────
-# A release build offers Always On only in a home whose settings file turns
-# it on (`FermixCore.Home.AlwaysOnRelease`: `[fermix_core.always_on]
-# enabled = true`, an unsupported switch for testing), read from that file
-# with no engine and no tree. So in a home that does not exist yet a step
-# must refuse before it reads anything: exit 1, exactly one JSON envelope on
-# stdout naming `always_on_unavailable`, the sentence on stderr, and nothing
-# written but the `secret_key_base` every release boot writes
-# (`holds_only_boot_key`): no settings, no role, no Always On state. An
-# artifact that reaches for the engine instead (`engine_stopped`
-# with no daemon) offers Always On to every home and fails here. In a
-# throwaway home whose settings carry the switch, the same step must reach
-# for the engine instead, exactly `engine_stopped` with no daemon, and leave
-# the settings as they were: an artifact that still refuses there does not
-# read the switch from the home's own file. This stage runs the artifact the
-# release is about to publish. It runs before the migrate-to-app stage
-# because that stage ends the script on a Linux target. When Always On
-# ships, the gate goes and the first half expects `engine_stopped` too.
+# Every release build serves Always On, and the verb needs the engine: in a
+# home that does not exist yet, with no daemon, a step must reach for it and
+# refuse `engine_stopped`: exit 1, exactly one JSON envelope on stdout, the
+# sentence on stderr, and nothing written but the `secret_key_base` every
+# release boot writes (`holds_only_boot_key`): no settings, no role, no
+# Always On state. This stage runs the artifact the release is about to
+# publish. It runs before the migrate-to-app stage because that stage ends
+# the script on a Linux target.
 always_on_home="$runtime_root/always-on-home"
 always_on_out="$runtime_root/always-on.out"
 always_on_err="$runtime_root/always-on.err"
 always_on_status=0
 env -u FERMIX_OPIK_ENABLED HOME="$home" FERMIX_HOME="$always_on_home" \
-  "$artifact" always-on create-server --json < /dev/null > "$always_on_out" 2> "$always_on_err" ||
+  "$artifact" always-on own-server --json < /dev/null > "$always_on_out" 2> "$always_on_err" ||
   always_on_status=$?
 printf '%s\n' "$(cat "$always_on_err")"
 [ "$always_on_status" -eq 1 ] ||
-  fail "fermix always-on create-server with no daemon must exit 1, got $always_on_status"
-always_on_json="$(cat "$always_on_out")"
-always_on_expected='{"error":{"code":"always_on_unavailable","sentence":"Always On is not in this release of Fermix yet."},"ok":false,"schema_version":1}'
-[ "$always_on_json" = "$always_on_expected" ] ||
-  fail "fermix always-on --json in a release must print exactly the always_on_unavailable envelope on stdout, got: $always_on_json"
-grep -Fq "Always On is not in this release of Fermix yet." "$always_on_err" ||
-  fail "fermix always-on did not say on stderr why it took no step: $(cat "$always_on_err")"
-holds_only_boot_key "$always_on_home" ||
-  fail "fermix always-on wrote more than the boot's secret_key_base into $always_on_home with no daemon: $(ls -A "$always_on_home")"
-
-switched_home="$runtime_root/always-on-switched-home"
-switched_settings='[fermix_core.always_on]
-enabled = true'
-mkdir -m 700 "$switched_home"
-printf '%s\n' "$switched_settings" > "$switched_home/config.toml"
-chmod 600 "$switched_home/config.toml"
-always_on_status=0
-env -u FERMIX_OPIK_ENABLED HOME="$home" FERMIX_HOME="$switched_home" \
-  "$artifact" always-on create-server --json < /dev/null > "$always_on_out" 2> "$always_on_err" ||
-  always_on_status=$?
-printf '%s\n' "$(cat "$always_on_err")"
-[ "$always_on_status" -eq 1 ] ||
-  fail "fermix always-on create-server with the switch and no daemon must exit 1, got $always_on_status"
+  fail "fermix always-on own-server with no daemon must exit 1, got $always_on_status"
 always_on_json="$(cat "$always_on_out")"
 always_on_expected='{"error":{"code":"engine_stopped","sentence":"Fermix is not running from this home, and this needs it. Start it, then try again."},"ok":false,"schema_version":1}'
 [ "$always_on_json" = "$always_on_expected" ] ||
-  fail "fermix always-on --json in a home whose settings turn Always On on must print exactly the engine_stopped envelope on stdout, got: $always_on_json"
+  fail "fermix always-on --json with no daemon must print exactly the engine_stopped envelope on stdout, got: $always_on_json"
 grep -Fq "Fermix is not running from this home" "$always_on_err" ||
-  fail "fermix always-on with the switch did not say on stderr why it took no step: $(cat "$always_on_err")"
-[ "$(cat "$switched_home/config.toml")" = "$switched_settings" ] ||
-  fail "fermix always-on changed the settings of $switched_home with no daemon: $(cat "$switched_home/config.toml")"
+  fail "fermix always-on did not say on stderr why it took no step: $(cat "$always_on_err")"
+holds_only_boot_key "$always_on_home" ||
+  fail "fermix always-on wrote more than the boot's secret_key_base into $always_on_home with no daemon: $(ls -A "$always_on_home")"
 
 # ── fermix home export, import and mark-moved, run from this artifact ──────
 # `fermix home` runs without the supervision tree and carries a whole home: it
@@ -560,7 +731,9 @@ grep -Fq "Fermix is not running from this home" "$always_on_err" ||
 # terminal is needed. The archive is restored into a second fresh root, which
 # must come back one epoch higher with the setting moved to the new path. The
 # source is then marked moved twice: the first must succeed and the second
-# refuse, because the first move is the one that counts.
+# refuse, because the first move is the one that counts. The setting is the
+# Signal command's path, one that travels with the home: this computer's own
+# settings stay behind in its machine.toml, which no archive carries.
 home_src="$runtime_root/home-src"
 home_dst="$runtime_root/home-dst"
 home_archive="$runtime_root/home.fxhome"
@@ -568,7 +741,7 @@ home_passphrase="$runtime_root/home-passphrase"
 mkdir -m 700 "$home_src" "$home_src/mobile"
 printf '5\n' > "$home_src/mobile/primary_epoch"
 chmod 600 "$home_src/mobile/primary_epoch"
-printf '[sandbox]\nworkspace_root = "%s/workspace"\n' "$home_src" > "$home_src/config.toml"
+printf '[fermix_channels.signal]\ncli_path = "%s/bin/signal-cli"\n' "$home_src" > "$home_src/config.toml"
 printf 'invented-verify-passphrase\n' > "$home_passphrase"
 chmod 600 "$home_passphrase"
 
@@ -595,43 +768,91 @@ printf '%s\n' "$home_output"
 [ "$home_status" -eq 0 ] || fail "fermix home import must exit 0 into an empty root, got $home_status"
 [ "$(cat "$home_dst/mobile/primary_epoch" 2>/dev/null)" = 6 ] ||
   fail "fermix home import must make the restored home the next primary, epoch 6"
-grep -Fq "\"$home_dst/workspace\"" "$home_dst/config.toml" 2>/dev/null ||
+grep -Fq "\"$home_dst/bin/signal-cli\"" "$home_dst/config.toml" 2>/dev/null ||
   fail "fermix home import did not move the setting that named the old home to the new one"
 [ ! -e "$home_dst/moved.json" ] || fail "fermix home import marked the restored home moved"
 
-# `fermix home status` is Always On's screen, and a release build offers
-# Always On only in a home whose settings turn it on
-# (`FermixCore.Home.AlwaysOnRelease`), so in a home without the switch it
-# refuses as `fermix always-on` does, before reading anything: exit 1 and
-# exactly the `always_on_unavailable` envelope. An artifact that answers the
-# home's facts there offers Always On to every home. With the switch added
-# to the same home's settings it answers from the home's own files with no
-# daemon, as an Always On server's first boot and its nightly update read
-# it: exit 0, the role and the update ceiling. When Always On ships, the
-# gate goes and the first half reads the home's files too.
+# `fermix home status` is Always On's screen, which every release build
+# serves: with no daemon it answers from the home's own files, as an Always On
+# server's first boot and its updates read it: exit 0, the role and the
+# update ceiling.
 status_out="$runtime_root/home-status.out"
 status_err="$runtime_root/home-status.err"
 home_status=0
 env -u FERMIX_OPIK_ENABLED HOME="$home" FERMIX_HOME="$home_src" \
   "$artifact" home status --json < /dev/null > "$status_out" 2> "$status_err" || home_status=$?
 printf '%s\n' "$(cat "$status_err")"
-[ "$home_status" -eq 1 ] ||
-  fail "fermix home status in a release must exit 1, got $home_status: $(cat "$status_out")"
-status_expected='{"error":{"code":"always_on_unavailable","sentence":"Always On is not in this release of Fermix yet."},"ok":false,"schema_version":1}'
-[ "$(cat "$status_out")" = "$status_expected" ] ||
-  fail "fermix home status --json in a release must print exactly the always_on_unavailable envelope on stdout, got: $(cat "$status_out")"
+[ "$home_status" -eq 0 ] ||
+  fail "fermix home status with no daemon must exit 0, got $home_status: $(cat "$status_out")"
+for field in '"ok":true' '"role":"primary"' '"update_ceiling":'; do
+  grep -Fq "$field" "$status_out" ||
+    fail "fermix home status --json must answer the home's role and update ceiling ($field), got: $(cat "$status_out")"
+done
 
-printf '\n[fermix_core.always_on]\nenabled = true\n' >> "$home_src/config.toml"
+# Under `--json` stdout is one JSON document and nothing else, and nothing the
+# verb logs lands there. `config/runtime.exs` moves the default logger handler
+# off stdout, but a release starts the `logger` application after it, which
+# installs its own handler on stdout, so `Fermix.CLI.main/1` moves it again
+# before the verb runs; only the packaged binary boots in that order. The home
+# never started and its settings are empty, with no daemon: home status reads
+# it from its files and logs that the home's computers could not be listed (no
+# engine runs to list them), on stderr. The whole of stdout is parsed, as a
+# caller reads it.
+one_ok_json_document() {
+  uv run --no-project python -c '
+import json, sys
+with open(sys.argv[1], encoding="utf-8") as stream:
+    text = stream.read()
+try:
+    document = json.loads(text)
+except ValueError as error:
+    sys.exit(f"stdout is not one JSON document: {error}")
+if not isinstance(document, dict) or document.get("ok") is not True:
+    sys.exit("stdout is not an envelope that is ok")
+' "$1"
+}
+
+status_fresh_home="$runtime_root/home-status-fresh"
+mkdir -m 700 "$status_fresh_home"
+: > "$status_fresh_home/config.toml"
+chmod 600 "$status_fresh_home/config.toml"
 home_status=0
-env -u FERMIX_OPIK_ENABLED HOME="$home" FERMIX_HOME="$home_src" \
+env -u FERMIX_OPIK_ENABLED HOME="$home" FERMIX_HOME="$status_fresh_home" \
   "$artifact" home status --json < /dev/null > "$status_out" 2> "$status_err" || home_status=$?
 printf '%s\n' "$(cat "$status_err")"
 [ "$home_status" -eq 0 ] ||
-  fail "fermix home status in a home whose settings turn Always On on must exit 0, got $home_status: $(cat "$status_out")"
-for field in '"ok":true' '"role":"primary"' '"update_ceiling":'; do
-  grep -Fq "$field" "$status_out" ||
-    fail "fermix home status --json with the switch must answer the home's role and update ceiling ($field), got: $(cat "$status_out")"
-done
+  fail "fermix home status --json in a home that never started must exit 0, got $home_status: $(cat "$status_out")"
+one_ok_json_document "$status_out" ||
+  fail "fermix home status --json in a home that never started must print exactly one JSON document on stdout, got: $(cat "$status_out")"
+
+# A settings file an earlier release wrote can carry a table this one retired,
+# Always On's test switch `[fermix_core.always_on]` above all, which every
+# home that tried Always On before it shipped still has. It must boot: the
+# table is accepted and ignored, the boot's read keeps the sentence that names
+# it, and the process says it once at warning
+# (`FermixCore.Setup.ConfigStore.say_retired_settings/0`), never once per
+# settings load, which the boot, the verb and every poll of a daemon repeat.
+# Under `--json` the notice is on stderr, and the file is left as it was: only
+# a settings save drops the table.
+retired_home="$runtime_root/home-status-retired"
+retired_settings='[fermix_core.always_on]
+enabled = true'
+mkdir -m 700 "$retired_home"
+printf '%s\n' "$retired_settings" > "$retired_home/config.toml"
+chmod 600 "$retired_home/config.toml"
+home_status=0
+env -u FERMIX_OPIK_ENABLED HOME="$home" FERMIX_HOME="$retired_home" \
+  "$artifact" home status --json < /dev/null > "$status_out" 2> "$status_err" || home_status=$?
+printf '%s\n' "$(cat "$status_err")"
+[ "$home_status" -eq 0 ] ||
+  fail "fermix home status --json in a home whose settings carry a retired table must exit 0, got $home_status: $(cat "$status_out")"
+one_ok_json_document "$status_out" ||
+  fail "fermix home status --json in a home whose settings carry a retired table must print exactly one JSON document on stdout, got: $(cat "$status_out")"
+retired_named="$(grep -Fc "config.toml [fermix_core.always_on] is retired" "$status_err" || :)"
+[ "$retired_named" -eq 1 ] ||
+  fail "fermix home status must name the retired [fermix_core.always_on] table exactly once on stderr, named it $retired_named times: $(cat "$status_err")"
+[ "$(cat "$retired_home/config.toml")" = "$retired_settings" ] ||
+  fail "fermix home status changed the settings of $retired_home: $(cat "$retired_home/config.toml")"
 
 moved_out="$runtime_root/home-moved.out"
 moved_err="$runtime_root/home-moved.err"
@@ -674,6 +895,123 @@ grep -Fq "not an enrollment code" "$enroll_err" ||
 holds_only_boot_key "$enroll_home" ||
   fail "fermix home enroll left more than the boot's secret_key_base at $enroll_home: $(ls -A "$enroll_home")"
 [ -f "$enroll_code" ] || fail "fermix home enroll removed the code file it refused"
+
+# ── fermix status and the daemon's lock, run from this artifact ────────────
+# Whether Fermix runs is read from its control socket and, when the socket
+# turns the connection away, from the lock a running daemon holds beside it
+# for its whole life (`daemon.sock.lock`, a SQLite file it keeps locked in
+# exclusive mode): on macOS a daemon too busy to accept is turned away
+# exactly as a stopped one is. That read opens SQLite through the Exqlite
+# NIF in the tree-less command line, which no other stage here does, and
+# only where a lock file exists, which no other throwaway home holds. It runs
+# before the migrate-to-app stage because that stage ends the script on a
+# Linux target.
+#
+# Two homes hold what a daemon that crashed leaves: its socket, bound and
+# closed with no one listening, and its lock, written and let go of. In the
+# first nothing holds the lock, so `fermix status` must say not running and
+# exit 3. In the second a stand-in daemon holds it, a SQLite connection in
+# exclusive locking mode as the daemon's is, so the socket turning the
+# connection away is a Fermix too busy to answer: it must say it could not
+# tell and exit 1. Once the stand-in is stopped by its PID, which drops its
+# lock as a crash would, that home must read not running again. The stand-in
+# also ends by itself once this run's directory is gone, so a failed stage
+# leaves no process behind. The homes sit directly under the run's directory
+# so the socket's address stays within macOS's 104 bytes, and the CLI's
+# connect is refused as a stale socket's is; the socket is bound by its name
+# inside the home, so a longer temporary directory still lays it out.
+lock_free_home="$runtime_root/st-free"
+lock_held_home="$runtime_root/st-held"
+lock_holder_ready="$runtime_root/lock-holder.pid"
+lock_out="$runtime_root/lock-status.out"
+lock_err="$runtime_root/lock-status.err"
+mkdir -m 700 "$lock_free_home" "$lock_held_home"
+
+# The two files a daemon that crashed leaves in the home $1.
+stale_daemon_files() {
+  uv run --no-project python -c '
+import os, socket, sqlite3, sys
+os.chdir(sys.argv[1])
+listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+listener.bind("daemon.sock")
+listener.close()
+lock = sqlite3.connect("daemon.sock.lock")
+lock.execute("CREATE TABLE holder (os_pid INTEGER)")
+lock.commit()
+lock.close()
+' "$1"
+}
+
+# Holds the lock $1 as a running daemon does and, once it holds it, writes
+# its PID to $2; it lets go when stopped or when the run's directory is gone,
+# and after two minutes at most.
+hold_daemon_lock() {
+  uv run --no-project python -c '
+import os, sqlite3, sys, time
+lock_path, ready = sys.argv[1], sys.argv[2]
+lock = sqlite3.connect(lock_path, timeout=0, isolation_level=None)
+lock.execute("PRAGMA locking_mode=EXCLUSIVE")
+lock.execute("BEGIN EXCLUSIVE")
+lock.execute("INSERT INTO holder (os_pid) VALUES (?)", (os.getpid(),))
+lock.execute("COMMIT")
+with open(ready + ".partial", "w") as stream:
+    stream.write(str(os.getpid()))
+os.rename(ready + ".partial", ready)
+for _ in range(1200):
+    if not os.path.isdir(os.path.dirname(ready)):
+        break
+    time.sleep(0.1)
+lock.close()
+' "$1" "$2"
+}
+
+# Runs `fermix status` in the home $1; its stderr lands in $lock_err and its
+# exit status in $lock_status.
+run_lock_status() {
+  lock_status=0
+  env -u FERMIX_OPIK_ENABLED HOME="$home" FERMIX_HOME="$1" \
+    "$artifact" status < /dev/null > "$lock_out" 2> "$lock_err" || lock_status=$?
+  printf '%s\n' "$(cat "$lock_err")"
+}
+
+stale_daemon_files "$lock_free_home" || fail "cannot lay out a crashed daemon's socket and lock (the reason is above)"
+stale_daemon_files "$lock_held_home" || fail "cannot lay out a crashed daemon's socket and lock (the reason is above)"
+
+run_lock_status "$lock_free_home"
+[ "$lock_status" -eq 3 ] ||
+  fail "fermix status beside a stale socket and a lock nothing holds must exit 3, got $lock_status"
+grep -Fxq "fermix: not running" "$lock_err" ||
+  fail "fermix status beside a stale socket and a lock nothing holds did not say Fermix is not running"
+
+hold_daemon_lock "$lock_held_home/daemon.sock.lock" "$lock_holder_ready" &
+lock_holder_job=$!
+for _ in $(seq 1 100); do
+  [ -s "$lock_holder_ready" ] && break
+  sleep 0.1
+done
+[ -s "$lock_holder_ready" ] ||
+  fail "the stand-in daemon never took its lock, so this stage would prove nothing"
+lock_holder_pid="$(cat "$lock_holder_ready")"
+kill -0 "$lock_holder_pid" 2>/dev/null ||
+  fail "the stand-in daemon is not running, so this stage would prove nothing"
+
+run_lock_status "$lock_held_home"
+[ "$lock_status" -eq 1 ] ||
+  fail "fermix status beside a stale socket whose lock another process holds must exit 1, got $lock_status"
+grep -Fq "fermix status: Fermix could not tell whether it is running: its control socket turned the connection away while Fermix holds its lock" "$lock_err" ||
+  fail "fermix status beside a stale socket whose lock another process holds did not say it could not tell"
+
+kill "$lock_holder_pid"
+lock_holder_status=0
+wait "$lock_holder_job" || lock_holder_status=$?
+! kill -0 "$lock_holder_pid" 2>/dev/null ||
+  fail "the stand-in daemon did not stop (exit $lock_holder_status), so its lock would still be held"
+
+run_lock_status "$lock_held_home"
+[ "$lock_status" -eq 3 ] ||
+  fail "fermix status once the process holding its lock is gone must exit 3, got $lock_status"
+grep -Fxq "fermix: not running" "$lock_err" ||
+  fail "fermix status once the process holding its lock is gone did not say Fermix is not running"
 
 # ── migrate-to-app preflight, run from this artifact ────────────────────────
 # `fermix migrate-to-app` with no `--yes` is a plan: it inspects the account
@@ -804,3 +1142,28 @@ if ! check_output="$("$disclaim" --check 2>&1)"; then
   fail "packaged disclaim shim self-check failed"
 fi
 printf '%s\n' "$check_output"
+
+# ── the packaged accessory serial helper (M91) ──────────────────────────────
+# It ships beside the shim in every macOS payload. Its self-check is its own
+# usage refusal (exit 64): run with no command it opens no device and lists
+# no port, so the gate touches no serial hardware on the build machine.
+serial_helper=""
+while IFS= read -r -d '' candidate; do
+  serial_helper="$candidate"
+  break
+done < <(find "$home" -type f -path '*/fermix_nif-*/priv/fermix_serial' -print0)
+
+[ -n "$serial_helper" ] || fail "packaged accessory serial helper not found in the isolated smoke home"
+[ -x "$serial_helper" ] || fail "packaged accessory serial helper is not executable"
+
+set +e
+serial_output="$("$serial_helper" --help 2>&1)"
+serial_status=$?
+set -e
+case "$serial_status:$serial_output" in
+  "64:fermix_serial: usage:"*) printf '%s\n' "$serial_output" ;;
+  *)
+    printf '%s\n' "$serial_output" >&2
+    fail "packaged accessory serial helper self-check failed (exit $serial_status; expected its usage and exit 64)"
+    ;;
+esac

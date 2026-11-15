@@ -2068,11 +2068,11 @@ defmodule FermixChannels.Mobile.SocketHandlerTest do
     test_pid = self()
 
     hello =
-      client_frame(3, "hello", 1, %{
+      client_frame(4, "hello", 1, %{
         "device_id" => "paired-device",
         "app_version" => "9.0",
         "last_server_seq" => 0,
-        "protocol_v" => 3
+        "protocol_v" => 4
       })
 
     {:ok, state} =
@@ -2094,12 +2094,12 @@ defmodule FermixChannels.Mobile.SocketHandlerTest do
             {1002, "unsupported mobile protocol version"}, [{:binary, frame}], _next} =
              SocketHandler.handle_in({hello, opcode: :binary}, state)
 
-    assert {%{"v" => 2, "t" => "error", "seq" => 1} = refusal, <<>>} = decode_server_frame(frame)
+    assert {%{"v" => 3, "t" => "error", "seq" => 1} = refusal, <<>>} = decode_server_frame(frame)
     assert refusal["code"] == "unsupported_protocol_version"
     assert refusal["direction"] == "client_too_new"
-    assert refusal["client_version"] == 3
+    assert refusal["client_version"] == 4
     assert refusal["min_version"] == 2
-    assert refusal["max_version"] == 2
+    assert refusal["max_version"] == 3
     refute_received :attached
   end
 
@@ -2174,6 +2174,8 @@ defmodule FermixChannels.Mobile.SocketHandlerTest do
         hello_state(%{
           discover: fn -> {:ok, candidates} end,
           iroh_candidate: fn -> {:ok, iroh} end,
+          # A phone is given no address hints: those are a desktop's.
+          iroh_hints: fn -> ["100.101.102.103:4033"] end,
           encode_server: fn "hello_ack", payload, 1 ->
             assert length(payload["candidates"]) == 16
             assert List.last(payload["candidates"]) == iroh

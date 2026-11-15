@@ -370,6 +370,50 @@ defmodule FermixCore.Harness.Adapters.CodexExecTest do
     end
   end
 
+  # M98 D10: Codex's own words when its sign-in is missing or no longer works,
+  # pinned per CLI version against streams captured from `codex exec --json`
+  # (codex-cli 0.166.0, throwaway CODEX_HOME, invented values).
+  describe "signed_out?/1" do
+    test "the words a 0.166.0 run ends on with no sign-in at all" do
+      words = failure_words("codex_0_166_0_not_signed_in.jsonl")
+
+      assert words =~ "401 Unauthorized"
+      assert CodexExec.signed_out?(words)
+    end
+
+    test "the words a 0.166.0 run ends on when its sign-in could not be refreshed" do
+      words = failure_words("codex_0_166_0_refresh_failed.jsonl")
+
+      assert words ==
+               "Your access token could not be refreshed. Please log out and sign in again."
+
+      assert CodexExec.signed_out?(words)
+    end
+
+    test "every other refresh sentence the 0.166.0 binary carries" do
+      for words <- [
+            "Your access token could not be refreshed because your refresh token has expired. " <>
+              "Please log out and sign in again.",
+            "Your access token could not be refreshed because your refresh token was already " <>
+              "used. Please log out and sign in again.",
+            "Your access token could not be refreshed because your refresh token was revoked. " <>
+              "Please log out and sign in again.",
+            "Your access token could not be refreshed because you have since logged out or " <>
+              "signed in to another account. Please sign in again.",
+            "Your authentication session could not be refreshed automatically. Please log out " <>
+              "and sign in again."
+          ] do
+        assert CodexExec.signed_out?(words), words
+      end
+    end
+
+    test "words that are not about the sign-in are not, nor `codex login status`'s own" do
+      refute CodexExec.signed_out?(failure_words("codex_exec_failure.jsonl"))
+      refute CodexExec.signed_out?("Not logged in")
+      refute CodexExec.signed_out?("")
+    end
+  end
+
   describe "resume_hint/1" do
     test "a resumable run with a session id yields the resume invocation" do
       row = %{resumable: true, vendor_session_id: "thread-9", cwd: "/repo"}
@@ -393,6 +437,15 @@ defmodule FermixCore.Harness.Adapters.CodexExecTest do
     |> File.read!()
     |> String.split("\n", trim: true)
     |> Enum.map(&Jason.decode!/1)
+  end
+
+  # The failure text a run takes from the stream: the last `turn.failed`'s words.
+  defp failure_words(name) do
+    name
+    |> read_events()
+    |> Enum.map(&CodexExec.extract/1)
+    |> Enum.flat_map(&List.wrap(Map.get(&1, :failure_text)))
+    |> List.last()
   end
 
   defp write_model_list!(codex_home, models) do

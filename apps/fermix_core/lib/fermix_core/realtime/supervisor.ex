@@ -1,14 +1,25 @@
 defmodule FermixCore.Realtime.Supervisor do
   @moduledoc """
   Supervisor for the local Realtime voice runtime.
+
+  `:rest_for_one`, in start order: a child's crash restarts every child
+  started after it. A call never outlives what admitted it, so a crash of the
+  call lease or the call registry ends every session (the guard tree), their
+  tasks and the socket, and the record sweep, restarted after the sessions
+  are gone, closes the records those calls left open before the new socket
+  takes a call. A restarted lease or registry is empty, so under
+  `:one_for_one` the sessions it admitted would run on unleased and a second
+  call could open beside them.
   """
 
   use Supervisor
 
+  alias FermixCore.Realtime.CallLease
   alias FermixCore.Realtime.CallRegistry
   alias FermixCore.Realtime.CallSweep
   alias FermixCore.Realtime.Config
   alias FermixCore.Realtime.LocalVoiceSocket
+  alias FermixCore.Realtime.SessionGuard
   alias FermixCore.Realtime.SessionSupervisor
 
   @spec start_link(keyword()) :: Supervisor.on_start()
@@ -22,22 +33,49 @@ defmodule FermixCore.Realtime.Supervisor do
     task_name = Keyword.get(opts, :task_supervisor_name, FermixCore.Realtime.TaskSupervisor)
     socket_name = Keyword.get(opts, :socket_name, LocalVoiceSocket)
     socket_path = Keyword.get(opts, :socket_path, Config.socket_path())
+    guard_name = Keyword.get(opts, :session_guard_name, SessionGuard)
 
-    # The call registry first: a Live session claims its call there from its
-    # own `init/1`. The record sweep before the socket: its cutoff must
-    # precede every call this boot starts.
+    # Start order is restart order (`:rest_for_one`). The call lease and
+    # registry first: every session takes the home's one call from its own
+    # `init/1`, and a task-engine session claims its chat context. The record
+    # sweep after both and before the sessions: when either crashes, the
+    # sessions are gone before the sweep takes its cutoff, so it closes their
+    # records; and before the socket, so its cutoff precedes every call this
+    # boot starts. The guarded sessions before the socket whose calls they are.
     children = [
+      {CallLease, name: Keyword.get(opts, :call_lease_name, CallLease)},
       {CallRegistry, name: Keyword.get(opts, :call_registry_name, CallRegistry)},
       {CallSweep, Keyword.take(opts, [:record_repo])},
-      {SessionSupervisor, name: session_name},
-      {Task.Supervisor, name: task_name},
+      guarded_sessions(guard_name, task_name, session_name),
       {LocalVoiceSocket,
        socket_path: socket_path,
        name: socket_name,
        task_supervisor: task_name,
-       session_supervisor: session_name}
+       session_supervisor: session_name,
+       session_guard: guard_name}
     ]
 
-    Supervisor.init(children, strategy: :one_for_one)
+    Supervisor.init(children, strategy: :rest_for_one)
+  end
+
+  # The guard and what it answers for, under `:rest_for_one` with the guard
+  # first: a guard restart takes down the task supervisor (its start and
+  # teardown tasks, and the connections' handlers) and the session supervisor
+  # (every session) with it, so a guard that comes back has nothing it forgot.
+  # A task supervisor restart ends every session too, so no teardown is lost
+  # to it. The guard is this tree's cascade root, and never raises on what it
+  # is sent (`SessionGuard`); nothing before it here does I/O.
+  defp guarded_sessions(guard_name, task_name, session_name) do
+    children = [
+      {SessionGuard, name: guard_name, task_supervisor: task_name},
+      {Task.Supervisor, name: task_name},
+      {SessionSupervisor, name: session_name}
+    ]
+
+    %{
+      id: :guarded_sessions,
+      type: :supervisor,
+      start: {Supervisor, :start_link, [children, [strategy: :rest_for_one]]}
+    }
   end
 end

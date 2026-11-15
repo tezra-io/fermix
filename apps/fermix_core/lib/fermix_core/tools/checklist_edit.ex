@@ -11,7 +11,7 @@ defmodule FermixCore.Tools.ChecklistEdit do
   A stamped row's words come back framed in the answer, which brings the turn
   an outside source, as a read does.
 
-  Offered and run only where `Checklists.Access.permitted?/2` admits it. Every
+  Offered and run only where `Kept.Access.permitted?/2` admits it. Every
   list the call touched is recorded for the reply's block with the rows it
   added or changed (`ReplyBlocks.put_checklists/3`).
 
@@ -21,8 +21,8 @@ defmodule FermixCore.Tools.ChecklistEdit do
   @behaviour FermixCore.Capabilities.Builtin.Tool
 
   alias FermixCore.Capabilities.Builtin.Tool
-  alias FermixCore.Checklists.Access
   alias FermixCore.Checklists.Registry
+  alias FermixCore.Kept.Access
   alias FermixCore.Memory.Repo
   alias FermixCore.ReplyBlocks
   alias FermixCore.Telemetry
@@ -135,7 +135,7 @@ defmodule FermixCore.Tools.ChecklistEdit do
   @impl true
   def category, do: :scheduling
 
-  @doc "Offered where `Checklists.Access.permitted?/2` admits it; `execute/2` asks again."
+  @doc "Offered where `Kept.Access.permitted?/2` admits it; `execute/2` asks again."
   @spec advertise?(map()) :: boolean()
   def advertise?(context) when is_map(context), do: Access.permitted?(context, name())
 

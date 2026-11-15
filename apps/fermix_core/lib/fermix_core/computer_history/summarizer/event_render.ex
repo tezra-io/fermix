@@ -64,6 +64,30 @@ defmodule FermixCore.ComputerHistory.Summarizer.EventRender do
   def max_line_chars, do: @max_line_chars
 
   @doc """
+  The field text a rendered sitting quotes (`text=` and an edit's
+  `text(unchanged first P chars)=`), unescaped, each once: what the model is
+  shown of what the owner typed, so what the verbatim guard checks a summary
+  against on the home, which holds no event (M97 §8.1). A value quoted inside
+  another (a title that reads `text="…"`) is escaped there and never matches.
+  """
+  @spec field_texts(String.t()) :: [String.t()]
+  def field_texts(input) when is_binary(input) do
+    ~r/(?:^| )text(?:\(unchanged first \d+ chars\))?="((?:[^"\\]|\\.)*)"/mu
+    |> Regex.scan(input, capture: :all_but_first)
+    |> Enum.map(fn [value] -> unescape(value) end)
+    |> Enum.reject(&(&1 == ""))
+    |> Enum.uniq()
+  end
+
+  defp unescape(value) do
+    Regex.replace(~r/\\(.)/su, value, fn
+      _all, "n" -> "\n"
+      _all, "r" -> "\r"
+      _all, other -> other
+    end)
+  end
+
+  @doc """
   Render `events` (id order) into `{user_message, rendered_events}`. `opts`:
   `:timezone` (defaults to the operator's), `:budget` (character cap on the
   rendered message). `rendered_events` is the prefix of `events` that fit — the
@@ -179,11 +203,18 @@ defmodule FermixCore.ComputerHistory.Summarizer.EventRender do
       withheld(event),
       char_len(event, clipped?),
       labeled(event, :scan_flag, "flag"),
-      gap(event, tz)
+      gap(event, tz),
+      by_fermix(event)
     ]
 
     {parts |> Enum.reject(&is_nil/1) |> Enum.join(" "), previous_text}
   end
+
+  # M97 §8.7, D11: an event stamped while Fermix on the owner's server drove
+  # this computer (`Sittings` marks it from `ComputerUse.ServerControl`) is
+  # Fermix's own, not the owner's.
+  defp by_fermix(%{by_fermix: true}), do: "by=fermix"
+  defp by_fermix(_event), do: nil
 
   # A re-observed field value renders as its delta: the model needs what changed,
   # not the unchanged 4 KB before it. Tracked per (app, field) within the batch,

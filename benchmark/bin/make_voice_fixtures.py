@@ -4,9 +4,10 @@
 # ///
 """Generate the spoken fixtures `drive: voice` streams into a call.
 
-Each clip is one thing the owner says aloud in `suites/grok_voice.yaml`. The
-texts live here, and only here: this script speaks each one with macOS `say`,
-converts it to what the realtime socket carries (`afconvert -f WAVE -d
+Each clip is one thing the owner says aloud in `suites/grok_voice.yaml`,
+`suites/voice_greeting_goodbye.yaml` or `suites/voice_lists_and_trips.yaml`. The texts live here, and only here:
+this script speaks each one with macOS `say`, converts it to what the
+realtime socket carries (`afconvert -f WAVE -d
 LEI16@24000 -c 1`: 24 kHz mono PCM16), and writes `manifest.json` beside the
 WAVs with each clip's file, text, duration and sha256. The suite names clips
 by their manifest key; the loader checks every named clip's hash and format at
@@ -71,6 +72,29 @@ CLIPS: dict[str, str] = {
     "correct_to_13": (
         "Wait, wrong day. I need the stocktake for the thirteenth of March, "
         "not the twentieth."),
+    # voice_greeting_goodbye.yaml (M96): an answer to the greeting, two whole
+    # goodbyes, and two requests that carry a goodbye word without being one.
+    "greeting_can_you_hear_me": "Hi there. Can you hear me all right?",
+    "goodbye_okay_thanks_bye": "Okay, thanks, bye.",
+    "goodbye_for_now": "Alright, goodbye for now.",
+    "bye_to_the_van_driver_27": (
+        "Who's driving the pantry van on Saturday the twenty-seventh of March, "
+        "twenty twenty-seven? The rota is in the voice fixtures folder of my workspace. "
+        "I want to say bye to them before they move away."),
+    "dont_hang_up_sorting_20": (
+        "Hang on, don't hang up yet. Who's on sorting at the pantry on Saturday the "
+        "twentieth of March, twenty twenty-seven? The rota is in the voice fixtures "
+        "folder of my workspace."),
+    "trip_plan_vell_19": (
+        "Plan Saturday the nineteenth of June, twenty twenty-seven, in Vell, in Kaldria, "
+        "for me: the castle at ten and lunch at the harbour market at one."),
+    "trip_remove_vell": (
+        "Thanks. Now remove that Vell trip, please."),
+    "list_make_packing": (
+        "Make me a packing list for the weekend with a toothbrush, warm socks and a "
+        "phone charger."),
+    "list_remove_packing": (
+        "Thanks. Now remove that packing list, please."),
 }
 
 

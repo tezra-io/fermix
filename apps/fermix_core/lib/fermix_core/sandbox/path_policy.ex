@@ -34,7 +34,9 @@ defmodule FermixCore.Sandbox.PathPolicy do
   @pane_bundle_ids ~w(io.tezra.FermixPet io.tezra.FermixPet.dev)
 
   # The daemon's own state under FERMIX_HOME, which no agent task reads or
-  # writes through file tools: configuration and credentials (the Linux file
+  # writes through file tools: configuration and credentials (the settings and
+  # this computer's own `machine.toml`, whose sandbox a task could otherwise
+  # widen, the Linux file
   # secret store, setup tokens, the session-signing key, ACP and mobile
   # identities, a desktop's key, the Sign in with ChatGPT install id, plugin
   # token projections, browser profiles), the persona files
@@ -42,7 +44,7 @@ defmodule FermixCore.Sandbox.PathPolicy do
   # kind joins this list in the same change. Each entry also covers the files
   # named after it (see `protected?/2`).
   @protected_fermix_entries ~w(
-    config.toml auth.json grants logs traces memory.db daemon.sock
+    config.toml machine.toml auth.json grants logs traces memory.db daemon.sock
     secrets secret_key_base setup-token setup-launch-token.json acp_identities
     mobile device plugins/run browser/profiles bootstrap acp.sock realtime.sock
     browser_bridge.sock companion.sock browser_host.sock native_host.sock chatgpt_host.json
@@ -202,6 +204,15 @@ defmodule FermixCore.Sandbox.PathPolicy do
     end
   end
 
+  @doc """
+  The folder a path's leading `~` stands for here: this process's home, which
+  every path a tool is given is resolved against (`~` and `~/…`), so a
+  computer that says its folders from `~` says them as its tools read them
+  (M97 §6.4, `Computers.Facts`).
+  """
+  @spec tilde_home() :: String.t()
+  def tilde_home, do: System.user_home!()
+
   @spec allowed_path?(String.t(), Config.t()) :: :ok | {:error, term()}
   def allowed_path?(path, config) when is_binary(path) do
     allowed_path?(path, config, protected_paths(config))
@@ -249,17 +260,28 @@ defmodule FermixCore.Sandbox.PathPolicy do
   def allowed_path?(_path, _config, _protected_roots, _effective_roots),
     do: {:error, :invalid_path}
 
+  # The daemon's own state is protected under this process's Fermix home and,
+  # where the config names another, under that one too (the home a computer's
+  # sandbox config names when it runs a tool for its server, M97 §6.4, which
+  # `OsSandbox` already confines by `config.home`): never fewer paths.
   @spec protected_paths(Config.t()) :: [String.t()]
   def protected_paths(config) do
     os_home = config.os_home
-    fermix_home = fermix_home()
 
     (@os_roots ++
        [@fermix_run_dir | credentials(os_home)] ++
        pane_website_data(os_home) ++
-       Enum.map(@protected_fermix_entries, &Path.join(fermix_home, &1)))
+       Enum.flat_map(fermix_homes(config), &home_entries/1))
     |> Enum.map(&link_resolved_path/1)
+    |> Enum.uniq()
   end
+
+  defp fermix_homes(%{home: home}) when is_binary(home) and home != "",
+    do: Enum.uniq([fermix_home(), home])
+
+  defp fermix_homes(_config), do: [fermix_home()]
+
+  defp home_entries(home), do: Enum.map(@protected_fermix_entries, &Path.join(home, &1))
 
   @doc """
   The Mac app browser pane's website data folders, a subset of
@@ -339,8 +361,8 @@ defmodule FermixCore.Sandbox.PathPolicy do
     |> resolve_components(64, &real_case/2)
   end
 
-  defp expand_path("~", _base), do: System.user_home!()
-  defp expand_path("~/" <> rest, _base), do: Path.join(System.user_home!(), rest)
+  defp expand_path("~", _base), do: tilde_home()
+  defp expand_path("~/" <> rest, _base), do: Path.join(tilde_home(), rest)
   defp expand_path("/" <> _rest = path, _base), do: Path.expand(path)
   defp expand_path(path, base), do: Path.expand(path, base)
 

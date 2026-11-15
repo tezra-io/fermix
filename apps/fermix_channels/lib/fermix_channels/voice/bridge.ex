@@ -511,7 +511,7 @@ defmodule FermixChannels.Voice.Bridge do
           revision: request.revision,
           turn_session_id: request.turn_session_id,
           conversation_store: store,
-          prompt_addendum: LivePrompt.backend_addendum(handle.conversation),
+          prompt_addendum: prompt_addendum(handle.conversation, request),
           persist?: persist?
         }
       },
@@ -519,32 +519,40 @@ defmodule FermixChannels.Voice.Bridge do
       # replies, so this one starts from them, as a request re-run after
       # `/confirm` starts from what its parked turn read.
       resumed_sources: Map.fetch!(request, :outside_sources),
-      inbound_attachments: screen_frame(request)
+      inbound_attachments: frame_attachments(request)
     })
   end
+
+  # A phone camera that is on with no fresh frame (M87 Phase 2): the turn is
+  # told there is no current picture in its prompt, never in the words the
+  # chat keeps.
+  defp prompt_addendum(conversation, %{camera_on?: true, frame: nil}),
+    do: LivePrompt.backend_addendum(conversation) <> "\n\n" <> LivePrompt.no_picture_note()
+
+  defp prompt_addendum(conversation, %{camera_on?: camera_on?})
+       when is_boolean(camera_on?),
+       do: LivePrompt.backend_addendum(conversation)
 
   defp delegation_message_id(%{delegation_id: delegation_id, revision: revision}) do
     "voice-delegation-#{delegation_id}-#{revision}"
   end
 
-  # The newest screen frame the session buffered, if the call is sharing a
-  # screen: an attachment the session already rendered, so it rides the turn
-  # like any inbound picture and its bytes are never persisted (M67).
-  defp screen_frame(request) do
-    case Map.get(request, :screen_frame) do
-      %{mime_type: mime, data: data} ->
-        [
-          %Attachment{
-            kind: :still,
-            mime_type: mime,
-            name: "screen frame",
-            size_bytes: byte_size(data),
-            bytes: data
-          }
-        ]
+  # The picture the task reads: the newest fresh frame of the phone's camera
+  # (M87 Phase 2) or of a shared screen, an attachment the session already
+  # rendered, so it rides the turn like any inbound picture and its bytes are
+  # never persisted (M67).
+  defp frame_attachments(%{frame: nil}), do: []
 
-      nil ->
-        []
-    end
+  defp frame_attachments(%{frame: %{source: source, mime_type: mime, data: data}})
+       when source in [:camera, :screen] do
+    [
+      %Attachment{
+        kind: :still,
+        mime_type: mime,
+        name: "#{source} frame",
+        size_bytes: byte_size(data),
+        bytes: data
+      }
+    ]
   end
 end

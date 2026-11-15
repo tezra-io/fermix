@@ -15,6 +15,9 @@ defmodule FermixCore.Providers.Telemetry do
 
   alias FermixCore.Telemetry
 
+  # The agents whose call content no trace or export keeps (`content_withheld/0`).
+  @content_withheld ["computer_history_summarizer"]
+
   @type opt ::
           {:session_id, String.t() | nil}
           | {:parent_session, String.t() | nil}
@@ -32,6 +35,15 @@ defmodule FermixCore.Providers.Telemetry do
     :telemetry.execute([:fermix, :provider, :failover], %{count: 1}, metadata)
   end
 
+  @doc """
+  The agents whose call content is never captured, whatever `capture_content`
+  says (M97 D10): computer history's summary call
+  (`ComputerHistory.Summarizer.summarizer_agent/0`), whose input is the owner's
+  raw activity.
+  """
+  @spec content_withheld() :: [String.t()]
+  def content_withheld, do: @content_withheld
+
   @doc "Emit a provider-call event from already-built `metadata`."
   @spec emit_call(map(), non_neg_integer(), [opt()]) :: :ok
   def emit_call(metadata, duration_ms, opts \\ [])
@@ -43,6 +55,14 @@ defmodule FermixCore.Providers.Telemetry do
 
     :telemetry.execute([:fermix, :provider, :call], %{duration_ms: duration_ms}, metadata)
   end
+
+  # M97 D10: a computer-history summary call carries the owner's raw activity in
+  # and a note about it out; a trace file or an Opik export holding that would be
+  # a second raw store, on a server most of all. So its content is never kept,
+  # whatever `capture_content` says: the call stays one event with its sizes,
+  # tokens and timing, marked as withheld.
+  defp maybe_put_content(%{agent: agent} = metadata, _opts) when agent in @content_withheld,
+    do: Map.put(metadata, :content_withheld, true)
 
   defp maybe_put_content(metadata, opts) do
     if Telemetry.capture_content?() do

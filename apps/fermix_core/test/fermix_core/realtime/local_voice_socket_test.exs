@@ -6,9 +6,16 @@ defmodule FermixCore.Realtime.LocalVoiceSocketTest do
   alias FermixCore.Realtime.LiveSessionServer
   alias FermixCore.Realtime.LocalVoiceSocket
   alias FermixCore.Realtime.Protocol
-  alias FermixCore.Realtime.SessionServer
+  alias FermixCore.Realtime.SessionGuard
   alias FermixCore.Realtime.SessionSupervisor
   alias FermixCore.SocketPath
+  alias FermixTestSupport.CallLeases
+
+  # Once it has taken a connection, a server that waits in a 50 ms accept takes
+  # each call only when that accept times out, so these calls in a row would
+  # need over 5 s; answered at once they take a few milliseconds.
+  @calls_in_a_row 101
+  @calls_bound_ms 2_500
 
   # A provider socket that takes `session.start` and never answers: enough for a
   # real Live session to hold its call open, and to claim it.
@@ -174,6 +181,7 @@ defmodule FermixCore.Realtime.LocalVoiceSocketTest do
       LocalVoiceSocket.start_link(
         socket_path: socket_path,
         task_supervisor: task_sup,
+        session_guard: start_guard!(task_sup),
         session_starter: session_starter,
         session_module: FakeSession,
         name: :"rt_socket_#{System.unique_integer([:positive])}"
@@ -185,6 +193,24 @@ defmodule FermixCore.Realtime.LocalVoiceSocketTest do
     end)
 
     %{socket: socket, socket_path: socket_path}
+  end
+
+  # The `server_hello` is the socket's accept loop at work.
+  test "answers a call at once while it waits for a connection", %{
+    socket: socket,
+    socket_path: socket_path
+  } do
+    {:ok, conn} = connect(socket_path)
+    :ok = :gen_tcp.send(conn, ~s({"type":"client_hello","protocol_version":1}\n))
+    assert {:ok, line} = recv_line(conn)
+    assert %{"type" => "server_hello"} = Jason.decode!(String.trim(line))
+    started = System.monotonic_time(:millisecond)
+
+    for _call <- 1..@calls_in_a_row,
+        do: assert(LocalVoiceSocket.active_clients(socket) == {:ok, 1})
+
+    took_ms = System.monotonic_time(:millisecond) - started
+    assert took_ms < @calls_bound_ms, "#{@calls_in_a_row} calls took #{took_ms} ms"
   end
 
   # M38 §4.4.6, the same pre-flight the control socket runs: an over-long address
@@ -259,7 +285,7 @@ defmodule FermixCore.Realtime.LocalVoiceSocketTest do
     assert Jason.decode!(String.trim(line)) == %{
              "type" => "server_hello",
              "min_version" => 1,
-             "max_version" => 3
+             "max_version" => 5
            }
 
     :gen_tcp.close(conn)
@@ -293,7 +319,7 @@ defmodule FermixCore.Realtime.LocalVoiceSocketTest do
              "direction" => "client_too_new",
              "client_version" => 99,
              "min_version" => 1,
-             "max_version" => 3
+             "max_version" => 5
            } = Jason.decode!(String.trim(line))
 
     assert {:error, :closed} = :gen_tcp.recv(conn, 0, 1_000)
@@ -375,6 +401,7 @@ defmodule FermixCore.Realtime.LocalVoiceSocketTest do
       LocalVoiceSocket.start_link(
         socket_path: socket_path,
         task_supervisor: task_sup,
+        session_guard: start_guard!(task_sup),
         session_starter: session_starter,
         session_module: SilentSession,
         name: :"rt_socket_silent_#{System.unique_integer([:positive])}"
@@ -424,6 +451,7 @@ defmodule FermixCore.Realtime.LocalVoiceSocketTest do
       LocalVoiceSocket.start_link(
         socket_path: socket_path,
         task_supervisor: task_sup,
+        session_guard: start_guard!(task_sup),
         session_starter: fn _opts -> {:error, {:missing_api_key, "xai"}} end,
         session_module: FakeSession,
         name: :"rt_socket_nokey_#{unique}"
@@ -819,6 +847,36 @@ defmodule FermixCore.Realtime.LocalVoiceSocketTest do
     wait_until(fn -> LocalVoiceSocket.active_clients(socket) == {:ok, 0} end)
   end
 
+  # M96 §6.2: a session that ends the call on the owner's goodbye has said
+  # `call_ended`; its exit is the button's end, so the connection stays for a
+  # fresh call and the peer reads no error and no EOF.
+  test "a session ending the call on a goodbye keeps the connection for a fresh call" do
+    %{socket: socket, socket_path: socket_path} = start_unlinked_session_socket()
+
+    {:ok, conn} = connect(socket_path)
+    :ok = handshake(conn, 5)
+    :ok = :gen_tcp.send(conn, ~s({"type":"call_start"}\n))
+    assert_receive {:session_started, session, opts}
+    assert Keyword.fetch!(opts, :ends_on_goodbye)
+    assert {:ok, _listening} = recv_line(conn)
+
+    send(Keyword.fetch!(opts, :companion), {:realtime, %{type: "call_ended", reason: "goodbye"}})
+    :ok = Agent.stop(session, {:shutdown, :goodbye})
+
+    assert {:ok, line} = recv_line(conn, 2_000)
+    assert Jason.decode!(String.trim(line)) == %{"type" => "call_ended", "reason" => "goodbye"}
+
+    # The same connection carries the next call.
+    :ok = :gen_tcp.send(conn, ~s({"type":"call_start"}\n))
+    assert_receive {:session_started, fresh, _opts}
+    assert fresh != session
+    assert {:ok, line} = recv_line(conn)
+    assert %{"type" => "state", "state" => "listening"} = Jason.decode!(String.trim(line))
+    assert LocalVoiceSocket.active_clients(socket) == {:ok, 1}
+
+    :gen_tcp.close(conn)
+  end
+
   test "killing the connection handler closes the client socket and tears the session down" do
     %{socket: socket, socket_path: socket_path} = start_unlinked_session_socket()
 
@@ -866,7 +924,7 @@ defmodule FermixCore.Realtime.LocalVoiceSocketTest do
              "direction" => "client_too_old",
              "client_version" => 1,
              "min_version" => 2,
-             "max_version" => 3,
+             "max_version" => 5,
              "required_for" => "openai_live"
            }
 
@@ -995,7 +1053,7 @@ defmodule FermixCore.Realtime.LocalVoiceSocketTest do
                "direction" => "client_too_old",
                "client_version" => version,
                "min_version" => 3,
-               "max_version" => 3,
+               "max_version" => 5,
                "required_for" => "xai_realtime"
              }
 
@@ -1012,6 +1070,42 @@ defmodule FermixCore.Realtime.LocalVoiceSocketTest do
     {conn, _session} = start_grok_call(socket_path)
 
     :gen_tcp.close(conn)
+  end
+
+  # M87 Phase 2, wire v4: the Mac's socket may speak v4, the hello's camera flag
+  # included, but the camera is a phone's. A `camera` here is the client's bug:
+  # refused with unsupported_by_endpoint, and the connection closes.
+  test "a v4 companion runs a Live call, and its camera is refused", %{
+    socket_path: socket_path
+  } do
+    put_realtime_env(engine: "openai_live")
+
+    {:ok, conn} = connect(socket_path)
+    :ok = :gen_tcp.send(conn, ~s({"type":"client_hello","protocol_version":4,"camera":true}\n))
+    assert {:ok, line} = recv_line(conn)
+    assert %{"type" => "server_hello", "max_version" => 5} = Jason.decode!(String.trim(line))
+
+    :ok = :gen_tcp.send(conn, ~s({"type":"call_start"}\n))
+    assert_receive {:session_started, _session, _opts}
+    assert {:ok, line} = recv_line(conn)
+    assert %{"type" => "state", "state" => "listening"} = Jason.decode!(String.trim(line))
+
+    :ok = :gen_tcp.send(conn, ~s({"type":"camera","on":true}\n))
+    assert {:ok, line} = recv_line(conn)
+
+    assert %{"type" => "error", "reason" => "unsupported_by_endpoint"} =
+             Jason.decode!(String.trim(line))
+
+    assert {:error, :closed} = :gen_tcp.recv(conn, 0, 1_000)
+  end
+
+  test "a hello whose camera flag is not a boolean is refused", %{socket_path: socket_path} do
+    {:ok, conn} = connect(socket_path)
+    :ok = :gen_tcp.send(conn, ~s({"type":"client_hello","protocol_version":4,"camera":"yes"}\n))
+
+    assert {:ok, line} = recv_line(conn)
+    assert %{"type" => "error", "reason" => "invalid_camera"} = Jason.decode!(String.trim(line))
+    assert {:error, :closed} = :gen_tcp.recv(conn, 0, 1_000)
   end
 
   test "a v3 companion still runs both OpenAI engines", %{socket_path: socket_path} do
@@ -1092,8 +1186,9 @@ defmodule FermixCore.Realtime.LocalVoiceSocketTest do
     end
   end
 
-  # One call per daemon (M56 §4.8): the second connection's session is refused
-  # before it exists, and the refusal is terminal like every error on this wire.
+  # One call per home (`CallLease`): the second connection's session is refused
+  # before it exists, the refusal names the endpoint holding the call, and it is
+  # terminal like every error on this wire.
   @tag :capture_log
   test "a second call_start while a Live call is up is refused with call_in_progress" do
     put_realtime_env(engine: "openai_live")
@@ -1119,7 +1214,8 @@ defmodule FermixCore.Realtime.LocalVoiceSocketTest do
 
     assert Jason.decode!(String.trim(line)) == %{
              "type" => "error",
-             "reason" => Protocol.call_in_progress()
+             "reason" => Protocol.call_in_progress(),
+             "held_by" => "desktop"
            }
 
     assert {:error, :closed} = :gen_tcp.recv(second, 0, 1_000)
@@ -1132,59 +1228,6 @@ defmodule FermixCore.Realtime.LocalVoiceSocketTest do
     # Hanging up settles the call and frees the daemon for the next one.
     :gen_tcp.close(first)
     wait_until(fn -> CallRegistry.active(registry) == :none end)
-  end
-
-  test "the default starter derives the engine module and session scope from the engine" do
-    put_openai_key()
-    put_realtime_env(engine: "openai_live")
-
-    assert {:ok, live_opts} = LocalVoiceSocket.session_opts([])
-    assert Keyword.fetch!(live_opts, :engine_module) == FermixCore.Realtime.LiveSessionServer
-    assert "voice_live:" <> _minted = Keyword.fetch!(live_opts, :session_scope)
-    assert Config.live?(Keyword.fetch!(live_opts, :config))
-
-    put_realtime_env(engine: "openai_realtime")
-
-    assert {:ok, realtime_opts} = LocalVoiceSocket.session_opts([])
-    assert Keyword.fetch!(realtime_opts, :engine_module) == SessionServer
-    assert "session:" <> _minted = Keyword.fetch!(realtime_opts, :session_scope)
-    refute Config.live?(Keyword.fetch!(realtime_opts, :config))
-  end
-
-  test "the default starter keeps a caller-supplied session scope" do
-    put_openai_key()
-    put_realtime_env(engine: "openai_live")
-
-    assert {:ok, opts} = LocalVoiceSocket.session_opts(session_scope: "voice_live:pinned")
-    assert Keyword.fetch!(opts, :session_scope) == "voice_live:pinned"
-  end
-
-  # M70 §06: a call dials with the key `Realtime.Config.api_key/1` resolves for
-  # the engine in force, so a Grok call carries the SpaceXAI key and never the
-  # OpenAI one, and a missing key stops the start before any session exists.
-  test "the default starter carries the Grok engine's SpaceXAI key" do
-    put_openai_key()
-    providers = Application.get_env(:fermix_core, :providers, [])
-
-    Application.put_env(
-      :fermix_core,
-      :providers,
-      Keyword.put(providers, :xai, api_key: "xai-test-voice")
-    )
-
-    put_realtime_env(engine: "xai_realtime")
-
-    assert {:ok, opts} = LocalVoiceSocket.session_opts([])
-    assert Keyword.fetch!(opts, :api_key) == "xai-test-voice"
-    assert Keyword.fetch!(opts, :config).provider == "xai"
-    assert "voice_live:" <> _minted = Keyword.fetch!(opts, :session_scope)
-  end
-
-  test "the default starter refuses a Grok call with no SpaceXAI key, naming the provider" do
-    put_openai_key()
-    put_realtime_env(engine: "xai_realtime")
-
-    assert LocalVoiceSocket.session_opts([]) == {:error, {:missing_api_key, "xai"}}
   end
 
   # Starts a socket whose sessions are UNLINKED from their handler (Agent.start,
@@ -1213,6 +1256,7 @@ defmodule FermixCore.Realtime.LocalVoiceSocketTest do
       LocalVoiceSocket.start_link(
         socket_path: socket_path,
         task_supervisor: task_sup,
+        session_guard: start_guard!(task_sup),
         session_starter: session_starter,
         session_module: FakeSession,
         name: :"rt_down_socket_#{System.unique_integer([:positive])}"
@@ -1245,6 +1289,7 @@ defmodule FermixCore.Realtime.LocalVoiceSocketTest do
       LocalVoiceSocket.start_link(
         socket_path: socket_path,
         task_supervisor: task_sup,
+        session_guard: start_guard!(task_sup),
         session_starter: session_starter,
         session_module: session_module,
         name: :"rt_socket_#{label}_#{unique}"
@@ -1273,6 +1318,7 @@ defmodule FermixCore.Realtime.LocalVoiceSocketTest do
       voice_bridge: QuietBridge,
       prompt: "# LIVE.md",
       call_registry: registry,
+      call_lease: CallLeases.own!(),
       close_deadline_ms: 10
     ]
 
@@ -1286,10 +1332,13 @@ defmodule FermixCore.Realtime.LocalVoiceSocketTest do
       )
     end
 
+    task_sup = start_supervised!({Task.Supervisor, []}, id: :"rt_live_tasks_#{unique}")
+
     {:ok, socket} =
       LocalVoiceSocket.start_link(
         socket_path: socket_path,
-        task_supervisor: start_supervised!({Task.Supervisor, []}, id: :"rt_live_tasks_#{unique}"),
+        task_supervisor: task_sup,
+        session_guard: start_guard!(task_sup),
         session_starter: starter,
         name: :"rt_live_socket_#{unique}"
       )
@@ -1300,6 +1349,14 @@ defmodule FermixCore.Realtime.LocalVoiceSocketTest do
     end)
 
     socket_path
+  end
+
+  # The session guard a listener binds its calls' sessions to, named for this
+  # test alone.
+  defp start_guard!(task_sup) do
+    name = :"rt_guard_#{System.unique_integer([:positive])}"
+    start_supervised!({SessionGuard, name: name, task_supervisor: task_sup}, id: name)
+    name
   end
 
   defp connect(socket_path) do
@@ -1317,7 +1374,7 @@ defmodule FermixCore.Realtime.LocalVoiceSocketTest do
     :ok = :gen_tcp.send(conn, ~s({"type":"client_hello","protocol_version":#{version}}\n))
     assert {:ok, line} = recv_line(conn)
 
-    assert %{"type" => "server_hello", "min_version" => 1, "max_version" => 3} =
+    assert %{"type" => "server_hello", "min_version" => 1, "max_version" => 5} =
              Jason.decode!(String.trim(line))
 
     :ok
@@ -1356,19 +1413,6 @@ defmodule FermixCore.Realtime.LocalVoiceSocketTest do
     previous = Application.get_env(:fermix_core, :realtime, [])
     Application.put_env(:fermix_core, :realtime, config)
     on_exit(fn -> Application.put_env(:fermix_core, :realtime, previous) end)
-    :ok
-  end
-
-  defp put_openai_key do
-    previous = Application.get_env(:fermix_core, :providers, [])
-
-    Application.put_env(
-      :fermix_core,
-      :providers,
-      Keyword.put(previous, :openai, api_key: "sk-test-voice")
-    )
-
-    on_exit(fn -> Application.put_env(:fermix_core, :providers, previous) end)
     :ok
   end
 

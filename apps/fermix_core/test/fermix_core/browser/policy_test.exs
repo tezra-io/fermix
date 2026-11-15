@@ -503,5 +503,110 @@ defmodule FermixCore.Browser.PolicyTest do
     assert :ok = Policy.read_answers_verdict("http://camera.example/", [{169, 254, 7, 9}], listed)
   end
 
+  # ── Fermix's own web interface ─────────────────────────────────────────────
+
+  # The listener serves the setup pages on loopback, and a tab of the owner's own
+  # browser (`selected_tab`) can hold the setup cookie: opened there, the setup
+  # page would hand the model every setup power. So the engine's own port on
+  # loopback is refused in every spelling the browser reaches it by, and no
+  # `allowed_hosts` entry lifts it, the defaults (`localhost`, `127.0.0.1`,
+  # `::1`) included.
+  test "Fermix's own web interface is refused at every loopback spelling" do
+    {:ok, config} = Config.current([], engine_web_port: 4030)
+
+    {:ok, listed} =
+      Config.current([allowed_hosts: ["localhost", "127.0.0.1", "::1", "app.localhost"]],
+        engine_web_port: 4030
+      )
+
+    for url <- [
+          "http://127.0.0.1:4030/setup",
+          "http://localhost:4030/",
+          "http://LOCALHOST.:4030/",
+          "https://127.0.0.1:4030/",
+          "http://[::1]:4030/",
+          "http://[::ffff:127.0.0.1]:4030/",
+          "http://127.0.0.2:4030/",
+          "http://127.1:4030/",
+          "http://2130706433:4030/",
+          "http://0x7f.0.0.1:4030/"
+        ],
+        settings <- [config, listed] do
+      assert {:error, error} = Policy.validate_url(url, settings), "#{url} must be refused"
+      assert error.code == "navigation_blocked"
+      assert error.details["reason"] == "engine_origin"
+    end
+
+    assert {:error, %{details: %{"reason" => "engine_origin"}}} =
+             Policy.validate_url("http://app.localhost:4030/", listed)
+  end
+
+  test "the unspecified address reaches the listener too, even on an allowed private network" do
+    {:ok, open} = Config.current([allow_private_network: true], engine_web_port: 4030)
+
+    for url <- ["http://0.0.0.0:4030/", "http://[::]:4030/", "http://0:4030/"] do
+      assert {:error, %{details: %{"reason" => "engine_origin"}}} = Policy.validate_url(url, open)
+    end
+  end
+
+  test "the refusal says what the page is and offers no recovery" do
+    {:ok, config} = Config.current([], engine_web_port: 4030)
+
+    assert {:error, error} = Policy.validate_url("http://127.0.0.1:4030/setup", config)
+    assert error.message =~ "Fermix's own web interface"
+    refute error.message =~ "allowed_hosts"
+  end
+
+  test "every other loopback port, and the same port elsewhere, stays open" do
+    {:ok, config} = Config.current([], engine_web_port: 4030)
+
+    for url <- [
+          "http://127.0.0.1:4000/",
+          "http://localhost:4031/",
+          "http://[::1]:8080/",
+          "http://localhost/",
+          "https://example.com:4030/"
+        ] do
+      assert {:ok, _uri} = Policy.validate_url(url, config), "#{url} must stay reachable"
+    end
+  end
+
+  test "a page already on Fermix's own web interface is never read" do
+    {:ok, config} = Config.current([], engine_web_port: 4030)
+
+    for url <- [
+          "http://127.0.0.1:4030/setup",
+          "http://localhost:4030/",
+          "blob:http://127.0.0.1:4030/6f1c2d3e"
+        ] do
+      assert {:error, error} = Policy.read_verdict(url, config), "#{url} must not be read"
+      assert error.code == "read_blocked"
+      assert error.details["reason"] == "engine_origin"
+    end
+
+    assert Policy.read_verdict("http://127.0.0.1:4000/", config) == :ok
+  end
+
+  # Any name can point at loopback. Chrome reports the address it loaded the
+  # document from, so a page served from loopback on the engine's port is
+  # refused whatever it is called, a listed name included.
+  test "a page served from loopback on the engine's port is never read, whatever its name" do
+    {:ok, listed} = Config.current([allowed_hosts: ["dev.example.test"]], engine_web_port: 4030)
+    url = "http://dev.example.test:4030/setup"
+
+    for answer <- [{127, 0, 0, 1}, {0, 0, 0, 0, 0, 0, 0, 1}, {0, 0, 0, 0, 0, 0xFFFF, 0x7F00, 1}] do
+      assert {:error, error} = Policy.read_answers_verdict(url, [answer], listed)
+      assert error.code == "read_blocked"
+      assert error.details["reason"] == "engine_origin"
+    end
+
+    assert :ok =
+             Policy.read_answers_verdict(
+               "http://dev.example.test:4000/",
+               [{127, 0, 0, 1}],
+               listed
+             )
+  end
+
   defp resolution_host(url, config), do: Policy.resolution_host(URI.parse(url), config)
 end

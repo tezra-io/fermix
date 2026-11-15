@@ -7,11 +7,13 @@ defmodule FermixCore.Harness.Vendors do
   operator's own CLI config — never a network call, never a keychain read:
 
     * **codex** — `~/.codex/auth.json` (or `Config.codex_home`) must carry a
-      non-empty refresh token (`codex_signed_in?/1`).
+      sign-in in a form Codex writes: a non-empty ChatGPT refresh token
+      (`codex_chatgpt_signed_in?/1`), or a non-empty API key (`codex login
+      --with-api-key`). The value is only tested for being there.
     * **claude** — `~/.claude` (or `Config.claude_config_dir`): a
       `.credentials.json` file means authenticated; the dir alone means
       `:unverified` (macOS stores credentials in the keychain, which is not read
-      here — the honest "installed; auth unverified" state); neither means
+      here — the honest "sign-in not verified" state); neither means
       `:absent`.
 
   The result is a boot snapshot consumed by the seeder (which vendors register)
@@ -82,13 +84,17 @@ defmodule FermixCore.Harness.Vendors do
   defp gate_by_default(vendor, default) when default == vendor, do: true
   defp gate_by_default(vendor, _default), do: not other_available?(vendor)
 
-  defp other_available?("codex"), do: detected_available?("claude")
-  defp other_available?("claude"), do: detected_available?("codex")
+  defp other_available?("codex"), do: detected?("claude")
+  defp other_available?("claude"), do: detected?("codex")
 
-  # Detection prefers the `:harness_vendor_detector` seam (the same static stub
-  # `config/test.exs` installs so `mix test` never spawns a CLI probe); production
-  # leaves it unset and falls back to the boot-cheap `available?/1` PATH lookup.
-  defp detected_available?(vendor) do
+  @doc """
+  Whether `vendor`'s CLI is found, the way the run tools' advertisement and the
+  coding store (`Harness.MachineStore`) ask: the `:harness_vendor_detector` seam
+  where it is set (the static stub `config/test.exs` installs so `mix test`
+  never spawns a CLI probe), else the boot-cheap `available?/1` PATH lookup.
+  """
+  @spec detected?(String.t()) :: boolean()
+  def detected?(vendor) when vendor in @vendors do
     case Application.get_env(:fermix_core, :harness_vendor_detector) do
       fun when is_function(fun, 0) -> snapshot_available?(fun.(), vendor)
       _unset -> available?(vendor)
@@ -135,20 +141,33 @@ defmodule FermixCore.Harness.Vendors do
   end
 
   @doc """
-  Whether a Codex CLI sign-in file carries a non-empty refresh token: the
-  network-free sign-in state of the Codex CLI's own login, which `codex_run`
-  uses. Never refreshes, never reads past the file.
+  Whether a Codex CLI sign-in file carries a non-empty ChatGPT refresh token:
+  a ChatGPT sign-in, which onboarding can adopt as a provider (an API-key
+  sign-in cannot be). Never refreshes, never reads past the file.
   """
-  @spec codex_signed_in?(Path.t()) :: boolean()
-  def codex_signed_in?(auth_path) when is_binary(auth_path) do
+  @spec codex_chatgpt_signed_in?(Path.t()) :: boolean()
+  def codex_chatgpt_signed_in?(auth_path) when is_binary(auth_path),
+    do: codex_sign_in(auth_path) == :chatgpt
+
+  # The form of the sign-in a Codex `auth.json` holds, each value only tested
+  # for being there: ChatGPT tokens, an API key, or none.
+  defp codex_sign_in(auth_path) do
     with {:ok, raw} <- File.read(auth_path),
-         {:ok, %{"tokens" => %{"refresh_token" => token}}} when is_binary(token) and token != "" <-
-           Jason.decode(raw) do
-      true
+         {:ok, %{} = auth} <- Jason.decode(raw) do
+      codex_sign_in_form(auth)
     else
-      _absent_or_unreadable -> false
+      _absent_or_unreadable -> :none
     end
   end
+
+  defp codex_sign_in_form(%{"tokens" => %{"refresh_token" => token}})
+       when is_binary(token) and token != "",
+       do: :chatgpt
+
+  defp codex_sign_in_form(%{"OPENAI_API_KEY" => key}) when is_binary(key) and key != "",
+    do: :api_key
+
+  defp codex_sign_in_form(_auth), do: :none
 
   defp cli("codex"), do: "codex"
   defp cli("claude"), do: "claude"
@@ -180,9 +199,10 @@ defmodule FermixCore.Harness.Vendors do
   """
   @spec auth_state(String.t(), keyword()) :: auth_state()
   def auth_state("codex", opts) when is_list(opts) do
-    auth_path = Path.join(codex_home(opts), "auth.json")
-
-    if codex_signed_in?(auth_path), do: :authenticated, else: :absent
+    case codex_sign_in(Path.join(codex_home(opts), "auth.json")) do
+      :none -> :absent
+      _chatgpt_or_api_key -> :authenticated
+    end
   end
 
   def auth_state("claude", opts) when is_list(opts) do
@@ -193,6 +213,25 @@ defmodule FermixCore.Harness.Vendors do
       File.dir?(dir) -> :unverified
       true -> :absent
     end
+  end
+
+  @doc """
+  The file `vendor` keeps its sign-in in, where it is there: Codex's
+  `auth.json`, Claude Code's `.credentials.json` (absent on a Mac, whose sign-in
+  is in the Keychain, which Fermix never reads), else nil. The path is read the
+  way `auth_state/2` reads it, and only its stat is ever compared
+  (`Harness.SignIn`), never its contents. Tests inject `:codex_home` and
+  `:claude_config_dir`.
+  """
+  @spec sign_in_file(String.t(), keyword()) :: Path.t() | nil
+  def sign_in_file(vendor, opts) when vendor in @vendors and is_list(opts) do
+    file =
+      case vendor do
+        "codex" -> Path.join(codex_home(opts), "auth.json")
+        "claude" -> Path.join(claude_config_dir(opts), ".credentials.json")
+      end
+
+    if File.regular?(file), do: file
   end
 
   @doc """

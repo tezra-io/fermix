@@ -39,11 +39,13 @@ defmodule FermixChannels.Voice.LiveEndToEndTest do
   alias FermixCore.Harness.Delivery, as: HarnessDelivery
   alias FermixCore.Memory.ConversationStore
   alias FermixCore.Memory.Repo
+  alias FermixCore.Realtime.CallLease
   alias FermixCore.Realtime.CallRegistry
   alias FermixCore.Realtime.Config
   alias FermixCore.Realtime.LiveSessionServer
   alias FermixCore.Realtime.LocalVoiceSocket
   alias FermixCore.Realtime.SessionControl
+  alias FermixCore.Realtime.SessionGuard
   alias FermixCore.Realtime.SessionSupervisor
 
   @moduletag :capture_log
@@ -54,6 +56,7 @@ defmodule FermixChannels.Voice.LiveEndToEndTest do
   # This module's own call registry: the daemon's is under the realtime
   # supervisor, which the suite never starts.
   @call_registry Module.concat(__MODULE__, CallRegistry)
+  @call_lease Module.concat(__MODULE__, CallLease)
   @timeline_repo :voice_e2e_timeline_repo
   @timeline_env ~w(companion_store mobile_event_sink)a
   @gist_route %{
@@ -260,6 +263,7 @@ defmodule FermixChannels.Voice.LiveEndToEndTest do
     {:ok, _binding} = QueueBoundBridge.bind(queue)
     on_exit(&QueueBoundBridge.unbind/0)
     start_supervised!(%{id: :fake_live_client, start: {FakeLiveClient, :start_agent, [self()]}})
+    start_supervised!({CallLease, name: @call_lease})
     start_supervised!({CallRegistry, name: @call_registry})
 
     %{queue: queue}
@@ -394,13 +398,16 @@ defmodule FermixChannels.Voice.LiveEndToEndTest do
 
     [%{type: "session.start", session: payload}] = FakeLiveClient.events()
 
+    # The chat, its closing line, and the call's greeting last (M96 §4.3).
     assert [
              %{role: "user", content: [%{type: "input_text", text: "the lease: " <> _url}]},
              %{role: "assistant", content: [%{type: "output_text", text: "Saved it."}]},
-             %{role: "developer", content: [%{text: closing}]}
+             %{role: "developer", content: [%{text: closing}]},
+             %{role: "developer", content: [%{text: greeting}]}
            ] = payload.input
 
     assert closing =~ "not a request"
+    assert greeting =~ "The owner has just started this call."
 
     assert :ok = SessionControl.call_stop(session)
     assert_receive {:EXIT, ^session, {:shutdown, :call_stop}}, 5_000
@@ -838,7 +845,10 @@ defmodule FermixChannels.Voice.LiveEndToEndTest do
     assert eventually(fn -> not Process.alive?(turn_pid) end)
 
     # The cancelled turn never speaks: no commentary was ever appended for it.
-    refute Enum.any?(FakeLiveClient.events(), &(&1.type == "session.commentary.append"))
+    refute Enum.any?(
+             FakeLiveClient.events(),
+             &(&1.type == "session.commentary.append" and &1.delegation_id == "dg_1")
+           )
 
     assert :ok = SessionControl.call_stop(session)
     assert_receive {:EXIT, ^session, {:shutdown, :call_stop}}, 5_000
@@ -1022,6 +1032,8 @@ defmodule FermixChannels.Voice.LiveEndToEndTest do
 
   defp live_session_opts do
     [
+      endpoint: :desktop,
+      call_lease: @call_lease,
       config: live_config(),
       api_key: "sk-test",
       device_id: "device-1",
@@ -1055,11 +1067,16 @@ defmodule FermixChannels.Voice.LiveEndToEndTest do
       {:ok, session}
     end
 
+    task_supervisor = start_supervised!({Task.Supervisor, []}, id: :voice_e2e_socket_tasks)
+    guard = :"voice_e2e_guard_#{unique}"
+    start_supervised!({SessionGuard, name: guard, task_supervisor: task_supervisor})
+
     start_supervised!(
       {LocalVoiceSocket,
        socket_path: socket_path,
        name: :"voice_e2e_socket_#{unique}",
-       task_supervisor: start_supervised!({Task.Supervisor, []}, id: :voice_e2e_socket_tasks),
+       task_supervisor: task_supervisor,
+       session_guard: guard,
        session_supervisor:
          start_supervised!({SessionSupervisor, name: :"voice_e2e_sessions_#{unique}"}),
        session_starter: starter,

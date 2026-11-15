@@ -1,15 +1,25 @@
 defmodule FermixChannels.Mobile.ProtocolContractTest do
   use ExUnit.Case, async: true
 
+  alias FermixChannels.Companion.Trips, as: CompanionTrips
   alias FermixChannels.Mobile.Attestation
+  alias FermixChannels.Mobile.CallAudio
   alias FermixChannels.Mobile.Chunks
   alias FermixChannels.Mobile.Iroh.Relays
   alias FermixChannels.Mobile.Management
   alias FermixChannels.Mobile.PairManager
   alias FermixChannels.Mobile.Peers
   alias FermixChannels.Mobile.Protocol
+  alias FermixChannels.Mobile.PushRelay
   alias FermixChannels.Mobile.Router
   alias FermixChannels.Mobile.Session
+  alias FermixCore.Computers.Offers
+  alias FermixCore.Computers.Offers.Files, as: FilesOffer
+  alias FermixCore.Computers.Origin
+  alias FermixCore.Computers.Outcome
+  alias FermixCore.ReplyBlocks
+  alias FermixCore.Trips.Ops, as: TripOps
+  alias FermixCore.Trips.Place
   alias FermixTestSupport.WireSchema
 
   @priv_dir Application.app_dir(:fermix_core, "priv/mobile")
@@ -20,8 +30,13 @@ defmodule FermixChannels.Mobile.ProtocolContractTest do
   @client_binary_fixtures Path.join(@priv_dir, "fixtures/client_binary_frames.jsonl")
   @server_binary_fixtures Path.join(@priv_dir, "fixtures/server_binary_frames.jsonl")
   @pairing_links Path.join(@priv_dir, "fixtures/pairing_links.jsonl")
+  @companion_schema_path Application.app_dir(:fermix_core, "priv/companion/protocol.schema.json")
   @attestation_roots Path.join(@priv_dir, "attestation_roots.json")
   @android_signers Path.join(@priv_dir, "android_signers.json")
+  # The reasons this primary gives for a call's end and for serving none: the
+  # wire carries any string, and these are the ones documented.
+  @call_endings ~w(ended lost link_too_slow revoked unknown_call)
+  @call_refusals ~w(voice_off no_key engine_not_for_phones)
   # M51 §7: the trust inputs a phone's attestation is verified against are
   # exported, and a changed byte in either is a changed contract.
   @attestation_roots_sha256 "1c8f9da8b5a13da216198541d276e424c6a73c72af9fa3433f43e096100ae5ed"
@@ -241,9 +256,88 @@ defmodule FermixChannels.Mobile.ProtocolContractTest do
       payload = Map.drop(header, ~w(v t seq))
 
       assert type in Protocol.server_events()
-      assert {:ok, encoded} = Protocol.encode_server_frame(type, payload, seq)
+
+      assert {:ok, encoded} =
+               Protocol.encode_server_frame(type, payload, seq, <<>>, version: header["v"])
+
       assert decode_header(encoded) == header
     end
+  end
+
+  # Mobile 3 is the version in which a row may carry any number of block
+  # types (M89 §06): the goldens at 3 carry an events block in each form a
+  # phone decodes, none at 2 does, and a session at 2 is sent each without it.
+  test "the protocol 3 goldens carry a reply's events, which a session at 2 is never sent", %{
+    protocol: protocol
+  } do
+    headers = jsonl(@server_fixtures)
+    {current, older} = Enum.split_with(headers, &(&1["v"] == Protocol.protocol_version()))
+
+    events =
+      for header <- current,
+          header["t"] in ~w(text_done row history_page),
+          row <- [header | Map.get(header, "messages", [])],
+          %{"type" => "events"} = block <- Map.get(row, "blocks", []),
+          do: {header, block}
+
+    assert Enum.any?(events, fn {header, _block} -> header["t"] == "text_done" end)
+    assert Enum.any?(events, fn {header, _block} -> header["t"] == "row" end)
+    assert Enum.any?(events, fn {header, _block} -> header["t"] == "history_page" end)
+
+    cards = for {_header, block} <- events, card <- block["events"], do: card
+    assert Enum.any?(cards, &(&1["yearly"] == true))
+    assert Enum.any?(cards, &(&1["change"] == "cancelled"))
+    assert Enum.any?(cards, &(&1["change"] == "snoozed"))
+
+    for header <- older, row <- [header | Map.get(header, "messages", [])] do
+      refute Enum.any?(Map.get(row, "blocks", []), &(&1["type"] == "events")), inspect(header)
+    end
+
+    for {header, _block} <- events do
+      payload = Map.drop(header, ~w(v t seq))
+      old = ReplyBlocks.for_session(header["t"], payload, :mobile, 2)
+
+      refute old |> Jason.encode!() |> String.contains?(~s("type":"events")),
+             inspect(header["t"])
+
+      assert {:ok, _frame} = Protocol.encode_server_frame(header["t"], old, 1, <<>>, version: 2)
+    end
+
+    assert protocol =~ "**Protocol 3: a row may carry any number of block types.**"
+    assert protocol =~ "**An engine's hello names its window**"
+  end
+
+  # M89 §06: protocol 3 carries `trips` too, the lists' block for the owner's
+  # trips: the goldens at 3 carry one for a turn that changed rows and one for
+  # a turn that only read, none at 2 does, and a session at 2 is sent neither.
+  test "the protocol 3 goldens carry a reply's trips, which a session at 2 is never sent", %{
+    protocol: protocol
+  } do
+    headers = jsonl(@server_fixtures)
+    {current, older} = Enum.split_with(headers, &(&1["v"] == Protocol.protocol_version()))
+
+    trips =
+      for header <- current,
+          header["t"] in ~w(text_done row history_page),
+          row <- [header | Map.get(header, "messages", [])],
+          %{"type" => "trips"} = block <- Map.get(row, "blocks", []),
+          do: {header, block}
+
+    refs = for {_header, block} <- trips, trip <- block["trips"], do: trip
+    assert Enum.any?(refs, &(&1["rows"] != []))
+    assert Enum.any?(refs, &(&1["rows"] == []))
+
+    for header <- older, row <- [header | Map.get(header, "messages", [])] do
+      refute Enum.any?(Map.get(row, "blocks", []), &(&1["type"] == "trips")), inspect(header)
+    end
+
+    for {header, _block} <- trips do
+      old = ReplyBlocks.for_session(header["t"], Map.drop(header, ~w(v t seq)), :mobile, 2)
+      refute old |> Jason.encode!() |> String.contains?(~s("type":"trips"))
+      assert {:ok, _frame} = Protocol.encode_server_frame(header["t"], old, 1, <<>>, version: 2)
+    end
+
+    assert protocol =~ "A `trips` block is the companion socket's too"
   end
 
   test "binary fixture wrappers reconstruct and round-trip exact frames" do
@@ -262,7 +356,8 @@ defmodule FermixChannels.Mobile.ProtocolContractTest do
                  header["t"],
                  Map.drop(header, ~w(v t seq)),
                  header["seq"],
-                 bytes
+                 bytes,
+                 version: header["v"]
                )
 
       assert encoded == frame(header, bytes)
@@ -424,22 +519,117 @@ defmodule FermixChannels.Mobile.ProtocolContractTest do
     end
   end
 
-  # The daemon pushes through APNs alone: no exported push list, and no
-  # golden frame, names any other service.
-  test "the push catalog is apns alone, in the schema and every golden frame", %{schema: schema} do
-    assert schema["$defs"]["pushServices"]["items"]["enum"] == ["apns"]
+  # The daemon pushes through APNs and, from protocol 3, through Fermix's
+  # push relay (`fcm`, M99 §14): no exported push list, and no golden frame,
+  # names any other service, and none at protocol 2 names fcm, which a phone
+  # app at 2 cannot read.
+  test "the push catalog is apns, and fcm from protocol 3, in the schema and every golden",
+       %{schema: schema} do
+    assert schema["$defs"]["pushServices"]["items"]["enum"] == ["apns", "fcm"]
 
     for header <- client_headers() ++ server_headers() do
+      allowed =
+        if header["v"] >= Protocol.relay_push_version(), do: ~w(apns fcm), else: ~w(apns)
+
       for push <- [get_in(header, ["caps", "push"]), header["push"]], push != nil do
-        assert push -- ["apns"] == [], "#{header["t"]} lists #{inspect(push)}"
+        assert push -- allowed == [], "#{header["t"]} at #{header["v"]} lists #{inspect(push)}"
       end
     end
 
-    approved = Enum.find(server_headers(), &(&1["t"] == "pair_approved"))
+    approved = Enum.find(server_headers(), &(&1["t"] == "pair_approved" and &1["v"] == 2))
 
-    for push <- [["fcm"], ["apns", "fcm"], ["apns", "apns"]] do
+    for push <- [["fcm"], ["apns", "fcm"], ["apns", "apns"], ["webpush"], ["apns", "webpush"]] do
       refute server_errors(Map.put(approved, "push", push), schema) == [], inspect(push)
+      assert {:error, _reason} = encode_at(approved, "pair_approved", payload(approved, push))
     end
+
+    approved = Enum.find(server_headers(), &(&1["t"] == "pair_approved" and &1["v"] == 3))
+
+    for push <- [["fcm"], ["apns", "fcm"], ["apns"], []] do
+      assert server_errors(Map.put(approved, "push", push), schema) == [], inspect(push)
+      assert {:ok, _frame} = encode_at(approved, "pair_approved", payload(approved, push))
+    end
+
+    for push <- [["webpush"], ["apns", "webpush"], ["gcm"]] do
+      refute server_errors(Map.put(approved, "push", push), schema) == [], inspect(push)
+      assert {:error, _reason} = encode_at(approved, "pair_approved", payload(approved, push))
+    end
+  end
+
+  # M99 §14: this daemon names fcm to every phone at protocol 3, beside apns
+  # or alone, and to no desktop, so the goldens a phone vendors show exactly
+  # that; nothing of the home's own key rides the wire.
+  test "every phone's push list at protocol 3 names fcm, and a desktop's never", %{
+    schema: schema
+  } do
+    lists =
+      for header <- server_headers(),
+          header["t"] in ["hello_ack", "pair_approved"] and header["v"] >= 3 do
+        refute Map.has_key?(header, "push_key"), header["t"]
+        {header["caps"]["computer"] != nil, get_in(header, ["caps", "push"]) || header["push"]}
+      end
+
+    phones = for {false, push} <- lists, do: push
+    desktops = for {true, push} <- lists, do: push
+
+    assert phones != [] and desktops != []
+    assert Enum.all?(phones, &(List.last(&1) == "fcm")), inspect(phones)
+    assert ["fcm"] in phones and ["apns", "fcm"] in phones
+    refute Enum.any?(desktops, &("fcm" in &1)), inspect(desktops)
+    refute Map.has_key?(schema["$defs"]["hello_ack"]["properties"], "push_key")
+  end
+
+  # M99 §14: push_subscribe at protocol 3, the codec and the schema alike.
+  test "the schema publishes push_subscribe as the codec reads it", %{schema: schema} do
+    golden = Enum.find(client_headers(), &(&1["t"] == "push_subscribe"))
+    assert golden["v"] == Protocol.relay_push_version()
+    assert golden["service"] in PushRelay.services()
+    assert PushRelay.valid_address?(golden["address"])
+    assert schema["$defs"]["push_subscribe"]["properties"]["service"]["enum"] == ["fcm"]
+
+    for field <- ~w(service address p256dh auth) do
+      assert field in schema["$defs"]["push_subscribe"]["required"], field
+    end
+
+    refute "token" in schema["$defs"]["push_subscribe"]["required"]
+
+    older = %{golden | "v" => 2}
+    refute client_errors(older, schema) == []
+
+    assert {:error, {:unknown_event, "push_subscribe"}} =
+             Protocol.decode_client_frame(frame(older))
+
+    point = golden["p256dh"]
+    secret = golden["auth"]
+
+    for {field, value} <- [
+          {"service", "apns"},
+          {"address", "with space"},
+          {"address", ""},
+          {"address", "dK3vQ8pLmX2:APA91bH7xZ"},
+          {"address", String.duplicate("a", 257)},
+          {"p256dh", "A" <> String.slice(point, 1..-1//1)},
+          {"p256dh", secret},
+          {"auth", point},
+          {"auth", String.slice(secret, 0, 21) <> "B"}
+        ] do
+      drifted = %{golden | field => value}
+      refute client_errors(drifted, schema) == [], inspect({field, value})
+
+      assert {:error, {:invalid_field, ^field}} = Protocol.decode_client_frame(frame(drifted)),
+             inspect({field, value})
+    end
+
+    longest = %{golden | "address" => String.duplicate("a", 256)}
+    assert client_errors(longest, schema) == []
+    assert {:ok, _event} = Protocol.decode_client_frame(frame(longest))
+
+    # A key off the curve has the shape the schema can say, and the codec
+    # alone refuses it, as the schema's description tells a phone.
+    off_curve = %{golden | "p256dh" => Base.url_encode64(<<4, 1::256, 1::256>>, padding: false)}
+    assert client_errors(off_curve, schema) == []
+    assert {:error, {:invalid_field, "p256dh"}} = Protocol.decode_client_frame(frame(off_curve))
+    assert schema["$defs"]["push_subscribe"]["description"] =~ "a point on the curve"
   end
 
   # Every field protocol 2 gained after it shipped is optional, so a daemon
@@ -469,13 +659,22 @@ defmodule FermixChannels.Mobile.ProtocolContractTest do
           Map.put(iroh, "relays", [Map.put(relay, "url", "http://us1.relay.fermix.ai/")]),
           Map.put(iroh, "relays", [Map.put(relay, "quic_port", 0)]),
           Map.delete(iroh, "relays_rev"),
-          Map.delete(iroh, "kind")
+          Map.delete(iroh, "kind"),
+          Map.put(iroh, "addrs", []),
+          Map.put(iroh, "addrs", ["fermix-vm.ts.net:4033"]),
+          Map.put(iroh, "addrs", ["100.64.0.9"]),
+          Map.put(iroh, "addrs", List.duplicate("100.64.0.9:4033", 9))
         ] do
       candidates = List.replace_at(ack["candidates"], -1, drifted)
 
       refute server_errors(Map.put(ack, "candidates", candidates), schema) == [],
              "an iroh candidate #{inspect(drifted)} was accepted"
     end
+
+    # A desktop's route names where it may dial the server directly.
+    hinted = Map.put(iroh, "addrs", ["100.101.102.103:4033", "[fd7a:115c:a1e0::9]:4033"])
+    candidates = List.replace_at(ack["candidates"], -1, hinted)
+    assert server_errors(Map.put(ack, "candidates", candidates), schema) == []
   end
 
   # M75 D14: the daemon announces its primary epoch on hello_ack and
@@ -558,6 +757,512 @@ defmodule FermixChannels.Mobile.ProtocolContractTest do
     assert ["missing media_refs"] = server_errors(server_event("row", macs_row), schema)
     refute server_errors(server_event("text_done", text_done(false)), schema) == []
     assert server_errors(server_event("text_done", text_done(true)), schema) == []
+  end
+
+  # M87: a phone's call channel is published as the session speaks it: its
+  # audio frame, the words a call ends with, and the call caps.
+  test "the schema publishes a phone's call channel as the codec reads it", %{schema: schema} do
+    defs = schema["$defs"]
+
+    for def <- ~w(call_audio call_audio_to_phone) do
+      assert defs[def]["x-raw-bytes"] == true, def
+      assert defs[def]["x-max-raw-bytes"] == CallAudio.frame_bytes(), def
+    end
+
+    for def <- ~w(call_line call_line_to_phone), do: assert(defs[def]["x-raw-bytes"] == true)
+    assert "playback_id" in defs["call_audio_to_phone"]["required"]
+    assert "control_seq" in defs["call_attached"]["required"]
+
+    # Both reasons are strings, as error.code is: a later primary may give one
+    # this one does not, and a phone reads it rather than refusing the frame.
+    # The values this primary sends are named in the description.
+    close_rule = defs["call_close_to_phone"]
+    assert close_rule["properties"]["reason"] == %{"type" => "string", "minLength" => 1}
+
+    for reason <- @call_endings,
+        do: assert(close_rule["description"] =~ "#{reason}:", reason)
+
+    for reason <- @call_endings ++ ["quota", "", 7] do
+      close = %{"call_id" => "c1", "reason" => reason}
+      encoded? = match?({:ok, _frame}, Protocol.encode_server_frame("call_close", close, 1))
+      assert encoded? == (server_errors(server_event("call_close", close), schema) == [])
+      assert encoded? == (is_binary(reason) and reason != ""), inspect(reason)
+    end
+
+    caps_rule = defs["callCaps"]
+    assert caps_rule["properties"]["reason"] == %{"type" => "string", "minLength" => 1}
+
+    for reason <- @call_refusals,
+        do: assert(caps_rule["description"] =~ "#{reason}:", reason)
+
+    # This daemon always sends its epoch; the schema leaves it optional for older ones.
+    ack = Map.put(hello_ack_payload(), "primary_epoch", 1)
+    cases = [{true, nil}, {false, nil}, {false, ""}, {false, "quota"}]
+
+    for {available?, reason} <- cases ++ Enum.map(@call_refusals, &{false, &1}) do
+      payload = put_in(ack, ["caps", "call"], call_caps(available?, reason))
+      encoded? = match?({:ok, _frame}, Protocol.encode_server_frame("hello_ack", payload, 1))
+      assert encoded? == (server_errors(server_event("hello_ack", payload), schema) == [])
+      assert encoded? == (available? or (is_binary(reason) and reason != "")), inspect(reason)
+    end
+  end
+
+  # M87 Phase 2: a camera still rides call_frame, one JPEG of at most 60 KiB,
+  # and caps.call says whether the primary takes them.
+  test "the schema publishes a phone's camera frame as the codec reads it", %{schema: schema} do
+    defs = schema["$defs"]
+    frame = defs["call_frame"]
+
+    assert frame["x-raw-bytes"] == true
+    assert frame["x-max-raw-bytes"] == 60 * 1_024
+    assert frame["x-raw-media-type"] == "image/jpeg"
+
+    for field <- ~w(call_id width height captured_ms), do: assert(field in frame["required"])
+
+    for side <- ~w(width height) do
+      assert %{"type" => "integer", "minimum" => 1, "maximum" => 4_096} =
+               frame["properties"][side]
+    end
+
+    assert %{"type" => "integer", "minimum" => 0} = frame["properties"]["captured_ms"]
+    assert defs["callCaps"]["description"] =~ "camera_share"
+  end
+
+  # M97 §3.4: a hello may name the oldest version its sender speaks, and the
+  # server serves the newest version both windows hold. The goldens carry a
+  # computer's hello that names its oldest and the hello_ack that answers it,
+  # whose window is the versions both engines speak; the schema reads
+  # `min_protocol_v` as the codec does, beyond what a schema can compare.
+  test "the schema and goldens publish a hello's oldest version and the hello_ack it is served",
+       %{schema: schema, protocol: protocol} do
+    hello_def = schema["$defs"]["hello"]
+    refute "min_protocol_v" in hello_def["required"]
+    assert %{"type" => "integer", "minimum" => 1} = hello_def["properties"]["min_protocol_v"]
+    assert hello_def["properties"]["min_protocol_v"]["description"] =~ "at most protocol_v"
+
+    [hello] = Enum.filter(client_headers(), &Map.has_key?(&1, "min_protocol_v"))
+    assert hello["platform"] in ~w(macos linux)
+    assert hello["v"] == Protocol.protocol_version()
+
+    assert {:ok, {oldest, served}} =
+             Protocol.negotiate_hello(
+               hello["protocol_v"],
+               hello["min_protocol_v"],
+               Protocol.supported_version_range()
+             )
+
+    [ack] = Enum.filter(server_headers(), &get_in(&1, ["caps", "computer"]))
+    assert {ack["v"], ack["min_version"], ack["max_version"]} == {served, oldest, served}
+
+    for {named, taken?} <- [{1, true}, {hello["protocol_v"], true}, {0, false}, {"2", false}] do
+      header = Map.put(hello, "min_protocol_v", named)
+      decoded? = match?({:ok, _event}, Protocol.decode_client_frame(frame(header)))
+      assert decoded? == taken?, inspect(named)
+      assert decoded? == (client_errors(header, schema) == []), inspect(named)
+    end
+
+    # An oldest newer than the hello's own is the codec's to refuse.
+    newer = Map.put(hello, "min_protocol_v", hello["protocol_v"] + 1)
+
+    assert {:error, {:invalid_field, "min_protocol_v"}} =
+             Protocol.decode_client_frame(frame(newer))
+
+    assert protocol =~ "**An engine's hello names its window**"
+    assert protocol =~ "`min_protocol_v`"
+    assert protocol =~ "the versions both engines speak"
+  end
+
+  # M97 §3.2, §5.3: a desktop names its system on hello, its hello_ack says
+  # which of a computer's own events the server takes, and its offers travel
+  # as one chunked payload whose rev is its own. The schema reads each as the
+  # codec does.
+  test "the schema publishes a computer's own record as the codec reads it",
+       %{schema: schema, protocol: protocol} do
+    [hello] = Enum.filter(client_headers(), &(&1["t"] == "hello" and &1["platform"]))
+    refute "platform" in schema["$defs"]["hello"]["required"]
+
+    for platform <- ~w(macos linux windows ios) do
+      header = Map.put(hello, "platform", platform)
+      decoded? = match?({:ok, _event}, Protocol.decode_client_frame(frame(header)))
+      assert decoded? == (client_errors(header, schema) == []), platform
+      assert decoded? == platform in ~w(macos linux), platform
+    end
+
+    # M97 §19.3: a desktop's hello says it applies the rule that a setting's
+    # id names its machine; a later desktop may name more, which is ignored.
+    assert hello["caps"]["computer"]["machine_settings"] == true
+
+    for {caps, taken?} <- [
+          {%{"computer" => %{"machine_settings" => true}}, true},
+          {%{"computer" => %{"machine_settings" => false, "later" => 1}}, true},
+          {%{}, true},
+          {%{"computer" => %{"machine_settings" => "yes"}}, false},
+          {%{"computer" => "yes"}, false},
+          {"yes", false}
+        ] do
+      header = Map.put(hello, "caps", caps)
+      decoded? = match?({:ok, _event}, Protocol.decode_client_frame(frame(header)))
+      assert decoded? == (client_errors(header, schema) == []), inspect(caps)
+      assert decoded? == taken?, inspect(caps)
+    end
+
+    [ack] = Enum.filter(server_headers(), &get_in(&1, ["caps", "computer"]))
+
+    assert ack["caps"]["computer"] == %{
+             "v" => 1,
+             "offers" => true,
+             "link_path" => true,
+             "invoke" => true,
+             "machine_settings" => true,
+             "standing" => "behind",
+             "versions" => %{"engine" => "4.12.3", "companion" => [6, 7], "management" => [1, 2]}
+           }
+
+    versions = ack["caps"]["computer"]["versions"]
+
+    taken = [
+      ack["caps"]["computer"],
+      %{"v" => 1},
+      %{"v" => 2, "link_path" => false, "x" => 1},
+      %{"v" => 1, "standing" => "settings_only"}
+    ]
+
+    refused = [
+      %{"v" => 0},
+      %{"v" => "1"},
+      %{"offers" => true},
+      %{"v" => 1, "link_path" => "on"},
+      %{"v" => 1, "machine_settings" => "on"},
+      %{"v" => 1, "standing" => "stale"},
+      %{"v" => 1, "versions" => Map.delete(versions, "engine")},
+      %{"v" => 1, "versions" => %{versions | "companion" => [7]}},
+      %{"v" => 1, "versions" => %{versions | "management" => [0, 2]}}
+    ]
+
+    for computer <- taken ++ refused ++ [[]] do
+      payload = ack |> Map.drop(~w(v t seq)) |> put_in(["caps", "computer"], computer)
+      encoded? = match?({:ok, _frame}, encode_at(ack, "hello_ack", payload))
+      assert encoded? == (server_errors(server_event("hello_ack", payload), schema) == [])
+      assert encoded? == computer in taken, inspect(computer)
+    end
+
+    [%{"header" => header, "bytes_b64" => tail}] =
+      Enum.filter(jsonl(@client_binary_fixtures), &(&1["header"]["t"] == "offers"))
+
+    payload = Base.decode64!(tail)
+    assert {:ok, [_offer | _more] = offers} = Offers.decode(payload)
+    assert Offers.rev(payload) == header["rev"]
+    # The folders files and commands reach there, as the documented row says.
+    assert [_root | _more] = FilesOffer.roots(offers)
+    assert protocol =~ "| `roots?` |"
+    assert %{home: "/" <> _home} = Enum.find(offers, &(&1.id == "files"))
+    assert protocol =~ "| `home?` |"
+
+    for rev <- ["0F1E2D3C4B5A6978", "0f1e2d3c", "0f1e2d3c4b5a69780"] do
+      drifted = Map.put(header, "rev", rev)
+      refute match?({:ok, _event}, Protocol.decode_client_frame(frame(drifted, payload))), rev
+      refute client_errors(drifted, schema) == [], rev
+    end
+
+    for path <- ~w(direct relay tailnet) do
+      header = %{"v" => 2, "t" => "link_path", "seq" => 3, "path" => path}
+      decoded? = match?({:ok, _event}, Protocol.decode_client_frame(frame(header)))
+      assert decoded? == (client_errors(header, schema) == []), path
+      assert decoded? == path in ~w(direct relay), path
+    end
+  end
+
+  # M97 §6.1: the invocation is one table either way, so every header is read
+  # as a computer's (decoded) and as a server's (encoded), and the schema
+  # takes exactly what both take.
+  # M97 §3.1, §7.5: a computer's join. The codec and the schema refuse the
+  # same frames, the denial reasons are the ones the codec takes, and the
+  # six digits are documented under a label that is not a pairing's.
+  test "the schema publishes a computer's join as the codec reads it",
+       %{schema: schema, protocol: protocol} do
+    [request | _more] = Enum.filter(client_headers(), &(&1["t"] == "join_request"))
+
+    for platform <- ~w(macos linux android) do
+      header = Map.put(request, "platform", platform)
+      decoded? = match?({:ok, _event}, Protocol.decode_client_frame(frame(header)))
+      assert decoded? == (client_errors(header, schema) == []), platform
+      assert decoded? == platform in ~w(macos linux), platform
+    end
+
+    refute client_errors(Map.delete(request, "host"), schema) == []
+
+    reasons = schema["$defs"]["join_denied"]["properties"]["reason"]["enum"]
+    assert reasons == ~w(denied timeout cancelled)
+
+    for reason <- reasons ++ ["attestation"] do
+      event = server_event("join_denied", %{"reason" => reason})
+      payload = %{"reason" => reason}
+      built? = match?({:ok, _frame}, Protocol.encode_server_frame("join_denied", payload, 1))
+      assert built? == (server_errors(event, schema) == []), reason
+      assert built? == reason in reasons, reason
+    end
+
+    [approved | _more] = Enum.filter(server_headers(), &(&1["t"] == "join_approved"))
+    refute server_errors(Map.delete(approved, "primary"), schema) == []
+
+    assert protocol =~ ~s(data: "fermix-computer-sas-v1")
+    assert protocol =~ ~s(data: "fermix-mobile-sas-v1")
+    assert protocol =~ "`enrollment_purpose`"
+    assert protocol =~ "(`join <reason>`)"
+  end
+
+  test "the schema publishes the invocation as the codec reads it", %{schema: schema} do
+    open = invoke_golden(&(&1["t"] == "invoke_open" and is_map(&1["part"])))
+    part = invoke_golden(&(&1["t"] == "invoke_part"))
+    cancel = invoke_golden(&(&1["t"] == "invoke_cancel"))
+    status = invoke_golden(&(&1["t"] == "invoke_status"))
+    largest = Outcome.max_part_bytes()
+
+    taken = [
+      open,
+      part,
+      cancel,
+      status,
+      Map.put(open, "deadline_ms", 0),
+      Map.put(open, "deadline_ms", 900_000),
+      open |> Map.drop(~w(turn part)) |> Map.put("origin", "computer"),
+      put_in(open, ["part", "size_bytes"], largest),
+      Map.put(open, "capability", "a" <> String.duplicate("b", 31)),
+      Map.put(part, "size_bytes", largest)
+    ]
+
+    drifted = [
+      Map.put(open, "capability", "Files"),
+      Map.put(open, "capability", "a" <> String.duplicate("b", 32)),
+      Map.put(open, "op", "Write"),
+      Map.put(open, "op", String.duplicate("w", 65)),
+      Map.put(open, "deadline_ms", 900_001),
+      Map.put(open, "deadline_ms", -1),
+      Map.put(open, "epoch", 0),
+      Map.put(open, "origin", "phone"),
+      Map.put(open, "id", ""),
+      Map.delete(open, "last"),
+      Map.update!(open, "turn", &Map.delete(&1, "tool_call_id")),
+      put_in(open, ["turn", "session_id"], String.duplicate("s", 129)),
+      put_in(open, ["part", "size_bytes"], largest + 1),
+      put_in(open, ["part", "size_bytes"], 0),
+      put_in(open, ["part", "sha256"], "abc"),
+      put_in(open, ["part", "mime"], "text plain"),
+      Map.put(part, "size_bytes", 0),
+      Map.put(part, "size_bytes", largest + 1),
+      Map.delete(part, "size_bytes"),
+      Map.put(cancel, "id", "-inv"),
+      Map.delete(status, "id"),
+      Map.delete(cancel, "capability"),
+      Map.delete(status, "op"),
+      Map.put(status, "op", "Glob")
+    ]
+
+    for header <- taken ++ drifted do
+      assert invoke_read?(header, schema) == header in taken, inspect(header)
+    end
+  end
+
+  # Which field rides with which status is the answer's reader's rule
+  # (`Outcome.from_wire/2`), not the codec's: the codec takes a refusal on an
+  # `ok`, the reader refuses it, and so does the schema.
+  test "the schema publishes an invocation's answer as the codec and its reader read it",
+       %{schema: schema} do
+    result = invoke_golden(&(&1["t"] == "invoke_result" and is_map(&1["part"])))
+    refused = invoke_golden(&(&1["t"] == "invoke_result" and &1["status"] == "refused"))
+    lost = "Fermix on this computer stopped while it ran."
+
+    taken = [
+      result,
+      refused,
+      result |> Map.drop(~w(receipt part)) |> Map.put("status", "unknown"),
+      result |> Map.drop(["part"]) |> Map.merge(%{"status" => "unknown", "message" => lost}),
+      Map.merge(result, %{"status" => "failed", "message" => "No such file."}),
+      Map.put(result, "status", "timed_out")
+    ]
+
+    drifted = [
+      Map.put(result, "status", "lost"),
+      Map.put(refused, "refusal", "asleep"),
+      Map.put(result, "duration_ms", -1),
+      Map.put(refused, "message", String.duplicate("m", 513)),
+      put_in(result, ["receipt", "at"], "2026-11-10T11:14:07+02:00"),
+      put_in(result, ["receipt", "at"], "yesterday"),
+      put_in(result, ["receipt", "target"], String.duplicate("t", 257)),
+      Map.update!(result, "receipt", &Map.delete(&1, "target")),
+      put_in(result, ["part", "size_bytes"], 0)
+    ]
+
+    for header <- taken ++ drifted do
+      assert invoke_read?(header, schema) == header in taken, inspect(header)
+    end
+
+    for header <- taken do
+      assert {:ok, _outcome} = Outcome.from_wire(Map.drop(header, ~w(v t seq)), "{}")
+    end
+
+    unreadable = [
+      Map.put(result, "refusal", "busy"),
+      Map.put(result, "message", "Done."),
+      Map.merge(result, %{"status" => "cancelled", "message" => "Stopped."}),
+      Map.merge(result, %{"status" => "failed", "message" => "No such file.", "refusal" => "off"}),
+      Map.put(result, "status", "failed"),
+      Map.delete(refused, "refusal"),
+      Map.delete(refused, "message")
+    ]
+
+    for header <- unreadable do
+      assert invoke_codec?(header), inspect(header)
+      assert {:error, _reason} = Outcome.from_wire(Map.drop(header, ~w(v t seq)), "{}")
+      refute client_errors(header, schema) == [], inspect(header)
+      refute server_errors(header, schema) == [], inspect(header)
+    end
+  end
+
+  test "the invocation's words and bounds are the computer record's own", %{schema: schema} do
+    defs = schema["$defs"]
+    words = fn atoms -> Enum.map(atoms, &Atom.to_string/1) end
+
+    assert defs["invoke_result"]["properties"]["status"]["enum"] == words.(Outcome.statuses())
+    assert defs["invoke_result"]["properties"]["refusal"]["enum"] == words.(Outcome.refusals())
+    assert defs["invoke_open"]["properties"]["origin"]["enum"] == words.(Origin.wire_origins())
+    assert defs["invokePart"]["properties"]["size_bytes"]["maximum"] == Outcome.max_part_bytes()
+    assert defs["invoke_part"]["properties"]["size_bytes"]["maximum"] == Outcome.max_part_bytes()
+    assert defs["invoke_part"]["x-max-part-bytes"] == Outcome.max_part_bytes()
+    assert {:ok, Outcome.max_result_bytes()} == Chunks.bound("invoke_result")
+
+    # The receipt-only answer in the fixtures is read as one.
+    [{header, payload}] =
+      for %{"header" => %{"t" => "invoke_result"} = header, "bytes_b64" => tail} <-
+            jsonl(@client_binary_fixtures),
+          Base.decode64!(tail) == Outcome.receipt_only_payload(),
+          do: {header, Base.decode64!(tail)}
+
+    assert {:ok, %Outcome{receipt_only: true, receipt: %{target: _target}}} =
+             Outcome.from_wire(Map.drop(header, ~w(v t seq)), payload)
+  end
+
+  # A computer sends an invocation's events only to a server whose hello_ack
+  # takes them, and the flag that says so is a boolean.
+  test "caps.computer.invoke is a boolean the codec and the schema read alike",
+       %{schema: schema} do
+    [ack] = Enum.filter(server_headers(), &get_in(&1, ["caps", "computer"]))
+    assert ack["caps"]["computer"]["invoke"] == true
+
+    for {flag, taken?} <- [{true, true}, {false, true}, {"yes", false}, {1, false}] do
+      payload = ack |> Map.drop(~w(v t seq)) |> put_in(["caps", "computer", "invoke"], flag)
+      encoded? = match?({:ok, _frame}, encode_at(ack, "hello_ack", payload))
+      assert encoded? == (server_errors(server_event("hello_ack", payload), schema) == [])
+      assert encoded? == taken?, inspect(flag)
+    end
+  end
+
+  # M89 §06: a phone sends a trip event on its list channel only when its
+  # hello_ack says this primary serves trips there, and the flag is a boolean.
+  test "caps.trips is a boolean the codec and the schema read alike", %{schema: schema} do
+    [ack] = Enum.filter(server_headers(), &(get_in(&1, ["caps", "trips"]) != nil))
+    assert %{"lists" => true, "trips" => true} = ack["caps"]
+
+    for {flag, taken?} <- [{true, true}, {false, true}, {"yes", false}, {1, false}] do
+      payload = ack |> Map.drop(~w(v t seq)) |> put_in(["caps", "trips"], flag)
+      encoded? = match?({:ok, _frame}, encode_at(ack, "hello_ack", payload))
+      # Read at the golden's own version, as the codec encodes it: a phone's
+      # push list at 3 names fcm, which 2 does not have (M99 §14).
+      event = Map.merge(payload, %{"v" => ack["v"], "t" => "hello_ack", "seq" => 1})
+      assert encoded? == (server_errors(event, schema) == [])
+      assert encoded? == taken?, inspect(flag)
+    end
+  end
+
+  test "documentation tells a phone how its list channel carries trips", %{protocol: protocol} do
+    [_before, section] = String.split(protocol, "## Trips on a phone", parts: 2)
+    [section, _after] = String.split(section, "\n## ", parts: 2)
+    flat = String.replace(section, ~r/\s+/, " ")
+
+    for words <- [
+          "`caps.trips: true`",
+          "companion 8",
+          "`made_via: \"phone\"`",
+          "A `client_msg_id` names one edit of any kind",
+          "pulled the trips index",
+          "1,000"
+        ] do
+      assert flat =~ words, "Trips on a phone does not say #{words}"
+    end
+  end
+
+  test "documentation tells a computer how an invocation runs", %{protocol: protocol} do
+    [_before, section] = String.split(protocol, "### Invocations", parts: 2)
+    [section, _after] = String.split(section, "\n### ", parts: 2)
+
+    words =
+      ~w(caps.computer.invoke size_bytes receipt_only device/invocations/ interrupted) ++
+        Enum.map(Outcome.statuses() ++ Outcome.refusals(), &"`#{&1}`")
+
+    for word <- words, do: assert(section =~ word, word)
+
+    for bound <- [
+          "1 MiB",
+          "4 MiB",
+          "20 MiB",
+          "64 MiB",
+          "900,000",
+          "256 KiB",
+          "at most 8",
+          "32 waiting",
+          "10 minutes",
+          "32 MiB",
+          "7 days",
+          "2,000",
+          "The upload did not arrive whole."
+        ],
+        do: assert(section =~ bound, bound)
+  end
+
+  # The golden invocation header `pick` finds, in either direction.
+  defp invoke_golden(pick) do
+    header = Enum.find(client_headers() ++ server_headers(), pick)
+    assert is_map(header), "no invocation golden matches"
+    header
+  end
+
+  # Whether the codec and the schema read `header`, which they must agree on.
+  defp invoke_read?(header, schema) do
+    read? = invoke_codec?(header)
+    assert read? == (client_errors(header, schema) == []), inspect(header)
+    assert read? == (server_errors(header, schema) == []), inspect(header)
+    read?
+  end
+
+  # Whether the codec reads `header` both ways: a computer decoding it and a
+  # server encoding it, which must agree.
+  defp invoke_codec?(header) do
+    bytes = if header["t"] in ~w(invoke_cancel invoke_status), do: <<>>, else: "{}"
+    fields = Map.drop(header, ~w(v t seq))
+    decoded? = match?({:ok, _event}, Protocol.decode_client_frame(frame(header, bytes)))
+
+    encoded? =
+      match?({:ok, _frame}, Protocol.encode_server_frame(header["t"], fields, 1, bytes))
+
+    assert decoded? == encoded?, "the two directions read #{inspect(header)} apart"
+    decoded?
+  end
+
+  test "documentation tells a phone how a call runs on its session", %{protocol: protocol} do
+    [_before, section] = String.split(protocol, "## Calls from the phone", parts: 2)
+    [section, _after] = String.split(section, "\n## ", parts: 2)
+
+    for word <-
+          ~w(call_open call_attached control_seq playback_id playback_progress caps.call
+             call_frame camera camera_share) do
+      assert section =~ word, "Calls from the phone does not name #{word}"
+    end
+
+    for reason <- @call_endings ++ @call_refusals do
+      assert section =~ "`#{reason}`", "Calls from the phone does not name #{reason}"
+    end
+
+    for bound <- ["20 s", "300 ms", "1 s", "5 s", "1.5 s"], do: assert(section =~ bound, bound)
   end
 
   # FEAT-5: the pairing link is the one thing a phone reads before it has a
@@ -738,6 +1443,48 @@ defmodule FermixChannels.Mobile.ProtocolContractTest do
     assert File.exists?(Path.join(@priv_dir, "push_vectors.json"))
   end
 
+  # M99 §14: what an Android app needs to receive a push through the relay, in
+  # the words it vendors, beside the vectors it is held to.
+  test "documentation records the push through the relay an Android app has to receive",
+       %{protocol: protocol} do
+    [_before, section] = String.split(protocol, "## Push notifications\n", parts: 2)
+    [section, _after] = String.split(section, "\n## ", parts: 2)
+
+    assert protocol =~ "**Protocol 3: push through the relay.**"
+    assert protocol =~ "| `push_unavailable` |"
+
+    for words <- [
+          "### Android, through Fermix's push relay",
+          "https://push.fermix.ai/v1/push",
+          ~s({"service":"fcm","address":"<the phone's address>","ttl":86400,"body":"<the sealed message>"}),
+          "2,150 bytes",
+          "2,867 characters",
+          "Firebase Installation ID",
+          ~s({"v":1,"kind":"message","profile_id":"main","server_seq":42,"preview_text":"…"}),
+          "`push_subscribe`",
+          ~s({"error":"gone"}),
+          "webpush_vectors.json"
+        ] do
+      assert section =~ words, words
+    end
+
+    # Draft 1's direct route, gone with the home's key (M99 §16).
+    for gone <- [
+          "`webpush`",
+          "hello_ack.push_key",
+          "push_key?",
+          "webpush_unavailable",
+          "fcm.googleapis.com",
+          "vapid"
+        ] do
+      refute protocol =~ gone, gone
+    end
+
+    refute section =~ "Only an `ios` phone is pushed"
+    refute section =~ "An `android` phone is pushed nothing"
+    assert File.exists?(Path.join(@priv_dir, "webpush_vectors.json"))
+  end
+
   # M75 §5.3: the table a phone, a desktop and wave-two responders read is the
   # one the session enforces.
   test "documentation's table of who may send what is Mobile.Peers'", %{protocol: protocol} do
@@ -797,6 +1544,26 @@ defmodule FermixChannels.Mobile.ProtocolContractTest do
     end
   end
 
+  # PROTOCOL.md "Desktop sessions": a run of `companion_line` frames carries
+  # one line of the companion connection, without its newline, which the
+  # companion protocol reads as it reads a line from its socket.
+  test "every companion_line run in the fixtures joins into one companion line" do
+    companion = @companion_schema_path |> File.read!() |> Jason.decode!()
+
+    for {path, ref} <- [
+          {@client_binary_fixtures, "clientEvent"},
+          {@server_binary_fixtures, "serverEvent"}
+        ] do
+      lines = companion_lines(path)
+      assert lines != [], "no companion line in #{Path.basename(path)}"
+
+      for line <- lines do
+        refute String.ends_with?(line, "\n"), line
+        assert WireSchema.errors(Jason.decode!(line), WireSchema.ref(ref), companion) == [], line
+      end
+    end
+  end
+
   test "every chunked run in the binary fixtures reassembles within its bound" do
     runs =
       for {path, decode} <- [
@@ -837,6 +1604,124 @@ defmodule FermixChannels.Mobile.ProtocolContractTest do
     end
   end
 
+  # M89 §06: a trip holds at most 1,000 days and stops and its whole `trip`
+  # stays within 768 KiB, so a phone's list channel carries one as one
+  # companion line the daemon cuts into 60 KiB chunks. The golden is that run
+  # at the row cap: its chunks are the daemon's cut, and its line is the trip
+  # the engine draws from those rows, every date and leg its own.
+  test "a trip at the row cap rides a phone's channel as one line in chunks, as the engine sends it" do
+    run = trip_run(jsonl(@server_binary_fixtures))
+
+    pieces =
+      for %{"header" => header, "bytes_b64" => bytes} <- run,
+          do: {header["index"], header["last"], Base.decode64!(bytes)}
+
+    line = pieces |> Enum.map(fn {_index, _last, bytes} -> bytes end) |> IO.iodata_to_binary()
+
+    assert length(pieces) > 1
+    assert Chunks.split(line) == pieces
+    assert run |> Enum.map(& &1["header"]["channel"]) |> Enum.uniq() |> length() == 1
+    {:ok, bound} = Chunks.bound("companion_line")
+    assert byte_size(line) <= bound
+
+    event = Jason.decode!(line)
+    assert %{"type" => "trip", "profile_id" => "main", "trip" => trip} = event
+    assert length(trip["rows"]) == TripOps.max_rows()
+    assert byte_size(Jason.encode!(trip)) <= TripOps.max_wire_bytes()
+
+    {stored, rows, towns} = store_trip(trip)
+    snapshot = %{trip: stored, rows: rows, towns: towns}
+
+    assert CompanionTrips.object_payload("main", snapshot, false, %{}) ==
+             Map.delete(event, "type")
+
+    # M89: the widest a trip goes, a town on every day, still one line.
+    days = Enum.filter(trip["rows"], &(&1["kind"] == "day"))
+    assert days != [] and Enum.all?(days, &Map.has_key?(&1, "town"))
+
+    stops = Enum.filter(trip["rows"], &(&1["kind"] == "stop"))
+    assert Enum.any?(stops, &Map.has_key?(&1, "leg_m"))
+    assert Enum.any?(stops, &(not Map.has_key?(&1, "place")))
+    assert Enum.any?(stops, &(&1["fixed"] == true and is_binary(&1["note"])))
+
+    minted = ~r/\At[ri]_[0-9a-hjkmnp-tv-z]{10}\z/
+
+    for id <- [trip["trip_id"] | Enum.map(trip["rows"], & &1["row_id"])],
+        do: assert(Regex.match?(minted, id), "#{id} is not an id the engine mints")
+
+    for %{"place" => place} <- stops, do: assert(Place.cut(place) == {:ok, place})
+  end
+
+  # The frames of the one golden companion line that is a `trip`.
+  defp trip_run(fixtures) do
+    {_before, rest} = Enum.split_while(fixtures, &(not trip_start?(&1)))
+    {middle, [last | _after]} = Enum.split_while(rest, &(&1["header"]["last"] != true))
+    middle ++ [last]
+  end
+
+  defp trip_start?(%{"header" => %{"t" => "companion_line", "index" => 0}} = fixture),
+    do: String.starts_with?(Base.decode64!(fixture["bytes_b64"]), ~s({"type":"trip",))
+
+  defp trip_start?(_fixture), do: false
+
+  # The store's trip and rows a golden `trip` was drawn from, without what
+  # the engine derives from them: a day's date and a stop's leg.
+  defp store_trip(trip) do
+    stored = %{
+      id: trip["trip_id"],
+      title: trip["title"],
+      rev: trip["rev"],
+      starts_on: trip["starts_on"] && Date.from_iso8601!(trip["starts_on"]),
+      timezone: trip["timezone"],
+      removed_at: nil,
+      near: nil
+    }
+
+    rows = trip["rows"]
+
+    towns =
+      for %{"kind" => "day", "town" => town} = row <- rows,
+          into: %{},
+          do: {row["row_id"], store_town(town)}
+
+    {stored, Enum.map(rows, &store_row/1), towns}
+  end
+
+  # A day the store keeps its own near for, named here by its id, whose town
+  # the wire carries.
+  defp store_row(%{"kind" => "day"} = row) do
+    %{
+      id: row["row_id"],
+      kind: :day,
+      text: Map.get(row, "text", ""),
+      timezone: row["timezone"],
+      near: if(Map.has_key?(row, "town"), do: row["row_id"])
+    }
+  end
+
+  defp store_row(%{"kind" => "stop"} = row) do
+    %{
+      id: row["row_id"],
+      kind: :stop,
+      text: row["text"],
+      time: row["time"],
+      duration: row["duration"],
+      fixed: row["fixed"] == true,
+      note: row["note"],
+      place: row["place"],
+      near: nil
+    }
+  end
+
+  defp store_town(town) do
+    %{
+      name: town["name"],
+      latitude: town["latitude"],
+      longitude: town["longitude"],
+      radius_meters: town["radius_meters"]
+    }
+  end
+
   defp backticked(text),
     do: Regex.scan(~r/`([a-z_]+)`/, text, capture: :all_but_first) |> List.flatten()
 
@@ -848,6 +1733,30 @@ defmodule FermixChannels.Mobile.ProtocolContractTest do
     |> File.read!()
     |> String.split("\n", trim: true)
     |> Enum.map(&Jason.decode!/1)
+  end
+
+  # A fixture file's companion lines: each channel's frames in file order,
+  # joined at each `last`.
+  defp companion_lines(path) do
+    path
+    |> jsonl()
+    |> Enum.filter(&(&1["header"]["t"] == "companion_line"))
+    |> Enum.group_by(& &1["header"]["channel"])
+    |> Enum.flat_map(fn {_channel, frames} -> join_lines(frames) end)
+  end
+
+  defp join_lines(frames) do
+    {lines, []} = Enum.reduce(frames, {[], []}, &join_frame/2)
+    Enum.reverse(lines)
+  end
+
+  defp join_frame(fixture, {lines, run}) do
+    assert fixture["header"]["index"] == length(run)
+    run = [Base.decode64!(fixture["bytes_b64"]) | run]
+
+    if fixture["header"]["last"],
+      do: {[run |> Enum.reverse() |> IO.iodata_to_binary() | lines], []},
+      else: {lines, run}
   end
 
   defp client_headers do
@@ -862,11 +1771,19 @@ defmodule FermixChannels.Mobile.ProtocolContractTest do
     Map.merge(payload, %{"v" => 2, "t" => type, "seq" => 1})
   end
 
+  # A golden's payload, changed, encoded again at the golden's own version.
+  defp encode_at(golden, type, payload),
+    do: Protocol.encode_server_frame(type, payload, 1, <<>>, version: golden["v"])
+
+  # A golden's payload, one field set.
+  defp payload(golden), do: Map.drop(golden, ~w(v t seq))
+  defp payload(golden, value, field \\ "push"), do: golden |> payload() |> Map.put(field, value)
+
   defp hello_ack_payload do
     %{
       "session_id" => "session",
       "min_version" => 2,
-      "max_version" => 2,
+      "max_version" => 3,
       "profiles" => [%{"id" => "main", "name" => "Fermix"}],
       "candidates" => [],
       "history_head_seq" => 0,
@@ -877,6 +1794,14 @@ defmodule FermixChannels.Mobile.ProtocolContractTest do
 
   defp server_errors(event, schema),
     do: WireSchema.errors(event, WireSchema.ref("serverEvent"), schema)
+
+  defp client_errors(event, schema),
+    do: WireSchema.errors(event, WireSchema.ref("clientEvent"), schema)
+
+  defp call_caps(available?, reason) do
+    call = %{"available" => available?, "min_version" => 2, "max_version" => 3, "camera" => false}
+    if reason, do: Map.put(call, "reason", reason), else: call
+  end
 
   defp text_done(truncated) do
     %{"turn_id" => "turn-1", "server_seq" => 1, "text" => "Hi", "truncated" => truncated}

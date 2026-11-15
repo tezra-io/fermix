@@ -42,6 +42,7 @@ defmodule FermixChannels.Home.ReturnTest do
   alias FermixCore.Home.Snapshot.Recovery
   alias FermixCore.Management.Protocol
   alias FermixCore.Management.Router
+  alias FermixCore.Setup.SecretWriter
   alias FermixTestSupport.TelemetryCapture
 
   @moduletag timeout: 120_000
@@ -57,8 +58,18 @@ defmodule FermixChannels.Home.ReturnTest do
     {:ok, recipient} = Recovery.set(@passphrase, config: [], save_recipient: &{:ok, &1})
 
     # Forward: the Mac moves to the server and stays as its desktop.
-    {:ok, %{code: code}} = Enrollment.open(mac.enrollment, :manual)
-    server_root = HomeMove.candidate_home!(code)
+    {:ok, %{code: code}} = Enrollment.open(mac.enrollment)
+    # The server's infrastructure set its bucket (E1), which a move back
+    # leaves behind on the server.
+    server_root =
+      HomeMove.candidate_home!(code,
+        destination: %{
+          "s3_bucket" => "invented-server-bucket",
+          "s3_region" => "eu-north-1",
+          "s3_credentials" => "instance_role"
+        }
+      )
+
     to_server = HomeMove.start_candidate!(server_root, mac)
     %{"candidate_id" => to_server_id} = HomeMove.await_phase(server_root, "enrolled")
     {:ok, _move} = Move.start(mac.root, @primary, to_server_id, recipient, HomeMove.start_opts())
@@ -78,6 +89,11 @@ defmodule FermixChannels.Home.ReturnTest do
   end
 
   test "the home comes back: the Mac is the one primary at N+2, the server is marked", ctx do
+    # M97 D13: the Mac's key is in its keychain until the move back ends.
+    profile = Path.basename(ctx.mac.root)
+    item = fn -> SecretWriter.get({:device_key, :desktop}, profile: profile, store: :keyring) end
+    assert {:ok, _key} = item.()
+
     back = move_back!(ctx)
     assert {:ok, %{"move_id" => move_id}} = move_now(ctx, back, @passphrase)
     TelemetryCapture.attach([[:fermix, :home, :move]], move_id: move_id)
@@ -106,10 +122,20 @@ defmodule FermixChannels.Home.ReturnTest do
     assert File.read!(Path.join([mac, "imessage", "cursor"])) == "rowid 4411"
     assert File.read!(Key.path(mac)) == File.read!(Key.path(ctx.server.root))
     refute File.exists?(DesktopLink.path(mac))
-    refute File.exists?(DesktopLink.key_path(mac))
+    assert item.() == {:error, :missing_secret}
     # Its own desktop row is gone from the list it took back.
     assert {:ok, []} = DeviceStore.list(root: mac)
-    assert File.read!(Path.join(mac, "config.toml")) =~ ~s(workspace_root = "#{mac}/workspace")
+
+    assert File.read!(Path.join(mac, "config.toml")) =~
+             ~s(recordings = "#{mac}/workspace/meetings")
+
+    # The server signed its snapshots with its own instance role; the Mac
+    # takes none of that bucket's settings back.
+    assert File.read!(Path.join(ctx.server.root, "config.toml")) =~
+             ~s(s3_credentials = "instance_role")
+
+    refute File.read!(Path.join(mac, "config.toml")) =~ "invented-server-bucket"
+    refute File.read!(Path.join(mac, "config.toml")) =~ "s3_credentials"
     one_primary!(ctx)
 
     # The Mac's first boot as the primary records that it took Fermix back.
@@ -122,6 +148,33 @@ defmodule FermixChannels.Home.ReturnTest do
 
     assert_received {:telemetry, [:fermix, :home, :move], _m,
                      %{phase: :finished, side: :candidate, result: :done, epoch: 6}}
+  end
+
+  # M97 §8.4: on the server the Mac's notes are its computer's; once the Mac
+  # is its own home again they are the home's own (""), with its reads, its
+  # purge and its delivered mark. Another computer's notes keep their computer.
+  # An off request still pending for the Mac is a computer's, never the home's
+  # own machine's, which switches off in process.
+  test "the Mac's history notes are the home's own again once it takes Fermix back", ctx do
+    assert {:ok, %{device_id: mac}} = DesktopLink.read(ctx.mac.root)
+    other = "7e8f9a0b-1c2d-4e3f-8a5b-6c7d8e9f0a1b"
+    :ok = HomeMove.history!(ctx.server.root, mac, [other], off: true)
+    assert %{offs: [^mac]} = HomeMove.history(ctx.server.root)
+
+    back = move_back!(ctx)
+    assert {:ok, _move} = move_now(ctx, back, @passphrase)
+    run_worker(ctx.server.root, back)
+    assert_received :source_restart
+    assert_received {:scheduled, :restart, _delay}
+    assert {:ok, %{role: :primary}} = Role.configured(ctx.mac.root)
+
+    assert %{
+             notes: [{"", "session"}, {^other, "session"}, {"", "thread"}],
+             reads: [""],
+             intervals: [""],
+             rows: [{"", 2}, {^other, 2}],
+             offs: []
+           } = HomeMove.history(ctx.mac.root)
   end
 
   test "a recovery passphrase that is not the one set is refused by the server", ctx do
@@ -148,7 +201,8 @@ defmodule FermixChannels.Home.ReturnTest do
     assert {:ok, %{"phase" => "undoing", "sentence" => sentence}} =
              Move.read_phase(ctx.server.root)
 
-    assert sentence =~ "studio-mac refused the move (move_failed: This Mac needs about"
+    # The Mac's own words for its disk are an owner's to read, after the plain ones.
+    assert sentence =~ "studio-mac turned the move down, so nothing moved. This Mac needs about"
     assert sentence =~ "make room on its disk, then move back again"
     assert Moved.read(ctx.server.root) == :absent
     assert :ok = Move.finish_at_boot(ctx.server.root, :primary)
@@ -331,7 +385,7 @@ defmodule FermixChannels.Home.ReturnTest do
   # candidate and its record of the return, and its candidate enrolls with
   # the server (`start: false` stops before that, as an engine that stopped).
   defp move_back!(ctx, opts \\ []) do
-    {:ok, %{code: code}} = Enrollment.open(ctx.server.enrollment, :manual)
+    {:ok, %{code: code}} = Enrollment.open(ctx.server.enrollment)
 
     {:ok, _state} =
       Candidate.prepare_return(ctx.mac.root, {:return, code},

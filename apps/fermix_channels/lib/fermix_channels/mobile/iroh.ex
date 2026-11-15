@@ -9,7 +9,8 @@ defmodule FermixChannels.Mobile.Iroh do
   1. the connections' `DynamicSupervisor`, one `Iroh.BridgeConnection` per iroh
      stream;
   2. `Iroh.Bridge`, the bridge socket the helper connects to;
-  3. `Iroh.Helper`, the helper itself.
+  3. `Iroh.Helper`, the helper itself, on the fixed UDP port of an Always On
+     server (`Iroh.Hints.bind_port/1`) and iroh's own port everywhere else.
 
   A bridge that goes down takes the helper with it, since the helper's streams
   died with the socket; a helper fault restarts nothing, because `Iroh.Helper`
@@ -25,6 +26,7 @@ defmodule FermixChannels.Mobile.Iroh do
   alias FermixChannels.Mobile.Identity
   alias FermixChannels.Mobile.Iroh.Bridge
   alias FermixChannels.Mobile.Iroh.Helper
+  alias FermixChannels.Mobile.Iroh.Hints
 
   @doc "Whether `[fermix_channels.mobile] iroh` is on in the running config; on unless set off."
   @spec switch_on?() :: boolean()
@@ -64,15 +66,19 @@ defmodule FermixChannels.Mobile.Iroh do
        connection_opts: [session_opts: Keyword.fetch!(opts, :session_opts)]},
       Supervisor.child_spec(
         {Helper,
-         [
-           name: names.iroh_helper,
-           root: root,
-           bridge_socket: socket_path,
-           bridge: names.bridge,
-           device_store: names.device_store,
-           identity_exists?: fn -> identity_exists?(root) end,
-           emit: &FermixChannels.Telemetry.emit_transport(:mobile_iroh, &1, &2, &3)
-         ] ++ Keyword.get(opts, :helper_opts, [])},
+         Keyword.merge(
+           [
+             name: names.iroh_helper,
+             root: root,
+             bridge_socket: socket_path,
+             bridge: names.bridge,
+             device_store: names.device_store,
+             identity_exists?: fn -> identity_exists?(root) end,
+             bind_port: Hints.bind_port(root),
+             emit: &FermixChannels.Telemetry.emit_transport(:mobile_iroh, &1, &2, &3)
+           ],
+           Keyword.get(opts, :helper_opts, [])
+         )},
         shutdown: 10_000
       )
     ]

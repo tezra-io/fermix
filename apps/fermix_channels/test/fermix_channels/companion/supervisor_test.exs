@@ -123,6 +123,39 @@ defmodule FermixChannels.Companion.SupervisorTest do
     assert Bitwise.band(File.stat!(socket_path).mode, 0o777) == 0o600
   end
 
+  # M97 §9.3 (D22): a desktop whose home moved takes its app's files into an
+  # inbox of its own, which uploads them to the server; it starts no store's
+  # inbox, and each tunnel is told the uploads.
+  test "a tunnel's serving tree starts this computer's uploads in place of the inbox" do
+    unique = System.unique_integer([:positive])
+    uploads = :"companion_sup_uploads_#{unique}"
+
+    {:ok, {_flags, children}} =
+      CompanionSupervisor.init(
+        serve?: true,
+        settle?: true,
+        boot_epoch: "boot-tunnel",
+        registry: :"companion_tunnel_registry_#{unique}",
+        approvals: :"companion_tunnel_approvals_#{unique}",
+        tunnel: [relay: :a_relay, staging: "/nonexistent/staging", uploads_opts: [name: uploads]]
+      )
+
+    modules = for %{start: {module, _fun, _args}} <- children, do: module
+    assert FermixChannels.Desktop.Uploads in modules
+    refute FermixChannels.Companion.Inbox in modules
+
+    [uploads_opts] =
+      for %{start: {FermixChannels.Desktop.Uploads, :start_link, [opts]}} <- children, do: opts
+
+    assert uploads_opts[:name] == uploads
+    assert uploads_opts[:relay] == :a_relay
+
+    [endpoint_opts] = for %{start: {Endpoint, :start_link, [opts]}} <- children, do: opts
+
+    assert endpoint_opts[:connection_module] == FermixChannels.Desktop.Tunnel
+    assert endpoint_opts[:connection_opts][:uploads] == uploads
+  end
+
   test "the socket lives under FERMIX_HOME" do
     assert Path.basename(Endpoint.socket_path()) == "companion.sock"
     assert Path.dirname(Endpoint.socket_path()) == ConfigStore.fermix_home()

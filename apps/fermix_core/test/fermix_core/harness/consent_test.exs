@@ -31,12 +31,15 @@ defmodule FermixCore.Harness.ConsentTest do
   end
 
   describe "scheduled_guidance/0" do
-    test "points at the setup surface and the config key, with no tap-to-approve language" do
+    # M98 D5: the approval is this computer's own setting, in its machine.toml.
+    test "points at this computer's settings and its machine file, with no tap-to-approve language" do
       guidance = Consent.scheduled_guidance()
 
-      assert guidance =~ "not yet approved on this machine"
+      assert guidance =~ "not yet approved on this computer"
+      assert guidance =~ "this computer's own settings"
       assert guidance =~ "Setup → Coding Agents"
-      assert guidance =~ "[fermix_core.harness] approved = true"
+      assert guidance =~ "[fermix_core.harness] approved = true in its machine.toml"
+      refute guidance =~ "in config"
 
       # The interactive path is gone: no prompt, button, token, or "Always allow".
       refute guidance =~ "Always allow"

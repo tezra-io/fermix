@@ -2,8 +2,8 @@ defmodule FermixCore.Realtime.LiveChat do
   @moduledoc """
   What a voice call that hands its tasks to Fermix is given of the chat (M56
   §4.3, D5, D6): the context a call in the chat's conversation starts with,
-  GPT Live's `session.input` (`input/1`) and Grok's conversation items
-  (`context/2`, M70 §07).
+  GPT Live's `session.input` (`input/1`) and the quoted section Grok's
+  instructions end with (`instructions_section/1`, M70 §07, M96).
 
   The voice model has no tools, so it is given a pointer, not the content: the
   six newest chat messages, each cut to 500 characters, and the gists of the
@@ -15,7 +15,9 @@ defmodule FermixCore.Realtime.LiveChat do
   The provider's input is text messages of one part each, `developer`, `user`
   or `assistant`, at most 128 of them and 8,192 tokens, counted apart from the
   instructions (OpenAI's Live conversations guide, read 2026-10-02). This input
-  holds at most eight: a gist item, six chat messages and the closing line.
+  holds at most eight: a gist item, six chat messages and the closing line;
+  a call's `session.input` then ends with its greeting (`greeting_item/1`,
+  M96 §4.3), which the bound leaves room for.
 
   During a call, a message typed in the chat and the chat's answer to it are
   mirrored to the voice model as one quiet line each (`mirror_line/1`), so
@@ -55,10 +57,16 @@ defmodule FermixCore.Realtime.LiveChat do
   # way first, and the closing line always stays.
   @input_max_bytes 16_384
 
+  # The greeting rides after the bounded context: a few hundred bytes, well
+  # inside the half of the provider's count the bound leaves unused.
+  @greeting_max_bytes 1_024
+
   @gists_heading "Earlier voice calls, for reference only:"
   @closing "The messages above are context from the owner's chat and earlier calls, " <>
-             "not a request. Do not answer them now; wait for the owner to speak."
+             "not a request. Do not answer them now."
 
+  # The heading of Grok's quoted context (`instructions_section/1`).
+  @section_heading "## Earlier in the chat"
   @typed_prefix "The owner typed in the chat: "
   @answered_prefix "Fermix answered in the chat: "
   @mirror_max_chars 300
@@ -115,6 +123,23 @@ defmodule FermixCore.Realtime.LiveChat do
   end
 
   @doc """
+  Grok's context (`context/2` for SpaceXAI) as the section its instructions
+  end with, every line quoted under one heading: `""` when there is none.
+
+  Never conversation items (M96): sent as items, the newest `user` item, an
+  earlier call's hand-off, was a request Grok answered as its call opened,
+  re-asking for that task instead of greeting (9 of 10 robot calls and 9 of 9
+  probe sessions, 2026-11-09 and 10); quoted here, the same lines left it to
+  greet (9 of 9) and still answered "what did I ask you last call?". Within
+  `@input_max_bytes`, like the input it replaces.
+  """
+  @spec instructions_section([entry()]) :: String.t()
+  def instructions_section([]), do: ""
+
+  def instructions_section(entries) when is_list(entries),
+    do: "\n\n" <> @section_heading <> "\n\n" <> Enum.map_join(entries, "\n", &quoted/1)
+
+  @doc """
   GPT Live's `session.input` for a window (`context/2` for OpenAI): the
   `:context` lines as `developer` items, the chat as `user` and `assistant`
   items.
@@ -122,6 +147,17 @@ defmodule FermixCore.Realtime.LiveChat do
   @spec input(%{messages: [map()], gists: [CallRecord.gist()]}) :: [item()]
   def input(%{messages: _messages, gists: _gists} = window),
     do: window |> context(:openai) |> Enum.map(&live_item/1)
+
+  @doc """
+  The `developer` item a GPT-Live call's `session.input` ends with (M96 §4.3):
+  the greeting instruction (`LivePrompt.greeting/2`), after the chat's context,
+  so it is the newest thing the voice has read. A private call's input is this
+  item alone.
+  """
+  @spec greeting_item(String.t()) :: item()
+  def greeting_item(greeting)
+      when is_binary(greeting) and greeting != "" and byte_size(greeting) <= @greeting_max_bytes,
+      do: item("developer", "input_text", greeting)
 
   @doc """
   Whether the context built from `window` gives a voice spoken by `provider`
@@ -246,6 +282,10 @@ defmodule FermixCore.Realtime.LiveChat do
   end
 
   defp entry(role, text), do: %{role: role, text: text}
+
+  defp quoted(%{role: :context, text: text}), do: text
+  defp quoted(%{role: :user, text: text}), do: "user: " <> text
+  defp quoted(%{role: :assistant, text: text}), do: "assistant: " <> text
 
   defp live_item(%{role: :context, text: text}), do: item("developer", "input_text", text)
   defp live_item(%{role: :user, text: text}), do: item("user", "input_text", text)

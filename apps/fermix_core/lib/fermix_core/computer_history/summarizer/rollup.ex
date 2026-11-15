@@ -33,6 +33,7 @@ defmodule FermixCore.ComputerHistory.Summarizer.Rollup do
   require Logger
 
   alias FermixCore.ComputerHistory.Config
+  alias FermixCore.ComputerHistory.Spool
   alias FermixCore.ComputerHistory.Summarizer
   alias FermixCore.Memory.Repo
 
@@ -45,7 +46,7 @@ defmodule FermixCore.ComputerHistory.Summarizer.Rollup do
   @note_artifacts 3
   @subject_max_chars 120
   @max_artifacts 12
-  # The verbatim guard's source side: the newest spool text still present.
+  # The verbatim guard's source side: the newest raw text this machine still holds.
   @guard_event_limit 2_000
   # Bound on the prior-citation lookup: at most 8 threads, so this is generous.
   @max_prior_notes 200
@@ -55,7 +56,9 @@ defmodule FermixCore.ComputerHistory.Summarizer.Rollup do
   @doc """
   Run the roll-up if it is due and there is anything new to roll up. `opts`
   carries `:now` (UTC DateTime), `:model` (the resolved route's model, stored on
-  every thread row) and optionally `:timezone`. `call_fun` is the caller's pinned,
+  every thread row) and optionally `:timezone` and `:machines` (whose notes it
+  reads, and whose threads it shows: `:all`, the default, or the ids of the
+  machines that contribute). `call_fun` is the caller's pinned,
   gate-checked provider call — the roll-up never resolves a route of its own and
   never fails over.
 
@@ -67,12 +70,14 @@ defmodule FermixCore.ComputerHistory.Summarizer.Rollup do
           :ok | :skipped | {:route_down, term()} | {:error, term()}
   def maybe_run(repo, opts, call_fun) when is_list(opts) and is_function(call_fun, 1) do
     now_ms = opts |> Keyword.fetch!(:now) |> DateTime.to_unix(:millisecond)
+    machines = Keyword.get(opts, :machines, :all)
 
     with {:ok, state} <- Repo.computer_history_ensure_state(server: repo),
          true <- due?(state, now_ms),
          {:ok, purge_mark} <- Repo.computer_history_purge_mark(server: repo),
-         {:ok, [_first | _rest] = notes} <- read_notes(repo, state.last_rollup_ts),
-         {:ok, threads} <- Repo.computer_history_active_threads(@max_active_threads, server: repo) do
+         {:ok, [_first | _rest] = notes} <- read_notes(repo, state.last_rollup_ts, machines),
+         {:ok, current} <- Repo.computer_history_active_threads(@max_active_threads, server: repo),
+         {:ok, threads} <- shown_threads(repo, current, machines) do
       run(repo, opts, call_fun, notes, threads, read_scope(purge_mark, notes, threads), now_ms)
     else
       false -> :skipped
@@ -93,12 +98,14 @@ defmodule FermixCore.ComputerHistory.Summarizer.Rollup do
 
   # The store hands back the NEWEST notes within the bound (that is the half most
   # likely to describe current work); the roll-up reads them chronologically.
-  defp read_notes(repo, last_ts) do
+  # Only the notes of the machines that still contribute (M97 §8.5): a machine
+  # whose history went off reaches no roll-up.
+  defp read_notes(repo, last_ts, machines) do
     since = last_ts || 0
+    read = [server: repo, machines: machines]
 
-    with {:ok, notes} <-
-           Repo.computer_history_session_notes_since(since, @max_new_notes, server: repo),
-         {:ok, total} <- Repo.computer_history_count_session_notes_since(since, server: repo) do
+    with {:ok, notes} <- Repo.computer_history_session_notes_since(since, @max_new_notes, read),
+         {:ok, total} <- Repo.computer_history_count_session_notes_since(since, read) do
       log_note_bound(length(notes), total)
       {:ok, Enum.reverse(notes)}
     end
@@ -116,6 +123,26 @@ defmodule FermixCore.ComputerHistory.Summarizer.Rollup do
       from_ts: rows |> Enum.map(& &1.provenance_from_ts) |> Enum.min(),
       to_ts: rows |> Enum.map(& &1.provenance_to_ts) |> Enum.max()
     }
+  end
+
+  # A current thread's state is its notes' history in other words, so it is
+  # shown to the call only when every note it cites is found and belongs to a
+  # machine that still contributes (M97 §8.5); the others are not shown, and
+  # retire with this write as any thread the reply leaves out does.
+  defp shown_threads(_repo, threads, :all), do: {:ok, threads}
+
+  defp shown_threads(repo, threads, machines) do
+    ids = threads |> Enum.flat_map(&decode_ids(&1.source_ids)) |> Enum.uniq()
+
+    with {:ok, cited} <- fetch_prior(ids, repo) do
+      machine_of = Map.new(cited, &{&1.id, &1.computer_id})
+      {:ok, Enum.filter(threads, &contributing?(&1, machine_of, machines))}
+    end
+  end
+
+  defp contributing?(thread, machine_of, machines) do
+    ids = decode_ids(thread.source_ids)
+    ids != [] and Enum.all?(ids, &(Map.get(machine_of, &1) in machines))
   end
 
   defp log_note_bound(read, total) when read >= total, do: :ok
@@ -145,14 +172,19 @@ defmodule FermixCore.ComputerHistory.Summarizer.Rollup do
     do: {:route_down, reason}
 
   defp write(repo, opts, content, notes, previous, scope, now_ms) do
-    with {:ok, texts} <-
-           Repo.computer_history_recent_event_texts(@guard_event_limit, server: repo),
+    with {:ok, texts} <- guard_texts(Keyword.get(opts, :spool)),
          {:ok, prior_notes} <- prior_notes(repo, notes, previous) do
       content
       |> build_threads(notes, prior_notes, texts, opts, now_ms)
       |> persist(repo, previous, now_ms, scope)
     end
   end
+
+  # The guard's source side (M97 §8.1): the newest raw text this machine's own
+  # store still holds. A home that records nothing holds none, and the notes the
+  # roll-up reads were each guarded against their own sitting's text when made.
+  defp guard_texts(nil), do: {:ok, []}
+  defp guard_texts(spool), do: Spool.recent_texts(@guard_event_limit, server: spool)
 
   # The notes the current threads already cite, fetched BY ID from the store: a
   # thread may be re-emitted on the strength of them, and fetching (rather than

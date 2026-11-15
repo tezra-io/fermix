@@ -30,6 +30,7 @@ defmodule FermixCore.Capabilities.Capability do
   """
 
   alias FermixCore.Capabilities.AccessGate
+  alias FermixCore.Computers.Choice
 
   @type kind :: :builtin | :skill | :mcp
   @type policy_class ::
@@ -104,12 +105,28 @@ defmodule FermixCore.Capabilities.Capability do
   bridge), so `Capabilities.AccessGate` decides here whether an
   access-sensitive command may run; a held call returns its result without the
   executor ever being called.
+
+  First `Computers.Choice` decides which machine a tool a computer can run
+  runs on (M97 §6.5), so the gate decides with that machine's facts; a call it
+  refuses runs nothing. The gate is handed the call's whole arguments, its
+  `computer` included, so a parked call is confirmed and re-run on the
+  computer it named; the executor gets them without it.
   """
   @spec execute(t(), map(), map()) :: term()
-  def execute(%__MODULE__{executor: {mod, fun, extra}} = capability, args, context)
+  def execute(%__MODULE__{executor: {_mod, _fun, extra}} = capability, args, context)
       when is_map(args) and is_map(context) and is_list(extra) do
+    case Choice.resolve(capability, args, context) do
+      {:ok, run_args, context} ->
+        admitted(capability, args, run_args, context)
+
+      {:refused, refusal, sentence} ->
+        {:ok, Choice.refuse(capability, args, context, refusal, sentence)}
+    end
+  end
+
+  defp admitted(%__MODULE__{executor: {mod, fun, extra}} = capability, args, run_args, context) do
     case AccessGate.admit(capability, args, context) do
-      {:dispatch, context} -> apply(mod, fun, [args, context | extra])
+      {:dispatch, context} -> apply(mod, fun, [run_args, context | extra])
       {:held, result} -> {:ok, result}
     end
   end

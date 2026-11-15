@@ -21,6 +21,36 @@ defmodule FermixCore.ComputerHistory.ConfigTest do
 
   defp configure(kw), do: Application.put_env(:fermix_core, :computer_history, kw)
 
+  # M97 §4: this machine's local summarizer decides over a different one in
+  # config.toml, and that is never silent: said once as the rail starts.
+  describe "a machine summarizer that decides over config.toml's" do
+    test "names the route it overrides, and only where one differs" do
+      assert Config.shadowed_route(machine_summarizer: :local, summarizer: :anthropic) ==
+               {:provider, :anthropic}
+
+      assert Config.shadowed_route(machine_summarizer: :local, summarizer: :default_provider) ==
+               :default_provider
+
+      assert is_nil(Config.shadowed_route(machine_summarizer: :local, summarizer: :local))
+      assert is_nil(Config.shadowed_route(machine_summarizer: :local))
+      assert is_nil(Config.shadowed_route(summarizer: :anthropic))
+    end
+
+    test "is said once at the rail's start, and nothing where nothing is overridden" do
+      log =
+        capture_log(fn ->
+          assert :ok = Config.warn_if_shadowed(machine_summarizer: :local, summarizer: :anthropic)
+        end)
+
+      assert log =~
+               ~s|summarizer = "local" in this machine's machine.toml decides over | <>
+                 "config.toml's summarizer (anthropic)"
+
+      quiet = capture_log(fn -> assert :ok = Config.warn_if_shadowed(summarizer: :anthropic) end)
+      refute quiet =~ "machine.toml"
+    end
+  end
+
   describe "defaults (key absent)" do
     test "everything is off / empty; summarizer defaults to the default provider" do
       Application.delete_env(:fermix_core, :computer_history)
@@ -249,15 +279,141 @@ defmodule FermixCore.ComputerHistory.ConfigTest do
     assert Config.config_keys() == [:enabled, :apps, :remote_summaries, :summarizer]
   end
 
+  # M97 §4: the section splits by key. This machine's file keeps whether it
+  # records, which apps, and `summarizer = "local"` when it makes its own
+  # notes; the home's config.toml keeps the route the home summarizes on and
+  # the providers that may receive summaries.
+  describe "the split between this machine's keys and the home's" do
+    test "the machine file's local summarizer is held apart from the home's route" do
+      assert Config.normalize(machine_summarizer: "local") == [machine_summarizer: :local]
+      assert Config.normalize(machine_summarizer: :local) == [machine_summarizer: :local]
+
+      assert_raise ArgumentError, ~r/takes only "local"/, fn ->
+        Config.normalize(machine_summarizer: "anthropic")
+      end
+    end
+
+    # The rule: a machine that chose local makes its own notes, and where it
+    # is the home its roll-up and every summary stay on it too; otherwise the
+    # home's route is in force.
+    test "a machine that chose local is local, whatever the home's route says" do
+      assert Config.summarizer(machine_summarizer: :local, summarizer: :default_provider) ==
+               :local
+
+      assert Config.summarizer(machine_summarizer: :local, summarizer: :anthropic) == :local
+      assert Config.summarizer(summarizer: :anthropic) == {:provider, :anthropic}
+      assert Config.summarizer(summarizer: :local) == :local
+      assert Config.summarizer([]) == :default_provider
+    end
+
+    test "each file's keys come out in that file's spelling" do
+      persisted =
+        Config.to_keyword(
+          enabled: true,
+          apps: ["com.example.Notes"],
+          machine_summarizer: :local,
+          summarizer: :default_provider,
+          remote_summaries: [:anthropic]
+        )
+
+      assert Config.machine_keyword(persisted) ==
+               [enabled: true, apps: ["com.example.Notes"], summarizer: "local"]
+
+      assert Config.home_keyword(persisted) ==
+               [summarizer: "default", remote_summaries: ["anthropic"]]
+
+      assert Config.machine_keyword(Config.to_keyword(summarizer: :local)) == []
+    end
+
+    # The Config round-trips rule: seeded with the normalized app-env shapes.
+    test "normalize is idempotent and to_keyword is its inverse with both summarizers" do
+      env = [
+        enabled: true,
+        apps: ["com.example.Notes"],
+        machine_summarizer: :local,
+        summarizer: :anthropic,
+        remote_summaries: [:anthropic]
+      ]
+
+      normalized = Config.normalize(env)
+      assert Config.normalize(normalized) == normalized
+      assert normalized |> Config.to_keyword() |> Config.normalize() == normalized
+    end
+
+    test "a computer never reads the home's keys" do
+      config = [
+        enabled: true,
+        apps: ["com.example.Notes"],
+        summarizer: :local,
+        remote_summaries: [:anthropic]
+      ]
+
+      assert Config.for_role(config, :device) == [enabled: true, apps: ["com.example.Notes"]]
+      assert Config.summarizer(Config.for_role(config, :device)) == :default_provider
+      assert Config.granted_providers(Config.for_role(config, :device)) == MapSet.new()
+
+      for role <- [:primary, :candidate, nil], do: assert(Config.for_role(config, role) == config)
+    end
+  end
+
+  # The machine file's own [fermix_core.computer_history], read beside the
+  # joined document: only this machine's keys, and a summarizer that says
+  # "local".
+  describe "machine_file/1" do
+    test "answers this machine's local summarizer, or nothing" do
+      assert Config.machine_file(nil) == []
+      assert Config.machine_file(%{"enabled" => true, "apps" => ["com.example.Notes"]}) == []
+
+      assert Config.machine_file(%{"enabled" => true, "summarizer" => "local"}) ==
+               [machine_summarizer: :local]
+    end
+
+    test "refuses a home key, any other summarizer and an unknown key, naming machine.toml" do
+      assert_raise ArgumentError, ~r/machine\.toml.*summarizer takes only "local"/s, fn ->
+        Config.machine_file(%{"summarizer" => "default"})
+      end
+
+      assert_raise ArgumentError, ~r/machine\.toml.*remote_summaries/s, fn ->
+        Config.machine_file(%{"remote_summaries" => ["anthropic"]})
+      end
+
+      assert_raise ArgumentError, ~r/machine\.toml.*sumarizer/s, fn ->
+        Config.machine_file(%{"sumarizer" => "local"})
+      end
+    end
+  end
+
   # v1.1 decision 1: every site visited in an allowlisted browser is recorded, so
   # there is no per-site filter left to configure. A key an operator already has
-  # on disk must never refuse boot (the poisoned-config incident) — it is accepted,
-  # named once, and dropped.
+  # on disk must never refuse boot (the poisoned-config incident) — it is accepted
+  # and dropped here, logging nothing, and `retired_notices/1` gives the sentence
+  # the settings read that drops it names it with.
   describe "the retired `sites` key" do
     test "retired_keys/0 names it and config_keys/0 does not" do
       assert Config.retired_keys() == [:sites]
       refute :sites in Config.config_keys()
       assert Config.accepted_keys() == Config.config_keys() ++ Config.retired_keys()
+    end
+
+    test "retired_notices/1 names it in a decoded table and in a snapshot's block" do
+      sentence =
+        "computer_history.sites is retired: every site in an allowlisted browser is " <>
+          "recorded; remove the key from the file that holds it"
+
+      assert Config.retired_notices(%{"enabled" => true, "sites" => ["github.com"]}) == [sentence]
+      assert Config.retired_notices(enabled: true, sites: ["github.com"]) == [sentence]
+      assert Config.retired_notices(%{"enabled" => true}) == []
+      assert Config.retired_notices([]) == []
+      assert Config.retired_notices(nil) == []
+    end
+
+    # Every key it accepts as retired has the sentence that names it, so a
+    # retired key cannot be dropped unnamed.
+    test "every retired key has a sentence that names it" do
+      for key <- Config.retired_keys() do
+        assert [sentence] = Config.retired_notices(%{"#{key}" => []})
+        assert sentence =~ "computer_history.#{key} is retired"
+      end
     end
 
     test "a config carrying sites normalizes to the same shape as one without it" do
@@ -271,19 +427,15 @@ defmodule FermixCore.ComputerHistory.ConfigTest do
         end)
 
       assert normalized == Config.normalize(%{"enabled" => true, "apps" => ["com.apple.Safari"]})
-      assert log =~ "computer_history.sites is retired"
+      refute log =~ "retired"
     end
 
-    test "the deprecation is logged exactly once, and names the repair" do
-      log =
-        capture_log(fn ->
-          Config.normalize(%{"sites" => ["github.com", "example.com"]})
-        end)
+    test "this computer's machine.toml table accepts it too, naming nothing" do
+      {own, log} =
+        with_log(fn -> Config.machine_file(%{"enabled" => true, "sites" => ["github.com"]}) end)
 
-      assert [_one] = Regex.scan(~r/computer_history\.sites is retired/, log)
-
-      assert log =~
-               "every site in an allowlisted browser is recorded; remove the key from config.toml"
+      assert own == []
+      refute log =~ "retired"
     end
 
     test "to_keyword never emits it" do

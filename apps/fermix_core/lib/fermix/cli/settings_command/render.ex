@@ -18,6 +18,7 @@ defmodule Fermix.CLI.SettingsCommand.Render do
 
   alias Fermix.CLI.Daemon.Client
   alias Fermix.CLI.HomeOwner
+  alias FermixCore.Management.Placement
 
   @control_chars ~r/[\x{0000}-\x{001F}\x{007F}-\x{009F}]/u
   @field_max 200
@@ -26,8 +27,11 @@ defmodule Fermix.CLI.SettingsCommand.Render do
 
   @not_running "the Fermix daemon is not running, and settings change only through it.\n" <>
                  "Start it with `fermix start`. If setup never finished, run `fermix setup` first."
-  @external_change "config.toml changed outside Fermix, so nothing was saved.\n" <>
-                     "Load it with `fermix settings reload`, then retry."
+  # The settings are two files, `config.toml` and this computer's own
+  # `machine.toml` (M97 §4), and the daemon's refusal does not say which one
+  # changed or could not be read, so its sentences name both.
+  @settings_files "config.toml or machine.toml"
+  @external_change "#{@settings_files} changed outside Fermix, so nothing was saved.\n"
   @file_store_remedy "On a machine with no desktop session to unlock it, " <>
                        "store secrets in the file store instead:\n" <>
                        "  fermix settings set secrets secret_store=file"
@@ -50,7 +54,7 @@ defmodule Fermix.CLI.SettingsCommand.Render do
          fermix settings secret set ID [--stdin] [--json]
          fermix settings secret clear ID [--json]
          fermix settings primary [PROVIDER] [--json]
-         fermix settings reload [--json]
+         fermix settings reload [SECTION] [--json]
   """
 
   @type rendered :: {:ok, iodata()} | {:error, :invalid_reply}
@@ -91,19 +95,33 @@ defmodule Fermix.CLI.SettingsCommand.Render do
     end
   end
 
-  @doc "A settings.apply result: saved keys, side effects, restart, readiness."
-  @spec applied(map(), String.t(), [String.t()]) :: rendered()
+  @doc """
+  A settings.apply result: saved keys, side effects, restart, readiness. The
+  saved line names the section by the `title` its read gave, and its id, so
+  on a linked computer it says which machine changed ("Sandbox on garden
+  server (sandbox)").
+  """
+  @spec applied(map(), String.t(), String.t(), [String.t()]) :: rendered()
   def applied(
         %{"applied" => applied, "restart" => restart, "readiness" => readiness} = result,
         section,
+        title,
         sent
       )
-      when is_list(applied) and is_binary(section) and is_list(sent) do
+      when is_list(applied) and is_binary(section) and is_binary(title) and is_list(sent) do
     with effects when is_list(effects) <- result["side_effects"],
          true <- strings?(applied) and strings?(effects),
          {:ok, restart_lines} <- restart(restart),
          {:ok, readiness_lines} <- readiness(readiness) do
-      saved = ["Saved ", safe(section), ": ", Enum.map_join(applied, ", ", &safe/1), "\n"]
+      saved = [
+        "Saved ",
+        safe(title),
+        " (",
+        safe(section),
+        "): ",
+        Enum.map_join(applied, ", ", &safe/1),
+        "\n"
+      ]
 
       {:ok,
        [saved, lines(effects), restart_lines, readiness_lines, derived(applied, sent, section)]}
@@ -112,7 +130,7 @@ defmodule Fermix.CLI.SettingsCommand.Render do
     end
   end
 
-  def applied(_result, _section, _sent), do: invalid()
+  def applied(_result, _section, _title, _sent), do: invalid()
 
   @doc """
   A secret.set or secret.clear result, and the environment variable the daemon
@@ -427,7 +445,7 @@ defmodule Fermix.CLI.SettingsCommand.Render do
   end
 
   defp config_state("clear"), do: []
-  defp config_state(state), do: ["config.toml state: ", safe(state), "\n"]
+  defp config_state(state), do: ["config.toml and machine.toml state: ", safe(state), "\n"]
 
   defp provider?(%{
          "id" => id,
@@ -461,15 +479,17 @@ defmodule Fermix.CLI.SettingsCommand.Render do
   defp management({:management_error, "invalid_params", _message, details}, ctx),
     do: invalid_params(details, ctx)
 
-  defp management({:management_error, "external_change", _message, _details}, _ctx),
-    do: @external_change
+  # A refusal that names this computer's own section (M97 §19.3) is cleared by
+  # reloading that section, on this computer; any other by the plain reload.
+  defp management({:management_error, "external_change", _message, details}, _ctx),
+    do: @external_change <> "Load them with `#{reload_for(details)}`, then retry."
 
   defp management(
          {:management_error, "config_unreadable", _message, %{"sentence" => sentence}},
          _ctx
        )
        when is_binary(sentence) do
-    "config.toml could not be read: #{sentence |> safe() |> String.trim_trailing(".")}. " <>
+    "#{@settings_files} could not be read: #{sentence |> safe() |> String.trim_trailing(".")}. " <>
       "Fix it, then run `fermix settings reload`."
   end
 
@@ -611,4 +631,12 @@ defmodule Fermix.CLI.SettingsCommand.Render do
   defp truncate(value, max) do
     if String.length(value) > max, do: String.slice(value, 0, max) <> "…", else: value
   end
+
+  defp reload_for(%{"section" => section}) when is_binary(section) do
+    if Placement.computer_id?(section),
+      do: "fermix settings reload #{section}",
+      else: "fermix settings reload"
+  end
+
+  defp reload_for(_details), do: "fermix settings reload"
 end

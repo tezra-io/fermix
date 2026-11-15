@@ -26,6 +26,7 @@ defmodule FermixCore.Application do
   alias FermixCore.ComputerHistory
   alias FermixCore.ComputerHistory.Supervisor, as: ComputerHistorySupervisor
   alias FermixCore.ComputerUse
+  alias FermixCore.ComputerUse.Seat, as: ComputerUseSeat
   alias FermixCore.ComputerUse.Supervisor, as: ComputerUseSupervisor
   alias FermixCore.Cues
   alias FermixCore.Cues.Supervisor, as: CuesSupervisor
@@ -36,6 +37,7 @@ defmodule FermixCore.Application do
   alias FermixCore.Home.Move
   alias FermixCore.Home.Return
   alias FermixCore.Home.Role
+  alias FermixCore.Home.ServerRestart
   alias FermixCore.Home.Snapshot.Scheduler, as: SnapshotScheduler
   alias FermixCore.HostFacts
   alias FermixCore.Jobs.RunnerSupervisor, as: JobRunnerSupervisor
@@ -47,7 +49,6 @@ defmodule FermixCore.Application do
   alias FermixCore.Management.Lifecycle, as: ManagementLifecycle
   alias FermixCore.Management.McpServers.DraftValues, as: McpDraftValues
   alias FermixCore.Management.Plugins.Discovery, as: ManagementPluginDiscovery
-  alias FermixCore.Management.Provision, as: ManagementProvision
   alias FermixCore.Meetings.Supervisor, as: MeetingsSupervisor
   alias FermixCore.Memory.ConversationStore
   alias FermixCore.Memory.Repo
@@ -98,8 +99,8 @@ defmodule FermixCore.Application do
   end
 
   defp start_profile(:app_engine) do
-    :ok = BootProfile.prepare(:app_engine)
-    start_supervision_tree()
+    :ok = BootProfile.prepare(:app_engine, ConfigStore.fermix_home())
+    start_tree_naming_retired_settings()
   end
 
   defp start_profile(:standalone_cli), do: cli_dispatch(:standalone_cli, BurritoArgs.argv())
@@ -118,7 +119,21 @@ defmodule FermixCore.Application do
   # plain release. `mix fermix.dev` sets the existing gates before starting
   # the application; only the immutable app-engine profile opens all daemon
   # surfaces here without going through the CLI.
-  defp start_profile(:source), do: start_supervision_tree()
+  defp start_profile(:source), do: start_tree_naming_retired_settings()
+
+  # An app engine and a source boot pass no `Fermix.CLI.main/1`, which names
+  # them for every process of a packaged binary, so their process says here,
+  # once, into the log file its tree attached, the retired settings the boot
+  # read in `config/runtime.exs` dropped from its files
+  # (`ConfigStore.say_retired_settings/0`). That read keeps them and does not
+  # say them: its only handler is the kernel's on stdout, which the app's
+  # launch agent sends nowhere. Saying them reads no file.
+  defp start_tree_naming_retired_settings do
+    with {:ok, pid} <- start_supervision_tree() do
+      :ok = ConfigStore.say_retired_settings()
+      {:ok, pid}
+    end
+  end
 
   # `run`: enable the endpoint server now (before OTP proceeds to start
   # fermix_web), build the supervision tree, then spawn `Fermix.CLI.Run`
@@ -159,7 +174,7 @@ defmodule FermixCore.Application do
   end
 
   defp run_daemon(profile, argv) do
-    :ok = BootProfile.prepare(profile)
+    :ok = BootProfile.prepare(profile, ConfigStore.fermix_home())
 
     with {:ok, pid} <- start_supervision_tree() do
       spawn(fn -> run_cli(argv) end)
@@ -290,10 +305,6 @@ defmodule FermixCore.Application do
         # add no restart intensity to the tree.
         CommandHostSupervisor,
         {Task.Supervisor, name: FermixCore.TaskSupervisor},
-        # The Always On provisioner's ledger locks, before anything that can
-        # write the ledger (a management call, a job, the desktop relay). It
-        # runs no writer's code, so nothing it serves can bring it down.
-        FermixCore.Home.Provision.Ledger.Lock,
         # Which files `home.status` reads cannot be read now, so each is
         # logged once a stretch however often the apps poll; in every role,
         # before anything that answers `home.status`.
@@ -369,6 +380,12 @@ defmodule FermixCore.Application do
         # reply that links them (M72). Before every process that dispatches a
         # tool; a restart forgets them, and a reply then carries its text alone.
         FermixCore.ReplyBlocks,
+        # The home's one door to Brave's place search (`PlaceSearch.Brave.Pacer`):
+        # its requests one at a time, paced by Brave's rate headers. Before every
+        # process that dispatches a tool; it holds only who waits and when the
+        # next may send, so a restart forgets that, and it raises on nothing its
+        # guarded callers hand it.
+        FermixCore.Tools.PlaceSearch.Brave.Pacer,
         AgentSupervisor,
         MainAgent,
         JobRunnerSupervisor,
@@ -404,8 +421,9 @@ defmodule FermixCore.Application do
         maybe_daemon_socket(),
         maybe_native_host(),
         maybe_realtime_supervisor(),
-        maybe_computer_use_supervisor(),
-        maybe_computer_history_supervisor(),
+        maybe_computer_use_supervisor(role),
+        maybe_screen_seat(role),
+        maybe_computer_history_supervisor(role),
         maybe_skill_curation_scheduler(),
         # Says where a scheduled job's or a cue's message came from on the
         # timeline rows written before `metadata.origin` existed, once most of
@@ -413,6 +431,41 @@ defmodule FermixCore.Application do
         # `:temporary`, so a crash restarts nothing after it; dark under `mix
         # test`, whose suites run their own pass on their own Repo.
         {OriginBackfill, enabled: @compiled_env != :test},
+        # What the move in hand counted (`Home.MoveProgress`), in memory, for
+        # the Always On summary. Late, so a crash restarts only the
+        # primary-only children after it, which the device a move runs on
+        # never starts; it raises on nothing its guarded callers hand it.
+        maybe_move_progress(),
+        # What the home knows live of its computers (M97 §3.2), primary-only.
+        # A crash restarts the snapshot scheduler and the cue tree, which
+        # re-read their state; its own is rebuilt as it starts, by asking each
+        # open session to say its facts again (`Home.Link`'s
+        # `announce_computers/1`), the records holding the last offers meanwhile.
+        FermixCore.Computers.Registry,
+        # The invocations the server waits on (M97 §6.1), primary-only: a
+        # crash loses only its waiters' routing, and they time out.
+        FermixCore.Computers.Calls,
+        # The trip placer (M89 D13 B), primary-only: places the stops a trip
+        # keeps waiting for a place search that could not run, when a Mac
+        # that offers places connects (told by the registry above), at
+        # Brave's reset and at boot. After the Repo, the pacer, the registry
+        # and the calls it reads; each run is a task of its own, and it
+        # raises on nothing it is sent, so it restarts nothing after it. Its
+        # runs stay dark under `mix test`.
+        {FermixCore.Trips.Placer, enabled: @compiled_env != :test},
+        # The trips index again at a day's turn (M89 D14), primary-only: within
+        # minutes of a local midnight that starts or ends a trip, the index goes
+        # again to the devices that pulled it, and once at its boot, so a
+        # restart of it never swallows a turn. After the Repo it reads; it
+        # serves no call, arms one timer and raises on nothing it is sent, so it
+        # restarts nothing after it. Dark under `mix test`, whose tests start
+        # their own with an injected clock and timer.
+        {FermixCore.Trips.DayTurn, enabled: @compiled_env != :test},
+        # The release table an Always On server's update chooses from (M97
+        # §3.4), primary-only and fetching only on an Always On server. It
+        # never raises on a fetch or a table: each fails into a sentence. Its
+        # timer stays dark under `mix test`.
+        {FermixCore.Home.ReleaseTable, release_table_opts()},
         # The primary's snapshots (M75 §8), before the cue tree so a crash of
         # either restarts nothing but the cue tree. Its timers stay dark under
         # `mix test`; tests start their own with an injected clock and timer.
@@ -560,19 +613,14 @@ defmodule FermixCore.Application do
       [
         ManagementLifecycle,
         ManagementDoctor,
-        # Before the job family and the socket: an Always On step a restart
-        # left with no job is kept as interrupted, once, and nothing written
-        # after it is taken for one (it starts no process).
-        %{
-          id: :provision_left_steps,
-          start: {ManagementProvision, :interrupt_at_boot, []},
-          restart: :temporary
-        },
         ManagementJobs,
         # Always On's steps (`home.act`), one at a time per engine, after the
         # job family they start and before the socket and the setup page that
         # ask for them.
         ManagementAlwaysOn,
+        # The server's restart a linked computer asks for (`home.restart`,
+        # M97 D28c), which waits out work in progress there first.
+        ServerRestart,
         # Beside the job family it serves: a workspace discovery is a job, and
         # what it found is republished on the plugin row rather than in the job.
         ManagementPluginDiscovery,
@@ -604,29 +652,62 @@ defmodule FermixCore.Application do
   end
 
   # Same gate as tool registration (`ComputerUse.ready?/0`): the session
-  # infrastructure boots only when computer use is enabled, the sidecar is
-  # installed, and OS permissions are granted. Off/unready (the default) starts
+  # infrastructure boots when computer use is enabled and the sidecar is
+  # installed; and on an engine that may drive a computer's screen or have its
+  # own driven by its server (M97 §6.4), which spawns no helper until asked.
+  # The second half is gated on the compile-time env, as the scheduler's is:
+  # `mix test` starts the tree it tests itself. Off (the default) starts
   # nothing — no OS-driver process is ever spawned.
-  defp maybe_computer_use_supervisor do
-    if ComputerUse.ready?() do
+  defp maybe_computer_use_supervisor(role) do
+    if ComputerUse.ready?() or (@compiled_env != :test and computer_screens?(role)) do
       [ComputerUseSupervisor]
     else
       []
     end
   end
 
-  # Computer History (MILESTONE_32 §6.3): the always-present, inert supervisor
-  # is present on macOS whenever the daemon boots, regardless of `enabled?()` —
-  # Retention must always run so a spool left behind by a disable still drains
-  # by the 48h horizon (inv. 16). Its work is tick-gated; the timer is disabled
-  # in `:test` (the scheduler precedent), never by omission. Off macOS the whole
-  # feature is unavailable, so the supervisor is absent (Decision 12).
-  defp maybe_computer_history_supervisor do
-    if ComputerHistory.macos?() do
+  defp computer_screens?(role),
+    do: ComputerUse.drives_computers?(role: role) or ComputerUse.driven?(role: role)
+
+  # This computer's screen while its server drives it (M97 §6.4,
+  # `ComputerUse.Seat`): only on a linked computer with the helper installed,
+  # and never under `mix test`, which starts its own with a driver double.
+  defp maybe_screen_seat(role) do
+    if @compiled_env != :test and ComputerUse.driven?(role: role),
+      do: [ComputerUseSeat],
+      else: []
+  end
+
+  # Computer History (MILESTONE_32 §6.3; M97 §8.1): the inert supervisor of both
+  # halves, offered on every home and on a computer only where this system has
+  # a recorder. Its own start decides whether anything here uses it (a
+  # recorder, or a home where a computer can contribute or that holds notes)
+  # and otherwise answers `:ignore`, so a plain Linux install runs none of it
+  # and creates no store. Where it runs, Retention must always run so a spool
+  # left behind by a disable still drains by the 48h horizon (inv. 16). Its
+  # work is tick-gated; the timer is disabled in `:test` (the scheduler
+  # precedent), never by omission. Its machine store failing to open never
+  # stops it or a child after it: the store stays up saying why and the
+  # recorder stays off (`ComputerHistory.Spool`). Public (@doc false) with the
+  # platform's fact injectable, so the gating test names the system it means.
+  @doc false
+  @spec maybe_computer_history_supervisor(Role.role(), boolean()) :: [Role.child()]
+  def maybe_computer_history_supervisor(role, recorder? \\ ComputerHistory.recorder?())
+      when role in [:primary, :device, :candidate] and is_boolean(recorder?) do
+    if role == :primary or recorder? do
       [{ComputerHistorySupervisor, timer_enabled: @compiled_env != :test}]
     else
       []
     end
+  end
+
+  # The move's count (Always On pane §3.13, P4): child-ABSENT under `mix
+  # test`, so no suite's summary reads another suite's move; a test starts a
+  # store of its own. A candidate's tree leaves it out too (`Role.children/2`
+  # keeps only `candidate_keeps/0`). Public (@doc false) for the gating test.
+  @doc false
+  def maybe_move_progress(compiled_env \\ @compiled_env) do
+    if compiled_env != :test, do: [FermixCore.Home.MoveProgress], else: []
   end
 
   # Skill-curation clock (MILESTONE_26_SKILL_CURATION §6.1): child-ABSENT when
@@ -735,6 +816,15 @@ defmodule FermixCore.Application do
     ConfigStore.fermix_home()
     |> AlwaysOn.facts(Role.recorded(), HostFacts.current())
     |> AlwaysOn.server?()
+  end
+
+  # An Always On server reads the release table its update chooses from; any
+  # other engine reads none (M97 §3.4).
+  defp release_table_opts do
+    [
+      fetching: always_on_server?(),
+      timer_enabled: @compiled_env != :test
+    ]
   end
 
   defp jobs_scheduler_opts do

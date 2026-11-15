@@ -26,18 +26,33 @@ defmodule FermixCore.Tools.JobsTest do
     # Minimal stand-in for FermixCore.Agents.SkillRegistry. The job tools only
     # ever call `SkillRegistry.load(registry, name)`, so a map-backed GenServer
     # keeps the binding tests hermetic — no fixture skill files, no
-    # default-skill seeding. A bare name loads a skill with no allowlist;
-    # `{name, allowed_tools}` loads one with that list, and `{name, %{...}}`
-    # one with those fields.
+    # default-skill seeding. Each loads an operator `AgentDefinition`, as the
+    # real registry's would: a bare name one with no allowlist,
+    # `{name, allowed_tools}` one with that list, `{name, %{...}}` one with
+    # those fields, and `{name, %AgentDefinition{}}` that definition.
     use GenServer
 
     def start_link(skills) when is_list(skills) do
       GenServer.start_link(__MODULE__, Map.new(skills, &definition/1))
     end
 
-    defp definition(name) when is_binary(name), do: {name, %{name: name}}
-    defp definition({name, %{} = fields}), do: {name, Map.put(fields, :name, name)}
-    defp definition({name, tools}), do: {name, %{name: name, allowed_tools: tools}}
+    defp definition(name) when is_binary(name), do: {name, operator_skill(name)}
+    defp definition({name, %AgentDefinition{} = skill}), do: {name, %{skill | name: name}}
+    defp definition({name, %{} = fields}), do: {name, struct!(operator_skill(name), fields)}
+
+    defp definition({name, tools}) when is_list(tools),
+      do: {name, %{operator_skill(name) | allowed_tools: tools}}
+
+    defp operator_skill(name) do
+      {:ok, skill} =
+        AgentDefinition.new(%{
+          "name" => name,
+          "description" => "Use #{name}.",
+          "system_prompt" => "Be #{name}."
+        })
+
+      AgentDefinition.with_trust(skill, :operator)
+    end
 
     @impl true
     def init(skills), do: {:ok, skills}
@@ -1064,6 +1079,84 @@ defmodule FermixCore.Tools.JobsTest do
              )
 
     assert Jason.decode!(updated)["note"] =~ "web_serch"
+  end
+
+  # The job's own list names tools it needs, so a skill whose trust or classes
+  # leave one off its runs is not bound, by either tool, and the refusal says
+  # which and why (`Jobs.Runner.unusable_tools/3`, which a run fails on). A
+  # plugin skill's runs are at guest yet keep its own plugin's tools.
+  test "a skill that leaves a tool of the job's own list off its runs is not bound", %{
+    context: context
+  } do
+    registry = :"skill_bind_reach_#{System.unique_integer([:positive])}"
+    start_supervised!({CapabilityRegistry, name: registry})
+
+    :ok =
+      CapabilityRegistry.register(registry, %{
+        Capability.new(%{
+          name: "acme_search",
+          description: "Searches Acme.",
+          parameters: %{"type" => "object"},
+          kind: :builtin,
+          executor: stand_in_executor(),
+          policy_class: :external_api
+        })
+        | metadata: %{plugin_owned?: true, plugin: "acme"}
+      })
+
+    :ok =
+      CapabilityRegistry.register(registry, %{
+        Capability.new(%{
+          name: "owner_diary",
+          description: "Reads the owner's diary.",
+          parameters: %{"type" => "object"},
+          kind: :builtin,
+          executor: stand_in_executor(),
+          policy_class: :read_only
+        })
+        | owner_only?: true
+      })
+
+    acme_plugin =
+      "acme-plugin"
+      |> skill_definition(%{}, :guest)
+      |> AgentDefinition.with_plugin("acme")
+
+    {:ok, skill_registry} =
+      SkillRegistryStub.start_link([{"acme-plugin", acme_plugin}, "weather"])
+
+    context = Map.merge(context, %{skill_registry: skill_registry, capability_registry: registry})
+    refusal = "can't use owner_diary: its skill acme-plugin comes from a plugin"
+
+    assert {:ok, refused} =
+             ScheduleJob.execute(
+               %{
+                 "name" => "Diary Digest",
+                 "schedule" => "every 15 minutes",
+                 "task" => "Report.",
+                 "allowed_tools" => ["acme_search", "owner_diary"],
+                 "skill_name" => "acme-plugin"
+               },
+               context
+             )
+
+    assert refused.success == false
+    assert refused.error =~ refusal
+
+    own_plugin_job = seed_job_with_tools(context, "Acme Digest", ["acme_search"], "acme-plugin")
+    diary_job = seed_job_with_tools(context, "Diary", ["owner_diary"], "weather")
+
+    assert {:ok, refused} =
+             UpdateJob.execute(%{"job_id" => diary_job, "skill_name" => "acme-plugin"}, context)
+
+    assert refused.success == false
+    assert refused.error =~ refusal
+
+    assert {:ok, %{skill_name: "weather"}} =
+             Repo.get_scheduled_job(diary_job, server: context.memory_repo)
+
+    assert {:ok, %{skill_name: "acme-plugin"}} =
+             Repo.get_scheduled_job(own_plugin_job, server: context.memory_repo)
   end
 
   test "update_job exposes delivery and skill_name parameters" do

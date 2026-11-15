@@ -21,6 +21,19 @@ defmodule FermixChannels.Home.EnrollmentResponder do
   any other event the enrollment kind may not send, `unsupported_event`
   (`Mobile.Peers`).
 
+  **A computer's join** (M97 §3.1, §7.5): on a window opened for a computer,
+  the session's first event is `join_request`. The responder derives the
+  six digits from the handshake under the computer label
+  (`Mobile.Noise.sas/2`) and hands the request to the window
+  (`Enrollment.join/5`), then holds the session, answering `ping`, with no
+  deadline of its own: the window's half hour bounds it. The window tells it
+  how the owner decided: `{:join_approved, payload}` is answered
+  `join_approved` and closes `1000` `joined`; `{:join_denied, reason}` is
+  answered `join_denied {reason}` and closes `4003` `join <reason>`. A
+  `join_request` on a candidate's window, or an `enroll_request` on a
+  computer's, is answered `error` `enrollment_purpose` and closed `4003`
+  `enrollment purpose` before the window is burned.
+
   Options: `:enrollment` (the window's server), `:schedule` (a 2-arity timer,
   for tests), and the session's `:load_gateway_keypair` and `:peer`.
   """
@@ -31,9 +44,15 @@ defmodule FermixChannels.Home.EnrollmentResponder do
 
   alias FermixChannels.Home.Enrollment
   alias FermixChannels.Home.ResponderWire
+  alias FermixChannels.Mobile.Noise
 
   @deadline_ms 10_000
+  # Which window each first event is for.
+  @purposes %{"enroll_request" => :candidate, "join_request" => :computer}
   @refusals %{
+    purpose:
+      {"enrollment_purpose", "enrollment purpose",
+       "That code is for something else; open the one this needs."},
     used: {"enrollment_used", "enrollment used", "That enrollment code was already used."},
     expired:
       {"enrollment_expired", "enrollment expired",
@@ -59,7 +78,16 @@ defmodule FermixChannels.Home.EnrollmentResponder do
              keypair_opts(keypair, secret),
              :enrollment
            ) do
-      state = %{server: server, wire: session, remote: remote, timer: nil, proven?: false}
+      state = %{
+        server: server,
+        purpose: Enrollment.purpose(server),
+        wire: session,
+        remote: remote,
+        timer: nil,
+        proven?: false,
+        joining?: false
+      }
+
       {:push, [reply], arm(state, opts)}
     else
       :none -> {:stop, :no_window, {1002, "mobile protocol error"}, %{timer: nil}}
@@ -72,9 +100,21 @@ defmodule FermixChannels.Home.EnrollmentResponder do
   @impl true
   def handle_frame(ciphertext, state) do
     case ResponderWire.read(state.wire, ciphertext) do
-      {:ok, event, wire} -> proven(%{state | wire: wire}, &handle_event(event, &1))
+      {:ok, event, wire} -> for_window(event, %{state | wire: wire})
       {:refused, type, wire} -> proven(%{state | wire: wire}, &unsupported(type, &1))
       {:error, reason} -> {:stop, reason, {1002, "mobile protocol error"}, state}
+    end
+  end
+
+  # A first event for a window of the other purpose is refused before the
+  # window is burned: the code is the owner's, opened for something else.
+  defp for_window(%{type: type} = event, state) do
+    case Map.fetch(@purposes, type) do
+      {:ok, purpose} when purpose != state.purpose and not state.proven? ->
+        refuse(:purpose, state)
+
+      _same_or_other ->
+        proven(state, &handle_event(event, &1))
     end
   end
 
@@ -93,11 +133,17 @@ defmodule FermixChannels.Home.EnrollmentResponder do
   def handle_info({:enrollment_deadline, token}, %{timer: {_ref, token}} = state),
     do: {:stop, :enrollment_deadline, {1008, "mobile handshake deadline"}, state}
 
+  # How the owner decided on the computer this session holds.
+  def handle_info({:join_approved, %{"device_id" => id} = payload}, %{joining?: true} = state),
+    do: reply_and_stop("join_approved", payload, {:joined, id}, {1000, "joined"}, state)
+
+  def handle_info({:join_denied, reason}, %{joining?: true} = state), do: denied(reason, state)
+
   def handle_info(_message, state), do: {:ok, state}
 
   @impl true
   def terminate(_reason, %{timer: {ref, _token}}) do
-    _ = Process.cancel_timer(ref)
+    _ = if is_reference(ref), do: Process.cancel_timer(ref)
     :ok
   end
 
@@ -109,6 +155,9 @@ defmodule FermixChannels.Home.EnrollmentResponder do
 
   defp handle_event(%{type: "enroll_request", payload: request}, state) do
     case Enrollment.enroll(state.server, request, state.remote) do
+      {:error, :purpose} ->
+        refuse(:purpose, state)
+
       {:ok, %{candidate_id: id, primary_name: name}} ->
         reply_and_stop(
           "enroll_accepted",
@@ -123,6 +172,31 @@ defmodule FermixChannels.Home.EnrollmentResponder do
 
       {:error, reason} ->
         Logger.error("enrollment: the candidate was not recorded: #{inspect(reason)}")
+        {:stop, reason, {1011, "enrollment failed"}, state}
+    end
+  end
+
+  defp handle_event(%{type: "join_request"}, %{joining?: true} = state),
+    do: unsupported("join_request", state)
+
+  defp handle_event(%{type: "join_request", payload: request}, state) do
+    sas = Noise.sas(state.wire.noise, :computer)
+
+    case Enrollment.join(state.server, request, state.remote, sas, self()) do
+      {:ok, :awaiting_approval} ->
+        {:ok, %{disarm(state) | joining?: true}}
+
+      {:ok, {:approved, %{"device_id" => id} = payload}} ->
+        reply_and_stop("join_approved", payload, {:joined, id}, {1000, "joined"}, state)
+
+      {:error, {:denied, reason}} ->
+        denied(reason, state)
+
+      {:error, reason} when reason in [:used, :expired, :purpose] ->
+        refuse(reason, state)
+
+      {:error, reason} ->
+        Logger.error("enrollment: the computer's join was not taken: #{inspect(reason)}")
         {:stop, reason, {1011, "enrollment failed"}, state}
     end
   end
@@ -155,6 +229,26 @@ defmodule FermixChannels.Home.EnrollmentResponder do
         {:stop, why, {4003, close}, state}
     end
   end
+
+  defp denied(reason, state) do
+    Logger.info("enrollment: a computer's join ended: #{reason}")
+
+    reply_and_stop(
+      "join_denied",
+      %{"reason" => reason},
+      {:join, reason},
+      {4003, "join #{reason}"},
+      state
+    )
+  end
+
+  # The window bounds a wait for the owner; the first event's deadline is over.
+  defp disarm(%{timer: {ref, _token}} = state) do
+    _ = if is_reference(ref), do: Process.cancel_timer(ref)
+    %{state | timer: nil}
+  end
+
+  defp disarm(state), do: state
 
   defp reply_and_stop(type, payload, why, close, state) do
     case ResponderWire.write(state.wire, type, payload) do

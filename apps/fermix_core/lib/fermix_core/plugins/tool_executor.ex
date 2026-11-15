@@ -292,6 +292,11 @@ defmodule FermixCore.Plugins.ToolExecutor do
   # a hop would carry the plugin's `Authorization` header to a host nothing
   # screened. The 3xx flows to the interpreter, which names the status and the
   # Location so the refusal is diagnosable.
+  #
+  # The call goes over the shared pool, which drops a connection idle past 15 s.
+  # A pool of the call's own keeps one forever, and the first call after a quiet
+  # spell writes into a socket the server has closed, then waits out the receive
+  # timeout. `http_request/4` does the same.
   defp issue_declarative(request, cred, attempt, context, plugin_name, auth_profile, tool) do
     req_options = Map.get(context, :plugin_req_options, [])
 
@@ -307,7 +312,7 @@ defmodule FermixCore.Plugins.ToolExecutor do
       )
       |> maybe_merge(:json, request.body)
       |> Req.merge(req_options)
-      |> Egress.attach(:direct)
+      |> Egress.attach(:pooled)
 
     case Req.request(req) do
       {:ok, %{status: 401}} when attempt == 0 ->
@@ -558,29 +563,32 @@ defmodule FermixCore.Plugins.ToolExecutor do
   defp dispatch("gmail_send_message", args, context, plugin_name, auth_profile, token, tool) do
     base = base_opts(context, plugin_name, auth_profile, tool)
 
-    request(:post, "#{@gmail_base}/users/me/messages/send", token, [
-      {:json, %{"raw" => gmail_raw(args)}} | base
-    ])
+    with_gmail_raw(args, fn raw ->
+      request(:post, "#{@gmail_base}/users/me/messages/send", token, [
+        {:json, %{"raw" => raw}} | base
+      ])
+    end)
   end
 
   defp dispatch("gmail_reply_to_thread", args, context, plugin_name, auth_profile, token, tool) do
     base = base_opts(context, plugin_name, auth_profile, tool)
 
-    body =
-      drop_blank_values(%{"raw" => gmail_raw(args), "threadId" => Map.get(args, "thread_id")})
-
-    request(:post, "#{@gmail_base}/users/me/messages/send", token, [{:json, body} | base])
+    with_gmail_raw(args, fn raw ->
+      body = drop_blank_values(%{"raw" => raw, "threadId" => Map.get(args, "thread_id")})
+      request(:post, "#{@gmail_base}/users/me/messages/send", token, [{:json, body} | base])
+    end)
   end
 
   defp dispatch("gmail_create_draft", args, context, plugin_name, auth_profile, token, tool) do
     base = base_opts(context, plugin_name, auth_profile, tool)
 
-    message =
-      drop_blank_values(%{"raw" => gmail_raw(args), "threadId" => Map.get(args, "thread_id")})
+    with_gmail_raw(args, fn raw ->
+      message = drop_blank_values(%{"raw" => raw, "threadId" => Map.get(args, "thread_id")})
 
-    request(:post, "#{@gmail_base}/users/me/drafts", token, [
-      {:json, %{"message" => message}} | base
-    ])
+      request(:post, "#{@gmail_base}/users/me/drafts", token, [
+        {:json, %{"message" => message}} | base
+      ])
+    end)
   end
 
   defp dispatch("gmail_get_message", args, context, plugin_name, auth_profile, token, tool) do
@@ -624,7 +632,7 @@ defmodule FermixCore.Plugins.ToolExecutor do
       |> maybe_merge(:json, Keyword.get(opts, :json))
       |> maybe_put_body(Keyword.get(opts, :body), Keyword.get(opts, :content_type))
 
-    case request |> Req.merge(req_options) |> Egress.attach(:direct) |> Req.request() do
+    case request |> Req.merge(req_options) |> Egress.attach(:pooled) |> Req.request() do
       {:ok, %{status: status, body: body}} when status in 200..299 ->
         {:ok, body}
 
@@ -668,24 +676,58 @@ defmodule FermixCore.Plugins.ToolExecutor do
     [context: context, plugin_name: plugin_name, auth_profile: auth_profile, tool: tool]
   end
 
+  # Send, reply and draft build one RFC-2822 message. A header value that
+  # spans lines would add headers of its own (a Bcc the arguments shown to
+  # the owner never named), so it is refused before any request is made.
+  defp with_gmail_raw(args, send_raw) do
+    case gmail_raw(args) do
+      {:ok, raw} -> send_raw.(raw)
+      {:error, reason} -> {:ok, Tool.error(reason)}
+    end
+  end
+
+  @gmail_outgoing_headers [
+    {"to", "To"},
+    {"cc", "Cc"},
+    {"bcc", "Bcc"},
+    {"subject", "Subject"},
+    {"in_reply_to", "In-Reply-To"},
+    {"references", "References"}
+  ]
+
   # Build a base64url RFC-2822 message shared by send / reply / draft.
   defp gmail_raw(args) do
-    headers =
-      [
-        {"To", Map.get(args, "to")},
-        {"Cc", Map.get(args, "cc")},
-        {"Bcc", Map.get(args, "bcc")},
-        {"Subject", Map.get(args, "subject")},
-        {"In-Reply-To", Map.get(args, "in_reply_to")},
-        {"References", Map.get(args, "references")}
-      ]
-      |> Enum.reject(fn {_name, value} -> value in [nil, ""] end)
-      |> Enum.map(fn {name, value} -> "#{name}: #{value}" end)
+    with {:ok, headers} <- outgoing_header_lines(args) do
+      raw =
+        (headers ++ ["Content-Type: text/plain; charset=utf-8", "", Map.get(args, "body", "")])
+        |> Enum.join("\r\n")
+        |> Base.url_encode64(padding: false)
 
-    (headers ++ ["Content-Type: text/plain; charset=utf-8", "", Map.get(args, "body", "")])
-    |> Enum.join("\r\n")
-    |> Base.url_encode64(padding: false)
+      {:ok, raw}
+    end
   end
+
+  defp outgoing_header_lines(args) do
+    Enum.reduce_while(@gmail_outgoing_headers, {:ok, []}, fn {key, name}, {:ok, lines} ->
+      case outgoing_header_line(key, name, Map.get(args, key)) do
+        :absent -> {:cont, {:ok, lines}}
+        {:ok, line} -> {:cont, {:ok, lines ++ [line]}}
+        {:error, _reason} = error -> {:halt, error}
+      end
+    end)
+  end
+
+  defp outgoing_header_line(_key, _name, value) when value in [nil, ""], do: :absent
+
+  defp outgoing_header_line(key, name, value) when is_binary(value) do
+    if String.contains?(value, ["\r", "\n", <<0>>]) do
+      {:error, "#{key} must be one line: a line break in a mail header adds headers of its own"}
+    else
+      {:ok, "#{name}: #{value}"}
+    end
+  end
+
+  defp outgoing_header_line(key, _name, _value), do: {:error, "#{key} must be a string"}
 
   defp gmail_summaries(messages, token, base) do
     messages

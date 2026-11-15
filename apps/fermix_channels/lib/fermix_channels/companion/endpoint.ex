@@ -39,7 +39,6 @@ defmodule FermixChannels.Companion.Endpoint do
   alias FermixCore.SocketPeer
 
   @max_clients 4
-  @accept_idle_ms 50
   @accept_retry_ms 1_000
   @socket_name "companion.sock"
 
@@ -84,9 +83,8 @@ defmodule FermixChannels.Companion.Endpoint do
 
     case bind(path) do
       {:ok, listen_socket} ->
-        Process.send_after(self(), :accept, 0)
         Logger.info("companion socket listening on #{path}")
-        {:ok, build_state(listen_socket, path, opts)}
+        {:ok, build_state(listen_socket, path, opts), {:continue, :accept}}
 
       {:error, reason} ->
         Logger.error(refusal(reason, path))
@@ -98,27 +96,22 @@ defmodule FermixChannels.Companion.Endpoint do
   def handle_call(:connection_count, _from, state), do: {:reply, connections(state), state}
   def handle_call(:connection_opts, _from, state), do: {:reply, state.connection_opts, state}
 
+  # Connections are accepted by a linked process of the endpoint's own, so the
+  # endpoint answers a call the moment it comes (a desktop's tunnel on the
+  # primary asks for `connection_opts/1` on every channel it opens), never once
+  # an accept's wait ends. The acceptor serves each connection with the state
+  # init left, which nothing changes after.
   @impl true
-  def handle_info(:accept, state) do
-    case :gen_tcp.accept(state.listen_socket, @accept_idle_ms) do
-      {:ok, socket} ->
-        serve_admitted(socket, state)
-        send(self(), :accept)
-        {:noreply, state}
-
-      {:error, :timeout} ->
-        send(self(), :accept)
-        {:noreply, state}
-
-      {:error, :closed} ->
-        {:stop, :normal, state}
-
-      {:error, reason} ->
-        Logger.warning("companion socket accept error: #{inspect(reason)}")
-        Process.send_after(self(), :accept, @accept_retry_ms)
-        {:noreply, state}
-    end
+  def handle_continue(:accept, state) do
+    acceptor = spawn_link(fn -> accept_loop(state) end)
+    {:noreply, Map.put(state, :acceptor, acceptor)}
   end
+
+  # The acceptor ends once the listening socket closed, or by a crash; the
+  # endpoint ends with it.
+  @impl true
+  def handle_info({:EXIT, acceptor, reason}, %{acceptor: acceptor} = state),
+    do: {:stop, reason, state}
 
   @impl true
   def terminate(_reason, state) do
@@ -238,6 +231,22 @@ defmodule FermixChannels.Companion.Endpoint do
   defp connections(state) do
     %{active: active} = DynamicSupervisor.count_children(state.connection_supervisor)
     active
+  end
+
+  defp accept_loop(state) do
+    case :gen_tcp.accept(state.listen_socket) do
+      {:ok, socket} ->
+        serve_admitted(socket, state)
+        accept_loop(state)
+
+      {:error, :closed} ->
+        :ok
+
+      {:error, reason} ->
+        Logger.warning("companion socket accept error: #{inspect(reason)}")
+        Process.sleep(@accept_retry_ms)
+        accept_loop(state)
+    end
   end
 
   # A command Fermix confines gets no answer here: no history, no turn, no

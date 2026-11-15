@@ -9,6 +9,7 @@ defmodule FermixChannels.Home.MoveKeepTest do
   alias FermixChannels.Home.MoveWorker
   alias FermixChannels.Mobile.DeviceStore
   alias FermixChannels.Test.HomeMove
+  alias FermixCore.Home.ComputerKey
   alias FermixCore.Home.DesktopLink
   alias FermixCore.Home.Epoch
   alias FermixCore.Home.Move
@@ -39,7 +40,7 @@ defmodule FermixChannels.Home.MoveKeepTest do
     assert {:ok, %{to: "north-box"}} = Moved.read(source)
     assert {:ok, %{role: :device}} = Role.configured(source)
     refute File.exists?(DesktopLink.path(source))
-    refute File.exists?(DesktopLink.key_path(source))
+    assert ComputerKey.read(source, store: :keyring) == {:error, {:missing, :keyring}}
     refute DesktopLink.linked?(%{role: :device}, source)
     assert :ok = Move.finish_at_boot(source, :device)
 

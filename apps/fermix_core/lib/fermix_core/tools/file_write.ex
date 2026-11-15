@@ -6,6 +6,9 @@ defmodule FermixCore.Tools.FileWrite do
   @behaviour FermixCore.Capabilities.Builtin.Tool
 
   alias FermixCore.Capabilities.Builtin.Tool
+  alias FermixCore.Computers.Capabilities.Files
+  alias FermixCore.Computers.Remote
+  alias FermixCore.Computers.ToolResult
   alias FermixCore.Sandbox
   alias FermixCore.Tools.Telemetry, as: ToolTelemetry
 
@@ -70,8 +73,40 @@ defmodule FermixCore.Tools.FileWrite do
   def category, do: :file
 
   @impl true
+  def computer_capability, do: Files
+
+  @impl true
   @spec execute(map(), Tool.context()) :: {:ok, Tool.tool_result()}
   def execute(args, context) when is_map(args) and is_map(context) do
+    if Remote.computer(context),
+      do: execute_on_computer(args, context),
+      else: execute_here(args, context)
+  end
+
+  @doc """
+  The write without its exec event, under the sandbox `context` names: what
+  `execute/2` runs on this machine and what a computer of the home runs for
+  its server (`Computers.Capabilities.Files`).
+  """
+  @spec perform(map(), map()) :: {:ok, Tool.tool_result()}
+  def perform(args, context) when is_map(args) and is_map(context), do: do_execute(args, context)
+
+  # Content above what the request carries inline rides as its part, on the
+  # bulk lane (M97 §6.4); the computer puts it back (`Files`).
+  defp execute_on_computer(%{"content" => content} = args, context)
+       when is_binary(content) and byte_size(content) > 0 do
+    if byte_size(content) > ToolResult.inline_bytes(),
+      do:
+        Remote.run(name(), Files, "file.write", Files.without_content(args), context,
+          part: content
+        ),
+      else: Remote.run(name(), Files, "file.write", args, context)
+  end
+
+  defp execute_on_computer(args, context),
+    do: Remote.run(name(), Files, "file.write", args, context)
+
+  defp execute_here(args, context) do
     start = System.monotonic_time(:millisecond)
     result = do_execute(args, context)
     duration = System.monotonic_time(:millisecond) - start

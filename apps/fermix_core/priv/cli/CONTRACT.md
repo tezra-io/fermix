@@ -55,10 +55,34 @@ never parses the sentence.
 | `fermix home snapshots passphrase --passphrase-file PATH --json` | the management `home.snapshots.passphrase` result |
 | `fermix home candidates --json` | the candidates result |
 | `fermix always-on --json` | the Always On screen |
-| `fermix always-on ACTION --json [--provider ID] [--type T --location L] [--stdin] [--recovery-passphrase-file PATH] [--yes] [--wait]` | the Always On step result |
+| `fermix always-on ACTION --json [--provider ID] [--type T --location L] [--stdin] [--recovery-passphrase-file PATH] [--sas DIGITS] [--yes] [--wait]` | the Always On step result |
 
 `fermix service run` is the systemd vendor unit's launch entry point. It is not
 a machine-mode verb: it becomes the daemon and never returns an envelope.
+
+`fermix computer join` joins this computer to a Fermix that already runs,
+with the code Add a computer opened there. It is not a machine-mode verb
+either: it runs with Fermix stopped here and no engine tree, writes this
+computer's key to the secret store and its join to the home, and prints one
+sentence. The code is read from stdin, never from argv: on a terminal it is
+asked for with echo off (the prompt on stderr), and from a pipe or a file it
+is the first line. It is asked for only once the verb found Fermix stopped.
+The next start of Fermix dials the server and shows six digits, and the
+owner adds this computer on the server only if the same digits show there.
+A link to a server is a home of its own, but not one whose server no longer
+knows this computer (the owner removed it there, or the server was restored
+from before it joined), which the link records once Fermix has run here
+since: once the code is one this computer can join with, it first lets go
+of that link here as a disconnect does (its key, what the server may use
+here, the link), then joins.
+Exit `0` done; `1` refused, with one sentence on stderr after `fermix
+computer join: ` (Fermix runs here; no code read; a home of its own; a code
+that is not a computer's or expired; a secret store that cannot keep the
+key; a link it could not let go of). A refusal of the home or the code
+leaves everything as it was. A letting go that fails part-way leaves the
+link, and the next join finishes letting go of it; a refusal after the link
+went (the secret store, say) leaves this computer the primary of its own
+home, with no link. `2` a usage error, a code given as an argument among them.
 
 ## The action result
 
@@ -199,7 +223,7 @@ the primary and runs only in the device role. It refuses while the engine runs
 from that home. It answers with the marker as written:
 
 ```json
-{"epoch": 4, "moved_at": "2026-10-27T09:30:00Z", "to": "hetzner fermix-home 48151623"}
+{"epoch": 4, "moved_at": "2026-10-27T09:30:00Z", "to": "fermix-home 48151623"}
 ```
 
 - `epoch` — integer. The home's primary epoch when it moved.
@@ -211,9 +235,8 @@ Golden: `home_mark_moved/ok.json`.
 
 ## The home result
 
-`fermix home status --json` (in a build with Always On; a release build
-refuses `always_on_unavailable`, *Always On* below) answers with the record
-the management method `home.status` answers (`priv/management/PROTOCOL.md`), whether or not Fermix
+`fermix home status --json` answers with the record the management method
+`home.status` answers (`priv/management/PROTOCOL.md`), whether or not Fermix
 runs: from the engine over its control socket when it runs, and from the
 home's own files when it does not (the role its settings configure, a device
 when it carries the moved marker, the epoch, the marker, the snapshot section
@@ -227,17 +250,23 @@ its enrollment stands).
 | `moved` | object, null | `to`, `moved_at`, `epoch`: the moved marker, or null. |
 | `primary` | object, null | In the device role after a move, the primary this desktop reaches: `name` (string, null), `connected` (boolean), `since` (string, null while not connected), `epoch` (integer, null; the highest primary epoch this desktop has seen) and `sentence` (string). Null on any other engine, and while Fermix is stopped. |
 | `desktops` | array | On the primary, each desktop that holds a session to it: `device_id`, `name`, `connected` (boolean) and `since` (string, null while not connected). Empty on any other engine, and while Fermix is stopped. |
+| `computers` | array | On the primary, each computer of the home: `device_id`, `name`, `platform` (`macos`, `linux`, or null before it said), `engine_version` (null before it said), `standing` (`current`, `behind`, `ahead` or `settings_only`: where that version stands against this server's by major.minor; null before it said one), `connected` (boolean), `since` and `last_seen` (strings or null), `path` (`direct` or `relay` while its session is up and it said, else null), `offers` (each `id`, `label` (the words it goes by, null for one this engine does not know), `state` `on`, `off` or `unavailable`, `sentence` and `detail`, each null when absent: what it offers in its session, nothing before its first offers, and while it is away what it last offered), `backups` (boolean) and `this_computer` (boolean: true only on the row of the linked computer whose forward the server answers, so false from this verb). Empty on any other engine and while Fermix is stopped. Optional: a client reads it absent from an older engine. |
 | `snapshots` | object | The snapshots result below. |
-| `enrollment` | object, null | On the primary, the enrollment window opened since Fermix started: `state` (`open`, `used` or `expired`), `expires_at`, `kind` (`manual`, the code a person copies, or `provisioned`, the code inside a server Fermix created) and `candidate_id` (the candidate that enrolled with it, null until one did), never the code. Null when none was opened, in every other role, and while Fermix is stopped. |
+| `enrollment` | object, null | On the primary, the enrollment window opened since Fermix started: `state` (`open`, `used` or `expired`), `expires_at` and `candidate_id` (the candidate that enrolled with it, null until one did), never the code. A window opened for a computer that joins the home also carries `purpose` (`computer`), `joiner` (`name` and `platform`, never the six digits it shows, which the owner reads on it and types, while it waits for the owner and `state` is `awaiting_approval`; else null) and `joined` (`device_id` and `name` once the owner added it and `state` is `approved`; else null); its `state` is `denied` once the computer was not added. Null when none was opened, in every other role, and while Fermix is stopped. |
+| `join` | object | Only on a computer joining a home with a code: `phase` (`dialing`, `awaiting_approval` or `denied`), `server` (the server's name), `sas` (the six digits this computer shows, for the owner to type on the server; null until the server answered) and `sentence`. Absent on every other engine. |
 | `candidates` | array | On the primary, the candidate primaries it holds, each as the candidates result below draws it. Empty in every other role. |
 | `move` | object, null | The move this home started or, on a candidate, the one it waits for: `phase`, `candidate` (the name of the host it moves to; null on a candidate) and `sentence`. On the home that moves, `phase` is `requested`, `streaming`, `committing`, `committed` (restarting as a desktop), `done`, `aborting`, `undoing` (restarting as the primary) or `aborted`, `done` and `aborted` written only by the start after the restart; on a candidate, `enrolling`, `enrolled`, `receiving`, `staged`, `activating`, `expired` or `failed`. Null when there is none. |
 | `secrets_missing` | array | On a running primary, the ids (as `fermix setup` and `secret.set` take them) of the secret references in its settings that did not resolve on this host: each needs entering again. Empty in every other role, and while Fermix is stopped. The human output names them on a line of its own. |
 | `primary_home` | object, null | On a running linked desktop, the primary's own record (this table's fields, as the primary answers them), asked within 5 s; its recovery, enrollment, candidates and move are the server's. Null on any other engine, while it is missing, and while Fermix is stopped. |
 | `primary_missing` | string, null | On a running linked desktop whose primary is unreachable or did not answer within 5 s, the sentence that says why `primary_home` is missing. Null otherwise. |
-| `summary` | object | Where Always On stands, as every surface prints it: `key`, `state`, `sentence`, `action` (the action record, or null), `detail` and `notice`, as the management `home.status` answers it (`priv/management/PROTOCOL.md`, "The Always On summary"). With Fermix stopped it is worked out from the home's own files, so the link, the window and the server's own part read as absent. The human output leads with its sentence and, on a line of its own, its action and where to take it: `fermix always-on`, or the Fermix app on a home the app manages. |
+| `summary` | object | Where Always On stands, as every surface prints it: `key`, `state`, `sentence`, `action` (the action record, or null), `detail`, `notice`, `outcome` and `help` (the docs page for the screen), as the management `home.status` answers it (`priv/management/PROTOCOL.md`, "The Always On summary"). With Fermix stopped it is worked out from the home's own files, so the link, the window and the server's own part read as absent. The human output leads with its sentence and, on a line of its own, its action and where to take it: `fermix always-on`, or the Fermix app on a home the app manages. |
 | `disk` | object, null | On the primary, how full its disk is: `used` (a fraction from 0 to 1) and `nearly_full` (from 0.85). Null in every other role and when it cannot be read. |
 | `version` | string | This engine's version. |
-| `update_ceiling` | string, null | The Fermix version a server's nightly update installs: the oldest engine among the desktops this machine served as their primary in the last 30 days, so the home can always move back to one of them. Null when none was, or when it cannot be read. |
+| `home_format` | integer | The home format this engine reads and writes: it restores a home of this format or an older one, whichever Fermix wrote it, and refuses a newer one. Absent from an engine before home formats. |
+| `update_ceiling` | string, null | The release an Always On server's update may install: `update.eligible`. Null where `update` is null or names none. Every server's `fermix-update` reads it. |
+| `update` | object, null | On an Always On server whose Fermix runs, what its update may install from the release table fermix.ai serves: `running`, `eligible` (the newest release at or above it whose home a published app for each system whose computers keep backups reads, by the home formats the release table names; null when none or no table was read), `held` (`{version, waits_for, sentence}` for a newer release not eligible yet, or null), `ahead_of_apps` (boolean) and `table` (`{read_at, sentence}`). Null on every other engine, and from a stopped Fermix. |
+| `restart_hold` | object, null | What holds the engine's restart after an update: `reason` (`move` or `computer_work`), `count`, `wait_s` (0 to 600) and `sentence`. Null when nothing does. |
+| `webhooks` | array | On a running primary, what it serves on loopback that the internet must reach, each `kind` (`whatsapp` while the WhatsApp channel is on, then `cue` for each enabled webhook source with a URL), `ref` (the source's name; null for WhatsApp) and `port` (the web listener's, or the cue door's). Never a source's URL. Empty in every other role, and while Fermix is stopped. A linked desktop's `summary` prints the Tailscale Funnel mounts of its server's. |
 
 ## The snapshots result
 
@@ -284,9 +313,12 @@ once, and its row is never its keys:
 
 A refusal is `home_status_unavailable`.
 
-`fermix home enroll --code-file PATH [--snapshot-bucket B --snapshot-region R]`
+`fermix home enroll --code-file PATH [--snapshot-bucket B --snapshot-region R [--snapshot-instance-role]]`
 is not a machine-mode verb: it takes no `--json` and no running Fermix, and
-makes a fresh home a candidate. It exits `0` with one line
+makes a fresh home a candidate. `--snapshot-instance-role` (first boot's, when
+the server's infrastructure set the bucket) keeps that the bucket is signed
+with the server's instance role; the held candidate's `snapshots` still names
+the bucket and region alone. It exits `0` with one line
 on stdout once the home is a candidate and the code file is removed, `1` with
 one sentence on stderr when it refused, leaving the home and the code file as
 it found them, and `2` on a usage error. A home that holds a candidate which
@@ -307,7 +339,7 @@ management `home.act` (`priv/management/PROTOCOL.md`, "Acting on it").
 of the home result, alone. Golden: `always_on/status.json`.
 
 `fermix always-on ACTION --json` takes the one step `ACTION` names, the
-action's `id` with `-` for `_` (`create-server`, `move-now`, `own-server`, …),
+action's `id` with `-` for `_` (`own-server`, `move-now`, `restore-here`, …),
 and answers the step result:
 
 ```json
@@ -318,25 +350,33 @@ and answers the step result:
   with `--wait`, the screen once the step settled.
 - `result` — object or null. What the step answered beyond its screen: for
   `own-server`, `code` (the enrollment code, answered this once and never
-  again), `expires_at` and `command` (what to run on the server, which carries
-  no code); for `move-now` and `try-again`, `move_id`; for `learn-more` and
-  `open-console`, which send nothing, `url`; null for every other step.
+  again), `expires_at`, `command` (what to run on the server, which carries
+  no code), `sentence` (the engine's line for the code: the systems it takes
+  and until when it works, in the owner's zone) and `tailscale` (`label`,
+  `sentence`, `command` and `url`: the optional step that also joins the
+  server to the owner's tailnet); for `move-now` and `try-again`, `move_id`;
+  for `add-computer`, `code` (the code a new computer joins with, answered
+  this once) and `expires_at`; for `approve-computer`, `device_id` and
+  `name` (the computer as the home added it); for `restart-server` (on a
+  computer linked to its server, while the server's restart is required),
+  the server's answer: `when` (`now`, or `after_work` while it runs work on
+  a computer), `wait_s` (at most 600) and `sentence`, which the verb prints;
+  null for every other step, `update` among them, which sends nothing.
 
 Golden: `always_on/step.json`.
 
 Under `--json`, or with no terminal, the verb never prompts. A step needs what
-the action's `needs` lists, from flags only: `--stdin` the token (with
-`--provider ID` when the screen offers more than one provider),
-`--recovery-passphrase-file PATH` the recovery passphrase, `--type` with
-`--location` the size and place (both; with neither, the verb reads
-`home.provision.options` and sends its recommended row, or refuses
-`action_refused` with that answer's sentence when it recommends none). A need no flag gives is a usage error, exit `2`, naming the
-flag. A step whose `confirm` is not null needs `--yes`; without it the verb
-refuses `confirm_required`. A token or passphrase typed as an argument is a
-usage error. `--wait` follows the step while the screen's `outcome`, the
-engine's own word, says Always On moves it on by itself (`running`: a step's
-job, the server setting up, the move; `waiting`: a code for a server of the
-owner's own, waiting for it), for at most 45 minutes; a connection that closes
+the action's `needs` lists, from flags only: `--recovery-passphrase-file
+PATH` the recovery passphrase (a new one for `change-passphrase`, the backup
+settings' Change, and for the first `move-now`), and `--sas DIGITS` the six digits the
+computer that asks to join shows (`approve-computer`; they are no secret,
+and on a terminal the verb asks for them). A need no flag gives is a usage error, exit
+`2`, naming the flag. A step whose `confirm` is not null needs `--yes`;
+without it the verb refuses `confirm_required`. A passphrase typed as an
+argument is a usage error. `--wait` follows the step while the screen's
+`outcome`, the engine's own word, says Always On moves it on by itself
+(`running`: the server connecting, the move, a restore; `waiting`: a code for
+the owner's server, waiting for it), for at most 45 minutes; a connection that closes
 during the wait is the move restarting Fermix, followed for up to 90 seconds
 before `engine_stopped`. A waited step reports how it ended: a screen whose
 `outcome` is `failed` (the step ended on a problem) is `step_failed`, and a
@@ -354,17 +394,11 @@ not come back, "Fermix stopped for the move and has not started again. Start
 Fermix again to finish the move."; `confirm_required`; `changed`, whose `error`
 object also carries `summary`, the screen read again; `action_refused`, in the
 engine's words, or, for a step the screen does not offer, "Always On does not
-offer turn-on now. Run fermix always-on to see the steps it offers."; and
+offer restore-here now. Run fermix always-on to see the steps it offers."; and
 `home_status_unavailable`; and, for a waited step, `step_failed` ("That step
 ended on a problem: <the screen's sentence> Run fermix always-on to fix it.")
 and `step_unfinished` ("Always On is still at it after 45 minutes; fermix
 always-on shows where it stands."). Golden: `always_on/changed.json`.
-
-In a build without Always On (a release build, until it ships), every use of
-`fermix always-on`, and `fermix home status` (Always On's screen, *The home
-result*), refuses `always_on_unavailable`, exit `1` ("Always On is not in
-this release of Fermix yet."), before anything is read or sent; `fermix home
-snapshots` is as ever.
 
 `unconfirmed` (a linked desktop's Move now that the server had, whose answer
 was lost) is not a refusal: the move may have started. The verb prints the
@@ -387,7 +421,7 @@ sentence interpolates a fact, the example below is the golden's.
 - `foreign_unit` — Fermix did not write the service file at /home/operator/.config/systemd/user/fermix.service, so it was left alone. Remove or rename it if you want Fermix to manage this service.
 - `activation_timeout` — The background service was started but did not answer in time. Read what it said with journalctl --user -u fermix, then try again.
 - `health_unavailable` — The background service is running, but its web address did not answer, so the setup page is not reachable yet. Read what it said with journalctl --user -u fermix.
-- `foreign_distribution` — This Fermix was not installed from a Linux package, so there is no packaged background service for it to manage.
+- `foreign_distribution` — fermix service status reports only a Linux package's background service, and this Fermix was not installed from one. For the service fermix service install sets up here, see the service unit row of fermix doctor.
 - `service_unbound` — No home is bound to the background service yet. Run fermix service install to choose one.
 - `diagnostics_unavailable` — Fermix could not collect the diagnostic bundle. It said: collecting it took too long
 - `idle_restart_unavailable` — This engine cannot restart when idle yet. Restarting now interrupts any work in progress.
@@ -398,17 +432,16 @@ sentence interpolates a fact, the example below is the golden's.
 - `binding_write_failed` — Fermix could not record which home the background service runs from. It said: permission denied
 - `daemon_running` — Fermix is running from this home. Stop it, then try again.
 - `epoch_absent` — The home has no primary epoch: it has never started as the primary.
-- `already_moved` — This home already moved to hetzner cx22 on 2026-10-20 at epoch 3, and the first move stands.
+- `already_moved` — This home already moved to fermix-home on 2026-10-20 at epoch 3, and the first move stands.
 - `mark_moved_failed` — Fermix could not mark this home moved. It said: could not tell whether Fermix is running (timeout)
 - `engine_stopped` — Fermix is not running from this home, and this needs it. Start it, then try again.
 - `snapshots_refused` — Fermix did not do that. It said: Snapshots are off: set a recovery passphrase to turn them on.
 - `home_status_unavailable` — Fermix could not read this home's status. It said: The requested management method is not available. (method_not_found)
-- `action_refused` — Fermix did not take that step. It said: Hetzner does not accept this token, so paste a Read & Write API token from the Hetzner project you made for Fermix.
-- `confirm_required` — Create your server? Hetzner bills it by the hour until it is deleted. Pass --yes to accept it.
+- `action_refused` — Fermix did not take that step. It said: That is not the recovery passphrase you set.
+- `confirm_required` — Move Fermix to your server now? This computer serves nothing while the move runs. Pass --yes to accept it.
 - `changed` — Always On changed since this was shown, so look at it again.
-- `step_failed` — That step ended on a problem: Falkenstein has no CPX22 right now. Run fermix always-on to fix it.
+- `step_failed` — That step ended on a problem: Fermix cannot reach your server. Your messages wait until it is back. Run fermix always-on to fix it.
 - `step_unfinished` — Always On is still at it after 45 minutes; fermix always-on shows where it stands.
-- `always_on_unavailable` — Always On is not in this release of Fermix yet.
 
 A sentence ending in `It said:` carries the words of whatever refused —
 the service manager, the login manager, the filesystem. A client shows them and

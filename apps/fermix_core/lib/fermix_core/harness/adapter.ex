@@ -82,6 +82,14 @@ defmodule FermixCore.Harness.Adapter do
   """
   @callback resume_hint(row :: map()) :: String.t() | nil
 
+  @doc """
+  Whether a failed run's own words (its `result_text`, settled by
+  `Harness.Run`) say the vendor could not sign in (M98 D10). Exact phrases,
+  pinned per CLI version against captured fixtures; words that match none are
+  not a sign-in failure, so a reworded CLI goes quiet, never wrong.
+  """
+  @callback signed_out?(text :: String.t()) :: boolean()
+
   alias FermixCore.Sandbox
 
   @doc """

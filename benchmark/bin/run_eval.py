@@ -41,7 +41,7 @@ from evallib import companion, cue_drive, voice
 from evallib import config as cfgmod
 from evallib import driver, grade, judge, report
 from evallib.fixture_server import (FIXTURE_URL_PLACEHOLDER, FixtureServer,
-                                    ServerError, case_uses_fixture)
+                                    ServerError, case_uses_fixture, home_port)
 from evallib.opik import OpikClient, OpikError, parse_ts, valid_run_id
 from evallib.session_ids import sess
 from evallib.suites import (ALWAYS_STICKY_GATES, RISK_LEVELS, STICKY_GATE_KEYS,
@@ -247,7 +247,7 @@ def _sweeps_past_voice(args) -> bool:
     """A bare `--all` sweep without `--voice` leaves `drive: voice` cases out.
 
     A voice case spends a paid voice minute and runs only against an eval daemon
-    with Grok voice on, which no other tier starts (`make behavioral-isolated`
+    with voice on, which no other tier starts (`make behavioral-isolated`
     sweeps `--all` against a daemon started without realtime). Named with
     --suite, --scenario, --case or --tag, it is selected and, without `--voice`,
     skipped with a notice that leaves the run incomplete."""
@@ -264,18 +264,58 @@ def voice_cases_left_out(suites, args, profiles) -> int:
 
 
 def hold_out_unseeded(cfg, chosen) -> tuple[list, list]:
-    """Suites that `requires: [cues]` on an eval home seeded without --cues. They are
-    NOT EVALUATED, named and left out of the run, never driven and never failures:
-    the capability runner's rule for an unmet precondition, so a sweep over a home
-    without cues reports the gap instead of a suite of zeros."""
-    needing = [(suite, scns) for suite, scns in chosen if "cues" in suite.requires]
-    problem = cue_drive.home_problem(cfg.daemon.fermix_home) if needing else None
-    if problem is None:
-        return chosen, []
-    held = [(suite.name, case.id, problem)
-            for suite, scns in needing for scenario in scns for case in scenario.cases]
-    kept = [(suite, scns) for suite, scns in chosen if "cues" not in suite.requires]
+    """Cases whose `requires:` (their suite's, then their own) the eval home was not
+    seeded with (`cues`: --cues; `computers`: --computers; `coding_signed_out`:
+    --coding-signed-out). They are NOT EVALUATED, named and left out of the
+    run, never driven and never failures: the capability runner's rule for an unmet
+    precondition, so a sweep over an unseeded home reports the gap instead of a
+    suite of zeros. A case's sibling that needs no seed still runs."""
+    home = cfg.daemon.fermix_home
+    needs = {need for suite, scns in chosen for scenario in scns for case in scenario.cases
+             for need in case_requirements(suite, case)}
+    problems = {need: requirement_problem(need, home) for need in needs}
+    unmet = {need: why for need, why in problems.items() if why is not None}
+    kept, held = [], []
+    for suite, scns in chosen:
+        runs = []
+        for scenario in scns:
+            reasons = [(case, unmet_reason(suite, case, unmet)) for case in scenario.cases]
+            held.extend((suite.name, case.id, why) for case, why in reasons if why is not None)
+            cases = [case for case, why in reasons if why is None]
+            if cases:
+                runs.append(scenario if len(cases) == len(scenario.cases)
+                            else replace(scenario, cases=cases))
+        if runs:
+            kept.append((suite, runs))
     return kept, held
+
+
+def case_requirements(suite, case) -> tuple[str, ...]:
+    """What the eval home must be seeded with for `case`: its suite's `requires`,
+    then its own."""
+    return tuple(dict.fromkeys((*suite.requires, *case.requires)))
+
+
+def unmet_reason(suite, case, unmet: dict[str, str]) -> str | None:
+    """Why `case` cannot run on this home (the first unmet requirement), or None."""
+    return next((unmet[need] for need in case_requirements(suite, case) if need in unmet), None)
+
+
+def requirement_problem(need: str, home: str) -> str | None:
+    """Why `home` cannot run a case that requires `need`, or None."""
+    if need == "cues":
+        return cue_drive.home_problem(home)
+    if need == "computers":
+        marker = os.path.join(os.path.expanduser(home), "eval-fixtures", "computers.json")
+        return None if os.path.isfile(marker) else (
+            "the eval home was not seeded with --computers (seed_capability_home.py)")
+    if need == "coding_signed_out":
+        # seed_capability_home.CLAUDE_STUB: the stub `claude` capability-daemon.sh
+        # puts first on the daemon's PATH.
+        stub = os.path.join(os.path.expanduser(home), "eval-bin", "claude")
+        return None if os.path.isfile(stub) and os.access(stub, os.X_OK) else (
+            "the eval home was not seeded with --coding-signed-out (seed_capability_home.py)")
+    raise ValueError(f"unknown requirement {need!r}")
 
 
 def split_by_platform(chosen, platform: str) -> tuple[list, list]:
@@ -546,20 +586,20 @@ def voice_jobs_driven(jobs, args) -> bool:
 
 def voice_policy_error(jobs, args) -> str | None:
     """A voice case runs only against a disposable eval home, whatever its risk:
-    its call writes the eval home's chat, and its daemon has Grok voice on."""
+    its call writes the eval home's chat, and its daemon has voice on."""
     if not voice_jobs_driven(jobs, args):
         return None
     if not (getattr(args, "confirm_daemon_isolated", False) and args.confirm_isolated_env):
-        return ("drive: voice cases run only against the disposable Grok-voice eval daemon: "
+        return ("drive: voice cases run only against the disposable voice eval daemon: "
                 "pass --confirm-daemon-isolated and --confirm-isolated-env")
     return None
 
 
 def voice_precondition_error(fermix_home: str) -> str | None:
-    """The eval home has Grok voice on and its daemon answers on the voice socket.
+    """The eval home has voice on and its daemon answers on the voice socket.
 
     Read before anything is driven, so a daemon started with --no-realtime, or
-    without XAI_API_KEY (the realtime supervisor then never starts), fails the
+    without its engine's key (the realtime supervisor then never starts), fails the
     run once instead of every voice case as an unreachable socket."""
     home = os.path.realpath(os.path.expanduser(fermix_home))
     path = os.path.join(home, "config.toml")
@@ -579,8 +619,9 @@ def voice_precondition_error(fermix_home: str) -> str | None:
         probe.connect(sock)
     except OSError as exc:
         return (f"no voice socket answers at {sock} ({exc}): start the eval daemon with "
-                "realtime on (`mix fermix.dev`, never --no-realtime) and XAI_API_KEY in its "
-                "environment")
+                "realtime on (`mix fermix.dev`, never --no-realtime) and its engine's key in "
+                "its environment (XAI_API_KEY for xai_realtime, OPENAI_API_KEY for "
+                "openai_live)")
     finally:
         probe.close()
     return None
@@ -681,7 +722,8 @@ def _path_within(path: str, root: str) -> bool:
 def daemon_sandbox_error(
         fermix_home: str, require_isolated: bool, require_strict: bool) -> str | None:
     home = os.path.realpath(os.path.expanduser(fermix_home))
-    config_path = os.path.join(home, "config.toml")
+    # The sandbox is the machine's own setting, read from machine.toml only (M97 §4).
+    config_path = os.path.join(home, "machine.toml")
     try:
         with open(config_path, "rb") as handle:
             raw = tomllib.load(handle)
@@ -724,7 +766,7 @@ def daemon_sandbox_error(
 
 def _configured_workspace(fermix_home: str) -> str:
     home = os.path.realpath(os.path.expanduser(fermix_home))
-    with open(os.path.join(home, "config.toml"), "rb") as handle:
+    with open(os.path.join(home, "machine.toml"), "rb") as handle:
         raw = tomllib.load(handle)
     workspace_raw = raw.get("sandbox", {}).get(
         "workspace_root", os.path.join(home, "workspace"))
@@ -1328,9 +1370,13 @@ def run_voice_case(cfg, client, suite, scn, case, run_id, trial, judge_on):
     trace = dict(trace, output={"text": evidence.spoken()})
     budget = {"max_cost_usd": cfg.budgets.max_cost_usd,
               "max_duration_ms": cfg.budgets.max_duration_ms}
-    gates = grade.grade(trace, spans, dict(budget, **eff),
-                        elapsed_ms=evidence.elapsed_ms) + wire_gates
-    view = grade.TurnView.build(trace, spans, elapsed_ms=evidence.elapsed_ms)
+    # A call that handed Fermix no task has no token usage: its own voice
+    # accounting is what shows its trace whole.
+    require_tokens = not voice.accounted_without_tasks(trace)
+    gates = grade.grade(trace, spans, dict(budget, **eff), elapsed_ms=evidence.elapsed_ms,
+                        require_tokens=require_tokens) + wire_gates
+    view = grade.TurnView.build(trace, spans, elapsed_ms=evidence.elapsed_ms,
+                                require_tokens=require_tokens)
     _record_graded_turn(rec, cfg, trace, gates, view, None)
     evidence_incomplete = _view_incomplete(view)
     said = spoken_request.split("\n")           # one clip's fixture text per line
@@ -1344,7 +1390,7 @@ def run_voice_case(cfg, client, suite, scn, case, run_id, trial, judge_on):
     rubric = None if evidence_incomplete else _rubric_record(
         cfg, case, scn, run_id, trial, judge_on, voice.transcript(evidence, said),
         [_tool_evidence(view, 0), voice.judge_evidence(evidence)],
-        _candidate_routes_from_turns([rec]), turn_records=[rec],
+        voice.call_routes(trace) + _candidate_routes_from_turns([rec]), turn_records=[rec],
         candidate_session=evidence.call_id(), extra_facts=facts)
     negative_failed = bool(failed_gates([rec], NEGATIVE_GATES))
     gate_ok = all(gate.passed for gate in gates) and not negative_failed
@@ -1932,7 +1978,7 @@ def _build_parser() -> argparse.ArgumentParser:
                     help="include operator-assisted cases (you send a Telegram message when prompted); "
                          "without this flag such cases are skipped with a notice")
     ap.add_argument("--voice", action="store_true",
-                    help="include drive: voice cases: each opens one paid Grok voice call on the "
+                    help="include drive: voice cases: each opens one paid voice call on the "
                          "eval daemon's realtime.sock; without this flag a named voice case is "
                          "skipped with a notice and a bare --all leaves voice cases out")
     ap.add_argument("--dangerous", action="store_true",
@@ -2031,7 +2077,7 @@ def _print_dry_run(chosen, profiles, judge_on: bool, args,
                      if case.needs_voice and voice_on)
     if voice_jobs:
         # Validated, not started: a dry run opens no call and spends nothing.
-        print(f"  voice: {voice_jobs} case trial(s) would each open one paid Grok voice call "
+        print(f"  voice: {voice_jobs} case trial(s) would each open one paid voice call "
               f"on <FERMIX_HOME>/{voice.SOCKET_NAME}")
     fixture_jobs = sum(1 for _suite, _scenario, case, _trial in jobs
                        if case_uses_fixture(case))
@@ -2463,7 +2509,7 @@ def _run_selected(cfg, args, chosen, profiles, judge_on: bool,
     run_id = new_run_id()
     started = now_utc()
     try:
-        fixtures = _start_fixture_server(jobs)
+        fixtures = _start_fixture_server(jobs, cfg.daemon.fermix_home)
     except ServerError as exc:
         # A precondition, and the one failure mode that would otherwise reach
         # every selected case as a connection refused that reads as the model.
@@ -2482,18 +2528,23 @@ def _run_selected(cfg, args, chosen, profiles, judge_on: bool,
         skipped_required, aborted, platform_skips)
 
 
-def _start_fixture_server(jobs) -> FixtureServer | None:
-    """Start the fixture server if and only if a selected case addresses it.
+def _start_fixture_server(jobs, home: str) -> FixtureServer | None:
+    """Start the fixture server if and only if a selected case addresses it, on
+    the port `home`'s fixture manifest names (the origin its daemon's web_fetch
+    reads), or an ephemeral one for a home with none (fixture_server.home_port).
 
     Before anything is driven: a run whose pages cannot be served must fail on
     the server, not case by case on a connection refused that reads as the model
     failing to open a page."""
     if not any(case_uses_fixture(case) for _suite, _scenario, case, _trial in jobs):
         return None
+    wanted = home_port(home)
     fixtures = FixtureServer(FIXTURE_PAGES_DIR)
-    port = fixtures.start()
-    print(f"fixture server: 127.0.0.1:{port} "
-          f"({len(fixtures.documents)} document(s), one token per case attempt)")
+    port = fixtures.start(wanted)
+    reach = ("the home's fixture port: web_fetch and browser" if wanted
+             else "ephemeral: browser only")
+    print(f"fixture server: 127.0.0.1:{port} ({reach}; "
+          f"{len(fixtures.documents)} document(s), one token per case attempt)")
     return fixtures
 
 
@@ -2570,7 +2621,7 @@ def main(argv=None, host: str | None = None) -> int:
     left_out = voice_cases_left_out(suites, args, profiles)
     if left_out:
         print(f"note: --all leaves out {left_out} drive: voice case(s) (each spends a paid "
-              "voice minute against the Grok-voice eval daemon); name them with --suite and "
+              "voice minute against the voice eval daemon); name them with --suite and "
               "pass --voice")
     selection_error = _selection_error(args, suites, chosen, profiles)
     if selection_error:

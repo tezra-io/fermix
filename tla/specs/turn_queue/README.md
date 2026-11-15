@@ -44,7 +44,7 @@ the checks that show a property needs it):
   fires `{:failed, _}` (`queue.ex:920-928`).
 - `TurnsShareQueueFate`: turn tasks run under a `Task.Supervisor` that
   `QueueSupervisor` (`:one_for_all`) terminates before it restarts the Queue
-  (`queue_supervisor.ex:46-51`, `application.ex:160`).
+  (`queue_supervisor.ex:46-51`, `application.ex:212`).
 - `CrashClosesUserMessage`: a crashed turn's `:DOWN` writes the stopped marker
   before the next message starts (`queue.ex:879`, `:893-899`).
 - `StopSparesClaimedTurn`: a stop leaves a turn that has claimed its outcome
@@ -164,7 +164,7 @@ watch was added to the model).
 
 - The LLM and tools (one "loop" step), streaming drafts, and typing.
 - The access gate's parked confirmation. `run_message_loop` hands AgentLoop
-  the owner-inbox closure and the Live call id (`turn_runner.ex:606`,
+  the owner-inbox closure and the Live call id (`turn_runner.ex:610`,
   `:608`). A parked call is a held tool result inside the one loop step, and
   the owner's confirm later runs it on a task outside the Queue, not as a
   new turn.
@@ -189,7 +189,7 @@ watch was added to the model).
 - What a turn does with its attachments before its loop (M67).
   `run_message_loop` composes their manifest into the user text that
   `persist_user_message` stores and, on the owner's chat turn, first saves
-  them to the workspace (`with_attachments`, `turn_runner.ex:479`). These are
+  them to the workspace (`with_attachments`, `turn_runner.ex:482`). These are
   file writes inside the turn's own steps, before its user message is
   persisted, and move no Queue state: a stop or crash during them is one at
   the turn's start, with nothing of the turn in history yet.
@@ -209,6 +209,14 @@ watch was added to the model).
   never reaches the Queue. A turn the Mac's connection carries after it pulled
   the lists' index is stamped `draws_lists`, which `run_message_loop` reads
   for the list line it appends at the turn's start, with no Queue state.
+- A Mac's Messages carried for its server (M97 §6.4): `application.ex`
+  registers `IMessage.ComputerHelper` as core's iMessage health provider
+  before it starts any child, and starts `IMessage.Bridge` after
+  `DeviceSupervisor`, on a linked Mac with the helper installed and nowhere
+  else. The bridge runs the helper and the watch that answers the server's
+  invocations; it makes no turn on the Mac and never reaches the Queue. The
+  server's turns from those messages enter the server's Queue as any
+  channel's do.
 - Consumers other than `Acp.Peer`. `Companion.Turns`, the settlement owner of
   the companion socket's turns and the phone's alike, watches the Queue it
   handed each turn to and answers the turn the Peer's way, with one
@@ -241,7 +249,7 @@ counterexample, run `make -C tla check SPECS=turn_queue` and open
     while the new Queue's turn ran, and nobody could stop it.
 - **Fix:** `FermixChannels.Gateway.QueueSupervisor` (`queue_supervisor.ex`)
   runs `{Task.Supervisor, name: FermixChannels.Gateway.TurnTasks}` and the
-  Queue, in that order, `:one_for_all`; `application.ex:160` starts it in the
+  Queue, in that order, `:one_for_all`; `application.ex:212` starts it in the
   Queue's slot. `:task_supervisor` is a required Queue option
   (`queue.ex:199`), so no Queue runs turns under a supervisor that outlives
   it. When the Queue dies, the supervisor terminates the task supervisor, and
@@ -257,7 +265,7 @@ counterexample, run `make -C tla check SPECS=turn_queue` and open
 - **Check:** 10 (6 states).
 - **Counterexample:** the reply is delivered (`deliver_final`, `queue.ex:547`).
   `/stop` then arrives before `runner.commit` persists it (`:551` →
-  `turn_runner.ex:159`).
+  `turn_runner.ex:162`).
 - **Code:**
   - `stop_active_turn` kills the task and writes the stopped marker
     (`queue.ex:1101-1106`, `:1151-1164`).
@@ -282,7 +290,7 @@ counterexample, run `make -C tla check SPECS=turn_queue` and open
 - **Counterexample:** the reply is delivered, then `/stop` arrives before the
   task claims its result.
 - **Code:** `commit/4` runs auto-compaction synchronously (`queue.ex:551` →
-  `turn_runner.ex:196`). The claim happens only after that returns
+  `turn_runner.ex:199`). The claim happens only after that returns
   (`finish_turn`, `queue.ex:519`), so the window also covers post-delivery
   auto-compaction: seconds to tens of seconds when it runs. The kill aborts
   that compaction (safely: `replace_history` is one atomic call) and skips
@@ -507,3 +515,47 @@ counterexample, run `make -C tla check SPECS=turn_queue` and open
   exception crashes the turn; that would still hold for the turn's work, but
   no longer for delivering its outcome. Recommendation: accept the residual
   now and revisit if helper crashes show up in traces.
+
+## Re-read for the real-machine fixes (2026-11-12)
+
+`ae8ea336` staled the channels `application.ex` pin: the boot reads the
+engine's role once, says which transports it refuses only on the primary,
+and records that the channels tree has started (`started?/0`, a
+`:persistent_term` the home's link reads to tell a boot from a stopped
+rail). The children, their order and the strategy are as before, so
+`QueueSupervisor`, its `TurnTasks` and the Queue run as the spec says; the
+one cited `application.ex` line moved (`:212`).
+
+## Re-read for events drawn as cards (2026-11-13)
+
+`run_message_loop` now also reads `draws_events`, a stamp the Mac's connection
+(from companion 8) and a phone's session (from mobile 3) put on a turn, for the
+one line it appends at the turn's start beside the lists' line, with no Queue
+state. No claim, start, stop, result or answer the spec models changed, and the
+line references into `turn_runner.ex` moved with the code.
+
+## Re-read for Trips (M89 E2, 2026-11-13)
+
+`run_message_loop` now also reads the trips' lines (`Trips.Note.lines/3`, one read
+of the store) and the `draws_trips` stamp, and puts `trips_told` and `draws_trips`
+in the turn's context for the trip tools, beside the lists' line and stamp, with
+no Queue state. No claim, start, stop, result or answer the spec models changed,
+and the line references into `turn_runner.ex` moved with the code.
+
+## Re-read for the review's fixes (2026-11-13)
+
+`run_message_loop` now drops the conversation's records a previous turn did not take
+(`ReplyBlocks`, an in-memory holder, before any tool runs), so a reply draws only its
+own turn's cards and touches. It is one call into the holder with no Queue state; no
+claim, start, stop, result or answer the spec models changed, and the line references
+into `turn_runner.ex` moved with the code.
+
+## Re-read for the call's lists and trips (2026-11-14)
+
+`run_message_loop` now puts the call's mode in the turn's context
+(`voice_conversation`, nil off a call) and takes the lists' and trips' lines for
+the channel whose reply this is (`ChannelPresentation.channel_of/1`: the voice's on
+a private call's hand-off, the screen's on a call in the chat), `08e03f95`. It is a
+context key and a pure choice with no Queue state; no claim, start, stop, result
+or answer the spec models changed, and the line references into `turn_runner.ex`
+moved with the code.

@@ -4,7 +4,7 @@ defmodule FermixCore.Tools.PlaceSearch.HelperTest do
   Makefile builds it there, so this module compiles to nothing elsewhere.
 
   The fixture requests need no network: the self-check, and every request the
-  helper refuses before it searches, each with its usage exit. The one live
+  helper refuses before it searches or geocodes, each with its usage exit. The one live
   search is tagged `mapkit_live` and excluded by default; run it on a Mac with
   `mix test --only mapkit_live`, where it calls Apple Maps for real.
   """
@@ -19,6 +19,7 @@ defmodule FermixCore.Tools.PlaceSearch.HelperTest do
     @live_bound_ms 30_000
     @suwanee {34.0550, -84.0657}
     @soho {40.7234, -74.0004}
+    @sintra {38.8029, -9.3817}
 
     test "the build made the helper, and it self-checks with no network" do
       assert {"fermix-maps: ok\n", 0} = System.cmd(helper!(), ["--check"])
@@ -52,7 +53,12 @@ defmodule FermixCore.Tools.PlaceSearch.HelperTest do
             ~s({"query": "coffee", "anchor": {"kind": "coordinates", "latitude": 91, "longitude": 2, "radius_meters": 5}}),
             ~s({"query": "coffee", "anchor": {"kind": "coordinates", "latitude": true, "longitude": 2, "radius_meters": 5}}),
             ~s({"query": "coffee", "anchor": {"kind": "coordinates", "latitude": 1, "longitude": 2, "radius_meters": 0}}),
-            ~s({"query": "coffee", "anchor": {"kind": "coordinates", "latitude": 1, "longitude": 2, "radius_meters": 50001}})
+            ~s({"query": "coffee", "anchor": {"kind": "coordinates", "latitude": 1, "longitude": 2, "radius_meters": 50001}}),
+            ~s({"geocode": ""}),
+            ~s({"geocode": "  "}),
+            ~s({"geocode": 7}),
+            ~s({"geocode": "Sintra", "anchor": {"kind": "query_only"}}),
+            ~s({"geocode": "Sintra", "query": "coffee"})
           ] do
         assert {%{"error" => %{"message" => message}}, @usage} = run([], line <> "\n"),
                "the helper did not refuse #{line}"
@@ -61,7 +67,8 @@ defmodule FermixCore.Tools.PlaceSearch.HelperTest do
       end
     end
 
-    # Calls Apple Maps for real: the named area is geocoded once and searched.
+    # Calls Apple Maps for real: the named area is geocoded once and searched
+    # at least 25 km about it.
     @tag :mapkit_live
     test "a live search through the adapter yields M31 records with Apple's pages" do
       request = %{query: "mexican restaurants", anchor: {:location, "Suwanee, GA"}, count: 5}
@@ -74,7 +81,7 @@ defmodule FermixCore.Tools.PlaceSearch.HelperTest do
         assert place.source_url ==
                  "https://maps.apple.com/place?place-id=" <> place.apple_place_id
 
-        assert within_km?(place, @suwanee, 10), "#{place.name} is not in Suwanee"
+        assert within_km?(place, @suwanee, 25), "#{place.name} is not around Suwanee"
         assert [category] = place.categories
         assert category =~ ~r/\A[a-z]+(_[a-z]+)*\z/
         refute Map.has_key?(place, :distance)
@@ -94,6 +101,40 @@ defmodule FermixCore.Tools.PlaceSearch.HelperTest do
       for place <- places do
         assert within_km?(place, @soho, 3), "#{place.name} is not in SoHo"
       end
+    end
+
+    # A traveller's day around a town reaches past its centre: the geocoder's
+    # region for Sintra covers about 2 km of it, and the cape lies 10 km west,
+    # so a search inside that region alone found nothing.
+    @tag :mapkit_live
+    test "a live search near a town finds a landmark outside the town's centre" do
+      request = %{query: "Cabo da Roca", anchor: {:location, "Sintra, Portugal"}, count: 5}
+
+      assert {:ok, places, %{}} = AppleMaps.search(request, timeout_ms: @live_bound_ms)
+      cape = Enum.find(places, &(&1.name =~ ~r/\bcabo da roca\b/i))
+      assert cape, "no Cabo da Roca among #{inspect(Enum.map(places, & &1.name))}"
+      assert within_km?(cape, @sintra, 15), "#{cape.name} is not near Sintra"
+    end
+
+    # M89: a trip's near geocoded alone, the town made of the placemark's own
+    # fields and point, its region's radius only a scale.
+    @tag :mapkit_live
+    test "a live geocode of a town is the town, at the placemark's own point" do
+      assert {:ok, town, %{}} =
+               AppleMaps.geocode("Sintra, Lisbon, Portugal", timeout_ms: @live_bound_ms)
+
+      assert town.name =~ ~r/\ASintra\b/ and town.name =~ ~r/\bPortugal\z/
+      assert within_km?(%{location: town}, @sintra, 5), "#{inspect(town)} is not Sintra"
+      assert is_integer(town.radius_meters) and town.radius_meters >= 1
+    end
+
+    @tag :mapkit_live
+    test "a live geocode of a country alone is no town" do
+      assert {:ok, raw} = AppleMaps.raw_geocode("Portugal", timeout_ms: @live_bound_ms)
+      refute Map.has_key?(raw, "locality") or Map.has_key?(raw, "administrative_area")
+
+      assert {:error, "not_a_town: " <> _words, %{}} =
+               AppleMaps.geocode("Portugal", timeout_ms: @live_bound_ms)
     end
 
     defp within_km?(%{location: %{latitude: lat, longitude: lng}}, {center_lat, center_lng}, km) do

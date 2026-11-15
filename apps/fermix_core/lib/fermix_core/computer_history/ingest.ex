@@ -5,7 +5,7 @@ defmodule FermixCore.ComputerHistory.Ingest do
   fixed pipeline before it touches disk:
 
       default-deny allowlist  ▸  private gate + URL normalization  ▸  title
-        normalization  ▸  secure-role suppression  ▸  secret scrubber  ▸
+        normalization  ▸  secure-text suppression  ▸  secret scrubber  ▸
         injection-scan tagging  ▸  consecutive-repeat collapse  ▸  batched write
 
   **Default-deny (§14 inv. 11):** consent is **per app**. An event whose bundle id
@@ -70,8 +70,8 @@ defmodule FermixCore.ComputerHistory.Ingest do
 
   alias FermixCore.ComputerHistory.Config
   alias FermixCore.ComputerHistory.Scrubber
+  alias FermixCore.ComputerHistory.Spool
   alias FermixCore.ComputerHistory.UrlNormalizer
-  alias FermixCore.Memory.Repo
   alias FermixCore.Prompt.InjectionScan
 
   # Every free-form string column is scrubbed — titles and labels carry secrets
@@ -82,9 +82,14 @@ defmodule FermixCore.ComputerHistory.Ingest do
   # and hosts are not natural-language and are excluded.
   @scan_columns [:window_title, :page_title, :field_label, :text]
 
-  # AX secure roles whose text is suppressed regardless — defense in depth
-  # behind the capturer's own secure-role suppression (§13.1).
-  @secure_roles ["AXSecureTextField"]
+  # Defense in depth behind the recorder's own rules (§13.1), which compux decides
+  # on facts no frame carries: a Mac password field's subrole, a terminal
+  # emulator's bundle id or pseudo-terminal, a GTK 4 version. A frame the helper
+  # marked `content_withheld` keeps no text, whatever came with it, and so does a
+  # field whose role says it holds a secret: a role spelled `AXSecureTextField`,
+  # and on Linux a password field and a terminal, whose prompts' passwords no role
+  # marks (M97 stage 4).
+  @secure_roles ["AXSecureTextField", "password text", "terminal"]
 
   # The §8.4 event kinds that are metadata about the machine, not about an app,
   # and so legitimately carry no bundle id. This list is the single source of
@@ -165,40 +170,41 @@ defmodule FermixCore.ComputerHistory.Ingest do
   private window, `:state` — a navigation whose private-window verdict this gate
   does not recognize, `:url` — a navigation address that is not a usable http(s)
   page). They stay distinct because they are three different operator problems and
-  one total would hide which. `opts`: `:repo`, `:apps` (each defaults to the
+  one total would hide which. `opts`: `:spool` (this machine's store,
+  `ComputerHistory.Spool`), `:apps` (each defaults to the
   configured value) and `:now` (a `DateTime`, defaults to `DateTime.utc_now/0`) for
   hermetic testing.
   """
   @spec ingest([map()], keyword()) :: {:ok, stats()} | {:error, term()}
   def ingest(events, opts \\ []) when is_list(events) do
-    repo = Keyword.get(opts, :repo, Repo)
-    horizon = pause_horizon(repo)
+    spool = Keyword.get(opts, :spool, Spool)
+    horizon = pause_horizon(spool)
     now_ms = opts |> Keyword.get_lazy(:now, &DateTime.utc_now/0) |> DateTime.to_unix(:millisecond)
 
     {paused, unpaused} = Enum.split_with(events, &paused?(&1, horizon, now_ms))
-    write_unpaused(unpaused, length(paused), repo, opts)
+    write_unpaused(unpaused, length(paused), spool, opts)
   end
 
-  # Every event paused: nothing to write, so no Repo transaction at all.
-  defp write_unpaused([], paused_count, _repo, _opts),
+  # Every event paused: nothing to write, so no store transaction at all.
+  defp write_unpaused([], paused_count, _spool, _opts),
     do: {:ok, %{written: 0, dropped: paused_count, collapsed: 0, refused: no_refusals()}}
 
   # `dropped` counts the paused events too, beside the allowlist's.
-  defp write_unpaused(events, paused_count, repo, opts) do
-    case write_batch(events, repo, opts) do
+  defp write_unpaused(events, paused_count, spool, opts) do
+    case write_batch(events, spool, opts) do
       {:ok, stats} -> {:ok, %{stats | dropped: stats.dropped + paused_count}}
       {:error, _reason} = error -> error
     end
   end
 
-  defp write_batch(events, repo, opts) do
+  defp write_batch(events, spool, opts) do
     apps = Keyword.get_lazy(opts, :apps, &Config.apps/0)
 
     {allowed, denied} = Enum.split_with(events, &allowed?(&1, apps))
     {admitted, refused} = admit(allowed)
     {processed, collapsed} = admitted |> Enum.map(&process/1) |> collapse_title_frames()
 
-    case Repo.computer_history_insert_events(processed, server: repo) do
+    case Spool.insert_events(processed, server: spool) do
       {:ok, written} ->
         {:ok,
          %{
@@ -239,8 +245,8 @@ defmodule FermixCore.ComputerHistory.Ingest do
   # frame `ts`, the capturer's gap rows; the column is NOT NULL).
   defp paused?(_no_integer_ts, {:until, _until_ms}, _now_ms), do: true
 
-  defp pause_horizon(repo) do
-    case Repo.computer_history_ensure_state(server: repo) do
+  defp pause_horizon(spool) do
+    case Spool.state(server: spool) do
       {:ok, %{pause_until: until}} when is_binary(until) ->
         parse_horizon(until)
 
@@ -457,6 +463,8 @@ defmodule FermixCore.ComputerHistory.Ingest do
   defp repeated_title?(_event, _previous), do: false
 
   defp title_identity(event), do: {Map.get(event, :bundle_id), Map.get(event, :window_title)}
+
+  defp suppress_secure_text(%{content_withheld: true} = event), do: Map.put(event, :text, nil)
 
   defp suppress_secure_text(%{role: role} = event) when role in @secure_roles,
     do: Map.put(event, :text, nil)

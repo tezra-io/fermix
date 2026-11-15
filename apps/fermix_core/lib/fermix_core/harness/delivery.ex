@@ -40,6 +40,7 @@ defmodule FermixCore.Harness.Delivery do
   alias FermixCore.Harness.Adapters.CodexExec
   alias FermixCore.Harness.Artifacts
   alias FermixCore.Harness.Continuation
+  alias FermixCore.Harness.SignIn
   alias FermixCore.Harness.VendorConfig
   alias FermixCore.Jobs.Registry, as: JobsRegistry
   alias FermixCore.Memory.ConversationStore
@@ -141,11 +142,14 @@ defmodule FermixCore.Harness.Delivery do
   @doc """
   Composes the terminal message for `row`. `result_text` is the run's harvested
   text — the deliverable for a completed run, the vendor's own error message for a
-  failed one (`nil` when the run produced neither). Pure and golden-tested.
+  failed one (`nil` when the run produced neither). Pure and golden-tested. A run
+  that failed to sign in carries, after the vendor's words, the sentence naming
+  the agent and this machine (`Harness.SignIn`, M98 D10): `opts[:machine]` names
+  the machine, else that sentence reads it off this host.
   """
-  @spec compose(map(), String.t() | nil) :: String.t()
-  def compose(row, result_text) when is_map(row) do
-    [header_line(row), body(row, result_text), VendorConfig.note(row), cap_note(row)]
+  @spec compose(map(), String.t() | nil, keyword()) :: String.t()
+  def compose(row, result_text, opts \\ []) when is_map(row) and is_list(opts) do
+    [header_line(row), body(row, result_text, opts), VendorConfig.note(row), cap_note(row)]
     |> Enum.reject(&(&1 == ""))
     |> Enum.join("\n")
   end
@@ -290,7 +294,7 @@ defmodule FermixCore.Harness.Delivery do
   # --- One bounded send ---------------------------------------------------
 
   defp deliver_to_channel(row, opts) do
-    text = compose(row, result_text_for(row))
+    text = compose(row, result_text_for(row), opts)
     timeout_ms = Keyword.get(opts, :timeout_ms, deliver_timeout_ms())
 
     result =
@@ -425,11 +429,11 @@ defmodule FermixCore.Harness.Delivery do
   # carries the vendor status/diff summary (persisted as `diagnostics_tail`), the
   # task URL, and a `codex cloud diff` hint — never a "resume" line (no exec-resume
   # applies) and never a `result.txt` body.
-  defp body(%{vendor: "codex_cloud"} = row, _result_text), do: cloud_body(row)
+  defp body(%{vendor: "codex_cloud"} = row, _result_text, _opts), do: cloud_body(row)
 
-  defp body(%{status: "completed"} = _row, result_text), do: completed_body(result_text)
+  defp body(%{status: "completed"} = _row, result_text, _opts), do: completed_body(result_text)
 
-  defp body(row, result_text) when is_map(row), do: failed_body(row, result_text)
+  defp body(row, result_text, opts) when is_map(row), do: failed_body(row, result_text, opts)
 
   defp completed_body(nil), do: ""
   defp completed_body(text) when is_binary(text), do: bound_text(text)
@@ -452,9 +456,10 @@ defmodule FermixCore.Harness.Delivery do
   # exit_1" tells the owner nothing, and the row's stderr tail repeats it beside
   # noise such as Codex's "Reading additional input from stdin..." (2026-11-03).
   # Both stay on the ledger row for `get_coding_run`; without the vendor's words
-  # they are all there is, so the message carries them.
-  defp failed_body(row, result_text) do
-    [diagnosis_lines(row, result_text), resume_line(row)]
+  # they are all there is, so the message carries them. A run that failed to
+  # sign in adds Fermix's sentence after the vendor's words (M98 D10).
+  defp failed_body(row, result_text, opts) do
+    [diagnosis_lines(row, result_text), SignIn.run_note(row, opts), resume_line(row)]
     |> Enum.reject(&(&1 == ""))
     |> Enum.join("\n")
   end

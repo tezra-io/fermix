@@ -17,6 +17,8 @@ defmodule FermixCore.ComputerUse.SessionManager do
   require Logger
 
   alias FermixCore.Acp.Identity
+  alias FermixCore.Computers.Computer
+  alias FermixCore.Computers.Origin
   alias FermixCore.ComputerUse
   alias FermixCore.ComputerUse.CaptureHealth
   alias FermixCore.ComputerUse.Config
@@ -30,17 +32,43 @@ defmodule FermixCore.ComputerUse.SessionManager do
   session pid, or fails closed for an unattended host origin or a shared Buzz
   channel — also when a session is already running for the conversation.
   """
+  #
+  # `opts`' `:computer` is the computer whose screen the call drives (M97 §6.4,
+  # its driver `ComputerDriver`), absent for this machine's own. Such a call
+  # must also come from a turn the owner is in by every measure
+  # (`Computers.Origin`: no delegated worker, cue or scheduled run), and one
+  # conversation holds one screen at a time: a conversation that holds another
+  # machine's, and a screen another conversation holds, are refused by name.
   @spec ensure(Config.t(), map(), keyword()) :: {:ok, pid()} | {:error, term()}
   def ensure(%Config{} = config, context, opts \\ []) when is_map(context) do
     key = conversation_key(context)
+    computer = Keyword.get(opts, :computer)
 
     with :ok <- precheck_host_origin(config, origin(context)),
          :ok <- precheck_shared_channel(context),
+         :ok <- precheck_attended_turn(computer, context),
          :ok <- OperatorStop.check(key, Map.get(context, :session_id)) do
       case Registry.lookup(CuSupervisor.registry(), key) do
-        [{pid, _}] -> {:ok, pid}
+        [{pid, value}] -> same_screen(pid, value, {key, config, context, opts})
         [] -> start_session(key, config, context, opts)
       end
+    end
+  end
+
+  @doc """
+  Ends the session of `conversation_key` if it is still the one minted as
+  `session_id`: a computer let go of its screen (`ComputerDriver`), and a
+  session started since must not be ended for it.
+  """
+  @spec end_session(term(), String.t()) :: :ok
+  def end_session(conversation_key, session_id) when is_binary(session_id) do
+    with true <- registry_running?(),
+         [{pid, %{session_id: ^session_id}}] <-
+           Registry.lookup(CuSupervisor.registry(), conversation_key) do
+      _ = DynamicSupervisor.terminate_child(CuSupervisor.session_supervisor(), pid)
+      :ok
+    else
+      _ -> :ok
     end
   end
 
@@ -184,10 +212,12 @@ defmodule FermixCore.ComputerUse.SessionManager do
 
   defp start_session(key, config, context, opts) do
     origin = origin(context)
+    computer = Keyword.get(opts, :computer)
 
-    with :ok <- CaptureHealth.status(),
+    with :ok <- capture_health(computer),
+         :ok <- screen_free(key, computer),
          {:ok, driver} <- resolve_driver(opts) do
-      child = {Session, session_opts(key, config, context, origin, driver)}
+      child = {Session, session_opts(key, config, context, origin, driver) ++ remote(computer)}
 
       case DynamicSupervisor.start_child(CuSupervisor.session_supervisor(), child) do
         {:ok, pid} -> {:ok, pid}
@@ -243,6 +273,74 @@ defmodule FermixCore.ComputerUse.SessionManager do
   end
 
   defp default_driver, do: ComputerUse.driver_spec()
+
+  # This machine's capture breaker says nothing of a computer's helper.
+  defp capture_health(nil), do: CaptureHealth.status()
+  defp capture_health(%Computer{}), do: :ok
+
+  # What a session on a computer's screen carries: the computer, and the
+  # platform its helper was built for, which a binding it cannot carry is
+  # worded by.
+  defp remote(nil), do: []
+
+  defp remote(%Computer{} = computer) do
+    [
+      computer: %{device_id: computer.device_id, name: computer.name},
+      sidecar_target: {:ok, sidecar_target(computer.platform)}
+    ]
+  end
+
+  defp sidecar_target(:linux), do: "linux-x86_64"
+  defp sidecar_target(_macos_or_unknown), do: "macos-aarch64"
+
+  # A computer's screen is driven only from a turn the owner is in by every
+  # measure the computer checks again (`Computers.Origin`).
+  defp precheck_attended_turn(nil, _context), do: :ok
+
+  defp precheck_attended_turn(%Computer{}, context) do
+    origin = Origin.of(context)
+    if Origin.attended?(origin), do: :ok, else: {:error, {:host_start_refused, origin}}
+  end
+
+  # The conversation's session drives one screen. Turning to another ends it
+  # first, once no action is under way on it; while one is, the other screen
+  # is refused by the name of the one it holds.
+  defp same_screen(pid, value, {key, config, context, opts}) do
+    value = if is_map(value), do: value, else: %{}
+    wanted = Keyword.get(opts, :computer)
+
+    cond do
+      Map.get(value, :computer) == (wanted && wanted.device_id) ->
+        {:ok, pid}
+
+      Session.idle?(pid) ->
+        _ = DynamicSupervisor.terminate_child(CuSupervisor.session_supervisor(), pid)
+        start_session(key, config, context, opts)
+
+      true ->
+        {:error, {:screen_in_use, Map.get(value, :computer_name) || "this server"}}
+    end
+  catch
+    # The session ended between the lookup and the question: there is none now.
+    :exit, {reason, _call} when reason in [:noproc, :normal, :shutdown] ->
+      start_session(key, config, context, opts)
+  end
+
+  # Another conversation holds this computer's screen. This machine's own is
+  # arbitrated by its input seat (`InputOwner`) as it always was.
+  defp screen_free(_key, nil), do: :ok
+
+  defp screen_free(key, %Computer{device_id: device_id, name: name}) do
+    holders =
+      Registry.select(CuSupervisor.registry(), [
+        {{:"$1", :_, %{computer: device_id}}, [], [:"$1"]}
+      ])
+
+    case Enum.reject(holders, &(&1 == key)) do
+      [] -> :ok
+      [holder | _more] -> {:error, {:screen_held, name, holder}}
+    end
+  end
 
   # Fail closed by default: a turn must EXPLICITLY declare an attended origin
   # (`:interactive`/`:voice`) to start or drive a host session. Anything that never

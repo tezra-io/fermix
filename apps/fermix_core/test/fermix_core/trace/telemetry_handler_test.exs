@@ -11,6 +11,7 @@ defmodule FermixCore.Trace.TelemetryHandlerTest do
   alias FermixCore.Tools.Telemetry, as: ToolTelemetry
   alias FermixCore.Trace
   alias FermixCore.Trace.TelemetryHandler
+  alias FermixCore.Trips.Telemetry, as: TripTelemetry
 
   # The day Trace files under, handed in so a run across UTC midnight writes
   # and reads the same folder.
@@ -429,6 +430,144 @@ defmodule FermixCore.Trace.TelemetryHandlerTest do
     refute Map.has_key?(entry, "content")
   end
 
+  # M91: the accessory link's three events, sessionless points and the call's
+  # counters, each a row of its own; an event missing from
+  # `event_definitions/0` would be invisible with no error.
+  test "every accessory link event reaches the JSONL trace stream", %{dir: dir, server: server} do
+    alias FermixCore.Accessories.Telemetry, as: AccessoryTelemetry
+
+    id = String.duplicate("cd", 32)
+
+    AccessoryTelemetry.emit_attach(:attached, 900, %{
+      mode: :attach,
+      phase: :proving,
+      kind: "stackchan",
+      accessory_id: id,
+      accessory_refusal: nil
+    })
+
+    AccessoryTelemetry.emit_fault(:crc_mismatch, :receive, 1)
+
+    AccessoryTelemetry.emit_call_link("voice_live:9", %{mic_frames: 50, duration_ms: 1_000}, %{
+      endpoint: "accessory:" <> id,
+      engine: "openai_live",
+      source: :head_swipe,
+      reason: :end_request
+    })
+
+    sync(server)
+
+    rows =
+      dir
+      |> read_entries(:agent_event)
+      |> Enum.filter(&String.starts_with?(&1["event"] || "", "accessory_"))
+
+    assert Enum.map(rows, & &1["event"]) ==
+             Enum.map(AccessoryTelemetry.trace_event_definitions(), & &1.trace_event)
+
+    [attach, fault, call] = rows
+    assert attach["agent"] == "attached" and attach["endpoint"] == "accessory:" <> id
+    assert attach["phase"] == "proving"
+    assert fault["agent"] == "crc_mismatch" and fault["stage"] == "receive"
+    assert call["session_id"] == "voice_live:9" and call["mic_frames"] == 50
+  end
+
+  # M89: a trip's read and edit are agent events keyed on their component,
+  # counts and Fermix's own words only.
+  test "a trip read and a trip edit become trip_read and trip_edit agent_event rows", %{
+    dir: dir,
+    server: server
+  } do
+    context = %{session_id: "main-trips-1"}
+
+    TripTelemetry.emit_read(
+      context,
+      %{scope: :days, trips: 1, outcome: :ok, made_via: "chat", error_code: nil},
+      700
+    )
+
+    TripTelemetry.emit_edit(
+      context,
+      %{
+        trips: 1,
+        ops: 3,
+        lookups: 2,
+        placed: 1,
+        offered: 1,
+        not_found: 0,
+        not_looked_up: 0,
+        outcome: :refused,
+        made_via: "chat",
+        error_code: "title_taken",
+        backend: "apple_maps",
+        rate_limited: false,
+        stop_reason: :deadline,
+        stop_code: nil,
+        towns: 1,
+        towns_found: 1,
+        towns_not_found: 0,
+        towns_stop_reason: nil
+      },
+      2_500
+    )
+
+    # M89 D13 B: the trip placer's run bookends route the same way.
+    run = %{session_id: "trip_place:0123456789abcdef", trigger: :computer}
+    :ok = TripTelemetry.emit_place_start(run, %{waiting: 2, expired: 0, unresolved_towns: 0})
+
+    :ok =
+      TripTelemetry.emit_place_complete(
+        run,
+        %{
+          backend: "computer",
+          skipped: nil,
+          stop_reason: nil,
+          stop_code: nil,
+          placed: 2,
+          waiting: 0,
+          stopped_waiting: 0,
+          expired: 0,
+          superseded: 0,
+          lookups: 2,
+          trips: 1,
+          failed: 0,
+          towns: 0,
+          towns_found: 0,
+          towns_not_found: 0,
+          towns_stop_reason: nil
+        },
+        9_000
+      )
+
+    :ok = TripTelemetry.emit_place_error(run, "crashed", "RuntimeError", 40)
+
+    sync(server)
+
+    rows =
+      dir
+      |> read_entries(:agent_event)
+      |> Enum.filter(&String.starts_with?(&1["event"] || "", "trip_"))
+
+    assert Enum.map(rows, & &1["event"]) ==
+             Enum.map(TripTelemetry.trace_event_definitions(), & &1.trace_event)
+
+    [read, edit, started, completed, failed] = rows
+    assert read["agent"] == "trips" and read["scope"] == "days" and read["trips"] == 1
+    assert read["session_id"] == "main-trips-1"
+    assert edit["ops"] == 3 and edit["placed"] == 1 and edit["backend"] == "apple_maps"
+    assert edit["outcome"] == "refused" and edit["error_code"] == "title_taken"
+    assert edit["stop_reason"] == "deadline" and Map.has_key?(edit, "stop_code")
+
+    for row <- [started, completed, failed] do
+      assert row["agent"] == "trips" and row["session_id"] == "trip_place:0123456789abcdef"
+      assert row["trigger"] == "computer"
+    end
+
+    assert started["waiting"] == 2
+    assert completed["placed"] == 2 and completed["backend"] == "computer"
+    assert failed["error_code"] == "crashed" and failed["reason"] == "RuntimeError"
+  end
+
   test "an attachment ingest becomes an attachment_ingest agent_event row, never its bytes", %{
     dir: dir,
     server: server
@@ -842,6 +981,10 @@ defmodule FermixCore.Trace.TelemetryHandlerTest do
       },
       :call_stop
     )
+
+    phone = Map.put(meta, :endpoint, "phone:0d7f6a52")
+    LiveTelemetry.phone_detached(phone)
+    LiveTelemetry.phone_resumed(phone, 1_250)
 
     sync(server)
 

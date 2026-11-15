@@ -52,6 +52,8 @@ defmodule FermixCore.Capabilities.UntrustedContent do
   # The list tools whose result can show a row added after outside content,
   # framed (`Checklists.Render`): a read, and an edit's answer, which names the
   # rows it touched. Their taint is in what they returned (`outside_source/3`).
+  # The trip tools frame such a stop the same way (`Trips.Render`) and bring
+  # no source: a trip tool's answer is not outside content (M89 D9).
   @checklist_framing_modules [ChecklistRead, ChecklistEdit]
 
   @typedoc """

@@ -351,6 +351,312 @@ defmodule FermixOpik.AggregationTest do
     end
   end
 
+  describe "the owner's trips (M89)" do
+    test "the reporter subscribes to the read and the edit" do
+      assert [:fermix, :trip, :read] in FermixOpik.Reporter.events()
+      assert [:fermix, :trip, :edit] in FermixOpik.Reporter.events()
+    end
+
+    test "an edit nests as a point span under the turn with its lookups, and a refused read is errored" do
+      {_state, closed} =
+        run([
+          {[:fermix, :trip, :edit],
+           %{
+             duration_us: 4_000,
+             trips: 1,
+             ops: 6,
+             lookups: 3,
+             placed: 2,
+             offered: 1,
+             not_found: 0,
+             not_looked_up: 0
+           },
+           %{
+             component: "trips",
+             made_via: "chat",
+             outcome: :ok,
+             error_code: nil,
+             backend: "apple_maps",
+             rate_limited: false,
+             session_id: "main-1"
+           }},
+          {[:fermix, :trip, :read], %{duration_us: 600, trips: 0},
+           %{
+             component: "trips",
+             made_via: "chat",
+             outcome: :refused,
+             error_code: "no_trip",
+             scope: :days,
+             session_id: "main-1"
+           }},
+          {[:fermix, :provider, :call], %{duration_ms: 1_000},
+           %{provider: :openai, model: "gpt-5.5", status: :ok, session_id: "main-1"}},
+          {[:fermix, :agent, :message], %{iterations: 1, total_tokens: 10},
+           %{channel: :telegram, chat_id: "c1", sender: "u1", session_id: "main-1", agent: "main"}}
+        ])
+
+      assert [%{spans: spans}] = closed
+      wrapper = span_named(spans, "agent:main")
+      edit = span_named(spans, "trip_edit")
+      read = span_named(spans, "trip_read")
+
+      assert edit.parent_span_id == wrapper.id
+
+      assert edit.metadata == %{
+               trips: 1,
+               ops: 6,
+               lookups: 3,
+               placed: 2,
+               offered: 1,
+               not_found: 0,
+               not_looked_up: 0,
+               duration_us: 4_000,
+               made_via: "chat",
+               outcome: "ok",
+               backend: "apple_maps",
+               rate_limited: false
+             }
+
+      refute Map.has_key?(edit, :error_info)
+      assert read.metadata.scope == "days"
+      assert read.error_info == %{exception_type: "TripRefused", message: "no_trip"}
+    end
+
+    test "an edit whose lookups were stopped says why, with the place search's own code" do
+      {_state, closed} =
+        run([
+          {[:fermix, :trip, :edit],
+           %{
+             duration_us: 4_000,
+             trips: 1,
+             ops: 3,
+             lookups: 1,
+             placed: 0,
+             offered: 0,
+             not_found: 0,
+             not_looked_up: 2
+           },
+           %{
+             component: "trips",
+             made_via: "chat",
+             outcome: :ok,
+             error_code: nil,
+             backend: "brave",
+             rate_limited: false,
+             stop_reason: :plan_excludes_place_search,
+             stop_code: "OPTION_NOT_IN_PLAN",
+             session_id: "main-1"
+           }},
+          {[:fermix, :agent, :message], %{iterations: 1, total_tokens: 10},
+           %{channel: :telegram, chat_id: "c1", sender: "u1", session_id: "main-1", agent: "main"}}
+        ])
+
+      assert [%{spans: spans}] = closed
+      edit = span_named(spans, "trip_edit")
+
+      assert %{stop_reason: "plan_excludes_place_search", stop_code: "OPTION_NOT_IN_PLAN"} =
+               edit.metadata
+
+      refute Map.has_key?(edit, :error_info)
+    end
+
+    # M89: what an edit's towns did rides its span, and a placer run's close.
+    test "an edit's towns ride its span: geocodes, found, none, and what stopped them" do
+      {_state, closed} =
+        run([
+          {[:fermix, :trip, :edit],
+           %{
+             duration_us: 4_000,
+             trips: 1,
+             ops: 1,
+             lookups: 0,
+             placed: 0,
+             offered: 0,
+             not_found: 0,
+             not_looked_up: 0,
+             towns: 2,
+             towns_found: 1,
+             towns_not_found: 1
+           },
+           %{
+             component: "trips",
+             made_via: "chat",
+             outcome: :ok,
+             error_code: nil,
+             backend: "computer",
+             rate_limited: false,
+             towns_stop_reason: :computer_refused,
+             session_id: "main-1"
+           }},
+          {[:fermix, :agent, :message], %{iterations: 1, total_tokens: 10},
+           %{channel: :telegram, chat_id: "c1", sender: "u1", session_id: "main-1", agent: "main"}}
+        ])
+
+      assert [%{spans: spans}] = closed
+      edit = span_named(spans, "trip_edit")
+
+      assert %{
+               towns: 2,
+               towns_found: 1,
+               towns_not_found: 1,
+               towns_stop_reason: "computer_refused"
+             } =
+               edit.metadata
+    end
+
+    test "a placer run's close carries what its towns did" do
+      meta = %{component: "trips", session_id: "trip_place:fedcba9876543210", trigger: :boot}
+
+      {_state, closed} =
+        run([
+          {[:fermix, :trip_place, :run_start], %{waiting: 0, expired: 0, unresolved_towns: 3},
+           meta},
+          {[:fermix, :trip_place, :run_complete],
+           %{
+             duration_us: 9_000,
+             placed: 0,
+             waiting: 0,
+             stopped_waiting: 0,
+             expired: 0,
+             superseded: 0,
+             lookups: 0,
+             trips: 1,
+             failed: 0,
+             towns: 3,
+             towns_found: 1,
+             towns_not_found: 1
+           },
+           Map.merge(meta, %{
+             backend: "apple_maps",
+             skipped: nil,
+             stop_reason: nil,
+             stop_code: nil,
+             towns_stop_reason: :rate_limited
+           })}
+        ])
+
+      assert [%{trace: trace}] = closed
+
+      assert %{
+               unresolved_towns: 3,
+               towns: 3,
+               towns_found: 1,
+               towns_not_found: 1,
+               towns_stop_reason: "rate_limited"
+             } = trace.metadata
+    end
+
+    # M89 D13 B: placing the stops a trip keeps waiting is a run of its own,
+    # minted `trip_place:<hex>` by the engine: a root, its trip writes nested
+    # under it by the shared session id, closed with what it placed.
+    @place_session "trip_place:0123456789abcdef"
+
+    test "the reporter subscribes to every trip_place event" do
+      for run <- [:run_start, :run_complete, :run_error] do
+        assert [:fermix, :trip_place, run] in FermixOpik.Reporter.events(),
+               "#{run} is not subscribed, so the run is invisible to Opik"
+      end
+    end
+
+    test "a placer run is one root nesting its trip write, closed with its counts" do
+      meta = %{component: "trips", session_id: @place_session, trigger: :computer}
+
+      {_state, closed} =
+        run([
+          {[:fermix, :trip_place, :run_start], %{waiting: 2, expired: 0}, meta},
+          {[:fermix, :trip, :edit],
+           %{
+             duration_us: 3_000,
+             trips: 1,
+             ops: 1,
+             lookups: 2,
+             placed: 1,
+             offered: 0,
+             not_found: 0,
+             not_looked_up: 1
+           },
+           %{
+             component: "trips",
+             made_via: "trip_place",
+             outcome: :ok,
+             error_code: nil,
+             backend: "computer",
+             rate_limited: false,
+             stop_reason: :computer_away,
+             stop_code: nil,
+             session_id: @place_session
+           }},
+          {[:fermix, :trip_place, :run_complete],
+           %{
+             duration_us: 9_000,
+             placed: 1,
+             waiting: 1,
+             stopped_waiting: 0,
+             expired: 0,
+             superseded: 0,
+             lookups: 2,
+             trips: 1,
+             failed: 0
+           },
+           Map.merge(meta, %{
+             backend: "computer",
+             skipped: nil,
+             stop_reason: :computer_away,
+             stop_code: nil
+           })}
+        ])
+
+      assert [%{trace: trace, spans: spans}] = closed
+      assert trace.name == @place_session
+      assert trace.tags == ["trip_place"]
+
+      assert %{trigger: "computer", placed: 1, waiting: 1, backend: "computer"} = trace.metadata
+      assert trace.metadata.stop_reason == "computer_away"
+
+      wrapper = span_named(spans, @place_session)
+      edit = span_named(spans, "trip_edit")
+      refute Map.has_key?(wrapper, :parent_span_id)
+      assert edit.parent_span_id == wrapper.id
+      assert edit.metadata.made_via == "trip_place"
+    end
+
+    test "a placer run that failed with no opener still closes as a trip_place root, errored" do
+      {_state, closed} =
+        run([
+          {[:fermix, :trip_place, :run_error], %{duration_us: 50},
+           %{
+             component: "trips",
+             session_id: @place_session,
+             trigger: :boot,
+             error_code: "repo_timeout",
+             reason: nil
+           }}
+        ])
+
+      assert [%{trace: trace}] = closed
+      assert trace.tags == ["trip_place"]
+      assert trace.error_info.message == "repo_timeout"
+    end
+
+    # The placer closes a run that crashed or was stopped at its bound, so
+    # its root never waits for the sweep.
+    test "a placer run the placer closed after it crashed is errored with the kind" do
+      meta = %{component: "trips", session_id: @place_session, trigger: :computer}
+
+      {_state, closed} =
+        run([
+          {[:fermix, :trip_place, :run_start], %{waiting: 1, expired: 0}, meta},
+          {[:fermix, :trip_place, :run_error], %{duration_us: 7_000},
+           Map.merge(meta, %{error_code: "crashed", reason: "RuntimeError"})}
+        ])
+
+      assert [%{trace: trace}] = closed
+      assert trace.error_info.message == "crashed"
+      assert trace.metadata.reason == "RuntimeError"
+      assert trace.metadata.duration_us == 7_000
+    end
+  end
+
   @compaction_event [:fermix, :agent_loop, :context_compaction]
   @recovery_event [:fermix, :agent_loop, :context_recovery]
 
@@ -1203,6 +1509,28 @@ defmodule FermixOpik.AggregationTest do
 
     created = span_named(spans, "realtime:session_created")
     assert created.parent_span_id == wrapper.id
+  end
+
+  # M87: the endpoint a call ran for (`desktop`, `<kind>:<device_id>`).
+  test "a realtime call's root names the endpoint it ran for" do
+    {_state, closed} =
+      run([
+        {[:fermix, :realtime, :call_start], %{},
+         %{
+           session_id: "session:3",
+           agent: "realtime",
+           device_id: "dev-1",
+           endpoint: "desktop",
+           model: "gpt-realtime-2",
+           voice: "marin",
+           session_scope: "session:3"
+         }},
+        {[:fermix, :realtime, :call_stop], %{},
+         %{session_id: "session:3", agent: "realtime", model: "gpt-realtime-2", voice: "marin"}}
+      ])
+
+    assert [%{trace: trace}] = closed
+    assert trace.metadata.endpoint == "desktop"
   end
 
   test "a realtime call_stop folds the call's audio usage into the trace metadata" do
@@ -2464,6 +2792,53 @@ defmodule FermixOpik.AggregationTest do
       end
     end
 
+    test "a live call's root names the endpoint it ran for" do
+      {_state, closed} =
+        run([
+          {@voice_live_start, %{},
+           voice_live_meta(%{max_duration_ms: 900_000, endpoint: "phone:0d7f6a52"})},
+          {@voice_live_stop, %{voice_seconds: 12.0}, voice_live_meta(%{reason: "call_stop"})}
+        ])
+
+      assert [%{trace: trace}] = closed
+      assert trace.metadata.endpoint == "phone:0d7f6a52"
+    end
+
+    # M87: a phone's call outlives a closed session, and the gap shows on the
+    # call as a span as long as the phone was away.
+    test "a phone's detach and resume are spans of the call, the resume as long as the gap" do
+      phone = %{endpoint: "phone:0d7f6a52"}
+
+      {_state, closed} =
+        run([
+          {@voice_live_start, %{}, voice_live_meta(Map.put(phone, :max_duration_ms, 900_000))},
+          {[:fermix, :voice_live, :phone_detached], %{}, voice_live_meta(phone)},
+          {[:fermix, :voice_live, :phone_resumed], %{duration_ms: 1_250}, voice_live_meta(phone)},
+          {@voice_live_stop, %{voice_seconds: 12.0}, voice_live_meta(%{reason: "call_stop"})}
+        ])
+
+      assert [%{trace: trace, spans: spans}] = closed
+      root = span_named(spans, trace.name)
+      detached = span_named(spans, "voice_live:phone_detached")
+      resumed = span_named(spans, "voice_live:phone_resumed")
+      assert detached.parent_span_id == root.id
+      assert resumed.parent_span_id == root.id
+      assert resumed.metadata.endpoint == "phone:0d7f6a52"
+
+      {:ok, started, 0} = DateTime.from_iso8601(resumed.start_time)
+      {:ok, ended, 0} = DateTime.from_iso8601(resumed.end_time)
+      assert DateTime.diff(ended, started, :millisecond) == 1_250
+    end
+
+    test "the reporter subscribes to a phone's detach and resume" do
+      for event <- [
+            [:fermix, :voice_live, :phone_detached],
+            [:fermix, :voice_live, :phone_resumed]
+          ] do
+        assert event in FermixOpik.Reporter.events(), inspect(event)
+      end
+    end
+
     test "a live call becomes one trace whose delegation turn nests under the root via parent_session" do
       {_state, closed} =
         run([
@@ -2770,6 +3145,54 @@ defmodule FermixOpik.AggregationTest do
       assert [%{trace: trace}] = closed
       assert trace.tags == ["voice_live"]
       assert trace.name == "voice_live:1"
+    end
+  end
+
+  # M91: an accessory call's link counters ride under the call's own session
+  # id, as one span of the call's trace. Emitted as the call ends and before
+  # its session closes, so it nests; one that lands after the call's root
+  # shipped is dropped, never a root of its own.
+  describe "an accessory call's link counters" do
+    @call_link [:fermix, :accessory, :call_link]
+
+    defp call_link_event do
+      {@call_link,
+       %{
+         duration_ms: 4_200,
+         mic_frames: 210,
+         mic_chunks: 42,
+         speaker_bytes: 96_000,
+         credit_waits: 3
+       },
+       %{
+         session_id: @voice_live_call,
+         endpoint: "accessory:" <> String.duplicate("ab", 32),
+         engine: "openai_live",
+         source: :screen_tap,
+         reason: :end_request
+       }}
+    end
+
+    test "nest under the call's trace with their counters and why the call ended" do
+      {state, []} =
+        run([
+          {@voice_live_start, %{}, voice_live_meta(%{max_duration_ms: 900_000})},
+          call_link_event()
+        ])
+
+      [%{spans: spans}] = Map.values(state.traces)
+      span = span_named(spans, "accessory:call_link")
+      assert span.metadata.endpoint == "accessory:" <> String.duplicate("ab", 32)
+      assert span.metadata.reason == "end_request"
+      assert span.metadata.source == "screen_tap"
+      assert span.metadata.mic_frames == 210
+      assert span.metadata.credit_waits == 3
+    end
+
+    test "never open a root of their own" do
+      {state, closed} = run([call_link_event()])
+      assert closed == []
+      assert state.traces == %{}
     end
   end
 
@@ -3453,6 +3876,224 @@ defmodule FermixOpik.AggregationTest do
       assert [%{trace: trace}] = closed
       assert trace.tags == ["computer_use"]
       assert trace.name == "computer_use:#{@cu_session}"
+    end
+  end
+
+  @job_start [:fermix, :management_job, :start]
+  @job_complete [:fermix, :management_job, :complete]
+
+  # The emitter's metadata (`FermixCore.Management.Telemetry`): a job's
+  # session is its job id, which a computer linked to its server mints as
+  # `computer.job:<id>` (`Management.Jobs`).
+  defp job_meta(session_id, extra),
+    do:
+      Map.merge(
+        %{
+          session_id: session_id,
+          agent: "management_job",
+          kind: :browser_install,
+          budget_ms: 900_000
+        },
+        extra
+      )
+
+  describe "management jobs" do
+    test "a job's bookends make one management_job root, on a server and on a linked computer" do
+      for session_id <- ["job:Qm9yZWFsLWZpbmNo", "computer.job:Qm9yZWFsLWZpbmNo"] do
+        {state, closed} =
+          run([
+            {@job_start, %{count: 1}, job_meta(session_id, %{})},
+            {@job_complete, %{count: 1, duration_ms: 40},
+             job_meta(session_id, %{status: "completed"})}
+          ])
+
+        assert state.traces == %{}
+        assert [%{trace: trace}] = closed
+        assert trace.tags == ["management_job"], session_id
+        assert trace.metadata.kind == "browser_install"
+      end
+    end
+
+    # Without the prefix clause a bookend whose opener was missed (a restart
+    # between the two) mints a root `infer_kind/1` reads as `:subagent`.
+    test "a bookend with no opener still closes as a management_job root, a computer's included" do
+      for session_id <- ["job:Qm9yZWFsLWZpbmNo", "computer.job:Qm9yZWFsLWZpbmNo"] do
+        {_state, closed} =
+          run([
+            {@job_complete, %{count: 1, duration_ms: 40},
+             job_meta(session_id, %{status: "failed"})}
+          ])
+
+        assert [%{trace: trace}] = closed
+        assert trace.tags == ["management_job"], session_id
+      end
+    end
+  end
+
+  @inv_start [:fermix, :computer_invocation, :start]
+  @inv_complete [:fermix, :computer_invocation, :complete]
+  @inv_error [:fermix, :computer_invocation, :error]
+  @inv_id "inv-mfrgg2lt5vgmy3dpqzt7xk4wha"
+  @inv_session "inv_inv-mfrgg2lt5vgmy3dpqzt7xk4wha"
+  @inv_turn "main-41"
+
+  # The emitter's own metadata shape (FermixCore.Computers.Telemetry), mirrored
+  # by hand like `computer_use_meta/1` above.
+  defp invocation_meta(extra) do
+    Map.merge(
+      %{
+        session_id: @inv_session,
+        parent_session: @inv_turn,
+        capability: "files",
+        op: "read",
+        origin: :chat,
+        epoch: 3
+      },
+      extra
+    )
+  end
+
+  describe "computer invocations" do
+    test "the reporter subscribes to every computer_invocation event" do
+      for event <- [@inv_start, @inv_complete, @inv_error] do
+        assert event in FermixOpik.Reporter.events(),
+               "#{inspect(event)} is not subscribed, so the run is invisible to Opik"
+      end
+    end
+
+    # The turn that asked is on the SERVER's trace, and a turn's id is minted per
+    # engine, so on the computer `parent_session` can name an unrelated turn of
+    # its own. The run opens its own root even while a local turn with that very
+    # id is open, and its bookend ships that root and leaves the turn alone.
+    test "an invocation is one root, never nested under a local turn sharing its parent's id" do
+      {state, closed} =
+        run([
+          {[:fermix, :provider, :call], %{duration_ms: 10},
+           %{provider: :openai, model: "gpt-5", status: :ok, session_id: @inv_turn}},
+          {@inv_start, %{duration_ms: 0}, invocation_meta(%{})},
+          {@inv_complete, %{duration_ms: 85, result_bytes: 2_048},
+           invocation_meta(%{status: :ok})}
+        ])
+
+      assert [%{trace: trace, spans: [root]}] = closed
+      assert trace.name == "computer_invocation:#{@inv_session}"
+      assert trace.tags == ["computer_invocation"]
+
+      assert trace.metadata == %{
+               parent_session: @inv_turn,
+               capability: "files",
+               op: "read",
+               origin: "chat",
+               epoch: 3,
+               duration_ms: 85,
+               result_bytes: 2_048
+             }
+
+      refute Map.has_key?(trace, :error_info)
+      assert root.name == "computer_invocation:#{@inv_session}"
+      refute Map.has_key?(root, :parent_span_id)
+
+      # The local turn is untouched: still open, still holding its own call.
+      assert [turn] = Map.values(state.traces)
+      assert turn.root_session == @inv_turn
+      assert turn.open?
+      assert length(spans_of_type(turn.spans, "llm")) == 1
+    end
+
+    # "ok" is the absence of a status on every root (`put_status/2`), so an ok
+    # invocation's metadata carries none.
+    test "ok, cancelled and refused close with :complete, never as an error" do
+      cases = [
+        {%{status: :ok}, nil, nil},
+        {%{status: :cancelled}, "cancelled", nil},
+        {%{status: :refused, refusal: :stale_epoch}, "refused", "stale_epoch"}
+      ]
+
+      for {bookend, status, refusal} <- cases do
+        {state, closed} =
+          run([
+            {@inv_start, %{duration_ms: 0}, invocation_meta(%{})},
+            {@inv_complete, %{duration_ms: 6, result_bytes: 0}, invocation_meta(bookend)}
+          ])
+
+        assert state.traces == %{}
+        assert [%{trace: trace}] = closed
+        refute Map.has_key?(trace, :error_info)
+        assert trace.metadata[:status] == status
+        assert trace.metadata[:refusal] == refusal
+        assert trace.metadata.duration_ms == 6
+      end
+    end
+
+    test "failed, timed_out and unknown close with :error and error_info naming the status" do
+      for status <- [:failed, :timed_out, :unknown] do
+        {state, closed} =
+          run([
+            {@inv_start, %{duration_ms: 0}, invocation_meta(%{})},
+            {@inv_error, %{duration_ms: 20_000, result_bytes: 0},
+             invocation_meta(%{status: status})}
+          ])
+
+        word = Atom.to_string(status)
+        assert state.traces == %{}
+        assert [%{trace: trace}] = closed
+        assert trace.name == "computer_invocation:#{@inv_session}"
+        assert trace.metadata.status == word
+        assert trace.metadata.duration_ms == 20_000
+        assert trace.error_info == %{exception_type: "ComputerInvocationError", message: word}
+      end
+    end
+
+    # Without the prefix clause a bookend whose opener was missed (a restart
+    # between the two) would mint a root `infer_kind/1` reads as `:subagent`.
+    test "a bookend with no opener still closes as a computer_invocation root" do
+      {_state, closed} =
+        run([
+          {@inv_error, %{duration_ms: 9, result_bytes: 0}, invocation_meta(%{status: :unknown})}
+        ])
+
+      assert [%{trace: trace}] = closed
+      assert trace.tags == ["computer_invocation"]
+      assert trace.name == "computer_invocation:#{@inv_session}"
+      assert trace.metadata.parent_session == @inv_turn
+    end
+
+    # The server's half: the model's one call is an ordinary tool exec under the
+    # turn, carrying the four keys that point at the computer's root.
+    test "the server's exec stays under its turn and carries the invocation's keys" do
+      {_state, closed} =
+        run([
+          {[:fermix, :tool, :exec], %{duration_ms: 140},
+           %{
+             tool: "computer_files",
+             agent: "main",
+             success: false,
+             session_id: @inv_turn,
+             computer: "dev_7k2m9q",
+             invocation: @inv_id,
+             invoke_status: :refused,
+             refusal: :off
+           }},
+          {[:fermix, :agent, :message], %{iterations: 2, total_tokens: 60},
+           %{
+             channel: :telegram,
+             chat_id: "c1",
+             sender: "u1",
+             session_id: @inv_turn,
+             agent: "main"
+           }}
+        ])
+
+      assert [%{trace: turn, spans: spans}] = closed
+      assert turn.name == "agent:main"
+      [tool] = spans_of_type(spans, "tool")
+
+      assert tool.metadata == %{
+               computer: "dev_7k2m9q",
+               invocation: @inv_id,
+               invoke_status: :refused,
+               refusal: :off
+             }
     end
   end
 end

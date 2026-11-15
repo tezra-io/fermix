@@ -889,6 +889,8 @@ defmodule FermixCore.Jobs.RunnerTest do
     assert timed_out_run.error =~ "wall-clock timeout after 20ms"
   end
 
+  # A guest job's own list naming these fails its run instead (below, "a job
+  # whose list names a tool its runs can't use ...").
   test "guest-trust scheduled runs are narrowed to read-only capabilities", %{
     repo: repo,
     capability_registry: capability_registry,
@@ -910,8 +912,7 @@ defmodule FermixCore.Jobs.RunnerTest do
                name: "Trust Check",
                schedule: "every 15 minutes",
                task_prompt: "Use only allowed read-only tools.",
-               created_by_trust: "guest",
-               allowed_tools: ["stage3_read", "stage3_exec", "stage3_external"]
+               created_by_trust: "guest"
              )
 
     assert_runner_exits_normally(
@@ -1170,6 +1171,139 @@ defmodule FermixCore.Jobs.RunnerTest do
     end
   end
 
+  # Guest trust reaches no plugin's tools (each is `:external_api`), so without
+  # more a job bound to a plugin skill would run without the plugin the skill
+  # ships with. Its own plugin's tools are the one thing beyond guest it gets,
+  # within the job's grant: another plugin's tools and owner-only tools stay
+  # out, and a guest job's grant has no `:external_api` to give.
+  test "a job bound to a plugin skill reaches its own plugin's tools and no other's", %{
+    repo: repo,
+    capability_registry: capability_registry,
+    output_base_dir: output_base_dir
+  } do
+    :ok = CapabilityRegistry.register(capability_registry, test_capability("page_read"))
+
+    :ok =
+      CapabilityRegistry.register(capability_registry, plugin_capability("acme_search", "acme"))
+
+    :ok =
+      CapabilityRegistry.register(capability_registry, plugin_capability("bolt_search", "bolt"))
+
+    :ok =
+      CapabilityRegistry.register(capability_registry, %{
+        test_capability("owner_diary")
+        | owner_only?: true
+      })
+
+    {:ok, skill_registry} =
+      SkillRegistryStub.start_link(%{"acme-plugin" => plugin_skill("acme-plugin", "acme")})
+
+    for {job_attrs, offered} <- [
+          {[], ["acme_search", "page_read"]},
+          {[allowed_tools: ["acme_search"]], ["acme_search"]},
+          {[created_by_trust: "guest"], ["page_read"]}
+        ] do
+      assert {:ok, {job, run}} =
+               create_claimed_job(
+                 repo,
+                 Keyword.merge(
+                   [
+                     name: "Acme watch #{System.unique_integer([:positive])}",
+                     task_prompt: "Search Acme.",
+                     skill_name: "acme-plugin"
+                   ],
+                   job_attrs
+                 )
+               )
+
+      assert_runner_exits_normally(
+        job,
+        run,
+        repo: repo,
+        capability_registry: capability_registry,
+        skill_registry: skill_registry,
+        output_base_dir: output_base_dir,
+        script: [%{content: "done"}]
+      )
+
+      assert_receive {:adapter_chat, _messages, tool_names}
+      assert {job_attrs, Enum.sort(tool_names)} == {job_attrs, offered}
+      assert {:ok, %{status: "ok"}} = Repo.get_job_run(run.id, server: repo)
+    end
+  end
+
+  # A tool the job's own list names is one it needs: a run whose surface leaves
+  # it out fails before the model is asked, saying which and why, rather than
+  # run without it, let the model improvise, and record `ok`. A tool the job's
+  # trust or skill leaves out and one no capability carries now are told apart.
+  test "a job whose list names a tool its runs can't use fails before the model is asked", %{
+    repo: repo,
+    capability_registry: capability_registry,
+    output_base_dir: output_base_dir
+  } do
+    :ok = CapabilityRegistry.register(capability_registry, test_capability("page_read"))
+
+    :ok =
+      CapabilityRegistry.register(capability_registry, plugin_capability("acme_search", "acme"))
+
+    :ok =
+      CapabilityRegistry.register(capability_registry, %{
+        test_capability("owner_diary")
+        | owner_only?: true
+      })
+
+    :ok =
+      CapabilityRegistry.register(capability_registry, %{
+        test_capability("hidden_tool")
+        | hidden_from_agent?: true
+      })
+
+    {:ok, skill_registry} =
+      SkillRegistryStub.start_link(%{"acme-plugin" => plugin_skill("acme-plugin", "acme")})
+
+    for {job_attrs, words} <- [
+          {[skill_name: "acme-plugin", allowed_tools: ["acme_search", "owner_diary"]],
+           "can't use owner_diary: its skill acme-plugin comes from a plugin, so its runs are " <>
+             "at guest trust"},
+          {[created_by_trust: "guest", skill_name: "acme-plugin", allowed_tools: ["acme_search"]],
+           "can't use acme_search: it was set up at guest trust"},
+          {[allowed_tools: ["page_read", "gone_tool"]],
+           "gone_tool is not set up on this computer"},
+          {[allowed_tools: ["page_read", "hidden_tool"]],
+           "can't use hidden_tool: Fermix doesn't offer it to agents"}
+        ] do
+      assert {:ok, {job, run}} =
+               create_claimed_job(
+                 repo,
+                 Keyword.merge(
+                   [
+                     name: "Needs tools #{System.unique_integer([:positive])}",
+                     task_prompt: "Go."
+                   ],
+                   job_attrs
+                 )
+               )
+
+      assert_runner_exits_normally(
+        job,
+        run,
+        repo: repo,
+        capability_registry: capability_registry,
+        skill_registry: skill_registry,
+        output_base_dir: output_base_dir,
+        script: [%{content: "unreachable"}]
+      )
+
+      refute_received {:adapter_chat, _messages, _tool_names}
+      assert {:ok, failed_run} = Repo.get_job_run(run.id, server: repo)
+      assert {job_attrs, failed_run.status} == {job_attrs, "error"}
+      assert failed_run.error =~ words
+
+      lead = output_base_dir |> Path.join(failed_run.output_ref) |> File.read!()
+      assert lead =~ words
+    end
+  end
+
   # The run of a job bound to a plugin skill is at guest under the owner's
   # trust, so its `update_job` cannot rewrite an operator job.
   test "a plugin skill's job run cannot change an operator job", %{
@@ -1390,6 +1524,92 @@ defmodule FermixCore.Jobs.RunnerTest do
            ]
 
     assert FermixCore.ReplyBlocks.take({:scheduled_job, job.id, run.id}) == []
+  end
+
+  # EVENTS_DRAWN_AS_CARDS §04: a morning brief that read event_list draws its
+  # agenda, so the delivery keeps the events beside the lists.
+  test "delivers the events the run's event tools returned as the message's events block", %{
+    repo: repo,
+    capability_registry: capability_registry,
+    output_base_dir: output_base_dir
+  } do
+    assert {:ok, {job, run}} =
+             create_claimed_job(repo,
+               name: "Morning Brief",
+               schedule: "every 15 minutes",
+               task_prompt: "What is coming up this week?",
+               delivery_mode: "channel",
+               delivery_target: %{"platform" => "telegram", "chat_id" => "123"}
+             )
+
+    card = %{
+      "event_id" => "evt_k2m4q7xd3np5rtwa",
+      "title" => "Dentist",
+      "kind" => "appointment",
+      "date" => "2026-11-13",
+      "time" => "10:30",
+      "timezone" => "America/New_York",
+      "status" => "active",
+      "when" => "Friday, November 13 at 10:30 AM EST"
+    }
+
+    :ok = FermixCore.ReplyBlocks.put_events({:scheduled_job, job.id, run.id}, [card])
+
+    assert_runner_exits_normally(
+      job,
+      run,
+      repo: repo,
+      capability_registry: capability_registry,
+      output_base_dir: output_base_dir,
+      delivery_adapter: RecordingDelivery,
+      delivery_opts: [test_pid: self()],
+      script: [%{content: "The dentist on Friday."}]
+    )
+
+    assert_receive {:delivery_send, "123", "The dentist on Friday.", opts}
+    assert Keyword.fetch!(opts, :blocks) == [%{"type" => "events", "events" => [card]}]
+    assert FermixCore.ReplyBlocks.take({:scheduled_job, job.id, run.id}) == []
+  end
+
+  # M89 §06: a job that read or changed a trip draws it, as it draws a list.
+  test "delivers the trips the run touched as the message's trips block, after the lists", %{
+    repo: repo,
+    capability_registry: capability_registry,
+    output_base_dir: output_base_dir
+  } do
+    assert {:ok, {job, run}} =
+             create_claimed_job(repo,
+               name: "Trip Morning",
+               schedule: "every 15 minutes",
+               task_prompt: "Read today's day of the Varonne trip.",
+               delivery_mode: "channel",
+               delivery_target: %{"platform" => "telegram", "chat_id" => "123"}
+             )
+
+    key = {:scheduled_job, job.id, run.id}
+    trip = %{trip_id: "tr_4q8m2x7v1d", title: "Varonne", rows: []}
+    list = %{list_id: "ck_3m9q2x7d1a", title: "Packing", rows: []}
+    :ok = FermixCore.ReplyBlocks.put_trips(key, [trip])
+    :ok = FermixCore.ReplyBlocks.put_checklists(key, [list])
+
+    assert_runner_exits_normally(
+      job,
+      run,
+      repo: repo,
+      capability_registry: capability_registry,
+      output_base_dir: output_base_dir,
+      delivery_adapter: RecordingDelivery,
+      delivery_opts: [test_pid: self()],
+      script: [%{content: "The fish market at half past eight."}]
+    )
+
+    assert_receive {:delivery_send, "123", "The fish market at half past eight.", opts}
+
+    assert [%{"type" => "checklists"}, %{"type" => "trips", "trips" => [only]}] =
+             Keyword.fetch!(opts, :blocks)
+
+    assert only == %{"trip_id" => "tr_4q8m2x7v1d", "title" => "Varonne", "rows" => []}
+    assert FermixCore.ReplyBlocks.take(key) == []
   end
 
   test "skips delivery when the final response is the silent marker", %{
@@ -1878,6 +2098,23 @@ defmodule FermixCore.Jobs.RunnerTest do
   def report_context(_args, context, test_pid) do
     send(test_pid, {:tool_context, context})
     {:ok, %{success: true, output: "ok", error: nil}}
+  end
+
+  # A plugin's tool as both plugin rails register it: `:external_api`, tagged
+  # with the plugin that owns it.
+  defp plugin_capability(name, plugin) do
+    %{
+      test_capability(name, :external_api)
+      | metadata: %{plugin_owned?: true, plugin: plugin}
+    }
+  end
+
+  # A skill that ships with `plugin`, as `SkillRegistry` loads one: at guest.
+  defp plugin_skill(name, plugin) do
+    name
+    |> skill_definition([])
+    |> AgentDefinition.with_trust(:guest)
+    |> AgentDefinition.with_plugin(plugin)
   end
 
   defp test_capability(name, policy_class \\ :read_only) do

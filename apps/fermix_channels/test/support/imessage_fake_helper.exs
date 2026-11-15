@@ -66,7 +66,7 @@ defmodule FermixChannels.Test.IMessageFakeHelper do
   end
 
   @impl FermixChannels.Channels.IMessage.Helper
-  def call(server, method, params, timeout) do
+  def call(server, method, params, timeout, turn) when is_map(turn) do
     GenServer.call(server, {:call, method, params}, timeout + 1_000)
   end
 

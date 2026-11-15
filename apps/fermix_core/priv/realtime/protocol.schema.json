@@ -3,8 +3,8 @@
   "$id": "https://fermix.sh/realtime/protocol.schema.json",
   "title": "Fermix Realtime voice socket protocol",
   "description": "Newline-delimited JSON wire contract between the Fermix daemon and the FermixPet companion. Source of truth: FermixCore.Realtime.Protocol. See PROTOCOL.md.",
-  "x-protocol-version": 3,
-  "x-supported-version-range": { "min": 1, "max": 3 },
+  "x-protocol-version": 5,
+  "x-supported-version-range": { "min": 1, "max": 5 },
   "$defs": {
     "clientEvent": {
       "type": "object",
@@ -19,7 +19,8 @@
             "mute",
             "call_stop",
             "task_cancel",
-            "playback_progress"
+            "playback_progress",
+            "camera"
           ]
         }
       },
@@ -43,6 +44,10 @@
         {
           "if": { "required": ["type"], "properties": { "type": { "const": "playback_progress" } } },
           "then": { "$ref": "#/$defs/playback_progress" }
+        },
+        {
+          "if": { "required": ["type"], "properties": { "type": { "const": "camera" } } },
+          "then": { "$ref": "#/$defs/camera" }
         }
       ]
     },
@@ -64,7 +69,8 @@
             "playback_stop",
             "call_ready",
             "caption",
-            "task"
+            "task",
+            "call_ended"
           ]
         }
       },
@@ -96,6 +102,10 @@
         {
           "if": { "required": ["type"], "properties": { "type": { "const": "usage" } } },
           "then": { "$ref": "#/$defs/usage" }
+        },
+        {
+          "if": { "required": ["type"], "properties": { "type": { "const": "call_ended" } } },
+          "then": { "$ref": "#/$defs/call_ended" }
         }
       ]
     },
@@ -104,7 +114,11 @@
       "required": ["type", "protocol_version"],
       "properties": {
         "type": { "const": "client_hello" },
-        "protocol_version": { "type": "integer", "minimum": 1 }
+        "protocol_version": { "type": "integer", "minimum": 1 },
+        "camera": {
+          "type": "boolean",
+          "description": "v4, optional: whether this endpoint has a camera it can share in a call (a phone). Absent means false, which is every older client's hello."
+        }
       }
     },
     "audio_chunk": {
@@ -155,6 +169,15 @@
         }
       }
     },
+    "camera": {
+      "type": "object",
+      "description": "v4: turns the call's camera on or off, stating the state it wants, so a repeat is harmless. Taken only during a call on a task engine (openai_live, xai_realtime), from an endpoint whose client_hello at version 4 or later said camera: true; the frames themselves ride the endpoint's own transport. Refused with error(unsupported_by_endpoint) from any other endpoint, error(unsupported_by_engine) under openai_realtime, and the connection closes after either. For on: true while the call's camera_share reading (taken when the call opened, kept for its life) is off, error(camera_off) refuses that camera alone: the camera stays off and the call goes on. No frame answers it.",
+      "required": ["type", "on"],
+      "properties": {
+        "type": { "const": "camera" },
+        "on": { "type": "boolean", "description": "The state the camera should be in." }
+      }
+    },
     "server_hello": {
       "type": "object",
       "required": ["type", "min_version", "max_version"],
@@ -162,6 +185,18 @@
         "type": { "const": "server_hello" },
         "min_version": { "type": "integer", "minimum": 1 },
         "max_version": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "call_ended": {
+      "type": "object",
+      "description": "v5: the daemon ended the call itself, normally: a call on a task engine (openai_live, xai_realtime) whose owner said goodbye, once the voice's goodbye played. Sent only to a client whose client_hello was at version 5 or later, after state idle and before the call's last task and usage frames. A client treats it as its own hang-up: stop the microphone and playback, show the call ended, no error. The connection stays open for a fresh call_start, as after call_stop, and the client sends no call_stop for it.",
+      "required": ["type", "reason"],
+      "properties": {
+        "type": { "const": "call_ended" },
+        "reason": {
+          "type": "string",
+          "description": "Why the call ended. Today goodbye: the owner said goodbye. The vocabulary is open: a client treats any reason as a normal end."
+        }
       }
     },
     "audio_delta": {
@@ -281,7 +316,7 @@
         "type": { "const": "error" },
         "reason": {
           "type": "string",
-          "description": "The failure's code. call_in_progress refuses a call_start while another task-engine call is up or still settling; the connection closes after it. On an xai_realtime call, unknown_playback, playback_regressed and playback_beyond_sent refuse a playback_progress (an id never sent, an offset that went backwards, an offset beyond the audio sent) and close the connection; playback_stalled ends a call whose sent audio went unacknowledged for 2 seconds, playback_overflow one whose reply outgrew the audio the daemon holds, and call_ids_exhausted one that raised more function calls than it can remember."
+          "description": "The failure's code. call_in_progress refuses a call_start while another call is up or still settling, on any engine and from any endpoint; the connection closes after it. voice_device_elsewhere refuses this socket's call_start while the owner's voice device is a paired accessory, before any session, with voice_device and sentence, and voice_device_unreadable while that choice cannot be read, with sentence; the connection closes after either. On an xai_realtime call, unknown_playback, playback_regressed and playback_beyond_sent refuse a playback_progress (an id never sent, an offset that went backwards, an offset beyond the audio sent) and close the connection; playback_stalled ends a call whose sent audio went unacknowledged for 2 seconds, playback_overflow one whose reply outgrew the audio the daemon holds, and call_ids_exhausted one that raised more function calls than it can remember. A camera from an endpoint whose client_hello did not say camera: true at version 4 or later is refused with unsupported_by_endpoint, and the connection closes after it; a camera with on: true while the call's camera_share reading is off with camera_off, and the call goes on: the one reason that does not end the call."
         },
         "kind": {
           "enum": [
@@ -298,6 +333,18 @@
         "detail": {
           "type": "string",
           "description": "The vendor's own sentence, bounded. Present when the provider explained the failure."
+        },
+        "held_by": {
+          "type": "string",
+          "description": "On call_in_progress: the endpoint holding the call, desktop or accessory:<accessory_id>. Absent only when the holder ended while being read."
+        },
+        "voice_device": {
+          "type": "string",
+          "description": "On voice_device_elsewhere: the owner's voice device, accessory:<accessory_id>."
+        },
+        "sentence": {
+          "type": "string",
+          "description": "On voice_device_elsewhere and voice_device_unreadable: the daemon's own sentence for the refusal, which a client shows as it is."
         },
         "required_for": {
           "enum": ["openai_live", "xai_realtime"],

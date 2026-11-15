@@ -83,6 +83,18 @@ user content), both from `AccessGate.held_metadata/2`, so its Opik span carries
 succeeded. A confirmed call (`access_gate: "confirmed"`) runs its executor,
 whose own event reports its own outcome.
 
+A third source stamps it in the same function, ahead of the access gate:
+`Computers.Choice`, which decides where a tool one of the home's computers can
+run runs (M97 §6.5). A call it refuses before anything is sent (the named
+computer is away, no computer of that name, several offer it and none was named,
+none offers it, or one is past the version window) never reaches the gate, the
+executor or the link, so `Choice.refuse/5` emits the call's single exec event
+with `success: false`, `policy_enforcement` from `Choice.refusal_metadata/1`
+(`source: "computers"`, `decision: "deny"`, `phase: "pre_execution"`),
+`error_code: "computer_<refusal>"`, a fixed `error_summary` ("refused before
+anything was sent to a computer") and `computer_refusal` (see "Computer
+invocations").
+
 ### Access-gate labels
 
 Every call the gate decides (every access-sensitive call, every host command it
@@ -467,6 +479,18 @@ harness/plugin-dist/MCP-client precedent): `mix opik.replay` skips reminder
 rows. The event tools themselves (`event_store`, `event_list`, `event_update`,
 `event_remove`) are ordinary built-ins riding `[:fermix, :tool, :exec]` with
 `input:` passed explicitly.
+
+A reminder for "this computer" that comes due on an Always On server (M99
+§10.1) keeps this one family on the server: its attempt is one
+`[:fermix, :reminder, :lifecycle]` row with `platform: "computer"`, whatever
+`Native.Notifications.Computers` did to show it, and no new event name. The
+fan-out asks each connected computer with one invocation of the
+`notifications` capability (`post`), each a `Computers.call/6` from the rail's
+own send process: no model call, so no `[:fermix, :tool, :exec]` row on the
+server, and the computer's own trace holds each as a computer-invocation run
+(below), its `parent_session` the reminder's (`reminder-<reminder id>`). A
+retry carries the reminder's `proactive_key`, so a computer that already
+showed it answers `before` and its run closes `:complete`.
 
 ## Open loop check-ins
 
@@ -923,9 +947,9 @@ Its completion re-enters the chat as an ordinary companion turn (`main-*`),
 also a root of its own.
 
 Every emission goes through `FermixCore.Realtime.LiveTelemetry` (the
-detached task's owner included) — never hand-rolled. The six events are `[:fermix, :voice_live, :call_start |
+detached task's owner included) — never hand-rolled. The eight events are `[:fermix, :voice_live, :call_start |
 :session_started | :delegation_start | :delegation_stop | :provider_error |
-:call_stop]`. Shared metadata: `agent: "voice_live"`, `session_id` (the call
+:call_stop | :phone_detached | :phone_resumed]`. Shared metadata: `agent: "voice_live"`, `session_id` (the call
 id), `call_uuid`, `engine`, `provider`, `device_id`, `model`, `voice`, and
 `provider_session_id` once the vendor has named its session — that last one is
 the only handle a vendor-side investigation has, and it exists nowhere else in
@@ -947,7 +971,29 @@ between delegations is force-closed at the idle TTL, and its ledger-bearing
 with (M56 §4.3), never quoting it: `instructions_bytes` (the composed
 instructions, the owner's details and memory files included) and `input_items`
 and `input_bytes` (the starting `session.input`: the chat's newest messages and
-earlier calls' gists; both `0` for a private call or an empty chat). The delegation events carry
+earlier calls' gists; both `0` for a private call or an empty chat). A Grok
+call quotes that context at the end of its instructions instead (M96), and
+`instructions_bytes` counts them without it. It
+names `endpoint`, who the call runs for: `desktop` (the Mac app's socket) or
+`<kind>:<device_id>` (`accessory:<id>`, `phone:<id>`, a device that calls
+Fermix itself; `computer:<id>`, a linked computer's app whose engine bridges
+its socket to its server, M97 §9.2, the phone call's run type); the Realtime
+engine's `[:fermix, :realtime, :call_start]`
+carries it too, and the exporter puts it on both kinds of call root. That
+engine's `[:fermix, :realtime, :session_updated]` adds `kept_lines` (`left_out`,
+or `previous` on a refresh) and `kept_lines_reason` when the owner's lists and
+trips could not be read for that `session.update`, so a trace shows the call
+ran without their lines; the exporter keeps both on its span. A phone's
+call (M87), and a linked computer's (M97 §9.2), outlives a closed session for
+its 20 s window: `phone_detached`
+marks the device's session closing mid-call, and `phone_resumed` its return,
+with the gap as its `duration_ms` measurement, so the exporter's span for it
+is as long as the device was away. Both name `endpoint` (`phone:<id>` or
+`computer:<id>`), and both come from
+`FermixChannels.Mobile.Call` once the call's voice session has named its call
+id (`call_ready`); a gap before that is a log line only. A computer's session
+gone silent mid-call ends the call instead of detaching it (M97 D20). A call the window
+ran out on ends with `call_stop`, as any other. The delegation events carry
 `delegation_id`, `revision` and `turn_session_id`, and `delegation_stop` adds
 the terminal word `status` (`completed | failed | cancelled`, and `timed_out`
 on a detached stop; never a bare "ok")
@@ -996,7 +1042,8 @@ the first audio Grok generated for it) and `audible_latency_ms_median`/`_max`
 the first reply after each turn counts, a latency with no sample is absent
 rather than `0`, and a task's own time stays on its `delegation_stop`, so a
 slow provider, a slow client and a slow backend remain three findings.
-Metadata carries `reason` — `call_stop`, `cost_limit`, `max_session_duration`,
+Metadata carries `reason` — `call_stop`, `goodbye` (the owner said goodbye and the
+call ended itself, M96), `cost_limit`, `max_session_duration`,
 `provider_disconnected`, `session_expired`, and on Grok also `playback_stalled`, `playback_overflow`
 and `call_ids_exhausted` — because a ceiling kill that read as a hang-up is
 exactly what makes a torn-down call undiagnosable. A non-numeric measurement
@@ -1041,7 +1088,7 @@ bill, which is the `call_stop` ledger. A vendor failure reaches
 on it. No field of any Grok event carries raw audio, a transcript, a caption,
 memory text, an API key or an unsanitized provider payload.
 
-`Trace.TelemetryHandler` registers all six events as `agent_event` rows,
+`Trace.TelemetryHandler` registers all eight events as `agent_event` rows,
 flattening every metadata key and measurement, `engine`, `provider`,
 `voice_text_items` and the latency summary included; `FermixOpik` binds them
 (`infer_kind("voice_live:" <> _)` → `:voice_live`,
@@ -1128,8 +1175,7 @@ A move back to the computer the home left is the same move, side
 restores that computer's own copy with no server sending it
 (`FermixCore.Home.LocalReturn`), brackets the restore as side `:candidate`
 too, its move id `local-<unix time>`; the job it runs in keeps the
-`home_provision` job family's own bookends, and the delete of the server
-before it is that job's step.
+`home_restore` job's own bookends.
 
 The sign-in loopback forward (M75 D17) adds no event: the sign-in it serves is
 the `auth` management job it always was, and a port the desktop could not open
@@ -1210,6 +1256,17 @@ is ready again, never per retry. `error_class` is the failure's kind
 not a transition, and emits nothing; `mobile.status` and `fermix doctor` say
 it. A phone's session over the iroh carrier emits exactly the events a
 WebSocket session does.
+Android push through Fermix's push relay (M99) is another:
+`emit_transport(:mobile_push_relay, :degraded | :recovered, …)` fires from
+the phone channel's `DeviceRegistry` when a push leg first ends with no push
+accepted and the relay not reached after its tries, and at the first accepted
+push after that, never per push or per try. `degraded` carries
+`consecutive_failures: 1` and the last failure's class (`busy`,
+`unavailable`, `permission`, `gateway` for the relay's gateway answering on
+its own, or the transport's reason such as `timeout`); `recovered` carries how
+many legs in a row could not reach the relay and `error_class: :none`. Each
+phone of a leg still gets its own `[:fermix, :channel, :push]` point; no
+address, key or answer body reaches either event.
 Slack over Socket Mode (M75) is another: `emit_transport(:slack, :degraded |
 :recovered, …)` fires when its connection first fails (Slack refused
 `apps.connections.open`, the WebSocket could not open, dropped or went silent,
@@ -1229,11 +1286,85 @@ within a minute of opening is `degraded` with `renewed_again`, redialed with
 the backoff, and `recovered` at the next `hello_ack`. A revocation (`4003`)
 is `degraded` with `revoked`, and no
 `recovered` follows until the engine restarts, since the relay stops dialing.
+One whose word the link cannot keep, or a session whose link cannot stop
+saying it, is `degraded` with `revoked_not_kept` instead, redialed with the
+backoff.
 `error_class` is `timeout`, `unreachable`, `refused`, `busy`, `helper`,
-`revoked`, `remote_closed`, `remote_ended`, `idle`, `lifetime`,
-`stale_primary`, `renewed_again`, `handshake`, `protocol` or `socket`. The calls and lines it
+`revoked`, `revoked_not_kept`, `remote_closed`, `remote_ended`, `idle`,
+`lifetime`, `stale_primary`, `renewed_again`, `handshake`, `protocol` or
+`socket`. The calls and lines it
 carries emit nothing of their own on the desktop: the primary's management
 and companion paths emit as for a local request.
+
+## Accessory link (M91)
+
+The accessory link (`FermixChannels.Accessories`, the USB serial link to a
+paired accessory such as StackChan) emits three events, all through
+`FermixCore.Accessories.Telemetry`; never hand-roll them.
+
+- `[:fermix, :accessory, :attach]`: one attach's outcome, a **sessionless
+  point** like a pairing decision. `count: 1` and `duration_us` (from the
+  host's `hello` to the verdict). Metadata, closed words only: `status`
+  (`attached`, `unenrolled`, a host refusal by its `refuse.code`, or
+  `accessory_refused` with the accessory's own code in `accessory_refusal`),
+  `mode` (`attach` for a port an enrolled accessory's hint named, `pairing`
+  for the port the owner selected until its accessory enrolls; the attach
+  after `enroll.done` is `attach`), `phase` (the link's phase the verdict
+  came in: `hello`, `proving`, `attached`, `unenrolled` or `refused`; an
+  `auth_timeout` in `hello` had no `hello_ack` in time, or one past the
+  bound, and one in `proving` sent the host's proof and heard no
+  `attached`), `kind` (only a kind the host knows, else
+  `nil`) and `endpoint` (`accessory:<accessory_id>`, only once the proof
+  verified).
+- `[:fermix, :accessory, :fault]`: a link fault, sessionless. `count`, the
+  `reason` (a receive or reassembly fault of `priv/accessory/PROTOCOL.md`,
+  a control refusal such as `unknown_message`, `link_lost`,
+  `accessory_fault` for the accessory's own `diag.fault`, or `mic_before_live`,
+  once per call, for microphone audio before the robot said it is live) and the `stage`
+  that found it (`receive`, `reassembly`, `control`, `peer`, `liveness`,
+  `call`). A receive fault is reported once per loss of sync, so bytes after
+  a fault are not a flood.
+- `[:fermix, :accessory, :call_link]`: once per accessory call, as it ends
+  and before its session is torn down, under the **call's own `session_id`**
+  (the engine session's scope, `session:<n>` or `voice_live:<n>`, which the
+  adapter mints and hands the session, so the two always agree). The
+  measurements are the link's counters for the call and nothing else (the
+  emitter refuses any other): `duration_ms`, `mic_frames`, `mic_chunks`,
+  `pcm_seq_gaps`, `speaker_frames`, `speaker_bytes`, `segments`, `flushes`,
+  `credit_waits`, `backlog_peak_bytes`, `speaker_bytes_dropped` (an odd byte
+  of the engine's audio that no later audio of its playback id completed),
+  `task_events`, `task_faults`; `mic_frames_before_live` (microphone frames
+  that came before the robot said `mic.state live`: a contract fault, never
+  forwarded, so it stays 0, HW-08's host-side proof); `interrupts`,
+  `interrupt_played_ms_total` and, after the first, `interrupt_played_ms_last`
+  (each interrupt's played position, as the robot's `spk.flushed` gave it);
+  the level of the microphone audio forwarded to the engine, each 4,800-byte
+  chunk's RMS over its int16 samples: `mic_chunks_silent` (chunks with an RMS
+  under 50) and, once a chunk was forwarded, `mic_rms_max` and `mic_rms_mean`
+  (the mean of the chunks' RMS), so a call that heard nothing says whether
+  the robot sent silence;
+  and, once the robot reported its `diag.counters` on this attach, its own
+  counters since its boot, as last reported: `robot_uptime_s`,
+  `robot_frames_rx`, `robot_frames_tx`, `robot_crc_errors`,
+  `robot_resync_bytes`, `robot_pcm_seq_gaps`, `robot_mic_overflows`,
+  `robot_spk_underflows`; and, when the robot's latest `diag.counters` in
+  the call carried them, its own levels of its latest microphone opening
+  (int 0–32767, all six or none): `robot_mic_rms`, `robot_mic_peak`,
+  `robot_ref_rms`, `robot_ref_peak`, `robot_out_rms`, `robot_out_peak`, the
+  RMS over the opening and that of its loudest 200 ms, for the AFE's input
+  microphone, its reference (the speaker's loopback) and its output, so a
+  call the engine heard nothing of says whether the robot heard anything. The
+  metadata: `endpoint`, `engine`, `source` (`screen_tap`, `head_swipe`,
+  `mac`) and `reason` (why it ended: `end_request`, `mac_end`,
+  `session_error`, `credit_overgrant`, `link_gone`, …).
+
+No audio, transcript, key, signature, nonce or tool name reaches any field.
+All three are `agent_event` rows in the JSONL trace (`accessory_attach`,
+`accessory_fault`, `accessory_call_link`). The Opik exporter nests
+`call_link` as an `accessory:call_link` span under the call's trace on
+either voice run kind, attached only while the call's run is open (never a
+root of its own), and replays it from the JSONL; it does **not** subscribe
+to the two sessionless points, for the pairing events' reason.
 
 ## Inbound attachments (a pre-turn point per attachment)
 
@@ -1309,23 +1440,181 @@ exporter places each under its turn's or job run's trace as a point span
 `failed`). The edit's `duration_us` is the budget's measure (M85 §12: under
 5 ms at p95 for a call that changes three lists).
 
+## The owner's trips (M89)
+
+`trip_read` and `trip_edit` are ordinary built-ins riding
+`[:fermix, :tool, :exec]` through `Tools.Telemetry.exec/5`: one event per model
+call, under the name the model used, and a refused call's event carries
+`error_code` (`Trips.Registry.error_tag/1`) and `error_summary`, the sentence
+the model received. The place lookups inside a `trip_edit` call are the
+engine's, not the model's: they go through `PlaceSearch.lookup/3`, which emits
+no `place_search` row, and are counted on the call's `[:fermix, :trip, :edit]`
+event below.
+
+A trip is the lists' second kind on the same mechanism, and its events are the
+lists' again. `Trips.Registry` emits **one point event per read and per edit**
+through `FermixCore.Trips.Telemetry`, an edit a device sends included
+(`made_via: "mac" | "phone"`, one op, no session): `[:fermix, :trip, :read]`
+with measurements `duration_us` (the store's read) and `trips` (how many it
+returned), and `[:fermix, :trip, :edit]` with `duration_us` (the call's one
+transaction), `trips` (the trips it touched), `ops`, and what the call's place
+lookups did: `lookups` (the lookups that reached the place search, so not one
+the Brave pacer refused or a stopped call left unsent), `placed`, `offered`,
+`not_found`, `not_looked_up` (all 0 for a device's edit, which carries a whole
+place), and what the call's towns did (`Trips.Towns`: the town each near in
+force names, geocoded after the lookups): `towns` (the geocodes that reached
+the place search), `towns_found` and `towns_not_found` (a near the search
+found no town by). Metadata on both:
+`component: "trips"`, `made_via` (`chat | job | mac | phone`, and `trip_place`
+for the trip placer's write below), `outcome` (`ok |
+refused | failed`), `error_code` (the refusal's tag,
+`Trips.Registry.error_tag/1`, else nil), and the caller's `session_id` when it
+has one; `scope` on a read (`index | trip | days | outline | share`); `backend`
+(the place search the lookups used: `brave`, `apple_maps` or `computer`, Apple
+Maps on a Mac of the home; else nil), `rate_limited`, and why the lookups
+stopped on an edit: `stop_reason` (`rate_limited | plan_excludes_place_search
+| computer_away | computer_off | computer_refused | computer_timed_out |
+deadline`, else nil; a busy Mac stops nothing) and `stop_code`, the place
+search's own code for it (Brave's `OPTION_NOT_IN_PLAN` or `RATE_LIMITED`; for a
+Mac of the home how its invocation ended, `timed_out` or its refusal such as
+`off`, `unavailable` or `stale_epoch`, nil when no Mac was online to ask; else
+nil), so a key without place search, or a Mac that is away, never traces like
+a deadline; and `towns_stop_reason`, in the same words, what stopped the
+call's towns after it (an older Mac refusing the `geocode` op is
+`computer_refused`), which is never the call's `stop_reason`. One call's
+lookups use the place search resolved once for the
+call, so `backend` is the one each of them ran, its geocodes too. A geocode
+is neither a tool call nor a provider call: it emits no
+`[:fermix, :tool, :exec]` and no `[:fermix, :provider, :call]` row, and on a
+Mac of the home it is one invocation of the `places` capability's
+`geocode` op, which emits nothing on the server. A lookup on
+a Mac of the home is one invocation of that computer's `places` capability
+(`Computers.call/6`), which emits nothing on the server: the trip's event
+under the turn's `session_id` is its trace, and the invocation's own run is
+on the computer's trace. The `place_search` tool's one exec event on such a
+home carries `backend: "computer"` and the invocation's `computer`,
+`invocation`, `invoke_status` and `refusal` (`Outcome.exec_metadata/1`),
+never the computer's name.
+Neither event ever carries a title, a stop's words, a place or a coordinate. A
+lookup inside an edit is no tool call and emits no `[:fermix, :tool, :exec]`
+row of its own. `Trace.TelemetryHandler` records them as `trip_read` and
+`trip_edit` `agent_event` rows keyed on `component`, and the Opik exporter
+places each under its turn's or job run's trace as a point span
+(`FermixOpik.Mapper.trip_span/4`: the counts, the towns' among them,
+`scope`, `made_via`, `outcome`, `backend`, `rate_limited`, `stop_reason`,
+`stop_code` and `towns_stop_reason`, flagged errored with the tag when the
+outcome is `refused` or `failed`).
+
+### The trip placer (a run kind with no model call)
+
+A stop a `trip_edit` call could not look up for a reason that heals by
+waiting (no Mac that looks places up online, that Mac timed out or busy, the
+place search rate limited, the call's deadline) keeps its words in memory.db,
+and the trip placer (`Trips.Placer`) looks it up again later: when a Mac that
+offers places connects, at the reset Brave's pacer last read, and at boot.
+Each of its runs (`Trips.Placer.Run`) is a run kind of its own, with no model
+call and no agent loop: `Trips.Placer` mints its `session_id =
+"trip_place:<16 hex>"` (`Trips.Telemetry.place_session_id/0`) before it starts
+the run's task, with **no** `parent_session` (no turn asked for it: always a
+root), and the bookends go through `FermixCore.Trips.Telemetry`, never
+hand-rolled:
+
+- `[:fermix, :trip_place, :run_start]`: measurements `waiting` (the stops
+  waiting when it began), `expired` (those the 7-day cap ended then) and
+  `unresolved_towns` (the nears in force with no town it asks, at most 20,
+  read only when the place search names towns and can run now);
+  metadata `trigger` (`boot | computer | timer`).
+- `[:fermix, :trip_place, :run_complete]`: measurements `duration_us`,
+  `placed`, `waiting` (still waiting when it ended), `stopped_waiting` (ended
+  unplaced, for any reason: a result by another name, none found, a refusal
+  that cannot heal, the 3-try cap, the 7-day cap), `expired` (of those, the
+  two caps'), `superseded` (a newer change ended them first, so the run wrote
+  nothing for them), `lookups`, `trips` (whose rev moved), `failed` (a trip
+  it could not read or write, and the nears with no town when it could not
+  read them, in which case `run_start` still carries what the take ended)
+  and `towns`, `towns_found` and `towns_not_found` as an edit's; metadata `trigger`, `backend`, `skipped`
+  (`no_mac | brave_spent | no_backend | computers_unread` when the place
+  search could not run, so it looked nothing up and spent no try; else nil),
+  `stop_reason`, `stop_code` and `towns_stop_reason` as an edit's.
+- `[:fermix, :trip_place, :run_error]`: measurements `duration_us` (the run's
+  own, from when it began); metadata `trigger`, `error_code` and `reason`.
+  The run emits it when it could not read the waits at all (`error_code`,
+  `Trips.Registry.error_tag/1` of the store's refusal; `reason` nil). The
+  placer emits it, under the session it named for the run, when the run's
+  task ends without answering: `error_code: "crashed"` with `reason`, the
+  kind of what ended it (an exception's module such as `RuntimeError`, an
+  exit's word), never its words; or `error_code: "overran"` (`reason:
+  "killed"`) when the placer killed it at its 120 s bound. So every run that
+  emitted `run_start` is closed by exactly one closer: `run_complete`, or
+  `run_error` from the run or from the placer.
+
+A run with nothing due, nothing the age cap ended and no near to find a
+town for emits nothing. All three carry `component:
+"trips"` and no stop's words, place or coordinate. Each trip the run writes is
+one ordinary `[:fermix, :trip, :edit]` under the run's `session_id`, with
+`made_via: "trip_place"` and the lookups' counts and stop for that trip, and
+each trip whose towns it writes one more, `ops: 0`, with that trip's
+`towns` (its geocodes that reached the place search, answered or not),
+`towns_found` and `towns_not_found`. Its
+lookups go through `PlaceSearch.lookup/3` as a call's do (no `place_search`
+row), and on a Mac of the home each is one `places` invocation whose turn is
+the run (`origin: background`, the run's `session_id`).
+`Trace.TelemetryHandler` records the bookends as `trip_place_run_start`,
+`trip_place_run_complete` and `trip_place_run_error` `agent_event` rows keyed
+on `component`. The Opik exporter subscribes to all three: `run_start` opens
+the root with its trigger, the stops waiting and `unresolved_towns` (kind
+`:trip_place`, also inferred from the id prefix, so a closer
+that arrives without its opener still roots as one), each trip edit nests
+under it as its `trip_edit` span, and the closer ends it with the counts above
+as the trace's metadata allowlist (`reason` among them), errored with
+`error_code` on `run_error`.
+
 ## Computer-history summarizer (a headless run with no bookends)
 
-The summarizer is **one bounded provider call per cycle**, not an agent loop:
-it mints `session_id = "computer_history_summarize:<unix_ms>"` with **no**
+The summarizer is **one bounded provider call per sitting**, not an agent loop,
+made on the home for a sitting a computer sent (`ComputerHistory.Submission`)
+or on a computer whose summarizer is `local` (`ComputerHistory.Sittings`): it
+mints `session_id = "computer_history_summarize:<unix_ms>"` with **no**
 `parent_session` and emits **no** lifecycle bookends — its provider span (via
 the standard provider emitter, `agent: "computer_history_summarizer"`) is the
 whole run. The Opik exporter keys the run kind off the id prefix
 (`infer_kind("computer_history_summarize:" <> _) → :computer_history_summary`)
 and the root closes by TTL sweep; keep the prefix and the exporter clause in
-lockstep if either changes. Event **content** rides the summarizer's own
-consent gate (`Gate.allow?({:summarizer, route})`) before it ever reaches the
-provider emitter, so the content-capture switch below is the second gate, not
-the first.
+lockstep if either changes. The route is checked by
+`Gate.summarizer_permitted?/2` before the call.
+
+**Its content is never captured (M97 D10).** The call's input is the owner's raw
+activity, and a trace file or an Opik export holding it would be a second raw
+store, on a server most of all. `Providers.Telemetry.emit_call/3` therefore
+drops `:input`, `:output` and `:tool_calls` for every agent in
+`Providers.Telemetry.content_withheld/0` (this one), whatever
+`capture_content` says, and sets `content_withheld: true` instead; the call
+keeps its provider, model, tokens, status and timing. The rule keys on the
+agent the adapter puts in the call's metadata, so it holds for every adapter;
+`providers/telemetry_test.exs` and the two-engines history test pin it. The
+daily roll-up (`agent: "computer_history_rollup"`) reads notes, never raw
+activity, and keeps the content switch.
+
+**A sitting sent from a computer is an invocation of a home service.** On the
+home, `history.submit` runs as `Desktop.InvokeFamily` runs any home service:
+an `inv_<id>` run with `[:fermix, :computer_invocation, :start | :complete |
+:error]` bookends (capability `history`, op `submit`), never its arguments. A
+computer's report of its recorder (`history.report`, a state word and counts)
+is the same kind of run with op `report`.
+The home telling a computer of a purge or pause from chat
+(`ComputerHistory.Delivery`) is an ordinary server invocation of
+`history.apply`, and of `history.off` when the owner switches that computer's
+history off from chat, its turn named `computer_history_delivery:<unix_ms>`; that id
+emits nothing on the home and rides on the computer only as its `inv_` run's
+`parent_session` correlation, so it is not a run kind and the exporter needs no
+clause for it.
+
 ## Management socket runs (Doctor sessions and management jobs)
 
 The management wire has two **run kinds** and no others. A Doctor session mints
-`session_id = "doctor:<rand>"`; a management job mints `"job:<rand>"`. Both go
+`session_id = "doctor:<rand>"`; a management job mints `"job:<rand>"`, and on a
+computer linked to its server, whose own jobs' ids name it, `"computer.job:<rand>"`
+(the exporter reads both prefixes as a management job). Both go
 through `FermixCore.Management.Telemetry` — never hand-rolled. Bookends are
 `[:fermix, :doctor, :session_start | :session_complete | :session_error]` and
 `[:fermix, :management_job, :start | :complete]`, with `agent: "doctor"` /
@@ -1362,12 +1651,12 @@ one and inherit the bookends rather than minting a sixth event.
 
 Always On's two methods are sessionless the same way. `home.status` (its
 held wait included) reads and answers; `home.act` (Always On setup §9) emits
-nothing of its own: a step that starts a job (a create, a power action, a
-delete, Start again) inherits that `home_provision` job's bookends, and the
-synchronous ones (a token check, a review, a code, a move's start) stay
-sessionless as their functions are. An act logs its action id and who asked,
-and its `input` (a token, a recovery passphrase) never enters any log line or
-any event's metadata.
+nothing of its own: Restore here, the one step that starts a job, inherits
+that `home_restore` job's bookends, and the synchronous ones (a code, a
+review, a backup's start, a move's start, a move back) stay sessionless as
+their functions are. An act logs its action id and who asked, and its
+`input` (a recovery passphrase) never enters any log line or any event's
+metadata.
 
 ## Computer-use sessions
 
@@ -1465,6 +1754,7 @@ defaulted whenever its fact was not established.
 | `cu_surfaces_count` | non-negative integer | the helper looked for open surfaces after input it dispatched | how many dialogs, alerts, menus and popups the action left open; never their names |
 | `cu_truncated` | `nodes \| depth \| time` | an `elements` or `wait_for` listing stopped before the tree did | why the walk was cut short |
 | `cu_ax_messages` | non-negative integer | the helper counted the walk's accessibility messages | what the walk cost |
+| `computer` | a computer's device id | the call drove the screen of one of the home's computers (M97 §6.4) | whose screen it was; each step of it is also an invocation run on that computer (*Computer invocations*), so one call can be several `inv_` runs there and is still exactly one exec row here |
 
 `control_origin` is the one addition to the **lifecycle** rows: on
 `session_pause` and `session_resume` it is `:command` when a chat `/pause` or
@@ -1479,6 +1769,101 @@ application name, no control label, no typed text, no value a `set_value`
 carried, no image data — whatever the content-capture posture. Those are content:
 they ride the model's side of the wire and the capture gate, never always-on
 metadata.
+
+## Computer invocations
+
+A server engine asks a linked computer engine to run a capability over the link
+(`invoke_open` … `invoke_result`, M97 §6), and on the **computer** that
+invocation is a **run kind**: `session_id = "inv_<invocation id>"`, minted by
+`FermixCore.Computers.Telemetry.session_id/1`. The id is itself `inv-` and 26
+base32 characters, so a session reads `inv_inv-…`. Every emission goes through
+`FermixCore.Computers.Telemetry` — never hand-rolled — and the bookends are
+`[:fermix, :computer_invocation, :start | :complete | :error]`.
+
+**Which bookend closes the run is the diagnosis.** Every invocation the computer
+answers opens with `:start` and closes with exactly one bookend: `:complete` for
+`ok`, `cancelled` and `refused`, `:error` for `failed`, `timed_out` and
+`unknown`. A refusal is the computer answering, not the run failing, so it
+closes with `:complete` and its `refusal` word; its bookend is emitted **before**
+the answer goes, so the computer's record of a refusal never depends on the
+answer reaching the server. Measurements: `duration_ms` (a placeholder `0` on the
+opener, which the exporter never exports) and, on a bookend, `result_bytes`.
+Metadata is a fixed allowlist: `session_id`, `parent_session`, `capability`,
+`op`, `origin`, `epoch`, and on a bookend `status` and `refusal` (absent unless
+refused). Never the arguments, the result or the target: those are content, and
+the computer's journal holds the target.
+
+The run is **always a root on the computer's own trace, and `parent_session`
+rides as correlation metadata, never as a parent**. The turn that asked is on
+another machine's trace — the server's — so there is nothing on this one to nest
+under; and a turn's id is minted per engine, so the same id can name an unrelated
+turn of the computer's own, and nesting under it would file the invocation in
+that turn's trace and let the bookend ship that turn early.
+`Trace.TelemetryHandler` registers the three as `agent_event` rows
+(`computer_invocation_start | _complete | _error`, each row's `agent` the
+capability); `FermixOpik` binds them (`infer_kind("inv_" <> _)` →
+`:computer_invocation`, the root opening on `:start` and closing through
+`close_root` on `:complete` and `:error` with the fields
+`Mapper.computer_invocation_root/3` builds, `error_info` on `:error` alone,
+replay in `TraceFile`). The id prefix is minted outside `fermix_opik`; keep it in
+lockstep with the exporter's clause, or a bookend arriving without its opener
+reads as a `:subagent` phantom root. An invocation that outlives the exporter's
+idle TTL ships its root then, and its bookend opens a continuation root under the
+same id, as a computer-use session's does; the JSONL stream is the complete
+record.
+
+**On the server an invocation is one tool exec.** The model's one call that
+invokes a computer is one ordinary `[:fermix, :tool, :exec]` under the *turn's*
+session, and its metadata gains four keys from
+`Computers.Outcome.exec_metadata/1`: `computer` (the computer's device id),
+`invocation` (the invocation's id), `invoke_status` (how it ended) and `refusal`
+(absent unless refused). Two ids and two closed words, never the target or the
+arguments, so all four ride outside the content gate; the bare `invocation` id is
+how a reader finds the computer's `inv_<id>` root. A metadata key no exporter
+names is silently dropped, so the four are listed in both allowlists a tool key
+must pass: `Mapper.tool_span/3`'s `Map.take` and
+`TraceFile.normalize("tool_exec", …)`. As with `outcome`, their **types differ by
+seam**: `invoke_status` and `refusal` are atoms on the live path and strings
+after replay, both pinned by tests, so a consumer that compares them must accept
+both spellings. A tool that ran on the computer and failed (a command that exited
+non-zero, a path its sandbox refused in the tool's own words) is `invoke_status:
+failed`, never `ok`, on this row and in the computer's journal; its `success` is
+false and its `error_summary` the first 500 characters of the tool's error, while
+the model still reads the whole error.
+
+A `browser` call on a computer (M97 §6.4) may make more than one invocation: a
+sign-in's lookup and its fill, a fill and the submit that follows it. It is
+still the model's one call and one exec row, under `browser`, whose
+`invocation`, `invoke_status` and `refusal` are the **last** invocation's (the
+one whose answer the model reads), and whose `backend` is the computer's own
+browser (`cdp` or `fermix_app`). A row whose call was refused before any
+invocation carries `computer` alone. When a turn whose browser ran on a computer
+ends, the server's `Browser.ComputerTurn` tells that computer with one more
+invocation, `browser.end`, which no model call made and so has no exec row; it
+is a root on the computer like any other.
+
+A call the home refused **before** anything was sent (`Computers.Choice`, M97
+§6.5) has no invocation, so it carries none of the four: its exec row carries
+`computer_refusal` instead, one closed word, a string on both seams: `away`,
+`ambiguous`, `no_such_computer`, `not_offered` or `settings_only`
+(`Choice.refusals/0`), beside the `computers` pre-execution marker (see "Proving
+a policy denial"). Never the computer's name the call carried, which is the
+model's argument and content. It is in both allowlists with the four.
+
+Two invocations come from no model call (M99 §10.1). A notification the
+server's reminder rail shows on a computer is the `notifications` capability,
+op `post`: on the computer an ordinary `inv_<id>` run with
+`capability: "notifications"`, origin `background` and `parent_session`
+`reminder-<reminder id>` (or `notification-<key>` for one with no reminder),
+its target never the text. Its op `ready`, asked when a reminder for the
+computer is stored, carries the storing turn's origin and session; it is no
+thing Fermix did there, so the journal holds no row for it, while its bookends
+still run. A Snooze pressed on such a notification goes the other
+way, a computer's request of the home's `reminders` service, op `snooze`,
+origin `computer`, under an id `snz-<24 hex>`: the server's
+`Desktop.InvokeFamily` opens and closes its run with the same three bookends,
+`parent_session` absent, as it does for `history.submit`. Neither adds an event
+name, a metadata key or an exporter clause.
 
 ## Content (prompts / responses / tool IO)
 

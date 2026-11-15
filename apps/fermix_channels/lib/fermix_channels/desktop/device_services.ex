@@ -1,17 +1,26 @@
 defmodule FermixChannels.Desktop.DeviceServices do
   @moduledoc """
   What a linked desktop serves for its primary beside the relay (M75 D17,
-  D19), in the device role: the sign-in loopback forward
-  (`Desktop.Loopback`) and the snapshot copies (`Desktop.SnapshotStore`).
-  The relay hands each the primary's events (`Desktop.Relay`'s `@inbound`),
-  so they start before it (`Desktop.DeviceSupervisor`).
+  D19, M97 §5.1), in the device role: the sign-in loopback forward
+  (`Desktop.Loopback`), the snapshot copies (`Desktop.SnapshotStore`) and the
+  media fetches (`Desktop.MediaFetches`), each family of the link in a process
+  of its own, what this computer offers its server (`Desktop.Offers`,
+  M97 §3.2), which the relay tells when a session is up, and the snoozes
+  pressed on a reminder's notification here, which go to the server that
+  holds the reminder (`Desktop.ReminderUplink`, M99 §10.1). The relay hands each the primary's events (`Desktop.Relay`'s
+  `@inbound`) and never waits on one, so they start before it
+  (`Desktop.DeviceSupervisor`).
 
-  `:one_for_one`: each keeps its own state and none depends on another.
+  `:one_for_one`: each keeps its own state and none depends on another, so
+  one that dies is restarted alone and the relay's session stays up.
   """
 
   use Supervisor
 
   alias FermixChannels.Desktop.Loopback
+  alias FermixChannels.Desktop.MediaFetches
+  alias FermixChannels.Desktop.Offers
+  alias FermixChannels.Desktop.ReminderUplink
   alias FermixChannels.Desktop.SnapshotStore
 
   @spec start_link(keyword()) :: Supervisor.on_start()
@@ -23,7 +32,13 @@ defmodule FermixChannels.Desktop.DeviceServices do
     home = Keyword.fetch!(opts, :home)
 
     Supervisor.init(
-      [Loopback, {SnapshotStore, home: home}],
+      [
+        Loopback,
+        {SnapshotStore, home: home},
+        {MediaFetches, home: home},
+        {Offers, home: home},
+        ReminderUplink
+      ],
       strategy: :one_for_one
     )
   end

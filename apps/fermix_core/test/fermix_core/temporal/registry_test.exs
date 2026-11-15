@@ -1153,7 +1153,7 @@ defmodule FermixCore.Temporal.RegistryTest do
     test "a created yearly event states its recurrence and its next occurrence", %{repo: repo} do
       assert {:ok, %{stated_as: stated}} = create(repo, birthday_params())
 
-      assert stated == "every September 14 — next on Monday, September 14"
+      assert stated == "every September 14, next on Monday, September 14"
     end
 
     test "an idempotent repeat states the same stored occurrence", %{repo: repo} do
@@ -2198,6 +2198,7 @@ defmodule FermixCore.Temporal.RegistryTest do
     answer = if server?, do: {:ok, "b true\n"}, else: {:ok, "b false\n"}
 
     [
+      placement: :here,
       provider: :dbus,
       find_executable: fn "busctl" -> @busctl end,
       runner: fn @busctl, _args ->
@@ -2208,7 +2209,7 @@ defmodule FermixCore.Temporal.RegistryTest do
   end
 
   # A computer no test may reach: any question asked of it fails the test.
-  defp computer_never_asked(native \\ [provider: :dbus]) do
+  defp computer_never_asked(native \\ [placement: :here, provider: :dbus]) do
     native ++
       [
         find_executable: fn "busctl" -> flunk("this computer was asked") end,

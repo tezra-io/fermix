@@ -14,6 +14,8 @@ defmodule FermixCore.Readiness do
 
   alias FermixCore.Auth.ChatGPT
   alias FermixCore.Config
+  alias FermixCore.Home.Role
+  alias FermixCore.IMessage
   alias FermixCore.IMessage.HelperInstaller
   alias FermixCore.Management.Settings.Channels.Inventory
   alias FermixCore.Providers.Descriptor
@@ -91,29 +93,61 @@ defmodule FermixCore.Readiness do
   # Slack over Socket Mode (M75) needs the app-level token where the webhook
   # needs the signing secret, so it has a sentence of its own.
   @slack_socket_action "Add the Slack bot token and app-level token in Channels settings."
+  # The rows whose sentence the engine publishes beside the key (M97 §6.4):
+  # the iMessage rows, which say what only the engine knows, the Mac of the
+  # home that carries Messages. Every other row's words are each surface's.
+  @published_sentences ~w(channel:imessage:helper channel:imessage:carrier
+                          channel:imessage:conflict channel:imessage:away)
+  # The rows that say a channel's computer is away rather than that setup is
+  # owed (M97 D4).
+  @away_keys ["channel:imessage:away"]
 
-  @spec report() :: report()
-  def report do
-    failures =
-      Enum.reject(
-        [
-          provider_failure(),
-          telegram_failure(),
-          whatsapp_failure(),
-          discord_failure(),
-          slack_failure(),
-          signal_failure(),
-          imessage_failure(),
-          realtime_failure(),
-          personalization_failure()
-        ],
-        &is_nil/1
-      ) ++ sandbox_env_failures()
+  @doc """
+  The readiness of this engine's settings, judged for the role it runs the
+  home in (`Home.Role`, the role this engine booted in; a process that booted
+  none is judged as the primary). `opts` names the role, the host and the
+  home for a test (`role:`, `macos?:`, `imessage_carrier:`): iMessage reads
+  the last two.
+
+  A computer that joined a home (the device role) runs no turn, calls no
+  provider, starts no channel or voice session and keeps no memory of its
+  own: those rows are the primary's. It runs the home's commands in its own
+  sandbox, so the sandbox's rows are the ones it is judged on (M97 F8).
+  """
+  @spec report(keyword()) :: report()
+  def report(opts \\ []) when is_list(opts) do
+    failures = failures(Keyword.get_lazy(opts, :role, &booted_role/0), opts)
 
     %{
       status: status_for(failures),
       failures: failures
     }
+  end
+
+  defp failures(:device, _opts), do: sandbox_env_failures()
+
+  defp failures(role, opts) when role in [:primary, :candidate] do
+    Enum.reject(
+      [
+        provider_failure(),
+        telegram_failure(),
+        whatsapp_failure(),
+        discord_failure(),
+        slack_failure(),
+        signal_failure(),
+        imessage_failure(opts),
+        realtime_failure(),
+        personalization_failure()
+      ],
+      &is_nil/1
+    ) ++ sandbox_env_failures()
+  end
+
+  defp booted_role do
+    case Role.booted() do
+      %{role: role} -> role
+      nil -> :primary
+    end
   end
 
   @doc "Every pane slug a readiness failure can name."
@@ -150,6 +184,9 @@ defmodule FermixCore.Readiness do
           multiple_primary_action(),
           invalid_auth_mode_action("provider:anthropic", "subscription"),
           imessage_helper_row(),
+          imessage_carrier_row(:none),
+          imessage_carrier_row({:conflict, ["loft Mac", "studio Mac"]}),
+          imessage_carrier_row({:away, "studio Mac"}),
           slack_socket_row()
         ] ++ Enum.map(realtime_providers(), &realtime_key_row/1),
       &{&1.detail_key, &1.action}
@@ -170,6 +207,26 @@ defmodule FermixCore.Readiness do
   @spec gating_failures([failure()]) :: [failure()]
   def gating_failures(failures) when is_list(failures),
     do: Enum.filter(failures, &(Map.get(&1, :gating, true) == true))
+
+  @doc """
+  The engine's own sentence for `failure` where it publishes one beside the
+  detail key (M97 §6.4): the iMessage rows, which name the Mac of the home
+  that carries Messages where the engine knows it. Nil for every other row,
+  whose words each surface keeps by its detail key.
+  """
+  @spec sentence(failure()) :: String.t() | nil
+  def sentence(%{detail_key: detail_key, action: action})
+      when is_binary(detail_key) and is_binary(action),
+      do: if(detail_key in @published_sentences, do: action)
+
+  @doc """
+  Whether `failure` says a channel's computer is away (the Mac that carries
+  Messages, M97 D4) rather than that setup is owed: the channel is away
+  while that computer is, and its transport says when.
+  """
+  @spec away?(failure()) :: boolean()
+  def away?(%{detail_key: detail_key}) when is_binary(detail_key),
+    do: detail_key in @away_keys
 
   @doc "Whether no gating failure remains. The one definition of ready."
   @spec ready?() :: boolean()
@@ -457,10 +514,13 @@ defmodule FermixCore.Readiness do
 
   defp signal_failure, do: channel_credentials_failure(:signal)
 
-  # iMessage (M54 §14) reads presence only: the saved section, then whether the
-  # helper is on disk. Its probe spawns the helper, so it is read by Doctor and
-  # `imessage.permissions.get`, never on this hot path.
-  defp imessage_failure do
+  # iMessage (M54 §14) reads presence only: the saved section, then on a Mac
+  # whether the helper is on disk, and anywhere else the Mac of the home that
+  # carries Messages (M97 §6.4): none, more than one, or one that is away
+  # (advisory: the channel is away, not broken), and on a build no Mac can
+  # carry it for, that it needs a Mac. Its probe spawns the helper, so it is
+  # read by Doctor and `imessage.permissions.get`, never on this hot path.
+  defp imessage_failure(opts) do
     cond do
       not channel_enabled?(:imessage) ->
         nil
@@ -468,13 +528,37 @@ defmodule FermixCore.Readiness do
       not channel_configured?(:imessage) ->
         channel_failure(:imessage, @channel_actions[:imessage])
 
-      not HelperInstaller.installed?() ->
-        imessage_helper_row()
+      Keyword.get_lazy(opts, :macos?, &IMessage.macos?/0) ->
+        if HelperInstaller.installed?(), do: nil, else: imessage_helper_row()
 
       true ->
-        nil
+        opts |> Keyword.get_lazy(:imessage_carrier, &carrier/0) |> carrier_failure()
     end
   end
+
+  defp carrier, do: IMessage.carrier(macos?: false)
+
+  defp carrier_failure(:none), do: imessage_carrier_row(:none)
+
+  defp carrier_failure({:conflict, computers}),
+    do: imessage_carrier_row({:conflict, Enum.map(computers, & &1.name)})
+
+  defp carrier_failure({:computer, %{connected: false, name: name}}),
+    do: imessage_carrier_row({:away, name})
+
+  defp carrier_failure({:computer, _connected}), do: nil
+
+  defp imessage_carrier_row(:none),
+    do: imessage_row(IMessage.none_sentence(), "channel:imessage:carrier")
+
+  defp imessage_carrier_row({:conflict, names}),
+    do: imessage_row(IMessage.conflict_sentence(names), "channel:imessage:conflict")
+
+  defp imessage_carrier_row({:away, name}),
+    do: imessage_row(IMessage.away_sentence(name), "channel:imessage:away")
+
+  defp imessage_row(action, detail_key),
+    do: advisory(%{component: "channel:imessage", action: action}, "channels", detail_key)
 
   defp imessage_helper_row do
     advisory(

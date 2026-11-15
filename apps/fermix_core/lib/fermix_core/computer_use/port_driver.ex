@@ -20,7 +20,9 @@ defmodule FermixCore.ComputerUse.PortDriver do
 
   The state is opaque — it holds the transport's pid, not a Port — plus the
   `:session_id` this adapter needs for correlation. The sidecar's death reaches
-  the process that called `start/1` as `{:compux_sidecar_exit, transport, status}`.
+  the process that called `start/1` as `{:compux_sidecar_exit, transport, status}`,
+  or the process `:owner` names (the screen's seat, which starts its helper
+  in a process of its own).
   """
 
   @behaviour Compux.Driver
@@ -31,12 +33,13 @@ defmodule FermixCore.ComputerUse.PortDriver do
   def start(opts) do
     path = Keyword.fetch!(opts, :binary_path)
 
-    compux_opts = [
-      binary_path: path,
-      timeout: Keyword.get(opts, :timeout, Timeouts.cu_sidecar_action()),
-      args: Keyword.get(opts, :args, []),
-      env: Keyword.get(opts, :env, [])
-    ]
+    compux_opts =
+      [
+        binary_path: path,
+        timeout: Keyword.get(opts, :timeout, Timeouts.cu_sidecar_action()),
+        args: Keyword.get(opts, :args, []),
+        env: Keyword.get(opts, :env, [])
+      ] ++ Keyword.take(opts, [:owner])
 
     with {:ok, cstate} <- Compux.PortDriver.start(compux_opts) do
       {:ok, Map.put(cstate, :session_id, Keyword.get(opts, :session_id))}

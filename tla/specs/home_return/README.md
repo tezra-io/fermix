@@ -6,9 +6,9 @@ the computer it left, which receives it in its own device engine. "Mac" is
 that computer, whatever its OS. Three copies of the home take part:
 - **The Mac's retired copy**: its home, configured as a device, carrying the
   moved marker (`moved.json`) and the desktop link (`device/desktop.json`).
-- **The server's home**, the primary. It moves as a replace's source does
-  (`FermixChannels.Home.MoveWorker`, `keep_as_desktop: false`): it retires by
-  its own marker, or undoes the move before writing it.
+- **The server's home**, the primary, on the Linux server the owner set up.
+  It moves with `keep_as_desktop: false` (`FermixChannels.Home.MoveWorker`):
+  it retires by its own marker, or undoes the move before writing it.
 - **The Mac's staging** (`candidate/staging`): the server's copy restored for
   this computer. The activation puts it in place of the retired copy, in the
   same home (`Activation.activate/2`, steps a to g of the design's 3.2, one
@@ -29,25 +29,28 @@ The parts:
   - Move now: `move_started_at` written ahead, then `home.move.start`
     forwarded over the link.
   - Cancel.
-  - Delete your server.
-  - Restore here, when no server answers: the delete through the ledger as
-    the fence, then the local copy staged and activated.
+  - Restore here, when no server answers: its request in `return.json`, then
+    the local copy staged and activated in the `home_restore` job, whose
+    ending takes the request back.
 
   Each act reads the summary (`HomeSummary`) first and runs only what it
   offers (the key rule). Its steps after that read are steps of their own, so
   the candidate and the server can move in between, as they can in the code.
-- **The provider**, which deletes the server, or refuses (`Provision`,
-  `Provision.Driver`).
+- **The owner**, who deletes or stops the server outside Fermix where the
+  Mac's screen offers Restore here, as its confirm asks. Fermix deletes no
+  server.
 
 The spec was first written from the design, ahead of the acts. Its finding
 HR-1 changed the design before the acts were built: Move now writes the start
 ahead. It now mirrors the built acts. Its findings against them, HR-2 and
-HR-3, are fixed (352ae545), and so is the second check 09 found.
+HR-3, are fixed (352ae545). Restore here then ran a delete of its own before
+its restore; since 63207f61 it deletes nothing, and HR-3's rule rests on its
+request standing beside its job.
 
 **Who serves as the primary**:
-- **The server**: it exists (no delete removed it), and its engine booted as
-  the primary, or its next boot will (config primary, no marker:
-  `Role.resolve/2`).
+- **The server**: it runs (the owner did not delete or stop it), and its
+  engine booted as the primary, or its next boot will (config primary, no
+  marker: `Role.resolve/2`).
 - **The Mac**: its engine booted as the primary, or, from its commit point on,
   its `config.toml` says primary with no marker. The commit point is step f,
   the rename of the staged `config.toml`.
@@ -64,21 +67,20 @@ primary over the three copies" is two rules here:
 | `MessagesCanBeLost` | environment | A rail loses a request or an answer. An answer comes after the worker stopped waiting. Or the forwarded `home.move.start`'s answer is lost (`unconfirmed`), before or after the server had it. At most `MaxLosses` in all |
 | `ServerCanCrash`, `MacCanCrash` | environment | The engine dies and boots again from its files (at most `MaxCrashes` each) |
 | `TransferCanFail` | environment | A staging fails: the rail's (a keychain that refuses, a restore that fails: `restored/2`'s error clause) or a local copy's (`LocalReturn`'s `failed`). Or the server's ready epoch or marker cannot be written (`commit/4` aborts) |
+| `JobCanStop` | environment | Restore here's job is stopped from outside, past its budget or cancelled: its run runs nothing after the stop |
 | `NetCanFail` | environment | The network between the Mac and its server fails for good. The link and every rail end; a server that runs runs on |
-| `DeleteCanFail` | environment | The provider refuses a delete |
 | `MaxPresses` | bound | The owner's presses on the Mac's Always On screen |
 | `MarkerBeforeCommit` | mechanism | The server writes its `moved.json` and records `committing` before it sends `move_commit` (`commit/4`, `retired/4`) |
 | `MarkerBeforeConfig` | mechanism | The activation removes the Mac's `moved.json` (step e) before it renames the staged `config.toml` into place (step f) (`activate/3`) |
 | `RecordEntries` | mechanism | The staged entries are recorded once, in `candidate/entries.json`, before any rename, and every run reads them back (`record_entries/1`). `FALSE` lists the staging again at each run, as the forward `activate/1` does |
 | `PruneRetired` | mechanism | Step a sets aside every path of the retired copy that no recorded entry names and this machine does not keep (`prune_retired/3`) |
-| `DeleteBeforeRestore` | mechanism | Restore here's job deletes the server first, and restores nothing after a fence refused or failed (`run_return_restore/4`, `fenced_restore/3`). `FALSE` restores first |
-| `DeleteOfferedOnlyBack` | mechanism | The summary offers Delete your server on this computer only once `return.json` has `moved_at` (`back/1`). `FALSE` offers it whenever the ledger's server stands, which leaves the delete to `delete_target/4` alone |
-| `UnconfirmedKept` | mechanism | Move now keeps `move_started_at` for an `unconfirmed` answer too (`return_answered/3`), as a replace's `Provision.move_forwarded/3` does. `FALSE` keeps it only on `{ok, move_id}` |
+| `OwnerDeletesFirst` | mechanism | The owner confirms Restore here only once the server is deleted or stopped, as its confirm asks (`Copy`'s `confirm_restore_here`). `FALSE` confirms with the server still running |
+| `UnconfirmedKept` | mechanism | Move now keeps `move_started_at` for an `unconfirmed` answer too (`return_answered/3`). `FALSE` keeps it only on `{ok, move_id}` |
 | `StartKeptFirst` | mechanism | Move now writes `move_started_at` before it forwards `home.move.start` (`return_start_ahead/2`), and the answer settles it. `FALSE` is the design's draft 2, which wrote it after the answer (HR-1) |
-| `MovingBackRefused` | mechanism | `delete_target/4` refuses `:moving_back` while a `candidate/` exists, or while `return.json` says the move back started and is not done (`moving_back?/1`, `started_back?/1`). `FALSE` has no such clause |
 | `StoppedReturnClears` | mechanism | A move back that a stop left part-way can be cleared. This switch stands for two changes, either of which alone closes the path (checked by hand): Cancel removes `return.json` before `candidate/` (`forget_return/1`), and a started record left alone, whose server answers with no move, offers Cancel (`returning/1` with `server_idle?/1`, `return_stopped/2`; `cancel/2`'s `returning?/1`). `FALSE` is neither change (HR-2) |
 | `UndoneInAnyPhase` | mechanism | A candidate receiving or staged, whose server answers as the primary with no move under way, draws undone, or Cancel when it has no record (`return_view/2`). `FALSE` draws moving whatever the server says (HR-2) |
-| `RestoreOnFenceRequest` | mechanism | Restore here is offered for a ledger server or a requested fence (`restore_offer/1` on `fence_requested`). `FALSE` needs `fenced_at`, which a stop after the delete never writes (HR-3) |
+| `RequestBesideJob` | mechanism | The summary draws Restore here running only while its request in `return.json` stands beside its running job (`restore_running?/1`, `Home`'s `restoring?/2`). `FALSE` takes the request alone, which a stop of the engine leaves behind |
+| `EndingSettles` | mechanism | The job's ending settles a `local` candidate a stopped run left, as the next start would (`restore_ended/3`): one receiving is discarded (`Home.Candidate.remove/1`), one activating is finished by a restart. `FALSE` takes back only the request |
 
 Every check sets every switch.
 
@@ -86,8 +88,9 @@ Every check sets every switch.
 
 Every check runs with every failure on: losses, late answers and lost
 forwarded answers; both engines crashing; the stagings and the server's
-marker failing; the network failing for good; and the provider refusing
-deletes.
+marker failing; the network failing for good; Restore here's job stopped
+from outside; and the owner deleting the server where Restore here is
+offered.
 
 **Check 01**: three rules.
 - `AtMostOnePrimary`: never both the server and the Mac serve as the
@@ -96,53 +99,33 @@ deletes.
     sends `move_commit` before its marker, and the Mac activates through f.
     The marker write then fails, so the server aborts and undoes the move and
     writes role primary.
-  - `DeleteBeforeRestore` (check 03, 15 states). With the network down,
-    Restore here stages and activates the copy first. The server, which
-    still runs, has not been deleted when the Mac's `config.toml` says
-    primary.
+  - `OwnerDeletesFirst` (check 03, 15 states). With the network down,
+    Restore here is confirmed while the server still runs, and the Mac's
+    `config.toml` says primary beside a server that serves.
 - `NoRefusedBoot`: the Mac's `config.toml` never says primary beside its
-  marker. It rests on `MarkerBeforeConfig` (check 04, 16 states): with f
+  marker. It rests on `MarkerBeforeConfig` (check 04, 15 states): with f
   before e, the state between them is one whose boot `Role.resolve/2`
   refuses.
 - `RetiredCopyNeverServes`: once the Mac serves as the primary, every path
   that is not this machine's own came from the staging, and none of the
   staging's is missing. A missing `memory.db` would make the primary's repo
   open a fresh one. The rule rests on two mechanisms:
-  - `RecordEntries` (check 05, 22 states). A local restore's activation
+  - `RecordEntries` (check 05, 21 states). A local restore's activation
     places the staged entry, and the engine dies. The next run lists the
     staging, which no longer names the entry, so step a sets the server's
     copy aside, and the primary opens a fresh `memory.db`.
-  - `PruneRetired` (check 06, 17 states): without step a, a file the server
+  - `PruneRetired` (check 06, 16 states): without step a, a file the server
     deleted survives into the primary.
-
-**Check 07**: `ServerDeletedOnlyAfterReturn`. The server is deleted only once
-the Mac recorded `moved_at` at its boot as the primary, or as Restore here's
-fence before anything is staged and while the Mac's `config.toml` still says
-device. It rests on two mechanisms:
-- `DeleteBeforeRestore` (check 08, 17 states): a job that restores first
-  deletes after the staging.
-- **Check 09** runs the same rule with `DeleteOfferedOnlyBack` off: Delete
-  your server offered on every screen while the ledger's server stands. The
-  rule still holds, because `delete_target/4` alone refuses the delete while
-  a move back's candidate or started record stands. That rests on
-  `MovingBackRefused` (check 21, 29 states). Without the refusal, Delete is
-  pressed after step e, when the device has lost its link (step c) and its
-  marker (step e), and the server is deleted before `moved_at`.
-
-  Wave 3 first refused only while a `candidate/` existed. This check then
-  broke in the second between step g and the candidate's restart, where no
-  candidate is left. Refusing a started record too (`started_back?/1`)
-  closed that second (352ae545).
 
 **Check 10**: `RetiredOnlyForStagedReturn`. Once the server wrote its marker,
 the Mac holds the staged home, is activating it, or serves it. This is
 `home_move`'s retire rule, carried to the return: a server that retired for
 anything less leaves no primary, and its resume loop never ends. It rests on
 two mechanisms:
-- `UnconfirmedKept` (check 11, 22 states). With an `unconfirmed` answer
+- `UnconfirmedKept` (check 11, 23 states). With an `unconfirmed` answer
   taken as "not started", the record goes again, so Cancel is offered while
   the server moves. The path from there is HR-1's.
-- `StartKeptFirst` (check 12, 21 states): HR-1's path, with the start written
+- `StartKeptFirst` (check 12, 22 states): HR-1's path, with the start written
   after the answer.
 
 **Check 19**: `UndoneReturnCanEnd`, a proposed rule (HR-2). While the
@@ -153,8 +136,15 @@ the Mac, the Mac's screen offers a step. It rests on two mechanisms:
 
 **Check 20**: `GoneServerCanBeRestored`, a proposed rule (HR-3). A Mac whose
 server is gone, and which serves nothing itself, is offered Restore here
-once nothing runs. It rests on `RestoreOnFenceRequest` (check 24, 6 states):
-HR-3's path.
+once nothing runs. It rests on two mechanisms:
+- `RequestBesideJob` (check 24, 6 states): the network fails, the owner
+  deletes the server, Restore here keeps its request, and the Mac's engine
+  stops before its job writes anything else. Taken alone, the request it
+  leaves draws moving with nothing to press.
+- `EndingSettles` (check 25, 9 states): the same, but the job is stopped
+  from outside once its `local` candidate is written. The ending takes the
+  request back, and the candidate left receiving draws moving with nothing
+  to press until the next start.
 
 **Witnesses**:
 - **13**: the round trip. The server retires, and the Mac boots as the
@@ -167,9 +157,8 @@ HR-3's path.
 - **16**: a `move_done` is lost (the Mac restarted with it on the rail), and
   the return completes on the Mac. The server resumes, and finds no candidate
   to answer.
-- **17**: no server answers. The fence deletes it, and the Mac restarts from
+- **17**: no server answers. The owner deletes it, and the Mac restarts from
   its copy.
-- **18**: Delete your server removes the server after the return.
 
 ## Findings
 
@@ -187,7 +176,7 @@ there:
 - the Mac's engine died between the answer and the write;
 - an `unconfirmed` answer was not counted as started.
 
-The path (check 12, 21 states):
+The path (check 12, 22 states):
 1. Move back. The candidate enrols.
 2. Move now. The server takes `home.move.start`, records the move, restarts
    into it, and answers.
@@ -200,9 +189,8 @@ The path (check 12, 21 states):
 7. Cancel stops the candidate and removes `candidate/`. The server is
    retired, and nothing holds its home.
 
-The same lost record also gave two more paths, found against checks 01 and 07:
-- a wedge: Cancel killed the candidate's restart in the second after g;
-- a delete before `moved_at`, by Restore here's fence.
+The same lost record also gave a wedge, found against check 01: Cancel
+killed the candidate's restart in the second after g.
 
 **The fix, as built**:
 - **Write ahead.** `return_start_ahead/2` writes `move_started_at` before the
@@ -212,8 +200,6 @@ The same lost record also gave two more paths, found against checks 01 and 07:
   refusal) takes it back.
 - **A new summary row.** A start recorded while the server answers as the
   primary with no move under way draws ready again (`server_idle?/1`).
-- **Delete refused.** `delete_target/4` refuses `:moving_back` while a
-  `candidate/` exists.
 
 ### HR-2: after the server undid a return, or never started it, the Mac could be left showing moving with nothing to press
 
@@ -268,35 +254,28 @@ draws moving (D14). With the fix, only a candidate removed by hand reaches
 that, and the model reaches it only in the second before the candidate's
 restart, which ends at the Mac's boot as the primary.
 
-### HR-3: a stop between the fence's delete and its `fenced_at` left no primary and no Restore here
+### HR-3: a stop inside Restore here left no primary and no Restore here
 
-**Fixed** in 352ae545. Check 24 keeps the path. Check 20 holds.
+**Fixed** in 352ae545, for the delete Restore here then ran before its
+restore. Restore here deletes nothing since 63207f61, and check 24 keeps the
+path the rule rests on now. Check 20 holds.
 
 The rule is a proposed one: `GoneServerCanBeRestored`. A Mac whose server is
 gone, and which serves nothing itself, is offered Restore here once nothing
 runs.
 
-The fence is two writes:
-1. `Driver.delete/3` removes the server and clears it from the ledger.
-2. `Provision.fenced/2` writes `fenced_at`.
-
-`restore_offer/1` offered Restore here only for a ledger server or a
-`fenced_at`, so after a stop between the two writes there was neither:
-- the screen was `cannot_reach` or `deleted`, with Learn more;
+At 69fb0c1a, Restore here's delete and the record that it was done were two
+writes, and the offer read the record. After a stop between them:
+- the screen was `cannot_reach`, with Learn more;
 - nothing served the home;
 - Always On could not restore it.
 
-The path (check 24, 6 states): the network fails; Restore here; the fence
-deletes the server and clears the ledger; the Mac's engine dies.
-
-**The fix, as built** (`RestoreOnFenceRequest`):
-- `restore_offer/1` offers Restore here for a ledger server or a
-  `fence_requested`. The job's `fence/4` then runs the restore alone
-  (`fenced_before/2`).
-- `fence_failed?/2` needs the ledger still to hold a server, so a fence whose
-  delete went through is no delete failure.
-- `restore_offer/1` also needs the server as silent as the fence asks (D13).
-  Here that is the link being down.
+**As built now** (`RequestBesideJob`): Restore here keeps its request in
+`return.json` and starts the `home_restore` job, whose ending takes the
+request back however the run ended. The summary draws the restore running
+only while that request stands beside the running job
+(`restore_running?/1`, `Home`'s `restoring?/2`). A request a stop of the
+engine leaves behind draws nothing, so Restore here is offered again.
 
 ## Model and code
 
@@ -307,33 +286,279 @@ first version modelled from the design, and whether it matters:
   Cancel. A started record with no candidate draws moving. Receiving and
   staged draw moving whatever the server says. That was HR-2, since fixed;
   modelled.
-- **`delete_target/4`.** It has the fence case and refuses `:moving_back`
-  while any `candidate/` exists. Modelled. It left open the second after
-  step g, which check 09 found and `started_back?/1` has since closed.
-- **The fence is two writes.** Restore here's offer needs the ledger's server
-  or `fenced_at`. That was HR-3, since fixed; modelled.
 - **A local staging can fail.** It records `failed` and ends the job, and
   `prepare_return/3` replaces that candidate. Modelled.
 - **Move now's write-ahead and settlement**, and **Cancel's stop, withdraw
   and two removals**, are as the spec proposed. Unchanged.
-- **The key's derivation** happens at the press, before the fence. It
-  matters to no rule (one staging step here).
+- **The key's derivation** happens at the press. It matters to no rule (one
+  staging step here).
 - **Move back's server check and forward** fold into the press, as before.
 
 Walked again against e115c598, the fixes:
 - **HR-2:** `forget_return/1`'s order; `cancel/2` with `returning?/1`;
   `returning/1` with `server_idle?/1`; `return_stopped/2`; and `return_view/2`
   for receiving and staged.
-- **HR-3:** `restore_offer/1` on `fence_requested` and `silent?/1`;
-  `fence_failed?/2` with a ledger server.
-- **Check 09's second:** `delete_target/4` with `moving_back?/1` and
-  `started_back?/1`.
-- **A fence refused for a server that answers again:** `fence_refused/1`
-  and `server_back/1`. The request is dropped, with no ledger failure, and
-  the screen is the linked one again (`RhDelete` sets `return.json` back to
-  a plain record).
+- **HR-3:** `restore_offer/1` with `silent?/1`.
 
 Each is modelled as built. Walking them found nothing new.
+
+Walked again against 63207f61, Restore here with no delete:
+- `restore_here/3` keeps the request (`restore_record/3`) and starts the
+  job (`start_restore/3`), whose ending takes it back (`request_done/1`),
+  as a start refused busy does;
+- `restoring/1` and `restore_running?/1` draw it running only beside the
+  running job, which `Home`'s `restoring?/2` reads from the job family;
+- `restore_offer/1` needs a copy and a silent server, nothing more;
+- the owner deletes or stops the server outside Fermix, where Restore
+  here's confirm asks for it (`OwnerDeletes`).
+
+Walked again after the review of the cut:
+- `silent?/1` is silent only where nothing answers (no link, or no session
+  for ten minutes). A server that answers as one that is not the primary
+  (`revoked`, `stale`) is not silent. `RestoreOffer` follows it
+  (`ServerSilent`): here a server that runs answers unless the network
+  failed.
+- `restore_record/3` starts a record of its own over a move back that
+  ended. Here the home moves away once only, so it never meets one.
+- `restore_ended/3`: the job's ending settles what a stopped run left
+  (`RhStopped`, `RhSettle`, `EndingSettles`).
+
+Each is modelled as built. Walking them found nothing new.
+
+Each is modelled as built. Walking them found nothing new.
+
+Walked again against db21a29d (M97: the computer's key and switches):
+- **Step c** (`end_tenure/2`) deletes the ended tenure's key from the secret
+  store its link records (with any file an older Fermix kept it in), then
+  removes the link, so a stop between the two deletes the key again. The key
+  is a write no rule reads, so `CTenure` stays one step. A link it cannot
+  read, or a store that will not delete, now fails the step where two file
+  removals did before, and the activation tries again, as the header's
+  failed activation does (not modelled).
+- **The server's move worker** moves with `keep_as_desktop: false`, so it
+  makes no key, no row, no link and no switches; `ensure_offers/1` on its
+  resume writes nothing.
+- **The `on` screen** offers the review of what a computer that moved before
+  M97 keeps on for its server (`review_offers`), beside Back up now, and
+  Move now from the computer that sets Always On up records `keep_offers`
+  in its request (`local_move/3`). Each is an act that writes nothing a rule
+  reads; Move now on a return (`forwarded_move/4`) is as before.
+
+None changes a modelled step. The comments' line numbers into the files
+this commit changed had drifted before it too; they now point at the
+committed code.
+
+Walked again against 16207ff5 (M97: a second computer, and the server's
+lead on versions):
+- **Move back and Restore here need the moved marker.** `move_back/1` and
+  `restore_offer/1` now offer them only where the home moved from this
+  computer (`moved`), so a computer that joined has neither. The model had
+  offered Restore here on a Mac with no marker: a Restore here whose engine
+  died while activating is finished by the candidate at the next start, and
+  between its last step and the restart the engine is still a device with
+  no marker, no link and no candidate, beside a request with no job.
+  `RestoreOffer` and `DeviceOffers` now read the marker (`mMarker`). The
+  press there was refused before any write (`Preparable` reads the marker
+  too), so every check has the result it had; the reachable states are
+  fewer (check 01: 54613, from 54682).
+- **Update in their place.** Where this computer's Fermix cannot read the
+  server's home, the summary offers Update where Move back or Restore here
+  would stand. Here the Mac reads it (the header says so).
+- **The pin** of `home_summary.ex` now names `move_back` and
+  `readable_or_update` as well, since `DeviceOffers` reads the first's
+  marker and the model takes the second's answer as read.
+- **Step c** (`end_tenure/2`) records which key is this home's once, in
+  `candidate/tenure.json`, before anything is deleted, deletes the stored
+  key only while it still holds that key, then removes the link. A link it
+  cannot read no longer fails the step: it is removed, the reason logged,
+  and any key it named stays. The record and the key are writes no rule
+  reads, and a later run reads the record and still removes the link, so
+  `CTenure` stays one step; its comment said an unreadable link fails the
+  step, and no longer does. A record that cannot be read or written, a
+  store that cannot be read, or one that will not delete, still fails it.
+- **The device tree** starts this computer's invocations (`Desktop.Invoke`)
+  beside the dial subtree while the home is linked, and a joiner inside the
+  dial subtree only while this computer joins a home and has no link. The
+  candidate subtree starts and stops as before.
+- **The act** gained Add a computer, the owner's answer to a computer that
+  asks to join, and Cancel on a computer that is joining: acts that write
+  nothing a rule reads. Move back, Move now, Cancel on a return and Restore
+  here are as before.
+- **The server's move worker** no longer reads its `machine.toml` on a
+  resume when it is not kept as a computer, as here.
+
+The comments' line numbers into the files this commit changed point at the
+committed code.
+
+Walked again against 18710c89 (M97: history notes named for their
+machine), which staled the `move_worker.ex`, `candidate.ex` and
+`activation.ex` pins:
+- **A return's staging names this computer's notes as the home's own
+  again.** `Activation.stage/6` for a return (from `stage_fun/4`, and from
+  Restore here's `LocalReturn`) renames the staged copy's rows of the device
+  id its desktop link holds back to `""` in one transaction (`own_notes/4`,
+  `ComputerHistorySql.rename_machine/3`). A link that is gone renames
+  nothing; one that cannot be read, or a rename that fails, fails the
+  staging, which the model has under `TransferCanFail` (`RestoreFails`, and
+  `RhStage` for Restore here). The link is still in place at every staging:
+  step c removes it only during the activation, after the staging. No rule
+  reads the notes.
+- **The server's move worker** names the source's device id in `move_offer`
+  when it is kept as a computer (`send_snapshot/4`), a field no rule reads.
+- **The activation** (`activate/2`, steps a to g) is as before.
+
+None changes a modelled step. The comments' line numbers into these three
+files point at the committed code; those into the candidate's
+`candidate.ex` had drifted before this change too.
+
+Walked again against c6fe1c48 (the review's fixes), which staled the
+`always_on.ex` pin: Try again with no block ticked moves with the keep the
+undone move started with (`Move.undone_keep/1`), a field of its request no
+rule reads, and Try again is not modelled. Move back, Move now, Cancel and
+Restore here are as before. The comments' line numbers into `always_on.ex`
+point at the committed code.
+
+Walked again against 1a89beae (HS-4's fix), which staled the
+`candidate.ex` pin: a return's staging passes `history: :continued`, so the
+server's live store keeps its history token; Restore here, from a stored
+copy, gets a new one. No rule reads it, no modelled step changed, and the
+comments' line numbers into `candidate.ex` point at the committed code.
+
+Walked again against c4c72e1f (M97 D16, a home's format), which staled
+the `candidate.ex` pin. A Mac whose Fermix cannot read the server's home
+format refuses it in the staging (`Archive.install/5`'s `not_newer`), a
+failed staging the model has (`RestoreFails`): the server's worker aborts
+and serves again, since it retires only once the Mac staged. Restore here
+refuses a copy in a newer format the same way (`LocalReturn`'s
+`failed_sentence/2`, `RhStage`), and the copy stays for a Fermix that reads
+it; the summary offers Update where Move back or Restore here would stand
+(`readable_or_update`, read as the scene takes it). So no move back leaves
+a home that no machine serves. No modelled step changed; the comments' line
+numbers into `candidate.ex` point at the committed code.
+
+Walked again against 101830533 (M97 D27, the computer's switches), which
+staled the `move_worker.ex` and `always_on.ex` pins: the kept lines are read
+through `Consent.known/1` and set the recorder through the history line.
+Switches no rule reads; no modelled step changed. The comments' line numbers
+into both files point at the committed code.
+
+Walked again against 8e3f586f (the Always On pane's engine half), which
+staled the `move_worker.ex`, `move_responder.ex`, `always_on.ex` and
+`home_summary.ex` pins. The summary draws one action per screen and moves
+the rest into `detail.alternatives`, which `offered/1` reads with the
+backup's Change (`change_passphrase`, a new act that starts no job); Learn
+more is gone, which the model never offered. Every set `ReturnOffers` and
+`DeviceOffers` name is offered as before: Cancel beside Move now and on the
+screens it stood on, Move back on `on`, Restore here where nothing answers.
+Move now's confirm carries every readiness warning, and `review_offers`
+with no `keep_offers` keeps the switches as they are: no act or offer set
+of the model moves. The progress the worker and the Mac's responder tell
+`Home.MoveProgress` adds no step (`home_move`'s README, the same re-read).
+The comments' line numbers into these files point at the committed code;
+those into `home_summary.ex` had drifted before this change too.
+
+Walked again against ae8ea336 (the real-machine fixes), which staled the
+`move_worker.ex` pin: its recorded sentences and logs changed, its steps
+did not. `Home.Link.computer_rows/0` now answers `:not_started` before the
+channels tree is up and `Home.Join`'s guard lets a home that holds only the
+memories Fermix seeds join; neither is pinned here, and neither is a step a
+rule reads. The comments' line numbers into `move_worker.ex` point at the
+committed code.
+
+Walked again for M97 D28 (one set of settings after a move), which stales
+the `always_on.ex` pin and the `placement.ex` pin of `@unconfirmed_methods`.
+The act gains `restart_server` (Restart <server> on a linked computer),
+which sends the rail-only `home.restart` and writes nothing of a move back.
+`@unconfirmed_methods` now lists `home.restart` beside `home.move.start`:
+the server restarts right after it answers, so an answer lost to that
+restart is `unconfirmed` too, with a sentence of its own
+(`unconfirmed/2`). The model's `unconfirmed` is `home.move.start`'s alone,
+the only forwarded call a move back sends that can be lost that way:
+`MessagesCanBeLost`, `UnconfirmedKept` and `StartKeptFirst` read only it,
+and no restart is a step of a move back, so no modelled step changed. The
+server refuses `home.restart` while a move is under way, a move back's
+included, and a move that starts while a restart waits ends the wait
+(`Home.ServerRestart`); a restart that slips in between its last read of the
+hold and the stop is a server restart mid-move, which the model has
+(`ServerCanCrash`), and the move request on disk boots the server back into
+it. Move
+back, Move now, Cancel and Restore here are as before. The comments' line
+numbers into `always_on.ex` point at the committed code.
+
+Walked again against 03df6995, f2d5efc5, f3e63d17 and 4c58837a, which
+staled the `move_worker.ex`, `device_supervisor.ex` and `always_on.ex` pins:
+- **Move now on a move back hangs up once the server took it** (as of
+  `4fdc1bcd`; at `4c58837a` it hung up before the request left). The start
+  is kept (`return_start_ahead/2`, `MnMark`), `home.move.start` is
+  forwarded, its answer settles the kept start (`return_answered/3`), and
+  only an answer with the move's id then ends the app's call bridged to the
+  server and drops its uploads (`Home.Link.end_for_return/0`); the relay and
+  `Uploads` then refuse new calls and attaches until a session is up again.
+  A refusal, a server that does not answer and an unconfirmed answer leave
+  the call and the uploads as they were; the server's restart into an
+  unconfirmed move ends the call on the server (`tunnel_down/2`,
+  `call_close` `bridge_down`). Calls and uploads are no state here, so the
+  hang-up is folded into the step that takes the answer and needs no step of
+  its own: it writes nothing a rule reads, and the record is settled before
+  it. A hang-up whose call exits there (it matches `:ok`) leaves the start
+  kept with the move's id and the move under way, as a Mac stop right after
+  the settle does, which the model has.
+- **A meeting holds the move back.** `MoveReadiness` blocks while a meeting
+  is in progress, and `Move.start` asks the review it is given again, so the
+  server refuses `home.move.start`; the answer is a refusal, which takes the
+  kept start back (`return_answered/3`), one more reason for a refusal the
+  model has.
+- **The probe's hello** names its versions as a computer's does
+  (`Protocol.hello_versions/0`), and `restart_server` answers a reply it
+  does not read as `unavailable`; neither is a step here.
+- **The device tree** serves the app's bridged voice socket beside
+  `Desktop.Invoke`, under the same `:one_for_one`; the candidate subtree
+  starts and stops as before.
+
+No modelled step changed. The comments' line numbers into these three files
+point at the committed code.
+
+Walked again against fa21aac6, which staled the `home_summary.ex` pin:
+`on/1` adds `detail.not_yet`, the list of what Always On does not do yet on
+a linked computer (`linked_not_yet/1`), a field of the screen's detail. No
+action, no offer set and no other pinned function changed, so `DeviceOffers`
+and `ReturnOffers` are as before and no modelled step changed. The comments'
+line numbers into `home_summary.ex` point at the committed code.
+
+Walked again against 2b8d4211, which staled the `move_worker.ex` pin: its
+context gains `consent_opts`, the system the keep block's lines are drawn for
+when a move's switches are written (`Consent.accept/3`, `default_keep/1`),
+the host's unless a test names it. The switches a move writes are as before,
+and a move back writes none, so no modelled step changed. The comments' line
+numbers into `move_worker.ex` point at the committed code.
+
+Walked again against `1cafb479`, which staled the `home_summary.ex` pin:
+`settled/1` and `silent?/1` take the server's word that it forgot this
+computer from the link file (the `revoked` fact, `DesktopLink.revoked?/1`,
+gathered only while the home is linked), Fermix running or stopped, where
+they read the relay's live `primary.status`. `silent?/1` answers it first,
+not silent, so a computer its server removed no longer reads as silent
+while Fermix is stopped. The relay now writes the mark before it acts on it
+(`Desktop.Relay`'s `revoked/2` at a `4003`, `known/3` before it uses a
+session), so it rests as revoked only once the mark is written, and while
+Fermix runs the two read alike. The mark is set only at a server's `4003`,
+for a computer it no longer knows (removed from its devices, or a server
+restored from before the computer joined it). No step here makes one: the
+server is the primary this home moved to and knows the computer it left,
+the model removes no computer and restores no server, and a retired server
+runs no mobile hub (`Mobile.Supervisor` is among `Role`'s primary-only
+children), so it sends no `4003` either. So the mark is clear in every
+state, `revoked` is false, and `settled/1` and `silent?/1`
+draw what they drew: retired with no link (`~mLink`), else the desktop's
+screens, and silent as `ServerSilent` says. Fermix stopped is no state
+here: a Mac crash boots again in the same step, and what the summary offers
+is pressed through the running engine's `home.act`. `retired_sentence/2`,
+new and public, and the `removed` sentence, now chosen by `revoked` where
+it was chosen by `linked`, change words, not offers; neither is pinned. No
+modelled step changed. The comments' line numbers into `home_summary.ex`
+had drifted since fa21aac6, as code beside the pinned functions grew, and
+now point at the committed code; `ServerSilent`'s comment says where the
+`revoked` word comes from.
 
 ## Done
 
@@ -345,22 +570,20 @@ Deadlock checking is on. `Done` has these ends:
 - **The server serves**: its worker is off and the Mac waits as a device,
   whatever its candidate holds. Check 19 holds that the Mac's screen offers
   a step there wherever the server answers.
-- **The server deleted as the fence, the restore unfinished**, with the
+- **The server deleted by the owner, the restore unfinished**, with the
   owner's presses spent. Restore here is offered again (check 20).
 
 ## Bounds
 
 The checks run with `MaxLosses = 2`, `MaxCrashes = 1` per engine and
 `MaxPresses = 4`. Each takes about one to two seconds. The holds checks
-explore 56,532 states; check 09, with Delete offered everywhere, 100,806.
+explore 54,682 states.
 
 Every rule of the holds checks was run by hand, together:
 - with one more of each (`MaxLosses = 3`, `MaxCrashes = 2`,
-  `MaxPresses = 5`): no error, 390,663 states, 7 s;
+  `MaxPresses = 5`): no error, 378,985 states, 7 s;
 - with two more (`MaxLosses = 4`, `MaxCrashes = 3`, `MaxPresses = 6`): no
-  error, 1,382,436 states, 24 s.
-
-Check 09's setup one bound up: no error, 695,984 states, 11 s.
+  error, 1,342,200 states, 21 s.
 
 ## Not modelled
 
@@ -382,20 +605,25 @@ The `.tla` header lists what is left out, with the reason for each:
   the same idempotent steps, as a crash and the next start do;
 - a primary boot that cannot write `moved_at` (it is retried at each
   `home.status` read);
+- a server the owner deletes at another moment than Restore here's confirm,
+  or stops and later starts again: the confirm names the two primaries a
+  server that still runs makes;
+- Restore here's ending that cannot write `return.json` (it logs): the
+  request then stands beside no job, as a stop of the engine leaves it;
 - a second desktop (the stale epoch, the passed return's drop);
-- an owner's own server, which has no ledger and no Restore here;
-- the fence's failure kept in the ledger and its `delete_failed` screen;
 - the copy's choice and a wrong passphrase;
-- the key's derivation.
+- the key's derivation;
+- the Mac's other acts: Back up now, Add a computer and the owner's answer
+  to one that asks to join, and the review of what a computer that moved
+  before M97 keeps on for its server;
+- a computer that joined the home, which carries no moved marker and is
+  offered neither Move back nor Restore here, and a Mac whose Fermix cannot
+  read the server's home, which is offered Update in their place.
 
 ## Outside the model
 
 Read while walking the code. TLC does not show these.
 
-- **A fence refused while the link came back** used to keep a delete
-  failure that left `delete_failed` with only Restore here, ahead of `on`,
-  for as long as the server answered. It is fixed in 352ae545:
-  `server_back/1` drops the request and keeps no failure.
 - **Cancel in undone.** Section 9's text said Cancel "is not offered once
   `move_started_at` is set", while its table offers it on undone. The code
   follows the table, and so does the spec. Cancel is safe there, since the

@@ -49,6 +49,22 @@ defmodule FermixCore.Home.Snapshot.StatusTest do
   end
 
   describe "the view every surface draws" do
+    # D18: a primary that is no Always On server has no target at all, whatever
+    # its settings name, and says so before anything about the passphrase.
+    test "off where no target runs: only an Always On server keeps snapshots" do
+      view =
+        view(Status.empty(), [recipient: @recipient, s3_bucket: "invented-bucket"], targets: [])
+
+      assert view["configured"] == false
+      assert view["targets"] == []
+      assert view["next_run_at"] == nil
+
+      assert view["sentence"] ==
+               "Snapshots are kept only by an Always On server, and this computer is not one."
+
+      assert view(Status.empty(), [], targets: [])["sentence"] == view["sentence"]
+    end
+
     test "off until a recovery passphrase is set" do
       view = view(Status.empty(), s3_bucket: "invented-bucket")
 
@@ -114,7 +130,6 @@ defmodule FermixCore.Home.Snapshot.StatusTest do
       waiting =
         Status.empty()
         |> Status.record("s3", verified(~U[2026-10-27 09:30:00Z]))
-        |> Status.record("s3", failed(~U[2026-10-27 12:30:00Z], "S3 could not be reached."))
         |> Status.record("s3", waiting(~U[2026-10-27 15:30:00Z], "S3 waits for the next run."))
 
       assert waiting.targets["s3"].last_error == nil
@@ -134,6 +149,38 @@ defmodule FermixCore.Home.Snapshot.StatusTest do
 
       assert view["sentence"] ==
                "The last snapshot was stored at 2026-10-27 09:30 UTC. S3 waits for the next run."
+    end
+
+    # The owner's rule: a place that failed stays failed until a backup there
+    # is stored. A try that only waited (a desktop away) stored nothing, so it
+    # is not recorded over the failure, whose words and time stand.
+    test "a failure stands until a backup is stored: a try that only waited leaves it" do
+      config = [recipient: @recipient, s3_bucket: "invented-bucket"]
+
+      failed =
+        Status.empty()
+        |> Status.record("s3", verified(~U[2026-10-27 09:30:00Z]))
+        |> Status.record("s3", failed(~U[2026-10-27 12:30:00Z], "S3 could not be reached."))
+
+      waited = Status.record(failed, "s3", waiting(~U[2026-10-27 15:30:00Z], "S3 waits."))
+
+      assert waited == failed
+
+      assert [
+               %{
+                 "last_result" => "failed",
+                 "last_attempt_at" => "2026-10-27T12:30:00Z",
+                 "last_error" => "S3 could not be reached.",
+                 "waiting" => nil
+               }
+             ] = view(waited, config)["targets"]
+
+      assert view(waited, config)["sentence"] ==
+               "The last snapshot to S3 failed: S3 could not be reached. Fermix tries again at " <>
+                 "the next run."
+
+      stored = Status.record(waited, "s3", verified(~U[2026-10-27 18:30:00Z]))
+      assert %{last_error: nil, last_attempt: %{result: :verified}} = stored.targets["s3"]
     end
 
     test "a waiting attempt, its recovery key and the boot request read back",
@@ -158,7 +205,7 @@ defmodule FermixCore.Home.Snapshot.StatusTest do
   defp view(status, config, extra \\ []) do
     Status.view(status, %{
       config: config,
-      targets: [S3],
+      targets: Keyword.get(extra, :targets, [S3]),
       running: Keyword.get(extra, :running, false),
       profile: "general"
     })

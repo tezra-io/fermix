@@ -317,7 +317,10 @@ defmodule Fermix.CLI.ServiceCommandTest do
       assert Jason.decode!(String.trim(stdout))["error"]["code"] == "user_manager_unreachable"
     end
 
-    test "a distribution with no packaged service says so" do
+    # A Mac or a standalone binary has a service of its own (`fermix service
+    # install` writes it), so the refusal says what the verb covers and where
+    # that service is reported instead (EC2 test finding 14).
+    test "a distribution with no packaged service says what the verb covers" do
       deps = deps(status: {:error, :foreign_distribution})
 
       stderr =
@@ -325,7 +328,11 @@ defmodule Fermix.CLI.ServiceCommandTest do
           assert ServiceCommand.run(["status"], deps) == 1
         end)
 
-      assert stderr =~ "not installed from a Linux package"
+      assert stderr ==
+               "fermix service: fermix service status reports only a Linux package's " <>
+                 "background service, and this Fermix was not installed from one. For the " <>
+                 "service fermix service install sets up here, see the service unit row of " <>
+                 "fermix doctor.\n"
     end
 
     test "status takes no scope flags" do

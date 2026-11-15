@@ -41,6 +41,38 @@ defmodule FermixCore.Realtime.GrokTurnTest do
     end
   end
 
+  # M96 §4.2: the greeting is a continuation owed before anything was said.
+  describe "owe/1" do
+    test "owes the greeting, due at once on a quiet call, and any response answers it" do
+      turn = GrokTurn.owe(GrokTurn.new())
+      assert GrokTurn.greeting?(turn)
+      assert GrokTurn.due?(turn, true)
+
+      {id, turn} = GrokTurn.request(turn)
+      assert GrokTurn.greeting?(turn)
+
+      turn = GrokTurn.response_created(turn, "r1", %{"fermix_continuation" => id})
+      refute GrokTurn.greeting?(turn)
+      refute GrokTurn.due?(GrokTurn.response_done(turn, "r1"), true)
+    end
+
+    test "owner speech answers it too: Grok's own response consumes what was owed" do
+      turn = GrokTurn.owe(GrokTurn.new()) |> GrokTurn.response_created("r_vad", nil)
+      refute GrokTurn.greeting?(turn)
+      refute GrokTurn.due?(GrokTurn.response_done(turn, "r_vad"), true)
+    end
+
+    test "a greeting that never starts is asked once more, then given up" do
+      {_id, turn} = GrokTurn.request(GrokTurn.owe(GrokTurn.new()))
+      assert {:retry, turn} = GrokTurn.request_failed(turn)
+      assert GrokTurn.greeting?(turn)
+      {_id, turn} = GrokTurn.request(turn)
+      assert {:gave_up, turn} = GrokTurn.request_failed(turn)
+      refute GrokTurn.greeting?(turn)
+      refute GrokTurn.due?(turn, true)
+    end
+  end
+
   describe "the continuation" do
     test "is owed once a done response's every call is answered, and due when nothing stands in the way" do
       turn = GrokTurn.response_created(GrokTurn.new(), "r1", nil)
@@ -111,6 +143,32 @@ defmodule FermixCore.Realtime.GrokTurnTest do
       assert {:gave_up, turn} = GrokTurn.request_failed(turn)
       refute GrokTurn.due?(turn, true)
       assert {:none, _turn} = GrokTurn.request_failed(turn)
+    end
+
+    # Grok's VAD can drop a response it began, before any audio, and never send
+    # its response.done (a robot call, 2026-11-09).
+    test "a response Grok never closes is ended by the next one it starts" do
+      turn =
+        GrokTurn.new()
+        |> GrokTurn.response_created("r_dropped", %{"fermix_continuation" => "c1"})
+        |> GrokTurn.response_created("r_vad", nil)
+        |> GrokTurn.response_done("r_vad")
+
+      assert GrokTurn.active(turn) == []
+      assert GrokTurn.cancellable(turn) == []
+      assert turn |> answered_response("r2", "a") |> GrokTurn.due?(true)
+    end
+
+    test "a call a dropped response carried still owes its continuation once answered" do
+      turn = GrokTurn.response_created(GrokTurn.new(), "r_dropped", nil)
+      {:ok, turn} = GrokTurn.function_call(turn, "r_dropped", "a")
+      turn = turn |> GrokTurn.response_created("r_vad", nil) |> GrokTurn.response_done("r_vad")
+      refute GrokTurn.due?(turn, true)
+
+      turn = GrokTurn.answered(turn, "a")
+      assert GrokTurn.due?(turn, true)
+      # Its own response.done, should it come late, changes nothing.
+      assert turn |> GrokTurn.response_done("r_dropped") |> GrokTurn.due?(true)
     end
 
     test "a response with no call owes nothing" do

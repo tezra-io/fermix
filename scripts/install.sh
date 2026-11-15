@@ -5,65 +5,74 @@
 # .deb or .rpm package through that package manager. On macOS, on a Linux host
 # with none of the three, or with --standalone, it installs the signed
 # standalone binary instead, in /usr/local/bin (with sudo) or ~/.local/bin (no
-# sudo) depending on what's writable. Either way the download is
-# sha256-verified against releases.json and cosign-verified when cosign is
-# installed, and `fermix setup` runs at the end unless told not to.
-# --version X installs release X instead, from that release's own
-# releases.json, under the same checks and the signing identity of its tag:
-# an Always On server runs exactly its desktop's release (its first boot and
-# its nightly update ask for it), and a package of X already installed is
-# left as it is.
+# sudo) depending on what's writable. Either way the download must match the
+# sha256 that fermix.ai lists for it, and `fermix setup` runs at the end unless
+# told not to. --version X installs release X instead, under the same check,
+# and a package of X already installed is left as it is.
+#
+# --always-on sets a Linux server up as an owner's Always On server instead:
+# it fetches the release's Always On server script (the copy of
+# packaging/cloud/first-boot.sh every release publishes as
+# fermix_always_on.sh), checks it as it checks a package, and runs it with
+# --version naming that release, every other argument passed on unread. The
+# server then runs exactly its desktop's release: its first boot and its
+# updates, every five minutes and nightly, ask this installer for it.
+#
+# Where the trust comes from. The files are downloaded from the project's
+# GitHub release, but their digests are not: they are read from the table at
+# https://fermix.ai/install/releases, which the site publishes only after it
+# has checked each file's cosign signature against the release workflow's
+# identity for that tag and hashed the file itself. A compromised release
+# channel can replace a file, its signature and GitHub's own manifest
+# together; it cannot change the digest this script compares with. So there
+# is no cosign to find and no check to skip: a file the table does not list,
+# or one that does not match it, the Always On server script included, is
+# refused before anything runs as root.
 #
 #   curl -fsSL https://fermix.ai/install | sh
 #   curl -fsSL https://fermix.ai/install | sh -s -- --no-setup
 #   curl -fsSL https://fermix.ai/install | sh -s -- --standalone --prefix /opt/fermix/bin
 #   curl -fsSL https://fermix.ai/install | sh -s -- --version 0.17.0
+#   curl -fsSL https://fermix.ai/install | sudo sh -s -- --always-on --version 0.20.0
 #
-# Hard-fails on any unsupported (os, arch) pair, missing tooling, or
-# sha256 mismatch. There is no "best effort" path that drops a
-# half-installed binary somewhere — partial installs make `fermix
-# upgrade` and `fermix doctor` lie about reality.
+# Hard-fails on any unsupported (os, arch) pair, missing tooling, a digest
+# table it cannot read or that lists no row for this machine's file, or a
+# sha256 mismatch. There is no "best effort" path that drops a half-installed
+# binary somewhere — partial installs make `fermix upgrade` and `fermix
+# doctor` lie about reality.
 
 set -eu
 
 REPO="tezra-io/fermix"
-MANIFEST_URL="https://github.com/${REPO}/releases/latest/download/releases.json"
+DIGESTS_URL="https://fermix.ai/install/releases"
 VERSION=""
 VERSION_GIVEN=0
 RUN_SETUP=1
 PREFIX=""
 STANDALONE=0
+ALWAYS_ON=0
+# The option still waiting for its value while the arguments are read.
+VALUE_FOR=""
 
-# Where the package puts the engine, and the cosign it bundles beside it.
+# Where the package puts the engine.
 PACKAGE_BINARY="/usr/bin/fermix"
-PACKAGE_COSIGN="/usr/lib/fermix/cosign"
 MIGRATE_URL="https://fermix.ai/docs/linux-packages#move-from-a-standalone-install"
 VERIFY_URL="https://fermix.ai/docs/linux-packages#download-and-verify"
+# The release's Always On server script, a byte copy of
+# packaging/cloud/first-boot.sh that every release publishes and signs.
+ALWAYS_ON_FILE="fermix_always_on.sh"
 
-# Every artifact URL the release pipeline emits is rooted here — the exact base
-# scripts/release/build_releases_json.sh builds. Must stay identical to
-# @artifact_origin in apps/fermix_core/lib/fermix/cli/upgrade/manifest.ex: one
-# document, one trust decision, and the two readers of it must not disagree
-# about which URLs in it are ours.
-#
-# Honest accounting: the manifest and the artifacts come from the same host under
-# the same TLS and fall in the same compromise event, so this is not a defence
-# against a compromised GitHub — cosign is. What the pin removes is the
-# blind-fetch-anywhere primitive: the binary, its signature and its certificate
-# are all downloaded BEFORE anything is verified, so whoever can edit
-# releases.json could otherwise make this machine issue three arbitrary
-# pre-verification GETs to a host of their choosing.
+# Every artifact is downloaded from ${ARTIFACT_ORIGIN}v<version>/<file>, the
+# base that @artifact_origin in apps/fermix_core/lib/fermix/cli/upgrade/manifest.ex
+# pins for `fermix upgrade`. The address is built here from the release and the
+# file name, never read from a document, so nothing can point this machine
+# anywhere else.
 ARTIFACT_ORIGIN="https://github.com/${REPO}/releases/download/"
-
-# Keyless-signing identity of the release workflow. Must stay identical to
-# apps/fermix_core/lib/fermix/cli/upgrade/cosign.ex, which pins the same issuer
-# and the same workflow@refs/tags/v<version> identity for `fermix upgrade`.
-COSIGN_ISSUER="https://token.actions.githubusercontent.com"
-COSIGN_IDENTITY_PREFIX="https://github.com/${REPO}/.github/workflows/release.yml@refs/tags/v"
 
 usage() {
   cat <<USAGE
 Usage: install.sh [--standalone] [--prefix DIR] [--version X] [--no-setup]
+       install.sh --always-on [--version X] [SERVER OPTIONS]
 
 On Linux with apt, dnf or zypper this installs the fermix .deb or .rpm package.
 Everywhere else, and with --standalone, it installs the standalone binary.
@@ -74,20 +83,48 @@ Options:
                  (default: /usr/local/bin if writable or sudo, else ~/.local/bin)
   --version X    Install release X (such as 0.17.0) instead of the latest
   --no-setup     Skip 'fermix setup' at the end
+  --always-on    Set this server up for Always On with release X's own server
+                 script, run as root; SERVER OPTIONS are that script's
   --help, -h     Show this message
 USAGE
 }
 
-while [ $# -gt 0 ]; do
-  case "$1" in
-    --prefix) PREFIX="${2:?--prefix requires a value}"; shift 2 ;;
-    --no-setup) RUN_SETUP=0; shift ;;
-    --standalone) STANDALONE=1; shift ;;
-    --version) VERSION_GIVEN=1; VERSION="${2-}"; shift; [ $# -eq 0 ] || shift ;;
+prefix_needs_a_value() {
+  printf 'install.sh: --prefix requires a value\n' >&2
+  exit 2
+}
+
+# The mode comes first, so that without --always-on an argument this installer
+# does not own is refused where it stands, as it always was.
+for argument do
+  [ "$argument" != --always-on ] || ALWAYS_ON=1
+done
+
+# Each argument is shifted off as it is read. With --always-on, one this
+# installer does not own goes back on the end, so "$@" holds only those once
+# the loop is done. They are the Always On server script's to read and are
+# never echoed, since one may be an enrollment code pasted in the wrong place.
+for argument do
+  shift
+  case "$VALUE_FOR" in
+    --prefix) [ -n "$argument" ] || prefix_needs_a_value; PREFIX="$argument"; VALUE_FOR=""; continue ;;
+    --version) VERSION="$argument"; VALUE_FOR=""; continue ;;
+  esac
+  case "$argument" in
+    --prefix) VALUE_FOR=--prefix ;;
+    --no-setup) RUN_SETUP=0 ;;
+    --standalone) STANDALONE=1 ;;
+    --version) VERSION_GIVEN=1; VALUE_FOR=--version ;;
+    --always-on) ;;
     --help|-h) usage; exit 0 ;;
-    *) echo "install.sh: unknown argument: $1" >&2; usage; exit 2 ;;
+    *)
+      [ "$ALWAYS_ON" -eq 1 ] || { echo "install.sh: unknown argument: $argument" >&2; usage; exit 2; }
+      set -- "$@" "$argument"
+      ;;
   esac
 done
+
+[ "$VALUE_FOR" != --prefix ] || prefix_needs_a_value
 
 abort() {
   printf 'install.sh: %s\n' "$*" >&2
@@ -106,14 +143,15 @@ release_version() {
   [ "$minor_patch" != "$1" ] && [ "$patch" != "$minor_patch" ]
 }
 
-# A named release is read from the manifest its own tag published.
-if [ "$VERSION_GIVEN" -eq 1 ]; then
-  if ! release_version "$VERSION"; then
-    printf 'install.sh: --version takes a release, such as 0.17.0\n' >&2
-    usage >&2
-    exit 2
-  fi
-  MANIFEST_URL="https://github.com/${REPO}/releases/download/v${VERSION}/releases.json"
+if [ "$VERSION_GIVEN" -eq 1 ] && ! release_version "$VERSION"; then
+  printf 'install.sh: --version takes a release, such as 0.17.0\n' >&2
+  usage >&2
+  exit 2
+fi
+
+if [ "$ALWAYS_ON" -eq 1 ] && { [ "$STANDALONE" -eq 1 ] || [ -n "$PREFIX" ] || [ "$RUN_SETUP" -eq 0 ]; }; then
+  printf "install.sh: --always-on runs the release's Always On server script, which installs Fermix itself, so it takes none of --standalone, --prefix and --no-setup.\n" >&2
+  exit 2
 fi
 
 require_cmd() {
@@ -172,99 +210,59 @@ sha256() {
   fi
 }
 
-# One field of this machine's package, read from the manifest's "packages"
-# object: packages -> <target> -> <deb|rpm> -> <field>. The same line scanner
-# the artifact fields below use, so there is still no jq dependency; it relies
-# on the one-key-per-line layout scripts/release/build_releases_json.sh emits.
-package_field() {
-  awk -v target="$TARGET" -v format="$PACKAGE_FORMAT" -v field="$1" '
-    { gsub(/[",]/, "") }
-    $1 == "packages:" { in_packages = 1; next }
-    !in_packages { next }
-    $2 == "{" {
-      key = $1
-      sub(/:$/, "", key)
-      if (key == "deb" || key == "rpm") { current_format = key }
-      else { current_target = key; current_format = "" }
-      next
-    }
-    current_target == target && current_format == format && $1 == (field ":") { print $2; exit }
-  ' "$TMPDIR/releases.json"
-}
-
-# An absent URL refuses rather than skips: a check that cannot read the value it
-# gates on is not a check. The quoted variable is a literal prefix to `case`;
-# only the trailing * is a wildcard.
-require_release_url() {
-  field="$1"
-  url="$2"
-
-  [ -n "$url" ] || abort "no $field for target $TARGET in $MANIFEST_URL"
-
-  case "$url" in
-    "$ARTIFACT_ORIGIN"*) ;;
-    *) abort "$field for target $TARGET is not under $ARTIFACT_ORIGIN — refusing to fetch $url" ;;
+# The release's own name for the file this machine installs, as the release
+# workflow builds it: the standalone binary is named for its target, a deb for
+# Debian's architecture name, and an rpm carries nFPM's default release "1".
+artifact_file() {
+  case "$PACKAGE_FORMAT" in
+    deb)
+      case "$ARCH" in
+        x86_64) printf 'fermix_%s_amd64.deb' "$VERSION" ;;
+        aarch64) printf 'fermix_%s_arm64.deb' "$VERSION" ;;
+      esac
+      ;;
+    rpm) printf 'fermix-%s-1.%s.rpm' "$VERSION" "$ARCH" ;;
+    *) printf 'fermix_%s_%s' "$OS" "$ARCH" ;;
   esac
 }
 
-# A cosign on PATH wins; failing that, the one an installed fermix package
-# bundles, which is the order the packaged engine itself resolves it in. So a
-# package install that is being updated always has its download checked.
-find_cosign() {
-  if command -v cosign >/dev/null 2>&1; then
-    command -v cosign
-  elif [ -x "$PACKAGE_COSIGN" ]; then
-    printf '%s' "$PACKAGE_COSIGN"
-  fi
+# The table is plain lines, read with awk alone:
+#
+#   format 1
+#   latest <version>
+#   <version> <sha256> <file>      (one line per file of every listed release)
+#
+# A first line other than "format 1" is a table this script cannot read, and is
+# refused rather than guessed at.
+table_format() {
+  awk 'NR == 1 { print; exit }' "$TMPDIR/releases"
 }
 
-# cosign-installed and cosign-absent are two valid machine configurations, not
-# two code paths for one configuration:
-#
-#   installed -> the release signature is checked against the pinned workflow
-#                identity and OIDC issuer. A FAILED check aborts; nothing is
-#                installed and nothing retries by another route.
-#   absent    -> one loud line, then continue. This is the bootstrap installer;
-#                hard-requiring a Go binary that ships with neither stock macOS
-#                nor stock Debian would break the advertised `curl | sh` path
-#                for nearly everyone.
-#
-# The sha256 check above is not a substitute: that digest comes from the same
-# releases.json that supplied the URL, so it proves transport integrity and
-# nothing whatsoever about authenticity.
-verify_signature() {
-  blob="$1"
-  cosign_bin="$(find_cosign)"
+table_latest() {
+  awk 'NR > 1 && NF == 2 && $1 == "latest" { print $2; exit }' "$TMPDIR/releases"
+}
 
-  if [ -z "$cosign_bin" ]; then
-    if [ -n "$PACKAGE_MANAGER" ]; then
-      printf '!!  cosign is not installed: SKIPPING the release signature check on this download. To check the signature yourself before installing, see %s\n' "$VERIFY_URL" >&2
-    else
-      printf '!!  cosign is not installed: SKIPPING the release signature check on this download. Install cosign (https://docs.sigstore.dev/cosign/system_config/installation/) — "fermix upgrade" and "fermix plugins install" both require it and fail hard without it.\n' >&2
-    fi
-    return 0
-  fi
+table_lists_release() {
+  awk -v version="$1" '
+    NR > 1 && NF == 3 && $1 == version { found = 1; exit }
+    END { exit !found }
+  ' "$TMPDIR/releases"
+}
 
-  [ -n "$LATEST_VERSION" ] || abort "no 'latest' version in $MANIFEST_URL"
+# The sha256 the table lists for file $2 of release $1, or nothing unless it
+# lists exactly one: a file listed twice is no more trustworthy than a file
+# not listed at all.
+table_digest() {
+  awk -v version="$1" -v file="$2" '
+    NR > 1 && NF == 3 && $1 == version && $3 == file { digest = $2; rows++ }
+    END { if (rows == 1) print digest }
+  ' "$TMPDIR/releases"
+}
 
-  printf '==> Verifying signature with cosign...\n'
-  curl -fsSL "$ARTIFACT_SIG_URL" -o "${blob}.sig"
-  curl -fsSL "$ARTIFACT_CERT_URL" -o "${blob}.pem"
-
-  # --certificate-identity (exact match) rather than the --certificate-identity-regexp
-  # form cosign.ex builds: it pins the identical string, but a tampered manifest
-  # cannot smuggle regex metacharacters through "latest" to widen the match.
-  if ! cosign_out="$("$cosign_bin" verify-blob \
-    --certificate "${blob}.pem" \
-    --signature "${blob}.sig" \
-    --certificate-identity "${COSIGN_IDENTITY_PREFIX}${LATEST_VERSION}" \
-    --certificate-oidc-issuer "$COSIGN_ISSUER" \
-    "$blob" 2>&1)"; then
-    printf '%s\n' "$cosign_out" >&2
-    abort "cosign verify-blob FAILED for $ARTIFACT_NAME — refusing to install"
-  fi
-
-  printf '==> Signature verified against %s%s\n' "$COSIGN_IDENTITY_PREFIX" "$LATEST_VERSION"
+# Whether $1 is a sha256 as the table writes one: 64 lowercase hex digits.
+sha256_hex() {
+  case "$1" in *[!0-9a-f]*) return 1 ;; esac
+  [ "${#1}" -eq 64 ]
 }
 
 decide_prefix() {
@@ -337,8 +335,9 @@ install_package() {
   case "$PACKAGE_MANAGER" in
     apt) run_as_root apt-get install -y --no-remove "$file" ;;
     dnf) run_as_root dnf install -y "$file" ;;
-    # The rpm carries no GPG signature of its own; the sha256 and cosign checks
-    # above are what vouched for this file, so zypper is told not to stop on it.
+    # The rpm carries no GPG signature of its own. What vouched for this file is
+    # the sha256 above, which matched the digest fermix.ai lists for it, so
+    # zypper is told not to stop on the missing GPG signature.
     zypper) run_as_root zypper --non-interactive install --allow-unsigned-rpm "$file" ;;
   esac
 
@@ -366,6 +365,71 @@ setup_did_not_finish() {
   abort "fermix is installed, but 'fermix setup' did not finish. Run it again when you are ready: fermix setup"
 }
 
+# Fetches the digest table into a directory of this run's own, removed on
+# exit, and settles VERSION: the release --version named, or the table's
+# latest, which the table must list.
+read_table() {
+  TMPDIR="$(mktemp -d)"
+  trap 'rm -rf "$TMPDIR"' EXIT
+
+  printf '==> Fetching release digests from %s...\n' "$DIGESTS_URL"
+  curl -fsSL "$DIGESTS_URL" -o "$TMPDIR/releases" ||
+    abort "could not fetch the release digests from $DIGESTS_URL, so nothing was installed. Check this machine's connection to fermix.ai and run the installer again."
+
+  [ "$(table_format)" = "format 1" ] ||
+    abort "$DIGESTS_URL is not in a format this installer reads (its first line is '$(table_format)'), so nothing was installed. Fetch the installer again from https://fermix.ai/install."
+
+  LATEST_VERSION="$(table_latest)"
+  release_version "$LATEST_VERSION" ||
+    abort "$DIGESTS_URL names no latest release, so nothing was installed."
+
+  [ "$VERSION_GIVEN" -eq 1 ] || VERSION="$LATEST_VERSION"
+
+  table_lists_release "$VERSION" ||
+    abort "$DIGESTS_URL lists no release $VERSION, so nothing was installed. A release is listed once its signatures have been verified; to check one by hand, see $VERIFY_URL"
+}
+
+# Downloads file $1 of the release into $2 and refuses it unless its sha256 is
+# $3, the digest the table lists for it.
+download_checked() {
+  printf '==> Downloading %s...\n' "$1"
+  curl -fsSL "${ARTIFACT_ORIGIN}v${VERSION}/$1" -o "$2"
+
+  actual_sha="$(sha256 "$2")"
+  if [ "$actual_sha" != "$3" ]; then
+    abort "sha256 mismatch: expected $3, got $actual_sha. The download is not the file $DIGESTS_URL lists for release $VERSION, so nothing was installed."
+  fi
+  printf '==> Verified sha256 %s against %s (%s, release %s)\n' "$actual_sha" "$DIGESTS_URL" "$1" "$VERSION"
+}
+
+# --always-on: the release's Always On server script, checked as a package is,
+# runs with that release named first and then every argument this installer
+# does not own, unchanged, and the installer ends with its exit status. The
+# host checks (root, the system, the architecture, Landlock) are the script's
+# alone. Its input is /dev/null, as a package manager's is, because under
+# `curl | sh` standard input is the rest of this script; it asks for the
+# enrollment code and the Tailscale auth key on the terminal itself, and
+# inherits them from the environment (FERMIX_ENROLL_CODE, TS_AUTHKEY) under
+# cloud-init. An interrupt waits for the script to stop, then removes the
+# download with the rest of this run's directory.
+run_always_on() {
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  read_table
+
+  script_sha="$(table_digest "$VERSION" "$ALWAYS_ON_FILE")"
+  sha256_hex "$script_sha" ||
+    abort "$DIGESTS_URL lists no Always On server script for release $VERSION, so nothing was run."
+  download_checked "$ALWAYS_ON_FILE" "$TMPDIR/$ALWAYS_ON_FILE" "$script_sha"
+
+  printf '==> Running the Always On server script of release %s\n' "$VERSION"
+  status=0
+  sh "$TMPDIR/$ALWAYS_ON_FILE" --version "$VERSION" "$@" </dev/null || status=$?
+  exit "$status"
+}
+
+[ "$ALWAYS_ON" -eq 0 ] || run_always_on "$@"
+
 OS="$(detect_os)"
 ARCH="$(detect_arch)"
 TARGET="${OS}-${ARCH}"
@@ -391,86 +455,31 @@ else
   fi
 fi
 
-TMPDIR="$(mktemp -d)"
-trap 'rm -rf "$TMPDIR"' EXIT
+read_table
 
-printf '==> Fetching release manifest...\n'
-curl -fsSL "$MANIFEST_URL" -o "$TMPDIR/releases.json"
+ARTIFACT_FILE="$(artifact_file)"
+ARTIFACT_SHA="$(table_digest "$VERSION" "$ARTIFACT_FILE")"
 
-# The manifest carries exactly one release, so "latest" names the tag the
-# selected artifact was built and signed under.
-LATEST_VERSION="$(awk '
-  /"latest":/ { gsub(/[",]/,""); print $2; exit }
-' "$TMPDIR/releases.json")"
-
-# A named release's manifest must be that release's: its artifacts are what
-# the signature check pins to the tag.
-if [ "$VERSION_GIVEN" -eq 1 ] && [ "$LATEST_VERSION" != "$VERSION" ]; then
-  abort "the manifest at $MANIFEST_URL is release ${LATEST_VERSION:-unknown}, not $VERSION — refusing to install it"
+if ! sha256_hex "$ARTIFACT_SHA"; then
+  standalone_hint=""
+  [ -z "$PACKAGE_MANAGER" ] || standalone_hint=" Pass --standalone to install the standalone binary instead."
+  abort "$DIGESTS_URL lists no single sha256 for $ARTIFACT_FILE of release $VERSION, so nothing was installed.$standalone_hint"
 fi
-
-if [ -n "$PACKAGE_MANAGER" ]; then
-  ARTIFACT_URL="$(package_field url)"
-  ARTIFACT_SHA="$(package_field sha256)"
-  ARTIFACT_SIG_URL="$(package_field sig_url)"
-  ARTIFACT_CERT_URL="$(package_field cert_url)"
-
-  [ -n "$ARTIFACT_URL" ] ||
-    abort "release ${LATEST_VERSION:-unknown} lists no $PACKAGE_FORMAT package for $TARGET in $MANIFEST_URL. Pass --standalone to install the standalone binary instead."
-else
-  # Extract URL + sha256 with awk — no jq dependency.
-  ARTIFACT_URL="$(awk -v t="$TARGET" '
-    /"target":/ { gsub(/[",]/,""); current=$2 }
-    /"url":/ && current==t { gsub(/[",]/,""); print $2; exit }
-  ' "$TMPDIR/releases.json")"
-
-  ARTIFACT_SHA="$(awk -v t="$TARGET" '
-    /"target":/ { gsub(/[",]/,""); current=$2 }
-    /"sha256":/ && current==t { gsub(/[",]/,""); print $2; exit }
-  ' "$TMPDIR/releases.json")"
-
-  ARTIFACT_SIG_URL="$(awk -v t="$TARGET" '
-    /"target":/ { gsub(/[",]/,""); current=$2 }
-    /"sig_url":/ && current==t { gsub(/[",]/,""); print $2; exit }
-  ' "$TMPDIR/releases.json")"
-
-  ARTIFACT_CERT_URL="$(awk -v t="$TARGET" '
-    /"target":/ { gsub(/[",]/,""); current=$2 }
-    /"cert_url":/ && current==t { gsub(/[",]/,""); print $2; exit }
-  ' "$TMPDIR/releases.json")"
-fi
-
-# All three are pinned here, before the first byte of any of them is fetched.
-require_release_url url "$ARTIFACT_URL"
-require_release_url sig_url "$ARTIFACT_SIG_URL"
-require_release_url cert_url "$ARTIFACT_CERT_URL"
-
-[ -n "$ARTIFACT_SHA" ] || abort "no sha256 for target $TARGET in $MANIFEST_URL"
 
 PREVIOUS_VERSION=""
 if [ -n "$PACKAGE_MANAGER" ]; then
-  [ -n "$LATEST_VERSION" ] || abort "no 'latest' version in $MANIFEST_URL"
   PREVIOUS_VERSION="$(installed_package_version)"
 
-  if [ "$PREVIOUS_VERSION" = "$LATEST_VERSION" ] && [ "$VERSION_GIVEN" -eq 1 ]; then
-    printf '\nfermix %s is already installed.\n' "$LATEST_VERSION"
+  if [ "$PREVIOUS_VERSION" = "$VERSION" ] && [ "$VERSION_GIVEN" -eq 1 ]; then
+    printf '\nfermix %s is already installed.\n' "$VERSION"
     exit 0
-  elif [ "$PREVIOUS_VERSION" = "$LATEST_VERSION" ]; then
-    printf '\nfermix %s is already installed, and it is the latest release. If this account has not set it up yet, run: fermix setup\n' "$LATEST_VERSION"
+  elif [ "$PREVIOUS_VERSION" = "$VERSION" ]; then
+    printf '\nfermix %s is already installed, and it is the latest release. If this account has not set it up yet, run: fermix setup\n' "$VERSION"
     exit 0
   fi
 fi
 
-printf '==> Downloading %s...\n' "$(basename "$ARTIFACT_URL")"
-curl -fsSL "$ARTIFACT_URL" -o "$TMPDIR/$ARTIFACT_NAME"
-
-ACTUAL_SHA="$(sha256 "$TMPDIR/$ARTIFACT_NAME")"
-if [ "$ACTUAL_SHA" != "$ARTIFACT_SHA" ]; then
-  abort "sha256 mismatch: expected $ARTIFACT_SHA, got $ACTUAL_SHA"
-fi
-printf '==> Verified sha256 %s\n' "$ACTUAL_SHA"
-
-verify_signature "$TMPDIR/$ARTIFACT_NAME"
+download_checked "$ARTIFACT_FILE" "$TMPDIR/$ARTIFACT_NAME" "$ARTIFACT_SHA"
 
 if [ -n "$PACKAGE_MANAGER" ]; then
   # apt reads a local package as its own unprivileged user, which cannot enter
@@ -505,7 +514,7 @@ if [ -n "$PACKAGE_MANAGER" ] && [ -n "$ON_PATH" ] && ! [ "$ON_PATH" -ef "$PACKAG
   printf '\nThe package is installed at %s, but typing fermix on this account runs %s, an earlier install.\n' "$PACKAGE_BINARY" "$ON_PATH"
   printf 'Move that install to the package before running setup: %s\n' "$MIGRATE_URL"
 elif [ -n "$PREVIOUS_VERSION" ]; then
-  printf '\nUpdated fermix %s to %s. A running service keeps the old engine until you run: fermix restart\n' "$PREVIOUS_VERSION" "$LATEST_VERSION"
+  printf '\nUpdated fermix %s to %s. A running service keeps the old engine until you run: fermix restart\n' "$PREVIOUS_VERSION" "$VERSION"
 elif [ "$RUN_SETUP" -eq 0 ]; then
   printf '\nSkipping fermix setup (--no-setup). Run manually with: fermix setup\n'
 elif [ -n "$PACKAGE_MANAGER" ] && [ -n "${SUDO_USER:-}" ]; then

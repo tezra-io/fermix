@@ -64,9 +64,31 @@ defmodule FermixCore.Realtime.ProtocolTest do
     assert {:error, :client_too_new} = Protocol.negotiate(max + 1)
   end
 
+  # Every adapter that speaks this wire answers `client_hello` with this one
+  # reply: the Unix socket and the phone's call channel alike.
+  test "hello_reply answers a version in range with server_hello and refuses the rest" do
+    {min, max} = Protocol.supported_version_range()
+
+    assert Protocol.hello_reply(max) ==
+             {:ok, %{type: "server_hello", min_version: min, max_version: max}}
+
+    assert Protocol.hello_reply(max + 1) ==
+             {:error,
+              %{
+                type: "error",
+                reason: "unsupported_protocol_version",
+                direction: "client_too_new",
+                client_version: max + 1,
+                min_version: min,
+                max_version: max
+              }}
+
+    assert {:error, %{direction: "client_too_old", client_version: 0}} = Protocol.hello_reply(0)
+  end
+
   test "exposes the version and event catalog as the source of truth" do
-    assert Protocol.protocol_version() == 3
-    assert Protocol.supported_version_range() == {1, 3}
+    assert Protocol.protocol_version() == 5
+    assert Protocol.supported_version_range() == {1, 5}
     assert "client_hello" in Protocol.client_events()
     assert "server_hello" in Protocol.server_events()
   end
@@ -93,11 +115,65 @@ defmodule FermixCore.Realtime.ProtocolTest do
 
   # The floor stays at 1 while the ceiling rises: a v1 companion still runs the
   # Realtime engine, and an N/N-1 window would have dropped it at v3.
-  test "negotiate serves every version from 1 to 3" do
-    assert :ok = Protocol.negotiate(1)
-    assert :ok = Protocol.negotiate(2)
-    assert :ok = Protocol.negotiate(3)
-    assert {:error, :client_too_new} = Protocol.negotiate(4)
+  test "negotiate serves every version from 1 to 5" do
+    for version <- 1..5, do: assert(:ok = Protocol.negotiate(version))
+    assert {:error, :client_too_new} = Protocol.negotiate(6)
+  end
+
+  # v5, the call that ends itself (M96): one server event, a normal end the
+  # daemon starts, and nothing a client sends.
+  test "v5 adds call_ended without dropping an earlier event" do
+    assert "call_ended" in Protocol.server_events()
+    assert {:ok, line} = Protocol.encode_server_event("call_ended", %{reason: "goodbye"})
+    assert Jason.decode!(line) == %{"type" => "call_ended", "reason" => "goodbye"}
+    refute "call_ended" in Protocol.client_events()
+
+    for type <- ~w(call_ready caption task playback_stop) do
+      assert type in Protocol.server_events()
+    end
+  end
+
+  # v4, the phone's camera (M87 Phase 2): one client object, and a hello that
+  # says whether the endpoint has a camera at all. An older peer's hello says
+  # nothing of it, which is no camera.
+  test "v4 adds camera without dropping an earlier event" do
+    assert "camera" in Protocol.client_events()
+
+    for type <- ~w(client_hello call_start audio_chunk interrupt mute call_stop task_cancel
+                   playback_progress) do
+      assert type in Protocol.client_events()
+    end
+  end
+
+  test "a client_hello says whether its endpoint has a camera, none when it is silent" do
+    config = Config.normalize([])
+    hello = &Protocol.decode_client_event(&1, config)
+
+    assert {:ok, %{payload: %{"protocol_version" => 4, "camera" => true}}} =
+             hello.(~s({"type":"client_hello","protocol_version":4,"camera":true}))
+
+    assert {:ok, %{payload: %{"protocol_version" => 4, "camera" => false}}} =
+             hello.(~s({"type":"client_hello","protocol_version":4,"camera":false}))
+
+    assert {:ok, %{payload: %{"protocol_version" => 3, "camera" => false}}} =
+             hello.(~s({"type":"client_hello","protocol_version":3}))
+
+    assert {:error, :invalid_camera} =
+             hello.(~s({"type":"client_hello","protocol_version":4,"camera":"yes"}))
+  end
+
+  test "decodes camera with the state it wants, and refuses one without it" do
+    config = Config.normalize([])
+
+    assert {:ok, %{type: "camera", payload: %{"on" => true}}} =
+             Protocol.decode_client_event(~s({"type":"camera","on":true}), config)
+
+    assert {:ok, %{type: "camera", payload: %{"on" => false}}} =
+             Protocol.decode_client_event(~s({"type":"camera","on":false}), config)
+
+    for line <- [~s({"type":"camera"}), ~s({"type":"camera","on":"true"})] do
+      assert {:error, :invalid_camera} = Protocol.decode_client_event(line, config)
+    end
   end
 
   test "v3 adds playback_progress without dropping a v1 or v2 event" do

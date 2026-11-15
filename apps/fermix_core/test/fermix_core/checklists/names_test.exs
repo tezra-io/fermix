@@ -76,6 +76,6 @@ defmodule FermixCore.Checklists.NamesTest do
       assert {:ok, _plugin} = Registry.decode_manifest(manifest(name), "/tmp/#{name}/plugin.json")
     end
 
-    assert Registry.reserved_name_sentence() == @sentence
+    assert Registry.reserved_name_sentence("checklist") == @sentence
   end
 end

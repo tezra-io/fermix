@@ -12,6 +12,7 @@ defmodule FermixCore.Tools.UpdateJob do
   alias FermixCore.Cues.Pins
   alias FermixCore.Jobs.DeliveryDefaults
   alias FermixCore.Jobs.Registry
+  alias FermixCore.Kept.Access, as: KeptAccess
   alias FermixCore.Tools.JobRegistrySupport, as: Support
 
   @impl true
@@ -122,6 +123,11 @@ defmodule FermixCore.Tools.UpdateJob do
         tag: "skill_drops_cue_history",
         description:
           "skill_name binds a watcher's task job to a skill whose trust or classes drop cue_history"
+      },
+      %{
+        tag: "skill_drops_job_tools",
+        description:
+          "skill_name binds a skill whose trust or classes leave a tool the job's own list names off its runs"
       }
     ]
   end
@@ -146,8 +152,10 @@ defmodule FermixCore.Tools.UpdateJob do
          {:ok, attrs} <-
            update_attrs(args, skill_name(skill), delivery, route_pin, clear_route_pin?),
          {:ok, job} <- Support.check_job_access(job_id, context),
+         :ok <- KeptAccess.check_job_tools(Map.get(job, :allowed_tools) || [], context),
          :ok <- Support.check_change_trust(job, context),
          :ok <- Support.check_cue_skill(job, skill, context),
+         :ok <- Support.check_skill_tools(job, skill, context),
          :ok <- Support.check_within_run_tools(job, skill, context),
          :ok <- Support.check_watcher_consent(job_id, context),
          :ok <- Mandates.check_update_consent(job_id, context),

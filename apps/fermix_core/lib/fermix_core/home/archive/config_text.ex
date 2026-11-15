@@ -131,6 +131,22 @@ defmodule FermixCore.Home.Archive.ConfigText do
   end
 
   @doc """
+  The file without the line that sets `key` in `[section]`, and whether it had
+  one; every other line kept. For a value written on one line, as a string is.
+  """
+  @spec drop(String.t(), String.t(), String.t()) :: {String.t(), boolean()}
+  def drop(contents, section, key)
+      when is_binary(contents) and is_binary(section) and section != "" and is_binary(key) and
+             key != "" do
+    lines = String.split(contents, "\n")
+
+    case find_entry(lines, section, key) do
+      {index, _line} -> {lines |> List.delete_at(index) |> Enum.join("\n"), true}
+      nil -> {contents, false}
+    end
+  end
+
+  @doc """
   The tables of the file named `table` or beneath it (`table.<name>…`), each
   as its header line and every line after it up to the next header, in file
   order.
