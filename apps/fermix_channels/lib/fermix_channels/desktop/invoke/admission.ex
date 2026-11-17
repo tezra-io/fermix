@@ -53,17 +53,19 @@ defmodule FermixChannels.Desktop.Invoke.Admission do
   is answered when it ends. `invoke_cancel` is answered exactly once:
   `cancelled`, or the outcome reached first.
 
-  **The master switch off** (`switches_changed/1`, told by
-  `FermixCore.Computers.Switches`) refuses every later request and ends
-  what runs or waits as `refused` `stopped_here`. **An
-  offer's own switch off**, the master on, ends the work of each capability
-  whose offer it is, running or waiting, by the rule a request is admitted
-  by (the capability's `offer/0` against `Switches.on?/2`): `refused` `off`,
-  the sentence a request of it arriving now gets; every other capability's
-  work goes on. A run that ends while the switches no longer let its
-  capability run was ended by them (a switch's own listener, such as the
-  browser's held turns, can end it before this process hears) and is
-  answered as they say, never `failed`. A request that waited for a slot or
+  **A switch off** (`switches_changed/1`, told by
+  `FermixCore.Computers.Switches`), the master or an offer's own, refuses
+  every later request it covers and ends the work it covers, running or
+  waiting, by the rule a request is admitted by (the capability's `offer/0`
+  against `Switches.on?/2`, under the master); every other capability's
+  work goes on. Whether that work had started decides its answer (M102 N7,
+  D9): a run is `refused` `stopped_here`, with how long it ran, and what it
+  did stands; what only waited, for a slot or its upload, never started and
+  is `refused` `off`, the sentence a request of it arriving now gets. A run
+  that ends while the switches no longer let its capability run was ended
+  by them (a switch's own listener, such as the browser's held turns, can
+  end it before this process hears) and had started: `stopped_here`, never
+  `failed`. A request that waited for a slot or
   its upload has the switches read again the moment it would start, as at
   admission, so none starts while they are off though this process has not
   heard yet.
@@ -210,13 +212,8 @@ defmodule FermixChannels.Desktop.Invoke.Admission do
     {:noreply, state}
   end
 
-  def handle_cast(:switches_changed, state) do
-    switches = switches(state)
-
-    if Switches.enabled?(switches),
-      do: {:noreply, offer_switched_off(switches, state)},
-      else: {:noreply, stopped(state)}
-  end
+  def handle_cast(:switches_changed, state),
+    do: {:noreply, switched_off(switches(state), state)}
 
   @impl true
   def handle_info({ref, result}, state) when is_reference(ref) do
@@ -677,15 +674,12 @@ defmodule FermixChannels.Desktop.Invoke.Admission do
   end
 
   # A run that ended while the switches no longer let its capability run was
-  # ended by them, and is answered as they would have ended it: the master
-  # off as stopped here, its offer off as a request of it now; else failed.
+  # ended by them, and had started: stopped here, as the switch going off
+  # ends a run (`switched_off/2`); else it failed.
   defp crash_outcome(entry, switches) do
-    with true <- Switches.enabled?(switches),
-         :ok <- switched_on(entry, switches) do
-      %Outcome{status: :failed, message: sentence(:crashed)}
-    else
-      false -> Outcome.refused(:stopped_here, sentence(:stopped_here))
-      {:refused, refusal, sentence} -> Outcome.refused(refusal, sentence)
+    case switched_on(entry, switches) do
+      :ok -> %Outcome{status: :failed, message: sentence(:crashed)}
+      {:refused, _refusal, _sentence} -> stopped_here()
     end
   end
 
@@ -875,32 +869,32 @@ defmodule FermixChannels.Desktop.Invoke.Admission do
   defp receipt_message("unknown"), do: sentence(:receipt_unknown)
   defp receipt_message(_status), do: nil
 
-  defp stopped(state) do
-    outcome = Outcome.refused(:stopped_here, sentence(:stopped_here))
-    state = Enum.reduce(Map.keys(state.running), state, &stop_running(&1, outcome, &2))
-    state = Enum.reduce(Map.keys(state.uploads), state, &drop_upload(&1, outcome, &2))
-    ids = for entry <- :queue.to_list(state.waiting), do: entry.id
-    Enum.reduce(ids, state, &drop_waiting(&1, outcome, &2))
-  end
-
-  # An offer's own switch off, the master on: each capability's work, running
-  # or waiting, is held to the rule it was admitted by (`switched_on/2`), and
-  # what that rule now refuses ends with its refusal (`off`, the sentence a
-  # request of it arriving now gets). What then has a slot starts.
-  defp offer_switched_off(switches, state) do
+  # A switch off, the master or an offer's own: each capability's work,
+  # running or waiting, is held to the rule it was admitted by
+  # (`switched_on/2`), and what that rule now refuses ends by whether it had
+  # started (M102 N7, D9). A run is stopped here, what it did standing; what
+  # only waited, for a slot or its upload, never started and ends with the
+  # refusal a request of it arriving now gets (`off`). What then has a slot
+  # starts.
+  defp switched_off(switches, state) do
     running = for {id, entry} <- state.running, do: {:running, id, entry}
     uploads = for {id, upload} <- state.uploads, do: {:upload, id, upload.entry}
     waiting = for entry <- :queue.to_list(state.waiting), do: {:waiting, entry.id, entry}
 
-    refused =
+    ended =
       for {where, id, entry} <- running ++ uploads ++ waiting,
           {:refused, refusal, sentence} <- [switched_on(entry, switches)],
-          do: {where, id, Outcome.refused(refusal, sentence)}
+          do: {where, id, ended_by_switch(where, refusal, sentence)}
 
-    refused
+    ended
     |> Enum.reduce(state, fn {where, id, outcome}, acc -> end_work(where, id, outcome, acc) end)
     |> next()
   end
+
+  defp ended_by_switch(:running, _refusal, _sentence), do: stopped_here()
+  defp ended_by_switch(_waited, refusal, sentence), do: Outcome.refused(refusal, sentence)
+
+  defp stopped_here, do: Outcome.refused(:stopped_here, sentence(:stopped_here))
 
   defp end_work(:running, id, outcome, state), do: stop_running(id, outcome, state)
   defp end_work(:upload, id, outcome, state), do: drop_upload(id, outcome, state)

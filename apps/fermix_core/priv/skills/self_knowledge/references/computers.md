@@ -256,12 +256,17 @@ server rings there, one request per connected computer, which no turn made
 
 - **The computer decides.** It refuses a request from an older copy of the
   home, anything while its master switch is off, and what its own switch
-  for that offer has off, before anything runs; switching the master off
-  also ends what is running ("The person at studio Mac stopped it."), and
-  switching one offer off (the browser, the screen, Messages, files or
-  commands) ends what runs or waits there for it, answered switched off with
-  the same sentence a new request gets, the browser's tabs for the server
-  included; other offers' work goes on. It runs at most 8 requests at once
+  for that offer has off, before anything runs. Switching the master off, or
+  one offer (the browser, the screen, Messages, files or commands), ends
+  what runs or waits there for it, the browser's tabs for the server
+  included; other offers' work goes on. What had started is told it ran and
+  was stopped partway, and that what it did stands ("The command ran for 5
+  seconds on studio Mac and was stopped partway when files and commands was
+  switched off there. What it did stands."; the screen's says "The person at
+  studio Mac stopped it."): never report such work as not run, and check
+  what it left before running it again. What only waited for its turn never
+  started and is answered switched off, with the same sentence a new request
+  gets. It runs at most 8 requests at once
   with 32 waiting, and refuses past that; when its request handler restarts,
   the waiting ones are answered at once as not run ("Fermix on this computer
   restarted before it ran this, so it did not run."), and it tells the
@@ -273,7 +278,9 @@ server rings there, one request per connected computer, which no turn made
 - **Every request ends one way:** done, failed (in the computer's words),
   refused (switched off, unavailable, outside its sandbox, only while the
   owner is in the conversation, stopped at the computer, busy, an older copy
-  of the home), timed out, cancelled, or not known. A tool that ran there
+  of the home), timed out, cancelled, or not known. A refusal means it never
+  ran, but for stopped at the computer: that ran partway, and what it did
+  stands. A tool that ran there
   and failed (a command that exited with an error, a file it could not
   read) is failed, never done: the journal says so, and the reply carries
   the tool's whole error.

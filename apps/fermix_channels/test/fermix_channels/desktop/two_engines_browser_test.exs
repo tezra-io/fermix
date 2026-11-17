@@ -972,16 +972,17 @@ defmodule FermixChannels.Desktop.TwoEnginesBrowserTest do
       send(chrome, :answer)
 
       assert {:ok, %{success: false, error: error}} = Task.await(turn, 30_000)
-      assert error =~ "The person at studio Mac stopped it."
+      assert error =~ " on studio Mac and was stopped partway when the browser was switched off"
+      assert error =~ "What it did stands."
       assert [%{op: "browser.open", status: "refused", refusal: "stopped_here"}] = journal(ctx.e)
       assert held_turns(ctx) == []
     end
 
-    # The browser's own switch, the master on: the request at work there is
-    # refused off, in the words a request that arrives while it is off gets,
-    # whether Admission hears first or the held turns' listener ends it first.
+    # The browser's own switch, the master on: the request at work there had
+    # started, so it is stopped here, what it did standing (M102 N7), whether
+    # Admission hears first or the held turns' listener ends it first.
     for first <- [:admission, :listener] do
-      test "the browser switch off refuses the request at work there as off (#{first} first)",
+      test "the browser switch off stops the request at work there (#{first} first)",
            ctx do
         turn =
           Task.async(fn ->
@@ -1002,9 +1003,13 @@ defmodule FermixChannels.Desktop.TwoEnginesBrowserTest do
         send(chrome, :answer)
 
         assert {:ok, %{success: false, error: error}} = Task.await(turn, 30_000)
-        assert error =~ "studio Mac has the browser switched off"
-        assert [%{op: "browser.open", status: "refused", refusal: "off"}] = journal(ctx.e)
-        assert exec_event().refusal == :off
+        assert error =~ " on studio Mac and was stopped partway when the browser was switched"
+        refute error =~ "has the browser switched off"
+
+        assert [%{op: "browser.open", status: "refused", refusal: "stopped_here"}] =
+                 journal(ctx.e)
+
+        assert exec_event().refusal == :stopped_here
       end
     end
 

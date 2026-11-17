@@ -586,8 +586,8 @@ it, never a second writer.
   copy that would leave its disk with less than 2 GiB free, and says so. A
   desktop that is not connected (asleep, shut, offline) is no failure: its
   status is `waiting`, "Your <name> is not connected; the snapshot waits for
-  the next run.", while the bucket's copy goes on. The
-  desktop never holds the passphrase, so it cannot read its copies; restoring
+  the next run.", while the bucket's copy goes on. When it connects, an owed
+  copy runs at once. The desktop never holds the passphrase, so it cannot read its copies; restoring
   from one is `fermix home import <home>/snapshots/<name>.fxsnap --into ROOT
   --passphrase-file PATH`, as from a downloaded one.
 

@@ -7,7 +7,7 @@ defmodule FermixCore.Computers.Outcome do
   |---|---|
   | `ok` | it ran; `result` is its answer |
   | `failed` | it ran and failed; `message` is the capability's own words, and a tool that failed with a result of its own carries it in `result` (and its part) as well |
-  | `refused` | it never ran; `refusal` says why, `message` in the computer's words |
+  | `refused` | it never ran, but for `stopped_here`: it started and was stopped partway at the computer, and what it did stands (M102 D9); `refusal` says why, `message` in the computer's words |
   | `timed_out` | it did not finish within its deadline |
   | `cancelled` | it was cancelled before it finished |
   | `unknown` | whether it ran is not known: its answer was lost |
@@ -15,7 +15,8 @@ defmodule FermixCore.Computers.Outcome do
   A refusal is one of `off` (switched off on that computer), `unavailable`
   (it cannot run there, in the computer's words), `outside_sandbox`,
   `not_attended` (it runs only while the owner is in the conversation),
-  `stopped_here` (the person at the computer stopped it), `busy` and
+  `stopped_here` (it had started, and its switch going off or the person at
+  the computer stopped it), `busy` and
   `stale_epoch` (the request came from an older copy of the home). The
   home's own refusals before anything is sent (a computer that is away, a
   name no computer has) are not in this set: they never reach the wire.
@@ -37,6 +38,7 @@ defmodule FermixCore.Computers.Outcome do
   """
 
   alias FermixCore.Computers.Offers
+  alias FermixCore.Computers.Switches
 
   @statuses [:ok, :failed, :refused, :timed_out, :cancelled, :unknown]
   @refusals [
@@ -368,7 +370,18 @@ defmodule FermixCore.Computers.Outcome do
   defp refusal_sentence(:not_attended, _outcome, name),
     do: "This runs on #{name} only while you are in the conversation."
 
-  defp refusal_sentence(:stopped_here, _outcome, name), do: "The person at #{name} stopped it."
+  # Work that had started and was stopped at the computer (M102 N7, D7, D9):
+  # it ran, for how long, was stopped partway when its switch went off, and
+  # what it did stands. The screen alone has a Stop of its own beside its
+  # switch, so its words name the person there and no switch.
+  defp refusal_sentence(:stopped_here, %{capability: "computer_use"}, name),
+    do: "The person at #{name} stopped it."
+
+  defp refusal_sentence(:stopped_here, outcome, name) do
+    "#{what_ran(outcome.capability)} ran for #{ran_for(outcome.duration_ms)} on #{name} and " <>
+      "was stopped partway when #{switch_words(outcome.capability)} was switched off there. " <>
+      "What it did stands."
+  end
 
   defp refusal_sentence(:busy, _outcome, name),
     do: "#{name} is running as much as it allows right now. Try again in a moment."
@@ -387,6 +400,34 @@ defmodule FermixCore.Computers.Outcome do
       n -> "#{n} seconds"
     end
   end
+
+  defp what_ran("shell"), do: "The command"
+  defp what_ran(_capability), do: "It"
+
+  # How long it ran, as the computer counts it from the request's arrival:
+  # whole seconds as a deadline is said (`seconds/1`; a decimal reads as a
+  # version to the copy rules), whole minutes from one.
+  defp ran_for(ms) when ms < 1_000, do: "under a second"
+  defp ran_for(ms) when ms < 60_000, do: seconds(ms)
+
+  defp ran_for(ms) do
+    case div(ms + 30_000, 60_000) do
+      1 -> "1 minute"
+      minutes -> "#{minutes} minutes"
+    end
+  end
+
+  # The switch at the computer that decides the capability, in the words of
+  # the offers it decides ("files and commands", "the browser"); for one the
+  # master switch alone decides, everything.
+  defp switch_words(capability) do
+    case Enum.find(Switches.switches(), &(capability in offer_ids(&1))) do
+      nil -> "everything Fermix on your server may use"
+      switch -> Enum.map_join(Switches.decides(switch), " and ", &Offers.module(&1).label())
+    end
+  end
+
+  defp offer_ids(switch), do: Enum.map(Switches.decides(switch), &Atom.to_string/1)
 
   # The words an offer goes by, for the capability that is that offer; none
   # for one gated by the master switch alone.
@@ -418,7 +459,10 @@ defmodule FermixCore.Computers.Outcome do
       %{base | status: :cancelled},
       %{base | status: :unknown},
       %{base | status: :unknown, target: nil},
-      %{refused(:off, "Switched off.") | capability: "system"}
+      %{refused(:off, "Switched off.") | capability: "system"},
+      %{refused(:stopped_here, "Stopped.") | capability: "shell", duration_ms: 4_700},
+      %{refused(:stopped_here, "Stopped.") | capability: "system", duration_ms: 61_000},
+      %{refused(:stopped_here, "Stopped.") | capability: "computer_use"}
     ]
     |> Enum.concat(for refusal <- @refusals, do: %{base | status: :refused, refusal: refusal})
     |> Enum.map(&sentence(&1, "studio Mac"))

@@ -30,11 +30,19 @@ defmodule FermixCore.Home.Snapshot.Scheduler do
   recipient or no target; `config_changed/1` (called by the writers of the
   section) and `targets_changed/1` (a target that can take a snapshot now:
   a desktop connected, `FermixChannels.Desktop.SnapshotCopies`) plan again
-  at once, at once again while `run_at_boot` still asks. A primary whose
-  only target is its desktops has none it can name when this process starts,
-  before the channels' device store, so it plans its first run once a
-  desktop connects. `run_now/1` starts one at once unless one is running
-  (`{:error, :busy}`).
+  at once, at once again while `run_at_boot` still asks. A change of the
+  section plans from the last attempt. A target that came plans what is
+  owed (M102 N11): when a target that is on has no attempt of its own, or
+  its last one waited (its desktop was not connected), the next run is due
+  at once, never sooner than the boot delay; otherwise from the last
+  attempt. A desktop that is away sends no connect, so this never loops. A
+  primary whose only target is its desktops has none it can name when this
+  process starts, before the channels' device store, so it plans its first
+  run once a desktop connects; on a server the boot run may go to S3 alone
+  for the same reason, and the desktop that connects after it is owed its
+  copy at once. Either change arriving while a run is going is held and
+  planned once the run's end is recorded, never dropped. `run_now/1` starts
+  one at once unless one is running (`{:error, :busy}`).
 
   **A backup a week old.** After each run, once the newest verified point of
   any target is seven days old, the phones are told, once per occurrence (M75
@@ -95,8 +103,12 @@ defmodule FermixCore.Home.Snapshot.Scheduler do
           started_at: DateTime.t(),
           task: reference() | nil,
           token: reference() | nil,
-          next_run_at: DateTime.t() | nil
+          next_run_at: DateTime.t() | nil,
+          held: why() | nil
         }
+
+  @typedoc "What a plan follows: the last attempt, or what is owed (a target came)."
+  @type why :: :from_last | :owed
 
   @doc """
   The targets this engine's home writes to: `targets/1` of whether its
@@ -142,19 +154,23 @@ defmodule FermixCore.Home.Snapshot.Scheduler do
   @spec info(GenServer.server()) :: %{running: boolean(), next_run_at: DateTime.t() | nil}
   def info(server \\ __MODULE__), do: GenServer.call(server, :info)
 
-  @doc "Plans the next run again after the section changed. A no-op when no scheduler runs."
+  @doc """
+  Plans the next run again after the section changed, from the last attempt.
+  A no-op when no scheduler runs.
+  """
   @spec config_changed(GenServer.server()) :: :ok
-  def config_changed(server \\ __MODULE__), do: replan(server)
+  def config_changed(server \\ __MODULE__), do: replan(server, :from_last)
 
   @doc """
   Plans the next run again once a target can take a snapshot it could not
-  (a desktop connected). A no-op when no scheduler runs.
+  (a desktop connected), by what is owed (the moduledoc). A no-op when no
+  scheduler runs.
   """
   @spec targets_changed(GenServer.server()) :: :ok
-  def targets_changed(server \\ __MODULE__), do: replan(server)
+  def targets_changed(server \\ __MODULE__), do: replan(server, :owed)
 
-  defp replan(server) do
-    if GenServer.whereis(server), do: GenServer.cast(server, :replan)
+  defp replan(server, why) do
+    if GenServer.whereis(server), do: GenServer.cast(server, {:replan, why})
     :ok
   end
 
@@ -179,10 +195,11 @@ defmodule FermixCore.Home.Snapshot.Scheduler do
       started_at: now.(),
       task: nil,
       token: nil,
-      next_run_at: nil
+      next_run_at: nil,
+      held: nil
     }
 
-    {:ok, plan_due(state)}
+    {:ok, plan_due(state, :from_last)}
   end
 
   @impl true
@@ -200,8 +217,13 @@ defmodule FermixCore.Home.Snapshot.Scheduler do
     do: {:reply, %{running: state.task != nil, next_run_at: state.next_run_at}, state}
 
   @impl true
-  def handle_cast(:replan, %{task: nil} = state), do: {:noreply, plan_due(state)}
-  def handle_cast(:replan, state), do: {:noreply, state}
+  def handle_cast({:replan, why}, %{task: nil} = state), do: {:noreply, plan_due(state, why)}
+
+  # A run is going: the change is held for its end (`finished/2`), what is
+  # owed before the last attempt, since owed plans from the last attempt when
+  # nothing is.
+  def handle_cast({:replan, why}, state),
+    do: {:noreply, %{state | held: if(state.held == :owed, do: :owed, else: why)}}
 
   @impl true
   def handle_info({:tick, token}, %{token: token, task: nil} = state) do
@@ -249,10 +271,10 @@ defmodule FermixCore.Home.Snapshot.Scheduler do
 
     :ok = notice_stale(state)
     :ok = state.status_changed.()
-    plan(%{state | task: nil}, started_at)
+    after_run(state, started_at)
   end
 
-  defp finished(state, :not_configured), do: plan(%{state | task: nil}, nil)
+  defp finished(state, :not_configured), do: after_run(state, nil)
 
   defp finished(state, {:crashed, _reason}) do
     at = DateTime.truncate(state.now.(), :second)
@@ -267,8 +289,15 @@ defmodule FermixCore.Home.Snapshot.Scheduler do
       )
     end)
 
-    plan(%{state | task: nil}, at)
+    after_run(state, at)
   end
+
+  # The next run once a run's end is recorded: as the change held while it
+  # went asks (`handle_cast/2`), else one interval after it started.
+  defp after_run(%{held: nil} = state, last_at), do: plan(%{state | task: nil}, last_at)
+
+  defp after_run(%{held: why} = state, _last_at),
+    do: plan_due(%{state | task: nil, held: nil}, why)
 
   # The phones hear once when the newest verified point passes seven days,
   # and again only for a later point grown as old.
@@ -365,7 +394,8 @@ defmodule FermixCore.Home.Snapshot.Scheduler do
     }
   end
 
-  # The next run, from the last attempt (nil: never, or not known), planned
+  # The next run, from the last attempt (nil: never, not known, or a copy
+  # owed: at once, never sooner than the boot delay), planned
   # only while the section turns snapshots on, and recorded in the status
   # file so a surface reading it without the engine still shows it. A
   # scheduler with no timer (a test tree) plans nothing and writes nothing.
@@ -378,14 +408,36 @@ defmodule FermixCore.Home.Snapshot.Scheduler do
   end
 
   # The plan of this start, and again at each change: at once while a move's
-  # activation asks for it (`run_at_boot`, until that run starts), otherwise
-  # from the last attempt.
-  defp plan_due(state) do
+  # activation asks for it (`run_at_boot`, until that run starts); for a
+  # target that came, at once while a target that is on is owed a copy
+  # (`owed?/2`); otherwise from the last attempt.
+  defp plan_due(state, why) do
     case Status.read(state.home) do
-      {:ok, %{run_at_boot: true}} -> plan_now(state)
-      _other -> plan(state, last_attempt_at(state))
+      {:ok, %{run_at_boot: true}} ->
+        plan_now(state)
+
+      {:ok, status} when why == :owed ->
+        if owed?(state, status), do: plan(state, nil), else: plan(state, last_attempt_at(state))
+
+      _from_last ->
+        plan(state, last_attempt_at(state))
     end
   end
+
+  # A target that is on with no attempt of its own, or whose last one waited
+  # (its desktop was not connected), is owed a copy.
+  defp owed?(state, status) do
+    config = state.config.()
+
+    Enum.any?(state.targets.(), fn target ->
+      match?({:ok, _settings}, target.configured(config)) and
+        owes?(get_in(status.targets, [target.id(), :last_attempt]))
+    end)
+  end
+
+  defp owes?(nil), do: true
+  defp owes?(%{result: :waiting}), do: true
+  defp owes?(%{result: result}) when result in [:verified, :failed], do: false
 
   defp plan_now(%{timer: nil} = state), do: plan(state, nil)
 
