@@ -117,7 +117,7 @@
 \* SOURCE: apps/fermix_core/lib/fermix_core/computers/journal.ex#append_started,append_finished,lookup,interrupted,close_all,closed_entry,append,write_line,entries,entry @ a6fec2dd5ee7
 \* SOURCE: apps/fermix_core/lib/fermix_core/computers.ex#call @ 1db7ef7e8b31
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/desktop/invoke.ex @ a5e7a51256cc
-\* SOURCE: apps/fermix_channels/lib/fermix_channels/desktop/invoke/admission.ex @ e1b6205d644c
+\* SOURCE: apps/fermix_channels/lib/fermix_channels/desktop/invoke/admission.ex @ cf07f1983988
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/desktop/invoke_family.ex#init,handle_event,reconcile @ aafda1185bd7
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/desktop/device_supervisor.ex#children,invoke_spec @ 62d59181f365
 \* SOURCE: apps/fermix_core/lib/fermix_core/computers/switches.ex#write,forget,notify @ bc1e22104814
