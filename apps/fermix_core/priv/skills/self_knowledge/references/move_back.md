@@ -45,7 +45,10 @@ The move to a server, the roles and the epoch: skill_view(name:
   coming back can no longer drive the one it kept, and that the server
   stays until deleted. The server refuses the move while its notetaker is
   in a meeting, naming it, since the move would end it before its notes
-  are written. Coding agents need nothing again: this Mac
+  are written. It also names each other computer that joined the server:
+  a home off a server holds no computer yet, so the move back disconnects
+  them, and each can join again with a new code once Fermix is on a server.
+  Coding agents need nothing again: this Mac
   kept its own approval in its `machine.toml`, in force once it is back. **Cancel** is offered until Move now, and again only once the
   server undid the move or answers with no move at all, never while it
   moves: it stops receiving, closes the code on the server and forgets the
@@ -65,7 +68,8 @@ The move to a server, the roles and the epoch: skill_view(name:
   own settings (sandbox, computer use, computer history, iMessage, StackChan,
   the dev plugin folder: its `machine.toml`) never left it and stay as they
   were, and Fermix restarts as the primary, one
-  epoch up from the server. Phones follow; the desktop link ends, and this
+  epoch up from the server. Phones follow, and every computer's row goes,
+  this one's included; the desktop link ends, and this
   computer's own key is deleted from its keychain (or file store). A server
   that undid the move ("The move back was undone. Fermix still runs on your
   server.") offers **Try again** and **Cancel**, also when this computer
@@ -90,7 +94,9 @@ The move to a server, the roles and the epoch: skill_view(name:
   on only once the server is deleted or stopped for good ("if it runs
   again, two copies of Fermix answer the same channels"), and says what is
   lost: messages, memory and jobs since that backup, and Telegram messages
-  older than 24 hours where it is set up. Fermix deletes no server: it
+  older than 24 hours where it is set up, and that any other computer that
+  joined the server is disconnected (none is named: the list is the
+  server's). Fermix deletes no server: it
   restores the copy here, deletes this computer's own key as a move back
   does, and restarts as the primary. A restore that stopped before its copy was in
   place is offered again. Before confirming, delete the server, or stop

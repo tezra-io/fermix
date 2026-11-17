@@ -488,7 +488,8 @@ defmodule FermixChannels.Desktop.TwoEnginesHistoryTest do
         spool: ctx.spool,
         now_ms: ctx.t0 + 60 * @minute,
         recording?: true,
-        status: %{mode: :capturing, reason: nil, lock_holder: nil}
+        status: %{mode: :capturing, reason: nil, lock_holder: nil},
+        apps: 1
       )
 
     assert :ok =
@@ -502,7 +503,10 @@ defmodule FermixChannels.Desktop.TwoEnginesHistoryTest do
              Repo.computer_history_home(:computer_rows, [], server: ctx.repo)
 
     assert is_integer(at)
-    assert %{"recorder" => "running", "events" => 2, "unsent" => 2} = Jason.decode!(kept)
+
+    assert %{"recorder" => "running", "events" => 2, "unsent" => 2, "apps" => 1} =
+             Jason.decode!(kept)
+
     refute kept =~ "Juniper"
   end
 

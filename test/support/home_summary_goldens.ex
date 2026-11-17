@@ -17,6 +17,7 @@ defmodule FermixTestSupport.HomeSummaryGoldens do
   """
 
   alias FermixCore.Home.MoveReadiness
+  alias FermixCore.Home.ServerPrimary
   alias FermixCore.Home.Snapshot
   alias FermixCore.Home.Snapshot.S3, as: SnapshotS3
   alias FermixCore.Home.Snapshot.Status, as: SnapshotStatus
@@ -186,6 +187,7 @@ defmodule FermixTestSupport.HomeSummaryGoldens do
       :primary,
       %{epoch: 5, snapshots: server_snapshots(), disk: disk(0.42), update_ceiling: "1.2.3"},
       %{
+        host_os: :linux,
         link:
           link(
             desktops: [Map.merge(desktop, %{connected: true, since: ~U[2031-05-04 09:00:00Z]})],
@@ -295,6 +297,7 @@ defmodule FermixTestSupport.HomeSummaryGoldens do
         ]
       },
       %{
+        host_os: :linux,
         link:
           link(
             desktops: [Map.merge(desktop, %{connected: true, since: ~U[2031-05-04 09:00:00Z]})]
@@ -327,9 +330,11 @@ defmodule FermixTestSupport.HomeSummaryGoldens do
   end
 
   # The record for `role` from its own facts (`own`) and the summary's
-  # (`extra`), as `Management.Home.status/1` puts them together.
+  # (`extra`), as `Management.Home.status/1` puts them together. A server is
+  # Linux (`ServerPrimary` refuses macOS); every other golden is a Mac's.
   defp record(role, own, extra) do
     link = Map.get(extra, :link, link([]))
+    host_os = Map.get(extra, :host_os, :macos)
 
     facts =
       Map.merge(
@@ -354,13 +359,14 @@ defmodule FermixTestSupport.HomeSummaryGoldens do
     summary =
       HomeSummary.summary(%{
         role: role,
-        host_os: :macos,
+        host_os: host_os,
         now: @now,
         linked: Map.get(extra, :linked, false),
         revoked: Map.get(extra, :revoked, false),
         moved: facts.moved,
         move: facts.move,
         link: link,
+        server: ServerPrimary.of(host_os, link.desktops) == :server,
         candidates: facts.candidates,
         review: Map.get(extra, :review),
         move_items: Map.get(extra, :move_items, []),

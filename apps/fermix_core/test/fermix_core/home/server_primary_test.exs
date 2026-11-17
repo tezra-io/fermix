@@ -30,6 +30,15 @@ defmodule FermixCore.Home.ServerPrimaryTest do
              {:not_server, {:device_list, :eacces}}
   end
 
+  # M102 N2: the pure decision, by the host's system and the home's desktop
+  # rows, which `HomeSummary` draws the server by as well.
+  test "the decision by system and rows: a server only off macOS and with a desktop row" do
+    assert ServerPrimary.of(:linux, [@mac]) == :server
+    assert ServerPrimary.of(:linux, []) == {:not_server, :no_desktop}
+    assert ServerPrimary.of(:macos, [@mac]) == {:not_server, :macos}
+    assert ServerPrimary.of(:macos, []) == {:not_server, :macos}
+  end
+
   test "each answer that is no server has its own sentence" do
     assert ServerPrimary.sentence(:macos) ==
              "Fermix keeps S3 backups only on an Always On server, and this Mac is not one."

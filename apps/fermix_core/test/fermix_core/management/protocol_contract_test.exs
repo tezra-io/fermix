@@ -30,6 +30,7 @@ defmodule FermixCore.Management.ProtocolContractTest do
   alias FermixCore.Home.Join, as: HomeJoin
   alias FermixCore.Home.Move, as: HomeMove
   alias FermixCore.Home.Moved
+  alias FermixCore.Home.ServerPrimary
   alias FermixCore.Home.ServerRestart
   alias FermixCore.Home.Snapshot
   alias FermixCore.Home.Snapshot.Recipient, as: SnapshotRecipient
@@ -2602,6 +2603,7 @@ defmodule FermixCore.Management.ProtocolContractTest do
 
     summary =
       golden_summary(
+        host_os: :linux,
         link: %{primary: nil, desktops: desktops, enrollment: nil},
         snapshots: server["snapshots"],
         disk: server["disk"],
@@ -2702,6 +2704,7 @@ defmodule FermixCore.Management.ProtocolContractTest do
 
     summary =
       golden_summary(
+        host_os: :linux,
         link: %{primary: nil, desktops: desktops, enrollment: nil},
         snapshots: server["snapshots"],
         disk: server["disk"],
@@ -2828,8 +2831,14 @@ defmodule FermixCore.Management.ProtocolContractTest do
       restarts_itself: true
     }
     |> Map.merge(Map.new(overrides))
+    |> served()
     |> HomeSummary.summary()
   end
+
+  # Whether the primary is an Always On server's, by the rule
+  # `HomeSummary.gather/5` sets it by (`ServerPrimary.of/2`).
+  defp served(facts),
+    do: Map.put(facts, :server, ServerPrimary.of(facts.host_os, facts.link.desktops) == :server)
 
   defp golden_row(name) do
     {^name, record} = List.keyfind(HomeSummaryGoldens.rows(), name, 0)

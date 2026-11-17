@@ -659,6 +659,50 @@ defmodule FermixChannels.Gateway.Commands.HistoryTest do
     assert text =~ "asked to switch its history off, not yet done there"
   end
 
+  # M102 N15: the computer's allowlist lives in its own machine.toml, which
+  # never travels, so its report says how many apps are chosen there (never
+  # which); a running recorder with none records nothing, and says so.
+  test "status says a computer whose recorder runs with no app chosen records nothing", %{
+    ctx: ctx,
+    repo: repo
+  } do
+    now = System.system_time(:millisecond)
+    ctx = Map.put(ctx, :computer_history_computers, [studio(true)])
+
+    report = fn apps ->
+      %{
+        "v" => 2,
+        "recorder" => "running",
+        "apps" => apps,
+        "events" => 0,
+        "unsent" => 0,
+        "oldest_unsent_ts" => nil,
+        "expired_unsent" => 0,
+        "title_only" => 0,
+        "private_unknown" => 0,
+        "ax_refused" => 0
+      }
+    end
+
+    status = fn apps ->
+      encoded = Jason.encode!(report.(apps))
+
+      :ok =
+        Repo.computer_history_home(:record_report, ["studio-7f3a", encoded, now], server: repo)
+
+      assert :ok = History.execute(message("status"), reply_fn(self()), ctx)
+      assert_receive {:reply, text}
+      text
+    end
+
+    assert status.(0) =~
+             "recorder running, no apps chosen there, so nothing is recorded (reported "
+
+    chosen = status.(3)
+    assert chosen =~ "recorder running, nothing unsent (reported "
+    refute chosen =~ "no apps chosen"
+  end
+
   test "status says when a computer has not reported yet", %{ctx: ctx} do
     ctx = Map.put(ctx, :computer_history_computers, [studio(false)])
     assert :ok = History.execute(message("status"), reply_fn(self()), ctx)

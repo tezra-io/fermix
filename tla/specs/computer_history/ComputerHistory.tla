@@ -123,12 +123,12 @@ CONSTANTS
                         \* Capturer exited (computer_history.ex:235, :243-247, :306,
                         \* controller.ex:63-64, :202)
     SaveBeforeReply,    \* /history off saves machine.toml before it replies
-                        \* (computer_history.ex:234-237, then history.ex:747-748)
+                        \* (computer_history.ex:234-237, then history.ex:758-759)
     BootReconciles,     \* a (re)started Controller reconciles in handle_continue (controller.ex:67-89)
     OffConfirmsStop,    \* an exit of the reconcile call (no Controller, a crash mid-call, a
                         \* timeout) is returned as an error, and /history off then says the
                         \* stop is unconfirmed instead of "nothing new is captured"
-                        \* (computer_history.ex:304-311, history.ex:827-832)
+                        \* (computer_history.ex:304-311, history.ex:838-843)
     InitChecksEnabled,  \* every Capturer start re-reads the enable bit and declines (:ignore)
                         \* while the feature is off (capturer.ex:130-136)
     InsertChecksIntervals, \* the spool insert refuses, inside its own transaction, each row
@@ -620,14 +620,14 @@ ControllerRestart ==
 ControllerStep == CtrlLookup \/ CtrlSend \/ ControllerRestart
 
 -----------------------------------------------------------------------------
-(* /history off (history.ex:740-864), in the channel's ingress process    *)
+(* /history off (history.ex:751-875), in the channel's ingress process    *)
 
 OffUnchanged ==
     UNCHANGED <<clock, where, ts, sidecar, cap, exitQueued, inc, dsBox, dsBusy, dsFor, ctrl,
                 ctrlGen, ctrlPc, ctrlPid, pauseUntil, pausePc, purges, pauseWin, faultsLeft>>
     /\ UNCHANGED <<pauseAcked, inPause, inAckedPause, afterOff, purged>>
 
-\* The owner sends /history off; disable/1 (history.ex:859-864) calls
+\* The owner sends /history off; disable/1 (history.ex:870-875) calls
 \* ComputerHistory.switch_off/1, which flips the app env
 \* (computer_history.ex:224-230). That is a get_env (Config.current/0) then a
 \* put_env, folded into one step: no other writer of this key is in scope.
@@ -681,7 +681,7 @@ OffSave ==
     /\ UNCHANGED <<ctrlCall, env, offAcked, offUnconfirmed>>
     /\ OffUnchanged
 
-\* The reply, chosen by off_text from the {stop, save} outcomes (history.ex:812-843).
+\* The reply, chosen by off_text from the {stop, save} outcomes (history.ex:823-854).
 \* A confirmed stop: "Computer history disabled - nothing new is captured ..."
 \* (:812-815). An unconfirmed one: "... the recorder could not be confirmed
 \* stopped ... it may still be capturing" (:827-832).
@@ -700,14 +700,14 @@ OffReply ==
 OffStep == OffCall \/ OffSave \/ OffReply
 
 -----------------------------------------------------------------------------
-(* /history pause and /history purge (history.ex:605-705)                 *)
+(* /history pause and /history purge (history.ex:616-716)                 *)
 
 CommandUnchanged ==
     UNCHANGED <<clock, ts, sidecar, cap, exitQueued, inc, dsBox, dsBusy, dsFor, ctrl, ctrlGen,
                 ctrlPc, ctrlPid, ctrlCall, env, config, offPc, faultsLeft>>
 
 \* The owner sends /history pause <d>: now is read and until = now + d
-\* (history.ex:613-614). pause_everywhere records the pause for every machine
+\* (history.ex:624-625). pause_everywhere records the pause for every machine
 \* on the home (pause_window/5, in memory.db, not this store: folded in), then
 \* apply_here applies it to this machine's store, with any earlier interval
 \* this machine owes (history.ex apply_here/2 -> Delivery.apply_here/1 ->
@@ -740,7 +740,7 @@ PauseSet ==
     /\ CommandUnchanged
     /\ GhostsUnchanged
 
-\* The reply (history.ex:633, :643-644), after the computers were told (told/1,
+\* The reply (history.ex:644, :654-655), after the computers were told (told/1,
 \* folded in): "paused until <until>. It resumes automatically then." There is
 \* no resume verb: the horizon passing is the only unpause (Ingest re-reads it
 \* per batch, ingest.ex:225-236).
@@ -763,7 +763,7 @@ PauseReply ==
 \* the command's start, so an event captured between the home's transaction
 \* and this one is stamped after it: the step is this store's transaction.
 \* Rows still in a Capturer buffer, or in a batch past its pause check, are
-\* not in the spool yet. The reply (history.ex:685-705) is folded in: no
+\* not in the spool yet. The reply (history.ex:696-716) is folded in: no
 \* property depends on its timing.
 PurgeCommit(w) ==
     /\ OwnerCanPurge
@@ -894,7 +894,7 @@ Spec == Init /\ [][Next]_vars /\ Fairness
 \* "Pause and disable both halt ingestion at the ack - no event timestamped
 \* after the pause or the disable acknowledgment lands in the spool".
 \* The disable half. The off reply itself says "nothing new is captured"
-\* (history.ex:813), and only after a confirmed stop.
+\* (history.ex:824), and only after a confirmed stop.
 DisableHaltsAtAck == \A e \in afterOff : where[e] /= "spool"
 
 \* The pause half, read up to the horizon: 12 says after the ack, and 12
@@ -905,7 +905,7 @@ PauseHaltsAtAck == \A e \in inAckedPause : where[e] /= "spool"
 \* whenever its batch is flushed: the claim at ingest.ex:225-236 ("an event
 \* stamped inside the pause therefore never reaches the spool, even when its
 \* batch is flushed after the horizon"), which since 826ba83a the pause's own
-\* fence makes as well (history.ex:656-672, spool.ex:161-169: each interval
+\* fence makes as well (history.ex:667-683, spool.ex:161-169: each interval
 \* "deletes the raw events stamped inside it and fences later ones"). It
 \* implies PauseHaltsAtAck
 \* (inAckedPause is a subset of inPause) and that nothing captured during the

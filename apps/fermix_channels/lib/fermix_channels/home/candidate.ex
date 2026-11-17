@@ -53,7 +53,7 @@ defmodule FermixChannels.Home.Candidate do
   that computer's device tree, beside its relay
   (`FermixChannels.Desktop.DeviceSupervisor`). It stages the server's home as
   a return (`Activation.stage/6`: this computer's device settings, secret
-  store and keychain, without its own desktop row; a keychain that refuses is
+  store and keychain, without any computer's row; a keychain that refuses is
   named as the settings rows name each secret), and on `move_commit` records
   the staged entries once and puts the home in place of the retired copy
   (`Activation.record_entries/1`, `Activation.activate/2`), then restarts, and

@@ -7,6 +7,7 @@ defmodule FermixCore.Management.HomeSummaryTest do
 
   alias FermixCore.Computers.Consent
   alias FermixCore.Home.Move
+  alias FermixCore.Home.ServerPrimary
   alias FermixCore.Home.Snapshot.S3
   alias FermixCore.Home.Snapshot.Status
   alias FermixCore.Management.Copy
@@ -42,6 +43,15 @@ defmodule FermixCore.Management.HomeSummaryTest do
        "Keep Fermix running when this Mac sleeps. It moves to a server you own.", "own_server"},
       {"a Linux home with nothing", facts(host_os: :linux), "off",
        "Keep Fermix running when this computer sleeps. It moves to a server you own.",
+       "own_server"},
+      # M102 N2: a Mac that took the home back can still hold a computer's
+      # row, and is no server (`ServerPrimary`): its own full disk is not a
+      # server's, and Always On can be set up again.
+      {"a Mac that took the home back, still holding a computer's row",
+       facts(
+         link: link(desktops: [desktop_row()]),
+         disk: %{"used" => 0.89, "nearly_full" => true}
+       ), "off", "Keep Fermix running when this Mac sleeps. It moves to a server you own.",
        "own_server"},
       {"a code for the owner's server", facts(link: link(enrollment: manual(:open))), "connect",
        "Waiting for your server to use its code.", nil},
@@ -1350,6 +1360,39 @@ defmodule FermixCore.Management.HomeSummaryTest do
              }
     end
 
+    # M102 D6: a home off a server holds no computer yet, so a move back
+    # drops every computer's row, and its confirm names each one that leaves
+    # by the name the server lists it under: never this computer, which the
+    # server marks as the one asking (`this_computer`).
+    test "a move back's confirm names each other computer it disconnects, which can join again" do
+      confirm = fn computers ->
+        home = Map.put(server_home([]), "computers", computers)
+        facts = returning(back("enrolled"), stays_here: [], primary_home: home)
+        HomeSummary.summary(facts)["action"]["confirm"]
+      end
+
+      this = %{"name" => "studio-mac", "this_computer" => true}
+      loft = %{"name" => "loft-linux", "this_computer" => false}
+      attic = %{"name" => "attic-pc", "this_computer" => false}
+
+      assert confirm.([this, loft]) ==
+               "Move Fermix back to this Mac now?\nloft-linux is disconnected from Fermix, and " <>
+                 "can join again once Fermix is on a server.\nYour server stays until you " <>
+                 "delete it."
+
+      both = confirm.([attic, this, loft])
+
+      assert both ==
+               "Move Fermix back to this Mac now?\nattic-pc and loft-linux are disconnected " <>
+                 "from Fermix, and each can join again once Fermix is on a server.\nYour " <>
+                 "server stays until you delete it."
+
+      assert Copy.summary_violations(both) == []
+
+      assert confirm.([this]) ==
+               "Move Fermix back to this Mac now?\nYour server stays until you delete it."
+    end
+
     # HR-1: Cancel only where no move of the server's is under way: before
     # the start, once the server undid it, and where the server answers as
     # the primary with no move although the start was recorded; never while
@@ -1511,11 +1554,15 @@ defmodule FermixCore.Management.HomeSummaryTest do
 
       assert %{"label" => "Restore on this Mac", "needs" => ["recovery_passphrase"]} = restore
 
+      # M102 D6: a restore drops every computer's row too. With the server
+      # silent, no list of them is at hand, so none is named.
       assert restore["confirm"] ==
                "Restore Fermix on this Mac from its backup of Sunday, May 4, 2031 at 9:30 AM " <>
                  "UTC?\nConfirm only once you deleted your server, or stopped it for good: if " <>
                  "it runs again, two copies of Fermix answer the same channels.\nMessages, " <>
-                 "memory and jobs since that backup are gone."
+                 "memory and jobs since that backup are gone.\nAny other computer that joined " <>
+                 "your server is disconnected from Fermix, and can join again once Fermix is " <>
+                 "on a server."
 
       # Telegram's 24 hours are named only where this computer's settings have
       # it set up (the EC2 test's F7 rule).
@@ -1526,7 +1573,7 @@ defmodule FermixCore.Management.HomeSummaryTest do
                &(&1["id"] == "restore_here")
              )[
                "confirm"
-             ] =~ ~r/are gone, and Telegram keeps nothing older than 24 hours\.\z/
+             ] =~ ~r/are gone, and Telegram keeps nothing older than 24 hours\.\n/
 
       # The pane's D8: the copy's date is the confirm's, never a Details line;
       # the note says what to check, and that Restore is the answer for good.
@@ -2574,7 +2621,14 @@ defmodule FermixCore.Management.HomeSummaryTest do
       },
       Map.new(overrides)
     )
+    |> served()
   end
+
+  # Whether the primary is an Always On server's, by the rule `gather/5` sets
+  # it by (`ServerPrimary.of/2`), unless a case says so itself.
+  defp served(facts),
+    do:
+      Map.put_new(facts, :server, ServerPrimary.of(facts.host_os, facts.link.desktops) == :server)
 
   defp ready_facts(overrides) do
     facts([candidates: [candidate()], link: link(enrollment: manual(:used, @cand))] ++ overrides)
@@ -2660,11 +2714,13 @@ defmodule FermixCore.Management.HomeSummaryTest do
 
   defp copy(name \\ @copy, at \\ ~U[2031-05-04 09:30:00Z]), do: %{name: name, at: at}
 
+  # An Always On server is Linux (`ServerPrimary` refuses macOS).
   defp server(overrides) do
     desktop_row = %{device_id: "6d2b3c1e", name: "Studio Mac", connected: true}
 
     facts(
       [
+        host_os: :linux,
         link: link(desktops: [desktop_row]),
         snapshots: snapshots([{"desktop", ~U[2031-05-04 10:00:00Z]}]),
         disk: %{"used" => 0.42, "nearly_full" => false}

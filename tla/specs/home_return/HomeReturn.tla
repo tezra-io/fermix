@@ -173,11 +173,11 @@ CONSTANTS
                          \* FALSE is neither (finding HR-2, fixed)
     UndoneInAnyPhase,    \* a candidate receiving or staged whose server answers as the
                          \* primary with no move under way draws undone, or Cancel with no
-                         \* record (return_view/2, home_summary.ex:1198-1204); FALSE draws
+                         \* record (return_view/2, home_summary.ex:1205-1211); FALSE draws
                          \* moving whatever the server says (finding HR-2, fixed)
     RequestBesideJob,    \* the summary draws Restore here running only while its request
                          \* in return.json stands beside its running job
-                         \* (restore_running?/1, home_summary.ex:1294-1295; Home's
+                         \* (restore_running?/1, home_summary.ex:1301-1302; Home's
                          \* restoring?/2); FALSE takes the request alone, which a stop of
                          \* the engine leaves behind
     EndingSettles        \* the job's ending settles a local candidate a stopped run left,
@@ -791,8 +791,8 @@ CandRestart ==
 -----------------------------------------------------------------------------
 (* The Mac's acts: home.act through Management.AlwaysOn, from the design   *)
 
-\* returning/1 (home_summary.ex:1148-1168), the first clause of the
-\* device's summary (device/1, :927-928, after a computer that is joining a
+\* returning/1 (home_summary.ex:1155-1175), the first clause of the
+\* device's summary (device/1, :934-935, after a computer that is joining a
 \* home, which this one is not): any candidate of this computer's, or,
 \* with none, return.json with move_started_at and no moved_at. (The stale
 \* check against a newer epoch the link reached needs a second desktop: not
@@ -805,11 +805,11 @@ Returning == cPhase # "none" \/ rj = "started"
 ServerAborted == LinkUp /\ sPhase = "aborted"
 ServerIdle == LinkUp /\ sPhase \in {"none", "aborted"}
 
-\* Restore here (restore_offer/1, home_summary.ex:1299-1312): the home moved
+\* Restore here (restore_offer/1, home_summary.ex:1306-1319): the home moved
 \* from this computer (its moved marker stands: a computer that joined, or
 \* one whose activation removed the marker, is offered none), it holds a
 \* copy (always, here) and nothing answers from the server
-\* (silent?/1, :1346-1352: no link, or no session for ten minutes, which here is
+\* (silent?/1, :1353-1359: no link, or no session for ten minutes, which here is
 \* the network down or the server gone). A server that runs answers, as the
 \* primary or, moving or retired, as one that is not (`stale`): not silent.
 \* Nor is one whose word that it forgot this computer the link keeps
@@ -822,7 +822,7 @@ ServerSilent == ~net \/ ~sAlive \/ ~mLink
 
 RestoreOffer == IF ServerSilent /\ mMarker THEN {"restore_here"} ELSE {}
 
-\* restoring/1 (home_summary.ex:1288-1295), the second clause of the device's
+\* restoring/1 (home_summary.ex:1295-1302), the second clause of the device's
 \* summary: moving, with nothing to press, while Restore here's request
 \* stands beside its running job (Home's restoring?/2 reads the job family:
 \* the act's steps here). Without RequestBesideJob the request alone.

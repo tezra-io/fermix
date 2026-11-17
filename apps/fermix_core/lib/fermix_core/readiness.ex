@@ -45,9 +45,15 @@ defmodule FermixCore.Readiness do
     * `:pane` — the settings pane (or assistant stage) that can clear it
     * `:detail_key` — the closed-set copy key, minted by the failure
       constructor so a reader can look one sentence up per cause rather than
-      collapsing three causes into one open `component`
+      collapsing three causes into one open `component`: a fixed key, a
+      carrier key of the iMessage Mac, or `channel:<channel>` for a channel
+      of the table, whose rest a surface reads as the channel's name
+    * `:sentence` — only on a row whose words only the engine has, set where
+      the row is built: its `action`, which a surface shows in place of its
+      own for the key (`sentence/1`)
   """
   @type failure :: %{
+          optional(:sentence) => String.t(),
           component: String.t(),
           action: String.t(),
           gating: boolean(),
@@ -93,11 +99,6 @@ defmodule FermixCore.Readiness do
   # Slack over Socket Mode (M75) needs the app-level token where the webhook
   # needs the signing secret, so it has a sentence of its own.
   @slack_socket_action "Add the Slack bot token and app-level token in Channels settings."
-  # The rows whose sentence the engine publishes beside the key (M97 §6.4):
-  # the iMessage rows, which say what only the engine knows, the Mac of the
-  # home that carries Messages. Every other row's words are each surface's.
-  @published_sentences ~w(channel:imessage:helper channel:imessage:carrier
-                          channel:imessage:conflict channel:imessage:away)
   # The rows that say a channel's computer is away rather than that setup is
   # owed (M97 D4).
   @away_keys ["channel:imessage:away"]
@@ -210,14 +211,16 @@ defmodule FermixCore.Readiness do
 
   @doc """
   The engine's own sentence for `failure` where it publishes one beside the
-  detail key (M97 §6.4): the iMessage rows, which name the Mac of the home
-  that carries Messages where the engine knows it. Nil for every other row,
-  whose words each surface keeps by its detail key.
+  detail key, set where the row is built: the rows a surface's words for the
+  key cannot say (M97 §6.4, M102 N5), iMessage's helper and the Mac of the
+  home that carries Messages, which they name where the engine knows it,
+  and Slack's Socket Mode credentials. Nil for every other row, whose words
+  each surface keeps by its detail key.
   """
   @spec sentence(failure()) :: String.t() | nil
-  def sentence(%{detail_key: detail_key, action: action})
+  def sentence(%{detail_key: detail_key, action: action} = failure)
       when is_binary(detail_key) and is_binary(action),
-      do: if(detail_key in @published_sentences, do: action)
+      do: Map.get(failure, :sentence)
 
   @doc """
   Whether `failure` says a channel's computer is away (the Mac that carries
@@ -504,13 +507,8 @@ defmodule FermixCore.Readiness do
     end
   end
 
-  defp slack_socket_row do
-    advisory(
-      %{component: "channel:slack", action: @slack_socket_action},
-      "channels",
-      "channel:slack:socket"
-    )
-  end
+  defp slack_socket_row,
+    do: published(%{component: "channel:slack", action: @slack_socket_action}, "channel:slack")
 
   defp signal_failure, do: channel_credentials_failure(:signal)
 
@@ -558,15 +556,10 @@ defmodule FermixCore.Readiness do
     do: imessage_row(IMessage.away_sentence(name), "channel:imessage:away")
 
   defp imessage_row(action, detail_key),
-    do: advisory(%{component: "channel:imessage", action: action}, "channels", detail_key)
+    do: published(%{component: "channel:imessage", action: action}, detail_key)
 
-  defp imessage_helper_row do
-    advisory(
-      %{component: "channel:imessage", action: @imessage_helper_action},
-      "channels",
-      "channel:imessage:helper"
-    )
-  end
+  defp imessage_helper_row,
+    do: imessage_row(@imessage_helper_action, "channel:imessage")
 
   defp channel_credentials_failure(channel) do
     cond do
@@ -691,6 +684,11 @@ defmodule FermixCore.Readiness do
 
   defp advisory(failure, pane, detail_key) when pane in @panes,
     do: Map.merge(failure, %{gating: false, pane: pane, detail_key: detail_key})
+
+  # A channel's advisory row whose words only the engine has: they are its
+  # sentence, which a surface shows in place of its own for the key.
+  defp published(%{action: action} = failure, detail_key),
+    do: failure |> Map.put(:sentence, action) |> advisory("channels", detail_key)
 
   # Two causes share `provider:missing_credentials:anthropic` and two share the
   # `:xai` key (api_key versus oauth), so each entry's sentence has to cover

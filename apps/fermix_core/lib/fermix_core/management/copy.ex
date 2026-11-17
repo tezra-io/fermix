@@ -118,6 +118,9 @@ defmodule FermixCore.Management.Copy do
   @return_costs [
     telegram: "Messages sent to Telegram while it moves wait until it is done."
   ]
+  # What a computer a move back or Restore here disconnects can do: a home
+  # off a server holds no computer yet (M102 D6).
+  @join_again "can join again once Fermix is on a server."
   # What Always On does not do yet (M97), in the order the list names them:
   # what the home's settings and the server's own turn on, then what one
   # computer's do (`not_yet/2`).
@@ -456,7 +459,8 @@ defmodule FermixCore.Management.Copy do
   names: `machine` ("Mac" or "computer"), `age` (seconds since the last
   backup), `days`, `percent`, `to` (the server's name), `at` and `zone` (a
   time, stated in the owner's zone), `place` and `error` (a failed backup's
-  own words), `restore` (whether Restore here is offered).
+  own words), `restore` (whether Restore here is offered), `leaving` (the
+  computers a move back disconnects, by name).
   """
   @spec summary_sentence(atom(), map()) :: String.t()
   def summary_sentence(:off, %{machine: machine}),
@@ -751,7 +755,9 @@ defmodule FermixCore.Management.Copy do
       "Confirm only once you deleted your server, or stopped it for good: if it runs again, " <>
         "two copies of Fermix answer the same channels.",
       "Messages, memory and jobs since that backup are gone" <>
-        if(telegram?, do: ", and Telegram keeps nothing older than 24 hours.", else: ".")
+        if(telegram?, do: ", and Telegram keeps nothing older than 24 hours.", else: "."),
+      "Any other computer that joined your server is disconnected from Fermix, and " <>
+        @join_again
     ])
   end
 
@@ -772,13 +778,15 @@ defmodule FermixCore.Management.Copy do
   def summary_sentence(:confirm_return_move, %{
         machine: machine,
         stays_here: features,
-        costs: costs
+        costs: costs,
+        leaving: leaving
       }),
       do:
         lines(
           ["Move Fermix back to this #{machine} now?"] ++
             runs_here_line(features) ++
             Enum.map(costs, &return_cost(&1, machine)) ++
+            leaving_line(leaving) ++
             ["Your server stays until you delete it."]
         )
 
@@ -913,6 +921,13 @@ defmodule FermixCore.Management.Copy do
         "Settings, Meetings, once Fermix is back here."
 
   defp return_cost(cost, _machine), do: Keyword.fetch!(@return_costs, cost)
+
+  # Each computer a move back disconnects, named as its server lists it.
+  defp leaving_line([]), do: []
+  defp leaving_line([name]), do: ["#{name} is disconnected from Fermix, and #{@join_again}"]
+
+  defp leaving_line(names),
+    do: ["#{join_names(names)} are disconnected from Fermix, and each #{@join_again}"]
 
   defp runs_here_line([]), do: []
 

@@ -2091,9 +2091,12 @@
         "component": { "type": "string" },
         "gating": { "type": "boolean" },
         "pane": { "$ref": "#/$defs/settingsPane" },
-        "detail_key": { "type": "string" },
+        "detail_key": {
+          "description": "The closed-set copy key: a fixed key, an iMessage carrier key (channel:imessage:carrier, channel:imessage:conflict, channel:imessage:away), or channel:<channel> for a channel the engine lists, whose rest a client reads as the channel's name. Engines before M102 sent channel:imessage:helper and channel:slack:socket for two rows that now use channel:imessage and channel:slack with a sentence.",
+          "type": "string"
+        },
         "sentence": {
-          "description": "The engine's own sentence for this failure where it publishes one, which a client shows in place of its own words for the detail_key: the iMessage rows channel:imessage:helper, channel:imessage:carrier, channel:imessage:conflict and channel:imessage:away, which name the Mac that carries Messages where the engine knows it. Null on every other row, whose words each client keeps by its detail_key. Absent from an engine older than it, which a client reads as null.",
+          "description": "The engine's own sentence for this failure where it publishes one, set where the row is built, which a client shows in place of its own words for the detail_key: iMessage's missing helper (channel:imessage), the iMessage carrier rows, which name the Mac that carries Messages where the engine knows it, and Slack's Socket Mode credentials (channel:slack). Null on every other row, a channel's own included, whose words each client keeps by its detail_key. Absent from an engine older than it, which a client reads as null.",
           "type": ["string", "null"],
           "minLength": 1
         }

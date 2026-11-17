@@ -560,6 +560,33 @@ had drifted since fa21aac6, as code beside the pinned functions grew, and
 now point at the committed code; `ServerSilent`'s comment says where the
 `revoked` word comes from.
 
+Walked again for M102 N2 and D6, which stale the `activation.ex` and the
+channels `candidate.ex` pins, beside the `always_on.ex` and
+`home_summary.ex` pins `0c8fee89` staled:
+- **One rule for a server's screen (N2).** `HomeSummary.gather/5` sets the
+  `server` fact from `ServerPrimary.of/2` (the host's system and the rail's
+  desktop rows), and the primary's screen, notice, watch and deadlines
+  match on it where they matched on a desktop row, so a Mac primary that
+  still holds a computer's row draws Always On's first screen, never a
+  server's. No step here draws the Mac as the primary: `ReturnOffers` and
+  `DeviceOffers` are the device's screens, and `screen/1` and every device
+  clause the pin names are as before.
+- **Every computer's row goes (D6).** A return's staging (`Return.settle/4`,
+  from `stage_fun/4` and from Restore here's `LocalReturn`) drops every
+  desktop row of the staged device list through the rail
+  (`drop_desktop_rows/1`, one write), and reads no key for it, where it
+  dropped this computer's own by its key; `@return_opts` names the new
+  seam. The staging is one step here, whose failure the model has
+  (`TransferCanFail`: `RestoreFails`, `RhStage`), and the rows are a write
+  no rule reads. Move back's confirm names each other computer its server
+  lists, and Restore here's says any other is disconnected: words in a
+  confirm the key rule already covers. A computer that joined the server
+  is outside the model (a second desktop, below): it next dials the Mac,
+  whose primary does not know it, and is refused `4003`.
+
+No modelled step changed. The comments' line numbers into `home_summary.ex`
+move by seven with the new fact and point at this code.
+
 ## Done
 
 Deadlock checking is on. `Done` has these ends:
@@ -610,7 +637,8 @@ The `.tla` header lists what is left out, with the reason for each:
   server that still runs makes;
 - Restore here's ending that cannot write `return.json` (it logs): the
   request then stands beside no job, as a stop of the engine leaves it;
-- a second desktop (the stale epoch, the passed return's drop);
+- a second desktop (the stale epoch, the passed return's drop, and a
+  computer that joined the server, whose row the staging drops);
 - the copy's choice and a wrong passphrase;
 - the key's derivation;
 - the Mac's other acts: Back up now, Add a computer and the owner's answer

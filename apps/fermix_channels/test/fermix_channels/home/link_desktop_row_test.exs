@@ -1,7 +1,8 @@
 defmodule FermixChannels.Home.LinkDesktopRowTest do
-  # A return (Always On's move back) stages the server's home on the computer
-  # it left, whose own desktop row is in that home's device list: the staging
-  # drops it, so the computer never counts itself as its own desktop.
+  # A return (Always On's move back, and Restore here) stages the server's
+  # home on the computer it left. A home off a server holds no computer yet
+  # (M102 D6), so the staging drops every computer's row, that computer's own
+  # among them, and keeps the phones.
   use ExUnit.Case, async: true
 
   alias FermixChannels.Home.Link
@@ -32,33 +33,32 @@ defmodule FermixChannels.Home.LinkDesktopRowTest do
     assert Link.computer_rows(true) == {:error, :not_running}
   end
 
-  test "drops the row of that key and keeps every other", %{staging: staging} do
+  test "drops every computer's row and keeps every phone's", %{staging: staging} do
     mac = row(:desktop, "orchard-mac")
     other = row(:desktop, "studio-mac")
-    phone = row(:phone, "Pixel 9")
-    for attrs <- [mac, other, phone], do: {:ok, _device} = DeviceStore.add(attrs, root: staging)
+    phones = [row(:phone, "Pixel 9"), row(:phone, "Pixel 8")]
 
-    assert :ok = Link.drop_desktop_row(staging, mac.noise_pk)
+    for attrs <- [mac, other | phones],
+        do: {:ok, _device} = DeviceStore.add(attrs, root: staging)
+
+    assert :ok = Link.drop_desktop_rows(staging)
 
     assert {:ok, devices} = DeviceStore.list(root: staging)
-    assert Enum.sort(Enum.map(devices, & &1.name)) == ["Pixel 9", "studio-mac"]
+    assert Enum.sort(Enum.map(devices, & &1.name)) == ["Pixel 8", "Pixel 9"]
   end
 
-  test "a list without that key, or no list at all, has nothing to drop", %{staging: staging} do
-    assert :ok = Link.drop_desktop_row(staging, :crypto.strong_rand_bytes(32))
+  test "a list with no computer's row, or no list at all, has nothing to drop", %{
+    staging: staging
+  } do
+    assert :ok = Link.drop_desktop_rows(staging)
     refute File.exists?(DeviceStore.store_path(staging))
 
     {:ok, _device} = DeviceStore.add(row(:phone, "Pixel 9"), root: staging)
-    assert :ok = Link.drop_desktop_row(staging, :crypto.strong_rand_bytes(32))
+    before = File.stat!(DeviceStore.store_path(staging), time: :posix)
+
+    assert :ok = Link.drop_desktop_rows(staging)
     assert {:ok, [%{name: "Pixel 9"}]} = DeviceStore.list(root: staging)
-  end
-
-  test "a phone's key is never dropped as a desktop's", %{staging: staging} do
-    phone = row(:phone, "Pixel 9")
-    {:ok, _device} = DeviceStore.add(phone, root: staging)
-
-    assert {:error, {:not_a_desktop, _device_id}} = Link.drop_desktop_row(staging, phone.noise_pk)
-    assert {:ok, [_phone]} = DeviceStore.list(root: staging)
+    assert File.stat!(DeviceStore.store_path(staging), time: :posix).inode == before.inode
   end
 
   # E1 (D18): whether a home is an Always On server's is read from its file,
@@ -83,7 +83,7 @@ defmodule FermixChannels.Home.LinkDesktopRowTest do
     File.mkdir_p!(Path.dirname(DeviceStore.store_path(staging)))
     File.write!(DeviceStore.store_path(staging), "not = [toml")
 
-    assert {:error, _reason} = Link.drop_desktop_row(staging, :crypto.strong_rand_bytes(32))
+    assert {:error, _reason} = Link.drop_desktop_rows(staging)
   end
 
   defp row(:desktop, name),

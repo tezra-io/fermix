@@ -151,6 +151,15 @@ no memory of its own.
   could not tell your server. Disconnect anyway? Your server lists this
   computer until you remove it there." The link goes last, so a disconnect
   that fails part-way leaves the computer linked, and asking again finishes.
+- **When the home leaves the server.** A move back and Restore here drop
+  every computer's row, since a home off a server holds no computer yet; the
+  move back's confirm names each one it disconnects ("loft-linux is
+  disconnected from Fermix, and can join again once Fermix is on a
+  server."), and Restore here's confirm says that any other computer that
+  joined is disconnected. Such a computer next reaches the computer the home
+  went back to, which does not know it, so it shows it was removed, with
+  **Join again**, and joins with a new code once the home is on a server
+  again. Phones stay paired.
 - Adding, removing and disconnecting are the owner's decisions: the agent
   has no tool for them, and a command Fermix runs is refused.
 

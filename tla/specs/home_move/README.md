@@ -514,3 +514,13 @@ context gains `consent_opts`, the system the keep block's lines are drawn for
 so a move's switches are written as before on every computer. It is one more
 key in a context no step reads, and no modelled step changed. The comments'
 line numbers into `move_worker.ex` point at the committed code.
+
+## Re-read for a move back's computers (M102 D6, 2026-11-17)
+
+Re-read for M102 D6, which stales the `activation.ex` and `candidate.ex`
+pins: a return's staging drops every computer's row of the staged device
+list, where it dropped the returning computer's own, so `@return_opts`
+names the seam `:drop_desktop_rows`, and the candidate's moduledoc says a
+return stages without any computer's row. A move's staging (`stage/5`),
+the activation and the candidate's steps are as before, and a return is
+`home_return`'s: no modelled step changed, and no line the spec cites moved.

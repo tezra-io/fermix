@@ -67,8 +67,10 @@ defmodule FermixChannels.Home.CandidateReturnTest do
       # M97 §4: neither computer's own sandbox is in the home's settings;
       # this one's stays in its machine file.
       refute staged =~ "sandbox"
-      # Its own desktop row is gone from the device list it takes back.
-      assert {:ok, [%{name: "office-mac"}]} = DeviceStore.list(root: staging)
+      # Every computer's row is gone from the device list it takes back, its
+      # own and the other computer's: a home off a server holds no computer
+      # yet (M102 D6).
+      assert {:ok, []} = DeviceStore.list(root: staging)
 
       assert {:ok, 6} = CandidateProcess.commit(name, @move_id)
       assert_received {:scheduled, :restart, _delay}

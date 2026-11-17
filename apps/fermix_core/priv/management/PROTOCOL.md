@@ -455,7 +455,7 @@ command `own_server` answers; Fermix creates, powers and deletes no server.
             "note": "Check that your server is on and online. If it is gone for good, restore Fermix on this Mac.",
             "alternatives": [{"id": "restore_here", "label": "Restore on this Mac",
                               "needs": ["recovery_passphrase"],
-                              "confirm": "Restore Fermix on this Mac from its backup of Sunday, May 4, 2031 at 12:00 PM CEST?\nConfirm only once you deleted your server, or stopped it for good: if it runs again, two copies of Fermix answer the same channels.\nMessages, memory and jobs since that backup are gone.",
+                              "confirm": "Restore Fermix on this Mac from its backup of Sunday, May 4, 2031 at 12:00 PM CEST?\nConfirm only once you deleted your server, or stopped it for good: if it runs again, two copies of Fermix answer the same channels.\nMessages, memory and jobs since that backup are gone.\nAny other computer that joined your server is disconnected from Fermix, and can join again once Fermix is on a server.",
                               "key": "er-r-ReXG6gOEo4Q7ANhcQ"}]},
  "notice": {"id": "cannot_reach:2031-05-04T11:49:00Z",
             "sentence": "Fermix cannot reach your server. Your messages wait until it is back."},
@@ -940,7 +940,11 @@ gone included: `creating` while it connects to the server (no action,
 ("Fermix still runs on your server. It moves back to this Mac when you
 press Move now.", its note until when this computer waits: `move_now` needs
 the server's `recovery_passphrase`, its confirm built on the desktop says
-what runs here again; `cancel` in `detail.alternatives`; `detail` the server
+what runs here again, what the move back costs, and each computer it
+disconnects, by the name its server's `computers` lists (every row but
+`this_computer`; a home off a server holds no computer yet, so a move back
+drops every computer's row, and each can join again once Fermix is on a
+server); `cancel` in `detail.alternatives`; `detail` the server
 and `waits_until`; its notice says the same: "Fermix still runs on your
 server. Open Always On and press Move now to move it back to this Mac."),
 `moving` from the server's start of
@@ -963,8 +967,11 @@ silent) and this computer keeps a copy of its snapshots,
 `detail.alternatives` adds `restore_here` (needs
 `recovery_passphrase`; its confirm asks the owner's word that the server is
 deleted, or stopped for good, since a server that runs again answers the
-same channels as the restored copy, names the date of the copy it restores
-and says what is lost). Fermix deletes no server for it: one job of its own
+same channels as the restored copy, names the date of the copy it restores,
+says what is lost, and that any other computer that joined the server is
+disconnected and can join again once Fermix is on a server: a restore
+drops every computer's row too, and with the server silent no list of them
+is at hand to name). Fermix deletes no server for it: one job of its own
 (`home_restore`) restores the copy, and the screen is `moving` from the
 press until this computer restarts as the primary. A restore that stopped
 before its copy was in place offers `restore_here` again. Back on this
@@ -1602,14 +1609,21 @@ Notes that the shapes alone do not carry:
   advisory because the daemon's first boot seeds it from the machine (the
   system time zone, the account's full name, a default style), so its row
   fires only where the machine could not answer; engines before this gated on
-  it, so a client keeps reading `gating` rather than assuming it. A failure
-  also carries `sentence`, the engine's own words where it publishes them,
-  which a client shows in place of its own for the `detail_key`: the iMessage
-  rows (`channel:imessage:helper`, `:carrier`, `:conflict` and `:away`),
-  which name the Mac of the home that carries Messages where the engine
-  knows it ("studio-mac, the Mac that carries Messages, is asleep or
-  offline."). It is null on every other row, whose words a client keeps by
-  its key, and absent from an engine before it, which a client reads as null.
+  it, so a client keeps reading `gating` rather than assuming it. A
+  `detail_key` is a fixed key, an iMessage carrier key
+  (`channel:imessage:carrier`, `:conflict` and `:away`), or
+  `channel:<channel>` for a channel the engine lists, whose rest a client
+  reads as the channel's name. A failure also carries `sentence`, the
+  engine's own words where it publishes them, set where the row is built,
+  which a client shows in place of its own for the `detail_key`: iMessage's
+  missing helper (`channel:imessage`), the carrier rows, which name the Mac
+  of the home that carries Messages where the engine knows it ("studio-mac,
+  the Mac that carries Messages, is asleep or offline."), and Slack's Socket
+  Mode credentials (`channel:slack`). It is null on every other row, a
+  channel's own included, whose words a client keeps by its key, and absent
+  from an engine before it, which a client reads as null. Engines before
+  M102 sent `channel:imessage:helper` and `channel:slack:socket` for the
+  helper and Socket Mode rows.
 - **Restart truth has one owner.** `restart.required` and `restart.reasons` come
   from the daemon's two baselines: the application environment captured at boot,
   and the parsed settings file as this daemon last saw it. The sentence for each

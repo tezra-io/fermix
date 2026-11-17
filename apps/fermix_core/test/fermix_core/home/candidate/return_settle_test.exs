@@ -51,9 +51,7 @@ defmodule FermixCore.Home.Candidate.ReturnSettleTest do
     {:ok, _written} =
       Snapshot.write(server, Recipient.public(pair), incoming, host: "linux-x86_64")
 
-    {:ok, desktop} = ComputerKey.read(mac)
-
-    %{tmp: tmp, mac: mac, profile: profile, pair: pair, incoming: incoming, desktop: desktop}
+    %{tmp: tmp, mac: mac, profile: profile, pair: pair, incoming: incoming}
   end
 
   test "stages the server's copy one epoch up, settled for this computer as it was", ctx do
@@ -83,43 +81,29 @@ defmodule FermixCore.Home.Candidate.ReturnSettleTest do
     assert {:ok, _marker} = Moved.read(ctx.mac)
   end
 
-  test "drops this computer's own desktop row from the staged device list", ctx do
-    test = self()
-
-    drop = fn root, noise_pk ->
-      send(test, {:dropped, root, noise_pk})
-      :ok
-    end
-
-    assert {:ok, 7} = stage(ctx, drop_desktop_row: drop)
+  # M102 D6: a home off a server holds no computer, so every computer's row
+  # goes from the staged device list, this computer's and every other's,
+  # whether or not this computer still has its key (the rows themselves are
+  # pinned in the channels app's `MoveBackComputersTest`).
+  test "drops every computer's row from the staged device list", ctx do
+    assert {:ok, 7} = stage(ctx, drop_desktop_rows: dropped(self()))
 
     staging = Candidate.staging_path(ctx.mac)
-    public = ctx.desktop.public
-    assert_received {:dropped, ^staging, ^public}
+    assert_received {:dropped, ^staging}
   end
 
-  test "a computer with no desktop key holds no row to drop", ctx do
+  test "a computer with no desktop key drops every computer's row all the same", ctx do
     :ok = ComputerKey.delete(ctx.mac, :keyring)
 
-    assert {:ok, 7} = stage(ctx, drop_desktop_row: fn _root, _pk -> flunk("no row to drop") end)
-  end
+    assert {:ok, 7} = stage(ctx, drop_desktop_rows: dropped(self()))
 
-  # M97 D13: the key is read from the store the link records, never from the
-  # file an older Fermix kept it in.
-  test "a key that has not moved out of its file fails the staging by name", ctx do
-    {:ok, link} = DesktopLink.read(ctx.mac)
-    v1 = ctx.mac |> DesktopLink.path() |> File.read!() |> Jason.decode!()
-    File.write!(DesktopLink.path(ctx.mac), Jason.encode!(%{Map.delete(v1, "key") | "v" => 1}))
-    File.write!(Path.join(ctx.mac, "device/desktop_key"), :crypto.strong_rand_bytes(32))
-    assert link.key == :keyring
-
-    assert {:error, {:desktop_key, :not_moved}} =
-             stage(ctx, drop_desktop_row: fn _root, _pk -> flunk("no key read from its file") end)
+    staging = Candidate.staging_path(ctx.mac)
+    assert_received {:dropped, ^staging}
   end
 
   test "a device list that cannot be changed fails the staging", ctx do
-    assert {:error, {:desktop_row, :unwritable}} =
-             stage(ctx, drop_desktop_row: fn _root, _pk -> {:error, :unwritable} end)
+    assert {:error, {:desktop_rows, :unwritable}} =
+             stage(ctx, drop_desktop_rows: fn _root -> {:error, :unwritable} end)
 
     refute File.exists?(Candidate.staging_path(ctx.mac))
   end
@@ -207,11 +191,11 @@ defmodule FermixCore.Home.Candidate.ReturnSettleTest do
     refute File.exists?(Candidate.staging_path(ctx.mac))
   end
 
-  # The row drop is the rail's (`FermixCore.Home.Link`), which this app does
-  # not compile against; it is pinned in the channels app's own test.
+  # The rows' drop is the rail's (`FermixCore.Home.Link`), which this app
+  # does not compile against; it is pinned in the channels app's own test.
   defp stage(ctx, opts \\ []) do
     {:ok, _state} = prepare(ctx.mac)
-    opts = Keyword.put_new(opts, :drop_desktop_row, fn _root, _noise_pk -> :ok end)
+    opts = Keyword.put_new(opts, :drop_desktop_rows, fn _root -> :ok end)
 
     Activation.stage(
       ctx.mac,
@@ -222,6 +206,8 @@ defmodule FermixCore.Home.Candidate.ReturnSettleTest do
       [host: "macos-aarch64", keyring_usable?: fn -> true end] ++ opts
     )
   end
+
+  defp dropped(test), do: fn root -> send(test, {:dropped, root}) && :ok end
 
   # The server's home as a stream whose manifest says what the test states.
   defp crafted!(ctx, name, opts) do

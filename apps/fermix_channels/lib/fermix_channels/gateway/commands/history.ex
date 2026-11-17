@@ -37,6 +37,8 @@ defmodule FermixChannels.Gateway.Commands.History do
   # The spool's own retention horizon: a coverage state older than the events it
   # describes is not current information.
   @coverage_window_ms :timer.hours(48)
+  # What a computer's recorder records with no app chosen there (M102 N15).
+  @nothing_recorded ", no apps chosen there, so nothing is recorded"
 
   @impl true
   def name, do: "history"
@@ -439,7 +441,7 @@ defmodule FermixChannels.Gateway.Commands.History do
   defp report_phrase(%{report: report, report_at: at}) when is_binary(report) do
     case Jason.decode(report) do
       {:ok, %{"recorder" => state} = fields} ->
-        "recorder #{recorder_word(state)}#{unsent_clause(fields)}#{remote_coverage(fields)} " <>
+        "recorder #{recorder_word(state)}#{recorded_clause(fields)}#{remote_coverage(fields)} " <>
           "(reported #{age_phrase(System.system_time(:millisecond) - at)} ago)"
 
       _unreadable ->
@@ -453,6 +455,15 @@ defmodule FermixChannels.Gateway.Commands.History do
   defp recorder_word("not_running"), do: "not running"
   defp recorder_word("not_answering"), do: "not answering"
   defp recorder_word(state), do: state
+
+  # M102 N15: a recorder with no app chosen there records nothing, which its
+  # state alone does not say. A report's `apps` counts them (version 2; a
+  # version 1 report says nothing of them).
+  defp recorded_clause(%{"apps" => 0, "unsent" => 0, "expired_unsent" => expired}),
+    do: @nothing_recorded <> expired_remote(expired)
+
+  defp recorded_clause(%{"apps" => 0} = fields), do: @nothing_recorded <> unsent_clause(fields)
+  defp recorded_clause(fields), do: unsent_clause(fields)
 
   defp unsent_clause(%{"unsent" => 0, "expired_unsent" => expired}),
     do: ", nothing unsent" <> expired_remote(expired)

@@ -198,6 +198,31 @@ defmodule FermixCore.ReadinessTest do
       Application.put_env(:fermix_channels, :telegram, enabled: true, bot_token: "t")
       assert Readiness.channel_configured?(:telegram)
     end
+
+    # M102 N5: both apps read the rest of a `channel:` key as a channel's
+    # name, so a key below a channel's own ("channel:imessage:helper") was
+    # drawn as a raw id. Every key is a fixed one, a carrier row of the
+    # iMessage Mac, or `channel:<c>` for a channel this table knows.
+    test "every key it can mint is a fixed key, a carrier key, or channel:<c> for a known channel" do
+      channels = for channel <- Readiness.channels(), do: "channel:#{channel}"
+      carriers = ~w(channel:imessage:carrier channel:imessage:conflict channel:imessage:away)
+
+      for {key, _action} <- Readiness.published_actions(),
+          String.starts_with?(key, "channel:"),
+          do: assert(key in channels or key in carriers, "#{key} is no channel's key")
+
+      fixed =
+        ~w(personalization provider:unknown_configured provider:multiple_primary
+           provider:invalid_auth_mode sandbox:env_missing sandbox:env_helper_failed)
+
+      for {key, _action} <- Readiness.published_actions(),
+          not String.starts_with?(key, "channel:"),
+          do:
+            assert(
+              key in fixed or key =~ ~r/\A(provider:missing_credentials|realtime):[a-z_]+\z/,
+              "#{key} is no fixed key"
+            )
+    end
   end
 
   # M75: the webhook checks Slack's signature, Socket Mode connects with the
@@ -241,10 +266,13 @@ defmodule FermixCore.ReadinessTest do
 
       refute Readiness.channel_configured?(:slack)
 
-      assert %{detail_key: "channel:slack:socket", pane: "channels", gating: false} =
+      assert %{detail_key: "channel:slack", pane: "channels", gating: false} =
                failure = slack_failure()
 
       assert failure.action == "Add the Slack bot token and app-level token in Channels settings."
+      # Slack's own row, whose words a surface keeps by its key, says the
+      # webhook's credentials: Socket Mode's are the engine's to publish.
+      assert Readiness.sentence(failure) == failure.action
 
       Application.put_env(:fermix_channels, :slack,
         enabled: true,
@@ -257,11 +285,13 @@ defmodule FermixCore.ReadinessTest do
       refute slack_failure()
     end
 
-    test "both of its sentences are published for the copy gate" do
-      keys = Enum.map(Readiness.published_actions(), &elem(&1, 0))
+    test "both of its sentences are published for the copy gate, under Slack's own key" do
+      actions = for {"channel:slack", action} <- Readiness.published_actions(), do: action
 
-      assert "channel:slack" in keys
-      assert "channel:slack:socket" in keys
+      assert Enum.sort(actions) == [
+               "Add the Slack bot token and app-level token in Channels settings.",
+               "Add the Slack bot token and signing secret in Channels settings."
+             ]
     end
 
     defp slack_failure do
@@ -326,7 +356,9 @@ defmodule FermixCore.ReadinessTest do
         owner_user_id: "+15551234567"
       )
 
-      assert %{detail_key: "channel:imessage:helper", gating: false} = imessage_failure()
+      assert %{detail_key: "channel:imessage", gating: false} = failure = imessage_failure()
+      assert failure.action =~ "Fermix Messages, the helper iMessage needs, is not installed."
+      assert Readiness.sentence(failure) == failure.action
     end
 
     test "configured with the helper on disk reports nothing", %{home: home} do
@@ -355,11 +387,14 @@ defmodule FermixCore.ReadinessTest do
       refute imessage_failure()
     end
 
-    test "both of its sentences are published for the copy gate" do
-      keys = Enum.map(Readiness.published_actions(), &elem(&1, 0))
+    test "both of its sentences are published for the copy gate, under iMessage's own key" do
+      actions = for {"channel:imessage", action} <- Readiness.published_actions(), do: action
 
-      assert "channel:imessage" in keys
-      assert "channel:imessage:helper" in keys
+      assert Enum.sort(actions) == [
+               "Add your Apple ID or phone number for iMessage in Channels settings.",
+               "Fermix Messages, the helper iMessage needs, is not installed. Turn iMessage " <>
+                 "on in Channels settings to install it."
+             ]
     end
 
     # M97 §6.4: off a Mac the channel runs through the Mac of the home that

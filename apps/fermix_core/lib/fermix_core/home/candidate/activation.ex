@@ -117,7 +117,7 @@ defmodule FermixCore.Home.Candidate.Activation do
   @database "memory.db"
   @file_mode 0o600
   @return_kinds ~w(return local)
-  @return_opts [:impl, :supervised, :drop_desktop_row]
+  @return_opts [:impl, :supervised, :drop_desktop_rows]
   # Step c's record when this home holds no key it can name.
   @no_tenure_key %{store: nil, public: nil}
 

@@ -1576,6 +1576,7 @@ defmodule FermixCore.Management.CopyTest do
       carried: [:whatsapp, :cues],
       costs: [:telegram],
       telegram: true,
+      leaving: ["loft-linux", "attic-pc"],
       to: "studio-mac",
       name: "loft-linux",
       system: "Linux",

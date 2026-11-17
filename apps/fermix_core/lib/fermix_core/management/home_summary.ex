@@ -268,6 +268,7 @@ defmodule FermixCore.Management.HomeSummary do
   alias FermixCore.Home.MoveReadiness
   alias FermixCore.Home.Readable
   alias FermixCore.Home.Return
+  alias FermixCore.Home.ServerPrimary
   alias FermixCore.Home.ServerSandbox
   alias FermixCore.Home.Snapshot.Capture
   alias FermixCore.Home.UnreadableFiles
@@ -332,6 +333,7 @@ defmodule FermixCore.Management.HomeSummary do
           required(:moved) => map() | nil,
           required(:move) => map() | nil,
           required(:link) => map(),
+          required(:server) => boolean(),
           required(:candidates) => [map()],
           required(:review) => map() | nil,
           required(:move_items) => [MoveReadiness.item()],
@@ -412,7 +414,7 @@ defmodule FermixCore.Management.HomeSummary do
   defp screen(%{role: :device} = facts), do: device(facts)
   defp screen(%{role: :primary} = facts), do: here(facts)
 
-  defp here(%{link: %{desktops: [_ | _]}} = facts), do: server(facts)
+  defp here(%{server: true} = facts), do: server(facts)
   defp here(facts), do: setup(facts)
 
   @doc """
@@ -548,7 +550,10 @@ defmodule FermixCore.Management.HomeSummary do
   the seams `:now`, `:host_os`, `:personalization` (the owner's time zone,
   `FermixCore.Clock`'s seam) and `:unreadable_files`
   (`Home.UnreadableFiles`, or nil for a verb with no engine tree);
-  `MoveReadiness.summary_items/4` is given `opts` as they are. Reads the
+  `MoveReadiness.summary_items/4` is given `opts` as they are. Whether this
+  primary is an Always On server's (`server`) is `Home.ServerPrimary.of/2`
+  of the host's system and the rail's desktop rows, the one rule every
+  server's screen, notice, watch and deadline here is drawn by. Reads the
   last readiness review, on a desktop what this home's settings turn on that
   runs only on this computer, and so here again after a move back, and what
   of a move back's costs they turn on (`MoveReadiness.costs/2`, `opts`'
@@ -583,6 +588,7 @@ defmodule FermixCore.Management.HomeSummary do
     now = Keyword.get_lazy(opts, :now, &DateTime.utc_now/0)
     return = return_record(home, reads)
     {not_yet, zoom} = not_yet(home, role, host_os, {reads, opts})
+    server = ServerPrimary.of(host_os, link.desktops) == :server
 
     %{
       role: role,
@@ -593,6 +599,7 @@ defmodule FermixCore.Management.HomeSummary do
       moved: status.moved,
       move: status.move,
       link: link,
+      server: server,
       candidates: status.candidates,
       review: review(home, role, reads),
       move_items: move_items(home, role, host_os, {status, link}, opts),
@@ -614,7 +621,7 @@ defmodule FermixCore.Management.HomeSummary do
       standing: server_compared(status, &Versions.standing/2),
       readable: server_readable(status),
       restarts_itself: restarts_itself(role, opts),
-      keeps_on: keeps_on(home, {role, link}, host_os, opts),
+      keeps_on: keeps_on(home, {role, server}, host_os, opts),
       offers_review: offers_review(DesktopLink.linked?(record, home), opts),
       join: if(role == :device, do: Join.view(home)),
       screen: Map.get(status, :screen),
@@ -1785,14 +1792,15 @@ defmodule FermixCore.Management.HomeSummary do
   defp confirm(act, _values, facts) when act in [:move_now, :try_again], do: move_confirm(facts)
   defp confirm(_act, _values, _facts), do: nil
 
-  # A move back's confirm says what runs here again; otherwise each warning
-  # this home's settings give, after any other the last review of the same
-  # server gave.
+  # A move back's confirm says what runs here again, what it costs and each
+  # computer it disconnects; otherwise each warning this home's settings
+  # give, after any other the last review of the same server gave.
   defp move_confirm(%{role: :device} = facts),
     do:
       sentence(:confirm_return_move, facts, %{
         stays_here: facts.stays_here,
-        costs: facts.return_costs
+        costs: facts.return_costs,
+        leaving: leaving(facts)
       })
 
   defp move_confirm(facts) do
@@ -1810,6 +1818,14 @@ defmodule FermixCore.Management.HomeSummary do
       machine(facts.host_os)
     )
   end
+
+  # The computers a move back disconnects (M102 D6: a home off a server holds
+  # no computer yet): each one its server lists but this computer, which the
+  # server marks as the one asking.
+  defp leaving(%{primary_home: %{"computers" => computers}}) when is_list(computers),
+    do: for(%{"name" => name, "this_computer" => false} <- computers, do: name)
+
+  defp leaving(_facts), do: []
 
   defp target_of(act, _values, facts) when act in [:move_now, :try_again, :check_again],
     do: candidate_id(target(facts))
@@ -1946,7 +1962,7 @@ defmodule FermixCore.Management.HomeSummary do
     end
   end
 
-  defp occurrence(view, %{role: :primary, link: %{desktops: [_ | _]}} = facts),
+  defp occurrence(view, %{role: :primary, server: true} = facts),
     do:
       week_occurrence(facts, :notice_server_backup_week) || change_occurrence(view, facts) ||
         sandbox_occurrence(facts) || joined_occurrence(view, facts)
@@ -2113,7 +2129,7 @@ defmodule FermixCore.Management.HomeSummary do
   # (`primary_home`): its newest backup, whether one runs, each place's
   # failed try, and its window for a computer; only a server with desktops
   # has anyone to tell.
-  defp drawn(%{role: :primary, link: %{desktops: [_ | _]}} = facts) do
+  defp drawn(%{role: :primary, server: true} = facts) do
     snapshots = facts.snapshots
 
     {newest_backup(snapshots), match?(%{"running" => true}, snapshots), failed_tries(snapshots),
@@ -2157,7 +2173,7 @@ defmodule FermixCore.Management.HomeSummary do
   defp backup_since(%{role: :device, primary_home: %{"snapshots" => snapshots}} = facts),
     do: newest_backup(snapshots) || get_in(facts, [:moved, :moved_at])
 
-  defp backup_since(%{role: :primary, link: %{desktops: [_ | _]}} = facts),
+  defp backup_since(%{role: :primary, server: true} = facts),
     do: newest_backup(facts.snapshots)
 
   defp backup_since(_facts), do: nil
@@ -2183,7 +2199,7 @@ defmodule FermixCore.Management.HomeSummary do
     ]
   end
 
-  defp deadlines(%{role: :primary, link: %{desktops: [_ | _]}} = facts) do
+  defp deadlines(%{role: :primary, server: true} = facts) do
     since = backup_since(facts)
 
     [
@@ -2242,7 +2258,7 @@ defmodule FermixCore.Management.HomeSummary do
 
   # What this computer keeps on for its server after the move (M97 §7.3),
   # where a move from it is set up: never on a server, which has computers.
-  defp keeps_on(home, {:primary, %{desktops: []}}, host_os, opts) do
+  defp keeps_on(home, {:primary, false = _server}, host_os, opts) do
     snapshot = Keyword.get(opts, :settings_snapshot, &ConfigStore.current_snapshot/0).()
     Consent.view(Consent.keep_on_block(home, os: host_os, snapshot: snapshot))
   end

@@ -17,19 +17,21 @@ defmodule FermixCore.Home.Candidate.Return do
       (`FermixCore.Home.MoveSecrets.restore/3`, under the staged settings'
       profile): a keychain that refuses fails the staging by name
       (`error_sentence/2`);
-    * drops this computer's **own desktop row** from the staged device list,
-      the row whose Noise key is the public half of this computer's key
-      (`FermixCore.Home.ComputerKey`, from the store its link records),
-      through the rail (`FermixCore.Home.Link`'s `drop_desktop_row/2`); a
-      computer with no link, or whose store holds no key, holds no row.
+    * drops **every computer's row** (`kind: :desktop`) from the staged
+      device list, this computer's own and every computer that joined the
+      server, through the rail (`FermixCore.Home.Link`'s
+      `drop_desktop_rows/1`), and keeps the phones: a home off a server
+      holds no computer yet (M102 D6). A computer that joined dials the
+      home's identity, which comes back here with the home; with its row
+      gone it is told it is unknown, and its screen says it was removed,
+      with Join again for a new code once Fermix is on a server. Move
+      back's confirm names each one that leaves.
 
-  Test seams in `opts`: `:drop_desktop_row` (the rail's function), and
-  `:impl` and `:supervised`, which `MoveSecrets.restore/3` and the key's
-  read take.
+  Test seams in `opts`: `:drop_desktop_rows` (the rail's function), and
+  `:impl` and `:supervised`, which `MoveSecrets.restore/3` takes.
   """
 
   alias FermixCore.Home.Archive.ConfigText
-  alias FermixCore.Home.ComputerKey
   alias FermixCore.Home.Link
   alias FermixCore.Home.MoveSecrets
   alias FermixCore.Setup.SecretWriter
@@ -46,7 +48,7 @@ defmodule FermixCore.Home.Candidate.Return do
     with {:ok, retired} <- read_retired(home),
          {:ok, store} <- retired_store(retired),
          {:ok, text} <- secrets(text, store, staging, opts),
-         :ok <- drop_own_row(home, staging, opts) do
+         :ok <- drop_desktop_rows(staging, opts) do
       {:ok, text}
     end
   end
@@ -109,25 +111,16 @@ defmodule FermixCore.Home.Candidate.Return do
     end
   end
 
-  # -- the desktop row --------------------------------------------------------
+  # -- the computers' rows -----------------------------------------------------
 
-  defp drop_own_row(home, staging, opts) do
-    case ComputerKey.read(home, Keyword.take(opts, [:impl, :supervised])) do
-      {:ok, %{public: public}} -> drop_row(staging, public, opts)
-      {:error, {:link, {:file, _path, :enoent}}} -> :ok
-      {:error, {:missing, _store}} -> :ok
-      {:error, reason} -> {:error, {:desktop_key, reason}}
-    end
-  end
+  defp drop_desktop_rows(staging, opts) do
+    drop = Keyword.get(opts, :drop_desktop_rows, &rail_drop/1)
 
-  defp drop_row(staging, public, opts) do
-    drop = Keyword.get(opts, :drop_desktop_row, &rail_drop/2)
-
-    case drop.(staging, public) do
+    case drop.(staging) do
       :ok -> :ok
-      {:error, reason} -> {:error, {:desktop_row, reason}}
+      {:error, reason} -> {:error, {:desktop_rows, reason}}
     end
   end
 
-  defp rail_drop(staging, public), do: Link.impl().drop_desktop_row(staging, public)
+  defp rail_drop(staging), do: Link.impl().drop_desktop_rows(staging)
 end

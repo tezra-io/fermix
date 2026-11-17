@@ -246,6 +246,14 @@ defmodule FermixChannels.Mobile.DeviceStore do
   def delete(server, device_id) when is_binary(device_id),
     do: GenServer.call(server, {:delete, device_id})
 
+  @doc """
+  Delete every desktop row (each computer's) of the list at `root:`, in one
+  write, keeping every phone's: a staged home taken back from a server
+  (M102 D6). A list with no desktop row, or no list, is left as it is.
+  """
+  @spec delete_desktops(keyword()) :: :ok | {:error, term()}
+  def delete_desktops(opts) when is_list(opts), do: with_root(opts, &delete_desktops_at_root/1)
+
   @doc "Resolve the device authenticated by a raw 32-byte Noise public key."
   @spec find_by_noise_pk(binary()) :: result(Device.t())
   def find_by_noise_pk(noise_pk) when is_binary(noise_pk),
@@ -456,6 +464,15 @@ defmodule FermixChannels.Mobile.DeviceStore do
          {:ok, _device} <- find_device(devices, device_id),
          :ok <- write_devices(root, Enum.reject(devices, &(&1.device_id == device_id))) do
       :ok
+    end
+  end
+
+  defp delete_desktops_at_root(root) do
+    with {:ok, devices} <- read_devices(root) do
+      case Enum.reject(devices, &(&1.kind == :desktop)) do
+        ^devices -> :ok
+        kept -> write_devices(root, kept)
+      end
     end
   end
 
