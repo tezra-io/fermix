@@ -23,14 +23,25 @@ defmodule FermixCore.PhoneCalls.Limits do
   a count, a retry or its backoff, a size of what is kept, sent or shown, a
   retention) lives here, and the code that enforces it reads it here: a
   bound nothing reads is deleted, and a bound that only documents is a
-  comment. A property of a vendor's interface stays beside the code that
-  speaks it, named and documented there: the field shapes and sizes OpenAI's
-  create reference documents (`OpenAILive`), the event names and the
-  keypad's keys (`OpenAILive.Controls`), how far back the sideband replays
-  (`OpenAILive.Sideband`). The provider's limits on a call's life are here
-  too, because the slot an uncertain call holds is built on them. Where a
-  table CHECK holds a size as well (the record's text, a closure's reason),
-  the CHECK is the store's and changes only by a migration.
+  comment. One class stays beside its code, named and documented there: a
+  property of a vendor's interface, or a size derived from one, because it
+  moves when the vendor's documentation does, not when the feature changes
+  its mind. They are the field shapes and sizes OpenAI's create reference
+  documents (`OpenAILive`), the event names and the keypad's keys
+  (`OpenAILive.Controls`), how far back the sideband replays
+  (`OpenAILive.Sideband`), the instructions and input a call's prompt may
+  send (`Prompt`, from the create reference's token caps) and the reply a
+  call speaks (`Disclosure`, under the vendor's 500-token append limit). The
+  provider's limits on a call's life are here, because the slot an uncertain
+  call holds is built on them. A parameter of an algorithm is no bound at
+  all and stays beside its code: it shapes how a result is computed, never
+  how long a call waits, how often it tries or how much it keeps, sends or
+  shows. `Outcome.Record`'s fitting rounds (8) and smallest value (16 bytes)
+  are how a report is fitted to the record's bounds, which are here, and
+  `Outcome.Confirmed`'s two words allowed after a clock time are how a time
+  is matched in what was said. Where a table CHECK holds a size as well (the
+  record's text, a closure's reason), the CHECK is the store's and changes
+  only by a migration.
   """
 
   @minute 60 * 1000
@@ -76,6 +87,17 @@ defmodule FermixCore.PhoneCalls.Limits do
   # Reached: a further delegation is answered with an honest limitation, not queued.
   @spec max_pending_delegations() :: pos_integer()
   def max_pending_delegations, do: 1
+
+  # How often a call's end asks a delegation's lane to stop: once for each
+  # turn it can hold (the one running and the one waiting), and once more.
+  # Reached: a stop that still finds a turn is logged, never repeated.
+  @spec max_delegation_stops() :: pos_integer()
+  def max_delegation_stops, do: max_active_delegations() + max_pending_delegations() + 1
+
+  # The transcript a backend turn reads of the call so far. Reached: the
+  # oldest lines are left out.
+  @spec max_backend_window_bytes() :: pos_integer()
+  def max_backend_window_bytes, do: 8_192
 
   # Reached: no more Core turns; the call ends if the task cannot proceed without one.
   @spec max_core_turns_per_call() :: pos_integer()
@@ -153,11 +175,19 @@ defmodule FermixCore.PhoneCalls.Limits do
   def max_immediate_termination_requests, do: 1
 
   # Further hangup requests for a session, only when the one before provably
-  # never left (`{:not_sent, _}`) and inside `cleanup_window_ms/0`: a request
-  # that may have reached the provider is never repeated, by anyone. Reached:
-  # closure stays unconfirmed.
+  # never left (`{:not_sent, _}`): a request that may have reached the
+  # provider is never repeated, by anyone. The worker sends them inside
+  # `cleanup_window_ms/0`; the Manager, for a session no worker owns, after
+  # `cleanup_retry_ms/0` doubling (2 s, then 4 s, inside the same window).
+  # Every one is counted on the row first, capped at one plus this, so neither
+  # can send more. Reached: closure stays unconfirmed.
   @spec max_cleanup_retries() :: non_neg_integer()
   def max_cleanup_retries, do: 2
+
+  # The Manager's wait before resending a cleanup hangup that provably never
+  # left, doubling before each one after.
+  @spec cleanup_retry_ms() :: pos_integer()
+  def cleanup_retry_ms, do: 2 * 1000
 
   # Reached: no further cleanup request for the session; closure stays unconfirmed.
   @spec cleanup_window_ms() :: pos_integer()
@@ -272,6 +302,26 @@ defmodule FermixCore.PhoneCalls.Limits do
   def delivery_backoff_cap_ms, do: 30 * @minute
 
   # -- what a call's record keeps ---------------------------------------------------
+
+  # The result extraction's whole reply. Reached: the reply is refused and the
+  # outcome is unknown.
+  @spec max_extraction_reply_bytes() :: pos_integer()
+  def max_extraction_reply_bytes, do: 16_384
+
+  # The corrections one extraction may list. Reached: the reply is refused and
+  # the outcome is unknown.
+  @spec max_claim_corrections() :: pos_integer()
+  def max_claim_corrections, do: 12
+
+  # The provider's closing words kept with a recorded closure. Reached: cut.
+  # The table's CHECK on `closure_reason` holds the same 120.
+  @spec max_closure_reason_bytes() :: pos_integer()
+  def max_closure_reason_bytes, do: 120
+
+  # How many of the owner's calls a recent list shows. Reached: older ones
+  # are left out of it.
+  @spec max_recent_calls() :: pos_integer()
+  def max_recent_calls, do: 20
 
   # Reached: the outcome's facts are fitted to it (`Outcome.Record`), else refused.
   @spec max_facts_json_bytes() :: pos_integer()

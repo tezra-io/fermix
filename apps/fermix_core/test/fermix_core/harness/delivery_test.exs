@@ -4,6 +4,7 @@ defmodule FermixCore.Harness.DeliveryTest do
   use ExUnit.Case, async: false
 
   alias FermixCore.Acp.Identity
+  alias FermixCore.Delivery.FrozenOrigin
   alias FermixCore.Delivery.FrozenSend
   alias FermixCore.Harness.Continuation
   alias FermixCore.Harness.Delivery
@@ -92,11 +93,11 @@ defmodule FermixCore.Harness.DeliveryTest do
     )
   end
 
-  describe "resolve_snapshot/2 — chat origin" do
+  describe "the frozen origin (`Delivery.FrozenOrigin.resolve/2`) — chat origin" do
     test "derives platform/destination and no thread for a root conversation" do
       ctx = %{conversation_key: {"telegram", "chat-9", :root}}
 
-      assert {:ok, snapshot} = Delivery.resolve_snapshot(ctx)
+      assert {:ok, snapshot} = FrozenOrigin.resolve(ctx)
       assert snapshot.origin_kind == "chat"
       assert snapshot.delivery_mode == "origin"
       assert snapshot.platform == "telegram"
@@ -108,7 +109,7 @@ defmodule FermixCore.Harness.DeliveryTest do
     test "carries the thread for a threaded conversation" do
       ctx = %{conversation_key: {"slack", "C123", "1699.55"}}
 
-      assert {:ok, snapshot} = Delivery.resolve_snapshot(ctx)
+      assert {:ok, snapshot} = FrozenOrigin.resolve(ctx)
       assert snapshot.platform == "slack"
       assert snapshot.destination == "C123"
       assert snapshot.thread == "1699.55"
@@ -117,14 +118,14 @@ defmodule FermixCore.Harness.DeliveryTest do
     test "treats a two-tuple key as a root conversation" do
       ctx = %{conversation_key: {"telegram", "chat-2"}}
 
-      assert {:ok, snapshot} = Delivery.resolve_snapshot(ctx)
+      assert {:ok, snapshot} = FrozenOrigin.resolve(ctx)
       assert snapshot.thread == nil
       assert snapshot.destination == "chat-2"
     end
 
     test "rejects an unresolvable origin" do
       assert {:error, {:unresolvable_delivery_origin, _}} =
-               Delivery.resolve_snapshot(%{conversation_key: :nonsense})
+               FrozenOrigin.resolve(%{conversation_key: :nonsense})
     end
 
     # A framework-delivered channel has no `session_env`, so it must freeze no
@@ -132,7 +133,7 @@ defmodule FermixCore.Harness.DeliveryTest do
     test "freezes no client origin for a framework-delivered channel" do
       ctx = %{conversation_key: {"telegram", "chat-9", :root}, cwd: "/repo"}
 
-      assert {:ok, snapshot} = Delivery.resolve_snapshot(ctx)
+      assert {:ok, snapshot} = FrozenOrigin.resolve(ctx)
       assert snapshot.client_origin == nil
     end
   end
@@ -140,7 +141,7 @@ defmodule FermixCore.Harness.DeliveryTest do
   # M29 §17.4 — the ACP session that launched a run is gone by the time it
   # finishes, so the row freezes who it belonged to, where it ran, and an opaque
   # excerpt of the launching turn.
-  describe "resolve_snapshot/2 — client-owned origin" do
+  describe "the frozen origin (`Delivery.FrozenOrigin.resolve/2`) — client-owned origin" do
     setup do
       unique = System.unique_integer([:positive])
       store = :"harness_delivery_convo_#{unique}"
@@ -162,7 +163,7 @@ defmodule FermixCore.Harness.DeliveryTest do
         conversation_store: store
       }
 
-      assert {:ok, snapshot} = Delivery.resolve_snapshot(ctx)
+      assert {:ok, snapshot} = FrozenOrigin.resolve(ctx)
       assert snapshot.platform == "acp"
 
       # The SAME derivation the Peer used at hello, so launch and hello can never
@@ -180,7 +181,7 @@ defmodule FermixCore.Harness.DeliveryTest do
 
       ctx = %{conversation_key: key, session_env: buzz_env(), conversation_store: store}
 
-      assert {:ok, snapshot} = Delivery.resolve_snapshot(ctx)
+      assert {:ok, snapshot} = FrozenOrigin.resolve(ctx)
       excerpt = snapshot.client_origin["reply_context"]
 
       assert byte_size(excerpt) <= 4_096
@@ -205,7 +206,7 @@ defmodule FermixCore.Harness.DeliveryTest do
         conversation_store: store
       }
 
-      assert {:ok, snapshot} = Delivery.resolve_snapshot(ctx)
+      assert {:ok, snapshot} = FrozenOrigin.resolve(ctx)
       assert snapshot.client_origin["reply_context"] == "fix the flake"
     end
 
@@ -221,12 +222,12 @@ defmodule FermixCore.Harness.DeliveryTest do
         conversation_store: store
       }
 
-      assert {:ok, snapshot} = Delivery.resolve_snapshot(ctx)
+      assert {:ok, snapshot} = FrozenOrigin.resolve(ctx)
       assert snapshot.client_origin == nil
     end
   end
 
-  describe "resolve_snapshot/2 — scheduled origin" do
+  describe "the frozen origin (`Delivery.FrozenOrigin.resolve/2`) — scheduled origin" do
     setup do
       unique = System.unique_integer([:positive])
       db_path = Path.join(System.tmp_dir!(), "fermix-harness-delivery-#{unique}.db")
@@ -266,7 +267,7 @@ defmodule FermixCore.Harness.DeliveryTest do
     test "copies the parent job's frozen delivery target", %{repo: repo, job: job} do
       ctx = %{conversation_key: {:scheduled_job, job.id, "run-1"}, memory_repo: repo}
 
-      assert {:ok, snapshot} = Delivery.resolve_snapshot(ctx)
+      assert {:ok, snapshot} = FrozenOrigin.resolve(ctx)
       assert snapshot.origin_kind == "scheduled"
       assert snapshot.delivery_mode == "channel"
       assert snapshot.platform == "telegram"
@@ -278,7 +279,7 @@ defmodule FermixCore.Harness.DeliveryTest do
     test "reports a lookup failure for a missing parent job", %{repo: repo} do
       ctx = %{conversation_key: {:scheduled_job, "job:absent", "run-1"}, memory_repo: repo}
 
-      assert {:error, {:parent_job_lookup_failed, _}} = Delivery.resolve_snapshot(ctx)
+      assert {:error, {:parent_job_lookup_failed, _}} = FrozenOrigin.resolve(ctx)
     end
   end
 

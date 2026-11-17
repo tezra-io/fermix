@@ -28,6 +28,7 @@ defmodule FermixCore.Capabilities.UntrustedContent do
   so an owner's own checklist still reads as theirs.
   """
 
+  alias FermixCore.Agents.RequestIdentity
   alias FermixCore.Attachments
   alias FermixCore.Capabilities.Capability
   alias FermixCore.Checklists.Render, as: ChecklistRender
@@ -328,9 +329,12 @@ defmodule FermixCore.Capabilities.UntrustedContent do
   so the re-run is the same request rather than a clean one: the outside
   sources the turn had read and, on a finished coding run's follow-up turn, its
   chain depth and that run's id, or on a phone call's result turn its depth and
-  that call's id (`phone_call_result`). The gateway keeps it with the resume intent
-  and `Agents.TurnRunner` seeds it on the resumed turn. A context the loop never
-  stamped hands on a source of its own, so the re-run is never read as clean.
+  that call's id (`phone_call_result`), and the owner request's identity
+  (`request_id`, `Agents.RequestIdentity`), so a tool whose effect outlives the
+  turn (a phone call) finds what the parked request already started. The
+  gateway keeps it with the resume intent and `Agents.TurnRunner` seeds it on
+  the resumed turn. A context the loop never stamped hands on a source of its
+  own, so the re-run is never read as clean.
   """
   @spec resume_provenance(map()) :: map()
   def resume_provenance(context) when is_map(context) do
@@ -338,6 +342,11 @@ defmodule FermixCore.Capabilities.UntrustedContent do
     |> put_positive(:harness_continuation_depth, Map.get(context, :harness_continuation_depth))
     |> put_binary(:harness_run_id, Map.get(context, :harness_run_id))
     |> put_binary(:phone_call_result, Map.get(context, :phone_call_result))
+    |> put_request(Map.get(context, :request_id))
+  end
+
+  defp put_request(map, request_id) do
+    if RequestIdentity.valid?(request_id), do: Map.put(map, :request_id, request_id), else: map
   end
 
   defp provenance_sources(context) do

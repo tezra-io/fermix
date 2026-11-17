@@ -40,7 +40,7 @@ defmodule FermixCore.Tools.PhoneCallControlsTest do
         session_id: session,
         source_trust: :phone_call,
         computer_use_origin: :unattended,
-        phone_call: %{call_id: "pc_1", handle: "h-current", delegation_id: "d1", revision: 1},
+        phone_call: %{call_id: "pc_1", handle: "h-current", delegation_id: "d1"},
         phone_call_controls: Worker
       },
       overrides

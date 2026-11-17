@@ -15,7 +15,7 @@ defmodule FermixCore.Agents.TurnRunnerTest do
   alias FermixCore.ComputerHistory.Gate.Snapshot
   alias FermixCore.ComputerHistory.Taint
   alias FermixCore.ComputerUse.Safety
-  alias FermixCore.Harness.Delivery, as: HarnessDelivery
+  alias FermixCore.Delivery.FrozenOrigin
   alias FermixCore.Memory.ConversationStore
   alias FermixCore.Memory.Repo
   alias FermixCore.OpenLoops.Reactions
@@ -1045,7 +1045,7 @@ defmodule FermixCore.Agents.TurnRunnerTest do
                 destination: "main",
                 thread: nil,
                 client_origin: nil
-              }} = HarnessDelivery.resolve_snapshot(context)
+              }} = FrozenOrigin.resolve(context)
     end
 
     # The reason a private call still may not: its conversation is the call's
@@ -1060,7 +1060,7 @@ defmodule FermixCore.Agents.TurnRunnerTest do
         })
 
       assert {:ok, %{platform: "voice", destination: "6f1c2a4e-9b3d-4c5e-8a7f-0123456789ab"}} =
-               HarnessDelivery.resolve_snapshot(context)
+               FrozenOrigin.resolve(context)
     end
 
     test "voice_call_id is nil on a chat turn carrying a forged voice_call" do

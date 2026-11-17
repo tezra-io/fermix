@@ -1,8 +1,14 @@
 defmodule FermixCore.PhoneCalls.PromptText do
   @moduledoc """
-  The one rule for text from outside Fermix that a phone call's prompts or its
-  record carry (M94 §7, §11): a brief's values, what was said on the call, an
-  excerpt of it, and the extraction's own words.
+  The one rule for a line of outside text in a phone call, wherever the call
+  carries it (M94 §7, §11). Despite the name, it is not only for prompts: it
+  is the rule for every text that came from outside Fermix (a brief's values,
+  what was said on the call, an excerpt of it, the extraction's own words)
+  whether it goes into a model's prompt (the voice brief, a backend turn's
+  window, the extraction's input) or into the call's record (the outcome's
+  facts, its evidence and its uncertainty note, `Outcome.Record`). A view
+  that shows such text should make it one line by this rule too, rather than
+  by a rule of its own.
 
   `line/1` makes such text one line that cannot reorder itself or forge
   structure: every format character (Unicode category Cf, which holds every
@@ -11,8 +17,9 @@ defmodule FermixCore.PhoneCalls.PromptText do
   (U+2028, U+2029) becomes one space; `<|`, which spells a model's control
   token, is broken up; and the `<` before the untrusted-content frame's tag,
   in any case, is dropped, so the text can never open or close a frame it is
-  placed in. Nothing else
-  changes: the words, their order and their punctuation stay as they were.
+  placed in. Nothing else changes: the words, their order and their
+  punctuation stay as they were. A byte bound on such a line is the shared
+  cut, `FermixCore.Text.truncate_utf8/2`.
   """
 
   @format ~r/\p{Cf}/u
@@ -28,20 +35,5 @@ defmodule FermixCore.PhoneCalls.PromptText do
     |> String.replace("<|", "< |")
     |> String.replace(@frame_tag, "\\1")
     |> String.trim()
-  end
-
-  @doc """
-  `text` at most `max` bytes, cut at a character boundary, never inside one.
-  """
-  @spec cut(String.t(), non_neg_integer()) :: String.t()
-  def cut(text, max) when is_binary(text) and is_integer(max) and max >= 0 do
-    if byte_size(text) <= max, do: text, else: prefix(text, max)
-  end
-
-  defp prefix(text, size) when size <= 0, do: binary_part(text, 0, 0)
-
-  defp prefix(text, size) do
-    candidate = binary_part(text, 0, size)
-    if String.valid?(candidate), do: candidate, else: prefix(text, size - 1)
   end
 end

@@ -73,8 +73,8 @@ defmodule FermixCore.PhoneCalls.OpenAILive do
   task that sends it. What does leave is the reason, which becomes a call's
   failure words in the owner's chat, the ledger and telemetry. So every reason
   of every shape is free of both secrets: vendor words and exception messages
-  are scrubbed of each secret as stored, trimmed, as `inspect/1` prints it and
-  as JSON escapes it, a refused key's message (which quotes the key, masked)
+  are scrubbed of each secret as stored, trimmed, as `inspect/1` prints it, as
+  JSON escapes it, percent-encoded and in base64, a refused key's message (which quotes the key, masked)
   is withheld, and a key no request could carry is refused before it is sent
   (`sendable_api_key?/1`). The same scrub, as a function (`scrubber/1`), is
   what `OpenAILive.Sideband` passes every message it hands the worker through,
@@ -96,6 +96,11 @@ defmodule FermixCore.PhoneCalls.OpenAILive do
   @scrub_depth 32
   # The vendor's `error.code` and `error.type` are fixed identifiers.
   @identifier ~r/\A[a-z0-9_.]{1,64}\z/
+  # OpenAI quotes a refused key back masked, with its first and last
+  # characters: `sk-proj-ab****…****wxyz`.
+  @masked_key ~r/sk-[A-Za-z0-9_\-]*\*{3,}[A-Za-z0-9_\-]*/
+  # A base64 run shorter than this could be anything, so it is not a form.
+  @min_base64_form 8
   # A bearer token is printable ASCII with no space: the only bytes an HTTP/1
   # header value, and the sideband's unchecked upgrade request, can carry.
   @api_key_shape ~r/\A[\x21-\x7E]+\z/
@@ -482,13 +487,30 @@ defmodule FermixCore.PhoneCalls.OpenAILive do
     end
   end
 
-  # OpenAI's refused-key message quotes the key back, masked but with its last
-  # characters, which no exact-match scrub can see. The engine's own sentence
-  # stands in for it, as `Realtime.SessionServer` does for the same refusal.
-  defp words(status, code, _text, _secrets) when status == 401 or code == "invalid_api_key",
-    do: refused_key(code)
+  defp words(401, code, _text, _secrets), do: refused_key(code)
 
-  defp words(_status, _code, text, secrets), do: vendor_text(text, secrets)
+  defp words(_status, code, text, secrets) do
+    case key_refusal(code, text) do
+      {:withhold, sentence} -> sentence
+      :keep -> vendor_text(text, secrets)
+    end
+  end
+
+  @doc """
+  The one rule for a vendor message that refuses the API key or names it:
+  `{:withhold, sentence}` when its code is `invalid_api_key` or its words
+  hold a key, even masked (OpenAI quotes a refused key back with its last
+  characters, which no exact-match scrub can see), and the engine's own
+  sentence stands in, as `Realtime.SessionServer` does for the same refusal;
+  `:keep` for any other. A create's or hangup's 401 is that refusal too. The
+  sideband applies it to every error and failure event.
+  """
+  @spec key_refusal(term(), term()) :: {:withhold, String.t()} | :keep
+  def key_refusal(code, message) do
+    if code == "invalid_api_key" or (is_binary(message) and Regex.match?(@masked_key, message)),
+      do: {:withhold, refused_key(identifier(code))},
+      else: :keep
+  end
 
   defp refused_key(nil), do: "OpenAI did not accept the API key."
   defp refused_key(code), do: "OpenAI did not accept the API key (#{code})."
@@ -530,16 +552,22 @@ defmodule FermixCore.PhoneCalls.OpenAILive do
 
   defp scrub(text, secrets), do: replace_forms(text, secret_forms(secrets))
 
-  defp replace_forms(text, forms),
-    do: Enum.reduce(forms, text, &String.replace(&2, &1, @redacted))
+  defp replace_forms(text, forms) do
+    forms
+    |> Enum.reduce(text, &String.replace(&2, &1, @redacted))
+    |> then(&Regex.replace(@masked_key, &1, @redacted))
+  end
 
   @doc """
   The scrub every vendor word leaves this adapter through, as a function of
   the call's `secrets` (its API key and trunk password): it answers its term
   with every string inside it, map keys included, scrubbed as the create's
   and hangup's answers are (each secret as stored, trimmed, as `inspect/1`
-  prints it and as JSON escapes it). Structure is kept; a part nested deeper
-  than #{@scrub_depth} levels is replaced whole by `#{@redacted}`. The
+  prints it, as JSON escapes it, percent-encoded and in base64 at any offset,
+  and a key OpenAI quotes back masked). A charlist, the shape Erlang's
+  transport reasons take, is read as text and stays a charlist. Structure is
+  kept, an improper list included, and no term makes it raise; a part nested
+  deeper than #{@scrub_depth} levels is replaced whole by `#{@redacted}`. The
   function closes over the secrets, so whoever holds it (the sideband, for the
   life of a call) holds no credential it could print.
   """
@@ -552,8 +580,11 @@ defmodule FermixCore.PhoneCalls.OpenAILive do
   defp scrub_all(_term, _forms, 0), do: @redacted
   defp scrub_all(text, forms, _depth) when is_binary(text), do: replace_forms(text, forms)
 
-  defp scrub_all(list, forms, depth) when is_list(list),
-    do: Enum.map(list, &scrub_all(&1, forms, depth - 1))
+  defp scrub_all(list, forms, depth) when is_list(list) do
+    if :io_lib.printable_unicode_list(list),
+      do: list |> List.to_string() |> replace_forms(forms) |> String.to_charlist(),
+      else: scrub_list(list, forms, depth - 1)
+  end
 
   defp scrub_all(tuple, forms, depth) when is_tuple(tuple),
     do: tuple |> Tuple.to_list() |> scrub_all(forms, depth) |> List.to_tuple()
@@ -569,18 +600,58 @@ defmodule FermixCore.PhoneCalls.OpenAILive do
 
   defp scrub_all(other, _forms, _depth), do: other
 
+  # Element by element, so an improper list's tail is read like any term.
+  defp scrub_list([head | tail], forms, depth),
+    do: [scrub_all(head, forms, depth) | scrub_list(tail, forms, depth)]
+
+  defp scrub_list([], _forms, _depth), do: []
+  defp scrub_list(tail, forms, depth), do: scrub_all(tail, forms, depth)
+
   # A secret as it can appear inside a message: as stored, trimmed, and as
-  # `inspect/1` prints or JSON escapes either, longest first so no form is left
-  # half replaced.
+  # `inspect/1` prints, JSON escapes, a URL percent-encodes or base64 encodes
+  # either, longest first so no form is left half replaced.
   defp secret_forms(secrets) do
     secrets
     |> Enum.filter(&(is_binary(&1) and &1 != ""))
     |> Enum.flat_map(&[&1, String.trim(&1)])
-    |> Enum.flat_map(&[&1, inspected(&1) | json_escaped(&1)])
+    |> Enum.flat_map(&([&1, inspected(&1)] ++ json_escaped(&1) ++ encoded(&1)))
     |> Enum.reject(&(&1 == ""))
     |> Enum.uniq()
     |> Enum.sort_by(&byte_size/1, :desc)
   end
+
+  defp encoded(form), do: percent_encoded(form) ++ base64_forms(form)
+
+  # As a query string or a path writes it, its escapes in either case.
+  defp percent_encoded(form) do
+    [URI.encode_www_form(form), URI.encode(form, &URI.char_unreserved?/1)]
+    |> Enum.flat_map(
+      &[&1, Regex.replace(~r/%[0-9A-F]{2}/, &1, fn escape -> String.downcase(escape) end)]
+    )
+  end
+
+  # The base64 characters `form` alone decides wherever it sits in a longer
+  # encoding (a basic-auth `user:password`, say): for each of the three
+  # offsets it can start at within a 3-byte group, the whole groups it fills,
+  # in both alphabets.
+  defp base64_forms(form) do
+    for offset <- 0..2,
+        alphabet <- [:standard, :url],
+        run = aligned_base64(form, offset, alphabet),
+        byte_size(run) >= @min_base64_form,
+        do: run
+  end
+
+  defp aligned_base64(form, offset, alphabet) do
+    padded = :binary.copy(<<0>>, offset) <> form
+    whole = div(byte_size(padded), 3) * 4
+    skip = if offset == 0, do: 0, else: 4
+    encoded = base64(padded, alphabet)
+    if whole > skip, do: binary_part(encoded, skip, whole - skip), else: ""
+  end
+
+  defp base64(bytes, :standard), do: Base.encode64(bytes)
+  defp base64(bytes, :url), do: Base.url_encode64(bytes)
 
   defp inspected(form), do: form |> inspect() |> String.slice(1..-2//1)
 

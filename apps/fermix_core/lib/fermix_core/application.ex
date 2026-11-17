@@ -211,29 +211,27 @@ defmodule FermixCore.Application do
     Supervisor.start_link(supervision_children(Egress.activate(), Role.current()), opts)
   end
 
-  # Every orderly stop of the engine (a restart, an upgrade, a move, the
-  # service manager's SIGTERM) passes here, before the supervision tree stops,
-  # so the Repo, the HTTP pools and the hand-off supervisor are all still up:
-  # the call in progress is asked to end and its end report written, within
-  # `PhoneCalls.Limits.shutdown_drain_ms/0`, before anything it needs goes
-  # away (M94 §04, §09). The subtree's own shutdown would run later, with its
+  # The call in progress is drained by the FIRST application an orderly stop
+  # of the engine stops (a restart, an upgrade, a move, the management
+  # lifecycle's stop, the service manager's SIGTERM): applications stop in
+  # reverse start order, and the web and channels applications start after
+  # this one, which they need, so they stop before it, the channels
+  # application's tree, the call's backend, with them. So the web
+  # application's `prep_stop/1`, the channels application's and this one each
+  # call `PhoneCalls.Manager.drain_for_stop/0`: whichever runs first asks the
+  # call to end and its end report written within
+  # `PhoneCalls.Limits.shutdown_drain_ms/0` while every tree still runs, and
+  # the later ones answer at once (M94 §04, §09). This one is the drain when
+  # the core alone runs. The subtree's own shutdown would run later, with its
   # workers killed by their supervisor first, and also whenever a crash of an
   # earlier sibling restarts it under `:rest_for_one`, when the Repo may be
   # the thing that crashed. A crash or a kill of the engine runs nothing here:
   # boot reconciliation settles it, as before.
   @impl true
   def prep_stop(state) do
-    log_phone_drain(PhoneCallsManager.drain())
+    _drained = PhoneCallsManager.drain_for_stop()
     state
   end
-
-  defp log_phone_drain(:idle), do: :ok
-
-  defp log_phone_drain(:drained),
-    do: Logger.info("engine stop: the phone call in progress ended before the stop")
-
-  defp log_phone_drain(other),
-    do: Logger.warning("engine stop: phone calls not drained (#{inspect(other)})")
 
   # What a boot writes into its home before any child starts. A candidate
   # (M75 §2) writes nothing there: its home is where a move will rename a
@@ -893,7 +891,8 @@ defmodule FermixCore.Application do
   # the home's running engine only (`daemon_boot?/0`): a command that boots
   # the tree in a process of its own (`fermix memory`, a supervised `fermix
   # setup`, a mix task) must not settle the daemon's live call as unowned or
-  # hang it up.
+  # hang it up, and its stop, its off switch and the owner's word leave the
+  # daemon's calls to the daemon (`daemon:`).
   @doc false
   @spec phone_calls_opts() :: keyword()
   def phone_calls_opts, do: phone_calls_opts(daemon_boot?(), @compiled_env)
@@ -914,7 +913,8 @@ defmodule FermixCore.Application do
       call_args: %{transport_opts: transport_opts, delegate: delegate},
       hangup: fn session_id -> PhoneCallTransport.manager_hangup(session_id, transport_opts) end,
       reconcile: daemon?,
-      timer_enabled: daemon?
+      timer_enabled: daemon?,
+      daemon: daemon?
     ]
   end
 

@@ -69,8 +69,14 @@ defmodule FermixCore.PhoneCalls.Call do
   The engine's stop (`cancel(pid, :shutdown)`) shortens every state, the
   ending tail included: no wait for speech, the stop's own hangup wait for a
   hangup still outstanding, no outcome read (one in flight is abandoned), and
-  the report at once, saying the outcome was not read because Fermix
-  stopped. An owner's stop or the off switch in the tail changes nothing.
+  the report at once. An owner's stop or the off switch in the tail changes
+  nothing.
+
+  An outcome that was not read (the engine stopped, the transcript reached
+  its bound, the extraction failed or ran out of time) is `unknown` with its
+  reason's code (`Outcome.unread_report/1`), and carries the call's last
+  words as its evidence (`Call.LastWords`): the transcript ends with the
+  worker, and these lines tell the owner whether anything was agreed.
 
   What is said on the call when a backend turn ends it (`finish`): its reply,
   when it has one (`:done` a goodbye, `:needs_owner` that the owner will
@@ -91,7 +97,7 @@ defmodule FermixCore.PhoneCalls.Call do
   `:readiness` (`&Readiness.current/1`, handed `:config` and
   `:call_backend?`), `:outcome` (`PhoneCalls.Outcome`),
   `:prompt` (`PhoneCalls.Prompt`), `:config` (`&PhoneCalls.Config.get/0`),
-  `:credentials` (`credentials/1`), `:ledger` (`PhoneCalls.Ledger`),
+  `:credentials` (`PhoneCalls.Config.credentials/1`), `:ledger` (`PhoneCalls.Ledger`),
   `:schedule` (`Process.send_after/3` to itself), `:monotonic`
   (milliseconds) and `:registry` (`CallControls.registry_name/0`).
   """
@@ -105,6 +111,7 @@ defmodule FermixCore.PhoneCalls.Call do
   alias FermixCore.PhoneCalls.Call.Ending
   alias FermixCore.PhoneCalls.Call.EndReport
   alias FermixCore.PhoneCalls.Call.Keypad
+  alias FermixCore.PhoneCalls.Call.LastWords
   alias FermixCore.PhoneCalls.Call.Printable
   alias FermixCore.PhoneCalls.Call.Tasks
   alias FermixCore.PhoneCalls.Call.Timers
@@ -131,9 +138,6 @@ defmodule FermixCore.PhoneCalls.Call do
   @failed_line "I can't get that done during this call; the owner will follow up on it."
   @timeout_line "That is taking too long; the owner will follow up on it."
   @owner_follows_up "The owner will follow up with you about this."
-  @transcript_full "The call's transcript reached its size limit, so its result was not read."
-  @extraction_failed "Fermix could not read the call's result."
-  @engine_stopped "Fermix stopped during the call, so its result was not read."
 
   # Inspected anywhere (a crash's stack frame, which carries its arguments
   # past `format_status/1`; `:sys.get_state/1`), the state prints only these
@@ -231,22 +235,6 @@ defmodule FermixCore.PhoneCalls.Call do
   @spec prompt_version() :: String.t()
   def prompt_version, do: Prompt.version()
 
-  @doc """
-  The credentials a call's I/O needs, resolved now: the OpenAI Platform key
-  and the trunk connection's username and password, never kept. What is
-  missing is named in `PhoneCalls.Readiness`'s words.
-  """
-  @spec credentials(Config.t()) ::
-          {:ok, %{api_key: String.t(), sip_username: String.t(), sip_password: String.t()}}
-          | {:error, :openai_api_key_missing | :sip_username_missing | :sip_password_missing}
-  def credentials(%Config{} = config) do
-    with {:ok, api_key} <- api_key(),
-         {:ok, username} <- sip_username(config),
-         {:ok, password} <- sip_password(config) do
-      {:ok, %{api_key: api_key, sip_username: username, sip_password: password}}
-    end
-  end
-
   # --- GenServer ------------------------------------------------------------------
 
   @impl true
@@ -307,8 +295,8 @@ defmodule FermixCore.PhoneCalls.Call do
   def handle_info({:phone_call_timer, kind, token}, state),
     do: state |> timer(kind, token) |> noreply()
 
-  def handle_info({:phone_call_delegation, call_id, id, revision, result}, state),
-    do: state |> delegation_result(call_id, id, revision, result) |> noreply()
+  def handle_info({:phone_call_delegation, call_id, id, result}, state),
+    do: state |> delegation_result(call_id, id, result) |> noreply()
 
   def handle_info({ref, result}, state) when is_reference(ref),
     do: state |> task_message(ref, {:result, result}) |> noreply()
@@ -606,7 +594,7 @@ defmodule FermixCore.PhoneCalls.Call do
 
   # The window is cut after the settle wait: the late fragments are in.
   defp run_turn(state, id) do
-    if Delegations.current?(state.delegations, id, Delegations.revision()) do
+    if Delegations.current?(state.delegations, id) do
       handle = new_handle()
       started(state, id, handle, state.delegate.run(turn_request(state, id, handle)))
     else
@@ -629,7 +617,6 @@ defmodule FermixCore.PhoneCalls.Call do
       call_id: state.call_id,
       handle: handle,
       delegation_id: id,
-      revision: Delegations.revision(),
       brief: state.brief,
       window: Enum.reverse(state.transcript),
       session_id: state.session_id,
@@ -639,11 +626,11 @@ defmodule FermixCore.PhoneCalls.Call do
     }
   end
 
-  # A result acts only for this call, a current delegation and revision, and
-  # a call not ending: a stale one cannot speak, press or reopen anything.
-  defp delegation_result(%{call_id: call_id, ending: nil} = state, call_id, id, revision, result)
-       when is_binary(id) and is_integer(revision) do
-    case Delegations.finish(state.delegations, id, revision) do
+  # A result acts only for this call, a delegation still running, and a call
+  # not ending: a stale one cannot speak, press or reopen anything.
+  defp delegation_result(%{call_id: call_id, ending: nil} = state, call_id, id, result)
+       when is_binary(id) do
+    case Delegations.finish(state.delegations, id) do
       {:ok, _record, delegations} ->
         %{state | delegations: delegations}
         |> disarm({:turn_timeout, id})
@@ -657,7 +644,7 @@ defmodule FermixCore.PhoneCalls.Call do
     end
   end
 
-  defp delegation_result(state, _call_id, _id, _revision, _result) do
+  defp delegation_result(state, _call_id, _id, _result) do
     Logger.debug("phone call #{state.call_id} backend answer ignored: not current")
     state
   end
@@ -694,7 +681,7 @@ defmodule FermixCore.PhoneCalls.Call do
   defp say_limitation(state, _id, _line), do: state
 
   defp turn_timed_out(state, id) do
-    case Delegations.finish(state.delegations, id, Delegations.revision()) do
+    case Delegations.finish(state.delegations, id) do
       {:ok, record, delegations} ->
         %{state | delegations: delegations}
         |> cancel_turn(record)
@@ -721,7 +708,7 @@ defmodule FermixCore.PhoneCalls.Call do
   defp next_delegation(state), do: state
 
   defp retire(state, id) do
-    case Delegations.finish(state.delegations, id, Delegations.revision()) do
+    case Delegations.finish(state.delegations, id) do
       {:ok, _record, delegations} -> %{state | delegations: delegations}
       :stale -> state
     end
@@ -877,6 +864,11 @@ defmodule FermixCore.PhoneCalls.Call do
 
   defp finish_taken(state), do: state
 
+  # Remembered while the create is in flight: the first cancel's reason, but
+  # an engine stop always, whatever came before it, so the end fits the drain.
+  defp cancel_call(%{phase: phase} = state, :shutdown) when phase in [:dispatching, :creating],
+    do: %{state | cancel: :shutdown}
+
   defp cancel_call(%{phase: phase} = state, why) when phase in [:dispatching, :creating],
     do: %{state | cancel: state.cancel || why}
 
@@ -897,7 +889,7 @@ defmodule FermixCore.PhoneCalls.Call do
   defp engine_stops(%{phase: :finalizing} = state) do
     %{state | tasks: Tasks.shutdown(state.tasks, :extract)}
     |> disarm(:extract_watchdog)
-    |> report_outcome(unread_outcome(@engine_stopped))
+    |> report_outcome(unread_outcome(state, :not_read))
   end
 
   defp engine_stops(%{ending: %Ending{stage: :speech}} = state),
@@ -1059,10 +1051,10 @@ defmodule FermixCore.PhoneCalls.Call do
   # --- finalizing ----------------------------------------------------------------------------
 
   defp extract(%{engine_stop?: true} = state),
-    do: report_outcome(state, unread_outcome(@engine_stopped))
+    do: report_outcome(state, unread_outcome(state, :not_read))
 
   defp extract(%{transcript_full?: true} = state),
-    do: report_outcome(state, unread_outcome(@transcript_full))
+    do: report_outcome(state, unread_outcome(state, :not_read))
 
   defp extract(state) do
     %{outcome: outcome, brief: brief} = state
@@ -1088,11 +1080,20 @@ defmodule FermixCore.PhoneCalls.Call do
 
   defp extracted(state, other) do
     Logger.warning("phone call #{state.call_id} outcome not read: #{describe(other)}")
-    report_outcome(state, unread_outcome(@extraction_failed))
+    report_outcome(state, unread_outcome(state, unread_reason(other)))
   end
 
-  defp unread_outcome(sentence),
-    do: %{outcome: "unknown", outcome_facts: nil, evidence: [], uncertainty: sentence}
+  defp unread_reason({:error, :extraction_timeout}), do: :extraction_timeout
+  defp unread_reason(_failed), do: :extraction_crashed
+
+  # Not read: `unknown` with the reason's code (`Outcome.unread_report/1`),
+  # and the call's last words as its evidence, when anyone said any
+  # (`Call.LastWords`); the end report fits it (`Outcome.fit_report/1`).
+  defp unread_outcome(state, reason) do
+    reason
+    |> Outcome.unread_report()
+    |> Map.put(:evidence, state.transcript |> Enum.reverse() |> LastWords.evidence())
+  end
 
   defp report_outcome(state, outcome) do
     failure =
@@ -1209,6 +1210,8 @@ defmodule FermixCore.PhoneCalls.Call do
   defp task_result(:hangup, {:down, reason}),
     do: {:error, {:unknown, {:hangup_stopped, describe(reason)}}}
 
+  defp task_result(:extract, {:down, :watchdog}), do: {:error, :extraction_timeout}
+
   defp task_result(:extract, {:down, reason}),
     do: {:error, {:extraction_stopped, describe(reason)}}
 
@@ -1285,7 +1288,7 @@ defmodule FermixCore.PhoneCalls.Call do
       outcome: Map.get(args, :outcome, Outcome),
       prompt: Map.get(args, :prompt, Prompt),
       config: Map.get(args, :config, &Config.get/0),
-      credentials: Map.get(args, :credentials, &credentials/1),
+      credentials: Map.get(args, :credentials, &Config.credentials/1),
       monotonic: Map.get(args, :monotonic, &monotonic_ms/0),
       timers: Timers.new(Map.get(args, :schedule, &send_after/2)),
       tasks: Tasks.new()
@@ -1307,25 +1310,6 @@ defmodule FermixCore.PhoneCalls.Call do
   defp now(state), do: state.now_fn.()
 
   # --- helpers ------------------------------------------------------------------------------
-
-  defp api_key do
-    case Config.openai_api_key() do
-      {:ok, key} -> {:ok, key}
-      {:error, :missing_openai_api_key} -> {:error, :openai_api_key_missing}
-    end
-  end
-
-  defp sip_username(%Config{sip_username: username}) when is_binary(username) and username != "",
-    do: {:ok, username}
-
-  defp sip_username(%Config{}), do: {:error, :sip_username_missing}
-
-  defp sip_password(config) do
-    case Config.sip_password(config) do
-      {:ok, password} -> {:ok, password}
-      {:error, :missing_sip_password} -> {:error, :sip_password_missing}
-    end
-  end
 
   defp new_handle,
     do: @handle_bytes |> :crypto.strong_rand_bytes() |> Base.url_encode64(padding: false)

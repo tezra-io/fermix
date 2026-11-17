@@ -138,12 +138,35 @@ defmodule FermixCore.PhoneCalls.Config do
     |> Enum.reject(fn {_key, value} -> is_nil(value) end)
   end
 
-  @doc "The trunk password, or `:missing_sip_password` when none is stored or it did not resolve."
-  @spec sip_password(t()) :: {:ok, String.t()} | {:error, :missing_sip_password}
+  @doc """
+  The credentials a call's I/O needs, resolved now: the OpenAI Platform key
+  and the trunk connection's username and password, never kept. The first
+  one missing is named in `PhoneCalls.Readiness`'s words, the one vocabulary
+  for what a call lacks.
+  """
+  @spec credentials(t()) ::
+          {:ok, %{api_key: String.t(), sip_username: String.t(), sip_password: String.t()}}
+          | {:error, :openai_api_key_missing | :sip_username_missing | :sip_password_missing}
+  def credentials(%__MODULE__{} = config) do
+    with {:ok, api_key} <- openai_api_key(),
+         {:ok, username} <- sip_username(config),
+         {:ok, password} <- sip_password(config) do
+      {:ok, %{api_key: api_key, sip_username: username, sip_password: password}}
+    end
+  end
+
+  defp sip_username(%__MODULE__{sip_username: username})
+       when is_binary(username) and username != "",
+       do: {:ok, username}
+
+  defp sip_username(%__MODULE__{}), do: {:error, :sip_username_missing}
+
+  @doc "The trunk password, or `:sip_password_missing` when none is stored or it did not resolve."
+  @spec sip_password(t()) :: {:ok, String.t()} | {:error, :sip_password_missing}
   def sip_password(%__MODULE__{sip_password: password}) do
     if is_binary(password) and password != "" and not SecretWriter.sentinel?(password),
       do: {:ok, password},
-      else: {:error, :missing_sip_password}
+      else: {:error, :sip_password_missing}
   end
 
   @doc """
@@ -151,7 +174,7 @@ defmodule FermixCore.PhoneCalls.Config do
   provider's, the existing `:openai_api_key` secret. An unresolved sentinel is
   no key.
   """
-  @spec openai_api_key() :: {:ok, String.t()} | {:error, :missing_openai_api_key}
+  @spec openai_api_key() :: {:ok, String.t()} | {:error, :openai_api_key_missing}
   def openai_api_key do
     case CoreConfig.provider_api_key(:openai) do
       {:ok, key} -> if SecretWriter.sentinel?(key), do: missing_key(), else: {:ok, key}
@@ -159,7 +182,7 @@ defmodule FermixCore.PhoneCalls.Config do
     end
   end
 
-  defp missing_key, do: {:error, :missing_openai_api_key}
+  defp missing_key, do: {:error, :openai_api_key_missing}
 
   defp field(:enabled, nil), do: {:ok, false}
   defp field(:enabled, value) when is_boolean(value), do: {:ok, value}

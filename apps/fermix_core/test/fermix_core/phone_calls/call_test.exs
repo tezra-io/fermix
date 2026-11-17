@@ -13,6 +13,7 @@ defmodule FermixCore.PhoneCalls.CallTest do
   alias FermixCore.PhoneCalls.CallControls
   alias FermixCore.PhoneCalls.Config
   alias FermixCore.PhoneCalls.Ledger
+  alias FermixCore.PhoneCalls.Limits
   alias FermixCore.PhoneCalls.Outcome
   alias FermixCore.PhoneCalls.Readiness
   alias FermixTestSupport.PhoneCallFakes, as: Fakes
@@ -173,7 +174,7 @@ defmodule FermixCore.PhoneCalls.CallTest do
   defp answer!(call, request, reply, usage \\ nil) do
     send(
       call.pid,
-      {:phone_call_delegation, call.id, request.delegation_id, request.revision,
+      {:phone_call_delegation, call.id, request.delegation_id,
        {:ok, %{reply: reply, backend_usage: usage}}}
     )
   end
@@ -563,20 +564,28 @@ defmodule FermixCore.PhoneCalls.CallTest do
       refute_received {:attach, _sideband, _session, _key}
     end
 
-    # The deadlines are the row's absolute ones: a slow create eats the
-    # ringing budget, never extends it.
-    test "a slow create leaves only what remains of the row's deadlines", ctx do
+    # The deadlines are the row's absolute ones. The ring bound starts when the
+    # session exists, so a slow create never eats it; the call's operational
+    # deadline is still measured from the dispatch claim.
+    test "a slow create leaves the whole ring bound and what remains of the call's", ctx do
       wall = :atomics.new(1, [])
       now_fn = fn -> DateTime.add(@t0, :atomics.get(wall, 1), :millisecond) end
       call = start!(ctx, %{now_fn: now_fn})
       {task, _request} = create!()
 
+      # Claimed: the call's deadline is stamped, the ring window is not yet.
+      claimed = row!(ctx, call.id)
+      assert claimed.call_deadline_at == DateTime.add(@t0, 600, :second)
+      assert is_nil(claimed.ringing_deadline_at)
+
       :atomics.put(wall, 1, 45_000)
       Fakes.answer(task, {:ok, %{session_id: @session, http_status: 201, transport_type: "sip"}})
 
-      assert_receive {:scheduled, {:phone_call_timer, :ringing, _token}, 15_000}
+      # The ring timer is armed from the row the session's record returns.
+      assert_receive {:scheduled, {:phone_call_timer, :ringing, _token}, 60_000}
       assert_receive {:scheduled, {:phone_call_timer, :deadline, _token}, 555_000}
-      assert row!(ctx, call.id).ringing_deadline_at == DateTime.add(@t0, 60, :second)
+      assert row!(ctx, call.id).ringing_deadline_at == DateTime.add(@t0, 105, :second)
+      assert row!(ctx, call.id).call_deadline_at == DateTime.add(@t0, 600, :second)
     end
   end
 
@@ -804,7 +813,9 @@ defmodule FermixCore.PhoneCalls.CallTest do
       report = hung_up_and_closed!(call, 300)
       assert report.failure_reason == "transcript_limit_reached"
       assert report.outcome == "unknown"
-      assert report.uncertainty =~ "size limit"
+      assert report.outcome_facts["reason"] == "not_read"
+      assert [%{speaker: "recipient", text: text}] = report.evidence
+      assert byte_size(text) <= Limits.max_excerpt_bytes()
       refute_received {:extract, _entries, _facts, _opts}
     end
   end
@@ -827,7 +838,7 @@ defmodule FermixCore.PhoneCalls.CallTest do
       assert_receive {:delegate_run, request}
       assert request.call_id == call.id
       assert request.delegation_id == "del_1"
-      assert request.revision == 1
+      refute Map.has_key?(request, :revision)
       assert request.session_id == "phone_call_" <> call.id
       assert request.deadline_ms == 30_000
       assert request.max_steps == 12
@@ -910,14 +921,13 @@ defmodule FermixCore.PhoneCalls.CallTest do
       refute_received {:scheduled, {:phone_call_timer, {:settle, _id}, _token}, _ms}
     end
 
-    test "an answer acts only for this call, a current delegation and revision", ctx do
+    test "an answer acts only for this call and a delegation still running", ctx do
       call = live!(ctx)
       request = running!(call, "del_1")
       result = {:ok, %{reply: "A stale answer.", backend_usage: nil}}
 
-      send(call.pid, {:phone_call_delegation, call.id, "del_1", 2, result})
-      send(call.pid, {:phone_call_delegation, call.id, "del_other", 1, result})
-      send(call.pid, {:phone_call_delegation, "pc_000000000000", "del_1", 1, result})
+      send(call.pid, {:phone_call_delegation, call.id, "del_other", result})
+      send(call.pid, {:phone_call_delegation, "pc_000000000000", "del_1", result})
       sync!(call)
       refute_received {:said, _id, _text}
 
@@ -1318,6 +1328,13 @@ defmodule FermixCore.PhoneCalls.CallTest do
       assert {:error, :invalid_note} =
                CallControls.finish(call.id, request.handle, :done, <<255>>, opts)
 
+      # The tool refuses a long note (`Tools.PhoneCallEnd`); the control trusts
+      # its caller to have, and refuses one rather than cutting it.
+      too_long = String.duplicate("é", div(Limits.max_finish_note_bytes(), 2) + 1)
+
+      assert {:error, :invalid_note} =
+               CallControls.finish(call.id, request.handle, :done, too_long, opts)
+
       assert {:error, :unknown_call} =
                CallControls.finish("pc_0123456789ab", request.handle, :done, nil, opts)
 
@@ -1539,7 +1556,7 @@ defmodule FermixCore.PhoneCalls.CallTest do
 
       assert report.status == "ended"
       assert report.outcome == "unknown"
-      assert report.uncertainty =~ "Fermix stopped"
+      assert report.outcome_facts["reason"] == "not_read"
       assert report.failure_reason == "call_deadline_reached; engine_stopped"
       refute_received {:extract, _entries, _facts, _opts}
     end
@@ -1556,7 +1573,7 @@ defmodule FermixCore.PhoneCalls.CallTest do
       assert report.status == "ended"
       assert report.voice_seconds == 33
       assert report.outcome == "unknown"
-      assert report.uncertainty =~ "Fermix stopped"
+      assert report.outcome_facts["reason"] == "not_read"
       assert report.failure_reason == "engine_stopped"
     end
 
@@ -1632,7 +1649,7 @@ defmodule FermixCore.PhoneCalls.CallTest do
       for secret <- secrets, do: refute(printed =~ secret, "status printed #{secret}")
 
       handled = [
-        {:phone_call_delegation, call.id, "del_1", 1,
+        {:phone_call_delegation, call.id, "del_1",
          {:ok, %{reply: "The account ends in 4417.", backend_usage: nil}}},
         {:phone_sideband, call.sideband,
          {:event,
@@ -1694,6 +1711,26 @@ defmodule FermixCore.PhoneCalls.CallTest do
       refute_received {:create, _task, _request}
     end
 
+    # An engine stop is never lost behind an earlier cancel: it always shortens
+    # the end to fit the stop's drain.
+    test "an engine stop after an owner's cancel during the create still takes effect", ctx do
+      call = start!(ctx)
+      {task, _request} = create!()
+      :ok = Call.cancel(call.pid, :owner)
+      :ok = Call.cancel(call.pid, :shutdown)
+      sync!(call)
+
+      Fakes.answer(task, {:ok, %{session_id: @session, http_status: 201, transport_type: "sip"}})
+      assert_receive {:hangup, _task, @session}
+      assert_receive {:scheduled, {:phone_call_timer, :hangup_watchdog, _token}, 3_000}
+
+      report = ended!(call)
+      assert report.failure_reason == "engine_stopped"
+      assert report.outcome_facts["reason"] == "not_read"
+      refute_received {:extract, _entries, _facts, _opts}
+      refute_received {:attach, _sideband, _session, _key}
+    end
+
     test "a create in flight whose answer is lost stays unknown after the switch", ctx do
       call = start!(ctx)
       {task, _request} = create!()
@@ -1744,8 +1781,7 @@ defmodule FermixCore.PhoneCalls.CallTest do
 
     send(
       call.pid,
-      {:phone_call_delegation, call.id, "del_1", request.revision,
-       {:error, {:reply_withheld, :too_long}}}
+      {:phone_call_delegation, call.id, "del_1", {:error, {:reply_withheld, :too_long}}}
     )
 
     sync!(call)
@@ -1799,6 +1835,54 @@ defmodule FermixCore.PhoneCalls.CallTest do
       assert report.voice_seconds == 95
     end
 
+    # The transcript dies with the worker: when the outcome was not read, the
+    # last words each side said are what tells the owner whether anything was
+    # agreed.
+    test "an outcome that was not read keeps each side's last words as evidence", ctx do
+      Fakes.script(:extract, :crash)
+
+      capture_log(fn ->
+        call = live!(ctx)
+        said!(call, :remote, "We have a table at eight.")
+        said!(call, :assistant, "Eight works for us.")
+        said!(call, :remote, "Great.\nSee you then, goodbye.")
+        closed!(call, 9, "remote_hangup")
+
+        report = ended!(call)
+        assert report.outcome == "unknown"
+        assert report.outcome_facts["reason"] == "extraction_crashed"
+        assert is_nil(report.uncertainty)
+
+        assert report.evidence == [
+                 %{speaker: "assistant", text: "Eight works for us"},
+                 %{speaker: "recipient", text: "Great. See you then, goodbye"}
+               ]
+      end)
+    end
+
+    test "a long closing turn keeps its end, within the ledger's excerpt bound", ctx do
+      call = live!(ctx)
+      words = Enum.map_join(1..200, " ", &"word#{&1}")
+      said!(call, :remote, words)
+      :ok = Call.cancel(call.pid, :shutdown)
+
+      report = hung_up_and_closed!(call, 40)
+      assert report.outcome_facts["reason"] == "not_read"
+      assert [%{speaker: "recipient", text: text}] = report.evidence
+      assert byte_size(text) <= Limits.max_excerpt_bytes()
+      assert String.ends_with?(text, "word200")
+      refute String.starts_with?(text, "word1 ")
+    end
+
+    test "a call where nobody said a word leaves no evidence", ctx do
+      call = live!(ctx)
+      :ok = Call.cancel(call.pid, :shutdown)
+
+      report = hung_up_and_closed!(call, 2)
+      assert report.evidence == []
+      assert report.outcome_facts == %{"reason" => "not_read"}
+    end
+
     test "a reading past its watchdog leaves the outcome unknown, said so", ctx do
       Fakes.script(:extract, :wait)
 
@@ -1814,7 +1898,7 @@ defmodule FermixCore.PhoneCalls.CallTest do
 
         report = ended!(call)
         assert report.outcome == "unknown"
-        assert report.uncertainty =~ "could not read"
+        assert report.outcome_facts["reason"] == "extraction_timeout"
       end)
     end
   end

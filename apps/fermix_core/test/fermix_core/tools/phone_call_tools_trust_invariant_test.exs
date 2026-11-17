@@ -237,7 +237,7 @@ defmodule FermixCore.Tools.PhoneCallToolsTrustInvariantTest do
       conversation_key: PhoneCallTurn.conversation_key(@call_id),
       source_trust: :phone_call,
       computer_use_origin: :unattended,
-      phone_call: %{call_id: @call_id, handle: "h-invented", delegation_id: "d1", revision: 1},
+      phone_call: %{call_id: @call_id, handle: "h-invented", delegation_id: "d1"},
       phone_call_controls: FermixCore.PhoneCalls.CallControls
     })
   end
@@ -444,7 +444,6 @@ defmodule FermixCore.Tools.PhoneCallToolsTrustInvariantTest do
         call_id: @call_id,
         handle: "h-invented",
         delegation_id: "d1",
-        revision: 1,
         brief: brief,
         window: [%{speaker: :remote, text: "When do you close?", start_ms: 0, end_ms: 900}],
         session_id: "phone_call_" <> @call_id,

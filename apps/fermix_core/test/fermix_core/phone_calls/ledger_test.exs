@@ -299,7 +299,7 @@ defmodule FermixCore.PhoneCalls.LedgerTest do
       assert {:ok, %{outcome: "unknown"}} = Ledger.get(row.id, ctx.opts)
     end
 
-    test "verified termination releases a closure_unconfirmed call's slot, outcome kept", ctx do
+    test "the owner's word releases a closure_unconfirmed call's slot, outcome kept", ctx do
       row = admit!(ctx)
       {:ok, _row} = Ledger.claim_dispatch(row.id, @t0, ctx.opts)
       {:ok, _row} = Ledger.record_session(row.id, "sess_invented_1", at(1), ctx.opts)
@@ -310,21 +310,30 @@ defmodule FermixCore.PhoneCalls.LedgerTest do
       assert {:error, {:slot_held, _holder}} = Ledger.admit(attrs(), at(61), ctx.opts)
 
       assert {:ok, released} =
-               Ledger.release_slot(row.id, :verified_termination, at(70), ctx.opts)
+               Ledger.release_slot(row.id, :owner_confirmed, at(70), ctx.opts)
 
       assert released.slot_released_at == at(70)
       assert released.outcome == "unknown"
       assert {:ok, {:admitted, _next}} = Ledger.admit(attrs(), at(71), ctx.opts)
 
       assert {:error, {:not_releasable, "closure_unconfirmed"}} =
-               Ledger.release_slot(row.id, :verified_termination, at(72), ctx.opts)
+               Ledger.release_slot(row.id, :owner_confirmed, at(72), ctx.opts)
+    end
+
+    # Nothing verifies a termination, so nothing releases a slot that way.
+    test "the owner's word is the one reason a slot is released", ctx do
+      row = admit!(ctx)
+
+      assert_raise FunctionClauseError, fn ->
+        Ledger.release_slot(row.id, :verified_termination, at(1), ctx.opts)
+      end
     end
 
     test "only an uncertain row can be released", ctx do
       row = admit!(ctx)
 
       assert {:error, {:not_releasable, "admitted"}} =
-               Ledger.release_slot(row.id, :verified_termination, at(1), ctx.opts)
+               Ledger.release_slot(row.id, :owner_confirmed, at(1), ctx.opts)
     end
 
     test "unresolved lists the uncertain rows still holding the slot", ctx do
@@ -352,11 +361,24 @@ defmodule FermixCore.PhoneCalls.LedgerTest do
       assert claimed.call_deadline_at ==
                DateTime.add(at(2), Limits.call_deadline_ms(), :millisecond)
 
-      assert claimed.ringing_deadline_at ==
-               DateTime.add(at(2), Limits.ringing_timeout_ms(), :millisecond)
+      # The ring window is the session's: it starts once the session exists.
+      assert is_nil(claimed.ringing_deadline_at)
 
       assert {:error, {:not_admitted, "dispatching"}} =
                Ledger.claim_dispatch(row.id, at(3), ctx.opts)
+    end
+
+    # A create that took 60 s still rings for the whole ring window.
+    test "the ring window starts when the session is recorded, not at the claim", ctx do
+      row = admit!(ctx)
+      {:ok, _row} = Ledger.claim_dispatch(row.id, at(2), ctx.opts)
+      assert {:ok, session} = Ledger.record_session(row.id, "sess_ring_1", at(62), ctx.opts)
+
+      assert session.ringing_deadline_at ==
+               DateTime.add(at(62), Limits.ringing_timeout_ms(), :millisecond)
+
+      assert session.call_deadline_at ==
+               DateTime.add(at(2), Limits.call_deadline_ms(), :millisecond)
     end
 
     test "a row cancelled before its claim can never be claimed, so it is never dialed", ctx do

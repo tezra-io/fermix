@@ -53,9 +53,13 @@ defmodule FermixCore.PhoneCalls.SecretLeakTest do
   @api_key "sk-LEAKCANARYkey7q9z3xWv"
   @password "LEAKCANARYtrunk4e8d2bQm"
   @secrets [@api_key, @password, "LEAKCANARYkey", "LEAKCANARYtrunk"]
-  # Both secrets as a vendor's words can carry them.
+  # Both secrets as a vendor's words can carry them: as stored, after
+  # `Bearer `, inside JSON, and the password inside a basic-auth base64.
+  @basic Base.encode64("fermixtrunk01:" <> @password)
   @quoted "Bearer #{@api_key} refused for trunk password #{@password}; " <>
-            ~s(sent {"api_key":"#{@api_key}","password":"#{@password}"})
+            ~s(sent {"api_key":"#{@api_key}","password":"#{@password}"} basic #{@basic})
+  # The key as OpenAI quotes a refused one back: masked, its last characters kept.
+  @masked "sk-LEAKCAN**************3xWv"
 
   defmodule Vendor do
     @moduledoc false
@@ -439,12 +443,19 @@ defmodule FermixCore.PhoneCalls.SecretLeakTest do
     call = answered_on!(ctx, session)
 
     push(call.socket, [
-      %{"type" => "vendor.future.#{@api_key}", "event_id" => "#{session}_u", "detail" => @quoted},
+      %{
+        "type" => "vendor.future.#{@api_key}",
+        "event_id" => "#{session}_u",
+        "detail" => @quoted <> " " <> @masked
+      },
       %{
         "type" => "transport.failed",
         "event_id" => "#{session}_f",
         "session_id" => session,
-        "error" => %{"code" => "sip_trunk_error", "message" => @quoted}
+        "error" => %{
+          "code" => "sip_trunk_error",
+          "message" => "Incorrect API key provided: #{@masked}. " <> @quoted
+        }
       }
     ])
 
@@ -565,15 +576,20 @@ defmodule FermixCore.PhoneCalls.SecretLeakTest do
         Enum.map(telemetry, fn {event, meta} -> {"telemetry #{inspect(event)}", meta} end) ++
         [{"captured log", log}, {"worker printed status", printed}]
 
-    # Named by surface, so a leak says where it is.
+    # Named by surface, so a leak says where it is: either secret, and the
+    # basic-auth base64 and the masked key the vendor quoted.
     assert leaks(texts) == []
 
-    # The vendor's words did reach the record and the log, so the check above
-    # read real vendor text, scrubbed.
+    assert for({where, text} <- texts, form <- [@basic, @masked], text =~ form, do: {where, form}) ==
+             []
+
+    # The vendor's words did reach the record and the log, so the checks above
+    # read real vendor text, scrubbed; a failure that names the key, even
+    # masked, is withheld in the engine's own words.
     {:ok, failed_row} = Ledger.get(failed, server: ctx.repo)
     {:ok, lost_row} = Ledger.get(lost, server: ctx.repo)
     assert failed_row.status == "failed"
-    assert failed_row.vendor_message =~ "[REDACTED]"
+    assert failed_row.vendor_message == "OpenAI did not accept the API key (sip_trunk_error)."
     assert failed_row.closure_reason =~ "[REDACTED]"
     assert lost_row.status == "closure_unconfirmed"
     assert lost_row.vendor_message =~ "[REDACTED]"

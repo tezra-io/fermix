@@ -19,7 +19,7 @@ defmodule FermixCore.PhoneCalls.Outcome.Confirmed do
   @type checked :: %{
           facts: %{atom() => %{value: String.t(), quote: String.t(), at: Transcript.position()}},
           basis: %{atom() => :verified | :read},
-          matched: String.t() | nil,
+          matched: :brief_time | {:alternative, pos_integer()} | nil,
           not_checked: [:alternative | :must_not_commit],
           kind: :stated | :readback,
           evidence: [evidence()]
@@ -389,7 +389,7 @@ defmodule FermixCore.PhoneCalls.Outcome.Confirmed do
         downgrade(:unknown, :unlisted_alternative)
 
       brief.times != [] and slot_matches?(brief.times, facts) ->
-        {:ok, matched("a time in the brief")}
+        {:ok, matched(:brief_time)}
 
       alternative != nil ->
         alternative_match(alternative, listed, brief, facts, basis)
@@ -411,7 +411,7 @@ defmodule FermixCore.PhoneCalls.Outcome.Confirmed do
   # that writes none is the extraction's reading, and says so.
   defp alternative_match(n, text, brief, facts, basis) do
     stated = Values.clock_times(text)
-    label = "alternative #{n} in the brief"
+    label = {:alternative, n}
 
     cond do
       MapSet.size(stated) == 0 ->

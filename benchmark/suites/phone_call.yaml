@@ -62,8 +62,10 @@ description: >
   daily attempts and a lost create holds the home's one call slot for hours, so
   a phone case runs only with `--reset-home` (each attempt starts from the
   seeded world); without it, or on a home seeded without `--phone-calls`, every
-  case is NOT EVALUATED. The phone_call tool is registered in every home, and its
-  start is offered only while phone calls are on, which the seed turns on. Every date is absolute and in February 2027; once they
+  case is NOT EVALUATED. The phone_call tool is registered in every home and
+  offered to the owner's own turn while phone calls are on, which the seed turns
+  on, and while a call still holds the slot, so it can be asked about and
+  stopped. Every date is absolute and in February 2027; once they
   pass, a mandate naming them is refused as past, so move them forward.
 defaults:
   timeout_ms: 240000

@@ -122,23 +122,25 @@ defmodule FermixCore.PhoneCalls.CallHoldTest do
     assert log =~ "corrupt_store"
   end
 
+  # The restart is refused only while a call's worker runs; a row left not
+  # ended, or a ledger that cannot be read, are what a restart clears.
   describe "the owner's restart" do
-    test "runs with no call, and with one that ended or is only unresolved", ctx do
-      assert CallHold.check_restart(repo: ctx.repo) == :ok
-
-      lost = admit!(ctx, "main-hold-6")
-      claim!(lost, ctx)
-
-      {:ok, _row} =
-        Ledger.terminalize(lost, "dispatch_unknown", %{ended_at: @t0}, server: ctx.repo)
-
-      assert CallHold.check_restart(repo: ctx.repo) == :ok
+    setup ctx do
+      registry = :"restart_hold_registry_#{ctx.unique}"
+      start_supervised!({Registry, keys: :unique, name: registry}, id: registry)
+      %{registry: registry}
     end
 
-    test "is refused while a call is in progress, in a sentence saying how to go on", ctx do
-      admit!(ctx, "main-hold-5") |> claim!(ctx)
+    defp live_worker!(registry, call_id) do
+      worker = {Agent, fn -> {:ok, _owner} = Registry.register(registry, call_id, nil) end}
+      start_supervised!(worker, id: {:worker, call_id})
+    end
 
-      assert CallHold.check_restart(repo: ctx.repo) ==
+    test "is refused while a call's worker runs, in a sentence saying how to go on", ctx do
+      id = admit!(ctx, "main-hold-5") |> claim!(ctx)
+      live_worker!(ctx.registry, id)
+
+      assert CallHold.check_restart(repo: ctx.repo, registry: ctx.registry) ==
                {:error,
                 {:restart_held,
                  "A phone call is in progress, and restarting Fermix now would hang it up " <>
@@ -146,18 +148,32 @@ defmodule FermixCore.PhoneCalls.CallHoldTest do
                    "restart."}}
     end
 
-    test "is refused when the ledger cannot be read", ctx do
+    test "runs with no worker, even beside a row left not ended", ctx do
+      assert CallHold.check_restart(repo: ctx.repo, registry: ctx.registry) == :ok
+
+      admit!(ctx, "main-hold-6") |> claim!(ctx)
+      assert {:ok, true} = CallHold.call_in_progress(repo: ctx.repo)
+      assert CallHold.check_restart(repo: ctx.repo, registry: ctx.registry) == :ok
+    end
+
+    test "runs when the ledger cannot be read: the engine's stop hangs up a live call first",
+         ctx do
       repo = :"restart_hold_broken_#{ctx.unique}"
       start_supervised!({BrokenRepo, repo})
 
-      ExUnit.CaptureLog.capture_log(fn ->
-        assert {:error, {:restart_held, sentence}} = CallHold.check_restart(repo: repo)
-        assert sentence =~ "could not tell whether a phone call is in progress"
-      end)
+      assert CallHold.check_restart(repo: repo, registry: ctx.registry) == :ok
     end
 
-    test "is never asked of a process whose ledger does not run", ctx do
-      assert CallHold.check_restart(repo: :"no_ledger_restart_#{ctx.unique}") == :ok
+    test "runs where no call registry runs, since no call does", ctx do
+      assert CallHold.check_restart(registry: :"no_registry_#{ctx.unique}") == :ok
+      refute CallHold.live_call?(registry: :"no_registry_#{ctx.unique}")
+    end
+
+    test "the credentials stay held for a row not ended, worker or not", ctx do
+      admit!(ctx, "main-hold-7") |> claim!(ctx)
+
+      assert {:error, {:credential_held, :openai_api_key, _sentence}} =
+               CallHold.check_credentials([:openai_api_key], repo: ctx.repo)
     end
   end
 

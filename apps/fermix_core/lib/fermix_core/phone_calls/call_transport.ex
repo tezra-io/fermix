@@ -124,15 +124,27 @@ defmodule FermixCore.PhoneCalls.CallTransport do
   the transport's wiring `opts`, the OpenAI Platform key resolved now (a
   refused transport resolves none). `:ok` when the vendor accepted it or said
   there was nothing to hang up (which is not proof that the call ended);
-  otherwise the error, in the transport's words.
+  otherwise the error, in the transport's words. A hangup that was never sent
+  (a refused transport, a key that does not resolve, an argument no request
+  could carry) is `{:error, {:not_sent, reason}}`, which the Manager may send
+  again; every other error may have reached the vendor.
   """
-  @spec manager_hangup(String.t(), keyword()) :: :ok | {:error, term()}
+  @spec manager_hangup(String.t(), keyword()) ::
+          :ok | {:error, {:not_sent, term()} | {:unknown, term()} | {:rejected, term(), term()}}
   def manager_hangup(session_id, opts)
       when is_binary(session_id) and session_id != "" and is_list(opts) do
     with :ok <- wired(opts),
-         {:ok, api_key} <- Config.openai_api_key(),
+         {:ok, api_key} <- cleanup_key(),
          {:ok, _accepted_or_ended} <- hangup(session_id, api_key, opts) do
       :ok
+    end
+  end
+
+  # A key that does not resolve sends nothing: the hangup provably never left.
+  defp cleanup_key do
+    case Config.openai_api_key() do
+      {:ok, api_key} -> {:ok, api_key}
+      {:error, reason} -> {:error, {:not_sent, reason}}
     end
   end
 

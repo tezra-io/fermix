@@ -30,9 +30,13 @@ defmodule FermixCore.Memory.Repo.PhoneCallsSql do
   @outcomes ~w(pending confirmed unavailable options needs_owner unknown)
   @usage_states ~w(provisional voice_duration_confirmed incomplete)
   @report_statuses ~w(pending written delivery_unconfirmed)
-  # Why an uncertain call's slot was released: termination verified, or the
-  # owner's word that they saw the call end in their Telnyx portal (M94 §12).
-  @release_reasons ~w(verified_termination owner_confirmed)
+  # Why an uncertain call's slot was released: the owner's word that they saw
+  # the call end in their Telnyx portal (M94 §12), the one reason anything
+  # writes. The table's CHECK, as migration 68 laid it down, also takes
+  # `verified_termination`, which nothing writes: nothing verifies a
+  # termination. A change to that CHECK is a migration.
+  @release_reasons ~w(owner_confirmed)
+  @checked_release_reasons ~w(verified_termination owner_confirmed)
   @counters ~w(core_turns dtmf_keys cleanup_attempts)a
 
   # The forward steps after the session is known, each with the column that
@@ -151,7 +155,7 @@ defmodule FermixCore.Memory.Repo.PhoneCallsSql do
     vendor_message TEXT,
     slot_released_at TEXT,
     slot_release_reason TEXT
-      CHECK (slot_release_reason IS NULL OR slot_release_reason IN (#{Enum.map_join(@release_reasons, ", ", &"'#{&1}'")})),
+      CHECK (slot_release_reason IS NULL OR slot_release_reason IN (#{Enum.map_join(@checked_release_reasons, ", ", &"'#{&1}'")})),
     delivery_attempts INTEGER NOT NULL DEFAULT 0 CHECK (delivery_attempts >= 0),
     next_delivery_at TEXT,
     last_delivery_error TEXT,
@@ -265,10 +269,6 @@ defmodule FermixCore.Memory.Repo.PhoneCallsSql do
   @spec steps() :: [String.t()]
   def steps, do: @step_names
 
-  @doc "The consumed counters."
-  @spec counters() :: [atom()]
-  def counters, do: @counters
-
   # --- requests (single-writer process) ------------------------------------
 
   @spec handle(term(), tuple()) :: term()
@@ -279,9 +279,10 @@ defmodule FermixCore.Memory.Repo.PhoneCallsSql do
   def handle(conn, {:claim_dispatch, id, fields}) when is_binary(id) and is_map(fields),
     do: claim_dispatch(conn, id, fields)
 
-  def handle(conn, {:record_session, id, session_id, stamp})
-      when is_binary(id) and is_binary(session_id) and is_binary(stamp),
-      do: record_session(conn, id, session_id, stamp)
+  def handle(conn, {:record_session, id, session_id, stamp, ring_until})
+      when is_binary(id) and is_binary(session_id) and is_binary(stamp) and
+             is_binary(ring_until),
+      do: record_session(conn, id, session_id, stamp, ring_until)
 
   def handle(conn, {:advance, id, step, stamp})
       when is_binary(id) and step in @step_names and is_binary(stamp),
@@ -456,14 +457,13 @@ defmodule FermixCore.Memory.Repo.PhoneCallsSql do
   defp claim_dispatch(conn, id, fields) do
     sql = """
     UPDATE phone_calls SET status = 'dispatching', dispatch_claimed_at = ?, call_deadline_at = ?,
-      ringing_deadline_at = ?, slot_expires_at = ?
+      slot_expires_at = ?
     WHERE id = ? AND status = 'admitted'
     """
 
     params = [
       Map.fetch!(fields, :dispatch_claimed_at),
       Map.fetch!(fields, :call_deadline_at),
-      Map.fetch!(fields, :ringing_deadline_at),
       Map.fetch!(fields, :slot_expires_at),
       id
     ]
@@ -472,17 +472,26 @@ defmodule FermixCore.Memory.Repo.PhoneCallsSql do
   end
 
   # The provider's session id is written once, exactly as the provider gave
-  # it. The first one moves a dispatching row to `connecting`; the same id
-  # again changes nothing; a different one is refused, never overwritten.
-  defp record_session(conn, id, session_id, stamp) do
+  # it. The first one moves a dispatching row to `connecting` and starts its
+  # ring window (`ringing_deadline_at`), which belongs to the session, never
+  # to the claim; the same id again changes nothing; a different one is
+  # refused, never overwritten.
+  defp record_session(conn, id, session_id, stamp, ring_until) do
     sql = """
     UPDATE phone_calls SET provider_session_id = ?,
       status = CASE WHEN status = 'dispatching' THEN 'connecting' ELSE status END,
-      connecting_at = CASE WHEN status = 'dispatching' THEN ? ELSE connecting_at END
+      connecting_at = CASE WHEN status = 'dispatching' THEN ? ELSE connecting_at END,
+      ringing_deadline_at = CASE WHEN status = 'dispatching' THEN ? ELSE ringing_deadline_at END
     WHERE id = ? AND provider_session_id IS NULL AND status != 'admitted'
     """
 
-    changed_or(conn, sql, [session_id, stamp, id], id, &session_refusal(&1, session_id))
+    changed_or(
+      conn,
+      sql,
+      [session_id, stamp, ring_until, id],
+      id,
+      &session_refusal(&1, session_id)
+    )
   end
 
   defp session_refusal(%{provider_session_id: session_id} = row, session_id), do: {:ok, row}

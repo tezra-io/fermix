@@ -6,6 +6,7 @@ defmodule FermixCore.Agents.SelfKnowledgeSkillTest do
   alias FermixCore.Checklists.Access, as: ChecklistAccess
   alias FermixCore.Checklists.Registry, as: ChecklistRegistry
   alias FermixCore.Delivery.OwnerInbox
+  alias FermixCore.Management.PhoneCalls, as: ManagementPhoneCalls
   alias FermixCore.NativeHost.Server, as: NativeHostServer
   alias FermixCore.PhoneCalls.Grants, as: PhoneCallGrants
   alias FermixCore.PhoneCalls.Limits, as: PhoneCallLimits
@@ -480,9 +481,22 @@ defmodule FermixCore.Agents.SelfKnowledgeSkillTest do
           "**read**",
           "may or may not have been placed",
           "**termination is unconfirmed**",
-          "the owner's own restart of Fermix"
+          "the owner's own restart of Fermix",
+          "An app's restart to apply does not ask yet",
+          "when Fermix looked the number up itself",
+          "changes no outcome",
+          "each side's last words",
+          "the tokens they reported",
+          "Unreadable"
         ] do
       assert reference =~ fact
+    end
+
+    # Every word the Status row can read, in the engine's own labels.
+    for state <- ManagementPhoneCalls.summary_states() do
+      label = state |> String.replace("_", " ") |> String.capitalize()
+      assert label in ManagementPhoneCalls.sentences(), state
+      assert reference =~ label, state
     end
 
     # The recovery verbs it names are the settings command's own.

@@ -40,8 +40,8 @@ defmodule FermixCore.PhoneCalls.Call.Printable do
   def message({:phone_sideband, pid, {:event, event}}),
     do: {:phone_sideband, pid, {:event, event(event)}}
 
-  def message({:phone_call_delegation, call_id, id, revision, {:ok, %{reply: _} = answer}}),
-    do: {:phone_call_delegation, call_id, id, revision, {:ok, %{answer | reply: :redacted}}}
+  def message({:phone_call_delegation, call_id, id, {:ok, %{reply: _} = answer}}),
+    do: {:phone_call_delegation, call_id, id, {:ok, %{answer | reply: :redacted}}}
 
   def message({:"$gen_call", from, {:press_keys, _handle, keys}}),
     do: {:"$gen_call", from, {:press_keys, :redacted, {:keys, String.length(keys)}}}

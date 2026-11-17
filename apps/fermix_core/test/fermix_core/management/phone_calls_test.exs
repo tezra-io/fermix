@@ -32,6 +32,7 @@ defmodule FermixCore.Management.PhoneCallsTest do
   alias FermixCore.PhoneCalls.Limits
   alias FermixCore.PhoneCalls.Manager
   alias FermixCore.PhoneCalls.Readiness
+  alias FermixCore.PhoneCalls.Report
   alias FermixCore.Realtime.Config, as: RealtimeConfig
   alias FermixCore.Setup.ConfigStore
   alias FermixCore.Setup.RestartState
@@ -174,7 +175,8 @@ defmodule FermixCore.Management.PhoneCallsTest do
 
       assert footer =~
                "If Fermix loses hold of a call, it can run until OpenAI's own limit of 2 " <>
-                 "hours, and your Telnyx connection's daily spend limit bounds what it costs."
+                 "hours; a daily spend limit on your Telnyx connection, if you set one as the " <>
+                 "setup asks, bounds what it costs."
 
       assert footer =~
                "Fermix keeps a call's outcome and brief for 90 days and short excerpts of what " <>
@@ -398,7 +400,9 @@ defmodule FermixCore.Management.PhoneCallsTest do
       lose_worker!(call, manager)
       assert row!(ctx, call.id).status == "dispatch_unknown"
 
-      assert {:ok, %{"summary" => %{"state" => "termination_unconfirmed"}}} =
+      # A lost dial has its own status word: it may never have been placed.
+      assert {:ok,
+              %{"summary" => %{"state" => "placement_unknown", "label" => "Placement unknown"}}} =
                route(ctx, "phone_calls.status", %{}, manager)
 
       assert {:ok, on} = apply_phone(ctx, %{"phone_calls_enabled" => true}, manager)
@@ -490,8 +494,8 @@ defmodule FermixCore.Management.PhoneCallsTest do
                  "Carrier charges: Telnyx bills the minutes to the account the call went " <>
                    "through, and Fermix does not know them.",
                "backend_turns" => 0,
-               "backend_cost_usd" => nil,
-               "backend" => "Backend work: 0 backend turns. Its cost is unknown."
+               "backend_tokens" => nil,
+               "backend" => "Backend work: no backend turns."
              }
 
       assert %{
@@ -577,6 +581,9 @@ defmodule FermixCore.Management.PhoneCallsTest do
                route(ctx, "phone_calls.stop", %{"call_id" => unresolved})
 
       assert sentence =~ "its termination is unconfirmed"
+      # The sentence the tool says for the same call: the slot, and both ways out.
+      assert sentence == Report.stop_refusal(row!(ctx, unresolved), @t0)
+      assert sentence =~ "It holds the call slot until it is confirmed ended"
 
       # Nothing here marks the call ended: it still holds the slot.
       assert {:ok, [%{id: ^unresolved}]} = Ledger.unresolved(@t0, server: ctx.repo)
@@ -628,7 +635,8 @@ defmodule FermixCore.Management.PhoneCallsTest do
       assert %{"call_id" => ^id, "provider_session_id" => "sess_seeded"} = view
 
       assert view["sentence"] ==
-               "Fermix asked OpenAI to end the call, and its termination is unconfirmed."
+               "Fermix lost hold of the call before it asked OpenAI to end it, and its " <>
+                 "termination is unconfirmed."
 
       # A feature turned off with an unresolved remote call is not Disabled.
       assert {:ok, %{"enabled" => false, "summary" => summary}} = route(ctx, "phone_calls.status")
@@ -650,7 +658,7 @@ defmodule FermixCore.Management.PhoneCallsTest do
   # call holds it (`Manager.slot_held?/2`), so the fact admission and the
   # `phone_call` tool read is free the moment the owner's word lands.
   describe "the owner's word that a call ended" do
-    test "frees an unresolved call's slot, its outcome kept unknown, and a new call may start",
+    test "frees an unresolved call's slot, its recorded outcome unchanged, and a new call may start",
          ctx do
       seed_ready!(ctx)
       id = seed_call!(ctx, "main-confirm-1", [:claim, :session, {:end, "closure_unconfirmed"}])
@@ -665,8 +673,8 @@ defmodule FermixCore.Management.PhoneCallsTest do
                PhoneCalls.route("phone_calls.recovery.confirm", %{"call_id" => id}, opts)
 
       assert sentence ==
-               "Fermix marked the call ended on your word, so a new call may be placed. What " <>
-                 "was agreed stays unknown."
+               "Fermix marked the call ended on your word, so a new call may be placed. The " <>
+                 "outcome already recorded is unchanged."
 
       assert %{"state" => "closure_unconfirmed", "outcome" => "unknown", "holds_slot" => false} =
                view
@@ -765,6 +773,51 @@ defmodule FermixCore.Management.PhoneCallsTest do
     end
   end
 
+  # A process that is not the home's running engine (a setup page served
+  # from another tree, a command that booted one) owns no worker of the
+  # daemon's: it says the call is the running Fermix's, and changes nothing.
+  describe "a call the running engine owns" do
+    # As `FermixCore.Application.phone_calls_opts/2` starts one outside the
+    # daemon: no boot reconciliation, no timers.
+    @not_the_daemon [daemon: false, reconcile: false]
+
+    test "is stopped and confirmed there, in the stop's own sentences", ctx do
+      seed!(ctx, phone_calls: phone(true))
+      live = seed_call!(ctx, "main-elsewhere-1", [:claim, :session])
+      manager = start_manager(ctx, @not_the_daemon)
+
+      assert {:error, :unavailable, %{"capability" => "phone_calls", "sentence" => stop}} =
+               route(ctx, "phone_calls.stop", %{"call_id" => live}, manager)
+
+      assert stop == "That call belongs to the Fermix that is running, so it is stopped there."
+      assert stop == Report.owned_elsewhere(:stop)
+      assert is_nil(row!(ctx, live).cancel_requested_at)
+
+      step!(ctx, live, {:end, "closure_unconfirmed"})
+
+      assert {:error, :unavailable, %{"sentence" => confirm}} =
+               route(ctx, "phone_calls.recovery.confirm", %{"call_id" => live}, manager)
+
+      assert confirm ==
+               "That call belongs to the Fermix that is running, so its end is confirmed there."
+
+      assert is_nil(row!(ctx, live).slot_released_at)
+    end
+
+    test "the off switch says the running engine still has the call", ctx do
+      seed_ready!(ctx)
+      seed_call!(ctx, "main-elsewhere-2", [:claim, :session])
+      manager = start_manager(ctx, @not_the_daemon)
+
+      assert {:ok, result} = apply_phone(ctx, %{"phone_calls_enabled" => false}, manager)
+
+      assert result["side_effects"] == [
+               "The Fermix that is running still has 1 call, and applies the switch when it " <>
+                 "reads the setting."
+             ]
+    end
+  end
+
   # The owner's own restart (M94 §12): the drain window a restart to apply
   # takes, refused while a call is in progress. An update, a move or a
   # disable takes `lifecycle.prepare`, which no call holds.
@@ -778,12 +831,17 @@ defmodule FermixCore.Management.PhoneCallsTest do
            name: :"phone_lifecycle_#{ctx.unique}", shutdown: fn -> send(test, :stopped) end}
         )
 
-      %{lifecycle: lifecycle}
+      registry = :"phone_restart_registry_#{ctx.unique}"
+      start_supervised!({Registry, keys: :unique, name: registry}, id: registry)
+      %{lifecycle: lifecycle, registry: registry}
     end
 
     test "is refused while a call is in progress, and opens no window", ctx do
       seed!(ctx, phone_calls: phone(true))
-      seed_call!(ctx, "main-restart-1", [:claim, :session])
+      id = seed_call!(ctx, "main-restart-1", [:claim, :session])
+      # The call's worker runs: a process registered under its id, as one is.
+      worker = {Agent, fn -> {:ok, _owner} = Registry.register(ctx.registry, id, nil) end}
+      start_supervised!(worker, id: :restart_worker)
 
       assert {:error, :unavailable, %{"capability" => "phone_calls", "sentence" => sentence}} =
                restart_route(ctx, "lifecycle.prepare_restart")
@@ -1059,7 +1117,7 @@ defmodule FermixCore.Management.PhoneCallsTest do
 
   # -- the call manager --------------------------------------------------------------
 
-  defp start_manager(ctx) do
+  defp start_manager(ctx, extra \\ []) do
     names = %{
       handoff: :"management_phone_handoff_#{ctx.unique}",
       calls: :"management_phone_calls_sup_#{ctx.unique}",
@@ -1081,6 +1139,7 @@ defmodule FermixCore.Management.PhoneCallsTest do
        now_fn: fn -> @t0 end,
        continuation_dispatcher: SinkDispatcher,
        timer_enabled: false}
+      |> then(fn {module, opts} -> {module, Keyword.merge(opts, extra)} end)
     )
 
     Map.put(names, :pid, GenServer.whereis(names.name))
@@ -1182,7 +1241,7 @@ defmodule FermixCore.Management.PhoneCallsTest do
     do:
       Router.route(request(method, params),
         lifecycle_server: ctx.lifecycle,
-        operation_opts: [phone_calls: phone_opts(ctx)]
+        operation_opts: [phone_calls: Keyword.put(phone_opts(ctx), :registry, ctx.registry)]
       )
 
   defp request(method, params \\ %{}),

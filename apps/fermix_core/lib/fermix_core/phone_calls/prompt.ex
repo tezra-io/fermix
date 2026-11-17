@@ -33,6 +33,7 @@ defmodule FermixCore.PhoneCalls.Prompt do
 
   alias FermixCore.PhoneCalls.Brief
   alias FermixCore.PhoneCalls.BriefText
+  alias FermixCore.PhoneCalls.Limits
   alias FermixCore.PhoneCalls.Outcome.Extraction
   alias FermixCore.PhoneCalls.Transcript
 
@@ -44,13 +45,15 @@ defmodule FermixCore.PhoneCalls.Prompt do
   # Fixed for v1: every call can press keys and hang up (M94 §7, §8).
   @controls [:keypad, :end_call]
 
-  # The vendor caps instructions at 16,384 tokens and `input` at 8,192 by
-  # default. The engine has no tokenizer, so the bounds are bytes: 4 bytes a
-  # token, taken at half for the instructions (`Realtime.LivePrompt`'s rule)
-  # and at three quarters for `input`, which a maximal brief needs.
-  @instructions_max_bytes 32_768
-  @input_max_bytes 24_576
-  @window_max_bytes 8_192
+  # Sizes derived from the vendor's own field limits, so they stay beside the
+  # code that speaks to it (`PhoneCalls.Limits`' rule for a property of a
+  # vendor's interface): OpenAI's create reference caps `instructions` at
+  # 16,384 tokens and `input` at 8,192 by default. The engine has no
+  # tokenizer, so the bounds are bytes: 4 bytes a token, taken at half for the
+  # instructions (`Realtime.LivePrompt`'s rule) and at three quarters for
+  # `input`, which a maximal brief needs.
+  @vendor_instructions_max_bytes 32_768
+  @vendor_input_max_bytes 24_576
 
   @identity """
   You are an AI assistant making a phone call on behalf of the person you work for. These \
@@ -211,8 +214,9 @@ defmodule FermixCore.PhoneCalls.Prompt do
     brief_text = BriefText.block(brief, fetch_now!(opts))
     opening = opening(brief)
 
-    with :ok <- within(:instructions, byte_size(instructions), @instructions_max_bytes),
-         :ok <- within(:input, byte_size(brief_text) + byte_size(opening), @input_max_bytes) do
+    with :ok <- within(:instructions, byte_size(instructions), @vendor_instructions_max_bytes),
+         :ok <-
+           within(:input, byte_size(brief_text) + byte_size(opening), @vendor_input_max_bytes) do
       {:ok,
        %{
          instructions: instructions,
@@ -269,19 +273,15 @@ defmodule FermixCore.PhoneCalls.Prompt do
   @doc """
   The transcript a backend turn reads: the call's speech, oldest first, with
   speaker labels and offsets, inside the untrusted-content frame and bounded
-  to its newest `window_max_bytes/0`. `entries` are `Transcript.entry/0`s.
+  to its newest `Limits.max_backend_window_bytes/0`. `entries` are `Transcript.entry/0`s.
   """
   @spec render_window([Transcript.entry()]) :: String.t()
   def render_window(entries) when is_list(entries),
-    do: Transcript.window(entries, @window_max_bytes)
-
-  @doc "The byte bound on a rendered transcript window."
-  @spec window_max_bytes() :: pos_integer()
-  def window_max_bytes, do: @window_max_bytes
+    do: Transcript.window(entries, Limits.max_backend_window_bytes())
 
   @doc "The byte bounds on the instructions and on `input`."
   @spec bounds() :: %{instructions: pos_integer(), input: pos_integer()}
-  def bounds, do: %{instructions: @instructions_max_bytes, input: @input_max_bytes}
+  def bounds, do: %{instructions: @vendor_instructions_max_bytes, input: @vendor_input_max_bytes}
 
   # -- the voice prompt ---------------------------------------------------------
 

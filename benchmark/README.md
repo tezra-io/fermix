@@ -1125,8 +1125,9 @@ is told, not how the voice converses (its header says what else it cannot prove)
 Each dial spends one of the home's five daily attempts and a lost create holds its
 one call slot for hours, so a phone case runs only with `--reset-home` (every
 attempt starts from the seeded world, one daemon restart each); without it every
-case is NOT EVALUATED. `phone_call` is registered in every home and offers `start`
-only while phone calls are on, which the seed does; the keypad and hang-up
+case is NOT EVALUATED. `phone_call` is registered in every home and offered to
+the owner's own turn while phone calls are on, which the seed does, and while a
+call still holds the slot, so it can be asked about and stopped; the keypad and hang-up
 controls are built by a call's own backend turn and are in no registry. The simulator's wire shapes are the engine's: both
 `apps/fermix_core/test/fermix_core/phone_calls/gpt_live_wire_contract_test.exs`
 and `bin/test_phone_sim.py` read

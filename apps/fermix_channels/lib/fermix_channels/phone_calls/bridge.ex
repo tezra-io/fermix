@@ -27,7 +27,7 @@ defmodule FermixChannels.PhoneCalls.Bridge do
   before the turn is queued, which is the one sender of the delegation's
   result:
 
-      {:phone_call_delegation, call_id, delegation_id, revision,
+      {:phone_call_delegation, call_id, delegation_id,
        {:ok, %{reply: String.t(), backend_usage: map()}} | {:error, reason}}
 
   It answers on the first of: the turn's reply (told on the raw stream
@@ -41,9 +41,9 @@ defmodule FermixChannels.PhoneCalls.Bridge do
   the turn's own late events reach a watcher that is gone.
 
   `cancel/2` stops the delegation's queue turns by its message id, a running
-  one killed and a waiting one dropped, whatever their revision; the watcher
-  then answers `:cancelled`. A turn already past its claim answers with its
-  own result. Fencing a stale answer is the worker's (`PhoneCalls.Delegate`).
+  one killed and a waiting one dropped; the watcher then answers `:cancelled`.
+  A turn already past its claim answers with its own result. Fencing a stale
+  answer is the worker's (`PhoneCalls.Delegate`).
 
   Seams (tests): `:queue` (a `Gateway.Queue` server), `:task_supervisor` and
   `:arm_deadline` (`(pid, message, ms -> term)`, default
@@ -57,11 +57,7 @@ defmodule FermixChannels.PhoneCalls.Bridge do
   alias FermixChannels.Gateway.Queue
   alias FermixCore.Agents.PhoneCallTurn
   alias FermixCore.PhoneCalls.Delegate
-
-  # A delegation has at most one turn running and one waiting in its lane, so
-  # two stops end both; the third is the bound, after which a stop that still
-  # finds a turn is logged rather than repeated.
-  @max_stops 3
+  alias FermixCore.PhoneCalls.Limits
 
   @impl true
   @spec run(Delegate.request()) :: :ok | {:error, term()}
@@ -184,7 +180,7 @@ defmodule FermixChannels.PhoneCalls.Bridge do
 
     send(
       request.reply_to,
-      {:phone_call_delegation, request.call_id, request.delegation_id, request.revision, result}
+      {:phone_call_delegation, request.call_id, request.delegation_id, result}
     )
 
     :ok
@@ -194,8 +190,8 @@ defmodule FermixChannels.PhoneCalls.Bridge do
 
   defp log_result(request, {:error, reason}) do
     Logger.info(
-      "phone call #{request.call_id} delegation #{request.delegation_id} " <>
-        "(revision #{request.revision}) answered with an error: #{inspect(reason, limit: 20)}"
+      "phone call #{request.call_id} delegation #{request.delegation_id} answered with an " <>
+        "error: #{inspect(reason, limit: 20)}"
     )
   end
 
@@ -208,14 +204,15 @@ defmodule FermixChannels.PhoneCalls.Bridge do
     )
   end
 
-  # Stops every queue turn of the delegation, at most `@max_stops` times: a
-  # stopped running turn lets its waiting successor start, which the next stop
-  # ends. A queue that is gone has nothing left to stop.
+  # Stops every queue turn of the delegation, at most
+  # `Limits.max_delegation_stops/0` times (each turn it can hold, and once
+  # more): a stopped running turn lets its waiting successor start, which the
+  # next stop ends. A queue that is gone has nothing left to stop.
   defp stop_turns(queue, call_id, delegation_id) do
     key = PhoneCallTurn.conversation_key(call_id)
     message_id = PhoneCallTurn.message_id(call_id, delegation_id)
 
-    Enum.reduce_while(1..@max_stops, [], fn _attempt, outcomes ->
+    Enum.reduce_while(1..Limits.max_delegation_stops(), [], fn _attempt, outcomes ->
       case stop_turn(queue, key, message_id) do
         outcome when outcome in [:stopped, :dequeued] -> {:cont, [outcome | outcomes]}
         outcome -> {:halt, [outcome | outcomes]}

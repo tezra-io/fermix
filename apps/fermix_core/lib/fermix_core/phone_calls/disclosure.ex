@@ -43,8 +43,10 @@ defmodule FermixCore.PhoneCalls.Disclosure do
   alias FermixCore.PhoneCalls.Brief
   alias FermixCore.PhoneCalls.Transcript
 
-  # About 300 tokens of English, and under the vendor's 500-token append limit
-  # for a script at two or three bytes a token.
+  # A size derived from the vendor's limit, kept beside the one check that
+  # holds it: the voice session takes at most 500 tokens appended at once, and
+  # 1,200 bytes stays under that for a script at two or three bytes a token
+  # (about 300 tokens of English).
   @max_reply_bytes 1_200
   @shingle_words 8
   @number ~r/\+?\d(?:[\s().\-]?\d){6,}/u

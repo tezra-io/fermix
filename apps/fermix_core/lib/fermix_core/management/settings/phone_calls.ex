@@ -77,7 +77,8 @@ defmodule FermixCore.Management.Settings.PhoneCalls do
 
     "Lets Fermix call a business or your own phone when you ask, from your Telnyx number. " <>
       "If Fermix loses hold of a call, it can run until OpenAI's own limit of #{hours} " <>
-      "hours, and your Telnyx connection's daily spend limit bounds what it costs. Fermix " <>
+      "hours; a daily spend limit on your Telnyx connection, if you set one as the setup " <>
+      "asks, bounds what it costs. Fermix " <>
       "keeps a call's outcome and brief for #{Limits.outcome_retention_days()} days and short " <>
       "excerpts of what was said for #{Limits.excerpt_retention_days()} days, records no " <>
       "audio, and a report sent to a chat stays in that chat."
@@ -176,7 +177,7 @@ defmodule FermixCore.Management.Settings.PhoneCalls do
   defp summary(opts) do
     case PhoneCallFacts.summary(opts) do
       {:ok, %{"label" => label, "sentence" => sentence}} -> {label, sentence}
-      {:error, {:unavailable, _capability, sentence}} -> {"Unknown", sentence}
+      {:error, {:unavailable, _capability, sentence}} -> {"Unreadable", sentence}
     end
   end
 

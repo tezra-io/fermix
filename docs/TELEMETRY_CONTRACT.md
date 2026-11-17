@@ -903,11 +903,14 @@ reads as a phone number replaced by `[number]`), and measure `duration_ms`,
 destination, the mandate and transcripts never reach these events, and no
 vendor word carries either credential: one scrub in `OpenAILive` (the
 function the sideband holds is `scrubber/1`) replaces the API key and the
-trunk password, as stored, trimmed, as printed and as JSON escapes them, in
-the create's and the hang-up's answers and in every message the sideband
-hands the worker during the call (an error event, a carrier failure, a
-`session.closed` reason, a close frame, an event of an unknown type, raw or
-not), before any of it becomes a call's words. `Trace.TelemetryHandler`
+trunk password in the create's and the hang-up's answers and in every message
+the sideband hands the worker during the call (an error event, a carrier
+failure, a `session.closed` reason, a close frame, an event of an unknown
+type, raw or not), before any of it becomes a call's words: each as stored,
+trimmed, as printed, as JSON escapes it, percent-encoded and in base64, in a
+charlist as in a string, and the key as OpenAI quotes it back masked. A vendor
+message that refuses the key is withheld whole for the engine's own sentence
+(`OpenAILive.key_refusal/2`). `Trace.TelemetryHandler`
 registers all three; `FermixOpik` binds them (`kind: :phone_call`,
 `infer_kind("phone_call_" <> _)`) as a root of its own, the meeting shape:
 `parent_session` is correlation metadata, never a parent, because the

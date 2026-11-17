@@ -1,10 +1,16 @@
 defmodule FermixCore.PhoneCalls.ReportTest do
-  # Pure: golden texts over hand-built rows, and the failure words read off
-  # the worker's and the manager's sources.
+  # Pure: golden texts over rows that hold what the worker writes. A confirmed
+  # outcome is a REAL one, built through `Outcome.verify/3` over a transcript
+  # and stored as `Outcome.to_report/1` makes it, so the report and the
+  # outcome cannot drift apart; the failure words are read off the worker's
+  # and the manager's sources.
   use ExUnit.Case, async: true
 
   alias FermixCore.Capabilities.UntrustedContent
   alias FermixCore.Memory.Repo.PhoneCallsSql
+  alias FermixCore.PhoneCalls.Brief
+  alias FermixCore.PhoneCalls.Outcome
+  alias FermixCore.PhoneCalls.Outcome.Claim
   alias FermixCore.PhoneCalls.Readiness
   alias FermixCore.PhoneCalls.Report
 
@@ -12,6 +18,9 @@ defmodule FermixCore.PhoneCalls.ReportTest do
   @t0 ~U[2031-03-04 15:00:00.000000Z]
   @expires ~U[2031-03-04 17:03:00.000000Z]
   @lib Path.expand("../../../lib/fermix_core", __DIR__)
+  @not_checked_commit "Not checked: Whether anything agreed is on the brief's list of things " <>
+                        "not to agree to is Fermix's reading of the call, not checked against " <>
+                        "the words."
 
   defp row(overrides) do
     Map.merge(
@@ -22,133 +31,380 @@ defmodule FermixCore.PhoneCalls.ReportTest do
         usage_state: "incomplete",
         report_status: "pending",
         mandate: %{
-          "contact_name" => "Calloway Bistro",
-          "destination" => "+12125550101",
+          "contact_name" => "Marrow & Sage",
+          "destination" => "+13125550123",
           "destination_kind" => "business"
         },
         created_at: @t0,
         dispatch_claimed_at: @t0,
         slot_expires_at: @expires,
         ended_at: DateTime.add(@t0, 200, :second),
-        core_turns: 0
+        core_turns: 0,
+        cleanup_attempts: 0
       },
       overrides
     )
   end
 
-  # A booking the recipient confirmed by saying yes to the assistant's
-  # read-back, in `PhoneCalls.Outcome.to_report/1`'s shapes as the ledger
-  # stores them.
-  defp confirmed_row do
-    row(%{
-      outcome: "confirmed",
-      usage_state: "voice_duration_confirmed",
-      voice_seconds: 154,
-      core_turns: 1,
-      backend_usage: %{"cost_usd" => 0.0123},
-      outcome_facts: %{
-        "date" => "2031-03-08",
-        "local_time" => "19:30",
-        "timezone" => "America/New_York",
-        "party" => "2",
-        "reference" => "QX-4471",
-        "confirmation" => "the recipient said yes to the assistant's read-back"
-      },
-      evidence: [
-        %{"speaker" => "assistant", "text" => "So that is a table for two at 19:30 on the 8th?"},
-        %{"speaker" => "recipient", "text" => "Yes, that's right. Your reference is QX-4471."}
+  # --- real outcomes ----------------------------------------------------------------
+
+  defp brief(overrides \\ %{}) do
+    params =
+      Map.merge(
+        %{
+          "destination" => "+13125550123",
+          "destination_kind" => "business",
+          "number_source" => "Listed on the restaurant's own website.",
+          "contact_name" => "Marrow & Sage",
+          "timezone" => "America/Chicago",
+          "goal" => "Reserve a table for four on Saturday, December 6, 2031 at 7:30 PM.",
+          "completion_criteria" => [
+            "The restaurant confirms a table for four on December 6, 2031 at 7:30 PM.",
+            "The name the reservation is under."
+          ],
+          "must_not_commit" => ["a deposit or card guarantee"],
+          "alternatives" => ["7:00 PM or 8:00 PM on the same evening"],
+          "shareable_facts" => [
+            %{"label" => "Name for the reservation", "value" => "Rowan Tellis"},
+            %{"label" => "Party size", "value" => "4"}
+          ],
+          "tool_grants" => [],
+          "times" => [%{"label" => "Requested table", "at" => "2031-12-06T19:30"}]
+        },
+        overrides
+      )
+
+    {:ok, brief} = Brief.new(params, caller_number: "+14155550142", now: ~U[2031-11-18 16:00:00Z])
+    brief
+  end
+
+  defp said(speaker, text, start_ms, end_ms),
+    do: %{speaker: speaker, text: text, start_ms: start_ms, end_ms: end_ms}
+
+  # The recipient states the booking and confirms it.
+  defp booked_call(time \\ "7:30") do
+    [
+      said(:assistant, "Hi, I'm an AI assistant calling for Rowan Tellis.", 0, 3_000),
+      said(:remote, "Sure, what day and time?", 3_200, 6_000),
+      said(:assistant, "Saturday, December 6 at 7:30 PM, for four.", 6_200, 8_000),
+      said(
+        :remote,
+        "Got it, Rowan Tellis, four people, Saturday December 6th at #{time}.",
+        8_200,
+        11_000
+      ),
+      said(:assistant, "So a table for four on December 6. Is that booked?", 11_200, 14_000),
+      said(:remote, "Yes, you're all booked. Your confirmation number is 4417.", 14_300, 17_000)
+    ]
+  end
+
+  defp claim(overrides) do
+    {:ok, claim} =
+      %{
+        "outcome" => "confirmed",
+        "commitment" => "completed",
+        "confirmation_quote" => "Yes, you're all booked",
+        "criteria" => [
+          %{"index" => 1, "quote" => "four people, Saturday December 6th at 7:30"},
+          %{"index" => 2, "quote" => "Got it, Rowan Tellis"}
+        ],
+        "facts" => [
+          %{"field" => "date", "value" => "2031-12-06", "quote" => "Saturday December 6th"},
+          %{"field" => "local_time", "value" => "19:30", "quote" => "at 7:30"},
+          %{"field" => "party", "value" => "four people", "quote" => "four people"},
+          %{"field" => "reference", "value" => "4417", "quote" => "confirmation number is 4417"}
+        ],
+        "alternative" => nil,
+        "corrections" => [],
+        "options" => [],
+        "reason_quote" => nil,
+        "contradiction" => nil,
+        "note" => nil
+      }
+      |> Map.merge(overrides)
+      |> Claim.from_map()
+
+    claim
+  end
+
+  @readback "A table for four on Saturday, December 6 at 7:30 PM, under Rowan Tellis."
+
+  # The assistant reads the details back and the recipient answers "Yes." next.
+  defp readback_call do
+    [
+      said(:assistant, "Hi, I'm an AI assistant calling for Rowan Tellis.", 0, 3_000),
+      said(:remote, "Sure, what can I do for you?", 3_200, 5_000),
+      said(:assistant, @readback <> " Is that booked?", 5_200, 9_000),
+      said(:remote, "Yes.", 9_300, 9_800),
+      said(:assistant, "Thank you, goodbye.", 10_000, 11_000)
+    ]
+  end
+
+  defp readback_claim do
+    claim(%{
+      "confirmation_quote" => "Yes",
+      "readback_quote" =>
+        "A table for four on Saturday, December 6 at 7:30 PM, under Rowan Tellis",
+      "criteria" => [
+        %{"index" => 1, "quote" => "table for four on Saturday, December 6 at 7:30 PM"},
+        %{"index" => 2, "quote" => "under Rowan Tellis"}
+      ],
+      "facts" => [
+        %{"field" => "date", "value" => "2031-12-06", "quote" => "Saturday, December 6"},
+        %{"field" => "local_time", "value" => "19:30", "quote" => "at 7:30 PM"}
       ]
     })
   end
 
-  # A call whose end OpenAI never confirmed: the line dropped mid-call, and
-  # Fermix's request to end it failed too.
-  defp unconfirmed_row do
-    row(%{
-      status: "closure_unconfirmed",
-      usage_state: "incomplete",
-      voice_seconds: 61,
-      failure_reason: "sideband_lost; hangup timeout after 5000 ms",
-      vendor_message: "Session sess-9 is\nnot reachable.",
-      cleanup_error: "timeout after 5000 ms",
-      evidence: [%{"speaker" => "recipient", "text" => "Let me check the book, one moment."}],
-      outcome_uncertainty: "The line dropped before the recipient answered."
-    })
+  # The row the worker writes from an outcome: `to_report/1`'s shape through
+  # the ledger's JSON, as `Ledger.terminalize/4` stores it.
+  defp outcome_row(%Outcome{} = outcome, overrides) do
+    report = outcome |> Outcome.to_report() |> Jason.encode!() |> Jason.decode!()
+
+    row(
+      Map.merge(
+        %{
+          outcome: report["outcome"],
+          outcome_facts: report["outcome_facts"],
+          evidence: report["evidence"],
+          outcome_uncertainty: report["uncertainty"],
+          usage_state: "voice_duration_confirmed",
+          voice_seconds: 74,
+          core_turns: 1,
+          backend_usage: %{"total_tokens" => 1834, "turns" => 1}
+        },
+        overrides
+      )
+    )
+  end
+
+  defp stated_row do
+    outcome =
+      Outcome.verify(
+        brief(),
+        booked_call(),
+        claim(%{"note" => "The host asked them to arrive ten minutes early."})
+      )
+
+    assert outcome.outcome == :confirmed
+    outcome_row(outcome, %{})
   end
 
   defp recipient(text), do: UntrustedContent.frame("phone_call_recipient", text)
   defp provider(text), do: UntrustedContent.frame("phone_call_provider", text)
   defp lines(list), do: Enum.join(list, "\n")
 
-  describe "a confirmed call" do
-    test "reads to a person as sentences and quotes, with nothing of the engine's" do
-      assert Report.text(confirmed_row()) ==
+  describe "a real confirmed outcome" do
+    test "reads to a person as what it means: facts with their basis, no key and no code" do
+      assert Report.text(stated_row()) ==
                lines([
-                 "Phone call to Calloway Bistro (a business), +12125550101",
+                 "Phone call to Marrow & Sage (a business), +13125550123",
                  "The call ended.",
                  "Outcome: The recipient confirmed what was asked for.",
                  "What the call established:",
-                 "- date: 2031-03-08",
-                 "- local time: 19:30",
-                 "- timezone: America/New_York",
-                 "- party: 2",
-                 "- reference: QX-4471",
-                 "- confirmed by: the recipient said yes to the assistant's read-back",
+                 "- date: 2031-12-06 (checked against what was said)",
+                 "- local time: 19:30, America/Chicago time (checked against what was said)",
+                 "- party: four people (checked against what was said)",
+                 "- reference: 4417 (checked against what was said)",
+                 "How it was confirmed: The recipient stated the details. It matches a time in " <>
+                   "the brief.",
+                 @not_checked_commit,
                  "What was said:",
-                 ~s(- The assistant: "So that is a table for two at 19:30 on the 8th?"),
-                 ~s(- The recipient: "Yes, that's right. Your reference is QX-4471."),
-                 "Voice time: 2 minutes 34 seconds, confirmed by OpenAI.",
+                 ~s(- The recipient: "Yes, you're all booked"),
+                 ~s(- The recipient: "four people, Saturday December 6th at 7:30"),
+                 ~s(- The recipient: "Got it, Rowan Tellis"),
+                 ~s(- The recipient: "confirmation number is 4417"),
+                 "Still uncertain, in Fermix's reading of the call: The host asked them to " <>
+                   "arrive ten minutes early.",
+                 "Voice time: 1 minute 14 seconds, confirmed by OpenAI.",
                  "Carrier charges: Telnyx bills the minutes to the account the call went " <>
                    "through, and Fermix does not know them.",
-                 "Backend work: 1 backend turn. It cost about $0.0123."
+                 "Backend work: 1 backend turn, 1834 tokens."
                ])
     end
 
-    test "reads to a model as the same facts, the recipient's words framed" do
-      assert Report.notice(confirmed_row()) ==
+    test "reads to a model as the same facts, everything from outside framed" do
+      assert Report.notice(stated_row()) ==
                lines([
                  "[phone call pc_0a1b2c3d4e5f] The call ended.",
-                 "To: Calloway Bistro (a business), +12125550101",
+                 "To: Marrow & Sage (a business), +13125550123",
                  "Outcome: confirmed. The recipient confirmed what was asked for.",
+                 "How it was confirmed: The recipient stated the details. It matches a time in " <>
+                   "the brief.",
+                 @not_checked_commit,
                  recipient(
                    lines([
                      "What the call established:",
-                     "- date: 2031-03-08",
-                     "- local time: 19:30",
-                     "- timezone: America/New_York",
-                     "- party: 2",
-                     "- reference: QX-4471",
-                     "- confirmed by: the recipient said yes to the assistant's read-back",
+                     "- date: 2031-12-06 (checked against what was said)",
+                     "- local time: 19:30, America/Chicago time (checked against what was said)",
+                     "- party: four people (checked against what was said)",
+                     "- reference: 4417 (checked against what was said)",
                      "What was said:",
-                     ~s(- the assistant: "So that is a table for two at 19:30 on the 8th?"),
-                     ~s(- the recipient: "Yes, that's right. Your reference is QX-4471.")
+                     ~s(- the recipient: "Yes, you're all booked"),
+                     ~s(- the recipient: "four people, Saturday December 6th at 7:30"),
+                     ~s(- the recipient: "Got it, Rowan Tellis"),
+                     ~s(- the recipient: "confirmation number is 4417"),
+                     "Still uncertain, in Fermix's reading of the call: The host asked them to " <>
+                       "arrive ten minutes early."
                    ])
                  ),
-                 "Voice time: 2 minutes 34 seconds, confirmed by OpenAI.",
+                 "Voice time: 1 minute 14 seconds, confirmed by OpenAI.",
                  "Carrier charges: Telnyx bills the minutes to the account the call went " <>
                    "through, and Fermix does not know them.",
-                 "Backend work: 1 backend turn. It cost about $0.0123."
+                 "Backend work: 1 backend turn, 1834 tokens."
                ])
+    end
+
+    test "a yes to the assistant's read-back says so, and what was read" do
+      outcome = Outcome.verify(brief(), readback_call(), readback_claim())
+      assert outcome.confirmation == :readback
+      text = Report.text(outcome_row(outcome, %{}))
+
+      assert text =~
+               "How it was confirmed: The recipient said yes when the assistant read the " <>
+                 "details back. It matches a time in the brief."
+
+      assert text =~ "- date: 2031-12-06 (checked against what was said)"
+      assert text =~ ~s(- The assistant: "A table for four on)
+      assert text =~ ~s(- The recipient: "Yes")
+      assert text =~ @not_checked_commit
+    end
+
+    test "a value that is Fermix's reading, and an alternative nothing checked, say so" do
+      no_time = brief(%{"alternatives" => ["any table that evening"]})
+
+      facts = [
+        %{"field" => "date", "value" => "2031-12-06", "quote" => "Saturday December 6th"},
+        %{"field" => "local_time", "value" => "21:30", "quote" => "at 9:30"},
+        %{"field" => "party", "value" => "4 guests", "quote" => "four people"}
+      ]
+
+      claim =
+        claim(%{
+          "alternative" => 1,
+          "facts" => facts,
+          "criteria" => [
+            %{"index" => 1, "quote" => "four people, Saturday December 6th at 9:30"},
+            %{"index" => 2, "quote" => "Got it, Rowan Tellis"}
+          ]
+        })
+
+      outcome = Outcome.verify(no_time, booked_call("9:30"), claim)
+      assert outcome.outcome == :confirmed
+      assert :alternative in outcome.not_checked
+      text = Report.text(outcome_row(outcome, %{}))
+
+      assert text =~ "- party: 4 guests (Fermix's reading of what was said)"
+      assert text =~ "It matches alternative 1 in the brief."
+
+      assert text =~
+               "Whether the result fits the alternative the brief allows is Fermix's reading " <>
+                 "of the call, not checked against the words."
+    end
+
+    # The end tool's note (`Call.EndReport`), written from what the recipient
+    # said: the assistant's own note, and framed for a model.
+    test "a call that needs the owner shows the assistant's note on ending it" do
+      call =
+        row(%{
+          outcome: "needs_owner",
+          outcome_facts: %{"note" => "They need the card holder's\nname before they book."},
+          evidence: [%{"speaker" => "recipient", "text" => "Whose name is the card under?"}]
+        })
+
+      assert Report.text(call) =~
+               "\nThe assistant's note on ending the call: They need the card holder's name " <>
+                 "before they book.\n"
+
+      [_before, framed] = String.split(Report.notice(call), "<untrusted_tool_result", parts: 2)
+      assert framed =~ "The assistant's note on ending the call: They need the card holder's"
+      refute Report.text(call) =~ ~r/\bnote:/
+    end
+
+    test "no key name or code of the outcome reaches a person" do
+      text = Report.text(stated_row())
+
+      for key <-
+            ~w(commitment completed verified not_checked must_not_commit brief_time readback
+               extraction_note timezone matched) do
+        refute text =~ ~r/\b#{key}\b/, key
+      end
+    end
+
+    test "the view holds words for every code an outcome's report can carry" do
+      ours = Report.outcome_vocabulary()
+
+      for {kind, codes} <- Outcome.vocabulary(), code <- codes do
+        assert Map.has_key?(Map.fetch!(ours, kind), code), "#{kind}: #{code}"
+      end
+    end
+  end
+
+  # Each verified fact brings its own quote, often a piece of a line already
+  # shown: a piece is not shown again (by the outcome's own words,
+  # `Transcript.words/1`), and the stored record keeps every excerpt.
+  describe "the excerpts" do
+    test "a piece of another excerpt by the same speaker is not shown again" do
+      call =
+        row(%{
+          evidence: [
+            %{"speaker" => "recipient", "text" => "AT  7:30"},
+            %{"speaker" => "recipient", "text" => "Four people, Saturday at 7:30."},
+            %{"speaker" => "assistant", "text" => "four people"},
+            %{"speaker" => "recipient", "text" => "four   PEOPLE"},
+            %{"speaker" => "recipient", "text" => "Four people, Saturday at 7:30."},
+            %{"speaker" => "recipient", "text" => "Rowan Tellis"}
+          ]
+        })
+
+      assert Report.view(call).excerpts == [
+               {"The recipient", "Four people, Saturday at 7:30."},
+               {"The assistant", "four people"},
+               {"The recipient", "Rowan Tellis"}
+             ]
+
+      assert length(call.evidence) == 6
     end
   end
 
   describe "a call whose termination is unconfirmed" do
+    defp unconfirmed_row(overrides \\ %{}) do
+      row(
+        Map.merge(
+          %{
+            status: "closure_unconfirmed",
+            voice_seconds: 61,
+            cleanup_attempts: 1,
+            failure_reason: "sideband_lost; hangup timeout after 5000 ms",
+            vendor_message: "Session sess-9 is\nnot reachable.",
+            cleanup_error: "timeout after 5000 ms",
+            evidence: [
+              %{"speaker" => "recipient", "text" => "Let me check the book, one moment."}
+            ],
+            outcome_uncertainty: "The line dropped before the recipient answered."
+          },
+          overrides
+        )
+      )
+    end
+
     test "tells a person both ways out and what OpenAI and the hang-up answered" do
       assert Report.text(unconfirmed_row()) ==
                lines([
-                 "Phone call to Calloway Bistro (a business), +12125550101",
+                 "Phone call to Marrow & Sage (a business), +13125550123",
                  "Fermix asked OpenAI to end the call, and its termination is unconfirmed.",
                  "Outcome: Fermix could not tell what was agreed, if anything.",
                  "What was said:",
                  ~s(- The recipient: "Let me check the book, one moment."),
-                 "Still uncertain: The line dropped before the recipient answered.",
+                 "Still uncertain, in Fermix's reading of the call: The line dropped before the " <>
+                   "recipient answered.",
                  "Fermix holds the call slot until the call is confirmed ended from the " <>
                    "Telnyx portal, or until OpenAI's own limit on a call passes, 2 hours and " <>
                    "5 minutes after the dial.",
                  "Voice time: at least 1 minute 1 second. The final figure never arrived.",
                  "Carrier charges: Telnyx bills the minutes to the account the call went " <>
                    "through, and Fermix does not know them.",
-                 "Backend work: 0 backend turns. Its cost is unknown.",
+                 "Backend work: no backend turns.",
                  "Why it stopped: Fermix lost its connection to the call. Fermix's request to " <>
                    "end the call failed.",
                  ~s(OpenAI said: "Session sess-9 is not reachable."),
@@ -157,56 +413,52 @@ defmodule FermixCore.PhoneCalls.ReportTest do
     end
 
     test "gives a model OpenAI's words inside their own frame" do
-      assert Report.notice(unconfirmed_row()) ==
-               lines([
-                 "[phone call pc_0a1b2c3d4e5f] Fermix asked OpenAI to end the call, and its " <>
-                   "termination is unconfirmed.",
-                 "To: Calloway Bistro (a business), +12125550101",
-                 "Outcome: unknown. Fermix could not tell what was agreed, if anything.",
-                 recipient(
-                   lines([
-                     "What was said:",
-                     ~s(- the recipient: "Let me check the book, one moment."),
-                     "Still uncertain: The line dropped before the recipient answered."
-                   ])
-                 ),
-                 "Fermix holds the call slot until the call is confirmed ended from the " <>
-                   "Telnyx portal, or until OpenAI's own limit on a call passes, 2 hours and " <>
-                   "5 minutes after the dial.",
-                 "Voice time: at least 1 minute 1 second. The final figure never arrived.",
-                 "Carrier charges: Telnyx bills the minutes to the account the call went " <>
-                   "through, and Fermix does not know them.",
-                 "Backend work: 0 backend turns. Its cost is unknown.",
-                 "Why it stopped: Fermix lost its connection to the call. Fermix's request to " <>
-                   "end the call failed.",
-                 provider(
-                   lines([
-                     "OpenAI said: Session sess-9 is not reachable.",
-                     "The request to end the call answered: timeout after 5000 ms"
-                   ])
-                 )
-               ])
+      notice = Report.notice(unconfirmed_row())
+
+      assert notice =~
+               provider(
+                 lines([
+                   "OpenAI said: Session sess-9 is not reachable.",
+                   "The request to end the call answered: timeout after 5000 ms"
+                 ])
+               )
+
+      refute notice =~ ~s(OpenAI said: "Session)
     end
 
-    test "once the owner confirms it ended, says so and claims nothing more" do
-      released = %{
-        unconfirmed_row()
-        | failure_reason: "sideband_lost"
-      }
+    test "one Fermix never asked OpenAI to end says so" do
+      call = unconfirmed_row(%{cleanup_attempts: 0, failure_reason: "worker_lost"})
+
+      assert Report.view(call).headline ==
+               "Fermix lost hold of the call before it asked OpenAI to end it, and its " <>
+                 "termination is unconfirmed."
+    end
+
+    test "a confirmed outcome stays confirmed, and the owner's word changes nothing of it" do
+      outcome = Outcome.verify(brief(), booked_call(), claim(%{}))
 
       released =
-        Map.merge(released, %{slot_release_reason: "owner_confirmed", slot_released_at: @t0})
+        outcome_row(outcome, %{
+          status: "closure_unconfirmed",
+          cleanup_attempts: 1,
+          slot_release_reason: "owner_confirmed",
+          slot_released_at: @t0
+        })
 
-      assert Report.view(released, @t0).slot ==
+      view = Report.view(released, @t0)
+      assert view.outcome_sentence == "The recipient confirmed what was asked for."
+
+      assert view.slot ==
                "The call was confirmed ended from the Telnyx portal, so its call slot is free. " <>
-                 "What was agreed stays unknown."
+                 "The outcome already recorded is unchanged."
 
-      refute Report.view(released, @t0).holds_slot?
+      refute view.holds_slot?
+      refute Report.text(released) =~ "unknown"
     end
   end
 
-  describe "a call never placed" do
-    test "says nothing was dialed and claims no voice time, charge or backend work" do
+  describe "a call that reached nobody" do
+    test "a call never placed has no outcome line and claims no time, charge or work" do
       for {overrides, why} <- [
             {%{dispatch_claimed_at: nil, failure_reason: "cancelled_by_owner"},
              "The call was stopped at the owner's request."},
@@ -233,11 +485,43 @@ defmodule FermixCore.PhoneCalls.ReportTest do
         assert Report.view(call).placed == :no
         assert text =~ "\nNothing was dialed.\n"
         assert text =~ "Why it stopped: " <> why
+        refute text =~ "Outcome"
+        refute text =~ "agreed"
         refute text =~ "Voice time"
         refute text =~ "Carrier charges"
         refute text =~ "Backend work"
         refute Report.notice(call) =~ "Voice time"
       end
+    end
+
+    test "a call nobody answered says nothing was agreed, and why, once each" do
+      report = Outcome.unread_report(:not_read)
+
+      call =
+        row(%{
+          status: "ended",
+          failure_reason: "no_answer",
+          outcome_facts: %{"reason" => "not_answered"},
+          usage_state: "voice_duration_confirmed",
+          voice_seconds: 0
+        })
+
+      assert report.outcome == "unknown"
+      text = Report.text(call)
+
+      assert text =~ "Outcome: Nobody was reached, so nothing was agreed.\n"
+      assert length(String.split(text, "Nobody answered.")) == 2
+      assert text =~ "Why it stopped: Nobody answered."
+      refute text =~ "could not tell what was agreed"
+    end
+
+    test "a voicemail says it reached nobody, and says the voicemail once" do
+      call = row(%{outcome_facts: %{"reason" => "voicemail"}, voice_seconds: 9})
+      text = Report.text(call)
+
+      assert text =~
+               "Outcome: Nobody was reached, so nothing was agreed. The call reached voicemail; " <>
+                 "no message was left."
     end
 
     test "a call still waiting to be dialed claims nothing either" do
@@ -265,6 +549,121 @@ defmodule FermixCore.PhoneCalls.ReportTest do
     end
   end
 
+  # A result the worker never read carries the call's last words as its
+  # evidence: each speaker's closing line, where the call stood.
+  describe "a result that was never read" do
+    test "labels its evidence as the call's last words, in both renderings" do
+      for code <- [:not_read, :extraction_timeout, :extraction_crashed] do
+        report = code |> Outcome.unread_report() |> Jason.encode!() |> Jason.decode!()
+
+        call =
+          row(%{
+            outcome: report["outcome"],
+            outcome_facts: report["outcome_facts"],
+            evidence: [
+              %{"speaker" => "assistant", "text" => "Could you hold the table until eight?"},
+              %{"speaker" => "recipient", "text" => "Let me ask my manager."}
+            ],
+            voice_seconds: 50
+          })
+
+        text = Report.text(call)
+
+        assert text =~
+                 "\nThe call's last words, since its result was not read:\n" <>
+                   ~s(- The assistant: "Could you hold the table until eight?"\n) <>
+                   ~s(- The recipient: "Let me ask my manager.")
+
+        refute text =~ "What was said:"
+        [_before, framed] = String.split(Report.notice(call), "<untrusted_tool_result", parts: 2)
+        assert framed =~ "The call's last words, since its result was not read:"
+      end
+
+      refute Report.text(stated_row()) =~ "last words"
+    end
+  end
+
+  describe "the backend's work" do
+    test "is its turns and the tokens they reported, never a cost" do
+      said = fn usage, turns ->
+        Report.view(row(%{core_turns: turns, backend_usage: usage})).usage
+      end
+
+      assert said.(nil, 0).backend == "Backend work: no backend turns."
+
+      assert said.(%{"total_tokens" => 1834, "turns" => 2}, 2).backend ==
+               "Backend work: 2 backend turns, 1834 tokens."
+
+      assert said.(%{"total_tokens" => 917, "turns" => 2, "turns_unmeasured" => 1}, 2).backend ==
+               "Backend work: 2 backend turns, at least 917 tokens; 1 turn reported none."
+
+      assert said.(%{"turns" => 1, "turns_unmeasured" => 1}, 1).backend ==
+               "Backend work: 1 backend turn, whose tokens were not reported."
+
+      refute Enum.any?(Report.sentences(), &(&1 =~ "cost"))
+    end
+  end
+
+  describe "a stop" do
+    test "says what happened at each stage, in the one set the tool and the apps share" do
+      assert Report.stop_sentence(:cancelled, nil) ==
+               "The call had not been placed yet, so it was stopped and nothing was dialed."
+
+      assert Report.stop_sentence(:stopping, row(%{status: "admitted"})) ==
+               "Fermix told the call to stop before it is placed. It reads stopping until its " <>
+                 "end is known, and its report follows."
+
+      assert Report.stop_sentence(:stopping, row(%{status: "dispatching"})) ==
+               "The call is still being placed, so Fermix ends it as soon as OpenAI answers the " <>
+                 "dial. It reads stopping until its end is known, and its report follows."
+
+      assert Report.stop_sentence(
+               :stopping,
+               row(%{status: "active", provider_session_id: "sess_invented_4"})
+             ) ==
+               "Fermix asked OpenAI to end the call. It reads stopping until its end is known, " <>
+                 "and its report follows. Stopping a call does not undo anything agreed on it."
+
+      assert Report.stop_sentence(:stopping, nil) ==
+               "Fermix told the call to stop. It reads stopping until its end is known, and " <>
+                 "its report follows."
+    end
+
+    test "a call the running engine owns is stopped or confirmed there" do
+      assert Report.owned_elsewhere(:stop) ==
+               "That call belongs to the Fermix that is running, so it is stopped there."
+
+      assert Report.owned_elsewhere(:confirm) ==
+               "That call belongs to the Fermix that is running, so its end is confirmed there."
+
+      assert Report.running_engine_calls(2) ==
+               "The Fermix that is running still has 2 calls, and applies the switch when it " <>
+                 "reads the setting."
+    end
+
+    test "a refusal for an unresolved call names the slot and both ways out" do
+      held = DateTime.add(@expires, -60, :second)
+
+      ways =
+        "It holds the call slot until it is confirmed ended, in the recovery view or with " <>
+          "the settings command, or until OpenAI's own limit on a call passes."
+
+      assert Report.stop_refusal(row(%{status: "dispatch_unknown"}), held) ==
+               "Fermix already stopped its part of that call, and whether it was placed is " <>
+                 "unknown, because OpenAI never said. " <> ways
+
+      assert Report.stop_refusal(row(%{status: "closure_unconfirmed"}), held) ==
+               "Fermix already stopped its part of that call, and its termination is " <>
+                 "unconfirmed. " <> ways
+
+      assert Report.stop_refusal(row(%{status: "closure_unconfirmed"}), @expires) ==
+               "That call has already ended."
+
+      assert Report.stop_refusal(row(%{status: "ended"}), held) == "That call has already ended."
+      assert is_nil(Report.stop_refusal(row(%{status: "active"}), held))
+    end
+  end
+
   describe "outside text" do
     test "is one bounded line, and a forged frame end stays inside the frame" do
       words =
@@ -276,7 +675,8 @@ defmodule FermixCore.PhoneCalls.ReportTest do
           evidence: [%{"speaker" => "recipient", "text" => words}],
           outcome_facts: %{
             "terms" => "deposit\nrequired",
-            "options" => ["nine\non Friday", "ten"]
+            "options" => ["nine\non Friday", "ten"],
+            "read" => ["options"]
           },
           outcome_uncertainty: "Two\nlines."
         })
@@ -292,8 +692,8 @@ defmodule FermixCore.PhoneCalls.ReportTest do
       [said] = for {"The recipient", said} <- Report.view(call).excerpts, do: said
       assert byte_size(said) <= 400 and String.valid?(said)
       refute said =~ "\n"
-      assert {"terms", "deposit required"} in Report.view(call).facts
-      assert {"options heard", "nine on Friday; ten"} in Report.view(call).facts
+      assert {"terms", "deposit required", nil} in Report.view(call).facts
+      assert {"options heard", "nine on Friday; ten", :read} in Report.view(call).facts
       assert Report.view(call).still_uncertain == "Two lines."
     end
 
@@ -426,15 +826,18 @@ defmodule FermixCore.PhoneCalls.ReportTest do
       assert view.state == "stopping"
       assert view.placed == "yes" and view.dialed
       assert view.holds_call_slot
-      assert view.sentence == "Fermix asked the call to end and is waiting to hear that it ended."
+
+      assert view.sentence ==
+               "The call was told to stop, and Fermix is waiting to hear that it ended."
+
       assert view.usage.carrier_charges =~ "Fermix does not know them"
       assert view.usage.voice == "Voice time so far: at least 30 seconds."
-      assert view.contact_name == "Calloway Bistro"
+      assert view.contact_name == "Marrow & Sage"
       assert is_nil(view.uncertainty)
       assert {:ok, _json} = Jason.encode(view)
     end
 
-    test "returns the outcome's uncertainty note framed, apart from what was said" do
+    test "returns the reading's note framed, apart from what was said" do
       view =
         Report.status_view(
           row(%{
@@ -445,7 +848,10 @@ defmodule FermixCore.PhoneCalls.ReportTest do
         )
 
       assert view.outcome_uncertainty ==
-               recipient("Still uncertain: The recipient did not commit to anything.")
+               recipient(
+                 "Still uncertain, in Fermix's reading of the call: The recipient did not " <>
+                   "commit to anything."
+               )
 
       assert view.recipient_said =~ "Maybe later this week."
       refute view.recipient_said =~ "Still uncertain"
@@ -463,7 +869,7 @@ defmodule FermixCore.PhoneCalls.ReportTest do
     end
   end
 
-  test "every sentence the view can say reads as plain copy" do
+  test "every sentence the view can say reads as plain copy, to no one in particular" do
     for sentence <- Report.sentences() do
       refute sentence =~ ~r/\b(you|your)\b/i, sentence
       refute sentence =~ "_", sentence

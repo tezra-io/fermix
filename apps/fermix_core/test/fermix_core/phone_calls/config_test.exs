@@ -6,6 +6,7 @@ defmodule FermixCore.PhoneCalls.ConfigTest do
 
   alias FermixCore.PhoneCalls.CarrierProfile
   alias FermixCore.PhoneCalls.Config
+  alias FermixCore.PhoneCalls.Readiness
   alias FermixCore.Realtime.Config, as: RealtimeConfig
 
   # Invented values, in the 555-01XX range NANPA reserves for fiction.
@@ -219,23 +220,46 @@ defmodule FermixCore.PhoneCalls.ConfigTest do
 
       for unresolved <- [nil, "@keyring", "@file"] do
         assert Config.sip_password(struct!(Config.normalize(nil), sip_password: unresolved)) ==
-                 {:error, :missing_sip_password}
+                 {:error, :sip_password_missing}
       end
     end
 
     test "openai_api_key/0 reads the OpenAI provider's key, never SpaceXAI's" do
       Application.put_env(:fermix_core, :providers, xai: [api_key: "xai-invented"])
-      assert Config.openai_api_key() == {:error, :missing_openai_api_key}
+      assert Config.openai_api_key() == {:error, :openai_api_key_missing}
 
       Application.put_env(:fermix_core, :providers,
         openai: [api_key: "@keyring"],
         xai: [api_key: "xai-invented"]
       )
 
-      assert Config.openai_api_key() == {:error, :missing_openai_api_key}
+      assert Config.openai_api_key() == {:error, :openai_api_key_missing}
 
       Application.put_env(:fermix_core, :providers, openai: [api_key: "sk-invented"])
       assert Config.openai_api_key() == {:ok, "sk-invented"}
+    end
+
+    # One vocabulary for what is missing: a credential read answers in the
+    # words `Readiness` names each requirement with.
+    test "credentials/1 resolves all three, or names the first missing in Readiness's words" do
+      Application.put_env(:fermix_core, :providers, openai: [api_key: "sk-invented"])
+      set = struct!(Config.normalize(nil), sip_username: "fermixtrunk01", sip_password: "pw-1")
+
+      assert Config.credentials(set) ==
+               {:ok,
+                %{api_key: "sk-invented", sip_username: "fermixtrunk01", sip_password: "pw-1"}}
+
+      assert Config.credentials(%{set | sip_username: nil}) == {:error, :sip_username_missing}
+
+      assert Config.credentials(%{set | sip_password: "@keyring"}) ==
+               {:error, :sip_password_missing}
+
+      Application.put_env(:fermix_core, :providers, [])
+      assert Config.credentials(set) == {:error, :openai_api_key_missing}
+
+      for word <- [:openai_api_key_missing, :sip_username_missing, :sip_password_missing] do
+        assert word in Readiness.reasons()
+      end
     end
   end
 

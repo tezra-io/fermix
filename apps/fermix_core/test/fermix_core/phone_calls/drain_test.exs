@@ -176,6 +176,34 @@ defmodule FermixCore.PhoneCalls.DrainTest do
     assert {:error, :engine_stopping} = Manager.start_call(request(), names.manager)
   end
 
+  # Every application that can stop first drains (M94 §04), so the stop
+  # reaches the drain more than once: the first drains, a later one answers
+  # at once and arms nothing.
+  test "the engine's stop drains once, and a later drain answers at once", ctx do
+    names = subtree!(ctx)
+
+    assert :idle = Manager.drain(names.manager)
+    assert :already_drained = Manager.drain(names.manager)
+    refute_received {:drain_deadline, _message, _ms}
+  end
+
+  test "after a drain that ran out of time, a later drain answers at once", ctx do
+    names = subtree!(ctx)
+    call = start_call!(names)
+
+    drainer = drain_async(names)
+    assert_receive {:drain_deadline, message, _ms}
+
+    capture_log(fn ->
+      send(GenServer.whereis(names.manager), message)
+      assert {:timeout, [id]} = Task.await(drainer)
+      assert id == call.id
+    end)
+
+    assert :already_drained = Manager.drain(names.manager)
+    refute_received {:drain_deadline, _message, _ms}
+  end
+
   test "an engine with no phone-call Manager has nothing to drain" do
     assert :idle = Manager.drain(:"phone_drain_absent_#{System.unique_integer([:positive])}")
   end
@@ -198,7 +226,7 @@ defmodule FermixCore.PhoneCalls.DrainTest do
     assert row.status == "ended"
     assert row.failure_reason == "engine_stopped"
     assert row.outcome == "unknown"
-    assert row.outcome_uncertainty =~ "Fermix stopped"
+    assert row.outcome_facts["reason"] == "not_read"
     assert row.voice_seconds == 41
     refute_received {:hangup, _task, _again}
     refute_received {:manager_hangup, _session}

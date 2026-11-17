@@ -52,8 +52,9 @@ defmodule FermixCore.PhoneCalls.Outcome do
   other value word for word), `:read` when the value is the extraction's
   reading of the excerpt. A reference number is kept when the called party
   gave one; its absence invalidates nothing. Each downgrade records its
-  reason (`reason/1`), and the uncertainty is only Fermix's own sentences;
-  the extraction's note is kept apart, as a reading.
+  reason as a code (`reasons/0`, `vocabulary/0`): this module writes no
+  sentence for an owner, the view (`PhoneCalls.Report`) says each code once.
+  The uncertainty is only the extraction's own note, the model's words.
 
   ## A yes to a finished read-back
 
@@ -105,70 +106,51 @@ defmodule FermixCore.PhoneCalls.Outcome do
   alias FermixCore.PhoneCalls.Outcome.Record
   alias FermixCore.PhoneCalls.PromptText
   alias FermixCore.PhoneCalls.Transcript
+  alias FermixCore.Text
 
   @words [:confirmed, :unavailable, :options, :needs_owner, :unknown]
-  @end_reasons [
-    :no_answer,
-    :busy,
-    :rejected,
-    :failed,
-    :voicemail,
-    :hangup,
-    :deadline,
-    :cancelled,
-    :connection_lost
-  ]
-  @abrupt_ends [:deadline, :cancelled, :connection_lost]
-  @note_max_bytes 400
-  @kinds %{
-    stated: "the recipient stated the details",
-    readback: "the recipient said yes to the assistant's read-back"
-  }
+  # How the worker's `Call.Ending` reads each end (`Ending.end_reason/1`).
+  @end_reasons [:no_answer, :failed, :voicemail, :hangup, :deadline, :cancelled, :connection_lost]
 
-  @reasons %{
-    no_answer: "Nobody answered.",
-    busy: "The line was busy.",
-    rejected: "The call was rejected before anyone answered.",
-    failed: "The call failed before anyone answered.",
-    deadline: "Nobody answered before the time limit.",
-    cancelled: "The call was stopped before anyone answered.",
-    connection_lost: "The connection was lost before anyone answered.",
-    voicemail: "The call reached voicemail; no message was left.",
-    no_recipient_speech: "The call was answered, but nothing the recipient said was transcribed.",
-    contradictory_evidence: "The recipient's words conflict on a detail that was never settled.",
-    tentative_offer: "The recipient offered this but did not confirm it was done.",
-    awaiting_action: "The recipient said they would act on it later; nothing is confirmed yet.",
-    no_commitment: "The recipient did not commit to anything.",
-    no_confirmation: "The recipient never confirmed the details.",
-    assistant_only_confirmation:
-      "Only the assistant stated the result; the recipient never confirmed it.",
-    assistant_only_evidence: "Only the assistant said this; the recipient never did.",
-    unverifiable_excerpt: "Words the result relies on are not in the transcript.",
-    invalid_fact: "A date or time the result relies on is not a valid date or time.",
-    unsupported_value: "A date or time the result relies on is not what the words said.",
-    interrupted_confirmation:
-      "The recipient's yes came while the assistant was still speaking or reading details back.",
-    criterion_unstated:
-      "The recipient's yes alone does not state what the brief requires, and nothing else they said does.",
-    superseded_value: "A detail was corrected after the words the result relies on.",
-    stale_confirmation: "A detail was corrected after the recipient confirmed.",
-    missing_required_fact: "The call did not establish everything the brief requires.",
-    outside_mandate: "The recipient confirmed something outside what the brief allows.",
-    unlisted_alternative: "The result relies on an alternative the brief does not list.",
-    no_evidence: "Nothing the recipient said supports this result.",
-    readback_not_found: "The read-back the result relies on is not among the assistant's words.",
-    readback_not_answered:
-      "The recipient's yes did not come right after the assistant's read-back.",
-    readback_untimed: "The call's timing cannot show the yes came after the read-back ended.",
-    later_readback_differs: "A later read-back gave a different value for a detail.",
-    details_left_out: "Some details were left out of the record to fit its size.",
-    extraction_timeout: "Fermix could not read the call's result in time.",
-    extraction_crashed: "Fermix could not read the call's result: the reader stopped.",
-    extraction_provider_error: "Fermix could not read the call's result: the provider failed.",
-    extraction_refused: "Fermix could not read the call's result: the provider refused.",
-    extraction_malformed:
-      "Fermix could not read the call's result: the answer was not in the expected form."
-  }
+  # Every reason an outcome carries, as the code the report holds. The words
+  # for each are the view's (`PhoneCalls.Report`), said once, there.
+  @reason_codes [
+    :not_answered,
+    :voicemail,
+    :no_recipient_speech,
+    :contradictory_evidence,
+    :tentative_offer,
+    :awaiting_action,
+    :no_commitment,
+    :no_confirmation,
+    :assistant_only_confirmation,
+    :assistant_only_evidence,
+    :unverifiable_excerpt,
+    :invalid_fact,
+    :unsupported_value,
+    :interrupted_confirmation,
+    :criterion_unstated,
+    :superseded_value,
+    :stale_confirmation,
+    :missing_required_fact,
+    :outside_mandate,
+    :unlisted_alternative,
+    :no_evidence,
+    :readback_not_found,
+    :readback_not_answered,
+    :readback_untimed,
+    :later_readback_differs,
+    :extraction_timeout,
+    :extraction_crashed,
+    :extraction_provider_error,
+    :extraction_refused,
+    :extraction_malformed,
+    :not_read
+  ]
+  # A result the worker could not read, as `unread_report/1` writes it: its
+  # transcript full or the engine stopping (the row's failure words say
+  # which), or its own wait for the reading run out or broken.
+  @unread_codes [:not_read, :extraction_timeout, :extraction_crashed]
 
   @extraction_reasons %{
     timeout: :extraction_timeout,
@@ -186,21 +168,13 @@ defmodule FermixCore.PhoneCalls.Outcome do
             options: [],
             excerpts: [],
             uncertainty: nil,
-            extraction_note: nil,
+            notes: [],
             confirmation: nil,
             extraction: :not_needed
 
   @type word :: :confirmed | :unavailable | :options | :needs_owner | :unknown
   @type end_reason ::
-          :no_answer
-          | :busy
-          | :rejected
-          | :failed
-          | :voicemail
-          | :hangup
-          | :deadline
-          | :cancelled
-          | :connection_lost
+          :no_answer | :failed | :voicemail | :hangup | :deadline | :cancelled | :connection_lost
   @typedoc "What the transport proved: whether the call was answered, and how it ended."
   @type transport :: %{answered: boolean(), end_reason: end_reason()}
   @type excerpt :: %{
@@ -213,13 +187,13 @@ defmodule FermixCore.PhoneCalls.Outcome do
   @type t :: %__MODULE__{
           outcome: word(),
           reason: atom() | nil,
-          facts: %{optional(atom()) => String.t()},
+          facts: %{optional(atom()) => String.t() | pos_integer()},
           basis: %{optional(atom()) => :verified | :read},
           not_checked: [:alternative | :must_not_commit],
           options: [String.t()],
           excerpts: [excerpt()],
           uncertainty: String.t() | nil,
-          extraction_note: String.t() | nil,
+          notes: [:transcript_cut],
           confirmation: :stated | :readback | nil,
           extraction: extraction()
         }
@@ -230,13 +204,36 @@ defmodule FermixCore.PhoneCalls.Outcome do
           uncertainty: String.t() | nil
         }
 
-  @doc "Every reason an outcome can carry."
+  @doc "Every reason an outcome can carry, as the atom its struct holds."
   @spec reasons() :: [atom(), ...]
-  def reasons, do: Map.keys(@reasons)
+  def reasons, do: @reason_codes
 
-  @doc "The sentence the owner reads for `reason`."
-  @spec reason(atom()) :: String.t()
-  def reason(reason) when is_map_key(@reasons, reason), do: Map.fetch!(@reasons, reason)
+  @doc """
+  Every code a report (`to_report/1`) can carry, by the key that carries it:
+  `reason` (`outcome_facts["reason"]`), `notes`, `confirmation`, `matched`,
+  `not_checked`, and `basis` (the names of the `verified` and `read`
+  lists). The view (`PhoneCalls.Report`) owns the words for each, and holds
+  a sentence for every code here.
+  """
+  @spec vocabulary() :: %{atom() => [String.t(), ...]}
+  def vocabulary,
+    do: %{
+      reason: @reason_codes |> Enum.map(&Atom.to_string/1) |> Enum.sort(),
+      notes: ["details_left_out", "transcript_cut"],
+      confirmation: ["readback", "stated"],
+      matched: ["alternative", "brief_time"],
+      not_checked: ["alternative", "must_not_commit"],
+      basis: ["read", "verified"]
+    }
+
+  @doc """
+  The report of a result the worker never read (`reason`, one of
+  `:not_read`, `:extraction_timeout`, `:extraction_crashed`): `unknown`, the
+  reason as its code, nothing else.
+  """
+  @spec unread_report(atom()) :: report()
+  def unread_report(reason) when reason in @unread_codes,
+    do: to_report(%__MODULE__{reason: reason})
 
   @doc """
   The call's outcome, once, after the call. `transcript` is its
@@ -259,7 +256,7 @@ defmodule FermixCore.PhoneCalls.Outcome do
     turns = Transcript.turns(transcript)
 
     case decided(transport, turns) do
-      {:decided, reason} -> {:ok, %__MODULE__{reason: reason, uncertainty: reason(reason)}}
+      {:decided, reason} -> {:ok, %__MODULE__{reason: reason}}
       :extract -> {:ok, extracted(brief, turns, transport, opts)}
     end
   end
@@ -274,14 +271,33 @@ defmodule FermixCore.PhoneCalls.Outcome do
       do: checked(brief, Transcript.turns(transcript), claim)
 
   @doc """
-  The outcome as the call worker reports it to `PhoneCalls.Manager`: the
-  outcome word; the facts under string keys, with `options` and the
-  extraction's note (`extraction_note`) when there are any, and the lists
-  `verified` (values code checked against the words), `read` (the
-  extraction's reading) and `not_checked` (judgements code cannot make);
-  the excerpts as evidence (`speaker` `recipient` or `assistant`); and the
-  uncertainty sentence. Fitted to the ledger's bounds after encoding
-  (`fit_report/1`).
+  The outcome as the call worker reports it to `PhoneCalls.Manager`, the
+  contract the view (`PhoneCalls.Report`) renders. Every word for an owner
+  is the view's: this carries codes (`vocabulary/0`) and what was said.
+
+    * `outcome`: `confirmed`, `unavailable`, `options`, `needs_owner` or
+      `unknown`.
+    * `outcome_facts` (`nil` when empty), under string keys:
+      * `reason`: why the outcome is what it is, a code; absent for a
+        confirmed result and an extraction's own word that needed none;
+      * `notes`: codes, `transcript_cut` (the review left out the start of a
+        long call) and `details_left_out` (the record was fitted to size);
+      * a confirmed result's values, one line each: `date` (`YYYY-MM-DD`),
+        `local_time` (`HH:MM`), `timezone`, `party`, `terms`, `reference`;
+        and its codes: `commitment` (`completed`), `confirmation` (`stated`
+        or `readback`), `matched` (`brief_time` or `alternative`, with
+        `alternative`, the number of the brief's alternative);
+      * `options`: what the recipient offered, one line each, the
+        extraction's reading;
+      * `verified`, `read`: the names of the values code checked against the
+        words, and of those that are the extraction's reading (`options`
+        among them); `not_checked`: `alternative`, `must_not_commit`.
+    * `evidence`: what was said, `%{speaker: "recipient" | "assistant",
+      text: ...}`, the transcript's own words, one line each.
+    * `uncertainty`: the extraction's own note on what stays uncertain, the
+      model's words, one line, or `nil`: render it as outside text.
+
+  Fitted to the ledger's bounds after encoding (`fit_report/1`).
   """
   @spec to_report(t()) :: report()
   def to_report(%__MODULE__{} = outcome) do
@@ -295,27 +311,21 @@ defmodule FermixCore.PhoneCalls.Outcome do
 
   @doc """
   A report fitted to the ledger's bounds after encoding
-  (`Outcome.Record.fit/2`), deterministically, saying in its uncertainty when
-  details were left out. Whoever adds to a report after `to_report/1` fits it
-  again with this.
+  (`Outcome.Record.fit/1`), deterministically, its notes saying when details
+  were left out. Whoever adds to a report after `to_report/1` fits it again
+  with this.
   """
   @spec fit_report(report()) :: report()
-  def fit_report(%{outcome: word} = report) when is_binary(word),
-    do: Record.fit(report, reason(:details_left_out))
+  def fit_report(%{outcome: word} = report) when is_binary(word), do: Record.fit(report)
 
   defp report_facts(outcome) do
-    read = names(outcome.basis, :read)
-
     outcome.facts
     |> Map.new(fn {key, value} -> {Atom.to_string(key), value} end)
+    |> put_value("reason", outcome.reason && Atom.to_string(outcome.reason))
+    |> put_list("notes", Enum.map(outcome.notes, &Atom.to_string/1))
     |> put_list("options", outcome.options)
-    |> put_value("extraction_note", outcome.extraction_note)
     |> put_list("verified", names(outcome.basis, :verified))
-    |> put_list(
-      "read",
-      read ++
-        present("options", outcome.options) ++ present("extraction_note", outcome.extraction_note)
-    )
+    |> put_list("read", names(outcome.basis, :read) ++ present("options", outcome.options))
     |> put_list("not_checked", Enum.map(outcome.not_checked, &Atom.to_string/1))
     |> then(&if(&1 == %{}, do: nil, else: &1))
   end
@@ -323,7 +333,6 @@ defmodule FermixCore.PhoneCalls.Outcome do
   defp names(basis, kind),
     do: for({field, ^kind} <- basis, do: Atom.to_string(field)) |> Enum.sort()
 
-  defp present(_name, nil), do: []
   defp present(_name, []), do: []
   defp present(name, _value), do: [name]
 
@@ -355,12 +364,12 @@ defmodule FermixCore.PhoneCalls.Outcome do
     if Transcript.remote_speech?(turns), do: :extract, else: {:decided, :no_recipient_speech}
   end
 
-  defp unanswered(ended) when ended in [:hangup, :voicemail], do: :no_answer
-  defp unanswered(ended), do: ended
+  # How it ended without an answer is the row's failure words, said by the view.
+  defp unanswered(_ended), do: :not_answered
 
   # -- the extraction -------------------------------------------------------------
 
-  defp extracted(brief, turns, transport, opts) do
+  defp extracted(brief, turns, _transport, opts) do
     started_at = Keyword.fetch!(opts, :started_at)
     {messages, cut?} = Extraction.messages(brief, turns, started_at)
 
@@ -369,7 +378,7 @@ defmodule FermixCore.PhoneCalls.Outcome do
         brief
         |> checked(turns, claim)
         |> Map.put(:extraction, :ok)
-        |> noted(cut_note(cut?) ++ end_note(transport))
+        |> noted(cut?)
 
       {:error, {class, detail}} ->
         extraction_failed(class, detail, Keyword.fetch!(opts, :session_id))
@@ -381,17 +390,11 @@ defmodule FermixCore.PhoneCalls.Outcome do
       "phone_call: the outcome of #{session_id} could not be read: #{class} #{detail}"
     )
 
-    reason = Map.fetch!(@extraction_reasons, class)
-    %__MODULE__{reason: reason, uncertainty: reason(reason), extraction: {:failed, class, detail}}
+    %__MODULE__{
+      reason: Map.fetch!(@extraction_reasons, class),
+      extraction: {:failed, class, detail}
+    }
   end
-
-  defp cut_note(true), do: ["The start of a long call was left out of the review."]
-  defp cut_note(false), do: []
-
-  defp end_note(%{end_reason: ended}) when ended in @abrupt_ends,
-    do: ["The call ended early (#{ended})."]
-
-  defp end_note(_transport), do: []
 
   # -- verification ----------------------------------------------------------------
 
@@ -430,8 +433,8 @@ defmodule FermixCore.PhoneCalls.Outcome do
     values =
       checked.facts
       |> Map.new(fn {field, fact} -> {field, PromptText.line(fact.value)} end)
-      |> Map.merge(%{commitment: "completed", confirmation: Map.fetch!(@kinds, checked.kind)})
-      |> put_value(:matched, checked.matched)
+      |> Map.merge(%{commitment: "completed", confirmation: Atom.to_string(checked.kind)})
+      |> Map.merge(matched(checked.matched))
       |> put_zone(brief, checked.facts)
 
     %__MODULE__{
@@ -441,9 +444,13 @@ defmodule FermixCore.PhoneCalls.Outcome do
       not_checked: checked.not_checked,
       confirmation: checked.kind,
       excerpts: excerpts(checked.evidence, turns),
-      extraction_note: note(claim.note)
+      uncertainty: note(claim.note)
     }
   end
+
+  defp matched(nil), do: %{}
+  defp matched(:brief_time), do: %{matched: "brief_time"}
+  defp matched({:alternative, n}), do: %{matched: "alternative", alternative: n}
 
   defp put_zone(values, %Brief{timezone: zone}, facts) do
     if Map.has_key?(facts, :date) or Map.has_key?(facts, :local_time),
@@ -458,17 +465,19 @@ defmodule FermixCore.PhoneCalls.Outcome do
       outcome: word,
       options: options |> Enum.map(&PromptText.line(&1.value)) |> Enum.reject(&(&1 == "")),
       excerpts: excerpts(evidence ++ options, turns),
-      extraction_note: note(claim.note)
+      uncertainty: note(claim.note)
     }
   end
 
   defp downgraded(word, reason, turns, claim),
-    do: %__MODULE__{kept(word, [], turns, claim) | reason: reason, uncertainty: reason(reason)}
+    do: %__MODULE__{kept(word, [], turns, claim) | reason: reason}
 
+  # The extraction's own note, the one thing only it can say, one line
+  # within the record's text bound.
   defp note(nil), do: nil
 
   defp note(text) do
-    case text |> PromptText.line() |> PromptText.cut(@note_max_bytes) do
+    case text |> PromptText.line() |> Text.truncate_utf8(Record.bounds().text_bytes) do
       "" -> nil
       line -> line
     end
@@ -500,12 +509,8 @@ defmodule FermixCore.PhoneCalls.Outcome do
   defp options_missing([]), do: :no_evidence
   defp options_missing(_claimed), do: :unverifiable_excerpt
 
-  defp noted(outcome, []), do: outcome
-
-  defp noted(outcome, notes) do
-    note = [outcome.uncertainty | notes] |> Enum.reject(&is_nil/1) |> Enum.join(" ")
-    %{outcome | uncertainty: PromptText.cut(note, Record.bounds().text_bytes)}
-  end
+  defp noted(outcome, false), do: outcome
+  defp noted(outcome, true), do: %{outcome | notes: [:transcript_cut]}
 
   # -- excerpts ----------------------------------------------------------------------
 
@@ -517,7 +522,7 @@ defmodule FermixCore.PhoneCalls.Outcome do
     evidence
     |> Enum.map(fn %{quote: quote, at: {index, _word} = at} ->
       turn = Enum.at(turns, index)
-      text = turn |> Transcript.said(at, quote) |> PromptText.cut(bytes)
+      text = turn |> Transcript.said(at, quote) |> Text.truncate_utf8(bytes)
       %{speaker: turn.speaker, text: text, start_ms: turn.start_ms, end_ms: turn.end_ms}
     end)
     |> Enum.uniq_by(&{&1.speaker, &1.start_ms, &1.text})

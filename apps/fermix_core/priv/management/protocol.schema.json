@@ -1856,7 +1856,7 @@
     },
     "lifecycle_prepare_restart_params": {
       "type": "object",
-      "description": "The owner's own restart (fermix restart, the apps' restart to apply): the drain window lifecycle.prepare opens, refused with unavailable (capability phone_calls, and the sentence saying how to go on) while a phone call is in progress, since the restart would hang it up with no outcome read. An update, a move or a disable takes lifecycle.prepare, which no call holds.",
+      "description": "The owner's own restart (fermix restart, the apps' restart to apply): the drain window lifecycle.prepare opens, refused with unavailable (capability phone_calls, and the sentence saying how to go on) while a phone call is positively in progress (its worker runs), since the restart would hang it up with no outcome read; unreadable call records do not refuse it. An update, a move or a disable takes lifecycle.prepare, which no call holds.",
       "maxProperties": 0,
       "additionalProperties": false
     },
@@ -7418,14 +7418,14 @@
     },
     "phone_calls_recovery_confirm_params": {
       "type": "object",
-      "description": "The owner's word that the call has ended, which they checked in their Telnyx portal. If they are wrong, a second call can be placed while the first is still up, and the carrier's one-channel limit bounds it.",
+      "description": "The owner's word that the call has ended, which they checked in their Telnyx portal. If they are wrong, a second call can be placed while the first is still up, bounded by the connection's one channel if the owner set it as the setup asks.",
       "required": ["call_id"],
       "additionalProperties": false,
       "properties": { "call_id": { "$ref": "#/$defs/phoneCallId" } }
     },
     "phone_calls_recovery_confirm_result": {
       "type": "object",
-      "description": "The unresolved call released on the owner's word: its slot is free (reason owner_confirmed, at that time) and its outcome stays unknown. Refused with unavailable for a call in progress, one already over or released, and one past OpenAI's own limit; invalid_params for another owner's.",
+      "description": "The unresolved call released on the owner's word: its slot is free (reason owner_confirmed, at that time) and the outcome already recorded is unchanged. Refused with unavailable for a call in progress, one already over or released, and one past OpenAI's own limit; invalid_params for another owner's.",
       "required": ["sentence", "call"],
       "additionalProperties": false,
       "properties": {
@@ -7470,12 +7470,20 @@
     },
     "phoneCallsSummary": {
       "type": "object",
-      "description": "The three facts as one word: the call first (calling, stopping, or termination_unconfirmed while an uncertain call holds the slot, whether phone calls are on or off), then disabled, then needs_setup, then ready. label and sentence are the engine's words.",
+      "description": "The three facts as one word: the call first (calling, stopping, or placement_unknown or termination_unconfirmed while an uncertain call holds the slot, whether phone calls are on or off), then disabled, then needs_setup, then ready. label and sentence are the engine's words.",
       "required": ["state", "label", "sentence"],
       "additionalProperties": false,
       "properties": {
         "state": {
-          "enum": ["disabled", "needs_setup", "ready", "calling", "stopping", "termination_unconfirmed"]
+          "enum": [
+            "disabled",
+            "needs_setup",
+            "ready",
+            "calling",
+            "stopping",
+            "placement_unknown",
+            "termination_unconfirmed"
+          ]
         },
         "label": { "type": "string", "minLength": 1 },
         "sentence": { "type": "string", "minLength": 1 }
@@ -7528,7 +7536,7 @@
         "outcome": {
           "enum": ["pending", "confirmed", "unavailable", "options", "needs_owner", "unknown"]
         },
-        "outcome_sentence": { "type": "string", "minLength": 1 },
+        "outcome_sentence": { "type": ["string", "null"], "minLength": 1, "description": "Null for a call never placed, which the state's sentence already says." },
         "uncertain": { "type": "boolean" },
         "holds_slot": { "type": "boolean" },
         "sentence": { "type": "string", "minLength": 1 },
@@ -7544,14 +7552,14 @@
     },
     "phoneCallUsage": {
       "type": "object",
-      "description": "The three costs apart, each with the engine's sentence: the voice time and how sure it is (voice_state), the carrier's charges, which only Telnyx knows, and the backend turns with their cost, null where unknown. Unknown is never zero. A call never placed claims none of them: voice, carrier, backend and voice_state are null.",
+      "description": "The three costs apart, each with the engine's sentence: the voice time and how sure it is (voice_state), the carrier's charges, which only Telnyx knows, and the backend turns with the tokens they reported, null where unknown (no turn reports a cost). Unknown is never zero. A call never placed claims none of them: voice, carrier, backend and voice_state are null.",
       "required": [
         "voice_seconds",
         "voice_state",
         "voice",
         "carrier",
         "backend_turns",
-        "backend_cost_usd",
+        "backend_tokens",
         "backend"
       ],
       "additionalProperties": false,
@@ -7561,7 +7569,7 @@
         "voice": { "type": ["string", "null"], "minLength": 1 },
         "carrier": { "type": ["string", "null"], "minLength": 1 },
         "backend_turns": { "type": "integer", "minimum": 0 },
-        "backend_cost_usd": { "type": ["number", "null"], "minimum": 0 },
+        "backend_tokens": { "type": ["integer", "null"], "minimum": 0, "description": "The tokens the backend turns reported; null where none reported any. No turn reports a cost." },
         "backend": { "type": ["string", "null"], "minLength": 1 }
       }
     },

@@ -605,8 +605,10 @@ defmodule FermixCore.Agents.TurnRunner do
       parent_session: parent_session(voice_call),
       # The owner request's own identity (`Agents.RequestIdentity`), one per
       # turn and shared by every tool call in it: what a tool whose effect
-      # outlives the turn (a phone call) records as the request that asked.
-      request_id: RequestIdentity.mint(),
+      # outlives the turn (a phone call) records as the request that asked. A
+      # request re-run after the owner's `/confirm` keeps its own
+      # (`request_id/1`).
+      request_id: request_id(msg),
       capability_registry: state.capability_registry,
       provider: state.provider,
       # Turn-start route-chain snapshot for subagents (§7): static for the
@@ -879,6 +881,15 @@ defmodule FermixCore.Agents.TurnRunner do
     if harness_continuation_depth(msg) > 0 and is_binary(call_id) and call_id != "",
       do: call_id,
       else: nil
+  end
+
+  # The owner request this turn is: the one a grant resume hands back, under
+  # its atom key, which only the grant resume hands the gateway (it drops one
+  # from every other message), or a fresh one.
+  defp request_id(msg) do
+    metadata = Map.get(msg, :metadata) || %{}
+    request_id = Map.get(metadata, :request_id)
+    if RequestIdentity.valid?(request_id), do: request_id, else: RequestIdentity.mint()
   end
 
   # The Live backend addendum (M41 §6.3), spliced right after the runtime

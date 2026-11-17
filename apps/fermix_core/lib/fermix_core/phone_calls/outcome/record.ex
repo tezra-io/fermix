@@ -8,26 +8,32 @@ defmodule FermixCore.PhoneCalls.Outcome.Record do
   there, so a bound that moves there moves here; the outcome report test
   writes the worst case through the real ledger.
 
-  `fit/2` is deterministic. Every string value, and every string in a list,
+  `fit/1` is deterministic. Every string value, and every string in a list,
   is made one line by `PromptText.line/1` (no control character, separator
   or bidirectional control is left to escape), and an empty one is dropped.
-  While the facts encode past their bound, entries go in this order, the
-  least important first: the extraction's note, the options from the last,
-  then `terms`, `party` and `reference`, each also struck from the
-  `verified` and `read` lists. Then every value is halved, at most
-  `@max_rounds` times and never below `@min_value_bytes`; and should the
-  facts still not fit, keys go in sorted order until they do. Whenever
-  anything was left out or shortened, the uncertainty starts with the
-  sentence the caller hands in. Evidence keeps at most the ledger's count of
-  excerpts, each one line within its bytes; the uncertainty is cut to its
-  bytes.
+  While the facts encode past their bound (less the room the
+  `details_left_out` note takes), entries go in this order, the least
+  important first: the options from the last, then `terms`, `party` and
+  `reference`, each also struck from the `verified` and `read` lists. Then
+  every free-text value (none of the codes `@codes` names, nor the date, time
+  and zone) is halved, at most `@max_rounds` times and never below
+  `@min_value_bytes`; and should the facts still not fit, keys go in sorted
+  order, the free ones before the codes, until they do. Whenever anything
+  was left out or shortened, `notes` gains `details_left_out`. Evidence keeps
+  at most the ledger's count of excerpts, each one line within its bytes;
+  the uncertainty is one line, cut to its bytes.
   """
 
   alias FermixCore.PhoneCalls.Ledger
   alias FermixCore.PhoneCalls.PromptText
+  alias FermixCore.Text
 
-  @drop_order ~w(extraction_note options terms party reference)
-  @lists ~w(verified read not_checked)
+  @drop_order ~w(options terms party reference)
+  @lists ~w(verified read not_checked notes)
+  # What `Outcome.to_report/1` writes as a code or a checked value: never
+  # shortened, and dropped only after every free key.
+  @codes ~w(reason commitment confirmation matched alternative date local_time timezone)
+  @left_out "details_left_out"
   @max_rounds 8
   @min_value_bytes 16
 
@@ -43,20 +49,15 @@ defmodule FermixCore.PhoneCalls.Outcome.Record do
   @spec bounds() :: %{atom() => pos_integer()}
   def bounds, do: Ledger.report_bounds()
 
-  @doc "`report` fitted to `bounds/0` (see the module doc); `left_out` says details went."
-  @spec fit(report(), String.t()) :: report()
-  def fit(
-        %{outcome_facts: facts, evidence: evidence, uncertainty: uncertainty} = report,
-        left_out
-      )
-      when is_list(evidence) and is_binary(left_out) do
-    {facts, shortened?} = facts |> cleaned() |> fitted()
-
+  @doc "`report` fitted to `bounds/0` (see the module doc)."
+  @spec fit(report()) :: report()
+  def fit(%{outcome_facts: facts, evidence: evidence, uncertainty: uncertainty} = report)
+      when is_list(evidence) do
     %{
       report
-      | outcome_facts: facts,
+      | outcome_facts: facts |> cleaned() |> fitted(),
         evidence: evidence(evidence),
-        uncertainty: uncertainty(uncertainty, shortened?, left_out)
+        uncertainty: uncertainty(uncertainty)
     }
   end
 
@@ -93,15 +94,24 @@ defmodule FermixCore.PhoneCalls.Outcome.Record do
   defp empty_to_nil(facts) when map_size(facts) == 0, do: nil
   defp empty_to_nil(facts), do: facts
 
-  defp fitted(nil), do: {nil, false}
+  defp fitted(nil), do: nil
 
   defp fitted(facts) do
-    if fits?(facts),
-      do: {facts, false},
-      else: {facts |> dropped() |> shortened(0) |> last_resort(), true}
+    if fits?(facts, 0),
+      do: facts,
+      else: facts |> dropped() |> shortened(0) |> last_resort() |> left_out()
   end
 
-  defp fits?(facts), do: byte_size(Jason.encode!(facts)) <= bounds().facts_json_bytes
+  # Room for the note the fit adds itself, so adding it never undoes the fit.
+  defp fits?(facts, reserve \\ reserve()),
+    do: byte_size(Jason.encode!(facts)) + reserve <= bounds().facts_json_bytes
+
+  defp reserve, do: byte_size(Jason.encode!(%{"notes" => [@left_out]}))
+
+  defp left_out(facts) do
+    notes = facts |> Map.get("notes", []) |> List.delete(@left_out)
+    Map.put(facts, "notes", notes ++ [@left_out])
+  end
 
   # The least important entries first, one at a time, until the facts fit.
   defp dropped(facts) do
@@ -142,8 +152,8 @@ defmodule FermixCore.PhoneCalls.Outcome.Record do
 
   defp halved(facts) do
     Map.new(facts, fn
-      {key, value} when is_binary(value) and key not in @lists ->
-        {key, PromptText.cut(value, max(div(byte_size(value), 2), @min_value_bytes))}
+      {key, value} when is_binary(value) and key not in @codes ->
+        {key, Text.truncate_utf8(value, max(div(byte_size(value), 2), @min_value_bytes))}
 
       pair ->
         pair
@@ -151,13 +161,11 @@ defmodule FermixCore.PhoneCalls.Outcome.Record do
   end
 
   defp last_resort(facts) do
-    facts
-    |> Map.keys()
-    |> Enum.sort()
-    |> Enum.reduce_while(facts, fn key, acc ->
+    {codes, free} = facts |> Map.keys() |> Enum.sort() |> Enum.split_with(&(&1 in @codes))
+
+    Enum.reduce_while(free ++ codes, facts, fn key, acc ->
       if fits?(acc), do: {:halt, acc}, else: {:cont, Map.delete(acc, key)}
     end)
-    |> empty_to_nil()
   end
 
   # -- evidence and the uncertainty ------------------------------------------------------
@@ -165,17 +173,18 @@ defmodule FermixCore.PhoneCalls.Outcome.Record do
   defp evidence(excerpts) do
     excerpts
     |> Enum.map(fn %{text: text} = excerpt ->
-      %{excerpt | text: text |> PromptText.line() |> PromptText.cut(bounds().excerpt_bytes)}
+      %{excerpt | text: text |> PromptText.line() |> Text.truncate_utf8(bounds().excerpt_bytes)}
     end)
     |> Enum.reject(&(&1.text == ""))
     |> Enum.take(bounds().excerpts)
   end
 
-  defp uncertainty(nil, false, _left_out), do: nil
-  defp uncertainty(nil, true, left_out), do: PromptText.cut(left_out, bounds().text_bytes)
+  defp uncertainty(nil), do: nil
 
-  defp uncertainty(text, shortened?, left_out) when is_binary(text) do
-    joined = if shortened?, do: left_out <> " " <> text, else: text
-    joined |> PromptText.line() |> PromptText.cut(bounds().text_bytes)
+  defp uncertainty(text) when is_binary(text) do
+    case text |> PromptText.line() |> Text.truncate_utf8(bounds().text_bytes) do
+      "" -> nil
+      line -> line
+    end
   end
 end

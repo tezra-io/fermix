@@ -94,30 +94,34 @@ defmodule FermixCore.PhoneCalls.OutcomeExtractionTest do
   @answered %{answered: true, end_reason: :hangup}
 
   describe "decided in code, with no model call" do
-    test "a call nobody answered" do
-      assert {:ok, %Outcome{outcome: :unknown, reason: :no_answer, extraction: :not_needed}} =
-               Outcome.extract(
-                 brief(),
-                 [],
-                 %{answered: false, end_reason: :no_answer},
-                 opts(turn(claim_json()))
-               )
+    # How the call ended is the row's own failure words; the outcome says
+    # only that nobody answered, as a code, and no sentence.
+    test "a call nobody answered, however it ended" do
+      for ended <- [:no_answer, :failed, :deadline, :cancelled, :connection_lost, :hangup] do
+        assert {:ok, %Outcome{outcome: :unknown, reason: :not_answered} = outcome} =
+                 Outcome.extract(
+                   brief(),
+                   [],
+                   %{answered: false, end_reason: ended},
+                   opts(turn(claim_json()))
+                 )
+
+        assert %{
+                 outcome: "unknown",
+                 outcome_facts: %{"reason" => "not_answered"},
+                 uncertainty: nil
+               } = Outcome.to_report(outcome)
+      end
 
       refute_received {:extraction_call, _, _, _}
     end
 
-    test "a busy line and a rejected call keep their reason" do
-      for reason <- [:busy, :rejected] do
-        assert {:ok, %Outcome{outcome: :unknown, reason: ^reason}} =
-                 Outcome.extract(
-                   brief(),
-                   [],
-                   %{answered: false, end_reason: reason},
-                   opts(turn(claim_json()))
-                 )
+    test "an end reason the worker never produces is refused" do
+      for ended <- [:busy, :rejected] do
+        assert_raise FunctionClauseError, fn ->
+          Outcome.extract(brief(), [], %{answered: false, end_reason: ended}, opts(nil))
+        end
       end
-
-      refute_received {:extraction_call, _, _, _}
     end
 
     test "voicemail" do
@@ -236,16 +240,15 @@ defmodule FermixCore.PhoneCalls.OutcomeExtractionTest do
       refute_received {:extraction_call, _, _, _}
     end
 
-    test "an abrupt end is noted beside a verified result" do
-      assert {:ok, %Outcome{outcome: :confirmed, uncertainty: note}} =
+    # Why the call ended is the row's failure words, said once, by the view.
+    test "an abrupt end adds nothing to a verified result" do
+      assert {:ok, %Outcome{outcome: :confirmed, uncertainty: nil, notes: []}} =
                Outcome.extract(
                  brief(),
                  call(),
                  %{answered: true, end_reason: :connection_lost},
                  opts(turn(claim_json()))
                )
-
-      assert note == "The call ended early (connection_lost)."
     end
 
     test "a transcript past its bound is cut from the front, and the outcome says so" do
@@ -258,10 +261,10 @@ defmodule FermixCore.PhoneCalls.OutcomeExtractionTest do
                 n
               )
 
-      assert {:ok, %Outcome{uncertainty: note}} =
+      assert {:ok, %Outcome{notes: [:transcript_cut]} = outcome} =
                Outcome.extract(brief(), early ++ call(), @answered, opts(turn(claim_json())))
 
-      assert note =~ "The start of a long call was left out of the review."
+      assert Outcome.to_report(outcome).outcome_facts["notes"] == ["transcript_cut"]
       assert_received {:extraction_call, [_system, user], [], _opts}
       assert user.content =~ "(earlier speech cut for length)"
       assert user.content =~ "Yes, it's booked."
@@ -331,11 +334,30 @@ defmodule FermixCore.PhoneCalls.OutcomeExtractionTest do
                Outcome.extract(brief(), call(), @answered, opts({:raise, "boom"}))
     end
 
-    test "the reason's sentence is the uncertainty" do
-      assert {:ok, %Outcome{uncertainty: note}} =
-               Outcome.extract(brief(), call(), @answered, opts(turn("not json")))
+    test "a failed reading carries its code, and no sentence" do
+      assert {:ok, outcome} = Outcome.extract(brief(), call(), @answered, opts(turn("not json")))
 
-      assert note == Outcome.reason(:extraction_malformed)
+      assert %{outcome: "unknown", outcome_facts: %{"reason" => "extraction_malformed"}} =
+               Outcome.to_report(outcome)
+
+      assert outcome.uncertainty == nil
+    end
+  end
+
+  describe "a result the worker never read" do
+    test "is one coded report, in the same contract" do
+      for reason <- [:not_read, :extraction_timeout, :extraction_crashed] do
+        code = Atom.to_string(reason)
+
+        assert Outcome.unread_report(reason) == %{
+                 outcome: "unknown",
+                 outcome_facts: %{"reason" => code},
+                 evidence: [],
+                 uncertainty: nil
+               }
+      end
+
+      assert_raise FunctionClauseError, fn -> Outcome.unread_report(:awaiting_action) end
     end
   end
 

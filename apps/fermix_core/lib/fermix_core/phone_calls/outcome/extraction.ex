@@ -27,11 +27,10 @@ defmodule FermixCore.PhoneCalls.Outcome.Extraction do
   alias FermixCore.Providers.Adapter
   alias FermixCore.Providers.Failover
   alias FermixCore.Providers.Selection
+  alias FermixCore.Text
 
   @agent "phone_call_outcome"
   @source "phone_call_transcript"
-  @transcript_max_bytes 49_152
-  @detail_max_chars 300
 
   @prompt """
   You review the transcript of a phone call that an AI assistant made for its owner, and report \
@@ -88,8 +87,8 @@ defmodule FermixCore.PhoneCalls.Outcome.Extraction do
   Write a date as YYYY-MM-DD and a local_time as HH:MM on a 24-hour clock, in the brief's time \
   zone. party is who or what the result is for (names, number of people, the service); terms are \
   conditions the recipient stated; reference is a confirmation or reference number the \
-  recipient gave. Leave out what was not said. Keep each value under 200 bytes and each quote \
-  under 400.
+  recipient gave. Leave out what was not said. Keep each value under \
+  #{Limits.max_report_fact_bytes()} bytes and each quote under #{Limits.max_excerpt_bytes()}.
   """
 
   @type failure :: :timeout | :crashed | :provider_error | :refused | :malformed
@@ -106,7 +105,8 @@ defmodule FermixCore.PhoneCalls.Outcome.Extraction do
   @spec messages(Brief.t(), [Transcript.turn()], DateTime.t()) :: {[map(), ...], boolean()}
   def messages(%Brief{} = brief, turns, %DateTime{} = started_at) when is_list(turns) do
     frame_bytes = byte_size(UntrustedContent.frame(@source, ""))
-    budget = @transcript_max_bytes - frame_bytes - byte_size(Transcript.cut_marker()) - 1
+    # The extraction reads what the call kept, up to the transcript's own bound.
+    budget = Limits.max_transcript_bytes() - frame_bytes - byte_size(Transcript.cut_marker()) - 1
     {lines, cut?} = turns |> Transcript.lines() |> Transcript.newest_lines(budget)
 
     user =
@@ -197,7 +197,7 @@ defmodule FermixCore.PhoneCalls.Outcome.Extraction do
   defp read(_turn), do: failed(:malformed, :no_content)
 
   defp failed(class, detail) when is_binary(detail),
-    do: {:error, {class, String.slice(detail, 0, @detail_max_chars)}}
+    do: {:error, {class, Text.truncate_utf8(detail, Limits.max_report_vendor_bytes())}}
 
   defp failed(class, detail), do: failed(class, inspect(detail, limit: 10))
 end

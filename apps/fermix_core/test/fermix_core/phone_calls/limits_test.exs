@@ -7,6 +7,9 @@ defmodule FermixCore.PhoneCalls.LimitsTest do
   # launchd's default `ExitTimeOut`, which applies under the Mac app, whose
   # launch agent sets none: the smallest window the engine gets to stop.
   @launchd_exit_timeout_ms 20 * 1000
+  # What an orderly stop stops before the drain begins (nothing), and after.
+  @stops_before_drain_ms 0
+  @trees_after_drain_ms 10 * 1000
 
   test "external calls and attempts" do
     assert Limits.max_outstanding_calls() == 1
@@ -55,9 +58,13 @@ defmodule FermixCore.PhoneCalls.LimitsTest do
   # The engine gets a fixed window to stop before SIGKILL: what the CLI's own
   # service units ask (`Fermix.CLI.Service.Templates`: ExitTimeOut,
   # TimeoutStopSec), or launchd's default under the Mac app, whose launch
-  # agent sets none (`@launchd_exit_timeout_ms`). The orderly stop's wait
-  # for a call fits inside the smallest with 10 s left for the rest of the
-  # tree, and holds the shutdown path's hangup wait, the terminal drain and a
+  # agent sets none (`@launchd_exit_timeout_ms`). Nothing stops before the
+  # drain: the first application an orderly stop stops (web, else channels,
+  # else the core) drains in its own `prep_stop/1`, before its tree goes
+  # (`FermixChannels.ApplicationStopTest`, `FermixWeb.ApplicationStopTest`).
+  # Every tree stops after it, the channels application's own children taking
+  # up to 10 s. So the drain, and then the trees, fit the smallest window, and
+  # the drain holds the shutdown path's hangup wait, the terminal drain and a
   # second for the end report.
   test "the orderly stop's drain fits the smallest stop window the engine runs under" do
     templates =
@@ -73,7 +80,10 @@ defmodule FermixCore.PhoneCalls.LimitsTest do
     assert window_ms == @launchd_exit_timeout_ms
 
     assert Limits.shutdown_drain_ms() == 10 * 1000
-    assert Limits.shutdown_drain_ms() <= window_ms - 10 * 1000
+
+    assert @stops_before_drain_ms + Limits.shutdown_drain_ms() + @trees_after_drain_ms <=
+             window_ms
+
     assert Limits.shutdown_hangup_wait_ms() == 3 * 1000
 
     assert Limits.shutdown_hangup_wait_ms() + Limits.terminal_drain_ms() + 1_000 <=

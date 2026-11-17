@@ -25,7 +25,7 @@ defmodule FermixCore.PhoneCalls.Telemetry do
   """
 
   alias FermixCore.PhoneCalls.Limits
-  alias FermixCore.PhoneCalls.PromptText
+  alias FermixCore.Text
 
   @run_start_event [:fermix, :phone_call, :run_start]
   @run_complete_event [:fermix, :phone_call, :run_complete]
@@ -147,7 +147,7 @@ defmodule FermixCore.PhoneCalls.Telemetry do
   defp scrub(text) when is_binary(text) do
     text
     |> String.replace(@number_pattern, "[number]")
-    |> PromptText.cut(Limits.max_record_text_bytes())
+    |> Text.truncate_utf8(Limits.max_record_text_bytes())
   end
 
   defp fetch_id!(row) do

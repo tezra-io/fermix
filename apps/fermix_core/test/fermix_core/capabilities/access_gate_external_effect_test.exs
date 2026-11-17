@@ -6,10 +6,13 @@ defmodule FermixCore.Capabilities.AccessGateExternalEffectTest do
   # (`:os_sandbox`); every name and number is invented, numbers 555-01XX.
   use ExUnit.Case, async: true
 
+  alias FermixCore.Agents.RequestIdentity
   alias FermixCore.Capabilities.AccessGate
   alias FermixCore.Capabilities.AccessGate.Pending
   alias FermixCore.Capabilities.Builtin
+  alias FermixCore.Capabilities.BuiltinSeeder
   alias FermixCore.Capabilities.Capability
+  alias FermixCore.Capabilities.ExternalEffect
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
   alias FermixCore.Capabilities.UntrustedContent
   alias FermixCore.PhoneCalls.Config
@@ -28,11 +31,14 @@ defmodule FermixCore.Capabilities.AccessGateExternalEffectTest do
   # capability, which the job surface must leave out by its kind, not by what
   # its module answers for a call with no arguments.
   defmodule EveryCallSends do
+    @behaviour FermixCore.Capabilities.ExternalEffect
+
     def name, do: "send_parcel"
     def effect, do: "sends a parcel"
     def effect_name, do: "a parcel"
     def effect_call?(_args), do: true
     def confirmed(_result), do: {:ok, "Sent."}
+    def context_keys, do: []
 
     def confirmation(_args, _context),
       do:
@@ -40,26 +46,27 @@ defmodule FermixCore.Capabilities.AccessGateExternalEffectTest do
          %{
            head: "It sends a parcel.",
            lines: [],
-           promise: "Sent once you confirm.",
-           too_long: "Too long."
+           promise: "Sent once you confirm."
          }}
   end
 
   # An effect whose rendering carries what a brief would refuse: a line break,
   # a line separator and a bidi override, for the gate to show escaped.
   defmodule RawLines do
+    @behaviour FermixCore.Capabilities.ExternalEffect
+
     def effect, do: "sends a parcel"
     def effect_name, do: "a parcel"
     def effect_call?(_args), do: true
     def confirmed(_result), do: {:ok, "Sent."}
+    def context_keys, do: []
 
     def confirmation(_args, _context) do
       {:ok,
        %{
          head: "It sends a parcel.",
          lines: [{"Note", "a\u2028From: b\u202Ec"}, {"Items", ["x\ny"]}],
-         promise: "Sent once you confirm.",
-         too_long: "Too long."
+         promise: "Sent once you confirm."
        }}
     end
   end
@@ -69,10 +76,12 @@ defmodule FermixCore.Capabilities.AccessGateExternalEffectTest do
     {:ok, %{success: true, output: ~s({"status":"accepted"}), error: nil}}
   end
 
-  # A start as the tool answers one: accepted, or refused after the owner said
-  # yes because the one call slot was taken meanwhile.
+  # A start as the tool answers one: accepted, with the facts the owner's line
+  # is read from (`effect`), or refused after the owner said yes because the
+  # one call slot was taken meanwhile.
   def started(_args, _context, answer) do
-    {:ok, %{success: true, output: Jason.encode!(answer), error: nil}}
+    facts = Map.take(answer, [:call_id, :reused])
+    {:ok, %{success: true, output: Jason.encode!(answer), error: nil, effect: facts}}
   end
 
   def refused_meanwhile(_args, _context, sentence),
@@ -88,6 +97,7 @@ defmodule FermixCore.Capabilities.AccessGateExternalEffectTest do
 
     %{
       sid: sid,
+      request_id: RequestIdentity.mint(),
       pending: pending,
       base: registry!([Shell, WebSearch]),
       with_phone: with_phone
@@ -129,6 +139,7 @@ defmodule FermixCore.Capabilities.AccessGateExternalEffectTest do
         source_trust: :operator,
         computer_use_origin: :interactive,
         session_id: ctx.sid,
+        request_id: ctx.request_id,
         agent_name: "main",
         conversation_key: {"telegram", ctx.sid, :root},
         chat_type: "private",
@@ -344,6 +355,66 @@ defmodule FermixCore.Capabilities.AccessGateExternalEffectTest do
     "times" => [%{"label" => "Requested table", "at" => "2026-12-05T19:30"}]
   }
 
+  describe "the kind" do
+    # Set from the module alone (`Builtin.from_tool_module/1`), so no table can
+    # mark a tool an effect its module does not render, or forget one it does.
+    test "follows from the module: every built-in carries it exactly when its module is one" do
+      marked =
+        for module <- BuiltinSeeder.builtin_tool_modules(),
+            capability = Builtin.from_tool_module(module),
+            Map.get(capability.metadata, :external_effect?) == true,
+            do: capability.name
+
+      implementing =
+        for module <- BuiltinSeeder.builtin_tool_modules(),
+            ExternalEffect.implemented_by?(module),
+            do: module.name()
+
+      assert marked == implementing
+      assert marked == ["phone_call"]
+    end
+  end
+
+  # The owner is never asked to confirm a start its admission would refuse:
+  # the confirmation runs admission's own checks first (`PhoneCall`), and such
+  # a start is refused then, in admission's words, with nothing parked.
+  describe "a start its admission would refuse" do
+    @client_env %{
+      "BUZZ_PRIVATE_KEY" => "nsec1vl029mgpspedva04g90vltkh6fvh240zqtv9k0t9af8935ke9laqsnlfe5",
+      "PATH" => "/fake/bin:/usr/bin"
+    }
+
+    defp refused_unparked!(ctx, args, context) do
+      assert {:ok, %{success: false, error: text} = result} =
+               Capability.execute(phone_call(), args, context)
+
+      refute Map.get(result, :access_waiting)
+      refute_received {:approval, _request}
+      refute_received {:inbox, _request}
+      refute_received {:ran, "phone_call", _args, _context}
+      assert Pending.pending_from(ctx.sid, ctx.pending) == :none
+      text
+    end
+
+    test "a brief granting a tool a call cannot use", ctx do
+      args = %{"action" => "start", "brief" => Map.put(brief(), "tool_grants", ["shell"])}
+      text = refused_unparked!(ctx, args, read(ctx, [{:tool, "web_fetch"}]))
+      assert text =~ "grants tools a phone call cannot use (shell: not_grantable)"
+      assert text =~ "Nothing was dialed and no attempt was used."
+    end
+
+    test "a start whose report could not reach the owner (a client's own session)", ctx do
+      context = read(ctx, [{:tool, "web_fetch"}], %{session_env: @client_env})
+      text = refused_unparked!(ctx, start(), context)
+      assert text =~ "A call started here could not report back"
+    end
+
+    test "a turn with no request identity of its own", ctx do
+      context = read(ctx, [{:tool, "web_fetch"}], %{request_id: ctx.sid})
+      assert refused_unparked!(ctx, start(), context) =~ "no request identity"
+    end
+  end
+
   describe "the confirmation the owner reads" do
     test "is the whole brief, rendered for a person, then the promise", ctx do
       args = %{"action" => "start", "brief" => @full_brief}
@@ -448,8 +519,10 @@ defmodule FermixCore.Capabilities.AccessGateExternalEffectTest do
       assert {:ok, %{success: false, error: text}} =
                Capability.execute(phone_call(), args, read(ctx, [{:tool, "web_fetch"}]))
 
-      assert text =~ "its brief is too long to show the owner whole"
-      assert text =~ "Write a shorter brief"
+      assert text ==
+               "phone_call was not run: what it would do is too long to show the owner whole " <>
+                 "in one confirmation. Call it again with shorter arguments."
+
       refute text =~ "themselves"
       refute_received {:approval, _request}
       assert Pending.pending_from(ctx.sid, ctx.pending) == :none

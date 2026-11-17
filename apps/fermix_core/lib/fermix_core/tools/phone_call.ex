@@ -45,10 +45,12 @@ defmodule FermixCore.Tools.PhoneCall do
   """
 
   @behaviour FermixCore.Capabilities.Builtin.Tool
+  @behaviour FermixCore.Capabilities.ExternalEffect
 
   alias FermixCore.Agents.RequestIdentity
   alias FermixCore.Capabilities.AccessGate
   alias FermixCore.Capabilities.Builtin.Tool
+  alias FermixCore.Capabilities.ExternalEffect
   alias FermixCore.Memory.Config, as: MemoryConfig
   alias FermixCore.Memory.Repo
   alias FermixCore.PhoneCalls.Brief
@@ -56,10 +58,12 @@ defmodule FermixCore.Tools.PhoneCall do
   alias FermixCore.PhoneCalls.Config
   alias FermixCore.PhoneCalls.Delivery
   alias FermixCore.PhoneCalls.Grants
+  alias FermixCore.PhoneCalls.Ledger
   alias FermixCore.PhoneCalls.Limits
   alias FermixCore.PhoneCalls.Manager
   alias FermixCore.PhoneCalls.Prompt
   alias FermixCore.PhoneCalls.Readiness
+  alias FermixCore.PhoneCalls.Report
   alias FermixCore.Temporal.Access
   alias FermixCore.Tools.Telemetry, as: ToolTelemetry
 
@@ -243,53 +247,62 @@ defmodule FermixCore.Tools.PhoneCall do
   def relays_outside_text?(arguments) when is_map(arguments),
     do: Map.get(arguments, "action") not in ["start", "cancel"]
 
-  # --- the owner's confirmation (`Capabilities.AccessGate`, `external_effect?`) ---
+  # --- the owner's confirmation (`Capabilities.AccessGate`, `ExternalEffect`) ---
 
   @confirm_head "It places a phone call for you, from your number, made by Fermix as your AI " <>
                   "assistant."
   @confirm_promise "Once you confirm, Fermix places exactly this call."
-  @too_long "phone_call was not run: its brief is too long to show the owner whole in one " <>
-              "confirmation. Write a shorter brief (its goal, lists and facts) and start the " <>
-              "call again."
 
-  @impl true
+  @impl ExternalEffect
   @spec effect() :: String.t()
   def effect, do: "places a phone call"
 
-  @impl true
+  @impl ExternalEffect
   @spec effect_call?(map()) :: boolean()
   def effect_call?(args) when is_map(args), do: Map.get(args, "action") == "start"
 
-  @impl true
+  @impl ExternalEffect
   @spec effect_name() :: String.t()
   def effect_name, do: "a phone call"
 
   @doc """
-  What the owner reads once a `start` they confirmed has run, from the start's
-  own answer: the call accepted, its id, that it is being placed and that its
-  result follows in the chat that asked for it (or, for a request that had
-  already started it, that no second call was placed). A start refused after
-  the confirmation (the one call slot taken meanwhile, calls switched off)
-  answers with the refusal's own sentence.
+  What a confirmed `start` reads of its turn besides the gate's own snapshot:
+  the owner and their store, and the seams this tool reads (the moduledoc's).
   """
-  @impl true
+  @impl ExternalEffect
+  @spec context_keys() :: [atom()]
+  def context_keys do
+    [
+      :memory_owner_id,
+      :memory_repo,
+      :phone_call_manager,
+      :phone_call_readiness,
+      :phone_call_config,
+      :phone_call_now,
+      :phone_call_snapshot_opts
+    ]
+  end
+
+  @doc """
+  What the owner reads once a `start` they confirmed has run, from the facts
+  its result carries (`effect`): the call accepted, its id, that it is being
+  placed and that its result follows in the chat that asked for it (or, for a
+  request that had already started it, that no second call was placed). A
+  start refused after the confirmation (the one call slot taken meanwhile,
+  calls switched off) answers with the refusal's own sentence.
+  """
+  @impl ExternalEffect
   @spec confirmed(Tool.tool_result()) :: {:ok, String.t()} | {:error, String.t()}
   def confirmed(%{success: false, error: error}) when is_binary(error), do: {:error, error}
 
-  def confirmed(%{success: true, output: output}) when is_binary(output) do
-    case Jason.decode(output) do
-      {:ok, %{"call_id" => id, "status" => "accepted", "reused" => false}} when is_binary(id) ->
-        {:ok,
-         "The call was accepted as #{id}, and Fermix is placing it now. Its result will " <>
-           "follow in the chat that asked for it."}
-
-      {:ok, %{"call_id" => id, "status" => "accepted", "reused" => true}} when is_binary(id) ->
-        {:ok, "This request had already started call #{id}; no second call was placed."}
-
-      _unreadable ->
-        {:error, "The call's start answered in a way Fermix cannot read; ask for its status."}
-    end
+  def confirmed(%{success: true, effect: %{call_id: id, reused: false}}) when is_binary(id) do
+    {:ok,
+     "The call was accepted as #{id}, and Fermix is placing it now. Its result will " <>
+       "follow in the chat that asked for it."}
   end
+
+  def confirmed(%{success: true, effect: %{call_id: id, reused: true}}) when is_binary(id),
+    do: {:ok, "This request had already started call #{id}; no second call was placed."}
 
   @doc """
   What the owner reads before a `start` goes ahead (`Capabilities.AccessGate`):
@@ -300,24 +313,22 @@ defmodule FermixCore.Tools.PhoneCall do
   must not agree to, the facts it may share, the lookups it may use and the
   language it opens in. Every value of the brief is quoted as its own rendering
   quotes it (`PhoneCalls.BriefText.quoted/1`), so it reads as data, and the
-  gate keeps each on a line of its own. When phone calls are off or need setup,
-  or the brief is not usable, there is nothing to confirm, and the sentence the
-  start itself would answer says why.
+  gate keeps each on a line of its own. A start its admission would certainly
+  refuse (`admissible/2`: calls off or needing setup, an unusable brief, a
+  report with nowhere to go, no request identity, a grant a call cannot use, a
+  prompt too large for the call) has nothing to confirm: it answers the
+  sentence the start itself would, and the owner is never asked.
   """
-  @impl true
-  @spec confirmation(map(), Tool.context()) :: {:ok, Tool.confirmation()} | {:error, String.t()}
+  @impl ExternalEffect
+  @spec confirmation(map(), Tool.context()) ::
+          {:ok, ExternalEffect.confirmation()} | {:error, String.t()}
   def confirmation(args, context) when is_map(args) and is_map(context) do
-    with :ok <- ready(context),
-         {:ok, brief} <- build_brief(args, context) do
-      {:ok,
-       %{
-         head: @confirm_head,
-         lines: confirmation_lines(brief),
-         promise: @confirm_promise,
-         too_long: @too_long
-       }}
-    else
-      {:error, reason} -> {:error, sentence(reason)}
+    case admissible(args, context) do
+      {:ok, %{brief: brief}} ->
+        {:ok, %{head: @confirm_head, lines: confirmation_lines(brief), promise: @confirm_promise}}
+
+      {:error, reason} ->
+        {:error, sentence(reason)}
     end
   end
 
@@ -406,14 +417,10 @@ defmodule FermixCore.Tools.PhoneCall do
   # --- start -------------------------------------------------------------------
 
   defp act("start", args, context) do
-    with :ok <- ready(context),
-         {:ok, brief} <- build_brief(args, context),
-         {:ok, snapshot} <-
-           Delivery.snapshot(context, AccessGate.voice_turn?(context), snapshot_opts(context)),
-         {:ok, ids} <- request_ids(context),
+    with {:ok, %{brief: brief, snapshot: snapshot, ids: ids}} <- admissible(args, context),
          {:ok, started} <-
            Manager.start_call(request(brief, snapshot, ids, context), manager(context)) do
-      success(accepted(started, snapshot))
+      {:ok, started_result(started, snapshot)}
     else
       {:error, reason} -> error(reason)
     end
@@ -430,13 +437,78 @@ defmodule FermixCore.Tools.PhoneCall do
   end
 
   defp act("cancel", args, context) do
-    with {:ok, call_id} <- fetch_call_id(args),
-         {:ok, stopped} <- Manager.cancel(call_id, owner(context), manager(context)) do
-      success(stopped_map(call_id, stopped))
-    else
+    case fetch_call_id(args) do
+      {:ok, call_id} ->
+        call_id |> Manager.cancel(owner(context), manager(context)) |> cancelled(call_id, context)
+
+      {:error, reason} ->
+        error(reason)
+    end
+  end
+
+  # Everything a start's admission can already know, by the functions
+  # admission itself runs, before the Manager is asked and before the owner is
+  # asked to confirm one (`confirmation/2`): readiness, the brief, where its
+  # report goes (`Delivery.snapshot/3`), the request's identity, the grants
+  # (`Grants.resolve/1`) and the call's prompt fitting (`Prompt.render/2`). The
+  # Manager checks the grants and the prompt again, as the authority; nothing
+  # here writes.
+  defp admissible(args, context) do
+    with :ok <- ready(context),
+         {:ok, brief} <- build_brief(args, context),
+         {:ok, snapshot} <-
+           Delivery.snapshot(context, AccessGate.voice_turn?(context), snapshot_opts(context)),
+         {:ok, ids} <- request_ids(context),
+         {:ok, _grantable} <- Grants.resolve(brief.tool_grants),
+         {:ok, _rendered} <- Prompt.render(brief, now: now(context)) do
+      {:ok, %{brief: brief, snapshot: snapshot, ids: ids}}
+    end
+  end
+
+  # What a start answers: the accepted call for the model, and its facts
+  # (`effect`) for the owner who confirmed it (`confirmed/1`).
+  defp started_result(started, snapshot) do
+    started
+    |> accepted(snapshot)
+    |> Jason.encode!()
+    |> Tool.success()
+    |> Map.put(:effect, %{call_id: started.call_id, reused: started.reused})
+  end
+
+  # What a stop says is the call's own (`PhoneCalls.Report.stop_sentence/2`,
+  # `stop_refusal/2`, the sentences the apps' Stop says too), from its row as
+  # it reads after the stop.
+  defp cancelled({:ok, stopped}, call_id, context) do
+    row =
+      case owner_row(call_id, context) do
+        {:ok, row} -> row
+        {:error, _unread} -> nil
+      end
+
+    success(stopped_map(call_id, stopped, Report.stop_sentence(stopped, row)))
+  end
+
+  # The manager found it over: a call whose end is unresolved says so, and
+  # the two ways out of it.
+  defp cancelled({:error, :already_terminal}, call_id, context) do
+    case owner_row(call_id, context) do
+      {:ok, row} -> row |> Report.stop_refusal(now(context)) |> refused()
       {:error, reason} -> error(reason)
     end
   end
+
+  # This process is not the home's running engine, which owns the call.
+  defp cancelled({:error, :owned_by_running_engine}, _call_id, _context),
+    do: error(Report.owned_elsewhere(:stop))
+
+  defp cancelled({:error, reason}, _call_id, _context), do: error(reason)
+
+  # A row the manager found over always has a refusal: none would be a call
+  # not over, which it is not.
+  defp refused(refusal) when is_binary(refusal), do: error(refusal)
+
+  defp owner_row(call_id, context),
+    do: Ledger.get_for_owner(call_id, owner(context), server: repo(context), on_timeout: :error)
 
   # Readiness first: the brief takes the configured caller number, which a
   # call needing setup may not have.
@@ -514,22 +586,8 @@ defmodule FermixCore.Tools.PhoneCall do
       "Accepted here; the call has not been answered. Its result comes back into this " <>
         "conversation when it ends."
 
-  defp stopped_map(call_id, :cancelled),
-    do: %{
-      call_id: call_id,
-      status: "cancelled",
-      detail: "Stopped before dialing; nothing was dialed."
-    }
-
-  defp stopped_map(call_id, :stopping) do
-    %{
-      call_id: call_id,
-      status: "stopping",
-      detail:
-        "Fermix asked the provider to hang up. The call reads stopping until its end is " <>
-          "known, and its report follows. Stopping a call does not undo anything agreed on it."
-    }
-  end
+  defp stopped_map(call_id, stopped, sentence),
+    do: %{call_id: call_id, status: Atom.to_string(stopped), detail: sentence}
 
   defp fetch_call_id(args) do
     case Map.get(args, "call_id") do
@@ -622,7 +680,6 @@ defmodule FermixCore.Tools.PhoneCall do
 
   defp sentence(:missing_call_id), do: "status and cancel need the call's call_id."
   defp sentence(:not_found), do: "No phone call of the owner's has that id."
-  defp sentence(:already_terminal), do: "That call has already ended."
   defp sentence(reason), do: "The phone call failed: #{inspect(reason)}"
 
   defp prompt_part(:input), do: "text"

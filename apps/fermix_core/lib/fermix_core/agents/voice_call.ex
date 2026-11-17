@@ -46,7 +46,7 @@ defmodule FermixCore.Agents.VoiceCall do
 
   # A coding run outlives the call that launched it and reports back into the
   # conversation it was launched from (its delivery snapshot is that
-  # conversation's, `Harness.Delivery.resolve_snapshot/2`). A call in the chat
+  # conversation's, `Delivery.FrozenOrigin.resolve/2`). A call in the chat
   # launches it in the chat's own conversation (M56 §4.7), so its outcome
   # re-enters the chat as a companion turn and is answered there, with no
   # delegation to answer. A private call's conversation ends with the call, so

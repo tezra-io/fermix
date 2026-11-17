@@ -253,7 +253,7 @@ defmodule FermixCore.PhoneCalls.CallTransportTest do
 
     send(
       call.pid,
-      {:phone_call_delegation, call.id, "dlg_e2e_1", request.revision,
+      {:phone_call_delegation, call.id, "dlg_e2e_1",
        {:ok, %{reply: "Thank you, goodbye.", backend_usage: %{"total_tokens" => 640}}}}
     )
 
@@ -320,10 +320,23 @@ defmodule FermixCore.PhoneCalls.CallTransportTest do
       refute_received {:vendor_hangup, _headers}
     end
 
-    test "with no OpenAI key it sends nothing and says why", ctx do
+    # Never sent, so the Manager may send it again (bounded, counted): a boot
+    # before the key resolves must not leave a call up.
+    test "with no OpenAI key it sends nothing, and says it provably never left", ctx do
       Application.put_env(:fermix_core, :providers, [])
 
-      assert {:error, :missing_openai_api_key} =
+      assert {:error, {:not_sent, :openai_api_key_missing}} =
+               CallTransport.manager_hangup(@session, ctx.origins)
+
+      refute_received {:vendor_hangup, _headers}
+    end
+
+    test "a stored key no request could carry is never sent either", ctx do
+      Application.put_env(:fermix_core, :providers,
+        openai: [api_key: "sk-invented\nX-Injected: 1"]
+      )
+
+      assert {:error, {:not_sent, {:invalid, :api_key}}} =
                CallTransport.manager_hangup(@session, ctx.origins)
 
       refute_received {:vendor_hangup, _headers}
@@ -331,7 +344,7 @@ defmodule FermixCore.PhoneCalls.CallTransportTest do
 
     test "over a refused transport it sends nothing and reads no key", ctx do
       # No usable key is stored, so a key read first would answer
-      # `:missing_openai_api_key` instead.
+      # `{:not_sent, :openai_api_key_missing}` instead.
       Application.put_env(:fermix_core, :providers, openai: [api_key: :not_a_key])
 
       assert {:error, {:not_sent, :test_build}} =

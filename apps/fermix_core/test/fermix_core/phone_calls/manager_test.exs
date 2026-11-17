@@ -96,6 +96,19 @@ defmodule FermixCore.PhoneCalls.ManagerTest do
   # `:busy` is an error the store gave; `:unrun` is the Repo turning a late
   # request away (`{:error, :repo_timeout}`); `:landed` runs it, then answers
   # as a caller that gave up on it sees.
+  # A store that never answers: a Repo stalled behind a long write.
+  defmodule SilentStore do
+    use GenServer
+
+    def start_link(_arg), do: GenServer.start_link(__MODULE__, nil)
+
+    @impl true
+    def init(nil), do: {:ok, nil}
+
+    @impl true
+    def handle_call(_request, _from, state), do: {:noreply, state}
+  end
+
   defmodule ScriptedStore do
     use GenServer
 
@@ -701,7 +714,110 @@ defmodule FermixCore.PhoneCalls.ManagerTest do
     end
   end
 
+  describe "a cleanup hang-up for a lost worker" do
+    test "one that provably never left is sent again, bounded, and the count caps it", ctx do
+      test = self()
+
+      manager =
+        start_manager(ctx,
+          hangup: fn session_id ->
+            send(test, {:hangup, session_id})
+            {:error, {:not_sent, :nxdomain}}
+          end,
+          write_schedule: scheduling(test)
+        )
+
+      call = start_call!(manager)
+      {:ok, _row} = session!(call, "sess_unsent_1")
+      assert kill!(call, manager).status == "closure_unconfirmed"
+      assert_receive {:hangup, "sess_unsent_1"}
+
+      for attempt <- 2..(1 + Limits.max_cleanup_retries()) do
+        assert_receive {:scheduled, {:phone_call_retry_cleanup, id, ^attempt} = retry, wait}
+        assert id == call.id
+        assert wait == Limits.cleanup_retry_ms() * Bitwise.bsl(1, attempt - 2)
+        send(manager.pid, retry)
+        assert_receive {:hangup, "sess_unsent_1"}
+      end
+
+      _state = :sys.get_state(manager.pid)
+      refute_received {:scheduled, {:phone_call_retry_cleanup, _id, _attempt}, _wait}
+      assert row!(ctx, call.id).cleanup_attempts == 1 + Limits.max_cleanup_retries()
+    end
+
+    test "one the provider may have seen is never sent again", ctx do
+      test = self()
+
+      manager =
+        start_manager(ctx,
+          hangup: fn session_id ->
+            send(test, {:hangup, session_id})
+            {:error, {:unknown, :timeout}}
+          end,
+          write_schedule: scheduling(test)
+        )
+
+      call = start_call!(manager)
+      {:ok, _row} = session!(call, "sess_unknown_1")
+      assert kill!(call, manager).status == "closure_unconfirmed"
+      assert_receive {:hangup, "sess_unknown_1"}
+      _state = :sys.get_state(manager.pid)
+      refute_received {:scheduled, {:phone_call_retry_cleanup, _id, _attempt}, _wait}
+      assert row!(ctx, call.id).cleanup_attempts == 1
+    end
+  end
+
+  describe "a Manager that is not the home's running engine" do
+    # The daemon's own call: a row this Manager tracks no worker for.
+    test "settles nothing it does not track: a stop, the off switch, the owner's word", ctx do
+      claim = fn id -> {:ok, _row} = Ledger.claim_dispatch(id, @t0, server: ctx.repo) end
+
+      session = fn id ->
+        {:ok, _row} = Ledger.record_session(id, "sess_daemon_1", @t0, server: ctx.repo)
+      end
+
+      live = seed!(ctx, "req-daemon-1", [claim, session])
+      manager = start_manager(ctx, daemon: false, reconcile: false)
+
+      assert {:error, :owned_by_running_engine} =
+               Manager.cancel(live, "default", manager.manager)
+
+      assert %{cancelled: 0, stopping: 0, running_engine: 1} = Manager.disable(manager.manager)
+      assert row!(ctx, live).status == "connecting"
+      refute_received {:hangup, _session}
+
+      {:ok, _row} =
+        Ledger.terminalize(live, "closure_unconfirmed", %{ended_at: @t0}, server: ctx.repo)
+
+      assert {:error, :owned_by_running_engine} =
+               Manager.confirm_ended(live, "default", @t0, manager.manager)
+
+      assert is_nil(row!(ctx, live).slot_released_at)
+    end
+  end
+
   describe "whether a call holds the slot" do
+    # The fact is the ledger's own answer every time, never the row in hand: a
+    # late terminal write for one call cannot free the slot another holds.
+    test "a late terminal write for one call never frees the slot another holds", ctx do
+      store = scripted!(ctx, %{terminalize: [:landed]})
+      manager = start_manager(ctx, repo: store, write_schedule: scheduling(self()))
+      first = start_call!(manager)
+      {:ok, _row} = session!(first, "sess_first_1")
+
+      :ok = in_worker(first, &Manager.report_end(&1.manager, &1.call_id, @confirmed_report))
+      assert_receive {:scheduled, {:phone_call_retry_write, _id, _op, 2} = retry, _wait}
+
+      second = start_call!(manager)
+      assert Manager.slot_held?(@t0, manager.manager)
+
+      send(manager.pid, retry)
+      assert_receive {:telemetry, [:fermix, :phone_call, :run_complete], _measurements, _meta}
+      _state = :sys.get_state(manager.pid)
+      assert Manager.slot_held?(@t0, manager.manager)
+      assert row!(ctx, second.id).status == "admitted"
+    end
+
     test "published at admission and freed by the terminal write", ctx do
       manager = start_manager(ctx)
       _state = :sys.get_state(manager.pid)
@@ -1053,6 +1169,20 @@ defmodule FermixCore.PhoneCalls.ManagerTest do
   end
 
   describe "a store that is off or failing" do
+    test "a store that does not say whether it keeps a ledger stops nothing", ctx do
+      store = start_supervised!(SilentStore, id: :silent_store)
+
+      log =
+        capture_log(fn ->
+          manager = start_manager(ctx, repo: store, reconcile: true)
+          _state = :sys.get_state(manager.pid, 30_000)
+          assert Process.alive?(manager.pid)
+          assert Manager.slot_held?(@t0, manager.manager)
+        end)
+
+      assert log =~ "did not say whether it keeps a ledger"
+    end
+
     test "with durable memory off the boot neither scans nor prunes, and says so once", ctx do
       info_logs!()
       repo = :"phone_manager_off_repo_#{ctx.unique}"

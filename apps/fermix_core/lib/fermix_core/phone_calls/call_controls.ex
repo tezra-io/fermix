@@ -30,10 +30,6 @@ defmodule FermixCore.PhoneCalls.CallControls do
   @spec registry_name() :: atom()
   def registry_name, do: @registry
 
-  @doc "The reasons `finish/4` takes."
-  @spec finish_reasons() :: [finish_reason(), ...]
-  def finish_reasons, do: @finish_reasons
-
   @doc """
   Presses `keys` on the call, for its running backend turn (`handle`). One
   key per event, each consuming one of the call's `Limits.max_dtmf_keys/0`
@@ -65,8 +61,10 @@ defmodule FermixCore.PhoneCalls.CallControls do
   `:cannot_proceed` or `:voicemail` (voicemail or a machine answered). `:ok`
   once taken. The call ends when that turn's answer has been given to the
   voice, or its time is up; on `:voicemail` at once, with nothing said and no
-  message left. `note` is kept with the outcome, cut to whole characters
-  within `Limits.max_finish_note_bytes/0`.
+  message left. `note` is kept with the outcome as given: the caller
+  (`Tools.PhoneCallEnd`) refuses one longer than
+  `Limits.max_finish_note_bytes/0`, and this control refuses it too, never
+  cutting it.
 
   Refused: `:invalid_reason`, `:invalid_note`, `:unknown_call`,
   `:bad_handle`, `:stale_handle`, `:not_active`, `:already_finishing`;
@@ -97,8 +95,8 @@ defmodule FermixCore.PhoneCalls.CallControls do
   defp valid_note(nil), do: {:ok, nil}
 
   defp valid_note(note) when is_binary(note) do
-    if String.valid?(note),
-      do: {:ok, note |> String.trim() |> cut(Limits.max_finish_note_bytes()) |> blank_nil()},
+    if String.valid?(note) and byte_size(note) <= Limits.max_finish_note_bytes(),
+      do: {:ok, blank_nil(note)},
       else: {:error, :invalid_note}
   end
 
@@ -131,19 +129,5 @@ defmodule FermixCore.PhoneCalls.CallControls do
     :exit, {:noproc, _call} -> {:error, :unknown_call}
     :exit, {:timeout, _call} -> {:error, :timeout}
     :exit, {_reason, _call} -> {:error, :call_ended}
-  end
-
-  defp cut(text, max) when byte_size(text) <= max, do: text
-
-  defp cut(text, max) do
-    text
-    |> String.graphemes()
-    |> Enum.reduce_while({[], 0}, fn grapheme, {kept, used} ->
-      next = used + byte_size(grapheme)
-      if next <= max, do: {:cont, {[grapheme | kept], next}}, else: {:halt, {kept, used}}
-    end)
-    |> elem(0)
-    |> Enum.reverse()
-    |> Enum.join()
   end
 end

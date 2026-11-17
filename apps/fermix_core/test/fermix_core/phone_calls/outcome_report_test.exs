@@ -184,7 +184,7 @@ defmodule FermixCore.PhoneCalls.OutcomeReportTest do
   end
 
   # A hand-built outcome past every bound: the least important entries go
-  # first, the rest shorten, and the uncertainty says details were left out.
+  # first, the rest shorten, and the facts' notes say details were left out.
   test "any outcome is fitted, deterministically, in the stated order", ctx do
     huge = String.duplicate("\"", 3_000)
 
@@ -199,7 +199,7 @@ defmodule FermixCore.PhoneCalls.OutcomeReportTest do
         terms: huge,
         reference: huge,
         commitment: "completed",
-        confirmation: "the recipient stated the details"
+        confirmation: "stated"
       },
       basis: %{
         date: :verified,
@@ -209,7 +209,6 @@ defmodule FermixCore.PhoneCalls.OutcomeReportTest do
         reference: :read
       },
       options: List.duplicate(huge, 6),
-      extraction_note: huge,
       excerpts: [%{speaker: :remote, text: "Yes, it's booked", start_ms: 0, end_ms: 1}],
       uncertainty: String.duplicate("u", 600)
     }
@@ -222,11 +221,12 @@ defmodule FermixCore.PhoneCalls.OutcomeReportTest do
              Ledger.report_bounds().facts_json_bytes
 
     assert byte_size(report.uncertainty) <= Ledger.report_bounds().text_bytes
-    assert report.uncertainty =~ Outcome.reason(:details_left_out)
+    assert report.uncertainty == String.duplicate("u", Ledger.report_bounds().text_bytes)
+    assert report.outcome_facts["notes"] == ["details_left_out"]
 
     facts = report.outcome_facts
 
-    for left_out <- ~w(extraction_note options terms party reference),
+    for left_out <- ~w(options terms party reference),
         do: refute(Map.has_key?(facts, left_out))
 
     assert %{

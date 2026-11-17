@@ -1108,7 +1108,7 @@ daemon onto anything else.
 | `doctor.cancel` | `session_id` | The terminal session view. Cancelling a finished session is a no-op, not an error. |
 | `logs.query` | `limit`, `level`, `subsystem`, `search`, `direction`, `cursor` | A bounded page of redacted entries plus the opaque cursor for the next page in the same direction. |
 | `lifecycle.prepare` | none | `lease_id` and the relative `ttl_ms` of the single drain window. |
-| `lifecycle.prepare_restart` | none | The owner's own restart (`fermix restart`, the apps' restart to apply): the same window and answer as `lifecycle.prepare`, refused with `unavailable` {`capability`: `phone_calls`, `sentence`} while a phone call is in progress, since the restart would hang it up with no outcome read; the sentence says how to go on, and no window opens. An update, a move or a disable takes `lifecycle.prepare`, which no call holds. A daemon that does not publish it runs no phone calls, so a client asks it for `lifecycle.prepare`. Minimum version `2`. |
+| `lifecycle.prepare_restart` | none | The owner's own restart (`fermix restart`, the apps' restart to apply): the same window and answer as `lifecycle.prepare`, refused with `unavailable` {`capability`: `phone_calls`, `sentence`} while a phone call is positively in progress (its worker runs), since the restart would hang it up with no outcome read; the sentence says how to go on, and no window opens. A call record left not ended with no worker, or call records that cannot be read, do not refuse it: those are what a restart clears, and the engine's stop hangs up any live call first. An update, a move or a disable takes `lifecycle.prepare`, which no call holds. A daemon that does not publish it runs no phone calls, so a client asks it for `lifecycle.prepare`. Minimum version `2`. |
 | `lifecycle.commit` | `lease_id` | Runs the daemon's shutdown path and answers before the VM stops. |
 | `lifecycle.cancel` | `lease_id` | Releases the window with the daemon untouched. |
 | `diagnostics.build` | none | A bounded, field-allowlisted, scrubbed diagnostic object for user-selected export. |
@@ -1233,9 +1233,9 @@ daemon onto anything else.
 | `accessories.set` | `accessory_id`, `volume`, `brightness` (each 0 to 100), `motion` (boolean, robots with head motion only), at least one | Changes the robot's own settings and answers the status; the robot reports the values it took in `state`. An owner decision. Device-class. Minimum version `2`. |
 | `phone_calls.status` | none | Phone calls as they stand (see *Phone calls*): `enabled`, `readiness` (`ready`, and each `missing` requirement with its sentence, read as if phone calls were on), `call` (the owner's call holding the one-call slot, or null), the `summary` (`state`, `label`, `sentence`) and the `engine` that calls. Answered with phone calls off. The home's: a linked computer forwards it, and a device with no link refuses it as retired. Minimum version `2`. |
 | `phone_calls.list` | none | The owner's recent calls, newest first, at most 20, each a call view: state, outcome, uncertainty and the three costs labelled apart. No destination number. With durable memory off, `unavailable` {`capability`: `phone_calls`, `sentence`}. Placed as `phone_calls.status`. Minimum version `2`. |
-| `phone_calls.stop` | `call_id` | The owner's stop of a call in progress, the path the `phone_call` tool's cancel takes: one not yet dialed ends with nothing dialed (`stop`: `cancelled`), one dialed is asked to end and reads `stopping` until its end is known (`stop`: `stopping`). Answers `{stop, sentence, call}`. Another owner's id, or none the ledger holds, is `invalid_params` on `call_id` with the sentence; a call already over is `unavailable` {`capability`: `phone_calls`, `sentence`}, which for an unresolved call says its termination is unconfirmed and points to the portal. An owner decision. Placed as `phone_calls.status`. Minimum version `2`. |
+| `phone_calls.stop` | `call_id` | The owner's stop of a call in progress, the path the `phone_call` tool's cancel takes: one not yet dialed ends with nothing dialed (`stop`: `cancelled`), one dialed is asked to end and reads `stopping` until its end is known (`stop`: `stopping`). Answers `{stop, sentence, call}`. Another owner's id, or none the ledger holds, is `invalid_params` on `call_id` with the sentence; a call already over is `unavailable` {`capability`: `phone_calls`, `sentence`}, which for an unresolved call says its end is unresolved, that it holds the call slot and the two ways out. A process that is not the home's running engine (a setup page served from another tree, a command that booted one) owns none of the daemon's calls: its stop is `unavailable` with the sentence saying the call is stopped in the Fermix that is running. An owner decision. Placed as `phone_calls.status`. Minimum version `2`. |
 | `phone_calls.recovery.get` | none | Every unresolved call of the owner's (whether it was placed is unknown, or its end is unconfirmed) that still holds the slot, with what is known of it and the steps at Telnyx meanwhile (see *Phone calls*). Placed as `phone_calls.status`. Minimum version `2`. |
-| `phone_calls.recovery.confirm` | `call_id` | The owner's word that an unresolved call has ended, which they checked in their Telnyx portal: its slot is released, recorded on the call with the reason `owner_confirmed` and the time, and its outcome stays `unknown`. Answers `{sentence, call}`. If the owner is wrong, a second call can be placed while the first is still up, and the carrier's one-channel limit bounds it. Only a call whose termination is unconfirmed and that still holds the slot: one in progress, one already over or released, and one past OpenAI's own limit are `unavailable` {`capability`: `phone_calls`, `sentence`}; another owner's is `invalid_params` on `call_id`. An owner decision, in the apps and `fermix settings phone-calls confirm-ended` alone: no tool reaches it. Placed as `phone_calls.status`. Minimum version `2`. |
+| `phone_calls.recovery.confirm` | `call_id` | The owner's word that an unresolved call has ended, which they checked in their Telnyx portal: its slot is released, recorded on the call with the reason `owner_confirmed` and the time; the outcome already recorded for the call is unchanged. Answers `{sentence, call}`. If the owner is wrong, a second call can be placed while the first is still up, bounded by the connection's one channel if the owner set it as the setup asks. Only a call whose termination is unconfirmed and that still holds the slot: one in progress, one already over or released, and one past OpenAI's own limit are `unavailable` {`capability`: `phone_calls`, `sentence`}, as is the word given to a process that is not the home's running engine (its end is confirmed in the Fermix that is running); another owner's is `invalid_params` on `call_id`. An owner decision, in the apps and `fermix settings phone-calls confirm-ended` alone: no tool reaches it. Placed as `phone_calls.status`. Minimum version `2`. |
 
 Notes that the shapes alone do not carry:
 
@@ -2668,7 +2668,9 @@ with the owner's sentence, and nothing is written.
 the section is written first, and only once that write has landed does the
 switch take effect, with no restart. Off closes admission, ends a call not yet
 dialed with nothing dialed and asks a call in progress to end, and
-`side_effects` says each in the owner's words; on reopens admission and
+`side_effects` says each in the owner's words (from a process that is not
+the home's running engine, that the running engine still has its calls and
+applies the switch when it reads the setting); on reopens admission and
 nothing else, so an unresolved call keeps its slot, nothing is redialed, and
 `side_effects` says when an earlier call still holds the slot. A write the
 settings file refuses (`external_change`, `config_unreadable`) changes
@@ -2683,8 +2685,8 @@ the call reads both, and its hang-up reads the key. So does
 `lifecycle.prepare_restart`, the owner's restart, which would hang the call
 up with no outcome read. The switch's footer says what the owner accepts by
 turning phone calls on: a call Fermix loses hold of can run to OpenAI's own
-limit, with the connection's daily spend limit behind it, and what is kept of
-a call and for how long. A trunk password longer
+limit, bounded by a daily spend limit on the connection if the owner set one
+as the setup asks, and what is kept of a call and for how long. A trunk password longer
 than 4096 bytes, or with a line break or NUL in it, is `invalid_params` on
 `value`.
 
@@ -2700,9 +2702,18 @@ carry the call's live control connection, which cannot tunnel),
 release always configures one), each with its sentence; a SpaceXAI key never
 satisfies the OpenAI one), and the call
 holding the one-call slot (`call`). The summary's `state` reads them as one
-word, the call first: `calling`, `stopping` (it was asked to end), or
+word, the call first: `calling`, `stopping` (it was asked to end),
+`placement_unknown` (OpenAI never said whether it placed the call) or
 `termination_unconfirmed` while an uncertain call holds the slot, whether
-phone calls are on or off; then `disabled`, `needs_setup` and `ready`.
+phone calls are on or off; then `disabled`, `needs_setup` and `ready`. The
+section's status row shows the summary's `label`, or `Unreadable` with the
+sentence when the call records cannot be read.
+
+**Who a sentence speaks to.** A call's sentences (its report, its call
+view, a stop and its refusal) are the ones a model relays to the owner and
+the apps show alike, so they never address their reader: they name the
+owner, or say what happened. Only this family's own sentences for the owner
+in a settings surface (what they can do, what their write did) say "you".
 
 **A call view.** `phone_calls.list`, `phone_calls.stop`,
 `phone_calls.recovery.confirm` and the status's `call` carry one shape, in
@@ -2710,14 +2721,16 @@ the words the call's own report uses (one view of the call renders both):
 `call_id`, `state` (the ledger's, or `stopping` for a call not yet over that
 was asked to end), `placed` (`yes`, `no`: nothing reached OpenAI or it
 refused, or `unknown`: OpenAI never said), `contact_name`,
-`destination_kind` (`owner` or `business`), `outcome` and its sentence,
+`destination_kind` (`owner` or `business`), `outcome` and its sentence
+(null for a call never placed, which the state's sentence already says),
 `uncertain` (the remote call is not proven gone: `dispatch_unknown`,
 `closure_unconfirmed`), `holds_slot`, the state's `sentence`, `slot` (for a
 call whose termination is unconfirmed, how it holds the slot and how that
 ends, else null), `usage` (the voice time and how sure it is, the carrier's
-charges, which only Telnyx knows, and the backend turns and cost, each with
-its sentence, unknown never zero; a call never placed claims none, so its
-sentences and `voice_state` are null), `why_stopped` (one sentence per
+charges, which only Telnyx knows, and the backend turns and the tokens they reported (`backend_tokens`, null
+where none reported any; no turn reports a cost), each with its sentence,
+unknown never zero; a call never placed claims none, so its sentences and
+`voice_state` are null), `why_stopped` (one sentence per
 failure the engine wrote, null for an ordinary end), `failure_reason` (the
 engine's code, for support, never prose to show), `vendor_message` (OpenAI's
 own words as one line, outside text), `report` and the two times. It carries
@@ -2731,10 +2744,12 @@ they are really known (null otherwise, never derived), `slot_release_at`
 connected limit), the state's `sentence`, the `release` sentence, and
 `containment`: the owner's steps at Telnyx (end the call or turn the
 connection off in the Telnyx portal; the connection's daily spend limit and
-its one channel bound it meanwhile; once the portal shows it ended, the owner
-confirms it). Two things release the slot: the owner's word that the call
-ended (`phone_calls.recovery.confirm`), and OpenAI's limit passing. Verified
-termination releases it too. Nothing else on this wire marks a call ended.
+its one channel, if the owner set them as the setup asks, bound it meanwhile;
+once the portal shows it ended, the owner confirms it). Two things release
+the slot: the owner's word that the call ended
+(`phone_calls.recovery.confirm`), which leaves the outcome already recorded
+unchanged, and OpenAI's limit passing. Nothing else on this wire marks a
+call ended.
 
 ## Error codes
 

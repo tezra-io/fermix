@@ -17,6 +17,7 @@ defmodule FermixChannels.Application do
   alias FermixChannels.Mobile.Supervisor, as: MobileSupervisor
   alias FermixCore.Home.DesktopLink
   alias FermixCore.Home.Role
+  alias FermixCore.PhoneCalls.Manager, as: PhoneCallsManager
   alias FermixCore.Readiness
   alias FermixCore.Setup.ConfigStore
 
@@ -25,6 +26,16 @@ defmodule FermixChannels.Application do
   @compiled_env Mix.env()
   @held_key {__MODULE__, :held_at_boot}
   @started_key {__MODULE__, :started}
+
+  # An orderly stop stops this application before the core it needs, and
+  # with it the backend a phone call's turns run on, so the call in progress
+  # is drained here first (`FermixCore.PhoneCalls.Manager.drain_for_stop/0`,
+  # which answers at once when the web application drained it already).
+  @impl true
+  def prep_stop(state) do
+    _drained = PhoneCallsManager.drain_for_stop()
+    state
+  end
 
   @impl true
   def start(_type, _args) do

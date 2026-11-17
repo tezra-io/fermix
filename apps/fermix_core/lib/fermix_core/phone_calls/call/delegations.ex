@@ -7,8 +7,9 @@ defmodule FermixCore.PhoneCalls.Call.Delegations do
 
   A delegation id is taken once: the same id again is a duplicate whether it
   is running, waiting, finished or was refused, so one request never runs two
-  turns. Live delegations carry no revised text, so every record runs under
-  revision 1; the revision still rides with each turn and fences its answer.
+  turns, and an answer is current only while its delegation's record runs.
+  GPT-Live delegations are never revised (decision D3), so a record is its id
+  and its turn's handle.
 
   Each started turn gets its own handle, minted by the worker. A control a
   turn presents is accepted only for a running record's handle; a handle of a
@@ -16,9 +17,10 @@ defmodule FermixCore.PhoneCalls.Call.Delegations do
   other `:bad_handle`. Handles are compared in constant time.
 
   Both remembered lists are bounded (`Limits.max_remembered_delegations/0`):
-  an id or handle past the bound is forgotten, the oldest first. Every started turn consumes one of
-  the call's `Limits.max_core_turns_per_call/0`, so the handles never reach
-  it; the ids are bounded against a stream of delegation events.
+  an id or handle past the bound is forgotten, the oldest first. Every started
+  turn consumes one of the call's `Limits.max_core_turns_per_call/0`, so the
+  handles never reach it; the ids are bounded against a stream of delegation
+  events.
 
   Why not `Realtime.LiveDelegation`, whose two-slot rule this is: the rule is
   the same, but its record is not. LiveDelegation fixes one running and one
@@ -34,11 +36,9 @@ defmodule FermixCore.PhoneCalls.Call.Delegations do
 
   alias FermixCore.PhoneCalls.Limits
 
-  @revision 1
-
   defstruct active: [], pending: [], seen: [], retired: []
 
-  @type record :: %{id: String.t(), revision: pos_integer(), handle: String.t() | nil}
+  @type record :: %{id: String.t(), handle: String.t() | nil}
   @type t :: %__MODULE__{
           active: [record()],
           pending: [record()],
@@ -59,7 +59,7 @@ defmodule FermixCore.PhoneCalls.Call.Delegations do
   @spec create(t(), String.t()) ::
           {:active | :pending, record(), t()} | {:full, t()} | {:duplicate, t()}
   def create(%__MODULE__{} = state, id) when is_binary(id) and id != "" do
-    record = %{id: id, revision: @revision, handle: nil}
+    record = %{id: id, handle: nil}
     seen = remember(state.seen, id)
 
     cond do
@@ -87,13 +87,13 @@ defmodule FermixCore.PhoneCalls.Call.Delegations do
   end
 
   @doc """
-  Ends a running record, only when `id` and `revision` are current:
-  `{:ok, record, state}`, its handle retired; `:stale` for anything else, so
-  a late or repeated answer changes nothing.
+  Ends a running record, only when `id` runs: `{:ok, record, state}`, its
+  handle retired; `:stale` for anything else, so a late or repeated answer
+  changes nothing.
   """
-  @spec finish(t(), String.t(), pos_integer()) :: {:ok, record(), t()} | :stale
-  def finish(%__MODULE__{} = state, id, revision) when is_binary(id) and is_integer(revision) do
-    case Enum.split_with(state.active, &(&1.id == id and &1.revision == revision)) do
+  @spec finish(t(), String.t()) :: {:ok, record(), t()} | :stale
+  def finish(%__MODULE__{} = state, id) when is_binary(id) do
+    case Enum.split_with(state.active, &(&1.id == id)) do
       {[record], others} -> {:ok, record, retire(%{state | active: others}, [record])}
       {[], _others} -> :stale
     end
@@ -115,14 +115,10 @@ defmodule FermixCore.PhoneCalls.Call.Delegations do
     {state.active, retire(%{state | active: [], pending: []}, state.active)}
   end
 
-  @doc "Whether `id` and `revision` name a running record."
-  @spec current?(t(), String.t(), pos_integer()) :: boolean()
-  def current?(%__MODULE__{} = state, id, revision),
-    do: Enum.any?(state.active, &(&1.id == id and &1.revision == revision))
-
-  @doc "Whether anything runs or waits."
-  @spec busy?(t()) :: boolean()
-  def busy?(%__MODULE__{active: active, pending: pending}), do: active != [] or pending != []
+  @doc "Whether `id` names a running record."
+  @spec current?(t(), String.t()) :: boolean()
+  def current?(%__MODULE__{} = state, id) when is_binary(id),
+    do: Enum.any?(state.active, &(&1.id == id))
 
   @doc """
   The running record whose turn presented `handle`, or why there is none:
@@ -139,7 +135,7 @@ defmodule FermixCore.PhoneCalls.Call.Delegations do
 
   def check_handle(%__MODULE__{}, _handle), do: {:error, :bad_handle}
 
-  @doc "The slots as a status prints them: counts, ids and revisions, never a handle."
+  @doc "The slots as a status prints them: counts and ids, never a handle."
   @spec printable(t()) :: map()
   def printable(%__MODULE__{} = state) do
     %{
@@ -152,10 +148,6 @@ defmodule FermixCore.PhoneCalls.Call.Delegations do
 
   defp printable_record(%{handle: nil} = record), do: record
   defp printable_record(record), do: %{record | handle: :redacted}
-
-  @doc "The revision every phone delegation runs under."
-  @spec revision() :: pos_integer()
-  def revision, do: @revision
 
   defp retire(state, records) do
     handles = for %{handle: handle} <- records, is_binary(handle), do: handle

@@ -28,9 +28,11 @@ defmodule FermixCore.PhoneCalls.Manager do
       recorded, its outcome `unknown` with a note that what was said was never
       read (for a refused end report: could not be stored), no hang-up, the
       slot free; dispatch claimed with no session id → `dispatch_unknown`; a
-      known provider session → `closure_unconfirmed`, and this process's one
+      known provider session → `closure_unconfirmed`, and this process's
       cleanup request for that session through the injected `:hangup`,
-      asynchronously, only when the row counts no hang-up request already.
+      asynchronously, only when the row counts no hang-up request already,
+      sent again only while it provably never left
+      (`Limits.max_cleanup_retries/0`, each counted on the row first).
       Nothing is ever redialed, and supervision never restarts a worker.
     * **A ledger that does not answer.** Every `Ledger` call answers
       `{:error, :timeout}` instead of exiting. A terminal write the ledger
@@ -41,19 +43,24 @@ defmodule FermixCore.PhoneCalls.Manager do
       row it committed late after all fails with nothing dialed. A count that
       pays for a side effect (the cleanup's) sends nothing unless written.
     * **Whether a call holds the slot** is published for turns to read
-      without a call into this process (`slot_held?/2`): from the ledger at
-      boot, and from the row in hand at admission and each terminal write.
+      without a call into this process (`slot_held?/2`): always the ledger's
+      own answer, read at boot, at admission, at each terminal write and at
+      the owner's release, never a row in hand.
     * **Cancel (`cancel/3`)** stops new work: a call not yet dispatched ends at
       once with nothing dialed (its later dispatch claim fails); a dispatched
-      one is asked to stop and reads `stopping` until its end is known.
+      one is asked to stop and reads `stopping` until its end is known. A
+      Manager that is not the home's daemon (`daemon: false`, a command that
+      booted the tree) stops only a call it tracks itself, and answers
+      `{:error, :owned_by_running_engine}` for any other, as it does for the
+      owner's word that a call ended.
     * **The off switch (`disable/1`)**, serialized with admission here: no new
       start, admitted work that has not dispatched ends with nothing dialed,
       a live call is asked to stop. Cleanup, status, recovery and report
       delivery stay alive. `enable/1` reopens admission and nothing else: it
       releases no uncertain slot and redials nothing.
-    * **The orderly stop's drain (`drain/1`)**, which
-      `FermixCore.Application.prep_stop/1` runs before the tree, the Repo and
-      the network stack stop: admission closes for good, work not yet
+    * **The orderly stop's drain (`drain/1`)**, which `drain_for_stop/0`
+      runs from the `prep_stop/1` of whichever application stops first, before
+      any tree, the Repo or the network stack stops: admission closes for good, work not yet
       dispatched ends with nothing dialed, and a live call is asked to end
       (`cancel(pid, :shutdown)`, so it reports the engine's stop, not the
       owner's); the drain answers once every call has reported its end, or at
@@ -147,6 +154,10 @@ defmodule FermixCore.PhoneCalls.Manager do
   alias FermixCore.PhoneCalls.Telemetry
 
   @end_statuses ~w(ended failed dispatch_unknown closure_unconfirmed)
+  # What the off switch did: calls it ended with nothing dialed, calls it asked
+  # to stop, and calls it left to the home's running engine.
+  @no_stops %{cancelled: 0, stopping: 0, running_engine: 0}
+  @cleanup_resends Limits.max_cleanup_retries()
   # The uncertainty note of a call settled by its recorded closure.
   @closed_unread "The call ended, but what was said was never read, so the result is unknown."
   @closed_unstored "The call ended, but its result could not be stored, so it is unknown."
@@ -248,7 +259,7 @@ defmodule FermixCore.PhoneCalls.Manager do
   The owner's word that their unresolved call ended, which they checked in
   their Telnyx portal (`Management.PhoneCalls.confirm_ended/2`, M94 §12): the
   slot is released with the reason `owner_confirmed` at `now`
-  (`Ledger.release_slot/4`), the outcome stays `unknown`, and the published
+  (`Ledger.release_slot/4`), the outcome already recorded is unchanged, and the published
   slot fact (`slot_held?/2`) is read again, so admission and the `phone_call`
   tool see the slot free. Only the owner's own call whose termination is
   unconfirmed and that still holds the slot: `:not_found` for another
@@ -272,17 +283,53 @@ defmodule FermixCore.PhoneCalls.Manager do
   never in the Manager's: `:idle` when no call is in progress (or no Manager
   runs), at once; `:drained` once every call has reported its end;
   `{:timeout, call_ids}` when `Limits.shutdown_drain_ms/0` passed first, the
-  rows left for the next boot; `{:no_answer, reason}` when the Manager died
-  or gave no answer within the bound and a margin.
+  rows left for the next boot; `:already_drained` at once when an earlier
+  drain of this engine's stop already ran; `{:no_answer, reason}` when the
+  Manager died or gave no answer within the bound and a margin.
   """
   @spec drain(GenServer.server()) ::
-          :idle | :drained | {:timeout, [String.t()]} | {:no_answer, term()}
+          :idle
+          | :drained
+          | :already_drained
+          | {:timeout, [String.t()]}
+          | {:no_answer, term()}
   def drain(server \\ __MODULE__) do
     case GenServer.whereis(server) do
       nil -> :idle
       pid when is_pid(pid) -> await_drain(pid)
     end
   end
+
+  @doc """
+  The engine's orderly stop's drain, as every application that can stop
+  first calls it from its own `prep_stop/1` (the web application, the
+  channels application and the core). Applications stop in reverse start
+  order and each starts after the ones it needs, so whichever of them stops
+  first runs the drain while every application's tree, the call's backend
+  among them, still runs; the later calls answer `:already_drained` at once.
+  It drains the Manager `config :fermix_core, :phone_calls_stop_manager`
+  names (a test's seam; this module otherwise), and says what it found once.
+  """
+  @spec drain_for_stop() ::
+          :idle
+          | :drained
+          | :already_drained
+          | {:timeout, [String.t()]}
+          | {:no_answer, term()}
+  def drain_for_stop do
+    :fermix_core
+    |> Application.get_env(:phone_calls_stop_manager, __MODULE__)
+    |> drain()
+    |> tap(&log_stop_drain/1)
+  end
+
+  defp log_stop_drain(result) when result in [:idle, :already_drained], do: :ok
+
+  defp log_stop_drain(:drained),
+    do: Logger.info("engine stop: the phone call in progress ended before the stop")
+
+  defp log_stop_drain(other),
+    do: Logger.warning("engine stop: phone calls not drained (#{inspect(other)})")
 
   defp await_drain(pid) do
     ref = Process.monitor(pid)
@@ -392,6 +439,11 @@ defmodule FermixCore.PhoneCalls.Manager do
 
   def handle_info(:phone_call_prune, %{store?: false} = state), do: {:noreply, state}
   def handle_info(:phone_call_prune, state), do: {:noreply, state |> prune() |> arm_prune()}
+
+  def handle_info({:phone_call_retry_cleanup, call_id, attempt}, state)
+      when is_binary(call_id) and is_integer(attempt) do
+    {:noreply, retry_cleanup(call_id, attempt, state)}
+  end
 
   def handle_info({:phone_call_retry_write, call_id, op, attempt}, state)
       when is_binary(call_id) and is_integer(attempt) do
@@ -536,7 +588,7 @@ defmodule FermixCore.PhoneCalls.Manager do
     case DynamicSupervisor.start_child(state.call_supervisor, child_spec(row, brief, state)) do
       {:ok, pid} ->
         {{:ok, %{call_id: row.id, state: row.status, reused: false}},
-         row |> track(pid, state) |> note_slot(row)}
+         row |> track(pid, state) |> refresh_slot_fact()}
 
       {:error, reason} ->
         start_failed(row, reason, state)
@@ -812,8 +864,8 @@ defmodule FermixCore.PhoneCalls.Manager do
     case Task.Supervisor.start_child(state.handoff_supervisor, fn ->
            Delivery.hand_off(row, opts)
          end) do
-      {:ok, _pid} -> note_slot(state, row)
-      {:error, reason} -> row |> log_handoff_unstarted(reason, state) |> note_slot(row)
+      {:ok, _pid} -> refresh_slot_fact(state)
+      {:error, reason} -> row |> log_handoff_unstarted(reason, state) |> refresh_slot_fact()
     end
   end
 
@@ -918,14 +970,16 @@ defmodule FermixCore.PhoneCalls.Manager do
 
   # One cleanup request for a known session, consumed on the row before the
   # request goes out, and run outside this process. A count the ledger refuses
-  # or does not answer sends nothing.
-  defp request_cleanup(state, %{id: call_id, provider_session_id: session_id}) do
+  # or does not answer (its cap among them) sends nothing.
+  defp request_cleanup(state, row), do: request_cleanup(state, row, 1)
+
+  defp request_cleanup(state, %{id: call_id, provider_session_id: session_id}, attempt) do
     with {:ok, _row} <- Ledger.consume(call_id, :cleanup_attempts, server: state.repo),
          %Task{ref: ref} <-
            Task.Supervisor.async_nolink(state.handoff_supervisor, fn ->
              state.hangup.(session_id)
            end) do
-      %{state | cleanups: Map.put(state.cleanups, ref, call_id)}
+      %{state | cleanups: Map.put(state.cleanups, ref, {call_id, attempt})}
     else
       other -> log_cleanup_unsent(call_id, other, state)
     end
@@ -939,19 +993,53 @@ defmodule FermixCore.PhoneCalls.Manager do
   defp cleanup_result(ref, result, state) do
     case Map.pop(state.cleanups, ref) do
       {nil, _cleanups} -> state
-      {call_id, cleanups} -> record_cleanup(call_id, result, ref, %{state | cleanups: cleanups})
+      {entry, cleanups} -> record_cleanup(entry, result, ref, %{state | cleanups: cleanups})
     end
   end
 
-  defp record_cleanup(call_id, result, ref, state) do
+  # A request that provably never left (`{:not_sent, _}`) is sent again, after
+  # `Limits.cleanup_retry_ms/0` doubling, while `Limits.max_cleanup_retries/0`
+  # allows; one the provider accepted, refused or may have seen never is.
+  defp record_cleanup({call_id, attempt}, result, ref, state) do
     Process.demonitor(ref, [:flush])
 
     case result do
-      :ok -> Logger.info("phone call #{call_id} hang-up requested for its known session")
-      {:error, reason} -> record_cleanup_error(call_id, reason, state)
-    end
+      :ok ->
+        Logger.info("phone call #{call_id} hang-up requested for its known session")
+        state
 
+      {:error, {:not_sent, _why} = reason} ->
+        call_id |> record_cleanup_error(reason, state) |> resend_cleanup(call_id, attempt)
+
+      {:error, reason} ->
+        record_cleanup_error(call_id, reason, state)
+    end
+  end
+
+  defp resend_cleanup(state, call_id, attempt) when attempt <= @cleanup_resends do
+    wait = Limits.cleanup_retry_ms() * Bitwise.bsl(1, attempt - 1)
+    _timer = state.write_schedule.({:phone_call_retry_cleanup, call_id, attempt + 1}, wait)
     state
+  end
+
+  defp resend_cleanup(state, call_id, attempt) do
+    Logger.warning("phone call #{call_id} cleanup hang-up not sent after #{attempt} tries")
+    state
+  end
+
+  # The resend reads the row again, so a call that ended meanwhile, or a count
+  # at its cap, sends nothing.
+  defp retry_cleanup(call_id, attempt, state) do
+    case Ledger.get(call_id, opts(state)) do
+      {:ok, %{provider_session_id: session} = row} when is_binary(session) ->
+        request_cleanup(state, row, attempt)
+
+      {:ok, _row} ->
+        state
+
+      {:error, reason} ->
+        log_cleanup_unsent(call_id, reason, state)
+    end
   end
 
   defp cleanup_down(ref, reason, state) do
@@ -959,7 +1047,7 @@ defmodule FermixCore.PhoneCalls.Manager do
       {nil, _cleanups} ->
         state
 
-      {call_id, cleanups} ->
+      {{call_id, _attempt}, cleanups} ->
         record_cleanup_error(call_id, {:cleanup_crashed, reason}, %{state | cleanups: cleanups})
     end
   end
@@ -982,10 +1070,14 @@ defmodule FermixCore.PhoneCalls.Manager do
     end
   end
 
+  # A Manager that is not the home's running engine (a command that booted
+  # the tree in a process of its own) tracks no worker of the daemon's, so it
+  # settles nothing it does not track: the running engine owns that call.
   defp cancel_row(%{status: status} = row, why, state) do
     cond do
       Ledger.terminal?(status) -> {{:error, :already_terminal}, state}
       Map.has_key?(state.calls, row.id) -> stop_tracked(row, why, state)
+      not state.daemon? -> {{:error, :owned_by_running_engine}, state}
       true -> stop_untracked(row, why, state)
     end
   end
@@ -1047,6 +1139,10 @@ defmodule FermixCore.PhoneCalls.Manager do
   defp stop_reason(:shutdown), do: "engine_stopped"
 
   # --- the orderly stop's drain ---------------------------------------------------
+
+  # The engine's stop drains once: a later request answers at once.
+  defp begin_drain(waiter, %{stopping?: true} = state),
+    do: answer_drain([waiter], :already_drained, state)
 
   defp begin_drain(waiter, state) do
     state = %{state | admission: :stopping}
@@ -1111,17 +1207,27 @@ defmodule FermixCore.PhoneCalls.Manager do
 
   defp disable_calls(state) do
     case Ledger.unsettled(server: state.repo) do
-      {:ok, rows} -> Enum.reduce(rows, {%{cancelled: 0, stopping: 0}, state}, &disable_row/2)
+      {:ok, rows} -> Enum.reduce(rows, {@no_stops, state}, &disable_row/2)
       {:error, reason} -> disable_scan_failed(reason, state)
     end
   end
 
   defp disable_row(row, {counts, state}) do
     case cancel_row(row, :disabled, state) do
-      {{:ok, :cancelled}, state} -> {Map.update!(counts, :cancelled, &(&1 + 1)), state}
-      {{:ok, :stopping}, state} -> {Map.update!(counts, :stopping, &(&1 + 1)), state}
-      {{:error, :already_terminal}, state} -> {counts, state}
-      {{:error, reason}, state} -> {counts, log_terminal_error(row.id, reason, state)}
+      {{:ok, :cancelled}, state} ->
+        {Map.update!(counts, :cancelled, &(&1 + 1)), state}
+
+      {{:ok, :stopping}, state} ->
+        {Map.update!(counts, :stopping, &(&1 + 1)), state}
+
+      {{:error, :already_terminal}, state} ->
+        {counts, state}
+
+      {{:error, :owned_by_running_engine}, state} ->
+        {Map.update!(counts, :running_engine, &(&1 + 1)), state}
+
+      {{:error, reason}, state} ->
+        {counts, log_terminal_error(row.id, reason, state)}
     end
   end
 
@@ -1130,7 +1236,7 @@ defmodule FermixCore.PhoneCalls.Manager do
   defp disable_scan_failed(reason, state) do
     Logger.error("phone calls disabled, but the ledger scan failed: #{inspect(reason)}")
     Enum.each(state.calls, fn {call_id, _call} -> notify_worker(call_id, :disabled, state) end)
-    {%{cancelled: 0, stopping: map_size(state.calls)}, state}
+    {%{@no_stops | stopping: map_size(state.calls)}, state}
   end
 
   # --- reconciliation and retention ---------------------------------------------
@@ -1149,8 +1255,24 @@ defmodule FermixCore.PhoneCalls.Manager do
 
   # Whether this home keeps a ledger at all, decided once: the Repo's own
   # answer, which holds for the life of this subtree (a Repo restart restarts
-  # it too).
-  defp with_store(state), do: %{state | store?: Repo.enabled?(server: state.repo)}
+  # it too). A Repo that does not answer is `:unanswered`, as any ledger call
+  # that does not answer: the boot's reconciliation and prune are left to
+  # the next boot, and the slot reads as held.
+  defp with_store(state) do
+    case Repo.enabled?(server: state.repo, on_timeout: :error) do
+      enabled when is_boolean(enabled) -> %{state | store?: enabled}
+      {:error, :repo_timeout} -> %{state | store?: :unanswered}
+    end
+  end
+
+  defp boot(%{store?: :unanswered} = state) do
+    Logger.warning(
+      "phone calls: the store did not say whether it keeps a ledger; boot reconciliation " <>
+        "is left for the next boot"
+    )
+
+    state |> refresh_slot_fact() |> arm_prune()
+  end
 
   defp boot(%{store?: false} = state) do
     Logger.info("phone calls: durable memory is off, so there is no call ledger to reconcile")
@@ -1193,6 +1315,9 @@ defmodule FermixCore.PhoneCalls.Manager do
 
   # --- the owner's word that a call ended -------------------------------------------
 
+  defp release_on_owners_word(_call_id, _owner_id, _now, %{daemon?: false}),
+    do: {:error, :owned_by_running_engine}
+
   defp release_on_owners_word(call_id, owner_id, now, state) do
     with {:ok, row} <- Ledger.get_for_owner(call_id, owner_id, opts(state)),
          :ok <- confirmable(row, now) do
@@ -1211,14 +1336,17 @@ defmodule FermixCore.PhoneCalls.Manager do
   # --- whether a call holds the slot -------------------------------------------------
 
   # Published where a turn reads it without a call here (`slot_held?/2`), by
-  # one rule (`publish_rows/2`) over the rows that hold the slot: read from
-  # the ledger at boot (`Ledger.outstanding/2`), and the row in hand at
-  # admission and at each terminal write, the one-call slot's own holder. As
+  # one function (`refresh_slot_fact/1`): the ledger's own answer to which
+  # rows hold the slot (`Ledger.outstanding/2`), read at boot, at admission,
+  # at each terminal write and at the owner's release, never a row in hand,
+  # so a write that lands late for one call cannot free the slot another
+  # holds. As
   # `:free`, `:held` (a call not yet terminal) or the unix millisecond an
   # uncertain call's slot expires: immediates, so publishing one triggers no
   # global garbage collection. A ledger that does not answer publishes
   # `:held`: status and stop stay offered, never start.
   defp refresh_slot_fact(%{store?: false} = state), do: publish_slot(state, :free)
+  defp refresh_slot_fact(%{store?: :unanswered} = state), do: publish_slot(state, :held)
 
   defp refresh_slot_fact(state) do
     case Ledger.outstanding(now(state), opts(state)) do
@@ -1226,8 +1354,6 @@ defmodule FermixCore.PhoneCalls.Manager do
       {:error, reason} -> slot_unread(reason, state)
     end
   end
-
-  defp note_slot(state, row), do: publish_rows(state, [row])
 
   defp publish_rows(state, rows) do
     now = now(state)
@@ -1283,6 +1409,7 @@ defmodule FermixCore.PhoneCalls.Manager do
       delivery_opts: Keyword.get(opts, :delivery_opts, []),
       continuation_opts: [dispatcher: Keyword.get(opts, :continuation_dispatcher)],
       reconcile?: Keyword.get(opts, :reconcile, true),
+      daemon?: Keyword.get(opts, :daemon, true),
       timer_enabled?: Keyword.get(opts, :timer_enabled, true),
       prune_interval_ms: Keyword.get(opts, :prune_interval_ms, Limits.prune_interval_ms()),
       drain_schedule: Keyword.get(opts, :drain_schedule, &schedule_self/2),

@@ -120,20 +120,20 @@ defmodule FermixCore.PhoneCalls.OpenAILive.Sideband do
 
     url = attach_url(Keyword.get(opts, :ws_base_url, @ws_base_url), session_id)
 
+    scrub = OpenAILive.scrubber([api_key | secrets])
+
     with :ok <- sendable_key(api_key),
          :ok <- Egress.ensure_direct(url, egress),
          {:ok, start_opts} <-
            OpenAILiveClient.start_options(url, OpenAILiveClient.headers(api_key)) do
-      state = %{
-        owner: self(),
-        seen: Events.new_seen(),
-        attached?: false,
-        scrub: OpenAILive.scrubber([api_key | secrets])
-      }
-
+      state = %{owner: self(), seen: Events.new_seen(), attached?: false, scrub: scrub}
       WebSockex.start_link(url, __MODULE__, state, start_opts ++ connect_options())
     end
+    |> started(scrub)
   end
+
+  defp started({:ok, pid}, _scrub), do: {:ok, pid}
+  defp started({:error, reason}, scrub), do: {:error, scrub.(reason)}
 
   # Never named in the error: each one is a credential.
   defp secrets!(secrets) when is_list(secrets) do
@@ -162,7 +162,7 @@ defmodule FermixCore.PhoneCalls.OpenAILive.Sideband do
       when is_pid(sideband) and is_binary(type) and is_binary(event_id) do
     case Jason.encode(event) do
       {:ok, payload} -> write(sideband, payload, event_id)
-      {:error, error} -> {:error, {:not_sent, {:encode_failed, Exception.message(error)}}}
+      {:error, %Jason.EncodeError{}} -> {:error, {:not_sent, :encode_failed}}
     end
   end
 
@@ -221,7 +221,7 @@ defmodule FermixCore.PhoneCalls.OpenAILive.Sideband do
         {:ok, deliver(event, state)}
 
       {:ok, other} ->
-        notify(state, {:invalid_frame, {:not_an_object, describe(other)}})
+        notify(state, {:invalid_frame, {:not_an_object, describe(other, state.scrub)}})
         {:ok, state}
 
       {:error, error} ->
@@ -240,12 +240,12 @@ defmodule FermixCore.PhoneCalls.OpenAILive.Sideband do
 
   @impl true
   def handle_disconnect(%{reason: reason}, %{attached?: false} = state) do
-    notify(state, {:attach_failed, attach_failure(reason)})
+    notify(state, {:attach_failed, attach_failure(reason, state.scrub)})
     {:ok, state}
   end
 
   def handle_disconnect(%{reason: reason}, state) do
-    notify(state, {:closed, close_reason(reason)})
+    notify(state, {:closed, close_reason(reason, state.scrub)})
     {:ok, state}
   end
 
@@ -258,22 +258,52 @@ defmodule FermixCore.PhoneCalls.OpenAILive.Sideband do
     ]
   end
 
-  # `WebSockex.send_frame/3` exits `{reason, {WebSockex, :call, [pid, frame]}}`
-  # when its call fails. A sideband that is already gone was never written to;
-  # one that timed out, or died under the call, may have written the frame. The
-  # frame (call content) is never part of what is returned.
   defp write(sideband, payload, event_id) do
     case WebSockex.send_frame(sideband, {:text, payload}, Limits.sideband_send_ms()) do
       :ok -> {:ok, event_id}
-      {:error, %WebSockex.NotConnectedError{} = error} -> {:error, {:not_sent, error}}
-      {:error, %WebSockex.FrameEncodeError{} = error} -> {:error, {:not_sent, error}}
-      {:error, error} -> {:error, {:unknown, error}}
+      {:error, error} -> send_failure({:error, error})
     end
   catch
-    :exit, {:noproc, _call} -> {:error, {:not_sent, :sideband_down}}
-    :exit, {:timeout, _call} -> {:error, {:unknown, :send_timeout}}
-    :exit, {reason, _call} -> {:error, {:unknown, {:sideband_exited, describe(reason)}}}
+    :exit, reason -> send_failure({:exit, reason})
   end
+
+  @doc """
+  What a send that failed says, in fixed words: never the frame (call
+  content), a client's error struct or an exit reason's text, any of which
+  could carry what the call said or a credential. `{:not_sent, _}` when the
+  frame provably was not written (`:sideband_down`, `{:not_connected, state}`,
+  `{:frame_encode, reason}`), `{:unknown, _}` when it may have been
+  (`:send_timeout`, `{:send_failed, kind}`, `{:sideband_exited, kind}`).
+  `WebSockex.send_frame/3` exits `{reason, {WebSockex, :call, [pid, frame]}}`
+  when its call fails: a sideband already gone was never written to, one that
+  timed out or died under the call may have been.
+  """
+  @spec send_failure({:error, term()} | {:exit, term()}) ::
+          {:error, {:not_sent, term()} | {:unknown, term()}}
+  def send_failure({:error, %WebSockex.NotConnectedError{connection_state: state}}),
+    do: {:error, {:not_sent, {:not_connected, kind(state)}}}
+
+  def send_failure({:error, %WebSockex.FrameEncodeError{reason: reason}}),
+    do: {:error, {:not_sent, {:frame_encode, kind(reason)}}}
+
+  def send_failure({:error, error}), do: {:error, {:unknown, {:send_failed, kind(error)}}}
+  def send_failure({:exit, {:noproc, _call}}), do: {:error, {:not_sent, :sideband_down}}
+  def send_failure({:exit, {:timeout, _call}}), do: {:error, {:unknown, :send_timeout}}
+
+  def send_failure({:exit, {reason, _call}}),
+    do: {:error, {:unknown, {:sideband_exited, kind(reason)}}}
+
+  def send_failure({:exit, reason}), do: {:error, {:unknown, {:sideband_exited, kind(reason)}}}
+
+  # A term's kind, never its contents: an atom, a struct's module, a tuple's
+  # leading atom.
+  defp kind(atom) when is_atom(atom), do: atom
+  defp kind(%{__struct__: module}), do: module
+
+  defp kind(tuple) when is_tuple(tuple) and tuple_size(tuple) > 0 and is_atom(elem(tuple, 0)),
+    do: elem(tuple, 0)
+
+  defp kind(_other), do: :other
 
   defp deliver(event, state) do
     case Events.dedupe(state.seen, event) do
@@ -285,26 +315,42 @@ defmodule FermixCore.PhoneCalls.OpenAILive.Sideband do
   defp forward({:reflected_audio, _direction}, state), do: state
 
   defp forward(event, state) do
-    notify(state, {:event, event})
+    notify(state, {:event, withhold_key_refusal(event)})
     state
   end
 
-  defp attach_failure(%WebSockex.RequestError{code: code, message: phrase}),
+  # The create's rule for a refused key (`OpenAILive.key_refusal/2`), on the
+  # events that carry the vendor's error words.
+  defp withhold_key_refusal({kind, %{code: code, message: message} = error})
+       when kind in [:vendor_error, :call_failed] do
+    case OpenAILive.key_refusal(code, message) do
+      {:withhold, sentence} -> {kind, %{error | message: sentence}}
+      :keep -> {kind, error}
+    end
+  end
+
+  defp withhold_key_refusal(event), do: event
+
+  defp attach_failure(%WebSockex.RequestError{code: code, message: phrase}, _scrub),
     do: {:http_status, code, phrase}
 
-  defp attach_failure(%WebSockex.ConnError{original: original}), do: {:transport, original}
-  defp attach_failure(%WebSockex.HandshakeError{}), do: {:handshake, :accept_mismatch}
-  defp attach_failure(other), do: {:transport, describe(other)}
+  defp attach_failure(%WebSockex.ConnError{original: original}, _scrub),
+    do: {:transport, original}
 
-  defp close_reason({:remote, :normal}), do: {:remote_close, 1000, ""}
-  defp close_reason({:remote, code, text}), do: {:remote_close, code, text}
-  defp close_reason({:remote, :closed}), do: :connection_lost
-  defp close_reason({:local, :normal}), do: :local_close
-  defp close_reason({:local, _code, _text}), do: :local_close
-  defp close_reason({:error, error}), do: {:error, describe(error)}
-  defp close_reason(other), do: {:error, describe(other)}
+  defp attach_failure(%WebSockex.HandshakeError{}, _scrub), do: {:handshake, :accept_mismatch}
+  defp attach_failure(other, scrub), do: {:transport, describe(other, scrub)}
 
-  defp describe(term), do: inspect(term, limit: 5, printable_limit: @describe_limit)
+  defp close_reason({:remote, :normal}, _scrub), do: {:remote_close, 1000, ""}
+  defp close_reason({:remote, code, text}, _scrub), do: {:remote_close, code, text}
+  defp close_reason({:remote, :closed}, _scrub), do: :connection_lost
+  defp close_reason({:local, :normal}, _scrub), do: :local_close
+  defp close_reason({:local, _code, _text}, _scrub), do: :local_close
+  defp close_reason({:error, error}, scrub), do: {:error, describe(error, scrub)}
+  defp close_reason(other, scrub), do: {:error, describe(other, scrub)}
+
+  # Scrubbed before it is cut, so no secret is left half there.
+  defp describe(term, scrub),
+    do: term |> scrub.() |> inspect(limit: 5, printable_limit: @describe_limit)
 
   defp notify(%{owner: owner, scrub: scrub}, payload),
     do: send(owner, {:phone_sideband, self(), scrub.(payload)})

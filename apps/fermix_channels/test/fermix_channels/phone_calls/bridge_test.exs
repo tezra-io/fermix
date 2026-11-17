@@ -216,7 +216,6 @@ defmodule FermixChannels.PhoneCalls.BridgeTest do
         call_id: call_id,
         handle: "h-#{System.unique_integer([:positive])}",
         delegation_id: "d1",
-        revision: 1,
         brief: brief(),
         window: [%{speaker: :remote, text: "Is 8 PM fine?", start_ms: 0, end_ms: 900}],
         session_id: "phone_call_" <> call_id,
@@ -274,12 +273,12 @@ defmodule FermixChannels.PhoneCalls.BridgeTest do
       assert_receive {:provider_request, turn, _tools}
       send(turn, {:provider_reply, "Eight works; they hold the table."})
 
-      assert_receive {:phone_call_delegation, ^call_id, "d1", 1, {:ok, answer}}
+      assert_receive {:phone_call_delegation, ^call_id, "d1", {:ok, answer}}
       assert answer.reply == "Eight works; they hold the table."
       assert answer.backend_usage == %{"total_tokens" => 12, "iterations" => 1}
 
       assert_receive {:DOWN, ^ref, :process, _pid, _reason}
-      refute_received {:phone_call_delegation, _call, _id, _revision, _second}
+      refute_received {:phone_call_delegation, _call, _id, _second}
     end
 
     test "runs on the call's own lane: an owner's long chat turn never holds it", ctx do
@@ -289,7 +288,7 @@ defmodule FermixChannels.PhoneCalls.BridgeTest do
 
       %{call_id: call_id} = request = request()
       assert :ok = Bridge.run(request, bridge_opts(ctx, queue))
-      assert_receive {:phone_call_delegation, ^call_id, "d1", 1, {:ok, %{reply: "Eight works."}}}
+      assert_receive {:phone_call_delegation, ^call_id, "d1", {:ok, %{reply: "Eight works."}}}
 
       send(owner_turn, :release)
       assert_receive {:owner_reply, {:text, "owner reply"}}
@@ -307,7 +306,7 @@ defmodule FermixChannels.PhoneCalls.BridgeTest do
       assert_receive {:owner_reply, {:text, "owner reply"}}
 
       send(phone_turn, {:provider_reply, "Eight works."})
-      assert_receive {:phone_call_delegation, ^call_id, "d1", 1, {:ok, %{reply: "Eight works."}}}
+      assert_receive {:phone_call_delegation, ^call_id, "d1", {:ok, %{reply: "Eight works."}}}
     end
 
     test "offers the call's turn only its controls and its grants", ctx do
@@ -322,19 +321,19 @@ defmodule FermixChannels.PhoneCalls.BridgeTest do
       %{call_id: call_id} = request = request()
       assert :ok = Bridge.run(request, bridge_opts(ctx, queue))
 
-      assert_receive {:phone_call_delegation, ^call_id, "d1", 1,
+      assert_receive {:phone_call_delegation, ^call_id, "d1",
                       {:error, {:reply_withheld, :unshared_number}}}
     end
 
-    test "answers each revision with its own, so the worker can fence a stale one", ctx do
+    test "answers each delegation under its own id, so the worker can fence a stale one", ctx do
       queue = start_queue(ctx, reply: "ok")
       %{call_id: call_id} = first = request()
       assert :ok = Bridge.run(first, bridge_opts(ctx, queue))
-      assert_receive {:phone_call_delegation, ^call_id, "d1", 1, {:ok, _answer}}
+      assert_receive {:phone_call_delegation, ^call_id, "d1", {:ok, _answer}}
 
-      second = %{first | revision: 2, handle: "h-next"}
+      second = %{first | delegation_id: "d2", handle: "h-next"}
       assert :ok = Bridge.run(second, bridge_opts(ctx, queue))
-      assert_receive {:phone_call_delegation, ^call_id, "d1", 2, {:ok, _answer}}
+      assert_receive {:phone_call_delegation, ^call_id, "d2", {:ok, _answer}}
     end
 
     test "refuses when the queue is gone, and nothing follows", ctx do
@@ -363,7 +362,7 @@ defmodule FermixChannels.PhoneCalls.BridgeTest do
       turn_ref = monitor_turn(turn)
 
       send(watcher, expiry)
-      assert_receive {:phone_call_delegation, ^call_id, "d1", 1, {:error, :deadline_exceeded}}
+      assert_receive {:phone_call_delegation, ^call_id, "d1", {:error, :deadline_exceeded}}
       assert_receive {:DOWN, ^turn_ref, :process, ^turn, _reason}
       key = PhoneCallTurn.conversation_key(call_id)
 
@@ -381,7 +380,7 @@ defmodule FermixChannels.PhoneCalls.BridgeTest do
       turn_ref = monitor_turn(turn)
 
       assert :ok = Bridge.cancel(call_id, "d1", queue: queue)
-      assert_receive {:phone_call_delegation, ^call_id, "d1", 1, {:error, :cancelled}}
+      assert_receive {:phone_call_delegation, ^call_id, "d1", {:error, :cancelled}}
       assert_receive {:DOWN, ^turn_ref, :process, ^turn, _reason}
     end
 

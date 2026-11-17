@@ -17,7 +17,8 @@ defmodule FermixCore.Management.PhoneCalls do
       uncertain (`PhoneCalls.Ledger.outstanding/2`).
 
   The summary reads them as one word (`summary_states/0`): the call first
-  (`calling`, `stopping`, or `termination_unconfirmed` while an uncertain call
+  (`calling`, `stopping`, or `placement_unknown` or `termination_unconfirmed`
+  while an uncertain call
   holds the slot, whether phone calls are on or off), then `disabled`, then
   `needs_setup`, then `ready`.
 
@@ -80,13 +81,15 @@ defmodule FermixCore.Management.PhoneCalls do
   @call_id_params ~w(call_id)
   @engine %{"name" => "GPT-Live", "carrier" => "Telnyx"}
 
-  @summary_states ~w(disabled needs_setup ready calling stopping termination_unconfirmed)
+  @summary_states ~w(disabled needs_setup ready calling stopping placement_unknown
+                      termination_unconfirmed)
   @summary_labels %{
     "disabled" => "Disabled",
     "needs_setup" => "Needs setup",
     "ready" => "Ready",
     "calling" => "Calling",
     "stopping" => "Stopping",
+    "placement_unknown" => "Placement unknown",
     "termination_unconfirmed" => "Termination unconfirmed"
   }
 
@@ -96,19 +99,13 @@ defmodule FermixCore.Management.PhoneCalls do
   @containment [
     "In the Telnyx portal, end any call still active on your connection, or turn the " <>
       "connection off to end every call through it.",
-    "Meanwhile, your connection's daily spend limit and its one channel bound what the call " <>
-      "can cost.",
+    "Meanwhile, if you set your connection's daily spend limit and its one channel as the " <>
+      "setup asks, they bound what the call can cost.",
     "Once the portal shows the call has ended, confirm it here, and a new call may be " <>
       "placed. Fermix never dials this call again."
   ]
 
-  @cancelled_sentence "The call had not been placed yet, so it was stopped and nothing was " <>
-                        "dialed."
-  @stop_asked_sentence "Fermix asked the call to end. It reads stopping until its end is known."
   @not_found_sentence "No phone call of yours has that id."
-  @already_ended_sentence "That call has already ended."
-  @uncertain_stop_sentence "Fermix already stopped its part of that call, and its termination " <>
-                             "is unconfirmed. Check your Telnyx portal, then confirm it ended."
   @not_running_sentence "Phone calls are not running here, so no call is in progress to stop."
   @manager_unreachable_sentence "Fermix could not reach the part of it that places calls. " <>
                                   "See the daemon log."
@@ -120,7 +117,7 @@ defmodule FermixCore.Management.PhoneCalls do
   @unresolved_sentence "An earlier call's termination is unconfirmed, so a new call waits " <>
                          "until you confirm it ended or OpenAI's own limit on a call passes."
   @confirmed_sentence "Fermix marked the call ended on your word, so a new call may be " <>
-                        "placed. What was agreed stays unknown."
+                        "placed. The outcome already recorded is unchanged."
   @in_progress_sentence "That call is still in progress, so only stopping it ends it."
   @nothing_to_confirm_sentence "That call has no unconfirmed end to confirm."
   @not_recorded_sentence "Fermix could not record that, so the call slot stays held. See the " <>
@@ -260,6 +257,7 @@ defmodule FermixCore.Management.PhoneCalls do
 
   defp call_summary(call) do
     cond do
+      call.status == "dispatch_unknown" -> "placement_unknown"
       uncertain?(call) -> "termination_unconfirmed"
       stop_asked?(call) -> "stopping"
       true -> "calling"
@@ -274,7 +272,8 @@ defmodule FermixCore.Management.PhoneCalls do
   defp summary_sentence("needs_setup", {:needs_setup, reasons}, _call),
     do: Enum.map_join(reasons, " ", &Readiness.sentence/1)
 
-  defp summary_sentence("termination_unconfirmed", _readiness, call) do
+  defp summary_sentence(state, _readiness, call)
+       when state in ["placement_unknown", "termination_unconfirmed"] do
     view = Report.view(call)
     Enum.join(Enum.reject([view.headline, view.slot], &is_nil/1), " ")
   end
@@ -330,7 +329,7 @@ defmodule FermixCore.Management.PhoneCalls do
       "voice" => usage.voice,
       "carrier" => usage.carrier,
       "backend_turns" => usage.turns,
-      "backend_cost_usd" => usage.cost,
+      "backend_tokens" => usage.tokens,
       "backend" => usage.backend
     }
   end
@@ -381,7 +380,7 @@ defmodule FermixCore.Management.PhoneCalls do
   their Telnyx portal, through the call manager that owns the slot
   (`PhoneCalls.Manager.confirm_ended/4`): its slot is released with the
   reason `owner_confirmed` at `now`, the manager's published slot fact is
-  read again, and its outcome stays `unknown`. Only a call whose termination
+  read again, and the outcome already recorded is unchanged. Only a call whose termination
   is unconfirmed and that still holds the slot: never one in progress, never
   one already over. If the owner is wrong, a second call can be placed while
   the first is still up, and the carrier's one-channel limit bounds it. An
@@ -418,6 +417,8 @@ defmodule FermixCore.Management.PhoneCalls do
 
   defp confirm_refused(_call_id, :disabled), do: memory_off()
 
+  defp confirm_refused(_call_id, :owned_by_running_engine), do: owned_elsewhere(:confirm)
+
   defp confirm_refused(call_id, reason) do
     Logger.error(
       "management phone calls: #{call_id} could not be released: #{Redaction.format(reason)}"
@@ -431,18 +432,20 @@ defmodule FermixCore.Management.PhoneCalls do
   @doc """
   The owner's stop of `call_id`: a call not yet dialed ends at once with
   nothing dialed (`stop: cancelled`); one dialed is asked to end
-  (`stop: stopping`). Answers the call as it now reads.
+  (`stop: stopping`). Answers the call as it now reads, in the stop's one
+  set of sentences (`PhoneCalls.Report.stop_sentence/2`,
+  `PhoneCalls.Report.stop_refusal/2`), the ones the `phone_call` tool says.
   """
   @spec stop(String.t(), keyword()) :: {:ok, map()} | {:error, error()}
   def stop(call_id, opts \\ []) when is_binary(call_id) and is_list(opts) do
     with {:ok, row} <- owner_call(call_id, opts),
-         :ok <- stoppable(row),
+         :ok <- stoppable(row, opts),
          {:ok, stopped} <- cancel(row, opts),
          {:ok, now_row} <- owner_call(call_id, opts) do
       {:ok,
        %{
          "stop" => Atom.to_string(stopped),
-         "sentence" => stop_sentence(stopped),
+         "sentence" => Report.stop_sentence(stopped, now_row),
          "call" => call_view(now_row, now(opts))
        }}
     end
@@ -457,11 +460,10 @@ defmodule FermixCore.Management.PhoneCalls do
     end
   end
 
-  defp stoppable(row) do
-    cond do
-      not Ledger.terminal?(row.status) -> :ok
-      uncertain?(row) -> {:error, {:unavailable, @capability, @uncertain_stop_sentence}}
-      true -> {:error, {:unavailable, @capability, @already_ended_sentence}}
+  defp stoppable(row, opts) do
+    case Report.stop_refusal(row, now(opts)) do
+      nil -> :ok
+      sentence -> {:error, {:unavailable, @capability, sentence}}
     end
   end
 
@@ -469,6 +471,7 @@ defmodule FermixCore.Management.PhoneCalls do
     case manager_call(opts, &Manager.cancel(row.id, row.owner_id, &1)) do
       {:ok, {:ok, stopped}} when stopped in [:cancelled, :stopping] -> {:ok, stopped}
       {:ok, {:error, :already_terminal}} -> ended_meanwhile(row.id, opts)
+      {:ok, {:error, :owned_by_running_engine}} -> owned_elsewhere(:stop)
       {:ok, {:error, reason}} -> cancel_failed(row.id, reason)
       :not_running -> {:error, {:unavailable, @capability, @not_running_sentence}}
       {:error, sentence} -> {:error, {:unavailable, @capability, sentence}}
@@ -477,8 +480,17 @@ defmodule FermixCore.Management.PhoneCalls do
 
   # The call ended between the read and the stop: said as its row now reads.
   defp ended_meanwhile(call_id, opts) do
-    with {:ok, row} <- owner_call(call_id, opts), do: stoppable(row)
+    with {:ok, row} <- owner_call(call_id, opts) do
+      case stoppable(row, opts) do
+        :ok -> unreadable({:in_progress_after_terminal, call_id})
+        refusal -> refusal
+      end
+    end
   end
+
+  # This process is not the home's running engine, which owns the call.
+  defp owned_elsewhere(what),
+    do: {:error, {:unavailable, @capability, Report.owned_elsewhere(what)}}
 
   defp cancel_failed(call_id, reason) do
     Logger.error(
@@ -487,9 +499,6 @@ defmodule FermixCore.Management.PhoneCalls do
 
     {:error, {:unavailable, @capability, @manager_unreachable_sentence}}
   end
-
-  defp stop_sentence(:cancelled), do: @cancelled_sentence
-  defp stop_sentence(:stopping), do: @stop_asked_sentence
 
   # -- the off switch ------------------------------------------------------------------
 
@@ -506,7 +515,7 @@ defmodule FermixCore.Management.PhoneCalls do
 
   def apply_enabled(false, opts) when is_list(opts) do
     case manager_call(opts, &Manager.disable/1) do
-      {:ok, %{cancelled: cancelled, stopping: stopping}} -> stopped_sentences(cancelled, stopping)
+      {:ok, %{} = stopped} -> stopped_sentences(stopped)
       :not_running -> []
       {:error, sentence} -> [sentence]
     end
@@ -520,11 +529,15 @@ defmodule FermixCore.Management.PhoneCalls do
     end
   end
 
-  defp stopped_sentences(cancelled, stopping) do
+  # What the switch stopped here, and the calls the running engine still owns
+  # when this process is not it (`running_engine`).
+  defp stopped_sentences(%{cancelled: cancelled, stopping: stopping} = stopped) do
+    running = Map.get(stopped, :running_engine, 0)
+
     Enum.flat_map(
       [{cancelled, @undispatched_stopped_sentence}, {stopping, @live_stopped_sentence}],
       fn {n, sentence} -> if n > 0, do: [sentence], else: [] end
-    )
+    ) ++ if(running > 0, do: [Report.running_engine_calls(running)], else: [])
   end
 
   # Turning phone calls on is no evidence that an earlier call ended.
@@ -567,8 +580,9 @@ defmodule FermixCore.Management.PhoneCalls do
 
   @doc """
   Whether the owner's restart may run now (`lifecycle.prepare_restart`, which
-  `fermix restart` and the apps' restart to apply take, and the setup page's
-  Restart): `:ok`, or this family's refusal while a phone call is in progress,
+  `fermix restart` takes, and the setup page's Restart; the apps' restart to
+  apply takes `lifecycle.prepare`, so it is not asked yet): `:ok`, or this
+  family's refusal while a phone call is in progress,
   since the restart would hang it up with no outcome read
   (`PhoneCalls.CallHold.check_restart/1`). A stop that is not the owner's
   restart (an update, a move, the service manager) is not asked.
@@ -596,11 +610,7 @@ defmodule FermixCore.Management.PhoneCalls do
         @disabled_sentence,
         @ready_sentence,
         @calling_sentence,
-        @cancelled_sentence,
-        @stop_asked_sentence,
         @not_found_sentence,
-        @already_ended_sentence,
-        @uncertain_stop_sentence,
         @not_running_sentence,
         @manager_unreachable_sentence,
         @unreadable_sentence,

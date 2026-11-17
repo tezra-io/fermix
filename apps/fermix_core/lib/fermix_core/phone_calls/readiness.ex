@@ -186,7 +186,7 @@ defmodule FermixCore.PhoneCalls.Readiness do
   defp openai_api_key_unsendable? do
     case Config.openai_api_key() do
       {:ok, key} -> not OpenAILive.sendable_api_key?(key)
-      {:error, :missing_openai_api_key} -> false
+      {:error, :openai_api_key_missing} -> false
     end
   end
 

@@ -684,7 +684,8 @@ defmodule FermixChannels.Gateway.Commands.Sandbox do
   # (`resumed_sources`, which the turn seeds) and, in the metadata the turn and
   # the store read them from, a forwarded message's mark and, on a coding run's
   # follow-up, its chain depth and finished run, or on a phone call's result
-  # turn its depth and the call (`phone_call_result`).
+  # turn its depth and the call (`phone_call_result`), and the owner request's
+  # identity (`request_id`), so the re-run finds what the request started.
   defp synthesize_resume_message(record, resume, token) do
     provenance = Map.fetch!(resume, :provenance)
 
@@ -698,7 +699,12 @@ defmodule FermixChannels.Gateway.Commands.Sandbox do
       thread_ts: record.thread_ts,
       metadata:
         provenance
-        |> Map.take([:harness_continuation_depth, :harness_run_id, :phone_call_result])
+        |> Map.take([
+          :harness_continuation_depth,
+          :harness_run_id,
+          :phone_call_result,
+          :request_id
+        ])
         |> Map.merge(Map.take(resume, [:forwarded]))
         |> Map.merge(%{user_id: record.user_id, resumed_from_grant: token}),
       resumed_sources: Map.get(provenance, :outside_sources)

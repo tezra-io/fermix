@@ -1058,6 +1058,10 @@ defmodule FermixWebWeb.SetupLive do
       when phone_read in [:phone_poll, :phone_reach],
       do: {:noreply, Phone.handle_info(message, socket)}
 
+  # The Phone calls section reads its state again while a call is in progress.
+  def handle_info({:phone_calls_poll, _ref} = message, socket),
+    do: {:noreply, PhoneCalls.handle_info(message, socket)}
+
   # The StackChan section follows the accessory watcher: a change notice, the
   # watcher ending, or the time to look for it again.
   def handle_info({:accessories_changed, _version} = message, socket),

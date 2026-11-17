@@ -19,6 +19,7 @@ defmodule FermixCore.Tools.PhoneCallTest do
   alias FermixCore.PhoneCalls.Limits
   alias FermixCore.PhoneCalls.Manager
   alias FermixCore.PhoneCalls.Prompt
+  alias FermixCore.PhoneCalls.Report
   alias FermixCore.Tools.PhoneCall
   alias FermixCore.Tools.Telemetry, as: ToolTelemetry
   alias FermixTestSupport.TelemetryCapture
@@ -394,18 +395,58 @@ defmodule FermixCore.Tools.PhoneCallTest do
                "No phone call"
     end
 
-    test "cancel asks the Manager to stop and reports stopping", ctx do
-      body =
-        decoded(
-          PhoneCall.execute(
-            %{"action" => "cancel", "call_id" => "pc_0a1b2c3d4e5f"},
-            owner_turn(ctx)
-          )
-        )
+    # The stop's one sentence set (`PhoneCalls.Report`), the apps' too, by the
+    # call's row as it reads after the stop.
+    test "cancel asks the Manager to stop and says what happened at the call's stage", ctx do
+      for {session, said} <- [
+            {"sess_invented_tool_1", "Fermix asked OpenAI to end the call."},
+            {nil, "The call is still being placed, so Fermix ends it as soon as OpenAI"}
+          ] do
+        id = seed_call!(ctx, "default")
+        {:ok, _row} = Ledger.claim_dispatch(id, @t0, server: ctx.repo)
+        if session, do: {:ok, _row} = Ledger.record_session(id, session, @t0, server: ctx.repo)
 
-      assert_receive {:cancel, "pc_0a1b2c3d4e5f", "default"}
-      assert body["status"] == "stopping"
-      assert body["detail"] =~ "does not undo"
+        body =
+          decoded(PhoneCall.execute(%{"action" => "cancel", "call_id" => id}, owner_turn(ctx)))
+
+        assert_receive {:cancel, ^id, "default"}
+        assert body["status"] == "stopping"
+        assert String.starts_with?(body["detail"], said), body["detail"]
+        refute body["detail"] =~ "provider"
+        # One call at a time: this one ends before the next is seeded.
+        {:ok, _row} = Ledger.terminalize(id, "failed", %{ended_at: @t0}, server: ctx.repo)
+      end
+    end
+
+    # A process that is not the home's running engine owns no worker of the
+    # daemon's: the call is the running Fermix's, and is stopped there.
+    test "cancel from a process that is not the running engine says where the call is", ctx do
+      id = seed_call!(ctx, "default")
+      {:ok, _row} = Ledger.claim_dispatch(id, @t0, server: ctx.repo)
+      manager = boot_manager!(ctx, "elsewhere", daemon: false, reconcile: false)
+      turn = owner_turn(ctx, %{phone_call_manager: manager})
+
+      assert refusal(PhoneCall.execute(%{"action" => "cancel", "call_id" => id}, turn)) ==
+               "That call belongs to the Fermix that is running, so it is stopped there."
+
+      {:ok, row} = Ledger.get(id, server: ctx.repo)
+      assert is_nil(row.cancel_requested_at)
+    end
+
+    # The Manager finds the call over; one whose end is unresolved says so and
+    # names both ways out, as the apps' Stop says for it.
+    test "cancel of an unresolved call says its end is unresolved, not that it ended", ctx do
+      id = seed_unresolved!(ctx)
+      manager = boot_manager!(ctx, "cancel")
+      turn = owner_turn(ctx, %{phone_call_manager: manager, phone_call_now: fn -> @t0 end})
+
+      text = refusal(PhoneCall.execute(%{"action" => "cancel", "call_id" => id}, turn))
+      {:ok, row} = Ledger.get(id, server: ctx.repo)
+
+      assert text == Report.stop_refusal(row, @t0)
+      assert text =~ "whether it was placed is unknown"
+      assert text =~ "It holds the call slot until it is confirmed ended"
+      refute text =~ "already ended"
     end
 
     test "status and cancel need a call id and a known action", ctx do
@@ -628,9 +669,11 @@ defmodule FermixCore.Tools.PhoneCallTest do
     send(test, {:ran, args})
     send(test, {:ran_request, Map.get(context, :request_id)})
     ToolTelemetry.exec("phone_call", context, true, 0)
-    # A start's own answer, which the owner's line after a confirm is read from.
+    # A start's own answer, with the facts the owner's line after a confirm is
+    # read from (`effect`).
     answer = %{call_id: "pc_0a1b2c3d4e5f", status: "accepted", state: "admitted", reused: false}
-    {:ok, %{success: true, output: Jason.encode!(answer), error: nil}}
+    facts = %{call_id: "pc_0a1b2c3d4e5f", reused: false}
+    {:ok, %{success: true, output: Jason.encode!(answer), error: nil, effect: facts}}
   end
 
   defp off_turn(ctx, manager, now),
@@ -643,7 +686,7 @@ defmodule FermixCore.Tools.PhoneCallTest do
 
   # A real Manager on this test's ledger, booted: its boot has read whether a
   # call holds the slot once `:sys.get_state/1` answers.
-  defp boot_manager!(ctx, label) do
+  defp boot_manager!(ctx, label, extra \\ []) do
     name = :"phone_tool_manager_#{label}_#{System.unique_integer([:positive])}"
 
     start_supervised!(
@@ -653,7 +696,8 @@ defmodule FermixCore.Tools.PhoneCallTest do
        hangup: fn _session -> {:error, :never_hung_up_here} end,
        repo: ctx.repo,
        now_fn: fn -> @t0 end,
-       timer_enabled: false},
+       timer_enabled: false}
+      |> then(fn {module, opts} -> {module, Keyword.merge(opts, extra)} end),
       id: name
     )
 

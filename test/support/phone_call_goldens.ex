@@ -87,9 +87,12 @@ defmodule FermixTestSupport.PhoneCallGoldens do
     repo = :"phone_goldens_repo_#{unique}"
     manager = :"phone_goldens_manager_#{unique}"
     real = :"phone_goldens_real_manager_#{unique}"
+    registry = :"phone_goldens_registry_#{unique}"
 
     start_supervised!({Repo, name: repo, enabled: true, database_path: db_path}, id: repo)
+    start_supervised!({Registry, keys: :unique, name: registry}, id: registry)
     seed(kind, repo)
+    live_worker(kind, registry)
     start_supervised!(real_manager(real, repo), id: real)
     start_supervised!({Manager, name: manager, repo: repo, now: @now, real: real}, id: manager)
 
@@ -100,12 +103,35 @@ defmodule FermixTestSupport.PhoneCallGoldens do
     [
       repo: repo,
       manager: manager,
+      registry: registry,
       now: @now,
       owner_id: @owner,
       config: config(),
       readiness: @host ++ [openai_api_key?: true, sip_password?: true]
     ]
   end
+
+  @doc """
+  `world`'s options with its call manager one that is not the home's running
+  engine (as `FermixCore.Application.phone_calls_opts/2` starts it outside
+  the daemon): it owns none of the daemon's calls.
+  """
+  @spec not_the_daemon(keyword()) :: keyword()
+  def not_the_daemon(world) when is_list(world) do
+    name = :"phone_goldens_elsewhere_#{System.unique_integer([:positive])}"
+    {module, opts} = real_manager(name, Keyword.fetch!(world, :repo))
+    start_supervised!({module, Keyword.put(opts, :daemon, false)}, id: name)
+    Keyword.put(world, :manager, name)
+  end
+
+  # The call in progress has a worker: a process registered under its id in
+  # the world's call registry, as `PhoneCalls.Call` registers.
+  defp live_worker(:in_progress, registry) do
+    worker = {Agent, fn -> {:ok, _owner} = Registry.register(registry, @in_progress, nil) end}
+    start_supervised!(worker, id: {:phone_goldens_worker, registry})
+  end
+
+  defp live_worker(_kind, _registry), do: :ok
 
   # The real call manager over the world's ledger: it runs no call (nothing is
   # admitted through it), reconciles nothing at boot and arms no timer.

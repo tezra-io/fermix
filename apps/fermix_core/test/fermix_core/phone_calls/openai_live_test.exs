@@ -525,6 +525,70 @@ defmodule FermixCore.PhoneCalls.OpenAILiveTest do
       refute printed =~ @api_key
       refute printed =~ @password
     end
+
+    test "the encodings a credential travels in are scrubbed too" do
+      scrub = OpenAILive.scrubber([@api_key, @odd_password])
+      percent = URI.encode(@odd_password, &URI.char_unreserved?/1)
+
+      for carried <- [
+            URI.encode_www_form(@odd_password),
+            percent,
+            String.replace(percent, ~r/%[0-9A-F]{2}/, &String.downcase/1),
+            Base.encode64(@api_key),
+            Base.url_encode64(@api_key, padding: false),
+            # Basic auth: the password at any offset inside a longer encoding.
+            Base.encode64("fermixtrunk01:" <> @odd_password),
+            Base.encode64("u:" <> @odd_password),
+            Base.encode64("ab:" <> @odd_password <> "!")
+          ] do
+        scrubbed = scrub.("auth=" <> carried <> "; next")
+        assert scrubbed =~ "[REDACTED]", carried
+        refute scrubbed =~ carried, carried
+      end
+    end
+
+    test "a charlist, the shape of Erlang's transport reasons, is scrubbed and kept a charlist" do
+      scrub = OpenAILive.scrubber([@api_key])
+
+      reason =
+        {:tls_alert, {:handshake_failure, ~c"refused Bearer " ++ String.to_charlist(@api_key)}}
+
+      assert scrub.(reason) == {:tls_alert, {:handshake_failure, ~c"refused Bearer [REDACTED]"}}
+    end
+
+    test "any term is answered, an improper list and a bitstring included, and nothing raises" do
+      scrub = OpenAILive.scrubber([@api_key])
+
+      assert scrub.([@api_key | "Bearer " <> @api_key]) == ["[REDACTED]" | "Bearer [REDACTED]"]
+      assert scrub.([1, 2 | :tail]) == [1, 2 | :tail]
+      assert scrub.(<<1::3>>) == <<1::3>>
+      assert scrub.(<<255, 0>> <> @api_key) == <<255, 0>> <> "[REDACTED]"
+      assert scrub.(%{{@api_key, 1} => [@api_key]}) == %{{"[REDACTED]", 1} => ["[REDACTED]"]}
+      assert is_function(scrub.(&String.upcase/1), 1)
+    end
+
+    test "a key OpenAI quotes back masked is scrubbed whole" do
+      scrub = OpenAILive.scrubber([@api_key])
+      masked = "Incorrect API key provided: sk-inve************0001. See the dashboard."
+
+      assert scrub.(masked) == "Incorrect API key provided: [REDACTED]. See the dashboard."
+    end
+  end
+
+  describe "key_refusal/2" do
+    test "a message that refuses the key or names it, even masked, is withheld" do
+      assert {:withhold, "OpenAI did not accept the API key (invalid_api_key)."} =
+               OpenAILive.key_refusal("invalid_api_key", "Incorrect API key provided: sk-in**01.")
+
+      assert {:withhold, "OpenAI did not accept the API key."} =
+               OpenAILive.key_refusal(nil, "Bad key sk-proj-ab*****************wxyz given")
+
+      assert {:withhold, "OpenAI did not accept the API key."} =
+               OpenAILive.key_refusal("not an identifier!", "sk-****")
+
+      assert :keep = OpenAILive.key_refusal("rate_limit_exceeded", "Slow down.")
+      assert :keep = OpenAILive.key_refusal(nil, nil)
+    end
   end
 
   describe "hangup/2" do

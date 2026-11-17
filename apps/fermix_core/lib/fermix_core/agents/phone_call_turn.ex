@@ -86,14 +86,13 @@ defmodule FermixCore.Agents.PhoneCallTurn do
   @trust :phone_call
   @agent_name "phone_call"
   @controls FermixCore.PhoneCalls.CallControls
-  @fields [:call_id, :handle, :delegation_id, :revision, :brief, :window, :session_id, :max_steps]
+  @fields [:call_id, :handle, :delegation_id, :brief, :window, :session_id, :max_steps]
 
   @typedoc "One delegation's turn, as the bridge puts it on the message (`message/1`)."
   @type t :: %{
           call_id: String.t(),
           handle: String.t(),
           delegation_id: String.t(),
-          revision: pos_integer(),
           brief: Brief.t(),
           window: [FermixCore.PhoneCalls.Transcript.entry()],
           session_id: String.t(),
@@ -116,20 +115,12 @@ defmodule FermixCore.Agents.PhoneCallTurn do
 
   @type in_call :: %{call_id: String.t(), handle: String.t(), controls: module()}
 
-  @doc "The channel a phone call's backend turn runs on."
-  @spec channel() :: String.t()
-  def channel, do: @channel
-
-  @doc "The trust a phone call's backend turn runs at."
-  @spec source_trust() :: :phone_call
-  def source_trust, do: @trust
-
   @doc "The conversation, and so the queue lane, of call `call_id`'s backend turns."
   @spec conversation_key(String.t()) :: ConversationKey.t()
   def conversation_key(call_id) when is_binary(call_id) and call_id != "",
     do: {@channel, call_id, :root}
 
-  @doc "The queue message id of one delegation, whatever its revision, so a stop can name it."
+  @doc "The queue message id of one delegation, so a stop can name it."
   @spec message_id(String.t(), String.t()) :: String.t()
   def message_id(call_id, delegation_id)
       when is_binary(call_id) and call_id != "" and is_binary(delegation_id) and
@@ -296,7 +287,7 @@ defmodule FermixCore.Agents.PhoneCallTurn do
       channel: @channel,
       computer_use_origin: :unattended,
       outside_sources: MapSet.new([UntrustedContent.phone_call_source()]),
-      phone_call: Map.take(turn, [:call_id, :handle, :delegation_id, :revision]),
+      phone_call: Map.take(turn, [:call_id, :handle, :delegation_id]),
       phone_call_controls: Map.get(runtime, :controls) || @controls
     }
   end
@@ -318,8 +309,7 @@ defmodule FermixCore.Agents.PhoneCallTurn do
 
       {:withheld, why} ->
         Logger.warning(
-          "phone call #{turn.call_id} delegation #{turn.delegation_id} " <>
-            "(revision #{turn.revision}): reply withheld, #{why}"
+          "phone call #{turn.call_id} delegation #{turn.delegation_id}: reply withheld, #{why}"
         )
 
         {:error, {:reply_withheld, why}}
@@ -342,10 +332,8 @@ defmodule FermixCore.Agents.PhoneCallTurn do
     end
   end
 
-  defp valid?(%{brief: %Brief{}, revision: revision, window: window, max_steps: max_steps} = turn) do
-    texts?(turn) and is_integer(revision) and revision >= 1 and is_list(window) and
-      is_integer(max_steps) and max_steps >= 1
-  end
+  defp valid?(%{brief: %Brief{}, window: window, max_steps: max_steps} = turn),
+    do: texts?(turn) and is_list(window) and is_integer(max_steps) and max_steps >= 1
 
   defp valid?(_incomplete), do: false
 

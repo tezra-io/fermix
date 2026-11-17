@@ -1,7 +1,7 @@
 defmodule FermixCore.PhoneCalls.CallHold do
   @moduledoc """
-  What a phone call in progress holds (M94 §12), with one test of "in
-  progress": a ledger row not yet ended (`call_in_progress/1`).
+  What a phone call in progress holds (M94 §12), each by the test that fails
+  safe for it.
 
     * **Its credentials** (`check_credentials/2`). Before a credential is
       cleared or rotated, every active consumer is found, and the change is
@@ -14,12 +14,21 @@ defmodule FermixCore.PhoneCalls.CallHold do
       registry secret is written, before anything is stored:
       `Setup.Wizard.put_secret/3` (`secret.set`), `Setup.Wizard.clear_secret/2`
       (`secret.clear`) and `Setup.Wizard.save_answers/3` (the setup page's
-      forms).
+      forms). Fail-closed: "in progress" is a ledger row not yet ended
+      (`call_in_progress/1`), and a ledger that cannot be read holds the
+      change, since a call may be reading the credential.
     * **The owner's restart** (`check_restart/1`): `lifecycle.prepare_restart`,
-      which `fermix restart` and the apps' restart to apply take, and the
-      setup page's Restart. The engine's stop would end the call and read no
-      outcome. A stop that is not the owner's restart (an update, a move, a
-      disable, the service manager) is not asked here and drains as before.
+      which `fermix restart` takes, and the setup page's Restart. The apps'
+      restart to apply takes `lifecycle.prepare` and so is not asked here yet.
+      The engine's stop would end the call and read no
+      outcome. Refused only when a call is positively in progress: its worker
+      runs (`live_call?/1`, the subtree's call registry,
+      `PhoneCalls.CallControls.registry_name/0`). A row left not ended with no
+      worker, or a ledger that cannot be read, are what a restart clears, so
+      neither refuses it: the engine's stop hangs up any live call first. A
+      stop that is
+      not the owner's restart (an update, a move, a disable, the service
+      manager) is not asked here and drains as before.
 
   A call that has ended holds nothing, and neither does one only unresolved
   (ended here, its end at OpenAI unconfirmed): nothing of Fermix reads its
@@ -36,6 +45,7 @@ defmodule FermixCore.PhoneCalls.CallHold do
 
   alias FermixCore.Auth.Redaction
   alias FermixCore.Memory.Repo
+  alias FermixCore.PhoneCalls.CallControls
   alias FermixCore.PhoneCalls.Ledger
 
   require Logger
@@ -75,14 +85,30 @@ defmodule FermixCore.PhoneCalls.CallHold do
     end
   end
 
-  @doc "Whether the owner's restart may run now: `:ok`, or the refusal with its sentence."
+  @doc """
+  Whether the owner's restart may run now: `:ok`, or the refusal with its
+  sentence while a call is positively in progress (`live_call?/1`).
+  """
   @spec check_restart(keyword()) :: :ok | {:error, {:restart_held, String.t()}}
-  def check_restart(opts \\ []) when is_list(opts),
-    do: held(call_in_progress(opts), {:restart_held})
+  def check_restart(opts \\ []) when is_list(opts) do
+    if live_call?(opts), do: {:error, {:restart_held, @restart_sentence}}, else: :ok
+  end
 
   @doc """
-  The one test of "a phone call is in progress": a ledger row not yet ended.
-  `{:error, reason}` when the ledger cannot be read.
+  Whether a call's worker runs: a call positively in progress. Read from the
+  subtree's call registry (`opts[:registry]`, for a test); where none runs,
+  no call does.
+  """
+  @spec live_call?(keyword()) :: boolean()
+  def live_call?(opts \\ []) when is_list(opts) do
+    registry = Keyword.get(opts, :registry, CallControls.registry_name())
+    not is_nil(Process.whereis(registry)) and Registry.count(registry) > 0
+  end
+
+  @doc """
+  The credentials' test of "a phone call is in progress", the one that fails
+  closed: a ledger row not yet ended. `{:error, reason}` when the ledger
+  cannot be read.
   """
   @spec call_in_progress(keyword()) :: {:ok, boolean()} | {:error, term()}
   def call_in_progress(opts \\ []) when is_list(opts) do
@@ -114,13 +140,10 @@ defmodule FermixCore.PhoneCalls.CallHold do
   end
 
   defp held_sentence({:credential_held, key}), do: Map.fetch!(@in_use_sentences, key)
-  defp held_sentence({:restart_held}), do: @restart_sentence
 
   defp with_sentence({:credential_held, key}, sentence), do: {:credential_held, key, sentence}
-  defp with_sentence({:restart_held}, sentence), do: {:restart_held, sentence}
 
   defp what({:credential_held, key}), do: key
-  defp what({:restart_held}), do: "the restart"
 
   @doc "Every sentence a refusal carries, for the copy gate."
   @spec sentences() :: [String.t(), ...]

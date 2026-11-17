@@ -153,10 +153,42 @@ defmodule FermixWebWeb.SetupLivePhoneCallsTest do
     view |> element("#phone-calls-stop") |> render_submit()
 
     assert view |> element("#phone-calls-notice") |> render() =~
-             "Fermix asked the call to end. It reads stopping until its end is known."
+             "Fermix asked OpenAI to end the call. It reads stopping until its end is known"
 
     assert view |> element("#phone-calls-call-sentence") |> render() =~ "waiting to hear"
     refute has_element?(view, "#phone-calls-stop")
+  end
+
+  # The section reads again on a timer while a call is in progress, as the
+  # Phone card reads a pairing, and stops once none is; a call that stopped
+  # says why in the recent calls.
+  test "a call in progress is followed until it ends, and the recent call says why it stopped",
+       %{conn: conn} do
+    test = self()
+    world = PhoneCallGoldens.world(:in_progress)
+
+    Application.put_env(:fermix_web, :phone_calls,
+      management: world,
+      settings: [],
+      schedule: fn message, ms -> send(test, {:scheduled, message, ms}) end
+    )
+
+    {:ok, view, _html} = live(conn, "/setup?tab=realtime")
+    assert_receive {:scheduled, {:phone_calls_poll, ref} = poll, 2_000}
+
+    fields = %{ended_at: PhoneCallGoldens.now(), failure_reason: "call_failed"}
+    id = PhoneCallGoldens.ids().in_progress
+    {:ok, _row} = Ledger.terminalize(id, "failed", fields, server: world[:repo])
+
+    send(view.pid, poll)
+    recent = view |> element("#phone-calls-recent-why-#{id}") |> render()
+    assert recent =~ "OpenAI reported that the call failed."
+    refute has_element?(view, "#phone-calls-stop")
+    refute_received {:scheduled, {:phone_calls_poll, _next}, _ms}
+
+    # A poll an earlier read scheduled and no longer awaits changes nothing.
+    send(view.pid, {:phone_calls_poll, ref})
+    assert render(view) =~ "OpenAI reported that the call failed."
   end
 
   test "an unresolved call shows what is known and the steps at Telnyx", %{conn: conn} do
@@ -171,7 +203,7 @@ defmodule FermixWebWeb.SetupLivePhoneCallsTest do
     assert recovery =~ "Telnyx portal"
     assert recovery =~ "daily spend limit"
     refute has_element?(view, "#phone-calls-stop")
-    assert view |> element("#phone-calls-summary") |> render() =~ "Termination unconfirmed"
+    assert view |> element("#phone-calls-summary") |> render() =~ "Placement unknown"
   end
 
   test "the owner's word that an unresolved call ended frees its slot", %{conn: conn} do

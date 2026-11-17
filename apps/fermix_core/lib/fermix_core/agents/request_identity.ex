@@ -10,7 +10,9 @@ defmodule FermixCore.Agents.RequestIdentity do
   function call by `Realtime.ToolBridge` (a voice session that runs tools
   itself and keeps one session id for the whole conversation). Every tool call
   inside that context shares it, and `Capabilities.AccessGate` keeps it in a
-  parked call's snapshot, so a confirmed call is still the same request.
+  parked call's snapshot, so a confirmed call is still the same request. A
+  request the grant resume re-runs after the owner's `/confirm` keeps it too:
+  `TurnRunner` takes the one the resume hands back instead of minting.
 
   Random and unique for the life of the home, never a per-boot counter: a
   session id (`"main-<n>"`, `"voice_delegation_<n>"`, `"session:<n>"`) restarts

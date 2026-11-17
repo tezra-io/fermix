@@ -11,15 +11,17 @@ defmodule FermixCore.PhoneCalls.Outcome.Claim do
   decides what survives of it.
   """
 
-  @content_max_bytes 16_384
-  @quote_max_bytes 400
-  @value_max_bytes 200
-  @text_max_bytes 400
-  @max_criteria 8
-  @max_facts 8
-  @max_corrections 12
-  @max_options 6
-  @max_index 8
+  alias FermixCore.PhoneCalls.Brief
+  alias FermixCore.PhoneCalls.Limits
+
+  # Each bound reads the one it answers to. A quote is evidence an excerpt
+  # holds (`Limits.max_excerpt_bytes/0`); a value is a fact the report shows
+  # (`Limits.max_report_fact_bytes/0`); a note is the record's text
+  # (`Limits.max_record_text_bytes/0`); each fact and option is an excerpt
+  # (`Limits.max_evidence_excerpts/0`); a criterion or an alternative is
+  # one of the brief's (`Brief.bounds/0`); the reply's size and the
+  # corrections a claim may list are the feature's own
+  # (`Limits.max_extraction_reply_bytes/0`, `Limits.max_claim_corrections/0`).
 
   @outcomes %{
     "confirmed" => :confirmed,
@@ -91,9 +93,13 @@ defmodule FermixCore.PhoneCalls.Outcome.Claim do
 
   # -- the reply's shape ----------------------------------------------------------
 
-  defp unfenced(content) when byte_size(content) > @content_max_bytes, do: malformed(:too_long)
-
   defp unfenced(content) do
+    if byte_size(content) > Limits.max_extraction_reply_bytes(),
+      do: malformed(:too_long),
+      else: fenced_or_plain(content)
+  end
+
+  defp fenced_or_plain(content) do
     trimmed = String.trim(content)
 
     case Regex.run(~r/\A```(?:json)?[ \t]*\n(.*)\n```\z/s, trimmed) do
@@ -124,10 +130,12 @@ defmodule FermixCore.PhoneCalls.Outcome.Claim do
   # -- lists ------------------------------------------------------------------------
 
   defp lists(map) do
-    with {:ok, criteria} <- list(map, "criteria", @max_criteria, &criterion/1),
-         {:ok, facts} <- list(map, "facts", @max_facts, &fact/1),
-         {:ok, corrections} <- list(map, "corrections", @max_corrections, &correction/1),
-         {:ok, options} <- list(map, "options", @max_options, &option/1) do
+    with {:ok, criteria} <-
+           list(map, "criteria", Brief.bounds().completion_criteria, &criterion/1),
+         {:ok, facts} <- list(map, "facts", Limits.max_evidence_excerpts(), &fact/1),
+         {:ok, corrections} <-
+           list(map, "corrections", Limits.max_claim_corrections(), &correction/1),
+         {:ok, options} <- list(map, "options", Limits.max_evidence_excerpts(), &option/1) do
       {:ok, %{criteria: criteria, facts: facts, corrections: corrections, options: options}}
     end
   end
@@ -150,7 +158,7 @@ defmodule FermixCore.PhoneCalls.Outcome.Claim do
 
   defp criterion(%{"index" => index, "quote" => quote} = item) when map_size(item) == 2 do
     with {:ok, index} <- index(index, "criteria"),
-         {:ok, quote} <- text(quote, @quote_max_bytes, "quote"),
+         {:ok, quote} <- text(quote, Limits.max_excerpt_bytes(), "quote"),
          do: {:ok, %{index: index, quote: quote}}
   end
 
@@ -159,8 +167,8 @@ defmodule FermixCore.PhoneCalls.Outcome.Claim do
   defp fact(%{"field" => field, "value" => value, "quote" => quote} = item)
        when map_size(item) == 3 do
     with {:ok, field} <- field(field, @fact_fields, {:bad_field, "facts"}),
-         {:ok, value} <- text(value, @value_max_bytes, "value"),
-         {:ok, quote} <- text(quote, @quote_max_bytes, "quote"),
+         {:ok, value} <- text(value, Limits.max_report_fact_bytes(), "value"),
+         {:ok, quote} <- text(quote, Limits.max_excerpt_bytes(), "quote"),
          do: {:ok, %{field: field, value: value, quote: quote}}
   end
 
@@ -168,15 +176,15 @@ defmodule FermixCore.PhoneCalls.Outcome.Claim do
 
   defp correction(%{"field" => field, "quote" => quote} = item) when map_size(item) == 2 do
     with {:ok, field} <- field(field, @correction_fields, {:bad_field, "corrections"}),
-         {:ok, quote} <- text(quote, @quote_max_bytes, "quote"),
+         {:ok, quote} <- text(quote, Limits.max_excerpt_bytes(), "quote"),
          do: {:ok, %{field: field, quote: quote}}
   end
 
   defp correction(_item), do: malformed({:bad_item, "corrections"})
 
   defp option(%{"value" => value, "quote" => quote} = item) when map_size(item) == 2 do
-    with {:ok, value} <- text(value, @value_max_bytes, "value"),
-         {:ok, quote} <- text(quote, @quote_max_bytes, "quote"),
+    with {:ok, value} <- text(value, Limits.max_report_fact_bytes(), "value"),
+         {:ok, quote} <- text(quote, Limits.max_excerpt_bytes(), "quote"),
          do: {:ok, %{value: value, quote: quote}}
   end
 
@@ -192,11 +200,13 @@ defmodule FermixCore.PhoneCalls.Outcome.Claim do
   # -- scalars ----------------------------------------------------------------------
 
   defp texts(map) do
-    with {:ok, confirmation} <- optional_text(map, "confirmation_quote", @quote_max_bytes),
-         {:ok, readback} <- optional_text(map, "readback_quote", @quote_max_bytes),
-         {:ok, reason} <- optional_text(map, "reason_quote", @quote_max_bytes),
-         {:ok, contradiction} <- optional_text(map, "contradiction", @text_max_bytes),
-         {:ok, note} <- optional_text(map, "note", @text_max_bytes) do
+    with {:ok, confirmation} <-
+           optional_text(map, "confirmation_quote", Limits.max_excerpt_bytes()),
+         {:ok, readback} <- optional_text(map, "readback_quote", Limits.max_excerpt_bytes()),
+         {:ok, reason} <- optional_text(map, "reason_quote", Limits.max_excerpt_bytes()),
+         {:ok, contradiction} <-
+           optional_text(map, "contradiction", Limits.max_record_text_bytes()),
+         {:ok, note} <- optional_text(map, "note", Limits.max_record_text_bytes()) do
       {:ok,
        %{
          confirmation_quote: confirmation,
@@ -228,8 +238,15 @@ defmodule FermixCore.PhoneCalls.Outcome.Claim do
   defp text(_value, _max, name), do: malformed({:not_a_string, name})
 
   defp index(nil, "alternative"), do: {:ok, nil}
-  defp index(n, _name) when is_integer(n) and n >= 1 and n <= @max_index, do: {:ok, n}
+
+  defp index(n, name) when is_integer(n) and n >= 1 do
+    if n <= max_index(), do: {:ok, n}, else: malformed({:bad_index, name})
+  end
+
   defp index(_n, name), do: malformed({:bad_index, name})
+
+  # A criterion's or an alternative's number: the brief holds no more of either.
+  defp max_index, do: max(Brief.bounds().completion_criteria, Brief.bounds().list_items)
 
   defp malformed(reason), do: {:error, {:malformed, reason}}
 end

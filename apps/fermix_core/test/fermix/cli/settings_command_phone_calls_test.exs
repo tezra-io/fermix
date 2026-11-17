@@ -121,8 +121,8 @@ defmodule Fermix.CLI.SettingsCommandPhoneCallsTest do
 
       assert run(["phone-calls", "confirm-ended", lost], world) ==
                {0,
-                "Fermix marked the call ended on your word, so a new call may be placed. What " <>
-                  "was agreed stays unknown.\n", ""}
+                "Fermix marked the call ended on your word, so a new call may be placed. The " <>
+                  "outcome already recorded is unchanged.\n", ""}
 
       assert {:ok, %{slot_release_reason: "owner_confirmed"}} =
                Ledger.get(lost, server: world[:repo])

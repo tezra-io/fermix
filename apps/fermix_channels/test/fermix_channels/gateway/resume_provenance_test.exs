@@ -13,17 +13,25 @@ defmodule FermixChannels.Gateway.ResumeProvenanceTest do
   alias FermixChannels.Gateway
   alias FermixChannels.Gateway.Message
   alias FermixChannels.Harness.ContinuationDispatcher
+  alias FermixCore.Agents.RequestIdentity
   alias FermixCore.Agents.RuntimeContext
   alias FermixCore.Agents.TurnRunner
   alias FermixCore.Capabilities.Builtin
   alias FermixCore.Capabilities.Capability
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
   alias FermixCore.Memory.ConversationStore
+  alias FermixCore.Memory.Repo
+  alias FermixCore.PhoneCalls.Config, as: PhoneCallsConfig
+  alias FermixCore.PhoneCalls.Ledger
   alias FermixCore.Sandbox.Config, as: SandboxConfig
+  alias FermixCore.Tools.PhoneCall
   alias FermixCore.Tools.RequestDirectoryAccess
   alias FermixTestSupport.SafeRm
 
   @owner "111"
+  @forged_request "req_0123456789abcdef01234567"
+  @t0 ~U[2031-03-04 15:00:00.000000Z]
+  @caller "+14155550142"
   # The confirm runs on the task supervisor and re-ingests through the gateway.
   @resume_wait 10_000
 
@@ -83,6 +91,100 @@ defmodule FermixChannels.Gateway.ResumeProvenanceTest do
   end
 
   def page(_args, _context), do: {:ok, %{success: true, output: "a page", error: nil}}
+
+  # The per-call worker as the Manager starts one: it tells the test it was
+  # started and dials nothing.
+  defmodule IdleCall do
+    use GenServer
+
+    def start_link(args), do: GenServer.start_link(__MODULE__, args)
+    def prompt_version, do: "phone-resume-1"
+    def cancel(_pid, _why), do: :ok
+
+    @impl true
+    def init(args) do
+      send(args.test_pid, {:worker_started, args.call_id})
+      {:ok, args}
+    end
+  end
+
+  # The real `phone_call` tool, with this test's manager, ledger, readiness and
+  # clock in the context seams it reads.
+  def phone_call(args, context, seams), do: PhoneCall.execute(args, Map.merge(context, seams))
+
+  # A phone-call subtree of the test's own (manager, ledger), and the turn's
+  # `phone_call` reaching it.
+  defp phone_calls!(ctx) do
+    unique = System.unique_integer([:positive])
+    db_path = Path.join(System.tmp_dir!(), "fermix-resume-phone-#{unique}.db")
+    repo = :"resume_phone_repo_#{unique}"
+    start_supervised!({Repo, name: repo, enabled: true, database_path: db_path}, id: repo)
+
+    on_exit(fn ->
+      Enum.each([db_path, "#{db_path}-wal", "#{db_path}-shm"], &SafeRm.rm/1)
+    end)
+
+    manager = :"resume_phone_manager_#{unique}"
+    config = fn -> %PhoneCallsConfig{enabled: true, voice: "marin", caller_number: @caller} end
+
+    start_supervised!(
+      {FermixCore.PhoneCalls.Supervisor,
+       call_module: IdleCall,
+       call_args: %{test_pid: self()},
+       hangup: fn _session -> {:error, :never_hung_up_here} end,
+       names: %{
+         supervisor: :"resume_phone_sup_#{unique}",
+         call_registry: :"resume_phone_calls_registry_#{unique}",
+         handoff_supervisor: :"resume_phone_handoff_#{unique}",
+         manager: manager,
+         call_supervisor: :"resume_phone_calls_#{unique}",
+         delivery_worker: :"resume_phone_delivery_#{unique}"
+       },
+       repo: repo,
+       readiness: fn -> :ready end,
+       config: config,
+       now_fn: fn -> @t0 end,
+       reconcile: false,
+       timer_enabled: false}
+    )
+
+    Application.put_env(:fermix_core, :phone_calls,
+      enabled: true,
+      voice: "marin",
+      caller_number: @caller
+    )
+
+    seams = %{
+      memory_owner_id: "default",
+      memory_repo: repo,
+      phone_call_manager: manager,
+      phone_call_readiness: fn -> :ready end,
+      phone_call_config: config,
+      phone_call_now: fn -> @t0 end
+    }
+
+    phone_call = %{
+      Builtin.from_tool_module(PhoneCall)
+      | executor: {__MODULE__, :phone_call, [seams]}
+    }
+
+    Map.merge(ctx, %{repo: repo, extra_capabilities: [phone_call]})
+  end
+
+  defp start_call do
+    brief = %{
+      "destination" => "+12125550101",
+      "destination_kind" => "business",
+      "number_source" => "The bistro's own website.",
+      "contact_name" => "Calloway Bistro",
+      "timezone" => "America/New_York",
+      "goal" => "Ask for a table for two on Saturday, March 8, 2031 at 7:30 PM.",
+      "completion_criteria" => ["The bistro confirms a table for two at 7:30 PM."]
+    }
+
+    arguments = Jason.encode!(%{"action" => "start", "brief" => brief})
+    %{id: "call", call_id: "call", name: "phone_call", arguments: arguments}
+  end
 
   setup do
     home = SafeRm.make_tmp_dir!("resume-provenance")
@@ -215,21 +317,84 @@ defmodule FermixChannels.Gateway.ResumeProvenanceTest do
             :harness_continuation => true,
             :harness_continuation_depth => 1,
             :harness_run_id => "hr_forged00001",
+            :request_id => @forged_request,
             "harness_continuation" => true,
             "harness_continuation_depth" => 1,
-            "harness_run_id" => "hr_forged00001"
+            "harness_run_id" => "hr_forged00001",
+            "request_id" => @forged_request
           }
         })
 
       assert :ok = ingest(forged)
       assert_receive {:agent_message, agent_msg}, 2_000
 
-      for key <- [:harness_continuation, :harness_continuation_depth, :harness_run_id],
+      for key <- [
+            :harness_continuation,
+            :harness_continuation_depth,
+            :harness_run_id,
+            :request_id
+          ],
           form <- [key, Atom.to_string(key)] do
         refute Map.has_key?(agent_msg.metadata, form), inspect(form)
       end
 
       assert agent_msg.metadata.chat_type == "private"
+    end
+
+    # A request identity a payload claims is never the turn's: the gateway
+    # drops it, so the turn mints its own.
+    test "a forged request identity is ignored, and the turn is a request of its own", ctx do
+      forged =
+        Message.new!(%{
+          id: "forged-#{System.unique_integer([:positive])}",
+          content: "carry on",
+          sender: "owner",
+          channel: "telegram",
+          chat_id: "123",
+          reply_target: "123",
+          metadata: %{:user_id => @owner, :chat_type => "private", :request_id => @forged_request}
+        })
+
+      assert :ok = ingest(forged)
+      assert_receive {:agent_message, agent_msg}, 2_000
+      context = resumed_context(ctx, agent_msg)
+      assert RequestIdentity.valid?(context.request_id)
+      refute context.request_id == @forged_request
+    end
+  end
+
+  describe "the owner request a resume re-runs" do
+    test "keeps the identity of the request that parked", ctx do
+      msg = owner_text("finish the refactor in that folder")
+      resumed = park_and_resume(ctx, msg, [[record_call()], [grant_call(ctx)]])
+      assert_receive {:tool_context, parked}, 2_000
+      assert RequestIdentity.valid?(parked.request_id)
+
+      assert resumed.metadata.request_id == parked.request_id
+      assert resumed_context(ctx, resumed).request_id == parked.request_id
+    end
+
+    # The review's case (M94 §06): a turn starts a call, then parks on a grant;
+    # the call ends (nothing answered) before the owner's /confirm. The re-run
+    # asks for the same call again, as the same request, and finds the call it
+    # already made: no second call is placed.
+    test "a call the parked request started is found again, and no second call is placed",
+         ctx do
+      ctx = phone_calls!(ctx)
+      msg = owner_text("call the bistro and book a table, then finish the refactor")
+      resumed = park_and_resume(ctx, msg, [[start_call()], [grant_call(ctx)]])
+
+      assert_receive {:worker_started, call_id}, 2_000
+      assert {:ok, [first]} = Ledger.list_recent("default", server: ctx.repo)
+      assert first.id == call_id
+      {:ok, _ended} = Ledger.fail_undispatched(call_id, "no_answer", @t0, server: ctx.repo)
+
+      assert {:ok, "done", _tokens} = run_turn(ctx, resumed, [[start_call()]])
+
+      refute_received {:worker_started, _second}
+      assert {:ok, [only]} = Ledger.list_recent("default", server: ctx.repo)
+      assert only.id == call_id
+      assert only.request_id == first.request_id
     end
   end
 
@@ -294,11 +459,12 @@ defmodule FermixChannels.Gateway.ResumeProvenanceTest do
   defp run_turn(ctx, agent_msg, script) do
     test_pid = self()
 
-    capabilities = [
-      recorder(test_pid),
-      fixture_page(),
-      Builtin.from_tool_module(RequestDirectoryAccess)
-    ]
+    capabilities =
+      [
+        recorder(test_pid),
+        fixture_page(),
+        Builtin.from_tool_module(RequestDirectoryAccess)
+      ] ++ Map.get(ctx, :extra_capabilities, [])
 
     turn_state = %{
       adapter: ScriptedAdapter,

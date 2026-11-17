@@ -7,6 +7,7 @@ defmodule FermixCore.PhoneCalls.PromptTest do
 
   alias FermixCore.PhoneCalls.Brief
   alias FermixCore.PhoneCalls.Grants
+  alias FermixCore.PhoneCalls.Limits
   alias FermixCore.PhoneCalls.Prompt
   alias FermixCore.PhoneCalls.PromptText
 
@@ -482,7 +483,7 @@ defmodule FermixCore.PhoneCalls.PromptTest do
 
       window = Prompt.render_window(entries)
 
-      assert byte_size(window) <= Prompt.window_max_bytes()
+      assert byte_size(window) <= Limits.max_backend_window_bytes()
       assert window =~ "(earlier speech cut for length)"
       assert window =~ "line 400 "
       refute window =~ "line 1 "

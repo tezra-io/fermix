@@ -19,15 +19,16 @@ defmodule FermixCore.Capabilities.Builtin do
   host command in a turn that read outside content waits for the owner where
   the call is not confined or the host has no kernel enforcement.
 
-  `external_effect?: true` marks a built-in whose call makes an effect outside
-  the machine that the owner confirms when the turn read outside content
-  (`phone_call`, which places a call). It is no host command: no sandbox holds
-  it or is asked about it. Its module says which of its calls make the effect
-  and what the owner reads before it goes ahead (the `effect/0`,
-  `effect_call?/1` and `confirmation/2` callbacks of `Builtin.Tool`).
+  `metadata.external_effect?` marks a built-in whose call makes an effect
+  outside the machine that the owner confirms when the turn read outside
+  content (`phone_call`, which places a call). It is no host command: no
+  sandbox holds it or is asked about it. It is set here, and only from the
+  tool module: a module that implements `Capabilities.ExternalEffect` builds
+  a capability that carries it, and no table entry does.
   """
 
   alias FermixCore.Capabilities.Capability
+  alias FermixCore.Capabilities.ExternalEffect
 
   @policy_defaults %{
     "shell" => %{
@@ -171,14 +172,14 @@ defmodule FermixCore.Capabilities.Builtin do
     "codex_cloud_run" => %{policy_class: :exec, hidden_from_agent?: false, owner_only?: false},
     # Phone calls (M94 §06). A call is an effect outside the machine the model
     # steers: a `start` in a turn that read outside content waits for the
-    # owner's confirmation of the brief the tool renders (`external_effect?`).
+    # owner's confirmation of the brief the tool renders (its module is a
+    # `Capabilities.ExternalEffect`).
     # Owner-only: every row is the owner's call. The execute-time attended gate
     # (`Tools.PhoneCall`) is the barrier for every other turn.
     "phone_call" => %{
       policy_class: :external_api,
       hidden_from_agent?: false,
-      owner_only?: true,
-      external_effect?: true
+      owner_only?: true
     },
     # A phone call's in-call controls (M94 §07): a key press and the hang-up,
     # each a side effect on the line, run on the handle its worker minted. No
@@ -327,12 +328,7 @@ defmodule FermixCore.Capabilities.Builtin do
       metadata:
         Map.merge(
           metadata(tool_module),
-          Map.take(defaults, [
-            :host_command?,
-            :host_command_confined?,
-            :coding_run?,
-            :external_effect?
-          ])
+          Map.take(defaults, [:host_command?, :host_command_confined?, :coding_run?])
         )
     })
   end
@@ -350,12 +346,18 @@ defmodule FermixCore.Capabilities.Builtin do
       category: callback_or(tool_module, :category, :system)
     }
     |> put_computer(callback_or(tool_module, :computer_capability, nil))
+    |> put_external_effect(ExternalEffect.implemented_by?(tool_module))
   end
 
   defp put_computer(metadata, nil), do: metadata
 
   defp put_computer(metadata, module) when is_atom(module),
     do: Map.put(metadata, :computer, module)
+
+  # An effect outside the machine (`Capabilities.AccessGate`, kind
+  # `:external_effect`): its module says so by implementing the behaviour.
+  defp put_external_effect(metadata, true), do: Map.put(metadata, :external_effect?, true)
+  defp put_external_effect(metadata, false), do: metadata
 
   defp callback_or(module, function, default) do
     if function_exported?(module, function, 0) do

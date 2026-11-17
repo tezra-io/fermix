@@ -232,7 +232,6 @@ defmodule FermixCore.Agents.PhoneCallTurnTest do
         call_id: ctx.call_id,
         handle: "h-current",
         delegation_id: "d1",
-        revision: 1,
         brief: brief(),
         window: window(),
         session_id: ctx.session,
@@ -430,7 +429,7 @@ defmodule FermixCore.Agents.PhoneCallTurnTest do
         {:reply, "done"}
       ]
 
-      assert {:ok, "done", 0} = run(ctx, request(ctx, %{handle: "h-old", revision: 1}), script)
+      assert {:ok, "done", 0} = run(ctx, request(ctx, %{handle: "h-old"}), script)
       refute_received {:pressed, _call, _keys}
       refute_received {:finished, _call, _reason, _note}
 

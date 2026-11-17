@@ -77,6 +77,7 @@ defmodule FermixCore.Management.CopyTest do
   alias FermixCore.Management.Settings.CodingMachine
   alias FermixCore.Management.Settings.PhoneCalls, as: PhoneCallsSection
   alias FermixCore.Management.Settings.ThisComputer
+  alias FermixCore.PhoneCalls.Report, as: PhoneCallReport
   alias FermixCore.Providers.DecisionModel
   alias FermixCore.Providers.Descriptor
   alias FermixCore.Readiness
@@ -351,6 +352,21 @@ defmodule FermixCore.Management.CopyTest do
         assert_clean(sentence, :prose, [], "phone calls sentence")
         assert internal_terms(sentence) == []
         refute_command(sentence, "phone calls sentence")
+      end
+    end
+
+    # The reader rule (M94 §12): a call's own sentences (`PhoneCalls.Report`:
+    # its report, its call view, a stop and its refusal) are relayed by a
+    # model and shown in the apps alike, so they never address their reader;
+    # only the family's own sentences for the owner in a settings surface say
+    # "you".
+    test "a call's own sentences address no reader" do
+      sentences = PhoneCallReport.sentences()
+      assert length(sentences) > 60
+
+      for sentence <- sentences do
+        refute sentence =~ ~r/\b(you|your|yours)\b/i, sentence
+        assert_clean(sentence, :prose, [], "phone call report sentence")
       end
     end
 

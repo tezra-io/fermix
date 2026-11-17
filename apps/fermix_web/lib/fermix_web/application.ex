@@ -6,6 +6,7 @@ defmodule FermixWeb.Application do
   use Application
 
   alias FermixCore.Home.Role
+  alias FermixCore.PhoneCalls.Manager, as: PhoneCallsManager
 
   @impl true
   def start(_type, _args) do
@@ -34,6 +35,15 @@ defmodule FermixWeb.Application do
       %{role: role} -> Role.children(children, role)
       nil -> children
     end
+  end
+
+  # An orderly stop stops this application first, before the channels and the
+  # core it needs, so the phone call in progress is drained here, while every
+  # other tree still runs (`FermixCore.PhoneCalls.Manager.drain_for_stop/0`).
+  @impl true
+  def prep_stop(state) do
+    _drained = PhoneCallsManager.drain_for_stop()
+    state
   end
 
   # Tell Phoenix to update the endpoint configuration

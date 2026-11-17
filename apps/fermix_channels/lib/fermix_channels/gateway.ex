@@ -35,11 +35,12 @@ defmodule FermixChannels.Gateway do
 
   @doc """
   Ingest inbound messages. A coding-run chain's metadata
-  (`harness_continuation`, `harness_continuation_depth`, `harness_run_id`) and
-  a phone call result's marker (`phone_call_result`) are
-  dropped from every message unless the `keep_chain_metadata` option is set,
-  which only the continuation dispatcher and the grant resume do, as
-  `name_conversation/2` names the conversation whatever a message arrived with.
+  (`harness_continuation`, `harness_continuation_depth`, `harness_run_id`), a
+  phone call result's marker (`phone_call_result`) and a resumed request's
+  identity (`request_id`) are dropped from every message unless the
+  `keep_chain_metadata` option is set, which only the continuation dispatcher
+  and the grant resume do, as `name_conversation/2` names the conversation
+  whatever a message arrived with.
   """
   @spec ingest([Message.t() | map()], keyword()) :: :ok | {:error, term()}
   def ingest(messages, opts) when is_list(messages) do
@@ -362,12 +363,16 @@ defmodule FermixChannels.Gateway do
   # (`keep_chain_metadata`); every other message carries none, whatever it
   # arrived with, under atom or string keys. A finished phone call's result
   # re-enters through the same dispatcher under its own marker
-  # (`phone_call_result`, M94 §04), kept and dropped the same way.
+  # (`phone_call_result`, M94 §04), kept and dropped the same way. So is the
+  # owner request's identity a grant resume hands back (`request_id`,
+  # `Agents.RequestIdentity`), which `Agents.TurnRunner` takes over minting a
+  # new one: no channel payload can make a message another request.
   @chain_metadata_keys [
     :harness_continuation,
     :harness_continuation_depth,
     :harness_run_id,
-    :phone_call_result
+    :phone_call_result,
+    :request_id
   ]
 
   defp drop_chain_metadata(%Message{} = message, true), do: message

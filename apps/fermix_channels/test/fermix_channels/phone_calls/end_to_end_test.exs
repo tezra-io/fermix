@@ -634,7 +634,7 @@ defmodule FermixChannels.PhoneCalls.EndToEndTest do
   defp stale_handle_refused!(call, handle) do
     stale = %{
       source_trust: :phone_call,
-      phone_call: %{call_id: call.id, handle: handle, delegation_id: "d1", revision: 1},
+      phone_call: %{call_id: call.id, handle: handle, delegation_id: "d1"},
       phone_call_controls: CallControls,
       agent_name: "phone_call"
     }
@@ -714,8 +714,10 @@ defmodule FermixChannels.PhoneCalls.EndToEndTest do
            ] =
              row.evidence
 
-    for %{"speaker" => speaker, "text" => text} <- row.evidence,
-        do: assert(notice.content =~ ~s(- the #{speaker}: "#{text}"))
+    # The row keeps every excerpt; the notice shows each once, a piece of a
+    # line already shown inside that line (`PhoneCalls.Report`).
+    for %{"text" => text} <- row.evidence, do: assert(notice.content =~ text, text)
+    assert notice.content =~ ~s(- the assistant: "#{hd(row.evidence)["text"]}")
   end
 
   # One exec event per model tool call, under each tool's own name and the

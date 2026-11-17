@@ -8,20 +8,20 @@ defmodule FermixCore.PhoneCalls.Delegate do
   same app-env module injection `Harness.ContinuationDispatcher` uses, read
   through `configured/0` and nowhere else. The composition root
   (`FermixCore.Application`) hands the module to every call's worker in its
-  start args; `PhoneCalls.Readiness` refuses calls while none is configured,
-  since a call could then neither press a key nor end through a backend turn.
-  A worker started with none answers every delegation with an honest
-  limitation and logs it once.
+  start args. `PhoneCalls.Readiness` refuses calls while none is configured,
+  since a call could then neither press a key nor end through a backend turn,
+  and a worker whose args name none never dials: its dispatch asks readiness
+  with that fact, so no call ever reaches a delegation without a backend.
 
   `PhoneCalls.Call` is the only caller and the authority on what a result may
   do: `run/1` hands one turn over and returns once it is accepted to run; the
   result arrives later as ONE message to `reply_to`:
 
-      {:phone_call_delegation, call_id, delegation_id, revision,
+      {:phone_call_delegation, call_id, delegation_id,
        {:ok, %{reply: String.t(), backend_usage: map() | nil}} | {:error, reason}}
 
-  The worker acts on it only while its call id, delegation id and revision are
-  current and the call is not ending, so a late or stale answer cannot speak,
+  The worker acts on it only while its call id and delegation id are current
+  and the call is not ending, so a late or stale answer cannot speak,
   press a key or reopen anything. `reply` has already passed
   `PhoneCalls.Disclosure`, the one owner of its byte bound (the voice
   session's append limit), and is spoken as given; a reply the check withheld
@@ -48,7 +48,6 @@ defmodule FermixCore.PhoneCalls.Delegate do
           call_id: String.t(),
           handle: String.t(),
           delegation_id: String.t(),
-          revision: pos_integer(),
           brief: Brief.t(),
           window: [transcript_entry()],
           session_id: String.t(),

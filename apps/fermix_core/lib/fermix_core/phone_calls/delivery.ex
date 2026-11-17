@@ -4,7 +4,7 @@ defmodule FermixCore.PhoneCalls.Delivery do
   §09), the coding run's rules with no second outbox.
 
     * **The destination** is frozen when the tool runs (`snapshot/2`): a chat
-      turn's through `Harness.Delivery.resolve_snapshot/2`, exactly as a coding
+      turn's through `Delivery.FrozenOrigin.resolve/2`, exactly as a coding
       run's; a voice turn's is the owner's durable private inbox
       (`Delivery.OwnerInbox.resolve/1`), resolved before admission, and the
       call is refused if there is none. A client-owned origin (an ACP session,
@@ -32,15 +32,15 @@ defmodule FermixCore.PhoneCalls.Delivery do
   require Logger
 
   alias FermixCore.Delivery.Continuation, as: DeliveryContinuation
+  alias FermixCore.Delivery.FrozenOrigin
   alias FermixCore.Delivery.FrozenSend
   alias FermixCore.Delivery.OwnerInbox
-  alias FermixCore.Harness.Delivery, as: HarnessDelivery
   alias FermixCore.PhoneCalls.Continuation
   alias FermixCore.PhoneCalls.DeliveryWorker
   alias FermixCore.PhoneCalls.Ledger
   alias FermixCore.PhoneCalls.Limits
-  alias FermixCore.PhoneCalls.PromptText
   alias FermixCore.PhoneCalls.Report
+  alias FermixCore.Text
 
   @resent_label "(Sent again: an earlier attempt to send this report may or may not have arrived.)"
 
@@ -57,8 +57,8 @@ defmodule FermixCore.PhoneCalls.Delivery do
   @doc """
   Freezes where the call's report goes, at tool-execute time. `voice?` says
   the request came from a live voice turn. Seams: `opts[:owner_inbox]` (the
-  `OwnerInbox.resolve/1` options) and the coding run's own
-  `resolve_snapshot/2` options.
+  `OwnerInbox.resolve/1` options) and `Delivery.FrozenOrigin.resolve/2`'s
+  options.
   """
   @spec snapshot(map(), boolean(), keyword()) :: {:ok, snapshot()} | {:error, term()}
   def snapshot(context, voice?, opts \\ []) when is_map(context) and is_boolean(voice?) do
@@ -85,7 +85,7 @@ defmodule FermixCore.PhoneCalls.Delivery do
   end
 
   defp chat_snapshot(context, opts) do
-    case HarnessDelivery.resolve_snapshot(context, opts) do
+    case FrozenOrigin.resolve(context, opts) do
       {:ok, %{origin_kind: "chat", client_origin: nil} = snapshot} ->
         {:ok, chat_fields(snapshot, Map.get(context, :conversation_key))}
 
@@ -205,5 +205,5 @@ defmodule FermixCore.PhoneCalls.Delivery do
   @doc "The bounded text an error is recorded under."
   @spec bounded_error(term()) :: String.t()
   def bounded_error(reason),
-    do: reason |> inspect() |> PromptText.cut(Limits.max_record_text_bytes())
+    do: reason |> inspect() |> Text.truncate_utf8(Limits.max_record_text_bytes())
 end

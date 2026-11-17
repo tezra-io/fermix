@@ -15,10 +15,10 @@ defmodule FermixCore.Tools.CodexCloudRun do
   @behaviour FermixCore.Capabilities.Builtin.Tool
 
   alias FermixCore.Capabilities.Builtin.Tool
+  alias FermixCore.Delivery.FrozenOrigin
   alias FermixCore.Harness.Authorization
   alias FermixCore.Harness.Config
   alias FermixCore.Harness.Consent
-  alias FermixCore.Harness.Delivery
   alias FermixCore.Harness.Manager
   alias FermixCore.Tools.HarnessSupport, as: Support
 
@@ -131,7 +131,7 @@ defmodule FermixCore.Tools.CodexCloudRun do
          {:ok, env_id} <- Support.required_string(args, "env_id"),
          {:ok, extra} <- Support.vendor_params(args, @param_keys, @reserved),
          {:ok, session_id} <- fetch_session_id(context),
-         {:ok, snapshot} <- Delivery.resolve_snapshot(context),
+         {:ok, snapshot} <- FrozenOrigin.resolve(context),
          :ok <- ensure_consent(env_id, snapshot, session_id, context),
          {:ok, run_id} <- start_run(query, env_id, extra, snapshot, session_id, context) do
       Support.success_json(launched_map(run_id))

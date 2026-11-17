@@ -102,6 +102,14 @@ defmodule FermixCore.PhoneCalls.OpenAILive.SidebandTest do
 
   defp push(socket, events), do: send(socket, {:push, Enum.map(events, &Jason.encode!/1)})
 
+  defp attach_with_password! do
+    base = vendor!(:accept)
+    assert {:ok, sideband} = start_sideband(base, secrets: ["pw-Invented-0002"])
+    assert_receive {:phone_sideband, ^sideband, :attached}, @arrival_ms
+    assert_receive {:vendor_socket, socket}, @arrival_ms
+    %{sideband: sideband, socket: socket}
+  end
+
   defp event!(sideband) do
     assert_receive {:phone_sideband, ^sideband, {:event, event}}, @arrival_ms
     event
@@ -439,6 +447,78 @@ defmodule FermixCore.PhoneCalls.OpenAILive.SidebandTest do
       end
 
       assert_receive {:EXIT, ^sideband, _reason}, @arrival_ms
+    end
+
+    test "the encodings a credential travels in are scrubbed as well" do
+      %{sideband: sideband, socket: socket} = attach_with_password!()
+
+      encoded = [
+        URI.encode_www_form(@password),
+        Base.encode64("fermixtrunk01:" <> @password),
+        Base.encode64(@api_key)
+      ]
+
+      push(socket, [
+        %{
+          "type" => "error",
+          "event_id" => "e1",
+          "error" => %{"message" => "auth " <> Enum.join(encoded, " ")}
+        }
+      ])
+
+      assert {:vendor_error, %{message: message}} = event!(sideband)
+      assert message =~ "[REDACTED]"
+      for form <- encoded, do: refute(message =~ form, form)
+    end
+
+    # The create's rule for a refused key: OpenAI quotes the key back masked,
+    # with its last characters, so the engine's own sentence stands in.
+    test "an error or a failure that refuses the key, or names it masked, is withheld" do
+      %{sideband: sideband, socket: socket} = attach_with_password!()
+      masked = "Incorrect API key provided: sk-inve************0002."
+
+      push(socket, [
+        %{
+          "type" => "error",
+          "event_id" => "e1",
+          "error" => %{"code" => "invalid_api_key", "message" => masked}
+        },
+        %{"type" => "error", "event_id" => "e2", "error" => %{"message" => masked}},
+        %{"type" => "transport.failed", "event_id" => "e3", "error" => %{"message" => masked}}
+      ])
+
+      assert {:vendor_error, %{message: "OpenAI did not accept the API key (invalid_api_key)."}} =
+               event!(sideband)
+
+      assert {:vendor_error, %{message: "OpenAI did not accept the API key."}} = event!(sideband)
+      assert {:call_failed, %{message: "OpenAI did not accept the API key."}} = event!(sideband)
+    end
+  end
+
+  describe "a send that fails" do
+    test "says why in fixed words, never a frame, a struct or a reason's text" do
+      reason = {:crash, "Bearer #{@api_key}"}
+
+      for failure <- [
+            {:error, %WebSockex.NotConnectedError{connection_state: :closing}},
+            {:error, %WebSockex.FrameEncodeError{reason: :invalid, frame_payload: @api_key}},
+            {:error, %WebSockex.ConnError{original: "Bearer " <> @api_key}},
+            {:error, {:closed, "Bearer " <> @api_key}},
+            {:exit, {:noproc, {WebSockex, :call, [self(), {:text, @api_key}]}}},
+            {:exit, {:timeout, {WebSockex, :call, [self(), {:text, @api_key}]}}},
+            {:exit, {reason, {WebSockex, :call, [self(), {:text, @api_key}]}}}
+          ] do
+        assert {:error, {kind, why}} = Sideband.send_failure(failure)
+        assert kind in [:not_sent, :unknown]
+        refute inspect(why, limit: :infinity, printable_limit: :infinity) =~ @api_key
+        refute is_struct(why)
+      end
+
+      assert {:error, {:not_sent, :sideband_down}} =
+               Sideband.send_failure({:exit, {:noproc, {WebSockex, :call, []}}})
+
+      assert {:error, {:unknown, {:sideband_exited, :crash}}} =
+               Sideband.send_failure({:exit, {reason, {WebSockex, :call, []}}})
     end
   end
 

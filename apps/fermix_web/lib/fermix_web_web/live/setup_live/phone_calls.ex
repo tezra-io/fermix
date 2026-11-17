@@ -20,10 +20,14 @@ defmodule FermixWebWeb.SetupLive.PhoneCalls do
   The switch is its own setter, never part of the section's form, as the
   StackChan switch is. A blank secret field keeps the stored value.
 
+  While a call is in progress the section reads its state again on a timer
+  (`handle_info/2`), the Phone card's way, and stops once no call is.
+
   Seams, under `config :fermix_web, :phone_calls`: `management` (options for
   `Management.PhoneCalls`, which the section's rows and the secret writes are
-  handed too) and `settings` (options for the section's write, such as
-  `:phone_calls_switch`).
+  handed too), `settings` (options for the section's write, such as
+  `:phone_calls_switch`) and `schedule` (a `(message, ms -> any)` that stands
+  for the timer, for a test).
   """
 
   use FermixWebWeb, :html
@@ -35,6 +39,10 @@ defmodule FermixWebWeb.SetupLive.PhoneCalls do
 
   @section "phone_calls"
   @switch "phone_calls_enabled"
+  # While a call holds the slot the section reads its state again this often,
+  # as the Phone card reads a pairing (`SetupLive.Phone`); otherwise it waits.
+  @poll_ms 2_000
+  @live_states ~w(calling stopping)
   @fields ~w(voice caller_number sip_username)
   @secrets [{"sip_password", "phone_calls_sip_password"}, {"openai_api_key", "openai_api_key"}]
 
@@ -48,7 +56,8 @@ defmodule FermixWebWeb.SetupLive.PhoneCalls do
       recovery: [],
       unreadable: nil,
       notice: nil,
-      refusal: nil
+      refusal: nil,
+      poll: nil
     }
 
   @doc "Reads the section's rows, the status, the recent calls and the recovery view."
@@ -57,12 +66,50 @@ defmodule FermixWebWeb.SetupLive.PhoneCalls do
     opts = management_opts()
     {:ok, %{"rows" => rows}} = ManagementSettings.get(@section, phone_calls: opts)
 
-    update(socket, fn state ->
+    socket
+    |> update(fn state ->
       %{state | rows: rows, unreadable: nil}
       |> read(:status, ManagementPhoneCalls.status(opts), & &1)
       |> read(:calls, ManagementPhoneCalls.list(opts), & &1["calls"])
       |> read(:recovery, ManagementPhoneCalls.recovery(opts), & &1["calls"])
     end)
+    |> poll_while_live()
+  end
+
+  @doc """
+  The section's own timed read (`{:phone_calls_poll, ref}`): read again while
+  a call is in progress. A read an earlier poll scheduled is dropped.
+  """
+  @spec handle_info(term(), Phoenix.LiveView.Socket.t()) :: Phoenix.LiveView.Socket.t()
+  def handle_info({:phone_calls_poll, ref}, %{assigns: %{phone_calls: %{poll: ref}}} = socket),
+    do: socket |> update(&%{&1 | poll: nil}) |> load()
+
+  def handle_info({:phone_calls_poll, _stale}, socket), do: socket
+
+  # One timer at a time, and only on a connected page while the summary says
+  # a call is in progress.
+  defp poll_while_live(%{assigns: %{phone_calls: %{poll: nil} = state}} = socket) do
+    if Phoenix.LiveView.connected?(socket) and live?(state.status) do
+      ref = make_ref()
+      :ok = schedule({:phone_calls_poll, ref}, @poll_ms)
+      update(socket, &%{&1 | poll: ref})
+    else
+      socket
+    end
+  end
+
+  defp poll_while_live(socket), do: socket
+
+  defp live?(%{"summary" => %{"state" => state}}), do: state in @live_states
+  defp live?(_status), do: false
+
+  defp schedule(message, wait_ms) do
+    case Keyword.get(seams(), :schedule) do
+      nil -> Process.send_after(self(), message, wait_ms)
+      schedule when is_function(schedule, 2) -> schedule.(message, wait_ms)
+    end
+
+    :ok
   end
 
   # A read the daemon refused keeps the section drawn and says why, apart from
@@ -403,6 +450,9 @@ defmodule FermixWebWeb.SetupLive.PhoneCalls do
           <span class="text-base-content/70">{call["created_at"]}</span>
         </p>
         <p>{call["sentence"]} {call["outcome_sentence"]}</p>
+        <p :if={call["why_stopped"]} id={"phone-calls-recent-why-#{call["call_id"]}"}>
+          {call["why_stopped"]}
+        </p>
         <p class="text-base-content/70">
           {call["usage"]["voice"]} {call["usage"]["carrier"]} {call["usage"]["backend"]}
         </p>

@@ -3,12 +3,12 @@ defmodule FermixCore.Capabilities.AccessGate do
   The one decision about whether a command that needs the owner's consent may
   run now.
 
-  Two kinds of capability are decided here. A plugin manifest marks a changing
-  tool `"access_sensitive": true` (a car unlock); the flag reaches the capability
-  as `metadata.access_sensitive?` on both plugin rails, and every call of it is
-  decided.
+  Four kinds of capability are decided here (`gate_kind/2`). First, a plugin
+  manifest marks a changing tool `"access_sensitive": true` (a car unlock); the
+  flag reaches the capability as `metadata.access_sensitive?` on both plugin
+  rails, and every call of it is decided.
 
-  A built-in that starts a host process the model steers
+  Second, a built-in that starts a host process the model steers
   (`metadata.host_command?`: `shell`, `git_write`, a command the owner
   declared, and the local coding runs `codex_run` and `claude_code_run`) is
   decided only when the turn read outside content and Fermix cannot sandbox the
@@ -30,15 +30,15 @@ defmodule FermixCore.Capabilities.AccessGate do
   whose prompt names the computer. That confirm is a yes to one call inside
   what that computer allows, never a widening of it.
 
-  One more kind is decided here: a built-in marked `external_effect?`,
-  whose call makes an effect outside the machine (`phone_call`'s `start`
-  places a call). It is no command: no sandbox holds it or is asked about it,
-  and it is no part of a job's reach (`check_job_tools/2`). Only the calls its
-  module names are decided (`effect_call?/1`, `Capabilities.Builtin.Tool`),
-  and only in a turn that read outside content or came from a shared Buzz
-  channel; then the owner confirms it in their own chat, reading what the
-  module renders (`confirmation/2`, shown whole or not asked at all), for
-  `@effect_ttl_ms`. A turn that cannot ask them (a voice call, a delegated
+  Third, a built-in whose module is a `Capabilities.ExternalEffect` (its
+  capability carries `metadata.external_effect?`), whose call makes an effect
+  outside the machine (`phone_call`'s `start` places a call). It is no command:
+  no sandbox holds it or is asked about it, and it is no part of a job's reach
+  (`check_job_tools/2`). Only the calls its module names are decided
+  (`effect_call?/1`), and only in a turn that read outside content or came
+  from a shared Buzz channel; then the owner confirms it in their own chat,
+  reading what the module renders (`confirmation/2`, shown whole or not asked
+  at all), for `@effect_ttl_ms`. A turn that cannot ask them (a voice call, a delegated
   worker, a cue or scheduled run, any turn that is not the owner's attended
   one) is refused in the kind's own sentences. Every other call goes on to
   the tool, whose own checks stay its barrier.
@@ -76,7 +76,7 @@ defmodule FermixCore.Capabilities.AccessGate do
        host command reaches these rules only after outside content, so it
        parks at 6, and its prompt names what was read, never the channel).
 
-  A third kind only refuses (M84): a `browser` call of `act` kind `sign_in`
+  The fourth kind only refuses (M84): a `browser` call of `act` kind `sign_in`
   (`gate_kind/2`). It runs only on the owner's own attended turn, never from a
   delegated worker, a cue or scheduled run (a job row naming `browser` does not
   admit it), or a shared Buzz channel (`sign_in_not_allowed`), and never on a
@@ -123,6 +123,7 @@ defmodule FermixCore.Capabilities.AccessGate do
   alias FermixCore.Capabilities.AccessGate.Pending
   alias FermixCore.Capabilities.Builtin.Tool
   alias FermixCore.Capabilities.Capability
+  alias FermixCore.Capabilities.ExternalEffect
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
   alias FermixCore.Capabilities.UntrustedContent
   alias FermixCore.Computers.Computer
@@ -158,8 +159,6 @@ defmodule FermixCore.Capabilities.AccessGate do
   # the reason and the approval line included).
   @effect_ttl_ms 5 * 60_000
   @max_effect_chars 3_500
-  # What an effect's module must say (`Capabilities.Builtin.Tool`).
-  @effect_callbacks [effect: 0, effect_name: 0, effect_call?: 1, confirmation: 2, confirmed: 1]
 
   @affirmatives MapSet.new(
                   ~w(yes yeah yep yup confirm confirmed) ++
@@ -224,6 +223,7 @@ defmodule FermixCore.Capabilities.AccessGate do
           :worker
           | :cue_run
           | :unattended
+          | :scheduled
           | :not_allowlisted
           | :no_surface
           | :voice_surface
@@ -301,10 +301,10 @@ defmodule FermixCore.Capabilities.AccessGate do
   defp registry(context), do: Map.get(context, :capability_registry) || CapabilityRegistry
 
   @doc """
-  Whether a call `admit/3` decides here (the moduledoc's two kinds) may run now
-  in `context`, must wait for the owner on a surface, or is refused. `args` are
-  the call's arguments; without them (a job's tools, checked before any call) a
-  call is never the next run of a chain. Pure apart from the job-row read a
+  Whether a call `admit/3` decides here (any of the moduledoc's four kinds) may
+  run now in `context`, must wait for the owner on a surface, or is refused.
+  `args` are the call's arguments; without them (a job's tools, checked before
+  any call) a call is never the next run of a chain. Pure apart from the job-row read a
   scheduled run makes and the link resolution a chained run's folder takes.
   """
   @spec decide(Capability.t(), map(), map()) :: decision()
@@ -729,13 +729,10 @@ defmodule FermixCore.Capabilities.AccessGate do
   defp effect_module!(%Capability{name: name} = capability) do
     module = Map.get(capability.metadata, :tool_module)
 
-    if is_atom(module) and Code.ensure_loaded?(module) and
-         Enum.all?(@effect_callbacks, fn {fun, arity} ->
-           function_exported?(module, fun, arity)
-         end),
-       do: module,
-       else:
-         raise(ArgumentError, "#{name} is an external effect whose module does not render one")
+    if is_atom(module) and ExternalEffect.implemented_by?(module),
+      do: module,
+      else:
+        raise(ArgumentError, "#{name} is an external effect whose module is no ExternalEffect")
   end
 
   defp effect_call?(capability, args), do: effect_module!(capability).effect_call?(args)
@@ -1014,11 +1011,11 @@ defmodule FermixCore.Capabilities.AccessGate do
   # the module's own sentence, as is a call with nothing to confirm.
   defp park_effect(%{capability: capability, args: args, context: context} = call, surface) do
     case effect_module!(capability).confirmation(args, context) do
-      {:ok, %{promise: promise, too_long: too_long} = confirmation} when is_binary(promise) ->
+      {:ok, %{promise: promise} = confirmation} when is_binary(promise) ->
         call = call |> Map.put(:confirmation, confirmation) |> with_sources()
 
         if String.length(owner_prompt(call)) > @max_effect_chars,
-          do: hold(call, too_long, "refused_confirmation_too_long"),
+          do: hold(call, effect_too_long_text(capability.name), "refused_confirmation_too_long"),
           else: park(call, surface)
 
       {:error, sentence} when is_binary(sentence) ->
@@ -1085,6 +1082,11 @@ defmodule FermixCore.Capabilities.AccessGate do
 
   defp snapshot_keys(%Capability{metadata: %{coding_run?: true}}),
     do: @snapshot_keys ++ @harness_snapshot_keys
+
+  # An effect outside the machine runs with what its module names besides
+  # (`ExternalEffect.context_keys/0`): its stores and seams.
+  defp snapshot_keys(%Capability{metadata: %{external_effect?: true}} = capability),
+    do: @snapshot_keys ++ effect_module!(capability).context_keys()
 
   defp snapshot_keys(%Capability{}), do: @snapshot_keys
 
@@ -1791,6 +1793,12 @@ defmodule FermixCore.Capabilities.AccessGate do
   defp command_too_long_text(tool) do
     "#{tool} was not run: the command is too long for the owner to confirm safely. " <>
       "Ask the owner to run a shorter command, or run it themselves."
+  end
+
+  # Composed here for every effect: a confirmation is shown whole or not at all.
+  defp effect_too_long_text(tool) do
+    "#{tool} was not run: what it would do is too long to show the owner whole in one " <>
+      "confirmation. Call it again with shorter arguments."
   end
 
   defp mismatch_text(tool) do

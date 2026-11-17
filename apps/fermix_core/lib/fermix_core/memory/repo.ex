@@ -1403,10 +1403,17 @@ defmodule FermixCore.Memory.Repo do
     [server: server, on_timeout: :error, timeout: timeout_ms]
   end
 
-  @spec enabled?(keyword()) :: boolean()
+  @doc """
+  Whether this Repo keeps a store. With `on_timeout: :error` a Repo that does
+  not answer within `opts[:timeout]` answers `{:error, :repo_timeout}`, as
+  every other bounded call does; otherwise the caller exits.
+  """
+  @spec enabled?(keyword()) :: boolean() | {:error, :repo_timeout}
   def enabled?(opts \\ []) do
-    server = Keyword.get(opts, :server, __MODULE__)
-    GenServer.call(server, :enabled?)
+    case Keyword.get(opts, :on_timeout, :exit) do
+      :exit -> GenServer.call(Keyword.get(opts, :server, __MODULE__), :enabled?)
+      :error -> call(:enabled?, opts)
+    end
   end
 
   @spec enabled_server(pid() | atom()) :: pid() | atom() | nil
@@ -5164,7 +5171,7 @@ defmodule FermixCore.Memory.Repo do
   # closure, the requesting turn's session kept apart from the request id (a
   # call from before keeps its request id, that session, as its parent), a
   # call reused by its request and its mandate together, and a slot released
-  # on the owner's word as well as on verified termination. A CHECK and a
+  # on the owner's word. A CHECK and a
   # unique key change only by making the table again, so the table 67 laid
   # down is rebuilt once into the one definition (`PhoneCallsSql.ledger_rebuild/0`).
   # Reapplying it changes nothing: a table already at that definition (a
