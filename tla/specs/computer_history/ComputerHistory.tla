@@ -88,7 +88,7 @@
 \* SOURCE: apps/fermix_core/lib/fermix_core/computer_use/sidecar_installer.ex @ a2681ba9c881
 \* SOURCE: apps/fermix_core/lib/fermix_core/memory/repo/computer_history_sql.ex @ bb42eceb1baa
 \* SOURCE: apps/fermix_core/lib/fermix_core/computer_history/spool.ex#call,handle_call,insert_events,state,fence,apply_intervals,apply_interval,pause_from,mark_applied @ cccf5927f54a
-\* SOURCE: apps/fermix_channels/lib/fermix_channels/gateway/commands/history.ex @ a49fc606e93e
+\* SOURCE: apps/fermix_channels/lib/fermix_channels/gateway/commands/history.ex @ ded606c09cd2
 EXTENDS Naturals, Sequences, FiniteSets
 
 CONSTANTS
