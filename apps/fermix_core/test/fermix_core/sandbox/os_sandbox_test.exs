@@ -452,10 +452,12 @@ defmodule FermixCore.Sandbox.OsSandboxTest do
                &String.contains?(&1, ":" <> resolved(Path.join(ctx.fermix_home, "secrets")))
              )
 
-      refute Enum.any?(
-               rules,
-               &(String.ends_with?(&1, "/config.toml") and String.contains?(&1, "w"))
-             )
+      # Only the rule's access letters, before the first ":", say whether it
+      # writes: a temporary folder's random name can hold a "w" of its own.
+      refute Enum.any?(rules, fn rule ->
+               [access, path] = String.split(rule, ":", parts: 2)
+               String.ends_with?(path, "/config.toml") and String.contains?(access, "w")
+             end)
     end
 
     test "on Linux a missing shim refuses every command by name", ctx do
