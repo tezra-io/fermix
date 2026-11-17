@@ -43,9 +43,11 @@ jobs:
           - { os: ubuntu-24.04, leg: linux-x64, timeout: 45, fetch_depth: 0 }
           - { os: ubuntu-24.04-arm, leg: linux-arm64, timeout: 30, fetch_depth: 1 }
           - { os: macos-15, leg: macos-arm64, timeout: 45, fetch_depth: 1 }
-          # The Intel runner is the slowest leg: a full compile takes about 7
-          # minutes and the core suite about 32, so it needs the longest bound.
-          - { os: macos-15-intel, leg: macos-x64, timeout: 60, fetch_depth: 1 }
+          # The Intel runner is the slowest leg and the least even: the same
+          # tree's suites took 38 minutes on one runner and 54 on another
+          # (runs 44089094271 and 44117704249), and a full compile adds 7. Its
+          # bound leaves room for the slow runner.
+          - { os: macos-15-intel, leg: macos-x64, timeout: 75, fetch_depth: 1 }
     env:
       MIX_ENV: test
       ELIXIR_VERSION: "1.19.7"
