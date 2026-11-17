@@ -153,6 +153,18 @@ defmodule FermixCore.Setup.SecretPaths do
       # [sandbox.env] — the meetbot sidecar never sees the Zoom credentials.
       sandbox_env: false
     },
+    # The password of the owner's Telnyx trunk connection (M94 §12), which the
+    # phone engine hands OpenAI at the call's I/O boundary so it can dial out
+    # through that one connection. BEAM-internal HTTP (no subprocess), so not in
+    # [sandbox.env].
+    %{
+      key: :phone_calls_sip_password,
+      env: "PHONE_CALLS_SIP_PASSWORD",
+      path: [:fermix_core, :phone_calls, :sip_password],
+      functionality: "Phone calls through the owner's Telnyx connection",
+      optional?: true,
+      sandbox_env: false
+    },
     # The S3 target of the home's snapshots (M75 §8). BEAM-internal HTTP (no
     # subprocess), so not in [sandbox.env].
     %{

@@ -1120,6 +1120,13 @@ defmodule FermixCore.Setup.ConfigStoreTest do
   voice = "marin"
   max_session_minutes = 15
 
+  [fermix_core.phone_calls]
+  enabled = true
+  voice = "cedar"
+  caller_number = "+14155550142"
+  sip_username = "fermixtrunk01"
+  sip_password = "@keyring"
+
   [fermix_core.computer_use]
   enabled = true
   display = 0

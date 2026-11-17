@@ -37,6 +37,10 @@ defmodule FermixCore.Net.HttpClient do
   case is rare and the alternative is requiring per-caller bookkeeping for
   a single shared concern.
 
+  A request that must never be sent twice (a phone call's creation) uses
+  `request_once/3` instead: the same pool and route, no retry of any kind, and
+  a result that says whether the request provably never left or might have.
+
   Finch does NOT return an error tuple when a connection-pool checkout exceeds
   its queue timeout: it `reraise`s a `RuntimeError` ("Finch was unable to
   provide a connection within the timeout due to excess queuing for
@@ -55,6 +59,11 @@ defmodule FermixCore.Net.HttpClient do
   alias FermixCore.Net.Egress
 
   @retry_reasons [:closed, :econnrefused]
+
+  # Transport reasons only a connect can produce, so the request was never
+  # written (`request_once/3`). `:ehostunreach` and the like are not here: a
+  # connection that is already up can report them after the request went out.
+  @never_sent_reasons [:econnrefused, :nxdomain]
 
   # Substring of the RuntimeError Finch reraises on a pool-checkout queue
   # timeout ("Finch was unable to provide a connection within the timeout due
@@ -94,6 +103,51 @@ defmodule FermixCore.Net.HttpClient do
         result
     end
   end
+
+  @doc """
+  Sends `req` at most once, on the same shared pool and egress route as
+  `request/3`, and says what is known about whether it left.
+
+  For a request that must never be repeated, such as one that places a phone
+  call: the stale-socket retry above, Req's own `:retry` and Req's redirect
+  following (a 307 re-sends the same POST) are all turned off, whatever `req`
+  asked for. Nothing in this operation sends a second request.
+
+    * `{:ok, response}`: a response arrived, any status, passed through.
+    * `{:error, {:not_sent, exception}}`: the request provably never left this
+      machine. Only failures that happen before any byte of it can be written:
+      a refused connection, a name that does not resolve, or no pooled
+      connection within the checkout timeout.
+    * `{:error, {:unknown, exception}}`: everything else. A timeout, a closed
+      connection, a TLS alert (the same reason also arrives after the request
+      was written) or a malformed response: the server may have read and acted
+      on the request. Never treat it as a definite failure.
+  """
+  @spec request_once(Req.Request.t(), String.t(), Egress.t()) ::
+          {:ok, Req.Response.t()}
+          | {:error, {:not_sent | :unknown, Exception.t()}}
+  def request_once(%Req.Request{} = req, label, %Egress{} = egress \\ Egress.active())
+      when is_binary(label) do
+    req
+    |> Req.merge(pool_timeout: @pool_checkout_timeout_ms, retry: false, redirect: false)
+    |> Egress.attach(:pooled, egress)
+    |> run(label)
+    |> classify_once()
+  end
+
+  defp classify_once({:ok, %Req.Response{}} = response), do: response
+
+  defp classify_once({:error, %Req.TransportError{reason: reason} = error})
+       when reason in @never_sent_reasons,
+       do: {:error, {:not_sent, error}}
+
+  defp classify_once({:error, %RuntimeError{} = error}) do
+    if connection_unavailable?(error),
+      do: {:error, {:not_sent, error}},
+      else: {:error, {:unknown, error}}
+  end
+
+  defp classify_once({:error, error}), do: {:error, {:unknown, error}}
 
   # A Finch pool-checkout queue timeout reraises a RuntimeError rather than
   # returning {:error, _}. Convert it to the contract's error tuple so callers

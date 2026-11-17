@@ -272,6 +272,10 @@ defmodule FermixCore.Setup.SecretMigrationTest do
     zoom_client_secret = "zoom-secret-old"
     zoom_ws_subscription_id = "zoom-sub"
 
+    [fermix_core.phone_calls]
+    sip_username = "fermixtrunk01"
+    sip_password = "phone-sip-old"
+
     [fermix_core.oauth.google]
     client_type = "desktop_public_pkce"
     client_id = "123.apps.googleusercontent.com"
@@ -355,6 +359,7 @@ defmodule FermixCore.Setup.SecretMigrationTest do
       transcription_xai_api_key: "transcription-xai-old",
       deepgram_api_key: "deepgram-old",
       meetings_zoom_client_secret: "zoom-secret-old",
+      phone_calls_sip_password: "phone-sip-old",
       snapshot_s3_access_key_id: "snapshot-key-id-old",
       snapshot_s3_secret_access_key: "snapshot-secret-old",
       google_oauth_client_secret: "google-oauth-old",

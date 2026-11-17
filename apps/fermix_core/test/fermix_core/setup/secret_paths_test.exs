@@ -82,6 +82,24 @@ defmodule FermixCore.Setup.SecretPathsTest do
     refute :meetings_zoom_client_secret in Enum.map(SecretPaths.sandbox_env_eligible(), & &1.key)
   end
 
+  # M94 §12: the trunk password is the one secret phone calls add; the phone
+  # engine's OpenAI key is the existing `:openai_api_key`. It is never an
+  # environment overlay and never reaches [sandbox.env].
+  test "registers the phone-call trunk password as a keychain-only phone_calls secret" do
+    secret = SecretPaths.fetch!(:phone_calls_sip_password)
+
+    assert secret.env == "PHONE_CALLS_SIP_PASSWORD"
+    assert secret.path == [:fermix_core, :phone_calls, :sip_password]
+    assert secret.functionality == "Phone calls through the owner's Telnyx connection"
+    assert secret.optional? == true
+    refute Map.get(secret, :env_overlay, false)
+    refute Map.get(secret, :sandbox_env, false)
+    refute :phone_calls_sip_password in Enum.map(SecretPaths.sandbox_env_eligible(), & &1.key)
+
+    assert [_one] =
+             Enum.filter(SecretPaths.all(), &match?([:fermix_core, :phone_calls | _], &1.path))
+  end
+
   describe "env_override/2" do
     @runtime_exs Path.expand("../../../../../config/runtime.exs", __DIR__)
 
